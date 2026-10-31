@@ -13,6 +13,7 @@
 #include "game/game_services.hpp"
 #include "pipeline/asset_inventory.hpp"
 #include "core/update_check.hpp"
+#include "core/wowpack_sync.hpp"
 #include "pipeline/blp_loader.hpp"
 #include <memory>
 #include <map>
@@ -115,6 +116,11 @@ public:
     /// Whether GitHub has a newer release than this build, asked once at
     /// startup. The login screen reads it; nothing else needs to.
     const UpdateCheck& getUpdateCheck() const { return updateCheck_; }
+    /// The content pack of the selected server, syncing or synced. The login
+    /// screen starts it and reads its progress.
+    WowpackSync& getWowpackSync() { return wowpackSync_; }
+    /// Look again for addons, after a content pack added or removed some.
+    void rescanAddons();
     pipeline::DBCLayout* getDBCLayout() { return dbcLayout_.get(); }
     bool setAssetExpansionOverride(const std::string& id);
     [[nodiscard]] const std::string& getAssetExpansionOverride() const { return assetExpansionOverrideId_; }
@@ -224,6 +230,9 @@ private:
     /// rather than every screen finding out separately.
     pipeline::AssetInventory assetInventory_;
     UpdateCheck updateCheck_;
+    WowpackSync wowpackSync_;
+    /// Where addons were scanned from at startup, for rescanAddons.
+    std::string addonsDir_;
 
 
     int stageStatFrames_ = 0;

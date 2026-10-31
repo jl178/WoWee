@@ -112,9 +112,13 @@ void AuthScreen::seedKnownServers() {
         const char* hostname;
         int port;
         const char* expansionId;
+        /// Content pack index, or empty. A known realm that ships one would
+        /// still want a first-time confirmation before anything downloads;
+        /// none does yet, so none is listed.
+        const char* packUrl;
     };
     static constexpr Known kKnown[] = {
-        {"ChromieCraft", "logon.chromiecraft.com", 3724, "wotlk"},
+        {"ChromieCraft", "logon.chromiecraft.com", 3724, "wotlk", ""},
     };
 
     for (const Known& k : kKnown) {
@@ -135,6 +139,7 @@ void AuthScreen::seedKnownServers() {
         s.port = k.port;
         s.expansionId = k.expansionId;
         s.label = k.label;
+        s.packUrl = k.packUrl;
         servers_.push_back(std::move(s));
     }
 }
@@ -172,6 +177,19 @@ void AuthScreen::selectServerProfile(int index) {
         app.setAssetExpansionOverride({});
     }
     app.reloadExpansionData();
+
+    packUrl_.setText(s.packUrl);
+    packSkipped_ = false;
+    startPackSync();
+}
+
+void AuthScreen::startPackSync() {
+    auto& app = core::Application::getInstance();
+    auto* assets = app.getAssetManager();
+    if (assets == nullptr) return;
+    std::string url = trimAscii(packUrl_.text());
+    if (!core::readSettingsFlag("content_packs", true)) url.clear();
+    app.getWowpackSync().start(url, assets->getOverridePath(), currentExpansionId());
 }
 
 void AuthScreen::upsertCurrentServerProfile(bool includePasswordHash) {
@@ -195,6 +213,8 @@ void AuthScreen::upsertCurrentServerProfile(bool includePasswordHash) {
     s.username = username_.text();
     s.expansionId = currentExpansionId();
     s.assetProfileId = assetProfileId_;
+    s.packUrl = trimAscii(packUrl_.text());
+    if (foundIndex >= 0) s.label = servers_[foundIndex].label;
     if (includePasswordHash && !savedPasswordHash.empty()) {
         s.passwordHash = savedPasswordHash;
     } else if (foundIndex >= 0) {
@@ -532,6 +552,35 @@ std::string assetLine(const pipeline::AssetInventory& inventory,
     return set->summary();
 }
 
+/// One line about the selected server's content pack, or empty when the
+/// server has none.
+std::string packStatusLine(const core::WowpackSync& sync) {
+    using State = core::WowpackSync::State;
+    switch (sync.state()) {
+        case State::Idle:
+            return {};
+        case State::Running: {
+            const std::uint64_t total = sync.filesTotal();
+            if (total == 0) return "Content pack: checking...";
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "Content pack: %llu of %llu files, %.1f of %.1f MB",
+                          static_cast<unsigned long long>(sync.filesDone()),
+                          static_cast<unsigned long long>(total),
+                          static_cast<double>(sync.bytesDone()) / (1024.0 * 1024.0),
+                          static_cast<double>(sync.bytesTotal()) / (1024.0 * 1024.0));
+            return buf;
+        }
+        case State::Done: {
+            const std::string name = sync.packName();
+            if (name.empty()) return "Content pack removed";
+            return "Content pack " + name + " " + sync.packVersion() + " is up to date";
+        }
+        case State::Failed:
+            return "Content pack: " + sync.error();
+    }
+    return {};
+}
+
 }  // namespace
 
 void AuthScreen::renderCard(auth::AuthHandler& authHandler, float screenW, float screenH) {
@@ -576,6 +625,7 @@ void AuthScreen::renderCard(auth::AuthHandler& authHandler, float screenW, float
             advancedH += smallRow + px(kRowGap);             // the one line instead
         }
         if (codeInAdvanced) advancedH += fieldRow + px(kRowGap);
+        advancedH += fieldRow + px(kRowGap);                 // content pack url
 #ifdef WOWEE_HAVE_ASSET_PANEL
         advancedH += smallRow + px(kRowGap);             // the assets link
 #endif
@@ -620,6 +670,17 @@ void AuthScreen::renderCard(auth::AuthHandler& authHandler, float screenW, float
     } else if (!haveLine.empty()) {
         haveH = ui_.wrappedHeight(contentW, haveLine.c_str(), smallSize) + px(6);
         contentH += haveH;
+    }
+
+    // The content pack of the selected server: syncing, synced, or failed.
+    // One line, the same size as the "what is installed" line above it.
+    auto& packSync = core::Application::getInstance().getWowpackSync();
+    const std::string packLine = packStatusLine(packSync);
+    float packH = 0.0f;
+    if (!packLine.empty()) {
+        packH = ui_.wrappedHeight(contentW, packLine.c_str(), smallSize) + px(6);
+        if (packSync.state() == core::WowpackSync::State::Failed) packH += smallRow;
+        contentH += packH;
     }
 
     if (codeInMain) contentH += fieldRow + px(kRowGap);
@@ -803,6 +864,36 @@ void AuthScreen::renderCard(auth::AuthHandler& authHandler, float screenW, float
         col.gap(haveH);
     }
 
+    // ---- content pack -----------------------------------------------------
+    if (packH > 0.0f) {
+        const bool failed = packSync.state() == core::WowpackSync::State::Failed;
+        ui_.wrapped(col.at(), contentW, packLine.c_str(), smallSize,
+                    failed ? theme.crayonRed : theme.pencil);
+        col.gap(packH - (failed ? smallRow : 0.0f));
+        if (failed) {
+            const float retryW = ui_.textWidth("retry", smallSize);
+            const float anywayW = ui_.textWidth("log in anyway", smallSize);
+            const float gap = px(16);
+            const float x = centreX - (retryW + gap + anywayW) * 0.5f;
+            if (ui_.link("packretry", ImVec2(x, col.y), "retry", smallSize)) {
+                packSkipped_ = false;
+                startPackSync();
+            }
+            if (ui_.link("packskip", ImVec2(x + retryW + gap, col.y), "log in anyway", smallSize)) {
+                packSkipped_ = true;
+            }
+            col.gap(smallRow);
+        }
+    }
+    // A finished sync that changed files: what the asset manager cached
+    // before is stale. Done here, on the thread that draws, never on the
+    // worker.
+    if (packSync.finished() && packSync.takeChanged()) {
+        auto& app = core::Application::getInstance();
+        app.reloadExpansionData();
+        app.rescanAddons();
+    }
+
     // ---- status ---------------------------------------------------------
     if (statusH > 0.0f) {
         ui_.wrapped(col.at(), contentW, statusMessage.c_str(), bodySize,
@@ -822,6 +913,9 @@ void AuthScreen::renderCard(auth::AuthHandler& authHandler, float screenW, float
             std::snprintf(label, sizeof(label), "Submit Code");
         } else if (authenticating) {
             std::snprintf(label, sizeof(label), "Connecting  %.0fs", authTimer);
+            enabled = false;
+        } else if (packSync.running() && !packSkipped_) {
+            std::snprintf(label, sizeof(label), "Syncing...");
             enabled = false;
         } else {
             std::snprintf(label, sizeof(label), "Log In");
@@ -883,6 +977,23 @@ void AuthScreen::renderCard(auth::AuthHandler& authHandler, float screenW, float
             port = portText_.empty()
                 ? 3724
                 : std::clamp(std::atoi(portText_.c_str()), 1, 65535);
+        }
+
+        // The content pack this server publishes. Empty for most servers.
+        {
+            ui_.text(col.at(), "Content pack URL", labelSize, theme.inkSoft);
+            ui_.textRight(col.x1, col.y + (labelSize - smallSize) * 0.5f, "if your realm has one",
+                          smallSize, theme.pencil);
+            col.gap(labelRow);
+            const auto [a, b] = col.row(px(kFieldHeight));
+            PaperUI::FieldOpts opts;
+            opts.placeholder = "https://realm.example/pack/wowpack.json";
+            const PaperUI::FieldResult r = ui_.field("packurl", a, b, packUrl_, opts);
+            col.gap(px(kRowGap));
+            if (r.submitted) {
+                packSkipped_ = false;
+                startPackSync();
+            }
         }
 
         // Expansion.
@@ -1132,6 +1243,13 @@ void AuthScreen::stopLoginMusic() {
 }
 
 void AuthScreen::attemptAuth(auth::AuthHandler& authHandler) {
+    {
+        auto& packSync = core::Application::getInstance().getWowpackSync();
+        if (packSync.running() && !packSkipped_) {
+            setStatus("The content pack is still syncing", true);
+            return;
+        }
+    }
     // Validate inputs
     if (username_.empty()) {
         setStatus("Enter an account name", true);
@@ -1296,6 +1414,9 @@ void AuthScreen::saveLoginInfo(bool includePasswordHash) {
         if (!s.assetProfileId.empty()) {
             out << "assets=" << s.assetProfileId << "\n";
         }
+        if (!s.packUrl.empty()) {
+            out << "pack_url=" << s.packUrl << "\n";
+        }
     }
 
     LOG_INFO("Login info saved to ", path);
@@ -1410,6 +1531,7 @@ void AuthScreen::loadLoginInfo() {
         else if (key == "password_hash") current.passwordHash = val;
         else if (key == "expansion") current.expansionId = val;
         else if (key == "assets") current.assetProfileId = val;
+        else if (key == "pack_url") current.packUrl = val;
     }
     flushServer();
 

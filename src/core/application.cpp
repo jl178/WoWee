@@ -862,6 +862,10 @@ bool Application::initialize() {
             }
             std::string addonsDir = interfaceRoot + "/interface/AddOns";
             addonManager_->setFrameXmlDir(interfaceRoot + "/interface/FrameXML");
+            // Addons a realm ships in its content pack land in the override
+            // directory, which is not under either interface root.
+            addonManager_->setExtraAddonRoot(assetManager->getOverridePath() + "/interface/addons");
+            addonsDir_ = addonsDir;
             addonManager_->scanAddons(addonsDir);
             // Wire Lua errors to UI error display
             addonManager_->getLuaEngine()->setLuaErrorCallback([gh = gameHandler.get()](const std::string& err) {
@@ -2478,6 +2482,10 @@ void Application::loadExpansionTables(const game::ExpansionProfile& profile) {
     }
 }
 
+void Application::rescanAddons() {
+    if (addonManager_ && !addonsDir_.empty()) addonManager_->scanAddons(addonsDir_);
+}
+
 void Application::reloadExpansionData() {
     if (!expansionRegistry_ || !gameHandler) return;
     auto* profile = expansionRegistry_->getActive();
@@ -2513,6 +2521,9 @@ void Application::reloadExpansionData() {
                  useLegacyAssets ? std::string("legacy") : assetProfile->id, "'");
         assetManager->setExpansionDataPath(profile->dataPath);
         assetManager->clearDBCCache();
+        // A content pack may have replaced textures or models since the
+        // login screen first drew with them.
+        assetManager->clearCache();
     }
 
     // Reset map name cache so it reloads from new expansion's Map.dbc

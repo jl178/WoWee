@@ -125,6 +125,9 @@ void AddonManager::scanAddons(const std::string& addonsPath) {
         std::error_code ec;
         const fs::path asked(addonsPath);
         if (fs::is_directory(asked, ec)) roots.emplace_back(asked);
+        if (!extraAddonRoot_.empty() && fs::is_directory(extraAddonRoot_, ec)) {
+            roots.emplace_back(extraAddonRoot_);
+        }
 
         const fs::path interfaceDir = asked.parent_path();
         if (fs::is_directory(interfaceDir, ec)) {

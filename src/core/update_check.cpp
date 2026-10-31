@@ -25,18 +25,9 @@ constexpr const char* kPath = "/repos/Kelsidavis/WoWee/releases/latest";
 /// interface for a value it needs before any of it is up. Absent means on,
 /// which is the default the panel starts the field at.
 bool wantsUpdateCheck() {
-    std::ifstream in(getConfigRoot() + "/settings.cfg");
-    if (!in.is_open()) return true;
-    std::string line;
-    while (std::getline(in, line)) {
-        const std::size_t eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        // The file spells it with underscores, as it spells the rest of
-        // its bool rows; the schema key it is bound to has none.
-        if (line.substr(0, eq) != "check_for_updates") continue;
-        return line.substr(eq + 1) != "0";
-    }
-    return true;
+    // The file spells it with underscores, as it spells the rest of its
+    // bool rows; the schema key it is bound to has none.
+    return readSettingsFlag("check_for_updates", true);
 }
 
 /// The numbers out of a tag, stopping at the first thing that is not one.

@@ -631,7 +631,10 @@ set(WOWEE_SOURCES
     src/core/config_paths.cpp
     src/core/frame_pacer.cpp
     src/core/https_get.cpp
+    src/core/http_fetch.cpp
     src/core/update_check.cpp
+    src/core/wowpack_index.cpp
+    src/core/wowpack_sync.cpp
 
     # Math
     src/math/spline.cpp

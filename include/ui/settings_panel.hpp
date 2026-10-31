@@ -215,6 +215,9 @@ public:
     /// default: a bug reported against a version fixed weeks ago costs both
     /// sides the whole exchange to find that out.
     bool pendingCheckForUpdates = true;
+    /// Sync a server's content pack before login. On by default; the URL
+    /// on the server entry is the opt-in, and without one nothing is fetched.
+    bool pendingContentPacks = true;
     bool pendingNormalMapping = true;   // on by default
     float pendingNormalMapStrength = 0.8f;  // 0.0-2.0
     float pendingLensFlare = 1.0f;          // 0.0-2.0, sun flare strength

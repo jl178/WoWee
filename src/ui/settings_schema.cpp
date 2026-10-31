@@ -379,6 +379,10 @@ constexpr SettingDesc kSchema[] = {
      "Ask GitHub once at startup whether a newer WoWee has been\n"
      "released, and say so on the login screen. Nothing is downloaded\n"
      "or installed, and nothing about you is sent.", "", 1},
+    {"contentpacks", "Download realm content packs", SettingKind::Bool, 0, 0, 0, "Interface", "",
+     "When a saved server has a content pack URL, download its files\n"
+     "into Data/.../override before logging in. Off, the URL is kept\n"
+     "but nothing is fetched.", "", 1},
 
     {"bagscale", "Bag scale", SettingKind::Float, 0.75f, 1.5f, 0.05f, "Interface", "Bags",
      "Size of the bag windows.", "", 1},

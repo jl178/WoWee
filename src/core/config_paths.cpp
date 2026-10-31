@@ -4,6 +4,8 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <string>
 #include <system_error>
 
 #if defined(_WIN32)
@@ -137,6 +139,19 @@ void migratePortableConfigIfNeeded() {
         LOG_INFO("Migrated existing config from ", userDir.string(),
                  " into portable folder ", portableDir.string());
     }
+}
+
+
+bool readSettingsFlag(const std::string& key, bool fallback) {
+    std::ifstream in(getConfigRoot() + "/settings.cfg");
+    if (!in.is_open()) return fallback;
+    std::string line;
+    while (std::getline(in, line)) {
+        const std::size_t eq = line.find('=');
+        if (eq == std::string::npos || line.substr(0, eq) != key) continue;
+        return line.substr(eq + 1) != "0";
+    }
+    return fallback;
 }
 
 }  // namespace wowee::core

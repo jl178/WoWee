@@ -1616,6 +1616,7 @@ add_executable(test_update_check
     test_update_check.cpp
     ${CMAKE_SOURCE_DIR}/src/core/update_check.cpp
     ${CMAKE_SOURCE_DIR}/src/core/https_get.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/http_fetch.cpp
     ${CMAKE_SOURCE_DIR}/src/core/config_paths.cpp
     ${TEST_COMMON_SOURCES}
 )
@@ -1640,27 +1641,72 @@ wowee_test_link_glm(test_update_check)
 add_test(NAME update_check COMMAND test_update_check)
 register_test_target(test_update_check)
 
-# ── test_realm_patches ───────────────────────────────────────
-# What a realm may name and where its archives may land. No network: the
-# naming and the parsing are the part that decides whether a manifest can
-# reach outside the directory its realm was given.
-add_executable(test_realm_patches
-    test_realm_patches.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/realm_patches.cpp
+# ── test_http_fetch ───────────────────────────────────────────
+# The streaming GET behind content packs, against a server on the loopback.
+add_executable(test_http_fetch
+    test_http_fetch.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/http_fetch.cpp
     ${TEST_COMMON_SOURCES}
 )
-target_include_directories(test_realm_patches PRIVATE
-    ${TEST_INCLUDE_DIRS}
-    ${CMAKE_SOURCE_DIR}
+target_include_directories(test_http_fetch PRIVATE ${TEST_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(test_http_fetch SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_http_fetch PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
+if(WIN32)
+    target_link_libraries(test_http_fetch PRIVATE crypt32 ws2_32)
+endif()
+wowee_test_link_glm(test_http_fetch)
+add_test(NAME http_fetch COMMAND test_http_fetch)
+register_test_target(test_http_fetch)
+
+# ── test_wowpack_index ───────────────────────────────────────
+# What a content pack may name and what a sync must do about it. No network.
+add_executable(test_wowpack_index
+    test_wowpack_index.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/wowpack_index.cpp
+    ${TEST_COMMON_SOURCES}
 )
-target_include_directories(test_realm_patches SYSTEM PRIVATE
+target_include_directories(test_wowpack_index PRIVATE ${TEST_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR})
+target_include_directories(test_wowpack_index SYSTEM PRIVATE
     ${TEST_SYSTEM_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}/extern/nlohmann
 )
-target_link_libraries(test_realm_patches PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
-wowee_test_link_glm(test_realm_patches)
-add_test(NAME realm_patches COMMAND test_realm_patches)
-register_test_target(test_realm_patches)
+target_link_libraries(test_wowpack_index PRIVATE catch2_main)
+wowee_test_link_glm(test_wowpack_index)
+add_test(NAME wowpack_index COMMAND test_wowpack_index)
+register_test_target(test_wowpack_index)
+
+# ── test_wowpack_sync ────────────────────────────────────────
+# The installer, end to end against a loopback server and a temp directory.
+add_executable(test_wowpack_sync
+    test_wowpack_sync.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/wowpack_sync.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/wowpack_index.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/http_fetch.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/update_check.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/https_get.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/config_paths.cpp
+    ${TEST_COMMON_SOURCES}
+)
+target_include_directories(test_wowpack_sync PRIVATE
+    ${TEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_BINARY_DIR}/generated   # version.hpp, written by wowee_version
+)
+if(TARGET wowee_version)
+    add_dependencies(test_wowpack_sync wowee_version)
+endif()
+target_include_directories(test_wowpack_sync SYSTEM PRIVATE
+    ${TEST_SYSTEM_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/extern/nlohmann
+)
+target_link_libraries(test_wowpack_sync PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
+if(WIN32)
+    target_link_libraries(test_wowpack_sync PRIVATE crypt32 ws2_32)
+endif()
+wowee_test_link_glm(test_wowpack_sync)
+add_test(NAME wowpack_sync COMMAND test_wowpack_sync)
+register_test_target(test_wowpack_sync)
 
 # ── test_extract_progress ────────────────────────────────────
 # Extraction is the long stage of a build, and the only one that can say how
