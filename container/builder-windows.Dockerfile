@@ -60,6 +60,13 @@ RUN apt-get update && \
 RUN printf '#!/bin/sh\nexit 0\n' > /usr/local/bin/powershell.exe && \
     chmod +x /usr/local/bin/powershell.exe
 
+# glslc compiles the shaders that have no committed .spv (grass, hi-z,
+# world map fog, editor water). Without it the client logs a missing
+# shader for each and disables that feature.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends glslc && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY build-windows.sh /build-platform.sh
 RUN chmod +x /build-platform.sh
 

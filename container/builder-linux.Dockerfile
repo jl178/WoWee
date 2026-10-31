@@ -4,6 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
+        ca-certificates \
         cmake \
         ninja-build \
         build-essential \
@@ -48,6 +49,13 @@ RUN git clone --depth 1 --branch release-3.2.24 \
     cmake --install /tmp/SDL3/build && \
     ldconfig && \
     rm -rf /tmp/SDL3
+
+# glslc compiles the shaders that have no committed .spv (grass, hi-z,
+# world map fog, editor water). Without it the client logs a missing
+# shader for each and disables that feature.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends glslc && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY build-linux.sh /build-platform.sh
 RUN chmod +x /build-platform.sh
