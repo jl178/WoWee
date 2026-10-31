@@ -1,261 +1,30 @@
 #include "core/https_get.hpp"
 
-#include <openssl/err.h>
-#include <openssl/ssl.h>
-#include <openssl/x509v3.h>
-
-#include <algorithm>
-#include <array>
-#include <cctype>
-#include <cstdlib>
-#include <memory>
-#include <vector>
-
-#include "network/net_platform.hpp"
-
-#ifdef _WIN32
-#include <wincrypt.h>
-#endif
+#include "core/http_fetch.hpp"
 
 namespace wowee::core {
-namespace {
 
-#ifdef _WIN32
-/// OpenSSL has no trust store of its own on Windows, so the default verify
-/// paths find nothing and every chain fails. Hand it the system's roots.
-/// Returns how many certificates were added.
-int loadWindowsRoots(SSL_CTX* ctx) {
-    X509_STORE* store = SSL_CTX_get_cert_store(ctx);
-    HCERTSTORE sys = CertOpenSystemStoreW(0, L"ROOT");
-    if (store == nullptr || sys == nullptr) return 0;
-
-    int added = 0;
-    for (PCCERT_CONTEXT cert = CertEnumCertificatesInStore(sys, nullptr); cert != nullptr;
-         cert = CertEnumCertificatesInStore(sys, cert)) {
-        const unsigned char* der = cert->pbCertEncoded;
-        X509* x = d2i_X509(nullptr, &der, static_cast<long>(cert->cbCertEncoded));
-        if (x == nullptr) continue;
-        if (X509_STORE_add_cert(store, x) == 1) ++added;
-        X509_free(x);
-    }
-    CertCloseStore(sys, 0);
-    ERR_clear_error();   // duplicate certificates queue an error that is not one
-    return added;
-}
-#endif
-
-/// OpenSSL's own error text for the failure on top of the thread's queue.
-std::string sslError() {
-    const unsigned long code = ERR_get_error();
-    if (code == 0) return "no detail";
-    char buf[256];
-    ERR_error_string_n(code, buf, sizeof(buf));
-    return buf;
-}
-
-/// Connect a plain TCP socket, with the timeout applied to the socket rather
-/// than to connect() itself - the handshake and the reads that follow are
-/// where a wedged host actually costs, and SO_RCVTIMEO covers those.
-socket_t connectTcp(const std::string& host, const std::string& port,
-                    int timeoutSeconds, std::string* error) {
-    net::ensureInit();
-
-    addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    addrinfo* found = nullptr;
-    if (getaddrinfo(host.c_str(), port.c_str(), &hints, &found) != 0 || found == nullptr) {
-        *error = "cannot resolve " + host;
-        return INVALID_SOCK;
-    }
-
-    socket_t sock = INVALID_SOCK;
-    for (addrinfo* at = found; at != nullptr; at = at->ai_next) {
-        sock = ::socket(at->ai_family, at->ai_socktype, at->ai_protocol);
-        if (sock == INVALID_SOCK) continue;
-
-#ifdef _WIN32
-        const DWORD timeout = static_cast<DWORD>(timeoutSeconds) * 1000;
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
-                   reinterpret_cast<const char*>(&timeout), sizeof(timeout));
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
-                   reinterpret_cast<const char*>(&timeout), sizeof(timeout));
-#else
-        timeval timeout{};
-        timeout.tv_sec = timeoutSeconds;
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-#endif
-
-        if (::connect(sock, at->ai_addr, static_cast<int>(at->ai_addrlen)) == 0) break;
-        net::closeSocket(sock);
-        sock = INVALID_SOCK;
-    }
-    freeaddrinfo(found);
-
-    if (sock == INVALID_SOCK) *error = "cannot reach " + host;
-    return sock;
-}
-
-/// Where the headers stop. Returns npos when the terminator has not arrived.
-std::size_t headerEnd(const std::string& raw) {
-    return raw.find("\r\n\r\n");
-}
-
-/// A header's value, matched without regard to case as HTTP requires.
-std::string headerValue(const std::string& headers, const std::string& name) {
-    std::string lowerHeaders = headers;
-    std::transform(lowerHeaders.begin(), lowerHeaders.end(), lowerHeaders.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    std::string lowerName = name;
-    std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-
-    std::size_t at = lowerHeaders.find("\r\n" + lowerName + ":");
-    if (at == std::string::npos) return {};
-    at += 2 + lowerName.size() + 1;
-    const std::size_t end = headers.find("\r\n", at);
-    std::string value = headers.substr(at, end == std::string::npos ? end : end - at);
-    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.erase(0, 1);
-    while (!value.empty() && (value.back() == ' ' || value.back() == '\r')) value.pop_back();
-    return value;
-}
-
-/// Undo Transfer-Encoding: chunked. GitHub answers this way often enough that
-/// leaving it out would make the reply unparseable at random.
-std::string dechunk(const std::string& body) {
-    std::string out;
-    std::size_t at = 0;
-    while (at < body.size()) {
-        const std::size_t lineEnd = body.find("\r\n", at);
-        if (lineEnd == std::string::npos) break;
-        const std::size_t size =
-            static_cast<std::size_t>(std::strtoul(body.substr(at, lineEnd - at).c_str(), nullptr, 16));
-        if (size == 0) break;
-        const std::size_t start = lineEnd + 2;
-        if (start + size > body.size()) break;
-        out.append(body, start, size);
-        at = start + size + 2;   // past the chunk and its trailing CRLF
-    }
-    return out;
-}
-
-}  // namespace
-
+// The small-document face of http_fetch, kept so the update check and its
+// test need not change. Same behaviour as before: port 443, GitHub's media
+// type, no redirects, a 4 MB cap, and the body of an error reply returned
+// so the caller can read what the API said.
 HttpsResponse httpsGet(const std::string& host, const std::string& path,
                        const std::string& userAgent, int timeoutSeconds) {
-    HttpsResponse result;
+    FetchOptions opts;
+    opts.userAgent = userAgent;
+    opts.accept = "application/vnd.github+json";
+    opts.timeoutSeconds = timeoutSeconds;
+    opts.maxBytes = 4u * 1024u * 1024u;
+    opts.followRedirect = false;
+    opts.bodyOnError = true;
 
-    socket_t sock = connectTcp(host, "443", timeoutSeconds, &result.error);
-    if (sock == INVALID_SOCK) return result;
-
-    // Unique_ptr rather than a goto chain: every failure below has to close
-    // the socket and free the TLS state, and there are six of them.
-    const std::unique_ptr<void, void (*)(void*)> socketGuard(
-        reinterpret_cast<void*>(static_cast<std::intptr_t>(sock)),
-        [](void* s) { net::closeSocket(static_cast<socket_t>(reinterpret_cast<std::intptr_t>(s))); });
-
-    SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
-    if (ctx == nullptr) {
-        result.error = "no TLS context: " + sslError();
-        return result;
-    }
-    const std::unique_ptr<SSL_CTX, void (*)(SSL_CTX*)> ctxGuard(ctx, SSL_CTX_free);
-
-    // Verify the chain, and verify the name on it. The peer identity check
-    // makes the second happen - without it a valid certificate for any host
-    // at all would satisfy the first, which is most of the point of asking.
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
-    if (SSL_CTX_set_default_verify_paths(ctx) != 1) {
-        result.error = "no trust store: " + sslError();
-        return result;
-    }
-#ifdef _WIN32
-    loadWindowsRoots(ctx);
-#endif
-    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
-
-    SSL* ssl = SSL_new(ctx);
-    if (ssl == nullptr) {
-        result.error = "no TLS session: " + sslError();
-        return result;
-    }
-    const std::unique_ptr<SSL, void (*)(SSL*)> sslGuard(ssl, SSL_free);
-
-    SSL_set_tlsext_host_name(ssl, host.c_str());   // SNI
-    // Set verification parameters directly: SSL_set1_host is deprecated in
-    // OpenSSL 4. Keep IP literals matched against IP SANs, rather than DNS SANs.
-    X509_VERIFY_PARAM* verify = SSL_get0_param(ssl);
-    std::array<unsigned char, 16> address{};
-    int identitySet = 0;
-    if (inet_pton(AF_INET, host.c_str(), address.data()) == 1) {
-        identitySet = X509_VERIFY_PARAM_set1_ip(verify, address.data(), 4);
-    } else if (inet_pton(AF_INET6, host.c_str(), address.data()) == 1) {
-        identitySet = X509_VERIFY_PARAM_set1_ip(verify, address.data(), 16);
-    } else if (!host.empty()) {
-        identitySet = X509_VERIFY_PARAM_set1_host(verify, host.c_str(), host.size());
-    }
-    if (identitySet != 1) {
-        result.error = "could not configure TLS peer identity: " + sslError();
-        return result;
-    }
-    SSL_set_fd(ssl, static_cast<int>(sock));
-
-    if (SSL_connect(ssl) != 1) {
-        result.error = "TLS handshake failed: " + sslError();
-        return result;
-    }
-
-    const std::string request =
-        "GET " + path + " HTTP/1.1\r\n"
-        "Host: " + host + "\r\n"
-        "User-Agent: " + userAgent + "\r\n"
-        "Accept: application/vnd.github+json\r\n"
-        "Connection: close\r\n"
-        "\r\n";
-    if (SSL_write(ssl, request.data(), static_cast<int>(request.size())) <= 0) {
-        result.error = "could not send the request: " + sslError();
-        return result;
-    }
-
-    std::string raw;
-    // A release document is a few kilobytes. The cap is there so a hostile or
-    // broken endpoint cannot make this read until it runs out of memory.
-    constexpr std::size_t kMaxBytes = 4u * 1024u * 1024u;
-    char buffer[8192];
-    while (raw.size() < kMaxBytes) {
-        const int got = SSL_read(ssl, buffer, sizeof(buffer));
-        if (got <= 0) break;   // close_notify, or the timeout expired
-        raw.append(buffer, static_cast<std::size_t>(got));
-    }
-
-    const std::size_t split = headerEnd(raw);
-    if (split == std::string::npos) {
-        result.error = "no headers in the reply";
-        return result;
-    }
-    const std::string headers = raw.substr(0, split);
-    std::string body = raw.substr(split + 4);
-
-    if (headers.rfind("HTTP/", 0) != 0) {
-        result.error = "not an HTTP reply";
-        return result;
-    }
-    const std::size_t firstSpace = headers.find(' ');
-    if (firstSpace == std::string::npos) {
-        result.error = "no status in the reply";
-        return result;
-    }
-    result.status = std::atoi(headers.c_str() + firstSpace + 1);
-
-    if (headerValue(headers, "Transfer-Encoding").find("chunked") != std::string::npos) {
-        body = dechunk(body);
-    }
-
-    result.ok = true;
-    result.body = std::move(body);
-    return result;
+    HttpsResponse response;
+    const FetchResult r = httpFetchToString("https://" + host + path, opts, &response.body);
+    response.ok = r.ok;
+    response.status = r.status;
+    response.error = r.error;
+    if (!r.ok) response.body.clear();
+    return response;
 }
 
 }  // namespace wowee::core

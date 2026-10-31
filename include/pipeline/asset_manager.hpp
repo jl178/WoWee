@@ -54,6 +54,8 @@ public:
      */
     [[nodiscard]] bool isInitialized() const { return initialized; }
     [[nodiscard]] const std::string& getDataPath() const { return dataPath; }
+    /// Where a content pack's files go: read before the extraction.
+    [[nodiscard]] const std::string& getOverridePath() const { return overridePath_; }
     [[nodiscard]] const AssetManifest& getManifest() const { return manifest_; }
 
     /**

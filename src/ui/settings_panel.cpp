@@ -341,6 +341,7 @@ constexpr FieldBinding kFieldBindings[] = {
     {.key = "scrollspeed",   .asFloat = &SettingsPanel::pendingScrollSpeed},
     {.key = "latencymeter",  .asBool  = &SettingsPanel::pendingShowLatencyMeter},
     {.key = "checkforupdates",   .asBool  = &SettingsPanel::pendingCheckForUpdates},
+    {.key = "contentpacks",      .asBool  = &SettingsPanel::pendingContentPacks},
     {.key = "micromenu",     .asBool  = &SettingsPanel::pendingShowMicroMenu},
     {.key = "chatboxvisible", .asBool = &SettingsPanel::pendingChatBoxVisible},
     {.key = "bagscale",      .asFloat = &SettingsPanel::pendingBagScale},

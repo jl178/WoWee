@@ -85,6 +85,9 @@ private:
         /// knows about. Empty for one somebody typed in themselves, which has
         /// no name beyond its address.
         std::string label;
+        /// Where this server's content pack index is, or empty for none.
+        /// Synced into the override directory when the server is selected.
+        std::string packUrl;
     };
 
     // UI state
@@ -97,6 +100,10 @@ private:
     TextEdit username_{255};
     TextEdit password_{255};
     TextEdit pinCode_{31};
+    /// The content pack URL of the selected server, as typed.
+    TextEdit packUrl_{1023};
+    /// "log in anyway" was chosen after a pack sync failed or while it runs.
+    bool packSkipped_ = false;
     /// The port as it is being typed. `port` is what the rest of the screen
     /// reads, and is re-derived from this whenever it changes - a half-typed
     /// port is a string with no number in it yet, and the connect path should
@@ -187,6 +194,9 @@ private:
     void seedKnownServers();
     void selectServerProfile(int index);
     void upsertCurrentServerProfile(bool includePasswordHash);
+    /// Start syncing the content pack named in packUrl_, or remove the one
+    /// installed when the box is empty. Respects the content_packs setting.
+    void startPackSync();
     [[nodiscard]] std::string currentExpansionId() const;
 
     // Background image (Vulkan)

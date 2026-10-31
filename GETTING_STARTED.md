@@ -170,6 +170,26 @@ Game data is looked for in this order:
 - A `portable.txt` file beside the executable keeps settings in a `config` folder next to it instead
 - Keybindings (`bindings.cfg`), graphics settings, saved servers (`login.cfg`) and UI state persist
 
+### Content Packs
+
+A server that adds zones, models, textures or addons can publish them as a
+content pack: a directory of client files plus a `wowpack.json` index. Under
+**more options** on the login screen, enter the pack URL the server gives you
+(for example `https://realm.example/pack/wowpack.json`) in **Content pack
+URL**. Selecting that server then downloads the pack's files into the
+`override` folder of your game data before you log in, and only the files
+whose hash changed on later logins. The Log In button waits while the sync
+runs; on a failure you can retry or log in anyway.
+
+- One pack is active at a time. Choosing a server with a different pack
+  replaces it; choosing one with no pack removes it. Files you put in
+  `override` yourself are left alone unless a pack ships the same path.
+- Plain `http://` is only accepted for LAN and loopback addresses. Anything
+  else must be `https://`.
+- The **Download realm content packs** setting turns the feature off
+  without forgetting the URL.
+- Packs are built with [wowpack](https://github.com/jl178/wowpack).
+
 ### Multi-Expansion Support
 WoWee supports:
 - **Vanilla 1.12** - Original game (and Turtle WoW 1.18)

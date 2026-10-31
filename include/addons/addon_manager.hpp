@@ -17,6 +17,9 @@ public:
 
     bool initialize(game::GameHandler* gameHandler, const LuaServices& services = {});
     void scanAddons(const std::string& addonsPath);
+    /// One more directory scanAddons searches: where a content pack puts
+    /// the addons a realm ships (<override>/interface/addons).
+    void setExtraAddonRoot(const std::string& path) { extraAddonRoot_ = path; }
     void loadAllAddons();
     /// Parse an XML file, build what it declares, and follow its includes and
     /// scripts. depth guards against a file that includes itself.
@@ -97,6 +100,7 @@ private:
     game::GameHandler* gameHandler_ = nullptr;
     LuaServices luaServices_;
     std::string addonsPath_;
+    std::string extraAddonRoot_;
 
     /// Every global the load-on-demand addons on disk define, read out of their
     /// own files. This is the source of truth for which names must answer as

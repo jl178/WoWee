@@ -3,11 +3,9 @@
 /// One HTTPS GET, blocking, for the small JSON documents this client asks
 /// public APIs for.
 ///
-/// Not a general HTTP client and not meant to become one: no keep-alive, no
-/// POST, no cookies, no proxy. The client had no way to make an HTTPS request
-/// at all, and the one thing it needs - asking GitHub what the newest release
-/// is - does not justify taking on a dependency when OpenSSL is already
-/// linked for the auth path.
+/// A thin face over http_fetch, which streams larger replies to a sink. Both
+/// stay deliberately small: no keep-alive, no POST, no cookies, no proxy.
+/// OpenSSL is already linked for the auth path, so neither needs a dependency.
 ///
 /// Call it off the render thread. It blocks on connect, handshake and read.
 

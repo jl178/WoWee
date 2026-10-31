@@ -862,6 +862,10 @@ bool Application::initialize() {
             }
             std::string addonsDir = interfaceRoot + "/interface/AddOns";
             addonManager_->setFrameXmlDir(interfaceRoot + "/interface/FrameXML");
+            // Addons a realm ships in its content pack land in the override
+            // directory, which is not under either interface root.
+            addonManager_->setExtraAddonRoot(assetManager->getOverridePath() + "/interface/addons");
+            addonsDir_ = addonsDir;
             addonManager_->scanAddons(addonsDir);
             // Wire Lua errors to UI error display
             addonManager_->getLuaEngine()->setLuaErrorCallback([gh = gameHandler.get()](const std::string& err) {
@@ -2478,6 +2482,10 @@ void Application::loadExpansionTables(const game::ExpansionProfile& profile) {
     }
 }
 
+void Application::rescanAddons() {
+    if (addonManager_ && !addonsDir_.empty()) addonManager_->scanAddons(addonsDir_);
+}
+
 void Application::reloadExpansionData() {
     if (!expansionRegistry_ || !gameHandler) return;
     auto* profile = expansionRegistry_->getActive();
@@ -2513,6 +2521,9 @@ void Application::reloadExpansionData() {
                  useLegacyAssets ? std::string("legacy") : assetProfile->id, "'");
         assetManager->setExpansionDataPath(profile->dataPath);
         assetManager->clearDBCCache();
+        // A content pack may have replaced textures or models since the
+        // login screen first drew with them.
+        assetManager->clearCache();
     }
 
     // Reset map name cache so it reloads from new expansion's Map.dbc
@@ -3017,7 +3028,7 @@ void Application::applyServerMovementState(float deltaTime) {
         // attachment, while folding real WASD/jump movement since
         // last frame into that offset. Treating ships as fully
         // externally driven cleared movement input and reapplied the
-        // boarding-time offset forever, freezing the player in a
+        // boarding-time offset enhanced, freezing the player in a
         // running pose at the point where they stepped aboard.
         auto* tm = gameHandler->getTransportManager();
         auto* tr = tm ? tm->getTransport(gameHandler->getPlayerTransportGuid()) : nullptr;
@@ -3094,7 +3105,7 @@ void Application::applyServerMovementState(float deltaTime) {
                     // on boarding and cleared only by a successful deck query,
                     // so boarding somewhere the query never succeeds - a
                     // gangway that belongs to the pier rather than the hull -
-                    // reapplied the boarding offset every frame forever. That
+                    // reapplied the boarding offset every frame enhanced. That
                     // is a rider running on the spot, unable to walk far
                     // enough to trigger disembark and so unable to get off.
                     deckFloorPending_ = false;
@@ -3169,7 +3180,7 @@ void Application::applyServerMovementState(float deltaTime) {
                     // shows up as horizontal render-position drift, and this code
                     // previously couldn't tell that apart from real WASD input - it baked
                     // ANY frame-to-frame position change into localOffset, compounding
-                    // forever. Gate on genuine movement input (the same signal driving the
+                    // enhanced. Gate on genuine movement input (the same signal driving the
                     // walking animation) so gravity noise while stationary is ignored
                     // instead of accumulated; only apply the delta when the player is
                     // actually pressing a movement key.

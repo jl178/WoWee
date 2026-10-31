@@ -17,6 +17,11 @@ std::string getExecutableDir();
 //   - Per-user (default): %APPDATA%\wowee on Windows, ~/.wowee elsewhere.
 std::string getConfigRoot();
 
+// A bool row of settings.cfg, as the file spells it ("check_for_updates").
+// The settings panel owns the file; core reads it back here for the few
+// values it needs before any of the interface is up. Absent means fallback.
+bool readSettingsFlag(const std::string& key, bool fallback);
+
 // One-time seeding of portable config. On the first launch after the user drops
 // a "portable.txt" marker next to the executable (before any config folder
 // exists), copies the existing per-user config tree into <exe_dir>/config so
