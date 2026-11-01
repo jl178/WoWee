@@ -482,3 +482,4 @@ Other fixes:
   - Jump-interrupt still unconfirmed. In a test client that isn't focused, `grounded` stays false, so a scripted jump never fires. Jered's next jump mid-cast will show in his log.
 - `343fc96`: LEARNED_SPELL_IN_TAB carries the spellbook tab index, so the tab flashes.
 - Windows package rebuild from 343fc96 started.
+- Windows package rebuilt from 343fc96, zip refreshed, share restarted (port 8081, 22:49 UTC).
