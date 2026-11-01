@@ -259,6 +259,8 @@ public:
         questLog_.clear();
         pendingQuestQueryIds_.clear();
         npcQuestStatus_.clear();
+        questSlotStatesSeen_.clear();
+        questSlotStatesSeeded_ = false;
     }
 
     // Drives the quest-giver status requery cooldown; called once per frame by
@@ -340,6 +342,17 @@ private:
 
     // Quest giver status per NPC
     std::unordered_map<uint64_t, QuestGiverStatus> npcQuestStatus_;
+
+    // The quest log as the player's update fields last described it: quest id
+    // to its complete/failed state bits. Only used to notice that the log
+    // changed (a quest added, removed, completed, failed, or made incomplete
+    // again) so the questgiver marks can be re-asked, which is what the stock
+    // client does on every such change.
+    std::unordered_map<uint32_t, uint32_t> questSlotStatesSeen_;
+    // False until the fields have been read once. The first read is the login
+    // snapshot, which the server already follows with its own
+    // SMSG_QUESTGIVER_STATUS_MULTIPLE, so it is not treated as a change.
+    bool questSlotStatesSeeded_ = false;
 
     // NPC gossip text cache (textId → body text)
     std::unordered_map<uint32_t, std::string> npcTextCache_;

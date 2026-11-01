@@ -139,6 +139,17 @@ void QuestHandler::tickQuestGiverStatusRequery(float deltaTime) {
 
 void QuestHandler::sendQuestGiverStatusQueries() {
     if (!owner_.getSocket()) return;
+    // CMSG_QUESTGIVER_STATUS_MULTIPLE_QUERY is what the stock client sends when
+    // its quest log changes: an empty packet, answered by one
+    // SMSG_QUESTGIVER_STATUS_MULTIPLE covering every questgiver the server
+    // considers visible, game objects included. Classic has no such opcode, so
+    // it falls back to one CMSG_QUESTGIVER_STATUS_QUERY per quest-giving unit.
+    const auto* opcodes = getActiveOpcodeTable();
+    if (opcodes && opcodes->hasOpcode(Opcode::CMSG_QUESTGIVER_STATUS_MULTIPLE_QUERY)) {
+        network::Packet multiPkt(wireOpcode(Opcode::CMSG_QUESTGIVER_STATUS_MULTIPLE_QUERY));
+        owner_.getSocket()->send(multiPkt);
+        return;
+    }
     for (const auto& [guid, entity] : owner_.getEntityManager().getEntities()) {
         if (entity->getType() != ObjectType::UNIT) continue;
         auto unit = std::static_pointer_cast<Unit>(entity);
@@ -2035,6 +2046,10 @@ void QuestHandler::applyQuestStateFromFields(const FlatFieldMap& fields) {
     const uint8_t qStride = owner_.getPacketParsers() ? owner_.getPacketParsers()->questLogStride() : 5;
     if (qStride < 2) return;
 
+    // Quest id to its complete/failed bits, as these fields describe the log
+    // now. Compared with the previous call's snapshot below.
+    std::unordered_map<uint32_t, uint32_t> slotStates;
+
     for (uint16_t slot = 0; slot < 25; ++slot) {
         const uint16_t idField    = ufQuestStart + slot * qStride;
         const uint16_t stateField = idField + 1;
@@ -2042,6 +2057,12 @@ void QuestHandler::applyQuestStateFromFields(const FlatFieldMap& fields) {
         if (idIt == fields.end()) continue;
         uint32_t questId = idIt->second;
         if (questId == 0) continue;
+
+        {
+            auto sIt = fields.find(stateField);
+            slotStates[questId] = (sIt != fields.end())
+                ? (questSlotState(qStride, sIt->second) & 0x3u) : 0u;
+        }
 
         // Add quest to local log only if we have a pending accept for it
         if (!hasQuestInLog(questId) && pendingQuestAcceptTimeouts_.count(questId) != 0) {
@@ -2070,16 +2091,55 @@ void QuestHandler::applyQuestStateFromFields(const FlatFieldMap& fields) {
         auto stateIt = fields.find(stateField);
         if (stateIt == fields.end()) continue;
         bool serverComplete = isQuestSlotComplete(qStride, stateIt->second);
-        if (!serverComplete) continue;
+        if (!serverComplete) {
+            // The server clears the bit again when a finished quest stops
+            // being finished - a collected item sold or destroyed, required
+            // money spent. Only a cleared bit that was seen set counts, so a
+            // quest completed by a packet that the fields have not caught up
+            // with yet is left alone.
+            auto seenIt = questSlotStatesSeen_.find(questId);
+            const bool wasServerComplete =
+                seenIt != questSlotStatesSeen_.end() && (seenIt->second & 0x1u) != 0;
+            if (!wasServerComplete) continue;
+            for (auto& quest : questLog_) {
+                if (quest.questId == questId && quest.complete) {
+                    quest.complete = false;
+                    LOG_INFO("Quest ", questId, " no longer complete from VALUES update field state");
+                    announceQuestLogChanged(questId);
+                    break;
+                }
+            }
+            continue;
+        }
 
         for (auto& quest : questLog_) {
             if (quest.questId == questId && !quest.complete) {
                 quest.complete = true;
                 LOG_INFO("Quest ", questId, " marked complete from VALUES update field state");
+                announceQuestLogChanged(questId);
                 break;
             }
         }
     }
+
+    // Re-ask every visible questgiver whenever the log changed shape: a quest
+    // added or removed, or one whose complete or failed bit moved.
+    //
+    // Most quests finish here and nowhere else. AzerothCore's
+    // Player::CompleteQuest only sets QUEST_STATE_COMPLETE in the slot's
+    // update field; SMSG_QUESTUPDATE_COMPLETE is sent for explore and event
+    // quests alone, and SMSG_QUESTUPDATE_ADD_ITEM is never sent at all. The
+    // server pushes SMSG_QUESTGIVER_STATUS_MULTIPLE by itself only on login,
+    // level-up, turn-in and item destruction; for everything else the stock
+    // client asks with CMSG_QUESTGIVER_STATUS_MULTIPLE_QUERY when its quest
+    // log changes. Without this, a collect, talk-to, spell or reputation
+    // quest finished in sight of its giver kept the grey "in progress" ?
+    // until the giver respawned for the client.
+    if (questSlotStatesSeeded_ && slotStates != questSlotStatesSeen_) {
+        requeryNearbyQuestGiverStatus();
+    }
+    questSlotStatesSeen_ = std::move(slotStates);
+    questSlotStatesSeeded_ = true;
 }
 
 void QuestHandler::applyPackedKillCountsFromFields(QuestLogEntry& quest) {
