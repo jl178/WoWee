@@ -14,6 +14,7 @@
 #include "core/coordinates.hpp"
 #include "network/world_socket.hpp"
 #include "rendering/animation_controller.hpp"
+#include "rendering/animation/animation_ids.hpp"
 #include <algorithm>
 #include <bit>
 #include <set>
@@ -939,6 +940,11 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
         }
         else if (key == ufi.npcFlags) { unit->setNpcFlags(val); }
         else if (key == ufi.npcEmoteState) { unit->setNpcEmoteState(val); }
+        else if (ufi.bytes1 != 0xFFFF && key == ufi.bytes1) {
+            // The stand state it comes into view in - an inn NPC already
+            // seated. The spawn reads it to choose the first animation.
+            unit->setStandState(static_cast<uint8_t>(val & 0xFF));
+        }
         else if (ufi.bytes2 != 0xFFFF && key == ufi.bytes2) {
             if (block.guid == owner_.getPlayerGuid()) {
                 setPlayerShapeshiftForm(static_cast<uint8_t>((val >> 24) & 0xFF));
@@ -1130,6 +1136,23 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             unit->setAuraState(val);
         }
         else if (ufi.bytes1 != 0xFFFF && key == ufi.bytes1) {
+            // Byte 0 is the stand state. It was never read for anyone: the
+            // local player hears it again as SMSG_STANDSTATE_UPDATE, but that
+            // goes to nobody else, so every other player in a chair and every
+            // inn NPC seated by its creature_addon stood up inside the
+            // furniture. Played as a persistent state through the emote path,
+            // which already loops it, keeps it across a model reload and puts
+            // an NPC's own emote state back when it stands.
+            const uint8_t newStandState = static_cast<uint8_t>(val & 0xFF);
+            if (newStandState != unit->getStandState()) {
+                unit->setStandState(newStandState);
+                if (block.guid != owner_.getPlayerGuid() && newStandState != 7 &&
+                    owner_.emoteAnimCallbackRef()) {
+                    owner_.emoteAnimCallbackRef()(
+                        block.guid, rendering::anim::standStateLoopAnim(newStandState),
+                        /*isState=*/true);
+                }
+            }
             const uint8_t oldVisibilityFlags = unit->getVisibilityFlags();
             const uint8_t newVisibilityFlags = static_cast<uint8_t>((val >> 16) & 0xFF);
             unit->setVisibilityFlags(newVisibilityFlags);

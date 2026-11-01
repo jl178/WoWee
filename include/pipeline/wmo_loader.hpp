@@ -191,6 +191,10 @@ struct WMOModel {
     uint32_t nDoodadSets;
 
     glm::vec3 ambientColor;     // MOHD ambient color (used for interior group lighting)
+    /// MOHD flags: 0x1 do not attenuate vertices by portal distance, 0x2 skip
+    /// the ambient when fixing vertex colours ("unified render path"), 0x4
+    /// liquid type from the DBC, 0x8 do not fix vertex colours, only alpha.
+    uint16_t mohdFlags = 0;
     glm::vec3 boundingBoxMin;
     glm::vec3 boundingBoxMax;
 

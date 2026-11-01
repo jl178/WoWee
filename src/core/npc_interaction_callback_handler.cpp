@@ -66,6 +66,28 @@ void NPCInteractionCallbackHandler::setupCallbacks() {
         audio::AudioEngine::instance().playSound3D(file, pos, entry->volume, 1.0f, 60.0f);
     });
 
+    // M2 $CSD animation sound events: the emote voices EmotesTextSound has no
+    // rows for (/laugh, /cry, /kiss, /chicken, /applaud) come from the model,
+    // keyed to the animation's frames, as in the stock client. Animations an
+    // EmotesTextSound row already voices are skipped so nothing plays twice.
+    if (renderer_) {
+        renderer_->setCharacterAnimSoundEventCallback(
+            [this](uint32_t /*instanceId*/, uint32_t animationId, uint32_t soundEntryId,
+                   const glm::vec3& position) {
+                const auto* data = audioCoordinator_ ? audioCoordinator_->getSoundData() : nullptr;
+                if (!data || data->animHasEmoteTextSound(animationId)) return;
+                // Missing ids are normal: EmoteTrain's $CSD points at rows
+                // the shipped SoundEntries.dbc no longer has.
+                const audio::SoundEntry* entry = data->sound(soundEntryId);
+                if (!entry || entry->files.empty()) return;
+                static std::mt19937 rng{std::random_device{}()};
+                const auto& file =
+                    entry->files[std::uniform_int_distribution<size_t>(0, entry->files.size() - 1)(rng)];
+                const float maxDistance = entry->distanceCutoff > 0.0f ? entry->distanceCutoff : 60.0f;
+                audio::AudioEngine::instance().playSound3D(file, position, entry->volume, 1.0f, maxDistance);
+            });
+    }
+
     // NPC greeting callback - play voice line
     gameHandler_.setNpcGreetingCallback([this](uint64_t guid, const glm::vec3& position) {
         // Play NPC_WELCOME animation on the NPC

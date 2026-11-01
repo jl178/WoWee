@@ -16,6 +16,7 @@
 #include "rendering/vk_context.hpp"
 #include "rendering/character_preview.hpp"
 #include "ui/ui_texture_load.hpp"
+#include "ui/glue_ui.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/music_manager.hpp"
@@ -415,7 +416,11 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
         }
     }
 
-    renderProminentStatus(screen.x, screen.y);
+    // The glue scene came up in drawBackdrop above: draw the stock login
+    // over it. Without it - no assets yet - the paper card is the screen.
+    const bool glueMode = glueScene_ != nullptr;
+    glueModalUp_ = false;
+    if (!glueMode) renderProminentStatus(screen.x, screen.y);
 
     // Whether a dropdown was down when the frame began. Escape closes one
     // from inside the control, so asking afterwards would find it already
@@ -432,7 +437,11 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
     // that had never been pushed.
     const bool sheetWasOpen = settingsOpen_;
     if (sheetWasOpen) ui_.pushInert();
-    renderCard(authHandler, screen.x, screen.y);
+    if (glueMode) {
+        renderGlueLogin(authHandler, screen.x, screen.y);
+    } else {
+        renderCard(authHandler, screen.x, screen.y);
+    }
     if (sheetWasOpen) ui_.popInert();
 
     if (settingsOpen_) renderLoginSettingsSheet(screen.x, screen.y);
@@ -442,6 +451,8 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
     if (!popupWasOpen && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
         if (settingsOpen_) {
             settingsOpen_ = false;
+        } else if (serverSheetOpen_) {
+            serverSheetOpen_ = false;
         } else {
             ui_.clearFocus();
         }
@@ -451,7 +462,8 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
     // screen opens with nothing focused - deliberately, so a phone does not
     // meet it with the on-screen keyboard already up over the card - and
     // pressing Enter there should do the obvious thing rather than nothing.
-    if (!settingsOpen_ && !authenticating && !ui_.wantsTextInput() &&
+    if (!settingsOpen_ && !serverSheetOpen_ && !glueModalUp_ && !authenticating &&
+        !ui_.wantsTextInput() &&
         (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
          ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false))) {
         attemptAuth(authHandler);
@@ -459,8 +471,9 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
 
     // Build version, bottom-left over the login art, as the retail client
     // does. On the overlay because the art behind it is a photograph and it
-    // needs its own shadow to stay readable over any part of one.
-    {
+    // needs its own shadow to stay readable over any part of one. The glue
+    // login draws its own, in AccountLoginVersion's place.
+    if (!glueMode) {
         ui_.setLayer(PaperLayer::Overlay);
         const float size = ui_.px(kSmallSize);
         const ImVec2 at(ui_.px(14), screen.y - ui_.lineHeight(size) - ui_.px(8));
@@ -1126,6 +1139,300 @@ void AuthScreen::renderCard(auth::AuthHandler& authHandler, float screenW, float
 }
 
 // ---------------------------------------------------------------------------
+// The stock login, over the glue scene
+// ---------------------------------------------------------------------------
+
+void AuthScreen::renderGlueLogin(auth::AuthHandler& authHandler, float screenW, float screenH) {
+    const float u = glue::unit();
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    // Glue positions are written from the bottom edge, as AccountLogin.xml's
+    // anchors are: `fromBottom` is the frame's bottom edge in glue units.
+    const auto bottomRect = [&](float cxOffset, float fromBottom, float w, float h) {
+        const float x0 = screenW * 0.5f + (cxOffset - w * 0.5f) * u;
+        const float y1 = screenH - fromBottom * u;
+        return std::make_pair(ImVec2(x0, y1 - h * u), ImVec2(x0 + w * u, y1));
+    };
+
+    const auto authState = authHandler.getState();
+    const bool waitingForSecurityCode = (authState == auth::AuthState::PIN_REQUIRED ||
+                                         authState == auth::AuthState::AUTHENTICATOR_REQUIRED);
+    auto& packSync = core::Application::getInstance().getWowpackSync();
+    if (packSync.finished() && packSync.takeChanged()) {
+        auto& app = core::Application::getInstance();
+        app.reloadExpansionData();
+        app.rescanAddons();
+    }
+
+    // Glues-BlizzardLogo, 100x100 at BOTTOM(0,8).
+    {
+        const auto [a, b] = bottomRect(0.0f, 8.0f, 100.0f, 100.0f);
+        glue::image(dl, "Interface\\Glues\\Mainmenu\\Glues-BlizzardLogo", a, b);
+    }
+    // AccountLoginVersion: GlueFontNormalSmall at BOTTOMLEFT(0,10), and the
+    // update note beside it when there is one.
+    {
+        const float size = glue::kFontSmall * u;
+        const ImVec2 at(4.0f * u, screenH - 10.0f * u - size);
+        glue::text(dl, at, core::kVersionString, size, glue::kNormal);
+        const core::UpdateCheck& updates = core::Application::getInstance().getUpdateCheck();
+        if (const std::string newer = updates.newerVersion(); !newer.empty()) {
+            const std::string note = "  -  " + newer + " is available";
+            const ImVec2 beside(at.x + glue::textWidth(core::kVersionString, size), at.y);
+            const ImVec2 end(beside.x + glue::textWidth(note.c_str(), size), beside.y + size);
+            const auto st = ui_.press("glue.update", beside, end);
+            glue::text(dl, beside, note.c_str(), size,
+                       st.hovered ? glue::kHighlight : IM_COL32(246, 217, 107, 255));
+            if (st.clicked) core::openExternalUrl(updates.releaseUrl());
+        }
+    }
+
+    // The server sheet: the paper card, over a scrim, with its own way back.
+    if (serverSheetOpen_) {
+        ui_.setLayer(PaperLayer::Overlay);
+        ui_.scrim(0.55f);
+        renderCard(authHandler, screenW, screenH);
+        ui_.setLayer(PaperLayer::Page);
+        const auto [a, b] = bottomRect(0.0f, 20.0f, 150.0f, 38.0f);
+        if (glue::button(ui_, ImGui::GetForegroundDrawList(), "glue.serverdone", a, b, "Done",
+                         glue::ButtonStyle::Blue, true, glue::kFontSmall)) {
+            serverSheetOpen_ = false;
+        }
+        return;
+    }
+
+    bool submit = false;
+    const bool busy = authenticating && !waitingForSecurityCode;
+    // While a dialog is up the form behind it is drawn but deaf, as GlueDialog
+    // is modal over AccountLogin.
+    const bool errorUp = !busy && (statusIsError || statusProminent) &&
+                         !statusMessage.empty() && statusMessage != glueDismissedStatus_;
+    const bool modal = busy || errorUp;
+    glueModalUp_ = modal;
+    if (modal) ui_.pushInert();
+
+    const auto editBox = [&](const char* id, const char* label, float fromBottom, TextEdit& edit,
+                             const PaperUI::FieldOpts& opts) {
+        // 200x37 with the tooltip backdrop; the text sits inside TextInsets
+        // left 12, right 5, bottom 5. The label is GlueFontNormal, centred
+        // nine units above the box.
+        const auto [a, b] = bottomRect(0.0f, fromBottom, 200.0f, 37.0f);
+        glue::tooltipBackdrop(dl, a, b);
+        const float labelSize = glue::kFontNormal * u;
+        glue::textCentered(dl, (a.x + b.x) * 0.5f, a.y - 9.0f * u - labelSize * 0.5f, label,
+                           labelSize, glue::kNormal);
+        const ImVec2 in0(a.x + 12.0f * u, a.y + 2.0f * u);
+        const ImVec2 in1(b.x - 5.0f * u, b.y - 5.0f * u);
+        return ui_.field(id, in0, in1, edit, opts);
+    };
+
+    {
+        PaperUI::FieldOpts opts;
+        opts.glue = true;
+        const PaperUI::FieldResult r = editBox("account", "Account Name", 345.0f, username_, opts);
+        if (r.changed) { statusProminent = false; glueDismissedStatus_.clear(); }
+        if (r.submitted) ui_.focus("password");
+    }
+    {
+        const bool hadPlaceholder = usingStoredHash && password_.text() == PASSWORD_PLACEHOLDER;
+        PaperUI::FieldOpts opts;
+        opts.glue = true;
+        opts.password = true;
+        const PaperUI::FieldResult r = editBox("password", "Password", 275.0f, password_, opts);
+        if (hadPlaceholder && r.focused && !passwordFocused_) password_.selectAll();
+        passwordFocused_ = r.focused;
+        if (r.changed) { statusProminent = false; glueDismissedStatus_.clear(); }
+        if (r.submitted) submit = true;
+    }
+    // AccountLoginTokenEdit: shown when the realm asks for a code, under the
+    // password box.
+    if (waitingForSecurityCode) {
+        PaperUI::FieldOpts opts;
+        opts.glue = true;
+        opts.password = true;
+        opts.digitsOnly = true;
+        const char* label = authState == auth::AuthState::AUTHENTICATOR_REQUIRED
+                                ? "Authenticator Code" : "PIN";
+        const PaperUI::FieldResult r = editBox("pin", label, 275.0f - 37.0f - 15.0f - 37.0f,
+                                               pinCode_, opts);
+        if (r.submitted) submit = true;
+        if (!securityPromptFocused_) {
+            ui_.focus("pin");
+            securityPromptFocused_ = true;
+        }
+    }
+
+    // AccountLoginLoginButton: GlueButtonTemplateBlue, 220x45 at BOTTOM(0,170).
+    {
+        const auto [a, b] = bottomRect(0.0f, waitingForSecurityCode ? 120.0f : 170.0f, 220.0f, 45.0f);
+        const bool syncing = packSync.running() && !packSkipped_;
+        const char* label = waitingForSecurityCode ? "Submit Code" : (syncing ? "Syncing..." : "Login");
+        if (glue::button(ui_, dl, "glue.login", a, b, label, glue::ButtonStyle::Blue, !syncing)) {
+            submit = true;
+        }
+
+        // Anything the player has to know before logging in goes under it,
+        // where SAVE_ACCOUNT_NAME sits in the stock layout.
+        float y = b.y + 6.0f * u;
+        const float small = glue::kFontSmall * u;
+        const float cx = (a.x + b.x) * 0.5f;
+        const pipeline::AssetInventory& inventory =
+            core::Application::getInstance().getAssetInventory();
+        if (const std::string trouble = inventory.troubleText(); !trouble.empty()) {
+            glue::textCentered(dl, cx, y, trouble.c_str(), small, glue::kRed);
+            y += small * 1.4f;
+        }
+        if (const std::string packLine = packStatusLine(packSync); !packLine.empty()) {
+            const bool failed = packSync.state() == core::WowpackSync::State::Failed;
+            glue::textCentered(dl, cx, y, packLine.c_str(), small,
+                               failed ? glue::kRed : glue::kNormal);
+            y += small * 1.4f;
+            if (failed) {
+                const float bw = 120.0f * u, bh = 32.0f * u, gap = 6.0f * u;
+                if (glue::button(ui_, dl, "glue.packretry", ImVec2(cx - bw - gap * 0.5f, y),
+                                 ImVec2(cx - gap * 0.5f, y + bh), "Retry",
+                                 glue::ButtonStyle::Blue, true, glue::kFontSmall)) {
+                    packSkipped_ = false;
+                    startPackSync();
+                }
+                if (glue::button(ui_, dl, "glue.packskip", ImVec2(cx + gap * 0.5f, y),
+                                 ImVec2(cx + bw + gap * 0.5f, y + bh), "Log In Anyway",
+                                 glue::ButtonStyle::Blue, true, glue::kFontSmall)) {
+                    packSkipped_ = true;
+                }
+            }
+        }
+    }
+
+    // The right-hand column, GlueButtonSmallTemplateBlue (150x38): Quit at
+    // BOTTOMRIGHT(-5,29), the realm list's name under it, and Options where
+    // the stock column starts above the gap.
+    {
+        const float w = 150.0f * u, h = 38.0f * u;
+        const float x1 = screenW - 5.0f * u;
+        const float quitY1 = screenH - 29.0f * u;
+        if (glue::button(ui_, dl, "glue.quit", ImVec2(x1 - w, quitY1 - h), ImVec2(x1, quitY1),
+                         "Quit", glue::ButtonStyle::Blue, true, glue::kFontSmall)) {
+            if (auto* window = core::Application::getInstance().getWindow())
+                window->setShouldClose(true);
+        }
+        // AccountLoginRealmName: GlueFontDisableSmall, right-justified under Quit.
+        std::string where = makeServerKey(hostname_.text(), port);
+        if (auto* registry = core::Application::getInstance().getExpansionRegistry())
+            if (const auto* active = registry->getActive()) where += "  " + active->shortName;
+        glue::textRight(dl, x1 - 8.0f * u, quitY1 + 4.0f * u, where.c_str(),
+                        glue::kFontSmall * u, glue::kDisable);
+
+        const float optY1 = quitY1 - h - 80.0f * u;
+        if (glue::button(ui_, dl, "glue.options", ImVec2(x1 - w, optY1 - h), ImVec2(x1, optY1),
+                         "Options", glue::ButtonStyle::Blue, true, glue::kFontSmall)) {
+            settingsOpen_ = true;
+            loginGfxLoaded_ = false;
+            ui_.swallowPress();
+        }
+    }
+
+    // The left-hand column, where Manage Account and Community Site sit at
+    // BOTTOMLEFT(10,135): this client's server settings instead.
+    {
+        const float w = 150.0f * u, h = 38.0f * u;
+        const float x0 = 10.0f * u;
+        float y1 = screenH - 135.0f * u;
+#ifdef WOWEE_HAVE_ASSET_PANEL
+        if (glue::button(ui_, dl, "glue.assets", ImVec2(x0, y1 - h), ImVec2(x0 + w, y1),
+                         "Game Assets", glue::ButtonStyle::Blue, true, glue::kFontSmall)) {
+            core::Application::getInstance().setState(core::AppState::FIRST_RUN);
+        }
+        y1 -= h;
+#endif
+        if (glue::button(ui_, dl, "glue.server", ImVec2(x0, y1 - h), ImVec2(x0 + w, y1),
+                         "Change Server", glue::ButtonStyle::Blue, true, glue::kFontSmall)) {
+            serverSheetOpen_ = true;
+            ui_.swallowPress();
+        }
+    }
+
+    if (modal) ui_.popInert();
+
+    // GlueDialog: "Connecting..." with Cancel while the attempt runs, the
+    // failure with Okay once it has failed.
+    if (modal) {
+        ImDrawList* fg = ImGui::GetForegroundDrawList();
+        const float w = 512.0f * u * 0.75f;
+        const float body = glue::kFontNormal * u;
+        const std::string message =
+            busy ? (statusMessage.empty() ? std::string("Connecting") : statusMessage)
+                 : statusMessage;
+        // Wrapped by hand to the dialog's width, so a long reason stays inside.
+        std::vector<std::string> lines;
+        {
+            std::string line, word;
+            const float maxW = w - 60.0f * u;
+            const auto flushWord = [&]() {
+                if (word.empty()) return;
+                const std::string trial = line.empty() ? word : line + " " + word;
+                if (!line.empty() && glue::textWidth(trial.c_str(), body) > maxW) {
+                    lines.push_back(line);
+                    line = word;
+                } else {
+                    line = trial;
+                }
+                word.clear();
+            };
+            for (char c : message) {
+                if (c == ' ') flushWord(); else word.push_back(c);
+            }
+            flushWord();
+            if (!line.empty()) lines.push_back(line);
+        }
+        const float lineH = body * 1.3f;
+        const float h = 26.0f * u + lineH * static_cast<float>(lines.size()) + 20.0f * u +
+                        40.0f * u + 16.0f * u;
+        const ImVec2 a((screenW - w) * 0.5f, (screenH - h) * 0.5f);
+        const ImVec2 b(a.x + w, a.y + h);
+        fg->AddRectFilled(ImVec2(0, 0), ImVec2(screenW, screenH), IM_COL32(0, 0, 0, 90));
+        glue::dialogBackdrop(fg, a, b);
+        ui_.claimMouse(ImVec2(0, 0), ImVec2(screenW, screenH));
+        float y = a.y + 26.0f * u;
+        for (const std::string& line : lines) {
+            glue::textCentered(fg, (a.x + b.x) * 0.5f, y, line.c_str(), body, glue::kHighlight);
+            y += lineH;
+        }
+        // GlueDialogButtonTemplate: 220x40, sixteen units off the bottom.
+        const float bw = 220.0f * u * 0.75f, bh = 40.0f * u;
+        const ImVec2 ba((a.x + b.x - bw) * 0.5f, b.y - 16.0f * u - bh);
+        const ImVec2 bb(ba.x + bw, ba.y + bh);
+        if (glue::button(ui_, fg, "glue.dialog", ba, bb, busy ? "Cancel" : "Okay",
+                         glue::ButtonStyle::Red, true, glue::kFontNormal) ||
+            (!busy && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+                       ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
+                       ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) {
+            if (busy) {
+                authHandler.disconnect();
+                authenticating = false;
+                setStatus("", false);
+            } else {
+                glueDismissedStatus_ = statusMessage;
+                statusProminent = false;
+            }
+        }
+        // The key that closed the dialog is not also a login.
+        submit = false;
+    }
+
+    if (submit && !authenticating) {
+        glueDismissedStatus_.clear();
+        attemptAuth(authHandler);
+    } else if (submit && waitingForSecurityCode) {
+        const std::string code = trimAscii(pinCode_.text());
+        if (!code.empty()) {
+            authHandler.submitSecurityCode(code);
+            pinCode_.clear();
+            pinAutoSubmitted_ = true;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Background art and login music
 // ---------------------------------------------------------------------------
 
@@ -1327,6 +1634,8 @@ void AuthScreen::stopLoginMusic() {
 }
 
 void AuthScreen::attemptAuth(auth::AuthHandler& authHandler) {
+    // A new attempt: whatever it says, the glue dialog shows it.
+    glueDismissedStatus_.clear();
     {
         auto& packSync = core::Application::getInstance().getWowpackSync();
         if (packSync.running() && !packSkipped_) {

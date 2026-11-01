@@ -523,6 +523,10 @@ void DataRepository::buildCosmicView(int /*expLevel*/) {
 
     cosmicEnabled_ = true;
 
+    // The stock hit areas: worldmapframe.xml's AzerothButton (366x366 at
+    // 593,255) and OutlandButton (320x320 at 115,90), in the 1002x668 detail
+    // frame. Earlier hand-measured boxes are kept described below.
+    //
     // Where each world actually sits on the cosmic art, measured off it rather
     // than rounded to a tenth. These were 0.05 to 0.95 tall, which is the whole
     // sheet: hovering blank parchment at the top of the map highlighted
@@ -531,13 +535,13 @@ void DataRepository::buildCosmicView(int /*expLevel*/) {
     // The bottom edges take in the name banner under each globe, which is part
     // of the thing being pointed at.
     cosmicMaps_.push_back({.mapId = 0, .label = "Azeroth",
-                           .uvLeft = 0.585f, .uvTop = 0.370f,
-                           .uvRight = 0.945f, .uvBottom = 0.875f});
+                           .uvLeft = 0.5918f, .uvTop = 0.3817f,
+                           .uvRight = 0.9571f, .uvBottom = 0.9296f});
 
     if (game::isActiveExpansion("tbc") || game::isActiveExpansion("wotlk")) {
         cosmicMaps_.push_back({.mapId = 530, .label = "Outland",
-                               .uvLeft = 0.115f, .uvTop = 0.070f,
-                               .uvRight = 0.555f, .uvBottom = 0.610f});
+                               .uvLeft = 0.1148f, .uvTop = 0.1347f,
+                               .uvRight = 0.4341f, .uvBottom = 0.6138f});
     }
 
     LOG_INFO("DataRepository: cosmic view built with ", cosmicMaps_.size(), " landmasses");

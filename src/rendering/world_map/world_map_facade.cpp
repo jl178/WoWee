@@ -159,7 +159,6 @@ struct WorldMapFacade::Impl {
     // Where a host frame wants the map drawn, in pixels from the top-left.
     // Lives here rather than on the facade because the drawing does.
     bool  hasFrameRect = false;
-    double lastMapActionTime = -1.0;  ///< ImGui time of the last click or zoom acted on
     float frameRectX = 0.0f, frameRectY = 0.0f;
     float frameRectW = 0.0f, frameRectH = 0.0f;
     std::function<void()> taxiCloseHandler;
@@ -173,6 +172,12 @@ struct WorldMapFacade::Impl {
     /// Build the picture for whatever viewState now says. The Lua map API
     /// moves viewState; without this the image stayed on the last zone drawn.
     void showCurrentView();
+    /// The navigations a click makes, shared by the native input path and the
+    /// Lua map API so both do exactly the same thing. Each marks the view as
+    /// the user's own choice, so the per-frame setMapName does not undo it.
+    void enterWorldRegion(uint32_t regionMapId);
+    void enterCosmicEntry(const std::string& label);
+    void enterZoneFromClick(int zoneIdx);
     void renderImGuiOverlay(const glm::vec3& playerRenderPos,
                             int screenWidth, int screenHeight,
                             float playerYawDeg,
@@ -300,6 +305,63 @@ void WorldMapFacade::Impl::showCurrentView() {
     compositor.loadZoneTextures(idx, data.zones(), mapName);
     if (lvl == ViewLevel::ZONE) compositor.loadOverlayTextures(idx, data.zones());
     compositor.requestComposite(idx);
+}
+
+void WorldMapFacade::Impl::enterZoneFromClick(int hz) {
+    if (hz < 0 || hz >= static_cast<int>(data.zones().size())) return;
+    userMapOverride = true;
+    // The resolver sends a zone stored on another map to that map.
+    auto zoneResult = resolveZoneClick(hz, data.zones(), data.currentMapId());
+    switch (zoneResult.action) {
+        case MapResolveAction::LOAD_MAP:
+            switchToMap(zoneResult.targetMapName);
+            break;
+        case MapResolveAction::ENTER_ZONE:
+            compositor.loadZoneTextures(hz, data.zones(), mapName);
+            compositor.loadOverlayTextures(hz, data.zones());
+            compositor.requestComposite(hz);
+            viewState.enterZone(hz);
+            break;
+        default:
+            break;
+    }
+}
+
+void WorldMapFacade::Impl::enterWorldRegion(uint32_t regionMapId) {
+    userMapOverride = true;
+    auto resolveResult = resolveWorldRegionClick(
+        regionMapId, data.zones(), data.currentMapId(), data.cosmicIdx());
+    switch (resolveResult.action) {
+        case MapResolveAction::NAVIGATE_CONTINENT:
+            // Same map - just switch to the continent view
+            viewState.setContinentIdx(resolveResult.targetZoneIdx);
+            compositor.loadZoneTextures(resolveResult.targetZoneIdx, data.zones(), mapName);
+            compositor.requestComposite(resolveResult.targetZoneIdx);
+            viewState.setCurrentZoneIdx(resolveResult.targetZoneIdx);
+            viewState.setLevel(ViewLevel::CONTINENT);
+            break;
+        case MapResolveAction::LOAD_MAP:
+            switchToMap(resolveResult.targetMapName);
+            break;
+        default:
+            break;
+    }
+}
+
+void WorldMapFacade::Impl::enterCosmicEntry(const std::string& label) {
+    userMapOverride = true;
+    if (label == "Outland") {
+        switchToMap("Expansion01");
+        return;
+    }
+    viewState.enterWorldView();
+    int wIdx = data.worldIdx();
+    if (wIdx >= 0) {
+        compositor.loadZoneTextures(wIdx, data.zones(), mapName);
+        compositor.invalidateComposite();
+        compositor.requestComposite(wIdx);
+        viewState.setCurrentZoneIdx(wIdx);
+    }
 }
 
 void WorldMapFacade::Impl::initOverlayLayers() {
@@ -555,13 +617,13 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
     if (d.taxiMode && inputResult.action != InputAction::CLOSE) {
         inputResult.action = InputAction::NONE;
     }
-    // One click, one action. The native path here and FrameXML's
-    // WorldMapButton (through the Lua map API) both see a click when FrameXML
-    // hosts the map; whichever acts first wins and the other skips that click.
-    if (inputResult.action != InputAction::NONE && inputResult.action != InputAction::CLOSE) {
-        const double now = ImGui::GetTime();
-        if (now - d.lastMapActionTime < 0.25) inputResult.action = InputAction::NONE;
-        else d.lastMapActionTime = now;
+    // One input owner. Hosted in FrameXML's WorldMapFrame, its WorldMapButton
+    // owns every click and zoom through the Lua map API (ProcessMapClick,
+    // SetMapZoom, ZoomOut). Acting here as well raced it: this path fires on
+    // the press and FrameXML on the release, so one click was two
+    // navigations whenever the first changed the level the second read.
+    if (d.hasFrameRect && inputResult.action != InputAction::CLOSE) {
+        inputResult.action = InputAction::NONE;
     }
 
     switch (inputResult.action) {
@@ -571,23 +633,17 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
             return;
 
         case InputAction::ZOOM_IN: {
-            int playerZone = findZoneForPlayer(d.data.zones(), displayPlayerRenderPos, d.playerZoneId);
-            // For continent→zone, verify the zone belongs to the current continent
-            int candidateZone = hoveredZone >= 0 ? hoveredZone : playerZone;
+            // The zone under the cursor or nothing. Falling back to the
+            // player's zone made a zoom over open sea (or a stale hover) open
+            // wherever the player stands instead of what was pointed at.
+            int candidateZone = hoveredZone;
             if (d.viewState.currentLevel() == ViewLevel::CONTINENT &&
                 candidateZone >= 0 &&
                 !zoneBelongsToContinent(d.data.zones(), candidateZone, d.viewState.continentIdx())) {
                 candidateZone = -1;
             }
-            // Bug fix: also validate playerZone against the continent so the
-            // fallback inside zoomIn() doesn't navigate to the wrong continent.
-            int validPlayerZone = playerZone;
-            if (d.viewState.currentLevel() == ViewLevel::CONTINENT &&
-                validPlayerZone >= 0 &&
-                !zoneBelongsToContinent(d.data.zones(), validPlayerZone, d.viewState.continentIdx())) {
-                validPlayerZone = -1;
-            }
-            auto zr = d.viewState.zoomIn(candidateZone, validPlayerZone);
+            auto zr = d.viewState.zoomIn(candidateZone, /*playerZoneIdx=*/-1);
+            if (zr.changed) d.userMapOverride = true;
             if (zr.changed && zr.targetIdx >= 0) {
                 d.compositor.loadZoneTextures(zr.targetIdx, d.data.zones(), d.mapName);
                 if (zr.newLevel == ViewLevel::ZONE) {
@@ -602,6 +658,7 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
 
         case InputAction::ZOOM_OUT: {
             auto zr = d.viewState.zoomOut();
+            if (zr.changed) d.userMapOverride = true;
             if (zr.changed && zr.targetIdx >= 0) {
                 d.compositor.loadZoneTextures(zr.targetIdx, d.data.zones(), d.mapName);
                 d.compositor.requestComposite(zr.targetIdx);
@@ -618,28 +675,12 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
         }
 
         case InputAction::CLICK_ZONE: {
-            int hz = inputResult.targetIdx;
-            if (hz >= 0) {
-                // Use centralized resolver to handle cross-map zone navigation
-                auto zoneResult = resolveZoneClick(hz, d.data.zones(), d.data.currentMapId());
-                switch (zoneResult.action) {
-                    case MapResolveAction::LOAD_MAP:
-                        d.switchToMap(zoneResult.targetMapName);
-                        break;
-                    case MapResolveAction::ENTER_ZONE:
-                        d.compositor.loadZoneTextures(hz, d.data.zones(), d.mapName);
-                        d.compositor.loadOverlayTextures(hz, d.data.zones());
-                        d.compositor.requestComposite(hz);
-                        d.viewState.enterZone(hz);
-                        break;
-                    default:
-                        break;
-                }
-            }
+            if (inputResult.targetIdx >= 0) d.enterZoneFromClick(inputResult.targetIdx);
             break;
         }
 
         case InputAction::RIGHT_CLICK_BACK: {
+            d.userMapOverride = true;
             // Only process right-click if we're at zone or continent level
             if (d.viewState.currentLevel() == ViewLevel::ZONE &&
                 d.viewState.continentIdx() >= 0) {
@@ -720,8 +761,11 @@ int WorldMapFacade::zoneAtMapPoint(float u, float v) const {
     // interface names whatever comes back, so hovering a globe labelled it
     // Hillsbrad Foothills, and clicking went through the same lookup and zoomed
     // into a zone nobody had pointed at.
+    //
+    // Not a zone map either: there the point is on the zone's own art, and
+    // projecting it through the continent's bounds names some unrelated zone.
     const ViewLevel level = d.viewState.currentLevel();
-    if (level != ViewLevel::CONTINENT && level != ViewLevel::ZONE) return -1;
+    if (level != ViewLevel::CONTINENT) return -1;
 
     const int continentIdx = d.viewState.continentIdx();
     if (continentIdx < 0) return -1;
@@ -772,20 +816,86 @@ std::string WorldMapFacade::zoneNameAtMapPoint(float u, float v) const {
     return zones[static_cast<size_t>(idx)].areaName;
 }
 
+bool WorldMapFacade::highlightAtMapPoint(float u, float v, MapHighlight& out) {
+    auto& d = *impl_;
+    const int idx = zoneAtMapPoint(u, v);   // continent view only
+    if (idx < 0) return false;
+    const auto& zones = d.data.zones();
+    const Zone& z = zones[static_cast<size_t>(idx)];
+    out = MapHighlight{};
+    out.name = zoneNameAtMapPoint(u, v);
+    if (!d.zoneHighlightLayer || z.areaName.empty()) return !out.name.empty();
+
+    // The zone's rectangle on the continent, through the same bounds the
+    // native highlight layer projects with.
+    bool isContinent = false;
+    const ZoneBounds cb = projectionBoundsFor(zones, d.viewState.continentIdx(), isContinent);
+    const float du = cb.locLeft - cb.locRight;
+    const float dv = cb.locTop - cb.locBottom;
+    if (std::abs(du) < 0.001f || std::abs(dv) < 0.001f) return !out.name.empty();
+    const float zu0 = std::clamp((cb.locLeft - z.bounds.locLeft) / du, 0.0f, 1.0f);
+    const float zu1 = std::clamp((cb.locLeft - z.bounds.locRight) / du, 0.0f, 1.0f);
+    const float zv0 = std::clamp((cb.locTop - z.bounds.locTop) / dv, 0.0f, 1.0f);
+    const float zv1 = std::clamp((cb.locTop - z.bounds.locBottom) / dv, 0.0f, 1.0f);
+    if (zu1 - zu0 < 0.001f || zv1 - zv0 < 0.001f) return !out.name.empty();
+
+    if (!d.zoneHighlightLayer->getHighlightTexture(z.areaName)) return !out.name.empty();
+    int texW = 0, texH = 0, cx0 = 0, cy0 = 0, cx1 = 0, cy1 = 0;
+    if (!d.zoneHighlightLayer->getHighlightExtent(z.areaName, texW, texH, cx0, cy0, cx1, cy1))
+        return !out.name.empty();
+
+    out.fileName = z.areaName;
+    // The zone fills the top-left of its power-of-two texture at one texel
+    // per map pixel; the interface crops with SetTexCoord(0, x, 0, y).
+    out.texPercentageX = std::min(1.0f, (zu1 - zu0) * 1002.0f / static_cast<float>(texW));
+    out.texPercentageY = std::min(1.0f, (zv1 - zv0) * 668.0f / static_cast<float>(texH));
+    out.textureX = zu1 - zu0;
+    out.textureY = zv1 - zv0;
+    out.scrollChildX = zu0;
+    out.scrollChildY = zv0;
+    return true;
+}
+
 bool WorldMapFacade::clickMapPoint(float u, float v) {
+    // ProcessMapClick: what a left click on the map does at every level, as
+    // the native input path does it when the map is not hosted.
+    auto& d = *impl_;
+    if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) return false;
+    const ViewLevel level = d.viewState.currentLevel();
+    auto inside = [u, v](const CosmicMapEntry& e) {
+        return u >= e.uvLeft && u <= e.uvRight && v >= e.uvTop && v <= e.uvBottom;
+    };
+    if (level == ViewLevel::WORLD) {
+        for (const auto& region : d.data.azerothRegions()) {
+            if (!inside(region)) continue;
+            d.enterWorldRegion(region.mapId);
+            return true;
+        }
+        return false;
+    }
+    if (level == ViewLevel::COSMIC) {
+        // Stock does this with OutlandButton/AzerothButton, which FrameXML
+        // only shows when GetCurrentMapContinent answers -1; this client
+        // answers 0 there, so the click reaches WorldMapButton instead.
+        for (const auto& entry : d.data.cosmicMaps()) {
+            if (!inside(entry)) continue;
+            d.enterCosmicEntry(entry.label);
+            return true;
+        }
+        return false;
+    }
     const int idx = zoneAtMapPoint(u, v);
     if (idx < 0) return false;
-    if (ImGui::GetTime() - impl_->lastMapActionTime < 0.25) return true;  // already handled natively
-    impl_->lastMapActionTime = ImGui::GetTime();
-    impl_->viewState.zoomIn(idx, /*playerZoneIdx=*/-1);
-    impl_->showCurrentView();
+    d.enterZoneFromClick(idx);
     return true;
 }
 
 void WorldMapFacade::zoomOutOneLevel() {
-    if (ImGui::GetTime() - impl_->lastMapActionTime < 0.25) return;  // already handled natively
-    impl_->lastMapActionTime = ImGui::GetTime();
-    if (impl_->viewState.zoomOut().changed) impl_->showCurrentView();
+    auto& d = *impl_;
+    const auto zr = d.viewState.zoomOut();
+    if (!zr.changed) return;
+    if (zr.newLevel == ViewLevel::WORLD) { d.switchToWorldView(); return; }
+    d.showCurrentView();
 }
 
 std::string WorldMapFacade::currentMapFolder() const {
@@ -1217,17 +1327,31 @@ void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
                     // Map region mapId to the highlight texture folder name
                     std::string regionFolder = mapIdToFolder(region.mapId);
 
-                    // Draw highlight texture covering the full map area
                     // The shipped glow is the highlight where there is one.
                     // Drawn under a box as well, the box is a second highlight
                     // in a shape the art does not agree with.
+                    //
+                    // At texel scale - one texel to one pixel of the 1002x668
+                    // map, the convention every other map highlight follows -
+                    // so the art keeps its shape. It was stretched over the
+                    // whole map, which made a square texture an oval that lay
+                    // across the neighbouring continents. Placed with the
+                    // glowing part of the texture centred on the region.
                     ImTextureID hlTex = (zoneHighlightLayer && !regionFolder.empty())
                         ? zoneHighlightLayer->getHighlightTexture(regionFolder)
                         : ImTextureID(0);
-                    if (hlTex) {
+                    int texW = 0, texH = 0, cx0 = 0, cy0 = 0, cx1 = 0, cy1 = 0;
+                    if (hlTex && zoneHighlightLayer->getHighlightExtent(
+                                     regionFolder, texW, texH, cx0, cy0, cx1, cy1)) {
+                        const float pxX = displayW / 1002.0f;   // screen px per map px
+                        const float pxY = displayH / 668.0f;
+                        const float contentCx = 0.5f * (cx0 + cx1 + 1) * pxX;
+                        const float contentCy = 0.5f * (cy0 + cy1 + 1) * pxY;
+                        const float hx0 = 0.5f * (rx0 + rx1) - contentCx;
+                        const float hy0 = 0.5f * (ry0 + ry1) - contentCy;
                         drawList->AddImage(hlTex,
-                            ImVec2(imgMin.x, imgMin.y),
-                            ImVec2(imgMin.x + displayW, imgMin.y + displayH),
+                            ImVec2(hx0, hy0),
+                            ImVec2(hx0 + texW * pxX, hy0 + texH * pxY),
                             ImVec2(0, 0), ImVec2(1, 1),
                             IM_COL32(255, 255, 255, 180));
                     } else {
@@ -1250,25 +1374,9 @@ void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
                                           IM_COL32(255, 230, 100, 255), region.label.c_str());
                     }
 
-                    if (io.MouseClicked[0]) {
-                        // Use centralized map resolver to determine navigation action
-                        auto resolveResult = resolveWorldRegionClick(
-                            region.mapId, data.zones(), data.currentMapId(), data.cosmicIdx());
-                        switch (resolveResult.action) {
-                            case MapResolveAction::NAVIGATE_CONTINENT:
-                                // Same map - just switch to the continent view
-                                viewState.setContinentIdx(resolveResult.targetZoneIdx);
-                                compositor.loadZoneTextures(resolveResult.targetZoneIdx, data.zones(), mapName);
-                                compositor.requestComposite(resolveResult.targetZoneIdx);
-                                viewState.setCurrentZoneIdx(resolveResult.targetZoneIdx);
-                                viewState.setLevel(ViewLevel::CONTINENT);
-                                break;
-                            case MapResolveAction::LOAD_MAP:
-                                switchToMap(resolveResult.targetMapName);
-                                break;
-                            default:
-                                break;
-                        }
+                    // Hosted, WorldMapButton owns the click (ProcessMapClick).
+                    if (!hasFrameRect && io.MouseClicked[0]) {
+                        enterWorldRegion(region.mapId);
                         break;
                     }
                 }
@@ -1284,6 +1392,7 @@ void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
                 if (rawName == "Azeroth") rawName = mapDisplayName(0);
                 std::string label = rawName + "##" + std::to_string(ci);
                 if (ImGui::Button(label.c_str())) {
+                    userMapOverride = true;
                     viewState.setContinentIdx(ci);
                     compositor.loadZoneTextures(ci, data.zones(), mapName);
                     compositor.requestComposite(ci);
@@ -1303,6 +1412,7 @@ void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.3f, 0.1f, 0.9f));
             ImGui::PushStyleColor(ImGuiCol_Text, ui::colors::kBrightGold);
             if (ImGui::Button("< Back")) {
+                userMapOverride = true;
                 compositor.loadZoneTextures(viewState.continentIdx(), data.zones(), mapName);
                 compositor.requestComposite(viewState.continentIdx());
                 viewState.setCurrentZoneIdx(viewState.continentIdx());
@@ -1401,52 +1511,22 @@ void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
                     std::string cosmicKey = "cosmic-" + cosmicLabel;
                     std::string cosmicPath = "Interface\\WorldMap\\Cosmic\\cosmic-" + cosmicLabel + "-highlight.blp";
 
-                    // ─── Cosmic Highlight Rendering Logic ───────────────────
-                    //
-                    // SOURCE TEXTURES:
-                    //   cosmic-azeroth-highlight.blp  → 512×512 px (DXT3, has alpha)
-                    //   cosmic-outland-highlight.blp  → 512×512 px (DXT3, has alpha)
-                    //   The glow is baked into the alpha channel:
-                    //     - Azeroth highlight: glow sits in the RIGHT-CENTER of the texture
-                    //     - Outland highlight: glow sits in the LEFT-CENTER of the texture
-                    //
-                    // DISPLAY AREA:
-                    //   The map on screen is displayW × displayH pixels.
-                    //   displayW/displayH ≈ 1002/668 ≈ 1.5:1 (wider than tall).
-                    //   imgMin = top-left corner,  imgMax = bottom-right corner.
-                    //
-                    // THE PROBLEM:
-                    //   512×512 is square, but the display area is 1.5× wider than tall.
-                    //   If we stretch the texture to fill the full display area
-                    //   (imgMin → imgMax), the circular glow becomes an ellipse
-                    //   (horizontally stretched ~50%).
-                    //   If we render it as a square (side = displayH), it has the
-                    //   correct aspect but only covers 2/3 of the map width.
-                    //
-                    // CURRENT APPROACH:
-                    //   Render as a square (side = displayH), anchored:
-                    //     Azeroth → flush to the RIGHT edge of the map (glow lands bottom-right)
-                    //     Outland → flush to the LEFT edge of the map  (glow lands top-left)
-                    //   This preserves the 1:1 aspect ratio of the glow shape.
-                    //
-                    // TO ADJUST:
-                    //   • Make glow wider:  increase hlW (e.g. displayH * 1.2f)
-                    //   • Make glow taller: increase hlH (e.g. displayH * 1.1f)
-                    //   • Full stretch (like WoW original): hlW = displayW, hlH = displayH
-                    //   • Shift glow position: adjust hlX offset
-                    //
-                    // Render highlight as a square (side = displayH) to preserve
-                    // the 1:1 aspect of the 512×512 glow textures at any resolution.
-                    float hlW = displayH;
-                    float hlH = displayH;
-                    float hlX, hlY;
-                    if (cosmicLabel == "azeroth") {
-                        hlX = imgMax.x - hlW;   // flush right (glow sits in right-center of texture)
-                        hlY = imgMin.y;          // flush top
-                    } else {
-                        hlX = imgMin.x;          // flush left (glow sits in left-center of texture)
-                        hlY = imgMin.y;          // flush top
-                    }
+                    // Where stock puts it: worldmapframe.xml's AzerothButton and
+                    // OutlandButton HighlightTextures, in 1002x668 detail-frame
+                    // units. Outland: 856x605 centred at (451,337). Azeroth:
+                    // 898x647 centred at (552,334). Stretched non-uniformly,
+                    // as the art is drawn for. The square this replaced was a
+                    // guess pinned to one map edge, so the glow sat off the
+                    // globe it was meant to ring.
+                    const bool az = (cosmicLabel == "azeroth");
+                    const float u0 = az ? 0.1028f : 0.0230f;
+                    const float v0 = az ? 0.0157f : 0.0516f;
+                    const float u1 = az ? 0.9990f : 0.8772f;
+                    const float v1 = az ? 0.9843f : 0.9573f;
+                    const float hlX = imgMin.x + u0 * displayW;
+                    const float hlY = imgMin.y + v0 * displayH;
+                    const float hlW = (u1 - u0) * displayW;
+                    const float hlH = (v1 - v0) * displayH;
 
                     // The glow the game ships is the highlight. A box drawn
                     // over it as well is a second, squarer highlight that the
@@ -1482,19 +1562,9 @@ void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
                     drawList->AddText(ImVec2(lx, ly),
                                       IM_COL32(255, 230, 100, 255), entry.label.c_str());
 
-                    if (io.MouseClicked[0]) {
-                        if (entry.label == "Outland") {
-                            switchToMap("Expansion01");
-                        } else {
-                            viewState.enterWorldView();
-                            int wIdx = data.worldIdx();
-                            if (wIdx >= 0) {
-                                compositor.loadZoneTextures(wIdx, data.zones(), mapName);
-                                compositor.invalidateComposite();
-                                compositor.requestComposite(wIdx);
-                                viewState.setCurrentZoneIdx(wIdx);
-                            }
-                        }
+                    // Hosted, WorldMapButton owns the click (ProcessMapClick).
+                    if (!hasFrameRect && io.MouseClicked[0]) {
+                        enterCosmicEntry(entry.label);
                         break;
                     }
                 }
@@ -1601,8 +1671,28 @@ std::vector<std::string> WorldMapFacade::zoneNames(int continentIndex) const {
 
 bool WorldMapFacade::showMap(int continentIndex, int zoneIndex) {
     // Continent zero is the world, which is what the zoom-out button asks for
-    // from a continent.
-    if (continentIndex <= 0) {
+    // from a continent. Minus one is WORLDMAP_COSMIC_ID, which the same button
+    // asks for from the world and from Outland; answering it with the world
+    // meant the cosmic map could never be reached from FrameXML.
+    if (continentIndex < 0) {
+        auto& d = *impl_;
+        if (!d.viewState.cosmicEnabled()) {
+            d.viewState.enterWorldView();
+            d.showCurrentView();
+            return true;
+        }
+        // The cosmic sheet is part of the Azeroth data set.
+        if (d.mapName != "Azeroth") d.switchToWorldView();
+        d.userMapOverride = true;
+        d.viewState.enterCosmicView();
+        if (d.data.cosmicIdx() >= 0) {
+            d.compositor.loadZoneTextures(d.data.cosmicIdx(), d.data.zones(), d.mapName);
+            d.compositor.requestComposite(d.data.cosmicIdx());
+            d.viewState.setCurrentZoneIdx(d.data.cosmicIdx());
+        }
+        return true;
+    }
+    if (continentIndex == 0) {
         impl_->viewState.enterWorldView();
         impl_->showCurrentView();
         return true;

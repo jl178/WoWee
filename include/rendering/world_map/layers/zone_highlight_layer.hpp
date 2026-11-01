@@ -30,6 +30,12 @@ public:
     ImTextureID getHighlightTexture(const std::string& key,
                                      const std::string& customPath = "");
 
+    /// Size of a loaded highlight in texels, and the box (in texels) holding
+    /// the texels that actually glow. False if it is not loaded.
+    bool getHighlightExtent(const std::string& key, int& texW, int& texH,
+                            int& contentX0, int& contentY0,
+                            int& contentX1, int& contentY1) const;
+
 private:
     /// Load the highlight BLP and register it with ImGui.
     void ensureHighlight(const std::string& key, const std::string& customPath);
@@ -41,6 +47,9 @@ private:
     struct HighlightEntry {
         std::unique_ptr<VkTexture> texture;
         VkDescriptorSet imguiDS = VK_NULL_HANDLE;  // ImGui texture ID
+        int width = 0, height = 0;
+        // Bounding box of the visible (glowing) texels, inclusive.
+        int contentX0 = 0, contentY0 = 0, contentX1 = 0, contentY1 = 0;
     };
     std::unordered_map<std::string, HighlightEntry> highlights_;
     std::unordered_set<std::string> missingHighlights_;  // areas with no highlight file

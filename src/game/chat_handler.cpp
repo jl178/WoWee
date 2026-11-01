@@ -766,10 +766,8 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
         if (!bubble && (data.type == ChatType::PARTY || data.type == ChatType::RAID)) {
             bubble = addons::storedCVarValue("chatBubblesParty", "0") != "0";
         }
-        if (bubble) {
-            bool isYell = (data.type == ChatType::YELL || data.type == ChatType::MONSTER_YELL);
-            owner_.chatBubbleCallbackRef()(data.senderGuid, data.message, isYell);
-        }
+        if (bubble) owner_.chatBubbleCallbackRef()(data.senderGuid, data.message,
+                                                   static_cast<uint8_t>(data.type));
     }
 
     // Log the message

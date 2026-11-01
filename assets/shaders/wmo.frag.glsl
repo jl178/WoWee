@@ -32,7 +32,7 @@ layout(set = 1, binding = 1) uniform WMOMaterial {
     int unlit;
     int isInterior;
     float specularIntensity;
-    int isWindow;
+    int reserved0;
     int enableNormalMap;
     int enablePOM;
     float pomScale;
@@ -45,7 +45,7 @@ layout(set = 1, binding = 1) uniform WMOMaterial {
     float wmoAmbientB;
     int emissive;
     int hasVertexColors;
-    int padding1;
+    uint sidnColor;   // F_SIDN night glow, 0x00RRGGBB; 0 = none
     int padding2;
 };
 
@@ -328,26 +328,41 @@ void main() {
         // Lava is self-luminous - bright emissive, no shadows
         result = texColor.rgb * 1.5;
     } else if (isInterior != 0) {
-        // WMO interior: vertex colors (MOCV) are pre-baked lighting from the artist.
-        // The MOHD ambient color floors the vertex colors so dark spots don't go
-        // completely black.  Full shadow strength is applied but clamped so
-        // interiors never go darker than a minimum brightness.
-        // The floor is the map's own MOHD ambient, which is what the artists
-        // set as the darkest an interior gets. It used to be raised to 0.35
-        // regardless, which lifted every dark corner in every building to
-        // the same grey. A small safety floor stays for the few roots that
-        // carry no ambient at all.
+        // WMO interior. The renderer has already run the client's
+        // FixColorVertexAlpha over the vertex colours (interiorVertexLight in
+        // wmo_renderer.cpp): rgb is the baked light at half scale, rebased off
+        // the MOHD ambient, and alpha is how much of the outdoors reaches the
+        // vertex - 0 in the room, rising across the trans batches at an
+        // opening, 1 on the exterior batches.
+        //
+        // Indoors the light is the ambient plus the baked colour doubled,
+        // which is the MOCV as authored. The sun's shadow map is not applied
+        // to it: the roof always shadows the room. A small floor stays for the
+        // roots that carry no ambient at all (Darnassus is one).
         vec3 wmoAmbient = vec3(wmoAmbientR, wmoAmbientG, wmoAmbientB);
-        wmoAmbient = max(wmoAmbient, vec3(0.12));
-        // MOCV is authored at half intensity (0x7F = fully lit; the stock
-        // client modulates 2x). The sun cannot reach an INDOOR group, so its
-        // shadow map is not applied here: it used to darken every interior to
-        // about 45% because the roof always shadows the room.
-        vec3 interiorLight = clamp(max(VertColor.rgb * 2.0, wmoAmbient), vec3(0.0), vec3(1.25));
-        result = texColor.rgb * interiorLight;
+        vec3 baked = VertColor.rgb * 2.0;
+        vec3 interiorLight = max(wmoAmbient + baked, vec3(0.12));
+        vec3 light = interiorLight;
+        // Toward an opening the room's light gives way to the outdoor light,
+        // sun and shadow included, the way an exterior group is lit. The baked
+        // colour has already been faded by the same alpha, so it goes to
+        // nothing where the opening does.
+        float outdoors = clamp(VertColor.a, 0.0, 1.0);
+        if (outdoors > 0.0) {
+            vec3 ldir = normalize(-lightDir.xyz);
+            float diff = max(dot(norm, ldir), 0.0);
+            vec3 exteriorLight = rtAmbient(rt, ambientColor.rgb)
+                               + shadow * diff * lightColor.rgb + baked;
+            light = mix(interiorLight, exteriorLight, outdoors);
+        }
+        result = texColor.rgb * light;
     } else if (unlit != 0) {
-        // Outdoor unlit surface - still receives directional shadows
-        result = texColor.rgb * shadow;
+        // F_UNLIT: the client does no lighting on these, so they are drawn
+        // at the texture's own brightness, in sun or shade. Darnassus'
+        // glowing amber screens (MM_DRNSS_SCREEN_01) on the sides of its
+        // houses are unlit, and they stand under the canopy's shadow: taking
+        // the shadow made them black squares.
+        result = texColor.rgb;
     } else {
         vec3 ldir = normalize(-lightDir.xyz);
         float diff = max(dot(norm, ldir), 0.0);
@@ -373,45 +388,31 @@ void main() {
         if (hasVertexColors != 0) result += texColor.rgb * VertColor.rgb * 0.5;
     }
 
-    if (isWindow == 0 && isLava == 0)
+    // F_SIDN: windows and lamps glow at night in the material's sidnColor,
+    // added to whatever light the surface already has. The client fades it
+    // in by the time of day; that is not in this shader's inputs, so how dark
+    // the outdoor light is stands in for it, as the clock face's fire does
+    // above. An unlit material is at full brightness already.
+    if (sidnColor != 0u && unlit == 0 && emissive == 0 && isLava == 0) {
+        vec3 sidn = vec3(float((sidnColor >> 16) & 0xFFu),
+                         float((sidnColor >> 8) & 0xFFu),
+                         float(sidnColor & 0xFFu)) / 255.0;
+        float daylight = clamp(dot(ambientColor.rgb + lightColor.rgb,
+                                   vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
+        float night = 1.0 - smoothstep(0.25, 0.65, daylight);
+        result += texColor.rgb * sidn * night;
+    }
+
+    if (isLava == 0)
         result += localLightContribution(FragPos, norm, texColor.rgb);
 
     float dist = length(viewPos.xyz - FragPos);
     result = applyFog(result, FragPos, dist);
 
+    // Opaque and alpha-key materials write their texture's alpha unused;
+    // blended ones (blend mode 2 and up) are drawn by the transparent
+    // pipeline with it.
     float alpha = texColor.a;
-
-    // Window glass: opaque but simulates dark tinted glass with reflections.
-    if (isWindow != 0) {
-        vec3 viewDir = normalize(viewPos.xyz - FragPos);
-        float NdotV = abs(dot(norm, viewDir));
-        float fresnel = 0.08 + 0.92 * pow(1.0 - NdotV, 4.0);
-
-        vec3 ldir = normalize(-lightDir.xyz);
-        vec3 reflectDir = reflect(-viewDir, norm);
-        float sunGlint = pow(max(dot(reflectDir, ldir), 0.0), 32.0);
-
-        float baseBrightness = mix(0.3, 0.9, sunGlint);
-        vec3 glass = result * baseBrightness;
-
-        vec3 reflectTint = mix(ambientColor.rgb * 1.2, vec3(0.6, 0.75, 1.0), 0.6);
-        glass = mix(glass, reflectTint, fresnel * 0.8);
-
-        vec3 halfDir = normalize(ldir + viewDir);
-        float spec = pow(max(dot(norm, halfDir), 0.0), 256.0);
-        glass += spec * lightColor.rgb * 0.8;
-
-        float specBroad = pow(max(dot(norm, halfDir), 0.0), 12.0);
-        glass += specBroad * lightColor.rgb * 0.12;
-
-        result = glass;
-        if (isWindow == 2) {
-            // Instance/dungeon glass: mostly transparent to see through
-            alpha = mix(0.12, 0.35, fresnel);
-        } else {
-            alpha = mix(0.4, 0.95, NdotV);
-        }
-    }
 
     outColor = vec4(result, alpha);
 }

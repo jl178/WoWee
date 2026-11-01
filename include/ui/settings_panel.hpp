@@ -273,6 +273,13 @@ public:
     bool frameCapApplied_ = false;         // True once the saved frame limit reached the window
     bool waterRefractionApplied_ = false;
     bool normalMapSettingsApplied_ = false;  // True once saved normal map/POM settings applied
+    /// The doodad renderer and terrain manager last given the world-detail
+    /// settings. Both are made when a world loads, after the settings were
+    /// first applied, and made again after a logout - so a latch that fires
+    /// once left clutter distance, particle and object detail and the
+    /// clutter density at their built-in values for the session.
+    const void* worldDetailM2Target_ = nullptr;
+    const void* worldDetailTerrainTarget_ = nullptr;
 
     // ---- Mute state: mute bypasses master volume without touching slider values ----
     bool soundMuted_ = false;

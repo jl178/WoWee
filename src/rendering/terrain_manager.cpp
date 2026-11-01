@@ -33,6 +33,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <unordered_set>
 
 #ifdef __linux__
@@ -656,6 +657,10 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
 
     // Procedural ground clutter from terrain layer effectId -> GroundEffectTexture/Doodad DBCs.
     ensureGroundEffectTablesLoaded();
+    // Stamped before placing: a density change that lands while this runs
+    // leaves the tile one generation behind, and it is placed again once
+    // loaded rather than keeping the old density.
+    pending->clutterGeneration = clutterDensityGeneration_.load();
     generateGroundClutterPlacements(pending, preparedModelIds);
 
     if (!workerRunning.load()) return nullptr;
@@ -1321,6 +1326,9 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
         tile->wmoUniqueIds = std::move(ft.tileWmoUniqueIds);
         tile->doodadUniqueIds = std::move(ft.tileUniqueIds);
         tile->clutterPlacements = std::move(pending->clutterPlacements);
+        tile->clutterChunkStart = pending->clutterChunkStart;
+        tile->clutterChunkBounds = pending->clutterChunkBounds;
+        tile->clutterGeneration = pending->clutterGeneration;
         getTileBounds(coord, tile->minX, tile->minY, tile->maxX, tile->maxY);
         loadedTiles[coord] = std::move(tile);
         // NOTE: Don't cache pending here - std::move above empties terrain/mesh,
@@ -1601,40 +1609,177 @@ std::shared_ptr<PendingTile> TerrainManager::getCachedTile(const TileCoord& coor
 void TerrainManager::streamGroundClutter(const glm::vec3& cameraPos) {
     if (!m2Renderer) return;
     // Clutter draws out to the clutter distance setting and no further, so
-    // a tile further away than that holds instances nothing can see. With
-    // 880 pieces a tile and a view distance of several tiles that was the
-    // bulk of every instance the renderer walked each frame. Tiles inside
-    // the range get their instances; tiles that leave it, with some slack
-    // so a player pacing a boundary does not churn, give them back.
+    // a chunk further away than that holds instances nothing can see. Chunks
+    // that come inside the range get their instances, close ones first; chunks
+    // that leave it, with slack so a player pacing a boundary does not churn,
+    // are retired and given back in batches.
+    //
+    // Per chunk, not per tile. A tile is 533 yards across, so instancing every
+    // tile that came within range instanced up to four tiles' worth of grass
+    // round a corner for a disc 280 yards wide - several times what any frame
+    // could draw, and every one of them walked by the cull upload, the
+    // animation pass and the shadow caster scan each frame.
+    //
+    // Retired chunks are batched because removing instances rebuilds the
+    // renderer's whole spatial index - every doodad in the world, not just the
+    // grass - and doing that for each chunk crossing the edge was a hitch every
+    // few yards. Out of range they cost a distance test and nothing else.
     const float clutterDistance = m2Renderer->groundDetailDistance();
-    const float nearEdge = (clutterDistance > 0.0f ? clutterDistance : 140.0f) + 20.0f;
-    const float farEdge = nearEdge + 80.0f;
-    constexpr size_t kInstancesPerFrame = 160;
+    const float drawDistance = clutterDistance > 0.0f ? clutterDistance : 140.0f;
+    const float nearEdge = drawDistance + 8.0f;
+    const float farEdge = drawDistance + 48.0f;
+    constexpr size_t kInstancesPerFrame = 256;
+    constexpr size_t kRetiredBatch = 3072;
     size_t created = 0;
-    for (auto& [coord, tile] : loadedTiles) {
-        (void)coord;
-        if (!tile || tile->clutterPlacements.empty()) continue;
-        const float dx = std::max({tile->minX - cameraPos.x, 0.0f, cameraPos.x - tile->maxX});
-        const float dy = std::max({tile->minY - cameraPos.y, 0.0f, cameraPos.y - tile->maxY});
-        const float distance = std::sqrt(dx * dx + dy * dy);
-        const bool populated = !tile->clutterInstanceIds.empty() || tile->clutterNextIndex > 0;
-        if (populated && distance > farEdge) {
-            m2Renderer->removeInstances(tile->clutterInstanceIds);
-            tile->clutterInstanceIds.clear();
-            tile->clutterNextIndex = 0;
-            continue;
-        }
-        if (distance > nearEdge || tile->clutterNextIndex >= tile->clutterPlacements.size()) continue;
-        while (tile->clutterNextIndex < tile->clutterPlacements.size() && created < kInstancesPerFrame) {
-            const auto& p = tile->clutterPlacements[tile->clutterNextIndex++];
-            if (!m2Renderer->hasModel(p.modelId)) continue;
-            if (const uint32_t id = m2Renderer->createInstance(p.modelId, p.position, p.rotation, p.scale)) {
-                tile->clutterInstanceIds.push_back(id);
-                ++created;
+    auto tileDistance = [&cameraPos](const TerrainTile& t) {
+        const float dx = std::max({t.minX - cameraPos.x, 0.0f, cameraPos.x - t.maxX});
+        const float dy = std::max({t.minY - cameraPos.y, 0.0f, cameraPos.y - t.maxY});
+        return std::sqrt(dx * dx + dy * dy);
+    };
+
+    // The density changed since some tiles were placed. Once it has held
+    // still for a moment, re-place the nearest stale tile in clutter range -
+    // one a frame, as placing costs a few milliseconds. Stale tiles further
+    // out hold no instances and are re-placed when they come into range.
+    const uint32_t generation = clutterDensityGeneration_.load();
+    const bool densitySettled =
+        std::chrono::steady_clock::now() - clutterDensityChangedAt_ > std::chrono::milliseconds(300);
+    if (densitySettled && !taxiStreamingMode_) {
+        TerrainTile* stalest = nullptr;
+        float nearest = farEdge;
+        for (auto& [coord, tile] : loadedTiles) {
+            (void)coord;
+            if (!tile || tile->clutterGeneration == generation) continue;
+            const float distance = tileDistance(*tile);
+            if (distance <= nearest) {
+                nearest = distance;
+                stalest = tile.get();
             }
         }
-        if (created >= kInstancesPerFrame) break;
+        if (stalest) regenerateTileClutter(*stalest);
     }
+
+    auto chunkDistance = [&cameraPos](const glm::vec4& b) {
+        const float dx = std::max({b.x - cameraPos.x, 0.0f, cameraPos.x - b.z});
+        const float dy = std::max({b.y - cameraPos.y, 0.0f, cameraPos.y - b.w});
+        return std::sqrt(dx * dx + dy * dy);
+    };
+
+    // Two sweeps. The first only makes what is close, so arriving somewhere -
+    // a login, a teleport, a flight path's end - fills in round the player
+    // before the far edge; the second makes the rest and settles retirement.
+    size_t retired = 0;
+    for (int sweep = 0; sweep < 2; ++sweep) {
+        const bool last = (sweep == 1);
+        const float createEdge = last ? nearEdge : std::min(nearEdge, 40.0f);
+        for (auto& [coord, tile] : loadedTiles) {
+            (void)coord;
+            if (!tile || tile->clutterPlacements.empty()) continue;
+            const float tileDist = tileDistance(*tile);
+            if (tileDist > farEdge && tile->clutterLive == 0) continue;
+            if (!last && tileDist > createEdge) continue;
+            for (size_t c = 0; c < 256; ++c) {
+                const uint32_t begin = tile->clutterChunkStart[c];
+                const uint32_t end = std::min<uint32_t>(
+                    tile->clutterChunkStart[c + 1],
+                    static_cast<uint32_t>(tile->clutterPlacements.size()));
+                if (begin >= end) continue;
+                auto& ids = tile->clutterChunkIds[c];
+                uint32_t& next = tile->clutterChunkNext[c];
+                const float distance = chunkDistance(tile->clutterChunkBounds[c]);
+                if (last) {
+                    if (distance > farEdge) {
+                        if (!ids.empty() || next > 0) {
+                            tile->clutterChunkRetired[c] = 1;
+                            retired += ids.size();
+                        }
+                        continue;
+                    }
+                    // Back in range before its batch went: keep what it has.
+                    tile->clutterChunkRetired[c] = 0;
+                }
+                if (distance > createEdge || created >= kInstancesPerFrame) continue;
+                if (next < begin) next = begin;
+                while (next < end && created < kInstancesPerFrame) {
+                    const auto& p = tile->clutterPlacements[next++];
+                    if (!m2Renderer->hasModel(p.modelId)) continue;
+                    if (const uint32_t id = m2Renderer->createInstance(
+                            p.modelId, p.position, glm::vec3(0.0f, 0.0f, p.yaw), p.scale)) {
+                        m2Renderer->setInstanceGroundNormal(id, p.groundNormal);
+                        ids.push_back(id);
+                        ++tile->clutterLive;
+                        ++created;
+                    }
+                }
+            }
+        }
+    }
+
+    if (retired >= kRetiredBatch) {
+        std::vector<uint32_t> toRemove;
+        toRemove.reserve(retired);
+        for (auto& [coord, tile] : loadedTiles) {
+            (void)coord;
+            if (!tile || tile->clutterLive == 0) continue;
+            for (size_t c = 0; c < 256; ++c) {
+                if (!tile->clutterChunkRetired[c]) continue;
+                auto& ids = tile->clutterChunkIds[c];
+                toRemove.insert(toRemove.end(), ids.begin(), ids.end());
+                tile->clutterLive -= std::min(tile->clutterLive, ids.size());
+                ids.clear();
+                tile->clutterChunkNext[c] = 0;
+                tile->clutterChunkRetired[c] = 0;
+            }
+        }
+        if (!toRemove.empty()) m2Renderer->removeInstances(toRemove);
+    }
+}
+
+void TerrainManager::setGroundClutterDensityScale(float scale) {
+    const float clamped = glm::clamp(scale, 0.0f, 1.5f);
+    if (std::abs(clamped - groundClutterDensityScale_) < 1e-4f) return;
+    groundClutterDensityScale_ = clamped;
+    clutterDensityGeneration_.fetch_add(1);
+    clutterDensityChangedAt_ = std::chrono::steady_clock::now();
+}
+
+void TerrainManager::regenerateTileClutter(TerrainTile& tile) {
+    const uint32_t generation = clutterDensityGeneration_.load();
+    ensureGroundEffectTablesLoaded();
+
+    // The placement code reads the tile's terrain through a PendingTile, as
+    // the workers hand it one. Lent and returned rather than copied: a tile's
+    // chunks and alpha maps are megabytes, and nothing else touches the
+    // loaded tile while this runs on the main thread.
+    auto pending = std::make_shared<PendingTile>();
+    pending->coord = tile.coord;
+    pending->terrain = std::move(tile.terrain);
+    // The models already on the GPU need not be read again; only one the new
+    // density reaches for the first time is loaded below.
+    std::unordered_set<uint32_t> preparedModelIds;
+    {
+        std::lock_guard<std::mutex> lock(uploadedM2IdsMutex_);
+        preparedModelIds = uploadedM2Ids_;
+    }
+    generateGroundClutterPlacements(pending, preparedModelIds);
+    tile.terrain = std::move(pending->terrain);
+
+    if (m2Renderer) {
+        for (auto& ready : pending->m2Models) {
+            if (m2Renderer->hasModel(ready.modelId)) continue;
+            if (m2Renderer->loadModel(ready.model, ready.modelId)) {
+                std::lock_guard<std::mutex> lock(uploadedM2IdsMutex_);
+                uploadedM2Ids_.insert(ready.modelId);
+            }
+        }
+    }
+    std::vector<uint32_t> oldIds;
+    tile.takeClutterInstances(oldIds);
+    if (m2Renderer && !oldIds.empty()) m2Renderer->removeInstances(oldIds);
+    tile.clutterPlacements = std::move(pending->clutterPlacements);
+    tile.clutterChunkStart = pending->clutterChunkStart;
+    tile.clutterChunkBounds = pending->clutterChunkBounds;
+    tile.clutterGeneration = generation;
 }
 
 void TerrainManager::unloadTile(int x, int y) {
@@ -1700,8 +1845,11 @@ void TerrainManager::unloadTile(int x, int y) {
 
     // Remove M2 doodad instances
     if (m2Renderer) {
-        m2Renderer->removeInstances(tile->m2InstanceIds);
-        if (!tile->clutterInstanceIds.empty()) m2Renderer->removeInstances(tile->clutterInstanceIds);
+        // One removal for the doodads and the clutter together: each call
+        // rebuilds the renderer's spatial index over every instance.
+        std::vector<uint32_t> ids = tile->m2InstanceIds;
+        tile->takeClutterInstances(ids);
+        m2Renderer->removeInstances(ids);
         LOG_DEBUG("  Removed ", tile->m2InstanceIds.size(), " M2 instances");
     }
 
@@ -1891,18 +2039,13 @@ void TerrainManager::generateGroundClutterPlacements(std::shared_ptr<PendingTile
     if (taxiStreamingMode_) return;  // Skip clutter while on taxi flights.
     if (!pending || groundEffectById_.empty() || groundDoodadModelById_.empty()) return;
 
-    static const std::string kGroundClutterProxyModel = "World\\NoDXT\\Detail\\ElwGra01.m2";
-    static bool loggedProxy = false;
-    if (!loggedProxy) {
-        LOG_INFO("Ground clutter: forcing proxy model ", kGroundClutterProxyModel);
-        loggedProxy = true;
-    }
-
+    // No stand-in model and no minimum per tile. Both put Elwynn's grass
+    // wherever the data asked for something that would not load, or for
+    // nothing at all - which is how ElwGra01 came to grow in Hellfire
+    // Peninsula. Ground the data leaves bare stays bare, as it does in the
+    // stock client.
     size_t modelMissing = 0;
     size_t modelInvalid = 0;
-    // How many placements ended up as the Elwynn proxy because the doodad the
-    // texture actually asked for would not load.
-    size_t proxyFallbackUsed = 0;
     auto ensureModelPrepared = [&](const std::string& m2Path, uint32_t modelId) -> bool {
         if (preparedModelIds.count(modelId)) return true;
 
@@ -1935,51 +2078,36 @@ void TerrainManager::generateGroundClutterPlacements(std::shared_ptr<PendingTile
 
     constexpr float unitSize = CHUNK_SIZE / 8.0f;
     constexpr float pi = core::coords::PI;
-    // The ceiling for a whole tile, and how many placements one texture layer
-    // of one chunk may try for.
+
+    // The stock placement, as the 3.3.5 client does it: each of a chunk's 8x8
+    // quads that the map does not mask off (MCNK noEffectDoodad) grows the
+    // ground effect of the one layer the map assigns it (MCNK doodadMapping,
+    // the low-resolution texture map), and as many pieces as that effect's
+    // GroundEffectTexture density times the groundEffectDensity setting says.
     //
-    // The ceiling used to be spent in chunk scan order: the loops below run
-    // cy 0..15, cx 0..15 and break the moment the running total reaches it, so
-    // a tile's whole allowance went to the first few rows of chunks and the
-    // rest of the tile got nothing at all. Measured against Mulgore's own
-    // layers that was about six of sixteen rows filled and ten empty, which is
-    // why standing in the wrong part of a tile showed no ground cover
-    // whatsoever. The ceiling is now shared out as a per-chunk budget, so it
-    // bounds the tile the same way while covering all of it.
-    // GroundEffectTexture densities in Elwynn are 6-8 per cell; 880 a tile
-    // capped it at 3, which read as stubs poking out of the dirt rather than
-    // the stock carpet. Clutter is now instantiated only near the camera, so
-    // the higher count costs only the tiles in range.
-    constexpr size_t kBaseMaxGroundClutterPerTile = 2048;
-    constexpr uint32_t kBaseMaxAttemptsPerLayer = 24;
-    const float densityScaleRaw = glm::clamp(groundClutterDensityScale_, 0.0f, 1.5f);
-    // Keep runtime density bounded to avoid large streaming spikes in dense tiles.
-    const float densityScale = std::min(densityScaleRaw, 1.0f);
-    const size_t kMaxGroundClutterPerTile = std::max<size_t>(
-        0, static_cast<size_t>(std::lround(static_cast<float>(kBaseMaxGroundClutterPerTile) * densityScale)));
-    const uint32_t kMaxAttemptsPerLayer = std::max<uint32_t>(
-        1u, static_cast<uint32_t>(std::lround(static_cast<float>(kBaseMaxAttemptsPerLayer) * densityScale)));
-    // A tile is 16x16 chunks. Dividing rather than rounding up keeps the sum of
-    // the chunk budgets under the tile ceiling, so the ceiling stays a backstop
-    // and never becomes the thing that decides where the cover stops.
-    const size_t kMaxGroundClutterPerChunk =
-        std::max<size_t>(1, kMaxGroundClutterPerTile / 256);
-    std::vector<uint8_t> alphaScratch;
+    // This used to scatter random points across the whole chunk per layer,
+    // test each against the layer's alpha and a list of road texture names,
+    // and stop at eight a chunk - an eighth of what Elwynn asks for at the
+    // stock default, which read as stubs in the dirt, while the masks that
+    // say where the data wants nothing were not read at all.
+    //
+    // groundEffectDensity: the settings slider is 0-150 percent with 70 the
+    // default, the stock setting 16-256 with 64 the default. 70 is mapped to
+    // 64 and 150 to 256, linearly either side. At 64, density 8 - most of
+    // Azeroth's grass - is one piece a quad, 64 to a fully grown chunk.
+    const float densityPercent = glm::clamp(groundClutterDensityScale_, 0.0f, 1.5f) * 100.0f;
+    const float groundEffectDensity = densityPercent <= 70.0f
+        ? densityPercent / 70.0f * 64.0f
+        : 64.0f + (densityPercent - 70.0f) / 80.0f * 192.0f;
+    // A ceiling per quad for the few textures whose density is far above the
+    // rest (50 to 123 against a usual 4 to 16): at 256 they would be sixty
+    // pieces in four yards square.
+    constexpr uint32_t kMaxPerQuad = 8;
     std::vector<uint8_t> alphaScratchTex;
     size_t added = 0;
-    size_t attemptsTotal = 0;
-    size_t alphaRejected = 0;
-    size_t roadRejected = 0;
+    size_t quadsGrowing = 0;
     size_t noEffectMatch = 0;
-    size_t textureIdFallbackMatch = 0;
     size_t noDoodadModel = 0;
-    std::array<uint16_t, 256> perChunkAdded{};
-
-    // pipeline::isRoadLikeTexture - shared with grass, which needs the same
-    // test for the same reason and used to lack it.
-    auto isRoadLikeTexture = [](const std::string& texPath) -> bool {
-        return pipeline::isRoadLikeTexture(texPath);
-    };
 
     auto layerWeightAt = [&](const pipeline::MapChunk& chunk, size_t layerIdx, int alphaIndex) -> int {
         if (layerIdx >= chunk.layers.size()) return 0;
@@ -2005,235 +2133,207 @@ void TerrainManager::generateGroundClutterPlacements(std::shared_ptr<PendingTile
         return 0;
     };
 
-    auto hasRoadLikeTextureAt = [&](const pipeline::MapChunk& chunk, float fracX, float fracY) -> bool {
-        if (chunk.layers.empty()) return false;
-        const int alphaIndex =
-            static_cast<int>(pipeline::alphaTexelIndex(fracX / 8.0f, fracY / 8.0f));
+    // The terrain's own normal at a point, from MCNR - the normals the terrain
+    // shader lights the ground with - so a piece is lit as the ground under it
+    // is rather than by its own card's normal. The quad's four outer vertices
+    // bilinearly, half and half with its centre vertex, which is near enough
+    // the four-wedge fan the mesh draws for a value only used for shading.
+    auto groundNormalAt = [](const pipeline::MapChunk& chunk, float fracX, float fracY) -> glm::vec3 {
+        auto vertexNormal = [&chunk](int index) -> glm::vec3 {
+            const size_t i = static_cast<size_t>(index) * 3;
+            if (index < 0 || i + 2 >= chunk.normals.size()) return glm::vec3(0.0f, 0.0f, 1.0f);
+            return glm::vec3(chunk.normals[i], chunk.normals[i + 1], chunk.normals[i + 2]) / 127.0f;
+        };
+        const int qx = glm::clamp(static_cast<int>(std::floor(fracX)), 0, 7);
+        const int qy = glm::clamp(static_cast<int>(std::floor(fracY)), 0, 7);
+        const float u = glm::clamp(fracX - static_cast<float>(qx), 0.0f, 1.0f);
+        const float v = glm::clamp(fracY - static_cast<float>(qy), 0.0f, 1.0f);
+        const glm::vec3 corners =
+            vertexNormal(qy * 17 + qx)           * (1.0f - u) * (1.0f - v) +
+            vertexNormal(qy * 17 + qx + 1)       * u * (1.0f - v) +
+            vertexNormal((qy + 1) * 17 + qx)     * (1.0f - u) * v +
+            vertexNormal((qy + 1) * 17 + qx + 1) * u * v;
+        glm::vec3 n = 0.5f * corners + 0.5f * vertexNormal(9 + qy * 17 + qx);
+        const float len = glm::length(n);
+        if (len < 1e-4f || !std::isfinite(len)) return glm::vec3(0.0f, 0.0f, 1.0f);
+        n /= len;
+        return n.z < 0.0f ? -n : n;
+    };
 
-        size_t numLayers = std::min(chunk.layers.size(), static_cast<size_t>(4));
-        for (size_t layerIdx = 0; layerIdx < numLayers; ++layerIdx) {
-            uint32_t texId = chunk.layers[layerIdx].textureId;
-            if (texId >= pending->terrain.textures.size()) continue;
-            const std::string& texPath = pending->terrain.textures[texId];
-            if (!isRoadLikeTexture(texPath)) continue;
-            // Treat meaningful blend contribution as road occupancy.
-            int w = layerWeightAt(chunk, layerIdx, alphaIndex);
-            if (w >= 24) return true;
+    // The model each GroundEffectDoodad id resolves to, loaded once per tile;
+    // 0 for an id with no row or a model that will not load.
+    std::unordered_map<uint32_t, uint32_t> modelIdForDoodad;
+    auto modelForDoodad = [&](uint32_t doodadId) -> uint32_t {
+        if (doodadId == 0) return 0;
+        auto cached = modelIdForDoodad.find(doodadId);
+        if (cached != modelIdForDoodad.end()) return cached->second;
+        uint32_t modelId = 0;
+        auto doodadIt = groundDoodadModelById_.find(doodadId);
+        if (doodadIt == groundDoodadModelById_.end()) {
+            noDoodadModel++;
+        } else {
+            const uint32_t id = static_cast<uint32_t>(std::hash<std::string>{}(doodadIt->second));
+            if (ensureModelPrepared(doodadIt->second, id)) modelId = id;
         }
-        return false;
+        modelIdForDoodad.emplace(doodadId, modelId);
+        return modelId;
     };
 
     for (int cy = 0; cy < 16; ++cy) {
-        if (added >= kMaxGroundClutterPerTile) break;
         for (int cx = 0; cx < 16; ++cx) {
-            if (added >= kMaxGroundClutterPerTile) break;
+            const size_t chunkIndex = static_cast<size_t>(cy * 16 + cx);
+            const size_t chunkBegin = pending->clutterPlacements.size();
+            pending->clutterChunkStart[chunkIndex] = static_cast<uint32_t>(chunkBegin);
             const auto& chunk = pending->terrain.getChunk(cx, cy);
             if (!chunk.hasHeightMap() || chunk.layers.empty()) continue;
 
-            size_t chunkAdded = 0;
-            for (size_t layerIdx = 0; layerIdx < chunk.layers.size(); ++layerIdx) {
-                if (added >= kMaxGroundClutterPerTile) break;
-                if (chunkAdded >= kMaxGroundClutterPerChunk) break;
-                const auto& layer = chunk.layers[layerIdx];
-                if (layer.effectId == 0) continue;
-
-                auto geIt = groundEffectById_.find(layer.effectId);
-                if (geIt == groundEffectById_.end() && layer.textureId != 0) {
-                    geIt = groundEffectById_.find(layer.textureId);
-                    if (geIt != groundEffectById_.end()) {
-                        textureIdFallbackMatch++;
-                    }
-                }
-                if (geIt == groundEffectById_.end()) {
-                    noEffectMatch++;
-                    continue;
-                }
-                const GroundEffectEntry& ge = geIt->second;
-
-                uint32_t totalWeight = ge.weights[0] + ge.weights[1] + ge.weights[2] + ge.weights[3];
-                if (totalWeight == 0) totalWeight = 4;
-
-                uint32_t density = std::min<uint32_t>(ge.density, 16u);
-                density = static_cast<uint32_t>(std::lround(static_cast<float>(density) * densityScale));
-                if (density == 0) continue;
-                uint32_t attempts = std::max<uint32_t>(3u, density * 2u);
-                attempts = std::min<uint32_t>(attempts, kMaxAttemptsPerLayer);
-                attemptsTotal += attempts;
-
-                bool hasAlpha = decodeLayerAlpha(chunk, layerIdx, alphaScratch);
-                uint32_t seed = static_cast<uint32_t>(
-                    ((pending->coord.x & 0xFF) << 24) ^
-                    ((pending->coord.y & 0xFF) << 16) ^
-                    ((cx & 0x1F) << 8) ^
-                    ((cy & 0x1F) << 3) ^
-                    (layerIdx & 0x7));
-                auto nextRand = [&seed]() -> uint32_t {
-                    seed = seed * 1664525u + 1013904223u;
-                    return seed;
-                };
-
-                for (uint32_t a = 0; a < attempts; ++a) {
-                    float fracX = (nextRand() & 0xFFFFu) / kRand16Max * 8.0f;
-                    float fracY = (nextRand() & 0xFFFFu) / kRand16Max * 8.0f;
-
-                    if (hasAlpha && !alphaScratch.empty()) {
-                        const int alphaIndex = static_cast<int>(
-                            pipeline::alphaTexelIndex(fracX / 8.0f, fracY / 8.0f));
-                        if (alphaIndex < 0 || alphaIndex >= static_cast<int>(alphaScratch.size())) continue;
-                        if (alphaScratch[alphaIndex] < 64) {
-                            alphaRejected++;
-                            continue;
-                        }
-                    }
-
-                    if (hasRoadLikeTextureAt(chunk, fracX, fracY)) {
-                        roadRejected++;
-                        continue;
-                    }
-
-                    uint32_t roll = nextRand() % totalWeight;
-                    int pick = 0;
-                    uint32_t acc = 0;
-                    for (int i = 0; i < 4; ++i) {
-                        uint32_t w = ge.weights[i] > 0 ? ge.weights[i] : 1;
-                        acc += w;
-                        if (roll < acc) { pick = i; break; }
-                    }
-                    uint32_t doodadId = ge.doodadIds[pick];
-                    if (doodadId == 0) continue;
-
-                    auto doodadIt = groundDoodadModelById_.find(doodadId);
-                    if (doodadIt == groundDoodadModelById_.end()) {
-                        noDoodadModel++;
-                        continue;
-                    }
-                    const std::string& doodadModelPath = doodadIt->second;
-                    uint32_t modelId = static_cast<uint32_t>(std::hash<std::string>{}(doodadModelPath));
-                    if (!ensureModelPrepared(doodadModelPath, modelId)) {
-                        modelId = static_cast<uint32_t>(std::hash<std::string>{}(kGroundClutterProxyModel));
-                        if (!ensureModelPrepared(kGroundClutterProxyModel, modelId)) {
-                            continue;
-                        }
-                        ++proxyFallbackUsed;
-                    }
-
-                    const glm::vec3 surfacePoint = pipeline::TerrainMeshGenerator::chunkSurfacePoint(
-                        chunk.position, chunk.heightMap, fracX, fracY, unitSize);
-                    const float worldX = surfacePoint.x;
-                    const float worldY = surfacePoint.y;
-                    const float worldZ = surfacePoint.z;
-
-                    PendingTile::M2Placement p;
-                    p.modelId = modelId;
-                    p.uniqueId = 0;
-                    // MCNK chunk.position is already in terrain/render world space.
-                    // Do not convert via ADT placement mapping (that is for MDDF/MODF records).
-                    p.rotation = glm::vec3(0.0f, 0.0f, (nextRand() & 0xFFFFu) / kRand16Max * (2.0f * pi));
-                    p.scale = 0.80f + ((nextRand() & 0xFFFFu) / kRand16Max) * 0.35f;
-                    // Snap directly to sampled terrain height.
-                    p.position = glm::vec3(worldX, worldY, worldZ + 0.01f);
-                    pending->clutterPlacements.push_back(p);
-                    added++;
-                    chunkAdded++;
-                    perChunkAdded[cy * 16 + cx]++;
-                    if (added >= kMaxGroundClutterPerTile) break;
-                    if (chunkAdded >= kMaxGroundClutterPerChunk) break;
-                }
+            // A chunk whose mapping is all zero either is all its first layer
+            // or comes from data that never filled the mapping in. The quad's
+            // heaviest layer answers both the same way.
+            bool mappingEmpty = true;
+            for (uint8_t b : chunk.doodadMapping) {
+                if (b != 0) { mappingEmpty = false; break; }
             }
-        }
-    }
+            const size_t layerCount = std::min<size_t>(chunk.layers.size(), 4);
 
-    size_t fallbackAdded = 0;
-    const size_t kMinGroundClutterPerTile = static_cast<size_t>(std::lround(40.0f * densityScale));
-    size_t fallbackNeeded = (added < kMinGroundClutterPerTile) ? (kMinGroundClutterPerTile - added) : 0;
-    if (fallbackNeeded > 0) {
-        const uint32_t proxyModelId = static_cast<uint32_t>(std::hash<std::string>{}(kGroundClutterProxyModel));
-        if (ensureModelPrepared(kGroundClutterProxyModel, proxyModelId)) {
-            constexpr uint32_t kFallbackPerChunk = 2;
-            for (int cy = 0; cy < 16; ++cy) {
-                for (int cx = 0; cx < 16; ++cx) {
-                    if (fallbackAdded >= fallbackNeeded || added >= kMaxGroundClutterPerTile) break;
-                    const auto& chunk = pending->terrain.getChunk(cx, cy);
-                    if (!chunk.hasHeightMap()) continue;
+            uint32_t seed = static_cast<uint32_t>(
+                ((pending->coord.x & 0xFF) << 24) ^
+                ((pending->coord.y & 0xFF) << 16) ^
+                ((cx & 0x1F) << 8) ^
+                ((cy & 0x1F) << 3)) * 2654435761u + 0x9E3779B9u;
+            auto nextRand = [&seed]() -> uint32_t {
+                seed = seed * 1664525u + 1013904223u;
+                return seed;
+            };
+            auto rand01 = [&nextRand]() -> float {
+                return static_cast<float>((nextRand() >> 8) & 0xFFFFu) / kRand16Max;
+            };
 
-                    for (uint32_t i = 0; i < kFallbackPerChunk; ++i) {
-                        if (fallbackAdded >= fallbackNeeded || added >= kMaxGroundClutterPerTile) break;
-                        // Deterministic scatter so the tile stays visually stable.
-                        uint32_t seed = static_cast<uint32_t>(
-                            ((pending->coord.x & 0xFF) << 24) ^
-                            ((pending->coord.y & 0xFF) << 16) ^
-                            ((cx & 0x1F) << 8) ^
-                            ((cy & 0x1F) << 3) ^
-                            (i & 0x7));
-                        auto nextRand = [&seed]() -> uint32_t {
-                            seed = seed * 1664525u + 1013904223u;
-                            return seed;
-                        };
+            for (int qy = 0; qy < 8; ++qy) {
+                for (int qx = 0; qx < 8; ++qx) {
+                    if (chunk.isHole(qy, qx) || chunk.isEffectDisabled(qy, qx)) continue;
 
-                        float fracX = (nextRand() & 0xFFFFu) / kRand16Max * 8.0f;
-                        float fracY = (nextRand() & 0xFFFFu) / kRand16Max * 8.0f;
-                        if (hasRoadLikeTextureAt(chunk, fracX, fracY)) {
-                            roadRejected++;
-                            continue;
+                    size_t layerIdx = chunk.effectLayerFor(qy, qx);
+                    if (mappingEmpty && layerCount > 1) {
+                        const int alphaIndex = static_cast<int>(pipeline::alphaTexelIndex(
+                            (static_cast<float>(qx) + 0.5f) / 8.0f, (static_cast<float>(qy) + 0.5f) / 8.0f));
+                        int best = -1;
+                        for (size_t li = 0; li < layerCount; ++li) {
+                            const int w = layerWeightAt(chunk, li, alphaIndex);
+                            if (w > best) { best = w; layerIdx = li; }
                         }
+                    }
+                    if (layerIdx >= layerCount) continue;
+                    const uint32_t effectId = chunk.layers[layerIdx].effectId;
+                    if (effectId == 0) continue;
+                    auto geIt = groundEffectById_.find(effectId);
+                    if (geIt == groundEffectById_.end()) {
+                        noEffectMatch++;
+                        continue;
+                    }
+                    const GroundEffectEntry& ge = geIt->second;
+
+                    const float expected =
+                        static_cast<float>(ge.density) * groundEffectDensity / 512.0f;
+                    uint32_t count = static_cast<uint32_t>(expected);
+                    if (rand01() < expected - static_cast<float>(count)) ++count;
+                    count = std::min(count, kMaxPerQuad);
+                    if (count == 0) continue;
+
+                    // The four doodads and their weights, over those that load.
+                    std::array<uint32_t, 4> models{};
+                    std::array<uint32_t, 4> weights{};
+                    uint32_t totalWeight = 0;
+                    uint32_t usable = 0;
+                    for (int i = 0; i < 4; ++i) {
+                        models[i] = modelForDoodad(ge.doodadIds[i]);
+                        if (models[i] == 0) continue;
+                        weights[i] = ge.weights[i];
+                        totalWeight += weights[i];
+                        ++usable;
+                    }
+                    if (usable == 0) continue;
+                    if (totalWeight == 0) {
+                        for (int i = 0; i < 4; ++i) weights[i] = models[i] ? 1u : 0u;
+                        totalWeight = usable;
+                    }
+                    ++quadsGrowing;
+
+                    for (uint32_t n = 0; n < count; ++n) {
+                        const float fracX = static_cast<float>(qx) + rand01();
+                        const float fracY = static_cast<float>(qy) + rand01();
+                        const uint32_t roll = nextRand() % totalWeight;
+                        int pick = 0;
+                        uint32_t acc = 0;
+                        for (int i = 0; i < 4; ++i) {
+                            acc += weights[i];
+                            if (roll < acc) { pick = i; break; }
+                        }
+                        if (models[pick] == 0) continue;
+
+                        // On the drawn surface, eased down where the ground
+                        // falls away: the lowest of four points a foot out
+                        // takes half the drop, so a piece on a slope keeps its
+                        // downhill side on the ground instead of standing on
+                        // its uphill edge with the rest in the air.
                         const glm::vec3 surfacePoint = pipeline::TerrainMeshGenerator::chunkSurfacePoint(
                             chunk.position, chunk.heightMap, fracX, fracY, unitSize);
-                        const float worldX = surfacePoint.x;
-                        const float worldY = surfacePoint.y;
-                        const float worldZ = surfacePoint.z;
+                        constexpr float kFootprint = 0.3f / unitSize;
+                        float lowest = surfacePoint.z;
+                        const float offsets[4][2] = {{kFootprint, 0.0f}, {-kFootprint, 0.0f},
+                                                     {0.0f, kFootprint}, {0.0f, -kFootprint}};
+                        for (const auto& o : offsets) {
+                            const float sx = glm::clamp(fracX + o[0], 0.0f, 8.0f);
+                            const float sy = glm::clamp(fracY + o[1], 0.0f, 8.0f);
+                            lowest = std::min(lowest, pipeline::TerrainMeshGenerator::chunkSurfacePoint(
+                                chunk.position, chunk.heightMap, sx, sy, unitSize).z);
+                        }
 
-                        PendingTile::M2Placement p;
-                        p.modelId = proxyModelId;
-                        p.uniqueId = 0;
-                        p.rotation = glm::vec3(0.0f, 0.0f, (nextRand() & 0xFFFFu) / kRand16Max * (2.0f * pi));
-                        p.scale = 0.75f + ((nextRand() & 0xFFFFu) / kRand16Max) * 0.40f;
-                        p.position = glm::vec3(worldX, worldY, worldZ + 0.01f);
+                        ClutterPlacement p;
+                        p.modelId = models[pick];
+                        // MCNK chunk.position is already in terrain/render world space.
+                        // Do not convert via ADT placement mapping (that is for MDDF/MODF records).
+                        p.yaw = rand01() * (2.0f * pi);
+                        p.scale = 0.80f + rand01() * 0.35f;
+                        p.position = glm::vec3(surfacePoint.x, surfacePoint.y,
+                                               surfacePoint.z - 0.5f * (surfacePoint.z - lowest));
+                        p.groundNormal = groundNormalAt(chunk, fracX, fracY);
                         pending->clutterPlacements.push_back(p);
-                        fallbackAdded++;
                         added++;
-                        perChunkAdded[cy * 16 + cx]++;
                     }
                 }
-                if (fallbackAdded >= fallbackNeeded || added >= kMaxGroundClutterPerTile) break;
+            }
+
+            // The chunk's extent, which is what the streamer measures to.
+            const size_t chunkEnd = pending->clutterPlacements.size();
+            if (chunkEnd > chunkBegin) {
+                glm::vec4 bounds(std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                                 std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest());
+                for (size_t i = chunkBegin; i < chunkEnd; ++i) {
+                    const glm::vec3& pos = pending->clutterPlacements[i].position;
+                    bounds.x = std::min(bounds.x, pos.x);
+                    bounds.y = std::min(bounds.y, pos.y);
+                    bounds.z = std::max(bounds.z, pos.x);
+                    bounds.w = std::max(bounds.w, pos.y);
+                }
+                pending->clutterChunkBounds[chunkIndex] = bounds;
             }
         }
     }
+    pending->clutterChunkStart[256] = static_cast<uint32_t>(pending->clutterPlacements.size());
 
-    // Baseline pass disabled: one-per-chunk fill caused large instance spikes and hitches
-    // when streaming tiles around the player.
-    size_t baselineAdded = 0;
-
-    if (added > 0) {
-        static int clutterLogCount = 0;
-        if (clutterLogCount < 12) {
-            // With the counts beside it. Elwynn grass was reported growing in
-            // Hellfire Peninsula, and the two places that can put it there - a
-            // doodad whose model will not load, and the minimum-per-tile floor
-            // below - both report only here. At debug: a tile that got its
-            // clutter is the ordinary case, twelve lines of it every session.
-            // A tile that got none says so at warning, below.
-            LOG_DEBUG("Ground clutter tile [", pending->coord.x, ",", pending->coord.y,
-                     "] added=", added, " attempts=", attemptsTotal,
-                     " proxyFallback=", proxyFallbackUsed,
-                     " fallbackAdded=", fallbackAdded,
-                     " baselineAdded=", baselineAdded,
-                     " roadRejected=", roadRejected);
-            clutterLogCount++;
-        }
-    } else {
-        static int noClutterLogCount = 0;
-        if (noClutterLogCount < 8) {
-            LOG_WARNING("Ground clutter tile [", pending->coord.x, ",", pending->coord.y,
-                     "] added=0 attempts=", attemptsTotal,
-                     " alphaRejected=", alphaRejected,
-                     " roadRejected=", roadRejected,
-                     " noEffect=", noEffectMatch,
-                     " textureFallback=", textureIdFallbackMatch,
-                     " noDoodadModel=", noDoodadModel,
-                     " modelMissing=", modelMissing,
-                     " modelInvalid=", modelInvalid);
-            noClutterLogCount++;
-        }
+    // At debug either way: a tile with no clutter is ordinary (deserts,
+    // snowfields, cities), and the counts say why when it is not.
+    static int clutterLogCount = 0;
+    if (clutterLogCount < 12) {
+        LOG_DEBUG("Ground clutter tile [", pending->coord.x, ",", pending->coord.y,
+                  "] added=", added, " quadsGrowing=", quadsGrowing,
+                  " groundEffectDensity=", groundEffectDensity,
+                  " noEffect=", noEffectMatch,
+                  " noDoodadModel=", noDoodadModel,
+                  " modelMissing=", modelMissing,
+                  " modelInvalid=", modelInvalid);
+        clutterLogCount++;
     }
 }
 

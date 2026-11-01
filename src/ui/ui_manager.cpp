@@ -508,8 +508,11 @@ void UIManager::render(core::AppState appState, auth::AuthHandler* authHandler, 
 
         case core::AppState::CHARACTER_SELECTION:
             authScreen->updateMusic();  // the glue theme plays until the world does
-            authScreen->drawBackdrop();
+            // The selected character's own racial scene covers the window, so
+            // the login scene is only drawn while there is nobody to show.
+            if (!characterScreen->drawsOwnScene()) authScreen->drawBackdrop();
             if (gameHandler) {
+                if (realmScreen) characterScreen->setRealmName(realmScreen->getSelectedName());
                 characterScreen->render(*gameHandler);
             }
             break;

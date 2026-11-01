@@ -1122,8 +1122,12 @@ namespace {
 struct AtlasRegion256 { int x, y, w, h; bool known; };
 
 AtlasRegion256 regionFor(const std::string& pathLower) {
-    if (pathLower.find("faceupper") != std::string::npos) return {  .x = 0, .y = 160, .w = 128, .h = 32, .known = true};
-    if (pathLower.find("facelower") != std::string::npos) return {  .x = 0, .y = 192, .w = 128, .h = 64, .known = true};
+    // FacialUpperHair/FacialLowerHair (CharSections section 2) paint the same
+    // two face regions as the face itself, on top of it.
+    if (pathLower.find("faceupper") != std::string::npos ||
+        pathLower.find("facialupper") != std::string::npos) return {  .x = 0, .y = 160, .w = 128, .h = 32, .known = true};
+    if (pathLower.find("facelower") != std::string::npos ||
+        pathLower.find("faciallower") != std::string::npos) return {  .x = 0, .y = 192, .w = 128, .h = 64, .known = true};
     if (pathLower.find("pelvis")    != std::string::npos) return {.x = 128,  .y = 96, .w = 128, .h = 64, .known = true};
     if (pathLower.find("torso")     != std::string::npos) return {.x = 128,   .y = 0, .w = 128, .h = 64, .known = true};
     if (pathLower.find("armupper")  != std::string::npos) return {  .x = 0,   .y = 0, .w = 128, .h = 64, .known = true};
@@ -2140,7 +2144,38 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
                 inst.currentAnimationId = inst.cachedModel->data.sequences[0].id;
             }
             const auto& seq = inst.cachedModel->data.sequences[inst.currentSequenceIndex];
+            const float prevAnimTime = inst.animationTime;
             inst.animationTime += deltaTime * 1000.0f;
+
+            // $CSD sound events whose timestamps the sequence just passed:
+            // [prev, now), split at the loop point, and a one-shot's events
+            // up to and including its last frame. Fired before the wrap below,
+            // which may switch the instance to its resume animation.
+            const auto& soundEvents = inst.cachedModel->data.soundEvents;
+            if (animSoundEventCallback_ &&
+                inst.currentSequenceIndex < static_cast<int>(soundEvents.size()) &&
+                !soundEvents[inst.currentSequenceIndex].empty()) {
+                const float dur = static_cast<float>(seq.duration);
+                const float now = inst.animationTime;
+                auto fireRange = [&](float from, float to, bool inclusiveEnd) {
+                    for (const auto& ev : soundEvents[inst.currentSequenceIndex]) {
+                        const float t = static_cast<float>(ev.timeMs);
+                        if (t >= from && (t < to || (inclusiveEnd && t <= to))) {
+                            animSoundEventCallback_(pair.first, inst.currentAnimationId,
+                                                    ev.soundEntryId, inst.position);
+                        }
+                    }
+                };
+                if (seq.duration == 0 || now < dur) {
+                    fireRange(prevAnimTime, now, false);
+                } else if (inst.animationLoop) {
+                    fireRange(prevAnimTime, dur, false);
+                    fireRange(0.0f, std::min(now - dur, dur), false);
+                } else if (prevAnimTime < dur) {
+                    fireRange(prevAnimTime, dur, true);
+                }
+            }
+
             if (seq.duration > 0 && inst.animationTime >= static_cast<float>(seq.duration)) {
                 if (inst.animationLoop) {
                     // Subtract duration instead of fmod to preserve float precision

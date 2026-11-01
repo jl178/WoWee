@@ -324,6 +324,16 @@ private:
     /// else's paperdoll.
     ui::UnitPortrait inspectModel_;
     uint32_t inspectModelWidgetId_ = 0;
+    /// The facing already applied to the inspect figure; see paperdollFacing_.
+    float inspectFacing_ = 0.0f;
+    /// A figure for any other model frame SetUnit was pointed at (an addon's
+    /// own PlayerModel), keyed by widget id. Made on first use, capped, and
+    /// torn down only at shutdown.
+    struct UnitModelView {
+        ui::UnitPortrait view;
+        float facing = 0.0f;
+    };
+    std::unordered_map<uint32_t, std::unique_ptr<UnitModelView>> unitModelViews_;
     /// And whoever this client is dealing with - the face in the gossip,
     /// quest, merchant, flight master and trade panels. One view for all of
     /// them because only one such window is open at a time.
@@ -418,9 +428,9 @@ private:
     /// once on entering the water rather than every frame in it.
     bool wasSwimmingForSheath_ = false;
 
-    // Quest marker billboard sprites (above NPCs)
-    void loadQuestMarkerModels();  // Now loads BLP textures
-    void updateQuestMarkers();     // Updates billboard positions
+    // Quest giver ! and ? over heads: the stock TalkToMe*.m2 models
+    void loadQuestMarkerModels();  // No-op; the models load on first use
+    void updateQuestMarkers();     // Places, turns and removes the marker instances
     void updateLootSparkles();     // The glitter over corpses with loot
 };
 

@@ -67,6 +67,21 @@ void M2Renderer::setInstanceFade(uint32_t instanceId, float alpha) {
     instances[idxIt->second].fade = std::clamp(alpha, 0.0f, 1.0f);
 }
 
+void M2Renderer::setInstanceGroundNormal(uint32_t instanceId, const glm::vec3& normal) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return;
+    auto& inst = instances[idxIt->second];
+    if (!inst.cachedIsGroundDetail) return;
+    const float len = glm::length(normal);
+    const glm::vec3 n = (len > 1e-4f && std::isfinite(len)) ? normal / len : glm::vec3(0.0f, 0.0f, 1.0f);
+    // A byte each for x and y over [-1, 1]; m2.vert rebuilds z as the
+    // positive root, which is all a ground normal can be.
+    auto toByte = [](float v) {
+        return static_cast<int32_t>(std::lround((std::clamp(v, -1.0f, 1.0f) * 0.5f + 0.5f) * 255.0f));
+    };
+    inst.groundNormalFlags = 2 | (toByte(n.x) << 8) | (toByte(n.y) << 16);
+}
+
 void M2Renderer::setInstanceHighlight(uint32_t instanceId, float amount) {
     auto idxIt = instanceIndexById.find(instanceId);
     if (idxIt == instanceIndexById.end()) return;
@@ -328,6 +343,12 @@ void M2Renderer::setSkipWallCollision(uint32_t instanceId, bool skip) {
             return;
         }
     }
+}
+
+void M2Renderer::setInstanceCastsShadow(uint32_t instanceId, bool casts) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) return;
+    instances[idxIt->second].castsShadow = casts;
 }
 
 void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
@@ -1206,14 +1227,43 @@ bool M2Renderer::checkCollision(const glm::vec3& from, const glm::vec3& to,
         const bool authoredCollision = model.collision.valid();
         if ((model.collisionNoBlock && !authoredCollision) ||
             model.isInvisibleTrap || model.isSpellEffect) continue;
-        if (instance.skipCollision || instance.skipWallCollision) continue;
+        if (instance.skipCollision) continue;
+        // skipWallCollision is set on every doodad of a WMO doodad set (MODD).
+        // What it exists to stop is the bounding-box blocker below, which is
+        // collision *invented* for a model that has none. It used to discard
+        // the authored mesh as well, so every fence, crate, barrel and lamp
+        // post placed by a building - farmyards, inns, Stormwind's streets -
+        // was walked through. Stock collides MODD doodads by their M2
+        // collision mesh exactly as it does MDDF ones.
+        if (instance.skipWallCollision && !authoredCollision) continue;
         if (instance.scale <= 0.001f) continue;
 
-        // --- Mesh-based wall collision: closest-point push ---
-        if (model.collision.valid()) {
+        // --- Mesh-based wall collision: swept clamp, then closest-point push ---
+        //
+        // This was a "gentle" push: 8% of the penetration, at most 0.015 per
+        // triangle and 0.02 per doodad per call. A run is ~0.12 yd a frame at
+        // 60 fps, so the push never caught up and anything that relied on its
+        // authored mesh - every fence, which is all of them - was walked
+        // straight through. elwynnwoodfence01 (342 placements on Goldshire's
+        // two tiles) ships 24 collision triangles, 18 of them walls, in a slab
+        // 0.27 yd thick.
+        //
+        // Now the same rule the WMO wall test uses: the full penetration is
+        // pushed out, and the centre's path is swept against each wall so a
+        // long step (a hitch, a fast mount) cannot pass a slab thinner than
+        // the step. Low geometry within the step height is left to the floor
+        // query, so a curb or a stair in a doodad is climbed, not walled.
+        if (authoredCollision) {
             glm::vec3 localFrom = glm::vec3(instance.invModelMatrix * glm::vec4(from, 1.0f));
             glm::vec3 localPos  = glm::vec3(instance.invModelMatrix * glm::vec4(adjustedPos, 1.0f));
-            float localRadius = playerRadius / instance.scale;
+            // Model units: a doodad placed at scale 2 has half-size units, so
+            // every world distance is divided by the scale.
+            const float invScale = 1.0f / instance.scale;
+            const float localRadius = playerRadius * invScale;
+            const float localHeight = 2.0f * invScale;     // player cylinder
+            const float localStepUp = 1.0f * invScale;     // matches the WMO wall test and the floor query
+            const float localJumpClear = 1.2f * invScale;  // rising: clears a wall this close below its top
+            const float localSkin = 0.01f * invScale;
 
             model.collision.getWallTrisInRange(
                 std::min(localFrom.x, localPos.x) - localRadius - 1.0f,
@@ -1222,61 +1272,104 @@ bool M2Renderer::checkCollision(const glm::vec3& from, const glm::vec3& to,
                 std::max(localFrom.y, localPos.y) + localRadius + 1.0f,
                 tl_m2_collisionTriScratch);
 
-            constexpr float PLAYER_HEIGHT = 2.0f;
-            constexpr float MAX_TOTAL_PUSH = 0.02f; // Cap total push per instance
+            const auto& verts = model.collision.vertices;
+            const auto& idx   = model.collision.indices;
+            const size_t vertCount = verts.size();
+            const bool rising = (localPos.z > localFrom.z + 0.05f * invScale);
             bool pushed = false;
-            float totalPushX = 0.0f, totalPushY = 0.0f;
 
-            for (uint32_t ti : tl_m2_collisionTriScratch) {
-                if (ti >= model.collision.triCount) continue;
-                if (localPos.z + PLAYER_HEIGHT < model.collision.triBounds[ti].minZ ||
-                    localPos.z > model.collision.triBounds[ti].maxZ) continue;
+            // Whether triangle ti is a wall for a character whose feet are at
+            // feetZ, and its corners if so.
+            auto wallTri = [&](uint32_t ti, float feetZ, glm::vec3& v0, glm::vec3& v1,
+                               glm::vec3& v2) -> bool {
+                if (ti >= model.collision.triCount) return false;
+                const uint32_t i0 = idx[ti * 3], i1 = idx[ti * 3 + 1], i2 = idx[ti * 3 + 2];
+                if (i0 >= vertCount || i1 >= vertCount || i2 >= vertCount) return false;
+                const auto& tb = model.collision.triBounds[ti];
+                if (feetZ + localHeight < tb.minZ || feetZ > tb.maxZ) return false;
+                if (tb.maxZ <= feetZ + localStepUp) return false;               // stepped over
+                if (rising && feetZ + localJumpClear >= tb.maxZ) return false;  // jumped over
+                v0 = verts[i0];
+                v1 = verts[i1];
+                v2 = verts[i2];
+                return true;
+            };
+            auto distXYTo = [](const glm::vec3& p, const glm::vec3& a, const glm::vec3& b,
+                               const glm::vec3& c) {
+                const glm::vec3 d = p - closestPointOnTriangle(p, a, b, c);
+                return std::sqrt(d.x * d.x + d.y * d.y);
+            };
+            // A character already deep inside a mesh (spawned or teleported
+            // there, or put there by another system) is let out rather than
+            // held: both passes ignore a triangle the start of the step is
+            // already well inside. A step that starts resolved is never
+            // inside by more than a residue, so this costs a fence nothing.
+            const float deepInside = 0.5f * localRadius;
 
-                // Step-up: only skip wall when player is rising (jumping over it)
-                constexpr float MAX_STEP_UP = 1.2f;
-                bool rising = (localPos.z > localFrom.z + 0.05f);
-                if (rising && localPos.z + MAX_STEP_UP >= model.collision.triBounds[ti].maxZ) continue;
-
-                // Early out if we already pushed enough this instance
-                float totalPushSoFar = std::sqrt(totalPushX * totalPushX + totalPushY * totalPushY);
-                if (totalPushSoFar >= MAX_TOTAL_PUSH) break;
-
-                const auto& verts = model.collision.vertices;
-                const auto& idx   = model.collision.indices;
-                const auto& v0 = verts[idx[ti * 3]];
-                const auto& v1 = verts[idx[ti * 3 + 1]];
-                const auto& v2 = verts[idx[ti * 3 + 2]];
-
-                glm::vec3 closest = closestPointOnTriangle(localPos, v0, v1, v2);
-                glm::vec3 diff = localPos - closest;
-                float distXY = std::sqrt(diff.x * diff.x + diff.y * diff.y);
-
-                if (distXY < localRadius && distXY > 1e-4f) {
-                    // Gentle push - very small fraction of penetration
-                    float penetration = localRadius - distXY;
-                    float pushDist = std::clamp(penetration * 0.08f, 0.001f, 0.015f);
-                    float dx = (diff.x / distXY) * pushDist;
-                    float dy = (diff.y / distXY) * pushDist;
-                    localPos.x += dx;
-                    localPos.y += dy;
-                    totalPushX += dx;
-                    totalPushY += dy;
-                    pushed = true;
-                } else if (distXY < 1e-4f) {
-                    // On the plane - soft push along triangle normal XY
-                    glm::vec3 n = glm::cross(v1 - v0, v2 - v0);
-                    float nxyLen = std::sqrt(n.x * n.x + n.y * n.y);
-                    if (nxyLen > 1e-4f) {
-                        float pushDist = std::min(localRadius, 0.015f);
-                        float dx = (n.x / nxyLen) * pushDist;
-                        float dy = (n.y / nxyLen) * pushDist;
-                        localPos.x += dx;
-                        localPos.y += dy;
-                        totalPushX += dx;
-                        totalPushY += dy;
-                        pushed = true;
-                    }
+            // Pass 1: the centre's path, swept. Substeps keep a normal step
+            // under the radius, but a hitch or a fast mount can still carry
+            // the centre clean across a slab this thin between two samples.
+            glm::vec3 move = localPos - localFrom;
+            move.z = 0.0f;
+            const float moveLen = std::sqrt(move.x * move.x + move.y * move.y);
+            if (moveLen > 1e-4f) {
+                float bestT = 2.0f;
+                for (uint32_t ti : tl_m2_collisionTriScratch) {
+                    glm::vec3 v0, v1, v2;
+                    if (!wallTri(ti, localFrom.z, v0, v1, v2)) continue;
+                    if (distXYTo(localFrom, v0, v1, v2) < deepInside) continue;
+                    // Cast at a height inside both the blocking band and the
+                    // triangle, so the ray can meet it at all.
+                    const auto& tb = model.collision.triBounds[ti];
+                    const float lo = std::max(localFrom.z + localStepUp, tb.minZ);
+                    const float hi = std::min(localFrom.z + localHeight, tb.maxZ);
+                    const glm::vec3 origin(localFrom.x, localFrom.y, 0.5f * (lo + hi));
+                    const float t = rayTriangleIntersect(origin, move, v0, v1, v2);
+                    if (t > 0.0f && t <= 1.0f && t < bestT) bestT = t;
                 }
+                if (bestT <= 1.0f) {
+                    // Stop just short of the face; pass 2 then pushes the
+                    // cylinder out to its full radius on the near side.
+                    const float tSafe = std::max(0.0f, bestT - localSkin / moveLen);
+                    localPos.x = localFrom.x + move.x * tSafe;
+                    localPos.y = localFrom.y + move.y * tSafe;
+                    pushed = true;
+                }
+            }
+
+            // Pass 2: the cylinder against each wall, the whole penetration
+            // pushed out. Each push moves localPos, so the second triangle of
+            // a quad sees the first one's result and does not push again.
+            for (uint32_t ti : tl_m2_collisionTriScratch) {
+                glm::vec3 v0, v1, v2;
+                if (!wallTri(ti, localPos.z, v0, v1, v2)) continue;
+
+                const glm::vec3 closest = closestPointOnTriangle(localPos, v0, v1, v2);
+                const glm::vec3 diff = localPos - closest;
+                const float distXY = std::sqrt(diff.x * diff.x + diff.y * diff.y);
+                if (distXY >= localRadius) continue;
+                if (distXYTo(localFrom, v0, v1, v2) < deepInside) continue;
+
+                glm::vec2 dir2;
+                if (distXY > 1e-4f) {
+                    dir2 = glm::vec2(diff.x, diff.y) / distXY;
+                } else {
+                    // On the face: out along its normal, to the side the step
+                    // came from.
+                    const glm::vec3 n = glm::cross(v1 - v0, v2 - v0);
+                    glm::vec2 n2(n.x, n.y);
+                    const float n2Len = glm::length(n2);
+                    if (n2Len < 1e-6f) continue;
+                    n2 /= n2Len;
+                    if (glm::dot(glm::vec2(localFrom.x - closest.x, localFrom.y - closest.y), n2) < 0.0f) {
+                        n2 = -n2;
+                    }
+                    dir2 = n2;
+                }
+                const float pushDist = std::min(localRadius - distXY + localSkin, localRadius);
+                localPos.x += dir2.x * pushDist;
+                localPos.y += dir2.y * pushDist;
+                pushed = true;
             }
 
             if (pushed) {

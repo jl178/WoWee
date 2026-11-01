@@ -26,7 +26,6 @@ public:
 private:
     bool initialized_ = false;
     bool prevGrounded_ = true;
-    bool prevJumping_ = false;
     bool prevFalling_ = false;
     float fallSeconds_ = 0.0f;  ///< time in the current fall, for hard landings
     bool prevSwimming_ = false;

@@ -2027,13 +2027,29 @@ static int lua_GetZoneText(lua_State* L) {
 }
 
 // GetSubZoneText() → subzone name (same as zone for now - server doesn't always send subzone)
-static int lua_GetSubZoneText(lua_State* L) {
-    return lua_GetZoneText(L);  // Best-effort: zone and subzone often overlap
+// Empty when the player stands in no subzone, as stock answers. Returning
+// the zone made ZoneText_OnEvent treat subzone == zone, so subzone banners
+// ("Goldshire") never showed.
+static std::string liveSubZoneName(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    auto* svc = getLuaServices(L);
+    if (!gh || !svc || !svc->getLiveAreaId || !svc->getLiveZoneId) return {};
+    const uint32_t area = svc->getLiveAreaId();
+    if (area == 0 || area == svc->getLiveZoneId()) return {};
+    return gh->getWhoAreaName(area);
 }
 
-// GetMinimapZoneText() → zone name displayed near minimap
+static int lua_GetSubZoneText(lua_State* L) {
+    lua_pushstring(L, liveSubZoneName(L).c_str());
+    return 1;
+}
+
+// GetMinimapZoneText(): the subzone when there is one, else the zone.
 static int lua_GetMinimapZoneText(lua_State* L) {
-    return lua_GetZoneText(L);
+    const std::string sub = liveSubZoneName(L);
+    if (sub.empty()) return lua_GetZoneText(L);
+    lua_pushstring(L, sub.c_str());
+    return 1;
 }
 
 // --- World Map Navigation API ---
@@ -2070,6 +2086,24 @@ static void fireWorldMapUpdate(lua_State* L) {
 
 // SetMapToCurrentZone() - sets map view to the player's current zone
 static int lua_SetMapToCurrentZone(lua_State* L) {
+    // Diagnostic: this is the only call that snaps the map to the player's
+    // zone. Log who asks (at most once a second) so a snap after a click can
+    // be traced to its FrameXML caller.
+    {
+        static double lastLog = -10.0;
+        const double now = static_cast<double>(clock()) / CLOCKS_PER_SEC;
+        if (now - lastLog > 1.0) {
+            lastLog = now;
+            std::string trace;
+            lua_Debug ar;
+            for (int lvl = 1; lvl <= 6 && lua_getstack(L, lvl, &ar); ++lvl) {
+                if (!lua_getinfo(L, "Sln", &ar)) break;
+                trace += std::string(" <- ") + ar.short_src + ":" +
+                         std::to_string(ar.currentline) + " " + (ar.name ? ar.name : "");
+            }
+            LOG_INFO("SetMapToCurrentZone from:", trace);
+        }
+    }
     // Called every time the map is shown. It set two statics that nothing
     // reads any more and never told the map, so a map left on another zone
     // stayed there when reopened.
@@ -4722,6 +4756,7 @@ static int lua_WoweeSettingList(lua_State* L) {
         lua_pushnumber(L, d.defaultValue); lua_setfield(L, -2, "default");
         lua_pushstring(L, d.enabledWhen);  lua_setfield(L, -2, "enabledwhen");
         lua_pushstring(L, d.store);        lua_setfield(L, -2, "store");
+        lua_pushstring(L, d.restartNote);  lua_setfield(L, -2, "restartnote");
         lua_rawseti(L, -2, static_cast<int>(i) + 1);
     }
     return 1;

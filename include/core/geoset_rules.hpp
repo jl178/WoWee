@@ -108,10 +108,13 @@ inline uint16_t resolveGeoset(uint16_t preferred,
 /// instead.
 inline void addFacialHairGeosets(std::unordered_set<uint16_t>& out,
                                  uint16_t variant100, uint16_t variant200,
-                                 uint16_t variant300) {
+                                 uint16_t variant300, uint16_t variant1700 = 0) {
     if (variant100 != 0) out.insert(static_cast<uint16_t>(100 + variant100));
     if (variant200 != 0) out.insert(static_cast<uint16_t>(200 + variant200));
     if (variant300 != 0) out.insert(static_cast<uint16_t>(300 + variant300));
+    // Group 1700 from the same row: the racial eye glow, 1702 on the stock
+    // night elf, blood elf and some undead faces (none of them carries 1701).
+    if (variant1700 != 0) out.insert(static_cast<uint16_t>(1700 + variant1700));
 }
 
 /// Key for the (race, sex, variation) maps built from CharHairGeosets.dbc and
@@ -157,11 +160,12 @@ inline std::unordered_set<uint16_t> bareCharacterGeosets(uint16_t hairScalp,
                                                          uint16_t facial100,
                                                          uint16_t facial200,
                                                          uint16_t facial300,
-                                                         uint8_t raceId = 0) {
+                                                         uint8_t raceId = 0,
+                                                         uint16_t facial1700 = 0) {
     std::unordered_set<uint16_t> geosets;
     geosets.insert(0);                      // the body
     if (hairScalp != 0) geosets.insert(hairScalp);
-    addFacialHairGeosets(geosets, facial100, facial200, facial300);
+    addFacialHairGeosets(geosets, facial100, facial200, facial300, facial1700);
     if (raceHasGlowingEyes(raceId)) geosets.insert(kGeosetEyeGlow);
 
     geosets.insert(kGeosetBareForearms);    // no gloves

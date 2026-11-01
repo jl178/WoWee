@@ -734,6 +734,39 @@ inline const game::ItemSlot* inventorySlotItem(const game::Inventory& inv, int s
     return nullptr;
 }
 
+/// The item entry another unit wears in equipment slot `slotId` (1..19), or
+/// zero.
+///
+/// The unit's PLAYER_VISIBLE_ITEM_n_ENTRYID update fields name every equipped
+/// item for any player in view, and they are live - they change the moment the
+/// player swaps a piece - so they are read first. The inspect reply (or the
+/// Classic/TBC inspect gear packets) is the answer for a player whose fields
+/// came through empty. Reading only the inspect cache left every square of the
+/// inspect paperdoll blank until a reply came, and for good when none did (out
+/// of range, or a server that declines).
+///
+/// Queues an item query for an entry the cache has not seen, so the name and
+/// icon follow; GET_ITEM_INFO_RECEIVED and UNIT_INVENTORY_CHANGED fire when it
+/// arrives.
+inline uint32_t unitEquippedItemEntry(game::GameHandler* gh, uint64_t guid, int slotId) {
+    if (!gh || guid == 0 || slotId < 1 || slotId > 19) return 0;
+    const auto idx = static_cast<size_t>(slotId - 1);
+    const std::array<uint32_t, 19>* source = nullptr;
+    const auto& visible = gh->otherPlayerVisibleItemEntriesRef();
+    if (auto it = visible.find(guid); it != visible.end()) {
+        for (uint32_t e : it->second) {
+            if (e != 0) { source = &it->second; break; }
+        }
+    }
+    if (!source) {
+        const auto& inspected = gh->inspectedPlayerItemEntriesRef();
+        if (auto it = inspected.find(guid); it != inspected.end()) source = &it->second;
+    }
+    const uint32_t entry = source ? (*source)[idx] : 0;
+    if (entry) gh->ensureItemInfo(entry);
+    return entry;
+}
+
 /// Where a container slot lives on the wire: the container byte and the slot
 /// within it.
 ///

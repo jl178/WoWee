@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ui/ui_services.hpp"
+#include <vulkan/vulkan.h>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -18,7 +19,7 @@ namespace ui {
 class ChatBubbleManager {
 public:
     /** Add or replace a bubble for the given entity. */
-    void addBubble(uint64_t senderGuid, const std::string& message, bool isYell);
+    void addBubble(uint64_t senderGuid, const std::string& message, uint8_t chatType);
 
     /** Render and tick all active bubbles (projects to screen via camera). */
     void render(game::GameHandler& gameHandler, const UIServices& services);
@@ -41,8 +42,11 @@ private:
         std::string message;
         float timeRemaining = 0.0f;
         float totalDuration = 0.0f;
-        bool isYell = false;
+        uint8_t chatType = 1;  ///< game::ChatType, for the stock colour
     };
+    // Interface\Tooltips\ChatBubble-* textures, loaded once.
+    VkDescriptorSet bg_ = VK_NULL_HANDLE, edge_ = VK_NULL_HANDLE, tail_ = VK_NULL_HANDLE;
+    bool texGiveUp_ = false;
     std::vector<ChatBubble> bubbles_;
     bool callbackSet_ = false;
     bool show_ = true;

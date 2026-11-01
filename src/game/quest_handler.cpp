@@ -2199,14 +2199,8 @@ void QuestHandler::handleGossipMessage(network::Packet& packet) {
     // Classify gossip quests and update quest log + overhead NPC markers.
     classifyGossipQuests(true);
 
-    // Play NPC greeting voice
-    if (owner_.npcGreetingCallbackRef() && currentGossip_.npcGuid != 0) {
-        auto entity = owner_.getEntityManager().getEntity(currentGossip_.npcGuid);
-        if (entity) {
-            glm::vec3 npcPos(entity->getX(), entity->getY(), entity->getZ());
-            owner_.npcGreetingCallbackRef()(currentGossip_.npcGuid, npcPos);
-        }
-    }
+    // The greeting voice plays on the interaction (GameHandler::interactWithNpc),
+    // not here: submenus re-send this packet and replayed it each time.
 }
 
 void QuestHandler::handleQuestgiverQuestList(network::Packet& packet) {

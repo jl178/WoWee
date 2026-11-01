@@ -95,7 +95,8 @@ AppearanceComposer::AppearanceComposer(rendering::Renderer* renderer,
 PlayerTextureInfo AppearanceComposer::resolvePlayerTextures(pipeline::M2Model& model,
                                                             game::Race race, game::Gender gender,
                                                             uint32_t appearanceBytes,
-                                                            bool useFemaleModel) {
+                                                            bool useFemaleModel,
+                                                            uint8_t facialHairId) {
     PlayerTextureInfo result;
 
     uint32_t targetRaceId = static_cast<uint32_t>(race);
@@ -137,6 +138,7 @@ PlayerTextureInfo AppearanceComposer::resolvePlayerTextures(pipeline::M2Model& m
         who.faceId = charFaceId;
         who.hairStyleId = charHairStyleId;
         who.hairColorId = charHairColorId;
+        who.facialHairId = facialHairId;
 
         // The underwear rows name art that is not always on disk, and this
         // caller can ask.
@@ -151,6 +153,8 @@ PlayerTextureInfo AppearanceComposer::resolvePlayerTextures(pipeline::M2Model& m
         result.skinExtraPath = sections.skinExtra;
         result.faceLowerPath = sections.faceLower;
         result.faceUpperPath = sections.faceUpper;
+        result.facialLowerPath = sections.facialLower;
+        result.facialUpperPath = sections.facialUpper;
         if (!sections.hair.empty()) result.hairTexturePath = sections.hair;
         result.underwearPaths = sections.underwear;
 
@@ -213,6 +217,8 @@ void AppearanceComposer::compositePlayerSkin(uint32_t modelSlotId, const PlayerT
     underwearPaths_.clear();
     if (!texInfo.faceLowerPath.empty()) underwearPaths_.push_back(texInfo.faceLowerPath);
     if (!texInfo.faceUpperPath.empty()) underwearPaths_.push_back(texInfo.faceUpperPath);
+    if (!texInfo.facialLowerPath.empty()) underwearPaths_.push_back(texInfo.facialLowerPath);
+    if (!texInfo.facialUpperPath.empty()) underwearPaths_.push_back(texInfo.facialUpperPath);
     for (const auto& up : texInfo.underwearPaths) underwearPaths_.push_back(up);
 
     // Composite body skin + face + underwear overlays
@@ -221,6 +227,9 @@ void AppearanceComposer::compositePlayerSkin(uint32_t modelSlotId, const PlayerT
         layers.push_back(texInfo.bodySkinPath);
         if (!texInfo.faceLowerPath.empty()) layers.push_back(texInfo.faceLowerPath);
         if (!texInfo.faceUpperPath.empty()) layers.push_back(texInfo.faceUpperPath);
+        // The beard over the face it grows on, before anything is worn.
+        if (!texInfo.facialLowerPath.empty()) layers.push_back(texInfo.facialLowerPath);
+        if (!texInfo.facialUpperPath.empty()) layers.push_back(texInfo.facialUpperPath);
         for (const auto& up : texInfo.underwearPaths) {
             layers.push_back(up);
         }
@@ -284,7 +293,7 @@ std::unordered_set<uint16_t> AppearanceComposer::buildDefaultPlayerGeosets(uint8
     // nothing equipped is one answer, in core/geoset_rules.hpp, shared with the
     // portrait - the two used to keep their own and had drifted.
     uint16_t selectedHairScalp = 1;
-    uint16_t facial100 = 0, facial200 = 0, facial300 = 0;
+    uint16_t facial100 = 0, facial200 = 0, facial300 = 0, facial1700 = 0;
     bool haveFacial = false;
     if (entitySpawner_) {
         const auto& hairMap = entitySpawner_->getHairGeosetMap();
@@ -297,6 +306,7 @@ std::unordered_set<uint16_t> AppearanceComposer::buildDefaultPlayerGeosets(uint8
             facial100 = itFacial->second.geoset100;
             facial200 = itFacial->second.geoset200;
             facial300 = itFacial->second.geoset300;
+            facial1700 = itFacial->second.geoset1700;
             haveFacial = true;
         }
     }
@@ -306,7 +316,8 @@ std::unordered_set<uint16_t> AppearanceComposer::buildDefaultPlayerGeosets(uint8
     }
 
     std::unordered_set<uint16_t> activeGeosets =
-        bareCharacterGeosets(selectedHairScalp, facial100, facial200, facial300, raceId);
+        bareCharacterGeosets(selectedHairScalp, facial100, facial200, facial300, raceId,
+                             facial1700);
 
     return activeGeosets;
 }
@@ -458,6 +469,22 @@ void AppearanceComposer::loadEquippedWeapons() {
     auto& inventory = gameHandler_->getInventory();
 
     loadEquippedHelm(inventory);
+
+    // Shoulders, which the local character never got: the other-player path
+    // had them and this one did not. Same helper, same side mapping.
+    {
+        const auto& shoulderSlot = inventory.getEquipSlot(game::EquipSlot::SHOULDERS);
+        uint32_t shoulderDisplayId = 0;
+        if (!shoulderSlot.empty()) {
+            const auto* info = gameHandler_->getItemInfo(shoulderSlot.item.itemId);
+            shoulderDisplayId = info && info->valid ? info->displayInfoId
+                                                    : shoulderSlot.item.displayInfoId;
+        }
+        core::attachShoulders(*charRenderer, *assetManager_, charInstanceId, shoulderDisplayId,
+            [this](const std::string&) {
+                return entitySpawner_ ? entitySpawner_->allocateWeaponModelId() : 0u;
+            });
+    }
 
     // Load ItemDisplayInfo.dbc
     auto displayInfoDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");

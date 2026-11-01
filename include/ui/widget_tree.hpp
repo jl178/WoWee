@@ -18,6 +18,7 @@
 // grows upward. Converting at the point of drawing keeps every anchor rule here
 // readable against Blizzard's own documentation, rather than mirrored.
 
+#include <algorithm>
 #include <cstdint>
 #include <deque>
 #include <map>
@@ -550,6 +551,15 @@ struct Widget {
     /// model is actually built. Zero is "nothing chosen".
     uint32_t modelDisplayId = 0;
 
+    /// The unit a PlayerModel / DressUpModel frame was told to show with
+    /// SetUnit, as the token it was given and the guid that token named at
+    /// the time. The guid is what is drawn - a model set to "target" keeps
+    /// showing that player after the target moves on, as the stock client's
+    /// does, until SetUnit or RefreshUnit is called again. Empty and zero for
+    /// a frame nothing has been set on.
+    std::string modelUnit;
+    uint64_t modelUnitGuid = 0;
+
     /// The colour a ColorSelect frame is showing, as r, g, b. Its own state
     /// rather than the frame's tint: a colour picker draws its wheel in every
     /// colour and this is only the one being chosen.
@@ -1010,6 +1020,16 @@ public:
     /// An id stays listed after EnableKeyboard(false); readers check the flag.
     void setKeyboardEnabled(uint32_t id, bool enabled);
     [[nodiscard]] const std::vector<uint32_t>& keyboardFrames() const { return keyboardFrames_; }
+    /// Every model frame SetUnit has been called on, so the render loop can
+    /// build a figure for each without scanning the tree. Listed once; an id
+    /// stays listed after its unit is cleared, and readers check modelUnitGuid.
+    void noteUnitModelFrame(uint32_t id) {
+        if (std::find(unitModelFrames_.begin(), unitModelFrames_.end(), id) ==
+            unitModelFrames_.end()) {
+            unitModelFrames_.push_back(id);
+        }
+    }
+    [[nodiscard]] const std::vector<uint32_t>& unitModelFrames() const { return unitModelFrames_; }
     [[nodiscard]] const std::vector<uint32_t>& playerPortraits() const { return portraitsFor("player"); }
 
     /// The widget published under this name, or null. Names are unique in
@@ -1131,6 +1151,7 @@ private:
     std::vector<uint32_t> frames_;
     /// Ids that ever called EnableKeyboard(true), ascending. See keyboardFrames.
     std::vector<uint32_t> keyboardFrames_;
+    std::vector<uint32_t> unitModelFrames_;
     /// Which unit each portrait texture is showing, and the reverse. Two maps
     /// rather than one because both questions are asked every frame: the draw
     /// loop wants every texture for a unit, and a claim wants the unit a

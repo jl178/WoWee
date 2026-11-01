@@ -373,6 +373,105 @@ local function enableHostApply(panel)
     if apply and apply.Enable then apply:Enable() end
 end
 
+-- The few settings that cannot show a change at once - the schema's
+-- restartnote says why - are marked with an orange star, say so in their
+-- tooltip, and say so again in a line beside Okay when changed and when
+-- applied. Everything else applies as it is changed, and the same line says
+-- that too, so Apply is never a button that seems to do nothing.
+local RESTART_MARK = " |cffff9933*|r"
+local function needsRestart(setting)
+    return setting.restartnote ~= nil and setting.restartnote ~= ""
+end
+local function shownLabel(setting)
+    if needsRestart(setting) then return setting.label .. RESTART_MARK end
+    return setting.label
+end
+local function restartLine(setting)
+    if not needsRestart(setting) then return nil end
+    return "|cffff9933* " .. (setting.restartnote:gsub("\n", " ")) .. "|r"
+end
+
+local function hostOf(panel)
+    local container = panel:GetParent()
+    return container and container:GetParent()
+end
+
+-- One line per options frame, left of its Okay button, where the stock
+-- frame has nothing.
+local function statusLine(host)
+    if not host or not host.CreateFontString then return nil end
+    if not host.woweeStatus then
+        local line = host:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+        local okay = host.GetName and rawget(_G, (host:GetName() or "") .. "Okay")
+        if okay then
+            line:SetPoint("RIGHT", okay, "LEFT", -10, 0)
+        else
+            line:SetPoint("BOTTOMLEFT", host, "BOTTOMLEFT", 128, 20)
+        end
+        line:SetWidth(300)
+        line:SetJustifyH("RIGHT")
+        host.woweeStatus = line
+    end
+    return host.woweeStatus
+end
+
+-- What changed on each frame since its last Apply: whether anything did,
+-- and the labels of the settings among them that need a restart.
+local pendingByHost = {}
+
+local function noteChanged(panel, setting)
+    enableHostApply(panel)
+    local host = hostOf(panel)
+    if not host then return end
+    local state = pendingByHost[host]
+    if not state then
+        state = { restartKeys = {}, restartNames = {} }
+        pendingByHost[host] = state
+    end
+    state.changed = true
+    local line = statusLine(host)
+    if needsRestart(setting) then
+        if not state.restartKeys[setting.key] then
+            state.restartKeys[setting.key] = true
+            table.insert(state.restartNames, setting.label)
+        end
+        if line then
+            line:SetText("|cffff9933* " .. setting.label .. ": " ..
+                         (setting.restartnote:gsub("\n", " ")) .. "|r")
+        end
+    elseif line and #state.restartNames == 0 then
+        line:SetText("|cff9fd89fChanges show as you make them.|r")
+    end
+end
+
+-- Apply and Okay. Every panel on the frame is told, so the first one to hear
+-- it reports for all of them and clears the record.
+local function reportApplied(panel)
+    local host = hostOf(panel)
+    local state = host and pendingByHost[host]
+    if not state or not state.changed then return end
+    pendingByHost[host] = nil
+    local line = statusLine(host)
+    if #state.restartNames > 0 then
+        -- The stock frame's own flag: VideoOptionsFrame_OnHide shows
+        -- CLIENT_RESTART_ALERT when it is set, and Cancel clears it.
+        host.gameRestart = 1
+        if line then
+            line:SetText("|cffff9933Applied. Restart to see all of: " ..
+                         table.concat(state.restartNames, ", ") .. "|r")
+        end
+    elseif line then
+        line:SetText("|cff9fd89fApplied - the changes are already on screen.|r")
+    end
+end
+
+local function forgetChanges(panel)
+    local host = hostOf(panel)
+    if not host then return end
+    pendingByHost[host] = nil
+    if host.woweeStatus then host.woweeStatus:SetText("") end
+end
+
 -- The three controls. Each answers a read function and a write function, so
 -- one refresh walks all of them without caring which kind it is holding.
 
@@ -384,10 +483,10 @@ local function addCheckButton(layout, panel, setting, onChanged)
     button:SetPoint("TOPLEFT", x, y)
     local label = templateRegion(name, "Text")
                   or ownLabel(panel, button, "GameFontHighlight", "LEFT", "RIGHT", 2, 1)
-    label:SetText(setting.label)
+    label:SetText(shownLabel(setting))
     button:SetScript("OnClick", function(self)
         WoweeSetSetting(setting.key, self:GetChecked() and "1" or "0")
-        enableHostApply(panel)
+        noteChanged(panel, setting)
         -- Ticking one of these can be what makes another control live -
         -- normal mapping gates its strength, each extra bar gates its offsets
         -- - so the rest of the panel is re-read. A click is one event, unlike
@@ -395,7 +494,8 @@ local function addCheckButton(layout, panel, setting, onChanged)
         if onChanged then onChanged(setting.key) end
     end)
     withTooltip(button, setting.label,
-                joinReason(setting.tooltip, waitingOn(setting)))
+                joinReason(joinReason(setting.tooltip, waitingOn(setting)),
+                           restartLine(setting)))
     return {
         read = function()
             button:SetChecked(WoweeGetSetting(setting.key) == "1")
@@ -429,7 +529,7 @@ local function addSlider(layout, panel, setting)
     -- template has nowhere to put a moving label, and a slider whose number is
     -- only in a tooltip is a slider nobody can set to a particular value.
     local function showValue(value)
-        valueText:SetText(setting.label .. ":  " .. num(value))
+        valueText:SetText(shownLabel(setting) .. ":  " .. num(value))
     end
     -- Only a drag writes. read() moves the thumb to the setting, and SetValue
     -- fires this; writing from it put every slider on the page back each time
@@ -438,10 +538,11 @@ local function addSlider(layout, panel, setting)
     local reading = false
     slider:SetScript("OnValueChanged", function(self, value)
         showValue(value)
-        if not reading then WoweeSetSetting(setting.key, tostring(value)); enableHostApply(panel) end
+        if not reading then WoweeSetSetting(setting.key, tostring(value)); noteChanged(panel, setting) end
     end)
     withTooltip(slider, setting.label,
-                joinReason(setting.tooltip, waitingOn(setting)))
+                joinReason(joinReason(setting.tooltip, waitingOn(setting)),
+                           restartLine(setting)))
     return {
         read = function()
             local value = tonumber(WoweeGetSetting(setting.key)) or setting.min
@@ -461,7 +562,7 @@ local function addDropdown(layout, panel, setting, onChanged)
 
     local label = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
     label:SetPoint("TOPLEFT", x + 2, y - 2)
-    label:SetText(setting.label)
+    label:SetText(shownLabel(setting))
 
     local choices = {}
     for choice in tostring(setting.choices or ""):gmatch("[^|]+") do
@@ -495,7 +596,7 @@ local function addDropdown(layout, panel, setting, onChanged)
             info.checked = (index == selected())
             info.func = function(button)
                 WoweeSetSetting(setting.key, tostring(button.value - 1))
-                enableHostApply(panel)
+                noteChanged(panel, setting)
                 UIDropDownMenu_SetText(dropdown, choices[button.value])
                 CloseDropDownMenus()
                 -- A dropdown can change other settings - the quality preset
@@ -508,7 +609,8 @@ local function addDropdown(layout, panel, setting, onChanged)
         end
     end)
     withTooltip(dropdown, setting.label,
-                joinReason(setting.tooltip, waitingOn(setting)))
+                joinReason(joinReason(setting.tooltip, waitingOn(setting)),
+                           restartLine(setting)))
     return {
         read = function()
             UIDropDownMenu_SetText(dropdown, choices[selected()] or "")
@@ -613,16 +715,22 @@ local function buildPanel(category, settings)
     -- which is what the button promises and what the old version of this panel
     -- quietly did not honour.
     local opened = {}
+    -- Refresh runs when the options frame opens (and after Cancel and
+    -- Defaults), which is where the last session's status line goes.
     panel.refresh = function()
+        forgetChanges(panel)
         for _, control in ipairs(controls) do
             opened[control.key] = WoweeGetSetting(control.key)
             control.read()
         end
     end
+    -- Okay and Apply. Nothing is left to apply, but the player is told what
+    -- happened, and which changes wait for a restart.
     panel.okay = function()
         for _, control in ipairs(controls) do
             opened[control.key] = WoweeGetSetting(control.key)
         end
+        reportApplied(panel)
     end
     -- Both put back only what differs. Writing a setting applies it, and
     -- Cancel with nothing changed wrote every row on every page: full screen

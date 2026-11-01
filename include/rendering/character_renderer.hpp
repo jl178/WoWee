@@ -15,6 +15,7 @@
 #include <string>
 #include <utility>
 #include <future>
+#include <functional>
 #include <deque>
 #include <condition_variable>
 #include <mutex>
@@ -125,6 +126,12 @@ public:
     /// Footfall ($FSD) event times in ms for the sequence the instance is
     /// currently playing; nullptr if the model has none for that sequence.
     [[nodiscard]] const std::vector<uint32_t>* getFootstepEventTimes(uint32_t instanceId) const;
+    /// Called from update() on the main thread when a playing sequence passes
+    /// one of its $CSD sound events. position is the instance's render-space
+    /// position; soundEntryId is the event's SoundEntries id.
+    using AnimSoundEventCallback = std::function<void(uint32_t instanceId, uint32_t animationId,
+                                                      uint32_t soundEntryId, const glm::vec3& position)>;
+    void setAnimSoundEventCallback(AnimSoundEventCallback cb) { animSoundEventCallback_ = std::move(cb); }
     [[nodiscard]] bool hasAnimation(uint32_t instanceId, uint32_t animationId) const;
     bool getAnimationSequences(uint32_t instanceId, std::vector<pipeline::M2Sequence>& out) const;
     bool getInstanceModelName(uint32_t instanceId, std::string& modelName) const;
@@ -502,6 +509,7 @@ private:
     uint32_t numAnimThreads_ = 1;
     std::vector<std::future<void>> animFutures_;
     std::vector<std::reference_wrapper<CharacterInstance>> toUpdate_;  // reused across frames
+    AnimSoundEventCallback animSoundEventCallback_;
 
     // Shadow pipeline resources
     VkPipeline shadowPipeline_ = VK_NULL_HANDLE;

@@ -71,6 +71,34 @@ bool usesVisibleItemDisplayIds() {
     return false;
 }
 
+/// UNIT_INVENTORY_CHANGED for every unit token another player answers to.
+///
+/// The inspect paperdoll (and any addon showing another player's gear) redraws
+/// its squares on this event for the unit it is showing, and nothing fired it
+/// for anyone but the player - so gear that changed, or an item whose template
+/// arrived after the window drew, left the square as it was drawn: blank, or a
+/// question mark for good.
+void fireUnitInventoryChangedFor(GameHandler& gh, uint64_t guid) {
+    if (guid == 0 || guid == gh.getPlayerGuid() || !gh.addonEventCallbackRef()) return;
+    auto fire = [&gh](const std::string& unit) {
+        gh.addonEventCallbackRef()("UNIT_INVENTORY_CHANGED", {unit});
+    };
+    if (guid == gh.getTargetGuid())    fire("target");
+    if (guid == gh.getFocusGuid())     fire("focus");
+    if (guid == gh.getMouseoverGuid()) fire("mouseover");
+    // Numbered as resolveUnitGuid numbers them: others only, and in a raid
+    // only the player's own subgroup.
+    const auto& pd = gh.getPartyData();
+    const bool raid = groupIsRaid(pd.groupType);
+    int party = 0;
+    for (const auto& m : pd.members) {
+        if (m.guid == gh.getPlayerGuid()) continue;
+        if (raid && m.subGroup != pd.subGroup) continue;
+        if (++party > 4) break;
+        if (m.guid == guid) fire("party" + std::to_string(party));
+    }
+}
+
 constexpr int kTbcVisibleItemStride = 16;
 
 int tbcVisibleItemBaseFallback() {
@@ -4646,6 +4674,33 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
                 owner_.playerEquipmentCallbackRef()(guid, displayIds, invTypes);
             }
         }
+
+        // And the interface, for a unit it can be showing: an inspect square
+        // drawn before this template came back drew a question mark, and it
+        // redraws on UNIT_INVENTORY_CHANGED for its unit and nothing else.
+        // Only the guids a unit token can name are checked - every other
+        // player has no token for a window to be showing them under.
+        if (owner_.addonEventCallbackRef()) {
+            auto wears = [&](uint64_t guid) {
+                for (const auto* table : {&owner_.otherPlayerVisibleItemEntriesRef(),
+                                          &owner_.inspectedPlayerItemEntriesRef()}) {
+                    auto it = table->find(guid);
+                    if (it == table->end()) continue;
+                    for (uint32_t e : it->second) {
+                        if (e == resolvedEntry) return true;
+                    }
+                }
+                return false;
+            };
+            std::vector<uint64_t> shown = {owner_.getTargetGuid(), owner_.getFocusGuid(),
+                                           owner_.getMouseoverGuid()};
+            for (const auto& m : owner_.getPartyData().members) shown.push_back(m.guid);
+            std::sort(shown.begin(), shown.end());
+            shown.erase(std::unique(shown.begin(), shown.end()), shown.end());
+            for (uint64_t guid : shown) {
+                if (guid != 0 && wears(guid)) fireUnitInventoryChangedFor(owner_, guid);
+            }
+        }
     }
 }
 
@@ -5632,6 +5687,9 @@ void InventoryHandler::updateOtherPlayerVisibleItems(uint64_t guid, const FlatFi
     if (changed) {
         owner_.otherPlayerVisibleDirtyRef().insert(guid);
         emitOtherPlayerEquipment(guid);
+        // The squares of an open inspect window are read from these fields;
+        // a piece swapped while it is open should show as swapped.
+        fireUnitInventoryChangedFor(owner_, guid);
     }
 }
 

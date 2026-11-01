@@ -74,7 +74,7 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
             // The replacement request is already queued; never instantiate stale
             // geometry (notably the lumberjack's log-carrying model while chopping).
             // Release the pending marker unless a replacement queue entry still
-            // holds it - a stranded marker blocks the resync sweep forever.
+            // holds it - a stranded marker blocks the resync sweep enhanced.
             erasePendingGuidIfUnqueued(result.guid);
             continue;
         }
@@ -460,6 +460,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                                 who.faceId = he.faceId;
                                 who.hairStyleId = he.hairStyleId;
                                 who.hairColorId = he.hairColorId;
+                                who.facialHairId = he.facialHairId;
                                 // With the same existence check the spawn uses:
                                 // the underwear rows name art that was never
                                 // shipped - every Broken male torso among it -
@@ -474,6 +475,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                                     am);
                                 for (const std::string* path : {&sections.bodySkin, &sections.skinExtra,
                                                                 &sections.faceLower, &sections.faceUpper,
+                                                                &sections.facialLower, &sections.facialUpper,
                                                                 &sections.hair}) {
                                     if (!path->empty()) displaySkinPaths.push_back(*path);
                                 }
@@ -881,7 +883,7 @@ void EntitySpawner::finishWmoSpawn(const PreparedGameObjectWMO& result, uint32_t
     // The synchronous WMO path notifies TransportManager after creating the
     // render instance. Do the same here: unique/uncached transport WMOs (notably
     // the Kraken icebreaker) otherwise become visible but remain unregistered
-    // and stationary forever.
+    // and stationary enhanced.
     if (gameHandler_ && gameHandler_->isTransportGuid(result.guid)) {
         gameHandler_->notifyTransportSpawned(
             result.guid, result.entry, result.displayId,
@@ -2092,7 +2094,7 @@ void EntitySpawner::applyGameObjectState(uint64_t guid, uint8_t goState) {
     // No OPEN or CLOSE sequence of its own, but one animation that is the
     // opening: Undercity's lift doors are one bone and one sequence, id 0,
     // 3333ms. Held at its end the door stands open. Simply letting it run -
-    // which is what this did - swung it open and shut on a loop forever,
+    // which is what this did - swung it open and shut on a loop enhanced,
     // and freezing it put it back to shut, so the door never opened at all.
     if (goState == 0) {
         if (const auto only = m2->soleSequenceId(instanceId)) {

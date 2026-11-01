@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace wowee {
@@ -131,6 +132,12 @@ public:
     /// EmotesTextSound: the clip a text emote plays for a race and sex
     /// (sex 0 male, 1 female). Null when the emote is silent for them.
     [[nodiscard]] const SoundEntry* emoteSound(uint32_t textEmoteId, uint32_t raceId, uint32_t sex) const;
+    /// True when some text emote that plays this animation (EmotesText ->
+    /// Emotes.AnimID) has EmotesTextSound rows. Its voice comes from that
+    /// table, so the model's $CSD event for the animation is not played too.
+    [[nodiscard]] bool animHasEmoteTextSound(uint32_t animId) const {
+        return emoteTextSoundAnims_.count(animId) != 0;
+    }
     /// ChrRaces.ClientFileString, "Human" or "Scourge". Empty when unknown.
     [[nodiscard]] std::string raceClientName(uint32_t raceId) const;
     /// The jump and land grunts are not in CreatureSoundData for player
@@ -157,6 +164,7 @@ private:
     std::unordered_map<uint32_t, std::vector<WmoAreaSounds>> wmoAreas_;  // by wmoId
     std::unordered_map<uint32_t, NpcSounds> npcSounds_;  // by NPCSounds id
     std::unordered_map<uint64_t, uint32_t> emoteSounds_;  // (emote<<16 | race<<8 | sex) -> sound
+    std::unordered_set<uint32_t> emoteTextSoundAnims_;    // anim ids voiced by EmotesTextSound
 
     // SoundEntries has ten thousand rows and a handful are ever asked for.
     mutable std::unordered_map<uint32_t, SoundEntry> soundCache_;

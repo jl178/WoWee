@@ -363,17 +363,11 @@ bool SpellHandler::launchSpellMissile(uint32_t spellId, uint32_t visualId, uint6
     glm::vec3 start, end;
     if (!resolveUnitPosition(casterGuid, start) || !resolveUnitPosition(targetGuid, end))
         return false;
-    // From the casting hand when the caster is drawn, else about chest high;
-    // into the target's chest.
-    start.z += 1.5f;
-    if (auto* characters = renderer->getCharacterRenderer()) {
-        glm::mat4 hand(1.0f);
-        const uint32_t casterInstance = owner_.resolveUnitRenderInstance(casterGuid);
-        if (casterInstance != 0 && characters->getAttachmentTransform(casterInstance, 1, hand))
-            start = glm::vec3(hand[3]);
-    }
-    end.z += 1.0f;
-    return svs->playSpellMissile(visualId, start, end, speed, impactAtEnd);
+    // Feet positions; the visual system picks the caster and target
+    // attachments SpellVisual.dbc names and homes on the target as it moves.
+    return svs->playSpellMissile(visualId, start, end, speed, impactAtEnd,
+                                 owner_.resolveUnitRenderInstance(casterGuid),
+                                 owner_.resolveUnitRenderInstance(targetGuid));
 }
 
 bool SpellHandler::resolveUnitPosition(uint64_t guid, glm::vec3& outPos) {
@@ -390,33 +384,40 @@ bool SpellHandler::resolveUnitPosition(uint64_t guid, glm::vec3& outPos) {
     return true;
 }
 
-void SpellHandler::triggerCastVisual(uint32_t spellId, uint64_t casterGuid, uint32_t castTimeMs) {
-    LOG_INFO("SpellVisual: triggerCastVisual spellId=", spellId, " casterGuid=0x", std::hex, casterGuid, std::dec);
-    auto* renderer = owner_.services().renderer;
-    if (!renderer) { LOG_WARNING("SpellVisual: triggerCastVisual - no renderer"); return; }
-    auto* svs = renderer->getSpellVisualSystem();
-    if (!svs) { LOG_WARNING("SpellVisual: triggerCastVisual - no SpellVisualSystem"); return; }
-    uint32_t visualId = resolveSpellVisualId(spellId);
-    if (visualId == 0) { LOG_WARNING("SpellVisual: triggerCastVisual - visualId=0 for spellId=", spellId); return; }
-    glm::vec3 casterPos;
-    if (!resolveUnitPosition(casterGuid, casterPos)) { LOG_DEBUG("SpellVisual: triggerCastVisual - cannot resolve caster position for guid=0x", std::hex, casterGuid, std::dec); return; }
-    LOG_INFO("SpellVisual: triggerCastVisual visualId=", visualId, " pos=(", casterPos.x, ",", casterPos.y, ",", casterPos.z, ") castTimeMs=", castTimeMs);
-    svs->playSpellVisualPrecast(visualId, casterPos, castTimeMs,
-                                owner_.resolveUnitRenderInstance(casterGuid));
-}
-
-void SpellHandler::triggerImpactVisual(uint32_t spellId, uint64_t targetGuid) {
-    LOG_INFO("SpellVisual: triggerImpactVisual spellId=", spellId, " targetGuid=0x", std::hex, targetGuid, std::dec);
+void SpellHandler::triggerCastVisual(uint32_t spellId, uint64_t casterGuid, uint32_t castTimeMs,
+                                     bool channel) {
     auto* renderer = owner_.services().renderer;
     if (!renderer) return;
     auto* svs = renderer->getSpellVisualSystem();
     if (!svs) return;
     uint32_t visualId = resolveSpellVisualId(spellId);
-    if (visualId == 0) { LOG_WARNING("SpellVisual: triggerImpactVisual - visualId=0 for spellId=", spellId); return; }
+    if (visualId == 0) return;
+    glm::vec3 casterPos;
+    if (!resolveUnitPosition(casterGuid, casterPos)) return;
+    LOG_DEBUG("SpellVisual: build-up spell=", spellId, " visual=", visualId, " caster=0x",
+              std::hex, casterGuid, std::dec, " ms=", castTimeMs, channel ? " channel" : "");
+    svs->playSpellVisualPrecast(visualId, casterPos, castTimeMs,
+                                owner_.resolveUnitRenderInstance(casterGuid), casterGuid, channel);
+}
+
+void SpellHandler::cancelCastVisual(uint64_t casterGuid) {
+    if (auto* renderer = owner_.services().renderer)
+        if (auto* svs = renderer->getSpellVisualSystem())
+            svs->cancelPrecastVisuals(casterGuid);
+}
+
+void SpellHandler::triggerImpactVisual(uint32_t spellId, uint64_t targetGuid) {
+    auto* renderer = owner_.services().renderer;
+    if (!renderer) return;
+    auto* svs = renderer->getSpellVisualSystem();
+    if (!svs) return;
+    uint32_t visualId = resolveSpellVisualId(spellId);
+    if (visualId == 0) return;
     glm::vec3 targetPos;
     if (!resolveUnitPosition(targetGuid, targetPos)) return;
-    LOG_INFO("SpellVisual: triggerImpactVisual visualId=", visualId, " pos=(", targetPos.x, ",", targetPos.y, ",", targetPos.z, ")");
-    svs->playSpellVisual(visualId, targetPos, /*useImpactKit=*/true);
+    // On the target itself, at the kit's slots (chest, head, base...).
+    svs->playSpellVisual(visualId, targetPos, /*useImpactKit=*/true,
+                         owner_.resolveUnitRenderInstance(targetGuid));
 }
 
 void SpellHandler::launchRangedWeaponProjectile(uint32_t spellId, uint64_t targetGuid) {
@@ -1206,11 +1207,8 @@ void SpellHandler::cancelCast() {
     queuedSpellTarget_ = 0;
     if (owner_.addonEventCallbackRef())
         owner_.addonEventCallbackRef()("UNIT_SPELLCAST_STOP", {"player"});
-    // Remove lingering precast visual effects
-    if (auto* renderer = owner_.services().renderer) {
-        if (auto* svs = renderer->getSpellVisualSystem())
-            svs->cancelAllPrecastVisuals();
-    }
+    // Remove the player's build-up (only theirs: other casters keep going)
+    cancelCastVisual(owner_.getPlayerGuid());
 }
 
 void SpellHandler::startCraftQueue(uint32_t spellId, int count) {
@@ -1755,6 +1753,7 @@ void SpellHandler::updateTimers(float dt) {
             if (st.timeRemaining <= -kCastEndGraceSec) {
                 const uint64_t guid = it->first;
                 it = unitCastStates_.erase(it);
+                if (guid != owner_.getPlayerGuid()) cancelCastVisual(guid);
                 if (guid != owner_.getPlayerGuid() && owner_.spellCastAnimCallbackRef())
                     owner_.spellCastAnimCallbackRef()(guid, false, /*hard stop*/true, SpellCastType::OMNI);
                 continue;
@@ -1979,11 +1978,8 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
     owner_.pendingGameObjectInteractGuidRef() = 0;
     craftQueueSpellId_ = 0;
     craftQueueRemaining_ = 0;
-    // Remove lingering precast visual effects
-    if (auto* renderer = owner_.services().renderer) {
-        if (auto* svs = renderer->getSpellVisualSystem())
-            svs->cancelAllPrecastVisuals();
-    }
+    // Remove the player's build-up (only theirs: other casters keep going)
+    cancelCastVisual(owner_.getPlayerGuid());
     queuedSpellId_ = 0;
     queuedSpellTarget_ = 0;
 
@@ -2157,8 +2153,8 @@ void SpellHandler::handleSpellStart(network::Packet& packet) {
         }
     }
 
-    // Trigger cast visual effect (precast/cast kit M2) at the caster's position.
-    // Skip profession spells (crafting has no flashy cast effects).
+    // The precast kit's build-up on the caster (any caster) until SPELL_GO,
+    // a failure or the timeout. Skip profession spells.
     if (!owner_.isProfessionSpell(data.spellId) && !rangedWeaponAttack) {
         triggerCastVisual(data.spellId, data.casterUnit, data.castTime);
     }
@@ -2377,12 +2373,17 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
     if ((playerIsHit || playerHitEnemy) && !rangedWeaponAttack)
         playSpellImpactSound(data.spellId);
 
+    // The cast went off: the build-up in the caster's hands is done (any
+    // caster - it used to stay for the whole timer, and a failure anywhere
+    // cleared every unit's at once).
+    cancelCastVisual(data.casterUnit);
+
     // Trigger spell visual effects: cast kit at caster + impact kit at each hit target.
     // Skip profession spells and melee (schoolMask == 1) abilities.
     if (!owner_.isProfessionSpell(data.spellId) && !rangedWeaponAttack) {
         uint32_t visualId = resolveSpellVisualId(data.spellId);
         if (visualId != 0) {
-            // Cast-complete visual at caster (for instant spells that skip SPELL_START)
+            // The cast kit on the caster, timed casts and instants alike
             glm::vec3 casterPos;
             if (resolveUnitPosition(data.casterUnit, casterPos)) {
                 if (auto* renderer = owner_.services().renderer) {
@@ -4161,6 +4162,7 @@ void SpellHandler::handleSpellFailedOther(network::Packet& packet) {
         uint32_t failedSpellId = 0;
         if (const auto* st = getUnitCastState(failOtherGuid)) failedSpellId = st->spellId;
         unitCastStates_.erase(failOtherGuid);
+        cancelCastVisual(failOtherGuid);
         if (owner_.spellCastAnimCallbackRef())
             owner_.spellCastAnimCallbackRef()(failOtherGuid, false, /*hard stop*/true, SpellCastType::OMNI);
         if (owner_.addonEventCallbackRef()) {
@@ -4224,9 +4226,11 @@ void SpellHandler::handlePlaySpellVisual(network::Packet& packet) {
         glm::vec3 canonical(entity->getLatestX(), entity->getLatestY(), entity->getLatestZ());
         spawnPos = core::coords::canonicalToRender(canonical);
     }
+    // The id is a SpellVisualKit.dbc row (AzerothCore Unit::SendPlaySpellVisual),
+    // not a SpellVisual.dbc one; reading it as the latter played some
+    // unrelated spell's cast kit.
     if (auto* sv = renderer->getSpellVisualSystem())
-        sv->playSpellVisual(visualId, spawnPos, /*useImpactKit=*/false,
-                            owner_.resolveUnitRenderInstance(casterGuid));
+        sv->playSpellVisualKit(visualId, spawnPos, owner_.resolveUnitRenderInstance(casterGuid));
 }
 
 void SpellHandler::handleSpellModifier(network::Packet& packet, bool isFlat) {
@@ -4381,11 +4385,8 @@ void SpellHandler::handleSpellFailure(network::Packet& packet) {
         craftQueueRemaining_ = 0;
         queuedSpellId_ = 0;
         queuedSpellTarget_ = 0;
-        // Remove lingering precast visual effects
-        if (auto* renderer = owner_.services().renderer) {
-            if (auto* svs = renderer->getSpellVisualSystem())
-                svs->cancelAllPrecastVisuals();
-        }
+        // Remove the player's build-up (only theirs: other casters keep going)
+        cancelCastVisual(owner_.getPlayerGuid());
         if (auto* ac = owner_.services().audioCoordinator) {
             if (auto* ssm = ac->getSpellSoundManager()) {
                 ssm->stopPrecast();
@@ -4395,8 +4396,10 @@ void SpellHandler::handleSpellFailure(network::Packet& packet) {
             owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), false, false, SpellCastType::OMNI);
         }
     } else {
-        // Another unit's cast failed - clear their tracked cast bar
+        // Another unit's cast failed - clear their tracked cast bar and the
+        // build-up in their hands (it used to stay until its timer ran out).
         unitCastStates_.erase(failGuid);
+        cancelCastVisual(failGuid);
         if (owner_.spellCastAnimCallbackRef()) {
             owner_.spellCastAnimCallbackRef()(failGuid, false, /*hard stop*/true, SpellCastType::OMNI);
         }
@@ -5017,8 +5020,9 @@ void SpellHandler::parseEffectInterruptCast(network::Packet& packet, uint32_t ef
         if (!readEffectLogTarget(packet, icTarget)) { packet.skipAll(); break; }
         if (!packet.hasRemaining(4)) { packet.skipAll(); break; }
         uint32_t icSpellId = packet.readUInt32();
-        // Clear the interrupted unit's cast bar immediately
+        // Clear the interrupted unit's cast bar and build-up immediately
         unitCastStates_.erase(icTarget);
+        cancelCastVisual(icTarget);
         // Record interrupt in combat log when player is involved
         if (isPlayerCaster || icTarget == playerGuid)
             owner_.addCombatText(CombatTextEntry::INTERRUPT, 0, icSpellId, isPlayerCaster, 0,
@@ -5264,6 +5268,10 @@ void SpellHandler::handleChannelStart(network::Packet& packet) {
         if (owner_.spellCastAnimCallbackRef()) {
             owner_.spellCastAnimCallbackRef()(chanCaster, true, true, chanType);
         }
+        // The channel's kit (Arcane Missiles' glowing hands, Drain Life) on
+        // the caster for as long as it runs.
+        if (!owner_.isProfessionSpell(chanSpellId))
+            triggerCastVisual(chanSpellId, chanCaster, chanTotalMs, /*channel=*/true);
 
         // Fire UNIT_SPELLCAST_CHANNEL_START for Lua addons
         if (owner_.addonEventCallbackRef()) {
@@ -5305,6 +5313,7 @@ void SpellHandler::handleChannelUpdate(network::Packet& packet) {
     }
     // Fire UNIT_SPELLCAST_CHANNEL_STOP when channel ends
     if (chanRemainMs == 0) {
+        cancelCastVisual(chanCaster2);
         // Stop channeling animation - return to idle
         if (owner_.spellCastAnimCallbackRef()) {
             owner_.spellCastAnimCallbackRef()(chanCaster2, false, true, SpellCastType::OMNI);

@@ -103,6 +103,15 @@ struct SettingDesc {
     /// game's own control did beyond writing its CVar - the global the
     /// interface reads, and the refresh that made the change show.
     const char* after = "";
+    /// "" when changing this setting shows at once. Otherwise what a player
+    /// is told about why it does not: the panels mark the control, repeat
+    /// this in its tooltip and in a status line beside Apply, and ask for a
+    /// restart when the options frame closes.
+    ///
+    /// Every other setting applies live, and should: a control that saves
+    /// and changes nothing on screen reads as broken, which is what this was
+    /// reported as. Use it only where applying live is not possible.
+    const char* restartNote = "";
 };
 
 /// A setting's value as a string, the way a CVar carries one.

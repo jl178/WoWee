@@ -3,6 +3,9 @@
 #include <SDL3/SDL_vulkan.h>
 #include "rendering/vk_context.hpp"
 #include "core/logger.hpp"
+#include "pipeline/asset_manager.hpp"
+#include "pipeline/blp_loader.hpp"
+#include "pipeline/dbc_loader.hpp"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <imgui_impl_vulkan.h>
@@ -11,6 +14,9 @@
 #include <random>
 #include <chrono>
 #include <cstdio>
+#include <algorithm>
+#include <cctype>
+#include <unordered_map>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -28,9 +34,216 @@ LoadingScreen::~LoadingScreen() {
 
 bool LoadingScreen::initialize() {
     LOG_INFO("Initializing loading screen (Vulkan/ImGui)");
-    selectRandomImage();
+    if (!loadStockImage()) selectRandomImage();
     LOG_INFO("Loading screen initialized");
     return true;
+}
+
+namespace {
+
+/// Every BLP the loading screen has shown, uploaded once for the life of the
+/// program. VkContext keeps UI textures until it is destroyed and offers no
+/// way to free one, so uploading the same 1024x1024 art on every map change
+/// would grow without bound; the art a player meets is a handful of images.
+VkDescriptorSet loadingBlpTexture(pipeline::AssetManager* am, VkContext* ctx,
+                                  const std::string& path, bool additive = false,
+                                  int* outW = nullptr, int* outH = nullptr) {
+    struct Entry { VkDescriptorSet ds = VK_NULL_HANDLE; int w = 0; int h = 0; };
+    static std::unordered_map<std::string, Entry> cache;
+    std::string key = path;
+    for (char& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (additive) key += "|add";
+    auto it = cache.find(key);
+    if (it == cache.end()) {
+        Entry e;
+        if (am && ctx) {
+            auto bytes = am->readFile(path);
+            if (!bytes.empty()) {
+                auto image = pipeline::BLPLoader::load(bytes);
+                if (image.isValid() && !image.data.empty()) {
+                    if (additive) {
+                        // An ADD-blended texture has no alpha of its own:
+                        // black is "nothing added". ImGui only blends by
+                        // alpha, so the brightness becomes the alpha and the
+                        // colour is un-premultiplied by it.
+                        for (size_t i = 0; i + 3 < image.data.size(); i += 4) {
+                            uint8_t* p = &image.data[i];
+                            const int m = std::max({p[0], p[1], p[2]});
+                            if (m == 0) { p[3] = 0; continue; }
+                            p[0] = static_cast<uint8_t>(p[0] * 255 / m);
+                            p[1] = static_cast<uint8_t>(p[1] * 255 / m);
+                            p[2] = static_cast<uint8_t>(p[2] * 255 / m);
+                            p[3] = static_cast<uint8_t>(m);
+                        }
+                    }
+                    e.ds = ctx->uploadImGuiTexture(image.data.data(), image.width, image.height);
+                    e.w = image.width;
+                    e.h = image.height;
+                }
+            }
+        }
+        it = cache.emplace(key, e).first;
+    }
+    if (outW) *outW = it->second.w;
+    if (outH) *outH = it->second.h;
+    return it->second.ds;
+}
+
+} // namespace
+
+bool LoadingScreen::loadStockImage() {
+    if (!assetManager || !vkCtx) return false;
+
+    // The bar is drawn whenever its art is there, even over the bundled
+    // picture, so a map without a LoadingScreens row still gets the stock bar.
+    barBorder = loadingBlpTexture(assetManager, vkCtx, "Interface\\Glues\\LoadingBar\\Loading-BarBorder.blp");
+    barFill = loadingBlpTexture(assetManager, vkCtx, "Interface\\Glues\\LoadingBar\\Loading-BarFill.blp");
+    barGlow = loadingBlpTexture(assetManager, vkCtx, "Interface\\Glues\\LoadingBar\\Loading-BarGlow.blp", true);
+    barGlass = loadingBlpTexture(assetManager, vkCtx, "Interface\\Glues\\LoadingBar\\Loading-BarGlass.blp");
+
+    if (mapId == 0xFFFFFFFFu) return false;
+    auto mapDbc = assetManager->loadDBC("Map.dbc");
+    auto screens = assetManager->loadDBC("LoadingScreens.dbc");
+    if (!mapDbc || !mapDbc->isLoaded() || !screens || !screens->isLoaded()) return false;
+    const int32_t mapRow = mapDbc->findRecordById(mapId);
+    if (mapRow < 0) return false;
+
+    // Map.LoadingScreenID: field 57 in 3.3.5a's 66-field Map.dbc. Other
+    // builds put it elsewhere, so it is found there by the two rows whose
+    // answer is known - Azeroth shows screen 4, Kalimdor screen 3.
+    uint32_t screenField = 0;
+    const uint32_t mapFields = mapDbc->getFieldCount();
+    if (mapFields == 66) {
+        screenField = 57;
+    } else {
+        const int32_t azeroth = mapDbc->findRecordById(0);
+        const int32_t kalimdor = mapDbc->findRecordById(1);
+        if (azeroth >= 0 && kalimdor >= 0) {
+            for (uint32_t f = 4; f < mapFields; ++f) {
+                if (mapDbc->getUInt32(static_cast<uint32_t>(azeroth), f) == 4 &&
+                    mapDbc->getUInt32(static_cast<uint32_t>(kalimdor), f) == 3) {
+                    screenField = f;
+                    break;
+                }
+            }
+        }
+    }
+    if (screenField == 0) return false;
+    const uint32_t screenId = mapDbc->getUInt32(static_cast<uint32_t>(mapRow), screenField);
+    if (screenId == 0) return false;
+    const int32_t screenRow = screens->findRecordById(screenId);
+    if (screenRow < 0) return false;
+
+    // LoadingScreens: ID, Name, FileName, HasWideScreen.
+    std::string file = screens->getString(static_cast<uint32_t>(screenRow), 2);
+    if (file.empty()) return false;
+    const bool hasWide = screens->getFieldCount() > 3 &&
+                         screens->getUInt32(static_cast<uint32_t>(screenRow), 3) != 0;
+
+    float aspect = 16.0f / 9.0f;
+    if (ImGui::GetCurrentContext()) {
+        const ImVec2 d = ImGui::GetIO().DisplaySize;
+        if (d.x > 1.0f && d.y > 1.0f) aspect = d.x / d.y;
+    }
+
+    VkDescriptorSet ds = VK_NULL_HANDLE;
+    int w = 0, h = 0;
+    // The client swaps in the *Wide art on a window wider than 4:3.
+    if (hasWide && aspect > 1.5f) {
+        std::string wide = file;
+        std::string lower = wide;
+        for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const size_t dot = lower.rfind(".blp");
+        if (dot != std::string::npos) wide.insert(dot, "Wide");
+        else wide += "Wide";
+        ds = loadingBlpTexture(assetManager, vkCtx, wide, false, &w, &h);
+        if (ds) wideImage = true;
+    }
+    if (!ds) ds = loadingBlpTexture(assetManager, vkCtx, file, false, &w, &h);
+    if (!ds) {
+        LOG_WARNING("Loading screen: no art at ", file, " for map ", mapId);
+        return false;
+    }
+    bgDescriptorSet = ds;
+    imageWidth = w;
+    imageHeight = h;
+    stockImage = true;
+    LOG_INFO("Loading screen: map ", mapId, " -> ", file, wideImage ? " (wide)" : "");
+    return true;
+}
+
+/// What the stock client draws while a world loads: the art, full screen, and
+/// the bar near the bottom. No zone name, no percentage, no status line.
+void LoadingScreen::drawContents(ImDrawList* dl, float screenW, float screenH) {
+    if (!dl || screenW < 1.0f || screenH < 1.0f) return;
+    dl->AddRectFilled(ImVec2(0, 0), ImVec2(screenW, screenH), IM_COL32(0, 0, 0, 255));
+
+    if (bgDescriptorSet) {
+        if (stockImage && !wideImage) {
+            // The square texture holds a 4:3 picture. A wider window
+            // letterboxes it at the sides rather than stretching it.
+            const float w = std::min(screenW, screenH * 4.0f / 3.0f);
+            const float x0 = (screenW - w) * 0.5f;
+            dl->AddImage(reinterpret_cast<ImTextureID>(bgDescriptorSet), ImVec2(x0, 0),
+                         ImVec2(x0 + w, screenH));
+        } else {
+            dl->AddImage(reinterpret_cast<ImTextureID>(bgDescriptorSet), ImVec2(0, 0),
+                         ImVec2(screenW, screenH));
+        }
+    }
+
+    const float progress = std::clamp(loadProgress, 0.0f, 1.0f);
+    // The bar in 768-tall interface units: the 512x64 border at its own
+    // size, centred, near the bottom of the screen.
+    const float u = screenH / 768.0f;
+    const float bw = 512.0f * u;
+    const float bh = 64.0f * u;
+    const float bx = (screenW - bw) * 0.5f;
+    const float by = screenH - 96.0f * u;
+    // The opening in the border art, in its texels: x 35..477, y 21..43.
+    const float ix0 = bx + 35.0f * u;
+    const float ix1 = bx + 477.0f * u;
+    const float iy0 = by + 21.0f * u;
+    const float iy1 = by + 43.0f * u;
+
+    if (!barBorder) {
+        // No glue art at all: a plain bar where the stock one sits.
+        dl->AddRectFilled(ImVec2(ix0, iy0), ImVec2(ix1, iy1), IM_COL32(0, 0, 0, 200));
+        if (progress > 0.001f)
+            dl->AddRectFilled(ImVec2(ix0, iy0), ImVec2(ix0 + (ix1 - ix0) * progress, iy1),
+                              IM_COL32(60, 110, 200, 255));
+        dl->AddRect(ImVec2(ix0 - 1, iy0 - 1), ImVec2(ix1 + 1, iy1 + 1),
+                    IM_COL32(120, 120, 120, 255));
+        return;
+    }
+
+    dl->AddRectFilled(ImVec2(ix0, iy0), ImVec2(ix1, iy1), IM_COL32(0, 0, 0, 255));
+    const float fillX = ix0 + (ix1 - ix0) * progress;
+    if (progress > 0.001f) {
+        if (barFill) {
+            dl->AddImage(reinterpret_cast<ImTextureID>(barFill), ImVec2(ix0, iy0),
+                         ImVec2(fillX, iy1));
+        }
+        if (barGlow) {
+            // The glow's head sits at texel 470 of 512 and its middle on row
+            // 63 of 128; drawn at half size with the head on the fill's edge,
+            // its tail trailing back over what has loaded.
+            const float gw = 256.0f * u;
+            const float gh = 64.0f * u;
+            const float gx = fillX - 235.0f * u;
+            const float gy = (iy0 + iy1) * 0.5f - 31.5f * u;
+            dl->PushClipRect(ImVec2(ix0, gy), ImVec2(fillX + 12.0f * u, gy + gh), true);
+            dl->AddImage(reinterpret_cast<ImTextureID>(barGlow), ImVec2(gx, gy),
+                         ImVec2(gx + gw, gy + gh));
+            dl->PopClipRect();
+        }
+    }
+    dl->AddImage(reinterpret_cast<ImTextureID>(barBorder), ImVec2(bx, by), ImVec2(bx + bw, by + bh));
+    if (barGlass) {
+        dl->AddImage(reinterpret_cast<ImTextureID>(barGlass), ImVec2(bx, by),
+                     ImVec2(bx + bw, by + bh), ImVec2(0, 0), ImVec2(1, 1),
+                     IM_COL32(255, 255, 255, 160));
+    }
 }
 
 void LoadingScreen::shutdown() {
@@ -265,73 +478,18 @@ void LoadingScreen::beginBackdrop(const char* windowName, float screenW, float s
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
         ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground |
         ImGuiWindowFlags_NoBringToFrontOnFocus);
-
-    if (bgDescriptorSet) {
-        ImGui::GetWindowDrawList()->AddImage(
-            reinterpret_cast<ImTextureID>(bgDescriptorSet),
-            ImVec2(0, 0), ImVec2(screenW, screenH));
-    }
+    // The picture itself is drawn by drawContents, which knows whether it is
+    // 4:3 art to letterbox or wide art to fill the window with.
 }
 
 void LoadingScreen::renderOverlay() {
     // Draw loading screen content as ImGui overlay within an existing ImGui frame.
     // Caller is responsible for ImGui NewFrame/Render and Vulkan frame management.
     ImGuiIO& io = ImGui::GetIO();
-    float screenW = io.DisplaySize.x;
-    float screenH = io.DisplaySize.y;
-
+    const float screenW = io.DisplaySize.x;
+    const float screenH = io.DisplaySize.y;
     beginBackdrop("##LoadingScreenOverlay", screenW, screenH);
-
-    // Zone name header
-    if (!zoneName.empty()) {
-        ImFont* font = ImGui::GetFont();
-        float zoneTextSize = 24.0f;
-        ImVec2 zoneSize = font->CalcTextSizeA(zoneTextSize, FLT_MAX, 0.0f, zoneName.c_str());
-        float zoneX = (screenW - zoneSize.x) * 0.5f;
-        float zoneY = screenH * 0.06f - 44.0f;
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddText(font, zoneTextSize, ImVec2(zoneX + 2.0f, zoneY + 2.0f),
-                    IM_COL32(0, 0, 0, 200), zoneName.c_str());
-        dl->AddText(font, zoneTextSize, ImVec2(zoneX, zoneY),
-                    IM_COL32(255, 220, 120, 255), zoneName.c_str());
-    }
-
-    // Progress bar
-    {
-        const float barWidthFrac = 0.6f;
-        const float barHeight = 6.0f;
-        const float barY = screenH * 0.06f;
-        float barX = screenW * (0.5f - barWidthFrac * 0.5f);
-        float barW = screenW * barWidthFrac;
-        ImDrawList* drawList = ImGui::GetWindowDrawList();
-        drawList->AddRectFilled(ImVec2(barX, barY), ImVec2(barX + barW, barY + barHeight),
-            IM_COL32(25, 25, 25, 200), 2.0f);
-        if (loadProgress > 0.001f) {
-            drawList->AddRectFilled(ImVec2(barX, barY), ImVec2(barX + barW * loadProgress, barY + barHeight),
-                IM_COL32(199, 156, 33, 255), 2.0f);
-        }
-        drawList->AddRect(ImVec2(barX - 1, barY - 1), ImVec2(barX + barW + 1, barY + barHeight + 1),
-            IM_COL32(140, 110, 25, 255), 2.0f);
-    }
-
-    // Percentage text
-    {
-        char pctBuf[32];
-        snprintf(pctBuf, sizeof(pctBuf), "%d%%", static_cast<int>(loadProgress * 100.0f));
-        float textY = screenH * 0.06f - 20.0f;
-        ImVec2 pctSize = ImGui::CalcTextSize(pctBuf);
-        ImGui::SetCursorPos(ImVec2((screenW - pctSize.x) * 0.5f, textY));
-        ImGui::TextColored(ImVec4(0.0f, 0.0f, 0.0f, 1.0f), "%s", pctBuf);
-    }
-
-    // Status text
-    {
-        float statusY = screenH * 0.06f + 14.0f;
-        ImVec2 statusSize = ImGui::CalcTextSize(statusText.c_str());
-        ImGui::SetCursorPos(ImVec2((screenW - statusSize.x) * 0.5f, statusY));
-        ImGui::TextColored(ImVec4(0.0f, 0.0f, 0.0f, 1.0f), "%s", statusText.c_str());
-    }
-
+    drawContents(ImGui::GetWindowDrawList(), screenW, screenH);
     ImGui::End();
 }
 
@@ -353,73 +511,7 @@ void LoadingScreen::render() {
 
     // Invisible fullscreen window
     beginBackdrop("##LoadingScreen", screenW, screenH);
-
-    // Zone name header (large text centered above progress bar)
-    if (!zoneName.empty()) {
-        ImFont* font = ImGui::GetFont();
-        float zoneTextSize = 24.0f;
-        ImVec2 zoneSize = font->CalcTextSizeA(zoneTextSize, FLT_MAX, 0.0f, zoneName.c_str());
-        float zoneX = (screenW - zoneSize.x) * 0.5f;
-        float zoneY = screenH * 0.06f - 44.0f;  // above percentage text
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        // Drop shadow
-        dl->AddText(font, zoneTextSize, ImVec2(zoneX + 2.0f, zoneY + 2.0f),
-                    IM_COL32(0, 0, 0, 200), zoneName.c_str());
-        // Gold text
-        dl->AddText(font, zoneTextSize, ImVec2(zoneX, zoneY),
-                    IM_COL32(255, 220, 120, 255), zoneName.c_str());
-    }
-
-    // Progress bar (top of screen)
-    {
-        const float barWidthFrac = 0.6f;
-        const float barHeight = 6.0f;
-        const float barY = screenH * 0.06f;
-        float barX = screenW * (0.5f - barWidthFrac * 0.5f);
-        float barW = screenW * barWidthFrac;
-
-        ImDrawList* drawList = ImGui::GetWindowDrawList();
-
-        // Background
-        drawList->AddRectFilled(
-            ImVec2(barX, barY),
-            ImVec2(barX + barW, barY + barHeight),
-            IM_COL32(25, 25, 25, 200), 2.0f);
-
-        // Fill (gold)
-        if (loadProgress > 0.001f) {
-            drawList->AddRectFilled(
-                ImVec2(barX, barY),
-                ImVec2(barX + barW * loadProgress, barY + barHeight),
-                IM_COL32(199, 156, 33, 255), 2.0f);
-        }
-
-        // Border
-        drawList->AddRect(
-            ImVec2(barX - 1, barY - 1),
-            ImVec2(barX + barW + 1, barY + barHeight + 1),
-            IM_COL32(140, 110, 25, 255), 2.0f);
-    }
-
-    // Percentage text above bar
-    {
-        char pctBuf[32];
-        snprintf(pctBuf, sizeof(pctBuf), "%d%%", static_cast<int>(loadProgress * 100.0f));
-        float barCenterY = screenH * 0.06f;
-        float textY = barCenterY - 20.0f;
-
-        ImVec2 pctSize = ImGui::CalcTextSize(pctBuf);
-        ImGui::SetCursorPos(ImVec2((screenW - pctSize.x) * 0.5f, textY));
-        ImGui::TextColored(ImVec4(0.0f, 0.0f, 0.0f, 1.0f), "%s", pctBuf);
-    }
-
-    // Status text below bar
-    {
-        float statusY = screenH * 0.06f + 14.0f;
-        ImVec2 statusSize = ImGui::CalcTextSize(statusText.c_str());
-        ImGui::SetCursorPos(ImVec2((screenW - statusSize.x) * 0.5f, statusY));
-        ImGui::TextColored(ImVec4(0.0f, 0.0f, 0.0f, 1.0f), "%s", statusText.c_str());
-    }
+    drawContents(ImGui::GetWindowDrawList(), screenW, screenH);
 
     ImGui::End();
     ImGui::Render();

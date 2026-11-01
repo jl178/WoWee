@@ -186,3 +186,47 @@ pre-existing, to be confirmed against the base commit.
 
 See the backlog in the loop prompt: jump phases, M2 per-frame scans, FrameXML
 layout, present mode, WMO ambience, footsteps, Windows package.
+
+## Playtest fixes, 2026-11-01 morning
+
+Jered played the native client against the lab server and reported gaps
+against stock 3.3.5a. Each fix goes after the general cause, not the one
+case he saw.
+
+- **Combat and casting:** hit reactions on both sides; remote casts stop on
+  SPELL_GO, failure, or a cast-time timeout, not only on channel end.
+- **Movement:** jump fixes; patrols walk because the WotLK spline Walkmode
+  bit is now read on every monster move; creatures turn to face a new target.
+- **Reaction colours:** nameplates, names, the selection circle and Lua
+  UnitReaction/UnitIsEnemy colour by how the unit regards the player, so
+  non-aggressive beasts are yellow.
+- **Character art:**
+  - Robe and dress skirts come from GeosetGroup[2] on the chest or legs
+    item, and robe leg textures are drawn last.
+  - NPC clothing groups 5/7/9/10/11 keep exactly one variant.
+  - Equipment is re-applied after every player model rebuild.
+  - Shoulders attach on the correct sides for everyone; NPCs also get helms.
+  - Facial hair textures come from CharSections section 2.
+  - Characters get no specular and no generated normal maps (they embossed
+    composited skins). The world keeps normal mapping and parallax.
+- **Lighting:** interior WMO groups use MOCV x2 with no sun shadow; unit
+  lighting eases indoors over about a second.
+- **Particles:** emitters use authored gravity, spread and drag (candles no
+  longer drip).
+- **UI:**
+  - Message frames honour justifyH.
+  - Subzone text is the real subzone.
+  - Chat bubbles use the stock textures, font and colours.
+  - A hidden subtree is re-marked after a partial resolve, which fixes the
+    half-closed achievement window.
+- **Map:** one input owner when hosted in WorldMapFrame; highlights use
+  additive alpha (no black squares in Northrend); cosmic highlights sit at
+  the stock rects.
+- **Barber:** previews revert unless bought; chairs seat at the server's
+  position and facing; remote units show their stand state.
+
+Not client bugs:
+- Undead-looking Stormwind commoners wear their Hallow's End costume (SmartAI
+  casts the appearance spell; the event runs through Nov 1).
+- Faces like Dordam's are Death Knight-only CharSections rows that the
+  playerbot randomizer hands to other classes.

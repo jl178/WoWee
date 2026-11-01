@@ -1549,7 +1549,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 e.boneBase = p.useBones ? static_cast<int32_t>(inst.megaBoneOffset) : 0;
                 e.boneCount = static_cast<int32_t>(inst.boneMatrices.size());
                 e.highlight = inst.highlight;
-                e.flags = inst.afloat > 0 ? 1 : 0;
+                e.flags = (inst.afloat > 0 ? 1 : 0) | inst.groundNormalFlags;
                 instanceDataCount_++;
                 ++writtenInstances;
             }
@@ -1834,7 +1834,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             e.boneBase = p.useBones ? static_cast<int32_t>(inst.megaBoneOffset) : 0;
                             e.boneCount = static_cast<int32_t>(inst.boneMatrices.size());
                             e.highlight = inst.highlight;
-                            e.flags = inst.afloat > 0 ? 1 : 0;
+                            e.flags = (inst.afloat > 0 ? 1 : 0) | inst.groundNormalFlags;
                             instanceDataCount_++;
                         }
                     }
@@ -2119,7 +2119,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             e.boneBase = needsBones ? static_cast<int32_t>(instance.megaBoneOffset) : 0;
             e.boneCount = static_cast<int32_t>(instance.boneMatrices.size());
             e.highlight = instance.highlight;
-            e.flags = instance.afloat > 0 ? 1 : 0;
+            e.flags = (instance.afloat > 0 ? 1 : 0) | instance.groundNormalFlags;
             instanceDataCount_++;
 
             // Pipeline selection
@@ -2477,7 +2477,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         // baked into the terrain - and a doodad smaller than a texel of the
         // shadow map at its distance draws for nothing. Both were most of the
         // casters, and each caster is a push constant and a draw per batch.
-        if (instance.cachedIsGroundDetail) continue;
+        if (instance.cachedIsGroundDetail || !instance.castsShadow) continue;
         {
             const glm::vec3 d = instance.position - shadowCenter;
             const float reach = shadowRadius + instance.cachedPaddedRadius;

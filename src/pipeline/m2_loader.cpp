@@ -1056,24 +1056,45 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
         };
 
         size_t footfallStamps = 0;
+        size_t soundStamps = 0;
         for (uint32_t e = 0; e < header.nEvents; e++) {
             size_t base = header.ofsEvents + e * eventSize;
             if (base + eventSize > m2Data.size()) break;
-            if (std::memcmp(m2Data.data() + base, "$FSD", 4) != 0) continue;
+            // $FSD: footfall times. $CSD: "play sound" - the data field is a
+            // SoundEntries id (character emote voices, clap). Other events
+            // ($BTH, $CST, $HIT...) carry no sound id and are not handled.
+            const bool isFootfall = std::memcmp(m2Data.data() + base, "$FSD", 4) == 0;
+            const bool isSound = std::memcmp(m2Data.data() + base, "$CSD", 4) == 0;
+            if (!isFootfall && !isSound) continue;
+            const uint32_t soundEntryId = isSound ? rd32(base + 4) : 0;
+            if (isSound && soundEntryId == 0) continue;
+            if (isSound && model.soundEvents.empty()) {
+                model.soundEvents.resize(model.sequences.size());
+            }
+            auto emit = [&](size_t s, uint32_t ts) {
+                if (isFootfall) {
+                    model.footstepEventTimes[s].push_back(ts);
+                    footfallStamps++;
+                } else {
+                    model.soundEvents[s].push_back({ts, soundEntryId});
+                    soundStamps++;
+                }
+            };
 
             if (wotlkEvents) {
                 uint32_t nArrays = rd32(base + trackOfs + 4);
                 uint32_t ofsArrays = rd32(base + trackOfs + 8);
                 uint32_t count = std::min<uint32_t>(nArrays, model.sequences.size());
                 for (uint32_t s = 0; s < count; s++) {
+                    // Without 0x20 the timestamps live in the sequence's .anim
+                    // file (EmoteLaugh does); loadAnimFile reads those.
+                    if (!(model.sequences[s].flags & kM2SeqFlagEmbeddedData)) continue;
                     uint32_t nTs = rd32(ofsArrays + s * 8);
                     uint32_t ofsTs = rd32(ofsArrays + s * 8 + 4);
                     if (nTs == 0 || nTs > 1024) continue;
                     if (ofsTs + nTs * sizeof(uint32_t) > m2Data.size()) continue;
                     auto stamps = readArray<uint32_t>(m2Data, ofsTs, nTs);
-                    auto& out = model.footstepEventTimes[s];
-                    out.insert(out.end(), stamps.begin(), stamps.end());
-                    footfallStamps += stamps.size();
+                    for (uint32_t ts : stamps) emit(s, ts);
                 }
             } else {
                 uint32_t nTs = rd32(base + trackOfs + 12);
@@ -1086,12 +1107,8 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                     uint32_t start = vanillaSeqWindows[s].first;
                     uint32_t end = vanillaSeqWindows[s].second;
                     if (start >= end) continue;
-                    auto& out = model.footstepEventTimes[s];
                     for (uint32_t ts : stamps) {
-                        if (ts >= start && ts < end) {
-                            out.push_back(ts - start);
-                            footfallStamps++;
-                        }
+                        if (ts >= start && ts < end) emit(s, ts - start);
                     }
                 }
             }
@@ -1100,8 +1117,17 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
         for (auto& list : model.footstepEventTimes) {
             std::sort(list.begin(), list.end());
         }
+        for (auto& list : model.soundEvents) {
+            std::sort(list.begin(), list.end(),
+                      [](const M2Model::SoundEvent& a, const M2Model::SoundEvent& b) {
+                          return a.timeMs < b.timeMs;
+                      });
+        }
         if (footfallStamps > 0) {
             core::Logger::getInstance().debug("  Footfall events: ", footfallStamps, " timestamps");
+        }
+        if (soundStamps > 0) {
+            core::Logger::getInstance().debug("  Sound events: ", soundStamps, " timestamps");
         }
     }
 
@@ -1996,6 +2022,61 @@ void M2Loader::loadAnimFile(const std::vector<uint8_t>& m2Data,
 
     M2Header header;
     std::memcpy(&header, m2Data.data(), sizeof(M2Header));
+
+    // Event ($FSD footfall, $CSD sound) timestamps for this sequence: the
+    // per-sequence array headers are in the M2, the timestamps in the .anim.
+    if (sequenceIndex < model.sequences.size() && header.version >= 264 &&
+        header.nEvents > 0 && header.nEvents < 512 && header.ofsEvents > 0) {
+        const bool haveFootfalls = sequenceIndex < model.footstepEventTimes.size() &&
+                                   !model.footstepEventTimes[sequenceIndex].empty();
+        const bool haveSounds = sequenceIndex < model.soundEvents.size() &&
+                                !model.soundEvents[sequenceIndex].empty();
+        auto rdM2 = [&](size_t off) -> uint32_t {
+            return off + 4 <= m2Data.size() ? readValue<uint32_t>(m2Data, off) : 0;
+        };
+        bool addedFootfalls = false, addedSounds = false;
+        for (uint32_t e = 0; e < header.nEvents; e++) {
+            const size_t base = header.ofsEvents + e * 36;
+            if (base + 36 > m2Data.size()) break;
+            const bool isFootfall = std::memcmp(m2Data.data() + base, "$FSD", 4) == 0;
+            const bool isSound = std::memcmp(m2Data.data() + base, "$CSD", 4) == 0;
+            if (isFootfall ? haveFootfalls : (!isSound || haveSounds)) continue;
+            const uint32_t soundEntryId = rdM2(base + 4);
+            if (isSound && soundEntryId == 0) continue;
+            const uint32_t nArrays = rdM2(base + 28);
+            const uint32_t ofsArrays = rdM2(base + 32);
+            if (sequenceIndex >= nArrays) continue;
+            const uint32_t nTs = rdM2(ofsArrays + sequenceIndex * 8);
+            const uint32_t ofsTs = rdM2(ofsArrays + sequenceIndex * 8 + 4);
+            if (nTs == 0 || nTs > 1024) continue;
+            if (static_cast<size_t>(ofsTs) + nTs * sizeof(uint32_t) > animData.size()) continue;
+            auto stamps = readArray<uint32_t>(animData, ofsTs, nTs);
+            if (isFootfall) {
+                if (model.footstepEventTimes.size() < model.sequences.size())
+                    model.footstepEventTimes.resize(model.sequences.size());
+                auto& out = model.footstepEventTimes[sequenceIndex];
+                out.insert(out.end(), stamps.begin(), stamps.end());
+                addedFootfalls = true;
+            } else {
+                if (model.soundEvents.size() < model.sequences.size())
+                    model.soundEvents.resize(model.sequences.size());
+                auto& out = model.soundEvents[sequenceIndex];
+                for (uint32_t ts : stamps) out.push_back({ts, soundEntryId});
+                addedSounds = true;
+            }
+        }
+        if (addedFootfalls) {
+            auto& list = model.footstepEventTimes[sequenceIndex];
+            std::sort(list.begin(), list.end());
+        }
+        if (addedSounds) {
+            auto& list = model.soundEvents[sequenceIndex];
+            std::sort(list.begin(), list.end(),
+                      [](const M2Model::SoundEvent& a, const M2Model::SoundEvent& b) {
+                          return a.timeMs < b.timeMs;
+                      });
+        }
+    }
 
     if (header.nBones == 0 || header.ofsBones == 0) return;
     if (sequenceIndex >= model.sequences.size()) return;

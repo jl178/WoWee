@@ -24,6 +24,9 @@ struct PlayerTextureInfo {
     std::string bodySkinPath;
     std::string faceLowerPath;
     std::string faceUpperPath;
+    /// CharSections section 2: the facial hair painted onto the face regions.
+    std::string facialLowerPath;
+    std::string facialUpperPath;
     std::string hairTexturePath;
     /// CharSections' second texture on the skin row - the "Extra" art an HD
     /// character model asks for as texture type 8. Empty on the stock models,
@@ -51,7 +54,8 @@ public:
     PlayerTextureInfo resolvePlayerTextures(pipeline::M2Model& model,
                                             game::Race race, game::Gender gender,
                                             uint32_t appearanceBytes,
-                                            bool useFemaleModel = false);
+                                            bool useFemaleModel = false,
+                                            uint8_t facialHairId = 0);
 
     // Apply composited textures to loaded model instance.
     // Call AFTER charRenderer->loadModel(). Saves skin state for re-compositing.

@@ -136,6 +136,9 @@ FacialHairFields detectFacialHairFields(const DBCFile* dbc, const DBCFieldMap* f
         f.geoset100 = 3;
         f.geoset300 = 4;
         f.geoset200 = 5;
+        // Columns 6 and 7 are groups 1600 and 1700. 1600 is zero on every
+        // row; 1700 is the racial eye glow and was dropped.
+        if (dbc->getFieldCount() >= 8) f.geoset1700 = 7;
     }
     s_cached = dbc;
     s_cachedResult = f;

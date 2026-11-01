@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ui/paper_ui.hpp"
+#include "ui/text_edit.hpp"
 #include "ui/ui_services.hpp"
 #include "game/game_handler.hpp"
 #include <imgui.h>
@@ -54,6 +55,15 @@ public:
     /// Set services (dependency injection)
     void setServices(const UIServices& services) { services_ = services; }
 
+    /// The realm the list is from, shown at the top of the character list as
+    /// CharSelectRealmName is.
+    void setRealmName(const std::string& name) { realmName_ = name; }
+
+    /// Whether this screen drew its own full-window glue scene last frame -
+    /// the selected character in its race's backdrop - so the login scene
+    /// behind it need not be drawn as well.
+    [[nodiscard]] bool drawsOwnScene() const { return sceneShown_; }
+
     /**
      * Reset selection state (e.g., when switching servers)
      */
@@ -66,6 +76,10 @@ public:
         statusMessage.clear();
         statusIsError = false;
         deleteConfirmStage = 0;
+        deleteConfirm_.clear();
+        dismissedStatus_.clear();
+        listScroll_ = 0;
+        sceneShown_ = false;
         previewInitialized_ = false;
         previewGuid_ = 0;
         previewAppearanceBytes_ = 0;
@@ -125,16 +139,26 @@ private:
     /// asked for, the same as the login and realm screens before it.
     PaperUI ui_;
 
-    /// The states with nothing to choose from - still loading, disconnected,
-    /// or an account with no characters on this realm. One small sheet
-    /// between them, since each is a sentence and a row of buttons.
-    void renderNotice(game::GameHandler& gameHandler, float screenW, float screenH);
-    /// The picture, the name and everything known about whoever is selected.
-    void renderDetails(game::GameHandler& gameHandler, const game::Character& character,
-                       ImVec2 a, ImVec2 b);
-    /// Both halves of "are you sure", over a scrim.
+    /// The selected character, standing in its race's glue scene, drawn over
+    /// the whole window as the stock CharacterSelect ModelFFX is.
+    void drawScene(const game::Character& character, float screenW, float screenH);
+    /// The right-hand list: realm name, Change Realm, the character buttons
+    /// and Create New Character, in CharacterSelectCharacterFrame's place.
+    void renderCharacterList(game::GameHandler& gameHandler, float screenW, float screenH);
+    /// CharacterDeleteDialog: the name, and DELETE typed to confirm.
     void renderDeleteConfirm(const game::Character& character, float screenW,
                              float screenH);
+    /// GlueDialog: a message and one button. Answers true when it is pressed.
+    bool glueDialog(const char* id, const std::string& message, const char* buttonLabel,
+                    float screenW, float screenH);
+
+    std::string realmName_;
+    bool sceneShown_ = false;
+    int listScroll_ = 0;  ///< first row shown, for more than ten characters
+    TextEdit deleteConfirm_{32};
+    std::string dismissedStatus_;
+    bool rotatingLeft_ = false;
+    bool rotatingRight_ = false;
 
     /// AddOns management sheet (list + enable/disable), opened from the footer.
     bool showAddonsWindow_ = false;

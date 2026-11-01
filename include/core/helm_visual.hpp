@@ -12,10 +12,12 @@
 // nothing on their back.
 
 #include <cstdint>
+#include <functional>
 #include <string>
 
 namespace wowee {
 namespace pipeline { class AssetManager; }
+namespace rendering { class CharacterRenderer; }
 
 namespace core {
 
@@ -26,6 +28,41 @@ namespace core {
 /// entity_spawner_player, which is how one of the three came to keep its copy
 /// after it stopped attaching anything.
 constexpr uint32_t kAttachHelm = 11;
+
+/// The shoulder attachment points in 3.3.5: 5 is ShoulderRight, 6 is
+/// ShoulderLeft. On humanmale.m2, 5 sits at -Y and 6 at +Y (+Y is the model's
+/// left), and LShoulder_*.m2 is built leaning toward +Y.
+constexpr uint32_t kAttachShoulderRight = 5;
+constexpr uint32_t kAttachShoulderLeft = 6;
+
+/// Hands out a renderer model id for each attached piece, given the M2 path it
+/// was loaded from (the character preview caches ids by path; the world
+/// renderers ignore it and take the next free id).
+using ModelIdAllocator = std::function<uint32_t(const std::string& m2Path)>;
+
+/// Detach both shoulder points, then hang the ItemDisplayInfo LeftModel on 6
+/// and the RightModel on 5. Id 0 only detaches. A side with no model stays
+/// empty: one-sided pauldrons are authored that way. Shoulder art has no
+/// per-race cuts in 3.3.5, so no suffix is tried.
+///
+/// Used by the local player, other players, NPCs and the character preview,
+/// so the side mapping lives in one place.
+void attachShoulders(rendering::CharacterRenderer& renderer,
+                     pipeline::AssetManager& assets,
+                     uint32_t instanceId,
+                     uint32_t itemDisplayInfoId,
+                     const ModelIdAllocator& allocModelId);
+
+/// Detach the helm point, then attach the helm for an ItemDisplayInfo id,
+/// trying the per-race model first. Id 0 only detaches. Does not touch hair
+/// geosets; callers that hide hair use helmHidesHair.
+bool attachHelm(rendering::CharacterRenderer& renderer,
+                pipeline::AssetManager& assets,
+                uint32_t instanceId,
+                uint32_t itemDisplayInfoId,
+                uint8_t raceId,
+                uint8_t genderId,
+                const ModelIdAllocator& allocModelId);
 
 /// The suffix a per-race, per-gender model carries - "_HuM" and the like.
 ///

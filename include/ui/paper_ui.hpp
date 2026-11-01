@@ -236,6 +236,17 @@ public:
     bool button(const char* id, ImVec2 a, ImVec2 b, const char* label,
                 ButtonKind kind = ButtonKind::Quiet, bool enabled = true);
 
+    /// A button's behaviour with none of its drawing, for a control that
+    /// draws itself in another style (the glue screens' textured buttons).
+    /// The same press rules as button(): inert and popups silence it, and it
+    /// fires on a release over the rect it was pressed in.
+    struct PressState {
+        bool hovered = false;
+        bool held = false;
+        bool clicked = false;
+    };
+    PressState press(const char* id, ImVec2 a, ImVec2 b, bool enabled = true);
+
     /// A small pill that is either chosen or not, in `accent` when it is.
     ///
     /// Ten races and ten classes are one question each, and a row of pills
@@ -264,6 +275,10 @@ public:
         /// Taking focus selects everything, so typing replaces rather than
         /// appends. What a remembered value wants and a fresh one does not.
         bool selectAllOnFocus = false;
+        /// Draw only the text and caret, in white on whatever the caller
+        /// put behind it: the glue screens' edit boxes, whose box is
+        /// texture art drawn by the screen.
+        bool glue = false;
     };
     FieldResult field(const char* id, ImVec2 a, ImVec2 b, TextEdit& edit,
                       const FieldOpts& opts);

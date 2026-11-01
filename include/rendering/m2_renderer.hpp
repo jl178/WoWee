@@ -338,8 +338,15 @@ struct M2Instance {
     int8_t afloat = -1;
     uint8_t afloatTries = 0;
     float afloatRecheck = 0.0f;
+    /// Ground clutter: the terrain normal under it, packed into the GPU
+    /// entry's flags (bit 1 set, x and y as bytes in bits 8-15 and 16-23) so
+    /// m2.vert lights the piece as the ground it stands on. 0 for the rest.
+    int32_t groundNormalFlags = 0;
     bool skipCollision = false;    // Fully non-collidable visual/effect instance
-    bool skipWallCollision = false; // Keep authored floors, suppress only wall blocking
+    bool skipWallCollision = false; // No invented (bounding-box) wall blocking; an authored collision mesh still blocks
+    /// Off for a marker floating over a unit - the quest giver's ! and ? - which
+    /// the stock client never lets fall on the ground beneath it.
+    bool castsShadow = true;
     float cachedBoundRadius = 0.0f;
     float cachedVisualRadius = 0.0f;               // transformed visual-bounds half diagonal
     // Pre-computed per-instance cull factors (depend only on static flags + scale +
@@ -608,6 +615,7 @@ public:
     void setInstanceIsGameObject(uint32_t instanceId, bool isGameObject);
     void setSkipCollision(uint32_t instanceId, bool skip);
     void setSkipWallCollision(uint32_t instanceId, bool skip);
+    void setInstanceCastsShadow(uint32_t instanceId, bool casts);
     void clear();
     /** Drop all instances but keep models in GPU memory. Cheap path for the
      *  editor's rebuild loop where the same model is re-instanced repeatedly. */
@@ -734,9 +742,20 @@ public:
     /// Its own distance rather than a share of the doodad one: grass stops
     /// between 70 and 140 yards in the original client while doodads run to
     /// the horizon, and the setting names those yards outright.
+    ///
+    /// Held to the stock groundEffectDist range. A saved 300 drew - and the
+    /// streamer instanced - more than four times the ground of the stock
+    /// maximum, all of it walked by the per-instance passes every frame, for
+    /// grass a few pixels tall. Zero, which used to mean no cap and so grass
+    /// out to the view distance, is the stock maximum too.
     void setGroundDetailDistance(float yards) {
-        groundDetailMaxDistance_ = std::clamp(yards, 0.0f, 500.0f);
+        groundDetailMaxDistance_ = yards > 0.0f ? std::clamp(yards, 40.0f, kMaxGroundDetailDistance)
+                                                : kMaxGroundDetailDistance;
     }
+    static constexpr float kMaxGroundDetailDistance = 140.0f;
+    /// Light a ground clutter instance with the terrain normal under it
+    /// rather than its own cards'. See M2Instance::groundNormalFlags.
+    void setInstanceGroundNormal(uint32_t instanceId, const glm::vec3& normal);
     [[nodiscard]] float groundDetailDistance() const { return groundDetailMaxDistance_; }
 
     void setEnvironmentDetail(float detail) {
@@ -1212,7 +1231,7 @@ private:
     /// detail setting changes without the caller having to say it again.
     float viewDistanceRaw_ = 1200.0f;
     float environmentDetail_ = 1.0f;
-    float groundDetailMaxDistance_ = 0.0f;   // 0 = no cap of its own
+    float groundDetailMaxDistance_ = kMaxGroundDetailDistance;  // see setGroundDetailDistance
     void recomputeViewDistanceScale() {
         viewDistanceScale_ = (viewDistanceRaw_ / 1200.0f) * environmentDetail_;
     }

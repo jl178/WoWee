@@ -102,10 +102,13 @@ inline constexpr float kSmokeEmitInterval = 1.0f / 48.0f;
 // ---- Geometry / collision helpers ----
 
 inline float computeGroundDetailDownOffset(const M2ModelGPU& model, float scale) {
-    // The base onto the surface: a model whose lowest vertex is below its
-    // origin is lifted by that much, one above it is lowered. A flat sink on
-    // top of that buried a fifth of a grass tuft.
-    return glm::clamp(model.boundMin.z * scale, -0.10f, 0.10f);
+    // The origin goes on the surface, as the stock client places detail
+    // doodads: geometry an artist put below z=0 is roots and is meant to be
+    // in the ground. Lifting the model until its lowest vertex touched stood
+    // every such tuft on stilts. Only a model whose geometry starts above its
+    // origin is lowered onto the ground. A flat sink buried a fifth of a tuft.
+    // The terrain scatterer has already eased the origin down on slopes.
+    return glm::clamp(model.boundMin.z * scale, 0.0f, 0.10f);
 }
 
 inline void getTightCollisionBounds(const M2ModelGPU& model, glm::vec3& outMin, glm::vec3& outMax) {

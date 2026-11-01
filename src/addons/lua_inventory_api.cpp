@@ -2595,6 +2595,31 @@ static const game::ItemSlot* auctionSellItemSlot(game::GameHandler* gh,
     return nullptr;
 }
 
+/// The item entry worn in an equipment slot by a unit that is not the player.
+///
+/// Everything about another player's gear arrives as bare item entries with no
+/// inventory behind them. The GetInventoryItem* bindings answered nil for any
+/// unit but "player", which the interface reads as an empty slot - so the
+/// inspect paperdoll drew every square blank however well equipped the target
+/// was.
+///
+/// Read from the unit's visible-item update fields first and the inspect
+/// reply second (see unitEquippedItemEntry), so the squares fill as soon as the
+/// window opens rather than only once - and only if - the reply arrives.
+static uint32_t inspectedItemEntry(game::GameHandler* gh, const std::string& uid, int slotId) {
+    if (!gh || slotId < 1 || slotId > 19) return 0;
+    return unitEquippedItemEntry(gh, resolveUnitGuid(gh, uid), slotId);
+}
+
+/// "target", "mouseover", "party1"... naming the player themselves is the
+/// player: the inventory answers, not the other-player caches, which never
+/// hold the player's own guid.
+static void foldSelfUnit(game::GameHandler* gh, std::string& uid) {
+    if (!gh || uid == "player") return;
+    const uint64_t guid = resolveUnitGuid(gh, uid);
+    if (guid != 0 && guid == gh->getPlayerGuid()) uid = "player";
+}
+
 /// GetInventoryItemCount(unit, slot) → how many are in that equipped slot.
 ///
 /// Stackable equipped things - ammo, thrown weapons - and the bank window's
@@ -2612,6 +2637,14 @@ static int lua_GetInventoryItemCount(lua_State* L) {
     const int slotId = static_cast<int>(luaL_optnumber(L, 2, 0));
     std::string uidStr(uid);
     toLowerInPlace(uidStr);
+    foldSelfUnit(gh, uidStr);
+    // Another unit's equipped item is one of it: the stack size of a worn
+    // item is not something their update fields carry, and one is what the
+    // stock client draws (which is to say, no number on the square).
+    if (gh && uidStr != "player") {
+        lua_pushnumber(L, inspectedItemEntry(gh, uidStr, slotId) ? 1 : 0);
+        return 1;
+    }
     // Not 1..19: the bank is addressed through this too - bankframe.lua asks
     // GetInventoryItemCount("player", BankButtonIDToInvSlotID(id)) for every
     // one of its twenty-eight slots, and those ids start at forty.
@@ -2628,30 +2661,6 @@ static int lua_GetInventoryItemCount(lua_State* L) {
     return 1;
 }
 
-/// The item entry worn in an equipment slot by a unit that is not the player.
-///
-/// Everything about another player's gear arrives through inspect, and it
-/// arrives as bare item entries with no inventory behind them. The three
-/// GetInventoryItem* bindings answered nil for any unit but "player", which the
-/// interface reads as an empty slot - so the inspect paperdoll drew every
-/// square blank however well equipped the target was.
-///
-/// Zero when there is nothing cached for that unit, which is the honest answer
-/// before the inspect response arrives.
-static uint32_t inspectedItemEntry(game::GameHandler* gh, const std::string& uid, int slotId) {
-    if (!gh || slotId < 1 || slotId > 19) return 0;
-    const uint64_t guid = resolveUnitGuid(gh, uid);
-    if (!guid) return 0;
-    auto& cache = gh->inspectedPlayerItemEntriesRef();
-    auto it = cache.find(guid);
-    if (it == cache.end()) return 0;
-    const uint32_t entry = it->second[static_cast<size_t>(slotId - 1)];
-    // The name and icon come from the item cache, which will not have an entry
-    // this client has never seen; asking queues the query.
-    if (entry) gh->ensureItemInfo(entry);
-    return entry;
-}
-
 static int lua_GetInventoryItemLink(lua_State* L) {
     auto* gh = getGameHandler(L);
     const char* uid = luaL_optstring(L, 1, "player");
@@ -2662,7 +2671,7 @@ static int lua_GetInventoryItemLink(lua_State* L) {
     //
     //     local equipSlot = bag > 0 and ContainerIDToInventoryID(bag)
     //
-    // which hands this `false` for the backpack. Bagnon_Forever's SaveBag does
+    // which hands this `false` for the backpack. Bagnon_Enhanced's SaveBag does
     // exactly that, and luaL_checknumber raised inside its event handler - so
     // the cache that feeds every bag frame it draws never ran.
     if (!lua_isnumber(L, 2)) return luaReturnNil(L);
@@ -2671,6 +2680,7 @@ static int lua_GetInventoryItemLink(lua_State* L) {
     if (!gh) { return luaReturnNil(L); }
     std::string uidStr(uid);
     toLowerInPlace(uidStr);
+    foldSelfUnit(gh, uidStr);
     uint32_t itemId = 0;
     std::string name;
     uint32_t q = 1;
@@ -2707,6 +2717,7 @@ static int lua_GetInventoryItemID(lua_State* L) {
     if (!gh) { return luaReturnNil(L); }
     std::string uidStr(uid);
     toLowerInPlace(uidStr);
+    foldSelfUnit(gh, uidStr);
     if (uidStr != "player") {
         const uint32_t entry = inspectedItemEntry(gh, uidStr, slotId);
         if (!entry) { return luaReturnNil(L); }
@@ -2731,7 +2742,7 @@ static int lua_GetInventoryItemTexture(lua_State* L) {
     //
     //     local equipSlot = bag > 0 and ContainerIDToInventoryID(bag)
     //
-    // which hands this `false` for the backpack. Bagnon_Forever's SaveBag does
+    // which hands this `false` for the backpack. Bagnon_Enhanced's SaveBag does
     // exactly that, and luaL_checknumber raised inside its event handler - so
     // the cache that feeds every bag frame it draws never ran.
     if (!lua_isnumber(L, 2)) return luaReturnNil(L);
@@ -2746,10 +2757,18 @@ static int lua_GetInventoryItemTexture(lua_State* L) {
     if (!gh || !inventorySlotItem(gh->getInventory(), slotId)) { return luaReturnNil(L); }
     std::string uidStr(uid);
     toLowerInPlace(uidStr);
+    foldSelfUnit(gh, uidStr);
     if (uidStr != "player") {
         const uint32_t entry = inspectedItemEntry(gh, uidStr, slotId);
-        const auto* info = entry ? gh->getItemInfo(entry) : nullptr;
-        if (!info || !info->displayInfoId) { return luaReturnNil(L); }
+        if (!entry) { return luaReturnNil(L); }
+        // Worn, but its template has not come back yet: a question mark says
+        // "something is here" until the query answers and UNIT_INVENTORY_CHANGED
+        // redraws the square with the real icon. Nil would draw it empty.
+        const auto* info = gh->getItemInfo(entry);
+        if (!info || !info->displayInfoId) {
+            lua_pushstring(L, "Interface\\Icons\\INV_Misc_QuestionMark");
+            return 1;
+        }
         const std::string path = gh->getItemIconPath(info->displayInfoId);
         lua_pushstring(L, path.empty() ? "Interface\\Icons\\INV_Misc_QuestionMark"
                                        : path.c_str());
@@ -3720,7 +3739,7 @@ void registerInventoryLuaAPI(lua_State* L) {
                 // you", raised from LOOT_BIND_CONFIRM.
                 //
                 // Not LootSlot again: LootSlot is what raises the prompt, so
-                // answering it that way asks the same question forever. The
+                // answering it that way asks the same question enhanced. The
                 // held request is sent instead, and the slot the dialog passes
                 // is not read - only one can be waiting.
                 {"ConfirmLootSlot", [](lua_State* L) -> int {

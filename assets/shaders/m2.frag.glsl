@@ -279,7 +279,14 @@ void main() {
     // caught the low sun twice as well as the ground. Shade them as the
     // terrain under them, as the stock client does.
     bool groundDetail = (alphaTest == 3);
-    if (groundDetail) norm = vec3(0.0, 0.0, 1.0);
+    if (groundDetail) {
+        // The terrain normal the vertex stage handed over for clutter the
+        // ground scatterer placed (unflipped: a card's back face is still the
+        // same ground). A card's own normal is near horizontal, so anything
+        // that steep is not a ground normal and falls back to straight up.
+        vec3 g = normalize(Normal);
+        norm = g.z > 0.45 ? g : vec3(0.0, 0.0, 1.0);
+    }
 
     // Detail normal perturbation (foliage only) - UV-based only so wind doesn't cause flicker
     if (isFoliage) {

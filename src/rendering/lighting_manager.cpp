@@ -152,6 +152,14 @@ bool LightingManager::loadLightParamsDbc(pipeline::AssetManager* assetManager) {
         if (dbc->getFieldCount() > 2) {
             profile.lightSkyboxId = dbc->getUInt32(i, 2);
         }
+        // 3.3.5: ID, HighlightSky, LightSkyboxID, CloudTypeID, Glow,
+        // WaterShallowAlpha, WaterDeepAlpha, OceanShallowAlpha, OceanDeepAlpha.
+        if (dbc->getFieldCount() >= 9) {
+            profile.waterShallowAlpha = dbc->getFloat(i, 5);
+            profile.waterDeepAlpha = dbc->getFloat(i, 6);
+            profile.oceanShallowAlpha = dbc->getFloat(i, 7);
+            profile.oceanDeepAlpha = dbc->getFloat(i, 8);
+        }
         lightParamsProfiles_[paramId] = profile;
     }
 
@@ -393,7 +401,22 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         newParams.fogEnd = 300.0f;
     } else if (!activeVolumes_.empty()) {
         // Outdoor with DBC lighting - blend multiple volumes
-        newParams = {}; // Zero-initialize
+        // `= {}` keeps the default member initialisers, so every field the
+        // weighted sum below adds onto is zeroed by hand. Only the liquid
+        // fields used to be: ambient, sun, sky, fog and clouds were the
+        // defaults *plus* the blend, which put about +0.4 on every outdoor
+        // ambient and over-bright sun, washing the world out against stock.
+        newParams = {};
+        newParams.ambientColor = newParams.diffuseColor = newParams.fogColor = glm::vec3(0.0f);
+        newParams.skyTopColor = newParams.skyMiddleColor = glm::vec3(0.0f);
+        newParams.skyBand1Color = newParams.skyBand2Color = glm::vec3(0.0f);
+        newParams.fogStart = newParams.fogEnd = newParams.fogDensity = 0.0f;
+        newParams.cloudDensity = newParams.horizonGlow = 0.0f;
+        newParams.oceanCloseColor = newParams.oceanFarColor = glm::vec3(0.0f);
+        newParams.riverCloseColor = newParams.riverFarColor = glm::vec3(0.0f);
+        newParams.waterShallowAlpha = newParams.waterDeepAlpha = 0.0f;
+        newParams.oceanShallowAlpha = newParams.oceanDeepAlpha = 0.0f;
+        float liquidWeight = 0.0f;
         glm::vec3 blendedDir(0.0f);  // Accumulate weighted directions
 
         // The first MAX_BLEND_VOLUMES only: the list is the whole
@@ -423,9 +446,59 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
                 newParams.cloudDensity += params.cloudDensity * wv.weight;
                 newParams.horizonGlow += params.horizonGlow * wv.weight;
 
+                newParams.oceanCloseColor += params.oceanCloseColor * wv.weight;
+                newParams.oceanFarColor += params.oceanFarColor * wv.weight;
+                newParams.riverCloseColor += params.riverCloseColor * wv.weight;
+                newParams.riverFarColor += params.riverFarColor * wv.weight;
+                newParams.waterShallowAlpha += params.waterShallowAlpha * wv.weight;
+                newParams.waterDeepAlpha += params.waterDeepAlpha * wv.weight;
+                newParams.oceanShallowAlpha += params.oceanShallowAlpha * wv.weight;
+                newParams.oceanDeepAlpha += params.oceanDeepAlpha * wv.weight;
+                liquidWeight += wv.weight;
+
                 // Blend direction weighted (normalize at end)
                 blendedDir += params.directionalDir * wv.weight;
             }
+        }
+
+        // The liquid colours over the volumes that had a profile, so a volume
+        // naming a missing LightParams row does not fade the water out.
+        if (liquidWeight > 1e-4f) {
+            const float inv = 1.0f / liquidWeight;
+            // A weighted average over the volumes that had a profile.
+            newParams.ambientColor *= inv;
+            newParams.diffuseColor *= inv;
+            newParams.fogColor *= inv;
+            newParams.skyTopColor *= inv;
+            newParams.skyMiddleColor *= inv;
+            newParams.skyBand1Color *= inv;
+            newParams.skyBand2Color *= inv;
+            newParams.fogStart *= inv;
+            newParams.fogEnd *= inv;
+            newParams.fogDensity *= inv;
+            newParams.cloudDensity *= inv;
+            newParams.horizonGlow *= inv;
+            newParams.oceanCloseColor *= inv;
+            newParams.oceanFarColor *= inv;
+            newParams.riverCloseColor *= inv;
+            newParams.riverFarColor *= inv;
+            newParams.waterShallowAlpha *= inv;
+            newParams.waterDeepAlpha *= inv;
+            newParams.oceanShallowAlpha *= inv;
+            newParams.oceanDeepAlpha *= inv;
+        } else {
+            const LightingParams defaults{};
+            const glm::vec3 keepDir = newParams.directionalDir;
+            newParams = defaults;
+            newParams.directionalDir = keepDir;
+            newParams.oceanCloseColor = defaults.oceanCloseColor;
+            newParams.oceanFarColor = defaults.oceanFarColor;
+            newParams.riverCloseColor = defaults.riverCloseColor;
+            newParams.riverFarColor = defaults.riverFarColor;
+            newParams.waterShallowAlpha = defaults.waterShallowAlpha;
+            newParams.waterDeepAlpha = defaults.waterDeepAlpha;
+            newParams.oceanShallowAlpha = defaults.oceanShallowAlpha;
+            newParams.oceanDeepAlpha = defaults.oceanDeepAlpha;
         }
 
         // Normalize blended direction
@@ -573,6 +646,14 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     currentParams_.fogDensity = glm::mix(currentParams_.fogDensity, newParams.fogDensity, blendFactor);
     currentParams_.cloudDensity = glm::mix(currentParams_.cloudDensity, newParams.cloudDensity, blendFactor);
     currentParams_.horizonGlow = glm::mix(currentParams_.horizonGlow, newParams.horizonGlow, blendFactor);
+    currentParams_.oceanCloseColor = glm::mix(currentParams_.oceanCloseColor, newParams.oceanCloseColor, blendFactor);
+    currentParams_.oceanFarColor = glm::mix(currentParams_.oceanFarColor, newParams.oceanFarColor, blendFactor);
+    currentParams_.riverCloseColor = glm::mix(currentParams_.riverCloseColor, newParams.riverCloseColor, blendFactor);
+    currentParams_.riverFarColor = glm::mix(currentParams_.riverFarColor, newParams.riverFarColor, blendFactor);
+    currentParams_.waterShallowAlpha = glm::mix(currentParams_.waterShallowAlpha, newParams.waterShallowAlpha, blendFactor);
+    currentParams_.waterDeepAlpha = glm::mix(currentParams_.waterDeepAlpha, newParams.waterDeepAlpha, blendFactor);
+    currentParams_.oceanShallowAlpha = glm::mix(currentParams_.oceanShallowAlpha, newParams.oceanShallowAlpha, blendFactor);
+    currentParams_.oceanDeepAlpha = glm::mix(currentParams_.oceanDeepAlpha, newParams.oceanDeepAlpha, blendFactor);
     currentParams_.directionalDir = glm::normalize(glm::mix(currentParams_.directionalDir, newParams.directionalDir, blendFactor));
 }
 
@@ -700,6 +781,22 @@ LightingParams LightingManager::sampleLightParams(const LightParamsProfile* prof
     params.skyMiddleColor = sampleColorBand(profile->colorBands[LightParamsProfile::SKY_MIDDLE_COLOR], timeHalfMinutes);
     params.skyBand1Color = sampleColorBand(profile->colorBands[LightParamsProfile::SKY_BAND1_COLOR], timeHalfMinutes);
     params.skyBand2Color = sampleColorBand(profile->colorBands[LightParamsProfile::SKY_BAND2_COLOR], timeHalfMinutes);
+
+    // Liquid colours. A profile with no band for a channel keeps the default
+    // rather than sampleColorBand's grey, and a missing far colour follows the
+    // close one.
+    auto liquidColor = [&](LightParamsProfile::ColorChannel ch, const glm::vec3& fallback) {
+        const ColorBand& band = profile->colorBands[ch];
+        return band.numKeyframes > 0 ? sampleColorBand(band, timeHalfMinutes) : fallback;
+    };
+    params.oceanCloseColor = liquidColor(LightParamsProfile::OCEAN_CLOSE_COLOR, params.oceanCloseColor);
+    params.oceanFarColor = liquidColor(LightParamsProfile::OCEAN_FAR_COLOR, params.oceanCloseColor * 0.4f);
+    params.riverCloseColor = liquidColor(LightParamsProfile::RIVER_CLOSE_COLOR, params.riverCloseColor);
+    params.riverFarColor = liquidColor(LightParamsProfile::RIVER_FAR_COLOR, params.riverCloseColor * 0.4f);
+    params.waterShallowAlpha = profile->waterShallowAlpha;
+    params.waterDeepAlpha = profile->waterDeepAlpha;
+    params.oceanShallowAlpha = profile->oceanShallowAlpha;
+    params.oceanDeepAlpha = profile->oceanDeepAlpha;
 
     // Sample float bands. The fog distance is stored in the same
     // thirty-sixths of a yard as the light positions, and was being used raw:

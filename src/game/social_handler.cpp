@@ -1126,7 +1126,9 @@ void SocialHandler::inspectUnit(uint64_t guid) {
     }
     auto player = std::static_pointer_cast<Player>(entity);
     std::string name = player->getName().empty() ? "Target" : player->getName();
-    owner_.addSystemChatMessage("Inspecting " + name + "...");
+    // No chat line: the stock client prints nothing here, and the inspect
+    // window calls NotifyInspect on every open and every unit change, so a
+    // line per request filled chat with "Inspecting ..." echoes.
     LOG_INFO("Sent inspect request for player: ", name, " (GUID: 0x", std::hex, guid, std::dec, ")");
 }
 
@@ -1349,6 +1351,18 @@ void SocialHandler::handleInspectResults(network::Packet& packet) {
                 // paperdoll names.
                 if (e == 0) enchantIds[slot] = enchId;
             }
+            // Each item record then closes with its random property id
+            // (int16), its creator as a packed guid, and its suffix factor
+            // (uint32) - Player::BuildEnchantmentsInfoData writes all three.
+            // Skipping none of them read the second item's entry out of the
+            // first item's tail, so only the head slot ever came out right and
+            // every other square of the inspect paperdoll was garbage or empty.
+            if (!packet.hasRemaining(2)) break;
+            packet.readUInt16();
+            if (!packet.hasFullPackedGuid()) break;
+            packet.readPackedGuid();
+            if (!packet.hasRemaining(4)) break;
+            packet.readUInt32();
         }
     }
 
@@ -2546,7 +2560,7 @@ void SocialHandler::handleGuildRoster(network::Packet& packet) {
     // The argument is "you may request a roster", and every reader answers it
     // with `if arg1 then GuildRoster() end` - friendsframe, the guild bank and
     // the calendar all do exactly that. Sending true here would have each of
-    // them request a roster, whose reply would fire this again, forever.
+    // them request a roster, whose reply would fire this again, enhanced.
     if (owner_.addonEventCallbackRef())
         owner_.addonEventCallbackRef()("GUILD_ROSTER_UPDATE", {eventBool(false)});
 }
@@ -4469,7 +4483,7 @@ void SocialHandler::handleArenaTeamRoster(network::Packet& packet) {
     // Fired with no arguments, and that is the whole contract. pvpframe reads
     // arg1 as "the roster you hold is stale, ask for it again" and only
     // redraws from what arrived when arg1 is absent - so any argument at all
-    // would answer this roster by requesting another one, forever. A zero
+    // would answer this roster by requesting another one, enhanced. A zero
     // would do it too, zero being true in Lua.
     if (owner_.addonEventCallbackRef()) {
         owner_.addonEventCallbackRef()("ARENA_TEAM_ROSTER_UPDATE", {});

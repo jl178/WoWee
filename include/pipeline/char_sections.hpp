@@ -38,6 +38,9 @@ struct CharacterAppearance {
     uint8_t faceId = 0;
     uint8_t hairStyleId = 0;
     uint8_t hairColorId = 0;
+    /// The facial hair style (PLAYER_BYTES_2 byte 0, CreatureDisplayInfoExtra
+    /// FacialHairID). Picks the CharSections section 2 row, coloured by hair.
+    uint8_t facialHairId = 0;
 };
 
 /// The textures CharSections names for that character.
@@ -49,6 +52,11 @@ struct CharacterSectionTextures {
     std::string skinExtra;
     std::string faceLower;
     std::string faceUpper;
+    /// CharSections section 2 - the beard and moustache painted onto the face
+    /// regions of the body texture. The facial hair geosets are textured with
+    /// the body (texture type 1), so without these they draw as bare skin.
+    std::string facialLower;
+    std::string facialUpper;
     std::string hair;
     std::vector<std::string> underwear;
 
