@@ -1087,10 +1087,17 @@ void GameHandler::registerCoreOpcodes() {
     // SMSG_SERVER_MESSAGE - moved to ChatHandler::registerOpcodes
     // SMSG_CHAT_SERVER_MESSAGE - moved to ChatHandler::registerOpcodes
     // SMSG_AREA_TRIGGER_MESSAGE - moved to ChatHandler::registerOpcodes
+    // A new character's intro. This client does not play cinematics, so it
+    // answers as a stock player skipping one with Escape: COMPLETE_CINEMATIC.
+    // It used to send NEXT_CINEMATIC_CAMERA, which tells the server the
+    // cinematic has begun - AzerothCore then moves the player's viewpoint along
+    // the camera path for its whole length and sends what is near the camera,
+    // so a new character stood in an empty Northshire for two minutes before
+    // any NPC around them arrived.
     dispatchTable_[Opcode::SMSG_TRIGGER_CINEMATIC] = [this](network::Packet& packet) {
         packet.skipAll();
-        network::Packet ack(wireOpcode(Opcode::CMSG_NEXT_CINEMATIC_CAMERA));
-        socket->send(ack);
+        network::Packet done(wireOpcode(Opcode::CMSG_COMPLETE_CINEMATIC));
+        socket->send(done);
     };
 
     // ---- Batch 5: Teleport, taxi, BG, LFG, arena, movement relay, mail, bank, auction, quests ----
