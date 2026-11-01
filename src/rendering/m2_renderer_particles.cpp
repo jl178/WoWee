@@ -177,14 +177,18 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
             float hRange = interpFloat(em.horizontalRange, inst.animTime, inst.globalSequenceTime,
                                        inst.currentSequenceIndex, gpu.globalSequenceDurations);
 
-            // Base direction: up in model space, transformed to world
-            glm::vec3 dir(0.0f, 0.0f, 1.0f);
-            // Add random spread
-            dir.x += distN(particleRng_) * hRange;
-            dir.y += distN(particleRng_) * hRange;
-            dir.z += distN(particleRng_) * vRange;
-            float lenSq = glm::dot(dir, dir);
-            if (lenSq > 0.001f * 0.001f) dir *= glm::inversesqrt(lenSq);
+            (void)hRange; // azimuth range only matters for sphere emitters
+            float speedVar = interpFloat(em.speedVariation, inst.animTime, inst.globalSequenceTime,
+                                         inst.currentSequenceIndex, gpu.globalSequenceDurations);
+            speed *= 1.0f + distN(particleRng_) * speedVar;
+
+            // Emitter +Z tilted by a random polar angle within verticalRange
+            // (radians) at a random azimuth. vRange 0 = straight up the bone Z.
+            const float theta = distN(particleRng_) * vRange;
+            const float phi = dist01(particleRng_) * 6.2831853f;
+            glm::vec3 dir(std::sin(theta) * std::cos(phi),
+                          std::sin(theta) * std::sin(phi),
+                          std::cos(theta));
 
             // Transform direction by bone + model orientation (rotation only)
             glm::mat3 rotMat = glm::mat3(inst.modelMatrix * boneXform);
@@ -194,19 +198,16 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
             // particles pile up at the same position. Give them a drift so they
             // spread outward like a mist/spray effect instead of clustering.
             if (std::abs(speed) < 0.01f) {
+                // Authored zero speed means the particle stays where it was
+                // born (candle/chandelier glow cards). Only fireflies drift.
                 if (gpu.isFireflyEffect) {
-                    // Fireflies: gentle random drift in all directions
                     p.velocity = rotMat * glm::vec3(
                         distN(particleRng_) * 0.6f,
                         distN(particleRng_) * 0.6f,
                         distN(particleRng_) * 0.3f
                     );
                 } else {
-                    p.velocity = rotMat * glm::vec3(
-                        distN(particleRng_) * 1.0f,
-                        distN(particleRng_) * 1.0f,
-                        -dist01(particleRng_) * 0.5f
-                    );
+                    p.velocity = glm::vec3(0.0f);
                 }
             }
 
@@ -262,16 +263,11 @@ void M2Renderer::updateParticles(M2Instance& inst, float dt) {
         }
         for (size_t e = 0; e < numEm; ++e) {
             const auto& pem = gpu.particleEmitters[e];
-            float grav = interpFloat(pem.gravity,
-                                      inst.animTime, inst.globalSequenceTime,
-                                      inst.currentSequenceIndex, gpu.globalSequenceDurations);
-            if (grav == 0.0f && !gpu.isFireflyEffect) {
-                float emSpeed = interpFloat(pem.emissionSpeed,
-                                             inst.animTime, inst.globalSequenceTime,
-                                             inst.currentSequenceIndex, gpu.globalSequenceDurations);
-                grav = (std::abs(emSpeed) > 0.1f) ? 4.0f : 1.5f;
-            }
-            emitterGrav[e] = grav;
+            // Authored gravity as-is: 0 means no gravity (candle flames,
+            // chandelier glows), never a substituted fall.
+            emitterGrav[e] = interpFloat(pem.gravity,
+                                         inst.animTime, inst.globalSequenceTime,
+                                         inst.currentSequenceIndex, gpu.globalSequenceDurations);
         }
     }
 
@@ -286,6 +282,8 @@ void M2Renderer::updateParticles(M2Instance& inst, float dt) {
         }
         if (p.emitterIndex >= 0 && static_cast<size_t>(p.emitterIndex) < numEm) {
             p.velocity.z -= emitterGrav[p.emitterIndex] * dt;
+            const float drag = gpu.particleEmitters[p.emitterIndex].drag;
+            if (drag > 0.0f) p.velocity *= std::exp(-drag * dt);
         }
         p.position += p.velocity * dt;
         i++;

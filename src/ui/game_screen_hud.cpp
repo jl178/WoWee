@@ -250,9 +250,13 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
                        !core::geosetMeansNone(g);
             });
         if (!kiltAlreadySet) {
-            geosets.insert(gg > 0 ? core::equippedGeoset(core::equipment::kLegsBare, gg)
-                                  : core::kGeosetBarePants);
+            // Legs GeosetGroup[2] is a dress or kilt; [0] is group 11 pant
+            // flaps and never the skirt.
+            const uint32_t legsGG3 = getGeosetGroup(did, geosetGroup3Field);
+            geosets.insert(legsGG3 > 0 ? core::equippedGeoset(core::equipment::kRobeKiltBare, legsGG3)
+                                       : core::kGeosetBarePants);
         }
+        (void)gg;
     }
 
     // Whether a helm and a cloak are *shown*, which is not the same question as
@@ -1087,35 +1091,31 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
             // Minimal grey bar for selected corpses (loot/skin targets)
             barColor = IM_COL32(140, 140, 140, A(200));
             bgColor  = IM_COL32(70,  70,  70,  A(160));
-        } else if (isHostile) {
-            // Check if mob is tapped by another player (grey nameplate)
-            uint32_t dynFlags = unit->getDynamicFlags();
-            bool tappedByOther = (dynFlags & 0x0004) != 0 && (dynFlags & 0x0008) == 0; // TAPPED but not TAPPED_BY_ALL_THREAT_LIST
-            if (tappedByOther) {
-                barColor = IM_COL32(160, 160, 160, A(200));
-                bgColor  = IM_COL32(80,  80,  80,  A(160));
-            } else {
-                barColor = IM_COL32(220, 60,  60,  A(200));
-                bgColor  = IM_COL32(100, 25,  25,  A(160));
-            }
-        } else if (isPlayer) {
-            // World-space bars communicate reaction, and a red death knight or
-            // a pink paladin reads as a hostility that is not there - so green
-            // stays the default. The interface offers the other choice though,
-            // and offering it and ignoring it is the worse of the two, so the
-            // setting is honoured when it is asked for.
-            const uint8_t classId = entityClassId(entityPtr.get());
-            if (classId != 0 &&
-                addons::storedCVarValue("showClassColorInNameplate", "0") != "0") {
-                barColor = classColorU32(classId, A(200));
-                bgColor  = classColorU32(classId, A(90));
-            } else {
-                barColor = IM_COL32(60,  200, 80,  A(200));
-                bgColor  = IM_COL32(25,  100, 35,  A(160));
-            }
         } else {
-            barColor = IM_COL32(60,  200, 80,  A(200));
-            bgColor  = IM_COL32(25,  100, 35,  A(160));
+            // By reaction, as the stock client colours it: red hostile, orange
+            // unfriendly, yellow neutral, green friendly. Attackable is not red:
+            // a beast that will not aggro is attackable and still yellow.
+            int react = isPlayer ? (isHostile ? 2 : 5) : gameHandler.unitReactionToPlayer(*unit);
+            if (!isPlayer && gameHandler.isAggressiveTowardPlayer(guid)) react = std::min(react, 2);
+            const uint32_t dynFlags = unit->getDynamicFlags();
+            // TAPPED but not TAPPED_BY_ALL_THREAT_LIST: someone else's mob.
+            const bool tappedByOther = !isPlayer && (dynFlags & 0x0004) != 0 && (dynFlags & 0x0008) == 0;
+            // Class colours are an interface option for player bars.
+            const uint8_t classId = isPlayer ? entityClassId(entityPtr.get()) : 0;
+            if (tappedByOther) {
+                barColor = IM_COL32(160, 160, 160, A(200)); bgColor = IM_COL32(80, 80, 80, A(160));
+            } else if (react <= 2) {
+                barColor = IM_COL32(220, 60, 60, A(200));   bgColor = IM_COL32(100, 25, 25, A(160));
+            } else if (react == 3) {
+                barColor = IM_COL32(240, 130, 60, A(200));  bgColor = IM_COL32(110, 55, 25, A(160));
+            } else if (react == 4) {
+                barColor = IM_COL32(230, 210, 60, A(200));  bgColor = IM_COL32(100, 90, 25, A(160));
+            } else if (classId != 0 &&
+                       addons::storedCVarValue("showClassColorInNameplate", "0") != "0") {
+                barColor = classColorU32(classId, A(200));  bgColor = classColorU32(classId, A(90));
+            } else {
+                barColor = IM_COL32(60, 200, 80, A(200));   bgColor = IM_COL32(25, 100, 35, A(160));
+            }
         }
         // Check if this unit is targeting the local player (threat indicator)
         bool isTargetingPlayer = false;
@@ -1454,15 +1454,13 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
             nameColor = isHostile
                 ? IM_COL32(220, 80, 80, A(230))
                 : IM_COL32(102, 153, 255, A(230));
-        } else if (!isHostile && gameHandler.unitReactionToPlayer(*unit) == 3) {
-            // Orange - unfriendly: not attackable, and it will not talk to
-            // the player either. The Kurenai at Telaar, to an Alliance player
-            // who has not yet reached Neutral with them.
-            nameColor = IM_COL32(240, 130, 60, A(230));
         } else {
-            nameColor = isHostile
-                ? IM_COL32(220,  80,  80, A(230))   // red  - hostile NPC
-                : IM_COL32(240, 200, 100, A(230));  // yellow - friendly NPC
+            // Stock reaction colours (UnitSelectionColor).
+            const int react = gameHandler.unitReactionToPlayer(*unit);
+            nameColor = react <= 2 ? IM_COL32(220,  80,  80, A(230))   // hostile
+                      : react == 3 ? IM_COL32(240, 130,  60, A(230))   // unfriendly
+                      : react == 4 ? IM_COL32(240, 220,  80, A(230))   // neutral
+                      :              IM_COL32( 90, 220,  90, A(230));  // friendly
         }
         // Sub-label below the name: guild tag for players, subtitle for NPCs
         std::string subLabel;

@@ -3068,8 +3068,13 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 matData.emissiveTintR = emissiveTint.r;
                 matData.emissiveTintG = emissiveTint.g;
                 matData.emissiveTintB = emissiveTint.b;
-                matData.specularIntensity = 0.5f;
-                matData.enableNormalMap = (useAdvancedMaterials && normalMappingEnabled_) ? 1 : 0;
+                // Stock 3.3.5 lights characters with diffuse plus ambient only:
+                // no specular and no normal map. The generated maps came from
+                // the composited skin itself, so sunlight embossed every seam
+                // and baked NPC texture (worst on legs and sleeves).
+                matData.specularIntensity = 0.0f;
+                matData.enableNormalMap = 0;
+                (void)useAdvancedMaterials;
                 // Character textures are layered/mirrored atlases, not coherent
                 // height fields. Parallax offsets cross face seams and reveal
                 // underlying armor through tabards, so keep POM out of the
@@ -3090,7 +3095,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // no-cloak panel, which is a patch of the same torso.
                 if (batchGroup == 0 || batch.submeshId == core::kGeosetNoCape) {
                     normalMap = flatNormalTexture_.get();
-                    matData.specularIntensity = 0.20f;
+                    matData.specularIntensity = 0.0f;
                     matData.enableNormalMap = 0;
                     matData.enablePOM = 0;
                     matData.heightMapVariance = 0.0f;
@@ -3103,7 +3108,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // but give group 12 a flat, low-specular cloth material.
                 if (batchGroup == 12) {
                     normalMap = flatNormalTexture_.get();
-                    matData.specularIntensity = 0.08f;
+                    matData.specularIntensity = 0.0f;
                     matData.enableNormalMap = 0;
                     matData.enablePOM = 0;
                     matData.heightMapVariance = 0.0f;

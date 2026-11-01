@@ -1586,6 +1586,8 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                 parseFBlock(m2Data, base + 0x104, em.particleColor, 0);
                 parseFBlock(m2Data, base + 0x114, em.particleAlpha, 1);
                 parseFBlock(m2Data, base + 0x124, em.particleScale, 2);
+                em.drag = readValue<float>(m2Data, base + 0x174);
+                if (!std::isfinite(em.drag) || em.drag < 0.0f) em.drag = 0.0f;
             }
 
             model.particleEmitters.push_back(std::move(em));

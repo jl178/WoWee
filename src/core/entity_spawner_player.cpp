@@ -496,8 +496,14 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     {
         uint32_t did = findDisplayIdByInvType({7});
         uint32_t gg1 = getGeosetGroup(did, geosetGroup1Field);
-        // A robe skirt wins over trousers, as in the stock client.
-        if (gg1 > 0 && !robeSkirt) geosetPants = pickGeoset(equippedGeoset(equipment::kLegsBare, gg1), kGeosetBarePants);
+        // Legs GeosetGroup[2] is a dress or kilt (group 13); [0] is group 11
+        // pant flaps and never the skirt. A robe's skirt wins.
+        uint32_t gg3 = getGeosetGroup(did, geosetGroup3Field);
+        if (gg3 > 0 && !robeSkirt) {
+            geosetPants = pickGeoset(equippedGeoset(equipment::kRobeKiltBare, gg3), kGeosetBarePants);
+            robeSkirt = true;
+        }
+        (void)gg1;
     }
 
     // Feet/Boots (invType 8) → shin group 5

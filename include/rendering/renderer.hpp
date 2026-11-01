@@ -437,6 +437,8 @@ private:
     // Post-process pipeline - owns all FSR/FXAA/FSR2 state (extracted §4.3)
     std::unique_ptr<PostProcessPipeline> postProcessPipeline_;
 
+    float indoorFactor_ = 0.0f;           // 0 outdoors .. 1 inside an interior group, eased
+    glm::vec3 interiorAmbient_{0.5f};     // MOHD ambient of the WMO the camera is in
     bool playerIndoors_ = false;  // Cached WMO inside state for macro conditionals
     bool deferredWorldInitEnabled_ = true;
     bool deferredWorldInitPending_ = false;

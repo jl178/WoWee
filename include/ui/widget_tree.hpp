@@ -636,6 +636,15 @@ struct Widget {
     bool  visibleChain = false;
     bool  visible = false;      ///< visibleChain, and anchored somewhere
     bool  visibilityDirty = false;  ///< on WidgetTree's list for the visibility pass
+    /// This widget is off the chain and so is everything under it, because
+    /// markSubtreeHidden walked it. Only markSubtreeHidden sets it; going back
+    /// on the chain, or being given a child by SetParent, clears it. The full
+    /// pass skips a subtree on this flag alone. Reading "already off" from
+    /// visibleChain/visible was wrong: a single-widget resolve (a rect getter,
+    /// a tooltip re-placed against its owner) turns the widgets on its parent
+    /// chain off without touching the rest of their subtrees, which then
+    /// stayed visible - and drawn - until the panel was shown again.
+    bool  subtreeOff = false;
     /// Whether the interface has been told this is on screen. Visibility is
     /// not a property a frame sets - it is shown, and every ancestor shown too
     /// - so becoming visible has to be noticed rather than announced at the

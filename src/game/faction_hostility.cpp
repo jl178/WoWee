@@ -124,6 +124,7 @@ void buildFactionHostilityMap(pipeline::AssetManager& assetManager, GameHandler&
     // Each template whose faction carries a standing, by the server's index for
     // that standing, so the live at-war flag can be asked for later.
     std::unordered_map<uint32_t, uint32_t> templateRepList;
+    std::unordered_map<uint32_t, bool> regardMap;
     for (uint32_t i = 0; i < ftDbc->getRecordCount(); i++) {
         uint32_t id = ftDbc->getUInt32(i, ftID);
         uint32_t parentFaction = ftDbc->getUInt32(i, ftFaction);
@@ -161,16 +162,29 @@ void buildFactionHostilityMap(pipeline::AssetManager& assetManager, GameHandler&
             (((friendGroup & playerFactionGroup) != 0) ||
              ((factionGroup & playerFriendGroup) != 0));
 
+        // How the unit regards the player, which is what the stock client
+        // colours by (UnitReaction(unit, "player")): its own hostile mask or
+        // enemy list must name the player. The attackable test above also asks
+        // the player's masks, and every race's EnemyGroup carries the Monster
+        // bit, so monster templates with an empty hostile mask (FT 58, 634,
+        // 594...) came out hostile and drew red instead of yellow.
+        bool regardsHostile = hostile && (enemyGroup & playerFactionGroup) != 0;
+        for (uint32_t e = ftEnemy0; hostile && !regardsHostile && playerFactionId > 0 &&
+                                    e <= ftEnemy0 + 3; e++)
+            regardsHostile = ftDbc->getUInt32(i, e) == playerFactionId;
+
         // 5. A faction with a standing overrides all of it: at war is hostile,
         // anything else friendly. See repFactions above.
         if (auto rep = repFactions.find(parentFaction); rep != repFactions.end()) {
             hostile = rep->second.atWar;
             friendly = !hostile;
+            regardsHostile = hostile;
             templateRepList[id] = rep->second.repListId;
         }
 
         factionMap[id] = hostile;
         friendlyMap[id] = friendly;
+        regardMap[id] = regardsHostile;
     }
 
     uint32_t hostileCount = 0;
@@ -181,6 +195,7 @@ void buildFactionHostilityMap(pipeline::AssetManager& assetManager, GameHandler&
              " templates friendly; the rest are hostile or neutral");
     gameHandler.setFactionTemplateRepList(std::move(templateRepList));
     gameHandler.setFactionFriendlyMap(std::move(friendlyMap));
+    gameHandler.setFactionRegardsHostileMap(std::move(regardMap));
     gameHandler.setFactionHostileMap(std::move(factionMap));
     LOG_INFO("Faction hostility for race ", static_cast<int>(playerRace), " (FT ", playerFtId, "): ",
         hostileCount, "/", ftDbc->getRecordCount(),

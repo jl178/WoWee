@@ -890,7 +890,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                         // By reaction, as the stock client colours it: red hostile,
                         // yellow neutral, green friendly. Difficulty is the name's job.
                         const int react = gameHandler.unitReactionToPlayer(*unit);
-                        if (unit->isHostile() || react <= 2 ||
+                        if (react <= 2 ||
                             gameHandler.isAggressiveTowardPlayer(target->getGuid())) {
                             circleColor = glm::vec3(1.0f, 0.0f, 0.0f);
                         } else if (react == 3) {
