@@ -563,6 +563,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
         modelData.materialTextureIndices.push_back(texIndex);
         modelData.materialBlendModes.push_back(mat.blendMode);
         modelData.materialFlags.push_back(mat.flags);
+        modelData.materialSidnColors.push_back(mat.color1);  // MOMT sidnColor, BGRA
 
     }
 
@@ -613,12 +614,18 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
         }
 
         GroupResources resources;
-        if (createGroupResources(wmoGroup, resources, wmoGroup.flags)) {
+        if (createGroupResources(wmoGroup, resources, wmoGroup.flags, model.ambientColor, model.mohdFlags)) {
             // Detect distance-only LOD/exterior shell groups:
-            // 1. Very low vertex count (<100) - portal connectors, tiny shells
-            // 2. ALWAYS_DRAW (0x10000) with low verts - distant LOD stand-ins
-            // 3. Pure OUTDOOR groups (0x8 set, 0x2000 not set) in large WMOs -
+            // 1. ALWAYS_DRAW (0x10000) with low verts - distant LOD stand-ins
+            // 2. Pure OUTDOOR groups (0x8 set, 0x2000 not set) in large WMOs -
             //    exterior cityscape shells (e.g. "city01" in Stormwind)
+            //
+            // A small vertex count is not one of them. That rule (under 100
+            // vertices, exterior, in a WMO of more than 50 groups) caught no
+            // LOD shell anywhere in the shipped data, only real pieces hidden
+            // within 196 yards: Darnassus' porch floors (house20, condoInt09),
+            // Sunwell's towers and doors, Karazhan's hall pieces, Dalaran's
+            // and Stratholme's. The client has no such rule.
             bool alwaysDraw = (wmoGroup.flags & 0x10000) != 0;
             size_t nVerts = wmoGroup.vertices.size();
             bool isLargeWmo = model.nGroups > 50;
@@ -637,8 +644,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             bool isIndoor = (wmoGroup.flags & 0x2000) != 0;
             const bool isStormwindCathedralShell = isStormwindCityWmo && isLargeWmo &&
                                                    isIndoor && (wmoGroup.flags & 0x80) != 0;
-            if ((nVerts < 100 && isLargeWmo && !isIndoor) ||
-                (alwaysDraw && nVerts < 5000 && isLargeWmo && !isIndoor) ||
+            if ((alwaysDraw && nVerts < 5000 && isLargeWmo && !isIndoor) ||
                 (isFacade && isLargeWmo && !isIndoor) ||
                 (isCityShell && !isIndoor && isLargeWmo) ||
                 isStormwindCathedralShell) {
@@ -673,11 +679,13 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             uintptr_t texPtr;
             bool alphaTest;
             bool unlit;
-            bool isWindow;
+            bool isTransparent;
+            uint32_t sidnColor;
             uint8_t emissiveLevel;
             bool operator==(const BatchKey& o) const {
                 return texPtr == o.texPtr && alphaTest == o.alphaTest &&
-                       unlit == o.unlit && isWindow == o.isWindow &&
+                       unlit == o.unlit && isTransparent == o.isTransparent &&
+                       sidnColor == o.sidnColor &&
                        emissiveLevel == o.emissiveLevel;
             }
         };
@@ -686,7 +694,8 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                 return std::hash<uintptr_t>()(k.texPtr) ^
                        (std::hash<bool>()(k.alphaTest) << 1) ^
                        (std::hash<bool>()(k.unlit) << 2) ^
-                       (std::hash<bool>()(k.isWindow) << 3) ^
+                       (std::hash<bool>()(k.isTransparent) << 3) ^
+                       (std::hash<uint32_t>()(k.sidnColor) << 5) ^
                        (std::hash<uint8_t>()(k.emissiveLevel) << 4);
             }
         };
@@ -727,11 +736,22 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                 unlit = (matFlags & 0x01) != 0;
             }
 
-            // Glass comes from the flags the artist set on the material, not
-            // from the texture's file name: most textures named for a window
-            // are walls with window openings painted into them. See
-            // rendering/wmo_material_class.hpp.
-            bool isWindow = false;
+            // Windows are drawn as the client draws them: by the material's
+            // blend mode, lit like the rest of the group. There used to be a
+            // glass path here - darkened, tinted toward a blue reflection and
+            // drawn see-through - picked by the texture's name. The windows
+            // it caught are opaque DXT1 paintings of panes with blend mode 0:
+            // Goldshire inn's lit front windows (MM_ELWYNN_WND_EXT__01, flags
+            // 0x11) came out a smoky see-through grey, and Darnassus' purple
+            // stained glass (MM_NE_WINDOWS_01) near black.
+            //
+            // What the client does give a window is F_SIDN: a glow at night,
+            // in the material's sidnColor.
+            uint32_t sidnColor = 0;
+            if ((matFlags & WMO_MAT_SIDN) != 0 &&
+                batch.materialId < modelData.materialSidnColors.size()) {
+                sidnColor = modelData.materialSidnColors[batch.materialId] & 0x00FFFFFFu;
+            }
             bool isLava = false;
             bool isCloth = false;
             uint8_t emissiveLevel = 0;
@@ -749,8 +769,6 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                         // face: backlit by a flickering fire in the tower.
                         emissiveLevel = 2;
                     }
-                    isWindow = emissiveLevel == 0 &&
-                               wmoMaterialIsGlass(matFlags, texName);
                     isLava = (texNameLower.find("lava") != std::string::npos ||
                               texNameLower.find("molten") != std::string::npos ||
                               texNameLower.find("magma") != std::string::npos);
@@ -795,16 +813,18 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                 }
             }
 
+            const bool isTransparent = (blendMode >= 2);
             BatchKey key{ .texPtr = reinterpret_cast<uintptr_t>(tex), .alphaTest = alphaTest, .unlit = unlit,
-                          .isWindow = isWindow, .emissiveLevel = emissiveLevel };
+                          .isTransparent = isTransparent, .sidnColor = sidnColor,
+                          .emissiveLevel = emissiveLevel };
             auto& mb = batchMap[key];
             if (mb.draws.empty()) {
                 mb.texture = tex;
                 mb.hasTexture = hasTexture;
                 mb.alphaTest = alphaTest;
                 mb.unlit = unlit;
-                mb.isTransparent = (blendMode >= 2);
-                mb.isWindow = isWindow;
+                mb.isTransparent = isTransparent;
+                mb.sidnColor = sidnColor;
                 mb.isLava = isLava;
                 mb.emissiveLevel = emissiveLevel;
                 mb.clothTop = clothTop;
@@ -850,8 +870,9 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             matData.unlit = mb.unlit ? 1 : 0;
             matData.isInterior = isInterior ? 1 : 0;
             matData.hasVertexColors = (groupRes.groupFlags & 0x4) != 0 ? 1 : 0;
-            matData.specularIntensity = 0.0f;  // stock WMO lighting has no specular
-            matData.isWindow = mb.isWindow ? (wmoOnlyMap_ ? 2 : 1) : 0;
+            matData.specularIntensity = 0.5f;
+            matData.reserved0 = 0;
+            matData.sidnColor = mb.sidnColor;
             matData.enableNormalMap = normalMappingEnabled_ ? 1 : 0;
             matData.enablePOM = pomEnabled_ ? 1 : 0;
             matData.pomScale = 0.012f;
@@ -1868,10 +1889,11 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
                 if (!mb.materialSet) continue;
 
                 // Determine which pipeline this batch needs
+                // By the material's blend mode alone: opaque (0) and alpha
+                // key (1, discarded in the shader) here, blended (2+) in the
+                // transparent pipeline.
                 int neededPipeline = 0; // opaque
-                if (mb.isWindow && glassPipeline_) {
-                    neededPipeline = 2; // glass (alpha blend + depth write)
-                } else if (mb.isTransparent && transparentPipeline_) {
+                if (mb.isTransparent && transparentPipeline_) {
                     neededPipeline = 1; // transparent (alpha blend, no depth write)
                 }
 
@@ -1880,7 +1902,6 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
                 if (neededPipeline != currentPipelineKind) {
                     VkPipeline targetPipeline = activePipeline;
                     if (neededPipeline == 1) targetPipeline = transparentPipeline_;
-                    else if (neededPipeline == 2) targetPipeline = glassPipeline_;
                     if (targetPipeline == VK_NULL_HANDLE) continue;
 
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, targetPipeline);
@@ -2048,7 +2069,101 @@ uint32_t WMORenderer::getTotalTriangleCount() const {
     return total;
 }
 
-bool WMORenderer::createGroupResources(const pipeline::WMOGroup& group, GroupResources& resources, uint32_t groupFlags) {
+// An interior group's vertex colours, made into what wmo.frag reads: rgb the
+// light baked into the vertex at half scale, alpha how far the vertex is lit by
+// the outdoors instead of the room (0 = room, 1 = outdoors).
+//
+// This is the client's CMapObjGroup::FixColorVertexAlpha, run when a group
+// loads. MOBA is ordered trans (A), interior (B), exterior (C), and vertices
+// follow their batches, so the vertices of the A batches come first:
+//
+//   * A, the trans batches, sit at the openings - the open sides of a
+//     Darnassus house, a doorway. Their MOCV alpha is how much of the outside
+//     reaches the vertex: 0 inside, up to 255 on the sill. The colour is
+//     rebased off the MOHD ambient and faded by that alpha, (c - amb)(1 - a)/2,
+//     and the alpha is kept, so the shader fades from the room's light to the
+//     sun's across the opening.
+//   * B, the interior batches: (c + c a / 64 - amb) / 2, alpha 0. The alpha on
+//     these vertices brightens rather than blends; almost all of them carry 0.
+//   * C, exterior batches inside an interior group (a balcony, the outer face
+//     of a window): the outdoor light alone, no baked colour.
+//
+// The shader then lights a vertex with ambient + 2 * rgb indoors, which gives
+// back the authored MOCV - not twice it: Darnassus' rooms are painted with
+// colours up to 255, and doubled they washed out. Half scale keeps the shader's
+// sums in the range the client's modulate-2x had.
+//
+// Two MOHD flags change this, as they do in the client:
+//   * 0x8 ("lighten interiors"): the colours are left as authored and only
+//     the alpha past the trans vertices is set. Read by the shader at 2x,
+//     these interiors come out twice as bright as a fixed one - which is the
+//     point of the flag. 124 roots carry it (Icecrown, Wintergrasp,
+//     Dalaran, the ziggurats).
+//   * 0x2: the ambient is not taken off the colours.
+// Darnassus has neither, as 1066 of the 1985 roots do.
+//
+// Exterior groups keep their colours as the loader read them: the exterior
+// branch of the shader has its own reading of them.
+static void interiorVertexLight(const pipeline::WMOGroup& group, uint32_t groupFlags,
+                                const glm::vec3& mohdAmbient, uint16_t mohdFlags,
+                                std::vector<WMOVertex>& vertices) {
+    if ((groupFlags & 0x2000) == 0) return;  // not an INTERIOR group
+    const size_t n = vertices.size();
+    constexpr uint16_t kMohdSkipBaseColor = 0x2;
+    constexpr uint16_t kMohdLightenInteriors = 0x8;
+    const bool fixColors = (mohdFlags & kMohdLightenInteriors) == 0;
+    const glm::vec3 amb = (mohdFlags & kMohdSkipBaseColor)
+        ? glm::vec3(0.0f)
+        : glm::clamp(mohdAmbient, glm::vec3(0.0f), glm::vec3(1.0f));
+    // A group flagged EXTERIOR as well is lit from outside away from its
+    // openings too, as the client sets it.
+    const float restBlend = (groupFlags & 0x8) ? 1.0f : 0.0f;
+
+    if ((groupFlags & 0x4) == 0) {
+        // No MOCV: the loader filled white. Fully lit, from the room.
+        const glm::vec3 baked = glm::max((glm::vec3(1.0f) - amb) * 0.5f, glm::vec3(0.0f));
+        for (auto& v : vertices) v.color = glm::vec4(baked, restBlend);
+    } else {
+        size_t transEnd = 0;
+        const size_t transCount = std::min<size_t>(group.batchCountA, group.batches.size());
+        if (transCount > 0) {
+            transEnd = std::min<size_t>(static_cast<size_t>(group.batches[transCount - 1].lastVertex) + 1, n);
+        }
+        for (size_t i = 0; i < n; ++i) {
+            glm::vec4& c = vertices[i].color;
+            const glm::vec3 rgb(c);
+            const float a = glm::clamp(c.a, 0.0f, 1.0f);
+            if (!fixColors) {
+                // Colours as authored; trans vertices keep their alpha.
+                if (i >= transEnd) c.a = restBlend;
+            } else if (i < transEnd) {
+                const glm::vec3 baked = glm::max(rgb - amb, glm::vec3(0.0f)) * (1.0f - a) * 0.5f;
+                c = glm::vec4(baked, a);
+            } else {
+                // x * w / 64 on bytes: a in [0,1] is w / 255.
+                const glm::vec3 baked = (rgb * (a * 255.0f / 64.0f) + rgb - amb) * 0.5f;
+                c = glm::vec4(glm::clamp(baked, glm::vec3(0.0f), glm::vec3(1.0f)), restBlend);
+            }
+        }
+    }
+
+    // The exterior (C) batches. Only when the header split the batches at
+    // all: a group whose counts are all zero has no C batches, only a header
+    // that did not say.
+    const size_t firstExt = static_cast<size_t>(group.batchCountA) + group.batchCountB;
+    if (firstExt == 0) return;
+    for (size_t b = firstExt; b < group.batches.size(); ++b) {
+        const auto& batch = group.batches[b];
+        if (batch.startVertex > batch.lastVertex) continue;
+        const size_t last = std::min<size_t>(batch.lastVertex, n == 0 ? 0 : n - 1);
+        for (size_t i = batch.startVertex; i <= last && i < n; ++i) {
+            vertices[i].color = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+        }
+    }
+}
+
+bool WMORenderer::createGroupResources(const pipeline::WMOGroup& group, GroupResources& resources, uint32_t groupFlags,
+                                       const glm::vec3& mohdAmbient, uint16_t mohdFlags) {
     if (group.vertices.empty() || group.indices.empty()) {
         return false;
     }
@@ -2072,6 +2187,7 @@ bool WMORenderer::createGroupResources(const pipeline::WMOGroup& group, GroupRes
         vd.tangent = glm::vec4(0.0f);
         vertices.push_back(vd);
     }
+    interiorVertexLight(group, groupFlags, mohdAmbient, mohdFlags, vertices);
 
     // Compute tangents using Lengyel's method
     {

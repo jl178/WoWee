@@ -422,6 +422,10 @@ public:
     // NPC emote state (UNIT_NPC_EMOTESTATE) - persistent looping animation for NPCs
     [[nodiscard]] uint32_t getNpcEmoteState() const { return npcEmoteState; }
     void setNpcEmoteState(uint32_t e) { npcEmoteState = e; }
+    /// UnitStandStateType, byte 0 of UNIT_FIELD_BYTES_1: standing, sitting,
+    /// in a chair (2, 4-6), asleep, dead, kneeling.
+    [[nodiscard]] uint8_t getStandState() const { return standState_; }
+    void setStandState(uint8_t s) { standState_ = s; }
 
     // Returns true if NPC has interaction flags (gossip/vendor/quest/trainer)
     [[nodiscard]] bool isInteractable() const { return npcFlags != 0; }
@@ -454,6 +458,7 @@ protected:
     uint32_t dynamicFlags = 0;
     uint32_t npcFlags = 0;
     uint32_t npcEmoteState = 0;
+    uint8_t standState_ = 0;
     uint32_t factionTemplate = 0;
     bool hostile = false;
 };

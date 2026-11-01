@@ -160,6 +160,13 @@ public:
     Weather* getWeather() const { return weather.get(); }
     Lightning* getLightning() const { return lightning.get(); }
     CharacterRenderer* getCharacterRenderer() const { return characterRenderer.get(); }
+    /// M2 $CSD sound event hook (instanceId, animationId, soundEntryId,
+    /// render-space position). Kept here because the character renderer is
+    /// created with the world, after the core callbacks are installed; it is
+    /// applied to the current one and to any created later.
+    using CharacterAnimSoundEventCallback =
+        std::function<void(uint32_t, uint32_t, uint32_t, const glm::vec3&)>;
+    void setCharacterAnimSoundEventCallback(CharacterAnimSoundEventCallback cb);
     WMORenderer* getWMORenderer() const { return wmoRenderer.get(); }
     M2Renderer* getM2Renderer() const { return m2Renderer.get(); }
     Minimap* getMinimap() const { return minimap.get(); }
@@ -169,6 +176,8 @@ public:
     SkySystem* getSkySystem() const { return skySystem.get(); }
     const std::string& getCurrentZoneName() const;
     uint32_t getCurrentZoneId() const;
+    /// AreaTable id of the chunk under the player (the subzone), 0 if unknown.
+    uint32_t getCurrentAreaId() const;
     /// The area under the player, asked of AreaTable rather than resolved to a
     /// zone first - the world PvP flag is on the subzone. See ZoneManager.
     bool isOnOutdoorPvpObjective() const;
@@ -305,6 +314,7 @@ private:
     std::unique_ptr<LootSparkles> lootSparkles_;
     std::unique_ptr<ChargeEffect> chargeEffect;
     std::unique_ptr<CharacterRenderer> characterRenderer;
+    CharacterAnimSoundEventCallback characterAnimSoundEventCallback_;
     std::unique_ptr<WMORenderer> wmoRenderer;
     std::unique_ptr<M2Renderer> m2Renderer;
     std::unique_ptr<M2Renderer> skyboxModelRenderer_;

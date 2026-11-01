@@ -109,14 +109,11 @@ void WindowManager::ensureBarberState(game::GameHandler& gameHandler) {
     // on its early return, which stops happening the moment the panel is handed
     // over - and stale originals would price a change against the wrong hair.
     if (!gameHandler.isBarberShopOpen()) {
-        // Out of the chair with the preview still on them - closed by the
-        // server, walked away from, or escaped out of. Put back what they came
-        // in wearing; a style is only theirs once it is paid for.
-        if (barberPreviewActive_) {
-            barberPreviewActive_ = false;
-            gameHandler.previewPlayerAppearance(barberOrigAppearanceBytes_,
-                                                barberOrigFacialHair_);
-        }
+        // Taking the unbought preview off is GameHandler::endBarberShop's job,
+        // on every way out. It was done here, which only ran if some barber
+        // Lua call came after the close - Escape and standing up made none, so
+        // the preview stayed on - and after a purchase it put the old look
+        // back over the one just paid for.
         barberInitialized_ = false;
         return;
     }
@@ -131,7 +128,6 @@ void WindowManager::ensureBarberState(game::GameHandler& gameHandler) {
     // wire values expected by a WotLK server. Build the race/sex-specific lists
     // once each time the chair opens.
     barberOrigAppearanceBytes_ = ch->appearanceBytes;
-    barberPreviewActive_ = false;
     barberOrigSkinColor_ = static_cast<uint8_t>(ch->appearanceBytes & 0xFF);
     barberOrigHairStyle_ = static_cast<uint8_t>((ch->appearanceBytes >> 16) & 0xFF);
     barberOrigHairColor_ = static_cast<uint8_t>((ch->appearanceBytes >> 24) & 0xFF);
@@ -340,6 +336,10 @@ void WindowManager::barberCycleStyle(game::GameHandler& gameHandler, int selecto
 /// number, with nothing to see. Nothing is sent by this; barberApplySelection
 /// is still the only thing that talks to the server.
 void WindowManager::barberPreview(game::GameHandler& gameHandler) {
+    // Out of the chair there is nothing to preview, and the selections left
+    // behind are stale: written to the record now, they would be a look the
+    // character never bought.
+    if (!gameHandler.isBarberShopOpen()) return;
     const auto* ch = gameHandler.getActiveCharacter();
     if (!ch) return;
     const BarberSelection sel = barberSelection(gameHandler);
@@ -350,8 +350,6 @@ void WindowManager::barberPreview(game::GameHandler& gameHandler) {
                          | (ch->appearanceBytes & 0x0000FF00u)
                          | (static_cast<uint32_t>(sel.hairStyle) << 16)
                          | (static_cast<uint32_t>(sel.hairColor) << 24);
-    barberPreviewActive_ = bytes != barberOrigAppearanceBytes_ ||
-                           sel.facialHair != barberOrigFacialHair_;
     if (!gameHandler.previewPlayerAppearance(bytes, sel.facialHair)) {
         // Said once. A preview that reaches no record looks exactly like a
         // preview that is not wired up at all, which is the shape this whole

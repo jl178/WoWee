@@ -1392,6 +1392,12 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
     // feet is still sampled and used one way only, upward, and never from the
     // chair's own M2, which is what standing on the furniture was.
     if (sitting) {
+        // In a chair the height is the server's alone: it placed the character
+        // at the chair's own Z and the sit animation lifts the hips onto the
+        // seat. The upward clamp below lifted them onto any WMO-built bench or
+        // seat within a step of that Z, which is the same floating it exists
+        // to prevent. It stays for sitting on the ground.
+        if (seatedInChair_) return;
         const FloorSample seated = sampleFloorUnderFeet(targetPos, movement::kMaxStepUp);
         const std::optional<float> under = selectReachableFloor3(
             seated.terrain, seated.wmo, std::nullopt, targetPos.z, movement::kMaxStepUp);
@@ -2994,6 +3000,7 @@ void CameraController::update(float deltaTime) {
     // Tick down gravity suspension timer (used after world entry to prevent
     // falling through WMO floors before collision is loaded)
     if (entryFloorAnchorTimer_ > 0.0f) entryFloorAnchorTimer_ -= deltaTime;
+    if (serverPlacementAge_ < kServerPlacementWindow) serverPlacementAge_ += deltaTime;
     if (gravitySuspendTimer_ > 0.0f) {
         gravitySuspendTimer_ -= deltaTime;
     }

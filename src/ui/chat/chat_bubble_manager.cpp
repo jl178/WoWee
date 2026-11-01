@@ -9,12 +9,33 @@
 #include <imgui.h>
 #include "ui/chat/chat_utils.hpp"
 #include "ui/sight_cache.hpp"
+#include "ui/ui_texture_load.hpp"
+#include "ui/interface_fonts.hpp"
+#include "ui/text_markup.hpp"
+#include "ui/text_wrap.hpp"
+#include <algorithm>
+#include <cfloat>
+#include <cmath>
 
 #include <glm/glm.hpp>
 
 namespace wowee { namespace ui {
 
-void ChatBubbleManager::addBubble(uint64_t senderGuid, const std::string& message, bool isYell) {
+namespace {
+// 3.3.5 ChatTypeInfo defaults for the chat types that get bubbles.
+ImVec4 bubbleColor(uint8_t t) {
+    switch (t) {
+        case 0x06: case 0x0E: return {1.0f, 0.251f, 0.251f, 1.0f};  // YELL, MONSTER_YELL
+        case 0x02: case 0x0D: return {0.667f, 0.667f, 1.0f, 1.0f};  // PARTY, MONSTER_PARTY
+        case 0x03:            return {1.0f, 0.498f, 0.0f, 1.0f};    // RAID
+        case 0x0C:            return {1.0f, 1.0f, 0.624f, 1.0f};    // MONSTER_SAY
+        default:              return {1.0f, 1.0f, 1.0f, 1.0f};      // SAY
+    }
+}
+} // namespace
+
+void ChatBubbleManager::addBubble(uint64_t senderGuid, const std::string& message, uint8_t chatType) {
+    const bool isYell = chatType == 0x06 || chatType == 0x0E;
     float duration = 8.0f + static_cast<float>(message.size()) * 0.06f;
     if (isYell) duration += 2.0f;
     if (duration > 15.0f) duration = 15.0f;
@@ -25,7 +46,7 @@ void ChatBubbleManager::addBubble(uint64_t senderGuid, const std::string& messag
             b.message = message;
             b.timeRemaining = duration;
             b.totalDuration = duration;
-            b.isYell = isYell;
+            b.chatType = chatType;
             return;
         }
     }
@@ -33,7 +54,7 @@ void ChatBubbleManager::addBubble(uint64_t senderGuid, const std::string& messag
     if (bubbles_.size() >= kMaxBubbles) {
         bubbles_.erase(bubbles_.begin());
     }
-    bubbles_.push_back({.senderGuid = senderGuid, .message = message, .timeRemaining = duration, .totalDuration = duration, .isYell = isYell});
+    bubbles_.push_back({.senderGuid = senderGuid, .message = message, .timeRemaining = duration, .totalDuration = duration, .chatType = chatType});
 }
 
 void ChatBubbleManager::render(game::GameHandler& gameHandler, const UIServices& services) {
@@ -45,6 +66,17 @@ void ChatBubbleManager::render(game::GameHandler& gameHandler, const UIServices&
     auto* renderer = services.renderer;
     auto* camera = renderer ? renderer->getCamera() : nullptr;
     if (!camera) return;
+
+    auto* window0 = services.window;
+    auto load = [&](VkDescriptorSet& ds, const char* p) {
+        if (ds || texGiveUp_ || !services.assetManager || !window0) return;
+        UiTextureLoad why{};
+        ds = uploadUiTextureFromBlp(services.assetManager, p, window0, &why);
+        if (why == UiTextureLoad::NotFound || why == UiTextureLoad::DecodeFailed) texGiveUp_ = true;
+    };
+    load(bg_,   "Interface\\Tooltips\\ChatBubble-Background.blp");
+    load(edge_, "Interface\\Tooltips\\ChatBubble-Backdrop.blp");
+    load(tail_, "Interface\\Tooltips\\ChatBubble-Tail.blp");
 
     auto* window = services.window;
     float screenW = window ? static_cast<float>(window->getWidth()) : 1280.0f;
@@ -110,30 +142,75 @@ void ChatBubbleManager::render(game::GameHandler& gameHandler, const UIServices&
         // sat on top of the auction house, the bags, the map, anything open.
         // Nothing about the position was wrong; a window was simply the one
         // thing that cannot go underneath.
+        // Say range, fading out towards its edge as the stock bubbles do.
+        const float s = screenH / 768.0f;  // interface units to pixels
+        const float dist = glm::length(camera->getPosition() - renderPos);
+        alpha *= std::clamp((60.0f - dist) / 20.0f, 0.0f, 1.0f);
+        if (alpha <= 0.0f) continue;
+
         ImDrawList* dl = ImGui::GetBackgroundDrawList();
-        ImFont* font = ImGui::GetFont();
-        const float fontSize = ImGui::GetFontSize();
-        constexpr float kWrapWidth = 200.0f;
-        const ImVec2 padding(8.0f, 4.0f);
-
-        const ImVec2 textSize =
-            font->CalcTextSizeA(fontSize, FLT_MAX, kWrapWidth, bubble.message.c_str());
-        const ImVec2 size(textSize.x + padding.x * 2.0f, textSize.y + padding.y * 2.0f);
-        // The point is where the speaker's head is, and the bubble sits above
-        // it, centred - which is what the window's pivot of (0.5, 1) did.
-        const ImVec2 topLeft(screenX - size.x * 0.5f, screenY - size.y);
-
-        ImVec4 background = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
-        background.w = 0.7f * alpha;
-        dl->AddRectFilled(topLeft, ImVec2(topLeft.x + size.x, topLeft.y + size.y),
-                          ImGui::GetColorU32(background), 8.0f);
-
-        const ImVec4 textColor = bubble.isYell
-            ? ImVec4(1.0f, 0.2f, 0.2f, alpha)
-            : ImVec4(1.0f, 1.0f, 1.0f, alpha);
-        dl->AddText(font, fontSize, ImVec2(topLeft.x + padding.x, topLeft.y + padding.y),
-                    ImGui::GetColorU32(textColor), bubble.message.c_str(), nullptr,
-                    kWrapWidth);
+        ImFont* font = interfaceFace("frizqt__");
+        if (!font) font = ImGui::GetFont();
+        const float fs = 13.0f * s, lineH = fs * 1.2f;
+        const float e = 16.0f * s, pad = 12.0f * s, maxW = 300.0f * s;
+        auto measure = [&](const std::string& t) {
+            return font->CalcTextSizeA(fs, FLT_MAX, 0.0f, t.c_str()).x;
+        };
+        const auto lines = wrapText(parseMarkup(bubble.message), maxW, true, measure);
+        std::vector<float> lw;
+        float textW = 0.0f;
+        for (const auto& ln : lines) {
+            float w = 0.0f;
+            for (const auto& run : ln) w += measure(run.text);
+            lw.push_back(w);
+            textW = std::max(textW, w);
+        }
+        const float bw = std::max(textW + pad * 2.0f, e * 2.0f);
+        const float bh = std::max(lineH * static_cast<float>(lines.size()) + pad * 2.0f, e * 2.0f);
+        const float tailH = 16.0f * s;
+        const float x0 = screenX - bw * 0.5f, x1 = x0 + bw;
+        const float y1 = screenY - tailH + 4.0f * s, y0 = y1 - bh;
+        const ImU32 white = IM_COL32(255, 255, 255, static_cast<int>(alpha * 255.0f));
+        auto tex = [](VkDescriptorSet d) { return reinterpret_cast<ImTextureID>(d); };
+        if (bg_) {
+            dl->AddImage(tex(bg_), {x0 + e, y0 + e}, {x1 - e, y1 - e}, {0, 0},
+                         {(bw - 2 * e) / e, (bh - 2 * e) / e}, white);
+        } else {
+            dl->AddRectFilled({x0, y0}, {x1, y1}, IM_COL32(0, 0, 0, static_cast<int>(alpha * 180.0f)), 8.0f * s);
+        }
+        if (edge_) {  // 8 cells: left, right, top, bottom, then the four corners
+            auto cell = [&](int i, ImVec2 a, ImVec2 b) {
+                dl->AddImage(tex(edge_), a, b, {i / 8.0f, 0.0f}, {(i + 1) / 8.0f, 1.0f}, white);
+            };
+            auto hrun = [&](int i, float px0, float py0, float px1, float py1) {
+                const float u0 = i / 8.0f, u1 = (i + 1) / 8.0f, f = (px1 - px0) / e;
+                dl->AddImageQuad(tex(edge_), {px0, py0}, {px1, py0}, {px1, py1}, {px0, py1},
+                                 {u0, 0.0f}, {u0, f}, {u1, f}, {u1, 0.0f}, white);
+            };
+            cell(0, {x0, y0 + e}, {x0 + e, y1 - e});
+            cell(1, {x1 - e, y0 + e}, {x1, y1 - e});
+            hrun(2, x0 + e, y0, x1 - e, y0 + e);
+            hrun(3, x0 + e, y1 - e, x1 - e, y1);
+            cell(4, {x0, y0}, {x0 + e, y0 + e});
+            cell(5, {x1 - e, y0}, {x1, y0 + e});
+            cell(6, {x0, y1 - e}, {x0 + e, y1});
+            cell(7, {x1 - e, y1 - e}, {x1, y1});
+        }
+        if (tail_) {
+            dl->AddImage(tex(tail_), {screenX - 8.0f * s, y1 - 4.0f * s},
+                         {screenX + 8.0f * s, y1 - 4.0f * s + tailH}, {0, 0}, {1, 1}, white);
+        }
+        const ImVec4 base = bubbleColor(bubble.chatType);
+        float ty = y0 + (bh - lineH * static_cast<float>(lines.size())) * 0.5f;
+        for (size_t li = 0; li < lines.size(); ++li, ty += lineH) {
+            float tx = screenX - lw[li] * 0.5f;  // centred, like stock
+            for (const auto& run : lines[li]) {
+                ImVec4 c = run.hasColor ? ImVec4(run.rgba[0], run.rgba[1], run.rgba[2], 1.0f) : base;
+                c.w = alpha;
+                dl->AddText(font, fs, {tx, ty}, ImGui::GetColorU32(c), run.text.c_str());
+                tx += measure(run.text);
+            }
+        }
     }
 }
 
@@ -144,8 +221,8 @@ void ChatBubbleManager::setupCallback(game::GameHandler& gameHandler) {
         // text, which is why an NPC line read correctly in the log and showed
         // its raw $r/$c/$g markers in the bubble over their head.
         gameHandler.setChatBubbleCallback(
-            [this, &gameHandler](uint64_t guid, const std::string& msg, bool isYell) {
-                addBubble(guid, chat_utils::replaceGenderPlaceholders(msg, gameHandler), isYell);
+            [this, &gameHandler](uint64_t guid, const std::string& msg, uint8_t type) {
+                addBubble(guid, chat_utils::replaceGenderPlaceholders(msg, gameHandler), type);
             });
         callbackSet_ = true;
     }

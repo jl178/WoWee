@@ -275,7 +275,9 @@ public:
     void setNormalMapStrength(float s) { normalMapStrength_ = s; materialSettingsDirty_ = true; }
     void setPOMEnabled(bool enabled) { pomEnabled_ = enabled; materialSettingsDirty_ = true; }
     void setPOMQuality(int q) { pomQuality_ = q; materialSettingsDirty_ = true; }
-    void setWMOOnlyMap(bool v) { wmoOnlyMap_ = v; materialSettingsDirty_ = true; }
+    // Nothing reads the WMO-only flag since the glass path went; the call
+    // still marks materials for a refresh.
+    void setWMOOnlyMap(bool) { materialSettingsDirty_ = true; }
     bool isNormalMappingEnabled() const { return normalMappingEnabled_; }
     float getNormalMapStrength() const { return normalMapStrength_; }
     bool isPOMEnabled() const { return pomEnabled_; }
@@ -481,7 +483,7 @@ private:
         int32_t unlit;             // 8
         int32_t isInterior;        // 12
         float specularIntensity;   // 16
-        int32_t isWindow;          // 20
+        int32_t reserved0;         // 20 (was the glass path's isWindow)
         int32_t enableNormalMap;   // 24
         int32_t enablePOM;         // 28
         float pomScale;            // 32 (height scale)
@@ -494,7 +496,7 @@ private:
         float wmoAmbientB;         // 60 (interior ambient color B)
         int32_t emissive;           // 64 (0 none, 1 lamp glass, 2 firelit)
         int32_t hasVertexColors;    // 68: the group carries MOCV (MOGP flag 0x4)
-        int32_t padding1;           // 72
+        uint32_t sidnColor;         // 72: F_SIDN night glow, MOMT sidnColor 0x00RRGGBB (0 = none)
         int32_t padding2;           // 76
     };  // 80 bytes total
 
@@ -535,7 +537,7 @@ private:
             bool alphaTest = false;
             bool unlit = false;
             bool isTransparent = false;     // blendMode >= 2
-            bool isWindow = false;          // F_SIDN or F_WINDOW material
+            uint32_t sidnColor = 0;         // F_SIDN night glow colour, 0x00RRGGBB (0 = none)
             bool isLava = false;            // lava/magma texture (UV scroll)
             /// Cloth hung in the building's own mesh: where the bar is, how
             /// far the cloth drops below it, and where it hangs.
@@ -662,6 +664,8 @@ private:
 
         // Material flags (materialId -> flags; 0x01 = unlit)
         std::vector<uint32_t> materialFlags;
+        // MOMT sidnColor per material (BGRA as stored), the F_SIDN night glow
+        std::vector<uint32_t> materialSidnColors;
 
         // Portal visibility data
         std::vector<PortalData> portals;
@@ -752,8 +756,13 @@ private:
 
     /**
      * Create GPU resources for a WMO group
+     *
+     * mohdAmbient and mohdFlags are the root's MOHD ambient colour and
+     * flags: an interior group's vertex colours are rebased on them the way
+     * the client does on load (see interiorVertexLight in the .cpp).
      */
-    bool createGroupResources(const pipeline::WMOGroup& group, GroupResources& resources, uint32_t groupFlags = 0);
+    bool createGroupResources(const pipeline::WMOGroup& group, GroupResources& resources, uint32_t groupFlags = 0,
+                              const glm::vec3& mohdAmbient = glm::vec3(0.0f), uint16_t mohdFlags = 0);
 
     /**
      * Check if group is visible in frustum
@@ -913,7 +922,6 @@ private:
     bool pomEnabled_ = true;             // on by default
     int pomQuality_ = 1;                 // 0=Low(16), 1=Medium(32), 2=High(64)
     bool materialSettingsDirty_ = false; // rebuild UBOs when settings change
-    bool wmoOnlyMap_ = false;            // true for dungeon/instance WMO-only maps
 
     // Rendering state
     bool wireframeMode = false;

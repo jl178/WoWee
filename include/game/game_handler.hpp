@@ -366,7 +366,7 @@ public:
     void autoJoinDefaultChannels();
 
     // Chat bubble callback: (senderGuid, message, isYell)
-    using ChatBubbleCallback = std::function<void(uint64_t, const std::string&, bool)>;
+    using ChatBubbleCallback = std::function<void(uint64_t, const std::string&, uint8_t /*ChatType*/)>;
     void setChatBubbleCallback(ChatBubbleCallback cb) { chatBubbleCallback_ = std::move(cb); }
 
     // Addon chat event callback: fires when any chat message is received (for Lua event dispatch)
@@ -1816,7 +1816,28 @@ public:
 
     // Barber shop
     bool isBarberShopOpen() const { return barberShopOpen_; }
-    void closeBarberShop() { barberShopOpen_ = false; fireAddonEvent("BARBER_SHOP_CLOSE", {}); }
+    /// Leave the barber without buying: the preview comes off. Every way out
+    /// that is not a paid-for style - Cancel, Escape, standing up - ends here.
+    void closeBarberShop() { endBarberShop(false); }
+    /// Leave the barber. `committed` is a style the server accepted: the
+    /// preview is what they now wear, and PLAYER_BYTES confirms it. Anything
+    /// else puts back what they came in wearing.
+    void endBarberShop(bool committed) {
+        if (barberStash_ && !committed) {
+            const uint64_t guid = activeCharacterGuid_ != 0 ? activeCharacterGuid_ : playerGuid;
+            for (auto& ch : characters) {
+                if (ch.guid != guid) continue;
+                ch.appearanceBytes = barberStash_->first;
+                ch.facialFeatures = barberStash_->second;
+                if (playerModelRebuildCallback_) playerModelRebuildCallback_();
+                break;
+            }
+        }
+        barberStash_.reset();
+        if (!barberShopOpen_) return;
+        barberShopOpen_ = false;
+        fireAddonEvent("BARBER_SHOP_CLOSE", {});
+    }
     void sendAlterAppearance(uint32_t hairStyleEntry, uint32_t hairColor,
                              uint32_t facialHairEntry, uint32_t skinColorEntry);
 
@@ -3523,6 +3544,15 @@ public:
         const uint64_t guid = activeCharacterGuid_ != 0 ? activeCharacterGuid_ : playerGuid;
         for (auto& ch : characters) {
             if (ch.guid != guid) continue;
+            // The record is the character's real appearance and this writes a
+            // preview over it, so the real one is kept the first time, and
+            // endBarberShop puts it back unless the style was bought. Putting
+            // it back used to depend on some barber Lua call happening after
+            // the shop closed; Escape and standing up made none, and the
+            // preview stayed on as if it had been paid for.
+            if (barberShopOpen_ && !barberStash_) {
+                barberStash_ = std::make_pair(ch.appearanceBytes, ch.facialFeatures);
+            }
             ch.appearanceBytes = appearanceBytes;
             ch.facialFeatures = facialFeatures;
             if (playerModelRebuildCallback_) playerModelRebuildCallback_();
@@ -4574,6 +4604,9 @@ private:
 
     // Barber shop
     bool barberShopOpen_ = false;
+    /// The appearance bytes and facial features the character had before the
+    /// barber's preview first wrote over them; see endBarberShop.
+    std::optional<std::pair<uint32_t, uint8_t>> barberStash_;
 
     // ---- Loot ----
     bool lootWindowOpen = false;

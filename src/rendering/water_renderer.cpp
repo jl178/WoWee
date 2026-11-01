@@ -10,11 +10,15 @@
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/frustum.hpp"
+#include "rendering/lighting_manager.hpp"
 #include "pipeline/adt_loader.hpp"
+#include "pipeline/asset_manager.hpp"
+#include "pipeline/dbc_loader.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "core/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -43,7 +47,8 @@ struct WaterPushConstants {
     glm::vec2 screenSize;  // target size, for screen-space UVs
     glm::vec2 depthRange;  // camera near, far - the shader linearises SceneDepth with these
     float sceneValid = 0.0f; // 1 once captureSceneHistory has run; the shader used to guess this per pixel
-    float pad0 = 0.0f, pad1 = 0.0f, pad2 = 0.0f;
+    float liquidTexValid = 0.0f; // 1 when set 3 holds a frame of this liquid's texture
+    float pad1 = 0.0f, pad2 = 0.0f;
 };
 static_assert(sizeof(WaterPushConstants) == 112, "the two shader declarations of this range are laid out for 112 bytes");
 
@@ -141,13 +146,20 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
         return false;
     }
 
+    // --- Liquid texture set layout (set 3) ---
+    if (!createLiquidTextureResources()) {
+        LOG_ERROR("WaterRenderer: failed to create liquid texture resources");
+        return false;
+    }
+
     // --- Pipeline layout ---
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pushRange.offset = 0;
     pushRange.size = sizeof(WaterPushConstants);
 
-    std::vector<VkDescriptorSetLayout> setLayouts = { perFrameLayout, materialSetLayout, sceneSetLayout };
+    std::vector<VkDescriptorSetLayout> setLayouts = { perFrameLayout, materialSetLayout, sceneSetLayout,
+                                                      liquidTexSetLayout_ };
     pipelineLayout = createPipelineLayout(device, setLayouts, { pushRange });
     if (!pipelineLayout) {
         LOG_ERROR("WaterRenderer: failed to create pipeline layout");
@@ -340,12 +352,227 @@ void WaterRenderer::shutdown() {
     destroySceneHistoryResources();
     destroy(device, waterPipeline);
     destroy(device, pipelineLayout);
+    destroyLiquidTextureResources();
     destroy(device, sceneDescPool);
     destroy(device, sceneSetLayout);
     destroy(device, materialDescPool);
     destroy(device, materialSetLayout);
 
     vkCtx = nullptr;
+}
+
+// ==============================================================
+// Liquid textures (LiquidType.dbc animated sequences)
+// ==============================================================
+
+bool WaterRenderer::createLiquidTextureResources() {
+    VkDevice device = vkCtx->getDevice();
+
+    VkDescriptorSetLayoutBinding texBinding{};
+    texBinding.binding = 0;
+    texBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    texBinding.descriptorCount = 1;
+    texBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    liquidTexSetLayout_ = createDescriptorSetLayout(device, { texBinding });
+    if (!liquidTexSetLayout_) return false;
+
+    VkDescriptorPoolSize poolSize{};
+    poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSize.descriptorCount = MAX_LIQUID_TEXTURE_SETS;
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.maxSets = MAX_LIQUID_TEXTURE_SETS;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &liquidTexPool_) != VK_SUCCESS) return false;
+
+    // A transparent black texel: added over the water colour it changes
+    // nothing, so a liquid whose texture failed to load still draws its colour.
+    const uint8_t blank[4] = {0, 0, 0, 0};
+    blankLiquidTexture_ = std::make_unique<VkTexture>();
+    if (!blankLiquidTexture_->upload(*vkCtx, blank, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, false)) return false;
+    blankLiquidTexture_->createSampler(device, VK_FILTER_LINEAR, VK_FILTER_LINEAR,
+                                       VK_SAMPLER_ADDRESS_MODE_REPEAT);
+    if (!blankLiquidTexture_->isValid()) return false;
+
+    VkDescriptorSetAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    ai.descriptorPool = liquidTexPool_;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &liquidTexSetLayout_;
+    if (vkAllocateDescriptorSets(device, &ai, &blankLiquidSet_) != VK_SUCCESS) return false;
+
+    VkDescriptorImageInfo imageInfo = blankLiquidTexture_->descriptorInfo();
+    VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = blankLiquidSet_;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    return true;
+}
+
+void WaterRenderer::destroyLiquidTextureResources() {
+    if (!vkCtx) return;
+    VkDevice device = vkCtx->getDevice();
+    VmaAllocator allocator = vkCtx->getAllocator();
+    for (auto& set : liquidTextureSets_) {
+        for (auto& tex : set.frames) {
+            if (tex) tex->destroy(device, allocator);
+        }
+    }
+    liquidTextureSets_.clear();
+    liquidTextureSetByPattern_.clear();
+    liquidInfoById_.clear();
+    for (int& d : defaultTextureSetByBasic_) d = -1;
+    liquidTexturesLoaded_ = false;
+    if (blankLiquidTexture_) {
+        blankLiquidTexture_->destroy(device, allocator);
+        blankLiquidTexture_.reset();
+    }
+    blankLiquidSet_ = VK_NULL_HANDLE;  // freed with the pool
+    destroy(device, liquidTexPool_);
+    destroy(device, liquidTexSetLayout_);
+}
+
+int WaterRenderer::loadLiquidTextureSequence(pipeline::AssetManager* assetManager,
+                                             const std::string& pattern) {
+    std::string key = pattern;
+    std::transform(key.begin(), key.end(), key.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (auto it = liquidTextureSetByPattern_.find(key); it != liquidTextureSetByPattern_.end()) {
+        return it->second;
+    }
+    liquidTextureSetByPattern_[key] = -1;  // a failed sequence is not retried
+
+    const size_t slot = pattern.find("%d");
+    if (slot == std::string::npos) return -1;
+
+    VkDevice device = vkCtx->getDevice();
+    LiquidTextureSet set;
+    // Frames are numbered from 1. Most sequences have 30; fast_a has 16, so
+    // the count is whatever is there.
+    constexpr int kMaxFrames = 30;
+    for (int frame = 1; frame <= kMaxFrames; ++frame) {
+        std::string path = pattern;
+        path.replace(slot, 2, std::to_string(frame));
+        if (!assetManager->fileExists(path)) break;
+
+        auto tex = std::make_unique<VkTexture>();
+        bool ok = false;
+        pipeline::BLPImage compressed = assetManager->loadTexture(path, true);
+        if (compressed.isValid()) ok = tex->uploadBLP(*vkCtx, compressed);
+        if (!ok) {
+            pipeline::BLPImage image = assetManager->loadTexture(path);
+            ok = image.isValid() &&
+                 tex->upload(*vkCtx, image.data.data(), image.width, image.height,
+                             VK_FORMAT_R8G8B8A8_UNORM, true);
+        }
+        if (!ok) break;
+        tex->createSampler(device, VK_FILTER_LINEAR, VK_FILTER_LINEAR,
+                           VK_SAMPLER_ADDRESS_MODE_REPEAT);
+        if (!tex->isValid()) break;
+        set.frames.push_back(std::move(tex));
+    }
+    if (set.frames.empty()) {
+        LOG_WARNING("Water: no frames found for liquid texture ", pattern);
+        return -1;
+    }
+
+    for (const auto& tex : set.frames) {
+        VkDescriptorSet ds = VK_NULL_HANDLE;
+        VkDescriptorSetAllocateInfo ai{};
+        ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        ai.descriptorPool = liquidTexPool_;
+        ai.descriptorSetCount = 1;
+        ai.pSetLayouts = &liquidTexSetLayout_;
+        if (vkAllocateDescriptorSets(device, &ai, &ds) != VK_SUCCESS) {
+            LOG_WARNING("Water: liquid texture descriptor pool exhausted at ", pattern);
+            break;
+        }
+        VkDescriptorImageInfo imageInfo = tex->descriptorInfo();
+        VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = ds;
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &imageInfo;
+        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        set.sets.push_back(ds);
+    }
+    if (set.sets.empty()) return -1;
+    set.frames.resize(set.sets.size());
+
+    LOG_INFO("Water: loaded ", set.sets.size(), " frames of ", pattern);
+    const int index = static_cast<int>(liquidTextureSets_.size());
+    liquidTextureSets_.push_back(std::move(set));
+    liquidTextureSetByPattern_[key] = index;
+    return index;
+}
+
+void WaterRenderer::loadLiquidTextures(pipeline::AssetManager* assetManager) {
+    if (liquidTexturesLoaded_ || !assetManager || !vkCtx || !liquidTexPool_) return;
+    liquidTexturesLoaded_ = true;
+
+    // Each basic type's stock sequence, for a liquid the DBC does not list.
+    static const char* const kDefaultPatterns[4] = {
+        "XTextures\\river\\lake_a.%d.blp",
+        "XTextures\\ocean\\ocean_h.%d.blp",
+        "XTextures\\lava\\lava.%d.blp",
+        "XTextures\\slime\\slime.%d.blp",
+    };
+    for (int b = 0; b < 4; ++b) {
+        defaultTextureSetByBasic_[b] = loadLiquidTextureSequence(assetManager, kDefaultPatterns[b]);
+    }
+
+    // LiquidType.dbc (3.3.5, 45 fields): 0 ID, 1 Name, 3 Type (0 water,
+    // 1 ocean, 2 magma, 3 slime), 15-20 Texture[6]. The first texture slot
+    // holding a frame sequence is the surface; the procedural types list
+    // their height maps there too, which are not the surface.
+    auto dbc = assetManager->loadDBCOptional("LiquidType.dbc");
+    if (!dbc || !dbc->isLoaded() || dbc->getFieldCount() < 21) {
+        LOG_WARNING("Water: LiquidType.dbc unavailable, using the stock texture per basic type");
+        return;
+    }
+    for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
+        const uint32_t id = dbc->getUInt32(row, 0);
+        if (id > 0xFFFF) continue;
+        LiquidInfo info;
+        const uint32_t type = dbc->getUInt32(row, 3);
+        info.basicType = static_cast<uint8_t>(type < 4 ? type : (id == 0 ? 0 : (id - 1) % 4));
+        for (uint32_t f = 15; f <= 20; ++f) {
+            std::string path = dbc->getString(row, f);
+            if (path.find("%d") == std::string::npos) continue;
+            std::string lower = path;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (lower.find("height") != std::string::npos) continue;
+            info.textureSet = loadLiquidTextureSequence(assetManager, path);
+            break;
+        }
+        liquidInfoById_[static_cast<uint16_t>(id)] = info;
+    }
+    LOG_INFO("Water: ", liquidInfoById_.size(), " liquid types, ",
+             liquidTextureSets_.size(), " texture sequences");
+}
+
+WaterRenderer::LiquidInfo WaterRenderer::resolveLiquid(uint16_t liquidType) const {
+    LiquidInfo info;
+    if (auto it = liquidInfoById_.find(liquidType); it != liquidInfoById_.end()) {
+        info = it->second;
+    } else {
+        info.basicType = static_cast<uint8_t>((liquidType == 0) ? 0 : ((liquidType - 1) % 4));
+    }
+    if (info.textureSet < 0) info.textureSet = defaultTextureSetByBasic_[info.basicType & 3];
+    return info;
+}
+
+void WaterRenderer::setLiquidLighting(const LightingParams& lighting) {
+    frameUBO_.riverClose = glm::vec4(lighting.riverCloseColor, lighting.waterShallowAlpha);
+    frameUBO_.riverFar = glm::vec4(lighting.riverFarColor, lighting.waterDeepAlpha);
+    frameUBO_.oceanClose = glm::vec4(lighting.oceanCloseColor, lighting.oceanShallowAlpha);
+    frameUBO_.oceanFar = glm::vec4(lighting.oceanFarColor, lighting.oceanDeepAlpha);
 }
 
 VkDescriptorSet WaterRenderer::allocateMaterialSet() {
@@ -604,7 +831,9 @@ void WaterRenderer::updateMaterialUBO(WaterSurface& surface) {
     // depth - so it came out as clear glass over the stone bed. Its own colour
     // is given a floor, a little deeper than a lake's, and it is no longer
     // thinned below open water.
-    float alphaScale = canalProfile ? 1.15f : 1.00f;
+    // The stock path takes its alpha from LightParams' shallow/deep alphas
+    // unscaled, canals included.
+    float alphaScale = 1.00f;
     float bodyFloor = 0.0f;
     if (canalProfile && (surface.liquidType == 0 || (surface.liquidType - 1) % 4 < 2)) {
         color = glm::vec4(0.08f, 0.30f, 0.40f, 1.0f);
@@ -1097,7 +1326,7 @@ void WaterRenderer::clear() {
 // ==============================================================
 
 void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                            const Camera& camera, float /*time*/, bool use1x, uint32_t frameIndex) {
+                            const Camera& camera, float time, bool use1x, uint32_t frameIndex) {
     // The wake as it stands, into this frame's slot - safe now, the frame has
     // waited for the GPU to finish with it.
     uploadFrameUBO();
@@ -1158,12 +1387,34 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
         bool isWmoWater = (surface.wmoId != 0);
         bool canalProfile = isWmoWater || (surface.liquidType == 5);
-        uint8_t basicType = (surface.liquidType == 0) ? 0 : ((surface.liquidType - 1) % 4);
-        // WMO water gets no wave displacement - prevents visible slosh at
-        // geometry edges (bridges, docks) where water is far below the surface.
-        float waveAmp = isWmoWater ? 0.0f : (basicType == 1 ? 0.35f : 0.08f);
+        // Basic type and texture sequence from LiquidType.dbc, not from the
+        // ID's position in the table: Naxxramas slime is ID 21 and a magma.
+        const LiquidInfo liquid = resolveLiquid(surface.liquidType);
+        uint8_t basicType = liquid.basicType;
+        // No wave displacement. The 3.3.5 liquid is the flat sheet the ADT and
+        // WMO give it; moving the surface up and down slid the waterline up
+        // and down every character and post standing in it, which is the
+        // silhouette that moved around when facing water.
+        float waveAmp = 0.0f;
         float waveFreq = canalProfile ? 0.35f : (basicType == 1 ? 0.20f : 0.30f);
         float waveSpeed = canalProfile ? 1.00f : (basicType == 1 ? 1.20f : 1.40f);
+
+        // The sequence's frame for now: the stock liquids step through their
+        // frames at 30 a second.
+        VkDescriptorSet liquidSet = blankLiquidSet_;
+        bool liquidTexValid = false;
+        if (liquid.textureSet >= 0 &&
+            static_cast<size_t>(liquid.textureSet) < liquidTextureSets_.size()) {
+            const auto& sets = liquidTextureSets_[liquid.textureSet].sets;
+            if (!sets.empty()) {
+                constexpr float kLiquidFramesPerSecond = 30.0f;
+                const auto frame = static_cast<size_t>(
+                    std::max(0.0f, time) * kLiquidFramesPerSecond) % sets.size();
+                liquidSet = sets[frame];
+                liquidTexValid = true;
+            }
+        }
+        if (!liquidSet) continue;
 
         WaterPushConstants push{};
         push.model = glm::mat4(1.0f);
@@ -1178,6 +1429,7 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         // against a near plane of 0.05 while the camera's is 0.5.
         push.depthRange = glm::vec2(camera.getNearPlane(), camera.getFarPlane());
         push.sceneValid = sceneHistoryReady ? 1.0f : 0.0f;
+        push.liquidTexValid = liquidTexValid ? 1.0f : 0.0f;
 
         vkCmdPushConstants(cmd, pipelineLayout,
                             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -1185,6 +1437,8 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                                  1, 1, &surface.materialSet, 0, nullptr);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
+                                 3, 1, &liquidSet, 0, nullptr);
 
         VkDeviceSize offset = 0;
         vkCmdBindVertexBuffers(cmd, 0, 1, &surface.vertexBuffer, &offset);

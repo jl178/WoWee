@@ -24,6 +24,8 @@ namespace cr  { constexpr uint32_t kFields = 69, kMaleDisplay = 4, kFemaleDispla
 namespace cdi { constexpr uint32_t kFields = 16, kModel = 1, kSound = 2, kNpcSound = 12; }
 namespace ns  { constexpr uint32_t kFields = 5, kSound0 = 1; }
 namespace ets { constexpr uint32_t kFields = 5, kEmote = 1, kRace = 2, kSex = 3, kSound = 4; }
+namespace etx { constexpr uint32_t kFields = 19, kEmote = 2; }   // EmotesText
+namespace emo { constexpr uint32_t kFields = 7, kAnim = 2; }     // Emotes
 namespace cmd { constexpr uint32_t kFields = 28, kSound = 13; }
 namespace csd { constexpr uint32_t kFields = 38, kExertion = 1, kExertionCritical = 2, kInjury = 3,
                 kInjuryCritical = 4, kDeath = 6, kStand = 8, kFootstep = 9, kJumpStart = 26,
@@ -63,10 +65,11 @@ bool SoundData::load(const Loader& loadDbc) {
     wmoAreas_.clear();
     npcSounds_.clear();
     emoteSounds_.clear();
+    emoteTextSoundAnims_.clear();
     soundCache_.clear();
     creatureSoundCache_.clear();
 
-    soundEntries_ = table(loadDbc, "SoundEntries.dbc", se::kFields);
+    soundEntries_ =table(loadDbc, "SoundEntries.dbc", se::kFields);
     if (!soundEntries_) return false;
     for (uint32_t i = 0; i < soundEntries_->getRecordCount(); ++i) {
         soundIdsByName_[lowered(soundEntries_->getStringView(i, se::kName))] = soundEntries_->getUInt32(i, 0);
@@ -141,7 +144,26 @@ bool SoundData::load(const Loader& loadDbc) {
             emoteSounds_[key] = dbc->getUInt32(i, ets::kSound);
         }
     }
-    chrRaces_ = table(loadDbc, "ChrRaces.dbc", cr::kFields);
+    // Animations voiced through EmotesTextSound (TRAIN -> EmoteTrain): the
+    // M2 $CSD path skips them so the voice does not play twice.
+    if (!emoteSounds_.empty()) {
+        auto texts = table(loadDbc, "EmotesText.dbc", etx::kFields);
+        auto emotes = table(loadDbc, "Emotes.dbc", emo::kFields);
+        if (texts && emotes) {
+            std::unordered_set<uint32_t> voicedTextEmotes;
+            for (const auto& [key, sound] : emoteSounds_) {
+                voicedTextEmotes.insert(static_cast<uint32_t>(key >> 16));
+            }
+            for (uint32_t i = 0; i < texts->getRecordCount(); ++i) {
+                if (!voicedTextEmotes.count(texts->getUInt32(i, 0))) continue;
+                const int32_t row = emotes->findRecordById(texts->getUInt32(i, etx::kEmote));
+                if (row < 0) continue;
+                const uint32_t anim = emotes->getUInt32(static_cast<uint32_t>(row), emo::kAnim);
+                if (anim != 0) emoteTextSoundAnims_.insert(anim);
+            }
+        }
+    }
+    chrRaces_ =table(loadDbc, "ChrRaces.dbc", cr::kFields);
     displayInfo_ = table(loadDbc, "CreatureDisplayInfo.dbc", cdi::kFields);
     modelData_ = table(loadDbc, "CreatureModelData.dbc", cmd::kFields);
     creatureSounds_ = table(loadDbc, "CreatureSoundData.dbc", csd::kFields);

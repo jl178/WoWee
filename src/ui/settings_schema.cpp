@@ -144,13 +144,21 @@ constexpr SettingDesc kSchema[] = {
 
     {"normalmapping", "Surface bumps (normal mapping)", SettingKind::Bool, 0, 0, 0, "Detail", "Surfaces",
      "Light stone, wood, cloth and metal by their surface texture, so\n"
-     "they catch the light like the real material rather than flat paint.", "", 1},
+     "they catch the light like the real material rather than flat paint.", "", 1,
+     // Off applies at once. On needs the bump maps, which are made as each
+     // building's textures load and skipped while this is off - so turned on
+     // mid-session it reaches only what loads afterwards.
+     "", "", "", "",
+     "Turning this on reaches buildings loaded from now on;\nrestart to see it everywhere."},
     {"normalmapstrength", "Bump strength", SettingKind::Float, 0, 2, 0.1f, "Detail", "",
      "How pronounced those surface bumps look. 1 is as the textures\n"
      "were made; higher exaggerates them.", "", 0.8f, "normalmapping"},
     {"parallax", "Surface depth (parallax)", SettingKind::Bool, 0, 0, 0, "Detail", "",
      "Gives bricks, cobbles and planks real depth when seen at an\n"
-     "angle, so mortar lines sink and stones stand out.", "", 1},
+     "angle, so mortar lines sink and stones stand out.", "", 1,
+     // The same maps as normal mapping carry the depth; see there.
+     "", "", "", "",
+     "Turning this on reaches buildings loaded from now on;\nrestart to see it everywhere."},
     {"parallaxquality", "Surface depth quality", SettingKind::Enum, 0, 2, 1, "Detail", "",
      "How finely each surface is traced for that depth: 16, 32 or 64\n"
      "steps. Higher looks steadier up close and costs more on big walls.",
@@ -171,7 +179,11 @@ constexpr SettingDesc kSchema[] = {
      "How sharp textures stay when seen at a shallow angle - a road\n"
      "ahead, a floor underfoot. Costs little on any modern card, and\n"
      "applies to textures loaded from here on.",
-     "Off|2x|4x|8x|16x", 4},
+     "Off|2x|4x|8x|16x", 4,
+     // Set where samplers are made (VkContext::getOrCreateSampler); the
+     // textures already loaded keep the ones they have.
+     "", "", "", "",
+     "Applies to textures loaded from now on;\nrestart to apply it to everything."},
     // Its own switch rather than riding on fog thickness: the distance fog
     // is the zone's haze and costs nothing, this is a compute pass every
     // frame, and a player may want either without the other. Here, with the

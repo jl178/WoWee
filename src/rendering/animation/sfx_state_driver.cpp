@@ -28,14 +28,12 @@ void SfxStateDriver::update(float deltaTime, Renderer* renderer,
     activitySoundManager->update(deltaTime);
     if (cameraController && cameraController->isThirdPerson()) {
         bool grounded = cameraController->isGrounded();
-        bool jumping = cameraController->isJumping();
         bool falling = cameraController->isFalling();
         bool swimming = cameraController->isSwimming();
         bool moving = cameraController->isMoving();
 
         if (!initialized_) {
             prevGrounded_ = grounded;
-            prevJumping_ = jumping;
             prevFalling_ = falling;
             prevSwimming_ = swimming;
             initialized_ = true;
@@ -76,7 +74,6 @@ void SfxStateDriver::update(float deltaTime, Renderer* renderer,
 
         fallSeconds_ = falling ? fallSeconds_ + deltaTime : 0.0f;
         prevGrounded_ = grounded;
-        prevJumping_ = jumping;
         prevFalling_ = falling;
         prevSwimming_ = swimming;
     } else {

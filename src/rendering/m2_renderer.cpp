@@ -2499,7 +2499,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             mat.volumetricBeam = bgpu.volumetricBeam ? 1 : 0;
             mat.fadeAlpha = 1.0f;
             mat.interiorDarken = 0.0f;
-            mat.specularIntensity = 0.0f;  // stock M2 lighting has no specular
+            mat.specularIntensity = 0.5f;
             mat.emissiveBoost = bgpu.preserveGlowMesh ? 2.4f : 1.0f;
             memcpy(matAllocInfo.pMappedData, &mat, sizeof(mat));
             bgpu.materialUBOMapped = matAllocInfo.pMappedData;
@@ -2667,7 +2667,7 @@ void M2Renderer::syncRtScene() {
     for (auto& inst : instances) {
         auto it = models.find(inst.modelId);
         const uint32_t mesh = it != models.end() ? it->second.rtMesh : RtScene::kInvalid;
-        const bool wanted = mesh != RtScene::kInvalid && inst.fade >= 1.0f;
+        const bool wanted = mesh != RtScene::kInvalid && inst.fade >= 1.0f && inst.castsShadow;
         // Still ours, not claimed by another instance this pass (a copied
         // M2Instance carries its original's id), and placing the same mesh.
         const bool valid = inst.rtInstance != RtScene::kInvalid &&

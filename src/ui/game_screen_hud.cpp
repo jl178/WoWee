@@ -924,8 +924,9 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
     const uint64_t  playerGuid = gameHandler.getPlayerGuid();
     const uint64_t  targetGuid = gameHandler.getTargetGuid();
 
-    refreshQuestObjectiveCache(gameHandler);
-    const auto& questKillEntries = minimapQuestCreatureEntries_;
+    // Raid marks drawn on a plate this frame, one bit per mark. A marked unit
+    // with no plate up still shows its mark over its head - see below.
+    uint32_t raidMarksOnPlates = 0;
 
     ImDrawList* drawList = ImGui::GetBackgroundDrawList();
     static thread_local std::vector<std::shared_ptr<game::Entity>> nameplateEntities;
@@ -1513,13 +1514,31 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
             drawList->AddText(ImVec2(subX,         subY),         IM_COL32(180, 180, 180, A(200)), subLabel.c_str());
         }
 
-        // Group leader crown to the right of the name on player nameplates
+        // Group leader crown to the right of the name on player nameplates.
+        // The stock party-frame art at its native 16 px: the font has no
+        // crown code point, so the old U+265B glyph drew as a '?' box.
         if (isPlayer && gameHandler.isInGroup() &&
             gameHandler.getPartyData().leaderGuid == guid) {
-            float crownX = nameX + textSize.x + 3.0f;
-            const char* crownSym = "\xe2\x99\x9b";  // ♛
-            drawList->AddText(ImVec2(crownX + 1.0f, nameY + 1.0f), IM_COL32(0, 0, 0, A(160)), crownSym);
-            drawList->AddText(ImVec2(crownX,         nameY),         IM_COL32(255, 215, 0, A(240)), crownSym);
+            static VkDescriptorSet leaderIcon = VK_NULL_HANDLE;
+            static bool leaderIconMissing = false;
+            if (!leaderIcon && !leaderIconMissing) {
+                UiTextureLoad why = UiTextureLoad::Ok;
+                leaderIcon = uploadUiTextureFromBlp(services_.assetManager,
+                    "Interface\\GroupFrame\\UI-Group-LeaderIcon.blp", services_.window, &why);
+                // A file that is not there will not appear; a context that is
+                // not up yet will, so only the first is remembered.
+                leaderIconMissing = !leaderIcon && why != UiTextureLoad::NoContext;
+            }
+            if (leaderIcon) {
+                constexpr float kLeaderIconSize = 16.0f;
+                const float crownX = nameX + textSize.x + 2.0f;
+                const float crownY = nameY + (textSize.y - kLeaderIconSize) * 0.5f;
+                drawList->AddImage((ImTextureID)(uintptr_t)leaderIcon,
+                                   ImVec2(crownX, crownY),
+                                   ImVec2(crownX + kLeaderIconSize, crownY + kLeaderIconSize),
+                                   ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
+                                   IM_COL32(255, 255, 255, A(255)));
+            }
         }
 
         // Raid mark: the real Blizzard icon art floating above the unit, the way
@@ -1542,30 +1561,16 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                         ImVec2(sx + kMarkSize * 0.5f, markBottom),
                         ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
                         IM_COL32(255, 255, 255, A(255)));
+                    raidMarksOnPlates |= 1u << raidMark;
                 }
             }
 
-            // Quest kill objective indicator: small yellow sword icon to the right of the name
-            float questIconX = nameX + textSize.x + 4.0f;
-            if (!isPlayer && questKillEntries.count(unit->getEntry())) {
-                const char* objSym = "\xe2\x9a\x94";  // ⚔ crossed swords (UTF-8)
-                drawList->AddText(ImVec2(questIconX + 1.0f, nameY + 1.0f), IM_COL32(0, 0, 0, A(160)), objSym);
-                drawList->AddText(ImVec2(questIconX,         nameY),         IM_COL32(255, 220, 0, A(230)), objSym);
-                questIconX += ImGui::CalcTextSize("\xe2\x9a\x94").x + 2.0f;
-            }
-
-            // Quest giver indicator: "!" for available quests, "?" for completable/incomplete
-            if (!isPlayer) {
-                const auto mark = game::questGiverMarker(
-                    gameHandler.getQuestGiverStatus(guid));
-                const char* qSym = mark.symbol;
-                const ImU32 qCol = mark.dim ? IM_COL32(160, 160, 160, A(220))
-                                            : IM_COL32(255, 210, 0, A(255));
-                if (qSym) {
-                    drawList->AddText(ImVec2(questIconX + 1.0f, nameY + 1.0f), IM_COL32(0, 0, 0, A(160)), qSym);
-                    drawList->AddText(ImVec2(questIconX,         nameY),         qCol, qSym);
-                }
-            }
+            // No quest glyphs beside the name. The stock client puts nothing
+            // there: a quest giver's ! or ? is the TalkToMe model over its
+            // head (QuestMarkerRenderer), and a kill target is not marked at
+            // all. The U+2694 swords and the "!"/"?" text that were here
+            // doubled the 3D mark, and the swords drew as a '?' box in a font
+            // without them.
         }
 
         // Click to target / right-click context: detect clicks inside the nameplate region.
@@ -1602,6 +1607,52 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                 }
             }
         }
+    }
+
+    // Raid marks over heads with no plate to sit on. The stock client shows a
+    // skull over its unit whether or not nameplates are on - and over your own
+    // head - but the only place this drew a mark was inside a plate, so with
+    // plates toggled off (the default) a marked mob carried nothing at all.
+    for (uint32_t mark = 0; mark < game::GameHandler::kRaidMarkCount; ++mark) {
+        if (raidMarksOnPlates & (1u << mark)) continue;
+        const uint64_t markGuid = gameHandler.getRaidMarkGuid(mark);
+        if (markGuid == 0) continue;
+        auto markEntity = gameHandler.getEntityManager().getEntity(markGuid);
+        if (!markEntity || !markEntity->isUnit()) continue;
+        if (static_cast<const game::Unit*>(markEntity.get())->getHealth() == 0) continue;
+
+        glm::vec3 headPos;
+        auto& app = core::Application::getInstance();
+        if (!app.getRenderPositionForGuid(markGuid, headPos)) {
+            headPos = core::coords::canonicalToRender(
+                glm::vec3(markEntity->getX(), markEntity->getY(), markEntity->getZ()));
+        }
+        glm::vec3 boundsCenter;
+        float boundsRadius = 0.0f;
+        if (app.getRenderBoundsForGuid(markGuid, boundsCenter, boundsRadius)) {
+            headPos.z = std::max(headPos.z + 0.5f, boundsCenter.z + boundsRadius);
+        } else {
+            headPos.z += 2.3f;
+        }
+        const glm::vec3 toMark = headPos - camPos;
+        if (glm::dot(toMark, toMark) > 100.0f * 100.0f) continue;
+
+        const glm::vec4 clip = viewProj * glm::vec4(headPos, 1.0f);
+        if (clip.w <= 0.01f) continue;
+        const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+        if (ndc.x < -1.1f || ndc.x > 1.1f || ndc.y < -1.1f || ndc.y > 1.1f) continue;
+        VkDescriptorSet markTex = ui::getRaidTargetIcon(static_cast<uint8_t>(mark),
+                                                        services_.assetManager);
+        if (!markTex) continue;
+        // The 64 px art drawn at 32, bottom edge on the top of the head.
+        constexpr float kMarkSize = 32.0f;
+        const float mx = (ndc.x * 0.5f + 0.5f) * screenW;
+        const float my = (ndc.y * 0.5f + 0.5f) * screenH;
+        drawList->AddImage((ImTextureID)(uintptr_t)markTex,
+                           ImVec2(mx - kMarkSize * 0.5f, my - kMarkSize),
+                           ImVec2(mx + kMarkSize * 0.5f, my),
+                           ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
+                           IM_COL32(255, 255, 255, 255));
     }
 
     // My Name. Its own block rather than a case inside the loop above, because

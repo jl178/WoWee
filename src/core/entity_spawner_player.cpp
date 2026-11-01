@@ -61,7 +61,8 @@ std::unordered_set<uint16_t> bareGeosetsFor(uint16_t scalp,
     const uint16_t f100 = facial ? facial->geoset100 : 1;
     const uint16_t f200 = facial ? facial->geoset200 : 1;
     const uint16_t f300 = facial ? facial->geoset300 : 1;
-    return bareCharacterGeosets(scalp, f100, f200, f300, raceId);
+    const uint16_t f1700 = facial ? facial->geoset1700 : 0;
+    return bareCharacterGeosets(scalp, f100, f200, f300, raceId, f1700);
 }
 
 uint16_t selectHairScalpGeoset(const std::unordered_map<uint32_t, uint16_t>& hairGeosets,
@@ -148,11 +149,16 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
             return;
         }
 
-        // Only the three animations a standing player needs. Loading every
-        // external sequence of a character model stalls the frame.
+        // Only the three animations a standing player needs, plus the vocal
+        // emotes: their keyframes and $CSD voice timestamps are in the .anim
+        // files. Loading every external sequence of a character model stalls
+        // the frame; this runs once per race and gender (playerModelCache_).
         pipeline::loadExternalAnimations(
             *assetManager_, m2Path, m2Data, model,
-            {rendering::anim::STAND, rendering::anim::WALK, rendering::anim::RUN});
+            {rendering::anim::STAND, rendering::anim::WALK, rendering::anim::RUN,
+             rendering::anim::EMOTE_LAUGH, rendering::anim::EMOTE_KISS,
+             rendering::anim::EMOTE_CRY, rendering::anim::EMOTE_CHICKEN,
+             rendering::anim::EMOTE_APPLAUD});
 
         modelId = nextPlayerModelId_++;
         if (!charRenderer->loadModel(model, modelId)) {
@@ -199,6 +205,7 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
 
     std::string bodySkinPath = defaultSkin;
     std::string skinExtraPath, hairTexturePath, faceLowerPath, faceUpperPath;
+    std::string facialLowerPath, facialUpperPath;
     std::vector<std::string> underwearPaths;
 
     if (auto charSectionsDbc = assetManager_->loadDBC("CharSections.dbc");
@@ -214,6 +221,7 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
         who.faceId = look.faceId;
         who.hairStyleId = look.hairStyleId;
         who.hairColorId = look.hairColorId;
+        who.facialHairId = facialFeatures;
 
         // The underwear rows name art that was never shipped for some skin
         // colours - Draenei 10 to 16 among them - and this caller can check.
@@ -228,6 +236,8 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
         skinExtraPath = sections.skinExtra;
         faceLowerPath = sections.faceLower;
         faceUpperPath = sections.faceUpper;
+        facialLowerPath = sections.facialLower;
+        facialUpperPath = sections.facialUpper;
         hairTexturePath = sections.hair;
         underwearPaths = sections.underwear;
 
@@ -253,6 +263,8 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
         layers.push_back(bodySkinPath);
         if (!faceLowerPath.empty()) layers.push_back(faceLowerPath);
         if (!faceUpperPath.empty()) layers.push_back(faceUpperPath);
+        if (!facialLowerPath.empty()) layers.push_back(facialLowerPath);
+        if (!facialUpperPath.empty()) layers.push_back(facialUpperPath);
         for (const auto& up : underwearPaths) layers.push_back(up);
         if (layers.size() > 1) {
             compositeTex = charRenderer->compositeTextures(layers);
@@ -300,7 +312,18 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     if (deadCreatureGuids_.count(guid)) {
         charRenderer->playAnimation(instanceId, rendering::anim::DEATH, false);
     } else {
-        charRenderer->playAnimation(instanceId, rendering::anim::STAND, true);
+        // Already seated, asleep or kneeling when they came into view.
+        uint32_t standAnim = 0;
+        if (gameHandler_) {
+            if (auto unit = std::dynamic_pointer_cast<game::Unit>(
+                    gameHandler_->getEntityManager().getEntity(guid))) {
+                standAnim = rendering::anim::standStateLoopAnim(unit->getStandState());
+            }
+        }
+        charRenderer->playAnimation(instanceId,
+                                    standAnim != 0 && charRenderer->hasAnimation(instanceId, standAnim)
+                                        ? standAnim : rendering::anim::STAND,
+                                    true);
     }
     playerInstances_[guid] = instanceId;
 
@@ -326,6 +349,8 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     // Include face textures so compositeWithRegions can rebuild the full base
     if (!faceLowerPath.empty()) st.underwearPaths.push_back(faceLowerPath);
     if (!faceUpperPath.empty()) st.underwearPaths.push_back(faceUpperPath);
+    if (!facialLowerPath.empty()) st.underwearPaths.push_back(facialLowerPath);
+    if (!facialUpperPath.empty()) st.underwearPaths.push_back(facialUpperPath);
     for (const auto& up : underwearPaths) st.underwearPaths.push_back(up);
     onlinePlayerAppearance_[guid] = std::move(st);
 }
@@ -611,104 +636,12 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     }
 
     // --- Shoulder model attachment ---
-    // SHOULDERS slot is index 2 in the 19-element equipment array.
-    // Shoulders have TWO M2 models (left + right) attached at points 5 and 6.
-    // ItemDisplayInfo.dbc: LeftModel → left shoulder, RightModel → right shoulder.
-    if (displayInfoIds[2] != 0) {
-        // Detach any previously attached shoulder models
-        charRenderer->detachWeapon(st.instanceId, 5);
-        charRenderer->detachWeapon(st.instanceId, 6);
-
-        int32_t shoulderIdx = displayInfoDbc->findRecordById(displayInfoIds[2]);
-        if (shoulderIdx >= 0) {
-            const uint32_t leftModelField = idiL ? (*idiL)["LeftModel"] : 1u;
-            const uint32_t rightModelField = idiL ? (*idiL)["RightModel"] : 2u;
-            const uint32_t leftTexField = idiL ? (*idiL)["LeftModelTexture"] : 3u;
-            const uint32_t rightTexField = idiL ? (*idiL)["RightModelTexture"] : 4u;
-
-            // The same suffix helmets use, and from the same place: this had
-            // its own copy of the ten race codes.
-            const std::string raceSuffix = raceGenderSuffix(st.raceId, st.genderId);
-
-            // Attach left shoulder (attachment point 5) using LeftModel
-            std::string leftModelName = displayInfoDbc->getString(static_cast<uint32_t>(shoulderIdx), leftModelField);
-            if (!leftModelName.empty()) {
-                size_t dotPos = leftModelName.rfind('.');
-                if (dotPos != std::string::npos) leftModelName = leftModelName.substr(0, dotPos);
-
-                std::string leftPath;
-                pipeline::M2Model leftModel;
-                if (!raceSuffix.empty()) {
-                    leftPath = "Item\\ObjectComponents\\Shoulder\\" + leftModelName + raceSuffix + ".m2";
-                    if (!loadWeaponM2(leftPath, leftModel)) leftModel = {};
-                }
-                if (!leftModel.isValid()) {
-                    leftPath = "Item\\ObjectComponents\\Shoulder\\" + leftModelName + ".m2";
-                    loadWeaponM2(leftPath, leftModel);
-                }
-
-                if (leftModel.isValid()) {
-                    uint32_t leftModelId = nextWeaponModelId_++;
-                    std::string leftTexName = displayInfoDbc->getString(static_cast<uint32_t>(shoulderIdx), leftTexField);
-                    std::string leftTexPath;
-                    if (!leftTexName.empty()) {
-                        if (!raceSuffix.empty()) {
-                            std::string suffixedTex = "Item\\ObjectComponents\\Shoulder\\" + leftTexName + raceSuffix + ".blp";
-                            if (assetManager_->fileExists(suffixedTex)) leftTexPath = suffixedTex;
-                        }
-                        if (leftTexPath.empty()) {
-                            leftTexPath = "Item\\ObjectComponents\\Shoulder\\" + leftTexName + ".blp";
-                        }
-                    }
-                    bool attached = charRenderer->attachWeapon(st.instanceId, 5, leftModel, leftModelId, leftTexPath);
-                    if (attached) {
-                        LOG_DEBUG("Attached left shoulder: ", leftPath, " tex: ", leftTexPath);
-                    }
-                }
-            }
-
-            // Attach right shoulder (attachment point 6) using RightModel
-            std::string rightModelName = displayInfoDbc->getString(static_cast<uint32_t>(shoulderIdx), rightModelField);
-            if (!rightModelName.empty()) {
-                size_t dotPos = rightModelName.rfind('.');
-                if (dotPos != std::string::npos) rightModelName = rightModelName.substr(0, dotPos);
-
-                std::string rightPath;
-                pipeline::M2Model rightModel;
-                if (!raceSuffix.empty()) {
-                    rightPath = "Item\\ObjectComponents\\Shoulder\\" + rightModelName + raceSuffix + ".m2";
-                    if (!loadWeaponM2(rightPath, rightModel)) rightModel = {};
-                }
-                if (!rightModel.isValid()) {
-                    rightPath = "Item\\ObjectComponents\\Shoulder\\" + rightModelName + ".m2";
-                    loadWeaponM2(rightPath, rightModel);
-                }
-
-                if (rightModel.isValid()) {
-                    uint32_t rightModelId = nextWeaponModelId_++;
-                    std::string rightTexName = displayInfoDbc->getString(static_cast<uint32_t>(shoulderIdx), rightTexField);
-                    std::string rightTexPath;
-                    if (!rightTexName.empty()) {
-                        if (!raceSuffix.empty()) {
-                            std::string suffixedTex = "Item\\ObjectComponents\\Shoulder\\" + rightTexName + raceSuffix + ".blp";
-                            if (assetManager_->fileExists(suffixedTex)) rightTexPath = suffixedTex;
-                        }
-                        if (rightTexPath.empty()) {
-                            rightTexPath = "Item\\ObjectComponents\\Shoulder\\" + rightTexName + ".blp";
-                        }
-                    }
-                    bool attached = charRenderer->attachWeapon(st.instanceId, 6, rightModel, rightModelId, rightTexPath);
-                    if (attached) {
-                        LOG_DEBUG("Attached right shoulder: ", rightPath, " tex: ", rightTexPath);
-                    }
-                }
-            }
-        }
-    } else {
-        // No shoulders equipped - detach any existing shoulder models
-        charRenderer->detachWeapon(st.instanceId, 5);
-        charRenderer->detachWeapon(st.instanceId, 6);
-    }
+    // SHOULDERS slot is index 2 in the 19-element equipment array. The shared
+    // helper hangs LeftModel on 6 (ShoulderLeft) and RightModel on 5
+    // (ShoulderRight); this used to have them the other way round, which
+    // crossed both pads in toward the neck.
+    core::attachShoulders(*charRenderer, *assetManager_, st.instanceId, displayInfoIds[2],
+                          [this](const std::string&) { return nextWeaponModelId_++; });
 
     // --- Cape texture (group 15 / texture type 2) ---
     // The geoset above enables the cape mesh, but without a texture it renders blank.

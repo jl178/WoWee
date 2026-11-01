@@ -815,6 +815,10 @@ void EntitySpawner::buildCreatureDisplayLookups() {
             fhg.geoset100 = static_cast<uint16_t>(cfh->getUInt32(i, fhF.geoset100));
             fhg.geoset300 = static_cast<uint16_t>(cfh->getUInt32(i, fhF.geoset300));
             fhg.geoset200 = static_cast<uint16_t>(cfh->getUInt32(i, fhF.geoset200));
+            if (fhF.geoset1700 != pipeline::FacialHairFields::kNoFacialField &&
+                fhF.geoset1700 < cfh->getFieldCount()) {
+                fhg.geoset1700 = pipeline::facialGeosetVariant(cfh->getUInt32(i, fhF.geoset1700));
+            }
             facialHairGeosetMap_[key] = fhg;
         }
         LOG_INFO("Loaded ", facialHairGeosetMap_.size(), " facial hair geoset mappings from CharacterFacialHairStyles.dbc");
@@ -1238,13 +1242,19 @@ if (deadCreatureGuids_.count(guid)) {
 } else {
     // Check if this NPC has a persistent emote state (e.g. working, eating, dancing)
     uint32_t npcEmote = 0;
+    uint32_t standAnim = 0;
     if (gameHandler_) {
         auto entity = gameHandler_->getEntityManager().getEntity(guid);
         if (entity && entity->getType() == game::ObjectType::UNIT) {
-            npcEmote = std::static_pointer_cast<game::Unit>(entity)->getNpcEmoteState();
+            const auto unit = std::static_pointer_cast<game::Unit>(entity);
+            npcEmote = unit->getNpcEmoteState();
+            // Seated, asleep or kneeling when it came into view: that pose
+            // comes first, as it does on the real client.
+            standAnim = rendering::anim::standStateLoopAnim(unit->getStandState());
         }
     }
-    uint32_t npcEmoteAnim = npcEmote != 0
+    uint32_t npcEmoteAnim = standAnim != 0 ? standAnim
+        : npcEmote != 0
         ? rendering::AnimationController::getEmoteAnimByEmotesId(npcEmote)
         : 0;
     if (npcEmoteAnim == 0) {
@@ -1918,6 +1928,7 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
                             who.faceId = static_cast<uint8_t>(npcFace);
                             who.hairStyleId = extraCopy.hairStyleId;
                             who.hairColorId = extraCopy.hairColorId;
+                            who.facialHairId = extraCopy.facialHairId;
 
                             const auto sections = pipeline::resolveCharacterSections(
                                 csDbc.get(), csF, who,
@@ -1935,6 +1946,10 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
                                 allPaths.push_back(def.basePath);
                                 if (!npcFaceLower.empty()) { def.overlayPaths.push_back(npcFaceLower); allPaths.push_back(npcFaceLower); }
                                 if (!npcFaceUpper.empty()) { def.overlayPaths.push_back(npcFaceUpper); allPaths.push_back(npcFaceUpper); }
+                                // The beard over the face (CharSections section 2).
+                                for (const std::string* fh : {&sections.facialLower, &sections.facialUpper}) {
+                                    if (!fh->empty()) { def.overlayPaths.push_back(*fh); allPaths.push_back(*fh); }
+                                }
                                 for (const auto& uw : npcUnderwear) { def.overlayPaths.push_back(uw); allPaths.push_back(uw); }
                             }
                         }
@@ -2315,6 +2330,22 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
     // NPC, cached model or not, so two NPCs sharing a model still get their own
     // colouring.
     applyHumanoidInstanceOverrides(instanceId, modelId, displayId);
+    // Helm and shoulder models for humanoid NPCs. The bake paints the armour
+    // onto the skin but cannot carry the M2 pieces, so a guard stood there
+    // bare-shouldered and bare-headed. CreatureDisplayInfoExtra slot 0 is the
+    // helm and slot 1 the shoulders; both are ItemDisplayInfo ids.
+    if (auto dIt = displayDataMap_.find(displayId);
+        dIt != displayDataMap_.end() && dIt->second.extraDisplayId != 0) {
+        if (auto xIt = humanoidExtraMap_.find(dIt->second.extraDisplayId);
+            xIt != humanoidExtraMap_.end()) {
+            const auto& extra = xIt->second;
+            const auto allocModelId = [this](const std::string&) { return nextWeaponModelId_++; };
+            core::attachHelm(*charRenderer, *assetManager_, instanceId, extra.equipDisplayId[0],
+                             extra.raceId, extra.sexId, allocModelId);
+            core::attachShoulders(*charRenderer, *assetManager_, instanceId,
+                                  extra.equipDisplayId[1], allocModelId);
+        }
+    }
     // A humanoid NPC geoset mask used to be built here, behind
     // `static constexpr bool kEnableNpcSafeGeosetMask = false`. Same story as
     // the block below: disabled, unreachable, and edited tonight as though it

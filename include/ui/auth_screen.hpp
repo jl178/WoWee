@@ -306,6 +306,20 @@ private:
     /// caller can hand the pointer over the whole sheet rather than only over
     /// the controls on it.
     void renderCard(auth::AuthHandler& authHandler, float screenW, float screenH);
+    /// The stock AccountLogin layout over the glue scene: account and
+    /// password boxes centred, the Login button under them, Options and Quit
+    /// bottom right, the server's own settings bottom left. Drawn whenever
+    /// the glue scene is up; the paper card stays as the fallback and as the
+    /// server sheet behind "Change Server".
+    void renderGlueLogin(auth::AuthHandler& authHandler, float screenW, float screenH);
+    /// The paper card, opened over the glue login for server, expansion and
+    /// content pack settings.
+    bool serverSheetOpen_ = false;
+    /// The last status the glue dialog was dismissed for, so "Okay" hides it
+    /// without clearing what the paper card shows.
+    std::string glueDismissedStatus_;
+    /// A glue dialog was up this frame: its Enter is not also a login.
+    bool glueModalUp_ = false;
     void renderLoginSettingsSheet(float screenW, float screenH);
     /// The paper strip a disconnect is announced on, across the top of the
     /// screen rather than inside the card.

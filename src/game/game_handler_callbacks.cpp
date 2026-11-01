@@ -2989,6 +2989,15 @@ void GameHandler::interactWithNpc(uint64_t guid) {
     auto packet = GossipHelloPacket::build(guid);
     socket->send(packet);
 
+    // The greeting plays on the right-click, as stock does, whatever window
+    // the server answers with: vendors, trainers, bankers and quest givers
+    // open no gossip and used to stay silent.
+    if (npcGreetingCallback_) {
+        if (auto entity = getEntityManager().getEntity(guid)) {
+            npcGreetingCallback_(guid, glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
+        }
+    }
+
     pendingNpcHello_ = PendingNpcHello{};
     pendingNpcHello_.guid = guid;
     pendingNpcHello_.sentAt = std::chrono::steady_clock::now();

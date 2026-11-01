@@ -14,6 +14,7 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <chrono>
 #include <queue>
 #include <list>
 #include <vector>
@@ -60,6 +61,17 @@ struct M2Placement {
     float scale;
 };
 
+/// One piece of ground clutter. Smaller than an M2Placement - a grassy tile
+/// holds tens of thousands - and carrying the terrain's normal under the
+/// piece, so it can be lit as the ground it stands on is.
+struct ClutterPlacement {
+    uint32_t modelId;
+    glm::vec3 position;
+    float yaw;
+    float scale;
+    glm::vec3 groundNormal;
+};
+
 struct TerrainTile {
     TileCoord coord;
     pipeline::ADTTerrain terrain;
@@ -75,11 +87,40 @@ struct TerrainTile {
     std::vector<uint32_t> m2InstanceIds;
     std::vector<uint32_t> doodadUniqueIds;  // For dedup cleanup on unload
     // Ground clutter is kept as placements and only becomes renderer
-    // instances while the tile is within clutter range of the camera. See
-    // TerrainManager::streamGroundClutter.
-    std::vector<M2Placement> clutterPlacements;
-    std::vector<uint32_t> clutterInstanceIds;
-    size_t clutterNextIndex = 0;
+    // instances while its map chunk is within clutter range of the camera.
+    // See TerrainManager::streamGroundClutter.
+    //
+    // Per chunk rather than per tile: a tile is 533 yards across and the
+    // clutter is drawn to 140 at most, so instancing whole tiles made several
+    // times more pieces than could ever be seen - most of a tile's, for each
+    // of up to four tiles round a corner.
+    std::vector<ClutterPlacement> clutterPlacements;  ///< in chunk order (cy * 16 + cx)
+    /// Chunk c's placements are [clutterChunkStart[c], clutterChunkStart[c + 1]).
+    std::array<uint32_t, 257> clutterChunkStart{};
+    /// Chunk c's placements' xy extent: min x, min y, max x, max y.
+    std::array<glm::vec4, 256> clutterChunkBounds{};
+    /// The instances made from chunk c, and the next of its placements to make.
+    std::array<std::vector<uint32_t>, 256> clutterChunkIds;
+    std::array<uint32_t, 256> clutterChunkNext{};
+    /// Set while a chunk is out of range and waiting for a batched removal.
+    std::array<uint8_t, 256> clutterChunkRetired{};
+    /// Instances alive across all chunks, so a tile with none is skipped whole.
+    size_t clutterLive = 0;
+    /// Hand every clutter instance id to `out` and forget them, leaving the
+    /// placements to be instanced again.
+    void takeClutterInstances(std::vector<uint32_t>& out) {
+        for (size_t c = 0; c < clutterChunkIds.size(); ++c) {
+            out.insert(out.end(), clutterChunkIds[c].begin(), clutterChunkIds[c].end());
+            clutterChunkIds[c].clear();
+            clutterChunkNext[c] = 0;
+            clutterChunkRetired[c] = 0;
+        }
+        clutterLive = 0;
+    }
+    /// Which ground clutter density the placements were made at. A tile whose
+    /// number is behind TerrainManager's is placed again, so the setting
+    /// reaches the ground already loaded rather than only the next tile.
+    uint32_t clutterGeneration = 0;
 };
 
 /**
@@ -102,7 +143,12 @@ struct PendingTile {
     using M2Placement = rendering::M2Placement;
     std::vector<M2Placement> m2Placements;
     // Ground clutter placements, instantiated by distance rather than at load.
-    std::vector<M2Placement> clutterPlacements;
+    std::vector<ClutterPlacement> clutterPlacements;
+    /// Per-chunk ranges and extents of clutterPlacements; see TerrainTile.
+    std::array<uint32_t, 257> clutterChunkStart{};
+    std::array<glm::vec4, 256> clutterChunkBounds{};
+    /// TerrainManager's clutter density generation when these were placed.
+    uint32_t clutterGeneration = 0;
 
     // Pre-loaded WMO data
     struct WMOReady {
@@ -255,7 +301,13 @@ public:
     void setStreamingEnabled(bool enabled) { streamingEnabled = enabled; }
     void setUpdateInterval(float seconds) { updateInterval = seconds; }
     void setTaxiStreamingMode(bool enabled) { taxiStreamingMode_ = enabled; }
-    void setGroundClutterDensityScale(float scale) { groundClutterDensityScale_ = glm::clamp(scale, 0.0f, 1.5f); }
+    /// Also marks every loaded tile's clutter stale when the value changes:
+    /// placements are made once per tile, so without that the setting only
+    /// reached tiles loaded after it, and Apply looked like it did nothing
+    /// until the player travelled. streamGroundClutter re-places them, one
+    /// tile a frame, once the value has stopped moving (a slider drag sends
+    /// every step).
+    void setGroundClutterDensityScale(float scale);
     [[nodiscard]] float getGroundClutterDensityScale() const { return groundClutterDensityScale_; }
 
     /** Density for a ground-effect id, or 0 if it grows nothing or is unknown.
@@ -425,6 +477,10 @@ private:
     void ensureGroundEffectTablesLoaded();
     void generateGroundClutterPlacements(std::shared_ptr<PendingTile>& pending,
                                          std::unordered_set<uint32_t>& preparedModelIds);
+    /// Place a loaded tile's clutter again at the current density, through
+    /// the same generateGroundClutterPlacements the workers use, and drop the
+    /// instances made from the old placements. Main thread.
+    void regenerateTileClutter(TerrainTile& tile);
 
     pipeline::AssetManager* assetManager = nullptr;
     TerrainRenderer* terrainRenderer = nullptr;
@@ -568,6 +624,12 @@ private:
     std::unordered_map<uint32_t, GroundEffectEntry> groundEffectById_; // effectId -> config
     std::unordered_map<uint32_t, std::string> groundDoodadModelById_;  // doodadId -> model path
     float groundClutterDensityScale_ = 1.0f;
+    /// Bumped each time the density changes. Workers stamp it on the tiles
+    /// they place; a loaded tile stamped with an older one is re-placed.
+    std::atomic<uint32_t> clutterDensityGeneration_{0};
+    /// When the density last changed, so re-placing waits for a slider drag
+    /// to finish rather than restarting on every step of it.
+    std::chrono::steady_clock::time_point clutterDensityChangedAt_{};
     std::unordered_map<std::string, TerrainTextureTones> terrainTextureTones_;
 };
 

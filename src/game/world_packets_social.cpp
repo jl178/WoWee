@@ -392,11 +392,14 @@ network::Packet SetActiveMoverPacket::build(uint64_t guid) {
 
 network::Packet InspectPacket::build(uint64_t targetGuid) {
     network::Packet packet(wireOpcode(Opcode::CMSG_INSPECT));
-    if (isActiveExpansion("classic") || isActiveExpansion("tbc") || isActiveExpansion("turtle")) {
-        packet.writeUInt64(targetGuid);
-    } else {
-        packet.writePackedGuid(targetGuid);
-    }
+    // A full eight-byte guid in every expansion, WotLK included:
+    // HandleInspectOpcode reads `recv_data >> guid` into an ObjectGuid, which
+    // is a plain uint64 read, not ReadAsPacked. Sending it packed on WotLK
+    // handed the server a mangled guid (and a short packet), so it found no
+    // such player and never answered - the inspect window opened on nothing,
+    // with no model, no gear and no talents. CMSG_QUERY_INSPECT_ACHIEVEMENTS
+    // is the one inspect request that does take a packed guid.
+    packet.writeUInt64(targetGuid);
     LOG_DEBUG("Built CMSG_INSPECT: target=0x", std::hex, targetGuid, std::dec);
     return packet;
 }

@@ -448,6 +448,21 @@ float PaperUI::wrappedHeight(float width, const char* s, float size) const {
 // Buttons
 // ---------------------------------------------------------------------------
 
+PaperUI::PressState PaperUI::press(const char* idStr, ImVec2 a, ImVec2 b, bool enabled) {
+    const ImU32 id = hashId(idStr);
+    PressState out;
+    const bool live = listening() && enabled;
+    out.hovered = live && hovered(a, b);
+    if (out.hovered) mouseWanted_ = true;
+    if (out.hovered && pressed()) active_ = id;
+    out.held = (active_ == id && ImGui::IsMouseDown(ImGuiMouseButton_Left));
+    if (active_ == id && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        out.clicked = out.hovered;
+        active_ = 0;
+    }
+    return out;
+}
+
 bool PaperUI::button(const char* idStr, ImVec2 a, ImVec2 b, const char* label,
                      ButtonKind kind, bool enabled) {
     const ImU32 id = hashId(idStr);
@@ -690,8 +705,12 @@ void PaperUI::drawFieldText(ImDrawList* dl, ImVec2 in0, ImVec2 in1, const TextEd
                           theme_.highlighter, px(2));
     }
 
+    // The glue boxes are dark, so their ink is white and their placeholder
+    // the glue's disabled grey.
+    const ImU32 ink = opts.glue ? IM_COL32(255, 255, 255, 255) : theme_.ink;
     if (edit.empty() && opts.placeholder && !focused) {
-        dl->AddText(bodyFace_, size, ImVec2(in0.x, baseY), paperFade(theme_.pencil, 0.85f),
+        dl->AddText(bodyFace_, size, ImVec2(in0.x, baseY),
+                    opts.glue ? IM_COL32(128, 128, 128, 255) : paperFade(theme_.pencil, 0.85f),
                     opts.placeholder);
     } else if (opts.password) {
         // Drawn rather than typeset: the bullet is not in every face the
@@ -703,10 +722,10 @@ void PaperUI::drawFieldText(ImDrawList* dl, ImVec2 in0, ImVec2 in1, const TextEd
         for (size_t i = 0; i < count; ++i) {
             const float cx = originX + (static_cast<float>(i) + 0.5f) * step;
             if (cx < in0.x - step || cx > in1.x + step) continue;
-            dl->AddCircleFilled(ImVec2(cx, baseY + size * 0.55f), radius, theme_.ink, 12);
+            dl->AddCircleFilled(ImVec2(cx, baseY + size * 0.55f), radius, ink, 12);
         }
     } else {
-        dl->AddText(bodyFace_, size, ImVec2(originX, baseY), theme_.ink, edit.c_str());
+        dl->AddText(bodyFace_, size, ImVec2(originX, baseY), ink, edit.c_str());
     }
 
     if (focused) {
@@ -715,7 +734,7 @@ void PaperUI::drawFieldText(ImDrawList* dl, ImVec2 in0, ImVec2 in1, const TextEd
         if (phase < 0.62f) {
             const float cx = originX + advanceTo(edit, edit.caret(), opts.password, size);
             dl->AddRectFilled(ImVec2(cx, baseY - px(2)),
-                              ImVec2(cx + px(1.6f), baseY + size + px(2)), theme_.ink);
+                              ImVec2(cx + px(1.6f), baseY + size + px(2)), ink);
         }
     }
 
@@ -747,8 +766,8 @@ PaperUI::FieldResult PaperUI::field(const char* idStr, ImVec2 a, ImVec2 b, TextE
     }
 
     const bool live = listening();
-    const float pad = px(9);
-    const float size = (b.y - a.y) * 0.46f;
+    const float pad = opts.glue ? 0.0f : px(9);
+    const float size = (b.y - a.y) * (opts.glue ? 0.5f : 0.46f);
     const ImVec2 in0(a.x + pad, a.y);
     const ImVec2 in1(b.x - pad, b.y);
     const float innerW = std::max(in1.x - in0.x, px(8));
@@ -886,6 +905,11 @@ PaperUI::FieldResult PaperUI::field(const char* idStr, ImVec2 a, ImVec2 b, TextE
         state.scroll = std::clamp(state.scroll, 0.0f, std::max(0.0f, fullW - innerW + px(2)));
     } else {
         state.scroll = 0.0f;
+    }
+
+    if (opts.glue) {
+        drawFieldText(dl_, in0, in1, edit, opts, state, focused, size);
+        return out;
     }
 
     // The box: a form field ruled on paper, firmer when it is the live one.

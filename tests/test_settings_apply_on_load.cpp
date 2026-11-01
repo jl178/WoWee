@@ -685,3 +685,94 @@ TEST_CASE("nothing writes a live setting without the field it is saved from", "[
         }
     }
 }
+
+namespace {
+
+// From a definition's signature to the brace that closes it at column 0.
+std::string definitionOf(const std::string& source, const std::string& signature) {
+    const size_t start = source.find(signature);
+    if (start == std::string::npos) return {};
+    const size_t end = source.find("\n}\n", start);
+    return source.substr(start, end == std::string::npos ? std::string::npos : end - start);
+}
+
+}  // namespace
+
+// Reported as "changing settings and clicking Apply doesn't change graphics",
+// naming ground clutter. Clutter is placed once per terrain tile as the tile
+// loads, so a new density reached only tiles loaded afterwards: nothing moved
+// until the player travelled. A change has to mark the loaded tiles stale and
+// the per-frame clutter stream has to place them again.
+TEST_CASE("a ground clutter change reaches the tiles already loaded", "[settings]") {
+    const std::string tm = wowee::test::slurp("src/rendering/terrain_manager.cpp");
+    const std::string setter =
+        definitionOf(tm, "void TerrainManager::setGroundClutterDensityScale(");
+    REQUIRE_FALSE(setter.empty());
+    CHECK(setter.find("clutterDensityGeneration_") != std::string::npos);
+
+    const std::string stream = definitionOf(tm, "void TerrainManager::streamGroundClutter(");
+    REQUIRE_FALSE(stream.empty());
+    CHECK(stream.find("regenerateTileClutter(") != std::string::npos);
+
+    // And a tile placed by a worker carries the generation it was placed at,
+    // or every tile would look stale (or none would).
+    CHECK(tm.find("pending->clutterGeneration = clutterDensityGeneration_") != std::string::npos);
+    CHECK(tm.find("tile->clutterGeneration = pending->clutterGeneration") != std::string::npos);
+}
+
+// The sound switches are re-read from the cvar store. setSettingValue writes
+// the store after applying, so the re-read saw the value from before the
+// click: Enable Music did the opposite of what was ticked.
+TEST_CASE("a sound switch is in the cvar store before it is re-read", "[settings]") {
+    const std::string panel = wowee::test::slurp("src/ui/settings_panel.cpp");
+    const std::string apply = definitionOf(panel, "void SettingsPanel::applySettingSideEffects(");
+    REQUIRE_FALSE(apply.empty());
+    const size_t branch = apply.find("key == \"enablemusic\"");
+    REQUIRE(branch != std::string::npos);
+    const size_t write = apply.find("noteClientSettingChanged(", branch);
+    const size_t reread = apply.find("applySoundCVarSideEffects(", branch);
+    REQUIRE(reread != std::string::npos);
+    CHECK(write < reread);
+}
+
+// The file is written from currentGraphicsPreset. Changing one setting under
+// a preset moved only the pending marker, so settings.cfg went on saying
+// Ultra over settings that were not, and the next start showed Ultra.
+TEST_CASE("the saved quality preset follows a setting changed by hand", "[settings]") {
+    const std::string panel = wowee::test::slurp("src/ui/settings_panel.cpp");
+    const std::string update =
+        definitionOf(panel, "void SettingsPanel::updateGraphicsPresetFromCurrentSettings(");
+    REQUIRE_FALSE(update.empty());
+    CHECK(update.find("currentGraphicsPreset =") != std::string::npos);
+    // And worked out again from what was loaded.
+    const std::string load = definitionOf(panel, "void SettingsPanel::applyLoadedSettings(");
+    CHECK(load.find("updateGraphicsPresetFromCurrentSettings()") != std::string::npos);
+}
+
+// Where a setting truly cannot apply live, the player is told rather than
+// left to conclude Apply is broken: the row carries a note, and the options
+// panel shows it and asks for a restart on close.
+TEST_CASE("a setting that cannot apply live says so", "[settings]") {
+    std::size_t count = 0;
+    const wowee::ui::SettingDesc* schema = wowee::ui::clientSettingsSchema(count);
+    std::map<std::string, std::string> notes;
+    for (std::size_t i = 0; i < count; ++i) {
+        notes[schema[i].key] = schema[i].restartNote ? schema[i].restartNote : "";
+    }
+    for (const char* key : {"texturefiltering", "normalmapping", "parallax"}) {
+        INFO(key << " applies only to what loads afterwards and has no note");
+        CHECK_FALSE(notes[key].empty());
+    }
+    // The ones the player named apply live, so they must not be excused.
+    for (const char* key : {"groundclutter", "mistdensity", "antialiasing",
+                            "shadowdistance", "viewdistance"}) {
+        INFO(key << " applies live and should not carry a restart note");
+        CHECK(notes[key].empty());
+    }
+
+    const std::string snippets = wowee::test::slurp("include/addons/addon_lua_snippets.hpp");
+    CHECK(snippets.find("setting.restartnote") != std::string::npos);
+    CHECK(snippets.find("host.gameRestart = 1") != std::string::npos);
+    const std::string api = wowee::test::slurp("src/addons/lua_system_api.cpp");
+    CHECK(api.find("\"restartnote\"") != std::string::npos);
+}

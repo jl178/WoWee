@@ -133,7 +133,18 @@ struct FacialHairFields {
     uint32_t geoset100 = 6;
     uint32_t geoset300 = 7;
     uint32_t geoset200 = 8;
+    /// Geoset group 1700 - the racial eye glow (1702) on night elves, blood
+    /// elves and some undead faces. Only the eight-column 3.3.5 file has it
+    /// (column 7); kNoFacialField where the copy of the table does not.
+    static constexpr uint32_t kNoFacialField = 0xFFFFFFFFu;
+    uint32_t geoset1700 = kNoFacialField;
 };
+
+/// A facial-hair geoset variant read from CharacterFacialHairStyles, or 0. The
+/// unused columns hold 0xCCCCCCCC on some rows, and a variant is two digits.
+inline uint16_t facialGeosetVariant(uint32_t raw) {
+    return raw < 100 ? static_cast<uint16_t>(raw) : 0;
+}
 
 /**
  * Detect the actual CharacterFacialHairStyles.dbc geoset columns.

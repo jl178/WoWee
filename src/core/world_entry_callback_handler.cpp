@@ -149,6 +149,19 @@ void WorldEntryCallbackHandler::setupCallbacks() {
                  " initial=", isInitialEntry);
         renderer_.resetCombatVisualState();
 
+        // The facing the server sent with the position. handleTeleportAck has
+        // already written it to movementInfo, but the renderer owns facing and
+        // the per-frame sync copies the renderer's yaw back over movementInfo -
+        // so unless it is applied here it is lost one frame later, and sent
+        // back to the server as a SET_FACING. A chair's teleport carries the
+        // chair's facing; this is what sat the character the wrong way round.
+        auto applyServerFacing = [this]() {
+            const float deg = core::coords::canonicalToCharacterYawDeg(
+                gameHandler_.getMovementInfo().orientation);
+            renderer_.setCharacterYaw(deg);
+            if (auto* cc = renderer_.getCameraController()) cc->setFacingYaw(deg);
+        };
+
         // Reconnect to the same map: terrain stays loaded but all online entities are stale.
         // Despawn them properly so the server's fresh CREATE_OBJECTs will re-populate the world.
         uint32_t currentLoadedMap = worldLoader_ ? worldLoader_->getLoadedMapId() : 0xFFFFFFFF;
@@ -168,6 +181,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
             glm::vec3 canonical = core::coords::serverToCanonical(glm::vec3(x, y, z));
             glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
             renderer_.getCharacterPosition() = renderPos;
+            applyServerFacing();
             if (renderer_.getCameraController()) {
                 auto* ft = renderer_.getCameraController()->getFollowTargetMutable();
                 if (ft) *ft = renderPos;
@@ -204,6 +218,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
                             "), deferring world reload to next frame");
                 // Update position immediately so the player doesn't keep moving at old location
                 renderer_.getCharacterPosition() = renderPos;
+                applyServerFacing();
                 if (renderer_.getCameraController()) {
                     auto* ft = renderer_.getCameraController()->getFollowTargetMutable();
                     if (ft) *ft = renderPos;
@@ -218,9 +233,14 @@ void WorldEntryCallbackHandler::setupCallbacks() {
             LOG_INFO("Same-map teleport (map ", mapId, "), skipping full world reload");
             // canonical and renderPos already computed above for distance check
             renderer_.getCharacterPosition() = renderPos;
+            applyServerFacing();
             if (renderer_.getCameraController()) {
                 auto* ft = renderer_.getCameraController()->getFollowTargetMutable();
                 if (ft) *ft = renderPos;
+                // Remembered so a seat that arrives a frame or two later (a
+                // chair's stand state follows its teleport) can be put back
+                // exactly where the server placed the character.
+                renderer_.getCameraController()->noteServerPlacement(renderPos);
             }
             worldEntryMovementGraceTimer_ = 2.0f;
             taxiLandingClampTimer_ = 0.0f;

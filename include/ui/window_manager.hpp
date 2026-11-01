@@ -69,7 +69,6 @@ public:
     /// has changed them since. Kept whole rather than as the four parts,
     /// because the face is in there too and the barber does not sell faces.
     uint32_t barberOrigAppearanceBytes_ = 0;
-    bool barberPreviewActive_ = false;
 
     // Barber state, separated from the window that used to hold it.
     //

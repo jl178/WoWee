@@ -554,6 +554,32 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         }
     }
 
+    // The world-detail settings, each time the doodad renderer or the terrain
+    // manager is new. Both are made by the world load, after setServices
+    // applied the saved settings to nothing, and made again after a logout;
+    // so a saved clutter distance or object detail reached the renderer only
+    // if the player touched its control, and the clutter density only once a
+    // session. Compared by pointer so a new instance is noticed.
+    if (auto* renderer = services_.renderer) {
+        const void* m2 = renderer->getM2Renderer();
+        const void* terrain = renderer->getTerrainManager();
+        // Forgotten while there is none, so a new one made at the old one's
+        // address still counts as new.
+        if (!m2) settingsPanel_.worldDetailM2Target_ = nullptr;
+        if (!terrain) settingsPanel_.worldDetailTerrainTarget_ = nullptr;
+        if (m2 && m2 != settingsPanel_.worldDetailM2Target_) {
+            settingsPanel_.worldDetailM2Target_ = m2;
+            for (const char* key : {"viewdistance", "groundclutterdistance", "particledensity",
+                                    "environmentdetail", "sharpstars", "weatherdetail"}) {
+                settingsPanel_.applySettingSideEffects(key);
+            }
+        }
+        if (terrain && terrain != settingsPanel_.worldDetailTerrainTarget_) {
+            settingsPanel_.worldDetailTerrainTarget_ = terrain;
+            settingsPanel_.applySettingSideEffects("groundclutter");
+        }
+    }
+
     // Apply saved upscaling setting once when renderer is available
     if (!settingsPanel_.fsrSettingsApplied_) {
         auto* renderer = services_.renderer;

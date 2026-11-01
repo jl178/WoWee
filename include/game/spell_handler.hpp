@@ -420,8 +420,12 @@ private:
                             uint64_t targetGuid, bool impactAtEnd);
     // Resolve render-space position for a unit GUID (player or entity).
     bool resolveUnitPosition(uint64_t guid, glm::vec3& outPos);
-    // Play the cast/precast visual effect at the caster's position.
-    void triggerCastVisual(uint32_t spellId, uint64_t casterGuid, uint32_t castTimeMs = 0);
+    // Put the spell's build-up (PrecastKit, or ChannelKit for a channel) on
+    // the caster until the cast resolves.
+    void triggerCastVisual(uint32_t spellId, uint64_t casterGuid, uint32_t castTimeMs = 0,
+                           bool channel = false);
+    // Take a caster's build-up off (its cast went off, failed or ended).
+    void cancelCastVisual(uint64_t casterGuid);
     // Play the impact visual effect at the target's position.
     void triggerImpactVisual(uint32_t spellId, uint64_t targetGuid);
     void launchRangedWeaponProjectile(uint32_t spellId, uint64_t targetGuid);

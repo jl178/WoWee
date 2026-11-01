@@ -1132,7 +1132,6 @@ void Renderer::applyMsaaChange() {
     if (m2Renderer) m2Renderer->recreatePipelines();
     if (skyboxModelRenderer_) skyboxModelRenderer_->recreatePipelines();
     if (characterRenderer) characterRenderer->recreatePipelines();
-    if (questMarkerRenderer) questMarkerRenderer->recreatePipelines();
     if (footprintRenderer) footprintRenderer->recreatePipelines();
     if (weather) weather->recreatePipelines();
     if (lightning) lightning->recreatePipelines();
@@ -1856,6 +1855,12 @@ bool Renderer::isOnOutdoorPvpObjective() const {
     return false;
 }
 
+uint32_t Renderer::getCurrentAreaId() const {
+    if (!terrainManager) return 0;
+    const auto areaId = terrainManager->getAreaIdAt(characterPosition.x, characterPosition.y);
+    return areaId ? *areaId : 0u;
+}
+
 uint32_t Renderer::getCurrentZoneId() const {
     // A zone remembered from the last map is worse than none: the sticky
     // answer below would hold Duskwood's pinned midnight over a continent
@@ -2052,6 +2057,8 @@ void Renderer::update(float deltaTime) {
 
         lightingManager->update(characterPosition, mapId, resolvedZoneId,
                                 gameTime, isRaining, isUnderwater);
+        // The water's Light.dbc colours and alphas follow the same lights.
+        if (waterRenderer) waterRenderer->setLiquidLighting(lightingManager->getLightingParams());
 
         // Sync weather visual renderer with game state
         if (weather && gh) {
@@ -2393,8 +2400,6 @@ void Renderer::runDeferredWorldInitStep(float deltaTime) {
             if (audioCoordinator_->getMovementSoundManager()) audioCoordinator_->getMovementSoundManager()->initialize(cachedAssetManager);
             break;
         case 5:
-            if (questMarkerRenderer && !questMarkerRenderer->initialize(vkCtx, perFrameSetLayout, cachedAssetManager))
-                LOG_WARNING("Quest marker renderer re-init failed (non-fatal)");
             if (footprintRenderer && !footprintRenderer->initialize(this, vkCtx, perFrameSetLayout, cachedAssetManager))
                 LOG_WARNING("Footprint renderer re-init failed (non-fatal)");
             break;
@@ -3156,7 +3161,6 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             if (mountDust && camera) mountDust->render(cmd, perFrameSet);
             if (chargeEffect && camera) chargeEffect->render(cmd, perFrameSet);
             if (footprintRenderer && camera) footprintRenderer->render(cmd, perFrameSet, *camera);
-            if (questMarkerRenderer && camera) questMarkerRenderer->render(cmd, perFrameSet, *camera);
 
             renderUnderwaterOverlay(cmd);
             renderPostSceneOverlays(cmd, gameHandler);
@@ -3345,7 +3349,6 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         if (mountDust && camera) mountDust->render(currentCmd, perFrameSet);
         if (chargeEffect && camera) chargeEffect->render(currentCmd, perFrameSet);
         if (footprintRenderer && camera) footprintRenderer->render(currentCmd, perFrameSet, *camera);
-        if (questMarkerRenderer && camera) questMarkerRenderer->render(currentCmd, perFrameSet, *camera);
         // The same one-line total the parallel path reports, so a profile taken
         // either way can be compared against the other.
         if (vkCtx) vkCtx->gpuMark(currentCmd, "world total");
@@ -3662,6 +3665,11 @@ void Renderer::setActiveMapName(const std::string& name) {
     if (wmoRenderer) wmoRenderer->setMapName(name);
 }
 
+void Renderer::setCharacterAnimSoundEventCallback(CharacterAnimSoundEventCallback cb) {
+    characterAnimSoundEventCallback_ = std::move(cb);
+    if (characterRenderer) characterRenderer->setAnimSoundEventCallback(characterAnimSoundEventCallback_);
+}
+
 bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const std::string& mapName) {
     if (!assetManager) {
         LOG_ERROR("Asset manager is null");
@@ -3708,6 +3716,8 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
             waterRenderer.reset();
         }
     }
+    // The LiquidType.dbc texture sequences the water is drawn with. Loads once.
+    if (waterRenderer) waterRenderer->loadLiquidTextures(assetManager);
 
     // Create minimap if not already created
     if (!minimap) {
@@ -3798,6 +3808,7 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
             if (!characterRenderer->initializeShadow(shadowRenderPass))
                 LOG_WARNING("Character shadow pipeline initialization failed");
         }
+        characterRenderer->setAnimSoundEventCallback(characterAnimSoundEventCallback_);
     }
 
     // Initialize AnimationController (§4.2)
@@ -3901,10 +3912,6 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
             }
             if (audioCoordinator_->getMovementSoundManager()) {
                 audioCoordinator_->getMovementSoundManager()->initialize(assetManager);
-            }
-            if (questMarkerRenderer) {
-                if (!questMarkerRenderer->initialize(vkCtx, perFrameSetLayout, assetManager))
-                    LOG_WARNING("Quest marker renderer initialization failed (non-fatal)");
             }
             if (footprintRenderer) {
                 if (!footprintRenderer->initialize(this, vkCtx, perFrameSetLayout, assetManager))

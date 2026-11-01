@@ -5,12 +5,17 @@
 #include <optional>
 #include <cstdint>
 #include <functional>
+#include <string>
+#include <unordered_map>
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
 
+#include "rendering/vk_texture.hpp"
+
 namespace wowee {
 namespace pipeline {
+    class AssetManager;
     struct ADTTerrain;
     struct LiquidData;
     struct WMOLiquid;
@@ -20,6 +25,7 @@ namespace rendering {
 
 class Camera;
 class VkContext;
+struct LightingParams;
 
 /**
  * Water surface for a single map chunk
@@ -73,6 +79,13 @@ struct WaterFrameUBOData {
     glm::mat4 reflViewProj{1.0f};
     glm::vec4 wakeBounds{0.0f};              // xy = centre, z = cull radius, w = count
     glm::vec4 wakePoints[kMaxWakePoints]{};  // xy = pos, z = age 0..1, w = strength
+    // Light.dbc liquid colours: rgb, a = LightParams' shallow alpha on the
+    // close colour and deep alpha on the far one. LightParams 1 at noon until
+    // the lighting first arrives.
+    glm::vec4 riverClose{30.0f / 255.0f, 48.0f / 255.0f, 62.0f / 255.0f, 0.5f};
+    glm::vec4 riverFar{0.0f, 19.0f / 255.0f, 23.0f / 255.0f, 1.0f};
+    glm::vec4 oceanClose{30.0f / 255.0f, 48.0f / 255.0f, 62.0f / 255.0f, 0.75f};
+    glm::vec4 oceanFar{0.0f, 19.0f / 255.0f, 23.0f / 255.0f, 1.0f};
 };
 
 class WaterRenderer {
@@ -87,6 +100,14 @@ public:
                          int tileX = -1, int tileY = -1);
 
     void loadFromWMO(const pipeline::WMOLiquid& liquid, const glm::mat4& modelMatrix, uint32_t wmoId);
+
+    /// Load the animated texture sequences LiquidType.dbc names for each
+    /// liquid (XTextures\river\lake_a.%d.blp and the rest). Once; later
+    /// calls do nothing.
+    void loadLiquidTextures(pipeline::AssetManager* assetManager);
+
+    /// The water's colours and alphas for this frame, from Light.dbc.
+    void setLiquidLighting(const LightingParams& lighting);
     void removeWMO(uint32_t wmoId);
     void removeTile(int tileX, int tileY);
     void clear();
@@ -170,6 +191,33 @@ public:
 private:
     void createWaterMesh(WaterSurface& surface);
     void destroyWaterMesh(WaterSurface& surface);
+
+    // What LiquidType.dbc says about a liquid: its basic type (0 water,
+    // 1 ocean, 2 magma, 3 slime) and which texture sequence it draws.
+    struct LiquidInfo {
+        uint8_t basicType = 0;
+        int textureSet = -1;
+    };
+    LiquidInfo resolveLiquid(uint16_t liquidType) const;
+    int loadLiquidTextureSequence(pipeline::AssetManager* assetManager, const std::string& pattern);
+    bool createLiquidTextureResources();
+    void destroyLiquidTextureResources();
+
+    struct LiquidTextureSet {
+        std::vector<std::unique_ptr<VkTexture>> frames;
+        std::vector<VkDescriptorSet> sets;  // one per frame, set 3 binding 0
+    };
+    std::vector<LiquidTextureSet> liquidTextureSets_;
+    std::unordered_map<std::string, int> liquidTextureSetByPattern_;
+    std::unordered_map<uint16_t, LiquidInfo> liquidInfoById_;
+    int defaultTextureSetByBasic_[4] = {-1, -1, -1, -1};
+    VkDescriptorSetLayout liquidTexSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool liquidTexPool_ = VK_NULL_HANDLE;
+    static constexpr uint32_t MAX_LIQUID_TEXTURE_SETS = 512;
+    // Bound for a liquid with no texture, so set 3 is never left empty.
+    std::unique_ptr<VkTexture> blankLiquidTexture_;
+    VkDescriptorSet blankLiquidSet_ = VK_NULL_HANDLE;
+    bool liquidTexturesLoaded_ = false;
 
     glm::vec4 getLiquidColor(uint16_t liquidType) const;
     float getLiquidAlpha(uint16_t liquidType) const;

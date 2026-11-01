@@ -10,6 +10,7 @@ namespace {
 // CharSections' BaseSection column: which part of a character a row describes.
 constexpr uint32_t kSectionSkin = 0;
 constexpr uint32_t kSectionFace = 1;
+constexpr uint32_t kSectionFacialHair = 2;
 constexpr uint32_t kSectionHair = 3;
 constexpr uint32_t kSectionUnderwear = 4;
 }  // namespace
@@ -33,7 +34,7 @@ CharacterSectionTextures resolveCharacterSections(
     std::string altFaceLower, altFaceUpper;
     bool haveAltFace = false;
 
-    bool foundSkin = false, foundUnderwear = false;
+    bool foundSkin = false, foundUnderwear = false, foundFacialHair = false;
 
     for (uint32_t r = 0; r < charSections->getRecordCount(); r++) {
         if (charSections->getUInt32(r, f.raceId) != who.raceId) continue;
@@ -70,6 +71,13 @@ CharacterSectionTextures resolveCharacterSections(
                 altFaceUpper = charSections->getString(r, f.texture2);
                 haveAltFace = true;
             }
+        } else if (section == kSectionFacialHair && !foundFacialHair &&
+                   variation == who.facialHairId && colour == who.hairColorId) {
+            // FacialLowerHairVV_CC and FacialUpperHairVV_CC: the style, in the
+            // character's hair colour.
+            out.facialLower = charSections->getString(r, f.texture1);
+            out.facialUpper = charSections->getString(r, f.texture2);
+            foundFacialHair = true;
         } else if (section == kSectionUnderwear && !foundUnderwear &&
                    colour == who.skinId) {
             for (uint32_t col = f.texture1; col <= f.texture1 + 2; col++) {
@@ -81,7 +89,7 @@ CharacterSectionTextures resolveCharacterSections(
             foundUnderwear = !out.underwear.empty();
         }
 
-        if (foundSkin && out.haveHair && out.exactFace && foundUnderwear) break;
+        if (foundSkin && out.haveHair && out.exactFace && foundUnderwear && foundFacialHair) break;
     }
 
     if (!out.exactFace && haveAltFace) {

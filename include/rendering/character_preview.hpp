@@ -69,6 +69,14 @@ public:
     /// Show a glue scene on its own, through its own camera, with no
     /// character: the login screen's UI_MainMenu_Northrend.m2.
     bool loadGlueScene(const std::string& scenePath);
+
+    /// Look through the racial scene's own camera, as the stock character
+    /// select does, rather than the portrait rig. Wheel zoom still leaves it
+    /// for the rig; zooming back out returns to it.
+    void setSceneCameraFraming(bool on);
+    /// Load this glue scene ("UI_DeathKnight") instead of the race's own on
+    /// the next loadCharacter. Empty goes back to the race's.
+    void setGlueSceneOverride(const std::string& sceneName);
     void rotate(float yawDelta);
     void zoom(float wheelDelta);
     void resetView();
@@ -110,6 +118,7 @@ private:
         uint16_t geoset100 = 0;
         uint16_t geoset300 = 0;
         uint16_t geoset200 = 0;
+        uint16_t geoset1700 = 0;
     };
 
     void createFBO();
@@ -204,6 +213,16 @@ private:
     glm::vec3 previewStandPosition_{0.0f};
     glm::vec3 previewViewDirection_{0.0f, 1.0f, 0.0f};
     bool transparentBackground_ = false;
+
+    // The racial scene's camera, for setSceneCameraFraming.
+    bool sceneCameraFraming_ = false;
+    bool sceneCameraValid_ = false;
+    glm::vec3 sceneCameraPos_{0.0f};
+    glm::vec3 sceneCameraTarget_{0.0f};
+    float sceneCameraFovDiagonal_ = 0.0f;
+    std::string glueSceneOverride_;
+    std::string backdropSceneLoaded_;
+    [[nodiscard]] float verticalFovFromDiagonal(float diagonalRadians) const;
 
     // Cached info from loadCharacter() for later recompositing.
     game::Race race_ = game::Race::HUMAN;

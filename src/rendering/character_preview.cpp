@@ -15,6 +15,7 @@
 #include "pipeline/dbc_layout.hpp"
 #include "core/appearance_composer.hpp"
 #include "core/geoset_rules.hpp"
+#include "core/helm_visual.hpp"
 #include "pipeline/item_textures.hpp"
 #include "pipeline/m2_asset_loader.hpp"
 #include "core/logger.hpp"
@@ -126,6 +127,10 @@ void CharacterPreview::ensureAppearanceGeosetsLoaded() {
             geosets.geoset100 = static_cast<uint16_t>(cfh->getUInt32(i, fhF.geoset100));
             geosets.geoset300 = static_cast<uint16_t>(cfh->getUInt32(i, fhF.geoset300));
             geosets.geoset200 = static_cast<uint16_t>(cfh->getUInt32(i, fhF.geoset200));
+            if (fhF.geoset1700 != pipeline::FacialHairFields::kNoFacialField &&
+                fhF.geoset1700 < cfh->getFieldCount()) {
+                geosets.geoset1700 = pipeline::facialGeosetVariant(cfh->getUInt32(i, fhF.geoset1700));
+            }
             facialHairGeosetMap_[key] = geosets;
         }
         LOG_INFO("CharacterPreview: loaded ", facialHairGeosetMap_.size(), " facial hair geoset mappings");
@@ -156,13 +161,14 @@ std::unordered_set<uint16_t> CharacterPreview::buildBaseGeosets() {
                            (gender_ == game::Gender::NONBINARY && useFemaleModel_)) ? 1u : 0u;
     const uint16_t selectedHairScalp = selectedHairScalpGeoset();
 
-    uint16_t facial100 = 1, facial200 = 1, facial300 = 1;
+    uint16_t facial100 = 1, facial200 = 1, facial300 = 1, facial1700 = 0;
     auto itFacial = facialHairGeosetMap_.find(
         core::appearanceKey(raceId, sexId, static_cast<uint8_t>(facialHair_)));
     if (itFacial != facialHairGeosetMap_.end()) {
         facial100 = itFacial->second.geoset100;
         facial200 = itFacial->second.geoset200;
         facial300 = itFacial->second.geoset300;
+        facial1700 = itFacial->second.geoset1700;
     }
 
     // The same bare set the player gets. This used to be its own list and had
@@ -170,7 +176,8 @@ std::unordered_set<uint16_t> CharacterPreview::buildBaseGeosets() {
     // its feet the other way stood in the portrait without them, and it named
     // the no-cloak panel, which the HD models do not carry.
     std::unordered_set<uint16_t> activeGeosets =
-        core::bareCharacterGeosets(selectedHairScalp, facial100, facial200, facial300, raceId);
+        core::bareCharacterGeosets(selectedHairScalp, facial100, facial200, facial300, raceId,
+                                   facial1700);
 
     return activeGeosets;
 }
@@ -598,6 +605,8 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
 
     std::string faceLowerPath;
     std::string faceUpperPath;
+    std::string facialLowerPath;
+    std::string facialUpperPath;
     std::string hairScalpPath;
     std::vector<std::string> underwearPaths;
     bodySkinPath_.clear();
@@ -622,6 +631,7 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
         who.faceId = static_cast<uint8_t>(face);
         who.hairStyleId = static_cast<uint8_t>(hairStyle);
         who.hairColorId = static_cast<uint8_t>(hairColor);
+        who.facialHairId = facialHair;
 
         const auto sections = pipeline::resolveCharacterSections(
             charSectionsDbc.get(), csF, who,
@@ -634,6 +644,8 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
         skinExtraPath_  = sections.skinExtra;
         faceLowerPath   = sections.faceLower;
         faceUpperPath   = sections.faceUpper;
+        facialLowerPath = sections.facialLower;
+        facialUpperPath = sections.facialUpper;
         hairScalpPath   = sections.hair;
         underwearPaths  = sections.underwear;
 
@@ -693,6 +705,9 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
         if (!faceUpperPath.empty()) {
             layers.push_back(faceUpperPath);
         }
+        // Facial hair over the face (CharSections section 2).
+        if (!facialLowerPath.empty()) layers.push_back(facialLowerPath);
+        if (!facialUpperPath.empty()) layers.push_back(facialUpperPath);
         for (const auto& up : underwearPaths) {
             layers.push_back(up);
         }
@@ -701,6 +716,8 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
         // Keep baseLayers_ without the base skin (compositeWithRegions takes basePath separately).
         if (!faceLowerPath.empty()) baseLayers_.push_back(faceLowerPath);
         if (!faceUpperPath.empty()) baseLayers_.push_back(faceUpperPath);
+        if (!facialLowerPath.empty()) baseLayers_.push_back(facialLowerPath);
+        if (!facialUpperPath.empty()) baseLayers_.push_back(facialUpperPath);
         for (const auto& up : underwearPaths) baseLayers_.push_back(up);
 
         if (layers.size() > 1) {
@@ -1197,6 +1214,21 @@ void CharacterPreview::attachWeapons(const std::vector<game::EquipmentItem>& equ
     charRenderer_->detachWeapon(instanceId_, 1);
     charRenderer_->detachWeapon(instanceId_, 2);
 
+    // Shoulders (INVTYPE_SHOULDER = 3) through the same helper the world uses.
+    // The helm is still left off here: hair is kept visible in the preview
+    // (see setEquipment), and a helm over it would clip.
+    {
+        uint32_t shoulderDisplayId = 0;
+        for (const auto& item : equipment) {
+            if (item.displayModel != 0 && item.inventoryType == 3) {
+                shoulderDisplayId = item.displayModel;
+                break;
+            }
+        }
+        core::attachShoulders(*charRenderer_, *assetManager_, instanceId_, shoulderDisplayId,
+                              [this](const std::string& m2Path) { return previewModelIdFor(m2Path); });
+    }
+
     auto displayInfoDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
     if (!displayInfoDbc || !displayInfoDbc->isLoaded()) return;
 
@@ -1307,7 +1339,10 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
     if (transparentBackground_) return;
 
     if (!charRenderer_ || !assetManager_) return;
-    if (backdropRace_ == static_cast<int>(race) && backdropInstanceId_ != 0) {
+    // A different scene asked for by name (the death knight's) is a different
+    // backdrop even for the same race.
+    if (backdropRace_ == static_cast<int>(race) && backdropInstanceId_ != 0 &&
+        backdropSceneLoaded_ == glueSceneOverride_) {
         // Appearance changes recreate the character instance but keep the racial
         // scene. Reapply its stand mark and camera rig to the new instance.
         applyPreviewView();
@@ -1319,6 +1354,8 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
         backdropInstanceId_ = 0;
     }
     backdropRace_ = static_cast<int>(race);
+    backdropSceneLoaded_ = glueSceneOverride_;
+    sceneCameraValid_ = false;
     previewStandPosition_ = glm::vec3(0.0f);
     previewViewDirection_ = glm::vec3(0.0f, 1.0f, 0.0f);
     modelYaw_ = 90.0f;
@@ -1343,6 +1380,8 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
         case game::Race::DRAENEI:   sceneName = "UI_Draenei";  break;
         default: break;
     }
+    // GetSelectBackgroundModel answers by class for a death knight.
+    if (!glueSceneOverride_.empty()) sceneName = glueSceneOverride_.c_str();
     if (!sceneName) return;
 
     std::string scenePath = std::string("Interface\\Glues\\Models\\") + sceneName + "\\" +
@@ -1381,6 +1420,14 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
     // Keep the character on the scene's authored stand mark and use the scene
     // camera only for viewing direction. Distance and focus come from our portrait
     // rig so scroll-wheel zoom can move naturally toward the face.
+    // The scene's own camera, kept for the stock character select, which
+    // looks through it unchanged.
+    sceneCameraPos_ = sceneCam.positionBase;
+    sceneCameraTarget_ = sceneCam.targetBase;
+    sceneCameraFovDiagonal_ = (sceneCam.fov > 0.0f && sceneCam.fov < 3.14159f) ? sceneCam.fov : 0.0f;
+    sceneCameraValid_ = true;
+    charRenderer_->playAnimation(backdropInstanceId_, 0, true);
+
     glm::vec3 toCamera = sceneCam.positionBase - sceneCam.targetBase;
     if (glm::length(toCamera) < 0.001f) toCamera = glm::vec3(0.0f, 1.0f, 0.0f);
     previewStandPosition_ = standPos;
@@ -1414,7 +1461,7 @@ bool CharacterPreview::loadGlueScene(const std::string& scenePath) {
     const glm::vec3 fwd = glm::normalize(cam.targetBase - cam.positionBase);
     camera_->setRotation(glm::degrees(std::atan2(fwd.y, fwd.x)),
                          glm::degrees(std::asin(std::clamp(fwd.z, -1.0f, 1.0f))));
-    if (cam.fov > 0.0f && cam.fov < 3.14159f) camera_->setFov(glm::degrees(cam.fov));
+    if (cam.fov > 0.0f && cam.fov < 3.14159f) camera_->setFov(verticalFovFromDiagonal(cam.fov));
     sceneOnly_ = true;
     LOG_INFO("CharacterPreview: glue scene ", scenePath);
     return true;
@@ -1530,8 +1577,47 @@ void CharacterPreview::resetView() {
     applyPreviewView();
 }
 
+float CharacterPreview::verticalFovFromDiagonal(float diagonalRadians) const {
+    // A 3.3.5 M2 camera's field of view is diagonal; the vertical one the
+    // projection wants is that over sqrt(1 + aspect^2) for this target.
+    const float aspect = (fboHeight_ > 0) ? static_cast<float>(fboWidth_) /
+                                                static_cast<float>(fboHeight_)
+                                          : 1.0f;
+    return glm::degrees(diagonalRadians / std::sqrt(1.0f + aspect * aspect));
+}
+
+void CharacterPreview::setSceneCameraFraming(bool on) {
+    sceneCameraFraming_ = on;
+    applyPreviewView();
+}
+
+void CharacterPreview::setGlueSceneOverride(const std::string& sceneName) {
+    glueSceneOverride_ = sceneName;
+}
+
 void CharacterPreview::applyPreviewView() {
     if (!camera_) return;
+
+    // The stock character select: the racial scene's own camera, untouched,
+    // looking at the character on the scene's stand mark.
+    if (sceneCameraFraming_ && sceneCameraValid_ && zoomLevel_ <= 0.0f) {
+        camera_->setPosition(sceneCameraPos_);
+        const glm::vec3 d = sceneCameraTarget_ - sceneCameraPos_;
+        if (glm::length(d) > 0.0001f) {
+            const glm::vec3 fwd = glm::normalize(d);
+            camera_->setRotation(glm::degrees(std::atan2(fwd.y, fwd.x)),
+                                 glm::degrees(std::asin(std::clamp(fwd.z, -1.0f, 1.0f))));
+        }
+        if (sceneCameraFovDiagonal_ > 0.0f) {
+            if (defaultFovDegrees_ <= 0.0f) defaultFovDegrees_ = camera_->getFovDegrees();
+            camera_->setFov(verticalFovFromDiagonal(sceneCameraFovDiagonal_));
+        }
+        if (instanceId_ > 0 && charRenderer_) {
+            charRenderer_->setInstancePosition(instanceId_, previewStandPosition_);
+            charRenderer_->setInstanceRotation(instanceId_, glm::vec3(0.0f, 0.0f, modelYaw_));
+        }
+        return;
+    }
 
     // A model that carries its own portrait camera is framed by it. The
     // fraction-of-height guess below assumes the bind pose is the drawn pose,

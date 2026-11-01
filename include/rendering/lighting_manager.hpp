@@ -32,6 +32,18 @@ struct LightingParams {
 
     float cloudDensity = 0.3f;                      // Cloud density/opacity
     float horizonGlow = 0.3f;                       // Horizon glow intensity
+
+    // The liquid colours, LightIntBand channels 14-17: the stock water is this
+    // colour, close (shallow) blending to far (deep) with the water's depth,
+    // at LightParams' shallow/deep alpha. Defaults are LightParams 1 at noon.
+    glm::vec3 oceanCloseColor{30.0f / 255.0f, 48.0f / 255.0f, 62.0f / 255.0f};
+    glm::vec3 oceanFarColor{0.0f, 19.0f / 255.0f, 23.0f / 255.0f};
+    glm::vec3 riverCloseColor{30.0f / 255.0f, 48.0f / 255.0f, 62.0f / 255.0f};
+    glm::vec3 riverFarColor{0.0f, 19.0f / 255.0f, 23.0f / 255.0f};
+    float waterShallowAlpha = 0.5f;
+    float waterDeepAlpha = 1.0f;
+    float oceanShallowAlpha = 0.75f;
+    float oceanDeepAlpha = 1.0f;
 };
 
 /** Apply any authored ambience that must remain stable regardless of world time. */
@@ -133,9 +145,20 @@ struct LightParamsProfile {
         SKY_SMOG_COLOR = 6,
         FOG_COLOR = 7,
         SUN_COLOR = 9,
-        // ... more channels exist (clouds, ocean, river)
+        // Liquid colours: close is the shallow end, far the deep end.
+        OCEAN_CLOSE_COLOR = 14,
+        OCEAN_FAR_COLOR = 15,
+        RIVER_CLOSE_COLOR = 16,
+        RIVER_FAR_COLOR = 17,
         COLOR_CHANNEL_COUNT = 18
     };
+
+    // LightParams.dbc fields 5-8: the water's opacity at the shallow and the
+    // deep end of the colour ramp above.
+    float waterShallowAlpha = 0.5f;
+    float waterDeepAlpha = 1.0f;
+    float oceanShallowAlpha = 0.75f;
+    float oceanDeepAlpha = 1.0f;
 
     ColorBand colorBands[COLOR_CHANNEL_COUNT];
 

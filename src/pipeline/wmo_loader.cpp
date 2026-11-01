@@ -130,8 +130,8 @@ WMOModel WMOLoader::load(const std::vector<uint8_t>& wmoData) {
                 model.boundingBoxMax.y = read<float>(wmoData, offset);
                 model.boundingBoxMax.z = read<float>(wmoData, offset);
 
-                // flags and numLod (uint16 each) - skip for now
-                offset += 4;
+                model.mohdFlags = read<uint16_t>(wmoData, offset);
+                offset += 2;  // numLod
 
                 core::Logger::getInstance().debug("WMO header: nTextures=", model.nTextures, " nGroups=", model.nGroups);
                 break;
@@ -470,7 +470,13 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
             group.boundingBoxMax.z = read<float>(groupData, mogpOffset);
             group.portalStart = read<uint16_t>(groupData, mogpOffset);
             group.portalCount = read<uint16_t>(groupData, mogpOffset);
-            mogpOffset += 8; // transBatchCount, intBatchCount, extBatchCount, padding
+            // MOBA is ordered trans (A), interior (B), exterior (C). The
+            // renderer needs A and B to light each batch the way the client
+            // does; C is whatever is left. extBatchCount and the padding
+            // after it are skipped.
+            group.batchCountA = read<uint16_t>(groupData, mogpOffset);  // transBatchCount
+            group.batchCountB = read<uint16_t>(groupData, mogpOffset);  // intBatchCount
+            mogpOffset += 4; // extBatchCount, padding
             // fogIndices: 4 × uint8 (4 bytes total, NOT 4 × uint32)
             group.fogIndices[0] = read<uint8_t>(groupData, mogpOffset);
             group.fogIndices[1] = read<uint8_t>(groupData, mogpOffset);

@@ -723,6 +723,9 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
     rendering::LoadingScreen loadingScreen;
     loadingScreen.setVkContext(window_->getVkContext());
     loadingScreen.setSDLWindow(window_->getSDLWindow());
+    // The map's own art from LoadingScreens.dbc and the stock loading bar.
+    loadingScreen.setAssetManager(assetManager_);
+    loadingScreen.setMapId(mapId);
     bool loadingScreenOk = loadingScreen.initialize();
 
     auto showProgress = [&](const char* msg, float progress) {

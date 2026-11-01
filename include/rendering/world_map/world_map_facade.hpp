@@ -128,7 +128,21 @@ public:
     /// The name of that zone, or empty.
     [[nodiscard]] std::string zoneNameAtMapPoint(float u, float v) const;
 
-    /// Drill into the zone under that point, as clicking it would.
+    /// What UpdateMapHighlight(x, y) answers: the zone under the point and
+    /// where its highlight art goes, all as fractions of the 1002x668 map
+    /// (worldmapframe.lua multiplies them by the button's size). False when
+    /// no zone with highlight art is under the point.
+    struct MapHighlight {
+        std::string name;        ///< display name (AreaTable)
+        std::string fileName;    ///< Interface\WorldMap\<fileName>\<fileName>Highlight
+        float texPercentageX = 0.0f, texPercentageY = 0.0f;
+        float textureX = 0.0f, textureY = 0.0f;
+        float scrollChildX = 0.0f, scrollChildY = 0.0f;
+    };
+    bool highlightAtMapPoint(float u, float v, MapHighlight& out);
+
+    /// Drill into what is under that point, as clicking it would: a continent
+    /// on the world map, a world on the cosmic map, a zone on a continent.
     bool clickMapPoint(float u, float v);
 
     /// Where a world position falls on the map now showing, as 0..1 across the

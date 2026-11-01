@@ -106,6 +106,7 @@ void WidgetTree::reset() {
     linkRects_.clear();
     scrollFrames_.clear();
     keyboardFrames_.clear();
+    unitModelFrames_.clear();
     ownedTooltips_.clear();
     portraitsByUnit_.clear();
     portraitUnitOf_.clear();

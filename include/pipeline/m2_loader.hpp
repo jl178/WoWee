@@ -229,6 +229,16 @@ struct M2Model {
     // Empty inner list = no footfall events for that sequence.
     std::vector<std::vector<uint32_t>> footstepEventTimes;
 
+    // Sound ($CSD) animation events per sequence index, sorted by time. The
+    // event's data field is a SoundEntries id: character models carry one per
+    // vocal emote (EmoteLaugh -> HumanMaleEmoteLaugh, EmoteCry, EmoteKiss,
+    // EmoteChicken, EmoteApplaud -> ClapSounds). Empty inner list = none.
+    struct SoundEvent {
+        uint32_t timeMs;        // from the start of the sequence
+        uint32_t soundEntryId;  // SoundEntries.dbc id
+    };
+    std::vector<std::vector<SoundEvent>> soundEvents;
+
     // Bone lookup table (vertex bone indices reference this to get global bone index)
     std::vector<uint16_t> boneLookupTable;
 

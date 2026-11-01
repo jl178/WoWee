@@ -2442,8 +2442,38 @@ int lua_Tooltip_SetUnit(lua_State* L) {
     // which then drew across the rotate arrows and sized the frame to fit one
     // line of text instead of the figure.
     if (w && w->objectType != "GameTooltip") {
-        lua_pushboolean(L, 0);
-        return 1;
+        // PlayerModel:SetUnit(unit) - which unit the figure is of. Recorded
+        // on the frame, token and guid both, and drawn by the render loop
+        // (which owns the offscreen views): a player from their race, sex,
+        // skin, face and hair bytes and their visible items, anything else
+        // from its display id. This answered nothing at all, so every model
+        // frame but the player's own paperdoll stayed empty - the inspect
+        // window most visibly, which is told the inspected unit this way.
+        const bool isModel = w->objectType == "PlayerModel" ||
+                             w->objectType == "DressUpModel" ||
+                             w->objectType == "TabardModel" ||
+                             w->objectType == "Model";
+        if (isModel) {
+            auto* gh = wowee::addons::getGameHandler(L);
+            std::string unit = lua_isstring(L, 2) ? lua_tostring(L, 2) : "";
+            wowee::addons::toLowerInPlace(unit);
+            w->modelUnit = unit;
+            w->modelUnitGuid = (gh && !unit.empty())
+                ? wowee::addons::resolveUnitGuid(gh, unit) : 0;
+            // Listed only once a unit is actually set: ClearModel on a frame
+            // that never had one (a spell-effect Model) must not hand it to
+            // the render loop, which would then blank its texture each frame.
+            if (!unit.empty()) {
+                if (auto* tree = wowee::addons::getWidgetTree(L)) tree->noteUnitModelFrame(w->id);
+            }
+            // Kept on the Lua side as well, for RefreshUnit to re-resolve.
+            if (lua_istable(L, 1)) {
+                lua_pushstring(L, "__modelUnit");
+                if (unit.empty()) lua_pushnil(L); else lua_pushstring(L, unit.c_str());
+                lua_rawset(L, 1);
+            }
+        }
+        return 0;
     }
     auto* gh = wowee::addons::getGameHandler(L);
     const char* uid = luaL_optstring(L, 2, "player");
@@ -2965,14 +2995,16 @@ int lua_Tooltip_SetInventoryItem(lua_State* L) {
     // rather than none, which is the harder kind to notice.
     std::string uid(luaL_optstring(L, 2, "player"));
     wowee::addons::toLowerInPlace(uid);
+    // "target" or "mouseover" naming the player is the player's own slot.
+    const uint64_t unitGuid = (uid == "player") ? 0 : wowee::addons::resolveUnitGuid(gh, uid);
+    if (unitGuid != 0 && unitGuid == gh->getPlayerGuid()) uid = "player";
     // Another player is only ever inspected as equipment, and the cache behind
     // it is one entry per equipment slot.
     if (uid != "player" && slot > 19) { lua_pushboolean(L, 0); return 1; }
     if (uid != "player") {
-        const uint64_t guid = wowee::addons::resolveUnitGuid(gh, uid);
-        auto& cache = gh->inspectedPlayerItemEntriesRef();
-        auto it = guid ? cache.find(guid) : cache.end();
-        const uint32_t entry = (it != cache.end()) ? it->second[static_cast<size_t>(slot - 1)] : 0;
+        // Their visible-item fields first, the inspect reply second - the
+        // same answer GetInventoryItemTexture gives the square being hovered.
+        const uint32_t entry = wowee::addons::unitEquippedItemEntry(gh, unitGuid, slot);
         lua_pushboolean(L, fillItemTooltipById(L, gh, entry) ? 1 : 0);
         return 1;
     }
@@ -6365,7 +6397,23 @@ void LuaEngine::registerCoreAPI() {
         // and built by the render loop, which is where the offscreen views
         // are; zero clears it.
         "function mt:SetCreature(id) __WoweeSetModelCreature(self, id) end\n"
-        "function mt:RefreshUnit() end\n"
+        // RefreshUnit re-reads the unit SetUnit was given - the inspect
+        // paperdoll calls it on UNIT_MODEL_CHANGED, and a token like "target"
+        // may name somebody else by now. SetUnit itself is the C binding
+        // shared with GameTooltip, which records the unit on a model frame.
+        "function mt:RefreshUnit()\n"
+        "    local u = rawget(self, '__modelUnit')\n"
+        "    if u then self:SetUnit(u) end\n"
+        "end\n"
+        // Dress() puts the unit's own gear back on, which here is taking
+        // every tried-on piece off again: the figure is always drawn from what
+        // the unit is wearing plus the try-on list. The dressing room's Reset
+        // button is this, and it did nothing.
+        "function mt:Dress() __WoweeUndress(self) end\n"
+        "function mt:ClearModel()\n"
+        "    __WoweeSetModelCreature(self, 0)\n"
+        "    self:SetUnit(nil)\n"
+        "end\n"
         "function mt:GetInventorySlot()\n"
         "    return BankButtonIDToInvSlotID(self:GetID(), self.isBag)\n"
         "end\n"
@@ -6935,10 +6983,10 @@ void LuaEngine::registerCoreAPI() {
         "AddToAutoHide=1,AllowAttributeChanges=1,Animate=1,\n"
         "CallMethod=1,CanSaveTabardNow=1,ChildUpdate=1,Clear=1,ClearAllPoints=1,\n"
         "ClearBinding=1,ClearBindings=1,ClearFocus=1,ClearHistory=1,ClearLines=1,\n"
-        "ClearModel=1,CreateFontString=1,CreatePlayerArrowFrame=1,\n"
+        "CreateFontString=1,CreatePlayerArrowFrame=1,\n"
         // DrawQuestBlob is a real binding now, applied after this set.
         "CreateTexture=1,CreateTitleRegion=1,CycleVariation=1,Disable=1,\n"
-        "Dress=1,Enable=1,EnableKeyboard=1,EnableMouse=1,EnableMouseWheel=1,\n"
+        "Enable=1,EnableKeyboard=1,EnableMouse=1,EnableMouseWheel=1,\n"
         "EnableSubtitles=1,FadeOut=1,Free=1,GetAlpha=1,GetAnchorType=1,GetAttribute=1,\n"
         "GetBackdrop=1,GetBottom=1,GetButtonState=1,GetCenter=1,GetChecked=1,\n"
         "GetCheckedTexture=1,GetChildList=1,GetChildren=1,\n"

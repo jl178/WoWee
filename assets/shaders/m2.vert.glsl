@@ -277,6 +277,15 @@ void main() {
 
     FragPos = worldPos.xyz;
     Normal = mat3(model) * norm.xyz;
+    // Ground clutter carries the terrain normal under it (flags bit 1, x and y
+    // as bytes in bits 8-23), and is lit with that rather than its cards' own
+    // normals, so it shades as the ground it stands on does - darker on a
+    // slope turned from the sun, not bright on every card facing it.
+    int instFlags = instanceData[instIdx].flags;
+    if ((instFlags & 2) != 0) {
+        vec2 g = vec2(float((instFlags >> 8) & 0xFF), float((instFlags >> 16) & 0xFF)) / 127.5 - 1.0;
+        Normal = vec3(g, sqrt(max(1.0 - dot(g, g), 0.0)));
+    }
 
     TexCoord = (push.texCoordSet == 1 ? aTexCoord2 : aTexCoord) + uvOff;
 

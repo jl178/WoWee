@@ -299,7 +299,8 @@ public:
                                   uint8_t variation, uint8_t color, int texIndex = 0) const;
     const std::unordered_map<uint32_t, uint16_t>& getHairGeosetMap() const { return hairGeosetMap_; }
 
-    struct FacialHairGeosets { uint16_t geoset100 = 0; uint16_t geoset300 = 0; uint16_t geoset200 = 0; };
+    struct FacialHairGeosets { uint16_t geoset100 = 0; uint16_t geoset300 = 0; uint16_t geoset200 = 0;
+                               uint16_t geoset1700 = 0; };
     const std::unordered_map<uint32_t, FacialHairGeosets>& getFacialHairGeosetMap() const { return facialHairGeosetMap_; }
 
     // Creature M2 sync loader (used by spawnPlayerCharacter in Application)

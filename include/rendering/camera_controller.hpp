@@ -154,7 +154,31 @@ public:
     /// chair puts a character in.
     void applyServerStandState(uint8_t standState) {
         sitting = (standState >= 1 && standState <= 6) || standState == 8;
+        const bool wasSeated = seatedInChair_;
         seatedInChair_ = standState == 2 || (standState >= 4 && standState <= 6);
+        // The seat is where the server's teleport put the character, not
+        // wherever grounding drifted in between. The two packets are sent
+        // together but processed under a per-frame budget, so a frame can run
+        // between them with the character still standing - and in that frame
+        // grounding steps the feet up onto the chair's collision mesh. Seated
+        // grounding never lowers, so the character then sat in the air above
+        // the chair for as long as they stayed in it.
+        if (seatedInChair_ && !wasSeated && followTarget &&
+            serverPlacementAge_ < kServerPlacementWindow) {
+            const glm::vec2 d = glm::vec2(*followTarget) - glm::vec2(serverPlacement_);
+            if (glm::dot(d, d) < 0.25f) {
+                *followTarget = serverPlacement_;
+                lastGroundZ = serverPlacement_.z;
+                verticalVelocity = 0.0f;
+                grounded = true;
+            }
+        }
+    }
+    /// Where the server last placed the character (a same-map teleport), in
+    /// render coordinates. Read back by applyServerStandState for a seat.
+    void noteServerPlacement(const glm::vec3& renderPos) {
+        serverPlacement_ = renderPos;
+        serverPlacementAge_ = 0.0f;
     }
     [[nodiscard]] bool isSeatedInChair() const { return seatedInChair_; }
 
@@ -711,6 +735,11 @@ private:
     /// barber's chair. Held apart from `sitting` because only this one means
     /// the character's height is the server's to decide.
     bool seatedInChair_ = false;
+    /// The server's last placement and how long ago it was; see
+    /// noteServerPlacement.
+    static constexpr float kServerPlacementWindow = 2.0f;
+    glm::vec3 serverPlacement_{0.0f};
+    float serverPlacementAge_ = 1.0e9f;
     bool barberView_ = false;
     float savedBarberYaw_ = 0.0f;
     float savedBarberPitch_ = 0.0f;

@@ -1126,7 +1126,9 @@ void SocialHandler::inspectUnit(uint64_t guid) {
     }
     auto player = std::static_pointer_cast<Player>(entity);
     std::string name = player->getName().empty() ? "Target" : player->getName();
-    owner_.addSystemChatMessage("Inspecting " + name + "...");
+    // No chat line: the stock client prints nothing here, and the inspect
+    // window calls NotifyInspect on every open and every unit change, so a
+    // line per request filled chat with "Inspecting ..." echoes.
     LOG_INFO("Sent inspect request for player: ", name, " (GUID: 0x", std::hex, guid, std::dec, ")");
 }
 
@@ -1349,6 +1351,18 @@ void SocialHandler::handleInspectResults(network::Packet& packet) {
                 // paperdoll names.
                 if (e == 0) enchantIds[slot] = enchId;
             }
+            // Each item record then closes with its random property id
+            // (int16), its creator as a packed guid, and its suffix factor
+            // (uint32) - Player::BuildEnchantmentsInfoData writes all three.
+            // Skipping none of them read the second item's entry out of the
+            // first item's tail, so only the head slot ever came out right and
+            // every other square of the inspect paperdoll was garbage or empty.
+            if (!packet.hasRemaining(2)) break;
+            packet.readUInt16();
+            if (!packet.hasFullPackedGuid()) break;
+            packet.readPackedGuid();
+            if (!packet.hasRemaining(4)) break;
+            packet.readUInt32();
         }
     }
 

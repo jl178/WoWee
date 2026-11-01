@@ -6,6 +6,7 @@
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/character_renderer.hpp"
+#include "rendering/spell_visual_system.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/animation/animation_ids.hpp"
@@ -432,6 +433,33 @@ void AnimationCallbackHandler::setupCallbacks() {
         const bool isDirected = (castType == game::SpellCastType::DIRECTED);
         const bool isArea     = (castType == game::SpellCastType::AREA);
 
+        // The animations the spell's own kits name (SpellVisualKit.AnimID):
+        // Flash Heal holds ReadySpellOmni and releases SpellCastOmni even when
+        // cast on someone, Arcane Missiles channels ChannelCastDirected. The
+        // target-based guess below stays as the fallback. Only the spell
+        // cast families are taken (a kit can name a melee swing).
+        rendering::SpellVisualSystem::KitAnimations kitAnims;
+        {
+            uint32_t kitSpell = isLocalPlayer ? gameHandler_.getCurrentCastSpellId() : 0;
+            if (kitSpell == 0)
+                if (const auto* st = gameHandler_.getUnitCastState(guid)) kitSpell = st->spellId;
+            auto* svs = renderer_.getSpellVisualSystem();
+            if (kitSpell != 0 && svs) {
+                gameHandler_.loadSpellNameCache();
+                auto it = gameHandler_.spellNameCacheRef().find(kitSpell);
+                if (it != gameHandler_.spellNameCacheRef().end() && it->second.spellVisualId)
+                    kitAnims = svs->getKitAnimations(it->second.spellVisualId);
+            }
+            using namespace rendering::anim;
+            auto keep = [&](uint32_t& a, std::initializer_list<uint32_t> family) {
+                if (std::find(family.begin(), family.end(), a) == family.end() ||
+                    !cr->hasAnimation(instanceId, a)) a = 0;
+            };
+            keep(kitAnims.precast, {READY_SPELL_DIRECTED, READY_SPELL_OMNI});
+            keep(kitAnims.channel, {CHANNEL_CAST_DIRECTED, CHANNEL_CAST_OMNI});
+            keep(kitAnims.cast, {SPELL_CAST_DIRECTED, SPELL_CAST_OMNI, SPELL_CAST_AREA});
+        }
+
         if (start) {
             uint32_t currentSpell = isLocalPlayer ? gameHandler_.getCurrentCastSpellId() : 0;
             bool isFishing = isChannel && game::spellclass::isFishingCast(currentSpell);
@@ -652,6 +680,11 @@ void AnimationCallbackHandler::setupCallbacks() {
                 }
             }
 
+            // The kits' own animations over the guesses above.
+            if (isChannel ? kitAnims.channel : kitAnims.precast)
+                castAnim = isChannel ? kitAnims.channel : kitAnims.precast;
+            if (finalizeAnim && kitAnims.cast) finalizeAnim = kitAnims.cast;
+
             if (isLocalPlayer) {
                 auto* ac = renderer_.getAnimationController();
                 if (ac) ac->startSpellCast(precastAnim, castAnim, true, finalizeAnim);
@@ -687,7 +720,8 @@ void AnimationCallbackHandler::setupCallbacks() {
                      cur == SPELL_CAST_AREA)) {
                     uint32_t release = 0;
                     if (!isChannel) {
-                        const uint32_t pref = isArea ? SPELL_CAST_AREA
+                        const uint32_t pref = kitAnims.cast ? kitAnims.cast
+                                            : isArea ? SPELL_CAST_AREA
                                             : isDirected ? SPELL_CAST_DIRECTED : SPELL_CAST_OMNI;
                         for (uint32_t id : {pref, static_cast<uint32_t>(SPELL_CAST_OMNI),
                                             static_cast<uint32_t>(SPELL_CAST)})

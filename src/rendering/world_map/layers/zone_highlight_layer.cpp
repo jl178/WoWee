@@ -93,20 +93,31 @@ void ZoneHighlightLayer::ensureHighlight(const std::string& key,
     LOG_INFO("ZoneHighlightLayer: loaded highlight key='", key, "' path='", path,
              "' ", blpImage.width, "x", blpImage.height, " dataSize=", blpImage.data.size());
 
-    // WoW highlight BLPs with alphaDepth=0 use additive blending (white=glow, black=invisible).
-    // Convert to alpha-blend compatible: set alpha = max(R,G,B) for fully opaque textures.
-    {
-        bool allOpaque = true;
-        for (size_t i = 3; i < blpImage.data.size(); i += 4) {
-            if (blpImage.data[i] < 255) { allOpaque = false; break; }
-        }
-        if (allOpaque) {
-            for (size_t i = 0; i < blpImage.data.size(); i += 4) {
-                uint8_t r = blpImage.data[i], g = blpImage.data[i + 1], b = blpImage.data[i + 2];
-                blpImage.data[i + 3] = std::max({r, g, b});
-            }
+    // Every highlight is drawn additively in the real client (alphaMode="ADD"
+    // on WorldMapHighlight, and the default for a HighlightTexture), where a
+    // black texel adds nothing. ImGui alpha-blends, so fold the colour into
+    // the alpha: a' = a * max(R,G,B). That is the additive look for all three
+    // kinds of file shipped - alphaDepth 0 (alpha all 255), the Northrend DXT5
+    // ones (alpha ~255 over black RGB, which drew as opaque black squares when
+    // only fully-opaque files were converted), and the cosmic glows (glow in
+    // the alpha over bright RGB, so a' ~= a).
+    for (size_t i = 0; i + 3 < blpImage.data.size(); i += 4) {
+        const uint8_t m = std::max({blpImage.data[i], blpImage.data[i + 1], blpImage.data[i + 2]});
+        blpImage.data[i + 3] = static_cast<uint8_t>((static_cast<unsigned>(blpImage.data[i + 3]) * m) / 255u);
+    }
+
+    // Where the glow actually is, for callers that have to place art whose
+    // canvas is mostly empty (the world-level continent highlights).
+    int cx0 = blpImage.width, cy0 = blpImage.height, cx1 = -1, cy1 = -1;
+    for (int y = 0; y < blpImage.height; ++y) {
+        for (int x = 0; x < blpImage.width; ++x) {
+            const size_t i = (static_cast<size_t>(y) * blpImage.width + x) * 4 + 3;
+            if (i >= blpImage.data.size() || blpImage.data[i] <= 24) continue;
+            cx0 = std::min(cx0, x); cy0 = std::min(cy0, y);
+            cx1 = std::max(cx1, x); cy1 = std::max(cy1, y);
         }
     }
+    if (cx1 < 0) { cx0 = 0; cy0 = 0; cx1 = blpImage.width - 1; cy1 = blpImage.height - 1; }
 
     auto loaded = makeImGuiTexture(*vkCtx_, blpImage);
     if (!loaded) {
@@ -119,6 +130,10 @@ void ZoneHighlightLayer::ensureHighlight(const std::string& key,
     HighlightEntry entry;
     entry.texture = std::move(tex);
     entry.imguiDS = ds;
+    entry.width = blpImage.width;
+    entry.height = blpImage.height;
+    entry.contentX0 = cx0; entry.contentY0 = cy0;
+    entry.contentX1 = cx1; entry.contentY1 = cy1;
     highlights_[key] = std::move(entry);
 }
 
@@ -132,8 +147,27 @@ ImTextureID ZoneHighlightLayer::getHighlightTexture(const std::string& key,
     return 0;
 }
 
+bool ZoneHighlightLayer::getHighlightExtent(const std::string& key, int& texW, int& texH,
+                                            int& contentX0, int& contentY0,
+                                            int& contentX1, int& contentY1) const {
+    auto it = highlights_.find(key);
+    if (it == highlights_.end() || it->second.width <= 0 || it->second.height <= 0) return false;
+    texW = it->second.width;
+    texH = it->second.height;
+    contentX0 = it->second.contentX0; contentY0 = it->second.contentY0;
+    contentX1 = it->second.contentX1; contentY1 = it->second.contentY1;
+    return true;
+}
+
 void ZoneHighlightLayer::render(const LayerContext& ctx) {
-    if (ctx.viewLevel != ViewLevel::CONTINENT || ctx.continentIdx < 0) return;
+    // Reset first: a hover left over from the last continent view would
+    // otherwise be read as "under the cursor" at every other level.
+    hoveredZone_ = -1;
+    if (ctx.viewLevel != ViewLevel::CONTINENT || ctx.continentIdx < 0) {
+        prevHoveredZone_ = -1;
+        hoverHighlightAlpha_ = 0.0f;
+        return;
+    }
     if (!ctx.zones) return;
 
     // The same bounds every marker layer projects against. This spelled the

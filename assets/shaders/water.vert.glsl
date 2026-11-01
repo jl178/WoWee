@@ -29,7 +29,8 @@ layout(push_constant) uniform Push {
     vec2 screenSize;
     vec2 depthRange;
     float sceneValid;
-    float pad0, pad1, pad2;
+    float liquidTexValid;
+    float pad1, pad2;
 } push;
 
 layout(location = 0) in vec3 aPos;
@@ -158,12 +159,10 @@ void main() {
     worldPos.z += waves.displacement.z;
     WaveOffset = waves.waveHeight; // raw wave height for fragment shader foam
 
-    // Player interaction ripples - concentric waves emanating from player position
-    vec2 rippleOrigin = playerPos.xy;
-    float rippleStrength = fogParams.w;
-    float d = length(worldPos.xy - rippleOrigin);
-    float ripple = rippleStrength * 0.12 * exp(-d * 0.12) * sin(d * 2.5 - time * 6.0);
-    worldPos.z += ripple;
+    // No ripple displacement around the player. The surface bobbing at the
+    // player's own feet slid the waterline up and down the character, which
+    // read as the silhouette moving; the 3.3.5 water stays flat and leaves
+    // ripples to the splash effects.
 
     // Analytical normal from Gerstner tangent/binormal (cross product gives Z-up normal)
     Normal = normalize(cross(waves.binormal, waves.tangent));

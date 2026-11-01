@@ -1150,6 +1150,12 @@ void GameHandler::registerCoreOpcodes() {
                 return;
             }
             standState_ = newStandState;
+            // Out of the chair is out of the barber, as on the real client;
+            // closing it here also takes the unbought preview off.
+            if (barberShopOpen_ &&
+                !(standState_ == 2 || (standState_ >= 4 && standState_ <= 6))) {
+                endBarberShop(false);
+            }
             // 0=stand, 1=sit, 2-6=sit variants, 7=dead, 8=kneel. Logged because a
             // wrong state here is indistinguishable, in-game, from a wrong animation.
             // At warning level: the file log filters info out by default.
@@ -1557,8 +1563,10 @@ void GameHandler::registerCoreOpcodes() {
             uint32_t result = packet.readUInt32();
             if (result == 0) {
                 addSystemChatMessage("Hairstyle changed.");
-                barberShopOpen_ = false;
-                fireAddonEvent("BARBER_SHOP_CLOSE", {});
+                // Bought: the preview is now the real thing, so it is not
+                // put back, and the server's PLAYER_BYTES update confirms it.
+                fireAddonEvent("BARBER_SHOP_SUCCESS", {});
+                endBarberShop(true);
             } else {
                 const char* msg = (result == 1 || result == 3) ? "Not enough money for new hairstyle."
                                 : (result == 2) ? "You are not at a barber shop."
@@ -2414,7 +2422,9 @@ void GameHandler::registerRemainingOpcodes() {
             glm::vec3 canonical(entity->getLatestX(), entity->getLatestY(), entity->getLatestZ());
             spawnPos = core::coords::canonicalToRender(canonical);
         }
-        if (auto* sv = renderer->getSpellVisualSystem()) sv->playSpellVisual(impVisualId, spawnPos, /*useImpactKit=*/true);
+        // A SpellVisualKit.dbc id (AzerothCore Unit::SendPlaySpellImpact), on the target.
+        if (auto* sv = renderer->getSpellVisualSystem())
+            sv->playSpellVisualKit(impVisualId, spawnPos, resolveUnitRenderInstance(impTargetGuid));
     };
     // SMSG_READ_ITEM_OK - moved to InventoryHandler::registerOpcodes
     // SMSG_READ_ITEM_FAILED - moved to InventoryHandler::registerOpcodes

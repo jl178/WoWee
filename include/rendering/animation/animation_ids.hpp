@@ -559,6 +559,22 @@ const char* nameFromId(uint32_t id);
 /// Logs warnings for IDs present in DBC but missing from constants, and vice versa.
 void validateAgainstDBC(const std::shared_ptr<wowee::pipeline::DBCFile>& dbc);
 
+/// The loop a unit holds for a server stand state (UnitStandStateType, byte 0
+/// of UNIT_FIELD_BYTES_1). Zero for standing, and for dead, which the death
+/// path owns. The chair states pick the chair height the server chose.
+constexpr uint32_t standStateLoopAnim(uint8_t standState) {
+    switch (standState) {
+        case 1: return SITTING;          // UNIT_STAND_STATE_SIT
+        case 2: return SIT_CHAIR_MED;    // UNIT_STAND_STATE_SIT_CHAIR
+        case 3: return SLEEP;            // UNIT_STAND_STATE_SLEEP
+        case 4: return SIT_CHAIR_LOW;    // UNIT_STAND_STATE_SIT_LOW_CHAIR
+        case 5: return SIT_CHAIR_MED;    // UNIT_STAND_STATE_SIT_MEDIUM_CHAIR
+        case 6: return SIT_CHAIR_HIGH;   // UNIT_STAND_STATE_SIT_HIGH_CHAIR
+        case 8: return KNEEL_LOOP;       // UNIT_STAND_STATE_KNEEL
+        default: return 0;
+    }
+}
+
 } // namespace anim
 } // namespace rendering
 } // namespace wowee

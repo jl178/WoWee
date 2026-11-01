@@ -148,6 +148,12 @@ void SettingsPanel::applyLoadedSettings() {
     // Everything the config file just filled in, handed to the thing it
     // affects. Same route the sliders and the presets take.
     for (const char* key : kGraphicsApplyKeys) applySettingSideEffects(key);
+    // And the preset marker worked out from what was loaded rather than taken
+    // from the file. The file kept the last preset chosen even after a
+    // setting under it was changed by hand, so it could say Ultra over
+    // settings that are not Ultra, and the dropdown showed Ultra with
+    // multisampling off.
+    updateGraphicsPresetFromCurrentSettings();
 }
 
 void SettingsPanel::applyGraphicsPreset(GraphicsPreset preset) {
@@ -216,10 +222,15 @@ void SettingsPanel::updateGraphicsPresetFromCurrentSettings() {
                           std::abs(pendingGrassDistance - p.grassDistance) <= 10));
         if (matches) {
             pendingGraphicsPreset = static_cast<GraphicsPreset>(i + 1);
+            // Both halves: saveSettings writes currentGraphicsPreset, and with
+            // only the pending one moved the file went on naming the preset
+            // last picked from the dropdown.
+            currentGraphicsPreset = pendingGraphicsPreset;
             return;
         }
     }
     pendingGraphicsPreset = GraphicsPreset::CUSTOM;
+    currentGraphicsPreset = pendingGraphicsPreset;
 }
 
 std::string SettingsPanel::getSettingsPath() {
@@ -472,12 +483,18 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
     auto* wmo = renderer ? renderer->getWMORenderer() : nullptr;
     auto* chars = renderer ? renderer->getCharacterRenderer() : nullptr;
 
-    // The switches the game's own Sound panel used to own. Writing the setting
-    // has already written the cvar behind it - see noteClientSettingChanged -
-    // and this is what re-reads them. applySoundCVars is where the knowledge
-    // of what each one silences lives, so it stays the only copy.
+    // The switches the game's own Sound panel used to own. applySoundCVars
+    // re-reads them from the cvar store, and is where the knowledge of what
+    // each one silences lives, so it stays the only copy.
+    //
+    // The store is written here first. setSettingValue writes it only after
+    // this function returns, so the pass read the value from before the click:
+    // ticking Enable Music did nothing and unticking it started the music.
+    // And at startup nothing wrote it at all, so a switch saved off in
+    // settings.cfg with no line in cvars.cfg came back on.
     if (key == "soundinbackground" || key == "enablemusic" || key == "loopmusic" ||
         key == "enableambience" || key == "errorspeech" || key == "enablesoundeffects") {
+        addons::noteClientSettingChanged(key, settingValue(key));
         if (services_.addonManager) {
             if (auto* engine = services_.addonManager->getLuaEngine()) {
                 if (auto* L = engine->getState()) addons::applySoundCVarSideEffects(L);
@@ -735,7 +752,17 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
     } else if (isVolumeKey(key)) {
         // Every volume goes through one call, because each of them is a balance
         // against the others and the coordinator works them all out together.
-        applyAudioVolumes(services_.audioCoordinator);
+        //
+        // Through the sound cvar pass where there is one: it recomputes the
+        // volumes and then lays the Enable Music / Ambience / Sound Effects
+        // switches over them. applyAudioVolumes alone ignored the switches, so
+        // moving the music slider with music switched off started it playing.
+        lua_State* L = nullptr;
+        if (services_.addonManager) {
+            if (auto* engine = services_.addonManager->getLuaEngine()) L = engine->getState();
+        }
+        if (L) addons::applySoundCVarSideEffects(L);
+        else applyAudioVolumes(services_.audioCoordinator);
     }
 
     // And say so, for the settings whose effect is not this client's to apply.
