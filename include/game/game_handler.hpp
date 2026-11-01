@@ -1443,6 +1443,11 @@ public:
     void setPlayerHealthCallback(PlayerHealthCallback cb) { playerHealthCallback_ = std::move(cb); }
 
     // NPC greeting callback (plays voice line when NPC is clicked)
+    /// A text emote someone performed, the player included: the sound layer
+    /// plays its EmotesTextSound clip for the sender's race and sex.
+    using TextEmoteSoundCallback = std::function<void(uint64_t senderGuid, uint32_t textEmoteId)>;
+    void setTextEmoteSoundCallback(TextEmoteSoundCallback cb) { textEmoteSoundCallback_ = std::move(cb); }
+    auto& textEmoteSoundCallbackRef() { return textEmoteSoundCallback_; }
     using NpcGreetingCallback = std::function<void(uint64_t guid, const glm::vec3& position)>;
     void setNpcGreetingCallback(NpcGreetingCallback cb) { npcGreetingCallback_ = std::move(cb); }
 
@@ -4986,6 +4991,7 @@ private:
     StealthStateCallback stealthStateCallback_;
     PlayerHealthCallback playerHealthCallback_;
     NpcGreetingCallback npcGreetingCallback_;
+    TextEmoteSoundCallback textEmoteSoundCallback_;
     NpcFarewellCallback npcFarewellCallback_;
     NpcVendorCallback npcVendorCallback_;
     ChargeCallback chargeCallback_;

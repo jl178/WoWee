@@ -982,6 +982,9 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
         LOG_WARNING("Failed to parse SMSG_TEXT_EMOTE");
         return;
     }
+    // The voice line plays for every sender, the player included; only the
+    // chat line below is the player's own echo to skip.
+    if (owner_.textEmoteSoundCallbackRef()) owner_.textEmoteSoundCallbackRef()(data.senderGuid, data.textEmoteId);
 
     if (data.senderGuid == owner_.getPlayerGuid() && data.senderGuid != 0) {
         return;

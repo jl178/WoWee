@@ -8,6 +8,10 @@
 #include "game/game_handler.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/npc_voice_manager.hpp"
+#include "audio/audio_engine.hpp"
+#include "audio/sound_data.hpp"
+#include "game/update_field_table.hpp"
+#include <random>
 
 namespace wowee { namespace core {
 
@@ -43,6 +47,25 @@ uint32_t NPCInteractionCallbackHandler::resolveNpcDisplayId(uint64_t guid) const
 }
 
 void NPCInteractionCallbackHandler::setupCallbacks() {
+    gameHandler_.setTextEmoteSoundCallback([this](uint64_t guid, uint32_t textEmoteId) {
+        const auto* data = audioCoordinator_ ? audioCoordinator_->getSoundData() : nullptr;
+        if (!data) return;
+        auto entity = gameHandler_.getEntityManager().getEntity(guid);
+        if (!entity || !entity->isUnit()) return;
+        auto unit = std::static_pointer_cast<game::Unit>(entity);
+        // UNIT_FIELD_BYTES_0: race, class, gender, power type.
+        const uint32_t bytes0 = unit->getField(game::fieldIndex(game::UF::UNIT_FIELD_BYTES_0));
+        const uint32_t race = bytes0 & 0xFF;
+        const uint32_t sex = (bytes0 >> 16) & 0xFF;
+        const audio::SoundEntry* entry = data->emoteSound(textEmoteId, race, sex == 1 ? 1u : 0u);
+        if (!entry || entry->files.empty()) return;
+        static std::mt19937 rng{std::random_device{}()};
+        const auto& file = entry->files[std::uniform_int_distribution<size_t>(0, entry->files.size() - 1)(rng)];
+        const glm::vec3 pos = core::coords::canonicalToRender(
+            glm::vec3(unit->getX(), unit->getY(), unit->getZ()));
+        audio::AudioEngine::instance().playSound3D(file, pos, entry->volume, 1.0f, 60.0f);
+    });
+
     // NPC greeting callback - play voice line
     gameHandler_.setNpcGreetingCallback([this](uint64_t guid, const glm::vec3& position) {
         // Play NPC_WELCOME animation on the NPC
