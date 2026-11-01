@@ -22,6 +22,7 @@
 #include <deque>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <string_view>
 #include <vector>
 
@@ -199,7 +200,7 @@ struct Widget {
     float modelFacing = 0.0f;
     /// A label whose size came from measuring its own text, and the text that
     /// was measured. Without the second, a label sized once keeps that size
-    /// forever - the character sheet's level line stayed the width of the
+    /// enhanced - the character sheet's level line stayed the width of the
     /// placeholder its XML shipped with, long after it read something else.
     bool autoSized = false;
     std::string measuredText;
@@ -1118,7 +1119,12 @@ private:
 
     /// Whether a state texture should be drawn given what the mouse is doing.
     [[nodiscard]] bool buttonArtVisible(const Widget& w) const;
-    std::deque<Widget> widgets_;   ///< Index 0 is a placeholder; id == index.
+    std::deque<Widget> widgets_;
+    /// Name to id, the last creation winning as the global it is published
+    /// under does. findByName was a reverse scan of all 28k widgets, and
+    /// the portrait, paperdoll and pet panels asked for frames that do not
+    /// exist yet every frame.
+    std::unordered_map<std::string, uint32_t> idsByName_;   ///< Index 0 is a placeholder; id == index.
     /// The screen itself, above UIParent. Everything FrameXML draws hangs off
     /// UIParent, but not quite everything: a frame declared at XML top level
     /// with no parent of its own is parentless in WoW, and that is load

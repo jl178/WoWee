@@ -53,11 +53,61 @@ Activity SFX voice profile (tables): race 1 male jump=1 land=1 attack=3 wound=3 
 at the keyboard. The game handler update now reports its sections to the
 frame profiler, and `renderer->update` is in the table.
 
-### Ground clutter streamed by distance
+### Ground clutter streamed by distance (19:30)
 
 Clutter placements stay with the tile; instances exist only for tiles within
-the clutter distance (plus 20 yards, released 80 yards further out). Target:
-125k instances down to the real doodads plus a few tiles of clutter.
+the clutter distance (plus 20 yards, released 80 yards further out). 125k
+instances became 70k; 17.8 fps became 21.7.
+
+### Transport manager rebuilt the WMO spatial grid every frame (19:38)
+
+The game handler sections showed `gameHandler/world/transport` at 15.9 ms a
+frame. `WMORenderer::setInstanceTransform` ended with `rebuildSpatialIndex()`,
+every WMO instance on the map, and the zone's elevators and boats call it
+every frame. It now refiles the one instance. 21.7 fps became 24.7.
+
+### Mailbox presentation, wider M2 visibility walk, FrameXML layout (19:45)
+
+Vsync on now asks for mailbox with FIFO fallback and three swapchain images.
+The M2 visibility walk uses every frame worker, not four. The FrameXML layout
+skips subtrees already marked hidden (anchor walk 1.8 ms to 0.5 ms) and looks
+up a font face only for strings it will measure (sizing 3.15 ms to 2.5 ms).
+Result 26.4 to 27 fps, 37 ms a frame:
+
+| Stage | ms/frame |
+|---|---|
+| beginFrame (waiting for the GPU) | 12.6 |
+| renderWorld | 7.7 |
+| addonWidgets | 7.5 |
+| renderer->update | 5.5 |
+| gameHandler->update | 0.3 |
+
+The GPU sits at 46% utilisation and 960 MHz of a 3105 MHz ceiling while the
+frame waits on it. Its own breakdown is 9.6 ms a frame, 7.7 of it in the
+post-process pass (which absorbs the scene pass on this driver).
+
+### Movement (19:35)
+
+Movement keys latch on leaving the ground and release on landing. Mount jump
+uses the character's velocity. Locomotion gains Fall and JumpLandRun. Tests in
+`test_locomotion_fsm` cover both. Not yet seen in-world: no input device in
+the unattended runs.
+
+### Footsteps from the ground's TerrainType (19:40)
+
+`TerrainManager::getTerrainSoundTypeAt` follows the dominant layer's
+`GroundEffectTexture.Sound` to `TerrainType.SoundID`; the footstep driver maps
+that the way FootstepTerrainLookup does for a character, with texture-name
+guessing kept as the fallback.
+
+### Room music and ambience from WMOAreaTable (19:55)
+
+The WMO loader keeps the MOHD wmoID, placements keep their MODF nameSet, and
+the renderer reports which group the camera is in. `SoundData::wmoArea` picks
+the group row, then the building's -1 row. A room's ZoneMusic overrides the
+area's set; its AmbienceID replaces the area loop; ambience no longer stops
+indoors. The hand-written tavern list applies only when the tables have no
+row for the building.
 
 ## Next
 
