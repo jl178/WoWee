@@ -298,3 +298,51 @@ Changes: off-screen particle throttle, ribbons walk the emitter list, no spatial
 
 The glue-scene particle draw caused a GPU device loss on the Night Elf create scene. It is gated behind WOWEE_GLUE_PARTICLES=1 until fixed.
 Measured after (Northshire, test account, same machine): **37.0 fps, 27 ms** (was 26.9 fps, 37 ms). Remaining top costs: renderWorld 7.9 ms, widgets 4.9 ms (layout 3.6), update 4.8 ms (m2 join 3.2, particles 2.8 ms for 112k live particles), shadows 2.4 ms. Next: particle counts (112k live is far above what is on screen).
+
+## Afternoon, 2026-11-01: reverse-engineered behaviour from Wow.exe 12340
+
+Several fixes now come straight from the stock binary (Ghidra projects are in the session scratchpad):
+
+- **Strafe:** CGUnit_C 0x73DAB0. The legs turn 45 or 90 degrees through a critically damped spring (omega 20); SpineLow and Head twist back toward the facing, 45 degrees each. The camera yaw is wrapped first, because it accumulates without bound.
+- **Shuffles:** 0x73E2C0. ShuffleLeft/ShuffleRight while standing and turning.
+- **Camera:** CGCamera, 0x606F90 and friends.
+  - Vertical FOV is 54 degrees (pi/2 x 0.6).
+  - Zoom defaults to 15 yd, times a factor of 1 to 2, capped at 50.
+  - Zoom moves at 8.33 yd/s, 1 yd per wheel notch.
+  - Follow style defaults to "Smarter" (4).
+  - Collision snaps the camera in, then eases back over 2 s.
+- **Selection circle:** Textures\UnitSelectTexture.blp, projected onto the ground. Radius is the square root of half the GeoBox diagonal times scale, capped at 10. Colours follow the UnitSelectionColor rules.
+- **Glue scenes:** per-race RaceLights and fog from GlueParent.lua.
+
+Other fixes:
+
+- **Rendering:**
+  - Characters, M2 and WMO were all lit from behind. The models wind counter-clockwise, so the front face is now set accordingly.
+  - Stock texture tiling, the Northrend alpha RLE fix, MCCV, and MCSH baked shadows.
+  - Creatures without the hover or fly flags settle onto the floor.
+  - Particles go dormant off screen, with closed-form warm-up when they return.
+- **Stability:** the startup crash came from the glue scene being destroyed mid-frame. It is now retired a frame later; verified with validation layers, zero errors.
+- **UI:**
+  - Talent window: server talent group count, ordered learn requests, no spec-change event storm.
+  - Minimap: stock blips.
+  - Combat text and combo points.
+  - Spell book filtering.
+  - Login Options glue frame.
+  - Level ?? only for attackable units 10 or more levels above you.
+- **Animation:**
+  - Melee abilities play their kit animations.
+  - Ready stances, parry, dodge and block.
+  - Sheathe reach timed by the model's $SHL/$SHR events.
+  - Cross-fades; idle variations weighted by frequency; death lock; morphs; stealth and ghost translucency.
+- **Audio:**
+  - Combat sounds from WeaponSwingSounds2 and WeaponImpactSounds.
+  - Creature wound and death sounds; footsteps from FootstepTerrainLookup.
+  - SoundEmitters and doodad $DSL loops.
+  - The listener sits at the character.
+- **Measured:** Northshire went from 26.9 fps to 37 fps after the morning's performance passes. Particle dormancy has not been measured yet.
+
+### Next
+
+- The world map rebuilt the stock way, from reverse-engineered C APIs (in progress on an isolated branch).
+- A plan of tasteful enhancements: wind sway, cloth flutter, ambience.
+- The Windows package rebuild.
