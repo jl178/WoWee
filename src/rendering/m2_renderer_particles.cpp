@@ -755,24 +755,30 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
     // spell kits, missiles, a campfire - claim it first. The budget was full
     // of distant portals and lava every frame, and spell effects, created
     // last and so at the end of the list, got no vertices at all.
+    //
+    // One walk sorts the drawable emitters into near and far, so each
+    // instance's cache lines are pulled in once rather than once per pass.
     constexpr float kNearFirstSq = 80.0f * 80.0f;
-    for (int pass = 0; pass < 2; ++pass)
+    particleDrawOrder_.clear();
+    size_t nearCount = 0;
     for (size_t idx : particleInstanceIndices_) {
         if (idx >= instances.size()) continue;
-        auto& inst = instances[idx];
-        if (inst.particles.empty()) continue;
+        const auto& inst = instances[idx];
+        if (inst.particles.empty() || !inst.cachedModel) continue;
         // Out of range: the update pass stopped stepping these, so what is
         // left in the vector is stale and would be drawn frozen.
-        {
-            const glm::vec3 toCam = inst.position - cachedCamPos_;
-            const float d2 = glm::dot(toCam, toCam);
-            if (d2 > cachedMaxRenderDistSq_) continue;
-            if ((pass == 0) != (d2 <= kNearFirstSq)) continue;
-        }
+        const glm::vec3 toCam = inst.position - cachedCamPos_;
+        const float d2 = glm::dot(toCam, toCam);
+        const bool fullRange = inst.cachedModel->isSpellEffect || inst.emissionStopped;
+        if (d2 > (fullRange ? cachedMaxRenderDistSq_ : particleRangeSq(inst, *inst.cachedModel))) continue;
         // Off screen: no vertices for what cannot be seen.
         if (inst.cachedPaddedRadius > 0.0f &&
             !cachedFrustum_.intersectsSphere(inst.cachedCullCenter, inst.cachedPaddedRadius + 30.0f)) continue;
-        if (!inst.cachedModel) continue;
+        particleDrawOrder_.push_back(idx);
+        if (d2 <= kNearFirstSq) std::swap(particleDrawOrder_[nearCount++], particleDrawOrder_.back());
+    }
+    for (size_t idx : particleDrawOrder_) {
+        auto& inst = instances[idx];
         const auto& gpu = *inst.cachedModel;
 
 

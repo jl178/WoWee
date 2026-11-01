@@ -228,6 +228,10 @@ struct M2ModelGPU {
 
     // Particle emitter data (kept from M2Model)
     std::vector<pipeline::M2ParticleEmitter> particleEmitters;
+    /// How far, in model units, a particle can get from its emitter: travel
+    /// over its lifespan plus its size. Sets how far the particles are worth
+    /// stepping (m2ParticleMaxDistSq) for vents whose smoke dwarfs the model.
+    float particleReach = 0.0f;
     std::vector<VkTexture*> particleTextures;    // Resolved Vulkan textures per emitter
     std::vector<VkDescriptorSet> particleTexSets; // Pre-allocated descriptor sets per emitter (stable, avoids per-frame alloc)
     /// Each emitter's colour, alpha and scale lifetime curves (FBlocks)
@@ -1357,6 +1361,10 @@ private:
     }
     std::vector<size_t> particleOnlyInstanceIndices_; // !hasAnimation && hasParticleEmitters
     std::vector<size_t> particleInstanceIndices_;    // ALL instances with particle emitters
+    /// How far this instance's particles are stepped and drawn, squared: the
+    /// scene's range, cut down to what is big enough on screen to see.
+    float particleRangeSq(const M2Instance& inst, const M2ModelGPU& model) const;
+    std::vector<size_t> particleDrawOrder_;          // this frame's drawable emitters, near ones first
 
     // Smoke particle system
     std::vector<SmokeParticle> smokeParticles;
