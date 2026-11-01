@@ -120,11 +120,13 @@ uint32_t M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
     };
     std::vector<Candidate> candidates;
 
-    for (const auto& instance : instances) {
+    // Only the instances whose model gives light, kept in a list of their
+    // own; this walked every instance in the world each frame.
+    for (size_t li : lightInstanceIndices_) {
+        if (li >= instances.size()) continue;
+        const auto& instance = instances[li];
         const M2ModelGPU* model = instance.cachedModel;
-        if (!model || (!model->isLanternLike && !model->isTorch &&
-                       !model->isBrazierOrFire && !model->isForge &&
-                       !model->isLavaModel)) continue;
+        if (!model || !modelGivesLight(*model)) continue;
 
         if (model->isLavaModel) {
             const glm::vec3 worldPos = instance.cachedCullCenter;

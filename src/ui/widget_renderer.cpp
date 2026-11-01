@@ -602,8 +602,9 @@ void WidgetRenderer::sizeArtAndText(WidgetTree& tree) {
     ImFont* font = interfaceFace("frizqt__");
     if (!font) font = ImGui::GetFont();
 
-    for (size_t id = 1; id < tree.size(); ++id) {
-        Widget* w = tree.get(static_cast<uint32_t>(id));
+    // The strings and textures only; this walked all 28k widgets to find them.
+    for (uint32_t id : tree.artAndTextWidgets()) {
+        Widget* w = tree.get(id);
         if (!w) continue;
         if (font && w->kind == WidgetKind::FontString) sizeFontStringWidget(w, font);
         else if (w->kind == WidgetKind::Texture) sizeTextureWidget(w);

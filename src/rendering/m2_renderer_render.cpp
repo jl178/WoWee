@@ -207,6 +207,7 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
         particleOnlyInstanceIndices_.push_back(idx);
     }
     if (mdlRef.isBoat) boatInstanceIndices_.push_back(idx);
+    if (modelGivesLight(mdlRef)) lightInstanceIndices_.push_back(idx);
     instanceIndexById[instance.id] = idx;
     insertBounds(spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
 
@@ -312,6 +313,7 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
         particleOnlyInstanceIndices_.push_back(idx);
     }
     if (mdl2.isBoat) boatInstanceIndices_.push_back(idx);
+    if (modelGivesLight(mdl2)) lightInstanceIndices_.push_back(idx);
     instanceIndexById[instance.id] = idx;
     insertBounds(spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
 

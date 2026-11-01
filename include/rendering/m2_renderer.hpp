@@ -1155,6 +1155,10 @@ private:
     // Fast-path instance index lists (rebuilt in rebuildSpatialIndex / on create)
     std::vector<size_t> animatedInstanceIndices_;   // hasAnimation && !disableAnimation
     std::vector<size_t> boatInstanceIndices_;       // cachedIsBoat: the afloat check
+    std::vector<size_t> lightInstanceIndices_;      // lanterns, torches, braziers, forges, lava: gatherLocalLights
+    static bool modelGivesLight(const M2ModelGPU& m) {
+        return m.isLanternLike || m.isTorch || m.isBrazierOrFire || m.isForge || m.isLavaModel;
+    }
     double sceneTimeMs_ = 0.0;                      // sum of update() deltas
     /// Bring an instance's animation clocks up to the scene time.
     void advanceClock(M2Instance& inst) const {

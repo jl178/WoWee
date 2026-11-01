@@ -291,6 +291,7 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
     particleOnlyInstanceIndices_.clear();
     particleInstanceIndices_.clear();
     boatInstanceIndices_.clear();
+    lightInstanceIndices_.clear();
     for (size_t i = 0; i < instances.size(); i++) {
         auto& ri = instances[i];
         if (ri.cachedIsSmoke) smokeInstanceIndices_.push_back(i);
@@ -301,6 +302,7 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
         else if (ri.cachedHasParticleEmitters)
             particleOnlyInstanceIndices_.push_back(i);
         if (ri.cachedIsBoat) boatInstanceIndices_.push_back(i);
+        if (ri.cachedModel && modelGivesLight(*ri.cachedModel)) lightInstanceIndices_.push_back(i);
     }
 }
 
@@ -445,6 +447,7 @@ void M2Renderer::clear() {
     particleOnlyInstanceIndices_.clear();
     particleInstanceIndices_.clear();
     boatInstanceIndices_.clear();
+    lightInstanceIndices_.clear();
     smokeEmitAccum = 0.0f;
 
     // Clear texture cache so stale textures don't block loads for the next
@@ -478,6 +481,7 @@ void M2Renderer::clearInstances() {
     particleOnlyInstanceIndices_.clear();
     particleInstanceIndices_.clear();
     boatInstanceIndices_.clear();
+    lightInstanceIndices_.clear();
     smokeParticles.clear();
     smokeEmitAccum = 0.0f;
 }
@@ -503,6 +507,7 @@ void M2Renderer::rebuildSpatialIndex() {
     particleOnlyInstanceIndices_.clear();
     particleInstanceIndices_.clear();
     boatInstanceIndices_.clear();
+    lightInstanceIndices_.clear();
 
     for (size_t i = 0; i < instances.size(); i++) {
         auto& inst = instances[i];
@@ -536,6 +541,7 @@ void M2Renderer::rebuildSpatialIndex() {
             particleOnlyInstanceIndices_.push_back(i);
         }
         if (inst.cachedIsBoat) boatInstanceIndices_.push_back(i);
+        if (inst.cachedModel && modelGivesLight(*inst.cachedModel)) lightInstanceIndices_.push_back(i);
 
         insertBounds(spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, inst.id);
     }
