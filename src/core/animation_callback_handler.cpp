@@ -201,31 +201,56 @@ void AnimationCallbackHandler::setupCallbacks() {
         return instanceId;
     });
 
-    // NPC/player death callback (online mode) - play death animation
+    // Death and coming back, for every unit: creatures, other players and the
+    // local character (health reaching 0, UNIT_DYNFLAG_DEAD, a corpse object).
+    // Death plays once and holds; the renderer then refuses every other
+    // animation for that instance until the respawn callback lifts the lock,
+    // so no idle, Ready stance, swing, flinch or emote clear can stand a
+    // corpse back up. A unit whose render instance is still queued is marked
+    // dead and spawns already lying down (EntitySpawner's spawn pose).
+    //
+    // world_loader registered its own pair on every world load, after this
+    // one, and so replaced it; it no longer does.
     gameHandler_.setNpcDeathCallback([this](uint64_t guid) {
-        entitySpawner_.markCreatureDead(guid);
-        if (!renderer_.getCharacterRenderer()) return;
-        uint32_t instanceId = entitySpawner_.getCreatureInstanceId(guid);
-        if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(guid);
-        if (instanceId != 0) {
-            renderer_.getCharacterRenderer()->playAnimation(instanceId, rendering::anim::DEATH, false);
+        const bool isLocal = guid == gameHandler_.getPlayerGuid();
+        if (!isLocal) entitySpawner_.markCreatureDead(guid);
+        auto* cr = renderer_.getCharacterRenderer();
+        if (!cr) return;
+        uint32_t instanceId = 0;
+        if (isLocal) {
+            instanceId = renderer_.getCharacterInstanceId();
+        } else {
+            instanceId = entitySpawner_.getCreatureInstanceId(guid);
+            if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(guid);
         }
+        if (instanceId != 0) cr->playDeath(instanceId, /*alreadyDead=*/false);
     });
 
-    // NPC/player respawn callback (online mode) - play rise animation then idle
     gameHandler_.setNpcRespawnCallback([this](uint64_t guid) {
-        entitySpawner_.unmarkCreatureDead(guid);
-        if (!renderer_.getCharacterRenderer()) return;
+        const bool isLocal = guid == gameHandler_.getPlayerGuid();
+        if (!isLocal) entitySpawner_.unmarkCreatureDead(guid);
+        auto* cr = renderer_.getCharacterRenderer();
+        if (!cr) return;
+        if (isLocal) {
+            // Resurrected, or released as a ghost (health 0 -> 1). Stand; the
+            // animation controller takes over from there.
+            const uint32_t charInstId = renderer_.getCharacterInstanceId();
+            if (charInstId == 0) return;
+            cr->clearDeath(charInstId);
+            cr->playAnimation(charInstId, rendering::anim::STAND, true);
+            return;
+        }
         uint32_t instanceId = entitySpawner_.getCreatureInstanceId(guid);
         if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(guid);
-        if (instanceId != 0) {
-            auto* cr = renderer_.getCharacterRenderer();
-            // Play RISE one-shot (auto-returns to STAND when finished), fall back to STAND
-            if (cr->hasAnimation(instanceId, rendering::anim::RISE))
-                cr->playAnimation(instanceId, rendering::anim::RISE, false);
-            else
-                cr->playAnimation(instanceId, rendering::anim::STAND, true);
-        }
+        if (instanceId == 0) return;
+        const bool wasDown = cr->isDeathLocked(instanceId);
+        cr->clearDeath(instanceId);
+        // Getting up off the ground plays Rise (a one-shot that returns to
+        // Stand); a unit that was not lying there just stands.
+        if (wasDown && cr->hasAnimation(instanceId, rendering::anim::RISE))
+            cr->playAnimation(instanceId, rendering::anim::RISE, false);
+        else
+            cr->playAnimation(instanceId, rendering::anim::STAND, true);
     });
 
     // Swing callback for every unit but the local player, whoever it is
@@ -808,8 +833,16 @@ void AnimationCallbackHandler::setupCallbacks() {
             if (!cr) return;
             uint32_t charInstId = renderer_.getCharacterInstanceId();
             if (charInstId == 0) return;
-            cr->playAnimation(charInstId, rendering::anim::DEATH, false);
+            cr->playDeath(charInstId, /*alreadyDead=*/false);
             return;
+        }
+        // Up from a stand-state death while alive (a scripted one): lift the
+        // lock. A real death is lifted by the respawn callback instead.
+        if (!gameHandler_.isPlayerDead() || gameHandler_.isPlayerGhost()) {
+            if (auto* cr = renderer_.getCharacterRenderer()) {
+                const uint32_t charInstId = renderer_.getCharacterInstanceId();
+                if (charInstId != 0) cr->clearDeath(charInstId);
+            }
         }
 
         ac->setStandState(standState);

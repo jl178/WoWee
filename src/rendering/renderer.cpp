@@ -2137,14 +2137,32 @@ void Renderer::update(float deltaTime) {
 
         // Movement-facing comes from camera controller and is decoupled from LMB orbit.
         bool taxiFlight = animationController_ && animationController_->isTaxiFlight();
-        bool activeStrafe = (cameraController->isStrafingLeft() || cameraController->isStrafingRight())
-                             && !cameraController->isMovingBackward();
-        float torsoYawDeltaDeg = 0.0f;
+        // Stock 3.3.5a has no strafe animations for characters: strafing plays
+        // the run (or walk) with the WHOLE model yawed toward the direction of
+        // travel - 45 degrees on a forward diagonal, 90 on a pure strafe - and a
+        // backpedal on a diagonal yaws the other way so the back leads. The
+        // facing that is sent to the server and used for melee arcs stays the
+        // logical facing; only the drawn model turns. This used to point the
+        // model (and the server facing) along travel and counter-twist the
+        // spine bone back to the camera, which bent the body at the waist.
+        float strafeTargetDeg = 0.0f;
+        const bool sideways = cameraController->isStrafingLeft() != cameraController->isStrafingRight();
+        if (!taxiFlight && sideways && cameraController->isMoving() &&
+            !cameraController->isSwimming() && !cameraController->isFlyingActive()) {
+            float travel = cameraController->getTravelYaw();
+            if (cameraController->isMovingBackward()) travel += 180.0f;
+            strafeTargetDeg = travel - cameraController->getFacingYaw();
+            while (strafeTargetDeg > 180.0f) strafeTargetDeg -= 360.0f;
+            while (strafeTargetDeg < -180.0f) strafeTargetDeg += 360.0f;
+        }
+        {
+            // Ease over ~0.15 s (time constant 0.05 s: 95% after three).
+            const float k = 1.0f - std::exp(-std::max(deltaTime, 0.0f) / 0.05f);
+            strafeYawOffsetDeg_ += (strafeTargetDeg - strafeYawOffsetDeg_) * k;
+            if (std::abs(strafeYawOffsetDeg_) < 0.01f && strafeTargetDeg == 0.0f) strafeYawOffsetDeg_ = 0.0f;
+        }
         if (taxiFlight) {
             characterYaw = cameraController->getFacingYaw();
-        } else if (cameraController->isMoving() && activeStrafe) {
-            characterYaw = cameraController->getTravelYaw();
-            torsoYawDeltaDeg = cameraController->getFacingYaw() - characterYaw;
         } else if (cameraController->isMoving() || cameraController->isRightMouseHeld() ||
                    cameraController->isTurningLeft() || cameraController->isTurningRight()) {
             characterYaw = cameraController->getFacingYaw();
@@ -2173,12 +2191,9 @@ void Renderer::update(float deltaTime) {
                 }
             }
         }
-        float yawRad = glm::radians(characterYaw);
+        float yawRad = glm::radians(getCharacterVisualYaw());
         characterRenderer->setInstanceRotation(characterInstanceId, glm::vec3(0.0f, 0.0f, yawRad));
-
-        while (torsoYawDeltaDeg > 180.0f) torsoYawDeltaDeg -= 360.0f;
-        while (torsoYawDeltaDeg < -180.0f) torsoYawDeltaDeg += 360.0f;
-        characterRenderer->setInstanceTorsoYaw(characterInstanceId, glm::radians(torsoYawDeltaDeg));
+        characterRenderer->setInstanceTorsoYaw(characterInstanceId, 0.0f);
 
         // Update animation based on movement state (delegated to AnimationController §4.2)
         if (animationController_) {

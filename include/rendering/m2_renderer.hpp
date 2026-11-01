@@ -245,6 +245,11 @@ struct M2Particle {
     float maxLife;     // total lifespan
     int emitterIndex;  // which emitter spawned this
     float tileIndex = 0.0f; // texture atlas tile index
+    // Emitter flag 0x10 ("do not trail"): simulated in the emitter bone's
+    // frame and placed through the bone each step, so it turns with it.
+    bool followsEmitter = false;
+    glm::vec3 localPos{0.0f};
+    glm::vec3 localVel{0.0f};
 };
 
 /**
@@ -327,6 +332,12 @@ struct M2Instance {
     // Particle emitter state
     std::vector<float> emitterAccumulators;  // fractional particle counter per emitter
     std::vector<M2Particle> particles;
+    /// Seconds of particle time skipped while off screen, paid on the next
+    /// step; see the particle loop in M2Renderer::update.
+    float particleDtDebt = 0.0f;
+    /// The shadow candidate generation in which this instance moved; see
+    /// M2Renderer::shadowMovers_.
+    uint32_t shadowMoverStamp = 0;
     /// No new particles or ribbon edges; the live ones run out their lives.
     /// A spell effect at the end of its life is kept this way until they do.
     bool emissionStopped = false;
@@ -415,6 +426,18 @@ struct M2Instance {
 
     void updateModelMatrix();
 };
+
+/// Whether an instance is filed in M2Renderer's spatial grid, which only the
+/// collision queries (floor, walls, camera rays) read. Ground clutter is not:
+/// it is collisionNoBlock and the stock client never collides with ground
+/// effects, and since clutter went per chunk a 64-yard cell held hundreds of
+/// tufts, every one a hash lookup and a cache miss in every query. A model
+/// under a detail path that ships its own collision mesh stays filed: the
+/// floor query honours authored collision whatever the classifier says.
+inline bool m2GridHolds(const M2Instance& inst) {
+    return !inst.cachedIsGroundDetail ||
+           (inst.cachedModel != nullptr && inst.cachedModel->collision.valid());
+}
 
 /**
  * A single smoke particle emitted from a chimney or similar M2 model
@@ -1140,11 +1163,33 @@ private:
     float shadowCandRadius_ = -1.0f;
     uint32_t shadowCandLayoutGen_ = ~0u;
     std::chrono::steady_clock::time_point shadowCandBuiltAt_{};
-    /// Bumped by whatever can put a possible caster where the candidate list
-    /// does not expect it: an instance removed (indices move), a non-clutter
-    /// instance created, or one moved a long way in one step. Clutter never
-    /// casts, so streaming it does not invalidate the list.
+    /// Bumped by whatever reorders `instances` wholesale (rebuildSpatialIndex),
+    /// which the candidate list cannot follow. Single removals patch the list
+    /// in place, creations append to it (noteShadowCandidate) and moves are
+    /// tracked in shadowMovers_, so none of those rebuild it any more - they
+    /// were most of the ~8 rebuilds a second, each a walk of 85k instances.
     uint32_t casterLayoutGen_ = 0;
+    /// Which list build is current; an instance whose shadowMoverStamp
+    /// matches has moved since and is asked through shadowMovers_ instead.
+    uint32_t shadowCandStamp_ = 1;
+    /// Ids of instances moved since the list was built. A mover is tested
+    /// every frame wherever it now is, so no margin has to cover its travel.
+    std::vector<uint32_t> shadowMovers_;
+    /// shadowMovers_ resolved to (index, id) for this frame; reused storage.
+    std::vector<std::pair<uint32_t, uint32_t>> shadowMoverPairs_;
+    /// The margin the current list was gathered with.
+    float shadowCandMargin_ = 0.0f;
+    /// A new instance at `idx`: put it on the candidate list if it could
+    /// reach the disc the list was built for.
+    void noteShadowCandidate(size_t idx);
+    /// An instance moved: track it as a mover until the next build.
+    void noteShadowMover(M2Instance& inst) {
+        if (inst.shadowMoverStamp == shadowCandStamp_) return;
+        // Missiles and kits move every frame and never cast; see renderShadow.
+        if (inst.cachedModel && inst.cachedModel->isSpellEffect) return;
+        inst.shadowMoverStamp = shadowCandStamp_;
+        shadowMovers_.push_back(inst.id);
+    }
 
     // Ribbon draw-call list (reused each frame)
     struct RibbonDrawCall {
@@ -1213,10 +1258,18 @@ private:
     struct UpdateProfile {
         double preMs = 0.0, animLoopMs = 0.0, bonesMs = 0.0, particlesMs = 0.0;
         uint64_t animatedListed = 0, boneWork = 0, staticPoseSkips = 0, particleListed = 0;
-        uint64_t shadowCandidates = 0, shadowCasters = 0, shadowRebuilds = 0;
+        uint64_t shadowCandidates = 0, shadowCasters = 0, shadowRebuilds = 0, shadowMovers = 0;
+        uint64_t particleFull = 0, particleThrottled = 0, particleLive = 0;
+        double queryMs = 0.0;
+        uint64_t queryCalls = 0;
         uint32_t frames = 0;
         std::chrono::steady_clock::time_point since{};
     } updateProf_;
+    /// Frame counter staggering the off-screen particle steps.
+    uint32_t particleFrame_ = 0;
+    /// Particle vertices the last particle pass wrote; written by the render
+    /// worker, read by the update's profile line.
+    std::atomic<uint32_t> particleVertsDrawn_{0};
     std::vector<std::future<void>> animFutures_; // Reused each frame
     bool spatialIndexDirty_ = false;
 

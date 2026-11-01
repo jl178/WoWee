@@ -83,8 +83,32 @@ public:
     // persistent work/state loop instead of idling.
     void playAnimation(uint32_t instanceId, uint32_t animationId, bool loop = true,
                        uint32_t oneShotReturnAnim = 0);
+    /// The unit is dead. Locks the instance in its death pose: every
+    /// playAnimation but Death/Dead is ignored until clearDeath. A unit that
+    /// dies in view (alreadyDead false) plays Death once and holds its last
+    /// frame - not restarted when it is already in Death. A unit that is
+    /// already dead when it comes into view (alreadyDead true) starts on that
+    /// last frame, lying down. Dead (6) stands in for a model with no Death.
+    void playDeath(uint32_t instanceId, bool alreadyDead);
+    /// Alive again (resurrection, respawn, ghost): lifts the death lock. The
+    /// caller then plays Stand or Rise.
+    void clearDeath(uint32_t instanceId);
+    [[nodiscard]] bool isDeathLocked(uint32_t instanceId) const;
     /// Play other animations on each arm alone, until the next playAnimation.
     void setArmAnimations(uint32_t instanceId, uint32_t leftArmAnim, uint32_t rightArmAnim);
+    /// Play a one-shot on the upper body only - the lower spine and all above
+    /// it - over whatever the legs are playing (a run, a walk, a stand), the
+    /// way the stock client sheathes while moving. Each arm plays its own
+    /// anim; 0 or STAND for an arm leaves it following the body underneath.
+    /// It outlives playAnimation, fades in and out, and ends by itself.
+    /// False when the model has none of the animations.
+    bool playUpperBodyAnimation(uint32_t instanceId, uint32_t torsoAnim,
+                                uint32_t leftArmAnim, uint32_t rightArmAnim);
+    /// The model's weapon hand-off time ($SHL/$SHR) in an animation, in ms;
+    /// UINT32_MAX when the model or the sequence has none.
+    [[nodiscard]] uint32_t getSheathEventTime(uint32_t instanceId, uint32_t animationId) const;
+    /// Length of an animation on this instance's model, in ms (0 if absent).
+    [[nodiscard]] uint32_t getAnimationDurationMs(uint32_t instanceId, uint32_t animationId) const;
 
     void update(float deltaTime, const glm::vec3& cameraPos = glm::vec3(0.0f));
 
@@ -151,6 +175,14 @@ public:
     bool getInstanceKeyBonePivotZ(uint32_t instanceId, int32_t keyBoneId, float& outZ) const;
     bool getInstanceFootZ(uint32_t instanceId, float& outFootZ) const;
     bool getInstancePosition(uint32_t instanceId, glm::vec3& outPos) const;
+
+    /// The pose an instance was last updated to: its bone palette (model
+    /// space), model matrix and animation clocks. For effects that hang off
+    /// the skeleton outside this renderer - a glue scene's particle emitters.
+    /// The bone pointer is valid until the next update() or removeInstance().
+    bool getInstancePose(uint32_t instanceId, const std::vector<glm::mat4>*& outBones,
+                         glm::mat4& outModel, int& outSequenceIndex,
+                         float& outAnimTimeMs, float& outGlobalSeqTimeMs) const;
 
     /** Debug: Log all available animations for an instance */
     void dumpAnimations(uint32_t instanceId) const;
@@ -277,11 +309,19 @@ private:
         int armSequenceIndex[2] = {-1, -1};  // Left, right arm on their own sequences; -1 follows the body
         bool armSequenceLoops[2] = {false, false};  // Idle arm loops; a reaching arm holds its last frame
         std::vector<int8_t> boneArm;  // Per bone: 0 left arm, 1 right arm, -1 neither; built by setArmAnimations
+        // Upper-body overlay (playUpperBodyAnimation): a one-shot on the spine
+        // and everything above it, over whatever the legs play, surviving
+        // playAnimation. Index 0/1 the arms, 2 the torso; -1 = follows the body.
+        int upperSequenceIndex[3] = {-1, -1, -1};
+        float upperTime = -1.0f;      // ms into the overlay; < 0 = none
+        float upperDurationMs = 0.0f;
+        std::vector<int8_t> boneUpper;  // Per bone: 0 left arm, 1 right arm, 2 torso/head, -1 lower body
         float animationTime = 0.0f;
         float globalSequenceTime = 0.0f; // Separate timer for global sequences (accumulates without wrapping at sequence duration)
         bool animationLoop = true;
         uint32_t oneShotReturnAnim = 0; // Anim to resume when a one-shot ends (0 = Stand)
         bool isDead = false;  // Prevents movement while in death state
+        bool deathLocked = false;  // playDeath: nothing but Death/Dead plays until clearDeath
         std::vector<glm::mat4> boneMatrices;  // Current bone transforms
 
         // Sequence cross-fade, as the stock client does on every switch: the

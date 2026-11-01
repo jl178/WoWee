@@ -45,11 +45,8 @@ void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& posit
     const glm::vec3 oldBoundsMin = inst.worldBoundsMin;
     const glm::vec3 oldBoundsMax = inst.worldBoundsMax;
 
-    // A jump the shadow candidate margin may not cover; see renderShadow.
-    {
-        const glm::vec3 step = position - inst.position;
-        if (glm::dot(step, step) > 64.0f) ++casterLayoutGen_;
-    }
+    // Asked by the shadow pass wherever it now is; see renderShadow.
+    if (!inst.cachedIsGroundDetail) noteShadowMover(inst);
     inst.position = position;
     inst.updateModelMatrix();
     // Use cachedModel instead of a fresh models.find() - the pointer was set
@@ -62,8 +59,9 @@ void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& posit
     }
 
     // Incrementally update spatial grid
-    refileBounds(spatialGrid, oldBoundsMin, oldBoundsMax,
-                 inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
+    if (m2GridHolds(inst))
+        refileBounds(spatialGrid, oldBoundsMin, oldBoundsMax,
+                     inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
 }
 
 void M2Renderer::setInstanceFade(uint32_t instanceId, float alpha) {
@@ -248,11 +246,9 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
 
     // Extract position from transform for bounds
     inst.position = glm::vec3(transform[3]);
-    // A jump the shadow candidate margin may not cover; see renderShadow.
-    {
-        const glm::vec3 step = inst.position - oldPosition;
-        if (glm::dot(step, step) > 64.0f) ++casterLayoutGen_;
-    }
+    // Asked by the shadow pass wherever it now is (its radius may have
+    // changed with the matrix too); see renderShadow.
+    if (!inst.cachedIsGroundDetail) noteShadowMover(inst);
 
     // The dedup map is keyed on position, so it has to move with the instance.
     // It did not, and only rebuildSpatialIndex ever put it right - which this
@@ -290,8 +286,9 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
     }
 
     // Incrementally update spatial grid (remove old cells, add new cells)
-    refileBounds(spatialGrid, oldBoundsMin, oldBoundsMax,
-                 inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
+    if (m2GridHolds(inst))
+        refileBounds(spatialGrid, oldBoundsMin, oldBoundsMax,
+                     inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
     // No spatialIndexDirty_ = true - handled incrementally
 }
 
@@ -304,7 +301,8 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
     auto& inst = instances[idx];
 
     // Remove from spatial grid incrementally (same pattern as the move-update path)
-    eraseBounds(spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
+    if (m2GridHolds(inst))
+        eraseBounds(spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
 
     // Remove from dedup map
     if (!inst.cachedIsGroundDetail) {
@@ -319,8 +317,17 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
 
     // Swap-remove: move last element to the hole and pop_back to avoid O(n) shift
     instanceIndexById.erase(instanceId);
-    ++casterLayoutGen_;  // the last instance changes index
     const size_t lastIdx = instances.size() - 1;
+    // The shadow candidate list follows the same swap rather than being
+    // rebuilt from all 85k instances; see renderShadow.
+    shadowCandidates_.erase(
+        std::remove_if(shadowCandidates_.begin(), shadowCandidates_.end(),
+                       [idx](const auto& c) { return c.first == idx; }),
+        shadowCandidates_.end());
+    if (idx < lastIdx) {
+        for (auto& c : shadowCandidates_)
+            if (c.first == lastIdx) c.first = static_cast<uint32_t>(idx);
+    }
     if (idx < lastIdx) {
         uint32_t movedId = instances.back().id;
         instances[idx] = std::move(instances.back());
@@ -382,8 +389,117 @@ void M2Renderer::setInstanceCastsShadow(uint32_t instanceId, bool casts) {
     instances[idxIt->second].castsShadow = casts;
 }
 
+void M2Renderer::noteShadowCandidate(size_t idx) {
+    // No list yet: the first build will see it.
+    if (shadowCandRadius_ < 0.0f || idx >= instances.size()) return;
+    const M2Instance& inst = instances[idx];
+    const glm::vec3 d = inst.position - shadowCandCenter_;
+    const float reach = shadowCandRadius_ + inst.cachedPaddedRadius + shadowCandMargin_;
+    if (glm::dot(d, d) > reach * reach) return;
+    shadowCandidates_.emplace_back(static_cast<uint32_t>(idx), inst.id);
+}
+
 void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
     if (instanceIds.empty() || instances.empty()) {
+        return;
+    }
+
+    // A batch that is a small share of the world is swap-removed one by one,
+    // as removeInstance does, with the index lists patched once at the end.
+    //
+    // The whole-array path below compacts every instance (each one ~700
+    // bytes, moved) and then rebuilds the spatial grid, the id map, the dedup
+    // map and every index list from all 85k of them. The settled clutter
+    // streamer retires a batch of a few hundred tufts this way every so often,
+    // and that was the 38 ms worst case of update/pre/terrain/clutter.
+    if (instanceIds.size() * 4 < instances.size()) {
+        std::vector<size_t> doomed;
+        doomed.reserve(instanceIds.size());
+        for (uint32_t id : instanceIds) {
+            const auto it = instanceIndexById.find(id);
+            if (it != instanceIndexById.end() && it->second < instances.size())
+                doomed.push_back(it->second);
+        }
+        if (doomed.empty()) return;
+        // Highest first: every slot above the one being removed has already
+        // been settled, so the tail element moved into the hole is never one
+        // that is itself due to go.
+        std::sort(doomed.begin(), doomed.end(), std::greater<size_t>());
+        doomed.erase(std::unique(doomed.begin(), doomed.end()), doomed.end());
+
+        // Where each moved element came from and where it is now, by its
+        // original index, so the index lists are remapped in one pass.
+        std::unordered_map<size_t, size_t> movedTo;    // original -> current
+        std::unordered_map<size_t, size_t> origAt;     // current -> original
+        movedTo.reserve(doomed.size());
+        origAt.reserve(doomed.size());
+        for (size_t idx : doomed) {
+            auto& inst = instances[idx];
+            if (m2GridHolds(inst))
+                eraseBounds(spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, inst.id);
+            if (!inst.cachedIsGroundDetail) {
+                DedupKey dk{.modelId = inst.modelId,
+                            .qx = static_cast<int32_t>(std::round(inst.position.x * 10.0f)),
+                            .qy = static_cast<int32_t>(std::round(inst.position.y * 10.0f)),
+                            .qz = static_cast<int32_t>(std::round(inst.position.z * 10.0f))};
+                const auto dit = instanceDedupMap_.find(dk);
+                if (dit != instanceDedupMap_.end() && dit->second == inst.id)
+                    instanceDedupMap_.erase(dit);
+            }
+            destroyInstanceBones(inst, /*defer=*/true);
+            instanceIndexById.erase(inst.id);
+
+            const size_t lastIdx = instances.size() - 1;
+            if (idx < lastIdx) {
+                const auto oit = origAt.find(lastIdx);
+                const size_t orig = (oit != origAt.end()) ? oit->second : lastIdx;
+                if (oit != origAt.end()) origAt.erase(oit);
+                movedTo[orig] = idx;
+                origAt[idx] = orig;
+                const uint32_t movedId = instances.back().id;
+                instances[idx] = std::move(instances.back());
+                instances.pop_back();
+                instanceIndexById[movedId] = idx;
+            } else {
+                instances.pop_back();
+            }
+        }
+
+        // doomed holds original indices (a removed slot never held a moved
+        // element: those only land in slots already settled above it).
+        std::sort(doomed.begin(), doomed.end());
+        const auto removed = [&doomed](size_t i) {
+            return std::binary_search(doomed.begin(), doomed.end(), i);
+        };
+        const auto remap = [&](std::vector<size_t>& list) {
+            size_t w = 0;
+            for (size_t r = 0; r < list.size(); ++r) {
+                size_t i = list[r];
+                if (removed(i)) continue;
+                const auto mit = movedTo.find(i);
+                if (mit != movedTo.end()) i = mit->second;
+                list[w++] = i;
+            }
+            list.resize(w);
+        };
+        remap(smokeInstanceIndices_);
+        remap(portalInstanceIndices_);
+        remap(animatedInstanceIndices_);
+        remap(particleOnlyInstanceIndices_);
+        remap(particleInstanceIndices_);
+        remap(boatInstanceIndices_);
+        remap(lightInstanceIndices_);
+        {
+            size_t w = 0;
+            for (size_t r = 0; r < shadowCandidates_.size(); ++r) {
+                auto c = shadowCandidates_[r];
+                if (removed(c.first)) continue;
+                const auto mit = movedTo.find(c.first);
+                if (mit != movedTo.end()) c.first = static_cast<uint32_t>(mit->second);
+                shadowCandidates_[w++] = c;
+            }
+            shadowCandidates_.resize(w);
+        }
         return;
     }
 
@@ -500,6 +616,9 @@ void M2Renderer::clear() {
     particleInstanceIndices_.clear();
     boatInstanceIndices_.clear();
     lightInstanceIndices_.clear();
+    shadowCandidates_.clear();
+    shadowMovers_.clear();
+    shadowCandRadius_ = -1.0f;  // rebuilt on the next shadow pass
     smokeEmitAccum = 0.0f;
 
     // Clear texture cache so stale textures don't block loads for the next
@@ -521,6 +640,9 @@ void M2Renderer::clearInstances() {
     if (vkCtx_) vkDeviceWaitIdle(vkCtx_->getDevice());
     for (auto& inst : instances) destroyInstanceBones(inst);
     instances.clear();
+    shadowCandidates_.clear();
+    shadowMovers_.clear();
+    shadowCandRadius_ = -1.0f;  // rebuilt on the next shadow pass
     spatialGrid.clear();
     instanceIndexById.clear();
     boneSeedInstanceByModel_.clear();
@@ -598,7 +720,8 @@ void M2Renderer::rebuildSpatialIndex() {
         if (inst.cachedIsBoat) boatInstanceIndices_.push_back(i);
         if (inst.cachedModel && modelGivesLight(*inst.cachedModel)) lightInstanceIndices_.push_back(i);
 
-        insertBounds(spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, inst.id);
+        if (m2GridHolds(inst))
+            insertBounds(spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, inst.id);
     }
     spatialIndexDirty_ = false;
 }
@@ -1079,7 +1202,10 @@ std::optional<float> M2Renderer::getFloorHeight(float glX, float glY, float glZ,
         if (instance.skipCollision) continue;
 
         // --- Mesh-based floor: vertical ray vs collision triangles ---
-        // A successful authored-mesh hit wins; AABB remains the fallback on a miss.
+        // A model with authored collision is stood on only where the ray under
+        // the feet meets one of its triangles. The bounding-box top is used
+        // solely for models that ship no collision at all (the invented
+        // blockers further down, which it pairs with).
         if (model.collision.valid()) {
             // Cast world-down through the instance transform. Using local -Z
             // only works for yaw-only placements; pitched flat models (notably
@@ -1156,7 +1282,11 @@ std::optional<float> M2Renderer::getFloorHeight(float glX, float glY, float glZ,
                 // projection is not a world-vertical intersection.
                 continue;
             }
-            // Fall through to AABB floor - both contribute, highest wins
+            // A miss is a miss. This used to fall through to the bounding-box
+            // top, so beside a fence - whose box, placed on a diagonal, spans
+            // yards either side of a 0.27-yard rail - the player stood on air
+            // at the rail's height wherever the ray missed the rail itself.
+            continue;
         }
 
         float zMargin = model.collisionBridge ? 25.0f : 2.0f;

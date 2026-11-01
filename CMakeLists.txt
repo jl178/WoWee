@@ -670,6 +670,7 @@ set(WOWEE_SOURCES
     src/game/movement_handler.cpp
     src/game/combat_handler.cpp
     src/game/spell_handler.cpp
+    src/game/global_strings.cpp
     src/game/spell_description_eval.cpp
     src/game/inventory_handler.cpp
     src/game/social_handler.cpp
@@ -929,6 +930,7 @@ set(WOWEE_SOURCES
     src/rendering/sky_system.cpp
     src/rendering/character_renderer.cpp
     src/rendering/character_preview.cpp
+    src/rendering/glue_scene_particles.cpp
     src/rendering/wmo_renderer.cpp
     src/rendering/imgui_texture.cpp
     src/rendering/bone_slots.cpp

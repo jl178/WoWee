@@ -30,6 +30,8 @@ glm::mat4 weaponLocalTransform(bool sheathed, game::EquipSlot slot, uint8_t inve
 /// The inventory type to put an item away as, from its Item.dbc SheatheType
 /// (UINT32_MAX when there is no row: the item's own inventory type).
 uint8_t sheathPlacementInvType(uint32_t sheatheType, uint8_t inventoryType);
+/// Where a put-away item sits, as the sheath reach needs it (hip or back).
+rendering::SheathSpot sheathSpotFor(game::EquipSlot slot, uint8_t placementInvType);
 
 /// Resolved texture paths from CharSections.dbc for player character compositing.
 struct PlayerTextureInfo {
@@ -83,9 +85,26 @@ public:
     // Weapon sheathe state
     /// Also sends CMSG_SET_SHEATHED when the state changes, so other clients
     /// see the character draw and put away its weapons.
+    /// Immediate, with no reach (consumables, swimming, transports); it also
+    /// cancels a reach in progress and anything queued behind it.
     void setWeaponsSheathed(bool sheathed);
     [[nodiscard]] bool isWeaponsSheathed() const { return weaponsSheathed_; }
-    void toggleWeaponsSheathed() { setWeaponsSheathed(!weaponsSheathed_); }
+    /// Draw or put away the way Z does in the stock client: the Sheath /
+    /// HipSheath reach on the upper body, the weapons changing hands at the
+    /// model's $SHL/$SHR hand-off with the item's sheathe or draw sound.
+    /// A request during a reach waits for it to finish; only the last one
+    /// counts, so spamming the key never flips the weapons twice in a reach.
+    void requestWeaponsSheathed(bool sheathed);
+    /// Z: toggles the state the weapons are heading for.
+    void toggleWeaponsSheathed() { requestWeaponsSheathed(!targetWeaponsSheathed()); }
+    /// The state the weapons will end in: queued, in flight, or current.
+    [[nodiscard]] bool targetWeaponsSheathed() const {
+        return sheathQueued_ >= 0 ? sheathQueued_ == 1
+             : sheathReachActive_ ? sheathReachTarget_ : weaponsSheathed_;
+    }
+    /// Advance a reach in progress (the hand-off, the end, the queued
+    /// request). Call every frame.
+    void updateSheathReach();
     /// Where the item in a hand is put away; NONE when the hand is empty.
     [[nodiscard]] rendering::SheathSpot sheathSpot(game::EquipSlot slot) const;
 
@@ -129,6 +148,17 @@ private:
     uint32_t cloakTextureSlotIndex_ = 0;
 
     bool weaponsSheathed_ = false;
+    // The Z reach in progress.
+    bool sheathReachActive_ = false;
+    bool sheathReachSwapped_ = false;
+    bool sheathReachTarget_ = false;
+    int sheathQueued_ = -1;           // -1 none, 0 draw, 1 put away
+    double sheathSwapAtMs_ = 0.0;
+    double sheathEndAtMs_ = 0.0;
+    void startSheathReach(bool sheathed);
+    /// Move the weapons to the new state now: the server is told, the models
+    /// move, and the item's sheathe or draw sound plays if `withSound`.
+    void applyWeaponsSheathed(bool sheathed, bool withSound);
     bool showingRanged_ = false;
     bool showingMiningPick_ = false;
     uint32_t miningPickInstanceId_ = 0;

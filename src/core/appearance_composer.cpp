@@ -16,6 +16,7 @@
 #include "pipeline/dbc_layout.hpp"
 #include "game/game_handler.hpp"
 #include <glm/gtc/matrix_transform.hpp>
+#include <chrono>
 
 namespace wowee {
 namespace core {
@@ -458,25 +459,103 @@ uint8_t localSheathPlacement(EntitySpawner* spawner, uint32_t itemId, uint8_t in
 }
 } // namespace
 
-void AppearanceComposer::setWeaponsSheathed(bool sheathed) {
-    if (sheathed == weaponsSheathed_) return;
-    weaponsSheathed_ = sheathed;
-    // SHEATH_STATE_UNARMED (0) or SHEATH_STATE_MELEE (1).
-    if (gameHandler_) gameHandler_->sendSetSheathed(sheathed ? 0u : 1u);
-}
-
-rendering::SheathSpot AppearanceComposer::sheathSpot(game::EquipSlot slot) const {
-    if (!gameHandler_) return rendering::SheathSpot::NONE;
-    const auto& equipped = gameHandler_->getInventory().getEquipSlot(slot);
-    if (equipped.empty()) return rendering::SheathSpot::NONE;
-    switch (weaponAttachment(true, slot, localSheathPlacement(entitySpawner_, equipped.item.itemId,
-                                                              equipped.item.inventoryType))) {
+rendering::SheathSpot sheathSpotFor(game::EquipSlot slot, uint8_t placementInvType) {
+    switch (weaponAttachment(true, slot, placementInvType)) {
         case kAttachHipWeaponLeft:
         case kAttachHipWeaponRight: return rendering::SheathSpot::HIP;
         case kAttachBack:
         case kAttachSheathShield:   return rendering::SheathSpot::BACK;
         default:                    return rendering::SheathSpot::NONE;
     }
+}
+
+namespace {
+double sheathClockMs() {
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+} // namespace
+
+void AppearanceComposer::setWeaponsSheathed(bool sheathed) {
+    // Immediate: whatever reach was playing or queued is superseded.
+    sheathReachActive_ = false;
+    sheathQueued_ = -1;
+    if (sheathed == weaponsSheathed_) return;
+    weaponsSheathed_ = sheathed;
+    // SHEATH_STATE_UNARMED (0) or SHEATH_STATE_MELEE (1).
+    if (gameHandler_) gameHandler_->sendSetSheathed(sheathed ? 0u : 1u);
+}
+
+void AppearanceComposer::applyWeaponsSheathed(bool sheathed, bool withSound) {
+    if (sheathed == weaponsSheathed_) return;
+    weaponsSheathed_ = sheathed;
+    if (gameHandler_) gameHandler_->sendSetSheathed(sheathed ? 0u : 1u);
+    loadEquippedWeapons();
+    if (!withSound || !gameHandler_ || !entitySpawner_ || !renderer_) return;
+    // The main hand's sound, or the off hand's when the main hand is empty
+    // (SheatheSoundLookups: metal, wood or shield, sheathe or draw).
+    for (game::EquipSlot slot : {game::EquipSlot::MAIN_HAND, game::EquipSlot::OFF_HAND}) {
+        const auto& equipped = gameHandler_->getInventory().getEquipSlot(slot);
+        if (equipped.empty()) continue;
+        if (const auto* row = entitySpawner_->lookupItemDbc(equipped.item.itemId)) {
+            entitySpawner_->playSheathSound(*row, !sheathed, renderer_->getCharacterPosition());
+        }
+        break;
+    }
+}
+
+void AppearanceComposer::requestWeaponsSheathed(bool sheathed) {
+    if (sheathReachActive_) {
+        // Wait for the reach in flight; the last request is the one kept.
+        sheathQueued_ = sheathed ? 1 : 0;
+        return;
+    }
+    sheathQueued_ = -1;
+    if (sheathed == weaponsSheathed_) return;
+    startSheathReach(sheathed);
+}
+
+void AppearanceComposer::startSheathReach(bool sheathed) {
+    rendering::AnimationController::SheathReachTiming timing;
+    if (renderer_ && renderer_->getAnimationController()) {
+        timing = renderer_->getAnimationController()->playWeaponSheathAnimation(
+            sheathSpot(game::EquipSlot::MAIN_HAND), sheathSpot(game::EquipSlot::OFF_HAND));
+    }
+    if (timing.durationMs == 0) {
+        // No reach to play (nothing in either hand, or no such animation).
+        applyWeaponsSheathed(sheathed, true);
+        return;
+    }
+    const double now = sheathClockMs();
+    sheathReachActive_ = true;
+    sheathReachSwapped_ = false;
+    sheathReachTarget_ = sheathed;
+    sheathSwapAtMs_ = now + timing.swapMs;
+    sheathEndAtMs_ = now + timing.durationMs;
+}
+
+void AppearanceComposer::updateSheathReach() {
+    if (!sheathReachActive_) return;
+    const double now = sheathClockMs();
+    if (!sheathReachSwapped_ && now >= sheathSwapAtMs_) {
+        sheathReachSwapped_ = true;
+        applyWeaponsSheathed(sheathReachTarget_, true);
+    }
+    if (now < sheathEndAtMs_) return;
+    sheathReachActive_ = false;
+    if (sheathQueued_ >= 0) {
+        const bool queued = sheathQueued_ == 1;
+        sheathQueued_ = -1;
+        if (queued != weaponsSheathed_) startSheathReach(queued);
+    }
+}
+
+rendering::SheathSpot AppearanceComposer::sheathSpot(game::EquipSlot slot) const {
+    if (!gameHandler_) return rendering::SheathSpot::NONE;
+    const auto& equipped = gameHandler_->getInventory().getEquipSlot(slot);
+    if (equipped.empty()) return rendering::SheathSpot::NONE;
+    return sheathSpotFor(slot, localSheathPlacement(entitySpawner_, equipped.item.itemId,
+                                                    equipped.item.inventoryType));
 }
 
 void AppearanceComposer::loadEquippedWeapons() {

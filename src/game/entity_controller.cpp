@@ -1563,7 +1563,11 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
                 owner_.corpseGuidRef() = 0;
                 owner_.corpseReclaimAvailableMsRef() = 0;
                 LOG_INFO("Player resurrected (PLAYER_FLAGS ghost cleared)");
-                pendingEvents_.emit("PLAYER_ALIVE", {});
+                // A ghost coming back is PLAYER_UNGHOST, as the stock client
+                // says it (PLAYER_ALIVE is the release itself, or a resurrect
+                // taken before releasing). UIParent hides the resurrect and
+                // skinned popups on it; on PLAYER_ALIVE it hid only DEATH.
+                pendingEvents_.emit("PLAYER_UNGHOST", {});
                 if (owner_.ghostStateCallbackRef()) owner_.ghostStateCallbackRef()(false);
             }
             // Which unit's flags, because that is the only thing the

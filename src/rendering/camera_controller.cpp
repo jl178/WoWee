@@ -111,6 +111,14 @@ constexpr float MIN_WALKABLE_NORMAL_TERRAIN = movement::kMinWalkableNormalZ;
 constexpr float MIN_WALKABLE_NORMAL_WMO = movement::kMinWalkableNormalZ;
 constexpr float MIN_WALKABLE_NORMAL_M2 = movement::kMinWalkableNormalZ;
 
+/// How far from the feet's centre line a floor still holds the player up in the
+/// ordinary floor probes. Stock stands a character on a surface only when the
+/// point under it is over a walkable triangle; a fifth of a yard bridges plank
+/// gaps and tread seams without letting a ledge or a rail carry the player
+/// past its edge. The rescue rings (which run only when nothing at all was
+/// found) keep their wider footprints.
+constexpr float kFloorFootprint = 0.2f;
+
 /// The points around the feet a floor probe samples.
 ///
 /// One ray straight down at the character's centre falls between two planks, or
@@ -789,12 +797,21 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
             }
         }
 
+        // Sliding down ground too steep to stand on (see groundFollowedCharacter).
+        if (slopeSlideVel_.x != 0.0f || slopeSlideVel_.y != 0.0f) {
+            targetPos.x += slopeSlideVel_.x * f.physicsDeltaTime;
+            targetPos.y += slopeSlideVel_.y * f.physicsDeltaTime;
+        }
+
         // Jump with input buffering and coyote time
         if (f.nowJump) jumpBufferTimer = JUMP_BUFFER_TIME;
         if (grounded) coyoteTimer = COYOTE_TIME;
 
-        // On the ground, or (with a grace time set) just off it.
-        bool canJump = (grounded || coyoteTimer > 0.0f) && (jumpBufferTimer > 0.0f) && !mounted_;
+        // On the ground, or (with a grace time set) just off it. Not from
+        // ground too steep to stand on: the stock client is falling there, and
+        // hopping up a cliff a jump at a time is what that stops.
+        bool canJump = (grounded || coyoteTimer > 0.0f) && (jumpBufferTimer > 0.0f) &&
+                       !mounted_ && !onSteepSlope_;
         if (canJump) {
             verticalVelocity = f.jumpVel;
             grounded = false;
@@ -1002,44 +1019,15 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
         }
         if (terrainManager) {
             terrainH = terrainManager->getHeightAt(targetPos.x, targetPos.y);
-            // ...and how steep it is there, which the height alone cannot say.
-            // Sampled at a third of a yard: wide enough not to read the
-            // interpolation inside one heightfield cell as a cliff, narrow
-            // enough to still see the face of one.
-            if (terrainH) {
-                // Half a heightfield cell, so the difference measures the
-                // slope of the ground rather than the seam between two of the
-                // triangles it is built from.
-                //
-                // This was a third of a yard, chosen when the floor query
-                // interpolated the four corners of a cell and was smooth
-                // across it. It samples the real surface now - four triangles
-                // fanned from the cell's centre vertex - and at that spacing
-                // the two samples routinely land in different wedges, so the
-                // difference reads the crease between them and calls a walkable
-                // hillside a cliff. A cell is 4.17 yards; a real cliff spans
-                // several of them and is still seen.
-                constexpr float kSlopeSampleSpacing = 2.0f;
-                const float nz = movement::heightfieldNormalZ(
-                    [this](float sx, float sy) {
-                        return terrainManager->getHeightAt(sx, sy);
-                    },
-                    targetPos.x, targetPos.y, kSlopeSampleSpacing);
-                // The slope limit does NOT remove the ground.
-                //
-                // It used to: too steep, and terrainH was cleared. But a floor
-                // that is not there is not a wall - the player does not fail to
-                // climb the hill, they fall through it and keep going, which is
-                // how this was reported. Whatever the limit is worth, it is not
-                // worth dropping someone out of the world.
-                //
-                // A slope limit belongs on the movement: refuse the step onto
-                // ground too steep to stand on, and leave the ground where it
-                // is. Until that is written, a steep hillside is climbable
-                // again, which is what it was before the limit was added and is
-                // the lesser of the two faults.
-                (void)nz;
-            }
+            // The slope limit does NOT remove the ground here.
+            //
+            // It used to: too steep, and terrainH was cleared. But a floor
+            // that is not there is not a wall - the player does not fail to
+            // climb the hill, they fall through it and keep going. The limit
+            // lives on the movement instead (groundFollowedCharacter): the
+            // uphill part of a step onto steep ground is refused and slid
+            // along the contour, and a character left standing on steep
+            // ground slides down it.
         }
         if (wmoAsync) {
             try { auto [h, nz] = wmoFuture.get(); wmoH = h; wmoNormalZ = nz; }
@@ -1439,6 +1427,103 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
         // horizontal step into it is refused (or slid along one axis) until
         // the arc clears it, and the landing comes on the way down, where the
         // feet cross the top.
+        //
+        // (First, on the ground: the slope limit.)
+        //
+        // Stock refuses ground steeper than 50 degrees (normal z below
+        // cos 50 = 0.643, kMinWalkableNormalZ). On the ground, a step whose
+        // destination is higher than the feet and on such a surface - terrain,
+        // WMO or M2 alike - loses its uphill part and runs along the slope's
+        // contour instead. Down and across are never touched, and a step onto
+        // a walkable tread (a stair, a ledge within step height) is the step-up
+        // it always was: only the surface the step would stand on is judged.
+        if (grounded && !ignoreSlopeLimit_ && !hoverActive_ && !externalFollow_ &&
+            !isFlightAirborne() && !sitting) {
+            const glm::vec2 from(prevTargetPos.x, prevTargetPos.y);
+            const glm::vec2 move(targetPos.x - from.x, targetPos.y - from.y);
+            const float moveLen = glm::length(move);
+            if (moveLen > 1e-4f && moveLen < 8.0f) {
+                const float feetZ = prevTargetPos.z;
+                const float reach = feetZ + movement::kMaxStepUp + 0.05f;
+                // Uphill direction of the too-steep surface a step to p would
+                // climb onto, or nothing if that step is allowed.
+                const auto steepClimbAt = [&](const glm::vec2& p) -> std::optional<glm::vec2> {
+                    std::optional<float> best;
+                    float bestNz = 1.0f;
+                    int source = 0;  // 1 terrain, 2 WMO, 3 M2
+                    bool walkableStructure = false;
+                    glm::vec3 terrainN(0.0f, 0.0f, 1.0f);
+                    if (wmoRenderer) {
+                        float nz = 1.0f;
+                        auto h = wmoRenderer->getFloorHeight(p.x, p.y, reach, &nz);
+                        if (h) {
+                            if (nz >= MIN_WALKABLE_NORMAL_WMO && *h >= feetZ - movement::kMaxStepUp)
+                                walkableStructure = true;
+                            best = h; bestNz = nz; source = 2;
+                        }
+                    }
+                    if (m2Renderer) {
+                        float nz = 1.0f;
+                        auto h = m2Renderer->getFloorHeight(p.x, p.y, reach, &nz);
+                        if (h && *h <= reach) {
+                            if (nz >= MIN_WALKABLE_NORMAL_M2 && *h >= feetZ - movement::kMaxStepUp)
+                                walkableStructure = true;
+                            if (!best || *h > *best) { best = h; bestNz = nz; source = 3; }
+                        }
+                    }
+                    if (terrainManager && !cachedInsideWMO && !terrainManager->isHoleAt(p.x, p.y)) {
+                        auto th = terrainManager->getHeightAt(p.x, p.y);
+                        if (th && *th <= reach && (!best || *th > *best)) {
+                            // Half a heightfield cell apart, so the difference
+                            // reads the hillside, not the crease between the
+                            // four triangles each cell is fanned into.
+                            constexpr float kTerrainSlopeSpacing = 2.0f;
+                            terrainN = movement::heightfieldNormal(
+                                [this](float sx, float sy) { return terrainManager->getHeightAt(sx, sy); },
+                                p.x, p.y, kTerrainSlopeSpacing);
+                            best = th; bestNz = terrainN.z; source = 1;
+                        }
+                    }
+                    if (!best || *best <= feetZ + 0.02f ||
+                        bestNz >= movement::kMinWalkableNormalZ) {
+                        return std::nullopt;
+                    }
+                    // At a tunnel mouth or a deck over a hillside, a walkable
+                    // structure floor within reach is what is walked on, and
+                    // the terrain beside it is not climbed.
+                    if (source == 1 && walkableStructure) return std::nullopt;
+                    glm::vec2 up(0.0f);
+                    if (source == 1) {
+                        up = -glm::vec2(terrainN.x, terrainN.y);
+                    } else {
+                        // A floor query answers a height and the normal's z,
+                        // not which way the surface rises; difference it.
+                        constexpr float d = 0.3f;
+                        const float probe = *best + 0.6f;
+                        const auto q = [&](float x, float y) -> std::optional<float> {
+                            return source == 2 ? wmoRenderer->getFloorHeight(x, y, probe)
+                                               : m2Renderer->getFloorHeight(x, y, probe);
+                        };
+                        const auto e = q(p.x + d, p.y), w = q(p.x - d, p.y);
+                        const auto n = q(p.x, p.y + d), s = q(p.x, p.y - d);
+                        if (e && w && n && s) up = glm::vec2(*e - *w, *n - *s);
+                    }
+                    const float upLen = glm::length(up);
+                    return upLen > 1e-4f ? up / upLen : move / moveLen;
+                };
+                if (const auto up = steepClimbAt(from + move)) {
+                    const glm::vec2 slid = movement::slideAlongContour(move, *up);
+                    glm::vec2 dest = from + slid;
+                    // In a crease the contour climbs too: no step at all.
+                    if (glm::length(slid) <= 1e-4f || steepClimbAt(dest)) dest = from;
+                    const glm::vec3 swept = sweepAgainstWalls(
+                        prevTargetPos, glm::vec3(dest.x, dest.y, targetPos.z), true);
+                    targetPos.x = swept.x;
+                    targetPos.y = swept.y;
+                }
+            }
+        }
+
         const bool airborne = !grounded && !hoverActive_ && !externalFollow_ &&
                               !isFlightAirborne();
         const float horizStep = glm::length(glm::vec2(targetPos.x - prevTargetPos.x,
@@ -1468,6 +1553,9 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
                 if (m2Renderer) {
                     float nz = 1.0f;
                     auto h = m2Renderer->getFloorHeight(x, y, reachZ, &nz);
+                    // The M2 query answers hits up to 3 yd over its probe;
+                    // only what is within reach is a ledge here.
+                    if (h && *h > reachZ) h = std::nullopt;
                     if (h) structure = true;
                     if (h && nz >= MIN_WALKABLE_NORMAL_M2 && (!top || *h > *top)) top = h;
                 }
@@ -1709,7 +1797,9 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
                 [this](float x, float y, float z, float* nz) {
                     return wmoRenderer->getFloorHeight(x, y, z, nz);
                 },
-                targetPos.x, targetPos.y, feetCross(0.35f), wmoProbeZ, minWalkableWmo,
+                // The floor footprint, as the M2 ring below: a plank gap is
+                // bridged, a ledge edge is not held onto from a step past it.
+                targetPos.x, targetPos.y, feetCross(kFloorFootprint), wmoProbeZ, minWalkableWmo,
                 {.minZ = lastGroundZ - 3.5f, .maxZ = maxZ});
             if (wh && (!groundH || *wh > *groundH)) groundH = wh;
         }
@@ -1782,7 +1872,13 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
             // Not highestWalkableFloor: this one prefers an M2 floor even when
             // it is slightly lower than the terrain, so a ship's deck wins over
             // the water under it.
-            const auto offsets = feetRing(0.6f);
+            //
+            // The ring is the floor footprint, not the body: stock stands the
+            // player on a surface only when the point under the feet, give or
+            // take a fraction of a yard, is over it. At 0.6 (the body radius)
+            // a fence rail 0.27 thick held the player up anywhere within 0.7
+            // of its centre line, floating beside it after walking off its top.
+            const auto offsets = feetRing(kFloorFootprint);
             float m2ProbeZ = std::max(targetPos.z, lastGroundZ) + 6.0f;
             for (const auto& o : offsets) {
                 float m2NormalZ = 1.0f;
@@ -2132,6 +2228,72 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
                 }
             }
         }
+
+    // Left standing on ground steeper than the limit - landed on a cliff from
+    // a jump or a fall, or pushed there - the character slides down it under
+    // gravity until the ground is walkable again, as stock does. Terrain only:
+    // a WMO or M2 surface that steep is never chosen as a floor in the first
+    // place (MIN_WALKABLE_NORMAL_WMO / _M2 in sampleFloorUnderFeet), and a
+    // walkable structure floor at the feet always wins over the hillside under
+    // it, which keeps tunnel ramps and decks out of this.
+    {
+        bool steep = false;
+        float steepNz = 1.0f;
+        glm::vec2 downhill(0.0f);
+        const bool slideApplies = !swimming && !ignoreSlopeLimit_ && !hoverActive_ &&
+                                  !externalFollow_ && !isFlightAirborne() && !sitting &&
+                                  !gravityDisabled_;
+        if (slideApplies && grounded && terrainManager && !cachedInsideInteriorWMO &&
+            !terrainManager->isHoleAt(targetPos.x, targetPos.y)) {
+            const auto th = terrainManager->getHeightAt(targetPos.x, targetPos.y);
+            if (th && std::abs(*th - targetPos.z) < 0.15f) {
+                constexpr float kTerrainSlopeSpacing = 2.0f;  // as the uphill rule
+                const glm::vec3 n = movement::heightfieldNormal(
+                    [this](float sx, float sy) { return terrainManager->getHeightAt(sx, sy); },
+                    targetPos.x, targetPos.y, kTerrainSlopeSpacing);
+                const glm::vec2 d(n.x, n.y);
+                if (n.z < movement::kMinWalkableNormalZ && glm::length(d) > 1e-4f) {
+                    bool onStructure = false;
+                    if (wmoRenderer) {
+                        float nz = 1.0f;
+                        auto h = wmoRenderer->getFloorHeight(targetPos.x, targetPos.y,
+                                                             targetPos.z + 0.3f, &nz);
+                        onStructure = h && std::abs(*h - targetPos.z) < 0.15f &&
+                                      nz >= MIN_WALKABLE_NORMAL_WMO;
+                    }
+                    if (!onStructure && m2Renderer) {
+                        float nz = 1.0f;
+                        auto h = m2Renderer->getFloorHeight(targetPos.x, targetPos.y,
+                                                            targetPos.z + 0.3f, &nz);
+                        onStructure = h && std::abs(*h - targetPos.z) < 0.15f &&
+                                      nz >= MIN_WALKABLE_NORMAL_M2;
+                    }
+                    if (!onStructure) {
+                        steep = true;
+                        steepNz = n.z;
+                        downhill = glm::normalize(d);  // the normal leans downhill
+                    }
+                }
+            }
+        }
+        onSteepSlope_ = steep;
+        const float dt = f.physicsDeltaTime;
+        if (!slideApplies) {
+            slopeSlideVel_ = glm::vec2(0.0f);
+        } else if (steep) {
+            // Only the downhill part is kept, so momentum from another face
+            // does not carry the character sideways off this one.
+            const float along = std::max(0.0f, glm::dot(slopeSlideVel_, downhill));
+            const float accel = movement::slopeSlideAccel(std::abs(f.gravity), steepNz);
+            const float speed = std::min(along + accel * dt, SLOPE_SLIDE_MAX_SPEED);
+            slopeSlideVel_ = downhill * speed;
+        } else if (grounded) {
+            // Walkable ground again: the slide stops within a tenth of a second.
+            slopeSlideVel_ *= std::exp(-25.0f * dt);
+            if (glm::dot(slopeSlideVel_, slopeSlideVel_) < 0.01f) slopeSlideVel_ = glm::vec2(0.0f);
+        }
+        // Airborne (slid off an edge): the momentum carries until a landing.
+    }
 
     // Update follow target position
     *followTarget = targetPos;
@@ -3419,7 +3581,7 @@ void CameraController::update(float deltaTime) {
         // Jump. Not in flight, where space climbs - and where grounded is held
         // true only to keep the fall-damage checks quiet, so every press sent
         // the server a jump from mid-air.
-        if (nowJump && !wasJumping && grounded && !isFlightAirborne()) {
+        if (nowJump && !wasJumping && grounded && !isFlightAirborne() && !onSteepSlope_) {
             movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_JUMP));
         }
 
@@ -3651,6 +3813,8 @@ void CameraController::reset() {
     swimming = false;
     sitting = false;
     renderZOffset_ = 0.0f;
+    slopeSlideVel_ = glm::vec2(0.0f);
+    onSteepSlope_ = false;
     autoRunning = false;
     noGroundTimer_ = 0.0f;
     autoUnstuckFired_ = false;
@@ -3883,6 +4047,8 @@ void CameraController::teleportTo(const glm::vec3& pos) {
     swimming = false;
     sitting = false;
     renderZOffset_ = 0.0f;
+    slopeSlideVel_ = glm::vec2(0.0f);
+    onSteepSlope_ = false;
     lastGroundZ = pos.z;
     noGroundTimer_ = 0.0f;  // Reset grace period so terrain has time to stream
     autoUnstuckFired_ = false;
@@ -3980,7 +4146,7 @@ void CameraController::triggerMountJump() {
     // Apply physics-driven mount jump: vz = sqrt(2 * g * h)
     // Desired height and gravity are configurable constants
     // The stock client jumps a mount exactly as it jumps a character.
-    if (grounded || coyoteTimer > 0.0f) {
+    if ((grounded || coyoteTimer > 0.0f) && !onSteepSlope_) {
         verticalVelocity = useWoWSpeed ? WOW_JUMP_VELOCITY : JUMP_VELOCITY;
         grounded = false;
         coyoteTimer = 0.0f;

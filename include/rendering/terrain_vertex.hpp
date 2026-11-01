@@ -19,11 +19,12 @@ namespace rendering {
 /// comment.
 
 /// What assets/shaders/terrain.vert.glsl declares, in its order.
-inline constexpr std::array<VertexAttribute, 4> kTerrainVertexAttributes = {{
+inline constexpr std::array<VertexAttribute, 5> kTerrainVertexAttributes = {{
     {.location = 0, .componentCount = 3, .offset = static_cast<uint32_t>(offsetof(pipeline::TerrainVertex, position))},
     {.location = 1, .componentCount = 3, .offset = static_cast<uint32_t>(offsetof(pipeline::TerrainVertex, normal))},
     {.location = 2, .componentCount = 2, .offset = static_cast<uint32_t>(offsetof(pipeline::TerrainVertex, texCoord))},
     {.location = 3, .componentCount = 2, .offset = static_cast<uint32_t>(offsetof(pipeline::TerrainVertex, layerUV))},
+    {.location = 4, .componentCount = 3, .offset = static_cast<uint32_t>(offsetof(pipeline::TerrainVertex, color))},
 }};
 
 /// The same geometry through the shared shadow shader, which declares bone

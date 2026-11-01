@@ -65,6 +65,13 @@ struct MapChunk {
     // Normals (compressed)
     std::array<int8_t, 145 * 3> normals;  // X, Y, Z per vertex
 
+    // MCCV: one colour per vertex, blue-green-red-alpha, 0x7F neutral. The
+    // client multiplies the ground's colour by twice it, so a chunk can be
+    // darkened or tinted; Northrend paints nearly every chunk this way. Only
+    // filled when the MCNK has_mccv flag (0x40) is set.
+    std::array<uint8_t, 145 * 4> vertexColors{};
+    bool hasVertexColors = false;
+
     [[nodiscard]] bool hasHeightMap() const { return heightMap.isLoaded(); }
     [[nodiscard]] bool hasLayers() const { return !layers.empty(); }
 
@@ -208,6 +215,7 @@ private:
     static constexpr uint32_t MCSH = 0x4D435348;  // Shadow map (ASCII "MCSH")
     static constexpr uint32_t MCAL = 0x4D43414C;  // Alpha maps (ASCII "MCAL")
     static constexpr uint32_t MCLQ = 0x4D434C51;  // Liquid (deprecated) (ASCII "MCLQ")
+    static constexpr uint32_t MCCV = 0x4D434356;  // Vertex colours (ASCII "MCCV")
 
     struct ChunkHeader {
         uint32_t magic;

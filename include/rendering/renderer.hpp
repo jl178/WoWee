@@ -199,6 +199,10 @@ public:
     uint32_t getCharacterInstanceId() const { return characterInstanceId; }
     float getCharacterYaw() const { return characterYaw; }
     void setCharacterYaw(float yawDeg) { characterYaw = yawDeg; }
+    /// The yaw the player model is DRAWN at: the facing plus the eased turn
+    /// toward the direction of travel while strafing. getCharacterYaw stays
+    /// the logical facing (server orientation, melee arcs).
+    float getCharacterVisualYaw() const { return characterYaw + strafeYawOffsetDeg_; }
 
     // Screenshot capture - copies swapchain image to PNG file
     bool captureScreenshot(const std::string& outputPath);
@@ -459,6 +463,9 @@ private:
     glm::vec3 characterPosition = glm::vec3(0.0f);
     uint32_t characterInstanceId = 0;
     float characterYaw = 0.0f;
+    // Eased yaw the drawn model is turned by while strafing (degrees); see
+    // getCharacterVisualYaw.
+    float strafeYawOffsetDeg_ = 0.0f;
 
     // Where the player was, for shaders that react to them moving through the
     // world. playerWakePos_ chases characterPosition with a fixed time

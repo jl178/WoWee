@@ -647,6 +647,13 @@ private:
     /// to be stopped by, not a floor to be lifted onto. Matches the wall
     /// tests' jump clearance (1.2), which leave such ledges to the floor pass.
     static constexpr float AIR_LEDGE_REACH = 1.2f;
+    /// Standing on ground steeper than the walkable limit: the horizontal
+    /// velocity it has given the character down the slope, and whether the
+    /// character is on such ground now (no jumping from it, as stock: the
+    /// client treats that slide as a fall). See groundFollowedCharacter.
+    glm::vec2 slopeSlideVel_{0.0f};
+    bool onSteepSlope_ = false;
+    static constexpr float SLOPE_SLIDE_MAX_SPEED = 25.0f;
     static constexpr float STAND_EYE_HEIGHT = 1.2f;  // Standing eye height
     static constexpr float CROUCH_EYE_HEIGHT = 0.6f; // Crouching eye height
     float eyeHeight = STAND_EYE_HEIGHT;

@@ -15,6 +15,9 @@
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "audio/npc_voice_manager.hpp"
+#include "audio/audio_coordinator.hpp"
+#include "audio/audio_engine.hpp"
+#include "audio/sound_data.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "rendering/animation/animation_ids.hpp"
@@ -31,6 +34,8 @@
 
 #include <cmath>
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <cctype>
 #include <sstream>
 #include <cstring>
@@ -559,6 +564,7 @@ const EntitySpawner::ItemDbcRow* EntitySpawner::lookupItemDbc(uint32_t entry) {
                 row.displayId = dbc->getUInt32(r, 5);
                 row.inventoryType = dbc->getUInt32(r, 6);
                 row.sheatheType = dbc->getUInt32(r, 7);
+                row.material = dbc->getUInt32(r, 4);
                 itemDbcCache_[dbc->getUInt32(r, 0)] = row;
             }
             LOG_INFO("Item.dbc: ", itemDbcCache_.size(), " items for unit weapons");
@@ -635,18 +641,129 @@ uint32_t EntitySpawner::unitIdleAnim(uint64_t guid, uint32_t instanceId) {
     return id != 0 ? id : STAND;
 }
 
+void EntitySpawner::playSheathSound(const ItemDbcRow& item, bool drawing, const glm::vec3& renderPos) {
+    if (!sheathSoundsLoaded_ && assetManager_) {
+        sheathSoundsLoaded_ = true;
+        // ID, ItemClass, ItemSubclass, ItemEnvTypes (material), IsShield/
+        // CheckMaterial, SheathSoundID, UnsheathSoundID.
+        if (auto dbc = assetManager_->loadDBCOptional("SheatheSoundLookups.dbc");
+            dbc && dbc->getFieldCount() >= 7) {
+            for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+                sheathSoundRows_.push_back({dbc->getUInt32(r, 1), dbc->getUInt32(r, 2),
+                                            dbc->getUInt32(r, 3), dbc->getUInt32(r, 4),
+                                            dbc->getUInt32(r, 5), dbc->getUInt32(r, 6)});
+            }
+        }
+    }
+    const SheathSoundRow* best = nullptr;
+    for (const auto& row : sheathSoundRows_) {
+        if (row.itemClass != item.itemClass || row.subclass != item.subclass) continue;
+        if (row.checkMaterial && row.material != item.material) continue;
+        best = &row;
+        break;
+    }
+    // A weapon of no listed material: the file's own catch-all (class 2,
+    // subclass 0, material 0) is wood.
+    if (!best) {
+        for (const auto& row : sheathSoundRows_) {
+            if (row.itemClass == item.itemClass && row.subclass == item.subclass) { best = &row; break; }
+        }
+    }
+    if (!best) return;
+    const uint32_t soundId = drawing ? best->unsheathe : best->sheathe;
+    auto* coordinator = gameServices_ ? gameServices_->audioCoordinator : nullptr;
+    const auto* data = coordinator ? coordinator->getSoundData() : nullptr;
+    const audio::SoundEntry* entry = data ? data->sound(soundId) : nullptr;
+    if (!entry || entry->files.empty()) return;
+    const auto& file = entry->files[static_cast<size_t>(std::rand()) % entry->files.size()];
+    const float maxDistance = entry->distanceCutoff > 0.0f ? entry->distanceCutoff : 40.0f;
+    audio::AudioEngine::instance().playSound3D(file, renderPos, entry->volume, 1.0f, maxDistance);
+}
+
 void EntitySpawner::syncUnitSheath(uint64_t guid, uint32_t instanceId) {
     auto it = unitSheathAttached_.find(guid);
     if (it == unitSheathAttached_.end() || instanceId == 0) return;
-    if (unitSheathState(guid) == it->second) return;
-    const auto items = unitWeaponItems(guid);
-    std::array<uint32_t, 3> displays{items[0].displayId, items[1].displayId, items[2].displayId};
-    if (auto ws = onlinePlayerWeaponSlots_.find(guid); ws != onlinePlayerWeaponSlots_.end()) {
-        displays = ws->second.displayIds;
-    } else if (!creatureVirtualItemUnits_.count(guid)) {
+    auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    if (!cr) return;
+
+    auto currentDisplays = [&](const std::array<ItemDbcRow, 3>& items) {
+        std::array<uint32_t, 3> displays{items[0].displayId, items[1].displayId, items[2].displayId};
+        if (auto ws = onlinePlayerWeaponSlots_.find(guid); ws != onlinePlayerWeaponSlots_.end())
+            displays = ws->second.displayIds;
+        return displays;
+    };
+    if (!onlinePlayerWeaponSlots_.count(guid) && !creatureVirtualItemUnits_.count(guid)) return;
+    const double nowMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+
+    // A reach in progress: the weapons move at the hand-off, with its sound,
+    // and nothing else starts until the reach is over. A state that changed
+    // again meanwhile is picked up after it, so the last one always wins and
+    // the weapons never jump twice inside one reach.
+    if (auto tr = unitSheathTransitions_.find(guid); tr != unitSheathTransitions_.end()) {
+        if (!tr->second.swapped && nowMs >= tr->second.swapAtMs) {
+            tr->second.swapped = true;
+            const auto items = unitWeaponItems(guid);
+            const auto displays = currentDisplays(items);
+            attachUnitWeapons(guid, instanceId, displays, items);
+            const uint8_t now = it->second;  // attachUnitWeapons recorded it
+            const bool ranged = now == 2 || tr->second.fromState == 2;
+            const ItemDbcRow& soundItem = ranged ? items[2] : (displays[0] ? items[0] : items[1]);
+            if (now != tr->second.fromState) {
+                auto pos = creatureRenderPosCache_.find(guid);
+                if (pos != creatureRenderPosCache_.end())
+                    playSheathSound(soundItem, now != 0, pos->second);
+            }
+        }
+        if (nowMs >= tr->second.endAtMs) unitSheathTransitions_.erase(tr);
         return;
     }
-    attachUnitWeapons(guid, instanceId, displays, items);
+
+    const uint8_t state = unitSheathState(guid);
+    if (state == it->second) return;
+
+    // Start the reach: Sheath (89) to the back, HipSheath (90) to the hip,
+    // each arm reaching for its own hand's item, on the upper body only so
+    // it plays over a run as well as over a stand.
+    const auto items = unitWeaponItems(guid);
+    const auto displays = currentDisplays(items);
+    const game::EquipSlot hands[2] = {game::EquipSlot::MAIN_HAND, game::EquipSlot::OFF_HAND};
+    rendering::SheathSpot spots[2] = {rendering::SheathSpot::NONE, rendering::SheathSpot::NONE};
+    for (int i = 0; i < 2; ++i) {
+        if (displays[i] == 0) continue;
+        const auto inv = static_cast<uint8_t>(items[i].inventoryType);
+        spots[i] = sheathSpotFor(hands[i], sheathPlacementInvType(items[i].sheatheType, inv));
+    }
+    // Drawing or putting away the ranged weapon reaches for the back.
+    if ((state == 2 || it->second == 2) && displays[2] != 0) spots[0] = rendering::SheathSpot::BACK;
+    const rendering::SheathSpot body = spots[0] != rendering::SheathSpot::NONE ? spots[0] : spots[1];
+    const uint32_t bodyAnim = rendering::anim::sheathReachAnim(body);
+    bool animating = false;
+    if (bodyAnim != 0) {
+        uint32_t chosen = bodyAnim;
+        if (!cr->hasAnimation(instanceId, chosen))
+            chosen = chosen == rendering::anim::SHEATHE ? rendering::anim::HIP_SHEATHE
+                                                       : rendering::anim::SHEATHE;
+        if (cr->hasAnimation(instanceId, chosen) &&
+            cr->playUpperBodyAnimation(instanceId, chosen,
+                                       rendering::anim::sheathReachAnim(spots[1]),
+                                       rendering::anim::sheathReachAnim(spots[0]))) {
+            const uint32_t dur = cr->getAnimationDurationMs(instanceId, chosen);
+            uint32_t swap = cr->getSheathEventTime(instanceId, chosen);
+            if (swap == UINT32_MAX || swap > dur) swap = dur / 2;
+            SheathTransition t;
+            t.swapAtMs = nowMs + swap;
+            t.endAtMs = nowMs + dur;
+            t.fromState = it->second;
+            unitSheathTransitions_[guid] = t;
+            animating = true;
+        }
+    }
+    if (!animating) {
+        // Nothing to reach with (no weapons, or a model without the reach):
+        // straight to where the new state puts them.
+        attachUnitWeapons(guid, instanceId, displays, items);
+    }
 }
 
 bool EntitySpawner::attachUnitWeapons(uint64_t guid, uint32_t instanceId,
@@ -1447,9 +1564,10 @@ void EntitySpawner::playCreatureSpawnPose(uint64_t guid, uint32_t instanceId) {
     auto* charRenderer = renderer_->getCharacterRenderer();
     if (!charRenderer) return;
 // Spawn in the correct pose. If the server marked this creature dead before
-// the queued spawn was processed, start directly in death animation.
+// the queued spawn was processed, it is a corpse coming into view: already
+// lying down (Death's last frame), not falling again from a standing start.
 if (deadCreatureGuids_.count(guid)) {
-    charRenderer->playAnimation(instanceId, rendering::anim::DEATH, false);
+    charRenderer->playDeath(instanceId, /*alreadyDead=*/true);
 } else {
     // Check if this NPC has a persistent emote state (e.g. working, eating, dancing)
     uint32_t npcEmote = 0;

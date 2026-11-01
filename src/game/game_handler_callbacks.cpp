@@ -1139,6 +1139,11 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
         // would have filled it in.
         if (isPlayerDead()) {
             fireAddonEvent("PLAYER_DEAD", {});
+            // And the body lies down. A corpse (not yet a ghost) entering the
+            // world never sees health reach zero either, so nothing put the
+            // character into its death pose; it stood over its own death.
+            // Already down when the spawn saw the death (no second fall).
+            if (!isPlayerGhost() && npcDeathCallback_) npcDeathCallback_(playerGuid);
         }
         // The durability warnings hide themselves when nothing is damaged, and
         // this is the event that asks them to look. Without it the frame keeps

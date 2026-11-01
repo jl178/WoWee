@@ -376,6 +376,20 @@ void ADTLoader::parseMCNK(std::span<const uint8_t> data, int chunkIndex, ADTTerr
         parseMCNR(data.subspan(ofsNormal + skip, 448), chunk);
     }
 
+    // Vertex colours (MCCV) - 145 x BGRA, ofsMCCV at MCNK header 0x74, only
+    // present when has_mccv (0x40) is set. Same offset convention as the
+    // others: the stored offset lands on the sub-chunk's data in this span.
+    chunk.hasVertexColors = false;
+    if (chunk.flags & 0x40) {
+        const uint32_t ofsMCCV = readUInt32(data, 0x74);
+        constexpr size_t kMCCVBytes = 145 * 4;
+        if (ofsMCCV > 0 && ofsMCCV + kMCCVBytes + 8 <= data.size()) {
+            const uint32_t skip = (readUInt32(data, ofsMCCV) == MCCV) ? 8 : 0;
+            std::memcpy(chunk.vertexColors.data(), data.data() + ofsMCCV + skip, kMCCVBytes);
+            chunk.hasVertexColors = true;
+        }
+    }
+
     // Texture layers (MCLY) - 16 bytes per layer
     if (ofsLayer > 0 && nLayers > 0) {
         size_t layerSize = nLayers * 16;

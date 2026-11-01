@@ -1082,6 +1082,29 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
             // ($BTH, $CST, $HIT...) carry no sound id and are not handled.
             const bool isFootfall = std::memcmp(m2Data.data() + base, "$FSD", 4) == 0;
             const bool isSound = std::memcmp(m2Data.data() + base, "$CSD", 4) == 0;
+            // $SHL / $SHR: the weapon hand-off in the sheath reach. The
+            // earliest of the two per sequence (both hands share it on the
+            // stock models). Embedded sequences only - Sheath and HipSheath
+            // are embedded on every character model checked.
+            const bool isSheath = std::memcmp(m2Data.data() + base, "$SHL", 4) == 0 ||
+                                  std::memcmp(m2Data.data() + base, "$SHR", 4) == 0;
+            if (isSheath && wotlkEvents) {
+                if (model.sheathEventTimes.size() < model.sequences.size())
+                    model.sheathEventTimes.resize(model.sequences.size(), UINT32_MAX);
+                const uint32_t nArrays = rd32(base + trackOfs + 4);
+                const uint32_t ofsArrays = rd32(base + trackOfs + 8);
+                const uint32_t count = std::min<uint32_t>(nArrays, model.sequences.size());
+                for (uint32_t s = 0; s < count; s++) {
+                    if (!(model.sequences[s].flags & kM2SeqFlagEmbeddedData)) continue;
+                    const uint32_t nTs = rd32(ofsArrays + s * 8);
+                    const uint32_t ofsTs = rd32(ofsArrays + s * 8 + 4);
+                    if (nTs == 0 || nTs > 64) continue;
+                    if (ofsTs + nTs * sizeof(uint32_t) > m2Data.size()) continue;
+                    for (uint32_t ts : readArray<uint32_t>(m2Data, ofsTs, nTs))
+                        model.sheathEventTimes[s] = std::min(model.sheathEventTimes[s], ts);
+                }
+                continue;
+            }
             if (!isFootfall && !isSound) continue;
             const uint32_t soundEntryId = isSound ? rd32(base + 4) : 0;
             if (isSound && soundEntryId == 0) continue;

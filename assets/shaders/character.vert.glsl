@@ -17,6 +17,9 @@ layout(set = 0, binding = 0) uniform PerFrame {
 
 layout(push_constant) uniform Push {
     mat4 model;
+    // xy: the batch's M2 texture-animation translation (UV scroll), pushed
+    // per batch by CharacterRenderer; zero for batches without one.
+    vec4 uvOffset;
 } push;
 
 layout(set = 2, binding = 0) readonly buffer BoneSSBO {
@@ -66,7 +69,7 @@ void main() {
     mat3 modelMat3 = mat3(push.model);
     FragPos = worldPos.xyz;
     Normal = modelMat3 * skinnedNorm;
-    TexCoord = aTexCoord;
+    TexCoord = aTexCoord + push.uvOffset.xy;
 
     // Gram-Schmidt re-orthogonalize tangent w.r.t. normal
     vec3 N = safeNormalize(Normal, vec3(0.0, 0.0, 1.0));

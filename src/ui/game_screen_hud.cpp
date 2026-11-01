@@ -8,6 +8,9 @@
 #include "ui/ui_colors.hpp"
 #include "ui/ui_helpers.hpp"
 #include "ui/nameplate_stacking.hpp"
+#include "ui/interface_fonts.hpp"
+#include "pipeline/blp_loader.hpp"
+#include "core/window.hpp"
 #include "rendering/vk_context.hpp"
 #include "core/application.hpp"
 #include "core/appearance_composer.hpp"
@@ -923,6 +926,84 @@ VkDescriptorSet GameScreen::getSpellIcon(uint32_t spellId, pipeline::AssetManage
 // Nameplates - world-space health bars projected to screen
 // ============================================================
 
+namespace {
+
+/// The stock 3.3.5 nameplate art, uploaded once.
+///
+/// Every piece is a 128x32 (or smaller) texture laid out against the same
+/// origin, the way the client stacks the plate's regions: the border with its
+/// bar hole and level box, the cast bar border (plain or shielded) below it,
+/// and the glow around the bar.
+struct NameplateArt {
+    VkDescriptorSet border = VK_NULL_HANDLE;      // Tooltips\Nameplate-Border
+    VkDescriptorSet castBorder = VK_NULL_HANDLE;  // Tooltips\Nameplate-CastBar
+    VkDescriptorSet castShield = VK_NULL_HANDLE;  // Tooltips\Nameplate-CastBar-Shield
+    VkDescriptorSet glow = VK_NULL_HANDLE;        // Tooltips\Nameplate-Glow (additive)
+    VkDescriptorSet elite = VK_NULL_HANDLE;       // Tooltips\EliteNameplateIcon
+    VkDescriptorSet barFill = VK_NULL_HANDLE;     // TargetingFrame\UI-TargetingFrame-BarFill
+    VkDescriptorSet skull = VK_NULL_HANDLE;       // TargetingFrame\UI-TargetingFrame-Skull
+    int attempts = 0;
+};
+
+/// One plate texture. `luminanceAsAlpha` is for the art the client draws with
+/// ADD blending (the glow has no alpha channel, only a bright shape on black):
+/// the brightness becomes the coverage, so ordinary blending draws the shape
+/// and not a black slab around it.
+VkDescriptorSet loadNameplateTexture(pipeline::AssetManager* am, core::Window* window,
+                                     const char* path, bool luminanceAsAlpha) {
+    if (!am || !window || !window->getVkContext()) return VK_NULL_HANDLE;
+    auto bytes = am->readFile(path);
+    if (bytes.empty()) {
+        LOG_WARNING("Nameplates: missing texture ", path);
+        return VK_NULL_HANDLE;
+    }
+    auto image = pipeline::BLPLoader::load(bytes);
+    if (!image.isValid() || image.data.empty()) {
+        LOG_WARNING("Nameplates: could not decode ", path);
+        return VK_NULL_HANDLE;
+    }
+    if (luminanceAsAlpha) {
+        for (size_t i = 0; i + 3 < image.data.size(); i += 4) {
+            const uint8_t m = std::max({image.data[i], image.data[i + 1], image.data[i + 2]});
+            image.data[i] = image.data[i + 1] = image.data[i + 2] = 255;
+            image.data[i + 3] = m;
+        }
+    }
+    return window->getVkContext()->uploadImGuiTexture(image.data.data(), image.width,
+                                                      image.height);
+}
+
+NameplateArt& nameplateArt(pipeline::AssetManager* am, core::Window* window) {
+    static NameplateArt art;
+    // Retried a few times only: before the Vulkan context is up nothing loads,
+    // and a file that is not in the data will not appear later.
+    if (!art.border && art.attempts < 8 && am && window && window->getVkContext()) {
+        ++art.attempts;
+        art.border     = loadNameplateTexture(am, window, "Interface\\Tooltips\\Nameplate-Border.blp", false);
+        art.castBorder = loadNameplateTexture(am, window, "Interface\\Tooltips\\Nameplate-CastBar.blp", false);
+        art.castShield = loadNameplateTexture(am, window, "Interface\\Tooltips\\Nameplate-CastBar-Shield.blp", false);
+        art.glow       = loadNameplateTexture(am, window, "Interface\\Tooltips\\Nameplate-Glow.blp", true);
+        art.elite      = loadNameplateTexture(am, window, "Interface\\Tooltips\\EliteNameplateIcon.blp", false);
+        art.barFill    = loadNameplateTexture(am, window, "Interface\\TargetingFrame\\UI-TargetingFrame-BarFill.blp", false);
+        art.skull      = loadNameplateTexture(am, window, "Interface\\TargetingFrame\\UI-TargetingFrame-Skull.blp", false);
+    }
+    return art;
+}
+
+/// Text with a one-pixel black outline, the way the plate's FRIZQT name is
+/// drawn ("OUTLINE" font flag).
+void addOutlinedText(ImDrawList* dl, ImFont* font, float size, ImVec2 pos, ImU32 col,
+                     int alpha, const char* text) {
+    const ImU32 black = IM_COL32(0, 0, 0, alpha);
+    static constexpr float kOff[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+    for (const auto& o : kOff) {
+        dl->AddText(font, size, ImVec2(pos.x + o[0], pos.y + o[1]), black, text);
+    }
+    dl->AddText(font, size, pos, col, text);
+}
+
+} // namespace
+
 void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
     if (gameHandler.getState() != game::WorldState::IN_WORLD) return;
 
@@ -1022,12 +1103,16 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
             (unit->getUnitFlags() & game::UNIT_FLAG_PLAYER_CONTROLLED) != 0;
         const bool isGuardian = isSummon && !isPet;
 
-        // Friendly player nameplates use Shift+V; enemy players and hostile/NPC
-        // nameplates use V. Reaction, not object type, owns the visual category.
-        // The current target ALWAYS gets a nameplate so it's clear what is
-        // selected even with nameplates toggled off.
-        if (isPlayer && !isHostile && !settingsPanel_.showFriendlyNameplates_ && !isTarget) continue;
-        if ((!isPlayer || isHostile) && !settingsPanel_.showEnemyNameplates_ && !isTarget) continue;
+        // Shift-V (nameplateShowFriends) owns every friendly unit, players and
+        // NPCs alike; V (nameplateShowEnemies) owns the rest - hostile,
+        // unfriendly and neutral. As in the stock client, the target gets no
+        // plate of its own when its kind is toggled off: the target frame is
+        // what says what is selected.
+        const int reaction = isPlayer ? (isHostile ? 2 : 5)
+                                      : gameHandler.unitReactionToPlayer(*unit);
+        const bool isFriendly = !isHostile && reaction >= 5;
+        if (isFriendly && !settingsPanel_.showFriendlyNameplates_) continue;
+        if (!isFriendly && !settingsPanel_.showEnemyNameplates_) continue;
 
         // Totems answer to their own two settings on top of the above, which
         // is how the real client has it: the defaults show an enemy's totems
@@ -1050,9 +1135,8 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
             if (addons::storedCVarValue(platecVar, "1") == "0") continue;
         }
 
-        // For corpses (dead units), only show a minimal grey nameplate if selected
-        bool isCorpse = (unit->getHealth() == 0);
-        if (isCorpse && !isTarget) continue;
+        // The dead have no plate in the stock client, selected or not.
+        if (unit->getHealth() == 0) continue;
 
         // Prefer the renderer's actual instance position so the nameplate tracks the
         // rendered model exactly (avoids drift from the parallel entity interpolator).
@@ -1063,11 +1147,14 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         }
         renderPos.z += 2.3f;
 
-        // Cull distance: the current target stays visible to 60 units so its
-        // bar doesn't vanish at combat range; players 40; other NPCs 20.
-        glm::vec3 nameDelta = renderPos - camPos;
-        float distSq = glm::dot(nameDelta, nameDelta);
-        float cullDist = isTarget ? 60.0f : (isPlayer ? 40.0f : 20.0f);
+        // The stock client's plate range: 41 yards from the character (not
+        // from the camera, so zooming out does not take plates away), the
+        // same for every kind of unit.
+        const glm::vec3 plateDelta(unit->getX() - playerCanonical.x,
+                                   unit->getY() - playerCanonical.y,
+                                   unit->getZ() - playerCanonical.z);
+        const float distSq = glm::dot(plateDelta, plateDelta);
+        constexpr float cullDist = 41.0f;
         if (distSq > cullDist * cullDist) continue;
 
         // Behind a building is out of sight, and a name that reads through a
@@ -1100,531 +1187,239 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         float sx = (ndc.x * 0.5f + 0.5f) * screenW;
         float sy = (ndc.y * 0.5f + 0.5f) * screenH;
 
-        // Fade out in the last 5 units of cull range
-        float fadeSq = (cullDist - 5.0f) * (cullDist - 5.0f);
-        float dist = std::sqrt(distSq);
-        float alpha = distSq < fadeSq ? 1.0f : 1.0f - (dist - (cullDist - 5.0f)) / 5.0f;
-        auto A = [&](int v) { return static_cast<int>(v * alpha); };
+        // The stock 3.3.5 plate, region for region. Everything below is laid
+        // out in the 128x32 texel space of Nameplate-Border.blp, which is the
+        // plate's own size in interface units:
+        //   health bar hole  x 5..104, y 20..26
+        //   level box        x 106..123, y 18..29 (centre 114.5, 23.5)
+        //   name             above the border, centred on the bar
+        // The cast bar art (Nameplate-CastBar / -Shield) sits under it, shifted
+        // 17 texels left so its bar hole (x 22..121) lines up with the health
+        // bar's, which puts its spell icon box just left of the plate.
+        const NameplateArt& art = nameplateArt(services_.assetManager, services_.window);
 
-        // Bar colour by hostility (grey for corpses)
-        ImU32 barColor, bgColor;
-        if (isCorpse) {
-            // Minimal grey bar for selected corpses (loot/skin targets)
-            barColor = IM_COL32(140, 140, 140, A(200));
-            bgColor  = IM_COL32(70,  70,  70,  A(160));
+        // Fade over the last five yards. With a target, every other plate is
+        // drawn at half strength: that is how the stock client marks the
+        // target's plate (the addons of the era found it by its alpha of 1).
+        const float dist = std::sqrt(distSq);
+        float alpha = dist < cullDist - 5.0f
+            ? 1.0f : std::clamp(1.0f - (dist - (cullDist - 5.0f)) / 5.0f, 0.0f, 1.0f);
+        if (targetGuid != 0 && !isTarget) alpha *= 0.5f;
+        auto A = [&](int v) { return static_cast<int>(static_cast<float>(v) * alpha); };
+        const ImU32 white = IM_COL32(255, 255, 255, A(255));
+
+        // Health bar colour, the stock set: red hostile or unfriendly, yellow
+        // neutral, green friendly NPC, blue friendly player, grey when someone
+        // else has tapped it. Class colours for players are an option.
+        int react = reaction;
+        if (!isPlayer && gameHandler.isAggressiveTowardPlayer(guid)) react = std::min(react, 2);
+        const uint32_t dynFlags = unit->getDynamicFlags();
+        // TAPPED but not TAPPED_BY_ALL_THREAT_LIST: someone else's mob.
+        const bool tappedByOther = !isPlayer && (dynFlags & 0x0004) != 0 && (dynFlags & 0x0008) == 0;
+        const uint8_t classId = isPlayer ? entityClassId(entityPtr.get()) : 0;
+        ImU32 barColor;
+        if (tappedByOther) {
+            barColor = IM_COL32(128, 128, 128, A(255));
+        } else if (classId != 0 &&
+                   addons::storedCVarValue("showClassColorInNameplate", "0") != "0") {
+            barColor = classColorU32(classId, A(255));
+        } else if (isPlayer && !isHostile) {
+            barColor = IM_COL32(0, 0, 255, A(255));
+        } else if (react <= 3) {
+            barColor = IM_COL32(255, 0, 0, A(255));
+        } else if (react == 4) {
+            barColor = IM_COL32(255, 255, 0, A(255));
         } else {
-            // By reaction, as the stock client colours it: red hostile, orange
-            // unfriendly, yellow neutral, green friendly. Attackable is not red:
-            // a beast that will not aggro is attackable and still yellow.
-            int react = isPlayer ? (isHostile ? 2 : 5) : gameHandler.unitReactionToPlayer(*unit);
-            if (!isPlayer && gameHandler.isAggressiveTowardPlayer(guid)) react = std::min(react, 2);
-            const uint32_t dynFlags = unit->getDynamicFlags();
-            // TAPPED but not TAPPED_BY_ALL_THREAT_LIST: someone else's mob.
-            const bool tappedByOther = !isPlayer && (dynFlags & 0x0004) != 0 && (dynFlags & 0x0008) == 0;
-            // Class colours are an interface option for player bars.
-            const uint8_t classId = isPlayer ? entityClassId(entityPtr.get()) : 0;
-            if (tappedByOther) {
-                barColor = IM_COL32(160, 160, 160, A(200)); bgColor = IM_COL32(80, 80, 80, A(160));
-            } else if (react <= 2) {
-                barColor = IM_COL32(220, 60, 60, A(200));   bgColor = IM_COL32(100, 25, 25, A(160));
-            } else if (react == 3) {
-                barColor = IM_COL32(240, 130, 60, A(200));  bgColor = IM_COL32(110, 55, 25, A(160));
-            } else if (react == 4) {
-                barColor = IM_COL32(230, 210, 60, A(200));  bgColor = IM_COL32(100, 90, 25, A(160));
-            } else if (classId != 0 &&
-                       addons::storedCVarValue("showClassColorInNameplate", "0") != "0") {
-                barColor = classColorU32(classId, A(200));  bgColor = classColorU32(classId, A(90));
-            } else {
-                barColor = IM_COL32(60, 200, 80, A(200));   bgColor = IM_COL32(25, 100, 35, A(160));
-            }
+            barColor = IM_COL32(0, 255, 0, A(255));
         }
-        // Check if this unit is targeting the local player (threat indicator)
+
+        // A hostile unit with the player as its target gets the red threat
+        // glow, as the stock plate's threat region shows aggro.
         bool isTargetingPlayer = false;
-        if (unit->isHostile() && !isCorpse) {
+        if (isHostile) {
             const uint64_t unitTarget = game::unitTargetGuid(*entityPtr);
-            if (unitTarget != 0) {
-                isTargetingPlayer = (unitTarget == playerGuid);
-            }
+            isTargetingPlayer = unitTarget != 0 && unitTarget == playerGuid;
         }
-        // Creature rank for border styling (Elite=gold double border, Boss=red, Rare=silver)
-        int creatureRank = -1;
-        if (!isPlayer) creatureRank = gameHandler.getCreatureRank(unit->getEntry());
+        const int creatureRank = isPlayer ? -1 : gameHandler.getCreatureRank(unit->getEntry());
 
-        // Border: gold = currently selected, orange = targeting player, dark = default
-        ImU32 borderColor = isTarget
-            ? IM_COL32(255, 215, 0,  A(255))
-            : isTargetingPlayer
-              ? IM_COL32(255, 140, 0,  A(220))   // orange = this mob is targeting you
-              : IM_COL32(20,  20,  20, A(180));
+        // Plate geometry, in pixels: interface units scale with the window
+        // height over the interface's 768, and the panel's plate scale on top.
+        const float s = settingsPanel_.nameplateScale_ * screenH / 768.0f;
+        const float plateW = 128.0f * s;
+        const float plateH = 32.0f * s;
+        float px = sx - 55.0f * s;     // the bar's centre over the unit
+        float py = sy - plateH;        // the plate's bottom on the point over its head
 
-        // Bar geometry
-        const float barW = 80.0f * settingsPanel_.nameplateScale_;
-        const float barH = 8.0f * settingsPanel_.nameplateScale_;
-        const float barX = sx - barW * 0.5f;
-
-        // ...and the lift itself, before anything is drawn with sy. The block a
-        // plate occupies is its bar plus the name line above it; the bound is
-        // generous rather than exact, because a plate that clears by a pixel
-        // still reads as two bars touching.
+        // Allow Nameplate Overlap off: lift this plate clear of the nearer
+        // ones already placed. The box is the whole plate, name area included.
         if (!allowPlateOverlap) {
-            const float topExtent = barH + 24.0f;
-            sy = ui::plateTopClearOf(placedPlates, barX, barX + barW, sy, barH, topExtent);
-            placedPlates.push_back({.x0 = barX, .y0 = sy - topExtent, .x1 = barX + barW, .y1 = sy + barH});
+            py = ui::plateTopClearOf(placedPlates, px, px + plateW, py, plateH, 0.0f);
+            placedPlates.push_back({.x0 = px, .y0 = py, .x1 = px + plateW, .y1 = py + plateH});
+        }
+        auto P = [&](float tx, float ty) { return ImVec2(px + tx * s, py + ty * s); };
+
+        // Hover, decided before drawing because the highlight is part of the
+        // picture. The plate frame is the hit rect, as in the stock client.
+        bool hovered = false;
+        if (!ImGui::GetIO().WantCaptureMouse) {
+            const ImVec2 mouse = ImGui::GetIO().MousePos;
+            hovered = mouse.x >= px && mouse.x <= px + plateW &&
+                      mouse.y >= py && mouse.y <= py + plateH;
         }
 
-        // Guard against division by zero when maxHealth hasn't been populated yet
-        // (freshly spawned entity with default fields). 0/0 produces NaN which
-        // poisons all downstream geometry; +inf is clamped but still wasteful.
-        float healthPct = (unit->getMaxHealth() > 0)
+        // Guard against division by zero when maxHealth hasn't been populated yet.
+        const float healthPct = (unit->getMaxHealth() > 0)
             ? std::clamp(static_cast<float>(unit->getHealth()) / static_cast<float>(unit->getMaxHealth()), 0.0f, 1.0f)
             : 0.0f;
 
-        drawList->AddRectFilled(ImVec2(barX,                 sy), ImVec2(barX + barW,               sy + barH), bgColor,    2.0f);
-        // For corpses, don't fill health bar (just show grey background)
-        if (!isCorpse) {
-            drawList->AddRectFilled(ImVec2(barX,                 sy), ImVec2(barX + barW * healthPct,   sy + barH), barColor,   2.0f);
-        }
-        drawList->AddRect       (ImVec2(barX - 1.0f, sy - 1.0f), ImVec2(barX + barW + 1.0f, sy + barH + 1.0f), borderColor, 2.0f);
-
-        // Elite/Boss/Rare decoration: extra outer border with rank-specific color
-        if (creatureRank == 1 || creatureRank == 2) {
-            // Elite / Rare Elite: gold double border
-            drawList->AddRect(ImVec2(barX - 3.0f, sy - 3.0f),
-                              ImVec2(barX + barW + 3.0f, sy + barH + 3.0f),
-                              IM_COL32(255, 200, 50, A(200)), 3.0f);
-        } else if (creatureRank == 3) {
-            // Boss: red double border
-            drawList->AddRect(ImVec2(barX - 3.0f, sy - 3.0f),
-                              ImVec2(barX + barW + 3.0f, sy + barH + 3.0f),
-                              IM_COL32(255, 40, 40, A(200)), 3.0f);
-        } else if (creatureRank == 4) {
-            // Rare: silver double border
-            drawList->AddRect(ImVec2(barX - 3.0f, sy - 3.0f),
-                              ImVec2(barX + barW + 3.0f, sy + barH + 3.0f),
-                              IM_COL32(170, 200, 230, A(200)), 3.0f);
+        // Glow behind the border: red threat, the target's own glow, and the
+        // mouseover highlight. Nameplate-Glow is drawn additive in the client;
+        // its brightness was turned into coverage when it was loaded.
+        if (art.glow) {
+            ImU32 glowColor = 0;
+            if (isTargetingPlayer)  glowColor = IM_COL32(255, 0, 0, A(255));
+            else if (isTarget)      glowColor = IM_COL32(255, 255, 255, A(230));
+            else if (hovered)       glowColor = IM_COL32(255, 255, 255, A(140));
+            if (glowColor != 0) {
+                drawList->AddImage((ImTextureID)(uintptr_t)art.glow, P(0, 0), P(128, 32),
+                                   ImVec2(0, 0), ImVec2(1, 1), glowColor);
+            }
         }
 
-        // HP % text centered on health bar (non-corpse, non-full-health for readability)
-        if (!isCorpse && unit->getMaxHealth() > 0) {
-            int hpPct = static_cast<int>(healthPct * 100.0f + 0.5f);
-            char hpBuf[8];
-            snprintf(hpBuf, sizeof(hpBuf), "%d%%", hpPct);
-            ImVec2 hpTextSz = ImGui::CalcTextSize(hpBuf);
-            float hpTx = sx - hpTextSz.x * 0.5f;
-            float hpTy = sy + (barH - hpTextSz.y) * 0.5f;
-            drawList->AddText(ImVec2(hpTx + 1.0f, hpTy + 1.0f), IM_COL32(0, 0, 0, A(140)), hpBuf);
-            drawList->AddText(ImVec2(hpTx,         hpTy),         IM_COL32(255, 255, 255, A(200)), hpBuf);
-        }
-
-        // Cast bar below health bar when unit is casting
-        float castBarBaseY = sy + barH + 2.0f;
-        float nameplateBottom = castBarBaseY;  // tracks lowest drawn element for debuff dots
+        // Health fill: UI-TargetingFrame-BarFill tinted by reaction, cut off
+        // at the health fraction rather than squeezed.
         {
-            // Enemy Cast Bars on Nameplates. The control names enemies, so a
-            // friendly caster's bar is not what it governs, and the current
-            // target keeps its bar for the same reason it keeps its plate.
+            const ImVec2 b0 = P(5, 20);
+            const ImVec2 b1 = P(105, 27);
+            const float fillX = b0.x + (b1.x - b0.x) * healthPct;
+            if (art.barFill) {
+                drawList->AddImage((ImTextureID)(uintptr_t)art.barFill, b0, ImVec2(fillX, b1.y),
+                                   ImVec2(0, 0), ImVec2(healthPct, 1), barColor);
+            } else {
+                drawList->AddRectFilled(b0, ImVec2(fillX, b1.y), barColor);
+            }
+        }
+
+        // The border, with its level box.
+        if (art.border) {
+            drawList->AddImage((ImTextureID)(uintptr_t)art.border, P(0, 0), P(128, 32),
+                               ImVec2(0, 0), ImVec2(1, 1), white);
+        } else {
+            drawList->AddRect(P(4, 19), P(106, 28), IM_COL32(200, 160, 40, A(255)));
+        }
+
+        // Level in the box, or the skull for ?? and bosses. Coloured by
+        // difficulty, as GetQuestDifficultyColor does.
+        ImFont* plateFont = interfaceFaceOrDefault("Fonts\\FRIZQT__.TTF");
+        const uint32_t level = unit->getLevel();
+        const uint32_t playerLevel = gameHandler.getPlayerLevel();
+        const bool skullLevel = creatureRank == 3 || level == 0 ||
+                                (!isPlayer && playerLevel > 0 && level >= playerLevel + 10) ||
+                                (isPlayer && isHostile && playerLevel > 0 && level >= playerLevel + 10);
+        if (skullLevel) {
+            if (art.skull) {
+                drawList->AddImage((ImTextureID)(uintptr_t)art.skull, P(106.5f, 15.5f), P(122.5f, 31.5f),
+                                   ImVec2(0, 0), ImVec2(1, 1), white);
+            }
+        } else {
+            const int diff = static_cast<int>(level) - static_cast<int>(playerLevel);
+            ImU32 levelColor;
+            if (diff >= 5)       levelColor = IM_COL32(255, 26, 26, A(255));
+            else if (diff >= 3)  levelColor = IM_COL32(255, 128, 64, A(255));
+            else if (diff >= -2) levelColor = IM_COL32(255, 209, 0, A(255));
+            else if (!addons::questIsTrivial(static_cast<int>(playerLevel), static_cast<int>(level)))
+                                 levelColor = IM_COL32(64, 191, 64, A(255));
+            else                 levelColor = IM_COL32(128, 128, 128, A(255));
+            char levelBuf[8];
+            snprintf(levelBuf, sizeof(levelBuf), "%u", level);
+            const float levelSize = 9.0f * s;
+            const ImVec2 lsz = plateFont->CalcTextSizeA(levelSize, FLT_MAX, 0.0f, levelBuf);
+            const ImVec2 c = P(114.5f, 23.5f);
+            addOutlinedText(drawList, plateFont, levelSize,
+                            ImVec2(std::round(c.x - lsz.x * 0.5f), std::round(c.y - lsz.y * 0.5f)),
+                            levelColor, A(200), levelBuf);
+        }
+
+        // The elite dragon, curled round the level box.
+        if ((creatureRank == 1 || creatureRank == 2 || creatureRank == 3) && art.elite) {
+            drawList->AddImage((ImTextureID)(uintptr_t)art.elite, P(102.5f, 11.5f), P(166.5f, 43.5f),
+                               ImVec2(0, 0), ImVec2(1, 1), white);
+        }
+
+        // Cast bar under the plate: the plain border when it can be
+        // interrupted, the shielded one when it cannot, the spell's icon in
+        // the box at the left. No text: the stock plate shows none.
+        {
             const bool castBarAllowed =
                 isTarget || !isHostile ||
                 addons::storedCVarValue("showVKeyCastBar", "1") != "0";
             const auto* cs = castBarAllowed ? gameHandler.getUnitCastState(guid) : nullptr;
             if (cs && cs->casting && cs->timeTotal > 0.0f) {
-                float castPct = std::clamp((cs->timeTotal - cs->timeRemaining) / cs->timeTotal, 0.0f, 1.0f);
-                const float cbH = 6.0f * settingsPanel_.nameplateScale_;
-
-                // Spell icon + name above the cast bar
-                const std::string& spellName = gameHandler.getSpellName(cs->spellId);
-                {
-                    auto* castAm = services_.assetManager;
-                    VkDescriptorSet castIcon = (cs->spellId && castAm)
-                        ? getSpellIcon(cs->spellId, castAm) : VK_NULL_HANDLE;
-                    float iconSz = cbH + 8.0f;
-                    if (castIcon) {
-                        // Draw icon to the left of the cast bar
-                        float iconX = barX - iconSz - 2.0f;
-                        float iconY = castBarBaseY;
-                        drawList->AddImage((ImTextureID)(uintptr_t)castIcon,
-                                           ImVec2(iconX, iconY),
-                                           ImVec2(iconX + iconSz, iconY + iconSz));
-                        drawList->AddRect(ImVec2(iconX - 1.0f, iconY - 1.0f),
-                                          ImVec2(iconX + iconSz + 1.0f, iconY + iconSz + 1.0f),
-                                          IM_COL32(0, 0, 0, A(180)), 1.0f);
-                    }
-                    if (!spellName.empty()) {
-                        ImVec2 snSz = ImGui::CalcTextSize(spellName.c_str());
-                        float snX = sx - snSz.x * 0.5f;
-                        float snY = castBarBaseY;
-                        drawList->AddText(ImVec2(snX + 1.0f, snY + 1.0f), IM_COL32(0, 0, 0, A(140)), spellName.c_str());
-                        drawList->AddText(ImVec2(snX,         snY),         IM_COL32(255, 210, 100, A(220)), spellName.c_str());
-                        castBarBaseY += snSz.y + 2.0f;
-                    }
-                }
-
-                // Cast bar: green = interruptible, red = uninterruptible; both pulse when >80% complete
-                ImU32 cbBg = IM_COL32(30, 25, 40, A(180));
-                ImU32 cbFill;
-                if (castPct > 0.8f && unit->isHostile()) {
-                    float pulse = 0.7f + 0.3f * std::sin(static_cast<float>(ImGui::GetTime()) * 8.0f);
-                    cbFill = cs->interruptible
-                        ? IM_COL32(static_cast<int>(40  * pulse), static_cast<int>(220 * pulse), static_cast<int>(40  * pulse), A(220))  // green pulse
-                        : IM_COL32(static_cast<int>(255 * pulse), static_cast<int>(30  * pulse), static_cast<int>(30  * pulse), A(220)); // red pulse
+                const float castPct = std::clamp(
+                    (cs->timeTotal - cs->timeRemaining) / cs->timeTotal, 0.0f, 1.0f);
+                // Cast-bar texel (x, y) in plate space.
+                auto C = [&](float tx, float ty) { return P(tx - 17.0f, ty + 26.0f); };
+                const ImVec2 c0 = C(22, 12);
+                const ImVec2 c1 = C(122, 19);
+                const ImU32 castColor = IM_COL32(255, 179, 0, A(255));
+                if (art.barFill) {
+                    drawList->AddImage((ImTextureID)(uintptr_t)art.barFill, c0,
+                                       ImVec2(c0.x + (c1.x - c0.x) * castPct, c1.y),
+                                       ImVec2(0, 0), ImVec2(castPct, 1), castColor);
                 } else {
-                    cbFill = cs->interruptible
-                        ? IM_COL32(50,  190, 50,  A(200))   // green = interruptible
-                        : IM_COL32(190, 40,  40,  A(200));  // red = uninterruptible
+                    drawList->AddRectFilled(c0, ImVec2(c0.x + (c1.x - c0.x) * castPct, c1.y), castColor);
                 }
-                drawList->AddRectFilled(ImVec2(barX,                   castBarBaseY),
-                                        ImVec2(barX + barW,             castBarBaseY + cbH), cbBg,    2.0f);
-                drawList->AddRectFilled(ImVec2(barX,                   castBarBaseY),
-                                        ImVec2(barX + barW * castPct,   castBarBaseY + cbH), cbFill,  2.0f);
-                drawList->AddRect      (ImVec2(barX - 1.0f, castBarBaseY - 1.0f),
-                                        ImVec2(barX + barW + 1.0f, castBarBaseY + cbH + 1.0f),
-                                        IM_COL32(20, 10, 40, A(200)), 2.0f);
-
-                // Time remaining text
-                char timeBuf[12];
-                snprintf(timeBuf, sizeof(timeBuf), "%.1fs", cs->timeRemaining);
-                ImVec2 timeSz = ImGui::CalcTextSize(timeBuf);
-                float timeX = sx - timeSz.x * 0.5f;
-                float timeY = castBarBaseY + (cbH - timeSz.y) * 0.5f;
-                drawList->AddText(ImVec2(timeX + 1.0f, timeY + 1.0f), IM_COL32(0, 0, 0, A(140)), timeBuf);
-                drawList->AddText(ImVec2(timeX,         timeY),         IM_COL32(220, 200, 255, A(220)), timeBuf);
-                nameplateBottom = castBarBaseY + cbH + 2.0f;
+                const VkDescriptorSet castArt = cs->interruptible ? art.castBorder : art.castShield;
+                if (castArt) {
+                    drawList->AddImage((ImTextureID)(uintptr_t)castArt, C(0, 0), C(128, 32),
+                                       ImVec2(0, 0), ImVec2(1, 1), white);
+                }
+                auto* castAm = services_.assetManager;
+                const VkDescriptorSet castIcon = (cs->spellId && castAm)
+                    ? getSpellIcon(cs->spellId, castAm) : VK_NULL_HANDLE;
+                if (castIcon) {
+                    const ImVec2 i0 = cs->interruptible ? C(4, 8) : C(5, 9);
+                    const ImVec2 i1 = cs->interruptible ? C(17, 21) : C(18, 22);
+                    drawList->AddImage((ImTextureID)(uintptr_t)castIcon, i0, i1,
+                                       ImVec2(0.07f, 0.07f), ImVec2(0.93f, 0.93f), white);
+                }
             }
         }
 
-        // Debuff dot indicators: small colored squares below the nameplate showing
-        // player-applied auras on the current hostile target.
-        // Colors: Magic=blue, Curse=purple, Disease=yellow, Poison=green, Other=grey
-        if (isTarget && unit->isHostile() && !isCorpse) {
-            const auto& auras = gameHandler.getTargetAuras();
-            const uint64_t pguid = gameHandler.getPlayerGuid();
-            const float dotSize = 6.0f * settingsPanel_.nameplateScale_;
-            const float dotGap  = 2.0f;
-            float dotX = barX;
-            for (const auto& aura : auras) {
-                if (aura.isEmpty() || aura.casterGuid != pguid) continue;
-                uint8_t dispelType = gameHandler.getSpellDispelType(aura.spellId);
-                ImU32 dotCol;
-                switch (dispelType) {
-                    case 1:  dotCol = IM_COL32( 64, 128, 255, A(210)); break; // Magic   - blue
-                    case 2:  dotCol = IM_COL32(160,  32, 240, A(210)); break; // Curse   - purple
-                    case 3:  dotCol = IM_COL32(180, 140,  40, A(210)); break; // Disease - yellow-brown
-                    case 4:  dotCol = IM_COL32( 50, 200,  50, A(210)); break; // Poison  - green
-                    default: dotCol = IM_COL32(170, 170, 170, A(170)); break; // Other   - grey
-                }
-                drawList->AddRectFilled(ImVec2(dotX,          nameplateBottom),
-                                        ImVec2(dotX + dotSize, nameplateBottom + dotSize), dotCol, 1.0f);
-                drawList->AddRect      (ImVec2(dotX - 1.0f,          nameplateBottom - 1.0f),
-                                        ImVec2(dotX + dotSize + 1.0f, nameplateBottom + dotSize + 1.0f),
-                                        IM_COL32(0, 0, 0, A(150)), 1.0f);
-
-                // Duration clock-sweep overlay (like target frame auras)
-                uint64_t nowMs = static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch()).count());
-                int32_t remainMs = aura.getRemainingMs(nowMs);
-                if (aura.maxDurationMs > 0 && remainMs > 0) {
-                    float pct = 1.0f - static_cast<float>(remainMs) / static_cast<float>(aura.maxDurationMs);
-                    pct = std::clamp(pct, 0.0f, 1.0f);
-                    float cx = dotX + dotSize * 0.5f;
-                    float cy = nameplateBottom + dotSize * 0.5f;
-                    float r  = dotSize * 0.5f;
-                    float startAngle = -IM_PI * 0.5f;
-                    float endAngle   = startAngle + pct * IM_PI * 2.0f;
-                    ImVec2 center(cx, cy);
-                    const int segments = 12;
-                    for (int seg = 0; seg < segments; seg++) {
-                        float a0 = startAngle + (endAngle - startAngle) * seg / segments;
-                        float a1 = startAngle + (endAngle - startAngle) * (seg + 1) / segments;
-                        drawList->AddTriangleFilled(
-                            center,
-                            ImVec2(cx + r * std::cos(a0), cy + r * std::sin(a0)),
-                            ImVec2(cx + r * std::cos(a1), cy + r * std::sin(a1)),
-                            IM_COL32(0, 0, 0, A(100)));
-                    }
-                }
-
-                // Stack count on dot (upper-left corner)
-                if (aura.charges > 1) {
-                    char stackBuf[8];
-                    snprintf(stackBuf, sizeof(stackBuf), "%d", aura.charges);
-                    drawList->AddText(ImVec2(dotX + 1.0f, nameplateBottom), IM_COL32(0, 0, 0, A(200)), stackBuf);
-                    drawList->AddText(ImVec2(dotX,         nameplateBottom - 1.0f), IM_COL32(255, 255, 255, A(240)), stackBuf);
-                }
-
-                // Duration text below dot
-                if (remainMs > 0) {
-                    char durBuf[8];
-                    if (remainMs >= 60000)
-                        snprintf(durBuf, sizeof(durBuf), "%dm", remainMs / 60000);
-                    else
-                        snprintf(durBuf, sizeof(durBuf), "%d", remainMs / 1000);
-                    ImVec2 durSz = ImGui::CalcTextSize(durBuf);
-                    float durX = dotX + (dotSize - durSz.x) * 0.5f;
-                    float durY = nameplateBottom + dotSize + 1.0f;
-                    drawList->AddText(ImVec2(durX + 1.0f, durY + 1.0f), IM_COL32(0, 0, 0, A(180)), durBuf);
-                    // Color: red if < 5s, yellow if < 15s, white otherwise
-                    ImU32 durCol = remainMs < 5000 ? IM_COL32(255, 60, 60, A(240))
-                                 : remainMs < 15000 ? IM_COL32(255, 200, 60, A(240))
-                                 : IM_COL32(230, 230, 230, A(220));
-                    drawList->AddText(ImVec2(durX, durY), durCol, durBuf);
-                }
-
-                // Spell name + duration tooltip on hover
-                {
-                    ImVec2 mouse = ImGui::GetMousePos();
-                    if (mouse.x >= dotX && mouse.x < dotX + dotSize &&
-                        mouse.y >= nameplateBottom && mouse.y < nameplateBottom + dotSize) {
-                        const std::string& dotSpellName = gameHandler.getSpellName(aura.spellId);
-                        if (!dotSpellName.empty()) {
-                            if (remainMs > 0) {
-                                int secs = remainMs / 1000;
-                                int mins = secs / 60;
-                                secs %= 60;
-                                char tipBuf[128];
-                                if (mins > 0)
-                                    snprintf(tipBuf, sizeof(tipBuf), "%s (%dm %ds)", dotSpellName.c_str(), mins, secs);
-                                else
-                                    snprintf(tipBuf, sizeof(tipBuf), "%s (%ds)", dotSpellName.c_str(), secs);
-                                ImGui::SetTooltip("%s", tipBuf);
-                            } else {
-                                ImGui::SetTooltip("%s", dotSpellName.c_str());
-                            }
-                        }
-                    }
-                }
-
-                dotX += dotSize + dotGap;
-                if (dotX + dotSize > barX + barW) break;
-            }
-        }
-
-        // Name + level label above health bar
-        //
-        // Whether this kind of unit gets its name shown at all. The interface
-        // offers one of these per category and read none of them, so every
-        // unit was labelled alike. The health bar is a different question -
-        // nameplateShowFriends and nameplateShowEnemies decide that, above -
-        // so turning a name off here leaves the plate and takes the text,
-        // which is what these settings mean. The current target keeps its
-        // name whatever is set, as it keeps its plate.
-        const char* nameCVar =
-            isPlayer ? (isHostile ? "unitNameEnemyPlayerName"
-                                  : "unitNameFriendlyPlayerName")
-            : isTotem ? (isHostile ? "unitNameEnemyTotemName"
-                                   : "unitNameFriendlyTotemName")
-            : isPet ? (isHostile ? "unitNameEnemyPetName"
-                                 : "unitNameFriendlyPetName")
-            : isGuardian ? (isHostile ? "unitNameEnemyGuardianName"
-                                      : "unitNameFriendlyGuardianName")
-                     : (unit->getMaxHealth() > 0 && unit->getMaxHealth() < 100
-                            ? "unitNameNonCombatCreatureName"   // critters
-                            : "unitNameNPC");
-        const bool showThisName =
-            isTarget || addons::storedCVarValue(nameCVar, "1") != "0";
-
-        uint32_t level = unit->getLevel();
+        // Name above the border: FRIZQT with an outline, white.
         const std::string& unitName = unit->getName();
-
-        // Player Titles. The chosen title travels with the player like any
-        // other public field, so a nameplate can decorate the name the same
-        // way the target frame does - with that player's name in the row's
-        // own hole, not the reader's. A title this client has no row for
-        // formats to nothing and the plain name is kept.
-        std::string titledName;
-        if (isPlayer && !unitName.empty() &&
-            addons::storedCVarValue("unitNamePlayerPvPTitle", "1") != "0") {
-            const auto& fields = entityPtr->getFields();
-            auto tit = fields.find(game::fieldIndex(game::UF::PLAYER_CHOSEN_TITLE));
-            if (tit != fields.end() && tit->second != 0) {
-                titledName = gameHandler.getFormattedTitleFor(tit->second, unitName);
-            }
-        }
-        const std::string& shownName = titledName.empty() ? unitName : titledName;
-
-        char labelBuf[96];
-        if (isPlayer) {
-            // Player nameplates: show name only (no level clutter).
-            // Fall back to level as placeholder while the name query is pending.
-            if (!shownName.empty())
-                snprintf(labelBuf, sizeof(labelBuf), "%s", shownName.c_str());
-            else {
-                // Name query may be pending; request it now to ensure it gets resolved
-                gameHandler.queryPlayerName(unit->getGuid());
-                if (level > 0)
-                    snprintf(labelBuf, sizeof(labelBuf), "Player (%u)", level);
-                else
-                    snprintf(labelBuf, sizeof(labelBuf), "Player");
-            }
-        } else if (level > 0) {
-            uint32_t playerLevel = gameHandler.getPlayerLevel();
-            // Show skull for units more than 10 levels above the player
-            if (playerLevel > 0 && level > playerLevel + 10)
-                snprintf(labelBuf, sizeof(labelBuf), "?? %s", unitName.c_str());
-            else
-                snprintf(labelBuf, sizeof(labelBuf), "%u %s", level, unitName.c_str());
-        } else {
-            snprintf(labelBuf, sizeof(labelBuf), "%s", unitName.c_str());
-        }
-        ImVec2 textSize = ImGui::CalcTextSize(labelBuf);
-        float nameX = sx - textSize.x * 0.5f;
-        float nameY = sy - barH - 12.0f;
-        // Name color communicates reaction too: friendly players blue, enemies red.
-        ImU32 nameColor;
-        if (isPlayer) {
-            nameColor = isHostile
-                ? IM_COL32(220, 80, 80, A(230))
-                : IM_COL32(102, 153, 255, A(230));
-        } else {
-            // Stock reaction colours (UnitSelectionColor).
-            const int react = gameHandler.unitReactionToPlayer(*unit);
-            nameColor = react <= 2 ? IM_COL32(220,  80,  80, A(230))   // hostile
-                      : react == 3 ? IM_COL32(240, 130,  60, A(230))   // unfriendly
-                      : react == 4 ? IM_COL32(240, 220,  80, A(230))   // neutral
-                      :              IM_COL32( 90, 220,  90, A(230));  // friendly
-        }
-        // Sub-label below the name: guild tag for players, subtitle for NPCs
-        std::string subLabel;
-        if (isPlayer) {
-            // Guild Names, which this client already had and never asked about.
-            // The NPC subtitle below is a different thing wearing the same
-            // angle brackets, and is not what this control names.
-            uint32_t guildId =
-                addons::storedCVarValue("unitNamePlayerGuild", "1") != "0"
-                    ? gameHandler.getEntityGuildId(guid) : 0;
-            if (guildId != 0) {
-                const std::string& gn = gameHandler.lookupGuildName(guildId);
-                if (!gn.empty()) subLabel = "<" + gn + ">";
-            }
-        } else {
-            // NPC subtitle (e.g. "<Reagent Vendor>", "<Innkeeper>")
-            std::string sub = gameHandler.getCachedCreatureSubName(unit->getEntry());
-            if (!sub.empty()) subLabel = "<" + sub + ">";
-        }
-        if (!subLabel.empty()) nameY -= 10.0f;  // shift name up for sub-label line
-
-        if (showThisName) {
-            drawList->AddText(ImVec2(nameX + 1.0f, nameY + 1.0f), IM_COL32(0, 0, 0, A(160)), labelBuf);
-            drawList->AddText(ImVec2(nameX,         nameY),         nameColor, labelBuf);
+        if (isPlayer && unitName.empty()) gameHandler.queryPlayerName(unit->getGuid());
+        if (!unitName.empty()) {
+            const float nameSize = 12.0f * s;
+            const ImVec2 nsz = plateFont->CalcTextSizeA(nameSize, FLT_MAX, 0.0f, unitName.c_str());
+            const ImVec2 anchor = P(55.0f, 16.0f);
+            addOutlinedText(drawList, plateFont, nameSize,
+                            ImVec2(std::round(anchor.x - nsz.x * 0.5f), std::round(anchor.y - nsz.y)),
+                            white, A(255), unitName.c_str());
         }
 
-        // Gold chevron above the current target's plate - a gently bobbing
-        // down-arrow so the selected enemy is unmistakable at a glance.
-        if (isTarget) {
-            float bob = 2.0f * std::sin(static_cast<float>(ImGui::GetTime()) * 5.0f);
-            float tipY  = nameY - 5.0f + bob;
-            float baseY = tipY - 8.0f;
-            float halfW = 6.0f;
-            drawList->AddTriangleFilled(
-                ImVec2(sx - halfW + 1.0f, baseY + 1.0f), ImVec2(sx + halfW + 1.0f, baseY + 1.0f),
-                ImVec2(sx + 1.0f, tipY + 1.0f), IM_COL32(0, 0, 0, A(140)));
-            drawList->AddTriangleFilled(
-                ImVec2(sx - halfW, baseY), ImVec2(sx + halfW, baseY),
-                ImVec2(sx, tipY), IM_COL32(255, 215, 0, A(240)));
-        }
-
-        // Sub-label below the name (WoW-style <Guild Name> or <NPC Title> in
-        // lighter color). Hidden with the name it belongs to: a guild tag
-        // floating alone over a nameless plate is not what anyone asked for.
-        if (!subLabel.empty() && showThisName) {
-            ImVec2 subSz = ImGui::CalcTextSize(subLabel.c_str());
-            float subX = sx - subSz.x * 0.5f;
-            float subY = nameY + textSize.y + 1.0f;
-            drawList->AddText(ImVec2(subX + 1.0f, subY + 1.0f), IM_COL32(0, 0, 0, A(120)), subLabel.c_str());
-            drawList->AddText(ImVec2(subX,         subY),         IM_COL32(180, 180, 180, A(200)), subLabel.c_str());
-        }
-
-        // Group leader crown to the right of the name on player nameplates.
-        // The stock party-frame art at its native 16 px: the font has no
-        // crown code point, so the old U+265B glyph drew as a '?' box.
-        if (isPlayer && gameHandler.isInGroup() &&
-            gameHandler.getPartyData().leaderGuid == guid) {
-            static VkDescriptorSet leaderIcon = VK_NULL_HANDLE;
-            static bool leaderIconMissing = false;
-            if (!leaderIcon && !leaderIconMissing) {
-                UiTextureLoad why = UiTextureLoad::Ok;
-                leaderIcon = uploadUiTextureFromBlp(services_.assetManager,
-                    "Interface\\GroupFrame\\UI-Group-LeaderIcon.blp", services_.window, &why);
-                // A file that is not there will not appear; a context that is
-                // not up yet will, so only the first is remembered.
-                leaderIconMissing = !leaderIcon && why != UiTextureLoad::NoContext;
-            }
-            if (leaderIcon) {
-                constexpr float kLeaderIconSize = 16.0f;
-                const float crownX = nameX + textSize.x + 2.0f;
-                const float crownY = nameY + (textSize.y - kLeaderIconSize) * 0.5f;
-                drawList->AddImage((ImTextureID)(uintptr_t)leaderIcon,
-                                   ImVec2(crownX, crownY),
-                                   ImVec2(crownX + kLeaderIconSize, crownY + kLeaderIconSize),
-                                   ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
-                                   IM_COL32(255, 255, 255, A(255)));
-            }
-        }
-
-        // Raid mark: the real Blizzard icon art floating above the unit, the way
-        // the original client presents it. This used to be a text glyph beside
-        // the name, but the ImGui font carries no skull/moon/cross code points,
-        // so every mark drew as a '?' box.
+        // Raid mark at the left of the plate.
         {
-            uint8_t raidMark = gameHandler.getEntityRaidMark(guid);
+            const uint8_t raidMark = gameHandler.getEntityRaidMark(guid);
             if (raidMark < game::GameHandler::kRaidMarkCount) {
                 VkDescriptorSet markTex = ui::getRaidTargetIcon(raidMark, services_.assetManager);
                 if (markTex) {
-                    // Sits above the name, and above the target chevron when this
-                    // is the current target, so the three never overlap.
-                    constexpr float kMarkSize = 32.0f;
-                    const float markBottom = nameY - (isTarget ? 16.0f : 3.0f);
-                    const float markTop    = markBottom - kMarkSize;
-                    drawList->AddImage(
-                        (ImTextureID)(uintptr_t)markTex,
-                        ImVec2(sx - kMarkSize * 0.5f, markTop),
-                        ImVec2(sx + kMarkSize * 0.5f, markBottom),
-                        ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
-                        IM_COL32(255, 255, 255, A(255)));
+                    drawList->AddImage((ImTextureID)(uintptr_t)markTex, P(-20.0f, 7.0f), P(2.0f, 29.0f),
+                                       ImVec2(0, 0), ImVec2(1, 1), white);
                     raidMarksOnPlates |= 1u << raidMark;
                 }
             }
-
-            // No quest glyphs beside the name. The stock client puts nothing
-            // there: a quest giver's ! or ? is the TalkToMe model over its
-            // head (QuestMarkerRenderer), and a kill target is not marked at
-            // all. The U+2694 swords and the "!"/"?" text that were here
-            // doubled the 3D mark, and the swords drew as a '?' box in a font
-            // without them.
         }
 
-        // Click to target / right-click context: detect clicks inside the nameplate region.
-        // Use the wider of name text or health bar for the horizontal hit area so short
-        // names like "Wolf" don't produce a tiny clickable strip narrower than the bar.
-        if (!ImGui::GetIO().WantCaptureMouse) {
-            ImVec2 mouse = ImGui::GetIO().MousePos;
-            float hitLeft  = std::min(nameX, barX) - 2.0f;
-            float hitRight = std::max(nameX + textSize.x, barX + barW) + 2.0f;
-            float ny0 = nameY - 1.0f;
-            float ny1 = sy + barH + 2.0f;
-            float nx0 = hitLeft;
-            float nx1 = hitRight;
-            if (mouse.x >= nx0 && mouse.x <= nx1 && mouse.y >= ny0 && mouse.y <= ny1) {
-                // Track mouseover for [target=mouseover] macro conditionals
-                gameHandler.setMouseoverGuid(guid);
-                // Hover tooltip: name, level/class, guild
-                ImGui::BeginTooltip();
-                ImGui::TextUnformatted(unitName.c_str());
-                if (isPlayer) {
-                    uint8_t cid = entityClassId(unit);
-                    ImGui::Text("Level %u %s", level, classNameStr(cid));
-                } else if (level > 0) {
-                    ImGui::Text("Level %u", level);
-                }
-                if (!subLabel.empty()) ImGui::TextColored(ImVec4(0.7f,0.7f,0.7f,1.0f), "%s", subLabel.c_str());
-                ImGui::EndTooltip();
-                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                    gameHandler.setTarget(guid);
-                } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-                    nameplateCtxGuid_ = guid;
-                    nameplateCtxPos_  = mouse;
-                    ImGui::OpenPopup("##NameplateCtx");
-                }
+        // Click to target, right-click for the unit menu; hover is mouseover.
+        if (hovered) {
+            gameHandler.setMouseoverGuid(guid);
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                gameHandler.setTarget(guid);
+            } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                nameplateCtxGuid_ = guid;
+                nameplateCtxPos_  = ImGui::GetIO().MousePos;
+                ImGui::OpenPopup("##NameplateCtx");
             }
         }
     }

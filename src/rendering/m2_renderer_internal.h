@@ -97,6 +97,11 @@ inline glm::vec3 animatedBatchLightWorldCenter(const M2Instance& instance,
 inline const auto kLavaAnimStart = std::chrono::steady_clock::now();
 inline constexpr uint32_t kParticleFlagRandomized = 0x40;
 inline constexpr uint32_t kParticleFlagTiled = 0x80;
+// M2 particle flag 0x10, "do not trail": particles stay in the emitter bone's
+// frame and move with it rather than being left behind in world space.
+inline constexpr uint32_t kParticleFlagNoTrail = 0x10;
+// M2ParticleEmitter::emitterType
+inline constexpr uint8_t kParticleEmitterSphere = 2;
 inline constexpr float kSmokeEmitInterval = 1.0f / 48.0f;
 
 // ---- Geometry / collision helpers ----

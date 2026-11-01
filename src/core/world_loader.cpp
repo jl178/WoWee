@@ -1008,34 +1008,11 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
                    " m2R=", (renderer_->getM2Renderer() ? "yes" : "NULL"));
     }
 
-    // Set up NPC animation callbacks (for online creatures)
     showProgress("Preparing creatures...", 0.97f);
-    if (gameHandler_ && renderer_ && renderer_->getCharacterRenderer()) {
-        auto* cr = renderer_->getCharacterRenderer();
-        auto* spawner = entitySpawner_;
-
-        gameHandler_->setNpcDeathCallback([cr, spawner](uint64_t guid) {
-            spawner->markCreatureDead(guid);
-            uint32_t instanceId = spawner->getCreatureInstanceId(guid);
-            if (instanceId == 0) instanceId = spawner->getPlayerInstanceId(guid);
-            if (instanceId != 0 && cr) {
-                cr->playAnimation(instanceId, rendering::anim::DEATH, false);
-            }
-        });
-
-        gameHandler_->setNpcRespawnCallback([cr, spawner](uint64_t guid) {
-            spawner->unmarkCreatureDead(guid);
-            uint32_t instanceId = spawner->getCreatureInstanceId(guid);
-            if (instanceId == 0) instanceId = spawner->getPlayerInstanceId(guid);
-            if (instanceId != 0 && cr) {
-                cr->playAnimation(instanceId, rendering::anim::STAND, true);
-            }
-        });
-
-        // No swing callback here: AnimationCallbackHandler owns that slot, and
-        // registering a weaponless ATTACK_1H prober on every world load
-        // replaced its weapon-, hand- and ability-aware one.
-    }
+    // No NPC death, respawn or swing callbacks here: AnimationCallbackHandler
+    // owns those slots. This registered a death and a respawn on every world
+    // load that replaced its pair - Death without the lock that keeps a corpse
+    // down, nothing for the local character, Stand rather than Rise.
 
     // Keep the loading screen visible until all spawn/equipment/gameobject queues
     // are fully drained. This ensures the player sees a fully populated world

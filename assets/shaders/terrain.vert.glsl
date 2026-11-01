@@ -21,11 +21,13 @@ layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
 layout(location = 3) in vec2 aLayerUV;
+layout(location = 4) in vec3 aVertColor;   // MCCV, doubled: 1.0 is neutral
 
 layout(location = 0) out vec3 FragPos;
 layout(location = 1) out vec3 Normal;
 layout(location = 2) out vec2 TexCoord;
 layout(location = 3) out vec2 LayerUV;
+layout(location = 4) out vec3 VertColor;
 
 void main() {
     vec4 worldPos = push.model * vec4(aPosition, 1.0);
@@ -33,5 +35,6 @@ void main() {
     Normal = aNormal;
     TexCoord = aTexCoord;
     LayerUV = aLayerUV;
+    VertColor = aVertColor;
     gl_Position = projection * view * worldPos;
 }

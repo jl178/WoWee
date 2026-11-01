@@ -28,6 +28,10 @@ static_assert(ALPHA_MAP_PACKED * 2 == ALPHA_MAP_SIZE,
 inline constexpr uint8_t ALPHA_FILL_FLAG = 0x80;
 inline constexpr uint8_t ALPHA_COUNT_MASK = 0x7F;
 
+/// MCNK flag: the four-bit map is painted to its edge, so its last row and
+/// column are data and are not to be copied from the ones before them.
+inline constexpr uint32_t MCNK_DO_NOT_FIX_ALPHA_MAP = 0x8000;
+
 /// Decode one layer's alpha map into `outAlpha`, which is resized to
 /// ALPHA_MAP_SIZE.
 ///

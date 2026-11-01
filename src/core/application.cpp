@@ -3956,14 +3956,9 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
              ranged.item.inventoryType == game::InvType::THROWN);
         const bool hasDrawableWeapon = !mainHand.empty() || hasOffHandWeapon || hasRangedWeapon;
         if (attackWeaponNeeded && hasDrawableWeapon && appearanceComposer_ &&
-            appearanceComposer_->isWeaponsSheathed()) {
-            if (renderer && renderer->getAnimationController()) {
-                renderer->getAnimationController()->playWeaponSheathAnimation(
-                    appearanceComposer_->sheathSpot(game::EquipSlot::MAIN_HAND),
-                    appearanceComposer_->sheathSpot(game::EquipSlot::OFF_HAND));
-            }
-            appearanceComposer_->setWeaponsSheathed(false);
-            appearanceComposer_->loadEquippedWeapons();
+            appearanceComposer_->targetWeaponsSheathed()) {
+            // The draw reach; the weapons reach the hands at its hand-off.
+            appearanceComposer_->requestWeaponsSheathed(false);
         }
         // Swap back to melee weapon when auto-attack stops
         if (!autoAttacking && wasAutoAttacking_ && appearanceComposer_ && appearanceComposer_->isShowingRanged()) {
@@ -3994,14 +3989,12 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
         const bool uiWantsKeyboard = ImGui::GetIO().WantCaptureKeyboard ||
                                      ui::interfaceTakingTypedInput();
         if (!uiWantsKeyboard && ui::KeybindingManager::getInstance().isCommandPressed("TOGGLESHEATH") && appearanceComposer_) {
-            if (renderer && renderer->getAnimationController()) {
-                renderer->getAnimationController()->playWeaponSheathAnimation(
-                    appearanceComposer_->sheathSpot(game::EquipSlot::MAIN_HAND),
-                    appearanceComposer_->sheathSpot(game::EquipSlot::OFF_HAND));
-            }
+            // The reach plays on the upper body (standing or running) and the
+            // weapons move at its hand-off; presses during it are queued and
+            // only the last counts.
             appearanceComposer_->toggleWeaponsSheathed();
-            appearanceComposer_->loadEquippedWeapons();
         }
+        if (appearanceComposer_) appearanceComposer_->updateSheathReach();
     }
 
     inGameStep = "world update";
@@ -5808,8 +5801,14 @@ void Application::spawnPlayerCharacter() {
 	        // draw and is worth drawing. Nothing else is set up for it.
 	        charRenderer->setDrawSkinExtra(instanceId, true);
 
-        // Play idle animation
-        charRenderer->playAnimation(instanceId, rendering::anim::STAND, true);
+        // Play idle animation - or, for a corpse that has not released, lie
+        // where it fell (a rebuilt or freshly logged-in character that is
+        // dead starts down, without a second fall).
+        if (gameHandler && gameHandler->isPlayerDead() && !gameHandler->isPlayerGhost()) {
+            charRenderer->playDeath(instanceId, /*alreadyDead=*/true);
+        } else {
+            charRenderer->playAnimation(instanceId, rendering::anim::STAND, true);
+        }
         LOG_INFO("Spawned player character at (",
                 static_cast<int>(spawnPos.x), ", ",
                 static_cast<int>(spawnPos.y), ", ",
