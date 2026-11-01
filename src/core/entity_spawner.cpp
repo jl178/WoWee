@@ -1356,6 +1356,7 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         // lookup works. What is left of that bug is updateCharacterTextures,
         // which has not been traced.
         uint16_t selectedHairScalp = 1;
+        uint32_t equipHeadDisplayId = 0;
         uint16_t selectedFacial100 = 100;
         uint16_t selectedFacial200 = 200;
         uint16_t selectedFacial300 = 300;
@@ -1368,6 +1369,7 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
                 extraRaceId = itExtra->second.raceId;
                 extraSexId = itExtra->second.sexId;
                 hasEquippedTabard = (itExtra->second.equipDisplayId[9] != 0);
+                equipHeadDisplayId = itExtra->second.equipDisplayId[0];
                 const uint32_t hairKey = appearanceKey(
                     extraRaceId, extraSexId, itExtra->second.hairStyleId);
                 auto itHairGeo = hairGeosetMap_.find(hairKey);
@@ -1633,6 +1635,15 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
                 // to be wearing one.
                 normalizedGeosets.insert(kGeosetNoCape);
             }
+        }
+
+        // A helm that hides hair swaps the style's scalp for the bald cap,
+        // the same rule other players get (core::helmHidesHair). NPCs now
+        // wear their helm models, and the hair poked through them.
+        if (hasHumanoidExtra && equipHeadDisplayId != 0 && selectedHairScalp > 1 && assetManager_ &&
+            core::helmHidesHair(*assetManager_, equipHeadDisplayId, extraSexId)) {
+            normalizedGeosets.erase(selectedHairScalp);
+            normalizedGeosets.insert(1);
         }
 
         if (!normalizedGeosets.empty()) {
