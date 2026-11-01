@@ -164,6 +164,16 @@ uint32_t M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
         const M2ModelGPU* model = instance.cachedModel;
         if (!model || !modelGivesLight(*model)) continue;
 
+        // Every light below sits inside the instance's padded bounds, and none
+        // is kept past 300 yards, so an instance whose sphere lies beyond that
+        // contributes nothing. Rejected here, before the per-batch bone
+        // transforms that were the bulk of this function's time.
+        {
+            const glm::vec3 toCam = instance.cachedCullCenter - cameraPos;
+            const float reach = 300.0f + std::max(instance.cachedPaddedRadius, 0.0f) + 10.0f;
+            if (glm::dot(toCam, toCam) > reach * reach) continue;
+        }
+
         if (model->isLavaModel) {
             const glm::vec3 worldPos = instance.cachedCullCenter;
             const glm::vec3 delta = worldPos - cameraPos;
