@@ -804,7 +804,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
     // pass that draws it. A wider pad to fall asleep than to wake keeps an
     // emitter at the edge from being dropped and rebuilt frame after frame.
     //
-    // Spell effects and emitters told to stop are left as they were, stepped
+    // Spell visuals (kits, missiles) and emitters told to stop are left as they were, stepped
     // whenever in range: a kit's end is timed by its live particles.
     ++particleFrame_;
     constexpr float kParticleViewPad = 30.0f;   // = renderM2Particles' pad
@@ -819,7 +819,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         const M2ModelGPU& pmodel = *instance.cachedModel;
         glm::vec3 toCam = instance.position - cachedCamPos_;
         float distSq = glm::dot(toCam, toCam);
-        const bool keepStepping = pmodel.isSpellEffect || instance.emissionStopped;
+        const bool keepStepping = instance.spellVisual || instance.emissionStopped;
         const bool inRange = distSq <= (keepStepping ? cachedMaxRenderDistSq_
                                                      : particleRangeSq(instance, pmodel));
         if (keepStepping) {

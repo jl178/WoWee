@@ -76,6 +76,12 @@ void M2Renderer::stopInstanceEmission(uint32_t instanceId) {
     instances[idxIt->second].emissionStopped = true;
 }
 
+void M2Renderer::markInstanceSpellVisual(uint32_t instanceId) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return;
+    instances[idxIt->second].spellVisual = true;
+}
+
 bool M2Renderer::instanceHasLiveParticles(uint32_t instanceId) const {
     auto idxIt = instanceIndexById.find(instanceId);
     if (idxIt == instanceIndexById.end()) return false;

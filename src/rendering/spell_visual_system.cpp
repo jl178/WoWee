@@ -400,6 +400,7 @@ bool SpellVisualSystem::spawnKitModel(uint32_t kitId, const std::string& path, u
         LOG_WARNING("SpellVisual: createInstance failed for kit ", kitId, " model ", path);
         return false;
     }
+    m2Renderer_->markInstanceSpellVisual(instanceId);
     if (attached) m2Renderer_->setInstanceTransform(instanceId, xf);
     m2Renderer_->restartInstanceAnimation(instanceId);
 
@@ -723,6 +724,7 @@ bool SpellVisualSystem::playSpellMissile(uint32_t visualId, const glm::vec3& sta
             LOG_WARNING("SpellVisual: failed to create missile instance for visualId=", visualId);
             break;
         }
+        m2Renderer_->markInstanceSpellVisual(instanceId);
         m2Renderer_->restartInstanceAnimation(instanceId);
         SpellMissile m;
         m.instanceId = instanceId;
