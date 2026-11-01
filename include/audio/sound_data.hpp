@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -218,6 +219,15 @@ public:
     /// ItemDisplayInfo.GroupSoundIndex -> ItemGroupSounds: the pickup or
     /// put-down sound of an item display. 0 when the display has no group.
     [[nodiscard]] uint32_t itemFoleySound(uint32_t itemDisplayId, bool pickup) const;
+    /// True when VocalUISounds.dbc was read. A character's spoken errors then
+    /// come from it alone; a missing row means the stock client says nothing.
+    [[nodiscard]] bool hasVocalUiSounds() const { return !vocalUiSounds_.empty(); }
+    /// VocalUISounds: the line a race and sex speak for a vocal UI error
+    /// (VocalUIEnum: 0 inventory full, 15 no mana, 46 out of range, ...).
+    /// pissed picks the PissedSoundID columns. Null when the row is missing
+    /// or its sound id names no SoundEntries row.
+    [[nodiscard]] const SoundEntry* vocalUiSound(uint32_t vocalUiEnum, uint32_t raceId, bool female,
+                                                 bool pissed) const;
     /// SoundEmitters.dbc rows placed on a map. Null when the map has none.
     [[nodiscard]] const std::vector<MapSoundEmitter>* mapEmitters(uint32_t mapId) const {
         auto it = mapEmitters_.find(mapId);
@@ -258,6 +268,9 @@ private:
     std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> footsteps_;
     // ItemGroupSounds: group -> pickup, put-down.
     std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> itemGroupSounds_;
+    // VocalUISounds: (enum << 8 | race) -> sound ids [normal male, normal
+    // female, pissed male, pissed female]; 0 for none.
+    std::unordered_map<uint32_t, std::array<uint32_t, 4>> vocalUiSounds_;
     // ItemDisplayInfo is large and only the item foley wants it: read on the
     // first ask, through the loader load() was given.
     Loader loader_;

@@ -1,6 +1,7 @@
 // SoundData reads the client's sound tables. These tests feed it synthetic
 // tables in the 3.3.5 layout and check the lookups and the parent chain.
 #include <catch_amalgamated.hpp>
+#include "audio/player_voice_manager.hpp"
 #include "audio/sound_data.hpp"
 #include "audio/world_fx.hpp"
 #include "pipeline/dbc_loader.hpp"
@@ -185,6 +186,62 @@ TEST_CASE("SoundData finds the misspelt female rows", "[sound_data]") {
     REQUIRE(data.load(f.loader()));
     REQUIRE(data.playerJumpSound(4, true)->id == 3285);
     REQUIRE(data.playerJumpSound(4, false) == nullptr);
+}
+
+TEST_CASE("SoundData picks a character's error line from VocalUISounds", "[sound_data]") {
+    Fixture f;
+    Strings se;
+    const uint32_t maleDir = se.add("Sound\\Character\\Human\\MaleErrorMessages");
+    const uint32_t femaleDir = se.add("Sound\\Character\\Human\\FemaleErrorMessages");
+    f.tables["SoundEntries.dbc"] = table(30, {
+        row(30, {{0, 1906}, {2, se.add("HumanMale_CantCastOutofRange")}, {3, se.add("HumanMale_err_outofrange02.wav")},
+                 {4, se.add("HumanMale_err_outofrange04.wav")}, {5, se.add("HumanMale_err_outofrange05.wav")},
+                 {23, maleDir}, {24, bits(0.69f)}}),
+        row(30, {{0, 2030}, {2, se.add("HumanFemale_CantCastOutOfRange")}, {3, se.add("HumanFemale_err_outofrange02.wav")},
+                 {23, femaleDir}, {24, bits(0.69f)}}),
+        row(30, {{0, 1880}, {2, se.add("HumanMale_InventoryFull")}, {3, se.add("HumanMale_err_inventoryfull01.wav")},
+                 {23, maleDir}, {24, bits(0.69f)}}),
+        row(30, {{0, 8000}, {2, se.add("HumanMale_InventoryFullPissed")}, {3, se.add("HumanMale_err_inventoryfull02.wav")},
+                 {23, maleDir}, {24, bits(0.5f)}}),
+    }, se.block);
+    // ID, VocalUIEnum, RaceID, NormalSoundID[male, female], PissedSoundID[male, female].
+    // The stock file marks an unused column 0 or 0xFFFFFFFF; 626 stands for
+    // the stock pissed ids that name no SoundEntries row.
+    f.tables["VocalUISounds.dbc"] = table(7, {
+        row(7, {{0, 363}, {1, 46}, {2, 1}, {3, 1906}, {4, 2030}, {5, 0xFFFFFFFFu}, {6, 0}}),
+        row(7, {{0, 9}, {1, 0}, {2, 1}, {3, 1880}, {4, 0xFFFFFFFFu}, {5, 8000}, {6, 626}}),
+    }, std::string(1, '\0'));
+    SoundData data;
+    REQUIRE(data.load(f.loader()));
+    REQUIRE(data.hasVocalUiSounds());
+
+    using wowee::audio::PlayerErrorSpeech;
+    using wowee::audio::vocalUiEnum;
+    REQUIRE(vocalUiEnum(PlayerErrorSpeech::OUT_OF_RANGE) == 46);
+    REQUIRE(vocalUiEnum(PlayerErrorSpeech::INVENTORY_FULL) == 0);
+    REQUIRE(vocalUiEnum(PlayerErrorSpeech::NO_MANA) == 15);
+    REQUIRE(vocalUiEnum(PlayerErrorSpeech::CANT_CREATE_HERE) == 18);
+
+    const auto* male = data.vocalUiSound(vocalUiEnum(PlayerErrorSpeech::OUT_OF_RANGE), 1, false, false);
+    REQUIRE(male != nullptr);
+    REQUIRE(male->files.size() == 3);
+    REQUIRE(male->files[0] == "Sound\\Character\\Human\\MaleErrorMessages\\HumanMale_err_outofrange02.wav");
+    REQUIRE(male->volume == Catch::Approx(0.69f));
+    REQUIRE(data.vocalUiSound(46, 1, true, false)->id == 2030);
+    REQUIRE(data.vocalUiSound(46, 1, false, true) == nullptr);  // 0xFFFFFFFF
+    REQUIRE(data.vocalUiSound(46, 1, true, true) == nullptr);   // 0
+    REQUIRE(data.vocalUiSound(46, 2, false, false) == nullptr); // no row for the race
+    REQUIRE(data.vocalUiSound(15, 1, false, false) == nullptr); // no row for the line
+
+    REQUIRE(data.vocalUiSound(0, 1, false, true)->id == 8000);
+    REQUIRE(data.vocalUiSound(0, 1, true, false) == nullptr);
+    REQUIRE(data.vocalUiSound(0, 1, true, true) == nullptr);    // names no SoundEntries row
+
+    f.tables.erase("VocalUISounds.dbc");
+    SoundData without;
+    REQUIRE(without.load(f.loader()));
+    REQUIRE_FALSE(without.hasVocalUiSounds());
+    REQUIRE(without.vocalUiSound(46, 1, false, false) == nullptr);
 }
 
 TEST_CASE("SoundData picks the room's WMOAreaTable row over the building's", "[sound_data]") {

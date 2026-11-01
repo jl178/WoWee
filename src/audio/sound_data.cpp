@@ -51,6 +51,9 @@ namespace igs { constexpr uint32_t kFields = 5, kPickup = 1, kPutDown = 2; }
 namespace idi { constexpr uint32_t kFields = 25, kGroupSound = 12; }  // ItemDisplayInfo
 // SoundEmitters: ID, Position[3], Direction[3], SoundEntriesID, MapID, Name.
 namespace sem { constexpr uint32_t kFields = 10, kPos = 1, kSound = 7, kMap = 8, kName = 9; }
+// VocalUISounds: ID, VocalUIEnum, RaceID, NormalSoundID[2] (male, female),
+// PissedSoundID[2]. An unused sound column holds 0 or 0xFFFFFFFF.
+namespace vui { constexpr uint32_t kFields = 7, kEnum = 1, kRace = 2, kSound0 = 3; }
 
 constexpr int kMaxParentDepth = 16;
 
@@ -94,6 +97,7 @@ bool SoundData::load(const Loader& loadDbc) {
     impactRows_.clear();
     footsteps_.clear();
     itemGroupSounds_.clear();
+    vocalUiSounds_.clear();
     loader_ = loadDbc;
     itemDisplayInfo_.reset();
     itemDisplayInfoTried_ = false;
@@ -248,6 +252,17 @@ bool SoundData::load(const Loader& loadDbc) {
             itemGroupSounds_[dbc->getUInt32(i, 0)] = {dbc->getUInt32(i, igs::kPickup), dbc->getUInt32(i, igs::kPutDown)};
         }
     }
+    if (auto dbc = table(loadDbc, "VocalUISounds.dbc", vui::kFields)) {
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            std::array<uint32_t, 4> ids{};
+            for (uint32_t c = 0; c < 4; ++c) {
+                const uint32_t id = dbc->getUInt32(i, vui::kSound0 + c);
+                ids[c] = id == 0xFFFFFFFFu ? 0 : id;
+            }
+            const uint32_t key = (dbc->getUInt32(i, vui::kEnum) << 8) | (dbc->getUInt32(i, vui::kRace) & 0xFF);
+            vocalUiSounds_.emplace(key, ids);
+        }
+    }
     mapEmitters_.clear();
     size_t emitterCount = 0;
     if (auto dbc = table(loadDbc, "SoundEmitters.dbc", sem::kFields)) {
@@ -267,7 +282,8 @@ bool SoundData::load(const Loader& loadDbc) {
     LOG_INFO("SoundData: ", soundEntries_->getRecordCount(), " sounds, ", zoneMusic_.size(), " music sets, ",
              ambience_.size(), " ambiences, ", areas_.size(), " areas, ", impactRows_.size(),
              " weapon impact rows, ", footsteps_.size(), " footstep rows, ", itemGroupSounds_.size(),
-             " item sound groups, ", emitterCount, " placed emitters on ", mapEmitters_.size(), " maps");
+             " item sound groups, ", vocalUiSounds_.size(), " vocal UI rows, ", emitterCount,
+             " placed emitters on ", mapEmitters_.size(), " maps");
     return true;
 }
 
@@ -296,6 +312,13 @@ uint32_t SoundData::footstepSound(uint32_t creatureFootstepId, uint32_t terrainS
     if (it == footsteps_.end()) return 0;
     if (splash && it->second.second != 0) return it->second.second;
     return it->second.first;
+}
+
+const SoundEntry* SoundData::vocalUiSound(uint32_t vocalUiEnum, uint32_t raceId, bool female, bool pissed) const {
+    auto it = vocalUiSounds_.find((vocalUiEnum << 8) | (raceId & 0xFF));
+    if (it == vocalUiSounds_.end()) return nullptr;
+    const SoundEntry* entry = sound(it->second[(pissed ? 2 : 0) + (female ? 1 : 0)]);
+    return entry && !entry->files.empty() ? entry : nullptr;
 }
 
 uint32_t SoundData::itemFoleySound(uint32_t itemDisplayId, bool pickup) const {
