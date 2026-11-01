@@ -934,10 +934,11 @@ namespace {
 /// Every piece is a 128x32 (or smaller) texture laid out against the same
 /// origin, the way the client stacks the plate's regions: the border with its
 /// bar hole and level box, the cast bar border (plain or shielded) below it,
-/// and the glow around the bar.
+/// and the glow around the bar. The plain cast bar border is Nameplate-Border
+/// itself, mirrored left to right (CGNamePlateFrame's constructor, 0x98f790):
+/// the client never loads Nameplate-CastBar.blp.
 struct NameplateArt {
     VkDescriptorSet border = VK_NULL_HANDLE;      // Tooltips\Nameplate-Border
-    VkDescriptorSet castBorder = VK_NULL_HANDLE;  // Tooltips\Nameplate-CastBar
     VkDescriptorSet castShield = VK_NULL_HANDLE;  // Tooltips\Nameplate-CastBar-Shield
     VkDescriptorSet glow = VK_NULL_HANDLE;        // Tooltips\Nameplate-Glow (additive)
     VkDescriptorSet elite = VK_NULL_HANDLE;       // Tooltips\EliteNameplateIcon
@@ -981,7 +982,6 @@ NameplateArt& nameplateArt(pipeline::AssetManager* am, core::Window* window) {
     if (!art.border && art.attempts < 8 && am && window && window->getVkContext()) {
         ++art.attempts;
         art.border     = loadNameplateTexture(am, window, "Interface\\Tooltips\\Nameplate-Border.blp", false);
-        art.castBorder = loadNameplateTexture(am, window, "Interface\\Tooltips\\Nameplate-CastBar.blp", false);
         art.castShield = loadNameplateTexture(am, window, "Interface\\Tooltips\\Nameplate-CastBar-Shield.blp", false);
         art.glow       = loadNameplateTexture(am, window, "Interface\\Tooltips\\Nameplate-Glow.blp", true);
         art.elite      = loadNameplateTexture(am, window, "Interface\\Tooltips\\EliteNameplateIcon.blp", false);
@@ -1194,9 +1194,19 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         //   health bar hole  x 5..104, y 20..26
         //   level box        x 106..123, y 18..29 (centre 114.5, 23.5)
         //   name             above the border, centred on the bar
-        // The cast bar art (Nameplate-CastBar / -Shield) sits under it, shifted
-        // 17 texels left so its bar hole (x 22..121) lines up with the health
-        // bar's, which puts its spell icon box just left of the plate.
+        // The anchors are CGNamePlateFrame's layout (0x98f390) and cast start
+        // (0x98f040), with the plate W x H = 0.1 x 0.025 (128 x 32 here):
+        //   health bar   BOTTOMLEFT at plate BOTTOMLEFT +(0.031W, 0.125H),
+        //                0.804W x 0.281H     -> x 3.968..106.88, y 19.008..28
+        //   cast border  Nameplate-Border mirrored, W x H, CENTER at plate
+        //                CENTER -H/2         -> x 0..128, y 16..48
+        //   shield       Nameplate-CastBar-Shield, W x H, CENTER at the cast
+        //                border's CENTER -H/2 -> x 0..128, y 32..64
+        //   cast bar     0.804W x 0.281H, BOTTOMRIGHT at the cast border's
+        //                BOTTOMRIGHT +(-4, +4), or +(-4, -4) when shielded
+        //   spell icon   12.8 square (0.01), CENTER at the cast border's
+        //                BOTTOMLEFT +(11.776, 9.088), or +(11.776, 0) shielded
+        // (interface y is up; these are y-down from the plate's top).
         const NameplateArt& art = nameplateArt(services_.assetManager, services_.window);
 
         // Fade over the last five yards. With a target, every other plate is
@@ -1288,10 +1298,11 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         }
 
         // Health fill: UI-TargetingFrame-BarFill tinted by reaction, cut off
-        // at the health fraction rather than squeezed.
+        // at the health fraction rather than squeezed. The stock bar is a
+        // texel bigger than the border's hole all round; the border hides it.
         {
-            const ImVec2 b0 = P(5, 20);
-            const ImVec2 b1 = P(105, 27);
+            const ImVec2 b0 = P(3.968f, 19.008f);
+            const ImVec2 b1 = P(106.88f, 28.0f);
             const float fillX = b0.x + (b1.x - b0.x) * healthPct;
             if (art.barFill) {
                 drawList->AddImage((ImTextureID)(uintptr_t)art.barFill, b0, ImVec2(fillX, b1.y),
@@ -1360,10 +1371,13 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
             if (cs && cs->casting && cs->timeTotal > 0.0f) {
                 const float castPct = std::clamp(
                     (cs->timeTotal - cs->timeRemaining) / cs->timeTotal, 0.0f, 1.0f);
-                // Cast-bar texel (x, y) in plate space.
-                auto C = [&](float tx, float ty) { return P(tx - 17.0f, ty + 26.0f); };
-                const ImVec2 c0 = C(22, 12);
-                const ImVec2 c1 = C(122, 19);
+                // Stock anchors (see the layout above): everything hangs off
+                // the cast border at y 16..48, and the shielded bar and icon
+                // drop to the shield, 8 lower.
+                const bool shielded = !cs->interruptible;
+                const float barBottom = shielded ? 52.0f : 44.0f;
+                const ImVec2 c0 = P(124.0f - 102.912f, barBottom - 8.992f);
+                const ImVec2 c1 = P(124.0f, barBottom);
                 const ImU32 castColor = IM_COL32(255, 179, 0, A(255));
                 if (art.barFill) {
                     drawList->AddImage((ImTextureID)(uintptr_t)art.barFill, c0,
@@ -1372,19 +1386,27 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                 } else {
                     drawList->AddRectFilled(c0, ImVec2(c0.x + (c1.x - c0.x) * castPct, c1.y), castColor);
                 }
-                const VkDescriptorSet castArt = cs->interruptible ? art.castBorder : art.castShield;
-                if (castArt) {
-                    drawList->AddImage((ImTextureID)(uintptr_t)castArt, C(0, 0), C(128, 32),
-                                       ImVec2(0, 0), ImVec2(1, 1), white);
+                if (shielded) {
+                    if (art.castShield) {
+                        drawList->AddImage((ImTextureID)(uintptr_t)art.castShield, P(0, 32), P(128, 64),
+                                           ImVec2(0, 0), ImVec2(1, 1), white);
+                    }
+                } else if (art.border) {
+                    // Nameplate-Border, mirrored: its level box becomes the
+                    // icon box at the left.
+                    drawList->AddImage((ImTextureID)(uintptr_t)art.border, P(0, 16), P(128, 48),
+                                       ImVec2(1, 0), ImVec2(0, 1), white);
                 }
                 auto* castAm = services_.assetManager;
                 const VkDescriptorSet castIcon = (cs->spellId && castAm)
                     ? getSpellIcon(cs->spellId, castAm) : VK_NULL_HANDLE;
                 if (castIcon) {
-                    const ImVec2 i0 = cs->interruptible ? C(4, 8) : C(5, 9);
-                    const ImVec2 i1 = cs->interruptible ? C(17, 21) : C(18, 22);
+                    // 0.01 square (12.8), the whole icon: stock sets no crop.
+                    const float iconCy = shielded ? 48.0f : 48.0f - 9.088f;
+                    const ImVec2 i0 = P(11.776f - 6.4f, iconCy - 6.4f);
+                    const ImVec2 i1 = P(11.776f + 6.4f, iconCy + 6.4f);
                     drawList->AddImage((ImTextureID)(uintptr_t)castIcon, i0, i1,
-                                       ImVec2(0.07f, 0.07f), ImVec2(0.93f, 0.93f), white);
+                                       ImVec2(0, 0), ImVec2(1, 1), white);
                 }
             }
         }

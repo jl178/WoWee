@@ -76,11 +76,33 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
         autoAttacking_ = false;
         autoAttackTarget_ = 0;
     };
-    table[Opcode::SMSG_THREAT_CLEAR] = [this](network::Packet& /*packet*/) {
-        threatLists_.clear();
-        if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("UNIT_THREAT_LIST_UPDATE", {});
+    // A list emptied or shortened changes the standing of whoever was on it,
+    // and the unit frames' threat indicators only look again when told so by
+    // name. Without this a glow lit during a fight stayed lit after it.
+    auto fireSituation = [this](uint64_t mobGuid, const std::vector<uint64_t>& victims) {
+        if (!owner_.addonEventCallbackRef()) return;
+        auto fire = owner_.addonEventCallbackRef();
+        const std::string mob = owner_.guidToUnitId(mobGuid);
+        fire("UNIT_THREAT_LIST_UPDATE", {mob});
+        for (uint64_t v : victims) {
+            const std::string who = owner_.guidToUnitId(v);
+            if (!who.empty()) fire("UNIT_THREAT_SITUATION_UPDATE", {who});
+        }
+        if (!mob.empty()) fire("UNIT_THREAT_SITUATION_UPDATE", {mob});
     };
-    table[Opcode::SMSG_THREAT_REMOVE] = [this](network::Packet& packet) {
+    // One mob's list, by its packed guid - not every list there is.
+    table[Opcode::SMSG_THREAT_CLEAR] = [this, fireSituation](network::Packet& packet) {
+        if (!packet.hasRemaining(1)) return;
+        const uint64_t unitGuid = packet.readPackedGuid();
+        std::vector<uint64_t> victims;
+        if (auto it = threatLists_.find(unitGuid); it != threatLists_.end()) {
+            for (const ThreatEntry& e : it->second) victims.push_back(e.victimGuid);
+            threatLists_.erase(it);
+        }
+        playerTopThreatOn_.erase(unitGuid);
+        fireSituation(unitGuid, victims);
+    };
+    table[Opcode::SMSG_THREAT_REMOVE] = [this, fireSituation](network::Packet& packet) {
         if (!packet.hasRemaining(1)) return;
         uint64_t unitGuid   = packet.readPackedGuid();
         if (!packet.hasRemaining(1)) return;
@@ -93,6 +115,8 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
                 list.end());
             if (list.empty()) threatLists_.erase(it);
         }
+        if (victimGuid == owner_.getPlayerGuid()) playerTopThreatOn_.erase(unitGuid);
+        fireSituation(unitGuid, {victimGuid});
     };
     table[Opcode::SMSG_CANCEL_COMBAT] = [this](network::Packet& /*packet*/) {
         autoAttacking_ = false;

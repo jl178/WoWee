@@ -2317,6 +2317,11 @@ const std::vector<GameHandler::ThreatEntry>* GameHandler::getThreatList(uint64_t
     return combatHandler_ ? combatHandler_->getThreatList(unitGuid) : nullptr;
 }
 
+const std::unordered_map<uint64_t, std::vector<GameHandler::ThreatEntry>>*
+GameHandler::getThreatLists() const {
+    return combatHandler_ ? &combatHandler_->getThreatLists() : nullptr;
+}
+
 bool GameHandler::isHostileAttacker(uint64_t guid) const {
     return combatHandler_ ? combatHandler_->isHostileAttacker(guid) : false;
 }
