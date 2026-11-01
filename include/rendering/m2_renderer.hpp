@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rendering/collision_geometry.hpp"
+#include "rendering/frustum.hpp"
 #include "rendering/spatial_grid.hpp"
 #include "rendering/shadow_params.hpp"
 
@@ -1160,6 +1161,7 @@ private:
         return m.isLanternLike || m.isTorch || m.isBrazierOrFire || m.isForge || m.isLavaModel;
     }
     double sceneTimeMs_ = 0.0;                      // sum of update() deltas
+    Frustum cachedFrustum_;                         // this frame's view, for the particle pass
     /// Bring an instance's animation clocks up to the scene time.
     void advanceClock(M2Instance& inst) const {
         const float dt = static_cast<float>(sceneTimeMs_ - inst.clockStampMs);

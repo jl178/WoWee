@@ -1386,8 +1386,36 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
              " stand=(", standPos.x, ",", standPos.y, ",", standPos.z, ")");
 }
 
+bool CharacterPreview::loadGlueScene(const std::string& scenePath) {
+    if (!charRenderer_ || !assetManager_ || !camera_) return false;
+    if (backdropInstanceId_ != 0) {
+        charRenderer_->removeInstance(backdropInstanceId_);
+        backdropInstanceId_ = 0;
+    }
+    pipeline::M2Model sceneModel;
+    if (!loadPreviewM2(scenePath, sceneModel) || sceneModel.cameras.empty()) {
+        LOG_WARNING("CharacterPreview: no usable glue scene at ", scenePath);
+        return false;
+    }
+    if (!charRenderer_->loadModel(sceneModel, PREVIEW_BACKDROP_MODEL_ID)) return false;
+    backdropInstanceId_ = charRenderer_->createInstance(PREVIEW_BACKDROP_MODEL_ID, glm::vec3(0.0f));
+    if (backdropInstanceId_ == 0) return false;
+    charRenderer_->setInstanceSceneModel(backdropInstanceId_, true);
+    charRenderer_->playAnimation(backdropInstanceId_, 0, true);
+    // The scene's own camera, as ModelFFX shows it.
+    const auto& cam = sceneModel.cameras[0];
+    camera_->setPosition(cam.positionBase);
+    const glm::vec3 fwd = glm::normalize(cam.targetBase - cam.positionBase);
+    camera_->setRotation(glm::degrees(std::atan2(fwd.y, fwd.x)),
+                         glm::degrees(std::asin(std::clamp(fwd.z, -1.0f, 1.0f))));
+    if (cam.fov > 0.0f && cam.fov < 3.14159f) camera_->setFov(glm::degrees(cam.fov));
+    sceneOnly_ = true;
+    LOG_INFO("CharacterPreview: glue scene ", scenePath);
+    return true;
+}
+
 void CharacterPreview::update(float deltaTime) {
-    if (charRenderer_ && modelLoaded_) {
+    if (charRenderer_ && (modelLoaded_ || sceneOnly_)) {
         // Racial glue scenes place the character far from world origin (the
         // human scene is roughly 230 units away). Use this preview's camera for
         // animation distance checks; testing against the renderer's default
@@ -1408,7 +1436,7 @@ void CharacterPreview::compositePass(VkCommandBuffer cmd, uint32_t frameIndex) {
     if (!compositeRequested_) return;
     compositeRequested_ = false;
 
-    if (!charRenderer_ || !camera_ || !modelLoaded_ || !renderTarget_ || !renderTarget_->isValid()) {
+    if (!charRenderer_ || !camera_ || !(modelLoaded_ || sceneOnly_) || !renderTarget_ || !renderTarget_->isValid()) {
         return;
     }
 

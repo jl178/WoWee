@@ -9,11 +9,13 @@
 #include "auth/auth_handler.hpp"
 #include <vulkan/vulkan.h>
 #include <string>
+#include <memory>
 #include <vector>
 #include <functional>
 #include <utility>
 
-namespace wowee { namespace rendering { class VkContext; } }
+namespace wowee {
+namespace rendering { class CharacterPreview; } namespace rendering { class VkContext; } }
 
 namespace wowee { namespace ui {
 
@@ -62,6 +64,8 @@ public:
     /// already decoded and uploaded by the time they are reached. It is owned
     /// here because this is the screen that pays to load it.
     void drawBackdrop();
+    /// Drop the login scene once the world is entered.
+    void releaseGlueScene();
 
     /**
      * Get status message
@@ -225,6 +229,13 @@ private:
     VkImageView bgImageView = VK_NULL_HANDLE;
     VkSampler bgSampler = VK_NULL_HANDLE;
     VkDescriptorSet bgDescriptorSet = VK_NULL_HANDLE;
+    // The stock login: the Northrend glue scene through its own camera and
+    // the Wrath logo, as AccountLogin.xml lays them out.
+    std::unique_ptr<rendering::CharacterPreview> glueScene_;
+    bool glueSceneTried_ = false;
+    VkDescriptorSet glueLogo_ = VK_NULL_HANDLE;
+    bool glueLogoTried_ = false;
+    bool drawGlueScene();
     int bgWidth = 0;
     int bgHeight = 0;
 

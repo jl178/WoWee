@@ -302,7 +302,9 @@ static audio::SpellSoundManager::MagicSchool schoolMaskToMagicSchool(uint32_t ma
     if (mask & 0x08) return audio::SpellSoundManager::MagicSchool::NATURE;
     if (mask & 0x20) return audio::SpellSoundManager::MagicSchool::SHADOW;
     if (mask & 0x40) return audio::SpellSoundManager::MagicSchool::ARCANE;
-    return audio::SpellSoundManager::MagicSchool::ARCANE;
+    // Physical: food, drink, bandages, melee abilities. No school sound -
+    // this answered Arcane, so eating played the Arcane Missiles impact.
+    return audio::SpellSoundManager::MagicSchool::PHYSICAL;
 }
 
 // ---- Extracted helpers to reduce nesting in handleSpellGo ----
@@ -312,7 +314,7 @@ audio::SpellSoundManager::MagicSchool SpellHandler::resolveSpellSchool(uint32_t 
     auto it = owner_.spellNameCacheRef().find(spellId);
     if (it != owner_.spellNameCacheRef().end() && it->second.schoolMask)
         return schoolMaskToMagicSchool(it->second.schoolMask);
-    return audio::SpellSoundManager::MagicSchool::ARCANE;
+    return audio::SpellSoundManager::MagicSchool::PHYSICAL;
 }
 
 void SpellHandler::playSpellCastSound(uint32_t spellId) {
@@ -2109,7 +2111,7 @@ void SpellHandler::handleSpellStart(network::Packet& packet) {
                     auto it = owner_.spellNameCacheRef().find(data.spellId);
                     auto school = (it != owner_.spellNameCacheRef().end() && it->second.schoolMask)
                         ? schoolMaskToMagicSchool(it->second.schoolMask)
-                        : audio::SpellSoundManager::MagicSchool::ARCANE;
+                        : audio::SpellSoundManager::MagicSchool::PHYSICAL;
                     ssm->playPrecast(school, audio::SpellSoundManager::SpellPower::MEDIUM);
                 }
             }

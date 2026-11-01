@@ -178,7 +178,7 @@ uint32_t SpellVisualSystem::classifyAttachmentId(const std::string& modelPath) {
         return 1; // RightHand
     // "chest" effects track chest/torso (attachment 5 in M2 spec)
     if (lower.find("_chest") != std::string::npos || lower.find("chest_") != std::string::npos)
-        return 5; // Chest
+        return 15; // ChestBloodFront (5 is ShoulderRight in 3.3.5)
     // "head" effects track head (attachment 11)
     if (lower.find("_head") != std::string::npos || lower.find("head_") != std::string::npos)
         return 11; // Head

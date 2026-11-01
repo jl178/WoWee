@@ -14,6 +14,8 @@
 #include "core/window.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/vk_context.hpp"
+#include "rendering/character_preview.hpp"
+#include "ui/ui_texture_load.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/music_manager.hpp"
@@ -1131,7 +1133,54 @@ void AuthScreen::renderCard(auth::AuthHandler& authHandler, float screenW, float
 // PaperUI: it is behind everything by definition, and the realm and character
 // screens ask for it before they have begun a frame of their own.
 
+bool AuthScreen::drawGlueScene() {
+    auto& app = core::Application::getInstance();
+    auto* assets = app.getAssetManager();
+    auto* renderer = app.getRenderer();
+    if (!assets || !assets->isInitialized() || !renderer) return false;
+    const ImVec2 screen = ImGui::GetIO().DisplaySize;
+    if (screen.x < 2.0f || screen.y < 2.0f) return false;
+    if (!glueSceneTried_) {
+        glueSceneTried_ = true;
+        auto scene = std::make_unique<rendering::CharacterPreview>();
+        if (scene->initialize(assets, static_cast<int>(screen.x), static_cast<int>(screen.y))) {
+            renderer->registerPreview(scene.get());
+            if (scene->loadGlueScene("Interface\\Glues\\Models\\UI_MainMenu_Northrend\\UI_MainMenu_Northrend.m2")) {
+                glueScene_ = std::move(scene);
+            }
+        }
+        if (!glueScene_) LOG_WARNING("AuthScreen: no login glue scene; using the flat backdrop");
+    }
+    if (!glueScene_) return false;
+    glueScene_->update(ImGui::GetIO().DeltaTime);
+    glueScene_->render();
+    glueScene_->requestComposite();
+    auto* bg = ImGui::GetBackgroundDrawList();
+    if (VkDescriptorSet tex = glueScene_->getTextureId()) {
+        bg->AddImage(reinterpret_cast<ImTextureID>(tex), ImVec2(0, 0), screen);
+    } else {
+        bg->AddRectFilled(ImVec2(0, 0), screen, IM_COL32(0, 0, 0, 255));
+    }
+    // The logo, 256x128 at (3,-7) from the top left in 768-tall glue units.
+    if (!glueLogoTried_) {
+        glueLogoTried_ = true;
+        glueLogo_ = uploadUiTextureFromBlp(assets, "Interface\\Glues\\Common\\Glues-WoW-WotLKLogo.blp", app.getWindow());
+    }
+    if (glueLogo_) {
+        const float u = screen.y / 768.0f;
+        bg->AddImage(reinterpret_cast<ImTextureID>(glueLogo_), ImVec2(3.0f * u, 7.0f * u),
+                     ImVec2((3.0f + 256.0f) * u, (7.0f + 128.0f) * u));
+    }
+    return true;
+}
+
+void AuthScreen::releaseGlueScene() {
+    glueScene_.reset();
+    glueSceneTried_ = false;
+}
+
 void AuthScreen::drawBackdrop() {
+    if (drawGlueScene()) return;
     // Kick the decode off once, then upload on whichever frame it lands.
     if (!bgDecodeStarted) {
         bgDecodeStarted = true;

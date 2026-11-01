@@ -516,6 +516,7 @@ void UIManager::render(core::AppState appState, auth::AuthHandler* authHandler, 
 
         case core::AppState::IN_GAME:
             authScreen->stopLoginMusic();
+            authScreen->releaseGlueScene();
             if (gameHandler) {
                 gameScreen->render(*gameHandler);
             }

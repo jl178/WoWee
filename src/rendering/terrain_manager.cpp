@@ -1946,8 +1946,12 @@ void TerrainManager::generateGroundClutterPlacements(std::shared_ptr<PendingTile
     // why standing in the wrong part of a tile showed no ground cover
     // whatsoever. The ceiling is now shared out as a per-chunk budget, so it
     // bounds the tile the same way while covering all of it.
-    constexpr size_t kBaseMaxGroundClutterPerTile = 880;
-    constexpr uint32_t kBaseMaxAttemptsPerLayer = 12;
+    // GroundEffectTexture densities in Elwynn are 6-8 per cell; 880 a tile
+    // capped it at 3, which read as stubs poking out of the dirt rather than
+    // the stock carpet. Clutter is now instantiated only near the camera, so
+    // the higher count costs only the tiles in range.
+    constexpr size_t kBaseMaxGroundClutterPerTile = 2048;
+    constexpr uint32_t kBaseMaxAttemptsPerLayer = 24;
     const float densityScaleRaw = glm::clamp(groundClutterDensityScale_, 0.0f, 1.5f);
     // Keep runtime density bounded to avoid large streaming spikes in dense tiles.
     const float densityScale = std::min(densityScaleRaw, 1.0f);

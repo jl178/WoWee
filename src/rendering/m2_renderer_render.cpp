@@ -360,6 +360,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
     // Build frustum for culling bones
     Frustum updateFrustum;
     updateFrustum.extractFromMatrix(viewProjection);
+    cachedFrustum_ = updateFrustum;
 
     // --- Smoke particle spawning (only iterate tracked smoke instances) ---
     std::uniform_real_distribution<float> distXY(rendering::SMOKE_OFFSET_XY_MIN, rendering::SMOKE_OFFSET_XY_MAX);

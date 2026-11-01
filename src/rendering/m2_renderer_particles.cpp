@@ -616,6 +616,12 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
     // That walk was 2.0ms of a 16ms frame - two thirds of the M2 worker,
     // which is the critical path of renderWorld. The smoke pass beside this
     // one does the same kind of work against a flat list and costs 0.003ms.
+    // Two passes over the fixed vertex budget: emitters near the camera -
+    // spell kits, missiles, a campfire - claim it first. The budget was full
+    // of distant portals and lava every frame, and spell effects, created
+    // last and so at the end of the list, got no vertices at all.
+    constexpr float kNearFirstSq = 80.0f * 80.0f;
+    for (int pass = 0; pass < 2; ++pass)
     for (size_t idx : particleInstanceIndices_) {
         if (idx >= instances.size()) continue;
         auto& inst = instances[idx];
@@ -624,8 +630,13 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
         // left in the vector is stale and would be drawn frozen.
         {
             const glm::vec3 toCam = inst.position - cachedCamPos_;
-            if (glm::dot(toCam, toCam) > cachedMaxRenderDistSq_) continue;
+            const float d2 = glm::dot(toCam, toCam);
+            if (d2 > cachedMaxRenderDistSq_) continue;
+            if ((pass == 0) != (d2 <= kNearFirstSq)) continue;
         }
+        // Off screen: no vertices for what cannot be seen.
+        if (inst.cachedPaddedRadius > 0.0f &&
+            !cachedFrustum_.intersectsSphere(inst.cachedCullCenter, inst.cachedPaddedRadius + 30.0f)) continue;
         if (!inst.cachedModel) continue;
         const auto& gpu = *inst.cachedModel;
         if (gpu.isInstancePortal) continue;
