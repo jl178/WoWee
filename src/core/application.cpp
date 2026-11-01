@@ -1485,6 +1485,31 @@ void Application::run() {
             }
         }
 
+        // WOWEE_DEBUG_RESIZE_CYCLE=1: a test hook, off by default. The client
+        // asks for a different size of its own window every 1.5 s, cycling
+        // through a few, so the resize paths (swapchain recreate, the login
+        // scene's rebuild once the size settles) can be exercised without
+        // anything outside the process touching the desktop. A tiling
+        // compositor may refuse the request; the log says what was asked.
+        if (window && window->getSDLWindow()) {
+            static const bool resizeCycle = [] {
+                const char* v = std::getenv("WOWEE_DEBUG_RESIZE_CYCLE");
+                return v && *v && *v != '0';
+            }();
+            if (resizeCycle) {
+                static auto lastResize = std::chrono::steady_clock::now();
+                static int resizeStep = 0;
+                const auto now = std::chrono::steady_clock::now();
+                if (now - lastResize > std::chrono::milliseconds(1500)) {
+                    lastResize = now;
+                    static const int sizes[][2] = {{1251, 986}, {1600, 900}, {1024, 768}, {1900, 1000}};
+                    const auto& s = sizes[resizeStep++ % 4];
+                    SDL_SetWindowSize(window->getSDLWindow(), s[0], s[1]);
+                    LOG_WARNING("debug resize cycle: asked for ", s[0], "x", s[1]);
+                }
+            }
+        }
+
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
             // Sound in Background. Off in the real client and off here: losing

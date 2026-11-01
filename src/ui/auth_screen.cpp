@@ -1445,11 +1445,13 @@ bool AuthScreen::drawGlueScene() {
     auto& app = core::Application::getInstance();
     auto* assets = app.getAssetManager();
     auto* renderer = app.getRenderer();
+    dropRetiredGlueScene();
     if (!assets || !assets->isInitialized() || !renderer) return false;
     const ImVec2 screen = ImGui::GetIO().DisplaySize;
     if (screen.x < 2.0f || screen.y < 2.0f) return false;
     // The window settled at a size other than the scene's: rebuild it there
-    // (see the crop below), before this frame draws the old one.
+    // (see the crop below), before this frame draws the old one. The old one
+    // is only retired here, not destroyed: see releaseGlueScene.
     if (glueScene_ && glueSceneResizeTimer_ > 0.3f) {
         releaseGlueScene();
         glueSceneResizeTimer_ = 0.0f;
@@ -1513,8 +1515,30 @@ bool AuthScreen::drawGlueScene() {
 }
 
 void AuthScreen::releaseGlueScene() {
-    glueScene_.reset();
+    // Called from the UI pass (the resize rebuild above, and every in-game
+    // frame from UIManager), which runs between Renderer::beginFrame and
+    // endFrame. beginFrame has already recorded this scene's composite pass
+    // into the frame's command buffer, so destroying the scene now would
+    // destroy its render pass, framebuffer, pipelines and descriptor sets out
+    // from under a buffer that is still recording; the submit in endFrame
+    // then crashed inside the NVIDIA driver. Unregistered now, so no later
+    // frame records it; destroyed on a later frame, once this one has been
+    // submitted (its own teardown waits for the GPU to finish with it).
+    dropRetiredGlueScene();
+    if (glueScene_) {
+        if (auto* renderer = core::Application::getInstance().getRenderer()) {
+            renderer->unregisterPreview(glueScene_.get());
+        }
+        retiredGlueScene_ = std::move(glueScene_);
+        retiredGlueSceneFrame_ = ImGui::GetFrameCount();
+    }
     glueSceneTried_ = false;
+}
+
+void AuthScreen::dropRetiredGlueScene() {
+    if (retiredGlueScene_ && ImGui::GetFrameCount() != retiredGlueSceneFrame_) {
+        retiredGlueScene_.reset();
+    }
 }
 
 void AuthScreen::drawBackdrop() {
