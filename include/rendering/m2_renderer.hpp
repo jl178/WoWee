@@ -380,6 +380,11 @@ struct M2Instance {
     /// No new particles or ribbon edges; the live ones run out their lives.
     /// A spell effect at the end of its life is kept this way until they do.
     bool emissionStopped = false;
+    /// Spawned by the spell system (a kit or a missile), not placed in the
+    /// world. Its particles run at the scene's full range, because the kit's
+    /// end waits on them; a placed doodad that merely looks like an effect -
+    /// a glowing mushroom, a wisp - is ranged by its size like the rest.
+    bool spellVisual = false;
 
     // Ribbon emitter state
     struct RibbonEdge {
@@ -664,6 +669,8 @@ public:
     void setInstanceFade(uint32_t instanceId, float alpha);
     /// See M2Instance::emissionStopped.
     void stopInstanceEmission(uint32_t instanceId);
+    /// See M2Instance::spellVisual.
+    void markInstanceSpellVisual(uint32_t instanceId);
     /// Whether any particle or ribbon edge of the instance is still alive.
     [[nodiscard]] bool instanceHasLiveParticles(uint32_t instanceId) const;
     /// Take the light off whatever has it, whichever instance that was.

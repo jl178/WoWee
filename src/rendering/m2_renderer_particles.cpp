@@ -329,7 +329,7 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
             inst.particles.push_back(p);
 
             // Diagnostic: log first particle birth per spell effect instance
-            if (gpu.isSpellEffect && inst.particles.size() == 1) {
+            if (inst.spellVisual && inst.particles.size() == 1) {
                 LOG_INFO("SpellEffect: first particle for '", gpu.name,
                          "' pos=(", p.position.x, ",", p.position.y, ",", p.position.z,
                          ") rate=", rate, " life=", life,
@@ -769,7 +769,7 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
         // left in the vector is stale and would be drawn frozen.
         const glm::vec3 toCam = inst.position - cachedCamPos_;
         const float d2 = glm::dot(toCam, toCam);
-        const bool fullRange = inst.cachedModel->isSpellEffect || inst.emissionStopped;
+        const bool fullRange = inst.spellVisual || inst.emissionStopped;
         if (d2 > (fullRange ? cachedMaxRenderDistSq_ : particleRangeSq(inst, *inst.cachedModel))) continue;
         // Off screen: no vertices for what cannot be seen.
         if (inst.cachedPaddedRadius > 0.0f &&
