@@ -438,13 +438,14 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
 
     // --- Pipeline layout ---
     // set 0 = perFrame, set 1 = material, set 2 = bones
-    // Push constant: mat4 model = 64 bytes
+    // Push constant: mat4 model (64 bytes) + vec4 uvOffset (16 bytes, the
+    // batch's texture-animation scroll; see character.vert.glsl)
     {
         VkDescriptorSetLayout setLayouts[] = {perFrameLayout, materialSetLayout_, boneSetLayout_};
         VkPushConstantRange pushRange{};
         pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
         pushRange.offset = 0;
-        pushRange.size = 64; // mat4
+        pushRange.size = 80; // mat4 + vec4
 
         VkPipelineLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         ci.setLayoutCount = 3;
@@ -2015,6 +2016,12 @@ void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId,
     }
 
     auto& instance = it->second;
+    // A dead unit stays down. Idle, Ready, swings, flinches, emote clears,
+    // cast ends and dismounts all reach here from their own paths while the
+    // unit lies dead; one gate here instead of a Death check in each of them.
+    if (instance.deathLocked && animationId != anim::DEATH && animationId != anim::DEAD) {
+        return;
+    }
     auto& model = models[instance.modelId].data;
     instance.oneShotReturnAnim = loop ? 0 : oneShotReturnAnim;
 
@@ -2102,6 +2109,53 @@ void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId,
     }
 }
 
+void CharacterRenderer::playDeath(uint32_t instanceId, bool alreadyDead) {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return;
+    auto& inst = it->second;
+    const bool wasDown = inst.deathLocked &&
+        (inst.currentAnimationId == anim::DEATH || inst.currentAnimationId == anim::DEAD);
+    inst.deathLocked = true;
+    inst.isDead = true;
+    // Already lying there: a second report of the same death (health and the
+    // dynamic flags both say so, or the unit is created again in view) must
+    // not stand it up to fall again.
+    if (wasDown) return;
+
+    if (hasAnimation(instanceId, anim::DEATH)) {
+        playAnimation(instanceId, anim::DEATH, /*loop=*/false);
+        if (alreadyDead) {
+            // A corpse coming into view is already down: the last frame of
+            // Death, with no fall and no fade from whatever pose it had.
+            const auto mIt = models.find(inst.modelId);
+            if (mIt != models.end() && inst.currentSequenceIndex >= 0 &&
+                inst.currentSequenceIndex < static_cast<int>(mIt->second.data.sequences.size())) {
+                inst.animationTime = static_cast<float>(
+                    mIt->second.data.sequences[inst.currentSequenceIndex].duration);
+            }
+            inst.blendDurationMs = 0.0f;
+        }
+    } else if (hasAnimation(instanceId, anim::DEAD)) {
+        playAnimation(instanceId, anim::DEAD, /*loop=*/true);
+        if (alreadyDead) inst.blendDurationMs = 0.0f;
+    } else {
+        // Neither: whatever playAnimation's fallback makes of Death, held.
+        playAnimation(instanceId, anim::DEATH, /*loop=*/false);
+    }
+}
+
+void CharacterRenderer::clearDeath(uint32_t instanceId) {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return;
+    it->second.deathLocked = false;
+    it->second.isDead = false;
+}
+
+bool CharacterRenderer::isDeathLocked(uint32_t instanceId) const {
+    auto it = instances.find(instanceId);
+    return it != instances.end() && it->second.deathLocked;
+}
+
 void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
     // Distance culling for animation updates in dense areas. The default is the
     // render radius (WOWEE_CHAR_RENDER_RADIUS, 130): at 120 a unit drawn 120-130
@@ -2153,6 +2207,12 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
 
         // Advance global sequence timer (accumulates independently of animation wrapping)
         inst.globalSequenceTime += deltaTime * 1000.0f;
+
+        // Upper-body overlay clock; it ends by itself.
+        if (inst.upperTime >= 0.0f) {
+            inst.upperTime += deltaTime * 1000.0f;
+            if (inst.upperTime >= inst.upperDurationMs) inst.upperTime = -1.0f;
+        }
 
         // Sequence cross-fade clock. Before the sequence clock below, which may
         // end a one-shot and start a fresh fade from zero.
@@ -2214,7 +2274,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
                 } else {
                     // One-shot animation finished: return to the caller-specified
                     // resume anim (NPC state emote) or Stand, unless dead
-                    if (inst.currentAnimationId != anim::DEATH) {
+                    if (inst.currentAnimationId != anim::DEATH && !inst.deathLocked) {
                         const uint32_t resumeAnim =
                             inst.oneShotReturnAnim != 0 ? inst.oneShotReturnAnim : anim::STAND;
                         playAnimation(pair.first, resumeAnim, true);
@@ -2433,6 +2493,79 @@ void CharacterRenderer::setArmAnimations(uint32_t instanceId, uint32_t leftArmAn
     }
 }
 
+bool CharacterRenderer::playUpperBodyAnimation(uint32_t instanceId, uint32_t torsoAnim,
+                                               uint32_t leftArmAnim, uint32_t rightArmAnim) {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return false;
+    auto& instance = it->second;
+    const auto& model = models[instance.modelId].data;
+    auto find = [&](uint32_t id) -> int {
+        if (id == 0 || id == anim::STAND) return -1;
+        int first = -1;
+        for (size_t i = 0; i < model.sequences.size(); i++) {
+            if (model.sequences[i].id != id) continue;
+            if (model.sequences[i].variationIndex == 0) return static_cast<int>(i);
+            if (first < 0) first = static_cast<int>(i);
+        }
+        return first;
+    };
+    const uint32_t anims[3] = {leftArmAnim, rightArmAnim, torsoAnim};
+    bool any = false;
+    float duration = 0.0f;
+    for (int part = 0; part < 3; part++) {
+        instance.upperSequenceIndex[part] = find(anims[part]);
+        if (instance.upperSequenceIndex[part] >= 0) {
+            any = true;
+            duration = std::max(duration, static_cast<float>(
+                model.sequences[instance.upperSequenceIndex[part]].duration));
+        }
+    }
+    if (!any || duration <= 0.0f) {
+        instance.upperTime = -1.0f;
+        return false;
+    }
+    instance.upperTime = 0.0f;
+    instance.upperDurationMs = duration;
+
+    // Which part each bone is in: the lower spine and everything under it is
+    // the upper body, a shoulder and everything under it an arm. Parents come
+    // first in M2 bone order, so one pass settles it.
+    instance.boneUpper.assign(model.bones.size(), -1);
+    for (size_t i = 0; i < model.bones.size(); i++) {
+        const auto& bone = model.bones[i];
+        const int8_t parent = bone.parentBone >= 0 && static_cast<size_t>(bone.parentBone) < i
+            ? instance.boneUpper[bone.parentBone] : -1;
+        if (bone.keyBoneId == kKeyBoneShoulderL)      instance.boneUpper[i] = 0;
+        else if (bone.keyBoneId == kKeyBoneShoulderR) instance.boneUpper[i] = 1;
+        else if (bone.keyBoneId == kKeyBoneSpineLow)  instance.boneUpper[i] = 2;
+        else                                          instance.boneUpper[i] = parent;
+    }
+    return true;
+}
+
+uint32_t CharacterRenderer::getSheathEventTime(uint32_t instanceId, uint32_t animationId) const {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return UINT32_MAX;
+    auto mIt = models.find(it->second.modelId);
+    if (mIt == models.end()) return UINT32_MAX;
+    const auto& model = mIt->second.data;
+    for (size_t i = 0; i < model.sequences.size() && i < model.sheathEventTimes.size(); i++) {
+        if (model.sequences[i].id == animationId && model.sequences[i].variationIndex == 0)
+            return model.sheathEventTimes[i];
+    }
+    return UINT32_MAX;
+}
+
+uint32_t CharacterRenderer::getAnimationDurationMs(uint32_t instanceId, uint32_t animationId) const {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return 0;
+    auto mIt = models.find(it->second.modelId);
+    if (mIt == models.end()) return 0;
+    for (const auto& seq : mIt->second.data.sequences)
+        if (seq.id == animationId && seq.variationIndex == 0) return seq.duration;
+    return 0;
+}
+
 void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
     if (!instance.cachedModel) return;
     auto& model = instance.cachedModel->data;
@@ -2504,6 +2637,24 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
                 pose.rotation = glm::normalize(glm::slerp(from.rotation, pose.rotation, blendWeight));
             if (bone.scale.globalSequence < 0)
                 pose.scale = glm::mix(from.scale, pose.scale, blendWeight);
+        }
+        // The upper-body overlay over whatever the body plays, faded in and
+        // out over 150 ms so the reach neither pops on nor snaps off the run.
+        if (instance.upperTime >= 0.0f && instance.boneUpper.size() == numBones &&
+            instance.boneUpper[i] >= 0) {
+            const int upSeq = instance.upperSequenceIndex[instance.boneUpper[i]];
+            if (upSeq >= 0 && upSeq < static_cast<int>(model.sequences.size())) {
+                const float upDur = static_cast<float>(model.sequences[upSeq].duration);
+                const float upT = std::min(instance.upperTime, upDur);
+                const float edge = std::min(instance.upperTime,
+                                            instance.upperDurationMs - instance.upperTime);
+                const float w = glm::clamp(edge / 150.0f, 0.0f, 1.0f);
+                const BoneLocalPose up = sampleBonePose(bone, upT, instance.globalSequenceTime,
+                                                        upSeq, gsd);
+                pose.translation = glm::mix(pose.translation, up.translation, w);
+                pose.rotation = glm::normalize(glm::slerp(pose.rotation, up.rotation, w));
+                pose.scale = glm::mix(pose.scale, up.scale, w);
+            }
         }
         instance.localPose[i] = pose;
         glm::mat4 localTransform = composeBoneTransform(bone, pose);
@@ -2804,8 +2955,11 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             ? instance.overrideModelMatrix
             : getModelMatrix(instance);
 
-        // Push model matrix
-        vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &modelMat);
+        // Push model matrix, and a zero UV scroll; batches with a texture
+        // animation push their own below.
+        struct { glm::mat4 model; glm::vec4 uvOffset; } charPush{modelMat, glm::vec4(0.0f)};
+        vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(charPush), &charPush);
+        glm::vec2 pushedUvOffset(0.0f);
 
         // Upload bone matrices to SSBO
         int numBones = std::min(static_cast<int>(instance.boneMatrices.size()), MAX_BONES);
@@ -3276,6 +3430,34 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // Per-batch depth bias from materialLayer to separate coplanar
                 // armor pieces (chest/legs/gloves) that share identical depth.
                 vkCmdSetDepthBias(cmd, static_cast<float>(batch.materialLayer) * 0.5f, 0.0f, 0.0f);
+
+                // M2 texture animation: the batch's UV translation track. The
+                // glue scenes scroll their fog, clouds, water and the death
+                // knight's floor glow this way, and creatures (elementals,
+                // waterfalls on models) use it too; this renderer used to
+                // ignore it, so all of those stood still.
+                {
+                    glm::vec2 uvOffset(0.0f);
+                    const auto& md = gpuModel.data;
+                    if (batch.textureAnimIndex != 0xFFFF &&
+                        batch.textureAnimIndex < md.textureTransformLookup.size()) {
+                        const uint16_t ti = md.textureTransformLookup[batch.textureAnimIndex];
+                        if (ti < md.textureTransforms.size()) {
+                            const glm::vec3 t = m2_track::sampleVec3(
+                                md.textureTransforms[ti].translation,
+                                instance.currentSequenceIndex, instance.animationTime,
+                                instance.globalSequenceTime, md.globalSequenceDurations,
+                                glm::vec3(0.0f));
+                            uvOffset = glm::vec2(t.x, t.y);
+                        }
+                    }
+                    if (uvOffset != pushedUvOffset) {
+                        const glm::vec4 uv(uvOffset, 0.0f, 0.0f);
+                        vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
+                                           sizeof(glm::mat4), sizeof(glm::vec4), &uv);
+                        pushedUvOffset = uvOffset;
+                    }
+                }
 
                 vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
             }
@@ -4304,6 +4486,20 @@ bool CharacterRenderer::getInstancePosition(uint32_t instanceId, glm::vec3& outP
     auto it = instances.find(instanceId);
     if (it == instances.end()) return false;
     outPos = it->second.position;
+    return true;
+}
+
+bool CharacterRenderer::getInstancePose(uint32_t instanceId, const std::vector<glm::mat4>*& outBones,
+                                        glm::mat4& outModel, int& outSequenceIndex,
+                                        float& outAnimTimeMs, float& outGlobalSeqTimeMs) const {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return false;
+    const auto& inst = it->second;
+    outBones = &inst.boneMatrices;
+    outModel = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix : getModelMatrix(inst);
+    outSequenceIndex = inst.currentSequenceIndex;
+    outAnimTimeMs = inst.animationTime;
+    outGlobalSeqTimeMs = inst.globalSequenceTime;
     return true;
 }
 

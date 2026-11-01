@@ -1255,13 +1255,11 @@ bool AddonManager::loadFrameXml(const std::string& frameXmlDir) {
         "  end)\n"
         "end\n");
 
-    // Let the bag windows, the character sheet and the PvP panels be dragged
-    // around.
+    // Let the bag windows and the PvP panels be dragged around.
     //
-    // A deliberate departure from 3.3.5, where neither can be moved: the bags
-    // arrange themselves up the right-hand side and the character sheet is a
-    // fixed panel. Asked for, and harmless - the item buttons inside them are
-    // what a drag starting on a slot picks up, because a drag belongs to the
+    // A deliberate departure from 3.3.5, where none can be moved: the bags
+    // arrange themselves up the right-hand side. Asked for, and harmless -
+    // the item buttons inside them are what a drag starting on a slot picks up, because a drag belongs to the
     // frame the press landed on.
     luaEngine_.executeString(
         "local function draggable(f)\n"
@@ -1273,7 +1271,9 @@ bool AddonManager::loadFrameXml(const std::string& frameXmlDir) {
         "  f:SetScript('OnDragStop', function(self) self:StopMovingOrSizing() end)\n"
         "end\n"
         "for i = 1, 13 do draggable(_G['ContainerFrame' .. i]) end\n"
-        "draggable(CharacterFrame)\n"
+        // Not CharacterFrame: it is a fixed UIPanel in 3.3.5 (no movable, no
+        // drag registration), the panel manager re-anchors it on every show,
+        // and players read a sheet that slides away with the cursor as a bug.
         // The PvP window (H), the battlemaster's list and the scoreboard -
         // asked for with the rest, and fixed panels in 3.3.5 for the same
         // reason the character sheet is.

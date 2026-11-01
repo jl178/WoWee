@@ -310,7 +310,8 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     charRenderer->setActiveGeosets(instanceId, activeGeosets);
 
     if (deadCreatureGuids_.count(guid)) {
-        charRenderer->playAnimation(instanceId, rendering::anim::DEATH, false);
+        // A dead player (or a corpse object) coming into view is already down.
+        charRenderer->playDeath(instanceId, /*alreadyDead=*/true);
     } else {
         // Already seated, asleep or kneeling when they came into view.
         uint32_t standAnim = 0;
@@ -798,6 +799,7 @@ void EntitySpawner::despawnPlayer(uint64_t guid) {
     pendingOnlinePlayerEquipment_.erase(guid);
     onlinePlayerWeaponSlots_.erase(guid);
     unitSheathAttached_.erase(guid);
+    unitSheathTransitions_.erase(guid);
     deadCreatureGuids_.erase(guid);
     creatureRenderPosCache_.erase(guid);
     creatureSwimmingState_.erase(guid);

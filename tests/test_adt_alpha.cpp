@@ -98,3 +98,28 @@ TEST_CASE("a layer with no map of its own is left as the caller asked",
     REQUIRE(alpha.size() == ALPHA_MAP_SIZE);
     CHECK(at(alpha, 10, 10) == 255);
 }
+
+TEST_CASE("a compressed map's run count is the low seven bits, not plus one",
+          "[adt][alpha]") {
+    // Each row: a copy run of 3 (10, 20, 30), then a fill run of 61 zeros.
+    // Decoded with a count one too long, the copy swallows the fill's command
+    // byte as data and the stream loses its framing within the first row -
+    // which on Northrend left most of every chunk at the 255 fallback.
+    MapChunk chunk;
+    chunk.layers.resize(2);
+    chunk.layers[1].flags = 0x300;   // use_alpha_map | alpha_map_compressed
+    chunk.layers[1].offsetMCAL = 0;
+    for (size_t y = 0; y < ALPHA_MAP_DIM; ++y) {
+        chunk.alphaMap.insert(chunk.alphaMap.end(), {0x03, 10, 20, 30, 0x80 | 61, 0});
+    }
+    std::vector<uint8_t> alpha;
+    REQUIRE(decodeLayerAlpha(chunk, 1, alpha, 255));
+    for (size_t y = 0; y < ALPHA_MAP_DIM; y += 21) {
+        INFO("row " << y);
+        CHECK(at(alpha, 0, y) == 10);
+        CHECK(at(alpha, 2, y) == 30);
+        CHECK(at(alpha, 3, y) == 0);
+        CHECK(at(alpha, ALPHA_MAP_DIM - 1, y) == 0);
+    }
+    CHECK(at(alpha, ALPHA_MAP_DIM - 1, ALPHA_MAP_DIM - 1) == 0);
+}

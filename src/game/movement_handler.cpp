@@ -1149,7 +1149,18 @@ void MovementHandler::handleForceMoveFlagChange(network::Packet& packet, const c
 
     if (!owner_.getSocket()) return;
     if (wireOpcode(ackOpcode) == 0xFFFF) return;
-    owner_.getSocket()->send(buildForceAck(ackOpcode, counter));
+    auto ack = buildForceAck(ackOpcode, counter);
+    // The flag-change acks end with whether the change applied (the server's
+    // HandleMoveFlagChangeOpcode reads a uint32 after the movement block for
+    // all of them but the two gravity acks). Without it every water-walk,
+    // hover, feather-fall and can-fly ack was a ByteBufferException and was
+    // skipped: the ghost's water walking on release was never acknowledged,
+    // nor a flying mount's can-fly (its pending flight change never cleared).
+    if (ackOpcode != Opcode::CMSG_MOVE_GRAVITY_DISABLE_ACK &&
+        ackOpcode != Opcode::CMSG_MOVE_GRAVITY_ENABLE_ACK) {
+        ack.writeUInt32(set ? 1u : 0u);
+    }
+    owner_.getSocket()->send(ack);
 }
 
 void MovementHandler::handleMoveSetCollisionHeight(network::Packet& packet) {
@@ -3332,34 +3343,15 @@ void MovementHandler::checkAreaTriggers() {
     const float checkedPy = movementInfo.y;
     const float checkedPz = movementInfo.z;
 
-    // Swept-path samples: also test points between the previous check position
-    // and the current one, so fast (mounted) movement cannot step across a
-    // small portal box between 0.25s polls - the Deeprun entrance trigger only
-    // fired intermittently when ridden into at mount speed.
-    glm::vec3 sweepSamples[10];
-    int sweepCount = 0;
-    {
-        const glm::vec3 cur(checkedPx, checkedPy, checkedPz);
-        const bool sameMap = lastAreaTriggerCheckValid_ &&
-                             lastAreaTriggerCheckMapId_ == owner_.currentMapIdRef();
-        if (sameMap) {
-            const glm::vec3 d = cur - lastAreaTriggerCheckPos_;
-            const float movedSq = d.x * d.x + d.y * d.y + d.z * d.z;
-            // Skip sweep on teleport-sized jumps; only bridge normal movement.
-            if (movedSq > 1.0f && movedSq < 50.0f * 50.0f) {
-                const float moved = std::sqrt(movedSq);
-                const int steps = std::min(8, static_cast<int>(moved));
-                for (int s = 1; s <= steps; ++s) {
-                    const float t = static_cast<float>(s) / static_cast<float>(steps + 1);
-                    sweepSamples[sweepCount++] = lastAreaTriggerCheckPos_ + d * t;
-                }
-            }
-        }
-        sweepSamples[sweepCount++] = cur;
-        lastAreaTriggerCheckPos_ = cur;
-        lastAreaTriggerCheckMapId_ = owner_.currentMapIdRef();
-        lastAreaTriggerCheckValid_ = true;
-    }
+    // Tested every frame at the current position only, as the stock client
+    // does. The server (AzerothCore HandleAreaTriggerOpcode) re-tests the
+    // trigger against ITS copy of the player position with zero tolerance
+    // for non-tavern triggers, and rejects silently ("too far", debug level).
+    // The old 0.25s poll plus swept samples could fire on a point the player
+    // had already passed, or before the 0.5s heartbeat had told the server
+    // where the player was; the server refused, the trigger was latched
+    // active here, and nothing happened until the player walked out and back
+    // in. That is "dungeon entrances only work sometimes".
 
     // Time-based cooldown after teleport/world entry - suppress ALL trigger
     // firing (not just the first check) to prevent re-entry from immediately
@@ -3406,10 +3398,7 @@ void MovementHandler::checkAreaTriggers() {
             return false;
         };
 
-        bool inside = false;
-        for (int s = 0; s < sweepCount && !inside; ++s) {
-            inside = insideTrigger(sweepSamples[s].x, sweepSamples[s].y, sweepSamples[s].z);
-        }
+        const bool inside = insideTrigger(checkedPx, checkedPy, checkedPz);
 
         // Near misses, once per trigger. A trigger that does not fire looks
         // exactly like a trigger that is not there, and the difference is a
@@ -3511,6 +3500,14 @@ void MovementHandler::checkAreaTriggers() {
                     // Suppressed above; if suppressFirst inserted the trigger,
                     // it will not fire until the player leaves/re-enters.
                 } else {
+                    // Tell the server where we are first. It re-tests the
+                    // trigger against its own position for the player with no
+                    // tolerance, and packets on a session are handled in
+                    // order, so this heartbeat lands before the trigger does.
+                    // Without it the server's copy can be up to one heartbeat
+                    // (0.5s, ~3.5 yards at run speed) behind - more than half
+                    // the depth of most portal boxes.
+                    sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
                     network::Packet pkt(wireOpcode(Opcode::CMSG_AREATRIGGER));
                     pkt.writeUInt32(at.id);
                     lastAreaTriggerId_ = at.id;

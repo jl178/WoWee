@@ -262,6 +262,12 @@ struct M2Model {
     };
     std::vector<std::vector<SoundEvent>> soundEvents;
 
+    // Weapon hand-off ($SHL / $SHR) per sequence index, in ms: the frame of
+    // Sheath (89) / HipSheath (90) where the hand reaches the sheath and the
+    // weapon moves between hand and back or hip (HumanMale: 500 of 1000 on
+    // Sheath, 567 on HipSheath). UINT32_MAX = the sequence has none.
+    std::vector<uint32_t> sheathEventTimes;
+
     // Bone lookup table (vertex bone indices reference this to get global bone index)
     std::vector<uint16_t> boneLookupTable;
 

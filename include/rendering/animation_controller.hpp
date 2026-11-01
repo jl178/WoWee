@@ -65,7 +65,11 @@ public:
     /// Play the one-shot reach animation used by the manual Z sheath toggle:
     /// down to the hip, or over the shoulder to the back.
     /// Each arm reaches for its own hand's item, and an empty hand stays still.
-    void playWeaponSheathAnimation(SheathSpot mainHand, SheathSpot offHand);
+    /// Upper body only, so it plays over a run or a walk as over a stand.
+    /// Returns when the weapon changes hands (the model's $SHL/$SHR event,
+    /// else half way) and how long the reach lasts; durationMs 0 = no reach.
+    struct SheathReachTiming { uint32_t swapMs = 0; uint32_t durationMs = 0; };
+    SheathReachTiming playWeaponSheathAnimation(SheathSpot mainHand, SheathSpot offHand);
     void cancelEmote();
     [[nodiscard]] bool isEmoteActive() const { return characterAnimator_.getActivity().isEmoteActive(); }
     static std::string getEmoteText(const std::string& emoteName,

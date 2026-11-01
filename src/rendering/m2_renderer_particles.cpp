@@ -89,7 +89,12 @@ std::vector<glm::vec3> M2Renderer::getWaterVegetationPositions(const glm::vec3& 
 }
 
 void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt) {
-    if (gpu.isInstancePortal || inst.emissionStopped) return;
+    // Instance portals were skipped here and drawn as a glow sprite instead,
+    // but the portal IS its emitters: InstancePortal.m2's only mesh has a
+    // texture weight of 0, and the blue vortex is two sphere emitters on
+    // bones spinning about the model X axis. Skipping them left nothing but
+    // the sprite on the ground.
+    if (inst.emissionStopped) return;
 
     if (inst.emitterAccumulators.size() != gpu.particleEmitters.size()) {
         inst.emitterAccumulators.resize(gpu.particleEmitters.size(), 0.0f);
@@ -177,23 +182,51 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
             float hRange = interpFloat(em.horizontalRange, inst.animTime, inst.globalSequenceTime,
                                        inst.currentSequenceIndex, gpu.globalSequenceDurations);
 
-            (void)hRange; // azimuth range only matters for sphere emitters
             float speedVar = interpFloat(em.speedVariation, inst.animTime, inst.globalSequenceTime,
                                          inst.currentSequenceIndex, gpu.globalSequenceDurations);
             speed *= 1.0f + distN(particleRng_) * speedVar;
 
-            // Emitter +Z tilted by a random polar angle within verticalRange
-            // (radians) at a random azimuth. vRange 0 = straight up the bone Z.
-            const float theta = distN(particleRng_) * vRange;
-            const float phi = dist01(particleRng_) * 6.2831853f;
-            glm::vec3 dir(std::sin(theta) * std::cos(phi),
-                          std::sin(theta) * std::sin(phi),
-                          std::cos(theta));
+            glm::vec3 dir;
+            if (em.emitterType == kParticleEmitterSphere) {
+                // Sphere emitter: born on a shell around the emitter and sent
+                // out along the radius (in, for a negative speed). The polar
+                // angle from bone +Z spans +-verticalRange and the azimuth
+                // +-horizontalRange, azimuth 0 being bone +Y. That zero is
+                // fixed by InstancePortal.m2: vRange pi, hRange 0, a 4.17
+                // shell, speed -3.3, on bones spinning about X - a ring in
+                // the YZ plane of the portal's own frame, drawn inward and
+                // spun into the vortex. Any other zero puts the ring edge-on.
+                const float theta = distN(particleRng_) * vRange;
+                const float phi = distN(particleRng_) * hRange;
+                dir = glm::vec3(std::sin(theta) * std::sin(phi),
+                                std::sin(theta) * std::cos(phi),
+                                std::cos(theta));
+                const float areaL = interpFloat(em.emissionAreaLength, inst.animTime,
+                                                inst.globalSequenceTime, inst.currentSequenceIndex,
+                                                gpu.globalSequenceDurations);
+                const float areaW = interpFloat(em.emissionAreaWidth, inst.animTime,
+                                                inst.globalSequenceTime, inst.currentSequenceIndex,
+                                                gpu.globalSequenceDurations);
+                const float rMax = std::max(areaL, areaW);
+                const float rMin = std::min(areaL, areaW);
+                const float radius = (rMin > 0.0f)
+                    ? rMin + (rMax - rMin) * dist01(particleRng_)
+                    : rMax;
+                if (radius > 0.0f) {
+                    localPos += dir * radius;
+                    p.position = glm::vec3(inst.modelMatrix * boneXform * glm::vec4(localPos, 1.0f));
+                }
+            } else {
+                // Emitter +Z tilted by a random polar angle within verticalRange
+                // (radians) at a random azimuth. vRange 0 = straight up the bone Z.
+                const float theta = distN(particleRng_) * vRange;
+                const float phi = dist01(particleRng_) * 6.2831853f;
+                dir = glm::vec3(std::sin(theta) * std::cos(phi),
+                                std::sin(theta) * std::sin(phi),
+                                std::cos(theta));
+            }
 
-            // Transform direction by bone + model orientation (rotation only)
-            glm::mat3 rotMat = glm::mat3(inst.modelMatrix * boneXform);
-            p.velocity = rotMat * dir * speed;
-
+            glm::vec3 localVel = dir * speed;
             // When emission speed is ~0 and bone animation isn't loaded (.anim files),
             // particles pile up at the same position. Give them a drift so they
             // spread outward like a mist/spray effect instead of clustering.
@@ -201,14 +234,28 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
                 // Authored zero speed means the particle stays where it was
                 // born (candle/chandelier glow cards). Only fireflies drift.
                 if (gpu.isFireflyEffect) {
-                    p.velocity = rotMat * glm::vec3(
+                    localVel = glm::vec3(
                         distN(particleRng_) * 0.6f,
                         distN(particleRng_) * 0.6f,
                         distN(particleRng_) * 0.3f
                     );
                 } else {
-                    p.velocity = glm::vec3(0.0f);
+                    localVel = glm::vec3(0.0f);
                 }
+            }
+
+            // Transform direction by bone + model orientation (rotation only)
+            glm::mat3 rotMat = glm::mat3(inst.modelMatrix * boneXform);
+            p.velocity = rotMat * localVel;
+
+            // "Do not trail": the particle lives in its emitter bone's frame and
+            // is carried by it, instead of being left behind in the world. The
+            // portal's swirl is exactly this - particles drawn inward while the
+            // bones turn them, so each one traces a spiral.
+            if (em.flags & kParticleFlagNoTrail) {
+                p.followsEmitter = true;
+                p.localPos = localPos;
+                p.localVel = localVel;
             }
 
             const uint32_t tilesX = std::max<uint16_t>(em.textureCols, 1);
@@ -280,6 +327,22 @@ void M2Renderer::updateParticles(M2Instance& inst, float dt) {
             inst.particles.pop_back();
             continue;
         }
+        if (p.followsEmitter && p.emitterIndex >= 0 &&
+            static_cast<size_t>(p.emitterIndex) < numEm) {
+            // Stepped in the emitter bone's frame, then placed through the
+            // bone as it is now - see kParticleFlagNoTrail.
+            const auto& pem = gpu.particleEmitters[p.emitterIndex];
+            p.localVel.z -= emitterGrav[p.emitterIndex] * dt;
+            if (pem.drag > 0.0f) p.localVel *= std::exp(-pem.drag * dt);
+            p.localPos += p.localVel * dt;
+            const glm::mat4 boneXform = (pem.bone < inst.boneMatrices.size())
+                ? inst.boneMatrices[pem.bone] : glm::mat4(1.0f);
+            const glm::mat4 xf = inst.modelMatrix * boneXform;
+            p.position = glm::vec3(xf * glm::vec4(p.localPos, 1.0f));
+            p.velocity = glm::mat3(xf) * p.localVel;
+            i++;
+            continue;
+        }
         if (p.emitterIndex >= 0 && static_cast<size_t>(p.emitterIndex) < numEm) {
             p.velocity.z -= emitterGrav[p.emitterIndex] * dt;
             const float drag = gpu.particleEmitters[p.emitterIndex].drag;
@@ -294,8 +357,6 @@ void M2Renderer::updateParticles(M2Instance& inst, float dt) {
 // Ribbon emitter simulation
 // ---------------------------------------------------------------------------
 void M2Renderer::updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt) {
-    if (gpu.isInstancePortal) return;
-
     const auto& emitters = gpu.ribbonEmitters;
     if (emitters.empty()) return;
 
@@ -429,16 +490,35 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     ribbonDraws_.clear();
     auto& draws = ribbonDraws_;
 
-    for (const auto& inst : instances) {
+    // Only the instances the update steps ribbons for - those on the emitter
+    // list; nothing else ever has an edge. This walked all 88k instances in
+    // the world, for a few dozen trails: 1.5-2.3 ms of the M2 worker, which is
+    // the critical path of renderWorld.
+    for (size_t instIdx : particleInstanceIndices_) {
+        if (instIdx >= instances.size()) continue;
+        const auto& inst = instances[instIdx];
         if (!inst.cachedModel) continue;
         const auto& gpu = *inst.cachedModel;
-        if (gpu.isInstancePortal) continue;
         if (gpu.ribbonEmitters.empty()) continue;
+        if (inst.ribbonEdges.empty()) continue;
+        // On screen if the instance is (padded as the particle pass pads it),
+        // or if the line from the trail's head to its tail is - a missile's
+        // trail can reach well past its carrier's own sphere.
+        const bool instOnScreen = inst.cachedPaddedRadius <= 0.0f ||
+            cachedFrustum_.intersectsSphere(inst.cachedCullCenter, inst.cachedPaddedRadius + 30.0f);
 
         for (size_t ri = 0; ri < gpu.ribbonEmitters.size(); ri++) {
             if (ri >= inst.ribbonEdges.size()) continue;
             const auto& edges = inst.ribbonEdges[ri];
             if (edges.size() < 2) continue;
+            if (!instOnScreen) {
+                const glm::vec3& head = edges.back().worldPos;
+                const glm::vec3& tail = edges.front().worldPos;
+                const float width = std::max(std::abs(edges.back().heightAbove),
+                                             std::abs(edges.back().heightBelow));
+                if (!cachedFrustum_.intersectsSphere(0.5f * (head + tail),
+                        0.5f * glm::length(head - tail) + width + 10.0f)) continue;
+            }
 
             const auto& em = gpu.ribbonEmitters[ri];
 
@@ -535,7 +615,9 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
         if (++ribbonDiagFrame_ % 300 == 1) {
             size_t spellRibbonDraws = 0;
             size_t spellRibbonVerts = 0;
-            for (const auto& inst : instances) {
+            for (size_t instIdx : particleInstanceIndices_) {
+                if (instIdx >= instances.size()) continue;
+                const auto& inst = instances[instIdx];
                 if (!inst.cachedModel || !inst.cachedModel->isSpellEffect) continue;
                 for (const auto& ribbonEdge : inst.ribbonEdges) {
                     if (ribbonEdge.size() >= 2) {
@@ -637,7 +719,6 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
             !cachedFrustum_.intersectsSphere(inst.cachedCullCenter, inst.cachedPaddedRadius + 30.0f)) continue;
         if (!inst.cachedModel) continue;
         const auto& gpu = *inst.cachedModel;
-        if (gpu.isInstancePortal) continue;
 
 
         // Cache the last emitter's per-emitter state so adjacent particles
@@ -810,7 +891,9 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
         static uint32_t spellParticleDiagFrame_ = 0;
         if (++spellParticleDiagFrame_ % 300 == 1) {
             size_t spellPtc = 0;
-            for (const auto& inst : instances) {
+            for (size_t instIdx : particleInstanceIndices_) {
+                if (instIdx >= instances.size()) continue;
+                const auto& inst = instances[instIdx];
                 if (inst.cachedModel && inst.cachedModel->isSpellEffect)
                     spellPtc += inst.particles.size();
             }
@@ -821,6 +904,7 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
         }
     }
 
+    particleVertsDrawn_.store(static_cast<uint32_t>(totalParticles), std::memory_order_relaxed);
     if (totalParticles == 0) return;
 
     // Bind per-frame set (set 0) for particle pipeline

@@ -225,6 +225,19 @@ private:
 
     // Loaded terrain chunks
     std::vector<TerrainChunkGPU> chunks;
+    /// Bumped whenever `chunks` gains or loses an entry, so the shadow pass
+    /// knows its per-tile grouping below is stale.
+    uint64_t chunksGeneration_ = 0;
+    /// The chunks grouped by tile with a sphere round each tile, for the
+    /// shadow pass: a tile whose sphere misses the shadow map skips its 256
+    /// chunk tests. Rebuilt when chunksGeneration_ moves.
+    struct ShadowTileGroup {
+        glm::vec3 center{0.0f};
+        float radius = 0.0f;
+        std::vector<uint32_t> chunkIndices;
+    };
+    std::vector<ShadowTileGroup> shadowTiles_;
+    uint64_t shadowTilesGeneration_ = ~0ull;
 
     // Texture cache (path -> VkTexture)
     struct TextureCacheEntry {

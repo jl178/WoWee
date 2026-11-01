@@ -1,4 +1,5 @@
 #include "game/spell_handler.hpp"
+#include "game/global_strings.hpp"
 #include "addons/lua_api_registrations.hpp"
 #include "game/protocol_constants.hpp"
 #include "game/current_action.hpp"
@@ -168,6 +169,12 @@ std::string castFailureMessage(const GameHandler& owner, uint32_t spellId,
         }
     }
 
+    // The game's own text for the result, as stock shows it
+    // (SPELL_FAILED_NO_DUELING -> "Dueling isn't allowed here.").
+    if (const char* name = spellCastResultName(result); name && *name) {
+        std::string text = globalString(owner.services().assetManager, name);
+        if (!text.empty()) return text;
+    }
     const char* reason = getSpellCastResultString(result, powerType);
     return reason ? reason
                   : ("Spell cast failed (error " + std::to_string(result) + ")");
@@ -1476,47 +1483,113 @@ const std::vector<SpellHandler::SpellBookTab>& SpellHandler::getSpellBookTabs() 
     // Must be an instance member, not static - a static is shared across all
     // SpellHandler instances, so switching characters with the same spell count
     // would skip the rebuild and return the previous character's tabs.
-    if (lastSpellCount_ == knownSpells_.size() && !spellBookTabsDirty_)
+    owner_.loadSpellNameCache();
+    owner_.loadSkillLineDbc();
+    loadSpellBookDbc();
+
+    const uint8_t race = owner_.getPlayerRace();
+    const uint8_t cls = owner_.getPlayerClass();
+    const uint32_t raceMask = (race >= 1 && race <= 32) ? (1u << (race - 1)) : 0;
+    const uint32_t classMask = (cls >= 1 && cls <= 32) ? (1u << (cls - 1)) : 0;
+    const auto& cache = owner_.spellNameCacheRef();
+    const bool dataReady = !cache.empty() && spellBookDbcLoaded_;
+
+    // Order-independent, so the unordered set's iteration order cannot matter.
+    uint64_t sig = knownSpells_.size();
+    for (uint32_t id : knownSpells_) {
+        uint64_t h = id * 0x9E3779B97F4A7C15ull;
+        h ^= h >> 31;
+        sig += h * 0xBF58476D1CE4E5B9ull;
+    }
+    sig ^= (uint64_t(raceMask) << 1) ^ (uint64_t(classMask) << 33) ^ (dataReady ? 0x5555ull : 0);
+    if (sig == spellBookSignature_ && !spellBookTabsDirty_)
         return spellBookTabs_;
-    lastSpellCount_ = knownSpells_.size();
+    spellBookSignature_ = sig;
     spellBookTabsDirty_ = false;
     spellBookTabs_.clear();
 
-    // Which SkillLine.dbc categories earn a tab of their own.
+    // What the stock client puts in the book, read off the 3.3.5a data rather
+    // than guessed. SMSG_INITIAL_SPELLS lists everything the character knows -
+    // proficiencies, languages, talent ranks, hidden states - and the book is
+    // a filtered view of it:
     //
-    // Only the class one did, so everything else fell into General - and what
-    // falls into General is not a handful of odds and ends but every recipe
-    // the character knows. A miner's General tab listed Smelt Copper, Smelt
-    // Tin, Smelt Silver and the rest beside Hearthstone, and a tailor's ran to
-    // a hundred entries. The recipes belong under the skill that makes them.
-    static constexpr uint32_t SKILLLINE_CATEGORY_CLASS     = 7;
-    static constexpr uint32_t SKILLLINE_CATEGORY_SECONDARY = 9;   // Cooking, First Aid, Fishing
-    static constexpr uint32_t SKILLLINE_CATEGORY_PROFESSION = 11; // Mining, Tailoring, ...
-    // Category 9 is not only Cooking, First Aid and Fishing: it also holds
-    // every racial and every riding skill - Dwarven Racial, Horse Riding, Kodo
-    // Riding, twenty-four lines in all. Tabbing the category wholesale would
-    // put a tab named "Kodo Riding" beside Mining. So a secondary line earns
-    // one only when the character knows something in it that is actually made:
-    // a spell with reagents or a created item. That is the same question the
-    // General tab was answering wrongly, asked once here instead.
-    const auto lineHasRecipe = [this](uint32_t skillLine) {
-        for (uint32_t known : knownSpells_) {
-            auto kslIt = owner_.spellToSkillLineRef().find(known);
-            if (kslIt == owner_.spellToSkillLineRef().end() ||
-                kslIt->second != skillLine) continue;
-            auto cacheIt = owner_.spellNameCacheRef().find(known);
-            if (cacheIt == owner_.spellNameCacheRef().end()) continue;
-            if (cacheIt->second.createdItemId != 0) return true;
-            for (const auto& reagent : cacheIt->second.reagents) {
-                if (reagent.itemId != 0) return true;
-            }
-        }
-        return false;
+    //  - Spell.dbc Attributes 0x80 (SPELL_ATTR0_DO_NOT_DISPLAY) is never shown.
+    //    That one bit is what Blizzard set on everything the report named:
+    //    Cloth, Leather, Mail, One-Handed Swords (0xC0), Activate Primary and
+    //    Secondary Spec (63645, 63644), Deep Freeze Immunity State (71761),
+    //    languages, riding ranks, and 208 of the 213 passive mage talent
+    //    ranks. Passives without it stay - Dual Wield, Parry, Block, Cold
+    //    Weather Flying, racial passives - and show as passive.
+    //  - Attributes 0x20 (SPELL_ATTR0_TRADESPELL) is a recipe. Recipes live in
+    //    the trade skill window; the book shows the profession spell that
+    //    opens it (Tailoring, Smelting, Cooking), not Smelt Copper.
+    //  - Mounts (SkillLine 777) and Companions (778) are the companion lists,
+    //    not book entries.
+    //  - Tabs: General, then one per class talent line - SkillLine category 7
+    //    lines whose SkillRaceClassInfo row for this race and class carries
+    //    flag 0x400. That is exactly the trees (Arcane, Fire, Frost ...) and
+    //    leaves out Lockpicking, Runeforging, Mounts, Companions and pet
+    //    lines. Everything else - racials, weapon skills (Shoot, Throw),
+    //    Defense (Parry, Dodge), professions and secondary skills, Generic
+    //    (Auto Attack), and spells with no SkillLineAbility row at all - goes
+    //    under General. WotLK had no profession tabs; that is Cataclysm, and
+    //    MAX_SKILLLINE_TABS = 8 would not hold three trees, two professions
+    //    and three secondary skills anyway.
+    static constexpr uint32_t SPELL_ATTR0_TRADESPELL     = 0x20;
+    static constexpr uint32_t SPELL_ATTR0_DO_NOT_DISPLAY = 0x80;
+    static constexpr uint32_t SKILLLINE_CATEGORY_CLASS   = 7;
+    static constexpr uint32_t SKILL_MOUNTS     = 777;
+    static constexpr uint32_t SKILL_COMPANIONS = 778;
+    static constexpr uint32_t SKILL_FLAG_CLASS_TREE = 0x400;
+
+    const auto masksMatch = [&](uint32_t want, uint32_t exclude, uint32_t mine) {
+        if (want != 0 && mine != 0 && !(want & mine)) return false;
+        if (exclude & mine) return false;
+        return true;
     };
-    const auto earnsOwnTab = [&](uint32_t category, uint32_t skillLine) {
-        if (category == SKILLLINE_CATEGORY_CLASS) return true;
-        if (category == SKILLLINE_CATEGORY_PROFESSION) return true;
-        if (category == SKILLLINE_CATEGORY_SECONDARY) return lineHasRecipe(skillLine);
+    // The skill line a spell belongs to for this character: the row whose
+    // masks admit this race and class, else any row.
+    const auto skillLineFor = [&](uint32_t spellId) -> uint32_t {
+        auto it = spellBookSla_.find(spellId);
+        if (it == spellBookSla_.end()) {
+            // No SkillLineAbility.dbc of our own (it failed to load): the
+            // shared map is still better than nothing.
+            auto shared = owner_.spellToSkillLineRef().find(spellId);
+            return shared != owner_.spellToSkillLineRef().end() ? shared->second : 0;
+        }
+        for (const auto& row : it->second) {
+            if (masksMatch(row.raceMask, row.excludeRace, raceMask) &&
+                masksMatch(row.classMask, row.excludeClass, classMask))
+                return row.skillLine;
+        }
+        return it->second.front().skillLine;
+    };
+    // Only trusted where the file actually uses the flag; it was read off the
+    // 3.3.5a file, and an older one that never sets it would otherwise lose
+    // every class tab.
+    bool srciHasTreeFlag = false;
+    for (const auto& [skill, rows] : spellBookSrci_) {
+        for (const auto& row : rows) {
+            if (row.flags & SKILL_FLAG_CLASS_TREE) { srciHasTreeFlag = true; break; }
+        }
+        if (srciHasTreeFlag) break;
+    }
+    const auto isClassTree = [&](uint32_t skillLine) {
+        auto catIt = owner_.skillLineCategoriesRef().find(skillLine);
+        if (catIt == owner_.skillLineCategoriesRef().end() ||
+            catIt->second != SKILLLINE_CATEGORY_CLASS) return false;
+        if (skillLine == SKILL_MOUNTS || skillLine == SKILL_COMPANIONS) return false;
+        // Without SkillRaceClassInfo (or for an expansion whose file differs)
+        // fall back to the category alone, which was the old behaviour.
+        if (!srciHasTreeFlag) return true;
+        auto it = spellBookSrci_.find(skillLine);
+        if (it == spellBookSrci_.end()) return false;
+        for (const auto& row : it->second) {
+            if (!(row.flags & SKILL_FLAG_CLASS_TREE)) continue;
+            if (row.raceMask != 0 && raceMask != 0 && !(row.raceMask & raceMask)) continue;
+            if (row.classMask != 0 && classMask != 0 && !(row.classMask & classMask)) continue;
+            return true;
+        }
         return false;
     };
 
@@ -1524,26 +1597,74 @@ const std::vector<SpellHandler::SpellBookTab>& SpellHandler::getSpellBookTabs() 
     std::vector<uint32_t> general;
 
     for (uint32_t spellId : knownSpells_) {
-        auto slIt = owner_.spellToSkillLineRef().find(spellId);
-        if (slIt != owner_.spellToSkillLineRef().end()) {
-            uint32_t skillLineId = slIt->second;
-            auto catIt = owner_.skillLineCategoriesRef().find(skillLineId);
-            if (catIt != owner_.skillLineCategoriesRef().end() &&
-                earnsOwnTab(catIt->second, skillLineId)) {
-                bySkillLine[skillLineId].push_back(spellId);
-                continue;
-            }
+        // Put into the known set by this client so the action bar default
+        // has something to point at; no server teaches it and the stock book
+        // never lists it - it is the item's spell.
+        if (spellId == SPELL_ID_HEARTHSTONE) continue;
+        auto cIt = cache.find(spellId);
+        if (cIt != cache.end()) {
+            const uint32_t attr = cIt->second.attr;
+            if (attr & (SPELL_ATTR0_DO_NOT_DISPLAY | SPELL_ATTR0_TRADESPELL)) continue;
+        } else if (!cache.empty()) {
+            // Not in this client's Spell.dbc: the stock client has nothing
+            // to draw for it either.
+            continue;
         }
-        general.push_back(spellId);
+        const uint32_t skillLine = skillLineFor(spellId);
+        if (skillLine == SKILL_MOUNTS || skillLine == SKILL_COMPANIONS) continue;
+        if (skillLine != 0 && isClassTree(skillLine)) {
+            bySkillLine[skillLine].push_back(spellId);
+        } else {
+            general.push_back(spellId);
+        }
     }
 
-    auto byName = [this](uint32_t a, uint32_t b) {
-        return owner_.getSpellName(a) < owner_.getSpellName(b);
+    // "Rank 7" → 7. Ranks are compared by number, not as strings, so Rank 10
+    // sorts above Rank 9; anything without a number is rank 0.
+    const auto rankNumber = [this](uint32_t id) {
+        const std::string& r = owner_.getSpellRank(id);
+        uint32_t n = 0;
+        bool digits = false;
+        for (char c : r) {
+            if (c >= '0' && c <= '9') { n = n * 10 + uint32_t(c - '0'); digits = true; }
+            else if (digits) break;
+        }
+        return n;
+    };
+    // By name, and each name's ranks low to high, which is how the book lays
+    // out the all-ranks view.
+    const auto byNameThenRank = [&](uint32_t a, uint32_t b) {
+        const std::string& na = owner_.getSpellName(a);
+        const std::string& nb = owner_.getSpellName(b);
+        if (na != nb) return na < nb;
+        const uint32_t ra = rankNumber(a), rb = rankNumber(b);
+        if (ra != rb) return ra < rb;
+        return a < b;
+    };
+    // The highest-rank view: the last entry of each run of one name. Lower
+    // ranks of a mana spell stay known - the server only supersedes ranks
+    // that cannot stack, which is why FrameXML hides the "show all ranks"
+    // box for warriors and rogues - so the client has to drop them here.
+    // SkillLineAbility.SupercededBySpell is no help for this: it is zero for
+    // Fireball and almost every other class spell.
+    const auto highestRanks = [this](const std::vector<uint32_t>& sorted) {
+        std::vector<uint32_t> idx;
+        for (size_t i = 0; i < sorted.size(); ++i) {
+            if (i + 1 < sorted.size() &&
+                owner_.getSpellName(sorted[i]) == owner_.getSpellName(sorted[i + 1]))
+                continue;
+            idx.push_back(static_cast<uint32_t>(i));
+        }
+        return idx;
     };
 
-    if (!general.empty()) {
-        std::sort(general.begin(), general.end(), byName);
-        spellBookTabs_.push_back({.name = "General", .texture = "Interface\\Icons\\INV_Misc_Book_09", .spellIds = std::move(general)});
+    // General always exists in the stock book, and FrameXML's OnLoad assumes
+    // tab 1 is there; an empty one is harmless.
+    {
+        std::sort(general.begin(), general.end(), byNameThenRank);
+        auto hi = highestRanks(general);
+        spellBookTabs_.push_back({.name = "General", .texture = "Interface\\Icons\\INV_Misc_Book_09",
+                                  .spellIds = std::move(general), .highestRankIdx = std::move(hi)});
     }
 
     // Each tab's own picture, from SkillLine.dbc's icon column. Every tab used
@@ -1561,26 +1682,10 @@ const std::vector<SpellHandler::SpellBookTab>& SpellHandler::getSpellBookTabs() 
         return path.empty() ? kDefaultTabIcon : path;
     };
 
-    // Down the side of the book in the order the kinds belong in, not in one
-    // alphabetical run: General, then the class's own lines, then the crafting
-    // ones. Sorting every tab by name alone dealt them together - Affliction,
-    // Alchemy, Arms, Blacksmithing - so a warlock's specialisations and their
-    // professions read as one undifferentiated column.
-    //
-    // Alphabetical within each kind, which is what the sort was right about.
-    const auto tabRank = [&](uint32_t skillLineId) {
-        auto catIt = owner_.skillLineCategoriesRef().find(skillLineId);
-        if (catIt == owner_.skillLineCategoriesRef().end()) return 3;
-        switch (catIt->second) {
-            case SKILLLINE_CATEGORY_CLASS:      return 0;
-            case SKILLLINE_CATEGORY_PROFESSION: return 1;
-            case SKILLLINE_CATEGORY_SECONDARY:  return 2;
-            default:                            return 3;
-        }
-    };
-
+    // The class trees after General, alphabetically - which for every class
+    // in 3.3.5a is also the talent-frame order (Arcane, Fire, Frost; Arms,
+    // Fury, Protection; Blood, Frost, Unholy ...).
     struct NamedTab {
-        int rank;
         std::string name;
         std::string icon;
         std::vector<uint32_t> spells;
@@ -1589,21 +1694,66 @@ const std::vector<SpellHandler::SpellBookTab>& SpellHandler::getSpellBookTabs() 
     for (auto& [skillLineId, spells] : bySkillLine) {
         auto nameIt = owner_.skillLineNamesRef().find(skillLineId);
         std::string tabName = (nameIt != owner_.skillLineNamesRef().end()) ? nameIt->second : "Unknown";
-        std::sort(spells.begin(), spells.end(), byName);
-        named.push_back({.rank = tabRank(skillLineId), .name = std::move(tabName), .icon = tabIcon(skillLineId),
+        std::sort(spells.begin(), spells.end(), byNameThenRank);
+        named.push_back({.name = std::move(tabName), .icon = tabIcon(skillLineId),
                          .spells = std::move(spells)});
     }
     std::sort(named.begin(), named.end(), [](const NamedTab& a, const NamedTab& b) {
-        if (a.rank != b.rank) return a.rank < b.rank;
         return a.name < b.name;
     });
 
     for (auto& tab : named) {
+        auto hi = highestRanks(tab.spells);
         spellBookTabs_.push_back({.name = std::move(tab.name), .texture = std::move(tab.icon),
-                                  .spellIds = std::move(tab.spells)});
+                                  .spellIds = std::move(tab.spells), .highestRankIdx = std::move(hi)});
     }
 
     return spellBookTabs_;
+}
+
+void SpellHandler::loadSpellBookDbc() {
+    if (spellBookDbcLoaded_) return;
+    auto* am = owner_.services().assetManager;
+    // Not yet an attempt, like the loaders beside it: an early call before
+    // the assets are up must not disable this for the session.
+    if (!am || !am->isInitialized()) return;
+    spellBookDbcLoaded_ = true;
+
+    // The first seven columns of SkillLineAbility.dbc are the same in every
+    // expansion: ID, SkillLine, Spell, RaceMask, ClassMask, ExcludeRace,
+    // ExcludeClass.
+    if (auto sla = am->loadDBC("SkillLineAbility.dbc"); sla && sla->isLoaded()) {
+        const auto* slaL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("SkillLineAbility") : nullptr;
+        const uint32_t skillField = slaL ? (*slaL)["SkillLineID"] : 1;
+        const uint32_t spellField = slaL ? (*slaL)["SpellID"]     : 2;
+        const bool hasMasks = sla->getFieldCount() >= 7;
+        for (uint32_t i = 0; i < sla->getRecordCount(); ++i) {
+            SpellBookSlaRow row;
+            row.skillLine = sla->getUInt32(i, skillField);
+            const uint32_t spellId = sla->getUInt32(i, spellField);
+            if (spellId == 0 || row.skillLine == 0) continue;
+            if (hasMasks) {
+                row.raceMask     = sla->getUInt32(i, 3);
+                row.classMask    = sla->getUInt32(i, 4);
+                row.excludeRace  = sla->getUInt32(i, 5);
+                row.excludeClass = sla->getUInt32(i, 6);
+            }
+            spellBookSla_[spellId].push_back(row);
+        }
+    }
+
+    // SkillRaceClassInfo.dbc: ID, SkillID, RaceMask, ClassMask, Flags, ...
+    if (auto srci = am->loadDBC("SkillRaceClassInfo.dbc");
+        srci && srci->isLoaded() && srci->getFieldCount() >= 5) {
+        for (uint32_t i = 0; i < srci->getRecordCount(); ++i) {
+            const uint32_t skill = srci->getUInt32(i, 1);
+            if (skill == 0) continue;
+            spellBookSrci_[skill].push_back({srci->getUInt32(i, 2), srci->getUInt32(i, 3),
+                                             srci->getUInt32(i, 4)});
+        }
+    }
+    LOG_INFO("Spellbook: ", spellBookSla_.size(), " spells with skill line rows, ",
+             spellBookSrci_.size(), " skill lines with race/class info");
 }
 
 void SpellHandler::loadTalentDbc() {

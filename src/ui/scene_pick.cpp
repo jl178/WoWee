@@ -5,6 +5,10 @@
 #include "game/game_handler.hpp"
 #include "game/entity.hpp"
 #include "rendering/camera.hpp"
+#include "rendering/renderer.hpp"
+#include "rendering/terrain_manager.hpp"
+#include "rendering/wmo_renderer.hpp"
+#include "rendering/m2_renderer.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -27,9 +31,50 @@ constexpr uint32_t kGoTypeChair = 7;
 constexpr uint32_t kGoTypeGeneric = 5;
 constexpr uint32_t kGoTypeFishingHole = 25;
 
+/// GAMEOBJECT_TYPE_FISHINGNODE: the bobber is reeled in from casting range.
+constexpr uint32_t kGoTypeFishingNode = 17;
+/// How near a game object has to be to be used. The server's
+/// INTERACTION_DISTANCE is 5.5 yards to the object's edge; a click from
+/// further out does nothing, so the stock client offers none: no cursor, no
+/// pick. Measured from the character to the object's pick sphere.
+constexpr float kGameObjectUseRange = 5.0f;
+/// How far the pick ray looks for walls and ground at all.
+constexpr float kOcclusionReach = 200.0f;
+
 bool isDeadUnit(const std::shared_ptr<game::Entity>& entity) {
     auto unit = std::dynamic_pointer_cast<game::Unit>(entity);
     return unit && unit->getHealth() == 0 && unit->getMaxHealth() > 0;
+}
+
+/// Where the ray first meets the terrain, or `reach` if it does not.
+///
+/// Marched in one-yard steps and refined by halving, which is far finer than
+/// any hill. Skipped when the ray starts below the ground at its own origin -
+/// a camera in a cave or a building cellar has terrain overhead that is not
+/// in its way.
+float terrainHitT(const rendering::TerrainManager* terrain, const rendering::Ray& ray,
+                  float reach) {
+    if (!terrain) return reach;
+    auto below = [&](float t) {
+        const glm::vec3 p = ray.origin + ray.direction * t;
+        const auto h = terrain->getHeightAt(p.x, p.y);
+        // A hole is open: getHeightAt interpolates straight across one, and
+        // a cave or crypt entrance cut out of the ground is not a wall.
+        return h && p.z < *h && !terrain->isHoleAt(p.x, p.y);
+    };
+    if (below(0.0f)) return reach;
+    constexpr float kStep = 1.0f;
+    float prev = 0.0f;
+    for (float t = kStep; t <= reach; t += kStep) {
+        if (!below(t)) { prev = t; continue; }
+        float lo = prev, hi = t;
+        for (int i = 0; i < 8; ++i) {
+            const float mid = 0.5f * (lo + hi);
+            (below(mid) ? hi : lo) = mid;
+        }
+        return hi;
+    }
+    return reach;
 }
 
 } // namespace
@@ -40,6 +85,37 @@ ScenePick pickScene(game::GameHandler& gameHandler,
                     const ScenePickHit& onHit) {
     ScenePick pick;
     const uint64_t myGuid = gameHandler.getPlayerGuid();
+
+    // The world in the ray's way. The stock client's pick stops at the first
+    // opaque surface - terrain, a building, a solid doodad - so nothing behind
+    // a wall can be hovered or clicked: not the bench inside Northshire Abbey
+    // seen from the yard, not a mob on the far side of a hill.
+    //
+    // Terrain and WMO are hard stops. A doodad (M2) is a softer one, because
+    // a game object is itself an M2 with collision - a mailbox, a door, a
+    // chest - and the ray meets the object's own face a little in front of
+    // its centre; an entity is only hidden by an M2 when its centre lies more
+    // than its own pick radius (and at least a yard) beyond that hit.
+    float hardT = kOcclusionReach;
+    float softT = kOcclusionReach;
+    if (auto* renderer = core::Application::getInstance().getRenderer()) {
+        hardT = terrainHitT(renderer->getTerrainManager(), ray, kOcclusionReach);
+        if (auto* wmo = renderer->getWMORenderer()) {
+            hardT = std::min(hardT, wmo->raycastBoundingBoxes(ray.origin, ray.direction, hardT));
+        }
+        if (auto* m2 = renderer->getM2Renderer()) {
+            softT = m2->raycastBoundingBoxes(ray.origin, ray.direction, hardT);
+        }
+    }
+
+    // The character, for the use range of game objects.
+    glm::vec3 playerRender(0.0f);
+    bool havePlayer = false;
+    if (auto me = gameHandler.getEntityManager().getEntity(myGuid)) {
+        playerRender = core::coords::canonicalToRender(
+            glm::vec3(me->getX(), me->getY(), me->getZ()));
+        havePlayer = true;
+    }
 
     for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
         if (!entity) continue;
@@ -106,6 +182,23 @@ ScenePick pickScene(game::GameHandler& gameHandler,
         float hitT = 0.0f;
         if (!raySphereIntersect(ray, hitCenter, hitRadius, hitT)) continue;
         const float centerT = glm::dot(hitCenter - ray.origin, ray.direction);
+
+        // Behind the first wall or hillside the ray meets: not there to be
+        // picked. Entered beyond it, or centred well past it.
+        if (hitT > hardT || centerT > hardT + 0.5f * hitRadius) continue;
+        // Behind a solid doodad, with the slack its own model needs.
+        if (centerT > softT + std::max(1.0f, hitRadius)) continue;
+
+        // A game object out of use range is not offered at all - no cursor,
+        // no click - which is the one rule for every object type, chairs and
+        // benches included. The fishing bobber is the exception: it is
+        // reeled in from casting range.
+        if (type == game::ObjectType::GAMEOBJECT && havePlayer &&
+            !(goInfo && goInfo->type == kGoTypeFishingNode) &&
+            guid != gameHandler.getHookedFishingBobberGuid()) {
+            const float edgeDist = glm::length(hitCenter - playerRender) - hitRadius;
+            if (edgeDist > kGameObjectUseRange) continue;
+        }
 
         if (type == game::ObjectType::UNIT || type == game::ObjectType::PLAYER) {
             // Rank the living ahead of the dead rather than by distance alone. A

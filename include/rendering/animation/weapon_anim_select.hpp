@@ -232,6 +232,14 @@ inline uint32_t readyAnim(const WeaponLoadout& w, SheathState sheath) {
     return READY_1H;
 }
 
+/// The reach for an item put away (or drawn from) a spot: Sheath (89) for
+/// the back, HipSheath (90) for the hip, 0 for an empty hand. 3.3.5 has no
+/// separate unsheathe; the same reach plays both ways, and the model's
+/// $SHL/$SHR event marks where the weapon changes hands.
+inline uint32_t sheathReachAnim(SheathSpot spot) {
+    return spot == SheathSpot::HIP ? HIP_SHEATHE : spot == SheathSpot::BACK ? SHEATHE : 0u;
+}
+
 inline bool isReadyStance(uint32_t id) {
     return (id >= READY_UNARMED && id <= READY_BOW) || id == READY_RIFLE ||
            id == READY_THROWN || id == READY_SPELL_DIRECTED;

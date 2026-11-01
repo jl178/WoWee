@@ -46,6 +46,7 @@ layout(location = 0) in vec3 FragPos;
 layout(location = 1) in vec3 Normal;
 layout(location = 2) in vec2 TexCoord;
 layout(location = 3) in vec2 LayerUV;
+layout(location = 4) in vec3 VertColor;   // MCCV, doubled: 1.0 is neutral
 
 layout(location = 0) out vec4 outColor;
 
@@ -189,6 +190,13 @@ void main() {
     float bumpFade = 1.0 - smoothstep(50.0, 125.0, fragDist);
     float edgeDist = min(min(LayerUV.x, 1.0 - LayerUV.x), min(LayerUV.y, 1.0 - LayerUV.y));
     bumpFade *= smoothstep(0.0, 0.06, edgeDist);
+    // And down on steep slopes. Terrain textures are projected straight down,
+    // so on a cliff each texel is smeared down the face; the luminance then
+    // changes sharply across the slope and hardly at all along it, and the
+    // bump turned that into lit ridges running down every cliff - streaks on
+    // top of the stretch the projection already has. Full strength up to
+    // about 45 degrees, a quarter of it on a vertical face.
+    bumpFade *= mix(0.25, 1.0, smoothstep(0.35, 0.7, abs(norm.z)));
     if (bumpFade > 0.001) {
         float lum = dot(finalColor.rgb, vec3(0.299, 0.587, 0.114));
         float dLdx = dFdx(lum);
@@ -229,6 +237,11 @@ void main() {
             norm = (len2 > 1e-8) ? candidate * inversesqrt(len2) : norm;
         }
     }
+
+    // MCCV vertex colour, as the client applies it: the blended ground times
+    // twice the stored colour (the doubling is done on load). After the bump,
+    // which reads the texture's own detail and not the painted tint.
+    finalColor.rgb *= VertColor;
 
     vec3 lightDir2 = normalize(-lightDir.xyz);
     vec3 ambient = ambientColor.rgb * finalColor.rgb;

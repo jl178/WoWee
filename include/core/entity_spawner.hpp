@@ -193,7 +193,12 @@ public:
         uint32_t inventoryType = 0;
         uint32_t sheatheType = UINT32_MAX;  ///< UINT32_MAX: no row / unknown
         uint32_t displayId = 0;
+        uint32_t material = 0;              ///< 1 metal, 2 wood... (SheatheSoundLookups)
     };
+    /// Play the sheathe (or draw) sound for an item at a render position,
+    /// from SheatheSoundLookups.dbc (class, subclass and, where the row asks,
+    /// material: SheathMetal / SheathWood / SheathShield and the Unsheath ones).
+    void playSheathSound(const ItemDbcRow& item, bool drawing, const glm::vec3& renderPos);
     /// The row for an item entry; nullptr when Item.dbc has none (or the
     /// expansion ships no Item.dbc).
     const ItemDbcRow* lookupItemDbc(uint32_t entry);
@@ -419,6 +424,21 @@ private:
     // Item.dbc, loaded on first use.
     std::unordered_map<uint32_t, ItemDbcRow> itemDbcCache_;
     bool itemDbcLoaded_ = false;
+    // SheatheSoundLookups.dbc rows: class, subclass, material, checkMaterial,
+    // sheathe sound, draw sound. Loaded on first use.
+    struct SheathSoundRow { uint32_t itemClass, subclass, material, checkMaterial, sheathe, unsheathe; };
+    std::vector<SheathSoundRow> sheathSoundRows_;
+    bool sheathSoundsLoaded_ = false;
+    /// A unit's sheath animation in progress: weapons move to where the new
+    /// sheath state puts them at swapAtMs (the model's $SHL/$SHR hand-off),
+    /// with that moment's sound; nothing more happens until endAtMs.
+    struct SheathTransition {
+        double swapAtMs = 0.0;
+        double endAtMs = 0.0;
+        bool swapped = false;
+        uint8_t fromState = 0;
+    };
+    std::unordered_map<uint64_t, SheathTransition> unitSheathTransitions_;
     /// Other players' weapon-slot displays (main, off, ranged) and inventory
     /// types as last sent, so a sheath change can re-attach without them.
     struct UnitWeaponDisplays {

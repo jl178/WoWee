@@ -60,7 +60,17 @@ bool decodeLayerAlpha(const MapChunk& chunk, size_t layerIdx,
         while (writePos < ALPHA_MAP_SIZE && readPos < chunk.alphaMap.size()) {
             const uint8_t cmd = chunk.alphaMap[readPos++];
             const bool fill = (cmd & ALPHA_FILL_FLAG) != 0;
-            const int count = (cmd & ALPHA_COUNT_MASK) + 1;
+            // The count is the low seven bits as they stand, not plus one.
+            // With the extra texel every run overran by one: a copy run ate
+            // the next command byte as data, the stream lost its framing,
+            // and the decode ran out of bytes a few rows in - leaving the
+            // rest of the 64x64 map at unsetFill (255, fully covered). That
+            // is the bright, hard-edged blocks on Northrend's cliffs, where
+            // nearly every layer is compressed. Checked on northrend_31_21,
+            // 30_21, 31_20 and 30_20: 2441 compressed layers, and without the
+            // +1 every one decodes to exactly 4096 texels and ends exactly
+            // where the next layer's MCLY offset begins.
+            const int count = cmd & ALPHA_COUNT_MASK;
 
             if (fill) {
                 if (readPos >= chunk.alphaMap.size()) break;
@@ -94,7 +104,11 @@ bool decodeLayerAlpha(const MapChunk& chunk, size_t layerIdx,
             outAlpha[i * 2] = static_cast<uint8_t>((v & 0x0F) * 17);
             outAlpha[i * 2 + 1] = static_cast<uint8_t>((v >> 4) * 17);
         }
-        fixLastRowAndColumn(outAlpha);
+        // MCNK flag 0x8000 (do_not_fix_alpha_map) says the map was painted
+        // all the way to the edge and the last row and column are data.
+        if ((chunk.flags & MCNK_DO_NOT_FIX_ALPHA_MAP) == 0) {
+            fixLastRowAndColumn(outAlpha);
+        }
         return true;
     }
 

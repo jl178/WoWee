@@ -842,9 +842,12 @@ void GameHandler::update(float deltaTime) {
 
         // Check area triggers (instance portals, tavern rests, etc.)
         if (areaTriggerCooldown_ > 0.0f) areaTriggerCooldown_ -= deltaTime;
-        areaTriggerCheckTimer_ += deltaTime;
-        if (areaTriggerCheckTimer_ >= game::AREA_TRIGGER_CHECK_INTERVAL) {
-            areaTriggerCheckTimer_ = 0.0f;
+        // Every frame, like the stock client: a 0.25s poll lets a portal box a
+        // few yards deep be crossed between checks. The timer is only still
+        // used as the post-transfer delay (set negative on world entry).
+        if (areaTriggerCheckTimer_ < 0.0f) {
+            areaTriggerCheckTimer_ += deltaTime;
+        } else {
             checkAreaTriggers();
         }
 

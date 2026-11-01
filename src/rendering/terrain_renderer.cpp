@@ -402,6 +402,7 @@ bool TerrainRenderer::loadTerrain(const pipeline::TerrainMesh& mesh,
 
             registerRtChunk(gpuChunk, chunk);
             chunks.push_back(std::move(gpuChunk));
+            ++chunksGeneration_;
         }
     }
 
@@ -475,6 +476,7 @@ bool TerrainRenderer::loadTerrainIncremental(const pipeline::TerrainMesh& mesh,
 
         registerRtChunk(gpuChunk, chunk);
         chunks.push_back(std::move(gpuChunk));
+        ++chunksGeneration_;
         uploaded++;
     }
 
@@ -1114,8 +1116,48 @@ void TerrainRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSp
     const float scaleY = glm::length(glm::vec3(lightSpaceMatrix[0][1], lightSpaceMatrix[1][1],
                                                lightSpaceMatrix[2][1]));
 
+    // Tiles first. Every loaded chunk was tested here each frame - 15k to 28k
+    // of them, each a light-space transform on a ~200-byte struct - to keep
+    // about 2000. A tile's sphere holds all of its chunks' spheres, so a tile
+    // that fails the same test cannot hold a chunk that passes it.
+    if (shadowTilesGeneration_ != chunksGeneration_) {
+        shadowTilesGeneration_ = chunksGeneration_;
+        shadowTiles_.clear();
+        std::unordered_map<uint64_t, size_t> tileSlot;
+        for (uint32_t ci = 0; ci < chunks.size(); ++ci) {
+            const auto& chunk = chunks[ci];
+            const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(chunk.tileX)) << 32) |
+                                 static_cast<uint32_t>(chunk.tileY);
+            auto [it, inserted] = tileSlot.try_emplace(key, shadowTiles_.size());
+            if (inserted) shadowTiles_.emplace_back();
+            shadowTiles_[it->second].chunkIndices.push_back(ci);
+        }
+        for (auto& tile : shadowTiles_) {
+            glm::vec3 sum(0.0f);
+            for (uint32_t ci : tile.chunkIndices) sum += chunks[ci].boundingSphereCenter;
+            tile.center = sum / static_cast<float>(std::max<size_t>(1, tile.chunkIndices.size()));
+            float r = 0.0f;
+            for (uint32_t ci : tile.chunkIndices) {
+                r = std::max(r, glm::length(chunks[ci].boundingSphereCenter - tile.center) +
+                                    chunks[ci].boundingSphereRadius);
+            }
+            tile.radius = r;
+        }
+    }
+
     uint32_t shadowChunksDrawn = 0;
-    for (const auto& chunk : chunks) {
+    for (const auto& tile : shadowTiles_) {
+    {
+        const glm::vec4 tls = lightSpaceMatrix * glm::vec4(tile.center, 1.0f);
+        if (std::abs(tls.x) > 1.0f + tile.radius * scaleX ||
+            std::abs(tls.y) > 1.0f + tile.radius * scaleY) {
+            continue;
+        }
+        if (tls.z > centreLs.z + (shadowRadius + tile.radius) * scaleZ) continue;
+    }
+    for (uint32_t ci : tile.chunkIndices) {
+        if (ci >= chunks.size()) continue;
+        const auto& chunk = chunks[ci];
         if (!chunk.isValid()) continue;
 
         const glm::vec4 ls = lightSpaceMatrix * glm::vec4(chunk.boundingSphereCenter, 1.0f);
@@ -1146,6 +1188,7 @@ void TerrainRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSp
             megaShadowBound = false;
         }
     }
+    }
     // How many chunks cast, said when it moves by a quarter: the count is the
     // cost of this pass, and the cull that decides it is not obvious.
     static uint32_t lastReported = 0;
@@ -1164,6 +1207,7 @@ void TerrainRenderer::removeTile(int tileX, int tileY) {
         if (it->tileX == tileX && it->tileY == tileY) {
             destroyChunkGPU(*it);
             it = chunks.erase(it);
+            ++chunksGeneration_;
             removed++;
         } else {
             ++it;
@@ -1181,6 +1225,7 @@ void TerrainRenderer::clear() {
         destroyChunkGPU(chunk);
     }
     chunks.clear();
+    ++chunksGeneration_;
     renderedChunks = 0;
     // No chunk is holding anything now, so nothing needs protecting from the
     // next upload's point of view either.

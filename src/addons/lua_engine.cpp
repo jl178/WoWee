@@ -1998,7 +1998,10 @@ static bool fillSpellTooltip(wowee::ui::Widget* w, game::GameHandler* gh,
     if (info.manaCost > 0) {
         const char* named = game::powerTypeName(info.powerType);
         const char* unit = named ? named : "";
-        cost = std::to_string(info.manaCost) + (*unit ? std::string(" ") + unit : "");
+        // Rage and runic power costs are in tenths ("150" is 15 Rage).
+        const bool tenths = info.powerType == 1 || info.powerType == 6;
+        cost = std::to_string(tenths ? info.manaCost / 10 : info.manaCost) +
+               (*unit ? std::string(" ") + unit : "");
     }
     if (info.maxRange > 0.0f) {
         range = std::to_string(static_cast<int>(info.maxRange)) + " yd range";
@@ -4140,6 +4143,16 @@ int lua_Region_GetVertexColor(lua_State* L) {
 int lua_Frame_SetNormalFontObject(lua_State* L) {
     auto* tree = wowee::addons::getWidgetTree(L);
     if (!tree) return 0;
+    // Remembered on the button, so GetNormalFontObject can answer and so a
+    // label given later by SetFontString takes it too. The emitter writes a
+    // body's <NormalFont> before its <ButtonText>, so within one template the
+    // font arrives first and the label second: GossipTitleButtonTemplate's
+    // QuestFontLeft went to a placeholder, and the real ButtonText drew its
+    // option centred in its 275-wide box instead of after the icon.
+    if (lua_istable(L, 1) && !lua_isnoneornil(L, 2)) {
+        lua_pushvalue(L, 2);
+        lua_setfield(L, 1, "__normalFont");
+    }
     // The label, not the button: a button has no text of its own.
     //
     // Made here if it does not exist yet. A template names its font as it is
@@ -6862,7 +6875,24 @@ void LuaEngine::registerCoreAPI() {
         "function mt:SetID(id) self.__id = id end\n"
         "function mt:GetID() return self.__id or 0 end\n"
         "function mt:GetScrollChild() return self.__scrollChild end\n"
-        "function mt:SetFontString(fs) self.__fontString = fs end\n"
+        // A label handed over after the button's <NormalFont> was named takes
+        // that font, unless it brought a font object of its own - which is
+        // what the client does with a button's normal font. A ButtonText with
+        // no inherits= (GossipTitleButtonTemplate's, under QuestFontLeft) was
+        // otherwise drawn in the default font, centred.
+        "function mt:SetFontString(fs)\n"
+        "    self.__fontString = fs\n"
+        "    local nf = self.__normalFont\n"
+        "    if fs and nf and self.SetNormalFontObject\n"
+        "       and not (fs.GetFontObject and fs:GetFontObject()) then\n"
+        "        self:SetNormalFontObject(nf)\n"
+        "    end\n"
+        "end\n"
+        "function mt:GetNormalFontObject()\n"
+        "    local f = self.__normalFont\n"
+        "    if type(f) == 'string' then return _G[f] end\n"
+        "    return f\n"
+        "end\n"
         // Made on demand when a button is asked for one it has not been
         // given. Every button has a font string in the real client, and
         // FrameXML assumes it: FCF_SetTabColor does
@@ -7417,52 +7447,49 @@ void LuaEngine::registerCoreAPI() {
     // pale one on coming back. No interface of 1.12 to 3.3.5 has either; the
     // chat lines for both are the interface's own and are not repeated here.
     //
-    // One builder for the pair: a frame over the whole screen, a tint that
-    // fades within the first second, and a line of text that holds and then
-    // fades over the last half second.
+    // One builder for the pair: a frame over the whole screen holding a line
+    // of text that holds and then fades over the last half second. No
+    // full-screen tint: the stock client never colours the screen here; the
+    // level-up glow is the LevelUp.m2 spell visual at the character.
     bootstrap(
-        "local function wBanner(name, font, r, g, b, tr, tg, tb)\n"
+        "local function wBanner(name, font, r, g, b)\n"
         "    local f = CreateFrame('Frame', name)\n"
         "    f:SetFrameStrata('FULLSCREEN_DIALOG')\n"
-        "    f.tint = f:CreateTexture(name .. 'Tint', 'BACKGROUND')\n"
-        "    f.tint:SetAllPoints(f)\n"
-        "    f.tint:SetTexture(tr, tg, tb, 1)\n"
         "    local fontName = (font == 'huge') and ((NumberFontNormalHuge and 'NumberFontNormalHuge')\n"
         "        or (GameFontNormalHuge and 'GameFontNormalHuge')) or nil\n"
         "    f.text = f:CreateFontString(name .. 'Text', 'OVERLAY',\n"
         "        fontName or (GameFontNormalLarge and 'GameFontNormalLarge') or 'GameFontNormal')\n"
         "    f.text:SetTextColor(r, g, b)\n"
-        "    f.Start = function(self, text, duration, tintAlpha)\n"
+        "    f.Start = function(self, text, duration)\n"
         "        self:ClearAllPoints()\n"
         "        self:SetAllPoints(UIParent)\n"
         "        self.text:ClearAllPoints()\n"
         "        self.text:SetPoint('CENTER', self, 'CENTER', 0, UIParent:GetHeight() * 0.15)\n"
         "        self.text:SetText(text)\n"
-        "        self.started, self.duration, self.tintAlpha = GetTime(), duration, tintAlpha\n"
+        "        self.started, self.duration = GetTime(), duration\n"
         "        self:Show()\n"
         "    end\n"
         "    f:SetScript('OnUpdate', function(self)\n"
         "        local age = GetTime() - (self.started or 0)\n"
         "        local left = (self.duration or 0) - age\n"
         "        if left <= 0 then self:Hide() return end\n"
-        "        self.tint:SetAlpha(math.max(0, 1 - age) * (self.tintAlpha or 0))\n"
         "        self.text:SetAlpha(left < 0.5 and left / 0.5 or 1)\n"
         "    end)\n"
         "    f:Hide()\n"
         "    return f\n"
         "end\n"
-        "local ding = wBanner('__WoweeLevelUpBanner', 'huge', 1, 0.86, 0.3, 1, 0.82, 0.2)\n"
+        "local ding = wBanner('__WoweeLevelUpBanner', 'huge', 1, 0.86, 0.3)\n"
         "ding:RegisterEvent('PLAYER_LEVEL_UP')\n"
         "ding:SetScript('OnEvent', function(self, event, level)\n"
         "    level = tonumber(level or arg1)\n"
-        "    if level then self:Start('Level ' .. level .. '!', 4, 0.25) end\n"
+        "    if level then self:Start('Level ' .. level .. '!', 4) end\n"
         "end)\n"
-        "local rez = wBanner('__WoweeResurrectBanner', 'large', 1, 0.94, 0.47, 0.78, 0.9, 1)\n"
+        "local rez = wBanner('__WoweeResurrectBanner', 'large', 1, 0.94, 0.47)\n"
         "rez:RegisterEvent('PLAYER_ALIVE')\n"
         "rez:RegisterEvent('PLAYER_UNGHOST')\n"
         "rez:SetScript('OnEvent', function(self)\n"
         "    if UnitIsDeadOrGhost and UnitIsDeadOrGhost('player') then return end\n"
-        "    self:Start('You have been resurrected', 3, 0.2)\n"
+        "    self:Start('You have been resurrected', 3)\n"
         "end)\n");
 
     // The cooldown tracker and the damage meter, two panels the client's own

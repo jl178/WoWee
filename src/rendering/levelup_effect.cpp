@@ -44,8 +44,12 @@ bool LevelUpEffect::loadModel(M2Renderer* m2Renderer,
     return true;
 }
 
+bool LevelUpEffect::isModelLoaded() const {
+    return modelLoaded_ && m2Renderer_ && m2Renderer_->hasModel(MODEL_ID);
+}
+
 void LevelUpEffect::trigger(const glm::vec3& position) {
-    if (!modelLoaded_ || !m2Renderer_) return;
+    if (!isModelLoaded()) return;
 
     uint32_t instanceId = m2Renderer_->createInstance(MODEL_ID, position,
                                                        glm::vec3(0.0f), 1.0f);

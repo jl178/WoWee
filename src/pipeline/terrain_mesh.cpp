@@ -211,14 +211,25 @@ std::vector<TerrainVertex> TerrainMeshGenerator::generateVertices(const MapChunk
         }
 
         // Texture coordinates: world-aligned so patterns don't reset per chunk.
-        // Tile each texture 4× per chunk (one repeat every ~8 yards) so the
-        // texture's own pattern noise breaks up the chunk grid rather than
-        // syncing with it. At 1 repeat/chunk the per-chunk alpha differences
-        // read as obvious 33-yard squares; at 4× the pattern is small enough
-        // that the eye no longer locks onto the chunk boundary.
-        constexpr float texScale = 4.0f / CHUNK_SIZE;
+        // Eight repeats per chunk, one per quad (~4.2 yards), as the 3.3.5
+        // client draws it - MTXF has no texture-scale bits before Cataclysm.
+        // This was 4, chosen to hide chunk-sized squares that were really the
+        // compressed alpha maps decoding wrong (see decodeLayerAlpha). At half
+        // the stock rate every texture was twice its size, and on a cliff,
+        // where the top-down projection already stretches it down the slope,
+        // the streaks ran twice as long.
+        constexpr float texScale = 8.0f / CHUNK_SIZE;
         vertex.texCoord[0] = -vertex.position[1] * texScale;
         vertex.texCoord[1] = -vertex.position[0] * texScale;
+
+        // MCCV: the client multiplies the ground by twice this colour, so
+        // 0x7F is (very nearly) neutral. Stored BGRA.
+        if (chunk.hasVertexColors) {
+            const uint8_t* c = &chunk.vertexColors[static_cast<size_t>(index) * 4];
+            vertex.color[0] = static_cast<float>(c[2]) * (2.0f / 255.0f);
+            vertex.color[1] = static_cast<float>(c[1]) * (2.0f / 255.0f);
+            vertex.color[2] = static_cast<float>(c[0]) * (2.0f / 255.0f);
+        }
 
         // Layer UV for alpha map sampling (0-1 range per chunk).
         // Sample at texel centers of the 64x64 alpha map to avoid edge seams.

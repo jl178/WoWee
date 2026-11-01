@@ -618,8 +618,11 @@ static int lua_GetSpellTabInfo(lua_State* L) {
     }
     // Compute offset: sum of spells in all preceding tabs (1-based)
     int offset = 0;
-    for (int i = 0; i < tabIdx - 1; ++i)
+    int highestOffset = 0;
+    for (int i = 0; i < tabIdx - 1; ++i) {
         offset += static_cast<int>(tabs[i].spellIds.size());
+        highestOffset += static_cast<int>(tabs[i].highestRankIdx.size());
+    }
     const auto& tab = tabs[tabIdx - 1];
     lua_pushstring(L, tab.name.c_str());           // name
     lua_pushstring(L, tab.texture.c_str());        // texture
@@ -628,10 +631,14 @@ static int lua_GetSpellTabInfo(lua_State* L) {
     // The highest-rank pair, which is what FrameXML actually reads: with
     // ShowAllSpellRanks off - the default - SpellBook_GetTabInfo throws away
     // the first offset and count and keeps these. Returning four values left
-    // numSpells nil and the page count divided by nothing. This client does
-    // not track ranks separately, so the whole tab is the highest rank.
-    lua_pushnumber(L, offset);                     // highestRankOffset
-    lua_pushnumber(L, tab.spellIds.size());        // highestRankNumSpells
+    // numSpells nil and the page count divided by nothing.
+    //
+    // A slot space of its own, as in the stock client: each tab's spells
+    // with lower ranks dropped, numbered across tabs the same way. FrameXML
+    // turns a slot in it back into a real one through
+    // GetKnownSlotFromHighestRankSlot before asking anything about it.
+    lua_pushnumber(L, highestOffset);              // highestRankOffset
+    lua_pushnumber(L, tab.highestRankIdx.size());  // highestRankNumSpells
     return 6;
 }
 
@@ -672,7 +679,9 @@ static int lua_GetSpellBookItemName(lua_State* L) {
             uint32_t spellId = tab.spellIds[idx - 1];
             const std::string& name = gh->getSpellName(spellId);
             lua_pushstring(L, name.empty() ? "Unknown" : name.c_str());
-            lua_pushstring(L, ""); // subName/rank
+            // Spell.dbc's rank text: "Rank 3", "Passive", "Racial" - what
+            // the book prints under the name.
+            lua_pushstring(L, gh->getSpellRank(spellId).c_str()); // subName/rank
             return 2;
         }
         idx -= static_cast<int>(tab.spellIds.size());
@@ -701,7 +710,9 @@ static int lua_GetSpellName(lua_State* L) {
     if (id == 0) { return luaReturnNil(L); }
     const std::string& name = gh->getSpellName(id);
     lua_pushstring(L, name.empty() ? "Unknown" : name.c_str());
-    lua_pushstring(L, "");
+    // The rank text, which the book prints under the name and which tells
+    // the ranks apart when ShowAllSpellRanks lists them all.
+    lua_pushstring(L, gh->getSpellRank(id).c_str());
     return 2;
 }
 
@@ -757,10 +768,27 @@ static int lua_GetSpellAutocast(lua_State* L) {
     return 2;
 }
 /// GetKnownSlotFromHighestRankSlot(slot) → the slot actually known. The book
-/// shows the highest rank and this maps back; with one entry per spell here
-/// the two are the same slot.
+/// pages through the highest-rank slot space (GetSpellTabInfo's last pair)
+/// and maps each slot back to the all-ranks one that GetSpellName, CastSpell
+/// and the rest take. A slot past the end comes back as 0, which those answer
+/// with nothing - passing it through unchanged would land on a real spell,
+/// because the all-ranks space is the longer of the two.
 static int lua_GetKnownSlotFromHighestRankSlot(lua_State* L) {
-    lua_pushnumber(L, luaL_optnumber(L, 1, 0));
+    const int slot = static_cast<int>(luaL_optnumber(L, 1, 0));
+    auto* gh = getGameHandler(L);
+    if (!gh || slot < 1) { lua_pushnumber(L, slot); return 1; }
+    int idx = slot;   // 1-based within the highest-rank space
+    int base = 0;     // all-ranks slots before this tab
+    for (const auto& tab : gh->getSpellBookTabs()) {
+        const int n = static_cast<int>(tab.highestRankIdx.size());
+        if (idx <= n) {
+            lua_pushnumber(L, base + static_cast<int>(tab.highestRankIdx[idx - 1]) + 1);
+            return 1;
+        }
+        idx -= n;
+        base += static_cast<int>(tab.spellIds.size());
+    }
+    lua_pushnumber(L, 0);
     return 1;
 }
 
@@ -999,7 +1027,8 @@ static int lua_GetSpellPowerCost(lua_State* L) {
         lua_newtable(L); // cost entry
         lua_pushnumber(L, data.powerType);
         lua_setfield(L, -2, "type");
-        lua_pushnumber(L, data.manaCost);
+        const bool tenths = data.powerType == 1 || data.powerType == 6;
+        lua_pushnumber(L, tenths ? data.manaCost / 10 : data.manaCost);
         lua_setfield(L, -2, "cost");
     
         lua_pushstring(L, data.powerType < 7 ? kLuaPowerNames[data.powerType] : "MANA");
@@ -1049,7 +1078,10 @@ static int lua_GetSpellInfo(lua_State* L) {
     // for every spell but a handful of warlock drains, and it is what the
     // callers branch on rather than display.
     auto spellData = gh->getSpellData(spellId);
-    lua_pushnumber(L, spellData.manaCost);                   // 4: cost
+    // Rage and runic power costs are stored in tenths, like the power itself;
+    // the client reports whole points, the same scale UnitPower answers in.
+    const bool tenths = spellData.powerType == 1 || spellData.powerType == 6;
+    lua_pushnumber(L, tenths ? spellData.manaCost / 10 : spellData.manaCost); // 4: cost
     lua_pushboolean(L, 0);                                   // 5: isFunnel
     lua_pushnumber(L, spellData.powerType);                  // 6: powerType
     lua_pushnumber(L, spellData.castTimeMs);                 // 7: castTime (ms)

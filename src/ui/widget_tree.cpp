@@ -3,6 +3,7 @@
 #include <chrono>
 
 #include <algorithm>
+#include <array>
 #include <climits>
 #include <cmath>
 #include <ranges>
@@ -27,6 +28,41 @@ int layerRank(DrawLayer l) { return static_cast<int>(l); }
 } // namespace
 
 AnchorPoint resolveAnchorPoint(const std::string& rawName) {
+    // The nine names as FrameXML and SetPoint nearly always spell them, matched
+    // before anything is copied. This runs for every anchor of every region the
+    // sizing pass and the solve visit, each frame - tens of thousands of calls -
+    // and the copy and four substring searches below were most of the sizing
+    // pass. Anything else (lower case, odd spellings) takes the general path,
+    // which gives these nine the same answers.
+    switch (rawName.size()) {
+        case 3:
+            if (rawName == "TOP") return {.fx = 0.5f, .fy = 1.0f};
+            break;
+        case 4:
+            if (rawName == "LEFT") return {.fx = 0.0f, .fy = 0.5f};
+            break;
+        case 5:
+            if (rawName == "RIGHT") return {.fx = 1.0f, .fy = 0.5f};
+            break;
+        case 6:
+            if (rawName == "CENTER") return {.fx = 0.5f, .fy = 0.5f};
+            if (rawName == "BOTTOM") return {.fx = 0.5f, .fy = 0.0f};
+            break;
+        case 7:
+            if (rawName == "TOPLEFT") return {.fx = 0.0f, .fy = 1.0f};
+            break;
+        case 8:
+            if (rawName == "TOPRIGHT") return {.fx = 1.0f, .fy = 1.0f};
+            break;
+        case 10:
+            if (rawName == "BOTTOMLEFT") return {.fx = 0.0f, .fy = 0.0f};
+            break;
+        case 11:
+            if (rawName == "BOTTOMRIGHT") return {.fx = 1.0f, .fy = 0.0f};
+            break;
+        default:
+            break;
+    }
     const std::string name = upper(rawName);
     AnchorPoint p;
     // Vertical: TOP is 1, BOTTOM is 0, neither is centred. Tested before the
@@ -1014,9 +1050,24 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
     // a frame pinned at two opposing corners gets sized without anyone calling
     // SetSize.
     struct Constraint { float f; float target; };
-    std::vector<Constraint> cx, cy;
-    cx.reserve(w->anchors.size());
-    cy.reserve(w->anchors.size());
+    // On the stack for the usual handful of anchors: two heap vectors per
+    // widget per frame was an allocation pair for every region the pass
+    // visits. More than eight anchors spill to the heap, as before.
+    struct Constraints {
+        std::array<Constraint, 8> local{};
+        std::vector<Constraint> spill;
+        size_t n = 0;
+        void push_back(const Constraint& c) {
+            if (n < local.size()) local[n] = c; else spill.push_back(c);
+            ++n;
+        }
+        [[nodiscard]] size_t size() const { return n; }
+        [[nodiscard]] bool empty() const { return n == 0; }
+        const Constraint& operator[](size_t i) const {
+            return i < local.size() ? local[i] : spill[i - local.size()];
+        }
+    };
+    Constraints cx, cy;
 
     for (const Anchor& a : w->anchors) {
         const Widget* rel = (a.relativeTo != 0) ? get(a.relativeTo) : parent;
@@ -1034,7 +1085,7 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
         cy.push_back({.f = mp.fy, .target = relBottom + rp.fy * relH + a.y * es});
     }
 
-    auto solveAxis = [](const std::vector<Constraint>& cs, float explicitSize,
+    auto solveAxis = [](const Constraints& cs, float explicitSize,
                         float parentOrigin, float parentSize,
                         float& outOrigin, float& outSize) {
         if (cs.empty()) {

@@ -38,7 +38,14 @@ public:
     struct SpellBookTab {
         std::string name;
         std::string texture; // icon path
-        std::vector<uint32_t> spellIds; // spells in this tab
+        /// Every rank the book shows, which is the slot space GetSpellName,
+        /// CastSpell and the rest index (ShowAllSpellRanks on).
+        std::vector<uint32_t> spellIds;
+        /// The same tab with each spell's lower ranks left out, as indices
+        /// into spellIds. This is the highestRank* pair of GetSpellTabInfo and
+        /// what GetKnownSlotFromHighestRankSlot maps back through - the view
+        /// the book draws by default.
+        std::vector<uint32_t> highestRankIdx;
     };
 
     // Unit cast state (aliased from handler_types.hpp)
@@ -215,6 +222,12 @@ public:
         talentCache_.clear();
         talentTabCache_.clear();
         talentDbcLoaded_ = false;
+        // The spell book's own SkillLineAbility / SkillRaceClassInfo copies,
+        // which are just as expansion-specific.
+        spellBookSla_.clear();
+        spellBookSrci_.clear();
+        spellBookDbcLoaded_ = false;
+        spellBookTabsDirty_ = true;
     }
     void loadTalentDbc();
     void syncPreWotlkTalentsFromKnownSpells();
@@ -547,8 +560,30 @@ private:
 
     // Spell book tabs
     std::vector<SpellBookTab> spellBookTabs_;
-    size_t lastSpellCount_ = 0;
+    /// What the tabs were last built from: the known set (order-independent
+    /// hash plus size), race, class and whether the DBCs were ready. A count
+    /// alone missed a rank swap - SMSG_SUPERCEDED_SPELL removes one spell and
+    /// adds another, and the book kept showing the old rank.
+    uint64_t spellBookSignature_ = 0;
     bool spellBookTabsDirty_ = true;
+
+    /// SkillLineAbility rows by spell, with the masks that say whose they are.
+    /// The shared spellToSkillLine map keeps one line per spell, the last row
+    /// read, which is a different class's row for a spell several classes
+    /// share - so the book reads its own.
+    struct SpellBookSlaRow {
+        uint32_t skillLine = 0;
+        uint32_t raceMask = 0;
+        uint32_t classMask = 0;
+        uint32_t excludeRace = 0;
+        uint32_t excludeClass = 0;
+    };
+    std::unordered_map<uint32_t, std::vector<SpellBookSlaRow>> spellBookSla_;
+    /// SkillRaceClassInfo rows by skill line: race mask, class mask, flags.
+    struct SpellBookSrciRow { uint32_t raceMask = 0, classMask = 0, flags = 0; };
+    std::unordered_map<uint32_t, std::vector<SpellBookSrciRow>> spellBookSrci_;
+    bool spellBookDbcLoaded_ = false;
+    void loadSpellBookDbc();
 
     // Talent wipe confirm dialog
     bool talentWipePending_ = false;

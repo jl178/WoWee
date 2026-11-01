@@ -256,10 +256,11 @@ void WidgetRenderer::sizeTextureWidget(Widget* w) {
     // stretched between two others must not be pulled back to its file's
     // dimensions - that is exactly the scroll bar middle, which would stop
     // stretching and become 31 by 256.
-    const bool spanX = anchorsSpanAxis(w->anchors, true);
-    const bool spanY = anchorsSpanAxis(w->anchors, false);
-    const bool needsW = w->width <= 0.0f && !spanX;
-    const bool needsH = w->height <= 0.0f && !spanY;
+    // A texture with both sizes needs nothing whatever its anchors say, and
+    // that is nearly all of them once the interface has settled.
+    if (w->width > 0.0f && w->height > 0.0f) return;
+    const bool needsW = w->width <= 0.0f && !anchorsSpanAxis(w->anchors, true);
+    const bool needsH = w->height <= 0.0f && !anchorsSpanAxis(w->anchors, false);
     if (!needsW && !needsH) return;
     float iw = 0.0f, ih = 0.0f;
     if (!textureSize(w->texturePath, iw, ih)) return;
@@ -2899,6 +2900,17 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
                 const float rx = (x1 - x0) * 0.5f;
                 const float ry = (y1 - y0) * 0.5f;
                 const ImU32 col = packColor(w->color, w->alpha);
+                // On black, as the client's own portraits are: the face is
+                // rendered over a dark disc, not over the world. The render
+                // target is cleared transparent (the paper doll needs that),
+                // so without this disc the sky showed through every portrait
+                // ring - the player frame's, the target's, and the NPC's in
+                // the quest and gossip windows.
+                {
+                    const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+                    dl->AddCircleFilled(centre, std::min(rx, ry),
+                                        packColor(black, w->alpha), kSegments);
+                }
                 dl->PushTextureID(reinterpret_cast<ImTextureID>(tex));
                 dl->PrimReserve(kSegments * 3, kSegments + 1);
                 const unsigned int base = dl->_VtxCurrentIdx;

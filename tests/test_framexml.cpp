@@ -1138,6 +1138,17 @@ TEST_CASE("A TitleRegion makes a frame draggable", "[framexml][emit]") {
     REQUIRE(has(r.lua, "StartMoving()"));
 }
 
+TEST_CASE("toplevel+movable alone does not make a frame draggable", "[framexml][emit]") {
+    // CharacterFrame declares both and is a fixed panel in 3.3.5: movable only
+    // permits StartMoving, it registers no drag.
+    XmlNode root = parseOrFail(
+        "<Ui><Frame name=\"CharacterFrame\" toplevel=\"true\" movable=\"true\"/></Ui>");
+    const EmitResult r = emitFrameXml(root);
+    REQUIRE(has(r.lua, "SetMovable(true)"));
+    REQUIRE_FALSE(has(r.lua, "RegisterForDrag("));
+    REQUIRE_FALSE(has(r.lua, "StartMoving()"));
+}
+
 TEST_CASE("A frame with its own drag scripts keeps them", "[framexml][emit]") {
     // The chat frame has a title region and five OnDragStart handlers; the
     // generic pair must not replace behaviour that is deliberately specific.

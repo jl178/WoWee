@@ -31,7 +31,9 @@ public:
     /// Remove expired effect instances
     void update(float deltaTime);
 
-    [[nodiscard]] bool isModelLoaded() const { return modelLoaded_; }
+    /// False again once a map change has cleared the M2 renderer's models, so
+    /// the caller reloads LevelUp.m2 instead of spawning a missing model.
+    [[nodiscard]] bool isModelLoaded() const;
 
 private:
     static constexpr float EFFECT_DURATION = 3.5f;

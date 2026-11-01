@@ -1,6 +1,7 @@
 #include "rendering/character_preview.hpp"
 #include "rendering/imgui_texture.hpp"
 #include "rendering/character_renderer.hpp"
+#include "rendering/glue_scene_particles.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "rendering/vk_render_target.hpp"
 #include "rendering/vk_texture.hpp"
@@ -246,6 +247,11 @@ void CharacterPreview::shutdown() {
     auto* appRenderer = core::Application::getInstance().getRenderer();
     if (appRenderer) appRenderer->unregisterPreview(this);
 
+    // Before the CharacterRenderer: its texture cache holds the particle textures.
+    if (sceneParticles_) {
+        sceneParticles_->shutdown();
+        sceneParticles_.reset();
+    }
     if (charRenderer_) {
         charRenderer_->shutdown();
         charRenderer_.reset();
@@ -986,7 +992,35 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     regionLayers.reserve(32);
     std::vector<std::pair<int, std::string>> robeLegs;  // drawn last
 
-    for (const auto& it : equipment) {
+    // Paint in the stock layering order, not the order the caller listed the
+    // items in. CharStartOutfit lists a caster's robe before the shirt, so the
+    // shirt's Chest_TU/TL went on top of the robe and the mage, priest and
+    // warlock wore a brown tunic over it. Shirt first, then trousers, boots,
+    // chest/robe, bracers, gloves, belt, tabard; a robe's legs after all of it.
+    auto layerRank = [](uint8_t invType) -> int {
+        switch (invType) {
+            case 4:  return 0;   // shirt
+            case 7:  return 1;   // legs
+            case 8:  return 2;   // feet
+            case 5:
+            case 20: return 3;   // chest / robe
+            case 9:  return 4;   // wrists
+            case 10: return 5;   // hands
+            case 6:  return 6;   // waist
+            case 19: return 7;   // tabard
+            default: return 8;
+        }
+    };
+    std::vector<const game::EquipmentItem*> layered;
+    layered.reserve(equipment.size());
+    for (const auto& it : equipment) layered.push_back(&it);
+    std::stable_sort(layered.begin(), layered.end(),
+        [&](const game::EquipmentItem* a, const game::EquipmentItem* b) {
+            return layerRank(a->inventoryType) < layerRank(b->inventoryType);
+        });
+
+    for (const game::EquipmentItem* itp : layered) {
+        const auto& it = *itp;
         if (it.displayModel == 0) continue;
         int32_t recIdx = displayInfoDbc->findRecordById(it.displayModel);
         if (recIdx < 0) continue;
@@ -1355,6 +1389,7 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
         charRenderer_->removeInstance(backdropInstanceId_);
         backdropInstanceId_ = 0;
     }
+    setSceneParticles(nullptr);
     backdropRace_ = static_cast<int>(race);
     backdropSceneLoaded_ = glueSceneOverride_;
     sceneCameraValid_ = false;
@@ -1419,6 +1454,7 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
     backdropInstanceId_ = charRenderer_->createInstance(PREVIEW_BACKDROP_MODEL_ID, glm::vec3(0.0f));
     if (backdropInstanceId_ == 0) return;
     charRenderer_->setInstanceSceneModel(backdropInstanceId_, true);
+    setSceneParticles(&sceneModel);
 
     // Keep the character on the scene's authored stand mark and use the scene
     // camera only for viewing direction. Distance and focus come from our portrait
@@ -1449,6 +1485,7 @@ bool CharacterPreview::loadGlueScene(const std::string& scenePath) {
         charRenderer_->removeInstance(backdropInstanceId_);
         backdropInstanceId_ = 0;
     }
+    setSceneParticles(nullptr);
     clearSceneLighting();
     pipeline::M2Model sceneModel;
     if (!loadPreviewM2(scenePath, sceneModel) || sceneModel.cameras.empty()) {
@@ -1460,6 +1497,7 @@ bool CharacterPreview::loadGlueScene(const std::string& scenePath) {
     if (backdropInstanceId_ == 0) return false;
     charRenderer_->setInstanceSceneModel(backdropInstanceId_, true);
     charRenderer_->playAnimation(backdropInstanceId_, 0, true);
+    setSceneParticles(&sceneModel);
     // The scene's own camera, as ModelFFX shows it.
     const auto& cam = sceneModel.cameras[0];
     camera_->setPosition(cam.positionBase);
@@ -1587,7 +1625,39 @@ void CharacterPreview::update(float deltaTime) {
         const glm::vec3 cameraPos = camera_ ? camera_->getPosition()
                                             : previewStandPosition_;
         charRenderer_->update(deltaTime, cameraPos);
+
+        // The scene's emitters ride its skeleton and clocks, as just posed.
+        if (sceneParticles_ && !sceneParticles_->empty() && backdropInstanceId_ != 0) {
+            const std::vector<glm::mat4>* bones = nullptr;
+            glm::mat4 modelMat(1.0f);
+            int seq = 0;
+            float animMs = 0.0f, gsMs = 0.0f;
+            if (charRenderer_->getInstancePose(backdropInstanceId_, bones, modelMat, seq, animMs, gsMs) &&
+                bones) {
+                sceneParticles_->update(deltaTime, *bones, modelMat, seq, animMs, gsMs);
+            }
+        }
     }
+}
+
+void CharacterPreview::setSceneParticles(const pipeline::M2Model* scene) {
+    if (!scene || scene->particleEmitters.empty()) {
+        if (sceneParticles_) sceneParticles_->clear();
+        return;
+    }
+    if (!charRenderer_ || !renderTarget_ || !renderTarget_->isValid()) return;
+    if (!sceneParticles_) {
+        auto* appRenderer = core::Application::getInstance().getRenderer();
+        VkDescriptorSetLayout perFrameLayout = appRenderer ? appRenderer->getPerFrameSetLayout()
+                                                           : VK_NULL_HANDLE;
+        auto particles = std::make_unique<GlueSceneParticles>();
+        if (!particles->initialize(vkCtx_, perFrameLayout, renderTarget_->getRenderPass(),
+                                   renderTarget_->getSampleCount())) {
+            return;
+        }
+        sceneParticles_ = std::move(particles);
+    }
+    sceneParticles_->setScene(*scene, *charRenderer_);
 }
 
 void CharacterPreview::render() {
@@ -1660,6 +1730,10 @@ void CharacterPreview::compositePass(VkCommandBuffer cmd, uint32_t frameIndex) {
     // Render the character model
     charRenderer_->render(cmd, previewPerFrameSet_[fi], *camera_);
 
+    // The scene's particles last: they test depth against the scene and the
+    // character but do not write it.
+    if (sceneParticles_) sceneParticles_->render(cmd, previewPerFrameSet_[fi], fi);
+
     renderTarget_->endPass(cmd);
 
     compositeRendered_ = true;
@@ -1686,6 +1760,7 @@ void CharacterPreview::setTransparentBackground(bool transparent) {
         charRenderer_->removeInstance(backdropInstanceId_);
         backdropInstanceId_ = 0;
         backdropRace_ = -1;
+        setSceneParticles(nullptr);
     }
     if (transparent) clearSceneLighting();
 }

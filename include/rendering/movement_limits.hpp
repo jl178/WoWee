@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <glm/glm.hpp>
 
@@ -100,6 +101,26 @@ glm::vec3 flightStepAgainstGround(SampleFn&& sample, const glm::vec3& from,
 
 inline bool isReachableStep(float deltaZ) {
     return deltaZ >= -0.25f && deltaZ <= kMaxStepUp;
+}
+
+/// A horizontal step against ground too steep to climb: the part of it going
+/// uphill is refused and what is left runs along the slope's contour.
+///
+/// `uphill` is the unit horizontal direction the ground rises in (the negated
+/// horizontal part of its normal, normalised). A step that does not go uphill
+/// at all is returned untouched, so walking down or across is never slowed.
+inline glm::vec2 slideAlongContour(const glm::vec2& move, const glm::vec2& uphill) {
+    const float into = glm::dot(move, uphill);
+    if (into <= 0.0f) return move;
+    return move - into * uphill;
+}
+
+/// Horizontal acceleration of a body sliding down ground whose normal has this
+/// upward component: gravity along the slope (g sin t), of which the
+/// horizontal part is g sin t cos t. Zero on the flat and on a sheer face.
+inline float slopeSlideAccel(float gravityMagnitude, float normalZ) {
+    const float nz = std::clamp(normalZ, 0.0f, 1.0f);
+    return gravityMagnitude * std::sqrt(std::max(0.0f, 1.0f - nz * nz)) * nz;
 }
 
 /// Whether the outdoor heightfield at this spot is a roof rather than a floor.

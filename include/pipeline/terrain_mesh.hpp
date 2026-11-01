@@ -18,6 +18,7 @@ struct TerrainVertex {
     float normal[3];       // Normal vector
     float texCoord[2];     // Base texture coordinates
     float layerUV[2];      // Layer texture coordinates
+    float color[3];        // MCCV tint, already doubled: 1.0 is neutral
     uint8_t chunkIndex = 0;    // Which chunk this vertex belongs to
 
     TerrainVertex()  {
@@ -25,6 +26,7 @@ struct TerrainVertex {
         normal[0] = normal[1] = normal[2] = 0.0f;
         texCoord[0] = texCoord[1] = 0.0f;
         layerUV[0] = layerUV[1] = 0.0f;
+        color[0] = color[1] = color[2] = 1.0f;
     }
 };
 

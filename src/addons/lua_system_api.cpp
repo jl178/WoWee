@@ -6035,7 +6035,13 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"GetZonePVPInfo", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushnil(L); return 1; }
-            const auto [type, faction] = gh->getZonePvpInfo(gh->getWorldStateZoneId());
+            // The same zone the name comes from (GetZoneText: the terrain
+            // under the player), not the server's last report, which lags a
+            // teleport: Stormwind read as the previous zone's territory.
+            uint32_t zoneId = 0;
+            if (auto* svc = getLuaServices(L); svc && svc->getLiveZoneId) zoneId = svc->getLiveZoneId();
+            if (zoneId == 0) zoneId = gh->getWorldStateZoneId();
+            const auto [type, faction] = gh->getZonePvpInfo(zoneId);
             if (type.empty()) { lua_pushnil(L); return 1; }
             lua_pushstring(L, type.c_str());
             lua_pushnil(L);

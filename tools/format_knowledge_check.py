@@ -53,7 +53,7 @@ RULES = [
      r"0x0F\)\s*\*\s*17|>>\s*4\)\s*\*\s*17"),
     ("the MCAL run-length decode",
      "src/pipeline/adt_alpha.cpp",
-     r"0x80\)\s*!=\s*0.*\n.*0x7F\)\s*\+\s*1"),
+     r"0x80\)\s*!=\s*0.*\n.*0x7F\)"),
     ("a point's texel in a chunk's alpha map",
      "src/pipeline/adt_alpha.cpp",
      r"\*\s*63\.0f|ALPHA_MAP_DIM\s*-\s*1\)\s*;?\s*$"),

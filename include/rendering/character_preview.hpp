@@ -17,6 +17,7 @@ namespace pipeline { class AssetManager; struct M2Model; }
 namespace rendering {
 
 class CharacterRenderer;
+class GlueSceneParticles;
 class Camera;
 class VkContext;
 class VkTexture;
@@ -138,6 +139,9 @@ private:
     void attachWeaponEnchantVisual(uint32_t attachmentId, uint32_t itemVisualId);
     // Load the race's glue scene (Stormwind for humans, Orgrimmar for orcs, ...) as a backdrop.
     void loadRacialBackdrop(game::Race race);
+    // Hand the loaded glue scene's emitters to sceneParticles_ (created on
+    // first use, so portraits never build one); nullptr clears them.
+    void setSceneParticles(const pipeline::M2Model* scene);
     void applyPreviewView();
     // Light the preview with a glue scene's own M2 lights (or neutral full
     // light if it has none), as the client lights its glue screens.
@@ -147,6 +151,10 @@ private:
     pipeline::AssetManager* assetManager_ = nullptr;
     VkContext* vkCtx_ = nullptr;
     std::unique_ptr<CharacterRenderer> charRenderer_;
+    // The glue scene's particle emitters, which CharacterRenderer does not
+    // draw (the death knight platform's mist and braziers, wisps, dust,
+    // torches). Created with the render target; empty without a scene.
+    std::unique_ptr<GlueSceneParticles> sceneParticles_;
     std::unique_ptr<Camera> camera_;
 
     // Off-screen render target (color + depth)

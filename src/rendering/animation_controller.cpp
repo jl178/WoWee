@@ -102,36 +102,39 @@ void AnimationController::playEmote(const std::string& emoteName) {
     }
 }
 
-void AnimationController::playWeaponSheathAnimation(SheathSpot mainHand, SheathSpot offHand) {
-    if (!renderer_) return;
+AnimationController::SheathReachTiming
+AnimationController::playWeaponSheathAnimation(SheathSpot mainHand, SheathSpot offHand) {
+    SheathReachTiming timing;
+    if (!renderer_) return timing;
     auto* characterRenderer = renderer_->getCharacterRenderer();
     const uint32_t characterInstanceId = renderer_->getCharacterInstanceId();
-    if (!characterRenderer || characterInstanceId == 0) return;
+    if (!characterRenderer || characterInstanceId == 0) return timing;
 
     // One animation both ways: 3.3.5 has Sheath and HipSheath and no unsheathe,
     // and plays the reach for drawing as well as for putting away. Each arm
-    // reaches for its own hand's item and an empty hand stays still; the rest
-    // of the body follows whichever hand holds something.
-    auto reach = [](SheathSpot spot) {
-        return spot == SheathSpot::HIP  ? anim::HIP_SHEATHE
-             : spot == SheathSpot::BACK ? anim::SHEATHE
-                                        : anim::STAND;
-    };
+    // reaches for its own hand's item and an empty hand follows the body.
     const SheathSpot body = mainHand != SheathSpot::NONE ? mainHand : offHand;
-    if (body == SheathSpot::NONE) return;
-    uint32_t animId = reach(body);
+    if (body == SheathSpot::NONE) return timing;
+    uint32_t animId = anim::sheathReachAnim(body);
     if (!characterRenderer->hasAnimation(characterInstanceId, animId)) {
         animId = body == SheathSpot::HIP ? anim::SHEATHE : anim::HIP_SHEATHE;
-        if (!characterRenderer->hasAnimation(characterInstanceId, animId)) return;
+        if (!characterRenderer->hasAnimation(characterInstanceId, animId)) return timing;
     }
 
-    // ActivityFSM owns the one-shot until completion so locomotion/combat does
-    // not replace the reach animation on the next frame.
-    characterAnimator_.playEmote(animId, false);
-    characterRenderer->playAnimation(characterInstanceId, animId, false);
-    characterRenderer->setArmAnimations(characterInstanceId, reach(offHand), reach(mainHand));
-    lastPlayerAnimRequest_ = animId;
-    lastPlayerAnimLoopRequest_ = false;
+    // On the upper body, over whatever the legs are doing: the stock client
+    // sheathes on the run without stopping. Played as a full-body emote it
+    // held the character still, and locomotion cancelled it the moment the
+    // player moved - which is how it came to show no reach at all.
+    if (!characterRenderer->playUpperBodyAnimation(characterInstanceId, animId,
+                                                   anim::sheathReachAnim(offHand),
+                                                   anim::sheathReachAnim(mainHand))) {
+        return timing;
+    }
+    timing.durationMs = characterRenderer->getAnimationDurationMs(characterInstanceId, animId);
+    timing.swapMs = characterRenderer->getSheathEventTime(characterInstanceId, animId);
+    if (timing.swapMs == UINT32_MAX || timing.swapMs > timing.durationMs)
+        timing.swapMs = timing.durationMs / 2;
+    return timing;
 }
 
 void AnimationController::cancelEmote() {
@@ -1087,7 +1090,8 @@ void AnimationController::updateMountedAnimation(float deltaTime) {
     // For taxi flights, use external mountRoll_ set by setMountPitchRoll
     // For ground mounts, use MountFSM's computed lean roll
     float finalRoll = taxiFlight_ ? mountRoll_ : mountOut.mountRoll;
-    applyMountPositioning(mountOut.mountBob, finalRoll, characterYaw);
+    // Drawn yaw: a ground mount strafes on its run, turned toward travel.
+    applyMountPositioning(mountOut.mountBob, finalRoll, renderer_->getCharacterVisualYaw());
 }
 
 // ── Character animation state machine (delegates to CharacterAnimator) ──────────

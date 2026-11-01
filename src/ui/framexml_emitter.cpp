@@ -343,7 +343,19 @@ struct Emitter {
                 std::to_string(col->attrFloat("g", 1.0f)) + ", " +
                 std::to_string(col->attrFloat("b", 1.0f)) + ", " +
                 std::to_string(col->attrFloat("a", 1.0f));
-            line(var + (isTexture ? ":SetVertexColor(" : ":SetTextColor(") + args + ")");
+            if (isTexture) {
+                // A <Texture> with a <Color> and no file is a solid fill - the
+                // client's SetTexture(r, g, b, a). PlayerFrameBackground and
+                // TargetFrameBackground are exactly that: the half-black panel
+                // behind the name and bars. As a tint on nothing they drew
+                // nothing, and the unit frames were see-through. With a file,
+                // inherited or its own, the colour tints it.
+                line("if (" + var + ":GetTexture() or '') == '' then " + var +
+                     ":SetTexture(" + args + ") else " + var +
+                     ":SetVertexColor(" + args + ") end");
+            } else {
+                line(var + ":SetTextColor(" + args + ")");
+            }
         }
         if (const XmlNode* anchors = node.child("Anchors"))
             emitAnchors(*anchors, var, parentVar, parentName);
@@ -1137,17 +1149,13 @@ struct Emitter {
         // chat frame has a title region and five OnDragStart scripts, and
         // overwriting those with the generic pair would replace behaviour that
         // is deliberately more specific.
-        // A window that says it is toplevel and movable counts too, title region
-        // or not. Only three frames in FrameXML declare one, so keying on it
-        // alone left the character sheet and the spellbook - both 384x512
-        // panels declaring toplevel and movable, neither with a title region -
-        // unable to be moved, along with thirty more windows.
-        //
-        // Both attributes, not just movable: forty-nine frames declare movable
-        // and the set includes the unit frames, which declare it so that addons
-        // can reposition them. Giving those a body drag would turn a click that
-        // slipped four units from "target this party member" into "move their
-        // frame". Pairing it with toplevel narrows it to the actual windows.
+        // Nothing else gets a synthesized drag. movable="true" only says the
+        // frame MAY be moved (by an addon calling StartMoving); it does not
+        // make the frame follow a drag. CharacterFrame, the spellbook and
+        // thirty other UIPanels declare toplevel+movable yet are fixed in
+        // 3.3.5 - giving them a body drag let the character sheet be dragged
+        // across the screen. A frame moves when it is movable AND something
+        // registered a drag script for it (its own XML/Lua, or a title region).
         {
             bool ownDrag = false;
             bool titleRegion = false;
@@ -1160,8 +1168,7 @@ struct Emitter {
                     }
                 }
             }
-            const bool window = node.attrBool("toplevel") && node.attrBool("movable");
-            if (titleRegion || window) {
+            if (titleRegion) {
                 line(var + ":SetMovable(true)");
                 if (!ownDrag) {
                     line(var + ":RegisterForDrag(\"LeftButton\")");

@@ -2597,7 +2597,13 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
 
     registerRtModel(gpuModel, model);
     models[modelId] = std::move(gpuModel);
-    spatialIndexDirty_ = true;  // Map may have rehashed - refresh cachedModel pointers
+    // No spatial index rebuild. This used to mark it dirty in case the map
+    // rehashed under the instances' cachedModel pointers - but an
+    // unordered_map's elements never move on a rehash (only iterators are
+    // invalidated), and a model loaded here is new (the early return above),
+    // so no instance points at it yet. The rebuild it caused walked all 85k
+    // instances in the next update - grid, id map, dedup map, every index
+    // list - for each model streamed in: the 45-70 ms update/m2 join spikes.
 
     LOG_DEBUG("Loaded M2 model: ", model.name, " (", models[modelId].vertexCount, " vertices, ",
               models[modelId].indexCount / 3, " triangles, ", models[modelId].batches.size(), " batches)");

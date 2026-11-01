@@ -104,13 +104,24 @@ static int lua_UnitHealthMax(lua_State* L) {
 ///
 /// The seven are all tracked - Entity keeps powers[7] and maxPowers[7] - so
 /// this is a matter of reading the one asked for.
+///
+/// Rage (1) and runic power (6) travel in UNIT_FIELD_POWER/MAXPOWER in tenths:
+/// a warrior's full bar is 1000 on the wire. The stock client hands Lua the
+/// whole points (0-100), and every FrameXML text and bar is written for that,
+/// so the tenths are dropped here, the one place Lua reads power.
+static uint32_t luaPowerValue(uint8_t powerType, uint32_t raw) {
+    return (powerType == 1 || powerType == 6) ? raw / 10 : raw;
+}
+
 static int lua_UnitPower(lua_State* L) {
     const char* uid = luaL_optstring(L, 1, "player");
     const bool byType = lua_isnumber(L, 2);
     const uint8_t want = byType ? static_cast<uint8_t>(lua_tonumber(L, 2)) : 0;
     auto* unit = resolveUnit(L, uid);
     if (unit) {
-        lua_pushnumber(L, byType ? unit->getPowerByType(want) : unit->getPower());
+        const uint8_t type = byType ? want : unit->getPowerType();
+        lua_pushnumber(L, luaPowerValue(type,
+            byType ? unit->getPowerByType(want) : unit->getPower()));
     } else {
         auto* gh = getGameHandler(L);
         std::string uidStr(uid);
@@ -120,7 +131,7 @@ static int lua_UnitPower(lua_State* L) {
         // Party stats carry one power and say which it is, so a request for a
         // different one is answered with nothing rather than with that.
         const bool same = pm && (!byType || pm->powerType == want);
-        lua_pushnumber(L, same ? pm->curPower : 0);
+        lua_pushnumber(L, same ? luaPowerValue(pm->powerType, pm->curPower) : 0);
     }
     return 1;
 }
@@ -134,7 +145,9 @@ static int lua_UnitPowerMax(lua_State* L) {
     const uint8_t want = byType ? static_cast<uint8_t>(lua_tonumber(L, 2)) : 0;
     auto* unit = resolveUnit(L, uid);
     if (unit) {
-        lua_pushnumber(L, byType ? unit->getMaxPowerByType(want) : unit->getMaxPower());
+        const uint8_t type = byType ? want : unit->getPowerType();
+        lua_pushnumber(L, luaPowerValue(type,
+            byType ? unit->getMaxPowerByType(want) : unit->getMaxPower()));
     } else {
         auto* gh = getGameHandler(L);
         std::string uidStr(uid);
@@ -142,7 +155,7 @@ static int lua_UnitPowerMax(lua_State* L) {
         uint64_t guid = gh ? resolveUnitGuid(gh, uidStr) : 0;
         const auto* pm = findPartyMember(gh, guid);
         const bool same = pm && (!byType || pm->powerType == want);
-        lua_pushnumber(L, same ? pm->maxPower : 0);
+        lua_pushnumber(L, same ? luaPowerValue(pm->powerType, pm->maxPower) : 0);
     }
     return 1;
 }
