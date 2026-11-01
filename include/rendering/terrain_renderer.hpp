@@ -50,6 +50,8 @@ struct TerrainChunkGPU {
     VkTexture* baseTexture = nullptr;
     VkTexture* layerTextures[3] = {nullptr, nullptr, nullptr};
     VkTexture* alphaTextures[3] = {nullptr, nullptr, nullptr};
+    // Baked shadow (MCSH) as light, binding 8; null = the opaque fallback, lit.
+    VkTexture* shadowTexture = nullptr;
     int layerCount = 0;
 
     // World position for culling

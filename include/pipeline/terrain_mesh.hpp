@@ -59,6 +59,11 @@ struct ChunkMesh {
     };
     std::vector<LayerInfo> layers;
 
+    // Baked shadow (MCSH) as light: 64x64, 255 lit, 0 in the baked shadow -
+    // the alpha maps' layout, so the renderer samples it at the same UV.
+    // Empty when the chunk has none, which reads as lit everywhere.
+    std::vector<uint8_t> shadowLight;
+
     [[nodiscard]] bool isValid() const { return !vertices.empty() && !indices.empty(); }
     [[nodiscard]] size_t getVertexCount() const { return vertices.size(); }
     [[nodiscard]] size_t getTriangleCount() const { return indices.size() / 3; }

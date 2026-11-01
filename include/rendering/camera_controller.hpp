@@ -32,8 +32,8 @@ public:
     /// How far back the camera may be pulled, as a multiple of the original
     /// client's own limit.
     ///
-    /// Max Camera Distance, as a multiple of the 22 yards the original client
-    /// gives. The schema's cameramaxdistance row counts the yards themselves
+    /// Max Camera Distance, as a multiple of the 15 yards the original client
+    /// gives (cameraDistanceMax). The schema's cameramaxdistance row counts the yards themselves
     /// and kClientCVars scales cameraDistanceMaxFactor - the CVar the game's
     /// own slider wrote, before that page was retired - onto it. Before both
     /// there was an extended-zoom checkbox of this client's own, a switch
@@ -199,12 +199,11 @@ public:
     void setBarberShopView(bool on) {
         if (on == barberView_) return;
         barberView_ = on;
-        // Whatever the collision sweep had taken off the zoom goes with it.
-        // This view sets its own distance and restores the player's on the way
-        // out, and a debt carried across either edge is given back on top of a
-        // number it was never taken from.
-        collisionZoomDebt_ = 0.0f;
-        collisionClearSeconds_ = 0.0f;
+        // A collision recovery in progress belongs to the old view, and a
+        // follow ease must not carry the camera off the face it is set to.
+        collisionShownDist_ = -1.0f;
+        followYaw_.active = false;
+        followPitch_.active = false;
         if (on) {
             savedBarberYaw_ = yaw;
             savedBarberPitch_ = pitch;
@@ -478,13 +477,21 @@ private:
 
     // Third-person orbit camera (WoW-style)
     bool thirdPerson = false;
-    float userTargetDistance = 10.0f;   // What the player wants (scroll wheel)
-    float currentDistance = 10.0f;      // Smoothed actual distance
-    float collisionDistance = 10.0f;    // Max allowed by collision
+    // Stock starts at the default view's distance: cameraView "2" picks view
+    // B, cameraDistanceB "5.55" / cameraPitchB "10.0" (table at 0xad1ba8,
+    // CGCamera ctor FUN_00606b30 loads it into +0x118/+0x120).
+    float userTargetDistance = 5.55f;   // What the player wants (scroll wheel) - CGCamera +0x1e8
+    float currentDistance = 5.55f;      // Zoom-driven distance - CGCamera +0x118
+    float collisionDistance = 5.55f;    // Max allowed by collision
     bool externalFollow_ = false;
     static constexpr float MIN_DISTANCE = 0.5f;     // Minimum zoom (first-person threshold)
-    static constexpr float MAX_DISTANCE_NORMAL = 22.0f;   // Default max zoom out
-    static constexpr float MAX_DISTANCE_EXTENDED = 50.0f;  // Extended max zoom out
+    /// cameraDistanceMax default "15.0" (Wow.exe 12340, registered in
+    /// FUN_005fd910 @ 0x5fe192); times cameraDistanceMaxFactor (default 1.0,
+    /// Interface Options slider 1..2) is the zoom limit (FUN_006000e0).
+    static constexpr float MAX_DISTANCE_NORMAL = 15.0f;
+    /// The hard cap: FUN_006000e0 clamps max * factor to 50.0 (0xa1e2fc), and
+    /// FUN_005fd680 refuses a cameraDistanceMax above it.
+    static constexpr float MAX_DISTANCE_EXTENDED = 50.0f;
 public:
     /// The largest multiple worth offering: the camera as far back as this
     /// client has ever allowed. Declared here because it is built from the two
@@ -492,26 +499,79 @@ public:
     static constexpr float kMaxDistanceFactorLimit =
         MAX_DISTANCE_EXTENDED / MAX_DISTANCE_NORMAL;
 private:
-    /// Max zoom indoors.
-    ///
-    /// Twelve still reached the walls of an ordinary room, so the collision
-    /// sweep pulled the camera in and let it back out with every step and every
-    /// turn - and that in-and-out is the motion that makes people ill. Eight
-    /// sat inside most rooms but still met the walls of a corridor, which is
-    /// most of what an interior is: Undercity is corridors, and so are the inns
-    /// and barracks a player spends time in.
-    ///
-    /// A camera that never reaches a wall is never pushed off one, so the only
-    /// way to stop the sweep firing is to keep the camera inside the room. Six
-    /// clears the corridors. It is closer than the game's own default and that
-    /// is the trade: the alternative is a view that swims.
-    ///
-    /// Chosen rather than computed, because the room's own clearance is what
-    /// the sweep already measures and feeding that back would let a doorway set
-    /// the cap for the hall beyond it.
-    static constexpr float MAX_DISTANCE_INTERIOR = 6.0f;
+    // There is no indoor zoom limit: the stock CGCamera has one maximum
+    // (FUN_006000e0: min(cameraDistanceMax * factor, 50), or a vehicle's own
+    // at +0x2cc) and leaves interiors to the collision pull-in below. The
+    // 6-yard interior cap this client used to apply is gone.
     bool extendedZoom_ = false;
-    static constexpr float ZOOM_SMOOTH_SPEED = 15.0f;  // How fast zoom eases
+    /// Zoom travel, yards a second. cameraDistanceMoveSpeed "8.33" (0xa1e7e0,
+    /// registered @ 0x5fda40). FUN_005ff950/005ffa60 turn a zoom request of
+    /// N yards into N / 8.33 s of travel (accumulated if one is already
+    /// running) and FUN_006000e0 moves the distance linearly over it.
+    static constexpr float kZoomMoveSpeed = 8.33f;
+    /// One wheel notch: Bindings.xml CAMERAZOOMIN/OUT run CameraZoomIn(1.0) /
+    /// CameraZoomOut(1.0) (FUN_006017e0 / FUN_00601840).
+    static constexpr float kZoomStepYards = 1.0f;
+    /// Moves currentDistance toward userTargetDistance at kZoomMoveSpeed.
+    void stepZoomTowardTarget(float deltaTime);
+
+    // ---- Stock collision pull-in (FUN_00606f90 @ 0x60789x / FUN_00605d60) ----
+    /// The distance the camera is allowed out to after a collision: the stock
+    /// +0x118 while its smoothing flag 0x4000000 is up. A hit nearer than it
+    /// by more than kCollisionSnap snaps it in to hit + kCollisionSnapOffset
+    /// at once, and it then eases back out to the zoom distance over
+    /// kCollisionRecoverSeconds with the cosine curve; the camera sits at
+    /// min(hit, this). Negative when no pull-in is active.
+    float collisionShownDist_ = -1.0f;
+    float collisionEaseFrom_ = 0.0f;
+    float collisionEaseElapsed_ = 0.0f;
+    static constexpr float kCollisionSnap = 0.1111111f;        // 0xa1e354
+    static constexpr float kCollisionSnapOffset = 0.1111121f;  // 0xa1ea80
+    static constexpr float kCollisionRecoverSeconds = 2.0f;    // 0xa4040c
+
+    // ---- Stock camera following (cameraSmoothStyle) ----
+    /// One eased value, as the stock smoothing slots hold them (yaw at
+    /// CGCamera +0x258.., pitch at +0x228..): from, to, a duration, and the
+    /// cosine curve FUN_008ca080 lerp(a, b, (1 - cos(pi t)) / 2), evaluated
+    /// each frame by FUN_00603d30.
+    struct FollowEase {
+        bool active = false;
+        float from = 0.0f;
+        float to = 0.0f;
+        float duration = 0.0f;
+        float elapsed = 0.0f;
+    };
+    FollowEase followYaw_;    ///< eases the camera's yaw offset from the facing
+    FollowEase followPitch_;  ///< eases the pitch into the band below
+    /// Dropdown index: 0 Never, 1 Only horizontal when moving (cameraSmoothStyle
+    /// 1, "Smart"), 2 Only when moving (4, "Smarter", the stock default),
+    /// 3 Always (2).
+    int followStyle_ = 2;
+    /// The movement keys and mouse buttons last seen, packed. The stock client
+    /// re-evaluates following (FUN_00602760) when these change - from
+    /// CGInputControl's key down/up handlers FUN_005fa170 / FUN_005fa450 -
+    /// not every frame.
+    uint32_t followInputSig_ = 0xFFFFFFFFu;
+    /// cameraYawSmoothSpeed "180", cameraPitchSmoothSpeed "45" (deg/s),
+    /// cameraPitchSmoothMin "0.0" / Max "30.0" (deg, positive = looking
+    /// down), cameraSmoothTimeMin "0.1" / Max "2.0" (s). FUN_005fd910.
+    static constexpr float kFollowYawSpeedDeg = 180.0f;
+    static constexpr float kFollowPitchSpeedDeg = 45.0f;
+    static constexpr float kFollowPitchDownMinDeg = 0.0f;
+    static constexpr float kFollowPitchDownMaxDeg = 30.0f;
+    static constexpr float kFollowTimeMin = 0.1f;
+    static constexpr float kFollowTimeMax = 2.0f;
+    void updateStockFollow(float deltaTime, bool forward, bool backward,
+                           bool strafeLeft, bool strafeRight,
+                           bool turnLeft, bool turnRight, bool cameraDrivesFacing);
+public:
+    /// Camera Following Style. See followStyle_.
+    void setCameraFollowStyle(int style) {
+        followStyle_ = std::clamp(style, 0, 3);
+        followInputSig_ = 0xFFFFFFFFu;  // re-evaluate on the next frame
+    }
+    [[nodiscard]] int cameraFollowStyle() const { return followStyle_; }
+private:
     static constexpr float CAM_SMOOTH_SPEED_DEFAULT = 30.0f;
     float camSmoothSpeed_ = CAM_SMOOTH_SPEED_DEFAULT;  // User-configurable camera smoothing (higher = tighter)
     // When true the camera keeps its exponential lerp even while actively
@@ -619,23 +679,18 @@ private:
     static constexpr float CAM_EPSILON = 0.22f;        // Extra wall offset to avoid near-plane clipping artifacts
     static constexpr float COLLISION_FOCUS_RADIUS_THIRD_PERSON = 20.0f;  // Reduced for performance
     static constexpr float COLLISION_FOCUS_RADIUS_FREE_FLY = 20.0f;
-    static constexpr float MIN_PITCH = -88.0f;      // Look almost straight down
-    static constexpr float MAX_PITCH = 88.0f;       // Look almost straight up (WoW standard)
+    // Stock pitch limits: +/-1.5533431 rad = 89 deg (0xad1b4c / 0xad1b50),
+    // clamped in FUN_006000e0, FUN_005ffc20 (mouse) and FUN_005ff530.
+    static constexpr float MIN_PITCH = -89.0f;      // Look almost straight down
+    static constexpr float MAX_PITCH = 89.0f;       // Look almost straight up
     glm::vec3* followTarget = nullptr;
     glm::vec3 smoothedCamPos = glm::vec3(0.0f);     // For smooth camera movement
-    float smoothedCollisionDist_ = -1.0f;           // Asymmetrically-smoothed WMO collision limit (-1 = uninitialised)
-    /// The ground's own limit, smoothed before it is combined with the built
-    /// geometry's. A hillside's marched height moves a little with every step
-    /// the player takes, and passing that straight through is a shudder.
-    float smoothedTerrainDist_ = -1.0f;
+    // (The asymmetric collision smoothing and the sideways step around
+    // obstructions are gone: the stock pull-in is collisionShownDist_.)
     /// How far the camera is currently being lifted clear of, or dropped
     /// below, the water surface. Eased both ways so crossing the water's
     /// edge does not jump the view.
     float waterNudgeZ_ = 0.0f;
-    // Degrees of yaw the camera is currently stepping around an obstruction by,
-    // so it clears a pillar or a doorframe instead of riding up the player's
-    // neck. Smoothed; zero whenever nothing is in the way.
-    float cameraDeflectDeg_ = 0.0f;
 
     // Gravity / grounding
     float verticalVelocity = 0.0f;
@@ -682,15 +737,6 @@ private:
     // Cached isInsideWMO result (throttled to avoid per-frame cost)
     bool cachedInsideWMO = false;
     bool cachedInsideInteriorWMO = false;
-    /// The zoom the player chose outdoors, kept while the indoor limit holds
-    /// them closer and given back on the way out - a limit that quietly keeps
-    /// their zoom is a setting changed behind their back.
-    float outdoorTargetDistance_ = 0.0f;
-    bool indoorZoomHeld_ = false;
-    /// How much of the zoom the collision sweep has taken, and how long
-    /// nothing has been in the way. See the pull in updateOrbitCamera.
-    float collisionZoomDebt_ = 0.0f;
-    float collisionClearSeconds_ = 0.0f;
     int insideStateCheckCounter_ = 0;
     glm::vec3 lastInsideStateCheckPos_ = glm::vec3(0.0f);
     int insideWMOCheckCounter = 0;
@@ -891,7 +937,7 @@ private:
     // Idle camera: triggers intro pan after IDLE_TIMEOUT seconds of no input
     float idleTimer_ = 0.0f;
     bool idleOrbit_ = false;  // true when current intro pan is an idle orbit (loops)
-    bool idleOrbitEnabled_ = true;
+    bool idleOrbitEnabled_ = false;  // stock CGCamera has no idle camera
     static constexpr float IDLE_TIMEOUT = 120.0f; // 2 minutes
 
     // Last known safe position (saved periodically when grounded on real geometry)

@@ -5,6 +5,7 @@
 #include "pipeline/blp_loader.hpp"
 #include "rendering/animation/weapon_type.hpp"
 #include "rendering/animation/body_facing.hpp"
+#include "rendering/animation/unit_locomotion.hpp"
 #include <memory>
 #include <string>
 #include <utility>
@@ -305,10 +306,27 @@ public:
     std::unordered_map<uint64_t, bool>& getCreatureWalkingState() { return creatureWalkingState_; }
     std::unordered_map<uint64_t, bool>& getCreatureFlyingState() { return creatureFlyingState_; }
     /// Last movement-direction flags per unit (FORWARD 0x1, BACKWARD 0x2,
-    /// STRAFE_LEFT 0x4, STRAFE_RIGHT 0x8, FALLING 0x1000) for the stock body
-    /// yaw, and that body yaw's state per remote player.
+    /// STRAFE_LEFT 0x4, STRAFE_RIGHT 0x8, TURN_LEFT 0x10, TURN_RIGHT 0x20,
+    /// FALLING 0x1000, FALLINGFAR 0x2000) for the stock body yaw and the
+    /// locomotion animation, and that body yaw's state per remote player.
     std::unordered_map<uint64_t, uint32_t>& getUnitMoveDirFlags() { return unitMoveDirFlags_; }
+    /// Movement flags that keep a unit off the floor, per unit: LEVITATING
+    /// (gravity disabled), CAN_FLY, FLYING and HOVER. A unit with none of them
+    /// falls to the floor under its server position in the stock client.
+    std::unordered_map<uint64_t, uint32_t>& getUnitGravityFreeFlags() { return unitGravityFreeFlags_; }
+    /// Where a standing creature's feet land: the floor found under its server
+    /// position, the position it was found for, and when to look again (a WMO
+    /// or doodad streaming in after the creature can change the answer).
+    struct RestingFloor {
+        glm::vec3 serverRenderPos{0.0f};
+        float floorZ = 0.0f;
+        float recheckIn = 0.0f;
+    };
+    std::unordered_map<uint64_t, RestingFloor>& getCreatureRestingFloor() { return creatureRestingFloor_; }
     std::unordered_map<uint64_t, rendering::anim::BodyFacingState>& getUnitBodyFacing() { return unitBodyFacing_; }
+    /// Per remote player and NPC: the LocomotionFSM driving its movement
+    /// animation (animation/unit_locomotion.hpp).
+    std::unordered_map<uint64_t, rendering::anim::UnitLocomotion>& getUnitLocomotion() { return unitLocomotion_; }
     std::unordered_map<uint64_t, uint32_t>& getCreatureActiveEmotes() { return creatureActiveEmotes_; }
     std::unordered_map<uint32_t, bool>& getModelIdIsWolfLike() { return modelIdIsWolfLike_; }
 
@@ -526,7 +544,10 @@ private:
     std::unordered_map<uint64_t, bool> creatureWalkingState_;
     std::unordered_map<uint64_t, bool> creatureFlyingState_;
     std::unordered_map<uint64_t, uint32_t> unitMoveDirFlags_;
+    std::unordered_map<uint64_t, uint32_t> unitGravityFreeFlags_;
+    std::unordered_map<uint64_t, RestingFloor> creatureRestingFloor_;
     std::unordered_map<uint64_t, rendering::anim::BodyFacingState> unitBodyFacing_;
+    std::unordered_map<uint64_t, rendering::anim::UnitLocomotion> unitLocomotion_;
     // Server waypoint scripts hold work/chop emotes for many seconds. Locomotion
     // temporarily overrides them, then the idle transition restores this loop.
     std::unordered_map<uint64_t, uint32_t> creatureActiveEmotes_;
@@ -717,6 +738,10 @@ private:
         uint32_t modelId = 0;
         uint32_t instanceId = 0;
         bool isWmo = false;
+        /// Last GOState applied, 0xFF none yet. GAMEOBJECT_BYTES_1 also carries
+        /// the art kit and anim progress, so the same state arrives again with
+        /// every change to those, and must not replay the Open swing.
+        uint8_t goState = 0xFF;
     };
     // Game objects spawned before their type was known, keyed by entry. Each is
     // frozen on the conservative assumption that it is state-driven until the

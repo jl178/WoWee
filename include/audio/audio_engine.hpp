@@ -86,9 +86,11 @@ public:
     /// A positional sound its owner keeps hold of - a missile's flight loop.
     /// Returns a non-zero id for stopSound / fadeOutSound / setSoundPosition,
     /// or 0 on failure. A looping one plays until it is stopped.
+    /// minDistance, when given, is how far out it stays at full volume (a
+    /// SoundEntries row's MinDistance); otherwise the engine's default.
     uint32_t playSound3DStoppable(const std::string& mpqPath, const glm::vec3& position,
                                   float volume = 1.0f, float maxDistance = 100.0f,
-                                  bool loop = false);
+                                  bool loop = false, float minDistance = -1.0f);
     /// Move a stoppable 3D sound (no-op once it has finished).
     void setSoundPosition(uint32_t id, const glm::vec3& position);
 
@@ -129,7 +131,7 @@ private:
     /// success; 0 on failure.
     uint32_t startSound3D(const std::vector<uint8_t>& wavData, const glm::vec3& position,
                           float volume, float pitch, float maxDistance, bool loop,
-                          bool stoppable);
+                          bool stoppable, float minDistance = -1.0f);
 
     // Track active one-shot sounds for cleanup
     struct ActiveSound {

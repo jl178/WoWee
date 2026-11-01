@@ -26,9 +26,10 @@ struct ChatSettings;
  * it serialises cross-cutting state (chat, quest tracker, etc.).
  */
 /// The cameramaxdistance row counts yards; the CVar the game's own slider wrote,
-/// cameraDistanceMaxFactor, counts multiples of the 22 the original client
-/// gives, which is the scale on that row of kClientCVars.
-inline constexpr float cameraDistanceFactor(int yards) { return static_cast<float>(yards) / 22.0f; }
+/// cameraDistanceMaxFactor, counts multiples of the 15 the original client
+/// gives (cameraDistanceMax "15.0", Wow.exe 12340), which is the scale on that
+/// row of kClientCVars.
+inline constexpr float cameraDistanceFactor(int yards) { return static_cast<float>(yards) / 15.0f; }
 
 class SettingsPanel {
 public:
@@ -103,11 +104,15 @@ public:
     bool pendingGamepadInvertLook = false;
     float pendingGamepadDeadzone = 0.18f;
     float pendingCameraStiffness = 30.0f;  // Camera smooth speed (higher = tighter, less sway)
-    int pendingCameraMaxDistance = 22;     // Yards; the CVar counts multiples of this default
+    int pendingCameraMaxDistance = 15;     // Yards; the CVar counts multiples of this default (stock cameraDistanceMax 15)
     float pendingPivotHeight = 1.6f;       // Camera pivot height above feet (lower = less detached feel)
     bool pendingSmoothCameraFollow = false; // Keep lerping while turning (floaty, detached follow)
-    float pendingFov = 70.0f;
-    float pendingCameraShake = 1.0f;  // 0 = off, 1 = the full amount  // degrees, default matches WoW's ~70° horizontal FOV
+    /// Camera following style, in the dropdown's order: 0 Never, 1 Only
+    /// horizontal when moving, 2 Only when moving (stock cameraSmoothStyle 4,
+    /// the default), 3 Always. See CameraController::setCameraFollowStyle.
+    int pendingCameraFollowStyle = 2;
+    float pendingFov = 54.0f;  // vertical degrees; stock fovy = 0.6 * pi/2 (Wow.exe 12340, 0x607d2f)
+    float pendingCameraShake = 1.0f;  // 0 = off, 1 = the full amount
 
     // ---- Pending UI / interface ----
     int pendingUiOpacity = 65;
@@ -167,7 +172,7 @@ public:
     bool pendingSecureAbilityToggle = false;
     /// Debug: turn to face the target on attack. See GameHandler::setAutoFaceTarget.
     bool pendingAutoFaceTarget = false;
-    bool pendingIdleCameraOrbit = true;
+    bool pendingIdleCameraOrbit = false;  // the stock client has no idle camera
 
     // ---- Pending soundtrack ----
     bool pendingUseOriginalSoundtrack = false;

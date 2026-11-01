@@ -104,6 +104,9 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
     // Creature despawn callback (online mode) - remove creature models
     gameHandler_.setCreatureDespawnCallback([this](uint64_t guid) {
         entitySpawner_.despawnCreature(guid);
+        // Gone for real (a display change despawns too, and keeps these): a
+        // creature that comes back gets them from its next movement block.
+        entitySpawner_.getUnitGravityFreeFlags().erase(guid);
     });
 
     gameHandler_.setPlayerDespawnCallback([this](uint64_t guid) {
@@ -126,20 +129,24 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
         entitySpawner_.onGameObjectInfoReceived(entry);
     });
 
-    // GameObject custom animation callback (e.g. chest opening)
+    // GameObject custom animation callback: Custom0-3 (153-156) from
+    // SMSG_GAMEOBJECT_CUSTOM_ANIM, Despawn (157) from ..._DESPAWN_ANIM.
     gameHandler_.setGameObjectCustomAnimCallback([this](uint64_t guid, uint32_t animId) {
         auto& goInstances = entitySpawner_.getGameObjectInstances();
         auto it = goInstances.find(guid);
         if (it == goInstances.end()) return;
         auto& info = it->second;
-        if (!info.isWmo) {
-            if (auto* m2r = renderer_.getM2Renderer()) {
-                // Play the custom animation as a one-shot if model supports it
-                if (m2r->hasAnimation(info.instanceId, animId))
-                    m2r->setInstanceAnimation(info.instanceId, animId, false);
-                else
-                    m2r->setInstanceAnimationFrozen(info.instanceId, false);
-            }
+        if (info.isWmo) return;
+        auto* m2r = renderer_.getM2Renderer();
+        // A model without the sequence plays nothing, as in the game. This
+        // used to unfreeze it instead, which set a shut door looping its swing.
+        if (!m2r || !m2r->hasAnimation(info.instanceId, animId)) return;
+        if (animId == rendering::anim::DESPAWN) {
+            // The object is removed when it ends; hold the last frame so it
+            // does not pop back to its idle in between.
+            m2r->setInstanceAnimationHeld(info.instanceId, animId, false);
+        } else {
+            m2r->setInstanceAnimation(info.instanceId, animId, false);
         }
     });
 
@@ -180,7 +187,11 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
                 // Player animation is managed by the local renderer state machine -
                 // don't reset it here or every server movement packet restarts the
                 // run cycle from frame 0, causing visible stutter.
-                if (!isPlayer) {
+                // A creature on the ground or in water is animated by its
+                // LocomotionFSM in the per-frame sync (Walk/Run, swim strokes,
+                // backpedal, stealth); starting Run here as well put it in
+                // Run in the water and fought the FSM's choice.
+                if (!isPlayer && entitySpawner_.getCreatureFlyingState().count(guid)) {
                     uint32_t curAnimId = 0; float curT = 0.0f, curDur = 0.0f;
                     auto* cr = renderer_.getCharacterRenderer();
                     bool gotState = cr->getAnimationState(instanceId, curAnimId, curT, curDur);
@@ -190,6 +201,8 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
                     if (!gotState || (curAnimId != rendering::anim::DEATH && curAnimId != targetAnim)) {
                         cr->playAnimation(instanceId, targetAnim, /*loop=*/true);
                     }
+                }
+                if (!isPlayer) {
                     entitySpawner_.getCreatureWasMoving()[guid] = true;
                 }
             }

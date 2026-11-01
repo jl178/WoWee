@@ -100,12 +100,9 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
 
     // Spline move: consume-only (no state change)
     for (auto op : { Opcode::SMSG_SPLINE_MOVE_FEATHER_FALL,
-                     Opcode::SMSG_SPLINE_MOVE_GRAVITY_DISABLE,
-                     Opcode::SMSG_SPLINE_MOVE_GRAVITY_ENABLE,
                      Opcode::SMSG_SPLINE_MOVE_LAND_WALK,
                      Opcode::SMSG_SPLINE_MOVE_NORMAL_FALL,
-                     Opcode::SMSG_SPLINE_MOVE_ROOT,
-                     Opcode::SMSG_SPLINE_MOVE_SET_HOVER }) {
+                     Opcode::SMSG_SPLINE_MOVE_ROOT }) {
         table[op] = [](network::Packet& packet) {
             if (packet.hasRemaining(1))
                 (void)packet.readPackedGuid();
@@ -149,6 +146,15 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
         table[Opcode::SMSG_SPLINE_MOVE_SET_FLYING]    = makeSynthHandler(kFlyBits, kFlyBits);
         table[Opcode::SMSG_SPLINE_MOVE_START_SWIM]    = makeSynthHandler(kSwimBit, kSwimBit);
         table[Opcode::SMSG_SPLINE_MOVE_STOP_SWIM]     = makeSynthHandler(0u, kSwimBit);
+        // Gravity and hover decide whether a standing unit settles onto the
+        // floor under its server position (Application's creature sync), so
+        // they are state now rather than consumed and dropped.
+        constexpr uint32_t kLevitateBit = asFlag(MovementFlags::LEVITATING);
+        constexpr uint32_t kHoverBit = asFlag(MovementFlags::HOVER);
+        table[Opcode::SMSG_SPLINE_MOVE_GRAVITY_DISABLE] = makeSynthHandler(kLevitateBit, kLevitateBit);
+        table[Opcode::SMSG_SPLINE_MOVE_GRAVITY_ENABLE]  = makeSynthHandler(0u, kLevitateBit);
+        table[Opcode::SMSG_SPLINE_MOVE_SET_HOVER]       = makeSynthHandler(kHoverBit, kHoverBit);
+        table[Opcode::SMSG_SPLINE_MOVE_UNSET_HOVER]     = makeSynthHandler(0u, kHoverBit);
     }
 
     // Spline speed: all opcodes share the same PackedGuid+float format, differing
@@ -282,9 +288,9 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
         handleClientControlUpdate(packet);
     };
 
-    // Spline move flag changes for other units (unroot/unset_hover/water_walk)
+    // Spline move flag changes for other units (unroot/water_walk). UNSET_HOVER
+    // is registered with the synthesised flags above.
     for (auto op : {Opcode::SMSG_SPLINE_MOVE_UNROOT,
-                    Opcode::SMSG_SPLINE_MOVE_UNSET_HOVER,
                     Opcode::SMSG_SPLINE_MOVE_WATER_WALK}) {
         table[op] = [](network::Packet& packet) {
             // Minimal parse: PackedGuid only - no animation-relevant state change.

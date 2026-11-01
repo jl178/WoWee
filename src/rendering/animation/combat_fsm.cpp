@@ -19,13 +19,15 @@ bool CombatFSM::oneShotComplete(const Input& in, uint32_t expectedAnimId) const 
 
 void CombatFSM::onEvent(AnimEvent event) {
     switch (event) {
+        // Combat starting or ending moves no weapons in 3.3.5, so it plays no
+        // sheath reach either (AppearanceComposer plays that when they move).
         case AnimEvent::COMBAT_ENTER:
             if (state_ == State::INACTIVE)
-                state_ = State::UNSHEATHE;
+                state_ = State::COMBAT_IDLE;
             break;
         case AnimEvent::COMBAT_EXIT:
             if (state_ == State::COMBAT_IDLE)
-                state_ = State::SHEATHE;
+                state_ = State::INACTIVE;
             break;
         case AnimEvent::STUN_ENTER:
             clearSpellState();

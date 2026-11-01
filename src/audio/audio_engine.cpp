@@ -498,14 +498,15 @@ bool AudioEngine::playSound3D(const std::vector<uint8_t>& wavData, const glm::ve
 }
 
 uint32_t AudioEngine::playSound3DStoppable(const std::string& mpqPath, const glm::vec3& position,
-                                           float volume, float maxDistance, bool loop) {
+                                           float volume, float maxDistance, bool loop,
+                                           float minDistance) {
     if (!assetManager_) return 0;
     auto data = assetManager_->readFile(mpqPath);
     if (data.empty()) {
         LOG_WARNING("AudioEngine::playSound3DStoppable: failed to load '", mpqPath, "'");
         return 0;
     }
-    return startSound3D(data, position, volume, 1.0f, maxDistance, loop, true);
+    return startSound3D(data, position, volume, 1.0f, maxDistance, loop, true, minDistance);
 }
 
 void AudioEngine::setSoundPosition(uint32_t id, const glm::vec3& position) {
@@ -520,7 +521,7 @@ void AudioEngine::setSoundPosition(uint32_t id, const glm::vec3& position) {
 
 uint32_t AudioEngine::startSound3D(const std::vector<uint8_t>& wavData, const glm::vec3& position,
                                    float volume, float pitch, float maxDistance, bool loop,
-                                   bool stoppable) {
+                                   bool stoppable, float minDistance) {
     if (!initialized_ || !engine_ || wavData.empty()) return 0;
     if (masterVolume_ <= 0.0f) return 0;
 
@@ -580,7 +581,12 @@ uint32_t AudioEngine::startSound3D(const std::vector<uint8_t>& wavData, const gl
     ma_sound_set_attenuation_model(sound.get(), ma_attenuation_model_linear);
     ma_sound_set_min_gain(sound.get(), 0.0f);
     ma_sound_set_max_gain(sound.get(), 1.0f);
-    ma_sound_set_min_distance(sound.get(), std::min(8.0f, maxDistance * 0.25f));
+    // A caller's own full-volume radius (SoundEntries MinDistance) is kept
+    // short of the cutoff, so there is still a fade to ride out on.
+    const float minDist = minDistance > 0.0f
+        ? std::min(minDistance, std::max(maxDistance, 1.0f) * 0.9f)
+        : std::min(8.0f, maxDistance * 0.25f);
+    ma_sound_set_min_distance(sound.get(), minDist);
     ma_sound_set_max_distance(sound.get(), std::max(maxDistance, 1.0f));
     ma_sound_set_rolloff(sound.get(), 1.0f);
     if (loop) ma_sound_set_looping(sound.get(), MA_TRUE);

@@ -72,6 +72,12 @@ struct MapChunk {
     std::array<uint8_t, 145 * 4> vertexColors{};
     bool hasVertexColors = false;
 
+    // MCSH: the baked shadow under trees and buildings, 64x64 one bit each,
+    // expanded here to one byte a texel - 255 shadowed, 0 lit - in the same
+    // layout as a decoded alpha map. Empty unless the MCNK has_mcsh flag (0x1)
+    // is set and the sub-chunk is there.
+    std::vector<uint8_t> shadowMap;
+
     [[nodiscard]] bool hasHeightMap() const { return heightMap.isLoaded(); }
     [[nodiscard]] bool hasLayers() const { return !layers.empty(); }
 

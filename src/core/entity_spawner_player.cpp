@@ -824,7 +824,10 @@ void EntitySpawner::despawnPlayer(uint64_t guid) {
     creatureWalkingState_.erase(guid);
     creatureFlyingState_.erase(guid);
     unitMoveDirFlags_.erase(guid);
+    unitGravityFreeFlags_.erase(guid);
+    creatureRestingFloor_.erase(guid);
     unitBodyFacing_.erase(guid);
+    unitLocomotion_.erase(guid);
     creatureWasMoving_.erase(guid);
     creatureWasSwimming_.erase(guid);
     creatureWasFlying_.erase(guid);

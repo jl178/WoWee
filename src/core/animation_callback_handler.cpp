@@ -364,15 +364,26 @@ void AnimationCallbackHandler::setupCallbacks() {
         ac->setLowHealth(lowHp);
     });
 
-    // Unit animation hint callback - plays jump (38=JumpMid) animation on other players/NPCs.
-    // Swim/walking state is now authoritative from the move-flags callback below.
-    // animId=38 (JumpMid): airborne jump animation; land detection is via per-frame sync.
+    // Unit animation hint callback - MSG_MOVE_JUMP from another player or NPC
+    // (animId 38). A unit on its feet hands the jump to its LocomotionFSM
+    // (animation/unit_locomotion.hpp), which plays JumpStart, the Jump loop
+    // while FALLING lasts, and JumpEnd or JumpLandRun on landing, as the
+    // local player's does. A rider's jump belongs to the mount; anything
+    // else (in flight) still just loops the hinted animation.
     gameHandler_.setUnitAnimHintCallback([this](uint64_t guid, uint32_t animId) {
         auto* cr = renderer_.getCharacterRenderer();
         if (!cr) return;
         uint32_t instanceId = entitySpawner_.getPlayerInstanceId(guid);
         if (instanceId == 0) instanceId = entitySpawner_.getCreatureInstanceId(guid);
         if (instanceId == 0) return;
+        if (entitySpawner_.getRemotePlayerMount(guid)) return;
+        if (animId == rendering::anim::JUMP && !entitySpawner_.getCreatureFlyingState().count(guid)) {
+            auto& loco = entitySpawner_.getUnitLocomotion()[guid];
+            loco.jumpPending = true;
+            loco.airborneSeen = false;
+            loco.jumpAge = 0.0f;
+            return;
+        }
         // Don't override Death animation
         uint32_t curAnim = 0; float curT = 0.0f, curDur = 0.0f;
         if (cr->getAnimationState(instanceId, curAnim, curT, curDur) && curAnim == rendering::anim::DEATH) return;
@@ -398,9 +409,27 @@ void AnimationCallbackHandler::setupCallbacks() {
         apply(game::MovementFlags::SWIMMING, entitySpawner_.getCreatureSwimmingState());
         apply(game::MovementFlags::WALKING,  entitySpawner_.getCreatureWalkingState());
         apply(game::MovementFlags::FLYING,   entitySpawner_.getCreatureFlyingState());
-        // Direction bits for the stock body yaw (forward, backward, strafes,
-        // falling): a strafing player's model turns toward travel.
-        constexpr uint32_t kDirBits = 0x1u | 0x2u | 0x4u | 0x8u | 0x1000u;
+        // What holds the unit up off the floor. Without any of these the stock
+        // client lets a unit settle onto the floor under its server position.
+        {
+            const uint32_t kGravityFreeBits =
+                static_cast<uint32_t>(game::MovementFlags::LEVITATING) |
+                static_cast<uint32_t>(game::MovementFlags::CAN_FLY) |
+                static_cast<uint32_t>(game::MovementFlags::FLYING) |
+                static_cast<uint32_t>(game::MovementFlags::HOVER);
+            const uint32_t gMask = mask & kGravityFreeBits;
+            if (gMask != 0) {
+                auto& gFlags = entitySpawner_.getUnitGravityFreeFlags();
+                const uint32_t g = (gFlags[guid] & ~gMask) | (moveFlags & gMask);
+                if (g != 0) gFlags[guid] = g;
+                else        gFlags.erase(guid);
+            }
+        }
+        // Direction bits for the stock body yaw and the locomotion animation
+        // (forward, backward, strafes, turns, falling, falling far): a
+        // strafing player's model turns toward travel, a backpedal walks
+        // backwards, a turn in place shuffles, a fall falls.
+        constexpr uint32_t kDirBits = 0x1u | 0x2u | 0x4u | 0x8u | 0x10u | 0x20u | 0x1000u | 0x2000u;
         const uint32_t dirMask = mask & kDirBits;
         if (dirMask != 0) {
             auto& dirFlags = entitySpawner_.getUnitMoveDirFlags();
@@ -594,7 +623,7 @@ void AnimationCallbackHandler::setupCallbacks() {
                         // client auto-sheathes on consume with no sheath animation
                         // (playing one here would fight the FSM's sit-down one-shot).
                         if (!appearanceComposer_.isWeaponsSheathed()) {
-                            appearanceComposer_.setWeaponsSheathed(true);
+                            appearanceComposer_.setWeaponsSheathed(true, "eat/drink");
                             appearanceComposer_.loadEquippedWeapons();
                         }
                         // Food and water keep the player seated (UNIT_FIELD_BYTES_1)
@@ -655,7 +684,7 @@ void AnimationCallbackHandler::setupCallbacks() {
                 // before starting so the cast animation actually swings it.
                 if (isLocalPlayer) {
                     if (appearanceComposer_.isWeaponsSheathed()) {
-                        appearanceComposer_.setWeaponsSheathed(false);
+                        appearanceComposer_.setWeaponsSheathed(false, "fishing cast");
                         appearanceComposer_.loadEquippedWeapons();
                     }
                     appearanceComposer_.showFishingPole(true);

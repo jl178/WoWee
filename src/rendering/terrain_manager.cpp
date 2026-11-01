@@ -12,6 +12,8 @@
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/camera.hpp"
 #include "audio/ambient_sound_manager.hpp"
+#include "audio/world_sound_emitters.hpp"
+#include "rendering/placement_transform.hpp"
 #include "core/coordinates.hpp"
 #include "pipeline/wowee_terrain_loader.hpp"
 #include "pipeline/wowee_model.hpp"
@@ -581,6 +583,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
         // The asset path carries foliage semantics; embedded names frequently
         // do not. Always classify ADT doodads using the path.
         m2Model.name = m2Path;
+        recordDoodadSounds(modelId, m2Model);
         std::string skinPath = pipeline::skinPathForM2(m2Path);
         std::vector<uint8_t> skinData = assetManager->readFileOptional(skinPath);
         if (!skinData.empty() && m2Model.version >= 264) {
@@ -793,6 +796,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
 
                             m2Model = pipeline::M2Loader::load(m2Data);
                             m2Model.name = m2Path;
+                            recordDoodadSounds(doodadModelId, m2Model);
                             std::string skinPath = pipeline::skinPathForM2(m2Path);
                             std::vector<uint8_t> skinData = assetManager->readFile(skinPath);
                             if (!skinData.empty() && m2Model.version >= 264) {
@@ -842,7 +846,12 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
                             doodadLogCount++;
                         }
 
-                        auto emitterType = rendering::classifyAmbientEmitter(m2PathLower);
+                        // A model with $DSL / $DSO events sounds through those
+                        // (added when its instance is made); the name guess is
+                        // for the ones that carry none.
+                        auto emitterType = modelHasDoodadSounds(doodadModelId)
+                            ? rendering::AmbientEmitterType::None
+                            : rendering::classifyAmbientEmitter(m2PathLower);
                         if (emitterType != rendering::AmbientEmitterType::None) {
                             PendingTile::AmbientEmitter emitter;
                             emitter.position = worldPos;
@@ -1103,6 +1112,8 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 uint32_t instId = m2Renderer->createInstance(p.modelId, p.position, p.rotation, p.scale);
                 if (instId) {
                     ft.m2InstanceIds.push_back(instId);
+                    addDoodadSounds(p.modelId, placementModelMatrix(p.position, p.rotation, p.scale),
+                                    ft.soundEmitterIds);
                     if (p.uniqueId != 0) {
                         placedDoodadIds.insert(p.uniqueId);
                         ft.tileUniqueIds.push_back(p.uniqueId);
@@ -1263,6 +1274,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                     // carry the only authored floor for their walkable ramps.
                     m2Renderer->setSkipWallCollision(wmoDoodadInstId, true);
                     ft.m2InstanceIds.push_back(wmoDoodadInstId);
+                    addDoodadSounds(doodad.modelId, doodad.modelMatrix, ft.soundEmitterIds);
                 }
                 ft.wmoDoodadIndex++;
                 uploaded++;
@@ -1330,6 +1342,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
         tile->wmoInstanceIds = std::move(ft.wmoInstanceIds);
         tile->wmoUniqueIds = std::move(ft.tileWmoUniqueIds);
         tile->doodadUniqueIds = std::move(ft.tileUniqueIds);
+        tile->soundEmitterIds = std::move(ft.soundEmitterIds);
         tile->clutterPlacements = std::move(pending->clutterPlacements);
         tile->clutterChunkStart = pending->clutterChunkStart;
         tile->clutterChunkBounds = pending->clutterChunkBounds;
@@ -1857,6 +1870,7 @@ void TerrainManager::unloadTile(int x, int y) {
                 std::lock_guard<std::mutex> lock(preparedWmoUniqueIdsMutex_);
                 preparedWmoUniqueIds_.erase(uid);
             }
+            removeSoundEmitters(fit->soundEmitterIds);
             finalizingTiles_.erase(fit);
             return;
         }
@@ -1870,6 +1884,8 @@ void TerrainManager::unloadTile(int x, int y) {
     LOG_INFO("Unloading terrain tile [", x, ",", y, "]");
 
     const auto& tile = it->second;
+
+    removeSoundEmitters(tile->soundEmitterIds);
 
     // Remove doodad unique IDs from dedup set
     for (uint32_t uid : tile->doodadUniqueIds) {
@@ -1916,6 +1932,44 @@ void TerrainManager::unloadTile(int x, int y) {
     loadedTiles.erase(it);
 }
 
+void TerrainManager::recordDoodadSounds(uint32_t modelId, const pipeline::M2Model& model) {
+    std::lock_guard<std::mutex> lock(doodadSoundsMutex_);
+    doodadSoundsByModel_[modelId] = model.doodadSounds;
+}
+
+bool TerrainManager::modelHasDoodadSounds(uint32_t modelId) const {
+    std::lock_guard<std::mutex> lock(doodadSoundsMutex_);
+    auto it = doodadSoundsByModel_.find(modelId);
+    return it != doodadSoundsByModel_.end() && !it->second.empty();
+}
+
+void TerrainManager::addDoodadSounds(uint32_t modelId, const glm::mat4& modelMatrix,
+                                     std::vector<uint32_t>& outIds) {
+    if (!worldSoundEmitters) return;
+    std::vector<pipeline::M2Model::DoodadSound> sounds;
+    {
+        std::lock_guard<std::mutex> lock(doodadSoundsMutex_);
+        auto it = doodadSoundsByModel_.find(modelId);
+        if (it == doodadSoundsByModel_.end() || it->second.empty()) return;
+        sounds = it->second;
+    }
+    for (const auto& s : sounds) {
+        // Where the event sits on the model, carried to where it was placed.
+        const glm::vec3 pos = glm::vec3(modelMatrix * glm::vec4(s.position, 1.0f));
+        const uint32_t id = s.loop
+            ? worldSoundEmitters->addLoop(pos, s.soundEntryId)
+            : worldSoundEmitters->addPeriodic(pos, s.soundEntryId, s.periodMs, s.timeMs);
+        if (id != 0) outIds.push_back(id);
+    }
+}
+
+void TerrainManager::removeSoundEmitters(std::vector<uint32_t>& ids) {
+    if (worldSoundEmitters) {
+        for (uint32_t id : ids) worldSoundEmitters->remove(id);
+    }
+    ids.clear();
+}
+
 void TerrainManager::stopWorkers() {
     if (!workerRunning.load()) {
         LOG_DEBUG("stopWorkers: already stopped");
@@ -1947,6 +2001,11 @@ void TerrainManager::softReset() {
         while (!readyQueue.empty()) readyQueue.pop();
     }
     pendingTiles.clear();
+    // The doodads' sounds go with their tiles.
+    for (auto& ft : finalizingTiles_) removeSoundEmitters(ft.soundEmitterIds);
+    for (auto& [coord, tile] : loadedTiles) {
+        if (tile) removeSoundEmitters(tile->soundEmitterIds);
+    }
     finalizingTiles_.clear();
     placedDoodadIds.clear();
     placedWmoIds.clear();

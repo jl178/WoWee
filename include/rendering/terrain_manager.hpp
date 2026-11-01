@@ -26,7 +26,7 @@
 namespace wowee {
 
 namespace pipeline { class AssetManager; }
-namespace audio { class AmbientSoundManager; }
+namespace audio { class AmbientSoundManager; class WorldSoundEmitters; }
 namespace rendering { class TerrainRenderer; class Camera; class WaterRenderer; class M2Renderer; class WMORenderer; }
 
 namespace rendering {
@@ -86,6 +86,8 @@ struct TerrainTile {
     std::vector<uint32_t> wmoUniqueIds;  // For WMO dedup cleanup on unload
     std::vector<uint32_t> m2InstanceIds;
     std::vector<uint32_t> doodadUniqueIds;  // For dedup cleanup on unload
+    // WorldSoundEmitters ids of the doodads' own sounds ($DSL / $DSO events).
+    std::vector<uint32_t> soundEmitterIds;
     // Ground clutter is kept as placements and only becomes renderer
     // instances while its map chunk is within clutter range of the camera.
     // See TerrainManager::streamGroundClutter.
@@ -234,6 +236,7 @@ struct FinalizingTile {
     std::vector<uint32_t> tileUniqueIds;
     std::vector<uint32_t> tileWmoUniqueIds;
     std::unordered_set<uint32_t> uploadedM2ModelIds;
+    std::vector<uint32_t> soundEmitterIds;
 };
 
 /**
@@ -337,6 +340,8 @@ public:
     void setM2Renderer(M2Renderer* renderer) { m2Renderer = renderer; }
     void setWMORenderer(WMORenderer* renderer) { wmoRenderer = renderer; }
     void setAmbientSoundManager(audio::AmbientSoundManager* manager) { ambientSoundManager = manager; }
+    /// Where placed doodads' own sound events ($DSL loops, $DSO one-shots) go.
+    void setWorldSoundEmitters(audio::WorldSoundEmitters* emitters) { worldSoundEmitters = emitters; }
 
     /**
      * Get terrain height at GL coordinates
@@ -493,6 +498,20 @@ private:
     M2Renderer* m2Renderer = nullptr;
     WMORenderer* wmoRenderer = nullptr;
     audio::AmbientSoundManager* ambientSoundManager = nullptr;
+    audio::WorldSoundEmitters* worldSoundEmitters = nullptr;
+
+    // Each doodad model's $DSL / $DSO events, recorded when a worker parses
+    // it: a model already uploaded is not parsed again, and its placements
+    // in later tiles still need its sounds. An empty list = parsed, silent.
+    std::unordered_map<uint32_t, std::vector<pipeline::M2Model::DoodadSound>> doodadSoundsByModel_;
+    mutable std::mutex doodadSoundsMutex_;
+    void recordDoodadSounds(uint32_t modelId, const pipeline::M2Model& model);
+    /// Whether a parsed model has sound events of its own (false if unknown).
+    bool modelHasDoodadSounds(uint32_t modelId) const;
+    /// Register a placed doodad's sound events at its world transform.
+    void addDoodadSounds(uint32_t modelId, const glm::mat4& modelMatrix,
+                         std::vector<uint32_t>& outIds);
+    void removeSoundEmitters(std::vector<uint32_t>& ids);
 
     std::string mapName = "Azeroth";
 

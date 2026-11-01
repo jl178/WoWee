@@ -61,6 +61,8 @@ struct AnimCapabilitySet {
     uint32_t resolvedSwimBackwards = 0;
     uint32_t resolvedSwimLeft = 0;
     uint32_t resolvedSwimRight = 0;
+    uint32_t resolvedShuffleLeft = 0;   // Turn in place, feet stepping (11)
+    uint32_t resolvedShuffleRight = 0;  // (12)
 
     // ── Combat resolved IDs ─────────────────────────────────────────────
     uint32_t resolvedCombatIdle = 0;

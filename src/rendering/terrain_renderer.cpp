@@ -126,7 +126,8 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
     // --- Create material descriptor set layout (set 1) ---
     // bindings 0-6: combined image samplers (base + 3 layer + 3 alpha)
     // binding 7: uniform buffer (TerrainParams)
-    std::vector<VkDescriptorSetLayoutBinding> materialBindings(8);
+    // binding 8: combined image sampler (baked MCSH shadow, as light)
+    std::vector<VkDescriptorSetLayoutBinding> materialBindings(9);
     for (uint32_t i = 0; i < 7; i++) {
         materialBindings[i] = {};
         materialBindings[i].binding = i;
@@ -139,6 +140,11 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
     materialBindings[7].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     materialBindings[7].descriptorCount = 1;
     materialBindings[7].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    materialBindings[8] = {};
+    materialBindings[8].binding = 8;
+    materialBindings[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    materialBindings[8].descriptorCount = 1;
+    materialBindings[8].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
     materialSetLayout = createDescriptorSetLayout(device, materialBindings);
     if (!materialSetLayout) {
@@ -148,7 +154,7 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
 
     // --- Create descriptor pool ---
     VkDescriptorPoolSize poolSizes[] = {
-        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_MATERIAL_SETS * 7 },
+        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_MATERIAL_SETS * 8 },
         { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_MATERIAL_SETS },
     };
 
@@ -489,6 +495,10 @@ void TerrainRenderer::bindChunkTextures(TerrainChunkGPU& gpuChunk,
                                         const pipeline::ChunkMesh& chunk,
                                         const std::vector<std::string>& texturePaths,
                                         int tileX, int tileY, int chunkX, int chunkY) {
+    // The baked shadow rides the alpha-map path: the same 64x64 R8 texture,
+    // the same cache and eviction. No map = the opaque fallback = lit.
+    gpuChunk.shadowTexture = chunk.shadowLight.empty() ? nullptr
+                                                       : createAlphaTexture(chunk.shadowLight);
     if (chunk.layers.empty()) {
         gpuChunk.baseTexture = whiteTexture.get();
         return;
@@ -616,6 +626,7 @@ bool TerrainRenderer::evictTexturesFor(size_t needBytes) {
         if (c.baseTexture) inUse.insert(c.baseTexture);
         for (VkTexture* t : c.layerTextures) if (t) inUse.insert(t);
         for (VkTexture* t : c.alphaTextures) if (t) inUse.insert(t);
+        if (c.shadowTexture) inUse.insert(c.shadowTexture);
     }
 
     std::vector<std::pair<uint64_t, std::string>> candidates;
@@ -858,19 +869,27 @@ bool TerrainRenderer::writeMaterialDescriptors(VkDescriptorSet set, const Terrai
         return false;
     }
 
-    VkDescriptorImageInfo imageInfos[7];
+    VkDescriptorImageInfo imageInfos[8];
     imageInfos[0] = pick(chunk.baseTexture, white)->descriptorInfo();
     for (int i = 0; i < 3; i++) {
         imageInfos[1 + i] = pick(chunk.layerTextures[i], white)->descriptorInfo();
         imageInfos[4 + i] = pick(chunk.alphaTextures[i], opaque)->descriptorInfo();
     }
+    // Binding 8, the baked shadow: the opaque 255 is "lit".
+    imageInfos[7] = pick(chunk.shadowTexture, opaque)->descriptorInfo();
 
     VkDescriptorBufferInfo bufInfo{};
     bufInfo.buffer = chunk.paramsUBO;
     bufInfo.offset = 0;
     bufInfo.range = sizeof(TerrainParamsUBO);
 
-    VkWriteDescriptorSet writes[8] = {};
+    VkWriteDescriptorSet writes[9] = {};
+    writes[8].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[8].dstSet = set;
+    writes[8].dstBinding = 8;
+    writes[8].descriptorCount = 1;
+    writes[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[8].pImageInfo = &imageInfos[7];
     for (int i = 0; i < 7; i++) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = set;
@@ -886,7 +905,7 @@ bool TerrainRenderer::writeMaterialDescriptors(VkDescriptorSet set, const Terrai
     writes[7].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     writes[7].pBufferInfo = &bufInfo;
 
-    vkUpdateDescriptorSets(vkCtx->getDevice(), 8, writes, 0, nullptr);
+    vkUpdateDescriptorSets(vkCtx->getDevice(), 9, writes, 0, nullptr);
     return true;
 }
 
@@ -1299,6 +1318,7 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     chunk.baseTexture = nullptr;
     for (VkTexture*& t : chunk.layerTextures) t = nullptr;
     for (VkTexture*& t : chunk.alphaTextures) t = nullptr;
+    chunk.shadowTexture = nullptr;
 
     vkCtx->deferAfterAllFrameFences([device, allocator, vertexBuffer, vertexAlloc, indexBuffer, indexAlloc,
                                      paramsUBO, paramsAlloc, pool, materialSet]() {

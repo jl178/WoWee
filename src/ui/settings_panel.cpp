@@ -339,7 +339,8 @@ constexpr FieldBinding kFieldBindings[] = {
     {.key = "cameramaxdistance", .asInt = &SettingsPanel::pendingCameraMaxDistance},
     {.key = "pivotheight",     .asFloat = &SettingsPanel::pendingPivotHeight},
     {.key = "smoothfollow",    .asBool  = &SettingsPanel::pendingSmoothCameraFollow},
-    {.key = "idleorbit",       .asBool  = &SettingsPanel::pendingIdleCameraOrbit},
+    {.key = "camerafollowstyle", .asInt = &SettingsPanel::pendingCameraFollowStyle},
+    {.key = "idleorbit",      .asBool  = &SettingsPanel::pendingIdleCameraOrbit},
     {.key = "invertmouse",     .asBool  = &SettingsPanel::pendingInvertMouse},
     {.key = "gamepad",          .asBool  = &SettingsPanel::pendingGamepadEnabled},
     {.key = "gamepadlookspeed", .asFloat = &SettingsPanel::pendingGamepadLookSpeed},
@@ -572,6 +573,8 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
         }
     } else if (key == "smoothfollow") {
         if (cameraController) cameraController->setSmoothCameraFollow(pendingSmoothCameraFollow);
+    } else if (key == "camerafollowstyle") {
+        if (cameraController) cameraController->setCameraFollowStyle(pendingCameraFollowStyle);
     } else if (key == "pivotheight") {
         if (cameraController) cameraController->setPivotHeight(pendingPivotHeight);
     } else if (key == "idleorbit") {

@@ -48,7 +48,7 @@ void TransportCallbackHandler::setupCallbacks() {
 
         // Mounting stows drawn weapons, matching the original client.
         if (appearanceComposer_ && !appearanceComposer_->isWeaponsSheathed()) {
-            appearanceComposer_->setWeaponsSheathed(true);
+            appearanceComposer_->setWeaponsSheathed(true, "mount");
             appearanceComposer_->loadEquippedWeapons();
         }
     });

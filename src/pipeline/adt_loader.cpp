@@ -390,6 +390,31 @@ void ADTLoader::parseMCNK(std::span<const uint8_t> data, int chunkIndex, ADTTerr
         }
     }
 
+    // Baked shadow (MCSH) - 64 rows of 8 bytes, one bit per texel, least
+    // significant bit first. ofsShadow at MCNK header 0x2C, sizeShadow at
+    // 0x30, present when has_mcsh (0x1) is set.
+    chunk.shadowMap.clear();
+    if (chunk.flags & 0x1) {
+        const uint32_t ofsShadow = readUInt32(data, 0x2C);
+        constexpr size_t kMCSHBytes = 64 * 8;
+        if (ofsShadow > 0 && ofsShadow + kMCSHBytes <= data.size()) {
+            uint32_t skip = (readUInt32(data, ofsShadow) == MCSH) ? 8 : 0;
+            if (ofsShadow + skip + kMCSHBytes > data.size()) skip = 0;
+            const uint8_t* bits = data.data() + ofsShadow + skip;
+            chunk.shadowMap.assign(64 * 64, 0);
+            for (size_t i = 0; i < 64 * 64; ++i) {
+                if ((bits[i >> 3] >> (i & 7)) & 1u) chunk.shadowMap[i] = 255;
+            }
+            // Like a four-bit alpha map, the last row and column are not
+            // painted unless do_not_fix_alpha_map (0x8000) says so; the
+            // client repeats the ones before them.
+            if ((chunk.flags & 0x8000) == 0) {
+                for (size_t x = 0; x < 64; ++x) chunk.shadowMap[63 * 64 + x] = chunk.shadowMap[62 * 64 + x];
+                for (size_t y = 0; y < 64; ++y) chunk.shadowMap[y * 64 + 63] = chunk.shadowMap[y * 64 + 62];
+            }
+        }
+    }
+
     // Texture layers (MCLY) - 16 bytes per layer
     if (ofsLayer > 0 && nLayers > 0) {
         size_t layerSize = nLayers * 16;

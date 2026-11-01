@@ -24,6 +24,16 @@ struct SoundEntry {
     float distanceCutoff = 0.0f;
 };
 
+/// One SoundEmitters.dbc row: a looping sound placed in the world by hand -
+/// a waterfall's roar, a forge, a river bend. 632 rows in 3.3.5, 334 of them
+/// in Northrend.
+struct MapSoundEmitter {
+    uint32_t id = 0;
+    float position[3] = {0.0f, 0.0f, 0.0f};  ///< Server/wire coordinates, as the DBC stores them.
+    uint32_t soundId = 0;                    ///< SoundEntries.dbc
+    std::string name;
+};
+
 /// One ZoneMusic.dbc row. Index 0 is day, 1 is night.
 struct ZoneMusicSet {
     uint32_t id = 0;
@@ -176,6 +186,11 @@ public:
     /// ItemDisplayInfo.GroupSoundIndex -> ItemGroupSounds: the pickup or
     /// put-down sound of an item display. 0 when the display has no group.
     [[nodiscard]] uint32_t itemFoleySound(uint32_t itemDisplayId, bool pickup) const;
+    /// SoundEmitters.dbc rows placed on a map. Null when the map has none.
+    [[nodiscard]] const std::vector<MapSoundEmitter>* mapEmitters(uint32_t mapId) const {
+        auto it = mapEmitters_.find(mapId);
+        return it == mapEmitters_.end() ? nullptr : &it->second;
+    }
 
 private:
     [[nodiscard]] const SoundEntry* playerVoiceByName(uint32_t raceId, bool female, const char* suffix) const;
@@ -196,6 +211,7 @@ private:
     std::unordered_map<uint32_t, NpcSounds> npcSounds_;  // by NPCSounds id
     std::unordered_map<uint64_t, uint32_t> emoteSounds_;  // (emote<<16 | race<<8 | sex) -> sound
     std::unordered_set<uint32_t> emoteTextSoundAnims_;    // anim ids voiced by EmotesTextSound
+    std::unordered_map<uint32_t, std::vector<MapSoundEmitter>> mapEmitters_;  // SoundEmitters, by map
 
     // WeaponSwingSounds2: (swingType << 1 | crit) -> sound.
     std::unordered_map<uint32_t, uint32_t> swingSounds_;

@@ -100,6 +100,9 @@ public:
         bool ascending = false;
         bool descending = false;
         bool jumpKeyPressed = false;
+        // Turning in place: see LocomotionFSM::Input::turnLeft/turnRight.
+        bool turnLeft = false;
+        bool turnRight = false;
         float characterYaw = 0.0f;
         // Melee/ranged timers
         float meleeSwingTimer = 0.0f;

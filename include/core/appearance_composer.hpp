@@ -96,16 +96,17 @@ public:
     /// see the character draw and put away its weapons.
     /// Immediate, with no reach (consumables, swimming, transports); it also
     /// cancels a reach in progress and anything queued behind it.
-    void setWeaponsSheathed(bool sheathed);
+    /// `cause` names the trigger for the (rate-limited) sheath log.
+    void setWeaponsSheathed(bool sheathed, const char* cause = "direct");
     [[nodiscard]] bool isWeaponsSheathed() const { return weaponsSheathed_; }
     /// Draw or put away the way Z does in the stock client: the Sheath /
     /// HipSheath reach on the upper body, the weapons changing hands at the
     /// model's $SHL/$SHR hand-off with the item's sheathe or draw sound.
     /// A request during a reach waits for it to finish; only the last one
     /// counts, so spamming the key never flips the weapons twice in a reach.
-    void requestWeaponsSheathed(bool sheathed);
+    void requestWeaponsSheathed(bool sheathed, const char* cause = "request");
     /// Z: toggles the state the weapons are heading for.
-    void toggleWeaponsSheathed() { requestWeaponsSheathed(!targetWeaponsSheathed()); }
+    void toggleWeaponsSheathed() { requestWeaponsSheathed(!targetWeaponsSheathed(), "toggle (Z)"); }
     /// The state the weapons will end in: queued, in flight, or current.
     [[nodiscard]] bool targetWeaponsSheathed() const {
         return sheathQueued_ >= 0 ? sheathQueued_ == 1
@@ -164,10 +165,12 @@ private:
     int sheathQueued_ = -1;           // -1 none, 0 draw, 1 put away
     double sheathSwapAtMs_ = 0.0;
     double sheathEndAtMs_ = 0.0;
-    void startSheathReach(bool sheathed);
+    const char* sheathReachCause_ = "";
+    const char* sheathQueuedCause_ = "";
+    void startSheathReach(bool sheathed, const char* cause);
     /// Move the weapons to the new state now: the server is told, the models
     /// move, and the item's sheathe or draw sound plays if `withSound`.
-    void applyWeaponsSheathed(bool sheathed, bool withSound);
+    void applyWeaponsSheathed(bool sheathed, bool withSound, const char* cause);
     bool showingRanged_ = false;
     bool showingMiningPick_ = false;
     uint32_t miningPickInstanceId_ = 0;

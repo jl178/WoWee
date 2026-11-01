@@ -17,6 +17,8 @@
 #include "game/spell_classification.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "rendering/animation/weapon_anim_select.hpp"
+#include "rendering/animation/anim_capability_probe.hpp"
+#include "rendering/animation/unit_locomotion.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/spell_visual_system.hpp"
 #include <bit>
@@ -209,6 +211,50 @@ std::optional<float> movingEntityFloor(rendering::Renderer* renderer,
     return best;
 }
 
+/// Where a standing creature's feet go: the floor under its server position.
+///
+/// The stock client lets every unit without gravity disabled, flight or hover
+/// settle onto the floor below the position the server gives it, so a spawn
+/// stored most of a yard above the ground (Eagan Peltskinner in Northshire is
+/// at 80.97 over terrain at 80.21) stands on the ground there. Wowee drew the
+/// server Z as given and such creatures floated.
+///
+/// Only ever down, never up: a floor a little above the server Z counts as
+/// standing on it, but nothing is lifted, because lifting is what put NPCs on
+/// city ramparts at the wrong height. The highest floor at or under the feet
+/// wins, so a creature on a WMO floor or a platform stays on it. Nothing within
+/// reach, or the tile not streamed in yet, answers nullopt: keep the server Z.
+std::optional<float> restingEntityFloor(rendering::Renderer* renderer,
+                                         const glm::vec3& serverRenderPos) {
+    if (!renderer) return std::nullopt;
+    auto* terrain = renderer->getTerrainManager();
+    if (!terrain || !terrain->isTileLoadedAt(serverRenderPos.x, serverRenderPos.y)) {
+        return std::nullopt;
+    }
+    constexpr float kOnFloorAbove = 0.25f;  // floor this far above still counts as underfoot
+    constexpr float kMaxSettle = 4.0f;      // spawn slop, not a creature placed in the air
+    const float z = serverRenderPos.z;
+    const float probeZ = z + kOnFloorAbove;
+    std::optional<float> best;
+    auto consider = [&](const std::optional<float>& floor) {
+        if (!floor || *floor > probeZ || *floor < z - kMaxSettle) return;
+        if (!best || *floor > *best) best = floor;
+    };
+    if (!terrain->isHoleAt(serverRenderPos.x, serverRenderPos.y)) {
+        consider(terrain->getHeightAt(serverRenderPos.x, serverRenderPos.y));
+    }
+    // Already standing on the ground: skip the WMO and doodad walks.
+    if (best && *best >= z - 0.05f) return z;
+    if (auto* wmo = renderer->getWMORenderer()) {
+        consider(wmo->getFloorHeight(serverRenderPos.x, serverRenderPos.y, probeZ));
+    }
+    if (auto* m2 = renderer->getM2Renderer()) {
+        consider(m2->getFloorHeight(serverRenderPos.x, serverRenderPos.y, probeZ));
+    }
+    if (!best) return std::nullopt;
+    return std::min(*best, z);
+}
+
 /// A wheel event's travel in clicks of a clicking wheel, which is what the
 /// interface scrolls by.
 ///
@@ -237,6 +283,101 @@ float wheelClicks(float delta, uint64_t timestampNs) {
     (void)timestampNs;
     return delta;
 #endif
+}
+
+/// What a remote unit on its feet or in the water knows this frame, for
+/// driveUnitLocomotion.
+struct UnitLocomotionSync {
+    bool moving = false;
+    bool walking = false;
+    bool swimming = false;
+    bool creature = false;  // an NPC: a stop resumes its retained state emote
+    float dt = 0.0f;
+};
+
+/// A remote player's or NPC's movement animation, through the same
+/// LocomotionFSM as the local player's (animation/unit_locomotion.hpp): Walk
+/// or Run, WalkBackwards for a backpedal, JumpStart -> Jump -> JumpEnd or
+/// JumpLandRun, Fall, the swim strokes, and the turn-in-place shuffles. It
+/// plays only when the FSM's answer changes, so a swing, a cast, an emote or a
+/// hit reaction someone else started is left to finish as before. Stand is
+/// the unit's idle: its Ready stance in combat, StealthStand, or for an NPC
+/// the state emote it was holding.
+void driveUnitLocomotion(rendering::Renderer* renderer, rendering::CharacterRenderer* cr,
+                         EntitySpawner& spawner, uint64_t guid, uint32_t instanceId,
+                         const UnitLocomotionSync& s) {
+    using namespace rendering::anim;
+    using State = rendering::LocomotionFSM::State;
+    auto& loco = spawner.getUnitLocomotion()[guid];
+    if (loco.instanceId != instanceId) {
+        // A new model (first sight, a display swap): probe it. Its spawner
+        // set its idle, so Stand is what it already shows. A jump the hint
+        // reported before the model was seen carries over.
+        UnitLocomotion fresh;
+        fresh.instanceId = instanceId;
+        fresh.caps = rendering::AnimCapabilityProbe::probeLocomotion(renderer, instanceId);
+        fresh.needsReplay = loco.needsReplay;
+        fresh.jumpPending = loco.jumpPending;
+        fresh.airborneSeen = loco.airborneSeen;
+        fresh.jumpAge = loco.jumpAge;
+        loco = std::move(fresh);
+    }
+
+    const auto& dirFlags = spawner.getUnitMoveDirFlags();
+    const auto dirIt = dirFlags.find(guid);
+    UnitLocomotionFrame frame;
+    frame.moveFlags = dirIt != dirFlags.end() ? dirIt->second : 0u;
+    frame.moving = s.moving;
+    frame.walking = s.walking;
+    frame.swimming = s.swimming;
+    frame.dt = s.dt;
+
+    uint32_t cur = 0;
+    float curT = 0.0f, curDur = 0.0f;
+    const bool haveState = cr->getAnimationState(instanceId, cur, curT, curDur);
+    frame.idleFree = !haveState || isLocomotionIdle(cur);
+
+    rendering::LocomotionFSM::Input in = unitLocomotionInput(loco, frame);
+    in.currentAnimId = cur;
+    in.currentAnimTime = curT;
+    in.currentAnimDuration = curDur;
+    in.haveAnimState = haveState;
+    const rendering::AnimOutput out = loco.fsm.resolve(in, loco.caps);
+    if (!out.valid) return;
+    if (!loco.needsReplay && out.animId == loco.lastRequest && out.loop == loco.lastLoop) return;
+    const uint32_t prevRequest = loco.lastRequest;
+    loco.lastRequest = out.animId;
+    loco.lastLoop = out.loop;
+    loco.needsReplay = false;
+    if (haveState && cur == DEATH) return;
+
+    const State state = loco.fsm.getState();
+    uint32_t play = out.animId;
+    uint32_t returnAnim = 0;
+    if (state == State::IDLE && out.animId == STAND) {
+        // A shuffle that something else interrupted (a swing, an emote)
+        // leaves that to return to idle by itself.
+        if ((prevRequest == SHUFFLE_LEFT || prevRequest == SHUFFLE_RIGHT) && haveState &&
+            cur != prevRequest) {
+            return;
+        }
+        play = spawner.unitIdleAnim(guid, instanceId);
+        if (s.creature && play == STAND) {
+            const auto& emotes = spawner.getCreatureActiveEmotes();
+            const auto emoteIt = emotes.find(guid);
+            if (emoteIt != emotes.end() && cr->hasAnimation(instanceId, emoteIt->second)) {
+                play = emoteIt->second;
+            }
+        }
+    } else if (state == State::WALK || state == State::RUN) {
+        play = spawner.unitMoveAnim(guid, instanceId, play);  // StealthWalk/StealthRun
+    } else if (state == State::JUMP_START && cr->hasAnimation(instanceId, JUMP)) {
+        // JumpStart flows into the jump loop, not a frame of Stand.
+        returnAnim = JUMP;
+    }
+    // Already there (the one-shot's return animation): restarting is a hitch.
+    if (out.loop && haveState && cur == play) return;
+    cr->playAnimation(instanceId, play, out.loop, returnAnim);
 }
 
 } // namespace
@@ -2334,7 +2475,7 @@ void Application::setState(AppState newState) {
             // If we reuse a previously spawned instance without forcing a respawn, appearance (notably hair) can desync.
             npcsSpawned = false;
             playerCharacterSpawned = false;
-            if (appearanceComposer_) appearanceComposer_->setWeaponsSheathed(false);
+            if (appearanceComposer_) appearanceComposer_->setWeaponsSheathed(false, "logout reset");
             wasAutoAttacking_ = false;
             if (worldLoader_) worldLoader_->resetLoadedMap();
             spawnedPlayerGuid_ = 0;
@@ -2701,7 +2842,7 @@ void Application::performLogoutToLogin() {
     // --- Per-session flags ---
     npcsSpawned = false;
     playerCharacterSpawned = false;
-    if (appearanceComposer_) appearanceComposer_->setWeaponsSheathed(false);
+    if (appearanceComposer_) appearanceComposer_->setWeaponsSheathed(false, "session start");
     wasAutoAttacking_ = false;
     if (worldLoader_) worldLoader_->resetLoadedMap();
     if (worldEntryCallbacks_) worldEntryCallbacks_->resetState();
@@ -3451,6 +3592,8 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
         auto& _creatureWasSwimming = entitySpawner_->getCreatureWasSwimming();
         auto& _creatureWasFlying = entitySpawner_->getCreatureWasFlying();
         auto& _creatureWasWalking = entitySpawner_->getCreatureWasWalking();
+        auto& _unitGravityFreeFlags = entitySpawner_->getUnitGravityFreeFlags();
+        auto& _creatureRestingFloor = entitySpawner_->getCreatureRestingFloor();
         const uint64_t currentTargetGuid = gameHandler->hasTarget()
             ? gameHandler->getTargetGuid() : 0;
         const uint64_t autoAttackGuid = gameHandler->getAutoAttackTargetGuid();
@@ -3512,6 +3655,31 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                 }
             }
 
+            // Standing still, a creature bound by gravity settles onto the
+            // floor under its server position, as the stock client does; one
+            // with gravity disabled, flight or hover stays where it was put.
+            // The answer is kept per creature and looked for again once a
+            // second, because a WMO or doodad streaming in after the creature
+            // can be the floor it stands on.
+            bool settledOnRestingFloor = false;
+            if (!entity->isActivelyMoving() && groundCreature &&
+                !_unitGravityFreeFlags.count(guid) &&
+                !gameHandler->transportAttachmentsRef().count(guid)) {
+                auto [restIt, fresh] = _creatureRestingFloor.try_emplace(guid);
+                auto& rest = restIt->second;
+                const glm::vec3 moved = renderPos - rest.serverRenderPos;
+                rest.recheckIn -= deltaTime;
+                if (fresh || glm::dot(moved, moved) > 0.0025f || rest.recheckIn <= 0.0f) {
+                    const auto floorZ = restingEntityFloor(renderer.get(), renderPos);
+                    rest.serverRenderPos = renderPos;
+                    rest.floorZ = floorZ.value_or(renderPos.z);
+                    // Unknown (tile still streaming): ask again soon.
+                    rest.recheckIn = floorZ ? 1.0f : 0.25f;
+                }
+                renderPos.z = rest.floorZ;
+                settledOnRestingFloor = true;
+            }
+
             // No visual collision guard here any more.
             //
             // A creature closer than about two yards used to have its *render*
@@ -3546,7 +3714,10 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                 // (e.g. teleports or position-only updates from the server).
                 const bool entityIsMoving = entity->isActivelyMoving();
                 constexpr float kMoveThreshSq = 0.03f * 0.03f;
-                const bool posChanging = planarDistSq > kMoveThreshSq || dz > 0.08f;
+                // Settling a standing creature onto its floor moves it in Z
+                // only, and that is not locomotion: it must not play Run.
+                const bool posChanging = planarDistSq > kMoveThreshSq ||
+                                         (dz > 0.08f && !settledOnRestingFloor);
                 const bool transportAttached =
                     gameHandler->transportAttachmentsRef().count(guid) != 0;
                 // A stationary deck passenger changes world position every
@@ -3591,7 +3762,27 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                                           (isSwimmingNow != prevSwimming) ||
                                           (isFlyingNow   != prevFlying)   ||
                                           (isWalkingNow  != prevWalking && isMovingNow);
-                if (stateChanged) {
+                // On the ground or in the water the LocomotionFSM drives it,
+                // as it does the local player (see driveUnitLocomotion); in
+                // flight or dead, the transition picks below still do.
+                const bool fsmDriven = !isFlyingNow && !deadOrCorpse;
+                if (fsmDriven) {
+                    _creatureWasMoving[guid]   = isMovingNow;
+                    _creatureWasSwimming[guid] = isSwimmingNow;
+                    _creatureWasFlying[guid]   = isFlyingNow;
+                    _creatureWasWalking[guid]  = isWalkingNow;
+                    UnitLocomotionSync sync;
+                    sync.moving = isMovingNow;
+                    sync.walking = isWalkingNow;
+                    sync.swimming = isSwimmingNow;
+                    sync.creature = true;
+                    sync.dt = deltaTime;
+                    driveUnitLocomotion(renderer.get(), charRenderer, *entitySpawner_, guid,
+                                        instanceId, sync);
+                } else {
+                    entitySpawner_->getUnitLocomotion()[guid].needsReplay = true;
+                }
+                if (stateChanged && !fsmDriven) {
                     _creatureWasMoving[guid]   = isMovingNow;
                     _creatureWasSwimming[guid] = isSwimmingNow;
                     _creatureWasFlying[guid]   = isFlyingNow;
@@ -3670,10 +3861,21 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                 }
             }
             auto [yawIt, firstSeen] = creatureRenderYaw_.try_emplace(guid, wantYaw);
+            float turned = 0.0f;
             if (!firstSeen) {
                 const float d = std::remainder(wantYaw - yawIt->second, 2.0f * glm::pi<float>());
                 const float step = 2.0f * glm::pi<float>() * deltaTime;
+                turned = (std::abs(d) <= step) ? d : std::copysign(step, d);
                 yawIt->second = (std::abs(d) <= step) ? wantYaw : yawIt->second + std::copysign(step, d);
+            }
+            // The turn is the body's step (CCW positive): standing still, it
+            // shuffles the feet next frame, as the stock client does for every
+            // unit that turns in place.
+            {
+                auto& unitLoco = entitySpawner_->getUnitLocomotion();
+                if (auto locoIt = unitLoco.find(guid); locoIt != unitLoco.end()) {
+                    locoIt->second.lastBodyStep = turned;
+                }
             }
             float renderYaw = yawIt->second + glm::radians(90.0f);
             charRenderer->setInstanceRotation(instanceId, glm::vec3(0.0f, 0.0f, renderYaw));
@@ -3819,7 +4021,28 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                                           (isSwimmingNow != prevSwimming) ||
                                           (isFlyingNow   != prevFlying)   ||
                                           (isWalkingNow  != prevWalking && isMovingNow);
-                if (stateChanged) {
+                // On foot or swimming, the same LocomotionFSM as the local
+                // player, from this player's movement flags (backpedal, jump,
+                // fall, swim strokes, turning in place); mounted, flying or
+                // dead, the transition picks below.
+                const bool fsmDriven = !remoteMount && !isFlyingNow && !deadOrCorpse;
+                if (fsmDriven) {
+                    _pCreatureWasMoving[guid]   = isMovingNow;
+                    _pCreatureWasSwimming[guid] = isSwimmingNow;
+                    _pCreatureWasFlying[guid]   = isFlyingNow;
+                    _pCreatureWasWalking[guid]  = isWalkingNow;
+                    UnitLocomotionSync sync;
+                    sync.moving = isMovingNow;
+                    sync.walking = isWalkingNow;
+                    sync.swimming = isSwimmingNow;
+                    sync.creature = false;
+                    sync.dt = deltaTime;
+                    driveUnitLocomotion(renderer.get(), charRenderer, *entitySpawner_, guid,
+                                        instanceId, sync);
+                } else {
+                    entitySpawner_->getUnitLocomotion()[guid].needsReplay = true;
+                }
+                if (stateChanged && !fsmDriven) {
                     _pCreatureWasMoving[guid]   = isMovingNow;
                     _pCreatureWasSwimming[guid] = isSwimmingNow;
                     _pCreatureWasFlying[guid]   = isFlyingNow;
@@ -3933,6 +4156,14 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
             bfIn.dt = deltaTime;
             const rendering::anim::BodyFacingResult bf = rendering::anim::updateBodyFacing(
                 entitySpawner_->getUnitBodyFacing()[guid], bfIn);
+            // The body's step is what shuffles the feet of a player turning in
+            // place (read by driveUnitLocomotion next frame).
+            {
+                auto& unitLoco = entitySpawner_->getUnitLocomotion();
+                if (auto locoIt = unitLoco.find(guid); locoIt != unitLoco.end()) {
+                    locoIt->second.lastBodyStep = bf.bodyStep;
+                }
+            }
             float renderYaw = bf.body + glm::radians(90.0f);
             charRenderer->setInstanceRotation(instanceId, glm::vec3(0.0f, 0.0f, renderYaw));
             if (remoteMount) {
@@ -4035,7 +4266,7 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
         if (attackWeaponNeeded && hasDrawableWeapon && appearanceComposer_ &&
             appearanceComposer_->targetWeaponsSheathed()) {
             // The draw reach; the weapons reach the hands at its hand-off.
-            appearanceComposer_->requestWeaponsSheathed(false);
+            appearanceComposer_->requestWeaponsSheathed(false, "auto-draw (attack)");
         }
         // Swap back to melee weapon when auto-attack stops
         if (!autoAttacking && wasAutoAttacking_ && appearanceComposer_ && appearanceComposer_->isShowingRanged()) {
@@ -4053,7 +4284,7 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
         const bool swimmingNow = cc && cc->isSwimming();
         if (swimmingNow && !wasSwimmingForSheath_ && appearanceComposer_
             && !appearanceComposer_->isWeaponsSheathed()) {
-            appearanceComposer_->setWeaponsSheathed(true);
+            appearanceComposer_->setWeaponsSheathed(true, "swim");
             appearanceComposer_->loadEquippedWeapons();
         }
         wasSwimmingForSheath_ = swimmingNow;
@@ -5959,7 +6190,7 @@ void Application::refreshPlayerCharacterModel() {
     spawnedFacialFeatures_ = 0;
 
     spawnSnapToGround = false; // don't snap Z - stay at the current position
-    if (appearanceComposer_) appearanceComposer_->setWeaponsSheathed(false);
+    if (appearanceComposer_) appearanceComposer_->setWeaponsSheathed(false, "player model rebuild");
     spawnPlayerCharacter();
 
     if (renderer) renderer->getCharacterPosition() = savedPos;

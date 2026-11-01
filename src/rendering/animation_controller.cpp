@@ -1138,6 +1138,20 @@ void AnimationController::updateCharacterAnimation() {
     fi.descending = cameraController->isDescending();
     fi.jumpKeyPressed = cameraController->isJumpKeyPressed();
     fi.characterYaw = renderer_->getCharacterYaw();
+    // Turning in place, as CGUnit_C's update does it (0x0073E2C0): only with
+    // none of the flags 0x2E0100F (moving, falling, swimming, ascending,
+    // descending, flying); then the turn keys (0x10/0x20) or the drawn body
+    // catching up with the facing (the body-facing step) pick ShuffleLeft or
+    // ShuffleRight, so the feet step while the body comes round.
+    {
+        const bool still = !fi.moving && fi.grounded && !fi.swimming && !fi.ascending &&
+                           !fi.descending && !cameraController->isFlyingActive();
+        const float step = renderer_->getBodyFacingStep();
+        constexpr float kStepEps = 1.0e-5f;  // 0x009EA558 / 0x00A34EEC
+        fi.turnLeft = still && (cameraController->isTurningLeft() || step > kStepEps);
+        fi.turnRight = still && !fi.turnLeft &&
+                       (cameraController->isTurningRight() || step < -kStepEps);
+    }
     // Melee/ranged timers
     fi.meleeSwingTimer = meleeSwingTimer_;
     fi.rangedShootTimer = rangedShootTimer_;

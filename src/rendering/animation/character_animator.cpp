@@ -151,10 +151,19 @@ AnimOutput CharacterAnimator::resolveAnimation() {
     // character currently has something to draw. Empty-handed combat must go
     // directly to READY_UNARMED / ATTACK_UNARMED. Equipped fist weapons still
     // have inventoryType ONE_HAND and retain their dedicated fist animation path.
-    const bool hasDrawableWeapon = loadout_.inventoryType != game::InvType::NON_EQUIP ||
-        (rangedWeaponActive_ && loadout_.rangedType != RangedWeaponType::NONE);
-    combatIn.hasUnsheathe = hasDrawableWeapon && caps_.resolvedUnsheathe != 0;
-    combatIn.hasSheathe = hasDrawableWeapon && caps_.resolvedSheathe != 0;
+    //
+    // Neither is played by the combat state machine any more. Combat starting
+    // or ending is not a sheath in 3.3.5: the weapons move only by the
+    // player's toggle, an attack or cast that needs them (auto-draw), mount,
+    // swim or the server - and each of those plays its own reach through
+    // AppearanceComposer, timed to the weapons actually moving. This played a
+    // full-body Sheath reach with nothing moving every time combat began, and
+    // again every time the character stopped moving in combat (COMBAT_IDLE
+    // drops to INACTIVE on movement and re-entered through UNSHEATHE) - which
+    // is what walking up to an enemy looked like: sword and shield reached
+    // for the back while being swung.
+    combatIn.hasUnsheathe = false;
+    combatIn.hasSheathe = false;
 
     // ── Combat FSM (highest priority for non-mount) ─────────────────────
     auto combatOut = combat_.resolve(combatIn, caps_, loadout_);
@@ -189,6 +198,8 @@ AnimOutput CharacterAnimator::resolveAnimation() {
     locoIn.swimming = fi.swimming;
     locoIn.sitting = fi.sitting;
     locoIn.sprintAura = sprintAura_;
+    locoIn.turnLeft = fi.turnLeft;
+    locoIn.turnRight = fi.turnRight;
     locoIn.deltaTime = lastDt_;
     // Animation state for one-shot completion detection (jump start/end)
     locoIn.currentAnimId = fi.currentAnimId;
@@ -211,7 +222,10 @@ AnimOutput CharacterAnimator::applyOverlays(AnimOutput base) const {
     // Stealth substitution based on locomotion state
     auto locoState = locomotion_.getState();
     if (locoState == LocomotionFSM::State::IDLE) {
-        if (caps_.resolvedStealthIdle) base.animId = caps_.resolvedStealthIdle;
+        // A turn-in-place shuffle keeps its feet; only the stand crouches.
+        const bool shuffling = base.animId != 0 &&
+            (base.animId == caps_.resolvedShuffleLeft || base.animId == caps_.resolvedShuffleRight);
+        if (caps_.resolvedStealthIdle && !shuffling) base.animId = caps_.resolvedStealthIdle;
     } else if (locoState == LocomotionFSM::State::WALK) {
         if (caps_.resolvedStealthWalk) base.animId = caps_.resolvedStealthWalk;
     } else if (locoState == LocomotionFSM::State::RUN) {

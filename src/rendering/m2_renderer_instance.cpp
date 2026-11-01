@@ -118,6 +118,14 @@ void M2Renderer::setInstanceAnimationFrozen(uint32_t instanceId, bool frozen) {
     auto idxIt = instanceIndexById.find(instanceId);
     if (idxIt == instanceIndexById.end()) return;
     auto& inst = instances[idxIt->second];
+    if (!frozen && inst.thenLoopSequence >= 0) {
+        // Already playing a state's motion or its loop (Open into Opened):
+        // running is what it is doing. Dropping holdAtEnd here would loop
+        // the Open swing, and going back to idle would lose the state - the
+        // GO type arriving after the state did unfreezes it like this.
+        inst.animSpeed = 1.0f;
+        return;
+    }
     inst.animSpeed = frozen ? 0.0f : 1.0f;
     inst.holdAtEnd = false;
     if (inst.thenLoopSequence >= 0) {
