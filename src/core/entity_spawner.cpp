@@ -1,3 +1,4 @@
+#include "core/env_flag.hpp"
 #include "core/entity_spawner.hpp"
 #include "rendering/m2_model_classifier.hpp"
 #include "core/appearance_composer.hpp"
@@ -80,6 +81,21 @@ void EntitySpawner::initialize() {
 }
 
 void EntitySpawner::update() {
+    // WOWEE_FRAME_PROFILE: how far behind the spawn queues are, every two
+    // seconds, so a world that fills slowly says which queue is holding it.
+    static const bool queueProfile = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
+    if (queueProfile) {
+        static auto lastReport = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastReport >= std::chrono::seconds(2) &&
+            (!pendingCreatureSpawns_.empty() || !pendingPlayerSpawns_.empty())) {
+            lastReport = now;
+            LOG_WARNING("  spawn queues: creatures ", pendingCreatureSpawns_.size(), " waiting, ",
+                        asyncCreatureLoads_.size(), " models loading, ", creatureInstances_.size(),
+                        " spawned; players ", pendingPlayerSpawns_.size(), " waiting, ",
+                        playerInstances_.size(), " spawned");
+        }
+    }
     processPlayerSpawnQueue();
     processCreatureSpawnQueue();
     processAsyncNpcCompositeResults();
