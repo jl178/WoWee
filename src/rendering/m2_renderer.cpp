@@ -45,6 +45,36 @@ namespace rendering {
 
 namespace {
 
+float trackMax(const pipeline::M2AnimationTrack& track) {
+    float best = 0.0f;
+    for (const auto& seq : track.sequences) {
+        for (float v : seq.floatValues) best = std::max(best, std::abs(v));
+    }
+    return best;
+}
+
+/// The farthest any emitter's particles get: launch speed (with its spread)
+/// and gravity over the longest lifespan, the emission area, and the largest
+/// size. Capped, because a few emitters carry junk keys in their tracks.
+float estimateParticleReach(const std::vector<pipeline::M2ParticleEmitter>& emitters) {
+    constexpr float kReachCap = 60.0f;
+    float reach = 0.0f;
+    for (const auto& em : emitters) {
+        const float life = std::min(trackMax(em.lifespan), 30.0f);
+        const float speed = trackMax(em.emissionSpeed) * (1.0f + trackMax(em.speedVariation));
+        const float fall = 0.5f * trackMax(em.gravity) * life * life;
+        float size = 0.0f;
+        for (float v : em.particleScale.floatValues) size = std::max(size, std::abs(v));
+        const float area = 0.5f * std::max(trackMax(em.emissionAreaLength), trackMax(em.emissionAreaWidth));
+        reach = std::max(reach, speed * life + fall + area + size);
+    }
+    return std::min(reach, kReachCap);
+}
+
+}  // namespace
+
+namespace {
+
 
 } // namespace
 
@@ -2109,6 +2139,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
 
     // Copy particle emitter data and resolve textures
     gpuModel.particleEmitters = model.particleEmitters;
+    gpuModel.particleReach = estimateParticleReach(model.particleEmitters);
     gpuModel.particleTextures.resize(model.particleEmitters.size(), whiteTexture_.get());
     for (size_t ei = 0; ei < model.particleEmitters.size(); ei++) {
         uint16_t texIdx = model.particleEmitters[ei].texture;

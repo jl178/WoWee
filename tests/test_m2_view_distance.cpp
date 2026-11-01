@@ -5,6 +5,7 @@
 #include "rendering/m2_view_distance.hpp"
 
 using wowee::rendering::m2InstanceMaxDistSq;
+using wowee::rendering::m2ParticleMaxDistSq;
 
 namespace {
 constexpr float kGameObjectFloor = 600.0f;
@@ -112,4 +113,15 @@ TEST_CASE("No clutter radius set leaves ground detail as it was", "[m2][viewdist
     const float grass = m2InstanceMaxDistSq(base, 1.0f, false, 600.0f, 2400.0f,
                                             /*isGroundDetail=*/true, 0.0f);
     CHECK(distanceOf(grass) == Catch::Approx(1000.0f));
+}
+
+TEST_CASE("a torch's particles stop where the flame is too small to see", "[m2][viewdist]") {
+    const float scene = 2000.0f * 2000.0f;
+    REQUIRE(distanceOf(m2ParticleMaxDistSq(scene, 0.5f)) == Catch::Approx(150.0f));
+    REQUIRE(distanceOf(m2ParticleMaxDistSq(scene, 3.0f)) == Catch::Approx(360.0f));
+}
+
+TEST_CASE("a large effect keeps the instance's own range", "[m2][viewdist]") {
+    const float scene = 1200.0f * 1200.0f;
+    REQUIRE(distanceOf(m2ParticleMaxDistSq(scene, 30.0f)) == Catch::Approx(1200.0f));
 }

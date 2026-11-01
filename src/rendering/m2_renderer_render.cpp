@@ -819,8 +819,9 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         const M2ModelGPU& pmodel = *instance.cachedModel;
         glm::vec3 toCam = instance.position - cachedCamPos_;
         float distSq = glm::dot(toCam, toCam);
-        const bool inRange = distSq <= cachedMaxRenderDistSq_;
         const bool keepStepping = pmodel.isSpellEffect || instance.emissionStopped;
+        const bool inRange = distSq <= (keepStepping ? cachedMaxRenderDistSq_
+                                                     : particleRangeSq(instance, pmodel));
         if (keepStepping) {
             if (!inRange) continue;
             instance.particlesDormant = false;
@@ -3030,6 +3031,11 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
             }
         }
     }
+}
+
+float M2Renderer::particleRangeSq(const M2Instance& inst, const M2ModelGPU& model) const {
+    const float radius = std::max(inst.cachedVisualRadius, model.particleReach * inst.scale);
+    return m2ParticleMaxDistSq(cachedMaxRenderDistSq_, radius);
 }
 
 } // namespace rendering

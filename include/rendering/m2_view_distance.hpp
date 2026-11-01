@@ -36,5 +36,23 @@ inline float m2InstanceMaxDistSq(float baseMaxDistSq,
     return std::min(maxDistSq, viewDistanceAbsolute * viewDistanceAbsolute);
 }
 
+/// How far one instance's particles are worth stepping and drawing, squared.
+///
+/// A flame or a wisp of smoke is a few pixels wide well before the model it
+/// sits on stops drawing, and the instance distance above runs out to the
+/// view distance. Stepping every torch and vent out there filled the particle
+/// budget in Goldshire with Burning Steppes vents and Stormwind braziers -
+/// 40k live particles, none of them visible. The limit follows the size on
+/// screen instead: about 120 radii, where a model is still a dozen pixels
+/// tall at 1080p and the stock 54 degree field of view, and never closer than
+/// a nearby campfire needs.
+constexpr float kParticleRadiiOfRange = 120.0f;
+constexpr float kParticleMinRange = 150.0f;
+
+inline float m2ParticleMaxDistSq(float instanceMaxDistSq, float worldRadius) {
+    const float range = std::max(kParticleMinRange, kParticleRadiiOfRange * worldRadius);
+    return std::min(instanceMaxDistSq, range * range);
+}
+
 } // namespace rendering
 } // namespace wowee
