@@ -388,6 +388,15 @@ public:
     /// definition for why checkWallCollision cannot answer this.
     bool segmentBlocked(const glm::vec3& from, const glm::vec3& to) const;
 
+    /// The nearest *visible, solid* WMO triangle along a ray: rendered
+    /// (MOPY 0x20) and not detail (0x04). Collision-only hulls, invisible
+    /// blockers and detail such as railings and gears do not count - this is
+    /// what the cursor pick's occlusion asks, where only what the eye sees can
+    /// stand in front of a unit. Ignores the collision focus. Returns
+    /// maxDistance on no hit; `hitDesc` receives "model <id> group <n>".
+    float raycastVisibleSolid(const glm::vec3& origin, const glm::vec3& direction,
+                              float maxDistance, std::string* hitDesc = nullptr) const;
+
     /**
      * Check if a position is inside any WMO
      * @param outModelId If not null, receives the model ID of the WMO

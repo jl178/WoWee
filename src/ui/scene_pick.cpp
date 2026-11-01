@@ -9,9 +9,12 @@
 #include "rendering/terrain_manager.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
+#include "core/logger.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <string>
 
 namespace wowee {
 namespace ui {
@@ -38,8 +41,10 @@ constexpr uint32_t kGoTypeFishingNode = 17;
 /// further out does nothing, so the stock client offers none: no cursor, no
 /// pick. Measured from the character to the object's pick sphere.
 constexpr float kGameObjectUseRange = 5.0f;
-/// How far the pick ray looks for walls and ground at all.
-constexpr float kOcclusionReach = 200.0f;
+/// How far the pick ray looks for walls and ground at all. Bounded because
+/// the hover runs this every frame and the WMO test walks every group the
+/// ray's box reaches; past this, nothing occludes.
+constexpr float kOcclusionReach = 120.0f;
 
 bool isDeadUnit(const std::shared_ptr<game::Entity>& entity) {
     auto unit = std::dynamic_pointer_cast<game::Unit>(entity);
@@ -87,26 +92,36 @@ ScenePick pickScene(game::GameHandler& gameHandler,
     const uint64_t myGuid = gameHandler.getPlayerGuid();
 
     // The world in the ray's way. The stock client's pick stops at the first
-    // opaque surface - terrain, a building, a solid doodad - so nothing behind
-    // a wall can be hovered or clicked: not the bench inside Northshire Abbey
-    // seen from the yard, not a mob on the far side of a hill.
+    // opaque surface, so nothing behind a wall or a hill can be hovered or
+    // clicked: not the bench inside Northshire Abbey seen from the yard.
     //
-    // Terrain and WMO are hard stops. A doodad (M2) is a softer one, because
-    // a game object is itself an M2 with collision - a mailbox, a door, a
-    // chest - and the ray meets the object's own face a little in front of
-    // its centre; an entity is only hidden by an M2 when its centre lies more
-    // than its own pick radius (and at least a yard) beyond that hit.
-    float hardT = kOcclusionReach;
-    float softT = kOcclusionReach;
+    // Three occluders, each found once per pick and kept apart so a rejected
+    // click can say which one it was:
+    //   terrain - the ground, holes open;
+    //   WMO     - visible, solid building triangles only (rendered and not
+    //             detail): no collision-only hulls, no railings;
+    //   M2      - doodads that ship an authored collision mesh, tested per
+    //             triangle: no ground clutter, no soft or box-only doodads.
+    // The rule for every entity is then the same: it is pickable when the ray
+    // enters its pick shape before it meets the first occluder that is not
+    // the entity's own ground or its own model (see occluderIgnored below).
+    float terrainT = kOcclusionReach;
+    float wmoT = kOcclusionReach;
+    float m2T = kOcclusionReach;
+    std::string wmoDesc, m2Name;
     if (auto* renderer = core::Application::getInstance().getRenderer()) {
-        hardT = terrainHitT(renderer->getTerrainManager(), ray, kOcclusionReach);
+        terrainT = terrainHitT(renderer->getTerrainManager(), ray, kOcclusionReach);
         if (auto* wmo = renderer->getWMORenderer()) {
-            hardT = std::min(hardT, wmo->raycastBoundingBoxes(ray.origin, ray.direction, hardT));
+            wmoT = wmo->raycastVisibleSolid(ray.origin, ray.direction, kOcclusionReach, &wmoDesc);
         }
         if (auto* m2 = renderer->getM2Renderer()) {
-            softT = m2->raycastBoundingBoxes(ray.origin, ray.direction, hardT);
+            m2T = m2->raycastCollisionMeshes(ray.origin, ray.direction,
+                                             std::min(terrainT, wmoT), &m2Name);
         }
     }
+    const glm::vec3 terrainHit = ray.origin + ray.direction * terrainT;
+    const glm::vec3 wmoHit = ray.origin + ray.direction * wmoT;
+    const glm::vec3 m2Hit = ray.origin + ray.direction * m2T;
 
     // The character, for the use range of game objects.
     glm::vec3 playerRender(0.0f);
@@ -183,11 +198,57 @@ ScenePick pickScene(game::GameHandler& gameHandler,
         if (!raySphereIntersect(ray, hitCenter, hitRadius, hitT)) continue;
         const float centerT = glm::dot(hitCenter - ray.origin, ray.direction);
 
-        // Behind the first wall or hillside the ray meets: not there to be
-        // picked. Entered beyond it, or centred well past it.
-        if (hitT > hardT || centerT > hardT + 0.5f * hitRadius) continue;
-        // Behind a solid doodad, with the slack its own model needs.
-        if (centerT > softT + std::max(1.0f, hitRadius)) continue;
+        // Occlusion: the ray must enter the pick shape before the first
+        // occluder, give or take a hand's width. An occluder hit is ignored
+        // when it is the entity's own footing - terrain or floor within its
+        // pick radius of where it stands and no higher than its middle, which
+        // is where a ray aimed at the legs meets the ground - or, for a
+        // doodad, when it lies inside the entity's own pick sphere (a game
+        // object's own model, a unit standing in a bush).
+        {
+            constexpr float kTolerance = 0.25f;
+            const glm::vec3 foot = core::coords::canonicalToRender(
+                glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
+            auto ownFooting = [&](const glm::vec3& p) {
+                const glm::vec2 d(p.x - foot.x, p.y - foot.y);
+                return glm::dot(d, d) <= hitRadius * hitRadius && p.z <= hitCenter.z;
+            };
+            const char* blockedBy = nullptr;
+            float blockT = 0.0f;
+            if (terrainT < kOcclusionReach && hitT > terrainT + kTolerance &&
+                !ownFooting(terrainHit)) {
+                blockedBy = "terrain"; blockT = terrainT;
+            } else if (wmoT < kOcclusionReach && hitT > wmoT + kTolerance &&
+                       !ownFooting(wmoHit)) {
+                blockedBy = "WMO"; blockT = wmoT;
+            } else if (m2T < kOcclusionReach && hitT > m2T + kTolerance &&
+                       glm::length(m2Hit - hitCenter) > hitRadius + 0.5f) {
+                blockedBy = "M2"; blockT = m2T;
+            }
+            if (blockedBy) {
+                if (params.logRejections) {
+                    // Rate-limited: a click that misses says why, a hover
+                    // sweep across a crowd does not flood the log.
+                    using Clock = std::chrono::steady_clock;
+                    static Clock::time_point lastLog{};
+                    const auto now = Clock::now();
+                    if (now - lastLog > std::chrono::milliseconds(250)) {
+                        lastLog = now;
+                        const std::string what =
+                            std::string(blockedBy) == "WMO" ? " (" + wmoDesc + ")"
+                            : std::string(blockedBy) == "M2" ? " ('" + m2Name + "')" : "";
+                        LOG_WARNING("Pick: click on '", game::entityDisplayName(entity),
+                                    "' (guid 0x", std::hex, guid, std::dec,
+                                    ") rejected - occluded by ", blockedBy, what,
+                                    " at t=", blockT, ", shape entered at t=", hitT,
+                                    " centre t=", centerT, " radius=", hitRadius,
+                                    " [terrain t=", terrainT, " wmo t=", wmoT,
+                                    " m2 t=", m2T, "]");
+                    }
+                }
+                continue;
+            }
+        }
 
         // A game object out of use range is not offered at all - no cursor,
         // no click - which is the one rule for every object type, chairs and

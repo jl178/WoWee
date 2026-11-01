@@ -600,10 +600,14 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
             }
         }
         fullBodyDistance_ = camera_->getPosition().y;
-        // A player model is framed by its bounds; no creature portrait camera
-        // is in play, and a stale one from the shared preview must not be.
-        portraitCameraValid_ = false;
     }
+    // A player model carries a portrait camera too (HumanMale's stands at
+    // (0.63, -0.39, 1.89) looking at the face from front-right), and the
+    // stock portraits are framed by it - turned three-quarters, not head-on.
+    // Only the portrait framing reads it; the paper doll and the glue scenes
+    // keep their own rigs.
+    previewIsPlayer_ = true;
+    capturePortraitCamera(model);
 
     // Look up CharSections.dbc for all appearance textures
     uint32_t targetRaceId = static_cast<uint32_t>(race);
@@ -1191,17 +1195,8 @@ bool CharacterPreview::loadCreature(
     }
 
     // The artist's own portrait framing, where the model carries one.
-    portraitCameraValid_ = false;
-    for (const auto& cam : model.cameras) {
-        if (cam.type != 0) continue;
-        if (!isFiniteVec3(cam.positionBase) || !isFiniteVec3(cam.targetBase)) break;
-        portraitCameraPos_ = cam.positionBase;
-        portraitCameraTarget_ = cam.targetBase;
-        portraitCameraFovDegrees_ =
-            (cam.fov > 0.0f && cam.fov < 3.14159f) ? glm::degrees(cam.fov) : 0.0f;
-        portraitCameraValid_ = true;
-        break;
-    }
+    previewIsPlayer_ = false;
+    capturePortraitCamera(model);
 
     if (!charRenderer_->loadModel(model, PREVIEW_MODEL_ID)) {
         LOG_WARNING("CharacterPreview: failed to upload creature model");
@@ -1815,6 +1810,9 @@ void CharacterPreview::setTransparentBackground(bool transparent) {
 
 void CharacterPreview::setPortraitFraming() {
     zoomLevel_ = 1.0f;
+    portraitFraming_ = true;
+    // A model with a portrait camera is framed by it in applyPreviewView, at
+    // the artist's angle. One without one gets the head-on rig set up here.
     // Straight at the character. The model is turned to face the camera in the
     // same breath, which is the part loadRacialBackdrop would otherwise be the
     // only place to do.
@@ -1826,7 +1824,40 @@ void CharacterPreview::setPortraitFraming() {
 
 void CharacterPreview::resetView() {
     zoomLevel_ = 0.0f;
+    portraitFraming_ = false;
     applyPreviewView();
+}
+
+void CharacterPreview::capturePortraitCamera(const pipeline::M2Model& model) {
+    // 3.3.5 M2 camera types: 0 portrait (CameraLookup[0]), 1 character info,
+    // -1 flyby. The portrait camera's position, target and roll tracks hold
+    // one key each, of zero, on every model checked (HumanMale, TaurenMale,
+    // Gnoll, Murloc): at t = 0 the camera is its base position and target.
+    portraitCameraValid_ = false;
+    portraitCameraNear_ = portraitCameraFar_ = 0.0f;
+    for (const auto& cam : model.cameras) {
+        if (cam.type != 0) continue;
+        if (!isFiniteVec3(cam.positionBase) || !isFiniteVec3(cam.targetBase)) break;
+        if (glm::length(cam.positionBase - cam.targetBase) < 1e-4f) break;
+        portraitCameraPos_ = cam.positionBase;
+        portraitCameraTarget_ = cam.targetBase;
+        // The field of view is diagonal; the projection wants the vertical
+        // one for this target's aspect (a portrait is square: over sqrt 2).
+        // It was used as the vertical field directly, 41% too wide.
+        if (cam.fov > 0.0f && cam.fov < 3.14159f) {
+            const float aspect = (fboHeight_ > 0)
+                ? static_cast<float>(fboWidth_) / static_cast<float>(fboHeight_) : 1.0f;
+            portraitCameraFovDegrees_ = glm::degrees(cam.fov / std::sqrt(1.0f + aspect * aspect));
+        } else {
+            portraitCameraFovDegrees_ = 0.0f;
+        }
+        if (cam.nearClip > 0.0f && cam.farClip > cam.nearClip) {
+            portraitCameraNear_ = cam.nearClip;
+            portraitCameraFar_ = cam.farClip;
+        }
+        portraitCameraValid_ = true;
+        break;
+    }
 }
 
 float CharacterPreview::verticalFovFromDiagonal(float diagonalRadians) const {
@@ -1881,7 +1912,10 @@ void CharacterPreview::applyPreviewView() {
     // artist's own camera looks at 0.96, and the portrait showed the top of
     // its head. The camera is placed in model space, so it is offset by where
     // the model stands and the model is left in its own orientation.
-    if (zoomLevel_ >= 1.0f && portraitCameraValid_) {
+    // A unit portrait (setPortraitFraming) of any model with a portrait
+    // camera, as SetPortraitTexture draws it; and, as before, a creature
+    // zoomed fully in. A player's paper doll zoomed in keeps the rig below.
+    if (zoomLevel_ >= 1.0f && portraitCameraValid_ && (portraitFraming_ || !previewIsPlayer_)) {
         // Room for the idle to move in.
         //
         // The artist's camera frames the pose Stand opens on, tightly. Left at
@@ -1889,8 +1923,15 @@ void CharacterPreview::applyPreviewView() {
         // loop. Backing off along the same axis keeps the framing the artist
         // chose - the angle, the target, the whole composition - and only
         // loosens the crop, which is the one thing an animated portrait needs
-        // and a still one does not. One number, tune it by eye.
-        constexpr float kPortraitHeadroom = 1.35f;
+        // and a still one does not. One number, tune it by eye. (It was 1.35
+        // while the diagonal field of view was taken as the vertical one,
+        // which already framed about 1.45 times wider than the client.)
+        constexpr float kPortraitHeadroom = 1.15f;
+        if (portraitCameraNear_ > 0.0f) {
+            // The camera's own near plane (0.22 yd): the 0.5 default cut
+            // into a face the portrait camera stands 0.7 yd from.
+            camera_->setClipPlanes(portraitCameraNear_, std::max(portraitCameraFar_, 50.0f));
+        }
         const glm::vec3 focus = previewStandPosition_ + portraitCameraTarget_;
         const glm::vec3 camPos =
             focus + (portraitCameraPos_ - portraitCameraTarget_) * kPortraitHeadroom;
@@ -1911,6 +1952,7 @@ void CharacterPreview::applyPreviewView() {
 
     // Whatever a portrait camera last set, handed back.
     if (defaultFovDegrees_ > 0.0f) camera_->setFov(defaultFovDegrees_);
+    if (camera_->getNearPlane() != 0.5f) camera_->setClipPlanes(0.5f, 30000.0f);  // Camera's defaults
 
     const float modelHeight = std::max(modelBoundMaxZ_ - modelBoundMinZ_, 0.1f);
     const float bodyFocusZ = (modelBoundMinZ_ + modelBoundMaxZ_) * 0.5f;

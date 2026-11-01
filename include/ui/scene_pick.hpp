@@ -59,6 +59,11 @@ struct ScenePickParams {
     /// caught while right-drag-rotating the camera near one, which sits the
     /// player down. Left-clicking a chair to target it still works.
     bool skipChairs = false;
+    /// Log (rate-limited) every entity whose pick shape the ray hit but which
+    /// was rejected as occluded, naming the occluder and the distances. Set
+    /// by the click paths, not the per-frame hover, so a missed click is
+    /// diagnosable from the log.
+    bool logRejections = false;
 };
 
 /// Everything the traversal found, before either caller applies its own rules.
