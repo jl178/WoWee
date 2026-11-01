@@ -688,6 +688,10 @@ static void applySoundCVars(lua_State* L) {
     //
     // What is left here are the three enable switches, which the client's panel
     // has no equivalent for. They multiply whatever the settings applied.
+    // Loop Music ("Play without gaps") takes effect when ticked, not only on
+    // the next start.
+    if (svc->setZoneMusicLooping)
+        svc->setZoneMusicLooping(soundCVar("sound_zonemusicnodelay", 0.0f) != 0.0f);
     const bool musicOn = soundCVar("sound_enablemusic", 1.0f) != 0.0f;
     if (!musicOn) {
         if (auto* music = ac->getMusicManager()) music->setVolume(0);

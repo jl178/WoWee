@@ -363,6 +363,16 @@ local function ownLabel(panel, control, font, point, relPoint, ox, oy)
     return label
 end
 
+-- The Options frame's Apply starts grey and only Blizzard's own controls
+-- enabled it, so a change made here looked as though it did nothing even
+-- though it applied at once. Any change lights Apply, as in the stock frame.
+local function enableHostApply(panel)
+    local container = panel:GetParent()
+    local host = container and container:GetParent()
+    local apply = host and host.GetName and rawget(_G, (host:GetName() or "") .. "Apply")
+    if apply and apply.Enable then apply:Enable() end
+end
+
 -- The three controls. Each answers a read function and a write function, so
 -- one refresh walks all of them without caring which kind it is holding.
 
@@ -377,6 +387,7 @@ local function addCheckButton(layout, panel, setting, onChanged)
     label:SetText(setting.label)
     button:SetScript("OnClick", function(self)
         WoweeSetSetting(setting.key, self:GetChecked() and "1" or "0")
+        enableHostApply(panel)
         -- Ticking one of these can be what makes another control live -
         -- normal mapping gates its strength, each extra bar gates its offsets
         -- - so the rest of the panel is re-read. A click is one event, unlike
@@ -427,7 +438,7 @@ local function addSlider(layout, panel, setting)
     local reading = false
     slider:SetScript("OnValueChanged", function(self, value)
         showValue(value)
-        if not reading then WoweeSetSetting(setting.key, tostring(value)) end
+        if not reading then WoweeSetSetting(setting.key, tostring(value)); enableHostApply(panel) end
     end)
     withTooltip(slider, setting.label,
                 joinReason(setting.tooltip, waitingOn(setting)))
@@ -484,6 +495,7 @@ local function addDropdown(layout, panel, setting, onChanged)
             info.checked = (index == selected())
             info.func = function(button)
                 WoweeSetSetting(setting.key, tostring(button.value - 1))
+                enableHostApply(panel)
                 UIDropDownMenu_SetText(dropdown, choices[button.value])
                 CloseDropDownMenus()
                 -- A dropdown can change other settings - the quality preset
