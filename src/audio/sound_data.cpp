@@ -23,6 +23,7 @@ namespace wa  { constexpr uint32_t kFields = 28, kWmoId = 1, kNameSet = 2, kGrou
 namespace cr  { constexpr uint32_t kFields = 69, kMaleDisplay = 4, kFemaleDisplay = 5, kClientFileString = 11; }
 namespace cdi { constexpr uint32_t kFields = 16, kModel = 1, kSound = 2, kNpcSound = 12; }
 namespace ns  { constexpr uint32_t kFields = 5, kSound0 = 1; }
+namespace ets { constexpr uint32_t kFields = 5, kEmote = 1, kRace = 2, kSex = 3, kSound = 4; }
 namespace cmd { constexpr uint32_t kFields = 28, kSound = 13; }
 namespace csd { constexpr uint32_t kFields = 38, kExertion = 1, kExertionCritical = 2, kInjury = 3,
                 kInjuryCritical = 4, kDeath = 6, kStand = 8, kFootstep = 9, kJumpStart = 26,
@@ -61,6 +62,7 @@ bool SoundData::load(const Loader& loadDbc) {
     areas_.clear();
     wmoAreas_.clear();
     npcSounds_.clear();
+    emoteSounds_.clear();
     soundCache_.clear();
     creatureSoundCache_.clear();
 
@@ -130,6 +132,13 @@ bool SoundData::load(const Loader& loadDbc) {
             row.pissed = dbc->getUInt32(i, ns::kSound0 + 2);
             row.ack = dbc->getUInt32(i, ns::kSound0 + 3);
             npcSounds_[dbc->getUInt32(i, 0)] = row;
+        }
+    }
+    if (auto dbc = table(loadDbc, "EmotesTextSound.dbc", ets::kFields)) {
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            const uint64_t key = (static_cast<uint64_t>(dbc->getUInt32(i, ets::kEmote)) << 16) |
+                                 ((dbc->getUInt32(i, ets::kRace) & 0xFF) << 8) | (dbc->getUInt32(i, ets::kSex) & 0xFF);
+            emoteSounds_[key] = dbc->getUInt32(i, ets::kSound);
         }
     }
     chrRaces_ = table(loadDbc, "ChrRaces.dbc", cr::kFields);
@@ -288,6 +297,12 @@ const NpcSounds* SoundData::npcSounds(uint32_t displayId) const {
     const uint32_t npcSoundId = displayInfo_->getUInt32(static_cast<uint32_t>(row), cdi::kNpcSound);
     auto it = npcSounds_.find(npcSoundId);
     return it == npcSounds_.end() ? nullptr : &it->second;
+}
+
+const SoundEntry* SoundData::emoteSound(uint32_t textEmoteId, uint32_t raceId, uint32_t sex) const {
+    const uint64_t key = (static_cast<uint64_t>(textEmoteId) << 16) | ((raceId & 0xFF) << 8) | (sex & 0xFF);
+    auto it = emoteSounds_.find(key);
+    return it == emoteSounds_.end() ? nullptr : sound(it->second);
 }
 
 const CreatureSounds* SoundData::playerSounds(uint32_t raceId, bool female) const {
