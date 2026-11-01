@@ -1316,6 +1316,9 @@ void Application::run() {
         if (gameHandler) {
             gameHandler->setStageSink([this](const char* stage, float ms) { noteStageTime(stage, ms); });
         }
+        if (renderer) {
+            renderer->setStageSink([this](const char* stage, float ms) { noteStageTime(stage, ms); });
+        }
     }
 
     // Integer nanoseconds off a monotonic clock, and the finest sleep the
@@ -5165,6 +5168,14 @@ void Application::reportStageTimes() {
     // GPU spent it in. One frame is enough to rank the passes, and reading a
     // window of them would mean keeping the marks alive across slots.
     if (renderer && renderer->getVkContext()) {
+        {
+            double fenceMs = 0.0, acquireMs = 0.0;
+            renderer->getVkContext()->takeBeginFrameWaits(fenceMs, acquireMs);
+            std::ostringstream waits;
+            waits << "  beginFrame waits: frame fence " << fenceMs << "ms, swapchain acquire "
+                  << acquireMs << "ms per frame";
+            if (frameProfileEnabled_) LOG_WARNING(waits.str()); else LOG_INFO(waits.str());
+        }
         const auto& gpu = renderer->getVkContext()->gpuTimings();
         if (!gpu.empty()) {
             double total = 0.0;

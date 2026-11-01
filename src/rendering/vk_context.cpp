@@ -2865,6 +2865,7 @@ VkCommandBuffer VkContext::beginFrame(uint32_t& imageIndex) {
     // Wait for this frame's fence (with timeout to detect GPU hangs)
     static int beginFrameCounter = 0;
     beginFrameCounter++;
+    const auto waitStart = std::chrono::steady_clock::now();
     VkResult fenceResult;
     if (frameTimeline_ != VK_NULL_HANDLE) {
         VkSemaphoreWaitInfo waitInfo{};
@@ -2888,17 +2889,25 @@ VkCommandBuffer VkContext::beginFrame(uint32_t& imageIndex) {
     }
 
     // Any work queued for this frame slot is now guaranteed to be unused by the GPU.
+    const auto fenceDone = std::chrono::steady_clock::now();
     runDeferredCleanup(currentFrame);
 
     // The wait above is what makes this slot's timestamps readable: the submit
     // that wrote them has completed. Read before the pool is reset below.
     readGpuTimings(currentFrame);
+    const auto acquireStart = std::chrono::steady_clock::now();
 
     // Acquire next swapchain image using the free semaphore.
     // After acquiring we swap it into the per-image slot so the old per-image
     // semaphore (now released by the presentation engine) becomes the free one.
     VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
         nextAcquireSemaphore_, VK_NULL_HANDLE, &imageIndex);
+    // Where beginFrame waits: on the GPU finishing an earlier frame, or on
+    // the presentation engine handing an image back. The profile prints
+    // both; they call for different fixes.
+    beginFrameFenceWaitMs_ += std::chrono::duration<double, std::milli>(fenceDone - waitStart).count();
+    beginFrameAcquireMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - acquireStart).count();
+    ++beginFrameWaitSamples_;
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         swapchainDirty = true;

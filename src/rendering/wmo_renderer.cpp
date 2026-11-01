@@ -1690,6 +1690,16 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
         const auto& instance = instances[instIdx];
         // Somewhere else entirely - see setInstanceHidden.
         if (instance.hidden) return;
+        // The building as a whole first. Every loaded instance used to go
+        // through the model lookup and a distance test per group; a town's
+        // worth of buildings beyond the view distance, or behind the camera,
+        // is settled here by its bounds.
+        if (cullingEnabled_) {
+            const glm::vec3 closest = glm::clamp(camPos, instance.worldBoundsMin, instance.worldBoundsMax);
+            const glm::vec3 toCam = closest - camPos;
+            if (glm::dot(toCam, toCam) > viewDistance_ * viewDistance_) return;
+            if (!frustum.intersectsAABB(instance.worldBoundsMin, instance.worldBoundsMax)) return;
+        }
         auto mdlIt = loadedModels.find(instance.modelId);
         if (mdlIt == loadedModels.end()) return;
         const ModelData& model = mdlIt->second;

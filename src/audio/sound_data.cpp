@@ -21,7 +21,8 @@ namespace zi  { constexpr uint32_t kFields = 5, kSoundId = 2, kMinDelayMinutes =
 namespace wa  { constexpr uint32_t kFields = 28, kWmoId = 1, kNameSet = 2, kGroup = 3, kAmbience = 6,
                 kZoneMusic = 7, kIntroSound = 8, kAreaTable = 10, kName = 11; }
 namespace cr  { constexpr uint32_t kFields = 69, kMaleDisplay = 4, kFemaleDisplay = 5, kClientFileString = 11; }
-namespace cdi { constexpr uint32_t kFields = 16, kModel = 1, kSound = 2; }
+namespace cdi { constexpr uint32_t kFields = 16, kModel = 1, kSound = 2, kNpcSound = 12; }
+namespace ns  { constexpr uint32_t kFields = 5, kSound0 = 1; }
 namespace cmd { constexpr uint32_t kFields = 28, kSound = 13; }
 namespace csd { constexpr uint32_t kFields = 38, kExertion = 1, kExertionCritical = 2, kInjury = 3,
                 kInjuryCritical = 4, kDeath = 6, kStand = 8, kFootstep = 9, kJumpStart = 26,
@@ -59,6 +60,7 @@ bool SoundData::load(const Loader& loadDbc) {
     intros_.clear();
     areas_.clear();
     wmoAreas_.clear();
+    npcSounds_.clear();
     soundCache_.clear();
     creatureSoundCache_.clear();
 
@@ -118,6 +120,16 @@ bool SoundData::load(const Loader& loadDbc) {
             row.areaId = dbc->getUInt32(i, wa::kAreaTable);
             row.name = dbc->getString(i, wa::kName);
             wmoAreas_[row.wmoId].push_back(std::move(row));
+        }
+    }
+    if (auto dbc = table(loadDbc, "NPCSounds.dbc", ns::kFields)) {
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            NpcSounds row;
+            row.hello = dbc->getUInt32(i, ns::kSound0);
+            row.goodbye = dbc->getUInt32(i, ns::kSound0 + 1);
+            row.pissed = dbc->getUInt32(i, ns::kSound0 + 2);
+            row.ack = dbc->getUInt32(i, ns::kSound0 + 3);
+            npcSounds_[dbc->getUInt32(i, 0)] = row;
         }
     }
     chrRaces_ = table(loadDbc, "ChrRaces.dbc", cr::kFields);
@@ -267,6 +279,15 @@ const CreatureSounds* SoundData::displaySounds(uint32_t displayId) const {
     cs.submerge = creatureSounds_->getUInt32(r, csd::kSubmerge);
     cs.submerged = creatureSounds_->getUInt32(r, csd::kSubmerged);
     return &(creatureSoundCache_[soundDataId] = cs);
+}
+
+const NpcSounds* SoundData::npcSounds(uint32_t displayId) const {
+    if (displayId == 0 || !displayInfo_) return nullptr;
+    const int32_t row = displayInfo_->findRecordById(displayId);
+    if (row < 0) return nullptr;
+    const uint32_t npcSoundId = displayInfo_->getUInt32(static_cast<uint32_t>(row), cdi::kNpcSound);
+    auto it = npcSounds_.find(npcSoundId);
+    return it == npcSounds_.end() ? nullptr : &it->second;
 }
 
 const CreatureSounds* SoundData::playerSounds(uint32_t raceId, bool female) const {

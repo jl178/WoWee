@@ -619,7 +619,10 @@ private:
     float jumpBufferTimer = 0.0f;   // Time since space was pressed
     float coyoteTimer = 0.0f;       // Time since last grounded
     static constexpr float JUMP_BUFFER_TIME = 0.15f;  // 150ms input buffer
-    static constexpr float COYOTE_TIME = 0.10f;        // 100ms grace after leaving ground
+    // No grace after leaving the ground: the stock client cannot jump once
+    // airborne. The jump buffer below still fires a press made a moment
+    // before the feet find ground again.
+    static constexpr float COYOTE_TIME = 0.0f;
 
     // Cached isInsideWMO result (throttled to avoid per-frame cost)
     bool cachedInsideWMO = false;

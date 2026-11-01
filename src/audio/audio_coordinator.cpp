@@ -79,6 +79,7 @@ void AudioCoordinator::loadSoundData(pipeline::AssetManager* assets) {
     if (soundData_.load([assets](const std::string& name) { return assets->loadDBCOptional(name); })) {
         zoneMusic_ = std::make_unique<ZoneMusicController>(soundData_);
         ambienceKey_ = 0;
+        if (npcVoiceManager_) npcVoiceManager_->setSoundData(&soundData_);
     }
 }
 

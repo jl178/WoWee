@@ -1,4 +1,5 @@
 #include "rendering/render_graph.hpp"
+#include <chrono>
 #include "rendering/vk_utils.hpp"
 #include "core/logger.hpp"
 #include <algorithm>
@@ -181,7 +182,14 @@ void RenderGraph::execute(VkCommandBuffer cmd) {
         }
 
         // Execute the pass
-        pass.execute(cmd);
+        if (stageSink_) {
+            const auto t0 = std::chrono::steady_clock::now();
+            pass.execute(cmd);
+            stageSink_(pass.name.c_str(), std::chrono::duration<float, std::milli>(
+                           std::chrono::steady_clock::now() - t0).count());
+        } else {
+            pass.execute(cmd);
+        }
     }
 }
 

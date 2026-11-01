@@ -26,6 +26,7 @@ public:
 private:
     /// Resolve NPC voice type from GUID (eliminates 4x copy-paste of display-ID lookup)
     [[nodiscard]] audio::VoiceType resolveNpcVoiceType(uint64_t guid) const;
+    [[nodiscard]] uint32_t resolveNpcDisplayId(uint64_t guid) const;
 
     EntitySpawner& entitySpawner_;
     rendering::Renderer* renderer_;

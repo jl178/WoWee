@@ -60,6 +60,14 @@ struct WmoAreaSounds {
     std::string name;
 };
 
+/// One NPCSounds.dbc row: what a creature says when spoken to.
+struct NpcSounds {
+    uint32_t hello = 0;
+    uint32_t goodbye = 0;
+    uint32_t pissed = 0;
+    uint32_t ack = 0;
+};
+
 /// The sound ids one CreatureSoundData.dbc row gives a model.
 struct CreatureSounds {
     uint32_t exertion = 0;
@@ -117,6 +125,9 @@ public:
     /// ChrRaces -> CreatureDisplayInfo -> CreatureModelData -> CreatureSoundData.
     [[nodiscard]] const CreatureSounds* playerSounds(uint32_t raceId, bool female) const;
     [[nodiscard]] const CreatureSounds* displaySounds(uint32_t displayId) const;
+    /// CreatureDisplayInfo.NPCSoundID -> NPCSounds: the greeting, farewell
+    /// and annoyed lines a display speaks. Null when the display has none.
+    [[nodiscard]] const NpcSounds* npcSounds(uint32_t displayId) const;
     /// ChrRaces.ClientFileString, "Human" or "Scourge". Empty when unknown.
     [[nodiscard]] std::string raceClientName(uint32_t raceId) const;
     /// The jump and land grunts are not in CreatureSoundData for player
@@ -141,6 +152,7 @@ private:
     std::unordered_map<uint32_t, ZoneIntro> intros_;
     std::unordered_map<uint32_t, AreaSounds> areas_;
     std::unordered_map<uint32_t, std::vector<WmoAreaSounds>> wmoAreas_;  // by wmoId
+    std::unordered_map<uint32_t, NpcSounds> npcSounds_;  // by NPCSounds id
 
     // SoundEntries has ten thousand rows and a handful are ever asked for.
     mutable std::unordered_map<uint32_t, SoundEntry> soundCache_;

@@ -88,6 +88,9 @@ public:
     void shutdown();
 
     void beginFrame();
+    /// Where beginFrame reports how long each of its parts took, when the
+    /// frame profiler is on. Unset, nothing is measured.
+    void setStageSink(std::function<void(const char*, float)> sink);
     void endFrame();
 
     /// Recorded after the interface is drawn and before the frame is submitted,
@@ -515,6 +518,7 @@ private:
     std::unique_ptr<PassAblation> passAblation_;
     bool passAblationReported_ = false;
     bool worldDrawnLastFrame_ = false;
+    std::function<void(const char*, float)> stageSink_;
     std::chrono::steady_clock::time_point lastFrameStart_{};
     float lastDeltaTime_ = 0.0f;           // cached for post-process pipeline
     bool createSecondaryCommandResources();
