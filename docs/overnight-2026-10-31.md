@@ -496,3 +496,6 @@ Other fixes:
   - Names resolve through SoundEntries (random file, row volume).
 - Test account WPTEST2/WPTEST2 (character Wptestb, HOME scratchpad/testhome2), for when Jered uses WPTEST in the stock client.
 - Next: stock sounds Wowee never plays (party join and decline, taxi node discovered, friend online, LFG ready/denied, PvP queue, aggro warning). SMSG_PLAY_SOUND to use the row's volume and a random file. Level-up and achievement sounds on other players.
+- `31f9bd5`: M2Instance cull fields packed into one cache line; the WMO draw ranges are joined. Northshire: 86 -> 93.5 fps uncapped.
+- `c56b190`: gatherLocalLights skips light-giving M2s beyond 300 yd before their bone transforms. record+ubo 0.6 -> 0.15 ms; ~97 fps.
+  - Same 2.6 GHz ceiling and test window throughout. This morning's Goldshire figure was 40-47 fps.
