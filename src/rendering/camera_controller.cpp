@@ -1895,8 +1895,10 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
             //    while extreme speeds still catch geometry penetration.
             // 3. Was grounded + ground is close (grace for slopes)
             bool nearGround = (dz >= 0.0f && dz <= stepUp);
-            float airSnapRange = std::min(fallCatch,
-                std::max(0.5f, std::abs(verticalVelocity) * f.physicsDeltaTime * 2.0f));
+            // Catch the feet only when they are about to touch: a half-yard
+            // floor here cut the last of every jump short with a snap. Passing
+            // below the surface is caught the next frame as nearGround/airFalling.
+            float airSnapRange = std::min(fallCatch, 0.05f);
             bool airFalling = (!grounded && verticalVelocity < -5.0f
                                && dz >= -airSnapRange);
             // Not while climbing in flight: a frame's climb at a high frame
@@ -2690,7 +2692,9 @@ void CameraController::updateFreeFlyCamera(float /*deltaTime*/, FrameInput& f) {
             // 2. Actually falling from height (was airborne + falling fast)
             // 3. Was grounded + ground is close (grace for slopes)
             bool nearGround = (dz >= 0.0f && dz <= stepUp);
-            bool airFalling = (!grounded && verticalVelocity < -5.0f);
+            // Only at the surface; this caught a falling player up to three
+            // yards above the ground and dropped them onto it.
+            bool airFalling = (!grounded && verticalVelocity < -5.0f && dz >= -0.05f);
             bool slopeGrace = (grounded && dz >= -1.0f && dz <= stepUp * 2.0f);
 
             if (dz >= -fallCatch && (nearGround || airFalling || slopeGrace)) {
