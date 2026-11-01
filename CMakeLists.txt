@@ -1014,6 +1014,7 @@ set(WOWEE_SOURCES
     src/ui/ui_raid_icons.cpp
     src/ui/ui_texture_load.cpp
     src/ui/glue_ui.cpp
+    src/ui/glue_options.cpp
     src/ui/auth_screen.cpp
     src/ui/first_run_screen.cpp
     src/ui/realm_screen.cpp
@@ -1193,6 +1194,7 @@ set(WOWEE_HEADERS
     include/ui/character_create_screen.hpp
     include/ui/character_screen.hpp
     include/ui/glue_ui.hpp
+    include/ui/glue_options.hpp
     include/ui/game_screen.hpp
     include/ui/inventory_screen.hpp
     include/ui/spellbook_screen.hpp

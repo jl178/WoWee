@@ -4,6 +4,7 @@
 #include <future>
 
 #include "ui/paper_ui.hpp"
+#include "ui/glue_options.hpp"
 #include "ui/text_edit.hpp"
 #include "ui/ui_services.hpp"
 #include "auth/auth_handler.hpp"
@@ -260,6 +261,10 @@ private:
 
     // ----- Login-screen graphics settings sheet -----
     bool settingsOpen_ = false;
+    /// What settingsOpen_ shows over the glue login: the stock glue Options
+    /// frame over the whole settings schema. The paper sheet below is only the
+    /// no-assets fallback, where there is no glue art to draw it with.
+    GlueOptionsFrame glueOptions_;
 
     // Local copies of the settings keys we expose in the login popup.
     // Loaded on first open; saved on Apply.

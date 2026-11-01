@@ -422,6 +422,9 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
     const bool glueMode = glueScene_ != nullptr;
     glueModalUp_ = false;
     if (!glueMode) renderProminentStatus(screen.x, screen.y);
+    // Over the glue login, whatever is still laid out with PaperUI - the
+    // server card behind "Change Server" - is drawn in the glue's look.
+    ui_.setSkin(glueMode && glue::paperSkinAvailable() ? glue::paperSkin() : nullptr);
 
     // Whether a dropdown was down when the frame began. Escape closes one
     // from inside the control, so asking afterwards would find it already
@@ -445,11 +448,24 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
     }
     if (sheetWasOpen) ui_.popInert();
 
-    if (settingsOpen_) renderLoginSettingsSheet(screen.x, screen.y);
+    // Over the glue login, Options is the stock glue Options frame; the paper
+    // sheet is for the screen without assets, where there is no glue art. The
+    // frame handles its own Escape and Enter, so a press that closes it is
+    // not taken again below. Once open it stays the glue frame even if the
+    // scene drops out for a frame - a resolution applied from it rebuilds
+    // the scene at the new size.
+    const bool glueOptionsUp = settingsOpen_ && (glueMode || glueOptions_.isOpen());
+    if (glueOptionsUp) {
+        if (!glueOptions_.isOpen()) glueOptions_.open();
+        glueOptions_.render(ui_);
+        settingsOpen_ = glueOptions_.isOpen();
+    } else if (settingsOpen_) {
+        renderLoginSettingsSheet(screen.x, screen.y);
+    }
 
     // Escape backs out of one thing per press: the open dropdown, then the
     // settings sheet, then the keyboard.
-    if (!popupWasOpen && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+    if (!popupWasOpen && !glueOptionsUp && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
         if (settingsOpen_) {
             settingsOpen_ = false;
         } else if (serverSheetOpen_) {
@@ -463,8 +479,9 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
     // screen opens with nothing focused - deliberately, so a phone does not
     // meet it with the on-screen keyboard already up over the card - and
     // pressing Enter there should do the obvious thing rather than nothing.
-    if (!settingsOpen_ && !serverSheetOpen_ && !glueModalUp_ && !authenticating &&
-        !ui_.wantsTextInput() &&
+    // Not on the frame the glue Options closed: its Enter was Okay.
+    if (!settingsOpen_ && !glueOptionsUp && !serverSheetOpen_ && !glueModalUp_ &&
+        !authenticating && !ui_.wantsTextInput() &&
         (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
          ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false))) {
         attemptAuth(authHandler);
