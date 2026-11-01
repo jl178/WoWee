@@ -224,6 +224,8 @@ private:
     /// that answers "where does the frame go" was never in the logs it was
     /// built for. With the flag set it is reported at warning instead.
     bool frameProfileEnabled_ = false;
+    /// Rendered facing per creature, turned toward the wanted facing each frame.
+    std::unordered_map<uint64_t, float> creatureRenderYaw_;
     std::map<std::string, StageStat> stageStats_;
     std::chrono::steady_clock::time_point stageStatsSince_{};
     /// What assets were found at startup, so the login screen can say so

@@ -3544,7 +3544,33 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                     }
                 }
             }
-            float renderYaw = entity->getOrientation() + glm::radians(90.0f);
+            // Facing. A creature in combat that stands still turns to its target,
+            // as the stock client does on its own - AzerothCore sends nothing when
+            // a mob switches who it hits. Everything turns at 2*pi rad/s rather
+            // than snapping, server facings included.
+            float wantYaw = entity->getOrientation();
+            if (entity->isUnit() && !entity->isActivelyMoving()) {
+                auto u = std::static_pointer_cast<game::Unit>(entity);
+                const uint64_t tgt = game::unitTargetGuid(*entity);
+                if (tgt != 0 && u->getHealth() > 0 && (u->getUnitFlags() & game::UNIT_FLAG_IN_COMBAT)) {
+                    glm::vec3 tp(0.0f);
+                    bool haveTp = false;
+                    if (tgt == gameHandler->getPlayerGuid() && havePlayerPos) {
+                        tp = playerPos; haveTp = true;
+                    } else if (auto t = gameHandler->getEntityManager().getEntity(tgt)) {
+                        tp = glm::vec3(t->getX(), t->getY(), t->getZ()); haveTp = true;
+                    }
+                    const float fdx = tp.x - entity->getX(), fdy = tp.y - entity->getY();
+                    if (haveTp && fdx * fdx + fdy * fdy > 0.01f) wantYaw = std::atan2(-fdy, fdx);
+                }
+            }
+            auto [yawIt, firstSeen] = creatureRenderYaw_.try_emplace(guid, wantYaw);
+            if (!firstSeen) {
+                const float d = std::remainder(wantYaw - yawIt->second, 2.0f * glm::pi<float>());
+                const float step = 2.0f * glm::pi<float>() * deltaTime;
+                yawIt->second = (std::abs(d) <= step) ? wantYaw : yawIt->second + std::copysign(step, d);
+            }
+            float renderYaw = yawIt->second + glm::radians(90.0f);
             charRenderer->setInstanceRotation(instanceId, glm::vec3(0.0f, 0.0f, renderYaw));
         }
     }

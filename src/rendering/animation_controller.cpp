@@ -1206,7 +1206,18 @@ void AnimationController::updateCharacterAnimation() {
     }
 
     if (shouldPlay) {
-        characterRenderer->playAnimation(characterInstanceId, animId, loop);
+        // The renderer has already flowed into this loop (a one-shot's return
+        // animation): recording the request is enough, restarting it is a hitch.
+        const bool alreadyThere = requestChanged && loop && haveState && currentAnimId == animId;
+        if (!alreadyThere) {
+            // A finished one-shot returns to Stand unless told otherwise, which
+            // put the arms down for a frame between JumpStart and the jump loop.
+            uint32_t returnAnim = 0;
+            if (animId == anim::JUMP_START && characterRenderer->hasAnimation(characterInstanceId, anim::JUMP)) {
+                returnAnim = anim::JUMP;
+            }
+            characterRenderer->playAnimation(characterInstanceId, animId, loop, returnAnim);
+        }
         lastPlayerAnimRequest_ = animId;
         lastPlayerAnimLoopRequest_ = loop;
     }
