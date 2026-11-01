@@ -32,6 +32,7 @@
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
+#include <cmath>
 #include <iomanip>
 #include <unordered_map>
 
@@ -1447,6 +1448,12 @@ bool AuthScreen::drawGlueScene() {
     if (!assets || !assets->isInitialized() || !renderer) return false;
     const ImVec2 screen = ImGui::GetIO().DisplaySize;
     if (screen.x < 2.0f || screen.y < 2.0f) return false;
+    // The window settled at a size other than the scene's: rebuild it there
+    // (see the crop below), before this frame draws the old one.
+    if (glueScene_ && glueSceneResizeTimer_ > 0.3f) {
+        releaseGlueScene();
+        glueSceneResizeTimer_ = 0.0f;
+    }
     if (!glueSceneTried_) {
         glueSceneTried_ = true;
         auto scene = std::make_unique<rendering::CharacterPreview>();
@@ -1463,8 +1470,32 @@ bool AuthScreen::drawGlueScene() {
     glueScene_->render();
     glueScene_->requestComposite();
     auto* bg = ImGui::GetBackgroundDrawList();
+    // The scene is built at the window's size when it is first drawn, and the
+    // window often changes size just after (the log shows 2560x1080 and then
+    // 1251x986 a tenth of a second later). Stretched, the scene was squashed
+    // and framed for the wrong aspect; it is cropped to fill meanwhile and
+    // rebuilt at the new size once the window has settled.
+    const float sw = static_cast<float>(glueScene_->getWidth());
+    const float sh = static_cast<float>(glueScene_->getHeight());
+    ImVec2 uv0(0.0f, 0.0f), uv1(1.0f, 1.0f);
+    if (sw > 0.0f && sh > 0.0f) {
+        const float sceneAspect = sw / sh;
+        const float screenAspect = screen.x / screen.y;
+        if (sceneAspect > screenAspect) {
+            const float keep = screenAspect / sceneAspect;
+            uv0.x = 0.5f - keep * 0.5f; uv1.x = 0.5f + keep * 0.5f;
+        } else {
+            const float keep = sceneAspect / screenAspect;
+            uv0.y = 0.5f - keep * 0.5f; uv1.y = 0.5f + keep * 0.5f;
+        }
+        if (std::abs(sw - screen.x) > 2.0f || std::abs(sh - screen.y) > 2.0f) {
+            glueSceneResizeTimer_ += ImGui::GetIO().DeltaTime;
+        } else {
+            glueSceneResizeTimer_ = 0.0f;
+        }
+    }
     if (VkDescriptorSet tex = glueScene_->getTextureId()) {
-        bg->AddImage(reinterpret_cast<ImTextureID>(tex), ImVec2(0, 0), screen);
+        bg->AddImage(reinterpret_cast<ImTextureID>(tex), ImVec2(0, 0), screen, uv0, uv1);
     } else {
         bg->AddRectFilled(ImVec2(0, 0), screen, IM_COL32(0, 0, 0, 255));
     }

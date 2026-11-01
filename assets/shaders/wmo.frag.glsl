@@ -374,18 +374,17 @@ void main() {
         result = rtAmbient(rt, ambientColor.rgb) * texColor.rgb
                + shadow * (diff * lightColor.rgb * texColor.rgb + spec * lightColor.rgb);
 
-        // An exterior group's vertex colour is light baked into it - a lamp's
-        // pool on a wall - and it adds to the sun, as it does in the client.
-        // It was multiplied in as if it were baked shadow, floored at a
-        // quarter: Stormwind has two exterior groups with vertex colours at
-        // all, both near black, and they drew at a quarter of the light the
-        // rest of the city had, shadows on or off - and so did 278 of the 362
-        // exterior groups in the game that carry any. A group without them has
-        // white filled in by the loader, which must add nothing.
+        // An exterior group's vertex colours play no part in its light. The
+        // client's FixColorVertexAlpha gives every vertex of an EXTERIOR group
+        // (past its trans batches, and exterior groups have none) an alpha of
+        // 255, and that alpha is the interior/exterior blend: at 255 the
+        // surface takes the outdoor light alone, the same ambient and sun the
+        // doodads and the terrain take. 296 of the 352 exterior groups in the
+        // data that carry MOCV ship that alpha already.
         //
-        // At half: a handful of Icecrown exteriors ship them pure white, and
-        // added at full those would double in brightness.
-        if (hasVertexColors != 0) result += texColor.rgb * VertColor.rgb * 0.5;
+        // They were multiplied in once (Stormwind's two exterior groups with
+        // MOCV, mean 8 of 255, drew near black), then added at half, which put
+        // a lamp-pool glow on walls that the stock client draws plain.
     }
 
     // F_SIDN: windows and lamps glow at night in the material's sidnColor,

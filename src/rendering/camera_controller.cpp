@@ -918,10 +918,15 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
         std::optional<float> terrainH;
         std::optional<float> wmoH;
         std::optional<float> m2H;
-        // When airborne, anchor probe to last ground level so the
-        // ceiling doesn't rise with the jump and catch roof geometry.
-        float wmoBaseZ = grounded ? std::max(targetPos.z, lastGroundZ) : lastGroundZ;
-        float wmoProbeZ = wmoBaseZ + stepUpBudget + 0.5f;
+        // Airborne, the probe starts at the feet and reaches only as far as
+        // the caller's budget, which is the span the feet crossed this frame
+        // plus a little slack (see groundFollowedCharacter). It used to sit at
+        // the last ground plus the budget plus half a yard, which offered
+        // ledge tops above the feet as floors and lifted the player onto them
+        // mid-jump. Nothing above the probe can be chosen, so roof geometry
+        // overhead stays out of it just as it did.
+        float wmoBaseZ = grounded ? std::max(targetPos.z, lastGroundZ) : targetPos.z;
+        float wmoProbeZ = wmoBaseZ + stepUpBudget + (grounded ? 0.5f : 0.05f);
         float wmoNormalZ = 1.0f;
 
         // Launch WMO + M2 floor queries asynchronously while terrain runs on this thread.
@@ -972,8 +977,13 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
             // then wins by 5.2 instead of losing by 0.42. It cannot pull
             // anyone up onto a floor they truly left, because a floor
             // they have walked off is not a candidate at their feet.
-            const float feetRef = movement::floorArbitrationAnchor(
-                grounded, targetPos.z, lastGroundZ);
+            //
+            // Airborne the probe only spans what the feet crossed this frame,
+            // so the floor wanted is the first one the feet met: the highest
+            // under the probe, which is what anchoring to the probe picks.
+            const float feetRef = grounded
+                ? movement::floorArbitrationAnchor(grounded, targetPos.z, lastGroundZ)
+                : wmoProbeZ;
             wmoFuture = core::ThreadPool::frameWorkers().submit(
                 [this, px, py, wmoProbeZ, feetRef]() -> FloorResult {
                     float nz = 1.0f;
@@ -1089,9 +1099,11 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
             wmoH = std::nullopt;  // Treat as unwalkable
         }
 
-        // Reject WMO floors far above last known ground when airborne
-        // (prevents snapping to roof/ceiling surfaces during jumps)
-        if (wmoH && !grounded && *wmoH > lastGroundZ + stepUpBudget + 0.5f) {
+        // Reject WMO floors above what the feet crossed when airborne
+        // (prevents snapping to roof/ceiling surfaces during jumps). Measured
+        // from the feet, not the last ground: a ledge top a jump clears sits
+        // above the ground it was jumped from and must still be landed on.
+        if (wmoH && !grounded && *wmoH > targetPos.z + stepUpBudget + 0.05f) {
             wmoH = std::nullopt;
             centerWmoH = std::nullopt;
         }
@@ -1414,7 +1426,110 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
     // Ground the character to terrain or WMO floor
     // Skip entirely while swimming - the swim floor clamp handles vertical bounds.
     if (!swimming) {
-        float stepUpBudget = grounded ? movement::kMaxStepUp : 1.2f;
+        // Airborne the player is a body on a ballistic arc. A surface is met
+        // where the arc crosses it, never by lifting the body up onto it.
+        //
+        // This used to reach 1.2 yards above the feet while airborne, and any
+        // floor found in that window snapped the player straight up onto it
+        // and grounded them - halfway up a jump at a crate, a rock or a ledge
+        // the character popped onto the top. The wall tests leave exactly
+        // those ledges to this pass (they ignore a wall whose top is within
+        // 1.2 of rising feet), so the pop was the only thing that ever
+        // resolved them. Now a ledge top above the feet is a ledge side: the
+        // horizontal step into it is refused (or slid along one axis) until
+        // the arc clears it, and the landing comes on the way down, where the
+        // feet cross the top.
+        const bool airborne = !grounded && !hoverActive_ && !externalFollow_ &&
+                              !isFlightAirborne();
+        const float horizStep = glm::length(glm::vec2(targetPos.x - prevTargetPos.x,
+                                                      targetPos.y - prevTargetPos.y));
+        // What the feet may meet this frame: anything between where they
+        // started and where they ended, plus a walkable slope's rise over the
+        // horizontal step and a little contact noise.
+        const auto crossTopFor = [&](float step) {
+            return std::max(prevTargetPos.z, targetPos.z) + 0.10f + step * 1.2f;
+        };
+        float crossTop = crossTopFor(horizStep);
+        if (airborne && horizStep > 1e-4f && horizStep < 8.0f) {
+            const float reachZ = targetPos.z + AIR_LEDGE_REACH;
+            // The highest surface at a column a rising body could run into:
+            // structure tops within reach of the feet, and terrain however
+            // high (a hillside face is a wall), unless a structure floor
+            // there says the column is a tunnel or a cave under the ground.
+            const auto surfaceTopAt = [&](float x, float y) -> std::optional<float> {
+                std::optional<float> top;
+                bool structure = false;
+                if (wmoRenderer) {
+                    float nz = 1.0f;
+                    auto h = wmoRenderer->getFloorHeight(x, y, reachZ, &nz);
+                    if (h) structure = true;
+                    if (h && nz >= MIN_WALKABLE_NORMAL_WMO) top = h;
+                }
+                if (m2Renderer) {
+                    float nz = 1.0f;
+                    auto h = m2Renderer->getFloorHeight(x, y, reachZ, &nz);
+                    if (h) structure = true;
+                    if (h && nz >= MIN_WALKABLE_NORMAL_M2 && (!top || *h > *top)) top = h;
+                }
+                if (terrainManager && !structure && !cachedInsideWMO &&
+                    !terrainManager->chunkHasHoles(x, y)) {
+                    auto th = terrainManager->getHeightAt(x, y);
+                    if (th && (!top || *th > *top)) top = th;
+                }
+                return top;
+            };
+            const auto blockedAt = [&](float x, float y, float limit) {
+                const auto top = surfaceTopAt(x, y);
+                return top && *top > limit ? top : std::optional<float>{};
+            };
+            if (const auto ahead = blockedAt(targetPos.x, targetPos.y, crossTop)) {
+                // Already under or beside the same thing where the step began
+                // (a table, an overhang, a tunnel roof): refusing the step
+                // cannot help, and the floor pass below will not lift onto it.
+                const bool alreadyUnder =
+                    blockedAt(prevTargetPos.x, prevTargetPos.y, crossTopFor(0.0f)).has_value();
+                if (!alreadyUnder) {
+                    if (verticalVelocity <= 0.0f && *ahead <= targetPos.z + movement::kMaxStepUp) {
+                        // Coming down against a lip no taller than a step:
+                        // the feet catch it, as a step taken on the ground
+                        // would. Physics takes the top; the picture eases up.
+                        renderZOffset_ -= *ahead - targetPos.z;
+                        targetPos.z = *ahead;
+                        verticalVelocity = 0.0f;
+                        grounded = true;
+                        lastGroundZ = *ahead;
+                    } else {
+                        // A ledge side: keep the arc, give up the horizontal
+                        // step - or the part of it along the ledge.
+                        const glm::vec2 slideX(targetPos.x, prevTargetPos.y);
+                        const glm::vec2 slideY(prevTargetPos.x, targetPos.y);
+                        const float stepX = std::abs(targetPos.x - prevTargetPos.x);
+                        const float stepY = std::abs(targetPos.y - prevTargetPos.y);
+                        const glm::vec2 first = stepX >= stepY ? slideX : slideY;
+                        const glm::vec2 second = stepX >= stepY ? slideY : slideX;
+                        const float firstStep = std::max(stepX, stepY);
+                        const float secondStep = std::min(stepX, stepY);
+                        glm::vec2 kept(prevTargetPos.x, prevTargetPos.y);
+                        if (firstStep > 1e-4f &&
+                            !blockedAt(first.x, first.y, crossTopFor(firstStep))) {
+                            kept = first;
+                        } else if (secondStep > 1e-4f &&
+                                   !blockedAt(second.x, second.y, crossTopFor(secondStep))) {
+                            kept = second;
+                        }
+                        targetPos.x = kept.x;
+                        targetPos.y = kept.y;
+                        crossTop = crossTopFor(glm::length(
+                            kept - glm::vec2(prevTargetPos.x, prevTargetPos.y)));
+                    }
+                }
+            }
+        }
+
+        // Grounded: the stock step height. Airborne: only what the feet crossed.
+        float stepUpBudget = grounded
+            ? movement::kMaxStepUp
+            : std::clamp(crossTop - targetPos.z, 0.10f, 3.0f);
         // 1. Center-only sample for terrain/WMO floor selection.
         //    Using only the center prevents tunnel entrances from snapping
         //    to terrain when offset samples miss the WMO floor geometry.
@@ -1580,14 +1695,15 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
         // 1b. Multi-sample WMO floors when in/near WMO space to avoid
         // falling through narrow board/plank gaps where center ray misses.
         if (wmoRenderer && nearWmoSpace) {
-            const float wmoMultiBaseZ = grounded ? std::max(targetPos.z, lastGroundZ) : lastGroundZ;
-            const float wmoProbeZ = wmoMultiBaseZ + stepUpBudget + 0.6f;
+            // Airborne the budget is already only what the feet crossed this
+            // frame, measured from the feet; anchoring to the last ground
+            // instead hid a ledge top the arc had cleared, so the player fell
+            // through a plank deck they jumped onto.
+            const float wmoMultiBaseZ = grounded ? std::max(targetPos.z, lastGroundZ) : targetPos.z;
+            const float wmoProbeZ = wmoMultiBaseZ + stepUpBudget + (grounded ? 0.6f : 0.05f);
             const float minWalkableWmo =
                 cachedInsideWMO ? MIN_WALKABLE_NORMAL_WMO : MIN_WALKABLE_NORMAL_TERRAIN;
-            // Airborne, anything above the last known ground is a roof rather
-            // than a step, so the ceiling of the band comes down.
-            float maxZ = targetPos.z + stepUpBudget;
-            if (!grounded) maxZ = std::min(maxZ, lastGroundZ + stepUpBudget + 0.5f);
+            const float maxZ = targetPos.z + stepUpBudget;
 
             auto wh = highestWalkableFloor(
                 [this](float x, float y, float z, float* nz) {
@@ -1806,7 +1922,10 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
         // back on it. The centre is asked first, so the four around it cost
         // nothing on the frames that matter least - every one where the answer
         // is no.
-        if (!isFlightAirborne() && !hoverActive_ && !externalFollow_ && wmoRenderer &&
+        //
+        // Grounded only: a body in the air beside a raised floor is mid-jump,
+        // and lifting it onto the floor is the pop the arc rule above removes.
+        if (grounded && !isFlightAirborne() && !hoverActive_ && !externalFollow_ && wmoRenderer &&
             nearWmoSpace && groundH && centerTerrainH && *groundH == *centerTerrainH) {
             constexpr float kWaistHeight = 1.8f;
             const float feetZ = targetPos.z;
@@ -1894,30 +2013,82 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
             float fallCatch = 3.0f;
             float dz = *groundH - feetZ;
 
-            // Only snap when:
-            // 1. Near ground (within step-up range above) - handles walking
-            // 2. Actually falling from height (was airborne + falling fast)
-            //    Scale snap range with fall speed so slow falls don't teleport
-            //    while extreme speeds still catch geometry penetration.
-            // 3. Was grounded + ground is close (grace for slopes)
+            if (airborne && !grounded) {
+                // In the air: land where the arc meets the surface.
+                //
+                // The feet crossed it this frame when it lies between where
+                // they started and where they ended (crossTop carries a little
+                // slack for a slope met mid-step). Physics takes the surface
+                // exactly, which is the intersection; nothing is eased, since
+                // the picture was already moving down through that height.
+                if (*groundH > crossTop + 0.01f) {
+                    // Above anything the feet reached - a recovery probe's
+                    // answer, not a floor met. Keep flying the arc.
+                    grounded = false;
+                } else if (dz >= 0.0f) {
+                    // Only the part of the correction above both ends of the
+                    // frame's motion is a jump the eye would see.
+                    const float lift = *groundH - std::max(prevTargetPos.z, feetZ);
+                    if (lift > 0.0f) renderZOffset_ -= lift;
+                    targetPos.z = *groundH;
+                    lastGroundZ = *groundH;
+                    if (verticalVelocity <= 0.0f) {
+                        verticalVelocity = 0.0f;
+                        grounded = true;
+                    } else {
+                        // Rising up a slope met mid-jump: the feet ride its
+                        // surface and the jump carries on.
+                        grounded = false;
+                    }
+                } else if (verticalVelocity <= 0.0f && dz >= -0.02f) {
+                    // Settled onto it within contact noise.
+                    targetPos.z = *groundH;
+                    verticalVelocity = 0.0f;
+                    grounded = true;
+                    lastGroundZ = *groundH;
+                } else {
+                    grounded = false;
+                    lastGroundZ = *groundH;
+                }
+            } else {
+            // On the ground (or hovering): follow it within the step height.
+            //
+            // 1. Near ground (within step-up range above) - a step up.
+            // 2. Hovering and falling onto the hover height.
+            // 3. Grounded with the ground just below - a slope or a step down.
+            //    Walking, that reaches a full step so stairs and curbs are
+            //    walked down rather than fallen down (the stock client keeps
+            //    the feet on the ground the same way); standing, only the
+            //    quarter yard that absorbs contact noise.
             bool nearGround = (dz >= 0.0f && dz <= stepUp);
-            // Catch the feet only when they are about to touch: a half-yard
-            // floor here cut the last of every jump short with a snap. Passing
-            // below the surface is caught the next frame as nearGround/airFalling.
             float airSnapRange = std::min(fallCatch, 0.05f);
-            bool airFalling = (!grounded && verticalVelocity < -5.0f
+            bool airFalling = (hoverActive_ && !grounded && verticalVelocity < -5.0f
                                && dz >= -airSnapRange);
+            const bool walkingOnGround = horizStep > 1e-3f && !isFlightAirborne() &&
+                                         !hoverActive_;
+            const float stepDownReach = walkingOnGround ? movement::kMaxStepUp : 0.25f;
             // Not while climbing in flight: a frame's climb at a high frame
             // rate is less than the quarter yard this reaches down, so taking
             // off was pulled back to the ground every frame and never left it.
+            // Up only as far as the step height: this reached half a step
+            // beyond it (stepUp * 1.5), a second snap above the first.
             bool slopeGrace = (grounded && verticalVelocity > -1.0f &&
-                               dz >= -0.25f && dz <= stepUp * 1.5f) &&
+                               dz >= -stepDownReach && dz <= stepUp) &&
                               !(isFlightAirborne() && f.spaceHeld);
 
             if (dz >= -fallCatch && (nearGround || airFalling || slopeGrace)) {
                 // HOVER: float at fixed height above ground instead of standing on it
                 static constexpr float HOVER_HEIGHT = 4.0f;  // ~4 yards above ground
                 const float snapH = hoverActive_ ? (*groundH + HOVER_HEIGHT) : *groundH;
+                // A step: the physics feet move to it this frame, the picture
+                // eases after them. Only a change sharper than walking a
+                // slope is a step - easing every slope frame would leave the
+                // drawn feet trailing the ground on every hillside.
+                const float snapDz = snapH - targetPos.z;
+                const float slopeDz = horizStep * 1.0f + 0.05f;
+                if (!hoverActive_ && !isFlightAirborne() && std::abs(snapDz) > slopeDz) {
+                    renderZOffset_ -= snapDz;
+                }
                 targetPos.z = snapH;
                 verticalVelocity = 0.0f;
                 grounded = true;
@@ -1925,6 +2096,7 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
             } else {
                 grounded = false;
                 lastGroundZ = *groundH;
+            }
             }
             } else {
                 hasRealGround_ = false;
@@ -2521,7 +2693,18 @@ void CameraController::updateThirdPersonCamera(float deltaTime, FrameInput& f) {
         flightAirborne_ = false;
         LOG_WARNING("Flight: landed");
     }
-    updateOrbitCamera(deltaTime, f, targetPos);
+    // The picture eases after a grounded step; physics stays where it is.
+    // Nothing to ease where something else owns the height.
+    if (swimming || externalFollow_ || isFlightAirborne() || hoverActive_ || sitting ||
+        !std::isfinite(renderZOffset_)) {
+        renderZOffset_ = 0.0f;
+    } else {
+        constexpr float kMaxRenderZLag = movement::kMaxStepUp + 0.25f;
+        renderZOffset_ = std::clamp(renderZOffset_, -kMaxRenderZLag, kMaxRenderZLag);
+        renderZOffset_ *= std::exp(-std::max(deltaTime, 0.0f) / RENDER_Z_SMOOTH_TAU);
+        if (std::abs(renderZOffset_) < 1e-3f) renderZOffset_ = 0.0f;
+    }
+    updateOrbitCamera(deltaTime, f, targetPos + glm::vec3(0.0f, 0.0f, renderZOffset_));
 }
 
 // The camera that flies itself, used when nothing is being followed.
@@ -3467,6 +3650,7 @@ void CameraController::reset() {
     grounded = true;
     swimming = false;
     sitting = false;
+    renderZOffset_ = 0.0f;
     autoRunning = false;
     noGroundTimer_ = 0.0f;
     autoUnstuckFired_ = false;
@@ -3698,6 +3882,7 @@ void CameraController::teleportTo(const glm::vec3& pos) {
     grounded = true;
     swimming = false;
     sitting = false;
+    renderZOffset_ = 0.0f;
     lastGroundZ = pos.z;
     noGroundTimer_ = 0.0f;  // Reset grace period so terrain has time to stream
     autoUnstuckFired_ = false;

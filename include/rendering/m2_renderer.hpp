@@ -293,6 +293,14 @@ struct M2Instance {
     float animDuration = 0.0f;   // Duration of current animation (ms)
     std::vector<glm::mat4> boneMatrices;
 
+    // Sequence cross-fade (see beginM2SequenceBlend): the old sequence keeps
+    // playing on its own clock and is faded out over the incoming sequence's
+    // blendTime. blendDurationMs 0 = not blending.
+    int blendFromSequence = -1;
+    float blendFromTime = 0.0f;
+    float blendElapsedMs = 0.0f;
+    float blendDurationMs = 0.0f;
+
     // Idle variation state
     int idleSequenceIndex = 0;   // Default idle sequence index
     float variationTimer = 0.0f; // Time until next variation attempt (ms)

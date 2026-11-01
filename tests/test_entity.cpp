@@ -54,6 +54,54 @@ TEST_CASE("Entity still interpolates meaningful movement", "[entity][movement]")
     REQUIRE(e.isActivelyMoving());
 }
 
+TEST_CASE("A late movement sample is dead-reckoned past, not held", "[entity][movement]") {
+    Entity e;
+    e.setPosition(0.0f, 0.0f, 0.0f, 0.0f);
+    // Two samples of a unit running +x at 7 yd/s, half a second apart.
+    e.startMoveTo(3.5f, 0.0f, 0.0f, 0.0f, 0.5f, /*deadReckon=*/true);
+    e.updateMovement(0.5f);
+    e.startMoveTo(7.0f, 0.0f, 0.0f, 0.0f, 0.5f, /*deadReckon=*/true);
+    e.updateMovement(0.5f);
+    REQUIRE(e.getX() == Catch::Approx(7.0f));
+
+    // The next sample is 100ms late: the model carries on, still running.
+    e.updateMovement(0.1f);
+    REQUIRE(e.getX() > 7.3f);
+    REQUIRE(e.isActivelyMoving());
+    REQUIRE(e.extrapolatesPastDestination());
+    const float shown = e.getX();
+
+    // And the late sample interpolates on from where it was shown.
+    e.startMoveTo(10.5f, 0.0f, 0.0f, 0.0f, 0.5f, /*deadReckon=*/true);
+    REQUIRE(e.getX() == Catch::Approx(shown));
+}
+
+TEST_CASE("Dead reckoning stops after its window and holds where it was drawn",
+          "[entity][movement]") {
+    Entity e;
+    e.setPosition(0.0f, 0.0f, 0.0f, 0.0f);
+    e.startMoveTo(3.5f, 0.0f, 0.0f, 0.0f, 0.5f, /*deadReckon=*/true);
+    e.updateMovement(0.5f);
+    e.updateMovement(0.3f);   // past the 0.25s window
+    const float held = e.getX();
+    REQUIRE_FALSE(e.isActivelyMoving());
+    e.updateMovement(0.5f);   // past a whole interval: movement ends
+    REQUIRE_FALSE(e.isEntityMoving());
+    REQUIRE(e.getX() == Catch::Approx(held));   // no step back to 3.5
+}
+
+TEST_CASE("A spline path starts where the model is", "[entity][movement]") {
+    Entity e;
+    e.setPosition(1.0f, 0.5f, 0.0f, 0.0f);
+    // The server says the unit starts at the origin; the model is half a
+    // yard off. The first frame must not jump to the server's start.
+    std::vector<std::array<float, 3>> path = {{0.0f, 0.0f, 0.0f}, {5.0f, 0.0f, 0.0f}, {10.0f, 0.0f, 0.0f}};
+    e.startMoveAlongPath(path, 0.0f, 2.0f);
+    e.updateMovement(0.001f);
+    REQUIRE(e.getX() == Catch::Approx(1.0f).margin(0.05f));
+    REQUIRE(e.getY() == Catch::Approx(0.5f).margin(0.05f));
+}
+
 TEST_CASE("Entity field set/get/has", "[entity]") {
     Entity e;
     REQUIRE_FALSE(e.hasField(10));

@@ -65,6 +65,21 @@ public:
 
     // Call OnUpdate scripts on all frames that have one.
     void dispatchOnUpdate(float elapsed);
+    /// Advance the garbage collector by up to `budgetMs` of work, once a frame.
+    ///
+    /// Lua 5.1 collects incrementally, but on its own schedule: a step runs
+    /// inside whichever allocation crosses the threshold, so the collector's
+    /// work landed in OnUpdate, in event handlers, in the widget layout -
+    /// wherever the interface happened to allocate - and a frame that drew
+    /// several steps was simply slower than its neighbours. Here the
+    /// automatic collector is held off and the cycle is advanced on a time
+    /// budget at one known point in the frame instead, starting a cycle only
+    /// once the heap has doubled since the last one finished (Lua's own
+    /// default pause). If allocation outruns the budget the budget grows,
+    /// and past four times the live heap the automatic collector is let
+    /// back in as well, so memory is never traded for smoothness without
+    /// bound. WOWEE_LUA_GC_AUTO=1 leaves the collector on its own schedule.
+    void stepGarbageCollector(float budgetMs);
     /// Run the OnTextChanged handlers owed by text set from code.
     void drainPendingTextChanged();
     /// Run the OnAnimFinished handlers owed by frames shown to animate.
@@ -282,6 +297,11 @@ public:
 
 private:
     lua_State* L_ = nullptr;
+    /// stepGarbageCollector's state, for the current L_. gcLiveKb_ is the
+    /// heap as the last finished cycle left it; 0 until the first call.
+    int gcLiveKb_ = 0;
+    bool gcInCycle_ = false;
+    bool gcAutoFallback_ = false;
     ui::WidgetTree widgets_;
     /// runOnUp commands whose key is down, by keycode, so the release reaches
     /// the same command even when a modifier was let go first.

@@ -389,7 +389,13 @@ void main() {
         // edge cutting the light in one frame at the door.
         float indoor = shadowParams.w;
         float sunVis = mix(shadow, 1.0, indoor) * (1.0 - 0.85 * indoor);
-        result = rtAmbient(rt, ambientColor.rgb) * texColor.rgb
+        // Indoors a unit takes the building's ambient in place of the sky's.
+        // The renderer hands it over in the .w slots of lightDir, lightColor
+        // and ambientColor, so that ambientColor.rgb - which every world
+        // shader reads - stays the area's wherever the camera is.
+        vec3 indoorAmbient = vec3(lightDir.w, lightColor.w, ambientColor.w);
+        vec3 unitAmbient = mix(ambientColor.rgb, indoorAmbient, indoor);
+        result = rtAmbient(rt, unitAmbient) * texColor.rgb
                + sunVis * (diff * lightColor.rgb * texColor.rgb + spec * lightColor.rgb);
     }
 

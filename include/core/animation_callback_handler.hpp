@@ -34,6 +34,10 @@ public:
     void resetChargeState();
 
 private:
+    /// The AnimID of a spell's cast kit (SpellVisual -> CastKit ->
+    /// SpellVisualKit.AnimID); 0 when it names none.
+    uint32_t kitCastAnim(uint32_t spellId);
+
     EntitySpawner& entitySpawner_;
     rendering::Renderer& renderer_;
     game::GameHandler& gameHandler_;

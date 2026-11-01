@@ -3096,7 +3096,9 @@ static std::array<ChatWindowSettings, kNumChatWindows>& chatWindows() {
         // the message carries "General - Blasted Lands" and the short name
         // beside it, and the match is on the short one. Zero for the zone id,
         // which this client does not learn; the name settles it.
-        for (const char* c : {"General", "Trade", "LocalDefense",
+        // WorldDefense is one of the zone channels this client now joins, as
+        // the real client does, so the window lists it too.
+        for (const char* c : {"General", "Trade", "LocalDefense", "WorldDefense",
                               "LookingForGroup", "GuildRecruitment"}) {
             w[0].channels.emplace_back(c, 0);
         }
@@ -6403,12 +6405,12 @@ void registerSystemLuaAPI(lua_State* L) {
             // the group wipe in FCF_ResetChatWindows, and a General with no
             // channels matched every channel line against nothing.
             if (w->channels.empty() && lua_tonumber(L, 1) == 1) {
-                for (const char* c : {"General", "Trade", "LocalDefense",
+                for (const char* c : {"General", "Trade", "LocalDefense", "WorldDefense",
                                       "LookingForGroup", "GuildRecruitment"}) {
                     lua_pushstring(L, c);
                     lua_pushnumber(L, 0);
                 }
-                return 10;
+                return 12;
             }
             for (const auto& c : w->channels) {
                 lua_pushstring(L, c.first.c_str());
@@ -7557,8 +7559,8 @@ void registerSystemLuaAPI(lua_State* L) {
                 lua_pushstring(L, "");             // invitedBy
                 lua_pushnumber(L, lock.difficulty);
                 lua_pushnumber(L, 1);              // inviteType
-                lua_pushnil(L);                    // sequenceIndex
-                lua_pushnil(L);                    // numSequenceDays
+                lua_pushnumber(L, 1);              // sequenceIndex
+                lua_pushnumber(L, 1);              // numSequenceDays
                 lua_pushstring(L, "");             // difficultyName
                 return 15;
             }
@@ -7578,8 +7580,8 @@ void registerSystemLuaAPI(lua_State* L) {
                 lua_pushstring(L, "");             // invitedBy
                 lua_pushnumber(L, 0);              // difficulty
                 lua_pushnumber(L, 0);              // inviteType
-                lua_pushnil(L);                    // sequenceIndex
-                lua_pushnil(L);                    // numSequenceDays
+                lua_pushnumber(L, row.sequenceIndex);
+                lua_pushnumber(L, row.numSequenceDays);
                 lua_pushstring(L, "");             // difficultyName
                 return 15;
             }

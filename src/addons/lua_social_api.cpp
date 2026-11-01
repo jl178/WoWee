@@ -1,5 +1,7 @@
 // lua_social_api.cpp - Chat, guild, friends, ignore, gossip, party management, and emotes Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
+#include <algorithm>
+#include <cctype>
 #include <iterator>
 #include <vector>
 #include "addons/lua_api_helpers.hpp"
@@ -1802,7 +1804,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 //
                 // A request, not a getter: the answer comes back as
                 // UPDATE_GM_STATUS. The help frame calls this from OnShow and
-                // waits for the event, so a no-op here meant it waited forever
+                // waits for the event, so a no-op here meant it waited enhanced
                 // and kept whatever it was last told.
                 {"GetGMStatus", [](lua_State* L) -> int {
             if (auto* gh = getGameHandler(L)) gh->requestGmSystemStatus();
@@ -1947,16 +1949,23 @@ void registerSocialLuaAPI(lua_State* L) {
                 // channel should show in. The frame binding is handled entirely
                 // in FrameXML, so only the join happens here.
                 //
-                // The first value says whether this is one of the automatic
-                // zone channels; nothing joined by name is, so it is nil rather
-                // than a zero that would read as true.
+                // The first value is the zone channel id, 0 for a custom
+                // channel - and 0 is true in Lua, which is the point:
+                // SlashCmdList["JOIN"] reads `if ( not zoneChannel )` as "the
+                // name was invalid", prints CHAT_INVALID_NAME_NOTICE and
+                // returns before putting the channel into the chat window's
+                // list. Answering nil did exactly that for every /join, so the
+                // channel was joined and everything said in it was filtered
+                // out of the window. nil is kept for what the server would
+                // refuse anyway: a name that starts with a digit.
                 {"JoinPermanentChannel", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const char* name = luaL_optstring(L, 1, "");
             const char* pass = luaL_optstring(L, 2, "");
             if (!gh || !name || !*name) return luaReturnNil(L);
+            if (std::isdigit(static_cast<unsigned char>(name[0]))) return luaReturnNil(L);
             gh->joinChannel(name, pass ? pass : "");
-            lua_pushnil(L);
+            lua_pushnumber(L, 0);
             lua_pushstring(L, name);
             return 2;
         }},
@@ -3691,6 +3700,22 @@ void registerSocialLuaAPI(lua_State* L) {
                 // pass whichever the player typed.
                 for (size_t i = 0; i < joined.size(); ++i) {
                     if (joined[i] == wanted) { index = static_cast<int>(i) + 1; break; }
+                }
+                // A zone channel by its name without the zone - "General"
+                // for "General - Elwynn Forest" - as the real client allows.
+                if (index == 0) {
+                    const std::string w(wanted);
+                    for (size_t i = 0; i < joined.size() && index == 0; ++i) {
+                        const size_t dash = joined[i].find(" - ");
+                        if (dash == w.size() &&
+                            std::equal(w.begin(), w.end(), joined[i].begin(),
+                                       [](char a, char b) {
+                                           return std::tolower(static_cast<unsigned char>(a)) ==
+                                                  std::tolower(static_cast<unsigned char>(b));
+                                       })) {
+                            index = static_cast<int>(i) + 1;
+                        }
+                    }
                 }
             }
             if (index < 1 || index > static_cast<int>(joined.size())) {

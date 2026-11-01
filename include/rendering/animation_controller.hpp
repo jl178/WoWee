@@ -88,7 +88,9 @@ public:
     [[nodiscard]] bool isMoving() const;
 
     // ── Melee combat ───────────────────────────────────────────────────────
-    void triggerMeleeSwing();
+    /// An auto-attack swing. offHand comes from the swing's HITINFO_OFFHAND
+    /// bit, so a dual wielder swings the hand the server says it swung.
+    void triggerMeleeSwing(bool offHand = false);
     /// inventoryType: WoW inventory type (0=unarmed, 13=1H, 17=2H, 21=main-hand, …)
     /// is2HLoose: true for polearms/staves (use ATTACK_2H_LOOSE instead of ATTACK_2H)
     /// isFist/isDagger describe the main hand; offHandIsFist/offHandIsDagger
@@ -98,8 +100,13 @@ public:
                                bool hasOffHand = false, bool hasShield = false,
                                bool offHandIsFist = false,
                                bool offHandIsDagger = false);
-    /// Play a special attack animation for a melee ability (spellId → SPECIAL_1H/2H/SHIELD_BASH/WHIRLWIND)
-    void triggerSpecialAttack(uint32_t spellId);
+    /// Play a melee ability's animation. kitAnimId is the AnimID of the
+    /// spell's cast kit (SpellVisualKit.AnimID): weapon-generic attacks are
+    /// swapped for the held weapon's variant (Special1H with a two-hander is
+    /// Special2H), anything else plays as named (ShieldBash, Whirlwind...).
+    /// Zero - a kit with no animation - is the normal next swing.
+    void triggerAbilityAnimation(uint32_t kitAnimId);
+    [[nodiscard]] const WeaponLoadout& getWeaponLoadout() const { return weaponLoadout_; }
 
     // ── Sprint aura animation ────────────────────────────────────────────
     void setSprintAuraActive(bool active);

@@ -553,9 +553,10 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                     LOG_WARNING("Successful sale had no pending buyback entry: itemGuid=0x",
                                 std::hex, itemGuid, std::dec);
                 }
+                // The stock sale clink is the loot coin sound, not a drop.
                 if (auto* ac = owner_.services().audioCoordinator) {
                     if (auto* sfx = ac->getUiSoundManager())
-                        sfx->playDropOnGround();
+                        if (!sfx->playByName("LOOTWINDOWCOINSOUND")) sfx->playDropOnGround();
                 }
                 if (owner_.addonEventCallbackRef()) {
                     fireBagUpdates();

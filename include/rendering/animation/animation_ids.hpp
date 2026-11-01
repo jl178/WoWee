@@ -559,6 +559,13 @@ const char* nameFromId(uint32_t id);
 /// Logs warnings for IDs present in DBC but missing from constants, and vice versa.
 void validateAgainstDBC(const std::shared_ptr<wowee::pipeline::DBCFile>& dbc);
 
+/// AnimationData.dbc's Fallback column: the sequence the stock client plays
+/// when a model has not got this one (ShieldBlock -> StandWound, Ready1H ->
+/// ReadyUnarmed, Special2H -> Attack2H, ShieldBash -> AttackOff). Filled by
+/// validateAgainstDBC; until then, and for ids the file does not name, it
+/// answers UINT32_MAX ("no fallback known"). Zero is a real answer: Stand.
+uint32_t dbcFallback(uint32_t id);
+
 /// The loop a unit holds for a server stand state (UnitStandStateType, byte 0
 /// of UNIT_FIELD_BYTES_1). Zero for standing, and for dead, which the death
 /// path owns. The chair states pick the chair height the server chose.

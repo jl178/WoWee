@@ -502,6 +502,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     uint16_t geosetBoots   = pickGeoset(kGeosetBareShins, lowestInGroup(5));
     uint16_t geosetSleeves = pickGeoset(kGeosetBareSleeves, kGeosetBareSleeves);
     uint16_t geosetPants   = pickGeoset(kGeosetBarePants, kGeosetBarePants);
+    uint32_t kneeGG = 0;
 
     bool robeSkirt = false;
     // Chest/Shirt/Robe (invType 4,5,20) → wrist/sleeve group 8
@@ -531,6 +532,8 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
             robeSkirt = true;
         }
         (void)gg1;
+        // Kneepads, group 9, from GeosetGroup[1]; none otherwise or under a skirt.
+        kneeGG = getGeosetGroup(did, geosetGroup3Field - 1);
     }
 
     // Feet/Boots (invType 8) → shin group 5
@@ -581,6 +584,12 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     if (geosetBoots != 0) geosets.insert(geosetBoots);
     if (geosetSleeves != 0) geosets.insert(geosetSleeves);
     if (geosetPants != 0) geosets.insert(geosetPants);
+    for (auto it = geosets.begin(); it != geosets.end();) {
+        if (*it / 100 == 9) it = geosets.erase(it); else ++it;
+    }
+    if (kneeGG > 0 && !robeSkirt) {
+        if (uint16_t k = pickGeoset(static_cast<uint16_t>(901 + kneeGG), 0)) geosets.insert(k);
+    }
     if (geosetBelt != 0) geosets.insert(geosetBelt);
     // Back/Cloak (invType 16)
     uint32_t capeGG = getGeosetGroup(findDisplayIdByInvType({16}), geosetGroup1Field);
@@ -757,68 +766,19 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     }
 
     // --- Weapon model attachment ---
-    // Slot indices in the 19-element EquipSlot array:
-    //   15 = MAIN_HAND → attachment 1 (right hand)
-    //   16 = OFF_HAND  → attachment 2 (left hand)
-    struct OnlineWeaponSlot {
-        int slotIndex;
-        uint32_t attachmentId;
-    };
-    // NOLINTBEGIN(modernize-use-designated-initializers) - a table whose
-    // columns are its field names, with the struct in view directly above.
-    static constexpr OnlineWeaponSlot weaponSlots[] = {
-        { 15, 1 },  // MAIN_HAND → right hand
-        { 16, 2 },  // OFF_HAND  → left hand
-    };
-    // NOLINTEND(modernize-use-designated-initializers)
-
-    for (const auto& ws : weaponSlots) {
-        uint32_t weapDisplayId = displayInfoIds[ws.slotIndex];
-        if (weapDisplayId == 0) {
-            charRenderer->detachWeapon(st.instanceId, ws.attachmentId);
-            continue;
-        }
-
-        int32_t recIdx = displayInfoDbc->findRecordById(weapDisplayId);
-        if (recIdx < 0) {
-            charRenderer->detachWeapon(st.instanceId, ws.attachmentId);
-            continue;
-        }
-
-        const auto art = pipeline::readItemDisplayArt(*displayInfoDbc,
-                                                      static_cast<uint32_t>(recIdx));
-        if (art.modelFile.empty()) {
-            charRenderer->detachWeapon(st.instanceId, ws.attachmentId);
-            continue;
-        }
-        const std::string& modelFile = art.modelFile;
-        const std::string& textureName = art.textureName;
-
-        // Try Weapon directory first, then Shield
-        std::string m2Path = "Item\\ObjectComponents\\Weapon\\" + modelFile;
-        pipeline::M2Model weaponModel;
-        if (!loadWeaponM2(m2Path, weaponModel)) {
-            m2Path = "Item\\ObjectComponents\\Shield\\" + modelFile;
-            if (!loadWeaponM2(m2Path, weaponModel)) {
-                charRenderer->detachWeapon(st.instanceId, ws.attachmentId);
-                continue;
-            }
-        }
-
-        // Build texture path
-        std::string texturePath;
-        if (!textureName.empty()) {
-            texturePath = "Item\\ObjectComponents\\Weapon\\" + textureName + ".blp";
-            if (!assetManager_->fileExists(texturePath)) {
-                texturePath = "Item\\ObjectComponents\\Shield\\" + textureName + ".blp";
-                if (!assetManager_->fileExists(texturePath)) texturePath.clear();
-            }
-        }
-
-        uint32_t weaponModelId = nextWeaponModelId_++;
-        charRenderer->attachWeapon(st.instanceId, ws.attachmentId,
-                                   weaponModel, weaponModelId, texturePath);
+    // Main hand, off hand and ranged slot (15, 16, 17), where the player's
+    // sheath state (UNIT_FIELD_BYTES_2 byte 0) puts them: drawn in the hands,
+    // or put away on the back and hips by each item's sheathe type, with the
+    // ranged weapon on the back until it is the one drawn. This used to put
+    // the main and off hand in the hands, always, and the ranged weapon
+    // nowhere - so no other player ever sheathed, and a shield was held in
+    // the left hand like a sword.
+    UnitWeaponDisplays& slots3 = onlinePlayerWeaponSlots_[guid];
+    for (int i = 0; i < 3; ++i) {
+        slots3.displayIds[i] = displayInfoIds[15 + i];
+        slots3.inventoryTypes[i] = inventoryTypes[15 + i];
     }
+    attachUnitWeapons(guid, st.instanceId, slots3.displayIds, unitWeaponItems(guid));
 }
 
 void EntitySpawner::despawnPlayer(uint64_t guid) {
@@ -836,6 +796,8 @@ void EntitySpawner::despawnPlayer(uint64_t guid) {
     playerInstances_.erase(it);
     onlinePlayerAppearance_.erase(guid);
     pendingOnlinePlayerEquipment_.erase(guid);
+    onlinePlayerWeaponSlots_.erase(guid);
+    unitSheathAttached_.erase(guid);
     deadCreatureGuids_.erase(guid);
     creatureRenderPosCache_.erase(guid);
     creatureSwimmingState_.erase(guid);

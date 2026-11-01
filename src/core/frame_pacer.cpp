@@ -59,6 +59,60 @@ float FramePacer::toSeconds(std::int64_t deltaNs, float capSeconds) {
     return std::min(seconds, capSeconds);
 }
 
+void DeltaSmoother::reset() {
+    count_ = 0;
+    next_ = 0;
+    owed_ = 0.0f;
+}
+
+float DeltaSmoother::smooth(float rawSeconds) {
+    // The first frame, or nonsense: nothing to step by.
+    if (!(rawSeconds > 0.0f)) return 0.0f;
+
+    // A stall that reached the cap - a loading screen, a breakpoint, a window
+    // drag - is not a hitch to spread. Hand it over as it is and start the
+    // history again, so the frames after it are not left paying it back.
+    constexpr float kStallSeconds = 0.0999f;
+    if (rawSeconds >= kStallSeconds) {
+        reset();
+        return rawSeconds;
+    }
+
+    // Clip an outlier against the median of what came before, so a single
+    // slow frame does not lift the mean for the next kWindow frames. The time
+    // it carried is not lost: it is still added to what is owed below.
+    float clipped = rawSeconds;
+    if (count_ >= 3) {
+        float sorted[kWindow];
+        std::copy(history_, history_ + count_, sorted);
+        std::nth_element(sorted, sorted + count_ / 2, sorted + count_);
+        const float median = sorted[count_ / 2];
+        clipped = std::min(rawSeconds, median * 2.0f);
+    }
+    history_[next_] = clipped;
+    next_ = (next_ + 1) % kWindow;
+    count_ = std::min(count_ + 1, kWindow);
+
+    float sum = 0.0f;
+    for (int i = 0; i < count_; ++i) sum += history_[i];
+    const float mean = sum / static_cast<float>(count_);
+
+    // Pay back a quarter of the difference between what is owed and the mean
+    // each frame: steady frames come out exactly as they went in, and a spike
+    // is spread over the next handful rather than landing in one.
+    constexpr float kPayback = 0.25f;
+    owed_ += rawSeconds;
+    float step = mean + (owed_ - mean) * kPayback;
+    step = std::clamp(step, 0.0f, kStallSeconds);
+    owed_ -= step;
+
+    // Never hold back or run ahead by more than a tenth of a second. Past that
+    // the frame rate has changed rather than hitched, and what is left over
+    // is dropped rather than chased for seconds.
+    owed_ = std::clamp(owed_, -0.1f, 0.1f);
+    return step;
+}
+
 void FramePacer::waitForCap(int fps) {
     if (fps <= 0 || !started_) return;
 
@@ -84,7 +138,7 @@ void FramePacer::waitForCap(int fps) {
         // Track the worst recent overshoot rather than the average: the
         // margin has to cover the bad frames, since those are the ones that
         // show. It decays so that a single hitch under load does not leave
-        // the client spinning a millisecond a frame forever after.
+        // the client spinning a millisecond a frame enhanced after.
         if (overshoot > sleepSlackNs_) {
             sleepSlackNs_ = std::min(overshoot, frameNs);   // never a whole frame
         } else {

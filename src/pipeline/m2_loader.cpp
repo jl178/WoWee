@@ -421,6 +421,23 @@ struct M2CameraDiskVanilla {
 static_assert(sizeof(M2CameraDisk) == 100, "M2CameraDisk must match the WotLK on-disk layout");
 static_assert(sizeof(M2CameraDiskVanilla) == 124, "M2CameraDiskVanilla must match the vanilla on-disk layout");
 
+// M2 light (on-disk, WotLK - 156 bytes)
+#pragma pack(push, 1)
+struct M2LightDisk {
+    uint16_t type;
+    int16_t bone;
+    float position[3];
+    M2TrackDisk ambientColor;
+    M2TrackDisk ambientIntensity;
+    M2TrackDisk diffuseColor;
+    M2TrackDisk diffuseIntensity;
+    M2TrackDisk attenuationStart;
+    M2TrackDisk attenuationEnd;
+    M2TrackDisk visibility;
+};
+#pragma pack(pop)
+static_assert(sizeof(M2LightDisk) == 156, "M2LightDisk must match the WotLK on-disk layout");
+
 template<typename T>
 T readValue(const std::vector<uint8_t>& data, uint32_t offset) {
     if (offset + sizeof(T) > data.size()) {
@@ -1481,6 +1498,31 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                 pushCamera(dc.type, dc.fov, dc.farClip, dc.nearClip, dc.positionBase, dc.targetBase);
         }
         core::Logger::getInstance().debug("  Cameras: ", model.cameras.size());
+    }
+
+    // Lights. Only the glue scenes read them (CharacterPreview lights a scene
+    // with its own lights); the 3.3.5 layout only.
+    if (header.version >= 264 && header.nLights > 0 && header.ofsLights > 0 && header.nLights <= 64) {
+        std::vector<uint32_t> seqFlags;
+        seqFlags.reserve(model.sequences.size());
+        for (const auto& seq : model.sequences) seqFlags.push_back(seq.flags);
+        auto disk = readArray<M2LightDisk>(m2Data, header.ofsLights, header.nLights);
+        model.lights.reserve(disk.size());
+        for (const auto& dl : disk) {
+            M2Light light;
+            light.type = dl.type;
+            light.bone = dl.bone;
+            light.position = glm::vec3(dl.position[0], dl.position[1], dl.position[2]);
+            parseAnimTrack(m2Data, dl.ambientColor, light.ambientColor, TrackType::VEC3, seqFlags);
+            parseAnimTrack(m2Data, dl.ambientIntensity, light.ambientIntensity, TrackType::FLOAT, seqFlags);
+            parseAnimTrack(m2Data, dl.diffuseColor, light.diffuseColor, TrackType::VEC3, seqFlags);
+            parseAnimTrack(m2Data, dl.diffuseIntensity, light.diffuseIntensity, TrackType::FLOAT, seqFlags);
+            parseAnimTrack(m2Data, dl.attenuationStart, light.attenuationStart, TrackType::FLOAT, seqFlags);
+            parseAnimTrack(m2Data, dl.attenuationEnd, light.attenuationEnd, TrackType::FLOAT, seqFlags);
+            parseAnimTrack(m2Data, dl.visibility, light.visibility, TrackType::BYTE_BOOL, seqFlags);
+            model.lights.push_back(std::move(light));
+        }
+        core::Logger::getInstance().debug("  Lights: ", model.lights.size());
     }
 
     // Parse particle emitters - struct size differs between versions:

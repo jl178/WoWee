@@ -144,7 +144,16 @@ void ChatBubbleManager::render(game::GameHandler& gameHandler, const UIServices&
         // thing that cannot go underneath.
         // Say range, fading out towards its edge as the stock bubbles do.
         const float s = screenH / 768.0f;  // interface units to pixels
-        const float dist = glm::length(camera->getPosition() - renderPos);
+        // Measured from the nearer of the camera and the player's character.
+        // From the camera alone, a zoomed-out view (22 yards and more behind
+        // the player) put someone at the edge of /say range - 25 yards from
+        // the player, on the far side - past the fade, and their bubble
+        // faded or vanished while their line was in chat.
+        float dist = glm::length(camera->getPosition() - renderPos);
+        if (auto self = gameHandler.getEntityManager().getEntity(gameHandler.getPlayerGuid())) {
+            const glm::vec3 me(self->getX(), self->getY(), self->getZ() + 2.5f);
+            dist = std::min(dist, glm::length(me - canonical));
+        }
         alpha *= std::clamp((60.0f - dist) / 20.0f, 0.0f, 1.0f);
         if (alpha <= 0.0f) continue;
 

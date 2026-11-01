@@ -117,6 +117,11 @@ public:
     // falling either - treating it as falling made leaving the water register as
     // a hard landing.
     [[nodiscard]] bool isFalling() const { return !grounded && !swimming && verticalVelocity <= 0.0f; }
+    /// How far the drawn character (and the camera pivot) sits from the
+    /// physics position in Z this frame. A grounded step up or down moves the
+    /// physics feet in one frame; the picture eases after them over about a
+    /// tenth of a second, as the stock client's does. Zero at rest.
+    [[nodiscard]] float getRenderZOffset() const { return renderZOffset_; }
 
     // Call every frame while riding a transport that forces Z to a locked value
     // externally (e.g. the Deeprun Tram, which has no real floor mid-tunnel).
@@ -632,6 +637,16 @@ private:
     bool airBackward_ = false;
     bool airStrafeLeft_ = false;
     bool airStrafeRight_ = false;
+    /// Visual Z lag behind the physics feet after a grounded step (negative
+    /// while the picture is still below a step just taken up). Decays to zero
+    /// with RENDER_Z_SMOOTH_TAU; never applied to a landing, which is exact.
+    float renderZOffset_ = 0.0f;
+    static constexpr float RENDER_Z_SMOOTH_TAU = 0.035f;  // ~95% settled in 0.1 s
+    /// Airborne, how far above the feet a surface under the character's
+    /// centre is looked for: a ledge top this close overhead is a ledge side
+    /// to be stopped by, not a floor to be lifted onto. Matches the wall
+    /// tests' jump clearance (1.2), which leave such ledges to the floor pass.
+    static constexpr float AIR_LEDGE_REACH = 1.2f;
     static constexpr float STAND_EYE_HEIGHT = 1.2f;  // Standing eye height
     static constexpr float CROUCH_EYE_HEIGHT = 0.6f; // Crouching eye height
     float eyeHeight = STAND_EYE_HEIGHT;

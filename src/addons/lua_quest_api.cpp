@@ -1683,7 +1683,7 @@ static uint32_t& pendingAbandonQuest() {
 /// failing outright.
 // Not static: the tooltip setters in lua_engine.cpp ask the same question, and
 // two copies of this would have to keep the same tab ordering and the same
-// row/column sort forever or the tooltip would describe a different talent from
+// row/column sort enhanced or the tooltip would describe a different talent from
 // the one under the cursor. Declared in lua_api_helpers.hpp.
 
 const game::TalentEntry* talentAt(game::GameHandler* gh,
@@ -4398,11 +4398,26 @@ void registerQuestLuaAPI(lua_State* L) {
                 // GetCategoryNumAchievements(id) → total, completed, incomplete
                 {"GetCategoryNumAchievements", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const auto id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
+            const auto id = lua_isnumber(L, 1) ? static_cast<uint32_t>(lua_tonumber(L, 1)) : 0u;
             if (!gh) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 0); return 3; }
             gh->ensureAchievementCategoriesLoaded();
-            const auto& ids = gh->getCategoryAchievements(id);
             const auto& earned = gh->getEarnedAchievements();
+            // "summary" (the comparison summary id) means every achievement
+            // category together; luaL_optnumber used to throw on the string.
+            if (lua_type(L, 1) == LUA_TSTRING && !lua_isnumber(L, 1)) {
+                size_t total = 0, doneAll = 0;
+                for (uint32_t cat : gh->getAchievementCategoryOrder()) {
+                    for (uint32_t a : gh->getCategoryAchievements(cat)) {
+                        ++total;
+                        if (earned.count(a)) ++doneAll;
+                    }
+                }
+                lua_pushnumber(L, static_cast<lua_Number>(total));
+                lua_pushnumber(L, static_cast<lua_Number>(doneAll));
+                lua_pushnumber(L, static_cast<lua_Number>(total - doneAll));
+                return 3;
+            }
+            const auto& ids = gh->getCategoryAchievements(id);
             uint32_t done = 0;
             for (uint32_t a : ids) if (earned.count(a)) ++done;
             lua_pushnumber(L, static_cast<lua_Number>(ids.size()));

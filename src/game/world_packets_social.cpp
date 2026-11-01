@@ -337,14 +337,15 @@ bool TextEmoteParser::parse(network::Packet& packet, TextEmoteData& data, bool l
 // Channel System
 // ============================================================
 
-network::Packet JoinChannelPacket::build(const std::string& channelName, const std::string& password) {
+network::Packet JoinChannelPacket::build(const std::string& channelName, const std::string& password,
+                                         uint32_t channelId) {
     network::Packet packet(wireOpcode(Opcode::CMSG_JOIN_CHANNEL));
-    packet.writeUInt32(0);  // channelId (unused)
-    packet.writeUInt8(0);   // hasVoice
-    packet.writeUInt8(0);   // joinedByZone
+    packet.writeUInt32(channelId);  // ChatChannels.dbc id, 0 for a custom channel
+    packet.writeUInt8(0);           // hasVoice
+    packet.writeUInt8(channelId != 0 ? 1 : 0);  // joinedByZone
     packet.writeString(channelName);
     packet.writeString(password);
-    LOG_DEBUG("Built CMSG_JOIN_CHANNEL: channel=", channelName);
+    LOG_DEBUG("Built CMSG_JOIN_CHANNEL: channel=", channelName, " id=", channelId);
     return packet;
 }
 
@@ -364,8 +365,28 @@ bool ChannelNotifyParser::parse(network::Packet& packet, ChannelNotifyData& data
     }
     data.notifyType = static_cast<ChannelNotifyType>(packet.readUInt8());
     data.channelName = packet.readString();
-    // Some notification types have additional fields (guid, etc.)
     bytesLeft = packet.getRemainingSize();
+    // YOU_JOINED and YOU_LEFT carry the channel's ChatChannels.dbc id, which
+    // is how a zone change is recognised: AzerothCore's UpdateLocalChannels
+    // sends YOU_JOINED for "General - Westfall" and no YOU_LEFT for
+    // "General - Elwynn Forest" ("it already replaced at client"), so the
+    // client has to put the new name in the old one's slot by id.
+    //   YOU_JOINED  flags(u8) channelId(u32) unk(u32)
+    //   YOU_LEFT    channelId(u32) isConstant(u8)
+    // Matched on the exact size, so a core that sends something else just
+    // leaves the id at zero rather than misreading.
+    if (data.notifyType == ChannelNotifyType::YOU_JOINED && bytesLeft == 9) {
+        data.channelFlags = packet.readUInt8();
+        data.channelId = packet.readUInt32();
+        packet.readUInt32();
+        return true;
+    }
+    if (data.notifyType == ChannelNotifyType::YOU_LEFT && bytesLeft == 5) {
+        data.channelId = packet.readUInt32();
+        data.constant = packet.readUInt8() != 0;
+        return true;
+    }
+    // Some notification types have additional fields (guid, etc.)
     if (bytesLeft >= 8) {
         data.senderGuid = packet.readUInt64();
     }

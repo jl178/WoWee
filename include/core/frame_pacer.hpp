@@ -63,6 +63,49 @@ private:
     std::int64_t sleepSlackNs_ = 500'000;
 };
 
+/// The delta the simulation steps by, made from the raw frame deltas.
+///
+/// A raw delta is how long the CPU took over the last frame, which is not
+/// how long that frame was on screen. Under vsync at 60Hz a client running
+/// at 30-35fps shows each frame for two refreshes or three, and a frame
+/// that took 26ms and one that took 38ms can be shown for the same 33ms -
+/// so stepping the camera, the character and every animation by the raw
+/// figure moves them unevenly against a display that advances evenly, and
+/// a single slow frame lands as a visible jump.
+///
+/// Three things, in order:
+///   - an outlier is clipped to a multiple of the recent median before it
+///     joins the history, so one hitch does not raise the average for the
+///     next several frames;
+///   - the step is the mean of the recent (clipped) deltas;
+///   - whatever the clipping and averaging held back - or handed out early -
+///     is owed, and a quarter of what is owed is paid each frame. Over any
+///     stretch longer than a few frames the simulation advances by exactly
+///     the wall time that passed, so nothing drifts against the server's
+///     clock; only the shape of a spike is spread out.
+///
+/// Mouse-look is not stepped by this at all: it turns by the pointer's own
+/// motion, so it stays one-to-one with the hand whatever the frame time.
+class DeltaSmoother {
+public:
+    /// The step for this frame, given this frame's raw delta in seconds.
+    /// The raw delta is expected to be capped already (FramePacer::toSeconds).
+    [[nodiscard]] float smooth(float rawSeconds);
+    /// Forget the history: after a loading screen, a stall or a toggle.
+    void reset();
+
+    /// How much time the smoother is holding back (positive) or has handed
+    /// out early (negative). For the spike log.
+    [[nodiscard]] float owedSeconds() const { return owed_; }
+
+private:
+    static constexpr int kWindow = 6;
+    float history_[kWindow] = {};
+    int count_ = 0;
+    int next_ = 0;
+    float owed_ = 0.0f;
+};
+
 /// Ask the platform for the finest sleep granularity it will give, for as
 /// long as this object lives.
 ///

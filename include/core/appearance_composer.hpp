@@ -4,6 +4,7 @@
 #include "game/character.hpp"
 #include "game/inventory.hpp"
 #include "rendering/animation/weapon_type.hpp"
+#include <glm/glm.hpp>
 #include <string>
 #include <vector>
 #include <unordered_set>
@@ -18,6 +19,17 @@ namespace game { class GameHandler; class Inventory; }
 namespace core {
 
 class EntitySpawner;
+
+/// The M2 attachment a weapon-slot item goes on: held (hand, or the shield
+/// mount for a shield) or put away (back, hip or shield sheath).
+/// UINT32_MAX when the item has nowhere to go (hidden). Shared by the local
+/// character, other players and creatures.
+uint32_t weaponAttachment(bool sheathed, game::EquipSlot slot, uint8_t inventoryType);
+/// The offset that lays a put-away weapon along the back.
+glm::mat4 weaponLocalTransform(bool sheathed, game::EquipSlot slot, uint8_t inventoryType);
+/// The inventory type to put an item away as, from its Item.dbc SheatheType
+/// (UINT32_MAX when there is no row: the item's own inventory type).
+uint8_t sheathPlacementInvType(uint32_t sheatheType, uint8_t inventoryType);
 
 /// Resolved texture paths from CharSections.dbc for player character compositing.
 struct PlayerTextureInfo {
@@ -69,9 +81,11 @@ public:
     void loadEquippedWeapons();
 
     // Weapon sheathe state
-    void setWeaponsSheathed(bool sheathed) { weaponsSheathed_ = sheathed; }
+    /// Also sends CMSG_SET_SHEATHED when the state changes, so other clients
+    /// see the character draw and put away its weapons.
+    void setWeaponsSheathed(bool sheathed);
     [[nodiscard]] bool isWeaponsSheathed() const { return weaponsSheathed_; }
-    void toggleWeaponsSheathed() { weaponsSheathed_ = !weaponsSheathed_; }
+    void toggleWeaponsSheathed() { setWeaponsSheathed(!weaponsSheathed_); }
     /// Where the item in a hand is put away; NONE when the hand is empty.
     [[nodiscard]] rendering::SheathSpot sheathSpot(game::EquipSlot slot) const;
 

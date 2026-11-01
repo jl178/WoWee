@@ -2,6 +2,7 @@
 
 #include "core/window.hpp"
 #include <chrono>
+#include <cstdint>
 #include "core/gamepad.hpp"
 #include "ui/unit_portrait.hpp"
 #include "ui/widget_renderer.hpp"
@@ -213,12 +214,24 @@ private:
     /// average and worst case per stage and prints the breakdown periodically.
     void noteStageTime(const char* stage, float milliseconds);
     void reportStageTimes();
+    /// Called once a frame with the frame that just finished: when it took
+    /// more than twice the running average, logs which stages were over their
+    /// own average in it (at most once a second, with a count of the rest).
+    void checkFrameSpike(std::int64_t frameNs, float stepSeconds);
 
     struct StageStat {
         double totalMs = 0.0;
         float worstMs = 0.0f;
         int frames = 0;
+        /// This frame's time so far, and its running average across frames
+        /// (zeros included) - for checkFrameSpike. Not reset with the window.
+        float frameMs = 0.0f;
+        float avgMs = 0.0f;
     };
+    float frameAvgMs_ = 0.0f;
+    int spikeBaselineFrames_ = 0;
+    int suppressedSpikes_ = 0;
+    std::chrono::steady_clock::time_point lastSpikeLog_{};
     /// WOWEE_FRAME_PROFILE. The breakdown below is reported at info, which the
     /// log a bug report arrives with does not carry - so the one measurement
     /// that answers "where does the frame go" was never in the logs it was

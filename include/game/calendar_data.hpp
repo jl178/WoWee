@@ -205,6 +205,11 @@ struct CalendarDayEntry {
     /// whose sequenceType is "ONGOING" when drawing the day's list, so a
     /// week-long holiday draws its name once rather than seven times.
     bool ongoing = false;
+    /// For a holiday: which day of its run this is (1-based) and how many
+    /// days the run lasts. CalendarGetDayEvent returns both; the calendar
+    /// compares numSequenceDays with a number and broke on holiday days.
+    int sequenceIndex = 0;
+    int numSequenceDays = 0;
 };
 
 /**

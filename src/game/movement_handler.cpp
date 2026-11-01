@@ -1318,11 +1318,37 @@ void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
         (wireOp == wireOpcode(Opcode::MSG_MOVE_FALL_LAND));
     const bool isJumpOpcode  = (wireOp == wireOpcode(Opcode::MSG_MOVE_JUMP));
 
-    const float entityDuration = isStopOpcode ? 0.0f : (durationMs / 1000.0f);
-    entity->startMoveTo(canonical.x, canonical.y, canonical.z, canYaw, entityDuration);
+    // Whether the unit is still travelling after this packet: the low four
+    // movement flags (forward, backward, strafe left, strafe right) mean the
+    // same in every expansion. A stop of turning or of strafing while still
+    // running forward is not a stop, and used to halt the model mid-run.
+    const bool stillTranslating = (info.flags & 0x0Fu) != 0;
+    const bool halts = isStopOpcode && !stillTranslating;
+
+    float entityDuration = durationMs / 1000.0f;
+    if (halts) {
+        // Glide to where it stopped rather than appear there. The model runs
+        // about one packet interval behind the server, so the stop position
+        // is up to a few yards ahead of it, and the snap at every stop was
+        // the jump players saw. Travelled at the unit's own recent speed,
+        // capped short; a real disagreement (6+ yards) still snaps.
+        const float sdx = canonical.x - entity->getX();
+        const float sdy = canonical.y - entity->getY();
+        const float sdz = canonical.z - entity->getZ();
+        const float dist = std::sqrt(sdx * sdx + sdy * sdy + sdz * sdz);
+        const float speed = std::max(entity->planarSpeed(), 2.5f);
+        entityDuration = dist < 6.0f ? std::min(dist / speed, 0.35f) : 0.0f;
+    }
+    // A sample of a unit in motion is dead-reckoned past if the next one is
+    // late, instead of halting at it and jumping on; see Entity::startMoveTo.
+    entity->startMoveTo(canonical.x, canonical.y, canonical.z, canYaw, entityDuration,
+                        /*deadReckon=*/stillTranslating);
 
     if (owner_.creatureMoveCallbackRef()) {
-        const uint32_t notifyDuration = isStopOpcode ? 0u : durationMs;
+        // The same glide for the renderer: a zero here set the instance at
+        // the stop position outright, a frame before the sync loop pulled it
+        // back toward the entity.
+        const uint32_t notifyDuration = static_cast<uint32_t>(entityDuration * 1000.0f);
         owner_.creatureMoveCallbackRef()(moverGuid, canonical.x, canonical.y, canonical.z, notifyDuration);
     }
 

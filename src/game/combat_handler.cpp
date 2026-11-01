@@ -705,7 +705,10 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
 
     bool isPlayerAttacker = (data.attackerGuid == owner_.getPlayerGuid());
     bool isPlayerTarget = (data.targetGuid == owner_.getPlayerGuid());
-    if (!isPlayerAttacker && !isPlayerTarget) return;  // Not our combat
+    // Animations are for every fight in view, as in the stock client: two
+    // other units trading blows swing and flinch too. Only the combat text,
+    // sounds and auto-targeting below are kept to the player's own fights.
+    const bool ourCombat = isPlayerAttacker || isPlayerTarget;
 
     if (isPlayerAttacker) {
         lastMeleeSwingMs_ = static_cast<uint64_t>(
@@ -716,13 +719,30 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
         // is already playing; firing the melee callback here would override it.
         if (owner_.consumeSuppressMeleeSwingAnim()) {
             LOG_DEBUG("Suppressed melee swing anim - ranged shot already triggered");
-        } else {
-            if (owner_.meleeSwingCallbackRef()) owner_.meleeSwingCallbackRef()(0);
+        } else if (!data.noAnimation()) {
+            if (owner_.meleeSwingCallbackRef()) owner_.meleeSwingCallbackRef()(0, data.hitInfo);
         }
     }
-    if (!isPlayerAttacker && owner_.npcSwingCallbackRef()) {
-        owner_.npcSwingCallbackRef()(data.attackerGuid);
+    if (!isPlayerAttacker && !data.noAnimation() && owner_.npcSwingCallbackRef()) {
+        owner_.npcSwingCallbackRef()(data.attackerGuid, data.hitInfo, 0);
     }
+
+    // The victim's reaction: dodge, parry, block or flinch. Which parry and
+    // which block is the victim's weapons' business, decided where they are
+    // known.
+    if (owner_.hitReactionCallbackRef() && !data.isMiss() && !data.noAnimation() &&
+        data.victimState != VICTIMSTATE_EVADES && data.victimState != VICTIMSTATE_IS_IMMUNE) {
+        using HR = GameHandler::HitReaction;
+        HR reaction = HR::WOUND;
+        if (data.victimState == VICTIMSTATE_DODGE) reaction = HR::DODGE;
+        else if (data.victimState == VICTIMSTATE_PARRY) reaction = HR::PARRY;
+        else if (data.victimState == VICTIMSTATE_BLOCKS || data.blocked > 0) reaction = HR::BLOCK;
+        else if (data.isCrit()) reaction = HR::CRIT_WOUND;
+        owner_.hitReactionCallbackRef()(data.targetGuid, reaction);
+    }
+
+    if (!ourCombat) return;  // Not our combat: no text, sounds or targeting
+
     if (!isPlayerAttacker) {
         auto entity = owner_.getEntityManager().getEntity(data.attackerGuid);
         auto* audioCoordinator = owner_.services().audioCoordinator;
@@ -808,18 +828,6 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
         if (data.blocked > 0)
             addCombatText(CombatTextEntry::BLOCK, static_cast<int32_t>(data.blocked), 0, isPlayerAttacker, 0, data.attackerGuid, data.targetGuid);
     }
-
-    // Fire hit reaction animation on the victim
-    if (owner_.hitReactionCallbackRef() && !data.isMiss()) {
-        using HR = GameHandler::HitReaction;
-        HR reaction = HR::WOUND;
-        if (data.victimState == VICTIMSTATE_DODGE) reaction = HR::DODGE;
-        else if (data.victimState == VICTIMSTATE_PARRY) reaction = HR::PARRY;
-        else if (data.victimState == VICTIMSTATE_BLOCKS || data.blocked > 0) reaction = HR::BLOCK;
-        else if (data.isCrit()) reaction = HR::CRIT_WOUND;
-        owner_.hitReactionCallbackRef()(data.targetGuid, reaction);
-    }
-
 }
 
 void CombatHandler::handleSpellDamageLog(network::Packet& packet) {
@@ -828,7 +836,13 @@ void CombatHandler::handleSpellDamageLog(network::Packet& packet) {
 
     bool isPlayerSource = (data.attackerGuid == owner_.getPlayerGuid());
     bool isPlayerTarget = (data.targetGuid == owner_.getPlayerGuid());
-    if (!isPlayerSource && !isPlayerTarget) return;  // Not our combat
+    // Spell damage makes the victim flinch, as a melee hit does - any
+    // victim in view, not only in the player's own fights.
+    if (owner_.hitReactionCallbackRef() && data.damage > 0) {
+        owner_.hitReactionCallbackRef()(data.targetGuid, data.isCrit
+            ? GameHandler::HitReaction::CRIT_WOUND : GameHandler::HitReaction::WOUND);
+    }
+    if (!isPlayerSource && !isPlayerTarget) return;  // Not our combat: no text or targeting
 
     if (isPlayerTarget && data.attackerGuid != 0) {
         hostileAttackers_.insert(data.attackerGuid);
@@ -842,11 +856,6 @@ void CombatHandler::handleSpellDamageLog(network::Packet& packet) {
         addCombatText(CombatTextEntry::ABSORB, static_cast<int32_t>(data.absorbed), data.spellId, isPlayerSource, 0, data.attackerGuid, data.targetGuid);
     if (data.resisted > 0)
         addCombatText(CombatTextEntry::RESIST, static_cast<int32_t>(data.resisted), data.spellId, isPlayerSource, 0, data.attackerGuid, data.targetGuid);
-    // Spell damage makes the victim flinch, as a melee hit does.
-    if (owner_.hitReactionCallbackRef() && data.damage > 0) {
-        owner_.hitReactionCallbackRef()(data.targetGuid, data.isCrit
-            ? GameHandler::HitReaction::CRIT_WOUND : GameHandler::HitReaction::WOUND);
-    }
 }
 
 void CombatHandler::handleSpellHealLog(network::Packet& packet) {

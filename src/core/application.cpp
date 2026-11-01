@@ -16,7 +16,9 @@
 #include "core/ui_screen_callback_handler.hpp"
 #include "game/spell_classification.hpp"
 #include "rendering/animation/animation_ids.hpp"
+#include "rendering/animation/weapon_anim_select.hpp"
 #include "rendering/animation_controller.hpp"
+#include "rendering/spell_visual_system.hpp"
 #include <bit>
 #include <unordered_set>
 #include <cmath>
@@ -1329,6 +1331,11 @@ void Application::run() {
     // for what each was costing at high refresh rates.
     FramePacer pacer;
     const SleepPrecisionScope sleepPrecision;
+    // The step everything integrates over, smoothed; see DeltaSmoother.
+    // WOWEE_RAW_DT=1 steps by the raw frame delta instead, to compare.
+    DeltaSmoother dtSmoother;
+    const bool rawDelta = core::envFlagEnabled("WOWEE_RAW_DT", false);
+    if (rawDelta) LOG_WARNING("WOWEE_RAW_DT: stepping by the raw frame delta, unsmoothed");
     beatWatchdog();
     std::atomic<int64_t>& watchdogHeartbeatMs = watchdogHeartbeatMs_;
     // Signal flag: watchdog sets this when a stall is detected, main loop
@@ -1418,7 +1425,17 @@ void Application::run() {
         // Capped, so a stall - a breakpoint, a swapchain rebuild, a machine
         // coming back from sleep - does not teleport everything that
         // integrates over it.
-        const float deltaTime = FramePacer::toSeconds(deltaNs);
+        const float rawDeltaTime = FramePacer::toSeconds(deltaNs);
+        // Smoothed, so a frame that took longer than its neighbours does not
+        // move the camera, the character and every animation by a visibly
+        // larger step than the display advanced. The same value feeds the
+        // whole frame - input turning, physics, remote unit interpolation
+        // and animation - so none of them disagree about how long it was.
+        const float deltaTime = rawDelta ? rawDeltaTime : dtSmoother.smooth(rawDeltaTime);
+
+        // The frame just finished, against the running average: names the
+        // stages that ran long when one stands out. See checkFrameSpike.
+        checkFrameSpike(deltaNs, deltaTime);
 
         if (renderer && renderer->getCameraController() && ImGui::GetIO().WantCaptureMouse) {
             renderer->getCameraController()->releaseMouseCapture();
@@ -2355,7 +2372,7 @@ void Application::setState(AppState newState) {
                     return canon;
                 });
 
-                gameHandler->setMeleeSwingCallback([this](uint32_t spellId) {
+                gameHandler->setMeleeSwingCallback([this](uint32_t spellId, uint32_t hitInfo) {
                     if (renderer) {
                         // Ranged auto-attack spells: Auto Shot (75), Shoot (5019), Throw (2764)
                         if (game::spellclass::isRangedWeaponAutoAttack(spellId)) {
@@ -2365,11 +2382,24 @@ void Application::setState(AppState newState) {
                         } else if (spellId != 0) {
                             if (appearanceComposer_ && appearanceComposer_->isShowingRanged())
                                 appearanceComposer_->showRangedWeapon(false);
-                            if (auto* ac = renderer->getAnimationController()) ac->triggerSpecialAttack(spellId);
+                            // The animation the spell's cast kit names
+                            // (SpellVisual -> CastKit -> SpellVisualKit.AnimID):
+                            // Special1H for Heroic Strike, ShieldBash for Shield
+                            // Bash. Zero is the next ordinary swing.
+                            uint32_t kitAnim = 0;
+                            gameHandler->loadSpellNameCache();
+                            auto it = gameHandler->spellNameCacheRef().find(spellId);
+                            auto* svs = renderer->getSpellVisualSystem();
+                            if (svs && it != gameHandler->spellNameCacheRef().end() &&
+                                it->second.spellVisualId)
+                                kitAnim = svs->getKitAnimations(it->second.spellVisualId).cast;
+                            if (auto* ac = renderer->getAnimationController()) ac->triggerAbilityAnimation(kitAnim);
                         } else {
                             if (appearanceComposer_ && appearanceComposer_->isShowingRanged())
                                 appearanceComposer_->showRangedWeapon(false);
-                            if (auto* ac = renderer->getAnimationController()) ac->triggerMeleeSwing();
+                            constexpr uint32_t kHitInfoOffHand = 0x00000004;
+                            if (auto* ac = renderer->getAnimationController())
+                                ac->triggerMeleeSwing((hitInfo & kHitInfoOffHand) != 0);
                         }
                     }
                 });
@@ -3413,8 +3443,11 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
             // target.  During the dead-reckoning overrun window getX/Y/Z
             // drifts past the destination at the last known velocity;
             // using getLatest (== moveEnd while isMoving_) avoids the
-            // visible forward-drift followed by a backward snap.
-            const bool inOverrun = entity->isEntityMoving() && !entity->isActivelyMoving();
+            // visible forward-drift followed by a backward snap. A segment
+            // that extrapolates on purpose (a moving unit's late sample) is
+            // drawn where it is - see Entity::startMoveTo.
+            const bool inOverrun = entity->isEntityMoving() && !entity->isActivelyMoving() &&
+                                   !entity->extrapolatesPastDestination();
             glm::vec3 canonical(
                 inOverrun ? entity->getLatestX() : entity->getX(),
                 inOverrun ? entity->getLatestY() : entity->getY(),
@@ -3539,9 +3572,11 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                                 // but only if this model ships the animation -
                                 // display swaps can land on models without it
                                 // (the log-carrying peasant has no chop anim).
-                                targetAnim = rendering::anim::STAND;
+                                // In combat, the drawn weapon's Ready stance.
+                                targetAnim = entitySpawner_->unitIdleAnim(guid, instanceId);
                                 auto emoteIt = _creatureActiveEmotes.find(guid);
-                                if (emoteIt != _creatureActiveEmotes.end() &&
+                                if (targetAnim == rendering::anim::STAND &&
+                                    emoteIt != _creatureActiveEmotes.end() &&
                                     charRenderer->hasAnimation(instanceId, emoteIt->second)) {
                                     targetAnim = emoteIt->second;
                                 }
@@ -3550,7 +3585,26 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                         charRenderer->playAnimation(instanceId, targetAnim, /*loop=*/true);
                     }
                 }
+
+                // Combat starting or ending while the creature stands still:
+                // Stand <-> Ready, over an idle only (never over a swing, an
+                // emote loop or a death).
+                if (!isMovingNow && !isSwimmingNow && !isFlyingNow && !deadOrCorpse) {
+                    uint32_t curIdle = 0; float idleT = 0.0f, idleD = 0.0f;
+                    if (charRenderer->getAnimationState(instanceId, curIdle, idleT, idleD) &&
+                        (curIdle == rendering::anim::STAND || rendering::anim::isReadyStance(curIdle))) {
+                        uint32_t idle = entitySpawner_->unitIdleAnim(guid, instanceId);
+                        auto emoteIt = _creatureActiveEmotes.find(guid);
+                        if (idle == rendering::anim::STAND && emoteIt != _creatureActiveEmotes.end() &&
+                            charRenderer->hasAnimation(instanceId, emoteIt->second)) {
+                            idle = emoteIt->second;
+                        }
+                        if (idle != curIdle) charRenderer->playAnimation(instanceId, idle, /*loop=*/true);
+                    }
+                }
             }
+            // Weapons follow the sheath state (drawn, put away, ranged out).
+            entitySpawner_->syncUnitSheath(guid, instanceId);
             // Facing. A creature in combat that stands still turns to its target,
             // as the stock client does on its own - AzerothCore sends nothing when
             // a mob switches who it hits. Everything turns at 2*pi rad/s rather
@@ -3632,8 +3686,10 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
             }
 
             // Position sync - clamp to destination during dead-reckoning
-            // overrun to avoid drift + backward snap (same as creature loop).
-            const bool inOverrun = entity->isEntityMoving() && !entity->isActivelyMoving();
+            // overrun to avoid drift + backward snap (same as creature loop),
+            // unless the segment extrapolates on purpose (movement samples).
+            const bool inOverrun = entity->isEntityMoving() && !entity->isActivelyMoving() &&
+                                   !entity->extrapolatesPastDestination();
             glm::vec3 canonical(
                 inOverrun ? entity->getLatestX() : entity->getX(),
                 inOverrun ? entity->getLatestY() : entity->getY(),
@@ -3752,9 +3808,21 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                         } else {
                             if (isFlyingNow)        targetAnim = rendering::anim::FLY_IDLE;
                             else if (isSwimmingNow) targetAnim = rendering::anim::SWIM_IDLE;
-                            else                    targetAnim = rendering::anim::STAND;
+                            // In combat, the drawn weapon's Ready stance.
+                            else targetAnim = entitySpawner_->unitIdleAnim(guid, instanceId);
                         }
                         charRenderer->playAnimation(instanceId, targetAnim, /*loop=*/true);
+                    }
+                }
+
+                // Combat starting or ending while the player stands still:
+                // Stand <-> Ready, over an idle only.
+                if (!remoteMount && !isMovingNow && !isSwimmingNow && !isFlyingNow && !deadOrCorpse) {
+                    uint32_t curIdle = 0; float idleT = 0.0f, idleD = 0.0f;
+                    if (charRenderer->getAnimationState(instanceId, curIdle, idleT, idleD) &&
+                        (curIdle == rendering::anim::STAND || rendering::anim::isReadyStance(curIdle))) {
+                        const uint32_t idle = entitySpawner_->unitIdleAnim(guid, instanceId);
+                        if (idle != curIdle) charRenderer->playAnimation(instanceId, idle, /*loop=*/true);
                     }
                 }
 
@@ -3774,9 +3842,26 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                     }
                 }
             }
+            // Weapons follow the sheath state (drawn, put away, ranged out).
+            entitySpawner_->syncUnitSheath(guid, instanceId);
 
-            // Orientation sync
-            float renderYaw = entity->getOrientation() + glm::radians(90.0f);
+            // Orientation sync, eased rather than set. A remote player's facing
+            // arrives a packet at a time - every heartbeat while mouse-turning -
+            // so setting it outright turned the model in visible steps. An
+            // exponential approach (63% in 60ms) keeps up with a fast turn
+            // without the steps; a wide change (a turn-around, a teleport)
+            // still lands at once.
+            const float wantYaw = entity->getOrientation();
+            auto [yawIt, firstSeen] = creatureRenderYaw_.try_emplace(guid, wantYaw);
+            if (!firstSeen) {
+                const float d = std::remainder(wantYaw - yawIt->second, 2.0f * glm::pi<float>());
+                if (std::abs(d) < 0.002f || std::abs(d) > glm::radians(150.0f)) {
+                    yawIt->second = wantYaw;
+                } else {
+                    yawIt->second += d * (1.0f - std::exp(-std::max(deltaTime, 0.0f) / 0.06f));
+                }
+            }
+            float renderYaw = yawIt->second + glm::radians(90.0f);
             charRenderer->setInstanceRotation(instanceId, glm::vec3(0.0f, 0.0f, renderYaw));
             if (remoteMount) {
                 charRenderer->setInstanceRotation(remoteMount->instanceId,
@@ -3838,7 +3923,16 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
         }
     });
     if (addonManager_ && addonsLoaded_) {
-        addonManager_->update(deltaTime);
+        // Timed so a long OnUpdate pass has a name in the spike log; it used
+        // to fall between stages and show only in the frame total.
+        runInGameStage("addon OnUpdate", [&] { addonManager_->update(deltaTime); });
+        // The interface's garbage, collected a little each frame on a time
+        // budget rather than whenever an allocation happens to cross the
+        // threshold - which put the collector's work inside whatever stage
+        // allocated, a few ms at a time. See LuaEngine::stepGarbageCollector.
+        runInGameStage("lua gc", [&] {
+            if (auto* engine = addonManager_->getLuaEngine()) engine->stepGarbageCollector(1.0f);
+        });
     }
     // Always unsheath on combat engage.
     inGameStep = "auto-unsheathe";
@@ -5281,6 +5375,80 @@ void Application::noteStageTime(const char* stage, float milliseconds) {
     stat.totalMs += milliseconds;
     stat.frames += 1;
     if (milliseconds > stat.worstMs) stat.worstMs = milliseconds;
+    stat.frameMs += milliseconds;
+}
+
+void Application::checkFrameSpike(std::int64_t frameNs, float stepSeconds) {
+    // The 10s table says a stage's worst; it cannot say which stages were long
+    // in the *same* frame, or how often. This looks at each frame as it ends:
+    // when one takes more than twice the running average, it names the
+    // stages that were over their own average in it, at most once a second.
+    const float frameMs = static_cast<float>(static_cast<double>(frameNs) / 1'000'000.0);
+    const bool inWorld = state == AppState::IN_GAME;
+
+    struct Over { float excess; float ms; float avg; const std::string* name; };
+    std::vector<Over> over;
+    const bool haveBaseline = spikeBaselineFrames_ >= 60 && frameAvgMs_ > 0.0f;
+    const bool spike = inWorld && haveBaseline && frameMs > 2.0f * frameAvgMs_ &&
+                       frameMs - frameAvgMs_ > 8.0f;
+    if (spike) over.reserve(8);
+
+    constexpr float kStageAlpha = 0.05f;
+    for (auto& [name, stat] : stageStats_) {
+        if (spike) {
+            const float excess = stat.frameMs - stat.avgMs;
+            if (excess > 1.0f && stat.frameMs > 1.5f * stat.avgMs) {
+                over.push_back({excess, stat.frameMs, stat.avgMs, &name});
+            }
+        }
+        // Zeros count: a stage that only runs now and then has a low average,
+        // and the frame it does run in is exactly the one worth naming.
+        stat.avgMs += (stat.frameMs - stat.avgMs) * kStageAlpha;
+        stat.frameMs = 0.0f;
+    }
+
+    if (frameMs > 0.0f && frameMs < 1000.0f) {
+        // The spike itself is clipped before it joins the average, so a run
+        // of them does not raise the bar until none of them count.
+        const float sample = haveBaseline ? std::min(frameMs, 2.0f * frameAvgMs_) : frameMs;
+        frameAvgMs_ = frameAvgMs_ <= 0.0f ? sample : frameAvgMs_ + (sample - frameAvgMs_) * 0.05f;
+        if (inWorld) ++spikeBaselineFrames_;
+    }
+    if (!inWorld) spikeBaselineFrames_ = 0;
+    if (!spike) return;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (lastSpikeLog_.time_since_epoch().count() != 0 &&
+        now - lastSpikeLog_ < std::chrono::seconds(1)) {
+        ++suppressedSpikes_;
+        return;
+    }
+    std::sort(over.begin(), over.end(),
+              [](const Over& a, const Over& b) { return a.excess > b.excess; });
+    std::ostringstream line;
+    line.setf(std::ios::fixed);
+    line.precision(1);
+    line << "Frame spike: " << frameMs << "ms (avg " << frameAvgMs_ << "ms, stepped "
+         << stepSeconds * 1000.0f << "ms) -";
+    if (over.empty()) {
+        line << " no stage over its average (time outside the timed stages:"
+                " present/vsync wait, event pump, OS scheduling)";
+    } else {
+        line << " over their average:";
+        const size_t shown = std::min<size_t>(over.size(), 6);
+        for (size_t i = 0; i < shown; ++i) {
+            line << (i ? ", " : " ") << *over[i].name << " " << over[i].ms
+                 << "ms (avg " << over[i].avg << ")";
+        }
+        if (over.size() > shown) line << ", +" << (over.size() - shown) << " more";
+    }
+    if (suppressedSpikes_ > 0) {
+        line << " [+" << suppressedSpikes_ << " more spike frame"
+             << (suppressedSpikes_ == 1 ? "" : "s") << " since the last line]";
+    }
+    LOG_WARNING(line.str());
+    lastSpikeLog_ = now;
+    suppressedSpikes_ = 0;
 }
 
 void Application::reportStageTimes() {
@@ -5376,7 +5544,15 @@ void Application::reportStageTimes() {
         }
     }
 
-    stageStats_.clear();
+    // The window's totals start again; the running averages the spike check
+    // keeps (avgMs, frameMs) carry on across windows. A stage with no frames
+    // in a window is skipped by the table above.
+    for (auto& [name, stat] : stageStats_) {
+        (void)name;
+        stat.totalMs = 0.0;
+        stat.worstMs = 0.0f;
+        stat.frames = 0;
+    }
     stageStatFrames_ = 0;
     stageStatsSince_ = now;
 }

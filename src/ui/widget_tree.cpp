@@ -3,7 +3,6 @@
 #include <chrono>
 
 #include <algorithm>
-#include <array>
 #include <climits>
 #include <cmath>
 #include <ranges>
@@ -28,41 +27,6 @@ int layerRank(DrawLayer l) { return static_cast<int>(l); }
 } // namespace
 
 AnchorPoint resolveAnchorPoint(const std::string& rawName) {
-    // The nine names as FrameXML and SetPoint nearly always spell them, matched
-    // before anything is copied. This runs for every anchor of every region the
-    // sizing pass and the solve visit, each frame - tens of thousands of calls -
-    // and the copy and four substring searches below were most of the sizing
-    // pass. Anything else (lower case, odd spellings) takes the general path,
-    // which gives these nine the same answers.
-    switch (rawName.size()) {
-        case 3:
-            if (rawName == "TOP") return {.fx = 0.5f, .fy = 1.0f};
-            break;
-        case 4:
-            if (rawName == "LEFT") return {.fx = 0.0f, .fy = 0.5f};
-            break;
-        case 5:
-            if (rawName == "RIGHT") return {.fx = 1.0f, .fy = 0.5f};
-            break;
-        case 6:
-            if (rawName == "CENTER") return {.fx = 0.5f, .fy = 0.5f};
-            if (rawName == "BOTTOM") return {.fx = 0.5f, .fy = 0.0f};
-            break;
-        case 7:
-            if (rawName == "TOPLEFT") return {.fx = 0.0f, .fy = 1.0f};
-            break;
-        case 8:
-            if (rawName == "TOPRIGHT") return {.fx = 1.0f, .fy = 1.0f};
-            break;
-        case 10:
-            if (rawName == "BOTTOMLEFT") return {.fx = 0.0f, .fy = 0.0f};
-            break;
-        case 11:
-            if (rawName == "BOTTOMRIGHT") return {.fx = 1.0f, .fy = 0.0f};
-            break;
-        default:
-            break;
-    }
     const std::string name = upper(rawName);
     AnchorPoint p;
     // Vertical: TOP is 1, BOTTOM is 0, neither is centred. Tested before the
@@ -811,7 +775,6 @@ void WidgetTree::layout(float pixelW, float pixelH) {
 
     const auto solveStart = std::chrono::steady_clock::now();
     visibleThisPass_ = 0;
-    passVisible_.clear();
 
     Widget& rootW = widgets_[rootId_];
     rootW.left = 0.0f;
@@ -821,7 +784,6 @@ void WidgetTree::layout(float pixelW, float pixelH) {
     rootW.visibleChain = rootW.shown;
     if (rootW.visible != rootW.shown) noteVisibilityCandidate(rootId_);
     rootW.visible = rootW.shown;
-    if (rootW.visible) passVisible_.push_back(rootId_);
     rootW.effStrata = rootW.strata;
     rootW.effLevel = 0;
     rootW.effScale = 1.0f;
@@ -841,7 +803,6 @@ void WidgetTree::layout(float pixelW, float pixelH) {
         ui->visibleChain = rootW.visible && ui->shown;
         if (ui->visible != ui->visibleChain) noteVisibilityCandidate(uiParentId_);
         ui->visible = ui->visibleChain;
-        if (ui->visible) passVisible_.push_back(uiParentId_);
         ui->effStrata = ui->strata;
         ui->effLevel = 0;
         ui->effScale = 1.0f;
@@ -1002,7 +963,6 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
         const bool nowVisible = w->shown && (!parent || parent->visible) && !unanchoredFrame;
         if (nowVisible != w->visible) noteVisibilityCandidate(id);
         w->visible = nowVisible;
-        if (nowVisible && layingOut_) passVisible_.push_back(id);
     }
     // Back on the chain: what was marked under it is stale, so the next time
     // it goes off its subtree has to be walked again.
@@ -1054,24 +1014,9 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
     // a frame pinned at two opposing corners gets sized without anyone calling
     // SetSize.
     struct Constraint { float f; float target; };
-    // On the stack for the usual handful of anchors: two heap vectors per
-    // widget per frame was an allocation pair for every region the pass
-    // visits. More than eight anchors spill to the heap, as before.
-    struct Constraints {
-        std::array<Constraint, 8> local{};
-        std::vector<Constraint> spill;
-        size_t n = 0;
-        void push_back(const Constraint& c) {
-            if (n < local.size()) local[n] = c; else spill.push_back(c);
-            ++n;
-        }
-        [[nodiscard]] size_t size() const { return n; }
-        [[nodiscard]] bool empty() const { return n == 0; }
-        const Constraint& operator[](size_t i) const {
-            return i < local.size() ? local[i] : spill[i - local.size()];
-        }
-    };
-    Constraints cx, cy;
+    std::vector<Constraint> cx, cy;
+    cx.reserve(w->anchors.size());
+    cy.reserve(w->anchors.size());
 
     for (const Anchor& a : w->anchors) {
         const Widget* rel = (a.relativeTo != 0) ? get(a.relativeTo) : parent;
@@ -1089,7 +1034,7 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
         cy.push_back({.f = mp.fy, .target = relBottom + rp.fy * relH + a.y * es});
     }
 
-    auto solveAxis = [](const Constraints& cs, float explicitSize,
+    auto solveAxis = [](const std::vector<Constraint>& cs, float explicitSize,
                         float parentOrigin, float parentSize,
                         float& outOrigin, float& outSize) {
         if (cs.empty()) {
@@ -1381,16 +1326,7 @@ bool WidgetTree::buttonArtVisible(const Widget& w) const {
 
 void WidgetTree::collectDrawOrder() {
     drawOrder_.clear();
-    // Only what the pass just found drawable - a few hundred - rather than
-    // all 28k widgets, each read only to find `visible` false. The sort below
-    // orders fully (creation order breaks ties), so the order these arrive in
-    // does not matter; an id met twice is kept once.
-    std::sort(passVisible_.begin(), passVisible_.end());
-    passVisible_.erase(std::unique(passVisible_.begin(), passVisible_.end()), passVisible_.end());
-    for (const uint32_t visibleId : passVisible_) {
-        const Widget* found = get(visibleId);
-        if (!found) continue;
-        const Widget& w = *found;
+    for (const Widget& w : widgets_) {
         if (w.id == 0) continue;
         if (!w.visible) continue;
         if (w.alpha <= 0.001f) continue;

@@ -35,6 +35,24 @@ constexpr uint32_t kAttachSheathShield = 28;
 constexpr uint32_t kAttachHipWeaponLeft = 32;
 constexpr uint32_t kAttachHipWeaponRight = 33;
 
+} // namespace
+
+uint8_t sheathPlacementInvType(uint32_t sheatheType, uint8_t inventoryType) {
+    // Item.dbc SheatheType, which is what the stock client puts away by - a
+    // big one-handed axe (sheathe type 1) goes on the back, a fist weapon
+    // or a blacksmith's hammer (0) is not shown at all:
+    //   0 none, 1 two-handed weapon (back), 2 staff (back), 3 one-handed
+    //   (hip), 4 shield (back), 5 enchanter's rod, 6 off-hand, 7 fist/misc.
+    // UINT32_MAX is "no Item.dbc row": what the inventory type alone suggests.
+    switch (sheatheType) {
+        case 0: return game::InvType::NON_EQUIP;   // nowhere: hidden
+        case 1: case 2: return game::InvType::TWO_HAND;
+        case 3: case 5: case 6: case 7: return game::InvType::ONE_HAND;
+        case 4: return game::InvType::SHIELD;
+        default: return inventoryType;
+    }
+}
+
 uint32_t weaponAttachment(bool sheathed, game::EquipSlot slot, uint8_t inventoryType) {
     if (!sheathed) {
         if (inventoryType == game::InvType::SHIELD) return kAttachShield;
@@ -78,8 +96,6 @@ glm::mat4 weaponLocalTransform(bool sheathed, game::EquipSlot /*slot*/,
     }
     return transform;
 }
-
-} // namespace
 
 AppearanceComposer::AppearanceComposer(rendering::Renderer* renderer,
                                        pipeline::AssetManager* assetManager,
@@ -433,11 +449,28 @@ void AppearanceComposer::loadEquippedHelm(game::Inventory& inventory) {
     }
 }
 
+namespace {
+/// Where the local character's item is put away: its Item.dbc SheatheType,
+/// as for every other unit, else its inventory type.
+uint8_t localSheathPlacement(EntitySpawner* spawner, uint32_t itemId, uint8_t inventoryType) {
+    const auto* row = spawner ? spawner->lookupItemDbc(itemId) : nullptr;
+    return sheathPlacementInvType(row ? row->sheatheType : UINT32_MAX, inventoryType);
+}
+} // namespace
+
+void AppearanceComposer::setWeaponsSheathed(bool sheathed) {
+    if (sheathed == weaponsSheathed_) return;
+    weaponsSheathed_ = sheathed;
+    // SHEATH_STATE_UNARMED (0) or SHEATH_STATE_MELEE (1).
+    if (gameHandler_) gameHandler_->sendSetSheathed(sheathed ? 0u : 1u);
+}
+
 rendering::SheathSpot AppearanceComposer::sheathSpot(game::EquipSlot slot) const {
     if (!gameHandler_) return rendering::SheathSpot::NONE;
     const auto& equipped = gameHandler_->getInventory().getEquipSlot(slot);
     if (equipped.empty()) return rendering::SheathSpot::NONE;
-    switch (weaponAttachment(true, slot, equipped.item.inventoryType)) {
+    switch (weaponAttachment(true, slot, localSheathPlacement(entitySpawner_, equipped.item.itemId,
+                                                              equipped.item.inventoryType))) {
         case kAttachHipWeaponLeft:
         case kAttachHipWeaponRight: return rendering::SheathSpot::HIP;
         case kAttachBack:
@@ -527,8 +560,12 @@ void AppearanceComposer::loadEquippedWeapons() {
             continue;
         }
 
+        // Held by the inventory type; put away by the item's sheathe type.
+        const uint8_t placementInvType = weaponsSheathed_
+            ? localSheathPlacement(entitySpawner_, equipSlot.item.itemId, equipSlot.item.inventoryType)
+            : equipSlot.item.inventoryType;
         const uint32_t attachmentId = weaponAttachment(
-            weaponsSheathed_, ws.slot, equipSlot.item.inventoryType);
+            weaponsSheathed_, ws.slot, placementInvType);
         if (attachmentId == UINT32_MAX) continue;
 
         uint32_t displayInfoId = equipSlot.item.displayInfoId;
@@ -577,7 +614,7 @@ void AppearanceComposer::loadEquippedWeapons() {
 
         uint32_t weaponModelId = entitySpawner_->allocateWeaponModelId();
         const glm::mat4 localTransform = weaponLocalTransform(
-            weaponsSheathed_, ws.slot, equipSlot.item.inventoryType);
+            weaponsSheathed_, ws.slot, placementInvType);
         bool ok = charRenderer->attachWeapon(charInstanceId, attachmentId,
                                               weaponModel, weaponModelId, texturePath,
                                               localTransform);
