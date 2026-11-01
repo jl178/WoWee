@@ -23,6 +23,7 @@
 #include "pipeline/m2_color_track.hpp"
 #include "core/logger.hpp"
 #include <cstring>
+#include <cmath>
 #include <algorithm>
 
 namespace wowee {
@@ -1103,6 +1104,37 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                     for (uint32_t ts : readArray<uint32_t>(m2Data, ofsTs, nTs))
                         model.sheathEventTimes[s] = std::min(model.sheathEventTimes[s], ts);
                 }
+                continue;
+            }
+            // $DSL / $DSO: a doodad's own sound, the data field a SoundEntries
+            // id. $DSL loops for as long as the model is in hearing range (a
+            // torch's crackle, a fountain); $DSO is a one-shot at its times in
+            // the idle sequence (a banner's flap), every time the sequence
+            // loops. 1308 $DSL and 230 $DSO events across 3.3.5's world models.
+            const bool isDoodadLoop = std::memcmp(m2Data.data() + base, "$DSL", 4) == 0;
+            const bool isDoodadOnce = std::memcmp(m2Data.data() + base, "$DSO", 4) == 0;
+            if (isDoodadLoop || isDoodadOnce) {
+                const uint32_t soundId = rd32(base + 4);
+                if (soundId == 0) continue;
+                glm::vec3 pos(0.0f);
+                std::memcpy(&pos, m2Data.data() + base + 12, sizeof(float) * 3);
+                if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z)) pos = glm::vec3(0.0f);
+                if (isDoodadLoop) {
+                    model.doodadSounds.push_back({soundId, pos, true, 0, 0});
+                    continue;
+                }
+                // One-shot: the idle sequence's (index 0) times and length.
+                if (!wotlkEvents || model.sequences.empty()) continue;
+                if (!(model.sequences[0].flags & kM2SeqFlagEmbeddedData)) continue;
+                const uint32_t periodMs = model.sequences[0].duration;
+                if (periodMs < 100) continue;
+                if (rd32(base + trackOfs + 4) == 0) continue;
+                const uint32_t ofsArrays = rd32(base + trackOfs + 8);
+                const uint32_t nTs = rd32(ofsArrays);
+                const uint32_t ofsTs = rd32(ofsArrays + 4);
+                if (nTs == 0 || nTs > 64 || ofsTs + nTs * sizeof(uint32_t) > m2Data.size()) continue;
+                for (uint32_t ts : readArray<uint32_t>(m2Data, ofsTs, nTs))
+                    model.doodadSounds.push_back({soundId, pos, false, periodMs, ts % periodMs});
                 continue;
             }
             // The other sound-making events ($CSS, $CAH, $AHn, $FDn, $WNG)

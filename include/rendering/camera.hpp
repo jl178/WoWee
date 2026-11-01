@@ -73,7 +73,12 @@ private:
     glm::vec3 position = glm::vec3(0.0f);
     float yaw = 0.0f;
     float pitch = 0.0f;
-    float fov = 45.0f;
+    /// Vertical field of view, degrees. Stock 3.3.5a (build 12340): CGCamera
+    /// is built with fov = pi/2 (0x9e8d88, ctor FUN_00607c20 from 0x606b30),
+    /// and FUN_00607cb0 hands the projection (FUN_006bf370, which asserts
+    /// "fovyInRadians") fov * 0.6 (0x9f5ad4) as fovy: 0.9425 rad = 54.0 deg
+    /// vertical at every aspect ratio (horizontal widens with the window).
+    float fov = 54.0f;
     float aspectRatio = 16.0f / 9.0f;
     float nearPlane = 0.5f;
     float farPlane = 30000.0f;   // Improves depth precision vs extremely large far clip

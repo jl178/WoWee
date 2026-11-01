@@ -29,7 +29,7 @@ uint32_t AnimCapabilityProbe::pickFirst(Renderer* renderer, uint32_t instanceId,
     return 0;
 }
 
-AnimCapabilitySet AnimCapabilityProbe::probe(Renderer* renderer, uint32_t instanceId) {
+AnimCapabilitySet AnimCapabilityProbe::probeLocomotion(Renderer* renderer, uint32_t instanceId) {
     AnimCapabilitySet caps;
     if (!renderer || instanceId == 0) return caps;
 
@@ -43,12 +43,6 @@ AnimCapabilitySet AnimCapabilityProbe::probe(Renderer* renderer, uint32_t instan
     // Helper: pick first available from static array
     auto pick = [&](const uint32_t* candidates, size_t count) -> uint32_t {
         return pickFirst(renderer, instanceId, candidates, count);
-    };
-    // The same, for the melee chains, which are shared with the controller
-    // that plays them rather than written out again here.
-    auto pickFrom = [&](anim::MeleeChain kind) -> uint32_t {
-        const auto chain = anim::meleeAnimChain(kind);
-        return pickFirst(renderer, instanceId, chain.data(), chain.size());
     };
 
     // ── Locomotion ──────────────────────────────────────────────────────
@@ -106,6 +100,33 @@ AnimCapabilitySet AnimCapabilityProbe::probe(Renderer* renderer, uint32_t instan
         static const uint32_t swimRightCands[] = {anim::SWIM_RIGHT, anim::SWIM};
         caps.resolvedSwimRight = pick(swimRightCands, 2);
     }
+    // Turning in place. No fallback: a model without them stands still.
+    caps.resolvedShuffleLeft = has(anim::SHUFFLE_LEFT) ? anim::SHUFFLE_LEFT : 0;
+    caps.resolvedShuffleRight = has(anim::SHUFFLE_RIGHT) ? anim::SHUFFLE_RIGHT : 0;
+    return caps;
+}
+
+AnimCapabilitySet AnimCapabilityProbe::probe(Renderer* renderer, uint32_t instanceId) {
+    AnimCapabilitySet caps = probeLocomotion(renderer, instanceId);
+    if (!renderer || instanceId == 0) return caps;
+
+    auto* cr = renderer->getCharacterRenderer();
+    if (!cr) return caps;
+
+    auto has = [&](uint32_t id) -> bool {
+        return cr->hasAnimation(instanceId, id);
+    };
+
+    // Helper: pick first available from static array
+    auto pick = [&](const uint32_t* candidates, size_t count) -> uint32_t {
+        return pickFirst(renderer, instanceId, candidates, count);
+    };
+    // The same, for the melee chains, which are shared with the controller
+    // that plays them rather than written out again here.
+    auto pickFrom = [&](anim::MeleeChain kind) -> uint32_t {
+        const auto chain = anim::meleeAnimChain(kind);
+        return pickFirst(renderer, instanceId, chain.data(), chain.size());
+    };
 
     // ── Melee combat ────────────────────────────────────────────────────
     // The chains are in melee_anim_chains.hpp, which the controller that

@@ -974,7 +974,7 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
                 app_.playerGender_ = activeChar->gender;
                 app_.playerClass_ = activeChar->characterClass;
                 app_.spawnSnapToGround = false;
-                if (appearanceComposer_) appearanceComposer_->setWeaponsSheathed(false);
+                if (appearanceComposer_) appearanceComposer_->setWeaponsSheathed(false, "world load");
                 if (appearanceComposer_) appearanceComposer_->loadEquippedWeapons(); // will no-op until instance exists
                 app_.spawnPlayerCharacter();
             }

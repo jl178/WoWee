@@ -2406,12 +2406,14 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
     // Camera direction from yaw/pitch (already computed as forward3D)
     glm::vec3 camDir = -f.forward3D;  // Camera looks at pivot, so it's behind
 
-    // Smooth zoom toward user target
-    float zoomLerp = 1.0f - std::exp(-ZOOM_SMOOTH_SPEED * deltaTime);
-    currentDistance += (userTargetDistance - currentDistance) * zoomLerp;
+    // Zoom travels linearly at cameraDistanceMoveSpeed (stock FUN_006000e0).
+    stepZoomTowardTarget(deltaTime);
 
-    // Limit max zoom when inside a WMO with a ceiling (building interior)
+    // Keep the active WMO group current for the collision and floor queries.
     // Throttle: only recheck every 10 frames or when position changes >2 units.
+    //
+    // No indoor zoom cap: the stock camera has a single maximum and lets the
+    // collision pull-in deal with walls (see MAX_DISTANCE_NORMAL).
     if (wmoRenderer) {
         glm::vec3 wmoCheckDelta = targetPos - lastInsideWMOCheckPos;
         float distFromLastCheckSq = glm::dot(wmoCheckDelta, wmoCheckDelta);
@@ -2420,197 +2422,62 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
             insideWMOCheckCounter = 0;
             lastInsideWMOCheckPos = targetPos;
         }
-
-        // Pulled in indoors, and let back out again.
-        //
-        // This is the same containment test IsIndoors answers with - the one a
-        // macro's [indoors] reads and the one that says a mount is not allowed
-        // here - asked at the player rather than at the camera. Indoors the
-        // camera is enhanced being pushed off a wall and let back out, and that
-        // is what turns a corridor into a bout of motion sickness.
-        if (cachedInsideWMO) {
-            if (!indoorZoomHeld_) {
-                indoorZoomHeld_ = true;
-                outdoorTargetDistance_ = userTargetDistance;
-            }
-            if (userTargetDistance > MAX_DISTANCE_INTERIOR) {
-                userTargetDistance = MAX_DISTANCE_INTERIOR;
-            }
-        } else if (indoorZoomHeld_) {
-            indoorZoomHeld_ = false;
-            // Given back only if they have not chosen something closer while
-            // they were inside: their own wheel outranks the restore.
-            // Plus what the collision took: a zoom the sweep pulled in is not
-            // a zoom the player chose, and without this a walk down one
-            // corridor meant never getting the outdoor distance back.
-            if (userTargetDistance + collisionZoomDebt_ >= MAX_DISTANCE_INTERIOR - 0.01f &&
-                outdoorTargetDistance_ > userTargetDistance) {
-                userTargetDistance = outdoorTargetDistance_;
-            }
-        }
     }
 
-    // ===== Camera collision (WMO raycast + terrain heightfield march) =====
-    // Cast a ray from the pivot toward the camera direction to find the
-    // nearest WMO wall, and march the terrain heightfield along the same
-    // ray so hills between the pivot and camera pull the camera in too.
-    // Uses asymmetric smoothing: pull-in is fast (so the camera never
-    // visibly clips through geometry) but recovery is slow (so passing a
-    // doorway or hill crest doesn't cause a zoom-out snap).
+    // ===== Camera collision: the stock CGCamera pull-in =====
+    // Wow.exe 12340. FUN_00605d60 casts from the pivot back along the view
+    // (world intersect FUN_0077f310, flags 0x100171, | 0x20000 for water with
+    // cameraWaterCollision on) and refines the hit with a near-plane test
+    // (FUN_006059e0), backing off 1/9 yd (0xa1e354). Then FUN_00606f90:
+    //
+    //   if (dist(+0x118) - hit > 1/9) {          // 0xa1e354
+    //       dist = hit + 0.111112;               // 0xa1ea80
+    //       start smoothing dist toward the zoom (+0x1e8) over 2.0 s  // 0xa4040c
+    //   }
+    //   camera at min(hit, dist)
+    //
+    // and FUN_00603d30 eases dist back out with the cosine curve
+    // (FUN_008ca080). So the pull-in is instant, the recovery takes two
+    // seconds and starts slowly, and the zoom the player chose is never
+    // changed by a wall. Here the near-plane margin is CAM_SPHERE_RADIUS +
+    // CAM_EPSILON off the WMO hit, and the terrain is the heightfield march.
     collisionDistance = currentDistance;
 
     if ((wmoRenderer || terrainManager) && currentDistance > MIN_DISTANCE) {
-        // Built geometry and the ground are treated separately from here on.
-        //
-        // A wall or a pillar is a thing with a side to step around, and it wants
-        // reacting to sharply. A hillside is neither: it has no edge to clear,
-        // it is under the camera for as long as the slope lasts, and the height
-        // it reports changes a little with every step the player takes. Feeding
-        // the ground through the same sharp path made the camera jitter along a
-        // slope and shove forward at every rise.
-        auto wmoLimitAlong = [&](const glm::vec3& dir) -> float {
-            if (!wmoRenderer) return currentDistance;
-            float hit = wmoRenderer->raycastBoundingBoxes(pivot, dir, currentDistance);
+        float hitLimit = currentDistance;
+        if (wmoRenderer) {
+            const float hit = wmoRenderer->raycastBoundingBoxes(pivot, camDir, currentDistance);
             // hit == currentDistance means no hit (returns maxDistance on miss)
-            if (hit >= currentDistance) return currentDistance;
-            return std::max(MIN_DISTANCE, hit - CAM_SPHERE_RADIUS - CAM_EPSILON);
-        };
-
-        float rawLimit = wmoLimitAlong(camDir);
-
-        // Step around what is in the way rather than only backing away from it.
-        //
-        // Pulling straight in is what puts the camera on the player's neck the
-        // moment they set their back to a wall, and from inside their own head
-        // there is nothing to steer by. A few degrees of yaw usually clears the
-        // obstruction entirely - a pillar, a doorframe, the corner of a
-        // building - and keeps the shot.
-        //
-        // Two extra rays at most, and only on a frame that is actually blocked,
-        // which is the minority of them. The winner has to buy a real amount of
-        // clearance, so the camera does not wander for nothing.
-        constexpr float DEFLECT_MAX_DEG = 14.0f;
-        constexpr float DEFLECT_MIN_GAIN = 1.0f;   // yards of clearance worth turning for
-        float deflectTarget = 0.0f;
-        if (rawLimit < currentDistance - 0.5f && rawLimit < userTargetDistance) {
-            float bestLimit = rawLimit;
-            for (float trialDeg : {DEFLECT_MAX_DEG, -DEFLECT_MAX_DEG}) {
-                const float a = glm::radians(trialDeg);
-                const float ca = std::cos(a), sa = std::sin(a);
-                // Yaw about world Z: the camera should step sideways, not rise.
-                glm::vec3 trialDir(camDir.x * ca - camDir.y * sa,
-                                   camDir.x * sa + camDir.y * ca,
-                                   camDir.z);
-                float trialLimit = wmoLimitAlong(glm::normalize(trialDir));
-                if (trialLimit > bestLimit + DEFLECT_MIN_GAIN) {
-                    bestLimit = trialLimit;
-                    deflectTarget = trialDeg;
-                }
-            }
-            rawLimit = bestLimit;
-        }
-
-        // Ease into and out of the turn; snapping to it reads as the camera
-        // being knocked sideways.
-        {
-            const float tau = (deflectTarget != 0.0f) ? 0.12f : 0.30f;
-            const float alpha = 1.0f - std::exp(-deltaTime / tau);
-            cameraDeflectDeg_ += (deflectTarget - cameraDeflectDeg_) * alpha;
-            if (std::abs(cameraDeflectDeg_) > 0.05f) {
-                const float a = glm::radians(cameraDeflectDeg_);
-                const float ca = std::cos(a), sa = std::sin(a);
-                camDir = glm::normalize(glm::vec3(camDir.x * ca - camDir.y * sa,
-                                                  camDir.x * sa + camDir.y * ca,
-                                                  camDir.z));
+            if (hit < currentDistance) {
+                hitLimit = std::max(MIN_DISTANCE, hit - CAM_SPHERE_RADIUS - CAM_EPSILON);
             }
         }
-
-        // The ground, folded in after the deflection and on its own timing.
-        //
-        // It is never a reason to turn: there is no side to a hillside to step
-        // past, so trying to yaw around one only wanders. And its own limit is
-        // smoothed before it is used, because the marched height changes a
-        // little every step the player takes and that arrives as a shudder if
-        // it is passed straight through.
         if (!cachedInsideInteriorWMO) {
-            const float terrainLimit =
-                raymarchTerrainCameraLimit(pivot, camDir, currentDistance);
-            if (smoothedTerrainDist_ < 0.0f) smoothedTerrainDist_ = terrainLimit;
-            // Slower coming in than the built geometry above, which is what
-            // makes a slope feel like a slope rather than a series of nudges.
-            const float terrainTau = (terrainLimit < smoothedTerrainDist_) ? 0.18f : 0.45f;
-            const float terrainAlpha = 1.0f - std::exp(-deltaTime / terrainTau);
-            smoothedTerrainDist_ += (terrainLimit - smoothedTerrainDist_) * terrainAlpha;
-            rawLimit = std::min(rawLimit, smoothedTerrainDist_);
-        } else {
-            smoothedTerrainDist_ = -1.0f;
+            hitLimit = std::min(hitLimit,
+                                raymarchTerrainCameraLimit(pivot, camDir, currentDistance));
         }
 
-        // Initialise smoothed state on first use.
-        if (smoothedCollisionDist_ < 0.0f) {
-            smoothedCollisionDist_ = rawLimit;
-        }
-
-        // Asymmetric smoothing:
-        //   • Pull-in: τ ≈ 60 ms  - react quickly to prevent clipping
-        //     (instant while actively rotating, matching the 1:1 drag snap)
-        //   • Recover: τ ≈ 400 ms - zoom out slowly after leaving geometry
-        bool rotatingNow = mouseButtonDown || f.nowTurnLeft || f.nowTurnRight;
-        if (rawLimit < smoothedCollisionDist_ && rotatingNow) {
-            smoothedCollisionDist_ = rawLimit;
-        } else {
-            const float tau = (rawLimit < smoothedCollisionDist_) ? 0.06f : 0.40f;
-            float alpha = 1.0f - std::exp(-deltaTime / tau);
-            smoothedCollisionDist_ += (rawLimit - smoothedCollisionDist_) * alpha;
-        }
-
-        collisionDistance = std::min(collisionDistance, smoothedCollisionDist_);
-
-        // A collision takes the zoom in with it.
-        //
-        // The sweep moved the camera and left the zoom where it was, so the
-        // moment the obstruction passed the camera sprang back out to a
-        // distance the room had already refused - and the next step pushed it
-        // in again. That in-and-out is the whole of what makes an interior
-        // unpleasant, and no amount of smoothing fixes it, because the target
-        // it is smoothing toward is the wrong one. Bringing the target in
-        // behind the camera is what lets the view settle.
-        // Not while something else owns the distance.
-        //
-        // The barber's chair sets it to 2.4 and holds the camera on the
-        // character's face, where the sweep meets the chair and the character
-        // constantly. Pulling in there and handing it back a second later is a
-        // slow breathe in and out at close range, which from the chair reads as
-        // the view bobbing - reported as exactly that. A scripted view is not a
-        // player deciding how far back to stand.
-        const float bite = barberView_ ? 0.0f
-                                       : userTargetDistance - smoothedCollisionDist_;
-        if (bite > 0.1f) {
-            collisionClearSeconds_ = 0.0f;
-            // Toward what the sweep is asking for and no further, over about a
-            // second: passing a doorway should not collapse the zoom.
-            constexpr float kPullTau = 1.0f;
-            const float step = bite * (1.0f - std::exp(-deltaTime / kPullTau));
-            const float pulled = std::max(userTargetDistance - step, MIN_DISTANCE);
-            collisionZoomDebt_ += userTargetDistance - pulled;
-            userTargetDistance = pulled;
-        } else {
-            collisionClearSeconds_ += deltaTime;
-            // Given back only once nothing has been in the way for a moment,
-            // and more slowly than it was taken, so clearing a doorway does
-            // not throw the camera straight out into the next wall. Slower out
-            // than in is also what stops the two rules chasing each other.
-            constexpr float kSettleSeconds = 1.0f;
-            constexpr float kGiveTau = 2.5f;
-            if (collisionClearSeconds_ > kSettleSeconds && collisionZoomDebt_ > 0.001f) {
-                const float give = collisionZoomDebt_ * (1.0f - std::exp(-deltaTime / kGiveTau));
-                userTargetDistance += give;
-                collisionZoomDebt_ -= give;
+        // Advance the recovery ease (FUN_00603d30's +0x118 slot). It ends when
+        // the time is up or the zoom has come in to meet it.
+        if (collisionShownDist_ >= 0.0f) {
+            collisionEaseElapsed_ += deltaTime;
+            const float t = collisionEaseElapsed_ / kCollisionRecoverSeconds;
+            if (t >= 1.0f || currentDistance <= collisionShownDist_) {
+                collisionShownDist_ = -1.0f;
+            } else {
+                const float k = (1.0f - std::cos(t * 3.14159265f)) * 0.5f;
+                collisionShownDist_ = collisionEaseFrom_ + (currentDistance - collisionEaseFrom_) * k;
             }
         }
+        const float allowed = (collisionShownDist_ >= 0.0f) ? collisionShownDist_ : currentDistance;
+        if (allowed - hitLimit > kCollisionSnap) {
+            collisionShownDist_ = hitLimit + kCollisionSnapOffset;
+            collisionEaseFrom_ = collisionShownDist_;
+            collisionEaseElapsed_ = 0.0f;
+        }
+        collisionDistance = std::min(hitLimit, allowed);
     } else {
-        smoothedCollisionDist_ = -1.0f;   // Reset when no collision sources available
-        smoothedTerrainDist_ = -1.0f;
+        collisionShownDist_ = -1.0f;   // No collision sources: nothing to pull in
     }
 
     // Camera collision: terrain-only floor clamping
@@ -3085,9 +2952,9 @@ void CameraController::update(float deltaTime) {
         idleTimer_ = 0.0f;
 
         camera->setRotation(yaw, pitch);
-        float zoomLerp = 1.0f - std::exp(-ZOOM_SMOOTH_SPEED * deltaTime);
-        currentDistance += (userTargetDistance - currentDistance) * zoomLerp;
+        stepZoomTowardTarget(deltaTime);
         collisionDistance = currentDistance;
+        collisionShownDist_ = -1.0f;
 
         // Position camera behind character during taxi
         if (thirdPerson && followTarget) {
@@ -3132,13 +2999,8 @@ void CameraController::update(float deltaTime) {
             camera->setPosition(smoothedCamPos);
         }
 
-        // The ground limits are not kept up in flight. Left as they were at
-        // takeoff, the first frames on the ground eased toward them from a
-        // limit measured somewhere else entirely; starting over takes the
-        // ground as it is at the landing.
-        smoothedCollisionDist_ = -1.0f;
-        smoothedTerrainDist_ = -1.0f;
-
+        // No collision pull-in is carried across a flight (collisionShownDist_
+        // was cleared above), so the landing starts from the ground as it is.
         return;
     }
 
@@ -3326,20 +3188,31 @@ void CameraController::update(float deltaTime) {
         airMoveLatched_ = false;
     }
 
-    // Keyboard turning updates camera yaw (character follows yaw in renderer).
+    // Keyboard turning turns the character, and the camera with it.
+    //
+    // The stock camera keeps its yaw relative to the facing (CGCamera +0x11c,
+    // with the facing added in FUN_00604490 while the lock count +0xac is 0),
+    // so a turn key carries the camera round rigidly and an orbit offset the
+    // player set survives the turn. Holding the left button locks the yaw to
+    // the world instead (CGInputControl FUN_005fa170 -> FUN_006047e0 ->
+    // FUN_00601ff0 -> FUN_006019b0 increments +0xac), so the character turns
+    // under a camera that stays put. It used to set facingYaw = yaw, which
+    // snapped the character round to wherever the camera had been orbited.
     // Use server turn rate (rad/s) when set; otherwise fall back to WOW_TURN_SPEED (deg/s).
     const float activeTurnSpeedDeg = (turnRateOverride_ > 0.0f && turnRateOverride_ < 20.0f
                                        && !std::isnan(turnRateOverride_))
                                          ? glm::degrees(turnRateOverride_)
                                          : WOW_TURN_SPEED;
+    float turnDeltaDeg = 0.0f;
     if (nowTurnLeft && !nowTurnRight) {
-        yaw += activeTurnSpeedDeg * deltaTime;
+        turnDeltaDeg = activeTurnSpeedDeg * deltaTime;
     } else if (nowTurnRight && !nowTurnLeft) {
-        yaw -= activeTurnSpeedDeg * deltaTime;
+        turnDeltaDeg = -activeTurnSpeedDeg * deltaTime;
     }
-    if (nowTurnLeft || nowTurnRight) {
+    if (turnDeltaDeg != 0.0f) {
+        facingYaw += turnDeltaDeg;
+        if (!leftMouseDown) yaw += turnDeltaDeg;
         camera->setRotation(yaw, pitch);
-        facingYaw = yaw;
     }
 
     // Tick down gravity suspension timer (used after world entry to prevent
@@ -3396,6 +3269,12 @@ void CameraController::update(float deltaTime) {
     } else {
         runPace = hasMoveInput && shiftDown;
     }
+
+    // Swing the camera back behind a moving character (cameraSmoothStyle).
+    // Before forward3D is read, so the frame is drawn with the eased angles.
+    updateStockFollow(deltaTime, nowForward, nowBackward, nowStrafeLeft, nowStrafeRight,
+                      nowTurnLeft, nowTurnRight,
+                      rightMouseDown || mouseAutorun || steering_ || (swimming && hasMoveInput));
 
     // Get camera axes - project forward onto XY plane for walking
     glm::vec3 forward3D = camera->getForward();
@@ -3797,6 +3676,8 @@ void CameraController::resetAngles() {
     yaw = defaultYaw;
     facingYaw = defaultYaw;
     pitch = defaultPitch;
+    followYaw_.active = false;
+    followPitch_.active = false;
     camera->setRotation(yaw, pitch);
 }
 
@@ -3808,6 +3689,9 @@ void CameraController::reset() {
     yaw = defaultYaw;
     facingYaw = defaultYaw;
     pitch = defaultPitch;
+    followYaw_.active = false;
+    followPitch_.active = false;
+    collisionShownDist_ = -1.0f;
     verticalVelocity = 0.0f;
     grounded = true;
     swimming = false;
@@ -4085,6 +3969,11 @@ bool CameraController::groundNotStreamedYet(float x, float y) const {
 void CameraController::applyLookDelta(float dxPixels, float dyPixels) {
     if (!enabled || !camera || introActive) return;
 
+    // A deliberate look, like a mouse drag: it ends any follow swing, which
+    // would otherwise override it for the rest of its duration.
+    followYaw_.active = false;
+    followPitch_.active = false;
+
     yaw -= dxPixels * mouseSensitivity;
     const float invert = invertMouse ? 1.0f : -1.0f;
     pitch += dyPixels * mouseSensitivity * invert;
@@ -4093,20 +3982,180 @@ void CameraController::applyLookDelta(float dxPixels, float dyPixels) {
 }
 
 void CameraController::processMouseWheel(float delta) {
-    // The player's own choice clears whatever the sweep had taken: a distance
-    // they picked outranks one this arrived at, and it must not be given back
-    // on top of theirs a moment later.
-    collisionZoomDebt_ = 0.0f;
-    collisionClearSeconds_ = 0.0f;
-    // Scale zoom speed proportionally to current distance for fine control up close
-    float zoomSpeed = glm::max(userTargetDistance * 0.15f, 0.3f);
-    userTargetDistance -= delta * zoomSpeed;
+    // A notch is a yard, at every distance: CameraZoomIn(1.0) (FUN_006017e0)
+    // asks FUN_005ff950 for 1 yd, travelled at cameraDistanceMoveSpeed - see
+    // stepZoomTowardTarget. It used to be 15% of the distance.
+    userTargetDistance -= delta * kZoomStepYards;
     // A multiple of the original client's limit rather than a choice between
     // two numbers, so the game's own Max Camera Distance slider means something
-    // at every position instead of only at its ends.
-    float maxDist = MAX_DISTANCE_NORMAL * maxDistanceFactor_;
-    if (cachedInsideWMO) maxDist = std::min(maxDist, MAX_DISTANCE_INTERIOR);
+    // at every position instead of only at its ends. Stock: min(15 * factor,
+    // 50), FUN_006000e0; there is no separate indoor limit.
+    float maxDist = std::min(MAX_DISTANCE_NORMAL * maxDistanceFactor_, MAX_DISTANCE_EXTENDED);
     userTargetDistance = glm::clamp(userTargetDistance, MIN_DISTANCE, maxDist);
+}
+
+void CameraController::stepZoomTowardTarget(float deltaTime) {
+    // Linear, not eased: FUN_006000e0 moves the zoom distance (+0x1e8) by
+    // elapsed_ms * cameraDistanceMoveSpeed * 0.001 each frame until the
+    // requested travel time is used up, and the camera distance (+0x118)
+    // follows it directly unless a collision recovery is easing it.
+    const float diff = userTargetDistance - currentDistance;
+    const float step = kZoomMoveSpeed * deltaTime;
+    if (std::abs(diff) <= step) {
+        currentDistance = userTargetDistance;
+    } else {
+        currentDistance += (diff > 0.0f) ? step : -step;
+    }
+}
+
+void CameraController::updateStockFollow(float deltaTime, bool forward, bool backward,
+                                         bool strafeLeft, bool strafeRight,
+                                         bool turnLeft, bool turnRight,
+                                         bool cameraDrivesFacing) {
+    // Stock 3.3.5a following, CGCamera FUN_00602760 (Wow.exe 12340).
+    //
+    // It runs when the movement keys or mouse buttons change, not each frame.
+    // It works out the situation - the highest of Fear 6, Turn 5, Strafe 4,
+    // Move 3, Track 2, Stop 1, Idle 0 that applies - and reads two CVars for
+    // it under the current style: cameraSmooth<Style><Situation>Delay and
+    // ...Factor. Then per component cameraSmoothViewData<Style><Comp>Delay
+    // and ...Factor; the component's factor is the two multiplied. Defaults:
+    //
+    //   style      Idle Stop Move Strafe Turn | ViewData Dist Pitch Yaw
+    //   Never(0)    0    0    0     0     0   |           0     0    0
+    //   Smart(1)    0    0    1     1     1   |           0     0    1
+    //   Always(2)   1    1    1     1     1   |           0     1    1
+    //   Smarter(4)  0    0    1     1     1   |           0     1    1
+    //
+    // (delays all 0; Track and Fear are 0.4 s / 10 under Smart and Smarter).
+    // A component whose factor is 0 stops where it is (FUN_005fef40 /
+    // FUN_005feee0). Otherwise:
+    //
+    //   yaw   (FUN_00602680 gate: cameraSmoothYaw, offset from facing != 0)
+    //         target = facing + view yaw (0); FUN_00601410:
+    //         duration = |delta| / cameraYawSmoothSpeed(180 deg/s) * factor
+    //   pitch (FUN_005ffeb0 gate: cameraSmoothPitch, not swimming/flying,
+    //         pitch outside [cameraPitchSmoothMin 0, Max 30] deg down)
+    //         target = the nearer edge of that band; FUN_00601190:
+    //         duration = |delta| / cameraPitchSmoothSpeed(45 deg/s) * factor
+    //
+    // The longest duration of the components started, clamped to
+    // [cameraSmoothTimeMin 0.1, cameraSmoothTimeMax 2.0] s, is given to all of
+    // them, and FUN_00603d30 runs each with the cosine curve of FUN_008ca080.
+    // A component already easing toward the same target keeps going rather
+    // than restarting (the early return in FUN_00601410 / FUN_00601190).
+    auto wrap180 = [](float d) {
+        d = std::fmod(d + 180.0f, 360.0f);
+        if (d < 0.0f) d += 360.0f;
+        return d - 180.0f;
+    };
+
+    // Not while the camera is someone else's: the left button holds the yaw
+    // to the world and the player is placing it; the right button, autorun on
+    // both buttons, a steering finger or swimming make the facing follow the
+    // camera, so there is no offset to take back.
+    if (!thirdPerson || externalFollow_ || introActive || barberView_ ||
+        leftMouseDown || cameraDrivesFacing) {
+        followYaw_.active = false;
+        followPitch_.active = false;
+        // Evaluated again when released, as FUN_005fa450 does on button up.
+        followInputSig_ = 0xFFFFFFFFu;
+        return;
+    }
+
+    const uint32_t sig = (forward ? 1u : 0u) | (backward ? 2u : 0u) |
+                         (strafeLeft ? 4u : 0u) | (strafeRight ? 8u : 0u) |
+                         (turnLeft ? 16u : 0u) | (turnRight ? 32u : 0u);
+    if (sig != followInputSig_) {
+        followInputSig_ = sig;
+
+        // Situation factor; the delays of these situations are all zero.
+        const bool moving = forward || backward || strafeLeft || strafeRight ||
+                            turnLeft || turnRight;
+        float situationFactor = 0.0f;
+        switch (followStyle_) {
+            case 0:  situationFactor = 0.0f; break;                    // Never
+            case 1:                                                    // Smart
+            case 2:  situationFactor = moving ? 1.0f : 0.0f; break;    // Smarter
+            default: situationFactor = 1.0f; break;                    // Always
+        }
+        const float yawFactor = situationFactor * (followStyle_ == 0 ? 0.0f : 1.0f);
+        const float pitchFactor = situationFactor * (followStyle_ >= 2 ? 1.0f : 0.0f);
+
+        float duration = 0.0f;
+        bool yawRuns = false;
+        bool pitchRuns = false;
+
+        // Pitch first, as FUN_00602760 does it. Pitch here is up-positive;
+        // the stock band is in degrees looking down.
+        const bool flying = isFlightAirborne();
+        const float down = -pitch;
+        if (!swimming && !flying &&
+            (down < kFollowPitchDownMinDeg || down > kFollowPitchDownMaxDeg)) {
+            if (pitchFactor == 0.0f) {
+                followPitch_.active = false;
+            } else {
+                const float targetPitch =
+                    -std::clamp(down, kFollowPitchDownMinDeg, kFollowPitchDownMaxDeg);
+                if (!(followPitch_.active && std::abs(followPitch_.to - targetPitch) < 0.06f)) {
+                    followPitch_.active = true;
+                    followPitch_.from = pitch;
+                    followPitch_.to = targetPitch;
+                    followPitch_.elapsed = 0.0f;
+                    followPitch_.duration =
+                        std::abs(targetPitch - pitch) / kFollowPitchSpeedDeg * pitchFactor;
+                }
+                pitchRuns = true;
+                duration = std::max(duration, followPitch_.duration);
+            }
+        }
+
+        const float offset = wrap180(yaw - facingYaw);
+        if (std::abs(offset) > 0.06f) {   // 0.001 rad, the stock epsilon (0xa1e34c)
+            if (yawFactor == 0.0f) {
+                followYaw_.active = false;
+            } else {
+                if (!followYaw_.active) {
+                    followYaw_.active = true;
+                    followYaw_.from = offset;
+                    followYaw_.to = 0.0f;
+                    followYaw_.elapsed = 0.0f;
+                    followYaw_.duration = std::abs(offset) / kFollowYawSpeedDeg * yawFactor;
+                }
+                yawRuns = true;
+                duration = std::max(duration, followYaw_.duration);
+            }
+        } else if (yawFactor == 0.0f) {
+            followYaw_.active = false;
+        }
+
+        duration = std::clamp(duration, kFollowTimeMin, kFollowTimeMax);
+        if (yawRuns) followYaw_.duration = duration;
+        if (pitchRuns) followPitch_.duration = duration;
+    }
+
+    auto ease = [](FollowEase& e, float dt) {
+        e.elapsed += dt;
+        const float t = (e.duration > 0.0f) ? e.elapsed / e.duration : 1.0f;
+        if (t >= 1.0f) {
+            e.active = false;
+            return e.to;
+        }
+        const float k = (1.0f - std::cos(t * 3.14159265f)) * 0.5f;
+        return e.from + (e.to - e.from) * k;
+    };
+    bool changed = false;
+    if (followYaw_.active) {
+        // Relative to the facing, so a turn key during the swing carries it
+        // round with the character, as the stock relative yaw does.
+        yaw = facingYaw + ease(followYaw_, deltaTime);
+        changed = true;
+    }
+    if (followPitch_.active) {
+        pitch = glm::clamp(ease(followPitch_, deltaTime), MIN_PITCH, MAX_PITCH);
+        changed = true;
+    }
+    if (changed) camera->setRotation(yaw, pitch);
 }
 
 void CameraController::setFollowTarget(glm::vec3* target) {

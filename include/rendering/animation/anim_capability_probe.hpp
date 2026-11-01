@@ -24,6 +24,11 @@ public:
     /// Returns a fully-populated AnimCapabilitySet.
     static AnimCapabilitySet probe(Renderer* renderer, uint32_t instanceId);
 
+    /// Only the locomotion IDs (stand, walk, run, back, jump, fall, swim,
+    /// shuffles): what LocomotionFSM reads, for remote players and NPCs,
+    /// at a fraction of the full probe's lookups.
+    static AnimCapabilitySet probeLocomotion(Renderer* renderer, uint32_t instanceId);
+
 
 private:
     /// Pick the first available animation from candidates for the given instance.

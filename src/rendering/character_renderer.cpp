@@ -21,6 +21,7 @@
 #include "rendering/normal_map.hpp"
 #include "rendering/m2_track_sampler.hpp"
 #include "rendering/animation/animation_ids.hpp"
+#include "rendering/animation/sequence_variation.hpp"
 #include "core/thread_pool.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/bone_slots.hpp"
@@ -2045,19 +2046,32 @@ void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId,
     instance.animationTime = 0.0f;
     instance.animationLoop = loop;
 
-    // Prefer variationIndex==0 (primary animation); fall back to first match
-    int firstMatch = -1;
-    for (size_t i = 0; i < model.sequences.size(); i++) {
-        if (model.sequences[i].id == animationId) {
-            if (firstMatch < 0) firstMatch = static_cast<int>(i);
-            if (model.sequences[i].variationIndex == 0) {
-                instance.currentSequenceIndex = static_cast<int>(i);
-                break;
+    // A loop starts on a variation rolled by the sequences' frequency weights
+    // and rolls again at every lap (update()), as the stock client does; a
+    // one-shot plays its primary (variationIndex 0), whose length the swing
+    // and cast timers were measured against.
+    instance.variationLapsLeft = 0;
+    if (loop) {
+        instance.currentSequenceIndex =
+            anim::pickSequenceVariation(model.sequences, model.bones, animationId);
+        if (instance.currentSequenceIndex >= 0) {
+            instance.variationLapsLeft =
+                anim::pickSequenceExtraLaps(model.sequences[instance.currentSequenceIndex]);
+        }
+    } else {
+        int firstMatch = -1;
+        for (size_t i = 0; i < model.sequences.size(); i++) {
+            if (model.sequences[i].id == animationId) {
+                if (firstMatch < 0) firstMatch = static_cast<int>(i);
+                if (model.sequences[i].variationIndex == 0) {
+                    instance.currentSequenceIndex = static_cast<int>(i);
+                    break;
+                }
             }
         }
-    }
-    if (instance.currentSequenceIndex < 0 && firstMatch >= 0) {
-        instance.currentSequenceIndex = firstMatch;
+        if (instance.currentSequenceIndex < 0 && firstMatch >= 0) {
+            instance.currentSequenceIndex = firstMatch;
+        }
     }
 
     // Not in this model: AnimationData.dbc's fallback chain, as the stock
@@ -2097,6 +2111,8 @@ void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId,
             LOG_WARNING("Animation ", animationId, " not found in model ", mId, ", using default");
         }
     }
+    // An alias (flag 0x40) has no keyframes; it plays the sequence it names.
+    instance.currentSequenceIndex = anim::resolveSequenceAlias(model.sequences, instance.currentSequenceIndex);
 
     // Cross-fade out of whatever the bones were doing. The stock client fades
     // over the incoming sequence's blendTime (150 ms on nearly every 3.3.5
@@ -2310,6 +2326,39 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
                     // Clamp to [0, duration) to handle multiple loops in one frame
                     while (inst.animationTime >= static_cast<float>(seq.duration)) {
                         inst.animationTime -= static_cast<float>(seq.duration);
+                    }
+                    // Next lap: the laps the variation still owes, else a new
+                    // variation rolled by frequency (the Stand fidgets), faded
+                    // in over its blendTime like any other switch.
+                    if (inst.variationLapsLeft > 0) {
+                        --inst.variationLapsLeft;
+                    } else {
+                        const auto& seqs = inst.cachedModel->data.sequences;
+                        const auto& bones = inst.cachedModel->data.bones;
+                        if (anim::hasSequenceVariations(seqs, inst.currentAnimationId)) {
+                            int next = anim::pickSequenceVariation(seqs, bones, inst.currentAnimationId);
+                            if (next >= 0) {
+                                inst.variationLapsLeft = anim::pickSequenceExtraLaps(seqs[next]);
+                                next = anim::resolveSequenceAlias(seqs, next);
+                            }
+                            if (next >= 0 && next < static_cast<int>(seqs.size()) &&
+                                next != inst.currentSequenceIndex) {
+                                if (!bones.empty() && inst.localPose.size() == bones.size()) {
+                                    const uint32_t blendMs = seqs[next].blendTime;
+                                    inst.blendFromPose = inst.localPose;
+                                    inst.blendElapsedMs = 0.0f;
+                                    inst.blendDurationMs = static_cast<float>(
+                                        blendMs > 0 ? std::min<uint32_t>(blendMs, 1000) : 150);
+                                }
+                                inst.currentSequenceIndex = next;
+                                const float nextDur = static_cast<float>(seqs[next].duration);
+                                if (nextDur > 0.0f) {
+                                    while (inst.animationTime >= nextDur) inst.animationTime -= nextDur;
+                                } else {
+                                    inst.animationTime = 0.0f;
+                                }
+                            }
+                        }
                     }
                 } else {
                     // One-shot animation finished: return to the caller-specified

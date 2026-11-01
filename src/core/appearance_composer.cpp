@@ -506,21 +506,40 @@ double sheathClockMs() {
     return std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+
+/// Every change of the local sheath state, with what caused it: the first
+/// 40 in full, then at most one a second (with a count of those skipped),
+/// so a loop that flips it shows up without flooding the log.
+void logSheathChange(const char* what, bool sheathed, const char* cause) {
+    static int logged = 0;
+    static double lastMs = 0.0;
+    static int skipped = 0;
+    const double now = sheathClockMs();
+    if (logged >= 40 && now - lastMs < 1000.0) { ++skipped; return; }
+    ++logged;
+    lastMs = now;
+    LOG_INFO("Sheath: ", what, " -> ", sheathed ? "put away" : "drawn", " (cause: ",
+             cause ? cause : "?", ")", skipped ? " [+" : "", skipped ? std::to_string(skipped) : "",
+             skipped ? " skipped]" : "");
+    skipped = 0;
+}
 } // namespace
 
-void AppearanceComposer::setWeaponsSheathed(bool sheathed) {
+void AppearanceComposer::setWeaponsSheathed(bool sheathed, const char* cause) {
     // Immediate: whatever reach was playing or queued is superseded.
     sheathReachActive_ = false;
     sheathQueued_ = -1;
     if (sheathed == weaponsSheathed_) return;
     weaponsSheathed_ = sheathed;
+    logSheathChange("set", sheathed, cause);
     // SHEATH_STATE_UNARMED (0) or SHEATH_STATE_MELEE (1).
     if (gameHandler_) gameHandler_->sendSetSheathed(sheathed ? 0u : 1u);
 }
 
-void AppearanceComposer::applyWeaponsSheathed(bool sheathed, bool withSound) {
+void AppearanceComposer::applyWeaponsSheathed(bool sheathed, bool withSound, const char* cause) {
     if (sheathed == weaponsSheathed_) return;
     weaponsSheathed_ = sheathed;
+    logSheathChange("hand-off", sheathed, cause);
     if (gameHandler_) gameHandler_->sendSetSheathed(sheathed ? 0u : 1u);
     loadEquippedWeapons();
     if (!withSound || !gameHandler_ || !entitySpawner_ || !renderer_) return;
@@ -536,18 +555,27 @@ void AppearanceComposer::applyWeaponsSheathed(bool sheathed, bool withSound) {
     }
 }
 
-void AppearanceComposer::requestWeaponsSheathed(bool sheathed) {
+void AppearanceComposer::requestWeaponsSheathed(bool sheathed, const char* cause) {
     if (sheathReachActive_) {
         // Wait for the reach in flight; the last request is the one kept.
+        // A request matching where the reach already goes queues nothing:
+        // re-asked every frame (auto-draw while attacking), it would otherwise
+        // overwrite a different request made in between.
+        if (sheathed == sheathReachTarget_ && sheathQueued_ < 0) return;
+        if ((sheathQueued_ == 1) != sheathed || sheathQueued_ < 0)
+            logSheathChange("queued", sheathed, cause);
         sheathQueued_ = sheathed ? 1 : 0;
+        sheathQueuedCause_ = cause;
         return;
     }
     sheathQueued_ = -1;
     if (sheathed == weaponsSheathed_) return;
-    startSheathReach(sheathed);
+    startSheathReach(sheathed, cause);
 }
 
-void AppearanceComposer::startSheathReach(bool sheathed) {
+void AppearanceComposer::startSheathReach(bool sheathed, const char* cause) {
+    logSheathChange("reach starts", sheathed, cause);
+    sheathReachCause_ = cause;
     rendering::AnimationController::SheathReachTiming timing;
     if (renderer_ && renderer_->getAnimationController()) {
         timing = renderer_->getAnimationController()->playWeaponSheathAnimation(
@@ -555,7 +583,7 @@ void AppearanceComposer::startSheathReach(bool sheathed) {
     }
     if (timing.durationMs == 0) {
         // No reach to play (nothing in either hand, or no such animation).
-        applyWeaponsSheathed(sheathed, true);
+        applyWeaponsSheathed(sheathed, true, cause);
         return;
     }
     const double now = sheathClockMs();
@@ -571,14 +599,14 @@ void AppearanceComposer::updateSheathReach() {
     const double now = sheathClockMs();
     if (!sheathReachSwapped_ && now >= sheathSwapAtMs_) {
         sheathReachSwapped_ = true;
-        applyWeaponsSheathed(sheathReachTarget_, true);
+        applyWeaponsSheathed(sheathReachTarget_, true, sheathReachCause_);
     }
     if (now < sheathEndAtMs_) return;
     sheathReachActive_ = false;
     if (sheathQueued_ >= 0) {
         const bool queued = sheathQueued_ == 1;
         sheathQueued_ = -1;
-        if (queued != weaponsSheathed_) startSheathReach(queued);
+        if (queued != weaponsSheathed_) startSheathReach(queued, sheathQueuedCause_);
     }
 }
 

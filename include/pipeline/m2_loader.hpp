@@ -288,6 +288,18 @@ struct M2Model {
     };
     std::vector<std::vector<SoundEvent>> soundEvents;
 
+    // A doodad's own sounds: $DSL events (loop) and $DSO events (one-shot at
+    // timeMs into the idle sequence, every periodMs - that sequence's length).
+    // The data field is a SoundEntries id; position is in model space.
+    struct DoodadSound {
+        uint32_t soundEntryId = 0;
+        glm::vec3 position{0.0f};
+        bool loop = true;
+        uint32_t periodMs = 0;
+        uint32_t timeMs = 0;
+    };
+    std::vector<DoodadSound> doodadSounds;
+
     // Weapon hand-off ($SHL / $SHR) per sequence index, in ms: the frame of
     // Sheath (89) / HipSheath (90) where the hand reaches the sheath and the
     // weapon moves between hand and back or hip (HumanMale: 500 of 1000 on

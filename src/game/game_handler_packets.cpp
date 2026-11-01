@@ -538,18 +538,21 @@ void GameHandler::registerCoreOpcodes() {
         Opcode::SMSG_DYNAMIC_DROP_ROLL_RESULT, Opcode::SMSG_DESTRUCTIBLE_BUILDING_DAMAGE,
     }) { registerSkipHandler(op); }
 
-    // Game object despawn animation - reset state to closed before actual despawn
+    // Game object despawn animation: the model plays its Despawn sequence
+    // (AnimationData 157) before the destroy that follows removes it. It used
+    // to send state 0, which is ACTIVE - every despawning object swung open.
     dispatchTable_[Opcode::SMSG_GAMEOBJECT_DESPAWN_ANIM] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(8)) return;
         uint64_t guid = packet.readUInt64();
-        // Trigger a CLOSE animation / freeze before the object is removed
-        if (gameObjectStateCallback_) gameObjectStateCallback_(guid, 0);
+        constexpr uint32_t kAnimDespawn = 157;   // rendering::anim::DESPAWN
+        if (gameObjectCustomAnimCallback_) gameObjectCustomAnimCallback_(guid, kAnimDespawn);
     };
-    // Game object reset state - return to READY(closed) state
+    // Game object reset state: back to GO_STATE_READY (1, closed). 0 is
+    // ACTIVE (open), which is what this used to send.
     dispatchTable_[Opcode::SMSG_GAMEOBJECT_RESET_STATE] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(8)) return;
         uint64_t guid = packet.readUInt64();
-        if (gameObjectStateCallback_) gameObjectStateCallback_(guid, 0);
+        if (gameObjectStateCallback_) gameObjectStateCallback_(guid, 1);
     };
     dispatchTable_[Opcode::SMSG_FORCED_DEATH_UPDATE] = [this](network::Packet& packet) {
         playerDead_ = true;
@@ -1205,8 +1208,15 @@ void GameHandler::registerCoreOpcodes() {
                             " serverAnimProgress=", animId);
             }
         }
-        if (!ownedFishingBite && gameObjectCustomAnimCallback_)
-            gameObjectCustomAnimCallback_(guid, animId);
+        // The payload is a custom animation index, which the game plays as
+        // Custom0 + n (AnimationData 153-156). It was passed as a raw M2
+        // animation id, so index 0 asked for Stand and 1-3 for Death/Spell/
+        // Stop. An out-of-range index (the bobber's anim progress, 100, from
+        // other players' fishing) is taken as Custom0, which is that splash.
+        if (!ownedFishingBite && gameObjectCustomAnimCallback_) {
+            constexpr uint32_t kAnimCustom0 = 153;   // rendering::anim::CUSTOM_0
+            gameObjectCustomAnimCallback_(guid, kAnimCustom0 + (animId < 4 ? animId : 0));
+        }
     };
 
     // Item refund / socket gems / item time

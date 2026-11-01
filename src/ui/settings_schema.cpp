@@ -302,8 +302,11 @@ constexpr SettingDesc kSchema[] = {
 
     // ------------------------------------------------------------------ Camera
     {"fov", "Field of view", SettingKind::Float, 45, 110, 1, "Camera", "View",
-     "How wide a view the camera takes, in degrees. 70 is what the\n"
-     "original client shows; wider fits more in and stretches the edges.", "", 70},
+     "How tall a view the camera takes, in degrees from top to bottom.\n"
+     "54 is what the original client shows; wider fits more in and\n"
+     "stretches the edges.", "", 54},
+    // 54: the stock client's vertical fov, 0.6 * pi/2 (Wow.exe 12340,
+    // FUN_00607cb0 @ 0x607d2f: fmul [0x9f5ad4] = 0.6 on CGCamera's pi/2).
     // The client shakes the camera for spell effects and for thunderstorms, and
     // there was no control over it. There would not have been in 2004 - the
     // idea that this is something to offer is newer than the game - and it is
@@ -317,15 +320,20 @@ constexpr SettingDesc kSchema[] = {
     // Max Camera Distance was the game's own Camera page's until 2026-09-06,
     // when it was the one control on that page not already a row here - the
     // other two, follow speed and camera style, wrote camerastiffness and
-    // smoothfollow. In yards rather than the multiple of 22 the game's slider
-    // counted in; kClientCVars scales cameraDistanceMaxFactor by 22 for an
+    // smoothfollow. In yards rather than the multiple of 15 the game's slider
+    // counted in; kClientCVars scales cameraDistanceMaxFactor by 15 for an
     // addon or a macro that still writes it. Before either there was an
     // extended-zoom checkbox of this client's own, a choice between two
     // positions where this is every distance between them.
-    {"cameramaxdistance", "Max camera distance", SettingKind::Int, 22, 50, 1, "Camera", "",
-     "How far back the camera can be pulled, in yards. 22 is what the\n"
-     "original client gives; further out shows more of a fight and less\n"
-     "of your character.", "", 22},
+    //
+    // Stock (Wow.exe 12340): cameraDistanceMax defaults to "15.0" and
+    // cameraDistanceMaxFactor to "1.0" (registered in FUN_005fd910); the
+    // zoom limit is min(max * factor, 50) (FUN_006000e0, 50.0 at 0xa1e2fc).
+    // The Interface Options slider moved the factor 1..2, so 15..30 yards.
+    {"cameramaxdistance", "Max camera distance", SettingKind::Int, 15, 50, 1, "Camera", "",
+     "How far back the camera can be pulled, in yards. 15 is what the\n"
+     "original client gives, and its slider went to 30; further out shows\n"
+     "more of a fight and less of your character.", "", 15},
     {"camerastiffness", "Camera follow speed", SettingKind::Float, 5, 100, 1, "Camera", "",
      "How quickly the camera catches up when you move or turn. Higher\n"
      "is tighter and steadier; lower trails behind and feels floaty.", "", 30},
@@ -335,8 +343,19 @@ constexpr SettingDesc kSchema[] = {
     {"smoothfollow", "Smooth follow", SettingKind::Bool, 0, 0, 0, "Camera", "",
      "Ease the camera round behind you as you turn, rather than\n"
      "snapping straight to it.", "", 0},
+    // The game's Camera Following Style, cameraSmoothStyle. Its values are
+    // 0 Never, 1 Smart ("Only horizontal when moving"), 2 Always and
+    // 4 Smarter ("Only when moving"); stock defaults to 4 (Wow.exe 12340,
+    // FUN_005fd910, default string at *0xad1c2c). The indices here are in
+    // the dropdown's order; CameraController::setCameraFollowStyle maps them.
+    {"camerafollowstyle", "Camera following style", SettingKind::Enum, 0, 3, 1, "Camera", "",
+     "When the camera swings back behind you after you have turned it.\n"
+     "Only when moving is the original client's default: it stays where\n"
+     "you put it until you move, then comes round behind you.",
+     "Never|Only horizontal when moving|Only when moving|Always", 2},
+    // Off by default: the stock client has no idle camera.
     {"idleorbit", "Idle orbit", SettingKind::Bool, 0, 0, 0, "Camera", "",
-     "Slowly circle the camera around you while you stand still.", "", 1},
+     "Slowly circle the camera around you while you stand still.", "", 0},
     {"mousespeed", "Mouse sensitivity", SettingKind::Float, 0.05f, 1.0f, 0.05f, "Camera", "Mouse",
      "How far the view turns for a given movement of the mouse. The game's\n"
      "own panel offered this twice, as sensitivity and as look speed, and\n"

@@ -11,6 +11,7 @@
 #include "audio/combat_sound_manager.hpp"
 #include "audio/spell_sound_manager.hpp"
 #include "audio/movement_sound_manager.hpp"
+#include "audio/world_sound_emitters.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "audio/day_night.hpp"
 #include "game/zone_manager.hpp"
@@ -46,12 +47,17 @@ bool AudioCoordinator::initialize() {
     combatSoundManager_ = std::make_unique<CombatSoundManager>();
     spellSoundManager_ = std::make_unique<SpellSoundManager>();
     movementSoundManager_ = std::make_unique<MovementSoundManager>();
+    worldSoundEmitters_ = std::make_unique<WorldSoundEmitters>();
+    // The terrain can hand it doodads before the tables are read; it resolves
+    // them once soundData_ has loaded.
+    worldSoundEmitters_->setSoundData(&soundData_);
 
-    LOG_INFO("AudioCoordinator initialized with ", 11, " audio managers");
+    LOG_INFO("AudioCoordinator initialized with ", 12, " audio managers");
     return true;
 }
 void AudioCoordinator::shutdown() {
     // Reset all managers first (they may reference AudioEngine)
+    worldSoundEmitters_.reset();
     movementSoundManager_.reset();
     spellSoundManager_.reset();
     combatSoundManager_.reset();
@@ -81,6 +87,7 @@ void AudioCoordinator::loadSoundData(pipeline::AssetManager* assets) {
         ambienceKey_ = 0;
         if (npcVoiceManager_) npcVoiceManager_->setSoundData(&soundData_);
         if (combatSoundManager_) combatSoundManager_->setSoundData(&soundData_);
+        if (worldSoundEmitters_) worldSoundEmitters_->setSoundData(&soundData_);
     }
 }
 
@@ -226,6 +233,15 @@ void AudioCoordinator::updateZoneAudio(const ZoneAudioContext& ctx) {
         ambientSoundManager_->setWeather(audioWeatherType);
         if (soundData_.loaded()) updateTableAmbience(ctx);
         ambientSoundManager_->update(deltaTime, ctx.cameraPosition, ctx.insideWmo, ctx.isSwimming, isBlacksmith);
+    }
+
+    // ── Placed emitters and doodad sound events ──
+    // Heard from the listener, which stands at the character, the way the
+    // stock client measures SoundEntries cutoffs.
+    if (worldSoundEmitters_ && soundData_.loaded()) {
+        if (ctx.mapId != 0xFFFFFFFFu) worldSoundEmitters_->setMap(ctx.mapId);
+        const float ambientScale = ambientSoundManager_ ? ambientSoundManager_->getVolumeScale() : 1.0f;
+        worldSoundEmitters_->update(deltaTime, AudioEngine::instance().getListenerPosition(), ambientScale);
     }
 
     // ── Zone detection and music transitions ──

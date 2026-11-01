@@ -1987,6 +1987,11 @@ uint32_t EntitySpawner::releaseCreatureInstance(uint64_t guid) {
     creatureWalkingState_.erase(guid);
     creatureFlyingState_.erase(guid);
     unitMoveDirFlags_.erase(guid);
+    // unitGravityFreeFlags_ stays: a display change comes through here and
+    // brings no new movement block, so a hovering creature would land. The
+    // creature despawn callback clears it when the unit really goes.
+    creatureRestingFloor_.erase(guid);
+    unitLocomotion_.erase(guid);
     unitPresentedAlpha_.erase(guid);
     return instanceId;
 }
@@ -2052,12 +2057,15 @@ void EntitySpawner::applyGameObjectState(uint64_t guid, uint8_t goState) {
     if (!m2) return;
 
     const uint32_t instanceId = it->second.instanceId;
-    // Canonical GOState: 0 ACTIVE (open), 1 READY (closed), 2 ACTIVE_ALTERNATIVE
-    // (destroyed). The animation ids are the game's own: OPEN, CLOSE, DESTROY.
-    const uint32_t anim = goState == 0 ? 148u : (goState == 2 ? 149u : 146u);
-    // Straight to the end when the state arrived before the model: the swing
-    // belongs to the moment a door opens, not to the moment it is first seen.
-    const bool skipToEnd = gameObjectPendingState_.erase(guid) > 0;
+    const uint8_t prevState = it->second.goState;
+    // GAMEOBJECT_BYTES_1 repeats the state with every art kit or anim progress
+    // change; only a change of state is a motion.
+    if (prevState == goState && !gameObjectPendingState_.count(guid)) return;
+    it->second.goState = goState;
+    // Straight to the end when the state arrived before the model, or is the
+    // first one this model hears: the swing belongs to the moment a door
+    // opens, not to the moment it is first seen.
+    const bool skipToEnd = gameObjectPendingState_.erase(guid) > 0 || prevState == 0xFF;
 
     // Whether an open pose should also stop blocking.
     //
@@ -2080,8 +2088,11 @@ void EntitySpawner::applyGameObjectState(uint64_t guid, uint8_t goState) {
             }
         }
     }
+    // A door's ACTIVE_ALTERNATIVE (2) is open the other way (UseDoorOrButton
+    // with alternative set), so everything but READY is a way through.
+    const bool open = goState != 1;
     if (goType == 0u || goType == 35u) {   // DOOR, TRAPDOOR
-        m2->setSkipCollision(instanceId, goState == 0);
+        m2->setSkipCollision(instanceId, open);
         // Said for the first few, because a door that never opens and a door
         // the server never tells us to open look identical from in front of
         // it. A lift door is meant to cycle at each level; if these lines
@@ -2092,12 +2103,38 @@ void EntitySpawner::applyGameObjectState(uint64_t guid, uint8_t goState) {
             ++saidDoor;
             LOG_WARNING("Door state: guid=0x", std::hex, guid, std::dec,
                         " type=", goType, " state=", static_cast<int>(goState),
-                        (goState == 0 ? " (open)" : " (shut)"));
+                        (open ? " (open)" : " (shut)"));
         }
     }
 
-    if (m2->hasAnimation(instanceId, anim)) {
-        m2->setInstanceAnimationHeld(instanceId, anim, skipToEnd);
+    // Transports are posed by the transport system, not by their state.
+    if (gameHandler_ && gameHandler_->isTransportGuid(guid)) return;
+
+    // The game's state animations (AnimationData.dbc): a one-shot for the
+    // change and a loop for the state it leaves the object in.
+    //   0 ACTIVE             Open 148    -> Opened 149
+    //   1 READY              Close 146   -> Closed 147  (Rebuild 152 from 2)
+    //   2 ACTIVE_ALTERNATIVE Destroy 150 -> Destroyed 151
+    // A model with no Destroy sequences takes state 2 as open, the way
+    // AnimationData falls Destroy back to Open (and doors use 2 for the
+    // other-way open).
+    namespace anim = rendering::anim;
+    auto has = [&](uint32_t a) { return m2->hasAnimation(instanceId, a); };
+    uint32_t once = anim::OPEN, loop = anim::OPENED;
+    if (goState == 2 && (has(anim::DESTROY) || has(anim::DESTROYED))) {
+        once = anim::DESTROY; loop = anim::DESTROYED;
+    } else if (goState == 1) {
+        once = (prevState == 2 && !skipToEnd && has(anim::REBUILD)) ? anim::REBUILD
+                                                                     : anim::CLOSE;
+        loop = anim::CLOSED;
+    }
+    if (has(once)) {
+        m2->setInstanceAnimationHeld(instanceId, once, skipToEnd, loop);
+        return;
+    }
+    if (has(loop)) {
+        // Only the state's loop: no motion into it, just the state.
+        m2->setInstanceAnimationHeld(instanceId, loop, /*skipToEnd=*/true, loop);
         return;
     }
     // No OPEN or CLOSE sequence of its own, but one animation that is the
@@ -2105,14 +2142,22 @@ void EntitySpawner::applyGameObjectState(uint64_t guid, uint8_t goState) {
     // 3333ms. Held at its end the door stands open. Simply letting it run -
     // which is what this did - swung it open and shut on a loop enhanced,
     // and freezing it put it back to shut, so the door never opened at all.
-    if (goState == 0) {
+    const bool stateDriven = goType == 0xFFFFFFFFu || gameObjectPoseIsStateDriven(goType);
+    if (open && stateDriven) {
         if (const auto only = m2->soleSequenceId(instanceId)) {
             m2->setInstanceAnimationHeld(instanceId, *only, skipToEnd);
             return;
         }
     }
+    // No state sequences at all. A brazier, a banner or a fishing pool (not a
+    // state-driven type) just keeps its Stand loop - READY is the normal state
+    // of every object, and freezing on it stopped them all.
+    if (!stateDriven) {
+        m2->setInstanceAnimationFrozen(instanceId, false);
+        return;
+    }
     // The closed pose is the bind pose.
-    m2->setInstanceAnimationFrozen(instanceId, goState != 0);
+    m2->setInstanceAnimationFrozen(instanceId, !open);
 }
 
 void EntitySpawner::onGameObjectInfoReceived(uint32_t entry) {

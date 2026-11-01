@@ -214,9 +214,14 @@ AnimOutput LocomotionFSM::resolve(const Input& in, const AnimCapabilitySet& caps
     bool animSelected = true;
     bool loop = true;
 
+    if (state_ != State::IDLE) {
+        shuffleAnim_ = 0;
+        shuffleLastTime_ = 0.0f;
+    }
+
     switch (state_) {
         case State::IDLE:
-            animId = anim::STAND;
+            animId = resolveIdle(in, caps);
             break;
 
         case State::WALK:
@@ -288,9 +293,42 @@ AnimOutput LocomotionFSM::resolve(const Input& in, const AnimCapabilitySet& caps
     return AnimOutput::ok(animId, loop);
 }
 
+// ── Turn in place ────────────────────────────────────────────────────────────
+
+uint32_t LocomotionFSM::resolveIdle(const Input& in, const AnimCapabilitySet& caps) {
+    uint32_t want = 0;
+    if (in.turnLeft && caps.resolvedShuffleLeft) want = caps.resolvedShuffleLeft;
+    else if (in.turnRight && caps.resolvedShuffleRight) want = caps.resolvedShuffleRight;
+
+    if (want != 0) {
+        // Turning, or turning the other way: (re)start that shuffle.
+        if (shuffleAnim_ != want) shuffleLastTime_ = 0.0f;
+        shuffleAnim_ = want;
+    } else if (shuffleAnim_ != 0) {
+        // The turn has stopped: the lap in progress plays out first. It ends
+        // within a frame of its end or once the clock has wrapped (times are
+        // in ms), or when something else has taken the model over.
+        const float frameMs = std::max(in.deltaTime * 1000.0f, 1.0f);
+        const bool done = !in.haveAnimState || in.currentAnimId != shuffleAnim_ ||
+                          in.currentAnimTime + 0.5f < shuffleLastTime_ ||
+                          (in.currentAnimDuration > 0.1f &&
+                           in.currentAnimTime >= in.currentAnimDuration - frameMs);
+        if (done) {
+            shuffleAnim_ = 0;
+            shuffleLastTime_ = 0.0f;
+        }
+    }
+    if (shuffleAnim_ != 0 && in.haveAnimState && in.currentAnimId == shuffleAnim_) {
+        shuffleLastTime_ = in.currentAnimTime;
+    }
+    return shuffleAnim_ != 0 ? shuffleAnim_ : anim::STAND;
+}
+
 // ── Reset ────────────────────────────────────────────────────────────────────
 
 void LocomotionFSM::reset() {
+    shuffleAnim_ = 0;
+    shuffleLastTime_ = 0.0f;
     state_ = State::IDLE;
     graceTimer_ = 0.0f;
     wasSprinting_ = false;

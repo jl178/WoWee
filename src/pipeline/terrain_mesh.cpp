@@ -146,6 +146,20 @@ ChunkMesh TerrainMeshGenerator::generateChunkMesh(const MapChunk& chunk, int chu
         mesh.layers.push_back(layerInfo);
     }
 
+    // Baked shadow, handed on as light so an absent map and the renderer's
+    // opaque fallback texture (255) mean the same thing: unshadowed. A map
+    // with nothing in it is dropped for the same reason.
+    if (chunk.shadowMap.size() == 64 * 64) {
+        bool any = false;
+        for (uint8_t s : chunk.shadowMap) { if (s) { any = true; break; } }
+        if (any) {
+            mesh.shadowLight.resize(chunk.shadowMap.size());
+            for (size_t i = 0; i < chunk.shadowMap.size(); ++i) {
+                mesh.shadowLight[i] = static_cast<uint8_t>(255 - chunk.shadowMap[i]);
+            }
+        }
+    }
+
     return mesh;
 }
 

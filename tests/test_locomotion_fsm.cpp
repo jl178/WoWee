@@ -2,6 +2,7 @@
 #include <catch_amalgamated.hpp>
 #include "rendering/animation/locomotion_fsm.hpp"
 #include "rendering/animation/animation_ids.hpp"
+#include "rendering/animation/unit_locomotion.hpp"
 
 using namespace wowee::rendering;
 namespace anim = wowee::rendering::anim;
@@ -336,4 +337,166 @@ TEST_CASE("LocomotionFSM: a new jump seen without its landing restarts JumpStart
     auto out = fsm.resolve(in, caps);
     REQUIRE(out.animId == anim::JUMP_START);
     CHECK(fsm.getState() == LocomotionFSM::State::JUMP_START);
+}
+
+// ── Turning in place (stock CGUnit_C 0x0073E2C0) ──────────────────────────
+
+static AnimCapabilitySet makeShuffleCaps() {
+    auto caps = makeLocoCaps();
+    caps.resolvedShuffleLeft = anim::SHUFFLE_LEFT;
+    caps.resolvedShuffleRight = anim::SHUFFLE_RIGHT;
+    return caps;
+}
+
+TEST_CASE("LocomotionFSM: turning in place shuffles, left before right", "[locomotion]") {
+    LocomotionFSM fsm;
+    auto caps = makeShuffleCaps();
+    auto in = idle();
+    in.turnLeft = true;
+    in.turnRight = true;
+    auto out = fsm.resolve(in, caps);
+    REQUIRE(out.valid);
+    CHECK(out.animId == anim::SHUFFLE_LEFT);
+    CHECK(out.loop);
+    CHECK(fsm.getState() == LocomotionFSM::State::IDLE);
+
+    in.turnLeft = false;
+    out = fsm.resolve(in, caps);
+    CHECK(out.animId == anim::SHUFFLE_RIGHT);
+}
+
+TEST_CASE("LocomotionFSM: a shuffle plays its lap out after the turn stops", "[locomotion]") {
+    LocomotionFSM fsm;
+    auto caps = makeShuffleCaps();
+    auto in = idle();
+    in.turnLeft = true;
+    REQUIRE(fsm.resolve(in, caps).animId == anim::SHUFFLE_LEFT);
+
+    // The turn (a one-frame body step) is over; the lap is 500 ms.
+    in.turnLeft = false;
+    in.haveAnimState = true;
+    in.currentAnimId = anim::SHUFFLE_LEFT;
+    in.currentAnimDuration = 500.0f;
+    in.currentAnimTime = 16.0f;
+    CHECK(fsm.resolve(in, caps).animId == anim::SHUFFLE_LEFT);
+    in.currentAnimTime = 250.0f;
+    CHECK(fsm.resolve(in, caps).animId == anim::SHUFFLE_LEFT);
+    // Within a frame of its end: back to Stand.
+    in.currentAnimTime = 495.0f;
+    CHECK(fsm.resolve(in, caps).animId == anim::STAND);
+}
+
+TEST_CASE("LocomotionFSM: a shuffle ends when the clock wraps", "[locomotion]") {
+    LocomotionFSM fsm;
+    auto caps = makeShuffleCaps();
+    auto in = idle();
+    in.turnRight = true;
+    in.haveAnimState = true;
+    in.currentAnimId = anim::SHUFFLE_RIGHT;
+    in.currentAnimDuration = 500.0f;
+    in.currentAnimTime = 400.0f;
+    REQUIRE(fsm.resolve(in, caps).animId == anim::SHUFFLE_RIGHT);
+    in.turnRight = false;
+    in.currentAnimTime = 10.0f;  // wrapped past the end between two frames
+    CHECK(fsm.resolve(in, caps).animId == anim::STAND);
+}
+
+TEST_CASE("LocomotionFSM: no shuffle on a model without one", "[locomotion]") {
+    LocomotionFSM fsm;
+    auto caps = makeLocoCaps();
+    auto in = idle();
+    in.turnLeft = true;
+    CHECK(fsm.resolve(in, caps).animId == anim::STAND);
+}
+
+TEST_CASE("LocomotionFSM: moving off cancels the shuffle", "[locomotion]") {
+    LocomotionFSM fsm;
+    auto caps = makeShuffleCaps();
+    auto in = idle();
+    in.turnLeft = true;
+    REQUIRE(fsm.resolve(in, caps).animId == anim::SHUFFLE_LEFT);
+    in.turnLeft = false;
+    in.moving = true;
+    in.sprinting = true;
+    CHECK(fsm.resolve(in, caps).animId == anim::RUN);
+    in.moving = false;
+    in.sprinting = false;
+    in.deltaTime = 1.0f;  // past the stop grace
+    CHECK(fsm.resolve(in, caps).animId == anim::STAND);
+}
+
+// ── Remote units from their movement flags (unit_locomotion.hpp) ─────────────
+
+TEST_CASE("UnitLocomotion: a backpedalling player walks backwards", "[locomotion]") {
+    anim::UnitLocomotion u;
+    u.caps = makeFullAirCaps();
+    anim::UnitLocomotionFrame f;
+    f.moveFlags = 0x2;  // BACKWARD
+    f.moving = true;
+    f.dt = 0.016f;
+    auto out = u.fsm.resolve(anim::unitLocomotionInput(u, f), u.caps);
+    CHECK(out.animId == anim::WALK_BACKWARDS);
+}
+
+TEST_CASE("UnitLocomotion: a remote jump plays JumpStart, Jump, JumpLandRun", "[locomotion]") {
+    anim::UnitLocomotion u;
+    u.caps = makeFullAirCaps();
+    anim::UnitLocomotionFrame f;
+    f.moving = true;
+    f.dt = 0.016f;
+    f.moveFlags = 0x1;  // running forward
+    REQUIRE(u.fsm.resolve(anim::unitLocomotionInput(u, f), u.caps).animId == anim::RUN);
+
+    u.jumpPending = true;  // MSG_MOVE_JUMP
+    f.moveFlags = 0x1 | 0x1000;
+    auto in = anim::unitLocomotionInput(u, f);
+    CHECK(in.jumping);
+    CHECK_FALSE(in.grounded);
+    REQUIRE(u.fsm.resolve(in, u.caps).animId == anim::JUMP_START);
+
+    in = anim::unitLocomotionInput(u, f);
+    in.haveAnimState = true;
+    in.currentAnimId = anim::JUMP_START;
+    in.currentAnimDuration = 400.0f;
+    in.currentAnimTime = 100.0f;
+    u.fsm.resolve(in, u.caps);
+    in.currentAnimId = anim::JUMP;  // the one-shot handed over to the loop
+    CHECK(u.fsm.resolve(in, u.caps).animId == anim::JUMP);
+
+    f.moveFlags = 0x1;  // MSG_MOVE_FALL_LAND, still running
+    in = anim::unitLocomotionInput(u, f);
+    CHECK(in.grounded);
+    CHECK_FALSE(u.jumpPending);
+    CHECK(u.fsm.resolve(in, u.caps).animId == anim::JUMP_LAND_RUN);
+}
+
+TEST_CASE("UnitLocomotion: turn flags shuffle a unit standing still", "[locomotion]") {
+    anim::UnitLocomotion u;
+    u.caps = makeShuffleCaps();
+    anim::UnitLocomotionFrame f;
+    f.dt = 0.016f;
+    f.moveFlags = 0x20;  // TURN_RIGHT
+    auto in = anim::unitLocomotionInput(u, f);
+    CHECK(in.turnRight);
+    CHECK_FALSE(in.turnLeft);
+    CHECK(u.fsm.resolve(in, u.caps).animId == anim::SHUFFLE_RIGHT);
+
+    // A counter-clockwise body step is a turn to the left.
+    anim::UnitLocomotion v;
+    v.caps = makeShuffleCaps();
+    v.lastBodyStep = 0.05f;
+    f.moveFlags = 0;
+    in = anim::unitLocomotionInput(v, f);
+    CHECK(in.turnLeft);
+
+    // Not while moving, and not over an emote or a swing.
+    f.moveFlags = 0x1 | 0x10;
+    f.moving = true;
+    in = anim::unitLocomotionInput(v, f);
+    CHECK_FALSE(in.turnLeft);
+    f.moveFlags = 0x10;
+    f.moving = false;
+    f.idleFree = false;
+    in = anim::unitLocomotionInput(v, f);
+    CHECK_FALSE(in.turnLeft);
 }

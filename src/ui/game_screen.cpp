@@ -73,6 +73,69 @@ namespace {
     using namespace wowee::ui::colors;
     using namespace wowee::ui::helpers;
 
+    // Half the XY diagonal of the box the stock client sizes a unit's
+    // selection circle from (Wow.exe 0x71ED80): CreatureModelData.GeoBox of the
+    // unit's display model, merged with the mount's when it rides one. 0 when
+    // the model has no box, -1 when the display cannot be resolved.
+    float selectionBoxHalfDiagonal(uint32_t displayId, uint32_t mountDisplayId) {
+        static std::unordered_map<uint64_t, float> memo;
+        const uint64_t key = (static_cast<uint64_t>(mountDisplayId) << 32) | displayId;
+        if (auto it = memo.find(key); it != memo.end()) return it->second;
+
+        auto* assets = wowee::core::Application::getInstance().getAssetManager();
+        if (!assets) return -1.0f;
+        auto cdi = assets->loadDBC("CreatureDisplayInfo.dbc");
+        auto cmd = assets->loadDBC("CreatureModelData.dbc");
+        if (!cdi || !cdi->isLoaded() || !cmd || !cmd->isLoaded()) return -1.0f;
+        const auto* dbcLayout = wowee::pipeline::getActiveDBCLayout();
+        const auto* cdiL = dbcLayout ? dbcLayout->getLayout("CreatureDisplayInfo") : nullptr;
+        const auto* cmdL = dbcLayout ? dbcLayout->getLayout("CreatureModelData") : nullptr;
+        uint32_t modelCol = cdiL ? cdiL->tryField("ModelID") : 0xFFFFFFFFu;
+        if (modelCol == 0xFFFFFFFFu) modelCol = 1;
+        // GeoBoxMin xyz, GeoBoxMax xyz: columns 17-22 of the 3.3.5 file (28
+        // columns); the older files carry no box and fall back to the default.
+        uint32_t boxCol = cmdL ? cmdL->tryField("GeoBoxMinX") : 0xFFFFFFFFu;
+        if (boxCol == 0xFFFFFFFFu && cmd->getFieldCount() == 28) boxCol = 17;
+        if (boxCol == 0xFFFFFFFFu || boxCol + 5 >= cmd->getFieldCount()) return memo[key] = 0.0f;
+
+        bool any = false;
+        float minX = 0, minY = 0, maxX = 0, maxY = 0;
+        auto merge = [&](uint32_t display) {
+            if (display == 0) return;
+            const int32_t d = cdi->findRecordById(display);
+            if (d < 0) return;
+            const int32_t m = cmd->findRecordById(cdi->getUInt32(static_cast<uint32_t>(d), modelCol));
+            if (m < 0) return;
+            const auto row = static_cast<uint32_t>(m);
+            const float x0 = cmd->getFloat(row, boxCol), y0 = cmd->getFloat(row, boxCol + 1);
+            const float x1 = cmd->getFloat(row, boxCol + 3), y1 = cmd->getFloat(row, boxCol + 4);
+            if (!any) { minX = x0; minY = y0; maxX = x1; maxY = y1; any = true; return; }
+            minX = std::min(minX, x0); minY = std::min(minY, y0);
+            maxX = std::max(maxX, x1); maxY = std::max(maxY, y1);
+        };
+        merge(displayId);
+        merge(mountDisplayId);
+        if (!any) return memo[key] = -1.0f;
+        const float dx = maxX - minX, dy = maxY - minY;
+        // Wow.exe 0x720330: a box flat in both x and y is "no box".
+        constexpr float kEps = 2.384185791015625e-07f;
+        if (std::abs(dx) < kEps && std::abs(dy) < kEps) return memo[key] = 0.0f;
+        return memo[key] = 0.5f * std::sqrt(dx * dx + dy * dy);
+    }
+
+    // The stock selection-circle size, CGUnit_C +0xB0C (Wow.exe 0x720330):
+    //   s = halfDiagonal * scale;  R = sqrt(s) + (s > 5 ? 0.06 (s-5)^2 : 0);
+    //   R = min(R, 10), or 1.2 for a model with no box.
+    // R is the half-width of the square the texture is projected over; the
+    // ring in UnitSelectTexture.blp sits at 0.88 of it. A human comes to 0.85.
+    float stockSelectionRadius(float halfDiagonal, float scale) {
+        if (halfDiagonal <= 0.0f) return 1.2f;
+        const float s = halfDiagonal * std::max(scale, 0.001f);
+        float r = std::sqrt(s);
+        if (s > 5.0f) r += (s - 5.0f) * (s - 5.0f) * 0.06f;
+        return std::min(r, 10.0f);
+    }
+
     // Upper bound on a game object's cursor-pick sphere. A wide/tall M2 GO (a forge, an
     // anvil, a large brazier) reports a legitimately big visual radius, but its bounding
     // sphere is a poor click target: the half-diagonal reaches well past the geometry and
@@ -263,7 +326,7 @@ void GameScreen::applyCameraControlSettings() {
     if (!renderer) return;
 
     // Field of view is on the camera rather than its controller, and the
-    // camera is built asking for 60 - so a saved fov, and the 70 the schema
+    // camera is built asking for 60 - so a saved fov, and the 54 the schema
     // defaults to, only ever reached it when the slider was moved.
     if (auto* cam = renderer->getCamera()) cam->setFov(settingsPanel_.pendingFov);
 
@@ -274,6 +337,7 @@ void GameScreen::applyCameraControlSettings() {
         cam->setPivotHeight(settingsPanel_.pendingPivotHeight);
         cam->setIdleOrbitEnabled(settingsPanel_.pendingIdleCameraOrbit);
         cam->setSmoothCameraFollow(settingsPanel_.pendingSmoothCameraFollow);
+        cam->setCameraFollowStyle(settingsPanel_.pendingCameraFollowStyle);
         cam->setShakeScale(settingsPanel_.pendingCameraShake);
         cam->setMaxDistanceFactor(cameraDistanceFactor(settingsPanel_.pendingCameraMaxDistance));
     }
@@ -879,48 +943,94 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                 }
                 if (auto* ac = renderer->getAnimationController()) ac->setTargetPosition(&targetGLPos);
 
-                // Selection circle color: WoW-canonical level-based colors
-                bool showSelectionCircle = false;
-                glm::vec3 circleColor(1.0f, 1.0f, 0.3f); // default yellow
-                float circleRadius = 1.5f;
-                {
-                    glm::vec3 boundsCenter;
-                    float boundsRadius = 0.0f;
-                    if (core::Application::getInstance().getRenderBoundsForGuid(target->getGuid(), boundsCenter, boundsRadius)) {
-                        float r = boundsRadius * 1.1f;
-                        circleRadius = std::min(std::max(r, 0.8f), 8.0f);
-                    }
-                }
-                if (target->getType() == game::ObjectType::UNIT) {
-                    showSelectionCircle = true;
+                // The stock selection circle (Wow.exe: WorldFrame 0x4F6F90 ->
+                // CGUnit_C vtable+0x6C 0x725980). Only the locked target gets
+                // one - the mouseover gets the model highlight instead - and
+                // never the active player, even self-targeted. It appears and
+                // goes with the target; it does not fade.
+                const bool isUnitTarget = target->getType() == game::ObjectType::UNIT ||
+                                          target->getType() == game::ObjectType::PLAYER;
+                bool showSelectionCircle = isUnitTarget &&
+                                           target->getGuid() != gameHandler.getPlayerGuid();
+                glm::vec3 circleColor(1.0f, 1.0f, 0.0f);
+                float circleRadius = 1.2f;
+                if (showSelectionCircle) {
                     auto unit = std::static_pointer_cast<game::Unit>(target);
-                    if (unit->getHealth() == 0 && unit->getMaxHealth() > 0) {
-                        circleColor = glm::vec3(0.5f, 0.5f, 0.5f); // gray (dead)
-                    } else {
-                        // By reaction, as the stock client colours it: red hostile,
-                        // yellow neutral, green friendly. Difficulty is the name's job.
-                        const int react = gameHandler.unitReactionToPlayer(*unit);
-                        if (react <= 2 ||
-                            gameHandler.isAggressiveTowardPlayer(target->getGuid())) {
-                            circleColor = glm::vec3(1.0f, 0.0f, 0.0f);
-                        } else if (react == 3) {
-                            circleColor = glm::vec3(1.0f, 0.5f, 0.0f);   // unfriendly
-                        } else if (react == 4) {
-                            circleColor = glm::vec3(1.0f, 1.0f, 0.0f);   // neutral
-                        } else {
-                            circleColor = glm::vec3(0.0f, 1.0f, 0.0f);
+
+                    // Size: CGUnit_C +0xB0C from the display's GeoBox and the
+                    // drawn scale; see stockSelectionRadius.
+                    float scale = 1.0f;
+                    auto& app = core::Application::getInstance();
+                    if (auto* spawner = app.getEntitySpawner()) {
+                        if (auto* cr = renderer->getCharacterRenderer()) {
+                            const uint32_t inst = spawner->characterInstanceIdForGuid(target->getGuid());
+                            if (inst != 0) scale = cr->getInstanceScale(inst);
                         }
                     }
-                } else if (target->getType() == game::ObjectType::PLAYER) {
-                    showSelectionCircle = true;
-                    circleColor = glm::vec3(0.3f, 1.0f, 0.3f); // green (player)
+                    circleRadius = stockSelectionRadius(
+                        selectionBoxHalfDiagonal(unit->getDisplayId(), unit->getMountDisplayId()), scale);
+
+                    // Colour: the UnitSelectionColor rules the circle asks for
+                    // (Wow.exe 0x521BF0, extended set): CImVector constants
+                    // there are red FF0000, orange FF8000, yellow FFFF00,
+                    // green 00FF00, grey 7F7F7F, blue 6060FF.
+                    constexpr uint32_t kUnitFlagPlayerControlled = 0x00000008;
+                    constexpr uint8_t kPvpFlag = 0x01;        // UNIT_FIELD_BYTES_2 byte 1
+                    constexpr uint8_t kSanctuaryFlag = 0x08;
+                    const int react = gameHandler.unitReactionToPlayer(*unit);
+                    const bool hostile = react <= 2 ||
+                                         gameHandler.isAggressiveTowardPlayer(target->getGuid());
+                    // FACTION_BAR_COLORS by reaction: hated and hostile red,
+                    // unfriendly orange, neutral yellow, friendly and up green.
+                    const glm::vec3 reactionColor =
+                        hostile    ? glm::vec3(1.0f, 0.0f, 0.0f)
+                        : react == 3 ? glm::vec3(1.0f, 0.5f, 0.0f)
+                        : react == 4 ? glm::vec3(1.0f, 1.0f, 0.0f)
+                                     : glm::vec3(0.0f, 1.0f, 0.0f);
+                    const bool playerControlled = target->getType() == game::ObjectType::PLAYER ||
+                                                  (unit->getUnitFlags() & kUnitFlagPlayerControlled) != 0;
+                    if (!playerControlled) {
+                        // A creature: grey once dead, else by reaction. Tapped
+                        // by someone else does not grey the circle.
+                        const bool dead = (unit->getHealth() == 0 && unit->getMaxHealth() > 0) ||
+                                          (unit->getDynamicFlags() & game::UNIT_DYNFLAG_DEAD) != 0;
+                        circleColor = dead ? glm::vec3(127.0f / 255.0f) : reactionColor;
+                    } else {
+                        // A player or a player's pet: red when it can be fought,
+                        // by reaction while it is PvP flagged, else the
+                        // unflagged blue.
+                        auto pvpByte = [](const game::Entity& e) {
+                            return static_cast<uint8_t>(
+                                (e.getField(game::fieldIndex(game::UF::UNIT_FIELD_BYTES_2)) >> 8) & 0xFF);
+                        };
+                        const uint8_t targetPvp = pvpByte(*unit);
+                        const auto self = gameHandler.getEntityManager().getEntity(gameHandler.getPlayerGuid());
+                        const bool selfSanctuary = self && (pvpByte(*self) & kSanctuaryFlag) != 0;
+                        const bool flagged = (targetPvp & kPvpFlag) != 0 &&
+                                             (targetPvp & kSanctuaryFlag) == 0 && !selfSanctuary;
+                        if (hostile && flagged) {
+                            circleColor = glm::vec3(1.0f, 0.0f, 0.0f);
+                        } else if (flagged) {
+                            circleColor = reactionColor;
+                        } else {
+                            circleColor = glm::vec3(96.0f / 255.0f, 96.0f / 255.0f, 1.0f);
+                        }
+                    }
                 }
-                // Nothing else gets one. WoW draws a selection circle under a
-                // unit and a player and under nothing else - a door, a mailbox,
-                // a bank vault is used rather than selected, and a ring on the
-                // floor around one reads as a creature being fought.
+                // Nothing else gets one. A game object is used rather than
+                // selected, and a ring on the floor around one reads as a
+                // creature being fought.
                 if (showSelectionCircle) {
-                    renderer->setSelectionCircle(targetGLPos, circleRadius, circleColor);
+                    // The box is centred on the unit's position (Wow.exe
+                    // 0x7446C0), which is its feet on the ground - the drawn
+                    // instance's origin, not the bottom of its bounds, which
+                    // sits in the air under a hovering model.
+                    glm::vec3 circleFeet = targetGLPos;
+                    glm::vec3 originPos;
+                    if (core::Application::getInstance().getRenderPositionForGuid(target->getGuid(), originPos)) {
+                        circleFeet = originPos;
+                    }
+                    renderer->setSelectionCircle(circleFeet, circleRadius, circleColor);
                 } else {
                     renderer->clearSelectionCircle();
                 }

@@ -4,6 +4,7 @@
 #include "rendering/m2_sway.hpp"
 #include "rendering/m2_blend_mode.hpp"
 #include "rendering/m2_glow_card.hpp"
+#include "rendering/animation/sequence_variation.hpp"
 #include "core/thread_pool.hpp"
 #include "rendering/m2_model_classifier.hpp"
 #include "rendering/hiz_system.hpp"
@@ -591,7 +592,19 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
             instance.animDuration = rendering::M2_DEFAULT_PARTICLE_ANIM_MS;
         }
         if (instance.animDuration > 0.0f && instance.animTime >= instance.animDuration) {
-            if (instance.holdAtEnd) {
+            if (instance.holdAtEnd && instance.thenLoopSequence >= 0 &&
+                instance.thenLoopSequence < static_cast<int>(model.sequences.size())) {
+                // Open ran once; Opened loops from here (Close/Closed,
+                // Destroy/Destroyed). thenLoopSequence stays set while it
+                // loops so idle variations keep out of it.
+                instance.holdAtEnd = false;
+                beginM2SequenceBlend(model, instance, instance.thenLoopSequence);
+                instance.currentSequenceIndex = instance.thenLoopSequence;
+                instance.animDuration =
+                    static_cast<float>(model.sequences[instance.thenLoopSequence].duration);
+                instance.animTime = 0.0f;
+                instance.animSpeed = 1.0f;
+            } else if (instance.holdAtEnd) {
                 // Stay on the last frame. A door's open sequence ends with the
                 // door open, and that is the pose the server is describing.
                 instance.animTime = instance.animDuration;
@@ -611,24 +624,31 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
                 while (instance.animTime >= duration) {
                     instance.animTime -= duration;
                 }
-            }
-        }
-
-        // Idle variation timer
-        if (!instance.playingVariation && !instance.holdAtEnd &&
-            model.idleVariationIndices.size() > 1) {
-            instance.variationTimer -= dtMs;
-            if (instance.variationTimer <= 0.0f) {
-                int pick = static_cast<int>(randRange(static_cast<uint32_t>(model.idleVariationIndices.size())));
-                int newSeq = model.idleVariationIndices[pick];
-                if (newSeq != instance.currentSequenceIndex && newSeq < static_cast<int>(model.sequences.size())) {
-                    instance.playingVariation = true;
-                    beginM2SequenceBlend(model, instance, newSeq);
-                    instance.currentSequenceIndex = newSeq;
-                    instance.animDuration = static_cast<float>(model.sequences[newSeq].duration);
-                    instance.animTime = 0.0f;
-                } else {
-                    instance.variationTimer = randFloat(rendering::M2_IDLE_VARIATION_TIMER_MIN_MS, rendering::M2_IDLE_VARIATION_TIMER_MAX_MS);
+                // The next lap, as the stock client does it: the laps the
+                // variation still owes (its replay range), else a variation
+                // of the same animation rolled by the sequences' frequency
+                // weights. Not inside a state loop (Opened, Destroyed).
+                if (instance.thenLoopSequence < 0 &&
+                    instance.currentSequenceIndex >= 0 &&
+                    instance.currentSequenceIndex < static_cast<int>(model.sequences.size())) {
+                    const uint32_t animId = model.sequences[instance.currentSequenceIndex].id;
+                    if (instance.variationLapsLeft > 0) {
+                        --instance.variationLapsLeft;
+                    } else if (anim::hasSequenceVariations(model.sequences, animId)) {
+                        int next = anim::pickSequenceVariation(model.sequences, model.bones, animId);
+                        if (next >= 0) {
+                            instance.variationLapsLeft = anim::pickSequenceExtraLaps(model.sequences[next]);
+                            next = anim::resolveSequenceAlias(model.sequences, next);
+                        }
+                        if (next >= 0 && next < static_cast<int>(model.sequences.size()) &&
+                            next != instance.currentSequenceIndex) {
+                            beginM2SequenceBlend(model, instance, next);
+                            instance.currentSequenceIndex = next;
+                            instance.animDuration = static_cast<float>(model.sequences[next].duration);
+                            const float nextDur = std::max(1.0f, instance.animDuration);
+                            while (instance.animTime >= nextDur) instance.animTime -= nextDur;
+                        }
+                    }
                 }
             }
         }

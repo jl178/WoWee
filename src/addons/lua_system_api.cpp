@@ -876,9 +876,10 @@ static void pushCvarDefault(lua_State* L, const std::string& n) {
     else if (n == "petmeleedamage") lua_pushstring(L, "1");
     else if (n == "fctspellmechanics") lua_pushstring(L, "1");
     else if (n == "fctspellmechanicsother") lua_pushstring(L, "0");
-    // The camera does not keep lerping through a turn unless asked, which is
-    // this client's own default, and the smoothing rate it starts at.
-    else if (n == "camerasmoothstyle") lua_pushstring(L, "0");
+    // Camera Following Style: stock defaults to 4, "Only when moving"
+    // (Wow.exe 12340, FUN_005fd910), which is the camerafollowstyle default.
+    // And the smoothing rate this client's follow speed starts at.
+    else if (n == "camerasmoothstyle") lua_pushstring(L, "4");
     else if (n == "camerayawsmoothspeed") lua_pushstring(L, "30");
     // Titles on player names, as the real client shows them.
     else if (n == "unitnameplayerpvptitle") lua_pushstring(L, "1");
@@ -1248,9 +1249,10 @@ constexpr ClientCVarBinding kClientCVars[] = {
     // and never saved.
     {"autolootdefault",      "autoloot"},
     // How far back the camera may be pulled. The row counts yards; the CVar
-    // the game's slider wrote counts multiples of the 22 the original client
-    // gives, so a 1 here is 22 there and the slider's 2 is 44.
-    {"cameradistancemaxfactor", "cameramaxdistance", 22.0},
+    // the game's slider wrote counts multiples of the 15 the original client
+    // gives (cameraDistanceMax "15.0", Wow.exe 12340), so a 1 here is 15
+    // there and the slider's 2 is 30.
+    {"cameradistancemaxfactor", "cameramaxdistance", 15.0},
     // Read by the client's own attack handling, not by FrameXML's buttons.
     {"secureabilitytoggle",  "secureabilitytoggle"},
     // The bubbles are drawn by this client, so both boxes are its own.
@@ -1579,9 +1581,16 @@ static void applyCVarSideEffects(lua_State* L, const std::string& key,
             svc->setClientSetting("fullscreen", value == "0" ? "1" : "0");
         }
     }
+    // Camera Following Style. The CVar's values are 0 Never, 1 Smart, 2 Always
+    // and 4 Smarter (Wow.exe 12340); the camerafollowstyle row lists them in
+    // the dropdown's order, Never, Smart, Smarter, Always.
     if (key == "camerasmoothstyle") {
         if (auto* svc = getLuaServices(L); svc && svc->setClientSetting) {
-            svc->setClientSetting("smoothfollow", value == "0" ? "0" : "1");
+            const char* style = value == "0" ? "0"
+                              : value == "1" ? "1"
+                              : value == "2" ? "3"
+                                             : "2";
+            svc->setClientSetting("camerafollowstyle", style);
         }
     }
     // Camera Following Speed. The shipped CVar is in degrees a second and this

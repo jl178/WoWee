@@ -5,12 +5,66 @@
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_utils.hpp"
 #include "core/logger.hpp"
+#include "core/application.hpp"
+#include "pipeline/asset_manager.hpp"
+#include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 namespace wowee {
 namespace rendering {
+
+static_assert(OverlaySystem::kSelFrameSlices >= MAX_FRAMES_IN_FLIGHT,
+              "one selection-lattice slice per frame in flight");
+
+namespace {
+
+// The stock selection circle, as Wow.exe 3.3.5a (12340) draws it.
+//
+//   Object_C 0x7460C0   loads Textures\UnitSelectTexture.blp into 0xCA12C4 and
+//                       registers the ObjectSelectionCircle cvar (default "1").
+//   WorldFrame 0x4F6F90 calls the target's vtable +0x6C (CGUnit_C 0x725980)
+//                       once a frame; only the locked target (0xBD07B0) gets
+//                       there, never the mouseover, never the active player.
+//   0x725980            box = feet +/- R in x, y and z, R = unit +0xB0C;
+//                       colour = vtable +0x78 (the UnitSelectionColor rules);
+//                       texture matrix = Z rotation by -atan2(unit - camera)
+//                       (0x744150), so the texture turns with the camera.
+//   0x744EB0            texture stage 0 = UnitSelectTexture, blend mode 3
+//                       (GxBlend_Add: src*srcAlpha + dst).
+//   0x7E4370/0x7E3E80   the shadow-blob projector: re-draws the terrain chunks
+//                       and the up-facing WMO triangles inside the box with
+//                       planar texgen (u,v over the box's x,y after a further
+//                       -90 degree turn, 0x7E2D60), a depth bias of 0.4, and a
+//                       second stage indexed by height through the box - the
+//                       "ShadowAdd" 64x8 ramp (0x7E36E0): alpha = 6t over the
+//                       first sixth, 1, then falling to 0 over the last sixth.
+//
+// Vulkan cannot re-draw the world's own triangles here, so the decal is
+// draped over a lattice of floor samples instead; the texture, its rotation,
+// its blend, its height ramp and its size are the stock ones.
+constexpr float kSelMinSpacing = 0.3f;    // yards between lattice points, at least
+constexpr float kSelSurfaceLift = 0.04f;  // under a lattice cell the floor can bulge
+constexpr int kSelCacheMaxAge = 240;      // frames before the floor is asked again
+constexpr size_t kSelCacheMaxEntries = 4096;
+
+struct SelCirclePush {
+    glm::mat4 viewProj;
+    glm::vec4 color;
+    glm::vec4 center;  // feet x, y, z; box half-width
+    glm::vec4 facing;  // camera->unit direction xy; surface lift; unused
+};
+static_assert(sizeof(SelCirclePush) == 112, "must match selection_circle.*.glsl");
+
+uint64_t latticeKey(int32_t ix, int32_t iy) {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(ix)) << 32) |
+           static_cast<uint64_t>(static_cast<uint32_t>(iy));
+}
+
+}  // namespace
 
 OverlaySystem::OverlaySystem(VkContext* ctx)
     : vkCtx_(ctx) {}
@@ -25,7 +79,13 @@ void OverlaySystem::cleanup() {
     destroy(device, selCirclePipeline_);
     destroy(device, selCirclePipelineLayout_);
     destroy(vkCtx_->getAllocator(), selCircleVertBuf_, selCircleVertAlloc_);
+    selCircleVertMapped_ = nullptr;
     destroy(vkCtx_->getAllocator(), selCircleIdxBuf_, selCircleIdxAlloc_);
+    selCircleTexture_.destroy(device, vkCtx_->getAllocator());
+    destroy(device, selCirclePool_);  // frees selCircleSet_ with it
+    selCircleSet_ = VK_NULL_HANDLE;
+    destroy(device, selCircleSetLayout_);
+    selCircleTextureTried_ = false;
     destroy(device, overlayPipeline_);
     destroy(device, brightnessPipeline_);
     destroy(device, overlayPipelineLayout_);
@@ -42,9 +102,104 @@ void OverlaySystem::recreatePipelines() {
 
 void OverlaySystem::setSelectionCircle(const glm::vec3& pos, float radius, const glm::vec3& color) {
     selCirclePos_ = pos;
-    selCircleRadius_ = radius;
+    selCircleRadius_ = std::max(radius, 0.05f);
     selCircleColor_ = color;
     selCircleVisible_ = true;
+    // Here rather than at draw time: this runs from the UI update, outside
+    // command recording, so the one-off upload's queue submit cannot meet a
+    // secondary buffer being recorded on another thread.
+    if (!selCircleTextureTried_) loadSelectionTexture();
+}
+
+bool OverlaySystem::initSelectionDescriptors() {
+    if (selCircleSet_ != VK_NULL_HANDLE) return true;
+    if (!vkCtx_) return false;
+    VkDevice device = vkCtx_->getDevice();
+    if (selCircleSetLayout_ == VK_NULL_HANDLE) {
+        VkDescriptorSetLayoutBinding sampler{};
+        sampler.binding = 0;
+        sampler.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        sampler.descriptorCount = 1;
+        sampler.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        selCircleSetLayout_ = createDescriptorSetLayout(device, {sampler});
+        if (selCircleSetLayout_ == VK_NULL_HANDLE) return false;
+    }
+    if (selCirclePool_ == VK_NULL_HANDLE) {
+        VkDescriptorPoolSize size{};
+        size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        size.descriptorCount = 1;
+        VkDescriptorPoolCreateInfo pool{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        pool.maxSets = 1;
+        pool.poolSizeCount = 1;
+        pool.pPoolSizes = &size;
+        if (vkCreateDescriptorPool(device, &pool, nullptr, &selCirclePool_) != VK_SUCCESS) {
+            selCirclePool_ = VK_NULL_HANDLE;
+            return false;
+        }
+    }
+    VkDescriptorSetAllocateInfo alloc{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    alloc.descriptorPool = selCirclePool_;
+    alloc.descriptorSetCount = 1;
+    alloc.pSetLayouts = &selCircleSetLayout_;
+    if (vkAllocateDescriptorSets(device, &alloc, &selCircleSet_) != VK_SUCCESS) {
+        selCircleSet_ = VK_NULL_HANDLE;
+        return false;
+    }
+    return true;
+}
+
+void OverlaySystem::loadSelectionTexture() {
+    selCircleTextureTried_ = true;
+    if (!vkCtx_ || !initSelectionDescriptors()) return;
+    VkDevice device = vkCtx_->getDevice();
+
+    // The stock file: 256x256, white, the ring in alpha at 0.88 of the
+    // half-width, a soft fill inward and a brighter lip along the bottom edge,
+    // which the camera-relative rotation keeps nearest the viewer.
+    bool uploaded = false;
+    if (auto* assets = core::Application::getInstance().getAssetManager()) {
+        pipeline::BLPImage image = assets->loadTexture("Textures\\UnitSelectTexture.blp");
+        if (image.isValid() && !image.data.empty()) {
+            uploaded = selCircleTexture_.upload(*vkCtx_, image.data.data(),
+                                                static_cast<uint32_t>(image.width),
+                                                static_cast<uint32_t>(image.height),
+                                                VK_FORMAT_R8G8B8A8_UNORM, true);
+        }
+    }
+    if (!uploaded) {
+        // No client data: a stand-in with the same radial profile, so the
+        // circle still sits where the stock one would.
+        LOG_WARNING("OverlaySystem: Textures\\UnitSelectTexture.blp unavailable, using a generated ring");
+        constexpr int N = 128;
+        std::vector<uint8_t> pixels(N * N * 4, 255);
+        for (int y = 0; y < N; ++y) {
+            for (int x = 0; x < N; ++x) {
+                const float dx = (x + 0.5f) / N * 2.0f - 1.0f;
+                const float dy = (y + 0.5f) / N * 2.0f - 1.0f;
+                const float r = std::sqrt(dx * dx + dy * dy);
+                const float ring = std::exp(-std::pow((r - 0.88f) / 0.025f, 2.0f));
+                const float fill = r < 0.88f ? std::clamp((r - 0.3f) / 0.58f, 0.0f, 1.0f) * 0.17f : 0.0f;
+                const float lip = 0.6f + 0.4f * std::clamp(dy, 0.0f, 1.0f);
+                const float a = r > 0.95f ? 0.0f : std::min(1.0f, (ring + fill) * lip);
+                pixels[(y * N + x) * 4 + 3] = static_cast<uint8_t>(a * 255.0f + 0.5f);
+            }
+        }
+        uploaded = selCircleTexture_.upload(*vkCtx_, pixels.data(), N, N,
+                                            VK_FORMAT_R8G8B8A8_UNORM, true);
+    }
+    if (!uploaded) return;
+    selCircleTexture_.createSampler(device, VK_FILTER_LINEAR, VK_FILTER_LINEAR,
+                                    VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    if (!selCircleTexture_.isValid()) return;  // never write an unsampleable texture (#123)
+
+    VkDescriptorImageInfo imageInfo = selCircleTexture_.descriptorInfo();
+    VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = selCircleSet_;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
 void OverlaySystem::clearSelectionCircle() {
@@ -68,63 +223,65 @@ void OverlaySystem::initSelectionCircle() {
         return;
     }
 
-    // Pipeline layout: push constants only (mat4 mvp=64 + vec4 color=16), VERTEX|FRAGMENT
-    VkPushConstantRange pcRange{};
-    pcRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    pcRange.offset = 0;
-    pcRange.size = 80;
-    selCirclePipelineLayout_ = createPipelineLayout(device, {}, {pcRange});
+    if (!initSelectionDescriptors()) {
+        LOG_ERROR("OverlaySystem: failed to create selection circle descriptors");
+        vertShader.destroy();
+        fragShader.destroy();
+        return;
+    }
 
-    // Vertex input: binding 0, stride 12, vec3 at location 0
+    // Set 0: the selection texture. Push block: SelCirclePush, both stages.
+    if (selCirclePipelineLayout_ == VK_NULL_HANDLE) {
+        VkPushConstantRange pcRange{};
+        pcRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pcRange.offset = 0;
+        pcRange.size = sizeof(SelCirclePush);
+        selCirclePipelineLayout_ = createPipelineLayout(device, {selCircleSetLayout_}, {pcRange});
+    }
+
+    // Vertex input: binding 0, stride 12, world-space vec3 at location 0
     VkVertexInputBindingDescription vertBind{.binding = 0, .stride = 12, .inputRate = VK_VERTEX_INPUT_RATE_VERTEX};
     VkVertexInputAttributeDescription vertAttr{.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0};
 
-    // Build disc geometry as TRIANGLE_LIST (N=48 segments)
-    constexpr int SEGMENTS = 48;
-    std::vector<float> verts;
-    verts.reserve((SEGMENTS + 1) * 3);
-    // Center vertex
-    verts.insert(verts.end(), {0.0f, 0.0f, 0.0f});
-    // Ring vertices
-    for (int i = 0; i <= SEGMENTS; ++i) {
-        float angle = core::coords::TWO_PI * static_cast<float>(i) / static_cast<float>(SEGMENTS);
-        verts.push_back(std::cos(angle));
-        verts.push_back(std::sin(angle));
-        verts.push_back(0.0f);
-    }
-
-    // Build TRIANGLE_LIST indices
-    std::vector<uint16_t> indices;
-    indices.reserve(SEGMENTS * 3);
-    for (int i = 0; i < SEGMENTS; ++i) {
-        indices.push_back(0);
-        indices.push_back(static_cast<uint16_t>(i + 1));
-        indices.push_back(static_cast<uint16_t>(i + 2));
-    }
-    selCircleVertCount_ = SEGMENTS * 3;
-
-    // Upload vertex buffer
     if (selCircleVertBuf_ == VK_NULL_HANDLE) {
-        AllocatedBuffer vbuf = uploadBuffer(*vkCtx_, verts.data(),
-            verts.size() * sizeof(float), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-        selCircleVertBuf_ = vbuf.buffer;
-        selCircleVertAlloc_ = vbuf.allocation;
-
+        // The lattice's triangles never change; only its heights do.
+        std::vector<uint16_t> indices;
+        indices.reserve(kSelGridCells * kSelGridCells * 6);
+        for (int y = 0; y < kSelGridCells; ++y) {
+            for (int x = 0; x < kSelGridCells; ++x) {
+                const auto i0 = static_cast<uint16_t>(y * kSelGridVerts + x);
+                const auto i1 = static_cast<uint16_t>(i0 + 1);
+                const auto i2 = static_cast<uint16_t>(i0 + kSelGridVerts);
+                const auto i3 = static_cast<uint16_t>(i2 + 1);
+                indices.insert(indices.end(), {i0, i1, i3, i0, i3, i2});
+            }
+        }
+        selCircleVertCount_ = static_cast<int>(indices.size());
         AllocatedBuffer ibuf = uploadBuffer(*vkCtx_, indices.data(),
             indices.size() * sizeof(uint16_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
         selCircleIdxBuf_ = ibuf.buffer;
         selCircleIdxAlloc_ = ibuf.allocation;
+
+        const VkDeviceSize sliceBytes = sizeof(float) * 3 * kSelGridVerts * kSelGridVerts;
+        AllocatedBuffer vbuf = createBuffer(vkCtx_->getAllocator(), sliceBytes * kSelFrameSlices,
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        selCircleVertBuf_ = vbuf.buffer;
+        selCircleVertAlloc_ = vbuf.allocation;
+        selCircleVertMapped_ = vbuf.info.pMappedData;
     }
 
-    // Build pipeline
+    // Build pipeline. Tested against the scene's depth without writing it and
+    // pulled toward the camera, as the stock projector biases its re-drawn
+    // floor (0.4); additive, as GxBlend_Add.
     selCirclePipeline_ = PipelineBuilder()
         .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
                     fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
         .setVertexInput({vertBind}, {vertAttr})
         .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
         .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-        .setNoDepthTest()
-        .setColorBlendAttachment(PipelineBuilder::blendAlpha())
+        .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
+        .setDepthBias(-1.0f, -1.0f)
+        .setColorBlendAttachment(PipelineBuilder::blendAdditive())
         .setMultisample(vkCtx_->getMsaaSamples())
         .setLayout(selCirclePipelineLayout_)
         .setRenderPass(vkCtx_->getImGuiRenderPass())
@@ -146,53 +303,94 @@ void OverlaySystem::renderSelectionCircle(const glm::mat4& view, const glm::mat4
                                            const HeightQuery3D& m2Height) {
     if (!selCircleVisible_) return;
     initSelectionCircle();
-    if (selCirclePipeline_ == VK_NULL_HANDLE || cmd == VK_NULL_HANDLE) return;
-
-    // Keep circle anchored near target foot Z. The floor queries are collision
-    // raycasts; reuse the last result while the target stands still, refreshing
-    // every 30 frames in case geometry streams in around it.
-    float floorZ;
-    if (selCircleFloorCacheAge_ >= 0 && selCircleFloorCacheAge_ < 30 &&
-        selCirclePos_ == selCircleFloorCachePos_) {
-        floorZ = selCircleFloorCacheZ_;
-        selCircleFloorCacheAge_++;
-    } else {
-        const float baseZ = selCirclePos_.z;
-        floorZ = baseZ;
-        auto considerFloor = [&](std::optional<float> sample) {
-            if (!sample) return;
-            const float h = *sample;
-            if (h < baseZ - 1.25f || h > baseZ + 0.85f) return;
-            floorZ = std::max(floorZ, h);
-        };
-
-        if (terrainHeight) considerFloor(terrainHeight(selCirclePos_.x, selCirclePos_.y));
-        if (wmoHeight) considerFloor(wmoHeight(selCirclePos_.x, selCirclePos_.y, selCirclePos_.z + 3.0f));
-        if (m2Height) considerFloor(m2Height(selCirclePos_.x, selCirclePos_.y, selCirclePos_.z + 2.0f));
-
-        selCircleFloorCachePos_ = selCirclePos_;
-        selCircleFloorCacheZ_ = floorZ;
-        selCircleFloorCacheAge_ = 0;
+    if (selCirclePipeline_ == VK_NULL_HANDLE || cmd == VK_NULL_HANDLE ||
+        selCircleVertMapped_ == nullptr || selCircleSet_ == VK_NULL_HANDLE ||
+        !selCircleTexture_.isValid()) {
+        return;
     }
 
-    glm::vec3 raisedPos = selCirclePos_;
-    raisedPos.z = floorZ + 0.17f;
-    glm::mat4 model = glm::translate(glm::mat4(1.0f), raisedPos);
-    model = glm::scale(model, glm::vec3(selCircleRadius_));
+    const glm::vec3 feet = selCirclePos_;
+    const float r = selCircleRadius_;
 
-    glm::mat4 mvp = projection * view * model;
-    glm::vec4 color4(selCircleColor_, 1.0f);
+    // Lattice spacing: the box (2R) plus a cell of slack fits in the grid
+    // wherever the lattice happens to fall, never finer than kSelMinSpacing.
+    const float spacing = std::max(kSelMinSpacing,
+                                   2.0f * r / static_cast<float>(kSelGridCells - 2));
+    // WMO/M2 floors are found by a downward probe; start it at the top of the
+    // box so a step or a deck up to R above the feet is still a floor.
+    const float probeZ = feet.z + r + 0.25f;
+    if (spacing != selFloorCacheSpacing_ || std::abs(probeZ - selFloorCacheProbeZ_) > 0.35f ||
+        ++selFloorCacheAge_ > kSelCacheMaxAge || selFloorCache_.size() > kSelCacheMaxEntries) {
+        selFloorCache_.clear();
+        selFloorCacheSpacing_ = spacing;
+        selFloorCacheProbeZ_ = probeZ;
+        selFloorCacheAge_ = 0;
+    }
+
+    const auto originX = static_cast<int32_t>(std::floor((feet.x - r) / spacing));
+    const auto originY = static_cast<int32_t>(std::floor((feet.y - r) / spacing));
+    // Below the box: the shader's height ramp is zero there, so a lattice point
+    // with no floor inside the box draws nothing.
+    const float noFloorZ = feet.z - 2.0f * r - 1.0f;
+
+    selLatticeVerts_.resize(static_cast<size_t>(kSelGridVerts) * kSelGridVerts * 3);
+    size_t out = 0;
+    for (int gy = 0; gy < kSelGridVerts; ++gy) {
+        for (int gx = 0; gx < kSelGridVerts; ++gx) {
+            const int32_t ix = originX + gx;
+            const int32_t iy = originY + gy;
+            const float wx = static_cast<float>(ix) * spacing;
+            const float wy = static_cast<float>(iy) * spacing;
+            auto [it, inserted] = selFloorCache_.try_emplace(latticeKey(ix, iy));
+            if (inserted) {
+                SelFloorSample& s = it->second;
+                if (terrainHeight) s.terrain = terrainHeight(wx, wy);
+                if (wmoHeight) s.wmo = wmoHeight(wx, wy, selFloorCacheProbeZ_);
+                if (m2Height) s.m2 = m2Height(wx, wy, selFloorCacheProbeZ_);
+            }
+            // The highest floor inside the box: from above, as the stock
+            // projector sees it, the top surface is the one left showing.
+            float z = noFloorZ;
+            bool found = false;
+            for (const std::optional<float>& h : {it->second.terrain, it->second.wmo, it->second.m2}) {
+                if (!h || *h < feet.z - r || *h > feet.z + r) continue;
+                if (!found || *h > z) z = *h;
+                found = true;
+            }
+            selLatticeVerts_[out++] = wx;
+            selLatticeVerts_[out++] = wy;
+            selLatticeVerts_[out++] = z;
+        }
+    }
+
+    const uint32_t slice = vkCtx_->getCurrentFrame() % kSelFrameSlices;
+    const VkDeviceSize sliceBytes = sizeof(float) * selLatticeVerts_.size();
+    std::memcpy(static_cast<uint8_t*>(selCircleVertMapped_) + slice * sliceBytes,
+                selLatticeVerts_.data(), sliceBytes);
+    vmaFlushAllocation(vkCtx_->getAllocator(), selCircleVertAlloc_, slice * sliceBytes, sliceBytes);
+
+    // The texture turns with the camera (0x744150): its bright lower lip is
+    // kept on the side of the ring nearest the viewer.
+    const glm::vec3 camPos = glm::vec3(glm::inverse(view)[3]);
+    glm::vec2 facing(feet.x - camPos.x, feet.y - camPos.y);
+    const float facingLen = glm::length(facing);
+    facing = facingLen > 1e-4f ? facing / facingLen : glm::vec2(1.0f, 0.0f);
+
+    SelCirclePush push{};
+    push.viewProj = projection * view;
+    push.color = glm::vec4(selCircleColor_, 1.0f);
+    push.center = glm::vec4(feet, r);
+    push.facing = glm::vec4(facing, kSelSurfaceLift, 0.0f);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, selCirclePipeline_);
-    VkDeviceSize offset = 0;
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, selCirclePipelineLayout_,
+                            0, 1, &selCircleSet_, 0, nullptr);
+    const VkDeviceSize offset = slice * sliceBytes;
     vkCmdBindVertexBuffers(cmd, 0, 1, &selCircleVertBuf_, &offset);
     vkCmdBindIndexBuffer(cmd, selCircleIdxBuf_, 0, VK_INDEX_TYPE_UINT16);
     vkCmdPushConstants(cmd, selCirclePipelineLayout_,
         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        0, 64, &mvp[0][0]);
-    vkCmdPushConstants(cmd, selCirclePipelineLayout_,
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        64, 16, &color4[0]);
+        0, sizeof(push), &push);
     vkCmdDrawIndexed(cmd, static_cast<uint32_t>(selCircleVertCount_), 1, 0, 0, 0);
 }
 

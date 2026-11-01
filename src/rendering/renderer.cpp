@@ -2222,6 +2222,7 @@ void Renderer::update(float deltaTime) {
             in.catchUpElapsed = bodyFacingClock_ - bodyFacingStamp_;
             const anim::BodyFacingResult bf = anim::updateBodyFacing(bodyFacing_, in);
             characterVisualYawDeg_ = glm::degrees(bf.body);
+            bodyFacingStep_ = bf.bodyStep;  // the turn-in-place shuffle reads it
             float yawRad = bf.body;
             characterRenderer->setInstanceRotation(characterInstanceId, glm::vec3(0.0f, 0.0f, yawRad));
             // Mounted, the twist belongs to the mount's model (the unit's
@@ -2461,6 +2462,12 @@ void Renderer::update(float deltaTime) {
             }
         }
         zctx.zoneManager = zoneManager.get();
+        // For SoundEmitters.dbc, which places its loops per map.
+        if (terrainManager) {
+            if (const auto* gh = core::Application::getInstance().getGameHandler()) {
+                zctx.mapId = gh->getCurrentMapId();
+            }
+        }
         audioCoordinator_->updateZoneAudio(zctx);
     }
 
@@ -3983,6 +3990,8 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         if (audioCoordinator_->getAmbientSoundManager()) {
             terrainManager->setAmbientSoundManager(audioCoordinator_->getAmbientSoundManager());
         }
+        // Doodads' own $DSL / $DSO sound events
+        terrainManager->setWorldSoundEmitters(audioCoordinator_->getWorldSoundEmitters());
         // Pass asset manager to character renderer for texture loading
         if (characterRenderer) {
             characterRenderer->setAssetManager(assetManager);

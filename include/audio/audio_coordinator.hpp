@@ -24,6 +24,7 @@ class UiSoundManager;
 class CombatSoundManager;
 class SpellSoundManager;
 class MovementSoundManager;
+class WorldSoundEmitters;
 
 /// Flat context passed from Renderer into updateZoneAudio() each frame.
 /// All values are pre-queried so AudioCoordinator needs no rendering pointers.
@@ -52,6 +53,8 @@ struct ZoneAudioContext {
     uint32_t wmoRootId = 0;
     int32_t wmoGroupIndex = -1;
     uint16_t wmoNameSet = 0;
+    // The map the world is on, for SoundEmitters.dbc; 0xFFFFFFFF = unknown.
+    uint32_t mapId = 0xFFFFFFFFu;
     // Zone manager pointer (for zone info and music queries)
     game::ZoneManager* zoneManager = nullptr;
 };
@@ -106,6 +109,8 @@ public:
     CombatSoundManager* getCombatSoundManager() { return combatSoundManager_.get(); }
     SpellSoundManager* getSpellSoundManager() { return spellSoundManager_.get(); }
     MovementSoundManager* getMovementSoundManager() { return movementSoundManager_.get(); }
+    /// SoundEmitters.dbc loops and M2 doodad sound events, by distance.
+    WorldSoundEmitters* getWorldSoundEmitters() { return worldSoundEmitters_.get(); }
 
 private:
     void playZoneMusic(const std::string& music);
@@ -128,6 +133,7 @@ private:
     std::unique_ptr<CombatSoundManager> combatSoundManager_;
     std::unique_ptr<SpellSoundManager> spellSoundManager_;
     std::unique_ptr<MovementSoundManager> movementSoundManager_;
+    std::unique_ptr<WorldSoundEmitters> worldSoundEmitters_;
 
     bool audioAvailable_ = false;
 

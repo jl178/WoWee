@@ -40,6 +40,8 @@ namespace ftl { constexpr uint32_t kFields = 5, kFootstep = 1, kTerrain = 2, kSo
 // ItemGroupSounds: ID, Sound[4] - pickup, put-down, and two the 3.3.5 rows leave unused.
 namespace igs { constexpr uint32_t kFields = 5, kPickup = 1, kPutDown = 2; }
 namespace idi { constexpr uint32_t kFields = 25, kGroupSound = 12; }  // ItemDisplayInfo
+// SoundEmitters: ID, Position[3], Direction[3], SoundEntriesID, MapID, Name.
+namespace sem { constexpr uint32_t kFields = 10, kPos = 1, kSound = 7, kMap = 8, kName = 9; }
 
 constexpr int kMaxParentDepth = 16;
 
@@ -215,12 +217,26 @@ bool SoundData::load(const Loader& loadDbc) {
             itemGroupSounds_[dbc->getUInt32(i, 0)] = {dbc->getUInt32(i, igs::kPickup), dbc->getUInt32(i, igs::kPutDown)};
         }
     }
+    mapEmitters_.clear();
+    size_t emitterCount = 0;
+    if (auto dbc = table(loadDbc, "SoundEmitters.dbc", sem::kFields)) {
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            MapSoundEmitter e;
+            e.id = dbc->getUInt32(i, 0);
+            for (uint32_t c = 0; c < 3; ++c) e.position[c] = dbc->getFloat(i, sem::kPos + c);
+            e.soundId = dbc->getUInt32(i, sem::kSound);
+            e.name = dbc->getString(i, sem::kName);
+            if (e.soundId == 0) continue;
+            mapEmitters_[dbc->getUInt32(i, sem::kMap)].push_back(std::move(e));
+            ++emitterCount;
+        }
+    }
 
     loaded_ = true;
     LOG_INFO("SoundData: ", soundEntries_->getRecordCount(), " sounds, ", zoneMusic_.size(), " music sets, ",
              ambience_.size(), " ambiences, ", areas_.size(), " areas, ", impactRows_.size(),
              " weapon impact rows, ", footsteps_.size(), " footstep rows, ", itemGroupSounds_.size(),
-             " item sound groups");
+             " item sound groups, ", emitterCount, " placed emitters on ", mapEmitters_.size(), " maps");
     return true;
 }
 

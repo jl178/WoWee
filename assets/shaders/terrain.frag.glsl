@@ -39,6 +39,17 @@ layout(set = 1, binding = 7) uniform TerrainParams {
     int hasLayer3;
 };
 
+// MCSH, the chunk's baked shadow, as light: 1 lit, 0 under the shadow the map
+// was baked with (trees, buildings, the hills themselves). Same 64x64 layout
+// and UV as the alpha maps; chunks without one get the opaque 1x1.
+layout(set = 1, binding = 8) uniform sampler2D uBakedShadow;
+
+// How dark the baked shadow takes the sunlit term at most. Light.dbc's
+// shadow band (LightIntBand channel 8) is a grey of about 0.3 at noon, the
+// opacity later clients name; half the direct light lands close to that once
+// the ambient term is added, and stays on the subtle side where unsure.
+const float kBakedShadowStrength = 0.5;
+
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
@@ -270,6 +281,11 @@ void main() {
 
     RtLight rt = rtLightAt(FragPos);
     shadow = rtShadow(rt, shadow);
+    // The baked shadow against the live one, the darker of the two: a tree
+    // the dynamic map already shades is not shaded twice, and ground beyond
+    // the dynamic map's reach keeps the shadow it was baked with.
+    float baked = 1.0 - kBakedShadowStrength * (1.0 - texture(uBakedShadow, LayerUV).r);
+    shadow = min(shadow, baked);
     ambient = rtAmbient(rt, ambientColor.rgb) * finalColor.rgb;
 
     vec3 result = ambient + shadow * diffuse;

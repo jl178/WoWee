@@ -222,6 +222,11 @@ public:
     float getCharacterVisualYaw() const {
         return bodyFacing_.initialized ? characterVisualYawDeg_ : characterYaw;
     }
+    /// Radians the drawn body turned this frame by the clamp and catch-up
+    /// (BodyFacingResult::bodyStep, CCW positive). Standing, a step past
+    /// 1e-5 either way is what plays ShuffleLeft/ShuffleRight in the stock
+    /// client (CGUnit_C 0x0073E2C0).
+    float getBodyFacingStep() const { return bodyFacingStep_; }
 
     // Screenshot capture - copies swapchain image to PNG file
     bool captureScreenshot(const std::string& outputPath);
@@ -493,6 +498,7 @@ private:
     float bodyFacingClock_ = 0.0f;
     float bodyFacingStamp_ = 0.0f;
     uint32_t bodyFacingControls_ = 0;
+    float bodyFacingStep_ = 0.0f;  // radians the body turned this frame (CCW +)
 
     // Where the player was, for shaders that react to them moving through the
     // world. playerWakePos_ chases characterPosition with a fixed time

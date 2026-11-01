@@ -17,6 +17,10 @@ void Camera::updateViewMatrix() {
 }
 
 void Camera::updateProjectionMatrix() {
+    // fov is vertical, as in the stock client: FUN_006bf370(fovy, aspect,
+    // near, far) builds m11 = 1/tan(fovy/2), m00 = m11/aspect - the same
+    // matrix glm::perspective makes. Stock fovy is 0.6 * pi/2 = 54 deg (see
+    // camera.hpp); the "fov" setting defaults to that.
     projectionMatrix = glm::perspective(glm::radians(fov), aspectRatio, nearPlane, farPlane);
     // Vulkan clip-space has Y pointing down; flip the projection's Y axis.
     projectionMatrix[1][1] *= -1.0f;

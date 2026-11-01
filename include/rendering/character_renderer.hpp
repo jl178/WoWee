@@ -221,6 +221,13 @@ public:
         return it != instances.end() ? it->second.modelId : 0;
     }
 
+    // The scale an instance draws at (1 if the instance doesn't exist). Read by
+    // the selection circle, whose size the stock client scales by the same.
+    [[nodiscard]] float getInstanceScale(uint32_t instanceId) const {
+        auto it = instances.find(instanceId);
+        return it != instances.end() ? it->second.scale : 1.0f;
+    }
+
     /**
      * Attach an enchant visual to the weapon at the given attachment point.
      * visualSlot is the ItemVisuals.dbc slot (0-4), which selects the attachment
@@ -332,6 +339,9 @@ private:
         float globalSequenceTime = 0.0f; // Separate timer for global sequences (accumulates without wrapping at sequence duration)
         bool animationLoop = true;
         uint32_t oneShotReturnAnim = 0; // Anim to resume when a one-shot ends (0 = Stand)
+        // Laps the playing variation still owes (its replay range) before the
+        // next variation is rolled. See animation/sequence_variation.hpp.
+        uint32_t variationLapsLeft = 0;
         bool isDead = false;  // Prevents movement while in death state
         bool deathLocked = false;  // playDeath: nothing but Death/Dead plays until clearDeath
         std::vector<glm::mat4> boneMatrices;  // Current bone transforms
