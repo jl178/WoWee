@@ -4,6 +4,7 @@
 #include "ui/widget_tree.hpp"
 #include <map>
 #include <functional>
+#include <chrono>
 #include <unordered_map>
 #include <string>
 #include <utility>
@@ -183,6 +184,11 @@ public:
     void runInterfaceProbe();
 
 private:
+    /// WOWEE_FRAME_PROFILE: OnUpdate milliseconds by frame name since the last report.
+    std::unordered_map<std::string, double> onUpdateCost_;
+    uint64_t onUpdateFrames_ = 0;
+    std::chrono::steady_clock::time_point onUpdateReportAt_{};
+
     bool eventListenersReported_ = false;
     int  eventReportFrames_ = 0;
 public:

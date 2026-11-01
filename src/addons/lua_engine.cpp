@@ -34,6 +34,7 @@
 #include <fstream>
 #include "core/app_clock.hpp"
 #include "core/config_paths.hpp"
+#include "core/env_flag.hpp"
 #include <filesystem>
 
 extern "C" {
@@ -1493,6 +1494,9 @@ int lua_MessageFrame_AddMessage(lua_State* L) {
     } else if (lua_type(L, 9) == LUA_TSTRING) {
         m.hasExtra = true;
         m.extra = lua_tostring(L, 9);
+    }
+    if (!w->isMessageFrame) {
+        if (auto* tree = wowee::addons::getWidgetTree(L)) tree->noteMessageFrame(widgetIdOf(L, 1));
     }
     w->isMessageFrame = true;
     // UIErrorsFrame asks for insertMode="TOP", which puts a new line above the
@@ -11921,13 +11925,13 @@ void LuaEngine::runInterfaceProbe() {
 /// erased here and why scrolling lights everything again - the player reading
 /// back wants what was said, not what is still fresh.
 void LuaEngine::expireMessages(float elapsed) {
-    for (size_t id = 1; id < widgets_.size(); ++id) {
-        // Read-only until it is a message frame: the writable get() marks a
-        // widget for the renderer's sizing pass, and this runs every frame
-        // over the whole tree.
-        const auto* seen = std::as_const(widgets_).get(static_cast<uint32_t>(id));
+    // Only the frames that have been sent a message: reading the whole tree to
+    // find them was 0.87 ms a frame. Read-only until one has timed messages,
+    // since the writable get() marks a widget for the renderer's sizing pass.
+    for (const uint32_t id : widgets_.messageFrames()) {
+        const auto* seen = std::as_const(widgets_).get(id);
         if (!seen || !seen->isMessageFrame || seen->messageDuration <= 0.0f) continue;
-        auto* w = widgets_.get(static_cast<uint32_t>(id));
+        auto* w = widgets_.get(id);
         const bool readingBack = w->messageScroll > 0;
         const float life = w->messageDuration;
         const float fade = w->messageFadeDuration > 0.0f ? w->messageFadeDuration : 0.0f;
@@ -12096,6 +12100,30 @@ void LuaEngine::dispatchOnUpdate(float elapsed) {
         lua_pop(L_, 1);
     }
 
+    // WOWEE_FRAME_PROFILE: which handlers the "addon OnUpdate" stage is made
+    // of, the costliest named every ten seconds.
+    static const bool onUpdateProfile = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
+    if (onUpdateProfile) {
+        ++onUpdateFrames_;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - onUpdateReportAt_ >= std::chrono::seconds(10)) {
+            if (onUpdateFrames_ > 0 && !onUpdateCost_.empty()) {
+                std::vector<std::pair<double, std::string>> top;
+                for (const auto& [name, ms] : onUpdateCost_) top.emplace_back(ms, name);
+                std::sort(top.begin(), top.end(), std::greater<>());
+                std::string line;
+                for (size_t i = 0; i < top.size() && i < 8; ++i) {
+                    line += " " + top[i].second + "=" +
+                            std::to_string(top[i].first / onUpdateFrames_).substr(0, 6) + "ms";
+                }
+                LOG_WARNING("  OnUpdate by frame (", top.size(), " ran):", line);
+            }
+            onUpdateCost_.clear();
+            onUpdateFrames_ = 0;
+            onUpdateReportAt_ = now;
+        }
+    }
+
     lua_getglobal(L_, "__WoweeOnUpdateFrames");
     if (!lua_istable(L_, -1)) { lua_pop(L_, 1); return; }
 
@@ -12148,7 +12176,16 @@ void LuaEngine::dispatchOnUpdate(float elapsed) {
             if (lua_isfunction(L_, -1)) {
                 lua_pushvalue(L_, hIdx - 2);  // self (frame)
                 lua_pushnumber(L_, static_cast<double>(elapsed));
-                if (pcallScript(L_, "OnUpdate", 2, hIdx) != 0) {
+                const auto handlerStart = onUpdateProfile ? std::chrono::steady_clock::now()
+                                                          : std::chrono::steady_clock::time_point{};
+                const int callResult = pcallScript(L_, "OnUpdate", 2, hIdx);
+                if (onUpdateProfile) {
+                    const auto* pw = widgetOf(L_, hIdx - 2);
+                    onUpdateCost_[(pw && !pw->name.empty()) ? pw->name : std::string("(unnamed)")] +=
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                                  handlerStart).count();
+                }
+                if (callResult != 0) {
                     const char* uerr = lua_tostring(L_, -1);
                     std::string uerrStr = uerr ? uerr : "(unknown)";
                     lua_pop(L_, 1);

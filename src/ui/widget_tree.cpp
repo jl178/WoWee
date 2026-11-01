@@ -162,6 +162,7 @@ void WidgetTree::reset() {
     layingOut_ = false;
     markLayoutDirty();
     changed_.clear();
+    messageFrames_.clear();
     visibleMirror_.clear();
 
     widgets_.emplace_back();          // id 0 is "none"
