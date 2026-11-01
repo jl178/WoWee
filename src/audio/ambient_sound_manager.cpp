@@ -45,6 +45,7 @@ bool AmbientSoundManager::initialize(pipeline::AssetManager* assets) {
     }
 
     LOG_INFO("AmbientSoundManager: Initializing...");
+    assets_ = assets;
 
     // Load fire sounds
     fireSoundsSmall_.resize(1);
@@ -254,6 +255,12 @@ bool AmbientSoundManager::initialize(pipeline::AssetManager* assets) {
 }
 
 void AmbientSoundManager::shutdown() {
+    if (areaLoopId_ != 0) {
+        AudioEngine::instance().stopSound(areaLoopId_);
+        areaLoopId_ = 0;
+    }
+    areaLoopPath_.clear();
+    areaSamples_.clear();
     emitters_.clear();
     activeSounds_.clear();
     initialized_ = false;
@@ -270,7 +277,7 @@ void AmbientSoundManager::update(float deltaTime, const glm::vec3& cameraPos, bo
     updatePositionalEmitters(deltaTime, cameraPos);
 
     // Don't play outdoor periodic sounds (birds) when indoors OR in blacksmith
-    if (!isIndoor && !isBlacksmith) {
+    if (!isIndoor && !isBlacksmith && !areaAmbienceDriven_) {
         updatePeriodicSounds(deltaTime, isIndoor, isSwimming);
     }
 
@@ -283,15 +290,19 @@ void AmbientSoundManager::update(float deltaTime, const glm::vec3& cameraPos, bo
     // Blacksmith takes priority over tavern
     if (isBlacksmith) {
         updateBlacksmithAmbience(deltaTime);
-    } else {
+    } else if (!areaAmbienceDriven_) {
         updateWindAmbience(deltaTime, isIndoor);
     }
 
     // Update weather, water, zone, and city ambience
     updateWeatherAmbience(deltaTime, isIndoor);
     updateWaterAmbience(deltaTime, isSwimming);
-    updateZoneAmbience(deltaTime, isIndoor);
-    updateCityAmbience(deltaTime);
+    if (areaAmbienceDriven_) {
+        updateAreaAmbience(isIndoor || isBlacksmith);
+    } else {
+        updateZoneAmbience(deltaTime, isIndoor);
+        updateCityAmbience(deltaTime);
+    }
     updateBellTolls(deltaTime);
 
     // Track indoor state changes
@@ -757,6 +768,44 @@ void AmbientSoundManager::updateWaterAmbience(float deltaTime, bool isSwimming) 
     // BEACH zone ambience above, which is why this was never missed. Whoever
     // adds the proximity query can load Sound\\Ambience\\Water\\OceanDeepDay.wav
     // here again - keeping it in memory until then bought nothing.
+}
+
+void AmbientSoundManager::setAreaAmbience(const std::string& dayPath, const std::string& nightPath, float volume) {
+    areaAmbienceDriven_ = true;
+    areaAmbienceDay_ = dayPath;
+    areaAmbienceNight_ = nightPath;
+    areaAmbienceVolume_ = volume;
+}
+
+void AmbientSoundManager::updateAreaAmbience(bool isIndoor) {
+    static const std::string kNone;
+    const std::string& want = isIndoor ? kNone : (isDaytime() ? areaAmbienceDay_ : areaAmbienceNight_);
+    const float volume = areaAmbienceVolume_ * volumeScale_;
+    if (want == areaLoopPath_) {
+        if (areaLoopId_ != 0 && volume != areaLoopVolume_) {
+            AudioEngine::instance().setSoundVolume(areaLoopId_, volume);
+            areaLoopVolume_ = volume;
+        }
+        return;
+    }
+    if (areaLoopId_ != 0) {
+        AudioEngine::instance().fadeOutSound(areaLoopId_, 1500.0f);
+        areaLoopId_ = 0;
+    }
+    areaLoopPath_ = want;
+    if (want.empty() || !assets_) return;
+    auto it = areaSamples_.find(want);
+    if (it == areaSamples_.end()) {
+        // A loop is a minute of stereo PCM; keep the last few areas, not every one.
+        if (areaSamples_.size() >= 6) areaSamples_.clear();
+        AmbientSample sample;
+        loadSound(want, sample, assets_);
+        it = areaSamples_.emplace(want, std::move(sample)).first;
+    }
+    if (!it->second.loaded) return;
+    areaLoopId_ = AudioEngine::instance().playSound2DStoppable(it->second.data, volume, /*loop=*/true, 1500.0f);
+    areaLoopVolume_ = volume;
+    LOG_INFO("Zone ambience: ", want);
 }
 
 void AmbientSoundManager::updateZoneAmbience(float deltaTime, bool isIndoor) {

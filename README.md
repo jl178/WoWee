@@ -467,11 +467,18 @@ cost; FSR 1 or FSR 3 upscaling can improve frame rate on weaker hardware.
 
 ## Soundtrack
 
-The client carries music of its own: the login theme, the track taverns open
-their rotation on, and zone rotations that play alongside whatever your game
-data provides - Elwynn, the Barrens, Booty Bay, Lordaeron, Stormwind and
-Ironforge among them. **WoWee soundtrack** under Sound → WoWee → Sound turns it
-off and leaves the zone music to the game's own files.
+Zone music, zone ambience and the character's voice come from the game's own
+tables (`AreaTable`, `ZoneMusic`, `SoundAmbience`, `SoundEntries`,
+`CreatureSoundData`), so they match what the stock client plays: a track on
+entering a zone, three to five minutes of quiet between tracks, day and night
+pools, a city's intro piece once an hour, and the ambience loop the area
+names. See [docs/sound.md](docs/sound.md).
+
+The client also carries music of its own: the login theme, the track taverns
+open their rotation on, and zone rotations for Elwynn, the Barrens, Booty Bay,
+Lordaeron, Stormwind and Ironforge among others. **WoWee soundtrack** under
+Sound → WoWee → Sound mixes them into the zone pools. It is off by default,
+so a fresh install hears the game's music only.
 
 <p align="center">
   <a href="https://kelsidavis.bandcamp.com/album/wowee-soundtrack">

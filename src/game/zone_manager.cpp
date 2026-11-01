@@ -548,8 +548,6 @@ void ZoneManager::enrichFromDBC(pipeline::AssetManager* assets) {
     if (!assets) return;
 
     auto areaDbc = assets->loadDBC("AreaTable.dbc");
-    auto zoneMusicDbc = assets->loadDBC("ZoneMusic.dbc");
-    auto soundDbc = assets->loadDBC("SoundEntries.dbc");
 
     if (!areaDbc || !areaDbc->isLoaded()) {
         LOG_WARNING("ZoneManager::enrichFromDBC: AreaTable.dbc not available");
@@ -580,74 +578,6 @@ void ZoneManager::enrichFromDBC(pipeline::AssetManager* assets) {
         if (haveFlags) areaFlags_[areaId] = areaDbc->getUInt32(i, 4);
     }
 
-    if (!zoneMusicDbc || !zoneMusicDbc->isLoaded()) {
-        LOG_WARNING("ZoneManager::enrichFromDBC: ZoneMusic.dbc not available");
-        return;
-    }
-    if (!soundDbc || !soundDbc->isLoaded()) {
-        LOG_WARNING("ZoneManager::enrichFromDBC: SoundEntries.dbc not available");
-        return;
-    }
-
-    // Build MPQ paths from a SoundEntries record.
-    // Fields 3-12 = File[0..9], field 23 = DirectoryBase.
-    auto getSoundPaths = [&](uint32_t soundId) -> std::vector<std::string> {
-        if (soundId == 0) return {};
-        int32_t idx = soundDbc->findRecordById(soundId);
-        if (idx < 0) return {};
-        uint32_t row = static_cast<uint32_t>(idx);
-        if (soundDbc->getFieldCount() < 24) return {};
-        std::string dir = soundDbc->getString(row, 23);
-        std::vector<std::string> paths;
-        for (uint32_t f = 3; f <= 12; ++f) {
-            std::string name = soundDbc->getString(row, f);
-            if (name.empty()) continue;
-            paths.push_back(dir.empty() ? name : dir + "\\" + name);
-        }
-        return paths;
-    };
-
-    if (areaFields < 9) {
-        LOG_WARNING("ZoneManager::enrichFromDBC: AreaTable.dbc has too few fields (", areaFields, ")");
-        return;
-    }
-
-    uint32_t zonesEnriched = 0;
-    for (uint32_t i = 0; i < numAreas; ++i) {
-        uint32_t zoneId      = areaDbc->getUInt32(i, 0);
-        uint32_t zoneMusicId = areaDbc->getUInt32(i, 8);
-        if (zoneId == 0 || zoneMusicId == 0) continue;
-
-        int32_t zmIdx = zoneMusicDbc->findRecordById(zoneMusicId);
-        if (zmIdx < 0) continue;
-        uint32_t zmRow = static_cast<uint32_t>(zmIdx);
-        if (zoneMusicDbc->getFieldCount() < 8) continue;
-
-        uint32_t daySoundId   = zoneMusicDbc->getUInt32(zmRow, 6);
-        uint32_t nightSoundId = zoneMusicDbc->getUInt32(zmRow, 7);
-
-        std::vector<std::string> newPaths;
-        for (const auto& p : getSoundPaths(daySoundId))   newPaths.push_back(p);
-        for (const auto& p : getSoundPaths(nightSoundId)) newPaths.push_back(p);
-        if (newPaths.empty()) continue;
-
-        auto& zone = zones[zoneId];
-        if (zone.id == 0) zone.id = zoneId;
-
-        // Append paths not already present (preserve hardcoded entries).
-        for (const auto& path : newPaths) {
-            bool found = false;
-            for (const auto& existing : zone.musicPaths) {
-                if (existing == path) { found = true; break; }
-            }
-            if (!found) {
-                zone.musicPaths.push_back(path);
-                ++zonesEnriched;
-            }
-        }
-    }
-
-    LOG_INFO("Zone music enriched from DBC: ", zones.size(), " zones, ", zonesEnriched, " paths added");
 
     // A track the data does not have is taken out of the pool rather than
     // picked and failed on: each one was a "Could not read" and a zone gone

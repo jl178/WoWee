@@ -1313,6 +1313,9 @@ void Application::run() {
     if (frameProfileEnabled_) {
         LOG_WARNING("Frame timing profile enabled (WOWEE_FRAME_PROFILE=1) - "
                     "the per-stage breakdown will be reported at warning");
+        if (gameHandler) {
+            gameHandler->setStageSink([this](const char* stage, float ms) { noteStageTime(stage, ms); });
+        }
     }
 
     // Integer nanoseconds off a monotonic clock, and the finest sleep the
@@ -4120,6 +4123,7 @@ void Application::update(float deltaTime) {
         }
         float ruMs = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - rendererUpdateStart).count();
+        noteStageTime("renderer->update", ruMs);
         if (ruMs > 50.0f) {
             LOG_WARNING("SLOW update stage 'renderer->update': ", ruMs, "ms");
         }
@@ -5471,7 +5475,8 @@ void Application::spawnPlayerCharacter() {
                     useFemaleVoice = ch->useFemaleModel;
                 }
             }
-            asm_->setCharacterVoiceProfile(std::string(raceFolder), std::string(raceBase), !useFemaleVoice);
+            asm_->setCharacterVoiceProfile(std::string(raceFolder), std::string(raceBase), !useFemaleVoice,
+                                           static_cast<uint32_t>(playerRace_), audioCoordinator_->getSoundData());
         }
 
         // Track which character's appearance this instance represents so we can

@@ -720,6 +720,8 @@ set(WOWEE_SOURCES
     src/audio/combat_sound_manager.cpp
     src/audio/spell_sound_manager.cpp
     src/audio/movement_sound_manager.cpp
+    src/audio/sound_data.cpp
+    src/audio/zone_music_controller.cpp
 
     # Pipeline (asset loaders)
     src/pipeline/blp_loader.cpp

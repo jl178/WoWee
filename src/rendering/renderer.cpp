@@ -2282,6 +2282,11 @@ void Renderer::update(float deltaTime) {
         // Use the precise MCNK area classification when available; this avoids
         // stale server world-state zones and whole-ADT ambiguity at river banks.
         zctx.serverZoneId = getCurrentZoneId();
+        if (terrainManager) {
+            if (const auto areaId = terrainManager->getAreaIdAt(characterPosition.x, characterPosition.y)) {
+                zctx.areaId = *areaId;
+            }
+        }
         zctx.zoneManager = zoneManager.get();
         audioCoordinator_->updateZoneAudio(zctx);
     }
@@ -3813,6 +3818,7 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
     // Initialize audio managers
     if (audioCoordinator_->getMusicManager() && assetManager && !cachedAssetManager) {
         audio::AudioEngine::instance().setAssetManager(assetManager);
+        audioCoordinator_->loadSoundData(assetManager);
         audioCoordinator_->getMusicManager()->initialize(assetManager);
         if (audioCoordinator_->getFootstepManager()) {
             audioCoordinator_->getFootstepManager()->initialize(assetManager);

@@ -12,6 +12,7 @@
 #include "audio/spell_sound_manager.hpp"
 #include "audio/movement_sound_manager.hpp"
 #include "pipeline/asset_manager.hpp"
+#include "audio/day_night.hpp"
 #include "game/zone_manager.hpp"
 #include "core/logger.hpp"
 
@@ -70,6 +71,69 @@ void AudioCoordinator::shutdown() {
     }
 
     LOG_INFO("AudioCoordinator shutdown complete");
+}
+
+void AudioCoordinator::loadSoundData(pipeline::AssetManager* assets) {
+    if (soundData_.loaded()) return;
+    if (!assets) return;
+    if (soundData_.load([assets](const std::string& name) { return assets->loadDBCOptional(name); })) {
+        zoneMusic_ = std::make_unique<ZoneMusicController>(soundData_);
+        ambienceAreaId_ = 0;
+    }
+}
+
+void AudioCoordinator::updateTableAmbience(const ZoneAudioContext& ctx) {
+    if (!ambientSoundManager_ || ctx.areaId == 0 || ctx.areaId == ambienceAreaId_) return;
+    ambienceAreaId_ = ctx.areaId;
+    uint32_t day = 0, night = 0;
+    std::string dayPath, nightPath;
+    float volume = 1.0f;
+    if (soundData_.areaAmbience(ctx.areaId, day, night)) {
+        if (const SoundEntry* e = soundData_.sound(day); e && !e->files.empty()) {
+            dayPath = e->files.front();
+            volume = e->volume;
+        }
+        if (const SoundEntry* e = soundData_.sound(night); e && !e->files.empty()) {
+            nightPath = e->files.front();
+            if (dayPath.empty()) volume = e->volume;
+        }
+        // Half the areas name a day loop only; it then runs all night.
+        if (nightPath.empty()) nightPath = dayPath;
+        if (dayPath.empty()) dayPath = nightPath;
+    }
+    ambientSoundManager_->setAreaAmbience(dayPath, nightPath, volume);
+}
+
+void AudioCoordinator::updateTableMusic(const ZoneAudioContext& ctx, uint32_t zoneId, bool suppressed) {
+    if (suppressed) return;
+    ZoneMusicInput in;
+    in.areaId = ctx.areaId;
+    in.isDay = isDaytimeHours(ctx.gameTimeHours);
+    in.trackPlaying = musicManager_->isPlaying();
+    in.trackLoading = musicManager_->isLoading();
+    in.deltaTime = ctx.deltaTime;
+    // The client's own soundtrack joins the pool only when asked for.
+    if (ctx.zoneManager && ctx.zoneManager->getUseOriginalSoundtrack()) {
+        if (const auto* info = ctx.zoneManager->getZoneInfo(zoneId)) {
+            for (const auto& path : info->musicPaths) {
+                if (path.rfind("file:", 0) == 0) in.extraTracks.push_back(path);
+            }
+        }
+    }
+    const ZoneMusicAction action = zoneMusic_->update(in);
+    switch (action.kind) {
+    case ZoneMusicAction::Kind::Play:
+        musicManager_->setTrackGain(action.path.rfind("file:", 0) == 0 ? 1.0f : action.volume);
+        musicManager_->setLooping(false);
+        playZoneMusic(action.path);
+        LOG_INFO("Zone music: ", action.path, " (set ", zoneMusic_->currentSetId(), ")");
+        break;
+    case ZoneMusicAction::Kind::Stop:
+        musicManager_->stopMusic();
+        break;
+    case ZoneMusicAction::Kind::None:
+        break;
+    }
 }
 
 void AudioCoordinator::playZoneMusic(const std::string& music) {
@@ -141,6 +205,7 @@ void AudioCoordinator::updateZoneAudio(const ZoneAudioContext& ctx) {
             else                                     audioWeatherType = AmbientSoundManager::WeatherType::SNOW_HEAVY;
         }
         ambientSoundManager_->setWeather(audioWeatherType);
+        if (soundData_.loaded()) updateTableAmbience(ctx);
         ambientSoundManager_->update(deltaTime, ctx.cameraPosition, ctx.insideWmo, ctx.isSwimming, isBlacksmith);
     }
 
@@ -235,6 +300,20 @@ void AudioCoordinator::updateZoneAudio(const ZoneAudioContext& ctx) {
                 musicSwitchCooldown_ = 6.0f;
             }
         }
+    }
+
+    // Zone music from the client's tables. The tavern and blacksmith
+    // overrides above still win while the player is inside one.
+    if (zoneMusic_) {
+        if (zoneId != currentZoneId_ && zoneId != 0) {
+            currentZoneId_ = zoneId;
+            if (const auto* area = soundData_.area(zoneId)) currentZoneName_ = area->name;
+            else if (const auto* info = zm->getZoneInfo(zoneId)) currentZoneName_ = info->name;
+            LOG_INFO("Entered zone: ", currentZoneName_);
+        }
+        updateTableMusic(ctx, zoneId, insideTavern || insideBlacksmith || inTavern_ || inBlacksmith_);
+        musicManager_->update(deltaTime);
+        return;
     }
 
     // Normal zone transitions

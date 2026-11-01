@@ -388,7 +388,8 @@ bool AudioEngine::playSound2D(const std::vector<uint8_t>& wavData, float volume,
     return true;
 }
 
-uint32_t AudioEngine::playSound2DStoppable(const std::vector<uint8_t>& wavData, float volume) {
+uint32_t AudioEngine::playSound2DStoppable(const std::vector<uint8_t>& wavData, float volume,
+                                           bool loop, float fadeInMs) {
     if (!initialized_ || !engine_ || wavData.empty()) return 0;
     if (masterVolume_ <= 0.0f) return 0;
 
@@ -418,6 +419,10 @@ uint32_t AudioEngine::playSound2DStoppable(const std::vector<uint8_t>& wavData, 
     sound.markInitialised();
 
     ma_sound_set_volume(sound.get(), volume);
+    if (loop) ma_sound_set_looping(sound.get(), MA_TRUE);
+    if (fadeInMs > 0.0f) {
+        ma_sound_set_fade_in_milliseconds(sound.get(), 0.0f, volume, static_cast<ma_uint64>(fadeInMs));
+    }
     if (ma_sound_start(sound.get()) != MA_SUCCESS) {
         return 0;
     }
@@ -426,6 +431,28 @@ uint32_t AudioEngine::playSound2DStoppable(const std::vector<uint8_t>& wavData, 
     if (nextSoundId_ == 0) nextSoundId_ = 1;  // Skip 0 (sentinel)
     activeSounds_.push_back({sound.release(), audioBuffer.release(), decoded.pcmData, id});
     return id;
+}
+
+void AudioEngine::setSoundVolume(uint32_t id, float volume) {
+    if (id == 0) return;
+    for (auto& active : activeSounds_) {
+        if (active.id == id) {
+            ma_sound_set_volume(active.sound, volume);
+            return;
+        }
+    }
+}
+
+void AudioEngine::fadeOutSound(uint32_t id, float fadeMs) {
+    if (id == 0 || !engine_) return;
+    for (auto& active : activeSounds_) {
+        if (active.id != id) continue;
+        const auto frames = static_cast<ma_uint64>(fadeMs / 1000.0f * ma_engine_get_sample_rate(engine_));
+        ma_sound_set_fade_in_pcm_frames(active.sound, -1.0f, 0.0f, frames);
+        ma_sound_set_stop_time_in_pcm_frames(active.sound, ma_engine_get_time_in_pcm_frames(engine_) + frames);
+        active.id = 0;  // anonymous from here: nothing may stop or retune it twice
+        return;
+    }
 }
 
 void AudioEngine::stopSound(uint32_t id) {

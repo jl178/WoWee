@@ -1,5 +1,8 @@
 #pragma once
 
+#include "audio/sound_data.hpp"
+#include "audio/zone_music_controller.hpp"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -40,6 +43,10 @@ struct ZoneAudioContext {
     bool hasTile = false;
     // Server-authoritative zone (from SMSG_INIT_WORLD_STATES); 0 = offline
     uint32_t serverZoneId = 0;
+    // AreaTable id of the terrain chunk under the player; 0 = unknown. The
+    // sound tables are keyed by area, not zone: Goldshire and Elwynn share
+    // music, Stormwind's districts share the city's.
+    uint32_t areaId = 0;
     // Zone manager pointer (for zone info and music queries)
     game::ZoneManager* zoneManager = nullptr;
 };
@@ -68,6 +75,11 @@ public:
     /// Called from Renderer::update() with a pre-filled context.
     void updateZoneAudio(const ZoneAudioContext& ctx);
 
+    /// Read the sound tables. Until this succeeds, music and ambience come
+    /// from the hand-written tables in ZoneManager and AmbientSoundManager.
+    void loadSoundData(pipeline::AssetManager* assets);
+    [[nodiscard]] const SoundData* getSoundData() const { return soundData_.loaded() ? &soundData_ : nullptr; }
+
     [[nodiscard]] const std::string& getCurrentZoneName() const { return currentZoneName_; }
     [[nodiscard]] uint32_t getCurrentZoneId() const { return currentZoneId_; }
 
@@ -92,6 +104,12 @@ public:
 
 private:
     void playZoneMusic(const std::string& music);
+    void updateTableMusic(const ZoneAudioContext& ctx, uint32_t zoneId, bool suppressed);
+    void updateTableAmbience(const ZoneAudioContext& ctx);
+
+    SoundData soundData_;
+    std::unique_ptr<ZoneMusicController> zoneMusic_;
+    uint32_t ambienceAreaId_ = 0;
 
     std::unique_ptr<MusicManager> musicManager_;
     std::unique_ptr<FootstepManager> footstepManager_;

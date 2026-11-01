@@ -1,6 +1,7 @@
 #include "audio/activity_sound_manager.hpp"
 #include "audio/footstep_paths.hpp"
 #include "audio/audio_engine.hpp"
+#include "audio/sound_data.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "core/logger.hpp"
 #include <algorithm>
@@ -136,6 +137,26 @@ void ActivitySoundManager::preloadCandidates(std::vector<Sample>& out, const std
     }
 }
 
+void ActivitySoundManager::replaceFromEntry(std::vector<Sample>& out, const SoundEntry* entry) {
+    if (!assetManager || !entry || entry->files.empty()) return;
+    std::vector<Sample> loaded;
+    for (const auto& path : entry->files) {
+        if (!assetManager->fileExists(path)) continue;
+        auto data = assetManager->readFile(path);
+        if (data.empty()) continue;
+        loaded.push_back({path, std::move(data), entry->volume});
+    }
+    if (!loaded.empty()) out = std::move(loaded);
+}
+
+// Voice clips play as recorded: the stock client does not retune a grunt.
+bool ActivitySoundManager::playVoice(const std::vector<Sample>& clips) {
+    if (!AudioEngine::instance().isInitialized() || clips.empty()) return false;
+    std::uniform_int_distribution<size_t> dist(0, clips.size() - 1);
+    const Sample& sample = clips[dist(rng)];
+    return AudioEngine::instance().playSound2D(sample.data, sample.volume * volumeScale, 1.0f);
+}
+
 void ActivitySoundManager::preloadLandingSet(FootstepSurface surface, const std::string& material) {
     auto& clips = landingSets[static_cast<size_t>(surface)].clips;
     preloadCandidates(clips, classicFootstepPaths(material));
@@ -231,17 +252,7 @@ void ActivitySoundManager::playJump() {
         if (std::chrono::duration<float>(now - lastJumpAt).count() < 0.35f) return;
     }
 
-    // Pick random clip
-    std::uniform_int_distribution<size_t> dist(0, jumpClips.size() - 1);
-    const Sample& sample = jumpClips[dist(rng)];
-
-    // Play with slight volume/pitch variation
-    std::uniform_real_distribution<float> volumeDist(0.65f, 0.75f);
-    std::uniform_real_distribution<float> pitchDist(0.98f, 1.04f);
-    float volume = volumeDist(rng) * volumeScale;
-    float pitch = pitchDist(rng);
-
-    if (AudioEngine::instance().playSound2D(sample.data, volume, pitch)) {
+    if (playVoice(jumpClips)) {
         lastJumpAt = now;
     }
 }
@@ -270,11 +281,9 @@ void ActivitySoundManager::playLanding(FootstepSurface surface, bool hardLanding
     }
 
     if (hardLanding && !hardLandClips.empty()) {
-        std::uniform_int_distribution<size_t> dist(0, hardLandClips.size() - 1);
-        const Sample& sample = hardLandClips[dist(rng)];
-        std::uniform_real_distribution<float> volumeDist(0.80f, 0.88f);
-        std::uniform_real_distribution<float> pitchDist(0.97f, 1.03f);
-        AudioEngine::instance().playSound2D(sample.data, volumeDist(rng) * volumeScale, pitchDist(rng));
+        playVoice(hardLandClips);
+    } else {
+        playVoice(landVoiceClips);
     }
 }
 
@@ -385,6 +394,40 @@ void ActivitySoundManager::setCharacterVoiceProfile(const std::string& raceFolde
                                      " attackGrunt clips=", attackGruntClips.size(),
                                      " wound clips=", woundClips.size(),
                                      " death clips=", deathClips.size());
+}
+
+void ActivitySoundManager::setCharacterVoiceProfile(const std::string& raceFolder, const std::string& raceBase,
+                                                    bool male, uint32_t raceId, const SoundData* data) {
+    if (!assetManager) return;
+    if (!data || !data->loaded()) {
+        setCharacterVoiceProfile(raceFolder, raceBase, male);
+        return;
+    }
+    const std::string key = raceFolder + "|" + raceBase + "|" + (male ? "M" : "F") + "|dbc";
+    if (key == voiceProfileKey) return;
+    voiceProfileKey = key;
+    // Guessed paths first, so every list has something; the tables then
+    // replace each list they have a row for.
+    rebuildJumpClipsForProfile(raceFolder, raceBase, male);
+    rebuildSwimLoopClipsForProfile(raceFolder, raceBase, male);
+    rebuildHardLandClipsForProfile(raceFolder, raceBase, male);
+    rebuildCombatVocalClipsForProfile(raceFolder, raceBase, male);
+    const bool female = !male;
+    if (const CreatureSounds* cs = data->playerSounds(raceId, female)) {
+        replaceFromEntry(attackGruntClips, data->sound(cs->exertion));
+        replaceFromEntry(woundClips, data->sound(cs->injury));
+        replaceFromEntry(woundCritClips, data->sound(cs->injuryCritical));
+        replaceFromEntry(deathClips, data->sound(cs->death));
+        replaceFromEntry(jumpClips, data->sound(cs->jumpStart));
+        replaceFromEntry(landVoiceClips, data->sound(cs->jumpEnd));
+    }
+    replaceFromEntry(jumpClips, data->playerJumpSound(raceId, female));
+    replaceFromEntry(landVoiceClips, data->playerLandSound(raceId, female));
+    LOG_INFO("Activity SFX voice profile (tables): race ", raceId, male ? " male" : " female",
+             " jump=", jumpClips.size(), " land=", landVoiceClips.size(),
+             " attack=", attackGruntClips.size(), " wound=", woundClips.size(),
+             " death=", deathClips.size(),
+             jumpClips.empty() ? "" : (" first jump " + jumpClips.front().path).c_str());
 }
 
 // Splashes go through the mixer like every other activity sound. They used to
@@ -535,11 +578,7 @@ void ActivitySoundManager::playAttackGrunt() {
     std::uniform_int_distribution<int> chance(0, 9);
     if (chance(rng) > 2) return;
 
-    std::uniform_int_distribution<size_t> dist(0, attackGruntClips.size() - 1);
-    const Sample& sample = attackGruntClips[dist(rng)];
-    std::uniform_real_distribution<float> volDist(0.55f, 0.70f);
-    std::uniform_real_distribution<float> pitchDist(0.96f, 1.04f);
-    if (AudioEngine::instance().playSound2D(sample.data, volDist(rng) * volumeScale, pitchDist(rng))) {
+    if (playVoice(attackGruntClips)) {
         lastAttackGruntAt = now;
     }
 }
@@ -552,11 +591,7 @@ void ActivitySoundManager::playWound(bool isCrit) {
     if (lastWoundAt.time_since_epoch().count() != 0) {
         if (std::chrono::duration<float>(now - lastWoundAt).count() < 0.8f) return;
     }
-    std::uniform_int_distribution<size_t> dist(0, clips.size() - 1);
-    const Sample& sample = clips[dist(rng)];
-    float vol = isCrit ? 0.80f : 0.65f;
-    std::uniform_real_distribution<float> pitchDist(0.96f, 1.04f);
-    if (AudioEngine::instance().playSound2D(sample.data, vol * volumeScale, pitchDist(rng))) {
+    if (playVoice(clips)) {
         lastWoundAt = now;
     }
 }

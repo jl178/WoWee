@@ -68,7 +68,13 @@ public:
     bool playSound2D(const std::string& mpqPath, float volume = 1.0f, float pitch = 1.0f);
 
     // Stoppable 2D sound - returns a non-zero handle, or 0 on failure
-    uint32_t playSound2DStoppable(const std::vector<uint8_t>& wavData, float volume = 1.0f);
+    uint32_t playSound2DStoppable(const std::vector<uint8_t>& wavData, float volume = 1.0f,
+                                  bool loop = false, float fadeInMs = 0.0f);
+    /// Change a stoppable sound's volume while it plays.
+    void setSoundVolume(uint32_t id, float volume);
+    /// Fade a stoppable sound to silence over fadeMs and stop it. The id is
+    /// dead on return; the update loop reclaims the sound once it stops.
+    void fadeOutSound(uint32_t id, float fadeMs);
     // Stop a sound started with playSound2DStoppable (no-op if already finished)
     void stopSound(uint32_t id);
 

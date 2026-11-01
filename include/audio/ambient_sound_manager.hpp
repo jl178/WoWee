@@ -5,6 +5,8 @@
 #include <string>
 #include <cstdint>
 #include <glm/vec3.hpp>
+#include <unordered_map>
+#include "audio/day_night.hpp"
 
 namespace wowee {
 namespace pipeline {
@@ -77,6 +79,14 @@ public:
     };
 
     uint64_t addEmitter(const glm::vec3& position, AmbientType type);
+
+    /// Zone ambience from the client's tables: the day loop and night loop
+    /// SoundAmbience.dbc gives the area under the player, as archive paths.
+    /// Empty paths mean the area has none. Once this has been called the
+    /// hand-written zone and city libraries and the bird, cricket and wind
+    /// one-shots stand down: the loops already carry those sounds, and the
+    /// stock client plays nothing else for an area.
+    void setAreaAmbience(const std::string& dayPath, const std::string& nightPath, float volume);
 
     // Time of day control (0-24 hours)
     void setGameTime(float hours);
@@ -206,11 +216,22 @@ private:
     void updateWaterAmbience(float deltaTime, bool isSwimming);
     void updateZoneAmbience(float deltaTime, bool isIndoor);
     void updateCityAmbience(float deltaTime);
+    void updateAreaAmbience(bool isIndoor);
+
+    pipeline::AssetManager* assets_ = nullptr;
+    bool areaAmbienceDriven_ = false;
+    std::string areaAmbienceDay_;
+    std::string areaAmbienceNight_;
+    float areaAmbienceVolume_ = 1.0f;
+    std::string areaLoopPath_;
+    uint32_t areaLoopId_ = 0;
+    float areaLoopVolume_ = -1.0f;
+    std::unordered_map<std::string, AmbientSample> areaSamples_;
     void updateBellTolls(float deltaTime);
     bool loadSound(const std::string& path, AmbientSample& sample, pipeline::AssetManager* assets);
 
     // Time of day helpers
-    [[nodiscard]] bool isDaytime() const { return gameTimeHours_ >= 6.0f && gameTimeHours_ < 20.0f; }
+    [[nodiscard]] bool isDaytime() const { return isDaytimeHours(gameTimeHours_); }
     [[nodiscard]] bool isNighttime() const { return !isDaytime(); }
 };
 
