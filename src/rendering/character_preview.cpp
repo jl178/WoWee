@@ -1526,7 +1526,7 @@ void CharacterPreview::setSceneFog(const std::string& sceneName) {
     // by a 0.27 ambient and a low warm sun, and without the pink-gold fog
     // from 0 to 222 yards it read as near-black blocks with hard edges
     // against the sky (which is unfogged, M2 flag 0x2).
-    struct Fog { const char* key; float r, g, b, far; };
+    struct Fog { const char* key; float r, g, b, farDist; };
     static constexpr Fog kFog[] = {
         {"HUMAN",           0.8f,  0.65f, 0.73f, 222.0f},
         {"ORC",             0.5f,  0.5f,  0.5f,  270.0f},
@@ -1546,7 +1546,7 @@ void CharacterPreview::setSceneFog(const std::string& sceneName) {
     for (const auto& f : kFog) {
         if (key == f.key) {
             sceneFogColor_ = glm::vec3(f.r, f.g, f.b);
-            sceneFogFar_ = f.far;
+            sceneFogFar_ = f.farDist;
             break;
         }
     }
