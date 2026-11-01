@@ -10616,8 +10616,9 @@ void LuaEngine::reportEventListenersOnce() {
 /// parent never goes near SetWidth.
 void LuaEngine::updateSizeChanges() {
     if (!L_) return;
-    for (size_t id = 1; id < widgets_.size(); ++id) {
-        const ui::Widget* wp = widgets_.get(static_cast<uint32_t>(id));
+    // Frames only, from the tree's own list; this walked all 28k widgets.
+    for (uint32_t id : widgets_.frameWidgets()) {
+        const ui::Widget* wp = widgets_.get(id);
         if (!wp) continue;
         const ui::Widget& w = *wp;
         if (w.id == 0 || w.kind != ui::WidgetKind::Frame) continue;

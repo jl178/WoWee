@@ -53,6 +53,14 @@ the player is inside one of those buildings.
 The client's own soundtrack (`assets/Original Music/`) joins the pool only
 when **WoWee soundtrack** is on. It is off by default.
 
+## Login screen
+
+The login, realm and character screens play the Wrath glue theme
+(`Sound\Music\GlueScreenMusic\wotlk_main_title.mp3`, falling back to the
+original `wow_main_theme.mp3`) until the world is entered, as the stock
+client does. The client's own login track plays instead only when the
+WoWee soundtrack setting is on and `assets/Original Music/` shipped.
+
 ## Ambience
 
 `SoundAmbience` names a day loop and a night loop per area, each about a
