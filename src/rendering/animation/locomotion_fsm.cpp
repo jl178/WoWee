@@ -49,6 +49,7 @@ void LocomotionFSM::onEvent(AnimEvent event) {
 // ── State transitions ────────────────────────────────────────────────────────
 
 void LocomotionFSM::updateTransitions(const Input& in, const AnimCapabilitySet& caps) {
+    ungroundedSeconds_ = in.grounded ? 0.0f : ungroundedSeconds_ + in.deltaTime;
     // Update grace timer
     if (in.moving) {
         graceTimer_ = kGraceSec;
@@ -67,7 +68,9 @@ void LocomotionFSM::updateTransitions(const Input& in, const AnimCapabilitySet& 
             } else if (!in.grounded && in.jumping) {
                 jumpStartSeen_ = false;
                 state_ = State::JUMP_START;
-            } else if (!in.grounded) {
+            } else if (!in.grounded && ungroundedSeconds_ > kFallDelaySec) {
+                // A real fall. A frame or two off the ground running down a
+                // slope is not one, and used to flicker Fall and a landing.
                 state_ = State::FALL;
             } else if (effectiveMoving && effectiveSprinting) {
                 state_ = State::RUN;
@@ -82,7 +85,9 @@ void LocomotionFSM::updateTransitions(const Input& in, const AnimCapabilitySet& 
             } else if (!in.grounded && in.jumping) {
                 jumpStartSeen_ = false;
                 state_ = State::JUMP_START;
-            } else if (!in.grounded) {
+            } else if (!in.grounded && ungroundedSeconds_ > kFallDelaySec) {
+                // A real fall. A frame or two off the ground running down a
+                // slope is not one, and used to flicker Fall and a landing.
                 state_ = State::FALL;
             } else if (!effectiveMoving) {
                 state_ = State::IDLE;
@@ -97,7 +102,9 @@ void LocomotionFSM::updateTransitions(const Input& in, const AnimCapabilitySet& 
             } else if (!in.grounded && in.jumping) {
                 jumpStartSeen_ = false;
                 state_ = State::JUMP_START;
-            } else if (!in.grounded) {
+            } else if (!in.grounded && ungroundedSeconds_ > kFallDelaySec) {
+                // A real fall. A frame or two off the ground running down a
+                // slope is not one, and used to flicker Fall and a landing.
                 state_ = State::FALL;
             } else if (!effectiveMoving) {
                 state_ = State::IDLE;

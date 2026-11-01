@@ -69,6 +69,8 @@ private:
     bool jumpEndSeen_ = false;
 
     static constexpr float kGraceSec = 0.12f;
+    static constexpr float kFallDelaySec = 0.25f;  ///< airborne this long without a jump is a fall
+    float ungroundedSeconds_ = 0.0f;
 
     /// Internal: update state transitions based on input.
     void updateTransitions(const Input& in, const AnimCapabilitySet& caps);
