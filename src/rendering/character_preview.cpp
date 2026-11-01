@@ -31,6 +31,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <cstring>
+#include <cctype>
 
 namespace wowee {
 namespace rendering {
@@ -1468,6 +1469,7 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
     sceneCameraValid_ = true;
     charRenderer_->playAnimation(backdropInstanceId_, 0, true);
     setupSceneLighting(sceneModel, standPos);
+    setSceneFog(sceneName);
 
     glm::vec3 toCamera = sceneCam.positionBase - sceneCam.targetBase;
     if (glm::length(toCamera) < 0.001f) toCamera = glm::vec3(0.0f, 1.0f, 0.0f);
@@ -1515,7 +1517,44 @@ bool CharacterPreview::loadGlueScene(const std::string& scenePath) {
 void CharacterPreview::clearSceneLighting() {
     sceneLit_ = false;
     sceneLocalLights_.clear();
+    sceneFogFar_ = 0.0f;
     if (charRenderer_) charRenderer_->setPreviewLit(false);
+}
+
+void CharacterPreview::setSceneFog(const std::string& sceneName) {
+    // GlueParent.lua's SetLighting: SetFogColor(CharModelFogInfo[race]),
+    // SetFogNear(0), SetFogFar(far), else ClearFog. The key is the scene's
+    // name without "UI_" (SetBackgroundModel's argument), so the troll's and
+    // gnome's borrowed scenes take their partner's fog, as they do in stock.
+    //
+    // This haze is most of the human scene's look: Stormwind's stone is lit
+    // by a 0.27 ambient and a low warm sun, and without the pink-gold fog
+    // from 0 to 222 yards it read as near-black blocks with hard edges
+    // against the sky (which is unfogged, M2 flag 0x2).
+    struct Fog { const char* key; float r, g, b, far; };
+    static constexpr Fog kFog[] = {
+        {"HUMAN",           0.8f,  0.65f, 0.73f, 222.0f},
+        {"ORC",             0.5f,  0.5f,  0.5f,  270.0f},
+        {"DWARF",           0.85f, 0.88f, 1.0f,  500.0f},
+        {"NIGHTELF",        0.25f, 0.22f, 0.55f, 611.0f},
+        {"TAUREN",          1.0f,  0.61f, 0.42f, 153.0f},
+        {"SCOURGE",         0.0f,  0.22f, 0.22f, 26.0f},
+        {"CHARACTERSELECT", 0.8f,  0.65f, 0.73f, 222.0f},
+    };
+    std::string key = sceneName;
+    if (key.size() > 3 && (key[0] == 'U' || key[0] == 'u') && (key[1] == 'I' || key[1] == 'i') &&
+        key[2] == '_') {
+        key = key.substr(3);
+    }
+    for (auto& c : key) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    sceneFogFar_ = 0.0f;
+    for (const auto& f : kFog) {
+        if (key == f.key) {
+            sceneFogColor_ = glm::vec3(f.r, f.g, f.b);
+            sceneFogFar_ = f.far;
+            break;
+        }
+    }
 }
 
 void CharacterPreview::setupSceneLighting(const pipeline::M2Model& scene, const glm::vec3& focus) {
@@ -1699,7 +1738,12 @@ void CharacterPreview::compositePass(VkCommandBuffer cmd, uint32_t frameIndex) {
         ubo.lightDir = glm::vec4(sceneLightDir_, 0.0f);
         ubo.lightColor = glm::vec4(sceneLightColor_, 0.0f);
         ubo.ambientColor = glm::vec4(sceneAmbient_, 0.0f);
-        ubo.fogParams = glm::vec4(1.0e6f, 1.0e6f + 1.0f, 0.0f, 0.0f);
+        if (sceneFogFar_ > 0.0f) {
+            ubo.fogColor = glm::vec4(sceneFogColor_, 0.0f);
+            ubo.fogParams = glm::vec4(0.0f, sceneFogFar_, 0.0f, 0.0f);
+        } else {
+            ubo.fogParams = glm::vec4(1.0e6f, 1.0e6f + 1.0f, 0.0f, 0.0f);
+        }
         const size_t n = std::min<size_t>(sceneLocalLights_.size(), MAX_LOCAL_LIGHTS);
         for (size_t i = 0; i < n; ++i) {
             const auto& l = sceneLocalLights_[i];
