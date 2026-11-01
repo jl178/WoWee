@@ -100,6 +100,7 @@ void WidgetTree::reset() {
     widgets_.clear();
     idsByName_.clear();
     visibilityDirty_.clear();
+    artAndText_.clear();
     drawOrder_.clear();
     linkRects_.clear();
     scrollFrames_.clear();
@@ -140,6 +141,7 @@ uint32_t WidgetTree::create(WidgetKind kind, uint32_t parent, const std::string&
     w.kind = kind;
     w.name = name;
     if (!name.empty()) idsByName_[name] = id;
+    if (kind == WidgetKind::FontString || kind == WidgetKind::Texture) artAndText_.push_back(id);
     w.creationOrder = nextOrder_++;
     // Regions belong to the frame that made them; a widget with no parent
     // hangs off the screen, which is the root and sits above UIParent.

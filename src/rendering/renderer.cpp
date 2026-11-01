@@ -1945,6 +1945,14 @@ float Renderer::sampleSunOcclusion() const {
 
 void Renderer::update(float deltaTime) {
     ZoneScopedN("Renderer::update");
+    using clock = std::chrono::steady_clock;
+    clock::time_point sectionStart = stageSink_ ? clock::now() : clock::time_point{};
+    auto section = [&](const char* name) {
+        if (!stageSink_) return;
+        const auto now = clock::now();
+        stageSink_(name, std::chrono::duration<float, std::milli>(now - sectionStart).count());
+        sectionStart = now;
+    };
     globalTime += deltaTime;
     runDeferredWorldInitStep(deltaTime);
 
@@ -2250,13 +2258,16 @@ void Renderer::update(float deltaTime) {
         m2AnimLaunched = true;
     }
 
+    section("update/before m2");
     // Update character animations (runs in parallel with M2 animation above)
     if (characterRenderer && camera) {
         characterRenderer->update(deltaTime, camera->getPosition());
     }
+    section("update/characters");
 
     // Update AudioEngine (cleanup finished sounds, etc.)
     audio::AudioEngine::instance().update(deltaTime);
+    section("update/audio engine");
 
     // M2Renderer::update may rebuild the instance spatial index when streaming
     // marked it dirty. Footprint spawning below performs an M2 floor query and
@@ -2271,6 +2282,7 @@ void Renderer::update(float deltaTime) {
         m2AnimLaunched = false;
     }
 
+    section("update/m2 join");
     // Footsteps: age visual prints, then let authored footfall events add new ones.
     if (footprintRenderer) footprintRenderer->update(deltaTime);
     if (animationController_) animationController_->updateFootsteps(deltaTime);

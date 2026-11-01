@@ -987,6 +987,10 @@ public:
     /// the handful that have something to say. Taking the list clears it.
     void noteVisibilityCandidate(uint32_t id);
     std::vector<uint32_t> takeVisibilityDirty();
+
+    /// Every FontString and Texture, the two kinds the renderer sizes each
+    /// frame. Widgets are never destroyed, only reset with the tree.
+    [[nodiscard]] const std::vector<uint32_t>& artAndTextWidgets() const { return artAndText_; }
     /// EnableKeyboard, recorded here as well as on the widget. The focus probe
     /// every binding poll consults asks for the topmost keyboard frame, and
     /// scanning the whole tree for it - tens of thousands of widgets once
@@ -1112,6 +1116,7 @@ private:
 #endif
     std::vector<uint32_t> scrollFrames_;
     std::vector<uint32_t> visibilityDirty_;
+    std::vector<uint32_t> artAndText_;
     /// Ids that ever called EnableKeyboard(true), ascending. See keyboardFrames.
     std::vector<uint32_t> keyboardFrames_;
     /// Which unit each portrait texture is showing, and the reverse. Two maps
