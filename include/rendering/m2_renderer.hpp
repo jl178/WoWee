@@ -13,6 +13,7 @@
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
 #include <atomic>
+#include <cstddef>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -280,14 +281,19 @@ struct M2Particle {
 
 /**
  * Instance of an M2 model in the world
+ *
+ * Aligned to a cache line so the first 64 bytes, which hold everything the
+ * per-frame walks over every instance read and write (the cull upload, the
+ * verdict scatter and the visibility classification in M2Renderer::render),
+ * are always one line. They were 66 bytes at an arbitrary offset, plus
+ * hizPrevCulledFrames 500 bytes further on: two to three lines per instance
+ * per walk, over 88k instances, three walks a frame. The layout is checked
+ * by the static_asserts after the struct.
  */
-struct M2Instance {
+struct alignas(64) M2Instance {
     uint32_t id = 0;     // Unique instance ID
     uint32_t modelId;
     glm::vec3 position;
-    // The fields the visibility walk and the cull upload read, kept together
-    // so a 70k-instance pass touches one cache line per instance rather than
-    // a dozen spread over the matrices and vectors below.
     float fade = 1.0f;
     bool cachedHasAnimation = false;
     bool cachedDisableAnimation = false;
@@ -296,12 +302,27 @@ struct M2Instance {
     bool cachedIsInvisibleTrap = false;
     bool cachedIsSkyBird = false;
     bool cachedIsValid = false;
+    // Server game object (mailbox, chest, node, door): exempt from the adaptive
+    // ambient-doodad distance, which collapses to ~200 units in a city and hid
+    // interactable objects long before the server stopped sending them.
+    // Set by the spawner; see M2_GAME_OBJECT_MIN_RENDER_DISTANCE.
+    bool isGameObject = false;
     glm::vec3 cachedCullCenter{0.0f};              // transformed visual-bounds center
     float cachedEffectiveMaxDistSqFactor = 1.0f;  // multiplied by maxRenderDistanceSq each frame
     float cachedPaddedRadius = 0.0f;              // sphere radius used by the cull compute
-    const M2ModelGPU* cachedModel = nullptr;  // Avoid per-frame hash lookups
+    // Result of the most recent GPU cull dispatch that actually covered this
+    // instance, matched back by instance ID (never by array index - see
+    // cullSubmittedIds_).  Defaults to visible so an instance created after the
+    // in-flight dispatch draws immediately instead of waiting ~2 frames for its
+    // first cull result.
     uint8_t lastCullVisible = 1;
-    bool isGameObject = false;
+    // Consecutive frames this instance has been culled (capped at 3), used for
+    // the HiZ `previouslyVisible` hysteresis.  Defaults to 2 ("not recently
+    // visible") so a freshly spawned instance skips the HiZ test rather than
+    // being judged against depth data that never contained it.
+    uint8_t hizPrevCulledFrames = 2;
+    const M2ModelGPU* cachedModel = nullptr;  // Avoid per-frame hash lookups
+    // End of the first cache line.
     glm::vec3 rotation;  // Euler angles in degrees
     float scale;
     glm::mat4 modelMatrix;
@@ -434,21 +455,6 @@ struct M2Instance {
     float animTimeAlt = 0.0f;
     float portalSpinAngle = 0.0f;  // Accumulated spin angle for portal rotation
 
-    // Result of the most recent GPU cull dispatch that actually covered this
-    // instance, matched back by instance ID (never by array index - see
-    // cullSubmittedIds_).  Defaults to visible so an instance created after the
-    // in-flight dispatch draws immediately instead of waiting ~2 frames for its
-    // first cull result.
-    // Consecutive frames this instance has been culled (capped at 3), used for
-    // the HiZ `previouslyVisible` hysteresis.  Defaults to 2 ("not recently
-    // visible") so a freshly spawned instance skips the HiZ test rather than
-    // being judged against depth data that never contained it.
-    uint8_t hizPrevCulledFrames = 2;
-    // Server game object (mailbox, chest, node, door): exempt from the adaptive
-    // ambient-doodad distance, which collapses to ~200 units in a city and hid
-    // interactable objects long before the server stopped sending them.
-    // Set by the spawner; see M2_GAME_OBJECT_MIN_RENDER_DISTANCE.
-
     void recomputeCachedCullFactors();
 
     // Frame-skip optimization (update distant animations less frequently)
@@ -473,6 +479,18 @@ struct M2Instance {
 
     void updateModelMatrix();
 };
+
+// The per-frame walks' fields stay inside the first cache line; see M2Instance.
+// offsetof on a type with vector members is conditionally supported, and GCC
+// and Clang give the plain layout answer, which is the one wanted here.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+static_assert(alignof(M2Instance) == 64);
+static_assert(offsetof(M2Instance, isGameObject) < 64);
+static_assert(offsetof(M2Instance, lastCullVisible) < 64);
+static_assert(offsetof(M2Instance, hizPrevCulledFrames) < 64);
+static_assert(offsetof(M2Instance, cachedModel) + sizeof(void*) <= 64);
+#pragma GCC diagnostic pop
 
 /// Whether an instance is filed in M2Renderer's spatial grid, which only the
 /// collision queries (floor, walls, camera rays) read. Ground clutter is not:

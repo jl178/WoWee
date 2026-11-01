@@ -67,6 +67,35 @@ constexpr float kWallMaxAbsNormalZ = 0.65f;
 inline bool wmoGroupLitAsInterior(uint32_t groupFlags) {
     return (groupFlags & 0x2000u) != 0 && (groupFlags & 0x40u) == 0;
 }
+
+/// WOWEE_WMO_LEGACY_RECORD=1 records batches as they were before adjacent
+/// draw ranges were joined and the first range was read from the batch
+/// itself: one vkCmdDrawIndexed per authored batch, every range read through
+/// the vector. For telling a change in the image from the recording.
+const bool kWmoLegacyRecord = envFlagEnabled("WOWEE_WMO_LEGACY_RECORD");
+
+/// Join index ranges that follow on from each other into one.
+///
+/// Batches of one material are usually authored back to back in the index
+/// buffer, so a merged batch's ranges are often contiguous: [a, a+n) then
+/// [a+n, a+n+m). Drawn under the same state, two such draws and one draw
+/// over [a, a+n+m) produce the same primitives in the same order, and no WMO
+/// shader reads gl_PrimitiveID or gl_DrawID, the only things that could tell
+/// them apart.
+template <typename Range>
+void joinAdjacentDrawRanges(std::vector<Range>& draws) {
+    if (draws.size() < 2) return;
+    size_t out = 0;
+    for (size_t i = 1; i < draws.size(); ++i) {
+        Range& last = draws[out];
+        if (last.firstIndex + last.indexCount == draws[i].firstIndex) {
+            last.indexCount += draws[i].indexCount;
+        } else {
+            draws[++out] = draws[i];
+        }
+    }
+    draws.resize(out + 1);
+}
 } // namespace
 
 // Thread-local scratch buffers for collision queries (allows concurrent getFloorHeight/checkWallCollision calls)
@@ -998,6 +1027,10 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                     }
                 }
             }
+
+            // After the lava lights, which are placed one per authored range.
+            if (!kWmoLegacyRecord) joinAdjacentDrawRanges(mb.draws);
+            if (!mb.draws.empty()) mb.firstDraw = mb.draws.front();
 
             groupRes.mergedBatches.push_back(std::move(mb));
         }
@@ -1953,7 +1986,16 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
                                        sizeof(glm::vec4), &pushedCloth);
                 }
 
-                // Issue draw calls for each range in this merged batch
+                // Issue draw calls for each range in this merged batch. The
+                // count comes from the vector's own pointers, which sit in the
+                // batch; only a batch of several ranges reads their storage.
+                if (!kWmoLegacyRecord && mb.draws.size() == 1) {
+                    if (mb.firstDraw.indexCount != 0) {
+                        vkCmdDrawIndexed(cmd, mb.firstDraw.indexCount, 1, mb.firstDraw.firstIndex, 0, 0);
+                        lastDrawCalls++;
+                    }
+                    continue;
+                }
                 for (const auto& dr : mb.draws) {
                     if (dr.indexCount == 0) continue;
                     vkCmdDrawIndexed(cmd, dr.indexCount, 1, dr.firstIndex, 0, 0);
@@ -2079,6 +2121,11 @@ void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceM
             vkCmdBindIndexBuffer(cmd, group.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
             for (const auto& mb : group.mergedBatches) {
+                // As in render(): a single range is read from the batch.
+                if (!kWmoLegacyRecord && mb.draws.size() == 1) {
+                    vkCmdDrawIndexed(cmd, mb.firstDraw.indexCount, 1, mb.firstDraw.firstIndex, 0, 0);
+                    continue;
+                }
                 for (const auto& dr : mb.draws) {
                     vkCmdDrawIndexed(cmd, dr.indexCount, 1, dr.firstIndex, 0, 0);
                 }
