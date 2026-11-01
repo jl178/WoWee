@@ -396,3 +396,8 @@ Other fixes:
 
 - `03fa503`: one registration per map binding. The old system-set map functions live on only as the fallback for when the map data isn't loaded.
 - Host note: Jered's System76 power profile had been "Battery" (50% cap, no turbo). It is now Performance, but scaling_max_freq is still 2.6 GHz on all policies and needs root to reset.
+- `862e88f`: only instances spawned by the spell system (kits, missiles) keep full-range particles. Placed doodads the classifier calls effects (Felwood mushrooms, wisps, portals) are now ranged by size and sleep off screen like everything else.
+  - Goldshire: live particles 20k -> 10k; update 0.75 -> 0.38 ms; draw 0.42 -> 0.26 ms.
+  - Particle total per frame is now about 0.6 ms, down from 4-6 ms at the start of the day.
+- Windows package rebuilt at `10df8c2` (map, both enhancement batches, particle range). The zip was refreshed and the share restarted; it serves on port 8081.
+- Next: incremental FrameXML layout. An agent is working on it; it has a `WOWEE_LAYOUT_VERIFY` mode that compares against the full layout.
