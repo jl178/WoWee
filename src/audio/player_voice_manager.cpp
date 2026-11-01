@@ -1,5 +1,6 @@
 #include "audio/player_voice_manager.hpp"
 #include "audio/audio_engine.hpp"
+#include "audio/sound_data.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "core/logger.hpp"
 
@@ -11,6 +12,11 @@ namespace audio {
 
 namespace {
 
+// Used only when VocalUISounds.dbc is missing. These names probe every
+// numbered take on disk, where the table's kits list a chosen subset and a
+// volume (0.69 for most races), so the result is not what the stock client
+// plays.
+//
 // Where a race's error voice files live and how they are named.
 // Nested races: Sound\Character\{folder}\{dirPrefix}{Gender}ErrorMessages\{filePrefix}{Gender}_err_{token}NN.wav
 // Flat races (TBC): Sound\Character\{folder}\{filePrefix}{Gender}_err_{token}NN.wav
@@ -189,6 +195,13 @@ void PlayerVoiceManager::playError(PlayerErrorSpeech type, uint8_t raceId, uint8
         if (elapsed < PLAY_COOLDOWN) return;
     }
 
+    // With the table read, it alone decides: a race or line it has no sound
+    // for stays silent, as in the stock client.
+    if (soundData_ && soundData_->loaded() && soundData_->hasVocalUiSounds()) {
+        playFromTable(type, raceId, gender, now);
+        return;
+    }
+
     ensureLibrary(raceId, gender);
 
     auto it = library_.find(static_cast<uint8_t>(type));
@@ -201,6 +214,37 @@ void PlayerVoiceManager::playError(PlayerErrorSpeech type, uint8_t raceId, uint8
     if (AudioEngine::instance().playSound2D(sample.data, volumeScale_, 1.0f)) {
         lastPlayTime_ = now;
     }
+}
+
+bool PlayerVoiceManager::playFromTable(PlayerErrorSpeech type, uint8_t raceId, uint8_t gender,
+                                       std::chrono::steady_clock::time_point now) {
+    const uint32_t vocalEnum = vocalUiEnum(type);
+    const bool female = gender == 1;
+
+    const bool repeated = repeatType_ == static_cast<int>(type) &&
+                          std::chrono::duration<float>(now - repeatTime_).count() <= PISSED_WINDOW;
+    const int count = repeated ? repeatCount_ + 1 : 1;
+
+    const SoundEntry* entry = nullptr;
+    bool pissed = false;
+    if (count >= PISSED_REPEATS) {
+        entry = soundData_->vocalUiSound(vocalEnum, raceId, female, true);
+        pissed = entry != nullptr;
+    }
+    if (!entry) entry = soundData_->vocalUiSound(vocalEnum, raceId, female, false);
+    if (!entry) return false;
+
+    std::uniform_int_distribution<size_t> choice(0, entry->files.size() - 1);
+    // As recorded: the kit's own volume, no pitch change.
+    if (!AudioEngine::instance().playSound2D(entry->files[choice(rng_)], entry->volume * volumeScale_, 1.0f)) {
+        return false;
+    }
+    lastPlayTime_ = now;
+    repeatType_ = static_cast<int>(type);
+    repeatTime_ = now;
+    // After the pissed line the count starts over.
+    repeatCount_ = pissed ? 0 : count;
+    return true;
 }
 
 } // namespace audio

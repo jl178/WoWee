@@ -87,6 +87,7 @@ void AudioCoordinator::loadSoundData(pipeline::AssetManager* assets) {
         zoneMusic_ = std::make_unique<ZoneMusicController>(soundData_);
         ambienceKey_ = 0;
         if (npcVoiceManager_) npcVoiceManager_->setSoundData(&soundData_);
+        if (playerVoiceManager_) playerVoiceManager_->setSoundData(&soundData_);
         if (combatSoundManager_) combatSoundManager_->setSoundData(&soundData_);
         if (worldSoundEmitters_) worldSoundEmitters_->setSoundData(&soundData_);
         // The client looks this one up by name, hence the warning in it.
