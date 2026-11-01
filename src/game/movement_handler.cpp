@@ -557,6 +557,7 @@ void MovementHandler::sendMovement(Opcode opcode) {
             opcode == Opcode::MSG_MOVE_START_STRAFE_RIGHT ||
             opcode == Opcode::MSG_MOVE_JUMP;
         if (isPositionalMove) {
+            LOG_INFO("Movement: opcode ", static_cast<int>(opcode), " interrupts the cast");
             owner_.cancelCast();
         }
     }

@@ -115,6 +115,7 @@ private:
     bool inputFocused_ = true;
     std::map<std::string, std::set<std::string>> virtualCommands_;
     std::set<std::string> virtualCommandPressed_;
+    std::set<std::string> virtualPressQueued_;  ///< scripted presses for the next input frame
     std::pair<std::string, std::string> resolve(const std::string& key, bool fallback) const;
     bool keyActive(const std::string& key, bool pressed, bool repeat = false) const;
     void initializeDefaults(Device device);
