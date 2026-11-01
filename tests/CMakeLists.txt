@@ -171,6 +171,11 @@ wowee_add_test(test_sell_count
 wowee_add_test(test_current_action
     SOURCES test_current_action.cpp)
 
+# Remembered text measurements for FontString sizing: what is part of the key
+# and when the cache empties. Header-only, no font.
+wowee_add_test(test_text_measure_cache
+    SOURCES test_text_measure_cache.cpp)
+
 # Stock-style hill climbing regression test. Run directly with:
 #   cmake --build build --target test_hill_climbing && ctest --test-dir build -R hill_climbing
 wowee_add_test(test_hill_climbing

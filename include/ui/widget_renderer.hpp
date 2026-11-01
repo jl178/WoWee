@@ -19,6 +19,8 @@
 
 #include <vulkan/vulkan.h>
 
+#include "ui/text_measure_cache.hpp"
+
 struct ImDrawList;   // global, as ImGui declares it
 struct ImFont;
 struct ImVec2;
@@ -108,10 +110,19 @@ private:
     /// Gives a texture the dimensions of its own image on any axis nothing else
     /// decides. WoW's rule, and FrameXML depends on it - the friends list's
     /// status icon declares one anchor and no size whatsoever.
-    /// Labels and textures, in one pass. See sizeArtAndText.
-    void sizeArtAndText(WidgetTree& tree);
+    /// Labels and textures, in one pass. See sizeArtAndText. Only those
+    /// changed since the last pass unless everyWidget, which is the old full
+    /// walk; useMeasureCache false measures every string afresh. Answers how
+    /// many widgets it visited.
+    size_t sizeArtAndText(WidgetTree& tree, bool everyWidget, bool useMeasureCache);
     void sizeTextureWidget(Widget* w);
-    void sizeFontStringWidget(Widget* w, ImFont* font);
+    void sizeFontStringWidget(Widget* w, ImFont* font, bool useMeasureCache);
+    /// WOWEE_LAYOUT_VERIFY: lay `scratch` - a copy of `tree` taken before this
+    /// frame's sizing - out the old way, every widget, and compare the two.
+    void verifyAgainstFullLayout(WidgetTree& tree, WidgetTree& scratch,
+                                 float screenW, float screenH);
+    /// Text measurements by face, size, text and wrap. See text_measure_cache.hpp.
+    TextMeasureCache measureCache_;
     void sizeTooltipWidget(Widget* w, ImFont* font, WidgetTree& tree);
     /// How big the picture is, without uploading it. No Vulkan context needed:
     /// asking a file its dimensions does not require a GPU, and requiring one

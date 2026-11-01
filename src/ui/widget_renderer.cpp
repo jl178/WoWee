@@ -26,6 +26,8 @@
 #include <cstdlib>
 #include <cmath>
 #include <map>
+#include <memory>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -270,7 +272,8 @@ void WidgetRenderer::sizeTextureWidget(Widget* w) {
 }
 
 /// One label, sized from its own text. See sizeArtAndText.
-void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font) {
+void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font,
+                                          bool useMeasureCache) {
     if (w->text.empty()) return;
     // Anchors that span an axis give the size on that axis, and the string
     // does not get a say about it. Asked per axis, the way the texture
@@ -353,15 +356,45 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font) {
         return runFont->CalcTextSizeA(size, FLT_MAX, 0.0f, piece.c_str()).x;
     };
 
+    // The measurement itself, or the one remembered for the same face, size,
+    // text and wrap - which is the same numbers, since nothing else goes in.
+    // A label sizes itself from its width on one line and its line count; a
+    // paragraph keeps its declared width and takes only the lines it wraps to.
+    TextMeasureKey key;
+    TextMeasure measure;
+    const TextMeasure* known = nullptr;
+    if (useMeasureCache) {
+        key.face = runFont;
+        key.size = size;
+        key.paragraph = paragraph;
+        key.wrapWidth = paragraph ? w->width : 0.0f;
+        key.nonSpaceWrap = paragraph && w->nonSpaceWrap;
+        key.text = w->text;
+        known = measureCache_.find(key);
+    }
+    if (known) {
+        measure = *known;
+    } else {
+        if (paragraph) {
+            measure.rows = static_cast<int>(
+                wrapText(parseMarkup(w->text), w->width, w->nonSpaceWrap,
+                         measureRun).size());
+        } else {
+            measure.width = runFont->CalcTextSizeA(size, FLT_MAX, 0.0f,
+                                                   strippedText(w->text).c_str()).x;
+            measure.rows = static_cast<int>(
+                wrapText(parseMarkup(w->text), 0.0f, false, measureRun).size());
+        }
+        if (useMeasureCache) measureCache_.insert(key, measure);
+    }
+
     if (paragraph) {
         // The width stays as declared and the height follows the wrap.
         // autoSized stays false on purpose: it is what the draw reads to
         // decide whether there is a box to wrap inside, and this string is
         // exactly the kind that has one.
         w->wrapsToWidth = true;
-        const int rows = static_cast<int>(
-            wrapText(parseMarkup(w->text), w->width, w->nonSpaceWrap,
-                     measureRun).size());
+        const int rows = measure.rows;
         w->wrappedLines = rows > 0 ? rows : 1;
         w->height = size * 1.2f * static_cast<float>(w->wrappedLines);
         w->measuredText = w->text;
@@ -370,16 +403,13 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font) {
         return;
     }
 
-    const ImVec2 measured =
-        runFont->CalcTextSizeA(size, FLT_MAX, 0.0f, strippedText(w->text).c_str());
-    w->width = measured.x;
-    w->measuredWidth = measured.x;
+    w->width = measure.width;
+    w->measuredWidth = measure.width;
     // As tall as the lines it holds. A label sized by its own text can
     // still be several lines: |n breaks one at any width, and giving it a
     // single line's height put whatever anchors below it over the top of
     // the rest.
-    const int rows = static_cast<int>(
-        wrapText(parseMarkup(w->text), 0.0f, false, measureRun).size());
+    const int rows = measure.rows;
     w->wrappedLines = rows > 0 ? rows : 1;
     if (w->height <= 0.0f || w->autoSized) {
         w->height = size * 1.2f * static_cast<float>(w->wrappedLines);
@@ -616,17 +646,45 @@ void WidgetRenderer::sizeTooltipWidget(Widget* w, ImFont* font, WidgetTree& tree
 /// dispatching on kind gives the same result.
 ///
 /// Tooltips are deliberately not in here; see sizeTooltipWidget.
-void WidgetRenderer::sizeArtAndText(WidgetTree& tree) {
+///
+/// Only the widgets the tree has marked as possibly changed are visited.
+/// Sizing reads nothing but the widget's own fields and the context that
+/// noteSizingContext is told about, and sizing a widget twice in a row writes
+/// nothing the second time, so an unmarked widget would only have returned
+/// early. Doing that for every label and texture in the tree each frame, each
+/// a 1.5k struct in its own deque block, was nearly all of what the pass cost.
+/// The full walk is kept for WOWEE_LAYOUT_FULL and for WOWEE_LAYOUT_VERIFY,
+/// which compares the two.
+size_t WidgetRenderer::sizeArtAndText(WidgetTree& tree, bool everyWidget,
+                                      bool useMeasureCache) {
     ImFont* font = interfaceFace("frizqt__");
     if (!font) font = ImGui::GetFont();
 
-    // The strings and textures only; this walked all 28k widgets to find them.
-    for (uint32_t id : tree.artAndTextWidgets()) {
-        Widget* w = tree.get(id);
-        if (!w) continue;
-        if (font && w->kind == WidgetKind::FontString) sizeFontStringWidget(w, font);
-        else if (w->kind == WidgetKind::Texture) sizeTextureWidget(w);
+    const auto sizeOne = [&](Widget& w) {
+        if (font && w.kind == WidgetKind::FontString) {
+            sizeFontStringWidget(&w, font, useMeasureCache);
+        } else if (w.kind == WidgetKind::Texture) {
+            sizeTextureWidget(&w);
+        }
+    };
+
+    if (everyWidget) {
+        // The strings and textures only; this walked all 28k widgets to find them.
+        for (uint32_t id : tree.artAndTextWidgets()) {
+            if (Widget* w = tree.get(id)) sizeOne(*w);
+        }
+        return tree.artAndTextWidgets().size();
     }
+
+    // A different fallback face or default point size changes what an
+    // unchanged label measures to, and assets arriving change what an
+    // unchanged texture can learn about itself; any of those revisits all of
+    // them. A face rebuilt at the same address would make the remembered
+    // measurements wrong, so they go too.
+    if (tree.noteSizingContext(font, assets_, interfaceFontSize(0.0f))) {
+        measureCache_.clear();
+    }
+    return tree.forEachChangedArtAndText(sizeOne);
 }
 
 
@@ -1279,6 +1337,9 @@ void WidgetRenderer::layout(WidgetTree& tree, float screenW, float screenH) {
         const uint32_t generation = vkCtx_->uiTextureGeneration();
         if (generation != uiTextureGenerationSeen_) {
             uiTextureGenerationSeen_ = generation;
+            // The fonts may have been rebuilt with the rest, possibly at the
+            // addresses the remembered measurements are keyed on.
+            measureCache_.clear();
             if (!textures_.empty()) {
                 LOG_WARNING("The UI textures were destroyed; dropping ",
                             textures_.size(),
@@ -1377,6 +1438,7 @@ void WidgetRenderer::layout(WidgetTree& tree, float screenW, float screenH) {
     static const bool profile = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
     struct PassTimes {
         double sizing = 0.0, solve = 0.0;
+        size_t sized = 0;
         int frames = 0;
         double reportedAt = 0.0;
     };
@@ -1397,9 +1459,42 @@ void WidgetRenderer::layout(WidgetTree& tree, float screenW, float screenH) {
     // frame and the draw then measured the lines it has now - two answers per
     // frame, and the tooltip flicked between the two widths they gave it.
     // WidgetRenderer::draw sizes them once, after FrameXML has finished.
-    mark(times.sizing, [&] { sizeArtAndText(tree); });
+    //
+    // Only what changed since the last pass is sized; see sizeArtAndText.
+    // WOWEE_LAYOUT_FULL sizes every label and texture each frame and reads
+    // every widget for the draw order, as before. WOWEE_LAYOUT_VERIFY checks
+    // the one against the other: every WOWEE_LAYOUT_VERIFY_EVERY frames (30)
+    // it copies the tree before sizing, lays the copy out the old way, and
+    // logs where the two differ. Both are read once; with neither set the
+    // check costs a branch.
+    static const bool fullLayout = core::envFlagEnabled("WOWEE_LAYOUT_FULL", false);
+    static const bool verifyLayout =
+        !fullLayout && core::envFlagEnabled("WOWEE_LAYOUT_VERIFY", false);
+    static std::unique_ptr<WidgetTree> verifyScratch;
+    static uint64_t verifyFrame = 0;
+    bool verifyNow = false;
+    if (verifyLayout) {
+        static const int every = core::envIntClamped("WOWEE_LAYOUT_VERIFY_EVERY", 30, 1, 1000000);
+        if (!verifyScratch) {
+            verifyScratch = std::make_unique<WidgetTree>();
+            LOG_WARNING("Layout verify: on - every ", every,
+                        " frames the incremental layout is checked against the full one");
+        }
+        verifyNow = (++verifyFrame % static_cast<uint64_t>(every)) == 0;
+        if (verifyNow) {
+            *verifyScratch = tree;
+            verifyScratch->setFullDrawOrderScan(true);
+        }
+    }
+
+    if (fullLayout) tree.setFullDrawOrderScan(true);
+    mark(times.sizing, [&] {
+        times.sized += sizeArtAndText(tree, fullLayout, /*useMeasureCache=*/!fullLayout);
+    });
 
     mark(times.solve, [&] { tree.layout(screenW, screenH); });
+
+    if (verifyNow) verifyAgainstFullLayout(tree, *verifyScratch, screenW, screenH);
 
     if (profile) {
         ++times.frames;
@@ -1409,7 +1504,10 @@ void WidgetRenderer::layout(WidgetTree& tree, float screenW, float screenH) {
             LOG_WARNING("  WidgetRenderer::layout over ", times.frames,
                         " frames: sizing ", times.sizing / n,
                         "ms, anchor solve ", times.solve / n,
-                        "ms/frame, over ", tree.size(), " widgets");
+                        "ms/frame, over ", tree.size(), " widgets; sized ",
+                        static_cast<double>(times.sized) / n, " of ",
+                        tree.artAndTextWidgets().size(),
+                        " labels and textures a frame");
             LOG_WARNING("    of that solve: anchor walk ", tree.lastWalkMs(),
                         "ms, draw order ", tree.lastDrawOrderMs(),
                         "ms (last frame); ", tree.cleanPasses(), " of ",
@@ -1440,6 +1538,120 @@ void WidgetRenderer::layout(WidgetTree& tree, float screenW, float screenH) {
     }
 }
 
+/// The incremental layout against the full one, for WOWEE_LAYOUT_VERIFY.
+///
+/// `scratch` is the tree as it stood before this frame's sizing. It is sized
+/// the old way - every label and texture, every string measured afresh - and
+/// laid out with the draw order read off every widget, which is what the
+/// client did before the incremental passes. Then every widget's size, rect,
+/// scale, level and visibility, and the draw order, are compared exactly: the
+/// same arithmetic on the same inputs gives the same bits, so any difference
+/// is an input change the incremental path did not see.
+void WidgetRenderer::verifyAgainstFullLayout(WidgetTree& tree, WidgetTree& scratch,
+                                             float screenW, float screenH) {
+    sizeArtAndText(scratch, /*everyWidget=*/true, /*useMeasureCache=*/false);
+    scratch.layout(screenW, screenH);
+
+    static uint64_t checks = 0;
+    static uint64_t cleanInARow = 0;
+    ++checks;
+    const WidgetTree& fast = tree;
+    const WidgetTree& full = scratch;
+    constexpr int kMaxLines = 10;
+    int said = 0;
+    size_t mismatches = 0;
+    const auto kindName = [](WidgetKind k) {
+        switch (k) {
+            case WidgetKind::Texture: return "Texture";
+            case WidgetKind::FontString: return "FontString";
+            default: return "Frame";
+        }
+    };
+    const auto report = [&](const Widget& w, const char* field, const auto& a, const auto& b) {
+        ++mismatches;
+        if (said >= kMaxLines) return;
+        ++said;
+        LOG_WARNING("Layout verify: check ", checks, ": '", w.name, "' (id ", w.id, ", ",
+                    kindName(w.kind), ") ", field, " fast=", a, " full=", b);
+    };
+    // Bit-equal or both NaN; a NaN rect is a fault of its own, not of this.
+    const auto differ = [](float a, float b) {
+        return a != b && !(std::isnan(a) && std::isnan(b));
+    };
+
+    if (fast.size() != full.size()) {
+        LOG_WARNING("Layout verify: check ", checks, ": the trees hold ", fast.size(),
+                    " and ", full.size(), " widgets");
+    }
+    const size_t n = std::min(fast.size(), full.size());
+    for (size_t id = 1; id < n; ++id) {
+        const Widget* a = fast.get(static_cast<uint32_t>(id));
+        const Widget* b = full.get(static_cast<uint32_t>(id));
+        if (!a || !b) continue;
+        const auto f = [&](const char* field, float x, float y) {
+            if (differ(x, y)) report(*a, field, x, y);
+        };
+        const auto i = [&](const char* field, long long x, long long y) {
+            if (x != y) report(*a, field, x, y);
+        };
+        f("width", a->width, b->width);
+        f("height", a->height, b->height);
+        f("left", a->left, b->left);
+        f("bottom", a->bottom, b->bottom);
+        f("rectW", a->rectW, b->rectW);
+        f("rectH", a->rectH, b->rectH);
+        f("effScale", a->effScale, b->effScale);
+        f("measuredWidth", a->measuredWidth, b->measuredWidth);
+        f("measuredSize", a->measuredSize, b->measuredSize);
+        i("visible", a->visible, b->visible);
+        i("visibleChain", a->visibleChain, b->visibleChain);
+        i("effLevel", a->effLevel, b->effLevel);
+        i("effStrata", static_cast<int>(a->effStrata), static_cast<int>(b->effStrata));
+        i("clipTo", a->clipTo, b->clipTo);
+        i("autoSized", a->autoSized, b->autoSized);
+        i("wrapsToWidth", a->wrapsToWidth, b->wrapsToWidth);
+        i("wrappedLines", a->wrappedLines, b->wrappedLines);
+        if (a->measuredText != b->measuredText) {
+            report(*a, "measuredText", a->measuredText, b->measuredText);
+        }
+        if (!fast.visibleMirrorAgrees(static_cast<uint32_t>(id))) {
+            report(*a, "visible mirror", "disagrees", a->visible ? "visible" : "hidden");
+        }
+    }
+
+    const auto& fo = fast.drawOrder();
+    const auto& uo = full.drawOrder();
+    if (fo.size() != uo.size()) {
+        ++mismatches;
+        LOG_WARNING("Layout verify: check ", checks, ": draw order holds ", fo.size(),
+                    " widgets fast, ", uo.size(), " full");
+    }
+    for (size_t k = 0; k < std::min(fo.size(), uo.size()); ++k) {
+        if (fo[k]->id == uo[k]->id) continue;
+        ++mismatches;
+        LOG_WARNING("Layout verify: check ", checks, ": draw order differs first at ", k,
+                    ": fast '", fo[k]->name, "' (id ", fo[k]->id, "), full '",
+                    uo[k]->name, "' (id ", uo[k]->id, ")");
+        break;
+    }
+
+    if (mismatches > 0) {
+        LOG_WARNING("Layout verify: check ", checks, ": ", mismatches,
+                    " mismatches over ", n, " widgets (", said,
+                    " shown); every label and texture is re-sized next frame");
+        // Back to the right answer rather than carrying the wrong one until
+        // something happens to touch the widget.
+        tree.markAllChanged();
+        cleanInARow = 0;
+        return;
+    }
+    ++cleanInARow;
+    if (checks == 1 || cleanInARow % 20 == 0) {
+        LOG_WARNING("Layout verify: check ", checks, " clean (", cleanInARow,
+                    " in a row; ", n, " widgets, ", fo.size(), " drawn)");
+    }
+}
+
 /// Labels whose glyphs are wider than the rect they were given.
 ///
 /// A font string with no width of its own is measured and the rect it gets is
@@ -1460,7 +1672,7 @@ void WidgetRenderer::layout(WidgetTree& tree, float screenW, float screenH) {
 /// writes them is somewhere else. This says which label holds one, by name.
 void WidgetRenderer::reportLetteredAmounts(WidgetTree& tree) {
     for (size_t id = 1; id < tree.size(); ++id) {
-        const Widget* w = tree.get(static_cast<uint32_t>(id));
+        const Widget* w = std::as_const(tree).get(static_cast<uint32_t>(id));
         if (!w || w->kind != WidgetKind::FontString || w->text.empty()) continue;
         // A run of digits with a single g, s or c after it and nothing else.
         const std::string& s = w->text;
@@ -1486,7 +1698,7 @@ void WidgetRenderer::reportLetteredAmounts(WidgetTree& tree) {
 
 void WidgetRenderer::reportOverflowingText(WidgetTree& tree) {
     for (size_t id = 1; id < tree.size(); ++id) {
-        const Widget* w = tree.get(static_cast<uint32_t>(id));
+        const Widget* w = std::as_const(tree).get(static_cast<uint32_t>(id));
         if (!w || w->kind != WidgetKind::FontString) continue;
         if (!w->autoSized || w->text.empty() || w->rectW <= 0.0f) continue;
         // On screen only. A hidden label's rect is whatever it was last solved
@@ -1513,7 +1725,7 @@ void WidgetRenderer::reportOverflowingText(WidgetTree& tree) {
         float chainScale = 1.0f;
         for (uint32_t up = static_cast<uint32_t>(id), guard = 0;
              up != 0 && guard <= tree.size(); ++guard) {
-            const Widget* node = tree.get(up);
+            const Widget* node = std::as_const(tree).get(up);
             if (!node) break;
             chainScale *= node->scale;
             up = node->parent;
@@ -1715,7 +1927,7 @@ void WidgetRenderer::reportWidgetDiagnostics(WidgetTree& tree,
             // the question actually being asked, so ask it of everything.
             int offscreen = 0;
             for (size_t id = 1; id < tree.size(); ++id) {
-                const Widget* w = tree.get(static_cast<uint32_t>(id));
+                const Widget* w = std::as_const(tree).get(static_cast<uint32_t>(id));
                 if (!w || !w->visible || w->name.empty()) continue;
                 if (w->rectW <= 0.0f || w->rectH <= 0.0f) continue;
                 const float l = w->left * s, b = w->bottom * s;
@@ -1751,7 +1963,7 @@ void WidgetRenderer::reportWidgetDiagnostics(WidgetTree& tree,
             {
                 int flat = 0;
                 for (size_t id = 1; id < tree.size(); ++id) {
-                    const Widget* w = tree.get(static_cast<uint32_t>(id));
+                    const Widget* w = std::as_const(tree).get(static_cast<uint32_t>(id));
                     if (!w || !w->visible || w->name.empty()) continue;
                     if (w->width <= 0.0f && w->height <= 0.0f) continue;
                     if (w->rectW > 0.0f && w->rectH > 0.0f) continue;
@@ -1777,7 +1989,7 @@ void WidgetRenderer::reportWidgetDiagnostics(WidgetTree& tree,
             {
                 std::map<std::string, int> seen;
                 for (size_t id = 1; id < tree.size(); ++id) {
-                    const Widget* w = tree.get(static_cast<uint32_t>(id));
+                    const Widget* w = std::as_const(tree).get(static_cast<uint32_t>(id));
                     if (!w || !w->visible || w->name.empty()) continue;
                     ++seen[w->name];
                 }
@@ -1806,14 +2018,14 @@ void WidgetRenderer::reportWidgetDiagnostics(WidgetTree& tree,
             {
                 std::map<std::string, int> texts;
                 for (size_t id = 1; id < tree.size(); ++id) {
-                    const Widget* w = tree.get(static_cast<uint32_t>(id));
+                    const Widget* w = std::as_const(tree).get(static_cast<uint32_t>(id));
                     if (!w || !w->visible || w->kind != WidgetKind::FontString) continue;
                     if (w->text.size() < 3) continue;   // too short to mean anything
                     ++texts[w->text];
                 }
                 int pairs = 0;
                 for (size_t id = 1; id < tree.size() && pairs < 8; ++id) {
-                    const Widget* w = tree.get(static_cast<uint32_t>(id));
+                    const Widget* w = std::as_const(tree).get(static_cast<uint32_t>(id));
                     if (!w || !w->visible || w->kind != WidgetKind::FontString) continue;
                     if (w->text.size() < 3 || texts[w->text] < 2) continue;
                     ++pairs;
@@ -1832,7 +2044,7 @@ void WidgetRenderer::reportWidgetDiagnostics(WidgetTree& tree,
             {
                 std::vector<const Widget*> labels;
                 for (size_t id = 1; id < tree.size(); ++id) {
-                    const Widget* w = tree.get(static_cast<uint32_t>(id));
+                    const Widget* w = std::as_const(tree).get(static_cast<uint32_t>(id));
                     if (!w || !w->visible || w->kind != WidgetKind::FontString) continue;
                     if (w->text.empty() || w->rectW <= 0.0f || w->rectH <= 0.0f) continue;
                     labels.push_back(w);
@@ -1871,7 +2083,7 @@ void WidgetRenderer::reportWidgetDiagnostics(WidgetTree& tree,
             if (const Widget* arrow = tree.findByName("CharacterModelFrameRotateLeftButton");
                 arrow && arrow->visible) {
                 for (size_t id = 1; id < tree.size(); ++id) {
-                    const Widget* w = tree.get(static_cast<uint32_t>(id));
+                    const Widget* w = std::as_const(tree).get(static_cast<uint32_t>(id));
                     if (!w || !w->visible || w->id == arrow->id) continue;
                     if (w->left > arrow->left + arrow->rectW + 60.0f) continue;
                     if (w->left + w->rectW < arrow->left - 20.0f) continue;
@@ -1899,7 +2111,7 @@ void WidgetRenderer::reportWidgetDiagnostics(WidgetTree& tree,
                 sheet && sheet->visible) {
                 int listed = 0;
                 for (size_t id = 1; id < tree.size() && listed < 24; ++id) {
-                    const Widget* w = tree.get(static_cast<uint32_t>(id));
+                    const Widget* w = std::as_const(tree).get(static_cast<uint32_t>(id));
                     if (!w || !w->visible || w->kind != WidgetKind::FontString) continue;
                     if (w->text.empty()) continue;
                     if (w->left < sheet->left || w->bottom < sheet->bottom) continue;
@@ -1933,7 +2145,7 @@ void WidgetRenderer::reportWidgetDiagnostics(WidgetTree& tree,
 
             int orphans = 0;
             for (size_t id = 1; id < tree.size(); ++id) {
-                const Widget* w = tree.get(static_cast<uint32_t>(id));
+                const Widget* w = std::as_const(tree).get(static_cast<uint32_t>(id));
                 if (!w || !w->visible || w->name.empty()) continue;
                 if (w->kind != WidgetKind::Frame) continue;
                 if (!w->anchors.empty()) continue;
@@ -2126,7 +2338,7 @@ void WidgetRenderer::reportWidgetDiagnostics(WidgetTree& tree,
         if (widgetDumpLevel() >= 2) {
             LOG_WARNING("WidgetDump: every named widget, drawn or not");
             for (size_t id = 1; id < tree.size(); ++id) {
-                const Widget* w = tree.get(static_cast<uint32_t>(id));
+                const Widget* w = std::as_const(tree).get(static_cast<uint32_t>(id));
                 if (!w || w->name.empty()) continue;
                 LOG_WARNING("  ", w->name, " kind=", static_cast<int>(w->kind),
                             " rect=(", w->left, ",", w->bottom, " ",
@@ -2172,12 +2384,16 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
         static const bool tipDiag = std::getenv("WOWEE_TOOLTIP_DIAG") != nullptr;
         int seenTooltip = 0, seenVisible = 0, seenWithLines = 0, sized = 0;
         for (size_t id = 1; id < tree.size(); ++id) {
-            Widget* w = tree.get(static_cast<uint32_t>(id));
-            if (!w || !w->isTooltip) continue;
+            // Looked at read-only and taken writable only to be sized: the
+            // writable get() marks a widget for the sizing pass, and asking
+            // it for all 28k here would have it revisit every one each frame.
+            const Widget* seen = std::as_const(tree).get(static_cast<uint32_t>(id));
+            if (!seen || !seen->isTooltip) continue;
             ++seenTooltip;
-            if (w->visible) ++seenVisible;
-            if (!w->tooltipLines.empty()) ++seenWithLines;
-            if (!w->visible || w->tooltipLines.empty()) continue;
+            if (seen->visible) ++seenVisible;
+            if (!seen->tooltipLines.empty()) ++seenWithLines;
+            if (!seen->visible || seen->tooltipLines.empty()) continue;
+            Widget* w = tree.get(static_cast<uint32_t>(id));
             // The same face the draw uses, not a different lookup: asking for
             // "frizqt__" here and falling back to ImGui's font skipped the
             // whole pass whenever that face was not loaded, which is why four
