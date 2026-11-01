@@ -287,116 +287,136 @@ static int lua_PlaySound(lua_State* L) {
     std::string sound;
     if (lua_isnumber(L, 1)) {
         uint32_t id = static_cast<uint32_t>(lua_tonumber(L, 1));
-        // A SoundEntries id names its own row; play that. The table below is
-        // the fallback for data without the row.
-        if (const auto* data = ac->getSoundData()) {
-            if (const auto* entry = data->sound(id); entry && sfx->playByName(entry->name)) return 0;
-        }
-        // Map common WoW sound IDs to named sounds
-        switch (id) {
-            case 856: case 1115: sfx->playButtonClick(); return 0; // igMainMenuOption
-            case 840: sfx->playQuestActivate(); return 0;          // igQuestListOpen
-            case 841: sfx->playQuestComplete(); return 0;           // igQuestListComplete
-            case 862: sfx->playBagOpen(); return 0;                // igBackPackOpen
-            case 863: sfx->playBagClose(); return 0;               // igBackPackClose
-            case 867: sfx->playError(); return 0;                  // igPlayerInvite
-            case 888: sfx->playLevelUp(); return 0;                // LEVELUPSOUND
-            default: return 0;
-        }
+        // A SoundEntries id names its own row; play that row - not the first
+        // row that happens to share its name, which for a duplicated name is
+        // a different volume or directory.
+        //
+        // There is no fallback for an id. It means something only through the
+        // table, and the hand-written one that stood here had it wrong more
+        // often than right: 840 is igCharacterInfoClose, not igQuestListOpen,
+        // and 867 is igCharacterNPCSelect, which it answered with Error.wav.
+        if (const auto* data = ac->getSoundData()) sfx->playEntry(data->sound(id));
+        return 0;
     } else {
         const char* name = luaL_optstring(L, 1, "");
         // The real sound first. These names are SoundEntries.dbc rows - the
-        // interface is naming one, and the row names the files - so looking it
-        // up plays what WoW plays rather than the nearest thing this client had
-        // already loaded, and it covers all sixty-eight rather than the
-        // forty-four below.
+        // interface is naming one, and the row names the files and the volume -
+        // so looking it up plays what WoW plays, at the level it plays it.
         //
-        // The table below stays as the fallback: an install without the sound,
-        // or without the dbc, still gets something for the names it can be
-        // approximated for.
+        // The table below is the fallback for an install without the dbc.
         if (sfx->playByName(name)) return 0;
 
         sound = name;
         for (char& c : sound) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
 
-        // FrameXML asks for eighty-nine names across the files that load -
-        // sixty-eight when this was written - and nine of them were answered,
-        // so nearly every panel this branch has handed over opened, closed and
-        // was clicked in silence. The sound manager already had most of these
-        // under its own names; only the mapping was missing.
+        // No SoundEntries.dbc, or no row by that name: the file and volume the
+        // 3.3.5a row names, for every name the stock FrameXML asks for. Taken
+        // from the table rather than chosen, so the fallback is the same sound
+        // as the real thing - the first of a row's files where it has several,
+        // since a random pick needs the row.
         //
-        // Mapped where the client has the sound the name asks for, and left
-        // alone where it does not. Substituting something that merely exists
-        // is worse than silence: a wrong sound is a wrong sound enhanced, while
-        // a missing one is a gap someone can still hear.
-        struct Mapping { const char* name; void (audio::UiSoundManager::*play)(); };
-        static const Mapping kMappings[] = {
-            // A click is a click, and these are all buttons.
-            {"IGMAINMENUOPTION",            &audio::UiSoundManager::playButtonClick},
-            {"IGMAINMENUOPTIONCHECKBOXON",  &audio::UiSoundManager::playButtonClick},
-            {"IGMAINMENUOPTIONCHECKBOXOFF", &audio::UiSoundManager::playButtonClick},
-            {"IGPLAYERINVITEACCEPTED",      &audio::UiSoundManager::playButtonClick},
-            {"IGCHARACTERINFOTAB",          &audio::UiSoundManager::playButtonClick},
-            {"UCHATSCROLLBUTTON",           &audio::UiSoundManager::playButtonClick},
-            {"IGCHATSCROLLUP",              &audio::UiSoundManager::playButtonClick},
-            {"IGCHATSCROLLDOWN",            &audio::UiSoundManager::playButtonClick},
-            {"IGCHATBOTTOM",                &audio::UiSoundManager::playButtonClick},
-            {"IGMAINMENUOPEN",              &audio::UiSoundManager::playMenuButtonClick},
-            {"IGMAINMENUCLOSE",             &audio::UiSoundManager::playMenuButtonClick},
-            {"IGMAINMENUCONTINUE",          &audio::UiSoundManager::playMenuButtonClick},
-            {"GSTITLEOPTIONOK",             &audio::UiSoundManager::playButtonClick},
-            {"GSTITLEOPTIONEXIT",           &audio::UiSoundManager::playButtonClick},
-            // The panels, each of which has its own pair here already.
-            {"IGCHARACTERINFOOPEN",         &audio::UiSoundManager::playCharacterSheetOpen},
-            {"IGCHARACTERINFOCLOSE",        &audio::UiSoundManager::playCharacterSheetClose},
-            {"TALENTSCREENOPEN",            &audio::UiSoundManager::playCharacterSheetOpen},
-            {"TALENTSCREENCLOSE",           &audio::UiSoundManager::playCharacterSheetClose},
-            // The guild vault, which was not silent: GuildVaultOpen and
-            // GuildVaultClose are rows in SoundEntries.dbc, so playByName above
-            // has been finding and playing them all along.
-            //
-            // What was missing is the fallback this table is for. Its two
-            // samples were preloaded from a fixed path and had no method to
-            // reach them, so an install with the wavs but no SoundEntries.dbc -
-            // the case the table exists to cover - had them in memory and no
-            // way to ask for them.
-            {"GUILDVAULTOPEN",              &audio::UiSoundManager::playGuildBankOpen},
-            {"GUILDVAULTCLOSE",             &audio::UiSoundManager::playGuildBankClose},
-            {"IGBACKPACKOPEN",              &audio::UiSoundManager::playBagOpen},
-            {"IGBACKPACKCLOSE",             &audio::UiSoundManager::playBagClose},
-            {"KEYRINGOPEN",                 &audio::UiSoundManager::playBagOpen},
-            {"KEYRINGCLOSE",                &audio::UiSoundManager::playBagClose},
-            {"IGQUESTLOGOPEN",              &audio::UiSoundManager::playQuestLogOpen},
-            {"IGQUESTLOGCLOSE",             &audio::UiSoundManager::playQuestLogClose},
-            {"IGQUESTLISTOPEN",             &audio::UiSoundManager::playQuestActivate},
-            {"IGQUESTLISTCOMPLETE",         &audio::UiSoundManager::playQuestComplete},
-            {"IGQUESTLOGABANDONQUEST",      &audio::UiSoundManager::playQuestFailed},
-            {"IGQUESTCANCEL",               &audio::UiSoundManager::playQuestFailed},
-            {"WRITEQUEST",                  &audio::UiSoundManager::playQuestUpdate},
-            {"IGSPELLBOOKOPEN",             &audio::UiSoundManager::playPickupBook},
-            {"IGSPELLBOOKCLOSE",            &audio::UiSoundManager::playPickupBook},
-            {"IGABILITYOPEN",               &audio::UiSoundManager::playPickupBook},
-            {"IGABILITYCLOSE",              &audio::UiSoundManager::playPickupBook},
-            {"IGABILIITYPAGETURN",          &audio::UiSoundManager::playPickupBook},
-            {"AUCTIONWINDOWOPEN",           &audio::UiSoundManager::playAuctionHouseOpen},
-            {"AUCTIONWINDOWCLOSE",          &audio::UiSoundManager::playAuctionHouseClose},
-            // The rest, each with an exact counterpart.
-            {"LEVELUPSOUND",                &audio::UiSoundManager::playLevelUp},
-            {"MAPPING",                     &audio::UiSoundManager::playMinimapPing},
-            {"TELLMESSAGE",                 &audio::UiSoundManager::playWhisperReceived},
-            {"IGCHARACTERNPCSELECT",        &audio::UiSoundManager::playTargetSelect},
-            {"IGCREATUREAGGROSELECT",       &audio::UiSoundManager::playTargetSelect},
-            {"IGCREATURENEUTRALSELECT",     &audio::UiSoundManager::playTargetSelect},
-            {"INTERFACESOUND_LOSTTARGETUNIT", &audio::UiSoundManager::playTargetDeselect},
-            {"IGBACKPACKCOINSELECT",        &audio::UiSoundManager::playLootCoinSmall},
-            {"IGBACKPACKCOINOK",            &audio::UiSoundManager::playLootCoinSmall},
-            {"LOOTWINDOWOPENEMPTY",         &audio::UiSoundManager::playError},
-            {"LFG_DENIED",                  &audio::UiSoundManager::playError},
-            {"LFG_REWARDS",                 &audio::UiSoundManager::playQuestComplete},
+        // This replaced a table of the sound manager's own samples, mapped by
+        // what seemed close: Error.wav for an empty loot window and an LFG
+        // refusal, the quest-complete fanfare for LFG rewards, a book pickup
+        // for the spellbook, the character sheet's sound for the talent
+        // frame. Substituting something that merely exists is worse than
+        // silence: a wrong sound is a wrong sound enhanced, while a missing one
+        // is a gap someone can still hear.
+        struct Fallback { const char* name; const char* path; float volume; };
+        static const Fallback kFallbacks[] = {
+            {"ACHIEVEMENTMENUCLOSE",         "Sound\\Interface\\AchievementMenuClose.wav", 0.30f},
+            {"ACHIEVEMENTMENUOPEN",          "Sound\\Interface\\AchievementMenuOpen.wav", 0.50f},
+            {"ALARMCLOCKWARNING2",           "Sound\\Interface\\AlarmClockWarning2.wav", 0.70f},
+            {"ALARMCLOCKWARNING3",           "Sound\\Interface\\AlarmClockWarning3.wav", 0.80f},
+            {"AUCTIONWINDOWCLOSE",           "Sound\\interface\\AuctionWindowClose.wav", 0.69f},
+            {"AUCTIONWINDOWOPEN",            "Sound\\interface\\AuctionWindowOpen.wav", 0.69f},
+            {"BARBERSHOP_HAIRCUT",           "Sound\\Interface\\BarberShop_Haicut1.wav", 0.80f},
+            {"BARBERSHOP_SIT",               "Sound\\Interface\\BarberShop_Sit1.wav", 0.80f},
+            {"FISHING REEL IN",              "Sound\\Spells\\Tradeskills\\FishReelIn.wav", 1.00f},
+            {"GLYPH_MAJORCREATE",            "Sound\\Interface\\Glyph_MajorCreate.wav", 0.40f},
+            {"GLYPH_MAJORDESTROY",           "Sound\\Interface\\Glyph_MajorDestroy.wav", 0.40f},
+            {"GLYPH_MINORCREATE",            "Sound\\Interface\\Glyph_MinorCreate.wav", 0.40f},
+            {"GLYPH_MINORDESTROY",           "Sound\\Interface\\Glyph_MinorDestroy.wav", 0.40f},
+            {"GM_CHATWARNING",               "Sound\\Interface\\GM_ChatWarning.wav", 0.80f},
+            {"GSCHARACTERCREATIONLOOK",      "Sound\\Interface\\uChatScrollButton.wav", 0.75f},
+            {"GSTITLEOPTIONEXIT",            "Sound\\Interface\\uChatScrollButton.wav", 0.75f},
+            {"GSTITLEOPTIONOK",              "Sound\\Interface\\uChatScrollButton.wav", 0.75f},
+            {"GUILDBANKOPENBAG",             "Sound\\Interface\\GuildBankOpenBag1.wav", 0.69f},
+            {"GUILDVAULTCLOSE",              "Sound\\Interface\\GuildVaultClose.wav", 0.70f},
+            {"GUILDVAULTOPEN",               "Sound\\Interface\\GuildVaultOpen.wav", 0.40f},
+            {"IGABILIITYPAGETURN",           "Sound\\interface\\iAbilitiesTurnPageA.wav", 0.75f},
+            {"IGABILITYCLOSE",               "Sound\\Interface\\iAbilitiesCloseA.wav", 0.75f},
+            {"IGABILITYOPEN",                "Sound\\Interface\\iAbilitiesOpenA.wav", 0.75f},
+            {"IGBACKPACKCLOSE",              "Sound\\Interface\\iEquipmentContainerCloseA.wav", 0.75f},
+            {"IGBACKPACKCOINCANCEL",         "Sound\\Interface\\iMoneyDialogClose.wav", 0.75f},
+            {"IGBACKPACKCOINOK",             "Sound\\Interface\\iMoneyDialogClose.wav", 0.75f},
+            {"IGBACKPACKCOINSELECT",         "Sound\\Interface\\iMoneyDialogOpen.wav", 0.75f},
+            {"IGBACKPACKOPEN",               "Sound\\Interface\\iEquipmentContainerOpenA.wav", 0.75f},
+            {"IGBONUSBAROPEN",               "Sound\\interface\\iQuestUpdate.wav", 0.75f},
+            {"IGCHARACTERINFOCLOSE",         "Sound\\Interface\\uCharacterSheetClose.wav", 0.75f},
+            {"IGCHARACTERINFOOPEN",          "Sound\\Interface\\uCharacterSheetOpen.wav", 0.75f},
+            {"IGCHARACTERINFOTAB",           "Sound\\Interface\\uCharacterSheetTab.wav", 0.75f},
+            {"IGCHARACTERNPCSELECT",         "Sound\\Interface\\iSelectTarget.wav", 0.75f},
+            {"IGCHATBOTTOM",                 "Sound\\Interface\\uChatScrollButton.wav", 0.75f},
+            {"IGCHATEMOTEBUTTON",            "Sound\\Interface\\iUIInterfaceButtonA.wav", 0.75f},
+            {"IGCHATSCROLLDOWN",             "Sound\\Interface\\uChatScrollButton.wav", 0.50f},
+            {"IGCHATSCROLLUP",               "Sound\\Interface\\uChatScrollButton.wav", 0.50f},
+            {"IGCREATUREAGGROSELECT",        "Sound\\Interface\\iSelectTarget.wav", 0.75f},
+            {"IGCREATURENEUTRALSELECT",      "Sound\\Interface\\iSelectTarget.wav", 0.75f},
+            {"IGINVENTORYROTATECHARACTER",   "Sound\\Interface\\uChatScrollButton.wav", 0.50f},
+            {"IGMAINMENUCLOSE",              "Sound\\Interface\\uEscapeScreenClose.wav", 0.50f},
+            {"IGMAINMENUCONTINUE",           "Sound\\Interface\\iUIInterfaceButtonA.wav", 0.75f},
+            {"IGMAINMENULOGOUT",             "Sound\\Interface\\iUIInterfaceButtonA.wav", 0.75f},
+            {"IGMAINMENUOPEN",               "Sound\\Interface\\uEscapeScreenOpen.wav", 0.50f},
+            {"IGMAINMENUOPTION",             "Sound\\Interface\\iUIInterfaceButtonA.wav", 0.75f},
+            {"IGMAINMENUOPTIONCHECKBOXOFF",  "Sound\\Interface\\uChatScrollButton.wav", 0.50f},
+            {"IGMAINMENUOPTIONCHECKBOXON",   "Sound\\Interface\\uChatScrollButton.wav", 0.50f},
+            {"IGMAINMENUQUIT",               "Sound\\Interface\\iUIInterfaceButtonA.wav", 0.75f},
+            {"IGMINIMAPCLOSE",               "Sound\\Interface\\uMiniMapClose.wav", 0.75f},
+            {"IGMINIMAPOPEN",                "Sound\\Interface\\uMiniMapOpen.wav", 0.75f},
+            {"IGMINIMAPZOOMIN",              "Sound\\Interface\\uMiniMapZoom.wav", 0.75f},
+            {"IGMINIMAPZOOMOUT",             "Sound\\Interface\\uMiniMapZoom.wav", 0.75f},
+            {"IGPLAYERINVITE",               "Sound\\Interface\\iPlayerInviteA.wav", 0.75f},
+            {"IGPVPUPDATE",                  "Sound\\interface\\PVPWARNING.wav", 0.69f},
+            {"IGQUESTCANCEL",                "Sound\\Interface\\iQuestLogCloseA.wav", 0.75f},
+            {"IGQUESTLISTCLOSE",             "Sound\\Interface\\iQuestLogCloseA.wav", 0.75f},
+            {"IGQUESTLISTCOMPLETE",          "Sound\\interface\\iQuestComplete.wav", 0.75f},
+            {"IGQUESTLISTOPEN",              "Sound\\Interface\\iQuestLogOpenA.wav", 0.75f},
+            {"IGQUESTLISTSELECT",            "Sound\\Interface\\iQuestLogCloseA.wav", 0.75f},
+            {"IGQUESTLOGABANDONQUEST",       "Sound\\interface\\igQuestFailed.wav", 0.50f},
+            {"IGQUESTLOGCLOSE",              "Sound\\Interface\\iQuestLogCloseA.wav", 0.75f},
+            {"IGQUESTLOGOPEN",               "Sound\\Interface\\iQuestLogOpenA.wav", 0.75f},
+            {"IGSPELLBOOKCLOSE",             "Sound\\Interface\\iAbilitiesCloseA.wav", 0.75f},
+            {"IGSPELLBOOKOPEN",              "Sound\\Interface\\iAbilitiesOpenA.wav", 0.75f},
+            {"INTERFACESOUND_LOSTTARGETUNIT", "Sound\\Interface\\iDeselectTarget.wav", 0.75f},
+            {"ITEM_REPAIR",                  "Sound\\Spells\\Tradeskills\\MiningHitA.wav", 0.69f},
+            {"JEWELCRAFTINGFINALIZE",        "Sound\\interface\\JewelcraftingFinalize.wav", 0.69f},
+            {"KEYRINGCLOSE",                 "Sound\\interface\\KeyRingClose.wav", 0.20f},
+            {"KEYRINGOPEN",                  "Sound\\interface\\KeyRingOpen.wav", 0.20f},
+            {"LFG_DENIED",                   "sound\\interface\\lfg_denied.wav", 0.80f},
+            {"LFG_REWARDS",                  "sound\\interface\\lfg_rewards.wav", 0.80f},
+            {"LFG_ROLECHECK",                "sound\\interface\\lfg_rolecheck.wav", 0.80f},
+            {"LOOTWINDOWCOINSOUND",          "Sound\\Interface\\LootCoinSmall.wav", 0.70f},
+            {"LOOTWINDOWOPENEMPTY",          "Sound\\interface\\igLootCreatureEmpty.wav", 0.70f},
+            {"MAPPING",                      "Sound\\interface\\MapPing.wav", 0.70f},
+            {"MONEYFRAMECLOSE",              "Sound\\Interface\\iMoneyDialogClose.wav", 0.70f},
+            {"MONEYFRAMEOPEN",               "Sound\\Interface\\iMoneyDialogOpen.wav", 0.70f},
+            {"PVPENTERQUEUE",                "Sound\\Spells\\PVPEnterQueue.wav", 0.69f},
+            {"PVPTHROUGHQUEUE",              "Sound\\Spells\\PVPThroughQueue.wav", 0.80f},
+            {"RAIDBOSSEMOTEWARNING",         "Sound\\Interface\\RaidBossWarning.wav", 0.80f},
+            {"RAIDWARNING",                  "Sound\\interface\\RaidWarning.wav", 0.70f},
+            {"READYCHECK",                   "Sound\\interface\\levelup2.wav", 1.00f},
+            {"TALENTSCREENCLOSE",            "Sound\\interface\\TalentScreenClose.wav", 0.80f},
+            {"TALENTSCREENOPEN",             "Sound\\interface\\TalentScreenOpen.wav", 0.40f},
+            {"TELLMESSAGE",                  "Sound\\interface\\iTellMessage.wav", 1.00f},
+            {"UCHATSCROLLBUTTON",            "Sound\\interface\\uChatScrollButton.wav", 0.50f},
+            {"VOICECHATOFF",                 "Sound\\Interface\\VoiceChatOff.wav", 0.70f},
+            {"VOICECHATON",                  "Sound\\Interface\\VoiceChatOn.wav", 0.70f},
+            {"WRITEQUEST",                   "Sound\\interface\\WriteQuestA.wav", 0.30f},
         };
         bool mapped = false;
-        for (const Mapping& m : kMappings) {
-            if (sound == m.name) { (sfx->*m.play)(); mapped = true; break; }
+        for (const Fallback& f : kFallbacks) {
+            if (sound == f.name) { sfx->playFile(f.path, f.volume); mapped = true; break; }
         }
         // Said once per name, because a sound that resolves to nothing is the
         // one gap in this file that leaves no trace at all: the row is missing
@@ -407,8 +427,8 @@ static int lua_PlaySound(lua_State* L) {
         // exists would be wrong enhanced, where a missing one can still be
         // heard - but it should be possible to find out which name it was
         // without guessing from a quiet button. The interface asks for eighty
-        // nine of these across the files that load, and the table below covers
-        // the ones the client has an equivalent for.
+        // nine of these across the files that load, and the table above covers
+        // every one with a row in 3.3.5a.
         if (!mapped) {
             static std::set<std::string> saidAlready;
             if (saidAlready.insert(sound).second) {

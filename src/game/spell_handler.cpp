@@ -1947,19 +1947,25 @@ void SpellHandler::updateTimers(float dt) {
         castTimeRemaining_ -= dt;
         if (castTimeRemaining_ < 0.0f) castTimeRemaining_ = 0.0f;
     }
-    // Eating/drinking munch-gulp repeats for the whole restoration aura,
-    // matching the real client's looping consume sound.
+    // The eating or drinking sound is the spell's own: Food (433 and kin) has
+    // visual 51, whose state kit 409 plays "Food" (iEating1.wav) as the aura
+    // goes on; Drink (430 and kin) has visual 101, whose cast kit 438 plays
+    // "Drinking". Both rows play once - neither has the loop flag - and the
+    // spell visual system plays them. This used to play the file again every
+    // second for the whole aura, on top of the kit's. What is left is one
+    // sound for a restoration spell whose visual names none.
     if (restorationActive_) {
         if (restorationTimeRemaining_ > 0.0f) {
             restorationTimeRemaining_ = std::max(0.0f, restorationTimeRemaining_ - dt);
         }
-        restorationSoundTimer_ -= dt;
         if (restorationSoundTimer_ <= 0.0f) {
-            restorationSoundTimer_ = 1.0f;
-            if (auto* ac = owner_.services().audioCoordinator) {
-                if (auto* sfx = ac->getUiSoundManager()) {
-                    if (restorationIsFood_) sfx->playEating();
-                    else                    sfx->playDrinking();
+            restorationSoundTimer_ = 1.0f;  // once per aura: reset only when one starts
+            if (!spellVisualPlaysSounds(restorationSpellId_, SpellSoundMoment::ANY)) {
+                if (auto* ac = owner_.services().audioCoordinator) {
+                    if (auto* sfx = ac->getUiSoundManager()) {
+                        if (restorationIsFood_) sfx->playEating();
+                        else                    sfx->playDrinking();
+                    }
                 }
             }
         }
@@ -2282,14 +2288,9 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
     // GameHandler::raiseUiError changed nothing that was being reported.
     const bool routine = isRoutineCastRejection(data.result);
 
-    if (!routine) {
-        if (auto* ac = owner_.services().audioCoordinator) {
-            if (auto* sfx = ac->getUiSoundManager())
-                sfx->playError();
-        }
-    }
-
-    // Character speech response ("Not enough mana", "I'm out of range", ...)
+    // Character speech response ("Not enough mana", "I'm out of range", ...),
+    // which is all the stock client plays for a failed cast. The Error.wav
+    // that played here as well is in no SoundEntries row.
     // Suppressed for gather casts, whose failures are routine and already
     // rephrased, and for the rejections that repeat with the keypress.
     if (!gatherCast && !routine) {
@@ -3298,6 +3299,9 @@ void SpellHandler::handleAchievementEarned(network::Packet& packet) {
 
         owner_.earnedAchievementsRef().insert(achievementId);
         owner_.achievementDatesRef()[achievementId] = earnDate;
+        // AchievementSound, the $SND event of the achievement visual
+        // (Spells\Achievement_OnRoot.m2). Once: the toast played it a second
+        // time on the same packet.
         if (auto* ac = owner_.services().audioCoordinator) {
             if (auto* sfx = ac->getUiSoundManager())
                 sfx->playAchievementAlert();

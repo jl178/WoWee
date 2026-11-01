@@ -396,22 +396,12 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         appearanceCallbackSet_ = true;
     }
 
-    // Set up UI error frame callback (once)
-    if (!uiErrorCallbackSet_) {
-        gameHandler.setUIErrorCallback([this](const std::string& msg) {
-            // The sound first, and outside the gate. It belongs to no
-            // element - the error is the same error whoever draws the text -
-            // and it sat after the return, so handing the errors over would
-            // have taken the sound with them.
-            if (auto* ac = services_.audioCoordinator) {
-                if (auto* sfx = ac->getUiSoundManager()) sfx->playError();
-            }
-            // UIErrorsFrame draws the text now. The sound above is still
-            // ours: FrameXML plays none for these, so it would go silent.
-            (void)msg;
-        });
-        uiErrorCallbackSet_ = true;
-    }
+    // No UI error callback here. UIErrorsFrame draws the text, and the sound
+    // this played for every error - Sound\Interface\Error.wav - is one the
+    // stock client never plays: no SoundEntries row names that file, and
+    // Wow.exe's error table (0xac8af0) gives each message either a
+    // SoundEntries name (igQuestFailed for the quest errors, QUESTADDED, ...)
+    // or a VocalUISounds line, played where the message is raised.
 
     // No flash callback here. The red overlay on a failed cast belonged to
     // this client's own action bar; FrameXML draws the bars and flashes its

@@ -82,14 +82,14 @@ def canary():
     marker = "canaryNeverPlayedSounds_"
     try:
         header.write_text(h_before.replace(
-            "    std::vector<UISample> pickupBagSounds_;",
-            "    std::vector<UISample> pickupBagSounds_;\n"
+            "    std::vector<UISample> lootItemSounds_;",
+            "    std::vector<UISample> lootItemSounds_;\n"
             f"    std::vector<UISample> {marker};", 1))
         source.write_text(s_before.replace(
-            "    pickupBagSounds_.resize(1);",
+            "    lootItemSounds_.resize(1);",
             f"    {marker}.resize(1);\n"
             f'    loadSound("Sound\\\\Interface\\\\Canary.wav", {marker}[0], assets);\n'
-            "    pickupBagSounds_.resize(1);", 1))
+            "    lootItemSounds_.resize(1);", 1))
         seen = [h for h in scan() if h[0] == marker]
     finally:
         header.write_text(h_before)

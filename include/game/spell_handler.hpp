@@ -522,7 +522,7 @@ private:
     bool restorationIsFood_ = false;
     float restorationTimeRemaining_ = 0.0f;
     float restorationTimeTotal_ = 0.0f;
-    float restorationSoundTimer_ = 0.0f; // repeats the consume sound while active
+    float restorationSoundTimer_ = 0.0f; // 0 until the aura's one fallback consume sound is due
 
     // Repeat-craft queue
     uint32_t craftQueueSpellId_ = 0;

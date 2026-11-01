@@ -1,8 +1,6 @@
 #include "ui/toast_manager.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/animation_controller.hpp"
-#include "audio/audio_coordinator.hpp"
-#include "audio/ui_sound_manager.hpp"
 
 namespace wowee { namespace ui {
 
@@ -15,17 +13,8 @@ void ToastManager::triggerDing(uint32_t /*newLevel*/) {
     }
 }
 
-void ToastManager::playAchievementEarned() {
-    // alertframes.lua registers ACHIEVEMENT_EARNED and raises the badge, so
-    // there is nothing of ours left to put on screen. The sound stays:
-    // FrameXML's alert frame plays one only for LFG rewards, and an
-    // achievement earned in silence is worse than one announced twice.
-    auto* ac = services_.audioCoordinator;
-    if (ac) {
-        if (auto* sfx = ac->getUiSoundManager()) {
-            sfx->playAchievementAlert();
-        }
-    }
-}
+// No achievement sound here. alertframes.lua raises the badge, and the sound
+// (AchievementSound) is played once where SMSG_ACHIEVEMENT_EARNED is read -
+// it was played from both places, on the same packet.
 
 } } // namespace wowee::ui
