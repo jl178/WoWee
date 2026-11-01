@@ -18,6 +18,8 @@
 #include "game/zone_manager.hpp"
 #include "core/logger.hpp"
 
+#include <cstdlib>
+
 namespace wowee {
 namespace audio {
 
@@ -99,6 +101,25 @@ void AudioCoordinator::loadSoundData(pipeline::AssetManager* assets) {
         }
         reverbPrefId_ = -1;
     }
+}
+
+bool AudioCoordinator::playInterfaceEntry(const SoundEntry* entry) {
+    if (!audioAvailable_ || !entry || entry->files.empty()) return false;
+    float volume = entry->volume;
+    if (uiSoundManager_) volume *= uiSoundManager_->getVolumeScale();
+    const auto& file = entry->files[static_cast<size_t>(std::rand()) % entry->files.size()];
+    return AudioEngine::instance().playSound2D(file, volume, 1.0f, SoundBus::Interface);
+}
+
+void AudioCoordinator::playCoinSound() {
+    if (playInterfaceEntry(soundData_.loaded() ? soundData_.coinSound() : nullptr)) return;
+    // No SoundEntries row: the file that row names.
+    if (uiSoundManager_) uiSoundManager_->playLootCoinSmall();
+}
+
+bool AudioCoordinator::playItemFoley(uint32_t itemDisplayId, bool pickup) {
+    if (!soundData_.loaded()) return false;
+    return playInterfaceEntry(soundData_.itemFoleyEntry(itemDisplayId, pickup));
 }
 
 void AudioCoordinator::updateReverb(const ZoneAudioContext& ctx) {

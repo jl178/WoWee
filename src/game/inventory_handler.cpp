@@ -227,6 +227,31 @@ uint64_t targetGuidForUseItem(GameHandler& owner, const ItemQueryResponseData* i
     if (info->subClass == kConsumableSubclassItemEnhancement) return 0;
     return owner.getPlayerGuid();
 }
+
+/// The put-down sound of an item that has just landed in the player's bags.
+/// The stock SMSG_ITEM_PUSH_RESULT path (0x523900) plays it for every push to
+/// the local player - loot, quest reward, purchase, craft - through 0x4d0090
+/// with ItemGroupSounds column 1 of the item's display. igLootCreature.wav is
+/// only the stand-in for an install without the tables.
+void playItemPushSound(GameHandler& owner, uint32_t displayInfoId) {
+    auto* ac = owner.services().audioCoordinator;
+    if (!ac || ac->playItemFoley(displayInfoId, /*pickup=*/false)) return;
+    if (auto* sfx = ac->getUiSoundManager()) sfx->playLootItem();
+}
+
+/// The pickup sound of a loot slot being taken. The stock LootSlot (0x589140),
+/// its bind-on-pickup confirm (0x589300) and the autoloot pass (0x588f90) play
+/// the item display's ItemGroupSounds pickup sound as they send the autostore,
+/// and only for a slot the player may take (slot type 0 or 4); a slot under a
+/// roll, held by a master looter or locked is refused without a sound.
+void playLootSlotPickupSound(GameHandler& owner, const LootItem& item) {
+    if (item.lootSlotType != 0 && item.lootSlotType != 4) return;
+    uint32_t displayId = item.displayInfoId;
+    if (displayId == 0) {
+        if (const auto* info = owner.getItemInfo(item.itemId)) displayId = info->displayInfoId;
+    }
+    if (auto* ac = owner.services().audioCoordinator) ac->playItemFoley(displayId, /*pickup=*/true);
+}
 } // namespace
 
 // ============================================================
@@ -236,8 +261,13 @@ uint64_t targetGuidForUseItem(GameHandler& owner, const ItemQueryResponseData* i
 /// Says what was looted, once per loot.
 ///
 /// Both paths that learn about looted money end here - the server's notify and
-/// the fallback timer for servers that do not send one - so the line and the
-/// coin cannot differ between them.
+/// the fallback timer for servers that do not send one - so the line cannot
+/// differ between them.
+///
+/// No sound here. The stock SMSG_LOOT_MONEY_NOTIFY handler (0x6ceca0) only
+/// prints YOU_LOOT_MONEY or LOOT_MONEY_SPLIT; the clink comes from the
+/// PLAYER_FIELD_COINAGE update that follows (see applyPlayerStatFields), and
+/// it is LOOTWINDOWCOINSOUND whatever the amount.
 void InventoryHandler::announceLootMoney(uint64_t lootGuid, uint32_t amount) {
     if (amount == 0) return;
     auto it = localLootState_.find(lootGuid);
@@ -246,12 +276,6 @@ void InventoryHandler::announceLootMoney(uint64_t lootGuid, uint32_t amount) {
         it->second.moneyTaken = true;
     }
     owner_.addSystemChatMessage("Looted: " + formatCopperAmount(amount));
-    if (auto* ac = owner_.services().audioCoordinator) {
-        if (auto* sfx = ac->getUiSoundManager()) {
-            if (amount >= 10000) sfx->playLootCoinLarge();
-            else sfx->playLootCoinSmall();
-        }
-    }
     if (lootGuid != 0) recentLootMoneyAnnounceCooldowns_[lootGuid] = 1.5f;
 }
 
@@ -509,10 +533,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         std::string msg = "Received item: " + link;
         if (count > 1) msg += " x" + std::to_string(count);
         owner_.addSystemChatMessage(msg);
-        if (auto* ac = owner_.services().audioCoordinator) {
-            if (auto* sfx = ac->getUiSoundManager())
-                sfx->playLootItem();
-        }
+        playItemPushSound(owner_, info->displayInfoId);
         if (owner_.addonEventCallbackRef()) {
             fireBagUpdates();
             // ITEM_PUSH(bagSlot, icon), which is what the bag button's flash
@@ -553,11 +574,9 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                     LOG_WARNING("Successful sale had no pending buyback entry: itemGuid=0x",
                                 std::hex, itemGuid, std::dec);
                 }
-                // The stock sale clink is the loot coin sound, not a drop.
-                if (auto* ac = owner_.services().audioCoordinator) {
-                    if (auto* sfx = ac->getUiSoundManager())
-                        if (!sfx->playByName("LOOTWINDOWCOINSOUND")) sfx->playDropOnGround();
-                }
+                // No sound here: the stock SMSG_SELL_ITEM handler plays none.
+                // The sale's clink is LOOTWINDOWCOINSOUND from the coinage
+                // update the server sends with it (applyPlayerStatFields).
                 if (owner_.addonEventCallbackRef()) {
                     fireBagUpdates();
                     owner_.addonEventCallbackRef()("PLAYER_MONEY", {});
@@ -1131,6 +1150,12 @@ void InventoryHandler::lootItem(uint8_t slotIndex, bool confirmed) {
     }
 
     pendingLootActive_ = false;
+    for (const auto& item : currentLoot_.items) {
+        if (item.slotIndex == slotIndex && !item.looted) {
+            playLootSlotPickupSound(owner_, item);
+            break;
+        }
+    }
     auto packet = AutostoreLootItemPacket::build(slotIndex);
     owner_.getSocket()->send(packet);
 }
@@ -1273,6 +1298,7 @@ void InventoryHandler::handleLootResponse(network::Packet& packet) {
                      " item=", item.itemId, " count=", item.count,
                      " fromGuid=0x", std::hex, currentLoot_.lootGuid, std::dec,
                      " gameObject=", autoStoreGameObjectLoot);
+            playLootSlotPickupSound(owner_, item);
             auto pkt = AutostoreLootItemPacket::build(item.slotIndex);
             owner_.getSocket()->send(pkt);
         }
@@ -4620,9 +4646,9 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
                 std::string msg = "Received item: " + link;
                 if (it->count > 1) msg += " x" + std::to_string(it->count);
                 owner_.addSystemChatMessage(msg);
-                if (auto* ac = owner_.services().audioCoordinator) {
-                    if (auto* sfx = ac->getUiSoundManager()) sfx->playLootItem();
-                }
+                // The stock client also defers the whole push, sound included,
+                // until the item cache answers (0x523900 requeues itself).
+                playItemPushSound(owner_, data.displayInfoId);
                 // ...and the event, which this path had never fired. An item
                 // whose name was not cached when it arrived is exactly the
                 // first one of its kind the player picks up, so the interface

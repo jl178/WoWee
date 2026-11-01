@@ -18,9 +18,6 @@
 #include "game/pet_action.hpp"
 #include "addons/lua_services.hpp"
 #include "audio/audio_coordinator.hpp"
-#include "audio/audio_engine.hpp"
-#include "audio/sound_data.hpp"
-#include "audio/ui_sound_manager.hpp"
 #include <cstdlib>
 #include <SDL3/SDL_keyboard.h>
 
@@ -35,19 +32,21 @@ namespace {
 void playItemFoley(lua_State* L, uint32_t itemId, uint32_t displayId, bool pickup) {
     auto* svc = getLuaServices(L);
     auto* ac = svc ? svc->audioCoordinator : nullptr;
-    const auto* data = ac ? ac->getSoundData() : nullptr;
-    if (!data) return;
+    if (!ac) return;
     if (displayId == 0 && itemId != 0) {
         if (auto* gh = getGameHandler(L)) {
             if (const auto* info = gh->getItemInfo(itemId)) displayId = info->displayInfoId;
         }
     }
-    const audio::SoundEntry* entry = data->sound(data->itemFoleySound(displayId, pickup));
-    if (!entry || entry->files.empty()) return;
-    float volume = entry->volume;
-    if (auto* ui = ac->getUiSoundManager()) volume *= ui->getVolumeScale();
-    const auto& file = entry->files[static_cast<size_t>(std::rand()) % entry->files.size()];
-    audio::AudioEngine::instance().playSound2D(file, volume, 1.0f, audio::SoundBus::Interface);
+    ac->playItemFoley(displayId, pickup);
+}
+
+/// LOOTWINDOWCOINSOUND. The stock client plays it when money goes onto the
+/// cursor (PickupPlayerMoney and the trade, mail and guild bank pickups) and
+/// again when the cursor lets go of it (ClearCursor with money held).
+void playCoinSound(lua_State* L) {
+    auto* svc = getLuaServices(L);
+    if (auto* ac = svc ? svc->audioCoordinator : nullptr) ac->playCoinSound();
 }
 } // namespace
 
@@ -173,6 +172,9 @@ static void setCursorType(lua_State* L, CursorType type) {
     if (type != CursorType::GUILDBANK) s_cursorSplit = 0;
     const bool wasCarrying = (s_cursorType != CursorType::NONE);
     const bool nowCarrying = (type != CursorType::NONE);
+    // Money onto the cursor and money off it both clink, as the stock
+    // client's money pickups and its ClearCursor do.
+    if (s_cursorType == CursorType::MONEY || type == CursorType::MONEY) playCoinSound(L);
     s_cursorType = type;
     lua_getfield(L, LUA_REGISTRYINDEX, "wowee_lua_engine");
     auto* engine = static_cast<LuaEngine*>(lua_touserdata(L, -1));

@@ -336,6 +336,18 @@ uint32_t SoundData::itemFoleySound(uint32_t itemDisplayId, bool pickup) const {
     return pickup ? it->second.first : it->second.second;
 }
 
+const SoundEntry* SoundData::itemFoleyEntry(uint32_t itemDisplayId, bool pickup) const {
+    const SoundEntry* entry = sound(itemFoleySound(itemDisplayId, pickup));
+    return entry && !entry->files.empty() ? entry : nullptr;
+}
+
+const SoundEntry* SoundData::coinSound() const {
+    // 3.3.5 has two rows with this name (120 and 895), both LootCoinSmall.wav
+    // at volume 0.7, so which one the name resolves to does not matter.
+    const SoundEntry* entry = soundByName("LOOTWINDOWCOINSOUND");
+    return entry && !entry->files.empty() ? entry : nullptr;
+}
+
 const SoundEntry* SoundData::sound(uint32_t id) const {
     if (id == 0 || !soundEntries_) return nullptr;
     auto cached = soundCache_.find(id);
