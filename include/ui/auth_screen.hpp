@@ -232,6 +232,14 @@ private:
     // The stock login: the Northrend glue scene through its own camera and
     // the Wrath logo, as AccountLogin.xml lays them out.
     std::unique_ptr<rendering::CharacterPreview> glueScene_;
+    /// A scene released this frame, kept alive until the next one. The scene
+    /// is released from the UI pass, while the frame's command buffer is
+    /// still recording - and Renderer::beginFrame has already recorded the
+    /// scene's composite pass into it. Destroying it there invalidated that
+    /// command buffer, and submitting it crashed the driver in endFrame.
+    std::unique_ptr<rendering::CharacterPreview> retiredGlueScene_;
+    int retiredGlueSceneFrame_ = 0;  ///< ImGui frame it was retired on
+    void dropRetiredGlueScene();
     bool glueSceneTried_ = false;
     /// How long the window has been a different size from the scene's target;
     /// the scene is rebuilt at the new size once that settles.
