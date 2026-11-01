@@ -65,6 +65,10 @@ public:
 
     void update(float deltaTime);
     void render();
+
+    /// Show a glue scene on its own, through its own camera, with no
+    /// character: the login screen's UI_MainMenu_Northrend.m2.
+    bool loadGlueScene(const std::string& scenePath);
     void rotate(float yawDelta);
     void zoom(float wheelDelta);
     void resetView();
@@ -169,6 +173,7 @@ private:
     int backdropRace_ = -1;   // race whose glue scene is currently loaded (-1 = none)
     uint32_t instanceId_ = 0;
     bool modelLoaded_ = false;
+    bool sceneOnly_ = false;  ///< a glue scene with no character (loadGlueScene)
     bool compositeRequested_ = false;
     bool compositeRendered_ = false;  // True after first successful compositePass
     float modelYaw_ = 90.0f;

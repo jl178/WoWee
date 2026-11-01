@@ -264,7 +264,7 @@ void main() {
     // in each other reads as a seam down the middle of the crown rather than
     // as two trees. Enough to break the copy, not enough to be seen as a
     // difference in light.
-    if (isFoliage) {
+    if (false) {  // the stock client tints no tree; kept for reference
         float hash = fract(sin(dot(InstanceOrigin.xy, vec2(127.1, 311.7))) * 43758.5453);
         float hueShiftR = 1.0 + (hash - 0.5) * 0.10;       // ±5% red
         float hueShiftB = 1.0 + (fract(hash * 7.13) - 0.5) * 0.10; // ±5% blue
@@ -346,11 +346,11 @@ void main() {
         shadow = rtShadow(rt, shadow);
         vec3 ambientTerm = rtAmbient(rt, ambientColor.rgb);
         if (isFoliage) {
-            ambientTerm *= 0.82 + 0.30 * clamp(norm.z, 0.0, 1.0);
+            ambientTerm *= 0.82 + 0.18 * clamp(norm.z, 0.0, 1.0);  // never above the area's ambient
         }
         result = ambientTerm * texColor.rgb
-               + shadow * (diff * lightColor.rgb * texColor.rgb + spec * lightColor.rgb)
-               + sss;
+               + shadow * (diff * lightColor.rgb * texColor.rgb + spec * lightColor.rgb);
+        // No leaf glow (sss unused): stock foliage is lit like any other M2.
 
         if (interiorDarken > 0.0) {
             result *= mix(1.0, 0.5, interiorDarken);

@@ -1933,12 +1933,8 @@ void EntityController::updateItemOnValuesUpdate(const UpdateBlock& block,
         // Slot zero means every button, which is what the interface reads it
         // as. Only sent when something on the bar is an item, so a bag change
         // does not rebuild a hundred and twenty buttons for nothing.
-        for (const auto& action : owner_.getActionBar()) {
-            if (action.type == ActionBarSlot::ITEM && action.id != 0) {
-                pendingEvents_.emit("ACTIONBAR_SLOT_CHANGED", {"0"});
-                break;
-            }
-        }
+        // ACTIONBAR_SLOT_CHANGED for item counts is sent by
+        // InventoryHandler::fireBagUpdates, which every rebuild reaches.
     }
     if (durabilityChanged) {
         // The armour indicator is DurabilityFrame, which listens for

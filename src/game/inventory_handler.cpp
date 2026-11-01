@@ -2419,6 +2419,15 @@ void InventoryHandler::fireBagUpdates() {
     // The character sheet redraws from this one rather than from BAG_UPDATE, so
     // both go out together - equipping something changes a bag and a slot.
     fire("UNIT_INVENTORY_CHANGED", {"player"});
+    // Action buttons redraw their item counts only on ACTIONBAR_SLOT_CHANGED.
+    // A stack shrinking arrives as a CREATE block for the existing item and
+    // comes through here, not through the values path that used to send it.
+    for (const auto& a : owner_.getActionBar()) {
+        if (a.type == ActionBarSlot::ITEM && a.id != 0) {
+            fire("ACTIONBAR_SLOT_CHANGED", {"0"});
+            break;
+        }
+    }
     // An open trade skill window is looking at the bags too, and it does not
     // watch them: TradeSkillFrame_OnLoad registers TRADE_SKILL_UPDATE,
     // TRADE_SKILL_FILTER_UPDATE, UNIT_PORTRAIT_UPDATE and
@@ -4425,7 +4434,7 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
         : ItemQueryResponseParser::parse(packet, data);
     if (!parsed) {
         // Extract entry from raw packet so we can clear the pending query even on parse failure.
-        // Without this, the entry stays in pendingItemQueries_ forever, blocking retries.
+        // Without this, the entry stays in pendingItemQueries_ enhanced, blocking retries.
         if (packet.getSize() >= 4) {
             packet.setReadPos(0);
             // High bit indicates a negative (invalid/missing) item entry response;

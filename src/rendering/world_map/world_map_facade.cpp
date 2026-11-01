@@ -159,6 +159,7 @@ struct WorldMapFacade::Impl {
     // Where a host frame wants the map drawn, in pixels from the top-left.
     // Lives here rather than on the facade because the drawing does.
     bool  hasFrameRect = false;
+    double lastMapActionTime = -1.0;  ///< ImGui time of the last click or zoom acted on
     float frameRectX = 0.0f, frameRectY = 0.0f;
     float frameRectW = 0.0f, frameRectH = 0.0f;
     std::function<void()> taxiCloseHandler;
@@ -555,11 +556,13 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
     if (d.taxiMode && inputResult.action != InputAction::CLOSE) {
         inputResult.action = InputAction::NONE;
     }
-    // With FrameXML hosting the map, its WorldMapButton handles clicks and
-    // zoom through the Lua map API, which now redraws. Handling them here as
-    // well would act twice on one click (zone straight to world).
-    if (d.hasFrameRect && inputResult.action != InputAction::CLOSE) {
-        inputResult.action = InputAction::NONE;
+    // One click, one action. The native path here and FrameXML's
+    // WorldMapButton (through the Lua map API) both see a click when FrameXML
+    // hosts the map; whichever acts first wins and the other skips that click.
+    if (inputResult.action != InputAction::NONE && inputResult.action != InputAction::CLOSE) {
+        const double now = ImGui::GetTime();
+        if (now - d.lastMapActionTime < 0.25) inputResult.action = InputAction::NONE;
+        else d.lastMapActionTime = now;
     }
 
     switch (inputResult.action) {
@@ -773,12 +776,16 @@ std::string WorldMapFacade::zoneNameAtMapPoint(float u, float v) const {
 bool WorldMapFacade::clickMapPoint(float u, float v) {
     const int idx = zoneAtMapPoint(u, v);
     if (idx < 0) return false;
+    if (ImGui::GetTime() - impl_->lastMapActionTime < 0.25) return true;  // already handled natively
+    impl_->lastMapActionTime = ImGui::GetTime();
     impl_->viewState.zoomIn(idx, /*playerZoneIdx=*/-1);
     impl_->showCurrentView();
     return true;
 }
 
 void WorldMapFacade::zoomOutOneLevel() {
+    if (ImGui::GetTime() - impl_->lastMapActionTime < 0.25) return;  // already handled natively
+    impl_->lastMapActionTime = ImGui::GetTime();
     if (impl_->viewState.zoomOut().changed) impl_->showCurrentView();
 }
 

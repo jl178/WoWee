@@ -5,6 +5,7 @@
 // battleground score HUD, combat log, threat window, BG scoreboard.
 // ============================================================
 #include "ui/combat_ui.hpp"
+#include "ui/interface_fonts.hpp"
 #include "addons/lua_api_registrations.hpp"
 #include "ui/buff_bar_layout.hpp"
 #include "ui/framexml_takeover.hpp"
@@ -102,8 +103,12 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler) {
     if (camera) viewProj = camera->getProjectionMatrix() * camera->getViewMatrix();
 
     ImDrawList* drawList = ImGui::GetForegroundDrawList();
-    ImFont* font = ImGui::GetFont();
-    const float baseFontSize = ImGui::GetFontSize();
+    // DAMAGE_TEXT_FONT at COMBAT_TEXT_HEIGHT 25, in the stock UI's 768-tall
+    // units (Blizzard_CombatText.lua); this drew the 15px interface font.
+    ImFont* font = interfaceFace("frizqt__.ttf");
+    if (!font) font = ImGui::GetFont();
+    const float uiPx = screenH / 768.0f;
+    const float baseFontSize = 25.0f * uiPx;
 
     // HUD fallback: entries without world-space anchor use classic screen-position layout.
     // We still need an ImGui window for those.
@@ -360,7 +365,15 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler) {
         // --- Rendering style ---
         bool isCrit = (entry.type == game::CombatTextEntry::CRIT_DAMAGE ||
                        entry.type == game::CombatTextEntry::CRIT_HEAL);
-        float renderFontSize = isCrit ? baseFontSize * 1.35f : baseFontSize;
+        float renderFontSize = baseFontSize;
+        if (isCrit) {  // the stock crit pop: 30 -> 60 in 0.05s, back to 30 by 0.2s
+            constexpr float kMin = 30.0f, kMax = 60.0f, kUp = 0.05f, kDown = 0.2f;
+            const float t = entry.age;
+            float h = kMin;
+            if (t <= kUp) h = kMin + (kMax - kMin) * (t / kUp);
+            else if (t <= kDown) h = kMax - (kMax - kMin) * ((t - kUp) / (kDown - kUp));
+            renderFontSize = h * uiPx;
+        }
 
         ImU32 shadowCol = IM_COL32(0, 0, 0, static_cast<int>(alpha * 180));
         ImU32 textCol   = ImGui::ColorConvertFloat4ToU32(color);
