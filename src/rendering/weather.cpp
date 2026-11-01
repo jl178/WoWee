@@ -58,10 +58,19 @@ constexpr float kStormFallSpeed = 32.0f;
 // Snow: flakes about a quarter yard across, drifting down at a walk.
 constexpr float kSnowHalfSize   = 0.11f;
 constexpr float kSnowFallSpeed  = 2.4f;
-// Splashes: only where a drop lands this close, for this long.
-constexpr float kSplashRadius   = 22.0f;
-constexpr float kSplashLife     = 0.30f;
-constexpr float kSplashHalfSize = 0.32f;
+// Splashes: only where a drop lands this close. The rest is the stock rain's
+// (MapWeather.cpp: splash spawn 0x785640, draw 0x7891b0 / shader 0x78a030):
+// a camera-facing triangle 1/12 yd either side of the impact and 1/6 yd tall
+// (0xa37f38, 0xa33b7c), living a quarter second (0x9e8ce4) through the
+// sheet's four columns at age * 4 * 3.99 (0x9e8d2c, 0xa3ebd0), its row picked
+// by how steeply the eye looks down on it, and no new ones while the camera's
+// averaged speed squared is over 2 (0xa4040c).
+constexpr float kSplashRadius     = 22.0f;
+constexpr float kSplashLife       = 0.25f;
+constexpr float kSplashHalfWidth  = 1.0f / 12.0f;
+constexpr float kSplashHeight     = 1.0f / 6.0f;
+constexpr float kSplashApexV      = 0.04296875f;   // 0xa3ebcc: apex v in the cell's 0.25
+constexpr float kSplashMaxSpeedSq = 2.0f;
 
 const Volume& volumeFor(Weather::Type type) {
     return type == Weather::Type::SNOW ? kSnowVolume : kRainVolume;
@@ -327,9 +336,16 @@ void Weather::update(const Camera& camera, float deltaTime) {
     if (haveLastCamera_ && glm::length(cameraPos - lastCameraPos_) > vol.radius * 2.0f) {
         for (auto& p : particles) spawnParticle(p, cameraPos, true);
         splashes_.clear();
+    } else if (haveLastCamera_ && deltaTime > 0.0f) {
+        // The camera's velocity, averaged over a fraction of a second as the
+        // client averages its recent moves: splashes only when nearly still.
+        const glm::vec3 v = (cameraPos - lastCameraPos_) / deltaTime;
+        const float k = std::min(1.0f, deltaTime / 0.25f);
+        cameraVelocity_ += (v - cameraVelocity_) * k;
     }
     lastCameraPos_ = cameraPos;
     haveLastCamera_ = true;
+    const bool splashesAllowed = glm::dot(cameraVelocity_, cameraVelocity_) <= kSplashMaxSpeedSq;
 
     // Storm gusts.
     const float gust = particlesType_ == Type::STORM ? 1.0f + 0.35f * std::sin(time_ * 0.7f) : 1.0f;
@@ -360,11 +376,10 @@ void Weather::update(const Camera& camera, float deltaTime) {
         }
 
         if (p.position.z <= p.groundZ || p.position.z < cameraPos.z - vol.below) {
-            if (p.lands && p.position.z <= p.groundZ &&
+            if (p.lands && splashesAllowed && p.position.z <= p.groundZ &&
                 static_cast<int>(splashes_.size()) < MAX_SPLASHES) {
                 splashes_.push_back({.position = glm::vec3(p.position.x, p.position.y, p.groundZ),
-                                     .age = 0.0f,
-                                     .variant = static_cast<uint8_t>(weatherRng()() % 4u)});
+                                     .age = 0.0f});
             }
             spawnParticle(p, cameraPos, false);
         }
@@ -429,22 +444,29 @@ void Weather::buildVertices(const Camera& camera) {
     }
     particleVertexCount_ = static_cast<uint32_t>(vertices_.size());
 
-    // Splashes: standing on the ground, turned to the eye about the vertical.
+    // Splashes, as the client draws them: one triangle facing the camera,
+    // base on the impact and apex above it. Looking down on one, it slides
+    // down the screen by half its height and up off the ground by a twelfth
+    // of a yard, so it stays centred on the impact. The sheet's columns are
+    // the four frames; its rows are the view, from straight down (row 0) to
+    // level (row 3). No fade: a splash shows whole until it ends.
     if (!snow && textureReady_[RAIN_SPLASH]) {
+        const glm::vec3 right = camRight * kSplashHalfWidth;
+        const glm::vec3 up = camUp * kSplashHeight;
         for (const auto& s : splashes_) {
-            glm::vec2 toCam(cameraPos.x - s.position.x, cameraPos.y - s.position.y);
-            const float len = glm::length(toCam);
+            const glm::vec3 fromCam = s.position - cameraPos;
+            const float len = glm::length(fromCam);
             if (len < 1e-3f) continue;
-            toCam /= len;
-            const glm::vec3 right(-toCam.y * kSplashHalfSize, toCam.x * kSplashHalfSize, 0.0f);
-            const glm::vec3 up(0.0f, 0.0f, kSplashHalfSize * 2.0f);
-            const glm::vec3 base = s.position + glm::vec3(0.0f, 0.0f, 0.02f);
-            // Four frames across, four kinds of splash down.
-            const int frame = std::min(3, static_cast<int>(s.age / kSplashLife * 4.0f));
-            const glm::vec2 uv0(frame * 0.25f, s.variant * 0.25f);
-            const glm::vec2 uv1 = uv0 + glm::vec2(0.25f);
-            const float alpha = 1.0f - glm::smoothstep(0.6f, 1.0f, s.age / kSplashLife);
-            quad(base - right + up, base + right + up, base + right, base - right, uv0, uv1, alpha);
+            const float down = std::max(0.0f, -fromCam.z / len);
+            const glm::vec3 base = s.position - up * (0.5f * down) +
+                                   glm::vec3(0.0f, 0.0f, down * kSplashHalfWidth + 0.02f);
+            const int frame = std::min(3, static_cast<int>(s.age * 4.0f * 3.99f));
+            const int row = std::min(3, static_cast<int>((1.0f - down) * 3.99f));
+            const float u0 = frame * 0.25f;
+            const float v0 = row * 0.25f;
+            vertices_.push_back({base - right, {u0, v0 + 0.25f}, 1.0f});
+            vertices_.push_back({base + up, {u0 + 0.125f, v0 + kSplashApexV}, 1.0f});
+            vertices_.push_back({base + right, {u0 + 0.25f, v0 + 0.25f}, 1.0f});
         }
     }
     splashVertexCount_ = static_cast<uint32_t>(vertices_.size()) - particleVertexCount_;

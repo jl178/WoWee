@@ -25,7 +25,8 @@ class VkContext;
  *
  * - Rain: textured streaks (Textures\Weather\RainDrop01.blp) stretched along
  *   the direction they fall, around the camera, with splashes
- *   (RainDropSplash01.blp, a 4x4 sheet: four kinds of splash in four frames)
+ *   (RainDropSplash01.blp, a 4x4 sheet: four frames across, four view
+ *   angles down)
  *   where they land near the camera.
  * - Snow: camera-facing flakes (SnowFlake01.blp) drifting down.
  * - How many falls by the server's weather intensity, times the Weather
@@ -136,7 +137,6 @@ private:
     struct Splash {
         glm::vec3 position;
         float age = 0.0f;
-        uint8_t variant = 0;       ///< Row of the splash sheet
     };
     struct Vertex {
         glm::vec3 pos;
@@ -183,6 +183,7 @@ private:
     Type builtType_ = Type::NONE;
     glm::vec3 lastCameraPos_{0.0f};
     bool haveLastCamera_ = false;
+    glm::vec3 cameraVelocity_{0.0f};   ///< Averaged, yards a second: gates splashes
     GroundQuery groundQuery_;
 
     // Weather parameters

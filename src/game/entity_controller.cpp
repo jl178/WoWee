@@ -1115,6 +1115,9 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
                 if (was != now) {
                     pendingEvents_.emit(now ? "PLAYER_REGEN_DISABLED"
                                             : "PLAYER_REGEN_ENABLED", {});
+                    // Out of combat is off every list: let the player frame's
+                    // threat glow look again even if a list's clear was lost.
+                    if (!now) pendingEvents_.emit("UNIT_THREAT_SITUATION_UPDATE", {"player"});
                 }
             }
             // Detect stun state change on local player

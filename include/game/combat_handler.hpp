@@ -62,6 +62,10 @@ public:
         auto it = threatLists_.find(unitGuid);
         return (it != threatLists_.end()) ? &it->second : nullptr;
     }
+    /// Every threat list the server has sent, by mob.
+    [[nodiscard]] const std::unordered_map<uint64_t, std::vector<ThreatEntry>>& getThreatLists() const {
+        return threatLists_;
+    }
 
     // Hostile attacker tracking
     [[nodiscard]] bool isHostileAttacker(uint64_t guid) const { return hostileAttackers_.count(guid) > 0; }

@@ -472,7 +472,6 @@ static int lua_UnitThreatSituation(lua_State* L) {
     toLowerInPlace(uidStr);
     uint64_t playerUnitGuid = resolveUnitGuid(gh, uidStr);
     if (playerUnitGuid == 0) { return luaReturnZero(L); }
-    // If no mob specified, check general combat threat against current target
     uint64_t mobGuid = 0;
     if (mobUid && *mobUid) {
         std::string mStr(mobUid);
@@ -484,24 +483,47 @@ static int lua_UnitThreatSituation(lua_State* L) {
     // from a misread packet and was never worth consulting - SMSG_THREAT_UPDATE
     // was read as though it carried the second guid that only
     // SMSG_HIGHEST_THREAT_UPDATE has.
+    // No mob: the unit's standing on every list it is on, the highest of them,
+    // and nil when it is on none - what the stock function (0x613a60) answers
+    // from its per-unit table. This used to say 1 whenever the player was "in
+    // combat" by the client's own guess (auto-attack or a remembered
+    // attacker), so PlayerFrameFlash, which asks exactly this, glowed the
+    // yellow of status 1 with no mob holding the player on any list - and
+    // never the red of actually tanking.
+    if (mobGuid == 0) {
+        // Whoever is on a list is in combat: with the server's combat flag
+        // down, any list still naming this unit is one whose clear was lost.
+        auto unitEnt = gh->getEntityManager().getEntity(playerUnitGuid);
+        if (!unitEnt ||
+            (unitEnt->getField(game::fieldIndex(game::UF::UNIT_FIELD_FLAGS)) & 0x00080000) == 0)
+            return 0;   // nil
+        int best = -1;
+        if (const auto* lists = gh->getThreatLists()) {
+            for (const auto& [listMob, list] : *lists) {
+                (void)list;
+                // A dead or vanished mob's list no longer counts, whether or
+                // not its clear has arrived.
+                auto mobEnt = gh->getEntityManager().getEntity(listMob);
+                if (!mobEnt || !mobEnt->isUnit() ||
+                    static_cast<const game::Unit*>(mobEnt.get())->getHealth() == 0) continue;
+                ThreatStanding s;
+                if (threatStandingFor(gh, playerUnitGuid, listMob, s) && s.onList)
+                    best = std::max(best, s.status);
+            }
+        }
+        if (best < 0) return 0;   // on no list: nil
+        lua_pushnumber(L, best);
+        return 1;
+    }
     ThreatStanding standing;
     if (threatStandingFor(gh, playerUnitGuid, mobGuid, standing)) {
         lua_pushnumber(L, standing.status);
         return 1;
     }
     // Approximate threat: check if the mob is targeting this unit
-    if (mobGuid != 0) {
-        auto mobEntity = gh->getEntityManager().getEntity(mobGuid);
-        if (mobEntity) {
-            if (game::unitTargetGuid(*mobEntity) == playerUnitGuid) {
-                lua_pushnumber(L, 3); // securely tanking
-                return 1;
-            }
-        }
-    }
-    // Check if player is in combat (basic threat indicator)
-    if (playerUnitGuid == gh->getPlayerGuid() && gh->isInCombat()) {
-        lua_pushnumber(L, 1); // in combat but not tanking
+    auto mobEntity = gh->getEntityManager().getEntity(mobGuid);
+    if (mobEntity && game::unitTargetGuid(*mobEntity) == playerUnitGuid) {
+        lua_pushnumber(L, 3); // securely tanking
         return 1;
     }
     lua_pushnumber(L, 0);
@@ -1900,22 +1922,21 @@ static int lua_UnitAffectingCombat(lua_State* L) {
     if (!gh) { return luaReturnFalse(L); }
     std::string uidStr(uid);
     toLowerInPlace(uidStr);
-    if (uidStr == "player") {
-        lua_pushboolean(L, gh->isInCombat());
-    } else {
-        // Check UNIT_FLAG_IN_COMBAT (0x00080000) in UNIT_FIELD_FLAGS
-        uint64_t guid = resolveUnitGuid(gh, uidStr);
-        bool inCombat = false;
-        if (guid != 0) {
-            auto entity = gh->getEntityManager().getEntity(guid);
-            if (entity) {
-                uint32_t flags = entity->getField(
-                    game::fieldIndex(game::UF::UNIT_FIELD_FLAGS));
-                inCombat = (flags & 0x00080000) != 0; // UNIT_FLAG_IN_COMBAT
-            }
+    // UNIT_FLAG_IN_COMBAT (0x00080000) in UNIT_FIELD_FLAGS, for the player as
+    // for anyone: the stock function (0x60f860) reads only that bit. The
+    // player used to answer from the client's own guess (auto-attack or a
+    // remembered attacker) instead, which outlives the server's flag.
+    uint64_t guid = resolveUnitGuid(gh, uidStr);
+    bool inCombat = false;
+    if (guid != 0) {
+        auto entity = gh->getEntityManager().getEntity(guid);
+        if (entity) {
+            uint32_t flags = entity->getField(
+                game::fieldIndex(game::UF::UNIT_FIELD_FLAGS));
+            inCombat = (flags & 0x00080000) != 0;
         }
-        lua_pushboolean(L, inCombat);
     }
+    lua_pushboolean(L, inCombat);
     return 1;
 }
 
