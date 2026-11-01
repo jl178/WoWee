@@ -483,6 +483,7 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
             group.fogIndices[2] = read<uint8_t>(groupData, mogpOffset);
             group.fogIndices[3] = read<uint8_t>(groupData, mogpOffset);
             group.liquidType = read<uint32_t>(groupData, mogpOffset);
+            group.wmoGroupId = read<uint32_t>(groupData, mogpOffset);
             // Skip to end of 68-byte header
             mogpOffset = offset + 68;
 

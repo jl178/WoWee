@@ -1437,7 +1437,10 @@ void WidgetTree::collectDrawOrder() {
             !(w.isCooldown && w.cooldownDuration > 0.0) &&
             !(w.isSimpleHtml && !w.text.empty()) &&
             !(w.isMessageFrame && !w.messages.empty()) &&
-            !(w.isTooltip && !w.tooltipLines.empty())) continue;
+            !(w.isTooltip && !w.tooltipLines.empty()) &&
+            // The world map's quest areas, which the frame paints itself
+            // (WidgetRenderer::drawQuestBlobs) the way CGQuestPOIFrame does.
+            w.name != "WorldMapBlobFrame") continue;
         if (w.rectW <= 0.0f || w.rectH <= 0.0f) continue;
         // A texture with nothing to show is dropped - unless it is the colour
         // picker's, whose art is generated rather than loaded.

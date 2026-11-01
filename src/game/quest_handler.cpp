@@ -2450,29 +2450,47 @@ void QuestHandler::handleQuestPoiQueryResponse(network::Packet& packet) {
             if (q.questId == questId) { questTitle = q.title; break; }
         }
 
+        // The whole quest as the client keeps it (0x005E7370), every map
+        // included - the world map asks about whichever map it is showing,
+        // which is often not the one the player stands on.
+        QuestPoiSet poiSet;
+        poiSet.questId = questId;
+
         for (uint32_t pi = 0; pi < poiCount; ++pi) {
             if (!packet.hasRemaining(32)) return;
-            packet.readUInt32();  // poiId
+            QuestPoiArea area;
+            area.poiId = static_cast<int32_t>(packet.readUInt32());
             const int32_t objIndex = static_cast<int32_t>(packet.readUInt32());
             const uint32_t mapId    = packet.readUInt32();
-            packet.readUInt32();  // areaId
-            packet.readUInt32();  // floorId
-            packet.readUInt32();  // unk1
-            packet.readUInt32();  // unk2
+            area.objectiveIndex = objIndex;
+            area.mapId = mapId;
+            area.worldMapAreaId = packet.readUInt32();
+            area.floor = packet.readUInt32();
+            area.priority = packet.readUInt32();   // unk3
+            area.flags = packet.readUInt32();      // unk4
             const uint32_t pointCount = packet.readUInt32();
-            if (pointCount == 0) continue;
-            if (packet.getRemainingSize() < pointCount * 8) return;
+            if (packet.getRemainingSize() < static_cast<size_t>(pointCount) * 8) return;
             float sumX = 0.0f, sumY = 0.0f;
+            int64_t isumX = 0, isumY = 0;
             std::vector<std::pair<float, float>> outline;
             outline.reserve(pointCount);
+            area.points.reserve(pointCount);
             for (uint32_t pt = 0; pt < pointCount; ++pt) {
                 const int32_t px = static_cast<int32_t>(packet.readUInt32());
                 const int32_t py = static_cast<int32_t>(packet.readUInt32());
                 sumX += static_cast<float>(px);
                 sumY += static_cast<float>(py);
+                isumX += px;
+                isumY += py;
+                area.points.emplace_back(px, py);
                 // Canonical, the same swap the centroid below makes.
                 outline.emplace_back(static_cast<float>(py), static_cast<float>(px));
             }
+            // Integer mean, and only divided when there is more than one point.
+            area.centerX = static_cast<int32_t>(pointCount > 1 ? isumX / static_cast<int64_t>(pointCount) : isumX);
+            area.centerY = static_cast<int32_t>(pointCount > 1 ? isumY / static_cast<int64_t>(pointCount) : isumY);
+            poiSet.areas.push_back(area);
+            if (pointCount == 0) continue;
             // Skip POIs for maps other than the player's current map.
             if (mapId != owner_.currentMapIdRef()) continue;
             GossipPoi poi;
@@ -2493,6 +2511,17 @@ void QuestHandler::handleQuestPoiQueryResponse(network::Packet& packet) {
                       " centroid=(", poi.x, ",", poi.y, ") title=", poi.name);
             if (gossipPois_.size() >= 200) gossipPois_.erase(gossipPois_.begin());
             gossipPois_.push_back(std::move(poi));
+        }
+        // One entry per quest, replaced when it is sent again. The client
+        // holds 25; a quest log holds 25 too, so the oldest goes only when a
+        // twenty-sixth quest arrives.
+        auto existing = std::find_if(questPoiSets_.begin(), questPoiSets_.end(),
+            [questId](const QuestPoiSet& s) { return s.questId == questId; });
+        if (existing != questPoiSets_.end()) {
+            *existing = std::move(poiSet);
+        } else {
+            if (questPoiSets_.size() >= 25) questPoiSets_.erase(questPoiSets_.begin());
+            questPoiSets_.push_back(std::move(poiSet));
         }
     }
     // The tracker draws its POI marks from this and had no way to know the

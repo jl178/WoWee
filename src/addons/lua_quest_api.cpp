@@ -9,6 +9,7 @@
 #include "game/packed_time.hpp"
 #include "game/quest_progress.hpp"
 #include "game/quest_objectives.hpp"
+#include "addons/world_map_api.hpp"
 #include "ui/chat/chat_utils.hpp"
 #include "core/logger.hpp"
 
@@ -870,7 +871,7 @@ static std::vector<uint32_t> questsWithPois(game::GameHandler* gh) {
 /// loop but an error, so the tracker's map-quest table was never built and the
 /// handler around it died on the way. The count it needs was already sitting
 /// in the same list QuestPOIGetQuestIDByVisibleIndex indexes.
-static int lua_QuestMapUpdateAllQuests(lua_State* L) {
+static int lua_QuestMapUpdateAllQuests_Legacy(lua_State* L) {
     lua_pushnumber(L, static_cast<lua_Number>(questsWithPois(getGameHandler(L)).size()));
     return 1;
 }
@@ -882,7 +883,7 @@ static int lua_QuestMapUpdateAllQuests(lua_State* L) {
 /// block that builds the map's quest list, and with only one value returned
 /// that gate never opened - so the list was always empty, quietly, with no
 /// error to say why.
-static int lua_QuestPOIGetQuestIDByVisibleIndex(lua_State* L) {
+static int lua_QuestPOIGetQuestIDByVisibleIndex_Legacy(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int index = static_cast<int>(luaL_checknumber(L, 1));
     const auto ids = questsWithPois(gh);
@@ -924,7 +925,7 @@ static int lua_QuestPOIGetQuestIDByVisibleIndex(lua_State* L) {
 /// parchment, which is the same fault GetPlayerMapPosition had. A quest whose
 /// marker is on another map answers no position at all, and the caller's
 /// `if ( posX and posY )` leaves its button where it was.
-static int lua_QuestPOIGetIconInfo(lua_State* L) {
+static int lua_QuestPOIGetIconInfo_Legacy(lua_State* L) {
     auto* gh = getGameHandler(L);
     auto* svc = getLuaServices(L);
     const uint32_t questId = static_cast<uint32_t>(luaL_checknumber(L, 1));
@@ -969,33 +970,629 @@ static int lua_QuestPOIGetIconInfo(lua_State* L) {
     return 4;
 }
 
-/// The markers arrive with the server's own updates, so there is nothing to
-/// refresh on demand - but the map asks before drawing and expects the call to
-/// exist.
-static int lua_QuestPOIUpdateIcons(lua_State* L) { (void)L; return 0; }
+// ── The client's QuestPOI functions, rebuilt from Wow.exe 3.3.5a ───────────
+//
+// The client keeps up to 25 quests' POI blocks (0x00C23B00, 0x30 bytes each)
+// straight from SMSG_QUEST_POI_QUERY_RESPONSE, and these functions read them
+// against whatever the world map is showing:
+//
+//   QuestMapUpdateAllQuests (0x005E63D0 -> 0x005E5A50) works out each quest's
+//     objective mask and whether any of its blocks for those objectives lands
+//     on the map showing, and answers how many do. Nothing on a continent.
+//   QuestPOIUpdateIcons (0x005E5740 -> 0x005E2EB0) picks, for each quest, the
+//     block its icon goes on: the lowest priority, then the nearest to the
+//     player, among the visible blocks for unfinished objectives - or for the
+//     turn-in once every objective is done.
+//   QuestPOIGetIconInfo (0x005E0590) answers that block's centre on the map.
+//   QuestPOIGetQuestIDByVisibleIndex (0x005E5750 -> 0x005E3840) numbers the
+//     visible quests: finished ones first, then watched ones in watch order,
+//     then the rest - the order WorldMapFrame's button numbering assumes.
+//
+// Positions are the blocks' own world coordinates, wire order (north axis
+// first), converted by the map's own function (worldmap::worldToMap).
+namespace {
+
+struct PoiSlot {
+    uint32_t questId = 0;
+    uint32_t mask = 0;         // +0x2C, 0xFFFFFFFF = every objective done
+    bool visible = false;      // +0x28
+    int mapId = 0;             // +0x14
+    int objective = 0;         // +0x18
+    int floor = 0;             // +0x1C
+    int32_t x = 999999;        // +0x20
+    int32_t y = 999999;        // +0x24
+    bool movable = true;       // the chosen area has more than one point
+    bool spread = false;       // an unfinished quest: its icon is spread from the others
+};
+
+std::vector<PoiSlot>& poiSlots() {
+    static std::vector<PoiSlot> slots;
+    return slots;
+}
+
+PoiSlot& poiSlotFor(uint32_t questId) {
+    auto& slots = poiSlots();
+    for (auto& s : slots) {
+        if (s.questId == questId) return s;
+    }
+    slots.push_back({});
+    slots.back().questId = questId;
+    return slots.back();
+}
+
+const game::GameHandler::QuestLogEntry* questInLog(game::GameHandler* gh, uint32_t questId) {
+    if (!gh) return nullptr;
+    for (const auto& q : gh->getQuestLog()) {
+        if (q.questId == questId) return &q;
+    }
+    return nullptr;
+}
+
+/// 0x005E10B0: a quest with nothing to do but hand it in.
+bool questHasNoObjectives(const game::GameHandler::QuestLogEntry& q) {
+    return !q.failed && game::questObjectiveCount(q) == 0;
+}
+
+/// The objective mask, 0x005E2950: a bit for each objective not yet done -
+/// kills and objects 0-3, items 4-9 - and all bits when the quest is complete.
+uint32_t questObjectiveMask(game::GameHandler* gh, uint32_t questId) {
+    const auto* q = questInLog(gh, questId);
+    if (!q || q->failed) return 0;
+    if (q->complete) return 0xFFFFFFFFu;
+    uint32_t mask = 0;
+    for (size_t i = 0; i < q->killObjectives.size(); ++i) {
+        const auto& kill = q->killObjectives[i];
+        if (!game::isQuestObjective(kill.npcOrGoId, kill.required)) continue;
+        uint32_t current = 0;
+        const uint32_t key = static_cast<uint32_t>(std::abs(kill.npcOrGoId));
+        if (auto it = q->killCounts.find(key); it != q->killCounts.end()) current = it->second.first;
+        if (current < kill.required) mask |= 1u << i;
+    }
+    for (size_t i = 0; i < q->itemObjectives.size(); ++i) {
+        const auto& item = q->itemObjectives[i];
+        if (!game::isQuestObjective(static_cast<int32_t>(item.itemId), item.required)) continue;
+        uint32_t current = 0;
+        if (auto it = q->itemCounts.find(item.itemId); it != q->itemCounts.end()) current = it->second;
+        if (current < item.required) mask |= 1u << (4 + i);
+    }
+    // An exploration or event quest still open: bit 16. The client reads the
+    // quest's flags for this; with none here, a quest that is neither done nor
+    // has a count to make is the same thing.
+    if (mask == 0 && game::questObjectiveCount(*q) == 0) mask |= 0x10000u;
+    return mask;
+}
+
+bool poiForObjectives(uint32_t mask, int32_t objectiveIndex) {
+    if (objectiveIndex == -1) return mask == 0xFFFFFFFFu;
+    return mask != 0xFFFFFFFFu && (mask & (1u << (static_cast<uint32_t>(objectiveIndex) & 31u))) != 0;
+}
+
+/// What the map shows, as the QuestPOI functions ask about it.
+struct PoiView {
+    bool valid = false;
+    bool dungeon = false;
+    int dungeonMapId = -1, dungeonMapMap = -1, dungeonFloor = -1;
+    int wmaId = -1, wmaMapId = -1;
+};
+
+PoiView poiView(lua_State* L) {
+    PoiView v;
+    v.dungeonMapId = worldmap::currentDungeonMapId(L);
+    if (worldmap::dungeonMapInfo(L, v.dungeonMapId, v.dungeonMapMap, v.dungeonFloor)) {
+        v.dungeon = true;
+        v.valid = true;
+        return v;
+    }
+    v.wmaId = worldmap::currentWorldMapAreaId(L);
+    v.wmaMapId = worldmap::currentWorldMapAreaMapId(L);
+    v.valid = v.wmaId != -1 && v.wmaMapId != -1;
+    return v;
+}
+
+/// 0x005E0110 / 0x005E0180: a block's centre lands on the map showing.
+bool poiOnMap(lua_State* L, const PoiView& view, const game::QuestPoiArea& a) {
+    float u = 0.0f, v = 0.0f;
+    bool hidden = false;
+    if (view.dungeon) {
+        if (static_cast<int>(a.mapId) != view.dungeonMapMap ||
+            static_cast<int>(a.floor) != view.dungeonFloor) {
+            return false;
+        }
+        const bool placed = worldmap::worldToMap(L, static_cast<float>(a.centerX),
+            static_cast<float>(a.centerY), 0.0f, a.mapId, view.dungeonMapId, u, v, &hidden);
+        return placed && !hidden && std::fabs(u * v) >= 0.001f;
+    }
+    if ((a.flags & 4u) != 0 && static_cast<int>(a.worldMapAreaId) != view.wmaId) return false;
+    if (static_cast<int>(a.mapId) != view.wmaMapId) return false;
+    const bool placed = worldmap::worldToMap(L, static_cast<float>(a.centerX),
+        static_cast<float>(a.centerY), 0.0f, a.mapId, 0, u, v, &hidden);
+    return placed && !hidden && std::fabs(u * v) >= 0.001f;
+}
+
+/// 0x005E5A50.
+int updateAllQuestPois(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    if (!gh || gh->getPlayerGuid() == 0) return 0;
+    const PoiView view = poiView(L);
+    if (!view.valid) return 0;
+    int count = 0;
+    for (const auto& set : gh->getQuestPoiSets()) {
+        PoiSlot& slot = poiSlotFor(set.questId);
+        slot.mask = questObjectiveMask(gh, set.questId);
+        slot.visible = false;
+        for (const auto& a : set.areas) {
+            if (!poiForObjectives(slot.mask, a.objectiveIndex)) continue;
+            if (!poiOnMap(L, view, a)) continue;
+            slot.visible = true;
+            ++count;
+            break;
+        }
+    }
+    return count;
+}
+
+const game::QuestPoiSet* poiSetFor(game::GameHandler* gh, uint32_t questId) {
+    if (!gh) return nullptr;
+    for (const auto& set : gh->getQuestPoiSets()) {
+        if (set.questId == questId) return &set;
+    }
+    return nullptr;
+}
+
+/// The quest log index (header rows counted) of a quest, or 0.
+int questLogRowOf(game::GameHandler* gh, uint32_t questId) {
+    const auto rows = questRows(gh);
+    for (size_t i = 0; i < rows.size(); ++i) {
+        if (rows[i].quest && rows[i].quest->questId == questId) return static_cast<int>(i) + 1;
+    }
+    return 0;
+}
+
+}  // namespace
+
+/// QuestMapUpdateAllQuests() - 0x005E63D0.
+static int lua_QuestMapUpdateAllQuests(lua_State* L) {
+    if (!worldmap::ready(L)) return lua_QuestMapUpdateAllQuests_Legacy(L);
+    int continent = -1, zone = -1;
+    worldmap::currentView(L, continent, zone);
+    const bool dungeon = worldmap::currentDungeonMapId(L) != -1 &&
+                         poiView(L).dungeon;
+    const bool area = worldmap::currentWorldMapAreaMapId(L) != -1;
+    int count = 0;
+    if ((area && (zone != -1 || continent == -2)) || dungeon) count = updateAllQuestPois(L);
+    lua_pushnumber(L, count);
+    return 1;
+}
+
+/// QuestPOIUpdateIcons() - 0x005E2EB0: which block each quest's icon is on.
+/// The client then nudges icons that overlap apart over twenty passes; that
+/// spreading is cosmetic and not reproduced.
+static int lua_QuestPOIUpdateIcons(lua_State* L) {
+    if (!worldmap::ready(L)) return 0;
+    auto* gh = getGameHandler(L);
+    if (!gh || gh->getPlayerGuid() == 0) return 0;
+    const PoiView view = poiView(L);
+    if (!view.valid) return 0;
+    // The player in wire order (north axis first), as the blocks are.
+    const auto& mi = gh->getMovementInfo();
+    const float playerX = mi.y;
+    const float playerY = mi.x;
+    for (const auto& set : gh->getQuestPoiSets()) {
+        PoiSlot& slot = poiSlotFor(set.questId);
+        float bestDist = 3.4028234663852886e+38f;
+        int bestPriority = 10;
+        const game::QuestPoiArea* best = nullptr;
+        for (const auto& a : set.areas) {
+            if (!poiForObjectives(slot.mask, a.objectiveIndex)) continue;
+            if (!poiOnMap(L, view, a)) continue;
+            const float dx = std::fabs(playerX - static_cast<float>(a.centerX));
+            const float dy = std::fabs(playerY - static_cast<float>(a.centerY));
+            const float dist = dy * dy + dx * dx;
+            const int priority = static_cast<int>(a.priority);
+            if (priority < bestPriority || (dist < bestDist && priority == bestPriority)) {
+                best = &a;
+                bestDist = dist;
+                bestPriority = priority;
+            }
+        }
+        if (!best) {
+            slot.mapId = 0;
+            slot.objective = 0;
+            slot.floor = 0;
+            slot.x = 999999;
+            slot.y = 999999;
+            continue;
+        }
+        slot.mapId = static_cast<int>(best->mapId);
+        slot.objective = best->objectiveIndex;
+        slot.floor = static_cast<int>(best->floor);
+        slot.x = best->centerX;
+        slot.y = best->centerY;
+        slot.movable = best->points.size() != 1;
+        const auto* q = questInLog(gh, set.questId);
+        slot.spread = !(q && q->complete);
+    }
+
+    // Then the icons of unfinished quests are pushed apart until none is
+    // closer than 24/1024 of the map's width to another (0x005E2EB0 from
+    // 0x005E3224): twenty passes, each moving an icon by the sum of a push of
+    // that length away from every icon too near it, capped at a twentieth of
+    // it. Y is squeezed by three quarters while this runs, which is roughly
+    // the map's aspect, and stretched back after. An area of one point is an
+    // exact place and does not move. Only on a zone's own map - not a
+    // dungeon floor.
+    if (!view.dungeon) {
+        std::vector<PoiSlot*> icons;
+        for (const auto& set : gh->getQuestPoiSets()) {
+            PoiSlot& slot = poiSlotFor(set.questId);
+            if (slot.x == 999999 && slot.y == 999999) continue;
+            if (slot.spread) icons.push_back(&slot);
+        }
+        const float width = std::fabs(worldmap::worldMapAreaWidth(L, view.wmaId));
+        const float reach = (12.0f + 12.0f) * static_cast<float>(static_cast<int>(width)) * 0.0009765625f;
+        const float step = 0.05f * reach;
+        const float reach2 = reach * reach;
+        for (PoiSlot* s : icons) s->y = static_cast<int32_t>(static_cast<float>(s->y) * 0.7500187754631042f);
+        static constexpr int kNudge[3][2] = {{0, 2}, {1, -2}, {-2, 1}};
+        int nudge = 0;
+        std::vector<std::pair<int32_t, int32_t>> push(icons.size());
+        for (int pass = 0; pass < 20 && !icons.empty(); ++pass) {
+            std::fill(push.begin(), push.end(), std::make_pair(0, 0));
+            for (size_t a = 0; a < icons.size(); ++a) {
+                for (size_t b = a + 1; b < icons.size(); ++b) {
+                    int32_t dx = icons[a]->x - icons[b]->x;
+                    int32_t dy = icons[a]->y - icons[b]->y;
+                    const int32_t d2 = dy * dy + dx * dx;
+                    if (!(static_cast<float>(d2) < reach2)) continue;
+                    if (d2 == 0) {
+                        dx = kNudge[nudge][0];
+                        dy = kNudge[nudge][1];
+                        nudge = (nudge + 1) % 3;
+                    }
+                    const float len = std::sqrt(static_cast<float>(dx) * static_cast<float>(dx) +
+                                                static_cast<float>(dy) * static_cast<float>(dy));
+                    const float k = reach / len;
+                    const int32_t ox = static_cast<int32_t>(k * static_cast<float>(dx));
+                    const int32_t oy = static_cast<int32_t>(k * static_cast<float>(dy));
+                    if (icons[a]->movable) {
+                        push[a].first += ox;
+                        push[a].second += oy;
+                    }
+                    if (d2 != 0 && icons[b]->movable) {
+                        push[b].first -= ox;
+                        push[b].second -= oy;
+                    }
+                }
+            }
+            float most = -9999999.0f;
+            for (const auto& p : push) {
+                most = std::max(most, std::fabs(static_cast<float>(p.first)));
+                most = std::max(most, std::fabs(static_cast<float>(p.second)));
+            }
+            if (most == 0.0f) break;
+            if (step < most) {
+                const float f = step / most;
+                for (auto& p : push) {
+                    p.first = static_cast<int32_t>(static_cast<float>(p.first) * f);
+                    p.second = static_cast<int32_t>(static_cast<float>(p.second) * f);
+                }
+            }
+            for (size_t i = 0; i < icons.size(); ++i) {
+                icons[i]->x += push[i].first;
+                icons[i]->y += push[i].second;
+            }
+        }
+        for (PoiSlot* s : icons) s->y = static_cast<int32_t>(static_cast<float>(s->y) * 1.3332999944686890f);
+    }
+    return 0;
+}
+
+/// QuestPOIGetIconInfo(questId) - 0x005E0590: isComplete, x, y, objective -
+/// or nothing at all when the quest's icon is not on this map.
+static int lua_QuestPOIGetIconInfo(lua_State* L) {
+    if (!worldmap::ready(L)) return lua_QuestPOIGetIconInfo_Legacy(L);
+    if (!lua_isnumber(L, 1)) return luaL_error(L, "Usage: QuestPOIGetIconInfo(questID)");
+    auto* gh = getGameHandler(L);
+    const uint32_t questId = static_cast<uint32_t>(lua_tonumber(L, 1));
+    if (!poiSetFor(gh, questId)) return 0;
+    const PoiSlot& slot = poiSlotFor(questId);
+    const int dungeon = worldmap::currentDungeonMapId(L);
+    int dmMap = 0, dmFloor = 0;
+    const int override = worldmap::dungeonMapInfo(L, dungeon, dmMap, dmFloor) ? dungeon : 0;
+    float u = 0.0f, v = 0.0f;
+    bool hidden = false;
+    const bool placed = worldmap::worldToMap(L, static_cast<float>(slot.x),
+        static_cast<float>(slot.y), 0.0f, static_cast<uint32_t>(slot.mapId), override, u, v, &hidden);
+    if (!placed || hidden || std::fabs(u * v) < 0.001f) return 0;
+    lua_pushboolean(L, slot.mask == 0xFFFFFFFFu);
+    lua_pushnumber(L, u);
+    lua_pushnumber(L, v);
+    lua_pushnumber(L, slot.objective);
+    return 4;
+}
+
+/// QuestPOIGetQuestIDByVisibleIndex(index) - 0x005E5750 / 0x005E3840:
+/// questId, questLogIndex.
+static int lua_QuestPOIGetQuestIDByVisibleIndex(lua_State* L) {
+    if (!worldmap::ready(L)) return lua_QuestPOIGetQuestIDByVisibleIndex_Legacy(L);
+    if (!lua_isnumber(L, 1)) return luaL_error(L, "Usage: QuestPOIGetQuestIDByVisibleIndex(index)");
+    auto* gh = getGameHandler(L);
+    const int want = static_cast<int>(lua_tonumber(L, 1)) - 1;
+    if (!gh || want < 0 || want > 24) return 0;
+
+    struct Entry { uint32_t questId; bool done; bool watched; };
+    std::vector<Entry> visible;
+    for (const auto& set : gh->getQuestPoiSets()) {
+        const PoiSlot& slot = poiSlotFor(set.questId);
+        if (!slot.visible) continue;
+        const auto* q = questInLog(gh, set.questId);
+        if (!q) continue;
+        visible.push_back({set.questId, q->complete || questHasNoObjectives(*q),
+                           gh->isQuestTracked(set.questId)});
+    }
+    std::vector<uint32_t> ordered;
+    // Finished first, in slot order.
+    for (const auto& e : visible) if (e.done) ordered.push_back(e.questId);
+    // Then the watched ones, in watch order (the quest log's order here).
+    for (const auto& row : questRows(gh)) {
+        if (!row.quest || !gh->isQuestTracked(row.quest->questId)) continue;
+        for (const auto& e : visible) {
+            if (e.questId == row.quest->questId && !e.done) ordered.push_back(e.questId);
+        }
+    }
+    // Then everything else.
+    for (const auto& e : visible) if (!e.done && !e.watched) ordered.push_back(e.questId);
+
+    if (want >= static_cast<int>(ordered.size())) return 0;
+    const uint32_t questId = ordered[static_cast<size_t>(want)];
+    lua_pushnumber(L, questId);
+    lua_pushnumber(L, questLogRowOf(gh, questId));
+    return 2;
+}
+
+/// GetQuestWorldMapAreaID(questId) - 0x005E56C0 / 0x005E2B60: the map the
+/// quest's work is on, and its floor. The client moves the world map to the
+/// player's zone first and then asks which block is best from there.
+static int lua_GetQuestWorldMapAreaID(lua_State* L) {
+    if (!worldmap::ready(L)) {
+        lua_pushnumber(L, 0);
+        lua_pushnumber(L, 0);
+        return 2;
+    }
+    if (!lua_isnumber(L, 1)) return luaL_error(L, "Usage: GetQuestWorldMapAreaID(questID)");
+    auto* gh = getGameHandler(L);
+    const uint32_t questId = static_cast<uint32_t>(lua_tonumber(L, 1));
+    int areaId = 0, floor = 0;
+    if (gh && gh->getPlayerGuid() != 0 && questId > 0) {
+        worldmap::setMapToCurrentZone(L);
+        const int here = worldmap::currentWorldMapAreaId(L);
+        const int hereMap = worldmap::currentWorldMapAreaMapId(L);
+        int dmMap = 0, hereFloor = 0;
+        if (!worldmap::dungeonMapInfo(L, worldmap::currentDungeonMapId(L), dmMap, hereFloor)) hereFloor = 0;
+        const auto* set = poiSetFor(gh, questId);
+        if (here != -1 && set) {
+            PoiSlot& slot = poiSlotFor(questId);
+            slot.mask = questObjectiveMask(gh, questId);
+            const auto& mi = gh->getMovementInfo();
+            const float playerX = mi.y, playerY = mi.x;
+            int bestFloorDelta = 0x7FFFFFFF;
+            float bestDist = 3.4028234663852886e+38f;
+            int candidate = 0, candidateFloor = 0;
+            for (const auto& a : set->areas) {
+                if (!poiForObjectives(slot.mask, a.objectiveIndex)) continue;
+                if (static_cast<int>(a.worldMapAreaId) == here &&
+                    static_cast<int>(a.floor) == hereFloor) {
+                    lua_pushnumber(L, a.worldMapAreaId);
+                    lua_pushnumber(L, a.floor);
+                    return 2;
+                }
+                if (worldmap::worldMapAreaMapId(L, static_cast<int>(a.worldMapAreaId)) == hereMap) {
+                    const float dx = playerX - static_cast<float>(a.centerX);
+                    const float dy = playerY - static_cast<float>(a.centerY);
+                    const int delta = std::abs(hereFloor - static_cast<int>(a.floor));
+                    const float dist = dy * dy + dx * dx;
+                    if (delta < bestFloorDelta || (delta == bestFloorDelta && dist < bestDist)) {
+                        candidate = static_cast<int>(a.worldMapAreaId);
+                        candidateFloor = static_cast<int>(a.floor);
+                        bestFloorDelta = delta;
+                        bestDist = dist;
+                    }
+                } else if (candidate == 0 &&
+                           worldmap::worldMapAreaMapId(L, static_cast<int>(a.worldMapAreaId)) != -1) {
+                    candidate = static_cast<int>(a.worldMapAreaId);
+                    candidateFloor = static_cast<int>(a.floor);
+                }
+            }
+            if (candidate != 0) {
+                areaId = candidate;
+                floor = candidateFloor;
+            }
+        }
+        if (areaId == 0) {
+            // No blocks: the quest's own zone (its zoneOrSort, taken up to
+            // the top-level area) and that zone's WorldMapArea.
+            if (const auto* q = questInLog(gh, questId); q && q->zoneOrSort > 0) {
+                areaId = worldmap::worldMapAreaForZone(L, q->zoneOrSort);
+            }
+        }
+    }
+    lua_pushnumber(L, areaId);
+    lua_pushnumber(L, floor);
+    return 2;
+}
+
+// ── WorldMapBlobFrame ───────────────────────────────────────────────────────
+//
+// A QuestPOIFrame (CGQuestPOIFrame, 0x005905F0 for DrawQuestBlob) holds up to
+// four quests and shades each one's blocks - the objective areas - for the
+// objectives still open, on the map showing. WorldMapFrame turns a quest on
+// when it is selected and off otherwise; game::GameHandler keeps that set.
+// UpdateMouseOverTooltip answers which quest's areas are under the cursor and
+// how many, and GetTooltipIndex which objective each of those is for.
+namespace {
+
+struct BlobShape {
+    uint32_t questId = 0;
+    int objective = -1;
+    std::vector<std::pair<float, float>> uv;
+};
+
+std::vector<BlobShape> blobShapes(lua_State* L) {
+    std::vector<BlobShape> out;
+    auto* gh = getGameHandler(L);
+    if (!gh || gh->getPlayerGuid() == 0 || !worldmap::ready(L)) return out;
+    const PoiView view = poiView(L);
+    if (!view.valid) return out;
+    int continent = -1, zone = -1;
+    worldmap::currentView(L, continent, zone);
+    if (zone == -1 && continent != -2 && !view.dungeon) return out;   // continents carry none
+    for (const auto& set : gh->getQuestPoiSets()) {
+        if (!gh->isQuestBlobShown(set.questId)) continue;
+        const uint32_t mask = questObjectiveMask(gh, set.questId);
+        for (const auto& a : set.areas) {
+            if (a.points.size() < 3) continue;
+            if (!poiForObjectives(mask, a.objectiveIndex)) continue;
+            if (!poiOnMap(L, view, a)) continue;
+            BlobShape shape;
+            shape.questId = set.questId;
+            shape.objective = a.objectiveIndex;
+            const int override = view.dungeon ? view.dungeonMapId : 0;
+            for (const auto& p : a.points) {
+                float u = 0.0f, v = 0.0f;
+                worldmap::worldToMap(L, static_cast<float>(p.first), static_cast<float>(p.second),
+                                     0.0f, a.mapId, override, u, v, nullptr, /*noClamp=*/true);
+                shape.uv.emplace_back(u, v);
+            }
+            out.push_back(std::move(shape));
+        }
+    }
+    return out;
+}
+
+bool pointInPolygon(const std::vector<std::pair<float, float>>& poly, float x, float y) {
+    bool inside = false;
+    for (size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++) {
+        const float xi = poly[i].first, yi = poly[i].second;
+        const float xj = poly[j].first, yj = poly[j].second;
+        if (((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
+    }
+    return inside;
+}
+
+std::vector<int>& blobTooltipObjectives() {
+    static std::vector<int> objectives;
+    return objectives;
+}
+
+}  // namespace
+
+std::vector<std::vector<std::pair<float, float>>> questBlobPolygons(lua_State* L) {
+    std::vector<std::vector<std::pair<float, float>>> out;
+    for (auto& s : blobShapes(L)) out.push_back(std::move(s.uv));
+    return out;
+}
+
+/// WorldMapBlobFrame:UpdateMouseOverTooltip(x, y) -> questLogIndex, count, for
+/// x and y as fractions of the frame.
+int lua_QuestBlobFrame_UpdateMouseOverTooltip(lua_State* L) {
+    const float x = static_cast<float>(luaL_optnumber(L, 2, -1));
+    const float y = static_cast<float>(luaL_optnumber(L, 3, -1));
+    auto& objectives = blobTooltipObjectives();
+    objectives.clear();
+    uint32_t questId = 0;
+    for (const auto& s : blobShapes(L)) {
+        if (questId != 0 && s.questId != questId) continue;
+        if (!pointInPolygon(s.uv, x, y)) continue;
+        questId = s.questId;
+        objectives.push_back(s.objective);
+    }
+    if (questId == 0) return 0;
+    lua_pushnumber(L, questLogRowOf(getGameHandler(L), questId));
+    lua_pushnumber(L, static_cast<lua_Number>(objectives.size()));
+    return 2;
+}
+
+/// WorldMapBlobFrame:GetNumTooltips() - how many areas the last hit found.
+int lua_QuestBlobFrame_GetNumTooltips(lua_State* L) {
+    const auto& objectives = blobTooltipObjectives();
+    if (objectives.empty()) return luaReturnNil(L);
+    lua_pushnumber(L, static_cast<lua_Number>(objectives.size()));
+    return 1;
+}
+
+/// WorldMapBlobFrame:GetTooltipIndex(i) - the objective index of the i-th.
+int lua_QuestBlobFrame_GetTooltipIndex(lua_State* L) {
+    const int i = static_cast<int>(luaL_optnumber(L, 2, 0));
+    const auto& objectives = blobTooltipObjectives();
+    if (i < 1 || i > static_cast<int>(objectives.size())) return luaReturnNil(L);
+    lua_pushnumber(L, objectives[static_cast<size_t>(i - 1)]);
+    return 1;
+}
+
+/// The QuestPOI set, bound after the system set and the world map so these
+/// are the ones FrameXML finds.
+void registerQuestPoiLuaAPI(lua_State* L) {
+    static const struct { const char* name; lua_CFunction fn; } api[] = {
+        {"QuestMapUpdateAllQuests", lua_QuestMapUpdateAllQuests},
+        {"QuestPOIUpdateIcons", lua_QuestPOIUpdateIcons},
+        {"QuestPOIGetIconInfo", lua_QuestPOIGetIconInfo},
+        {"QuestPOIGetQuestIDByVisibleIndex", lua_QuestPOIGetQuestIDByVisibleIndex},
+        {"GetQuestWorldMapAreaID", lua_GetQuestWorldMapAreaID},
+    };
+    for (const auto& a : api) {
+        lua_pushcfunction(L, a.fn);
+        lua_setglobal(L, a.name);
+    }
+}
 
 /// GetQuestPOILeaderBoard(objectiveIndex, questId) → the objective's text and
 /// counts, the same as the quest log's version - except that this one is given
 /// a quest id where that one takes a log index. Aliasing the two would look
 /// right and read the wrong quest, so the id is turned into an index here.
 static int lua_GetQuestPOILeaderBoard(lua_State* L) {
+    // GetQuestPOILeaderBoard(questPOIIndex, questLogIndex) - 0x005E6650.
+    //
+    // The first number is a POI block's objective index, as the blob frame's
+    // GetTooltipIndex hands it out: 0-3 the kill and object counts, 4-9 the
+    // items. The second is a quest log index, the same as
+    // GetQuestLogLeaderBoard's - WorldMapQuestPOI_SetTooltip passes the one it
+    // has. The line answered is the one for that objective.
     auto* gh = getGameHandler(L);
-    const uint32_t questId = static_cast<uint32_t>(luaL_optnumber(L, 2, 0));
-    if (!gh || questId == 0) { return luaReturnNil(L); }
-    const auto rows = questRows(gh);
-    int index = 0;
-    for (size_t i = 0; i < rows.size(); ++i) {
-        if (rows[i].quest && rows[i].quest->questId == questId) {
-            index = static_cast<int>(i) + 1;
-            break;
-        }
+    const int poiIndex = static_cast<int>(luaL_checknumber(L, 1));
+    const int logIndex = static_cast<int>(luaL_optnumber(L, 2, 0));
+    const auto* qp = (gh && logIndex > 0) ? questAtRow(gh, logIndex) : nullptr;
+    if (!qp) {
+        lua_pushnil(L);
+        lua_pushnil(L);
+        lua_pushnil(L);
+        return 3;
     }
-    if (index == 0) { return luaReturnNil(L); }
-    lua_pushvalue(L, 1);            // objective index, unchanged
-    lua_pushnumber(L, index);       // the log index the other one wants
-    lua_replace(L, 2);
-    lua_replace(L, 1);
-    return lua_GetQuestLogLeaderBoard(L);
+    const std::vector<game::QuestObjective> lines = game::questObjectives(*gh, *qp);
+    int line = 0, found = -1;
+    for (size_t i = 0; i < qp->killObjectives.size(); ++i) {
+        const auto& kill = qp->killObjectives[i];
+        if (!game::isQuestObjective(kill.npcOrGoId, kill.required)) continue;
+        if (static_cast<int>(i) == poiIndex) found = line;
+        ++line;
+    }
+    for (size_t i = 0; i < qp->itemObjectives.size(); ++i) {
+        const auto& item = qp->itemObjectives[i];
+        if (!game::isQuestObjective(static_cast<int32_t>(item.itemId), item.required)) continue;
+        if (static_cast<int>(4 + i) == poiIndex) found = line;
+        ++line;
+    }
+    if (found < 0 || found >= static_cast<int>(lines.size())) {
+        lua_pushnil(L);
+        lua_pushnil(L);
+        lua_pushnil(L);
+        return 3;
+    }
+    const game::QuestObjective& o = lines[static_cast<size_t>(found)];
+    lua_pushstring(L, o.text.c_str());
+    lua_pushstring(L, o.type);
+    if (o.finished) lua_pushnumber(L, 1);
+    else lua_pushnil(L);
+    return 3;
 }
 
 /// The objective's line, its kind and whether it is done - through the one

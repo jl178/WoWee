@@ -3,6 +3,9 @@
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #pragma once
 
+#include <utility>
+#include <vector>
+
 struct lua_State;
 
 namespace wowee::addons {
@@ -15,6 +18,18 @@ void registerLfgLuaAPI(lua_State* L);
 void registerSocketLuaAPI(lua_State* L);
 void registerSocialLuaAPI(lua_State* L);
 void registerSystemLuaAPI(lua_State* L);
+/// The QuestPOI functions over the world map (lua_quest_api.cpp). After the
+/// system set and the world map, which bind older versions of the same names.
+void registerQuestPoiLuaAPI(lua_State* L);
+
+/// The shaded quest areas WorldMapBlobFrame shows, as polygons in fractions of
+/// the frame (0,0 top-left). Empty when nothing is selected or the map shows
+/// a continent. For the widget renderer, which draws them.
+std::vector<std::vector<std::pair<float, float>>> questBlobPolygons(lua_State* L);
+/// WorldMapBlobFrame's methods behind the blob tooltip (lua_quest_api.cpp).
+int lua_QuestBlobFrame_UpdateMouseOverTooltip(lua_State* L);
+int lua_QuestBlobFrame_GetNumTooltips(lua_State* L);
+int lua_QuestBlobFrame_GetTooltipIndex(lua_State* L);
 
 /// Re-apply every CVar restored from disk, now that the services behind them
 /// exist. See applyCVarSideEffects.

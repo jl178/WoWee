@@ -32,9 +32,12 @@ namespace {
 /// rule existed.
 ///
 /// Three elements are left drawing: the minimap, the world map and the taxi
-/// picker. They are shared surfaces, where this client draws into a frame
-/// FrameXML owns rather than beside it, so this flag has no last one to turn
-/// off.
+/// picker. The minimap and the taxi picker are shared surfaces, where this
+/// client draws into a frame FrameXML owns rather than beside it. The world
+/// map is not any more: while FrameXML owns it, WorldMapFrame draws all of it
+/// from the C functions in lua_world_map_api.cpp, as the stock client does,
+/// and this client's own map renderer is only the fallback for a session that
+/// runs without FrameXML.
 struct Entry {
     UiElement element;
     std::string_view name;
