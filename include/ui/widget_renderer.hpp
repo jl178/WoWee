@@ -19,6 +19,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include "ui/stock_font_metrics.hpp"
 #include "ui/text_measure_cache.hpp"
 
 struct ImDrawList;   // global, as ImGui declares it
@@ -30,6 +31,15 @@ namespace pipeline { class AssetManager; }
 namespace rendering { class VkContext; }
 
 namespace ui {
+
+/// What a font string adds to a markup draw beyond its face and size: the
+/// outline it was measured with, which moves its glyphs, and the distance from
+/// one line to the next in pixels - zero for 1.2 times the size, which is what
+/// tooltips and message frames lay their rows out by.
+struct MarkupTextStyle {
+    FontOutline outline = FontOutline::None;
+    float lineHeight = 0.0f;
+};
 
 class WidgetTree;
 struct Widget;
@@ -123,6 +133,9 @@ private:
                                  float screenW, float screenH);
     /// Text measurements by face, size, text and wrap. See text_measure_cache.hpp.
     TextMeasureCache measureCache_;
+    /// Screen pixels per interface unit for the sizing pass in flight: the
+    /// tree's interface scale. A label's own effective scale multiplies it.
+    float sizingPixelScale_ = 1.0f;
     void sizeTooltipWidget(Widget* w, ImFont* font, WidgetTree& tree);
     /// How big the picture is, without uploading it. No Vulkan context needed:
     /// asking a file its dimensions does not require a GPU, and requiring one
@@ -139,15 +152,19 @@ private:
     /// Labels holding a coin amount with a letter on the end of it.
     void reportLetteredAmounts(WidgetTree& tree);
 
+    using TextStyle = MarkupTextStyle;
     /// Draw a string that may carry WoW's inline colour markup, as runs.
     /// wrapWidth of zero draws one line, which is what an auto-sized label
     /// and a tooltip row want; a positive one breaks the text to fit.
-    /// Answers the height it drew, in pixels.
+    /// Glyphs are placed by the stock client's pen (stock_font_metrics.hpp)
+    /// where the face has stock metrics, so they land where the measurement
+    /// put them. Answers the height it drew, in pixels.
     float drawMarkupText(ImDrawList* dl, ImFont* font, float size, ImVec2 at,
                         uint32_t fallback, float alpha, const std::string& text,
                         float wrapWidth = 0.0f, bool nonSpaceWrap = false,
                         const char* justifyH = nullptr, bool forceColor = false,
-                        WidgetTree* linkSink = nullptr, uint32_t linkOwner = 0);
+                        WidgetTree* linkSink = nullptr, uint32_t linkOwner = 0,
+                        const TextStyle& style = TextStyle{});
     /// A SimpleHTML page holding a document rather than a string: its blocks
     /// stacked down the frame, text justified per block and each picture on a
     /// line of its own. See simple_html.hpp.

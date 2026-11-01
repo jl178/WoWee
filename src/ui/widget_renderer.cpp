@@ -325,6 +325,13 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font,
     // Same face too - the widget's own, then the interface default -
     // rather than whichever face this measure happened to be handed.
     const float size = interfaceFontSize(w->fontHeight);
+    // The screen pixels in one of this label's units, and its outline. The
+    // stock metrics lay text out in whole pixels and widen an outlined cell,
+    // so both are part of what the text measures to - see
+    // stock_font_metrics.hpp.
+    const float pixelScale =
+        sizingPixelScale_ * (w->effScale > 0.0f ? w->effScale : 1.0f);
+    const FontOutline outline = fontOutlineFromName(w->fontOutline);
 
     // Already the right size for this text, measured the way it would be
     // measured now. A label that has changed what it says is measured
@@ -340,7 +347,10 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font,
     // overspill lands on the coin.
     const bool sameMeasurement = w->measuredText == w->text &&
                                  w->measuredSize == size &&
-                                 w->measuredFace == w->fontFace;
+                                 w->measuredFace == w->fontFace &&
+                                 w->measuredPixelScale == pixelScale &&
+                                 w->measuredOutline == w->fontOutline &&
+                                 w->measuredSpacing == w->lineSpacing;
     if (paragraph) {
         if (sameMeasurement) return;
     } else {
@@ -352,9 +362,9 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font,
     // name search that was paid for the thousands that return above.
     ImFont* runFont = interfaceFaceOrDefault(w->fontFace);
     if (!runFont) runFont = font;
-    const auto measureRun = [&](const std::string& piece) {
-        return runFont->CalcTextSizeA(size, FLT_MAX, 0.0f, piece.c_str()).x;
-    };
+    const InterfaceTextMeasure measureRun{.font = runFont, .size = size,
+                                          .pixelsPerUnit = pixelScale,
+                                          .outline = outline};
 
     // The measurement itself, or the one remembered for the same face, size,
     // text and wrap - which is the same numbers, since nothing else goes in.
@@ -369,6 +379,8 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font,
         key.paragraph = paragraph;
         key.wrapWidth = paragraph ? w->width : 0.0f;
         key.nonSpaceWrap = paragraph && w->nonSpaceWrap;
+        key.pixelScale = pixelScale;
+        key.outline = static_cast<uint8_t>(outline);
         key.text = w->text;
         known = measureCache_.find(key);
     }
@@ -380,8 +392,7 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font,
                 wrapText(parseMarkup(w->text), w->width, w->nonSpaceWrap,
                          measureRun).size());
         } else {
-            measure.width = runFont->CalcTextSizeA(size, FLT_MAX, 0.0f,
-                                                   strippedText(w->text).c_str()).x;
+            measure.width = measureRun(strippedText(w->text));
             measure.rows = static_cast<int>(
                 wrapText(parseMarkup(w->text), 0.0f, false, measureRun).size());
         }
@@ -396,10 +407,13 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font,
         w->wrapsToWidth = true;
         const int rows = measure.rows;
         w->wrappedLines = rows > 0 ? rows : 1;
-        w->height = size * 1.2f * static_cast<float>(w->wrappedLines);
+        w->height = stockTextHeight(w->wrappedLines, size, w->lineSpacing);
         w->measuredText = w->text;
         w->measuredSize = size;
         w->measuredFace = w->fontFace;
+        w->measuredPixelScale = pixelScale;
+        w->measuredOutline = w->fontOutline;
+        w->measuredSpacing = w->lineSpacing;
         return;
     }
 
@@ -411,13 +425,20 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font,
     // the rest.
     const int rows = measure.rows;
     w->wrappedLines = rows > 0 ? rows : 1;
+    // Exactly the font height per line, plus the spacing between lines, as
+    // GetStringHeight answers. This was 1.2 times the size, ImGui's habit
+    // rather than WoW's, and a self-sized label stood a fifth taller than
+    // the one it was laid out against in the stock client.
     if (w->height <= 0.0f || w->autoSized) {
-        w->height = size * 1.2f * static_cast<float>(w->wrappedLines);
+        w->height = stockTextHeight(w->wrappedLines, size, w->lineSpacing);
     }
     w->autoSized = true;
     w->measuredText = w->text;
     w->measuredSize = size;
     w->measuredFace = w->fontFace;
+    w->measuredPixelScale = pixelScale;
+    w->measuredOutline = w->fontOutline;
+    w->measuredSpacing = w->lineSpacing;
 }
 
 /// One tooltip, sized from its own lines - and the lines placed with it.
@@ -462,6 +483,10 @@ void WidgetRenderer::sizeTooltipWidget(Widget* w, ImFont* font, WidgetTree& tree
 
     const float size = interfaceFontSize(w->fontHeight);
     const float lineH = size * 1.2f;
+    // Measured the way the draw places the glyphs; see InterfaceTextMeasure.
+    const InterfaceTextMeasure textWidth{
+        .font = font, .size = size,
+        .pixelsPerUnit = tree.uiScale() * (w->effScale > 0.0f ? w->effScale : 1.0f)};
     // Ten units of padding a side, which is what the tooltip backdrop's
     // own insets come to.
     constexpr float kPad = 10.0f;
@@ -477,29 +502,33 @@ void WidgetRenderer::sizeTooltipWidget(Widget* w, ImFont* font, WidgetTree& tree
     // The widest of its lines, where a line breaks: runs are added up only
     // until a newline, or a colour change on the second line would be
     // measured as sitting at the end of the first.
+    // A line's text is measured whole, across its colour runs: the stock
+    // width of two pieces is not the sum of their widths.
     const auto measure = [&](const std::string& text) {
         float widestLine = 0.0f;
-        float total = 0.0f;
+        float pictures = 0.0f;
+        std::string lineText;
+        const auto lineWidth = [&] { return pictures + textWidth(lineText); };
         for (const auto& run : parseMarkup(text)) {
             if (!run.texture.empty()) {
-                total += run.texWidth > 0.0f    ? run.texWidth
-                       : run.texHeight > 0.0f   ? run.texHeight
-                                                : size;
+                pictures += run.texWidth > 0.0f    ? run.texWidth
+                          : run.texHeight > 0.0f   ? run.texHeight
+                                                   : size;
                 continue;
             }
             std::size_t at = 0;
             while (true) {
                 const std::size_t brk = run.text.find('\n', at);
-                const std::string piece = run.text.substr(
+                lineText += run.text.substr(
                     at, brk == std::string::npos ? std::string::npos : brk - at);
-                total += font->CalcTextSizeA(size, FLT_MAX, 0.0f, piece.c_str()).x;
                 if (brk == std::string::npos) break;
-                widestLine = std::max(widestLine, total);
-                total = 0.0f;
+                widestLine = std::max(widestLine, lineWidth());
+                lineText.clear();
+                pictures = 0.0f;
                 at = brk + 1;
             }
         }
-        return std::max(widestLine, total);
+        return std::max(widestLine, lineWidth());
     };
     for (const auto& line : w->tooltipLines) {
         // A wrapping line does not set the width - that is what the comment
@@ -551,11 +580,7 @@ void WidgetRenderer::sizeTooltipWidget(Widget* w, ImFont* font, WidgetTree& tree
             int rowsHere = 1;
             if (line.wrap && !segment.empty()) {
                 rowsHere = static_cast<int>(
-                    wrapText(parseMarkup(segment), wrapW, false,
-                             [&](const std::string& piece) {
-                                 return font->CalcTextSizeA(size, FLT_MAX, 0.0f,
-                                                            piece.c_str()).x;
-                             }).size());
+                    wrapText(parseMarkup(segment), wrapW, false, textWidth).size());
                 if (rowsHere < 1) rowsHere = 1;
             }
             n += rowsHere;
@@ -659,6 +684,9 @@ size_t WidgetRenderer::sizeArtAndText(WidgetTree& tree, bool everyWidget,
                                       bool useMeasureCache) {
     ImFont* font = interfaceFace("frizqt__");
     if (!font) font = ImGui::GetFont();
+    // Before the first layout the tree's scale is still 1, and a label
+    // measured then is measured again once it changes; see noteSizingContext.
+    sizingPixelScale_ = tree.uiScale() > 0.0f ? tree.uiScale() : 1.0f;
 
     const auto sizeOne = [&](Widget& w) {
         if (font && w.kind == WidgetKind::FontString) {
@@ -681,7 +709,8 @@ size_t WidgetRenderer::sizeArtAndText(WidgetTree& tree, bool everyWidget,
     // unchanged texture can learn about itself; any of those revisits all of
     // them. A face rebuilt at the same address would make the remembered
     // measurements wrong, so they go too.
-    if (tree.noteSizingContext(font, assets_, interfaceFontSize(0.0f))) {
+    if (tree.noteSizingContext(font, assets_, interfaceFontSize(0.0f),
+                               sizingPixelScale_)) {
         measureCache_.clear();
     }
     return tree.forEachChangedArtAndText(sizeOne);
@@ -689,32 +718,99 @@ size_t WidgetRenderer::sizeArtAndText(WidgetTree& tree, bool everyWidget,
 
 
 
+namespace {
+/// One glyph out of the face baked at `baked`'s size, drawn `scale` times
+/// that size with its origin at (x, y) - the top of the line, as ImGui
+/// measures a glyph's offsets. ImFont::RenderChar with the bake chosen by the
+/// caller: above 32 pixels the stock client draws its 32 pixel bitmaps
+/// stretched, and asking ImGui for the glyph at the drawn size would bake a
+/// sharper one than WoW ever shows.
+void drawBakedGlyph(ImDrawList* dl, ImFontBaked* baked, float scale, float x,
+                    float y, uint32_t col, uint32_t codepoint) {
+    const ImWchar c = codepoint <= IM_UNICODE_CODEPOINT_MAX
+                          ? static_cast<ImWchar>(codepoint)
+                          : static_cast<ImWchar>(IM_UNICODE_CODEPOINT_INVALID);
+    const ImFontGlyph* glyph = baked->FindGlyph(c);
+    if (!glyph || !glyph->Visible) return;
+    if (glyph->Colored) col |= ~IM_COL32_A_MASK;
+    dl->PrimReserve(6, 4);
+    dl->PrimRectUV(ImVec2(x + glyph->X0 * scale, y + glyph->Y0 * scale),
+                   ImVec2(x + glyph->X1 * scale, y + glyph->Y1 * scale),
+                   ImVec2(glyph->U0, glyph->V0), ImVec2(glyph->U1, glyph->V1), col);
+}
+} // namespace
+
 float WidgetRenderer::drawMarkupText(ImDrawList* dl, ImFont* font, float size,
                                      ImVec2 at, uint32_t fallback, float alpha,
                                      const std::string& text, float wrapWidth,
                                      bool nonSpaceWrap, const char* justifyH,
                                      bool forceColor, WidgetTree* linkSink,
-                                     uint32_t linkOwner) {
-    const auto lines = wrapText(parseMarkup(text), wrapWidth, nonSpaceWrap,
-                                [&](const std::string& piece) {
-                                    return font->CalcTextSizeA(size, FLT_MAX, 0.0f,
-                                                               piece.c_str()).x;
-                                });
-    const float lineH = size * 1.2f;
+                                     uint32_t linkOwner, const TextStyle& style) {
+    // Measured in pixels, the units everything here is in, by the same rules
+    // the sizing pass measured the widget with.
+    const InterfaceTextMeasure measure{.font = font, .size = size,
+                                       .pixelsPerUnit = 1.0f,
+                                       .outline = style.outline};
+    const auto lines = wrapText(parseMarkup(text), wrapWidth, nonSpaceWrap, measure);
+    const float lineH = style.lineHeight > 0.0f ? style.lineHeight : size * 1.2f;
+
+    // The stock pen, where the face has stock metrics: every glyph goes where
+    // the measurement put it, so a label's text fills exactly the rect it was
+    // sized to. ImGui's own advances are fractional and would drift from the
+    // whole-pixel steps the client takes - about a pixel every few glyphs.
+    // The layout is at the raster size and stretched by px / raster above 32
+    // pixels, drawing as measurement.
+    const GlyphMetricsSource* metrics = interfaceFaceMetrics(font);
+    const int px = stockfont::pixelSize(size, 1.0f);
+    const int raster = stockfont::rasterSize(px);
+    const float stretch = static_cast<float>(px) / static_cast<float>(raster);
+    ImFontBaked* baked = metrics ? font->GetFontBaked(static_cast<float>(raster)) : nullptr;
+    if (!baked) metrics = nullptr;
+    const float glyphScale = baked ? static_cast<float>(px) / baked->Size : 1.0f;
+
     float y = at.y;
     for (const auto& line : lines) {
         // A picture contributes its own width, not its (empty) text's, or a
         // centred line of coins would be justified as if it were blank.
+        const auto pictureWidth = [&](const TextRun& run) {
+            return run.texWidth > 0.0f    ? run.texWidth
+                 : run.texHeight > 0.0f   ? run.texHeight
+                                          : size;
+        };
         const auto runWidth = [&](const TextRun& run) {
-            if (!run.texture.empty()) {
-                return run.texWidth > 0.0f    ? run.texWidth
-                     : run.texHeight > 0.0f   ? run.texHeight
-                                              : size;
-            }
+            if (!run.texture.empty()) return pictureWidth(run);
             return font->CalcTextSizeA(size, FLT_MAX, 0.0f, run.text.c_str()).x;
         };
+        // The whole line through one pen, so the pad, the kerning across a
+        // colour change and the last glyph's cell are counted once each.
+        // onGlyph(run, codepoint, x) for each glyph and onRun(run, x0, x1)
+        // after each run, in pixels from the line's start.
+        const auto layLine = [&](StockPen& pen, const auto& onGlyph,
+                                 const auto& onRun) {
+            for (const TextRun& run : line) {
+                const float start = pen.cursor() * stretch;
+                if (!run.texture.empty()) {
+                    pen.skip(pictureWidth(run) / stretch);
+                } else {
+                    size_t i = 0;
+                    while (i < run.text.size()) {
+                        const uint32_t cp = nextCodepoint(run.text, i);
+                        if (cp < 0x20) continue;
+                        onGlyph(run, cp, pen.place(cp) * stretch);
+                    }
+                }
+                onRun(run, start, pen.cursor() * stretch);
+            }
+        };
         float lineW = 0.0f;
-        for (const TextRun& run : line) lineW += runWidth(run);
+        if (metrics) {
+            StockPen pen(*metrics, raster, style.outline);
+            layLine(pen, [](const TextRun&, uint32_t, float) {},
+                    [](const TextRun&, float, float) {});
+            lineW = pen.width() * stretch;
+        } else {
+            for (const TextRun& run : line) lineW += runWidth(run);
+        }
         // Each line justifies inside the box on its own, which is what makes a
         // centred paragraph look centred rather than ragged from one offset.
         float x = at.x;
@@ -722,56 +818,82 @@ float WidgetRenderer::drawMarkupText(ImDrawList* dl, ImFont* font, float size,
             if (std::string(justifyH) == "CENTER") x = at.x + (wrapWidth - lineW) * 0.5f;
             else if (std::string(justifyH) == "RIGHT") x = at.x + wrapWidth - lineW;
         }
-        for (const TextRun& run : line) {
-            if (!run.texture.empty()) {
-                const float w = runWidth(run);
-                const float h = run.texHeight > 0.0f ? run.texHeight : size;
-                // Only on the pass that draws the text. The shadow and outline
-                // passes repeat the same runs offset by a pixel, and an icon
-                // drawn three times reads as a smear rather than as depth.
-                if (!forceColor) {
-                    VkDescriptorSet tex = resident(run.texture);
-                    if (tex != kMissing) {
-                        // Sat on the baseline like a capital, which is where
-                        // the interface's own money frames put a coin.
-                        const float top = y + (lineH - h) * 0.5f;
-                        dl->AddImage(reinterpret_cast<ImTextureID>(tex),
-                                     ImVec2(x, top), ImVec2(x + w, top + h),
-                                     ImVec2(0, 0), ImVec2(1, 1),
-                                     IM_COL32(255, 255, 255,
-                                              static_cast<int>(alpha * 255.0f)));
-                    }
-                }
-                x += w;
-                continue;
-            }
+        // A picture, sat on the baseline like a capital, which is where the
+        // interface's own money frames put a coin. Only on the pass that draws
+        // the text: the shadow and outline passes repeat the same runs offset
+        // by a pixel, and an icon drawn three times reads as a smear rather
+        // than as depth.
+        const auto drawPicture = [&](const TextRun& run, float px0) {
+            if (forceColor) return;
+            const float w = pictureWidth(run);
+            const float h = run.texHeight > 0.0f ? run.texHeight : size;
+            VkDescriptorSet tex = resident(run.texture);
+            if (tex == kMissing) return;
+            const float top = y + (lineH - h) * 0.5f;
+            dl->AddImage(reinterpret_cast<ImTextureID>(tex),
+                         ImVec2(px0, top), ImVec2(px0 + w, top + h),
+                         ImVec2(0, 0), ImVec2(1, 1),
+                         IM_COL32(255, 255, 255, static_cast<int>(alpha * 255.0f)));
+        };
+        // The shadow and outline passes draw the same glyphs in one colour;
+        // a run's own colour would light them up.
+        const auto runColor = [&](const TextRun& run) {
+            if (!run.hasColor || forceColor) return fallback;
+            float rgba[4] = {run.rgba[0], run.rgba[1], run.rgba[2], run.rgba[3]};
+            return packColor(rgba, alpha);
+        };
+        // Where the link landed, for the click that arrives in another pass
+        // entirely. Only from the pass that draws the text itself - the
+        // outline and shadow draw the same glyphs and would file the same link
+        // two or three times over.
+        const auto fileLink = [&](const TextRun& run, float rx, float runW) {
+            if (!linkSink || forceColor || run.link.empty()) return;
+            // Into the space the click arrives in, which is not the space
+            // this draws in. dispatchMouse takes DisplaySize.y - MousePos.y
+            // and divides by the interface scale, so the tree is in
+            // interface units with y growing upward, while every
+            // coordinate here is a screen pixel with y growing down.
+            // Filing the pixels would have made the hit test miss by the
+            // scale factor and by the whole height of the screen.
+            linkSink->addLinkRect(linkRectFromDraw(
+                linkOwner, run.link, run.text, rx, y, runW, lineH,
+                linkScreenH_, linkScale_));
+        };
+
+        if (metrics) {
+            // On whole pixels, as ImGui's own text is; the steps between the
+            // glyphs are whole already.
+            const float ox = static_cast<float>(static_cast<int>(x));
+            const float oy = static_cast<float>(static_cast<int>(y));
+            const TextRun* colorOf = nullptr;
             uint32_t col = fallback;
-            // The shadow and outline passes draw the same glyphs in one colour;
-            // a run's own colour would light them up.
-            if (run.hasColor && !forceColor) {
-                float rgba[4] = {run.rgba[0], run.rgba[1], run.rgba[2], run.rgba[3]};
-                col = packColor(rgba, alpha);
+            StockPen pen(*metrics, raster, style.outline);
+            layLine(
+                pen,
+                [&](const TextRun& run, uint32_t cp, float gx) {
+                    if (colorOf != &run) {
+                        colorOf = &run;
+                        col = runColor(run);
+                    }
+                    if ((col & IM_COL32_A_MASK) == 0) return;
+                    drawBakedGlyph(dl, baked, glyphScale, ox + gx, oy, col, cp);
+                },
+                [&](const TextRun& run, float x0, float x1) {
+                    if (!run.texture.empty()) drawPicture(run, ox + x0);
+                    else fileLink(run, ox + x0, x1 - x0);
+                });
+        } else {
+            for (const TextRun& run : line) {
+                if (!run.texture.empty()) {
+                    drawPicture(run, x);
+                    x += pictureWidth(run);
+                    continue;
+                }
+                dl->AddText(font, size, ImVec2(x, y), runColor(run), run.text.c_str());
+                const float runW = runWidth(run);
+                fileLink(run, x, runW);
+                x += runW;
             }
-            dl->AddText(font, size, ImVec2(x, y), col, run.text.c_str());
-            const float runW = font->CalcTextSizeA(size, FLT_MAX, 0.0f,
-                                                   run.text.c_str()).x;
-            // Where the link landed, for the click that arrives in another
-            // pass entirely. Only from the pass that draws the text itself -
-            // the outline and shadow draw the same glyphs and would file the
-            // same link two or three times over.
-            if (linkSink && !forceColor && !run.link.empty()) {
-                // Into the space the click arrives in, which is not the space
-                // this draws in. dispatchMouse takes DisplaySize.y - MousePos.y
-                // and divides by the interface scale, so the tree is in
-                // interface units with y growing upward, while every
-                // coordinate here is a screen pixel with y growing down.
-                // Filing the pixels would have made the hit test miss by the
-                // scale factor and by the whole height of the screen.
-                linkSink->addLinkRect(linkRectFromDraw(
-                    linkOwner, run.link, run.text, x, y, runW, lineH,
-                    linkScreenH_, linkScale_));
-            }
-            x += runW;
         }
         y += lineH;
     }
@@ -1603,6 +1725,7 @@ void WidgetRenderer::verifyAgainstFullLayout(WidgetTree& tree, WidgetTree& scrat
         f("effScale", a->effScale, b->effScale);
         f("measuredWidth", a->measuredWidth, b->measuredWidth);
         f("measuredSize", a->measuredSize, b->measuredSize);
+        f("measuredPixelScale", a->measuredPixelScale, b->measuredPixelScale);
         i("visible", a->visible, b->visible);
         i("visibleChain", a->visibleChain, b->visibleChain);
         i("effLevel", a->effLevel, b->effLevel);
@@ -2775,10 +2898,7 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
                     if (line.wrap && tipFont) {
                         const auto broken = wrapText(
                             parseMarkup(line.left), tipTextW, false,
-                            [&](const std::string& piece) {
-                                return tipFont->CalcTextSizeA(
-                                    tipSize, FLT_MAX, 0.0f, piece.c_str()).x;
-                            });
+                            InterfaceTextMeasure{.font = tipFont, .size = tipSize});
                         n = std::max(static_cast<int>(broken.empty() ? 1 : broken.size()),
                                      line.lines);
                     }
@@ -2842,8 +2962,8 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
                                    line.wrap ? textW : 0.0f);
                     if (!line.right.empty()) {
                         float rc[4] = {line.rc[0], line.rc[1], line.rc[2], line.rc[3]};
-                        const float rw = font->CalcTextSizeA(
-                            size, FLT_MAX, 0.0f, strippedText(line.right).c_str()).x;
+                        const float rw = InterfaceTextMeasure{.font = font, .size = size}(
+                            strippedText(line.right));
                         drawMarkupText(dl, font, size, ImVec2(x1 - pad - rw, y),
                                        packColor(rc, w->alpha), w->alpha, line.right);
                     }
@@ -2873,10 +2993,7 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
                     if (wrapW <= 0.0f) return size_t{1};
                     const auto lines = wrapText(
                         parseMarkup(text), wrapW, false,
-                        [&](const std::string& piece) {
-                            return font->CalcTextSizeA(size, FLT_MAX, 0.0f,
-                                                       piece.c_str()).x;
-                        });
+                        InterfaceTextMeasure{.font = font, .size = size});
                     return lines.empty() ? size_t{1} : lines.size();
                 };
                 float y = y1 - lineH;
@@ -3078,8 +3195,11 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
                     // would put the caret an escape sequence too far right.
                     const std::string upTo = strippedText(w->editText.substr(
                         0, std::min(w->cursorPos, w->editText.size())));
+                    // Where the pen stands after it, which is where the draw
+                    // puts the next glyph - not the text's width, which ends
+                    // at the last glyph's ink.
                     const float caret = font
-                        ? font->CalcTextSizeA(size, FLT_MAX, 0.0f, upTo.c_str()).x
+                        ? InterfaceTextMeasure{.font = font, .size = size}.advance(upTo)
                         : 0.0f;
                     const float cx = x0 + pad + caret;
                     dl->AddLine(ImVec2(cx, ty), ImVec2(cx, ty + size), col);
@@ -3345,24 +3465,29 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
             // parses the runs and draws only the visible ones, in their
             // colours. It was the width the placement is computed from.
             const std::string measured = strippedText(w->text);
+            // In pixels, by the rules the sizing pass measured the rect with,
+            // outline included: an outlined cell is wider.
+            const FontOutline outline = fontOutlineFromName(w->fontOutline);
+            const InterfaceTextMeasure textWidth{.font = font, .size = size,
+                                                 .pixelsPerUnit = 1.0f,
+                                                 .outline = outline};
+            // One line is the font height, and the lines after it the height
+            // and the spacing, as GetStringHeight counts them.
+            const float spacingPx = w->lineSpacing * ws;
+            const float lineAdvance = size + spacingPx;
             ImVec2 extent =
-                font ? font->CalcTextSizeA(size, FLT_MAX, 0.0f, measured.c_str())
+                font ? ImVec2(textWidth(measured), stockTextHeight(1, size, spacingPx))
                      : ImGui::CalcTextSize(measured.c_str());
             // Counted even when nothing wraps: |n is a line break at any
             // width, so a label with one in it is two lines tall whether or
             // not it is also being broken to fit.
             if (font) {
-                const auto lines = wrapText(
-                    parseMarkup(w->text), wrapW, w->nonSpaceWrap,
-                    [&](const std::string& piece) {
-                        return font->CalcTextSizeA(size, FLT_MAX, 0.0f,
-                                                   piece.c_str()).x;
-                    });
+                const auto lines = wrapText(parseMarkup(w->text), wrapW,
+                                            w->nonSpaceWrap, textWidth);
                 w->wrappedLines = static_cast<int>(lines.size());
-                if (wrapW > 0.0f) {
-                    extent.x = wrapW;
-                    extent.y = size * 1.2f * static_cast<float>(lines.size());
-                }
+                extent.y = stockTextHeight(static_cast<int>(lines.size()), size,
+                                           spacingPx);
+                if (wrapW > 0.0f) extent.x = wrapW;
             } else {
                 w->wrappedLines = 1;
             }
@@ -3401,9 +3526,7 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
             std::string fitted;
             if (overflows && font && measured == w->text &&
                 w->text.find('\n') == std::string::npos) {
-                fitted = fitWithEllipsis(w->text, boxW, [&](const std::string& piece) {
-                    return font->CalcTextSizeA(size, FLT_MAX, 0.0f, piece.c_str()).x;
-                });
+                fitted = fitWithEllipsis(w->text, boxW, textWidth);
             }
             const std::string& shown = fitted.empty() ? w->text : fitted;
             float tx = x0;
@@ -3416,6 +3539,7 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
             else if (w->justifyV == "BOTTOM") ty = y1 - extent.y;
             tx += pushX;
             ty += pushY;
+            const TextStyle style{.outline = outline, .lineHeight = lineAdvance};
             // An outline is drawn as the same glyphs in black around the text.
             // ImGui has no outlined draw, and offsetting a few copies is what
             // the effect amounts to at these sizes - it is what keeps a
@@ -3435,7 +3559,8 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
                     // the ones on top of it.
                     drawMarkupText(dl, font, size, ImVec2(tx + o.x, ty + o.y),
                                    shadow, w->alpha, shown, wrapW,
-                                   w->nonSpaceWrap, w->justifyH.c_str(), true);
+                                   w->nonSpaceWrap, w->justifyH.c_str(), true,
+                                   nullptr, 0, style);
                 }
             }
             // The shadow sits under the text and over the outline: it is a
@@ -3449,7 +3574,7 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
                                ImVec2(tx + w->shadowX * s, ty - w->shadowY * s),
                                packColor(sc, w->alpha * w->shadowColor[3]),
                                w->alpha, shown, wrapW, w->nonSpaceWrap,
-                               w->justifyH.c_str(), true);
+                               w->justifyH.c_str(), true, nullptr, 0, style);
             }
             // A button's label takes its colour from the button's state. The
             // colour lives on the parent because that is where the template
@@ -3467,7 +3592,7 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
             drawMarkupText(dl, font, size, ImVec2(tx, ty),
                            packColor(textColor, w->alpha), w->alpha, shown,
                            wrapW, w->nonSpaceWrap, w->justifyH.c_str(), false,
-                           &tree, w->id);
+                           &tree, w->id, style);
         }
     }
 }

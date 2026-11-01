@@ -1501,6 +1501,7 @@ register_test_target(test_chat_markup_parser)
 add_executable(test_font_em_scale
     test_font_em_scale.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/interface_fonts.cpp
+    ${CMAKE_SOURCE_DIR}/src/ui/stock_font_metrics.cpp
 )
 target_include_directories(test_font_em_scale PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_font_em_scale SYSTEM PRIVATE
@@ -1510,6 +1511,15 @@ target_include_directories(test_font_em_scale SYSTEM PRIVATE
 target_link_libraries(test_font_em_scale PRIVATE catch2_main imgui)
 add_test(NAME font_em_scale COMMAND test_font_em_scale)
 register_test_target(test_font_em_scale)
+
+# ── test_stock_font_metrics ──────────────────────────────────
+# The stock client's FontString metrics, reverse engineered from Wow.exe:
+# whole-pixel advances, the outline pad, the last glyph's cell, negative-only
+# kerning and the 32 px raster clamp. Made-up glyphs, and FRIZQT__'s own
+# figures copied in, so it needs no game data.
+wowee_add_test(test_stock_font_metrics
+    SOURCES test_stock_font_metrics.cpp
+            ${CMAKE_SOURCE_DIR}/src/ui/stock_font_metrics.cpp)
 
 # ── test_quest_text ──────────────────────────────────────────
 # Which of a quest's five strings holds the line a finished quest shows. The
@@ -1523,6 +1533,7 @@ wowee_add_test(test_quest_text SOURCES test_quest_text.cpp)
 add_executable(test_interface_text_lines
     test_interface_text_lines.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/interface_fonts.cpp
+    ${CMAKE_SOURCE_DIR}/src/ui/stock_font_metrics.cpp
 )
 target_include_directories(test_interface_text_lines PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_interface_text_lines SYSTEM PRIVATE

@@ -73,6 +73,23 @@ std::vector<std::vector<WrapRun>> wrapText(const std::vector<WrapRun>& runs,
     std::vector<std::vector<WrapRun>> lines;
     lines.emplace_back();
     float x = 0.0f;
+    // The line is measured whole rather than as a sum of its words. A width
+    // the stock client's way is not a sum: the line starts with the outline's
+    // pad, its last glyph counts its cell rather than its advance, and the
+    // glyphs either side of a join kern. Adding up words measured one by one
+    // counted the pad and the last cell once per word and wrapped early.
+    // Pictures do not go through the measure, so their room is kept apart.
+    std::string lineText;
+    float pictures = 0.0f;
+    const auto widthWith = [&](const std::string& more) {
+        return pictures + measure(lineText + more);
+    };
+    const auto newLine = [&] {
+        lines.emplace_back();
+        x = 0.0f;
+        lineText.clear();
+        pictures = 0.0f;
+    };
     auto place = [&](const WrapRun& style, const std::string& piece) {
         if (!lines.back().empty() && sameStyle(lines.back().back(), style)) {
             lines.back().back().text += piece;
@@ -94,11 +111,9 @@ std::vector<std::vector<WrapRun>> wrapText(const std::vector<WrapRun>& runs,
             const float w = run.texWidth > 0.0f    ? run.texWidth
                           : run.texHeight > 0.0f   ? run.texHeight
                                                    : measure("W");
-            if (wrapWidth > 0.0f && x > 0.0f && x + w > wrapWidth) {
-                lines.emplace_back();
-                x = 0.0f;
-            }
+            if (wrapWidth > 0.0f && x > 0.0f && x + w > wrapWidth) newLine();
             lines.back().push_back(run);
+            pictures += w;
             x += w;
             continue;
         }
@@ -109,8 +124,7 @@ std::vector<std::vector<WrapRun>> wrapText(const std::vector<WrapRun>& runs,
             // label with an explicit break gets one even when nothing is
             // wrapping.
             if (run.text[at] == '\n') {
-                lines.emplace_back();
-                x = 0.0f;
+                newLine();
                 ++at;
                 continue;
             }
@@ -135,13 +149,12 @@ std::vector<std::vector<WrapRun>> wrapText(const std::vector<WrapRun>& runs,
             std::string word = run.text.substr(at, end - at);
             at = end;
 
-            float w = measure(word);
-            if (x > 0.0f && x + w > wrapWidth) {
-                lines.emplace_back();
-                x = 0.0f;
+            float w = widthWith(word);
+            if (x > 0.0f && w > wrapWidth) {
+                newLine();
                 // The break stands in for the space that separated them.
                 while (!word.empty() && word.front() == ' ') word.erase(0, 1);
-                w = measure(word);
+                w = widthWith(word);
             }
 
             if (w > wrapWidth && nonSpaceWrap) {
@@ -149,23 +162,24 @@ std::vector<std::vector<WrapRun>> wrapText(const std::vector<WrapRun>& runs,
                 // which is the only thing left and what the attribute asks for.
                 std::string part;
                 for (char c : word) {
-                    if (!part.empty() && x + measure(part + c) > wrapWidth) {
+                    if (!part.empty() && widthWith(part + c) > wrapWidth) {
                         place(run, part);
-                        lines.emplace_back();
-                        x = 0.0f;
+                        newLine();
                         part.clear();
                     }
                     part += c;
                 }
                 if (!part.empty()) {
                     place(run, part);
-                    x += measure(part);
+                    x = widthWith(part);
+                    lineText += part;
                 }
                 continue;
             }
 
             place(run, word);
-            x += w;
+            lineText += word;
+            x = w;
         }
     }
     return lines;

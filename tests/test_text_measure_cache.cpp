@@ -44,6 +44,13 @@ TEST_CASE("A remembered measurement is found only under every input it was made 
     CHECK(cache.find(key(&faceA, 12.0f, "Goldshire", true)) == nullptr);
     CHECK(cache.find(key(&faceA, 12.0f, "Goldshire", false, 100.0f)) == nullptr);
     CHECK(cache.find(key(&faceA, 12.0f, "Goldshire", false, 0.0f, true)) == nullptr);
+    // The stock metrics round in pixels and widen an outlined cell.
+    TextMeasureKey scaled = key(&faceA, 12.0f, "Goldshire");
+    scaled.pixelScale = 1080.0f / 768.0f;
+    CHECK(cache.find(scaled) == nullptr);
+    TextMeasureKey outlined = key(&faceA, 12.0f, "Goldshire");
+    outlined.outline = 2;
+    CHECK(cache.find(outlined) == nullptr);
 }
 
 TEST_CASE("A paragraph is remembered per wrap width", "[ui][textmeasure]") {

@@ -30,14 +30,19 @@ struct TextMeasureKey {
     float wrapWidth = 0.0f;       ///< the box a paragraph wraps in; 0 for a label
     bool paragraph = false;       ///< wraps inside wrapWidth rather than sizing itself
     bool nonSpaceWrap = false;
+    /// Screen pixels per unit and the outline: the stock metrics round in
+    /// pixels and widen an outlined glyph's cell, so either changes the answer.
+    float pixelScale = 1.0f;
+    uint8_t outline = 0;
     std::string text;
 
     bool operator==(const TextMeasureKey& o) const {
         return face == o.face &&
                std::bit_cast<uint32_t>(size) == std::bit_cast<uint32_t>(o.size) &&
                std::bit_cast<uint32_t>(wrapWidth) == std::bit_cast<uint32_t>(o.wrapWidth) &&
+               std::bit_cast<uint32_t>(pixelScale) == std::bit_cast<uint32_t>(o.pixelScale) &&
                paragraph == o.paragraph && nonSpaceWrap == o.nonSpaceWrap &&
-               text == o.text;
+               outline == o.outline && text == o.text;
     }
 };
 
@@ -50,7 +55,9 @@ struct TextMeasureKeyHash {
         mix(std::hash<const void*>()(k.face));
         mix(std::bit_cast<uint32_t>(k.size));
         mix(std::bit_cast<uint32_t>(k.wrapWidth));
-        mix((k.paragraph ? 1u : 0u) | (k.nonSpaceWrap ? 2u : 0u));
+        mix(std::bit_cast<uint32_t>(k.pixelScale));
+        mix((k.paragraph ? 1u : 0u) | (k.nonSpaceWrap ? 2u : 0u) |
+            (static_cast<size_t>(k.outline) << 2));
         return h;
     }
 };

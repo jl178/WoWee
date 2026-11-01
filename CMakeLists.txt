@@ -1010,6 +1010,7 @@ set(WOWEE_SOURCES
     src/ui/framexml_takeover.cpp
     src/ui/unit_portrait.cpp
     src/ui/interface_fonts.cpp
+    src/ui/stock_font_metrics.cpp
     src/ui/text_edit.cpp
     src/ui/paper_ui.cpp
     src/ui/widget_renderer.cpp
@@ -1918,6 +1919,7 @@ if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR AND SDL3_FOUND AND EXISTS ${IMGUI_D
         src/ui/paper_ui.cpp
         src/ui/text_edit.cpp
         src/ui/interface_fonts.cpp
+        src/ui/stock_font_metrics.cpp
         src/pipeline/asset_inventory.cpp
         src/rendering/m2_model_classifier.cpp
         tools/asset_extract/extractor.cpp

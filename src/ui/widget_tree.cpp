@@ -371,14 +371,15 @@ Widget* WidgetTree::get(uint32_t id) {
 }
 
 bool WidgetTree::noteSizingContext(const void* font, const void* assets,
-                                   float defaultFontSize) {
+                                   float defaultFontSize, float pixelScale) {
     if (font == sizingFont_ && assets == sizingAssets_ &&
-        defaultFontSize == sizingDefaultFontSize_) {
+        defaultFontSize == sizingDefaultFontSize_ && pixelScale == sizingPixelScale_) {
         return false;
     }
     sizingFont_ = font;
     sizingAssets_ = assets;
     sizingDefaultFontSize_ = defaultFontSize;
+    sizingPixelScale_ = pixelScale;
     markAllChanged();
     return true;
 }

@@ -748,15 +748,26 @@ int lua_Region_SetHeight(lua_State* L) {
 /// not be a frame in flight to ask, and an estimate is far better than nothing:
 /// the alternative was answering nil, and MoneyFrame does
 /// SetWidth(GetTextWidth() + iconWidth) - arithmetic that loses the file.
-float measureTextWidth(const std::string& text, const std::string& fontFace,
-                       float fontHeight) {
+/// The screen pixels in one of a widget's own units: the interface scale
+/// times the widget's effective scale. The stock text metrics round in pixels,
+/// so a width in units depends on it - GetStringWidth answers in the font
+/// string's own units, converted back from the pixels it laid out.
+float pixelsPerUnitOf(lua_State* L, const wowee::ui::Widget& w) {
+    const auto* tree = wowee::addons::getWidgetTree(L);
+    const float ui = (tree && tree->uiScale() > 0.0f) ? tree->uiScale() : 1.0f;
+    return ui * (w.effScale > 0.0f ? w.effScale : 1.0f);
+}
+
+float measureTextWidth(lua_State* L, const wowee::ui::Widget& w) {
     // Through the same function the renderer draws with, so a widget sized to
     // its own text gets the width its own text will occupy. Measuring in this
     // client's face at a flat twelve while drawing in the interface's at its
     // real height made every self-sized label narrower than what went in it -
     // MoneyFrame sizes all three coin buttons that way, and the gold, silver
     // and copper ran into one another.
-    return wowee::ui::interfaceTextWidth(text, fontFace, fontHeight);
+    return wowee::ui::interfaceTextWidth(w.text, w.fontFace, w.fontHeight,
+                                         pixelsPerUnitOf(L, w),
+                                         wowee::ui::fontOutlineFromName(w.fontOutline));
 }
 
 /// The font string a widget measures: itself if it is one, and otherwise the
@@ -775,7 +786,7 @@ const wowee::ui::Widget* textWidgetOf(lua_State* L, int index) {
 
 int lua_Region_GetTextWidth(lua_State* L) {
     const auto* w = textWidgetOf(L, 1);
-    lua_pushnumber(L, w ? measureTextWidth(w->text, w->fontFace, w->fontHeight) : 0.0);
+    lua_pushnumber(L, w ? measureTextWidth(L, *w) : 0.0);
     return 1;
 }
 
@@ -845,7 +856,7 @@ int lua_Region_GetFieldSize(lua_State* L) {
 /// no height is a paragraph, and so is anything the interface has marked as
 /// wrapping. A label sized by its own text wraps at nothing and is one line
 /// unless it carries a |n.
-double fontStringTextHeight(const wowee::ui::Widget& w) {
+double fontStringTextHeight(lua_State* L, const wowee::ui::Widget& w) {
     // The size it is actually drawn at, which is what interfaceFontSize
     // answers. Three places asked this question with three different
     // fallbacks - twelve here, twelve below, fourteen in the edit box - and a
@@ -855,14 +866,17 @@ double fontStringTextHeight(const wowee::ui::Widget& w) {
         (w.wrapsToWidth || (!w.autoSized && w.width > 0.0f)) ? w.width : 0.0f;
     const int lines = std::max(1, wowee::ui::interfaceTextLines(
                                       w.text, w.fontFace, w.fontHeight,
-                                      wrapWidth, w.nonSpaceWrap));
-    return line * 1.2 * lines;
+                                      wrapWidth, w.nonSpaceWrap, pixelsPerUnitOf(L, w),
+                                      wowee::ui::fontOutlineFromName(w.fontOutline)));
+    // GetStringHeight's own count: the font height per line and the spacing
+    // between them, so one line is exactly the height.
+    return wowee::ui::stockTextHeight(lines, line, w.lineSpacing);
 }
 
 int lua_Region_GetTextHeight(lua_State* L) {
     const auto* w = textWidgetOf(L, 1);
     if (!w) { lua_pushnumber(L, 0.0); return 1; }
-    lua_pushnumber(L, fontStringTextHeight(*w));
+    lua_pushnumber(L, fontStringTextHeight(L, *w));
     return 1;
 }
 
@@ -903,7 +917,7 @@ int lua_Region_GetWidth(lua_State* L) {
         // _G[name.."Text"]:GetWidth(), so answering zero made every tab on the
         // character sheet collapse to the width of its two end textures, with
         // the label clipped out of sight inside it.
-        lua_pushnumber(L, measureTextWidth(w->text, w->fontFace, w->fontHeight));
+        lua_pushnumber(L, measureTextWidth(L, *w));
         return 1;
     }
     lua_pushnumber(L, w ? (w->rectW > 0.0f ? w->rectW / es : w->width) : 0.0);
@@ -928,7 +942,7 @@ int lua_Region_GetHeight(lua_State* L) {
         // against one line and gives a two-line objective a taller row. Zero
         // failed that test always, so every wrapped objective was drawn over
         // the row beneath it.
-        lua_pushnumber(L, fontStringTextHeight(*w));
+        lua_pushnumber(L, fontStringTextHeight(L, *w));
         return 1;
     }
     lua_pushnumber(L, w ? (w->rectH > 0.0f ? w->rectH / es : w->height) : 0.0);
