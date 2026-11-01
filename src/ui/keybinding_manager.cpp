@@ -415,7 +415,11 @@ std::string KeybindingManager::resolveBindingKey(const std::string& key) const {
 std::string KeybindingManager::resolveCommand(const std::string& key) const { return resolve(key, true).second; }
 void KeybindingManager::beginInputFrame() {
     pressedBindings_.clear();
-    virtualCommandPressed_.clear();
+    // Presses made outside the input pump (a script's JumpOrAscendStart, run
+    // from an OnUpdate after this frame's movement read its input) become this
+    // frame's edges, rather than being cleared before anything saw them.
+    virtualCommandPressed_ = std::move(virtualPressQueued_);
+    virtualPressQueued_.clear();
 }
 void KeybindingManager::processInputEvent(const SDL_Event& event) {
     nativeInput_ = true;
@@ -502,9 +506,12 @@ void KeybindingManager::updateInput() {
     down_ = next;
 }
 void KeybindingManager::setVirtualCommand(const std::string& command, const std::string& source, bool down) {
-    if (command.empty() || (down && !inputFocused_)) return;
+    // A script's press is not a key and does not wait on keyboard focus; it is
+    // queued for the next input frame (see beginInputFrame).
+    const bool scripted = (source == "lua");
+    if (command.empty() || (down && !inputFocused_ && !scripted)) return;
     auto& sources = virtualCommands_[command];
-    if (down && sources.empty()) virtualCommandPressed_.insert(command);
+    if (down && sources.empty()) (scripted ? virtualPressQueued_ : virtualCommandPressed_).insert(command);
     if (down) sources.insert(source); else sources.erase(source);
     // A release must not erase an edge from earlier in the same pump.
     if (sources.empty()) virtualCommands_.erase(command);
@@ -534,8 +541,12 @@ bool hasCommand(const Sources& sources, const std::string& command) {
 }
 }
 bool KeybindingManager::isCommandPressed(const std::string& command, bool repeat) const {
-    if (command.empty() || !inputFocused_ || interfaceTakingTypedInput() || ImGui::GetIO().WantTextInput) return false;
-    if (virtualCommandPressed_.count(command) || hasCommand(pressedBindings_, command)) return true;
+    if (command.empty()) return false;
+    // A virtual press (a script's JumpOrAscendStart, a touch or pad control)
+    // is not a key, so it does not wait on the window having keyboard focus.
+    if (virtualCommandPressed_.count(command)) return true;
+    if (!inputFocused_ || interfaceTakingTypedInput() || ImGui::GetIO().WantTextInput) return false;
+    if (hasCommand(pressedBindings_, command)) return true;
     if (nativeInput_) return false;
     const auto it = bindings_.find(command);
     return it != bindings_.end() && (keyActive(it->second[0], true, repeat) || keyActive(it->second[1], true, repeat));

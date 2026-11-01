@@ -1849,6 +1849,20 @@ static int lua_RunBinding(lua_State* L) {
     lua_pop(L, 1);
     return 0;
 }
+// JumpOrAscendStart / AscendStop: what the stock JUMP binding runs
+// (Bindings.xml). The press reaches the movement code the way a key would,
+// as the JUMP command held for as long as AscendStop has not been called, so
+// a jump from a script or an addon is the same jump as one from the keyboard.
+static int lua_JumpOrAscendStart(lua_State* L) {
+    (void)L;
+    ui::KeybindingManager::getInstance().setVirtualCommand("JUMP", "lua", true);
+    return 0;
+}
+static int lua_AscendStop(lua_State* L) {
+    (void)L;
+    ui::KeybindingManager::getInstance().setVirtualCommand("JUMP", "lua", false);
+    return 0;
+}
 // The override-binding family, none of which this client implements - only
 // the Click variant was ever *bound*, and the other four raised. They are
 // reached from restrictedframes.lua, the secure-frame machinery behind action
@@ -2188,6 +2202,8 @@ void registerActionLuaAPI(lua_State* L) {
                 {"SaveBindings",        lua_SaveBindings},
                 {"LoadBindings",        lua_LoadBindings},
                 {"RunBinding",          lua_RunBinding},
+                {"JumpOrAscendStart",   lua_JumpOrAscendStart},
+                {"AscendStop",          lua_AscendStop},
                 {"SetOverrideBindingClick", lua_SetOverrideBindingClick},
                 {"SetOverrideBinding",      lua_SetOverrideBinding},
                 {"SetOverrideBindingSpell", lua_SetOverrideBindingSpell},
