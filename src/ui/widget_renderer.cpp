@@ -16,6 +16,7 @@
 #include "core/env_flag.hpp"
 #include "ui/interface_fonts.hpp"
 #include "core/logger.hpp"
+#include "rendering/polygon_triangulate.hpp"
 
 #include "imgui.h"
 
@@ -1203,16 +1204,29 @@ void WidgetRenderer::drawQuestBlobs(ImDrawList* dl, const Widget& w,
         centre.y /= static_cast<float>(pts.size());
         const int n = static_cast<int>(pts.size());
 
-        // Fill: a fan from the centre, which covers the outlines the server
-        // sends (a hull drawn around the objective's spawns).
-        dl->PrimReserve(n * 3, n + 1);
-        unsigned int base = dl->_VtxCurrentIdx;
-        dl->PrimWriteVtx(centre, white, fill);
-        for (const ImVec2& p : pts) dl->PrimWriteVtx(p, white, fill);
-        for (int i = 0; i < n; ++i) {
-            dl->PrimWriteIdx(static_cast<ImDrawIdx>(base));
-            dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + 1 + i));
-            dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + 1 + ((i + 1) % n)));
+        // Fill: the ring cut into triangles by ear clipping, because the
+        // outlines are often concave (rendering/polygon_triangulate.hpp). A
+        // ring that will not reduce falls back to a fan from its centre.
+        std::vector<glm::vec2> ring;
+        ring.reserve(pts.size());
+        for (const ImVec2& p : pts) ring.emplace_back(p.x, p.y);
+        const std::vector<uint16_t> tris = rendering::triangulateSimplePolygon(ring);
+        unsigned int base = 0;
+        if (!tris.empty()) {
+            dl->PrimReserve(static_cast<int>(tris.size()), n);
+            base = dl->_VtxCurrentIdx;
+            for (const ImVec2& p : pts) dl->PrimWriteVtx(p, white, fill);
+            for (uint16_t t : tris) dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + t));
+        } else {
+            dl->PrimReserve(n * 3, n + 1);
+            base = dl->_VtxCurrentIdx;
+            dl->PrimWriteVtx(centre, white, fill);
+            for (const ImVec2& p : pts) dl->PrimWriteVtx(p, white, fill);
+            for (int i = 0; i < n; ++i) {
+                dl->PrimWriteIdx(static_cast<ImDrawIdx>(base));
+                dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + 1 + i));
+                dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + 1 + ((i + 1) % n)));
+            }
         }
 
         // Edge: a band along the inside of each side, opaque at the line and
