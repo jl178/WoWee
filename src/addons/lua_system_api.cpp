@@ -286,6 +286,11 @@ static int lua_PlaySound(lua_State* L) {
     std::string sound;
     if (lua_isnumber(L, 1)) {
         uint32_t id = static_cast<uint32_t>(lua_tonumber(L, 1));
+        // A SoundEntries id names its own row; play that. The table below is
+        // the fallback for data without the row.
+        if (const auto* data = ac->getSoundData()) {
+            if (const auto* entry = data->sound(id); entry && sfx->playByName(entry->name)) return 0;
+        }
         // Map common WoW sound IDs to named sounds
         switch (id) {
             case 856: case 1115: sfx->playButtonClick(); return 0; // igMainMenuOption
@@ -321,7 +326,7 @@ static int lua_PlaySound(lua_State* L) {
         //
         // Mapped where the client has the sound the name asks for, and left
         // alone where it does not. Substituting something that merely exists
-        // is worse than silence: a wrong sound is a wrong sound forever, while
+        // is worse than silence: a wrong sound is a wrong sound enhanced, while
         // a missing one is a gap someone can still hear.
         struct Mapping { const char* name; void (audio::UiSoundManager::*play)(); };
         static const Mapping kMappings[] = {
@@ -398,7 +403,7 @@ static int lua_PlaySound(lua_State* L) {
         // returns having done nothing and the panel is silent.
         //
         // Silence is the right answer - substituting a sound that merely
-        // exists would be wrong forever, where a missing one can still be
+        // exists would be wrong enhanced, where a missing one can still be
         // heard - but it should be possible to find out which name it was
         // without guessing from a quiet button. The interface asks for eighty
         // nine of these across the files that load, and the table below covers

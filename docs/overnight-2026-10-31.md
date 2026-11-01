@@ -148,6 +148,17 @@ The visibility walk and the cull upload read a dozen scattered fields per
 instance; grouped behind the position, the M2 record worker fell from
 10-12 ms to 4-5 ms (`renderWorld: ... workers ... m2 4.68`).
 
+### Named the rest of beginFrame (20:35)
+
+Per-pass timing in the render graph and per-renderer timing in the shadow
+pass. At 34.5 fps (28.9 ms): shadow_pass 3.9 ms of the 4.1 ms graph,
+record+ubo 1.9 ms, M2 cull upload 1.0 ms, acquire 0.1 ms, volumetric fog
+0.03 ms. The WMO pass now rejects whole buildings by bounds before testing
+their groups, and the M2 shadow walk rejects casters by distance before
+touching the model. NPC greeting, farewell and annoyed lines come from
+CreatureDisplayInfo.NPCSoundID through NPCSounds; the race voice library is
+the fallback. Numeric PlaySound ids resolve through SoundEntries too.
+
 ## Next
 
 See the backlog in the loop prompt: jump phases, M2 per-frame scans, FrameXML
