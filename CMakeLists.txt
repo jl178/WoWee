@@ -608,6 +608,7 @@ endif()
 set(WOWEE_SOURCES
     # Core
     src/core/application.cpp
+    src/core/debug_lua_hook.cpp
     src/core/screen_recorder.cpp
     src/core/entity_spawner.cpp
     src/core/entity_spawner_player.cpp
@@ -1076,6 +1077,7 @@ set(WOWEE_SOURCES
     src/addons/lua_social_api.cpp
     src/addons/lua_system_api.cpp
     src/addons/lua_action_api.cpp
+    src/addons/lua_world_map_api.cpp
     src/addons/toc_parser.cpp
 
     # Main

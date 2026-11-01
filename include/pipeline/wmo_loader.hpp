@@ -152,6 +152,9 @@ struct WMOGroup {
     uint32_t fogIndices[4];     // Fog references
     uint32_t liquidType;
     uint32_t groupId;
+    /// MOGP's own group id - global across all WMOs, the key WMOAreaTable
+    /// and DungeonMapChunk use. Not the index above.
+    uint32_t wmoGroupId = 0;
 
     // Geometry
     std::vector<WMOVertex> vertices;

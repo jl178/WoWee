@@ -2197,6 +2197,8 @@ public:
     // Gossip POI (aliased from handler_types.hpp)
     using GossipPoi = game::GossipPoi;
     const std::vector<GossipPoi>& getGossipPois() const;
+    /// Every quest POI block the server sent, see QuestHandler.
+    const std::vector<QuestPoiSet>& getQuestPoiSets() const;
 
     // Quest turn-in
     bool isQuestRequestItemsOpen() const;

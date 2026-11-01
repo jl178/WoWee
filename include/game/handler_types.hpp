@@ -328,6 +328,31 @@ struct GossipPoi {
     std::vector<std::pair<float, float>> area;
 };
 
+/// One POI block of SMSG_QUEST_POI_QUERY_RESPONSE, kept the way the client
+/// keeps it (Wow.exe 0x005E7370, 0x34 bytes a block). Everything the world
+/// map's QuestPOI functions need: which objective the area is for, which map,
+/// WorldMapArea and dungeon floor it is drawn on, and its outline.
+struct QuestPoiArea {
+    int32_t poiId = 0;
+    int32_t objectiveIndex = -1;    ///< -1: the turn-in; 0-3 kill/object, 4-9 items
+    uint32_t mapId = 0;
+    uint32_t worldMapAreaId = 0;
+    uint32_t floor = 0;
+    uint32_t priority = 0;          ///< "unk3" on the wire; lower wins the icon
+    uint32_t flags = 0;             ///< "unk4"; 4 = only on its own WorldMapArea
+    /// Wire order and wire axes: first the north axis (server X), then the
+    /// west axis (server Y), as int32 yards.
+    std::vector<std::pair<int32_t, int32_t>> points;
+    /// The integer mean of the points (the client divides with int division).
+    int32_t centerX = 0, centerY = 0;
+};
+
+/// A quest's POI blocks, one entry of the client's 25 at 0x00C23B00.
+struct QuestPoiSet {
+    uint32_t questId = 0;
+    std::vector<QuestPoiArea> areas;
+};
+
 // ---- Instance lockouts ----
 
 /// What a random dungeon pays out the first time it is run each day.

@@ -180,6 +180,10 @@ public:
     uint32_t getCurrentZoneId() const;
     /// AreaTable id of the chunk under the player (the subzone), 0 if unknown.
     uint32_t getCurrentAreaId() const;
+    /// The global id (MOGP group id) of the WMO group the player stands in,
+    /// 0 outdoors. The world map picks a dungeon floor from it, through
+    /// DungeonMapChunk, the way the client does.
+    uint32_t getPlayerWmoGroupId() const;
     /// The area under the player, asked of AreaTable rather than resolved to a
     /// zone first - the world PvP flag is on the subzone. See ZoneManager.
     bool isOnOutdoorPvpObjective() const;

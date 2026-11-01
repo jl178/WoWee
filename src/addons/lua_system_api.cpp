@@ -493,7 +493,12 @@ static int lua_GetPlayerMapPosition(lua_State* L) {
 static int lua_GetPlayerFacing(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (gh) {
-        float facing = gh->getMovementInfo().orientation;
+        // The client's own orientation, as the server sends it: 0 facing
+        // north, a quarter turn counter-clockwise facing west. The movement
+        // info holds this client's canonical yaw, which is that less a
+        // quarter turn, so the arrow on the world map pointed 90 degrees
+        // clockwise of where the player faced.
+        float facing = core::coords::canonicalToServerYaw(gh->getMovementInfo().orientation);
         // Normalize to [0, 2π)
         while (facing < 0) facing += 6.2831853f;
         while (facing >= 6.2831853f) facing -= 6.2831853f;

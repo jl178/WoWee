@@ -52,6 +52,7 @@
 #include "rendering/minimap.hpp"
 #include "rendering/world_map.hpp"
 #include "ui/framexml_takeover.hpp"
+#include "core/debug_lua_hook.hpp"
 #include "ui/keybinding_manager.hpp"
 #include "rendering/quest_marker_renderer.hpp"
 #include "rendering/footprint_renderer.hpp"
@@ -902,6 +903,9 @@ bool Application::initialize() {
         luaSvc.getLiveAreaId = [r = renderer.get()]() -> uint32_t {
             return r ? r->getCurrentAreaId() : 0u;
         };
+        luaSvc.getLiveWmoGroupId = [r = renderer.get()]() -> uint32_t {
+            return r ? r->getPlayerWmoGroupId() : 0u;
+        };
         luaSvc.isOnOutdoorPvpObjective = [r = renderer.get()]() -> bool {
             return r && r->isOnOutdoorPvpObjective();
         };
@@ -984,6 +988,14 @@ bool Application::initialize() {
         // device to upload it; both exist by now.
         widgetRenderer_.initialize(assetManager.get(),
                                    window ? window->getVkContext() : nullptr);
+        // WorldMapBlobFrame's quest areas: which quests are selected and which
+        // objectives are open is the interface's state, so the renderer asks.
+        widgetRenderer_.setQuestBlobSource([am = addonManager_.get()]() {
+            std::vector<std::vector<std::pair<float, float>>> none;
+            auto* engine = am ? am->getLuaEngine() : nullptr;
+            if (!engine || !engine->getState()) return none;
+            return addons::questBlobPolygons(engine->getState());
+        });
         if (addonManager_->initialize(gameHandler.get(), luaSvc)) {
             // FrameXML and the AddOns folder are loose directories on disk, not
             // assets reached through the manifest, and they belong to the
@@ -4705,7 +4717,20 @@ void Application::render() {
                 // like the minimap it is told where to be rather than handed
                 // a picture. The detail frame, not the outer one: that is the
                 // map area inside the panel FrameXML drew.
-                if (auto* wmap = renderer->getWorldMap()) {
+                if (auto* wmap = renderer->getWorldMap();
+                    wmap && ui::frameXmlOwns(ui::UiElement::WorldMap)) {
+                    // FrameXML's WorldMapFrame is the whole map, as it is in
+                    // the stock client: tiles, overlays, landmarks, quest
+                    // markers, the arrow and every button, driven by the C
+                    // functions in lua_world_map_api.cpp. This client's own
+                    // map renderer used to be laid over WorldMapDetailFrame,
+                    // and the two fought: it took the mouse (so no button or
+                    // click on the map reached the interface), kept its own
+                    // idea of the zone, and drew its own quest icons in the
+                    // wrong places. It is not given the frame any more.
+                    (void)wmap->takeViewChanged();
+                    wmap->clearFrameRect();
+                } else if (wmap) {
                     // The map settles on the player's zone a frame after the
                     // interface asked where it was, so it says when it has and
                     // the dropdowns are rebuilt from the answer rather than
@@ -5525,6 +5550,9 @@ void Application::render() {
             engine->updateSizeChanges();
             engine->updateScrollRanges();
             });
+            // WOWEE_DEBUG_LUA: a test script, once, after world entry. Off
+            // unless the variable is set.
+            debugLuaHookTick(engine, window ? window->getSDLWindow() : nullptr);
 
             // A click that never reaches the interface and a click whose
             // handler does nothing look the same from the chair. Said once a
@@ -5633,6 +5661,11 @@ void Application::render() {
     // row counted in one place and not the other comes out as a sheet taller
     // than what is on it, which nothing but looking will catch. The in-game
     // screenshot key cannot reach the login screen, which is where that card is.
+    // A screenshot a WOWEE_DEBUG_LUA script asked for, of the frame that has
+    // just been drawn.
+    if (const std::string shot = debugLuaHookTakeScreenshot(); !shot.empty()) {
+        renderer->captureScreenshot(shot);
+    }
     if (const char* shot = std::getenv("WOWEE_SCREENSHOT"); shot != nullptr) {
         // Let the interface settle first: ImGui sizes much of its layout from
         // what it measured last frame, and hides a window outright for its

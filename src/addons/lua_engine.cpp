@@ -26,6 +26,7 @@
 #include "addons/lua_bit_lib.hpp"
 #include "addons/lua_handler_globals.hpp"
 #include "addons/lua_api_registrations.hpp"
+#include "addons/world_map_api.hpp"
 #include "addons/toc_parser.hpp"
 #include "core/window.hpp"
 #include "game/classic_combat_chat.hpp"
@@ -5973,6 +5974,10 @@ void LuaEngine::registerCoreAPI() {
     registerActionLuaAPI(L_);
     registerLfgLuaAPI(L_);
     registerSocketLuaAPI(L_);
+    // The world map last, over the older map bindings in the system set,
+    // which it keeps as its fallback for client data it cannot read.
+    worldmap::registerWorldMapLuaAPI(L_);
+    registerQuestPoiLuaAPI(L_);
 
     // WoW aliases
     lua_getglobal(L_, "string");
@@ -6255,6 +6260,9 @@ void LuaEngine::registerCoreAPI() {
         {"GetZoomLevels",   lua_Minimap_GetZoomLevels},
         {"PingLocation",    lua_Minimap_PingLocation},
         {"DrawQuestBlob",   lua_QuestBlobFrame_DrawQuestBlob},
+        {"UpdateMouseOverTooltip", lua_QuestBlobFrame_UpdateMouseOverTooltip},
+        {"GetNumTooltips",  lua_QuestBlobFrame_GetNumTooltips},
+        {"GetTooltipIndex", lua_QuestBlobFrame_GetTooltipIndex},
         {"GetCenter",       lua_Region_GetCenter},
         {"SetAlpha",        lua_Region_SetAlpha},
         {"GetAlpha",        lua_Region_GetAlpha},
@@ -7942,12 +7950,12 @@ void LuaEngine::registerCoreAPI() {
         // from the widget metatable.
         "function WorldMapBlobFrame:SetFillAlpha() end\n"
         "function WorldMapBlobFrame:SetBorderAlpha() end\n"
-        // Nil rather than zero: the caller reads it as "are there blob
-        // tooltips to use instead of the quest log's own objectives", and
-        // takes the quest log path when there are none. Zero is true in Lua
-        // and would send it down the blob path with nothing in it.
-        "function WorldMapBlobFrame:GetNumTooltips() return nil end\n"
-        "function WorldMapBlobFrame:GetTooltipIndex(i) return i end\n"
+        // GetNumTooltips, GetTooltipIndex and UpdateMouseOverTooltip are real
+        // bindings on the widget metatable now (lua_quest_api.cpp) and must
+        // not be shadowed by fields here either. GetNumTooltips still answers
+        // nil rather than zero when no area is under the cursor: the caller
+        // reads it as "are there blob tooltips to use instead of the quest
+        // log's own objectives", and zero is true in Lua.
         // GameTooltip: global tooltip frame used by virtually all addons
         // Created as a GameTooltip, not a Frame, so it is one as far as the
         // widget tree is concerned and its lines are drawn.

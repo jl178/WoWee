@@ -409,6 +409,7 @@ public:
         uint32_t modelId = 0;
         uint32_t wmoId = 0;       ///< MOHD wmoID
         int32_t groupIndex = -1;  ///< index of the containing group
+        uint32_t wmoGroupId = 0;  ///< the tightest containing group's MOGP id
         uint16_t nameSet = 0;
         bool interior = false;    ///< the group has the indoor flag
         /// The group is lit as an interior: INDOOR and not EXTERIOR_LIT (0x40).
@@ -525,6 +526,7 @@ private:
         glm::vec3 boundingBoxMax;
 
         uint32_t groupFlags = 0;
+        uint32_t wmoGroupId = 0;  ///< MOGP group id (global), see WMOGroup
         bool allUntextured = false;  // True if ALL batches use fallback white texture (collision/placeholder group)
         bool isLOD = false;          // Distance-only group (skip when camera is close)
 
