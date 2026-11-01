@@ -54,6 +54,61 @@ ItemDisplayArt readItemDisplayArt(const DBCFile& itemDisplayInfo, uint32_t recor
     return art;
 }
 
+ItemRegionSource readItemRegionSource(const DBCFile& itemDisplayInfo, uint32_t recordIndex,
+                                      CharComponentSlot slot) {
+    const auto* layout = getActiveDBCLayout()
+        ? getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
+    uint32_t texFields[kItemTextureRegionCount];
+    getItemDisplayInfoTextureFields(itemDisplayInfo, layout, texFields);
+
+    // 25-field files (TBC/WotLK) carry two inventory icons and so sit one
+    // column right of the 23-field vanilla ones. Flags follows GeosetGroup3 in
+    // both.
+    const bool wide = itemDisplayInfo.getFieldCount() >= 25;
+    uint32_t geoset1Field = layout ? layout->field("GeosetGroup1") : 0xFFFFFFFF;
+    if (geoset1Field == 0xFFFFFFFF) geoset1Field = wide ? 7u : 6u;
+    uint32_t geoset3Field = layout ? layout->field("GeosetGroup3") : 0xFFFFFFFF;
+    if (geoset3Field == 0xFFFFFFFF) geoset3Field = wide ? 9u : 8u;
+    const uint32_t flagsField = geoset3Field + 1;
+
+    ItemRegionSource src;
+    src.slot = slot;
+    for (int region = 0; region < kItemTextureRegionCount; region++) {
+        src.textures[region] = itemDisplayInfo.getString(recordIndex, texFields[region]);
+    }
+    src.geosetGroup1 = itemDisplayInfo.getUInt32(recordIndex, geoset1Field);
+    src.geosetGroup3 = itemDisplayInfo.getUInt32(recordIndex, geoset3Field);
+    if (flagsField < itemDisplayInfo.getFieldCount()) {
+        src.flags = itemDisplayInfo.getUInt32(recordIndex, flagsField);
+    }
+    return src;
+}
+
+std::vector<std::pair<int, std::string>> resolveItemRegionLayers(
+    AssetManager& assets, const std::vector<ItemRegionLayer>& layers, bool isFemale) {
+    std::vector<std::pair<int, std::string>> out;
+    out.reserve(layers.size());
+    for (const auto& layer : layers) {
+        std::string path = resolveItemRegionTexture(assets, layer.region, layer.texture, isFemale);
+        if (!path.empty()) out.emplace_back(layer.region, std::move(path));
+    }
+    return out;
+}
+
+std::vector<std::pair<int, std::string>> buildItemRegionLayers(
+    AssetManager& assets, const DBCFile& itemDisplayInfo,
+    const std::vector<EquippedItemDisplay>& items, bool isFemale) {
+    std::vector<ItemRegionSource> sources;
+    sources.reserve(items.size());
+    for (const auto& item : items) {
+        if (item.displayId == 0 || item.slot == CharComponentSlot::None) continue;
+        const int32_t recIdx = itemDisplayInfo.findRecordById(item.displayId);
+        if (recIdx < 0) continue;
+        sources.push_back(readItemRegionSource(itemDisplayInfo, static_cast<uint32_t>(recIdx), item.slot));
+    }
+    return resolveItemRegionLayers(assets, orderItemRegionLayers(sources), isFemale);
+}
+
 
 }  // namespace pipeline
 }  // namespace wowee

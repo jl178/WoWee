@@ -389,50 +389,27 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
 
     if (bodySkinPath.empty()) return;
 
-    // Component directory names indexed by region
-
-    // Load ItemDisplayInfo.dbc
     auto displayInfoDbc = assetManager->loadDBC("ItemDisplayInfo.dbc");
     if (!displayInfoDbc) return;
-    const auto* idiL = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-    uint32_t texRegionFields[8];
-    pipeline::getItemDisplayInfoTextureFields(*displayInfoDbc, idiL, texRegionFields);
 
-    // Collect equipment texture regions from all equipped items
-    std::vector<std::pair<int, std::string>> regionLayers;
-    std::vector<std::pair<int, std::string>> robeLegs;  // drawn last
+    bool isFemale = false;
+    if (auto* gh = app.getGameHandler()) {
+        if (auto* ch = gh->getActiveCharacter()) {
+            isFemale = (ch->gender == game::Gender::FEMALE) ||
+                       (ch->gender == game::Gender::NONBINARY && ch->useFemaleModel);
+        }
+    }
 
+    // Layered in the stock client's order, not slot order -
+    // pipeline/item_textures.hpp.
+    std::vector<pipeline::EquippedItemDisplay> equipped;
     for (int s = 0; s < game::Inventory::NUM_EQUIP_SLOTS; s++) {
         const auto& slot = inventory.getEquipSlot(static_cast<game::EquipSlot>(s));
         if (slot.empty() || slot.item.displayInfoId == 0) continue;
-
-        int32_t recIdx = displayInfoDbc->findRecordById(slot.item.displayInfoId);
-        if (recIdx < 0) continue;
-        const bool robeRec = pipeline::isRobeDisplay(*displayInfoDbc, idiL, recIdx);
-
-        for (int region = 0; region < 8; region++) {
-            std::string texName = displayInfoDbc->getString(
-                static_cast<uint32_t>(recIdx), texRegionFields[region]);
-            if (texName.empty()) continue;
-
-            // Which of _M, _F, _U exists is not recorded anywhere, so the
-            // order they are asked in is the rule - pipeline/item_textures.hpp.
-            bool isFemale = false;
-            if (auto* gh = app.getGameHandler()) {
-                if (auto* ch = gh->getActiveCharacter()) {
-                    isFemale = (ch->gender == game::Gender::FEMALE) ||
-                               (ch->gender == game::Gender::NONBINARY && ch->useFemaleModel);
-                }
-            }
-            const std::string fullPath = pipeline::resolveItemRegionTexture(
-                *assetManager, region, texName, isFemale);
-            if (fullPath.empty()) continue;
-            if (robeRec && pipeline::isRobeLegRegion(region)) robeLegs.emplace_back(region, fullPath);
-            else regionLayers.emplace_back(region, fullPath);
-        }
+        equipped.push_back({pipeline::componentSlotForEquipSlot(s), slot.item.displayInfoId});
     }
-    regionLayers.insert(regionLayers.end(), robeLegs.begin(), robeLegs.end());
+    std::vector<std::pair<int, std::string>> regionLayers =
+        pipeline::buildItemRegionLayers(*assetManager, *displayInfoDbc, equipped, isFemale);
 
     // Re-composite: base skin + underwear + equipment regions
     // Clear composite cache first to prevent stale textures from being reused

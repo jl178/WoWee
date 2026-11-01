@@ -184,21 +184,5 @@ inline void getItemDisplayInfoTextureFields(const DBCFile& dbc,
     for (int i = 0; i < 8; i++) out[i] = base + static_cast<uint32_t>(i);
 }
 
-/**
- * True when an ItemDisplayInfo row is a robe: GeosetGroup[2] (field 9 in
- * WotLK) is non-zero. The stock client paints a robe's leg regions over
- * trousers, boots and belt, so callers draw those layers last.
- */
-inline bool isRobeDisplay(const DBCFile& dbc, const DBCFieldMap* layout, int32_t recIdx)
-{
-    if (recIdx < 0) return false;
-    uint32_t f = layout ? layout->field("GeosetGroup3") : 0xFFFFFFFF;
-    if (f == 0xFFFFFFFF) f = (dbc.getFieldCount() >= 25) ? 9u : 8u;
-    return dbc.getUInt32(static_cast<uint32_t>(recIdx), f) != 0;
-}
-
-/** Leg regions (LegUpper 5, LegLower 6) are the ones a robe covers. */
-inline bool isRobeLegRegion(int region) { return region == 5 || region == 6; }
-
 } // namespace pipeline
 } // namespace wowee
