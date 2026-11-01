@@ -93,6 +93,9 @@ private:
 
     // 3D model preview
     std::unique_ptr<rendering::CharacterPreview> preview_;
+    /// Time the window has been another size than the preview; rebuilt at
+    /// the new size once that settles.
+    float previewResizeTimer_ = 0.0f;
     pipeline::AssetManager* assetManager_ = nullptr;
     int prevRaceIndex_ = -1;
     int prevClassIndex_ = -1;

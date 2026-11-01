@@ -100,8 +100,12 @@ inline void spring(BodyFacingState& s, float facing, float target, float dt) {
 inline BodyFacingResult updateBodyFacing(BodyFacingState& s, const BodyFacingInput& in) {
     using namespace body_facing_detail;
     BodyFacingResult out;
-    if (!s.initialized) {
-        s.body = in.facing;
+    // The stock facing is kept in [0, 2pi); Wowee's camera yaw accumulates
+    // without bound, and the spring only unwraps by one turn, so a facing
+    // several turns away swung the body (and the legs) across the circle.
+    const float facing = wrapPi(in.facing);
+    if (!s.initialized || !std::isfinite(s.body) || !std::isfinite(s.vel)) {
+        s.body = facing;
         s.vel = 0.0f;
         s.blend = 0.0f;
         s.initialized = true;
@@ -110,7 +114,7 @@ inline BodyFacingResult updateBodyFacing(BodyFacingState& s, const BodyFacingInp
     const bool strafing = in.strafeLeft || in.strafeRight;  // flags & 0xC
 
     if (!in.enabled) {
-        s.body = in.facing;
+        s.body = facing;
         s.vel = 0.0f;
         s.blend = 0.0f;
         out.body = s.body;
@@ -124,16 +128,16 @@ inline BodyFacingResult updateBodyFacing(BodyFacingState& s, const BodyFacingInp
         float offset = (in.forward || in.backward) ? kQuarterPi : kHalfPi;
         if (in.backward == in.strafeLeft) offset = -offset;
         s.blend = 1.0f;
-        const float target = wrapPi(wrapPi(in.facing - s.body + offset) + s.body);
-        spring(s, in.facing, target, dt);
+        const float target = wrapPi(wrapPi(facing - s.body + offset) + s.body);
+        spring(s, facing, target, dt);
     } else if (in.forward || in.backward || in.falling) {  // flags & 0x1003
         if (s.blend <= 0.0f) {
-            s.body = in.facing;
+            s.body = facing;
             s.vel = 0.0f;
         } else {
             s.blend -= dt * 2.5f;  // 0x009EDCE8
             if (s.blend > 1.0f) s.blend = 1.0f;
-            spring(s, in.facing, in.facing, dt);
+            spring(s, facing, facing, dt);
         }
     } else if (s.blend < 1.0f) {
         s.blend += dt * 2.5f;  // standing: no spring, the blend recovers
@@ -142,7 +146,7 @@ inline BodyFacingResult updateBodyFacing(BodyFacingState& s, const BodyFacingInp
     // 0x0073DEBF: whatever lies beyond 90 degrees turns the body at once;
     // when neither strafing nor turning, the body also catches up at a rate
     // that grows with the time since the last facing update.
-    const float d = wrapPi(in.facing - s.body);
+    const float d = wrapPi(facing - s.body);
     const float ad = std::abs(d);
     if (ad < 0.001f) {  // 0x009E1134
         out.body = s.body;
@@ -157,7 +161,7 @@ inline BodyFacingResult updateBodyFacing(BodyFacingState& s, const BodyFacingInp
     out.body = s.body;
     out.bodyStep = step;
 
-    const float r = wrapPi(in.facing - s.body);
+    const float r = wrapPi(facing - s.body);
     const float ar = std::abs(r);
     if (ar < 1.0e-5f) return out;  // 0x009EA558
     float spine = in.activePlayer ? ar : ar * 0.5f;

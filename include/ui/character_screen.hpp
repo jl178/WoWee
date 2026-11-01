@@ -181,6 +181,9 @@ private:
     pipeline::AssetManager* assetManager_ = nullptr;
     std::unique_ptr<rendering::CharacterPreview> preview_;
     bool previewInitialized_ = false;
+    /// How long the window has been another size than the preview was built
+    /// at; the preview is rebuilt at the new size once that settles.
+    float previewResizeTimer_ = 0.0f;
     uint64_t previewGuid_ = 0;
     uint32_t previewAppearanceBytes_ = 0;
     uint8_t previewFacialFeatures_ = 0;

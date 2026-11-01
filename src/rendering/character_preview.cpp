@@ -1830,12 +1830,15 @@ void CharacterPreview::resetView() {
 }
 
 float CharacterPreview::verticalFovFromDiagonal(float diagonalRadians) const {
-    // A 3.3.5 M2 camera's field of view is diagonal; the vertical one the
-    // projection wants is that over sqrt(1 + aspect^2) for this target.
-    const float aspect = (fboHeight_ > 0) ? static_cast<float>(fboWidth_) /
-                                                static_cast<float>(fboHeight_)
-                                          : 1.0f;
-    return glm::degrees(diagonalRadians / std::sqrt(1.0f + aspect * aspect));
+    // A 3.3.5 M2 camera's field of view is diagonal, authored for the 4:3
+    // screen the glue scenes were built on. The vertical field is taken from
+    // that aspect and kept whatever the window's (Hor+): a wider window shows
+    // more of the scene at the sides, never less at the top and bottom.
+    // Converting by the window's own aspect narrowed the vertical field as the
+    // window widened - at 21:9 to 47 degrees from 4:3's 72 - and full screen
+    // zoomed in on the character's waist.
+    constexpr float kAuthoredAspect = 4.0f / 3.0f;
+    return glm::degrees(diagonalRadians / std::sqrt(1.0f + kAuthoredAspect * kAuthoredAspect));
 }
 
 void CharacterPreview::setSceneCameraFraming(bool on) {
