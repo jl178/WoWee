@@ -16,6 +16,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <cmath>
 #include <deque>
 #include <string>
 #include <functional>
@@ -260,6 +261,10 @@ struct M2Instance {
     // Animation state
     float animTime = 0.0f;       // Current animation time (ms)
     float globalSequenceTime = 0.0f; // Independent clock for global animation tracks
+    // Scene time the two clocks above were last brought up to. They advance
+    // when something reads them - an animated or particle instance each
+    // frame, a static one when it is drawn - not for all 70k instances at once.
+    double clockStampMs = 0.0;
     float animSpeed = 1.0f;      // Animation playback speed
     int currentSequenceIndex = 0;// Index into sequences array
     float animDuration = 0.0f;   // Duration of current animation (ms)
@@ -588,7 +593,7 @@ public:
     /// True while the instance is still live in the renderer. Owners that cache
     /// instance IDs (game objects, transports) use this to notice an instance
     /// that was dropped underneath them - e.g. by a renderer-wide clear - and
-    /// respawn it instead of silently addressing a dead handle forever.
+    /// respawn it instead of silently addressing a dead handle enhanced.
     [[nodiscard]] bool hasInstance(uint32_t instanceId) const {
         return instanceIndexById.find(instanceId) != instanceIndexById.end();
     }
@@ -1137,6 +1142,20 @@ private:
 
     // Fast-path instance index lists (rebuilt in rebuildSpatialIndex / on create)
     std::vector<size_t> animatedInstanceIndices_;   // hasAnimation && !disableAnimation
+    std::vector<size_t> boatInstanceIndices_;       // cachedIsBoat: the afloat check
+    double sceneTimeMs_ = 0.0;                      // sum of update() deltas
+    /// Bring an instance's animation clocks up to the scene time.
+    void advanceClock(M2Instance& inst) const {
+        const float dt = static_cast<float>(sceneTimeMs_ - inst.clockStampMs);
+        if (dt <= 0.0f) return;
+        inst.clockStampMs = sceneTimeMs_;
+        inst.animTime += dt;
+        inst.globalSequenceTime += dt;
+        const bool stepped = inst.cachedHasAnimation && !inst.cachedDisableAnimation;
+        if (!stepped && inst.animDuration > 0.0f && inst.animTime >= inst.animDuration) {
+            inst.animTime = std::fmod(inst.animTime, inst.animDuration);
+        }
+    }
     std::vector<size_t> particleOnlyInstanceIndices_; // !hasAnimation && hasParticleEmitters
     std::vector<size_t> particleInstanceIndices_;    // ALL instances with particle emitters
 
