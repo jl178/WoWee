@@ -31,6 +31,7 @@ inline SkyParams skyParamsFromLighting(float timeOfDay, float gameTime,
     params.gameTime = gameTime;
     if (lighting) {
         params.directionalDir = lighting->directionalDir;
+        params.sunDir = lighting->sunDir;
         // The sun sprite's own colour (LightIntBand 9), not the light it
         // casts: the storm set's is a flat grey and the death set's black.
         params.sunColor = lighting->sunColor;

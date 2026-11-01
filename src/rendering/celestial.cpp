@@ -1,5 +1,6 @@
 #include "rendering/celestial.hpp"
 #include "rendering/sky_system.hpp"
+#include "rendering/stock_day_night.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/vk_pipeline.hpp"
@@ -179,13 +180,8 @@ void Celestial::loadTextures(pipeline::AssetManager* assetManager) {
 // ---------------------------------------------------------------------------
 
 glm::vec3 Celestial::moonDirection(float timeOfDayHours) {
-    // LightingManager::sampleLightParams moves the light along this path by
-    // the hour; the moon stands where the sun stands twelve hours on.
-    const float angle = std::fmod(timeOfDayHours / 24.0f + 0.5f, 1.0f) * glm::two_pi<float>();
-    const glm::vec3 lightDir(std::sin(angle) * 0.6f,
-                             -0.6f + std::cos(angle) * 0.4f,
-                             std::cos(angle) * 0.6f);
-    return -glm::normalize(lightDir);
+    // The White Lady's own table in the stock client, 120 half-minutes an hour.
+    return stockMoonDirection(timeOfDayHours * 120.0f);
 }
 
 void Celestial::drawSprite(VkCommandBuffer cmd, Sprite sprite, const glm::vec3& dir,
@@ -230,7 +226,7 @@ void Celestial::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const S
 
     // --- Sun ---
     const float day = glm::clamp(params.dayIntensity, 0.0f, 1.0f) * throughCloud;
-    const glm::vec3 sunDir = -glm::normalize(params.directionalDir);
+    const glm::vec3 sunDir = glm::normalize(params.sunDir);
     if (day > 0.002f && sunDir.z > -0.1f) {
         const glm::vec3 sunColor = glm::max(params.sunColor, glm::vec3(0.0f));
         drawSprite(cmd, SUN_GLARE, sunDir, kSunGlareHalfSize, glm::vec4(sunColor, day), false);

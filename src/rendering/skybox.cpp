@@ -131,8 +131,8 @@ void Skybox::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyP
         return;
     }
 
-    // Compute sun direction from directionalDir (light points toward scene, sun is opposite)
-    glm::vec3 sunDir = -glm::normalize(params.directionalDir);
+    // Where the sun sprite is, which is not where the light comes from.
+    glm::vec3 sunDir = glm::normalize(params.sunDir);
 
     SkyPushConstants push{};
     push.topColor      = glm::vec4(params.skyTopColor, 1.0f);
