@@ -34,7 +34,7 @@ namespace ui {
 namespace {
 
 /// A path that resolved to nothing. Stored rather than retried, so one bad
-/// SetTexture in an addon does not read a missing file every frame forever.
+/// SetTexture in an addon does not read a missing file every frame enhanced.
 constexpr VkDescriptorSet kMissing = VK_NULL_HANDLE;
 
 uint32_t packColor(const float rgba[4], float alpha) {
@@ -304,12 +304,7 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font) {
     //
     // Same face too - the widget's own, then the interface default -
     // rather than whichever face this measure happened to be handed.
-    ImFont* runFont = interfaceFaceOrDefault(w->fontFace);
-    if (!runFont) runFont = font;
     const float size = interfaceFontSize(w->fontHeight);
-    const auto measureRun = [&](const std::string& piece) {
-        return runFont->CalcTextSizeA(size, FLT_MAX, 0.0f, piece.c_str()).x;
-    };
 
     // Already the right size for this text, measured the way it would be
     // measured now. A label that has changed what it says is measured
@@ -332,6 +327,14 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font) {
         if (w->autoSized && sameMeasurement) return;
         if (!w->autoSized && w->width > 0.0f && w->height > 0.0f) return;
     }
+    // Looked up only for a string that is going to be measured. This pass
+    // visits every string in the tree each frame, and the face lookup is a
+    // name search that was paid for the thousands that return above.
+    ImFont* runFont = interfaceFaceOrDefault(w->fontFace);
+    if (!runFont) runFont = font;
+    const auto measureRun = [&](const std::string& piece) {
+        return runFont->CalcTextSizeA(size, FLT_MAX, 0.0f, piece.c_str()).x;
+    };
 
     if (paragraph) {
         // The width stays as declared and the height follows the wrap.

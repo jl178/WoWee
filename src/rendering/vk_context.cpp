@@ -1252,7 +1252,13 @@ bool VkContext::createSwapchain(int width, int height) {
     presentsOffNativeTransform_ = requestIdentityTransform(builder, physicalDevice, surface);
 
     if (vsync_) {
-        builder.set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR);
+        // Mailbox: no tearing, and a frame that took longer than a refresh
+        // presents at the next one instead of also waiting out a whole
+        // vblank in beginFrame, which FIFO charged every slow frame. FIFO
+        // stays as the fallback for drivers without it. frame_cap limits the
+        // rate when the scene is light.
+        builder.set_desired_present_mode(VK_PRESENT_MODE_MAILBOX_KHR);
+        builder.add_fallback_present_mode(VK_PRESENT_MODE_FIFO_KHR);
     } else {
         builder.set_desired_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR);
         builder.add_fallback_present_mode(VK_PRESENT_MODE_MAILBOX_KHR);
@@ -1266,7 +1272,7 @@ bool VkContext::createSwapchain(int width, int height) {
     if (loggedPresentVsync_ != (vsync_ ? 1 : 0)) {
         loggedPresentVsync_ = vsync_ ? 1 : 0;
         LOG_WARNING("Swapchain present mode now ",
-                    vsync_ ? "FIFO (vsync on)" : "IMMEDIATE (vsync off)");
+                    vsync_ ? "MAILBOX (vsync on)" : "IMMEDIATE (vsync off)");
     }
 
     auto swapRet = builder.build();
@@ -2645,7 +2651,13 @@ bool VkContext::recreateSwapchain(int width, int height) {
     presentsOffNativeTransform_ = requestIdentityTransform(builder, physicalDevice, surface);
 
     if (vsync_) {
-        builder.set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR);
+        // Mailbox: no tearing, and a frame that took longer than a refresh
+        // presents at the next one instead of also waiting out a whole
+        // vblank in beginFrame, which FIFO charged every slow frame. FIFO
+        // stays as the fallback for drivers without it. frame_cap limits the
+        // rate when the scene is light.
+        builder.set_desired_present_mode(VK_PRESENT_MODE_MAILBOX_KHR);
+        builder.add_fallback_present_mode(VK_PRESENT_MODE_FIFO_KHR);
     } else {
         builder.set_desired_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR);
         builder.add_fallback_present_mode(VK_PRESENT_MODE_MAILBOX_KHR);
@@ -2659,7 +2671,7 @@ bool VkContext::recreateSwapchain(int width, int height) {
     if (loggedPresentVsync_ != (vsync_ ? 1 : 0)) {
         loggedPresentVsync_ = vsync_ ? 1 : 0;
         LOG_WARNING("Swapchain present mode now ",
-                    vsync_ ? "FIFO (vsync on)" : "IMMEDIATE (vsync off)");
+                    vsync_ ? "MAILBOX (vsync on)" : "IMMEDIATE (vsync off)");
     }
 
     auto swapRet = builder.build();

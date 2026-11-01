@@ -143,6 +143,9 @@ TerrainManager::~TerrainManager() {
 
 bool TerrainManager::initialize(pipeline::AssetManager* assets, TerrainRenderer* renderer) {
     assetManager = assets;
+    // On this thread, before any tile worker and before the first footstep
+    // asks what the ground is made of.
+    ensureGroundEffectTablesLoaded();
     terrainRenderer = renderer;
 
     if (!assetManager) {
@@ -237,6 +240,7 @@ void TerrainManager::update(const Camera& camera, float deltaTime) {
     const auto tUnloadStart = clock::now();
     processPendingUnloads();
     unloadMs = elapsedMs(tUnloadStart, clock::now());
+    streamGroundClutter(camera.getPosition());
 
     timeSinceLastUpdate += deltaTime;
 
@@ -1314,6 +1318,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
         tile->wmoInstanceIds = std::move(ft.wmoInstanceIds);
         tile->wmoUniqueIds = std::move(ft.tileWmoUniqueIds);
         tile->doodadUniqueIds = std::move(ft.tileUniqueIds);
+        tile->clutterPlacements = std::move(pending->clutterPlacements);
         getTileBounds(coord, tile->minX, tile->minY, tile->maxX, tile->maxY);
         loadedTiles[coord] = std::move(tile);
         // NOTE: Don't cache pending here - std::move above empties terrain/mesh,
@@ -1591,6 +1596,45 @@ std::shared_ptr<PendingTile> TerrainManager::getCachedTile(const TileCoord& coor
     it->second.lruIt = tileCacheLru_.begin();
     return it->second.tile;
 }
+void TerrainManager::streamGroundClutter(const glm::vec3& cameraPos) {
+    if (!m2Renderer) return;
+    // Clutter draws out to the clutter distance setting and no further, so
+    // a tile further away than that holds instances nothing can see. With
+    // 880 pieces a tile and a view distance of several tiles that was the
+    // bulk of every instance the renderer walked each frame. Tiles inside
+    // the range get their instances; tiles that leave it, with some slack
+    // so a player pacing a boundary does not churn, give them back.
+    const float clutterDistance = m2Renderer->groundDetailDistance();
+    const float nearEdge = (clutterDistance > 0.0f ? clutterDistance : 140.0f) + 20.0f;
+    const float farEdge = nearEdge + 80.0f;
+    constexpr size_t kInstancesPerFrame = 160;
+    size_t created = 0;
+    for (auto& [coord, tile] : loadedTiles) {
+        (void)coord;
+        if (!tile || tile->clutterPlacements.empty()) continue;
+        const float dx = std::max({tile->minX - cameraPos.x, 0.0f, cameraPos.x - tile->maxX});
+        const float dy = std::max({tile->minY - cameraPos.y, 0.0f, cameraPos.y - tile->maxY});
+        const float distance = std::sqrt(dx * dx + dy * dy);
+        const bool populated = !tile->clutterInstanceIds.empty() || tile->clutterNextIndex > 0;
+        if (populated && distance > farEdge) {
+            m2Renderer->removeInstances(tile->clutterInstanceIds);
+            tile->clutterInstanceIds.clear();
+            tile->clutterNextIndex = 0;
+            continue;
+        }
+        if (distance > nearEdge || tile->clutterNextIndex >= tile->clutterPlacements.size()) continue;
+        while (tile->clutterNextIndex < tile->clutterPlacements.size() && created < kInstancesPerFrame) {
+            const auto& p = tile->clutterPlacements[tile->clutterNextIndex++];
+            if (!m2Renderer->hasModel(p.modelId)) continue;
+            if (const uint32_t id = m2Renderer->createInstance(p.modelId, p.position, p.rotation, p.scale)) {
+                tile->clutterInstanceIds.push_back(id);
+                ++created;
+            }
+        }
+        if (created >= kInstancesPerFrame) break;
+    }
+}
+
 void TerrainManager::unloadTile(int x, int y) {
     TileCoord coord = {.x = x, .y = y};
 
@@ -1655,6 +1699,7 @@ void TerrainManager::unloadTile(int x, int y) {
     // Remove M2 doodad instances
     if (m2Renderer) {
         m2Renderer->removeInstances(tile->m2InstanceIds);
+        if (!tile->clutterInstanceIds.empty()) m2Renderer->removeInstances(tile->clutterInstanceIds);
         LOG_DEBUG("  Removed ", tile->m2InstanceIds.size(), " M2 instances");
     }
 
@@ -1807,7 +1852,15 @@ void TerrainManager::ensureGroundEffectTablesLoaded() {
         e.weights[2] = groundEffectTex->getUInt32(i, 7);
         e.weights[3] = groundEffectTex->getUInt32(i, 8);
         e.density = groundEffectTex->getUInt32(i, 9);
+        if (groundEffectTex->getFieldCount() > 10) e.terrainType = groundEffectTex->getUInt32(i, 10);
         groundEffectById_[effectId] = e;
+    }
+    // TerrainType: ID, description, two spray effects, SoundID, flags.
+    if (auto terrainType = assetManager->loadDBCOptional("TerrainType.dbc");
+        terrainType && terrainType->isLoaded() && terrainType->getFieldCount() >= 5) {
+        for (uint32_t i = 0; i < terrainType->getRecordCount(); ++i) {
+            terrainTypeSoundId_[terrainType->getUInt32(i, 0)] = terrainType->getUInt32(i, 4);
+        }
     }
 
     // GroundEffectDoodad: id + modelName(offset) + flags
@@ -2073,7 +2126,7 @@ void TerrainManager::generateGroundClutterPlacements(std::shared_ptr<PendingTile
                     p.scale = 0.80f + ((nextRand() & 0xFFFFu) / kRand16Max) * 0.35f;
                     // Snap directly to sampled terrain height.
                     p.position = glm::vec3(worldX, worldY, worldZ + 0.01f);
-                    pending->m2Placements.push_back(p);
+                    pending->clutterPlacements.push_back(p);
                     added++;
                     chunkAdded++;
                     perChunkAdded[cy * 16 + cx]++;
@@ -2129,7 +2182,7 @@ void TerrainManager::generateGroundClutterPlacements(std::shared_ptr<PendingTile
                         p.rotation = glm::vec3(0.0f, 0.0f, (nextRand() & 0xFFFFu) / kRand16Max * (2.0f * pi));
                         p.scale = 0.75f + ((nextRand() & 0xFFFFu) / kRand16Max) * 0.40f;
                         p.position = glm::vec3(worldX, worldY, worldZ + 0.01f);
-                        pending->m2Placements.push_back(p);
+                        pending->clutterPlacements.push_back(p);
                         fallbackAdded++;
                         added++;
                         perChunkAdded[cy * 16 + cx]++;
@@ -2387,15 +2440,15 @@ std::optional<uint32_t> TerrainManager::getAreaIdAt(float glX, float glY) const 
     return chunk->areaId;
 }
 
-std::optional<std::string> TerrainManager::getDominantTextureAt(float glX, float glY) const {
+const pipeline::TextureLayer* TerrainManager::dominantLayerAt(float glX, float glY,
+                                                                 const TerrainTile** outTile) const {
     // Through the one finder, which was the last copy of "which chunk is under
     // this point" in this file: a bounds test against the chunk's own
     // position, the two fractions, a guess and a widening search - findChunkAt
     // to the line, written again inside two lambdas.
     float fracX = 0.0f, fracY = 0.0f;
-    const TerrainTile* tile = nullptr;
-    const pipeline::MapChunk* chunk = findChunkAt(glX, glY, fracX, fracY, &tile);
-    if (!chunk || !tile || chunk->layers.empty()) return std::nullopt;
+    const pipeline::MapChunk* chunk = findChunkAt(glX, glY, fracX, fracY, outTile);
+    if (!chunk || !*outTile || chunk->layers.empty()) return nullptr;
 
     const int alphaIndex =
         static_cast<int>(pipeline::alphaTexelIndex(fracX / 8.0f, fracY / 8.0f));
@@ -2426,9 +2479,26 @@ std::optional<std::string> TerrainManager::getDominantTextureAt(float glX, float
         }
     }
 
-    const uint32_t texId = chunk->layers[bestLayer].textureId;
-    if (texId >= tile->terrain.textures.size()) return std::nullopt;
-    return tile->terrain.textures[texId];
+    return &chunk->layers[bestLayer];
+}
+
+std::optional<std::string> TerrainManager::getDominantTextureAt(float glX, float glY) const {
+    const TerrainTile* tile = nullptr;
+    const pipeline::TextureLayer* layer = dominantLayerAt(glX, glY, &tile);
+    if (!layer) return std::nullopt;
+    if (layer->textureId >= tile->terrain.textures.size()) return std::nullopt;
+    return tile->terrain.textures[layer->textureId];
+}
+
+std::optional<uint32_t> TerrainManager::getTerrainSoundTypeAt(float glX, float glY) const {
+    const TerrainTile* tile = nullptr;
+    const pipeline::TextureLayer* layer = dominantLayerAt(glX, glY, &tile);
+    if (!layer || layer->effectId == 0) return std::nullopt;
+    auto effect = groundEffectById_.find(layer->effectId);
+    if (effect == groundEffectById_.end()) return std::nullopt;
+    auto sound = terrainTypeSoundId_.find(effect->second.terrainType);
+    if (sound == terrainTypeSoundId_.end() || sound->second == 0) return std::nullopt;
+    return sound->second;
 }
 
 void TerrainManager::streamTiles() {
