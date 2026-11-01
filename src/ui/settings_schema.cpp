@@ -509,8 +509,10 @@ constexpr SettingDesc kSchema[] = {
     {"chesttracker", "Chest tracker", SettingKind::Bool, 0, 0, 0, "HUD", "",
      "Mark treasure chests near you on the minimap.", "", 0},
 
+    // Off by default: the stock client has no flash per hit. Its only red
+    // edge is the full-screen status below, while on the hate list.
     {"damageflash", "Damage flash", SettingKind::Bool, 0, 0, 0, "HUD", "Screen effects",
-     "Flash a red edge around the screen when you take a hit.", "", 1},
+     "Flash a red edge around the screen when you take a hit.", "", 0},
     {"lowhealthvignette", "Low health warning", SettingKind::Bool, 0, 0, 0,
      "HUD", "", "Pulse a red edge around the screen while your health is\n"
      "below a fifth.", "", 1},
