@@ -1946,7 +1946,7 @@ TEST_CASE("A rect that is not a number is never hit", "[widget][hittest]") {
     const uint32_t good = tree.create(WidgetKind::Frame, tree.uiParentId(), "Good");
     Widget* g = tree.get(good);
     g->mouseEnabled = true;
-    g->visible = true;
+    tree.setVisibleForTest(good, true);
     g->left = 10.0f; g->bottom = 10.0f; g->rectW = 20.0f; g->rectH = 20.0f;
     REQUIRE(tree.hitTest(15.0f, 15.0f) == good);
     REQUIRE(tree.hitTest(500.0f, 500.0f) == 0);
@@ -1954,7 +1954,7 @@ TEST_CASE("A rect that is not a number is never hit", "[widget][hittest]") {
     const uint32_t bad = tree.create(WidgetKind::Frame, tree.uiParentId(), "Bad");
     Widget* b = tree.get(bad);
     b->mouseEnabled = true;
-    b->visible = true;
+    tree.setVisibleForTest(bad, true);
     b->left = std::numeric_limits<float>::quiet_NaN();
     b->bottom = 0.0f; b->rectW = 100.0f; b->rectH = 100.0f;
 

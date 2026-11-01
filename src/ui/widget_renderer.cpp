@@ -2384,6 +2384,9 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
         static const bool tipDiag = std::getenv("WOWEE_TOOLTIP_DIAG") != nullptr;
         int seenTooltip = 0, seenVisible = 0, seenWithLines = 0, sized = 0;
         for (size_t id = 1; id < tree.size(); ++id) {
+            // Only visible tooltips are sized; the hidden ones are read only to
+            // be counted for the diagnostic.
+            if (!tipDiag && !tree.visibleById(id)) continue;
             // Looked at read-only and taken writable only to be sized: the
             // writable get() marks a widget for the sizing pass, and asking
             // it for all 28k here would have it revisit every one each frame.

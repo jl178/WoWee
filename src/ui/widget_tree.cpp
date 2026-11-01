@@ -1334,7 +1334,12 @@ uint32_t WidgetTree::hitTestWheel(float x, float y) const {
 
 uint32_t WidgetTree::hitTestFor(float x, float y, bool forWheel) const {
     const Widget* best = nullptr;
-    for (const Widget& w : widgets_) {
+    // Only what is shown can be hit, and the visible mirror says which ids
+    // those are without reading the 28k widgets behind them.
+    const std::size_t count = std::min(visibleMirror_.size(), widgets_.size());
+    for (std::size_t id = 1; id < count; ++id) {
+        if (!visibleMirror_[id]) continue;
+        const Widget& w = widgets_[id];
         if (w.id == 0 || w.kind != WidgetKind::Frame) continue;
         if (!w.visible) continue;
         // The wheel is enabled separately from the mouse and a scroll frame

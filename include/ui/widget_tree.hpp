@@ -1050,6 +1050,18 @@ public:
     /// ageing visits those rather than reading all 28k widgets to find them.
     void noteMessageFrame(uint32_t id) { messageFrames_.push_back(id); }
     [[nodiscard]] const std::vector<uint32_t>& messageFrames() const { return messageFrames_; }
+
+    /// Whether the widget with this id is visible, from the byte mirror: for
+    /// per-frame passes that only care about visible widgets, so they can skip
+    /// the rest without reading them.
+    [[nodiscard]] bool visibleById(size_t id) const {
+        return id < visibleMirror_.size() && visibleMirror_[id] != 0;
+    }
+    /// Set a widget's resolved visibility from outside the layout pass, with
+    /// its mirror byte. For tests that place widgets by hand.
+    void setVisibleForTest(uint32_t id, bool v) {
+        if (id < widgets_.size()) setVisible(widgets_[id], v);
+    }
     /// What sizing reads besides a widget's own fields: the face a label falls
     /// back on, whether there are assets to read a texture's size from, and
     /// the point size a label with no height of its own is measured at. When
