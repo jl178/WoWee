@@ -421,3 +421,20 @@ Other fixes:
   - The profile now also names the costliest OnUpdate handlers. They total about 0.13 ms; UIParent and WorldFrame lead.
 - Uncapped Goldshire: about 71 fps, 14.1 ms per frame (test window, 2.6 GHz).
 - In progress: a shadow caster cache. It never hits yet ("kept in 0 frames"), so the agent is adding miss-reason counters.
+
+## Shadow cache, voices, font check
+
+- `271e53f`: the static shadow caster list is kept between frames. Goldshire: kept in 747 of 803 frames; shadow/m2 1.16 -> 0.45 ms; 72.5 -> 80.7 fps uncapped. `WOWEE_SHADOW_CACHE=0` restores the old per-frame cull.
+- `8f20f51`: the hit test and tooltip sizing read only visible widgets.
+- `7e10b7e`: creatures with no NPCSounds row say nothing. Spirit healers had played the gnome "Hey!" through the GENERIC fallback.
+- `d65dda7`: error speech comes from VocalUISounds.dbc and SoundEntries kits (the listed takes, at their volume).
+- Font size, from Wow.exe:
+  - FontHeight is the em size: px = round(screenH * h/768), clamped to 32 px for rasterising and scaled up above that.
+  - Advances are floor(adv) + 1 px, +1 more for THICK outlines.
+  - So Wowee's em mapping is the right base. Stock text is 6-12% wider than ours, not narrower.
+  - Long zone names wrap in the 512-wide ZoneTextString in stock too.
+  - Not changed yet. Notes and decompiled output are in scratchpad/font-re.
+- Lab server set to noon and clear weather for Jered:
+  - TZ=LAB+9 in docker-compose.override.yml.
+  - game_weather chances zeroed; backup in game_weather_lab_backup.
+- Lab account JTRAIN20 created for Jered's own test client (HOME ~/workplace/wowee-jtrain-home).
