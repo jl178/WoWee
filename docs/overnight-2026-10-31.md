@@ -346,3 +346,19 @@ Other fixes:
 - The world map rebuilt the stock way, from reverse-engineered C APIs (in progress on an isolated branch).
 - A plan of tasteful enhancements: wind sway, cloth flutter, ambience.
 - The Windows package rebuild.
+
+## Sunday afternoon: first enhancement batch, Windows package
+
+- `3350897` enhancements batch 1:
+  - Trees sway in the grass's wind, or play their own sway animation if they have one.
+  - Awnings, tents and tarps flutter, with their poles and edges held still.
+  - Wind follows the weather and fades for foliage indoors.
+  - Shadow darkness follows Light.dbc, and shadow edges use a rotated 9-tap PCF.
+  - Zone music crossfades over 3 s.
+  - Footsteps and hits vary.
+  - New settings: `foliagewind` on the Grass page and `shadowstrength` on Graphics. The Sky rows moved to Display and the character-sheet rows to Gameplay, so every settings page fits again.
+- Tests updated to stock rules that were already in place: the no-cape panel on bare bodies, no sheath when combat starts, no weather chat lines.
+- `e58eed9`: canvas is any texture that isn't structural. The Stormwind awning uses "overhang copy.blp" and the Durotar tents use "mm_orc_roof"; both now flutter.
+- `dd83374`: a fog field was named `far`, which is a macro in windef.h and broke the Windows build. The Windows package was rebuilt from that commit, staged to `~/workplace/wowee-dist`, the zip refreshed, and `wowee-share` restarted. It serves on port 8081.
+- Smoke test, Wptester: no errors; 55-60 fps once loaded.
+- Open: sweep_guard is over its ceilings (dead declarations, a too-long function, one duplicate). An agent is cleaning that up. The world map rebuild is still running.
