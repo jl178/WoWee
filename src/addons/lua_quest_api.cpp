@@ -1529,8 +1529,7 @@ int lua_QuestBlobFrame_GetTooltipIndex(lua_State* L) {
     return 1;
 }
 
-/// The QuestPOI set, bound after the system set and the world map so these
-/// are the ones FrameXML finds.
+/// The QuestPOI set, the only binding of each of these names.
 void registerQuestPoiLuaAPI(lua_State* L) {
     static const struct { const char* name; lua_CFunction fn; } api[] = {
         {"QuestMapUpdateAllQuests", lua_QuestMapUpdateAllQuests},
@@ -3957,10 +3956,6 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"GetQuestLink",            lua_GetQuestLink},
                 {"GetNumQuestLeaderBoards", lua_GetNumQuestLeaderBoards},
                 {"GetQuestLogLeaderBoard",  lua_GetQuestLogLeaderBoard},
-                {"QuestMapUpdateAllQuests", lua_QuestMapUpdateAllQuests},
-                {"QuestPOIGetQuestIDByVisibleIndex", lua_QuestPOIGetQuestIDByVisibleIndex},
-                {"QuestPOIGetIconInfo",     lua_QuestPOIGetIconInfo},
-                {"QuestPOIUpdateIcons",     lua_QuestPOIUpdateIcons},
                 {"GetQuestPOILeaderBoard",  lua_GetQuestPOILeaderBoard},
                 {"ExpandQuestHeader",       lua_ExpandQuestHeader},
                 {"CollapseQuestHeader",     lua_CollapseQuestHeader},

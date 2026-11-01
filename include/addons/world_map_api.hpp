@@ -21,9 +21,41 @@ struct lua_State;
 
 namespace wowee::addons::worldmap {
 
-/// Registers every map function over whatever earlier code bound to the same
-/// names. Called once, after the other API sets.
+/// Registers every map function, each with its fallback below. Called once,
+/// after the other API sets.
 void registerWorldMapLuaAPI(lua_State* L);
+
+/// What each map function answers while the client data is not loaded or is
+/// not 3.3.5-shaped (lua_system_api.cpp): this client's own map, reached
+/// through LuaServices. Not bound by name - each is handed to the map function
+/// of the same name, so every name has one binding.
+namespace fallback {
+int GetMapContinents(lua_State* L);
+int GetMapZones(lua_State* L);
+int SetMapZoom(lua_State* L);
+int SetMapToCurrentZone(lua_State* L);
+int GetCurrentMapContinent(lua_State* L);
+int GetCurrentMapZone(lua_State* L);
+int GetCurrentMapAreaID(lua_State* L);
+int SetMapByID(lua_State* L);
+int GetMapInfo(lua_State* L);
+int GetNumMapOverlays(lua_State* L);
+int GetMapOverlayInfo(lua_State* L);
+int GetNumMapLandmarks(lua_State* L);
+int GetMapLandmarkInfo(lua_State* L);
+int ProcessMapClick(lua_State* L);
+int UpdateMapHighlight(lua_State* L);
+int ZoomOut(lua_State* L);
+int IsZoomOutAvailable(lua_State* L);
+int GetPlayerMapPosition(lua_State* L);
+int GetCorpseMapPosition(lua_State* L);
+int GetDeathReleasePosition(lua_State* L);
+int GetNumDungeonMapLevels(lua_State* L);
+int GetCurrentMapDungeonLevel(lua_State* L);
+int SetDungeonMapLevel(lua_State* L);
+int DungeonUsesTerrainMap(lua_State* L);
+int ClickLandmark(lua_State* L);
+}  // namespace fallback
 
 /// Whether the client data loaded and the functions below answer.
 bool ready(lua_State* L);
