@@ -1509,7 +1509,6 @@ void EntitySpawner::normalizeHumanoidClothingGeosets(uint32_t instanceId, uint32
 // Normalize only clothing groups while leaving all other model batches untouched.
 if (const auto* md = charRenderer->getModelData(modelId)) {
     std::unordered_set<uint16_t> allGeosets;
-    std::unordered_map<uint16_t, uint16_t> firstByGroup;
     bool hasGroup3 = false;  // glove/forearm variants
     bool hasGroup4 = false;  // glove/forearm variants (some models)
     bool hasGroup5 = false;  // boot/shin variants
@@ -1521,10 +1520,6 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         const uint16_t sid = b.submeshId;
         const uint16_t group = static_cast<uint16_t>(sid / 100);
         allGeosets.insert(sid);
-        auto itFirst = firstByGroup.find(group);
-        if (itFirst == firstByGroup.end() || sid < itFirst->second) {
-            firstByGroup[group] = sid;
-        }
         if (group == 3) hasGroup3 = true;
         if (group == 4) hasGroup4 = true;
         if (group == 5) hasGroup5 = true;
@@ -1568,9 +1563,11 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         // which has not been traced.
         uint16_t selectedHairScalp = 1;
         uint32_t equipHeadDisplayId = 0;
-        uint16_t selectedFacial100 = 100;
-        uint16_t selectedFacial200 = 200;
-        uint16_t selectedFacial300 = 300;
+        // No CharacterFacialHairStyles row: the "none" variant of each group,
+        // as the player path does (bareGeosetsFor).
+        uint16_t selectedFacial100 = 101;
+        uint16_t selectedFacial200 = 201;
+        uint16_t selectedFacial300 = 301;
         uint32_t equipChestGG = 0, equipLegsGG = 0, equipFeetGG = 0, equipGlovesGG = 0, equipCapeGG = 0, equipRobeGG = 0, equipKneeGG = 0;
         if (itDisplayData != displayDataMap_.end() &&
             itDisplayData->second.extraDisplayId != 0) {
@@ -1699,26 +1696,14 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
             if (hasHumanoidExtra && sid < 100 && sid != 0 && sid != selectedHairScalp) {
                 continue;
             }
-            // Group 1 is the first CharacterFacialHairStyles channel.
-            if (hasHumanoidExtra && group == 1) {
-                uint16_t resolvedFacial100 = selectedFacial100;
-                if (allGeosets.count(resolvedFacial100) == 0)
-                    resolvedFacial100 = allGeosets.count(101) > 0 ? 101 : firstByGroup[1];
-                if (sid != resolvedFacial100) continue;
-            }
-            // Group 2 facial variants: keep selected variant; fallback only if missing.
-            if (hasHumanoidExtra && group == 2) {
-                uint16_t resolvedFacial200 = selectedFacial200;
-                if (allGeosets.count(resolvedFacial200) == 0) {
-                    if (allGeosets.count(201) > 0) resolvedFacial200 = 201;
-                    else if (allGeosets.count(200) > 0) resolvedFacial200 = 200;
-                    else {
-                        auto itFirst = firstByGroup.find(2);
-                        resolvedFacial200 = (itFirst != firstByGroup.end()) ? itFirst->second : 0;
-                    }
-                }
-                if (sid != resolvedFacial200) continue;
-            }
+            // Groups 1 and 2 are CharacterFacialHairStyles channels: exactly the
+            // id the row names, or nothing. The client draws nothing for a
+            // variant the model lacks (an orc's 0 is "no beard" and orcs carry
+            // no 101; a tauren's style 4 names 205, which the model does not
+            // have). Substituting the group's first mesh put a beard on faces
+            // that asked for none.
+            if (hasHumanoidExtra && group == 1 && sid != selectedFacial100) continue;
+            if (hasHumanoidExtra && group == 2 && sid != selectedFacial200) continue;
             normalizedGeosets.insert(sid);
         }
 
@@ -1801,15 +1786,12 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
             if (tabardSid != 0) normalizedGeosets.insert(tabardSid);
         }
 
-        // Some mustache/goatee variants are authored in facial group 3xx.
-        // Re-add selected facial 3xx plus low-index facial fallbacks.
-        if (hasHumanoidExtra) {
-            uint16_t facial300Sid = resolveGeoset(selectedFacial300, allGeosets);
-            if (facial300Sid != 0) normalizedGeosets.insert(facial300Sid);
-            if (facial300Sid == 0) {
-                if (allGeosets.count(300) > 0) normalizedGeosets.insert(300);
-                else if (allGeosets.count(301) > 0) normalizedGeosets.insert(301);
-            }
+        // Group 3 is the third CharacterFacialHairStyles channel (sideburns,
+        // and the dwarf/tauren beard pieces): the exact id or nothing, as for
+        // groups 1 and 2. resolveGeoset's lowest-in-group substitute drew a
+        // second, unrelated piece of facial hair through the face.
+        if (hasHumanoidExtra && allGeosets.count(selectedFacial300) > 0) {
+            normalizedGeosets.insert(selectedFacial300);
         }
 
         // Night Elf NPC eyes require the model's eye overlay. Continue to
