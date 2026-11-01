@@ -47,6 +47,11 @@ struct ZoneAudioContext {
     // sound tables are keyed by area, not zone: Goldshire and Elwynn share
     // music, Stormwind's districts share the city's.
     uint32_t areaId = 0;
+    // The building and room the camera is in, for WMOAreaTable: a tavern's
+    // music and a crypt's ambience live there, not in AreaTable.
+    uint32_t wmoRootId = 0;
+    int32_t wmoGroupIndex = -1;
+    uint16_t wmoNameSet = 0;
     // Zone manager pointer (for zone info and music queries)
     game::ZoneManager* zoneManager = nullptr;
 };
@@ -109,7 +114,7 @@ private:
 
     SoundData soundData_;
     std::unique_ptr<ZoneMusicController> zoneMusic_;
-    uint32_t ambienceAreaId_ = 0;
+    uint64_t ambienceKey_ = 0;  ///< area id and room ambience the loops were chosen for
 
     std::unique_ptr<MusicManager> musicManager_;
     std::unique_ptr<FootstepManager> footstepManager_;

@@ -78,17 +78,26 @@ void AudioCoordinator::loadSoundData(pipeline::AssetManager* assets) {
     if (!assets) return;
     if (soundData_.load([assets](const std::string& name) { return assets->loadDBCOptional(name); })) {
         zoneMusic_ = std::make_unique<ZoneMusicController>(soundData_);
-        ambienceAreaId_ = 0;
+        ambienceKey_ = 0;
     }
 }
 
 void AudioCoordinator::updateTableAmbience(const ZoneAudioContext& ctx) {
-    if (!ambientSoundManager_ || ctx.areaId == 0 || ctx.areaId == ambienceAreaId_) return;
-    ambienceAreaId_ = ctx.areaId;
+    if (!ambientSoundManager_ || ctx.areaId == 0) return;
+    // A room with its own WMOAreaTable ambience sounds like itself; any other
+    // place, indoors or out, sounds like its area.
+    const WmoAreaSounds* room = ctx.wmoRootId
+        ? soundData_.wmoArea(ctx.wmoRootId, ctx.wmoNameSet, ctx.wmoGroupIndex) : nullptr;
+    const uint32_t roomAmbience = room ? room->ambienceId : 0;
+    const uint64_t key = (static_cast<uint64_t>(roomAmbience) << 32) | ctx.areaId;
+    if (key == ambienceKey_) return;
+    ambienceKey_ = key;
     uint32_t day = 0, night = 0;
     std::string dayPath, nightPath;
     float volume = 1.0f;
-    if (soundData_.areaAmbience(ctx.areaId, day, night)) {
+    const bool found = roomAmbience ? soundData_.ambience(roomAmbience, day, night)
+                                    : soundData_.areaAmbience(ctx.areaId, day, night);
+    if (found) {
         if (const SoundEntry* e = soundData_.sound(day); e && !e->files.empty()) {
             dayPath = e->files.front();
             volume = e->volume;
@@ -108,6 +117,11 @@ void AudioCoordinator::updateTableMusic(const ZoneAudioContext& ctx, uint32_t zo
     if (suppressed) return;
     ZoneMusicInput in;
     in.areaId = ctx.areaId;
+    if (ctx.wmoRootId) {
+        if (const WmoAreaSounds* room = soundData_.wmoArea(ctx.wmoRootId, ctx.wmoNameSet, ctx.wmoGroupIndex)) {
+            in.zoneMusicOverride = room->zoneMusicId;
+        }
+    }
     in.isDay = isDaytimeHours(ctx.gameTimeHours);
     in.trackPlaying = musicManager_->isPlaying();
     in.trackLoading = musicManager_->isLoading();
@@ -236,10 +250,14 @@ void AudioCoordinator::updateZoneAudio(const ZoneAudioContext& ctx) {
             LOG_INFO("Detected blacksmith WMO ", wmoModelId);
         }
 
-        // Tavern / inn detection
-        if (wmoModelId == 191 || wmoModelId == 71414 || wmoModelId == 190 ||
-            wmoModelId == 220 || wmoModelId == 221 ||
-            wmoModelId == 5392 || wmoModelId == 5393) {
+        // Tavern / inn detection, for data without WMOAreaTable rows. With the
+        // tables loaded a tavern names its own music there.
+        const bool tableKnowsRoom = soundData_.loaded() && ctx.wmoRootId != 0 &&
+            soundData_.wmoArea(ctx.wmoRootId, ctx.wmoNameSet, ctx.wmoGroupIndex) != nullptr;
+        if (!tableKnowsRoom &&
+            (wmoModelId == 191 || wmoModelId == 71414 || wmoModelId == 190 ||
+             wmoModelId == 220 || wmoModelId == 221 ||
+             wmoModelId == 5392 || wmoModelId == 5393)) {
             insideTavern = true;
             // The first slot is our own tavern track. It falls back to the
             // Blizzard one it replaces when the file is missing, and the
