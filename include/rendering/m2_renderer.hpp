@@ -248,6 +248,23 @@ struct M2Instance {
     uint32_t id = 0;     // Unique instance ID
     uint32_t modelId;
     glm::vec3 position;
+    // The fields the visibility walk and the cull upload read, kept together
+    // so a 70k-instance pass touches one cache line per instance rather than
+    // a dozen spread over the matrices and vectors below.
+    float fade = 1.0f;
+    bool cachedHasAnimation = false;
+    bool cachedDisableAnimation = false;
+    bool cachedIsSmoke = false;
+    bool cachedIsGroundDetail = false;
+    bool cachedIsInvisibleTrap = false;
+    bool cachedIsSkyBird = false;
+    bool cachedIsValid = false;
+    glm::vec3 cachedCullCenter{0.0f};              // transformed visual-bounds center
+    float cachedEffectiveMaxDistSqFactor = 1.0f;  // multiplied by maxRenderDistanceSq each frame
+    float cachedPaddedRadius = 0.0f;              // sphere radius used by the cull compute
+    const M2ModelGPU* cachedModel = nullptr;  // Avoid per-frame hash lookups
+    uint8_t lastCullVisible = 1;
+    bool isGameObject = false;
     glm::vec3 rotation;  // Euler angles in degrees
     float scale;
     glm::mat4 modelMatrix;
@@ -292,7 +309,6 @@ struct M2Instance {
     /// An alpha its owner sets on the whole model - the sky's crossfade
     /// between zones. Below one the instance is drawn in the blended pass
     /// alone, every layer of it, since an opaque layer cannot fade otherwise.
-    float fade = 1.0f;
 
     // Particle emitter state
     std::vector<float> emitterAccumulators;  // fractional particle counter per emitter
@@ -312,14 +328,8 @@ struct M2Instance {
     std::vector<float> ribbonEdgeAccumulators; // fractional edge counter per emitter
 
     // Cached model flags (set at creation to avoid per-frame hash lookups)
-    bool cachedHasAnimation = false;
-    bool cachedDisableAnimation = false;
-    bool cachedIsSmoke = false;
     bool cachedHasParticleEmitters = false;
-    bool cachedIsGroundDetail = false;
-    bool cachedIsInvisibleTrap = false;
     bool cachedIsInstancePortal = false;
-    bool cachedIsSkyBird = false;
     bool cachedIsLightBeam = false;
     bool cachedIsTransportDoodad = false;
     bool cachedIsBoat = false;
@@ -327,32 +337,26 @@ struct M2Instance {
     int8_t afloat = -1;
     uint8_t afloatTries = 0;
     float afloatRecheck = 0.0f;
-    bool cachedIsValid = false;
     bool skipCollision = false;    // Fully non-collidable visual/effect instance
     bool skipWallCollision = false; // Keep authored floors, suppress only wall blocking
     float cachedBoundRadius = 0.0f;
-    glm::vec3 cachedCullCenter{0.0f};              // transformed visual-bounds center
     float cachedVisualRadius = 0.0f;               // transformed visual-bounds half diagonal
     // Pre-computed per-instance cull factors (depend only on static flags + scale +
     // bound radius), populated by recomputeCachedCullFactors(). The per-frame SSBO
     // upload just multiplies by the smoothed render distance and packs the rest.
-    float cachedEffectiveMaxDistSqFactor = 1.0f;  // multiplied by maxRenderDistanceSq each frame
     /// +1 playing forward, -1 playing back. See M2ModelGPU::pingPongAnim.
     float animDir = 1.0f;
     /// The reversing clock, for the bones named in pingPongBones. The ordinary
     /// animTime beside it keeps looping, so the same model can sweep a beam
     /// back and forth while its propeller turns one way.
     float animTimeAlt = 0.0f;
-    float cachedPaddedRadius = 0.0f;              // sphere radius used by the cull compute
     float portalSpinAngle = 0.0f;  // Accumulated spin angle for portal rotation
-    const M2ModelGPU* cachedModel = nullptr;  // Avoid per-frame hash lookups
 
     // Result of the most recent GPU cull dispatch that actually covered this
     // instance, matched back by instance ID (never by array index - see
     // cullSubmittedIds_).  Defaults to visible so an instance created after the
     // in-flight dispatch draws immediately instead of waiting ~2 frames for its
     // first cull result.
-    uint8_t lastCullVisible = 1;
     // Consecutive frames this instance has been culled (capped at 3), used for
     // the HiZ `previouslyVisible` hysteresis.  Defaults to 2 ("not recently
     // visible") so a freshly spawned instance skips the HiZ test rather than
@@ -362,7 +366,6 @@ struct M2Instance {
     // ambient-doodad distance, which collapses to ~200 units in a city and hid
     // interactable objects long before the server stopped sending them.
     // Set by the spawner; see M2_GAME_OBJECT_MIN_RENDER_DISTANCE.
-    bool isGameObject = false;
 
     void recomputeCachedCullFactors();
 
