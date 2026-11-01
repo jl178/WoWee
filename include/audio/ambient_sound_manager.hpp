@@ -88,6 +88,13 @@ public:
     /// stock client plays nothing else for an area.
     void setAreaAmbience(const std::string& dayPath, const std::string& nightPath, float volume);
 
+    /// The loop the stock client plays with the camera under water -
+    /// SoundEntries "Underwater (DONOTRENAME)", UndwaterLoop.wav - and its
+    /// volume. An empty path leaves the old periodic swim one-shot in charge.
+    void setUnderwaterLoop(const std::string& path, float volume);
+    /// The camera is below the surface. Fades the underwater loop in or out.
+    void setSubmerged(bool submerged);
+
     // Time of day control (0-24 hours)
     void setGameTime(float hours);
 
@@ -227,6 +234,11 @@ private:
     uint32_t areaLoopId_ = 0;
     float areaLoopVolume_ = -1.0f;
     std::unordered_map<std::string, AmbientSample> areaSamples_;
+    AmbientSample underwaterLoop_{};
+    float underwaterLoopVolume_ = 0.69f;
+    uint32_t underwaterLoopId_ = 0;
+    bool underwaterLoopTried_ = false;
+    bool submerged_ = false;
     void updateBellTolls(float deltaTime);
     bool loadSound(const std::string& path, AmbientSample& sample, pipeline::AssetManager* assets);
 

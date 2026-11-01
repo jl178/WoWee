@@ -128,11 +128,6 @@ public:
     [[nodiscard]] bool isDebugSkyMode() const { return debugSkyMode_; }
 
     /**
-     * Get sun position in world space (for lens flare, shadows, etc.)
-     */
-    [[nodiscard]] glm::vec3 getSunPosition(const SkyParams& params) const;
-
-    /**
      * Enable/disable moon phase cycling
      */
     void setMoonPhaseCycling(bool enabled);

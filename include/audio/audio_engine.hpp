@@ -16,6 +16,13 @@ namespace wowee {
 namespace pipeline { class AssetManager; }
 namespace audio {
 
+struct ReverbSettings;
+
+/// Where a sound is mixed. World sounds pass through the room's reverb and
+/// the underwater muffle (WorldFx); interface sounds and music do not - a
+/// button click is not in the cave with the player.
+enum class SoundBus { World, Interface };
+
 /**
  * AudioEngine: Singleton managing miniaudio device and playback.
  * Replaces process-spawning audio system with proper non-blocking library.
@@ -64,12 +71,22 @@ public:
     [[nodiscard]] const glm::vec3& getListenerPosition() const { return listenerPosition_; }
 
     // Simple 2D sound playback (non-blocking)
-    bool playSound2D(const std::vector<uint8_t>& wavData, float volume = 1.0f, float pitch = 1.0f);
-    bool playSound2D(const std::string& mpqPath, float volume = 1.0f, float pitch = 1.0f);
+    bool playSound2D(const std::vector<uint8_t>& wavData, float volume = 1.0f, float pitch = 1.0f,
+                     SoundBus bus = SoundBus::World);
+    bool playSound2D(const std::string& mpqPath, float volume = 1.0f, float pitch = 1.0f,
+                     SoundBus bus = SoundBus::World);
 
     // Stoppable 2D sound - returns a non-zero handle, or 0 on failure
     uint32_t playSound2DStoppable(const std::vector<uint8_t>& wavData, float volume = 1.0f,
-                                  bool loop = false, float fadeInMs = 0.0f);
+                                  bool loop = false, float fadeInMs = 0.0f,
+                                  SoundBus bus = SoundBus::World);
+
+    /// The room the world's sounds are heard in; WorldFx eases to it over
+    /// about a second. A wet of 0 is a dry mix.
+    void setWorldReverb(const ReverbSettings& reverb);
+    /// Muffle the world's sounds as heard from under water, eased in and out
+    /// over a third of a second. Interface sounds and music stay clear.
+    void setWorldUnderwater(bool underwater);
     /// Change a stoppable sound's volume while it plays.
     void setSoundVolume(uint32_t id, float volume);
     /// Fade a stoppable sound to silence over fadeMs and stop it. The id is
@@ -171,6 +188,18 @@ private:
 
     // miniaudio engine (opaque pointer)
     ma_engine* engine_ = nullptr;
+
+    // The world bus: a sound group (an ma_sound_group is an ma_sound) feeding
+    // the WorldFx node, which feeds the endpoint. Null when either failed to
+    // come up, and world sounds then go straight to the endpoint.
+    ma_sound* worldGroup_ = nullptr;
+    void* worldFxNode_ = nullptr;  // WorldFxNode*, see audio_engine.cpp
+    void initWorldBus();
+    void releaseWorldBus();
+    /// The group a sound on this bus is started in; null is the endpoint.
+    [[nodiscard]] ma_sound* groupFor(SoundBus bus) const {
+        return bus == SoundBus::World ? worldGroup_ : nullptr;
+    }
 
     /// Replaces miniaudio's own device callback: it mixes exactly as that one
     /// does, then hands the result to the capture ring when one is open.

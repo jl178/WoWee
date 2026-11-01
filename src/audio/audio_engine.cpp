@@ -1,5 +1,6 @@
 #define MINIAUDIO_IMPLEMENTATION
 #include "audio/audio_engine.hpp"
+#include "audio/world_fx.hpp"
 #include "core/logger.hpp"
 #include "pipeline/asset_manager.hpp"
 
@@ -181,6 +182,25 @@ static bool decodeWavCached(const std::vector<uint8_t>& wavData, DecodedWavCache
     return true;
 }
 
+/// A miniaudio node around WorldFx: one input bus, one output bus, the
+/// engine's channel count on both. ma_node_base must come first - miniaudio
+/// treats a pointer to this as a pointer to it.
+struct WorldFxNode {
+    ma_node_base base;
+    WorldFx fx;
+};
+
+void worldFxProcess(ma_node* node, const float** framesIn, ma_uint32* frameCountIn,
+                    float** framesOut, ma_uint32* frameCountOut) {
+    (void)frameCountIn;
+    auto* self = static_cast<WorldFxNode*>(node);
+    self->fx.process(framesIn[0], framesOut[0], *frameCountOut);
+}
+
+// Continuous: the reverb's tail keeps sounding after the last sound in the
+// group has finished, so the node is pulled even when nothing feeds it.
+ma_node_vtable gWorldFxVtable = {worldFxProcess, nullptr, 1, 1, MA_NODE_FLAG_CONTINUOUS_PROCESSING};
+
 } // namespace
 
 AudioEngine& AudioEngine::instance() {
@@ -240,9 +260,70 @@ bool AudioEngine::initialize() {
         default: break;
     }
 
+    initWorldBus();
+
     initialized_ = true;
     LOG_INFO("AudioEngine initialized (miniaudio, backend: ", backendName, ")");
     return true;
+}
+
+void AudioEngine::initWorldBus() {
+    if (!engine_) return;
+    const ma_uint32 channels = ma_engine_get_channels(engine_);
+    auto* node = new WorldFxNode();
+    node->fx.prepare(ma_engine_get_sample_rate(engine_), channels);
+    ma_node_config config = ma_node_config_init();
+    config.vtable = &gWorldFxVtable;
+    config.pInputChannels = &channels;
+    config.pOutputChannels = &channels;
+    if (ma_node_init(ma_engine_get_node_graph(engine_), &config, nullptr, &node->base) != MA_SUCCESS) {
+        LOG_WARNING("AudioEngine: world effects node failed; world sounds play dry");
+        delete node;
+        return;
+    }
+    if (ma_node_attach_output_bus(&node->base, 0, ma_engine_get_endpoint(engine_), 0) != MA_SUCCESS) {
+        LOG_WARNING("AudioEngine: world effects node would not attach; world sounds play dry");
+        ma_node_uninit(&node->base, nullptr);
+        delete node;
+        return;
+    }
+    auto* group = static_cast<ma_sound*>(std::malloc(sizeof(ma_sound)));
+    if (!group || ma_sound_group_init(engine_, MA_SOUND_FLAG_NO_SPATIALIZATION, nullptr, group) != MA_SUCCESS) {
+        LOG_WARNING("AudioEngine: world sound group failed; world sounds play dry");
+        std::free(group);
+        ma_node_uninit(&node->base, nullptr);
+        delete node;
+        return;
+    }
+    // The group starts on the endpoint; moved onto the effects node instead.
+    ma_node_attach_output_bus(group, 0, &node->base, 0);
+    worldGroup_ = group;
+    worldFxNode_ = node;
+    LOG_INFO("AudioEngine: world bus up (reverb and underwater muffle), ", channels, " channels at ",
+             ma_engine_get_sample_rate(engine_), " Hz");
+}
+
+void AudioEngine::releaseWorldBus() {
+    // After every sound in the group is gone, before the engine.
+    if (worldGroup_) {
+        ma_sound_group_uninit(worldGroup_);
+        std::free(worldGroup_);
+        worldGroup_ = nullptr;
+    }
+    if (worldFxNode_) {
+        auto* node = static_cast<WorldFxNode*>(worldFxNode_);
+        ma_node_uninit(&node->base, nullptr);
+        delete node;
+        worldFxNode_ = nullptr;
+    }
+}
+
+void AudioEngine::setWorldReverb(const ReverbSettings& reverb) {
+    if (auto* node = static_cast<WorldFxNode*>(worldFxNode_)) node->fx.setReverb(reverb);
+}
+
+void AudioEngine::setWorldUnderwater(bool underwater) {
+    if (auto* node = static_cast<WorldFxNode*>(worldFxNode_)) node->fx.setMuffle(underwater ? 1.0f : 0.0f);
 }
 
 std::string AudioEngine::getOutputDeviceName() const {
@@ -270,6 +351,7 @@ void AudioEngine::shutdown() {
         std::free(buffer);
     }
     activeSounds_.clear();
+    releaseWorldBus();
 
     capturing_.store(false, std::memory_order_release);
     if (engine_) {
@@ -320,7 +402,8 @@ void AudioEngine::setListenerOrientation(const glm::vec3& forward, const glm::ve
     }
 }
 
-bool AudioEngine::playSound2D(const std::vector<uint8_t>& wavData, float volume, float pitch) {
+bool AudioEngine::playSound2D(const std::vector<uint8_t>& wavData, float volume, float pitch,
+                              SoundBus bus) {
     // Size and volume, because this overload is handed decoded bytes and has
     // no name to report. The sample managers all cache their clips and call
     // this one, so the path-named log above never fires for them - and a sound
@@ -364,7 +447,7 @@ bool AudioEngine::playSound2D(const std::vector<uint8_t>& wavData, float volume,
         engine_,
         audioBuffer.get(),
         MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_ASYNC | MA_SOUND_FLAG_NO_PITCH | MA_SOUND_FLAG_NO_SPATIALIZATION,
-        nullptr,
+        groupFor(bus),
         sound.get()
     );
 
@@ -391,7 +474,7 @@ bool AudioEngine::playSound2D(const std::vector<uint8_t>& wavData, float volume,
 }
 
 uint32_t AudioEngine::playSound2DStoppable(const std::vector<uint8_t>& wavData, float volume,
-                                           bool loop, float fadeInMs) {
+                                           bool loop, float fadeInMs, SoundBus bus) {
     if (!initialized_ || !engine_ || wavData.empty()) return 0;
     if (masterVolume_ <= 0.0f) return 0;
 
@@ -414,7 +497,7 @@ uint32_t AudioEngine::playSound2DStoppable(const std::vector<uint8_t>& wavData, 
     ma_result result = ma_sound_init_from_data_source(
         engine_, audioBuffer.get(),
         MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_ASYNC | MA_SOUND_FLAG_NO_PITCH | MA_SOUND_FLAG_NO_SPATIALIZATION,
-        nullptr, sound.get());
+        groupFor(bus), sound.get());
     if (result != MA_SUCCESS) {
         return 0;
     }
@@ -473,7 +556,7 @@ void AudioEngine::stopSound(uint32_t id) {
     }
 }
 
-bool AudioEngine::playSound2D(const std::string& mpqPath, float volume, float pitch) {
+bool AudioEngine::playSound2D(const std::string& mpqPath, float volume, float pitch, SoundBus bus) {
     // Which file, and how loud, for the one-shots that name a path.
     //
     // A sound reported as playing loudly on every world entry cannot be found
@@ -490,7 +573,7 @@ bool AudioEngine::playSound2D(const std::string& mpqPath, float volume, float pi
         LOG_WARNING("AudioEngine::playSound2D: failed to load '", mpqPath, "'");
         return false;
     }
-    return playSound2D(data, volume, pitch);
+    return playSound2D(data, volume, pitch, bus);
 }
 
 bool AudioEngine::playSound3D(const std::vector<uint8_t>& wavData, const glm::vec3& position,
@@ -562,7 +645,7 @@ uint32_t AudioEngine::startSound3D(const std::vector<uint8_t>& wavData, const gl
         engine_,
         audioBuffer.get(),
         MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_ASYNC,  // Removed NO_PITCH flag
-        nullptr,
+        groupFor(SoundBus::World),
         sound.get()
     );
 

@@ -53,6 +53,12 @@ struct ZoneAudioContext {
     uint32_t wmoRootId = 0;
     int32_t wmoGroupIndex = -1;
     uint16_t wmoNameSet = 0;
+    // That group has the indoor flag: a room or a cave, whose reverb is its
+    // own. An outdoor group - a city street - sounds like the area around it.
+    bool wmoInterior = false;
+    // The camera is below the water's surface (not merely swimming at it):
+    // the world goes muffled and the underwater loop plays.
+    bool cameraUnderwater = false;
     // The map the world is on, for SoundEmitters.dbc; 0xFFFFFFFF = unknown.
     uint32_t mapId = 0xFFFFFFFFu;
     // Zone manager pointer (for zone info and music queries)
@@ -116,10 +122,15 @@ private:
     void playZoneMusic(const std::string& music);
     void updateTableMusic(const ZoneAudioContext& ctx, uint32_t zoneId, bool suppressed);
     void updateTableAmbience(const ZoneAudioContext& ctx);
+    void updateReverb(const ZoneAudioContext& ctx);
 
     SoundData soundData_;
     std::unique_ptr<ZoneMusicController> zoneMusic_;
     uint64_t ambienceKey_ = 0;
+    int32_t reverbPrefId_ = -1;   ///< the SoundProviderPreferences row in force; 0 dry, -1 none yet
+    bool reverbUnderwater_ = false;
+    std::string underwaterLoopPath_;  ///< from SoundEntries, resolved once the tables load
+    float underwaterLoopVolume_ = 0.69f;
     bool loopMusic_ = false;  ///< Loop Music setting: repeat the track instead of resting between tracks  ///< area id and room ambience the loops were chosen for
 
     std::unique_ptr<MusicManager> musicManager_;

@@ -130,11 +130,6 @@ private:
     std::function<void(uint64_t)> onDeleteCharacter;
     int deleteConfirmStage = 0;  // 0=none, 1=first warning, 2=final warning
 
-    /**
-     * Get faction color based on race
-     */
-    [[nodiscard]] ImVec4 getFactionColor(game::Race race) const;
-
     /// The controls. See paper_ui.hpp - this screen is drawn rather than
     /// asked for, the same as the login and realm screens before it.
     PaperUI ui_;
@@ -148,9 +143,6 @@ private:
     /// CharacterDeleteDialog: the name, and DELETE typed to confirm.
     void renderDeleteConfirm(const game::Character& character, float screenW,
                              float screenH);
-    /// GlueDialog: a message and one button. Answers true when it is pressed.
-    bool glueDialog(const char* id, const std::string& message, const char* buttonLabel,
-                    float screenW, float screenH);
 
     std::string realmName_;
     bool sceneShown_ = false;

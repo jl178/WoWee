@@ -56,23 +56,6 @@ std::string categoryName(int id) {
 RealmScreen::RealmScreen() {
 }
 
-const char* RealmScreen::getRealmType(uint8_t icon) {
-    switch (icon) {
-        case 0: return "Normal";
-        case 1: return "PvP";
-        case 6: return "RP";
-        case 8: return "RP-PvP";
-        default: return "Other";
-    }
-}
-
-const char* RealmScreen::getPopulationName(float population) {
-    if (population < 0.5f) return "Low";
-    if (population < 1.5f) return "Medium";
-    if (population < 2.5f) return "High";
-    return "Full";
-}
-
 void RealmScreen::render(auth::AuthHandler& authHandler) {
     const ImVec2 screen = ImGui::GetIO().DisplaySize;
     const float scale = std::clamp(std::min(screen.x / 1280.0f, screen.y / 760.0f), 0.62f, 2.6f);
@@ -479,28 +462,6 @@ void RealmScreen::render(auth::AuthHandler& authHandler) {
 
 void RealmScreen::setStatus(const std::string& message) {
     statusMessage = message;
-}
-
-const char* RealmScreen::getRealmStatus(uint8_t flags) const {
-    if (flags & 0x02) return "Offline";
-    if (flags & 0x01) return "Invalid";
-    if (flags & 0x80) return "Full";
-    if (flags & 0x40) return "New";
-    if (flags & 0x20) return "Recommended";
-    return "Online";
-}
-
-ImVec4 RealmScreen::getPopulationColor(float population) const {
-    if (population < 0.5f) {
-        return ui::colors::kBrightGreen;  // Green - Low
-    }
-    if (population < 1.5f) {
-        return ui::colors::kYellow;  // Yellow - Medium
-    }
-    if (population < 2.5f) {
-        return ImVec4(1.0f, 0.6f, 0.0f, 1.0f);  // Orange - High
-    }
-    return ui::colors::kRed;  // Red - Full
 }
 
 }} // namespace wowee::ui

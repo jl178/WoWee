@@ -1374,53 +1374,10 @@ void AuthScreen::renderGlueLogin(auth::AuthHandler& authHandler, float screenW, 
     // GlueDialog: "Connecting..." with Cancel while the attempt runs, the
     // failure with Okay once it has failed.
     if (modal) {
-        ImDrawList* fg = ImGui::GetForegroundDrawList();
-        const float w = 512.0f * u * 0.75f;
-        const float body = glue::kFontNormal * u;
         const std::string message =
             busy ? (statusMessage.empty() ? std::string("Connecting") : statusMessage)
                  : statusMessage;
-        // Wrapped by hand to the dialog's width, so a long reason stays inside.
-        std::vector<std::string> lines;
-        {
-            std::string line, word;
-            const float maxW = w - 60.0f * u;
-            const auto flushWord = [&]() {
-                if (word.empty()) return;
-                const std::string trial = line.empty() ? word : line + " " + word;
-                if (!line.empty() && glue::textWidth(trial.c_str(), body) > maxW) {
-                    lines.push_back(line);
-                    line = word;
-                } else {
-                    line = trial;
-                }
-                word.clear();
-            };
-            for (char c : message) {
-                if (c == ' ') flushWord(); else word.push_back(c);
-            }
-            flushWord();
-            if (!line.empty()) lines.push_back(line);
-        }
-        const float lineH = body * 1.3f;
-        const float h = 26.0f * u + lineH * static_cast<float>(lines.size()) + 20.0f * u +
-                        40.0f * u + 16.0f * u;
-        const ImVec2 a((screenW - w) * 0.5f, (screenH - h) * 0.5f);
-        const ImVec2 b(a.x + w, a.y + h);
-        fg->AddRectFilled(ImVec2(0, 0), ImVec2(screenW, screenH), IM_COL32(0, 0, 0, 90));
-        glue::dialogBackdrop(fg, a, b);
-        ui_.claimMouse(ImVec2(0, 0), ImVec2(screenW, screenH));
-        float y = a.y + 26.0f * u;
-        for (const std::string& line : lines) {
-            glue::textCentered(fg, (a.x + b.x) * 0.5f, y, line.c_str(), body, glue::kHighlight);
-            y += lineH;
-        }
-        // GlueDialogButtonTemplate: 220x40, sixteen units off the bottom.
-        const float bw = 220.0f * u * 0.75f, bh = 40.0f * u;
-        const ImVec2 ba((a.x + b.x - bw) * 0.5f, b.y - 16.0f * u - bh);
-        const ImVec2 bb(ba.x + bw, ba.y + bh);
-        if (glue::button(ui_, fg, "glue.dialog", ba, bb, busy ? "Cancel" : "Okay",
-                         glue::ButtonStyle::Red, true, glue::kFontNormal) ||
+        if (glue::dialog(ui_, "glue.dialog", message, busy ? "Cancel" : "Okay") ||
             (!busy && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
                        ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
                        ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) {

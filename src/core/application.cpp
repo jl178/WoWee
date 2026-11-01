@@ -3559,6 +3559,11 @@ void Application::applyServerMovementState(float deltaTime) {
 // a different reason: without it they never leave the run animation when they
 // stop.
 void Application::syncRenderInstancesToEntities(float deltaTime) {
+    syncCreatureRenderInstances(deltaTime);
+    syncPlayerRenderInstances(deltaTime);
+}
+
+void Application::syncCreatureRenderInstances(float deltaTime) {
     auto creatureSyncStart = std::chrono::steady_clock::now();
     if (renderer && gameHandler && renderer->getCharacterRenderer()) {
         auto* charRenderer = renderer->getCharacterRenderer();
@@ -3889,7 +3894,9 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                         entitySpawner_->getCreatureInstances().size(), " creatures)");
         }
     }
+}
 
+void Application::syncPlayerRenderInstances(float deltaTime) {
     // --- Online player render sync (position, orientation, animation) ---
     // Mirrors the creature sync loop above but without collision guard or
     // weapon-attach logic.  Without this, online players never transition
@@ -4185,7 +4192,6 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                         entitySpawner_->getPlayerInstances().size(), " players)");
         }
     }
-
 }
 
 void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {

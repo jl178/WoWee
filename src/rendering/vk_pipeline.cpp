@@ -317,5 +317,33 @@ VkDescriptorSetLayout createDescriptorSetLayout(VkDevice device,
     return layout;
 }
 
+bool createSamplerSets(VkDevice device, uint32_t count, VkDescriptorSetLayout& layout,
+    VkDescriptorPool& pool, VkDescriptorSet* sets)
+{
+    VkDescriptorSetLayoutBinding sampler{};
+    sampler.binding = 0;
+    sampler.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    sampler.descriptorCount = 1;
+    sampler.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    layout = createDescriptorSetLayout(device, {sampler});
+    if (!layout) return false;
+
+    VkDescriptorPoolSize size{};
+    size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    size.descriptorCount = count;
+    VkDescriptorPoolCreateInfo poolInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolInfo.maxSets = count;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &size;
+    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &pool) != VK_SUCCESS) return false;
+
+    const std::vector<VkDescriptorSetLayout> layouts(count, layout);
+    VkDescriptorSetAllocateInfo alloc{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    alloc.descriptorPool = pool;
+    alloc.descriptorSetCount = count;
+    alloc.pSetLayouts = layouts.data();
+    return vkAllocateDescriptorSets(device, &alloc, sets) == VK_SUCCESS;
+}
+
 } // namespace rendering
 } // namespace wowee

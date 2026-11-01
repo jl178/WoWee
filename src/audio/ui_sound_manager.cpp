@@ -242,7 +242,7 @@ bool UiSoundManager::playByName(const std::string& soundName) {
     // thousand mp3s among its wavs - claiming success for one of those would
     // skip the fallback below this and play nothing at all.
     return AudioEngine::instance().playSound2D(cached->second.data,
-                                               0.7f * volumeScale_, 1.0f);
+                                               0.7f * volumeScale_, 1.0f, SoundBus::Interface);
 }
 
 bool UiSoundManager::playFile(const std::string& path) {
@@ -259,14 +259,14 @@ bool UiSoundManager::playFile(const std::string& path) {
     }
     if (!cached->second.loaded) return false;
     return AudioEngine::instance().playSound2D(cached->second.data,
-                                               0.7f * volumeScale_, 1.0f);
+                                               0.7f * volumeScale_, 1.0f, SoundBus::Interface);
 }
 
 void UiSoundManager::playSound(const std::vector<UISample>& library) {
     if (!initialized_ || library.empty() || !library[0].loaded) return;
 
     float volume = 0.7f * volumeScale_;
-    AudioEngine::instance().playSound2D(library[0].data, volume, 1.0f);
+    AudioEngine::instance().playSound2D(library[0].data, volume, 1.0f, SoundBus::Interface);
 }
 
 void UiSoundManager::setVolumeScale(float scale) {

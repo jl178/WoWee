@@ -17,7 +17,9 @@
 namespace wowee {
 namespace ui {
 
-/// What each quality preset means, in the order Low, Medium, High, Ultra.
+/// What each quality preset means, in the order Low, Medium, High, Ultra,
+/// Classic. Classic is last because it was added last, not because it is the
+/// most demanding: it is off the Low-to-Ultra ladder (see kClassicPresetIndex).
 ///
 /// That order is what the config file holds. graphics_preset is written as an
 /// index - 0 for Custom, then one per row here - so a preset added at the front
@@ -61,6 +63,17 @@ struct GraphicsPresetValues {
     int   grassDensity;      ///< percent of what the terrain asks for
     int   grassHeight;       ///< percent
     int   grassDistance;     ///< yards
+    // The enhancements over the stock picture, stated on every row for the
+    // same reason as the grass: picking Ultra after Classic has to bring them
+    // back, and a row that left them alone would not.
+    float foliageWind;       ///< foliagewind: 1 the usual breeze, 0 still
+    float shadowStrength;    ///< shadowstrength: 1 is Light.dbc's own darkness
+    int   lightShafts;       ///< lightshafts: index of Off, Low, Medium, High
+    float fogStrength;       ///< fogstrength: 1 is Light.dbc's fog exactly
+    float fogSkyBlend;       ///< fogskyblend: 0 is the zone's own fog colour
+    float lensFlare;         ///< lensflare: 0 is none
+    bool  sharpStars;        ///< off is the sky model's own star texture
+    bool  sunShafts;
 };
 
 // Normal mapping and parallax are on from Medium up, by choice: Jered
@@ -82,17 +95,36 @@ struct GraphicsPresetValues {
 // first, rebuilt every ten to fifteen seconds of travel with a hitch of 30 ms
 // and up each time (the frame profile's beginFrame/grass+misc). It stays in
 // the panel for anyone who wants it.
+// The enhancement columns on Low to Ultra are each setting's own default, bar
+// Low's lighter mist. Classic sets every one of them to the stock picture:
+// still trees and cloth, Light.dbc's shadow darkness, fog and fog colour
+// exactly, no mist, flare or sun shafts, the sky's own stars, and no normal
+// maps or parallax (the ground's relief follows normal mapping, so it is flat
+// too). Shadows stay on, as on every row; the rest of its quality columns are
+// High's, at the default view distance, where the fog is Light.dbc's own
+// (LightingManager::kFogReferenceViewDistance).
 constexpr GraphicsPresetValues kGraphicsPresets[] = {
-    /* Low    */ { .viewDistance = 600.0f, .shadows = true,  .shadowDistance = 100.0f, .antiAliasing = 0, .fxaa = false, .normalMapping = false, .normalMapStrength = 0.6f, .parallax = false, .parallaxQuality = 0,  .groundClutter = 25,  .grass = false, .grassDensity = 70, .grassHeight = 50, .grassDistance = 215},
-    /* Medium */ {.viewDistance = 1000.0f, .shadows = true,  .shadowDistance = 200.0f, .antiAliasing = 1, .fxaa = false, .normalMapping = true, .normalMapStrength = 0.6f, .parallax = true, .parallaxQuality = 0,  .groundClutter = 60,  .grass = false, .grassDensity = 70, .grassHeight = 50, .grassDistance = 215},
-    /* High   */ {.viewDistance = 1600.0f, .shadows = true,  .shadowDistance = 350.0f, .antiAliasing = 2, .fxaa = false, .normalMapping = true, .normalMapStrength = 0.8f, .parallax = true, .parallaxQuality = 1, .groundClutter = 100, .grass = false, .grassDensity = 70, .grassHeight = 50, .grassDistance = 215},
-    /* Ultra  */ {.viewDistance = 2400.0f, .shadows = true,  .shadowDistance = 500.0f, .antiAliasing = 3, .fxaa = false, .normalMapping = true, .normalMapStrength = 1.2f, .parallax = true, .parallaxQuality = 2, .groundClutter = 150, .grass = false, .grassDensity = 70, .grassHeight = 50, .grassDistance = 215},
+    /* Low    */ { .viewDistance = 600.0f, .shadows = true,  .shadowDistance = 100.0f, .antiAliasing = 0, .fxaa = false, .normalMapping = false, .normalMapStrength = 0.6f, .parallax = false, .parallaxQuality = 0,  .groundClutter = 25,  .grass = false, .grassDensity = 70, .grassHeight = 50, .grassDistance = 215,
+                   .foliageWind = 1.0f, .shadowStrength = 1.0f, .lightShafts = 1, .fogStrength = 0.4f, .fogSkyBlend = 0.7f, .lensFlare = 1.0f, .sharpStars = true, .sunShafts = true},
+    /* Medium */ {.viewDistance = 1000.0f, .shadows = true,  .shadowDistance = 200.0f, .antiAliasing = 1, .fxaa = false, .normalMapping = true, .normalMapStrength = 0.6f, .parallax = true, .parallaxQuality = 0,  .groundClutter = 60,  .grass = false, .grassDensity = 70, .grassHeight = 50, .grassDistance = 215,
+                   .foliageWind = 1.0f, .shadowStrength = 1.0f, .lightShafts = 2, .fogStrength = 0.4f, .fogSkyBlend = 0.7f, .lensFlare = 1.0f, .sharpStars = true, .sunShafts = true},
+    /* High   */ {.viewDistance = 1600.0f, .shadows = true,  .shadowDistance = 350.0f, .antiAliasing = 2, .fxaa = false, .normalMapping = true, .normalMapStrength = 0.8f, .parallax = true, .parallaxQuality = 1, .groundClutter = 100, .grass = false, .grassDensity = 70, .grassHeight = 50, .grassDistance = 215,
+                   .foliageWind = 1.0f, .shadowStrength = 1.0f, .lightShafts = 2, .fogStrength = 0.4f, .fogSkyBlend = 0.7f, .lensFlare = 1.0f, .sharpStars = true, .sunShafts = true},
+    /* Ultra  */ {.viewDistance = 2400.0f, .shadows = true,  .shadowDistance = 500.0f, .antiAliasing = 3, .fxaa = false, .normalMapping = true, .normalMapStrength = 1.2f, .parallax = true, .parallaxQuality = 2, .groundClutter = 150, .grass = false, .grassDensity = 70, .grassHeight = 50, .grassDistance = 215,
+                   .foliageWind = 1.0f, .shadowStrength = 1.0f, .lightShafts = 2, .fogStrength = 0.4f, .fogSkyBlend = 0.7f, .lensFlare = 1.0f, .sharpStars = true, .sunShafts = true},
+    /* Classic */ {.viewDistance = kDefaultViewDistance, .shadows = true, .shadowDistance = 350.0f, .antiAliasing = 2, .fxaa = false, .normalMapping = false, .normalMapStrength = 0.8f, .parallax = false, .parallaxQuality = 1, .groundClutter = 100, .grass = false, .grassDensity = 70, .grassHeight = 50, .grassDistance = 215,
+                   .foliageWind = 0.0f, .shadowStrength = 1.0f, .lightShafts = 0, .fogStrength = 1.0f, .fogSkyBlend = 0.0f, .lensFlare = 0.0f, .sharpStars = false, .sunShafts = false},
 };
 
 /// The number of presets, not counting Custom - which is not a set of values
 /// but the name for "these are whatever you made them".
 inline constexpr int kGraphicsPresetCount =
     static_cast<int>(sizeof(kGraphicsPresets) / sizeof(kGraphicsPresets[0]));
+
+/// Classic's row. The ones before it are the Low-to-Ultra ladder, each asking
+/// for more than the last; Classic stands beside it.
+inline constexpr int kClassicPresetIndex = 4;
+static_assert(kClassicPresetIndex == kGraphicsPresetCount - 1, "Classic is the last row");
 
 }  // namespace ui
 }  // namespace wowee

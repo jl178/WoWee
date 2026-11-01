@@ -18,7 +18,7 @@ struct GPUPerFrameData {
     glm::vec4 lightDir;       // xyz = direction, w = unused
     glm::vec4 lightColor;     // xyz = color, w = unused
     glm::vec4 ambientColor;   // xyz = color, w = unused
-    glm::vec4 viewPos;        // xyz = camera pos, w = unused
+    glm::vec4 viewPos;        // xyz = camera pos, w = terrain relief (Renderer::setTerrainRelief)
     // w = the cloth wind strength (banners, awnings, WMO cloth): playerWake.w
     // without the indoor cut, because a hall's banners always breathed.
     glm::vec4 fogColor;       // xyz = color, w = cloth wind strength

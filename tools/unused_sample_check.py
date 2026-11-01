@@ -64,8 +64,10 @@ def scan():
     hits = []
     for name, header in sorted(collections().items()):
         lines = mentions(name)
+        # Every line but the declaration: a header-only class (world_fx.hpp)
+        # does its real work in the header.
         used = [l for l in lines
-                if not l.split(":")[0].endswith(".hpp")
+                if not DECL.search(l)
                 and not any(tok in l for tok in LOAD_ONLY)]
         if lines and not used:
             hits.append((name, header, len(lines)))

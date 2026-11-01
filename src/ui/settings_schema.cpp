@@ -33,11 +33,13 @@ constexpr SettingDesc kSchema[] = {
     // them. Both panels show the label as the title and these lines under it,
     // and the interface's panel adds the reason when a control is greyed, so
     // no line here needs to say what it depends on.
-    {"graphicspreset", "Quality preset", SettingKind::Enum, 0, 4, 1, "Graphics", "Quality",
-     "Sets every graphics option at once: view distance, shadows,\n"
-     "anti-aliasing, surface detail, ground clutter and grass.\n"
-     "Change any one of them afterwards and this reads Custom.",
-     "Custom|Low|Medium|High|Ultra", 0},
+    // Classic is last because the stored index is the row's place; see
+    // graphics_presets.hpp.
+    {"graphicspreset", "Quality preset", SettingKind::Enum, 0, 5, 1, "Graphics", "Quality",
+     "Sets every graphics option at once. Classic is the stock 3.3.5\n"
+     "picture: no wind, mist, flare, sun shafts or surface bumps, and\n"
+     "the zone's own fog. Change any option and this reads Custom.",
+     "Custom|Low|Medium|High|Ultra|Classic", 0},
     // Shadows off used to lose the device, and the row was taken away; off
     // now only stops the scene sampling the map, with the shadow pass run as
     // it is when they are on. See Renderer::renderShadowPass.
@@ -131,8 +133,8 @@ constexpr SettingDesc kSchema[] = {
      "is not there, so a short distance is a visible edge on open ground.", "", 140},
 
     {"normalmapping", "Surface bumps (normal mapping)", SettingKind::Bool, 0, 0, 0, "Detail", "Surfaces",
-     "Light stone, wood, cloth and metal by their surface texture, so\n"
-     "they catch the light like the real material rather than flat paint.", "", 1,
+     "Light stone, wood, metal and the ground by their surface texture,\n"
+     "so they catch the light like the real material, not flat paint.", "", 1,
      // Off applies at once. On needs the bump maps, which are made as each
      // building's textures load and skipped while this is off - so turned on
      // mid-session it reaches only what loads afterwards.

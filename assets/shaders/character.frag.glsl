@@ -185,7 +185,7 @@ vec4 samplePreviewTexture(sampler2D tex, vec2 uv) {
 }
 
 // Parallax Occlusion Mapping with angle-adaptive sampling
-vec2 parallaxOcclusionMap(vec2 uv, vec3 viewDirTS, float lodFactor) {
+vec2 parallaxOcclusionMap(vec2 uv, vec3 viewDirTS, float lodFactor, float depthScale) {
     float VdotN = abs(viewDirTS.z);
 
     if (VdotN < 0.15) return uv;
@@ -199,8 +199,8 @@ vec2 parallaxOcclusionMap(vec2 uv, vec3 viewDirTS, float lodFactor) {
     float layerDepth = 1.0 / float(numSamples);
     float currentLayerDepth = 0.0;
 
-    vec2 P = viewDirTS.xy / max(VdotN, 0.15) * pomScale;
-    float maxOffset = pomScale * 3.0;
+    vec2 P = viewDirTS.xy / max(VdotN, 0.15) * depthScale;
+    float maxOffset = depthScale * 3.0;
     P = clamp(P, vec2(-maxOffset), vec2(maxOffset));
     vec2 deltaUV = P / float(numSamples);
 
@@ -317,7 +317,7 @@ void main() {
         mat3 TBN_inv = transpose(TBN);
         vec3 viewDirWorld = normalize(viewPos.xyz - FragPos);
         vec3 viewDirTS = TBN_inv * viewDirWorld;
-        finalUV = parallaxOcclusionMap(TexCoord, viewDirTS, lodFactor);
+        finalUV = parallaxOcclusionMap(TexCoord, viewDirTS, lodFactor, pomScale);
     }
 
     vec4 texColor = textureGrad(uTexture, finalUV, uvDx, uvDy);

@@ -127,7 +127,6 @@ void WindowManager::ensureBarberState(game::GameHandler& gameHandler) {
     // BarberShopStyle IDs, rather than the visible appearance numbers, are the
     // wire values expected by a WotLK server. Build the race/sex-specific lists
     // once each time the chair opens.
-    barberOrigAppearanceBytes_ = ch->appearanceBytes;
     barberOrigSkinColor_ = static_cast<uint8_t>(ch->appearanceBytes & 0xFF);
     barberOrigHairStyle_ = static_cast<uint8_t>((ch->appearanceBytes >> 16) & 0xFF);
     barberOrigHairColor_ = static_cast<uint8_t>((ch->appearanceBytes >> 24) & 0xFF);

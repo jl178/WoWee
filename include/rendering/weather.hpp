@@ -147,7 +147,6 @@ private:
 
     enum Sprite : uint32_t { RAIN_STREAK = 0, RAIN_SPLASH, SNOW_FLAKE, SPRITE_COUNT };
 
-    bool createDescriptors();
     void loadTextures(pipeline::AssetManager* assetManager);
     void spawnParticle(Particle& p, const glm::vec3& cameraPos, bool anywhereInColumn);
     float resolveGround(const glm::vec3& at, const glm::vec3& cameraPos) const;

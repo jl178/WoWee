@@ -15,11 +15,20 @@ namespace se  { constexpr uint32_t kFields = 30, kName = 2, kFile0 = 3, kFileCou
                 kDirectory = 23, kVolume = 24, kFlags = 25, kMinDistance = 26, kDistanceCutoff = 27; }
 namespace zm  { constexpr uint32_t kFields = 8, kSetName = 1, kSilenceMin = 2, kSilenceMax = 4, kSounds = 6; }
 namespace sa  { constexpr uint32_t kFields = 3, kAmbience = 1; }
-namespace at  { constexpr uint32_t kFields = 36, kParent = 2, kAmbience = 7, kZoneMusic = 8,
-                kIntroSound = 9, kName = 11; }
+namespace at  { constexpr uint32_t kFields = 36, kParent = 2, kReverb = 5, kReverbUnderwater = 6,
+                kAmbience = 7, kZoneMusic = 8, kIntroSound = 9, kName = 11; }
 namespace zi  { constexpr uint32_t kFields = 5, kSoundId = 2, kMinDelayMinutes = 4; }
-namespace wa  { constexpr uint32_t kFields = 28, kWmoId = 1, kNameSet = 2, kGroup = 3, kAmbience = 6,
-                kZoneMusic = 7, kIntroSound = 8, kAreaTable = 10, kName = 11; }
+namespace wa  { constexpr uint32_t kFields = 28, kWmoId = 1, kNameSet = 2, kGroup = 3, kReverb = 4,
+                kReverbUnderwater = 5, kAmbience = 6, kZoneMusic = 7, kIntroSound = 8, kAreaTable = 10,
+                kName = 11; }
+// SoundProviderPreferences: ID, Description, Flags, EAXEnvironmentSelection,
+// EAXDecayTime, EAX2EnvironmentSize, EAX2EnvironmentDiffusion, EAX2Room,
+// EAX2RoomHF, EAX2DecayHFRatio, EAX2Reflections, EAX2ReflectionsDelay,
+// EAX2Reverb, EAX2ReverbDelay, then room rolloff, air absorption and the
+// EAX 3 columns this client does not use.
+namespace spp { constexpr uint32_t kFields = 24, kName = 1, kDecayTime = 4, kDiffusion = 6, kRoom = 7,
+                kRoomHF = 8, kDecayHFRatio = 9, kReflections = 10, kReflectionsDelay = 11, kReverb = 12,
+                kReverbDelay = 13; }
 namespace cr  { constexpr uint32_t kFields = 69, kMaleDisplay = 4, kFemaleDisplay = 5, kClientFileString = 11; }
 namespace cdi { constexpr uint32_t kFields = 16, kModel = 1, kSound = 2, kNpcSound = 12; }
 namespace ns  { constexpr uint32_t kFields = 5, kSound0 = 1; }
@@ -75,6 +84,7 @@ bool SoundData::load(const Loader& loadDbc) {
     intros_.clear();
     areas_.clear();
     wmoAreas_.clear();
+    providerPrefs_.clear();
     npcSounds_.clear();
     emoteSounds_.clear();
     emoteTextSoundAnims_.clear();
@@ -128,6 +138,8 @@ bool SoundData::load(const Loader& loadDbc) {
             area.ambienceId = dbc->getUInt32(i, at::kAmbience);
             area.zoneMusicId = dbc->getUInt32(i, at::kZoneMusic);
             area.introId = dbc->getUInt32(i, at::kIntroSound);
+            area.reverb = dbc->getInt32(i, at::kReverb);
+            area.reverbUnderwater = dbc->getInt32(i, at::kReverbUnderwater);
             area.name = dbc->getString(i, at::kName);
             areas_[dbc->getUInt32(i, 0)] = std::move(area);
         }
@@ -142,8 +154,27 @@ bool SoundData::load(const Loader& loadDbc) {
             row.zoneMusicId = dbc->getUInt32(i, wa::kZoneMusic);
             row.introId = dbc->getUInt32(i, wa::kIntroSound);
             row.areaId = dbc->getUInt32(i, wa::kAreaTable);
+            row.reverb = dbc->getInt32(i, wa::kReverb);
+            row.reverbUnderwater = dbc->getInt32(i, wa::kReverbUnderwater);
             row.name = dbc->getString(i, wa::kName);
             wmoAreas_[row.wmoId].push_back(std::move(row));
+        }
+    }
+    if (auto dbc = table(loadDbc, "SoundProviderPreferences.dbc", spp::kFields)) {
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            SoundProviderPref p;
+            p.id = dbc->getUInt32(i, 0);
+            p.name = dbc->getString(i, spp::kName);
+            p.decayTime = dbc->getFloat(i, spp::kDecayTime);
+            p.diffusion = dbc->getFloat(i, spp::kDiffusion);
+            p.room = dbc->getInt32(i, spp::kRoom);
+            p.roomHF = dbc->getInt32(i, spp::kRoomHF);
+            p.decayHFRatio = dbc->getFloat(i, spp::kDecayHFRatio);
+            p.reflections = dbc->getInt32(i, spp::kReflections);
+            p.reflectionsDelay = dbc->getFloat(i, spp::kReflectionsDelay);
+            p.reverb = dbc->getInt32(i, spp::kReverb);
+            p.reverbDelay = dbc->getFloat(i, spp::kReverbDelay);
+            providerPrefs_[p.id] = std::move(p);
         }
     }
     if (auto dbc = table(loadDbc, "NPCSounds.dbc", ns::kFields)) {
@@ -387,6 +418,43 @@ const WmoAreaSounds* SoundData::wmoArea(uint32_t wmoId, uint16_t nameSet, int32_
         }
     }
     return best;
+}
+
+const SoundProviderPref* SoundData::providerPref(int32_t id) const {
+    if (id <= 0) return nullptr;
+    auto it = providerPrefs_.find(static_cast<uint32_t>(id));
+    return it == providerPrefs_.end() ? nullptr : &it->second;
+}
+
+const SoundProviderPref* SoundData::providerPrefByName(std::string_view name) const {
+    for (const auto& [id, p] : providerPrefs_) {
+        if (p.name == name) return &p;
+    }
+    return nullptr;
+}
+
+int32_t SoundData::areaReverb(uint32_t areaId, bool underwater) const {
+    for (int depth = 0; areaId != 0 && depth < kMaxParentDepth; ++depth) {
+        const AreaSounds* a = area(areaId);
+        if (!a) return 0;
+        const int32_t id = underwater ? a->reverbUnderwater : a->reverb;
+        if (id > 0) return id;
+        if (a->parent == areaId) return 0;
+        areaId = a->parent;
+    }
+    return 0;
+}
+
+int32_t SoundData::wmoReverb(uint32_t wmoId, uint16_t nameSet, int32_t groupIndex, bool underwater) const {
+    // A group's own row may carry only a name or music and leave the reverb
+    // to the building's -1 row.
+    const auto pick = [underwater](const WmoAreaSounds* row) {
+        return row ? (underwater ? row->reverbUnderwater : row->reverb) : 0;
+    };
+    const int32_t own = pick(wmoArea(wmoId, nameSet, groupIndex));
+    if (own > 0) return own;
+    const int32_t building = groupIndex != -1 ? pick(wmoArea(wmoId, nameSet, -1)) : 0;
+    return building > 0 ? building : 0;
 }
 
 const CreatureSounds* SoundData::displaySounds(uint32_t displayId) const {

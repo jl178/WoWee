@@ -52,10 +52,6 @@ public:
                                 uint32_t durationMs = 0, uint32_t attachInstanceId = 0,
                                 uint64_t casterGuid = 0, bool channel = false);
 
-    // Whether SpellVisual.dbc has this row. Its kits then carry the spell's
-    // sounds (SpellVisualKit.SoundID), so the school-sound fallback stays quiet.
-    bool hasVisual(uint32_t visualId);
-
     // Whether the kit this visual plays at one moment of the cast names a
     // sound: the build-up (PrecastKit or ChannelKit), the release (CastKit,
     // or the missile's own MissileSound) or the landing (ImpactKit,
@@ -135,9 +131,6 @@ public:
     // no new particles, the live ones finish (at most ~1.5 s) - and its
     // looping sound fades.
     void cancelPrecastVisuals(uint64_t casterGuid);
-
-    // Remove every caster's precast/channel build-up.
-    void cancelAllPrecastVisuals();
 
     // Remove all active spell visual instances and reset caches.
     // Called on map change / combat reset.

@@ -216,13 +216,23 @@ void main() {
     float bumpFade = 1.0 - smoothstep(50.0, 125.0, fragDist);
     float edgeDist = min(min(LayerUV.x, 1.0 - LayerUV.x), min(LayerUV.y, 1.0 - LayerUV.y));
     bumpFade *= smoothstep(0.0, 0.06, edgeDist);
-    // And down on steep slopes. Terrain textures are projected straight down,
-    // so on a cliff each texel is smeared down the face; the luminance then
-    // changes sharply across the slope and hardly at all along it, and the
-    // bump turned that into lit ridges running down every cliff - streaks on
-    // top of the stretch the projection already has. Full strength up to
-    // about 45 degrees, a quarter of it on a vertical face.
-    bumpFade *= mix(0.25, 1.0, smoothstep(0.35, 0.7, abs(norm.z)));
+    // And down on slopes. Terrain textures are projected straight down, so on
+    // a hillside each texel is smeared down the face by 1/cos of the slope;
+    // the luminance then changes sharply across the slope and hardly at all
+    // along it, and the bump turned that into lit ridges running down every
+    // mountain - streaks on top of the stretch the projection already has,
+    // and the "wrong and weird" mountains. It held full strength to 45
+    // degrees and a quarter on a cliff; mountainsides are mostly 30 to 60, so
+    // it was near full on exactly the ground it looks worst on. Now full only
+    // on ground that reads as flat (to about 25 degrees), a tenth by 55, so a
+    // mountain shows its painted rock as stock does and the meadow at its
+    // foot keeps its relief.
+    float flatness = smoothstep(0.57, 0.9, abs(norm.z));
+    bumpFade *= mix(0.1, 1.0, flatness);
+    // The Surface bumps setting and its strength (viewPos.w): 0 is the flat
+    // stock ground, 1 the default. Capped, so the top of the slider deepens
+    // the buildings' maps without turning the ground to gravel.
+    bumpFade *= clamp(viewPos.w, 0.0, 1.25);
     if (bumpFade > 0.001) {
         float lum = dot(finalColor.rgb, vec3(0.299, 0.587, 0.114));
         float dLdx = dFdx(lum);
@@ -255,9 +265,11 @@ void main() {
                               * (9.0 * bumpFade);
             // A texture edge is a step, not a slope. Left unbounded, one
             // crossing a sharp boundary still turns the normal further than
-            // any real ground ever slopes.
+            // any real ground ever slopes. Tighter on a slope, where the
+            // geometry's own normal is what carries the mountain's shape.
             float amount = length(perturbation);
-            if (amount > 0.7) perturbation *= 0.7 / amount;
+            float maxTilt = mix(0.3, 0.6, flatness);
+            if (amount > maxTilt) perturbation *= maxTilt / amount;
             vec3 candidate = norm - perturbation;
             float len2 = dot(candidate, candidate);
             norm = (len2 > 1e-8) ? candidate * inversesqrt(len2) : norm;

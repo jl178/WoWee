@@ -2398,14 +2398,6 @@ std::string GameHandler::formatTitleStringFor(const std::string& fmt,
     return fmt;
 }
 
-std::string GameHandler::getFormattedTitleFor(uint32_t bit,
-                                              const std::string& name) const {
-    loadTitleNameCache();
-    auto it = titleNameCache_.find(bit);
-    if (it == titleNameCache_.end() || it->second.empty()) return {};
-    return formatTitleStringFor(it->second, name);
-}
-
 void GameHandler::sendSetTitle(int32_t bit) {
     if (!isInWorld()) return;
     auto packet = SetTitlePacket::build(bit);

@@ -376,7 +376,7 @@ bool ChannelNotifyParser::parse(network::Packet& packet, ChannelNotifyData& data
     // Matched on the exact size, so a core that sends something else just
     // leaves the id at zero rather than misreading.
     if (data.notifyType == ChannelNotifyType::YOU_JOINED && bytesLeft == 9) {
-        data.channelFlags = packet.readUInt8();
+        packet.readUInt8();  // flags: nothing here uses them
         data.channelId = packet.readUInt32();
         packet.readUInt32();
         return true;

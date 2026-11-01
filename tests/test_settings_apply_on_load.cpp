@@ -306,8 +306,9 @@ TEST_CASE("no preset asks for shadows to be off", "[settings]") {
 TEST_CASE("the presets climb", "[settings]") {
     // Each step up is meant to ask for more than the one below it. A column
     // that goes backwards is a preset that improves something by turning it
-    // down, which is how the two copies were spotted disagreeing.
-    for (int i = 1; i < wowee::ui::kGraphicsPresetCount; ++i) {
+    // down, which is how the two copies were spotted disagreeing. Classic is
+    // not a step: it stands beside the ladder (kClassicPresetIndex).
+    for (int i = 1; i < wowee::ui::kClassicPresetIndex; ++i) {
         const auto& lo = wowee::ui::kGraphicsPresets[i - 1];
         const auto& hi = wowee::ui::kGraphicsPresets[i];
         INFO("preset " << i << " asks for less than " << (i - 1));

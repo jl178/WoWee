@@ -112,6 +112,8 @@ constexpr const char* kPresetKeys[] = {
     "viewdistance", "shadows",      "shadowdistance", "antialiasing", "fxaa",
     "normalmapping", "normalmapstrength", "parallax", "parallaxquality", "groundclutter",
     "grassenabled", "grassdensity", "grassheight",    "grassdistance",
+    "foliagewind", "shadowstrength", "lightshafts", "fogstrength", "fogskyblend",
+    "lensflare", "sharpstars", "sunshafts",
 };
 
 bool isPresetKey(const std::string& key) {
@@ -191,6 +193,14 @@ void GlueOptionsFrame::set(const std::string& key, const std::string& v) {
         pending_["grassdensity"] = settingNumberText(p.grassDensity);
         pending_["grassheight"] = settingNumberText(p.grassHeight);
         pending_["grassdistance"] = settingNumberText(p.grassDistance);
+        pending_["foliagewind"] = settingNumberText(p.foliageWind);
+        pending_["shadowstrength"] = settingNumberText(p.shadowStrength);
+        pending_["lightshafts"] = settingNumberText(p.lightShafts);
+        pending_["fogstrength"] = settingNumberText(p.fogStrength);
+        pending_["fogskyblend"] = settingNumberText(p.fogSkyBlend);
+        pending_["lensflare"] = settingNumberText(p.lensFlare);
+        pending_["sharpstars"] = on(p.sharpStars);
+        pending_["sunshafts"] = on(p.sunShafts);
     } else if (isPresetKey(key)) {
         // Changed by hand, these are no longer the preset; Apply works out
         // whether they happen to be another one.

@@ -2679,13 +2679,6 @@ public:
     /// with the player's name where the "%s" sits - "%s the Explorer". Empty
     /// when the id is unknown.
     std::string getFormattedTitleById(uint32_t id) const;
-
-    /// One player's title, decorated with that player's own name.
-    ///
-    /// getFormattedTitle above answers for the local player, because the row
-    /// it reads is a sentence with the reader's name in it. Anyone else needs
-    /// their own name in that hole, which is all this adds.
-    std::string getFormattedTitleFor(uint32_t bit, const std::string& name) const;
     /// Send CMSG_SET_TITLE to activate a title (bit >= 0) or clear it (bit = -1).
     void sendSetTitle(int32_t bit);
 

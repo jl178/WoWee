@@ -47,7 +47,7 @@ void playItemFoley(lua_State* L, uint32_t itemId, uint32_t displayId, bool picku
     float volume = entry->volume;
     if (auto* ui = ac->getUiSoundManager()) volume *= ui->getVolumeScale();
     const auto& file = entry->files[static_cast<size_t>(std::rand()) % entry->files.size()];
-    audio::AudioEngine::instance().playSound2D(file, volume, 1.0f);
+    audio::AudioEngine::instance().playSound2D(file, volume, 1.0f, audio::SoundBus::Interface);
 }
 } // namespace
 

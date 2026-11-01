@@ -65,10 +65,6 @@ public:
     uint8_t barberColorsForHairStyle_ = 0xFF;
     float barberBaseCost_ = 0.0f;
     bool barberInitialized_ = false;
-    /// What the character walked into the shop wearing, and whether the preview
-    /// has changed them since. Kept whole rather than as the four parts,
-    /// because the face is in there too and the barber does not sell faces.
-    uint32_t barberOrigAppearanceBytes_ = 0;
 
     // Barber state, separated from the window that used to hold it.
     //
