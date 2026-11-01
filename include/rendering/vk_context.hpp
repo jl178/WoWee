@@ -204,6 +204,17 @@ public:
     /// previous mark). Empty until a frame has come round and been read back.
     [[nodiscard]] const std::vector<std::pair<const char*, double>>&
         gpuTimings() const { return gpuTimings_; }
+
+        /// Average milliseconds beginFrame spent waiting since the last call: on
+        /// the frame fence, then on the swapchain acquire. Resets the counters.
+        void takeBeginFrameWaits(double& fenceMs, double& acquireMs) {
+            const double n = beginFrameWaitSamples_ > 0 ? static_cast<double>(beginFrameWaitSamples_) : 1.0;
+            fenceMs = beginFrameFenceWaitMs_ / n;
+            acquireMs = beginFrameAcquireMs_ / n;
+            beginFrameFenceWaitMs_ = 0.0;
+            beginFrameAcquireMs_ = 0.0;
+            beginFrameWaitSamples_ = 0;
+        }
     [[nodiscard]] bool hasDedicatedTransferQueue() const { return hasDedicatedTransfer_; }
     [[nodiscard]] VmaAllocator getAllocator() const { return allocator; }
     [[nodiscard]] VkSurfaceKHR getSurface() const { return surface; }
@@ -421,6 +432,9 @@ private:
     bool swapchainDirty = false;
     bool surfaceLost_ = false;
     bool deviceLost_ = false;
+    double beginFrameFenceWaitMs_ = 0.0;
+    double beginFrameAcquireMs_ = 0.0;
+    uint32_t beginFrameWaitSamples_ = 0;
     bool vsync_ = true;
     /// The vsync state the present-mode line last reported, so a rebuild
     /// that changes nothing says nothing. -1 until the first swapchain.

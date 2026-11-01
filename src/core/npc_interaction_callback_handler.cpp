@@ -34,6 +34,14 @@ audio::VoiceType NPCInteractionCallbackHandler::resolveNpcVoiceType(uint64_t gui
     return voiceType;
 }
 
+uint32_t NPCInteractionCallbackHandler::resolveNpcDisplayId(uint64_t guid) const {
+    auto entity = gameHandler_.getEntityManager().getEntity(guid);
+    if (entity && entity->getType() == game::ObjectType::UNIT) {
+        return std::static_pointer_cast<game::Unit>(entity)->getDisplayId();
+    }
+    return 0;
+}
+
 void NPCInteractionCallbackHandler::setupCallbacks() {
     // NPC greeting callback - play voice line
     gameHandler_.setNpcGreetingCallback([this](uint64_t guid, const glm::vec3& position) {
@@ -49,7 +57,7 @@ void NPCInteractionCallbackHandler::setupCallbacks() {
             // Convert canonical to render coords for 3D audio
             glm::vec3 renderPos = core::coords::canonicalToRender(position);
             audio::VoiceType voiceType = resolveNpcVoiceType(guid);
-            audioCoordinator_->getNpcVoiceManager()->playGreeting(guid, voiceType, renderPos);
+            audioCoordinator_->getNpcVoiceManager()->playGreeting(guid, resolveNpcDisplayId(guid), voiceType, renderPos);
         }
     });
 
@@ -58,7 +66,7 @@ void NPCInteractionCallbackHandler::setupCallbacks() {
         if (audioCoordinator_ && audioCoordinator_->getNpcVoiceManager()) {
             glm::vec3 renderPos = core::coords::canonicalToRender(position);
             audio::VoiceType voiceType = resolveNpcVoiceType(guid);
-            audioCoordinator_->getNpcVoiceManager()->playFarewell(guid, voiceType, renderPos);
+            audioCoordinator_->getNpcVoiceManager()->playFarewell(guid, resolveNpcDisplayId(guid), voiceType, renderPos);
         }
     });
 
@@ -67,7 +75,7 @@ void NPCInteractionCallbackHandler::setupCallbacks() {
         if (audioCoordinator_ && audioCoordinator_->getNpcVoiceManager()) {
             glm::vec3 renderPos = core::coords::canonicalToRender(position);
             audio::VoiceType voiceType = resolveNpcVoiceType(guid);
-            audioCoordinator_->getNpcVoiceManager()->playVendor(guid, voiceType, renderPos);
+            audioCoordinator_->getNpcVoiceManager()->playVendor(guid, resolveNpcDisplayId(guid), voiceType, renderPos);
         }
     });
 

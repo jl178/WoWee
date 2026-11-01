@@ -109,6 +109,45 @@ area's set; its AmbienceID replaces the area loop; ambience no longer stops
 indoors. The hand-written tavern list applies only when the tables have no
 row for the building.
 
+### Widget name index, lazy M2 clocks (20:10)
+
+`WidgetTree::findByName` was a reverse scan of 28k widgets, asked every
+frame for panels that do not exist yet (pet, inspect, paperdoll): a name map
+took `addonWidgets/models` and `/paperdoll` from 2.6 ms to nothing. The M2
+renderer no longer steps 70k animation clocks a frame; clocks advance when
+read (`advanceClock`): `renderer->update` 5.5 ms to 3.5 ms.
+
+Northshire, same spot as the baseline: **33.5 fps, 29.8 ms a frame** (was
+17.8 fps, 56 ms).
+
+| Stage | ms/frame |
+|---|---|
+| beginFrame | 8.4 |
+| renderWorld | 7.3 |
+| addonWidgets | 6.3 (layout 3.9, engine 1.9) |
+| renderer->update | 3.5 |
+| frameXml->draw | 1.2 |
+| gameHandler->update | 0.4 |
+
+Verified in the Goldshire inn (character moved beside Innkeeper Farley):
+`Zone music: Sound\Music\ZoneMusic\TavernHuman\RA_HumanTavern2A.mp3 (set 156)`
+and `Zone ambience: Sound\Ambience\WMOAmbience\Tavern.wav`.
+
+### Where beginFrame waits (20:20)
+
+beginFrame's 8 ms was assumed to be the GPU or the compositor. Timing the
+fence wait and the swapchain acquire separately showed both under 0.05 ms:
+the GPU sits at 930 MHz in P4 with "Idle" as its clock reason. The time is
+CPU work inside Renderer::beginFrame: the M2 cull input upload (a loop over
+every instance), grass population, and the render graph that records the
+shadow, HiZ and fog passes on the main thread. Sections added to name them.
+
+### M2 cull fields on one cache line (20:17)
+
+The visibility walk and the cull upload read a dozen scattered fields per
+instance; grouped behind the position, the M2 record worker fell from
+10-12 ms to 4-5 ms (`renderWorld: ... workers ... m2 4.68`).
+
 ## Next
 
 See the backlog in the loop prompt: jump phases, M2 per-frame scans, FrameXML

@@ -13,6 +13,8 @@ namespace pipeline { class AssetManager; }
 
 namespace audio {
 
+class SoundData;
+
 struct VoiceSample {
     std::string path;
     std::vector<uint8_t> data;
@@ -59,6 +61,15 @@ public:
     void playVendor(uint64_t npcGuid, VoiceType voiceType, const glm::vec3& position);
     void playPissed(uint64_t npcGuid, VoiceType voiceType, const glm::vec3& position);
 
+    /// The same lines from the client's tables: CreatureDisplayInfo.NPCSoundID
+    /// names an NPCSounds row with the display's own greeting, farewell and
+    /// annoyed sounds. A display without a row falls back to the race voice.
+    void setSoundData(const SoundData* data) { soundData_ = data; }
+    void playGreeting(uint64_t npcGuid, uint32_t displayId, VoiceType voiceType, const glm::vec3& position);
+    void playFarewell(uint64_t npcGuid, uint32_t displayId, VoiceType voiceType, const glm::vec3& position);
+    void playVendor(uint64_t npcGuid, uint32_t displayId, VoiceType voiceType, const glm::vec3& position);
+    void playPissed(uint64_t npcGuid, uint32_t displayId, VoiceType voiceType, const glm::vec3& position);
+
     // Play NPC combat sounds
     void playAggro(uint64_t npcGuid, uint32_t displayId, VoiceType voiceType,
                    const glm::vec3& position);
@@ -82,6 +93,8 @@ private:
     void loadCreatureAggroSounds();
     bool loadSound(const std::string& path, VoiceSample& sample);
     bool playSoundEntry(uint32_t soundId, const glm::vec3& position);
+    bool playFromTables(uint64_t npcGuid, uint32_t displayId, SoundCategory category, const glm::vec3& position);
+    const SoundData* soundData_ = nullptr;
     void playSound(uint64_t npcGuid, VoiceType voiceType, SoundCategory category, const glm::vec3& position);
 
     pipeline::AssetManager* assetManager_ = nullptr;

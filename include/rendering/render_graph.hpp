@@ -61,6 +61,10 @@ public:
     RenderGraph() = default;
     ~RenderGraph() = default;
 
+    /// Where execute() reports each pass's recording time, when the frame
+    /// profiler is on. Unset, nothing is measured.
+    void setStageSink(std::function<void(const char*, float)> sink) { stageSink_ = std::move(sink); }
+
     // Reset graph for a new frame (clears passes, keeps resource registry).
     void reset();
 
@@ -111,6 +115,7 @@ private:
     // Compiled execution order (indices into passes_)
     std::vector<uint32_t> executionOrder_;
     bool compiled_ = false;
+    std::function<void(const char*, float)> stageSink_;
 };
 
 } // namespace rendering

@@ -874,6 +874,7 @@ bool Renderer::initialize(core::Window* win) {
 
     // Create render graph and register virtual resources
     renderGraph_ = std::make_unique<RenderGraph>();
+    if (stageSink_) renderGraph_->setStageSink(stageSink_);
 
     // Create overlay system (selection circle + fullscreen overlay)
     overlaySystem_ = std::make_unique<OverlaySystem>(vkCtx);
@@ -1189,10 +1190,24 @@ void Renderer::applyMsaaChange() {
 
 }
 
+void Renderer::setStageSink(std::function<void(const char*, float)> sink) {
+    stageSink_ = std::move(sink);
+    if (renderGraph_) renderGraph_->setStageSink(stageSink_);
+}
+
 void Renderer::beginFrame() {
     ZoneScopedN("Renderer::beginFrame");
     if (!vkCtx) return;
     if (vkCtx->isDeviceLost()) return;
+    // Section timing for the frame profiler; see GameHandler::update.
+    using clock = std::chrono::steady_clock;
+    clock::time_point sectionStart = stageSink_ ? clock::now() : clock::time_point{};
+    auto section = [&](const char* name) {
+        if (!stageSink_) return;
+        const auto now = clock::now();
+        stageSink_(name, std::chrono::duration<float, std::milli>(now - sectionStart).count());
+        sectionStart = now;
+    };
 
     // The ablation's clock. Top of one frame to the top of the next is the
     // frame's whole wall time, which is the number a pass has to move to be
@@ -1297,6 +1312,7 @@ void Renderer::beginFrame() {
     if (rtLighting_ && rtLighting_->prepare(sceneRenderExtent())) writeRtLightingBindings();
 
     rtRecordedThisFrame_ = false;
+    section("beginFrame/uploads+swapchain");
 
     // Acquire swapchain image and begin command buffer
     currentCmd = vkCtx->beginFrame(currentImageIndex);
@@ -1304,6 +1320,7 @@ void Renderer::beginFrame() {
         // Swapchain out of date, will retry next frame
         return;
     }
+    section("beginFrame/acquire");
 
     // This slot's fence has just been waited on, so a frame it copied for the
     // recording two frames ago is complete.
@@ -1317,6 +1334,7 @@ void Renderer::beginFrame() {
 
     // Update per-frame UBO with current camera/lighting state
     updatePerFrameUBO();
+    section("beginFrame/record+ubo");
 
     // ── Early compute: M2 frustum culling ──
     // beginFrame() has already waited for this frame slot's previous fence, so
@@ -1330,6 +1348,7 @@ void Renderer::beginFrame() {
         m2Renderer->invalidateCullOutput(frame);
         m2Renderer->dispatchCullCompute(currentCmd, frame, *camera);
     }
+    section("beginFrame/m2 cull upload");
 
     // Grass culls here too, for the same reason: a dispatch has to be recorded
     // outside a render pass. Unlike the M2 path nothing reads the result back -
@@ -1344,10 +1363,12 @@ void Renderer::beginFrame() {
     // --- Off-screen pre-passes ---
     // Build frame graph: registers pre-passes as graph nodes with dependencies.
     // compile() topologically sorts; execute() runs them with auto barriers.
+    section("beginFrame/grass+misc");
     buildFrameGraph(nullptr);
     if (renderGraph_) {
         renderGraph_->execute(currentCmd);
     }
+    section("beginFrame/graph (shadows, hiz, fog)");
 
     // --- Begin render pass ---
     // Select framebuffer: PP off-screen target or swapchain (§4.3 - PostProcessPipeline)
@@ -4496,16 +4517,16 @@ void Renderer::renderShadowPass() {
     const float shadowCullRadius = shadowDistance_ * 1.35f;
     {
     if (terrainRenderer) {
-        terrainRenderer->renderShadow(currentCmd, lightSpaceMatrix, shadowCenter, shadowCullRadius);
+        { const auto shadowT0 = std::chrono::steady_clock::now(); terrainRenderer->renderShadow(currentCmd, lightSpaceMatrix, shadowCenter, shadowCullRadius); if (stageSink_) stageSink_("shadow/terrain", std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - shadowT0).count()); }
     }
     if (wmoRenderer) {
-        wmoRenderer->renderShadow(currentCmd, lightSpaceMatrix, shadowCenter, shadowCullRadius);
+        { const auto shadowT0 = std::chrono::steady_clock::now(); wmoRenderer->renderShadow(currentCmd, lightSpaceMatrix, shadowCenter, shadowCullRadius); if (stageSink_) stageSink_("shadow/wmo", std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - shadowT0).count()); }
     }
     if (m2Renderer) {
-        m2Renderer->renderShadow(currentCmd, lightSpaceMatrix, globalTime, shadowCenter, shadowCullRadius);
+        { const auto shadowT0 = std::chrono::steady_clock::now(); m2Renderer->renderShadow(currentCmd, lightSpaceMatrix, globalTime, shadowCenter, shadowCullRadius); if (stageSink_) stageSink_("shadow/m2", std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - shadowT0).count()); }
     }
     if (characterRenderer) {
-        characterRenderer->renderShadow(currentCmd, lightSpaceMatrix, shadowCenter, shadowCullRadius);
+        { const auto shadowT0 = std::chrono::steady_clock::now(); characterRenderer->renderShadow(currentCmd, lightSpaceMatrix, shadowCenter, shadowCullRadius); if (stageSink_) stageSink_("shadow/characters", std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - shadowT0).count()); }
     }
     }
 

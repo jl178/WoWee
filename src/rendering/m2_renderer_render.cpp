@@ -2350,7 +2350,7 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
 }
 
 void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, float globalTime,
-                              const glm::vec3& /*shadowCenter*/, float shadowRadius) {
+                              const glm::vec3& shadowCenter, float shadowRadius) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
     if (instances.empty() || models.empty()) return;
 
@@ -2424,6 +2424,15 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         const auto& instance = instances[i];
         if (!instance.cachedIsValid || instance.cachedIsSmoke ||
             instance.cachedIsInvisibleTrap) continue;
+        // Every instance is a candidate caster, so this is a walk over all of
+        // them on the main thread. A squared distance against the shadow disc,
+        // read from the instance's first cache line, settles the far ones before
+        // the model pointer and the light-space transform are touched.
+        {
+            const glm::vec3 d = instance.position - shadowCenter;
+            const float reach = shadowRadius + instance.cachedPaddedRadius;
+            if (glm::dot(d, d) > reach * reach) continue;
+        }
         if (!instance.cachedModel) continue;
         const M2ModelGPU& model = *instance.cachedModel;
 

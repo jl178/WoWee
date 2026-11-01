@@ -1,4 +1,5 @@
 #include "audio/npc_voice_manager.hpp"
+#include "audio/sound_data.hpp"
 #include "audio/audio_engine.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
@@ -466,6 +467,51 @@ void NpcVoiceManager::playSound(uint64_t npcGuid, VoiceType voiceType, SoundCate
     if (success) {
         lastPlayTime_[npcGuid] = now;
     }
+}
+
+bool NpcVoiceManager::playFromTables(uint64_t npcGuid, uint32_t displayId, SoundCategory category,
+                                     const glm::vec3& position) {
+    if (!soundData_ || !soundData_->loaded() || !AudioEngine::instance().isInitialized()) return false;
+    const NpcSounds* lines = soundData_->npcSounds(displayId);
+    if (!lines) return false;
+    uint32_t soundId = 0;
+    switch (category) {
+        case SoundCategory::GREETING:
+        case SoundCategory::VENDOR:   soundId = lines->hello; break;
+        case SoundCategory::FAREWELL: soundId = lines->goodbye; break;
+        case SoundCategory::PISSED:   soundId = lines->pissed; break;
+        default: break;
+    }
+    const SoundEntry* entry = soundData_->sound(soundId);
+    if (!entry || entry->files.empty()) return false;
+    const auto now = std::chrono::steady_clock::now();
+    if (category != SoundCategory::PISSED) {
+        auto it = lastPlayTime_.find(npcGuid);
+        if (it != lastPlayTime_.end() &&
+            std::chrono::duration<float>(now - it->second).count() < GREETING_COOLDOWN) {
+            return true;  // said something recently; the fallback must not speak either
+        }
+    }
+    std::uniform_int_distribution<size_t> choice(0, entry->files.size() - 1);
+    // As recorded: the stock client does not retune a voice line.
+    if (AudioEngine::instance().playSound3D(entry->files[choice(rng_)], position,
+                                            entry->volume * volumeScale_, 1.0f, 60.0f)) {
+        lastPlayTime_[npcGuid] = now;
+    }
+    return true;
+}
+
+void NpcVoiceManager::playGreeting(uint64_t npcGuid, uint32_t displayId, VoiceType voiceType, const glm::vec3& position) {
+    if (!playFromTables(npcGuid, displayId, SoundCategory::GREETING, position)) playGreeting(npcGuid, voiceType, position);
+}
+void NpcVoiceManager::playFarewell(uint64_t npcGuid, uint32_t displayId, VoiceType voiceType, const glm::vec3& position) {
+    if (!playFromTables(npcGuid, displayId, SoundCategory::FAREWELL, position)) playFarewell(npcGuid, voiceType, position);
+}
+void NpcVoiceManager::playVendor(uint64_t npcGuid, uint32_t displayId, VoiceType voiceType, const glm::vec3& position) {
+    if (!playFromTables(npcGuid, displayId, SoundCategory::VENDOR, position)) playVendor(npcGuid, voiceType, position);
+}
+void NpcVoiceManager::playPissed(uint64_t npcGuid, uint32_t displayId, VoiceType voiceType, const glm::vec3& position) {
+    if (!playFromTables(npcGuid, displayId, SoundCategory::PISSED, position)) playPissed(npcGuid, voiceType, position);
 }
 
 void NpcVoiceManager::playGreeting(uint64_t npcGuid, VoiceType voiceType, const glm::vec3& position) {
