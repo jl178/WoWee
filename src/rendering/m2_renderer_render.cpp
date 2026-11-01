@@ -1197,13 +1197,19 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
     // with every visibility flip) tracked per slot; ranges get the same
     // result without touching the shaders.
     auto* input = static_cast<CullInstanceGPU*>(cullInputMapped_[frameIndex]);
+    // The IDs are logged in the same pass as the cull data. A separate pass
+    // ahead of it walked the range twice, and a range (~3k instances of 704
+    // bytes) is larger than L2, so the second walk missed on every line again.
     const auto uploadRange = [&](uint32_t begin, uint32_t end) {
-        if (submittedIds) {
-            for (uint32_t i = begin; i < end; i++) submittedIds[i] = instances[i].id;
+        if (!input) {
+            if (submittedIds) {
+                for (uint32_t i = begin; i < end; i++) submittedIds[i] = instances[i].id;
+            }
+            return;
         }
-        if (!input) return;
         for (uint32_t i = begin; i < end; i++) {
             const auto& inst = instances[i];
+            if (submittedIds) submittedIds[i] = inst.id;
             float effectiveMaxDistSq = rendering::m2InstanceMaxDistSq(
                 maxRenderDistanceSq, inst.cachedEffectiveMaxDistSqFactor,
                 inst.isGameObject, rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE,
@@ -1553,6 +1559,14 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 (instance.cachedModel->hasTransparentBatches || instance.cachedModel->isSpellEffect))) {
                 out.transparent.push_back(visible);
             }
+            // Texture scrolls and colour tracks read the clocks of whatever is
+            // drawn. Advanced here, in array order on the chunk's own thread,
+            // rather than after the merge in model order on the M2 worker,
+            // where each one was a cache miss in a scattered walk. Every
+            // instance that reaches this point lands in at least one list, and
+            // the clock is brought up to scene time, so once is the same as
+            // the once-per-list it was.
+            advanceClock(instances[i]);
         }
         // Each worker sorts its own share by model; the shares are merged
         // below rather than the whole list sorted on this thread, which was
@@ -1587,10 +1601,6 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                                    std::make_move_iterator(chunk.transparent.begin()),
                                    std::make_move_iterator(chunk.transparent.end()));
     }
-    // Texture scrolls and colour tracks read the clocks of whatever is drawn.
-    for (const auto& v : sortedVisible_) advanceClock(instances[v.index]);
-    for (const auto& v : transparentVisible_) advanceClock(instances[v.index]);
-
     // The furthest doodad actually drawn, for the diagnostic that sets it
     // against the furthest terrain chunk. See Renderer::logViewDistanceDiag.
     furthestDrawnSq_ = 0.0f;

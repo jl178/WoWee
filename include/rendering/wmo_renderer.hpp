@@ -569,6 +569,12 @@ private:
             uint8_t emissiveLevel = 0;
             // For multi-draw: store index ranges
             struct DrawRange { uint32_t firstIndex; uint32_t indexCount; };
+            // draws[0], copied here when the batch is built. Most batches are
+            // a single range once adjacent ranges are joined, and the draw
+            // loop reads this one beside the material set instead of
+            // following draws to its own heap block, which was a cache miss
+            // per batch drawn and half of WMORenderer::render's time.
+            DrawRange firstDraw{0, 0};
             std::vector<DrawRange> draws;
         };
         std::vector<MergedBatch> mergedBatches;
