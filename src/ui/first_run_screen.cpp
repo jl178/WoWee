@@ -6,6 +6,7 @@
 
 #include <imgui.h>
 #include "core/application.hpp"
+#include "ui/glue_ui.hpp"
 #include "ui/paper_ui.hpp"
 
 namespace wowee::ui {
@@ -32,6 +33,19 @@ bool FirstRunScreen::render() {
     ui_.begin(ImGui::GetIO().DeltaTime, scale);
     ui_.setLayer(PaperLayer::Page);
 
+    // Two ways in, and they need different sentences. A first run arrives
+    // here because there is nothing to play with; somebody who came from the
+    // login screen already has a game and wants another, and telling them
+    // they have no assets would be wrong.
+    const bool alreadyHaveAssets =
+        core::Application::getInstance().getAssetInventory().anyUsable();
+    // Reached from the glue login's "Game Assets" button, the page wears the
+    // glue's look like the screen it came from: a glue dialog, glue buttons
+    // and edit boxes, the same controls doing the same things. A first run
+    // has no archives to draw that with, and stays on paper.
+    const bool glueLook = alreadyHaveAssets && glue::paperSkinAvailable();
+    ui_.setSkin(glueLook ? glue::paperSkin() : nullptr);
+
     const float margin = ui_.px(kCardMargin);
     const float width = std::min(ui_.px(kCardWidth), screen.x - margin * 2.0f);
     const ImVec2 a((screen.x - width) * 0.5f, margin);
@@ -45,15 +59,22 @@ bool FirstRunScreen::render() {
     const float x1 = b.x - inset;
     float y = a.y + ui_.px(28);
 
-    // Two ways in, and they need different sentences. A first run arrives
-    // here because there is nothing to play with; somebody who came from the
-    // login screen already has a game and wants another, and telling them
-    // they have no assets would be wrong.
-    const bool alreadyHaveAssets =
-        core::Application::getInstance().getAssetInventory().anyUsable();
     const float titleSize = ui_.px(30);
-    ui_.text(ImVec2(x0, y), alreadyHaveAssets ? "Game assets" : "Before you can play",
-             titleSize, theme.ink, true);
+    if (glueLook) {
+        // UI-DialogBox-Header over the dialog's top, as glue dialogs title
+        // themselves, rather than a heading inside it.
+        const float u = glue::unit();
+        const float cx = (a.x + b.x) * 0.5f;
+        const float top = a.y - 12.0f * u;
+        ImDrawList* dl = ImGui::GetBackgroundDrawList();
+        glue::image(dl, "Interface\\DialogFrame\\UI-DialogBox-Header", ImVec2(cx - 150.0f * u, top),
+                    ImVec2(cx + 150.0f * u, top + 68.0f * u));
+        glue::textCentered(dl, cx, top + 14.0f * u, "Game Assets", glue::kFontNormal * u,
+                           glue::kNormal);
+    } else {
+        ui_.text(ImVec2(x0, y), alreadyHaveAssets ? "Game assets" : "Before you can play",
+                 titleSize, theme.ink, true);
+    }
     if (alreadyHaveAssets) {
         // And a way back, which a first run neither needs nor should have:
         // there is nowhere for it to go.
