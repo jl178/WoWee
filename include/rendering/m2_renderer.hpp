@@ -861,6 +861,15 @@ private:
     VmaAllocation instanceAlloc_[2] = {};
     void* instanceMapped_[2] = {};
     VkDescriptorSet instanceSet_[2] = {};
+    // The shadow pass's casters, one model matrix each, sorted by model so a
+    // model's casters are one instanced draw. Same set layout as the
+    // instance data above (one storage buffer, vertex stage).
+    static constexpr uint32_t MAX_SHADOW_CASTERS = 32768;
+    ::VkBuffer casterBuffer_[2] = {};
+    VmaAllocation casterAlloc_[2] = {};
+    void* casterMapped_[2] = {};
+    VkDescriptorSet casterSet_[2] = {};
+    VkDescriptorPool casterDescPool_ = VK_NULL_HANDLE;
     uint32_t instanceDataCount_ = 0; // reset each frame in render()
 
     // GPU Frustum Culling via Compute Shader

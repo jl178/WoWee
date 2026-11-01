@@ -159,6 +159,13 @@ touching the model. NPC greeting, farewell and annoyed lines come from
 CreatureDisplayInfo.NPCSoundID through NPCSounds; the race voice library is
 the fallback. Numeric PlaySound ids resolve through SoundEntries too.
 
+### Instanced M2 shadow pass (20:55, building)
+
+The shadow pass recorded a push constant and a draw per batch per caster.
+Casters now go into a per-frame matrix buffer sorted by model and each
+model's batches draw once, instanced (`m2_shadow.vert.glsl`). Before: 2.5 ms
+for `shadow/m2` after the caster filters.
+
 ## Next
 
 See the backlog in the loop prompt: jump phases, M2 per-frame scans, FrameXML

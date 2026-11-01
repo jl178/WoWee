@@ -1165,6 +1165,12 @@ void M2Renderer::shutdown() {
         vkDestroyDescriptorPool(device, boneDescPool_, nullptr);
         boneDescPool_ = VK_NULL_HANDLE;
     }
+    for (int i = 0; i < 2; i++) {
+        destroy(alloc, casterBuffer_[i], casterAlloc_[i]);
+        casterMapped_[i] = nullptr;
+        casterSet_[i] = VK_NULL_HANDLE;
+    }
+    destroy(device, casterDescPool_);
     // Instance data SSBO cleanup (sets freed with instanceDescPool_)
     for (int i = 0; i < 2; i++) {
         destroy(alloc, instanceBuffer_[i], instanceAlloc_[i]);
@@ -2411,7 +2417,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                 int32_t parent = (i < model.bones.size())
                     ? model.bones[i].parentBone : -1;
                 // Bounded by the bone count: a malformed parent cycle would
-                // otherwise spin here forever.
+                // otherwise spin here enhanced.
                 for (std::size_t guard = 0; parent >= 0 && guard < boneCount; ++guard) {
                     const std::size_t p = static_cast<std::size_t>(parent);
                     if (p >= boneCount || p >= model.bones.size()) break;

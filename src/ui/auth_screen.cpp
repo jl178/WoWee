@@ -1217,33 +1217,47 @@ void AuthScreen::updateMusic() {
 
     if (!introTracksScanned_) {
         introTracksScanned_ = true;
-        const std::filesystem::path relative =
-            std::filesystem::path("assets") / "Original Music" / "TavernAllianceREMIX.mp3";
-        if (std::filesystem::exists(relative)) {
-            loginTrackPath_ = relative.string();
-        } else {
-            const auto absolute = std::filesystem::current_path() / relative;
-            if (std::filesystem::exists(absolute)) {
-                loginTrackPath_ = absolute.string();
+        // The client's own login track, only when the WoWee soundtrack is on
+        // and the file shipped (release archives leave it out). Otherwise the
+        // Wrath glue theme, which is what a 3.3.5 login screen plays.
+        if (core::readSettingsFlag("use_original_soundtrack", false)) {
+            const std::filesystem::path relative =
+                std::filesystem::path("assets") / "Original Music" / "TavernAllianceREMIX.mp3";
+            if (std::filesystem::exists(relative)) {
+                loginTrackPath_ = relative.string();
+            } else {
+                const auto absolute = std::filesystem::current_path() / relative;
+                if (std::filesystem::exists(absolute)) {
+                    loginTrackPath_ = absolute.string();
+                }
             }
         }
     }
-
     if (!loginTrackPath_.empty()) {
         music->playFilePath(loginTrackPath_, true, 1800.0f);
-        // The read runs on a worker, so the track is not playing yet.
-        // Treat a load in flight as success or the track gets dropped below.
         musicPlaying = music->isPlaying() || music->isLoading();
         if (musicPlaying) {
             LOG_INFO("AuthScreen: Playing login intro track: ", loginTrackPath_);
         } else {
-            // Avoid retrying a bad file every frame. There is deliberately
-            // no fallback: the login screen is constrained to this track.
             loginTrackPath_.clear();
         }
-    } else if (!missingIntroTracksLogged_) {
-        LOG_WARNING("AuthScreen: Login track not found: assets/Original Music/TavernAllianceREMIX.mp3");
-        missingIntroTracksLogged_ = true;
+    } else {
+        static const char* const kGlueThemes[] = {
+            "Sound\\Music\\GlueScreenMusic\\wotlk_main_title.mp3",
+            "Sound\\Music\\GlueScreenMusic\\wow_main_theme.mp3",
+        };
+        auto* assets = app.getAssetManager();
+        for (const char* theme : kGlueThemes) {
+            if (assets && !assets->fileExists(theme)) continue;
+            music->setTrackGain(1.0f);
+            music->playMusic(theme, true, 1800.0f);
+            musicPlaying = music->isPlaying() || music->isLoading();
+            if (musicPlaying) break;
+        }
+        if (!musicPlaying && !missingIntroTracksLogged_) {
+            LOG_WARNING("AuthScreen: no login music: neither the WoWee track nor the glue theme is available");
+            missingIntroTracksLogged_ = true;
+        }
     }
 }
 
