@@ -835,7 +835,15 @@ void GameHandler::update(float deltaTime) {
                                       : (classicLikeStationaryCombatSync ? game::HEARTBEAT_INTERVAL_STATIONARY_COMBAT
                                                                          : (classicLikeCombatSync ? game::HEARTBEAT_INTERVAL_MOVING_COMBAT
                                                                                                   : moveHeartbeatInterval_));
-        if (movementHandler_ && movementHandler_->timeSinceLastMoveHeartbeatRef() >= heartbeatInterval) {
+        // The stock client sends a heartbeat only while the character is in
+        // motion; standing still, the server already has the position from the
+        // stop packet. Taxi flights and the classic combat sync keep their own
+        // cadence regardless.
+        const bool inMotion = (movementInfo.flags & kLocomotionFlags) != 0;
+        const bool forcedCadence = onRealTaxiFlight || taxiActivatePending_ || taxiClientActive_ ||
+                                   classicLikeCombatSync;
+        if (movementHandler_ && (inMotion || forcedCadence) &&
+            movementHandler_->timeSinceLastMoveHeartbeatRef() >= heartbeatInterval) {
             sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
             movementHandler_->timeSinceLastMoveHeartbeatRef() = 0.0f;
         }
