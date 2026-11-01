@@ -4,6 +4,7 @@
 #include <catch_amalgamated.hpp>
 #include "audio/zone_music_controller.hpp"
 #include "pipeline/dbc_loader.hpp"
+#include "synthetic_dbc.hpp"
 
 #include <map>
 #include <memory>
@@ -18,42 +19,9 @@ using wowee::pipeline::DBCFile;
 
 namespace {
 
-struct Strings {
-    std::string block{std::string(1, '\0')};
-    uint32_t add(const std::string& s) {
-        if (s.empty()) return 0;
-        const auto off = static_cast<uint32_t>(block.size());
-        block += s;
-        block.push_back('\0');
-        return off;
-    }
-};
-
-std::shared_ptr<DBCFile> table(uint32_t fields, const std::vector<std::vector<uint32_t>>& rows, const std::string& strings) {
-    std::vector<uint8_t> bytes;
-    auto u32 = [&](uint32_t v) {
-        for (int i = 0; i < 4; ++i) bytes.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xFF));
-    };
-    bytes.insert(bytes.end(), {'W', 'D', 'B', 'C'});
-    u32(static_cast<uint32_t>(rows.size()));
-    u32(fields);
-    u32(fields * 4);
-    u32(static_cast<uint32_t>(strings.size()));
-    for (const auto& row : rows) {
-        REQUIRE(row.size() == fields);
-        for (uint32_t v : row) u32(v);
-    }
-    bytes.insert(bytes.end(), strings.begin(), strings.end());
-    auto dbc = std::make_shared<DBCFile>();
-    REQUIRE(dbc->load(bytes));
-    return dbc;
-}
-
-std::vector<uint32_t> row(uint32_t fields, std::map<uint32_t, uint32_t> set) {
-    std::vector<uint32_t> r(fields, 0);
-    for (auto [i, v] : set) r[i] = v;
-    return r;
-}
+using synthetic_dbc::Strings;
+using synthetic_dbc::table;
+using synthetic_dbc::row;
 
 // Forest (area 12, set 1): one day track, one night track, 10-20 s silence.
 // Northshire (9) inherits it. Stormwind (1519, set 13): one track, an intro

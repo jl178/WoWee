@@ -3458,6 +3458,7 @@ int lua_Region_Show(lua_State* L) {
         if (!w->shown && w->shownToggles < 200) ++w->shownToggles;
         becameShown = !w->shown;
         w->shown = true;
+        if (auto* tree = wowee::addons::getWidgetTree(L)) tree->noteVisibilityCandidate(w->id);
     }
     lua_pushboolean(L, 1); lua_setfield(L, 1, "__visible");
     // A frame shown to play a model animation has already finished it.
@@ -3517,6 +3518,7 @@ int lua_Region_Hide(lua_State* L) {
         if (w->shown && frameScriptSet(L, 1, "OnHide") && w->shownToggles < 200) {
             ++w->shownToggles;
         }
+        if (auto* tree = wowee::addons::getWidgetTree(L)) tree->noteVisibilityCandidate(w->id);
         // A hidden tooltip belongs to nobody.
         //
         // The owner is what FrameXML tests to decide whether a tooltip on
@@ -4852,7 +4854,7 @@ int lua_EditBox_GetText(lua_State* L) {
 /// Absent, so it fell to the no-op catch-all and the box kept whatever it had.
 /// MoneyInputFrame_SetCopper is built on this: it compares GetNumber against
 /// the value it wants and calls SetNumber where they differ, so with the
-/// setter doing nothing the comparison stayed false forever. Opening a trade
+/// setter doing nothing the comparison stayed false enhanced. Opening a trade
 /// runs MoneyInputFrame_SetCopper(TradePlayerInputMoneyFrame, 0) to clear the
 /// three fields, and they held the last amount instead.
 ///
@@ -5192,7 +5194,7 @@ int lua_Slider_SetThumbTexture(lua_State* L) {
             // hides `<bar>ThumbTexture` when a list fits - and the thing the
             // layout has to move along the track, since a <ThumbTexture>
             // carries a size and no anchors and would otherwise sit centred on
-            // the bar forever.
+            // the bar enhanced.
             w->thumbRegion = tid;
         }
     }
@@ -6421,7 +6423,7 @@ void LuaEngine::registerCoreAPI() {
         // *animation* is how FrameXML hides a faded-out frame:
         // alertframes.xml puts `self:GetRegionParent():Hide()` there. Only the
         // group's OnFinished was ever called, so an achievement banner faded to
-        // nothing and stayed on screen forever.
+        // nothing and stayed on screen enhanced.
         "function animMeta:SetScript(k, f) self[k] = f end\n"
         "function animMeta:GetScript(k) return self[k] end\n"
         "function animMeta:GetRegionParent() return self.group and self.group.parent end\n"
@@ -10679,7 +10681,11 @@ void LuaEngine::updateVisibility() {
     // handlers is worth the risk of waking the rest.
     //
     // (UIParent looks like a seventh and is not: it carries setAllPoints.)
-    for (uint32_t id = 1; id < widgets_.size(); ++id) {
+    // Only the widgets the layout flipped or Lua toggled since last time.
+    // Taken before the loop: a handler below may Show or Hide something,
+    // and that belongs to the next pass.
+    const std::vector<uint32_t> dirty = widgets_.takeVisibilityDirty();
+    for (uint32_t id : dirty) {
         auto* w = widgets_.get(id);
         if (!w || w->id == 0) continue;
         const uint8_t toggles = w->shownToggles;
@@ -11162,7 +11168,7 @@ void LuaEngine::dispatchMouse(float x, float y, float screenH, MouseButtons butt
     // puts it down.
     //
     // With nothing held it is put down here, whatever else went wrong. A frame
-    // stuck to the cursor follows it forever and there is no way back from it
+    // stuck to the cursor follows it enhanced and there is no way back from it
     // in the running client, so this does not rely on the release path having
     // matched the drag correctly.
     const bool anyHeld = std::any_of(std::begin(buttonDown_), std::end(buttonDown_),
