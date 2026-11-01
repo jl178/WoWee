@@ -230,3 +230,71 @@ Not client bugs:
   casts the appearance spell; the event runs through Nov 1).
 - Faces like Dordam's are Death Knight-only CharSections rows that the
   playerbot randomizer hands to other classes.
+
+## Playtest fixes, 2026-11-01 late morning
+
+### Fixed
+
+**Rendering**
+- Interior groups flagged exterior-lit (Stormwind's districts, Silvermoon) now take outdoor light.
+- Glue scenes are lit by their own M2 lights.
+- Login scene composited.
+- Northrend alpha RLE off-by-one: blocky cliff patches.
+- MCCV tint.
+- Stock texture tiling: 8 per chunk.
+- Terrain bump eased on slopes.
+
+**Characters**
+- Eyebrows: the face and facial-hair layers are placed by region in the equipment composite.
+- DK faces only for DKs.
+- Starter outfits in character create.
+- Robes drawn over shirts.
+- Kneepads and the back panel.
+- Chest wins over shirt.
+
+**Movement and animation**
+- Melee abilities use their kit animation per weapon.
+- Every unit swings and flinches.
+- Ready stances, parry, dodge and block.
+- Sheath reach with a timed hand-off and sounds.
+- Weapons on the model's sheath points.
+- Cross-fades.
+- Death holds; corpses spawn down; release acks.
+- Slope limit; fence floors.
+- Jump lands on the arc.
+
+**Sound**
+- Listener at the character with linear falloff (quiet emotes and greetings).
+- M2 $CSD emote voices.
+- Coin clink on sale.
+- Greetings on interact.
+
+**UI**
+- Spell book filtered by the stock rules.
+- Stock nameplates.
+- Unit frame backgrounds.
+- Gossip fonts left-aligned.
+- Rage and runic power /10.
+- Cast errors from GlobalStrings.
+- Live-zone PvP text.
+- Chat: own emotes, zone channels, own bubbles.
+- Character window no longer drags; rotate buttons hold; item locks clear.
+
+**World**
+- Area triggers fire reliably (heartbeat before CMSG_AREATRIGGER).
+- Instance portal particles.
+- Patrols walk (pace-based).
+
+### Performance
+
+| Location | Frame time |
+|---|---|
+| Elwynn, before | 26.9 fps, 37 ms |
+| Northrend, before | 24-30 fps |
+
+Changes: off-screen particle throttle, ribbons walk the emitter list, no spatial-index rebuild per model load, incremental M2 removals, clutter out of the collision grid, stable shadow candidates, tile-level terrain shadow cull, parallel cull upload, safe widget-layout speed-ups. The visible-only draw list was reverted because it dropped action bar textures. Not yet measured in game.
+
+### Regression
+
+The glue-scene particle draw caused a GPU device loss on the Night Elf create scene. It is gated behind WOWEE_GLUE_PARTICLES=1 until fixed.
+Measured after (Northshire, test account, same machine): **37.0 fps, 27 ms** (was 26.9 fps, 37 ms). Remaining top costs: renderWorld 7.9 ms, widgets 4.9 ms (layout 3.6), update 4.8 ms (m2 join 3.2, particles 2.8 ms for 112k live particles), shadows 2.4 ms. Next: particle counts (112k live is far above what is on screen).
