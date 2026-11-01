@@ -68,7 +68,7 @@ void LocomotionFSM::updateTransitions(const Input& in, const AnimCapabilitySet& 
                 jumpStartSeen_ = false;
                 state_ = State::JUMP_START;
             } else if (!in.grounded) {
-                state_ = State::JUMP_MID;
+                state_ = State::FALL;
             } else if (effectiveMoving && effectiveSprinting) {
                 state_ = State::RUN;
             } else if (effectiveMoving) {
@@ -83,7 +83,7 @@ void LocomotionFSM::updateTransitions(const Input& in, const AnimCapabilitySet& 
                 jumpStartSeen_ = false;
                 state_ = State::JUMP_START;
             } else if (!in.grounded) {
-                state_ = State::JUMP_MID;
+                state_ = State::FALL;
             } else if (!effectiveMoving) {
                 state_ = State::IDLE;
             } else if (effectiveSprinting) {
@@ -98,7 +98,7 @@ void LocomotionFSM::updateTransitions(const Input& in, const AnimCapabilitySet& 
                 jumpStartSeen_ = false;
                 state_ = State::JUMP_START;
             } else if (!in.grounded) {
-                state_ = State::JUMP_MID;
+                state_ = State::FALL;
             } else if (!effectiveMoving) {
                 state_ = State::IDLE;
             } else if (!effectiveSprinting) {
@@ -131,32 +131,31 @@ void LocomotionFSM::updateTransitions(const Input& in, const AnimCapabilitySet& 
             break;
 
         case State::JUMP_MID:
+        case State::FALL:
             if (in.swimming) {
                 state_ = State::SWIM_IDLE;
             } else if (in.grounded) {
+                jumpEndSeen_ = false;
                 state_ = State::JUMP_END;
             }
             break;
 
-        case State::JUMP_END:
+        case State::JUMP_END: {
             if (in.swimming) {
                 state_ = effectiveMoving ? State::SWIM : State::SWIM_IDLE;
-            } else if (effectiveMoving) {
-                // Movement overrides landing animation
-                state_ = effectiveSprinting ? State::RUN : State::WALK;
-            } else if (caps.resolvedJumpEnd == 0) {
-                // Model doesn't have JUMP_END animation - go straight to IDLE
-                state_ = State::IDLE;
-            } else if (in.haveAnimState) {
-                uint32_t expected = caps.resolvedJumpEnd;
-                if (in.currentAnimId == expected) jumpEndSeen_ = true;
-                // Only transition to IDLE after landing animation completes
-                if (jumpEndSeen_ && oneShotComplete(in, expected)) {
-                    state_ = State::IDLE;
-                }
-            } else {
-                state_ = State::IDLE;
+                break;
             }
+            // Landing while running plays JumpLandRun through; landing still
+            // plays JumpEnd through. A model without the one-shot moves on.
+            const uint32_t expected = effectiveMoving ? caps.resolvedJumpLandRun : caps.resolvedJumpEnd;
+            const State after = effectiveMoving ? (effectiveSprinting ? State::RUN : State::WALK) : State::IDLE;
+            if (expected == 0 || !in.haveAnimState) {
+                state_ = after;
+            } else {
+                if (in.currentAnimId == expected) jumpEndSeen_ = true;
+                if (jumpEndSeen_ && oneShotComplete(in, expected)) state_ = after;
+            }
+        }
             break;
 
         case State::SWIM_IDLE:
@@ -224,8 +223,15 @@ AnimOutput LocomotionFSM::resolve(const Input& in, const AnimCapabilitySet& caps
             animId = caps.resolvedJump ? caps.resolvedJump : anim::JUMP;
             loop = true;  // Must loop - long falls outlast a single play cycle
             break;
+        case State::FALL:
+            animId = caps.resolvedFall ? caps.resolvedFall
+                   : caps.resolvedJump ? caps.resolvedJump : anim::JUMP;
+            loop = true;
+            break;
+
         case State::JUMP_END:
-            animId = caps.resolvedJumpEnd ? caps.resolvedJumpEnd : anim::JUMP_END;
+            if (in.moving && caps.resolvedJumpLandRun) animId = caps.resolvedJumpLandRun;
+            else animId = caps.resolvedJumpEnd ? caps.resolvedJumpEnd : anim::JUMP_END;
             loop = false;
             break;
 

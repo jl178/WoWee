@@ -602,6 +602,12 @@ private:
     // Gravity / grounding
     float verticalVelocity = 0.0f;
     bool grounded = false;
+    // Movement keys as they were on leaving the ground; see the latch in update().
+    bool airMoveLatched_ = false;
+    bool airForward_ = false;
+    bool airBackward_ = false;
+    bool airStrafeLeft_ = false;
+    bool airStrafeRight_ = false;
     static constexpr float STAND_EYE_HEIGHT = 1.2f;  // Standing eye height
     static constexpr float CROUCH_EYE_HEIGHT = 0.6f; // Crouching eye height
     float eyeHeight = STAND_EYE_HEIGHT;

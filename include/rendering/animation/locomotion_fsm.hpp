@@ -19,7 +19,7 @@ class LocomotionFSM {
 public:
     enum class State : uint8_t {
         IDLE, WALK, RUN,
-        JUMP_START, JUMP_MID, JUMP_END,
+        JUMP_START, JUMP_MID, JUMP_END, FALL,
         SWIM_IDLE, SWIM,
     };
 

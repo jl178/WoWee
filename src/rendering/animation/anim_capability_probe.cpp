@@ -86,6 +86,8 @@ AnimCapabilitySet AnimCapabilityProbe::probe(Renderer* renderer, uint32_t instan
     caps.resolvedJumpStart = has(anim::JUMP_START) ? anim::JUMP_START : 0;
     caps.resolvedJump = has(anim::JUMP) ? anim::JUMP : 0;
     caps.resolvedJumpEnd = has(anim::JUMP_END) ? anim::JUMP_END : 0;
+    caps.resolvedFall = has(anim::FALL) ? anim::FALL : 0;
+    caps.resolvedJumpLandRun = has(anim::JUMP_LAND_RUN) ? anim::JUMP_LAND_RUN : 0;
     caps.hasJump = (caps.resolvedJumpStart != 0);
 
     // ── Swim ────────────────────────────────────────────────────────────
