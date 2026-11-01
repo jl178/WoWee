@@ -506,7 +506,9 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     bool robeSkirt = false;
     // Chest/Shirt/Robe (invType 4,5,20) → wrist/sleeve group 8
     {
-        uint32_t did = findDisplayIdByInvType({4, 5, 20});
+        // Chest or robe over the shirt beneath it (the shirt's slot comes first).
+        uint32_t did = findDisplayIdByInvType({5, 20});
+        if (did == 0) did = findDisplayIdByInvType({4});
         uint32_t gg1 = getGeosetGroup(did, geosetGroup1Field);
         if (gg1 > 0) geosetSleeves = pickGeoset(equippedGeoset(equipment::kChestBare, gg1), kGeosetBareSleeves);
         // Robe kilt → leg group 13

@@ -900,7 +900,9 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     bool robeSkirt = false;
     // Chest/Shirt/Robe → group 8 (sleeves)
     {
-        uint32_t did = findDisplayId({4, 5, 20});
+        // Chest or robe over the shirt beneath it.
+        uint32_t did = findDisplayId({5, 20});
+        if (did == 0) did = findDisplayId({4});
         uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
         if (gg > 0) geosetSleeves = pickGeoset(core::equippedGeoset(core::equipment::kChestBare, gg), core::kGeosetBareSleeves);
         // Robe kilt legs
