@@ -18,7 +18,12 @@ namespace rendering {
 struct LightingParams {
     glm::vec3 ambientColor{0.4f, 0.4f, 0.5f};      // Fill lighting
     glm::vec3 diffuseColor{1.0f, 0.95f, 0.8f};     // Directional sun color
-    glm::vec3 directionalDir{0.0f, -1.0f, 0.5f};   // Sun direction (normalized)
+    glm::vec3 directionalDir{0.0f, -1.0f, 0.5f};   // Way the light travels (normalized)
+    /// Unit direction from the eye to the sun sprite. Not -directionalDir: the
+    /// stock light stays 20-37 degrees up all day and night while the sun
+    /// climbs to the zenith and sets (see stock_day_night.hpp). Follows the
+    /// clock alone, so it is neither blended nor smoothed. Defaults to noon.
+    glm::vec3 sunDir{0.057f, 0.057f, 0.997f};
 
     glm::vec3 fogColor{0.5f, 0.6f, 0.7f};          // Fog color
     float fogStart = 100.0f;                        // Fog start distance

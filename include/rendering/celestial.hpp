@@ -62,8 +62,8 @@ public:
     void setMoonPhaseCycling(bool enabled) { moonPhaseCycling_ = enabled; }
     [[nodiscard]] bool isMoonPhaseCycling() const { return moonPhaseCycling_; }
 
-    /// Where the moon is: where the sun will be in twelve hours, by the same
-    /// path LightingManager moves the sun along, so the two stay opposite.
+    /// Where the moon is, from the stock client's White Lady table: up from
+    /// about 22:20 to 03:25, 55 degrees high at midnight (stockMoonDirection).
     [[nodiscard]] static glm::vec3 moonDirection(float timeOfDayHours);
 
 private:

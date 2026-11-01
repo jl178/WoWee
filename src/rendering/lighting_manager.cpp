@@ -4,6 +4,7 @@
 #include "rendering/light_band_block.hpp"
 #include "rendering/light_headroom.hpp"
 #include "rendering/light_volume_order.hpp"
+#include "rendering/stock_day_night.hpp"
 #include <glm/gtc/constants.hpp>
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
@@ -367,6 +368,9 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     // Convert visual time to half-minutes (WoW DBC format: 0-2879).
     const float visualDayFraction = visualTimeOfDayHours_ / 24.0f;
     uint16_t timeHalfMinutes = static_cast<uint16_t>(visualDayFraction * static_cast<float>(kHalfMinutesPerDay)) % kHalfMinutesPerDay;
+    // Unrounded, for the sun and light directions: the stock client moves
+    // them continuously rather than a half-minute at a time.
+    const float timeHalfMinutesExact = visualDayFraction * static_cast<float>(kHalfMinutesPerDay);
 
     // Update player position and map
     currentPlayerPos_ = playerPos;
@@ -515,20 +519,16 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         if (blendedDirLenSq > 1e-6f) {
             newParams.directionalDir = blendedDir * glm::inversesqrt(blendedDirLenSq);
         } else {
-            // Fallback if all directions cancelled out
-            newParams.directionalDir = glm::vec3(0.3f, -0.7f, 0.6f);
+            // No volume had a profile. The light's way does not depend on
+            // the volume anyway (see stockLightDirection).
+            newParams.directionalDir = stockLightDirection(timeHalfMinutesExact);
         }
     } else {
         // No light volume, use fallback with time-based animation
         newParams = fallbackParams_;
 
-        // Animate sun direction
-        float angle = timeOfDay_ * glm::two_pi<float>();
-        newParams.directionalDir = glm::normalize(glm::vec3(
-            std::sin(angle) * 0.6f,
-            -0.6f + std::cos(angle) * 0.4f,
-            std::cos(angle) * 0.6f
-        ));
+        // The stock light by the hour, as with Light.dbc.
+        newParams.directionalDir = stockLightDirection(timeHalfMinutesExact);
 
         // Time-of-day color adjustments
         if (timeOfDay_ < 0.25f || timeOfDay_ > 0.75f) {
@@ -675,6 +675,8 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     // Day and night follow the clock alone, so they are not smoothed.
     currentParams_.dayIntensity = dayIntensity;
     currentParams_.nightIntensity = nightIntensity;
+    // So does the sun sprite.
+    currentParams_.sunDir = stockSunDirection(timeHalfMinutesExact);
     currentParams_.directionalDir = glm::normalize(glm::mix(currentParams_.directionalDir, newParams.directionalDir, blendFactor));
     // Settled exactly once within a millionth of the target. The blend comes
     // to rest an ulp or two short of it, and for most directions it then
@@ -1006,13 +1008,9 @@ LightingParams LightingManager::sampleLightParams(const LightParamsProfile* prof
         debugCount++;
     }
 
-    // Compute sun direction from time
-    float angle = (timeHalfMinutes / static_cast<float>(kHalfMinutesPerDay)) * glm::two_pi<float>();
-    params.directionalDir = glm::normalize(glm::vec3(
-        std::sin(angle) * 0.6f,
-        -0.6f + std::cos(angle) * 0.4f,
-        std::cos(angle) * 0.6f
-    ));
+    // Light.dbc carries no direction: the stock client's DayNight sets it from
+    // the hour alone, the same in every light and on every map.
+    params.directionalDir = stockLightDirection(static_cast<float>(timeHalfMinutes));
 
     return params;
 }

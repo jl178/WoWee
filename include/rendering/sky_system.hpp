@@ -22,6 +22,9 @@ class LightingManager;
 struct SkyParams {
     // Sun/moon positioning
     glm::vec3 directionalDir{0.0f, -1.0f, 0.3f};
+    /// Unit direction to the sun sprite - LightingParams::sunDir, not
+    /// -directionalDir. Defaults to noon.
+    glm::vec3 sunDir{0.057f, 0.057f, 0.997f};
     glm::vec3 sunColor{1.0f, 1.0f, 0.9f};
 
     // Sky colors (for skybox tinting/blending)

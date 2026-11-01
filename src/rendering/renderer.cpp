@@ -1979,9 +1979,10 @@ float Renderer::sampleSunOcclusion() const {
     if (!camera) return 1.0f;
     const glm::vec3 eye = camera->getPosition();
 
-    // The same direction the flare itself is drawn around, from the same rule.
+    // The sun Celestial draws, which is not where the light comes from: the
+    // stock light stays up all night (see stock_day_night.hpp).
     const glm::vec3 sunDir = lightingManager
-        ? sunDirectionFromLightDir(lightingManager->getLightingParams().directionalDir)
+        ? lightingManager->getLightingParams().sunDir
         : glm::vec3(0.0f, 0.0f, -1.0f);
     // Below the horizon there is nothing to be occluded by, and nothing to
     // flare either - the time-of-day gate in LensFlare covers the same ground.
@@ -4968,12 +4969,13 @@ void Renderer::recordSunShafts() {
         currentImageIndex < images.size() &&
         !(passAblation_ && passAblation_->skip(AblationPass::SunShafts))) {
         const auto& lp = lightingManager->getLightingParams();
-        // The sun the lens flare draws around, from the same rule - and the
-        // one Celestial draws: both are -LightingParams::directionalDir, the
-        // Light.dbc/game-time light the terrain is lit by. Projected without
-        // the upscaler's sub-pixel jitter, because the picture the rays are
-        // laid over is the resolved, unjittered one.
-        const glm::vec3 sunDir = sunDirectionFromLightDir(lp.directionalDir);
+        // The sun Celestial draws and the occlusion test looks for:
+        // LightingParams::sunDir, the stock sun table - not -directionalDir,
+        // the light the terrain is lit by, which in the stock client never
+        // follows the sun. Projected without the upscaler's sub-pixel jitter,
+        // because the picture the rays are laid over is the resolved,
+        // unjittered one.
+        const glm::vec3 sunDir = lp.sunDir;
         const SunOnScreen sun = sunScreenPosition(camera->getViewMatrix(),
                                                   camera->getUnjitteredProjectionMatrix(), sunDir);
         if (sun.inFront) {
