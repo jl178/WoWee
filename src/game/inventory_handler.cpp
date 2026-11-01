@@ -5930,8 +5930,13 @@ void InventoryHandler::handleTrainerBuySucceeded(network::Packet& packet) {
         owner_.addSystemChatMessage("You have learned " + name + ".");
     else
         owner_.addSystemChatMessage("Spell learned.");
-    if (auto* ac = owner_.services().audioCoordinator)
-        if (auto* sfx = ac->getUiSoundManager()) sfx->playQuestActivate();
+    // No sound here. The learning sound is the server's: AzerothCore's
+    // Trainer::TeachSpell sends SMSG_PLAY_SPELL_IMPACT with SpellVisualKit 362
+    // ("Learn Impact Base", SoundEntries 1455 SealofMight.wav) on the player
+    // before this packet, and the spell visual system plays that kit with its
+    // sound. Castable trainer spells add their own SMSG_SPELL_GO visual. The
+    // trainer frame itself plays nothing on a purchase. This used to also play
+    // iQuestActivate.wav, which is the quest-accept sound, on top of it.
     owner_.fireAddonEvent("TRAINER_UPDATE", {});
     owner_.fireAddonEvent("SPELLS_CHANGED", {});
 }

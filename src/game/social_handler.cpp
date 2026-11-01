@@ -2254,8 +2254,10 @@ void SocialHandler::handleGroupInvite(network::Packet& packet) {
     pendingInviterName = data.inviterName;
     owner_.addSystemChatMessage(data.inviterName + " has invited you to a group.");
     owner_.addUIError(data.inviterName + " has invited you to join a group.");
-    if (auto* ac = owner_.services().audioCoordinator)
-        if (auto* sfx = ac->getUiSoundManager()) sfx->playQuestActivate();
+    // The invite sound belongs to the popup: uiparent.lua answers this event
+    // with StaticPopup_Show("PARTY_INVITE"), whose entry carries
+    // sound = "igPlayerInvite". Playing the quest-accept sound here as well
+    // put a second, wrong sound under it.
     if (owner_.addonEventCallbackRef())
         owner_.addonEventCallbackRef()("PARTY_INVITE_REQUEST", {data.inviterName});
 }
