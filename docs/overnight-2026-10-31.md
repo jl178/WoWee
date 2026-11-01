@@ -438,3 +438,16 @@ Other fixes:
   - TZ=LAB+9 in docker-compose.override.yml.
   - game_weather chances zeroed; backup in game_weather_lab_backup.
 - Lab account JTRAIN20 created for Jered's own test client (HOME ~/workplace/wowee-jtrain-home).
+
+## Jered's playtest, Sunday afternoon (JTRAIN20)
+
+- `9e34ac6`: the intro cinematic is answered with COMPLETE_CINEMATIC. NEXT_CINEMATIC_CAMERA had told AzerothCore that the cinematic started, so a new character's viewpoint rode the intro camera for about 2 min and nearby NPCs never arrived. The frame profile now also reports spawn queue depths.
+- `90598cd`: stock day/night directions from Wow.exe.
+  - The light comes from DayNight 0x7eea90: phi 127/110 deg, azimuth 225 deg, half-day period, using the client's own cubic sin/cos.
+  - Sun and moon sprites come from 0x7eecc0; the noon sun sits at 85 deg.
+- `0d98a19`: damage flash is off by default. Stock has no per-hit flash; its only red edge is screenEdgeFlash while on a hate list.
+- In progress, one agent each:
+  - remote casters show an unarmed ready stance and their cast animations are overridden; Seal of Righteousness replays its kit; the selection circle colour needs checking
+  - stock loot sounds
+  - stock equipment texture layer order (the belt is hidden under the pants; the layering is duplicated four times)
+  - stale questgiver status after objectives complete; the learn-spell sound
