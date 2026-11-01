@@ -1963,7 +1963,11 @@ void registerSocialLuaAPI(lua_State* L) {
             const char* name = luaL_optstring(L, 1, "");
             const char* pass = luaL_optstring(L, 2, "");
             if (!gh || !name || !*name) return luaReturnNil(L);
-            if (std::isdigit(static_cast<unsigned char>(name[0]))) return luaReturnNil(L);
+            if (std::isdigit(static_cast<unsigned char>(name[0]))) {
+                LOG_WARNING("JoinPermanentChannel: '", name,
+                            "' starts with a digit, not joining");
+                return luaReturnNil(L);
+            }
             gh->joinChannel(name, pass ? pass : "");
             lua_pushnumber(L, 0);
             lua_pushstring(L, name);

@@ -2,9 +2,11 @@
 // tables in the 3.3.5 layout and check the lookups and the parent chain.
 #include <catch_amalgamated.hpp>
 #include "audio/sound_data.hpp"
+#include "audio/world_fx.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "synthetic_dbc.hpp"
 
+#include <cmath>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -204,4 +206,90 @@ TEST_CASE("SoundData picks the room's WMOAreaTable row over the building's", "[s
     REQUIRE(data.wmoArea(53, 1, 5)->name == "Deepwater Tavern");
     REQUIRE(data.wmoArea(53, 1, 893)->zoneMusicId == 15);
     REQUIRE(data.wmoArea(99, 0, -1) == nullptr);
+}
+
+TEST_CASE("SoundData finds an area's and a room's reverb", "[sound_data]") {
+    Fixture f;
+    // AreaTable columns 5 and 6: SoundProviderPref, and the underwater one.
+    // Northshire (9) names neither and takes Elwynn's underwater row.
+    Strings at;
+    f.tables["AreaTable.dbc"] = table(36, {
+        row(36, {{0, 12}, {6, 11}, {11, at.add("Elwynn Forest")}}),
+        row(36, {{0, 9}, {2, 12}, {11, at.add("Northshire Valley")}}),
+        row(36, {{0, 1519}, {5, 83}, {11, at.add("Stormwind City")}}),
+    }, at.block);
+    // A mine whose building row names a cave and whose group row names only
+    // its music, and a group of its own with -1 (none).
+    Strings wa;
+    f.tables["WMOAreaTable.dbc"] = table(28, {
+        row(28, {{0, 1}, {1, 77}, {2, 0}, {3, 0xFFFFFFFFu}, {4, 75}, {5, 11}, {11, wa.add("Fargodeep Mine")}}),
+        row(28, {{0, 2}, {1, 77}, {2, 0}, {3, 4}, {7, 9}}),
+        row(28, {{0, 3}, {1, 78}, {2, 0}, {3, 1}, {4, 0xFFFFFFFFu}}),
+    }, wa.block);
+    Strings sp;
+    f.tables["SoundProviderPreferences.dbc"] = table(24, {
+        row(24, {{0, 11}, {1, sp.add("Underwater")}, {4, bits(1.0f)}, {7, 0xFFFFFC18u /* -1000 */},
+                 {8, 0xFFFFD8F0u /* -10000 */}, {9, bits(0.1f)}, {12, 1700}}),
+        row(24, {{0, 75}, {1, sp.add("PRESET_CAVE")}, {4, bits(2.91f)}, {7, 0xFFFFFC18u},
+                 {8, 0xFFFFFE0Cu /* -500 */}, {9, bits(1.3f)}, {11, bits(0.015f)},
+                 {12, 0xFFFFFE6Eu /* -402 */}, {13, bits(0.022f)}}),
+        row(24, {{0, 66}, {1, sp.add("PRESET_OFF")}, {4, bits(1.0f)}, {7, 0xFFFFD8F0u}}),
+    }, sp.block);
+    SoundData data;
+    REQUIRE(data.load(f.loader()));
+
+    REQUIRE(data.areaReverb(12, false) == 0);   // the open forest is dry
+    REQUIRE(data.areaReverb(9, true) == 11);    // through the parent
+    REQUIRE(data.areaReverb(1519, false) == 83);
+    REQUIRE(data.wmoReverb(77, 0, 4, false) == 75);  // the building's row
+    REQUIRE(data.wmoReverb(77, 0, 4, true) == 11);
+    REQUIRE(data.wmoReverb(78, 0, 1, false) == 0);   // -1 is none
+
+    const auto* cave = data.providerPref(75);
+    REQUIRE(cave != nullptr);
+    REQUIRE(cave->name == "PRESET_CAVE");
+    REQUIRE(cave->room == -1000);
+    REQUIRE(cave->reverb == -402);
+    REQUIRE(data.providerPrefByName("Underwater")->id == 11);
+    REQUIRE(data.providerPref(0) == nullptr);
+    REQUIRE(data.providerPref(-1) == nullptr);
+
+    // The tail: a cave rings longer and quieter than the generic room's
+    // -8 dB, PRESET_OFF is silent, and nothing passes the cap.
+    const auto caveReverb = wowee::audio::reverbFromProvider(*cave);
+    REQUIRE(caveReverb.wet > 0.05f);
+    REQUIRE(caveReverb.wet < wowee::audio::reverbFromProvider(wowee::audio::SoundProviderPref{}).wet);
+    REQUIRE(caveReverb.decayTime == Catch::Approx(2.91f));
+    REQUIRE(wowee::audio::reverbFromProvider(*data.providerPref(66)).wet == 0.0f);
+    REQUIRE(wowee::audio::reverbFromProvider(*data.providerPref(11)).wet <= 0.45f);
+}
+
+TEST_CASE("WorldFx is transparent when dry and muffles under water", "[sound_data]") {
+    wowee::audio::WorldFx fx;
+    fx.prepare(48000, 2);
+    std::vector<float> in(960), out(960);
+    // A 5 kHz tone: passes untouched dry, mostly gone under water.
+    auto run = [&](int blocks) {
+        double sumIn = 0.0, sumOut = 0.0;
+        long t = 0;
+        for (int b = 0; b < blocks; ++b) {
+            for (size_t i = 0; i < 480; ++i, ++t) {
+                const float v = std::sin(6.2831853f * 5000.0f * static_cast<float>(t) / 48000.0f);
+                in[2 * i] = in[2 * i + 1] = v;
+            }
+            fx.process(in.data(), out.data(), 480);
+            if (b >= blocks / 2) {
+                for (size_t i = 0; i < in.size(); ++i) {
+                    sumIn += in[i] * in[i];
+                    sumOut += out[i] * out[i];
+                }
+            }
+        }
+        return std::sqrt(sumOut / sumIn);
+    };
+    REQUIRE(run(20) == Catch::Approx(1.0).margin(1e-6));
+    fx.setMuffle(1.0f);
+    REQUIRE(run(200) < 0.1);
+    fx.setMuffle(0.0f);
+    REQUIRE(run(300) == Catch::Approx(1.0).margin(0.01));
 }

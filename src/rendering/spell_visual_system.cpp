@@ -463,11 +463,6 @@ void SpellVisualSystem::playSpellVisualKit(uint32_t kitId, const glm::vec3& worl
     spawnKit(kitId, s);
 }
 
-bool SpellVisualSystem::hasVisual(uint32_t visualId) {
-    if (visualId == 0 || !ensureLoaded()) return false;
-    return visuals_.count(visualId) != 0;
-}
-
 bool SpellVisualSystem::visualHasKitSound(uint32_t visualId, KitSoundMoment moment) {
     if (visualId == 0 || !ensureLoaded()) return false;
     auto vIt = visuals_.find(visualId);
@@ -1223,12 +1218,6 @@ void SpellVisualSystem::cancelPrecastVisuals(uint64_t casterGuid) {
     // The build-up winds down rather than blinking out (see retireVisual).
     for (auto& sv : activeSpellVisuals_)
         if (sv.isPrecast && sv.ownerGuid == casterGuid && !sv.retiring) retireVisual(sv);
-}
-
-void SpellVisualSystem::cancelAllPrecastVisuals() {
-    if (!m2Renderer_) return;
-    for (auto& sv : activeSpellVisuals_)
-        if (sv.isPrecast && !sv.retiring) retireVisual(sv);
 }
 
 // ---------------------------------------------------------------------------

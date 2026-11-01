@@ -908,7 +908,6 @@ struct ChannelNotifyData {
     uint64_t senderGuid = 0;
     /// YOU_JOINED / YOU_LEFT only: the ChatChannels.dbc id (0 = custom).
     uint32_t channelId = 0;
-    uint8_t channelFlags = 0;
     /// YOU_LEFT only: a built-in channel (General, Trade...), which the real
     /// client keeps the number of when the server takes it away on a zone
     /// change - "Left Channel" as SUSPENDED rather than YOU_LEFT.

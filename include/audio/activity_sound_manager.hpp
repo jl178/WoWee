@@ -25,7 +25,6 @@ public:
     void update(float deltaTime);
     [[nodiscard]] bool isInitialized() const { return initialized; }
 
-    void playJump();
     void playLanding(FootstepSurface surface, bool hardLanding);
     void setSwimmingState(bool swimming, bool moving);
     void setCharacterVoiceProfile(const std::string& modelName);
@@ -76,7 +75,6 @@ private:
     std::string loopTempPath = platform::getTempFilePath("wowee_swim_loop.wav");
     std::mt19937 rng;
 
-    std::chrono::steady_clock::time_point lastJumpAt{};
     std::chrono::steady_clock::time_point lastLandAt{};
     std::chrono::steady_clock::time_point lastSplashAt{};
     std::chrono::steady_clock::time_point lastMeleeSwingAt{};

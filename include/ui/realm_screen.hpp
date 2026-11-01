@@ -100,21 +100,6 @@ private:
      * Update status message
      */
     void setStatus(const std::string& message);
-
-    /**
-     * Get realm status text
-     */
-    [[nodiscard]] const char* getRealmStatus(uint8_t flags) const;
-
-    /**
-     * Get population color
-     */
-    [[nodiscard]] ImVec4 getPopulationColor(float population) const;
-
-    /// What the population number is called.
-    [[nodiscard]] static const char* getPopulationName(float population);
-    /// What the type icon means.
-    [[nodiscard]] static const char* getRealmType(uint8_t icon);
 };
 
 }} // namespace wowee::ui

@@ -242,21 +242,6 @@ void ActivitySoundManager::reapProcesses() {
     }
 }
 
-void ActivitySoundManager::playJump() {
-    if (!AudioEngine::instance().isInitialized() || jumpClips.empty()) {
-        return;
-    }
-
-    auto now = std::chrono::steady_clock::now();
-    if (lastJumpAt.time_since_epoch().count() != 0) {
-        if (std::chrono::duration<float>(now - lastJumpAt).count() < 0.35f) return;
-    }
-
-    if (playVoice(jumpClips)) {
-        lastJumpAt = now;
-    }
-}
-
 void ActivitySoundManager::playLanding(FootstepSurface surface, bool hardLanding) {
     if (!AudioEngine::instance().isInitialized()) {
         return;

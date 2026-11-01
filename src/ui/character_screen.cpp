@@ -330,15 +330,15 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
     } else if (showAddonsWindow_) {
         renderAddonsSheet(screen.x, screen.y);
     } else if (disconnected && characters.empty()) {
-        if (glueDialog("cs.disconnected",
-                       "The server closed the connection before it sent the character list.",
-                       "Okay", screen.x, screen.y)) {
+        if (glue::dialog(ui_, "cs.disconnected",
+                         "The server closed the connection before it sent the character list.",
+                         "Okay")) {
             if (onBack) onBack();
         }
     } else if (loading) {
-        glueDialog("cs.loading", "Retrieving character list", nullptr, screen.x, screen.y);
+        glue::dialog(ui_, "cs.loading", "Retrieving character list", nullptr);
     } else if (errorUp) {
-        if (glueDialog("cs.error", statusMessage, "Okay", screen.x, screen.y) ||
+        if (glue::dialog(ui_, "cs.error", statusMessage, "Okay") ||
             ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
             ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
             dismissedStatus_ = statusMessage;
@@ -543,54 +543,6 @@ void CharacterScreen::renderCharacterList(game::GameHandler& gameHandler, float 
             if (onCreateCharacter) onCreateCharacter();
         }
     }
-}
-
-bool CharacterScreen::glueDialog(const char* id, const std::string& message,
-                                 const char* buttonLabel, float screenW, float screenH) {
-    const float u = glue::unit();
-    ImDrawList* fg = ImGui::GetForegroundDrawList();
-    const float body = glue::kFontNormal * u;
-    const float w = 384.0f * u;
-
-    std::vector<std::string> lines;
-    {
-        std::string line, word;
-        const float maxW = w - 60.0f * u;
-        const auto flushWord = [&]() {
-            if (word.empty()) return;
-            const std::string trial = line.empty() ? word : line + " " + word;
-            if (!line.empty() && glue::textWidth(trial.c_str(), body) > maxW) {
-                lines.push_back(line);
-                line = word;
-            } else {
-                line = trial;
-            }
-            word.clear();
-        };
-        for (char c : message) {
-            if (c == ' ') flushWord(); else word.push_back(c);
-        }
-        flushWord();
-        if (!line.empty()) lines.push_back(line);
-    }
-    const float lineH = body * 1.3f;
-    const float buttonH = buttonLabel ? 40.0f * u + 16.0f * u : 0.0f;
-    const float h = 26.0f * u + lineH * static_cast<float>(lines.size()) + 20.0f * u + buttonH;
-    const ImVec2 a((screenW - w) * 0.5f, (screenH - h) * 0.5f);
-    const ImVec2 b(a.x + w, a.y + h);
-    fg->AddRectFilled(ImVec2(0, 0), ImVec2(screenW, screenH), IM_COL32(0, 0, 0, 90));
-    glue::dialogBackdrop(fg, a, b);
-    ui_.claimMouse(ImVec2(0, 0), ImVec2(screenW, screenH));
-    float y = a.y + 26.0f * u;
-    for (const std::string& line : lines) {
-        glue::textCentered(fg, (a.x + b.x) * 0.5f, y, line.c_str(), body, glue::kHighlight);
-        y += lineH;
-    }
-    if (!buttonLabel) return false;
-    const float bw = 165.0f * u, bh = 40.0f * u;
-    const ImVec2 ba((a.x + b.x - bw) * 0.5f, b.y - 16.0f * u - bh);
-    return glue::button(ui_, fg, id, ba, ImVec2(ba.x + bw, ba.y + bh), buttonLabel,
-                        glue::ButtonStyle::Red, true, glue::kFontNormal);
 }
 
 void CharacterScreen::renderDeleteConfirm(const game::Character& character, float screenW,
@@ -863,28 +815,6 @@ void CharacterScreen::selectCharacterByName(const std::string& name) {
     newlyCreatedCharacterName = name;
     restoredLastCharacter = false;  // Allow re-selection in render()
     selectedCharacterIndex = -1;
-}
-
-ImVec4 CharacterScreen::getFactionColor(game::Race race) const {
-    // Alliance races: blue
-    if (race == game::Race::HUMAN ||
-        race == game::Race::DWARF ||
-        race == game::Race::NIGHT_ELF ||
-        race == game::Race::GNOME ||
-        race == game::Race::DRAENEI) {
-        return ImVec4(0.3f, 0.5f, 1.0f, 1.0f);
-    }
-
-    // Horde races: red
-    if (race == game::Race::ORC ||
-        race == game::Race::UNDEAD ||
-        race == game::Race::TAUREN ||
-        race == game::Race::TROLL ||
-        race == game::Race::BLOOD_ELF) {
-        return ui::colors::kRed;
-    }
-
-    return ui::colors::kWhite;
 }
 
 std::string CharacterScreen::getConfigDir() {

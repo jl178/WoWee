@@ -191,6 +191,11 @@ private:
     /// once at spawn and would otherwise stay there while its target circle
     /// follows the entity, which reads as a ring sliding off a still NPC.
     void syncRenderInstancesToEntities(float deltaTime);
+    /// The two halves of it: creatures (position, floor settle, locomotion,
+    /// combat facing, weapon retries) and other players (position, mount,
+    /// locomotion, eased facing and body twist).
+    void syncCreatureRenderInstances(float deltaTime);
+    void syncPlayerRenderInstances(float deltaTime);
     void render();
     void performLogoutToLogin();
     void processDeferredLogoutToLogin();

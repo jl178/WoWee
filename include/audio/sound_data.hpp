@@ -56,6 +56,8 @@ struct AreaSounds {
     uint32_t ambienceId = 0;   ///< SoundAmbience.dbc
     uint32_t zoneMusicId = 0;  ///< ZoneMusic.dbc
     uint32_t introId = 0;      ///< ZoneIntroMusicTable.dbc
+    int32_t reverb = 0;           ///< SoundProviderPreferences.dbc; 0 none
+    int32_t reverbUnderwater = 0; ///< the same, with the listener submerged
     std::string name;
 };
 
@@ -68,7 +70,26 @@ struct WmoAreaSounds {
     uint32_t zoneMusicId = 0; ///< ZoneMusic.dbc
     uint32_t introId = 0;
     uint32_t areaId = 0;      ///< AreaTable.dbc, 0 when the row has none
+    int32_t reverb = 0;           ///< SoundProviderPreferences.dbc; 0 or -1 none
+    int32_t reverbUnderwater = 0;
     std::string name;
+};
+
+/// One SoundProviderPreferences.dbc row: an EAX 2 room description, the
+/// reverb the stock client asks its sound provider for in an area or room.
+/// Levels are millibels (-10000 silent, 0 full), times are seconds.
+struct SoundProviderPref {
+    uint32_t id = 0;
+    std::string name;
+    float decayTime = 1.49f;
+    float diffusion = 1.0f;
+    int32_t room = -1000;          ///< master level of the room effect
+    int32_t roomHF = -100;         ///< its level at high frequencies
+    float decayHFRatio = 0.83f;    ///< how much faster the highs die away
+    int32_t reflections = -2602;   ///< early reflections, against room
+    float reflectionsDelay = 0.007f;
+    int32_t reverb = 200;          ///< late reverb, against room
+    float reverbDelay = 0.011f;
 };
 
 /// One NPCSounds.dbc row: what a creature says when spoken to.
@@ -145,6 +166,17 @@ public:
     /// building's -1 row, each with the placement's name set and then set 0.
     [[nodiscard]] const WmoAreaSounds* wmoArea(uint32_t wmoId, uint16_t nameSet, int32_t groupIndex) const;
 
+    /// A SoundProviderPreferences row by id; null for 0, -1 or an unknown id.
+    [[nodiscard]] const SoundProviderPref* providerPref(int32_t id) const;
+    /// SoundProviderPreferences.Description, case-sensitive ("PRESET_ROOM").
+    [[nodiscard]] const SoundProviderPref* providerPrefByName(std::string_view name) const;
+    /// The reverb an area asks for, following ParentAreaID while the area's
+    /// own column is 0. 0 when the chain names none - most of the outdoors.
+    [[nodiscard]] int32_t areaReverb(uint32_t areaId, bool underwater) const;
+    /// The reverb a room asks for: the group's own row, then the building's
+    /// -1 row when the group's names none. 0 when neither does.
+    [[nodiscard]] int32_t wmoReverb(uint32_t wmoId, uint16_t nameSet, int32_t groupIndex, bool underwater) const;
+
     /// ChrRaces -> CreatureDisplayInfo -> CreatureModelData -> CreatureSoundData.
     [[nodiscard]] const CreatureSounds* playerSounds(uint32_t raceId, bool female) const;
     [[nodiscard]] const CreatureSounds* displaySounds(uint32_t displayId) const;
@@ -208,6 +240,7 @@ private:
     std::unordered_map<uint32_t, ZoneIntro> intros_;
     std::unordered_map<uint32_t, AreaSounds> areas_;
     std::unordered_map<uint32_t, std::vector<WmoAreaSounds>> wmoAreas_;  // by wmoId
+    std::unordered_map<uint32_t, SoundProviderPref> providerPrefs_;      // by id
     std::unordered_map<uint32_t, NpcSounds> npcSounds_;  // by NPCSounds id
     std::unordered_map<uint64_t, uint32_t> emoteSounds_;  // (emote<<16 | race<<8 | sex) -> sound
     std::unordered_set<uint32_t> emoteTextSoundAnims_;    // anim ids voiced by EmotesTextSound

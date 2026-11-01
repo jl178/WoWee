@@ -2424,64 +2424,35 @@ static int lua_ResetGroupPreviewTalentPoints(lua_State* L) {
     return 0;
 }
 
-// LearnPreviewTalents(pet) - commit the staged points
-static int lua_LearnPreviewTalents(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    if (!gh) return 0;
-    if (wantsPetTalents(L, 1)) return 0;
-    settlePreview(gh);
-    auto& committed = committedPreview();
-    // A fresh baseline unless an earlier Learn is still being answered: its
-    // count of taught-but-uncharged points is measured from its own baseline.
-    if (committed.talents.empty() && unchargedPreviewPoints(gh) == 0) {
-        committed.unspentAtSend = gh->getUnspentTalentPoints(gh->getActiveTalentSpec());
-        committed.retiredTotal = 0;
-    }
+// What still has to be sent for one staged talent: the ranks above what is
+// learned and above what an earlier Learn already has on its way.
+struct PreviewSend {
+    const game::GameHandler::TalentEntry* talent;
+    int fromRank;   // first rank to request, counted from one
+    int toRank;     // last rank to request
+    int staged;     // the talent's whole staged count, all of it now sent
+};
 
-    // What still has to be sent for each staged talent: the ranks above what
-    // is learned and above what an earlier Learn already has on its way.
-    struct Send {
-        const game::GameHandler::TalentEntry* talent;
-        int fromRank;   // first rank to request, counted from one
-        int toRank;     // last rank to request
-        int staged;     // the talent's whole staged count, all of it now sent
-    };
-    std::vector<Send> sends;
-    for (const auto& [id, n] : previewPoints()) {
-        const auto* talent = gh->getTalentEntry(id);
-        if (!talent || n <= 0) continue;
-        const int have = gh->getTalentRank(id);
-        // An earlier Learn's ranks still on their way are part of the staged
-        // count (settlePreview has already let go of the ones taught), and
-        // are not asked for twice.
-        int alreadyAsked = have;
-        if (const auto c = committed.talents.find(id); c != committed.talents.end()) {
-            alreadyAsked = std::max(have, c->second.targetRank);
-        }
-        const int fromRank = alreadyAsked + 1;
-        const int toRank = have + n;
-        if (fromRank <= toRank) sends.push_back({talent, fromRank, toRank, n});
-    }
-
-    // In the order the tree unlocks, which is the order the server checks.
-    //
-    // AzerothCore handles each request on its own against the talents already
-    // learned: a talent in tier N needs N*5 points in its tree, and one with a
-    // prerequisite needs that prerequisite's rank. The staged points came out
-    // of a hash map, so a deep talent was routinely asked for before the tier
-    // points beneath it - and refused, silently, with the server answering the
-    // unchanged talents. A Learn of eleven points would teach the shallow ones
-    // and quietly drop the rest. Tier by tier, then column, and never before a
-    // staged prerequisite (a prerequisite can sit in the same tier).
-    std::sort(sends.begin(), sends.end(), [](const Send& a, const Send& b) {
+// `sends` in the order the tree unlocks, which is the order the server checks.
+//
+// AzerothCore handles each request on its own against the talents already
+// learned: a talent in tier N needs N*5 points in its tree, and one with a
+// prerequisite needs that prerequisite's rank. The staged points came out
+// of a hash map, so a deep talent was routinely asked for before the tier
+// points beneath it - and refused, silently, with the server answering the
+// unchanged talents. A Learn of eleven points would teach the shallow ones
+// and quietly drop the rest. Tier by tier, then column, and never before a
+// staged prerequisite (a prerequisite can sit in the same tier).
+static std::vector<PreviewSend> inUnlockOrder(std::vector<PreviewSend> sends) {
+    std::sort(sends.begin(), sends.end(), [](const PreviewSend& a, const PreviewSend& b) {
         if (a.talent->row != b.talent->row) return a.talent->row < b.talent->row;
         if (a.talent->column != b.talent->column) return a.talent->column < b.talent->column;
         return a.talent->talentId < b.talent->talentId;
     });
-    std::vector<Send> ordered;
+    std::vector<PreviewSend> ordered;
     ordered.reserve(sends.size());
     std::vector<bool> done(sends.size(), false);
-    const auto waitsOnPrereq = [&](const Send& s) {
+    const auto waitsOnPrereq = [&](const PreviewSend& s) {
         for (uint32_t prereqId : s.talent->prereqTalent) {
             if (prereqId == 0) continue;
             for (size_t j = 0; j < sends.size(); ++j) {
@@ -2505,8 +2476,42 @@ static int lua_LearnPreviewTalents(lua_State* L) {
         done[pick] = true;
         ordered.push_back(sends[pick]);
     }
+    return ordered;
+}
 
-    for (const Send& s : ordered) {
+// LearnPreviewTalents(pet) - commit the staged points
+static int lua_LearnPreviewTalents(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    if (!gh) return 0;
+    if (wantsPetTalents(L, 1)) return 0;
+    settlePreview(gh);
+    auto& committed = committedPreview();
+    // A fresh baseline unless an earlier Learn is still being answered: its
+    // count of taught-but-uncharged points is measured from its own baseline.
+    if (committed.talents.empty() && unchargedPreviewPoints(gh) == 0) {
+        committed.unspentAtSend = gh->getUnspentTalentPoints(gh->getActiveTalentSpec());
+        committed.retiredTotal = 0;
+    }
+
+    std::vector<PreviewSend> sends;
+    for (const auto& [id, n] : previewPoints()) {
+        const auto* talent = gh->getTalentEntry(id);
+        if (!talent || n <= 0) continue;
+        const int have = gh->getTalentRank(id);
+        // An earlier Learn's ranks still on their way are part of the staged
+        // count (settlePreview has already let go of the ones taught), and
+        // are not asked for twice.
+        int alreadyAsked = have;
+        if (const auto c = committed.talents.find(id); c != committed.talents.end()) {
+            alreadyAsked = std::max(have, c->second.targetRank);
+        }
+        const int fromRank = alreadyAsked + 1;
+        const int toRank = have + n;
+        if (fromRank <= toRank) sends.push_back({talent, fromRank, toRank, n});
+    }
+
+    const std::vector<PreviewSend> ordered = inUnlockOrder(std::move(sends));
+    for (const PreviewSend& s : ordered) {
         // One request per rank: the server counts them, and asking for the
         // final rank in one call is not how the protocol reads it.
         for (int r = s.fromRank; r <= s.toRank; ++r) {

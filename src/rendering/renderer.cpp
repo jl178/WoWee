@@ -561,7 +561,8 @@ void Renderer::updatePerFrameUBO() {
 
     currentFrameData.view = camera->getViewMatrix();
     currentFrameData.projection = camera->getProjectionMatrix();
-    currentFrameData.viewPos = glm::vec4(camera->getPosition(), 1.0f);
+    // w, which no shader read, is the ground's relief; see setTerrainRelief.
+    currentFrameData.viewPos = glm::vec4(camera->getPosition(), terrainRelief_);
     currentFrameData.fogParams.z = globalTime;
 
     // Lighting from LightingManager
@@ -2142,6 +2143,8 @@ void Renderer::update(float deltaTime) {
             const auto surface = waterRenderer->getNearestWaterHeightAt(eye.x, eye.y, eye.z, 200.0f);
             isUnderwater = surface && eye.z < *surface;
         }
+        // The sound goes under with the picture; see updateZoneAudio.
+        cameraUnderwater_ = isUnderwater;
         const uint32_t resolvedZoneId = getCurrentZoneId();
 
         // Light.dbc's death slot while the player is dead or a ghost.
@@ -2478,7 +2481,9 @@ void Renderer::update(float deltaTime) {
             zctx.wmoRootId = wmoHit.wmoId;
             zctx.wmoGroupIndex = wmoHit.groupIndex;
             zctx.wmoNameSet = wmoHit.nameSet;
+            zctx.wmoInterior = wmoHit.interior;
         }
+        zctx.cameraUnderwater = cameraUnderwater_;
         if (weather) {
             auto wt = weather->getWeatherType();
             if (wt == Weather::Type::RAIN)       zctx.weatherType = 1;
@@ -4263,6 +4268,8 @@ void Renderer::setViewDistance(float distance) {
     if (terrainRenderer) terrainRenderer->setViewDistance(viewDistance_);
     if (wmoRenderer) wmoRenderer->setViewDistance(viewDistance_);
     if (m2Renderer) m2Renderer->setViewDistance(viewDistance_);
+    // The fog finishes where the drawing does; see LightingManager::update.
+    if (lightingManager) lightingManager->setViewDistance(viewDistance_);
     if (terrainManager) {
         terrainManager->setLoadRadius(getTerrainLoadRadius());
         terrainManager->setUnloadRadius(getTerrainUnloadRadius());
@@ -4577,7 +4584,7 @@ void Renderer::renderReflectionPass() {
     // Reflected camera position (Z is up)
     glm::vec3 reflPos = camPos;
     reflPos.z = 2.0f * waterHeight - reflPos.z;
-    reflData.viewPos = glm::vec4(reflPos, 1.0f);
+    reflData.viewPos = glm::vec4(reflPos, terrainRelief_);
     // The fog volume is the camera's; its sets here bind the neutral one.
     reflData.volumetricParams = glm::vec4(0.0f);
     reflData.rtParams = glm::vec4(0.0f);
@@ -4950,10 +4957,14 @@ void Renderer::recordSunShafts() {
         currentImageIndex < images.size() &&
         !(passAblation_ && passAblation_->skip(AblationPass::SunShafts))) {
         const auto& lp = lightingManager->getLightingParams();
-        // The sun the lens flare draws around, from the same rule.
+        // The sun the lens flare draws around, from the same rule - and the
+        // one Celestial draws: both are -LightingParams::directionalDir, the
+        // Light.dbc/game-time light the terrain is lit by. Projected without
+        // the upscaler's sub-pixel jitter, because the picture the rays are
+        // laid over is the resolved, unjittered one.
         const glm::vec3 sunDir = sunDirectionFromLightDir(lp.directionalDir);
         const SunOnScreen sun = sunScreenPosition(camera->getViewMatrix(),
-                                                  camera->getProjectionMatrix(), sunDir);
+                                                  camera->getUnjitteredProjectionMatrix(), sunDir);
         if (sun.inFront) {
             // Screen strength: 1 would be the sky's own colour over anything a
             // fully lit walk crosses. Less, because the sky around the sun is
@@ -4962,6 +4973,13 @@ void Renderer::recordSunShafts() {
             // Up out of the horizon and gone again as it sets. A sun under the
             // ground lights nothing to stream from.
             strength *= glm::smoothstep(-0.02f, 0.1f, sunDir.z);
+            // As visible as Celestial draws the disc: its day intensity, seen
+            // through as much cloud as LightFloatBand 2 lets it. Without this
+            // the rays streamed from an empty patch of sky in the storm and
+            // death sets, which hide the sun.
+            const float throughCloud = glm::mix(1.0f, glm::clamp(lp.celestialGlowThrough, 0.0f, 1.0f),
+                                                glm::clamp(lp.cloudDensity, 0.0f, 1.0f));
+            strength *= glm::clamp(lp.dayIntensity, 0.0f, 1.0f) * throughCloud;
             // In view, or streaming in from just past an edge, fading out as
             // it goes half a screen beyond one.
             const glm::vec2 past = glm::max(glm::abs(sun.uv - 0.5f) - 0.5f, glm::vec2(0.0f));

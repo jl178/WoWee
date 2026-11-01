@@ -46,10 +46,6 @@ void CharacterAnimator::triggerHitReaction(uint32_t animId) {
     combat_.triggerHitReaction(animId);
 }
 
-void CharacterAnimator::triggerSpecialAttack(uint32_t /*spellId*/) {
-    // Special attack animation is injected via FrameInput::specialAttackAnimId
-}
-
 void CharacterAnimator::setEquippedWeaponType(const WeaponLoadout& loadout) {
     loadout_ = loadout;
 }

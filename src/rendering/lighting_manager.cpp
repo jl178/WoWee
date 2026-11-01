@@ -591,6 +591,27 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         newParams.fogEnd *= scale;
     }
 
+    // And as far as the view distance reaches.
+    //
+    // The fog's distances knew nothing of the view distance, so wherever the
+    // fog ended beyond it - most zones at the default 0.4 strength, which
+    // pushes Light.dbc's 300 to 1000 yards out two and a half times - the
+    // world stopped at a hard line half-hazed against the sky. The fog now
+    // always finishes by the view distance, the start keeping its place on
+    // the curve. Past the reference distance (the setting's default) it also
+    // moves out in proportion, so a longer view sees further into the same
+    // haze rather than the same haze with more drawn behind it. At or below
+    // the reference nothing moves except that last clamp: at the default the
+    // fog is Light.dbc's, times the strength, as before. Off (strength 0)
+    // stays off, and under water the water's own fog is left alone.
+    if (strength > 0.001f && newParams.fogEnd > 1.0f) {
+        const float reach = std::max(viewDistance_, 1.0f);
+        float scale = authoredFogOnly ? 1.0f : std::max(1.0f, reach / kFogReferenceViewDistance);
+        if (newParams.fogEnd * scale > reach) scale = reach / newParams.fogEnd;
+        newParams.fogStart *= scale;
+        newParams.fogEnd *= scale;
+    }
+
     // Every lit shader adds these as `ambient + diffuse * N-dot-L`, and on
     // ground facing the sun that is nearly their plain sum. 82% of the
     // client's 844 LightParams rows exceed 1.0 in some channel at noon, the

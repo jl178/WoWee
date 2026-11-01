@@ -79,7 +79,6 @@ private:
     VkPipeline buildPipeline(VkDevice device,
                              const VkPipelineShaderStageCreateInfo& vertStage,
                              const VkPipelineShaderStageCreateInfo& fragStage);
-    bool createDescriptors();
     void drawSprite(VkCommandBuffer cmd, Sprite sprite, const glm::vec3& dir, float halfSize,
                     const glm::vec4& color, bool alphaBlended);
 

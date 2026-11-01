@@ -358,9 +358,6 @@ private:
 
     bool appearanceCallbackSet_ = false;
 
-
-    void renderWeatherOverlay(game::GameHandler& gameHandler);
-
 public:
     /// The server asking for the window (SMSG_OPEN_LFG_DUNGEON_FINDER).
     ///

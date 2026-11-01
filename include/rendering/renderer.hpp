@@ -452,6 +452,13 @@ public:
     void setFoliageWind(float strength) { foliageWindSetting_ = glm::clamp(strength, 0.0f, 2.0f); }
     /// A multiplier on the shadow darkness Light.dbc asks for; 1 is as set.
     void setShadowStrength(float strength) { shadowStrengthSetting_ = glm::clamp(strength, 0.5f, 1.5f); }
+    /// The ground's relief: the terrain shader's bump from its own texture,
+    /// which follows the Surface bumps setting and its strength as the
+    /// buildings' normal maps do. 0 is the flat stock ground; 1 the default
+    /// strength (0.8). Carried to terrain.frag in viewPos.w.
+    void setTerrainRelief(bool enabled, float strength) {
+        terrainRelief_ = enabled ? glm::clamp(strength / 0.8f, 0.0f, 2.5f) : 0.0f;
+    }
     int getTerrainLoadRadius() const;
     int getTerrainUnloadRadius() const { return getTerrainLoadRadius() + 3; }
     void setMsaaSamples(VkSampleCountFlagBits samples);
@@ -486,6 +493,8 @@ private:
     float windStrength_ = 1.0f;           // setting x weather x outdoors, eased over ~4 s
     float clothWindStrength_ = 1.0f;      // setting x weather, eased: cloth breathes indoors too
     float shadowStrengthSetting_ = 1.0f;  // the "Shadow darkness" setting
+    float terrainRelief_ = 1.0f;          // see setTerrainRelief
+    bool cameraUnderwater_ = false;       // camera below the water's surface, for the audio
     glm::vec3 interiorAmbient_{0.5f};     // MOHD ambient of the WMO the camera is in
     bool playerIndoors_ = false;  // Cached WMO inside state for macro conditionals
     bool deferredWorldInitEnabled_ = true;

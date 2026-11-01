@@ -12,6 +12,7 @@
 #include "audio/spell_sound_manager.hpp"
 #include "audio/movement_sound_manager.hpp"
 #include "audio/world_sound_emitters.hpp"
+#include "audio/world_fx.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "audio/day_night.hpp"
 #include "game/zone_manager.hpp"
@@ -88,7 +89,58 @@ void AudioCoordinator::loadSoundData(pipeline::AssetManager* assets) {
         if (npcVoiceManager_) npcVoiceManager_->setSoundData(&soundData_);
         if (combatSoundManager_) combatSoundManager_->setSoundData(&soundData_);
         if (worldSoundEmitters_) worldSoundEmitters_->setSoundData(&soundData_);
+        // The client looks this one up by name, hence the warning in it.
+        const SoundEntry* loop = soundData_.soundByName("Underwater (DONOTRENAME)");
+        if (!loop || loop->files.empty()) loop = soundData_.soundByName("UnderWaterLoop");
+        if (loop && !loop->files.empty()) {
+            underwaterLoopPath_ = loop->files.front();
+            underwaterLoopVolume_ = loop->volume;
+        }
+        reverbPrefId_ = -1;
     }
+}
+
+void AudioCoordinator::updateReverb(const ZoneAudioContext& ctx) {
+    const bool under = ctx.cameraUnderwater;
+    AudioEngine::instance().setWorldUnderwater(under);
+    if (ambientSoundManager_) {
+        ambientSoundManager_->setUnderwaterLoop(underwaterLoopPath_, underwaterLoopVolume_);
+        ambientSoundManager_->setSubmerged(under);
+    }
+
+    // Which SoundProviderPreferences row. A room or cave - an indoor group -
+    // has its WMOAreaTable row's; one with no row of its own gets a small
+    // plain room rather than the open air outside. Anywhere else, the area's,
+    // which for nearly all of the outdoors is none: the stock data leaves
+    // fields and forests dry. Under water the rows' underwater column, and
+    // the stock Underwater row where a city's area names none.
+    int32_t id = 0;
+    if (soundData_.loaded()) {
+        if (ctx.wmoRootId != 0 && ctx.wmoInterior) {
+            id = soundData_.wmoReverb(ctx.wmoRootId, ctx.wmoNameSet, ctx.wmoGroupIndex, under);
+            if (id == 0 && !under) {
+                if (const SoundProviderPref* room = soundData_.providerPrefByName("PRESET_ROOM")) {
+                    id = static_cast<int32_t>(room->id);
+                }
+            }
+        }
+        if (id == 0) id = soundData_.areaReverb(ctx.areaId, under);
+        if (id == 0 && under) {
+            if (const SoundProviderPref* water = soundData_.providerPrefByName("Underwater")) {
+                id = static_cast<int32_t>(water->id);
+            }
+        }
+    }
+    if (id == reverbPrefId_ && under == reverbUnderwater_) return;
+    reverbPrefId_ = id;
+    reverbUnderwater_ = under;
+
+    ReverbSettings reverb;  // dry
+    const SoundProviderPref* pref = soundData_.providerPref(id);
+    if (pref) reverb = reverbFromProvider(*pref);
+    AudioEngine::instance().setWorldReverb(reverb);
+    LOG_INFO("Reverb: ", pref ? pref->name : std::string("none"), " (", id, ")",
+             under ? " under water" : "", " wet=", reverb.wet, " decay=", reverb.decayTime, "s");
 }
 
 void AudioCoordinator::updateTableAmbience(const ZoneAudioContext& ctx) {
@@ -234,6 +286,9 @@ void AudioCoordinator::updateZoneAudio(const ZoneAudioContext& ctx) {
         if (soundData_.loaded()) updateTableAmbience(ctx);
         ambientSoundManager_->update(deltaTime, ctx.cameraPosition, ctx.insideWmo, ctx.isSwimming, isBlacksmith);
     }
+
+    // ── The room the world is heard in, and the water over it ──
+    updateReverb(ctx);
 
     // ── Placed emitters and doodad sound events ──
     // Heard from the listener, which stands at the character, the way the

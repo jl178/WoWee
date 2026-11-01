@@ -94,7 +94,14 @@ constexpr const char* kGraphicsPresetKeys[] = {
     "normalmapping", "normalmapstrength", "parallax", "parallaxquality",
     "groundclutter",
     "grassenabled", "grassdensity", "grassheight", "grassdistance",
+    "foliagewind", "shadowstrength", "lightshafts", "fogstrength", "fogskyblend",
+    "lensflare", "sharpstars", "sunshafts",
 };
+
+// The fog is Light.dbc's own at the default view distance; see
+// LightingManager::update.
+static_assert(rendering::LightingManager::kFogReferenceViewDistance == kDefaultViewDistance,
+              "the fog's reference view distance is not the setting's default");
 
 /// Every graphics setting that has to reach something when it is loaded.
 ///
@@ -115,7 +122,7 @@ constexpr const char* kGraphicsApplyKeys[] = {
     "grassdistance", "waterrefraction", "upscaling", "fsrquality",
     "fsrsharpness", "framegen", "brightness", "uiopacity", "minimapsquare",
     "minimapnpcdots", "minimapclock", "minimapcoords", "minimaprotate", "latencymeter",
-    "fogskyblend", "fogstrength", "sharpstars", "lightshafts", "mistdensity", "sunshafts",
+    "fogskyblend", "fogstrength", "sharpstars", "lensflare", "lightshafts", "mistdensity", "sunshafts",
     "raytracedlighting", "shadowstrength", "foliagewind",
     // Moved off the game's own Effects panel, so this list is now what
     // applies them at startup; the cvar store used to do it.
@@ -176,6 +183,14 @@ void SettingsPanel::applyGraphicsPreset(GraphicsPreset preset) {
         pendingGrassDensity      = p.grassDensity;
         pendingGrassHeight       = p.grassHeight;
         pendingGrassDistance     = p.grassDistance;
+        pendingFoliageWind       = p.foliageWind;
+        pendingShadowStrength    = p.shadowStrength;
+        pendingVolumetricFog     = p.lightShafts;
+        pendingFogStrength       = p.fogStrength;
+        pendingFogSkyBlend       = p.fogSkyBlend;
+        pendingLensFlare         = p.lensFlare;
+        pendingSharpStars        = p.sharpStars;
+        pendingSunShafts         = p.sunShafts;
         // Each one goes to the thing it affects through the one function that
         // knows where that is, rather than through a second copy of the same
         // renderer calls written out here.
@@ -219,7 +234,15 @@ void SettingsPanel::updateGraphicsPresetFromCurrentSettings() {
             // how dense, how tall or how far it would have been.
             (!p.grass || (std::abs(pendingGrassDensity - p.grassDensity) <= 5 &&
                           std::abs(pendingGrassHeight - p.grassHeight) <= 5 &&
-                          std::abs(pendingGrassDistance - p.grassDistance) <= 10));
+                          std::abs(pendingGrassDistance - p.grassDistance) <= 10)) &&
+            std::abs(pendingFoliageWind - p.foliageWind) <= 0.03f &&
+            std::abs(pendingShadowStrength - p.shadowStrength) <= 0.03f &&
+            pendingVolumetricFog == p.lightShafts &&
+            std::abs(pendingFogStrength - p.fogStrength) <= 0.03f &&
+            std::abs(pendingFogSkyBlend - p.fogSkyBlend) <= 0.03f &&
+            std::abs(pendingLensFlare - p.lensFlare) <= 0.05f &&
+            pendingSharpStars == p.sharpStars &&
+            pendingSunShafts == p.sunShafts;
         if (matches) {
             pendingGraphicsPreset = static_cast<GraphicsPreset>(i + 1);
             // Both halves: saveSettings writes currentGraphicsPreset, and with
@@ -634,9 +657,12 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
     } else if (key == "normalmapping") {
         if (wmo) wmo->setNormalMappingEnabled(pendingNormalMapping);
         if (chars) chars->setNormalMappingEnabled(pendingNormalMapping);
+        // The ground's relief too, which used to ignore this switch.
+        if (renderer) renderer->setTerrainRelief(pendingNormalMapping, pendingNormalMapStrength);
     } else if (key == "normalmapstrength") {
         if (wmo) wmo->setNormalMapStrength(pendingNormalMapStrength);
         if (chars) chars->setNormalMapStrength(pendingNormalMapStrength);
+        if (renderer) renderer->setTerrainRelief(pendingNormalMapping, pendingNormalMapStrength);
     } else if (key == "parallax") {
         if (wmo) wmo->setPOMEnabled(pendingPOM);
         if (chars) chars->setPOMEnabled(pendingPOM);

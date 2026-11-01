@@ -76,41 +76,14 @@ VkPipeline Celestial::buildPipeline(VkDevice device,
         .build(device, vkCtx_->getPipelineCache());
 }
 
-bool Celestial::createDescriptors() {
-    VkDevice device = vkCtx_->getDevice();
-    VkDescriptorSetLayoutBinding sampler{};
-    sampler.binding = 0;
-    sampler.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sampler.descriptorCount = 1;
-    sampler.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    textureSetLayout_ = createDescriptorSetLayout(device, {sampler});
-    if (!textureSetLayout_) return false;
-
-    VkDescriptorPoolSize size{};
-    size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    size.descriptorCount = SPRITE_COUNT;
-    VkDescriptorPoolCreateInfo pool{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pool.maxSets = SPRITE_COUNT;
-    pool.poolSizeCount = 1;
-    pool.pPoolSizes = &size;
-    if (vkCreateDescriptorPool(device, &pool, nullptr, &descriptorPool_) != VK_SUCCESS) return false;
-
-    std::array<VkDescriptorSetLayout, SPRITE_COUNT> layouts{};
-    layouts.fill(textureSetLayout_);
-    VkDescriptorSetAllocateInfo alloc{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    alloc.descriptorPool = descriptorPool_;
-    alloc.descriptorSetCount = SPRITE_COUNT;
-    alloc.pSetLayouts = layouts.data();
-    return vkAllocateDescriptorSets(device, &alloc, textureSets_.data()) == VK_SUCCESS;
-}
-
 bool Celestial::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
     LOG_INFO("Initializing celestial renderer (Vulkan)");
 
     vkCtx_ = ctx;
     VkDevice device = vkCtx_->getDevice();
 
-    if (!createDescriptors()) {
+    if (!createSamplerSets(device, SPRITE_COUNT, textureSetLayout_, descriptorPool_,
+                           textureSets_.data())) {
         LOG_ERROR("Failed to create celestial descriptors");
         return false;
     }

@@ -1,5 +1,4 @@
 #include "rendering/sky_system.hpp"
-#include "rendering/sun_direction.hpp"
 #include "rendering/skybox.hpp"
 #include "rendering/celestial.hpp"
 #include "rendering/starfield.hpp"
@@ -158,12 +157,6 @@ void SkySystem::renderOverlays(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     }
 
     // No lens flare: the stock sun has its glare sprite and nothing more.
-}
-
-glm::vec3 SkySystem::getSunPosition(const SkyParams& params) const {
-    // Below the horizon it stays below - see sun_direction.hpp for what the
-    // mirror that used to be here cost.
-    return sunDirectionFromLightDir(params.directionalDir) * 800.0f;
 }
 
 void SkySystem::setMoonPhaseCycling(bool enabled) {

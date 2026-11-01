@@ -288,6 +288,14 @@ public:
     /// LightingManager::update.
     void setFogStrength(float strength) { fogStrength_ = strength; }
     [[nodiscard]] float getFogStrength() const { return fogStrength_; }
+    /// The view distance setting, in yards, which the fog follows: beyond the
+    /// reference distance the fog moves out with it, and it always finishes
+    /// by where the world stops being drawn. See LightingManager::update.
+    void setViewDistance(float yards) { viewDistance_ = yards; }
+    /// The view distance at which the fog is exactly what Light.dbc and the
+    /// strength above ask for: the setting's default (ui::kDefaultViewDistance,
+    /// checked against it in settings_panel.cpp).
+    static constexpr float kFogReferenceViewDistance = 1900.0f;
 
     /**
      * Get current time of day (0.0-1.0)
@@ -420,6 +428,7 @@ private:
     bool playerDead_ = false;
     float fogSkyBlend_ = 0.7f;
     float fogStrength_ = 0.4f;
+    float viewDistance_ = kFogReferenceViewDistance;
 
     /// dnc.db's keys: half-minutes since midnight, day and night intensity.
     struct DayNightKey {

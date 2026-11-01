@@ -245,14 +245,6 @@ public:
     /// Dims everything already drawn, for a modal to sit on.
     void scrim(float alpha);
 
-    /// A colour chosen for a dark interface, brought onto paper.
-    ///
-    /// WoW's class and faction colours are picked to glow against black; laid
-    /// on cream they read as pastel smudges. Blending each of them part of
-    /// the way to the page's own ink keeps them recognisable and legible at
-    /// once - a paladin is still pink, and it is still a colour you can read.
-    [[nodiscard]] ImU32 onPaper(ImVec4 colour) const;
-
     void text(ImVec2 at, const char* s, float size, ImU32 col, bool titleFace = false);
     void textCentered(float cx, float y, const char* s, float size, ImU32 col,
                       bool titleFace = false);
@@ -306,9 +298,6 @@ public:
     /// and class colours, which a radio button has nowhere to put.
     bool chip(const char* id, ImVec2 a, ImVec2 b, const char* label, bool selected,
               ImU32 accent);
-    /// How wide a chip has to be for its label. The caller wraps rows of them
-    /// itself, since only it knows what the row has to fit inside.
-    [[nodiscard]] float chipWidth(const char* label, float height) const;
 
     enum class Glyph { Gear, Cross, Eye, EyeClosed };
     /// A glyph in a circle of `radius`, drawn without a frame until hovered.

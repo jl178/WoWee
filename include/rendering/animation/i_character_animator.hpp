@@ -21,7 +21,6 @@ public:
     virtual void triggerMeleeSwing() = 0;
     virtual void triggerRangedShot() = 0;
     virtual void triggerHitReaction(uint32_t animId) = 0;
-    virtual void triggerSpecialAttack(uint32_t spellId) = 0;
     virtual void setEquippedWeaponType(const WeaponLoadout& loadout) = 0;
     virtual void setEquippedRangedType(RangedWeaponType type) = 0;
     virtual void setRangedWeaponActive(bool active) = 0;

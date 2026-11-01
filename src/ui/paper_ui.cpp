@@ -571,10 +571,6 @@ bool PaperUI::button(const char* idStr, ImVec2 a, ImVec2 b, const char* label,
     return clicked;
 }
 
-float PaperUI::chipWidth(const char* label, float height) const {
-    return textWidth(label, height * 0.46f) + height * 0.86f;
-}
-
 bool PaperUI::chip(const char* idStr, ImVec2 a, ImVec2 b, const char* label, bool selected,
                    ImU32 accent) {
     const ImU32 id = hashId(idStr);
@@ -991,19 +987,6 @@ PaperUI::FieldResult PaperUI::field(const char* idStr, ImVec2 a, ImVec2 b, TextE
 // ---------------------------------------------------------------------------
 // Lists and pictures
 // ---------------------------------------------------------------------------
-
-ImU32 PaperUI::onPaper(ImVec4 colour) const {
-    const auto channel = [](ImU32 c, int shift) {
-        return static_cast<float>((c >> shift) & 0xFFu);
-    };
-    const auto blend = [&](float value, int shift) {
-        const float raw = std::clamp(value, 0.0f, 1.0f) * 255.0f;
-        const float mixed = raw * 0.62f + channel(theme_.ink, shift) * 0.38f;
-        return static_cast<ImU32>(std::clamp(mixed, 0.0f, 255.0f)) << shift;
-    };
-    return blend(colour.x, IM_COL32_R_SHIFT) | blend(colour.y, IM_COL32_G_SHIFT) |
-           blend(colour.z, IM_COL32_B_SHIFT) | (0xFFu << IM_COL32_A_SHIFT);
-}
 
 bool PaperUI::hover(ImVec2 a, ImVec2 b) {
     if (inert_ != 0) return false;

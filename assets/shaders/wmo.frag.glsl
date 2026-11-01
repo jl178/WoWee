@@ -129,7 +129,7 @@ float computeLodFactor() {
 }
 
 // Parallax Occlusion Mapping with angle-adaptive sampling
-vec2 parallaxOcclusionMap(vec2 uv, vec3 viewDirTS, float lodFactor) {
+vec2 parallaxOcclusionMap(vec2 uv, vec3 viewDirTS, float lodFactor, float depthScale) {
     float VdotN = abs(viewDirTS.z);  // 1=head-on, 0=grazing
 
     // Fade out POM at grazing angles to avoid distortion
@@ -145,9 +145,9 @@ vec2 parallaxOcclusionMap(vec2 uv, vec3 viewDirTS, float lodFactor) {
     float currentLayerDepth = 0.0;
 
     // Direction to shift UV per layer - clamp denominator to prevent explosion at grazing angles
-    vec2 P = viewDirTS.xy / max(VdotN, 0.15) * pomScale;
+    vec2 P = viewDirTS.xy / max(VdotN, 0.15) * depthScale;
     // Hard-clamp total UV offset to prevent texture swimming
-    float maxOffset = pomScale * 3.0;
+    float maxOffset = depthScale * 3.0;
     P = clamp(P, vec2(-maxOffset), vec2(maxOffset));
     vec2 deltaUV = P / float(numSamples);
 
@@ -236,11 +236,25 @@ void main() {
     vec3 N = vertexNormal;
     mat3 TBN = mat3(T, B, N);
 
+    // How many yards one repeat of the texture covers, from the same
+    // derivatives. The parallax depth and the bump are both in texture space,
+    // so a rock face whose texture is stretched thirty yards across got thirty
+    // times the depth of a brick wall's - a mountain's surface sliding about
+    // under the camera. Both are held to what a few yards of texture gets.
+    vec3 posDx = dFdx(FragPos);
+    vec3 posDy = dFdy(FragPos);
+    float uvLen = max(length(uvDx) + length(uvDy), 1e-6);
+    float yardsPerRepeat = (length(posDx) + length(posDy)) / uvLen;
+    // The authored 0.012 is a depth of about five centimetres at 4 yards a
+    // repeat; deeper than that only on smaller textures.
+    float pomScaleHere = min(pomScale, 0.05 / max(yardsPerRepeat, 1e-3));
+    float bumpScaleHere = mix(1.0, 0.35, smoothstep(8.0, 32.0, yardsPerRepeat));
+
     if (enablePOM != 0 && heightMapVariance > 0.001 && lodFactor < 0.99) {
         mat3 TBN_inv = transpose(TBN);
         vec3 viewDirWorld = normalize(viewPos.xyz - FragPos);
         vec3 viewDirTS = TBN_inv * viewDirWorld;
-        finalUV = parallaxOcclusionMap(TexCoord, viewDirTS, lodFactor);
+        finalUV = parallaxOcclusionMap(TexCoord, viewDirTS, lodFactor, pomScaleHere);
     }
 
     vec4 texColor = hasTexture != 0 ? textureGrad(uTexture, finalUV, uvDx, uvDy) : vec4(1.0);
@@ -255,7 +269,7 @@ void main() {
         if (!gl_FrontFacing) worldNormal = -worldNormal;
         // Linear blend: strength controls how much normal map detail shows,
         // LOD fades out at distance. Both multiply for smooth falloff.
-        float blend = clamp(normalMapStrength, 0.0, 1.0) * (1.0 - lodFactor);
+        float blend = clamp(normalMapStrength, 0.0, 1.0) * (1.0 - lodFactor) * bumpScaleHere;
         norm = normalize(mix(vertexNormal, worldNormal, blend));
     }
 

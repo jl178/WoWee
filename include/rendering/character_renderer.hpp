@@ -94,8 +94,6 @@ public:
     /// caller then plays Stand or Rise.
     void clearDeath(uint32_t instanceId);
     [[nodiscard]] bool isDeathLocked(uint32_t instanceId) const;
-    /// Play other animations on each arm alone, until the next playAnimation.
-    void setArmAnimations(uint32_t instanceId, uint32_t leftArmAnim, uint32_t rightArmAnim);
     /// Play a one-shot on the upper body only - the lower spine and all above
     /// it - over whatever the legs are playing (a run, a walk, a stand), the
     /// way the stock client sheathes while moving. Each arm plays its own
@@ -325,9 +323,6 @@ private:
         // Animation state
         uint32_t currentAnimationId = 0;
         int currentSequenceIndex = -1;  // Index into M2Model::sequences
-        int armSequenceIndex[2] = {-1, -1};  // Left, right arm on their own sequences; -1 follows the body
-        bool armSequenceLoops[2] = {false, false};  // Idle arm loops; a reaching arm holds its last frame
-        std::vector<int8_t> boneArm;  // Per bone: 0 left arm, 1 right arm, -1 neither; built by setArmAnimations
         // Upper-body overlay (playUpperBodyAnimation): a one-shot on the spine
         // and everything above it, over whatever the legs play, surviving
         // playAnimation. Index 0/1 the arms, 2 the torso; -1 = follows the body.

@@ -749,8 +749,9 @@ void AmbientSoundManager::updateWaterAmbience(float deltaTime, bool isSwimming) 
 
     wasSwimming_ = isSwimming;
 
-    // Play underwater sounds when swimming
-    if (isSwimming) {
+    // Play underwater sounds when swimming - unless the table's underwater
+    // loop is running, which is what the stock client plays down there.
+    if (isSwimming && underwaterLoopId_ == 0) {
         if (!underwaterSounds_.empty() && underwaterSounds_[0].loaded) {
             oceanLoopTime_ += deltaTime;
             // Play every 18 seconds for underwater ambience
@@ -771,6 +772,42 @@ void AmbientSoundManager::updateWaterAmbience(float deltaTime, bool isSwimming) 
     // BEACH zone ambience above, which is why this was never missed. Whoever
     // adds the proximity query can load Sound\\Ambience\\Water\\OceanDeepDay.wav
     // here again - keeping it in memory until then bought nothing.
+}
+
+void AmbientSoundManager::setUnderwaterLoop(const std::string& path, float volume) {
+    underwaterLoopVolume_ = volume;
+    // Called every frame, from before initialize() too; read once the assets
+    // are there to read it from.
+    if (!assets_) return;
+    if (path == underwaterLoop_.path && (underwaterLoopTried_ || path.empty())) return;
+    underwaterLoop_ = AmbientSample{};
+    underwaterLoop_.path = path;
+    underwaterLoop_.loaded = false;
+    underwaterLoopTried_ = true;
+    if (!path.empty()) loadSound(path, underwaterLoop_, assets_);
+    LOG_INFO("Ambient: underwater loop ", path.empty() ? std::string("(none)") : path,
+             underwaterLoop_.loaded ? "" : " - not loaded");
+}
+
+void AmbientSoundManager::setSubmerged(bool submerged) {
+    const float volume = underwaterLoopVolume_ * volumeScale_;
+    if (submerged == submerged_) {
+        if (underwaterLoopId_ != 0) AudioEngine::instance().setSoundVolume(underwaterLoopId_, volume);
+        return;
+    }
+    submerged_ = submerged;
+    if (submerged) {
+        if (!underwaterLoop_.loaded || underwaterLoop_.data.empty()) return;
+        // Outside the world bus: it is the sound of being under water, and
+        // muffling it again would bury it.
+        underwaterLoopId_ = AudioEngine::instance().playSound2DStoppable(
+            underwaterLoop_.data, volume, /*loop=*/true, 400.0f, SoundBus::Interface);
+        LOG_INFO("Ambient: under water, loop ", underwaterLoopId_ != 0 ? "started" : "failed");
+    } else if (underwaterLoopId_ != 0) {
+        AudioEngine::instance().fadeOutSound(underwaterLoopId_, 600.0f);
+        underwaterLoopId_ = 0;
+        LOG_INFO("Ambient: surfaced, loop fading");
+    }
 }
 
 void AmbientSoundManager::setAreaAmbience(const std::string& dayPath, const std::string& nightPath, float volume) {

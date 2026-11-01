@@ -171,14 +171,6 @@ inline std::vector<VkVertexInputAttributeDescription> positionPlusTwoFloatsAttrs
     };
 }
 
-/// vec3 position, then a vec2 texture coordinate. Stride 20.
-inline std::vector<VkVertexInputAttributeDescription> positionPlusUvAttrs() {
-    return {
-        {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0},
-        {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 3 * sizeof(float)},
-    };
-}
-
 /// Viewport and scissor set per command buffer rather than baked into the
 /// pipeline - which is every pipeline here, because the window can resize.
 inline std::vector<VkDynamicState> viewportAndScissorDynamic() {
@@ -277,6 +269,13 @@ VkPipelineLayout createPipelineLayout(VkDevice device,
 // Helper to create a descriptor set layout from bindings
 VkDescriptorSetLayout createDescriptorSetLayout(VkDevice device,
     const std::vector<VkDescriptorSetLayoutBinding>& bindings);
+
+// One set per texture for a sprite renderer: a layout with a single combined
+// image sampler at binding 0 for the fragment stage, a pool sized for exactly
+// `count` of them, and `count` sets allocated into `sets`. False when any step
+// fails; whatever was created is left in the outputs for the caller to destroy.
+bool createSamplerSets(VkDevice device, uint32_t count, VkDescriptorSetLayout& layout,
+    VkDescriptorPool& pool, VkDescriptorSet* sets);
 
 } // namespace rendering
 } // namespace wowee
