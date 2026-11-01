@@ -1232,6 +1232,8 @@ void WMORenderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tra
     inst.rotation = glm::vec3(0.0f);  // Euler angles not directly used, so zero them
 
     // Update model matrix and bounds
+    const glm::vec3 oldBoundsMin = inst.worldBoundsMin;
+    const glm::vec3 oldBoundsMax = inst.worldBoundsMax;
     inst.modelMatrix = transform;
     inst.invModelMatrix = glm::inverse(transform);
 
@@ -1245,7 +1247,12 @@ void WMORenderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tra
         }
     }
 
-    rebuildSpatialIndex();
+    // Refile this one instance. This used to rebuild the whole grid, every
+    // instance on the map, and a transport calls here every frame: with the
+    // elevators and boats a zone knows about that was 16ms a frame in
+    // Northshire, where none of them is in sight.
+    refileBounds(spatialGrid, oldBoundsMin, oldBoundsMax,
+                 inst.worldBoundsMin, inst.worldBoundsMax, inst.id);
 }
 
 void WMORenderer::addDoodadToInstance(uint32_t instanceId, uint32_t m2InstanceId, const glm::mat4& localTransform) {

@@ -1169,8 +1169,12 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     // remaining monolithic M2 CPU pass. Split dense scenes across a few pool
     // workers; the caller handles the final chunk so nested use from the M2
     // render worker cannot deadlock the shared pool.
+    // One chunk per worker plus this thread. Four was the cap, and on a
+    // twenty-core machine it left the visibility walk of tens of thousands
+    // of instances to four threads while the rest idled.
+    const uint32_t workerChunks = static_cast<uint32_t>(core::ThreadPool::frameWorkers().threadCount()) + 1;
     const uint32_t chunkCount = totalInstances >= 2048
-        ? std::min<uint32_t>(4, (totalInstances + 1023) / 1024)
+        ? std::min<uint32_t>(std::max(4u, workerChunks), (totalInstances + 1023) / 1024)
         : 1;
     std::vector<VisibleChunk> chunks(chunkCount);
     auto classifyRange = [&](uint32_t chunk, uint32_t begin, uint32_t end) {

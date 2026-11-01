@@ -824,16 +824,22 @@ void WidgetTree::markSubtreeHidden(uint32_t id) {
         w = get(id);
         if (!w || i >= w->children.size()) return;
         const uint32_t child = w->children[i];
-        if (Widget* c = get(child)) {
-            // Neither running nor drawn, so the draw-order pass skips it and
-            // nothing measures against it. Its rect is deliberately left
-            // alone, and its resolvedGen deliberately not stamped: a script
-            // that asks a hidden frame for its width still gets a fresh
-            // answer, because resolveWidget re-derives whatever the last full
-            // pass did not claim.
-            c->visibleChain = false;
-            c->visible = false;
-        }
+        Widget* c = get(child);
+        if (!c) continue;
+        // Neither running nor drawn, so the draw-order pass skips it and
+        // nothing measures against it. Its rect is deliberately left alone,
+        // and its resolvedGen deliberately not stamped: a script that asks a
+        // hidden frame for its width still gets a fresh answer, because
+        // resolveWidget re-derives whatever the last full pass did not claim.
+        //
+        // A child already off the chain was marked, with its own subtree,
+        // when it went off; widgets start off the chain, so one created
+        // under a hidden parent since then is covered too. 97% of the 28k
+        // widgets sit under hidden frames, and walking them again every
+        // frame was most of this pass.
+        if (!c->visibleChain && !c->visible) continue;
+        c->visibleChain = false;
+        c->visible = false;
         markSubtreeHidden(child);
     }
 }

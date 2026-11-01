@@ -51,6 +51,15 @@ struct TileCoord {
 /**
  * Loaded terrain tile data
  */
+/// One doodad to place: a model the tile loaded, and where.
+struct M2Placement {
+    uint32_t modelId;
+    uint32_t uniqueId;
+    glm::vec3 position;
+    glm::vec3 rotation;
+    float scale;
+};
+
 struct TerrainTile {
     TileCoord coord;
     pipeline::ADTTerrain terrain;
@@ -65,6 +74,12 @@ struct TerrainTile {
     std::vector<uint32_t> wmoUniqueIds;  // For WMO dedup cleanup on unload
     std::vector<uint32_t> m2InstanceIds;
     std::vector<uint32_t> doodadUniqueIds;  // For dedup cleanup on unload
+    // Ground clutter is kept as placements and only becomes renderer
+    // instances while the tile is within clutter range of the camera. See
+    // TerrainManager::streamGroundClutter.
+    std::vector<M2Placement> clutterPlacements;
+    std::vector<uint32_t> clutterInstanceIds;
+    size_t clutterNextIndex = 0;
 };
 
 /**
@@ -84,14 +99,10 @@ struct PendingTile {
     std::vector<M2Ready> m2Models;
 
     // M2 instance placement data (references modelId from m2Models)
-    struct M2Placement {
-        uint32_t modelId;
-        uint32_t uniqueId;
-        glm::vec3 position;
-        glm::vec3 rotation;
-        float scale;
-    };
+    using M2Placement = rendering::M2Placement;
     std::vector<M2Placement> m2Placements;
+    // Ground clutter placements, instantiated by distance rather than at load.
+    std::vector<M2Placement> clutterPlacements;
 
     // Pre-loaded WMO data
     struct WMOReady {
@@ -222,6 +233,9 @@ public:
      * @param y Tile Y coordinate
      */
     void unloadTile(int x, int y);
+    /// Create clutter instances for tiles near the camera, drop them for
+    /// tiles that have moved out of range. A frame's worth of work at a time.
+    void streamGroundClutter(const glm::vec3& cameraPos);
 
     void stopWorkers();  // Stop worker threads without restarting (for shutdown)
     void softReset();  // Clear tile data without stopping worker threads (non-blocking)
@@ -343,6 +357,12 @@ public:
      * Returns empty if terrain is not loaded at that position.
      */
     [[nodiscard]] std::optional<std::string> getDominantTextureAt(float glX, float glY) const;
+    /// TerrainType.SoundID for the ground under a point, as the stock client
+    /// derives it: the dominant layer's GroundEffectTexture row names a
+    /// TerrainType, whose SoundID keys FootstepTerrainLookup. 1 dirt, 2 metal,
+    /// 3 stone, 4 snow, 5 wood, 6 grass, 7 leaves, 8 sand, 9 soggy, 10 water.
+    /// Empty when the layer carries no effect or the tables are absent.
+    [[nodiscard]] std::optional<uint32_t> getTerrainSoundTypeAt(float glX, float glY) const;
 
     /**
      * Get statistics
@@ -538,7 +558,11 @@ private:
         std::array<uint32_t, 4> doodadIds{{0, 0, 0, 0}};
         std::array<uint32_t, 4> weights{{0, 0, 0, 0}};
         uint32_t density = 0;
+        uint32_t terrainType = 0;  ///< TerrainType.dbc id (GroundEffectTexture.Sound)
     };
+    std::unordered_map<uint32_t, uint32_t> terrainTypeSoundId_;  // TerrainType id -> SoundID
+    /// The layer with the most weight at a point, or null.
+    const pipeline::TextureLayer* dominantLayerAt(float glX, float glY, const TerrainTile** outTile) const;
     bool groundEffectsLoaded_ = false;
     std::unordered_map<uint32_t, GroundEffectEntry> groundEffectById_; // effectId -> config
     std::unordered_map<uint32_t, std::string> groundDoodadModelById_;  // doodadId -> model path
