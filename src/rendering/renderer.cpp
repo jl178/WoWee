@@ -4411,12 +4411,9 @@ void Renderer::renderReflectionPass() {
             skyParams.sunOcclusion = 1.0f;
             skySystem->render(currentCmd, reflDescSet, *camera, skyParams);
         }
-        if (terrainRenderer && terrainEnabled) {
-            terrainRenderer->render(currentCmd, reflDescSet, *camera);
-        }
-        if (wmoRenderer) {
-            wmoRenderer->render(currentCmd, reflDescSet, *camera);
-        }
+        // Sky only, as the 3.3.5 water reflects. Terrain and buildings were
+        // drawn a second time here, culled with the unmirrored camera, for
+        // 3.5ms a frame near water and a look the stock client never had.
     }
 
     waterRenderer->endReflectionPass(currentCmd);
