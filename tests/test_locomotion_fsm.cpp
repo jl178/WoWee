@@ -183,6 +183,11 @@ TEST_CASE("LocomotionFSM: leaving the ground without a jump is FALL", "[locomoti
     fsm.resolve(in, caps);
     in.grounded = false;
     in.jumping = false;
+    // A blip off the ground is not a fall.
+    in.deltaTime = 0.1f;
+    fsm.resolve(in, caps);
+    REQUIRE(fsm.getState() == LocomotionFSM::State::RUN);
+    in.deltaTime = 0.2f;
     auto out = fsm.resolve(in, caps);
     REQUIRE(out.animId == anim::FALL);
     REQUIRE(out.loop);
@@ -198,6 +203,7 @@ TEST_CASE("LocomotionFSM: a model without Fall uses the Jump loop", "[locomotion
     auto caps = makeLocoCaps();
     auto in = idle();
     in.grounded = false;
+    in.deltaTime = 0.3f;
     auto out = fsm.resolve(in, caps);
     REQUIRE(out.animId == anim::JUMP);
     CHECK(fsm.getState() == LocomotionFSM::State::FALL);
@@ -247,8 +253,10 @@ TEST_CASE("LocomotionFSM: landing while running without JumpLandRun runs at once
     in.moving = true;
     in.sprinting = true;
     in.grounded = false;
+    in.deltaTime = 0.3f;
     fsm.resolve(in, caps);
     in.grounded = true;
+    in.deltaTime = 0.016f;
     fsm.resolve(in, caps);  // the landing frame itself
     auto out = fsm.resolve(in, caps);
     REQUIRE(out.animId == anim::RUN);

@@ -1475,7 +1475,15 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
             for (int i = 0; i < game::GameHandler::SLOTS_PER_BAR; ++i) {
                 for (const bool bottom : {false, true}) {
                     if (!bindings.isCommandPressed((bottom ? bottomCommands : actionCommands)[i])) continue;
-                    const int page = bottom ? ActionBarPanel::kBottomLeftActionPage : actionBarPanel_.getMainActionBarPage();
+                    // A stance, form or stealth swaps the main bar to its bonus bar
+                    // (ActionBarFrame.lua: page 1 becomes NUM_ACTIONBAR_PAGES +
+                    // GetBonusBarOffset()). A warrior's abilities live in slots 72-83
+                    // in Battle Stance, so keys 1-3 read empty slots without this.
+                    int mainPage = actionBarPanel_.getMainActionBarPage();
+                    if (mainPage == 1 && gameHandler.getBonusActionBarOffset() > 0) {
+                        mainPage = 6 + static_cast<int>(gameHandler.getBonusActionBarOffset());
+                    }
+                    const int page = bottom ? ActionBarPanel::kBottomLeftActionPage : mainPage;
                     const int slot = ActionBarPanel::actionSlotForPage(page, i);
                     if (bar[slot].type == game::ActionBarSlot::SPELL && bar[slot].isReady()) {
                         gameHandler.castSpell(bar[slot].id, gameHandler.hasTarget() ? gameHandler.getTargetGuid() : 0);
