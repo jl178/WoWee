@@ -1246,7 +1246,10 @@ bool VkContext::createSwapchain(int width, int height) {
         .set_desired_format({.format = VK_FORMAT_B8G8R8A8_UNORM, .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
         .set_desired_extent(static_cast<uint32_t>(width), static_cast<uint32_t>(height))
         .set_image_usage_flags(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
-        .set_desired_min_image_count(2)
+        // Three under mailbox: the compositor holds one, one is being drawn,
+        // and acquiring the next must not wait for a release. Two made every
+        // acquire a vblank wait, which is what mailbox was chosen to avoid.
+        .set_desired_min_image_count(vsync_ ? 3 : 2)
         .set_old_swapchain(swapchain);
 
     presentsOffNativeTransform_ = requestIdentityTransform(builder, physicalDevice, surface);
@@ -2645,7 +2648,10 @@ bool VkContext::recreateSwapchain(int width, int height) {
         .set_desired_format({.format = VK_FORMAT_B8G8R8A8_UNORM, .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
         .set_desired_extent(static_cast<uint32_t>(width), static_cast<uint32_t>(height))
         .set_image_usage_flags(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
-        .set_desired_min_image_count(2)
+        // Three under mailbox: the compositor holds one, one is being drawn,
+        // and acquiring the next must not wait for a release. Two made every
+        // acquire a vblank wait, which is what mailbox was chosen to avoid.
+        .set_desired_min_image_count(vsync_ ? 3 : 2)
         .set_old_swapchain(oldSwapchain);
 
     presentsOffNativeTransform_ = requestIdentityTransform(builder, physicalDevice, surface);

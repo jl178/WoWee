@@ -98,6 +98,7 @@ WidgetTree::WidgetTree() {
 
 void WidgetTree::reset() {
     widgets_.clear();
+    idsByName_.clear();
     drawOrder_.clear();
     linkRects_.clear();
     scrollFrames_.clear();
@@ -137,6 +138,7 @@ uint32_t WidgetTree::create(WidgetKind kind, uint32_t parent, const std::string&
     w.id = id;
     w.kind = kind;
     w.name = name;
+    if (!name.empty()) idsByName_[name] = id;
     w.creationOrder = nextOrder_++;
     // Regions belong to the frame that made them; a widget with no parent
     // hangs off the screen, which is the root and sits above UIParent.
@@ -287,12 +289,12 @@ const std::vector<uint32_t>& WidgetTree::portraitsFor(const std::string& unit) c
 // during load, where the tree is full and each scan is longest.
 Widget* WidgetTree::findByName(std::string_view name) {
     if (name.empty()) return nullptr;
-    // Backwards, so the last frame to take the name is the one found - the
-    // same rule as the global it was published under.
-    for (auto& widget : std::views::reverse(widgets_)) {
-        if (widget.id != 0 && widget.name == name) return &widget;
-    }
-    return nullptr;
+    // The last frame to take the name is the one found - the same rule as
+    // the global it was published under; the index keeps that on insert.
+    auto it = idsByName_.find(std::string(name));
+    if (it == idsByName_.end()) return nullptr;
+    Widget* w = get(it->second);
+    return (w && w->id != 0 && w->name == name) ? w : nullptr;
 }
 
 const Widget* WidgetTree::findByName(std::string_view name) const {
