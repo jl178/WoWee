@@ -8,6 +8,7 @@
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "game/game_handler.hpp"
+#include "game/update_field_table.hpp"
 
 namespace wowee { namespace core {
 
@@ -47,7 +48,7 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
 
     // Player spawn callback (online mode) - spawn player models with correct textures
     gameHandler_.setPlayerSpawnCallback([this](uint64_t guid,
-                                              uint32_t /*displayId*/,
+                                              uint32_t displayId,
                                               uint8_t raceId,
                                               uint8_t genderId,
                                               uint32_t appearanceBytes,
@@ -56,11 +57,33 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
         LOG_DEBUG("playerSpawnCallback: guid=0x", std::hex, guid, std::dec,
                     " race=", static_cast<int>(raceId), " gender=", static_cast<int>(genderId),
                     " pos=(", x, ",", y, ",", z, ")");
+        // The display the player is drawn as. UNIT_FIELD_NATIVEDISPLAYID is
+        // the field after UNIT_FIELD_DISPLAYID in every expansion (MOUNT
+        // follows it at +2 in all four tables); when the two differ the unit
+        // is shapeshifted, polymorphed or in costume and is drawn as that
+        // creature display - the local player too. Players only: a corpse
+        // spawned through here carries neither field.
+        {
+            uint32_t morph = 0;
+            const uint16_t displayIdx = game::fieldIndex(game::UF::UNIT_FIELD_DISPLAYID);
+            auto entity = gameHandler_.getEntityManager().getEntity(guid);
+            if (entity && entity->getType() == game::ObjectType::PLAYER && displayIdx != 0xFFFF) {
+                const uint32_t native = entity->getField(static_cast<uint16_t>(displayIdx + 1));
+                if (displayId != 0 && native != 0 && displayId != native) morph = displayId;
+                entitySpawner_.setPlayerMorphDisplayId(guid, morph);
+            }
+        }
         // Skip local player - already spawned as the main character
         if (isLocalPlayerGuid_(guid)) return;
         if (entitySpawner_.isPlayerSpawned(guid)) return;
         if (entitySpawner_.isPlayerPending(guid)) return;
         entitySpawner_.queuePlayerSpawn(guid, raceId, genderId, appearanceBytes, facialFeatures, x, y, z, orientation);
+    });
+
+    // A corpse that is bones by now: its race and sex's death skeleton.
+    gameHandler_.setCorpseBonesCallback([this](uint64_t guid, uint8_t raceId, uint8_t genderId,
+                                               float x, float y, float z, float orientation) {
+        entitySpawner_.spawnCorpseBones(guid, raceId, genderId, x, y, z, orientation);
     });
 
     // Online player equipment callback - apply armor geosets/skin overlays per player instance.

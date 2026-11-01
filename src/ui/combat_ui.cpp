@@ -76,20 +76,21 @@ void CombatUI::playSoundsForNewChat(game::GameHandler& gameHandler) {
 // Floating Combat Text
 // ============================================================
 
-// Not gated, and there is no element to gate it on.
+// Two kinds of text, kept apart as 3.3.5 keeps them.
 //
-// FrameXML's own floating combat text lives in Blizzard_CombatText, which is
-// load-on-demand and reached from exactly one place: the float-mode dropdown in
-// the Interface Options combat panel, which calls UIParentLoadAddOn for it. So
-// it is absent until a player touches that setting, and drawing beside it after
-// that is a latent double rather than a live one.
+// Outgoing - the player's (and pet's) hits and heals landing on somebody else -
+// is the C client's world text over the target's head: a bare number, white for
+// a melee swing, yellow for a spell, green for a heal, a crit the same colour
+// popped large; misses as the bare word. No sign, no "!".
 //
-// Left alone deliberately. Covering it means a new UiElement and a suppression
-// entry, which is a decision about what this interface owns rather than a fix
-// to something broken - and the client's combat text is the one on screen today.
-void CombatUI::renderCombatText(game::GameHandler& gameHandler) {
+// Incoming - what happened to the player - is floating combat text, which is
+// Blizzard_CombatText's and drawn from COMBAT_TEXT_UPDATE. This client draws it
+// only as a stand-in while that addon is not loaded (drawIncoming), in the
+// addon's own words and colours: "-N" red, spell damage "-N" purple, "+N" green.
+void CombatUI::renderCombatText(game::GameHandler& gameHandler, bool drawIncoming) {
     const auto& entries = gameHandler.getCombatText();
     if (entries.empty()) return;
+    const uint64_t playerGuid = gameHandler.getPlayerGuid();
 
     auto* window = services_.window;
     if (!window) return;
@@ -155,9 +156,40 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler) {
     };
 
     for (const auto& entry : entries) {
-        if (!wanted(entry.type)) continue;
         const float alpha = 1.0f - (entry.age / game::CombatTextEntry::LIFETIME);
-        const bool outgoing = entry.isPlayerSource;
+        // Incoming is anything that landed on the player, or that belongs to
+        // the player with no one else in it (experience, honour, a proc).
+        const bool incoming =
+            entry.dstGuid == playerGuid ||
+            (entry.dstGuid == 0 && !entry.isPlayerSource) ||
+            entry.type == game::CombatTextEntry::XP_GAIN ||
+            entry.type == game::CombatTextEntry::HONOR_GAIN ||
+            entry.type == game::CombatTextEntry::PROC_TRIGGER;
+        if (incoming && !drawIncoming) continue;
+        // The fct* switches are the floating text's; the world text over a
+        // target was filtered by its own CVars when the line was raised.
+        if (incoming && !wanted(entry.type)) continue;
+        const bool outgoing = !incoming;
+        // A melee swing has no spell; everything else that hurts does.
+        const bool isSpell = entry.spellId != 0;
+
+        // Stock colours. World text: white melee, yellow spells, green heals.
+        // Floating text (Blizzard_CombatText's COMBAT_TEXT_TYPE_INFO): red
+        // damage, purple spell damage, green heals.
+        const ImVec4 worldMelee(1.0f, 1.0f, 1.0f, alpha);
+        const ImVec4 worldSpell(1.0f, 1.0f, 0.0f, alpha);
+        const ImVec4 worldHeal(0.0f, 1.0f, 0.0f, alpha);
+        const ImVec4 fctDamage(1.0f, 0.1f, 0.1f, alpha);
+        const ImVec4 fctSpell(0.79f, 0.3f, 0.85f, alpha);
+        const ImVec4 fctHeal(0.1f, 1.0f, 0.1f, alpha);
+        const ImVec4 fctMiss = isSpell ? ImVec4(1.0f, 1.0f, 1.0f, alpha) : fctDamage;
+        const ImVec4 worldMiss = isSpell ? worldSpell : worldMelee;
+        // A partial resist, block or absorb, in GlobalStrings' trailer words
+        // without the leading space; the whole one is the bare word.
+        const auto reduced = [&](char* out, size_t n, const char* word, const char* past) {
+            if (entry.amount > 0) snprintf(out, n, "(%d %s)", entry.amount, past);
+            else                  snprintf(out, n, "%s", word);
+        };
 
         // --- Format text and color (identical logic for both world and HUD paths) ---
         ImVec4 color;
@@ -165,77 +197,70 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler) {
         switch (entry.type) {
             case game::CombatTextEntry::MELEE_DAMAGE:
             case game::CombatTextEntry::SPELL_DAMAGE:
-                snprintf(text, sizeof(text), "-%d", entry.amount);
-                color = outgoing ?
-                    ImVec4(1.0f, 1.0f, 0.3f, alpha) :
-                    ImVec4(1.0f, 0.3f, 0.3f, alpha);
-                break;
             case game::CombatTextEntry::CRIT_DAMAGE:
-                snprintf(text, sizeof(text), "-%d!", entry.amount);
-                color = outgoing ?
-                    ImVec4(1.0f, 0.8f, 0.0f, alpha) :
-                    ImVec4(1.0f, 0.5f, 0.0f, alpha);
+                if (outgoing) {
+                    snprintf(text, sizeof(text), "%d", entry.amount);
+                    color = isSpell ? worldSpell : worldMelee;
+                } else {
+                    snprintf(text, sizeof(text), "-%d", entry.amount);
+                    color = isSpell ? fctSpell : fctDamage;
+                }
                 break;
             case game::CombatTextEntry::HEAL:
-                snprintf(text, sizeof(text), "+%d", entry.amount);
-                color = ImVec4(0.3f, 1.0f, 0.3f, alpha);
-                break;
             case game::CombatTextEntry::CRIT_HEAL:
-                snprintf(text, sizeof(text), "+%d!", entry.amount);
-                color = ImVec4(0.3f, 1.0f, 0.3f, alpha);
+                if (outgoing) {
+                    snprintf(text, sizeof(text), "%d", entry.amount);
+                    color = worldHeal;
+                } else {
+                    snprintf(text, sizeof(text), "+%d", entry.amount);
+                    color = fctHeal;
+                }
                 break;
+            // The bare GlobalStrings words (MISS, DODGE ... and COMBAT_TEXT_*
+            // for the floating text, which spell them the same), no "You".
             case game::CombatTextEntry::MISS:
                 snprintf(text, sizeof(text), "Miss");
-                color = ImVec4(0.7f, 0.7f, 0.7f, alpha);
+                color = outgoing ? worldMiss : fctMiss;
                 break;
             case game::CombatTextEntry::DODGE:
-                snprintf(text, sizeof(text), outgoing ? "Dodge" : "You Dodge");
-                color = outgoing ? ImVec4(0.6f, 0.6f, 0.6f, alpha)
-                                 : ImVec4(0.4f, 0.9f, 1.0f, alpha);
+                snprintf(text, sizeof(text), "Dodge");
+                color = outgoing ? worldMiss : fctMiss;
                 break;
             case game::CombatTextEntry::PARRY:
-                snprintf(text, sizeof(text), outgoing ? "Parry" : "You Parry");
-                color = outgoing ? ImVec4(0.6f, 0.6f, 0.6f, alpha)
-                                 : ImVec4(0.4f, 0.9f, 1.0f, alpha);
+                snprintf(text, sizeof(text), "Parry");
+                color = outgoing ? worldMiss : fctMiss;
                 break;
             case game::CombatTextEntry::BLOCK:
-                if (entry.amount > 0)
-                    snprintf(text, sizeof(text), outgoing ? "Block %d" : "You Block %d", entry.amount);
-                else
-                    snprintf(text, sizeof(text), outgoing ? "Block" : "You Block");
-                color = outgoing ? ImVec4(0.6f, 0.6f, 0.6f, alpha)
-                                 : ImVec4(0.4f, 0.9f, 1.0f, alpha);
+                reduced(text, sizeof(text), "Block", "blocked");
+                color = outgoing ? worldMiss : fctMiss;
                 break;
             case game::CombatTextEntry::EVADE:
-                snprintf(text, sizeof(text), outgoing ? "Evade" : "You Evade");
-                color = outgoing ? ImVec4(0.6f, 0.6f, 0.6f, alpha)
-                                 : ImVec4(0.4f, 0.9f, 1.0f, alpha);
+                snprintf(text, sizeof(text), "Evade");
+                color = outgoing ? worldMiss : fctMiss;
                 break;
             case game::CombatTextEntry::PERIODIC_DAMAGE:
-                snprintf(text, sizeof(text), "-%d", entry.amount);
-                color = outgoing ?
-                    ImVec4(1.0f, 0.9f, 0.3f, alpha) :
-                    ImVec4(1.0f, 0.4f, 0.4f, alpha);
+                if (outgoing) {
+                    snprintf(text, sizeof(text), "%d", entry.amount);
+                    color = worldSpell;
+                } else {
+                    snprintf(text, sizeof(text), "-%d", entry.amount);
+                    color = fctSpell;
+                }
                 break;
             case game::CombatTextEntry::PERIODIC_HEAL:
-                snprintf(text, sizeof(text), "+%d", entry.amount);
-                color = ImVec4(0.4f, 1.0f, 0.5f, alpha);
-                break;
-            case game::CombatTextEntry::ENVIRONMENTAL: {
-                const char* envLabel = "";
-                switch (entry.powerType) {
-                    case 0: envLabel = "Fatigue "; break;
-                    case 1: envLabel = "Drowning "; break;
-                    case 2: envLabel = ""; break;
-                    case 3: envLabel = "Lava "; break;
-                    case 4: envLabel = "Slime "; break;
-                    case 5: envLabel = "Fire "; break;
-                    default: envLabel = ""; break;
+                if (outgoing) {
+                    snprintf(text, sizeof(text), "%d", entry.amount);
+                    color = worldHeal;
+                } else {
+                    snprintf(text, sizeof(text), "+%d", entry.amount);
+                    color = fctHeal;
                 }
-                snprintf(text, sizeof(text), "%s-%d", envLabel, entry.amount);
-                color = ImVec4(0.9f, 0.5f, 0.2f, alpha);
                 break;
-            }
+            case game::CombatTextEntry::ENVIRONMENTAL:
+                // Falling, drowning, lava: plain damage to the floating text.
+                snprintf(text, sizeof(text), "-%d", entry.amount);
+                color = fctDamage;
+                break;
             case game::CombatTextEntry::ENERGIZE:
                 snprintf(text, sizeof(text), "+%d", entry.amount);
                 switch (entry.powerType) {
@@ -261,38 +286,25 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler) {
                 color = ImVec4(0.7f, 0.3f, 1.0f, alpha);
                 break;
             case game::CombatTextEntry::IMMUNE:
-                snprintf(text, sizeof(text), "Immune!");
-                color = ImVec4(0.9f, 0.9f, 0.9f, alpha);
+                snprintf(text, sizeof(text), "Immune");
+                color = outgoing ? worldMiss : fctMiss;
                 break;
             case game::CombatTextEntry::ABSORB:
-                if (entry.amount > 0)
-                    snprintf(text, sizeof(text), "Absorbed %d", entry.amount);
-                else
-                    snprintf(text, sizeof(text), "Absorbed");
-                color = ImVec4(0.5f, 0.8f, 1.0f, alpha);
+                reduced(text, sizeof(text), "Absorb", "absorbed");
+                color = outgoing ? worldMiss : (isSpell ? fctSpell : fctDamage);
                 break;
             case game::CombatTextEntry::RESIST:
-                if (entry.amount > 0)
-                    snprintf(text, sizeof(text), "Resisted %d", entry.amount);
-                else
-                    snprintf(text, sizeof(text), "Resisted");
-                color = ImVec4(0.7f, 0.7f, 0.7f, alpha);
+                reduced(text, sizeof(text), "Resist", "resisted");
+                color = outgoing ? worldMiss : (isSpell ? fctSpell : fctDamage);
                 break;
             case game::CombatTextEntry::DEFLECT:
-                snprintf(text, sizeof(text), outgoing ? "Deflect" : "You Deflect");
-                color = outgoing ? ImVec4(0.7f, 0.7f, 0.7f, alpha)
-                                 : ImVec4(0.5f, 0.9f, 1.0f, alpha);
+                snprintf(text, sizeof(text), "Deflect");
+                color = outgoing ? worldMiss : fctMiss;
                 break;
-            case game::CombatTextEntry::REFLECT: {
-                const std::string& reflectName = entry.spellId ? gameHandler.getSpellName(entry.spellId) : "";
-                if (!reflectName.empty())
-                    snprintf(text, sizeof(text), outgoing ? "Reflected: %s" : "Reflect: %s", reflectName.c_str());
-                else
-                    snprintf(text, sizeof(text), outgoing ? "Reflected" : "You Reflect");
-                color = outgoing ? ImVec4(0.85f, 0.75f, 1.0f, alpha)
-                                 : ImVec4(0.75f, 0.85f, 1.0f, alpha);
+            case game::CombatTextEntry::REFLECT:
+                snprintf(text, sizeof(text), "Reflect");
+                color = outgoing ? worldMiss : fctMiss;
                 break;
-            }
             case game::CombatTextEntry::PROC_TRIGGER: {
                 const std::string& procName = entry.spellId ? gameHandler.getSpellName(entry.spellId) : "";
                 if (!procName.empty())
@@ -341,20 +353,20 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler) {
                                  : ImVec4(1.0f, 0.1f, 0.1f, alpha);
                 break;
             case game::CombatTextEntry::HONOR_GAIN:
-                snprintf(text, sizeof(text), "+%d Honor", entry.amount);
-                color = ImVec4(1.0f, 0.85f, 0.0f, alpha);
+                // COMBAT_TEXT_HONOR_GAINED, in HONOR_GAINED's colour.
+                snprintf(text, sizeof(text), "Honor +%d", entry.amount);
+                color = ImVec4(0.1f, 0.1f, 1.0f, alpha);
                 break;
             case game::CombatTextEntry::GLANCING:
-                snprintf(text, sizeof(text), "~%d", entry.amount);
-                color = outgoing ?
-                    ImVec4(0.75f, 0.75f, 0.5f, alpha) :
-                    ImVec4(0.75f, 0.35f, 0.35f, alpha);
-                break;
             case game::CombatTextEntry::CRUSHING:
-                snprintf(text, sizeof(text), "%d!", entry.amount);
-                color = outgoing ?
-                    ImVec4(1.0f, 0.55f, 0.1f, alpha) :
-                    ImVec4(1.0f, 0.15f, 0.15f, alpha);
+                // A swing like any other in both kinds of text.
+                if (outgoing) {
+                    snprintf(text, sizeof(text), "%d", entry.amount);
+                    color = worldMelee;
+                } else {
+                    snprintf(text, sizeof(text), "-%d", entry.amount);
+                    color = fctDamage;
+                }
                 break;
             default:
                 snprintf(text, sizeof(text), "%d", entry.amount);

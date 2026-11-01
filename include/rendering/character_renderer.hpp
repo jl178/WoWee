@@ -151,11 +151,20 @@ public:
     /// currently playing; nullptr if the model has none for that sequence.
     [[nodiscard]] const std::vector<uint32_t>* getFootstepEventTimes(uint32_t instanceId) const;
     /// Called from update() on the main thread when a playing sequence passes
-    /// one of its $CSD sound events. position is the instance's render-space
-    /// position; soundEntryId is the event's SoundEntries id.
+    /// one of its sound-making events. position is the instance's
+    /// render-space position. eventTag is the event name as
+    /// pipeline::m2EventTag makes it: $CSD (soundEntryId is the event's
+    /// SoundEntries id), $FSD footfalls, $CSS / $CAH / $AHn / $FDn / $WNG
+    /// (soundEntryId 0) - and kAnimEventDeathStart, not an M2 event, when a
+    /// Death animation starts (the stock client's SoundDeathID moment).
     using AnimSoundEventCallback = std::function<void(uint32_t instanceId, uint32_t animationId,
-                                                      uint32_t soundEntryId, const glm::vec3& position)>;
+                                                      uint32_t eventTag, uint32_t soundEntryId,
+                                                      const glm::vec3& position)>;
+    static constexpr uint32_t kAnimEventDeathStart = 0x48544544u;  // "DETH"
     void setAnimSoundEventCallback(AnimSoundEventCallback cb) { animSoundEventCallback_ = std::move(cb); }
+    /// Whether the sequence the instance is playing now carries an event
+    /// with this tag ($CSS, $CAH ...).
+    [[nodiscard]] bool currentAnimHasEvent(uint32_t instanceId, uint32_t eventTag) const;
     [[nodiscard]] bool hasAnimation(uint32_t instanceId, uint32_t animationId) const;
     bool getAnimationSequences(uint32_t instanceId, std::vector<pipeline::M2Sequence>& out) const;
     bool getInstanceModelName(uint32_t instanceId, std::string& modelName) const;

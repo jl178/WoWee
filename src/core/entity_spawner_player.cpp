@@ -25,6 +25,7 @@
 #include "pipeline/item_textures.hpp"
 #include "pipeline/m2_asset_loader.hpp"
 #include "game/game_handler.hpp"
+#include "game/update_field_table.hpp"
 #include "game/game_services.hpp"
 #include "game/transport_manager.hpp"
 
@@ -786,9 +787,26 @@ void EntitySpawner::despawnPlayer(uint64_t guid) {
     if (!renderer_ || !renderer_->getCharacterRenderer()) return;
     pendingRemotePlayerMounts_.erase(guid);
     removeRemotePlayerMount(guid);
+    auto* charRenderer = renderer_->getCharacterRenderer();
+    // A form being built for this player, or drawn for it. The drawn one is
+    // removed here and the character's own instance put back in the map, so
+    // what follows frees the composite and never the shared creature model.
+    pendingPlayerMorphs_.erase(guid);
+    despawnCreature(morphSpawnKey(guid));
+    if (auto morph = playerMorphs_.find(guid); morph != playerMorphs_.end()) {
+        if (morph->second.instanceId != 0) charRenderer->removeInstance(morph->second.instanceId);
+        if (auto pit = playerInstances_.find(guid); pit != playerInstances_.end())
+            pit->second = morph->second.nativeInstanceId;
+        playerMorphs_.erase(morph);
+    }
+    unitPresentedAlpha_.erase(guid);
+    // A corpse's bones, drawn under the corpse guid.
+    if (auto bones = corpseBonesInstances_.find(guid); bones != corpseBonesInstances_.end()) {
+        charRenderer->removeInstance(bones->second);
+        corpseBonesInstances_.erase(bones);
+    }
     auto it = playerInstances_.find(guid);
     if (it == playerInstances_.end()) return;
-    auto* charRenderer = renderer_->getCharacterRenderer();
     // Player composites get a fresh model id per spawn (unlike displayId-keyed
     // creature models, which stay cached), so free the model with the instance.
     const uint32_t compositeModelId = charRenderer->getInstanceModelId(it->second);
@@ -1224,6 +1242,264 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
 
     LOG_DEBUG("Spawned gameobject: guid=0x", std::hex, guid, std::dec,
              " displayId=", displayId, " at (", x, ", ", y, ", ", z, ")");
+}
+
+// ---------------------------------------------------------------------------
+// Player morphs: shapeshift forms, polymorph, costumes
+//
+// The server says a unit looks like something else by putting another display
+// in UNIT_FIELD_DISPLAYID while UNIT_FIELD_NATIVEDISPLAYID keeps the character's
+// own. Creatures were already re-spawned on that; players - the local one and
+// everyone else - were drawn as themselves whatever it said, so there was no
+// bear, cat, travel or flight form, no ghost wolf, no sheep and no costume.
+// ---------------------------------------------------------------------------
+
+bool EntitySpawner::isLocalPlayer(uint64_t guid) const {
+    return gameHandler_ && guid != 0 && guid == gameHandler_->getPlayerGuid();
+}
+
+void EntitySpawner::setPlayerMorphDisplayId(uint64_t guid, uint32_t displayId) {
+    if (guid == 0) return;
+    auto current = playerMorphs_.find(guid);
+    const uint32_t drawn = current != playerMorphs_.end() ? current->second.displayId : 0;
+    if (displayId == drawn) {
+        // Back to what is already drawn before the other one was built
+        // (cat, then straight back to caster): drop that build.
+        if (pendingPlayerMorphs_.erase(guid)) despawnCreature(morphSpawnKey(guid));
+        return;
+    }
+    pendingPlayerMorphs_[guid] = displayId;
+}
+
+void EntitySpawner::applyPlayerMorph(uint64_t guid, uint32_t displayId, uint32_t morphInstanceId,
+                                     uint32_t nativeInstanceId, bool isLocal) {
+    auto* cr = renderer_->getCharacterRenderer();
+    // What is drawn now: the character, or the form this one replaces.
+    uint32_t shownInstance = nativeInstanceId;
+    uint32_t oldMorphInstance = 0;
+    if (auto old = playerMorphs_.find(guid); old != playerMorphs_.end()) {
+        oldMorphInstance = old->second.instanceId;
+        shownInstance = oldMorphInstance;
+    }
+
+    // Where the drawn model is, so the form appears in its place; the player
+    // sync (or the renderer, for the local player) keeps it there from now.
+    glm::vec3 pos(0.0f);
+    if (cr->getInstancePosition(shownInstance, pos)) cr->setInstancePosition(morphInstanceId, pos);
+    // At once, as the stock client does. The spawn path fades a creature in,
+    // and a form that faded in over a hidden character would blink out.
+    cr->setInstanceOpacity(morphInstanceId, 1.0f);
+
+    // Carry on with what the unit was doing: the same sequence where the form
+    // has it (Run, Stand, a swing), Stand where it does not, the death pose
+    // held.
+    uint32_t curAnim = 0;
+    float animTime = 0.0f, animDuration = 0.0f;
+    if (cr->isDeathLocked(shownInstance)) {
+        cr->playDeath(morphInstanceId, /*alreadyDead=*/true);
+    } else {
+        const bool known = cr->getAnimationState(shownInstance, curAnim, animTime, animDuration);
+        const uint32_t anim = (known && cr->hasAnimation(morphInstanceId, curAnim))
+            ? curAnim : static_cast<uint32_t>(rendering::anim::STAND);
+        cr->playAnimation(morphInstanceId, anim, /*loop=*/true);
+    }
+
+    if (isLocal) {
+        renderer_->setCharacterMorphInstance(morphInstanceId);
+    } else {
+        playerInstances_[guid] = morphInstanceId;
+        cr->setInstanceVisible(nativeInstanceId, false);
+        cr->setInstanceVisible(morphInstanceId, true);
+    }
+    if (oldMorphInstance != 0) cr->removeInstance(oldMorphInstance);
+    playerMorphs_[guid] = {.displayId = displayId, .instanceId = morphInstanceId,
+                           .nativeInstanceId = nativeInstanceId};
+    LOG_INFO("Player morph: guid=0x", std::hex, guid, std::dec, " displayId=", displayId,
+             " model=", getModelPathForDisplayId(displayId), isLocal ? " (local)" : "");
+}
+
+void EntitySpawner::clearPlayerMorph(uint64_t guid) {
+    auto it = playerMorphs_.find(guid);
+    if (it == playerMorphs_.end()) return;
+    const PlayerMorph morph = it->second;
+    playerMorphs_.erase(it);
+    auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    if (!cr) return;
+
+    const bool local = isLocalPlayer(guid);
+    const bool nativeAlive = local
+        ? (renderer_->getNativeCharacterInstanceId() == morph.nativeInstanceId)
+        : (playerInstances_.count(guid) != 0);
+    if (nativeAlive && morph.nativeInstanceId != 0) {
+        glm::vec3 pos(0.0f);
+        if (cr->getInstancePosition(morph.instanceId, pos))
+            cr->setInstancePosition(morph.nativeInstanceId, pos);
+        uint32_t curAnim = 0;
+        float animTime = 0.0f, animDuration = 0.0f;
+        if (cr->isDeathLocked(morph.instanceId)) {
+            cr->playDeath(morph.nativeInstanceId, /*alreadyDead=*/true);
+        } else if (!cr->isDeathLocked(morph.nativeInstanceId)) {
+            const bool known = cr->getAnimationState(morph.instanceId, curAnim, animTime, animDuration);
+            const uint32_t anim = (known && cr->hasAnimation(morph.nativeInstanceId, curAnim))
+                ? curAnim : static_cast<uint32_t>(rendering::anim::STAND);
+            cr->playAnimation(morph.nativeInstanceId, anim, /*loop=*/true);
+        }
+        if (local) {
+            renderer_->setCharacterMorphInstance(0);
+        } else {
+            playerInstances_[guid] = morph.nativeInstanceId;
+            cr->setInstanceVisible(morph.nativeInstanceId, true);
+        }
+    }
+    if (morph.instanceId != 0) cr->removeInstance(morph.instanceId);
+    LOG_INFO("Player morph cleared: guid=0x", std::hex, guid, std::dec,
+             " displayId=", morph.displayId, local ? " (local)" : "");
+}
+
+void EntitySpawner::processPendingPlayerMorphs() {
+    if (!renderer_ || !gameHandler_) return;
+    auto* cr = renderer_->getCharacterRenderer();
+    if (!cr) return;
+
+    // The local character's instance is replaced on a relog, a teleport
+    // reload or a race change. The form drawn for the old one is gone with
+    // it (the renderer handed its slot to the new character): drop the
+    // stale instance and build the form again for the new one.
+    if (const uint64_t self = gameHandler_->getPlayerGuid(); self != 0) {
+        auto local = playerMorphs_.find(self);
+        if (local != playerMorphs_.end() &&
+            renderer_->getNativeCharacterInstanceId() != local->second.nativeInstanceId) {
+            const PlayerMorph stale = local->second;
+            playerMorphs_.erase(local);
+            if (renderer_->getCharacterInstanceId() == stale.instanceId)
+                renderer_->setCharacterMorphInstance(0);
+            cr->removeInstance(stale.instanceId);
+            if (!pendingPlayerMorphs_.count(self)) pendingPlayerMorphs_[self] = stale.displayId;
+        }
+    }
+
+    // A drawn form keeps the character hidden underneath. Equipment changes
+    // re-attach weapons to it, and new attachments start out visible.
+    for (const auto& [guid, morph] : playerMorphs_) {
+        (void)guid;
+        if (morph.nativeInstanceId != 0) cr->setInstanceVisible(morph.nativeInstanceId, false);
+    }
+
+    for (auto it = pendingPlayerMorphs_.begin(); it != pendingPlayerMorphs_.end(); ) {
+        const uint64_t guid = it->first;
+        const uint32_t want = it->second;
+        const uint64_t key = morphSpawnKey(guid);
+        const bool local = isLocalPlayer(guid);
+
+        if (want == 0) {
+            despawnCreature(key);
+            clearPlayerMorph(guid);
+            it = pendingPlayerMorphs_.erase(it);
+            continue;
+        }
+        if (auto cur = playerMorphs_.find(guid);
+            cur != playerMorphs_.end() && cur->second.displayId == want) {
+            despawnCreature(key);
+            it = pendingPlayerMorphs_.erase(it);
+            continue;
+        }
+
+        // The character has to be drawn first: its spawn can still be
+        // queued when the fields that say it is shapeshifted arrive.
+        uint32_t nativeInstance = 0;
+        if (local) {
+            nativeInstance = renderer_->getNativeCharacterInstanceId();
+        } else if (auto app = onlinePlayerAppearance_.find(guid); app != onlinePlayerAppearance_.end()) {
+            nativeInstance = app->second.instanceId;
+        }
+        if (nativeInstance == 0) { ++it; continue; }
+
+        // Built: take it out of the creature maps and draw it for the player.
+        if (auto built = creatureDisplayIds_.find(key);
+            built != creatureDisplayIds_.end() && built->second == want &&
+            creatureInstances_.count(key)) {
+            const uint32_t morphInstance = releaseCreatureInstance(key);
+            if (morphInstance != 0) applyPlayerMorph(guid, want, morphInstance, nativeInstance, local);
+            it = pendingPlayerMorphs_.erase(it);
+            continue;
+        }
+        // Not drawable (no model, a helper display): stay as the character.
+        if (nonRenderableCreatureDisplayIds_.count(want) || creaturePermanentFailureGuids_.count(key)) {
+            LOG_WARNING("Player morph display ", want, " has no drawable model; guid=0x",
+                        std::hex, guid, std::dec);
+            despawnCreature(key);
+            clearPlayerMorph(guid);
+            it = pendingPlayerMorphs_.erase(it);
+            continue;
+        }
+        // Not asked for yet (or asked for another display): queue the build.
+        if (auto req = requestedCreatureDisplayIds_.find(key);
+            req == requestedCreatureDisplayIds_.end() || req->second != want) {
+            if (creatureInstances_.count(key)) despawnCreature(key);
+            float x = 0.0f, y = 0.0f, z = 0.0f, o = 0.0f, scale = 1.0f;
+            if (auto entity = gameHandler_->getEntityManager().getEntity(guid)) {
+                x = entity->getLatestX(); y = entity->getLatestY(); z = entity->getLatestZ();
+                o = entity->getOrientation();
+                // OBJECT_FIELD_SCALE_X; the display's own scale is applied by
+                // the creature path on top, as for any creature.
+                const uint16_t scaleIdx = game::fieldIndex(game::UF::OBJECT_FIELD_SCALE_X);
+                if (scaleIdx != 0xFFFF) {
+                    const uint32_t raw = entity->getField(scaleIdx);
+                    float s = 0.0f;
+                    std::memcpy(&s, &raw, sizeof(s));
+                    if (raw != 0 && s > 0.01f && s < 100.0f) scale = s;
+                }
+            }
+            queueCreatureSpawn(key, want, x, y, z, o, scale);
+        }
+        ++it;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Corpse bones
+// ---------------------------------------------------------------------------
+
+void EntitySpawner::spawnCorpseBones(uint64_t guid, uint8_t raceId, uint8_t genderId,
+                                     float x, float y, float z, float orientation) {
+    if (!renderer_ || !assetManager_ || guid == 0) return;
+    auto* cr = renderer_->getCharacterRenderer();
+    if (!cr || corpseBonesInstances_.count(guid)) return;
+    const auto race = static_cast<game::Race>(raceId);
+    if (!game::hasPlayerModel(race)) return;
+
+    // wow.exe: "World\Generic\PassiveDoodads\DeathSkeletons\%s%sDeathSkeleton.mdx",
+    // the race's file name and the sex - the same two words that name the
+    // character model, which is where they are taken from here.
+    const std::string charPath = game::getPlayerModelPath(
+        race, genderId == 1 ? game::Gender::FEMALE : game::Gender::MALE);
+    const size_t slash = charPath.find_last_of('\\');
+    const size_t dot = charPath.find_last_of('.');
+    if (slash == std::string::npos || dot == std::string::npos || dot <= slash) return;
+    const std::string path = "World\\Generic\\PassiveDoodads\\DeathSkeletons\\" +
+        charPath.substr(slash + 1, dot - slash - 1) + "DeathSkeleton.m2";
+
+    uint32_t modelId = 0;
+    if (auto cached = corpseBonesModels_.find(path); cached != corpseBonesModels_.end()) {
+        modelId = cached->second;
+    } else {
+        pipeline::M2Model model;
+        if (pipeline::loadM2WithSkin(*assetManager_, path, model) && model.isValid()) {
+            modelId = nextCreatureModelId_++;
+            if (!cr->loadModel(model, modelId)) modelId = 0;
+        }
+        if (modelId == 0) LOG_WARNING("Corpse bones model missing: ", path);
+        corpseBonesModels_[path] = modelId;
+    }
+    if (modelId == 0) return;
+
+    const glm::vec3 renderPos = core::coords::canonicalToRender(glm::vec3(x, y, z));
+    const uint32_t instanceId = cr->createInstance(
+        modelId, renderPos, glm::vec3(0.0f, 0.0f, orientation + glm::radians(90.0f)), 1.0f);
+    if (instanceId == 0) return;
+    cr->playAnimation(instanceId, rendering::anim::STAND, /*loop=*/true);
+    corpseBonesInstances_[guid] = instanceId;
+    LOG_DEBUG("Corpse bones: guid=0x", std::hex, guid, std::dec, " model=", path);
 }
 
 } // namespace core

@@ -22,9 +22,10 @@ layout(set = 0, binding = 0) uniform PerFrame {
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
 layout(push_constant) uniform Push {
-    vec4 cloudColor;      // xyz = DBC-derived base cloud color, w = unused
+    vec4 cloudColor;      // xyz = cloud sun colour (LightIntBand 10), w = unused
     vec4 sunDirDensity;   // xyz = sun direction, w = density
     vec4 windAndLight;    // x = windOffset, y = sunIntensity, z = ambient, w = unused
+    vec4 cloudShade;      // xyz = cloud emissive + ambient (LightIntBand 11-13)
 } push;
 
 layout(location = 0) in vec3 vWorldDir;
@@ -129,18 +130,13 @@ void main() {
     // Thick cores read darker - sunlight doesn't penetrate deep cloud
     float coreDarken = mix(1.0, 0.55, cumulus * cumulus);
 
-    vec3 baseColor = push.cloudColor.rgb;
-    vec3 shadowColor = baseColor * ambient * 0.75;
-    vec3 litColor = baseColor * (ambient + sunIntensity * 0.85 * sunUp);
+    // Light.dbc's cloud colours, which already follow the hour: the shaded
+    // side is the emissive and ambient, the sunlit side adds the cloud sun
+    // colour. No scattering glow or silver lining - the stock clouds have
+    // neither.
+    vec3 shadowColor = push.cloudShade.rgb;
+    vec3 litColor = clamp(shadowColor + push.cloudColor.rgb, 0.0, 1.0);
     vec3 cloudRgb = mix(shadowColor, litColor, shadow) * coreDarken;
-
-    // Forward scattering: thin cloud near the sun glows warm
-    float scatter = pow(sunView, 6.0) * sunIntensity * sunUp;
-    cloudRgb += vec3(1.0, 0.92, 0.82) * (1.0 - cumulus) * scatter * 0.9;
-
-    // Silver lining on sunlit cloud edges
-    float edge = smoothstep(0.0, 0.35, cloud) * (1.0 - smoothstep(0.35, 0.85, cloud));
-    cloudRgb += vec3(1.0, 0.95, 0.88) * edge * scatter * 0.6;
 
     // --- Edge softness for alpha ---
     float alpha = cloud * smoothstep(0.0, 0.25, cloud);

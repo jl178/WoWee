@@ -1720,8 +1720,18 @@ void GameHandler::registerRemainingOpcodes() {
             // leave-vehicle button, which redraws on VEHICLE_UPDATE, never
             // learned there was a vehicle to leave.
             fireAddonEvent("VEHICLE_UPDATE", {});
-            fireAddonEvent(nowInVehicle ? "UNIT_ENTERED_VEHICLE"
-                                        : "UNIT_EXITED_VEHICLE", {"player"});
+            // The -ING half first, as the real client sends it: the player
+            // frame and the main menu bar start their slide-out on it and
+            // finish on the -ED one. Its second argument is whether the vehicle
+            // brings its own bar (UnitHasVehicleUI, false here) and the third
+            // that bar's skin.
+            if (nowInVehicle) {
+                fireAddonEvent("UNIT_ENTERING_VEHICLE", {"player", kEventNil, ""});
+                fireAddonEvent("UNIT_ENTERED_VEHICLE", {"player", kEventNil});
+            } else {
+                fireAddonEvent("UNIT_EXITING_VEHICLE", {"player"});
+                fireAddonEvent("UNIT_EXITED_VEHICLE", {"player"});
+            }
             fireAddonEvent("UPDATE_BONUS_ACTIONBAR", {});
         }
     };
@@ -2622,6 +2632,7 @@ void GameHandler::registerRemainingOpcodes() {
         }
         if (wasRiding) {
             fireAddonEvent("VEHICLE_UPDATE", {});
+            fireAddonEvent("UNIT_EXITING_VEHICLE", {"player"});
             fireAddonEvent("UNIT_EXITED_VEHICLE", {"player"});
             fireAddonEvent("UPDATE_BONUS_ACTIONBAR", {});
         }

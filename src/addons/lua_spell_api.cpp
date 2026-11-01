@@ -288,7 +288,29 @@ static int lua_UnitAura(lua_State* L, bool wantBuff) {
             } else {
                 lua_pushnil(L);
             }
-            lua_pushboolean(L, 0);           // isStealable
+            // isStealable: what the target frame's Stealable border reads
+            // (targetframe.lua shows it for a buff when this is true and the
+            // target is not the player). The 3.3.5 client answers true for a
+            // helpful Magic aura on a unit the player can attack, and only for
+            // a player who can steal one - which is a mage with Spellsteal, so
+            // nobody else ever sees the border.
+            {
+                constexpr uint32_t kSpellsteal = 30449;
+                bool stealable = false;
+                if (!isDebuff && gh->getSpellDispelType(aura.spellId) == 1 &&
+                    gh->getKnownSpells().count(kSpellsteal) != 0) {
+                    const uint64_t unitGuid = resolveUnitGuid(gh, uidStr);
+                    if (unitGuid != 0 && unitGuid != gh->getPlayerGuid()) {
+                        auto ent = gh->getEntityManager().getEntity(unitGuid);
+                        if (ent && ent->isUnit()) {
+                            const auto* u = static_cast<const game::Unit*>(ent.get());
+                            stealable = u->isHostile() ||
+                                        !gh->isFriendlyFaction(u->getFactionTemplate());
+                        }
+                    }
+                }
+                lua_pushboolean(L, stealable ? 1 : 0);
+            }
             lua_pushboolean(L, 0);           // shouldConsolidate
             lua_pushnumber(L, aura.spellId); // spellId
             return 11;
@@ -414,6 +436,30 @@ static int lua_GetPlayerBuffDispelType(lua_State* L) {
         default: break;
     }
     return luaReturnNil(L);
+}
+
+// __WoweePlayerBuffInfo(slot) -> name, debuffType, spellId, timeLeft
+//
+// What GameTooltip:SetPlayerBuff needs from a 1.12 slot, in one call. Not a WoW
+// function: the real method is C and reads the aura directly, and the 1.12 API
+// has no getter that names the spell in a slot.
+static int lua_WoweePlayerBuffInfo(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const auto* aura = playerAuraAt(gh, static_cast<int>(luaL_optnumber(L, 1, -1)));
+    if (!aura || aura->spellId == 0) return luaReturnNil(L);
+    const std::string& name = gh->getSpellName(aura->spellId);
+    lua_pushstring(L, name.empty() ? "Unknown" : name.c_str());
+    switch (gh->getSpellDispelType(aura->spellId)) {
+        case 1:  lua_pushstring(L, "Magic");   break;
+        case 2:  lua_pushstring(L, "Curse");   break;
+        case 3:  lua_pushstring(L, "Disease"); break;
+        case 4:  lua_pushstring(L, "Poison");  break;
+        default: lua_pushnil(L);               break;
+    }
+    lua_pushnumber(L, aura->spellId);
+    if (aura->durationMs > 0) lua_pushnumber(L, aura->getRemainingMs(auraNowMs()) / 1000.0);
+    else                      lua_pushnil(L);
+    return 4;
 }
 
 // CancelPlayerBuff(slot)
@@ -827,6 +873,25 @@ static int lua_GetSpellDescription(lua_State* L) {
     // $d and the rest, so a duration read as "lasts X sec".
     const std::string desc =
         gh->formatSpellDescription(spellId, gh->getSpellDescription(spellId));
+    lua_pushstring(L, desc.c_str());
+    return 1;
+}
+
+// __WoweeAuraDescription(spellId) -> the aura tooltip's text, formatted.
+//
+// Not a WoW function: the real client fills the aura tooltip in C from
+// Spell.dbc's ToolTip column, and the GameTooltip methods that do that here
+// are written in Lua, so they need the text handed to them. The ToolTip column
+// is not the Description - Fortitude's buff reads "Increases Stamina by 165."
+// where its spell book entry describes casting it - and an aura with no ToolTip
+// text shows no description line at all, as it does in the real client.
+static int lua_WoweeAuraDescription(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    if (!gh) { lua_pushstring(L, ""); return 1; }
+    const uint32_t spellId = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
+    if (spellId == 0) { lua_pushstring(L, ""); return 1; }
+    const std::string desc =
+        gh->formatSpellDescription(spellId, gh->getSpellAuraDescription(spellId));
     lua_pushstring(L, desc.c_str());
     return 1;
 }
@@ -1277,6 +1342,7 @@ void registerSpellLuaAPI(lua_State* L) {
                 {"GetPlayerBuffApplications", lua_GetPlayerBuffApplications},
                 {"GetPlayerBuffDispelType",   lua_GetPlayerBuffDispelType},
                 {"CancelPlayerBuff",          lua_CancelPlayerBuff},
+                {"__WoweePlayerBuffInfo",     lua_WoweePlayerBuffInfo},
                 {"UnitCastingInfo",   lua_UnitCastingInfo},
                 {"UnitChannelInfo",   lua_UnitChannelInfo},
                 {"CastSpellByName",   lua_CastSpellByName},
@@ -1305,6 +1371,7 @@ void registerSpellLuaAPI(lua_State* L) {
                 {"GetSpellCooldown",  lua_GetSpellCooldown},
                 {"GetSpellPowerCost", lua_GetSpellPowerCost},
                 {"GetSpellDescription", lua_GetSpellDescription},
+                {"__WoweeAuraDescription", lua_WoweeAuraDescription},
                 {"GetEnchantInfo",     lua_GetEnchantInfo},
                 {"GetSpellInfo",      lua_GetSpellInfo},
                 {"GetSpellTexture",   lua_GetSpellTexture},

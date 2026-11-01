@@ -4800,6 +4800,10 @@ void SocialHandler::handleSetFactionStanding(network::Packet& packet) {
             // These events fire unconditionally on any rep change (not gated by callback).
             owner_.fireAddonEvent("UPDATE_FACTION", {});
             owner_.addLocalChatLine(ChatType::COMBAT_FACTION_CHANGE, std::string(buf));
+            // Blizzard_CombatText's "(Name +N)": the faction's name, then the
+            // signed change, which the addon prefixes with + itself.
+            owner_.fireCombatTextUpdate(owner_.getPlayerGuid(),
+                                        {"FACTION", name, std::to_string(delta)});
         }
     }
 }

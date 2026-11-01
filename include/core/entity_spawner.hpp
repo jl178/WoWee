@@ -24,7 +24,7 @@ namespace wowee {
 namespace rendering { class Renderer; }
 namespace pipeline { class AssetManager; struct M2Model; struct WMOModel; }
 namespace audio { enum class VoiceType; }
-namespace game { class GameHandler; }
+namespace game { class GameHandler; class Unit; }
 
 namespace core {
 
@@ -215,8 +215,13 @@ public:
     void syncUnitSheath(uint64_t guid, uint32_t instanceId);
     /// The loop another unit idles in: its drawn weapon's Ready stance while
     /// alive and in combat (UNIT_FLAG_IN_COMBAT), Stand otherwise - and Stand
-    /// for a model with no ready stance at all.
+    /// for a model with no ready stance at all. StealthStand while stealthed.
     uint32_t unitIdleAnim(uint64_t guid, uint32_t instanceId);
+    /// The stealth variant of a locomotion sequence (Walk -> StealthWalk,
+    /// Run -> StealthRun or StealthWalk) for a unit sent with the CREEP
+    /// visibility flag, where its model has one; the sequence itself
+    /// otherwise.
+    uint32_t unitMoveAnim(uint64_t guid, uint32_t instanceId, uint32_t moveAnim);
 
     // Mount
     void setMountDisplayId(uint32_t displayId) { pendingMountDisplayId_ = displayId; }
@@ -234,6 +239,27 @@ public:
         auto it = remotePlayerMounts_.find(guid);
         return it != remotePlayerMounts_.end() ? &it->second : nullptr;
     }
+
+    /// Draw a player - the local one included - as a creature display, or as
+    /// itself again given 0.
+    ///
+    /// This is what UNIT_FIELD_DISPLAYID differing from
+    /// UNIT_FIELD_NATIVEDISPLAYID means: a druid form, ghost wolf, a
+    /// polymorph, a costume. The display goes through the creature path
+    /// (CreatureDisplayInfo model, skins, scale, a humanoid's composited
+    /// look), and the resulting instance takes the player's place in
+    /// playerInstances_ - or the renderer's character slot - so movement,
+    /// melee, casts and deaths animate the form with its own sequences. The
+    /// character's own instance is kept hidden underneath, wearing its
+    /// equipment, so turning back is instant.
+    void setPlayerMorphDisplayId(uint64_t guid, uint32_t displayId);
+    [[nodiscard]] bool isPlayerMorphed(uint64_t guid) const { return playerMorphs_.count(guid) != 0; }
+
+    /// A player's corpse as stock draws it: the bones model for its race and
+    /// sex (World\Generic\PassiveDoodads\DeathSkeletons\<Race><Sex>DeathSkeleton,
+    /// the path wow.exe formats) once CORPSE_FLAG_BONES is set.
+    void spawnCorpseBones(uint64_t guid, uint8_t raceId, uint8_t genderId,
+                          float x, float y, float z, float orientation);
 
     // Local player GUID exclusion (EntitySpawner skips spawning the local player)
     void setLocalPlayerGuid(uint64_t guid) { spawnedPlayerGuid_ = guid; }
@@ -496,13 +522,26 @@ private:
     // Server waypoint scripts hold work/chop emotes for many seconds. Locomotion
     // temporarily overrides them, then the idle transition restores this loop.
     std::unordered_map<uint64_t, uint32_t> creatureActiveEmotes_;
-    std::unordered_map<uint64_t, bool> creatureWasStealthed_;
-    uint32_t stealthSyncFrameCounter_ = 0;  // throttles syncCreatureStealthVisuals()
+    /// The translucency last given to each unit's drawn instance, by guid:
+    /// which instance, and the alpha. Keyed with the instance so a morph
+    /// swap (stealth in cat form) is re-applied to the new model.
+    struct PresentedAlpha { uint32_t instanceId = 0; float alpha = 1.0f; };
+    std::unordered_map<uint64_t, PresentedAlpha> unitPresentedAlpha_;
+    uint32_t stealthSyncFrameCounter_ = 0;  // throttles syncUnitPresentation()
     std::unordered_set<uint64_t> creatureWeaponsAttached_;
     std::unordered_map<uint64_t, uint8_t> creatureWeaponAttachAttempts_;
     std::unordered_map<uint32_t, bool> modelIdIsWolfLike_;
 
-    void syncCreatureStealthVisuals();
+    /// Ghosts and stealthed units drawn see-through, every unit alike: a
+    /// player ghost (PLAYER_FLAGS_GHOST), a unit sent with the CREEP
+    /// visibility flag, or one carrying a stealth or invisibility aura
+    /// (SPELL_AURA_MOD_STEALTH 16, SPELL_AURA_MOD_INVISIBILITY 18).
+    void syncUnitPresentation();
+    float unitPresentationAlpha(uint64_t guid, const game::Unit& unit, bool isLocal);
+    void presentUnitAlpha(uint64_t guid, uint32_t instanceId, float alpha);
+    /// spellId -> whether one of its effects applies stealth or invisibility.
+    std::unordered_map<uint32_t, bool> stealthAuraSpells_;
+    bool isStealthAuraSpell(uint32_t spellId);
 
     // --- Creature async loads ---
     struct PreparedCreatureModel {
@@ -764,6 +803,34 @@ private:
     bool loadRemoteMountModel(uint32_t displayId, uint32_t& modelId,
                               std::string& modelPath, float& riderHeight);
     void removeRemotePlayerMount(uint64_t guid);
+
+    // --- Player morphs (shapeshift, polymorph, costume) ---
+    struct PlayerMorph {
+        uint32_t displayId = 0;
+        uint32_t instanceId = 0;        // the creature display drawn in the player's place
+        uint32_t nativeInstanceId = 0;  // the character's own instance, hidden meanwhile
+    };
+    std::unordered_map<uint64_t, PlayerMorph> playerMorphs_;
+    /// Wanted display per player (0 = turn back), until it is drawn.
+    std::unordered_map<uint64_t, uint32_t> pendingPlayerMorphs_;
+    /// The morph display is built by the ordinary creature spawn path under
+    /// this key - the player's guid with the top bit flipped, which no
+    /// player, creature, pet or object guid this client meets carries - and
+    /// taken out of the creature maps once it exists.
+    static constexpr uint64_t morphSpawnKey(uint64_t guid) { return guid ^ 0x8000000000000000ull; }
+    void processPendingPlayerMorphs();
+    void applyPlayerMorph(uint64_t guid, uint32_t displayId, uint32_t morphInstanceId,
+                          uint32_t nativeInstanceId, bool isLocal);
+    void clearPlayerMorph(uint64_t guid);
+    /// Forget a creature's bookkeeping and hand back its render instance
+    /// without removing it (0 if there is none). despawnCreature is this
+    /// plus removing the instance.
+    uint32_t releaseCreatureInstance(uint64_t guid);
+    bool isLocalPlayer(uint64_t guid) const;
+
+    // --- Corpse bones (other players' and the local player's) ---
+    std::unordered_map<uint64_t, uint32_t> corpseBonesInstances_;  // corpse guid -> instance
+    std::unordered_map<std::string, uint32_t> corpseBonesModels_;   // path -> model id (0 = missing)
 
     // --- Local player GUID exclusion ---
     uint64_t spawnedPlayerGuid_ = 0;

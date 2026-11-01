@@ -750,7 +750,10 @@ EntityController::PlayerFieldIndices EntityController::PlayerFieldIndices::resol
         // Mana is power index 0, so the flat modifier and its interrupted
         // (while-casting) twin sit at the base of each seven-wide array.
         .manaRegen = fieldIndex(UF::UNIT_FIELD_POWER_REGEN_FLAT_MODIFIER),
-        .manaRegenCasting = fieldIndex(UF::UNIT_FIELD_POWER_REGEN_INTERRUPTED_FLAT_MODIFIER)
+        .manaRegenCasting = fieldIndex(UF::UNIT_FIELD_POWER_REGEN_INTERRUPTED_FLAT_MODIFIER),
+        .baseAttackTime = fieldIndex(UF::UNIT_FIELD_BASEATTACKTIME),
+        .minDamage = fieldIndex(UF::UNIT_FIELD_MINDAMAGE),
+        .minRangedDamage = fieldIndex(UF::UNIT_FIELD_MINRANGEDDAMAGE)
     };
 }
 
@@ -1410,7 +1413,28 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
     bool rangedPowerChanged = false;
     bool resistancesChanged = false;
     bool spellBonusChanged = false;
+    // Weapon speed and damage. Present in a values update only when the server
+    // changed them, so being here is the change. paperdollframe.lua redraws its
+    // damage and speed lines on UNIT_DAMAGE, UNIT_ATTACK_SPEED and
+    // UNIT_RANGEDDAMAGE, and none of the three was ever sent.
+    bool attackSpeedChanged = false;
+    bool damageChanged = false;
+    bool rangedDamageChanged = false;
     for (const auto& [key, val] : fields) {
+        if (pfi.baseAttackTime != 0xFFFF && key >= pfi.baseAttackTime &&
+            key < pfi.baseAttackTime + 3) {
+            // Main hand, off hand, then ranged: the ranged speed is part of the
+            // ranged damage line rather than the melee speed one.
+            if (key == pfi.baseAttackTime + 2) rangedDamageChanged = true;
+            else                               attackSpeedChanged = true;
+        }
+        if (pfi.minDamage != 0xFFFF && key >= pfi.minDamage && key < pfi.minDamage + 4) {
+            damageChanged = true;  // min/max main hand, min/max off hand
+        }
+        if (pfi.minRangedDamage != 0xFFFF && key >= pfi.minRangedDamage &&
+            key < pfi.minRangedDamage + 2) {
+            rangedDamageChanged = true;
+        }
         if (key == pfi.xp) {
             owner_.playerXpRef() = val;
             if (!isCreate) {
@@ -1687,6 +1711,9 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
         // number on the sheet until the next login.
         if (resistancesChanged) pendingEvents_.emit("UNIT_RESISTANCES", {"player"});
         if (spellBonusChanged)  pendingEvents_.emit("PLAYER_DAMAGE_DONE_MODS", {"player"});
+        if (attackSpeedChanged)  pendingEvents_.emit("UNIT_ATTACK_SPEED", {"player"});
+        if (damageChanged)       pendingEvents_.emit("UNIT_DAMAGE", {"player"});
+        if (rangedDamageChanged) pendingEvents_.emit("UNIT_RANGEDDAMAGE", {"player"});
     }
     return slotsChanged;
 }
@@ -1699,7 +1726,16 @@ void EntityController::dispatchEntitySpawn(uint64_t guid, ObjectType objectType,
                                             const std::shared_ptr<Unit>& unit,
                                             bool isDead) {
     if (objectType == ObjectType::PLAYER && guid == owner_.getPlayerGuid()) {
-        return;  // Skip local player - spawned separately via spawnPlayerCharacter()
+        // The local character is spawned separately (spawnPlayerCharacter),
+        // but what it is drawn as is still this display: a druid form, ghost
+        // wolf, a polymorph or a costume. The callback reads the display
+        // against the native one and leaves the spawning alone.
+        if (owner_.playerSpawnCallbackRef()) {
+            owner_.playerSpawnCallbackRef()(guid, unit->getDisplayId(), 0, 0, 0, 0,
+                                            unit->getX(), unit->getY(), unit->getZ(),
+                                            unit->getOrientation());
+        }
+        return;
     }
     if (objectType == ObjectType::PLAYER) {
         if (owner_.playerSpawnCallbackRef()) {
@@ -2273,7 +2309,79 @@ void EntityController::onCreateCorpse(const UpdateBlock& block) {
         auto ownerHighIt = block.fields.find(ownerLowIdx + 1);
         uint32_t ownerHigh = (ownerHighIt != block.fields.end()) ? ownerHighIt->second : 0;
         uint64_t ownerGuid = (static_cast<uint64_t>(ownerHigh) << 32) | ownerLow;
-        if (ownerGuid == owner_.getPlayerGuid() || ownerLow == static_cast<uint32_t>(owner_.getPlayerGuid())) {
+        const bool ownCorpse = ownerGuid == owner_.getPlayerGuid() ||
+                               ownerLow == static_cast<uint32_t>(owner_.getPlayerGuid());
+
+        // What the corpse itself says it looks like, where this expansion's
+        // corpse fields are mapped (see UF::CORPSE_FIELD_DISPLAY_ID): the
+        // owner's race, sex and looks, what they wore, and whether it is bones
+        // by now. Stock draws a corpse from these alone - every player's, not
+        // only one's own.
+        const uint16_t displayIdx = fieldIndex(UF::CORPSE_FIELD_DISPLAY_ID);
+        auto corpseField = [&](uint16_t offset) -> uint32_t {
+            auto it = block.fields.find(static_cast<uint16_t>(displayIdx + offset));
+            return it != block.fields.end() ? it->second : 0u;
+        };
+        constexpr uint32_t kCorpseFlagBones = 0x01;
+        constexpr uint32_t kCorpseFlagHideHelm = 0x08;
+        constexpr uint32_t kCorpseFlagHideCloak = 0x10;
+        const bool haveCorpseFields = displayIdx != 0xFFFF;
+        const uint32_t corpseBytes1 = haveCorpseFields ? corpseField(20) : 0;
+        const uint32_t corpseBytes2 = haveCorpseFields ? corpseField(21) : 0;
+        const uint32_t corpseFlags = haveCorpseFields ? corpseField(23) : 0;
+        const uint8_t corpseRace = static_cast<uint8_t>((corpseBytes1 >> 8) & 0xFF);
+        const uint8_t corpseGender = static_cast<uint8_t>((corpseBytes1 >> 16) & 0xFF);
+        const glm::vec3 corpseCanonical = core::coords::serverToCanonical(
+            glm::vec3(block.x, block.y, block.z));
+        const float corpseOrientation = core::coords::serverToCanonicalYaw(block.orientation);
+
+        // Bones: a corpse whose owner was resurrected elsewhere (a spirit
+        // healer) or that has lain long enough. The death skeleton for the
+        // race and sex, never the character - and not a corpse to reclaim.
+        if (haveCorpseFields && (corpseFlags & kCorpseFlagBones) != 0 && corpseRace != 0) {
+            if (owner_.corpseBonesCallbackRef()) {
+                owner_.corpseBonesCallbackRef()(block.guid, corpseRace, corpseGender,
+                                                corpseCanonical.x, corpseCanonical.y,
+                                                corpseCanonical.z, corpseOrientation);
+            }
+            return;
+        }
+
+        // Another player's corpse: the character model it was, lying dead,
+        // in what it wore. Drawn the way one's own is - a player instance
+        // under the corpse guid, forced into the death pose.
+        if (!ownCorpse && haveCorpseFields && corpseRace != 0 && owner_.playerSpawnCallbackRef()) {
+            const uint32_t skin = (corpseBytes1 >> 24) & 0xFF;
+            const uint32_t face = corpseBytes2 & 0xFF;
+            const uint32_t hairStyle = (corpseBytes2 >> 8) & 0xFF;
+            const uint32_t hairColor = (corpseBytes2 >> 16) & 0xFF;
+            const uint8_t facialHair = static_cast<uint8_t>((corpseBytes2 >> 24) & 0xFF);
+            // PLAYER_BYTES order: skin, face, hair style, hair colour.
+            const uint32_t appearanceBytes = skin | (face << 8) | (hairStyle << 16) | (hairColor << 24);
+            owner_.playerSpawnCallbackRef()(block.guid, 0, corpseRace, corpseGender,
+                                            appearanceBytes, facialHair,
+                                            corpseCanonical.x, corpseCanonical.y,
+                                            corpseCanonical.z, corpseOrientation);
+            if (owner_.playerEquipmentCallbackRef()) {
+                std::array<uint32_t, 19> displayInfoIds{};
+                std::array<uint8_t, 19> inventoryTypes{};
+                for (uint16_t i = 0; i < 19; ++i) {
+                    const uint32_t v = corpseField(static_cast<uint16_t>(1 + i));
+                    displayInfoIds[i] = v & 0x00FFFFFFu;
+                    inventoryTypes[i] = static_cast<uint8_t>(v >> 24);
+                }
+                // The owner's helm and cloak display choices travel with it.
+                if (corpseFlags & kCorpseFlagHideHelm)  { displayInfoIds[0] = 0;  inventoryTypes[0] = 0; }
+                if (corpseFlags & kCorpseFlagHideCloak) { displayInfoIds[14] = 0; inventoryTypes[14] = 0; }
+                owner_.playerEquipmentCallbackRef()(block.guid, displayInfoIds, inventoryTypes);
+            }
+            if (owner_.npcDeathCallbackRef()) owner_.npcDeathCallbackRef()(block.guid);
+            LOG_DEBUG("Player corpse: guid=0x", std::hex, block.guid, " owner=0x", ownerGuid,
+                      std::dec, " race=", static_cast<int>(corpseRace));
+            return;
+        }
+
+        if (ownCorpse) {
             owner_.corpseGuidRef()  = block.guid;
             // The position only where the block actually carried one; a
             // stationary create may not, and overwriting a good answer from

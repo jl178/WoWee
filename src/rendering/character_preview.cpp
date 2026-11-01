@@ -763,10 +763,11 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
         }
     }
 
-    // Create instance at origin with current yaw
+    // Create instance at origin with current yaw (degrees here; the renderer
+    // takes radians)
     instanceId_ = charRenderer_->createInstance(PREVIEW_MODEL_ID,
         glm::vec3(0.0f, 0.0f, 0.0f),
-        glm::vec3(0.0f, 0.0f, modelYaw_),
+        glm::vec3(0.0f, 0.0f, glm::radians(modelYaw_)),
         1.0f);
 
     if (instanceId_ == 0) {
@@ -1208,7 +1209,7 @@ bool CharacterPreview::loadCreature(
 
     instanceId_ = charRenderer_->createInstance(PREVIEW_MODEL_ID,
         glm::vec3(0.0f, 0.0f, 0.0f),
-        glm::vec3(0.0f, 0.0f, modelYaw_),
+        glm::vec3(0.0f, 0.0f, glm::radians(modelYaw_)),
         1.0f);
     if (instanceId_ == 0) {
         LOG_WARNING("CharacterPreview: failed to create creature instance");
@@ -1647,11 +1648,8 @@ void CharacterPreview::setSceneParticles(const pipeline::M2Model* scene) {
     }
     if (!charRenderer_ || !renderTarget_ || !renderTarget_->isValid()) return;
     if (!sceneParticles_) {
-        auto* appRenderer = core::Application::getInstance().getRenderer();
-        VkDescriptorSetLayout perFrameLayout = appRenderer ? appRenderer->getPerFrameSetLayout()
-                                                           : VK_NULL_HANDLE;
         auto particles = std::make_unique<GlueSceneParticles>();
-        if (!particles->initialize(vkCtx_, perFrameLayout, renderTarget_->getRenderPass(),
+        if (!particles->initialize(vkCtx_, renderTarget_->getRenderPass(),
                                    renderTarget_->getSampleCount())) {
             return;
         }
@@ -1732,7 +1730,13 @@ void CharacterPreview::compositePass(VkCommandBuffer cmd, uint32_t frameIndex) {
 
     // The scene's particles last: they test depth against the scene and the
     // character but do not write it.
-    if (sceneParticles_) sceneParticles_->render(cmd, previewPerFrameSet_[fi], fi);
+    // Their own shaders and push constants; the per-frame set is not bound.
+    if (sceneParticles_ && !sceneParticles_->empty()) {
+        const glm::mat4 proj = camera_->getProjectionMatrix();
+        const float pixelsPerUnit = std::abs(proj[1][1]) * static_cast<float>(fboHeight_) * 0.5f;
+        sceneParticles_->render(cmd, proj * camera_->getViewMatrix(), camera_->getPosition(),
+                                pixelsPerUnit, fi);
+    }
 
     renderTarget_->endPass(cmd);
 
@@ -1740,9 +1744,9 @@ void CharacterPreview::compositePass(VkCommandBuffer cmd, uint32_t frameIndex) {
 }
 
 void CharacterPreview::rotate(float yawDelta) {
-    modelYaw_ += yawDelta;
+    modelYaw_ = std::fmod(modelYaw_ + yawDelta, 360.0f);
     if (instanceId_ > 0 && charRenderer_) {
-        charRenderer_->setInstanceRotation(instanceId_, glm::vec3(0.0f, 0.0f, modelYaw_));
+        charRenderer_->setInstanceRotation(instanceId_, glm::vec3(0.0f, 0.0f, glm::radians(modelYaw_)));
     }
 }
 
@@ -1818,7 +1822,7 @@ void CharacterPreview::applyPreviewView() {
         }
         if (instanceId_ > 0 && charRenderer_) {
             charRenderer_->setInstancePosition(instanceId_, previewStandPosition_);
-            charRenderer_->setInstanceRotation(instanceId_, glm::vec3(0.0f, 0.0f, modelYaw_));
+            charRenderer_->setInstanceRotation(instanceId_, glm::vec3(0.0f, 0.0f, glm::radians(modelYaw_)));
         }
         return;
     }
@@ -1898,7 +1902,7 @@ void CharacterPreview::applyPreviewView() {
 
     if (instanceId_ > 0 && charRenderer_) {
         charRenderer_->setInstancePosition(instanceId_, previewStandPosition_);
-        charRenderer_->setInstanceRotation(instanceId_, glm::vec3(0.0f, 0.0f, modelYaw_));
+        charRenderer_->setInstanceRotation(instanceId_, glm::vec3(0.0f, 0.0f, glm::radians(modelYaw_)));
     }
 }
 

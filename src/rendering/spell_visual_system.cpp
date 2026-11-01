@@ -468,6 +468,31 @@ bool SpellVisualSystem::hasVisual(uint32_t visualId) {
     return visuals_.count(visualId) != 0;
 }
 
+bool SpellVisualSystem::visualHasKitSound(uint32_t visualId, KitSoundMoment moment) {
+    if (visualId == 0 || !ensureLoaded()) return false;
+    auto vIt = visuals_.find(visualId);
+    if (vIt == visuals_.end()) return false;
+    const VisualRow& v = vIt->second;
+    auto kitSounds = [&](uint32_t kitId) {
+        if (kitId == 0) return false;
+        auto kIt = kits_.find(kitId);
+        return kIt != kits_.end() && kIt->second.soundId != 0;
+    };
+    switch (moment) {
+        case KitSoundMoment::PRECAST: return kitSounds(v.precastKit) || kitSounds(v.channelKit);
+        case KitSoundMoment::CAST:    return kitSounds(v.castKit) || (v.hasMissile && v.missileSound != 0);
+        case KitSoundMoment::IMPACT:  return kitSounds(v.impactKit) || kitSounds(v.targetImpactKit) ||
+                                             kitSounds(v.impactAreaKit);
+        case KitSoundMoment::ANY:
+            return kitSounds(v.precastKit) || kitSounds(v.channelKit) || kitSounds(v.castKit) ||
+                   (v.hasMissile && v.missileSound != 0) || kitSounds(v.impactKit) ||
+                   kitSounds(v.targetImpactKit) || kitSounds(v.impactAreaKit) ||
+                   kitSounds(v.instantAreaKit) || kitSounds(v.persistentAreaKit) ||
+                   kitSounds(v.stateKit) || kitSounds(v.stateDoneKit);
+    }
+    return false;
+}
+
 SpellVisualSystem::KitAnimations SpellVisualSystem::getKitAnimations(uint32_t visualId) {
     KitAnimations out;
     if (visualId == 0) return out;

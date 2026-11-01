@@ -2,7 +2,9 @@
 
 // FXAA 3.11, quality preset 12 (Timothy Lottes). Reads the resolved scene
 // colour and writes the smoothed result.
-// Push constants: rcpFrame, sharpness, intoxication (0 = sober, 1 = smashed).
+// Push constants: rcpFrame, sharpness, intoxication (0 = sober, 1 = smashed),
+// ghost (0 = alive, 1 = the spirit world's desaturation) and antialias (0 when
+// the pass runs only for the ghost world or intoxication, with FXAA off).
 //
 // A port of the reference rather than a paraphrase of it. The pass this
 // replaces had the shape of FXAA and two of its numbers wrong. Its
@@ -25,6 +27,8 @@ layout(push_constant) uniform PC {
     vec2  rcpFrame;
     float sharpness;    // 0 = no sharpen, 2 = max (matches FSR2 RCAS range)
     float intoxication;
+    float ghost;
+    float antialias;
 } pc;
 
 // The reference's default tuning. Subpix 0.75 is what it calls the default
@@ -42,6 +46,17 @@ const float kSearchStep[FXAA_SEARCH_STEPS] =
 
 float luma(vec3 c) {
     return dot(c, vec3(0.299, 0.587, 0.114));
+}
+
+// The spirit world: colour drained toward its own brightness and leaned cold,
+// a little blue. The stock client's ghost screen is this over Light.dbc's
+// death lighting; it replaces a flat blue-grey quad that dimmed and fogged
+// the whole picture rather than taking the colour out of it.
+vec3 ghostWorld(vec3 c) {
+    float g = clamp(pc.ghost, 0.0, 1.0);
+    if (g <= 0.0) return c;
+    vec3 grey = vec3(luma(c)) * vec3(0.88, 0.95, 1.10);
+    return mix(c, clamp(grey, 0.0, 1.0), 0.85 * g);
 }
 
 void main() {
@@ -67,6 +82,12 @@ void main() {
         rgbM = mix(rgbM, blur / 9.0, 0.75 * drunk);
     }
 
+    // FXAA switched off: the pass is here for the colour alone.
+    if (pc.antialias < 0.5) {
+        outColor = vec4(ghostWorld(rgbM), 1.0);
+        return;
+    }
+
     // --- Cardinal neighbours: is there an edge here at all ---
     float lumaM = luma(rgbM);
     float lumaN = luma(texture(uScene, uv + vec2( 0.0, -1.0) * rcp).rgb);
@@ -79,7 +100,7 @@ void main() {
     float range    = rangeMax - rangeMin;
 
     if (range < max(FXAA_EDGE_THRESHOLD_MIN, rangeMax * FXAA_EDGE_THRESHOLD)) {
-        outColor = vec4(rgbM, 1.0);
+        outColor = vec4(ghostWorld(rgbM), 1.0);
         return;
     }
 
@@ -187,5 +208,5 @@ void main() {
         fxaaResult = clamp(fxaaResult + s * (fxaaResult - blur), 0.0, 1.0);
     }
 
-    outColor = vec4(fxaaResult, 1.0);
+    outColor = vec4(ghostWorld(fxaaResult), 1.0);
 }

@@ -31,11 +31,22 @@ inline SkyParams skyParamsFromLighting(float timeOfDay, float gameTime,
     params.gameTime = gameTime;
     if (lighting) {
         params.directionalDir = lighting->directionalDir;
-        params.sunColor = lighting->diffuseColor;
+        // The sun sprite's own colour (LightIntBand 9), not the light it
+        // casts: the storm set's is a flat grey and the death set's black.
+        params.sunColor = lighting->sunColor;
         params.skyTopColor = lighting->skyTopColor;
         params.skyMiddleColor = lighting->skyMiddleColor;
         params.skyBand1Color = lighting->skyBand1Color;
         params.skyBand2Color = lighting->skyBand2Color;
+        params.skySmogColor = lighting->skySmogColor;
+        params.skyFogColor = lighting->skyFogColor;
+        params.cloudSunColor = lighting->cloudSunColor;
+        params.cloudEmissiveColor = lighting->cloudEmissiveColor;
+        params.cloudLayer1AmbientColor = lighting->cloudLayer1AmbientColor;
+        params.cloudLayer2AmbientColor = lighting->cloudLayer2AmbientColor;
+        params.celestialGlowThrough = lighting->celestialGlowThrough;
+        params.dayIntensity = lighting->dayIntensity;
+        params.nightIntensity = lighting->nightIntensity;
         params.cloudDensity = lighting->cloudDensity;
         params.fogDensity = lighting->fogDensity;
         params.horizonGlow = lighting->horizonGlow;

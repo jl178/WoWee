@@ -80,6 +80,7 @@ void AudioCoordinator::loadSoundData(pipeline::AssetManager* assets) {
         zoneMusic_ = std::make_unique<ZoneMusicController>(soundData_);
         ambienceKey_ = 0;
         if (npcVoiceManager_) npcVoiceManager_->setSoundData(&soundData_);
+        if (combatSoundManager_) combatSoundManager_->setSoundData(&soundData_);
     }
 }
 
@@ -185,6 +186,8 @@ void AudioCoordinator::onOriginalSoundtrackDisabled(game::ZoneManager* zm) {
 
 void AudioCoordinator::updateZoneAudio(const ZoneAudioContext& ctx) {
     float deltaTime = ctx.deltaTime;
+    // Blows still waiting on an attack animation's $CSS / $CAH event.
+    if (combatSoundManager_) combatSoundManager_->update();
     if (musicSwitchCooldown_ > 0.0f) {
         musicSwitchCooldown_ = std::max(0.0f, musicSwitchCooldown_ - deltaTime);
     }

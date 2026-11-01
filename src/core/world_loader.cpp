@@ -956,7 +956,9 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
                 }
                 // Remove old instance so we don't keep stale visuals.
                 if (renderer_ && renderer_->getCharacterRenderer()) {
-                    uint32_t oldInst = renderer_->getCharacterInstanceId();
+                    // The character's own instance; a form drawn over it is
+                    // removed by the spawner when it sees the character go.
+                    uint32_t oldInst = renderer_->getNativeCharacterInstanceId();
                     if (oldInst > 0) {
                         renderer_->setCharacterFollow(0);
                         if (auto* ac = renderer_->getAnimationController()) ac->clearMount();

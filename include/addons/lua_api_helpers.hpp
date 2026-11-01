@@ -935,6 +935,12 @@ void setCursorMoney(lua_State* L, uint64_t copper);
 /// came from a bag or nothing is held. One-based, as FrameXML numbers slots.
 int cursorEquipSlot();
 
+/// Put the cursor down completely - type, source, icon - and fire
+/// ITEM_LOCK_CHANGED for the slot it was picked up from, so the greyed square
+/// redraws unlocked. What ClearCursor does; for C++ drop paths outside
+/// lua_action_api.cpp that used to clear only cursorItemSlot().
+void clearCursor(lua_State* L);
+
 /// Whether the cursor is carrying an item that came out of the player's own
 /// inventory - a bag slot or a worn slot - rather than off an action bar.
 ///

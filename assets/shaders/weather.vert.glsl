@@ -13,13 +13,19 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 shadowParams;
 };
 
-layout(push_constant) uniform Push {
-    float particleSize;
-} push;
-
 layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec2 aUV;
+layout(location = 2) in float aAlpha;
+
+layout(location = 0) out vec2 vUV;
+layout(location = 1) out float vAlpha;
+layout(location = 2) out float vFog;
 
 void main() {
-    gl_PointSize = push.particleSize;
+    vUV = aUV;
+    vAlpha = aAlpha;
+    // The scene's linear fog, as everything else in the world takes it.
+    float dist = length(aPos - viewPos.xyz);
+    vFog = clamp((fogParams.y - dist) / max(fogParams.y - fogParams.x, 1e-3), 0.0, 1.0);
     gl_Position = projection * view * vec4(aPos, 1.0);
 }

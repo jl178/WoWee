@@ -585,23 +585,9 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.fogColor = glm::vec4(lp.fogColor, 1.0f);
         currentFrameData.fogParams.x = lp.fogStart;
         currentFrameData.fogParams.y = lp.fogEnd;
-
-        // Shift fog to blue when camera is significantly underwater (terrain water only).
-        if (waterRenderer && camera) {
-            glm::vec3 camPos = camera->getPosition();
-            auto waterH = waterRenderer->getNearestWaterHeightAt(camPos.x, camPos.y, camPos.z);
-            constexpr float MIN_SUBMERSION = 2.0f;
-            if (waterH && camPos.z < (*waterH - MIN_SUBMERSION)
-                       && !waterRenderer->isWmoWaterAt(camPos.x, camPos.y)) {
-                float depth = *waterH - camPos.z - MIN_SUBMERSION;
-                float blend = glm::clamp(1.0f - std::exp(-depth * 0.08f), 0.0f, 0.7f);
-                glm::vec3 underwaterFog(0.03f, 0.09f, 0.18f);
-                glm::vec3 blendedFog = glm::mix(lp.fogColor, underwaterFog, blend);
-                currentFrameData.fogColor = glm::vec4(blendedFog, 1.0f);
-                currentFrameData.fogParams.x = glm::mix(lp.fogStart, 20.0f, blend);
-                currentFrameData.fogParams.y = glm::mix(lp.fogEnd, 200.0f, blend);
-            }
-        }
+        // Under water the fog is Light.dbc's underwater set (LightingManager
+        // switches to it with the camera below the surface), so no fixed blue
+        // is mixed in here any more.
     }
 
     currentFrameData.lightSpaceMatrix = lightSpaceMatrix;
@@ -1531,10 +1517,28 @@ void Renderer::endFrame() {
 
 void Renderer::setCharacterFollow(uint32_t instanceId) {
     characterInstanceId = instanceId;
+    // A new character instance is the character itself; whatever morph was
+    // drawn for the old one went with it, and the spawner re-applies it.
+    nativeCharacterInstanceId_ = 0;
     if (cameraController && instanceId > 0) {
         cameraController->setFollowTarget(&characterPosition);
     }
     if (animationController_) animationController_->onCharacterFollow(instanceId);
+}
+
+void Renderer::setCharacterMorphInstance(uint32_t morphInstanceId) {
+    const uint32_t native = getNativeCharacterInstanceId();
+    if (native == 0 || !characterRenderer) return;
+    const uint32_t drawn = morphInstanceId != 0 ? morphInstanceId : native;
+    if (drawn == characterInstanceId) return;
+    nativeCharacterInstanceId_ = morphInstanceId != 0 ? native : 0;
+    characterRenderer->setInstanceVisible(native, morphInstanceId == 0);
+    characterInstanceId = drawn;
+    // The camera measures the pivot off the drawn model (a bear's head is not
+    // a tauren's), and hides it in first person; the animation controller
+    // re-probes which sequences the new model has.
+    if (cameraController) cameraController->setCharacterRenderer(characterRenderer.get(), drawn);
+    if (animationController_) animationController_->onCharacterFollow(drawn);
 }
 
 bool Renderer::startRecording(const std::string& path, std::string& error) {
@@ -2081,12 +2085,27 @@ void Renderer::update(float deltaTime) {
         const auto* gh = core::Application::getInstance().getGameHandler();
         uint32_t mapId    = gh ? gh->getCurrentMapId() : 0;
         float gameTime    = gh ? gh->getGameTime() : -1.0f;
-        bool isRaining    = gh ? gh->isRaining() : false;
-        bool isUnderwater = cameraController ? cameraController->isSwimming() : false;
+        // How far the lights lean toward their storm LightParams: the
+        // server's weather intensity for any weather it sends, as stock blends
+        // the storm set in by intensity rather than switching on rain.
+        const float stormIntensity =
+            (gh && gh->getWeatherKind() != game::WeatherKind::NONE)
+                ? glm::clamp(gh->getWeatherIntensity(), 0.0f, 1.0f) : 0.0f;
+        // Light.dbc's underwater slots while the camera is under the surface -
+        // not while the player swims at it, which kept the underwater set up
+        // with the camera in open air.
+        bool isUnderwater = false;
+        if (waterRenderer && camera) {
+            const glm::vec3 eye = camera->getPosition();
+            const auto surface = waterRenderer->getNearestWaterHeightAt(eye.x, eye.y, eye.z, 200.0f);
+            isUnderwater = surface && eye.z < *surface;
+        }
         const uint32_t resolvedZoneId = getCurrentZoneId();
 
+        // Light.dbc's death slot while the player is dead or a ghost.
+        lightingManager->setPlayerDead(gh && (gh->isPlayerDead() || gh->isPlayerGhost()));
         lightingManager->update(characterPosition, mapId, resolvedZoneId,
-                                gameTime, isRaining, isUnderwater);
+                                gameTime, stormIntensity, isUnderwater);
         // The water's Light.dbc colours and alphas follow the same lights.
         if (waterRenderer) waterRenderer->setLiquidLighting(lightingManager->getLightingParams());
 
@@ -2094,25 +2113,18 @@ void Renderer::update(float deltaTime) {
         if (weather && gh) {
             uint32_t wType = gh->getWeatherType();
             float wInt = gh->getWeatherIntensity();
-            if (resolvedZoneId == 10) {
-                // Duskwood's defining effect is persistent ground fog. Some
-                // realms continuously report rain here; suppress those streak
-                // particles so they cannot replace the authored fog ambience.
-                weather->setWeatherType(Weather::Type::NONE);
-                weather->setIntensity(0.0f);
-            } else {
-                // The server's weather, and only that: it sends fine weather
-                // on entering a zone that has none, and this drew a random
-                // zone weather over it. Fog and sandstorms have no particles
-                // here, so they draw nothing rather than rain.
-                switch (game::weatherKind(wType)) {
-                    case game::WeatherKind::RAIN:         weather->setWeatherType(Weather::Type::RAIN); break;
-                    case game::WeatherKind::SNOW:         weather->setWeatherType(Weather::Type::SNOW); break;
-                    case game::WeatherKind::THUNDERSTORM: weather->setWeatherType(Weather::Type::STORM); break;
-                    default:                              weather->setWeatherType(Weather::Type::NONE); break;
-                }
-                weather->setIntensity(weather->getWeatherType() == Weather::Type::NONE ? 0.0f : wInt);
+            // The server's weather, and only that, in every zone (Duskwood
+            // included: stock draws whatever rain the server sends there): it
+            // sends fine weather on entering a zone that has none, and this
+            // drew a random zone weather over it. Fog and sandstorms have no
+            // particles here, so they draw nothing rather than rain.
+            switch (game::weatherKind(wType)) {
+                case game::WeatherKind::RAIN:         weather->setWeatherType(Weather::Type::RAIN); break;
+                case game::WeatherKind::SNOW:         weather->setWeatherType(Weather::Type::SNOW); break;
+                case game::WeatherKind::THUNDERSTORM: weather->setWeatherType(Weather::Type::STORM); break;
+                default:                              weather->setWeatherType(Weather::Type::NONE); break;
             }
+            weather->setIntensity(weather->getWeatherType() == Weather::Type::NONE ? 0.0f : wInt);
             weather->setEnabled(!insideWmo);
 
             // Lightning flash disabled
@@ -2234,6 +2246,20 @@ void Renderer::update(float deltaTime) {
 
     // Update weather particles
     if (weather && camera) {
+        // Where rain lands, for its splashes: the highest of the terrain and
+        // any building floor under the drop (city streets are WMO floors).
+        if (!weather->hasGroundQuery()) {
+            weather->setGroundQuery([this](float x, float y, float fromZ) -> std::optional<float> {
+                std::optional<float> ground;
+                if (terrainManager) ground = terrainManager->getHeightAt(x, y);
+                if (wmoRenderer) {
+                    if (auto floor = wmoRenderer->getFloorHeight(x, y, fromZ)) {
+                        ground = ground ? std::max(*ground, *floor) : *floor;
+                    }
+                }
+                return ground;
+            });
+        }
         weather->update(*camera, deltaTime);
     }
 
@@ -3002,6 +3028,10 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
 
     // Cache ghost state for use in overlay and FXAA passes this frame.
     ghostMode_ = (gameHandler && gameHandler->isPlayerGhost());
+    // The spirit world's colour is a desaturation of the finished scene, in
+    // the post pass; the tint quad below only covers frames where that pass
+    // is not there yet (or could not be made).
+    if (postProcessPipeline_) postProcessPipeline_->setGhostDesaturation(ghostMode_ ? 1.0f : 0.0f);
 
     uint32_t frameIdx = vkCtx->getCurrentFrame();
     VkDescriptorSet perFrameSet = perFrameDescSets[frameIdx];
@@ -3043,7 +3073,10 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
     const bool drawSkyModels = skyboxModelRenderer_ && !skyLayers_.empty();
     float skyModelCoverage = 0.0f;
     if (lightingManager) {
-        for (const auto& layer : lightingManager->getSkyboxLayers()) skyModelCoverage += layer.weight;
+        // The night stars are drawn over the plain sky, not in place of it.
+        for (const auto& layer : lightingManager->getSkyboxLayers()) {
+            if (!layer.stars) skyModelCoverage += layer.weight;
+        }
     }
     const bool useOriginalSkybox = drawSkyModels && skyModelCoverage >= 0.5f;
 
@@ -3168,10 +3201,13 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
                     lightingManager ? &lightingManager->getLightingParams() : nullptr,
                     useOriginalSkybox);
                 skyParams.sunOcclusion = sunOcclusion_;
-                skySystem->render(cmd, perFrameSet, *camera, skyParams);
+                // Dome, then the client's sky models (and night stars), then
+                // the sun, moon and clouds over them.
+                skySystem->renderDome(cmd, perFrameSet, skyParams);
                 if (drawSkyModels) {
                     skyboxModelRenderer_->render(cmd, perFrameSet, *camera);
                 }
+                skySystem->renderOverlays(cmd, perFrameSet, *camera, skyParams);
             }
             vkEndCommandBuffer(cmd);
         }
@@ -3351,11 +3387,14 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
                 lightingManager ? &lightingManager->getLightingParams() : nullptr,
                 useOriginalSkybox);
             skyParams.sunOcclusion = sunOcclusion_;
-            skySystem->render(currentCmd, perFrameSet, *camera, skyParams);
+            // Dome, then the client's sky models (and night stars), then the
+            // sun, moon and clouds over them.
+            skySystem->renderDome(currentCmd, perFrameSet, skyParams);
             if (drawSkyModels) {
                 skyboxModelRenderer_->prepareRender(frameIdx, *camera);
                 skyboxModelRenderer_->render(currentCmd, perFrameSet, *camera);
             }
+            skySystem->renderOverlays(currentCmd, perFrameSet, *camera, skyParams);
             if (vkCtx) vkCtx->gpuMark(currentCmd, "sky");
         }
 
@@ -3652,8 +3691,12 @@ if (overlaySystem_ && waterRenderer && camera) {
 
 void Renderer::renderPostSceneOverlays(VkCommandBuffer cmd,
                                        game::GameHandler* gameHandler) {
-    // Ghost mode desaturation: cold blue-grey overlay when dead/ghost
-    if (ghostMode_ && overlaySystem_) {
+    // Ghost world: the post pass desaturates the scene (fxaa.frag ghostWorld).
+    // Only while that pass is missing - its first frame, or a device that
+    // could not make it - does the old cold blue-grey quad stand in.
+    const bool ghostInPostPass = postProcessPipeline_ &&
+                                 postProcessPipeline_->isGhostDesaturationActive();
+    if (ghostMode_ && !ghostInPostPass && overlaySystem_) {
         overlaySystem_->renderOverlay(glm::vec4(0.30f, 0.35f, 0.42f, 0.45f), cmd);
     }
 
@@ -4467,23 +4510,15 @@ void Renderer::renderReflectionPass() {
     if (canRenderScene) {
         // Render scene into reflection texture (sky + terrain + WMO only for perf)
         if (skySystem) {
-            rendering::SkyParams skyParams;
             auto* reflSkybox = skySystem->getSkybox();
-            skyParams.timeOfDay = lightingManager
-                ? lightingManager->getVisualTimeOfDayHours()
-                : (reflSkybox ? reflSkybox->getTimeOfDay() : 12.0f);
-            if (lightingManager) {
-                const auto& lp = lightingManager->getLightingParams();
-                skyParams.directionalDir = lp.directionalDir;
-                skyParams.sunColor = lp.diffuseColor;
-                skyParams.skyTopColor = lp.skyTopColor;
-                skyParams.skyMiddleColor = lp.skyMiddleColor;
-                skyParams.skyBand1Color = lp.skyBand1Color;
-                skyParams.skyBand2Color = lp.skyBand2Color;
-                skyParams.cloudDensity = lp.cloudDensity;
-                skyParams.fogDensity = lp.fogDensity;
-                skyParams.horizonGlow = lp.horizonGlow;
-            }
+            // The same parameters the main sky is drawn with, from the one
+            // helper, so the reflection's dome has the same bands and sun.
+            rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
+                lightingManager ? lightingManager->getVisualTimeOfDayHours()
+                                : (reflSkybox ? reflSkybox->getTimeOfDay() : 12.0f),
+                -1.0f, 0.0f,
+                lightingManager ? &lightingManager->getLightingParams() : nullptr,
+                false);
             // weatherIntensity left at default 0 for reflection pass (no game handler in scope)
             // A flare is an artefact of the lens, so it belongs to the camera
             // and not to what the water is showing it.

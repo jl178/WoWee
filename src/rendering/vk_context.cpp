@@ -559,6 +559,11 @@ bool VkContext::selectPhysicalDevice() {
     };
     samplerAnisotropySupported_ = enableIfPresent(&VkPhysicalDeviceFeatures::samplerAnisotropy);
     fillModeNonSolidSupported_ = enableIfPresent(&VkPhysicalDeviceFeatures::fillModeNonSolid);
+    // Every particle pass writes gl_PointSize above 1 (M2, smoke, the glue
+    // scenes'), which the spec allows only with largePoints enabled; without
+    // it the size is undefined. GlueSceneParticles reads the feature back and
+    // draws 1 px points on a device without it.
+    (void)enableIfPresent(&VkPhysicalDeviceFeatures::largePoints);
     fsr2ComputeFeaturesSupported_ =
         enableIfPresent(&VkPhysicalDeviceFeatures::shaderStorageImageWriteWithoutFormat) &&
         enableIfPresent(&VkPhysicalDeviceFeatures::shaderInt16);

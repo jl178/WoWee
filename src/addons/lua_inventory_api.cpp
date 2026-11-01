@@ -2950,8 +2950,10 @@ static int lua_PutItemInBag(lua_State* L) {
         if (fromIndex != bagIndex) {
             gh->swapBagSlots(fromIndex, bagIndex);
         }
-        cursorItemSlot() = {};
-        wowee::ui::frameXmlSetCursorItem(std::string());
+        // The whole cursor, not only cursorItemSlot: the item type and source
+        // stayed set, so IsInventoryItemLocked kept the bag slot greyed and no
+        // ITEM_LOCK_CHANGED ever told it otherwise.
+        clearCursor(L);
         lua_pushboolean(L, 1);
         return 1;
     }
@@ -2968,8 +2970,7 @@ static int lua_PutItemInBag(lua_State* L) {
     if (size == 0) {
         gh->swapContainerItems(srcBag, srcSlot, 0xFF,
                                static_cast<uint8_t>(game::slots::toWireSlot(inventoryId)));
-        cursorItemSlot() = {};
-        wowee::ui::frameXmlSetCursorItem(std::string());
+        clearCursor(L);
         lua_pushboolean(L, 1);
         return 1;
     }
@@ -2982,8 +2983,7 @@ static int lua_PutItemInBag(lua_State* L) {
         gh->swapContainerItems(srcBag, srcSlot,
                                static_cast<uint8_t>(container),
                                static_cast<uint8_t>(i));
-        cursorItemSlot() = {};
-        wowee::ui::frameXmlSetCursorItem(std::string());
+        clearCursor(L);
         lua_pushboolean(L, 1);
         return 1;
     }
@@ -3005,8 +3005,7 @@ static int lua_PutItemInBackpack(lua_State* L) {
     if (free >= 0) {
         gh->swapContainerItems(srcBag, srcSlot, 0xFF,
                                static_cast<uint8_t>(game::slots::backpackWireSlot(free)));
-        cursorItemSlot() = {};
-        wowee::ui::frameXmlSetCursorItem(std::string());
+        clearCursor(L);
     }
     lua_pushboolean(L, 1);
     return 1;

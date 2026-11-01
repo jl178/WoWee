@@ -319,7 +319,8 @@
     "ClassMask": 20,
     "ID": 0,
     "Name": 1,
-    "OrderIndex": 21
+    "OrderIndex": 21,
+    "SpellIconID": 18
   },
   "TaxiNodes": {
     "ID": 0,

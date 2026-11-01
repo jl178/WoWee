@@ -2290,9 +2290,25 @@ static int lua_UnitClassification(lua_State* L) {
 }
 
 // GetComboPoints("player"|"vehicle", "target") → number
+//
+// The points are on one unit: SMSG_UPDATE_COMBO_POINTS names the guid they are
+// built on, and in 3.3.5 they stay there when the player changes target. So
+// the count is the target's only while the target is that unit - a rogue who
+// tabs to a fresh mob sees an empty combo frame, and the five come back on
+// tabbing back. Answering the bare count lit the frame on any target.
 static int lua_GetComboPoints(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushnumber(L, gh ? gh->getComboPoints() : 0);
+    if (!gh) { lua_pushnumber(L, 0); return 1; }
+    std::string unit = luaL_optstring(L, 1, "player");
+    std::string target = luaL_optstring(L, 2, "target");
+    toLowerInPlace(unit);
+    toLowerInPlace(target);
+    // Only the player's own points are tracked; a vehicle's arrive on
+    // SMSG_PET_UPDATE_COMBO_POINTS, which this client does not read.
+    if (unit != "player") { lua_pushnumber(L, 0); return 1; }
+    const uint64_t targetGuid = resolveUnitGuid(gh, target);
+    const bool onIt = targetGuid != 0 && targetGuid == gh->getComboTarget();
+    lua_pushnumber(L, onIt ? gh->getComboPoints() : 0);
     return 1;
 }
 

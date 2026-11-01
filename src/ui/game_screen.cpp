@@ -357,15 +357,9 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     float prevAlpha = ImGui::GetStyle().Alpha;
     ImGui::GetStyle().Alpha = settingsPanel_.uiOpacity_;
 
-    // Sync minimap opacity with UI opacity
-    {
-        auto* renderer = services_.renderer;
-        if (renderer) {
-            if (auto* minimap = renderer->getMinimap()) {
-                minimap->setOpacity(settingsPanel_.uiOpacity_);
-            }
-        }
-    }
+    // UI opacity is not handed to the minimap. The terrain image in a stock
+    // client is always solid - there is no minimap opacity, only the border art
+    // around it - and passing this through made the map itself see-through.
 
     // Apply initial settings when renderer becomes available
     if (!settingsPanel_.minimapSettingsApplied_ || !settingsPanel_.zoneSettingsApplied_ ||
@@ -690,19 +684,18 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     // ---- New UI elements ----
     renderNameplates(gameHandler);  // player names always shown; NPC plates gated by the enemyplates row
     combatUI_.playSoundsForNewChat(gameHandler);
-    // Blizzard_CombatText draws its own once it is loaded, which happens the
-    // moment the player touches the float-mode dropdown in the interface
-    // options. Not an element gate: the addon arrives mid-run, so this has to
-    // keep drawing until it does and then stand down.
     offerPendingTradeItem(gameHandler);
-    // The master switch for the damage and healing numbers, which the panel
-    // offers and nothing read: the numbers were drawn whatever it said. Its own
-    // eighteen filters - fctDamage, fctHealing and the rest - are still
-    // unread; this is the one that turns the whole thing off, which is what
-    // somebody who does not want numbers over the world actually reaches for.
-    if (!frameXmlDrawsCombatText() &&
-        addons::storedCVarValue("enableCombatText", "1") != "0") {
-        combatUI_.renderCombatText(gameHandler);
+    // Two things, as in the stock client. The numbers over a target - the
+    // player's own hits and heals - are world text, always drawn here and
+    // filtered by CombatDamage / CombatHealing / CombatLogPeriodicSpells when
+    // they are raised. What happens to the player is floating combat text,
+    // Blizzard_CombatText's once it has loaded (it loads at world entry with
+    // enableCombatText on); until then, or without FrameXML, this client draws
+    // that half too, and enableCombatText turns it off.
+    {
+        const bool incoming = !frameXmlDrawsCombatText() &&
+            addons::storedCVarValue("enableCombatText", "1") != "0";
+        combatUI_.renderCombatText(gameHandler, incoming);
     }
     // FriendsFrame is what "social" suppresses, and its tabs are the friends
     // list, the who list and the guild roster. Only the friends list was gated
@@ -729,7 +722,8 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     // - its menu buttons are routed here through ShowUIPanel - and this window
     // draws nothing unless something opened it, so leaving it out cost every
     // setting in it the moment the menu was handed over.
-    renderWeatherOverlay(gameHandler);
+    // No screen-space weather layer: stock rain and snow are world particles
+    // only (rendering/weather.cpp), never drawn over the UI.
 
     // Always, because this is the only thing that feeds the map its data and
     // the only thing that draws it. Skipping it when FrameXML owns the map
@@ -855,20 +849,10 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         if (auto* ac = renderer->getAnimationController()) ac->setInCombat(gameHandler.isInCombat() &&
                               !gameHandler.isPlayerDead() &&
                               !gameHandler.isPlayerGhost());
-        if (auto* cr = renderer->getCharacterRenderer()) {
-            uint32_t charInstId = renderer->getCharacterInstanceId();
-            if (charInstId != 0) {
-                const bool isGhost = gameHandler.isPlayerGhost();
-                if (!ghostOpacityStateKnown_ ||
-                    ghostOpacityLastState_ != isGhost ||
-                    ghostOpacityLastInstanceId_ != charInstId) {
-                    cr->setInstanceOpacity(charInstId, isGhost ? 0.5f : 1.0f);
-                    ghostOpacityStateKnown_ = true;
-                    ghostOpacityLastState_ = isGhost;
-                    ghostOpacityLastInstanceId_ = charInstId;
-                }
-            }
-        }
+        // The character's translucency (ghost, stealth) is no longer set
+        // here: EntitySpawner::syncUnitPresentation sets it for every unit,
+        // the local player included. A second writer here put a stealthed
+        // cat form back to opaque whenever the drawn instance changed.
         static glm::vec3 targetGLPos;
         if (gameHandler.hasTarget()) {
             auto target = gameHandler.getTarget();

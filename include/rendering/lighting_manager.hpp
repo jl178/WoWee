@@ -33,6 +33,24 @@ struct LightingParams {
     float cloudDensity = 0.3f;                      // Cloud density/opacity
     float horizonGlow = 0.3f;                       // Horizon glow intensity
 
+    // The rest of the stock sky, LightIntBand channels 6-13 (see
+    // LightParamsProfile::ColorChannel). The dome runs top, middle, band 1,
+    // band 2, smog at the horizon and the raw fog colour below it - skyFogColor
+    // is channel 7 before the fog-to-sky blend fogColor gets.
+    glm::vec3 skySmogColor{0.7f, 0.7f, 0.7f};
+    glm::vec3 skyFogColor{0.5f, 0.6f, 0.7f};
+    glm::vec3 sunColor{1.0f, 0.97f, 0.87f};         // The sun sprite (ch 9)
+    glm::vec3 cloudSunColor{1.0f, 0.78f, 0.54f};    // Sunlit side of clouds (ch 10)
+    glm::vec3 cloudEmissiveColor{0.17f, 0.41f, 0.52f};   // ch 11
+    glm::vec3 cloudLayer1AmbientColor{0.0f};        // ch 12
+    glm::vec3 cloudLayer2AmbientColor{0.38f, 0.51f, 0.72f};  // ch 13
+    /// LightFloatBand channel 2: how much the sun and moon show through cloud.
+    float celestialGlowThrough = 1.0f;
+    /// world/dnc.db: how much of the day's sun and the night's moon and stars
+    /// are up, 0..1. Not blended per light - the same everywhere.
+    float dayIntensity = 1.0f;
+    float nightIntensity = 0.0f;
+
     // The liquid colours, LightIntBand channels 14-17: the stock water is this
     // colour, close (shallow) blending to far (deep) with the water's depth,
     // at LightParams' shallow/deep alpha. Defaults are LightParams 1 at noon.
@@ -84,11 +102,23 @@ struct LightVolume {
     float innerRadius = 0.0f;   // Full weight radius
     float outerRadius = 0.0f;   // Fade-out radius
 
-    // LightParams IDs for different conditions
-    uint32_t lightParamsId = 0;        // Normal/clear weather
-    uint32_t lightParamsIdRain = 0;    // Rainy weather
-    uint32_t lightParamsIdUnderwater = 0;
-    // More variants exist for phases, death, etc.
+    // Light.dbc's LightParams slots, columns 7-11 in every client from 1.12
+    // to 3.3.5. Read off the file (715 rows): column 8 equals column 10 in
+    // 409 of them and column 9 equals column 7 in 337 - each underwater set
+    // pairs with its weather set, and many zones have no storm set of their
+    // own. Light 1 (the map default) names 12 clear, 13 underwater, 10 storm,
+    // 13 storm underwater and 4 death; 4 is the ghost's blue world with
+    // LightSkybox 90 (DeathSkybox) and is the death slot of nearly every row.
+    // Columns 12-14 are almost all zero.
+    enum ParamsSlot : uint8_t {
+        SLOT_CLEAR = 0,
+        SLOT_CLEAR_UNDERWATER = 1,
+        SLOT_STORM = 2,
+        SLOT_STORM_UNDERWATER = 3,
+        SLOT_DEATH = 4,
+        SLOT_COUNT = 5
+    };
+    uint32_t lightParamsIds[SLOT_COUNT] = {};
 };
 
 /**
@@ -144,7 +174,17 @@ struct LightParamsProfile {
         SKY_BAND2_COLOR = 5,
         SKY_SMOG_COLOR = 6,
         FOG_COLOR = 7,
+        // Channel 8 is a neutral grey (77,77,77 at Stormwind noon): the shadow
+        // strength later clients split out as ShadowOpacity. 9-13 follow the
+        // order those clients name - sun, cloud sun, cloud emissive, cloud
+        // layer 1 and 2 ambient - and fit the file: the storm set's sun (9)
+        // is a flat grey and the death set's 9-13 are black.
+        SHADOW_COLOR = 8,
         SUN_COLOR = 9,
+        CLOUD_SUN_COLOR = 10,
+        CLOUD_EMISSIVE_COLOR = 11,
+        CLOUD_LAYER1_AMBIENT_COLOR = 12,
+        CLOUD_LAYER2_AMBIENT_COLOR = 13,
         // Liquid colours: close is the shallow end, far the deep end.
         OCEAN_CLOSE_COLOR = 14,
         OCEAN_FAR_COLOR = 15,
@@ -205,21 +245,29 @@ public:
      * Update lighting for current time and player position
      * @param playerPos Player world position
      * @param mapId Current map ID
-     * @param gameTime Optional game time in seconds (use -1 for real time)
-     * @param isRaining Whether it's raining
-     * @param isUnderwater Whether player is underwater
+     * @param gameTime Optional game time in hours (use -1 for real time)
+     * @param stormIntensity 0..1: how far each light leans from its clear
+     *        LightParams toward its storm set - the server's weather intensity
+     * @param isUnderwater Whether the camera is under water (the underwater
+     *        slots of Light.dbc)
      *
      * Note: WoW uses server-sent game time, not local PC time.
      * Pass gameTime from SMSG_LOGIN_SETTIMESPEED or similar.
      */
     void update(const glm::vec3& playerPos, uint32_t mapId, uint32_t zoneId,
                 float gameTime = -1.0f,
-                bool isRaining = false, bool isUnderwater = false);
+                float stormIntensity = 0.0f, bool isUnderwater = false);
 
     /**
      * Get current lighting parameters
      */
     [[nodiscard]] const LightingParams& getLightingParams() const { return currentParams_; }
+
+    /// While the player is dead or a ghost every light uses its death set,
+    /// Light.dbc column 11 (LightParams 4 nearly everywhere: the blue ghost
+    /// world under DeathSkybox). Cheap to call every frame.
+    void setPlayerDead(bool dead) { playerDead_ = dead; }
+    [[nodiscard]] bool isPlayerDead() const { return playerDead_; }
 
     /**
      * Set whether player is indoors (disables outdoor lighting)
@@ -249,6 +297,11 @@ public:
     struct SkyboxLayer {
         std::string path;
         float weight = 0.0f;   ///< 0..1: the share of the lights here that name it
+        /// The night stars (Environments\Stars\Stars.mdx, LightSkybox 4) the
+        /// stock client puts over a sky that has no model of its own, at
+        /// dnc.db's night intensity. Not a zone sky: it does not stand in for
+        /// the sun, moon and clouds the way a LightSkybox model does.
+        bool stars = false;
     };
     /// Every sky model the lights around the player name, heaviest first, at
     /// the weights those lights have - the same falloff the sky colours blend
@@ -298,9 +351,29 @@ private:
     [[nodiscard]] std::vector<WeightedVolume> findLightVolumes(const glm::vec3& playerPos, uint32_t mapId) const;
 
     /**
-     * Get LightParams ID based on conditions
+     * The LightParams row a volume uses for one of its slots, falling back to
+     * the clear set where a slot is empty or names a missing row.
      */
-    uint32_t selectLightParamsId(const LightVolume* volume, bool isRaining, bool isUnderwater) const;
+    uint32_t paramsIdForSlot(const LightVolume* volume, LightVolume::ParamsSlot slot) const;
+
+    /**
+     * The profile a volume shows right now: the death set while the player is
+     * dead, otherwise the clear (or underwater) set, with the storm set the
+     * heavier one once the weather is past half.
+     */
+    uint32_t dominantParamsId(const LightVolume* volume, float stormIntensity, bool isUnderwater) const;
+
+    /**
+     * One volume's lighting: the clear (or underwater) set blended toward its
+     * storm set by the weather intensity, or the death set while dead.
+     * False if the volume names no profile that exists.
+     */
+    bool sampleVolume(const LightVolume* volume, uint16_t timeHalfMinutes,
+                      float stormIntensity, bool isUnderwater, LightingParams& out) const;
+
+    /** world/dnc.db: the day and night intensity keys, by time of day. */
+    bool loadDayNightCycle(pipeline::AssetManager* assetManager);
+    void sampleDayNight(uint16_t timeHalfMinutes, float& day, float& night) const;
 
     /**
      * Sample lighting from LightParams profile
@@ -340,8 +413,17 @@ private:
     /// When update last ran, for smoothing by real time rather than by frame.
     std::chrono::steady_clock::time_point lastUpdate_{};
     bool isIndoors_ = false;
+    bool playerDead_ = false;
     float fogSkyBlend_ = 0.7f;
     float fogStrength_ = 0.4f;
+
+    /// dnc.db's keys: half-minutes since midnight, day and night intensity.
+    struct DayNightKey {
+        uint16_t time = 0;
+        float day = 0.0f;
+        float night = 0.0f;
+    };
+    std::vector<DayNightKey> dayNightKeys_;
 
     // Last values the sky diagnostic reported, so it prints on a change
     // rather than every frame. See LightingManager::update.

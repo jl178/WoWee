@@ -1105,10 +1105,14 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                 }
                 continue;
             }
-            if (!isFootfall && !isSound) continue;
+            // The other sound-making events ($CSS, $CAH, $AHn, $FDn, $WNG)
+            // ride in soundEvents with their tag and no sound id.
+            const uint32_t eventTag = rd32(base);
+            const bool isTagged = !isFootfall && !isSound && isM2SoundEventTag(eventTag);
+            if (!isFootfall && !isSound && !isTagged) continue;
             const uint32_t soundEntryId = isSound ? rd32(base + 4) : 0;
             if (isSound && soundEntryId == 0) continue;
-            if (isSound && model.soundEvents.empty()) {
+            if ((isSound || isTagged) && model.soundEvents.empty()) {
                 model.soundEvents.resize(model.sequences.size());
             }
             auto emit = [&](size_t s, uint32_t ts) {
@@ -1116,7 +1120,7 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                     model.footstepEventTimes[s].push_back(ts);
                     footfallStamps++;
                 } else {
-                    model.soundEvents[s].push_back({ts, soundEntryId});
+                    model.soundEvents[s].push_back({ts, soundEntryId, eventTag});
                     soundStamps++;
                 }
             };
@@ -2104,10 +2108,13 @@ void M2Loader::loadAnimFile(const std::vector<uint8_t>& m2Data,
             const size_t base = header.ofsEvents + e * 36;
             if (base + 36 > m2Data.size()) break;
             const bool isFootfall = std::memcmp(m2Data.data() + base, "$FSD", 4) == 0;
-            const bool isSound = std::memcmp(m2Data.data() + base, "$CSD", 4) == 0;
+            const uint32_t eventTag = rdM2(base);
+            const bool isSound = std::memcmp(m2Data.data() + base, "$CSD", 4) == 0 ||
+                                 (!isFootfall && pipeline::isM2SoundEventTag(eventTag));
             if (isFootfall ? haveFootfalls : (!isSound || haveSounds)) continue;
-            const uint32_t soundEntryId = rdM2(base + 4);
-            if (isSound && soundEntryId == 0) continue;
+            const bool isCsd = std::memcmp(m2Data.data() + base, "$CSD", 4) == 0;
+            const uint32_t soundEntryId = isCsd ? rdM2(base + 4) : 0;
+            if (isCsd && soundEntryId == 0) continue;
             const uint32_t nArrays = rdM2(base + 28);
             const uint32_t ofsArrays = rdM2(base + 32);
             if (sequenceIndex >= nArrays) continue;
@@ -2126,7 +2133,7 @@ void M2Loader::loadAnimFile(const std::vector<uint8_t>& m2Data,
                 if (model.soundEvents.size() < model.sequences.size())
                     model.soundEvents.resize(model.sequences.size());
                 auto& out = model.soundEvents[sequenceIndex];
-                for (uint32_t ts : stamps) out.push_back({ts, soundEntryId});
+                for (uint32_t ts : stamps) out.push_back({ts, soundEntryId, eventTag});
                 addedSounds = true;
             }
         }

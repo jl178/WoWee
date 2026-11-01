@@ -88,6 +88,42 @@ std::vector<glm::vec3> M2Renderer::getWaterVegetationPositions(const glm::vec3& 
     return result;
 }
 
+void M2Renderer::ensureParticleCurves(const M2ModelGPU& gpu) {
+    if (gpu.particleCurves.size() == gpu.particleEmitters.size()) return;
+    using Curve = M2ModelGPU::ParticleCurve;
+    std::vector<Curve> curves(gpu.particleEmitters.size());
+    for (size_t e = 0; e < curves.size(); ++e) {
+        const auto& em = gpu.particleEmitters[e];
+        for (int k = 0; k <= Curve::kSteps; ++k) {
+            const float r = static_cast<float>(k) / static_cast<float>(Curve::kSteps);
+            const glm::vec3 c = interpFBlockVec3(em.particleColor, r);
+            const float a = std::min(interpFBlockFloat(em.particleAlpha, r), 1.0f);
+            curves[e].colorAlpha[k] = glm::vec4(c, a);
+            curves[e].scale[k] = interpFBlockFloat(em.particleScale, r);
+        }
+    }
+    gpu.particleCurves = std::move(curves);
+}
+
+namespace {
+// Moves a particle t seconds along under gravity g (down world or bone Z) and
+// drag k, in closed form: what the per-frame step does in many small steps,
+// for a particle born part way through a step or warmed up on waking.
+inline void advanceParticle(glm::vec3& pos, glm::vec3& vel, float g, float k, float t) {
+    if (t <= 0.0f) return;
+    if (k > 1e-4f) {
+        const float e = std::exp(-k * t);
+        const glm::vec3 vInf(0.0f, 0.0f, -g / k);
+        pos += vInf * t + (vel - vInf) * ((1.0f - e) / k);
+        vel = vInf + (vel - vInf) * e;
+    } else {
+        pos += vel * t;
+        pos.z -= 0.5f * g * t * t;
+        vel.z -= g * t;
+    }
+}
+} // namespace
+
 void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt) {
     // Instance portals were skipped here and drawn as a glow sprite instead,
     // but the portal IS its emitters: InstancePortal.m2's only mesh has a
@@ -95,6 +131,8 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
     // bones spinning about the model X axis. Skipping them left nothing but
     // the sprite on the ground.
     if (inst.emissionStopped) return;
+    if (!(dt > 0.0f)) return;
+    ensureParticleCurves(gpu);
 
     if (inst.emitterAccumulators.size() != gpu.particleEmitters.size()) {
         inst.emitterAccumulators.resize(gpu.particleEmitters.size(), 0.0f);
@@ -103,6 +141,7 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
     std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
     std::uniform_real_distribution<float> distN(-1.0f, 1.0f);
     std::uniform_int_distribution<int> distTile;
+    const glm::mat4 identity(1.0f);
 
     for (size_t ei = 0; ei < gpu.particleEmitters.size(); ei++) {
         const auto& em = gpu.particleEmitters[ei];
@@ -154,40 +193,70 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
             continue;
         }
 
-        inst.emitterAccumulators[ei] += rate * dt;
+        // Only the last lifespan of the window can still be alive at its end,
+        // so a long window (a dormant emitter waking) spawns that and no more:
+        // the standing population, at evenly spread ages.
+        const float window = std::min(dt, life);
+        float& acc = inst.emitterAccumulators[ei];
+        acc += rate * window;
+        if (acc < 1.0f) continue;  // nothing due: skip the spawn-track sampling
 
-        while (inst.emitterAccumulators[ei] >= 1.0f && inst.particles.size() < MAX_M2_PARTICLES) {
-            inst.emitterAccumulators[ei] -= 1.0f;
+        // Everything below depends on the emitter and the clock, not on the
+        // particle: sampled once per emitter step, not once per particle.
+        const auto sample = [&](const pipeline::M2AnimationTrack& t) {
+            return interpFloat(t, inst.animTime, inst.globalSequenceTime,
+                               inst.currentSequenceIndex, gpu.globalSequenceDurations);
+        };
+        const float baseSpeed = sample(em.emissionSpeed);
+        const float vRange = sample(em.verticalRange);
+        const float hRange = sample(em.horizontalRange);
+        const float speedVar = sample(em.speedVariation);
+        const bool isSphere = (em.emitterType == kParticleEmitterSphere);
+        float rMax = 0.0f, rMin = 0.0f;
+        if (isSphere) {
+            const float areaL = sample(em.emissionAreaLength);
+            const float areaW = sample(em.emissionAreaWidth);
+            rMax = std::max(areaL, areaW);
+            rMin = std::min(areaL, areaW);
+        }
+        const float gravity = sample(em.gravity);
+        const float drag = em.drag;
+        const glm::mat4& boneXform = (em.bone < inst.boneMatrices.size())
+            ? inst.boneMatrices[em.bone] : identity;
+        const glm::mat4 xf = inst.modelMatrix * boneXform;
+        const glm::mat3 rotMat(xf);
+        const bool noTrail = (em.flags & kParticleFlagNoTrail) != 0;
+        const uint32_t tilesX = std::max<uint16_t>(em.textureCols, 1);
+        const uint32_t tilesY = std::max<uint16_t>(em.textureRows, 1);
+        const uint32_t totalTiles = tilesX * tilesY;
+        const bool randomTile = (em.flags & kParticleFlagTiled) && totalTiles > 1 &&
+                                (em.flags & kParticleFlagRandomized);
+        if (randomTile) {
+            distTile = std::uniform_int_distribution<int>(0, static_cast<int>(totalTiles - 1));
+        }
+        const float invRate = 1.0f / rate;
+
+        while (acc >= 1.0f && inst.particles.size() < MAX_M2_PARTICLES) {
+            acc -= 1.0f;
+            // Born when the accumulator crossed this integer: what is left
+            // of it is how far into the window that was from the end.
+            const float age = std::min(acc * invRate, window);
 
             M2Particle p;
             p.emitterIndex = static_cast<int>(ei);
-            p.life = 0.0f;
+            p.life = age;
             p.maxLife = life;
             p.tileIndex = 0.0f;
 
             // Position: emitter position transformed by bone matrix
             glm::vec3 localPos = em.position;
-            glm::mat4 boneXform = glm::mat4(1.0f);
-            if (em.bone < inst.boneMatrices.size()) {
-                boneXform = inst.boneMatrices[em.bone];
-            }
-            glm::vec3 worldPos = glm::vec3(inst.modelMatrix * boneXform * glm::vec4(localPos, 1.0f));
-            p.position = worldPos;
+            p.position = glm::vec3(xf * glm::vec4(localPos, 1.0f));
 
             // Velocity: emission speed in upward direction + random spread
-            float speed = interpFloat(em.emissionSpeed, inst.animTime, inst.globalSequenceTime,
-                                      inst.currentSequenceIndex, gpu.globalSequenceDurations);
-            float vRange = interpFloat(em.verticalRange, inst.animTime, inst.globalSequenceTime,
-                                       inst.currentSequenceIndex, gpu.globalSequenceDurations);
-            float hRange = interpFloat(em.horizontalRange, inst.animTime, inst.globalSequenceTime,
-                                       inst.currentSequenceIndex, gpu.globalSequenceDurations);
-
-            float speedVar = interpFloat(em.speedVariation, inst.animTime, inst.globalSequenceTime,
-                                         inst.currentSequenceIndex, gpu.globalSequenceDurations);
-            speed *= 1.0f + distN(particleRng_) * speedVar;
+            float speed = baseSpeed * (1.0f + distN(particleRng_) * speedVar);
 
             glm::vec3 dir;
-            if (em.emitterType == kParticleEmitterSphere) {
+            if (isSphere) {
                 // Sphere emitter: born on a shell around the emitter and sent
                 // out along the radius (in, for a negative speed). The polar
                 // angle from bone +Z spans +-verticalRange and the azimuth
@@ -201,20 +270,12 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
                 dir = glm::vec3(std::sin(theta) * std::sin(phi),
                                 std::sin(theta) * std::cos(phi),
                                 std::cos(theta));
-                const float areaL = interpFloat(em.emissionAreaLength, inst.animTime,
-                                                inst.globalSequenceTime, inst.currentSequenceIndex,
-                                                gpu.globalSequenceDurations);
-                const float areaW = interpFloat(em.emissionAreaWidth, inst.animTime,
-                                                inst.globalSequenceTime, inst.currentSequenceIndex,
-                                                gpu.globalSequenceDurations);
-                const float rMax = std::max(areaL, areaW);
-                const float rMin = std::min(areaL, areaW);
                 const float radius = (rMin > 0.0f)
                     ? rMin + (rMax - rMin) * dist01(particleRng_)
                     : rMax;
                 if (radius > 0.0f) {
                     localPos += dir * radius;
-                    p.position = glm::vec3(inst.modelMatrix * boneXform * glm::vec4(localPos, 1.0f));
+                    p.position = glm::vec3(xf * glm::vec4(localPos, 1.0f));
                 }
             } else {
                 // Emitter +Z tilted by a random polar angle within verticalRange
@@ -244,30 +305,25 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
                 }
             }
 
-            // Transform direction by bone + model orientation (rotation only)
-            glm::mat3 rotMat = glm::mat3(inst.modelMatrix * boneXform);
-            p.velocity = rotMat * localVel;
-
             // "Do not trail": the particle lives in its emitter bone's frame and
             // is carried by it, instead of being left behind in the world. The
             // portal's swirl is exactly this - particles drawn inward while the
             // bones turn them, so each one traces a spiral.
-            if (em.flags & kParticleFlagNoTrail) {
+            if (noTrail) {
                 p.followsEmitter = true;
+                advanceParticle(localPos, localVel, gravity, drag, age);
                 p.localPos = localPos;
                 p.localVel = localVel;
+                p.position = glm::vec3(xf * glm::vec4(localPos, 1.0f));
+                p.velocity = rotMat * localVel;
+            } else {
+                // Transform direction by bone + model orientation (rotation only)
+                p.velocity = rotMat * localVel;
+                advanceParticle(p.position, p.velocity, gravity, drag, age);
             }
 
-            const uint32_t tilesX = std::max<uint16_t>(em.textureCols, 1);
-            const uint32_t tilesY = std::max<uint16_t>(em.textureRows, 1);
-            const uint32_t totalTiles = tilesX * tilesY;
-            if ((em.flags & kParticleFlagTiled) && totalTiles > 1) {
-                if (em.flags & kParticleFlagRandomized) {
-                    distTile = std::uniform_int_distribution<int>(0, static_cast<int>(totalTiles - 1));
-                    p.tileIndex = static_cast<float>(distTile(particleRng_));
-                } else {
-                    p.tileIndex = 0.0f;
-                }
+            if (randomTile) {
+                p.tileIndex = static_cast<float>(distTile(particleRng_));
             }
 
             inst.particles.push_back(p);
@@ -289,68 +345,67 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
 }
 
 void M2Renderer::updateParticles(M2Instance& inst, float dt) {
-    if (!inst.cachedModel) return;
+    if (!inst.cachedModel || inst.particles.empty()) return;
     const auto& gpu = *inst.cachedModel;
 
-    // Hoist per-emitter gravity out of the per-particle loop. Gravity (and the
-    // emissionSpeed fallback) depends only on the emitter and animation time -
-    // not on the particle itself - so interpFloat was being re-evaluated for
-    // every particle even when 100s of particles share one emitter.
-    constexpr size_t kMaxStackEmitters = 16;
-    float emitterGravStack[kMaxStackEmitters];
-    std::vector<float> emitterGravHeap;
+    // Everything per emitter hoisted out of the per-particle loop: gravity
+    // (a track sample), the drag factor (an exp) and, for "do not trail"
+    // emitters, the model * bone matrix. Each was being worked out again for
+    // every particle, though hundreds share one emitter. The scratch array is
+    // the renderer's, so the step never allocates.
     const size_t numEm = gpu.particleEmitters.size();
-    float* emitterGrav = nullptr;
-    if (numEm > 0) {
-        if (numEm <= kMaxStackEmitters) {
-            emitterGrav = emitterGravStack;
-        } else {
-            emitterGravHeap.resize(numEm);
-            emitterGrav = emitterGravHeap.data();
-        }
-        for (size_t e = 0; e < numEm; ++e) {
-            const auto& pem = gpu.particleEmitters[e];
-            // Authored gravity as-is: 0 means no gravity (candle flames,
-            // chandelier glows), never a substituted fall.
-            emitterGrav[e] = interpFloat(pem.gravity,
-                                         inst.animTime, inst.globalSequenceTime,
-                                         inst.currentSequenceIndex, gpu.globalSequenceDurations);
+    auto& ems = particleStepScratch_;
+    if (ems.size() < numEm) ems.resize(numEm);
+    const glm::mat4 identity(1.0f);
+    for (size_t e = 0; e < numEm; ++e) {
+        const auto& pem = gpu.particleEmitters[e];
+        auto& s = ems[e];
+        // Authored gravity as-is: 0 means no gravity (candle flames,
+        // chandelier glows), never a substituted fall.
+        s.gravity = interpFloat(pem.gravity,
+                                inst.animTime, inst.globalSequenceTime,
+                                inst.currentSequenceIndex, gpu.globalSequenceDurations);
+        s.drag = pem.drag;
+        s.dragFactor = (pem.drag > 0.0f) ? std::exp(-pem.drag * dt) : 1.0f;
+        if (pem.flags & kParticleFlagNoTrail) {
+            const glm::mat4& boneXform = (pem.bone < inst.boneMatrices.size())
+                ? inst.boneMatrices[pem.bone] : identity;
+            s.xf = inst.modelMatrix * boneXform;
         }
     }
 
-    for (size_t i = 0; i < inst.particles.size(); ) {
-        auto& p = inst.particles[i];
+    M2Particle* const ps = inst.particles.data();
+    size_t n = inst.particles.size();
+    for (size_t i = 0; i < n; ) {
+        M2Particle& p = ps[i];
         p.life += dt;
         if (p.life >= p.maxLife) {
-            // Swap-and-pop removal
-            inst.particles[i] = inst.particles.back();
-            inst.particles.pop_back();
+            // Swap-and-pop removal; the vector is shrunk once at the end.
+            p = ps[n - 1];
+            --n;
             continue;
         }
-        if (p.followsEmitter && p.emitterIndex >= 0 &&
-            static_cast<size_t>(p.emitterIndex) < numEm) {
-            // Stepped in the emitter bone's frame, then placed through the
-            // bone as it is now - see kParticleFlagNoTrail.
-            const auto& pem = gpu.particleEmitters[p.emitterIndex];
-            p.localVel.z -= emitterGrav[p.emitterIndex] * dt;
-            if (pem.drag > 0.0f) p.localVel *= std::exp(-pem.drag * dt);
-            p.localPos += p.localVel * dt;
-            const glm::mat4 boneXform = (pem.bone < inst.boneMatrices.size())
-                ? inst.boneMatrices[pem.bone] : glm::mat4(1.0f);
-            const glm::mat4 xf = inst.modelMatrix * boneXform;
-            p.position = glm::vec3(xf * glm::vec4(p.localPos, 1.0f));
-            p.velocity = glm::mat3(xf) * p.localVel;
-            i++;
-            continue;
-        }
-        if (p.emitterIndex >= 0 && static_cast<size_t>(p.emitterIndex) < numEm) {
-            p.velocity.z -= emitterGrav[p.emitterIndex] * dt;
-            const float drag = gpu.particleEmitters[p.emitterIndex].drag;
-            if (drag > 0.0f) p.velocity *= std::exp(-drag * dt);
+        const size_t e = static_cast<size_t>(static_cast<uint32_t>(p.emitterIndex));
+        if (e < numEm) {
+            const auto& s = ems[e];
+            if (p.followsEmitter) {
+                // Stepped in the emitter bone's frame, then placed through the
+                // bone as it is now - see kParticleFlagNoTrail.
+                p.localVel.z -= s.gravity * dt;
+                p.localVel *= s.dragFactor;
+                p.localPos += p.localVel * dt;
+                p.position = glm::vec3(s.xf * glm::vec4(p.localPos, 1.0f));
+                p.velocity = glm::mat3(s.xf) * p.localVel;
+                ++i;
+                continue;
+            }
+            p.velocity.z -= s.gravity * dt;
+            p.velocity *= s.dragFactor;
         }
         p.position += p.velocity * dt;
-        i++;
+        ++i;
     }
+    inst.particles.resize(n);
 }
 
 // ---------------------------------------------------------------------------
@@ -737,6 +792,16 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
         float cachedTilesFloat = 1.0f;
         bool cachedIsTiled = false;
         float invAnimMs = 1.0f / 1000.0f;
+        // The emitter's lifetime curves as tables (see M2ModelGPU::ParticleCurve);
+        // null only if the update never emitted for this model, when the
+        // FBlocks are walked as before.
+        using Curve = M2ModelGPU::ParticleCurve;
+        const bool haveCurves = gpu.particleCurves.size() == gpu.particleEmitters.size();
+        const Curve* cachedCurve = nullptr;
+        // The model's class, the same for every particle it has.
+        const bool isFlameFixture = gpu.isLanternLike || gpu.isTorch ||
+                                    gpu.isBrazierOrFire || gpu.isKoboldFlame;
+        const bool isPlainDoodad = !gpu.isSpellEffect && !gpu.isFireflyEffect && !isFlameFixture;
 
         // How far this instance's particles actually reach, against how far
         // the model says it extends. A fire twice the height of the hut behind
@@ -752,6 +817,7 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
             if (p.emitterIndex != lastEmitterIdx) {
                 lastEmitterIdx = p.emitterIndex;
                 cachedEm = &gpu.particleEmitters[p.emitterIndex];
+                cachedCurve = haveCurves ? &gpu.particleCurves[p.emitterIndex] : nullptr;
 
                 cachedTex = whiteTexture_.get();
                 if (p.emitterIndex < static_cast<int>(gpu.particleTextures.size())) {
@@ -784,12 +850,23 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
 
             const auto& em = *cachedEm;
             float lifeRatio = p.life / std::max(p.maxLife, 0.001f);
-            glm::vec3 color = interpFBlockVec3(em.particleColor, lifeRatio);
-            float alpha = std::min(interpFBlockFloat(em.particleAlpha, lifeRatio), 1.0f);
-            float rawScale = interpFBlockFloat(em.particleScale, lifeRatio);
+            glm::vec3 color;
+            float alpha, rawScale;
+            if (cachedCurve) {
+                const float f = glm::clamp(lifeRatio, 0.0f, 1.0f) * static_cast<float>(Curve::kSteps);
+                const int k = std::min(static_cast<int>(f), Curve::kSteps - 1);
+                const float t = f - static_cast<float>(k);
+                const glm::vec4 ca = glm::mix(cachedCurve->colorAlpha[k], cachedCurve->colorAlpha[k + 1], t);
+                color = glm::vec3(ca);
+                alpha = ca.a;
+                rawScale = glm::mix(cachedCurve->scale[k], cachedCurve->scale[k + 1], t);
+            } else {
+                color = interpFBlockVec3(em.particleColor, lifeRatio);
+                alpha = std::min(interpFBlockFloat(em.particleAlpha, lifeRatio), 1.0f);
+                rawScale = interpFBlockFloat(em.particleScale, lifeRatio);
+            }
 
-            if (!gpu.isSpellEffect && !gpu.isFireflyEffect && !gpu.isLanternLike &&
-                !gpu.isTorch && !gpu.isBrazierOrFire && !gpu.isKoboldFlame) {
+            if (isPlainDoodad) {
                 color = glm::mix(color, glm::vec3(1.0f), 0.7f);
                 if (rawScale > 2.0f) alpha *= 0.02f;
                 if (cachedBlendType == 3 || cachedBlendType == 4) alpha *= 0.05f;
@@ -802,8 +879,7 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
             // the frame. Floor colour and alpha so a lit fixture always shows
             // flame. Floors only lift the dim end, leaving torches and candles
             // that already read correctly untouched.
-            if (gpu.isLanternLike || gpu.isTorch ||
-                gpu.isBrazierOrFire || gpu.isKoboldFlame) {
+            if (isFlameFixture) {
                 color = glm::max(color, glm::vec3(0.50f, 0.26f, 0.09f));
                 alpha = std::max(alpha, 0.30f);
             }
@@ -827,8 +903,7 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
                 // cut, so its five candles rendered as nothing. Give flame
                 // fixtures the same floor without making them spell effects,
                 // which would also change how they blend.
-                if (gpu.isLanternLike || gpu.isTorch ||
-                    gpu.isBrazierOrFire || gpu.isKoboldFlame) {
+                if (isFlameFixture) {
                     scale = std::max(scale, 0.15f);
                 }
             }

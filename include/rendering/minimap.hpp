@@ -70,8 +70,23 @@ public:
     [[nodiscard]] bool isSquareShape() const { return squareShape; }
     [[nodiscard]] float getViewRadius() const { return viewRadius; }
 
-    void zoomIn() { viewRadius = std::max(100.0f, viewRadius - 50.0f); }
-    void zoomOut() { viewRadius = std::min(800.0f, viewRadius + 50.0f); }
+    /// The stock zoom levels: Minimap:GetZoomLevels() is 6, Minimap:SetZoom
+    /// takes 0 (furthest out) to 5. The outdoor map across, in yards, is
+    /// 466 2/3, 400, 333 1/3, 266 2/3, 200 and 133 1/3 - the figures the
+    /// coordinate libraries (Astrolabe, HereBeDragons) measured from the real
+    /// client. viewRadius is half of that. The indoor table (300 .. 50) is not
+    /// used: this map draws terrain tiles only, never a WMO's own minimap.
+    static constexpr int kZoomLevels = 6;
+    static constexpr float kZoomRadius[kZoomLevels] = {
+        233.0f + 1.0f / 3.0f, 200.0f, 166.0f + 2.0f / 3.0f,
+        133.0f + 1.0f / 3.0f, 100.0f, 66.0f + 2.0f / 3.0f};
+    void setZoomLevel(int level) {
+        zoomLevel_ = std::clamp(level, 0, kZoomLevels - 1);
+        viewRadius = kZoomRadius[zoomLevel_];
+    }
+    [[nodiscard]] int getZoomLevel() const { return zoomLevel_; }
+    void zoomIn() { setZoomLevel(zoomLevel_ + 1); }
+    void zoomOut() { setZoomLevel(zoomLevel_ - 1); }
 
     void setOpacity(float opacity) { opacity_ = opacity; }
 
@@ -151,7 +166,8 @@ private:
     VkDescriptorSet displayDescSet = VK_NULL_HANDLE;
 
     int mapSize = 200;
-    float viewRadius = 400.0f;
+    float viewRadius = kZoomRadius[0];
+    int zoomLevel_ = 0;
     bool enabled = true;
     bool rotateWithCamera = false;
     bool squareShape = false;
@@ -170,13 +186,10 @@ private:
     int lastCenterTileX = -1;
     int lastCenterTileY = -1;
 
-    // No arrow texture: the player arrow is a triangle the display shader
-    // draws from push.arrowRotation. A MinimapArrow.blp was loaded here once
-    // and the members outlived the drawing - never assigned, so the teardown
-    // that freed them could not run, and the two accessors that read them had
-    // no callers. Kept as a note rather than as fields, because the real
-    // client draws the texture and honours SetPlayerTextureWidth/Height on it,
-    // which this cannot: those two are still no-ops.
+    // No arrow texture here: the player arrow is Interface\Minimap\MinimapArrow
+    // drawn by the UI marker pass (game_screen_minimap.cpp) at the stock 40x40
+    // that Minimap.lua asks for with SetPlayerTextureWidth/Height. The display
+    // shader used to draw a triangle of its own as well and no longer does.
 };
 
 } // namespace rendering

@@ -282,8 +282,12 @@ void main() {
                   colorKeyBlack == 0 &&
                   heightMapVariance > 0.001 &&
                   lodFactor < 0.99;
+    // unlit: bit 0 = M2 render flag 0x1 (unlit), bit 1 = 0x2 (unfogged; set
+    // for glue scenes, whose skies and cloud cards carry it).
+    bool isUnlit = (unlit & 1) != 0;
+    bool unfogged = (unlit & 2) != 0;
     bool useNormalMap = enableNormalMap != 0 &&
-                        unlit == 0 &&
+                        !isUnlit &&
                         lodFactor < 0.99 &&
                         normalMapStrength > 0.001;
     mat3 TBN;

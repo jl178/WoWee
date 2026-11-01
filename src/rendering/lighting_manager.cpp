@@ -11,7 +11,9 @@
 #include "core/logger.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <ctime>
+#include <type_traits>
 
 namespace wowee {
 namespace rendering {
@@ -23,6 +25,46 @@ constexpr uint16_t kHalfMinutesPerDay = 2880;
 
 // Maximum volumes to blend (top 2-4)
 constexpr size_t MAX_BLEND_VOLUMES = 2;
+
+namespace {
+
+/// Every field of LightingParams that is blended between lights, between a
+/// clear and a storm set, and smoothed over time - all of them but the sun
+/// direction (normalised separately) and dnc.db's day and night (the same
+/// everywhere). One list, so a field added to the struct is added once.
+template <typename Params, typename F>
+void forEachBlended(Params& a, const LightingParams& b, F&& f) {
+    f(a.ambientColor, b.ambientColor);
+    f(a.diffuseColor, b.diffuseColor);
+    f(a.fogColor, b.fogColor);
+    f(a.fogStart, b.fogStart);
+    f(a.fogEnd, b.fogEnd);
+    f(a.fogDensity, b.fogDensity);
+    f(a.skyTopColor, b.skyTopColor);
+    f(a.skyMiddleColor, b.skyMiddleColor);
+    f(a.skyBand1Color, b.skyBand1Color);
+    f(a.skyBand2Color, b.skyBand2Color);
+    f(a.cloudDensity, b.cloudDensity);
+    f(a.horizonGlow, b.horizonGlow);
+    f(a.skySmogColor, b.skySmogColor);
+    f(a.skyFogColor, b.skyFogColor);
+    f(a.sunColor, b.sunColor);
+    f(a.cloudSunColor, b.cloudSunColor);
+    f(a.cloudEmissiveColor, b.cloudEmissiveColor);
+    f(a.cloudLayer1AmbientColor, b.cloudLayer1AmbientColor);
+    f(a.cloudLayer2AmbientColor, b.cloudLayer2AmbientColor);
+    f(a.celestialGlowThrough, b.celestialGlowThrough);
+    f(a.oceanCloseColor, b.oceanCloseColor);
+    f(a.oceanFarColor, b.oceanFarColor);
+    f(a.riverCloseColor, b.riverCloseColor);
+    f(a.riverFarColor, b.riverFarColor);
+    f(a.waterShallowAlpha, b.waterShallowAlpha);
+    f(a.waterDeepAlpha, b.waterDeepAlpha);
+    f(a.oceanShallowAlpha, b.oceanShallowAlpha);
+    f(a.oceanDeepAlpha, b.oceanDeepAlpha);
+}
+
+}  // namespace
 
 LightingManager::LightingManager() {
     // Set fallback lighting (Elwynn Forest-ish outdoor daytime)
@@ -53,6 +95,7 @@ bool LightingManager::initialize(pipeline::AssetManager* assetManager) {
     loadLightParamsDbc(assetManager);
     loadLightSkyboxDbc(assetManager);
     loadLightBandDbcs(assetManager);
+    loadDayNightCycle(assetManager);
 
     initialized_ = true;
     LOG_INFO("LightingManager initialized: ", lightVolumesByMap_.size(), " maps with lighting");
@@ -82,10 +125,9 @@ bool LightingManager::loadLightDbc(pipeline::AssetManager* assetManager) {
     // 2-4: float X, Z, Y (note: z and y swapped!)
     // 5: float FalloffStart (inner radius)
     // 6: float FalloffEnd (outer radius)
-    // 7: uint32 LightParamsID (clear weather)
-    // 8: uint32 LightParamsID (overcast/rain)
-    // 9: uint32 LightParamsID (underwater)
-    // ... more params for death, phases, etc.
+    // 7-11: uint32 LightParamsID - clear, clear underwater, storm,
+    //       storm underwater, death
+    // 12-14: further slots, all but empty in 3.3.5
 
     const auto* activeLayout = pipeline::getActiveDBCLayout();
     const auto* lL = activeLayout ? activeLayout->getLayout("Light") : nullptr;
@@ -110,13 +152,16 @@ bool LightingManager::loadLightDbc(pipeline::AssetManager* assetManager) {
         volume.outerRadius =
             dbc->getFloat(i, lL ? (*lL)["OuterRadius"] : 6) / LIGHT_COORD_UNITS_PER_YARD;
 
-        // LightParams IDs for different conditions
-        volume.lightParamsId = dbc->getUInt32(i, lL ? (*lL)["LightParamsID"] : 7);
-        if (dbc->getFieldCount() > 8) {
-            volume.lightParamsIdRain = dbc->getUInt32(i, lL ? (*lL)["LightParamsIDRain"] : 8);
-        }
-        if (dbc->getFieldCount() > 9) {
-            volume.lightParamsIdUnderwater = dbc->getUInt32(i, lL ? (*lL)["LightParamsIDUnderwater"] : 9);
+        // The five LightParams slots, consecutive from the first: clear,
+        // clear underwater, storm, storm underwater, death (see LightVolume).
+        // Addressed from the layout's first slot rather than by the names it
+        // gives columns 8 and 9 ("Rain", "Underwater"), which were swapped
+        // against the file: underwater got the storm set and rain the
+        // underwater one.
+        const uint32_t firstSlot = lL ? (*lL)["LightParamsID"] : 7;
+        for (uint32_t s = 0; s < LightVolume::SLOT_COUNT; ++s) {
+            if (firstSlot + s >= dbc->getFieldCount()) break;
+            volume.lightParamsIds[s] = dbc->getUInt32(i, firstSlot + s);
         }
 
         // Add to map-specific list
@@ -285,8 +330,9 @@ bool LightingManager::loadLightBandDbcs(pipeline::AssetManager* assetManager) {
 
 void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_t zoneId,
                               float gameTime,
-                              bool isRaining, bool isUnderwater) {
+                              float stormIntensity, bool isUnderwater) {
     if (!initialized_) return;
+    stormIntensity = glm::clamp(stormIntensity, 0.0f, 1.0f);
 
     // Update time
     if (!manualTime_) {
@@ -309,10 +355,12 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     }
     // else: manualTime_ is set, use timeOfDay_ as-is
 
-    // Duskwood's visible sky is permanently late-night even while the global
-    // world clock continues normally for gameplay and every other zone.
-    visualTimeOfDayHours_ = resolveZoneVisualTimeHours(
-        zoneId, isIndoors_, timeOfDay_ * 24.0f);
+    // The world clock, in every zone. Duskwood, Tirisfal and Silverpine are
+    // dark because their Light.dbc rows are; the stock client neither pins
+    // Duskwood's hour nor paints over those zones' sky colours, so the
+    // zone_ambience overrides (resolveZoneVisualTimeHours,
+    // applyZoneAmbienceOverride) are no longer applied here.
+    visualTimeOfDayHours_ = timeOfDay_ * 24.0f;
 
     // Convert visual time to half-minutes (WoW DBC format: 0-2879).
     const float visualDayFraction = visualTimeOfDayHours_ / 24.0f;
@@ -336,6 +384,11 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     lastUpdate_ = now;
     const float blendFactor = 1.0f - std::exp(-deltaTime * 5.0f);
 
+    // dnc.db's day and night, the same everywhere: they say when the sun,
+    // and the moon and stars, are up.
+    float dayIntensity = 1.0f, nightIntensity = 0.0f;
+    sampleDayNight(timeHalfMinutes, dayIntensity, nightIntensity);
+
     // Which sky models are overhead, and how much of each.
     //
     // One model was chosen and held until the player left its zone's
@@ -351,34 +404,48 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     // cross the border together. A light with no sky model contributes to no
     // layer, and the models fade toward the plain sky there.
     {
-        std::vector<std::pair<std::string, float>> target;
+        // The night stars the stock client draws wherever no sky model does:
+        // Stars.mdx, the LightSkybox 4 model, which no Azeroth or Kalimdor
+        // LightParams row names (all 209 of their lights have no sky model).
+        static const std::string kStarsModel = "Environments\\Stars\\Stars.mdx";
+        std::vector<SkyboxLayer> target;
         if (!isIndoors_) {
             const size_t blendCount = std::min(activeVolumes_.size(), MAX_BLEND_VOLUMES);
+            float zoneSkyWeight = 0.0f;
             for (size_t i = 0; i < blendCount; ++i) {
                 const auto& wv = activeVolumes_[i];
-                const uint32_t paramsId = selectLightParamsId(wv.volume, isRaining, isUnderwater);
+                const uint32_t paramsId = dominantParamsId(wv.volume, stormIntensity, isUnderwater);
                 auto profileIt = lightParamsProfiles_.find(paramsId);
                 if (profileIt == lightParamsProfiles_.end() ||
                     profileIt->second.lightSkyboxId == 0) continue;
                 auto skyIt = lightSkyboxPaths_.find(profileIt->second.lightSkyboxId);
                 if (skyIt == lightSkyboxPaths_.end() || skyIt->second.empty()) continue;
+                zoneSkyWeight += wv.weight;
                 auto t = std::find_if(target.begin(), target.end(),
-                                      [&](const auto& e) { return e.first == skyIt->second; });
-                if (t == target.end()) target.emplace_back(skyIt->second, wv.weight);
-                else t->second += wv.weight;
+                                      [&](const SkyboxLayer& e) { return e.path == skyIt->second; });
+                if (t == target.end()) target.push_back({.path = skyIt->second, .weight = wv.weight});
+                else t->weight += wv.weight;
+            }
+            const float starsWeight =
+                nightIntensity * (1.0f - glm::clamp(zoneSkyWeight, 0.0f, 1.0f));
+            if (starsWeight > 0.0f && !isUnderwater) {
+                target.push_back({.path = kStarsModel, .weight = starsWeight, .stars = true});
             }
         }
         auto targetFor = [&](const std::string& path) {
-            for (const auto& [p, w] : target) if (p == path) return w;
+            for (const auto& t : target) if (t.path == path) return t.weight;
             return 0.0f;
         };
         for (auto& layer : skyboxLayers_) {
             layer.weight += (targetFor(layer.path) - layer.weight) * blendFactor;
         }
-        for (const auto& [path, w] : target) {
+        for (const auto& t : target) {
             const bool present = std::any_of(skyboxLayers_.begin(), skyboxLayers_.end(),
-                                             [&](const SkyboxLayer& l) { return l.path == path; });
-            if (!present) skyboxLayers_.push_back({.path = path, .weight = w * blendFactor});
+                                             [&](const SkyboxLayer& l) { return l.path == t.path; });
+            if (!present) {
+                skyboxLayers_.push_back({.path = t.path, .weight = t.weight * blendFactor,
+                                         .stars = t.stars});
+            }
         }
         // Gone once faded out and not wanted - never while it is still wanted,
         // so a model is not dropped and reloaded on its way in.
@@ -407,16 +474,10 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         // defaults *plus* the blend, which put about +0.4 on every outdoor
         // ambient and over-bright sun, washing the world out against stock.
         newParams = {};
-        newParams.ambientColor = newParams.diffuseColor = newParams.fogColor = glm::vec3(0.0f);
-        newParams.skyTopColor = newParams.skyMiddleColor = glm::vec3(0.0f);
-        newParams.skyBand1Color = newParams.skyBand2Color = glm::vec3(0.0f);
-        newParams.fogStart = newParams.fogEnd = newParams.fogDensity = 0.0f;
-        newParams.cloudDensity = newParams.horizonGlow = 0.0f;
-        newParams.oceanCloseColor = newParams.oceanFarColor = glm::vec3(0.0f);
-        newParams.riverCloseColor = newParams.riverFarColor = glm::vec3(0.0f);
-        newParams.waterShallowAlpha = newParams.waterDeepAlpha = 0.0f;
-        newParams.oceanShallowAlpha = newParams.oceanDeepAlpha = 0.0f;
-        float liquidWeight = 0.0f;
+        forEachBlended(newParams, newParams, [](auto& x, const auto&) {
+            x = std::remove_reference_t<decltype(x)>(0.0f);  // glm's {} need not be zero
+        });
+        float profileWeight = 0.0f;
         glm::vec3 blendedDir(0.0f);  // Accumulate weighted directions
 
         // The first MAX_BLEND_VOLUMES only: the list is the whole
@@ -425,80 +486,26 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         const size_t blendCount = std::min(activeVolumes_.size(), MAX_BLEND_VOLUMES);
         for (size_t i = 0; i < blendCount; ++i) {
             const auto& wv = activeVolumes_[i];
-            uint32_t lightParamsId = selectLightParamsId(wv.volume, isRaining, isUnderwater);
-            auto it = lightParamsProfiles_.find(lightParamsId);
-
-            if (it != lightParamsProfiles_.end()) {
-                LightingParams params = sampleLightParams(&it->second, timeHalfMinutes);
-
-                // Blend this volume's contribution
-                newParams.ambientColor += params.ambientColor * wv.weight;
-                newParams.diffuseColor += params.diffuseColor * wv.weight;
-                newParams.fogColor += params.fogColor * wv.weight;
-                newParams.skyTopColor += params.skyTopColor * wv.weight;
-                newParams.skyMiddleColor += params.skyMiddleColor * wv.weight;
-                newParams.skyBand1Color += params.skyBand1Color * wv.weight;
-                newParams.skyBand2Color += params.skyBand2Color * wv.weight;
-
-                newParams.fogStart += params.fogStart * wv.weight;
-                newParams.fogEnd += params.fogEnd * wv.weight;
-                newParams.fogDensity += params.fogDensity * wv.weight;
-                newParams.cloudDensity += params.cloudDensity * wv.weight;
-                newParams.horizonGlow += params.horizonGlow * wv.weight;
-
-                newParams.oceanCloseColor += params.oceanCloseColor * wv.weight;
-                newParams.oceanFarColor += params.oceanFarColor * wv.weight;
-                newParams.riverCloseColor += params.riverCloseColor * wv.weight;
-                newParams.riverFarColor += params.riverFarColor * wv.weight;
-                newParams.waterShallowAlpha += params.waterShallowAlpha * wv.weight;
-                newParams.waterDeepAlpha += params.waterDeepAlpha * wv.weight;
-                newParams.oceanShallowAlpha += params.oceanShallowAlpha * wv.weight;
-                newParams.oceanDeepAlpha += params.oceanDeepAlpha * wv.weight;
-                liquidWeight += wv.weight;
-
-                // Blend direction weighted (normalize at end)
-                blendedDir += params.directionalDir * wv.weight;
+            LightingParams params;
+            if (!sampleVolume(wv.volume, timeHalfMinutes, stormIntensity, isUnderwater, params)) {
+                continue;
             }
+            const float w = wv.weight;
+            forEachBlended(newParams, params, [w](auto& x, const auto& y) { x += y * w; });
+            profileWeight += w;
+            // Blend direction weighted (normalize at end)
+            blendedDir += params.directionalDir * w;
         }
 
-        // The liquid colours over the volumes that had a profile, so a volume
-        // naming a missing LightParams row does not fade the water out.
-        if (liquidWeight > 1e-4f) {
-            const float inv = 1.0f / liquidWeight;
-            // A weighted average over the volumes that had a profile.
-            newParams.ambientColor *= inv;
-            newParams.diffuseColor *= inv;
-            newParams.fogColor *= inv;
-            newParams.skyTopColor *= inv;
-            newParams.skyMiddleColor *= inv;
-            newParams.skyBand1Color *= inv;
-            newParams.skyBand2Color *= inv;
-            newParams.fogStart *= inv;
-            newParams.fogEnd *= inv;
-            newParams.fogDensity *= inv;
-            newParams.cloudDensity *= inv;
-            newParams.horizonGlow *= inv;
-            newParams.oceanCloseColor *= inv;
-            newParams.oceanFarColor *= inv;
-            newParams.riverCloseColor *= inv;
-            newParams.riverFarColor *= inv;
-            newParams.waterShallowAlpha *= inv;
-            newParams.waterDeepAlpha *= inv;
-            newParams.oceanShallowAlpha *= inv;
-            newParams.oceanDeepAlpha *= inv;
+        // A weighted average over the volumes that had a profile, so a volume
+        // naming a missing LightParams row does not fade anything out.
+        if (profileWeight > 1e-4f) {
+            const float inv = 1.0f / profileWeight;
+            forEachBlended(newParams, newParams, [inv](auto& x, const auto&) { x *= inv; });
         } else {
-            const LightingParams defaults{};
             const glm::vec3 keepDir = newParams.directionalDir;
-            newParams = defaults;
+            newParams = LightingParams{};
             newParams.directionalDir = keepDir;
-            newParams.oceanCloseColor = defaults.oceanCloseColor;
-            newParams.oceanFarColor = defaults.oceanFarColor;
-            newParams.riverCloseColor = defaults.riverCloseColor;
-            newParams.riverFarColor = defaults.riverFarColor;
-            newParams.waterShallowAlpha = defaults.waterShallowAlpha;
-            newParams.waterDeepAlpha = defaults.waterDeepAlpha;
-            newParams.oceanShallowAlpha = defaults.oceanShallowAlpha;
-            newParams.oceanDeepAlpha = defaults.oceanDeepAlpha;
         }
 
         // Normalize blended direction
@@ -532,9 +539,8 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         }
     }
 
-    if (!isIndoors_) {
-        applyZoneAmbienceOverride(zoneId, newParams);
-    }
+    // The sky dome's fog band is the authored colour, before the haze blend.
+    newParams.skyFogColor = newParams.fogColor;
 
     // Fog toward the colour of the sky it is seen against.
     //
@@ -553,8 +559,15 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     // The amount is a setting rather than a constant, because how much haze a
     // zone should have is taste and the right value is not the same at noon in
     // Elwynn as at night in Hellfire. Zero is the old behaviour exactly.
-    newParams.fogColor = glm::mix(newParams.fogColor, newParams.skyMiddleColor,
-                                  glm::clamp(fogSkyBlend_, 0.0f, 1.0f));
+    //
+    // Neither this nor the strength below applies under water: there the fog
+    // is the water itself, Light.dbc's underwater set exactly (about 170
+    // yards, teal), and the sky it would be pulled toward is not in view.
+    const bool authoredFogOnly = isUnderwater && !isIndoors_;
+    if (!authoredFogOnly) {
+        newParams.fogColor = glm::mix(newParams.fogColor, newParams.skyMiddleColor,
+                                      glm::clamp(fogSkyBlend_, 0.0f, 1.0f));
+    }
 
     // How much fog, as a multiplier on the distances the zone asks for.
     //
@@ -567,7 +580,7 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     // Zero is off rather than infinitely thick. A strength of zero scaling
     // distances by 1/0 is where a divide would land, and what the player means
     // by nothing is no fog at all.
-    const float strength = glm::clamp(fogStrength_, 0.0f, 2.0f);
+    const float strength = authoredFogOnly ? 1.0f : glm::clamp(fogStrength_, 0.0f, 2.0f);
     if (strength <= 0.001f) {
         newParams.fogStart = 1.0e6f;
         newParams.fogEnd = 1.0e6f + 1.0f;
@@ -634,26 +647,11 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     // Smooth temporal blending to avoid snapping (5.0 = blend rate); see
     // blendFactor above.
 
-    currentParams_.ambientColor = glm::mix(currentParams_.ambientColor, newParams.ambientColor, blendFactor);
-    currentParams_.diffuseColor = glm::mix(currentParams_.diffuseColor, newParams.diffuseColor, blendFactor);
-    currentParams_.fogColor = glm::mix(currentParams_.fogColor, newParams.fogColor, blendFactor);
-    currentParams_.skyTopColor = glm::mix(currentParams_.skyTopColor, newParams.skyTopColor, blendFactor);
-    currentParams_.skyMiddleColor = glm::mix(currentParams_.skyMiddleColor, newParams.skyMiddleColor, blendFactor);
-    currentParams_.skyBand1Color = glm::mix(currentParams_.skyBand1Color, newParams.skyBand1Color, blendFactor);
-    currentParams_.skyBand2Color = glm::mix(currentParams_.skyBand2Color, newParams.skyBand2Color, blendFactor);
-    currentParams_.fogStart = glm::mix(currentParams_.fogStart, newParams.fogStart, blendFactor);
-    currentParams_.fogEnd = glm::mix(currentParams_.fogEnd, newParams.fogEnd, blendFactor);
-    currentParams_.fogDensity = glm::mix(currentParams_.fogDensity, newParams.fogDensity, blendFactor);
-    currentParams_.cloudDensity = glm::mix(currentParams_.cloudDensity, newParams.cloudDensity, blendFactor);
-    currentParams_.horizonGlow = glm::mix(currentParams_.horizonGlow, newParams.horizonGlow, blendFactor);
-    currentParams_.oceanCloseColor = glm::mix(currentParams_.oceanCloseColor, newParams.oceanCloseColor, blendFactor);
-    currentParams_.oceanFarColor = glm::mix(currentParams_.oceanFarColor, newParams.oceanFarColor, blendFactor);
-    currentParams_.riverCloseColor = glm::mix(currentParams_.riverCloseColor, newParams.riverCloseColor, blendFactor);
-    currentParams_.riverFarColor = glm::mix(currentParams_.riverFarColor, newParams.riverFarColor, blendFactor);
-    currentParams_.waterShallowAlpha = glm::mix(currentParams_.waterShallowAlpha, newParams.waterShallowAlpha, blendFactor);
-    currentParams_.waterDeepAlpha = glm::mix(currentParams_.waterDeepAlpha, newParams.waterDeepAlpha, blendFactor);
-    currentParams_.oceanShallowAlpha = glm::mix(currentParams_.oceanShallowAlpha, newParams.oceanShallowAlpha, blendFactor);
-    currentParams_.oceanDeepAlpha = glm::mix(currentParams_.oceanDeepAlpha, newParams.oceanDeepAlpha, blendFactor);
+    forEachBlended(currentParams_, newParams,
+                   [blendFactor](auto& x, const auto& y) { x = glm::mix(x, y, blendFactor); });
+    // Day and night follow the clock alone, so they are not smoothed.
+    currentParams_.dayIntensity = dayIntensity;
+    currentParams_.nightIntensity = nightIntensity;
     currentParams_.directionalDir = glm::normalize(glm::mix(currentParams_.directionalDir, newParams.directionalDir, blendFactor));
 }
 
@@ -755,17 +753,133 @@ std::vector<LightingManager::WeightedVolume> LightingManager::findLightVolumes(c
     return weighted;
 }
 
-uint32_t LightingManager::selectLightParamsId(const LightVolume* volume, bool isRaining, bool isUnderwater) const {
+uint32_t LightingManager::paramsIdForSlot(const LightVolume* volume,
+                                          LightVolume::ParamsSlot slot) const {
     if (!volume) return 0;
+    const uint32_t id = volume->lightParamsIds[slot];
+    if (id != 0 && lightParamsProfiles_.count(id)) return id;
+    // A storm underwater set falls back to the plain underwater one before
+    // the clear set, so a dive in the rain stays under water.
+    if (slot == LightVolume::SLOT_STORM_UNDERWATER) {
+        return paramsIdForSlot(volume, LightVolume::SLOT_CLEAR_UNDERWATER);
+    }
+    return volume->lightParamsIds[LightVolume::SLOT_CLEAR];
+}
 
-    // Select appropriate LightParams based on conditions
-    if (isUnderwater && volume->lightParamsIdUnderwater != 0) {
-        return volume->lightParamsIdUnderwater;
+uint32_t LightingManager::dominantParamsId(const LightVolume* volume, float stormIntensity,
+                                           bool isUnderwater) const {
+    if (playerDead_) return paramsIdForSlot(volume, LightVolume::SLOT_DEATH);
+    const bool storm = stormIntensity >= 0.5f;
+    if (isUnderwater) {
+        return paramsIdForSlot(volume, storm ? LightVolume::SLOT_STORM_UNDERWATER
+                                             : LightVolume::SLOT_CLEAR_UNDERWATER);
     }
-    if (isRaining && volume->lightParamsIdRain != 0) {
-        return volume->lightParamsIdRain;
+    return paramsIdForSlot(volume, storm ? LightVolume::SLOT_STORM : LightVolume::SLOT_CLEAR);
+}
+
+bool LightingManager::sampleVolume(const LightVolume* volume, uint16_t timeHalfMinutes,
+                                   float stormIntensity, bool isUnderwater,
+                                   LightingParams& out) const {
+    if (!volume) return false;
+    auto sample = [&](uint32_t id, LightingParams& p) {
+        auto it = lightParamsProfiles_.find(id);
+        if (it == lightParamsProfiles_.end()) return false;
+        p = sampleLightParams(&it->second, timeHalfMinutes);
+        return true;
+    };
+
+    if (playerDead_) {
+        return sample(paramsIdForSlot(volume, LightVolume::SLOT_DEATH), out);
     }
-    return volume->lightParamsId;
+
+    const uint32_t clearId = paramsIdForSlot(
+        volume, isUnderwater ? LightVolume::SLOT_CLEAR_UNDERWATER : LightVolume::SLOT_CLEAR);
+    if (!sample(clearId, out)) return false;
+
+    // Toward the storm set by the weather's intensity: light rain greys the
+    // light a little, a downpour all the way.
+    const uint32_t stormId = paramsIdForSlot(
+        volume, isUnderwater ? LightVolume::SLOT_STORM_UNDERWATER : LightVolume::SLOT_STORM);
+    if (stormIntensity > 0.001f && stormId != clearId) {
+        LightingParams storm;
+        if (sample(stormId, storm)) {
+            forEachBlended(out, storm, [stormIntensity](auto& x, const auto& y) {
+                x = glm::mix(x, y, stormIntensity);
+            });
+        }
+    }
+    return true;
+}
+
+bool LightingManager::loadDayNightCycle(pipeline::AssetManager* assetManager) {
+    // world/dnc.db, the client's day/night table: a header of (tag, offset)
+    // pairs, then one record per hour of 25 tagged 4-byte values - hour,
+    // minute, day intensity, day colour and direction, night intensity,
+    // night colour and direction, ambient, fog. The shipped file has 25
+    // records, 00:00 to 23:00; the day intensity is 0.8 from 06:00 to 19:00
+    // and the night intensity 1.0 from 18:00 to 05:00.
+    dayNightKeys_.clear();
+    auto data = assetManager->readFileOptional("World\\dnc.db");
+    if (data.size() < 16) {
+        LOG_WARNING("World\\dnc.db not found; using a fixed day and night");
+    } else {
+        auto u32 = [&](size_t off) {
+            uint32_t v = 0;
+            if (off + 4 <= data.size()) std::memcpy(&v, data.data() + off, 4);
+            return v;
+        };
+        auto f32 = [&](size_t off) {
+            float v = 0.0f;
+            if (off + 4 <= data.size()) std::memcpy(&v, data.data() + off, 4);
+            return v;
+        };
+        const uint32_t count = u32(4);
+        const uint32_t end = std::min<uint32_t>(u32(12), static_cast<uint32_t>(data.size()));
+        constexpr size_t kValues = 25;
+        size_t pos = 8 + static_cast<size_t>(count) * 8;
+        while (count < 1000 && pos + kValues * 8 <= end) {
+            // Each value is a 4-byte tag then the value.
+            auto value = [&](size_t index) { return f32(pos + index * 8 + 4); };
+            const float hour = value(0), minute = value(1);
+            DayNightKey key;
+            key.time = static_cast<uint16_t>(
+                (static_cast<int>(hour) * 60 + static_cast<int>(minute)) * 2 % kHalfMinutesPerDay);
+            key.day = value(2);
+            key.night = value(9);
+            dayNightKeys_.push_back(key);
+            pos += kValues * 8;
+        }
+    }
+    if (dayNightKeys_.empty()) {
+        for (int h = 0; h < 24; ++h) {
+            DayNightKey key;
+            key.time = static_cast<uint16_t>(h * 120);
+            key.day = (h >= 6 && h <= 19) ? 0.8f : 0.0f;
+            key.night = (h >= 18 || h <= 5) ? 1.0f : 0.0f;
+            dayNightKeys_.push_back(key);
+        }
+    }
+    std::sort(dayNightKeys_.begin(), dayNightKeys_.end(),
+              [](const DayNightKey& a, const DayNightKey& b) { return a.time < b.time; });
+    LOG_INFO("Day/night cycle: ", dayNightKeys_.size(), " keys");
+    return true;
+}
+
+void LightingManager::sampleDayNight(uint16_t timeHalfMinutes, float& day, float& night) const {
+    day = 1.0f;
+    night = 0.0f;
+    if (dayNightKeys_.empty()) return;
+    // Between the key at or before this time and the next, wrapping at midnight.
+    size_t next = 0;
+    while (next < dayNightKeys_.size() && dayNightKeys_[next].time <= timeHalfMinutes) ++next;
+    const DayNightKey& b = dayNightKeys_[next % dayNightKeys_.size()];
+    const DayNightKey& a = dayNightKeys_[(next + dayNightKeys_.size() - 1) % dayNightKeys_.size()];
+    const int span = (static_cast<int>(b.time) - a.time + kHalfMinutesPerDay) % kHalfMinutesPerDay;
+    const int into = (static_cast<int>(timeHalfMinutes) - a.time + kHalfMinutesPerDay) % kHalfMinutesPerDay;
+    const float t = span > 0 ? glm::clamp(static_cast<float>(into) / span, 0.0f, 1.0f) : 0.0f;
+    // The file's day intensity tops out at 0.8; as a visibility it is "up".
+    day = glm::clamp(glm::mix(a.day, b.day, t) / 0.8f, 0.0f, 1.0f);
+    night = glm::clamp(glm::mix(a.night, b.night, t), 0.0f, 1.0f);
 }
 
 LightingParams LightingManager::sampleLightParams(const LightParamsProfile* profile, uint16_t timeHalfMinutes) const {
@@ -781,6 +895,21 @@ LightingParams LightingManager::sampleLightParams(const LightParamsProfile* prof
     params.skyMiddleColor = sampleColorBand(profile->colorBands[LightParamsProfile::SKY_MIDDLE_COLOR], timeHalfMinutes);
     params.skyBand1Color = sampleColorBand(profile->colorBands[LightParamsProfile::SKY_BAND1_COLOR], timeHalfMinutes);
     params.skyBand2Color = sampleColorBand(profile->colorBands[LightParamsProfile::SKY_BAND2_COLOR], timeHalfMinutes);
+
+    // The rest of the sky. A profile with no band for one (the underwater
+    // sets carry no sky bands at all) keeps the nearest sky colour, not grey.
+    auto bandOr = [&](LightParamsProfile::ColorChannel ch, const glm::vec3& fallback) {
+        const ColorBand& band = profile->colorBands[ch];
+        return band.numKeyframes > 0 ? sampleColorBand(band, timeHalfMinutes) : fallback;
+    };
+    params.skySmogColor = bandOr(LightParamsProfile::SKY_SMOG_COLOR, params.skyBand2Color);
+    params.sunColor = bandOr(LightParamsProfile::SUN_COLOR, params.diffuseColor);
+    params.cloudSunColor = bandOr(LightParamsProfile::CLOUD_SUN_COLOR, params.sunColor);
+    params.cloudEmissiveColor = bandOr(LightParamsProfile::CLOUD_EMISSIVE_COLOR, params.ambientColor);
+    params.cloudLayer1AmbientColor =
+        bandOr(LightParamsProfile::CLOUD_LAYER1_AMBIENT_COLOR, glm::vec3(0.0f));
+    params.cloudLayer2AmbientColor =
+        bandOr(LightParamsProfile::CLOUD_LAYER2_AMBIENT_COLOR, params.ambientColor);
 
     // Liquid colours. A profile with no band for a channel keeps the default
     // rather than sampleColorBand's grey, and a missing far colour follows the
@@ -811,6 +940,8 @@ LightingParams LightingManager::sampleLightParams(const LightParamsProfile* prof
     params.fogStart = params.fogEnd * fogStartScalar;
     params.fogDensity = sampleFloatBand(profile->floatBands[LightParamsProfile::FOG_DENSITY], timeHalfMinutes);
     params.cloudDensity = sampleFloatBand(profile->floatBands[LightParamsProfile::CLOUD_DENSITY], timeHalfMinutes);
+    params.celestialGlowThrough = sampleFloatBand(
+        profile->floatBands[LightParamsProfile::CELESTIAL_GLOW_THROUGH], timeHalfMinutes);
 
     // Debug logging for fog params (first few samples only)
     static int debugCount = 0;

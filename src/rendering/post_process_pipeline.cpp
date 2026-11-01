@@ -61,7 +61,9 @@ void PostProcessPipeline::manageResources() {
 
     // FXAA resource management - FXAA can coexist with FSR1 and FSR3.
     // When both FXAA and FSR3 are enabled, FXAA runs as a post-FSR3 pass.
-    // Do not force this pass for ghost mode; keep AA quality strictly user-controlled.
+    // Ghost desaturation and intoxication keep the pass alive without FXAA;
+    // the shader is told whether to anti-alias, so AA quality stays strictly
+    // user-controlled either way.
     const bool useFXAA = needsFXAAPass();
     if ((fxaa_.needsRecreate || !useFXAA) && fxaa_.sceneFramebuffer) {
         destroyFXAAResources();
@@ -73,6 +75,10 @@ void PostProcessPipeline::manageResources() {
             LOG_ERROR("FXAA: initialization failed, disabling");
             if (fxaa_.enabled) fxaa_.enabled = false;
             intoxication_ = 0.0f;
+            // The renderer falls back to its tint quad when the pass is absent,
+            // and is not let to ask for it again every frame.
+            ghost_ = 0.0f;
+            ghostPassFailed_ = true;
         }
     }
 }
@@ -1796,11 +1802,12 @@ bool PostProcessPipeline::initFXAAResources() {
         vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
     }
 
-    // Pipeline layout - push constant holds vec4(rcpFrame.xy, sharpness, pad)
+    // Pipeline layout - push constants: vec4(rcpFrame.xy, sharpness,
+    // intoxication), vec4(ghost, antialias, pad, pad)
     VkPushConstantRange pc{};
     pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     pc.offset = 0;
-    pc.size = 16;  // vec4
+    pc.size = 32;  // two vec4
     VkPipelineLayoutCreateInfo plCI{};
     plCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     plCI.setLayoutCount = 1;
@@ -1877,15 +1884,22 @@ void PostProcessPipeline::renderFXAAPass() {
     // Pass rcpFrame + sharpness + effect flag (vec4, 16 bytes). The sharpness
     // slot drove an unsharp mask that stood in for RCAS while FXAA replaced
     // it under the upscaler; RCAS runs ahead of FXAA now, so it stays at zero.
+    // The second vec4 carries the ghost desaturation and whether to
+    // anti-alias at all: the pass also runs for the ghost world and for
+    // intoxication with FXAA switched off, and then only colours the scene.
     const float sharpness = 0.0f;
-    float pc[4] = {
+    float pc[8] = {
         1.0f / static_cast<float>(ext.width),
         1.0f / static_cast<float>(ext.height),
         sharpness,
-        intoxication_
+        intoxication_,
+        ghost_,
+        fxaa_.enabled ? 1.0f : 0.0f,
+        0.0f,
+        0.0f
     };
     vkCmdPushConstants(currentCmd_, fxaa_.pipelineLayout,
-                       VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, pc);
+                       VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), pc);
 
     vkCmdDraw(currentCmd_, 3, 1, 0, 0);  // fullscreen triangle
 }

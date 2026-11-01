@@ -1544,7 +1544,7 @@ static void applyCVarSideEffects(lua_State* L, const std::string& key,
         if (auto* tree = getWidgetTree(L)) {
             if (auto* mm = tree->findByName("Minimap")) {
                 const int z = std::atoi(value.c_str());
-                mm->zoomLevel = (z < 0) ? 0 : (z > 4 ? 4 : z);
+                mm->zoomLevel = (z < 0) ? 0 : (z > 5 ? 5 : z);  // stock 0-5
                 lua_getfield(L, LUA_REGISTRYINDEX, "wowee_lua_engine");
                 auto* engine = static_cast<LuaEngine*>(lua_touserdata(L, -1));
                 lua_pop(L, 1);

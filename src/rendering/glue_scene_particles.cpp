@@ -20,6 +20,14 @@ namespace {
 // M2Renderer's meaning for this bit (m2_renderer_internal.h).
 constexpr uint32_t kFlagRandomTile = 0x40;
 
+bool finite3(const glm::vec3& v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
+
+float finiteOr(float v, float fallback) {
+    return std::isfinite(v) ? v : fallback;
+}
+
 float lifeCurve(const pipeline::M2FBlock& fb, float t) {
     if (fb.floatValues.empty()) return 1.0f;
     if (fb.floatValues.size() == 1 || fb.timestamps.size() < 2) return fb.floatValues[0];
@@ -58,14 +66,25 @@ GlueSceneParticles::~GlueSceneParticles() {
     shutdown();
 }
 
-bool GlueSceneParticles::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout,
-                                    VkRenderPass renderPass, VkSampleCountFlagBits samples) {
+bool GlueSceneParticles::initialize(VkContext* ctx, VkRenderPass renderPass,
+                                    VkSampleCountFlagBits samples) {
     if (vkCtx_) return true;
-    if (!ctx || perFrameLayout == VK_NULL_HANDLE || renderPass == VK_NULL_HANDLE) return false;
+    if (!ctx || renderPass == VK_NULL_HANDLE) return false;
     vkCtx_ = ctx;
     VkDevice device = ctx->getDevice();
 
-    // set 1: the particle texture.
+    // Points above 1 px need the largePoints feature, and then stay inside
+    // the device's range.
+    {
+        VkPhysicalDeviceFeatures feats{};
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceFeatures(ctx->getPhysicalDevice(), &feats);
+        vkGetPhysicalDeviceProperties(ctx->getPhysicalDevice(), &props);
+        maxPointSize_ = feats.largePoints
+            ? std::clamp(props.limits.pointSizeRange[1], 1.0f, 64.0f) : 1.0f;
+    }
+
+    // set 0: the particle texture, the only descriptor this draw binds.
     {
         VkDescriptorSetLayoutBinding b{};
         b.binding = 0;
@@ -88,25 +107,32 @@ bool GlueSceneParticles::initialize(VkContext* ctx, VkDescriptorSetLayout perFra
         ci.pPoolSizes = &size;
         vkCreateDescriptorPool(device, &ci, nullptr, &texPool_);
     }
-    // The M2 particle shaders' layout: set 0 per-frame, set 1 texture, and
-    // the fragment push block {vec2 tileCount; int alphaKey}.
+    // glue_particle.vert/frag: set 0 the texture; push constants
+    // {mat4 viewProj; vec4 cameraPos; vec4 limits} for the vertex stage at
+    // 0..96 and {vec2 tileCount; int alphaKey} for the fragment stage at 96.
     {
-        VkDescriptorSetLayout sets[] = {perFrameLayout, texLayout_};
-        VkPushConstantRange pc{};
-        pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        pc.offset = 0;
-        pc.size = 12;
+        VkPushConstantRange pc[2]{};
+        pc[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        pc[0].offset = 0;
+        pc[0].size = 96;
+        pc[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        pc[1].offset = 96;
+        pc[1].size = 12;
         VkPipelineLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        ci.setLayoutCount = 2;
-        ci.pSetLayouts = sets;
-        ci.pushConstantRangeCount = 1;
-        ci.pPushConstantRanges = &pc;
+        ci.setLayoutCount = 1;
+        ci.pSetLayouts = &texLayout_;
+        ci.pushConstantRangeCount = 2;
+        ci.pPushConstantRanges = pc;
         vkCreatePipelineLayout(device, &ci, nullptr, &pipelineLayout_);
+    }
+    if (!texLayout_ || !texPool_ || !pipelineLayout_) {
+        shutdown();
+        return false;
     }
 
     rendering::VkShaderModule vert, frag;
-    if (!vert.loadFromFile(device, "assets/shaders/m2_particle.vert.spv") ||
-        !frag.loadFromFile(device, "assets/shaders/m2_particle.frag.spv")) {
+    if (!vert.loadFromFile(device, "assets/shaders/glue_particle.vert.spv") ||
+        !frag.loadFromFile(device, "assets/shaders/glue_particle.frag.spv")) {
         LOG_WARNING("GlueSceneParticles: particle shaders missing; glue scenes draw without particles");
         shutdown();
         return false;
@@ -254,6 +280,11 @@ void GlueSceneParticles::update(float dt, const std::vector<glm::mat4>& bones,
         p.velocity.z -= track(em.gravity) * dt;
         if (em.drag > 0.0f) p.velocity *= std::exp(-em.drag * dt);
         p.position += p.velocity * dt;
+        if (!finite3(p.position) || !finite3(p.velocity)) {
+            p = particles_.back();
+            particles_.pop_back();
+            continue;
+        }
         ++i;
     }
 
@@ -307,10 +338,13 @@ void GlueSceneParticles::update(float dt, const std::vector<glm::mat4>& bones,
             }
             Particle p;
             p.position = glm::vec3(xf * glm::vec4(local, 1.0f));
+            if (!finite3(p.position)) continue;
             const float s = speed * (1.0f + uN(rng_) * speedVar);
-            p.velocity = glm::normalize(rot * dir) * s;
-            if (!std::isfinite(p.velocity.x)) p.velocity = glm::vec3(0.0f);
-            p.maxLife = life;
+            const glm::vec3 wdir = rot * dir;
+            const float len = glm::length(wdir);
+            p.velocity = (len > 1e-6f && std::isfinite(s)) ? wdir * (s / len) : glm::vec3(0.0f);
+            if (!finite3(p.velocity)) p.velocity = glm::vec3(0.0f);
+            p.maxLife = std::min(life, 60.0f);
             p.emitter = static_cast<uint16_t>(ei);
             p.tile = (tiles > 1 && (em.flags & kFlagRandomTile))
                          ? static_cast<uint16_t>(rng_() % tiles) : 0;
@@ -319,12 +353,15 @@ void GlueSceneParticles::update(float dt, const std::vector<glm::mat4>& bones,
     }
 }
 
-void GlueSceneParticles::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+void GlueSceneParticles::render(VkCommandBuffer cmd, const glm::mat4& viewProj,
+                                const glm::vec3& cameraPos, float pixelsPerUnit,
                                 uint32_t frameIndex) {
     if (!vkCtx_ || particles_.empty() || emitters_.empty()) return;
+    if (!alphaPipeline_ || !additivePipeline_ || !pipelineLayout_) return;
+    if (!std::isfinite(pixelsPerUnit) || pixelsPerUnit <= 0.0f || !finite3(cameraPos)) return;
     const uint32_t fi = frameIndex % kFrames;
     float* vb = static_cast<float*>(vbMapped_[fi]);
-    if (!vb) return;
+    if (!vb || vb_[fi] == VK_NULL_HANDLE) return;
 
     // Grouped by emitter, so one texture bind and draw per emitter.
     struct Run { uint32_t first, count; uint16_t emitter; };
@@ -337,17 +374,23 @@ void GlueSceneParticles::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet
     });
     uint32_t written = 0;
     for (uint32_t idx : order) {
+        if (written >= kMaxParticles) break;
         const Particle& p = particles_[idx];
-        const auto& em = *emitters_[p.emitter].data;
-        const float t = p.life / std::max(p.maxLife, 0.001f);
-        const glm::vec3 color = lifeCurve3(em.particleColor, t);
-        const float alpha = std::min(lifeCurve(em.particleAlpha, t), 1.0f);
-        const float scale = lifeCurve(em.particleScale, t);
+        if (p.emitter >= emitters_.size()) continue;
+        const Emitter& pe = emitters_[p.emitter];
+        if (pe.texSet == VK_NULL_HANDLE || !finite3(p.position)) continue;
+        const auto& em = *pe.data;
+        const float t = glm::clamp(p.life / std::max(p.maxLife, 0.001f), 0.0f, 1.0f);
+        const glm::vec3 color = glm::clamp(lifeCurve3(em.particleColor, t), glm::vec3(0.0f), glm::vec3(1.0f));
+        const float alpha = glm::clamp(finiteOr(lifeCurve(em.particleAlpha, t), 0.0f), 0.0f, 1.0f);
+        const float scale = glm::clamp(finiteOr(lifeCurve(em.particleScale, t), 0.0f), 0.0f, 50.0f);
+        if (alpha <= 0.0f || scale <= 0.0f || !finite3(color)) continue;
         const uint32_t tiles = std::max<uint32_t>(1u, uint32_t(em.textureRows) * em.textureCols);
         float tile = 0.0f;
         if (tiles > 1) {
             // Step through the cells over the particle's life.
-            tile = static_cast<float>((p.tile + static_cast<uint32_t>(t * tiles)) % tiles);
+            const uint32_t step = std::min(static_cast<uint32_t>(t * tiles), tiles - 1);
+            tile = static_cast<float>((p.tile + step) % tiles);
         }
         if (runs.empty() || runs.back().emitter != p.emitter) runs.push_back({written, 0, p.emitter});
         float* v = vb + static_cast<size_t>(written) * 9;
@@ -359,13 +402,22 @@ void GlueSceneParticles::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet
         ++runs.back().count;
     }
     if (written == 0) return;
+    // Visible to the device whether or not the memory type is coherent.
+    vmaFlushAllocation(vkCtx_->getAllocator(), vbAlloc_[fi], 0,
+                       static_cast<VkDeviceSize>(written) * 9 * sizeof(float));
 
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1,
-                            &perFrameSet, 0, nullptr);
+    struct VertPush {
+        glm::mat4 viewProj;
+        glm::vec4 cameraPos;
+        glm::vec4 limits;
+    } vp{viewProj, glm::vec4(cameraPos, pixelsPerUnit), glm::vec4(maxPointSize_, 0.0f, 0.0f, 0.0f)};
+    static_assert(sizeof(VertPush) == 96, "matches glue_particle.vert.glsl");
+
     VkDeviceSize off = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &vb_[fi], &off);
     VkPipeline bound = VK_NULL_HANDLE;
     for (const Run& r : runs) {
+        if (r.count == 0) continue;
         const Emitter& e = emitters_[r.emitter];
         const auto& em = *e.data;
         // 3 and 4 are the additive blends, as M2Renderer draws them.
@@ -373,15 +425,16 @@ void GlueSceneParticles::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet
                                                                          : alphaPipeline_;
         if (want != bound) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want);
+            vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(vp), &vp);
             bound = want;
         }
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 1, 1,
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1,
                                 &e.texSet, 0, nullptr);
         struct { float tx, ty; int32_t alphaKey; } pc{
             static_cast<float>(std::max<uint16_t>(em.textureCols, 1)),
             static_cast<float>(std::max<uint16_t>(em.textureRows, 1)),
             em.blendingType == 1 ? 1 : 0};
-        vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
+        vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 96, sizeof(pc), &pc);
         vkCmdDraw(cmd, r.count, 1, r.first, 0);
     }
 }

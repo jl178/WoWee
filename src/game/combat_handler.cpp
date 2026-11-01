@@ -174,6 +174,11 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
                 addCombatText(CombatTextEntry::ABSORB, static_cast<int32_t>(envAbs), 0, false, 0, 0, victimGuid);
             if (envRes > 0)
                 addCombatText(CombatTextEntry::RESIST, static_cast<int32_t>(envRes), 0, false, 0, 0, victimGuid);
+            // Lava, fire and slime are magical schools to the addon; falling,
+            // drowning and fatigue are plain damage.
+            const bool envMagical = envType == 3 || envType == 4 || envType == 5;
+            owner_.fireCombatTextUpdate(victimGuid,
+                combatTextUpdateForHit(envMagical, false, dmg, envRes, 0, envAbs));
             // Drowning damage → play DROWN one-shot on player
             if (envType == 1 && dmg > 0 && owner_.emoteAnimCallbackRef())
                 owner_.emoteAnimCallbackRef()(victimGuid, 131, /*isState=*/false); // anim::DROWN
@@ -706,9 +711,11 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
     bool isPlayerAttacker = (data.attackerGuid == owner_.getPlayerGuid());
     bool isPlayerTarget = (data.targetGuid == owner_.getPlayerGuid());
     // Animations are for every fight in view, as in the stock client: two
-    // other units trading blows swing and flinch too. Only the combat text,
-    // sounds and auto-targeting below are kept to the player's own fights.
+    // other units trading blows swing and flinch too, and are heard. Only the
+    // combat text, the local character's voice and auto-targeting below are
+    // kept to the player's own fights.
     const bool ourCombat = isPlayerAttacker || isPlayerTarget;
+    bool rangedShot = false;
 
     if (isPlayerAttacker) {
         lastMeleeSwingMs_ = static_cast<uint64_t>(
@@ -718,6 +725,7 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
         // SMSG_SPELL_GO (Auto Shot / Shoot / Throw).  The ranged animation
         // is already playing; firing the melee callback here would override it.
         if (owner_.consumeSuppressMeleeSwingAnim()) {
+            rangedShot = true;
             LOG_DEBUG("Suppressed melee swing anim - ranged shot already triggered");
         } else if (!data.noAnimation()) {
             if (owner_.meleeSwingCallbackRef()) owner_.meleeSwingCallbackRef()(0, data.hitInfo);
@@ -741,40 +749,50 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
         owner_.hitReactionCallbackRef()(data.targetGuid, reaction);
     }
 
-    if (!ourCombat) return;  // Not our combat: no text, sounds or targeting
-
-    if (!isPlayerAttacker) {
-        auto entity = owner_.getEntityManager().getEntity(data.attackerGuid);
-        auto* audioCoordinator = owner_.services().audioCoordinator;
-        auto* voiceManager = audioCoordinator ? audioCoordinator->getNpcVoiceManager() : nullptr;
-        if (entity && entity->getType() == ObjectType::UNIT && voiceManager) {
-            auto unit = std::static_pointer_cast<Unit>(entity);
-            const glm::vec3 canonical(unit->getLatestX(), unit->getLatestY(), unit->getLatestZ());
-            voiceManager->playCombatAttack(
-                data.attackerGuid, unit->getDisplayId(), core::coords::canonicalToRender(canonical));
+    // The swing and the blow, heard for every fight in view as in the stock
+    // client: the swoosh by the attacker's weapon, the blow by that weapon
+    // against what it struck - the victim's body or armour, its shield on a
+    // block, its weapon on a parry; a dodge or a miss is the swoosh alone.
+    // The victim's injury voice comes with some blows. Synced to the attack
+    // animation's $CSS / $CAH events where it has them (CombatSoundManager).
+    if (!rangedShot && data.victimState != VICTIMSTATE_EVADES && data.victimState != VICTIMSTATE_IS_IMMUNE) {
+        if (auto* ac = owner_.services().audioCoordinator) {
+            if (auto* csm = ac->getCombatSoundManager()) {
+                using MO = audio::CombatSoundManager::MeleeOutcome;
+                MO outcome = MO::HIT;
+                if (data.victimState == VICTIMSTATE_DODGE) outcome = MO::DODGE;
+                else if (data.victimState == VICTIMSTATE_PARRY) outcome = MO::PARRY;
+                else if (data.isMiss()) outcome = MO::MISS;
+                else if (data.victimState == VICTIMSTATE_BLOCKS || data.blocked > 0) outcome = MO::BLOCK;
+                else if (data.isCrit()) outcome = MO::CRIT;
+                constexpr uint32_t kHitInfoOffHand = 0x00000004;
+                csm->onMelee(data.attackerGuid, data.targetGuid, outcome, (data.hitInfo & kHitInfoOffHand) != 0,
+                             !data.noAnimation(), /*injureVictim=*/true, ourCombat);
+            }
+            // A creature's attack cry (CreatureSoundData exertion), which is
+            // also all a claw or a fist has to say for itself.
+            if (!isPlayerAttacker) {
+                auto entity = owner_.getEntityManager().getEntity(data.attackerGuid);
+                auto* voiceManager = ac->getNpcVoiceManager();
+                if (entity && entity->getType() == ObjectType::UNIT && voiceManager) {
+                    auto unit = std::static_pointer_cast<Unit>(entity);
+                    const glm::vec3 canonical(unit->getLatestX(), unit->getLatestY(), unit->getLatestZ());
+                    voiceManager->playCombatAttack(
+                        data.attackerGuid, unit->getDisplayId(), core::coords::canonicalToRender(canonical));
+                }
+            }
         }
     }
+
+    if (!ourCombat) return;  // Not our combat: no text, voice or targeting
 
     if (isPlayerTarget && data.attackerGuid != 0) {
         hostileAttackers_.insert(data.attackerGuid);
         autoTargetAttacker(data.attackerGuid);
     }
 
-    // Play combat sounds via CombatSoundManager + character vocalizations
+    // The local character's own voice
     if (auto* ac = owner_.services().audioCoordinator) {
-        if (auto* csm = ac->getCombatSoundManager()) {
-            auto weaponSize = audio::CombatSoundManager::WeaponSize::MEDIUM;
-            if (data.isMiss()) {
-                csm->playWeaponMiss(false);
-            } else if (data.victimState == VICTIMSTATE_DODGE || data.victimState == VICTIMSTATE_PARRY) {
-                // Dodge/parry - swing whoosh but no impact
-                csm->playWeaponSwing(weaponSize, false);
-            } else {
-                // Hit - swing + flesh impact
-                csm->playWeaponSwing(weaponSize, data.isCrit());
-                csm->playImpact(weaponSize, audio::CombatSoundManager::ImpactType::FLESH, data.isCrit());
-            }
-        }
         // Character vocalizations
         if (auto* asm_ = ac->getActivitySoundManager()) {
             if (isPlayerAttacker && !data.isMiss() && data.victimState != VICTIMSTATE_DODGE &&
@@ -828,6 +846,28 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
         if (data.blocked > 0)
             addCombatText(CombatTextEntry::BLOCK, static_cast<int32_t>(data.blocked), 0, isPlayerAttacker, 0, data.attackerGuid, data.targetGuid);
     }
+
+    // The same swing as Blizzard_CombatText hears it, when it landed on us.
+    if (isPlayerTarget) {
+        std::vector<std::string> ctu;
+        if (data.victimState == VICTIMSTATE_EVADES)          ctu = {"EVADE"};
+        else if (data.isMiss())                               ctu = {"MISS"};
+        else if (data.victimState == VICTIMSTATE_DODGE)       ctu = {"DODGE"};
+        else if (data.victimState == VICTIMSTATE_PARRY)       ctu = {"PARRY"};
+        else if (data.victimState == VICTIMSTATE_IS_IMMUNE)   ctu = {"IMMUNE"};
+        else if (data.victimState == VICTIMSTATE_DEFLECTS)    ctu = {"DEFLECT"};
+        else if (data.victimState == VICTIMSTATE_BLOCKS && data.totalDamage <= 0) ctu = {"BLOCK"};
+        else {
+            uint32_t absorbed = 0, resisted = 0;
+            for (const auto& sub : data.subDamages) {
+                absorbed += sub.absorbed;
+                resisted += sub.resisted;
+            }
+            const uint32_t dealt = data.totalDamage > 0 ? static_cast<uint32_t>(data.totalDamage) : 0u;
+            ctu = combatTextUpdateForHit(false, data.isCrit(), dealt, resisted, data.blocked, absorbed);
+        }
+        owner_.fireCombatTextUpdate(data.targetGuid, ctu);
+    }
 }
 
 void CombatHandler::handleSpellDamageLog(network::Packet& packet) {
@@ -841,6 +881,18 @@ void CombatHandler::handleSpellDamageLog(network::Packet& packet) {
     if (owner_.hitReactionCallbackRef() && data.damage > 0) {
         owner_.hitReactionCallbackRef()(data.targetGuid, data.isCrit
             ? GameHandler::HitReaction::CRIT_WOUND : GameHandler::HitReaction::WOUND);
+    }
+    // And cries out as a melee blow can make it: its injury voice
+    // (CreatureSoundData), the crit one on a crit. The local character's is
+    // its activity sounds'.
+    if (data.damage > 0) {
+        if (auto* ac = owner_.services().audioCoordinator) {
+            if (isPlayerTarget) {
+                if (auto* asm_ = ac->getActivitySoundManager()) asm_->playWound(data.isCrit);
+            } else if (auto* csm = ac->getCombatSoundManager()) {
+                csm->onWounded(data.targetGuid, data.isCrit);
+            }
+        }
     }
     if (!isPlayerSource && !isPlayerTarget) return;  // Not our combat: no text or targeting
 
@@ -856,6 +908,13 @@ void CombatHandler::handleSpellDamageLog(network::Packet& packet) {
         addCombatText(CombatTextEntry::ABSORB, static_cast<int32_t>(data.absorbed), data.spellId, isPlayerSource, 0, data.attackerGuid, data.targetGuid);
     if (data.resisted > 0)
         addCombatText(CombatTextEntry::RESIST, static_cast<int32_t>(data.resisted), data.spellId, isPlayerSource, 0, data.attackerGuid, data.targetGuid);
+    // A physical ability - Mortal Strike, a mob's Cleave - is DAMAGE to the
+    // addon rather than SPELL_DAMAGE, and drawn in the melee colour.
+    if (isPlayerTarget) {
+        const bool magical = data.schoolMask != 0 && data.schoolMask != 1;
+        owner_.fireCombatTextUpdate(data.targetGuid,
+            combatTextUpdateForHit(magical, data.isCrit, data.damage, data.resisted, 0, data.absorbed));
+    }
 }
 
 void CombatHandler::handleSpellHealLog(network::Packet& packet) {
@@ -870,6 +929,13 @@ void CombatHandler::handleSpellHealLog(network::Packet& packet) {
     addCombatText(type, static_cast<int32_t>(data.heal), data.spellId, isPlayerSource, 0, data.casterGuid, data.targetGuid);
     if (data.absorbed > 0)
         addCombatText(CombatTextEntry::ABSORB, static_cast<int32_t>(data.absorbed), data.spellId, isPlayerSource, 0, data.casterGuid, data.targetGuid);
+    // HEAL carries the healer's name and then the amount: the addon prints
+    // "+N", or "+N [Name]" with friendly healer names switched on.
+    if (isPlayerTarget) {
+        owner_.fireCombatTextUpdate(data.targetGuid,
+            {data.isCrit ? "HEAL_CRIT" : "HEAL", owner_.lookupName(data.casterGuid),
+             std::to_string(data.heal)});
+    }
 }
 
 void CombatHandler::handleSetForcedReactions(network::Packet& packet) {
@@ -1061,7 +1127,12 @@ void CombatHandler::handleUpdateComboPoints(network::Packet& packet) {
     owner_.comboTargetRef() = target;
     LOG_DEBUG("SMSG_UPDATE_COMBO_POINTS: target=0x", std::hex, target,
               std::dec, " points=", static_cast<int>(owner_.comboPointsRef()));
-    owner_.fireAddonEvent("PLAYER_COMBO_POINTS", {});
+    // UNIT_COMBO_POINTS with the unit is the 3.x name: comboframe.lua and
+    // Blizzard_CombatText both answer it and only when arg1 is the unit their
+    // frame follows. PLAYER_COMBO_POINTS is what 1.x and 2.x interfaces listen
+    // for, and a WotLK one never registers it - so the combo frame stayed dark.
+    if (isPreWotlk()) owner_.fireAddonEvent("PLAYER_COMBO_POINTS", {});
+    else              owner_.fireAddonEvent("UNIT_COMBO_POINTS", {"player"});
 }
 
 void CombatHandler::handlePvpCredit(network::Packet& packet) {
@@ -1073,6 +1144,8 @@ void CombatHandler::handlePvpCredit(network::Packet& packet) {
         std::string msg = "You gain " + std::to_string(honor) + " honor points.";
         owner_.addLocalChatLine(ChatType::COMBAT_HONOR_GAIN, msg);
         if (honor > 0) addCombatText(CombatTextEntry::HONOR_GAIN, static_cast<int32_t>(honor), 0, true);
+        if (honor > 0)
+            owner_.fireCombatTextUpdate(owner_.getPlayerGuid(), {"HONOR_GAINED", std::to_string(honor)});
     }
 }
 
@@ -1091,6 +1164,7 @@ void CombatHandler::handleProcResist(network::Packet& packet) {
     uint32_t spellId = packet.readUInt32();
     if (victim == owner_.getPlayerGuid())       addCombatText(CombatTextEntry::RESIST, 0, spellId, false, 0, caster, victim);
     else if (caster == owner_.getPlayerGuid())  addCombatText(CombatTextEntry::RESIST, 0, spellId, true,  0, caster, victim);
+    owner_.fireCombatTextUpdate(victim, {"SPELL_RESIST"});
     packet.skipAll();
 }
 
@@ -1136,6 +1210,7 @@ void CombatHandler::handleSpellDamageShield(network::Packet& packet) {
     } else if (victimGuid == owner_.getPlayerGuid()) {
         // A damage shield hit us (e.g. target's Thorns)
         addCombatText(CombatTextEntry::SPELL_DAMAGE, static_cast<int32_t>(damage), shieldSpellId, false, 0, casterGuid, victimGuid);
+        owner_.fireCombatTextUpdate(victimGuid, combatTextUpdateForHit(true, false, damage, 0, 0, 0));
     }
 }
 
@@ -1166,6 +1241,8 @@ void CombatHandler::handleSpellOrDamageImmune(network::Packet& packet) {
         addCombatText(CombatTextEntry::IMMUNE, 0, immuneSpellId,
                       casterGuid == owner_.getPlayerGuid(), 0, casterGuid, victimGuid);
     }
+    // No COMBAT_TEXT_UPDATE here: the same immunity arrives in SMSG_SPELL_GO's
+    // miss list (or the melee swing's victim state), which already sends it.
 }
 
 void CombatHandler::handleResistLog(network::Packet& packet) {

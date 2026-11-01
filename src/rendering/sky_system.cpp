@@ -7,6 +7,7 @@
 #include "rendering/lens_flare.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/vk_context.hpp"
+#include "core/application.hpp"
 #include "core/logger.hpp"
 
 namespace wowee {
@@ -95,85 +96,68 @@ void SkySystem::update(float deltaTime) {
     }
 
     if (skybox_)    skybox_->update(deltaTime);
-    if (celestial_) celestial_->update(deltaTime);
+    if (celestial_) {
+        // The stock sprites, loaded the first time there is an asset manager
+        // - here rather than while the sky is being recorded.
+        celestial_->loadTextures(core::Application::getInstance().getAssetManager());
+        celestial_->update(deltaTime);
+    }
     if (starField_) starField_->update(deltaTime);
     if (clouds_)    clouds_->update(deltaTime);
 }
 
 void SkySystem::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         const Camera& camera, const SkyParams& params) {
-    if (!initialized_) {
-        return;
-    }
+    renderDome(cmd, perFrameSet, params);
+    renderOverlays(cmd, perFrameSet, camera, params);
+}
 
-    // --- Skybox (authoritative sky gradient, DBC-driven colors) ---
+void SkySystem::renderDome(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                           const SkyParams& params) {
+    if (!initialized_) return;
+
+    // --- The dome: Light.dbc's six sky bands ---
     if (skybox_) {
         skybox_->render(cmd, perFrameSet, params);
     }
+}
 
-    // Original client sky M2s supply their own celestial bodies, clouds, and
-    // nebula layers. The caller draws that model over the gradient underlay.
+void SkySystem::renderOverlays(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                               const Camera& /*camera*/, const SkyParams& params) {
+    if (!initialized_) return;
 
-    // --- Procedural stars ---
-    // Not only a fallback any more: with sharp stars on, the sky model keeps
-    // its clouds and planets while M2Renderer drops its star layer, and these
-    // are drawn in that layer's place. So the original-skybox path continues
-    // here rather than returning, and skyboxHasStars stops meaning "do not".
-    bool renderProceduralStars = false;
-    if (debugSkyMode_) {
-        renderProceduralStars = true;
-    } else if (proceduralStarsEnabled_) {
-        renderProceduralStars = true;
-    } else if (!params.useOriginalSkybox) {
-        renderProceduralStars = !params.skyboxHasStars;
-    }
-
-    if (params.useOriginalSkybox && !renderProceduralStars) {
-        if (starField_) starField_->setEnabled(false);
-        return;
-    }
-
+    // --- Procedural stars: only when asked for ---
+    // The stock night sky is Stars.mdx, which LightingManager puts up as a sky
+    // model layer at dnc.db's night intensity. These are the "sharp stars"
+    // option (and the debug view), drawn where M2Renderer drops a sky model's
+    // star batches - not a fallback under every sky without a model.
+    const bool renderProceduralStars = debugSkyMode_ || proceduralStarsEnabled_;
     if (starField_) {
         starField_->setEnabled(renderProceduralStars);
         if (renderProceduralStars) {
-            const float cloudDensity = params.cloudDensity;
-            const float fogDensity   = params.fogDensity;
-            starField_->render(cmd, perFrameSet, params.timeOfDay, cloudDensity, fogDensity);
+            starField_->render(cmd, perFrameSet, params.timeOfDay,
+                               params.cloudDensity, params.fogDensity);
         }
     }
 
-    // --- Celestial bodies (sun + White Lady + Blue Child) ---
+    // Original client sky M2s (LightSkybox) carry their own sun, moons and
+    // clouds; the caller has drawn that model over the dome already.
+    if (params.useOriginalSkybox) return;
+
+    // --- Sun and moon: the client's sprites ---
     if (celestial_) {
-        // Gate moon visibility on how dark the DBC sky actually is. The
-        // hardcoded 19:00 night window can precede sky darkening by hours,
-        // and full-brightness moons on a daylight sky read as extra suns.
-        float skyLum = glm::dot(params.skyTopColor, glm::vec3(0.2126f, 0.7152f, 0.0722f));
-        float nightFactor = 1.0f - glm::smoothstep(0.08f, 0.25f, skyLum);
-        celestial_->render(cmd, perFrameSet, params.timeOfDay,
-                           &params.directionalDir, &params.sunColor, params.gameTime,
-                           nightFactor);
+        celestial_->render(cmd, perFrameSet, params);
     }
 
-    // --- Clouds (DBC-driven colors + sun lighting) ---
+    // --- Clouds: Light.dbc's density and colours. A storm's overcast comes
+    // from its storm set, which LightingManager blends in by the weather's
+    // intensity, so nothing is added for the weather here. ---
     if (clouds_) {
-        // Sync cloud density with weather/DBC-driven cloud coverage.
-        // Active weather (rain/snow/storm) increases cloud density for visual consistency.
-        float effectiveDensity = params.cloudDensity;
-        if (params.weatherIntensity > 0.05f) {
-            float weatherBoost = params.weatherIntensity * 0.4f;  // storms add up to 0.4 density
-            effectiveDensity = glm::min(1.0f, effectiveDensity + weatherBoost);
-        }
-        clouds_->setDensity(effectiveDensity);
+        clouds_->setDensity(params.cloudDensity);
         clouds_->render(cmd, perFrameSet, params);
     }
 
-    // --- Lens flare (attenuated by atmosphere) ---
-    if (lensFlare_) {
-        glm::vec3 sunPos = getSunPosition(params);
-        lensFlare_->render(cmd, camera, sunPos, params.timeOfDay,
-                           params.fogDensity, params.cloudDensity,
-                           params.weatherIntensity, params.sunOcclusion);
-    }
+    // No lens flare: the stock sun has its glare sprite and nothing more.
 }
 
 glm::vec3 SkySystem::getSunPosition(const SkyParams& params) const {

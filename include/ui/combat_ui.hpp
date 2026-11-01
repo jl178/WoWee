@@ -39,7 +39,9 @@ public:
     /// The whisper sound, taken from a walk of new chat lines. What is left
     /// of the raid warning overlay, whose banner is FrameXML's.
     void playSoundsForNewChat(game::GameHandler& gameHandler);
-    void renderCombatText(game::GameHandler& gameHandler);
+    /// World text over targets always; what happened to the player only when
+    /// `drawIncoming` - false once Blizzard_CombatText is drawing that half.
+    void renderCombatText(game::GameHandler& gameHandler, bool drawIncoming);
 
     // UIServices injection (Phase B singleton breaking)
     void setServices(const UIServices& services) { services_ = services; }

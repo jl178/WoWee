@@ -1,16 +1,54 @@
 #include "rendering/celestial.hpp"
+#include "rendering/sky_system.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/vk_pipeline.hpp"
-#include "rendering/vk_frame_data.hpp"
 #include "rendering/vk_utils.hpp"
+#include "pipeline/asset_manager.hpp"
+#include "pipeline/blp_loader.hpp"
 #include "core/logger.hpp"
-#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/constants.hpp>
 #include <cmath>
 #include <vector>
 
 namespace wowee {
 namespace rendering {
+
+namespace {
+
+// The client's sky sprites, by the paths 3.3.5 ships them under.
+constexpr const char* kSpritePaths[] = {
+    "Textures\\SunCenter.blp",
+    "Textures\\SunGlare.blp",
+    "Textures\\Moon.blp",
+    "Textures\\MoonGlare.blp",
+};
+
+// Angular half sizes, in radians. The sun's core is about seven degrees
+// across with its glare reaching some twenty degrees out; the moon is a
+// little smaller than the sun's core.
+constexpr float kSunCenterHalfSize = 0.060f;
+constexpr float kSunGlareHalfSize  = 0.340f;
+constexpr float kMoonHalfSize      = 0.050f;
+constexpr float kMoonGlareHalfSize = 0.110f;
+
+/// Premultiplied blending, so one pipeline draws both the additive sprites
+/// (alpha written as 0) and the alpha-blended moon.
+VkPipelineColorBlendAttachmentState blendPremultiplied() {
+    VkPipelineColorBlendAttachmentState state{};
+    state.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    state.blendEnable = VK_TRUE;
+    state.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+    state.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    state.colorBlendOp = VK_BLEND_OP_ADD;
+    state.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    state.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    state.alphaBlendOp = VK_BLEND_OP_ADD;
+    return state;
+}
+
+} // namespace
 
 Celestial::Celestial() = default;
 
@@ -21,25 +59,49 @@ Celestial::~Celestial() {
 VkPipeline Celestial::buildPipeline(VkDevice device,
                                     const VkPipelineShaderStageCreateInfo& vertStage,
                                     const VkPipelineShaderStageCreateInfo& fragStage) {
-    // Vertex: vec3 pos + vec2 texCoord, stride = 20 bytes
-    VkVertexInputBindingDescription binding = tightVertexBinding(5 * sizeof(float));
-    std::vector<VkVertexInputAttributeDescription> attrs = positionPlusUvAttrs();
-    std::vector<VkDynamicState> dynamicStates = viewportAndScissorDynamic();
-
+    // No vertex buffer: the quad's corners come from gl_VertexIndex.
     return PipelineBuilder()
         .setShaders(vertStage, fragStage)
-        .setVertexInput({binding}, attrs)
+        .setVertexInput({}, {})
         .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
         .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
         // On the far plane and tested, never written: the ground is drawn before
-        // the sky now, and this is what keeps the sun behind a mountain.
+        // the sky, and this is what keeps the sun behind a mountain.
         .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
-        .setColorBlendAttachment(PipelineBuilder::blendAdditive())
+        .setColorBlendAttachment(blendPremultiplied())
         .setMultisample(vkCtx_->getMsaaSamples())
         .setLayout(pipelineLayout_)
         .setRenderPass(vkCtx_->getImGuiRenderPass())
-        .setDynamicStates(dynamicStates)
+        .setDynamicStates(viewportAndScissorDynamic())
         .build(device, vkCtx_->getPipelineCache());
+}
+
+bool Celestial::createDescriptors() {
+    VkDevice device = vkCtx_->getDevice();
+    VkDescriptorSetLayoutBinding sampler{};
+    sampler.binding = 0;
+    sampler.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    sampler.descriptorCount = 1;
+    sampler.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    textureSetLayout_ = createDescriptorSetLayout(device, {sampler});
+    if (!textureSetLayout_) return false;
+
+    VkDescriptorPoolSize size{};
+    size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    size.descriptorCount = SPRITE_COUNT;
+    VkDescriptorPoolCreateInfo pool{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pool.maxSets = SPRITE_COUNT;
+    pool.poolSizeCount = 1;
+    pool.pPoolSizes = &size;
+    if (vkCreateDescriptorPool(device, &pool, nullptr, &descriptorPool_) != VK_SUCCESS) return false;
+
+    std::array<VkDescriptorSetLayout, SPRITE_COUNT> layouts{};
+    layouts.fill(textureSetLayout_);
+    VkDescriptorSetAllocateInfo alloc{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    alloc.descriptorPool = descriptorPool_;
+    alloc.descriptorSetCount = SPRITE_COUNT;
+    alloc.pSetLayouts = layouts.data();
+    return vkAllocateDescriptorSets(device, &alloc, textureSets_.data()) == VK_SUCCESS;
 }
 
 bool Celestial::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
@@ -48,37 +110,31 @@ bool Celestial::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout)
     vkCtx_ = ctx;
     VkDevice device = vkCtx_->getDevice();
 
-    // ------------------------------------------------------------------ shaders
-    auto shaders = loadShaderPair(device, "assets/shaders/celestial.vert.spv", "assets/shaders/celestial.frag.spv", "celestial");
-    if (!shaders) return false;
-    const auto& vertStage = shaders.vertStage;
-    const auto& fragStage = shaders.fragStage;
+    if (!createDescriptors()) {
+        LOG_ERROR("Failed to create celestial descriptors");
+        return false;
+    }
 
-    // ------------------------------------------------------------------ push constants
-    // Layout: mat4(64) + vec4(16) + float*3(12) + pad(4) = 96 bytes
+    auto shaders = loadShaderPair(device, "assets/shaders/celestial.vert.spv",
+                                  "assets/shaders/celestial.frag.spv", "celestial");
+    if (!shaders) return false;
+
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pushRange.offset     = 0;
-    pushRange.size       = sizeof(CelestialPush); // 96 bytes
+    pushRange.size       = sizeof(CelestialPush);
 
-    // ------------------------------------------------------------------ pipeline layout
-    pipelineLayout_ = createPipelineLayout(device, {perFrameLayout}, {pushRange});
+    pipelineLayout_ = createPipelineLayout(device, {perFrameLayout, textureSetLayout_}, {pushRange});
     if (pipelineLayout_ == VK_NULL_HANDLE) {
         LOG_ERROR("Failed to create celestial pipeline layout");
         return false;
     }
 
-    // ------------------------------------------------------------------ pipeline
-    pipeline_ = buildPipeline(device, vertStage, fragStage);
-
-
+    pipeline_ = buildPipeline(device, shaders.vertStage, shaders.fragStage);
     if (pipeline_ == VK_NULL_HANDLE) {
         LOG_ERROR("Failed to create celestial pipeline");
         return false;
     }
-
-    // ------------------------------------------------------------------ geometry
-    createQuad();
 
     LOG_INFO("Celestial renderer initialized");
     return true;
@@ -90,330 +146,138 @@ void Celestial::recreatePipelines() {
 
     destroy(device, pipeline_);
 
-    auto shaders = loadShaderPair(device, "assets/shaders/celestial.vert.spv", "assets/shaders/celestial.frag.spv", "celestial");
+    auto shaders = loadShaderPair(device, "assets/shaders/celestial.vert.spv",
+                                  "assets/shaders/celestial.frag.spv", "celestial");
     if (!shaders) return;
-    const auto& vertStage = shaders.vertStage;
-    const auto& fragStage = shaders.fragStage;
 
-    pipeline_ = buildPipeline(device, vertStage, fragStage);
-
-
+    pipeline_ = buildPipeline(device, shaders.vertStage, shaders.fragStage);
     if (pipeline_ == VK_NULL_HANDLE) {
         LOG_ERROR("Celestial::recreatePipelines: failed to create pipeline");
     }
 }
 
 void Celestial::shutdown() {
-    destroyQuad();
-
-    if (vkCtx_) destroyPipeline(vkCtx_->getDevice(), pipeline_, pipelineLayout_);
-
+    if (!vkCtx_) return;
+    VkDevice device = vkCtx_->getDevice();
+    VmaAllocator allocator = vkCtx_->getAllocator();
+    for (auto& texture : textures_) texture.destroy(device, allocator);
+    textureReady_.fill(false);
+    destroyPipeline(device, pipeline_, pipelineLayout_);
+    destroy(device, descriptorPool_);
+    destroy(device, textureSetLayout_);
+    textureSets_.fill(VK_NULL_HANDLE);
+    texturesAttempted_ = false;
     vkCtx_ = nullptr;
 }
 
-// ---------------------------------------------------------------------------
-// Public render entry point
-// ---------------------------------------------------------------------------
+void Celestial::loadTextures(pipeline::AssetManager* assetManager) {
+    if (texturesAttempted_ || !assetManager || !vkCtx_ || !descriptorPool_) return;
+    texturesAttempted_ = true;
 
-void Celestial::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                       float timeOfDay,
-                       const glm::vec3* sunDir, const glm::vec3* sunColor,
-                       float gameTime, float nightFactor) {
-    if (!renderingEnabled_ || pipeline_ == VK_NULL_HANDLE) {
-        return;
+    VkDevice device = vkCtx_->getDevice();
+    for (uint32_t i = 0; i < SPRITE_COUNT; ++i) {
+        pipeline::BLPImage image = assetManager->loadTexture(kSpritePaths[i]);
+        if (!image.isValid() ||
+            !textures_[i].upload(*vkCtx_, image.data.data(), image.width, image.height,
+                                 VK_FORMAT_R8G8B8A8_UNORM, true)) {
+            LOG_WARNING("Celestial: failed to load ", kSpritePaths[i]);
+            continue;
+        }
+        textures_[i].createSampler(device, VK_FILTER_LINEAR, VK_FILTER_LINEAR,
+                                   VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+        if (!textures_[i].isValid()) {
+            LOG_WARNING("Celestial: ", kSpritePaths[i], " is not sampleable");
+            continue;
+        }
+        VkDescriptorImageInfo imageInfo = textures_[i].descriptorInfo();
+        VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = textureSets_[i];
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &imageInfo;
+        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        textureReady_[i] = true;
     }
+}
 
-    // Update moon phases from server game time if provided
-    if (gameTime >= 0.0f) {
-        updatePhasesFromGameTime(gameTime);
-    }
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
 
-    // Bind pipeline and per-frame descriptor set once - reused for all draws
+glm::vec3 Celestial::moonDirection(float timeOfDayHours) {
+    // LightingManager::sampleLightParams moves the light along this path by
+    // the hour; the moon stands where the sun stands twelve hours on.
+    const float angle = std::fmod(timeOfDayHours / 24.0f + 0.5f, 1.0f) * glm::two_pi<float>();
+    const glm::vec3 lightDir(std::sin(angle) * 0.6f,
+                             -0.6f + std::cos(angle) * 0.4f,
+                             std::cos(angle) * 0.6f);
+    return -glm::normalize(lightDir);
+}
+
+void Celestial::drawSprite(VkCommandBuffer cmd, Sprite sprite, const glm::vec3& dir,
+                           float halfSize, const glm::vec4& color, bool alphaBlended) {
+    if (!textureReady_[sprite] || color.a <= 0.002f) return;
+    CelestialPush push{};
+    push.dirAndSize = glm::vec4(glm::normalize(dir), halfSize);
+    push.color = color;
+    push.mode = glm::vec4(alphaBlended ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
+                            1, 1, &textureSets_[sprite], 0, nullptr);
+    vkCmdPushConstants(cmd, pipelineLayout_,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(push), &push);
+    vkCmdDraw(cmd, 6, 1, 0, 0);
+}
+
+void Celestial::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyParams& params) {
+    if (!renderingEnabled_ || pipeline_ == VK_NULL_HANDLE) return;
+
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
-        0, 1, &perFrameSet, 0, nullptr);
+                            0, 1, &perFrameSet, 0, nullptr);
 
-    // Bind the shared quad buffers
-    VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer_, &offset);
-    vkCmdBindIndexBuffer(cmd, indexBuffer_, 0, VK_INDEX_TYPE_UINT32);
+    // Through cloud only as much as LightFloatBand 2 lets it: 1 in almost
+    // every set, 0 in the death set and the storm sets' heaviest hours.
+    const float throughCloud =
+        glm::mix(1.0f, glm::clamp(params.celestialGlowThrough, 0.0f, 1.0f),
+                 glm::clamp(params.cloudDensity, 0.0f, 1.0f));
 
-    // Draw sun, then moon(s) - each call pushes different constants
-    renderSun(cmd, perFrameSet, timeOfDay, sunDir, sunColor);
-    renderMoon(cmd, perFrameSet, timeOfDay, nightFactor);
-    if (dualMoonMode_) {
-        renderBlueChild(cmd, perFrameSet, timeOfDay, nightFactor);
+    // --- Moon: behind the sun's glare, so drawn first ---
+    const float night = glm::clamp(params.nightIntensity, 0.0f, 1.0f) * throughCloud;
+    if (night > 0.002f) {
+        const glm::vec3 moonDir = moonDirection(params.timeOfDay);
+        if (moonDir.z > -0.1f) {
+            drawSprite(cmd, MOON_GLARE, moonDir, kMoonGlareHalfSize,
+                       glm::vec4(1.0f, 1.0f, 1.0f, night), false);
+            drawSprite(cmd, MOON, moonDir, kMoonHalfSize,
+                       glm::vec4(1.0f, 1.0f, 1.0f, night), true);
+        }
+    }
+
+    // --- Sun ---
+    const float day = glm::clamp(params.dayIntensity, 0.0f, 1.0f) * throughCloud;
+    const glm::vec3 sunDir = -glm::normalize(params.directionalDir);
+    if (day > 0.002f && sunDir.z > -0.1f) {
+        const glm::vec3 sunColor = glm::max(params.sunColor, glm::vec3(0.0f));
+        drawSprite(cmd, SUN_GLARE, sunDir, kSunGlareHalfSize, glm::vec4(sunColor, day), false);
+        drawSprite(cmd, SUN_CENTER, sunDir, kSunCenterHalfSize, glm::vec4(sunColor, day), false);
     }
 }
 
 // ---------------------------------------------------------------------------
-// Private per-body render helpers
-// ---------------------------------------------------------------------------
-
-void Celestial::renderSun(VkCommandBuffer cmd, VkDescriptorSet /*perFrameSet*/,
-                           float timeOfDay,
-                           const glm::vec3* sunDir, const glm::vec3* sunColor) {
-    // Sun visible 5:00–19:00
-    if (timeOfDay < 5.0f || timeOfDay >= 19.0f) {
-        return;
-    }
-
-    // Resolve sun direction - prefer opposite of incoming light ray, clamp below horizon
-    glm::vec3 lightDir = sunDir ? glm::normalize(*sunDir) : glm::vec3(0.0f, 0.0f, -1.0f);
-    glm::vec3 dir = -lightDir;
-    if (dir.z < 0.0f) {
-        dir = lightDir;
-    }
-
-    const float sunDistance = 800.0f;
-    glm::vec3 sunPos = dir * sunDistance;
-
-    glm::mat4 model = glm::mat4(1.0f);
-    model = glm::translate(model, sunPos);
-    model = glm::scale(model, glm::vec3(95.0f, 95.0f, 1.0f));
-
-    glm::vec3 color = sunColor ? *sunColor : getSunColor(timeOfDay);
-    const glm::vec3 warmSun(1.0f, 0.88f, 0.55f);
-    color = glm::mix(color, warmSun, 0.52f);
-    float intensity = getSunIntensity(timeOfDay) * 0.92f;
-
-    CelestialPush push{};
-    push.model          = model;
-    push.celestialColor = glm::vec4(color, 1.0f);
-    push.intensity      = intensity;
-    push.moonPhase      = 0.5f; // unused for sun
-    push.animTime       = sunHazeTimer_;
-
-    vkCmdPushConstants(cmd, pipelineLayout_,
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        0, sizeof(push), &push);
-
-    vkCmdDrawIndexed(cmd, 6, 1, 0, 0, 0);
-}
-
-void Celestial::renderMoon(VkCommandBuffer cmd, VkDescriptorSet /*perFrameSet*/,
-                            float timeOfDay, float nightFactor) {
-    // Moon (White Lady) visible 19:00–5:00
-    if (timeOfDay >= 5.0f && timeOfDay < 19.0f) {
-        return;
-    }
-    // Scale by actual sky darkness - the DBC sky can stay daylight-bright
-    // well past 19:00, and a full-brightness moon on a blue sky reads as a
-    // second sun.
-    if (nightFactor < 0.01f) {
-        return;
-    }
-
-    glm::vec3 moonPos = getMoonPosition(timeOfDay);
-
-    glm::mat4 model = glm::mat4(1.0f);
-    model = glm::translate(model, moonPos);
-    model = glm::scale(model, glm::vec3(40.0f, 40.0f, 1.0f));
-
-    glm::vec3 color = glm::vec3(0.8f, 0.85f, 1.0f);
-
-    float intensity = nightFactor;
-    if (timeOfDay >= 19.0f && timeOfDay < 21.0f) {
-        intensity *= (timeOfDay - 19.0f) / 2.0f; // Fade in
-    } else if (timeOfDay >= 3.0f && timeOfDay < 5.0f) {
-        intensity *= 1.0f - (timeOfDay - 3.0f) / 2.0f; // Fade out
-    }
-
-    CelestialPush push{};
-    push.model          = model;
-    push.celestialColor = glm::vec4(color, 0.0f);  // w=0 marks moon for the shader
-    push.intensity      = intensity;
-    push.moonPhase      = whiteLadyPhase_;
-    push.animTime       = sunHazeTimer_;
-
-    vkCmdPushConstants(cmd, pipelineLayout_,
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        0, sizeof(push), &push);
-
-    vkCmdDrawIndexed(cmd, 6, 1, 0, 0, 0);
-}
-
-void Celestial::renderBlueChild(VkCommandBuffer cmd, VkDescriptorSet /*perFrameSet*/,
-                                 float timeOfDay, float nightFactor) {
-    // Blue Child visible 19:00–5:00
-    if (timeOfDay >= 5.0f && timeOfDay < 19.0f) {
-        return;
-    }
-    if (nightFactor < 0.01f) {
-        return;
-    }
-
-    // Offset slightly from White Lady
-    glm::vec3 moonPos = getMoonPosition(timeOfDay);
-    moonPos.x += 80.0f;
-    moonPos.z -= 40.0f;
-
-    glm::mat4 model = glm::mat4(1.0f);
-    model = glm::translate(model, moonPos);
-    model = glm::scale(model, glm::vec3(30.0f, 30.0f, 1.0f));
-
-    glm::vec3 color = glm::vec3(0.7f, 0.8f, 1.0f);
-
-    float intensity = nightFactor;
-    if (timeOfDay >= 19.0f && timeOfDay < 21.0f) {
-        intensity *= (timeOfDay - 19.0f) / 2.0f;
-    } else if (timeOfDay >= 3.0f && timeOfDay < 5.0f) {
-        intensity *= 1.0f - (timeOfDay - 3.0f) / 2.0f;
-    }
-    intensity *= 0.7f; // Blue Child is dimmer
-
-    CelestialPush push{};
-    push.model          = model;
-    push.celestialColor = glm::vec4(color, 0.0f);  // w=0 marks moon for the shader
-    push.intensity      = intensity;
-    push.moonPhase      = blueChildPhase_;
-    push.animTime       = sunHazeTimer_;
-
-    vkCmdPushConstants(cmd, pipelineLayout_,
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        0, sizeof(push), &push);
-
-    vkCmdDrawIndexed(cmd, 6, 1, 0, 0, 0);
-}
-
-// ---------------------------------------------------------------------------
-// Position / colour query helpers (identical logic to GL version)
-// ---------------------------------------------------------------------------
-
-glm::vec3 Celestial::getSunPosition(float timeOfDay) const {
-    float angle = calculateCelestialAngle(timeOfDay, 6.0f, 18.0f);
-    const float radius = 800.0f;
-    const float height = 600.0f;
-    float x = radius * std::cos(angle);
-    float z = height * std::sin(angle);
-    return glm::vec3(x, 0.0f, z);
-}
-
-glm::vec3 Celestial::getMoonPosition(float timeOfDay) const {
-    float moonTime = timeOfDay + 12.0f;
-    if (moonTime >= 24.0f) moonTime -= 24.0f;
-    float angle = calculateCelestialAngle(moonTime, 6.0f, 18.0f);
-    const float radius = 800.0f;
-    const float height = 600.0f;
-    float x = radius * std::cos(angle);
-    float z = height * std::sin(angle);
-    return glm::vec3(x, 0.0f, z);
-}
-
-glm::vec3 Celestial::getSunColor(float timeOfDay) const {
-    if (timeOfDay >= 5.0f && timeOfDay < 7.0f) {
-        return glm::vec3(1.0f, 0.6f, 0.2f); // Sunrise orange
-    }
-    if (timeOfDay >= 7.0f && timeOfDay < 9.0f) {
-        float t = (timeOfDay - 7.0f) / 2.0f;
-        return glm::mix(glm::vec3(1.0f, 0.6f, 0.2f), glm::vec3(1.0f, 1.0f, 0.9f), t);
-    }
-    if (timeOfDay >= 9.0f && timeOfDay < 16.0f) {
-        return glm::vec3(1.0f, 1.0f, 0.9f); // Day yellow-white
-    }
-    if (timeOfDay >= 16.0f && timeOfDay < 18.0f) {
-        float t = (timeOfDay - 16.0f) / 2.0f;
-        return glm::mix(glm::vec3(1.0f, 1.0f, 0.9f), glm::vec3(1.0f, 0.5f, 0.1f), t);
-    }
-    return glm::vec3(1.0f, 0.4f, 0.1f); // Sunset orange
-}
-
-float Celestial::getSunIntensity(float timeOfDay) const {
-    if (timeOfDay >= 5.0f && timeOfDay < 6.0f) {
-        return timeOfDay - 5.0f;          // Fade in
-    }
-    if (timeOfDay >= 6.0f && timeOfDay < 18.0f) {
-        return 1.0f;                       // Full day
-    }
-    if (timeOfDay >= 18.0f && timeOfDay < 19.0f) {
-        return 1.0f - (timeOfDay - 18.0f); // Fade out
-    }
-    return 0.0f;
-}
-
-float Celestial::calculateCelestialAngle(float timeOfDay, float riseTime, float setTime) const {
-    float duration = setTime - riseTime;
-    float elapsed  = timeOfDay - riseTime;
-    float t = elapsed / duration;
-    return t * static_cast<float>(M_PI);
-}
-
-// ---------------------------------------------------------------------------
-// Moon phase helpers
+// Moon phase bookkeeping
 // ---------------------------------------------------------------------------
 
 void Celestial::update(float deltaTime) {
-    sunHazeTimer_ += deltaTime;
-    // Keep timer in a range where GPU sin() precision is reliable (< ~10000).
-    // The noise period repeats at multiples of 1.0 on each axis, so fmod by a
-    // large integer preserves visual continuity.
-    if (sunHazeTimer_ > 10000.0f) {
-        sunHazeTimer_ = std::fmod(sunHazeTimer_, 10000.0f);
-    }
-
-    if (!moonPhaseCycling_) {
-        return;
-    }
-
+    if (!moonPhaseCycling_) return;
     moonPhaseTimer_ += deltaTime;
     whiteLadyPhase_ = std::fmod(moonPhaseTimer_ / MOON_CYCLE_DURATION, 1.0f);
-
-    constexpr float BLUE_CHILD_CYCLE = 210.0f; // Slightly faster: 3.5 minutes
-    blueChildPhase_ = std::fmod(moonPhaseTimer_ / BLUE_CHILD_CYCLE, 1.0f);
+    blueChildPhase_ = std::fmod(moonPhaseTimer_ / 210.0f, 1.0f);
 }
+
 void Celestial::setBlueChildPhase(float phase) {
     blueChildPhase_ = glm::clamp(phase, 0.0f, 1.0f);
-}
-
-float Celestial::computePhaseFromGameTime(float gameTime, float cycleDays) const {
-    constexpr float SECONDS_PER_GAME_DAY = 1440.0f; // 24 real minutes
-    float gameDays = gameTime / SECONDS_PER_GAME_DAY;
-    float phase    = std::fmod(gameDays / cycleDays, 1.0f);
-    if (phase < 0.0f) phase += 1.0f;
-    return phase;
-}
-
-void Celestial::updatePhasesFromGameTime(float gameTime) {
-    whiteLadyPhase_ = computePhaseFromGameTime(gameTime, WHITE_LADY_CYCLE_DAYS);
-    blueChildPhase_ = computePhaseFromGameTime(gameTime, BLUE_CHILD_CYCLE_DAYS);
-}
-
-// ---------------------------------------------------------------------------
-// GPU buffer management
-// ---------------------------------------------------------------------------
-
-void Celestial::createQuad() {
-    // Billboard quad centred at origin, vertices: pos(vec3) + uv(vec2)
-    float vertices[] = {
-        // Position              TexCoord
-        -0.5f,  0.5f, 0.0f,    0.0f, 1.0f, // Top-left
-         0.5f,  0.5f, 0.0f,    1.0f, 1.0f, // Top-right
-         0.5f, -0.5f, 0.0f,    1.0f, 0.0f, // Bottom-right
-        -0.5f, -0.5f, 0.0f,    0.0f, 0.0f, // Bottom-left
-    };
-
-    uint32_t indices[] = { 0, 1, 2,  0, 2, 3 };
-
-    AllocatedBuffer vbuf = uploadBuffer(*vkCtx_,
-        vertices, sizeof(vertices),
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-    vertexBuffer_ = vbuf.buffer;
-    vertexAlloc_  = vbuf.allocation;
-
-    AllocatedBuffer ibuf = uploadBuffer(*vkCtx_,
-        indices, sizeof(indices),
-        VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-    indexBuffer_ = ibuf.buffer;
-    indexAlloc_  = ibuf.allocation;
-}
-
-void Celestial::destroyQuad() {
-    if (!vkCtx_) return;
-
-    VmaAllocator allocator = vkCtx_->getAllocator();
-
-    destroy(allocator, vertexBuffer_, vertexAlloc_);
-    destroy(allocator, indexBuffer_, indexAlloc_);
 }
 
 } // namespace rendering

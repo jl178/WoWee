@@ -60,6 +60,8 @@ enum class UF : uint16_t {
     UNIT_FIELD_MAXDAMAGE,            // ...and high end
     UNIT_FIELD_ATTACK_POWER,         // Melee attack power (int32)
     UNIT_FIELD_RANGED_ATTACK_POWER,  // Ranged attack power (int32)
+    UNIT_FIELD_BASEATTACKTIME,       // Main hand, off hand, then ranged (RANGEDATTACKTIME) swing ms
+    UNIT_FIELD_MINRANGEDDAMAGE,      // Ranged weapon damage low end, MAXRANGEDDAMAGE after it
     UNIT_FIELD_POWER_REGEN_FLAT_MODIFIER,             // Power regen while not casting (float[7], mana=0); PRIVATE/OWNER
     UNIT_FIELD_POWER_REGEN_INTERRUPTED_FLAT_MODIFIER, // ...and the reduced rate during the five-second rule
 
@@ -142,6 +144,15 @@ enum class UF : uint16_t {
     // Container fields
     CONTAINER_FIELD_NUM_SLOTS,
     CONTAINER_FIELD_SLOT_1,
+
+    // Corpse fields. The display id, and the block behind it in one fixed
+    // shape: ITEM (19 slots, display | inventoryType << 24) at +1, BYTES_1
+    // (0, race, sex, skin) at +20, BYTES_2 (face, hair style, hair colour,
+    // facial hair) at +21, GUILD at +22, FLAGS (0x01 bones, 0x08 hide helm,
+    // 0x10 hide cloak) at +23. WotLK only, read off AzerothCore's
+    // UpdateFields.h (OBJECT_END + 4 = 10); the other tables are not mapped,
+    // and without it only the local player's corpse is drawn, as before.
+    CORPSE_FIELD_DISPLAY_ID,
 
     COUNT
 };

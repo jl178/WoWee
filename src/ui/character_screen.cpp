@@ -226,6 +226,10 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
             };
             rotateButton("cs.rotl", la, true, rotatingLeft_);
             rotateButton("cs.rotr", ra, false, rotatingRight_);
+            // CharacterSelectRotate*_OnUpdate: CHARACTER_FACING_INCREMENT, 2
+            // degrees a frame, which is 120 a second at the client's 60.
+            // (The preview's yaw used to reach the renderer as radians, so
+            // this and the drag below spun 57 times too fast.)
             const float dt = ImGui::GetIO().DeltaTime;
             if (rotatingLeft_) preview_->rotate(-120.0f * dt);
             if (rotatingRight_) preview_->rotate(120.0f * dt);
@@ -237,7 +241,10 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
             const ImVec2 m = ImGui::GetIO().MousePos;
             const float listX = screen.x - (5.0f + kFrameW) * u;
             if (m.x < listX && m.y < screen.y - 110.0f * u) {
-                preview_->rotate(ImGui::GetIO().MouseDelta.x * 0.4f);
+                // CharacterSelectFrame_OnUpdate: the cursor's x movement, in
+                // 768-tall glue units, times CHARACTER_ROTATION_CONSTANT (0.6),
+                // in degrees.
+                preview_->rotate(ImGui::GetIO().MouseDelta.x / u * 0.6f);
             }
         }
     }

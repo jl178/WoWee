@@ -45,23 +45,10 @@ void main() {
 
     vec4 mapColor = texture(uComposite, mapUV);
 
-    // Single player direction indicator (center arrow) rendered in-shader.
-    vec2 local = center; // [-0.5, 0.5] around minimap center
-    float ac = cos(push.arrowRotation);
-    float as = sin(push.arrowRotation);
-    // TexCoord Y grows downward on screen; use negative Y so 0-angle points North (up).
-    vec2 tip   = vec2(0.0, -0.09);
-    vec2 left  = vec2(-0.045, 0.02);
-    vec2 right = vec2( 0.045, 0.02);
-    mat2 rot = mat2(ac, -as, as, ac);
-    tip = rot * tip;
-    left = rot * left;
-    right = rot * right;
-    if (pointInTriangle(local, tip, left, right)) {
-        mapColor.rgb = vec3(1.0, 0.86, 0.05);
-    }
-    float centerDot = smoothstep(0.016, 0.0, length(local));
-    mapColor.rgb = mix(mapColor.rgb, vec3(1.0), centerDot * 0.95);
+    // No player arrow here. It used to be a yellow triangle and a white dot
+    // drawn into the map, under the textured MinimapArrow.blp the marker pass
+    // draws - two arrows at the centre. The stock client has the one, so the
+    // marker pass owns it; push.arrowRotation is left in the block unread.
 
     // Dark border ring
     float border = smoothstep(0.48, 0.5, dist);
@@ -69,5 +56,8 @@ void main() {
         mapColor.rgb *= 1.0 - border * 0.7;
     }
 
-    outColor = vec4(mapColor.rgb, mapColor.a * push.opacity);
+    // Always opaque. The stock map is solid whatever the interface's opacity;
+    // push.opacity is kept in the block (its layout is shared with the C++ side)
+    // but no longer thins the terrain image out.
+    outColor = vec4(mapColor.rgb, 1.0);
 }

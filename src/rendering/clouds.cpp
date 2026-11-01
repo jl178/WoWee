@@ -129,9 +129,17 @@ void Clouds::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyP
         return;
     }
 
-    // Derive cloud base color from DBC horizon band, slightly brightened
-    glm::vec3 cloudBaseColor = params.skyBand1Color * 1.1f;
-    cloudBaseColor = glm::clamp(cloudBaseColor, glm::vec3(0.0f), glm::vec3(1.0f));
+    // The cloud light Light.dbc gives every set (LightIntBand 10-13): the
+    // sunlit side is the cloud sun colour over the cloud's own emissive and
+    // ambient, the shaded side the emissive and ambient alone. These follow
+    // the hour and the weather like every other band - the storm sets' are
+    // grey, the death set's black - rather than being the sky's horizon band
+    // brightened.
+    const glm::vec3 cloudShade = glm::clamp(
+        params.cloudEmissiveColor +
+            0.5f * (params.cloudLayer1AmbientColor + params.cloudLayer2AmbientColor),
+        glm::vec3(0.0f), glm::vec3(1.0f));
+    const glm::vec3 cloudSun = glm::clamp(params.cloudSunColor, glm::vec3(0.0f), glm::vec3(1.0f));
 
     // Sun direction (opposite of light direction). Guard the hemisphere like
     // Celestial/SkySystem do - directionalDir's sign convention is not stable,
@@ -147,9 +155,10 @@ void Clouds::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyP
     float ambient = glm::mix(0.3f, 0.7f, sunAboveHorizon);
 
     CloudPush push{};
-    push.cloudColor    = glm::vec4(cloudBaseColor, 1.0f);
+    push.cloudColor    = glm::vec4(cloudSun, 1.0f);
     push.sunDirDensity = glm::vec4(sunDir, density_);
     push.windAndLight  = glm::vec4(windOffset_, sunIntensity, ambient, 0.0f);
+    push.cloudShade    = glm::vec4(cloudShade, 1.0f);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
 

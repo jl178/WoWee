@@ -85,7 +85,8 @@ No mechanism here to honour them:
   * monochrome on Font, rotatesTexture on StatusBar, protected on Frame -
     a font flag, a fill-direction texture rotation, and secure-frame marking.
   * minimapArrowModel, minimapPlayerModel on Minimap - the player arrow is
-    drawn in minimap_display.frag.glsl, not from a model.
+    MinimapArrow.blp drawn by the marker pass in game_screen_minimap.cpp,
+    not from a model.
 
 No consequence:
 

@@ -372,6 +372,7 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font) {
     const ImVec2 measured =
         runFont->CalcTextSizeA(size, FLT_MAX, 0.0f, strippedText(w->text).c_str());
     w->width = measured.x;
+    w->measuredWidth = measured.x;
     // As tall as the lines it holds. A label sized by its own text can
     // still be several lines: |n breaks one at any width, and giving it a
     // single line's height put whatever anchors below it over the top of

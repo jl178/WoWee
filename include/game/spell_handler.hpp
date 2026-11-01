@@ -180,6 +180,7 @@ public:
 
     // Talents
     [[nodiscard]] uint8_t getActiveTalentSpec() const { return activeTalentSpec_; }
+    [[nodiscard]] uint8_t getNumTalentGroups() const { return talentGroupCount_; }
     [[nodiscard]] uint8_t getUnspentTalentPoints() const { return unspentTalentPoints_[activeTalentSpec_]; }
     [[nodiscard]] uint8_t getUnspentTalentPoints(uint8_t spec) const { return spec < 2 ? unspentTalentPoints_[spec] : 0; }
     [[nodiscard]] const std::unordered_map<uint32_t, uint8_t>& getLearnedTalents() const { return learnedTalents_[activeTalentSpec_]; }
@@ -284,6 +285,8 @@ public:
     [[nodiscard]] const std::string& getSpellName(uint32_t spellId) const;
     [[nodiscard]] const std::string& getSpellRank(uint32_t spellId) const;
     [[nodiscard]] const std::string& getSpellDescription(uint32_t spellId) const;
+    /// Spell.dbc ToolTip: what a buff or debuff's tooltip says it does.
+    [[nodiscard]] const std::string& getSpellAuraDescription(uint32_t spellId) const;
     [[nodiscard]] std::string getEnchantName(uint32_t enchantId) const;
     /// The gem item an enchantment came out of (SpellItemEnchantment.Src_ItemID).
     /// Zero when the enchantment is not a gem, or on a file with no such column.
@@ -383,6 +386,14 @@ private:
     [[nodiscard]] bool answersPress(const CastFailedData& data, uint8_t castCount) const;
     void handleSpellStart(network::Packet& packet);
     void handleSpellGo(network::Packet& packet);
+    /// COMBAT_TEXT_UPDATE for a spell that missed the player, once per miss.
+    void announceSpellMissToCombatText(uint32_t spellId, uint64_t victimGuid,
+                                       CombatTextEntry::Type ct);
+    /// COMBAT_TEXT_UPDATE ENERGIZE / PERIODIC_ENERGIZE for the player's power.
+    void announceEnergizeToCombatText(bool periodic, uint8_t powerType, uint32_t amount);
+    uint32_t lastMissTextSpell_ = 0;
+    const char* lastMissTextType_ = nullptr;
+    std::chrono::steady_clock::time_point lastMissTextAt_{};
     void handleSpellCooldown(network::Packet& packet);
     void handleCooldownEvent(network::Packet& packet);
     void handleAuraUpdate(network::Packet& packet, bool isAll);
@@ -421,12 +432,14 @@ private:
     audio::SpellSoundManager::MagicSchool resolveSpellSchool(uint32_t spellId);
 
     // Play a spell cast or impact sound via audioCoordinator, if available.
-    // Only for a spell with no SpellVisual row: one that has one plays its
-    // kits' own SoundEntries (precast, cast, impact) through the visual
-    // system, and the school sound on top of it was a second copy.
+    // Only for a spell none of whose SpellVisual kits names a sound (ANY):
+    // the stock client plays a spell's kit sounds and nothing else - Flash
+    // Heal's silent cast kit stays silent - so the school sound is a fallback
+    // for spells that would otherwise make none at all.
     void playSpellCastSound(uint32_t spellId);
     void playSpellImpactSound(uint32_t spellId);
-    bool spellVisualPlaysSounds(uint32_t spellId);
+    enum class SpellSoundMoment : uint8_t { PRECAST, CAST, IMPACT, ANY };
+    bool spellVisualPlaysSounds(uint32_t spellId, SpellSoundMoment moment);
     // The unit's auras' SpellVisual state kits, after its aura list changed.
     void syncAuraStateVisuals(uint64_t guid, const std::vector<AuraSlot>& auras);
     // The area kits of a spell cast at a ground point (SPELL_GO dest).
@@ -538,6 +551,9 @@ private:
 
     // Talents (dual-spec support)
     uint8_t activeTalentSpec_ = 0;
+    // How many specs the character owns, as SMSG_TALENTS_INFO says: 1 until
+    // Dual Talent Specialization is bought, then 2.
+    uint8_t talentGroupCount_ = 1;
     uint8_t unspentTalentPoints_[2] = {0, 0};
     std::unordered_map<uint32_t, uint8_t> learnedTalents_[2];
     std::array<std::array<uint16_t, MAX_GLYPH_SLOTS>, 2> learnedGlyphs_{};

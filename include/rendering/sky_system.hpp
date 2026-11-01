@@ -29,6 +29,21 @@ struct SkyParams {
     glm::vec3 skyMiddleColor{0.7f, 0.85f, 1.0f};
     glm::vec3 skyBand1Color{0.9f, 0.95f, 1.0f};
     glm::vec3 skyBand2Color{1.0f, 0.98f, 0.9f};
+    // The horizon (LightIntBand 6) and the authored fog below it (7): the
+    // stock dome's last two stops.
+    glm::vec3 skySmogColor{0.8f, 0.85f, 0.9f};
+    glm::vec3 skyFogColor{0.5f, 0.6f, 0.7f};
+
+    // Cloud light, LightIntBand 10-13.
+    glm::vec3 cloudSunColor{1.0f, 0.78f, 0.54f};
+    glm::vec3 cloudEmissiveColor{0.17f, 0.41f, 0.52f};
+    glm::vec3 cloudLayer1AmbientColor{0.0f};
+    glm::vec3 cloudLayer2AmbientColor{0.38f, 0.51f, 0.72f};
+    /// LightFloatBand 2: how much the sun and moon show through cloud.
+    float celestialGlowThrough = 1.0f;
+    /// dnc.db: how far the sun, and the moon, are up (0..1).
+    float dayIntensity = 1.0f;
+    float nightIntensity = 0.0f;
 
     // Atmospheric effects
     float cloudDensity = 0.0f;      // 0-1
@@ -90,6 +105,14 @@ public:
      */
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 const Camera& camera, const SkyParams& params);
+
+    /// The sky in two halves, for a caller that draws the client's sky models
+    /// (LightSkybox, and the night stars) between them: the dome first, the
+    /// models over it, then the sun, moon and clouds over those - so cloud
+    /// covers the stars as it does in the stock client. render() is both.
+    void renderDome(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyParams& params);
+    void renderOverlays(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                        const Camera& camera, const SkyParams& params);
 
     /**
      * Enable/disable procedural stars (DEBUG/FALLBACK)
