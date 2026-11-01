@@ -488,7 +488,7 @@ void UIManager::render(core::AppState appState, auth::AuthHandler* authHandler, 
             break;
 
         case core::AppState::REALM_SELECTION:
-            authScreen->stopLoginMusic();
+            authScreen->updateMusic();  // the glue theme plays until the world does
             // The realm and character screens are drawn on the same paper the
             // login screen is, so they keep its backdrop rather than dropping
             // to a black window between one and the next.
@@ -499,7 +499,7 @@ void UIManager::render(core::AppState appState, auth::AuthHandler* authHandler, 
             break;
 
         case core::AppState::CHARACTER_CREATION:
-            authScreen->stopLoginMusic();
+            authScreen->updateMusic();  // the glue theme plays until the world does
             authScreen->drawBackdrop();
             if (gameHandler) {
                 characterCreateScreen->render(*gameHandler);
@@ -507,7 +507,7 @@ void UIManager::render(core::AppState appState, auth::AuthHandler* authHandler, 
             break;
 
         case core::AppState::CHARACTER_SELECTION:
-            authScreen->stopLoginMusic();
+            authScreen->updateMusic();  // the glue theme plays until the world does
             authScreen->drawBackdrop();
             if (gameHandler) {
                 characterScreen->render(*gameHandler);

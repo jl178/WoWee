@@ -1165,6 +1165,12 @@ void M2Renderer::shutdown() {
         vkDestroyDescriptorPool(device, boneDescPool_, nullptr);
         boneDescPool_ = VK_NULL_HANDLE;
     }
+    for (int i = 0; i < 2; i++) {
+        destroy(alloc, casterBuffer_[i], casterAlloc_[i]);
+        casterMapped_[i] = nullptr;
+        casterSet_[i] = VK_NULL_HANDLE;
+    }
+    destroy(device, casterDescPool_);
     // Instance data SSBO cleanup (sets freed with instanceDescPool_)
     for (int i = 0; i < 2; i++) {
         destroy(alloc, instanceBuffer_[i], instanceAlloc_[i]);

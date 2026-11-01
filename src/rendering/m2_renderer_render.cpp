@@ -2298,7 +2298,49 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
     pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pc.offset = 0;
     pc.size = sizeof(ShadowPush);  // one combined matrix, plus the sway slot
-    shadowPipelineLayout_ = createPipelineLayout(device, {shadowParams_.layout}, {pc});
+    // The casters' model matrices, one buffer per frame in flight, bound as
+    // set 1 with the same layout the main pass gives its instance data.
+    {
+        const VkDeviceSize casterBufSize = MAX_SHADOW_CASTERS * sizeof(glm::mat4);
+        VkDescriptorPoolSize poolSize{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 2};
+        VkDescriptorPoolCreateInfo poolCi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        poolCi.maxSets = 2;
+        poolCi.poolSizeCount = 1;
+        poolCi.pPoolSizes = &poolSize;
+        if (vkCreateDescriptorPool(device, &poolCi, nullptr, &casterDescPool_) != VK_SUCCESS) {
+            LOG_ERROR("M2Renderer: failed to create shadow caster pool");
+            return false;
+        }
+        for (int i = 0; i < 2; i++) {
+            VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            bci.size = casterBufSize;
+            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+            VmaAllocationCreateInfo aci{};
+            aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+            aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+            VmaAllocationInfo allocInfo{};
+            if (vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci,
+                                &casterBuffer_[i], &casterAlloc_[i], &allocInfo) != VK_SUCCESS) {
+                LOG_ERROR("M2Renderer: failed to create shadow caster buffer ", i);
+                return false;
+            }
+            casterMapped_[i] = allocInfo.pMappedData;
+            VkDescriptorSetAllocateInfo setAi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            setAi.descriptorPool = casterDescPool_;
+            setAi.descriptorSetCount = 1;
+            setAi.pSetLayouts = &instanceSetLayout_;
+            vkAllocateDescriptorSets(device, &setAi, &casterSet_[i]);
+            VkDescriptorBufferInfo bufInfo{.buffer = casterBuffer_[i], .offset = 0, .range = casterBufSize};
+            VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            write.dstSet = casterSet_[i];
+            write.dstBinding = 0;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            write.pBufferInfo = &bufInfo;
+            vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        }
+    }
+    shadowPipelineLayout_ = createPipelineLayout(device, {shadowParams_.layout, instanceSetLayout_}, {pc});
     if (!shadowPipelineLayout_) {
         LOG_ERROR("M2Renderer: failed to create shadow pipeline layout");
         return false;
@@ -2306,7 +2348,7 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
 
     // Load shadow shaders
     VkShaderModule vertShader, fragShader;
-    if (!vertShader.loadFromFile(device, "assets/shaders/shadow.vert.spv")) {
+    if (!vertShader.loadFromFile(device, "assets/shaders/m2_shadow.vert.spv")) {
         LOG_ERROR("M2Renderer: failed to load shadow vertex shader");
         return false;
     }
@@ -2465,6 +2507,8 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     }
 
     // Helper lambda to draw instances with a given foliageSway setting
+    glm::mat4* casterMatrices = static_cast<glm::mat4*>(casterMapped_[frameIdx]);
+    uint32_t castersWritten = 0;
     auto drawPass = [&](bool foliagePass) {
         // What this pass is, carried with each draw rather than written into a
         // buffer both passes share. The uniform buffer this used to be is read
@@ -2481,6 +2525,8 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
             0, 1, &shadowParams_.set, 0, nullptr);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
+            1, 1, &casterSet_[frameIdx], 0, nullptr);
 
         const auto& casters = shadowCasters_[foliagePass ? 1 : 0];
         for (std::size_t g = 0; g < casters.size();) {
@@ -2499,6 +2545,14 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                                           model.boundMin.z, model.boundMax.z,
                                           model.isStandingCloth);
             const glm::vec2 modelSwayZW(sway.refHeight, sway.amp);
+            // The group's matrices go into the caster buffer once; every batch
+            // below draws them all with a single instanced draw.
+            const uint32_t groupSize = static_cast<uint32_t>(groupEnd - g);
+            if (!casterMatrices || castersWritten + groupSize > MAX_SHADOW_CASTERS) { g = groupEnd; continue; }
+            const uint32_t casterBase = castersWritten;
+            for (std::size_t k = g; k < groupEnd; ++k) {
+                casterMatrices[castersWritten++] = instances[casters[k].second].modelMatrix;
+            }
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &model.vertexBuffer, &offset);
             vkCmdBindIndexBuffer(cmd, model.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
@@ -2534,21 +2588,14 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                         shadowPipelineLayout_, 0, 1, &shadowParams_.set, 0, nullptr);
                 }
 
-                for (std::size_t k = g; k < groupEnd; ++k) {
-                    const auto& instance = instances[casters[k].second];
-                    // The instance's own origin is what gives the wind its
-                    // per-tree phase; the height and amplitude beside it are
-                    // the model's.
-                    const glm::vec3 origin = glm::vec3(instance.modelMatrix[3]);
-                    ShadowPush push{
-                        .lightSpaceModel = lightSpaceMatrix * instance.modelMatrix,
-                        .sway = glm::vec4(origin.x, origin.y, modelSwayZW.x, modelSwayZW.y),
-                        .flags = passFlags,
-                        .wind = wind};
-                    vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
-                                       0, sizeof(ShadowPush), &push);
-                    vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
-                }
+                ShadowPush push{
+                    .lightSpaceModel = lightSpaceMatrix,  // light space only; the model is per caster
+                    .sway = glm::vec4(0.0f, 0.0f, modelSwayZW.x, modelSwayZW.y),
+                    .flags = glm::ivec4(passFlags.x, passFlags.y, passFlags.z, static_cast<int>(casterBase)),
+                    .wind = wind};
+                vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(ShadowPush), &push);
+                vkCmdDrawIndexed(cmd, batch.indexCount, groupSize, batch.indexStart, 0, 0);
             }
             castersDrawn[foliagePass ? 1 : 0] += static_cast<uint32_t>(groupEnd - g);
             g = groupEnd;

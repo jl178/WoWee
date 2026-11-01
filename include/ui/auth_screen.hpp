@@ -24,6 +24,9 @@ namespace wowee { namespace ui {
  */
 class AuthScreen {
 public:
+    /// The login music, which has nothing to do with the controls. Public
+    /// because the realm and character screens keep it playing.
+    void updateMusic();
     AuthScreen();
     /// Releases the background image. It is the only Vulkan resource this
     /// screen owns outright -- bgSampler comes from the context's cache and
@@ -296,8 +299,6 @@ private:
     /// The paper strip a disconnect is announced on, across the top of the
     /// screen rather than inside the card.
     void renderProminentStatus(float screenW, float screenH);
-    /// The login music, which has nothing to do with the controls.
-    void updateMusic();
     void loadLoginGraphicsState();
     void saveLoginGraphicsState();
     static void applyPresetToState(LoginGraphicsState& s, int preset);
