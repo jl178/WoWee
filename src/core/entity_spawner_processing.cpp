@@ -1979,6 +1979,7 @@ uint32_t EntitySpawner::releaseCreatureInstance(uint64_t guid) {
     creatureVirtualItemUnits_.erase(guid);
     unitSheathAttached_.erase(guid);
     unitSheathTransitions_.erase(guid);
+    unitCastHolds_.erase(guid);
     creatureWasMoving_.erase(guid);
     creatureWasSwimming_.erase(guid);
     creatureWasFlying_.erase(guid);

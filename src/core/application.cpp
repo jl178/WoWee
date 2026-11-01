@@ -336,7 +336,9 @@ void driveUnitLocomotion(rendering::Renderer* renderer, rendering::CharacterRend
     uint32_t cur = 0;
     float curT = 0.0f, curDur = 0.0f;
     const bool haveState = cr->getAnimationState(instanceId, cur, curT, curDur);
-    frame.idleFree = !haveState || isLocomotionIdle(cur);
+    // A cast hold is not an idle a turn may shuffle out of (ReadySpellDirected
+    // counts as a Ready stance for a wand, and a caster turns to its target).
+    frame.idleFree = (!haveState || isLocomotionIdle(cur)) && spawner.unitCastHold(guid) == 0;
 
     rendering::LocomotionFSM::Input in = unitLocomotionInput(loco, frame);
     in.currentAnimId = cur;

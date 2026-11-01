@@ -69,11 +69,9 @@ public:
 
     // Loot sounds
     void playLootCoinSmall();
-    void playLootCoinLarge();
     void playLootItem();
 
     // Item sounds
-    void playDropOnGround();
     void playPickupBag();
     /// Picking an item up sounds like the thing it is - cloth, food or a gem.
     /// Chosen by item class; anything else keeps the bag rustle.
@@ -130,10 +128,8 @@ private:
     std::vector<UISample> fishingBiteSounds_;
 
     std::vector<UISample> lootCoinSmallSounds_;
-    std::vector<UISample> lootCoinLargeSounds_;
     std::vector<UISample> lootItemSounds_;
 
-    std::vector<UISample> dropSounds_;
     std::vector<UISample> pickupBagSounds_;
     std::vector<UISample> pickupBookSounds_;
 

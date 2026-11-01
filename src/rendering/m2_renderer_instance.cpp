@@ -160,6 +160,15 @@ void M2Renderer::restartInstanceAnimation(uint32_t instanceId) {
     if (inst.cachedModel) computeBoneMatrices(*inst.cachedModel, inst, &cachedCamPos_);
 }
 
+void M2Renderer::holdInstanceAnimationAtEnd(uint32_t instanceId) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return;
+    auto& inst = instances[idxIt->second];
+    inst.holdAtEnd = true;
+    inst.thenLoopSequence = -1;
+    inst.playingVariation = false;
+}
+
 std::optional<uint32_t> M2Renderer::soleSequenceId(uint32_t instanceId) const {
     auto idxIt = instanceIndexById.find(instanceId);
     if (idxIt == instanceIndexById.end()) return std::nullopt;

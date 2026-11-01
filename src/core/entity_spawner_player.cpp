@@ -728,34 +728,16 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
 
     // --- Textures (skin atlas compositing) ---
 
-    uint32_t texRegionFields[8];
-    pipeline::getItemDisplayInfoTextureFields(*displayInfoDbc, idiL, texRegionFields);
-
-    std::vector<std::pair<int, std::string>> regionLayers;
+    // Layered in the stock client's order, not slot order -
+    // pipeline/item_textures.hpp.
     const bool isFemale = (st.genderId == 1);
-
-    std::vector<std::pair<int, std::string>> robeLegs;  // drawn last
+    std::vector<pipeline::EquippedItemDisplay> equipped;
     for (int s = 0; s < 19; s++) {
-        uint32_t did = displayInfoIds[s];
-        if (did == 0) continue;
-        int32_t recIdx = displayInfoDbc->findRecordById(did);
-        if (recIdx < 0) continue;
-        const bool robeRec = pipeline::isRobeDisplay(*displayInfoDbc, idiL, recIdx);
-
-        for (int region = 0; region < 8; region++) {
-            std::string texName = displayInfoDbc->getString(
-                static_cast<uint32_t>(recIdx), texRegionFields[region]);
-            if (texName.empty()) continue;
-
-            std::string fullPath = pipeline::resolveItemRegionTexture(
-                *assetManager_, region, texName, isFemale);
-            if (fullPath.empty()) continue;
-
-            if (robeRec && pipeline::isRobeLegRegion(region)) robeLegs.emplace_back(region, fullPath);
-            else regionLayers.emplace_back(region, fullPath);
-        }
+        if (displayInfoIds[s] == 0) continue;
+        equipped.push_back({pipeline::componentSlotForEquipSlot(s), displayInfoIds[s]});
     }
-    regionLayers.insert(regionLayers.end(), robeLegs.begin(), robeLegs.end());
+    std::vector<std::pair<int, std::string>> regionLayers =
+        pipeline::buildItemRegionLayers(*assetManager_, *displayInfoDbc, equipped, isFemale);
 
     const auto slotsIt = playerTextureSlotsByModelId_.find(st.modelId);
     if (slotsIt == playerTextureSlotsByModelId_.end()) return;
@@ -818,6 +800,7 @@ void EntitySpawner::despawnPlayer(uint64_t guid) {
     onlinePlayerWeaponSlots_.erase(guid);
     unitSheathAttached_.erase(guid);
     unitSheathTransitions_.erase(guid);
+    unitCastHolds_.erase(guid);
     deadCreatureGuids_.erase(guid);
     creatureRenderPosCache_.erase(guid);
     creatureSwimmingState_.erase(guid);

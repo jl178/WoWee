@@ -415,6 +415,14 @@ bool SpellVisualSystem::spawnKitModel(uint32_t kitId, const std::string& path, u
         duration = (animDurMs > 100.0f)
             ? std::clamp(animDurMs / 1000.0f, 0.5f, SPELL_VISUAL_MAX_DURATION)
             : SPELL_VISUAL_DEFAULT_DURATION;
+        // A one-shot kit (a cast or an impact, timed by its own sequence)
+        // plays that sequence once. M2 sequences loop, and the model used to
+        // start over as it reached its end - the frame the kit retires on -
+        // so its first frames played again through the quarter-second fade:
+        // a second Judgement hammer, a Seal of Righteousness impact twice.
+        // Precast, channel, area and state kits are given a lifetime and
+        // loop as authored for as long as they last.
+        m2Renderer_->holdInstanceAnimationAtEnd(instanceId);
     }
     sv.duration = duration;
     sv.isPrecast = spawn.isPrecast;

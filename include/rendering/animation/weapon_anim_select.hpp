@@ -214,7 +214,13 @@ inline uint32_t parryAnim(const WeaponLoadout& w) {
 /// UNIT_FIELD_BYTES_2 byte 0.
 enum class SheathState : uint8_t { UNARMED = 0, MELEE = 1, RANGED = 2 };
 
-/// The ready stance a unit holds in combat, from what it has drawn.
+/// The ready stance a unit holds in combat: the ranged weapon's when that is
+/// what is drawn, else the main hand's - the same rule the local character's
+/// CombatFSM follows, which reads the loadout and not the sheath byte.
+/// A sheath state of 0 used to mean ReadyUnarmed (fists up) whatever the
+/// unit held, and AzerothCore never sets that byte for anyone who does not
+/// send CMSG_SET_SHEATHED: playerbots stay at 0 for good, so every bot
+/// priest, warlock and mage boxed between casts with a staff on its back.
 inline uint32_t readyAnim(const WeaponLoadout& w, SheathState sheath) {
     if (sheath == SheathState::RANGED) {
         switch (w.rangedType) {
@@ -226,7 +232,7 @@ inline uint32_t readyAnim(const WeaponLoadout& w, SheathState sheath) {
             default: break;
         }
     }
-    if (sheath == SheathState::UNARMED || isUnarmedMainHand(w)) return READY_UNARMED;
+    if (isUnarmedMainHand(w)) return READY_UNARMED;
     if (w.is2HLoose) return READY_2H_LOOSE;
     if (w.inventoryType == game::InvType::TWO_HAND) return READY_2H;
     return READY_1H;

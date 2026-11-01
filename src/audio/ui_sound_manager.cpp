@@ -76,16 +76,11 @@ bool UiSoundManager::initialize(pipeline::AssetManager* assets) {
     lootCoinSmallSounds_.resize(1);
     bool lootCoinSmallLoaded = loadSound("Sound\\Interface\\LootCoinSmall.wav", lootCoinSmallSounds_[0], assets);
 
-    lootCoinLargeSounds_.resize(1);
-    bool lootCoinLargeLoaded = loadSound("Sound\\Interface\\LootCoinLarge.wav", lootCoinLargeSounds_[0], assets);
 
     lootItemSounds_.resize(1);
     bool lootItemLoaded = loadSound("Sound\\Interface\\igLootCreature.wav", lootItemSounds_[0], assets);
 
     // Load item pickup sounds
-    dropSounds_.resize(1);
-    bool dropLoaded = loadSound("Sound\\Interface\\DropOnGround.wav", dropSounds_[0], assets);
-
     pickupBagSounds_.resize(1);
     bool pickupBagLoaded = loadSound("Sound\\Interface\\PickUp\\PickUpBag.wav", pickupBagSounds_[0], assets);
 
@@ -151,10 +146,9 @@ bool UiSoundManager::initialize(pipeline::AssetManager* assets) {
     LOG_INFO("UISoundManager: Quest sounds - Activate: ", questActivateLoaded ? "YES" : "NO",
              ", Complete: ", questCompleteLoaded ? "YES" : "NO",
              ", Failed: ", questFailedLoaded ? "YES" : "NO");
-    LOG_INFO("UISoundManager: Loot sounds - Coins: ", (lootCoinSmallLoaded && lootCoinLargeLoaded) ? "YES" : "NO",
+    LOG_INFO("UISoundManager: Loot sounds - Coins: ", lootCoinSmallLoaded ? "YES" : "NO",
              ", Items: ", lootItemLoaded ? "YES" : "NO");
-    LOG_INFO("UISoundManager: Item sounds - Pickup: ", (pickupBagLoaded && pickupBookLoaded) ? "YES" : "NO",
-             ", Drop: ", dropLoaded ? "YES" : "NO");
+    LOG_INFO("UISoundManager: Item sounds - Pickup: ", (pickupBagLoaded && pickupBookLoaded) ? "YES" : "NO");
     LOG_INFO("UISoundManager: Misc sounds - Eating: ", eatingLoaded ? "YES" : "NO",
              ", Drinking: ", drinkingLoaded ? "YES" : "NO",
              ", LevelUp: ", levelUpLoaded ? "YES" : "NO");
@@ -297,11 +291,9 @@ void UiSoundManager::playFishingBite() { playSound(fishingBiteSounds_); }
 
 // Loot sounds
 void UiSoundManager::playLootCoinSmall() { playSound(lootCoinSmallSounds_); }
-void UiSoundManager::playLootCoinLarge() { playSound(lootCoinLargeSounds_); }
 void UiSoundManager::playLootItem() { playSound(lootItemSounds_); }
 
 // Item sounds
-void UiSoundManager::playDropOnGround() { playSound(dropSounds_); }
 void UiSoundManager::playPickupBag() { playSound(pickupBagSounds_); }
 void UiSoundManager::playPickupBook() { playSound(pickupBookSounds_); }
 // Eating/drinking

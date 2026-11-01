@@ -34,7 +34,7 @@ Fields of the structs in include/game/world_packets.hpp, against every mention
 of that name in the tree. A field counts as read when it is named anywhere
 outside the packet header and the parser sources.
 
-TWO THINGS THAT MAKE A NAIVE VERSION REPORT ZERO FOREVER
+TWO THINGS THAT MAKE A NAIVE VERSION REPORT ZERO ENHANCED
 
 Both were hit while writing this, and both fail silently in the safe-looking
 direction - a clean report that has seen nothing.
@@ -145,7 +145,7 @@ def mentions(skip=None):
     parser, other = collections.Counter(), collections.Counter()
     sources = list((ROOT / "src").rglob("*.cpp")) + list((ROOT / "include").rglob("*.hpp"))
     for p in sources:
-        if p.name == skip or p.resolve() == HDR.resolve():
+        if (skip and p.name in skip) or p.resolve() == HDR.resolve():
             continue
         # A name that appears only in a comment is not a read.
         s = re.sub(r"//[^\n]*|/\*.*?\*/", "", p.read_text(errors="ignore"), flags=re.S)
@@ -172,13 +172,14 @@ def unread(fields, accessors, skip=None):
 def main():
     fields, accessors = structs_and_accessors()
 
-    # The canary. GetLootSlotInfo is the one reader of LootItem.lootSlotType,
-    # so hiding its file must bring that field back. If it does not, the
+    # The canary. GetLootSlotInfo and the loot click's pickup sound are the
+    # readers of LootItem.lootSlotType, so hiding their files must bring that
+    # field back. If it does not, the
     # comparison is broken and the empty report below means nothing - which is
     # precisely how the first version of this passed while seeing nothing.
-    hidden, _ = unread(fields, accessors, skip="lua_inventory_api.cpp")
+    hidden, _ = unread(fields, accessors, skip=("lua_inventory_api.cpp", "inventory_handler.cpp"))
     if not any(f == "lootSlotType" for _, f, _ in hidden):
-        print("  CANARY FAILED: hiding the one reader did not surface the field.")
+        print("  CANARY FAILED: hiding its readers did not surface the field.")
         print("  Every count below is meaningless. Do not believe the zero.\n")
         return 1
 

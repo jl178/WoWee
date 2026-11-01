@@ -696,8 +696,18 @@ std::array<EntitySpawner::ItemDbcRow, 3> EntitySpawner::unitWeaponItems(uint64_t
         // Visible item entries, slots 15-17 (main hand, off hand, ranged).
         auto& table = gameHandler_->otherPlayerVisibleItemEntriesRef();
         if (auto it = table.find(guid); it != table.end()) {
-            for (int i = 0; i < 3; ++i)
-                if (const auto* row = lookupItemDbc(it->second[15 + i])) out[i] = *row;
+            for (int i = 0; i < 3; ++i) {
+                const uint32_t entry = it->second[15 + i];
+                if (const auto* row = lookupItemDbc(entry)) {
+                    out[i] = *row;
+                } else if (const auto* info = entry ? gameHandler_->getItemInfo(entry) : nullptr) {
+                    // Not in Item.dbc: the item query's class and subclass, so
+                    // a staff is still a staff (Ready2HL) and a dagger a dagger.
+                    out[i].itemClass = info->itemClass;
+                    out[i].subclass = info->subClass;
+                    out[i].inventoryType = info->inventoryType;
+                }
+            }
         }
         // An item Item.dbc does not list still has the inventory type the
         // item cache gave the equipment callback.
@@ -750,6 +760,13 @@ uint32_t EntitySpawner::unitIdleAnim(uint64_t guid, uint32_t instanceId) {
     if (unit->getHealth() != 0 && unit->hasCreepVisibility() &&
         cr->hasAnimation(instanceId, STEALTH_STAND))
         return STEALTH_STAND;
+    // Casting or channelling: the cast hold, in or out of combat. The stock
+    // client plays the cast animation for the whole cast and the stance only
+    // between casts; anything that returned a caster to its idle (a flinch,
+    // the Stand/Ready switch below, a stop) used to drop the hold for good.
+    if (unit->getHealth() != 0)
+        if (const uint32_t hold = unitCastHold(guid); hold != 0 && cr->hasAnimation(instanceId, hold))
+            return hold;
     if (unit->getHealth() == 0 || (unit->getUnitFlags() & game::UNIT_FLAG_IN_COMBAT) == 0)
         return STAND;
     const uint32_t want = readyAnim(unitWeaponLoadout(guid),
@@ -2432,68 +2449,39 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
                     // --- Equipment region layers (ItemDisplayInfo DBC) ---
                     auto idiDbc = am->loadDBC("ItemDisplayInfo.dbc");
                     if (idiDbc) {
-                        const auto* idiL = pipeline::getActiveDBCLayout()
-                            ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-                        uint32_t texRegionFields[8];
-                        pipeline::getItemDisplayInfoTextureFields(*idiDbc, idiL, texRegionFields);
                         const bool npcIsFemale = (extraCopy.sexId == 1);
                         const bool npcHasArmArmor = (extraCopy.equipDisplayId[7] != 0 || extraCopy.equipDisplayId[8] != 0);
 
-                        // Which regions of the skin atlas a piece of equipment paints.
-                        //
-                        // ItemDisplayInfo already answers that: a row names a
-                        // texture for each region the item covers and leaves
-                        // the rest empty. It is why the player path reads all
-                        // eight and filters nothing at all - see the loop in
-                        // entity_spawner_player.cpp, which the same items go
-                        // through when a player wears them.
-                        //
-                        // The list here was narrower and dropped texture the
-                        // items do name: across a 3.3.5 install's NPC displays,
-                        // every belt's LegUpper (12790 of them), every boot's
-                        // LegLower (10597), every glove's ArmLower (7908) and
-                        // every bracer's ArmLower (3814). The bracers are where
-                        // it was noticed - forearms wearing nothing on an NPC
-                        // whose CreatureDisplayInfoExtra names a bracer and
-                        // whose bracer names a texture.
-                        //
-                        // Helm, shoulder and cape stay out. Those are geometry
-                        // rather than skin, they name no regions to begin with,
-                        // and a helm painting a face would be worse than a helm
-                        // that does not paint at all.
-                        auto regionAllowedForNpcSlot = [](int eqSlot, int region) -> bool {
-                            (void)region;
-                            switch (eqSlot) {
-                                case 0: case 1: case 10: return false;
-                                default: return true;
-                            }
-                        };
-
-                        std::vector<std::pair<int, std::string>> robeLegs;  // drawn last
-                        for (int eqSlot = 0; eqSlot < 11; eqSlot++) {
+                        // CreatureDisplayInfoExtra's equipment columns run in
+                        // the stock compositor's own item order (helm, shoulder,
+                        // shirt, chest, belt, legs, boots, wrist, gloves, tabard,
+                        // cape), so the column index is the component slot. Which
+                        // regions each kind paints, and in what order, is the
+                        // stock table in pipeline/item_textures.hpp: helm,
+                        // shoulder and cape paint none.
+                        std::vector<pipeline::ItemRegionSource> sources;
+                        for (int eqSlot = 0; eqSlot < 10; eqSlot++) {
                             uint32_t did = extraCopy.equipDisplayId[eqSlot];
                             if (did == 0) continue;
                             int32_t recIdx = idiDbc->findRecordById(did);
                             if (recIdx < 0) continue;
-                            const bool robeRec = eqSlot == 3 && pipeline::isRobeDisplay(*idiDbc, idiL, recIdx);
-
-                            for (int region = 0; region < 8; region++) {
-                                if (!regionAllowedForNpcSlot(eqSlot, region)) continue;
-                                if (eqSlot == 2 && !npcHasArmArmor && !(region == 3 || region == 4)) continue;
-                                std::string texName = idiDbc->getString(
-                                    static_cast<uint32_t>(recIdx), texRegionFields[region]);
-                                if (texName.empty()) continue;
-
-                                std::string fullPath = pipeline::resolveItemRegionTexture(
-                                    *am, region, texName, npcIsFemale);
-                                if (fullPath.empty()) continue;
-
-                                if (robeRec && pipeline::isRobeLegRegion(region)) robeLegs.emplace_back(region, fullPath);
-                                else def.regionLayers.emplace_back(region, fullPath);
-                                allPaths.push_back(fullPath);
+                            pipeline::ItemRegionSource src = pipeline::readItemRegionSource(
+                                *idiDbc, static_cast<uint32_t>(recIdx),
+                                static_cast<pipeline::CharComponentSlot>(eqSlot));
+                            // An NPC with neither bracers nor gloves keeps the
+                            // shirt off its arms.
+                            if (src.slot == pipeline::CharComponentSlot::Shirt && !npcHasArmArmor) {
+                                for (int region = 0; region < pipeline::kItemTextureRegionCount; region++) {
+                                    if (region != 3 && region != 4) src.textures[region].clear();
+                                }
                             }
+                            sources.push_back(std::move(src));
                         }
-                        def.regionLayers.insert(def.regionLayers.end(), robeLegs.begin(), robeLegs.end());
+                        for (auto& layer : pipeline::resolveItemRegionLayers(
+                                 *am, pipeline::orderItemRegionLayers(sources), npcIsFemale)) {
+                            allPaths.push_back(layer.second);
+                            def.regionLayers.push_back(std::move(layer));
+                        }
                     }
 
                     // Determine compositing mode

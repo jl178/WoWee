@@ -215,10 +215,22 @@ public:
     /// Re-attach a unit's weapons when its sheath state changed since the
     /// last look. Cheap when nothing changed; called every frame.
     void syncUnitSheath(uint64_t guid, uint32_t instanceId);
-    /// The loop another unit idles in: its drawn weapon's Ready stance while
-    /// alive and in combat (UNIT_FLAG_IN_COMBAT), Stand otherwise - and Stand
-    /// for a model with no ready stance at all. StealthStand while stealthed.
+    /// The loop another unit idles in: its cast hold while it casts or
+    /// channels, else its weapon's Ready stance while alive and in combat
+    /// (UNIT_FLAG_IN_COMBAT), Stand otherwise - and Stand for a model with no
+    /// ready stance at all. StealthStand while stealthed.
     uint32_t unitIdleAnim(uint64_t guid, uint32_t instanceId);
+    /// The cast or channel loop another unit holds from its SMSG_SPELL_START
+    /// or MSG_CHANNEL_START until the cast resolves (0 to end it). Everything
+    /// that returns a unit to its idle - a flinch, a stop, the Stand/Ready
+    /// switch - returns it to this, so the stance never replaces a cast.
+    void setUnitCastHold(uint64_t guid, uint32_t animId) {
+        if (animId) unitCastHolds_[guid] = animId; else unitCastHolds_.erase(guid);
+    }
+    uint32_t unitCastHold(uint64_t guid) const {
+        auto it = unitCastHolds_.find(guid);
+        return it != unitCastHolds_.end() ? it->second : 0u;
+    }
     /// The stealth variant of a locomotion sequence (Walk -> StealthWalk,
     /// Run -> StealthRun or StealthWalk) for a unit sent with the CREEP
     /// visibility flag, where its model has one; the sequence itself
@@ -501,6 +513,8 @@ private:
     std::unordered_set<uint64_t> creatureVirtualItemUnits_;
     /// The sheath state each unit's weapons were last attached for.
     std::unordered_map<uint64_t, uint8_t> unitSheathAttached_;
+    /// Each casting unit's cast hold (see setUnitCastHold).
+    std::unordered_map<uint64_t, uint32_t> unitCastHolds_;
     /// Attach a unit's three weapon-slot items where its sheath state puts
     /// them: in the hands when drawn, on the back or hips by their sheathe
     /// type when not, the ranged weapon in hand when it is the one drawn

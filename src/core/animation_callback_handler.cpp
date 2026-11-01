@@ -695,6 +695,7 @@ void AnimationCallbackHandler::setupCallbacks() {
                         ac->startSpellCast(castAnim, rendering::anim::FISHING_LOOP, true, 0);
                     }
                 } else {
+                    entitySpawner_.setUnitCastHold(guid, rendering::anim::FISHING_LOOP);
                     cr->playAnimation(instanceId, rendering::anim::FISHING_LOOP, true);
                 }
             } else {
@@ -790,6 +791,9 @@ void AnimationCallbackHandler::setupCallbacks() {
                 auto* ac = renderer_.getAnimationController();
                 if (ac) ac->startSpellCast(precastAnim, castAnim, true, finalizeAnim);
             } else {
+                // Held until the cast resolves: unitIdleAnim answers with it,
+                // so a flinch or the Stand/Ready switch comes back to it.
+                if (castAnim != rendering::anim::STAND) entitySpawner_.setUnitCastHold(guid, castAnim);
                 cr->playAnimation(instanceId, castAnim, true);
             }
             } // end !isFishing
@@ -807,18 +811,21 @@ void AnimationCallbackHandler::setupCallbacks() {
                 // Another unit leaving its cast hold. Only a cast animation is
                 // replaced, so a unit that has since died, run or swung keeps
                 // that. isChannel doubles as "hard stop" (failure, timeout,
-                // channel end): straight to Stand. A finished cast plays its
-                // one-shot release, which returns to Stand by itself. Before,
-                // only channels were stopped and every remote cast looped its
-                // hold until something else overwrote it.
+                // channel end): straight to its idle. A finished cast plays
+                // its one-shot release, then the idle - the weapon's Ready
+                // stance in combat, as between casts in the stock client.
+                // Before, only channels were stopped and every remote cast
+                // looped its hold until something else overwrote it.
                 using namespace rendering::anim;
+                entitySpawner_.setUnitCastHold(guid, 0);
                 uint32_t cur = 0; float t = 0.0f, dur = 0.0f;
                 if (cr->getAnimationState(instanceId, cur, t, dur) &&
                     (cur == READY_SPELL_DIRECTED || cur == READY_SPELL_OMNI ||
                      cur == CHANNEL_CAST_DIRECTED || cur == CHANNEL_CAST_OMNI ||
                      cur == SPELL_PRECAST || cur == SPELL || cur == SPELL_CAST ||
                      cur == SPELL_CAST_DIRECTED || cur == SPELL_CAST_OMNI ||
-                     cur == SPELL_CAST_AREA)) {
+                     cur == SPELL_CAST_AREA || cur == FISHING_LOOP)) {
+                    const uint32_t idle = entitySpawner_.unitIdleAnim(guid, instanceId);
                     uint32_t release = 0;
                     if (!isChannel) {
                         const uint32_t pref = kitAnims.cast ? kitAnims.cast
@@ -828,8 +835,8 @@ void AnimationCallbackHandler::setupCallbacks() {
                                             static_cast<uint32_t>(SPELL_CAST)})
                             if (cr->hasAnimation(instanceId, id)) { release = id; break; }
                     }
-                    if (release) cr->playAnimation(instanceId, release, /*loop=*/false);
-                    else         cr->playAnimation(instanceId, STAND, true);
+                    if (release) cr->playAnimation(instanceId, release, /*loop=*/false, idle);
+                    else         cr->playAnimation(instanceId, idle, true);
                 }
             }
         }
