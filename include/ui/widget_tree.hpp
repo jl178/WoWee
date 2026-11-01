@@ -1013,6 +1013,55 @@ public:
     /// Every FontString and Texture, the two kinds the renderer sizes each
     /// frame. Widgets are never destroyed, only reset with the tree.
     [[nodiscard]] const std::vector<uint32_t>& artAndTextWidgets() const { return artAndText_; }
+
+    /// The labels and textures that may have changed since the sizing pass
+    /// last looked at them, handed to `fn(Widget&)` in id order. The marks are
+    /// cleared as they are handed out. Answers how many were visited.
+    ///
+    /// The renderer sizes every one of these from its own fields alone - its
+    /// text, font, anchors and declared size, or its texture path - and a
+    /// second sizing of an unchanged widget returns without writing anything.
+    /// Walking all of them every frame to find that out was most of the
+    /// layout stage: a Widget is 1.5k and the deque gives each its own block,
+    /// so the walk was a cache miss or several per widget for ~18k widgets.
+    ///
+    /// What marks one is the non-const get() (and findByName, which goes
+    /// through it): nothing outside the tree can write a field without it, so
+    /// a widget nobody has asked for that way since the last pass cannot have
+    /// changed. The mark is conservative - a read through a non-const tree
+    /// marks too - which costs a revisit, never a wrong size. The layout pass
+    /// reads through node() instead, because it writes only rects, levels and
+    /// visibility, and sizing reads none of those.
+    template <typename Fn>
+    size_t forEachChangedArtAndText(Fn&& fn) {
+        size_t visited = 0;
+        for (const uint32_t id : artAndText_) {
+            if (!changed_[id]) continue;
+            changed_[id] = 0;
+            fn(widgets_[id]);
+            ++visited;
+        }
+        return visited;
+    }
+    /// Mark every widget changed, so the next sizing pass revisits them all.
+    void markAllChanged() { std::fill(changed_.begin(), changed_.end(), uint8_t{1}); }
+    /// What sizing reads besides a widget's own fields: the face a label falls
+    /// back on, whether there are assets to read a texture's size from, and
+    /// the point size a label with no height of its own is measured at. When
+    /// any of them differs from the last call every widget is marked, and the
+    /// answer is true.
+    bool noteSizingContext(const void* font, const void* assets, float defaultFontSize);
+
+    /// Whether the compact copy of `visible` the draw order reads agrees with
+    /// the widget's own flag. For WOWEE_LAYOUT_VERIFY; see collectDrawOrder.
+    [[nodiscard]] bool visibleMirrorAgrees(uint32_t id) const {
+        return id < widgets_.size() && (visibleMirror_[id] != 0) == widgets_[id].visible;
+    }
+    /// Collect the draw order by reading every widget, as it was before the
+    /// mirror. WOWEE_LAYOUT_VERIFY sets this on its scratch copy, so the copy
+    /// is laid out the old way end to end.
+    void setFullDrawOrderScan(bool on) { fullDrawOrderScan_ = on; }
+
     /// Every Frame, for the pass that reports size changes to Lua.
     [[nodiscard]] const std::vector<uint32_t>& frameWidgets() const { return frames_; }
     /// EnableKeyboard, recorded here as well as on the widget. The focus probe
@@ -1066,6 +1115,33 @@ private:
     /// wheel without taking the mouse counts as under the cursor.
     [[nodiscard]] uint32_t hitTestFor(float x, float y, bool forWheel) const;
     std::vector<LinkRect> linkRects_;
+    /// get() without the changed mark, for the layout pass. See
+    /// forEachChangedArtAndText for why that pass may skip it.
+    Widget* node(uint32_t id) {
+        return (id == 0 || id >= widgets_.size()) ? nullptr : &widgets_[id];
+    }
+    /// Every write of Widget::visible inside the tree goes through here, so
+    /// the mirror the draw order scans cannot fall out of step with the flag.
+    void setVisible(Widget& w, bool v) {
+        w.visible = v;
+        visibleMirror_[w.id] = v ? 1 : 0;
+    }
+    /// One byte per widget, indexed by id: set when anything that can change
+    /// how a label or texture is sized may have been written. See
+    /// forEachChangedArtAndText. Kept the same length as widgets_.
+    std::vector<uint8_t> changed_;
+    /// Widget::visible, one byte per widget. collectDrawOrder reads this
+    /// rather than all 28k widgets to find the few hundred that are visible:
+    /// 28k bytes in a row instead of 28k scattered 1.5k blocks. It mirrors the
+    /// flag at every write, not a list of what one walk happened to reach -
+    /// a list of the second kind (passVisible_) left out widgets that stayed
+    /// visible from an earlier pass and dropped action bar art and frame art.
+    std::vector<uint8_t> visibleMirror_;
+    bool fullDrawOrderScan_ = false;
+    /// The sizing context noteSizingContext last saw.
+    const void* sizingFont_ = nullptr;
+    const void* sizingAssets_ = nullptr;
+    float sizingDefaultFontSize_ = -1.0f;
     void layoutWidget(uint32_t id, float screenW, float screenH);
     /// Clear the drawing and running flags under a hidden frame without
     /// placing any of it. See layoutWidget.

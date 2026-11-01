@@ -161,8 +161,12 @@ void WidgetTree::reset() {
     lastPixelH_ = 0.0f;
     layingOut_ = false;
     markLayoutDirty();
+    changed_.clear();
+    visibleMirror_.clear();
 
     widgets_.emplace_back();          // id 0 is "none"
+    changed_.push_back(0);
+    visibleMirror_.push_back(0);
     // The screen, then UIParent inside it. The screen carries no name: nothing
     // in FrameXML may find it, and GetParent on a detached frame answers nil
     // rather than naming something WoW has no word for.
@@ -174,6 +178,10 @@ uint32_t WidgetTree::create(WidgetKind kind, uint32_t parent, const std::string&
     markLayoutDirty();
     const uint32_t id = static_cast<uint32_t>(widgets_.size());
     widgets_.emplace_back();
+    // New, so not yet sized; and not visible until a layout says so, which is
+    // what a fresh Widget's flag says too.
+    changed_.push_back(1);
+    visibleMirror_.push_back(0);
     Widget& w = widgets_.back();
     w.id = id;
     w.kind = kind;
@@ -284,7 +292,7 @@ void WidgetTree::hideOrphanedTooltips() {
         if (owner && owner->visibleChain) continue;
         tip->shown = false;
         if (tip->visible) noteVisibilityCandidate(tip->id);
-        tip->visible = false;
+        setVisible(*tip, false);
         tip->visibleChain = false;
     }
 }
@@ -355,7 +363,23 @@ const Widget* WidgetTree::findByName(std::string_view name) const {
 
 Widget* WidgetTree::get(uint32_t id) {
     if (id == 0 || id >= widgets_.size()) return nullptr;
+    // Whoever asks for a writable widget may change how it is sized; see
+    // forEachChangedArtAndText.
+    changed_[id] = 1;
     return &widgets_[id];
+}
+
+bool WidgetTree::noteSizingContext(const void* font, const void* assets,
+                                   float defaultFontSize) {
+    if (font == sizingFont_ && assets == sizingAssets_ &&
+        defaultFontSize == sizingDefaultFontSize_) {
+        return false;
+    }
+    sizingFont_ = font;
+    sizingAssets_ = assets;
+    sizingDefaultFontSize_ = defaultFontSize;
+    markAllChanged();
+    return true;
 }
 
 const Widget* WidgetTree::get(uint32_t id) const {
@@ -770,7 +794,7 @@ void WidgetTree::resolveWidget(uint32_t id) {
     // Nothing has run a full pass yet, so there is no screen size to resolve
     // against. Better a stale zero than a rect measured against a guess.
     if (lastPixelW_ <= 0.0f || lastPixelH_ <= 0.0f) return;
-    const Widget* w = get(id);
+    const Widget* w = node(id);
     if (!w || w->resolvedGen == layoutGeneration_) return;
     const float screenW = (uiScale_ > 0.0f) ? (lastPixelW_ / uiScale_) : lastPixelW_;
     const float screenH = (uiScale_ > 0.0f) ? (lastPixelH_ / uiScale_) : lastPixelH_;
@@ -780,7 +804,7 @@ void WidgetTree::resolveWidget(uint32_t id) {
 
 void WidgetTree::resolveChain(uint32_t id, float screenW, float screenH, int& depth) {
     if (id == 0) return;
-    Widget* w = get(id);
+    Widget* w = node(id);
     if (!w || w->resolvedGen == layoutGeneration_) return;
     // The screen and UIParent are placed by the full pass and have no anchors
     // of their own - running the anchor solver over them would give the screen
@@ -849,7 +873,7 @@ void WidgetTree::layout(float pixelW, float pixelH) {
     rootW.rectH = screenH;
     rootW.visibleChain = rootW.shown;
     if (rootW.visible != rootW.shown) noteVisibilityCandidate(rootId_);
-    rootW.visible = rootW.shown;
+    setVisible(rootW, rootW.shown);
     rootW.effStrata = rootW.strata;
     rootW.effLevel = 0;
     rootW.effScale = 1.0f;
@@ -858,7 +882,7 @@ void WidgetTree::layout(float pixelW, float pixelH) {
     // it is created before any XML is read, so it has none, and a frame with
     // no anchors is not displayed. Its own shown flag still decides whether
     // anything under it is, which is the whole point of it being a frame.
-    if (Widget* ui = get(uiParentId_); ui && ui != &rootW) {
+    if (Widget* ui = node(uiParentId_); ui && ui != &rootW) {
         // Inside the safe area, which is nothing on a screen with none.
         const float inL = safeLeft_ / uiScale_;
         const float inB = safeBottom_ / uiScale_;
@@ -868,7 +892,7 @@ void WidgetTree::layout(float pixelW, float pixelH) {
         ui->rectH = std::max(screenH - inB - safeTop_ / uiScale_, 1.0f);
         ui->visibleChain = rootW.visible && ui->shown;
         if (ui->visible != ui->visibleChain) noteVisibilityCandidate(uiParentId_);
-        ui->visible = ui->visibleChain;
+        setVisible(*ui, ui->visibleChain);
         ui->effStrata = ui->strata;
         ui->effLevel = 0;
         ui->effScale = 1.0f;
@@ -903,7 +927,7 @@ void WidgetTree::layout(float pixelW, float pixelH) {
 }
 
 void WidgetTree::noteVisibilityCandidate(uint32_t id) {
-    Widget* w = get(id);
+    Widget* w = node(id);
     if (!w || w->visibilityDirty) return;
     w->visibilityDirty = true;
     visibilityDirty_.push_back(id);
@@ -913,23 +937,23 @@ std::vector<uint32_t> WidgetTree::takeVisibilityDirty() {
     std::vector<uint32_t> out;
     out.swap(visibilityDirty_);
     for (uint32_t id : out) {
-        if (Widget* w = get(id)) w->visibilityDirty = false;
+        if (Widget* w = node(id)) w->visibilityDirty = false;
     }
     return out;
 }
 
 void WidgetTree::markSubtreeHidden(uint32_t id) {
-    const Widget* w = get(id);
+    const Widget* w = node(id);
     if (!w) return;
     // Only for a widget that is itself off; layoutWidget calls this on
     // exactly those, and the recursion below has just turned the child off.
-    if (Widget* self = get(id); self && !self->visibleChain) self->subtreeOff = true;
+    if (Widget* self = node(id); self && !self->visibleChain) self->subtreeOff = true;
     const std::size_t count = w->children.size();
     for (std::size_t i = 0; i < count; ++i) {
-        w = get(id);
+        w = node(id);
         if (!w || i >= w->children.size()) return;
         const uint32_t child = w->children[i];
-        Widget* c = get(child);
+        Widget* c = node(child);
         if (!c) continue;
         // Neither running nor drawn, so the draw-order pass skips it and
         // nothing measures against it. Its rect is deliberately left alone,
@@ -945,7 +969,7 @@ void WidgetTree::markSubtreeHidden(uint32_t id) {
         if (c->subtreeOff) continue;
         c->visibleChain = false;
         if (c->visible) noteVisibilityCandidate(child);
-        c->visible = false;
+        setVisible(*c, false);
         markSubtreeHidden(child);
     }
 }
@@ -957,7 +981,7 @@ void WidgetTree::layoutWidget(uint32_t id, float screenW, float screenH) {
     // and every ancestor shown - so placing them is arithmetic for something
     // that is neither drawn nor measured against. Of the 28018 widgets this
     // pass walked, 666 were visible; the other 97% were the 3.4ms.
-    if (const Widget* self = get(id); self && !self->visibleChain) {
+    if (const Widget* self = node(id); self && !self->visibleChain) {
         markSubtreeHidden(id);
         return;
     }
@@ -972,21 +996,21 @@ void WidgetTree::layoutWidget(uint32_t id, float screenW, float screenH) {
     // nothing: get() is a bounds check and an index. The count is taken once
     // so a child created during the walk is laid out on the next frame rather
     // than this one, which is what copying the vector did.
-    const Widget* w = get(id);
+    const Widget* w = node(id);
     if (!w) return;
     const std::size_t count = w->children.size();
     for (std::size_t i = 0; i < count; ++i) {
-        w = get(id);
+        w = node(id);
         if (!w || i >= w->children.size()) return;
         layoutWidget(w->children[i], screenW, screenH);
     }
 }
 
 void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
-    Widget* w = get(id);
+    Widget* w = node(id);
     if (!w) return;
     w->resolvedGen = layoutGeneration_;
-    const Widget* parent = get(w->parent);
+    const Widget* parent = node(w->parent);
 
     // A frame with no anchor points is not displayed. That is WoW's rule, and
     // without it every frame FrameXML declares without anchors - a money
@@ -1028,7 +1052,7 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
     {
         const bool nowVisible = w->shown && (!parent || parent->visible) && !unanchoredFrame;
         if (nowVisible != w->visible) noteVisibilityCandidate(id);
-        w->visible = nowVisible;
+        setVisible(*w, nowVisible);
     }
     // Back on the chain: what was marked under it is stale, so the next time
     // it goes off its subtree has to be walked again.
@@ -1100,7 +1124,7 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
     Constraints cx, cy;
 
     for (const Anchor& a : w->anchors) {
-        const Widget* rel = (a.relativeTo != 0) ? get(a.relativeTo) : parent;
+        const Widget* rel = (a.relativeTo != 0) ? node(a.relativeTo) : parent;
         float relLeft, relBottom, relW, relH;
         if (rel) {
             relLeft = rel->left; relBottom = rel->bottom; relW = rel->rectW; relH = rel->rectH;
@@ -1291,7 +1315,7 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
     // one it was moved out of.
     if (w->clampedToScreen && id != rootId_ &&
         w->rectW > 0.0f && w->rectH > 0.0f) {
-        if (const Widget* screen = get(rootId_)) {
+        if (const Widget* screen = node(rootId_)) {
             clampInside(*screen, w->rectW, w->rectH, w->left, w->bottom,
                         w->clampInsetL, w->clampInsetR, w->clampInsetT, w->clampInsetB);
         }
@@ -1407,10 +1431,12 @@ bool WidgetTree::buttonArtVisible(const Widget& w) const {
 
 void WidgetTree::collectDrawOrder() {
     drawOrder_.clear();
-    for (const Widget& w : widgets_) {
-        if (w.id == 0) continue;
-        if (!w.visible) continue;
-        if (w.alpha <= 0.001f) continue;
+    // Whether a visible widget has anything to paint, and if so its place in
+    // the list.
+    const auto consider = [&](const Widget& w) {
+        if (w.id == 0) return;
+        if (!w.visible) return;
+        if (w.alpha <= 0.001f) return;
         // Frames are containers, except when they carry a backdrop or are a
         // status bar - then the frame itself has something to paint, and it
         // paints underneath its own regions because they sit a level above it.
@@ -1440,8 +1466,8 @@ void WidgetTree::collectDrawOrder() {
             !(w.isTooltip && !w.tooltipLines.empty()) &&
             // The world map's quest areas, which the frame paints itself
             // (WidgetRenderer::drawQuestBlobs) the way CGQuestPOIFrame does.
-            w.name != "WorldMapBlobFrame") continue;
-        if (w.rectW <= 0.0f || w.rectH <= 0.0f) continue;
+            w.name != "WorldMapBlobFrame") return;
+        if (w.rectW <= 0.0f || w.rectH <= 0.0f) return;
         // A texture with nothing to show is dropped - unless it is the colour
         // picker's, whose art is generated rather than loaded.
         //
@@ -1454,13 +1480,23 @@ void WidgetTree::collectDrawOrder() {
         // window: a chat window's background among them.
         if (w.kind == WidgetKind::Texture && w.texturePath.empty() &&
             !w.solidColor && w.externalTexture == 0 &&
-            w.colorRole == Widget::ColorRole::None) continue;
+            w.colorRole == Widget::ColorRole::None) return;
         if (w.kind == WidgetKind::Frame && w.isStatusBar && w.barTexture.empty() &&
-            !w.hasBackdrop) continue;
-        if (w.kind == WidgetKind::FontString && w.text.empty()) continue;
+            !w.hasBackdrop) return;
+        if (w.kind == WidgetKind::FontString && w.text.empty()) return;
         // A button shows one of its state textures, not all of them.
-        if (!buttonArtVisible(w)) continue;
+        if (!buttonArtVisible(w)) return;
         drawOrder_.push_back(&w);
+    };
+    if (fullDrawOrderScan_) {
+        for (const Widget& w : widgets_) consider(w);
+    } else {
+        // Only the visible ones are read, found from the mirror; ascending
+        // ids, the order the scan above visits them in.
+        const std::size_t count = std::min(visibleMirror_.size(), widgets_.size());
+        for (std::size_t id = 1; id < count; ++id) {
+            if (visibleMirror_[id]) consider(widgets_[id]);
+        }
     }
 
     // A status bar draws its own fill, where the real client makes the fill a

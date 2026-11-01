@@ -4,6 +4,7 @@
 
 #include <limits>
 #include <string>
+#include <vector>
 
 using namespace wowee::ui;
 
@@ -3113,4 +3114,148 @@ TEST_CASE("a hidden frame still answers for its own rect") {
     tree.resolveWidget(inner);
     CHECK(tree.get(inner)->rectW == Catch::Approx(200.0f));
     CHECK(tree.get(inner)->rectH == Catch::Approx(60.0f));
+}
+
+TEST_CASE("Only widgets asked for writable are handed to the sizing pass",
+          "[widget][sizing]") {
+    // The renderer sizes labels and textures from their own fields, and only
+    // revisits the ones the tree has marked. A widget that changed without
+    // being marked would keep a stale size, so pin what marks one and what
+    // must not.
+    WidgetTree tree;
+    const uint32_t frame = tree.create(WidgetKind::Frame, 0, "F");
+    const uint32_t label = tree.create(WidgetKind::FontString, frame, "L");
+    const uint32_t tex = tree.create(WidgetKind::Texture, frame, "T");
+    tree.get(frame)->width = 100.0f;
+    tree.get(frame)->height = 50.0f;
+    tree.addPoint(frame, Anchor{});
+    tree.setAllPoints(tex, frame);
+    tree.addPoint(label, Anchor{});
+
+    const auto take = [&] {
+        std::vector<uint32_t> seen;
+        tree.forEachChangedArtAndText([&](Widget& w) { seen.push_back(w.id); });
+        return seen;
+    };
+
+    // New and never sized, in id order; then nothing until something changes.
+    CHECK(take() == std::vector<uint32_t>{label, tex});
+    CHECK(take().empty());
+
+    // Reads through a const tree mark nothing.
+    const WidgetTree& readOnly = tree;
+    CHECK(readOnly.get(label)->text.empty());
+    CHECK(take().empty());
+
+    // Nor does the layout pass, which writes rects and visibility - none of
+    // which sizing reads - or an on-demand resolve.
+    tree.layout(kScreenW, kScreenH);
+    tree.markLayoutDirty();
+    tree.resolveWidget(label);
+    CHECK(take().empty());
+
+    // A write through the writable accessor marks exactly that widget.
+    tree.get(label)->text = "Goldshire";
+    CHECK(take() == std::vector<uint32_t>{label});
+    // And so does every tree method that changes a size or an anchor.
+    tree.setWidth(tex, 20.0f);
+    CHECK(take() == std::vector<uint32_t>{tex});
+    CHECK(tree.findByName("L") != nullptr);
+    CHECK(take() == std::vector<uint32_t>{label});
+
+    // A new sizing context - a different fallback face, assets, or default
+    // point size - revisits every one; the same context again revisits none.
+    int face = 0, assets = 0;
+    CHECK(tree.noteSizingContext(&face, &assets, 12.0f));
+    CHECK(take() == std::vector<uint32_t>{label, tex});
+    CHECK_FALSE(tree.noteSizingContext(&face, &assets, 12.0f));
+    CHECK(take().empty());
+    CHECK(tree.noteSizingContext(&face, &assets, 14.0f));
+    CHECK(take() == std::vector<uint32_t>{label, tex});
+
+    tree.markAllChanged();
+    CHECK(take() == std::vector<uint32_t>{label, tex});
+}
+
+TEST_CASE("The draw order from the visible mirror matches a scan of every widget",
+          "[widget][draworder]") {
+    // collectDrawOrder finds the visible widgets from a byte-per-widget copy of
+    // the flag. An earlier version kept a list of what one walk reached
+    // instead, missed widgets that stayed visible from an earlier pass, and
+    // dropped action bar and frame art. The mirror has to agree with the flag
+    // at every write, and the order it gives has to be the full scan's.
+    WidgetTree tree;
+    std::vector<uint32_t> frames;
+    for (int f = 0; f < 4; ++f) {
+        const uint32_t frame =
+            tree.create(WidgetKind::Frame, tree.uiParentId(), "F" + std::to_string(f));
+        tree.get(frame)->width = 40.0f;
+        tree.get(frame)->height = 40.0f;
+        Anchor a;
+        a.x = 50.0f * static_cast<float>(f);
+        tree.addPoint(frame, a);
+        frames.push_back(frame);
+        for (int t = 0; t < 3; ++t) {
+            const uint32_t tex = tree.create(WidgetKind::Texture, frame, "");
+            tree.get(tex)->texturePath = "x.blp";
+            tree.get(tex)->layer = static_cast<DrawLayer>(t);
+            tree.setAllPoints(tex, frame);
+        }
+        const uint32_t label = tree.create(WidgetKind::FontString, frame, "");
+        tree.get(label)->text = "label";
+        tree.get(label)->width = 30.0f;
+        tree.get(label)->height = 12.0f;
+        tree.addPoint(label, Anchor{});
+    }
+    const uint32_t tip = tree.create(WidgetKind::Frame, 0, "Tip");
+    tree.get(tip)->hasBackdrop = true;
+    tree.get(tip)->width = 100.0f;
+    tree.get(tip)->height = 30.0f;
+    tree.addPoint(tip, Anchor{});
+    tree.setTooltipOwner(tip, frames[2]);
+
+    const auto ids = [](const WidgetTree& t) {
+        std::vector<uint32_t> out;
+        for (const Widget* w : t.drawOrder()) out.push_back(w->id);
+        return out;
+    };
+    const auto mirrorAgrees = [&] {
+        for (uint32_t id = 1; id < tree.size(); ++id) {
+            if (!tree.visibleMirrorAgrees(id)) return false;
+        }
+        return true;
+    };
+    // The same tree laid out both ways, from the same state.
+    const auto checkBothWays = [&] {
+        tree.setFullDrawOrderScan(false);
+        tree.layout(kScreenW, kScreenH);
+        REQUIRE(mirrorAgrees());
+        const auto fromMirror = ids(tree);
+        tree.setFullDrawOrderScan(true);
+        tree.layout(kScreenW, kScreenH);
+        CHECK(ids(tree) == fromMirror);
+        return fromMirror.size();
+    };
+
+    CHECK(checkBothWays() == 4 * 4 + 1);
+
+    // A frame hidden, and the subtree under it with it.
+    tree.get(frames[1])->shown = false;
+    CHECK(checkBothWays() == 3 * 4 + 1);
+
+    // UIParent hidden: everything under it goes, and the parentless tooltip
+    // stays.
+    tree.get(tree.uiParentId())->shown = false;
+    CHECK(checkBothWays() == 1);
+    tree.get(tree.uiParentId())->shown = true;
+    tree.get(frames[1])->shown = true;
+    CHECK(checkBothWays() == 4 * 4 + 1);
+
+    // The orphaned-tooltip sweep hides outside the layout pass.
+    tree.get(frames[2])->shown = false;
+    tree.layout(kScreenW, kScreenH);
+    tree.hideOrphanedTooltips();
+    CHECK(mirrorAgrees());
+    CHECK_FALSE(tree.get(tip)->visible);
+    CHECK(checkBothWays() == 3 * 4);
 }

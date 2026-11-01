@@ -11210,7 +11210,7 @@ void LuaEngine::dispatchMouse(float x, float y, float screenH, MouseButtons butt
     if (now - lastReport >= 1.0) {
         size_t mouseFrames = 0;
         for (uint32_t id = 1; id < widgets_.size(); ++id) {
-            const auto* w = widgets_.get(id);
+            const auto* w = std::as_const(widgets_).get(id);
             if (w && w->mouseEnabled && w->visible) ++mouseFrames;
         }
         // Reported whenever anything is on screen at all, not only when
@@ -11221,7 +11221,7 @@ void LuaEngine::dispatchMouse(float x, float y, float screenH, MouseButtons butt
         // report.
         size_t visibleFrames = 0;
         for (uint32_t id = 1; id < widgets_.size(); ++id) {
-            const auto* w = widgets_.get(id);
+            const auto* w = std::as_const(widgets_).get(id);
             if (w && w->visible) ++visibleFrames;
         }
         if (visibleFrames > 0) {
@@ -11922,8 +11922,12 @@ void LuaEngine::runInterfaceProbe() {
 /// back wants what was said, not what is still fresh.
 void LuaEngine::expireMessages(float elapsed) {
     for (size_t id = 1; id < widgets_.size(); ++id) {
+        // Read-only until it is a message frame: the writable get() marks a
+        // widget for the renderer's sizing pass, and this runs every frame
+        // over the whole tree.
+        const auto* seen = std::as_const(widgets_).get(static_cast<uint32_t>(id));
+        if (!seen || !seen->isMessageFrame || seen->messageDuration <= 0.0f) continue;
         auto* w = widgets_.get(static_cast<uint32_t>(id));
-        if (!w || !w->isMessageFrame || w->messageDuration <= 0.0f) continue;
         const bool readingBack = w->messageScroll > 0;
         const float life = w->messageDuration;
         const float fade = w->messageFadeDuration > 0.0f ? w->messageFadeDuration : 0.0f;
