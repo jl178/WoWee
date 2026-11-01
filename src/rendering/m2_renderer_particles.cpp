@@ -89,7 +89,7 @@ std::vector<glm::vec3> M2Renderer::getWaterVegetationPositions(const glm::vec3& 
 }
 
 void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt) {
-    if (gpu.isInstancePortal) return;
+    if (gpu.isInstancePortal || inst.emissionStopped) return;
 
     if (inst.emitterAccumulators.size() != gpu.particleEmitters.size()) {
         inst.emitterAccumulators.resize(gpu.particleEmitters.size(), 0.0f);
@@ -365,7 +365,7 @@ void M2Renderer::updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt
         }
 
         // Emit new edges based on edgesPerSecond
-        if (visibility > 0.5f) {
+        if (visibility > 0.5f && !inst.emissionStopped) {
             accum += em.edgesPerSecond * dt;
             while (accum >= 1.0f) {
                 accum -= 1.0f;
@@ -729,7 +729,12 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
 
             float scale = rawScale;
             if (gpu.isSpellEffect) {
-                scale = std::max(rawScale * 1.5f, 0.15f);
+                // The authored size, as every other emitter draws it. This
+                // was raised by half on top, which nothing in the data asks
+                // for: kits on the caster's hands and missiles came out a
+                // size larger than the stock client's. Only the sub-pixel
+                // floor the flame fixtures also get stays.
+                scale = std::max(rawScale, 0.15f);
             } else if (!gpu.isFireflyEffect) {
                 scale = std::min(rawScale, 1.5f);
                 // Candle flames are authored at a fraction of a unit, which lands

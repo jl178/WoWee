@@ -44,6 +44,9 @@ public:
         selectedRealmName.clear();
         selectedRealmAddress.clear();
         statusMessage.clear();
+        listScroll_ = 0;
+        category_ = -1;
+        sortColumn_ = -1;
     }
 
     /**
@@ -76,6 +79,11 @@ private:
     bool autoSelectAttempted = false;
     std::string selectedRealmName;
     std::string selectedRealmAddress;
+
+    int listScroll_ = 0;     ///< the first of the eighteen rows shown
+    int category_ = -1;      ///< the realm category (Cfg_Categories) whose tab is up; -1 not yet
+    int sortColumn_ = -1;    ///< SortRealms: 0 name, 1 type, 2 characters, 3 population; -1 as sent
+    bool sortDescending_ = false;
 
     // Status
     std::string statusMessage;

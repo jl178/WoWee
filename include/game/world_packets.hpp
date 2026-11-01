@@ -2296,6 +2296,12 @@ struct SpellGoData {
     uint8_t missCount = 0;
     std::vector<SpellGoMissEntry> missTargets;
     uint64_t targetGuid = 0;  ///< Primary target GUID from SpellCastTargets (0 = none/AoE)
+    /// TARGET_FLAG_DEST_LOCATION (0x40): the point on the ground the spell
+    /// was cast at (Blizzard, Flamestrike), as sent: server/wire coordinates
+    /// (core::coords::serverToCanonical turns them canonical).
+    bool hasDest = false;
+    uint64_t destTransportGuid = 0;  ///< non-zero: dest is relative to this transport
+    float destX = 0.0f, destY = 0.0f, destZ = 0.0f;
 
     [[nodiscard]] bool isValid() const { return spellId != 0; }
 };

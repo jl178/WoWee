@@ -180,9 +180,19 @@ bool SpellGoParser::parse(network::Packet& packet, SpellGoData& data) {
             if (targetFlags & 0x0020u) {
                 skipPackedAndFloats3();
             }
-            // DEST_LOCATION: PackedGuid (transport) + float x,y,z
+            // DEST_LOCATION: PackedGuid (transport) + float x,y,z - kept: the
+            // ground point a Blizzard or Flamestrike plays its area kits at.
             if (targetFlags & 0x0040u) {
-                skipPackedAndFloats3();
+                if (packet.hasFullPackedGuid()) {
+                    data.destTransportGuid = packet.readPackedGuid();
+                    if (packet.hasRemaining(12)) {
+                        data.destX = packet.readFloat();
+                        data.destY = packet.readFloat();
+                        data.destZ = packet.readFloat();
+                        data.hasDest = std::isfinite(data.destX) && std::isfinite(data.destY) &&
+                                       std::isfinite(data.destZ);
+                    }
+                }
             }
             // STRING: null-terminated
             if (targetFlags & 0x0200u) {

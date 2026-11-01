@@ -500,7 +500,9 @@ void UIManager::render(core::AppState appState, auth::AuthHandler* authHandler, 
 
         case core::AppState::CHARACTER_CREATION:
             authScreen->updateMusic();  // the glue theme plays until the world does
-            authScreen->drawBackdrop();
+            // The race's own scene covers the window once it is up; the login
+            // scene stands in until then.
+            if (!characterCreateScreen->drawsOwnScene()) authScreen->drawBackdrop();
             if (gameHandler) {
                 characterCreateScreen->render(*gameHandler);
             }

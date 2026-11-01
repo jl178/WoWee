@@ -45,6 +45,11 @@ void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& posit
     const glm::vec3 oldBoundsMin = inst.worldBoundsMin;
     const glm::vec3 oldBoundsMax = inst.worldBoundsMax;
 
+    // A jump the shadow candidate margin may not cover; see renderShadow.
+    {
+        const glm::vec3 step = position - inst.position;
+        if (glm::dot(step, step) > 64.0f) ++casterLayoutGen_;
+    }
     inst.position = position;
     inst.updateModelMatrix();
     // Use cachedModel instead of a fresh models.find() - the pointer was set
@@ -65,6 +70,22 @@ void M2Renderer::setInstanceFade(uint32_t instanceId, float alpha) {
     auto idxIt = instanceIndexById.find(instanceId);
     if (idxIt == instanceIndexById.end()) return;
     instances[idxIt->second].fade = std::clamp(alpha, 0.0f, 1.0f);
+}
+
+void M2Renderer::stopInstanceEmission(uint32_t instanceId) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return;
+    instances[idxIt->second].emissionStopped = true;
+}
+
+bool M2Renderer::instanceHasLiveParticles(uint32_t instanceId) const {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return false;
+    const auto& inst = instances[idxIt->second];
+    if (!inst.particles.empty()) return true;
+    for (const auto& edges : inst.ribbonEdges)
+        if (!edges.empty()) return true;
+    return false;
 }
 
 void M2Renderer::setInstanceGroundNormal(uint32_t instanceId, const glm::vec3& normal) {
@@ -223,6 +244,11 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
 
     // Extract position from transform for bounds
     inst.position = glm::vec3(transform[3]);
+    // A jump the shadow candidate margin may not cover; see renderShadow.
+    {
+        const glm::vec3 step = inst.position - oldPosition;
+        if (glm::dot(step, step) > 64.0f) ++casterLayoutGen_;
+    }
 
     // The dedup map is keyed on position, so it has to move with the instance.
     // It did not, and only rebuildSpatialIndex ever put it right - which this
@@ -289,7 +315,9 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
 
     // Swap-remove: move last element to the hole and pop_back to avoid O(n) shift
     instanceIndexById.erase(instanceId);
-    if (idx < instances.size() - 1) {
+    ++casterLayoutGen_;  // the last instance changes index
+    const size_t lastIdx = instances.size() - 1;
+    if (idx < lastIdx) {
         uint32_t movedId = instances.back().id;
         instances[idx] = std::move(instances.back());
         instances.pop_back();
@@ -298,27 +326,26 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
         instances.pop_back();
     }
 
-    // Rebuild the lightweight auxiliary index vectors (smoke, portal, etc.)
-    // These are small vectors of indices that are rebuilt cheaply.
-    smokeInstanceIndices_.clear();
-    portalInstanceIndices_.clear();
-    animatedInstanceIndices_.clear();
-    particleOnlyInstanceIndices_.clear();
-    particleInstanceIndices_.clear();
-    boatInstanceIndices_.clear();
-    lightInstanceIndices_.clear();
-    for (size_t i = 0; i < instances.size(); i++) {
-        auto& ri = instances[i];
-        if (ri.cachedIsSmoke) smokeInstanceIndices_.push_back(i);
-        if (ri.cachedIsInstancePortal) portalInstanceIndices_.push_back(i);
-        if (ri.cachedHasParticleEmitters) particleInstanceIndices_.push_back(i);
-        if (ri.cachedHasAnimation && !ri.cachedDisableAnimation)
-            animatedInstanceIndices_.push_back(i);
-        else if (ri.cachedHasParticleEmitters)
-            particleOnlyInstanceIndices_.push_back(i);
-        if (ri.cachedIsBoat) boatInstanceIndices_.push_back(i);
-        if (ri.cachedModel && modelGivesLight(*ri.cachedModel)) lightInstanceIndices_.push_back(i);
-    }
+    // Patch the auxiliary index lists rather than rebuilding them: drop the
+    // removed slot, and point whatever named the old last slot at the hole
+    // it moved into. The moved instance keeps its own flags, so its list
+    // membership is unchanged.
+    //
+    // These were rebuilt from every instance in the world on each single
+    // removal - 85k of them since clutter went per chunk, a cache miss each -
+    // and every spell visual, missile and precast kit ends with one. Walking
+    // the short index vectors touches no instance at all.
+    const auto patch = [idx, lastIdx](std::vector<size_t>& list) {
+        list.erase(std::remove(list.begin(), list.end(), idx), list.end());
+        if (idx < lastIdx) std::replace(list.begin(), list.end(), lastIdx, idx);
+    };
+    patch(smokeInstanceIndices_);
+    patch(portalInstanceIndices_);
+    patch(animatedInstanceIndices_);
+    patch(particleOnlyInstanceIndices_);
+    patch(particleInstanceIndices_);
+    patch(boatInstanceIndices_);
+    patch(lightInstanceIndices_);
 }
 
 void M2Renderer::setInstanceIsGameObject(uint32_t instanceId, bool isGameObject) {
@@ -517,6 +544,9 @@ void M2Renderer::resetQueryStats() {
 }
 
 void M2Renderer::rebuildSpatialIndex() {
+    // Every path that compacts or reorders `instances` comes through here;
+    // the shadow candidate list holds indices into it.
+    ++casterLayoutGen_;
     spatialGrid.clear();
     instanceIndexById.clear();
     boneSeedInstanceByModel_.clear();

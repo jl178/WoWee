@@ -191,6 +191,9 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     censusInstance(instance);
     instances.push_back(instance);
     size_t idx = instances.size() - 1;
+    // A possible shadow caster the candidate list has not seen; clutter
+    // never casts, so streaming it leaves the list alone.
+    if (!mdlRef.isGroundDetail) ++casterLayoutGen_;
     // Track special instances for fast-path iteration
     if (mdlRef.isSmoke) {
         smokeInstanceIndices_.push_back(idx);
@@ -301,6 +304,7 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     censusInstance(instance);
     instances.push_back(instance);
     size_t idx = instances.size() - 1;
+    if (!mdl2.isGroundDetail) ++casterLayoutGen_;
     if (mdl2.isSmoke) {
         smokeInstanceIndices_.push_back(idx);
     }
@@ -337,6 +341,9 @@ static bool skyBatchAllowed(bool skyMode, std::size_t index) {
 
 void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::mat4& viewProjection) {
     ZoneScopedN("M2Renderer::update");
+    static const bool updateProfile = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
+    using profClock = std::chrono::steady_clock;
+    const profClock::time_point profStart = updateProfile ? profClock::now() : profClock::time_point{};
     if (spatialIndexDirty_) {
         rebuildSpatialIndex();
     }
@@ -509,6 +516,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         }
     }
 
+    const profClock::time_point profAnimStart = updateProfile ? profClock::now() : profClock::time_point{};
     boneWorkIndices_.clear();
     boneWorkIndices_.reserve(animatedInstanceIndices_.size());
 
@@ -607,6 +615,16 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
             }
         }
 
+        // Already in the one pose this sequence has. The clock and the
+        // variation timer above still ran, so the sequence changes when it
+        // would have, and that change is what poses it again.
+        if (model.staticPose &&
+            instance.posedSequence == instance.currentSequenceIndex &&
+            !instance.boneMatrices.empty()) {
+            ++updateProf_.staticPoseSkips;
+            continue;
+        }
+
         // Frustum + distance cull: skip expensive bone computation for off-screen instances.
         // Both effectiveMaxDistSq and paddedRadius are precomputed per instance in
         // recomputeCachedCullFactors(); we only need the per-frame distance and frustum test.
@@ -645,8 +663,12 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         instance.frameSkipCounter++;
         if ((instance.frameSkipCounter % boneInterval) != 0) continue;
 
+        if (model.staticPose) {
+            instance.posedSequence = static_cast<int16_t>(instance.currentSequenceIndex);
+        }
         boneWorkIndices_.push_back(idx);
     }
+    const profClock::time_point profBonesStart = updateProfile ? profClock::now() : profClock::time_point{};
 
     // Compute bone matrices (expensive, parallel if enough work)
     const size_t animCount = boneWorkIndices_.size();
@@ -714,6 +736,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         }
     }
 
+    const profClock::time_point profParticlesStart = updateProfile ? profClock::now() : profClock::time_point{};
     // Particle update (sequential - uses RNG, not thread-safe)
     // Only iterate instances that have particle emitters (pre-built list).
     for (size_t idx : particleInstanceIndices_) {
@@ -732,6 +755,38 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         }
     }
 
+    // Where update/m2 join goes. Reported by the world renderer only - the
+    // sky has an M2Renderer of its own and a handful of instances.
+    if (updateProfile && !skyMode_) {
+        const auto profEnd = profClock::now();
+        const auto ms = [](profClock::time_point a, profClock::time_point b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        auto& p = updateProf_;
+        p.preMs += ms(profStart, profAnimStart);
+        p.animLoopMs += ms(profAnimStart, profBonesStart);
+        p.bonesMs += ms(profBonesStart, profParticlesStart);
+        p.particlesMs += ms(profParticlesStart, profEnd);
+        p.animatedListed += animatedInstanceIndices_.size();
+        p.boneWork += boneWorkIndices_.size();
+        p.particleListed += particleInstanceIndices_.size();
+        ++p.frames;
+        if (p.since == profClock::time_point{}) p.since = profEnd;
+        if (profEnd - p.since > std::chrono::seconds(10) && p.frames > 0) {
+            const double n = p.frames;
+            LOG_WARNING("  m2 update: pre ", p.preMs / n, "ms, anim loop ", p.animLoopMs / n,
+                        "ms, bones ", p.bonesMs / n, "ms, particles ", p.particlesMs / n,
+                        "ms per frame; ", p.animatedListed / p.frames, " animated listed, ",
+                        p.boneWork / p.frames, " posed, ", p.staticPoseSkips / p.frames,
+                        " static-pose skips, ", p.particleListed / p.frames,
+                        " with emitters, of ", instances.size(), " instances");
+            LOG_WARNING("  m2 shadow: ", p.shadowCandidates / p.frames, " candidates, ",
+                        p.shadowCasters / p.frames, " casters drawn per frame; candidate list rebuilt ",
+                        p.shadowRebuilds, " times in ", p.frames, " frames");
+            p = UpdateProfile{};
+            p.since = profEnd;
+        }
+    }
 }
 
 // Diagnostic: WOWEE_M2_NO_SKINNING=1 renders every M2 in its bind pose by
@@ -2465,8 +2520,53 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     // this pass, and none of it is drawing.
     shadowCasters_[0].clear();
     shadowCasters_[1].clear();
-    for (uint32_t i = 0; i < instances.size(); ++i) {
+
+    // Who is worth asking. Walking every instance in the world here was
+    // 3.2 ms a frame at 85k instances, almost all of it rejecting things far
+    // outside the shadow disc. So the walk runs a few times a second, keeps
+    // whatever could reach the disc with a margin to spare, and each frame
+    // asks only those - with the same tests as before, on their current
+    // positions, so nothing inside the list is culled differently.
+    //
+    // What could reach the disc without being on the list: something that
+    // moved more than the margin since the list was built (the list is at
+    // most a quarter second old, and a long jump in one step bumps
+    // casterLayoutGen_), something created since (a non-clutter create bumps
+    // it), or the centre wandering off (rebuilt past half the margin).
+    // Removals move indices, so they bump it too; ids are checked anyway.
+    {
+        constexpr float kCandidateMargin = 32.0f;
+        const auto now = std::chrono::steady_clock::now();
+        const glm::vec3 drift = shadowCenter - shadowCandCenter_;
+        const bool rebuild =
+            shadowCandLayoutGen_ != casterLayoutGen_ ||
+            std::abs(shadowCandRadius_ - shadowRadius) > 0.01f ||
+            glm::dot(drift, drift) > (0.5f * kCandidateMargin) * (0.5f * kCandidateMargin) ||
+            now - shadowCandBuiltAt_ > std::chrono::milliseconds(250);
+        if (rebuild) {
+            shadowCandidates_.clear();
+            for (uint32_t i = 0; i < instances.size(); ++i) {
+                const auto& instance = instances[i];
+                if (!instance.cachedIsValid || instance.cachedIsSmoke ||
+                    instance.cachedIsInvisibleTrap || instance.cachedIsGroundDetail) continue;
+                const glm::vec3 d = instance.position - shadowCenter;
+                const float reach = shadowRadius + instance.cachedPaddedRadius + kCandidateMargin;
+                if (glm::dot(d, d) > reach * reach) continue;
+                shadowCandidates_.emplace_back(i, instance.id);
+            }
+            shadowCandCenter_ = shadowCenter;
+            shadowCandRadius_ = shadowRadius;
+            shadowCandLayoutGen_ = casterLayoutGen_;
+            shadowCandBuiltAt_ = now;
+            ++updateProf_.shadowRebuilds;
+        }
+        updateProf_.shadowCandidates += shadowCandidates_.size();
+    }
+
+    for (const auto& [i, candidateId] : shadowCandidates_) {
+        if (i >= instances.size()) continue;
         const auto& instance = instances[i];
+        if (instance.id != candidateId) continue;
         if (!instance.cachedIsValid || instance.cachedIsSmoke ||
             instance.cachedIsInvisibleTrap) continue;
         // Every instance is a candidate caster, so this is a walk over all of
@@ -2488,6 +2588,11 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         }
         if (!instance.cachedModel) continue;
         const M2ModelGPU& model = *instance.cachedModel;
+        // A spell kit or missile is drawn additive and unlit - glow cards and
+        // particles round a small carrier mesh - and the stock client casts
+        // no shadow from one. Drawn here it cast the cards as solid quads,
+        // and every cast added casters that followed their bones each frame.
+        if (model.isSpellEffect) continue;
 
         // Cull casters against the light-space ortho footprint, not a
         // world-space sphere around the player. The shadow frustum extends
@@ -2616,6 +2721,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     // still - and from the ground that reads as the shadow blinking. Said at
     // most once a second, and only when the count actually swings, so an
     // ordinary walk through a forest stays quiet.
+    updateProf_.shadowCasters += castersDrawn[0] + castersDrawn[1];
     {
         const uint32_t foliageNow = castersDrawn[1];
         const uint32_t foliageWas = lastFoliageCasters_;

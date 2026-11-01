@@ -317,7 +317,18 @@ audio::SpellSoundManager::MagicSchool SpellHandler::resolveSpellSchool(uint32_t 
     return audio::SpellSoundManager::MagicSchool::PHYSICAL;
 }
 
+bool SpellHandler::spellVisualPlaysSounds(uint32_t spellId) {
+    const uint32_t visualId = resolveSpellVisualId(spellId);
+    if (visualId == 0) return false;
+    auto* renderer = owner_.services().renderer;
+    auto* svs = renderer ? renderer->getSpellVisualSystem() : nullptr;
+    return svs && svs->hasVisual(visualId);
+}
+
 void SpellHandler::playSpellCastSound(uint32_t spellId) {
+    // Fireball's cast kit plays "Fire Cast" (SoundEntries 1484) at the caster;
+    // the school bank's fire cast on top of it was the same moment twice.
+    if (spellVisualPlaysSounds(spellId)) return;
     auto* ac = owner_.services().audioCoordinator;
     if (!ac) return;
     auto* ssm = ac->getSpellSoundManager();
@@ -326,12 +337,67 @@ void SpellHandler::playSpellCastSound(uint32_t spellId) {
 }
 
 void SpellHandler::playSpellImpactSound(uint32_t spellId) {
+    // The impact kit's sound plays on the target as it lands.
+    if (spellVisualPlaysSounds(spellId)) return;
     auto* ac = owner_.services().audioCoordinator;
     if (!ac) return;
     auto* ssm = ac->getSpellSoundManager();
     if (!ssm) return;
     ssm->playImpact(resolveSpellSchool(spellId),
                      audio::SpellSoundManager::SpellPower::MEDIUM);
+}
+
+void SpellHandler::syncAuraStateVisuals(uint64_t guid, const std::vector<AuraSlot>& auras) {
+    if (guid == 0) return;
+    auto* renderer = owner_.services().renderer;
+    auto* svs = renderer ? renderer->getSpellVisualSystem() : nullptr;
+    if (!svs) return;
+    if (!svs->hasUnitResolvers()) {
+        svs->setUnitResolvers(
+            [this](uint64_t g) { return owner_.resolveUnitRenderInstance(g); },
+            [this](uint64_t g, glm::vec3& feet) { return resolveUnitPosition(g, feet); });
+    }
+    std::vector<uint32_t> visuals;
+    visuals.reserve(auras.size());
+    for (const auto& a : auras) {
+        if (a.isEmpty()) continue;
+        if (const uint32_t vid = resolveSpellVisualId(a.spellId)) visuals.push_back(vid);
+    }
+    svs->syncUnitStateVisuals(guid, visuals);
+}
+
+void SpellHandler::triggerGroundAreaVisual(const SpellGoData& data, uint32_t visualId) {
+    if (!data.hasDest || visualId == 0) return;
+    // On a transport the point is relative to it; the area kits are not
+    // worth guessing a frame for.
+    if (data.destTransportGuid != 0) return;
+    auto* renderer = owner_.services().renderer;
+    auto* svs = renderer ? renderer->getSpellVisualSystem() : nullptr;
+    if (!svs) return;
+    const glm::vec3 ground = core::coords::canonicalToRender(
+        core::coords::serverToCanonical(glm::vec3(data.destX, data.destY, data.destZ)));
+    owner_.loadSpellNameCache();
+    auto it = owner_.spellNameCacheRef().find(data.spellId);
+    const bool channel = it != owner_.spellNameCacheRef().end() &&
+                         (it->second.attrEx & (0x4u | 0x40u)) != 0;  // SPELL_ATTR1_CHANNELED_1/2
+    const float duration = getSpellDuration(data.spellId);
+    // A missile thrown at the point (a mortar, a flare) carries the impact
+    // area kit there itself.
+    bool missile = false;
+    if (data.casterUnit != 0 && data.targetGuid == 0) {
+        const float speed = resolveSpellMissileSpeed(data.spellId);
+        glm::vec3 casterFeet;
+        if (std::isfinite(speed) && speed >= 1.0f && speed <= 200.0f &&
+            svs->hasSpellMissile(visualId) && resolveUnitPosition(data.casterUnit, casterFeet) &&
+            glm::length(ground - casterFeet) > 2.0f) {
+            missile = svs->playSpellMissile(visualId, casterFeet, ground, speed,
+                                            /*impactAtEnd=*/true,
+                                            owner_.resolveUnitRenderInstance(data.casterUnit), 0,
+                                            /*groundTarget=*/true);
+        }
+    }
+    svs->playSpellAreaVisual(visualId, ground, duration, channel ? data.casterUnit : 0,
+                             /*impactNow=*/!missile);
 }
 
 // ---- Spell visual effect helpers ----
@@ -402,8 +468,11 @@ void SpellHandler::triggerCastVisual(uint32_t spellId, uint64_t casterGuid, uint
 
 void SpellHandler::cancelCastVisual(uint64_t casterGuid) {
     if (auto* renderer = owner_.services().renderer)
-        if (auto* svs = renderer->getSpellVisualSystem())
+        if (auto* svs = renderer->getSpellVisualSystem()) {
             svs->cancelPrecastVisuals(casterGuid);
+            // A channel's ground area (Blizzard) ends with the channel.
+            svs->cancelChannelAreaVisuals(casterGuid);
+        }
 }
 
 void SpellHandler::triggerImpactVisual(uint32_t spellId, uint64_t targetGuid) {
@@ -2106,8 +2175,10 @@ void SpellHandler::handleSpellStart(network::Packet& packet) {
         castTimeTotal_ = data.castTime / 1000.0f;
         castTimeRemaining_ = castTimeTotal_;
 
-        // Play precast sound - skip profession/tradeskill spells
-        if (!owner_.isProfessionSpell(data.spellId)) {
+        // Play precast sound - skip profession/tradeskill spells, and spells
+        // whose precast kit plays its own (Fireball: "Precast Fire Low",
+        // looping at the caster until the cast resolves).
+        if (!owner_.isProfessionSpell(data.spellId) && !spellVisualPlaysSounds(data.spellId)) {
             if (auto* ac = owner_.services().audioCoordinator) {
                 if (auto* ssm = ac->getSpellSoundManager()) {
                     owner_.loadSpellNameCache();
@@ -2375,8 +2446,11 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
 
     // The cast went off: the build-up in the caster's hands is done (any
     // caster - it used to stay for the whole timer, and a failure anywhere
-    // cleared every unit's at once).
-    cancelCastVisual(data.casterUnit);
+    // cleared every unit's at once). Not for a triggered spell
+    // (CAST_FLAG_PENDING, 0x1): Arcane Missiles' bolts and Blizzard's ticks
+    // go off mid-channel, and each one took the channel's kit - and now its
+    // ground area - away with it.
+    if ((data.castFlags & 0x1u) == 0) cancelCastVisual(data.casterUnit);
 
     // Trigger spell visual effects: cast kit at caster + impact kit at each hit target.
     // Skip profession spells and melee (schoolMask == 1) abilities.
@@ -2395,18 +2469,26 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
             }
             // The missile, where the spell has one, and the impact at each hit
             // target - played by the missile when it lands, or straight away
-            // for a spell that does not fly.
+            // for a spell that does not fly. A spell thrown at a point (a
+            // mortar) flies one missile there instead, below, and its hits
+            // take their impacts at once.
+            const bool atPoint = data.hasDest && data.targetGuid == 0 &&
+                                 data.destTransportGuid == 0;
             for (const auto& tgt : data.hitTargets) {
                 if (tgt == 0) continue;
-                if (!launchSpellMissile(data.spellId, visualId, data.casterUnit, tgt,
-                                        /*impactAtEnd=*/true)) {
+                if (atPoint || !launchSpellMissile(data.spellId, visualId, data.casterUnit, tgt,
+                                                   /*impactAtEnd=*/true)) {
                     triggerImpactVisual(data.spellId, tgt);
                 }
             }
-            for (const auto& miss : data.missTargets) {
-                launchSpellMissile(data.spellId, visualId, data.casterUnit, miss.targetGuid,
-                                   /*impactAtEnd=*/false);
+            if (!atPoint) {
+                for (const auto& miss : data.missTargets) {
+                    launchSpellMissile(data.spellId, visualId, data.casterUnit, miss.targetGuid,
+                                       /*impactAtEnd=*/false);
+                }
             }
+            // Cast at a point on the ground: the area kits stand there.
+            if (data.hasDest) triggerGroundAreaVisual(data, visualId);
         }
     }
 }
@@ -2546,6 +2628,9 @@ void SpellHandler::handleAuraUpdate(network::Packet& packet, bool isAll) {
             (*auraList)[slot] = aura;
         }
         mirrorAurasByGuid(data.guid, *auraList);
+        // Each aura's StateKit on the unit while it lasts (Renew, Power Word:
+        // Shield, Ice Block, a Frostbolt's chill), off again as it goes.
+        syncAuraStateVisuals(data.guid, *auraList);
 
         if (owner_.addonEventCallbackRef()) {
             std::string unitId;
@@ -3181,6 +3266,9 @@ void SpellHandler::resetAllState() {
     targetAuras_.clear();
     unitAurasCache_.clear();
     unitCastStates_.clear();
+    // The auras are forgotten, so are their state visuals.
+    if (auto* renderer = owner_.services().renderer)
+        if (auto* svs = renderer->getSpellVisualSystem()) svs->clearAllUnitStateVisuals();
     resetCastState();
     resetTalentState();
 }
