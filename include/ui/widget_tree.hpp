@@ -1045,6 +1045,11 @@ public:
     }
     /// Mark every widget changed, so the next sizing pass revisits them all.
     void markAllChanged() { std::fill(changed_.begin(), changed_.end(), uint8_t{1}); }
+
+    /// Frames that have been sent a message (AddMessage), so the per-frame
+    /// ageing visits those rather than reading all 28k widgets to find them.
+    void noteMessageFrame(uint32_t id) { messageFrames_.push_back(id); }
+    [[nodiscard]] const std::vector<uint32_t>& messageFrames() const { return messageFrames_; }
     /// What sizing reads besides a widget's own fields: the face a label falls
     /// back on, whether there are assets to read a texture's size from, and
     /// the point size a label with no height of its own is measured at. When
@@ -1130,6 +1135,7 @@ private:
     /// how a label or texture is sized may have been written. See
     /// forEachChangedArtAndText. Kept the same length as widgets_.
     std::vector<uint8_t> changed_;
+    std::vector<uint32_t> messageFrames_;
     /// Widget::visible, one byte per widget. collectDrawOrder reads this
     /// rather than all 28k widgets to find the few hundred that are visible:
     /// 28k bytes in a row instead of 28k scattered 1.5k blocks. It mirrors the
