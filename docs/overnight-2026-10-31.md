@@ -416,3 +416,8 @@ Other fixes:
   - UI layout 2.3 -> 0.5 ms
   - the test window now holds the 60 fps vsync cap (it was 40-47).
 - Next candidates: shadow pass (1.5 ms), renderer->update (2.2 ms), addon OnUpdate (1.0 ms), and the full-tree scans left in hitTestFor and the tooltip loop.
+- `7abe121`: `expireMessages` read all 28k widgets every frame (0.87 ms) to find message frames. The tree now keeps a list of the ids AddMessage has written to.
+  - Goldshire: addon OnUpdate 1.2 -> 0.34 ms.
+  - The profile now also names the costliest OnUpdate handlers. They total about 0.13 ms; UIParent and WorldFrame lead.
+- Uncapped Goldshire: about 71 fps, 14.1 ms per frame (test window, 2.6 GHz).
+- In progress: a shadow caster cache. It never hits yet ("kept in 0 frames"), so the agent is adding miss-reason counters.
