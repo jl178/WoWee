@@ -1656,13 +1656,28 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
         owner_.unitMoveFlagsCallbackRef()(data.guid, locomotionFlags, ~0u);
     } else if (!usesPreWotlkSplineFlags && entity->getType() == ObjectType::UNIT &&
                owner_.unitMoveFlagsCallbackRef() && data.hasDest) {
-        // WotLK: MoveSplineInit copies MOVEMENTFLAG_WALKING into the spline's
-        // Walkmode bit on every monster move. SET_WALK_MODE only arrives when
-        // the mode flips while the unit is in view, so a patrol that spawned
-        // walking would otherwise play Run for its whole path.
+        // WotLK: walk or run is the pace of the move. AzerothCore's monster
+        // moves carry no Walkmode bit (every one arrives with flags 0), and
+        // SET_WALK_MODE only comes when the mode flips in view, so patrols
+        // that spawned walking played Run for their whole path. The path
+        // length over the spline duration says which it is: stock walk speed
+        // is 2.5 yd/s and run 7, so anything under the midpoint walks.
         const uint32_t walk = static_cast<uint32_t>(MovementFlags::WALKING);
-        owner_.unitMoveFlagsCallbackRef()(data.guid,
-            (data.splineFlags & SplineFlagWotlk::WALKMODE) ? walk : 0u, walk);
+        bool walking = (data.splineFlags & SplineFlagWotlk::WALKMODE) != 0;
+        if (!walking && data.duration > 0) {
+            glm::vec3 prev(data.x, data.y, data.z);
+            float length = 0.0f;
+            for (const auto& wp : data.waypoints) {
+                const glm::vec3 p(wp.x, wp.y, wp.z);
+                length += glm::length(p - prev);
+                prev = p;
+            }
+            length += glm::length(glm::vec3(data.destX, data.destY, data.destZ) - prev);
+            const float speed = length / (static_cast<float>(data.duration) / 1000.0f);
+            constexpr float kWalkRunMidpoint = (2.5f + 7.0f) * 0.5f;
+            walking = length > 0.5f && speed < kWalkRunMidpoint;
+        }
+        owner_.unitMoveFlagsCallbackRef()(data.guid, walking ? walk : 0u, walk);
     }
 
     if (data.hasDest) {

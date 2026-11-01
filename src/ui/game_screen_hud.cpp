@@ -222,7 +222,10 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
     // Controls group 8 (wristbands/sleeve length): 801=bare wrists, 802+=sleeve styles
     // Also controls group 13 (trousers) via GeosetGroup[2] for robes
     {
-        uint32_t did = findEquippedDisplayId({4, 5, 20});
+        // The chest or robe wins over the shirt under it: a shirt sits in an
+        // earlier slot and was found first, so robes never set the skirt.
+        uint32_t did = findEquippedDisplayId({5, 20});
+        if (did == 0) did = findEquippedDisplayId({4});
         uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
         geosets.insert(gg > 0 ? core::equippedGeoset(core::equipment::kChestBare, gg)
                               : core::kGeosetBareSleeves);
