@@ -1314,9 +1314,11 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         ImFont* plateFont = interfaceFaceOrDefault("Fonts\\FRIZQT__.TTF");
         const uint32_t level = unit->getLevel();
         const uint32_t playerLevel = gameHandler.getPlayerLevel();
+        // Stock hides a level only for units you can fight that are ten or
+        // more levels above you (UnitLevel returns -1), and for bosses. A
+        // friendly guard or player shows his number however high he is.
         const bool skullLevel = creatureRank == 3 || level == 0 ||
-                                (!isPlayer && playerLevel > 0 && level >= playerLevel + 10) ||
-                                (isPlayer && isHostile && playerLevel > 0 && level >= playerLevel + 10);
+                                (isHostile && playerLevel > 0 && level >= playerLevel + 10);
         if (skullLevel) {
             if (art.skull) {
                 drawList->AddImage((ImTextureID)(uintptr_t)art.skull, P(106.5f, 15.5f), P(122.5f, 31.5f),

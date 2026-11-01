@@ -164,7 +164,16 @@ static int lua_UnitLevel(lua_State* L) {
     const char* uid = luaL_optstring(L, 1, "player");
     auto* unit = resolveUnit(L, uid);
     if (unit) {
-        lua_pushnumber(L, unit->getLevel());
+        // Stock answers -1 ("??", the skull) for a unit you can fight that is
+        // ten or more levels above you; friendly units always give their level.
+        int level = static_cast<int>(unit->getLevel());
+        if (auto* gh = getGameHandler(L)) {
+            const int playerLevel = static_cast<int>(gh->getPlayerLevel());
+            if (unit->isHostile() && playerLevel > 0 && level >= playerLevel + 10) level = -1;
+            // World bosses always read ??.
+            if (unit->getType() == game::ObjectType::UNIT && gh->getCreatureRank(unit->getEntry()) == 3) level = -1;
+        }
+        lua_pushnumber(L, level);
     } else {
         auto* gh = getGameHandler(L);
         std::string uidStr(uid);
