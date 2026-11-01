@@ -380,3 +380,19 @@ Other fixes:
   - Top stages: renderWorld 5.8 ms, beginFrame 3.8 ms, FrameXML widget layout 2.6 ms, renderer update 3.3 ms, shadow pass 2.2 ms.
   - The frame is spread across many stages; no single stage dominates.
 - Next: remove the superseded map bindings (an agent is on it), relaunch for Jered, then performance in Goldshire (layout cost, shadow pass).
+
+## Particles by screen size
+
+- `8554177`: an emitter is stepped and drawn out to about 120 times the larger of its model radius and its particle reach (speed and gravity over its lifespan, plus emission area and size, computed once per model). The minimum range is 150 yd, and it never goes past the instance's own range.
+- Goldshire, same clocks (2.6 GHz ceiling):
+
+  | | before | after |
+  |---|---|---|
+  | live particles | 36-47k | 20k |
+  | particles drawn | 26-32k (budget full) | 9.9k |
+  | particle update | 1.8-2.1 ms | 0.75 ms |
+  | particle draw | 1.6-4.5 ms | 0.42 ms |
+  | frame rate | 40-47 fps | 60 fps (vsync cap) |
+
+- `03fa503`: one registration per map binding. The old system-set map functions live on only as the fallback for when the map data isn't loaded.
+- Host note: Jered's System76 power profile had been "Battery" (50% cap, no turbo). It is now Performance, but scaling_max_freq is still 2.6 GHz on all policies and needs root to reset.
