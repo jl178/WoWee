@@ -3018,7 +3018,18 @@ void SpellHandler::handleLearnedSpell(network::Packet& packet) {
     }
 
     if (!alreadyKnown && owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("LEARNED_SPELL_IN_TAB", {std::to_string(spellId)});
+        // The argument is the spellbook tab the spell landed in, 1-based:
+        // SpellBookFrame flashes SpellBookSkillLineTab<n>. It was the spell id,
+        // which named no tab, so the flash never showed.
+        spellBookTabsDirty_ = true;
+        int tabIndex = 0;
+        const auto& tabs = getSpellBookTabs();
+        for (size_t t = 0; t < tabs.size() && tabIndex == 0; ++t) {
+            for (uint32_t id : tabs[t].spellIds) {
+                if (id == spellId) { tabIndex = static_cast<int>(t) + 1; break; }
+            }
+        }
+        if (tabIndex > 0) owner_.addonEventCallbackRef()("LEARNED_SPELL_IN_TAB", {std::to_string(tabIndex)});
         owner_.addonEventCallbackRef()("SPELLS_CHANGED", {});
         // The mounts and critters list is built from the spellbook, so a new
         // spell can add to it. petpaperdollframe refreshes on this and on
