@@ -2200,6 +2200,7 @@ bool WMORenderer::createGroupResources(const pipeline::WMOGroup& group, GroupRes
     }
 
     resources.groupFlags = groupFlags;
+    resources.wmoGroupId = group.wmoGroupId;
 
     resources.vertexCount = group.vertices.size();
     resources.indexCount = group.indices.size();
@@ -4332,6 +4333,9 @@ bool WMORenderer::isInsideWMOGroups(float glX, float glY, float glZ,
                         ? model.groups[static_cast<size_t>(tight)].groupFlags
                         : group.groupFlags;
                     outHit->interiorLit = wmoGroupLitAsInterior(lightFlags);
+                    outHit->wmoGroupId = tight >= 0
+                        ? model.groups[static_cast<size_t>(tight)].wmoGroupId
+                        : group.wmoGroupId;
                 }
                 return true;
             }

@@ -1917,6 +1917,17 @@ uint32_t Renderer::getCurrentAreaId() const {
     return areaId ? *areaId : 0u;
 }
 
+uint32_t Renderer::getPlayerWmoGroupId() const {
+    if (!wmoRenderer) return 0;
+    WMORenderer::AreaHit hit;
+    // A little above the feet, so the floor stood on is inside its group.
+    if (!wmoRenderer->insideWmoArea(characterPosition.x, characterPosition.y,
+                                    characterPosition.z + 1.0f, &hit)) {
+        return 0;
+    }
+    return hit.wmoGroupId;
+}
+
 uint32_t Renderer::getCurrentZoneId() const {
     // A zone remembered from the last map is worse than none: the sticky
     // answer below would hold Duskwood's pinned midnight over a continent

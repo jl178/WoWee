@@ -1437,7 +1437,10 @@ void WidgetTree::collectDrawOrder() {
             !(w.isCooldown && w.cooldownDuration > 0.0) &&
             !(w.isSimpleHtml && !w.text.empty()) &&
             !(w.isMessageFrame && !w.messages.empty()) &&
-            !(w.isTooltip && !w.tooltipLines.empty())) continue;
+            !(w.isTooltip && !w.tooltipLines.empty()) &&
+            // The world map's quest areas, which the frame paints itself
+            // (WidgetRenderer::drawQuestBlobs) the way CGQuestPOIFrame does.
+            w.name != "WorldMapBlobFrame") continue;
         if (w.rectW <= 0.0f || w.rectH <= 0.0f) continue;
         // A texture with nothing to show is dropped - unless it is the colour
         // picker's, whose art is generated rather than loaded.
@@ -1484,8 +1487,15 @@ void WidgetTree::collectDrawOrder() {
     // ARTWORK, so it lands above the box's background and border art and
     // alongside the header rather than over it - the two never overlap, the
     // insets see to that.
+    // WorldMapBlobFrame paints its quest areas itself too, and goes one level
+    // in for the same reason: its regions' level is the frame's own plus one,
+    // which is where WorldMapDetailFrame's map tiles and explored overlays sit
+    // (the detail frame is one level below it). At its own level the areas
+    // tied with those and were drawn under every overlay created after them -
+    // which is every explored part of the zone.
     auto sortLevel = [](const Widget* w) {
-        return ((w->isStatusBar && !w->barTexture.empty()) || w->isEditBox)
+        return ((w->isStatusBar && !w->barTexture.empty()) || w->isEditBox ||
+                w->name == "WorldMapBlobFrame")
                    ? w->effLevel + 1
                    : w->effLevel;
     };

@@ -1,0 +1,196 @@
+// debug_lua_hook.cpp - WOWEE_DEBUG_LUA: run a Lua file once the player is in
+// the world. A test hook, off by default.
+//
+// The world map, like most of the interface, can only be judged from inside a
+// running client: what the C functions answer depends on the DBCs, the player's
+// position and whatever FrameXML did with the answers. This lets a script ask
+// those questions and write the answers to the log, without anything outside
+// the process touching the desktop.
+//
+//   WOWEE_DEBUG_LUA=/path/to/test.lua       the file to run
+//   WOWEE_DEBUG_LUA_DELAY=12                seconds after world entry (default 10)
+//
+// The script gets five extra globals, and only while the variable is set:
+//   WoweeDebug_Log(...)            a line in the log, prefixed [luatest]
+//   WoweeDebug_Screenshot(path)    a PNG of the next finished frame
+//   WoweeDebug_PushKey(name, down) a key event through the SDL queue, so it
+//                                  takes the same path as a real press
+//   WoweeDebug_Mouse(frame, button, down [, fx, fy])
+//                                  a mouse button event at a point inside a
+//                                  frame, through the same queue
+//   WoweeDebug_Quit()              close the client
+//
+// Events pushed this way reach only this client: SDL's queue is in-process.
+#include "core/debug_lua_hook.hpp"
+
+#include "addons/lua_engine.hpp"
+#include "core/logger.hpp"
+#include "ui/framexml_takeover.hpp"
+#include "ui/widget_tree.hpp"
+
+#include <SDL3/SDL.h>
+#include <imgui.h>
+
+extern "C" {
+#include <lauxlib.h>
+#include <lua.h>
+}
+
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
+#include <string>
+
+namespace wowee::core {
+
+namespace {
+
+std::string gPendingScreenshot;
+addons::LuaEngine* gEngine = nullptr;
+SDL_WindowID gWindowId = 0;
+
+int luaDebugLog(lua_State* L) {
+    std::string line;
+    const int n = lua_gettop(L);
+    for (int i = 1; i <= n; ++i) {
+        if (i > 1) line += ' ';
+        lua_getglobal(L, "tostring");
+        lua_pushvalue(L, i);
+        lua_call(L, 1, 1);
+        const char* s = lua_tostring(L, -1);
+        line += s ? s : "?";
+        lua_pop(L, 1);
+    }
+    LOG_WARNING("[luatest] ", line);
+    return 0;
+}
+
+int luaDebugScreenshot(lua_State* L) {
+    gPendingScreenshot = luaL_checkstring(L, 1);
+    return 0;
+}
+
+int luaDebugPushKey(lua_State* L) {
+    const char* name = luaL_checkstring(L, 1);
+    const bool down = lua_isnoneornil(L, 2) ? true : lua_toboolean(L, 2) != 0;
+    const SDL_Scancode sc = SDL_GetScancodeFromName(name);
+    if (sc == SDL_SCANCODE_UNKNOWN) {
+        LOG_WARNING("[luatest] WoweeDebug_PushKey: no key called ", name);
+        return 0;
+    }
+    SDL_Event ev{};
+    ev.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+    ev.key.scancode = sc;
+    ev.key.key = SDL_GetKeyFromScancode(sc, SDL_KMOD_NONE, false);
+    ev.key.down = down;
+    ev.key.repeat = false;
+    ev.key.mod = SDL_KMOD_NONE;
+    ev.key.windowID = gWindowId;
+    SDL_PushEvent(&ev);
+    return 0;
+}
+
+/// WoweeDebug_Mouse(frameName, button, down [, fx, fy]) - a mouse button
+/// event at a point inside a frame, through the SDL queue. fx, fy are fractions
+/// of the frame's width and height from its top-left corner (0.5, 0.5 when
+/// left out). A motion event goes first so the press lands where it says.
+int luaDebugMouse(lua_State* L) {
+    const char* name = luaL_checkstring(L, 1);
+    const std::string button = luaL_optstring(L, 2, "LeftButton");
+    const bool down = lua_isnoneornil(L, 3) ? true : lua_toboolean(L, 3) != 0;
+    const float fx = static_cast<float>(luaL_optnumber(L, 4, 0.5));
+    const float fy = static_cast<float>(luaL_optnumber(L, 5, 0.5));
+    if (!gEngine) return 0;
+    auto& widgets = gEngine->widgets();
+    const ui::Widget* w = widgets.findByName(name);
+    if (!w || w->rectW <= 0.0f || w->rectH <= 0.0f) {
+        LOG_WARNING("[luatest] WoweeDebug_Mouse: no laid-out frame called ", name);
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    const float sc = widgets.uiScale();
+    const float x = (w->left + w->rectW * fx) * sc;
+    const float y = ImGui::GetIO().DisplaySize.y - (w->bottom + w->rectH * (1.0f - fy)) * sc;
+    SDL_Event mv{};
+    mv.type = SDL_EVENT_MOUSE_MOTION;
+    mv.motion.x = x;
+    mv.motion.y = y;
+    mv.motion.windowID = gWindowId;
+    SDL_PushEvent(&mv);
+    SDL_Event ev{};
+    ev.type = down ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
+    ev.button.button = button == "RightButton" ? SDL_BUTTON_RIGHT
+                     : button == "MiddleButton" ? SDL_BUTTON_MIDDLE
+                                                : SDL_BUTTON_LEFT;
+    ev.button.down = down;
+    ev.button.clicks = 1;
+    ev.button.x = x;
+    ev.button.y = y;
+    ev.button.windowID = gWindowId;
+    SDL_PushEvent(&ev);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+int luaDebugQuit(lua_State* L) {
+    (void)L;
+    SDL_Event ev{};
+    ev.type = SDL_EVENT_QUIT;
+    SDL_PushEvent(&ev);
+    return 0;
+}
+
+}  // namespace
+
+void debugLuaHookTick(addons::LuaEngine* engine, SDL_Window* window) {
+    if (window) gWindowId = SDL_GetWindowID(window);
+    static const char* path = std::getenv("WOWEE_DEBUG_LUA");
+    if (!path || !*path || !engine || !engine->getState()) return;
+    static bool done = false;
+    if (done || !ui::frameXmlWorldEntered()) return;
+
+    using Clock = std::chrono::steady_clock;
+    static Clock::time_point entered{};
+    static bool sawEntry = false;
+    if (!sawEntry) {
+        sawEntry = true;
+        entered = Clock::now();
+        return;
+    }
+    static const double delay = [] {
+        const char* v = std::getenv("WOWEE_DEBUG_LUA_DELAY");
+        return (v && *v) ? std::atof(v) : 10.0;
+    }();
+    if (std::chrono::duration<double>(Clock::now() - entered).count() < delay) return;
+    done = true;
+
+    std::ifstream in(path);
+    if (!in) {
+        LOG_WARNING("[luatest] WOWEE_DEBUG_LUA: cannot read ", path);
+        return;
+    }
+    std::stringstream ss;
+    ss << in.rdbuf();
+
+    lua_State* L = engine->getState();
+    lua_register(L, "WoweeDebug_Log", luaDebugLog);
+    lua_register(L, "WoweeDebug_Screenshot", luaDebugScreenshot);
+    lua_register(L, "WoweeDebug_PushKey", luaDebugPushKey);
+    lua_register(L, "WoweeDebug_Quit", luaDebugQuit);
+    lua_register(L, "WoweeDebug_Mouse", luaDebugMouse);
+    gEngine = engine;
+
+    LOG_WARNING("[luatest] running ", path);
+    if (!engine->executeString(ss.str())) {
+        LOG_WARNING("[luatest] the script failed to run");
+    }
+}
+
+std::string debugLuaHookTakeScreenshot() {
+    std::string out;
+    out.swap(gPendingScreenshot);
+    return out;
+}
+
+}  // namespace wowee::core

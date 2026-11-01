@@ -91,6 +91,9 @@ public:
     using GossipPoi = game::GossipPoi;
     [[nodiscard]] const std::vector<GossipPoi>& getGossipPois() const { return gossipPois_; }
     void clearGossipPois() { gossipPois_.clear(); }
+    /// SMSG_QUEST_POI_QUERY_RESPONSE as the client keeps it: every block of
+    /// every quest, on every map, for the world map's QuestPOI functions.
+    [[nodiscard]] const std::vector<QuestPoiSet>& getQuestPoiSets() const { return questPoiSets_; }
 
     // Quest turn-in
     [[nodiscard]] bool isQuestRequestItemsOpen() const { return questRequestItemsOpen_; }
@@ -301,6 +304,7 @@ private:
     GossipMessageData currentGossip_;
     std::string questGreeting_;
     std::vector<GossipPoi> gossipPois_;
+    std::vector<QuestPoiSet> questPoiSets_;
 
     // Quest details
     bool questDetailsOpen_ = false;
