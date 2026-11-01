@@ -11,6 +11,7 @@
 // is shipped; it is the player's own install being drawn.
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -72,7 +73,19 @@ public:
         return textureSize(path, w, h);
     }
 
+    /// The shaded quest areas of a QuestPOIFrame (WorldMapBlobFrame), as
+    /// polygons in fractions of the frame, (0,0) at its top-left. The data is
+    /// the interface's - which quest is selected, which objectives are open -
+    /// so it is asked for rather than known here.
+    using QuestBlobSource = std::function<std::vector<std::vector<std::pair<float, float>>>()>;
+    void setQuestBlobSource(QuestBlobSource source) { questBlobSource_ = std::move(source); }
+
 private:
+    QuestBlobSource questBlobSource_;
+    /// Draws the source's polygons in the frame's rect the way
+    /// WorldMapBlobFrame_OnLoad sets the frame up: UI-QuestBlob-Inside at a
+    /// fill alpha of 128, edged with UI-QuestBlob-Outside at 192.
+    void drawQuestBlobs(ImDrawList* dl, const Widget& w, float x0, float y0, float x1, float y1);
     /// Descriptor set for an Interface\ path, loading it on first use. Returns
     /// VK_NULL_HANDLE for anything missing, and remembers the failure so a
     /// mistyped path is not re-read every frame.

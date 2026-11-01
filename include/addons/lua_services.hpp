@@ -193,6 +193,10 @@ struct LuaServices {
     std::function<uint32_t()> getLiveZoneId;
     /// The area (subzone) under the player, from the terrain. 0 when unknown.
     std::function<uint32_t()> getLiveAreaId;
+    /// The WMO group the player stands in, by its global id (MOGP's group id,
+    /// the number WMOAreaTable and DungeonMapChunk are keyed on). 0 outdoors
+    /// or when unknown. The world map picks a dungeon floor from it.
+    std::function<uint32_t()> getLiveWmoGroupId;
 
     /// Whether the player is standing on a world PvP objective.
     ///

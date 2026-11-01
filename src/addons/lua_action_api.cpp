@@ -2115,11 +2115,24 @@ void registerActionLuaAPI(lua_State* L) {
                 // print screen takes a screenshot, neither rebindable. Anything
                 // else answers nil, which is what WoW answers for an unbound
                 // key and which lets the dialog's own key handling run.
+                //
+                // And every other key, because more than the popups ask.
+                // WorldMapFrame_OnKeyDown asks it of every key while the map
+                // is up - the map listens for keys, so it gets them before
+                // any binding does - and closes itself only when the answer is
+                // TOGGLEWORLDMAP or TOGGLEGAMEMENU. With nil for M, M went to
+                // the map, the map did nothing with it, and the key was
+                // spent: the map could be opened with M and never closed
+                // with it.
                 {"GetBindingByKey", [](lua_State* L) -> int {
+            seedBindingDefaults();
             std::string key(luaL_optstring(L, 1, ""));
             for (char& c : key) c = static_cast<char>(std::toupper(
                 static_cast<unsigned char>(c)));
-            if (key == "ESCAPE")           lua_pushstring(L, "TOGGLEGAMEMENU");
+            const std::string command =
+                wowee::ui::KeybindingManager::getInstance().commandForKey(key);
+            if (!command.empty())          lua_pushstring(L, command.c_str());
+            else if (key == "ESCAPE")      lua_pushstring(L, "TOGGLEGAMEMENU");
             else if (key == "PRINTSCREEN") lua_pushstring(L, "SCREENSHOT");
             else                           lua_pushnil(L);
             return 1;

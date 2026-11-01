@@ -4387,6 +4387,12 @@ const std::vector<GossipPoi>& GameHandler::getGossipPois() const {
     return empty;
 }
 
+const std::vector<QuestPoiSet>& GameHandler::getQuestPoiSets() const {
+    if (questHandler_) return questHandler_->getQuestPoiSets();
+    static const std::vector<QuestPoiSet> empty;
+    return empty;
+}
+
 void GameHandler::clearGossipPois() {
     if (questHandler_) questHandler_->clearGossipPois();
 }

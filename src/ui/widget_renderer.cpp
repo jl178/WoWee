@@ -1166,6 +1166,98 @@ void WidgetRenderer::drawCooldown(ImDrawList* dl, const Widget& w,
     dl->PopClipRect();
 }
 
+void WidgetRenderer::drawQuestBlobs(ImDrawList* dl, const Widget& w,
+                                    float x0, float y0, float x1, float y1) {
+    if (!questBlobSource_) return;
+    const auto polygons = questBlobSource_();
+    if (const char* dbg = std::getenv("WOWEE_BLOB_DEBUG"); dbg && *dbg) {
+        dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(255, 0, 0, 255), 0.0f, 0, 4.0f);
+        static int said = 0;
+        if (said++ < 5 && !polygons.empty()) {
+            LOG_WARNING("blob debug: ", polygons.size(), " polys, first point ", polygons[0][0].first,
+                        ",", polygons[0][0].second, " rect ", x0, ",", y0, " - ", x1, ",", y1,
+                        " alpha ", w.alpha);
+        }
+    }
+    if (polygons.empty()) return;
+    const float width = x1 - x0;
+    const float height = y1 - y0;
+    // WorldMapBlobFrame_OnLoad: UI-QuestBlob-Inside at a fill alpha of 128 and
+    // UI-QuestBlob-Outside at a border alpha of 192. Both are flat colour - the
+    // inside a solid (56,108,248), the outside a (101,185,248) edge that fades
+    // out over the first half of its sixteen rows - so they are drawn as the
+    // colours themselves rather than sampled, which also keeps the areas
+    // visible before the art has been uploaded.
+    const float alpha = std::clamp(w.alpha, 0.0f, 1.0f);
+    const ImU32 fill = IM_COL32(56, 108, 248, static_cast<int>(128.0f * alpha));
+    const ImU32 edge = IM_COL32(101, 185, 248, static_cast<int>(220.0f * 192.0f / 255.0f * alpha));
+    const ImU32 edgeClear = IM_COL32(101, 185, 248, 0);
+    const ImVec2 white = ImGui::GetFontTexUvWhitePixel();
+    // The edge's width: half of the texture's sixteen rows, on a map drawn at
+    // its 1002x668 authoring size, and scaled with it.
+    const float band = std::max(1.5f, 8.0f * (height / 668.0f));
+
+    dl->PushClipRect(ImVec2(x0, y0), ImVec2(x1, y1), true);
+    for (const auto& poly : polygons) {
+        if (poly.size() < 3) continue;
+        std::vector<ImVec2> pts;
+        pts.reserve(poly.size());
+        ImVec2 centre(0.0f, 0.0f);
+        for (const auto& p : poly) {
+            pts.emplace_back(x0 + p.first * width, y0 + p.second * height);
+            centre.x += pts.back().x;
+            centre.y += pts.back().y;
+        }
+        centre.x /= static_cast<float>(pts.size());
+        centre.y /= static_cast<float>(pts.size());
+        const int n = static_cast<int>(pts.size());
+
+        // Fill: a fan from the centre, which covers the outlines the server
+        // sends (a hull drawn around the objective's spawns).
+        dl->PrimReserve(n * 3, n + 1);
+        unsigned int base = dl->_VtxCurrentIdx;
+        dl->PrimWriteVtx(centre, white, fill);
+        for (const ImVec2& p : pts) dl->PrimWriteVtx(p, white, fill);
+        for (int i = 0; i < n; ++i) {
+            dl->PrimWriteIdx(static_cast<ImDrawIdx>(base));
+            dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + 1 + i));
+            dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + 1 + ((i + 1) % n)));
+        }
+
+        // Edge: a band along the inside of each side, opaque at the line and
+        // clear inward, as the outside texture is laid.
+        for (int i = 0; i < n; ++i) {
+            const ImVec2 a = pts[static_cast<size_t>(i)];
+            const ImVec2 b = pts[static_cast<size_t>((i + 1) % n)];
+            const float dx = b.x - a.x, dy = b.y - a.y;
+            const float len = std::sqrt(dx * dx + dy * dy);
+            if (len < 0.5f) continue;
+            ImVec2 nrm(-dy / len, dx / len);
+            const ImVec2 mid((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+            if ((centre.x - mid.x) * nrm.x + (centre.y - mid.y) * nrm.y < 0.0f) {
+                nrm.x = -nrm.x;
+                nrm.y = -nrm.y;
+            }
+            const ImVec2 a2(a.x + nrm.x * band, a.y + nrm.y * band);
+            const ImVec2 b2(b.x + nrm.x * band, b.y + nrm.y * band);
+            dl->PrimReserve(6, 4);
+            base = dl->_VtxCurrentIdx;
+            dl->PrimWriteVtx(a, white, edge);
+            dl->PrimWriteVtx(b, white, edge);
+            dl->PrimWriteVtx(b2, white, edgeClear);
+            dl->PrimWriteVtx(a2, white, edgeClear);
+            dl->PrimWriteIdx(static_cast<ImDrawIdx>(base));
+            dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + 1));
+            dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + 2));
+            dl->PrimWriteIdx(static_cast<ImDrawIdx>(base));
+            dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + 2));
+            dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + 3));
+        }
+    }
+    dl->PopClipRect();
+}
+
+
 void WidgetRenderer::render(WidgetTree& tree, float screenW, float screenH) {
     layout(tree, screenW, screenH);
     draw(tree, screenW, screenH);
@@ -2504,6 +2596,11 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
             if (w->isStatusBar) drawStatusBar(dl, *w, x0, y0, x1, y1);
             if (w->isSlider) drawSlider(dl, *w, x0, y0, x1, y1);
             if (w->isCooldown) drawCooldown(dl, *w, x0, y0, x1, y1);
+            // WorldMapBlobFrame - a QuestPOIFrame - draws its quest areas
+            // itself, as the C client's CGQuestPOIFrame does.
+            if (w->objectType == "QuestPOIFrame" || w->name == "WorldMapBlobFrame") {
+                drawQuestBlobs(dl, *w, x0, y0, x1, y1);
+            }
             // A tooltip reads downward from the top, which is the other way
             // round from chat.
             if (isGameTooltip) {
