@@ -268,6 +268,12 @@ wowee_add_test(test_shared_rules
             ${CMAKE_SOURCE_DIR}/src/ui/settings_schema.cpp
             ${TEST_COMMON_SOURCES})
 
+# ── test_item_texture_layers ─────────────────────────────────
+# The order equipped items paint the character skin in, as the stock client's
+# CCharacterComponent does it. Pure header, synthetic items in.
+wowee_add_test(test_item_texture_layers
+    SOURCES test_item_texture_layers.cpp ${TEST_COMMON_SOURCES})
+
 # ── test_geoset_rules ────────────────────────────────────────
 # Choosing a geoset when the model lacks the one asked for. Pure header, so the
 # test needs nothing but Catch.

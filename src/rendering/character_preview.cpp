@@ -990,60 +990,19 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     if (bodySkinPath_.empty()) return true; // geosets applied, but can't composite
 
 
-    // Texture component region fields - use DBC layout when available, fall back to binary offsets.
-    uint32_t texRegionFields[8];
-    pipeline::getItemDisplayInfoTextureFields(*displayInfoDbc, idiL, texRegionFields);
-
-    std::vector<std::pair<int, std::string>> regionLayers;
-    regionLayers.reserve(32);
-    std::vector<std::pair<int, std::string>> robeLegs;  // drawn last
-
     // Paint in the stock layering order, not the order the caller listed the
-    // items in. CharStartOutfit lists a caster's robe before the shirt, so the
-    // shirt's Chest_TU/TL went on top of the robe and the mage, priest and
-    // warlock wore a brown tunic over it. Shirt first, then trousers, boots,
-    // chest/robe, bracers, gloves, belt, tabard; a robe's legs after all of it.
-    auto layerRank = [](uint8_t invType) -> int {
-        switch (invType) {
-            case 4:  return 0;   // shirt
-            case 7:  return 1;   // legs
-            case 8:  return 2;   // feet
-            case 5:
-            case 20: return 3;   // chest / robe
-            case 9:  return 4;   // wrists
-            case 10: return 5;   // hands
-            case 6:  return 6;   // waist
-            case 19: return 7;   // tabard
-            default: return 8;
-        }
-    };
-    std::vector<const game::EquipmentItem*> layered;
-    layered.reserve(equipment.size());
-    for (const auto& it : equipment) layered.push_back(&it);
-    std::stable_sort(layered.begin(), layered.end(),
-        [&](const game::EquipmentItem* a, const game::EquipmentItem* b) {
-            return layerRank(a->inventoryType) < layerRank(b->inventoryType);
-        });
-
-    for (const game::EquipmentItem* itp : layered) {
-        const auto& it = *itp;
+    // items in. CharStartOutfit lists a caster's robe before the shirt, which
+    // put the shirt over the robe; the stock order is in
+    // pipeline/item_textures.hpp. The character list sends no slots, so the
+    // item kind comes from the inventory type.
+    std::vector<pipeline::EquippedItemDisplay> equipped;
+    equipped.reserve(equipment.size());
+    for (const auto& it : equipment) {
         if (it.displayModel == 0) continue;
-        int32_t recIdx = displayInfoDbc->findRecordById(it.displayModel);
-        if (recIdx < 0) continue;
-        const bool robeRec = pipeline::isRobeDisplay(*displayInfoDbc, idiL, recIdx);
-
-        for (int region = 0; region < 8; region++) {
-            std::string texName = displayInfoDbc->getString(static_cast<uint32_t>(recIdx), texRegionFields[region]);
-            if (texName.empty()) continue;
-
-            const std::string fullPath = pipeline::resolveItemRegionTexture(
-                *assetManager_, region, texName, gender_ == game::Gender::FEMALE);
-            if (fullPath.empty()) continue;
-            if (robeRec && pipeline::isRobeLegRegion(region)) robeLegs.emplace_back(region, fullPath);
-            else regionLayers.emplace_back(region, fullPath);
-        }
+        equipped.push_back({pipeline::componentSlotForInventoryType(it.inventoryType), it.displayModel});
     }
-    regionLayers.insert(regionLayers.end(), robeLegs.begin(), robeLegs.end());
+    std::vector<std::pair<int, std::string>> regionLayers = pipeline::buildItemRegionLayers(
+        *assetManager_, *displayInfoDbc, equipped, gender_ == game::Gender::FEMALE);
 
     if (!regionLayers.empty()) {
         VkTexture* newTex = charRenderer_->compositeWithRegions(bodySkinPath_, baseLayers_, regionLayers);
