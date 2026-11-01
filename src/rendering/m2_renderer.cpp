@@ -1685,8 +1685,11 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     // Canvas on a frame: an awning, a tent, a tarp.
     //
     // The name proposes it and the texture list confirms it, as with banners:
-    // a model named for a tent but painted only as wood is a tent frame. A
-    // model that animates itself keeps its own motion.
+    // a model named for a tent but painted only as wood is a tent frame. Any
+    // texture that is not structural counts as the surface, since the art
+    // names cloth many ways ("overhang copy" on the Stormwind awning,
+    // "mm_orc_roof" on the Durotar tents). A model that animates itself keeps
+    // its own motion.
     //
     // What moves is decided per vertex, here, once. Canvas is held wherever
     // it meets its frame - the poles and spars painted with a structural
@@ -1701,7 +1704,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
         };
         static constexpr std::string_view kFrameTex[] = {
             "pole", "post", "wood", "timber", "plank", "iron", "metal",
-            "stone", "rim", "chain", "rope", "frame",
+            "stone", "rim", "chain", "rope", "frame", "trim",
         };
         const auto lowerFile = [](std::string file) {
             if (const size_t slash = file.find_last_of("\\/"); slash != std::string::npos) {
@@ -1716,20 +1719,20 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             }
             return false;
         };
-        // Per texture: is it the canvas, is it the frame.
+        // Per texture: is it the frame. Everything else is surface.
         std::vector<uint8_t> frameTexture(model.textures.size(), 0);
         bool anyCanvasTex = false;
         for (size_t t = 0; t < model.textures.size(); ++t) {
             if (model.textures[t].filename.empty()) continue;
             const std::string file = lowerFile(model.textures[t].filename);
-            const bool canvas = names(file, kCanvasTex);
-            anyCanvasTex = anyCanvasTex || canvas;
-            frameTexture[t] = (!canvas && names(file, kFrameTex)) ? 1 : 0;
+            const bool frame = !names(file, kCanvasTex) && names(file, kFrameTex);
+            anyCanvasTex = anyCanvasTex || !frame;
+            frameTexture[t] = frame ? 1 : 0;
         }
         const bool selfMoving = anyBoneMoves();
         if (!anyCanvasTex || selfMoving) {
             LOG_INFO("Not canvas: '", model.name, "' ",
-                     selfMoving ? "animates itself" : "names no canvas in its textures");
+                     selfMoving ? "animates itself" : "has only structural textures");
         } else {
             const size_t vcount = model.vertices.size();
             std::vector<uint8_t> anchor(vcount, 0);
