@@ -114,7 +114,8 @@ private:
 
     SoundData soundData_;
     std::unique_ptr<ZoneMusicController> zoneMusic_;
-    uint64_t ambienceKey_ = 0;  ///< area id and room ambience the loops were chosen for
+    uint64_t ambienceKey_ = 0;
+    bool loopMusic_ = false;  ///< Loop Music setting: repeat the track instead of resting between tracks  ///< area id and room ambience the loops were chosen for
 
     std::unique_ptr<MusicManager> musicManager_;
     std::unique_ptr<FootstepManager> footstepManager_;

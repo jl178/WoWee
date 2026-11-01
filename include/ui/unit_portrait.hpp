@@ -116,6 +116,7 @@ private:
     std::unique_ptr<rendering::CharacterPreview> preview_;
     bool initialized_ = false;
     Framing framing_ = Framing::Face;
+    bool portraitPosed_ = false;  ///< face portraits pose once, then hold still
     int targetWidth_ = 640;
     int targetHeight_ = 800;
     bool registered_ = false;

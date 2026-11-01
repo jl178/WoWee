@@ -102,9 +102,10 @@ inline constexpr float kSmokeEmitInterval = 1.0f / 48.0f;
 // ---- Geometry / collision helpers ----
 
 inline float computeGroundDetailDownOffset(const M2ModelGPU& model, float scale) {
-    const float pivotComp = glm::clamp(std::max(0.0f, model.boundMin.z * scale), 0.0f, 0.10f);
-    const float terrainSink = 0.03f;
-    return pivotComp + terrainSink;
+    // The base onto the surface: a model whose lowest vertex is below its
+    // origin is lifted by that much, one above it is lowered. A flat sink on
+    // top of that buried a fifth of a grass tuft.
+    return glm::clamp(model.boundMin.z * scale, -0.10f, 0.10f);
 }
 
 inline void getTightCollisionBounds(const M2ModelGPU& model, glm::vec3& outMin, glm::vec3& outMax) {

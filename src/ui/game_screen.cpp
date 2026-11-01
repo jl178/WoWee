@@ -886,12 +886,20 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                     auto unit = std::static_pointer_cast<game::Unit>(target);
                     if (unit->getHealth() == 0 && unit->getMaxHealth() > 0) {
                         circleColor = glm::vec3(0.5f, 0.5f, 0.5f); // gray (dead)
-                    } else if (unit->isHostile() || gameHandler.isAggressiveTowardPlayer(target->getGuid())) {
-                        const ImVec4 c = ui::helpers::levelDifficultyColor(
-                            gameHandler.getPlayerLevel(), unit->getLevel());
-                        circleColor = glm::vec3(c.x, c.y, c.z);
                     } else {
-                        circleColor = glm::vec3(0.3f, 1.0f, 0.3f); // green (friendly)
+                        // By reaction, as the stock client colours it: red hostile,
+                        // yellow neutral, green friendly. Difficulty is the name's job.
+                        const int react = gameHandler.unitReactionToPlayer(*unit);
+                        if (unit->isHostile() || react <= 2 ||
+                            gameHandler.isAggressiveTowardPlayer(target->getGuid())) {
+                            circleColor = glm::vec3(1.0f, 0.0f, 0.0f);
+                        } else if (react == 3) {
+                            circleColor = glm::vec3(1.0f, 0.5f, 0.0f);   // unfriendly
+                        } else if (react == 4) {
+                            circleColor = glm::vec3(1.0f, 1.0f, 0.0f);   // neutral
+                        } else {
+                            circleColor = glm::vec3(0.0f, 1.0f, 0.0f);
+                        }
                     }
                 } else if (target->getType() == game::ObjectType::PLAYER) {
                     showSelectionCircle = true;

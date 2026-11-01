@@ -7779,11 +7779,9 @@ void LuaEngine::registerCoreAPI() {
         // The player's face is a real render and is assigned every frame, so
         // stamping a class circle over it would only fight that assignment.
         "    if unit and strlower(unit) == 'player' then return end\n"
-        "    local _, class = UnitClass(unit or 'player')\n"
-        "    local coords = class and CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[class]\n"
-        "    if coords then\n"
-        "        texture:SetTexture('Interface\\\\TargetingFrame\\\\UI-Classes-Circles')\n"
-        "        texture:SetTexCoord(coords[1], coords[2], coords[3], coords[4])\n"
+        // No class circle: the stock portrait is the unit's face, which the
+        // live render supplies. A class icon only showed while it loaded.
+        "    if false then\n"
         // Nothing at all when the class is not known yet, rather than the
         // placeholder. This runs at world entry now that events reach frames,
         // which is before the player's entity resolves - so it answered

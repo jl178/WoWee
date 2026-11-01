@@ -139,7 +139,7 @@ void AudioCoordinator::updateTableMusic(const ZoneAudioContext& ctx, uint32_t zo
     switch (action.kind) {
     case ZoneMusicAction::Kind::Play:
         musicManager_->setTrackGain(action.path.rfind("file:", 0) == 0 ? 1.0f : action.volume);
-        musicManager_->setLooping(false);
+        musicManager_->setLooping(loopMusic_);  // the player's Loop Music setting
         playZoneMusic(action.path);
         LOG_INFO("Zone music: ", action.path, " (set ", zoneMusic_->currentSetId(), ")");
         break;
@@ -161,6 +161,7 @@ void AudioCoordinator::playZoneMusic(const std::string& music) {
 }
 
 void AudioCoordinator::setZoneMusicLooping(bool loop) {
+    loopMusic_ = loop;
     if (musicManager_) musicManager_->setLooping(loop);
 }
 

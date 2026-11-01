@@ -199,24 +199,17 @@ void ZoneHighlightLayer::render(const LayerContext& ctx) {
         float zvMin = (cTop - z.bounds.locTop) / cDenomV;
         float zvMax = (cTop - z.bounds.locBottom) / cDenomV;
 
-        constexpr float kOverlayShrink = 0.92f;
-        float cu = (zuMin + zuMax) * 0.5f, cv = (zvMin + zvMax) * 0.5f;
-        float hu = (zuMax - zuMin) * 0.5f * kOverlayShrink;
-        float hv = (zvMax - zvMin) * 0.5f * kOverlayShrink;
-        zuMin = cu - hu; zuMax = cu + hu;
-        zvMin = cv - hv; zvMax = cv + hv;
-
         zuMin = std::clamp(zuMin, 0.0f, 1.0f);
         zuMax = std::clamp(zuMax, 0.0f, 1.0f);
         zvMin = std::clamp(zvMin, 0.0f, 1.0f);
         zvMax = std::clamp(zvMax, 0.0f, 1.0f);
         if (zuMax - zuMin < 0.001f || zvMax - zvMin < 0.001f) continue;
 
-        float titleBarH = ImGui::GetFrameHeight();
+        // imgMin is already the top of the map image; no title bar to add.
         float sx0 = ctx.imgMin.x + zuMin * ctx.displayW;
-        float sy0 = ctx.imgMin.y + zvMin * ctx.displayH + titleBarH;
+        float sy0 = ctx.imgMin.y + zvMin * ctx.displayH;
         float sx1 = ctx.imgMin.x + zuMax * ctx.displayW;
-        float sy1 = ctx.imgMin.y + zvMax * ctx.displayH + titleBarH;
+        float sy1 = ctx.imgMin.y + zvMax * ctx.displayH;
 
         bool explored = !ctx.exploredZones ||
                         ctx.exploredZones->empty() ||
@@ -242,17 +235,19 @@ void ZoneHighlightLayer::render(const LayerContext& ctx) {
             it = highlights_.find(z.areaName);
             if (it != highlights_.end() && it->second.imguiDS) {
                 uint8_t imgAlpha = static_cast<uint8_t>(255.0f * hoverHighlightAlpha_);
-                // Draw twice for a very bright glow effect
+                // The zone fills only the top-left of its power-of-two highlight
+                // texture; WorldMapFrame.lua crops it the same way (SetTexCoord).
+                ImVec2 uvMax(1.0f, 1.0f);
+                if (const auto* t = it->second.texture.get(); t && t->getWidth() && t->getHeight()) {
+                    uvMax = ImVec2(std::min(1.0f, (zuMax - zuMin) * 1002.0f / float(t->getWidth())),
+                                   std::min(1.0f, (zvMax - zvMin) * 668.0f / float(t->getHeight())));
+                }
+                // Once, as the stock highlight is drawn.
                 ctx.drawList->AddImage(
                     reinterpret_cast<ImTextureID>(it->second.imguiDS),
                     ImVec2(sx0, sy0), ImVec2(sx1, sy1),
-                    ImVec2(0, 0), ImVec2(1, 1),
+                    ImVec2(0, 0), uvMax,
                     IM_COL32(255, 255, 255, imgAlpha));
-                ctx.drawList->AddImage(
-                    reinterpret_cast<ImTextureID>(it->second.imguiDS),
-                    ImVec2(sx0, sy0), ImVec2(sx1, sy1),
-                    ImVec2(0, 0), ImVec2(1, 1),
-                    IM_COL32(255, 255, 200, imgAlpha));
             } else {
                 // Fallback: bright colored rectangle if no highlight texture
                 uint8_t fillAlpha = static_cast<uint8_t>(100.0f * hoverHighlightAlpha_);

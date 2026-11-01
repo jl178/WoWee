@@ -271,7 +271,13 @@ void AnimationCallbackHandler::setupCallbacks() {
         // For NPCs/other players: direct playAnimation
         uint32_t instanceId = entitySpawner_.getCreatureInstanceId(victimGuid);
         if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(victimGuid);
-        if (instanceId != 0 && cr->hasAnimation(instanceId, animId))
+        // Not over a swing, a cast or a death, as the stock client does.
+        uint32_t cur = 0; float t = 0.0f, d = 0.0f;
+        const bool busy = instanceId != 0 && cr->getAnimationState(instanceId, cur, t, d) &&
+            ((cur >= rendering::anim::ATTACK_UNARMED && cur <= rendering::anim::ATTACK_2H_LOOSE) ||
+             cur == rendering::anim::DEATH ||
+             (cur >= rendering::anim::SPELL_PRECAST && cur <= rendering::anim::SPELL_CAST_AREA));
+        if (instanceId != 0 && !busy && cr->hasAnimation(instanceId, animId))
             cr->playAnimation(instanceId, animId, false);
     });
 

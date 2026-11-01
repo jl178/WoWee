@@ -275,6 +275,11 @@ void main() {
     vec3 norm = normalize(Normal);
     bool foliageTwoSided = (alphaTest == 2);
     if (!foliageTwoSided && !gl_FrontFacing) norm = -norm;
+    // Ground clutter is crossed vertical cards; lit by their own normals they
+    // caught the low sun twice as well as the ground. Shade them as the
+    // terrain under them, as the stock client does.
+    bool groundDetail = (alphaTest == 3);
+    if (groundDetail) norm = vec3(0.0, 0.0, 1.0);
 
     // Detail normal perturbation (foliage only) - UV-based only so wind doesn't cause flicker
     if (isFoliage) {
@@ -285,7 +290,7 @@ void main() {
 
     vec3 ldir = normalize(-lightDir.xyz);
         float nDotL = dot(norm, ldir);
-        float diff = foliageTwoSided ? abs(nDotL) : max(nDotL, 0.0);
+        float diff = max(nDotL, 0.0);  // a leaf's back stays dark
 
     vec3 result;
     if (unlit != 0) {
@@ -305,7 +310,7 @@ void main() {
 
         float spec = 0.0;
         float shadow = 1.0;
-        if (!isFoliage) {
+        if (!isFoliage && !groundDetail) {
             vec3 halfDir = normalize(ldir + viewDir);
             spec = pow(max(dot(norm, halfDir), 0.0), 32.0) * specularIntensity;
         }

@@ -103,7 +103,14 @@ void CombatFSM::triggerHitReaction(uint32_t animId) {
     if (state_ == State::SPELL_PRECAST || state_ == State::SPELL_CASTING || state_ == State::SPELL_FINALIZE) {
         clearSpellState();
     }
+    if (animId == 0) {  // a clear, not a reaction
+        hitReactionAnimId_ = 0;
+        if (state_ == State::HIT_REACTION) state_ = State::INACTIVE;
+        return;
+    }
     hitReactionAnimId_ = animId;
+    hitReactionAnimSeen_ = false;
+    hitReactionFrames_ = 0;
     state_ = State::HIT_REACTION;
 }
 
@@ -275,7 +282,11 @@ void CombatFSM::updateTransitions(const Input& in) {
                 state_ = State::INACTIVE;
             } else if (in.haveAnimState) {
                 uint32_t expectedAnim = hitReactionAnimId_ ? hitReactionAnimId_ : anim::COMBAT_WOUND;
-                if (oneShotComplete(in, expectedAnim)) {
+                // Wait for the wound anim to start before asking whether it ended:
+                // on the first frame the old anim is still current, which read as done.
+                if (in.currentAnimId == expectedAnim) hitReactionAnimSeen_ = true;
+                if ((hitReactionAnimSeen_ && oneShotComplete(in, expectedAnim)) ||
+                    (!hitReactionAnimSeen_ && ++hitReactionFrames_ > 10)) {
                     hitReactionAnimId_ = 0;
                     state_ = in.inCombat ? State::COMBAT_IDLE : State::INACTIVE;
                 }

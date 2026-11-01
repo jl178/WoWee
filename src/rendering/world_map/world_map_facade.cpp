@@ -169,6 +169,9 @@ struct WorldMapFacade::Impl {
     void closeMap();
     void switchToMap(const std::string& newMapName);
     void switchToWorldView();
+    /// Build the picture for whatever viewState now says. The Lua map API
+    /// moves viewState; without this the image stayed on the last zone drawn.
+    void showCurrentView();
     void renderImGuiOverlay(const glm::vec3& playerRenderPos,
                             int screenWidth, int screenHeight,
                             float playerYawDeg,
@@ -284,6 +287,18 @@ void WorldMapFacade::Impl::switchToWorldView() {
             viewState.setCurrentZoneIdx(rootIdx);
         }
     }
+}
+
+void WorldMapFacade::Impl::showCurrentView() {
+    userMapOverride = true;
+    const ViewLevel lvl = viewState.currentLevel();
+    if (lvl == ViewLevel::WORLD) { switchToWorldView(); return; }
+    const int idx = (lvl == ViewLevel::COSMIC) ? data.cosmicIdx() : viewState.currentZoneIdx();
+    if (idx < 0) return;
+    viewState.setCurrentZoneIdx(idx);
+    compositor.loadZoneTextures(idx, data.zones(), mapName);
+    if (lvl == ViewLevel::ZONE) compositor.loadOverlayTextures(idx, data.zones());
+    compositor.requestComposite(idx);
 }
 
 void WorldMapFacade::Impl::initOverlayLayers() {
@@ -540,6 +555,12 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
     if (d.taxiMode && inputResult.action != InputAction::CLOSE) {
         inputResult.action = InputAction::NONE;
     }
+    // With FrameXML hosting the map, its WorldMapButton handles clicks and
+    // zoom through the Lua map API, which now redraws. Handling them here as
+    // well would act twice on one click (zone straight to world).
+    if (d.hasFrameRect && inputResult.action != InputAction::CLOSE) {
+        inputResult.action = InputAction::NONE;
+    }
 
     switch (inputResult.action) {
         case InputAction::CLOSE:
@@ -753,11 +774,12 @@ bool WorldMapFacade::clickMapPoint(float u, float v) {
     const int idx = zoneAtMapPoint(u, v);
     if (idx < 0) return false;
     impl_->viewState.zoomIn(idx, /*playerZoneIdx=*/-1);
+    impl_->showCurrentView();
     return true;
 }
 
 void WorldMapFacade::zoomOutOneLevel() {
-    impl_->viewState.zoomOut();
+    if (impl_->viewState.zoomOut().changed) impl_->showCurrentView();
 }
 
 std::string WorldMapFacade::currentMapFolder() const {
@@ -1572,6 +1594,7 @@ bool WorldMapFacade::showMap(int continentIndex, int zoneIndex) {
     // from a continent.
     if (continentIndex <= 0) {
         impl_->viewState.enterWorldView();
+        impl_->showCurrentView();
         return true;
     }
     if (continentIndex > kContinentCount) return false;
@@ -1584,12 +1607,14 @@ bool WorldMapFacade::showMap(int continentIndex, int zoneIndex) {
         impl_->viewState.setContinentIdx(contIdx);
         impl_->viewState.setCurrentZoneIdx(contIdx);
         impl_->viewState.setLevel(ViewLevel::CONTINENT);
+        impl_->showCurrentView();
         return true;
     }
     const auto rows = zonesOnContinent(zones, impl_->data.areaNameByAreaId(), contIdx);
     if (zoneIndex > static_cast<int>(rows.size())) return false;
     impl_->viewState.setContinentIdx(contIdx);
     impl_->viewState.enterZone(rows[static_cast<size_t>(zoneIndex) - 1].second);
+    impl_->showCurrentView();
     return true;
 }
 

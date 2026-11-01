@@ -33,6 +33,9 @@ bool LevelUpEffect::loadModel(M2Renderer* m2Renderer,
         return false;
     }
 
+    // Pinned: the renderer frees models nothing has used for a minute, and
+    // this one waits for the next level.
+    m2Renderer_->setModelPinned(MODEL_ID, true);
     modelLoaded_ = true;
     LOG_INFO("LevelUpEffect: loaded LevelUp.m2 - vertices=", model.vertices.size(),
              " indices=", model.indices.size(),
