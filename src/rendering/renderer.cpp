@@ -591,11 +591,18 @@ void Renderer::updatePerFrameUBO() {
     }
 
     currentFrameData.lightSpaceMatrix = lightSpaceMatrix;
-    // Scale shadow bias proportionally to ortho extent to avoid acne at close range / gaps at far range
-    float shadowBias = glm::clamp(0.8f * (shadowDistance_ / 300.0f), 0.0f, 1.0f);
+    // y is how dark the shadow is, and the sky decides it: Light.dbc's shadow
+    // band through LightingManager, times the player's Shadow darkness. It
+    // was named a bias and derived from the shadow distance - 0.8 at 300
+    // yards, a tenth of that at 40 - so shortening the distance for sharper
+    // shadows also all but erased them. The depth bias is the shaders' own,
+    // from the surface's angle to the light and one texel of the map (z).
+    const float skyShadowOpacity =
+        lightingManager ? lightingManager->getLightingParams().shadowOpacity : 0.8f;
+    const float shadowStrength = glm::clamp(skyShadowOpacity * shadowStrengthSetting_, 0.0f, 1.0f);
     // z carries one texel of the shadow map. The shaders used to hold that as
     // a constant for 4096, and the map is 512 to 4096 by the quality level.
-    currentFrameData.shadowParams = glm::vec4(shadowsEnabled ? 1.0f : 0.0f, shadowBias,
+    currentFrameData.shadowParams = glm::vec4(shadowsEnabled ? 1.0f : 0.0f, shadowStrength,
                                               1.0f / static_cast<float>(SHADOW_MAP_SIZE), indoorFactor_);
 
     // Whether this frame builds the fog volume. Decided here, beside the
@@ -678,7 +685,42 @@ void Renderer::updatePerFrameUBO() {
         prevPlayerPos_ = characterPosition;
     }
     currentFrameData.playerPos = glm::vec4(characterPosition, playerSpeed_);
-    currentFrameData.playerWake = glm::vec4(playerWakePos_, 0.0f);
+
+    // One wind for everything that sways: the trees, the grass, the banners
+    // and the awnings each had their own idea of it, so a storm left the
+    // canopy as calm as a clear noon. The setting scales it, the weather
+    // stirs it - rain a little, a storm by how hard it is blowing, snow
+    // barely - and indoors the foliage outside the window stands still.
+    // Eased over about four seconds, so a squall arriving or a step through
+    // a door is a lull or a gathering rather than a switch.
+    //
+    // Cloth keeps the weather but not the indoor cut: a banner in a hall
+    // always breathed, and freezing it whenever the player walked in would be
+    // a different hall. playerWake.w carries the foliage number and
+    // fogColor.w, which no shader read, the cloth one.
+    {
+        float weatherWind = 1.0f;
+        if (weather && weather->isEnabled()) {
+            const float wi = glm::clamp(weather->getIntensity(), 0.0f, 1.0f);
+            switch (weather->getWeatherType()) {
+                case Weather::Type::RAIN:  weatherWind = 1.3f; break;
+                case Weather::Type::SNOW:  weatherWind = 1.1f; break;
+                case Weather::Type::STORM: weatherWind = std::max(1.3f, 1.0f + 0.8f * wi); break;
+                default: break;
+            }
+        }
+        const float clothTarget = foliageWindSetting_ * weatherWind;
+        const float foliageTarget = clothTarget * (1.0f - glm::clamp(indoorFactor_, 0.0f, 1.0f));
+        constexpr float WIND_TIME_CONSTANT = 4.0f;  // seconds
+        const float k = 1.0f - std::exp(-std::max(lastDeltaTime_, 0.0f) / WIND_TIME_CONSTANT);
+        windStrength_ += (foliageTarget - windStrength_) * k;
+        clothWindStrength_ += (clothTarget - clothWindStrength_) * k;
+        // The M2 shadow pass has no per-frame buffer and is told directly;
+        // WMO banners read fogColor.w from the per-frame buffer like m2.vert.
+        if (m2Renderer) m2Renderer->setWindStrength(windStrength_, clothWindStrength_);
+    }
+    currentFrameData.playerWake = glm::vec4(playerWakePos_, windStrength_);
+    currentFrameData.fogColor.w = clothWindStrength_;
 
     // Water ripple gate: swimming and actually moving.
     if (cameraController) {

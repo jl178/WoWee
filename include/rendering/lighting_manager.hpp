@@ -46,6 +46,10 @@ struct LightingParams {
     glm::vec3 cloudLayer2AmbientColor{0.38f, 0.51f, 0.72f};  // ch 13
     /// LightFloatBand channel 2: how much the sun and moon show through cloud.
     float celestialGlowThrough = 1.0f;
+    /// How dark the sun's shadow is, 0.4..0.9, from LightIntBand channel 8
+    /// (SHADOW_COLOR): the darker that grey, the deeper the shadow. 0.8 is
+    /// what every shadow was before, and roughly what noon in Elwynn reads.
+    float shadowOpacity = 0.8f;
     /// world/dnc.db: how much of the day's sun and the night's moon and stars
     /// are up, 0..1. Not blended per light - the same everywhere.
     float dayIntensity = 1.0f;

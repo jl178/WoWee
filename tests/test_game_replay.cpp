@@ -317,14 +317,14 @@ std::vector<std::string> chatLines(Session& s) {
 
 }  // namespace
 
-TEST_CASE("weather is announced once per kind, and clears only after weather", "[replay]") {
+TEST_CASE("weather changes post nothing to chat, as in the stock client", "[replay]") {
     Session s;
     s.receive(weather(3, 0.3f));
     s.receive(weather(5, 0.9f));
     s.receive(weather(0, 0.0f));
     s.receive(weather(1, 0.5f));
     s.receive(weather(0, 0.0f));
-    CHECK(chatLines(s) == std::vector<std::string>{"It begins to rain.", "The weather clears."});
+    CHECK(chatLines(s).empty());
 }
 
 TEST_CASE("faint rain is not rain", "[replay]") {

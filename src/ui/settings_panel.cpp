@@ -116,7 +116,7 @@ constexpr const char* kGraphicsApplyKeys[] = {
     "fsrsharpness", "framegen", "brightness", "uiopacity", "minimapsquare",
     "minimapnpcdots", "minimapclock", "minimapcoords", "minimaprotate", "latencymeter",
     "fogskyblend", "fogstrength", "sharpstars", "lightshafts", "mistdensity", "sunshafts",
-    "raytracedlighting",
+    "raytracedlighting", "shadowstrength", "foliagewind",
     // Moved off the game's own Effects panel, so this list is now what
     // applies them at startup; the cvar store used to do it.
     "groundclutterdistance", "particledensity", "weatherdetail",
@@ -269,6 +269,8 @@ constexpr FieldBinding kFieldBindings[] = {
     {.key = "viewdistance",   .asFloat = &SettingsPanel::pendingViewDistance},
     {.key = "fogskyblend",    .asFloat = &SettingsPanel::pendingFogSkyBlend},
     {.key = "fogstrength",    .asFloat = &SettingsPanel::pendingFogStrength},
+    {.key = "shadowstrength", .asFloat = &SettingsPanel::pendingShadowStrength},
+    {.key = "foliagewind",    .asFloat = &SettingsPanel::pendingFoliageWind},
     {.key = "lightshafts",    .asInt   = &SettingsPanel::pendingVolumetricFog},
     {.key = "raytracedlighting", .asInt = &SettingsPanel::pendingRtLighting},
     {.key = "mistdensity",    .asFloat = &SettingsPanel::pendingVolumetricDensity},
@@ -672,6 +674,10 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
                 lighting->setFogStrength(pendingFogStrength);
             }
         }
+    } else if (key == "shadowstrength") {
+        if (renderer) renderer->setShadowStrength(pendingShadowStrength);
+    } else if (key == "foliagewind") {
+        if (renderer) renderer->setFoliageWind(pendingFoliageWind);
     } else if (key == "lightshafts") {
         if (renderer) renderer->setVolumetricFogQuality(pendingVolumetricFog);
     } else if (key == "raytracedlighting") {

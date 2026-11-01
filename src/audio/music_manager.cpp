@@ -38,14 +38,11 @@ void MusicManager::shutdown() {
     playing = false;
     fadingIn = false;
     fadingOut = false;
-    crossfading = false;
     fadeInTimer = 0.0f;
     fadeInDuration = 0.0f;
     fadeInTargetVolume = 0.0f;
     currentTrack.clear();
     currentTrackIsFile = false;
-    pendingTrack.clear();
-    pendingIsFile = false;
     musicDataCache_.clear();
     assetManager = nullptr;
 }
@@ -195,9 +192,6 @@ void MusicManager::pollPendingFileLoad() {
 void MusicManager::stopMusic(float fadeMs) {
     cancelPendingFileLoad();
     fadingIn = false;
-    crossfading = false;
-    pendingTrack.clear();
-    pendingIsFile = false;
     if (!playing) return;
 
     if (fadeMs > 0.0f) {
@@ -254,17 +248,28 @@ void MusicManager::setUnderwaterMode(bool underwater) {
     }
 }
 
+// A real crossfade: the old track goes to the engine's second voice and fades
+// out there over fadeMs while the new one fades in on the main voice over the
+// same span. This used to cut the old track dead, wait 30% of the fade in
+// silence and start the new one at full volume - a zone line was a hard stop
+// and a jump.
+void MusicManager::beginCrossfadeOut(float fadeMs) {
+    // Whatever fade the outgoing track was in is carried by the engine's fader
+    // from its current level; a pending stop must not land on the new track.
+    fadingOut = false;
+    fadingIn = false;
+    AudioEngine::instance().fadeOutMusicVoice(fadeMs);
+    playing = false;
+    currentTrack.clear();
+    currentTrackIsFile = false;
+}
+
 void MusicManager::crossfadeTo(const std::string& mpqPath, float fadeMs) {
     if (mpqPath == currentTrack && playing) return;
 
-    // Simple implementation: stop and start (no actual crossfade yet)
     if (fadeMs > 0 && playing) {
-        crossfading = true;
-        pendingTrack = mpqPath;
-        pendingIsFile = false;
-        fadeTimer = 0.0f;
-        fadeDuration = fadeMs / 1000.0f;
-        AudioEngine::instance().stopMusic();
+        beginCrossfadeOut(fadeMs);
+        playMusic(mpqPath, loopTracks_, fadeMs);
     } else {
         playMusic(mpqPath, loopTracks_);
     }
@@ -274,12 +279,10 @@ void MusicManager::crossfadeToFile(const std::string& filePath, float fadeMs) {
     if (filePath == currentTrack && playing) return;
 
     if (fadeMs > 0 && playing) {
-        crossfading = true;
-        pendingTrack = filePath;
-        pendingIsFile = true;
-        fadeTimer = 0.0f;
-        fadeDuration = fadeMs / 1000.0f;
-        AudioEngine::instance().stopMusic();
+        // The file is read on a worker as ever; it fades in from silence
+        // whenever the read lands (pollPendingFileLoad), over the same span.
+        beginCrossfadeOut(fadeMs);
+        playFilePath(filePath, loopTracks_, fadeMs);
     } else {
         playFilePath(filePath, loopTracks_);
     }
@@ -316,22 +319,6 @@ void MusicManager::update(float deltaTime) {
         AudioEngine::instance().setMusicVolume(fadeInTargetVolume * t);
         if (t >= 1.0f) {
             fadingIn = false;
-        }
-    }
-
-    // Handle crossfade
-    if (crossfading) {
-        fadeTimer += deltaTime;
-        if (fadeTimer >= fadeDuration * 0.3f) {
-            // Start new track after brief pause
-            crossfading = false;
-            if (pendingIsFile) {
-                playFilePath(pendingTrack, loopTracks_);
-            } else {
-                playMusic(pendingTrack, loopTracks_);
-            }
-            pendingTrack.clear();
-            pendingIsFile = false;
         }
     }
 }

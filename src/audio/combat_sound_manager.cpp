@@ -3,9 +3,11 @@
 #include "audio/audio_engine.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "audio/sound_data.hpp"
+#include "audio/sound_variation.hpp"
 #include "core/logger.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <iterator>
 #include <random>
 #include <glm/geometric.hpp>
@@ -171,6 +173,26 @@ void CombatSoundManager::playRandomSound(const std::vector<CombatSample>& librar
     AudioEngine::instance().playSound2D(chosen->data, volume, 1.0f);
 }
 
+void CombatSoundManager::playVariedImpact(const std::vector<CombatSample>& library,
+                                          float volumeMultiplier) {
+    if (!initialized_) return;
+    std::vector<size_t> loaded;
+    loaded.reserve(library.size());
+    for (size_t i = 0; i < library.size(); ++i) {
+        if (library[i].loaded) loaded.push_back(i);
+    }
+    if (loaded.empty()) return;
+    // The last pick is held as an index into this bank's loaded list; a
+    // different bank starts afresh.
+    const size_t last = (lastImpactLibrary_ == &library) ? lastImpactIndex_ : SIZE_MAX;
+    const size_t pick = pickAvoidingRepeat(loaded.size(), last, gen);
+    lastImpactLibrary_ = &library;
+    lastImpactIndex_ = pick;
+    const SoundJitter jitter = soundJitter(gen);
+    const float volume = std::min(1.0f, 0.8f * volumeScale_ * volumeMultiplier * jitter.gain);
+    AudioEngine::instance().playSound2D(library[loaded[pick]].data, volume, jitter.pitch);
+}
+
 void CombatSoundManager::setVolumeScale(float scale) {
     volumeScale_ = std::max(0.0f, std::min(1.0f, scale));
 }
@@ -247,10 +269,13 @@ void CombatSoundManager::playImpact([[maybe_unused]] WeaponSize weaponSize, Impa
     if (!normalLibrary) return;
 
     // Play crit version if available, otherwise use normal
+    // Each with a small turn of pitch and level and never the same clip
+    // twice running: impacts come in runs, and a run of one sample is the
+    // most obviously canned sound in a fight.
     if (isCrit && critLibrary && !critLibrary->empty()) {
-        playSound(*critLibrary, 1.2f);  // Crits slightly louder
+        playVariedImpact(*critLibrary, 1.2f);  // Crits slightly louder
     } else {
-        playRandomSound(*normalLibrary);
+        playVariedImpact(*normalLibrary);
     }
 }
 
@@ -258,7 +283,8 @@ void CombatSoundManager::playImpact([[maybe_unused]] WeaponSize weaponSize, Impa
 // Table-driven melee and body sounds
 // ---------------------------------------------------------------------------
 
-bool CombatSoundManager::playEntry3D(uint32_t soundId, const glm::vec3& position, float volumeMul) {
+bool CombatSoundManager::playEntry3D(uint32_t soundId, const glm::vec3& position, float volumeMul,
+                                     bool vary) {
     if (!initialized_ || !soundData_ || soundId == 0) return false;
     const SoundEntry* entry = soundData_->sound(soundId);
     if (!entry || entry->files.empty()) return false;
@@ -268,6 +294,15 @@ bool CombatSoundManager::playEntry3D(uint32_t soundId, const glm::vec3& position
     // Out of earshot: not started at all. Every unit in view now has steps,
     // fidgets and blows, and most of them are too far to hear.
     if (glm::distance(engine.getListenerPosition(), position) > maxDistance) return false;
+    if (vary) {
+        const auto lastIt = lastVariedFile_.try_emplace(soundId, SIZE_MAX).first;
+        const size_t file = pickAvoidingRepeat(entry->files.size(), lastIt->second, gen);
+        lastIt->second = file;
+        const SoundJitter jitter = soundJitter(gen);
+        return engine.playSound3D(entry->files[file], position,
+                                  std::min(1.0f, entry->volume * volumeScale_ * volumeMul * jitter.gain),
+                                  jitter.pitch, maxDistance);
+    }
     std::uniform_int_distribution<size_t> pick(0, entry->files.size() - 1);
     return engine.playSound3D(entry->files[pick(gen)], position,
                               entry->volume * volumeScale_ * volumeMul, 1.0f, maxDistance);
@@ -306,7 +341,7 @@ void CombatSoundManager::playBlowSwing(PendingBlow& blow) {
 void CombatSoundManager::playBlowImpact(PendingBlow& blow) {
     if (blow.impactPlayed) return;
     blow.impactPlayed = true;
-    playEntry3D(blow.impactSound, blow.victimPos);
+    playEntry3D(blow.impactSound, blow.victimPos, 1.0f, /*vary=*/true);
     playEntry3D(blow.injurySound, blow.victimPos);
 }
 

@@ -1,9 +1,11 @@
 #include "audio/footstep_manager.hpp"
 #include "audio/footstep_paths.hpp"
 #include "audio/audio_engine.hpp"
+#include "audio/sound_variation.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "core/logger.hpp"
 #include <algorithm>
+#include <cstdint>
 #include <string>
 
 namespace wowee {
@@ -161,15 +163,21 @@ bool FootstepManager::playRandomStep(FootstepSurface surface, FootstepBank bank,
         if (list->empty()) return false;
     }
 
-    // Pick a random clip
-    std::uniform_int_distribution<size_t> clipDist(0, list->size() - 1);
-    const Sample& sample = (*list)[clipDist(rng)];
+    // A different clip from the last one, whenever the bank has a choice: two
+    // identical steps in a row is the loop a run of footsteps gives itself
+    // away by. The last clip is remembered by bank, so a mount and its rider
+    // do not count against each other.
+    const size_t last = (list == lastStepList_) ? lastStepIndex_ : SIZE_MAX;
+    const size_t index = pickAvoidingRepeat(list->size(), last, rng);
+    const Sample& sample = (*list)[index];
+    lastStepList_ = list;
+    lastStepIndex_ = index;
 
-    // Subtle variation for less repetitive cadence
-    std::uniform_real_distribution<float> pitchDist(0.97f, 1.05f);
-    std::uniform_real_distribution<float> volumeDist(0.92f, 1.00f);
-    float pitch = pitchDist(rng);
-    float volume = volumeDist(rng) * volumeMul * volumeScale;
+    // Pitch within 4% and level within 1.5 dB, so the cadence varies the way
+    // feet on ground do without any clip stopping sounding like itself.
+    const SoundJitter jitter = soundJitter(rng);
+    float pitch = jitter.pitch;
+    float volume = jitter.gain * volumeMul * volumeScale;
     if (volume > 1.0f) volume = 1.0f;
     if (volume < 0.1f) volume = 0.1f;
 

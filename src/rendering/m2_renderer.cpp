@@ -87,9 +87,15 @@ void M2Instance::recomputeCachedCullFactors() {
 
     float worldRadius = cachedVisualRadius;
     float cullRadius = worldRadius;
-    if (cachedDisableAnimation) cullRadius = std::max(cullRadius, 3.0f);
+    // The long reach is for foliage, which is what disableAnimation used to
+    // mean on its own. A palm that plays its own sway has animation on and is
+    // still a tree on the skyline; without this it drew to 1/2.6 the distance
+    // of the trees around it and popped in as the player approached.
+    const bool foliageReach = cachedDisableAnimation ||
+                              (cachedModel && cachedModel->foliageAnimatesItself);
+    if (foliageReach) cullRadius = std::max(cullRadius, 3.0f);
     float factor = std::max(1.0f, cullRadius / rendering::M2_CULL_RADIUS_SCALE_DIVISOR);
-    if (cachedDisableAnimation) factor *= 2.6f;
+    if (foliageReach) factor *= 2.6f;
     if (cachedIsGroundDetail)   factor *= 0.9f;
     cachedEffectiveMaxDistSqFactor = factor;
     cachedPaddedRadius = std::max(cullRadius * rendering::M2_PADDED_RADIUS_SCALE,
@@ -288,12 +294,13 @@ bool M2Renderer::buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout) {
     VkRenderPass mainPass = vkCtx_->getImGuiRenderPass();
 
     // --- Build M2 model pipelines ---
-    // Vertex input: 18 floats = 72 bytes stride
+    // Vertex input: 19 floats = 76 bytes stride
     // loc 0: vec3 pos (0), loc 1: vec3 normal (12), loc 2: vec2 uv0 (24),
-    // loc 5: vec2 uv1 (32), loc 3: vec4 boneWeights (40), loc 4: vec4 boneIndices (56)
+    // loc 5: vec2 uv1 (32), loc 3: vec4 boneWeights (40), loc 4: vec4 boneIndices (56),
+    // loc 6: float canvas weight (72)
     VkVertexInputBindingDescription m2Binding{};
     m2Binding.binding = 0;
-    m2Binding.stride = 18 * sizeof(float);
+    m2Binding.stride = M2_VERTEX_FLOATS * sizeof(float);
     m2Binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
     std::vector<VkVertexInputAttributeDescription> m2Attrs = {
@@ -303,6 +310,7 @@ bool M2Renderer::buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout) {
         {.location = 5, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 8 * sizeof(float)},        // texCoord1
         {.location = 3, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 10 * sizeof(float)}, // boneWeights
         {.location = 4, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 14 * sizeof(float)}, // boneIndices (float)
+        {.location = 6, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 18 * sizeof(float)},          // canvas weight
     };
 
     // Pipeline derivatives - opaque is the base, others derive from it for shared state optimization
@@ -1545,6 +1553,38 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     gpuModel.isFoliageLike               = cls.isFoliageLike;
     gpuModel.disableAnimation            = cls.disableAnimation;
     gpuModel.shadowWindFoliage           = cls.shadowWindFoliage;
+    // A bone that moves: more than one key in some sequence of its rotation
+    // or translation. One key per sequence samples the same pose at every time
+    // (see staticPose below), so it is not motion the artist authored.
+    const auto boneKeyed = [](const pipeline::M2AnimationTrack& track) {
+        for (const auto& seq : track.sequences) {
+            if (seq.timestamps.size() > 1) return true;
+        }
+        return false;
+    };
+    const auto anyBoneMoves = [&model, &boneKeyed]() {
+        for (const auto& bone : model.bones) {
+            if (boneKeyed(bone.rotation) || boneKeyed(bone.translation)) return true;
+        }
+        return false;
+    };
+    // Foliage that sways itself plays its own sway.
+    //
+    // The classifier turns animation off for everything foliage-like and hands
+    // it the shader wind, which is right for the trees that ship a single
+    // still pose. durotarpalm01 does not: its fronds are on a keyed bone chain
+    // the artist animated, and freezing that to bend the whole palm like a
+    // sapling is a different tree from the one the stock client shows. Ground
+    // clutter is left as it was - it already plays its own sequence and never
+    // took the wind.
+    if (cls.isFoliageLike && !cls.isGroundDetail && anyBoneMoves()) {
+        gpuModel.disableAnimation = false;
+        gpuModel.foliageAnimatesItself = true;
+        static core::LogBudget selfSwayBudget(40, "foliage left to its own animation");
+        if (selfSwayBudget.take()) {
+            LOG_INFO("Foliage plays its own sway: '", model.name, "'");
+        }
+    }
     // A banner whose own bones move its cloth does not want the procedural
     // sway on top of it. forsakenbanner01 at the Undercity gate is the shape:
     // 51 of its 85 vertices sit on a root bone with no keys at all - the pole
@@ -1605,18 +1645,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
 
     bool clothMovesItself = false;
     if (cls.isHangingCloth && !allStructure) {
-        const auto keyed = [](const pipeline::M2AnimationTrack& track) {
-            for (const auto& seq : track.sequences) {
-                if (seq.timestamps.size() > 1) return true;
-            }
-            return false;
-        };
-        for (const auto& bone : model.bones) {
-            if (keyed(bone.rotation) || keyed(bone.translation)) {
-                clothMovesItself = true;
-                break;
-            }
-        }
+        clothMovesItself = anyBoneMoves();
     }
     gpuModel.isHangingCloth              =
         cls.isHangingCloth && !clothMovesItself && !allStructure;
@@ -1649,6 +1678,119 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             if (anyFoot && fullW > 0.01f) {
                 footW = std::max(footMax.x - footMin.x, footMax.y - footMin.y);
                 gpuModel.isStandingCloth = (footW / fullW) < 0.25f;
+            }
+        }
+    }
+
+    // Canvas on a frame: an awning, a tent, a tarp.
+    //
+    // The name proposes it and the texture list confirms it, as with banners:
+    // a model named for a tent but painted only as wood is a tent frame. A
+    // model that animates itself keeps its own motion.
+    //
+    // What moves is decided per vertex, here, once. Canvas is held wherever
+    // it meets its frame - the poles and spars painted with a structural
+    // texture - and at its foot and ridge, where it is pegged and where it
+    // hangs from the ridge pole. Each vertex is weighted by how far it is from
+    // the nearest of those, reaching full weight a third of the way across the
+    // model, so the middle of a panel breathes and its edges stay put.
+    std::vector<float> canvasWeight;
+    if (cls.isCanvas && hasGeometry) {
+        static constexpr std::string_view kCanvasTex[] = {
+            "canvas", "cloth", "tent", "tarp", "awning", "drape",
+        };
+        static constexpr std::string_view kFrameTex[] = {
+            "pole", "post", "wood", "timber", "plank", "iron", "metal",
+            "stone", "rim", "chain", "rope", "frame",
+        };
+        const auto lowerFile = [](std::string file) {
+            if (const size_t slash = file.find_last_of("\\/"); slash != std::string::npos) {
+                file = file.substr(slash + 1);
+            }
+            for (char& c : file) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return file;
+        };
+        const auto names = [](const std::string& file, const auto& list) {
+            for (std::string_view token : list) {
+                if (file.find(token) != std::string::npos) return true;
+            }
+            return false;
+        };
+        // Per texture: is it the canvas, is it the frame.
+        std::vector<uint8_t> frameTexture(model.textures.size(), 0);
+        bool anyCanvasTex = false;
+        for (size_t t = 0; t < model.textures.size(); ++t) {
+            if (model.textures[t].filename.empty()) continue;
+            const std::string file = lowerFile(model.textures[t].filename);
+            const bool canvas = names(file, kCanvasTex);
+            anyCanvasTex = anyCanvasTex || canvas;
+            frameTexture[t] = (!canvas && names(file, kFrameTex)) ? 1 : 0;
+        }
+        const bool selfMoving = anyBoneMoves();
+        if (!anyCanvasTex || selfMoving) {
+            LOG_INFO("Not canvas: '", model.name, "' ",
+                     selfMoving ? "animates itself" : "names no canvas in its textures");
+        } else {
+            const size_t vcount = model.vertices.size();
+            std::vector<uint8_t> anchor(vcount, 0);
+            for (const auto& batch : model.batches) {
+                if (batch.textureIndex >= model.textureLookup.size()) continue;
+                const uint16_t texIdx = model.textureLookup[batch.textureIndex];
+                if (texIdx >= frameTexture.size() || !frameTexture[texIdx]) continue;
+                const size_t end = std::min<size_t>(size_t(batch.indexStart) + batch.indexCount,
+                                                    model.indices.size());
+                for (size_t i = batch.indexStart; i < end; ++i) {
+                    if (model.indices[i] < vcount) anchor[model.indices[i]] = 1;
+                }
+            }
+            const float spanZ = std::max(tightMax.z - tightMin.z, 0.01f);
+            const float footZ = tightMin.z + spanZ * 0.05f;
+            const float ridgeZ = tightMax.z - spanZ * 0.03f;
+            std::vector<glm::vec3> anchors;
+            for (size_t v = 0; v < vcount; ++v) {
+                const glm::vec3& p = model.vertices[v].position;
+                if (p.z <= footZ || p.z >= ridgeZ) anchor[v] = 1;
+                if (anchor[v]) anchors.push_back(p);
+            }
+            // A big tent against a big frame is millions of pairs; thinning
+            // the anchors evenly keeps it a load-time cost of milliseconds
+            // and moves the weights by less than a vertex spacing.
+            constexpr size_t kMaxPairs = 8'000'000;
+            if (!anchors.empty() && vcount * anchors.size() > kMaxPairs) {
+                const size_t keep = std::max<size_t>(kMaxPairs / vcount, 1);
+                const size_t step = (anchors.size() + keep - 1) / keep;
+                std::vector<glm::vec3> thinned;
+                for (size_t a = 0; a < anchors.size(); a += step) thinned.push_back(anchors[a]);
+                anchors.swap(thinned);
+            }
+            const glm::vec3 ext = tightMax - tightMin;
+            const float maxExtent = std::max({ext.x, ext.y, ext.z, 0.01f});
+            const float reach = 0.3f * maxExtent;
+            canvasWeight.assign(vcount, 0.0f);
+            size_t moving = 0;
+            for (size_t v = 0; v < vcount; ++v) {
+                if (anchor[v] || anchors.empty()) continue;
+                const glm::vec3& p = model.vertices[v].position;
+                float best = std::numeric_limits<float>::max();
+                for (const auto& a : anchors) {
+                    const glm::vec3 d = p - a;
+                    best = std::min(best, glm::dot(d, d));
+                }
+                const float x = std::clamp(std::sqrt(best) / reach, 0.0f, 1.0f);
+                canvasWeight[v] = x * x * (3.0f - 2.0f * x);
+                if (canvasWeight[v] > 0.05f) ++moving;
+            }
+            if (moving == 0) {
+                canvasWeight.clear();
+                LOG_INFO("Not canvas: '", model.name, "' is all frame");
+            } else {
+                gpuModel.isCanvas = true;
+                gpuModel.canvasExtent = maxExtent;
+                static core::LogBudget canvasBudget(24, "Canvas models given a flutter");
+                if (canvasBudget.take()) {
+                    LOG_INFO("Canvas flutter: '", model.name, "' ", moving, " of ", vcount,
+                             " vertices move, extent=", maxExtent);
+                }
             }
         }
     }
@@ -1811,12 +1953,14 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
 
     if (hasGeometry) {
         // Create VBO with interleaved vertex data
-        // Format: position (3), normal (3), texcoord0 (2), texcoord1 (2), boneWeights (4), boneIndices (4 as float)
-        const size_t floatsPerVertex = 18;
+        // Format: position (3), normal (3), texcoord0 (2), texcoord1 (2), boneWeights (4),
+        // boneIndices (4 as float), canvas flutter weight (1; zero unless isCanvas)
+        const size_t floatsPerVertex = M2_VERTEX_FLOATS;
         std::vector<float> vertexData;
         vertexData.reserve(model.vertices.size() * floatsPerVertex);
 
-        for (const auto& v : model.vertices) {
+        for (size_t vi = 0; vi < model.vertices.size(); ++vi) {
+            const auto& v = model.vertices[vi];
             vertexData.push_back(v.position.x);
             vertexData.push_back(v.position.y);
             vertexData.push_back(v.position.z);
@@ -1839,6 +1983,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             vertexData.push_back(static_cast<float>(std::min(v.boneIndices[1], uint8_t(127))));
             vertexData.push_back(static_cast<float>(std::min(v.boneIndices[2], uint8_t(127))));
             vertexData.push_back(static_cast<float>(std::min(v.boneIndices[3], uint8_t(127))));
+            vertexData.push_back(vi < canvasWeight.size() ? canvasWeight[vi] : 0.0f);
         }
 
         // Upload vertex buffer to GPU

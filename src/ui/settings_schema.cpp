@@ -52,6 +52,9 @@ constexpr SettingDesc kSchema[] = {
      "How far away things still cast shadows, in yards. The shadow map\n"
      "covers this whole range, so a shorter distance also gives sharper\n"
      "shadows close to you.", "", 300},
+    {"shadowstrength", "Shadow darkness", SettingKind::Float, 0.5f, 1.5f, 0.05f, "Graphics", "",
+     "How dark shadows are, against what the zone's light asks for.\n"
+     "1 is as the sky sets it: deeper at noon, faint under cloud.", "", 1.0f},
     {"viewdistance", "View distance", SettingKind::Float, 400, 2400, 50, "Graphics", "View",
      "How far into the distance the world is drawn, in yards. The single\n"
      "largest cost in the picture: terrain, buildings and creatures are all\n"
@@ -111,21 +114,6 @@ constexpr SettingDesc kSchema[] = {
      "A cheap smoothing pass over the finished picture. Catches edges\n"
      "MSAA misses, such as leaves and grass, and softens fine texture\n"
      "a little. Most useful with MSAA off or on weaker hardware.", "", 0},
-
-    {"lensflare", "Lens flare", SettingKind::Float, 0, 2, 0.1f, "Graphics", "Sky",
-     "How strong the sun's flare is when it is in view. It warms to\n"
-     "amber near the horizon for the dawn and dusk look. 0 removes it.",
-     "", 1.0f},
-    {"sharpstars", "Sharp stars", SettingKind::Bool, 0, 0, 0, "Graphics", "",
-     "Draw the night sky's stars as crisp points. Off, they come from\n"
-     "the sky's own small star texture, which goes soft at high\n"
-     "resolutions.", "", 1},
-    // A check box and not a strength slider: the page has room for the one
-    // and not the other.
-    {"sunshafts", "Sun shafts", SettingKind::Bool, 0, 0, 0, "Graphics", "",
-     "Rays of light streaming from the sun through gaps in trees and\n"
-     "between buildings when you look toward it. Cheap; drawn over\n"
-     "the finished picture.", "", 1},
 
     // ------------------------------------------------------------------ Detail
     //
@@ -255,6 +243,10 @@ constexpr SettingDesc kSchema[] = {
      "How far out grass is drawn, in yards. Beyond 45 the field thins\n"
      "with distance and each blade fades in as you ride toward it.\n"
      "Farther costs more each time you move.", "", 150, "grassenabled"},
+    {"foliagewind", "Foliage and cloth wind", SettingKind::Float, 0, 2, 0.05f, "Grass", "Wind",
+     "How hard the wind moves trees, grass, banners and awnings.\n"
+     "1 is the usual breeze; rain and storms stir it further and it\n"
+     "drops away indoors. 0 holds everything still.", "", 1.0f},
 
 #if WOWEE_HAS_AMD_FSR3_FRAMEGEN
     {"framegen", "Frame generation", SettingKind::Bool, 0, 0, 0, "Upscaling", "",
@@ -296,6 +288,18 @@ constexpr SettingDesc kSchema[] = {
      "How bright the picture is. 50 leaves it as the zone was lit; below\n"
      "darkens and above lifts the shadows. The game's own panel called\n"
      "this gamma and reached the same value.", "", 50},
+    {"lensflare", "Lens flare", SettingKind::Float, 0, 2, 0.1f, "Display", "Sky",
+     "How strong the sun's flare is when it is in view. It warms to\n"
+     "amber near the horizon for the dawn and dusk look. 0 removes it.",
+     "", 1.0f},
+    {"sharpstars", "Sharp stars", SettingKind::Bool, 0, 0, 0, "Display", "",
+     "Draw the night sky's stars as crisp points. Off, they come from\n"
+     "the sky's own small star texture, which goes soft at high\n"
+     "resolutions.", "", 1},
+    {"sunshafts", "Sun shafts", SettingKind::Bool, 0, 0, 0, "Display", "",
+     "Rays of light streaming from the sun through gaps in trees and\n"
+     "between buildings when you look toward it. Cheap; drawn over\n"
+     "the finished picture.", "", 1},
     // Gamma, on the game's own panel, is this same value on another scale -
     // GetGamma answers it divided by 50 - and both end in SetGamma, so the
     // two cannot disagree whichever a player reaches for.
@@ -442,13 +446,6 @@ constexpr SettingDesc kSchema[] = {
      "and AchievementFrame_ForceUpdate then AchievementFrame_ForceUpdate() end"},
     {"showitemlevel", "Item level in tooltips", SettingKind::Bool, 0, 0, 0, "Interface", "",
      "Show an item's level in its tooltip.", "", 1, "", "cvar:showItemLevel"},
-
-    {"equipmentmanager", "Equipment manager", SettingKind::Bool, 0, 0, 0, "Interface", "Character sheet",
-     "Save sets of gear on the character sheet and swap between them\n"
-     "in one click.", "", 0, "", "cvar:equipmentManager"},
-    {"previewtalents", "Preview talent changes", SettingKind::Bool, 0, 0, 0, "Interface", "",
-     "Lay talent points out on the talent sheet before spending them,\n"
-     "and confirm them all at once.", "", 1, "", "cvar:previewTalents"},
 
     // ----------------------------------------------------------------- Minimap
     // Rotate-with-camera was deliberately absent until 2026-09-06: the loader
@@ -945,6 +942,12 @@ constexpr SettingDesc kSchema[] = {
      "", "lua:ShowingCloak|ShowCloak"},
     {"showhelm", "Show your helm", SettingKind::Bool, 0, 0, 0, "Gameplay", "",
      "The same for the helm.", "", 1, "", "lua:ShowingHelm|ShowHelm"},
+    {"equipmentmanager", "Equipment manager", SettingKind::Bool, 0, 0, 0, "Gameplay", "Character sheet",
+     "Save sets of gear on the character sheet and swap between them\n"
+     "in one click.", "", 0, "", "cvar:equipmentManager"},
+    {"previewtalents", "Preview talent changes", SettingKind::Bool, 0, 0, 0, "Gameplay", "",
+     "Lay talent points out on the talent sheet before spending them,\n"
+     "and confirm them all at once.", "", 1, "", "cvar:previewTalents"},
 };
 
 }  // namespace

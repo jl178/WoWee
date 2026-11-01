@@ -121,6 +121,9 @@ struct M2ClassificationResult {
     /// so it gets a sway of its own rather than the foliage one, and a small
     /// one: a banner indoors moves, it does not flap.
     bool isHangingCloth     = false;
+    /// An awning, a tent, a tarp: canvas held all round its frame. Never set
+    /// together with isHangingCloth.
+    bool isCanvas           = false;
 };
 
 /**

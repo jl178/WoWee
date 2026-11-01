@@ -44,6 +44,17 @@
 namespace wowee {
 namespace rendering {
 
+namespace {
+/// The sway one model gets, asked the same way by the main and shadow passes.
+/// Foliage that plays its own keyed sway takes no shader wind on top of it.
+M2Sway swayOfModel(const M2ModelGPU& mdl, bool sky) {
+    return m2SwayFor(sky, mdl.isHangingCloth,
+                     mdl.shadowWindFoliage && !mdl.foliageAnimatesItself,
+                     mdl.isGroundDetail, mdl.boundMin.z, mdl.boundMax.z,
+                     mdl.isStandingCloth, mdl.isCanvas ? mdl.canvasExtent : 0.0f);
+}
+}  // namespace
+
 /// Starts a new instance's animation and gives it bones to draw with now.
 ///
 /// Both spawn paths need this: the one that takes a position and the one that
@@ -1687,9 +1698,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     // neighbour should not sway ten times less. Both ends reproduce the numbers
     // that were there: a 20-yard tree still throws 0.35 model units at the tip.
     auto fillSway = [](M2PushConstants& pc, const M2ModelGPU& mdl, bool sky) {
-        const M2Sway sway = m2SwayFor(sky, mdl.isHangingCloth, mdl.shadowWindFoliage,
-                                      mdl.isGroundDetail, mdl.boundMin.z, mdl.boundMax.z,
-                                      mdl.isStandingCloth);
+        const M2Sway sway = swayOfModel(mdl, sky);
         pc.isFoliage = sway.mode;
         pc.swayRefHeight = sway.refHeight;
         pc.swayAmp = sway.amp;
@@ -2654,20 +2663,23 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
         return false;
     }
 
-    // M2 vertex layout: 18 floats = 72 bytes stride
+    // M2 vertex layout: 19 floats = 76 bytes stride (M2_VERTEX_FLOATS)
     // loc0=pos(off0), loc1=normal(off12), loc2=texCoord0(off24), loc5=texCoord1(off32),
-    // loc3=boneWeights(off40), loc4=boneIndices(off56)
-    // Shadow shader locations: 0=aPos, 1=aTexCoord, 2=aBoneWeights, 3=aBoneIndicesF
+    // loc3=boneWeights(off40), loc4=boneIndices(off56), loc6=canvas weight(off72)
+    // Shadow shader locations: 0=aPos, 1=aTexCoord, 2=aBoneWeights, 3=aBoneIndicesF,
+    // 4=aNormal, 5=aCanvasWeight (the canvas flutter moves along the normal)
     // useBones=0 so locations 2,3 are never used
     VkVertexInputBindingDescription vertBind{};
     vertBind.binding = 0;
-    vertBind.stride = 18 * sizeof(float);
+    vertBind.stride = M2_VERTEX_FLOATS * sizeof(float);
     vertBind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
     std::vector<VkVertexInputAttributeDescription> vertAttrs = {
         {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT,    .offset = 0},                     // aPos       -> position
         {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT,       .offset = 6 * sizeof(float)},     // aTexCoord  -> texCoord0
         {.location = 2, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 10 * sizeof(float)},    // aBoneWeights
         {.location = 3, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 14 * sizeof(float)},    // aBoneIndicesF
+        {.location = 4, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT,    .offset = 3 * sizeof(float)},     // aNormal
+        {.location = 5, .binding = 0, .format = VK_FORMAT_R32_SFLOAT,          .offset = 18 * sizeof(float)},    // aCanvasWeight
     };
 
     shadowPipeline_ = buildShadowPipeline(
@@ -2897,9 +2909,11 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         // land inside the previous frame's reads. A foliage batch that lost
         // its alpha test that way casts the whole leaf quad, which is the
         // canopy's outline in solid black instead of its cutout.
-        const glm::ivec4 passFlags{foliagePass ? 1 : 0, foliagePass ? 1 : 0,
-                                   foliagePass ? 1 : 0, 0};
-        const glm::vec4 wind{globalTime, 0.0f, 0.0f, 0.0f};
+        const glm::ivec4 passFlags{foliagePass ? 1 : 0, foliagePass ? 1 : 0, 0, 0};
+        // x the wind clock, y the foliage wind strength the main pass reads
+        // from playerWake.w, z the cloth one it reads from fogColor.w - the
+        // two passes must bend a tree or an awning by the same amount.
+        const glm::vec4 wind{globalTime, windStrength_, clothWindStrength_, 0.0f};
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
@@ -2919,10 +2933,15 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
 
             // Once per model, not once per instance: the bend comes from the
             // model's own bounds and its kind, and so do the buffers.
-            const M2Sway sway = m2SwayFor(false, model.isHangingCloth,
-                                          model.shadowWindFoliage, model.isGroundDetail,
-                                          model.boundMin.z, model.boundMax.z,
-                                          model.isStandingCloth);
+            //
+            // The displacement flag follows the main pass's mode, not which
+            // bucket the model is in: the foliage bucket is about the alpha
+            // test. Ground clutter (mode 2) and a palm playing its own sway
+            // take no shader wind in the main pass, so their shadows take none
+            // either - they used to get the tree trunk sway here regardless.
+            // 1 = tree wind, 2 = canvas flutter along the normal.
+            const M2Sway sway = swayOfModel(model, false);
+            const int swayFlag = sway.mode == 1 ? 1 : (sway.mode == 5 ? 2 : 0);
             const glm::vec2 modelSwayZW(sway.refHeight, sway.amp);
             // The group's matrices go into the caster buffer once; every batch
             // below draws them all with a single instanced draw.
@@ -2970,7 +2989,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                 ShadowPush push{
                     .lightSpaceModel = lightSpaceMatrix,  // light space only; the model is per caster
                     .sway = glm::vec4(0.0f, 0.0f, modelSwayZW.x, modelSwayZW.y),
-                    .flags = glm::ivec4(passFlags.x, passFlags.y, passFlags.z, static_cast<int>(casterBase)),
+                    .flags = glm::ivec4(passFlags.x, passFlags.y, swayFlag, static_cast<int>(casterBase)),
                     .wind = wind};
                 vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    0, sizeof(ShadowPush), &push);

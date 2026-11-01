@@ -186,6 +186,15 @@ struct M2ModelGPU {
     bool isInstancePortal = false; // Instance portal model (spin + glow)
     bool disableAnimation = false; // Keep foliage/tree doodads visually stable
     bool shadowWindFoliage = false; // Apply wind sway in shadow pass for foliage/tree cards
+    /// Foliage whose own bones are keyed (durotarpalm01): it plays its authored
+    /// sway and takes no shader wind. Still foliage for the shadow pass's alpha
+    /// test and for the long draw distance foliage gets.
+    bool foliageAnimatesItself = false;
+    /// Awning, tent or tarp: flutters along its normal by a per-vertex weight
+    /// (the 19th float of each vertex, location 6) that is zero at its frame.
+    bool isCanvas = false;
+    /// The model's largest extent, which the canvas flutter is a fraction of.
+    float canvasExtent = 0.0f;
     bool isHangingCloth = false;    // Banner/flag/tapestry: sways from the end it is held by
     bool isStandingCloth = false;   // ...and that end is the foot of a planted pole
     bool isFoliageLike = false;     // Model name matches foliage/tree/bush/grass etc (precomputed)
@@ -595,6 +604,15 @@ public:
     void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, float globalTime = 0.0f,
                       const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f);
 
+    /// The shared wind: `foliage` is setting x weather, eased, zero indoors;
+    /// `cloth` the same without the indoor cut. The main pass reads them from
+    /// the per-frame playerWake.w and fogColor.w; the shadow pass has no
+    /// per-frame buffer of its own and takes them from here.
+    void setWindStrength(float foliage, float cloth) {
+        windStrength_ = foliage;
+        clothWindStrength_ = cloth;
+    }
+
     /**
      * Render M2 particle emitters (point sprites)
      */
@@ -876,6 +894,9 @@ private:
     float doodadDistanceCapYards_ = 0.0f;
     /// Said once: a foliage batch reached the shadow pass with no texture.
     bool warnedShadowNoTexture_ = false;
+    /// See setWindStrength.
+    float windStrength_ = 1.0f;
+    float clothWindStrength_ = 1.0f;
     /// Foliage casters drawn into the shadow map last frame, for spotting a
     /// caster count that swings while nothing is moving.
     uint32_t lastFoliageCasters_ = 0;

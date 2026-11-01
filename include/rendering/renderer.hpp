@@ -446,6 +446,12 @@ public:
     void setVolumetricFogDensity(float density) { volumetricFogDensity_ = glm::clamp(density, 0.0f, 3.0f); }
     /// Rays streaming from the sun across the finished picture. See SunShafts.
     void setSunShaftsEnabled(bool enabled) { sunShaftsEnabled_ = enabled; }
+    /// How hard the wind moves foliage, grass and cloth; 1 is the usual
+    /// breeze, 0 holds everything still. Weather and indoors scale it further,
+    /// eased; see updatePerFrameUBO.
+    void setFoliageWind(float strength) { foliageWindSetting_ = glm::clamp(strength, 0.0f, 2.0f); }
+    /// A multiplier on the shadow darkness Light.dbc asks for; 1 is as set.
+    void setShadowStrength(float strength) { shadowStrengthSetting_ = glm::clamp(strength, 0.5f, 1.5f); }
     int getTerrainLoadRadius() const;
     int getTerrainUnloadRadius() const { return getTerrainLoadRadius() + 3; }
     void setMsaaSamples(VkSampleCountFlagBits samples);
@@ -476,6 +482,10 @@ private:
     std::unique_ptr<PostProcessPipeline> postProcessPipeline_;
 
     float indoorFactor_ = 0.0f;           // 0 outdoors .. 1 inside an interior group, eased
+    float foliageWindSetting_ = 1.0f;     // the "Foliage and cloth wind" setting
+    float windStrength_ = 1.0f;           // setting x weather x outdoors, eased over ~4 s
+    float clothWindStrength_ = 1.0f;      // setting x weather, eased: cloth breathes indoors too
+    float shadowStrengthSetting_ = 1.0f;  // the "Shadow darkness" setting
     glm::vec3 interiorAmbient_{0.5f};     // MOHD ambient of the WMO the camera is in
     bool playerIndoors_ = false;  // Cached WMO inside state for macro conditionals
     bool deferredWorldInitEnabled_ = true;

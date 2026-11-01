@@ -614,6 +614,19 @@ M2ClassificationResult classifyM2Model(
     r.isHangingCloth = !r.isFoliageLike &&
                        (has(n, "banner") || flagCloth || has(n, "tapestry") ||
                         has(n, "pennant"));
+    // Canvas stretched on a frame: a vendor's awning, a tent, a tarp. It is
+    // held all round its edge rather than at one end, so it flutters in the
+    // middle and not at a hem - a mode of its own. The renderer confirms it
+    // from the texture list and works out where the frame is from geometry.
+    //
+    // Tentacles are not tents, and neither is a wreck: a collapsed tent lies
+    // on the ground. A canopy is canvas unless it is a tree's or a bed's.
+    const bool tentCanvas = has(n, "tent") && !has(n, "tentacle") &&
+                            !has(n, "tentburninator");
+    const bool canopyCanvas = has(n, "canopy") && !treeLike && !foliageName &&
+                              !has(n, "bed");
+    r.isCanvas = !r.isFoliageLike && !r.isHangingCloth && !has(n, "wrecked") &&
+                 (has(n, "awning") || has(n, "tarp") || tentCanvas || canopyCanvas);
     r.isFireflyEffect   = ambientCreature;
 
     // Small foliage: foliage-like models with a small bounding box.

@@ -100,6 +100,12 @@ public:
     bool playMusic(std::shared_ptr<const std::vector<uint8_t>> musicData,
                    float volume = 1.0f, bool loop = true);
     void stopMusic();
+    /// Hand the playing track to a second voice that fades it to silence over
+    /// fadeMs and then stops, leaving the main voice free for the next track
+    /// to fade in over it - a crossfade. The fade runs on the audio thread, so
+    /// it finishes even on a frame that never calls update(); update() frees
+    /// the voice once it has stopped. A track already fading is cut short.
+    void fadeOutMusicVoice(float fadeMs);
     [[nodiscard]] bool isMusicPlaying() const;
     void setMusicVolume(float volume);
 
@@ -148,6 +154,11 @@ private:
     void* musicDecoder_ = nullptr;  // ma_decoder* - Keep decoder alive for streaming
     std::shared_ptr<const std::vector<uint8_t>> musicData_;  // Keep encoded music data alive
     float musicVolume_ = 1.0f;
+    // The outgoing track of a crossfade; see fadeOutMusicVoice.
+    ma_sound* retiringMusicSound_ = nullptr;
+    void* retiringMusicDecoder_ = nullptr;
+    std::shared_ptr<const std::vector<uint8_t>> retiringMusicData_;
+    void releaseRetiringMusic();
 
     bool initialized_ = false;
     float masterVolume_ = 1.0f;

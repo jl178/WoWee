@@ -73,6 +73,9 @@ private:
 
     std::mt19937 rng;
     float volumeScale = 1.0f;
+    // The clip played last, so the next step never repeats it.
+    const std::vector<Sample>* lastStepList_ = nullptr;
+    size_t lastStepIndex_ = SIZE_MAX;
 };
 
 } // namespace audio
