@@ -100,6 +100,8 @@ private:
 
     // Hit reaction
     uint32_t hitReactionAnimId_ = 0;
+    bool hitReactionAnimSeen_ = false;  ///< the wound anim has started playing
+    uint8_t hitReactionFrames_ = 0;     ///< frames waited for it to start
 
     // Stun
     bool stunned_ = false;

@@ -13,7 +13,7 @@ void main() {
     float r = length(vLocalPos);
     float ring = smoothstep(0.93, 0.97, r) * smoothstep(1.0, 0.97, r);
     float inward = (1.0 - smoothstep(0.0, 0.93, r)) * 0.15;
-    float alpha = max(ring, inward);
+    float alpha = ring;  // a ring, no filled disc, like the stock circle
     if (alpha < 0.01) discard;
     outColor = vec4(push.color.rgb, alpha);
 }

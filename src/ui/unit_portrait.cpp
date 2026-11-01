@@ -109,7 +109,10 @@ void UnitPortrait::update(game::GameHandler& gameHandler,
         loadedEquipHash_ = equipHash;
     }
 
-    preview_->update(deltaTime);
+    // A unit frame portrait is a still in the stock client; the paperdoll
+    // figure idles. Face framing advances once, to settle the pose.
+    preview_->update(framing_ == Framing::Face ? (portraitPosed_ ? 0.0f : deltaTime) : deltaTime);
+    portraitPosed_ = true;
     preview_->render();
     preview_->requestComposite();
 }
@@ -176,7 +179,10 @@ bool UnitPortrait::updatePlayer(uint8_t race, uint8_t gender,
         loadedBake_ = pendingBake_;
     }
 
-    preview_->update(deltaTime);
+    // A unit frame portrait is a still in the stock client; the paperdoll
+    // figure idles. Face framing advances once, to settle the pose.
+    preview_->update(framing_ == Framing::Face ? (portraitPosed_ ? 0.0f : deltaTime) : deltaTime);
+    portraitPosed_ = true;
     preview_->render();
     preview_->requestComposite();
     return preview_->isModelLoaded();
@@ -223,7 +229,10 @@ bool UnitPortrait::updateCreature(const std::string& m2Path,
         loadedEquipHash_ = 0;
     }
 
-    preview_->update(deltaTime);
+    // A unit frame portrait is a still in the stock client; the paperdoll
+    // figure idles. Face framing advances once, to settle the pose.
+    preview_->update(framing_ == Framing::Face ? (portraitPosed_ ? 0.0f : deltaTime) : deltaTime);
+    portraitPosed_ = true;
     preview_->render();
     preview_->requestComposite();
     return preview_->isModelLoaded();

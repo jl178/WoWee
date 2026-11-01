@@ -842,6 +842,11 @@ void CombatHandler::handleSpellDamageLog(network::Packet& packet) {
         addCombatText(CombatTextEntry::ABSORB, static_cast<int32_t>(data.absorbed), data.spellId, isPlayerSource, 0, data.attackerGuid, data.targetGuid);
     if (data.resisted > 0)
         addCombatText(CombatTextEntry::RESIST, static_cast<int32_t>(data.resisted), data.spellId, isPlayerSource, 0, data.attackerGuid, data.targetGuid);
+    // Spell damage makes the victim flinch, as a melee hit does.
+    if (owner_.hitReactionCallbackRef() && data.damage > 0) {
+        owner_.hitReactionCallbackRef()(data.targetGuid, data.isCrit
+            ? GameHandler::HitReaction::CRIT_WOUND : GameHandler::HitReaction::WOUND);
+    }
 }
 
 void CombatHandler::handleSpellHealLog(network::Packet& packet) {

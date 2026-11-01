@@ -280,10 +280,10 @@ void ActivitySoundManager::playLanding(FootstepSurface surface, bool hardLanding
         lastLandAt = now;
     }
 
+    // The footstep above is the landing; the stock client adds no grunt to an
+    // ordinary jump. A hard landing from a fall keeps its clip.
     if (hardLanding && !hardLandClips.empty()) {
         playVoice(hardLandClips);
-    } else {
-        playVoice(landVoiceClips);
     }
 }
 

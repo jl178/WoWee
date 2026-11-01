@@ -48,15 +48,15 @@ void SfxStateDriver::update(float deltaTime, Renderer* renderer,
         // Jump detection. Wading ashore lifts the character without a jump, and
         // jumpClips are the character's exertion vocalisations, so a grunt there
         // sounds like it jumped out of the lake.
-        if (jumping && !prevJumping_ && !swimming && !justLeftWater) {
-            activitySoundManager->playJump();
-        }
+        // No sound on takeoff: the stock client plays nothing when a player
+        // jumps. The MainJump clips are in the data but not used for this.
 
         // Landing detection. Wading out of water reaches the ground without a
         // fall, and retail marks that with the water-exit splash below rather
         // than a landing thud, so a swim-to-ground transition is not a landing.
         if (grounded && !prevGrounded_ && !justLeftWater) {
-            bool hardLanding = prevFalling_;
+            // A jump's own descent is not a hard landing; a real drop is.
+            bool hardLanding = prevFalling_ && fallSeconds_ > 1.0f;
             activitySoundManager->playLanding(
                 footstepDriver.resolveFootstepSurface(renderer), hardLanding);
         }
@@ -74,6 +74,7 @@ void SfxStateDriver::update(float deltaTime, Renderer* renderer,
             renderer->getAudioCoordinator()->getMusicManager()->setUnderwaterMode(swimming);
         }
 
+        fallSeconds_ = falling ? fallSeconds_ + deltaTime : 0.0f;
         prevGrounded_ = grounded;
         prevJumping_ = jumping;
         prevFalling_ = falling;
