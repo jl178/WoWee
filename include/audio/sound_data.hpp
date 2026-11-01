@@ -219,6 +219,17 @@ public:
     /// ItemDisplayInfo.GroupSoundIndex -> ItemGroupSounds: the pickup or
     /// put-down sound of an item display. 0 when the display has no group.
     [[nodiscard]] uint32_t itemFoleySound(uint32_t itemDisplayId, bool pickup) const;
+    /// The same, as a playable row: null when the display has no group or the
+    /// group's sound names no row with files. The stock client plays the
+    /// pickup sound when a loot slot is clicked and the put-down sound when
+    /// SMSG_ITEM_PUSH_RESULT puts an item in the player's bags.
+    [[nodiscard]] const SoundEntry* itemFoleyEntry(uint32_t itemDisplayId, bool pickup) const;
+    /// SoundEntries "LOOTWINDOWCOINSOUND" (LootCoinSmall.wav), the one coin
+    /// sound the stock client plays: on every change of PLAYER_FIELD_COINAGE,
+    /// on a rise of the honor or arena point fields, and when money goes onto
+    /// or comes off the cursor. It has no amount threshold. Null when the row
+    /// is missing or has no files.
+    [[nodiscard]] const SoundEntry* coinSound() const;
     /// True when VocalUISounds.dbc was read. A character's spoken errors then
     /// come from it alone; a missing row means the stock client says nothing.
     [[nodiscard]] bool hasVocalUiSounds() const { return !vocalUiSounds_.empty(); }

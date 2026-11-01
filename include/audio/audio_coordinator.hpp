@@ -94,6 +94,14 @@ public:
     void loadSoundData(pipeline::AssetManager* assets);
     [[nodiscard]] const SoundData* getSoundData() const { return soundData_.loaded() ? &soundData_ : nullptr; }
 
+    /// LOOTWINDOWCOINSOUND, the stock client's only coin sound. Plays
+    /// LootCoinSmall.wav directly when SoundEntries.dbc is missing.
+    void playCoinSound();
+    /// An item display's ItemGroupSounds pickup or put-down sound. False when
+    /// the tables are missing or the display has no group, so the caller can
+    /// choose a fallback.
+    bool playItemFoley(uint32_t itemDisplayId, bool pickup);
+
     [[nodiscard]] const std::string& getCurrentZoneName() const { return currentZoneName_; }
     [[nodiscard]] uint32_t getCurrentZoneId() const { return currentZoneId_; }
 
@@ -123,6 +131,9 @@ private:
     void updateTableMusic(const ZoneAudioContext& ctx, uint32_t zoneId, bool suppressed);
     void updateTableAmbience(const ZoneAudioContext& ctx);
     void updateReverb(const ZoneAudioContext& ctx);
+    /// One of the row's files on the interface bus, at the row's volume times
+    /// the interface volume.
+    bool playInterfaceEntry(const SoundEntry* entry);
 
     SoundData soundData_;
     std::unique_ptr<ZoneMusicController> zoneMusic_;

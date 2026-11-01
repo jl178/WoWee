@@ -244,6 +244,65 @@ TEST_CASE("SoundData picks a character's error line from VocalUISounds", "[sound
     REQUIRE(without.vocalUiSound(46, 1, false, false) == nullptr);
 }
 
+TEST_CASE("SoundData finds the loot coin and an item's pickup and put-down rows", "[sound_data]") {
+    Fixture f;
+    Strings se;
+    const uint32_t uiDir = se.add("Sound\\Interface");
+    const uint32_t pickupDir = se.add("Sound\\interface\\PickUp");
+    // The stock file carries the coin row twice, 120 and 895, identical.
+    f.tables["SoundEntries.dbc"] = table(30, {
+        row(30, {{0, 120}, {2, se.add("LOOTWINDOWCOINSOUND")}, {3, se.add("LootCoinSmall.wav")},
+                 {23, uiDir}, {24, bits(0.7f)}}),
+        row(30, {{0, 895}, {2, se.add("LOOTWINDOWCOINSOUND")}, {3, se.add("LootCoinSmall.wav")},
+                 {23, uiDir}, {24, bits(0.7f)}}),
+        row(30, {{0, 1185}, {2, se.add("PickUpCloth_Leather")}, {3, se.add("PickUpCloth_Leather01.wav")},
+                 {23, pickupDir}, {24, bits(0.69f)}}),
+        row(30, {{0, 1202}, {2, se.add("PutDownClothLeather")}, {3, se.add("PutDownCloth_Leather01.wav")},
+                 {23, pickupDir}, {24, bits(0.69f)}}),
+        row(30, {{0, 7000}, {2, se.add("NoFiles")}}),
+    }, se.block);
+    // ItemGroupSounds: ID, Sound[4]. Group 7 is cloth and leather; group 30
+    // names a row with no files and group 31 a row that does not exist.
+    f.tables["ItemGroupSounds.dbc"] = table(5, {
+        row(5, {{0, 7}, {1, 1185}, {2, 1202}}),
+        row(5, {{0, 30}, {1, 7000}, {2, 7000}}),
+        row(5, {{0, 31}, {1, 4242}, {2, 4242}}),
+    }, std::string(1, '\0'));
+    // ItemDisplayInfo: GroupSoundIndex is column 12.
+    f.tables["ItemDisplayInfo.dbc"] = table(25, {
+        row(25, {{0, 2453}, {12, 7}}),
+        row(25, {{0, 2454}, {12, 30}}),
+        row(25, {{0, 2455}, {12, 31}}),
+        row(25, {{0, 2456}}),
+    }, std::string(1, '\0'));
+    SoundData data;
+    REQUIRE(data.load(f.loader()));
+
+    const auto* coin = data.coinSound();
+    REQUIRE(coin != nullptr);
+    REQUIRE((coin->id == 120 || coin->id == 895));
+    REQUIRE(coin->files == std::vector<std::string>{"Sound\\Interface\\LootCoinSmall.wav"});
+    REQUIRE(coin->volume == Catch::Approx(0.7f));
+
+    const auto* pickup = data.itemFoleyEntry(2453, true);
+    REQUIRE(pickup != nullptr);
+    REQUIRE(pickup->id == 1185);
+    REQUIRE(pickup->files[0] == "Sound\\interface\\PickUp\\PickUpCloth_Leather01.wav");
+    REQUIRE(data.itemFoleyEntry(2453, false)->id == 1202);
+    REQUIRE(data.itemFoleyEntry(2454, true) == nullptr);   // row has no files
+    REQUIRE(data.itemFoleyEntry(2455, false) == nullptr);  // names no row
+    REQUIRE(data.itemFoleyEntry(2456, true) == nullptr);   // display has no group
+    REQUIRE(data.itemFoleyEntry(9999, true) == nullptr);   // unknown display
+    REQUIRE(data.itemFoleyEntry(0, false) == nullptr);
+
+    // The default fixture's SoundEntries has no coin row.
+    Fixture plain;
+    SoundData without;
+    REQUIRE(without.load(plain.loader()));
+    REQUIRE(without.coinSound() == nullptr);
+    REQUIRE(without.itemFoleyEntry(2453, true) == nullptr);
+}
+
 TEST_CASE("SoundData picks the room's WMOAreaTable row over the building's", "[sound_data]") {
     Fixture f;
     Strings wa;

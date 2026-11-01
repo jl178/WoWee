@@ -12,6 +12,7 @@
 #include "game/movement_handler.hpp"
 #include "core/logger.hpp"
 #include "core/coordinates.hpp"
+#include "audio/audio_coordinator.hpp"
 #include "network/world_socket.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/animation/animation_ids.hpp"
@@ -1423,6 +1424,9 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
     bool attackSpeedChanged = false;
     bool damageChanged = false;
     bool rangedDamageChanged = false;
+    auto playCoinSound = [this]() {
+        if (auto* ac = owner_.services().audioCoordinator) ac->playCoinSound();
+    };
     for (const auto& [key, val] : fields) {
         if (pfi.baseAttackTime != 0xFFFF && key >= pfi.baseAttackTime &&
             key < pfi.baseAttackTime + 3) {
@@ -1466,12 +1470,22 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
             LOG_DEBUG("Money ", isCreate ? "set from update fields: " : "updated via VALUES: ", val, " copper");
             if (val != oldMoney)
                 pendingEvents_.emit("PLAYER_MONEY", {});
+            // The stock client's coinage field handler (0x6da070, registered
+            // on PLAYER_FIELD_COINAGE) plays LOOTWINDOWCOINSOUND on every
+            // change, up or down and of any size: looted coin, a sale, a
+            // purchase, a quest reward. It is the only coin sound looting
+            // makes.
+            if (!isCreate && val != oldMoney) playCoinSound();
         }
         else if (pfi.honor != 0xFFFF && key == pfi.honor) {
+            // Honor and arena points clink only when they rise (0x6da3c0 and
+            // 0x6da430 compare the new value with the old).
+            if (!isCreate && val > owner_.playerHonorPointsRef()) playCoinSound();
             owner_.playerHonorPointsRef() = val;
             LOG_DEBUG("Honor points ", isCreate ? "from update fields: " : "updated: ", val);
         }
         else if (pfi.arena != 0xFFFF && key == pfi.arena) {
+            if (!isCreate && val > owner_.playerArenaPointsRef()) playCoinSound();
             owner_.playerArenaPointsRef() = val;
             LOG_DEBUG("Arena points ", isCreate ? "from update fields: " : "updated: ", val);
         }
