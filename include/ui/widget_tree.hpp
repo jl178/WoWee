@@ -635,6 +635,7 @@ struct Widget {
     /// animation system.
     bool  visibleChain = false;
     bool  visible = false;      ///< visibleChain, and anchored somewhere
+    bool  visibilityDirty = false;  ///< on WidgetTree's list for the visibility pass
     /// Whether the interface has been told this is on screen. Visibility is
     /// not a property a frame sets - it is shown, and every ancestor shown too
     /// - so becoming visible has to be noticed rather than announced at the
@@ -979,6 +980,13 @@ public:
     /// same omission and new ones would arrive with the same bug.
     void hideOrphanedTooltips();
     [[nodiscard]] const std::vector<uint32_t>& scrollFrames() const { return scrollFrames_; }
+
+    /// Widgets whose visibility may have changed since the last take: every
+    /// `visible` flip the layout made, and every Show or Hide Lua called.
+    /// The visibility pass used to ask all 28k widgets each frame; this is
+    /// the handful that have something to say. Taking the list clears it.
+    void noteVisibilityCandidate(uint32_t id);
+    std::vector<uint32_t> takeVisibilityDirty();
     /// EnableKeyboard, recorded here as well as on the widget. The focus probe
     /// every binding poll consults asks for the topmost keyboard frame, and
     /// scanning the whole tree for it - tens of thousands of widgets once
@@ -1103,6 +1111,7 @@ private:
     float userScale_ = 1.0f;
 #endif
     std::vector<uint32_t> scrollFrames_;
+    std::vector<uint32_t> visibilityDirty_;
     /// Ids that ever called EnableKeyboard(true), ascending. See keyboardFrames.
     std::vector<uint32_t> keyboardFrames_;
     /// Which unit each portrait texture is showing, and the reverse. Two maps

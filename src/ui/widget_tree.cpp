@@ -99,6 +99,7 @@ WidgetTree::WidgetTree() {
 void WidgetTree::reset() {
     widgets_.clear();
     idsByName_.clear();
+    visibilityDirty_.clear();
     drawOrder_.clear();
     linkRects_.clear();
     scrollFrames_.clear();
@@ -232,6 +233,7 @@ void WidgetTree::hideOrphanedTooltips() {
         // own right after LootFrame hides above it.
         if (owner && owner->visibleChain) continue;
         tip->shown = false;
+        if (tip->visible) noteVisibilityCandidate(tip->id);
         tip->visible = false;
         tip->visibleChain = false;
     }
@@ -766,6 +768,7 @@ void WidgetTree::layout(float pixelW, float pixelH) {
     rootW.rectW = screenW;
     rootW.rectH = screenH;
     rootW.visibleChain = rootW.shown;
+    if (rootW.visible != rootW.shown) noteVisibilityCandidate(rootId_);
     rootW.visible = rootW.shown;
     rootW.effStrata = rootW.strata;
     rootW.effLevel = 0;
@@ -784,6 +787,7 @@ void WidgetTree::layout(float pixelW, float pixelH) {
         ui->rectW = std::max(screenW - inL - safeRight_ / uiScale_, 1.0f);
         ui->rectH = std::max(screenH - inB - safeTop_ / uiScale_, 1.0f);
         ui->visibleChain = rootW.visible && ui->shown;
+        if (ui->visible != ui->visibleChain) noteVisibilityCandidate(uiParentId_);
         ui->visible = ui->visibleChain;
         ui->effStrata = ui->strata;
         ui->effLevel = 0;
@@ -818,6 +822,22 @@ void WidgetTree::layout(float pixelW, float pixelH) {
     generationAtLastPass_ = layoutGeneration_;
 }
 
+void WidgetTree::noteVisibilityCandidate(uint32_t id) {
+    Widget* w = get(id);
+    if (!w || w->visibilityDirty) return;
+    w->visibilityDirty = true;
+    visibilityDirty_.push_back(id);
+}
+
+std::vector<uint32_t> WidgetTree::takeVisibilityDirty() {
+    std::vector<uint32_t> out;
+    out.swap(visibilityDirty_);
+    for (uint32_t id : out) {
+        if (Widget* w = get(id)) w->visibilityDirty = false;
+    }
+    return out;
+}
+
 void WidgetTree::markSubtreeHidden(uint32_t id) {
     const Widget* w = get(id);
     if (!w) return;
@@ -841,6 +861,7 @@ void WidgetTree::markSubtreeHidden(uint32_t id) {
         // frame was most of this pass.
         if (!c->visibleChain && !c->visible) continue;
         c->visibleChain = false;
+        if (c->visible) noteVisibilityCandidate(child);
         c->visible = false;
         markSubtreeHidden(child);
     }
@@ -921,7 +942,11 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
     // anchored child of an unanchored frame has nowhere to be either, because
     // the thing it is anchored to has no position. Deriving this from the
     // chain instead put those children back on screen.
-    w->visible = w->shown && (!parent || parent->visible) && !unanchoredFrame;
+    {
+        const bool nowVisible = w->shown && (!parent || parent->visible) && !unanchoredFrame;
+        if (nowVisible != w->visible) noteVisibilityCandidate(id);
+        w->visible = nowVisible;
+    }
     // Clipping is inherited: anything under a scroll frame is bounded by it,
     // however deep, because a scroll child holds frames of its own.
     //

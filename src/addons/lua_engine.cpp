@@ -3458,6 +3458,7 @@ int lua_Region_Show(lua_State* L) {
         if (!w->shown && w->shownToggles < 200) ++w->shownToggles;
         becameShown = !w->shown;
         w->shown = true;
+        if (auto* tree = wowee::addons::getWidgetTree(L)) tree->noteVisibilityCandidate(w->id);
     }
     lua_pushboolean(L, 1); lua_setfield(L, 1, "__visible");
     // A frame shown to play a model animation has already finished it.
@@ -3517,6 +3518,7 @@ int lua_Region_Hide(lua_State* L) {
         if (w->shown && frameScriptSet(L, 1, "OnHide") && w->shownToggles < 200) {
             ++w->shownToggles;
         }
+        if (auto* tree = wowee::addons::getWidgetTree(L)) tree->noteVisibilityCandidate(w->id);
         // A hidden tooltip belongs to nobody.
         //
         // The owner is what FrameXML tests to decide whether a tooltip on
@@ -10679,7 +10681,11 @@ void LuaEngine::updateVisibility() {
     // handlers is worth the risk of waking the rest.
     //
     // (UIParent looks like a seventh and is not: it carries setAllPoints.)
-    for (uint32_t id = 1; id < widgets_.size(); ++id) {
+    // Only the widgets the layout flipped or Lua toggled since last time.
+    // Taken before the loop: a handler below may Show or Hide something,
+    // and that belongs to the next pass.
+    const std::vector<uint32_t> dirty = widgets_.takeVisibilityDirty();
+    for (uint32_t id : dirty) {
         auto* w = widgets_.get(id);
         if (!w || w->id == 0) continue;
         const uint8_t toggles = w->shownToggles;
