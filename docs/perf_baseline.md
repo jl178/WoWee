@@ -68,6 +68,10 @@ The client also measures itself, with no build option needed:
 - `WOWEE_FRAME_PROFILE=1` - every 10 seconds, logs the average and worst
   time of each CPU stage of the frame and the GPU's per-pass timestamps from
   the last completed frame, at warning level instead of info.
+- `WOWEE_AUTO_LOGIN=account:password` (or `=1` for the saved profile) and
+  `WOWEE_AUTO_CHARACTER=<name>` - log in and enter the world without a hand
+  on the mouse, so a profile run can be scripted. The realm must be the only
+  one listed, or one the client already auto-selects.
 - `WOWEE_PASS_ABLATION=1` - switches the world passes (terrain, grass, WMO,
   M2, ground clutter, far doodads, characters, sky, shadows) off one at a time
   for a few seconds each, with a baseline at both ends, and logs what the

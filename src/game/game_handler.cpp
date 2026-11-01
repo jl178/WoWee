@@ -522,7 +522,7 @@ void GameHandler::updateTimers(float deltaTime) {
     if (spellHandler_) spellHandler_->updateTimers(deltaTime);
 
     // Periodically clear stale pending item queries so they can be retried.
-    // Without this, a lost/malformed response leaves the entry stuck forever.
+    // Without this, a lost/malformed response leaves the entry stuck enhanced.
     pendingItemQueryTimer_ += deltaTime;
     if (pendingItemQueryTimer_ >= 5.0f) {
         pendingItemQueryTimer_ = 0.0f;
@@ -717,7 +717,20 @@ void GameHandler::update(float deltaTime) {
         return;
     }
 
+    // Section timing for the frame profiler: which part of this update the
+    // frame waited in. Two clock reads per section when a sink is set,
+    // nothing otherwise.
+    using clock = std::chrono::steady_clock;
+    clock::time_point sectionStart = stageSink_ ? clock::now() : clock::time_point{};
+    auto section = [&](const char* name) {
+        if (!stageSink_) return;
+        const auto now = clock::now();
+        stageSink_(name, std::chrono::duration<float, std::milli>(now - sectionStart).count());
+        sectionStart = now;
+    };
+
     updateNetworking();
+    section("gameHandler/network");
     if (!socket) return;  // disconnect() may have been called
 
     // Sends a Warden response built off the main thread. Nothing else does:
@@ -792,6 +805,7 @@ void GameHandler::update(float deltaTime) {
     // may be changed. Two sources, two edges, at slightly different moments.
 
     updateTimers(deltaTime);
+    section("gameHandler/timers");
 
     // Send periodic heartbeat if in world
     if (state == WorldState::IN_WORLD) {
@@ -889,7 +903,9 @@ void GameHandler::update(float deltaTime) {
         // Tick logout countdown
         if (socialHandler_) socialHandler_->updateLogoutCountdown(deltaTime);
 
+        section("gameHandler/world/misc");
         updateTaxiAndMountState(deltaTime);
+        section("gameHandler/world/taxiMount");
 
         // Update transport manager
         if (transportManager_) {
@@ -897,8 +913,10 @@ void GameHandler::update(float deltaTime) {
             transportManager_->update(deltaTime);
             updateAttachedTransportChildren(deltaTime);
         }
+        section("gameHandler/world/transport");
 
         updateAutoAttack(deltaTime);
+        section("gameHandler/world/autoAttack");
         auto closeIfTooFar = [&](bool windowOpen, uint64_t npcGuid, auto closeFn, const char* label) {
             if (!windowOpen || npcGuid == 0) return;
             auto npc = entityController_->getEntityManager().getEntity(npcGuid);
@@ -953,9 +971,10 @@ void GameHandler::update(float deltaTime) {
                       movementHandler_ ? movementHandler_->getTaxiNpcGuid() : 0,
                       [this]{ closeTaxi(); }, "Taxi window");
         closeIfTooFar(isTrainerWindowOpen(), getTrainerSpells().trainerGuid, [this]{ closeTrainer(); }, "Trainer");
+        section("gameHandler/world");
 
         updateEntityInterpolation(deltaTime);
-
+        section("gameHandler/interpolation");
     }
 }
 

@@ -315,6 +315,27 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
         }
     }
 
+    // Once the saved profile is in the fields and its content pack, if any,
+    // has finished syncing. attemptAuth refuses while a sync runs.
+    if (!autoLoginTried_) {
+        const char* env = std::getenv("WOWEE_AUTO_LOGIN");
+        if (!env || !*env) {
+            autoLoginTried_ = true;
+        } else if (!core::Application::getInstance().getWowpackSync().running()) {
+            autoLoginTried_ = true;
+            // account:password, or any other value to use the saved profile.
+            const std::string spec(env);
+            const auto colon = spec.find(':');
+            if (colon != std::string::npos && colon > 0) {
+                username_.setText(spec.substr(0, colon));
+                password_.setText(spec.substr(colon + 1));
+                usingStoredHash = false;
+            }
+            LOG_WARNING("Auto login as ", username_.text(), " at ", hostname_.text(), ":", port);
+            attemptAuth(authHandler);
+        }
+    }
+
     drawBackdrop();
     updateMusic();
 

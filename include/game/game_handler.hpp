@@ -3461,6 +3461,9 @@ public:
      * @param deltaTime Time since last update in seconds
      */
     void update(float deltaTime);
+    /// Where update() reports how long each of its parts took, when the
+    /// frame profiler is on. Unset, nothing is measured.
+    void setStageSink(std::function<void(const char*, float)> sink) { stageSink_ = std::move(sink); }
     void updateNetworking();
     void updateTimers(float deltaTime);
     void updateEntityInterpolation(float deltaTime);
@@ -4259,6 +4262,7 @@ private:
     // Heartbeat
     uint32_t pingSequence = 0;               // Ping sequence number (increments)
     float timeSinceLastPing = 0.0f;          // Time since last ping sent (seconds)
+    std::function<void(const char*, float)> stageSink_;
     float pingInterval = 30.0f;              // Ping interval (30 seconds)
     float moveHeartbeatInterval_ = 0.5f;
     uint32_t lastLatency = 0;                // Last measured latency (milliseconds)

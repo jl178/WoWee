@@ -183,6 +183,10 @@ private:
     void loadLoginInfo();
     static std::string getConfigPath();
     bool loginInfoLoaded = false;
+    /// WOWEE_AUTO_LOGIN=account:password (or =1 for the saved profile) logs
+    /// in on the first frame, once.
+    /// For profiling and test runs nobody is sitting at.
+    bool autoLoginTried_ = false;
 
     static std::string makeServerKey(const std::string& host, int port);
     /// How one reads in the server list: its name if this client knows one,
