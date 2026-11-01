@@ -206,6 +206,7 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     } else if (!mdlRef.particleEmitters.empty()) {
         particleOnlyInstanceIndices_.push_back(idx);
     }
+    if (mdlRef.isBoat) boatInstanceIndices_.push_back(idx);
     instanceIndexById[instance.id] = idx;
     insertBounds(spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
 
@@ -310,6 +311,7 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     } else if (!mdl2.particleEmitters.empty()) {
         particleOnlyInstanceIndices_.push_back(idx);
     }
+    if (mdl2.isBoat) boatInstanceIndices_.push_back(idx);
     instanceIndexById[instance.id] = idx;
     insertBounds(spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
 
@@ -439,12 +441,12 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
     // waterfall with no bones of its own scrolled once after it loaded and
     // then stood still, and one with emitters - wrapped at a fixed 3.3 s
     // below, whatever its sequence - stopped for the rest of each lap.
-    for (auto& instance : instances) {
-        instance.animTime += dtMs;
-        instance.globalSequenceTime += dtMs;
-        // A boat asks once whether it is on water - the canal may stream in
-        // after it does, so it keeps asking for a while - and rides it if so.
-        // A rowboat pulled up on a beach is the same model and stays put.
+    sceneTimeMs_ += dtMs;
+    // The clocks used to advance here for every instance, 70k of them a
+    // frame; see advanceClock. Only the boats need a look every frame.
+    for (size_t bi : boatInstanceIndices_) {
+        if (bi >= instances.size()) continue;
+        auto& instance = instances[bi];
         if (instance.cachedIsBoat && instance.afloat < 0 && waterHeightAt_) {
             instance.afloatRecheck -= deltaTime;
             if (instance.afloatRecheck <= 0.0f) {
@@ -457,11 +459,6 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
                     instance.afloat = 0;
                 }
             }
-        }
-        const bool steppedBelow = instance.cachedHasAnimation && !instance.cachedDisableAnimation;
-        if (!steppedBelow && instance.animDuration > 0.0f &&
-            instance.animTime >= instance.animDuration) {
-            instance.animTime = std::fmod(instance.animTime, instance.animDuration);
         }
     }
 
@@ -501,6 +498,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
     for (size_t idx : particleOnlyInstanceIndices_) {
         if (idx >= instances.size()) continue;
         auto& instance = instances[idx];
+        advanceClock(instance);
         if (instance.animDuration > 0.0f) continue;
         // Use iterative subtraction instead of fmod() to preserve precision
         while (instance.animTime > kParticleWrapMs) {
@@ -525,6 +523,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
     for (size_t idx : animatedInstanceIndices_) {
         if (idx >= instances.size()) continue;
         auto& instance = instances[idx];
+        advanceClock(instance);
 
         if (clutterAnimCutoffSq > 0.0f && instance.cachedIsGroundDetail) {
             const glm::vec3 toCam = instance.position - cachedCamPos_;
@@ -717,6 +716,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
     for (size_t idx : particleInstanceIndices_) {
         if (idx >= instances.size()) continue;
         auto& instance = instances[idx];
+        advanceClock(instance);
         // Distance cull: only update particles within visible range
         glm::vec3 toCam = instance.position - cachedCamPos_;
         float distSq = glm::dot(toCam, toCam);
@@ -1259,6 +1259,9 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                                    std::make_move_iterator(chunk.transparent.begin()),
                                    std::make_move_iterator(chunk.transparent.end()));
     }
+    // Texture scrolls and colour tracks read the clocks of whatever is drawn.
+    for (const auto& v : sortedVisible_) advanceClock(instances[v.index]);
+    for (const auto& v : transparentVisible_) advanceClock(instances[v.index]);
 
     // The furthest doodad actually drawn, for the diagnostic that sets it
     // against the furthest terrain chunk. See Renderer::logViewDistanceDiag.
