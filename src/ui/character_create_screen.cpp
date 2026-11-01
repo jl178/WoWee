@@ -1,13 +1,18 @@
 #include "ui/character_create_screen.hpp"
 #include "core/logger.hpp"
-#include "ui/ui_colors.hpp"
+#include "ui/glue_ui.hpp"
 #include "rendering/character_preview.hpp"
 #include "rendering/renderer.hpp"
 #include "core/application.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/dbc_loader.hpp"
 #include <imgui.h>
 #include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <iterator>
+#include <random>
 
 namespace wowee {
 namespace ui {
@@ -172,17 +177,19 @@ void CharacterCreateScreen::reset() {
     prevRangeBodyType_ = -1;
     prevRangeSkin_ = -1;
     prevRangeHairStyle_ = -1;
+
+    sceneShown_ = false;
+    prevSceneDK_ = -1;
+    nameFocused_ = false;
+    rotatingLeft_ = rotatingRight_ = false;
+    raceScroll_ = classScroll_ = 0.0f;
+    infoKey_ = -1;
 }
 
 void CharacterCreateScreen::initializePreview(pipeline::AssetManager* am) {
+    // The view itself is built on the first frame drawn, at the window's
+    // size: it is the whole screen, as the stock CharacterCreate ModelFFX is.
     assetManager_ = am;
-    if (!preview_) {
-        preview_ = std::make_unique<rendering::CharacterPreview>();
-        if (preview_->initialize(am)) {
-            auto* renderer = core::Application::getInstance().getRenderer();
-            if (renderer) renderer->registerPreview(preview_.get());
-        }
-    }
     if (preview_) preview_->resetView();
     // Force model reload
     prevRaceIndex_ = -1;
@@ -382,358 +389,759 @@ void CharacterCreateScreen::updateAppearanceRanges() {
 
 namespace {
 
-// Written in units and drawn at a scale taken from the window, the same way
-// the login card is. See paper_ui.hpp.
-constexpr float kSheetWidth  = 1160.0f;
-constexpr float kSheetHeight = 740.0f;
-constexpr float kPad         = 34.0f;
-constexpr float kTitleSize   = 40.0f;
-constexpr float kLabelSize   = 14.0f;
-constexpr float kBodySize    = 15.0f;
-constexpr float kSmallSize   = 13.0f;
-constexpr float kFieldHeight = 38.0f;
-constexpr float kChipHeight  = 30.0f;
-constexpr float kButtonH     = 44.0f;
-constexpr float kColumnGap   = 28.0f;
+// The screen is CharacterCreate.xml's, drawn natively: every number below is
+// that file's, in glue units (see glue_ui.hpp).
 
-/// Alliance blue and Horde red, before the paper takes the glare off them.
-constexpr ImVec4 kAllianceColour{0.30f, 0.50f, 1.00f, 1.0f};
-constexpr ImVec4 kHordeColour{0.85f, 0.25f, 0.22f, 1.0f};
+/// A TexCoords rectangle: left, right, top, bottom.
+struct TexRect {
+    float l, r, t, b;
+};
+
+/// GetNameForRace's file string, which the glue's tables and strings key on.
+const char* raceFile(game::Race race) {
+    switch (race) {
+        case game::Race::HUMAN:     return "HUMAN";
+        case game::Race::ORC:       return "ORC";
+        case game::Race::DWARF:     return "DWARF";
+        case game::Race::NIGHT_ELF: return "NIGHTELF";
+        case game::Race::UNDEAD:    return "SCOURGE";
+        case game::Race::TAUREN:    return "TAUREN";
+        case game::Race::GNOME:     return "GNOME";
+        case game::Race::TROLL:     return "TROLL";
+        case game::Race::BLOOD_ELF: return "BLOODELF";
+        case game::Race::DRAENEI:   return "DRAENEI";
+        default:                    return "HUMAN";
+    }
+}
+
+/// The class's file string, as CLASS_ICON_TCOORDS and GlueStrings name it.
+const char* classFile(game::Class cls) {
+    switch (cls) {
+        case game::Class::WARRIOR:      return "WARRIOR";
+        case game::Class::PALADIN:      return "PALADIN";
+        case game::Class::HUNTER:       return "HUNTER";
+        case game::Class::ROGUE:        return "ROGUE";
+        case game::Class::PRIEST:       return "PRIEST";
+        case game::Class::DEATH_KNIGHT: return "DEATHKNIGHT";
+        case game::Class::SHAMAN:       return "SHAMAN";
+        case game::Class::MAGE:         return "MAGE";
+        case game::Class::WARLOCK:      return "WARLOCK";
+        case game::Class::DRUID:        return "DRUID";
+        default:                        return "WARRIOR";
+    }
+}
+
+/// RACE_ICON_TCOORDS: an 8x4 grid, males in the top two rows, Alliance
+/// then Horde, the same again below for females.
+TexRect raceIcon(game::Race race, bool female) {
+    int col = 0, row = 0;
+    switch (race) {
+        case game::Race::HUMAN:     col = 0; row = 0; break;
+        case game::Race::DWARF:     col = 1; row = 0; break;
+        case game::Race::GNOME:     col = 2; row = 0; break;
+        case game::Race::NIGHT_ELF: col = 3; row = 0; break;
+        case game::Race::DRAENEI:   col = 4; row = 0; break;
+        case game::Race::TAUREN:    col = 0; row = 1; break;
+        case game::Race::UNDEAD:    col = 1; row = 1; break;
+        case game::Race::TROLL:     col = 2; row = 1; break;
+        case game::Race::ORC:       col = 3; row = 1; break;
+        case game::Race::BLOOD_ELF: col = 4; row = 1; break;
+        default: break;
+    }
+    if (female) row += 2;
+    return {col * 0.125f, (col + 1) * 0.125f, row * 0.25f, (row + 1) * 0.25f};
+}
+
+/// CLASS_ICON_TCOORDS, for both UI-CharacterCreate-Classes and
+/// UI-Classes-Circles.
+TexRect classIcon(game::Class cls) {
+    constexpr float c[] = {0.0f, 0.25f, 0.49609375f, 0.7421875f, 0.98828125f};
+    int col = 0, row = 0;
+    switch (cls) {
+        case game::Class::WARRIOR:      col = 0; row = 0; break;
+        case game::Class::MAGE:         col = 1; row = 0; break;
+        case game::Class::ROGUE:        col = 2; row = 0; break;
+        case game::Class::DRUID:        col = 3; row = 0; break;
+        case game::Class::HUNTER:       col = 0; row = 1; break;
+        case game::Class::SHAMAN:       col = 1; row = 1; break;
+        case game::Class::PRIEST:       col = 2; row = 1; break;
+        case game::Class::WARLOCK:      col = 3; row = 1; break;
+        case game::Class::PALADIN:      col = 0; row = 2; break;
+        case game::Class::DEATH_KNIGHT: col = 1; row = 2; break;
+        default: break;
+    }
+    return {c[col], c[col + 1], row * 0.25f, (row + 1) * 0.25f};
+}
+
+/// ChrRaces' hairCustomization: what the third and fourth customization
+/// rows are called (HAIR_<x>_STYLE / HAIR_<x>_COLOR).
+const char* hairCustomization(game::Race race) {
+    return race == game::Race::TAUREN ? "HORNS" : "NORMAL";
+}
+
+/// ChrRaces' facialHairCustomization for each sex: what the fifth row is
+/// called (FACIAL_HAIR_<x>).
+const char* facialHairCustomization(game::Race race, bool female) {
+    if (!female) {
+        if (race == game::Race::UNDEAD) return "FEATURES";
+        if (race == game::Race::TROLL) return "TUSKS";
+        return "NORMAL";
+    }
+    switch (race) {
+        case game::Race::NIGHT_ELF: return "MARKINGS";
+        case game::Race::UNDEAD:    return "FEATURES";
+        case game::Race::TAUREN:    return "HAIR";
+        case game::Race::GNOME:     return "EARRINGS";
+        case game::Race::TROLL:     return "TUSKS";
+        case game::Race::BLOOD_ELF: return "EARRINGS";
+        case game::Race::DRAENEI:   return "HORNS";
+        default:                    return "PIERCINGS";
+    }
+}
+
+/// GetFlavorText: the sex's own text, or the other's when it has none.
+std::string flavorText(const std::string& tag, bool female) {
+    const std::string primary = female ? tag + "_FEMALE" : tag;
+    const std::string secondary = female ? tag : tag + "_FEMALE";
+    std::string text = glue::str(primary.c_str());
+    if (text.empty()) text = glue::str(secondary.c_str());
+    return text;
+}
+
+/// The numbered lines a race's or class's description starts with:
+/// ABILITY_INFO_HUMAN1.. or CLASS_INFO_WARRIOR0.., each followed by a blank.
+std::string numberedLines(const std::string& stem, int first) {
+    std::string out;
+    for (int i = first;; ++i) {
+        const std::string key = stem + std::to_string(i);
+        if (!glue::hasStr(key)) break;
+        out += glue::str(key.c_str()) + "\n\n";
+    }
+    return out;
+}
+
+std::mt19937& rng() {
+    static std::mt19937 gen{std::random_device{}()};
+    return gen;
+}
+
+int randomUpTo(int maxValue) {
+    if (maxValue <= 0) return 0;
+    return std::uniform_int_distribution<int>(0, maxValue)(rng());
+}
 
 } // namespace
+
+void CharacterCreateScreen::drawScene(float screenW, float screenH) {
+    if (!assetManager_) assetManager_ = core::Application::getInstance().getAssetManager();
+    if (!assetManager_ || !assetManager_->isInitialized() || availableRaces_.empty()) return;
+    if (!preview_) {
+        auto preview = std::make_unique<rendering::CharacterPreview>();
+        const int w = std::max(64, static_cast<int>(screenW));
+        const int h = std::max(64, static_cast<int>(screenH));
+        if (!preview->initialize(assetManager_, w, h)) {
+            LOG_WARNING("CharacterCreateScreen: failed to init CharacterPreview");
+            return;
+        }
+        preview_ = std::move(preview);
+        preview_->setSceneCameraFraming(true);
+        if (auto* renderer = core::Application::getInstance().getRenderer())
+            renderer->registerPreview(preview_.get());
+        prevRaceIndex_ = -1;
+    }
+
+    // GetCreateBackgroundModel answers by class for a death knight: Acherus.
+    const bool dk = !availableClasses.empty() &&
+                    classIndex < static_cast<int>(availableClasses.size()) &&
+                    availableClasses[static_cast<size_t>(classIndex)] == game::Class::DEATH_KNIGHT;
+    if (static_cast<int>(dk) != prevSceneDK_) {
+        preview_->setGlueSceneOverride(dk ? "UI_DeathKnight" : "");
+        prevSceneDK_ = dk ? 1 : 0;
+        prevRaceIndex_ = -1;  // the scene is loaded with the character
+    }
+
+    updatePreviewIfNeeded();
+    preview_->render();
+    preview_->requestComposite();
+    if (VkDescriptorSet tex = preview_->getTextureId()) {
+        ImGui::GetBackgroundDrawList()->AddImage(reinterpret_cast<ImTextureID>(tex), ImVec2(0, 0),
+                                                 ImVec2(screenW, screenH));
+        sceneShown_ = true;
+    }
+}
+
+void CharacterCreateScreen::randomizeAppearance() {
+    // Skin and hair style first: the faces and hair colours on offer depend
+    // on them, and are asked for again before they are chosen.
+    skin = randomUpTo(maxSkin);
+    hairStyle = randomUpTo(maxHairStyle);
+    facialHair = randomUpTo(maxFacialHair);
+    updateAppearanceRanges();
+    face = randomUpTo(maxFace);
+    hairColor = randomUpTo(maxHairColor);
+}
+
+std::string CharacterCreateScreen::randomName() const {
+    if (!assetManager_ || availableRaces_.empty()) return {};
+    auto dbc = assetManager_->loadDBC("NameGen.dbc");
+    if (!dbc) return {};
+    // NameGen.dbc: ID, Name, RaceID, Sex.
+    const uint32_t race = static_cast<uint32_t>(availableRaces_[static_cast<size_t>(raceIndex)]);
+    const uint32_t sex = genderIndex == 0 ? 0u : 1u;
+    std::vector<uint32_t> rows;
+    for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+        if (dbc->getUInt32(r, 2) == race && dbc->getUInt32(r, 3) == sex) rows.push_back(r);
+    }
+    if (rows.empty()) return {};
+    const uint32_t row =
+        rows[std::uniform_int_distribution<size_t>(0, rows.size() - 1)(rng())];
+    return dbc->getString(row, 1);
+}
 
 void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
     // Resolve valid DBC option IDs before loading the preview. Doing this after
     // loadCharacter left race/style changes using the previous option mapping.
     updateAppearanceRanges();
 
-    // Render the preview to FBO before the ImGui frame
-    if (preview_) {
-        updatePreviewIfNeeded();
-        preview_->render();
-        preview_->requestComposite();
-    }
-    const bool hasPreview = (preview_ && preview_->getTextureId() != nullptr &&
-                             preview_->getWidth() > 0 && preview_->getHeight() > 0);
-
     const ImVec2 screen = ImGui::GetIO().DisplaySize;
-    // This sheet carries more at once than the others and none of it can be
-    // scrolled to, so it shrinks to fit the window rather than running off the
-    // bottom of it.
-    float scale = std::clamp(std::min(screen.x / 1280.0f, screen.y / 760.0f), 0.62f, 2.6f);
-    scale = std::min(scale, (screen.y - 32.0f) / kSheetHeight);
-    scale = std::min(scale, (screen.x - 32.0f) / kSheetWidth);
-    scale = std::max(scale, 0.34f);
-
+    const float scale = std::clamp(std::min(screen.x / 1280.0f, screen.y / 760.0f), 0.62f, 2.6f);
     ui_.begin(ImGui::GetIO().DeltaTime, scale);
     ui_.setLayer(PaperLayer::Page);
+    sceneShown_ = false;
 
-    const PaperTheme& theme = ui_.theme();
-    const auto px = [this](float units) { return ui_.px(units); };
+    const float u = glue::unit();
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    const ImU32 white = IM_COL32_WHITE;
 
-    const float sheetW = px(kSheetWidth);
-    const float sheetH = px(kSheetHeight);
-    const ImVec2 a((screen.x - sheetW) * 0.5f, (screen.y - sheetH) * 0.5f);
-    const ImVec2 b(a.x + sheetW, a.y + sheetH);
-    ui_.sheet(a, b);
-    ui_.claimMouse(a, b);
+    // ---- the scene ----------------------------------------------------------
+    drawScene(screen.x, screen.y);
 
-    const float titleSize = px(kTitleSize);
-    const float bodySize = px(kBodySize);
-    const float smallSize = px(kSmallSize);
-    const float labelSize = px(kLabelSize);
-    const float labelRow = ui_.lineHeight(labelSize) + px(3);
-    const float chipH = px(kChipHeight);
-    const float chipGap = px(6);
-
-    Column page{a.x + px(kPad), b.x - px(kPad), a.y + px(kPad)};
-
-    // ---- heading ----------------------------------------------------------
-    ui_.text(page.at(), "Create a Hero", titleSize, theme.ink, /*titleFace=*/true);
-    {
-        const float w = ui_.textWidth("Create a Hero", titleSize, true);
-        const float y = page.y + ui_.inkHeight(titleSize, true);
-        ui_.squiggle(ImVec2(page.x0, y), ImVec2(page.x0 + w * 1.04f, y), theme.crayonRed,
-                     px(2.0f), 0x7731u);
-    }
-    ui_.textRight(page.x1, page.y + titleSize * 0.55f, "Who are you going to be?", smallSize,
-                  theme.pencil);
-    page.gap(ui_.inkHeight(titleSize, true) + px(18));
-
-    // ---- three columns ----------------------------------------------------
-    const float footerH = px(kButtonH) + ui_.lineHeight(smallSize) + px(20);
-    const float bodyTop = page.y;
-    const float bodyBottom = b.y - px(kPad) - footerH;
-    const float columnsW = page.width() - px(kColumnGap) * 2.0f;
-    const float previewW = columnsW * 0.37f;
-    const float identityW = columnsW * 0.34f;
-    const float appearanceW = columnsW - previewW - identityW;
-    const float identityX = page.x0 + previewW + px(kColumnGap);
-    const float appearanceX = identityX + identityW + px(kColumnGap);
-
-    {
-        const float dividers[] = {identityX - px(kColumnGap) * 0.5f,
-                                  appearanceX - px(kColumnGap) * 0.5f};
-        for (uint32_t i = 0; i < 2; ++i) {
-            ui_.rule(ImVec2(dividers[i], bodyTop), ImVec2(dividers[i], bodyBottom),
-                     paperFade(theme.pencil, 0.5f), px(1.0f), 0x3355u + i);
-        }
-    }
-
-    // ---- the picture ------------------------------------------------------
-    if (hasPreview) {
-        const float aspect = static_cast<float>(preview_->getHeight()) /
-                             static_cast<float>(preview_->getWidth());
-        const float mat = px(9);
-        const float hintH = ui_.lineHeight(smallSize) + px(8);
-        float imgW = previewW - mat * 2.0f;
-        float imgH = imgW * aspect;
-        const float roomH = (bodyBottom - bodyTop) - mat * 2.0f - hintH;
-        if (imgH > roomH) {
-            imgH = std::max(roomH, px(120));
-            imgW = imgH / aspect;
-        }
-        const float imgX = page.x0 + (previewW - imgW) * 0.5f;
-        const ImVec2 imgA(imgX, bodyTop + mat);
-        const ImVec2 imgB(imgX + imgW, bodyTop + mat + imgH);
-        ui_.image(reinterpret_cast<ImTextureID>(preview_->getTextureId()), imgA, imgB);
-
-        // Mouse drag rotation and hover-only wheel zoom on the preview image.
-        if (ui_.hover(imgA, imgB)) {
-            if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-                preview_->rotate(ImGui::GetIO().MouseDelta.x * 0.2f);
-            }
-            if (ImGui::GetIO().MouseWheel != 0.0f) {
-                preview_->zoom(ImGui::GetIO().MouseWheel);
-            }
-        }
-        ui_.textCentered(page.x0 + previewW * 0.5f, imgB.y + mat + px(4),
-                         "Drag to turn  -  scroll to zoom", smallSize, theme.pencil);
-    } else {
-        ui_.textCentered(page.x0 + previewW * 0.5f, bodyTop + px(20),
-                         "No picture yet.", bodySize, theme.pencil);
-    }
-
-    // ---- who they are -----------------------------------------------------
-    Column who{identityX, identityX + identityW, bodyTop};
-
-    // Rows of pills that wrap when they run out of line.
-    float flowX = who.x0;
-    float flowY = who.y;
-    const auto beginFlow = [&]() {
-        flowX = who.x0;
-        flowY = who.y;
-    };
-    const auto pill = [&](const char* label, bool selected, ImVec4 accent) {
-        const float w = ui_.chipWidth(label, chipH);
-        if (flowX + w > who.x1 && flowX > who.x0) {
-            flowX = who.x0;
-            flowY += chipH + chipGap;
-        }
-        const bool hit = ui_.chip(label, ImVec2(flowX, flowY), ImVec2(flowX + w, flowY + chipH),
-                                  label, selected, ui_.onPaper(accent));
-        flowX += w + chipGap;
-        return hit;
-    };
-    const auto endFlow = [&](float trailingGap) {
-        who.y = flowY + chipH + trailingGap;
-    };
-
-    ui_.text(who.at(), "Name", labelSize, theme.inkSoft);
-    ui_.textRight(who.x1, who.y + (labelSize - smallSize) * 0.5f, "12 letters", smallSize,
-                  theme.pencil);
-    who.gap(labelRow);
-    {
-        const auto [fa, fb] = who.row(px(kFieldHeight));
-        PaperUI::FieldOpts opts;
-        opts.placeholder = "name your hero";
-        const PaperUI::FieldResult r = ui_.field("name", fa, fb, name_, opts);
-        if (r.changed && statusIsError) setStatus("", false);
-        who.gap(px(14));
-    }
+    const bool waiting = (createTimer_ >= 0.0f);
+    const bool errorUp = statusIsError && !statusMessage.empty();
+    const bool modalUp = waiting || errorUp;
+    if (modalUp) ui_.pushInert();
 
     const int raceCount = static_cast<int>(availableRaces_.size());
+    raceIndex = std::clamp(raceIndex, 0, std::max(0, raceCount - 1));
+    const game::Race race = raceCount > 0 ? availableRaces_[static_cast<size_t>(raceIndex)]
+                                          : game::Race::HUMAN;
+    const bool female = (genderIndex == 1);
+    const bool alliance = raceIndex < allianceRaceCount_;
+    const bool haveClass = !availableClasses.empty() &&
+                           classIndex < static_cast<int>(availableClasses.size());
+    const game::Class cls = haveClass ? availableClasses[static_cast<size_t>(classIndex)]
+                                      : game::Class::WARRIOR;
+    const glue::ButtonStyle buttonStyle =  // CharacterCreate_DeathKnightSwap
+        (haveClass && cls == game::Class::DEATH_KNIGHT) ? glue::ButtonStyle::Blue
+                                                         : glue::ButtonStyle::Red;
+
+    // FACTION_BACKDROP_COLOR_TABLE: the border, then the background.
+    const ImU32 edgeTint = alliance ? IM_COL32(128, 128, 128, 255) : IM_COL32(128, 51, 51, 255);
+    const ImU32 bgTint = alliance ? IM_COL32(23, 23, 48, 255) : IM_COL32(48, 13, 13, 255);
+
+    // A tooltip asked for by whatever is under the pointer, drawn last.
+    std::string tip;
+    ImVec2 tipAt(0, 0);
+
     const auto pickRace = [&](int i) {
         if (raceIndex == i) return;
         raceIndex = i;
         classIndex = 0;
         skin = face = hairStyle = hairColor = facialHair = 0;
         updateAvailableClasses();
+        // The class stays chosen when the new race can be it, as it does in
+        // the stock screen.
+        if (haveClass) {
+            const auto it = std::find(availableClasses.begin(), availableClasses.end(), cls);
+            if (it != availableClasses.end())
+                classIndex = static_cast<int>(it - availableClasses.begin());
+        }
     };
 
-    if (allianceRaceCount_ > 0) {
-        ui_.text(who.at(), "Alliance", labelSize, ui_.onPaper(kAllianceColour));
-        who.gap(labelRow);
-        beginFlow();
-        for (int i = 0; i < allianceRaceCount_; ++i) {
-            if (pill(game::getRaceName(availableRaces_[static_cast<size_t>(i)]), raceIndex == i,
-                     kAllianceColour)) {
-                pickRace(i);
-            }
+    // CharacterCreateIconButtonTemplate: the shadow, the icon, its bevel, the
+    // black of a disabled one, and the ADD highlight and checked art.
+    const auto iconButton = [&](const char* id, float cx, float top, const char* file,
+                                TexRect tc, bool checked, bool enabled,
+                                bool disableOverlay) -> PaperUI::PressState {
+        const ImVec2 a(cx - 19.0f * u, top);
+        const ImVec2 b(cx + 19.0f * u, top + 38.0f * u);
+        const PaperUI::PressState st = ui_.press(id, a, b, enabled);
+        const ImVec2 c(cx, top + 19.0f * u);
+        const float shadow = (st.held ? 26.0f : 29.0f) * u;
+        glue::image(dl, "Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-IconShadow",
+                    ImVec2(c.x - shadow, c.y - shadow), ImVec2(c.x + shadow, c.y + shadow),
+                    ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, 217));
+        const float push = st.held ? 2.0f * u : 0.0f;
+        const ImVec2 pa(a.x + push, a.y + push), pb(b.x + push, b.y + push);
+        // SetButtonDesaturated: half grey where the shader cannot desaturate.
+        glue::image(dl, file, pa, pb, ImVec2(tc.l, tc.t), ImVec2(tc.r, tc.b),
+                    enabled ? white : IM_COL32(128, 128, 128, 255));
+        const char* hl = "Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Highlights";
+        glue::image(dl, hl, pa, pb, ImVec2(0.0f, 0.5f), ImVec2(0.5f, 1.0f));
+        if (disableOverlay) dl->AddRectFilled(a, b, IM_COL32(0, 0, 0, 191));
+        if (enabled && st.hovered) {
+            glue::image(dl, hl, a, b, ImVec2(0, 0), ImVec2(0.5f, 0.5f), white, true);
         }
-        endFlow(px(12));
-    }
-    if (allianceRaceCount_ < raceCount) {
-        ui_.text(who.at(), "Horde", labelSize, ui_.onPaper(kHordeColour));
-        who.gap(labelRow);
-        beginFlow();
-        for (int i = allianceRaceCount_; i < raceCount; ++i) {
-            if (pill(game::getRaceName(availableRaces_[static_cast<size_t>(i)]), raceIndex == i,
-                     kHordeColour)) {
-                pickRace(i);
-            }
-        }
-        endFlow(px(14));
-    }
-
-    ui_.text(who.at(), "Class", labelSize, theme.inkSoft);
-    who.gap(labelRow);
-    if (availableClasses.empty()) {
-        ui_.text(who.at(), "No class this race can be.", smallSize, theme.crayonRed);
-        who.gap(ui_.lineHeight(smallSize) + px(14));
-    } else {
-        beginFlow();
-        for (int i = 0; i < static_cast<int>(availableClasses.size()); ++i) {
-            const auto cls = availableClasses[static_cast<size_t>(i)];
-            if (pill(game::getClassName(cls), classIndex == i,
-                     ui::getClassColor(static_cast<uint8_t>(cls)))) {
-                classIndex = i;
-            }
-        }
-        endFlow(px(14));
-    }
-
-    ui_.text(who.at(), "Gender", labelSize, theme.inkSoft);
-    who.gap(labelRow);
-    beginFlow();
-    if (pill("Male", genderIndex == 0, kAllianceColour)) genderIndex = 0;
-    if (pill("Female", genderIndex == 1, kHordeColour)) genderIndex = 1;
-    endFlow(px(12));
-
-    // TODO(server): Re-enable the nonbinary option and the body-type controls
-    // once character creation accepts gender=2 plus the selected model body.
-    // The renderer/data plumbing remains in place so server support can enable
-    // it: it would be one more pill here and a pair below it for the body.
-
-    // ---- what they look like ----------------------------------------------
-    //
-    // Race and gender above may have changed this frame; refresh their option
-    // lists before presenting customization controls.
-    updateAppearanceRanges();
-    const game::Gender currentGender = static_cast<game::Gender>(genderIndex);
-
-    Column look{appearanceX, appearanceX + appearanceW, bodyTop};
-    ui_.text(look.at(), "Appearance", px(22), theme.ink, /*titleFace=*/true);
-    look.gap(px(30));
-
-    const auto appearanceSlider = [&](const char* id, const char* label, int* value, int maxVal) {
-        ui_.text(look.at(), label, labelSize, theme.inkSoft);
-        look.gap(labelRow);
-        const auto [sa, sb] = look.row(px(30));
-        // One choice is no choice; a slider from zero to zero is a control
-        // that cannot be moved and should not look as though it could.
-        if (maxVal > 0) {
-            ui_.sliderInt(id, sa, sb, value, 0, maxVal);
-        } else {
-            ui_.text(ImVec2(sa.x, sa.y + px(6)), "only one to choose from", smallSize,
-                     theme.pencil);
-        }
-        look.gap(px(10));
+        if (checked) glue::image(dl, hl, a, b, ImVec2(0.5f, 0), ImVec2(1.0f, 0.5f), white, true);
+        // motionScriptsWhileDisabled: a greyed button still says why.
+        PaperUI::PressState out = st;
+        out.hovered = st.hovered || (!enabled && ui_.hover(a, b));
+        if (out.hovered) tipAt = ImVec2(b.x + 3.0f * u, a.y);
+        return out;
     };
 
-    appearanceSlider("look.skin", "Skin", &skin, maxSkin);
-    appearanceSlider("look.face", "Face", &face, maxFace);
-    appearanceSlider("look.hairstyle", "Hair style", &hairStyle, maxHairStyle);
-    appearanceSlider("look.haircolor", "Hair colour", &hairColor, maxHairColor);
-    appearanceSlider("look.facialhair", "Facial feature", &facialHair, maxFacialHair);
+    // ---- CharacterCreateConfigurationFrame: the left column -----------------
+    const float fx = 9.0f * u, fy = 5.0f * u;
+    const float fw = 256.0f * u, fh = 758.0f * u;
+    const float fcx = fx + fw * 0.5f;
+    ui_.claimMouse(ImVec2(fx, fy), ImVec2(fx + fw, fy + fh));
+    {
+        const char* border = "Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-OuterBorder";
+        glue::image(dl, "Interface\\Tooltips\\UI-Tooltip-Background",
+                    ImVec2(fx + 10.0f * u, fy + 8.0f * u),
+                    ImVec2(fx + fw - 10.0f * u, fy + fh - 8.0f * u), ImVec2(0, 0), ImVec2(1, 1),
+                    bgTint);
+        glue::image(dl, "Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Banners",
+                    ImVec2(fx, fy + 5.0f * u), ImVec2(fx + fw, fy + 517.0f * u));
+        glue::image(dl, border, ImVec2(fx, fy), ImVec2(fx + fw, fy + 256.0f * u), ImVec2(0, 1),
+                    ImVec2(1, 0));
+        glue::image(dl, border, ImVec2(fx, fy + 256.0f * u), ImVec2(fx + fw, fy + 502.0f * u),
+                    ImVec2(0, 0), ImVec2(1, 0.9609375f));
+        glue::image(dl, border, ImVec2(fx, fy + 502.0f * u), ImVec2(fx + fw, fy + 758.0f * u));
 
-    // Skin and hairstyle choose the valid face/color subsets. Refresh now so a
-    // Create click in this same frame sends IDs from the newly selected subset.
+        // FactionName_Shadow_Huge over each column.
+        ImFont* title = glue::titleFace();
+        const float huge = 18.0f * u;
+        const std::string allianceLabel = glue::str("ALLIANCE", "Alliance");
+        const std::string hordeLabel = glue::str("HORDE", "Horde");
+        if (allianceRaceCount_ > 0) {
+            glue::text(dl, title,
+                       ImVec2(fcx - 50.0f * u -
+                                  glue::textWidth(title, allianceLabel.c_str(), huge) * 0.5f,
+                              fy + 20.0f * u),
+                       allianceLabel.c_str(), huge, white);
+        }
+        if (allianceRaceCount_ < raceCount) {
+            glue::text(dl, title,
+                       ImVec2(fcx + 50.0f * u - glue::textWidth(title, hordeLabel.c_str(), huge) * 0.5f,
+                              fy + 20.0f * u),
+                       hordeLabel.c_str(), huge, white);
+        }
+    }
+
+    // CharacterCreateRaceButton1..10: Alliance down the left at TOP(-50,-61),
+    // Horde down the right at TOP(50,-61), each 21 under the last.
+    {
+        const char* racesFile = "Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Races";
+        const float small = glue::kFontSmall * u;
+        for (int i = 0; i < raceCount; ++i) {
+            const bool horde = i >= allianceRaceCount_;
+            const int slot = horde ? i - allianceRaceCount_ : i;
+            const float cx = fcx + (horde ? 50.0f : -50.0f) * u;
+            const float top = fy + (61.0f + 59.0f * static_cast<float>(slot)) * u;
+            const game::Race r = availableRaces_[static_cast<size_t>(i)];
+            char id[24];
+            std::snprintf(id, sizeof(id), "cc.race%d", i);
+            const auto st = iconButton(id, cx, top, racesFile, raceIcon(r, female), raceIndex == i,
+                                       true, false);
+            if (st.clicked) pickRace(i);
+            if (st.hovered) tip = game::getRaceName(r);
+            // The selected race's name over its button.
+            if (raceIndex == i) {
+                glue::textCentered(dl, cx, top - 2.0f * u - small, game::getRaceName(r), small,
+                                   glue::kNormal);
+            }
+        }
+    }
+
+    // CharacterCreateGender over the two gender buttons at TOP(-+20,-392).
+    {
+        const float medium = 15.0f * u;
+        const std::string maleLabel = glue::str("MALE", "Male");
+        const std::string femaleLabel = glue::str("FEMALE", "Female");
+        glue::textCentered(dl, fcx, fy + 388.0f * u - medium,
+                           (female ? femaleLabel : maleLabel).c_str(), medium, glue::kNormal);
+        const char* genderFile = "Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Gender";
+        const auto male = iconButton("cc.male", fcx - 20.0f * u, fy + 392.0f * u, genderFile,
+                                     {0.0f, 0.5f, 0.0f, 1.0f}, genderIndex == 0, true, false);
+        if (male.hovered) tip = maleLabel;
+        if (male.clicked) genderIndex = 0;
+        const auto fem = iconButton("cc.female", fcx + 20.0f * u, fy + 392.0f * u, genderFile,
+                                    {0.5f, 1.0f, 0.0f, 1.0f}, genderIndex == 1, true, false);
+        if (fem.hovered) tip = femaleLabel;
+        if (fem.clicked) genderIndex = 1;
+    }
+
+    // CharacterCreateClassName, then CharacterCreateClassButton1..10 in two
+    // rows of five from TOP(-90,-463), six apart.
+    {
+        const float medium = 15.0f * u;
+        if (haveClass) {
+            glue::textCentered(dl, fcx, fy + 456.0f * u - medium, game::getClassName(cls), medium,
+                               glue::kNormal);
+        }
+        std::vector<game::Class> shown = expansionClasses_;
+        if (shown.empty()) shown.assign(std::begin(kAllClasses), std::end(kAllClasses));
+        const char* classesFile = "Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Classes";
+        for (size_t k = 0; k < shown.size() && k < 10; ++k) {
+            const game::Class c = shown[k];
+            const auto it = std::find(availableClasses.begin(), availableClasses.end(), c);
+            const bool enabled = it != availableClasses.end();
+            const int index = enabled ? static_cast<int>(it - availableClasses.begin()) : -1;
+            const float cx = fcx + (-90.0f + 44.0f * static_cast<float>(k % 5)) * u;
+            const float top = fy + (463.0f + 44.0f * static_cast<float>(k / 5)) * u;
+            char id[24];
+            std::snprintf(id, sizeof(id), "cc.class%zu", k);
+            const auto st = iconButton(id, cx, top, classesFile, classIcon(c),
+                                       haveClass && c == cls, enabled, !enabled);
+            if (st.hovered) {
+                // A class the race cannot be says why, as <CLASS>_DISABLED does.
+                tip = enabled ? std::string(game::getClassName(c))
+                              : glue::str((std::string(classFile(c)) + "_DISABLED").c_str(),
+                                          game::getClassName(c));
+            }
+            if (st.clicked && enabled) classIndex = index;
+        }
+    }
+
+    // Race, sex or class may have changed above; refresh the option lists
+    // before the rows that cycle through them.
     updateAppearanceRanges();
 
-    // ---- footer -----------------------------------------------------------
-    page.y = bodyBottom + px(10);
-    ui_.rule(ImVec2(page.x0, page.y), ImVec2(page.x1, page.y), paperFade(theme.pencil, 0.55f),
-             px(1.0f), 0x5512u);
-    page.gap(px(8));
+    // CharCreateRandomizeButton at the frame's BOTTOM(0,10), and the five
+    // CharacterCustomizationButtonFrames stacked on it.
+    {
+        const std::string label = glue::str("RANDOMIZE", "Randomize");
+        const float small = glue::kFontSmall * u;
+        const float rw = glue::textWidth(label.c_str(), small) + 50.0f * u;
+        const float rBottom = fy + fh - 10.0f * u;
+        const float rTop = rBottom - 30.0f * u;
+        if (glue::button(ui_, dl, "cc.randomize", ImVec2(fcx - rw * 0.5f, rTop),
+                         ImVec2(fcx + rw * 0.5f, rBottom), label.c_str(), buttonStyle, true,
+                         glue::kFontSmall)) {
+            randomizeAppearance();
+        }
 
-    if (!statusMessage.empty()) {
-        ui_.text(page.at(), statusMessage.c_str(), smallSize,
-                 statusIsError ? theme.crayonRed : theme.crayonGreen);
-    } else {
-        ui_.text(page.at(), "Pick a race, then a class it can be. Names may run to twelve "
-                            "letters.", smallSize, theme.pencil);
+        const std::string hair = hairCustomization(race);
+        const std::string facial = facialHairCustomization(race, female);
+        const std::string labels[5] = {
+            glue::str("CHAR_CUSTOMIZATION1_DESC", "Skin Color"),
+            glue::str("CHAR_CUSTOMIZATION2_DESC", "Face"),
+            glue::str(("HAIR_" + hair + "_STYLE").c_str(), "Hair Style"),
+            glue::str(("HAIR_" + hair + "_COLOR").c_str(), "Hair Color"),
+            glue::str(("FACIAL_HAIR_" + facial).c_str(), "Facial Hair"),
+        };
+        int* values[5] = {&skin, &face, &hairStyle, &hairColor, &facialHair};
+        const int maxima[5] = {maxSkin, maxFace, maxHairStyle, maxHairColor, maxFacialHair};
+        const char* labelFrame = "Interface\\Glues\\CharacterCreate\\CharacterCreate-LabelFrame";
+        for (int k = 0; k < 5; ++k) {
+            const float bottom = rTop - 3.0f * u - static_cast<float>(4 - k) * 32.0f * u;
+            const float top = bottom - 32.0f * u;
+            const float x0 = fcx - 6.0f * u - 115.0f * u;
+            const float midY = top + 16.0f * u;
+            glue::image(dl, labelFrame, ImVec2(x0 - 5.0f * u, midY - 32.0f * u),
+                        ImVec2(x0 + 20.0f * u, midY + 32.0f * u), ImVec2(0, 0),
+                        ImVec2(0.1953125f, 1));
+            glue::image(dl, labelFrame, ImVec2(x0 + 20.0f * u, midY - 32.0f * u),
+                        ImVec2(x0 + 161.0f * u, midY + 32.0f * u), ImVec2(0.1953125f, 0),
+                        ImVec2(0.8046875f, 1));
+            glue::image(dl, labelFrame, ImVec2(x0 + 161.0f * u, midY - 32.0f * u),
+                        ImVec2(x0 + 186.0f * u, midY + 32.0f * u), ImVec2(0.8046875f, 0),
+                        ImVec2(1, 1));
+            glue::textCentered(dl, x0 + 90.5f * u, midY - 2.0f * u - small * 0.5f,
+                               labels[k].c_str(), small, white);
+
+            // CycleCharCustomization wraps round at either end.
+            const int count = maxima[k] + 1;
+            char id[24];
+            std::snprintf(id, sizeof(id), "cc.cust%dl", k);
+            const auto left = glue::textureButton(
+                ui_, dl, id, ImVec2(x0 + 169.0f * u, top), ImVec2(x0 + 201.0f * u, top + 32.0f * u),
+                "Interface\\Glues\\Common\\Glue-LeftArrow-Button-Up",
+                "Interface\\Glues\\Common\\Glue-LeftArrow-Button-Down",
+                "Interface\\Glues\\Common\\Glue-LeftArrow-Button-Highlight");
+            std::snprintf(id, sizeof(id), "cc.cust%dr", k);
+            const auto right = glue::textureButton(
+                ui_, dl, id, ImVec2(x0 + 198.0f * u, top), ImVec2(x0 + 230.0f * u, top + 32.0f * u),
+                "Interface\\Glues\\Common\\Glue-RightArrow-Button-Up",
+                "Interface\\Glues\\Common\\Glue-RightArrow-Button-Down",
+                "Interface\\Glues\\Common\\Glue-RightArrow-Button-Highlight");
+            if (count > 1 && (left.clicked || right.clicked)) {
+                *values[k] = (*values[k] + (left.clicked ? count - 1 : 1)) % count;
+                // Skin and hair style choose the faces and hair colours on
+                // offer; ask again before the next row reads them.
+                updateAppearanceRanges();
+            }
+        }
     }
-    page.gap(ui_.lineHeight(smallSize) + px(8));
 
+    // ---- the right: logo, race and class panels, Accept and Back ------------
+    const float logoX1 = screen.x - 9.0f * u;
+    const float logoCX = logoX1 - 128.0f * u;
+    glue::image(dl, "Interface\\Glues\\Common\\Glues-WoW-WotLKLogo",
+                ImVec2(logoX1 - 256.0f * u, 0.0f), ImVec2(logoX1, 128.0f * u));
+
+    {
+        const int key = raceIndex * 1000 + (haveClass ? static_cast<int>(cls) : 0) * 10 + genderIndex;
+        if (key != infoKey_) {
+            infoKey_ = key;
+            raceScroll_ = classScroll_ = 0.0f;
+        }
+    }
+
+    // CharacterCreateCharacterRace / ...Class: 267x287, the icon, the info
+    // box art, the name in FactionName_Shadow_Huge and a 220x220 scroll of
+    // the numbered lines in gold over the flavour text in white.
+    const auto infoBox = [&](const char* id, ImVec2 a, const char* iconFile, TexRect tc,
+                             const char* label, const std::string& gold,
+                             const std::string& flavour, float& scroll) {
+        const ImVec2 b(a.x + 267.0f * u, a.y + 287.0f * u);
+        ui_.claimMouse(a, b);
+        glue::backdrop(dl, a, b, "Interface\\Tooltips\\UI-Tooltip-Background", "", 16.0f * u,
+                       16.0f * u, 12.0f * u, 3.0f * u, 20.0f * u, 6.0f * u, bgTint);
+        glue::image(dl, iconFile, ImVec2(a.x + 4.0f * u, a.y + 4.0f * u),
+                    ImVec2(a.x + 52.0f * u, a.y + 52.0f * u), ImVec2(tc.l, tc.t), ImVec2(tc.r, tc.b));
+        glue::image(dl, "Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-InfoBox", a, b,
+                    ImVec2(0.005859375f, 0.005859375f), ImVec2(0.52734375f, 0.56640625f));
+        glue::text(dl, glue::titleFace(), ImVec2(a.x + 63.5f * u, a.y + 10.0f * u), label,
+                   18.0f * u, white);
+
+        const ImVec2 sa(a.x + 20.0f * u, a.y + 55.0f * u);
+        const ImVec2 sb(sa.x + 220.0f * u, sa.y + 220.0f * u);
+        const float small = glue::kFontSmall * u;
+        const std::vector<std::string> goldLines = glue::wrap(glue::plain(gold), 220.0f * u, small);
+        const std::vector<std::string> flavourLines =
+            glue::wrap(glue::plain(flavour), 220.0f * u, small);
+        const float goldStep = small + 1.0f * u;
+        const float flavourStep = small + 2.5f * u;  // GlueFontCharacterCreate's spacing
+        const float total = goldStep * static_cast<float>(goldLines.size()) + 2.0f * u +
+                            flavourStep * static_cast<float>(flavourLines.size());
+        const float range = std::max(0.0f, total / u - 220.0f);
+        if (!modalUp && ui_.hover(sa, sb) && ImGui::GetIO().MouseWheel != 0.0f) {
+            scroll -= ImGui::GetIO().MouseWheel * 3.0f * (goldStep / u);
+        }
+        scroll = std::clamp(scroll, 0.0f, range);
+        (void)id;
+
+        dl->PushClipRect(sa, sb, true);
+        float y = sa.y - scroll * u;
+        for (const auto& line : goldLines) {
+            if (y + goldStep >= sa.y && y <= sb.y)
+                glue::text(dl, ImVec2(sa.x, y), line.c_str(), small, glue::kNormal);
+            y += goldStep;
+        }
+        y += 2.0f * u;
+        for (const auto& line : flavourLines) {
+            if (y + flavourStep >= sa.y && y <= sb.y)
+                glue::text(dl, ImVec2(sa.x, y), line.c_str(), small, white);
+            y += flavourStep;
+        }
+        dl->PopClipRect();
+
+        // Where there is more than fits, a thin bar beside it says how much.
+        if (range > 0.0f) {
+            const float trackX = sb.x + 9.0f * u;
+            const float knobH = std::max(16.0f * u, (sb.y - sa.y) * 220.0f / (220.0f + range));
+            const float knobY = sa.y + (sb.y - sa.y - knobH) * (scroll / range);
+            dl->AddRectFilled(ImVec2(trackX, sa.y), ImVec2(trackX + 4.0f * u, sb.y),
+                              IM_COL32(0, 0, 0, 120), 2.0f * u);
+            dl->AddRectFilled(ImVec2(trackX, knobY), ImVec2(trackX + 4.0f * u, knobY + knobH),
+                              IM_COL32(255, 199, 0, 200), 2.0f * u);
+        }
+    };
+
+    const float raceCX = logoCX - 5.0f * u;
+    const float raceTop = 123.0f * u;
+    {
+        const std::string file = raceFile(race);
+        const TexRect tc = raceIcon(race, female);
+        infoBox("cc.raceinfo", ImVec2(raceCX - 133.5f * u, raceTop),
+                "Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-RacesRound", tc,
+                game::getRaceName(race), numberedLines("ABILITY_INFO_" + file, 1),
+                flavorText("RACE_INFO_" + file, female), raceScroll_);
+    }
+    const float classCX = raceCX - 5.0f * u;
+    const float classTop = raceTop + 287.0f * u + 5.0f * u;
+    if (haveClass) {
+        const std::string file = classFile(cls);
+        infoBox("cc.classinfo", ImVec2(classCX - 133.5f * u, classTop),
+                "Interface\\TargetingFrame\\UI-Classes-Circles", classIcon(cls),
+                game::getClassName(cls), numberedLines("CLASS_INFO_" + file, 0),
+                flavorText("CLASS_" + file, female), classScroll_);
+    }
+
+    // The create itself: the name, checked here as the client checks it
+    // before asking the server, then the packet.
     const auto submit = [&]() {
         std::string name = name_.text();
-        // Trim whitespace
         const size_t start = name.find_first_not_of(" \t\r\n");
         const size_t end = name.find_last_not_of(" \t\r\n");
-        if (start == std::string::npos) {
-            name.clear();
-        } else {
-            name = name.substr(start, end - start + 1);
+        name = (start == std::string::npos) ? std::string() : name.substr(start, end - start + 1);
+        size_t letters = 0;
+        bool onlyLetters = true;
+        for (unsigned char c : name) {
+            if ((c & 0xC0) != 0x80) ++letters;
+            if (c < 0x80 && !std::isalpha(c)) onlyLetters = false;
         }
         if (name.empty()) {
-            setStatus("Give your hero a name first.", true);
-            ui_.focus("name");
+            setStatus(glue::str("CHAR_NAME_NO_NAME", "Enter a name for your character"), true);
+            ui_.focus("cc.name");
+            return;
+        }
+        if (letters < 2) {
+            setStatus(glue::str("CHAR_NAME_TOO_SHORT", "Names must be at least 2 characters"), true);
+            return;
+        }
+        if (!onlyLetters) {
+            setStatus(glue::str("CHAR_NAME_INVALID_CHARACTER", "Names can only contain letters"),
+                      true);
             return;
         }
         if (availableClasses.empty()) {
             setStatus("No valid class for this race.", true);
             return;
         }
-        setStatus("Creating character...", false);
+        setStatus(glue::str("CHAR_CREATE_IN_PROGRESS", "Creating character"), false);
         createTimer_ = 0.0f;
         game::CharCreateData data;
         data.name = name;
         data.race = availableRaces_[static_cast<size_t>(raceIndex)];
         data.characterClass = availableClasses[static_cast<size_t>(classIndex)];
-        data.gender = currentGender;
+        data.gender = static_cast<game::Gender>(genderIndex);
         data.useFemaleModel = (genderIndex == 2 && bodyTypeIndex == 1);  // Nonbinary + Feminine
         data.skin = selectedAppearanceId(skinIds_, skin);
         data.face = selectedAppearanceId(faceIds_, face);
         data.hairStyle = selectedAppearanceId(hairStyleIds_, hairStyle);
         data.hairColor = selectedAppearanceId(hairColorIds_, hairColor);
         data.facialHair = selectedAppearanceId(facialHairIds_, facialHair);
-        if (onCreate) {
-            onCreate(data);
-        }
+        if (onCreate) onCreate(data);
     };
 
+    // CharCreateOkayButton (160x35) under the class panel, and
+    // CharCreateBackButton (120x30) under that.
     {
-        const float y = page.y;
-        const float h = px(kButtonH);
-        if (ui_.button("create.back", ImVec2(page.x0, y), ImVec2(page.x0 + px(110), y + h),
-                       "Back")) {
-            if (onCancel) onCancel();
-        }
-        const float createW = px(210);
-        const bool waiting = (createTimer_ >= 0.0f);
-        if (ui_.button("create.go", ImVec2(page.x1 - createW, y), ImVec2(page.x1, y + h),
-                       waiting ? "Creating..." : "Create Hero",
-                       PaperUI::ButtonKind::Primary, !waiting)) {
+        const float okTop = classTop + 287.0f * u + 3.0f * u;
+        const float okCX = classCX + 4.0f * u;
+        const std::string accept = glue::str("CHARACTER_CREATE_ACCEPT", "Accept");
+        if (glue::button(ui_, dl, "cc.accept", ImVec2(okCX - 80.0f * u, okTop),
+                         ImVec2(okCX + 80.0f * u, okTop + 35.0f * u), accept.c_str(), buttonStyle,
+                         !waiting, glue::kFontNormal)) {
             submit();
+        }
+        const float backTop = okTop + 35.0f * u - 3.0f * u;
+        const float backCX = okCX + 4.0f * u;
+        const std::string back = glue::str("BACK", "Back");
+        if (glue::button(ui_, dl, "cc.back", ImVec2(backCX - 60.0f * u, backTop),
+                         ImVec2(backCX + 60.0f * u, backTop + 30.0f * u), back.c_str(),
+                         buttonStyle, true, glue::kFontSmall)) {
+            if (onCancel) onCancel();
         }
     }
 
-    // Enter in the name box, or with the keyboard nowhere, is the same as
-    // pressing the button.
-    if (createTimer_ < 0.0f &&
-        (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
-         ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false))) {
-        submit();
-    }
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-        if (!ui_.popupOpen()) {
-            if (ui_.wantsTextInput()) {
-                ui_.clearFocus();
-            } else if (onCancel) {
-                onCancel();
-            }
+    // ---- the bottom: name, random name, rotation ------------------------------
+    const float cx = screen.x * 0.5f;
+    {
+        // CharacterCreateNameEdit: 156x40 at BOTTOM(0,55), "Name" over it.
+        const ImVec2 a(cx - 78.0f * u, screen.y - 95.0f * u);
+        const ImVec2 b(cx + 78.0f * u, screen.y - 55.0f * u);
+        glue::backdrop(dl, a, b, "Interface\\Tooltips\\UI-Tooltip-Background",
+                       "Interface\\Glues\\Common\\Glue-Tooltip-Border", 16.0f * u, 16.0f * u,
+                       10.0f * u, 5.0f * u, 4.0f * u, 9.0f * u, bgTint, edgeTint);
+        const float large = glue::kFontLarge * u;
+        const std::string nameLabel = glue::str("NAME", "Name");
+        glue::textCentered(dl, cx, a.y - 9.0f * u - large * 0.5f, nameLabel.c_str(), large,
+                           glue::kNormal);
+        if (!nameFocused_ && !modalUp) {
+            ui_.focus("cc.name");
+            nameFocused_ = true;
         }
+        PaperUI::FieldOpts opts;
+        opts.glue = true;
+        const PaperUI::FieldResult r = ui_.field("cc.name", ImVec2(a.x + 15.0f * u, a.y + 2.0f * u),
+                                                 ImVec2(b.x - 8.0f * u, a.y + 34.0f * u), name_,
+                                                 opts);
+        (void)r;
+
+        // CharacterCreateRandomName: under the box, 7 up into it.
+        const std::string label = glue::str("RANDOMIZE", "Randomize");
+        const float small = glue::kFontSmall * u;
+        const float rw = glue::textWidth(label.c_str(), small) + 50.0f * u;
+        if (glue::button(ui_, dl, "cc.randomname", ImVec2(cx - rw * 0.5f, b.y - 7.0f * u),
+                         ImVec2(cx + rw * 0.5f, b.y + 23.0f * u), label.c_str(), buttonStyle, true,
+                         glue::kFontSmall)) {
+            const std::string picked = randomName();
+            if (!picked.empty()) name_.setText(picked);
+        }
+    }
+
+    // CharacterCreateRotateLeft/Right: 50x50 at BOTTOM(-+16,-5), turning
+    // while held, with a hit rect inset 13/13/10/13.
+    if (preview_) {
+        const float bs = 50.0f * u;
+        const auto rotateButton = [&](const char* id, float bcx, bool flip, bool& held) {
+            const ImVec2 a(bcx - bs * 0.5f, screen.y + 5.0f * u - bs);
+            const ImVec2 b(a.x + bs, a.y + bs);
+            const auto st = ui_.press(id, ImVec2(a.x + 13.0f * u, a.y + 10.0f * u),
+                                      ImVec2(b.x - 13.0f * u, b.y - 13.0f * u));
+            held = st.held;
+            const char* tex = st.held ? "Interface\\Glues\\CharacterCreate\\UI-RotationRight-Big-Down"
+                                      : "Interface\\Glues\\CharacterCreate\\UI-RotationRight-Big-Up";
+            glue::image(dl, tex, a, b, ImVec2(flip ? 1.0f : 0.0f, 0.0f), ImVec2(flip ? 0.0f : 1.0f, 1.0f));
+            if (st.hovered) {
+                const ImVec2 c((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+                glue::image(dl, "Interface\\Buttons\\UI-Common-MouseHilight",
+                            ImVec2(c.x - 15.0f * u, c.y - 15.0f * u),
+                            ImVec2(c.x + 15.0f * u, c.y + 15.0f * u), ImVec2(0, 0), ImVec2(1, 1),
+                            white, true);
+            }
+        };
+        rotateButton("cc.rotl", cx - 16.0f * u, true, rotatingLeft_);
+        rotateButton("cc.rotr", cx + 16.0f * u, false, rotatingRight_);
+        const float dt = ImGui::GetIO().DeltaTime;
+        if (rotatingLeft_) preview_->rotate(-120.0f * dt);
+        if (rotatingRight_) preview_->rotate(120.0f * dt);
+
+        // CharacterCreateFrame_OnMouseDown: a drag that starts on the scene
+        // itself, between the two columns, turns the character.
+        const ImGuiIO& io = ImGui::GetIO();
+        const ImVec2 from = io.MouseClickedPos[0];
+        const float rightX = classCX - 133.5f * u - 5.0f * u;
+        if (!modalUp && !rotatingLeft_ && !rotatingRight_ &&
+            ImGui::IsMouseDragging(ImGuiMouseButton_Left) && from.x > fx + fw && from.x < rightX &&
+            from.y < screen.y - 100.0f * u) {
+            preview_->rotate(io.MouseDelta.x * 0.4f);
+        }
+    }
+
+    // Enter is Accept and Escape is Back, as CharacterCreate_OnKeyDown has it.
+    if (!modalUp) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
+            submit();
+        } else if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            if (onCancel) onCancel();
+        }
+    }
+
+    if (modalUp) ui_.popInert();
+
+    if (!tip.empty() && !modalUp) glue::tooltip(ImGui::GetForegroundDrawList(), tipAt, tip);
+
+    // ---- dialogs ----------------------------------------------------------------
+    // The server's answer or the name check's, in a GlueDialog with Okay.
+    if (errorUp) {
+        if (glue::dialog(ui_, "cc.error", statusMessage, glue::str("OKAY", "Okay").c_str()) ||
+            ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
+            setStatus("", false);
+            ui_.focus("cc.name");
+        }
+    } else if (waiting) {
+        glue::dialog(ui_, "cc.waiting", statusMessage.empty()
+                                            ? glue::str("CHAR_CREATE_IN_PROGRESS", "Creating character")
+                                            : statusMessage,
+                     nullptr);
     }
 
     ui_.end();

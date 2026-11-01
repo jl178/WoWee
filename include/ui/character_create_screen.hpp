@@ -34,7 +34,29 @@ public:
     /** Set allowed races/classes from expansion profile. Empty = allow all (WotLK default). */
     void setExpansionConstraints(const std::vector<uint32_t>& races, const std::vector<uint32_t>& classes);
 
+    /// Whether this screen drew its own full-window glue scene last frame -
+    /// the character in its race's backdrop - so the login scene behind it
+    /// need not be drawn as well.
+    [[nodiscard]] bool drawsOwnScene() const { return sceneShown_; }
+
 private:
+    /// The character standing in its race's glue scene (Acherus for a death
+    /// knight), over the whole window as the stock CharacterCreate ModelFFX.
+    void drawScene(float screenW, float screenH);
+    /// RandomizeCharCustomization: every appearance choice at random.
+    void randomizeAppearance();
+    /// GetRandomName: a NameGen.dbc name for this race and sex.
+    std::string randomName() const;
+
+    bool sceneShown_ = false;
+    int prevSceneDK_ = -1;         ///< whether the loaded scene is Acherus; -1 unknown
+    bool nameFocused_ = false;     ///< the name box takes the keyboard once per visit
+    bool rotatingLeft_ = false;
+    bool rotatingRight_ = false;
+    float raceScroll_ = 0.0f;      ///< the race and class descriptions' scroll, in glue units
+    float classScroll_ = 0.0f;
+    int infoKey_ = -1;             ///< race, class and sex the descriptions were scrolled for
+
     /// WoW allows twelve characters in a name. See paper_ui.hpp for why this
     /// screen draws its own box around them rather than asking ImGui for one.
     TextEdit name_{12};

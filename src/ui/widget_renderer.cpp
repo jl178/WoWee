@@ -241,10 +241,13 @@ void WidgetRenderer::sizeTextureWidget(Widget* w) {
     // stretched between two others must not be pulled back to its file's
     // dimensions - that is exactly the scroll bar middle, which would stop
     // stretching and become 31 by 256.
-    const bool spanX = anchorsSpanAxis(w->anchors, true);
-    const bool spanY = anchorsSpanAxis(w->anchors, false);
-    const bool needsW = w->width <= 0.0f && !spanX;
-    const bool needsH = w->height <= 0.0f && !spanY;
+    //
+    // A texture that already has both sizes needs nothing whatever its
+    // anchors say, and that is nearly all of them once the interface has
+    // settled - so that is asked first, and the anchors only when it matters.
+    if (w->width > 0.0f && w->height > 0.0f) return;
+    const bool needsW = w->width <= 0.0f && !anchorsSpanAxis(w->anchors, true);
+    const bool needsH = w->height <= 0.0f && !anchorsSpanAxis(w->anchors, false);
     if (!needsW && !needsH) return;
     float iw = 0.0f, ih = 0.0f;
     if (!textureSize(w->texturePath, iw, ih)) return;
@@ -273,9 +276,9 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font) {
     // button. The entries were there and the buttons were there; the names
     // were invisible, so nothing could be read or clicked, and no setting
     // added to the schema could be reached however correctly it registered.
-    const bool spansX = anchorsSpanAxis(w->anchors, true);
-    const bool spansY = anchorsSpanAxis(w->anchors, false);
-    if (spansX && spansY) return;
+    //
+    // Asked below, after the cheap returns: both lead to doing nothing, so
+    // the order changes no answer, and almost every string returns there.
 
     // A width with no height is a paragraph, not a request to be measured.
     //
@@ -327,6 +330,7 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font) {
         if (w->autoSized && sameMeasurement) return;
         if (!w->autoSized && w->width > 0.0f && w->height > 0.0f) return;
     }
+    if (anchorsSpanAxis(w->anchors, true) && anchorsSpanAxis(w->anchors, false)) return;
     // Looked up only for a string that is going to be measured. This pass
     // visits every string in the tree each frame, and the face lookup is a
     // name search that was paid for the thousands that return above.

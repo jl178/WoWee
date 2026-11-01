@@ -260,6 +260,11 @@ public:
      */
     void update(const Camera& camera, float deltaTime);
 
+    /// How long the last update spent in each of its per-frame phases, for
+    /// the WOWEE_FRAME_PROFILE breakdown. Zero for a phase that did not run.
+    struct UpdatePhases { float readyMs = 0.0f, unloadMs = 0.0f, clutterMs = 0.0f; };
+    [[nodiscard]] const UpdatePhases& lastUpdatePhases() const { return lastPhases_; }
+
     /**
      * Set map name
      * @param mapName Map name (e.g., "Azeroth", "Kalimdor")
@@ -510,6 +515,16 @@ private:
     float proactiveStreamTimer_ = 0.0f;
     bool taxiStreamingMode_ = false;
     bool isCustomZone_ = false;
+    UpdatePhases lastPhases_;
+    // Ground clutter streaming settles: once a sweep made nothing and had
+    // nothing stale to re-place, the next one only runs after the camera has
+    // moved, the loaded tile set has changed, or a short timer has run out.
+    // See streamGroundClutter.
+    bool clutterSettled_ = false;
+    glm::vec3 clutterSettledAt_{0.0f};
+    size_t clutterSettledTiles_ = 0;
+    uint32_t clutterSettledGeneration_ = 0;
+    std::chrono::steady_clock::time_point clutterSettledSince_{};
 
     // Collision data for custom zones (loaded from WOC files)
     struct CollisionData {

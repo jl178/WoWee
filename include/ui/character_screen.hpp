@@ -160,9 +160,15 @@ private:
     bool rotatingLeft_ = false;
     bool rotatingRight_ = false;
 
-    /// AddOns management sheet (list + enable/disable), opened from the footer.
+    /// The stock AddonList dialog (checkboxes, Enable All / Disable All, Okay
+    /// and Cancel), opened from the AddOns button.
     bool showAddonsWindow_ = false;
     void renderAddonsSheet(float screenW, float screenH);
+    /// Opens it, remembering what was enabled so Cancel can put it back
+    /// (ResetAddOns).
+    void openAddons();
+    std::vector<std::pair<std::string, bool>> addonsOnOpen_;
+    int addonScroll_ = 0;
 
     /**
      * Persist / restore last selected character GUID

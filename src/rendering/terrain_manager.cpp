@@ -185,6 +185,7 @@ bool TerrainManager::initialize(pipeline::AssetManager* assets, TerrainRenderer*
 
 void TerrainManager::update(const Camera& camera, float deltaTime) {
     ZoneScopedN("TerrainManager::update");
+    lastPhases_ = UpdatePhases{};
     if (!streamingEnabled || !assetManager || !terrainRenderer) {
         return;
     }
@@ -241,7 +242,11 @@ void TerrainManager::update(const Camera& camera, float deltaTime) {
     const auto tUnloadStart = clock::now();
     processPendingUnloads();
     unloadMs = elapsedMs(tUnloadStart, clock::now());
+    const auto tClutter = clock::now();
     streamGroundClutter(camera.getPosition());
+    lastPhases_.readyMs = readyMs;
+    lastPhases_.unloadMs = unloadMs;
+    lastPhases_.clutterMs = elapsedMs(tClutter, clock::now());
 
     timeSinceLastUpdate += deltaTime;
 
@@ -1642,8 +1647,28 @@ void TerrainManager::streamGroundClutter(const glm::vec3& cameraPos) {
     // one a frame, as placing costs a few milliseconds. Stale tiles further
     // out hold no instances and are re-placed when they come into range.
     const uint32_t generation = clutterDensityGeneration_.load();
-    const bool densitySettled =
-        std::chrono::steady_clock::now() - clutterDensityChangedAt_ > std::chrono::milliseconds(300);
+    const auto now = std::chrono::steady_clock::now();
+
+    // Settled: the last sweep made nothing and re-placed nothing, and since
+    // then the camera has stayed within a couple of yards, no tile has come
+    // or gone, and the density has not changed. Every answer below would be
+    // the same as last time, so it is not asked - two passes over every
+    // loaded tile and 256 chunks of each in range, every frame, for nothing.
+    // Two yards against the eight of slack past the draw distance that
+    // creation already allows, so nothing appears later than it would have
+    // anywhere it can be seen. A full sweep still runs twice a second.
+    {
+        const glm::vec2 moved(cameraPos.x - clutterSettledAt_.x, cameraPos.y - clutterSettledAt_.y);
+        if (clutterSettled_ && generation == clutterSettledGeneration_ &&
+            loadedTiles.size() == clutterSettledTiles_ &&
+            glm::dot(moved, moved) < 4.0f &&
+            now - clutterSettledSince_ < std::chrono::milliseconds(500)) {
+            return;
+        }
+    }
+    bool regenerated = false;
+
+    const bool densitySettled = now - clutterDensityChangedAt_ > std::chrono::milliseconds(300);
     if (densitySettled && !taxiStreamingMode_) {
         TerrainTile* stalest = nullptr;
         float nearest = farEdge;
@@ -1656,7 +1681,10 @@ void TerrainManager::streamGroundClutter(const glm::vec3& cameraPos) {
                 stalest = tile.get();
             }
         }
-        if (stalest) regenerateTileClutter(*stalest);
+        if (stalest) {
+            regenerateTileClutter(*stalest);
+            regenerated = true;
+        }
     }
 
     auto chunkDistance = [&cameraPos](const glm::vec4& b) {
@@ -1733,6 +1761,16 @@ void TerrainManager::streamGroundClutter(const glm::vec3& cameraPos) {
         }
         if (!toRemove.empty()) m2Renderer->removeInstances(toRemove);
     }
+
+    // Nothing made and nothing re-placed: settled until something changes.
+    // A sweep that removed a batch is not settled - removal ran this frame,
+    // and the next sweep is what confirms nothing else is due.
+    clutterSettled_ = created == 0 && !regenerated && densitySettled &&
+                      retired < kRetiredBatch;
+    clutterSettledAt_ = cameraPos;
+    clutterSettledTiles_ = loadedTiles.size();
+    clutterSettledGeneration_ = generation;
+    clutterSettledSince_ = now;
 }
 
 void TerrainManager::setGroundClutterDensityScale(float scale) {

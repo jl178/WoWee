@@ -175,6 +175,11 @@ struct M2ModelGPU {
     std::vector<pipeline::M2Sequence> sequences;
     std::vector<uint32_t> globalSequenceDurations;  // Loop durations for global sequence tracks
     bool hasAnimation = false;  // True if any bone has keyframes
+    /// Every bone track holds at most one key per sequence (global ones
+    /// included) and no bone billboards, so the pose depends on which
+    /// sequence is playing and on nothing else - not the clock, not the
+    /// camera. Its bones are computed once per sequence, not once a frame.
+    bool staticPose = false;
     uint32_t rtMesh = ~0u;      // RtScene mesh, or ~0u when it does not cast
     bool isSmoke = false;       // True for smoke models (UV scroll animation)
     bool isSpellEffect = false;  // True for spell effect models (skip particle dampeners)
@@ -314,6 +319,9 @@ struct M2Instance {
     // Particle emitter state
     std::vector<float> emitterAccumulators;  // fractional particle counter per emitter
     std::vector<M2Particle> particles;
+    /// No new particles or ribbon edges; the live ones run out their lives.
+    /// A spell effect at the end of its life is kept this way until they do.
+    bool emissionStopped = false;
 
     // Ribbon emitter state
     struct RibbonEdge {
@@ -379,6 +387,9 @@ struct M2Instance {
 
     // Frame-skip optimization (update distant animations less frequently)
     uint8_t frameSkipCounter = 0;
+    /// For a staticPose model: the sequence boneMatrices were last computed
+    /// for by the update, or -1. See M2ModelGPU::staticPose.
+    int16_t posedSequence = -1;
     bool bonesDirty[2] = {false, false};  // Per-frame-index: set when bones recomputed, cleared after upload
     // Mega-bone slot this instance's bones were last uploaded to, per frame
     // index (0 = never uploaded; valid slots start at 1). Lets prepareRender
@@ -566,6 +577,10 @@ public:
     void setInstanceHighlight(uint32_t instanceId, float amount);
     /// See M2Instance::fade.
     void setInstanceFade(uint32_t instanceId, float alpha);
+    /// See M2Instance::emissionStopped.
+    void stopInstanceEmission(uint32_t instanceId);
+    /// Whether any particle or ribbon edge of the instance is still alive.
+    [[nodiscard]] bool instanceHasLiveParticles(uint32_t instanceId) const;
     /// Take the light off whatever has it, whichever instance that was.
     void clearInstanceHighlights();
     /// Set the animation sequence by animation ID (e.g. anim::OPEN, anim::CLOSE).
@@ -1107,6 +1122,22 @@ private:
     /// Kept as members so a frame's worth of casters costs no allocation.
     std::vector<std::pair<uint32_t, uint32_t>> shadowCasters_[2];
 
+    /// The instances that could cast into the shadow disc, as (index, id),
+    /// gathered with a margin and refreshed a few times a second rather than
+    /// walking all 85k instances every frame. The exact caster tests still
+    /// run on every candidate every frame against its current position; this
+    /// only decides who is asked. See renderShadow.
+    std::vector<std::pair<uint32_t, uint32_t>> shadowCandidates_;
+    glm::vec3 shadowCandCenter_{0.0f};
+    float shadowCandRadius_ = -1.0f;
+    uint32_t shadowCandLayoutGen_ = ~0u;
+    std::chrono::steady_clock::time_point shadowCandBuiltAt_{};
+    /// Bumped by whatever can put a possible caster where the candidate list
+    /// does not expect it: an instance removed (indices move), a non-clutter
+    /// instance created, or one moved a long way in one step. Clutter never
+    /// casts, so streaming it does not invalidate the list.
+    uint32_t casterLayoutGen_ = 0;
+
     // Ribbon draw-call list (reused each frame)
     struct RibbonDrawCall {
         VkDescriptorSet texSet;
@@ -1169,6 +1200,15 @@ private:
 
     // Animation update buffers (avoid per-frame allocation)
     std::vector<size_t> boneWorkIndices_;        // Reused each frame
+    /// What update() spent and on how many instances, summed over a window
+    /// and reported under WOWEE_FRAME_PROFILE; see the end of update().
+    struct UpdateProfile {
+        double preMs = 0.0, animLoopMs = 0.0, bonesMs = 0.0, particlesMs = 0.0;
+        uint64_t animatedListed = 0, boneWork = 0, staticPoseSkips = 0, particleListed = 0;
+        uint64_t shadowCandidates = 0, shadowCasters = 0, shadowRebuilds = 0;
+        uint32_t frames = 0;
+        std::chrono::steady_clock::time_point since{};
+    } updateProf_;
     std::vector<std::future<void>> animFutures_; // Reused each frame
     bool spatialIndexDirty_ = false;
 

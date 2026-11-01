@@ -83,6 +83,14 @@ public:
                      float volume = 1.0f, float pitch = 1.0f, float maxDistance = 100.0f);
     bool playSound3D(const std::string& mpqPath, const glm::vec3& position,
                      float volume = 1.0f, float pitch = 1.0f, float maxDistance = 100.0f);
+    /// A positional sound its owner keeps hold of - a missile's flight loop.
+    /// Returns a non-zero id for stopSound / fadeOutSound / setSoundPosition,
+    /// or 0 on failure. A looping one plays until it is stopped.
+    uint32_t playSound3DStoppable(const std::string& mpqPath, const glm::vec3& position,
+                                  float volume = 1.0f, float maxDistance = 100.0f,
+                                  bool loop = false);
+    /// Move a stoppable 3D sound (no-op once it has finished).
+    void setSoundPosition(uint32_t id, const glm::vec3& position);
 
     // Music streaming (for background music)
     // Retains shared ownership: the decoder streams directly from encoded tracks that
@@ -116,6 +124,12 @@ private:
     AudioEngine();
     AudioEngine(const AudioEngine&) = delete;
     AudioEngine& operator=(const AudioEngine&) = delete;
+
+    /// Start a positional sound. Returns its id when stoppable, else 1 on
+    /// success; 0 on failure.
+    uint32_t startSound3D(const std::vector<uint8_t>& wavData, const glm::vec3& position,
+                          float volume, float pitch, float maxDistance, bool loop,
+                          bool stoppable);
 
     // Track active one-shot sounds for cleanup
     struct ActiveSound {

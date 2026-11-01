@@ -230,6 +230,8 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
         if (gg3 > 0) {
             geosets.insert(core::equippedGeoset(core::equipment::kRobeKiltBare, gg3));
         }
+        LOG_INFO("Player geosets: chest display ", did, " skirt group ", gg3,
+                 " model has 1302=", modelGeosets.count(1302));
     }
 
     // Kneepads: group 9 (always default 902)

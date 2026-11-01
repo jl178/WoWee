@@ -1973,6 +1973,9 @@ void Renderer::update(float deltaTime) {
         const float rate = 1.0f - std::exp(-deltaTime / 0.25f);
         sunOcclusion_ += (target - sunOcclusion_) * glm::clamp(rate, 0.0f, 1.0f);
     }
+    // "update/before m2" was one 4.4 ms bucket holding everything from here
+    // to the M2 launch. These split it; the remainder keeps the old name.
+    section("update/pre/sun occlusion");
 
     auto updateStart = std::chrono::steady_clock::now();
     lastDeltaTime_ = deltaTime;
@@ -2016,6 +2019,7 @@ void Renderer::update(float deltaTime) {
             characterRenderer->setInstanceVisible(characterInstanceId, true);
         }
     }
+    section("update/pre/camera");
 
     // Resolve WMO containment before weather and ambience consume it. Server
     // weather remains authoritative outdoors, but particles must not follow the
@@ -2095,6 +2099,7 @@ void Renderer::update(float deltaTime) {
             weather->setEnabled(!insideWmo);
         }
     }
+    section("update/pre/wmo area+lighting");
 
     // Sync character model position/rotation and animation with follow target
     if (characterInstanceId > 0 && characterRenderer && cameraController) {
@@ -2152,6 +2157,7 @@ void Renderer::update(float deltaTime) {
             animationController_->updateCharacterAnimation();
         }
     }
+    section("update/pre/player sync");
 
     // Update terrain streaming
     if (terrainManager && camera) {
@@ -2162,7 +2168,15 @@ void Renderer::update(float deltaTime) {
         if (terrMs > 50.0f) {
             LOG_WARNING("SLOW terrainManager->update: ", terrMs, "ms");
         }
+        if (stageSink_) {
+            // Nested under update/pre/terrain, which already counts them.
+            const auto& tp = terrainManager->lastUpdatePhases();
+            stageSink_("update/pre/terrain/ready tiles", tp.readyMs);
+            stageSink_("update/pre/terrain/unloads", tp.unloadMs);
+            stageSink_("update/pre/terrain/clutter", tp.clutterMs);
+        }
     }
+    section("update/pre/terrain");
 
     // Update sky system (skybox time, star twinkle, clouds, celestial moon phases)
     if (skySystem) {
@@ -2258,8 +2272,10 @@ void Renderer::update(float deltaTime) {
     if (chargeEffect) {
         chargeEffect->update(deltaTime);
     }
+    section("update/pre/sky+weather+water+fx");
     // Update transient spell visual instances (delegated to SpellVisualSystem §4.4)
     if (spellVisualSystem_) spellVisualSystem_->update(deltaTime);
+    section("update/pre/spell visuals");
 
 
     // Launch M2 doodad animation on background thread (overlaps with character animation + audio)

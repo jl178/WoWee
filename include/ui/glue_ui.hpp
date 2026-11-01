@@ -10,12 +10,13 @@
 /// numbers below can be read straight out of AccountLogin.xml and
 /// CharacterSelect.xml.
 
+#include "ui/paper_ui.hpp"
+
 #include <imgui.h>
 #include <string>
+#include <vector>
 
 namespace wowee::ui {
-
-class PaperUI;
 
 namespace glue {
 
@@ -59,12 +60,37 @@ void textRight(ImDrawList* dl, float rx, float y, const char* s, float sizePx, I
                bool outline = true);
 float textWidth(const char* s, float sizePx);
 
+/// MORPHEUS, the face FactionName_Shadow_Huge names, or face() without it.
+ImFont* titleFace();
+/// The same text in a face of the caller's choosing.
+void text(ImDrawList* dl, ImFont* font, ImVec2 at, const char* s, float sizePx, ImU32 col,
+          bool outline = true);
+float textWidth(ImFont* font, const char* s, float sizePx);
+
+/// A GlueStrings.lua global ("CHARACTER_CREATE_ACCEPT"), read once from
+/// Interface\GlueXML\GlueStrings.lua, or `fallback` when the file or the
+/// name is not there. The value is as the file has it, markup and all; see
+/// plain().
+std::string str(const char* key, const char* fallback = "");
+/// Whether GlueStrings has `key` at all.
+bool hasStr(const std::string& key);
+/// A glue string with its markup taken out: |n is a line break, || a bar,
+/// and |cAARRGGBB..|r colour is dropped.
+std::string plain(const std::string& s);
+/// `s` (already plain) broken into lines no wider than `widthPx`, at
+/// `sizePx` in `font` (face() when null). Line breaks in `s` are kept, and
+/// an empty paragraph is an empty line.
+std::vector<std::string> wrap(const std::string& s, float widthPx, float sizePx,
+                              ImFont* font = nullptr);
+
 /// A FrameXML <Backdrop>: a tiled background inset into a border cut from an
 /// edge file's eight 1:1 segments (left, right, top, bottom, then the four
 /// corners). Sizes in pixels. `bgFile` or `edgeFile` may be empty.
+/// `bgTint` and `edgeTint` are SetBackdropColor and SetBackdropBorderColor.
 void backdrop(ImDrawList* dl, ImVec2 a, ImVec2 b, const std::string& bgFile,
               const std::string& edgeFile, float edgePx, float tilePx, float insetL,
-              float insetR, float insetT, float insetB, ImU32 bgTint = IM_COL32_WHITE);
+              float insetR, float insetT, float insetB, ImU32 bgTint = IM_COL32_WHITE,
+              ImU32 edgeTint = IM_COL32_WHITE);
 
 /// The backdrop every glue edit box and the character list wear:
 /// Glue-Tooltip-Background inside Glue-Tooltip-Border, 16-unit edges.
@@ -84,6 +110,37 @@ enum class ButtonStyle {
 bool button(PaperUI& ui, ImDrawList* dl, const char* id, ImVec2 a, ImVec2 b,
             const char* label, ButtonStyle style = ButtonStyle::Red, bool enabled = true,
             float fontUnits = kFontNormal);
+
+/// A button that is nothing but its art: NormalTexture (`up`), PushedTexture
+/// (`down`, while held) and an ADD HighlightTexture over it while pointed at.
+/// `uv0`/`uv1` are the TexCoords all three share. `highlight` may be null.
+PaperUI::PressState textureButton(PaperUI& ui, ImDrawList* dl, const char* id, ImVec2 a,
+                                  ImVec2 b, const char* up, const char* down,
+                                  const char* highlight, bool enabled = true,
+                                  ImVec2 uv0 = ImVec2(0, 0), ImVec2 uv1 = ImVec2(1, 1));
+
+/// A UI-CheckBox CheckButton, `sizePx` square at `at`. Answers true on the
+/// frame it is clicked; the caller flips its own value.
+bool checkbox(PaperUI& ui, ImDrawList* dl, const char* id, ImVec2 at, float sizePx,
+              bool checked, bool enabled = true);
+
+/// GlueCloseButton: UI-Panel-MinimizeButton, 32 units square at `a`.
+bool closeButton(PaperUI& ui, ImDrawList* dl, const char* id, ImVec2 a);
+
+/// The 640x512 HelpFrame panel the realm list and the addon list are drawn
+/// on, with its top left at `a` (pixels), and the UI-DialogBox-Header over
+/// its top carrying `title`, `headerOffset` units off centre.
+void helpFrame(ImDrawList* dl, ImVec2 a, const char* title, float headerOffset);
+
+/// GlueTooltip: UI-Tooltip-Border round the glue's dark blue, the text in
+/// CharacterCreateTooltipFont, its top left at `at` and kept on screen.
+void tooltip(ImDrawList* dl, ImVec2 at, const std::string& text);
+
+/// GlueDialog: `message` in the dialog backdrop at the middle of the screen
+/// over a dimmed one, with one button labelled `buttonLabel` (none when null,
+/// for a "please wait"). Takes the whole screen's pointer while it is up.
+/// Answers true on the frame the button is clicked.
+bool dialog(PaperUI& ui, const char* id, const std::string& message, const char* buttonLabel);
 
 }  // namespace glue
 }  // namespace wowee::ui

@@ -408,8 +408,16 @@ private:
     audio::SpellSoundManager::MagicSchool resolveSpellSchool(uint32_t spellId);
 
     // Play a spell cast or impact sound via audioCoordinator, if available.
+    // Only for a spell with no SpellVisual row: one that has one plays its
+    // kits' own SoundEntries (precast, cast, impact) through the visual
+    // system, and the school sound on top of it was a second copy.
     void playSpellCastSound(uint32_t spellId);
     void playSpellImpactSound(uint32_t spellId);
+    bool spellVisualPlaysSounds(uint32_t spellId);
+    // The unit's auras' SpellVisual state kits, after its aura list changed.
+    void syncAuraStateVisuals(uint64_t guid, const std::vector<AuraSlot>& auras);
+    // The area kits of a spell cast at a ground point (SPELL_GO dest).
+    void triggerGroundAreaVisual(const SpellGoData& data, uint32_t visualId);
 
     // Resolve SpellVisualID from Spell.dbc cache for a given spellId.
     uint32_t resolveSpellVisualId(uint32_t spellId);

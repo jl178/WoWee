@@ -493,12 +493,39 @@ bool AudioEngine::playSound2D(const std::string& mpqPath, float volume, float pi
 
 bool AudioEngine::playSound3D(const std::vector<uint8_t>& wavData, const glm::vec3& position,
                               float volume, float pitch, float maxDistance) {
-    if (!initialized_ || !engine_ || wavData.empty()) return false;
-    if (masterVolume_ <= 0.0f) return false;
+    return startSound3D(wavData, position, volume, pitch, maxDistance, false, false) != 0;
+}
+
+uint32_t AudioEngine::playSound3DStoppable(const std::string& mpqPath, const glm::vec3& position,
+                                           float volume, float maxDistance, bool loop) {
+    if (!assetManager_) return 0;
+    auto data = assetManager_->readFile(mpqPath);
+    if (data.empty()) {
+        LOG_WARNING("AudioEngine::playSound3DStoppable: failed to load '", mpqPath, "'");
+        return 0;
+    }
+    return startSound3D(data, position, volume, 1.0f, maxDistance, loop, true);
+}
+
+void AudioEngine::setSoundPosition(uint32_t id, const glm::vec3& position) {
+    if (id == 0) return;
+    for (auto& active : activeSounds_) {
+        if (active.id == id) {
+            ma_sound_set_position(active.sound, position.x, position.y, position.z);
+            return;
+        }
+    }
+}
+
+uint32_t AudioEngine::startSound3D(const std::vector<uint8_t>& wavData, const glm::vec3& position,
+                                   float volume, float pitch, float maxDistance, bool loop,
+                                   bool stoppable) {
+    if (!initialized_ || !engine_ || wavData.empty()) return 0;
+    if (masterVolume_ <= 0.0f) return 0;
 
     DecodedWavCacheEntry decoded;
     if (!decodeWavCached(wavData, decoded) || !decoded.pcmData || decoded.frames == 0) {
-        return false;
+        return 0;
     }
 
     LOG_DEBUG("playSound3D: cached WAV - format:", decoded.format,
@@ -552,16 +579,23 @@ bool AudioEngine::playSound3D(const std::vector<uint8_t>& wavData, const glm::ve
     ma_sound_set_min_distance(sound.get(), 1.0f);
     ma_sound_set_max_distance(sound.get(), maxDistance);
     ma_sound_set_rolloff(sound.get(), 1.0f);
+    if (loop) ma_sound_set_looping(sound.get(), MA_TRUE);
 
     result = ma_sound_start(sound.get());
     if (result != MA_SUCCESS) {
-        return false;
+        return 0;
     }
 
-    // Track for cleanup
-    activeSounds_.push_back({sound.release(), audioBuffer.release(), decoded.pcmData});
+    // Track for cleanup; a stoppable sound gets an id its owner can stop,
+    // move or fade it by, an anonymous one plays out and is reclaimed.
+    uint32_t id = 0;
+    if (stoppable) {
+        id = nextSoundId_++;
+        if (nextSoundId_ == 0) nextSoundId_ = 1;  // Skip 0 (sentinel)
+    }
+    activeSounds_.push_back({sound.release(), audioBuffer.release(), decoded.pcmData, id});
 
-    return true;
+    return stoppable ? id : 1u;
 }
 
 bool AudioEngine::playSound3D(const std::string& mpqPath, const glm::vec3& position,

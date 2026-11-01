@@ -22,10 +22,10 @@ namespace wowee { namespace ui {
 
 namespace {
 
-// The paper sheets that remain (AddOns) are written in units and drawn at a
-// scale taken from the window, the same way the login card is.
-constexpr float kBodySize    = 15.5f;
-constexpr float kSmallSize   = 13.0f;
+/// AddonList.lua: MAX_ADDONS_DISPLAYED rows of ADDON_BUTTON_HEIGHT, each 4
+/// under the last.
+constexpr int kAddonRowsShown = 19;
+constexpr float kAddonRowStep = 16.0f + 4.0f;
 
 /// Enter is claimed for the rest of the press when it takes a character into
 /// the world, so the game screen does not read the same keystroke as "open
@@ -248,7 +248,7 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
         const ImVec2 b(a.x + 150.0f * u, screen.y - 25.0f * u);
         if (glue::button(ui_, dl, "cs.addons", a, b, "AddOns", glue::ButtonStyle::Red, true,
                          glue::kFontSmall)) {
-            showAddonsWindow_ = true;
+            openAddons();
         }
     }
     // CharacterSelectBackButton: 100x35 at BOTTOMRIGHT(-30,25), and
@@ -634,100 +634,186 @@ void CharacterScreen::setStatus(const std::string& message, bool isError) {
     statusIsError = isError;
 }
 
-void CharacterScreen::renderAddonsSheet(float screenW, float screenH) {
-    const PaperTheme& theme = ui_.theme();
-    const auto px = [this](float units) { return ui_.px(units); };
-
-    ui_.setLayer(PaperLayer::Overlay);
-    ui_.scrim(0.45f);
-
-    const float w = std::min(px(560), screenW - px(40));
-    const float h = std::min(px(520), screenH - px(40));
-    const ImVec2 a((screenW - w) * 0.5f, (screenH - h) * 0.5f);
-    const ImVec2 b(a.x + w, a.y + h);
-    ui_.sheet(a, b, /*taped=*/false);
-    ui_.claimMouse(a, b);
-
-    Column col{a.x + px(28), b.x - px(28), a.y + px(28)};
-    const float smallSize = px(kSmallSize);
-
-    ui_.text(col.at(), "AddOns", px(30), theme.ink, /*titleFace=*/true);
-    {
-        const float r = smallSize * 0.95f;
-        if (ui_.glyphButton("addons.close", ImVec2(col.x1 - r, col.y + r), r,
-                            PaperUI::Glyph::Cross)) {
-            showAddonsWindow_ = false;
+void CharacterScreen::openAddons() {
+    addonsOnOpen_.clear();
+    addonScroll_ = 0;
+    if (auto* am = services_.addonManager) {
+        for (const auto& addon : am->getAddons()) {
+            addonsOnOpen_.emplace_back(addon.addonName, am->isAddonEnabled(addon.addonName));
         }
     }
-    col.gap(px(34));
+    showAddonsWindow_ = true;
+}
+
+void CharacterScreen::renderAddonsSheet(float screenW, float screenH) {
+    const float u = glue::unit();
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+    ui_.setLayer(PaperLayer::Overlay);
 
     auto* am = services_.addonManager;
-    if (!am) {
-        ui_.text(col.at(), "The addon system is not running.", px(kBodySize), theme.pencil);
-        ui_.setLayer(PaperLayer::Page);
-        return;
+    // AddonList_OnOk keeps what was ticked (SaveAddOns); AddonList_OnCancel
+    // puts back what was enabled when the list was opened (ResetAddOns).
+    const auto close = [&](bool keep) {
+        if (!keep && am) {
+            for (const auto& [name, enabled] : addonsOnOpen_) {
+                if (am->isAddonEnabled(name) != enabled) am->setAddonEnabled(name, enabled);
+            }
+        }
+        addonsOnOpen_.clear();
+        showAddonsWindow_ = false;
+    };
+
+    // AddonList: the screen behind at a quarter, and the 640x512 frame at
+    // CENTER(24,0) with the strip under its header the dropdown sits in.
+    fg->AddRectFilled(ImVec2(0, 0), ImVec2(screenW, screenH), IM_COL32(0, 0, 0, 191));
+    ui_.claimMouse(ImVec2(0, 0), ImVec2(screenW, screenH));
+    const ImVec2 a(screenW * 0.5f + (24.0f - 320.0f) * u, screenH * 0.5f - 256.0f * u);
+    const ImVec2 b(a.x + 640.0f * u, a.y + 512.0f * u);
+    glue::helpFrame(fg, a, glue::str("ADDON_LIST", "AddOn List").c_str(), -22.0f);
+    {
+        const ImVec2 uv0(0, 0.12109375f), uv1(1, 0.234375f);
+        const float y0 = a.y + 50.0f * u, y1 = y0 + 29.0f * u;
+        glue::image(fg, "Interface\\HelpFrame\\HelpFrame-TopLeft", ImVec2(a.x, y0),
+                    ImVec2(a.x + 256.0f * u, y1), uv0, uv1);
+        glue::image(fg, "Interface\\HelpFrame\\HelpFrame-Top", ImVec2(a.x + 256.0f * u, y0),
+                    ImVec2(a.x + 512.0f * u, y1), uv0, uv1);
+        glue::image(fg, "Interface\\HelpFrame\\HelpFrame-TopRight", ImVec2(a.x + 512.0f * u, y0),
+                    ImVec2(b.x, y1), uv0, uv1);
     }
 
-    const auto& addons = am->getAddons();
-    ui_.text(col.at(), "Enabled addons load when you enter the world, or on /reload.",
-             smallSize, theme.pencil);
-    col.gap(ui_.lineHeight(smallSize) + px(8));
-    ui_.rule(ImVec2(col.x0, col.y), ImVec2(col.x1, col.y), paperFade(theme.ink, 0.45f),
-             px(1.2f), 0x7712u);
-    col.gap(px(8));
+    const float normal = glue::kFontNormal * u;
+    const float small = glue::kFontSmall * u;
+    std::string tip;
+    ImVec2 tipAt(0, 0);
 
-    const float listBottom = b.y - px(28);
-    if (addons.empty()) {
-        col.gap(ui_.wrapped(col.at(), col.width(),
-                            "None installed. Put addon folders under interface/AddOns/ in your "
-                            "data path, then restart the client.",
-                            px(kBodySize), theme.pencil));
-        ui_.setLayer(PaperLayer::Page);
-        return;
+    const auto* addons = am ? &am->getAddons() : nullptr;
+    const int count = addons ? static_cast<int>(addons->size()) : 0;
+    if (count == 0) {
+        const char* none = am ? "No AddOns are installed." : "The addon system is not running.";
+        glue::textCentered(fg, (a.x + b.x) * 0.5f - 22.0f * u, a.y + 100.0f * u, none, normal,
+                           glue::kNormal);
     }
 
-    const float rowH = px(38);
-    const PaperUI::ListResult picked = ui_.list(
-        "addons", ImVec2(col.x0, col.y), ImVec2(col.x1, listBottom),
-        static_cast<int>(addons.size()), rowH, -1,
-        [&](int index, ImVec2 rowA, ImVec2 rowB, bool, bool) {
-            const auto& addon = addons[static_cast<size_t>(index)];
-            const bool enabled = am->isAddonEnabled(addon.addonName);
-            const float boxSize = px(17);
-            const float cy = (rowA.y + rowB.y) * 0.5f;
+    // AddonListEntry1..19 from TOPLEFT(37,-80): the checkbox, the title in
+    // gold (grey when off), and the status beside it.
+    addonScroll_ = std::clamp(addonScroll_, 0, std::max(0, count - kAddonRowsShown));
+    {
+        const ImVec2 la(a.x + 37.0f * u, a.y + 72.0f * u);
+        const ImVec2 lb(la.x + 520.0f * u, la.y + kAddonRowStep * kAddonRowsShown * u);
+        if (count > kAddonRowsShown && ui_.hover(la, lb)) {
+            const float wheel = ImGui::GetIO().MouseWheel;
+            if (wheel > 0.0f) addonScroll_ = std::max(0, addonScroll_ - 1);
+            if (wheel < 0.0f) addonScroll_ = std::min(count - kAddonRowsShown, addonScroll_ + 1);
+        }
+    }
+    for (int row = 0; row < kAddonRowsShown && addons; ++row) {
+        const int index = addonScroll_ + row;
+        if (index >= count) break;
+        const auto& addon = (*addons)[static_cast<size_t>(index)];
+        const bool enabled = am->isAddonEnabled(addon.addonName);
+        const ImVec2 ea(a.x + 37.0f * u, a.y + (80.0f + kAddonRowStep * row) * u);
+        const ImVec2 eb(ea.x + 520.0f * u, ea.y + 16.0f * u);
 
-            // The checkbox is drawn here rather than left to the row's click,
-            // so an addon can be turned on without being pointed at exactly.
-            bool value = enabled;
-            if (ui_.checkbox(addon.addonName.c_str(),
-                             ImVec2(rowA.x + px(8), cy - boxSize * 0.5f), boxSize, nullptr,
-                             &value)) {
-                am->setAddonEnabled(addon.addonName, value);
-            }
+        char id[40];
+        std::snprintf(id, sizeof(id), "addon.check%d", index);
+        if (glue::checkbox(ui_, fg, id, ImVec2(ea.x + 5.0f * u, ea.y - 8.0f * u), 32.0f * u,
+                           enabled)) {
+            am->setAddonEnabled(addon.addonName, !enabled);
+        }
 
-            const float textX = rowA.x + px(8) + boxSize + px(12);
-            const std::string title = addon.getTitle();
-            ui_.text(ImVec2(textX, rowA.y + px(4)), title.c_str(), px(kBodySize),
-                     enabled ? theme.ink : theme.pencil);
+        const std::string title = glue::plain(addon.getTitle());
+        glue::text(fg, ImVec2(ea.x + 42.0f * u, ea.y + (16.0f * u - normal) * 0.5f),
+                   title.c_str(), normal, enabled ? glue::kNormal : glue::kDisable);
+        if (!enabled) {
+            const std::string status = glue::str("ADDON_DISABLED", "Disabled");
+            glue::text(fg, ImVec2(ea.x + 292.0f * u, ea.y + 2.0f * u), status.c_str(), small,
+                       glue::kNormal);
+        }
 
-            std::string sub;
-            if (auto it = addon.directives.find("Version");
+        // AddonTooltip: the title, the notes in white, and what it needs.
+        if (ui_.hover(ImVec2(ea.x + 40.0f * u, ea.y), eb)) {
+            tip = title;
+            if (auto it = addon.directives.find("Notes");
                 it != addon.directives.end() && !it->second.empty()) {
-                sub = "v" + it->second;
+                tip += "\n" + glue::plain(it->second);
             }
-            if (auto it = addon.directives.find("Author");
-                it != addon.directives.end() && !it->second.empty()) {
-                if (!sub.empty()) sub += "  ";
-                sub += "by " + it->second;
+            for (const char* key : {"Dependencies", "RequiredDeps", "Dep"}) {
+                if (auto it = addon.directives.find(key);
+                    it != addon.directives.end() && !it->second.empty()) {
+                    tip += "\n" + glue::str("ADDON_DEPENDENCIES", "Dependencies: ") + it->second;
+                    break;
+                }
             }
-            if (!sub.empty()) {
-                ui_.text(ImVec2(textX, rowA.y + px(4) + px(kBodySize) * 1.15f), sub.c_str(),
-                         smallSize, theme.pencil);
-            }
-        });
-    (void)picked;
+            tipAt = ImVec2(a.x - 226.0f * u, ea.y);
+        }
+    }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) showAddonsWindow_ = false;
+    // The scroll bar's art, where there is more than one page.
+    if (count > kAddonRowsShown) {
+        const char* bar = "Interface\\PaperDollInfoFrame\\UI-Character-ScrollBar";
+        const float x = a.x + 557.0f * u;
+        const float top = a.y + 68.0f * u, bottom = a.y + 465.0f * u;
+        glue::image(fg, bar, ImVec2(x, top), ImVec2(x + 31.0f * u, top + 256.0f * u), ImVec2(0, 0),
+                    ImVec2(0.484375f, 1.0f));
+        glue::image(fg, bar, ImVec2(x, top + 256.0f * u), ImVec2(x + 31.0f * u, bottom - 106.0f * u),
+                    ImVec2(0, 0.75f), ImVec2(0.484375f, 1.0f));
+        glue::image(fg, bar, ImVec2(x, bottom - 106.0f * u), ImVec2(x + 31.0f * u, bottom),
+                    ImVec2(0.515625f, 0), ImVec2(1.0f, 0.4140625f));
+        const float trackTop = top + 24.0f * u, trackBottom = bottom - 24.0f * u;
+        const float knobH = 24.0f * u;
+        const float t = static_cast<float>(addonScroll_) / static_cast<float>(count - kAddonRowsShown);
+        const float ky = trackTop + (trackBottom - trackTop - knobH) * t;
+        glue::image(fg, "Interface\\Buttons\\UI-ScrollBar-Knob", ImVec2(x + 2.0f * u, ky),
+                    ImVec2(x + 29.0f * u, ky + knobH));
+    }
+
+    // AddonListDisableAllButton / EnableAllButton at BOTTOMLEFT(16,13), and
+    // Cancel at BOTTOMRIGHT(-46,13) with Okay beside it.
+    {
+        const float y1 = b.y - 13.0f * u, y0 = y1 - 35.0f * u;
+        const float x0 = a.x + 16.0f * u;
+        const std::string disableAll = glue::str("DISABLE_ALL_ADDONS", "Disable All");
+        const std::string enableAll = glue::str("ENABLE_ALL_ADDONS", "Enable All");
+        if (glue::button(ui_, fg, "addon.disableall", ImVec2(x0, y0), ImVec2(x0 + 160.0f * u, y1),
+                         disableAll.c_str(), glue::ButtonStyle::Red, count > 0, glue::kFontNormal) &&
+            addons) {
+            for (const auto& addon : *addons) am->setAddonEnabled(addon.addonName, false);
+        }
+        if (glue::button(ui_, fg, "addon.enableall", ImVec2(x0 + 160.0f * u, y0),
+                         ImVec2(x0 + 320.0f * u, y1), enableAll.c_str(), glue::ButtonStyle::Red,
+                         count > 0, glue::kFontNormal) &&
+            addons) {
+            for (const auto& addon : *addons) am->setAddonEnabled(addon.addonName, true);
+        }
+
+        const ImVec2 cb(b.x - 46.0f * u, y1);
+        const ImVec2 ca(cb.x - 125.0f * u, y0);
+        const std::string cancelLabel = glue::str("CANCEL", "Cancel");
+        const std::string okayLabel = glue::str("OKAY", "Okay");
+        if (glue::button(ui_, fg, "addon.cancel", ca, cb, cancelLabel.c_str(),
+                         glue::ButtonStyle::Red, true, glue::kFontNormal)) {
+            close(false);
+        } else if (glue::button(ui_, fg, "addon.okay", ImVec2(ca.x + 8.0f * u - 125.0f * u, y0),
+                                ImVec2(ca.x + 8.0f * u, y1), okayLabel.c_str(),
+                                glue::ButtonStyle::Red, true, glue::kFontNormal)) {
+            close(true);
+        } else if (glue::closeButton(ui_, fg, "addon.close",
+                                     ImVec2(b.x - 42.0f * u - 32.0f * u, a.y + 3.0f * u))) {
+            close(false);
+        }
+    }
+
+    // AddonList_OnKeyDown: Escape is Cancel, Enter is Okay.
+    if (showAddonsWindow_) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            close(false);
+        } else if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+                   ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
+            close(true);
+        }
+    }
+
+    if (!tip.empty()) glue::tooltip(fg, tipAt, tip);
     ui_.setLayer(PaperLayer::Page);
 }
 
