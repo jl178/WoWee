@@ -401,3 +401,18 @@ Other fixes:
   - Particle total per frame is now about 0.6 ms, down from 4-6 ms at the start of the day.
 - Windows package rebuilt at `10df8c2` (map, both enhancement batches, particle range). The zip was refreshed and the share restarted; it serves on port 8081.
 - Next: incremental FrameXML layout. An agent is working on it; it has a `WOWEE_LAYOUT_VERIFY` mode that compares against the full layout.
+
+## FrameXML layout, idle heartbeats
+
+- `13efbca`: incremental FrameXML layout.
+  - A label or texture is re-sized only after something took it writable; a change mark is kept per widget id.
+  - Text measurements are cached.
+  - The draw order comes from a byte mirror of the visible flag.
+  - `WOWEE_LAYOUT_VERIFY=1` compares against the full layout every 30 frames, and stayed clean through the scripted map test. `WOWEE_LAYOUT_FULL=1` restores the old path.
+  - Goldshire: addonWidgets/layout 2.3 -> 0.51 ms; addonWidgets 3.0 -> 1.35 ms. 16 of 22229 labels and textures are sized per frame.
+- `1564d38`: MSG_MOVE_HEARTBEAT is sent only while a locomotion flag is set, as the stock client does. Taxi flights and the classic combat sync keep their own cadence.
+- Totals at Goldshire since this morning, same 2.6 GHz clocks:
+  - particles 4-6 ms -> 0.6 ms
+  - UI layout 2.3 -> 0.5 ms
+  - the test window now holds the 60 fps vsync cap (it was 40-47).
+- Next candidates: shadow pass (1.5 ms), renderer->update (2.2 ms), addon OnUpdate (1.0 ms), and the full-tree scans left in hitTestFor and the tooltip loop.
