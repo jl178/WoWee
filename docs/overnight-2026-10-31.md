@@ -159,12 +159,28 @@ touching the model. NPC greeting, farewell and annoyed lines come from
 CreatureDisplayInfo.NPCSoundID through NPCSounds; the race voice library is
 the fallback. Numeric PlaySound ids resolve through SoundEntries too.
 
-### Instanced M2 shadow pass (20:55, building)
+### Instanced M2 shadow pass (20:55)
 
 The shadow pass recorded a push constant and a draw per batch per caster.
 Casters now go into a per-frame matrix buffer sorted by model and each
 model's batches draw once, instanced (`m2_shadow.vert.glsl`). Before: 2.5 ms
-for `shadow/m2` after the caster filters.
+for `shadow/m2` after the caster filters; after: 1.7 ms, and the frame as a
+whole fell to **22 ms (45 fps)** from 29 ms. Login, realm and character
+screens now play the Wrath glue theme unless the WoWee soundtrack is on.
+
+### Visibility dirty list, lit-instance list, sized-widget list (21:15)
+
+`LuaEngine::updateVisibility` takes the widgets the layout flipped or Lua
+toggled instead of walking 28k (`addonWidgets/engine` 2.0 ms to 0.9 ms).
+`gatherLocalLights` and the FrameXML sizing pass walk lists of their own kinds.
+Steady state before these two lists: **41-44 fps (22.5-24 ms)**.
+
+Full test suite: 234 of 236 pass. `sweep_guard` flagged the duplicated
+synthetic-DBC helper in the two new tests, now shared through
+`tests/synthetic_dbc.hpp`. `settings_panel_layout` fails on the Interface
+panel ("previewtalents lands at -441, past the bottom at -418"); nothing
+tonight touched the settings schema or layout, so it is treated as
+pre-existing, to be confirmed against the base commit.
 
 ## Next
 

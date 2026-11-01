@@ -793,7 +793,8 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
         if (f.nowJump) jumpBufferTimer = JUMP_BUFFER_TIME;
         if (grounded) coyoteTimer = COYOTE_TIME;
 
-        bool canJump = (coyoteTimer > 0.0f) && (jumpBufferTimer > 0.0f) && !mounted_;
+        // On the ground, or (with a grace time set) just off it.
+        bool canJump = (grounded || coyoteTimer > 0.0f) && (jumpBufferTimer > 0.0f) && !mounted_;
         if (canJump) {
             verticalVelocity = f.jumpVel;
             grounded = false;
@@ -2621,7 +2622,7 @@ void CameraController::updateFreeFlyCamera(float /*deltaTime*/, FrameInput& f) {
         if (f.nowJump) jumpBufferTimer = JUMP_BUFFER_TIME;
         if (grounded) coyoteTimer = COYOTE_TIME;
 
-        if (coyoteTimer > 0.0f && jumpBufferTimer > 0.0f && !mounted_) {
+        if ((grounded || coyoteTimer > 0.0f) && jumpBufferTimer > 0.0f && !mounted_) {
             verticalVelocity = f.jumpVel;
             grounded = false;
             jumpBufferTimer = 0.0f;
