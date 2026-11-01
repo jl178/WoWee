@@ -362,3 +362,21 @@ Other fixes:
 - `dd83374`: a fog field was named `far`, which is a macro in windef.h and broke the Windows build. The Windows package was rebuilt from that commit, staged to `~/workplace/wowee-dist`, the zip refreshed, and `wowee-share` restarted. It serves on port 8081.
 - Smoke test, Wptester: no errors; 55-60 fps once loaded.
 - Open: sweep_guard is over its ceilings (dead declarations, a too-long function, one duplicate). An agent is cleaning that up. The world map rebuild is still running.
+
+## Sunday afternoon, later: enhancements batch 2, world map merged
+
+- `c4fc12c`, enhancements batch 2:
+  - Reverb by place from SoundProviderPreferences, on a world sound bus. UI and music stay dry.
+  - Under water, world sound is low-passed and the stock UndwaterLoop plays.
+  - Sun shafts follow the sun's visibility.
+  - Fog follows view distance.
+  - Terrain bump eases off on slopes and follows the surface-bumps setting.
+  - New "Classic" preset.
+  - Same commit: the sweep cleanup (dead code, the duplicate sampler-set code, a too-long function split, glue dialogs shared).
+- Merged `map-stock-framexml`. The world map's C side was rebuilt from the Wow.exe 3.3.5a handlers: continents, zones, .zmp click grid, overlays, landmarks, quest POIs, zoom-out rules, dungeon floors, and the player arrow. The stock WorldMapFrame now draws the map; the native ImGui map is only a fallback.
+  - `WOWEE_DEBUG_LUA=tools/lua_tests/world_map_test.lua` passes on the merged build: 0 failures, including real M and Escape keys and mouse clicks.
+- Found: the three "disconnects" in Goldshire were the map agent's test client logging into the same WPTEST account. The server closes the older session when the same account logs in again. Lab worldserver logging now includes `Logger.network=3`; the backup of the old config is in the scratchpad.
+- Goldshire, test window 1053x986: 42-48 fps.
+  - Top stages: renderWorld 5.8 ms, beginFrame 3.8 ms, FrameXML widget layout 2.6 ms, renderer update 3.3 ms, shadow pass 2.2 ms.
+  - The frame is spread across many stages; no single stage dominates.
+- Next: remove the superseded map bindings (an agent is on it), relaunch for Jered, then performance in Goldshire (layout cost, shadow pass).
