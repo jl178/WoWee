@@ -620,6 +620,12 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
         if (idx >= instances.size()) continue;
         auto& inst = instances[idx];
         if (inst.particles.empty()) continue;
+        // Out of range: the update pass stopped stepping these, so what is
+        // left in the vector is stale and would be drawn frozen.
+        {
+            const glm::vec3 toCam = inst.position - cachedCamPos_;
+            if (glm::dot(toCam, toCam) > cachedMaxRenderDistSq_) continue;
+        }
         if (!inst.cachedModel) continue;
         const auto& gpu = *inst.cachedModel;
         if (gpu.isInstancePortal) continue;

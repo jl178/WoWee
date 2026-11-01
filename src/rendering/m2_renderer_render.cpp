@@ -2428,10 +2428,18 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         // them on the main thread. A squared distance against the shadow disc,
         // read from the instance's first cache line, settles the far ones before
         // the model pointer and the light-space transform are touched.
+        // Grass never cast a shadow in the stock client - doodad shadows were
+        // baked into the terrain - and a doodad smaller than a texel of the
+        // shadow map at its distance draws for nothing. Both were most of the
+        // casters, and each caster is a push constant and a draw per batch.
+        if (instance.cachedIsGroundDetail) continue;
         {
             const glm::vec3 d = instance.position - shadowCenter;
             const float reach = shadowRadius + instance.cachedPaddedRadius;
-            if (glm::dot(d, d) > reach * reach) continue;
+            const float distSq = glm::dot(d, d);
+            if (distSq > reach * reach) continue;
+            constexpr float kTexelsPerYardOfRadius = 150.0f;
+            if (instance.cachedPaddedRadius * kTexelsPerYardOfRadius < std::sqrt(distSq)) continue;
         }
         if (!instance.cachedModel) continue;
         const M2ModelGPU& model = *instance.cachedModel;

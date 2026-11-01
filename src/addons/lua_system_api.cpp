@@ -286,6 +286,11 @@ static int lua_PlaySound(lua_State* L) {
     std::string sound;
     if (lua_isnumber(L, 1)) {
         uint32_t id = static_cast<uint32_t>(lua_tonumber(L, 1));
+        // A SoundEntries id names its own row; play that. The table below is
+        // the fallback for data without the row.
+        if (const auto* data = ac->getSoundData()) {
+            if (const auto* entry = data->sound(id); entry && sfx->playByName(entry->name)) return 0;
+        }
         // Map common WoW sound IDs to named sounds
         switch (id) {
             case 856: case 1115: sfx->playButtonClick(); return 0; // igMainMenuOption
