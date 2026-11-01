@@ -1170,15 +1170,6 @@ void WidgetRenderer::drawQuestBlobs(ImDrawList* dl, const Widget& w,
                                     float x0, float y0, float x1, float y1) {
     if (!questBlobSource_) return;
     const auto polygons = questBlobSource_();
-    if (const char* dbg = std::getenv("WOWEE_BLOB_DEBUG"); dbg && *dbg) {
-        dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(255, 0, 0, 255), 0.0f, 0, 4.0f);
-        static int said = 0;
-        if (said++ < 5 && !polygons.empty()) {
-            LOG_WARNING("blob debug: ", polygons.size(), " polys, first point ", polygons[0][0].first,
-                        ",", polygons[0][0].second, " rect ", x0, ",", y0, " - ", x1, ",", y1,
-                        " alpha ", w.alpha);
-        }
-    }
     if (polygons.empty()) return;
     const float width = x1 - x0;
     const float height = y1 - y0;
