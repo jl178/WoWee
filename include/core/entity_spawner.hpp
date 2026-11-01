@@ -4,6 +4,7 @@
 #include "game/game_services.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "rendering/animation/weapon_type.hpp"
+#include "rendering/animation/body_facing.hpp"
 #include <memory>
 #include <string>
 #include <utility>
@@ -303,6 +304,11 @@ public:
     std::unordered_map<uint64_t, bool>& getCreatureSwimmingState() { return creatureSwimmingState_; }
     std::unordered_map<uint64_t, bool>& getCreatureWalkingState() { return creatureWalkingState_; }
     std::unordered_map<uint64_t, bool>& getCreatureFlyingState() { return creatureFlyingState_; }
+    /// Last movement-direction flags per unit (FORWARD 0x1, BACKWARD 0x2,
+    /// STRAFE_LEFT 0x4, STRAFE_RIGHT 0x8, FALLING 0x1000) for the stock body
+    /// yaw, and that body yaw's state per remote player.
+    std::unordered_map<uint64_t, uint32_t>& getUnitMoveDirFlags() { return unitMoveDirFlags_; }
+    std::unordered_map<uint64_t, rendering::anim::BodyFacingState>& getUnitBodyFacing() { return unitBodyFacing_; }
     std::unordered_map<uint64_t, uint32_t>& getCreatureActiveEmotes() { return creatureActiveEmotes_; }
     std::unordered_map<uint32_t, bool>& getModelIdIsWolfLike() { return modelIdIsWolfLike_; }
 
@@ -519,6 +525,8 @@ private:
     std::unordered_map<uint64_t, bool> creatureSwimmingState_;
     std::unordered_map<uint64_t, bool> creatureWalkingState_;
     std::unordered_map<uint64_t, bool> creatureFlyingState_;
+    std::unordered_map<uint64_t, uint32_t> unitMoveDirFlags_;
+    std::unordered_map<uint64_t, rendering::anim::BodyFacingState> unitBodyFacing_;
     // Server waypoint scripts hold work/chop emotes for many seconds. Locomotion
     // temporarily overrides them, then the idle transition restores this loop.
     std::unordered_map<uint64_t, uint32_t> creatureActiveEmotes_;

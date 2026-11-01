@@ -398,6 +398,16 @@ void AnimationCallbackHandler::setupCallbacks() {
         apply(game::MovementFlags::SWIMMING, entitySpawner_.getCreatureSwimmingState());
         apply(game::MovementFlags::WALKING,  entitySpawner_.getCreatureWalkingState());
         apply(game::MovementFlags::FLYING,   entitySpawner_.getCreatureFlyingState());
+        // Direction bits for the stock body yaw (forward, backward, strafes,
+        // falling): a strafing player's model turns toward travel.
+        constexpr uint32_t kDirBits = 0x1u | 0x2u | 0x4u | 0x8u | 0x1000u;
+        const uint32_t dirMask = mask & kDirBits;
+        if (dirMask != 0) {
+            auto& dirFlags = entitySpawner_.getUnitMoveDirFlags();
+            const uint32_t dir = (dirFlags[guid] & ~dirMask) | (moveFlags & dirMask);
+            if (dir != 0) dirFlags[guid] = dir;
+            else          dirFlags.erase(guid);
+        }
     });
 
     // Emote animation callback - play server-driven emote animations on NPCs and other players.

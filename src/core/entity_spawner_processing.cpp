@@ -1986,6 +1986,7 @@ uint32_t EntitySpawner::releaseCreatureInstance(uint64_t guid) {
     creatureSwimmingState_.erase(guid);
     creatureWalkingState_.erase(guid);
     creatureFlyingState_.erase(guid);
+    unitMoveDirFlags_.erase(guid);
     unitPresentedAlpha_.erase(guid);
     return instanceId;
 }

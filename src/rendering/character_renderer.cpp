@@ -2496,6 +2496,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
 constexpr int32_t kKeyBoneShoulderL = 2;
 constexpr int32_t kKeyBoneShoulderR = 3;
 constexpr int32_t kKeyBoneSpineLow = 4;
+constexpr int32_t kKeyBoneHead = 6;
 
 void CharacterRenderer::setArmAnimations(uint32_t instanceId, uint32_t leftArmAnim, uint32_t rightArmAnim) {
     auto it = instances.find(instanceId);
@@ -2693,9 +2694,15 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
         instance.localPose[i] = pose;
         glm::mat4 localTransform = composeBoneTransform(bone, pose);
 
-        if (bone.keyBoneId == kKeyBoneSpineLow && instance.torsoYawOverrideRad != 0.0f) {
+        // Look twist (stock CGUnit_C 0x0073E1A5/0x0073E237): a yaw about the
+        // SpineLow and Head key bones, so the chest and face turn back to the
+        // facing while the body runs toward a strafe.
+        const float twistYaw = bone.keyBoneId == kKeyBoneSpineLow ? instance.torsoYawOverrideRad
+                             : bone.keyBoneId == kKeyBoneHead     ? instance.headYawOverrideRad
+                             :                                      0.0f;
+        if (twistYaw != 0.0f) {
             glm::mat4 extraYaw = glm::translate(glm::mat4(1.0f), bone.pivot)
-                                * glm::rotate(glm::mat4(1.0f), instance.torsoYawOverrideRad, glm::vec3(0.0f, 0.0f, 1.0f))
+                                * glm::rotate(glm::mat4(1.0f), twistYaw, glm::vec3(0.0f, 0.0f, 1.0f))
                                 * glm::translate(glm::mat4(1.0f), -bone.pivot);
             localTransform = extraYaw * localTransform;
         }
@@ -4014,10 +4021,11 @@ void CharacterRenderer::setInstanceRotation(uint32_t instanceId, const glm::vec3
     }
 }
 
-void CharacterRenderer::setInstanceTorsoYaw(uint32_t instanceId, float deltaYawRad) {
+void CharacterRenderer::setInstanceTorsoYaw(uint32_t instanceId, float deltaYawRad, float headYawRad) {
     auto it = instances.find(instanceId);
     if (it != instances.end()) {
         it->second.torsoYawOverrideRad = deltaYawRad;
+        it->second.headYawOverrideRad = headYawRad;
     }
 }
 
