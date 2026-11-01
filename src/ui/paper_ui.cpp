@@ -111,6 +111,23 @@ void PaperUI::end() {
 
     for (const PopupDraw& p : popups_) {
         ImDrawList* dl = overlay_;
+        if (p.skin) {
+            p.skin->popup(dl, p.a, p.b);
+            for (int i = 0; i < static_cast<int>(p.items.size()); ++i) {
+                const float y0 = p.a.y + px(4) + static_cast<float>(i) * p.rowHeight;
+                const float y1 = y0 + p.rowHeight;
+                const ImVec2 ra(p.a.x + px(6), y0);
+                const ImVec2 rb(p.b.x - px(6), y1);
+                if (i == p.hovered || i == p.selected)
+                    p.skin->rowMark(dl, ra, rb, i == p.selected, i == p.hovered);
+                const float size = p.rowHeight * 0.62f;
+                const ImU32 col = (i == p.selected || i == p.hovered) ? p.theme.onCrayon
+                                                                      : p.theme.ink;
+                p.skin->text(dl, bodyFace_, ImVec2(p.a.x + px(20), y0 + (p.rowHeight - size) * 0.5f),
+                             p.items[i].c_str(), size, col);
+            }
+            continue;
+        }
         dl->AddRectFilled(ImVec2(p.a.x + px(3), p.a.y + px(4)),
                           ImVec2(p.b.x + px(3), p.b.y + px(4)), theme_.shadow, px(3));
         dl->AddRectFilled(p.a, p.b, theme_.paperTop, px(3));
@@ -165,6 +182,13 @@ void PaperUI::setLayer(PaperLayer layer) {
     dl_ = (layer == PaperLayer::Overlay) ? overlay_ : page_;
 }
 
+void PaperUI::setSkin(PaperSkin* skin) {
+    if (skin == skin_) return;
+    if (!skin_) paperTheme_ = theme_;
+    skin_ = skin;
+    theme_ = skin_ ? skin_->theme() : paperTheme_;
+}
+
 void PaperUI::pushInert() { ++inert_; }
 void PaperUI::popInert() { if (inert_ > 0) --inert_; }
 
@@ -215,6 +239,11 @@ void PaperUI::rule(ImVec2 a, ImVec2 b, ImU32 col, float thickness, uint32_t seed
     const float dy = b.y - a.y;
     const float len = std::sqrt(dx * dx + dy * dy);
     if (len < 0.5f) return;
+    if (skin_) {
+        // Nothing is drawn by hand under a skin: a rule is a straight line.
+        dl_->AddLine(a, b, col, std::max(1.0f, thickness * 0.8f));
+        return;
+    }
     const float nx = -dy / len;
     const float ny = dx / len;
     if (amplitude <= 0.0f) amplitude = std::max(px(0.5f), thickness * 0.55f);
@@ -236,6 +265,7 @@ void PaperUI::squiggle(ImVec2 a, ImVec2 b, ImU32 col, float thickness, uint32_t 
     // Two passes, the second shorter and offset - a pen gone back over a line
     // it had already drawn.
     rule(a, b, col, thickness, seed);
+    if (skin_) return;
     const float inset = (b.x - a.x) * 0.12f;
     rule(ImVec2(a.x + inset, a.y + thickness * 1.6f),
          ImVec2(b.x - inset * 0.4f, b.y + thickness * 1.9f), paperFade(col, 0.45f),
@@ -255,7 +285,13 @@ void PaperUI::wobblyRect(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col, float th
     dl_ = keep;
 }
 
-void PaperUI::sheet(ImVec2 a, ImVec2 b, bool taped) { drawSheetBody(dl_, a, b, taped); }
+void PaperUI::sheet(ImVec2 a, ImVec2 b, bool taped) {
+    if (skin_) {
+        skin_->sheet(dl_, a, b);
+        return;
+    }
+    drawSheetBody(dl_, a, b, taped);
+}
 
 void PaperUI::drawSheetBody(ImDrawList* dl, ImVec2 a, ImVec2 b, bool taped) {
     // The shadow, as a handful of expanding rectangles rather than a blur.
@@ -305,6 +341,10 @@ void PaperUI::drawSheetBody(ImDrawList* dl, ImVec2 a, ImVec2 b, bool taped) {
 
 void PaperUI::scrim(float alpha) {
     const ImVec2 screen = ImGui::GetIO().DisplaySize;
+    if (skin_) {
+        skin_->scrim(dl_, screen, alpha);
+        return;
+    }
     dl_->AddRectFilled(ImVec2(0, 0), screen, IM_COL32(0x20, 0x16, 0x0C,
                        static_cast<int>(std::clamp(alpha, 0.0f, 1.0f) * 255.0f)));
 }
@@ -343,6 +383,10 @@ float PaperUI::inkHeight(float size, bool titleFace) const {
 
 void PaperUI::text(ImVec2 at, const char* s, float size, ImU32 col, bool titleFace) {
     if (!s || !*s) return;
+    if (skin_) {
+        skin_->text(dl_, face(titleFace), at, s, size, col);
+        return;
+    }
     dl_->AddText(face(titleFace), size, at, col, s);
 }
 
@@ -431,7 +475,8 @@ float PaperUI::wrapped(ImVec2 at, float width, const char* s, float size, ImU32 
         s, width, step,
         [&](const char* t) { return f ? f->CalcTextSizeA(size, FLT_MAX, 0.0f, t).x : 0.0f; },
         [&](const std::string& line, float y) {
-            dl_->AddText(f, size, ImVec2(at.x, at.y + y), col, line.c_str());
+            if (skin_) skin_->text(dl_, f, ImVec2(at.x, at.y + y), line.c_str(), size, col);
+            else dl_->AddText(f, size, ImVec2(at.x, at.y + y), col, line.c_str());
         });
 }
 
@@ -476,6 +521,11 @@ bool PaperUI::button(const char* idStr, ImVec2 a, ImVec2 b, const char* label,
     if (active_ == id && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         clicked = over;
         active_ = 0;
+    }
+
+    if (skin_) {
+        skin_->button(dl_, a, b, label, kind == ButtonKind::Primary, enabled, over, held);
+        return clicked;
     }
 
     // Pressing pushes the button into the paper rather than moving it.
@@ -538,6 +588,11 @@ bool PaperUI::chip(const char* idStr, ImVec2 a, ImVec2 b, const char* label, boo
     if (active_ == id && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         clicked = over;
         active_ = 0;
+    }
+
+    if (skin_) {
+        skin_->button(dl_, a, b, label, selected, true, over, held);
+        return clicked;
     }
 
     const float h = b.y - a.y;
@@ -707,10 +762,12 @@ void PaperUI::drawFieldText(ImDrawList* dl, ImVec2 in0, ImVec2 in1, const TextEd
 
     // The glue boxes are dark, so their ink is white and their placeholder
     // the glue's disabled grey.
-    const ImU32 ink = opts.glue ? IM_COL32(255, 255, 255, 255) : theme_.ink;
+    // A skinned box is the glue's dark one too.
+    const bool dark = opts.glue || skin_ != nullptr;
+    const ImU32 ink = dark ? IM_COL32(255, 255, 255, 255) : theme_.ink;
     if (edit.empty() && opts.placeholder && !focused) {
         dl->AddText(bodyFace_, size, ImVec2(in0.x, baseY),
-                    opts.glue ? IM_COL32(128, 128, 128, 255) : paperFade(theme_.pencil, 0.85f),
+                    dark ? IM_COL32(128, 128, 128, 255) : paperFade(theme_.pencil, 0.85f),
                     opts.placeholder);
     } else if (opts.password) {
         // Drawn rather than typeset: the bullet is not in every face the
@@ -766,10 +823,11 @@ PaperUI::FieldResult PaperUI::field(const char* idStr, ImVec2 a, ImVec2 b, TextE
     }
 
     const bool live = listening();
-    const float pad = opts.glue ? 0.0f : px(9);
-    const float size = (b.y - a.y) * (opts.glue ? 0.5f : 0.46f);
+    const float pad = opts.glue ? 0.0f : (skin_ ? skin_->boxPad() : px(9));
+    const float size = (b.y - a.y) * (opts.glue ? 0.5f : (skin_ ? 0.40f : 0.46f));
     const ImVec2 in0(a.x + pad, a.y);
-    const ImVec2 in1(b.x - pad, b.y);
+    // A skinned box's border is heavier on the bottom, as the glue's are.
+    const ImVec2 in1(b.x - pad, b.y - ((skin_ && !opts.glue) ? pad * 0.35f : 0.0f));
     const float innerW = std::max(in1.x - in0.x, px(8));
 
     ImGuiIO& io = ImGui::GetIO();
@@ -911,6 +969,11 @@ PaperUI::FieldResult PaperUI::field(const char* idStr, ImVec2 a, ImVec2 b, TextE
         drawFieldText(dl_, in0, in1, edit, opts, state, focused, size);
         return out;
     }
+    if (skin_) {
+        skin_->box(dl_, a, b, focused);
+        drawFieldText(dl_, in0, in1, edit, opts, state, focused, size);
+        return out;
+    }
 
     // The box: a form field ruled on paper, firmer when it is the live one.
     const uint32_t seed = seedFor(a, b);
@@ -1022,7 +1085,9 @@ PaperUI::ListResult PaperUI::list(const char* idStr, ImVec2 a, ImVec2 b, int row
         if (rowHovered) out.hovered = i;
 
         const bool isSelected = (i == selected);
-        if (isSelected) {
+        if (skin_) {
+            if (isSelected || rowHovered) skin_->rowMark(dl_, rowA, rowB, isSelected, rowHovered);
+        } else if (isSelected) {
             dl_->AddRectFilled(ImVec2(rowA.x + px(2), rowA.y + px(1)),
                                ImVec2(rowB.x - px(2), rowB.y - px(1)), theme_.highlighter,
                                px(2));
@@ -1154,15 +1219,19 @@ bool PaperUI::radio(const char* idStr, ImVec2 at, float boxSize, const char* lab
         active_ = 0;
     }
 
-    // A ring drawn by hand rather than a box, which is what says "one of".
-    const ImVec2 c(a.x + boxSize * 0.5f, a.y + boxSize * 0.5f);
-    const float r = boxSize * 0.5f;
-    dl_->AddCircleFilled(c, r, paperFade(theme_.fieldFill, over ? 1.0f : 0.7f));
-    const ImU32 ring = !enabled ? paperFade(theme_.pencil, 0.6f)
-                     : over     ? theme_.ink
-                                : paperFade(theme_.pencil, 0.95f);
-    dl_->AddCircle(c, r, ring, 0, px(1.3f));
-    if (selected) dl_->AddCircleFilled(c, r * 0.48f, enabled ? theme_.crayonRed : theme_.pencil);
+    if (skin_) {
+        skin_->radio(dl_, a, ImVec2(a.x + boxSize, a.y + boxSize), selected, enabled, over);
+    } else {
+        // A ring drawn by hand rather than a box, which is what says "one of".
+        const ImVec2 c(a.x + boxSize * 0.5f, a.y + boxSize * 0.5f);
+        const float r = boxSize * 0.5f;
+        dl_->AddCircleFilled(c, r, paperFade(theme_.fieldFill, over ? 1.0f : 0.7f));
+        const ImU32 ring = !enabled ? paperFade(theme_.pencil, 0.6f)
+                         : over     ? theme_.ink
+                                    : paperFade(theme_.pencil, 0.95f);
+        dl_->AddCircle(c, r, ring, 0, px(1.3f));
+        if (selected) dl_->AddCircleFilled(c, r * 0.48f, enabled ? theme_.crayonRed : theme_.pencil);
+    }
     if (label && *label) {
         const ImU32 col = !enabled ? theme_.pencil : (over || selected) ? theme_.ink : theme_.inkSoft;
         text(ImVec2(a.x + boxSize + px(9), a.y + (boxSize - size) * 0.5f - px(1)), label, size, col);
@@ -1171,12 +1240,20 @@ bool PaperUI::radio(const char* idStr, ImVec2 at, float boxSize, const char* lab
 }
 
 void PaperUI::frame(ImVec2 a, ImVec2 b) {
+    if (skin_) {
+        skin_->box(dl_, a, b, false);
+        return;
+    }
     dl_->AddRectFilled(a, b, paperFade(theme_.fieldFill, 0.6f), px(3));
     wobblyRect(dl_, a, b, paperFade(theme_.pencil, 0.8f), px(1.1f), px(0.8f), seedFor(a, b));
 }
 
 void PaperUI::progress(ImVec2 a, ImVec2 b, float fraction) {
     const float t = std::clamp(fraction, 0.0f, 1.0f);
+    if (skin_) {
+        skin_->progress(dl_, a, b, t);
+        return;
+    }
     dl_->AddRectFilled(a, b, paperFade(theme_.fieldFill, 0.8f), px(3));
     if (t > 0.0f) {
         // Coloured in, the way a bar on a form would be filled with a crayon.
@@ -1243,6 +1320,30 @@ bool PaperUI::dropdown(const char* idStr, ImVec2 a, ImVec2 b, const std::string&
         openPopup_ = open ? 0u : id;
     }
 
+    if (skin_) {
+        skin_->box(dl_, a, b, openPopup_ == id);
+        const float pad = skin_->boxPad();
+        const float tsize = (b.y - a.y) * 0.38f;
+        dl_->PushClipRect(ImVec2(a.x + pad, a.y), ImVec2(b.x - (b.y - a.y), b.y), true);
+        text(ImVec2(a.x + pad, a.y + ((b.y - a.y) - tsize) * 0.5f - px(2)), preview.c_str(),
+             tsize, theme_.onCrayon);
+        dl_->PopClipRect();
+        skin_->dropdownArrow(dl_, a, b, openPopup_ == id, over && live);
+        if (openPopup_ == id && !items.empty()) {
+            PopupDraw draw;
+            draw.a = la;
+            draw.b = lb;
+            draw.items = items;
+            draw.selected = index ? *index : -1;
+            draw.hovered = hoveredRow;
+            draw.rowHeight = rowHeight;
+            draw.skin = skin_;
+            draw.theme = theme_;
+            popups_.push_back(std::move(draw));
+        }
+        return changed;
+    }
+
     // The closed control looks like a field that cannot be typed into.
     const uint32_t seed = seedFor(a, b);
     dl_->AddRectFilled(a, b, paperFade(theme_.fieldFill, 0.75f), px(3));
@@ -1305,11 +1406,16 @@ bool PaperUI::checkbox(const char* idStr, ImVec2 at, float boxSize, const char* 
 
     const ImVec2 boxA = a;
     const ImVec2 boxB(a.x + boxSize, a.y + boxSize);
-    dl_->AddRectFilled(boxA, boxB, paperFade(theme_.fieldFill, over ? 1.0f : 0.7f), px(2));
-    wobblyRect(dl_, boxA, boxB,
-               over ? theme_.ink : paperFade(theme_.pencil, enabled ? 0.95f : 0.6f), px(1.3f),
-               px(0.8f), seedFor(boxA, boxB));
-    if (value && *value) {
+    if (skin_) {
+        const bool held = (active_ == id && ImGui::IsMouseDown(ImGuiMouseButton_Left));
+        skin_->checkbox(dl_, boxA, boxB, value && *value, enabled, over, held);
+    } else {
+        dl_->AddRectFilled(boxA, boxB, paperFade(theme_.fieldFill, over ? 1.0f : 0.7f), px(2));
+        wobblyRect(dl_, boxA, boxB,
+                   over ? theme_.ink : paperFade(theme_.pencil, enabled ? 0.95f : 0.6f), px(1.3f),
+                   px(0.8f), seedFor(boxA, boxB));
+    }
+    if (!skin_ && value && *value) {
         // A tick that runs slightly outside its box, as a pen does.
         const float x0 = boxA.x + boxSize * 0.20f;
         const float y0 = boxA.y + boxSize * 0.52f;
@@ -1363,6 +1469,11 @@ bool PaperUI::sliderFloat(const char* idStr, ImVec2 a, ImVec2 b, float* value, f
     }
 
     const float t = std::clamp((*value - lo) / (hi - lo), 0.0f, 1.0f);
+    if (skin_) {
+        skin_->slider(dl_, ta, tb, t, over || active_ == id);
+        textRight(b.x, cy - size * 0.62f, shown, size, theme_.onCrayon);
+        return changed;
+    }
     const float kx = x0 + (x1 - x0) * t;
     const uint32_t seed = seedFor(a, b);
     rule(ImVec2(x0, cy), ImVec2(x1, cy), paperFade(theme_.pencil, 0.9f), px(1.6f), seed);
