@@ -254,18 +254,14 @@ void ZoneHighlightLayer::render(const LayerContext& ctx) {
                 ctx.drawList->AddRectFilled(ImVec2(sx0, sy0), ImVec2(sx1, sy1),
                                             IM_COL32(255, 235, 50, fillAlpha));
             }
-
-            uint8_t borderAlpha = static_cast<uint8_t>(200.0f * hoverHighlightAlpha_);
-            ctx.drawList->AddRect(ImVec2(sx0, sy0), ImVec2(sx1, sy1),
-                                  IM_COL32(255, 225, 50, borderAlpha), 0, 0, 2.0f);
-        } else if (explored) {
-            ctx.drawList->AddRect(ImVec2(sx0, sy0), ImVec2(sx1, sy1),
-                                  IM_COL32(255, 255, 255, 30), 0.0f, 0, 1.0f);
         }
 
-        // Zone name label
+        // The stock map draws no outlines and no per-zone labels; the hovered
+        // zone's name shows in the map title. Kept behind a constant for
+        // anyone who wants the old overlay back.
+        constexpr bool kZoneLabels = false;
         bool zoneExplored = explored;
-        if (!z.areaName.empty()) {
+        if (kZoneLabels && !z.areaName.empty()) {
             const ZoneMeta* meta = metadata_ ? metadata_->find(z.areaName) : nullptr;
             std::string label = ZoneMetadata::formatLabel(z.areaName, meta);
 

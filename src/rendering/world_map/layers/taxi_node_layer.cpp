@@ -90,9 +90,9 @@ void TaxiNodeLayer::render(const LayerContext& ctx) {
 
     if (taxiMode_) {
         renderFlightMap(ctx, projection->bounds, projection->isContinent);
-    } else {
-        renderWorldMapMarkers(ctx, projection->bounds, projection->isContinent);
     }
+    // The stock world map shows no flight masters; only the flight map does.
+    // renderWorldMapMarkers stays for callers that opt back in.
 }
 
 void TaxiNodeLayer::renderWorldMapMarkers(const LayerContext& ctx,

@@ -1349,7 +1349,7 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         uint16_t selectedFacial100 = 100;
         uint16_t selectedFacial200 = 200;
         uint16_t selectedFacial300 = 300;
-        uint32_t equipChestGG = 0, equipLegsGG = 0, equipFeetGG = 0, equipGlovesGG = 0, equipCapeGG = 0;
+        uint32_t equipChestGG = 0, equipLegsGG = 0, equipFeetGG = 0, equipGlovesGG = 0, equipCapeGG = 0, equipRobeGG = 0;
         if (itDisplayData != displayDataMap_.end() &&
             itDisplayData->second.extraDisplayId != 0) {
             auto itExtra = humanoidExtraMap_.find(itDisplayData->second.extraDisplayId);
@@ -1432,6 +1432,13 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
                     equipFeetGG = readGG(itExtra->second.equipDisplayId[6]);
                     equipGlovesGG = readGG(itExtra->second.equipDisplayId[8]);
                     equipCapeGG = readGG(itExtra->second.equipDisplayId[10]);
+                    // GeosetGroup[2] on the chest item is the robe skirt
+                    // (group 13 value 2+). It replaces trousers and boots.
+                    const uint32_t fGG3 = idiL ? (*idiL)["GeosetGroup3"] : 9;
+                    if (uint32_t did = itExtra->second.equipDisplayId[3]; did != 0) {
+                        int32_t idx = itemDisplayDbc->findRecordById(did);
+                        if (idx >= 0) equipRobeGG = itemDisplayDbc->getUInt32(static_cast<uint32_t>(idx), fGG3);
+                    }
                 }
             }
         }
@@ -1496,7 +1503,7 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         // the other half: the feet value used to be applied to the arm group,
         // and when that was corrected to gloves no group 5 block was added.
         if (hasGroup5) {
-            uint16_t wantShins = (equipFeetGG > 0)
+            uint16_t wantShins = (equipFeetGG > 0 && equipRobeGG == 0)
                 ? equippedGeoset(equipment::kBootsBare, equipFeetGG)
                 : kGeosetBareShins;
             uint16_t shinSid = resolveGeoset(wantShins, allGeosets);
@@ -1564,9 +1571,10 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
 
         // Prefer trousers geoset; use covered variant when legs armor exists.
         if (hasGroup13) {
-            uint16_t wantPants = (equipLegsGG > 0)
-                ? equippedGeoset(equipment::kLegsBare, equipLegsGG)
-                : kGeosetBarePants;
+            uint16_t wantPants = (equipRobeGG > 0)
+                ? equippedGeoset(equipment::kRobeKiltBare, equipRobeGG)
+                : (equipLegsGG > 0) ? equippedGeoset(equipment::kLegsBare, equipLegsGG)
+                                    : kGeosetBarePants;
             uint16_t pantsSid = resolveGeoset(wantPants, allGeosets);
             if (pantsSid != 0) normalizedGeosets.insert(pantsSid);
         }
@@ -1943,11 +1951,13 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
                             }
                         };
 
+                        std::vector<std::pair<int, std::string>> robeLegs;  // drawn last
                         for (int eqSlot = 0; eqSlot < 11; eqSlot++) {
                             uint32_t did = extraCopy.equipDisplayId[eqSlot];
                             if (did == 0) continue;
                             int32_t recIdx = idiDbc->findRecordById(did);
                             if (recIdx < 0) continue;
+                            const bool robeRec = eqSlot == 3 && pipeline::isRobeDisplay(*idiDbc, idiL, recIdx);
 
                             for (int region = 0; region < 8; region++) {
                                 if (!regionAllowedForNpcSlot(eqSlot, region)) continue;
@@ -1960,10 +1970,12 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
                                     *am, region, texName, npcIsFemale);
                                 if (fullPath.empty()) continue;
 
-                                def.regionLayers.emplace_back(region, fullPath);
+                                if (robeRec && pipeline::isRobeLegRegion(region)) robeLegs.emplace_back(region, fullPath);
+                                else def.regionLayers.emplace_back(region, fullPath);
                                 allPaths.push_back(fullPath);
                             }
                         }
+                        def.regionLayers.insert(def.regionLayers.end(), robeLegs.begin(), robeLegs.end());
                     }
 
                     // Determine compositing mode

@@ -478,6 +478,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     uint16_t geosetSleeves = pickGeoset(kGeosetBareSleeves, kGeosetBareSleeves);
     uint16_t geosetPants   = pickGeoset(kGeosetBarePants, kGeosetBarePants);
 
+    bool robeSkirt = false;
     // Chest/Shirt/Robe (invType 4,5,20) → wrist/sleeve group 8
     {
         uint32_t did = findDisplayIdByInvType({4, 5, 20});
@@ -485,21 +486,25 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
         if (gg1 > 0) geosetSleeves = pickGeoset(equippedGeoset(equipment::kChestBare, gg1), kGeosetBareSleeves);
         // Robe kilt → leg group 13
         uint32_t gg3 = getGeosetGroup(did, geosetGroup3Field);
-        if (gg3 > 0) geosetPants = pickGeoset(equippedGeoset(equipment::kRobeKiltBare, gg3), kGeosetBarePants);
+        if (gg3 > 0) {
+            geosetPants = pickGeoset(equippedGeoset(equipment::kRobeKiltBare, gg3), kGeosetBarePants);
+            robeSkirt = true;
+        }
     }
 
     // Legs (invType 7) → leg group 13
     {
         uint32_t did = findDisplayIdByInvType({7});
         uint32_t gg1 = getGeosetGroup(did, geosetGroup1Field);
-        if (gg1 > 0) geosetPants = pickGeoset(equippedGeoset(equipment::kLegsBare, gg1), kGeosetBarePants);
+        // A robe skirt wins over trousers, as in the stock client.
+        if (gg1 > 0 && !robeSkirt) geosetPants = pickGeoset(equippedGeoset(equipment::kLegsBare, gg1), kGeosetBarePants);
     }
 
     // Feet/Boots (invType 8) → shin group 5
     {
         uint32_t did = findDisplayIdByInvType({8});
         uint32_t gg1 = getGeosetGroup(did, geosetGroup1Field);
-        if (gg1 > 0) geosetBoots = pickGeoset(equippedGeoset(equipment::kBootsBare, gg1), lowestInGroup(5));
+        if (gg1 > 0 && !robeSkirt) geosetBoots = pickGeoset(equippedGeoset(equipment::kBootsBare, gg1), lowestInGroup(5));
     }
 
     // Hands/Gloves (invType 10) → forearm group 4
@@ -777,11 +782,13 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     std::vector<std::pair<int, std::string>> regionLayers;
     const bool isFemale = (st.genderId == 1);
 
+    std::vector<std::pair<int, std::string>> robeLegs;  // drawn last
     for (int s = 0; s < 19; s++) {
         uint32_t did = displayInfoIds[s];
         if (did == 0) continue;
         int32_t recIdx = displayInfoDbc->findRecordById(did);
         if (recIdx < 0) continue;
+        const bool robeRec = pipeline::isRobeDisplay(*displayInfoDbc, idiL, recIdx);
 
         for (int region = 0; region < 8; region++) {
             std::string texName = displayInfoDbc->getString(
@@ -792,9 +799,11 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
                 *assetManager_, region, texName, isFemale);
             if (fullPath.empty()) continue;
 
-            regionLayers.emplace_back(region, fullPath);
+            if (robeRec && pipeline::isRobeLegRegion(region)) robeLegs.emplace_back(region, fullPath);
+            else regionLayers.emplace_back(region, fullPath);
         }
     }
+    regionLayers.insert(regionLayers.end(), robeLegs.begin(), robeLegs.end());
 
     const auto slotsIt = playerTextureSlotsByModelId_.find(st.modelId);
     if (slotsIt == playerTextureSlotsByModelId_.end()) return;

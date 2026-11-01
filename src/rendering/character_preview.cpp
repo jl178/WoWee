@@ -963,11 +963,13 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
 
     std::vector<std::pair<int, std::string>> regionLayers;
     regionLayers.reserve(32);
+    std::vector<std::pair<int, std::string>> robeLegs;  // drawn last
 
     for (const auto& it : equipment) {
         if (it.displayModel == 0) continue;
         int32_t recIdx = displayInfoDbc->findRecordById(it.displayModel);
         if (recIdx < 0) continue;
+        const bool robeRec = pipeline::isRobeDisplay(*displayInfoDbc, idiL, recIdx);
 
         for (int region = 0; region < 8; region++) {
             std::string texName = displayInfoDbc->getString(static_cast<uint32_t>(recIdx), texRegionFields[region]);
@@ -976,9 +978,11 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
             const std::string fullPath = pipeline::resolveItemRegionTexture(
                 *assetManager_, region, texName, gender_ == game::Gender::FEMALE);
             if (fullPath.empty()) continue;
-            regionLayers.emplace_back(region, fullPath);
+            if (robeRec && pipeline::isRobeLegRegion(region)) robeLegs.emplace_back(region, fullPath);
+            else regionLayers.emplace_back(region, fullPath);
         }
     }
+    regionLayers.insert(regionLayers.end(), robeLegs.begin(), robeLegs.end());
 
     if (!regionLayers.empty()) {
         VkTexture* newTex = charRenderer_->compositeWithRegions(bodySkinPath_, baseLayers_, regionLayers);
