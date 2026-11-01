@@ -33,6 +33,10 @@ public:
     void update(float deltaTime);
     void setVolume(int volume);
     [[nodiscard]] int getVolume() const { return volumePercent; }
+    /// Gain the data gives the current track (SoundEntries.VolumeFloat),
+    /// applied under the music volume setting. 1 when the data has no say.
+    void setTrackGain(float gain);
+    [[nodiscard]] float getTrackGain() const { return trackGain_; }
     void setUnderwaterMode(bool underwater);
     void preloadMusic(const std::string& mpqPath);
 
@@ -68,6 +72,7 @@ private:
     bool currentTrackIsFile = false;
     bool playing = false;
     int volumePercent = 30;
+    float trackGain_ = 1.0f;
     bool underwaterMode = false;
 
     // Crossfade state

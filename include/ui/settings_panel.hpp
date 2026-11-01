@@ -170,7 +170,7 @@ public:
     bool pendingIdleCameraOrbit = true;
 
     // ---- Pending soundtrack ----
-    bool pendingUseOriginalSoundtrack = true;
+    bool pendingUseOriginalSoundtrack = false;
 
     // ---- Pending buff bar layout ----
     // Multiplier for the buff/debuff bar icons, on top of the automatic

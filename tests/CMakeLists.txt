@@ -2786,3 +2786,21 @@ endif()
 # the re-parsing it saved (950.8 s of CPU against 945.2 s without). The main
 # target benefits because it is one target over 413 objects; the tests are the
 # opposite shape. Do not re-add it without measuring.
+
+# ── sound tables and the music schedule ──────────────────────
+# Pure: synthetic DBCs in, lookups and actions out. No asset stack.
+wowee_add_test(test_sound_data SOURCES
+    test_sound_data.cpp
+    ${TEST_COMMON_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp
+    ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/sound_data.cpp
+)
+wowee_add_test(test_zone_music_controller SOURCES
+    test_zone_music_controller.cpp
+    ${TEST_COMMON_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp
+    ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/sound_data.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/zone_music_controller.cpp
+)

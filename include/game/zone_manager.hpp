@@ -28,8 +28,10 @@ class ZoneManager {
 public:
     void initialize();
 
-    // Supplement zone music paths using AreaTable → ZoneMusic → SoundEntries DBC chain.
-    // Safe to call after initialize(); idempotent and additive (does not remove existing paths).
+    // Read AreaTable parents and flags, and drop hand-written music tracks
+    // the data does not have. Zone music itself comes from the sound tables
+    // (audio::SoundData); the tracks kept here are the fallback for data
+    // without them and the client's own soundtrack.
     void enrichFromDBC(pipeline::AssetManager* assets);
 
     [[nodiscard]] uint32_t getZoneId(int tileX, int tileY) const;
@@ -66,7 +68,7 @@ private:
     /// parents; the file is walked once either way.
     std::unordered_map<uint32_t, uint32_t> areaFlags_;
     std::string lastPlayedMusic_;
-    bool useOriginalSoundtrack_ = true;
+    bool useOriginalSoundtrack_ = false;
 };
 
 } // namespace game

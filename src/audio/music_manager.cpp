@@ -25,7 +25,7 @@ bool MusicManager::initialize(pipeline::AssetManager* assets) {
 }
 
 float MusicManager::effectiveMusicVolume() const {
-    float vol = volumePercent / 100.0f;
+    float vol = volumePercent / 100.0f * trackGain_;
     if (underwaterMode) {
         vol *= 0.3f;
     }
@@ -213,6 +213,13 @@ void MusicManager::stopMusic(float fadeMs) {
         currentTrack.clear();
         currentTrackIsFile = false;
     }
+}
+
+void MusicManager::setTrackGain(float gain) {
+    gain = std::clamp(gain, 0.0f, 1.0f);
+    if (trackGain_ == gain) return;
+    trackGain_ = gain;
+    AudioEngine::instance().setMusicVolume(effectiveMusicVolume());
 }
 
 void MusicManager::setVolume(int volume) {

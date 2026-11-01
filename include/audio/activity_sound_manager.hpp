@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+namespace wowee { namespace audio { struct SoundEntry; class SoundData; } }
+
 namespace wowee {
 namespace pipeline { class AssetManager; }
 namespace audio {
@@ -28,6 +30,11 @@ public:
     void setSwimmingState(bool swimming, bool moving);
     void setCharacterVoiceProfile(const std::string& modelName);
     void setCharacterVoiceProfile(const std::string& raceFolder, const std::string& raceBase, bool male);
+    /// The voice the client's tables give the race: exertion, wound and death
+    /// from CreatureSoundData, jump and land from SoundEntries. Anything the
+    /// tables leave out keeps the guessed paths of the overload above.
+    void setCharacterVoiceProfile(const std::string& raceFolder, const std::string& raceBase, bool male,
+                                  uint32_t raceId, const SoundData* data);
     void playWaterEnter();
     void playWaterExit();
     void playMeleeSwing();
@@ -40,6 +47,7 @@ private:
     struct Sample {
         std::string path;
         std::vector<uint8_t> data;
+        float volume = 0.7f;  ///< Gain under the activity volume; the data's VolumeFloat when it names the clip.
     };
 
     struct SurfaceLandingSet {
@@ -54,6 +62,7 @@ private:
     std::vector<Sample> splashExitClips;
     std::vector<Sample> swimLoopClips;
     std::vector<Sample> hardLandClips;
+    std::vector<Sample> landVoiceClips;
     std::vector<Sample> meleeSwingClips;
     std::vector<Sample> attackGruntClips;
     std::vector<Sample> woundClips;
@@ -79,6 +88,9 @@ private:
     float volumeScale = 1.0f;
 
     void preloadCandidates(std::vector<Sample>& out, const std::vector<std::string>& candidates);
+    /// Replace out with the files a SoundEntries row names, when any of them load.
+    void replaceFromEntry(std::vector<Sample>& out, const SoundEntry* entry);
+    bool playVoice(const std::vector<Sample>& clips);
     void preloadLandingSet(FootstepSurface surface, const std::string& material);
     void rebuildJumpClipsForProfile(const std::string& raceFolder, const std::string& raceBase, bool male);
     void rebuildSwimLoopClipsForProfile(const std::string& raceFolder, const std::string& raceBase, bool male);
