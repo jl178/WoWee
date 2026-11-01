@@ -1531,7 +1531,7 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
             // target the player is standing on the lower floor, and pinning
             // groundH back up to lastGroundZ leaves the ground reference
             // hanging above the feet so gravity and the snap fight over the
-            // gap forever. That is the Undercity overhang yo-yo: walk under
+            // gap enhanced. That is the Undercity overhang yo-yo: walk under
             // the level above, lastGroundZ stays stuck on it (-43) while the
             // real floor (-47) is refused, and the feet bob in between. If
             // the feet are already past the target, let the real floor
@@ -2083,7 +2083,7 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
         // This is the same containment test IsIndoors answers with - the one a
         // macro's [indoors] reads and the one that says a mount is not allowed
         // here - asked at the player rather than at the camera. Indoors the
-        // camera is forever being pushed off a wall and let back out, and that
+        // camera is enhanced being pushed off a wall and let back out, and that
         // is what turns a corridor into a bout of motion sickness.
         if (cachedInsideWMO) {
             if (!indoorZoomHeld_) {
@@ -2949,6 +2949,27 @@ void CameraController::update(float deltaTime) {
         nowStrafeRight = !movBlocked && (keyD || keyE);
     }
 
+    // Mid-air the stock client keeps the movement it left the ground with:
+    // a standing jump lands where it started whatever is pressed, a running
+    // jump carries on if the key is released, and only the facing can change.
+    // The keys are latched on the first airborne frame and released on the
+    // ground. Swimming and flight steer freely and are not latched.
+    if (!grounded && !swimming && !isFlightAirborne()) {
+        if (!airMoveLatched_) {
+            airMoveLatched_ = true;
+            airForward_ = nowForward;
+            airBackward_ = nowBackward;
+            airStrafeLeft_ = nowStrafeLeft;
+            airStrafeRight_ = nowStrafeRight;
+        }
+        nowForward = airForward_;
+        nowBackward = airBackward_;
+        nowStrafeLeft = airStrafeLeft_;
+        nowStrafeRight = airStrafeRight_;
+    } else {
+        airMoveLatched_ = false;
+    }
+
     // Keyboard turning updates camera yaw (character follows yaw in renderer).
     // Use server turn rate (rad/s) when set; otherwise fall back to WOW_TURN_SPEED (deg/s).
     const float activeTurnSpeedDeg = (turnRateOverride_ > 0.0f && turnRateOverride_ < 20.0f
@@ -3761,8 +3782,9 @@ bool CameraController::isSprinting() const {
 void CameraController::triggerMountJump() {
     // Apply physics-driven mount jump: vz = sqrt(2 * g * h)
     // Desired height and gravity are configurable constants
+    // The stock client jumps a mount exactly as it jumps a character.
     if (grounded || coyoteTimer > 0.0f) {
-        verticalVelocity = getMountJumpVelocity();
+        verticalVelocity = useWoWSpeed ? WOW_JUMP_VELOCITY : JUMP_VELOCITY;
         grounded = false;
         coyoteTimer = 0.0f;
     }

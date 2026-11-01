@@ -163,3 +163,119 @@ TEST_CASE("LocomotionFSM: reset restores IDLE", "[locomotion]") {
     fsm.reset();
     CHECK(fsm.getState() == LocomotionFSM::State::IDLE);
 }
+
+// The stock client's airborne phases: a jump is JumpStart, Jump, JumpEnd;
+// walking off an edge is Fall; landing while running is JumpLandRun.
+
+static AnimCapabilitySet makeFullAirCaps() {
+    auto caps = makeLocoCaps();
+    caps.resolvedFall = anim::FALL;
+    caps.resolvedJumpLandRun = anim::JUMP_LAND_RUN;
+    return caps;
+}
+
+TEST_CASE("LocomotionFSM: leaving the ground without a jump is FALL", "[locomotion]") {
+    LocomotionFSM fsm;
+    auto caps = makeFullAirCaps();
+    auto in = idle();
+    in.moving = true;
+    in.sprinting = true;
+    fsm.resolve(in, caps);
+    in.grounded = false;
+    in.jumping = false;
+    auto out = fsm.resolve(in, caps);
+    REQUIRE(out.animId == anim::FALL);
+    REQUIRE(out.loop);
+    CHECK(fsm.getState() == LocomotionFSM::State::FALL);
+    // Landing from a fall still plays the landing one-shot.
+    in.grounded = true;
+    out = fsm.resolve(in, caps);
+    CHECK(fsm.getState() == LocomotionFSM::State::JUMP_END);
+}
+
+TEST_CASE("LocomotionFSM: a model without Fall uses the Jump loop", "[locomotion]") {
+    LocomotionFSM fsm;
+    auto caps = makeLocoCaps();
+    auto in = idle();
+    in.grounded = false;
+    auto out = fsm.resolve(in, caps);
+    REQUIRE(out.animId == anim::JUMP);
+    CHECK(fsm.getState() == LocomotionFSM::State::FALL);
+}
+
+TEST_CASE("LocomotionFSM: landing while running plays JumpLandRun through, then runs", "[locomotion]") {
+    LocomotionFSM fsm;
+    auto caps = makeFullAirCaps();
+    auto in = idle();
+    in.moving = true;
+    in.sprinting = true;
+    fsm.resolve(in, caps);
+    in.grounded = false;
+    in.jumping = true;
+    fsm.resolve(in, caps);
+    REQUIRE(fsm.getState() == LocomotionFSM::State::JUMP_START);
+    // Past the apex and down.
+    in.jumping = false;
+    in.haveAnimState = true;
+    in.currentAnimId = anim::JUMP_START;
+    in.currentAnimDuration = 0.5f;
+    in.currentAnimTime = 0.5f;
+    fsm.resolve(in, caps);
+    REQUIRE(fsm.getState() == LocomotionFSM::State::JUMP_MID);
+    in.grounded = true;
+    auto out = fsm.resolve(in, caps);
+    REQUIRE(out.animId == anim::JUMP_LAND_RUN);
+    REQUIRE_FALSE(out.loop);
+    CHECK(fsm.getState() == LocomotionFSM::State::JUMP_END);
+    // Still landing while the one-shot runs...
+    in.currentAnimId = anim::JUMP_LAND_RUN;
+    in.currentAnimDuration = 0.4f;
+    in.currentAnimTime = 0.1f;
+    out = fsm.resolve(in, caps);
+    CHECK(fsm.getState() == LocomotionFSM::State::JUMP_END);
+    // ...and running once it is done.
+    in.currentAnimTime = 0.4f;
+    out = fsm.resolve(in, caps);
+    REQUIRE(out.animId == anim::RUN);
+    CHECK(fsm.getState() == LocomotionFSM::State::RUN);
+}
+
+TEST_CASE("LocomotionFSM: landing while running without JumpLandRun runs at once", "[locomotion]") {
+    LocomotionFSM fsm;
+    auto caps = makeLocoCaps();
+    auto in = idle();
+    in.moving = true;
+    in.sprinting = true;
+    in.grounded = false;
+    fsm.resolve(in, caps);
+    in.grounded = true;
+    fsm.resolve(in, caps);  // the landing frame itself
+    auto out = fsm.resolve(in, caps);
+    REQUIRE(out.animId == anim::RUN);
+    CHECK(fsm.getState() == LocomotionFSM::State::RUN);
+}
+
+TEST_CASE("LocomotionFSM: landing still plays JumpEnd through", "[locomotion]") {
+    LocomotionFSM fsm;
+    auto caps = makeFullAirCaps();
+    auto in = idle();
+    in.grounded = false;
+    in.jumping = true;
+    fsm.resolve(in, caps);
+    in.jumping = false;
+    in.grounded = true;
+    in.haveAnimState = true;
+    in.currentAnimId = anim::JUMP_START;
+    in.currentAnimDuration = 0.5f;
+    in.currentAnimTime = 0.5f;
+    auto out = fsm.resolve(in, caps);
+    REQUIRE(out.animId == anim::JUMP_END);
+    in.currentAnimId = anim::JUMP_END;
+    in.currentAnimTime = 0.0f;
+    out = fsm.resolve(in, caps);
+    CHECK(fsm.getState() == LocomotionFSM::State::JUMP_END);
+    in.currentAnimTime = 0.5f;
+    out = fsm.resolve(in, caps);
+    REQUIRE(out.animId == anim::STAND);
+    CHECK(fsm.getState() == LocomotionFSM::State::IDLE);
+}

@@ -602,6 +602,12 @@ private:
     // Gravity / grounding
     float verticalVelocity = 0.0f;
     bool grounded = false;
+    // Movement keys as they were on leaving the ground; see the latch in update().
+    bool airMoveLatched_ = false;
+    bool airForward_ = false;
+    bool airBackward_ = false;
+    bool airStrafeLeft_ = false;
+    bool airStrafeRight_ = false;
     static constexpr float STAND_EYE_HEIGHT = 1.2f;  // Standing eye height
     static constexpr float CROUCH_EYE_HEIGHT = 0.6f; // Crouching eye height
     float eyeHeight = STAND_EYE_HEIGHT;
@@ -859,7 +865,7 @@ private:
     // impulse here and let the normal physics loop (gravity, collision) resolve it.
     bool knockbackActive_ = false;
     glm::vec2 knockbackHorizVel_ = glm::vec2(0.0f); // render-space horizontal velocity (units/s)
-    // Horizontal velocity decays via WoW-like drag so the player doesn't slide forever.
+    // Horizontal velocity decays via WoW-like drag so the player doesn't slide enhanced.
     static constexpr float KNOCKBACK_HORIZ_DRAG = 4.5f; // exponential decay rate (1/s)
 
     // Camera shake state (SMSG_CAMERA_SHAKE)

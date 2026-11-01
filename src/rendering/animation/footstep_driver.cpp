@@ -163,7 +163,26 @@ audio::FootstepSurface FootstepDriver::resolveFootstepSurface(Renderer* renderer
 
     audio::FootstepSurface surface = audio::FootstepSurface::STONE;
 
+    // The tables first: the ground's TerrainType names the footstep set, and
+    // FootstepTerrainLookup maps those sets for a character as below. Texture
+    // names are the fallback for layers without a ground effect.
+    bool fromTables = false;
     if (terrainManager) {
+        if (auto terrainSound = terrainManager->getTerrainSoundTypeAt(p.x, p.y)) {
+            fromTables = true;
+            switch (*terrainSound) {
+            case 1: case 8: surface = audio::FootstepSurface::DIRT; break;   // dirt, sand
+            case 2: surface = audio::FootstepSurface::METAL; break;
+            case 3: surface = audio::FootstepSurface::STONE; break;
+            case 4: surface = audio::FootstepSurface::SNOW; break;
+            case 5: surface = audio::FootstepSurface::WOOD; break;
+            case 6: case 7: case 9: surface = audio::FootstepSurface::GRASS; break;  // grass, leaves, soggy
+            case 10: surface = audio::FootstepSurface::WATER; break;
+            default: fromTables = false; break;
+            }
+        }
+    }
+    if (terrainManager && !fromTables) {
         auto texture = terrainManager->getDominantTextureAt(p.x, p.y);
         if (texture) {
             std::string t = *texture;
