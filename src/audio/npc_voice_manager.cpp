@@ -440,6 +440,12 @@ void NpcVoiceManager::playSound(uint64_t npcGuid, VoiceType voiceType, SoundCate
         case SoundCategory::FLEE: library = &fleeLibrary_; break;
     }
 
+    // A creature that is not a character model and has no NPCSounds row says
+    // nothing in the stock client - a spirit healer, a beast. GENERIC drew a
+    // random dwarf, gnome, night elf or orc greeting for them, and the gnome's
+    // squeaky "Hey!" sounded like a goblin coming out of a spirit healer.
+    if (voiceType == VoiceType::GENERIC) return;
+
     // Find voice samples for this type
     auto libIt = library->find(voiceType);
     if (libIt == library->end() || libIt->second.empty()) {
