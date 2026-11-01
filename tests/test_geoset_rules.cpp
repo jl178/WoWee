@@ -155,12 +155,12 @@ TEST_CASE("the bare set a character shows with nothing equipped", "[geoset]") {
         CHECK(bare.count(kGeosetBareFeetAlt) == 1);
     }
 
-    SECTION("no cloak of any kind") {
+    SECTION("the back panel and no cape") {
         // Built before equipment is known. Naming the cloak mesh gives an
-        // untextured cape to a character wearing none; naming the no-cloak
-        // panel is wrong on a model that has no such panel.
+        // untextured cape to a character wearing none. The no-cloak panel
+        // closes the upper back; models without it have no 1501 to draw.
         CHECK(bare.count(kGeosetWithCape) == 0);
-        CHECK(bare.count(kGeosetNoCape) == 0);
+        CHECK(bare.count(kGeosetNoCape) == 1);
     }
 
     SECTION("a clean-shaven character adds no facial geoset") {
@@ -223,12 +223,12 @@ TEST_CASE("the ears are the variant that has ears on it", "[geoset]") {
     CHECK(wowee::core::kGeosetDefaultEars == 702);
 }
 
-TEST_CASE("no cloak group is chosen before the equipment is known", "[geoset]") {
-    // Naming the cloak mesh gives an untextured cape to someone wearing none,
-    // and naming the no-cloak panel is wrong on the models that have no such
-    // panel. The equipment pass decides.
+TEST_CASE("only the back panel is chosen before the equipment is known", "[geoset]") {
+    // Naming the cloak mesh gives an untextured cape to someone wearing none.
+    // The no-cloak panel closes the upper back; the equipment pass erases
+    // group 15 before it picks the cape or the panel.
     const auto bare = wowee::core::bareCharacterGeosets(1, 1, 1, 1, 4);
-    CHECK(bare.count(wowee::core::kGeosetNoCape) == 0);
+    CHECK(bare.count(wowee::core::kGeosetNoCape) == 1);
     CHECK(bare.count(wowee::core::kGeosetWithCape) == 0);
 }
 

@@ -70,12 +70,27 @@ float shadowTexel() {
     return shadowParams.z > 0.0 ? shadowParams.z : 1.0 / 4096.0;
 }
 
+// Nine taps on a disk 1.5 texels across, turned per pixel by interleaved
+// gradient noise. The 3x3 box this replaces had the same nine taps on a grid,
+// and a grid's penumbra is a staircase of the map's own texels; a rotated
+// disk trades that for a fine grain the eye reads as a soft edge. Repeated in
+// terrain, m2, wmo and character .frag - keep the four the same.
+float shadowIgn(vec2 p) {
+    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+}
+
 float sampleShadowPCF(sampler2DShadow smap, vec3 coords) {
+    // A Vogel (golden-angle) disk: r = sqrt((i + 0.5) / 9), i x 137.5 degrees.
+    const vec2 kDisk[9] = vec2[9](
+        vec2( 0.2357,  0.0000), vec2(-0.3010,  0.2758), vec2( 0.0461, -0.5250),
+        vec2( 0.3794,  0.4949), vec2(-0.6963, -0.1232), vec2( 0.6596, -0.4196),
+        vec2(-0.2206,  0.8207), vec2(-0.4207, -0.8101), vec2( 0.9129,  0.3334));
+    float a = 6.2831853 * shadowIgn(gl_FragCoord.xy);
+    float c = cos(a), s = sin(a);
+    mat2 rot = mat2(c, s, -s, c) * (1.5 * shadowTexel());
     float shadow = 0.0;
-    for (int x = -1; x <= 1; ++x) {
-        for (int y = -1; y <= 1; ++y) {
-            shadow += texture(smap, vec3(coords.xy + vec2(x, y) * shadowTexel(), coords.z));
-        }
+    for (int i = 0; i < 9; ++i) {
+        shadow += texture(smap, vec3(coords.xy + rot * kDisk[i], coords.z));
     }
     return shadow / 9.0;
 }

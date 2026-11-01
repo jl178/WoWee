@@ -795,9 +795,12 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                     // Stormwind are geometry in the city's own WMO, textured
                     // STORMWINDBANNER01, not doodads with models of their own.
                     // A flagstone is a floor, as ever.
+                    // A tarp hung in a building (HangingTarp, the plain TARP
+                    // sheets) is held at its top the same way.
                     isCloth = texNameLower.find("banner") != std::string::npos ||
                               texNameLower.find("tapestry") != std::string::npos ||
                               texNameLower.find("pennant") != std::string::npos ||
+                              texNameLower.find("tarp") != std::string::npos ||
                               (texNameLower.find("flag") != std::string::npos &&
                                texNameLower.find("flagstone") == std::string::npos);
                 }

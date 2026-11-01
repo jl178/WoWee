@@ -35,6 +35,11 @@ constexpr float M2_CULL_RADIUS_SCALE_DIVISOR = 12.0f;
 constexpr float M2_PADDED_RADIUS_SCALE       = 1.5f;
 constexpr float M2_PADDED_RADIUS_MIN_MARGIN  = 3.0f;
 
+// Floats per interleaved M2 vertex: position 3, normal 3, uv0 2, uv1 2,
+// bone weights 4, bone indices 4, canvas flutter weight 1. The main and the
+// shadow pipelines both take their stride from this.
+constexpr unsigned M2_VERTEX_FLOATS = 19;
+
 // Distance floor for server game objects (mailboxes, chests, nodes, doors).
 // The adaptive doodad distance collapses to its densest-scene value in any
 // populated area - a city holds ~100k M2 instances, so ambient doodads are cut

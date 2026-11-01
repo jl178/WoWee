@@ -75,10 +75,11 @@ TEST_CASE("CombatFSM: equipped fist weapons retain fist-weapon animations", "[co
     CHECK(fsm.resolve(in, caps, loadout).animId == anim::ATTACK_1H_PIERCE);
 }
 
-TEST_CASE("CombatFSM: INACTIVE → UNSHEATHE on COMBAT_ENTER event", "[combat]") {
+TEST_CASE("CombatFSM: INACTIVE → COMBAT_IDLE on COMBAT_ENTER event", "[combat]") {
+    // Entering combat moves no weapons in 3.3.5, so there is no sheath reach.
     CombatFSM fsm;
     fsm.onEvent(AnimEvent::COMBAT_ENTER);
-    CHECK(fsm.getState() == CombatFSM::State::UNSHEATHE);
+    CHECK(fsm.getState() == CombatFSM::State::COMBAT_IDLE);
     CHECK(fsm.isActive());
 }
 

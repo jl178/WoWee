@@ -62,6 +62,7 @@ void forEachBlended(Params& a, const LightingParams& b, F&& f) {
     f(a.waterDeepAlpha, b.waterDeepAlpha);
     f(a.oceanShallowAlpha, b.oceanShallowAlpha);
     f(a.oceanDeepAlpha, b.oceanDeepAlpha);
+    f(a.shadowOpacity, b.shadowOpacity);
 }
 
 }  // namespace
@@ -910,6 +911,23 @@ LightingParams LightingManager::sampleLightParams(const LightParamsProfile* prof
         bandOr(LightParamsProfile::CLOUD_LAYER1_AMBIENT_COLOR, glm::vec3(0.0f));
     params.cloudLayer2AmbientColor =
         bandOr(LightParamsProfile::CLOUD_LAYER2_AMBIENT_COLOR, params.ambientColor);
+
+    // Shadow darkness from channel 8, the grey later clients split out as
+    // ShadowOpacity: (77,77,77) at Stormwind noon. The darker the grey, the
+    // deeper the shadow - so a storm set or an overcast hour that lightens it
+    // softens the shadows with it, and the sky decides rather than the shadow
+    // distance slider, which is what used to set this. k puts that noon grey
+    // (luminance 0.30) at the 0.8 every shadow had before; the clamp keeps a
+    // set with no shadow band, or a black one, from erasing or inking them.
+    {
+        const ColorBand& band = profile->colorBands[LightParamsProfile::SHADOW_COLOR];
+        if (band.numKeyframes > 0) {
+            const glm::vec3 c = sampleColorBand(band, timeHalfMinutes);
+            const float luminance = glm::dot(c, glm::vec3(0.2126f, 0.7152f, 0.0722f));
+            constexpr float kShadowOpacityScale = 1.15f;
+            params.shadowOpacity = glm::clamp(kShadowOpacityScale * (1.0f - luminance), 0.4f, 0.9f);
+        }
+    }
 
     // Liquid colours. A profile with no band for a channel keeps the default
     // rather than sampleColorBand's grey, and a missing far colour follows the

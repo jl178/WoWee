@@ -19,7 +19,9 @@ struct GPUPerFrameData {
     glm::vec4 lightColor;     // xyz = color, w = unused
     glm::vec4 ambientColor;   // xyz = color, w = unused
     glm::vec4 viewPos;        // xyz = camera pos, w = unused
-    glm::vec4 fogColor;       // xyz = color, w = unused
+    // w = the cloth wind strength (banners, awnings, WMO cloth): playerWake.w
+    // without the indoor cut, because a hall's banners always breathed.
+    glm::vec4 fogColor;       // xyz = color, w = cloth wind strength
     glm::vec4 fogParams;      // x = fogStart, y = fogEnd, z = time, w = water ripple strength
     glm::vec4 shadowParams;   // x = enabled(0/1), y = strength, z = one shadow-map texel, w = unused
     // The player, for effects that react to where they are standing: water
@@ -27,7 +29,10 @@ struct GPUPerFrameData {
     // player by a fixed time constant, so clutter the player has already walked
     // through springs back over that interval instead of snapping upright.
     glm::vec4 playerPos;      // xyz = player world position, w = horizontal speed (yd/s)
-    glm::vec4 playerWake;     // xyz = trailing player position, w = unused
+    // w = the shared wind strength every swaying thing scales by: the
+    // "Foliage and cloth wind" setting times the weather, eased over a few
+    // seconds, zero indoors. 1.0 is the motion as it was before the setting.
+    glm::vec4 playerWake;     // xyz = trailing player position, w = wind strength
     glm::vec4 localLightPosRadius[MAX_LOCAL_LIGHTS];       // xyz = position, w = radius
     glm::vec4 localLightColorIntensity[MAX_LOCAL_LIGHTS];  // rgb = color, w = intensity
     glm::ivec4 localLightMeta;                             // x = active light count
@@ -82,7 +87,8 @@ struct ShadowPush {
     /// canopy. Push constants are recorded into the command buffer with the
     /// draw, so there is nothing left to race.
     glm::ivec4 flags{0};
-    /// x: the wind clock the sway is sampled at.
+    /// x: the wind clock the sway is sampled at. y: the shared wind strength
+    /// (M2 casters; the main pass has it as playerWake.w).
     glm::vec4 wind{0.0f};
 };
 

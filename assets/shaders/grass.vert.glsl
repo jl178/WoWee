@@ -27,7 +27,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 fogParams;   // z = wind time
     vec4 shadowParams;
     vec4 playerPos;   // xyz = player world position, w = horizontal speed
-    vec4 playerWake;  // xyz = trailing player position (springback reference)
+    vec4 playerWake;  // xyz = trailing player position (springback reference), w = wind strength
 };
 
 // Matches GrassBladeGPU in include/rendering/grass_blade.hpp (std430).
@@ -206,6 +206,10 @@ void main() {
                      * (0.82 + 0.18 * rustle);
     // A bolted stem catches more wind than the sward it stands above.
     if (seeded) windAmount *= 1.25;
+    // The shared wind strength (setting x weather, zero indoors), the same
+    // number the trees and the cloth scale by. Capped so a storm at the
+    // setting's top end lays the sward over without flattening it.
+    windAmount *= clamp(playerWake.w, 0.0, 2.0);
 
     vec2 perp = vec2(-windDir.y, windDir.x);
     vec2 dirNow = normalize(windDir

@@ -357,9 +357,6 @@ private:
 
 
     bool appearanceCallbackSet_ = false;
-    bool ghostOpacityStateKnown_ = false;
-    bool ghostOpacityLastState_ = false;
-    uint32_t ghostOpacityLastInstanceId_ = 0;
 
 
     void renderWeatherOverlay(game::GameHandler& gameHandler);

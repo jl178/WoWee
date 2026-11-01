@@ -8,7 +8,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 lightColor;
     vec4 ambientColor;
     vec4 viewPos;
-    vec4 fogColor;
+    vec4 fogColor;    // w = cloth wind strength
     vec4 fogParams;
     vec4 shadowParams;
 };
@@ -49,7 +49,9 @@ void main() {
         float span = max(push.cloth.y, 0.01);
         float drop = clamp((push.cloth.x - pos.z) / span, 0.0, 1.0);
         drop *= drop;
-        float amp = span * 0.05 * drop;
+        // fogColor.w: the shared cloth wind strength (the "Foliage and cloth
+        // wind" setting times the weather, eased), as m2.vert.glsl's banners.
+        float amp = span * 0.05 * drop * fogColor.w;
         float phase = fogParams.z * 1.1 + dot(push.cloth.zw, vec2(0.21, 0.17));
         vec3 sway = vec3(
             (sin(phase) * 0.7 + sin(phase * 2.7 + pos.y * 1.9) * 0.25) * amp,

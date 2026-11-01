@@ -50,6 +50,12 @@ public:
     bool displaySettingsLoaded_ = false;
     bool pendingShadows = true;
     float pendingShadowDistance = 300.0f;
+    /// A multiplier on the shadow darkness Light.dbc asks for. See
+    /// Renderer::setShadowStrength.
+    float pendingShadowStrength = 1.0f;
+    /// How hard the wind moves foliage and cloth; 1 is the usual breeze. See
+    /// Renderer::setFoliageWind.
+    float pendingFoliageWind = 1.0f;
     float pendingViewDistance = kDefaultViewDistance;
     /// How far the distance fog takes the sky's colour. See
     /// LightingManager::setFogSkyBlend.

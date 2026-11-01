@@ -2056,6 +2056,8 @@ void GameScreen::saveSettings() {
     out << "grass_distance=" << settingsPanel_.pendingGrassDistance << "\n";
     out << "shadows=" << (settingsPanel_.pendingShadows ? 1 : 0) << "\n";
     out << "shadow_distance=" << settingsPanel_.pendingShadowDistance << "\n";
+    out << "shadow_strength=" << settingsPanel_.pendingShadowStrength << "\n";
+    out << "foliage_wind=" << settingsPanel_.pendingFoliageWind << "\n";
     out << "view_distance=" << settingsPanel_.pendingViewDistance << "\n";
     out << "fog_sky_blend=" << settingsPanel_.pendingFogSkyBlend << "\n";
     out << "fog_strength=" << settingsPanel_.pendingFogStrength << "\n";
@@ -2318,6 +2320,8 @@ void GameScreen::loadSettings() {
             else if (key == "grass_distance") settingsPanel_.pendingGrassDistance = std::clamp(std::stoi(val), 30, 800);
             else if (key == "shadows") settingsPanel_.pendingShadows = (std::stoi(val) != 0);
             else if (key == "shadow_distance") settingsPanel_.pendingShadowDistance = std::clamp(std::stof(val), 40.0f, 500.0f);
+            else if (key == "shadow_strength") settingsPanel_.pendingShadowStrength = std::clamp(std::stof(val), 0.5f, 1.5f);
+            else if (key == "foliage_wind") settingsPanel_.pendingFoliageWind = std::clamp(std::stof(val), 0.0f, 2.0f);
             else if (key == "view_distance") settingsPanel_.pendingViewDistance = std::clamp(std::stof(val), 400.0f, 2400.0f);
             else if (key == "fog_sky_blend") settingsPanel_.pendingFogSkyBlend = std::clamp(std::stof(val), 0.0f, 1.0f);
             else if (key == "fog_strength") settingsPanel_.pendingFogStrength = std::clamp(std::stof(val), 0.0f, 2.0f);

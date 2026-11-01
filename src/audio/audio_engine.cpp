@@ -257,8 +257,9 @@ void AudioEngine::shutdown() {
         return;
     }
 
-    // Stop music
+    // Stop music, the outgoing track of a crossfade included
     stopMusic();
+    releaseRetiringMusic();
 
     // Clean up all active sounds
     for (auto& activeSound : activeSounds_) {
@@ -731,6 +732,40 @@ void AudioEngine::stopMusic() {
     musicData_.reset();
 }
 
+void AudioEngine::releaseRetiringMusic() {
+    if (retiringMusicSound_) {
+        ma_sound_uninit(retiringMusicSound_);
+        std::free(retiringMusicSound_);
+        retiringMusicSound_ = nullptr;
+    }
+    if (retiringMusicDecoder_) {
+        ma_decoder* decoder = static_cast<ma_decoder*>(retiringMusicDecoder_);
+        ma_decoder_uninit(decoder);
+        delete decoder;
+        retiringMusicDecoder_ = nullptr;
+    }
+    retiringMusicData_.reset();
+}
+
+void AudioEngine::fadeOutMusicVoice(float fadeMs) {
+    if (!musicSound_) return;
+    // Two at once is the most there is: a third track arriving mid-fade cuts
+    // the oldest, which by then is mostly faded anyway.
+    releaseRetiringMusic();
+    retiringMusicSound_ = musicSound_;
+    retiringMusicDecoder_ = musicDecoder_;
+    retiringMusicData_ = std::move(musicData_);
+    musicSound_ = nullptr;
+    musicDecoder_ = nullptr;
+    musicData_.reset();
+    // The fader multiplies the voice's volume rather than replacing it, so the
+    // fade starts from wherever the track was - mid fade-in included - and a
+    // loop flag cannot carry it past its end.
+    ma_sound_set_looping(retiringMusicSound_, MA_FALSE);
+    const float ms = std::max(fadeMs, 1.0f);
+    ma_sound_stop_with_fade_in_milliseconds(retiringMusicSound_, static_cast<ma_uint64>(ms));
+}
+
 bool AudioEngine::isMusicPlaying() const {
     if (!musicSound_) {
         return false;
@@ -750,6 +785,11 @@ void AudioEngine::update(float deltaTime) {
 
     if (!initialized_ || !engine_) {
         return;
+    }
+
+    // The outgoing track of a crossfade, once its fade has stopped it.
+    if (retiringMusicSound_ && !ma_sound_is_playing(retiringMusicSound_)) {
+        releaseRetiringMusic();
     }
 
     // Clean up finished sounds - swap-and-pop avoids the O(N) shift that

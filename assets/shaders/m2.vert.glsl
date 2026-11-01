@@ -12,13 +12,14 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 fogParams;
     vec4 shadowParams;
     vec4 playerPos;   // xyz = player world position, w = horizontal speed
-    vec4 playerWake;  // xyz = trailing player position (springback reference)
+    vec4 playerWake;  // xyz = trailing player position (springback reference), w = wind strength
 };
 
 // Per-draw push constants (batch-level data only)
 layout(push_constant) uniform Push {
     int texCoordSet;         // UV set index (0 or 1)
-    int isFoliage;           // -1 sky, 0 none, 1 foliage, 2 clutter, 3 hanging cloth
+    int isFoliage;           // -1 sky, 0 none, 1 foliage, 2 clutter, 3 hanging cloth,
+                             // 4 standing cloth, 5 canvas on a frame
     int instanceDataOffset;  // Base index into InstanceSSBO for this draw group
     float swayRefHeight;     // Model height the sway normalises against (model space)
     float swayAmp;           // Sway amplitude scale; 1.0 = the tree-sized default
@@ -53,6 +54,10 @@ layout(location = 2) in vec2 aTexCoord;
 layout(location = 3) in vec4 aBoneWeights;
 layout(location = 4) in vec4 aBoneIndicesF;
 layout(location = 5) in vec2 aTexCoord2;
+// How free this vertex of an awning, tent or tarp is to flutter: 0 at its
+// frame, foot and ridge, 1 a third of the model away from all of them. Zero
+// on every other model. Worked out at load (m2_renderer.cpp).
+layout(location = 6) in float aCanvasWeight;
 
 layout(location = 0) out vec3 FragPos;
 layout(location = 1) out vec3 Normal;
@@ -107,15 +112,31 @@ void main() {
     // top would be two swings of the same plant at two different rates. The
     // player brush below still applies to it: that is motion the authored
     // animation has no way to know about.
+    // m2_shadow.vert.glsl repeats this block line for line (see m2_sway.hpp).
     if (push.isFoliage == 1) {
         float windTime = fogParams.z;
         vec3 worldRef = model[3].xyz;
-        float amp = push.swayAmp * heightFactor;
+        float amp = push.swayAmp * heightFactor * playerWake.w;
 
-        // Layer 1: Trunk sway - slow, large amplitude
+        // Layer 1: Trunk - a lean downwind with a sway about it.
+        //
+        // One prevailing wind, the grass's: trees used to swing on two
+        // unrelated axes each at its own phase, so a stand of them stirred in
+        // every direction at once beside a field whose waves all ran one way.
+        // The gust band is the grass's too, so a swell that rolls through the
+        // meadow carries on into the trees. The direction is taken into the
+        // model's own frame, since the sway is applied before the placement
+        // rotation. At full gust the throw is what the old trunk layer's was.
+        const vec2 kWindDir = normalize(vec2(0.80, 0.60));
+        float gust = 0.55 + 0.45 * sin(dot(worldRef.xy, kWindDir) * 0.11 - windTime * 0.7);
+        vec2 windM = (transpose(mat3(model)) * vec3(kWindDir, 0.0)).xy;
+        windM *= inversesqrt(max(dot(windM, windM), 1e-8));
+        vec2 crossM = vec2(-windM.y, windM.x);
         float trunkPhase = windTime * 0.8 + dot(worldRef.xy, vec2(0.1, 0.13));
-        float trunkSwayX = sin(trunkPhase) * 0.35 * amp;
-        float trunkSwayY = cos(trunkPhase * 0.7) * 0.25 * amp;
+        float trunkAlong = (0.12 + 0.23 * sin(trunkPhase)) * gust * amp;
+        float trunkAcross = cos(trunkPhase * 0.7) * 0.08 * amp;
+        float trunkSwayX = windM.x * trunkAlong + crossM.x * trunkAcross;
+        float trunkSwayY = windM.y * trunkAlong + crossM.y * trunkAcross;
 
         // Layer 2: Branch sway - medium frequency, per-branch phase
         float branchPhase = windTime * 1.7 + dot(worldRef.xy, vec2(0.37, 0.71));
@@ -154,7 +175,9 @@ void main() {
                    ? clamp((pos.z - clothBase) / span, 0.0, 1.0)
                    : clamp((push.swayRefHeight - pos.z) / span, 0.0, 1.0);
         held *= held;
-        float amp = push.swayAmp * held;
+        // fogColor.w: the cloth wind strength (setting x weather, eased; no
+        // indoor cut, as a hall's banners always breathed).
+        float amp = push.swayAmp * held * fogColor.w;
 
         // Per banner rather than per vertex, so two on the same wall are not
         // in step - the phase comes from where the instance stands.
@@ -185,6 +208,24 @@ void main() {
         pos.xyz += sway;
     }
 
+    // Canvas on a frame: an awning, a tent, a tarp (mode 5).
+    //
+    // Held all round its edge, so it does not swing - it breathes in and out
+    // along its own normal, most in the middle of a panel and not at all where
+    // it meets a pole, the ground or the ridge. The weight that says where is
+    // per vertex, from load. Two rates, the second rippling across the
+    // canvas, so a panel billows rather than pumping like a bellows; the phase
+    // is per instance, so a market's awnings are not in step.
+    // m2_shadow.vert.glsl repeats this, so the shadow breathes with it.
+    if (push.isFoliage == 5) {
+        float windTime = fogParams.z;
+        vec3 worldRef = model[3].xyz;
+        float ph = windTime * 1.3 + dot(worldRef.xy, vec2(0.21, 0.17));
+        float flutter = 0.65 * sin(ph) + 0.35 * sin(2.3 * ph + dot(aPos.xy, vec2(1.3, 1.7)));
+        vec3 canvasN = norm.xyz * inversesqrt(max(dot(norm.xyz, norm.xyz), 1e-8));
+        pos.xyz += canvasN * (aCanvasWeight * push.swayAmp * flutter * fogColor.w);
+    }
+
     vec4 worldPos = model * pos;
 
     // A boat on the water rises and falls with it and rocks a little, pivoting
@@ -212,7 +253,7 @@ void main() {
     // sway modes it happens to use. A shoulder-high bush and a waist-high one
     // should not behave differently because a bounding box crossed a threshold.
     if (push.isFoliage > 0 && push.isFoliage != 3 && push.isFoliage != 4 &&
-        push.plantHeight > 0.0) {
+        push.isFoliage != 5 && push.plantHeight > 0.0) {
         vec3 base = model[3].xyz;                      // instance origin, on the ground
         float zScale = length(model[2].xyz);
         float plantHeight = push.plantHeight * zScale;

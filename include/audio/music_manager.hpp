@@ -75,18 +75,14 @@ private:
     float trackGain_ = 1.0f;
     bool underwaterMode = false;
 
-    // Crossfade state
     /// Loop Music: whether a zone track runs on instead of stopping at its
-    /// end. Every place a track is started reads this, including the one that
-    /// starts the pending track after a crossfade - a flag applied at three of
-    /// four sites is worse than none, because the exception is the one nobody
-    /// remembers.
+    /// end. Every place a track is started reads this, including the
+    /// incoming track of a crossfade - a flag applied at three of four sites
+    /// is worse than none, because the exception is the one nobody remembers.
     bool loopTracks_ = false;
-    bool crossfading = false;
-    std::string pendingTrack;
-    bool pendingIsFile = false;
-    float fadeTimer = 0.0f;
-    float fadeDuration = 0.0f;
+    /// Hands the playing track to the engine's fading voice and clears the
+    /// state that described it, so the next track can fade in over it.
+    void beginCrossfadeOut(float fadeMs);
     bool fadingIn = false;
     float fadeInTimer = 0.0f;
     float fadeInDuration = 0.0f;

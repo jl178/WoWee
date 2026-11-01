@@ -485,3 +485,27 @@ TEST_CASE("the fire sound and the fire rendering agree on what a fire is",
         CHECK(emitter(name) == AmbientEmitterType::None);
     }
 }
+
+// Canvas held all round a frame flutters in the middle; the renderer confirms
+// it from the texture list. These are the names it is meant for, and the ones
+// that only share a token with them.
+TEST_CASE("awnings, tents and tarps are canvas", "[m2][classifier][canvas]") {
+    for (const char* n : {"World\\Generic\\Human\\Passive Doodads\\VendorAwnings\\"
+                          "StormwindVendorAwning01.m2",
+                          "HumanTentLarge.m2", "HumanTentMedium.m2", "WT_Tent01.m2",
+                          "TS_Tarp_01.m2"}) {
+        CAPTURE(n);
+        const auto r = classify(n);
+        CHECK(r.isCanvas);
+        CHECK_FALSE(r.isHangingCloth);
+    }
+    // "canopy" is a foliage token, so a canopy that is not a tree's or a bed's
+    // is only canvas when nothing else claims it - a bare canopy name stays
+    // foliage, as it was.
+    for (const char* n : {"Tentacle01.m2", "TentBurninator.m2", "WreckedTent01.m2",
+                          "InnBedCanopy.m2", "ElwynnTreeCanopy01.m2", "BannerTent01.m2",
+                          "DuskwoodCanopy01.m2"}) {
+        CAPTURE(n);
+        CHECK_FALSE(classify(n).isCanvas);
+    }
+}

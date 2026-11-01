@@ -81,3 +81,22 @@ TEST_CASE("the sway modes are unchanged by that", "[m2][sway]") {
         CHECK(sway.plantHeight == Catch::Approx(0.8f));
     }
 }
+
+TEST_CASE("canvas on a frame flutters on its own mode", "[m2][sway]") {
+    SECTION("an awning throws 1.2% of its largest extent") {
+        const auto sway = m2SwayFor(kNotSky, kNotCloth, kNotFoliage, kNotDetail, 0.0f, 4.0f,
+                                    false, /*canvasExtent=*/10.0f);
+        CHECK(sway.mode == 5);
+        CHECK(sway.amp == Catch::Approx(0.12f));
+        CHECK(sway.plantHeight == Catch::Approx(4.0f));
+    }
+    SECTION("cloth outranks canvas, and canvas outranks foliage") {
+        CHECK(m2SwayFor(kNotSky, true, kNotFoliage, kNotDetail, 0.0f, 4.0f, false, 10.0f).mode
+              == 3);
+        CHECK(m2SwayFor(kNotSky, kNotCloth, true, kNotDetail, 0.0f, 4.0f, false, 10.0f).mode
+              == 5);
+    }
+    SECTION("no extent, no canvas") {
+        CHECK(m2SwayFor(kNotSky, kNotCloth, kNotFoliage, kNotDetail, 0.0f, 4.0f).mode == 0);
+    }
+}
