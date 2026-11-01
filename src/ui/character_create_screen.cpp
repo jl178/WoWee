@@ -177,6 +177,7 @@ void CharacterCreateScreen::reset() {
     prevRangeBodyType_ = -1;
     prevRangeSkin_ = -1;
     prevRangeHairStyle_ = -1;
+    prevRangeDK_ = -1;
 
     sceneShown_ = false;
     prevSceneDK_ = -1;
@@ -307,11 +308,21 @@ void CharacterCreateScreen::applyStartOutfit() {
 }
 
 void CharacterCreateScreen::updateAppearanceRanges() {
+    // CharSections.Flags: 0x1 is offered at character creation, 0x4 is death
+    // knight art (the pale skins, the scarred faces, the DK hair colours). Rows
+    // without 0x1 (NPC skins, barbershop-only styles) are never offered, and
+    // the 0x4 rows only to a death knight - they sit at ordinary skin colours
+    // too, so without the check every class was offered DK faces and
+    // Randomize picked them.
+    const bool dk = classIndex >= 0 &&
+                    classIndex < static_cast<int>(availableClasses.size()) &&
+                    availableClasses[static_cast<size_t>(classIndex)] == game::Class::DEATH_KNIGHT;
     if (raceIndex == prevRangeRace_ &&
         genderIndex == prevRangeGender_ &&
         bodyTypeIndex == prevRangeBodyType_ &&
         skin == prevRangeSkin_ &&
-        hairStyle == prevRangeHairStyle_) {
+        hairStyle == prevRangeHairStyle_ &&
+        static_cast<int>(dk) == prevRangeDK_) {
         return;
     }
 
@@ -342,10 +353,18 @@ void CharacterCreateScreen::updateAppearanceRanges() {
 
     const auto* csL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
     auto csF = pipeline::detectCharSectionsFields(dbc.get(), csL);
+    const bool haveFlags = csF.flags < dbc->getFieldCount();
+    auto offered = [&](uint32_t r) {
+        if (!haveFlags) return true;
+        const uint32_t flags = dbc->getUInt32(r, csF.flags);
+        if ((flags & 0x1u) == 0) return false;
+        return dk || (flags & 0x4u) == 0;
+    };
     for (uint32_t r = 0; r < dbc->getRecordCount(); r++) {
         uint32_t raceId = dbc->getUInt32(r, csF.raceId);
         uint32_t sexId = dbc->getUInt32(r, csF.sexId);
         if (raceId != targetRaceId || sexId != targetSexId) continue;
+        if (!offered(r)) continue;
 
         uint32_t baseSection = dbc->getUInt32(r, csF.baseSection);
         uint32_t variationIndex = dbc->getUInt32(r, csF.variationIndex);
@@ -374,6 +393,7 @@ void CharacterCreateScreen::updateAppearanceRanges() {
         uint32_t raceId = dbc->getUInt32(r, csF.raceId);
         uint32_t sexId = dbc->getUInt32(r, csF.sexId);
         if (raceId != targetRaceId || sexId != targetSexId) continue;
+        if (!offered(r)) continue;
 
         uint32_t baseSection = dbc->getUInt32(r, csF.baseSection);
         uint32_t variationIndex = dbc->getUInt32(r, csF.variationIndex);
@@ -420,6 +440,7 @@ void CharacterCreateScreen::updateAppearanceRanges() {
     prevRangeBodyType_ = bodyTypeIndex;
     prevRangeSkin_ = skin;
     prevRangeHairStyle_ = hairStyle;
+    prevRangeDK_ = dk ? 1 : 0;
 }
 
 namespace {
