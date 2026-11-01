@@ -483,3 +483,16 @@ Other fixes:
 - `343fc96`: LEARNED_SPELL_IN_TAB carries the spellbook tab index, so the tab flashes.
 - Windows package rebuild from 343fc96 started.
 - Windows package rebuilt from 343fc96, zip refreshed, share restarted (port 8081, 22:49 UTC).
+
+## Sunday evening (Jered asleep; hourly checks until ~3:30)
+
+- `50c3485`: FontString metrics as Wow.exe measures them.
+  - em px, raster clamp at 32 px, floor(adv)+1 (+1 for THICK), negative kerning only, outline pad, last-glyph cell.
+  - "Stranglethorn Vale" at 62 THICK = 601 units, matching stock. Layout verify stayed clean in game, and all tests pass.
+- `6df47d7`: interface sound audit.
+  - Error.wav removed. Stock never plays it, and errors had played it twice.
+  - igQuestFailed and Aggro_Pulled_Aggro per the Wow.exe error table and threat code.
+  - Doubled sounds removed: whisper, ping, achievement, food/drink, Charge, duel.
+  - Names resolve through SoundEntries (random file, row volume).
+- Test account WPTEST2/WPTEST2 (character Wptestb, HOME scratchpad/testhome2), for when Jered uses WPTEST in the stock client.
+- Next: stock sounds Wowee never plays (party join and decline, taxi node discovered, friend online, LFG ready/denied, PvP queue, aggro warning). SMSG_PLAY_SOUND to use the row's volume and a random file. Level-up and achievement sounds on other players.
