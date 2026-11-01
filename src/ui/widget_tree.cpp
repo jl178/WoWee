@@ -1487,8 +1487,15 @@ void WidgetTree::collectDrawOrder() {
     // ARTWORK, so it lands above the box's background and border art and
     // alongside the header rather than over it - the two never overlap, the
     // insets see to that.
+    // WorldMapBlobFrame paints its quest areas itself too, and goes one level
+    // in for the same reason: its regions' level is the frame's own plus one,
+    // which is where WorldMapDetailFrame's map tiles and explored overlays sit
+    // (the detail frame is one level below it). At its own level the areas
+    // tied with those and were drawn under every overlay created after them -
+    // which is every explored part of the zone.
     auto sortLevel = [](const Widget* w) {
-        return ((w->isStatusBar && !w->barTexture.empty()) || w->isEditBox)
+        return ((w->isStatusBar && !w->barTexture.empty()) || w->isEditBox ||
+                w->name == "WorldMapBlobFrame")
                    ? w->effLevel + 1
                    : w->effLevel;
     };
