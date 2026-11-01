@@ -40,6 +40,7 @@
 #include <algorithm>
 #include <array>
 #include <cfenv>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -533,11 +534,22 @@ int playerZoneId(lua_State* L, game::GameHandler* gh) {
 }
 
 /// The global WMO group id the player stands in - 0x00BD0814.
+///
+/// Asked of the WMO renderer at most ten times a second: the map asks for
+/// every party and raid member's position every frame, and the client itself
+/// only learns the group when the player crosses into another one.
 int playerWmoGroupId(lua_State* L) {
+    using Clock = std::chrono::steady_clock;
+    static Clock::time_point askedAt{};
+    static int cached = 0;
+    const auto now = Clock::now();
+    if (now - askedAt < std::chrono::milliseconds(100)) return cached;
+    askedAt = now;
+    cached = 0;
     if (auto* svc = getLuaServices(L); svc && svc->getLiveWmoGroupId) {
-        return static_cast<int>(svc->getLiveWmoGroupId());
+        cached = static_cast<int>(svc->getLiveWmoGroupId());
     }
-    return 0;
+    return cached;
 }
 
 /// CGPlayer::IsExplored (0x00546100): bit `areaBit` of PLAYER_EXPLORED_ZONES.
@@ -966,9 +978,17 @@ bool ensureReady(lua_State* L) {
     if (!loadData(gh)) return false;
     if (!gState.initialised && gh && gh->getPlayerGuid() != 0) {
         setMapToCurrentZoneImpl(L);
-    } else if (gState.initialised && gh && exploredHash(gh) != gState.exploredHash) {
-        // New ground: the overlays and landmarks change (0x007F5BA0 -> 0x0050F490).
-        refresh(L);
+        return true;
+    }
+    // New ground or a landmark's world state: the overlays and landmarks
+    // change (0x007F5BA0 / 0x005285F0 -> 0x0050F490). Looked at four times a
+    // second rather than on every call - the map makes dozens a frame.
+    using Clock = std::chrono::steady_clock;
+    static Clock::time_point checkedAt{};
+    const auto now = Clock::now();
+    if (gState.initialised && gh && now - checkedAt > std::chrono::milliseconds(250)) {
+        checkedAt = now;
+        if (exploredHash(gh) != gState.exploredHash) refresh(L);
     }
     return true;
 }
