@@ -3371,6 +3371,10 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 matData.alphaTest = blendNeedsCutout ? 1 : 0;
                 matData.colorKeyBlack = colorKeyBlack ? 1 : 0;
                 matData.unlit = unlit ? 1 : 0;
+                // Bit 1: M2 render flag 0x2, unfogged. Only a glue scene has
+                // fog worth skipping (its sky dome and cloud cards carry it),
+                // so only a scene sets it.
+                if (instance.isSceneModel && (materialFlags & 0x02) != 0) matData.unlit |= 2;
                 matData.emissiveBoost = emissiveBoost;
                 matData.emissiveTintR = emissiveTint.r;
                 matData.emissiveTintG = emissiveTint.g;

@@ -358,7 +358,7 @@ void main() {
 
     vec3 result;
 
-    if (unlit != 0) {
+    if (isUnlit) {
         vec3 emissiveTint = vec3(emissiveTintR, emissiveTintG, emissiveTintB);
         vec3 warm = emissiveTint * emissiveBoost;
         result = texColor.rgb * (1.0 + warm);
@@ -403,10 +403,10 @@ void main() {
                + sunVis * (diff * lightColor.rgb * texColor.rgb + spec * lightColor.rgb);
     }
 
-    if (unlit == 0) result += localLightContribution(FragPos, norm, texColor.rgb);
+    if (!isUnlit) result += localLightContribution(FragPos, norm, texColor.rgb);
 
     float dist = length(viewPos.xyz - FragPos);
-    result = applyFog(result, FragPos, dist);
+    if (!unfogged) result = applyFog(result, FragPos, dist);
     if (!finiteVec3(result)) {
         result = texColor.rgb;
     }

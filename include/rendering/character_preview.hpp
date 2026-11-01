@@ -251,6 +251,11 @@ private:
     glm::vec3 sceneLightDir_{0.0f, 0.0f, -1.0f};  // the way the light travels
     glm::vec3 sceneLightColor_{0.0f};
     std::vector<SceneLocalLight> sceneLocalLights_;
+    // GlueParent.lua's CharModelFogInfo for the scene: linear from 0 to
+    // sceneFogFar_ yards. 0 = no fog.
+    glm::vec3 sceneFogColor_{0.0f};
+    float sceneFogFar_ = 0.0f;
+    void setSceneFog(const std::string& sceneName);
 
     // Cached info from loadCharacter() for later recompositing.
     game::Race race_ = game::Race::HUMAN;
