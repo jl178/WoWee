@@ -981,8 +981,11 @@ void GameHandler::registerCoreOpcodes() {
         ping.wowY = pingX;
         ping.age  = 0.0f;
         minimapPings_.push_back(ping);
-        if (senderGuid != playerGuid) {
-                            withSoundManager(&audio::AudioCoordinator::getUiSoundManager, [](auto* sfx) { sfx->playMinimapPing(); });
+        // MapPing is minimap.lua's: MinimapPing_OnEvent plays it on
+        // MINIMAP_PING, fired below. Only a minimap that is not FrameXML's
+        // needs it from here; with both, every ping sounded twice.
+        if (senderGuid != playerGuid && !ui::frameXmlOwns(ui::UiElement::Minimap)) {
+            withSoundManager(&audio::AudioCoordinator::getUiSoundManager, [](auto* sfx) { sfx->playMinimapPing(); });
         }
         // The ping is drawn by this client from minimapPings_ and was never
         // announced, so a handed-over minimap heard the sound and showed
@@ -1209,6 +1212,8 @@ void GameHandler::registerCoreOpcodes() {
                     gameObjectCustomAnimCallback_(guid, kFishingBobberBiteAnimation);
                 addUIError("A fish is on your line! Right-click to reel it in.");
                 addSystemChatMessage("A fish is on your line! Right-click to reel it in.");
+                // "Fishing Hooked" (3355): the bobber display's (668) custom
+                // animation sound, GameObjectDisplayInfo Sound[6].
                 withSoundManager(&audio::AudioCoordinator::getUiSoundManager,
                                  [](auto* sfx) { sfx->playFishingBite(); });
                 LOG_WARNING("Fishing bite ready: guid=0x", std::hex, guid, std::dec,
@@ -1479,6 +1484,9 @@ void GameHandler::registerCoreOpcodes() {
                             addSystemChatMessage("You have reached level " +
                                                  std::to_string(newLevel) + "!");
                         }
+                        // LEVELUP (888): in the stock client it is the $SND
+                        // event of Spells\LevelUp\LevelUp.m2, which the
+                        // level-up effect here draws without its events.
                         withSoundManager(&audio::AudioCoordinator::getUiSoundManager, [](auto* sfx) { sfx->playLevelUp(); });
                         if (levelUpCallback_) levelUpCallback_(newLevel);
                         // All nine, in the order the interface reads them:

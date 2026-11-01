@@ -261,8 +261,14 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
                 else        playerTopThreatOn_.erase(unitGuid);
                 if (topNow && threatWarningWanted() &&
                     addons::storedCVarValue("threatPlaySounds", "0") != "0") {
+                    // Aggro_Pulled_Aggro (SoundEntries 15263), which Wow.exe
+                    // plays by id from its threat update (0x737620) under
+                    // threatPlaySounds; Error.wav played here was no row's.
                     if (auto* ac = owner_.services().audioCoordinator) {
-                        if (auto* sfx = ac->getUiSoundManager()) sfx->playError();
+                        if (auto* sfx = ac->getUiSoundManager()) {
+                            if (const auto* data = ac->getSoundData())
+                                sfx->playEntry(data->sound(15263));
+                        }
                     }
                 }
             }

@@ -182,13 +182,10 @@ void AnimationCallbackHandler::setupCallbacks() {
         glm::vec3 chargeDir = glm::normalize(endRender - startRender);
         if (auto* ac = renderer_.getAnimationController()) ac->startChargeEffect(startRender, chargeDir);
 
-        // Charge's cast kit points at SoundEntries 3330 ("HeroicLeap"), whose file name
-        // carries Blizzard's own typo. There is no Sound\Spells\Charge.wav.
-        auto& audio = audio::AudioEngine::instance();
-        if (!audio.playSound2D("Sound\\Spells\\HeroricLeap.wav", 0.8f)) {
-            // Fallback: weapon whoosh
-            audio.playSound2D("Sound\\Item\\Weapons\\WeaponSwings\\mWooshLarge1.wav", 0.9f);
-        }
+        // No sound here. Charge's visual (867) has cast kit 44, whose sound is
+        // SoundEntries 3330 ("HeroicLeap"), and the spell visual system plays
+        // it at the caster on SPELL_GO. Playing HeroricLeap.wav from here as
+        // well gave every charge two of it.
     });
 
     // GUID → CharacterRenderer instance for bone-attached spell visuals:
@@ -637,16 +634,11 @@ void AnimationCallbackHandler::setupCallbacks() {
                             pickFirst({rendering::anim::EATING_LOOP}));
                     }
                 }
-                // Food/water consume sounds repeat from SpellHandler::updateTimers
-                // for the whole aura; potions get their single swig sound here.
-                if (restChannel == game::spellclass::RestChannelKind::POTION ||
-                    restChannel == game::spellclass::RestChannelKind::ALCOHOL) {
-                    if (auto* audio = gameHandler_.services().audioCoordinator) {
-                        if (auto* ui = audio->getUiSoundManager()) {
-                            ui->playDrinking();
-                        }
-                    }
-                }
+                // No swig sound here. A potion's or a drink's gulp is its cast
+                // kit's: Healing Potion's visual 147 (kit 237) and the
+                // alcohol/drink visual 101 (kit 438) both play "Drinking", and
+                // the spell visual system plays cast kits on SPELL_GO. This
+                // played the same file a second time.
             } else if (isMining) {
                 appearanceComposer_.showMiningPick(true);
                 uint32_t mineAnim = pickFirst({

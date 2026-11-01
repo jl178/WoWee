@@ -1865,8 +1865,9 @@ void SocialHandler::handleDuelRequested(network::Packet& packet) {
     }
     pendingDuelRequest_ = true;
     owner_.addSystemChatMessage(duelChallengerName_ + " challenges you to a duel!");
-    if (auto* ac = owner_.services().audioCoordinator)
-        if (auto* sfx = ac->getUiSoundManager()) sfx->playTargetSelect();
+    // No sound of ours: DUEL_REQUESTED raises StaticPopupDialogs.DUEL_REQUESTED,
+    // whose sound = "igPlayerInvite" plays as it shows. The target-select click
+    // played here as well was neither.
     if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("DUEL_REQUESTED", {duelChallengerName_});
 }
 

@@ -92,6 +92,7 @@ void AudioCoordinator::loadSoundData(pipeline::AssetManager* assets) {
         if (playerVoiceManager_) playerVoiceManager_->setSoundData(&soundData_);
         if (combatSoundManager_) combatSoundManager_->setSoundData(&soundData_);
         if (worldSoundEmitters_) worldSoundEmitters_->setSoundData(&soundData_);
+        if (uiSoundManager_) uiSoundManager_->setSoundData(&soundData_);
         // The client looks this one up by name, hence the warning in it.
         const SoundEntry* loop = soundData_.soundByName("Underwater (DONOTRENAME)");
         if (!loop || loop->files.empty()) loop = soundData_.soundByName("UnderWaterLoop");

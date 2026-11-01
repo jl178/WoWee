@@ -55,12 +55,21 @@ namespace ui {
 //
 // What is left of the raid warning overlay. RaidWarningFrame is FrameXML's and
 // answers CHAT_MSG_RAID_WARNING itself, so the banner went; the walk through
-// new chat lines stayed, because the whisper sound was being played from
-// inside it and belongs to no element - FrameXML plays none for a whisper.
+// new chat lines stayed for the whisper sound.
+//
+// Only for a chat that is not FrameXML's. chatframe.lua plays TellMessage
+// itself on CHAT_MSG_WHISPER (ChatFrame_MessageEventHandler, throttled by
+// tellTimer), so with its chat frame up this was a second sound on every
+// whisper - and a different one, since the file it asked for does not exist
+// and it fell back to the target-select click.
 void CombatUI::playSoundsForNewChat(game::GameHandler& gameHandler) {
     const auto& chatHistory = gameHandler.getChatHistory();
     const size_t newCount = chatHistory.size();
     if (newCount <= raidWarnChatSeenCount_) return;
+    if (frameXmlOwns(UiElement::Chat)) {
+        raidWarnChatSeenCount_ = newCount;
+        return;
+    }
 
     for (size_t i = raidWarnChatSeenCount_; i < newCount; ++i) {
         if (chatHistory[i].type != game::ChatType::WHISPER) continue;

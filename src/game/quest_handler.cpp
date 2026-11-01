@@ -161,6 +161,15 @@ void QuestHandler::sendQuestGiverStatusQueries() {
     }
 }
 
+// igQuestFailed, which the stock client plays with every quest refusal and
+// failure it reports: Wow.exe's error table (0xac8af0) gives it to
+// ERR_QUEST_FAILED_S and its variants, ERR_QUEST_ALREADY_ON/DONE,
+// ERR_QUEST_NEED_PREREQS, ERR_QUEST_LOG_FULL and the rest of the quest errors.
+static void playQuestFailedSound(GameHandler& owner) {
+    if (auto* ac = owner.services().audioCoordinator)
+        if (auto* sfx = ac->getUiSoundManager()) sfx->playQuestFailed();
+}
+
 
 // The readability test and the completed-line choice live in game/quest_text.hpp
 // so they can be tested without a packet; this is the name the file has always
@@ -590,6 +599,7 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
             std::to_string(maxQuestLogSlots()) + " quests). Abandon a quest to make room.";
         owner_.addUIError(msg);
         owner_.addSystemChatMessage(msg);
+        playQuestFailedSound(owner_);
         // Roll back the optimistic local entries the server refused; without
         // this the local log drifts past the server cap with phantom quests.
         bool removed = false;
@@ -651,6 +661,7 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
                 if (q.questId == questId && !q.title.empty()) { questTitle = q.title; break; }
             owner_.addSystemChatMessage(questTitle.empty() ? std::string("Quest failed!")
                                                            : ('"' + questTitle + "\" failed!"));
+            playQuestFailedSound(owner_);  // ERR_QUEST_FAILED_S (Wow.exe 0x6d8030)
             // Same omission as the complete handler had: a line of chat is not
             // a redraw, and a failed quest goes on looking fine in the log.
             announceQuestLogChanged(questId);
@@ -666,6 +677,7 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
                 if (q.questId == questId && !q.title.empty()) { questTitle = q.title; break; }
             owner_.addSystemChatMessage(questTitle.empty() ? std::string("Quest timed out!")
                                                            : ('"' + questTitle + "\" has timed out."));
+            playQuestFailedSound(owner_);  // the same ERR_QUEST_FAILED_S path
             announceQuestLogChanged(questId);
         }
     };
@@ -694,6 +706,7 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
             if (reasonStr) msg += std::string(": ") + reasonStr;
             msg += '.';
             owner_.addSystemChatMessage(msg);
+            playQuestFailedSound(owner_);
         }
     };
 
@@ -740,6 +753,7 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
             // Only show error to user for real errors (not informational messages)
             if (failReason != 13 && failReason != 18) {  // Don't spam "already on/completed"
                 owner_.addSystemChatMessage(std::string("Quest unavailable: ") + reasonStr);
+                playQuestFailedSound(owner_);
             }
         }
     };
@@ -761,7 +775,8 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
                     if (!it->title.empty()) {
                         owner_.addSystemChatMessage(it->title + " completed.");
                     }
-                    // Play quest-complete sound
+                    // igQuestListComplete, which Wow.exe plays from its own
+                    // SMSG_QUESTGIVER_QUEST_COMPLETE handler (0x6d0e10)
                     if (auto* ac = owner_.services().audioCoordinator) {
                         if (auto* sfx = ac->getUiSoundManager())
                             sfx->playQuestComplete();
@@ -1521,8 +1536,7 @@ void QuestHandler::acceptQuest() {
                                 " quests). Abandon a quest to make room.";
         owner_.addUIError(msg);
         owner_.addSystemChatMessage(msg);
-        if (auto* ac = owner_.services().audioCoordinator)
-            if (auto* sfx = ac->getUiSoundManager()) sfx->playError();
+        playQuestFailedSound(owner_);  // ERR_QUEST_LOG_FULL's sound, not Error.wav
         return;
     }
 
@@ -1543,7 +1557,7 @@ void QuestHandler::acceptQuest() {
     // "show all when nothing tracked" fallback still applies to those.
     owner_.setQuestTracked(questId, true);
 
-    // Play quest-accept sound
+    // QUESTADDED, the sound of the stock ERR_QUEST_ACCEPTED_S message
     if (auto* ac = owner_.services().audioCoordinator) {
         if (auto* sfx = ac->getUiSoundManager())
             sfx->playQuestActivate();

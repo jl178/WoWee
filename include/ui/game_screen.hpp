@@ -172,9 +172,6 @@ private:
     float damageFlashAlpha_ = 0.0f; // Screen edge flash intensity (fades to 0)
 
 
-    // UIErrorsFrame: WoW-style center-bottom error messages (spell fails, out of range, etc.)
-    bool uiErrorCallbackSet_ = false;
-
     bool showWorldMap_ = false;  // W key toggles world map
 
     /**

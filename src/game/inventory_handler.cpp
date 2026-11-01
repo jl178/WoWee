@@ -603,10 +603,6 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                 const char* msg = (result < 7) ? sellErrors[result] : "Unknown sell error";
                 owner_.addUIError(std::string("Sell failed: ") + msg);
                 owner_.addSystemChatMessage(std::string("Sell failed: ") + msg);
-                if (auto* ac = owner_.services().audioCoordinator) {
-                    if (auto* sfx = ac->getUiSoundManager())
-                        sfx->playError();
-                }
                 LOG_WARNING("SMSG_SELL_ITEM error: ", (int)result, " (", msg,
                             ") itemGuid=0x", std::hex, itemGuid,
                             " vendorGuid=0x", vendorGuid, std::dec);
@@ -748,12 +744,10 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         }
         owner_.addUIError(msg);
         owner_.addSystemChatMessage(msg);
-        if (auto* ac = owner_.services().audioCoordinator) {
-            if (auto* sfx = ac->getUiSoundManager())
-                sfx->playError();
-        }
 
-        // Character speech response for errors with a matching voice line
+        // Character speech response for errors with a matching voice line -
+        // the only sound the stock client gives these (its error table names
+        // a VocalUISounds line for them, no interface sound).
         using audio::PlayerErrorSpeech;
         switch (error) {
             case 4:  owner_.playErrorSpeech(PlayerErrorSpeech::BAG_FULL); break;
@@ -822,10 +816,6 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
             }
             owner_.addUIError(msg);
             owner_.addSystemChatMessage(msg);
-            if (auto* ac = owner_.services().audioCoordinator) {
-                if (auto* sfx = ac->getUiSoundManager())
-                    sfx->playError();
-            }
             if (errCode == 2)
                 owner_.playErrorSpeech(audio::PlayerErrorSpeech::NOT_ENOUGH_MONEY);
             else if (errCode == 6)
@@ -877,10 +867,6 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                 }
                 pendingBuybackSlot_ = -1;
                 pendingBuybackWireSlot_ = 0;
-                if (auto* ac = owner_.services().audioCoordinator) {
-                    if (auto* sfx = ac->getUiSoundManager())
-                        sfx->playPickupBag();
-                }
                 if (owner_.addonEventCallbackRef()) {
                     owner_.addonEventCallbackRef()("MERCHANT_UPDATE", {});
                     fireBagUpdates();
@@ -898,10 +884,10 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                 std::string msg = "Purchased: " + buildItemLink(pendingBuyItemId_, buyQuality, itemLabel);
                 if (itemCount > 1) msg += " x" + std::to_string(itemCount);
                 owner_.addSystemChatMessage(msg);
-                if (auto* ac = owner_.services().audioCoordinator) {
-                    if (auto* sfx = ac->getUiSoundManager())
-                        sfx->playPickupBag();
-                }
+                // No sound of its own. The purchase is heard as the coin sound
+                // (the money field drops) and the item's put-down foley
+                // (SMSG_ITEM_PUSH_RESULT), as in the stock client; the bag
+                // rustle that played here as well is in neither.
             }
             pendingBuyItemId_   = 0;
             pendingBuyItemSlot_ = 0;
@@ -3433,12 +3419,13 @@ void InventoryHandler::handleQueryNextMailTime(network::Packet& packet) {
 }
 
 void InventoryHandler::setHasNewMail(bool value) {
-    // Announce a chat line + sound only on the rising edge (no unread -> unread), so the
+    // Announce a chat line only on the rising edge (no unread -> unread), so the
     // periodic next-mail-time poll doesn't repeat the notification while mail sits unread.
+    // No sound: the stock client plays none for new mail (nothing in Wow.exe's
+    // own sound calls, nothing on UPDATE_PENDING_MAIL in FrameXML), and the
+    // one here was iTellMessage.wav - a whisper's sound.
     if (value && !hasNewMail_) {
         owner_.addSystemChatMessage("You have new mail.");
-        if (auto* ac = owner_.services().audioCoordinator)
-            if (auto* sfx = ac->getUiSoundManager()) sfx->playMailReceived();
     }
     hasNewMail_ = value;
     if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("UPDATE_PENDING_MAIL", {});
@@ -5960,8 +5947,6 @@ void InventoryHandler::handleTrainerBuyFailed(network::Packet& packet) {
     else msg += " (requirements not met)";
     owner_.addUIError(msg);
     owner_.addSystemChatMessage(msg);
-    if (auto* ac = owner_.services().audioCoordinator)
-        if (auto* sfx = ac->getUiSoundManager()) sfx->playError();
     if (errorCode == 1)
         owner_.playErrorSpeech(audio::PlayerErrorSpeech::NOT_ENOUGH_MONEY);
     else

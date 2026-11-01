@@ -56,13 +56,8 @@ void AudioCallbackHandler::setupCallbacks() {
         }
     });
 
-    // Achievement earned callback - show toast banner
-    gameHandler_.setAchievementEarnedCallback([this](uint32_t /*achievementId*/,
-                                                    const std::string& /*name*/) {
-        if (uiManager_) {
-            uiManager_->getGameScreen().toastManager().playAchievementEarned();
-        }
-    });
+    // No achievement callback: the badge is alertframes.lua's and the sound is
+    // played where SMSG_ACHIEVEMENT_EARNED is read (SpellHandler).
 
     // Server-triggered music callback (SMSG_PLAY_MUSIC)
     // Resolves soundId → SoundEntries.dbc → MPQ path → MusicManager.
