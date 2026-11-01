@@ -476,3 +476,9 @@ Other fixes:
   - LEARNED_SPELL_IN_TAB passes the spell id instead of the tab index.
   - Bots' weapons stay sheathed (server sheath 0). Need a stock comparison of whether the stock client draws them anyway.
   - Restart Jered's client.
+- `1ad8cad`: JumpOrAscendStart/AscendStop.
+  - Scripted presses skip the focus gate and are queued to the next input frame.
+  - "Movement: ... interrupts the cast" is now logged.
+  - Jump-interrupt still unconfirmed. In a test client that isn't focused, `grounded` stays false, so a scripted jump never fires. Jered's next jump mid-cast will show in his log.
+- `343fc96`: LEARNED_SPELL_IN_TAB carries the spellbook tab index, so the tab flashes.
+- Windows package rebuild from 343fc96 started.
