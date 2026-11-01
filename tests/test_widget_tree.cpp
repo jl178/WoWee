@@ -3172,6 +3172,12 @@ TEST_CASE("Only widgets asked for writable are handed to the sizing pass",
     CHECK(take().empty());
     CHECK(tree.noteSizingContext(&face, &assets, 14.0f));
     CHECK(take() == std::vector<uint32_t>{label, tex});
+    // A new screen height: the stock text metrics round in pixels, so every
+    // label measures again.
+    CHECK(tree.noteSizingContext(&face, &assets, 14.0f, 1080.0f / 768.0f));
+    CHECK(take() == std::vector<uint32_t>{label, tex});
+    CHECK_FALSE(tree.noteSizingContext(&face, &assets, 14.0f, 1080.0f / 768.0f));
+    CHECK(take().empty());
 
     tree.markAllChanged();
     CHECK(take() == std::vector<uint32_t>{label, tex});

@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <chrono>
 #include "core/window.hpp"
 #include "core/application.hpp"
@@ -341,6 +342,21 @@ void UIManager::loadInterfaceFont(const std::string& dataRoot,
         }
         if (f) {
             registerInterfaceFace(name, f);
+            // The same file again, for the stock client's metrics: FrameXML
+            // text is measured and placed by them rather than by ImGui's
+            // advances. See stock_font_metrics.hpp.
+            std::vector<uint8_t> bytes;
+            if (!file.empty()) {
+                std::ifstream in(file, std::ios::binary);
+                bytes.assign(std::istreambuf_iterator<char>(in),
+                             std::istreambuf_iterator<char>());
+            } else if (assets) {
+                std::string upper(name);
+                for (char& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                bytes = assets->readFileOptional(std::string("Fonts\\") + upper);
+            }
+            registerInterfaceFaceMetrics(
+                f, std::make_shared<const std::vector<uint8_t>>(std::move(bytes)));
             ++loaded;
         }
     }
@@ -412,6 +428,9 @@ void UIManager::loadInterfaceFont(const std::string& dataRoot,
     for (std::vector<uint8_t>* face : { &cjkFontData_, &hangulFontData_ }) {
         if (face->empty()) continue;
         const float emScale = fontEmSizeScale(face->data(), face->size());
+        // Measured from the same merged face the glyphs are drawn from, one
+        // copy shared by every interface face it sits under.
+        const auto shared = std::make_shared<const std::vector<uint8_t>>(*face);
         for (int i = firstNewFont; i < io.Fonts->Fonts.Size; ++i) {
             ImFont* dst = io.Fonts->Fonts[i];
             ImFontConfig cfg = interfaceFontConfig(emScale);
@@ -421,6 +440,7 @@ void UIManager::loadInterfaceFont(const std::string& dataRoot,
             io.Fonts->AddFontFromMemoryTTF(face->data(),
                                            static_cast<int>(face->size()),
                                            dst->LegacySize, &cfg);
+            addInterfaceFaceMetricsFallback(dst, shared);
         }
     }
     if (loaded > 0) interfaceFontsLoaded_ = true;

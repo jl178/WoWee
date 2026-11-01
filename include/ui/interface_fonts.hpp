@@ -9,7 +9,12 @@
 // afterwards without being torn down.
 
 #include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <string>
+#include <vector>
+
+#include "ui/stock_font_metrics.hpp"
 
 struct ImFont;
 
@@ -23,6 +28,47 @@ void registerInterfaceFace(const std::string& pathOrName, ImFont* font);
 /// in which case the caller should draw with whatever it was already using.
 ImFont* interfaceFace(const std::string& pathOrName);
 
+/// The TrueType file behind a registered face, for measuring it the stock
+/// client's way. A face with none is measured by ImGui's own advances.
+/// Registering again replaces what was there.
+void registerInterfaceFaceMetrics(const ImFont* font,
+                                  std::shared_ptr<const std::vector<uint8_t>> ttf);
+
+/// A face merged under one already registered - the CJK fallback - for the
+/// code points the face itself lacks. Shared rather than copied: the CJK
+/// faces are tens of megabytes and sit under every interface face.
+void addInterfaceFaceMetricsFallback(const ImFont* font,
+                                     std::shared_ptr<const std::vector<uint8_t>> ttf);
+
+/// The stock metrics for a face, or null if it has none.
+const GlyphMetricsSource* interfaceFaceMetrics(const ImFont* font);
+
+/// Measures plain text - markup already parsed out - the way the stock client
+/// does, in whichever units `size` is in.
+///
+/// Every place that measures FrameXML text goes through this, and the draw
+/// places its glyphs by the same rules, so a label's rect, its wrap and its
+/// glyphs agree to the pixel. `pixelsPerUnit` is the screen pixels in one of
+/// the caller's units: the interface scale times the widget's effective scale
+/// for a size in interface units, 1 for a size already in pixels. The stock
+/// rounding happens in pixels, so the same text is not simply proportional
+/// across scales.
+///
+/// A face with no stock metrics falls back on ImGui's advances at `size`, and
+/// no face at all on half the size per byte - the estimate the FrameXML load
+/// gets before there is a frame to ask.
+struct InterfaceTextMeasure {
+    ImFont* font = nullptr;
+    float size = 12.0f;
+    float pixelsPerUnit = 1.0f;
+    FontOutline outline = FontOutline::None;
+
+    /// The text's width: its widest line.
+    float operator()(const std::string& plain) const;
+    /// Where the pen stands after the text's last line - a caret's place.
+    float advance(const std::string& plain) const;
+};
+
 /// How wide a piece of text is, in interface units.
 ///
 /// The one answer to that question. It was asked twice with two different
@@ -34,8 +80,11 @@ ImFont* interfaceFace(const std::string& pathOrName);
 ///
 /// `fontFace` is the widget's own, `fontHeight` its own point size; zero for
 /// either means the default, which is what the renderer falls back to too.
+/// `pixelsPerUnit` and `outline` as for InterfaceTextMeasure. Markup is not
+/// measured, as in GetStringWidth: a colour code or a link marker is not text.
 float interfaceTextWidth(const std::string& text, const std::string& fontFace,
-                         float fontHeight);
+                         float fontHeight, float pixelsPerUnit = 1.0f,
+                         FontOutline outline = FontOutline::None);
 
 /// How many lines a piece of text takes when it is drawn.
 ///
@@ -45,7 +94,9 @@ float interfaceTextWidth(const std::string& text, const std::string& fontFace,
 /// sets a string's text and reads its height in the same breath, long before
 /// the next frame is laid out, and the quest tracker sizes every row that way.
 int interfaceTextLines(const std::string& text, const std::string& fontFace,
-                       float fontHeight, float wrapWidth, bool nonSpaceWrap);
+                       float fontHeight, float wrapWidth, bool nonSpaceWrap,
+                       float pixelsPerUnit = 1.0f,
+                       FontOutline outline = FontOutline::None);
 
 /// The face a widget draws in, resolved the way the renderer resolves it: its
 /// own, then the interface default, then whatever is current.

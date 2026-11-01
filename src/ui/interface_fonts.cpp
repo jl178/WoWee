@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -34,6 +35,19 @@ std::string faceKey(const std::string& pathOrName) {
 std::unordered_map<std::string, ImFont*>& faces() {
     static std::unordered_map<std::string, ImFont*> map;
     return map;
+}
+
+std::unordered_map<const ImFont*, std::unique_ptr<TrueTypeGlyphSource>>& faceMetrics() {
+    static std::unordered_map<const ImFont*, std::unique_ptr<TrueTypeGlyphSource>> map;
+    return map;
+}
+
+/// Markup out, text in: what GetStringWidth measures.
+std::string plainText(const std::string& text) {
+    if (text.find('|') == std::string::npos) return text;
+    std::string out;
+    for (const WrapRun& r : parseMarkup(text)) out += r.text;
+    return out;
 }
 
 /// A big-endian field out of a font file, or zero past the end.
@@ -76,32 +90,72 @@ float interfaceFontSize(float fontHeight) {
     return (ImGui::GetCurrentContext() != nullptr) ? ImGui::GetFontSize() : 12.0f;
 }
 
-float interfaceTextWidth(const std::string& text, const std::string& fontFace,
-                         float fontHeight) {
-    if (text.empty()) return 0.0f;
-    const float size = interfaceFontSize(fontHeight);
-    if (ImFont* font = interfaceFaceOrDefault(fontFace)) {
-        return font->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str()).x;
+void registerInterfaceFaceMetrics(const ImFont* font,
+                                  std::shared_ptr<const std::vector<uint8_t>> ttf) {
+    if (!font) return;
+    auto source = std::make_unique<TrueTypeGlyphSource>();
+    if (!source->addFace(std::move(ttf))) {
+        faceMetrics().erase(font);
+        return;
     }
+    faceMetrics()[font] = std::move(source);
+}
+
+void addInterfaceFaceMetricsFallback(const ImFont* font,
+                                     std::shared_ptr<const std::vector<uint8_t>> ttf) {
+    const auto it = faceMetrics().find(font);
+    if (it != faceMetrics().end()) it->second->addFace(std::move(ttf));
+}
+
+const GlyphMetricsSource* interfaceFaceMetrics(const ImFont* font) {
+    if (!font) return nullptr;
+    const auto it = faceMetrics().find(font);
+    return it == faceMetrics().end() ? nullptr : it->second.get();
+}
+
+float InterfaceTextMeasure::operator()(const std::string& plain) const {
+    if (plain.empty()) return 0.0f;
+    if (const GlyphMetricsSource* m = interfaceFaceMetrics(font)) {
+        return stockTextWidth(*m, plain, size, pixelsPerUnit, outline);
+    }
+    if (font) return font->CalcTextSizeA(size, FLT_MAX, 0.0f, plain.c_str()).x;
     // No context yet - during the FrameXML load there may be no frame in
     // flight to ask. An estimate is far better than nothing: the alternative
     // is answering zero, and MoneyFrame does SetWidth(GetTextWidth() +
     // iconWidth), which then places three buttons on top of each other.
-    return static_cast<float>(text.size()) * size * 0.5f;
+    return static_cast<float>(plain.size()) * size * 0.5f;
+}
+
+float InterfaceTextMeasure::advance(const std::string& plain) const {
+    if (const GlyphMetricsSource* m = interfaceFaceMetrics(font)) {
+        return stockTextAdvance(*m, plain, size, pixelsPerUnit, outline);
+    }
+    if (plain.empty()) return 0.0f;
+    if (font) return font->CalcTextSizeA(size, FLT_MAX, 0.0f, plain.c_str()).x;
+    return static_cast<float>(plain.size()) * size * 0.5f;
+}
+
+float interfaceTextWidth(const std::string& text, const std::string& fontFace,
+                         float fontHeight, float pixelsPerUnit, FontOutline outline) {
+    if (text.empty()) return 0.0f;
+    const InterfaceTextMeasure measure{.font = interfaceFaceOrDefault(fontFace),
+                                       .size = interfaceFontSize(fontHeight),
+                                       .pixelsPerUnit = pixelsPerUnit,
+                                       .outline = outline};
+    return measure(plainText(text));
 }
 
 int interfaceTextLines(const std::string& text, const std::string& fontFace,
-                       float fontHeight, float wrapWidth, bool nonSpaceWrap) {
+                       float fontHeight, float wrapWidth, bool nonSpaceWrap,
+                       float pixelsPerUnit, FontOutline outline) {
     if (text.empty()) return 0;
-    const float size = interfaceFontSize(fontHeight);
-    ImFont* font = interfaceFaceOrDefault(fontFace);
-    const auto measure = [&](const std::string& piece) {
-        if (font) return font->CalcTextSizeA(size, FLT_MAX, 0.0f, piece.c_str()).x;
-        // The same estimate interfaceTextWidth falls back on when there is no
-        // context yet, so a measure taken during the load does not answer that
-        // everything fits on one line.
-        return static_cast<float>(piece.size()) * size * 0.5f;
-    };
+    // The same measure interfaceTextWidth takes, estimate included, so a
+    // measure taken during the load does not answer that everything fits on
+    // one line.
+    const InterfaceTextMeasure measure{.font = interfaceFaceOrDefault(fontFace),
+                                       .size = interfaceFontSize(fontHeight),
+                                       .pixelsPerUnit = pixelsPerUnit,
+                                       .outline = outline};
     const auto lines = wrapText(parseMarkup(text), wrapWidth, nonSpaceWrap, measure);
     return lines.empty() ? 1 : static_cast<int>(lines.size());
 }

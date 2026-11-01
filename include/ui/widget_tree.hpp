@@ -214,6 +214,13 @@ struct Widget {
     /// then drew glyphs wider than the box they were given.
     float measuredSize = 0.0f;
     std::string measuredFace;
+    /// The rest of what a measurement read: the screen pixels in one of the
+    /// label's units, its outline and its line spacing. The stock metrics
+    /// round in pixels and widen an outlined cell, so a label is not simply
+    /// proportional across scales, and its height counts the spacing.
+    float measuredPixelScale = 0.0f;
+    std::string measuredOutline;
+    float measuredSpacing = 0.0f;
     /// The width that measuring gave, so SetWidth(0) on a label that already
     /// is exactly as wide as its own text can tell it has nothing to undo.
     float measuredWidth = 0.0f;
@@ -1063,11 +1070,13 @@ public:
         if (id < widgets_.size()) setVisible(widgets_[id], v);
     }
     /// What sizing reads besides a widget's own fields: the face a label falls
-    /// back on, whether there are assets to read a texture's size from, and
-    /// the point size a label with no height of its own is measured at. When
-    /// any of them differs from the last call every widget is marked, and the
-    /// answer is true.
-    bool noteSizingContext(const void* font, const void* assets, float defaultFontSize);
+    /// back on, whether there are assets to read a texture's size from, the
+    /// point size a label with no height of its own is measured at, and the
+    /// screen pixels in an interface unit, which the stock text metrics round
+    /// in. When any of them differs from the last call every widget is
+    /// marked, and the answer is true.
+    bool noteSizingContext(const void* font, const void* assets, float defaultFontSize,
+                           float pixelScale = 1.0f);
 
     /// Whether the compact copy of `visible` the draw order reads agrees with
     /// the widget's own flag. For WOWEE_LAYOUT_VERIFY; see collectDrawOrder.
@@ -1160,6 +1169,7 @@ private:
     const void* sizingFont_ = nullptr;
     const void* sizingAssets_ = nullptr;
     float sizingDefaultFontSize_ = -1.0f;
+    float sizingPixelScale_ = -1.0f;
     void layoutWidget(uint32_t id, float screenW, float screenH);
     /// Clear the drawing and running flags under a hidden frame without
     /// placing any of it. See layoutWidget.
