@@ -54,6 +54,19 @@ namespace {
 /// stairs stay walkable while still blocking, so its two cutoffs deliberately
 /// overlap where these do not.
 constexpr float kWallMaxAbsNormalZ = 0.65f;
+
+/// Whether a group is lit as an interior: INDOOR (0x2000) and not
+/// EXTERIOR_LIT (0x40). The second flag puts an indoor group under the sky's
+/// light: Stormwind has 88 of them and no exterior group for most of its
+/// streets - the Trade District's buildings are indoor groups lit from
+/// outside, with no vertex colours at all - and Silvermoon is built the same
+/// way (350 such groups in the shipped data, none carrying MOCV). Lit as
+/// interiors they took the full white an absent MOCV stands for and drew at
+/// constant full brightness, day or night, while the doodads beside them
+/// took the dusk.
+inline bool wmoGroupLitAsInterior(uint32_t groupFlags) {
+    return (groupFlags & 0x2000u) != 0 && (groupFlags & 0x40u) == 0;
+}
 } // namespace
 
 // Thread-local scratch buffers for collision queries (allows concurrent getFloorHeight/checkWallCollision calls)
@@ -851,7 +864,11 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
         // Allocate descriptor sets and UBOs for each merged batch
         groupRes.mergedBatches.reserve(batchMap.size());
         bool anyTextured = false;
-        bool isInterior = (groupRes.groupFlags & 0x2000) != 0;
+        // Lit as an interior: INDOOR and not EXTERIOR_LIT (see
+        // wmoGroupLitAsInterior). An exterior-lit indoor group takes the
+        // shader's exterior path, sun, ambient and shadow, like the doodads
+        // standing in it.
+        bool isInterior = wmoGroupLitAsInterior(groupRes.groupFlags);
         for (auto& [key, mb] : batchMap) {
             if (mb.hasTexture) anyTextured = true;
 
@@ -870,7 +887,10 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             matData.unlit = mb.unlit ? 1 : 0;
             matData.isInterior = isInterior ? 1 : 0;
             matData.hasVertexColors = (groupRes.groupFlags & 0x4) != 0 ? 1 : 0;
-            matData.specularIntensity = 0.5f;
+            // Stock WMO lighting has no specular. 7c43953 set this to zero and
+            // the playtest batch's merge put the 0.5 back, which laid a white
+            // sun glint over every exterior wall the doodads beside it lack.
+            matData.specularIntensity = 0.0f;
             matData.reserved0 = 0;
             matData.sidnColor = mb.sidnColor;
             matData.enableNormalMap = normalMappingEnabled_ ? 1 : 0;
@@ -2107,7 +2127,9 @@ uint32_t WMORenderer::getTotalTriangleCount() const {
 static void interiorVertexLight(const pipeline::WMOGroup& group, uint32_t groupFlags,
                                 const glm::vec3& mohdAmbient, uint16_t mohdFlags,
                                 std::vector<WMOVertex>& vertices) {
-    if ((groupFlags & 0x2000) == 0) return;  // not an INTERIOR group
+    // Not lit as an interior: not INDOOR, or INDOOR but EXTERIOR_LIT. The
+    // exterior shader path reads the colours as the loader left them.
+    if (!wmoGroupLitAsInterior(groupFlags)) return;
     const size_t n = vertices.size();
     constexpr uint16_t kMohdSkipBaseColor = 0x2;
     constexpr uint16_t kMohdLightenInteriors = 0x8;
@@ -4232,6 +4254,16 @@ bool WMORenderer::isInsideWMOGroups(float glX, float glY, float glZ,
                     outHit->groupIndex = static_cast<int32_t>(gi);
                     outHit->nameSet = instance.nameSet;
                     outHit->interior = (group.groupFlags & kWMOGroupIndoor) != 0;
+                    // The light is the tightest group's around the point, not
+                    // the first in file order: Stormwind's canal groups come
+                    // before its street groups and their boxes spill over the
+                    // street, so the first match put units on the Trade
+                    // District street into the canal's interior light.
+                    const int tight = findContainingGroup(model, localPos);
+                    const uint32_t lightFlags = tight >= 0
+                        ? model.groups[static_cast<size_t>(tight)].groupFlags
+                        : group.groupFlags;
+                    outHit->interiorLit = wmoGroupLitAsInterior(lightFlags);
                 }
                 return true;
             }

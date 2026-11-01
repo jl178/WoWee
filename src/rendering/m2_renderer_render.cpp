@@ -561,6 +561,25 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
             }
         }
 
+        // Cross-fade clock: the sequence being faded out keeps playing until
+        // the fade is done, holding its last frame if it runs out (a finished
+        // one-shot must not jump back to its first). See beginM2SequenceBlend.
+        if (instance.blendDurationMs > 0.0f) {
+            instance.blendElapsedMs += dtMs;
+            if (instance.blendElapsedMs >= instance.blendDurationMs ||
+                instance.blendFromSequence < 0 ||
+                instance.blendFromSequence >= static_cast<int>(model.sequences.size())) {
+                instance.blendDurationMs = 0.0f;
+            } else {
+                instance.blendFromTime += dtMs;
+                const float fromDur =
+                    static_cast<float>(model.sequences[instance.blendFromSequence].duration);
+                if (fromDur > 0.0f && instance.blendFromTime > fromDur) {
+                    instance.blendFromTime = fromDur;
+                }
+            }
+        }
+
         // Validate sequence index
         if (instance.currentSequenceIndex < 0 ||
             instance.currentSequenceIndex >= static_cast<int>(model.sequences.size())) {
@@ -582,6 +601,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
                 instance.animSpeed = 0.0f;
             } else if (instance.playingVariation) {
                 instance.playingVariation = false;
+                beginM2SequenceBlend(model, instance, instance.idleSequenceIndex);
                 instance.currentSequenceIndex = instance.idleSequenceIndex;
                 if (instance.idleSequenceIndex < static_cast<int>(model.sequences.size())) {
                     instance.animDuration = static_cast<float>(model.sequences[instance.idleSequenceIndex].duration);
@@ -606,6 +626,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
                 int newSeq = model.idleVariationIndices[pick];
                 if (newSeq != instance.currentSequenceIndex && newSeq < static_cast<int>(model.sequences.size())) {
                     instance.playingVariation = true;
+                    beginM2SequenceBlend(model, instance, newSeq);
                     instance.currentSequenceIndex = newSeq;
                     instance.animDuration = static_cast<float>(model.sequences[newSeq].duration);
                     instance.animTime = 0.0f;

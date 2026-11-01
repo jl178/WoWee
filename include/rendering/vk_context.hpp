@@ -436,8 +436,9 @@ private:
     double beginFrameAcquireMs_ = 0.0;
     uint32_t beginFrameWaitSamples_ = 0;
     bool vsync_ = true;
-    /// The vsync state the present-mode line last reported, so a rebuild
-    /// that changes nothing says nothing. -1 until the first swapchain.
+    /// The present mode and vsync state the present-mode line last reported
+    /// (mode * 2 + vsync), so a rebuild that changes nothing says nothing.
+    /// -1 until the first swapchain.
     int loggedPresentVsync_ = -1;
 
     // Per-frame resources

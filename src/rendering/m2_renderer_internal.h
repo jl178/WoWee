@@ -279,6 +279,32 @@ inline glm::vec3 closestPointOnTriangle(const glm::vec3& p,
 /// keeps its glow on bone 0, flagged 0x8.
 constexpr uint32_t kM2BoneSphericalBillboard = 0x8;
 
+/// Start a cross-fade before switching `instance` to sequence `newSeq`. Call it
+/// while currentSequenceIndex/animTime still describe the old sequence.
+///
+/// The stock client fades bone transforms from the old sequence into the new
+/// one over the incoming sequence's blendTime rather than cutting; a sequence
+/// that says 0 gets 150 ms, the value nearly every 3.3.5 sequence carries.
+/// A static-pose model only ever has its pose recomputed on a sequence change,
+/// so it is left to cut.
+inline void beginM2SequenceBlend(const M2ModelGPU& model, M2Instance& instance, int newSeq) {
+    const int oldSeq = instance.currentSequenceIndex;
+    const int seqCount = static_cast<int>(model.sequences.size());
+    // Only instances update() steps every frame have a fade clock; any other
+    // would be left holding the old pose.
+    const bool stepped = instance.cachedHasAnimation && !instance.cachedDisableAnimation;
+    if (!stepped || model.staticPose || model.bones.empty() || instance.boneMatrices.empty() ||
+        oldSeq < 0 || oldSeq >= seqCount || newSeq < 0 || newSeq >= seqCount) {
+        instance.blendDurationMs = 0.0f;
+        return;
+    }
+    const uint32_t blendMs = model.sequences[newSeq].blendTime;
+    instance.blendFromSequence = oldSeq;
+    instance.blendFromTime = instance.animTime;
+    instance.blendElapsedMs = 0.0f;
+    instance.blendDurationMs = static_cast<float>(blendMs > 0 ? std::min<uint32_t>(blendMs, 1000) : 150);
+}
+
 /// Bone transforms for one instance.
 ///
 /// `cameraPosWorld` is what a billboard bone turns toward; pass nullptr and
@@ -290,6 +316,15 @@ inline void computeBoneMatrices(const M2ModelGPU& model, M2Instance& instance,
     if (numBones == 0) return;
     instance.boneMatrices.resize(numBones);
     const auto& gsd = model.globalSequenceDurations;
+
+    // Cross-fade weight of the current sequence over the one it replaced.
+    const bool blending = instance.blendDurationMs > 0.0f &&
+                          instance.blendElapsedMs < instance.blendDurationMs &&
+                          instance.blendFromSequence >= 0 &&
+                          instance.blendFromSequence < static_cast<int>(model.sequences.size());
+    const float blendWeight = blending
+        ? glm::clamp(instance.blendElapsedMs / instance.blendDurationMs, 0.0f, 1.0f)
+        : 1.0f;
 
     for (size_t i = 0; i < numBones; i++) {
         const auto& bone = model.bones[i];
@@ -313,6 +348,30 @@ inline void computeBoneMatrices(const M2ModelGPU& model, M2Instance& instance,
         glm::vec3 scl = m2_track::sampleVec3(
             bone.scale, instance.currentSequenceIndex, boneTime,
             instance.globalSequenceTime, gsd, glm::vec3(1.0f));
+
+        // Fade the old sequence out. Global-sequence tracks run on their own
+        // clock whatever plays, and ping-pong bones on the reversing one, so
+        // neither has anything to fade from.
+        const bool pingPong = i < model.pingPongBones.size() && model.pingPongBones[i];
+        if (blending && !pingPong) {
+            const int fromSeq = instance.blendFromSequence;
+            const float fromTime = instance.blendFromTime;
+            if (bone.translation.globalSequence < 0) {
+                trans = glm::mix(m2_track::sampleVec3(bone.translation, fromSeq, fromTime,
+                                                      instance.globalSequenceTime, gsd, glm::vec3(0.0f)),
+                                 trans, blendWeight);
+            }
+            if (bone.rotation.globalSequence < 0) {
+                rot = glm::normalize(glm::slerp(m2_track::sampleQuat(bone.rotation, fromSeq, fromTime,
+                                                                     instance.globalSequenceTime, gsd),
+                                                rot, blendWeight));
+            }
+            if (bone.scale.globalSequence < 0) {
+                scl = glm::mix(m2_track::sampleVec3(bone.scale, fromSeq, fromTime,
+                                                    instance.globalSequenceTime, gsd, glm::vec3(1.0f)),
+                               scl, blendWeight);
+            }
+        }
 
         if (scl.x < 0.001f) scl.x = 1.0f;
         if (scl.y < 0.001f) scl.y = 1.0f;

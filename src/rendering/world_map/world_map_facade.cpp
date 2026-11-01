@@ -493,6 +493,8 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
     // First-time open, zones lost after a map change, or the interface asking
     // to go back to the player's own zone
     if (!d.open || d.data.zones().empty() || d.recenterOnPlayer) {
+        LOG_INFO("WorldMap snap to player zone: open=", d.open, " zonesEmpty=",
+                 d.data.zones().empty(), " recenter=", d.recenterOnPlayer);
         d.open = true;
         d.recenterOnPlayer = false;
         if (d.data.zones().empty()) {
@@ -885,8 +887,14 @@ bool WorldMapFacade::clickMapPoint(float u, float v) {
         return false;
     }
     const int idx = zoneAtMapPoint(u, v);
+    LOG_INFO("WorldMap click: uv=(", u, ",", v, ") level=", static_cast<int>(level),
+             " zoneIdx=", idx, " name=",
+             (idx >= 0 ? d.data.zones()[static_cast<size_t>(idx)].areaName : std::string("-")),
+             " before currentZone=", d.viewState.currentZoneIdx());
     if (idx < 0) return false;
     d.enterZoneFromClick(idx);
+    LOG_INFO("WorldMap click: after currentZone=", d.viewState.currentZoneIdx(),
+             " level=", static_cast<int>(d.viewState.currentLevel()));
     return true;
 }
 
@@ -1752,6 +1760,7 @@ bool WorldMapFacade::takeViewChanged() {
 }
 
 void WorldMapFacade::showPlayerZone() {
+    LOG_INFO("WorldMap showPlayerZone requested");
     impl_->userMapOverride = false;
     impl_->recenterOnPlayer = true;
 }

@@ -19,6 +19,9 @@
 #include "pipeline/wmo_loader.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "rendering/animation/emote_registry.hpp"
+#include "rendering/animation/weapon_anim_select.hpp"
+#include "game/game_utils.hpp"
+#include "game/update_field_table.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
@@ -383,6 +386,21 @@ bool EntitySpawner::tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t inst
     auto unit = std::static_pointer_cast<game::Unit>(entity);
     if (!unit) return false;
 
+    // The stock path: UNIT_VIRTUAL_ITEM_SLOT_ID[0..2] are the item entries
+    // of the main hand, off hand and ranged slot, resolved through Item.dbc -
+    // shields and off-hand weapons included, put away or drawn as the
+    // creature's sheath state says. Any model with hand attachments gets
+    // them (ogres and gnolls are not CreatureDisplayInfoExtra humanoids).
+    // Before WotLK the slots hold displays and the scan below stays.
+    if (!game::isPreWotlk()) {
+        const auto items = unitWeaponItems(guid);
+        const std::array<uint32_t, 3> displays{items[0].displayId, items[1].displayId,
+                                               items[2].displayId};
+        if (displays[0] == 0 && displays[1] == 0 && displays[2] == 0) return false;
+        creatureVirtualItemUnits_.insert(guid);
+        return attachUnitWeapons(guid, instanceId, displays, items);
+    }
+
     // Virtual weapons are only appropriate for humanoid-style displays.
     // Non-humanoids (wolves/boars/etc.) can expose non-zero virtual item fields
     // and otherwise end up with comedic floating weapons.
@@ -519,6 +537,199 @@ bool EntitySpawner::retryCreatureVirtualWeapons(uint64_t guid, uint32_t instance
         creatureWeaponAttachAttempts_[guid] = static_cast<uint8_t>(attempts + 1);
     }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Unit weapons: what a unit holds, and where it carries it
+// ---------------------------------------------------------------------------
+
+const EntitySpawner::ItemDbcRow* EntitySpawner::lookupItemDbc(uint32_t entry) {
+    if (entry == 0 || !assetManager_) return nullptr;
+    if (!itemDbcLoaded_) {
+        itemDbcLoaded_ = true;
+        // ID, Class, Subclass, SoundOverrideSubclass, Material, DisplayInfoID,
+        // InventoryType, SheatheType - the 3.3.5 layout. Earlier releases ship
+        // no Item.dbc (or a shorter one), and answer nothing here.
+        if (auto dbc = assetManager_->loadDBCOptional("Item.dbc"); dbc && dbc->getFieldCount() >= 8) {
+            itemDbcCache_.reserve(dbc->getRecordCount());
+            for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+                ItemDbcRow row;
+                row.itemClass = dbc->getUInt32(r, 1);
+                row.subclass = dbc->getUInt32(r, 2);
+                row.displayId = dbc->getUInt32(r, 5);
+                row.inventoryType = dbc->getUInt32(r, 6);
+                row.sheatheType = dbc->getUInt32(r, 7);
+                itemDbcCache_[dbc->getUInt32(r, 0)] = row;
+            }
+            LOG_INFO("Item.dbc: ", itemDbcCache_.size(), " items for unit weapons");
+        }
+    }
+    auto it = itemDbcCache_.find(entry);
+    return it != itemDbcCache_.end() ? &it->second : nullptr;
+}
+
+std::array<EntitySpawner::ItemDbcRow, 3> EntitySpawner::unitWeaponItems(uint64_t guid) {
+    std::array<ItemDbcRow, 3> out{};
+    if (!gameHandler_) return out;
+    auto entity = gameHandler_->getEntityManager().getEntity(guid);
+    if (!entity) return out;
+    if (entity->getType() == game::ObjectType::PLAYER) {
+        // Visible item entries, slots 15-17 (main hand, off hand, ranged).
+        auto& table = gameHandler_->otherPlayerVisibleItemEntriesRef();
+        if (auto it = table.find(guid); it != table.end()) {
+            for (int i = 0; i < 3; ++i)
+                if (const auto* row = lookupItemDbc(it->second[15 + i])) out[i] = *row;
+        }
+        // An item Item.dbc does not list still has the inventory type the
+        // item cache gave the equipment callback.
+        if (auto ws = onlinePlayerWeaponSlots_.find(guid); ws != onlinePlayerWeaponSlots_.end()) {
+            for (int i = 0; i < 3; ++i) {
+                if (out[i].inventoryType == 0) out[i].inventoryType = ws->second.inventoryTypes[i];
+                if (ws->second.displayIds[i] != 0) out[i].displayId = ws->second.displayIds[i];
+            }
+        }
+    } else if (entity->getType() == game::ObjectType::UNIT && !game::isPreWotlk()) {
+        // UNIT_VIRTUAL_ITEM_SLOT_ID[0..2]: item entries in 3.3.5 (0x38-0x3A).
+        constexpr uint16_t kVirtualItemSlotId = 56;
+        for (int i = 0; i < 3; ++i)
+            if (const auto* row = lookupItemDbc(entity->getField(static_cast<uint16_t>(kVirtualItemSlotId + i))))
+                out[i] = *row;
+    }
+    return out;
+}
+
+rendering::WeaponLoadout EntitySpawner::unitWeaponLoadout(uint64_t guid) {
+    const auto items = unitWeaponItems(guid);
+    auto toItem = [](const ItemDbcRow& r) {
+        rendering::anim::WeaponItem w;
+        w.itemClass = r.itemClass;
+        w.subclass = r.subclass;
+        w.inventoryType = r.inventoryType;
+        return w;
+    };
+    return rendering::anim::loadoutFromItems(toItem(items[0]), toItem(items[1]), toItem(items[2]));
+}
+
+uint8_t EntitySpawner::unitSheathState(uint64_t guid) const {
+    if (!gameHandler_) return 0;
+    auto entity = gameHandler_->getEntityManager().getEntity(guid);
+    if (!entity) return 0;
+    const uint16_t idx = game::fieldIndex(game::UF::UNIT_FIELD_BYTES_2);
+    if (idx == 0xFFFF) return 1;  // no such field: show them drawn, as before
+    return static_cast<uint8_t>(entity->getField(idx) & 0xFF);
+}
+
+uint32_t EntitySpawner::unitIdleAnim(uint64_t guid, uint32_t instanceId) {
+    using namespace rendering::anim;
+    auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    if (!cr || !gameHandler_ || instanceId == 0) return STAND;
+    auto entity = gameHandler_->getEntityManager().getEntity(guid);
+    if (!entity || !entity->isUnit()) return STAND;
+    auto unit = std::static_pointer_cast<game::Unit>(entity);
+    if (unit->getHealth() == 0 || (unit->getUnitFlags() & game::UNIT_FLAG_IN_COMBAT) == 0)
+        return STAND;
+    const uint32_t want = readyAnim(unitWeaponLoadout(guid),
+                                    static_cast<SheathState>(std::min<uint8_t>(unitSheathState(guid), 2)));
+    auto has = [&](uint32_t id) { return cr->hasAnimation(instanceId, id); };
+    const uint32_t id = firstPlayable(has, {want});
+    return id != 0 ? id : STAND;
+}
+
+void EntitySpawner::syncUnitSheath(uint64_t guid, uint32_t instanceId) {
+    auto it = unitSheathAttached_.find(guid);
+    if (it == unitSheathAttached_.end() || instanceId == 0) return;
+    if (unitSheathState(guid) == it->second) return;
+    const auto items = unitWeaponItems(guid);
+    std::array<uint32_t, 3> displays{items[0].displayId, items[1].displayId, items[2].displayId};
+    if (auto ws = onlinePlayerWeaponSlots_.find(guid); ws != onlinePlayerWeaponSlots_.end()) {
+        displays = ws->second.displayIds;
+    } else if (!creatureVirtualItemUnits_.count(guid)) {
+        return;
+    }
+    attachUnitWeapons(guid, instanceId, displays, items);
+}
+
+bool EntitySpawner::attachUnitWeapons(uint64_t guid, uint32_t instanceId,
+                                      const std::array<uint32_t, 3>& displayIds,
+                                      const std::array<ItemDbcRow, 3>& items) {
+    if (!renderer_ || !assetManager_ || instanceId == 0) return false;
+    auto* charRenderer = renderer_->getCharacterRenderer();
+    if (!charRenderer) return false;
+    auto displayInfoDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
+    if (!displayInfoDbc) return false;
+
+    // UNIT_FIELD_BYTES_2 byte 0: 0 nothing drawn, 1 melee drawn, 2 ranged drawn.
+    const uint8_t sheath = unitSheathState(guid);
+    unitSheathAttached_[guid] = sheath;
+
+    // Every point a weapon-slot item can sit on, held or put away, so an
+    // item that moved leaves no copy behind.
+    constexpr uint32_t kShieldMount = 0, kRightHand = 1, kLeftHand = 2, kBack = 12,
+                       kSheathShield = 28, kHipLeft = 32, kHipRight = 33;
+    for (uint32_t a : {kShieldMount, kRightHand, kLeftHand, kBack, kSheathShield, kHipLeft, kHipRight})
+        charRenderer->detachWeapon(instanceId, a);
+
+    auto attachDisplay = [&](uint32_t displayId, uint32_t attachmentId,
+                             const glm::mat4& localTransform) -> bool {
+        const int32_t recIdx = displayInfoDbc->findRecordById(displayId);
+        if (recIdx < 0) return false;
+        const auto art = pipeline::readItemDisplayArt(*displayInfoDbc, static_cast<uint32_t>(recIdx));
+        if (art.modelFile.empty()) return false;
+        pipeline::M2Model model;
+        if (!loadWeaponM2("Item\\ObjectComponents\\Weapon\\" + art.modelFile, model) &&
+            !loadWeaponM2("Item\\ObjectComponents\\Shield\\" + art.modelFile, model)) {
+            return false;
+        }
+        std::string texturePath;
+        if (!art.textureName.empty()) {
+            texturePath = "Item\\ObjectComponents\\Weapon\\" + art.textureName + ".blp";
+            if (!assetManager_->fileExists(texturePath)) {
+                texturePath = "Item\\ObjectComponents\\Shield\\" + art.textureName + ".blp";
+                if (!assetManager_->fileExists(texturePath)) texturePath.clear();
+            }
+        }
+        return charRenderer->attachWeapon(instanceId, attachmentId, model, nextWeaponModelId_++,
+                                          texturePath, localTransform);
+    };
+
+    bool any = false;
+    bool backTaken = false;
+    const bool meleeDrawn = (sheath == 1);
+    const game::EquipSlot hands[2] = {game::EquipSlot::MAIN_HAND, game::EquipSlot::OFF_HAND};
+    for (int i = 0; i < 2; ++i) {
+        if (displayIds[i] == 0) continue;
+        const auto inv = static_cast<uint8_t>(items[i].inventoryType);
+        // Held by inventory type (a shield on its mount, a weapon in its
+        // hand); put away by the item's own sheathe type.
+        const uint8_t place = meleeDrawn ? inv : sheathPlacementInvType(items[i].sheatheType, inv);
+        const uint32_t attachmentId = weaponAttachment(!meleeDrawn, hands[i], place);
+        if (attachmentId == UINT32_MAX) continue;
+        if (attachDisplay(displayIds[i], attachmentId, weaponLocalTransform(!meleeDrawn, hands[i], place))) {
+            any = true;
+            if (attachmentId == kBack) backTaken = true;
+        }
+    }
+
+    // The ranged slot: in hand when it is what is drawn (a bow in the left
+    // hand, guns, crossbows, wands and thrown weapons in the right), on the
+    // back otherwise. Wands and thrown weapons are not shown put away.
+    if (displayIds[2] != 0) {
+        namespace WS = rendering::anim::WeaponSubclass;
+        const bool knownClass = items[2].itemClass == rendering::anim::kItemClassWeapon;
+        const uint32_t sub = items[2].subclass;
+        const uint32_t inv = items[2].inventoryType;
+        const bool isBow = knownClass ? sub == WS::BOW : inv == game::InvType::RANGED_BOW;
+        const bool hiddenWhenAway = knownClass ? (sub == WS::WAND || sub == WS::THROWN)
+                                               : inv == game::InvType::THROWN;
+        if (sheath == 2) {
+            any |= attachDisplay(displayIds[2], isBow ? kLeftHand : kRightHand, glm::mat4(1.0f));
+        } else if (!hiddenWhenAway && !backTaken) {
+            any |= attachDisplay(displayIds[2], kBack,
+                                 weaponLocalTransform(true, game::EquipSlot::MAIN_HAND,
+                                                      game::InvType::TWO_HAND));
+        }
+    }
+    return any;
 }
 
 

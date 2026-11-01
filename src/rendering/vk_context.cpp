@@ -12,10 +12,13 @@
 #include <SDL3/SDL_vulkan.h>
 #include <imgui_impl_vulkan.h>
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace wowee {
 namespace rendering {
@@ -1239,6 +1242,66 @@ static bool requestIdentityTransform(vkb::SwapchainBuilder& builder,
     return true;
 }
 
+static const char* presentModeName(VkPresentModeKHR mode) {
+    switch (mode) {
+        case VK_PRESENT_MODE_IMMEDIATE_KHR:    return "IMMEDIATE";
+        case VK_PRESENT_MODE_MAILBOX_KHR:      return "MAILBOX";
+        case VK_PRESENT_MODE_FIFO_KHR:         return "FIFO";
+        case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return "FIFO_RELAXED";
+        default:                               return "other";
+    }
+}
+
+/// The present modes to ask for, best first. vk-bootstrap takes the first the
+/// surface supports and falls back to FIFO, which every surface has.
+///
+/// Vsync on: MAILBOX, then FIFO_RELAXED, then FIFO. Mailbox never tears, and a
+/// frame that misses a refresh goes up at the next one without also costing
+/// a blocked acquire. Where it is missing, FIFO_RELAXED is the next best for a
+/// client that runs below the refresh rate: a frame that is on time waits for
+/// the vblank as FIFO would, and one that is late is shown at once (tearing
+/// only then) instead of being held a whole extra refresh - plain FIFO at
+/// 60Hz turns 30ms frames into an uneven 33/50ms cadence. A compositor
+/// (Wayland) usually offers neither tearing mode, so FIFO stays the floor.
+///
+/// Vsync off: IMMEDIATE, then MAILBOX, then FIFO_RELAXED.
+///
+/// WOWEE_PRESENT_MODE=mailbox|relaxed|fifo|immediate puts that one first, for
+/// comparing them on one machine without touching the vsync setting.
+static void requestPresentModes(vkb::SwapchainBuilder& builder, bool vsync) {
+    std::vector<VkPresentModeKHR> order;
+    if (const char* v = std::getenv("WOWEE_PRESENT_MODE"); v != nullptr && *v != '\0') {
+        std::string want(v);
+        for (char& c : want) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (want == "mailbox") order.push_back(VK_PRESENT_MODE_MAILBOX_KHR);
+        else if (want == "relaxed" || want == "fifo_relaxed") order.push_back(VK_PRESENT_MODE_FIFO_RELAXED_KHR);
+        else if (want == "fifo") order.push_back(VK_PRESENT_MODE_FIFO_KHR);
+        else if (want == "immediate") order.push_back(VK_PRESENT_MODE_IMMEDIATE_KHR);
+    }
+    if (vsync) {
+        order.insert(order.end(), {VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_FIFO_RELAXED_KHR,
+                                   VK_PRESENT_MODE_FIFO_KHR});
+    } else {
+        order.insert(order.end(), {VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_MAILBOX_KHR,
+                                   VK_PRESENT_MODE_FIFO_RELAXED_KHR});
+    }
+    builder.set_desired_present_mode(order.front());
+    for (size_t i = 1; i < order.size(); ++i) builder.add_fallback_present_mode(order[i]);
+}
+
+/// Said when it changes, not on every rebuild: a window being dragged
+/// rebuilds the swapchain repeatedly and this would bury the log. The mode
+/// named is the one the swapchain actually got, not the one asked for - the
+/// line used to print the request, and on a surface without mailbox it said
+/// MAILBOX while the frames went out FIFO.
+static void notePresentMode(int& lastLogged, VkPresentModeKHR got, bool vsync) {
+    const int key = static_cast<int>(got) * 2 + (vsync ? 1 : 0);
+    if (lastLogged == key) return;
+    lastLogged = key;
+    LOG_WARNING("Swapchain present mode now ", presentModeName(got),
+                vsync ? " (vsync on)" : " (vsync off)");
+}
+
 bool VkContext::createSwapchain(int width, int height) {
     vkb::SwapchainBuilder swapchainBuilder{physicalDevice, device, surface};
 
@@ -1254,29 +1317,8 @@ bool VkContext::createSwapchain(int width, int height) {
 
     presentsOffNativeTransform_ = requestIdentityTransform(builder, physicalDevice, surface);
 
-    if (vsync_) {
-        // Mailbox: no tearing, and a frame that took longer than a refresh
-        // presents at the next one instead of also waiting out a whole
-        // vblank in beginFrame, which FIFO charged every slow frame. FIFO
-        // stays as the fallback for drivers without it. frame_cap limits the
-        // rate when the scene is light.
-        builder.set_desired_present_mode(VK_PRESENT_MODE_MAILBOX_KHR);
-        builder.add_fallback_present_mode(VK_PRESENT_MODE_FIFO_KHR);
-    } else {
-        builder.set_desired_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR);
-        builder.add_fallback_present_mode(VK_PRESENT_MODE_MAILBOX_KHR);
-        builder.add_fallback_present_mode(VK_PRESENT_MODE_FIFO_RELAXED_KHR);
-    }
-
-    // Said when it changes, not on every rebuild: a window being dragged
-    // rebuilds the swapchain repeatedly and this would bury the log. A
-    // present mode is the difference between a frame rate held at the
-    // refresh and one that runs past it, so the changes are worth a line.
-    if (loggedPresentVsync_ != (vsync_ ? 1 : 0)) {
-        loggedPresentVsync_ = vsync_ ? 1 : 0;
-        LOG_WARNING("Swapchain present mode now ",
-                    vsync_ ? "MAILBOX (vsync on)" : "IMMEDIATE (vsync off)");
-    }
+    // frame_cap limits the rate when the scene is light. See requestPresentModes.
+    requestPresentModes(builder, vsync_);
 
     auto swapRet = builder.build();
 
@@ -1291,6 +1333,7 @@ bool VkContext::createSwapchain(int width, int height) {
     }
 
     auto vkbSwap = swapRet.value();
+    notePresentMode(loggedPresentVsync_, vkbSwap.present_mode, vsync_);
     swapchain = vkbSwap.swapchain;
     swapchainFormat = vkbSwap.image_format;
     swapchainExtent = vkbSwap.extent;
@@ -2656,29 +2699,8 @@ bool VkContext::recreateSwapchain(int width, int height) {
 
     presentsOffNativeTransform_ = requestIdentityTransform(builder, physicalDevice, surface);
 
-    if (vsync_) {
-        // Mailbox: no tearing, and a frame that took longer than a refresh
-        // presents at the next one instead of also waiting out a whole
-        // vblank in beginFrame, which FIFO charged every slow frame. FIFO
-        // stays as the fallback for drivers without it. frame_cap limits the
-        // rate when the scene is light.
-        builder.set_desired_present_mode(VK_PRESENT_MODE_MAILBOX_KHR);
-        builder.add_fallback_present_mode(VK_PRESENT_MODE_FIFO_KHR);
-    } else {
-        builder.set_desired_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR);
-        builder.add_fallback_present_mode(VK_PRESENT_MODE_MAILBOX_KHR);
-        builder.add_fallback_present_mode(VK_PRESENT_MODE_FIFO_RELAXED_KHR);
-    }
-
-    // Said when it changes, not on every rebuild: a window being dragged
-    // rebuilds the swapchain repeatedly and this would bury the log. A
-    // present mode is the difference between a frame rate held at the
-    // refresh and one that runs past it, so the changes are worth a line.
-    if (loggedPresentVsync_ != (vsync_ ? 1 : 0)) {
-        loggedPresentVsync_ = vsync_ ? 1 : 0;
-        LOG_WARNING("Swapchain present mode now ",
-                    vsync_ ? "MAILBOX (vsync on)" : "IMMEDIATE (vsync off)");
-    }
+    // frame_cap limits the rate when the scene is light. See requestPresentModes.
+    requestPresentModes(builder, vsync_);
 
     auto swapRet = builder.build();
 
@@ -2700,6 +2722,7 @@ bool VkContext::recreateSwapchain(int width, int height) {
     }
 
     auto vkbSwap = swapRet.value();
+    notePresentMode(loggedPresentVsync_, vkbSwap.present_mode, vsync_);
     swapchain = vkbSwap.swapchain;
     swapchainFormat = vkbSwap.image_format;
     swapchainExtent = vkbSwap.extent;

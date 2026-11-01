@@ -1032,24 +1032,9 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
             }
         });
 
-        // Probe the creature model for the best available attack animation
-        gameHandler_->setNpcSwingCallback([cr, spawner](uint64_t guid) {
-            uint32_t instanceId = spawner->getCreatureInstanceId(guid);
-            if (instanceId == 0) instanceId = spawner->getPlayerInstanceId(guid);
-            if (instanceId != 0 && cr) {
-                const auto attackAnims =
-                rendering::anim::meleeAnimChain(rendering::anim::MeleeChain::Generic);
-                bool played = false;
-                for (uint32_t anim : attackAnims) {
-                    if (cr->hasAnimation(instanceId, anim)) {
-                        cr->playAnimation(instanceId, anim, false);
-                        played = true;
-                        break;
-                    }
-                }
-                if (!played) cr->playAnimation(instanceId, rendering::anim::ATTACK_UNARMED, false);
-            }
-        });
+        // No swing callback here: AnimationCallbackHandler owns that slot, and
+        // registering a weaponless ATTACK_1H prober on every world load
+        // replaced its weapon-, hand- and ability-aware one.
     }
 
     // Keep the loading screen visible until all spawn/equipment/gameobject queues

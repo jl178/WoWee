@@ -25,6 +25,9 @@ struct EmoteInfo {
     std::string textTarget;
     std::string othersNoTarget;
     std::string othersTarget;
+    /// "%s laughs at you." - what the target reads. EmotesText's text array
+    /// carries it in the slot after the bystanders' targeted form.
+    std::string othersAtYou;
     std::string command;
 };
 
@@ -62,6 +65,15 @@ public:
                             const std::string& senderName,
                             const std::string* targetName = nullptr) const;
 
+    /// The sender's own wording by DBC ID - "You laugh." / "You laugh at %s." -
+    /// for the echo of the player's own SMSG_TEXT_EMOTE. Empty if unknown.
+    std::string selfTextByDbcId(uint32_t dbcId,
+                                const std::string* targetName = nullptr) const;
+
+    /// The target's wording by DBC ID - "Name laughs at you." Falls back to
+    /// the bystanders' targeted form when the file has none.
+    std::string atYouTextByDbcId(uint32_t dbcId, const std::string& senderName,
+                                 const std::string& playerName) const;
 
 private:
     EmoteRegistry() = default;

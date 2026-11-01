@@ -1542,10 +1542,9 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
         composite = base.data;
     }
 
-    // Blend face + underwear overlays
-    // If we upscaled from 256->512, scale coords and texels with blitOverlayScaled2x.
-    // For native 512/1024 textures, face overlays are full atlas size (hit width==width branch).
-    bool upscaled = (base.width == kBaseTexSize && base.height == kBaseTexSize && width == kUpscaleTexSize);
+    // Blend face, facial hair and underwear overlays, each into its region at
+    // the region's size on this canvas.
+    const int coordScale = std::max(1, width / 256);
     for (const auto& ul : baseLayers) {
         if (ul.empty()) continue;
         pipeline::BLPImage overlay;
@@ -1567,51 +1566,29 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
         if (overlay.width == width && overlay.height == height) {
             blitOverlay(composite, width, height, overlay, 0, 0);
         } else {
-            // WoW 256-scale atlas coordinates (from CharComponentTextureSections)
-            int dstX = 0, dstY = 0;
-            std::string pathLower = ul;
-            for (auto& c : pathLower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-
-            // Scale factor from 256-base coordinates to actual canvas size
-            int coordScale = width / 256;
-            if (coordScale < 1) coordScale = 1;
-            bool useScale = true;
-
-            if (pathLower.find("faceupper") != std::string::npos) {
-                dstX = 0; dstY = 160;
-            } else if (pathLower.find("facelower") != std::string::npos) {
-                dstX = 0; dstY = 192;
-            } else if (pathLower.find("pelvis") != std::string::npos) {
-                dstX = 128; dstY = 96;
-            } else if (pathLower.find("torso") != std::string::npos) {
-                dstX = 128; dstY = 0;
-            } else if (pathLower.find("armupper") != std::string::npos) {
-                dstX = 0; dstY = 0;
-            } else if (pathLower.find("armlower") != std::string::npos) {
-                dstX = 0; dstY = 64;
-            } else if (pathLower.find("hand") != std::string::npos) {
-                dstX = 0; dstY = 128;
-            } else if (pathLower.find("foot") != std::string::npos || pathLower.find("feet") != std::string::npos) {
-                dstX = 128; dstY = 224;
-            } else if (pathLower.find("legupper") != std::string::npos || pathLower.find("leg") != std::string::npos) {
-                dstX = 128; dstY = 160;
-            } else {
-                // Fallback: center overlay on canvas (already in canvas coords)
-                dstX = (width - overlay.width) / 2;
-                dstY = (height - overlay.height) / 2;
-                useScale = false;
+            // The same region table compositeTextures uses. This path kept its
+            // own copy, which knew no facial hair: FacialUpperHair (a human's
+            // eyebrows) matched nothing and was pasted in the middle of the
+            // atlas, so the brows vanished as soon as anything was worn.
+            //
+            // And the layer lands at its region's size on this canvas, whatever
+            // it was authored at. Pasting at its own size put 128x64 legacy art
+            // (every facial-hair texture, the death knight faces) into a
+            // quarter of its region on a 512 skin.
+            const AtlasRegion256 region = regionFor(lowerPath(ul));
+            if (!region.known) {
+                blitOverlay(composite, width, height, overlay,
+                            (width - overlay.width) / 2, (height - overlay.height) / 2);
+                continue;
             }
-
-            if (useScale) {
-                dstX *= coordScale;
-                dstY *= coordScale;
-            }
-
-            if (upscaled) {
-                // Overlay is 256-base sized, needs 2x texel scaling for 512 canvas
-                blitOverlayScaled2x(composite, width, height, overlay, dstX, dstY);
-            } else {
+            const int dstX = region.x * coordScale;
+            const int dstY = region.y * coordScale;
+            const int dstW = region.w * coordScale;
+            const int dstH = region.h * coordScale;
+            if (overlay.width == dstW && overlay.height == dstH) {
                 blitOverlay(composite, width, height, overlay, dstX, dstY);
+            } else {
+                blitOverlayResampled(composite, width, height, overlay, dstX, dstY, dstW, dstH);
             }
         }
     }
@@ -2070,6 +2047,28 @@ void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId,
         instance.currentSequenceIndex = firstMatch;
     }
 
+    // Not in this model: AnimationData.dbc's fallback chain, as the stock
+    // client walks it (ShieldBlock -> StandWound, Special2H -> Attack2H ->
+    // Attack1H -> AttackUnarmed). The first sequence was the only answer
+    // before, which is a Stand on most models and anything at all on some.
+    if (instance.currentSequenceIndex < 0) {
+        uint32_t fb = anim::dbcFallback(animationId);
+        for (int step = 0; step < 8 && fb != UINT32_MAX && fb != animationId; ++step) {
+            int match = -1;
+            for (size_t i = 0; i < model.sequences.size(); i++) {
+                if (model.sequences[i].id != fb) continue;
+                if (match < 0 || model.sequences[i].variationIndex == 0) match = static_cast<int>(i);
+                if (model.sequences[i].variationIndex == 0) break;
+            }
+            if (match >= 0) {
+                instance.currentSequenceIndex = match;
+                instance.currentAnimationId = fb;
+                break;
+            }
+            fb = anim::dbcFallback(fb);
+        }
+    }
+
     if (instance.currentSequenceIndex < 0) {
         // Fall back to first sequence
         if (!model.sequences.empty()) {
@@ -2085,11 +2084,29 @@ void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId,
             LOG_WARNING("Animation ", animationId, " not found in model ", mId, ", using default");
         }
     }
+
+    // Cross-fade out of whatever the bones were doing. The stock client fades
+    // over the incoming sequence's blendTime (150 ms on nearly every 3.3.5
+    // character and creature sequence); a sequence that says 0 gets the same
+    // 150 ms so a switch never pops. Needs a pose computed for this skeleton:
+    // a fresh instance has nothing to fade from.
+    if (instance.currentSequenceIndex >= 0 &&
+        instance.currentSequenceIndex < static_cast<int>(model.sequences.size()) &&
+        !model.bones.empty() && instance.localPose.size() == model.bones.size()) {
+        const uint32_t blendMs = model.sequences[instance.currentSequenceIndex].blendTime;
+        instance.blendFromPose = instance.localPose;
+        instance.blendElapsedMs = 0.0f;
+        instance.blendDurationMs = static_cast<float>(blendMs > 0 ? std::min<uint32_t>(blendMs, 1000) : 150);
+    } else {
+        instance.blendDurationMs = 0.0f;
+    }
 }
 
 void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
-    // Distance culling for animation updates in dense areas.
-    const float animUpdateRadius = static_cast<float>(envSizeOrDefault("WOWEE_CHAR_ANIM_RADIUS", 120));
+    // Distance culling for animation updates in dense areas. The default is the
+    // render radius (WOWEE_CHAR_RENDER_RADIUS, 130): at 120 a unit drawn 120-130
+    // yards out stood frozen mid-stride, its clock stopped with its bones.
+    const float animUpdateRadius = static_cast<float>(envSizeOrDefault("WOWEE_CHAR_ANIM_RADIUS", 130));
     const float animUpdateRadiusSq = animUpdateRadius * animUpdateRadius;
     // Creature birds are rendered by this path rather than M2Renderer.  Their
     // rapid wing motion remains conspicuous at distance, and the render radius
@@ -2136,6 +2153,15 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
 
         // Advance global sequence timer (accumulates independently of animation wrapping)
         inst.globalSequenceTime += deltaTime * 1000.0f;
+
+        // Sequence cross-fade clock. Before the sequence clock below, which may
+        // end a one-shot and start a fresh fade from zero.
+        if (inst.blendDurationMs > 0.0f) {
+            inst.blendElapsedMs += deltaTime * 1000.0f;
+            if (inst.blendElapsedMs >= inst.blendDurationMs) {
+                inst.blendDurationMs = 0.0f;
+            }
+        }
 
         // Always advance animation time (cheap)
         if (inst.cachedModel && !inst.cachedModel->data.sequences.empty()) {
@@ -2205,11 +2231,14 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
         // at 40 yards, making ordinary monster locomotion look like a slideshow.
         // Reserve frame skipping for models far enough away that bone detail is
         // much less noticeable, consistent with the generic M2 renderer.
+        //
+        // Every frame out to 80 yards, every other frame beyond. The old 45/90
+        // yard steps (every 2nd, then every 4th frame) gave units across a
+        // ordinary pull or town square 15 and 7.5 poses a second at 30 fps,
+        // which read as choppy; the stock client poses everything in view
+        // every frame.
         uint32_t boneInterval = 1;
-        if (!isSkyBird) {
-            if (distSq > 90.0f * 90.0f) boneInterval = 4;
-            else if (distSq > 45.0f * 45.0f) boneInterval = 2;
-        }
+        if (!isSkyBird && distSq > 80.0f * 80.0f) boneInterval = 2;
 
         inst.boneUpdateCounter++;
         bool needsBones = (inst.boneUpdateCounter >= boneInterval) || inst.boneMatrices.empty();
@@ -2438,6 +2467,15 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
     const bool armsOwnSequences = (instance.armSequenceIndex[0] >= 0 || instance.armSequenceIndex[1] >= 0) &&
                                   instance.boneArm.size() == numBones;
 
+    // Cross-fade weight of the new sequence: 0 at the switch, 1 when done.
+    const bool blending = instance.blendDurationMs > 0.0f &&
+                          instance.blendElapsedMs < instance.blendDurationMs &&
+                          instance.blendFromPose.size() == numBones;
+    const float blendWeight = blending
+        ? glm::clamp(instance.blendElapsedMs / instance.blendDurationMs, 0.0f, 1.0f)
+        : 1.0f;
+    instance.localPose.resize(numBones);
+
     for (size_t i = 0; i < numBones; i++) {
         const auto& bone = model.bones[i];
 
@@ -2454,8 +2492,21 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
 
         // Local transform includes pivot bracket: T(pivot)*T*R*S*T(-pivot)
         // At rest this is identity, so no separate bind pose is needed
-        glm::mat4 localTransform = getBoneTransform(bone, time, instance.globalSequenceTime,
-                                                    sequence, gsd);
+        BoneLocalPose pose = sampleBonePose(bone, time, instance.globalSequenceTime,
+                                            sequence, gsd);
+        if (blending) {
+            // Tracks on a global sequence run on their own clock whatever the
+            // body plays, so they have nothing to fade from.
+            const auto& from = instance.blendFromPose[i];
+            if (bone.translation.globalSequence < 0)
+                pose.translation = glm::mix(from.translation, pose.translation, blendWeight);
+            if (bone.rotation.globalSequence < 0)
+                pose.rotation = glm::normalize(glm::slerp(from.rotation, pose.rotation, blendWeight));
+            if (bone.scale.globalSequence < 0)
+                pose.scale = glm::mix(from.scale, pose.scale, blendWeight);
+        }
+        instance.localPose[i] = pose;
+        glm::mat4 localTransform = composeBoneTransform(bone, pose);
 
         if (bone.keyBoneId == kKeyBoneSpineLow && instance.torsoYawOverrideRad != 0.0f) {
             glm::mat4 extraYaw = glm::translate(glm::mat4(1.0f), bone.pivot)
@@ -2503,18 +2554,34 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
 
 glm::mat4 CharacterRenderer::getBoneTransform(const pipeline::M2Bone& bone, float animTime, float globalSeqTime,
                                                int sequenceIndex, const std::vector<uint32_t>& globalSeqDurations) {
+    return composeBoneTransform(bone, sampleBonePose(bone, animTime, globalSeqTime,
+                                                     sequenceIndex, globalSeqDurations));
+}
+
+CharacterRenderer::BoneLocalPose CharacterRenderer::sampleBonePose(
+        const pipeline::M2Bone& bone, float animTime, float globalSeqTime,
+        int sequenceIndex, const std::vector<uint32_t>& globalSeqDurations) {
     // Resolve global sequences: bones with globalSequence >= 0 use sequence 0
     // with time wrapped at the global sequence duration, independent of the
     // character's current animation.
-    glm::vec3 translation = m2_track::sampleVec3(
+    BoneLocalPose pose;
+    pose.translation = m2_track::sampleVec3(
         bone.translation, sequenceIndex, animTime, globalSeqTime,
         globalSeqDurations, glm::vec3(0.0f));
-    glm::quat rotation = m2_track::sampleQuat(
+    pose.rotation = m2_track::sampleQuat(
         bone.rotation, sequenceIndex, animTime, globalSeqTime,
         globalSeqDurations);
-    glm::vec3 scale = m2_track::sampleVec3(
+    pose.scale = m2_track::sampleVec3(
         bone.scale, sequenceIndex, animTime, globalSeqTime,
         globalSeqDurations, glm::vec3(1.0f));
+    return pose;
+}
+
+glm::mat4 CharacterRenderer::composeBoneTransform(const pipeline::M2Bone& bone,
+                                                  const BoneLocalPose& pose) {
+    const glm::vec3& translation = pose.translation;
+    const glm::quat& rotation = pose.rotation;
+    const glm::vec3& scale = pose.scale;
 
     // M2 bone transform: T(pivot) * T(trans) * R(rot) * S(scale) * T(-pivot).
     // Build directly instead of chaining glm::translate/rotate/scale (each of
@@ -2802,7 +2869,9 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 return false;
             };
 
+            // A lit preview (a glue scene) takes the lit path for everything.
             const bool previewMainModel = renderPassOverride_ != VK_NULL_HANDLE &&
+                                          !previewLit_ &&
                                           !instance.hasOverrideModelMatrix;
 
             // Draw batches in two passes: opaque (blendMode 0) first, then
@@ -3076,6 +3145,19 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     emissiveBoost = (blendMode >= 3) ? (2.4f * flicker) : (1.5f * flicker);
                     emissiveTint = glm::vec3(1.28f, 1.04f, 0.82f);
                 }
+                if (instance.isSceneModel && unlit) {
+                    // The shader draws an unlit batch at tex * (1 + tint *
+                    // boost), which is twice the texture by default. A glue
+                    // scene's unlit sky, clouds and glows are the texture at
+                    // its own brightness, times the batch's M2Color: so the
+                    // tint is that colour less one. The login scene's and the
+                    // human scene's skies were drawn doubled.
+                    glm::vec3 color(1.0f);
+                    if (batch.colorIndex != 0xFFFF && batch.colorIndex < gpuModel.data.colorRGB.size())
+                        color = glm::clamp(gpuModel.data.colorRGB[batch.colorIndex], glm::vec3(0.0f), glm::vec3(1.0f));
+                    emissiveBoost = 1.0f;
+                    emissiveTint = color - glm::vec3(1.0f);
+                }
 
                 // Resolve normal/height map for this texture
                 VkTexture* normalMap = flatNormalTexture_.get();
@@ -3226,6 +3308,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             matData.emissiveTintB = 1.0f;
             matData.specularIntensity = 0.5f;
             const bool previewMainModel = renderPassOverride_ != VK_NULL_HANDLE &&
+                                          !previewLit_ &&
                                           !instance.hasOverrideModelMatrix;
             const bool useAdvancedMaterials = !previewMainModel;
             const bool usePreviewSimpleShader = previewMainModel;
@@ -3726,22 +3809,9 @@ void CharacterRenderer::moveInstanceTo(uint32_t instanceId, const glm::vec3& des
     // Don't move dead instances (corpses shouldn't slide around)
     if (inst.isDead) return;
 
-    auto pickMoveAnim = [&](bool preferRun) -> uint32_t {
-        // Choose movement anim from estimated speed; fall back if missing.
-        if (preferRun) {
-            if (hasAnimation(instanceId, 5)) return 5; // Run
-            if (hasAnimation(instanceId, 4)) return 4; // Walk
-        } else {
-            if (hasAnimation(instanceId, 4)) return 4; // Walk
-            if (hasAnimation(instanceId, 5)) return 5; // Run
-        }
-        return 0;
-    };
-
     float pdx = destination.x - inst.position.x;
     float pdy = destination.y - inst.position.y;
     float planarDistSq = pdx * pdx + pdy * pdy;
-    bool synthesizedDuration = false;
     if (durationSeconds <= 0.0f) {
         if (planarDistSq < 1e-4f) {
             // Stop at current location.
@@ -3755,7 +3825,6 @@ void CharacterRenderer::moveInstanceTo(uint32_t instanceId, const glm::vec3& des
         // Some cores send movement-only deltas without spline duration.
         // Synthesize a tiny duration so movement anim/rotation still updates.
         durationSeconds = std::clamp(std::sqrt(planarDistSq) / 7.0f, 0.05f, 0.20f);
-        synthesizedDuration = true;
     }
 
     inst.moveStart = inst.position;
@@ -3771,14 +3840,16 @@ void CharacterRenderer::moveInstanceTo(uint32_t instanceId, const glm::vec3& des
         inst.rotation.z = angle;
     }
 
-    // Play movement animation while moving.
-    // Prefer run only when speed is clearly above normal walk pace.
-    float moveSpeed = std::sqrt(planarDistSq) / std::max(durationSeconds, 0.001f);
-    bool preferRun = (!synthesizedDuration && moveSpeed >= 4.5f);
-    uint32_t moveAnim = pickMoveAnim(preferRun);
-    if (moveAnim != 0 && inst.currentAnimationId != moveAnim) {
-        playAnimation(instanceId, moveAnim, true);
-    }
+    // No movement animation is chosen here. The callers - the per-frame remote
+    // player sync in Application and the creature move callback - pick
+    // Walk/Run/Swim/Fly/Mount from the movement flags on each state change.
+    // The guess that used to be made here came from one frame's displacement
+    // over a duration clamped to at least 50 ms, so at 30-40 fps a running
+    // player's estimate straddled its 4.5 yd/s line and flipped Walk<->Run
+    // from frame to frame, restarting the cycle each time; it put a mounted
+    // rider into Run every frame for the sync loop to put back into Mount; and
+    // it started Run again during the dead-reckoning tail after the sync loop
+    // had already chosen Stand, leaving the unit running in place.
 }
 
 const pipeline::M2Model* CharacterRenderer::getModelData(uint32_t modelId) const {

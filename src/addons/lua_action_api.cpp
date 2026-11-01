@@ -2175,7 +2175,8 @@ void registerActionLuaAPI(lua_State* L) {
             if (!gh || index < 0 || index > 2 || !gh->getMirrorTimer(index).active) {
                 lua_pushstring(L, "UNKNOWN");
                 lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 0);
-                lua_pushboolean(L, 0);
+                // paused is a number in stock (mirrortimer.lua compares it).
+                lua_pushnumber(L, 0);
                 lua_pushstring(L, "");
                 return 6;
             }
@@ -2184,7 +2185,7 @@ void registerActionLuaAPI(lua_State* L) {
             lua_pushnumber(L, t.value);
             lua_pushnumber(L, t.maxValue);
             lua_pushnumber(L, t.scale);
-            lua_pushboolean(L, t.paused ? 1 : 0);
+            lua_pushnumber(L, t.paused ? 1 : 0);
             lua_pushstring(L, kLabels[index]);
             return 6;
         }},

@@ -193,13 +193,28 @@ bool WidgetRenderer::textureSize(const std::string& path, float& w, float& h) {
     std::string resolved;
     auto data = readTextureFile(path, resolved);
     if (data.empty()) { textureSizes_[path] = {0.0f, 0.0f}; return false; }
-    const auto image = pipeline::BLPLoader::load(data);
-    if (!image.isValid() || image.width == 0 || image.height == 0) {
+    // The size is in the header, so read it there. This used to decode the
+    // whole image - palette or DXT, every mip - to learn two numbers, on the
+    // main thread, inside the widget layout, for every new texture the moment
+    // a panel opened: one of the sources of the addonWidgets/layout spikes.
+    // BLP1 and BLP2 both keep width and height as little-endian uint32 at
+    // bytes 12 and 16.
+    uint32_t iw = 0, ih = 0;
+    const bool blp = data.size() >= 20 &&
+                     (std::memcmp(data.data(), "BLP1", 4) == 0 ||
+                      std::memcmp(data.data(), "BLP2", 4) == 0);
+    if (blp) {
+        iw = static_cast<uint32_t>(data[12]) | (static_cast<uint32_t>(data[13]) << 8) |
+             (static_cast<uint32_t>(data[14]) << 16) | (static_cast<uint32_t>(data[15]) << 24);
+        ih = static_cast<uint32_t>(data[16]) | (static_cast<uint32_t>(data[17]) << 8) |
+             (static_cast<uint32_t>(data[18]) << 16) | (static_cast<uint32_t>(data[19]) << 24);
+    }
+    if (!blp || iw == 0 || ih == 0 || iw > 8192 || ih > 8192) {
         textureSizes_[path] = {0.0f, 0.0f};
         return false;
     }
-    w = static_cast<float>(image.width);
-    h = static_cast<float>(image.height);
+    w = static_cast<float>(iw);
+    h = static_cast<float>(ih);
     textureSizes_[path] = {w, h};
     return true;
 }
@@ -241,13 +256,10 @@ void WidgetRenderer::sizeTextureWidget(Widget* w) {
     // stretched between two others must not be pulled back to its file's
     // dimensions - that is exactly the scroll bar middle, which would stop
     // stretching and become 31 by 256.
-    //
-    // A texture that already has both sizes needs nothing whatever its
-    // anchors say, and that is nearly all of them once the interface has
-    // settled - so that is asked first, and the anchors only when it matters.
-    if (w->width > 0.0f && w->height > 0.0f) return;
-    const bool needsW = w->width <= 0.0f && !anchorsSpanAxis(w->anchors, true);
-    const bool needsH = w->height <= 0.0f && !anchorsSpanAxis(w->anchors, false);
+    const bool spanX = anchorsSpanAxis(w->anchors, true);
+    const bool spanY = anchorsSpanAxis(w->anchors, false);
+    const bool needsW = w->width <= 0.0f && !spanX;
+    const bool needsH = w->height <= 0.0f && !spanY;
     if (!needsW && !needsH) return;
     float iw = 0.0f, ih = 0.0f;
     if (!textureSize(w->texturePath, iw, ih)) return;
@@ -276,9 +288,9 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font) {
     // button. The entries were there and the buttons were there; the names
     // were invisible, so nothing could be read or clicked, and no setting
     // added to the schema could be reached however correctly it registered.
-    //
-    // Asked below, after the cheap returns: both lead to doing nothing, so
-    // the order changes no answer, and almost every string returns there.
+    const bool spansX = anchorsSpanAxis(w->anchors, true);
+    const bool spansY = anchorsSpanAxis(w->anchors, false);
+    if (spansX && spansY) return;
 
     // A width with no height is a paragraph, not a request to be measured.
     //
@@ -330,7 +342,6 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font) {
         if (w->autoSized && sameMeasurement) return;
         if (!w->autoSized && w->width > 0.0f && w->height > 0.0f) return;
     }
-    if (anchorsSpanAxis(w->anchors, true) && anchorsSpanAxis(w->anchors, false)) return;
     // Looked up only for a string that is going to be measured. This pass
     // visits every string in the tree each frame, and the face lookup is a
     // name search that was paid for the thousands that return above.
@@ -2239,9 +2250,23 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
     // asynchronous form would let this frame sample an image whose copy has not
     // landed. Nothing to upload means no batch at all, so an idle frame does
     // not allocate a command buffer to record nothing into.
+    //
+    // Bounded by time as well as count: three small icons are nothing, but
+    // three 512x512 backgrounds are three palette decodes on this thread, and
+    // the count alone let one panel opening cost a 20ms frame. The first is
+    // always taken so the queue moves; whatever is left is picked up again
+    // next frame, since it is still not in the cache.
     if (!wanted.empty() && vkCtx_) {
+        constexpr double kUploadBudgetMs = 3.0;
+        const auto uploadStart = std::chrono::steady_clock::now();
         vkCtx_->beginUploadBatch();
-        for (const auto& p : wanted) texture(*p.first, p.second);
+        for (const auto& p : wanted) {
+            texture(*p.first, p.second);
+            if (std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - uploadStart).count() >= kUploadBudgetMs) {
+                break;
+            }
+        }
         vkCtx_->endUploadBatchSync();
     }
 

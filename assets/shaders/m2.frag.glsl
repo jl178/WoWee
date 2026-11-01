@@ -351,10 +351,13 @@ void main() {
         // of a uniformly-lit blob.
         RtLight rt = rtLightAt(FragPos);
         shadow = rtShadow(rt, shadow);
+        // The area's ambient as the terrain, the WMO walls and the characters
+        // take it. Foliage used to take 82-100% of it by how far the leaf
+        // faced up, a darkening that dates from when the outdoor ambient
+        // carried an extra +0.4 from LightingManager's defaults; against the
+        // true Light.dbc blend it left trees darker than the ground they
+        // stand on. The stock client lights foliage like any other M2.
         vec3 ambientTerm = rtAmbient(rt, ambientColor.rgb);
-        if (isFoliage) {
-            ambientTerm *= 0.82 + 0.18 * clamp(norm.z, 0.0, 1.0);  // never above the area's ambient
-        }
         result = ambientTerm * texColor.rgb
                + shadow * (diff * lightColor.rgb * texColor.rgb + spec * lightColor.rgb);
         // No leaf glow (sss unused): stock foliage is lit like any other M2.
@@ -369,7 +372,12 @@ void main() {
     // place on a forty-yard tree and on a knee-high fern; it used to be raw
     // model-space z against a hardcoded eighteen, which put the darkening on
     // the trunk of anything tall and over the whole of anything short.
-    if (isFoliage) {
+    //
+    // Off: the stock client has no canopy occlusion, and it was tuned against
+    // the over-bright outdoor ambient (see the ambient term above). Halving
+    // the lower part of every plant made Elwynn's trees and Stormwind's
+    // planters darker than the walls and street around them.
+    if (false && isFoliage) {
         float aoFactor = mix(0.55, 1.0, smoothstep(0.0, 0.6, ModelHeight));
         result *= aoFactor;
     }

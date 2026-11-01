@@ -34,7 +34,9 @@ constexpr uint16_t kGeosetBareForearms     = 401;   // Group  4: no gloves
 constexpr uint16_t kGeosetBareShins        = 501;   // Group  5: no boots
 constexpr uint16_t kGeosetDefaultEars      = 702;   // Group  7: ears
 constexpr uint16_t kGeosetBareSleeves      = 801;   // Group  8: no chest armor sleeves
-constexpr uint16_t kGeosetDefaultKneepads  = 902;   // Group  9: kneepads
+constexpr uint16_t kGeosetDefaultKneepads  = 901;   // Group  9: none. 902/903 are kneepad
+                                                     // meshes a legs item selects with GeosetGroup[1];
+                                                     // 902 by default drew boot tops on bare calves.
 constexpr uint16_t kGeosetDefaultTabard    = 1201;  // Group 12: tabard base
 constexpr uint16_t kGeosetBarePants        = 1301;  // Group 13: no leggings
 constexpr uint16_t kGeosetNoCape           = 1501;  // Group 15: no cape
@@ -179,10 +181,11 @@ inline std::unordered_set<uint16_t> bareCharacterGeosets(uint16_t hairScalp,
     // agree on the number, so naming one loses them on half of them.
     geosets.insert(kGeosetBareFeet);
     geosets.insert(kGeosetBareFeetAlt);
-    // No cloak geoset at all. This set is built before equipment is known, so
-    // naming the cloak mesh gives an untextured cape to a character wearing
-    // none, and naming the no-cloak panel is wrong on the models that have no
-    // such panel. The equipment pass adds the cape when there is one.
+    // The no-cloak back panel. Without it a character no equipment pass ran
+    // for (character create, a naked preview) had a hole in the upper back.
+    // Models without the panel simply have no 1501 submesh to draw, and every
+    // equipment pass erases group 15 before choosing the cape or the panel.
+    geosets.insert(kGeosetNoCape);
     return geosets;
 }
 

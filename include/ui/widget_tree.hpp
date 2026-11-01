@@ -1084,10 +1084,6 @@ private:
     uint64_t cleanPasses_ = 0;
     uint64_t totalPasses_ = 0;
     uint32_t visibleThisPass_ = 0;
-    /// Every widget the full pass found drawable, for collectDrawOrder to
-    /// read instead of all 28k. A drawable widget has a drawable parent, so
-    /// the walk reaches every one of them.
-    std::vector<uint32_t> passVisible_;
     uint32_t lastVisibleCount_ = 0;
 
 public:

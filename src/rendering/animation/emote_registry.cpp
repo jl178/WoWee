@@ -204,8 +204,14 @@ void EmoteRegistry::loadFromDbc() {
         uint32_t senderNoTargetTextId = emotesTextDbc->getUInt32(r, etL ? (*etL)["SenderNoTargetTextID"] : 9);
         uint32_t othersTargetTextId = emotesTextDbc->getUInt32(r, etL ? (*etL)["OthersTargetTextID"] : 3);
         uint32_t othersNoTargetTextId = emotesTextDbc->getUInt32(r, etL ? (*etL)["OthersNoTargetTextID"] : 7);
+        // The target's own form ("%s laughs at you.") is the next slot of the
+        // same text array, in every expansion's layout.
+        const uint32_t atYouField = (etL ? (*etL)["OthersTargetTextID"] : 3) + 1;
+        uint32_t othersAtYouTextId = atYouField < emotesTextDbc->getFieldCount()
+            ? emotesTextDbc->getUInt32(r, atYouField) : 0;
 
-        std::string textTarget, textNoTarget, oTarget, oNoTarget;
+        std::string textTarget, textNoTarget, oTarget, oNoTarget, oAtYou;
+        if (auto it = textData.find(othersAtYouTextId); it != textData.end()) oAtYou = it->second;
         if (auto it = textData.find(senderTargetTextId); it != textData.end()) textTarget = it->second;
         if (auto it = textData.find(senderNoTargetTextId); it != textData.end()) textNoTarget = it->second;
         if (auto it = textData.find(othersTargetTextId); it != textData.end()) oTarget = it->second;
@@ -221,6 +227,7 @@ void EmoteRegistry::loadFromDbc() {
             info.textTarget = textTarget;
             info.othersNoTarget = oNoTarget;
             info.othersTarget = oTarget;
+            info.othersAtYou = oAtYou;
             info.command = cmd;
             emoteTable_.emplace(cmd, std::move(info));
         }
@@ -375,7 +382,28 @@ std::string EmoteRegistry::textByDbcId(uint32_t dbcId,
             return replacePlaceholders(info.othersNoTarget, &senderName);
         }
         return senderName + " " + info.command + "s.";
-   
+
+}
+
+std::string EmoteRegistry::selfTextByDbcId(uint32_t dbcId,
+                                           const std::string* targetName) const {
+    auto it = emoteByDbcId_.find(dbcId);
+    if (it == emoteByDbcId_.end()) return "";
+    const EmoteInfo& info = *it->second;
+    const bool targeted = targetName && !targetName->empty();
+    const std::string& base = targeted ? info.textTarget : info.textNoTarget;
+    if (!base.empty()) return replacePlaceholders(base, targetName);
+    if (targeted) return "You " + info.command + " at " + *targetName + ".";
+    return "You " + info.command + ".";
+}
+
+std::string EmoteRegistry::atYouTextByDbcId(uint32_t dbcId, const std::string& senderName,
+                                            const std::string& playerName) const {
+    auto it = emoteByDbcId_.find(dbcId);
+    if (it == emoteByDbcId_.end()) return "";
+    const EmoteInfo& info = *it->second;
+    if (!info.othersAtYou.empty()) return replacePlaceholders(info.othersAtYou, &senderName);
+    return textByDbcId(dbcId, senderName, &playerName);
 }
 
 } // namespace rendering

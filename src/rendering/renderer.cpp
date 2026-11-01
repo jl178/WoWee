@@ -567,12 +567,21 @@ void Renderer::updatePerFrameUBO() {
     // Lighting from LightingManager
     if (lightingManager) {
         const auto& lp = lightingManager->getLightingParams();
-        currentFrameData.lightDir = glm::vec4(lp.directionalDir, 0.0f);
-        currentFrameData.lightColor = glm::vec4(lp.diffuseColor, 1.0f);
-        // Indoors, units take the building's ambient (MOHD, stored half
-        // intensity like MOCV) in place of the sky's.
-        currentFrameData.ambientColor = glm::vec4(glm::mix(lp.ambientColor,
-            glm::max(interiorAmbient_ * 2.0f, glm::vec3(0.35f)), indoorFactor_), 1.0f);
+        // The world's ambient is the area's, wherever the camera is. It used
+        // to be eased toward the building's MOHD ambient whenever the camera
+        // entered an interior group, and every shader reads it - so stepping
+        // into a Stormwind canal tunnel relit the whole Trade District seen
+        // through its mouth.
+        //
+        // Units indoors still take the building's ambient (MOHD, stored half
+        // intensity like MOCV). character.frag alone reads it, from the .w
+        // slots no shader otherwise uses: lightDir.w, lightColor.w and
+        // ambientColor.w carry its r, g and b, and shadowParams.w how far
+        // indoors the player is.
+        const glm::vec3 unitIndoorAmbient = glm::max(interiorAmbient_ * 2.0f, glm::vec3(0.35f));
+        currentFrameData.lightDir = glm::vec4(lp.directionalDir, unitIndoorAmbient.r);
+        currentFrameData.lightColor = glm::vec4(lp.diffuseColor, unitIndoorAmbient.g);
+        currentFrameData.ambientColor = glm::vec4(lp.ambientColor, unitIndoorAmbient.b);
         currentFrameData.fogColor = glm::vec4(lp.fogColor, 1.0f);
         currentFrameData.fogParams.x = lp.fogStart;
         currentFrameData.fogParams.y = lp.fogEnd;
@@ -2005,7 +2014,14 @@ void Renderer::update(float deltaTime) {
             glm::vec3 up = glm::cross(right, fwd);
             float uLen = glm::length(up);
             up = (uLen < 1e-6f) ? glm::vec3(0.0f, 0.0f, 1.0f) : up / uLen;
-            audio::AudioEngine::instance().setListenerPosition(camera->getPosition());
+            // At the character, facing where the camera looks: stock 3.3.5's
+            // Sound_ListenerAtCharacter (on by default). At the camera, the
+            // player's own voice and anything they stand next to sat 10+ yd
+            // away and played at a fraction of its volume.
+            const glm::vec3 listenerPos = (characterInstanceId > 0)
+                ? characterPosition + glm::vec3(0.0f, 0.0f, 1.5f)
+                : camera->getPosition();
+            audio::AudioEngine::instance().setListenerPosition(listenerPos);
             audio::AudioEngine::instance().setListenerOrientation(fwd, up);
         }
     } else {
@@ -2044,8 +2060,18 @@ void Renderer::update(float deltaTime) {
     {
         // Ease characters between sun and interior light over about a second,
         // as the stock client does, rather than flipping on the doorway frame.
-        const bool interior = insideWmo && wmoHit.interior;
-        if (interior) interiorAmbient_ = wmoRenderer->getModelAmbient(wmoHit.modelId);
+        //
+        // Decided by where the player stands, not the camera: the camera
+        // backing into a wall's group took the player's own light indoors
+        // with it. And only a group lit as an interior counts: an INTERIOR
+        // group flagged EXTERIOR_LIT (0x40) - Stormwind's Trade District and
+        // Silvermoon's streets are hundreds of them - is under the sky.
+        WMORenderer::AreaHit unitHit;
+        const bool unitInside = wmoRenderer &&
+            wmoRenderer->insideWmoArea(characterPosition.x, characterPosition.y,
+                                       characterPosition.z + 1.0f, &unitHit);
+        const bool interior = unitInside && unitHit.interiorLit;
+        if (interior) interiorAmbient_ = wmoRenderer->getModelAmbient(unitHit.modelId);
         const float target = interior ? 1.0f : 0.0f;
         indoorFactor_ += (target - indoorFactor_) * (1.0f - std::exp(-deltaTime / 0.35f));
     }
@@ -2103,7 +2129,11 @@ void Renderer::update(float deltaTime) {
 
     // Sync character model position/rotation and animation with follow target
     if (characterInstanceId > 0 && characterRenderer && cameraController) {
-        characterRenderer->setInstancePosition(characterInstanceId, characterPosition);
+        // Drawn where the eased step puts it; characterPosition stays the
+        // physics position that movement packets and collision use.
+        characterRenderer->setInstancePosition(
+            characterInstanceId,
+            characterPosition + glm::vec3(0.0f, 0.0f, cameraController->getRenderZOffset()));
 
         // Movement-facing comes from camera controller and is decoupled from LMB orbit.
         bool taxiFlight = animationController_ && animationController_->isTaxiFlight();
@@ -4860,7 +4890,10 @@ void Renderer::buildFrameGraph(game::GameHandler* gameHandler) {
         [this](VkCommandBuffer cmd) {
             uint32_t frame = vkCtx->getCurrentFrame();
             for (auto* preview : activePreviews_) {
-                if (preview && preview->isModelLoaded())
+                // hasContent, not isModelLoaded: the login screen's glue
+                // scene has no character, and gating on one meant it was
+                // never drawn - the auth screen showed its black fill.
+                if (preview && preview->hasContent())
                     preview->compositePass(cmd, frame);
             }
         });

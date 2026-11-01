@@ -305,13 +305,17 @@ void ChatPanel::sendChatMessage(game::GameHandler& gameHandler) {
                 if (dbcId != 0) {
                     uint64_t targetGuid = gameHandler.hasTarget() ? gameHandler.getTargetGuid() : 0;
                     gameHandler.sendTextEmote(dbcId, targetGuid);
+                } else {
+                    // Only an emote the server is never told about needs a
+                    // line of its own here. One that was sent comes back as
+                    // SMSG_TEXT_EMOTE, and chat_handler prints "You laugh."
+                    // from that echo - adding it here as well doubled it.
+                    game::MessageChatData msg;
+                    msg.type = game::ChatType::TEXT_EMOTE;
+                    msg.language = game::ChatLanguage::UNIVERSAL;
+                    msg.message = emoteText;
+                    gameHandler.addLocalChatMessage(msg);
                 }
-
-                game::MessageChatData msg;
-                msg.type = game::ChatType::TEXT_EMOTE;
-                msg.language = game::ChatLanguage::COMMON;
-                msg.message = emoteText;
-                gameHandler.addLocalChatMessage(msg);
 
                 chatInputBuffer_[0] = '\0';
                 return;

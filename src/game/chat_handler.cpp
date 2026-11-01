@@ -12,6 +12,9 @@
 #include "network/world_socket.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/animation_controller.hpp"
+#include "rendering/animation/emote_registry.hpp"
+#include "pipeline/asset_manager.hpp"
+#include "pipeline/dbc_loader.hpp"
 #include "core/logger.hpp"
 #include "core/app_clock.hpp"
 #include <algorithm>
@@ -374,6 +377,27 @@ void ChatHandler::sendChatMessage(ChatType type, const std::string& message, con
     }
 
     addLocalChatMessage(echo);
+
+    // The player's own bubble. The server's echo of a /say is dropped in
+    // handleMessageChat in favour of the line above, and that echo was the
+    // only thing that ever raised a bubble - so nothing the player said
+    // floated over their own head, where the real client shows it.
+    showChatBubble(echo.senderGuid, type, message);
+}
+
+void ChatHandler::showChatBubble(uint64_t senderGuid, ChatType type, const std::string& message) {
+    if (!owner_.chatBubbleCallbackRef() || senderGuid == 0 || message.empty()) return;
+    bool bubble = (type == ChatType::SAY || type == ChatType::YELL ||
+                   type == ChatType::MONSTER_SAY || type == ChatType::MONSTER_YELL ||
+                   type == ChatType::MONSTER_PARTY);
+    // Party Chat Bubbles, a separate box beside the one for say and yell. Off
+    // unless asked for, as it ships, since a five-person group talking is a
+    // lot of text over the fight. The leader's lines are party lines too.
+    if (!bubble && (type == ChatType::PARTY || type == ChatType::RAID ||
+                    type == ChatType::PARTY_LEADER || type == ChatType::RAID_LEADER)) {
+        bubble = addons::storedCVarValue("chatBubblesParty", "0") != "0";
+    }
+    if (bubble) owner_.chatBubbleCallbackRef()(senderGuid, message, static_cast<uint8_t>(type));
 }
 
 void ChatHandler::sendAddonMessage(ChatType type, const std::string& message, const std::string& target) {
@@ -754,21 +778,8 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
         }
     }
 
-    // Trigger chat bubble for SAY/YELL messages from others
-    if (owner_.chatBubbleCallbackRef() && data.senderGuid != 0) {
-        bool bubble = (data.type == ChatType::SAY || data.type == ChatType::YELL ||
-                       data.type == ChatType::MONSTER_SAY || data.type == ChatType::MONSTER_YELL ||
-                       data.type == ChatType::MONSTER_PARTY);
-        // Party Chat Bubbles, a separate box beside the one for say and yell,
-        // and read by nothing until now: party lines never floated over anyone
-        // whichever way it was set. Off unless asked for, as it ships, since a
-        // five-person group talking is a lot of text over the fight.
-        if (!bubble && (data.type == ChatType::PARTY || data.type == ChatType::RAID)) {
-            bubble = addons::storedCVarValue("chatBubblesParty", "0") != "0";
-        }
-        if (bubble) owner_.chatBubbleCallbackRef()(data.senderGuid, data.message,
-                                                   static_cast<uint8_t>(data.type));
-    }
+    // Chat bubble for say/yell (and party, when asked for) over the speaker.
+    showChatBubble(data.senderGuid, data.type, data.message);
 
     // Log the message
     std::string senderInfo;
@@ -833,6 +844,17 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
         const size_t dash = data.channelName.find(" - ");
         const std::string shortChannel = (dash == std::string::npos)
             ? data.channelName : data.channelName.substr(0, dash);
+        // arg4 is the channel *with its number*, "1. General - Elwynn Forest",
+        // as the real client sends it. FrameXML cuts the zone off and prints
+        // "[1. General]", and before that only accepts the line if arg4 is
+        // longer than the name the window lists - which a bare "mychannel"
+        // against "mychannel" never is, so every custom channel was dropped.
+        const std::string numberedChannel = (channelNumber > 0)
+            ? std::to_string(channelNumber) + ". " + data.channelName : data.channelName;
+        // arg7, the zone channel's ChatChannels.dbc id, 0 for a custom one.
+        const uint32_t zoneChannelId =
+            (channelNumber > 0 && static_cast<size_t>(channelNumber) <= joinedChannelIds_.size())
+                ? joinedChannelIds_[static_cast<size_t>(channelNumber) - 1] : 0;
         // arg5 is the *target*, not the sender. It was the sender's own name,
         // which is only read by CHANNEL_NOTICE_USER - and read as "there are
         // two names in this notice", so every kick and ban was formatted as
@@ -879,10 +901,10 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
             data.message,
             shownName,
             lang,
-            data.channelName,
+            numberedChannel,
             data.receiverName,
             chatFlag,
-            "0",
+            std::to_string(zoneChannelId),
             std::to_string(channelNumber),
             shortChannel,
             "0",
@@ -957,6 +979,9 @@ void ChatHandler::flushChatAwaitingName(uint64_t guid) {
 }
 
 void ChatHandler::expireChatAwaitingName() {
+    // Riding on this per-tick call rather than adding another: the zone
+    // channels wait for the zone to be known, and this is chat's tick.
+    servicePendingAutoJoin();
     if (chatAwaitingName_.empty()) return;
     const double now = core::appTimeSeconds();
     std::vector<MessageChatData> ready;
@@ -980,38 +1005,49 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
         LOG_WARNING("Failed to parse SMSG_TEXT_EMOTE");
         return;
     }
-    // The voice line plays for every sender, the player included; only the
-    // chat line below is the player's own echo to skip.
+    // The voice line plays for every sender, the player included.
     if (owner_.textEmoteSoundCallbackRef()) owner_.textEmoteSoundCallbackRef()(data.senderGuid, data.textEmoteId);
 
-    if (data.senderGuid == owner_.getPlayerGuid() && data.senderGuid != 0) {
-        return;
-    }
+    // The player's own name, for the echo and for "Name laughs at you."
+    std::string playerName;
+    if (const Character* active = owner_.getActiveCharacter()) playerName = active->name;
+    if (playerName.empty()) playerName = owner_.lookupName(owner_.getPlayerGuid());
 
-    std::string senderName = owner_.lookupName(data.senderGuid);
+    const bool fromPlayer = data.senderGuid == owner_.getPlayerGuid() && data.senderGuid != 0;
+    const std::string* targetPtr = data.targetName.empty() ? nullptr : &data.targetName;
+    auto& emotes = rendering::EmoteRegistry::instance();
+    emotes.loadFromDbc();
+
     // SMSG_TEXT_EMOTE is the narrated chat line. The server sends the actual
     // visual separately in SMSG_EMOTE; replaying an animation here restarts
     // one-shots and replaces correctly resolved STATE_* loops such as /dance.
-    if (senderName.empty()) {
-        const auto& partyData = owner_.getPartyData();
-        for (const auto& member : partyData.members) {
-            if (member.guid == data.senderGuid && !member.name.empty()) {
-                senderName = member.name;
-                break;
-            }
+    std::string senderName;
+    std::string emoteText;
+    if (fromPlayer) {
+        // The player's own echo is the only place "You laugh." comes from.
+        // This used to be skipped as a duplicate of a local line, but DoEmote
+        // - the route FrameXML's chat takes for every /emote - adds none, so
+        // the player's own emotes never appeared in chat at all. The real
+        // client prints it from this echo too, which is also why a dead
+        // player's /laugh (which the server refuses) prints nothing.
+        senderName = playerName;
+        emoteText = emotes.selfTextByDbcId(data.textEmoteId, targetPtr);
+    } else {
+        senderName = knownPlayerName(data.senderGuid);
+        if (senderName.empty()) {
+            owner_.queryPlayerName(data.senderGuid);
+            LOG_DEBUG("Deferred chat text for unresolved SMSG_TEXT_EMOTE sender=0x",
+                      std::hex, data.senderGuid, std::dec,
+                      " emoteId=", data.textEmoteId);
+            return;
+        }
+        // Aimed at the player: "Name laughs at you.", as the target reads it.
+        if (targetPtr && !playerName.empty() && data.targetName == playerName) {
+            emoteText = emotes.atYouTextByDbcId(data.textEmoteId, senderName, playerName);
+        } else {
+            emoteText = emotes.textByDbcId(data.textEmoteId, senderName, targetPtr);
         }
     }
-
-    if (senderName.empty()) {
-        owner_.queryPlayerName(data.senderGuid);
-        LOG_DEBUG("Deferred chat text for unresolved SMSG_TEXT_EMOTE sender=0x",
-                  std::hex, data.senderGuid, std::dec,
-                  " emoteId=", data.textEmoteId);
-        return;
-    }
-
-    const std::string* targetPtr = data.targetName.empty() ? nullptr : &data.targetName;
-    std::string emoteText = rendering::AnimationController::getEmoteTextByDbcId(data.textEmoteId, senderName, targetPtr);
     if (emoteText.empty()) {
         emoteText = data.targetName.empty()
             ? senderName + " performs an emote."
@@ -1020,7 +1056,9 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
 
     MessageChatData chatMsg;
     chatMsg.type = ChatType::TEXT_EMOTE;
-    chatMsg.language = ChatLanguage::COMMON;
+    // Universal, so the chat frame puts no "[Common] " header in front of it
+    // for a Horde reader: a text emote is narration, not speech.
+    chatMsg.language = ChatLanguage::UNIVERSAL;
     chatMsg.senderGuid = data.senderGuid;
     chatMsg.senderName = senderName;
     chatMsg.message = emoteText;
@@ -1030,13 +1068,21 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
     LOG_INFO("TEXT_EMOTE from ", senderName, " (emoteId=", data.textEmoteId, ")");
 }
 
-void ChatHandler::joinChannel(const std::string& channelName, const std::string& password) {
+void ChatHandler::joinChannel(const std::string& channelName, const std::string& password,
+                              uint32_t channelId) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    auto packet = owner_.getPacketParsers()
-        ? owner_.getPacketParsers()->buildJoinChannel(channelName, password)
-        : JoinChannelPacket::build(channelName, password);
+    // A zone channel's id goes in the prefix WotLK and TBC share; the
+    // expansion builders only ever send zero there, which the server reads
+    // as a custom channel of that name.
+    auto packet = (channelId != 0 && !isClassicLikeExpansion())
+        ? JoinChannelPacket::build(channelName, password, channelId)
+        : owner_.getPacketParsers()
+            ? owner_.getPacketParsers()->buildJoinChannel(channelName, password)
+            : JoinChannelPacket::build(channelName, password);
     owner_.getSocket()->send(packet);
-    LOG_INFO("Requesting to join channel: ", channelName);
+    // Asking to join is the opposite of asking to leave.
+    leavingChannels_.erase(channelName);
+    LOG_INFO("Requesting to join channel: ", channelName, " id=", channelId);
 }
 
 void ChatHandler::requestChannelList(const std::string& channelName) {
@@ -1056,7 +1102,52 @@ void ChatHandler::leaveChannel(const std::string& channelName) {
         ? owner_.getPacketParsers()->buildLeaveChannel(channelName)
         : LeaveChannelPacket::build(channelName);
     owner_.getSocket()->send(packet);
+    leavingChannels_.insert(channelName);
     LOG_INFO("Requesting to leave channel: ", channelName);
+}
+
+const char* ChatHandler::rememberJoinedChannel(const std::string& name, uint32_t channelId) {
+    if (joinedChannelIds_.size() != joinedChannels_.size())
+        joinedChannelIds_.resize(joinedChannels_.size(), 0);
+    for (size_t i = 0; i < joinedChannels_.size(); ++i) {
+        if (joinedChannels_[i] != name) continue;
+        if (channelId != 0) joinedChannelIds_[i] = channelId;
+        // Rejoined after the server suspended it: a join worth announcing.
+        return suspendedChannels_.erase(name) ? "YOU_JOINED" : nullptr;
+    }
+    // A zone channel under its new zone's name takes the old one's number,
+    // as the real client does: "Changed Channel: [1. General - Westfall]".
+    if (channelId != 0) {
+        for (size_t i = 0; i < joinedChannels_.size(); ++i) {
+            if (joinedChannelIds_[i] != channelId) continue;
+            const bool wasSuspended = suspendedChannels_.erase(joinedChannels_[i]) != 0;
+            ownedChannels_.erase(joinedChannels_[i]);
+            joinedChannels_[i] = name;
+            return wasSuspended ? "YOU_JOINED" : "YOU_CHANGED";
+        }
+    }
+    joinedChannels_.push_back(name);
+    joinedChannelIds_.push_back(channelId);
+    return "YOU_JOINED";
+}
+
+void ChatHandler::fireChannelNotice(const char* notice, const std::string& channelName) {
+    if (!notice || !owner_.addonEventCallbackRef()) return;
+    const int index = getChannelIndex(channelName);
+    uint32_t zoneChannelId = 0;
+    if (index > 0 && static_cast<size_t>(index) <= joinedChannelIds_.size())
+        zoneChannelId = joinedChannelIds_[static_cast<size_t>(index) - 1];
+    const size_t dash = channelName.find(" - ");
+    const std::string shortName = dash == std::string::npos ? channelName : channelName.substr(0, dash);
+    // arg4 is "N. Name" and arg8 the number: CHAT_YOU_JOINED_NOTICE is
+    // "Joined Channel: |Hchannel:%d|h[%s]|h" formatted with arg8 and arg4.
+    // arg9 is matched against the names the chat window carries ("General").
+    const std::string numbered = index > 0
+        ? std::to_string(index) + ". " + channelName : channelName;
+    owner_.addonEventCallbackRef()("CHAT_MSG_CHANNEL_NOTICE", {
+        notice, "", "", numbered, "", "", std::to_string(zoneChannelId),
+        std::to_string(index), shortName, "0", "0", ""
+    });
 }
 
 std::string ChatHandler::getChannelByIndex(int index) const {
@@ -1080,33 +1171,51 @@ void ChatHandler::handleChannelNotify(network::Packet& packet) {
 
     switch (data.notifyType) {
         case ChannelNotifyType::YOU_JOINED: {
-            if (std::find(joinedChannels_.begin(), joinedChannels_.end(), data.channelName) == joinedChannels_.end()) {
-                joinedChannels_.push_back(data.channelName);
-            }
-            MessageChatData msg;
-            msg.type = ChatType::SYSTEM;
-            msg.message = "Joined channel: " + data.channelName;
-            addLocalChatMessage(msg);
-            LOG_INFO("Joined channel: ", data.channelName);
+            // Through CHAT_MSG_CHANNEL_NOTICE, which FrameXML prints as
+            // "Joined Channel: [1. General - Elwynn Forest]" (or "Changed
+            // Channel:" when a zone change renamed it in place). This was a
+            // SYSTEM line with no number, and the list it kept had no idea a
+            // zone change had replaced General, so the numbers drifted.
+            const char* notice = rememberJoinedChannel(data.channelName, data.channelId);
+            fireChannelNotice(notice, data.channelName);
+            LOG_INFO("Joined channel: ", data.channelName, " id=", data.channelId,
+                     " as #", getChannelIndex(data.channelName));
             break;
         }
         case ChannelNotifyType::YOU_LEFT: {
+            const bool asked = leavingChannels_.erase(data.channelName) != 0;
+            if (data.constant && !asked && getChannelIndex(data.channelName) > 0) {
+                // The server took a built-in channel away (left the city that
+                // Trade belongs to). The real client keeps its number for when
+                // it comes back and says SUSPENDED: "Left Channel: [2. Trade -
+                // City]". YOU_LEFT would make FrameXML drop the channel from
+                // the chat window, and Trade would stay filtered out of it
+                // after the next visit to a city.
+                suspendedChannels_.insert(data.channelName);
+                fireChannelNotice("SUSPENDED", data.channelName);
+                LOG_INFO("Channel suspended: ", data.channelName);
+                break;
+            }
+            // Announced before it is taken off the list, so it still has its
+            // number.
+            fireChannelNotice("YOU_LEFT", data.channelName);
             ownedChannels_.erase(data.channelName);
-            joinedChannels_.erase(
-                std::remove(joinedChannels_.begin(), joinedChannels_.end(), data.channelName),
-                joinedChannels_.end());
-            MessageChatData msg;
-            msg.type = ChatType::SYSTEM;
-            msg.message = "Left channel: " + data.channelName;
-            addLocalChatMessage(msg);
+            suspendedChannels_.erase(data.channelName);
+            if (joinedChannelIds_.size() != joinedChannels_.size())
+                joinedChannelIds_.resize(joinedChannels_.size(), 0);
+            for (size_t i = joinedChannels_.size(); i-- > 0;) {
+                if (joinedChannels_[i] == data.channelName) {
+                    joinedChannels_.erase(joinedChannels_.begin() + static_cast<std::ptrdiff_t>(i));
+                    joinedChannelIds_.erase(joinedChannelIds_.begin() + static_cast<std::ptrdiff_t>(i));
+                }
+            }
             LOG_INFO("Left channel: ", data.channelName);
             break;
         }
         case ChannelNotifyType::PLAYER_ALREADY_MEMBER: {
             // Server confirms we're in this channel but our local list doesn't have it yet -
             // can happen after reconnect or if the join notification was missed.
-            if (std::find(joinedChannels_.begin(), joinedChannels_.end(), data.channelName) == joinedChannels_.end()) {
-                joinedChannels_.push_back(data.channelName);
+            if (rememberJoinedChannel(data.channelName, 0)) {
                 LOG_INFO("Already in channel: ", data.channelName);
             }
             break;
@@ -1212,22 +1321,125 @@ void ChatHandler::autoJoinDefaultChannels() {
     LOG_INFO("autoJoinDefaultChannels: general=", chatAutoJoin.general,
              " trade=", chatAutoJoin.trade, " localDefense=", chatAutoJoin.localDefense,
              " lfg=", chatAutoJoin.lfg, " local=", chatAutoJoin.local);
-    if (chatAutoJoin.general) joinChannel("General");
-    if (chatAutoJoin.trade) joinChannel("Trade");
-    if (chatAutoJoin.localDefense) joinChannel("LocalDefense");
-    if (chatAutoJoin.lfg) joinChannel("LookingForGroup");
-    if (chatAutoJoin.local) joinChannel("Local");
 
-    // Guild Recruitment. Unlike the five above it has no switch of this
-    // client's own - the interface's checkbox is its only control - so the
-    // CVar is read here rather than mirrored into a client setting first.
-    //
-    // At world entry, like the rest of this function: the other five are
-    // applied here too, so a channel joined by ticking a box arrives on the
-    // next login, and this behaves the same way rather than differently.
-    if (addons::storedCVarValue("guildRecruitmentChannel", "0") != "0") {
-        joinChannel("GuildRecruitment");
+    // A new session: the server has us in no channel yet, whatever the list
+    // remembered from the last character.
+    joinedChannels_.clear();
+    joinedChannelIds_.clear();
+    ownedChannels_.clear();
+    leavingChannels_.clear();
+    suspendedChannels_.clear();
+
+    if (isClassicLikeExpansion()) {
+        // Plain names, as before; 1.12's join packet has no channel id.
+        if (chatAutoJoin.general) joinChannel("General");
+        if (chatAutoJoin.trade) joinChannel("Trade");
+        if (chatAutoJoin.localDefense) joinChannel("LocalDefense");
+        if (chatAutoJoin.lfg) joinChannel("LookingForGroup");
+        if (chatAutoJoin.local) joinChannel("Local");
+        if (addons::storedCVarValue("guildRecruitmentChannel", "0") != "0") {
+            joinChannel("GuildRecruitment");
+        }
+        return;
     }
+
+    // The zone channels are named after the zone, and at world entry the
+    // zone is not known yet: SMSG_INIT_WORLD_STATES brings it a moment later.
+    // Held until then (see servicePendingAutoJoin). The server will not do
+    // this for us - UpdateLocalChannels skips a player who is still loading,
+    // "the client handles it automatically after loading".
+    autoJoinPending_ = true;
+    autoJoinRequestedAt_ = core::appTimeSeconds();
+    // What the zone said before this login, which may be the last
+    // character's. Not trusted until it changes or a moment has passed for
+    // this login's SMSG_INIT_WORLD_STATES to arrive: the server takes the
+    // channel name as given, so a stale zone would put the player in
+    // another zone's General.
+    autoJoinZoneAtRequest_ = owner_.getWorldStateZoneId();
+    servicePendingAutoJoin();
+}
+
+void ChatHandler::servicePendingAutoJoin() {
+    if (!autoJoinPending_) return;
+    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
+    const uint32_t zoneId = owner_.getWorldStateZoneId();
+    if (zoneId != 0 && zoneId == autoJoinZoneAtRequest_ &&
+        core::appTimeSeconds() - autoJoinRequestedAt_ < 3.0) {
+        return;
+    }
+    if (zoneId == 0) {
+        static bool warned = false;
+        if (!warned && core::appTimeSeconds() - autoJoinRequestedAt_ > 15.0) {
+            warned = true;
+            LOG_WARNING("Chat: no zone after 15s in world - zone channels not joined yet");
+        }
+        return;
+    }
+    autoJoinPending_ = false;
+    joinZoneChannels(zoneId);
+}
+
+void ChatHandler::joinZoneChannels(uint32_t zoneId) {
+    // ChatChannels.dbc as 3.3.5 ships it, for when the file cannot be read.
+    struct ZoneChannel { uint32_t id; uint32_t flags; std::string pattern; };
+    std::vector<ZoneChannel> table;
+    if (auto* am = owner_.services().assetManager; am && am->isInitialized()) {
+        auto dbc = am->loadDBC("ChatChannels.dbc");
+        // ID, Flags, FactionGroup, Name_lang[...] - enUS name at field 3.
+        if (dbc && dbc->isLoaded() && dbc->getFieldCount() > 3) {
+            for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+                std::string pattern = dbc->getString(r, 3);
+                if (!pattern.empty())
+                    table.push_back({dbc->getUInt32(r, 0), dbc->getUInt32(r, 1), std::move(pattern)});
+            }
+        }
+    }
+    if (table.empty()) {
+        table = {{1, 0x80003, "General - %s"}, {2, 0x3B, "Trade - %s"},
+                 {22, 0x10003, "LocalDefense - %s"}, {23, 0x10004, "WorldDefense"},
+                 {25, 0x20032, "GuildRecruitment - %s"}, {26, 0x40039, "LookingForGroup"}};
+    }
+
+    // AzerothCore's flag names (CHANNEL_DBC_FLAG_*).
+    constexpr uint32_t kGlobal = 0x4, kTrade = 0x8, kCityOnly = 0x10,
+                       kDefense = 0x10000, kGuildReq = 0x20000, kLfg = 0x40000;
+    const std::string zoneName = owner_.getWhoAreaName(zoneId);
+    const bool guildRecruitment =
+        addons::storedCVarValue("guildRecruitmentChannel", "0") != "0";
+
+    for (const auto& ch : table) {
+        // Which of the client's switches covers this row. Trade and the
+        // recruitment channel both carry the city flag, so the more specific
+        // flags decide first.
+        bool wanted;
+        if (ch.flags & kLfg)            wanted = chatAutoJoin.lfg;
+        else if (ch.flags & kGuildReq)  wanted = guildRecruitment;
+        else if (ch.flags & kTrade)     wanted = chatAutoJoin.trade;
+        else if (ch.flags & kDefense)   wanted = chatAutoJoin.localDefense;  // Local and World
+        else if (ch.id == 1)            wanted = chatAutoJoin.general;
+        else                            wanted = false;
+        if (!wanted) continue;
+
+        // The name the server keys the channel on, built the way
+        // Player::UpdateLocalChannels builds it, so this client lands in the
+        // same "General - Elwynn Forest" as everyone else rather than a
+        // custom channel called "General".
+        std::string name = ch.pattern;
+        if (!(ch.flags & kGlobal)) {
+            const std::string ext = (ch.flags & kCityOnly) ? std::string("City") : zoneName;
+            if (const size_t pos = name.find("%s"); pos != std::string::npos) {
+                if (ext.empty()) continue;  // zone name unknown: wrong name is worse than none
+                name.replace(pos, 2, ext);
+            }
+        }
+        // Not ours to filter by zone: the server checks the city and guild
+        // rules (CanJoinConstantChannelInZone) and ignores a join that fails
+        // them, silently, which is what Trade outside a city should do.
+        joinChannel(name, "", ch.id);
+    }
+
+    // A custom channel of this client's own, not one of the real client's.
+    if (chatAutoJoin.local) joinChannel("Local");
 }
 
 void ChatHandler::addLocalChatMessage(const MessageChatData& msg) {
@@ -1278,11 +1490,23 @@ void ChatHandler::fireChatEvent(const MessageChatData& msg) {
         (msg.type == ChatType::WHISPER_INFORM && !msg.receiverName.empty())
             ? msg.receiverName
             : senderName;
+    // The same channel arguments the server path sends: arg4 numbered, arg9
+    // without the zone. arg9 was the full "General - Elwynn Forest", which
+    // matches nothing in the chat window's list ("General"), and arg4 had no
+    // number, so the player's own /1 lines were filtered out of the window.
+    const size_t dash = msg.channelName.find(" - ");
+    const std::string shortChannel = (dash == std::string::npos)
+        ? msg.channelName : msg.channelName.substr(0, dash);
+    const std::string numberedChannel = (channelIndex > 0)
+        ? std::to_string(channelIndex) + ". " + msg.channelName : msg.channelName;
+    const uint32_t zoneChannelId =
+        (channelIndex > 0 && static_cast<size_t>(channelIndex) <= joinedChannelIds_.size())
+            ? joinedChannelIds_[static_cast<size_t>(channelIndex) - 1] : 0;
     owner_.addonEventCallbackRef()(eventName, {
         msg.message, shownName,
         owner_.getLanguageName(static_cast<uint32_t>(msg.language)),
-        msg.channelName, msg.receiverName, "", "0", std::to_string(channelIndex),
-        msg.channelName, "0", "0", guidBuf
+        numberedChannel, msg.receiverName, "", std::to_string(zoneChannelId),
+        std::to_string(channelIndex), shortChannel, "0", "0", guidBuf
     });
 }
 

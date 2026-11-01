@@ -233,6 +233,9 @@ private:
     // the Wrath logo, as AccountLogin.xml lays them out.
     std::unique_ptr<rendering::CharacterPreview> glueScene_;
     bool glueSceneTried_ = false;
+    /// How long the window has been a different size from the scene's target;
+    /// the scene is rebuilt at the new size once that settles.
+    float glueSceneResizeTimer_ = 0.0f;
     VkDescriptorSet glueLogo_ = VK_NULL_HANDLE;
     bool glueLogoTried_ = false;
     bool drawGlueScene();

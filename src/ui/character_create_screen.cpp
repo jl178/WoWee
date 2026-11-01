@@ -240,6 +240,7 @@ void CharacterCreateScreen::updatePreviewIfNeeded() {
     if (!preview_) return;
 
     bool changed = (raceIndex != prevRaceIndex_ ||
+                    classIndex != prevClassIndex_ ||
                     genderIndex != prevGenderIndex_ ||
                     bodyTypeIndex != prevBodyTypeIndex_ ||
                     skin != prevSkin_ ||
@@ -259,8 +260,10 @@ void CharacterCreateScreen::updatePreviewIfNeeded() {
             selectedAppearanceId(hairColorIds_, hairColor),
             selectedAppearanceId(facialHairIds_, facialHair),
             useFemaleModel);
+        applyStartOutfit();
 
         prevRaceIndex_ = raceIndex;
+        prevClassIndex_ = classIndex;
         prevGenderIndex_ = genderIndex;
         prevBodyTypeIndex_ = bodyTypeIndex;
         prevSkin_ = skin;
@@ -268,6 +271,38 @@ void CharacterCreateScreen::updatePreviewIfNeeded() {
         prevHairStyle_ = hairStyle;
         prevHairColor_ = hairColor;
         prevFacialHair_ = facialHair;
+    }
+}
+
+void CharacterCreateScreen::applyStartOutfit() {
+    // The stock create screen dresses the model in the class's starter gear
+    // (CharStartOutfit.dbc: id, race/class/sex bytes, 24 item ids, 24 display
+    // ids, 24 inventory types). It showed a naked character instead.
+    if (!preview_ || !assetManager_ || availableClasses.empty() ||
+        classIndex >= static_cast<int>(availableClasses.size()) ||
+        raceIndex >= static_cast<int>(availableRaces_.size())) return;
+    auto dbc = assetManager_->loadDBC("CharStartOutfit.dbc");
+    if (!dbc || dbc->getFieldCount() < 74) return;
+    const uint32_t race = static_cast<uint32_t>(availableRaces_[raceIndex]);
+    const uint32_t cls = static_cast<uint32_t>(availableClasses[classIndex]);
+    // Nonbinary picks a body; the outfit follows the model used.
+    const uint32_t sex = (genderIndex == 1 || (genderIndex == 2 && bodyTypeIndex == 1)) ? 1u : 0u;
+    for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+        const uint32_t packed = dbc->getUInt32(r, 1);
+        if ((packed & 0xFF) != race || ((packed >> 8) & 0xFF) != cls ||
+            ((packed >> 16) & 0xFF) != sex) continue;
+        std::vector<game::EquipmentItem> equipment;
+        for (uint32_t i = 0; i < 24; ++i) {
+            const uint32_t display = dbc->getUInt32(r, 26 + i);
+            const uint32_t invType = dbc->getUInt32(r, 50 + i);
+            if (display == 0 || display == 0xFFFFFFFFu || invType == 0 || invType == 0xFFFFFFFFu) continue;
+            game::EquipmentItem item{};
+            item.displayModel = display;
+            item.inventoryType = static_cast<uint8_t>(invType);
+            equipment.push_back(item);
+        }
+        preview_->applyEquipment(equipment);
+        return;
     }
 }
 

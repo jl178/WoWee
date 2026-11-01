@@ -154,6 +154,9 @@ void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animatio
     const auto& seqs = inst.cachedModel->sequences;
     for (int i = 0; i < static_cast<int>(seqs.size()); ++i) {
         if (seqs[i].id != animationId) continue;
+        // Jumping straight to the held end is a state, not a motion: no fade.
+        if (skipToEnd) inst.blendDurationMs = 0.0f;
+        else beginM2SequenceBlend(*inst.cachedModel, inst, i);
         inst.currentSequenceIndex = i;
         inst.animDuration = static_cast<float>(seqs[i].duration);
         inst.playingVariation = false;   // not a variation: it does not go back
@@ -178,6 +181,7 @@ void M2Renderer::setInstanceAnimation(uint32_t instanceId, uint32_t animationId,
     // Find the first sequence matching the requested animation ID
     for (int i = 0; i < static_cast<int>(seqs.size()); ++i) {
         if (seqs[i].id == animationId) {
+            beginM2SequenceBlend(*inst.cachedModel, inst, i);
             inst.currentSequenceIndex = i;
             inst.animDuration = static_cast<float>(seqs[i].duration);
             inst.animTime = 0.0f;

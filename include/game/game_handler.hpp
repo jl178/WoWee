@@ -711,6 +711,9 @@ public:
     // Display toggles
     void toggleHelm();
     void toggleCloak();
+    /// Tell the server the character's sheath state (0 put away, 1 melee
+    /// drawn, 2 ranged drawn), so other clients see it.
+    void sendSetSheathed(uint32_t sheathState);
     bool isHelmVisible() const { return helmVisible_; }
     bool isCloakVisible() const { return cloakVisible_; }
 
@@ -1376,7 +1379,9 @@ public:
 
     // Melee swing callback (for driving animation/SFX)
     // spellId: 0 = regular auto-attack swing, non-zero = melee ability (special attack)
-    using MeleeSwingCallback = std::function<void(uint32_t spellId)>;
+    // hitInfo: the swing's SMSG_ATTACKERSTATEUPDATE HitInfo (HITINFO_OFFHAND
+    // picks the hand); 0 for an ability.
+    using MeleeSwingCallback = std::function<void(uint32_t spellId, uint32_t hitInfo)>;
     void setMeleeSwingCallback(MeleeSwingCallback cb) { meleeSwingCallback_ = std::move(cb); }
 
     // Snap the character to face the camera's current look direction and return the
@@ -1421,8 +1426,12 @@ public:
         std::function<void(uint64_t guid, uint32_t moveFlags, uint32_t mask)>;
     void setUnitMoveFlagsCallback(UnitMoveFlagsCallback cb) { unitMoveFlagsCallback_ = std::move(cb); }
 
-    // NPC swing callback (plays attack animation on NPC)
-    using NpcSwingCallback = std::function<void(uint64_t guid)>;
+    // Swing callback for any unit but the local player (creatures and other
+    // players), whoever they are fighting. hitInfo is the swing's HitInfo
+    // (HITINFO_OFFHAND picks the hand) and spellId is non-zero for an
+    // instant ability whose cast kit names its own animation (or a melee
+    // ability whose kit names none, which swings normally).
+    using NpcSwingCallback = std::function<void(uint64_t guid, uint32_t hitInfo, uint32_t spellId)>;
     void setNpcSwingCallback(NpcSwingCallback cb) { npcSwingCallback_ = std::move(cb); }
 
     // Hit reaction callback - triggers victim animation (dodge, block, wound, crit wound)

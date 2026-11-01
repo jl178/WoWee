@@ -189,6 +189,8 @@ std::vector<CalendarDayEntry> calendarEntriesForDay(const CalendarData& data,
             entry.kind = CalendarEntryKind::Holiday;
             entry.index = h;
             entry.ongoing = wanted > first;
+            entry.sequenceIndex = static_cast<int>(wanted - first) + 1;
+            entry.numSequenceDays = static_cast<int>(days);
             out.push_back(entry);
             break;  // one row per holiday per day, whichever run covers it
         }

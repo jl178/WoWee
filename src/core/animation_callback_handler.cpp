@@ -1,4 +1,5 @@
 #include "rendering/animation/melee_anim_chains.hpp"
+#include "rendering/animation/weapon_anim_select.hpp"
 #include "core/animation_callback_handler.hpp"
 #include "core/appearance_composer.hpp"
 #include "core/entity_spawner.hpp"
@@ -33,6 +34,15 @@ AnimationCallbackHandler::AnimationCallbackHandler(
     , gameHandler_(gameHandler)
     , appearanceComposer_(appearanceComposer)
 {
+}
+
+uint32_t AnimationCallbackHandler::kitCastAnim(uint32_t spellId) {
+    auto* svs = renderer_.getSpellVisualSystem();
+    if (spellId == 0 || !svs) return 0;
+    gameHandler_.loadSpellNameCache();
+    auto it = gameHandler_.spellNameCacheRef().find(spellId);
+    if (it == gameHandler_.spellNameCacheRef().end() || it->second.spellVisualId == 0) return 0;
+    return svs->getKitAnimations(it->second.spellVisualId).cast;
 }
 
 void AnimationCallbackHandler::resetChargeState() {
@@ -218,68 +228,95 @@ void AnimationCallbackHandler::setupCallbacks() {
         }
     });
 
-    // NPC/player swing callback (online mode) - play attack animation
-    // Probes the model for the best available attack animation:
-    //   ATTACK_1H(17) → ATTACK_2H(18) → ATTACK_2H_LOOSE(19) → ATTACK_UNARMED(16)
-    gameHandler_.setNpcSwingCallback([this](uint64_t guid) {
-        if (!renderer_.getCharacterRenderer()) return;
+    // Swing callback for every unit but the local player, whoever it is
+    // fighting. The swing comes from the unit's own weapons and the hand the
+    // server named (HITINFO_OFFHAND); an instant ability plays its cast kit's
+    // animation with the weapon variant swapped in. Both return to the unit's
+    // idle - its Ready stance while in combat - rather than to Stand.
+    // Before, every unit swung ATTACK_1H whatever it held, and the hand, the
+    // ability and the stance were all lost.
+    gameHandler_.setNpcSwingCallback([this](uint64_t guid, uint32_t hitInfo, uint32_t spellId) {
+        auto* cr = renderer_.getCharacterRenderer();
+        if (!cr) return;
         uint32_t instanceId = entitySpawner_.getCreatureInstanceId(guid);
         if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(guid);
-        if (instanceId != 0) {
-            auto* cr = renderer_.getCharacterRenderer();
-            const auto attackAnims =
-                rendering::anim::meleeAnimChain(rendering::anim::MeleeChain::Generic);
-            bool played = false;
-            for (uint32_t anim : attackAnims) {
-                if (cr->hasAnimation(instanceId, anim)) {
-                    cr->playAnimation(instanceId, anim, false);
-                    played = true;
-                    break;
-                }
-            }
-            if (!played) cr->playAnimation(instanceId, rendering::anim::ATTACK_UNARMED, false);
+        if (instanceId == 0) return;
+        using namespace rendering::anim;
+        uint32_t cur = 0; float t = 0.0f, d = 0.0f;
+        if (cr->getAnimationState(instanceId, cur, t, d) && cur == DEATH) return;
+
+        const rendering::WeaponLoadout weapons = entitySpawner_.unitWeaponLoadout(guid);
+        auto has = [&](uint32_t id) { return cr->hasAnimation(instanceId, id); };
+        uint32_t anim = 0;
+        if (spellId != 0) anim = firstPlayable(has, abilityAnimCandidates(kitCastAnim(spellId), weapons));
+        if (anim == 0) {
+            constexpr uint32_t kHitInfoOffHand = 0x00000004;
+            const auto chain = meleeAnimChain(swingChain(weapons, (hitInfo & kHitInfoOffHand) != 0));
+            for (uint32_t id : chain) if (has(id)) { anim = id; break; }
         }
+        if (anim == 0) return;  // a model with no attack at all stays as it is
+        cr->playAnimation(instanceId, anim, false, entitySpawner_.unitIdleAnim(guid, instanceId));
     });
 
-    // Hit reaction callback - plays one-shot dodge/block/wound animation on the victim
+    // Hit reaction callback - plays one-shot dodge/parry/block/wound animation on the victim
     gameHandler_.setHitReactionCallback([this](uint64_t victimGuid, game::GameHandler::HitReaction reaction) {
         auto* cr = renderer_.getCharacterRenderer();
         if (!cr) return;
+        using namespace rendering::anim;
+        const bool isLocalPlayer = (victimGuid == gameHandler_.getPlayerGuid());
+        auto* ac = renderer_.getAnimationController();
 
-        // Determine animation based on reaction type
-        uint32_t animId = rendering::anim::COMBAT_WOUND;
-        switch (reaction) {
-            case game::GameHandler::HitReaction::DODGE:      animId = rendering::anim::DODGE; break;
-            case game::GameHandler::HitReaction::PARRY:      break; // Parry already handled by existing system
-            case game::GameHandler::HitReaction::BLOCK:      animId = rendering::anim::BLOCK; break;
-            case game::GameHandler::HitReaction::SHIELD_BLOCK: animId = rendering::anim::SHIELD_BLOCK; break;
-            case game::GameHandler::HitReaction::CRIT_WOUND: animId = rendering::anim::COMBAT_CRITICAL; break;
-            case game::GameHandler::HitReaction::WOUND:      animId = rendering::anim::COMBAT_WOUND; break;
+        uint32_t instanceId = 0;
+        if (isLocalPlayer) {
+            instanceId = renderer_.getCharacterInstanceId();
+        } else {
+            instanceId = entitySpawner_.getCreatureInstanceId(victimGuid);
+            if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(victimGuid);
         }
+        if (instanceId == 0) return;
+
+        // The parry and the block are the victim's weapons': Parry1H/2H/2HL/
+        // Unarmed for what parried it, ShieldBlock for a shield (only a shield
+        // blocks; Block for a model without ShieldBlock). The parry used to
+        // play the hit flinch and a block never showed the shield.
+        const rendering::WeaponLoadout weapons = isLocalPlayer
+            ? (ac ? ac->getWeaponLoadout() : rendering::WeaponLoadout{})
+            : entitySpawner_.unitWeaponLoadout(victimGuid);
+        uint32_t want = COMBAT_WOUND;
+        switch (reaction) {
+            case game::GameHandler::HitReaction::DODGE:        want = DODGE; break;
+            case game::GameHandler::HitReaction::PARRY:        want = parryAnim(weapons); break;
+            case game::GameHandler::HitReaction::BLOCK:
+            case game::GameHandler::HitReaction::SHIELD_BLOCK: want = SHIELD_BLOCK; break;
+            case game::GameHandler::HitReaction::CRIT_WOUND:   want = COMBAT_CRITICAL; break;
+            case game::GameHandler::HitReaction::WOUND:        want = COMBAT_WOUND; break;
+        }
+        auto has = [&](uint32_t id) { return cr->hasAnimation(instanceId, id); };
+        const uint32_t animId = want == SHIELD_BLOCK
+            ? firstPlayable(has, {SHIELD_BLOCK, BLOCK})
+            : firstPlayable(has, {want});
+        if (animId == 0) return;
 
         // For local player: use AnimationController state
-        bool isLocalPlayer = (victimGuid == gameHandler_.getPlayerGuid());
         if (isLocalPlayer) {
-            auto* ac = renderer_.getAnimationController();
-            if (ac) {
-                uint32_t charInstId = renderer_.getCharacterInstanceId();
-                if (charInstId && cr->hasAnimation(charInstId, animId))
-                    ac->triggerHitReaction(animId);
-            }
+            if (ac) ac->triggerHitReaction(animId);
             return;
         }
 
-        // For NPCs/other players: direct playAnimation
-        uint32_t instanceId = entitySpawner_.getCreatureInstanceId(victimGuid);
-        if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(victimGuid);
-        // Not over a swing, a cast or a death, as the stock client does.
+        // Not over a swing, an ability, a cast, a death or a stride, as the
+        // stock client does: the reaction is a one-shot on the whole body.
         uint32_t cur = 0; float t = 0.0f, d = 0.0f;
-        const bool busy = instanceId != 0 && cr->getAnimationState(instanceId, cur, t, d) &&
-            ((cur >= rendering::anim::ATTACK_UNARMED && cur <= rendering::anim::ATTACK_2H_LOOSE) ||
-             cur == rendering::anim::DEATH ||
-             (cur >= rendering::anim::SPELL_PRECAST && cur <= rendering::anim::SPELL_CAST_AREA));
-        if (instanceId != 0 && !busy && cr->hasAnimation(instanceId, animId))
-            cr->playAnimation(instanceId, animId, false);
+        const bool haveState = cr->getAnimationState(instanceId, cur, t, d);
+        const bool busy = haveState &&
+            ((cur >= ATTACK_UNARMED && cur <= ATTACK_2H_LOOSE) ||
+             (cur >= SPECIAL_1H && cur <= SHIELD_BASH) ||
+             (cur >= ATTACK_1H_PIERCE && cur <= ATTACK_OFF_PIERCE) ||
+             cur == ATTACK_UNARMED_OFF || cur == SPECIAL_UNARMED || cur == WHIRLWIND ||
+             cur == KICK || cur == MUTILATE || cur == DEATH ||
+             cur == WALK || cur == RUN || cur == SWIM || cur == WALK_BACKWARDS ||
+             isSpellCastFamily(cur));
+        if (!busy)
+            cr->playAnimation(instanceId, animId, false, entitySpawner_.unitIdleAnim(victimGuid, instanceId));
     });
 
     // Stun state callback - enters/exits STUNNED animation on local player

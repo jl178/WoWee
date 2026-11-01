@@ -237,8 +237,23 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
                  " model has 1302=", modelGeosets.count(1302));
     }
 
-    // Kneepads: group 9 (always default 902)
-    geosets.insert(core::kGeosetDefaultKneepads);
+    // Kneepads: group 9 from the legs item's GeosetGroup[1] (902, 903); none
+    // otherwise. A robe or dress skirt covers them.
+    {
+        const uint32_t legsDid = findEquippedDisplayId({7});
+        const uint32_t kneeGG = getGeosetGroup(legsDid, geosetGroup3Field - 1);
+        const uint32_t chestDid = findEquippedDisplayId({5, 20});
+        const bool skirt = getGeosetGroup(chestDid, geosetGroup3Field) > 0 ||
+                           getGeosetGroup(legsDid, geosetGroup3Field) > 0;
+        if (kneeGG > 0 && !skirt) geosets.insert(pickGeoset(static_cast<uint16_t>(901 + kneeGG)));
+        if (skirt) {
+            // Boot tops would poke through the skirt: bare shins under it.
+            for (auto it = geosets.begin(); it != geosets.end();) {
+                if (*it / 100 == 5) it = geosets.erase(it); else ++it;
+            }
+            geosets.insert(pickGeoset(core::kGeosetBareShins));
+        }
+    }
 
     // Legs/Pants: inventoryType 7 → group 13 (trousers/thighs)
     // 1301=bare legs, 1302+=pant/kilt styles

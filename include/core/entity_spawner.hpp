@@ -3,6 +3,7 @@
 #include "game/character.hpp"
 #include "game/game_services.hpp"
 #include "pipeline/blp_loader.hpp"
+#include "rendering/animation/weapon_type.hpp"
 #include <memory>
 #include <string>
 #include <utility>
@@ -183,6 +184,34 @@ public:
     // only when this call consumed the caller's per-frame attachment budget.
     bool retryCreatureVirtualWeapons(uint64_t guid, uint32_t instanceId,
                                      uint8_t maxAttempts);
+
+    /// One Item.dbc row, the client's own table of every item's class,
+    /// subclass, inventory type, sheathe type and display.
+    struct ItemDbcRow {
+        uint32_t itemClass = 0;
+        uint32_t subclass = 0;
+        uint32_t inventoryType = 0;
+        uint32_t sheatheType = UINT32_MAX;  ///< UINT32_MAX: no row / unknown
+        uint32_t displayId = 0;
+    };
+    /// The row for an item entry; nullptr when Item.dbc has none (or the
+    /// expansion ships no Item.dbc).
+    const ItemDbcRow* lookupItemDbc(uint32_t entry);
+    /// A unit's main-hand, off-hand and ranged items: other players from
+    /// their visible item fields, creatures from UNIT_VIRTUAL_ITEM_SLOT_ID.
+    /// Not for the local character, whose inventory is authoritative.
+    std::array<ItemDbcRow, 3> unitWeaponItems(uint64_t guid);
+    /// The weapon loadout the combat animations are picked from.
+    rendering::WeaponLoadout unitWeaponLoadout(uint64_t guid);
+    /// UNIT_FIELD_BYTES_2 byte 0: 0 nothing drawn, 1 melee, 2 ranged.
+    uint8_t unitSheathState(uint64_t guid) const;
+    /// Re-attach a unit's weapons when its sheath state changed since the
+    /// last look. Cheap when nothing changed; called every frame.
+    void syncUnitSheath(uint64_t guid, uint32_t instanceId);
+    /// The loop another unit idles in: its drawn weapon's Ready stance while
+    /// alive and in combat (UNIT_FLAG_IN_COMBAT), Stand otherwise - and Stand
+    /// for a model with no ready stance at all.
+    uint32_t unitIdleAnim(uint64_t guid, uint32_t instanceId);
 
     // Mount
     void setMountDisplayId(uint32_t displayId) { pendingMountDisplayId_ = displayId; }
@@ -386,6 +415,29 @@ private:
     std::unordered_map<uint32_t, FacialHairGeosets> facialHairGeosetMap_;
     bool creatureLookupsBuilt_ = false;
     bool tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t instanceId);
+
+    // Item.dbc, loaded on first use.
+    std::unordered_map<uint32_t, ItemDbcRow> itemDbcCache_;
+    bool itemDbcLoaded_ = false;
+    /// Other players' weapon-slot displays (main, off, ranged) and inventory
+    /// types as last sent, so a sheath change can re-attach without them.
+    struct UnitWeaponDisplays {
+        std::array<uint32_t, 3> displayIds{};
+        std::array<uint8_t, 3> inventoryTypes{};
+    };
+    std::unordered_map<uint64_t, UnitWeaponDisplays> onlinePlayerWeaponSlots_;
+    /// Creatures whose weapons came from UNIT_VIRTUAL_ITEM_SLOT_ID and follow
+    /// their sheath state.
+    std::unordered_set<uint64_t> creatureVirtualItemUnits_;
+    /// The sheath state each unit's weapons were last attached for.
+    std::unordered_map<uint64_t, uint8_t> unitSheathAttached_;
+    /// Attach a unit's three weapon-slot items where its sheath state puts
+    /// them: in the hands when drawn, on the back or hips by their sheathe
+    /// type when not, the ranged weapon in hand when it is the one drawn
+    /// and on the back otherwise. Returns whether anything was attached.
+    bool attachUnitWeapons(uint64_t guid, uint32_t instanceId,
+                           const std::array<uint32_t, 3>& displayIds,
+                           const std::array<ItemDbcRow, 3>& items);
 
     // CharSections.dbc lookup cache
     std::unordered_map<uint64_t, std::string> charSectionsCache_;

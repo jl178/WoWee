@@ -5768,6 +5768,11 @@ bool LuaEngine::initialize() {
         LOG_ERROR("LuaEngine: failed to create Lua state");
         return false;
     }
+    // A new state starts on Lua's own schedule; stepGarbageCollector takes
+    // it over on its first call, once the interface has loaded.
+    gcLiveKb_ = 0;
+    gcInCycle_ = false;
+    gcAutoFallback_ = false;
 
     // Open safe standard libraries (no io, os, debug, package)
     luaopen_base(L_);
@@ -11899,6 +11904,78 @@ void LuaEngine::drainPendingTextChanged() {
         lua_pop(L_, 1);
     }
     lua_pop(L_, 1);
+}
+
+void LuaEngine::stepGarbageCollector(float budgetMs) {
+    if (!L_) return;
+    static const bool autoGc = [] {
+        const char* v = std::getenv("WOWEE_LUA_GC_AUTO");
+        return v != nullptr && *v != '\0' && *v != '0';
+    }();
+    if (autoGc) return;
+
+    const int heapKb = lua_gc(L_, LUA_GCCOUNT, 0);
+    if (gcLiveKb_ <= 0) {
+        // The first call comes once the interface has loaded, when nearly all
+        // of the heap is live - as good a baseline as a finished cycle.
+        gcLiveKb_ = std::max(heapKb, 1024);
+        LOG_INFO("LuaEngine: garbage collector paced per frame from here (heap ",
+                 heapKb / 1024, " MB, ", budgetMs, "ms a frame)");
+    }
+
+    // Lua's own default pause: start a cycle once the heap has doubled since
+    // the last one finished. Until then there is nothing to do - and the
+    // automatic collector stays held off, so no allocation starts one either.
+    const int startAtKb = gcLiveKb_ * 2;
+    if (!gcInCycle_ && heapKb < startAtKb) {
+        lua_gc(L_, LUA_GCSTOP, 0);
+        return;
+    }
+    gcInCycle_ = true;
+
+    // Falling behind - the heap well past where this cycle began - spends
+    // more of the frame, up to four times the budget.
+    const float behind = static_cast<float>(heapKb) / static_cast<float>(startAtKb);
+    const float budget = budgetMs * std::clamp(behind, 1.0f, 4.0f);
+    using clock = std::chrono::steady_clock;
+    const auto deadline = clock::now() +
+        std::chrono::duration_cast<clock::duration>(std::chrono::duration<float, std::milli>(budget));
+    for (;;) {
+        // 16KB of debt per call is a few dozen microseconds of marking or
+        // sweeping, so the deadline is overshot by about that much at most.
+        // LUA_GCSTEP also re-arms the automatic threshold, which is why the
+        // collector is stopped again below.
+        if (lua_gc(L_, LUA_GCSTEP, 16) == 1) {
+            gcInCycle_ = false;
+            gcLiveKb_ = std::max(lua_gc(L_, LUA_GCCOUNT, 0), 1024);
+            break;
+        }
+        if (clock::now() >= deadline) break;
+    }
+
+    // Never trade memory for smoothness without bound: if the heap has run
+    // to four times what is live (and by at least 32MB), let allocation drive
+    // the collector as well until it is back under three.
+    const int afterKb = lua_gc(L_, LUA_GCCOUNT, 0);
+    if (afterKb > gcLiveKb_ * 4 && afterKb - gcLiveKb_ > 32 * 1024) {
+        if (!gcAutoFallback_) {
+            gcAutoFallback_ = true;
+            LOG_WARNING("LuaEngine: interface garbage outran the per-frame collector (heap ",
+                        afterKb / 1024, " MB, live ", gcLiveKb_ / 1024,
+                        " MB) - automatic collection back on until it catches up");
+        }
+        lua_gc(L_, LUA_GCRESTART, 0);
+        return;
+    }
+    if (gcAutoFallback_ && afterKb < gcLiveKb_ * 3) {
+        gcAutoFallback_ = false;
+        LOG_INFO("LuaEngine: per-frame collector caught up (heap ", afterKb / 1024, " MB)");
+    }
+    if (gcAutoFallback_) {
+        lua_gc(L_, LUA_GCRESTART, 0);
+        return;
+    }
+    lua_gc(L_, LUA_GCSTOP, 0);
 }
 
 void LuaEngine::dispatchOnUpdate(float elapsed) {

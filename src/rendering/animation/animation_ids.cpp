@@ -6,11 +6,27 @@
 #include "pipeline/dbc_loader.hpp"
 #include "core/logger.hpp"
 
+#include <array>
 #include <unordered_set>
 
 namespace wowee {
 namespace rendering {
 namespace anim {
+
+namespace {
+std::array<uint32_t, ANIM_COUNT>& fallbackTable() {
+    static std::array<uint32_t, ANIM_COUNT> table = [] {
+        std::array<uint32_t, ANIM_COUNT> t{};
+        t.fill(UINT32_MAX);
+        return t;
+    }();
+    return table;
+}
+} // namespace
+
+uint32_t dbcFallback(uint32_t id) {
+    return id < ANIM_COUNT ? fallbackTable()[id] : UINT32_MAX;
+}
 
 const char* nameFromId(uint32_t id) {
     static const char* const names[ANIM_COUNT] = {
@@ -532,9 +548,17 @@ void validateAgainstDBC(const std::shared_ptr<wowee::pipeline::DBCFile>& dbc) {
 
     // Collect all IDs present in the DBC (first field is the animation ID)
     std::unordered_set<uint32_t> dbcIds;
+    // ID, Name, WeaponFlags, BodyFlags, Flags, Fallback, BehaviorID[, Tier]:
+    // the Fallback column is 5 in every release that ships the file.
+    constexpr uint32_t kFallbackField = 5;
+    const bool haveFallback = dbc->getFieldCount() > kFallbackField + 1;
     for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
         uint32_t id = dbc->getUInt32(i, 0);
         dbcIds.insert(id);
+        if (haveFallback && id < ANIM_COUNT) {
+            const uint32_t fb = dbc->getUInt32(i, kFallbackField);
+            fallbackTable()[id] = (fb < ANIM_COUNT && fb != id) ? fb : UINT32_MAX;
+        }
     }
 
     // Check: constants we define that are missing from DBC

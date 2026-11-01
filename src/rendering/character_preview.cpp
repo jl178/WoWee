@@ -1358,6 +1358,7 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
     backdropRace_ = static_cast<int>(race);
     backdropSceneLoaded_ = glueSceneOverride_;
     sceneCameraValid_ = false;
+    clearSceneLighting();
     previewStandPosition_ = glm::vec3(0.0f);
     previewViewDirection_ = glm::vec3(0.0f, 1.0f, 0.0f);
     modelYaw_ = 90.0f;
@@ -1429,6 +1430,7 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
     sceneCameraFovDiagonal_ = (sceneCam.fov > 0.0f && sceneCam.fov < 3.14159f) ? sceneCam.fov : 0.0f;
     sceneCameraValid_ = true;
     charRenderer_->playAnimation(backdropInstanceId_, 0, true);
+    setupSceneLighting(sceneModel, standPos);
 
     glm::vec3 toCamera = sceneCam.positionBase - sceneCam.targetBase;
     if (glm::length(toCamera) < 0.001f) toCamera = glm::vec3(0.0f, 1.0f, 0.0f);
@@ -1447,6 +1449,7 @@ bool CharacterPreview::loadGlueScene(const std::string& scenePath) {
         charRenderer_->removeInstance(backdropInstanceId_);
         backdropInstanceId_ = 0;
     }
+    clearSceneLighting();
     pipeline::M2Model sceneModel;
     if (!loadPreviewM2(scenePath, sceneModel) || sceneModel.cameras.empty()) {
         LOG_WARNING("CharacterPreview: no usable glue scene at ", scenePath);
@@ -1464,9 +1467,114 @@ bool CharacterPreview::loadGlueScene(const std::string& scenePath) {
     camera_->setRotation(glm::degrees(std::atan2(fwd.y, fwd.x)),
                          glm::degrees(std::asin(std::clamp(fwd.z, -1.0f, 1.0f))));
     if (cam.fov > 0.0f && cam.fov < 3.14159f) camera_->setFov(verticalFovFromDiagonal(cam.fov));
+    setupSceneLighting(sceneModel, cam.targetBase);
     sceneOnly_ = true;
     LOG_INFO("CharacterPreview: glue scene ", scenePath);
     return true;
+}
+
+void CharacterPreview::clearSceneLighting() {
+    sceneLit_ = false;
+    sceneLocalLights_.clear();
+    if (charRenderer_) charRenderer_->setPreviewLit(false);
+}
+
+void CharacterPreview::setupSceneLighting(const pipeline::M2Model& scene, const glm::vec3& focus) {
+    // The first key of a track, which is all these scenes animate bar the
+    // undead scene's torch flicker; fallback when the track has none.
+    auto firstVec3 = [](const pipeline::M2AnimationTrack& t, const glm::vec3& fallback) {
+        for (const auto& s : t.sequences)
+            if (!s.vec3Values.empty()) return s.vec3Values.front();
+        return fallback;
+    };
+    auto firstFloat = [](const pipeline::M2AnimationTrack& t, float fallback) {
+        for (const auto& s : t.sequences)
+            if (!s.floatValues.empty()) return s.floatValues.front();
+        return fallback;
+    };
+    // A bone's rest transform, parents included: the pivot, the translation
+    // track's first key, and the rotation's.
+    auto boneRest = [&](int boneIndex, glm::quat& outRot, glm::vec3& outPos, const glm::vec3& p) {
+        outRot = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        outPos = p;
+        int guard = 0;
+        while (boneIndex >= 0 && boneIndex < static_cast<int>(scene.bones.size()) && guard++ < 64) {
+            const auto& b = scene.bones[boneIndex];
+            glm::quat r(1.0f, 0.0f, 0.0f, 0.0f);
+            for (const auto& s : b.rotation.sequences)
+                if (!s.quatValues.empty()) { r = s.quatValues.front(); break; }
+            const glm::vec3 tr = firstVec3(b.translation, glm::vec3(0.0f));
+            outPos = b.pivot + tr + r * (outPos - b.pivot);
+            outRot = r * outRot;
+            boneIndex = b.parentBone;
+        }
+    };
+
+    sceneLocalLights_.clear();
+    sceneAmbient_ = glm::vec3(0.0f);
+    sceneLightColor_ = glm::vec3(0.0f);
+    sceneLightDir_ = glm::vec3(0.0f, 0.0f, -1.0f);
+    struct Directional { glm::vec3 dir; glm::vec3 color; };
+    std::vector<Directional> directionals;
+    int visibleLights = 0;
+
+    for (const auto& light : scene.lights) {
+        if (firstFloat(light.visibility, 1.0f) < 0.5f) continue;
+        ++visibleLights;
+        sceneAmbient_ += firstVec3(light.ambientColor, glm::vec3(1.0f)) *
+                         firstFloat(light.ambientIntensity, 0.0f);
+        const glm::vec3 diffuse = firstVec3(light.diffuseColor, glm::vec3(1.0f)) *
+                                  firstFloat(light.diffuseIntensity, 0.0f);
+        if (glm::dot(diffuse, glm::vec3(1.0f)) <= 1e-4f) continue;
+        glm::quat rot;
+        glm::vec3 pos;
+        boneRest(light.bone, rot, pos, light.position);
+        if (light.type == 0) {
+            // Down the bone's -Z. Checked against every scene that rotates
+            // one: it points from the light toward the scene's focus each
+            // time (human, tauren, draenei, blood elf, dwarf).
+            directionals.push_back({glm::normalize(rot * glm::vec3(0.0f, 0.0f, -1.0f)), diffuse});
+        } else {
+            const float attStart = firstFloat(light.attenuationStart, 0.0f);
+            const float attEnd = firstFloat(light.attenuationEnd, 0.0f);
+            SceneLocalLight l;
+            l.position = pos;
+            l.radius = std::max({attEnd, attStart, 1.0f});
+            const float peak = std::max({diffuse.r, diffuse.g, diffuse.b});
+            l.color = diffuse / peak;
+            l.intensity = peak;
+            sceneLocalLights_.push_back(l);
+        }
+    }
+
+    if (visibleLights == 0) {
+        // No lights of its own: the scene at its textures' own brightness.
+        sceneAmbient_ = glm::vec3(1.0f);
+    } else if (!directionals.empty()) {
+        // The shader has one sun. The brightest directional light is it; the
+        // rest are stood far off along their directions as wide local lights.
+        auto lum = [](const glm::vec3& c) { return glm::dot(c, glm::vec3(0.299f, 0.587f, 0.114f)); };
+        std::sort(directionals.begin(), directionals.end(),
+                  [&](const Directional& a, const Directional& b) { return lum(a.color) > lum(b.color); });
+        sceneLightDir_ = directionals.front().dir;
+        sceneLightColor_ = directionals.front().color;
+        for (size_t i = 1; i < directionals.size(); ++i) {
+            const float peak = std::max({directionals[i].color.r, directionals[i].color.g,
+                                         directionals[i].color.b});
+            SceneLocalLight l;
+            l.position = focus - directionals[i].dir * 2000.0f;
+            l.radius = 200000.0f;
+            l.color = directionals[i].color / peak;
+            l.intensity = peak;
+            sceneLocalLights_.push_back(l);
+        }
+    }
+
+    sceneLit_ = true;
+    if (charRenderer_) charRenderer_->setPreviewLit(true);
+    LOG_INFO("CharacterPreview: scene lights ", visibleLights, " ambient=(", sceneAmbient_.r, ",",
+             sceneAmbient_.g, ",", sceneAmbient_.b, ") sun=(", sceneLightColor_.r, ",",
+             sceneLightColor_.g, ",", sceneLightColor_.b, ") local=", sceneLocalLights_.size());
 }
 
 void CharacterPreview::update(float deltaTime) {
@@ -1515,6 +1623,24 @@ void CharacterPreview::compositePass(VkCommandBuffer cmd, uint32_t frameIndex) {
     // drivers, so keep the portrait on studio lighting only.
     ubo.shadowParams = glm::vec4(0.0f);
 
+    // A glue scene is lit by its own lights, not the studio rig: the login
+    // screen by its pale blue ambient alone, the human scene by a dim ambient
+    // and two directional lights. The scenes are hundreds of yards across, so
+    // the fog is pushed out of reach as well.
+    if (sceneLit_) {
+        ubo.lightDir = glm::vec4(sceneLightDir_, 0.0f);
+        ubo.lightColor = glm::vec4(sceneLightColor_, 0.0f);
+        ubo.ambientColor = glm::vec4(sceneAmbient_, 0.0f);
+        ubo.fogParams = glm::vec4(1.0e6f, 1.0e6f + 1.0f, 0.0f, 0.0f);
+        const size_t n = std::min<size_t>(sceneLocalLights_.size(), MAX_LOCAL_LIGHTS);
+        for (size_t i = 0; i < n; ++i) {
+            const auto& l = sceneLocalLights_[i];
+            ubo.localLightPosRadius[i] = glm::vec4(l.position, l.radius);
+            ubo.localLightColorIntensity[i] = glm::vec4(l.color, l.intensity);
+        }
+        ubo.localLightMeta = glm::ivec4(static_cast<int>(n), 0, 0, 0);
+    }
+
     std::memcpy(previewUBOMapped_[fi], &ubo, sizeof(GPUPerFrameData));
 
     // Begin off-screen render pass
@@ -1561,6 +1687,7 @@ void CharacterPreview::setTransparentBackground(bool transparent) {
         backdropInstanceId_ = 0;
         backdropRace_ = -1;
     }
+    if (transparent) clearSceneLighting();
 }
 
 void CharacterPreview::setPortraitFraming() {

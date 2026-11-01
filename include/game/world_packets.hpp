@@ -844,7 +844,11 @@ public:
  */
 class JoinChannelPacket {
 public:
-    static network::Packet build(const std::string& channelName, const std::string& password = "");
+    /// channelId is the ChatChannels.dbc row for a zone channel (General=1,
+    /// Trade=2, ...) and zero for a custom one. The server only treats a join
+    /// as the built-in channel when the id is there.
+    static network::Packet build(const std::string& channelName, const std::string& password = "",
+                                 uint32_t channelId = 0);
 };
 
 /**
@@ -902,6 +906,13 @@ struct ChannelNotifyData {
     ChannelNotifyType notifyType = ChannelNotifyType::YOU_JOINED;
     std::string channelName;
     uint64_t senderGuid = 0;
+    /// YOU_JOINED / YOU_LEFT only: the ChatChannels.dbc id (0 = custom).
+    uint32_t channelId = 0;
+    uint8_t channelFlags = 0;
+    /// YOU_LEFT only: a built-in channel (General, Trade...), which the real
+    /// client keeps the number of when the server takes it away on a zone
+    /// change - "Left Channel" as SUSPENDED rather than YOU_LEFT.
+    bool constant = false;
 
     [[nodiscard]] bool isValid() const { return !channelName.empty(); }
 };
@@ -2103,6 +2114,10 @@ struct AttackerStateUpdateData {
     [[nodiscard]] bool isMiss() const     { return (hitInfo & 0x00000010) != 0; }
     [[nodiscard]] bool isGlancing() const { return (hitInfo & 0x00010000) != 0; }
     [[nodiscard]] bool isCrushing() const { return (hitInfo & 0x00020000) != 0; }
+    // HITINFO_OFFHAND (once named HITINFO_LEFTSWING): the off-hand swung.
+    [[nodiscard]] bool isOffHand() const  { return (hitInfo & 0x00000004) != 0; }
+    // HITINFO_NO_ANIMATION: damage with no swing to show for it.
+    [[nodiscard]] bool noAnimation() const { return (hitInfo & 0x00040000) != 0; }
 };
 
 class AttackerStateUpdateParser {

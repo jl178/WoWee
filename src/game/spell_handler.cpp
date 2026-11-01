@@ -13,6 +13,7 @@
 #include "rendering/camera_controller.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/spell_visual_system.hpp"
+#include "rendering/animation/weapon_anim_select.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/spell_sound_manager.hpp"
 #include "audio/combat_sound_manager.hpp"
@@ -2236,6 +2237,27 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
     if (!owner_.getPacketParsers()->parseSpellGo(packet, data)) return;
     const bool rangedWeaponAttack = spellclass::isRangedWeaponAutoAttack(data.spellId);
 
+    // Whether an instant plays as an ability rather than a spell cast: its
+    // cast kit names an animation of its own (Special1H for Heroic Strike,
+    // ShieldBash, Whirlwind, BattleRoar for Battle Shout), or it is a melee
+    // ability whose kit names none, which is the normal next swing. A kit
+    // naming a spell-cast pose stays with the cast animation path. A
+    // triggered spell (CAST_FLAG_PENDING: a proc, a talent's extra effect)
+    // has no swing of its own.
+    const bool playsAsAbility = [&]() -> bool {
+        if (rangedWeaponAttack || owner_.isProfessionSpell(data.spellId)) return false;
+        if ((data.castFlags & 0x1u) != 0) return false;
+        uint32_t kitAnim = 0;
+        if (auto* renderer = owner_.services().renderer) {
+            if (auto* svs = renderer->getSpellVisualSystem()) {
+                if (const uint32_t visualId = resolveSpellVisualId(data.spellId))
+                    kitAnim = svs->getKitAnimations(visualId).cast;
+            }
+        }
+        if (kitAnim != 0) return !rendering::anim::isSpellCastFamily(kitAnim);
+        return spellclass::isMeleeRange(getSpellMaxRange(data.spellId));
+    }();
+
     if (data.casterUnit == owner_.getPlayerGuid()) {
         if (data.spellId == nextSwingSpellId_) nextSwingSpellId_ = 0;
         owner_.loadSpellNameCache();
@@ -2277,7 +2299,7 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
         // ranged shot animation explicitly here.
         uint32_t sid = data.spellId;
         if (spellclass::isRangedWeaponAutoAttack(sid)) {
-            if (owner_.meleeSwingCallbackRef()) owner_.meleeSwingCallbackRef()(sid);
+            if (owner_.meleeSwingCallbackRef()) owner_.meleeSwingCallbackRef()(sid, 0);
             owner_.suppressNextMeleeSwingAnim();
             uint64_t projectileTarget = data.targetGuid;
             if (projectileTarget == 0 && !data.hitTargets.empty())
@@ -2287,17 +2309,19 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
             launchRangedWeaponProjectile(sid, projectileTarget);
         }
 
-        // Instant melee abilities → trigger attack animation. Range decides this, not
-        // school: physical abilities cast at range (Steady Shot, Taunt) would otherwise
-        // play a melee swing.
-        bool isMeleeAbility = false;
-        if (!owner_.isProfessionSpell(sid) && !spellclass::isRangedWeaponAutoAttack(sid)) {
-            if (spellclass::isMeleeRange(getSpellMaxRange(sid))) {
-                isMeleeAbility = (currentCastSpellId_ != sid);
-            }
-        }
+        // Instant abilities → their kit's animation (or the next swing). The
+        // kit decides, then range, not school: physical abilities cast at
+        // range (Steady Shot, Taunt) would otherwise play a melee swing.
+        // Consumables keep their own presentation in the cast path.
+        const bool meleeRangeSpell = !owner_.isProfessionSpell(sid) &&
+            !spellclass::isRangedWeaponAutoAttack(sid) &&
+            spellclass::isMeleeRange(getSpellMaxRange(sid));
+        const bool isMeleeAbility = playsAsAbility && currentCastSpellId_ != sid &&
+            restKind == spellclass::RestChannelKind::NONE;
         if (isMeleeAbility) {
-            if (owner_.meleeSwingCallbackRef()) owner_.meleeSwingCallbackRef()(sid);
+            if (owner_.meleeSwingCallbackRef()) owner_.meleeSwingCallbackRef()(sid, 0);
+        }
+        if (isMeleeAbility && meleeRangeSpell) {
             if (auto* ac = owner_.services().audioCoordinator) {
                 if (auto* csm = ac->getCombatSoundManager()) {
                     csm->playWeaponSwing(audio::CombatSoundManager::WeaponSize::MEDIUM, false);
@@ -2394,10 +2418,17 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
             npcGoType = SpellCastType::DIRECTED;
         else if (data.targetGuid == 0 && data.hitCount > 1)
             npcGoType = SpellCastType::AREA;
-        if (!wasTrackedCast && !rangedWeaponAttack && owner_.spellCastAnimCallbackRef()) {
+        // An instant ability (Heroic Strike, Cleave, Shield Bash, a creature's
+        // Strike or War Stomp) plays its kit's animation through the swing
+        // path, with the caster's weapons - not a spell wind-up and release.
+        const bool abilityAnim = !wasTrackedCast && playsAsAbility;
+        if (abilityAnim) {
+            if (owner_.npcSwingCallbackRef())
+                owner_.npcSwingCallbackRef()(data.casterUnit, 0, data.spellId);
+        } else if (!wasTrackedCast && !rangedWeaponAttack && owner_.spellCastAnimCallbackRef()) {
             owner_.spellCastAnimCallbackRef()(data.casterUnit, true, false, npcGoType);
         }
-        if (!rangedWeaponAttack && owner_.spellCastAnimCallbackRef()) {
+        if (!abilityAnim && !rangedWeaponAttack && owner_.spellCastAnimCallbackRef()) {
             owner_.spellCastAnimCallbackRef()(data.casterUnit, false, false,
                 wasTrackedCast ? castIt->second.castType : npcGoType);
         }

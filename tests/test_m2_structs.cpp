@@ -258,3 +258,49 @@ TEST_CASE("M2Model collections", "[m2]") {
     REQUIRE(model.textures.size() == 1);
     REQUIRE(model.sequences[0].duration == 1000);
 }
+
+TEST_CASE("M2 sequence switch cross-fades over the incoming blendTime", "[m2][animation]") {
+    wowee::rendering::M2ModelGPU model;
+    model.sequences.resize(2);
+    model.sequences[0] = {};
+    model.sequences[0].duration = 1000;
+    model.sequences[1] = {};
+    model.sequences[1].duration = 1000;
+    model.sequences[1].blendTime = 200;
+
+    M2Bone bone{};
+    bone.parentBone = -1;
+    bone.pivot = glm::vec3(0.0f);
+    bone.translation.interpolationType = 1;
+    bone.translation.sequences.resize(2);
+    // Sequence 0 holds the bone at x=0, sequence 1 at x=10.
+    bone.translation.sequences[0].timestamps = {0, 1000};
+    bone.translation.sequences[0].vec3Values = {glm::vec3(0.0f), glm::vec3(0.0f)};
+    bone.translation.sequences[1].timestamps = {0, 1000};
+    bone.translation.sequences[1].vec3Values = {glm::vec3(10.0f, 0.0f, 0.0f),
+                                                glm::vec3(10.0f, 0.0f, 0.0f)};
+    model.bones.push_back(bone);
+
+    wowee::rendering::M2Instance instance;
+    instance.cachedHasAnimation = true;
+    instance.currentSequenceIndex = 0;
+    instance.animTime = 500.0f;
+    wowee::rendering::computeBoneMatrices(model, instance);
+    REQUIRE(instance.boneMatrices.size() == 1);
+    CHECK(instance.boneMatrices[0][3][0] == Catch::Approx(0.0f));
+
+    wowee::rendering::beginM2SequenceBlend(model, instance, 1);
+    CHECK(instance.blendDurationMs == Catch::Approx(200.0f));
+    instance.currentSequenceIndex = 1;
+    instance.animTime = 0.0f;
+
+    // At the switch the old pose, halfway a mix, at the end the new pose.
+    wowee::rendering::computeBoneMatrices(model, instance);
+    CHECK(instance.boneMatrices[0][3][0] == Catch::Approx(0.0f));
+    instance.blendElapsedMs = 100.0f;
+    wowee::rendering::computeBoneMatrices(model, instance);
+    CHECK(instance.boneMatrices[0][3][0] == Catch::Approx(5.0f));
+    instance.blendElapsedMs = 200.0f;
+    wowee::rendering::computeBoneMatrices(model, instance);
+    CHECK(instance.boneMatrices[0][3][0] == Catch::Approx(10.0f));
+}

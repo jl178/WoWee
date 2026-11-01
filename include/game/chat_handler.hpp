@@ -36,7 +36,9 @@ public:
     void sendChatMessage(ChatType type, const std::string& message, const std::string& target = "");
     void sendAddonMessage(ChatType type, const std::string& message, const std::string& target = "");
     void sendTextEmote(uint32_t textEmoteId, uint64_t targetGuid = 0);
-    void joinChannel(const std::string& channelName, const std::string& password = "");
+    /// channelId: ChatChannels.dbc row for a built-in zone channel, 0 otherwise.
+    void joinChannel(const std::string& channelName, const std::string& password = "",
+                     uint32_t channelId = 0);
     void leaveChannel(const std::string& channelName);
     /// Ask the server for a channel's members; the answer arrives as
     /// SMSG_CHANNEL_LIST and fires CHANNEL_ROSTER_UPDATE.
@@ -134,6 +136,24 @@ private:
     /// names, or the logged-in character when it names nobody.
     TextSubject monsterLineSubject(const MessageChatData& data);
 
+    /// Raise a bubble over the speaker for the chat types that get one
+    /// (say/yell, NPC say/yell, party when chatBubblesParty is on).
+    void showChatBubble(uint64_t senderGuid, ChatType type, const std::string& message);
+    /// Send the CMSG_JOIN_CHANNEL for each built-in zone channel the settings
+    /// ask for, named the way the real client names them - ChatChannels.dbc's
+    /// pattern with the zone ("General - Elwynn Forest") and the row's id.
+    void joinZoneChannels(uint32_t zoneId);
+    /// Run the auto-join held back until the zone is known.
+    void servicePendingAutoJoin();
+    /// Put a joined channel into the numbered list: in the slot of the zone
+    /// channel it replaces (same id), else at the end.
+    /// Returns "YOU_JOINED", "YOU_CHANGED" (a zone channel renamed in place)
+    /// or nullptr when the channel was already listed under that name.
+    const char* rememberJoinedChannel(const std::string& name, uint32_t channelId);
+    /// CHAT_MSG_CHANNEL_NOTICE with the real client's arguments, which is how
+    /// FrameXML prints "Joined Channel: [1. General - Elwynn Forest]".
+    void fireChannelNotice(const char* notice, const std::string& channelName);
+
     void handleTextEmote(network::Packet& packet);
     void handleChannelNotify(network::Packet& packet);
     void handleChannelList(network::Packet& packet);
@@ -155,6 +175,18 @@ private:
     size_t maxChatHistory_ = 100;
     uint64_t chatUidCounter_ = 0;  // monotonic uid for MessageChatData::uid
     std::vector<std::string> joinedChannels_;
+    /// ChatChannels.dbc id beside each joinedChannels_ entry (0 = custom).
+    std::vector<uint32_t> joinedChannelIds_;
+    /// Channels the player asked to leave, so their YOU_LEFT is a real leave
+    /// and not the server taking a zone channel away (which keeps the slot).
+    std::set<std::string> leavingChannels_;
+    /// Built-in channels the server took away on a zone change. They keep
+    /// their number, as in the real client, until rejoined or replaced.
+    std::set<std::string> suspendedChannels_;
+    /// Auto-join asked for at world entry, waiting for the zone to be known.
+    bool autoJoinPending_ = false;
+    double autoJoinRequestedAt_ = 0.0;
+    uint32_t autoJoinZoneAtRequest_ = 0;
     std::set<std::string> ownedChannels_;
     /// Who sent the message a chat line id names, newest last.
     ///

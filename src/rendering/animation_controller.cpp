@@ -1,6 +1,7 @@
 #include <span>
 
 #include "rendering/animation/melee_anim_chains.hpp"
+#include "rendering/animation/weapon_anim_select.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/animation/emote_registry.hpp"
 #include "rendering/animation/anim_capability_probe.hpp"
@@ -273,7 +274,7 @@ bool AnimationController::isMoving() const {
 
 // ── Melee combat ─────────────────────────────────────────────────────────────
 
-void AnimationController::triggerMeleeSwing() {
+void AnimationController::triggerMeleeSwing(bool offHand) {
     auto* characterRenderer = renderer_->getCharacterRenderer();
     uint32_t characterInstanceId = renderer_->getCharacterInstanceId();
     if (!characterRenderer || characterInstanceId == 0) return;
@@ -282,7 +283,13 @@ void AnimationController::triggerMeleeSwing() {
         characterAnimator_.cancelEmote();
     }
     specialAttackAnimId_ = 0;  // Clear any special attack override
-    resolveMeleeAnimId();
+    // The hand the server says swung (HITINFO_OFFHAND), not a toggle: the
+    // two hands' swing timers differ, so blind alternation drifts off them.
+    meleeOffHandTurn_ = offHand && weaponLoadout_.hasOffHand;
+    const uint32_t swingAnim = resolveMeleeAnimId();
+    // CombatFSM alternates hands on its own; a dual wielder's swing is
+    // handed to it explicitly so it plays the hand named here.
+    if (weaponLoadout_.hasOffHand && swingAnim != 0) specialAttackAnimId_ = swingAnim;
     meleeSwingCooldown_ = 0.1f;
     float durationSec = meleeAnimDurationMs_ > 0.0f ? meleeAnimDurationMs_ / 1000.0f : 0.6f;
     if (durationSec < 0.25f) durationSec = 0.25f;
@@ -311,34 +318,32 @@ void AnimationController::setEquippedWeaponType(uint32_t inventoryType, bool is2
     characterAnimator_.setEquippedWeaponType(weaponLoadout_);
 }
 
-void AnimationController::triggerSpecialAttack(uint32_t /*spellId*/) {
+void AnimationController::triggerAbilityAnimation(uint32_t kitAnimId) {
     auto* characterRenderer = renderer_->getCharacterRenderer();
     uint32_t characterInstanceId = renderer_->getCharacterInstanceId();
     if (!characterRenderer || characterInstanceId == 0) return;
-    if (meleeSwingCooldown_ > 0.0f) return;
+    // A kit with no animation of its own: the normal next swing.
+    if (kitAnimId == 0) {
+        triggerMeleeSwing(false);
+        return;
+    }
+    // An ability is its own swing: it replaces an auto-attack swing that
+    // started a moment ago rather than being dropped by the swing cooldown.
     if (characterAnimator_.getActivity().isEmoteActive()) {
         characterAnimator_.cancelEmote();
     }
 
     auto has = [&](uint32_t id) { return characterRenderer->hasAnimation(characterInstanceId, id); };
 
-    // Choose special attack animation based on equipped weapon type
-    uint32_t specAnim = 0;
-    if (weaponLoadout_.hasShield && has(anim::SHIELD_BASH)) {
-        specAnim = anim::SHIELD_BASH;
-    } else if ((weaponLoadout_.inventoryType == game::InvType::TWO_HAND || weaponLoadout_.is2HLoose) && has(anim::SPECIAL_2H)) {
-        specAnim = anim::SPECIAL_2H;
-    } else if (weaponLoadout_.inventoryType != game::InvType::NON_EQUIP && has(anim::SPECIAL_1H)) {
-        specAnim = anim::SPECIAL_1H;
-    } else if (has(anim::SPECIAL_UNARMED)) {
-        specAnim = anim::SPECIAL_UNARMED;
-    } else if (has(anim::SPECIAL_1H)) {
-        specAnim = anim::SPECIAL_1H;
-    }
+    // The kit's animation, with the weapon-generic attacks swapped for the
+    // held weapon's. This used to ignore the spell altogether and pick by
+    // loadout - a shield made every ability Shield Bash, which is how
+    // Heroic Strike (kit AnimID 57, Special1H) played ShieldBash (59).
+    const uint32_t specAnim = anim::firstPlayable(
+        has, anim::abilityAnimCandidates(kitAnimId, weaponLoadout_));
 
     if (specAnim == 0) {
-        // No special animation available - fall back to regular melee swing
-        triggerMeleeSwing();
+        triggerMeleeSwing(false);
         return;
     }
 
@@ -356,9 +361,12 @@ void AnimationController::triggerSpecialAttack(uint32_t /*spellId*/) {
         }
     }
     if (dur < 0.25f) dur = 0.25f;
-    if (dur > 1.0f) dur = 1.0f;
+    // A roar or a stomp runs its full length; a swing is capped as before.
+    if (dur > (anim::isMeleeAttackAnim(specAnim) ? 1.0f : 3.0f))
+        dur = anim::isMeleeAttackAnim(specAnim) ? 1.0f : 3.0f;
     meleeSwingTimer_ = dur;
-    if (renderer_->getAudioCoordinator()->getActivitySoundManager()) {
+    if (anim::isMeleeAttackAnim(specAnim) &&
+        renderer_->getAudioCoordinator()->getActivitySoundManager()) {
         renderer_->getAudioCoordinator()->getActivitySoundManager()->playMeleeSwing();
     }
 }
@@ -450,7 +458,7 @@ uint32_t AnimationController::resolveMeleeAnimId() {
         return 0;
     }
 
-    // When dual-wielding, bypass cache to alternate main/off-hand animations
+    // When dual-wielding, bypass the cache: the hand changes swing to swing.
     if (!weaponLoadout_.hasOffHand && meleeAnimId_ != 0 && characterRenderer->hasAnimation(characterInstanceId, meleeAnimId_)) {
         return meleeAnimId_;
     }
@@ -475,37 +483,11 @@ uint32_t AnimationController::resolveMeleeAnimId() {
     // The chains live in melee_anim_chains.hpp, which the capability probe
     // reads too - it used to keep its own copies under a comment saying they
     // matched these.
-    using anim::MeleeChain;
-
-    // Dual-wield: alternate main-hand and off-hand swings
-    bool useOffHand = weaponLoadout_.hasOffHand && meleeOffHandTurn_;
-    meleeOffHandTurn_ = weaponLoadout_.hasOffHand ? !meleeOffHandTurn_ : false;
-
-    if (useOffHand) {
-        // The off-hand weapon's kind, not the main hand's.
-        if (weaponLoadout_.offHandIsFist) {
-            chain = anim::meleeAnimChain(MeleeChain::OffHandFist);
-        } else if (weaponLoadout_.offHandIsDagger) {
-            chain = anim::meleeAnimChain(MeleeChain::OffHandPierce);
-        } else if (weaponLoadout_.inventoryType == game::InvType::NON_EQUIP) {
-            chain = anim::meleeAnimChain(MeleeChain::OffHandUnarmed);
-        } else {
-            chain = anim::meleeAnimChain(MeleeChain::OffHand);
-        }
-    } else if (weaponLoadout_.isFist) {
-        chain = anim::meleeAnimChain(MeleeChain::Fist);
-    } else if (weaponLoadout_.isDagger) {
-        chain = anim::meleeAnimChain(MeleeChain::Dagger);
-    } else if (weaponLoadout_.is2HLoose) {
-        // Polearm thrust uses pierce variant
-        chain = anim::meleeAnimChain(MeleeChain::TwoHandLoose);
-    } else if (weaponLoadout_.inventoryType == game::InvType::TWO_HAND) {
-        chain = anim::meleeAnimChain(MeleeChain::TwoHand);
-    } else if (weaponLoadout_.inventoryType == game::InvType::NON_EQUIP) {
-        chain = anim::meleeAnimChain(MeleeChain::Unarmed);
-    } else {
-        chain = anim::meleeAnimChain(MeleeChain::OneHand);
-    }
+    // The hand was set by triggerMeleeSwing from the swing's hit flags; the
+    // rules that turn hand + weapon into a chain are shared with every other
+    // unit (weapon_anim_select.hpp).
+    const bool useOffHand = weaponLoadout_.hasOffHand && meleeOffHandTurn_;
+    chain = anim::meleeAnimChain(anim::swingChain(weaponLoadout_, useOffHand));
     for (uint32_t id : chain) {
         if (characterRenderer->hasAnimation(characterInstanceId, id)) {
             meleeAnimId_ = id;

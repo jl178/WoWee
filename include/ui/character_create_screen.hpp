@@ -95,6 +95,9 @@ private:
     std::unique_ptr<rendering::CharacterPreview> preview_;
     pipeline::AssetManager* assetManager_ = nullptr;
     int prevRaceIndex_ = -1;
+    int prevClassIndex_ = -1;
+    /// CharStartOutfit.dbc: the starter gear the preview wears, as stock.
+    void applyStartOutfit();
     int prevGenderIndex_ = -1;
     int prevBodyTypeIndex_ = -1;
     int prevSkin_ = -1;
@@ -107,6 +110,7 @@ private:
     int prevRangeBodyType_ = -1;
     int prevRangeSkin_ = -1;
     int prevRangeHairStyle_ = -1;
+    int prevRangeDK_ = -1;  // death knights are offered their own CharSections rows
     float createTimer_ = -1.0f;  // >=0 while waiting for SMSG_CHAR_CREATE response
 
     void updatePreviewIfNeeded();

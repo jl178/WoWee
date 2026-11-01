@@ -2516,7 +2516,9 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             mat.volumetricBeam = bgpu.volumetricBeam ? 1 : 0;
             mat.fadeAlpha = 1.0f;
             mat.interiorDarken = 0.0f;
-            mat.specularIntensity = 0.5f;
+            // Stock M2 lighting has no specular (7c43953; the playtest batch's
+            // merge had put the 0.5 back).
+            mat.specularIntensity = 0.0f;
             mat.emissiveBoost = bgpu.preserveGlowMesh ? 2.4f : 1.0f;
             memcpy(matAllocInfo.pMappedData, &mat, sizeof(mat));
             bgpu.materialUBOMapped = matAllocInfo.pMappedData;

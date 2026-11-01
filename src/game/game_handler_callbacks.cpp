@@ -1218,6 +1218,16 @@ void GameHandler::sendPing() {
     socket->send(packet);
 }
 
+void GameHandler::sendSetSheathed(uint32_t sheathState) {
+    // CMSG_SET_SHEATHED: uint32 SheathState (0 unarmed, 1 melee, 2 ranged).
+    // The server keeps it in UNIT_FIELD_BYTES_2 byte 0, which is how every
+    // other client sees this character draw and put away its weapons.
+    if (state != WorldState::IN_WORLD || !socket) return;
+    network::Packet pkt(wireOpcode(Opcode::CMSG_SET_SHEATHED));
+    pkt.writeUInt32(sheathState);
+    socket->send(pkt);
+}
+
 void GameHandler::sendRequestVehicleExit() {
     if (state != WorldState::IN_WORLD || vehicleId_ == 0) return;
     // CMSG_REQUEST_VEHICLE_EXIT has no payload - opcode only

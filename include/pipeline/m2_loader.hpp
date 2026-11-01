@@ -147,6 +147,29 @@ struct M2Camera {
 };
 
 // FBlock: particle lifetime curve (color/alpha/scale over particle life)
+// A light the model carries (M2Light, 156 bytes in 3.3.5). The glue scenes
+// are lit by these and nothing else: the login screen's single light is an
+// ambient of (0.72, 0.83, 0.93) x 1.3 with no diffuse, the human select scene
+// a 0.27 ambient plus a warm and a cool directional light.
+//
+// A directional light (type 0) shines along -Z of its bone: the human scene's
+// two are carried by bones rotated so that -Z points down onto the street from
+// the camera's side, each from the side its bone stands on. A point light
+// (type 1) sits at its bone's pivot plus position and fades out between the
+// attenuation start and end.
+struct M2Light {
+    uint16_t type = 0;          // 0 directional, 1 point
+    int16_t bone = -1;
+    glm::vec3 position{0.0f};   // relative to the bone
+    M2AnimationTrack ambientColor;      // vec3
+    M2AnimationTrack ambientIntensity;  // float
+    M2AnimationTrack diffuseColor;      // vec3
+    M2AnimationTrack diffuseIntensity;  // float
+    M2AnimationTrack attenuationStart;  // float
+    M2AnimationTrack attenuationEnd;    // float
+    M2AnimationTrack visibility;        // byte, read as 0/1 floats
+};
+
 struct M2FBlock {
     std::vector<float> timestamps;      // Normalized 0..1
     std::vector<float> floatValues;     // For alpha/scale
@@ -279,6 +302,7 @@ struct M2Model {
     // Attachment points (for weapon/effect anchoring)
     std::vector<M2Attachment> attachments;
     std::vector<M2Camera> cameras;
+    std::vector<M2Light> lights;            // 3.3.5 models only
     std::vector<uint16_t> attachmentLookup; // attachment ID → index
 
     // Particle emitters

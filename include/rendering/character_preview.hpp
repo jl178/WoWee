@@ -112,6 +112,9 @@ public:
     [[nodiscard]] uint32_t getInstanceId() const { return instanceId_; }
     [[nodiscard]] uint32_t getModelId() const { return PREVIEW_MODEL_ID; }
     [[nodiscard]] bool isModelLoaded() const { return modelLoaded_; }
+    /// Whether there is anything to draw: a character, or a glue scene on its
+    /// own (the login screen has no character, and was never composited).
+    [[nodiscard]] bool hasContent() const { return modelLoaded_ || sceneOnly_; }
 
 private:
     struct FacialHairGeosets {
@@ -136,6 +139,10 @@ private:
     // Load the race's glue scene (Stormwind for humans, Orgrimmar for orcs, ...) as a backdrop.
     void loadRacialBackdrop(game::Race race);
     void applyPreviewView();
+    // Light the preview with a glue scene's own M2 lights (or neutral full
+    // light if it has none), as the client lights its glue screens.
+    void setupSceneLighting(const pipeline::M2Model& scene, const glm::vec3& focus);
+    void clearSceneLighting();
 
     pipeline::AssetManager* assetManager_ = nullptr;
     VkContext* vkCtx_ = nullptr;
@@ -223,6 +230,19 @@ private:
     std::string glueSceneOverride_;
     std::string backdropSceneLoaded_;
     [[nodiscard]] float verticalFovFromDiagonal(float diagonalRadians) const;
+
+    // The glue scene's lights, for the per-frame block (setupSceneLighting).
+    struct SceneLocalLight {
+        glm::vec3 position{0.0f};
+        float radius = 0.0f;
+        glm::vec3 color{0.0f};
+        float intensity = 0.0f;
+    };
+    bool sceneLit_ = false;
+    glm::vec3 sceneAmbient_{1.0f};
+    glm::vec3 sceneLightDir_{0.0f, 0.0f, -1.0f};  // the way the light travels
+    glm::vec3 sceneLightColor_{0.0f};
+    std::vector<SceneLocalLight> sceneLocalLights_;
 
     // Cached info from loadCharacter() for later recompositing.
     game::Race race_ = game::Race::HUMAN;

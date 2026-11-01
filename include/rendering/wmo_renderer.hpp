@@ -402,6 +402,8 @@ public:
         int32_t groupIndex = -1;  ///< index of the containing group
         uint16_t nameSet = 0;
         bool interior = false;    ///< the group has the indoor flag
+        /// The group is lit as an interior: INDOOR and not EXTERIOR_LIT (0x40).
+        bool interiorLit = false;
     };
     bool insideWmoArea(float glX, float glY, float glZ, AreaHit* out) const;
     /// MOHD ambient of a loaded model (interior fill light); 0.5 grey if unknown.

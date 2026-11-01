@@ -75,6 +75,13 @@ void NPCInteractionCallbackHandler::setupCallbacks() {
             [this](uint32_t /*instanceId*/, uint32_t animationId, uint32_t soundEntryId,
                    const glm::vec3& position) {
                 const auto* data = audioCoordinator_ ? audioCoordinator_->getSoundData() : nullptr;
+                static int logBudget = 30;
+                if (logBudget > 0) {
+                    --logBudget;
+                    LOG_INFO("Anim sound event: anim ", animationId, " sound ", soundEntryId,
+                             " skipped=", (data && data->animHasEmoteTextSound(animationId)),
+                             " entry=", (data && data->sound(soundEntryId)) ? "yes" : "no");
+                }
                 if (!data || data->animHasEmoteTextSound(animationId)) return;
                 // Missing ids are normal: EmoteTrain's $CSD points at rows
                 // the shipped SoundEntries.dbc no longer has.

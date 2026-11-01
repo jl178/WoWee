@@ -6,6 +6,7 @@
 
 #include "../../extern/miniaudio.h"
 
+#include <algorithm>
 #include <cstring>
 #include <cstdlib>
 #include <iterator>
@@ -573,11 +574,14 @@ uint32_t AudioEngine::startSound3D(const std::vector<uint8_t>& wavData, const gl
     ma_sound_set_position(sound.get(), position.x, position.y, position.z);
     ma_sound_set_volume(sound.get(), volume);
     ma_sound_set_pitch(sound.get(), pitch);  // Enable pitch variation
-    ma_sound_set_attenuation_model(sound.get(), ma_attenuation_model_inverse);
+    // Full volume up close, fading to silence at the sound's cutoff, as the
+    // stock client's SoundEntries distanceCutoff behaves. Inverse falloff
+    // from 1 yd put anything 10 yd away at a tenth of its volume.
+    ma_sound_set_attenuation_model(sound.get(), ma_attenuation_model_linear);
     ma_sound_set_min_gain(sound.get(), 0.0f);
     ma_sound_set_max_gain(sound.get(), 1.0f);
-    ma_sound_set_min_distance(sound.get(), 1.0f);
-    ma_sound_set_max_distance(sound.get(), maxDistance);
+    ma_sound_set_min_distance(sound.get(), std::min(8.0f, maxDistance * 0.25f));
+    ma_sound_set_max_distance(sound.get(), std::max(maxDistance, 1.0f));
     ma_sound_set_rolloff(sound.get(), 1.0f);
     if (loop) ma_sound_set_looping(sound.get(), MA_TRUE);
 

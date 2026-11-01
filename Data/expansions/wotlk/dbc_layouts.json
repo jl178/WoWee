@@ -142,6 +142,7 @@
   },
   "ItemDisplayInfo": {
     "GeosetGroup1": 7,
+    "GeosetGroup2": 8,
     "GeosetGroup3": 9,
     "ID": 0,
     "InventoryIcon": 5,

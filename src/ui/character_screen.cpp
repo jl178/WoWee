@@ -390,8 +390,25 @@ void CharacterScreen::drawScene(const game::Character& character, float screenW,
     preview_->render();
     preview_->requestComposite();
     if (VkDescriptorSet tex = preview_->getTextureId()) {
+        // Cropped to fill rather than stretched when the window is no longer
+        // the size the scene was built at: stretched, the scene camera's
+        // framing came out squashed.
+        ImVec2 uv0(0.0f, 0.0f), uv1(1.0f, 1.0f);
+        const float pw = static_cast<float>(preview_->getWidth());
+        const float ph = static_cast<float>(preview_->getHeight());
+        if (pw > 0.0f && ph > 0.0f && screenW > 0.0f && screenH > 0.0f) {
+            const float sceneAspect = pw / ph;
+            const float screenAspect = screenW / screenH;
+            if (sceneAspect > screenAspect) {
+                const float keep = screenAspect / sceneAspect;
+                uv0.x = 0.5f - keep * 0.5f; uv1.x = 0.5f + keep * 0.5f;
+            } else {
+                const float keep = sceneAspect / screenAspect;
+                uv0.y = 0.5f - keep * 0.5f; uv1.y = 0.5f + keep * 0.5f;
+            }
+        }
         ImGui::GetBackgroundDrawList()->AddImage(reinterpret_cast<ImTextureID>(tex),
-                                                 ImVec2(0, 0), ImVec2(screenW, screenH));
+                                                 ImVec2(0, 0), ImVec2(screenW, screenH), uv0, uv1);
         sceneShown_ = true;
     }
 }

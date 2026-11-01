@@ -192,6 +192,11 @@ public:
     /** Mark an instance as a scene backdrop: no culling, no character material heuristics. */
     void setInstanceSceneModel(uint32_t instanceId, bool isScene);
 
+    /** Off-screen previews draw their models as flat texture unless this is
+     *  set; a glue scene sets it, so the scene and the character standing in
+     *  it are lit by the per-frame block (the scene M2's own lights). */
+    void setPreviewLit(bool lit) { previewLit_ = lit; }
+
 
     /** Get the world-space transform of an attachment point on an instance. */
     bool getAttachmentTransform(uint32_t instanceId, uint32_t attachmentId, glm::mat4& outTransform);
@@ -248,6 +253,13 @@ private:
         bool isSkyBird = false;
     };
 
+    // One bone's local animated pose, before the pivot bracket.
+    struct BoneLocalPose {
+        glm::vec3 translation{0.0f};
+        glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
+        glm::vec3 scale{1.0f};
+    };
+
     // Character instance
     struct CharacterInstance {
         uint32_t id;
@@ -271,6 +283,16 @@ private:
         uint32_t oneShotReturnAnim = 0; // Anim to resume when a one-shot ends (0 = Stand)
         bool isDead = false;  // Prevents movement while in death state
         std::vector<glm::mat4> boneMatrices;  // Current bone transforms
+
+        // Sequence cross-fade, as the stock client does on every switch: the
+        // pose the old sequence left the bones in is faded into the new one
+        // over the incoming sequence's blendTime. localPose is the pose last
+        // computed (after any blend, so an interrupted fade starts from where
+        // the bones actually were); blendFromPose is the snapshot being faded out.
+        std::vector<BoneLocalPose> localPose;
+        std::vector<BoneLocalPose> blendFromPose;
+        float blendElapsedMs = 0.0f;
+        float blendDurationMs = 0.0f;  // 0 = not blending
 
         // Geoset visibility - which submesh IDs to render
         // Empty = render all (for non-character models)
@@ -334,6 +356,9 @@ private:
     void calculateBoneMatrices(CharacterInstance& instance);
     glm::mat4 getBoneTransform(const pipeline::M2Bone& bone, float animTime, float globalSeqTime,
                                int sequenceIndex, const std::vector<uint32_t>& globalSeqDurations);
+    static BoneLocalPose sampleBonePose(const pipeline::M2Bone& bone, float animTime, float globalSeqTime,
+                                        int sequenceIndex, const std::vector<uint32_t>& globalSeqDurations);
+    static glm::mat4 composeBoneTransform(const pipeline::M2Bone& bone, const BoneLocalPose& pose);
     [[nodiscard]] glm::mat4 getModelMatrix(const CharacterInstance& instance) const;
     void destroyModelGPU(M2ModelGPU& gpuModel, bool defer = false);
     void destroyInstanceBones(CharacterInstance& inst, bool defer = false);
@@ -375,6 +400,7 @@ private:
 
     VkContext* vkCtx_ = nullptr;
     VkRenderPass renderPassOverride_ = VK_NULL_HANDLE;
+    bool previewLit_ = false;  // see setPreviewLit
     VkSampleCountFlagBits msaaSamplesOverride_ = VK_SAMPLE_COUNT_1_BIT;
     pipeline::AssetManager* assetManager = nullptr;
 

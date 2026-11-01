@@ -14,6 +14,48 @@
 #include "core/frame_pacer.hpp"
 
 using wowee::core::FramePacer;
+using wowee::core::DeltaSmoother;
+
+TEST_CASE("smoothed delta passes steady frames through unchanged", "[pacing][smoothing]") {
+    DeltaSmoother s;
+    for (int i = 0; i < 20; ++i) {
+        CHECK(s.smooth(0.030f) == Catch::Approx(0.030f).margin(1e-5));
+    }
+}
+
+TEST_CASE("smoothed delta spreads a spike and keeps the time", "[pacing][smoothing]") {
+    DeltaSmoother s;
+    float raw = 0.0f, stepped = 0.0f;
+    for (int i = 0; i < 10; ++i) { raw += 0.030f; stepped += s.smooth(0.030f); }
+    // One 75ms frame among 30ms ones.
+    const float spikeStep = s.smooth(0.075f);
+    raw += 0.075f; stepped += spikeStep;
+    CHECK(spikeStep < 0.050f);
+    for (int i = 0; i < 40; ++i) { raw += 0.030f; stepped += s.smooth(0.030f); }
+    // All of it paid back within a few frames: no drift against the clock.
+    CHECK(stepped == Catch::Approx(raw).margin(0.001));
+}
+
+TEST_CASE("smoothed delta evens out an alternating cadence", "[pacing][smoothing]") {
+    DeltaSmoother s;
+    for (int i = 0; i < 10; ++i) { (void)s.smooth(0.026f); (void)s.smooth(0.038f); }
+    float lo = 1.0f, hi = 0.0f;
+    for (int i = 0; i < 10; ++i) {
+        const float a = s.smooth(0.026f), b = s.smooth(0.038f);
+        lo = std::min({lo, a, b});
+        hi = std::max({hi, a, b});
+    }
+    // Raw swings 12ms; the step should swing well under half of that.
+    CHECK(hi - lo < 0.005f);
+}
+
+TEST_CASE("smoothed delta hands a capped stall over as it is", "[pacing][smoothing]") {
+    DeltaSmoother s;
+    for (int i = 0; i < 10; ++i) (void)s.smooth(0.016f);
+    CHECK(s.smooth(0.1f) == Catch::Approx(0.1f));
+    // And starts again rather than paying it back.
+    CHECK(s.smooth(0.016f) == Catch::Approx(0.016f).margin(1e-5));
+}
 
 TEST_CASE("the clock moves forward and only forward", "[pacing]") {
     const std::int64_t a = FramePacer::nowNs();
