@@ -323,6 +323,9 @@ struct M2Instance {
     int idleSequenceIndex = 0;   // Default idle sequence index
     float variationTimer = 0.0f; // Time until next variation attempt (ms)
     bool playingVariation = false;// Currently playing a one-shot variation
+    /// Laps the looping variation still owes (its replay range) before the
+    /// next one is rolled by frequency (animation/sequence_variation.hpp).
+    uint32_t variationLapsLeft = 0;
 
     /// Stop at the end of the sequence and stay there.
     ///
@@ -331,6 +334,12 @@ struct M2Instance {
     /// back to the idle sequence, which for a door is the closed pose - so an
     /// open door swung open and shut itself, over and over.
     bool holdAtEnd = false;
+    /// With holdAtEnd: the sequence to loop once the held one-shot ends, -1 none.
+    ///
+    /// The game's own state pairs: Open runs once and Opened loops, Close then
+    /// Closed, Destroy then Destroyed. A chest's Opened is where its lid
+    /// glows or its coins glint; holding Open's last frame loses that.
+    int thenLoopSequence = -1;
 
     /// Lit while the player is pressing on this instance: 0 none, 1 full.
     ///
@@ -618,8 +627,14 @@ public:
     /// skipToEnd puts the model there immediately, which is what a door that
     /// was already open when it came into view wants - the swing belongs to
     /// the moment it opens, not to the moment it is first seen.
+    ///
+    /// thenLoopAnimationId, when the model has it, is looped after the one-shot
+    /// instead of holding its last frame (Open -> Opened); with skipToEnd it is
+    /// played straight away. Without it, or when the model lacks it, the
+    /// one-shot is held as before.
     void setInstanceAnimationHeld(uint32_t instanceId, uint32_t animationId,
-                                  bool skipToEnd);
+                                  bool skipToEnd,
+                                  uint32_t thenLoopAnimationId = UINT32_MAX);
 
     /// Light an instance while it is being pressed on. 0 clears it.
     void setInstanceHighlight(uint32_t instanceId, float amount);
@@ -705,6 +720,14 @@ public:
     /// trace at all beyond "m2=-99999".
     void debugDumpFloorCandidatesAt(float glX, float glY, float glZ) const;
     [[nodiscard]] float raycastBoundingBoxes(const glm::vec3& origin, const glm::vec3& direction, float maxDistance) const;
+    /// The nearest doodad *collision mesh* triangle along a ray, for the
+    /// cursor pick's occlusion. Only models that ship authored collision
+    /// count - not ground clutter, not soft or bounding-box-only doodads, not
+    /// spell effects - and the test is per triangle, so a tree hides what is
+    /// behind its trunk and not what is under its crown. Returns maxDistance
+    /// on no hit; `hitName` receives the model's name when there is one.
+    [[nodiscard]] float raycastCollisionMeshes(const glm::vec3& origin, const glm::vec3& direction,
+                                               float maxDistance, std::string* hitName = nullptr) const;
     void setCollisionFocus(const glm::vec3& worldPos, float radius);
 
     void resetQueryStats();

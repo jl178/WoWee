@@ -36,6 +36,13 @@ public:
         if (!std::isfinite(fov) || fov <= 0.0f || fov >= 180.0f) return;
         this->fov = fov; updateProjectionMatrix();
     }
+    /// Near and far clip, for a camera an M2 authored (a portrait camera's
+    /// near plane is 0.22 yards, inside the 0.5 default).
+    void setClipPlanes(float nearClip, float farClip) {
+        if (!std::isfinite(nearClip) || !std::isfinite(farClip) ||
+            nearClip <= 0.0f || farClip <= nearClip) return;
+        nearPlane = nearClip; farPlane = farClip; updateProjectionMatrix();
+    }
 
     [[nodiscard]] const glm::vec3& getPosition() const { return position; }
     [[nodiscard]] const glm::mat4& getViewMatrix() const { return viewMatrix; }

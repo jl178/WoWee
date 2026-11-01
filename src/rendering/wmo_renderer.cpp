@@ -3821,6 +3821,65 @@ bool WMORenderer::segmentBlocked(const glm::vec3& from, const glm::vec3& to) con
     return false;
 }
 
+float WMORenderer::raycastVisibleSolid(const glm::vec3& origin, const glm::vec3& direction,
+                                       float maxDistance, std::string* hitDesc) const {
+    QueryTimer timer(&queryTimeMs, &queryCallCount);
+    float closestHit = maxDistance;
+    const glm::vec3 rayEnd = origin + direction * maxDistance;
+    gatherCandidates(glm::min(origin, rayEnd) - glm::vec3(1.0f),
+                     glm::max(origin, rayEnd) + glm::vec3(1.0f), tl_candidateScratch);
+
+    for (size_t idx : tl_candidateScratch) {
+        const auto& instance = instances[idx];
+        if (!rayIntersectsAABB(origin, direction, instance.worldBoundsMin, instance.worldBoundsMax)) {
+            continue;
+        }
+        auto it = loadedModels.find(instance.modelId);
+        if (it == loadedModels.end()) continue;
+        const ModelData& model = it->second;
+
+        // Local direction left unnormalised, so t comes back in world yards
+        // whatever the placement's scale.
+        const glm::vec3 localOrigin = glm::vec3(instance.invModelMatrix * glm::vec4(origin, 1.0f));
+        const glm::vec3 localDir = glm::vec3(instance.invModelMatrix * glm::vec4(direction, 0.0f));
+
+        for (size_t gi = 0; gi < model.groups.size(); ++gi) {
+            if (gi < instance.worldGroupBounds.size()) {
+                const auto& [gMin, gMax] = instance.worldGroupBounds[gi];
+                if (!rayIntersectsAABB(origin, direction, gMin, gMax)) continue;
+            }
+            const auto& group = model.groups[gi];
+            if (!trianglesAlongRay(group, localOrigin, localDir, tl_triScratch)) continue;
+
+            const auto& verts = group.collisionVertices;
+            const auto& indices = group.collisionIndices;
+            for (uint32_t triStart : tl_triScratch) {
+                if (triStart + 2 >= indices.size()) continue;
+                // Seen and solid only. A group with no MOPY flags at all is
+                // taken as drawn.
+                const size_t triIdx = triStart / 3;
+                if (!group.triMopyFlags.empty()) {
+                    if (triIdx >= group.triMopyFlags.size()) continue;
+                    const uint8_t mopy = group.triMopyFlags[triIdx];
+                    if (!(mopy & 0x20) || (mopy & 0x04)) continue;
+                }
+                const float t = rayTriangleIntersect(localOrigin, localDir,
+                                                     verts[indices[triStart]],
+                                                     verts[indices[triStart + 1]],
+                                                     verts[indices[triStart + 2]]);
+                if (t > 0.0f && t < closestHit) {
+                    closestHit = t;
+                    if (hitDesc) {
+                        *hitDesc = "model " + std::to_string(instance.modelId) +
+                                   " group " + std::to_string(gi);
+                    }
+                }
+            }
+        }
+    }
+    return closestHit;
+}
+
 bool WMORenderer::checkWallCollision(const glm::vec3& from, const glm::vec3& to, glm::vec3& adjustedPos, bool insideWMO) const {
     QueryTimer timer(&queryTimeMs, &queryCallCount);
     adjustedPos = to;

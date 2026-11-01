@@ -1637,8 +1637,9 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     }
                 }
 
-                const ui::ScenePick pick = ui::pickScene(
-                    gameHandler, ray, ui::ScenePickParams{});
+                ui::ScenePickParams clickParams;
+                clickParams.logRejections = true;  // a missed click says why
+                const ui::ScenePick pick = ui::pickScene(gameHandler, ray, clickParams);
                 uint64_t closestGuid = pick.resolve();
 
                 // Dropping what the cursor is carrying onto another player
@@ -1823,6 +1824,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 params.unitHitRadius = 1.5f;
                 params.unitHeightOffset = 1.5f;
                 params.skipChairs = true;
+                params.logRejections = true;  // a missed click says why
 
                 float closestQuestGoT = 1e30f;
                 uint64_t closestQuestGoGuid = 0;

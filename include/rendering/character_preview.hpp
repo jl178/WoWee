@@ -217,7 +217,17 @@ private:
     float defaultFovDegrees_ = 0.0f;
     glm::vec3 portraitCameraPos_{0.0f};
     glm::vec3 portraitCameraTarget_{0.0f};
-    float portraitCameraFovDegrees_ = 0.0f;
+    float portraitCameraFovDegrees_ = 0.0f;   // vertical, for the preview's aspect
+    /// setPortraitFraming was asked for: a unit portrait, framed by the
+    /// model's portrait camera. A player's paper doll zoomed all the way in is
+    /// not one, and keeps its own rig (and the yaw the player turned it to).
+    bool portraitFraming_ = false;
+    bool previewIsPlayer_ = false;
+    float portraitCameraNear_ = 0.0f;         // the M2 camera's clip planes, 0 = none
+    float portraitCameraFar_ = 0.0f;
+    /// Take the model's portrait camera (M2 camera type 0, CameraLookup[0])
+    /// as SetPortraitTexture frames with it; clears it when there is none.
+    void capturePortraitCamera(const pipeline::M2Model& model);
     float modelBoundMinZ_ = 0.0f;
     float modelBoundMaxZ_ = 2.0f;
     /// Where the head is attached, in model Z, or zero if the skeleton does

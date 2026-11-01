@@ -120,6 +120,17 @@ void M2Renderer::setInstanceAnimationFrozen(uint32_t instanceId, bool frozen) {
     auto& inst = instances[idxIt->second];
     inst.animSpeed = frozen ? 0.0f : 1.0f;
     inst.holdAtEnd = false;
+    if (inst.thenLoopSequence >= 0) {
+        // Leaving a state loop (Opened, Destroyed): its first frame is that
+        // state's pose, not the bind pose, so go back to the idle sequence.
+        inst.thenLoopSequence = -1;
+        if (inst.cachedModel &&
+            inst.idleSequenceIndex < static_cast<int>(inst.cachedModel->sequences.size())) {
+            inst.currentSequenceIndex = inst.idleSequenceIndex;
+            inst.animDuration = static_cast<float>(
+                inst.cachedModel->sequences[inst.idleSequenceIndex].duration);
+        }
+    }
     if (frozen) {
         inst.animTime = 0.0f;  // Reset to bind pose
     }
@@ -144,12 +155,30 @@ std::optional<uint32_t> M2Renderer::soleSequenceId(uint32_t instanceId) const {
 }
 
 void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animationId,
-                                          bool skipToEnd) {
+                                          bool skipToEnd, uint32_t thenLoopAnimationId) {
     auto idxIt = instanceIndexById.find(instanceId);
     if (idxIt == instanceIndexById.end()) return;
     auto& inst = instances[idxIt->second];
     if (!inst.cachedModel) return;
     const auto& seqs = inst.cachedModel->sequences;
+    int loopIdx = -1;
+    if (thenLoopAnimationId != UINT32_MAX) {
+        for (int i = 0; i < static_cast<int>(seqs.size()); ++i) {
+            if (seqs[i].id == thenLoopAnimationId) { loopIdx = i; break; }
+        }
+    }
+    if (loopIdx >= 0 && skipToEnd) {
+        // Already in the state when first seen: its loop, without the motion.
+        inst.blendDurationMs = 0.0f;
+        inst.currentSequenceIndex = loopIdx;
+        inst.animDuration = static_cast<float>(seqs[loopIdx].duration);
+        inst.animTime = 0.0f;
+        inst.animSpeed = 1.0f;
+        inst.playingVariation = false;
+        inst.holdAtEnd = false;
+        inst.thenLoopSequence = loopIdx;
+        return;
+    }
     for (int i = 0; i < static_cast<int>(seqs.size()); ++i) {
         if (seqs[i].id != animationId) continue;
         // Jumping straight to the held end is a state, not a motion: no fade.
@@ -159,6 +188,7 @@ void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animatio
         inst.animDuration = static_cast<float>(seqs[i].duration);
         inst.playingVariation = false;   // not a variation: it does not go back
         inst.holdAtEnd = true;
+        inst.thenLoopSequence = loopIdx;
         if (skipToEnd) {
             inst.animTime = inst.animDuration;
             inst.animSpeed = 0.0f;
@@ -187,6 +217,7 @@ void M2Renderer::setInstanceAnimation(uint32_t instanceId, uint32_t animationId,
             // Use playingVariation=true for one-shot (returns to idle when done)
             inst.playingVariation = !loop;
             inst.holdAtEnd = false;
+            inst.thenLoopSequence = -1;
             return;
         }
     }
@@ -1780,6 +1811,61 @@ float M2Renderer::raycastBoundingBoxes(const glm::vec3& origin, const glm::vec3&
         }
     }
 
+    return closestHit;
+}
+
+float M2Renderer::raycastCollisionMeshes(const glm::vec3& origin, const glm::vec3& direction,
+                                         float maxDistance, std::string* hitName) const {
+    QueryTimer timer(&queryTimeMs, &queryCallCount);
+    float closestHit = maxDistance;
+    const glm::vec3 rayEnd = origin + direction * maxDistance;
+    gatherCandidates(glm::min(origin, rayEnd) - glm::vec3(1.0f),
+                     glm::max(origin, rayEnd) + glm::vec3(1.0f), tl_m2_candidateScratch);
+
+    for (size_t idx : tl_m2_candidateScratch) {
+        const auto& instance = instances[idx];
+        if (!instance.cachedModel || instance.cachedIsGroundDetail) continue;
+        const M2ModelGPU& model = *instance.cachedModel;
+        // Authored collision only. A doodad without it is soft to the stock
+        // client's pick as much as to its feet; a box invented around a bush
+        // or a tree's crown is exactly the false wall a click must not meet.
+        if (!model.collision.valid() || model.isInvisibleTrap || model.isSpellEffect) continue;
+
+        float tEnter = 0.0f;
+        if (!segmentIntersectsAABB(origin, rayEnd, instance.worldBoundsMin - glm::vec3(0.1f),
+                                   instance.worldBoundsMax + glm::vec3(0.1f), tEnter)) {
+            continue;
+        }
+
+        const glm::vec3 lo = glm::vec3(instance.invModelMatrix * glm::vec4(origin, 1.0f));
+        const glm::vec3 ld = glm::vec3(instance.invModelMatrix * glm::vec4(direction, 0.0f));
+        const auto& verts = model.collision.vertices;
+        const auto& indices = model.collision.indices;
+        for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+            if (indices[i] >= verts.size() || indices[i + 1] >= verts.size() ||
+                indices[i + 2] >= verts.size()) continue;
+            const glm::vec3& v0 = verts[indices[i]];
+            const glm::vec3 e1 = verts[indices[i + 1]] - v0;
+            const glm::vec3 e2 = verts[indices[i + 2]] - v0;
+            // Moller-Trumbore, two-sided. t is in units of ld, and ld is the
+            // world direction carried into local space, so t is world yards.
+            const glm::vec3 p = glm::cross(ld, e2);
+            const float det = glm::dot(e1, p);
+            if (std::abs(det) < 1e-8f) continue;
+            const float inv = 1.0f / det;
+            const glm::vec3 s = lo - v0;
+            const float u = glm::dot(s, p) * inv;
+            if (u < 0.0f || u > 1.0f) continue;
+            const glm::vec3 q = glm::cross(s, e1);
+            const float v = glm::dot(ld, q) * inv;
+            if (v < 0.0f || u + v > 1.0f) continue;
+            const float t = glm::dot(e2, q) * inv;
+            if (t > 0.0f && t < closestHit) {
+                closestHit = t;
+                if (hitName) *hitName = model.name;
+            }
+        }
+    }
     return closestHit;
 }
 
