@@ -346,8 +346,7 @@ void WorldMapFacade::Impl::initOverlayLayers() {
     rareTrackerLayer = rtLayer.get();
     overlay.addLayer(std::move(rtLayer));
 
-    // Coordinate display
-    overlay.addLayer(std::make_unique<CoordinateDisplay>());
+    // No coordinate display: the stock 3.3.5 map has none.
 
     // Subzone tooltip
     overlay.addLayer(std::make_unique<SubzoneTooltipLayer>());
@@ -1166,12 +1165,14 @@ void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
         ViewLevel vl = viewState.currentLevel();
         if (vl == ViewLevel::WORLD) {
             bool goCosmic = false;
-            if (viewState.cosmicEnabled() && !rightClickConsumed) {
+            // Hosted in the stock WorldMapFrame, its Lua owns zoom-out,
+            // titles and clicks; drawing our own would double them.
+            if (!hasFrameRect && viewState.cosmicEnabled() && !rightClickConsumed) {
                 goCosmic = ImGui::GetIO().MouseClicked[1];
             }
 
             // "< Cosmic" back button (only if cosmic view is available for this expansion)
-            if (viewState.cosmicEnabled()) {
+            if (!hasFrameRect && viewState.cosmicEnabled()) {
                 ImGui::SetCursorPos(ImVec2(8.0f, 8.0f));
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.15f, 0.15f, 0.8f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.3f, 0.1f, 0.9f));
@@ -1193,7 +1194,7 @@ void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
             ImVec2 titleSz = ImGui::CalcTextSize("World");
             float titleX = imgMin.x + (displayW - titleSz.x) * 0.5f;
             float titleY = imgMin.y - titleSz.y - 8.0f;
-            if (titleY > 0.0f) {
+            if (!hasFrameRect && titleY > 0.0f) {
                 drawList->AddText(ImVec2(titleX + 1.0f, titleY + 1.0f),
                                   IM_COL32(0, 0, 0, 220), "World");
                 drawList->AddText(ImVec2(titleX, titleY),
@@ -1242,10 +1243,12 @@ void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
                     float lx = (rx0 + rx1 - labelSz.x) * 0.5f;
                     float ly = ry0 - labelSz.y - 4.0f;
                     if (ly < imgMin.y) ly = ry0 + 4.0f;
-                    drawList->AddText(ImVec2(lx + 1.0f, ly + 1.0f),
-                                      IM_COL32(0, 0, 0, 200), region.label.c_str());
-                    drawList->AddText(ImVec2(lx, ly),
-                                      IM_COL32(255, 230, 100, 255), region.label.c_str());
+                    if (!hasFrameRect) {
+                        drawList->AddText(ImVec2(lx + 1.0f, ly + 1.0f),
+                                          IM_COL32(0, 0, 0, 200), region.label.c_str());
+                        drawList->AddText(ImVec2(lx, ly),
+                                          IM_COL32(255, 230, 100, 255), region.label.c_str());
+                    }
 
                     if (io.MouseClicked[0]) {
                         // Use centralized map resolver to determine navigation action
@@ -1270,7 +1273,7 @@ void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
                     }
                 }
             }
-        } else if (vl == ViewLevel::CONTINENT && continentIndices.size() > 1) {
+        } else if (!hasFrameRect && vl == ViewLevel::CONTINENT && continentIndices.size() > 1) {
             ImGui::SetCursorPos(ImVec2(8.0f, contentLocalY + 8.0f));
             for (size_t i = 0; i < continentIndices.size(); i++) {
                 int ci = continentIndices[i];
@@ -1294,7 +1297,7 @@ void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
         overlay.render(layerCtx);
 
         // Zone view: back to continent + zone name
-        if (vl == ViewLevel::ZONE && viewState.continentIdx() >= 0) {
+        if (!hasFrameRect && vl == ViewLevel::ZONE && viewState.continentIdx() >= 0) {
             ImGui::SetCursorPos(ImVec2(8.0f, contentLocalY + 8.0f));
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.15f, 0.15f, 0.8f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.3f, 0.1f, 0.9f));
@@ -1321,7 +1324,7 @@ void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
         }
 
         // Continent view: back to world + hovered zone name
-        if (vl == ViewLevel::CONTINENT) {
+        if (!hasFrameRect && vl == ViewLevel::CONTINENT) {
             float localBtnY = contentLocalY +
                               (continentIndices.size() > 1 ? 40.0f : 8.0f);
             ImGui::SetCursorPos(ImVec2(8.0f, localBtnY));
@@ -1365,7 +1368,7 @@ void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.15f, 0.15f, 0.8f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.3f, 0.1f, 0.9f));
             ImGui::PushStyleColor(ImGuiCol_Text, ui::colors::kBrightGold);
-            if (ImGui::Button("< Azeroth")) {
+            if (!hasFrameRect && ImGui::Button("< Azeroth")) {
                 switchToWorldView();
             }
             ImGui::PopStyleColor(3);
@@ -1373,9 +1376,9 @@ void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
             ImVec2 titleSz = ImGui::CalcTextSize("Cosmic");
             float titleX = imgMin.x + (displayW - titleSz.x) * 0.5f;
             float titleY = imgMin.y + 8.0f;
-            drawList->AddText(ImVec2(titleX + 1.0f, titleY + 1.0f),
+            if (!hasFrameRect) drawList->AddText(ImVec2(titleX + 1.0f, titleY + 1.0f),
                               IM_COL32(0, 0, 0, 220), "Cosmic");
-            drawList->AddText(ImVec2(titleX, titleY),
+            if (!hasFrameRect) drawList->AddText(ImVec2(titleX, titleY),
                               IM_COL32(255, 215, 0, 255), "Cosmic");
 
             ImVec2 mp2 = ImGui::GetMousePos();

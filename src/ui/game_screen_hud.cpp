@@ -373,6 +373,7 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
 
     // Collect equipment texture regions from all equipped items
     std::vector<std::pair<int, std::string>> regionLayers;
+    std::vector<std::pair<int, std::string>> robeLegs;  // drawn last
 
     for (int s = 0; s < game::Inventory::NUM_EQUIP_SLOTS; s++) {
         const auto& slot = inventory.getEquipSlot(static_cast<game::EquipSlot>(s));
@@ -380,6 +381,7 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
 
         int32_t recIdx = displayInfoDbc->findRecordById(slot.item.displayInfoId);
         if (recIdx < 0) continue;
+        const bool robeRec = pipeline::isRobeDisplay(*displayInfoDbc, idiL, recIdx);
 
         for (int region = 0; region < 8; region++) {
             std::string texName = displayInfoDbc->getString(
@@ -398,9 +400,11 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
             const std::string fullPath = pipeline::resolveItemRegionTexture(
                 *assetManager, region, texName, isFemale);
             if (fullPath.empty()) continue;
-            regionLayers.emplace_back(region, fullPath);
+            if (robeRec && pipeline::isRobeLegRegion(region)) robeLegs.emplace_back(region, fullPath);
+            else regionLayers.emplace_back(region, fullPath);
         }
     }
+    regionLayers.insert(regionLayers.end(), robeLegs.begin(), robeLegs.end());
 
     // Re-composite: base skin + underwear + equipment regions
     // Clear composite cache first to prevent stale textures from being reused
@@ -587,7 +591,10 @@ void GameScreen::feedWorldMap(game::GameHandler& gameHandler,
         // Add authoritative NPC statuses first. Some servers also emit a
         // generic POI at the NPC's position; that duplicate is filtered below
         // so it cannot leave a teal objective circle on a quest giver.
-        for (const auto& [guid, status] : questStatuses) {
+        // The stock world map marks no quest givers; ! and ? live on the
+        // minimap and over heads only.
+        constexpr bool kQuestGiverMapMarkers = false;
+        if (kQuestGiverMapMarkers) for (const auto& [guid, status] : questStatuses) {
             auto entity = gameHandler.getEntityManager().getEntity(guid);
             if (!entity || entity->getType() != game::ObjectType::UNIT) continue;
 

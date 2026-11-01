@@ -563,7 +563,8 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
         uint32_t icon = packet.readUInt32();
         uint32_t data = packet.readUInt32();
         std::string name = packet.readString();
-        GossipPoi poi; poi.x = poiX; poi.y = poiY; poi.icon = icon; poi.data = data; poi.name = std::move(name);
+        // Wire order is server X,Y; store canonical (swapped), like quest POIs.
+        GossipPoi poi; poi.x = poiY; poi.y = poiX; poi.icon = icon; poi.data = data; poi.name = std::move(name);
         if (gossipPois_.size() >= 200) gossipPois_.erase(gossipPois_.begin());
         gossipPois_.push_back(std::move(poi));
         LOG_DEBUG("SMSG_GOSSIP_POI: x=", poiX, " y=", poiY, " icon=", icon);
