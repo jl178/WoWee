@@ -13,6 +13,7 @@
 #include <imgui_internal.h>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -349,6 +350,23 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
 
 void CharacterScreen::drawScene(const game::Character& character, float screenW, float screenH) {
     if (!assetManager_ || !assetManager_->isInitialized()) return;
+    // The preview is built at the window's size and keeps it (initialize on a
+    // built preview changes nothing), so going full screen drew the old
+    // image cropped to fill: the top and bottom cut away, the waist in the
+    // middle of the screen. Once the window has settled at another size the
+    // preview is rebuilt there; its camera keeps the scene's vertical field
+    // of view, so the wider window shows more at the sides.
+    if (preview_ && previewInitialized_ && preview_->getWidth() > 0 && preview_->getHeight() > 0) {
+        const bool differs = std::abs(static_cast<float>(preview_->getWidth()) - screenW) > 2.0f ||
+                             std::abs(static_cast<float>(preview_->getHeight()) - screenH) > 2.0f;
+        previewResizeTimer_ = differs ? previewResizeTimer_ + ImGui::GetIO().DeltaTime : 0.0f;
+        if (previewResizeTimer_ > 0.3f) {
+            preview_.reset();  // waits for the GPU and unregisters itself
+            previewInitialized_ = false;
+            previewGuid_ = 0;  // reload the character into the new preview
+            previewResizeTimer_ = 0.0f;
+        }
+    }
     if (!preview_) {
         preview_ = std::make_unique<rendering::CharacterPreview>();
     }

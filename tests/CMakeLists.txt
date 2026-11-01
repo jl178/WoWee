@@ -1243,6 +1243,17 @@ target_link_libraries(test_locomotion_fsm PRIVATE catch2_main)
 add_test(NAME locomotion_fsm COMMAND test_locomotion_fsm)
 register_test_target(test_locomotion_fsm)
 
+# ── test_body_facing ─────────────────────────────────────────
+add_executable(test_body_facing
+    test_body_facing.cpp
+    ${TEST_COMMON_SOURCES}
+)
+target_include_directories(test_body_facing PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_body_facing SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_body_facing PRIVATE catch2_main)
+add_test(NAME body_facing COMMAND test_body_facing)
+register_test_target(test_body_facing)
+
 # ── test_chat_filters ────────────────────────────────────────
 add_executable(test_chat_filters
     test_chat_filters.cpp

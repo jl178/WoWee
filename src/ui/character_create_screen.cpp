@@ -10,6 +10,7 @@
 #include <imgui.h>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <iterator>
 #include <random>
@@ -591,6 +592,18 @@ int randomUpTo(int maxValue) {
 void CharacterCreateScreen::drawScene(float screenW, float screenH) {
     if (!assetManager_) assetManager_ = core::Application::getInstance().getAssetManager();
     if (!assetManager_ || !assetManager_->isInitialized() || availableRaces_.empty()) return;
+    // Rebuilt at the window's size once a resize settles: drawn at the old
+    // size the scene was stretched, its camera framed for the wrong aspect.
+    if (preview_ && preview_->getWidth() > 0 && preview_->getHeight() > 0) {
+        const bool differs = std::abs(static_cast<float>(preview_->getWidth()) - screenW) > 2.0f ||
+                             std::abs(static_cast<float>(preview_->getHeight()) - screenH) > 2.0f;
+        previewResizeTimer_ = differs ? previewResizeTimer_ + ImGui::GetIO().DeltaTime : 0.0f;
+        if (previewResizeTimer_ > 0.3f) {
+            preview_.reset();    // waits for the GPU and unregisters itself
+            prevSceneDK_ = -1;   // the new preview takes the scene override again
+            previewResizeTimer_ = 0.0f;
+        }
+    }
     if (!preview_) {
         auto preview = std::make_unique<rendering::CharacterPreview>();
         const int w = std::max(64, static_cast<int>(screenW));
