@@ -451,3 +451,13 @@ Other fixes:
   - stock loot sounds
   - stock equipment texture layer order (the belt is hidden under the pants; the layering is duplicated four times)
   - stale questgiver status after objectives complete; the learn-spell sound
+- `9290471`: loot sounds as Wow.exe plays them.
+  - Coin sound (LOOTWINDOWCOINSOUND) on every change to coinage, and when honor or arena points rise.
+  - Item pickup sound when a loot slot is clicked.
+  - Item put-down sound on ITEM_PUSH_RESULT.
+  - The loot window itself plays nothing.
+- Open: "jumping during a cast doesn't interrupt".
+  - MovementHandler::sendMovement cancels the cast on MSG_MOVE_JUMP, and nothing gates jump input while casting.
+  - Can't reproduce from a Lua test yet: JUMP polls the keyboard, which SDL_PushEvent doesn't update, and JumpOrAscendStart isn't implemented.
+  - Next: log the cancel path and implement JumpOrAscendStart/AscendStop (stock FrameXML bindings use them).
+- WPTEST has gmlevel 3 on the lab (for test setup commands).
