@@ -569,7 +569,10 @@ void Renderer::updatePerFrameUBO() {
         const auto& lp = lightingManager->getLightingParams();
         currentFrameData.lightDir = glm::vec4(lp.directionalDir, 0.0f);
         currentFrameData.lightColor = glm::vec4(lp.diffuseColor, 1.0f);
-        currentFrameData.ambientColor = glm::vec4(lp.ambientColor, 1.0f);
+        // Indoors, units take the building's ambient (MOHD, stored half
+        // intensity like MOCV) in place of the sky's.
+        currentFrameData.ambientColor = glm::vec4(glm::mix(lp.ambientColor,
+            glm::max(interiorAmbient_ * 2.0f, glm::vec3(0.35f)), indoorFactor_), 1.0f);
         currentFrameData.fogColor = glm::vec4(lp.fogColor, 1.0f);
         currentFrameData.fogParams.x = lp.fogStart;
         currentFrameData.fogParams.y = lp.fogEnd;
@@ -598,7 +601,7 @@ void Renderer::updatePerFrameUBO() {
     // z carries one texel of the shadow map. The shaders used to hold that as
     // a constant for 4096, and the map is 512 to 4096 by the quality level.
     currentFrameData.shadowParams = glm::vec4(shadowsEnabled ? 1.0f : 0.0f, shadowBias,
-                                              1.0f / static_cast<float>(SHADOW_MAP_SIZE), 0.0f);
+                                              1.0f / static_cast<float>(SHADOW_MAP_SIZE), indoorFactor_);
 
     // Whether this frame builds the fog volume. Decided here, beside the
     // switch in the block the shaders read, and the frame graph dispatches by
@@ -2029,6 +2032,14 @@ void Renderer::update(float deltaTime) {
         }
     }
     playerIndoors_ = insideWmo;
+    {
+        // Ease characters between sun and interior light over about a second,
+        // as the stock client does, rather than flipping on the doorway frame.
+        const bool interior = insideWmo && wmoHit.interior;
+        if (interior) interiorAmbient_ = wmoRenderer->getModelAmbient(wmoHit.modelId);
+        const float target = interior ? 1.0f : 0.0f;
+        indoorFactor_ += (target - indoorFactor_) * (1.0f - std::exp(-deltaTime / 0.35f));
+    }
 
     // Update lighting system
     if (lightingManager) {

@@ -384,8 +384,13 @@ void main() {
         RtLight rt = rtLightAt(FragPos);
         shadow = rtShadow(rt, shadow);
 
+        // shadowParams.w: eased indoor factor. Indoors the sun is gone, so
+        // its direct term and shadow fade out instead of the roof's shadow
+        // edge cutting the light in one frame at the door.
+        float indoor = shadowParams.w;
+        float sunVis = mix(shadow, 1.0, indoor) * (1.0 - 0.85 * indoor);
         result = rtAmbient(rt, ambientColor.rgb) * texColor.rgb
-               + shadow * (diff * lightColor.rgb * texColor.rgb + spec * lightColor.rgb);
+               + sunVis * (diff * lightColor.rgb * texColor.rgb + spec * lightColor.rgb);
     }
 
     if (unlit == 0) result += localLightContribution(FragPos, norm, texColor.rgb);

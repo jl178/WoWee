@@ -1654,6 +1654,15 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
                 ? static_cast<uint32_t>(MovementFlags::WALKING)
                 : 0u;
         owner_.unitMoveFlagsCallbackRef()(data.guid, locomotionFlags, ~0u);
+    } else if (!usesPreWotlkSplineFlags && entity->getType() == ObjectType::UNIT &&
+               owner_.unitMoveFlagsCallbackRef() && data.hasDest) {
+        // WotLK: MoveSplineInit copies MOVEMENTFLAG_WALKING into the spline's
+        // Walkmode bit on every monster move. SET_WALK_MODE only arrives when
+        // the mode flips while the unit is in view, so a patrol that spawned
+        // walking would otherwise play Run for its whole path.
+        const uint32_t walk = static_cast<uint32_t>(MovementFlags::WALKING);
+        owner_.unitMoveFlagsCallbackRef()(data.guid,
+            (data.splineFlags & SplineFlagWotlk::WALKMODE) ? walk : 0u, walk);
     }
 
     if (data.hasDest) {
@@ -1845,6 +1854,11 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
                 ? static_cast<uint32_t>(MovementFlags::WALKING)
                 : 0u;
         owner_.unitMoveFlagsCallbackRef()(moverGuid, locomotionFlags, ~0u);
+    } else if (!usesPreWotlkSplineFlags && entity->getType() == ObjectType::UNIT &&
+               owner_.unitMoveFlagsCallbackRef() && hasDest) {
+        const uint32_t walk = static_cast<uint32_t>(MovementFlags::WALKING);
+        owner_.unitMoveFlagsCallbackRef()(moverGuid,
+            (splineFlags & SplineFlagWotlk::WALKMODE) ? walk : 0u, walk);
     }
 
     if (!owner_.getTransportManager()) {
@@ -2771,7 +2785,7 @@ void MovementHandler::updateClientTaxi(float deltaTime) {
     // activation was deferred to the reply (see activateTaxi()'s comment), the
     // speculative flight start accidentally "recovered" from this since it
     // never waited on a reply in the first place. Now that it correctly does,
-    // a dropped reply left taxiActivatePending_ true forever - every future
+    // a dropped reply left taxiActivatePending_ true enhanced - every future
     // activateTaxi() call silently no-ops on its pending-guard, permanently
     // soft-locking the player's taxi system until relog. Time out and clear
     // pending state the same way an explicit failure reply would.

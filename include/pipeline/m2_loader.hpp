@@ -174,7 +174,8 @@ struct M2ParticleEmitter {
     M2AnimationTrack emissionRate;
     M2AnimationTrack emissionAreaLength;
     M2AnimationTrack emissionAreaWidth;
-    M2AnimationTrack deceleration;
+    M2AnimationTrack deceleration;  // on-disk zSource (0xF0); not a deceleration
+    float drag = 0.0f;              // WotLK +0x174: velocity damping per second
     M2FBlock particleColor;   // vec3 RGB at 3 timestamps
     M2FBlock particleAlpha;   // float (from uint16/32767) at 3 timestamps
     M2FBlock particleScale;   // float (x component of vec2) at 3 timestamps

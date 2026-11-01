@@ -1742,14 +1742,21 @@ void SpellHandler::updateTimers(float dt) {
         owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_STATE", {});
         if (castChanged) owner_.addonEventCallbackRef()("CURRENT_SPELL_CAST_CHANGED", {});
     }
-    // Tick down unit cast states
+    // Tick down unit cast states. The bar ends when its time is up; the entry
+    // waits a grace period for SPELL_GO or a failure (so a late GO still plays
+    // the release), then the cast animation is stopped here. A lost or never
+    // sent end otherwise left the caster looping its cast hold for good.
+    constexpr float kCastEndGraceSec = 1.0f;
     for (auto it = unitCastStates_.begin(); it != unitCastStates_.end(); ) {
-        if (it->second.casting && it->second.timeRemaining > 0.0f) {
-            it->second.timeRemaining -= dt;
-            if (it->second.timeRemaining <= 0.0f) {
-                it->second.timeRemaining = 0.0f;
-                it->second.casting = false;
+        auto& st = it->second;
+        st.timeRemaining -= dt;
+        if (st.timeRemaining <= 0.0f) {
+            st.casting = false;  // bar gone: getUnitCastState() answers null
+            if (st.timeRemaining <= -kCastEndGraceSec) {
+                const uint64_t guid = it->first;
                 it = unitCastStates_.erase(it);
+                if (guid != owner_.getPlayerGuid() && owner_.spellCastAnimCallbackRef())
+                    owner_.spellCastAnimCallbackRef()(guid, false, /*hard stop*/true, SpellCastType::OMNI);
                 continue;
             }
         }
@@ -2324,7 +2331,8 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
             owner_.spellCastAnimCallbackRef()(data.casterUnit, true, false, npcGoType);
         }
         if (!rangedWeaponAttack && owner_.spellCastAnimCallbackRef()) {
-            owner_.spellCastAnimCallbackRef()(data.casterUnit, false, false, SpellCastType::OMNI);
+            owner_.spellCastAnimCallbackRef()(data.casterUnit, false, false,
+                wasTrackedCast ? castIt->second.castType : npcGoType);
         }
         bool targetsPlayer = false;
         for (const auto& tgt : data.hitTargets) {
@@ -4153,6 +4161,8 @@ void SpellHandler::handleSpellFailedOther(network::Packet& packet) {
         uint32_t failedSpellId = 0;
         if (const auto* st = getUnitCastState(failOtherGuid)) failedSpellId = st->spellId;
         unitCastStates_.erase(failOtherGuid);
+        if (owner_.spellCastAnimCallbackRef())
+            owner_.spellCastAnimCallbackRef()(failOtherGuid, false, /*hard stop*/true, SpellCastType::OMNI);
         if (owner_.addonEventCallbackRef()) {
             std::string unitId;
             if (failOtherGuid == owner_.getTargetGuid())     unitId = "target";
@@ -4388,7 +4398,7 @@ void SpellHandler::handleSpellFailure(network::Packet& packet) {
         // Another unit's cast failed - clear their tracked cast bar
         unitCastStates_.erase(failGuid);
         if (owner_.spellCastAnimCallbackRef()) {
-            owner_.spellCastAnimCallbackRef()(failGuid, false, false, SpellCastType::OMNI);
+            owner_.spellCastAnimCallbackRef()(failGuid, false, /*hard stop*/true, SpellCastType::OMNI);
         }
     }
 }

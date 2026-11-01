@@ -1349,7 +1349,7 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         uint16_t selectedFacial100 = 100;
         uint16_t selectedFacial200 = 200;
         uint16_t selectedFacial300 = 300;
-        uint32_t equipChestGG = 0, equipLegsGG = 0, equipFeetGG = 0, equipGlovesGG = 0, equipCapeGG = 0, equipRobeGG = 0;
+        uint32_t equipChestGG = 0, equipLegsGG = 0, equipFeetGG = 0, equipGlovesGG = 0, equipCapeGG = 0, equipRobeGG = 0, equipKneeGG = 0;
         if (itDisplayData != displayDataMap_.end() &&
             itDisplayData->second.extraDisplayId != 0) {
             auto itExtra = humanoidExtraMap_.find(itDisplayData->second.extraDisplayId);
@@ -1439,6 +1439,18 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
                         int32_t idx = itemDisplayDbc->findRecordById(did);
                         if (idx >= 0) equipRobeGG = itemDisplayDbc->getUInt32(static_cast<uint32_t>(idx), fGG3);
                     }
+                    // Legs items: GeosetGroup[0] -> group 11 (pant flaps),
+                    // [1] -> group 9 (kneepads), [2] -> group 13 (dress or
+                    // kilt; 738 legs displays set it, e.g. 9438 Dress_B_03).
+                    if (uint32_t did = itExtra->second.equipDisplayId[5]; did != 0) {
+                        int32_t idx = itemDisplayDbc->findRecordById(did);
+                        if (idx >= 0) {
+                            const uint32_t fGG2 = idiL ? (*idiL)["GeosetGroup2"] : 8;
+                            equipKneeGG = itemDisplayDbc->getUInt32(static_cast<uint32_t>(idx), fGG2);
+                            if (equipRobeGG == 0)
+                                equipRobeGG = itemDisplayDbc->getUInt32(static_cast<uint32_t>(idx), fGG3);
+                        }
+                    }
                 }
             }
         }
@@ -1447,6 +1459,11 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         for (uint16_t sid : allGeosets) {
             const uint16_t group = static_cast<uint16_t>(sid / 100);
             if (group == 3 || group == 4 || group == 8 || group == 12 || group == 13 || group == 15) continue;
+            // Character models carry every variant of these clothing groups.
+            // Keep none here and add exactly one below, as the player path does;
+            // passing them through drew all boots, kneepads and flaps at once.
+            if (hasHumanoidExtra &&
+                (group == 5 || group == 7 || group == 9 || group == 10 || group == 11)) continue;
             // Group 17 = eye glow (DK/Night Elf "shining eyes" overlay), group 18 = related
             // glow geosets. NPCs are never DK/NE players opting into eye glow, so strip
             // these groups so creatures don't get unwanted glowing blue night-elf eyes.
@@ -1510,6 +1527,17 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
             if (shinSid != 0) normalizedGeosets.insert(shinSid);
         }
 
+        if (hasHumanoidExtra) {
+            if (uint16_t ears = resolveGeoset(kGeosetDefaultEars, allGeosets)) normalizedGeosets.insert(ears);
+            const uint16_t wantKnees = equipKneeGG > 0
+                ? static_cast<uint16_t>(901 + equipKneeGG) : kGeosetDefaultKneepads;
+            if (uint16_t knees = resolveGeoset(wantKnees, allGeosets)) normalizedGeosets.insert(knees);
+            // Group 11 pant flaps only when the legs item names a variant the
+            // model really has; 1101 (none) is absent from shipped models.
+            if (equipLegsGG > 0 && allGeosets.count(static_cast<uint16_t>(1101 + equipLegsGG)))
+                normalizedGeosets.insert(static_cast<uint16_t>(1101 + equipLegsGG));
+        }
+
         // Add sleeve/wrist meshes when chest armor calls for them.
         if (hasGroup8 && equipChestGG > 0) {
             uint16_t wantSleeves = equippedGeoset(equipment::kChestBare, equipChestGG);
@@ -1571,10 +1599,11 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
 
         // Prefer trousers geoset; use covered variant when legs armor exists.
         if (hasGroup13) {
+            // Group 13 is the skirt: a robe's or dress's GeosetGroup[2]. The
+            // legs item's GeosetGroup[0] belongs to group 11, not here.
             uint16_t wantPants = (equipRobeGG > 0)
                 ? equippedGeoset(equipment::kRobeKiltBare, equipRobeGG)
-                : (equipLegsGG > 0) ? equippedGeoset(equipment::kLegsBare, equipLegsGG)
-                                    : kGeosetBarePants;
+                : kGeosetBarePants;
             uint16_t pantsSid = resolveGeoset(wantPants, allGeosets);
             if (pantsSid != 0) normalizedGeosets.insert(pantsSid);
         }

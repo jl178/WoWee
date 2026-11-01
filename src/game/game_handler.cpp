@@ -2890,7 +2890,11 @@ int GameHandler::unitReactionToPlayer(const Unit& unit) const {
         if (standing.flags & FACTION_FLAG_AT_WAR) rank = std::min(rank, 4);
         return rank;
     }
-    if (unit.isHostile()) return 2;
+    if (auto it = factionRegardsHostileMap_.find(ft); it != factionRegardsHostileMap_.end()) {
+        if (it->second) return 2;
+    } else if (unit.isHostile()) {
+        return 2;  // map not built yet: the attackable answer
+    }
     return isFriendlyFaction(ft) ? 5 : 4;
 }
 

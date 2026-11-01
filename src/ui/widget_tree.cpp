@@ -194,6 +194,15 @@ void WidgetTree::setParent(uint32_t id, uint32_t newParent) {
     }
     w->parent = newParent;
     get(newParent)->children.push_back(id);
+    // The new parent's subtree is no longer known to be off: this widget may
+    // be on. Cleared up the chain so the full pass descends to it from
+    // whichever ancestor it reaches first.
+    for (uint32_t up = newParent; up != 0;) {
+        Widget* p = get(up);
+        if (!p || !p->subtreeOff) break;
+        p->subtreeOff = false;
+        up = p->parent;
+    }
 }
 
 void WidgetTree::markScrollFrame(uint32_t id) {
@@ -845,6 +854,9 @@ std::vector<uint32_t> WidgetTree::takeVisibilityDirty() {
 void WidgetTree::markSubtreeHidden(uint32_t id) {
     const Widget* w = get(id);
     if (!w) return;
+    // Only for a widget that is itself off; layoutWidget calls this on
+    // exactly those, and the recursion below has just turned the child off.
+    if (Widget* self = get(id); self && !self->visibleChain) self->subtreeOff = true;
     const std::size_t count = w->children.size();
     for (std::size_t i = 0; i < count; ++i) {
         w = get(id);
@@ -858,12 +870,12 @@ void WidgetTree::markSubtreeHidden(uint32_t id) {
         // hidden frame for its width still gets a fresh answer, because
         // resolveWidget re-derives whatever the last full pass did not claim.
         //
-        // A child already off the chain was marked, with its own subtree,
-        // when it went off; widgets start off the chain, so one created
-        // under a hidden parent since then is covered too. 97% of the 28k
-        // widgets sit under hidden frames, and walking them again every
-        // frame was most of this pass.
-        if (!c->visibleChain && !c->visible) continue;
+        // Skipped only once this function has walked it (subtreeOff), not
+        // merely because it is off the chain: resolveChain turns a widget off
+        // without marking anything under it, so "off" did not mean "subtree
+        // marked". 97% of the 28k widgets sit under hidden frames, and
+        // walking them again every frame was most of this pass.
+        if (c->subtreeOff) continue;
         c->visibleChain = false;
         if (c->visible) noteVisibilityCandidate(child);
         c->visible = false;
@@ -951,6 +963,9 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
         if (nowVisible != w->visible) noteVisibilityCandidate(id);
         w->visible = nowVisible;
     }
+    // Back on the chain: what was marked under it is stale, so the next time
+    // it goes off its subtree has to be walked again.
+    if (w->visibleChain) w->subtreeOff = false;
     // Clipping is inherited: anything under a scroll frame is bounded by it,
     // however deep, because a scroll child holds frames of its own.
     //

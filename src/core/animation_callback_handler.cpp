@@ -669,8 +669,33 @@ void AnimationCallbackHandler::setupCallbacks() {
                     ac->setSeatedLoopAnimation(0);
                     ac->stopSpellCast();
                 }
-            } else if (isChannel) {
-                cr->playAnimation(instanceId, rendering::anim::STAND, true);
+            } else {
+                // Another unit leaving its cast hold. Only a cast animation is
+                // replaced, so a unit that has since died, run or swung keeps
+                // that. isChannel doubles as "hard stop" (failure, timeout,
+                // channel end): straight to Stand. A finished cast plays its
+                // one-shot release, which returns to Stand by itself. Before,
+                // only channels were stopped and every remote cast looped its
+                // hold until something else overwrote it.
+                using namespace rendering::anim;
+                uint32_t cur = 0; float t = 0.0f, dur = 0.0f;
+                if (cr->getAnimationState(instanceId, cur, t, dur) &&
+                    (cur == READY_SPELL_DIRECTED || cur == READY_SPELL_OMNI ||
+                     cur == CHANNEL_CAST_DIRECTED || cur == CHANNEL_CAST_OMNI ||
+                     cur == SPELL_PRECAST || cur == SPELL || cur == SPELL_CAST ||
+                     cur == SPELL_CAST_DIRECTED || cur == SPELL_CAST_OMNI ||
+                     cur == SPELL_CAST_AREA)) {
+                    uint32_t release = 0;
+                    if (!isChannel) {
+                        const uint32_t pref = isArea ? SPELL_CAST_AREA
+                                            : isDirected ? SPELL_CAST_DIRECTED : SPELL_CAST_OMNI;
+                        for (uint32_t id : {pref, static_cast<uint32_t>(SPELL_CAST_OMNI),
+                                            static_cast<uint32_t>(SPELL_CAST)})
+                            if (cr->hasAnimation(instanceId, id)) { release = id; break; }
+                    }
+                    if (release) cr->playAnimation(instanceId, release, /*loop=*/false);
+                    else         cr->playAnimation(instanceId, STAND, true);
+                }
             }
         }
     });

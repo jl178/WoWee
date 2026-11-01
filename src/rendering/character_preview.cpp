@@ -880,6 +880,7 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     uint16_t geosetSleeves = pickGeoset(core::kGeosetBareSleeves, core::kGeosetBareSleeves);
     uint16_t geosetPants = pickGeoset(core::kGeosetBarePants, core::kGeosetBarePants);
 
+    bool robeSkirt = false;
     // Chest/Shirt/Robe → group 8 (sleeves)
     {
         uint32_t did = findDisplayId({4, 5, 20});
@@ -887,19 +888,20 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
         if (gg > 0) geosetSleeves = pickGeoset(core::equippedGeoset(core::equipment::kChestBare, gg), core::kGeosetBareSleeves);
         // Robe kilt legs
         uint32_t gg3 = getGeosetGroup(did, geosetGroup3Field);
-        if (gg3 > 0) geosetPants = pickGeoset(core::equippedGeoset(core::equipment::kRobeKiltBare, gg3), core::kGeosetBarePants);
+        if (gg3 > 0) { geosetPants = pickGeoset(core::equippedGeoset(core::equipment::kRobeKiltBare, gg3), core::kGeosetBarePants); robeSkirt = true; }
     }
-    // Legs → group 13 (trousers)
+    // Legs: GeosetGroup[2] is a dress or kilt (group 13). [0] is group 11
+    // pant flaps, never the skirt. A robe's skirt wins.
     {
         uint32_t did = findDisplayId({7});
-        uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-        if (gg > 0) geosetPants = pickGeoset(core::equippedGeoset(core::equipment::kLegsBare, gg), core::kGeosetBarePants);
+        uint32_t gg3 = getGeosetGroup(did, geosetGroup3Field);
+        if (gg3 > 0 && !robeSkirt) { geosetPants = pickGeoset(core::equippedGeoset(core::equipment::kRobeKiltBare, gg3), core::kGeosetBarePants); robeSkirt = true; }
     }
-    // Boots → group 5 (shins)
+    // Boots → group 5 (shins); a skirt hides the boot tops
     {
         uint32_t did = findDisplayId({8});
         uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-        if (gg > 0) geosetBoots = pickGeoset(core::equippedGeoset(core::equipment::kBootsBare, gg), lowestInGroup(5));
+        if (gg > 0 && !robeSkirt) geosetBoots = pickGeoset(core::equippedGeoset(core::equipment::kBootsBare, gg), lowestInGroup(5));
     }
     // Gloves → group 4 (forearms)
     {

@@ -246,9 +246,7 @@ void main() {
 
     vec3 result;
 
-    // Sample shadow map for all groups.  Interior groups receive attenuated
-    // shadow (30%) so they get subtle light/shadow variation without the full
-    // outdoor darkening that makes them look wrong.
+    // Sample the sun shadow map. Interior groups ignore it below.
     float shadow = 1.0;
     if (shadowParams.x > 0.5) {
         vec3 ldir = normalize(-lightDir.xyz);
@@ -340,10 +338,13 @@ void main() {
         // the same grey. A small safety floor stays for the few roots that
         // carry no ambient at all.
         vec3 wmoAmbient = vec3(wmoAmbientR, wmoAmbientG, wmoAmbientB);
-        wmoAmbient = max(wmoAmbient, vec3(0.15));
-        vec3 mocv = max(VertColor.rgb, wmoAmbient);
-        float clampedShadow = max(shadow, 0.45);
-        result = texColor.rgb * mocv * clampedShadow;
+        wmoAmbient = max(wmoAmbient, vec3(0.12));
+        // MOCV is authored at half intensity (0x7F = fully lit; the stock
+        // client modulates 2x). The sun cannot reach an INDOOR group, so its
+        // shadow map is not applied here: it used to darken every interior to
+        // about 45% because the roof always shadows the room.
+        vec3 interiorLight = clamp(max(VertColor.rgb * 2.0, wmoAmbient), vec3(0.0), vec3(1.25));
+        result = texColor.rgb * interiorLight;
     } else if (unlit != 0) {
         // Outdoor unlit surface - still receives directional shadows
         result = texColor.rgb * shadow;

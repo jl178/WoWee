@@ -1624,6 +1624,7 @@ public:
     // Faction hostility map (populated from FactionTemplate.dbc by Application)
     void setFactionHostileMap(std::unordered_map<uint32_t, bool> map) { factionHostileMap_ = std::move(map); }
     void setFactionFriendlyMap(std::unordered_map<uint32_t, bool> map) { factionFriendlyMap_ = std::move(map); }
+    void setFactionRegardsHostileMap(std::unordered_map<uint32_t, bool> map) { factionRegardsHostileMap_ = std::move(map); }
     /// The templates whose faction the player has a standing with, by that
     /// standing's index in the server's list. See factionAtWarLive.
     void setFactionTemplateRepList(std::unordered_map<uint32_t, uint32_t> map) {
@@ -4671,6 +4672,7 @@ private:
     // Faction hostility lookup (populated from FactionTemplate.dbc)
     std::unordered_map<uint32_t, bool> factionHostileMap_;
     std::unordered_map<uint32_t, bool> factionFriendlyMap_;
+    std::unordered_map<uint32_t, bool> factionRegardsHostileMap_;  ///< unit regards player as hostile (colour)
     std::unordered_map<uint32_t, uint32_t> factionTemplateRepList_;
 
     // Vehicle (WotLK): non-zero when player is seated in a vehicle

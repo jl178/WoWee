@@ -2171,7 +2171,9 @@ static int lua_UnitIsFriend(lua_State* L) {
 /// answered false for every enemy.
 static int lua_UnitIsEnemy(lua_State* L) {
     auto* unit = unitAskedAbout(L);
-    lua_pushboolean(L, unit && unit->isHostile());
+    auto* gh = getGameHandler(L);
+    // Reaction, not attackability: a neutral beast is attackable but not an enemy.
+    lua_pushboolean(L, unit && gh && gh->unitReactionToPlayer(*unit) <= 2);
     return 1;
 }
 

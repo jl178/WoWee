@@ -402,6 +402,11 @@ public:
         bool interior = false;    ///< the group has the indoor flag
     };
     bool insideWmoArea(float glX, float glY, float glZ, AreaHit* out) const;
+    /// MOHD ambient of a loaded model (interior fill light); 0.5 grey if unknown.
+    glm::vec3 getModelAmbient(uint32_t modelId) const {
+        auto it = loadedModels.find(modelId);
+        return it != loadedModels.end() ? it->second.wmoAmbientColor : glm::vec3(0.5f);
+    }
     void setInstanceNameSet(uint32_t instanceId, uint16_t nameSet);
 
     /**
