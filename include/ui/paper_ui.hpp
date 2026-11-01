@@ -132,8 +132,59 @@ struct Column {
     void gap(float h) { y += h; }
 };
 
+/// Another look for the same controls.
+///
+/// The screens that still lay themselves out with PaperUI - the server card
+/// behind "Change Server" and the asset builder behind "Game Assets" - are
+/// reached from the stock glue login, and drawn as ink on paper they read as
+/// another program opened over it. A skin changes how every control is drawn
+/// and nothing about what it does: the press rules, focus, scrolling and
+/// layout stay PaperUI's, so a screen switched to it keeps its behaviour
+/// exactly. The glue look is ui/glue_ui.hpp's glue::paperSkin(); it lives
+/// there rather than here because this file is also built into the standalone
+/// asset manager, which has no game archives to draw glue art from.
+///
+/// Rects are in pixels. `hovered` and `held` are what press() decided.
+class PaperSkin {
+public:
+    virtual ~PaperSkin() = default;
+    /// The colours theme() answers while the skin is on, so the screens'
+    /// own labels and notes follow it.
+    [[nodiscard]] virtual PaperTheme theme() const = 0;
+    /// A run of text, as the skin sets it (outline, shadow).
+    virtual void text(ImDrawList* dl, ImFont* font, ImVec2 at, const char* s, float size,
+                      ImU32 col) = 0;
+    virtual void sheet(ImDrawList* dl, ImVec2 a, ImVec2 b) = 0;
+    virtual void scrim(ImDrawList* dl, ImVec2 screen, float alpha) = 0;
+    virtual void button(ImDrawList* dl, ImVec2 a, ImVec2 b, const char* label, bool primary,
+                        bool enabled, bool hovered, bool held) = 0;
+    /// The box behind a field, a dropdown or a frame.
+    virtual void box(ImDrawList* dl, ImVec2 a, ImVec2 b, bool focused) = 0;
+    /// How far a field's text sits inside its box.
+    [[nodiscard]] virtual float boxPad() const = 0;
+    virtual void checkbox(ImDrawList* dl, ImVec2 a, ImVec2 b, bool checked, bool enabled,
+                          bool hovered, bool held) = 0;
+    virtual void radio(ImDrawList* dl, ImVec2 a, ImVec2 b, bool selected, bool enabled,
+                       bool hovered) = 0;
+    /// A slider's track over a..b, its thumb `t` of the way along.
+    virtual void slider(ImDrawList* dl, ImVec2 a, ImVec2 b, float t, bool hot) = 0;
+    virtual void progress(ImDrawList* dl, ImVec2 a, ImVec2 b, float t) = 0;
+    /// An open dropdown's list, behind its rows.
+    virtual void popup(ImDrawList* dl, ImVec2 a, ImVec2 b) = 0;
+    /// The mark on a list or dropdown row that is chosen or pointed at.
+    virtual void rowMark(ImDrawList* dl, ImVec2 a, ImVec2 b, bool selected, bool hovered) = 0;
+    /// The arrow at the right of a closed dropdown, over its box.
+    virtual void dropdownArrow(ImDrawList* dl, ImVec2 a, ImVec2 b, bool open, bool hovered) = 0;
+};
+
 class PaperUI {
 public:
+    /// Draw every control through `skin` from now on, or as paper again for
+    /// null. The theme is swapped with it and put back after. The skin is
+    /// not owned and must outlive its use.
+    void setSkin(PaperSkin* skin);
+    [[nodiscard]] PaperSkin* skin() const { return skin_; }
+
     // ---- frame ----------------------------------------------------------
 
     /// `scale` is pixels per layout unit; everything below is written in
@@ -444,11 +495,16 @@ private:
         int selected = -1;
         int hovered = -1;
         float rowHeight = 0.0f;
+        PaperSkin* skin = nullptr;  ///< the skin it was opened under
+        PaperTheme theme;           ///< and that skin's colours
     };
     std::vector<PopupDraw> popups_;
 
     std::vector<std::pair<ImU32, FieldState>> fieldStates_;
     FieldState& fieldState(ImU32 id);
+
+    PaperSkin* skin_ = nullptr;
+    PaperTheme paperTheme_;  ///< the theme to put back when the skin comes off
 };
 
 } // namespace wowee::ui

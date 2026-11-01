@@ -215,6 +215,8 @@ void EntitySpawner::shutdown() {
     creatureSwimmingState_.clear();
     creatureWalkingState_.clear();
     creatureFlyingState_.clear();
+    unitMoveDirFlags_.clear();
+    unitBodyFacing_.clear();
     creatureActiveEmotes_.clear();
     unitPresentedAlpha_.clear();
     creatureWeaponsAttached_.clear();
@@ -273,6 +275,8 @@ void EntitySpawner::resetAllState() {
     creatureSwimmingState_.clear();
     creatureWalkingState_.clear();
     creatureFlyingState_.clear();
+    unitMoveDirFlags_.clear();
+    unitBodyFacing_.clear();
     creatureActiveEmotes_.clear();
     // Carried over, a stale entry matching the creature's current stealth state
     // suppresses the opacity call that would apply it, so a stealthed NPC came

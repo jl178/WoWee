@@ -128,7 +128,9 @@ public:
 
     void setInstancePosition(uint32_t instanceId, const glm::vec3& position);
     void setInstanceRotation(uint32_t instanceId, const glm::vec3& rotation);
-    void setInstanceTorsoYaw(uint32_t instanceId, float deltaYawRad);
+    /// Look twist: yaw on the SpineLow key bone and, on top of it, the Head
+    /// key bone (radians, CCW positive). See animation/body_facing.hpp.
+    void setInstanceTorsoYaw(uint32_t instanceId, float deltaYawRad, float headYawRad = 0.0f);
     void moveInstanceTo(uint32_t instanceId, const glm::vec3& destination, float durationSeconds);
     void startFadeIn(uint32_t instanceId, float durationSeconds);
     void setInstanceOpacity(uint32_t instanceId, float opacity);
@@ -310,7 +312,8 @@ private:
         glm::vec3 rotation;
         float scale;
         bool visible = true;  // For first-person camera hiding
-        float torsoYawOverrideRad = 0.0f;
+        float torsoYawOverrideRad = 0.0f;  // SpineLow (key bone 4) look twist
+        float headYawOverrideRad = 0.0f;   // Head (key bone 6) look twist
 
         // Animation state
         uint32_t currentAnimationId = 0;

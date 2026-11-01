@@ -2149,30 +2149,6 @@ void Renderer::update(float deltaTime) {
 
         // Movement-facing comes from camera controller and is decoupled from LMB orbit.
         bool taxiFlight = animationController_ && animationController_->isTaxiFlight();
-        // Stock 3.3.5a has no strafe animations for characters: strafing plays
-        // the run (or walk) with the WHOLE model yawed toward the direction of
-        // travel - 45 degrees on a forward diagonal, 90 on a pure strafe - and a
-        // backpedal on a diagonal yaws the other way so the back leads. The
-        // facing that is sent to the server and used for melee arcs stays the
-        // logical facing; only the drawn model turns. This used to point the
-        // model (and the server facing) along travel and counter-twist the
-        // spine bone back to the camera, which bent the body at the waist.
-        float strafeTargetDeg = 0.0f;
-        const bool sideways = cameraController->isStrafingLeft() != cameraController->isStrafingRight();
-        if (!taxiFlight && sideways && cameraController->isMoving() &&
-            !cameraController->isSwimming() && !cameraController->isFlyingActive()) {
-            float travel = cameraController->getTravelYaw();
-            if (cameraController->isMovingBackward()) travel += 180.0f;
-            strafeTargetDeg = travel - cameraController->getFacingYaw();
-            while (strafeTargetDeg > 180.0f) strafeTargetDeg -= 360.0f;
-            while (strafeTargetDeg < -180.0f) strafeTargetDeg += 360.0f;
-        }
-        {
-            // Ease over ~0.15 s (time constant 0.05 s: 95% after three).
-            const float k = 1.0f - std::exp(-std::max(deltaTime, 0.0f) / 0.05f);
-            strafeYawOffsetDeg_ += (strafeTargetDeg - strafeYawOffsetDeg_) * k;
-            if (std::abs(strafeYawOffsetDeg_) < 0.01f && strafeTargetDeg == 0.0f) strafeYawOffsetDeg_ = 0.0f;
-        }
         if (taxiFlight) {
             characterYaw = cameraController->getFacingYaw();
         } else if (cameraController->isMoving() || cameraController->isRightMouseHeld() ||
@@ -2203,9 +2179,61 @@ void Renderer::update(float deltaTime) {
                 }
             }
         }
-        float yawRad = glm::radians(getCharacterVisualYaw());
-        characterRenderer->setInstanceRotation(characterInstanceId, glm::vec3(0.0f, 0.0f, yawRad));
-        characterRenderer->setInstanceTorsoYaw(characterInstanceId, 0.0f);
+        // Drawn body yaw and look twist, as the stock 3.3.5a client does it
+        // (CGUnit_C update 0x0073DAB0; see animation/body_facing.hpp). The
+        // logical facing (characterYaw: what the server and melee arcs use)
+        // never changes for strafing. The body springs 45 degrees toward a
+        // diagonal and 90 toward a pure strafe (a back diagonal turns the
+        // other way so the back leads), and SpineLow and Head twist back up to
+        // 45 degrees each, so the chest and face stay on the facing - on the
+        // enemy - while the legs run sideways. Standing and turning, the body
+        // lags and the twist leads; it catches up once the turning stops.
+        {
+            const bool mounted = animationController_ && animationController_->isMounted();
+            const bool turning = cameraController->isTurningLeft() || cameraController->isTurningRight() ||
+                                 cameraController->isRightMouseHeld();
+            const uint32_t controls =
+                (cameraController->isMovingForward()  ? 0x01u : 0u) |
+                (cameraController->isMovingBackward() ? 0x02u : 0u) |
+                (cameraController->isStrafingLeft()   ? 0x04u : 0u) |
+                (cameraController->isStrafingRight()  ? 0x08u : 0u) |
+                (cameraController->isTurningLeft()    ? 0x10u : 0u) |
+                (cameraController->isTurningRight()   ? 0x20u : 0u) |
+                (cameraController->isRightMouseHeld() ? 0x40u : 0u);
+            bodyFacingClock_ += std::max(deltaTime, 0.0f);
+            // unit+0xABC is stamped when the input controls change and the
+            // player is not turning (CGUnit_C 0x00735FC2, reached from the
+            // input-control handlers).
+            if (controls != bodyFacingControls_ && !turning) bodyFacingStamp_ = bodyFacingClock_;
+            bodyFacingControls_ = controls;
+
+            anim::BodyFacingInput in;
+            in.facing = glm::radians(characterYaw);
+            in.forward = cameraController->isMovingForward();
+            in.backward = cameraController->isMovingBackward();
+            in.strafeLeft = cameraController->isStrafingLeft();
+            in.strafeRight = cameraController->isStrafingRight();
+            in.falling = !cameraController->isGrounded() && !cameraController->isSwimming();
+            in.enabled = !taxiFlight && !cameraController->isSwimming() &&
+                         !cameraController->isFlyingActive();
+            in.turning = turning;
+            in.activePlayer = true;
+            in.dt = deltaTime;
+            in.catchUpElapsed = bodyFacingClock_ - bodyFacingStamp_;
+            const anim::BodyFacingResult bf = anim::updateBodyFacing(bodyFacing_, in);
+            characterVisualYawDeg_ = glm::degrees(bf.body);
+            float yawRad = bf.body;
+            characterRenderer->setInstanceRotation(characterInstanceId, glm::vec3(0.0f, 0.0f, yawRad));
+            // Mounted, the twist belongs to the mount's model (the unit's
+            // model in the stock client); the rider sits on it untwisted.
+            if (mounted) {
+                characterRenderer->setInstanceTorsoYaw(characterInstanceId, 0.0f, 0.0f);
+                characterRenderer->setInstanceTorsoYaw(animationController_->getMountInstanceId(),
+                                                       bf.spineYaw, bf.headYaw);
+            } else {
+                characterRenderer->setInstanceTorsoYaw(characterInstanceId, bf.spineYaw, bf.headYaw);
+            }
+        }
 
         // Update animation based on movement state (delegated to AnimationController §4.2)
         if (animationController_) {

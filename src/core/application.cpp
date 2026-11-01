@@ -3908,11 +3908,41 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                     yawIt->second += d * (1.0f - std::exp(-std::max(deltaTime, 0.0f) / 0.06f));
                 }
             }
-            float renderYaw = yawIt->second + glm::radians(90.0f);
+            // Drawn body yaw and look twist from that facing and the player's
+            // movement flags, as the stock client does for every unit
+            // (animation/body_facing.hpp): strafing turns the hips and legs
+            // toward travel while spine and head turn back to the facing, the
+            // twist split evenly between them. Nobody else's client stamps the
+            // catch-up time, so out of a strafe the body returns at once.
+            rendering::anim::BodyFacingInput bfIn;
+            bfIn.facing = yawIt->second;
+            {
+                auto dirIt = entitySpawner_->getUnitMoveDirFlags().find(guid);
+                const uint32_t dir = dirIt != entitySpawner_->getUnitMoveDirFlags().end()
+                                         ? dirIt->second : 0u;
+                bfIn.forward = (dir & 0x1u) != 0;
+                bfIn.backward = (dir & 0x2u) != 0;
+                bfIn.strafeLeft = (dir & 0x4u) != 0;
+                bfIn.strafeRight = (dir & 0x8u) != 0;
+                bfIn.falling = (dir & 0x1000u) != 0;
+            }
+            const bool remoteDead = std::static_pointer_cast<game::Unit>(entity)->getHealth() == 0;
+            bfIn.enabled = !remoteDead && !_pCreatureSwimmingState.count(guid) &&
+                           !_pCreatureFlyingState.count(guid);
+            bfIn.activePlayer = false;
+            bfIn.dt = deltaTime;
+            const rendering::anim::BodyFacingResult bf = rendering::anim::updateBodyFacing(
+                entitySpawner_->getUnitBodyFacing()[guid], bfIn);
+            float renderYaw = bf.body + glm::radians(90.0f);
             charRenderer->setInstanceRotation(instanceId, glm::vec3(0.0f, 0.0f, renderYaw));
             if (remoteMount) {
                 charRenderer->setInstanceRotation(remoteMount->instanceId,
                                                   glm::vec3(0.0f, 0.0f, renderYaw));
+                // The twist belongs to the mount's model; the rider sits untwisted.
+                charRenderer->setInstanceTorsoYaw(instanceId, 0.0f, 0.0f);
+                charRenderer->setInstanceTorsoYaw(remoteMount->instanceId, bf.spineYaw, bf.headYaw);
+            } else {
+                charRenderer->setInstanceTorsoYaw(instanceId, bf.spineYaw, bf.headYaw);
             }
         }
     }

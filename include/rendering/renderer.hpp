@@ -13,6 +13,7 @@
 #include <glm/glm.hpp>
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
+#include "rendering/animation/body_facing.hpp"
 #include "rendering/pass_ablation.hpp"
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/vk_utils.hpp"
@@ -214,10 +215,13 @@ public:
     void setCharacterMorphInstance(uint32_t morphInstanceId);
     float getCharacterYaw() const { return characterYaw; }
     void setCharacterYaw(float yawDeg) { characterYaw = yawDeg; }
-    /// The yaw the player model is DRAWN at: the facing plus the eased turn
-    /// toward the direction of travel while strafing. getCharacterYaw stays
-    /// the logical facing (server orientation, melee arcs).
-    float getCharacterVisualYaw() const { return characterYaw + strafeYawOffsetDeg_; }
+    /// The yaw the player model is DRAWN at (degrees): the stock body yaw,
+    /// which springs toward the direction of travel while strafing and lags a
+    /// turn in place (animation/body_facing.hpp). getCharacterYaw stays the
+    /// logical facing (server orientation, melee arcs).
+    float getCharacterVisualYaw() const {
+        return bodyFacing_.initialized ? characterVisualYawDeg_ : characterYaw;
+    }
 
     // Screenshot capture - copies swapchain image to PNG file
     bool captureScreenshot(const std::string& outputPath);
@@ -481,9 +485,14 @@ private:
     /// when the character is drawn as itself.
     uint32_t nativeCharacterInstanceId_ = 0;
     float characterYaw = 0.0f;
-    // Eased yaw the drawn model is turned by while strafing (degrees); see
-    // getCharacterVisualYaw.
-    float strafeYawOffsetDeg_ = 0.0f;
+    // Stock body yaw and look twist of the player model; see
+    // getCharacterVisualYaw. The clock and stamp stand in for unit+0xABC
+    // (the last input-control change while not turning).
+    anim::BodyFacingState bodyFacing_;
+    float characterVisualYawDeg_ = 0.0f;
+    float bodyFacingClock_ = 0.0f;
+    float bodyFacingStamp_ = 0.0f;
+    uint32_t bodyFacingControls_ = 0;
 
     // Where the player was, for shaders that react to them moving through the
     // world. playerWakePos_ chases characterPosition with a fixed time
