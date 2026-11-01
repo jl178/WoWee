@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <map>
 #include <set>
 #include <vector>
@@ -1591,11 +1592,14 @@ static int lua_GetNumTalentTabs(lua_State* L) {
 /// Points staged in the talent preview but not yet learned, defined below with
 /// the functions that change it.
 static std::unordered_map<uint32_t, int>& previewPoints();
+/// Retires staged points the server has since learned; defined with them.
+static void settlePreview(game::GameHandler* gh);
 
 // GetTalentTabInfo(tabIndex) → name, iconTexture, pointsSpent, background
 static int lua_GetTalentTabInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
     int tabIndex = static_cast<int>(luaL_checknumber(L, 1)); // 1-indexed
+    settlePreview(gh);
     if (!gh || tabIndex < 1) {
         return luaReturnNil(L);
     }
@@ -1633,8 +1637,15 @@ static int lua_GetTalentTabInfo(lua_State* L) {
         }
     }
 
+    // The tree's own icon, from TalentTab.dbc's SpellIconID. The talent frame
+    // puts the icon of the spec's primary tree on the spec tab, and a nil here
+    // left that tab with nothing to draw.
+    const std::string icon = tab->spellIconId ? gh->getIconPath(tab->spellIconId)
+                                              : std::string{};
+
     lua_pushstring(L, tab->name.c_str());              // 1: name
-    lua_pushnil(L);                                     // 2: iconTexture (not resolved)
+    if (icon.empty()) lua_pushnil(L);                   // 2: iconTexture
+    else lua_pushstring(L, icon.c_str());
     lua_pushnumber(L, pointsSpent);                     // 3: pointsSpent
     lua_pushstring(L, tab->backgroundFile.c_str());     // 4: background
     lua_pushnumber(L, previewSpent);                    // 5: previewPointsSpent
@@ -1733,6 +1744,7 @@ static int lua_GetTalentInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int tabIndex = static_cast<int>(luaL_checknumber(L, 1));
     const int talentIndex = static_cast<int>(luaL_checknumber(L, 2));
+    settlePreview(gh);
     const bool inspect = lua_toboolean(L, 3) != 0;
     if (wantsPetTalents(L, 4)) {
         for (int i = 0; i < 10; i++) lua_pushnil(L);
@@ -2208,11 +2220,84 @@ static uint32_t resolveTalentId(game::GameHandler* gh, int tabIndex, int talentI
 /// WotLK's talent frame does not spend a point when one is clicked: it adds to
 /// a preview, redraws from the preview, and sends the lot when Learn is
 /// pressed. Without somewhere to hold that, clicking a talent did nothing at
-/// all. Keyed by talent id so it survives a tab change, and cleared whenever
-/// the server confirms what was learned.
+/// all. Keyed by talent id so it survives a tab change, and retired point by
+/// point as the server confirms each rank (see settlePreview).
 static std::unordered_map<uint32_t, int>& previewPoints() {
     static std::unordered_map<uint32_t, int> points;
     return points;
+}
+
+/// Staged points that Learn has already sent, per talent, until the server
+/// answers for them.
+///
+/// Learn used to drop the whole preview the moment it sent the requests. The
+/// answers take a round trip and arrive one rank at a time, and every one of
+/// them redraws the frame - so in between, the talents fell back to their old
+/// ranks, the counter jumped back up to the full unspent total, and the
+/// Learn/Reset bar greyed out, then it all came back rank by rank. That is the
+/// window "disappearing for a second" after Learn. Holding each sent point as
+/// staged until its rank is actually taught keeps the talents and tree totals
+/// steady: learned goes up by exactly what staged comes down by.
+struct CommittedPreview {
+    struct Pending {
+        int targetRank = 0;  // the rank Learn asked for, counted from one
+        int remaining = 0;   // staged points still waiting for their rank
+    };
+    std::unordered_map<uint32_t, Pending> talents;
+    std::chrono::steady_clock::time_point sentAt{};
+    // The rank (SMSG_LEARNED_SPELL) lands a moment before the new unspent
+    // total (SMSG_TALENTS_INFO). Points let go on the rank are still counted
+    // as spent until the total catches up - see unchargedPreviewPoints - or the
+    // "Talent Points" counter ticked up by one and back on every rank.
+    int unspentAtSend = 0;
+    int retiredTotal = 0;
+};
+static CommittedPreview& committedPreview() {
+    static CommittedPreview committed;
+    return committed;
+}
+
+/// Long past any round trip: whatever has not arrived was refused.
+static bool committedPreviewExpired() {
+    return std::chrono::steady_clock::now() - committedPreview().sentAt >
+           std::chrono::seconds(5);
+}
+
+static void settlePreview(game::GameHandler* gh) {
+    auto& committed = committedPreview();
+    if (!gh || committed.talents.empty()) return;
+    // A refused rank goes back to being an ordinary unstaged talent rather
+    // than a point the frame holds for ever.
+    const bool expired = committedPreviewExpired();
+    auto& staged = previewPoints();
+    for (auto it = committed.talents.begin(); it != committed.talents.end();) {
+        auto& pending = it->second;
+        const int have = gh->getTalentRank(it->first);
+        const int stillWaiting =
+            expired ? 0 : std::min(pending.remaining, std::max(0, pending.targetRank - have));
+        const int retire = pending.remaining - stillWaiting;
+        if (retire > 0) {
+            // Only ranks actually taught are waiting to be charged.
+            if (!expired) committed.retiredTotal += retire;
+            pending.remaining = stillWaiting;
+            auto s = staged.find(it->first);
+            if (s != staged.end()) {
+                s->second -= retire;
+                if (s->second <= 0) staged.erase(s);
+            }
+        }
+        if (pending.remaining == 0) it = committed.talents.erase(it);
+        else ++it;
+    }
+}
+
+/// Points already taught by the server but not yet taken off its unspent total.
+static int unchargedPreviewPoints(game::GameHandler* gh) {
+    auto& committed = committedPreview();
+    if (!gh || committed.retiredTotal <= 0 || committedPreviewExpired()) return 0;
+    const int unspentNow = gh->getUnspentTalentPoints(gh->getActiveTalentSpec());
+    const int charged = std::max(0, committed.unspentAtSend - unspentNow);
+    return std::max(0, committed.retiredTotal - charged);
 }
 
 // AddPreviewTalentPoints(tabIndex, talentIndex, delta, pet, group)
@@ -2224,6 +2309,7 @@ static int lua_AddPreviewTalentPoints(lua_State* L) {
     // The pet tree again: staging a preview point there resolved against the
     // player's trees, and LearnPreviewTalents would then have spent it.
     if (wantsPetTalents(L, 4)) return 0;
+    settlePreview(gh);
     const uint32_t id = resolveTalentId(gh, tab, index);
     if (!gh || id == 0) return 0;
 
@@ -2250,11 +2336,19 @@ static int lua_AddPreviewTalentPoints(lua_State* L) {
     if (delta > 0) {
         int stagedTotal = 0;
         for (const auto& [tid, n] : previewPoints()) { (void)tid; stagedTotal += n; }
+        stagedTotal += unchargedPreviewPoints(gh);
         const int unspent =
             gh->getUnspentTalentPoints(gh->getActiveTalentSpec()) - stagedTotal;
         upper = std::min(upper, staged + std::max(0, unspent));
     }
-    const int wanted = std::clamp(staged + delta, 0, std::max(0, upper));
+    // Not below what Learn has already sent for it: those ranks are on their
+    // way, and taking them back here would not stop the server teaching them.
+    int lower = 0;
+    if (const auto c = committedPreview().talents.find(id);
+        c != committedPreview().talents.end()) {
+        lower = c->second.remaining;
+    }
+    const int wanted = std::clamp(staged + delta, lower, std::max(lower, upper));
     staged = wanted;
     if (staged == 0) previewPoints().erase(id);
     // What makes a staged point appear: the talent frame refreshes on this
@@ -2274,6 +2368,7 @@ static int lua_GetTalentPrereqs(lua_State* L) {
     const int tabIndex = static_cast<int>(luaL_checknumber(L, 1));
     const int talentIndex = static_cast<int>(luaL_checknumber(L, 2));
     if (wantsPetTalents(L, 4)) return 0;
+    settlePreview(gh);
     const auto* talent = talentAt(gh, tabIndex, talentIndex);
     if (!talent) return 0;
 
@@ -2302,8 +2397,14 @@ static int lua_GetTalentPrereqs(lua_State* L) {
 
 // GetGroupPreviewTalentPointsSpent(pet, group) → points staged
 static int lua_GetGroupPreviewTalentPointsSpent(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    settlePreview(gh);
     int total = 0;
     for (const auto& [id, n] : previewPoints()) { (void)id; total += n; }
+    // Plus points a Learn has had taught but the server has not yet taken off
+    // the unspent total: the frame shows unspent minus this, and that line
+    // should not step up and back down between the two packets.
+    total += unchargedPreviewPoints(gh);
     lua_pushnumber(L, total);
     return 1;
 }
@@ -2311,6 +2412,10 @@ static int lua_GetGroupPreviewTalentPointsSpent(lua_State* L) {
 // ResetGroupPreviewTalentPoints(pet, group)
 static int lua_ResetGroupPreviewTalentPoints(lua_State* L) {
     previewPoints().clear();
+    // Ranks already sent still arrive and show as learned when they do; there
+    // is nothing left to hold for them.
+    committedPreview().talents.clear();
+    committedPreview().retiredTotal = 0;
     // The frame redraws on this and on nothing else, so clearing the staged
     // points without it leaves them on screen after they are gone.
     if (auto* gh = getGameHandler(L)) {
@@ -2323,16 +2428,96 @@ static int lua_ResetGroupPreviewTalentPoints(lua_State* L) {
 static int lua_LearnPreviewTalents(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) return 0;
-    // A copy, because learnTalent goes to the server and what comes back
-    // clears this map - iterating it while that happens is not safe.
-    const auto staged = previewPoints();
-    for (const auto& [id, n] : staged) {
-        const uint8_t have = gh->getTalentRank(id);
+    if (wantsPetTalents(L, 1)) return 0;
+    settlePreview(gh);
+    auto& committed = committedPreview();
+    // A fresh baseline unless an earlier Learn is still being answered: its
+    // count of taught-but-uncharged points is measured from its own baseline.
+    if (committed.talents.empty() && unchargedPreviewPoints(gh) == 0) {
+        committed.unspentAtSend = gh->getUnspentTalentPoints(gh->getActiveTalentSpec());
+        committed.retiredTotal = 0;
+    }
+
+    // What still has to be sent for each staged talent: the ranks above what
+    // is learned and above what an earlier Learn already has on its way.
+    struct Send {
+        const game::GameHandler::TalentEntry* talent;
+        int fromRank;   // first rank to request, counted from one
+        int toRank;     // last rank to request
+        int staged;     // the talent's whole staged count, all of it now sent
+    };
+    std::vector<Send> sends;
+    for (const auto& [id, n] : previewPoints()) {
+        const auto* talent = gh->getTalentEntry(id);
+        if (!talent || n <= 0) continue;
+        const int have = gh->getTalentRank(id);
+        // An earlier Learn's ranks still on their way are part of the staged
+        // count (settlePreview has already let go of the ones taught), and
+        // are not asked for twice.
+        int alreadyAsked = have;
+        if (const auto c = committed.talents.find(id); c != committed.talents.end()) {
+            alreadyAsked = std::max(have, c->second.targetRank);
+        }
+        const int fromRank = alreadyAsked + 1;
+        const int toRank = have + n;
+        if (fromRank <= toRank) sends.push_back({talent, fromRank, toRank, n});
+    }
+
+    // In the order the tree unlocks, which is the order the server checks.
+    //
+    // AzerothCore handles each request on its own against the talents already
+    // learned: a talent in tier N needs N*5 points in its tree, and one with a
+    // prerequisite needs that prerequisite's rank. The staged points came out
+    // of a hash map, so a deep talent was routinely asked for before the tier
+    // points beneath it - and refused, silently, with the server answering the
+    // unchanged talents. A Learn of eleven points would teach the shallow ones
+    // and quietly drop the rest. Tier by tier, then column, and never before a
+    // staged prerequisite (a prerequisite can sit in the same tier).
+    std::sort(sends.begin(), sends.end(), [](const Send& a, const Send& b) {
+        if (a.talent->row != b.talent->row) return a.talent->row < b.talent->row;
+        if (a.talent->column != b.talent->column) return a.talent->column < b.talent->column;
+        return a.talent->talentId < b.talent->talentId;
+    });
+    std::vector<Send> ordered;
+    ordered.reserve(sends.size());
+    std::vector<bool> done(sends.size(), false);
+    const auto waitsOnPrereq = [&](const Send& s) {
+        for (uint32_t prereqId : s.talent->prereqTalent) {
+            if (prereqId == 0) continue;
+            for (size_t j = 0; j < sends.size(); ++j) {
+                if (!done[j] && sends[j].talent->talentId == prereqId) return true;
+            }
+        }
+        return false;
+    };
+    while (ordered.size() < sends.size()) {
+        size_t pick = sends.size();
+        for (size_t i = 0; i < sends.size(); ++i) {
+            if (!done[i] && !waitsOnPrereq(sends[i])) { pick = i; break; }
+        }
+        // A prerequisite loop cannot come out of the DBC; if one did, sending
+        // in tier order is still the best guess.
+        if (pick == sends.size()) {
+            for (size_t i = 0; i < sends.size(); ++i) {
+                if (!done[i]) { pick = i; break; }
+            }
+        }
+        done[pick] = true;
+        ordered.push_back(sends[pick]);
+    }
+
+    for (const Send& s : ordered) {
         // One request per rank: the server counts them, and asking for the
         // final rank in one call is not how the protocol reads it.
-        for (int r = 1; r <= n; ++r) gh->learnTalent(id, have + r);
+        for (int r = s.fromRank; r <= s.toRank; ++r) {
+            gh->learnTalent(s.talent->talentId, static_cast<uint32_t>(r));
+        }
+        // Held as staged until the server teaches them - see CommittedPreview.
+        auto& pending = committed.talents[s.talent->talentId];
+        pending.targetRank = s.toRank;
+        pending.remaining = s.staged;
     }
-    previewPoints().clear();
+    if (!ordered.empty()) committed.sentAt = std::chrono::steady_clock::now();
     return 0;
 }
 
@@ -2376,6 +2561,17 @@ static int lua_GetUnspentTalentPoints(lua_State* L) {
 // GetNumTalentGroups(inspect, pet) → how many specs the player has
 static int lua_GetNumTalentGroups(lua_State* L) {
     auto* gh = getGameHandler(L);
+    // The pet's groups. Pet talents are not modelled here - every other talent
+    // binding answers nothing for the pet tree - and the count has to agree
+    // with them: answering the player's 1 for the pet made the talent frame
+    // build a "petspec1" tab for every class, so two spec tabs stood on the
+    // frame's right edge (read as dual spec), each drawn with a portrait
+    // because one group means "show the unit's face". Zero is what the client
+    // answers with no talented pet, and it hides that tab.
+    if (wantsPetTalents(L, 2)) {
+        lua_pushnumber(L, 0);
+        return 1;
+    }
     // Two only once the second is actually bought: the frame draws a spec tab
     // per group, and reporting two unconditionally offers one that is not there.
     int groups = 1;
@@ -2388,8 +2584,9 @@ static int lua_GetNumTalentGroups(lua_State* L) {
         lua_pushnumber(L, groups);
         return 1;
     }
-    if (gh && gh->getUnspentTalentPoints(1) > 0) groups = 2;
-    if (gh && !gh->getLearnedTalents(1).empty()) groups = 2;
+    // The server's count from SMSG_TALENTS_INFO, not a guess from what the
+    // second slot happens to hold.
+    if (gh) groups = std::clamp<int>(gh->getNumTalentGroups(), 1, 2);
     lua_pushnumber(L, groups);
     return 1;
 }

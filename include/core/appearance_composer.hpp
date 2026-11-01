@@ -25,13 +25,22 @@ class EntitySpawner;
 /// UINT32_MAX when the item has nowhere to go (hidden). Shared by the local
 /// character, other players and creatures.
 uint32_t weaponAttachment(bool sheathed, game::EquipSlot slot, uint8_t inventoryType);
-/// The offset that lays a put-away weapon along the back.
+/// The model's sheath point for a put-away item, from its Item.dbc
+/// SheatheType (UINT32_MAX when there is no row: by inventory type):
+/// two-handers 26/27, staves and polearms 30/31, shields 28, one-handers
+/// 32/33. These points carry the sheathed orientation themselves, so the
+/// item goes on with an identity transform. UINT32_MAX = not shown.
+uint32_t sheathedAttachment(uint32_t sheatheType, game::EquipSlot slot, uint8_t inventoryType);
+/// Where a put-away bow, gun or crossbow goes.
+uint32_t rangedSheathAttachment();
+/// A back sheath point some models (creatures) lack: callers retry on the
+/// plain Back point (12) with weaponLocalTransform's back layout.
+bool isLegacyBackFallbackPoint(uint32_t attachmentId);
+/// The offset that lays a weapon along the plain Back point (12), for a
+/// model without the sheath points only.
 glm::mat4 weaponLocalTransform(bool sheathed, game::EquipSlot slot, uint8_t inventoryType);
-/// The inventory type to put an item away as, from its Item.dbc SheatheType
-/// (UINT32_MAX when there is no row: the item's own inventory type).
-uint8_t sheathPlacementInvType(uint32_t sheatheType, uint8_t inventoryType);
 /// Where a put-away item sits, as the sheath reach needs it (hip or back).
-rendering::SheathSpot sheathSpotFor(game::EquipSlot slot, uint8_t placementInvType);
+rendering::SheathSpot sheathSpotFor(uint32_t sheathedAttachmentId);
 
 /// Resolved texture paths from CharSections.dbc for player character compositing.
 struct PlayerTextureInfo {

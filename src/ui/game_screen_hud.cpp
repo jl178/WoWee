@@ -87,7 +87,8 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
     auto* renderer = app.getRenderer();
     if (!renderer) return;
 
-    uint32_t instanceId = renderer->getCharacterInstanceId();
+    // The character's own model, also while a form is drawn in its place.
+    uint32_t instanceId = renderer->getNativeCharacterInstanceId();
     if (instanceId == 0) return;
 
     auto* charRenderer = renderer->getCharacterRenderer();
@@ -437,7 +438,7 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
     // Clear composite cache first to prevent stale textures from being reused
     charRenderer->clearCompositeCache();
     // Use per-instance texture override (not model-level) to avoid deleting cached composites.
-    uint32_t instanceId = renderer->getCharacterInstanceId();
+    uint32_t instanceId = renderer->getNativeCharacterInstanceId();
     auto* newTex = charRenderer->compositeWithRegions(bodySkinPath, underwearPaths, regionLayers);
     if (newTex != nullptr && instanceId != 0) {
         charRenderer->setTextureSlotOverride(instanceId, static_cast<uint16_t>(skinSlot), newTex);

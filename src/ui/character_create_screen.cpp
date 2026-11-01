@@ -1165,7 +1165,9 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
         if (!modalUp && !rotatingLeft_ && !rotatingRight_ &&
             ImGui::IsMouseDragging(ImGuiMouseButton_Left) && from.x > fx + fw && from.x < rightX &&
             from.y < screen.y - 100.0f * u) {
-            preview_->rotate(io.MouseDelta.x * 0.4f);
+            // CharacterCreateFrame_OnUpdate: cursor x in 768-tall glue units
+            // times CHARACTER_ROTATION_CONSTANT (0.6), in degrees.
+            preview_->rotate(io.MouseDelta.x / u * 0.6f);
         }
     }
 

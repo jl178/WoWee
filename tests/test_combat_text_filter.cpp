@@ -77,3 +77,30 @@ TEST_CASE("lines these six rows do not describe are left alone", "[combattext]")
     CHECK(ruleFor(T::ENERGIZE, true, kPlayer, kPlayer).cvar == nullptr);
     CHECK(ruleFor(T::MISS, true, kPlayer, kTarget).cvar == nullptr);
 }
+
+// COMBAT_TEXT_UPDATE: one message per hit, in Blizzard_CombatText's terms.
+TEST_CASE("a hit on the player is one COMBAT_TEXT_UPDATE message", "[combattext]") {
+    using V = std::vector<std::string>;
+    CHECK(combatTextUpdateForHit(false, false, 120, 0, 0, 0) == V{"DAMAGE", "120"});
+    CHECK(combatTextUpdateForHit(true, false, 300, 0, 0, 0) == V{"SPELL_DAMAGE", "300"});
+    CHECK(combatTextUpdateForHit(false, true, 500, 0, 40, 0) == V{"DAMAGE_CRIT", "500"});
+    CHECK(combatTextUpdateForHit(true, true, 900, 0, 0, 0) == V{"SPELL_DAMAGE_CRIT", "900"});
+    // A partial reduction is the damage tagged with what was taken off.
+    CHECK(combatTextUpdateForHit(true, false, 600, 200, 0, 0) == V{"SPELL_RESIST", "600", "200"});
+    CHECK(combatTextUpdateForHit(false, false, 80, 0, 30, 0) == V{"BLOCK", "80", "30"});
+    CHECK(combatTextUpdateForHit(false, false, 50, 0, 0, 25) == V{"ABSORB", "50", "25"});
+    // A whole one is the bare word, which the addon prints from GlobalStrings.
+    CHECK(combatTextUpdateForHit(false, false, 0, 0, 0, 400) == V{"ABSORB"});
+    CHECK(combatTextUpdateForHit(true, false, 0, 350, 0, 0) == V{"SPELL_RESIST"});
+    // Nothing at all is nothing to say.
+    CHECK(combatTextUpdateForHit(false, false, 0, 0, 0, 0).empty());
+}
+
+TEST_CASE("spell misses and power tokens use the addon's names", "[combattext]") {
+    CHECK(std::string(combatTextSpellMissType(T::RESIST)) == "SPELL_RESIST");
+    CHECK(std::string(combatTextSpellMissType(T::REFLECT)) == "SPELL_REFLECT");
+    CHECK(combatTextSpellMissType(T::MELEE_DAMAGE) == nullptr);
+    CHECK(std::string(combatTextPowerToken(0)) == "MANA");
+    CHECK(std::string(combatTextPowerToken(6)) == "RUNIC_POWER");
+    CHECK(combatTextPowerToken(4) == nullptr);
+}

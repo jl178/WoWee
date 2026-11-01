@@ -384,17 +384,41 @@ void WidgetTree::setWidth(uint32_t id, float width) {
     // zero, because it has already been measured once and its text has not
     // changed since.
     if (width <= 0.0f && w->kind == WidgetKind::FontString) {
+        // Already exactly as wide as the text it holds now: there is nothing
+        // to undo, and undoing it anyway is a visible flicker.
+        //
+        // The frame's layout runs before FrameXML's clicks, events and
+        // OnUpdates, and the draw after them, so whatever a handler leaves in
+        // a rect is what gets drawn this frame. PanelTemplates_TabResize ends
+        // every tab with tabText:SetWidth(0), and the talent frame resizes
+        // its tabs on every refresh - every talent point clicked. Zeroing
+        // here put each tab label at no width until the next frame measured
+        // it again, so the tree names along the bottom of the talent window
+        // jumped on every click, and every other tabbed panel did the same
+        // whenever it refreshed.
+        if (w->autoSized && !w->wrapsToWidth && !w->measuredText.empty() &&
+            w->measuredText == w->text && w->width == w->measuredWidth) {
+            return;
+        }
         w->autoSized = false;
         w->measuredText.clear();
         // And it is no longer a paragraph: there is no width left to wrap
         // inside, which is the whole of what that meant.
         w->wrapsToWidth = false;
+        w->width = width;
+        // No provisional zero rect. It would be drawn this frame as a label
+        // with no width, which is no label at all; the old rect is the better
+        // stand-in until the next measure, and a read in the meantime
+        // re-solves the widget and measures the text instead (GetWidth).
+        return;
     }
     w->width = width;
     // Provisional, so a read before the next layout sees what was just set.
     // The layout overwrites it from the anchors, which is the final answer
-    // where anchors decide the size.
-    w->rectW = width;
+    // where anchors decide the size. In laid-out units - the rect carries the
+    // effective scale, and GetWidth divides it back out - so a scaled frame
+    // is not drawn at the wrong size for the frame in between.
+    w->rectW = width * (w->effScale > 0.0f ? w->effScale : 1.0f);
 }
 
 void WidgetTree::setHeight(uint32_t id, float height) {
@@ -419,9 +443,15 @@ void WidgetTree::setHeight(uint32_t id, float height) {
     // re-measured and did appear, which is what made it look intermittent.
     if (height <= 0.0f && w->kind == WidgetKind::FontString) {
         w->measuredText.clear();
+        w->height = height;
+        // No provisional zero, for the reason setWidth gives: the draw runs
+        // after the interface's handlers and before the next measure, and a
+        // label with no height is dropped from it - the tracker's lines
+        // blinked out for a frame on every rebuild.
+        return;
     }
     w->height = height;
-    w->rectH = height;
+    w->rectH = height * (w->effScale > 0.0f ? w->effScale : 1.0f);
 }
 
 void WidgetTree::pinToCurrentPosition(uint32_t id) {

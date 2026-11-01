@@ -2142,6 +2142,22 @@ void CharacterRenderer::playDeath(uint32_t instanceId, bool alreadyDead) {
         // Neither: whatever playAnimation's fallback makes of Death, held.
         playAnimation(instanceId, anim::DEATH, /*loop=*/false);
     }
+    // A death seen happening (not a corpse coming into view): the unit's
+    // death cry, which the stock client plays as the Death animation starts.
+    if (!alreadyDead && animSoundEventCallback_)
+        animSoundEventCallback_(instanceId, anim::DEATH, kAnimEventDeathStart, 0, inst.position);
+}
+
+bool CharacterRenderer::currentAnimHasEvent(uint32_t instanceId, uint32_t eventTag) const {
+    auto it = instances.find(instanceId);
+    if (it == instances.end() || !it->second.cachedModel) return false;
+    const auto& inst = it->second;
+    const auto& events = inst.cachedModel->data.soundEvents;
+    if (inst.currentSequenceIndex < 0 || inst.currentSequenceIndex >= static_cast<int>(events.size()))
+        return false;
+    for (const auto& ev : events[inst.currentSequenceIndex])
+        if (ev.tag == eventTag) return true;
+    return false;
 }
 
 void CharacterRenderer::clearDeath(uint32_t instanceId) {
@@ -2233,22 +2249,40 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
             const float prevAnimTime = inst.animationTime;
             inst.animationTime += deltaTime * 1000.0f;
 
-            // $CSD sound events whose timestamps the sequence just passed:
+            // Sound events ($CSD, $CSS, $CAH, $AHn, $FDn, $WNG) and $FSD
+            // footfalls whose timestamps the sequence just passed:
             // [prev, now), split at the loop point, and a one-shot's events
             // up to and including its last frame. Fired before the wrap below,
-            // which may switch the instance to its resume animation.
+            // which may switch the instance to its resume animation. Every
+            // unit's, so every unit in view steps, fidgets and swings aloud.
             const auto& soundEvents = inst.cachedModel->data.soundEvents;
-            if (animSoundEventCallback_ &&
-                inst.currentSequenceIndex < static_cast<int>(soundEvents.size()) &&
-                !soundEvents[inst.currentSequenceIndex].empty()) {
+            const auto& footfalls = inst.cachedModel->data.footstepEventTimes;
+            const int seqIdx = inst.currentSequenceIndex;
+            const bool haveSoundEvents = seqIdx < static_cast<int>(soundEvents.size()) &&
+                                         !soundEvents[seqIdx].empty();
+            const bool haveFootfalls = seqIdx < static_cast<int>(footfalls.size()) &&
+                                       !footfalls[seqIdx].empty();
+            if (animSoundEventCallback_ && (haveSoundEvents || haveFootfalls)) {
                 const float dur = static_cast<float>(seq.duration);
                 const float now = inst.animationTime;
+                static constexpr uint32_t kFootfallTag = pipeline::m2EventTag("$FSD");
                 auto fireRange = [&](float from, float to, bool inclusiveEnd) {
-                    for (const auto& ev : soundEvents[inst.currentSequenceIndex]) {
-                        const float t = static_cast<float>(ev.timeMs);
-                        if (t >= from && (t < to || (inclusiveEnd && t <= to))) {
-                            animSoundEventCallback_(pair.first, inst.currentAnimationId,
-                                                    ev.soundEntryId, inst.position);
+                    auto passed = [&](uint32_t timeMs) {
+                        const float t = static_cast<float>(timeMs);
+                        return t >= from && (t < to || (inclusiveEnd && t <= to));
+                    };
+                    if (haveSoundEvents) {
+                        for (const auto& ev : soundEvents[seqIdx]) {
+                            if (passed(ev.timeMs))
+                                animSoundEventCallback_(pair.first, inst.currentAnimationId, ev.tag,
+                                                        ev.soundEntryId, inst.position);
+                        }
+                    }
+                    if (haveFootfalls) {
+                        for (uint32_t timeMs : footfalls[seqIdx]) {
+                            if (passed(timeMs))
+                                animSoundEventCallback_(pair.first, inst.currentAnimationId, kFootfallTag,
+                                                        0, inst.position);
                         }
                     }
                 };
@@ -3163,7 +3197,9 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // For body/equipment parts with white/fallback texture, use skin (type 1) texture.
                 if (texPtr == whiteTexture_.get() && !instance.isSceneModel) {
                     uint16_t group = batchGroup;
-                    bool isSkinGroup = (group == 0 || group == 3 || group == 4 || group == 5 ||
+                    // 1 and 2 (beard, moustache, chin) and 7 (ears) sample the
+                    // body atlas as much as 3 does.
+                    bool isSkinGroup = (group <= 5 || group == 7 ||
                                         group == 8 || group == 9 || group == 13);
                     if (isSkinGroup) {
                         uint32_t texType = 0;
@@ -3897,22 +3933,21 @@ VkTexture* CharacterRenderer::resolveBatchTexture(const CharacterInstance& inst,
 
                 VkTexture* texPtr = gm.textureIds[texSlot];
                 uint32_t texType = (texSlot < gm.data.textures.size()) ? gm.data.textures[texSlot].type : 0;
-                // Apply texture slot overrides.
-                // For type-1 (skin) overrides, only apply to skin-group batches
-                // to prevent the skin composite from bleeding onto cloak/hair.
+                // Apply texture slot overrides, whatever geoset group the batch
+                // is in. A batch that names the type-1 slot samples the body
+                // atlas by definition - cloaks bind type 2 and hair type 6, so
+                // they never reach the skin override. This used to be limited
+                // to a list of "skin groups" that left out 1 and 2 (beard,
+                // moustache, bare chin), 7 (ears), 10, 11, 12 and 18. On every
+                // instance textured by override - other players and NPCs, whose
+                // shared model's own type-1 slot is empty - those batches drew
+                // the white texture: a white beard on a human male with
+                // facial style 3 (102/202), where the local player, textured
+                // through the model slot instead, looked right.
                 {
                     auto itO = inst.textureSlotOverrides.find(texSlot);
                     if (itO != inst.textureSlotOverrides.end() && itO->second != nullptr) {
-                        if (texType == 1) {
-                            // Only apply skin override to skin groups
-                            uint16_t grp = b.submeshId / 100;
-                            bool isSkinGroup = (grp == 0 || grp == 3 || grp == 4 || grp == 5 ||
-                                                grp == 8 || grp == 9 || grp == 13 || grp == 15 ||
-                                                grp == 20);
-                            if (isSkinGroup) texPtr = itO->second;
-                        } else {
-                            texPtr = itO->second;
-                        }
+                        texPtr = itO->second;
                     }
                 }
 

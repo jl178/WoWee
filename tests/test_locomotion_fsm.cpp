@@ -287,3 +287,53 @@ TEST_CASE("LocomotionFSM: landing still plays JumpEnd through", "[locomotion]") 
     REQUIRE(out.animId == anim::STAND);
     CHECK(fsm.getState() == LocomotionFSM::State::IDLE);
 }
+
+TEST_CASE("LocomotionFSM: jumping during the landing restarts JumpStart", "[locomotion]") {
+    LocomotionFSM fsm;
+    auto caps = makeFullAirCaps();
+    auto in = idle();
+    in.moving = true;
+    in.sprinting = true;
+    in.grounded = false;
+    in.jumping = true;
+    fsm.resolve(in, caps);
+    in.jumping = false;
+    in.grounded = true;
+    in.haveAnimState = true;
+    in.currentAnimId = anim::JUMP_START;
+    in.currentAnimDuration = 0.5f;
+    in.currentAnimTime = 0.5f;
+    fsm.resolve(in, caps);
+    REQUIRE(fsm.getState() == LocomotionFSM::State::JUMP_END);
+    // Mid-landing, off the ground again on a new jump.
+    in.currentAnimId = anim::JUMP_LAND_RUN;
+    in.currentAnimDuration = 0.4f;
+    in.currentAnimTime = 0.1f;
+    in.grounded = false;
+    in.jumping = true;
+    auto out = fsm.resolve(in, caps);
+    REQUIRE(out.animId == anim::JUMP_START);
+    CHECK(fsm.getState() == LocomotionFSM::State::JUMP_START);
+}
+
+TEST_CASE("LocomotionFSM: a new jump seen without its landing restarts JumpStart", "[locomotion]") {
+    LocomotionFSM fsm;
+    auto caps = makeFullAirCaps();
+    auto in = idle();
+    in.grounded = false;
+    in.jumping = true;
+    fsm.resolve(in, caps);
+    in.jumping = false;
+    in.haveAnimState = true;
+    in.currentAnimId = anim::JUMP_START;
+    in.currentAnimDuration = 0.5f;
+    in.currentAnimTime = 0.5f;
+    fsm.resolve(in, caps);
+    REQUIRE(fsm.getState() == LocomotionFSM::State::JUMP_MID);
+    // Landed and jumped between two updates: rising again, never grounded.
+    in.currentAnimId = anim::JUMP;
+    in.jumping = true;
+    auto out = fsm.resolve(in, caps);
+    REQUIRE(out.animId == anim::JUMP_START);
+    CHECK(fsm.getState() == LocomotionFSM::State::JUMP_START);
+}

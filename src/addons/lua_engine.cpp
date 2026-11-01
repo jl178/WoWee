@@ -1390,18 +1390,42 @@ int lua_Button_SetButtonState(lua_State* L) {
     auto* w = widgetOf(L, 1);
     if (!w) return 0;
     const std::string state = luaL_optstring(L, 2, "NORMAL");
+    const bool lock = lua_toboolean(L, 3) != 0;
     using F = wowee::ui::Widget::Forced;
     if      (state == "PUSHED")   w->forcedState = F::Pushed;
     else if (state == "DISABLED") w->forcedState = F::Disabled;
-    else                          w->forcedState = F::Normal;
+    // An unlocked NORMAL hands the button back to the mouse rather than pinning
+    // it up: UpdateMicroButtons says SetButtonState("NORMAL") for every closed
+    // panel on every update, and pinning that meant a micro button never
+    // showed (or reported) its pushed state while held.
+    else if (lock)                w->forcedState = F::Normal;
+    else                          w->forcedState = F::None;
     return 0;
 }
+/// GetButtonState answers what the button is doing now, not only what the
+/// interface forced on it. Model_OnUpdate (UIParent.lua) spins the character
+/// model while CharacterModelFrameRotateLeft/RightButton report "PUSHED";
+/// answering only the forced state said "NORMAL" while the mouse was held, so
+/// the model turned 0.03 rad per press/release (the OnClick nudge) and holding
+/// the arrow did nothing.
 int lua_Button_GetButtonState(lua_State* L) {
     const auto* w = widgetOf(L, 1);
     using F = wowee::ui::Widget::Forced;
     const F f = w ? w->forcedState : F::None;
-    lua_pushstring(L, f == F::Pushed ? "PUSHED"
-                    : f == F::Disabled ? "DISABLED" : "NORMAL");
+    const char* state = "NORMAL";
+    if (f == F::Pushed) {
+        state = "PUSHED";
+    } else if (f == F::Disabled || (w && !w->enabled)) {
+        state = "DISABLED";
+    } else if (f == F::None && w) {
+        // The frame the left button went down on and is still held over -
+        // the same answer the tree uses to draw the pushed texture.
+        if (auto* tree = wowee::addons::getWidgetTree(L);
+            tree && tree->pressedWidget() == w->id) {
+            state = "PUSHED";
+        }
+    }
+    lua_pushstring(L, state);
     return 1;
 }
 int lua_Button_LockHighlight(lua_State* L) {
@@ -3277,14 +3301,15 @@ int lua_Region_GetNumPoints(lua_State* L) {
     return 1;
 }
 
-// Minimap zoom. Five levels, as in WoW, and the level is kept on the widget so
-// the buttons that step it can read back what they set - Minimap_Update
-// compares GetZoom() against GetZoomLevels() - 1 to decide whether to grey the
-// zoom-in button out, and nil there is arithmetic on nothing.
+// Minimap zoom. Six levels, 0 to 5, as in WoW (GetZoomLevels() is 6), and the
+// level is kept on the widget so the buttons that step it can read back what
+// they set - Minimap_Update compares GetZoom() against GetZoomLevels() - 1 to
+// decide whether to grey the zoom-in button out, and nil there is arithmetic
+// on nothing.
 int lua_Minimap_SetZoom(lua_State* L) {
     if (auto* w = widgetOf(L, 1)) {
         int z = static_cast<int>(luaL_optnumber(L, 2, 0));
-        w->zoomLevel = (z < 0) ? 0 : (z > 4 ? 4 : z);
+        w->zoomLevel = (z < 0) ? 0 : (z > 5 ? 5 : z);
         // And kept, because the player set it by using the map rather than by
         // setting a setting, and it was gone at every start: the ring came back
         // at its widest however far in it had been left. Written to the CVar
@@ -3307,7 +3332,7 @@ int lua_Minimap_GetZoom(lua_State* L) {
 }
 int lua_Minimap_GetZoomLevels(lua_State* L) {
     (void)L;
-    lua_pushnumber(L, 5);
+    lua_pushnumber(L, 6);
     return 1;
 }
 /// Minimap_OnClick's whole body: a click inside the circle pings that spot for
@@ -8057,16 +8082,62 @@ void LuaEngine::registerCoreAPI() {
         "function __WoweeFrameMT:GetUnit() return nil end\n"
         // NumLines and GetText come from the widget itself, which is where
         // the lines now live.
-        "function __WoweeFrameMT:SetUnitBuff(unit, index, filter)\n"
-        "    self:ClearLines()\n"
-        "    local name, rank, icon, count, debuffType, duration, expTime, caster, steal, consolidate, spellId = UnitBuff(unit, index, filter)\n"
-        "    if name then\n"
-        "        self:SetText(name, 1, 1, 1)\n"
-        "        if duration and duration > 0 then\n"
-        "            self:AddLine(string.format('%.0f sec remaining', expTime - GetTime()), 1, 1, 1)\n"
-        "        end\n"
-        "        self.__spellId = spellId\n"
+        // The aura tooltip, as the real client fills it in C for all four of
+        // SetUnitAura, SetUnitBuff, SetUnitDebuff and SetPlayerBuff: the name,
+        // with the dispel type on the right of the same line; then the aura's
+        // own text, Spell.dbc's ToolTip column with its $-tokens filled in; then
+        // the time left in GlobalStrings' SPELL_TIME_REMAINING_* words. No
+        // stacks line - the count is on the icon - and no "N sec remaining"
+        // for a thirty-minute buff.
+        //
+        // The thresholds and rounding are SecondsToTimeAbbrev's: a unit is used
+        // from one whole of it upward and the count rounds up, so a buff with
+        // 29:10 left says 30 minutes. The |4singular:plural; escape is resolved
+        // here because tooltip lines are drawn as given.
+        "function __WoweeAuraTimeLeftText(t)\n"
+        "    local fmt, n\n"
+        "    if t >= 86400 then fmt, n = SPELL_TIME_REMAINING_DAYS or '%d |4day:days; remaining', math.ceil(t / 86400)\n"
+        "    elseif t >= 3600 then fmt, n = SPELL_TIME_REMAINING_HOURS or '%d |4hour:hours; remaining', math.ceil(t / 3600)\n"
+        "    elseif t >= 60 then fmt, n = SPELL_TIME_REMAINING_MIN or '%d |4minute:minutes; remaining', math.ceil(t / 60)\n"
+        "    else fmt, n = SPELL_TIME_REMAINING_SEC or '%d |4second:seconds; remaining', math.ceil(t) end\n"
+        "    if n < 1 then n = 1 end\n"
+        "    local s = string.format(fmt, n)\n"
+        "    s = string.gsub(s, '|4([^:;]*):([^;]*);', function(one, many)\n"
+        "        if n == 1 then return one end\n"
+        "        return many\n"
+        "    end)\n"
+        "    return s\n"
+        "end\n"
+        "function __WoweeFillAuraTooltip(tip, name, debuffType, spellId, timeLeft)\n"
+        "    tip:ClearLines()\n"
+        "    if not name then return end\n"
+        "    if debuffType and debuffType ~= '' then\n"
+        "        tip:AddDoubleLine(name, debuffType, 1, 1, 1, 1, 1, 1)\n"
+        "    else\n"
+        "        tip:SetText(name, 1, 1, 1)\n"
         "    end\n"
+        "    local desc = spellId and __WoweeAuraDescription and __WoweeAuraDescription(spellId)\n"
+        "    if desc and desc ~= '' then tip:AddLine(desc, 1, 0.82, 0, 1) end\n"
+        "    if timeLeft and timeLeft > 0 then\n"
+        "        tip:AddLine(__WoweeAuraTimeLeftText(timeLeft), 1, 0.82, 0)\n"
+        "    end\n"
+        "    tip.__spellId = spellId\n"
+        "end\n"
+        "function __WoweeFrameMT:SetUnitBuff(unit, index, filter)\n"
+        // HELPFUL is what makes UnitAura count buffs; a caller's own filter
+        // ('PLAYER', 'RAID') keeps it rather than replacing it.
+        "    if filter and filter ~= '' then\n"
+        "        if not string.find(filter, 'HELPFUL') then filter = filter .. '|HELPFUL' end\n"
+        "    else\n"
+        "        filter = 'HELPFUL'\n"
+        "    end\n"
+        "    return self:SetUnitAura(unit, index, filter)\n"
+        "end\n"
+        // The 1.12 spelling, by slot rather than by index: the slot is what
+        // GetPlayerBuff handed the buff frame, and it hands it straight back.
+        "function __WoweeFrameMT:SetPlayerBuff(slot)\n"
+        "    local name, debuffType, spellId, timeLeft = __WoweePlayerBuffInfo(slot)\n"
+        "    return __WoweeFillAuraTooltip(self, name, debuffType, spellId, timeLeft)\n"
         "end\n"
         // The one the buff frame actually calls. SetUnitBuff and
         // SetUnitDebuff were written and this was left in the no-op
@@ -8135,11 +8206,14 @@ void LuaEngine::registerCoreAPI() {
         // whichever side owns it.
         "function __WoweeFrameMT:SetTotem(slot)\n"
         "    self:ClearLines()\n"
-        "    local _, name, _, duration = GetTotemInfo(slot)\n"
+        // GetTotemInfo answers the start and the full length, so what is left
+        // is worked out here, in the same words an aura's countdown uses.
+        "    local _, name, startTime, duration = GetTotemInfo(slot)\n"
         "    if not name or name == '' then return end\n"
         "    self:SetText(name, 1, 1, 1)\n"
         "    if duration and duration > 0 then\n"
-        "        self:AddLine(string.format('%.0f sec remaining', duration), 1, 1, 1)\n"
+        "        local left = (startTime and startTime > 0) and (startTime + duration - GetTime()) or duration\n"
+        "        if left > 0 then self:AddLine(__WoweeAuraTimeLeftText(left), 1, 0.82, 0) end\n"
         "    end\n"
         "end\n"
         // What the minimap's tracking button is showing. 1.12's Minimap.xml
@@ -8269,29 +8343,9 @@ void LuaEngine::registerCoreAPI() {
         "    if count and count > 1 then self:AddLine('x' .. count, 1, 1, 1) end\n"
         "end\n"
         "function __WoweeFrameMT:SetUnitAura(unit, index, filter)\n"
-        "    self:ClearLines()\n"
         "    local name, rank, icon, count, debuffType, duration, expTime, caster, steal, consolidate, spellId = UnitAura(unit, index, filter)\n"
-        "    if not name then return end\n"
-        // Harmful auras name their school and are titled in red; a buff is
-        // white. filter is what the caller asked for, debuffType is what came
-        // back, and either is enough to tell them apart.
-        "    local harmful = debuffType ~= nil or (filter and string.find(filter, 'HARMFUL'))\n"
-        "    if harmful then self:SetText(name, 1, 0, 0) else self:SetText(name, 1, 1, 1) end\n"
-        "    if debuffType then self:AddLine(debuffType, 0.5, 0.5, 0.5) end\n"
-        "    if count and count > 1 then self:AddLine(count .. ' stacks', 1, 1, 1) end\n"
-        // What the aura actually does, which is the whole reason a buff is
-        // worth hovering. The tooltip gave its name, its stacks and its time
-        // left and never said that Power Word: Fortitude increases Stamina by
-        // 165 - so nothing on the buff bar described its own effect.
-        //
-        // Above the time remaining, as WoW orders it: the description belongs
-        // to the aura and the countdown to this moment.
-        "    local desc = GetSpellDescription and spellId and GetSpellDescription(spellId)\n"
-        "    if desc and desc ~= '' then self:AddLine(desc, 1, 0.82, 0, 1) end\n"
-        "    if duration and duration > 0 and expTime then\n"
-        "        self:AddLine(string.format('%.0f sec remaining', expTime - GetTime()), 1, 1, 1)\n"
-        "    end\n"
-        "    self.__spellId = spellId\n"
+        "    local timeLeft = (duration and duration > 0 and expTime and expTime > 0) and (expTime - GetTime()) or nil\n"
+        "    return __WoweeFillAuraTooltip(self, name, debuffType, spellId, timeLeft)\n"
         "end\n"
         // Through SetUnitAura rather than beside it. This had the name and the
         // dispel type and nothing else - no stacks, no time left, no

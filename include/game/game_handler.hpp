@@ -1218,6 +1218,7 @@ public:
 
     // Talents - delegate to SpellHandler as canonical authority
     uint8_t getActiveTalentSpec() const { return spellHandler_ ? spellHandler_->getActiveTalentSpec() : 0; }
+    uint8_t getNumTalentGroups() const { return spellHandler_ ? spellHandler_->getNumTalentGroups() : 1; }
     uint8_t getUnspentTalentPoints() const { return spellHandler_ ? spellHandler_->getUnspentTalentPoints() : 0; }
     uint8_t getUnspentTalentPoints(uint8_t spec) const { return spellHandler_ ? spellHandler_->getUnspentTalentPoints(spec) : 0; }
     const std::unordered_map<uint32_t, uint8_t>& getLearnedTalents() const {
@@ -1581,6 +1582,14 @@ public:
                                                    uint8_t facialFeatures,
                                                    float x, float y, float z, float orientation)>;
     void setPlayerSpawnCallback(PlayerSpawnCallback cb) { playerSpawnCallback_ = std::move(cb); }
+
+    /// A player corpse that has become bones (CORPSE_FLAG_BONES): drawn as
+    /// its race and sex's death skeleton, not as the character. Removed by
+    /// the player despawn callback with the corpse guid, like a corpse.
+    using CorpseBonesCallback = std::function<void(uint64_t corpseGuid, uint8_t raceId,
+                                                   uint8_t genderId, float x, float y,
+                                                   float z, float orientation)>;
+    void setCorpseBonesCallback(CorpseBonesCallback cb) { corpseBonesCallback_ = std::move(cb); }
 
     using PlayerDespawnCallback = std::function<void(uint64_t guid)>;
     void setPlayerDespawnCallback(PlayerDespawnCallback cb) { playerDespawnCallback_ = std::move(cb); }
@@ -2970,6 +2979,16 @@ public:
     void fireAddonEvent(const std::string& event, const std::vector<std::string>& args = {}) {
         if (addonEventCallback_) addonEventCallback_(event, args);
     }
+    /// COMBAT_TEXT_UPDATE, the feed Blizzard_CombatText draws every incoming
+    /// number from: args are the message type ("DAMAGE", "HEAL", "SPELL_MISS"
+    /// ...) and its data, in the stock order. Only for what happened to the
+    /// unit the addon follows - the player - because the real client sends
+    /// nothing about anyone else on it. The addon applies its own filters, so
+    /// the panel's world-text switches are not asked here.
+    void fireCombatTextUpdate(uint64_t unitGuid, const std::vector<std::string>& args) {
+        if (args.empty() || unitGuid == 0 || unitGuid != getPlayerGuid()) return;
+        fireAddonEvent("COMBAT_TEXT_UPDATE", args);
+    }
     // Convenience: invoke a callback with a sound manager obtained from the renderer.
     template<typename ManagerGetter, typename Callback>
     void withSoundManager(ManagerGetter getter, Callback cb) {
@@ -3360,6 +3379,8 @@ public:
     const std::string& getSpellRank(uint32_t spellId) const;
     /// Returns the tooltip/description text from Spell.dbc (empty if unknown or has no text).
     const std::string& getSpellDescription(uint32_t spellId) const;
+    /// Spell.dbc ToolTip, unformatted: the line an aura's tooltip shows.
+    const std::string& getSpellAuraDescription(uint32_t spellId) const;
     /// Substitute WoW description tokens in `raw` using live spell data: $s/$o/$m/$M base
     /// points and $d durations (incl. cross-spell $<spellId> references), plus $l/$g
     /// plural/gender forms. Unresolvable tokens ($h proc chance, $t period) are stripped
@@ -3839,6 +3860,7 @@ public:
     auto& playerEquipmentCallbackRef() { return playerEquipmentCallback_; }
     auto& playerHealthCallbackRef() { return playerHealthCallback_; }
     auto& playerSpawnCallbackRef() { return playerSpawnCallback_; }
+    auto& corpseBonesCallbackRef() { return corpseBonesCallback_; }
     auto& spellCastAnimCallbackRef() { return spellCastAnimCallback_; }
     auto& spellCastFailedCallbackRef() { return spellCastFailedCallback_; }
     auto& sprintAuraCallbackRef() { return sprintAuraCallback_; }
@@ -3956,6 +3978,10 @@ public:
     struct SpellReagent { uint32_t itemId = 0; uint32_t count = 0; };
     struct SpellNameEntry {
         std::string name; std::string rank; std::string description;
+        /// Spell.dbc ToolTip (column 187 in 3.3.5): the short text an aura's
+        /// tooltip shows - "Increases Stamina by $s1." - where description is
+        /// the spell book's "Power infuses the target, increasing...".
+        std::string auraDescription;
         uint32_t schoolMask = 0; uint8_t dispelType = 0; uint32_t attrEx = 0;
         /// Spell.dbc Attributes, the base word. Bit 6 (0x40) is passive.
         uint32_t attr = 0;
@@ -4440,6 +4466,7 @@ private:
     CreatureSpawnCallback creatureSpawnCallback_;
     CreatureDespawnCallback creatureDespawnCallback_;
     PlayerSpawnCallback playerSpawnCallback_;
+    CorpseBonesCallback corpseBonesCallback_;
     PlayerDespawnCallback playerDespawnCallback_;
     PlayerEquipmentCallback playerEquipmentCallback_;
     CreatureMoveCallback creatureMoveCallback_;

@@ -348,6 +348,15 @@ public:
     // For first-person player hiding
     void setCharacterRenderer(class CharacterRenderer* cr, uint32_t playerId) {
         characterRenderer = cr;
+        // Another model (a shapeshift, a polymorph, turning back): its head
+        // bone is measured afresh. The kept answer is for a frame where the
+        // same model cannot answer, not for a different model - a cat form
+        // with a head bone at 0.6 would otherwise orbit the night elf's 1.8,
+        // and a model without one would never drop to its own height.
+        if (playerId != playerInstanceId) {
+            followedHeight_ = 0.0f;
+            followedHeadZ_ = 0.0f;
+        }
         playerInstanceId = playerId;
     }
 

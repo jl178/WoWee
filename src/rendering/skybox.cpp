@@ -12,14 +12,21 @@ namespace wowee {
 namespace rendering {
 
 // Push constant struct - must match skybox.frag.glsl layout
+// The stock sky dome is LightIntBand 2-7 laid over fixed elevations - top at
+// the zenith, middle at 18 degrees, band 1 at 10, band 2 at 3, smog on the
+// horizon, fog from 30 degrees below it down - interpolated between them and
+// nothing else: no scattering, no sun glow (that is the sun's own glare
+// sprite). The same angles every model viewer that draws the 3.3.5 sky uses.
 struct SkyPushConstants {
-    glm::vec4 zenithColor;    // DBC skyTopColor
-    glm::vec4 midColor;       // DBC skyMiddleColor
-    glm::vec4 horizonColor;   // DBC skyBand1Color
-    glm::vec4 fogColor;       // DBC skyBand2Color / fogColor blend
+    glm::vec4 topColor;       // LightIntBand 2
+    glm::vec4 middleColor;    // 3
+    glm::vec4 band1Color;     // 4
+    glm::vec4 band2Color;     // 5
+    glm::vec4 smogColor;      // 6
+    glm::vec4 fogColor;       // 7
     glm::vec4 sunDirAndTime;  // xyz = sun direction, w = timeOfDay
 };
-static_assert(sizeof(SkyPushConstants) == 80, "SkyPushConstants size mismatch");
+static_assert(sizeof(SkyPushConstants) == 112, "SkyPushConstants size mismatch");
 
 Skybox::Skybox() = default;
 
@@ -40,7 +47,7 @@ bool Skybox::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
     const auto& vertStage = shaders.vertStage;
     const auto& fragStage = shaders.fragStage;
 
-    // Push constant range: 5 x vec4 = 80 bytes
+    // Push constant range: 7 x vec4 = 112 bytes
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pushRange.offset = 0;
@@ -128,10 +135,12 @@ void Skybox::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyP
     glm::vec3 sunDir = -glm::normalize(params.directionalDir);
 
     SkyPushConstants push{};
-    push.zenithColor   = glm::vec4(params.skyTopColor, 1.0f);
-    push.midColor      = glm::vec4(params.skyMiddleColor, 1.0f);
-    push.horizonColor  = glm::vec4(params.skyBand1Color, 1.0f);
-    push.fogColor      = glm::vec4(params.skyBand2Color, 1.0f);
+    push.topColor      = glm::vec4(params.skyTopColor, 1.0f);
+    push.middleColor   = glm::vec4(params.skyMiddleColor, 1.0f);
+    push.band1Color    = glm::vec4(params.skyBand1Color, 1.0f);
+    push.band2Color    = glm::vec4(params.skyBand2Color, 1.0f);
+    push.smogColor     = glm::vec4(params.skySmogColor, 1.0f);
+    push.fogColor      = glm::vec4(params.skyFogColor, 1.0f);
     push.sunDirAndTime = glm::vec4(sunDir, params.timeOfDay);
 
     // Bind pipeline

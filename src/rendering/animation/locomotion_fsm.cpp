@@ -50,6 +50,10 @@ void LocomotionFSM::onEvent(AnimEvent event) {
 
 void LocomotionFSM::updateTransitions(const Input& in, const AnimCapabilitySet& caps) {
     ungroundedSeconds_ = in.grounded ? 0.0f : ungroundedSeconds_ + in.deltaTime;
+    // A jump that has just left the ground. Stock restarts JumpStart for every
+    // jump, cutting whatever landing is playing short.
+    const bool jumpBegan = !in.grounded && in.jumping && !wasJumping_;
+    wasJumping_ = in.jumping;
     // Update grace timer
     if (in.moving) {
         graceTimer_ = kGraceSec;
@@ -141,6 +145,11 @@ void LocomotionFSM::updateTransitions(const Input& in, const AnimCapabilitySet& 
         case State::FALL:
             if (in.swimming) {
                 state_ = State::SWIM_IDLE;
+            } else if (jumpBegan) {
+                // Landed and jumped again between two updates: the landing
+                // was never seen, but this is a new jump all the same.
+                jumpStartSeen_ = false;
+                state_ = State::JUMP_START;
             } else if (in.grounded) {
                 jumpEndSeen_ = false;
                 state_ = State::JUMP_END;
@@ -150,6 +159,16 @@ void LocomotionFSM::updateTransitions(const Input& in, const AnimCapabilitySet& 
         case State::JUMP_END: {
             if (in.swimming) {
                 state_ = effectiveMoving ? State::SWIM : State::SWIM_IDLE;
+                break;
+            }
+            // Jumping again before the landing has finished: the landing is
+            // cut short and the new jump starts at once. Waiting for the
+            // one-shot to end left the run cycle playing in the air - by the
+            // time JumpEnd/JumpLandRun finished the jump was falling, so RUN
+            // never saw it rise and only a Fall caught it a quarter second on.
+            if (!in.grounded && in.jumping) {
+                jumpStartSeen_ = false;
+                state_ = State::JUMP_START;
                 break;
             }
             // Landing while running plays JumpLandRun through; landing still
@@ -277,6 +296,8 @@ void LocomotionFSM::reset() {
     wasSprinting_ = false;
     jumpStartSeen_ = false;
     jumpEndSeen_ = false;
+    wasJumping_ = false;
+    ungroundedSeconds_ = 0.0f;
 }
 
 } // namespace rendering

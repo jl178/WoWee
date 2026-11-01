@@ -7,7 +7,10 @@
 #include "ui/ui_raid_icons.hpp"
 #include "ui/ui_colors.hpp"
 #include "ui/ui_helpers.hpp"
+#include "ui/ui_texture_load.hpp"
 #include "ui/minimap_projection.hpp"
+#include "game/quest_giver_status.hpp"
+#include "game/update_field_table.hpp"
 #include "rendering/vk_context.hpp"
 #include "core/application.hpp"
 #include "core/appearance_composer.hpp"
@@ -99,7 +102,142 @@ namespace {
         return dx * dx + dy * dy <= radius * radius;
     }
 
+    // ---- The stock minimap art ---------------------------------------------
+    //
+    // What the 3.3.5a C client draws on the minimap, from the files it draws
+    // them from, instead of the ImGui circles and triangles that stood in for
+    // them. Sizes are interface units on the stock 140-unit Minimap frame and
+    // scale with the ring, so they keep their proportion to the map at any UI
+    // scale and on this client's own 200-pixel ring alike.
+    constexpr const char* kObjectIconsPath    = "Interface\\Minimap\\ObjectIcons.blp";
+    constexpr const char* kPartyRaidBlipsPath = "Interface\\Minimap\\PartyRaidBlips.blp";
+    constexpr const char* kPlayerArrowPath    = "Interface\\Minimap\\MinimapArrow.blp";
+    constexpr const char* kGroupArrowPath     = "Interface\\Minimap\\Rotating-MinimapGroupArrow.blp";
+    constexpr const char* kCorpseArrowPath    = "Interface\\Minimap\\Rotating-MinimapCorpseArrow.blp";
+    constexpr const char* kPoiIconsPath       = "Interface\\Minimap\\POIIcons.blp";
+    constexpr const char* kFlightMasterPath   = "Interface\\Minimap\\Tracking\\FlightMaster.blp";
 
+    constexpr float kStockMinimapSize = 140.0f;  // Minimap.xml: <AbsDimension x="140" y="140"/>
+    constexpr float kBlipSize = 16.0f;           // one ObjectIcons / PartyRaidBlips cell
+    constexpr float kPlayerArrowSize = 40.0f;    // Minimap.lua: SetPlayerTextureWidth/Height(40)
+    constexpr float kEdgeArrowSize = 32.0f;      // the rotating rim arrows
+    constexpr float kPoiIconSize = 16.0f;        // WorldMap_GetPOITextureCoords' worldMapIconDimension
+
+    /// Cells of ObjectIcons.blp: 256x64, eight 32x32 cells to a row.
+    ///
+    /// Row one is the round blips: silver-rimmed party (blue), raid (lilac),
+    /// hostile (red), neutral / tracked resource (gold) and friendly (green),
+    /// then gold-rimmed red, gold and green. Row two is the quest marks -
+    /// yellow ! and ?, blue ! and ? for repeatable quests, a green ! - and a
+    /// last lilac blip.
+    enum ObjectIcon : int {
+        kIconHostile = 2,
+        kIconNeutral = 3,       // also the tracked herb, ore or treasure blip
+        kIconFriendly = 4,
+        // The gold-rimmed cells carry this client's own optional markers, which
+        // have no stock blip of their own: rares and quest objectives.
+        kIconRareElite = 5,
+        kIconRare = 6,
+        kIconQuestTarget = 8,
+        kIconQuestAvailable = 9,
+        kIconQuestComplete = 10,
+        kIconRepeatableAvailable = 11,
+        kIconRepeatableComplete = 12,
+    };
+    constexpr int kObjectIconCols = 8, kObjectIconRows = 2;
+    /// PartyRaidBlips.blp: 256x128, 8x4 cells, cell = classId - 1 in the top
+    /// two rows (filled - your own party), and the same plus 16 in the bottom
+    /// two (ringed - the rest of the raid).
+    constexpr int kPartyBlipCols = 8, kPartyBlipRows = 4;
+
+    /// A minimap texture, uploaded once. A file that is not there is not asked
+    /// for again every frame; a failed upload (no context yet) is.
+    VkDescriptorSet minimapArt(const char* path, wowee::pipeline::AssetManager* am,
+                               wowee::core::Window* window) {
+        struct Slot { VkDescriptorSet ds = VK_NULL_HANDLE; bool missing = false; };
+        static std::unordered_map<std::string, Slot> cache;
+        Slot& slot = cache[path];
+        if (slot.ds || slot.missing || !am) return slot.ds;
+        wowee::ui::UiTextureLoad why = wowee::ui::UiTextureLoad::Ok;
+        slot.ds = wowee::ui::uploadUiTextureFromBlp(am, path, window, &why);
+        if (!slot.ds && (why == wowee::ui::UiTextureLoad::NotFound ||
+                         why == wowee::ui::UiTextureLoad::DecodeFailed)) {
+            slot.missing = true;
+            LOG_WARNING("Minimap art missing: ", path);
+        }
+        return slot.ds;
+    }
+
+    inline ImTextureID texId(VkDescriptorSet ds) {
+        return (ImTextureID)(uintptr_t)ds;
+    }
+
+    /// One cell of an atlas, centred on (cx, cy).
+    void drawAtlasCell(ImDrawList* dl, VkDescriptorSet tex, int cell, int cols, int rows,
+                       float cx, float cy, float size, ImU32 tint = IM_COL32_WHITE) {
+        if (!tex) return;
+        const float du = 1.0f / static_cast<float>(cols);
+        const float dv = 1.0f / static_cast<float>(rows);
+        const float u0 = static_cast<float>(cell % cols) * du;
+        const float v0 = static_cast<float>(cell / cols) * dv;
+        const float h = size * 0.5f;
+        dl->AddImage(texId(tex), ImVec2(cx - h, cy - h), ImVec2(cx + h, cy + h),
+                     ImVec2(u0, v0), ImVec2(u0 + du, v0 + dv), tint);
+    }
+
+    /// A whole texture whose art points up, turned so up lands on (dirX, dirY)
+    /// in screen space (a unit vector, +y down).
+    void drawRotated(ImDrawList* dl, VkDescriptorSet tex, float cx, float cy, float size,
+                     float dirX, float dirY) {
+        if (!tex) return;
+        const float c = -dirY;
+        const float s = dirX;
+        const float h = size * 0.5f;
+        auto corner = [&](float lx, float ly) {
+            return ImVec2(cx + lx * c - ly * s, cy + lx * s + ly * c);
+        };
+        dl->AddImageQuad(texId(tex), corner(-h, -h), corner(h, -h), corner(h, h), corner(-h, h),
+                         ImVec2(0.0f, 0.0f), ImVec2(1.0f, 0.0f), ImVec2(1.0f, 1.0f),
+                         ImVec2(0.0f, 1.0f));
+    }
+
+    /// Where a direction from the centre meets the rim - the circle, or the
+    /// box when the map is square.
+    ImVec2 minimapRimPoint(float cx, float cy, float radius, float nx, float ny, bool square) {
+        float r = radius;
+        if (square) {
+            const float m = std::max(std::fabs(nx), std::fabs(ny));
+            if (m > 1e-4f) r = radius / m;
+        }
+        return ImVec2(cx + nx * r, cy + ny * r);
+    }
+
+    /// Lock.dbc id -> the LockType bits (1 << (type - 1)) that open it through
+    /// a skill: 2 Herbalism, 3 Mining, 1 Lockpicking, 6/... treasure and so on.
+    /// This is what PLAYER_TRACK_RESOURCES is matched against - Find Herbs sets
+    /// bit 1, Find Minerals bit 2, Find Treasure its own.
+    uint32_t lockTrackMask(wowee::pipeline::AssetManager* am, uint32_t lockId) {
+        static std::unordered_map<uint32_t, uint32_t> masks;
+        static bool built = false;
+        if (!built && am) {
+            built = true;
+            auto lockDbc = am->loadDBC("Lock.dbc");
+            if (lockDbc && lockDbc->isLoaded() && lockDbc->getFieldCount() >= 17) {
+                for (uint32_t row = 0; row < lockDbc->getRecordCount(); ++row) {
+                    uint32_t mask = 0;
+                    for (uint32_t slot = 0; slot < 8; ++slot) {
+                        constexpr uint32_t kLockKeySkill = 2;
+                        if (lockDbc->getUInt32(row, 1 + slot) != kLockKeySkill) continue;
+                        const uint32_t type = lockDbc->getUInt32(row, 9 + slot);
+                        if (type >= 1 && type <= 32) mask |= 1u << (type - 1);
+                    }
+                    if (mask) masks[lockDbc->getUInt32(row, 0)] = mask;
+                }
+            }
+        }
+        auto it = masks.find(lockId);
+        return it == masks.end() ? 0u : it->second;
+    }
 
 }
 
@@ -594,36 +732,91 @@ void GameScreen::renderMinimapChrome(game::GameHandler& gameHandler, float cente
     renderMinimapIndicators(gameHandler, centerX, centerY, mapRadius);
 }
 
-// Every nearby unit as a dot, and a quest objective as a larger gold one.
+namespace {
+
+/// What the player is tracking, as the server publishes it.
+///
+/// PLAYER_TRACK_CREATURES and PLAYER_TRACK_RESOURCES are the two fields just
+/// before PLAYER_BLOCK_PERCENTAGE in every layout from 1.12 to 3.3.5a (1022
+/// and 1023 in WotLK), so they are found from that mapped field rather than
+/// added to every expansion's table. The server writes 1 << (misc - 1) from
+/// the running SPELL_AURA_TRACK_CREATURES / TRACK_RESOURCES aura: a
+/// CreatureType bit (Beasts 1, Humanoids 7, ...) and a LockType bit (Herbalism
+/// 2, Mining 3, ...).
+struct MinimapTracking {
+    uint32_t creatures = 0;
+    uint32_t resources = 0;
+};
+
+MinimapTracking playerTracking(game::GameHandler& gameHandler) {
+    MinimapTracking t;
+    const uint16_t block = game::fieldIndex(game::UF::PLAYER_BLOCK_PERCENTAGE);
+    if (block == 0xFFFF || block < 2) return t;
+    auto self = gameHandler.getEntityManager().getEntity(gameHandler.getPlayerGuid());
+    if (!self) return t;
+    t.creatures = self->getField(static_cast<uint16_t>(block - 2));
+    t.resources = self->getField(static_cast<uint16_t>(block - 1));
+    return t;
+}
+
+/// Whether a CreatureType (1-based, as creature_template has it) is tracked.
+bool creatureTypeTracked(uint32_t mask, uint32_t creatureType) {
+    return creatureType >= 1 && creatureType <= 32 && (mask & (1u << (creatureType - 1))) != 0;
+}
+
+constexpr uint32_t kCreatureTypeHumanoid = 7;
+
+/// The blip for a unit by how it regards the player: red hostile, gold
+/// neutral, green friendly - the three silver-rimmed ObjectIcons cells.
+int reactionBlip(game::GameHandler& gameHandler, const game::Unit& unit) {
+    if (unit.isHostile()) return kIconHostile;
+    const int reaction = gameHandler.unitReactionToPlayer(unit);
+    if (reaction <= 3) return kIconHostile;
+    if (reaction == 4) return kIconNeutral;
+    return kIconFriendly;
+}
+
+/// Interface units to pixels for this ring.
+inline float minimapArtScale(float mapRadius) {
+    return (mapRadius * 2.0f) / kStockMinimapSize;
+}
+
+}  // namespace
+
+// Tracked creatures - what Track Beasts, Track Humanoids, Sense Undead and the
+// rest of SPELL_AURA_TRACK_CREATURES put on the map - as the stock
+// ObjectIcons blips coloured by reaction. With this client's optional "nearby
+// creature dots" on, every live unit gets one. Quest objectives are drawn by
+// renderMinimapQuestKills.
 void GameScreen::renderMinimapNpcDots(const MinimapFrame& frame, const EntityList& minimapUnits,
                                       const EntrySet& minimapQuestEntries) {
-    // Optional base nearby NPC dots (independent of quest status packets).
-    if (settingsPanel_.minimapNpcDots_) {
-        for (const auto& entity : minimapUnits) {
+    auto* gh = services_.gameHandler;
+    if (!gh) return;
+    const MinimapTracking tracking = playerTracking(*gh);
+    const bool allDots = settingsPanel_.minimapNpcDots_;
+    if (!allDots && tracking.creatures == 0) return;
+    VkDescriptorSet icons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
+    if (!icons) return;
+    const float size = kBlipSize * minimapArtScale(frame.mapRadius);
 
-            auto unit = std::static_pointer_cast<game::Unit>(entity);
-            if (!unit || unit->getHealth() == 0) continue;
+    for (const auto& entity : minimapUnits) {
+        auto unit = std::static_pointer_cast<game::Unit>(entity);
+        if (!unit || unit->getHealth() == 0) continue;
+        if (allDots && minimapQuestEntries.count(unit->getEntry()) != 0) continue;
+        if (!allDots &&
+            !creatureTypeTracked(tracking.creatures, gh->getCreatureType(unit->getEntry()))) {
+            continue;
+        }
 
-            float sx = 0.0f, sy = 0.0f;
-            if (!frame.projectEntity(*entity, sx, sy)) continue;
-
-            bool isQuestTarget = minimapQuestEntries.count(unit->getEntry()) != 0;
-            if (isQuestTarget) {
-                // Quest kill objective: larger gold dot with dark outline
-                frame.drawList->AddCircleFilled(ImVec2(sx, sy), 3.5f, IM_COL32(255, 210, 30, 240));
-                frame.drawList->AddCircle(ImVec2(sx, sy), 3.5f, IM_COL32(80, 50, 0, 180), 0, 1.0f);
-                // Tooltip on hover showing unit name
-                if (cursorNearBlip(sx, sy)) {
-                    const std::string& nm = unit->getName();
-                    if (!nm.empty()) ImGui::SetTooltip("%s (quest)", nm.c_str());
-                }
-            } else {
-                ImU32 baseDot = unit->isHostile() ? IM_COL32(220, 70, 70, 220) : IM_COL32(245, 245, 245, 210);
-                frame.drawList->AddCircleFilled(ImVec2(sx, sy), 1.0f, baseDot);
-            }
+        float sx = 0.0f, sy = 0.0f;
+        if (!frame.projectEntity(*entity, sx, sy)) continue;
+        drawAtlasCell(frame.drawList, icons, reactionBlip(*gh, *unit),
+                      kObjectIconCols, kObjectIconRows, sx, sy, size);
+        if (cursorNearBlip(sx, sy, kSmallBlipHoverRadius)) {
+            const std::string& nm = unit->getName();
+            if (!nm.empty()) ImGui::SetTooltip("%s", nm.c_str());
         }
     }
-
 }
 
 // A standard service marker, independent of the optional NPC dots - and read
@@ -634,6 +827,14 @@ void GameScreen::renderMinimapFlightMasters(const MinimapFrame& frame, const Ent
     // the optional generic NPC-dot overlay. Use the live UNIT_NPC_FLAGS value
     // so an undiscovered flight master is visible before the taxi window has
     // ever been opened (and therefore before the known-node mask is available).
+    //
+    // Drawn with the stock Flight Master tracking icon - what a 3.3.5a client
+    // puts on the map for a tracked town service. Stock shows it only while
+    // "Flight Master" is the chosen tracking; this client has no town tracking
+    // entries in GetTrackingInfo yet, so it is shown always, as it was before.
+    VkDescriptorSet tex = minimapArt(kFlightMasterPath, services_.assetManager, services_.window);
+    if (!tex) return;
+    const float size = kBlipSize * minimapArtScale(frame.mapRadius);
     {
         for (const auto& entity : minimapUnits) {
             auto unit = std::static_pointer_cast<game::Unit>(entity);
@@ -645,17 +846,8 @@ void GameScreen::renderMinimapFlightMasters(const MinimapFrame& frame, const Ent
             float sx = 0.0f, sy = 0.0f;
             if (!frame.projectEntity(*entity, sx, sy)) continue;
 
-            constexpr float halfSize = 5.5f;
-            const ImVec2 top(sx, sy - halfSize);
-            const ImVec2 right(sx + halfSize, sy);
-            const ImVec2 bottom(sx, sy + halfSize);
-            const ImVec2 left(sx - halfSize, sy);
-            frame.drawList->AddQuadFilled(top, right, bottom, left,
-                                    IM_COL32(255, 215, 0, 245));
-            frame.drawList->AddQuad(top, right, bottom, left,
-                              IM_COL32(70, 45, 0, 230), 1.5f);
-            frame.drawList->AddCircleFilled(ImVec2(sx, sy), 1.7f,
-                                      IM_COL32(255, 250, 205, 255));
+            frame.drawList->AddImage(texId(tex), ImVec2(sx - size * 0.5f, sy - size * 0.5f),
+                                     ImVec2(sx + size * 0.5f, sy + size * 0.5f));
 
             if (cursorNearBlip(sx, sy)) {
                 const std::string& name = unit->getName();
@@ -674,6 +866,9 @@ void GameScreen::renderMinimapRares(const MinimapFrame& frame, const EntityList&
     // This is independent of generic NPC dots so enabling rare tracking consistently
     // shows spawned rares on both maps without adding every nearby creature.
     if (settingsPanel_.showRareTracker_) {
+        VkDescriptorSet icons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
+        if (!icons) return;
+        const float size = kBlipSize * minimapArtScale(frame.mapRadius);
         for (const auto& entity : minimapUnits) {
             auto unit = std::static_pointer_cast<game::Unit>(entity);
             if (!unit || unit->getHealth() == 0) continue;
@@ -684,18 +879,11 @@ void GameScreen::renderMinimapRares(const MinimapFrame& frame, const EntityList&
             float sx = 0.0f, sy = 0.0f;
             if (!frame.projectEntity(*entity, sx, sy)) continue;
 
-            // Match the world-map tracker: gold for Rare, silver for Rare Elite.
+            // A gold-rimmed ObjectIcons blip: there is no stock rare blip, so
+            // this optional tracker borrows the stock art rather than a shape.
             const bool isElite = rank == 2;
-            const ImU32 fill = isElite
-                ? IM_COL32(210, 210, 225, 255)
-                : IM_COL32(255, 190, 60, 255);
-            constexpr float halfSize = 5.0f;
-            const ImVec2 top(sx, sy - halfSize);
-            const ImVec2 right(sx + halfSize, sy);
-            const ImVec2 bottom(sx, sy + halfSize);
-            const ImVec2 left(sx - halfSize, sy);
-            frame.drawList->AddQuadFilled(top, right, bottom, left, fill);
-            frame.drawList->AddQuad(top, right, bottom, left, IM_COL32(0, 0, 0, 220), 1.5f);
+            drawAtlasCell(frame.drawList, icons, isElite ? kIconRareElite : kIconRare,
+                          kObjectIconCols, kObjectIconRows, sx, sy, size);
 
             if (cursorNearBlip(sx, sy, kSmallBlipHoverRadius)) {
                 const std::string& name = unit->getName();
@@ -708,20 +896,25 @@ void GameScreen::renderMinimapRares(const MinimapFrame& frame, const EntityList&
 
 }
 
-// Other players nearby. Party members are squares, drawn elsewhere; these are
-// the small circles for everyone else.
+// Other players nearby. Party and raid members have their own class-coloured
+// blips, drawn elsewhere; everyone else shows while Track Humanoids is running
+// (players are humanoids to the tracking aura, as in the stock client), or
+// always with this client's optional creature dots on.
 void GameScreen::renderMinimapPlayerDots(const MinimapFrame& frame, const EntityList& minimapPlayers,
                                           game::GameHandler& gameHandler) {
-    // Nearby other-player dots - shown when NPC dots are enabled.
-    // Party members are already drawn as squares above; other players get a small circle.
-    if (settingsPanel_.minimapNpcDots_) {
+    const bool show = settingsPanel_.minimapNpcDots_ ||
+        creatureTypeTracked(playerTracking(gameHandler).creatures, kCreatureTypeHumanoid);
+    VkDescriptorSet icons = show
+        ? minimapArt(kObjectIconsPath, services_.assetManager, services_.window) : VK_NULL_HANDLE;
+    if (icons) {
+        const float size = kBlipSize * minimapArtScale(frame.mapRadius);
         const uint64_t selfGuid = gameHandler.getPlayerGuid();
         const auto& partyData = gameHandler.getPartyData();
         for (const auto& entity : minimapPlayers) {
             const uint64_t guid = entity->getGuid();
             if (entity->getGuid() == selfGuid) continue;  // skip self (already drawn as arrow)
 
-            // Skip party members (already drawn as squares above)
+            // Skip party members (renderMinimapPartyDots draws their class blips)
             bool isPartyMember = false;
             for (const auto& m : partyData.members) {
                 if (m.guid == guid) { isPartyMember = true; break; }
@@ -731,17 +924,27 @@ void GameScreen::renderMinimapPlayerDots(const MinimapFrame& frame, const Entity
             float sx = 0.0f, sy = 0.0f;
             if (!frame.projectEntity(*entity, sx, sy)) continue;
 
-            // Blue dot for other nearby players
-            frame.drawList->AddCircleFilled(ImVec2(sx, sy), 2.0f, IM_COL32(80, 160, 255, 220));
+            auto player = std::static_pointer_cast<game::Unit>(entity);
+            const int cell = player ? reactionBlip(gameHandler, *player) : kIconFriendly;
+            drawAtlasCell(frame.drawList, icons, cell, kObjectIconCols, kObjectIconRows,
+                          sx, sy, size);
+            if (player && cursorNearBlip(sx, sy, kSmallBlipHoverRadius) &&
+                !player->getName().empty()) {
+                ImGui::SetTooltip("%s", player->getName().c_str());
+            }
         }
     }
 
 }
 
-// Dead and lootable, as a small yellow-green diamond.
+// Dead and lootable. Not a stock blip - the 3.3.5a minimap marks no corpses but
+// your own - so it is part of this client's optional creature dots, and drawn
+// with the stock art: a gold blip, dimmed.
 void GameScreen::renderMinimapLootCorpses(const MinimapFrame& frame, const EntityList& minimapUnits) {
-    // Lootable corpse dots: small yellow-green diamonds on dead, lootable units.
-    // Shown whenever NPC dots are enabled (or always, since they're always useful).
+    if (!settingsPanel_.minimapNpcDots_) return;
+    VkDescriptorSet icons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
+    if (!icons) return;
+    const float size = kBlipSize * minimapArtScale(frame.mapRadius);
     {
         for (const auto& entity : minimapUnits) {
             auto unit = std::static_pointer_cast<game::Unit>(entity);
@@ -753,17 +956,11 @@ void GameScreen::renderMinimapLootCorpses(const MinimapFrame& frame, const Entit
             float sx = 0.0f, sy = 0.0f;
             if (!frame.projectEntity(*entity, sx, sy)) continue;
 
-            // Draw a small diamond (rotated square) in light yellow-green
-            const float dr = 3.5f;
-            ImVec2 top  (sx,      sy - dr);
-            ImVec2 right(sx + dr, sy     );
-            ImVec2 bot  (sx,      sy + dr);
-            ImVec2 left (sx - dr, sy     );
-            frame.drawList->AddQuadFilled(top, right, bot, left, IM_COL32(180, 230, 80, 230));
-            frame.drawList->AddQuad      (top, right, bot, left, IM_COL32(60,  80,  20, 200), 1.0f);
+            drawAtlasCell(frame.drawList, icons, kIconNeutral, kObjectIconCols, kObjectIconRows,
+                          sx, sy, size, IM_COL32(170, 170, 170, 255));
 
             // Tooltip on hover
-            if (ImGui::IsMouseHoveringRect(ImVec2(sx - dr, sy - dr), ImVec2(sx + dr, sy + dr))) {
+            if (cursorNearBlip(sx, sy, kSmallBlipHoverRadius)) {
                 const std::string& nm = unit->getName();
                 ImGui::BeginTooltip();
                 ImGui::TextColored(ImVec4(0.7f, 0.9f, 0.3f, 1.0f), "%s",
@@ -775,55 +972,54 @@ void GameScreen::renderMinimapLootCorpses(const MinimapFrame& frame, const Entit
 
 }
 
-// Chests and resource nodes, as orange triangles - a different shape from the
-// unit dots on purpose, because they are a different thing to walk to.
+// Tracked resources - Find Herbs, Find Minerals, Find Treasure - as the stock
+// gold blip. A node shows when a skill lock on it (Lock.dbc, through the
+// object's lockId) is of a LockType the player's PLAYER_TRACK_RESOURCES bit
+// says is tracked, which is the test the stock client makes. With this
+// client's optional dots on, every interactable object gets a blip, and a
+// tracked quest's objective objects the gold-rimmed one.
 void GameScreen::renderMinimapObjectDots(const MinimapFrame& frame, const EntityList& minimapGameObjects,
                                           const EntrySet& minimapQuestGoEntries,
                                           game::GameHandler& gameHandler) {
-    // Interactable game object dots (chests, resource nodes) when NPC dots are enabled.
-    // Shown as small orange triangles to distinguish from unit dots and loot corpses.
-    if (settingsPanel_.minimapNpcDots_) {
-        for (const auto& entity : minimapGameObjects) {
+    const MinimapTracking tracking = playerTracking(gameHandler);
+    const bool allDots = settingsPanel_.minimapNpcDots_;
+    if (!allDots && tracking.resources == 0) return;
+    VkDescriptorSet icons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
+    if (!icons) return;
+    const float size = kBlipSize * minimapArtScale(frame.mapRadius);
 
-            // Only show objects that are likely interactive (chests/nodes: type 3;
-            // also show type 0=Door when open, but filter by dynamic-flag ACTIVATED).
-            // For simplicity, show all game objects that have a non-empty cached name.
-            auto go = std::static_pointer_cast<game::GameObject>(entity);
-            if (!go) continue;
+    for (const auto& entity : minimapGameObjects) {
+        auto go = std::static_pointer_cast<game::GameObject>(entity);
+        if (!go) continue;
 
-            // Only show if we have name data (avoids cluttering with unknown objects)
-            const auto* goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
-            if (!goInfo || !goInfo->isValid()) continue;
-            // Skip transport objects (boats/zeppelins): type 15 = MO_TRANSPORT, 11 = TRANSPORT
-            if (goInfo->type == 11 || goInfo->type == 15) continue;
+        // Only with query data: the lock is in it, and the name for the tooltip.
+        const auto* goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
+        if (!goInfo || !goInfo->isValid()) continue;
+        // Skip transport objects (boats/zeppelins): type 15 = MO_TRANSPORT, 11 = TRANSPORT
+        if (goInfo->type == 11 || goInfo->type == 15) continue;
 
-            float sx = 0.0f, sy = 0.0f;
-            if (!frame.projectEntity(*entity, sx, sy)) continue;
+        // GAMEOBJECT_TYPE_CHEST (3) is every herb, vein and treasure; its lock
+        // is data[0].
+        constexpr uint32_t kGoTypeChest = 3;
+        const bool tracked = tracking.resources != 0 && goInfo->type == kGoTypeChest &&
+            goInfo->hasData &&
+            (lockTrackMask(services_.assetManager, goInfo->data[0]) & tracking.resources) != 0;
+        const bool isQuestGO = allDots && minimapQuestGoEntries.count(go->getEntry()) != 0;
+        if (!tracked && !allDots) continue;
 
-            // Triangle size and color: bright cyan for quest objectives, amber for others
-            bool isQuestGO = minimapQuestGoEntries.count(go->getEntry()) != 0;
-            const float ts = isQuestGO ? 4.5f : 3.5f;
-            ImVec2 goTip  (sx,        sy - ts);
-            ImVec2 goLeft (sx - ts,   sy + ts * 0.6f);
-            ImVec2 goRight(sx + ts,   sy + ts * 0.6f);
-            if (isQuestGO) {
-                frame.drawList->AddTriangleFilled(goTip, goLeft, goRight, IM_COL32(50, 230, 255, 240));
-                frame.drawList->AddTriangle(goTip, goLeft, goRight, IM_COL32(0, 60, 80, 200), 1.5f);
-            } else {
-                frame.drawList->AddTriangleFilled(goTip, goLeft, goRight, IM_COL32(255, 185, 30, 220));
-                frame.drawList->AddTriangle(goTip, goLeft, goRight, IM_COL32(100, 60, 0, 180), 1.0f);
-            }
+        float sx = 0.0f, sy = 0.0f;
+        if (!frame.projectEntity(*entity, sx, sy)) continue;
 
-            // Tooltip on hover
-            if (cursorNearBlip(sx, sy)) {
-                if (isQuestGO)
-                    ImGui::SetTooltip("%s (quest)", goInfo->name.c_str());
-                else
-                    ImGui::SetTooltip("%s", goInfo->name.c_str());
-            }
+        drawAtlasCell(frame.drawList, icons, isQuestGO ? kIconQuestTarget : kIconNeutral,
+                      kObjectIconCols, kObjectIconRows, sx, sy, size);
+
+        if (cursorNearBlip(sx, sy, kSmallBlipHoverRadius)) {
+            if (isQuestGO)
+                ImGui::SetTooltip("%s (quest)", goInfo->name.c_str());
+            else
+                ImGui::SetTooltip("%s", goInfo->name.c_str());
         }
     }
-
 }
 
 // GAMEOBJECT_TYPE_CHEST covers gathering nodes on WoW servers, so the mining
@@ -833,7 +1029,10 @@ void GameScreen::renderMinimapChests(const MinimapFrame& frame, const EntityList
     // Chest tracker: GAMEOBJECT_TYPE_CHEST also covers gathering nodes on WoW
     // servers, so explicitly exclude the existing mining/herbalism classification.
     if (settingsPanel_.showChestTracker_) {
-        ImVec2 mouse = ImGui::GetMousePos();
+        // The gold blip, as Find Treasure draws a chest in the stock client.
+        VkDescriptorSet icons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
+        if (!icons) return;
+        const float size = kBlipSize * minimapArtScale(frame.mapRadius);
         for (const auto& entity : minimapGameObjects) {
             auto chest = std::static_pointer_cast<game::GameObject>(entity);
             if (!chest) continue;
@@ -844,22 +1043,10 @@ void GameScreen::renderMinimapChests(const MinimapFrame& frame, const EntityList
             float sx = 0.0f, sy = 0.0f;
             if (!frame.projectEntity(*entity, sx, sy)) continue;
 
-            constexpr float halfW = 5.5f;
-            constexpr float halfH = 4.0f;
-            constexpr ImU32 fill = IM_COL32(205, 125, 35, 255);
-            constexpr ImU32 outline = IM_COL32(45, 25, 5, 230);
-            frame.drawList->AddRectFilled(ImVec2(sx - halfW, sy - halfH),
-                                    ImVec2(sx + halfW, sy + halfH), fill, 1.5f);
-            frame.drawList->AddRect(ImVec2(sx - halfW, sy - halfH),
-                              ImVec2(sx + halfW, sy + halfH), outline, 1.5f, 0, 1.5f);
-            frame.drawList->AddLine(ImVec2(sx - halfW, sy - 0.8f),
-                              ImVec2(sx + halfW, sy - 0.8f), outline, 1.0f);
-            frame.drawList->AddRectFilled(ImVec2(sx - 1.0f, sy - 1.2f),
-                                    ImVec2(sx + 1.0f, sy + 1.3f),
-                                    IM_COL32(255, 220, 80, 255), 0.5f);
+            drawAtlasCell(frame.drawList, icons, kIconNeutral, kObjectIconCols, kObjectIconRows,
+                          sx, sy, size);
 
-            if (mouse.x >= sx - halfW - 2.0f && mouse.x <= sx + halfW + 2.0f &&
-                mouse.y >= sy - halfH - 2.0f && mouse.y <= sy + halfH + 2.0f) {
+            if (cursorNearBlip(sx, sy, kSmallBlipHoverRadius)) {
                 const std::string& name = chest->getName().empty() ? info->name : chest->getName();
                 ImGui::SetTooltip("%s\nChest", name.empty() ? "Chest" : name.c_str());
             }
@@ -890,9 +1077,11 @@ void GameScreen::renderMinimapQuestGivers(const MinimapFrame& frame, const Quest
             }
         }
         if (!mark.symbol || !mark.onMinimap) continue;
-        const ImU32 dotColor = mark.dim ? IM_COL32(160, 160, 160, 255)
-                                        : IM_COL32(255, 210, 0, 255);
-        const char* marker = mark.symbol;
+        // The grey marks - a low-level quest, a quest still in progress - are
+        // not on the stock minimap: low-level ones only appear under the "Low
+        // Level Quests" tracking, which this client does not offer, and an
+        // incomplete turn-in never does.
+        if (mark.dim) continue;
 
         auto entity = gameHandler.getEntityManager().getEntity(guid);
         if (!entity) continue;
@@ -900,13 +1089,15 @@ void GameScreen::renderMinimapQuestGivers(const MinimapFrame& frame, const Quest
         float sx = 0.0f, sy = 0.0f;
         if (!frame.projectEntity(*entity, sx, sy)) continue;
 
-        // Draw dot with marker text
-        frame.drawList->AddCircleFilled(ImVec2(sx, sy), 5.0f, dotColor);
-        ImFont* font = ImGui::GetFont();
-        ImVec2 textSize = font->CalcTextSizeA(11.0f, FLT_MAX, 0.0f, marker);
-        frame.drawList->AddText(font, 11.0f,
-            ImVec2(sx - textSize.x * 0.5f, sy - textSize.y * 0.5f),
-            IM_COL32(0, 0, 0, 255), marker);
+        // The ObjectIcons quest marks: yellow ! and ?, blue for repeatable.
+        const bool available = mark.symbol[0] == '!';
+        const int cell = available
+            ? (mark.repeatable ? kIconRepeatableAvailable : kIconQuestAvailable)
+            : (mark.repeatable ? kIconRepeatableComplete : kIconQuestComplete);
+        drawAtlasCell(frame.drawList,
+                      minimapArt(kObjectIconsPath, services_.assetManager, services_.window),
+                      cell, kObjectIconCols, kObjectIconRows, sx, sy,
+                      kBlipSize * minimapArtScale(frame.mapRadius));
 
         // Show NPC name and quest status on hover
         {
@@ -928,13 +1119,21 @@ void GameScreen::renderMinimapQuestGivers(const MinimapFrame& frame, const Quest
 
 }
 
-// A gold X over an NPC a tracked quest still needs killed.
+// A gold-rimmed blip on an NPC a tracked quest still needs killed.
+//
+// Not a stock blip: the 3.3.5a minimap shows a quest's objective as its POI
+// area (renderMinimapGossipPois), not per creature. So it belongs to this
+// client's optional creature dots, and is drawn with the stock art.
 //
 // Skips any NPC that already has a ! or a ?: a quest giver marker is more
 // specific than an objective marker at the same NPC.
 void GameScreen::renderMinimapQuestKills(const MinimapFrame& frame, const EntityList& minimapUnits,
                                         const QuestStatusMap& statuses,
                                         game::GameHandler& gameHandler) {
+    if (!settingsPanel_.minimapNpcDots_) return;
+    VkDescriptorSet icons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
+    if (!icons) return;
+    const float blipSize = kBlipSize * minimapArtScale(frame.mapRadius);
     // Quest kill objective markers - highlight live NPCs matching active quest kill objectives
     {
         // Build map of NPC entry → (quest title, current, required) for tooltips
@@ -971,13 +1170,8 @@ void GameScreen::renderMinimapQuestKills(const MinimapFrame& frame, const Entity
                 float sx = 0.0f, sy = 0.0f;
                 if (!frame.projectEntity(*entity, sx, sy)) continue;
 
-                // Gold circle with a dark "x" mark - indicates a quest kill target
-                frame.drawList->AddCircleFilled(ImVec2(sx, sy), 5.0f, IM_COL32(255, 185, 0, 240));
-                frame.drawList->AddCircle(ImVec2(sx, sy), 5.5f, IM_COL32(0, 0, 0, 180), 12, 1.0f);
-                frame.drawList->AddLine(ImVec2(sx - 2.5f, sy - 2.5f), ImVec2(sx + 2.5f, sy + 2.5f),
-                                  IM_COL32(20, 20, 20, 230), 1.2f);
-                frame.drawList->AddLine(ImVec2(sx + 2.5f, sy - 2.5f), ImVec2(sx - 2.5f, sy + 2.5f),
-                                  IM_COL32(20, 20, 20, 230), 1.2f);
+                drawAtlasCell(frame.drawList, icons, kIconQuestTarget,
+                              kObjectIconCols, kObjectIconRows, sx, sy, blipSize);
 
                 // Tooltip on hover
                 if (cursorNearBlip(sx, sy)) {
@@ -1000,37 +1194,84 @@ void GameScreen::renderMinimapQuestKills(const MinimapFrame& frame, const Entity
 
 }
 
-// The points a gossip window has pointed at - quest and service targets.
+// The points a gossip window has pointed at, and a tracked quest's POIs.
+//
+// A gossip point (SMSG_GOSSIP_POI) carries an icon number into POIIcons.blp,
+// laid out the way WorldMap_GetPOITextureCoords reads it: 14 to a row on an
+// 18-pixel pitch, 16 pixels of icon. A quest's objective (SMSG_QUEST_POI) is
+// an area, which 3.3 shades on the minimap as it does on the world map; its
+// end point is the ? once the quest is complete.
 void GameScreen::renderMinimapGossipPois(const MinimapFrame& frame, game::GameHandler& gameHandler) {
-    // Gossip POI markers (quest / NPC navigation targets)
+    const float scale = minimapArtScale(frame.mapRadius);
+    VkDescriptorSet poiIcons = minimapArt(kPoiIconsPath, services_.assetManager, services_.window);
+    VkDescriptorSet objIcons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
+
+    auto questComplete = [&gameHandler](uint32_t questId) {
+        for (const auto& q : gameHandler.getQuestLog()) {
+            if (q.questId == questId) return q.complete;
+        }
+        return false;
+    };
+
     for (const auto& poi : gameHandler.getGossipPois()) {
         // A gossip target always, a quest's points while it is tracked.
         if (poi.questObjectiveIndex != -2 && !gameHandler.isQuestTracked(poi.data)) {
             continue;
         }
-        // Convert WoW canonical coords to render coords for minimap projection
+
+        // An objective area: a translucent fill, its points pulled in to the
+        // rim where they fall outside it. Only while the quest is unfinished.
+        if (poi.questObjectiveIndex >= 0) {
+            if (poi.area.size() < 3 || questComplete(poi.data)) continue;
+            std::vector<ImVec2> pts;
+            pts.reserve(poi.area.size());
+            ImVec2 centroid(0.0f, 0.0f);
+            const float rim = frame.mapRadius - 1.0f;
+            for (const auto& [ax, ay] : poi.area) {
+                const glm::vec3 r = core::coords::canonicalToRender(glm::vec3(ax, ay, 0.0f));
+                glm::vec2 off = renderDeltaToMinimapOffset(r.x - frame.playerRender.x,
+                                                           r.y - frame.playerRender.y, frame.view);
+                const float len = std::sqrt(off.x * off.x + off.y * off.y);
+                if (len > rim && len > 0.0f) off *= rim / len;
+                pts.emplace_back(frame.centerX + off.x, frame.centerY + off.y);
+                centroid.x += pts.back().x;
+                centroid.y += pts.back().y;
+            }
+            centroid.x /= static_cast<float>(pts.size());
+            centroid.y /= static_cast<float>(pts.size());
+            // A fan from the centre: the server's outlines are hulls.
+            const ImU32 fill = IM_COL32(110, 170, 255, 60);
+            for (size_t i = 0; i < pts.size(); ++i) {
+                frame.drawList->AddTriangleFilled(centroid, pts[i], pts[(i + 1) % pts.size()], fill);
+            }
+            frame.drawList->AddPolyline(pts.data(), static_cast<int>(pts.size()),
+                                        IM_COL32(255, 220, 120, 110), ImDrawFlags_Closed, 1.0f);
+            continue;
+        }
+
         float sx = 0.0f, sy = 0.0f;
         if (!frame.projectCanonical(poi.x, poi.y, sx, sy)) continue;
 
-        // Draw as a cyan diamond with tooltip on hover
-        const float d = 5.0f;
-        ImVec2 pts[4] = {
-            { sx,     sy - d },
-            { sx + d, sy     },
-            { sx,     sy + d },
-            { sx - d, sy     },
-        };
-        frame.drawList->AddConvexPolyFilled(pts, 4, IM_COL32(0, 210, 255, 220));
-        frame.drawList->AddPolyline(pts, 4, IM_COL32(255, 255, 255, 160), true, 1.0f);
+        if (poi.questObjectiveIndex == -1) {
+            // The quest's end point: the stock turn-in ?, once there is
+            // something to turn in.
+            if (!questComplete(poi.data)) continue;
+            drawAtlasCell(frame.drawList, objIcons, kIconQuestComplete,
+                          kObjectIconCols, kObjectIconRows, sx, sy, kBlipSize * scale);
+        } else if (poiIcons) {
+            constexpr int kPoiCols = 14;
+            constexpr float kTex = 256.0f, kPitch = 18.0f, kIcon = 16.0f;
+            const float u0 = (static_cast<float>(poi.icon % kPoiCols) * kPitch + 1.0f) / kTex;
+            const float v0 = (static_cast<float>(poi.icon / kPoiCols) * kPitch + 1.0f) / kTex;
+            const float h = kPoiIconSize * scale * 0.5f;
+            frame.drawList->AddImage(texId(poiIcons), ImVec2(sx - h, sy - h), ImVec2(sx + h, sy + h),
+                                     ImVec2(u0, v0), ImVec2(u0 + kIcon / kTex, v0 + kIcon / kTex));
+        }
 
-        // Show name label if cursor is within ~8px
-        ImVec2 cursorPos = ImGui::GetMousePos();
-        float dx = cursorPos.x - sx, dy = cursorPos.y - sy;
-        if (!poi.name.empty() && (dx * dx + dy * dy) < 64.0f) {
+        if (!poi.name.empty() && cursorNearBlip(sx, sy)) {
             ImGui::SetTooltip("%s", poi.name.c_str());
         }
     }
-
 }
 
 // What a party member pinged, for as long as the ping lasts.
@@ -1055,70 +1296,89 @@ void GameScreen::renderMinimapPings(const MinimapFrame& frame, game::GameHandler
 
 }
 
-// One dot per party member, with the raid mark above it.
+// One blip per party and raid member, from PartyRaidBlips.blp in the member's
+// class colour: the filled blip for your own party (or subgroup), the ringed
+// one for the rest of the raid. A member beyond the edge of the map is the
+// rotating group arrow on the rim, pointing at them.
 //
-// There were two of these drawing at the same point until recently - a square
-// from one pass and this circle over it.
+// The position is the live entity's while the member is in sight, and the
+// last SMSG_PARTY_MEMBER_STATS position otherwise - that one only moves every
+// few seconds, so it is the fallback rather than the source.
 void GameScreen::renderMinimapPartyDots(const MinimapFrame& frame, game::GameHandler& gameHandler) {
-    // Party member dots on minimap
-    {
-        const auto& partyData = gameHandler.getPartyData();
-        const uint64_t leaderGuid = partyData.leaderGuid;
-        for (const auto& member : partyData.members) {
-            if (!member.isOnline || !member.hasPartyStats) continue;
-            if (member.posX == 0 && member.posY == 0) continue;
+    VkDescriptorSet blips = minimapArt(kPartyRaidBlipsPath, services_.assetManager, services_.window);
+    VkDescriptorSet objIcons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
+    VkDescriptorSet groupArrow = minimapArt(kGroupArrowPath, services_.assetManager, services_.window);
+    auto* minimap = services_.renderer ? services_.renderer->getMinimap() : nullptr;
+    const bool square = minimap && minimap->isSquareShape();
+    const float scale = minimapArtScale(frame.mapRadius);
+    const float blipSize = kBlipSize * scale;
+    const float arrowSize = kEdgeArrowSize * scale;
 
+    const auto& partyData = gameHandler.getPartyData();
+    const bool inRaid = partyData.groupType == 1;
+    const uint64_t selfGuid = gameHandler.getPlayerGuid();
+    for (const auto& member : partyData.members) {
+        if (!member.isOnline || member.guid == selfGuid) continue;
+
+        auto mEnt = gameHandler.getEntityManager().getEntity(member.guid);
+        glm::vec3 render;
+        if (mEnt) {
+            render = core::coords::canonicalToRender(
+                glm::vec3(mEnt->getX(), mEnt->getY(), mEnt->getZ()));
+        } else {
+            if (!member.hasPartyStats || (member.posX == 0 && member.posY == 0)) continue;
             // posX/posY follow same server axis convention as minimap pings:
             // server posX = east/west axis → canonical Y (west)
             // server posY = north/south axis → canonical X (north)
-            float wowX = static_cast<float>(member.posY);
-            float wowY = static_cast<float>(member.posX);
-            float sx = 0.0f, sy = 0.0f;
-            if (!frame.projectCanonical(wowX, wowY, sx, sy)) continue;
+            render = core::coords::canonicalToRender(glm::vec3(
+                static_cast<float>(member.posY), static_cast<float>(member.posX), 0.0f));
+        }
+        const glm::vec2 off = renderDeltaToMinimapOffset(render.x - frame.playerRender.x,
+                                                         render.y - frame.playerRender.y,
+                                                         frame.view);
+        const float edge = frame.mapRadius - 3.0f;
+        const bool onMap = square
+            ? (std::fabs(off.x) <= edge && std::fabs(off.y) <= edge)
+            : (off.x * off.x + off.y * off.y <= edge * edge);
 
-            ImU32 dotColor;
-            {
-                // Grey for a corpse or a ghost, which the other party-dot pass
-                // that used to draw over this one was the only thing saying.
-                const bool isDead  = (member.onlineStatus & 0x0020) != 0;
-                const bool isGhost = (member.onlineStatus & 0x0010) != 0;
-                auto mEnt = gameHandler.getEntityManager().getEntity(member.guid);
-                uint8_t cid = entityClassId(mEnt.get());
-                dotColor = (isDead || isGhost)
-                    ? IM_COL32(140, 140, 140, 200)
-                    : (cid != 0)
-                        ? classColorU32(cid, 235)
-                        : (member.guid == leaderGuid)
-                            ? IM_COL32(255, 210, 0, 235)
-                            : IM_COL32(100, 180, 255, 235);
+        float sx = frame.centerX + off.x;
+        float sy = frame.centerY + off.y;
+        if (onMap) {
+            uint8_t cid = entityClassId(mEnt.get());
+            if (cid == 0) cid = gameHandler.lookupPlayerClass(member.guid);
+            const bool otherSubgroup = inRaid && member.subGroup != partyData.subGroup;
+            // A corpse or a ghost greyed, as the old pass did.
+            const bool deadOrGhost = (member.onlineStatus & 0x0030) != 0;
+            const ImU32 tint = deadOrGhost ? IM_COL32(140, 140, 140, 255) : IM_COL32_WHITE;
+            if (cid >= 1 && cid <= 16 && blips) {
+                const int cell = (cid - 1) + (otherSubgroup ? 16 : 0);
+                drawAtlasCell(frame.drawList, blips, cell, kPartyBlipCols, kPartyBlipRows,
+                              sx, sy, blipSize, tint);
+            } else {
+                // Class not known yet: the plain ObjectIcons party / raid blip.
+                drawAtlasCell(frame.drawList, objIcons, otherSubgroup ? 1 : 0,
+                              kObjectIconCols, kObjectIconRows, sx, sy, blipSize, tint);
             }
-            frame.drawList->AddCircleFilled(ImVec2(sx, sy), 4.0f, dotColor);
-            frame.drawList->AddCircle(ImVec2(sx, sy), 4.0f, IM_COL32(255, 255, 255, 160), 12, 1.0f);
+        } else {
+            const float len = std::sqrt(off.x * off.x + off.y * off.y);
+            if (len < 1e-3f) continue;
+            const float nx = off.x / len, ny = off.y / len;
+            const ImVec2 rim = minimapRimPoint(frame.centerX, frame.centerY,
+                                               frame.mapRadius, nx, ny, square);
+            sx = rim.x;
+            sy = rim.y;
+            drawRotated(frame.drawList, groupArrow, sx, sy, arrowSize, nx, ny);
+        }
 
-            // Raid mark: the marker artwork drawn small above the dot
-            {
-                uint8_t pmk = gameHandler.getEntityRaidMark(member.guid);
-                if (pmk < game::GameHandler::kRaidMarkCount) {
-                    if (VkDescriptorSet markTex = ui::getRaidTargetIcon(pmk, services_.assetManager)) {
-                        constexpr float kMarkSize = 10.0f;
-                        frame.drawList->AddImage((ImTextureID)(uintptr_t)markTex,
-                            ImVec2(sx - kMarkSize * 0.5f, sy - 4.0f - kMarkSize),
-                            ImVec2(sx + kMarkSize * 0.5f, sy - 4.0f));
-                    }
-                }
-            }
-
-            if (!member.name.empty() && cursorNearBlip(sx, sy)) {
-                uint8_t pmk2 = gameHandler.getEntityRaidMark(member.guid);
-                if (const char* markName = game::raidMarkName(pmk2)) {
-                    ImGui::SetTooltip("%s {%s}", member.name.c_str(), markName);
-                } else {
-                    ImGui::SetTooltip("%s", member.name.c_str());
-                }
+        if (!member.name.empty() && cursorNearBlip(sx, sy, kSmallBlipHoverRadius)) {
+            uint8_t pmk2 = gameHandler.getEntityRaidMark(member.guid);
+            if (const char* markName = game::raidMarkName(pmk2)) {
+                ImGui::SetTooltip("%s {%s}", member.name.c_str(), markName);
+            } else {
+                ImGui::SetTooltip("%s", member.name.c_str());
             }
         }
     }
-
 }
 
 // Flag carriers and the other positions a battleground reports.
@@ -1184,16 +1444,18 @@ void GameScreen::renderMinimapCorpseMarker(const MinimapFrame& frame, game::Game
             float csx = 0.0f, csy = 0.0f;
             const bool onMap = frame.project(corpseRender, csx, csy);
 
+            const float scale = minimapArtScale(frame.mapRadius);
             if (onMap) {
-                // Draw a small skull-like X marker at the corpse position
-                const float r = 5.0f;
-                frame.drawList->AddCircleFilled(ImVec2(csx, csy), r + 1.0f, IM_COL32(0, 0, 0, 140), 12);
-                frame.drawList->AddCircle(ImVec2(csx, csy), r + 1.0f, IM_COL32(200, 200, 220, 220), 12, 1.5f);
-                // Draw an X in the circle
-                frame.drawList->AddLine(ImVec2(csx - 3.0f, csy - 3.0f), ImVec2(csx + 3.0f, csy + 3.0f),
-                                  IM_COL32(180, 180, 220, 255), 1.5f);
-                frame.drawList->AddLine(ImVec2(csx + 3.0f, csy - 3.0f), ImVec2(csx - 3.0f, csy + 3.0f),
-                                  IM_COL32(180, 180, 220, 255), 1.5f);
+                // The tombstone from POIIcons.blp, at the coordinates
+                // WorldMapCorpseTemplate gives it (worldmapframetemplates.xml).
+                if (VkDescriptorSet poi = minimapArt(kPoiIconsPath, services_.assetManager,
+                                                     services_.window)) {
+                    const float h = kPoiIconSize * scale * 0.5f;
+                    frame.drawList->AddImage(texId(poi), ImVec2(csx - h, csy - h),
+                                             ImVec2(csx + h, csy + h),
+                                             ImVec2(0.56640625f, 0.00390625f),
+                                             ImVec2(0.6328125f, 0.0703125f));
+                }
                 // Tooltip on hover
                 if (cursorNearBlip(csx, csy)) {
                     float dist = gameHandler.getCorpseDistance();
@@ -1216,20 +1478,16 @@ void GameScreen::renderMinimapCorpseMarker(const MinimapFrame& frame, game::Game
                 if (len > 0.001f) {
                     float nx = rx / len;
                     float ny = ry / len;
-                    // Place arrow at the minimap edge
-                    float edgeR = frame.mapRadius - 7.0f;
-                    float ax = frame.centerX + nx * edgeR;
-                    float ay = frame.centerY + ny * edgeR;
-                    // Arrow pointing outward (toward corpse)
-                    float arrowLen = 6.0f;
-                    float arrowW = 3.5f;
-                    ImVec2 tip(ax + nx * arrowLen, ay + ny * arrowLen);
-                    ImVec2 left(ax - ny * arrowW - nx * arrowLen * 0.4f,
-                                ay + nx * arrowW - ny * arrowLen * 0.4f);
-                    ImVec2 right(ax + ny * arrowW - nx * arrowLen * 0.4f,
-                                 ay - nx * arrowW - ny * arrowLen * 0.4f);
-                    frame.drawList->AddTriangleFilled(tip, left, right, IM_COL32(180, 180, 240, 230));
-                    frame.drawList->AddTriangle(tip, left, right, IM_COL32(0, 0, 0, 180), 1.0f);
+                    // The stock corpse arrow, on the rim, turned toward it.
+                    auto* mm = services_.renderer ? services_.renderer->getMinimap() : nullptr;
+                    const ImVec2 rim = minimapRimPoint(frame.centerX, frame.centerY,
+                                                       frame.mapRadius, nx, ny,
+                                                       mm && mm->isSquareShape());
+                    const float ax = rim.x;
+                    const float ay = rim.y;
+                    drawRotated(frame.drawList,
+                                minimapArt(kCorpseArrowPath, services_.assetManager, services_.window),
+                                ax, ay, kEdgeArrowSize * scale, nx, ny);
                     // Tooltip on hover
                     if (cursorNearBlip(ax, ay, kArrowHoverRadius)) {
                         float dist = gameHandler.getCorpseDistance();
@@ -1270,7 +1528,17 @@ void GameScreen::renderMinimapPlayerArrow(const MinimapFrame& frame) {
         float nx =  std::sin(arrowAngle); // screen +X = east
         float ny = -std::cos(arrowAngle); // screen -Y = north
 
-        // Draw a chevron-style arrow: tip, two base corners, and a notch at the back
+        // The stock arrow, Interface\Minimap\MinimapArrow, at the 40x40 that
+        // Minimap.lua sets with SetPlayerTextureWidth/Height.
+        if (VkDescriptorSet arrow = minimapArt(kPlayerArrowPath, services_.assetManager,
+                                               services_.window)) {
+            drawRotated(frame.drawList, arrow, frame.centerX, frame.centerY,
+                        kPlayerArrowSize * minimapArtScale(frame.mapRadius), nx, ny);
+            return;
+        }
+
+        // Only without the texture: a chevron-style arrow - tip, two base
+        // corners, and a notch at the back.
         const float tipLen  = 8.0f;  // tip forward distance
         const float baseW   = 5.0f;  // half-width at base
         const float notchIn = 3.0f;  // how far back the center notch sits
@@ -1418,29 +1686,12 @@ void GameScreen::renderMinimapReadouts(const MinimapFrame& frame, game::GameHand
             ImFont* font = ImGui::GetFont();
             float fontSize = ImGui::GetFontSize();
 
-            const char* weatherIcon = nullptr;
-            ImU32 weatherColor = IM_COL32(255, 255, 255, 200);
-            const game::WeatherKind weatherKind = gameHandler.getWeatherKind();
-            const float weatherIntensity = gameHandler.getWeatherIntensity();
-            if (weatherKind == game::WeatherKind::RAIN && weatherIntensity > 0.05f) {
-                weatherIcon = " \xe2\x9b\x86"; // Rain
-                weatherColor = IM_COL32(140, 180, 240, 220);
-            } else if (weatherKind == game::WeatherKind::SNOW && weatherIntensity > 0.05f) {
-                weatherIcon = " \xe2\x9d\x84"; // Snow
-                weatherColor = IM_COL32(210, 230, 255, 220);
-            } else if (weatherKind != game::WeatherKind::NONE && weatherIntensity > 0.05f) {
-                weatherIcon = " \xe2\x98\x81"; // Storm/fog
-                weatherColor = IM_COL32(160, 160, 190, 220);
-            }
-
             // FrameXML's MinimapZoneText names the zone above the minimap, so
             // naming it again inside the circle put it on screen twice. The
-            // name is drawn here only when this client owns the minimap; the
-            // weather glyph has no counterpart over there and stays either way.
+            // name is drawn here only when this client owns the minimap. No
+            // weather glyph: the stock minimap shows none.
             const bool nameIsOurs = !frameXmlOwns(UiElement::Minimap);
-            const std::string fullLabel = nameIsOurs
-                ? (weatherIcon ? zoneName + weatherIcon : zoneName)
-                : (weatherIcon ? std::string(weatherIcon) : std::string());
+            const std::string fullLabel = nameIsOurs ? zoneName : std::string();
             if (!fullLabel.empty()) {
                 ImVec2 ts = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, fullLabel.c_str());
                 float tx = frame.centerX - ts.x * 0.5f;
@@ -1450,17 +1701,10 @@ void GameScreen::renderMinimapReadouts(const MinimapFrame& frame, game::GameHand
                     ImVec2(tx - pad, ty - pad),
                     ImVec2(tx + ts.x + pad, ty + ts.y + pad),
                     IM_COL32(0, 0, 0, 160), 2.0f);
-                float iconX = tx;
-                if (nameIsOurs) {
-                    drawList->AddText(font, fontSize, ImVec2(tx + 1.0f, ty + 1.0f),
-                                      IM_COL32(0, 0, 0, 180), zoneName.c_str());
-                    drawList->AddText(font, fontSize, ImVec2(tx, ty),
-                                      IM_COL32(255, 230, 150, 220), zoneName.c_str());
-                    iconX += font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, zoneName.c_str()).x;
-                }
-                if (weatherIcon) {
-                    drawList->AddText(font, fontSize, ImVec2(iconX, ty), weatherColor, weatherIcon);
-                }
+                drawList->AddText(font, fontSize, ImVec2(tx + 1.0f, ty + 1.0f),
+                                  IM_COL32(0, 0, 0, 180), zoneName.c_str());
+                drawList->AddText(font, fontSize, ImVec2(tx, ty),
+                                  IM_COL32(255, 230, 150, 220), zoneName.c_str());
             }
         }
     }
@@ -1669,6 +1913,9 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
     const auto& minimapQuestEntries = minimapQuestCreatureEntries_;
     const auto& minimapQuestGoEntries = minimapQuestGameObjectEntries_;
 
+    // Bottom to top, as the stock client stacks them: quest areas under
+    // everything, then tracked things, quest marks, the group, the player.
+    renderMinimapGossipPois(frame, gameHandler);
     renderMinimapNpcDots(frame, minimapUnits, minimapQuestEntries);
     renderMinimapFlightMasters(frame, minimapUnits);
     renderMinimapRares(frame, minimapUnits, gameHandler);
@@ -1677,9 +1924,8 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
     renderMinimapObjectDots(frame, minimapGameObjects, minimapQuestGoEntries, gameHandler);
     renderMinimapChests(frame, minimapGameObjects, gameHandler);
 
-    renderMinimapQuestGivers(frame, statuses, gameHandler);
     renderMinimapQuestKills(frame, minimapUnits, statuses, gameHandler);
-    renderMinimapGossipPois(frame, gameHandler);
+    renderMinimapQuestGivers(frame, statuses, gameHandler);
     renderMinimapPings(frame, gameHandler);
     renderMinimapPartyDots(frame, gameHandler);
     renderMinimapBattlegroundPositions(frame, gameHandler);

@@ -780,29 +780,12 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
 
 // SMSG_WEATHER, and the 0x006B alias some 1.12 servers send it as.
 void GameHandler::applyWeather(uint32_t state, float intensity) {
-    const WeatherKind was = weatherKind(weatherType_);
     const WeatherKind kind = weatherKind(state);
     weatherType_ = state;
     weatherIntensity_ = intensity;
     LOG_INFO("Weather changed: state=", state, ", intensity=", intensity);
-    // Announce weather changes (including initial zone weather)
-    if (kind != was) {
-        const auto announced = [](WeatherKind k) {
-            return k == WeatherKind::RAIN || k == WeatherKind::SNOW ||
-                   k == WeatherKind::THUNDERSTORM;
-        };
-        const char* weatherMsg = nullptr;
-        if (intensity < 0.05f || kind == WeatherKind::NONE) {
-            if (announced(was)) weatherMsg = "The weather clears.";
-        } else if (kind == WeatherKind::RAIN) {
-            weatherMsg = "It begins to rain.";
-        } else if (kind == WeatherKind::SNOW) {
-            weatherMsg = "It begins to snow.";
-        } else if (kind == WeatherKind::THUNDERSTORM) {
-            weatherMsg = "A storm rolls in.";
-        }
-        if (weatherMsg) addSystemChatMessage(weatherMsg);
-    }
+    // No chat line: the stock client says nothing when the weather changes,
+    // it only shows it.
     // Notify addons of weather change
     fireAddonEvent("WEATHER_CHANGED", {std::to_string(state), std::to_string(intensity)});
     // Storm transition: trigger a low-frequency thunder rumble shake
@@ -3871,6 +3854,11 @@ const std::string& GameHandler::getSpellRank(uint32_t spellId) const {
 
 const std::string& GameHandler::getSpellDescription(uint32_t spellId) const {
     if (spellHandler_) return spellHandler_->getSpellDescription(spellId);
+    return EMPTY_STRING;
+}
+
+const std::string& GameHandler::getSpellAuraDescription(uint32_t spellId) const {
+    if (spellHandler_) return spellHandler_->getSpellAuraDescription(spellId);
     return EMPTY_STRING;
 }
 

@@ -77,11 +77,23 @@ struct CreatureSounds {
     uint32_t injuryCritical = 0;
     uint32_t death = 0;
     uint32_t stand = 0;
-    uint32_t footstep = 0;
+    uint32_t footstep = 0;       ///< FootstepTerrainLookup.CreatureFootstepID, not a sound
     uint32_t jumpStart = 0;
     uint32_t jumpEnd = 0;
     uint32_t submerge = 0;
     uint32_t submerged = 0;
+    uint32_t wingFlap = 0;       ///< the model's $WNG events
+    uint32_t fidget[5] = {};     ///< the model's $FD1..$FD5 events
+    uint32_t customAttack[4] = {};  ///< the model's $AH0..$AH3 events
+    uint32_t impactType = 0;     ///< CreatureImpactType: the victim column of WeaponImpactSounds
+};
+
+/// WeaponImpactSounds.dbc columns 3..12 (and the crit set 13..22): what a
+/// weapon sounds like against each kind of victim, shield or parrying weapon.
+enum class ImpactSlot : uint32_t {
+    FLESH = 0, CHAIN = 1, PLATE = 2, SHIELD_METAL = 3, SHIELD_WOOD = 4,
+    PARRY_METAL = 5, PARRY_WOOD = 6, WOOD = 7, STONE = 8, ETHEREAL = 9,
+    COUNT = 10
 };
 
 /// The client's own sound tables, read once and queried by id.
@@ -146,6 +158,25 @@ public:
     [[nodiscard]] const SoundEntry* playerJumpSound(uint32_t raceId, bool female) const;
     [[nodiscard]] const SoundEntry* playerLandSound(uint32_t raceId, bool female) const;
 
+    /// WeaponSwingSounds2: the swoosh for a swing type (0 light, 1 medium,
+    /// 2 heavy) and whether the swing is a crit. 0 when the table has none.
+    [[nodiscard]] uint32_t weaponSwingSound(uint32_t swingType, bool crit) const;
+    /// WeaponImpactSounds: the sound a weapon subclass (Item.dbc class 2
+    /// subclass; 13 Fist is the unarmed row) makes against a victim slot.
+    /// metalWeapon picks the row by the swinging weapon's material (the
+    /// table's second column: 1 metal, 0 wood), falling back to the other row
+    /// of the subclass. 0 when nothing matches.
+    [[nodiscard]] uint32_t weaponImpactSound(uint32_t weaponSubclass, bool metalWeapon, ImpactSlot slot,
+                                             bool crit) const;
+    /// FootstepTerrainLookup: the step a creature footstep set
+    /// (CreatureSoundData.SoundFootstepID) makes on a ground sound type
+    /// (TerrainType.SoundID: 1 dirt ... 9 soggy; 0 when unknown). splash picks
+    /// the SoundIDSplash column, for feet in shallow water.
+    [[nodiscard]] uint32_t footstepSound(uint32_t creatureFootstepId, uint32_t terrainSoundId, bool splash) const;
+    /// ItemDisplayInfo.GroupSoundIndex -> ItemGroupSounds: the pickup or
+    /// put-down sound of an item display. 0 when the display has no group.
+    [[nodiscard]] uint32_t itemFoleySound(uint32_t itemDisplayId, bool pickup) const;
+
 private:
     [[nodiscard]] const SoundEntry* playerVoiceByName(uint32_t raceId, bool female, const char* suffix) const;
 
@@ -165,6 +196,24 @@ private:
     std::unordered_map<uint32_t, NpcSounds> npcSounds_;  // by NPCSounds id
     std::unordered_map<uint64_t, uint32_t> emoteSounds_;  // (emote<<16 | race<<8 | sex) -> sound
     std::unordered_set<uint32_t> emoteTextSoundAnims_;    // anim ids voiced by EmotesTextSound
+
+    // WeaponSwingSounds2: (swingType << 1 | crit) -> sound.
+    std::unordered_map<uint32_t, uint32_t> swingSounds_;
+    // WeaponImpactSounds: (subclass << 1 | metal) -> normal[10], crit[10].
+    struct ImpactRow {
+        uint32_t normal[static_cast<uint32_t>(ImpactSlot::COUNT)] = {};
+        uint32_t crit[static_cast<uint32_t>(ImpactSlot::COUNT)] = {};
+    };
+    std::unordered_map<uint32_t, ImpactRow> impactRows_;
+    // FootstepTerrainLookup: (footstepId << 8 | terrainSoundId) -> sound, splash.
+    std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> footsteps_;
+    // ItemGroupSounds: group -> pickup, put-down.
+    std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> itemGroupSounds_;
+    // ItemDisplayInfo is large and only the item foley wants it: read on the
+    // first ask, through the loader load() was given.
+    Loader loader_;
+    mutable std::shared_ptr<pipeline::DBCFile> itemDisplayInfo_;
+    mutable bool itemDisplayInfoTried_ = false;
 
     // SoundEntries has ten thousand rows and a handful are ever asked for.
     mutable std::unordered_map<uint32_t, SoundEntry> soundCache_;

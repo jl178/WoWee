@@ -14,24 +14,33 @@ layout(set = 0, binding = 0) uniform PerFrame {
 };
 
 layout(push_constant) uniform Push {
-    mat4 model;
-    vec4 celestialColor; // xyz = color, w = unused
-    float intensity;
-    float moonPhase;
-    float animTime;
+    vec4 dirAndSize;   // xyz = unit direction to the sprite, w = half size (radians)
+    vec4 color;        // rgb = tint, a = opacity
+    vec4 mode;         // x = 1 alpha-blended, 0 additive
 } push;
-
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec2 aTexCoord;
 
 layout(location = 0) out vec2 TexCoord;
 
+// Two triangles, corners from the vertex index - no vertex buffer.
+const vec2 kCorners[6] = vec2[](
+    vec2(-1.0, -1.0), vec2( 1.0, -1.0), vec2( 1.0,  1.0),
+    vec2(-1.0, -1.0), vec2( 1.0,  1.0), vec2(-1.0,  1.0));
+
 void main() {
-    TexCoord = aTexCoord;
-    // Sky object: remove camera translation so celestial bodies are at infinite distance
-    mat4 rotView = mat4(mat3(view));
-    vec4 clip = projection * rotView * push.model * vec4(aPos, 1.0);
-    // On the far plane, as the clouds are, so the depth test the sky is now
-    // drawn under rejects it wherever the world has already been drawn.
+    vec2 corner = kCorners[gl_VertexIndex];
+    TexCoord = corner * vec2(0.5, -0.5) + 0.5;
+
+    // A sprite at infinity facing the eye: its centre in view space by the
+    // view's rotation alone, the corners spread square to the line of sight
+    // with the view's up kept up, so it is the same angular size anywhere on
+    // screen.
+    vec3 centre = mat3(view) * normalize(push.dirAndSize.xyz);
+    vec3 right = cross(centre, vec3(0.0, 1.0, 0.0));
+    right = dot(right, right) > 1e-6 ? normalize(right) : vec3(1.0, 0.0, 0.0);
+    vec3 up = cross(right, centre);
+    float r = tan(push.dirAndSize.w);
+    vec3 pos = centre + (right * corner.x + up * corner.y) * r;
+    vec4 clip = projection * vec4(pos, 1.0);
+    // On the far plane, so the depth test keeps it behind the world.
     gl_Position = vec4(clip.xy, clip.w, clip.w);
 }

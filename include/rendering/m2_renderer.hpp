@@ -221,6 +221,19 @@ struct M2ModelGPU {
     std::vector<pipeline::M2ParticleEmitter> particleEmitters;
     std::vector<VkTexture*> particleTextures;    // Resolved Vulkan textures per emitter
     std::vector<VkDescriptorSet> particleTexSets; // Pre-allocated descriptor sets per emitter (stable, avoids per-frame alloc)
+    /// Each emitter's colour, alpha and scale lifetime curves (FBlocks)
+    /// sampled at kSteps + 1 even life ratios, so the particle pass reads
+    /// two table entries per particle instead of walking three key lists.
+    /// FBlock keys sit at 0, 0.5 and 1 in practice, on the grid, so the
+    /// linear read between entries is the curve itself. Built by the update
+    /// on first emission (M2Renderer::ensureParticleCurves) - before any
+    /// particle of the model exists for the draw pass to read.
+    struct ParticleCurve {
+        static constexpr int kSteps = 64;
+        glm::vec4 colorAlpha[kSteps + 1];  // rgb colour, a = min(alpha, 1)
+        float scale[kSteps + 1];
+    };
+    mutable std::vector<ParticleCurve> particleCurves;
 
     // Ribbon emitter data (kept from M2Model)
     std::vector<pipeline::M2RibbonEmitter> ribbonEmitters;
@@ -335,6 +348,10 @@ struct M2Instance {
     /// Seconds of particle time skipped while off screen, paid on the next
     /// step; see the particle loop in M2Renderer::update.
     float particleDtDebt = 0.0f;
+    /// Off screen or out of range: its particles were dropped and it neither
+    /// emits nor steps. particleDtDebt then counts how long it has lain so,
+    /// and the step that wakes it warms the emitters up over that time.
+    bool particlesDormant = false;
     /// The shadow candidate generation in which this instance moved; see
     /// M2Renderer::shadowMovers_.
     uint32_t shadowMoverStamp = 0;
@@ -1259,7 +1276,7 @@ private:
         double preMs = 0.0, animLoopMs = 0.0, bonesMs = 0.0, particlesMs = 0.0;
         uint64_t animatedListed = 0, boneWork = 0, staticPoseSkips = 0, particleListed = 0;
         uint64_t shadowCandidates = 0, shadowCasters = 0, shadowRebuilds = 0, shadowMovers = 0;
-        uint64_t particleFull = 0, particleThrottled = 0, particleLive = 0;
+        uint64_t particleFull = 0, particleDormant = 0, particleLive = 0;
         double queryMs = 0.0;
         uint64_t queryCalls = 0;
         uint32_t frames = 0;
@@ -1353,8 +1370,23 @@ private:
                       const std::vector<uint32_t>& globalSeqDurations);
     float interpFBlockFloat(const pipeline::M2FBlock& fb, float lifeRatio);
     glm::vec3 interpFBlockVec3(const pipeline::M2FBlock& fb, float lifeRatio);
+    /// Spawns what the emitters released over the last dt seconds, each
+    /// particle aged by how long ago in that window it was born. A long dt
+    /// is a warm-up: an emitter coming back into view after lying dormant
+    /// gets its standing population in one call (see M2Renderer::update).
     void emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt);
     void updateParticles(M2Instance& inst, float dt);
+    /// Builds gpu.particleCurves once per model; see M2ModelGPU::ParticleCurve.
+    void ensureParticleCurves(const M2ModelGPU& gpu);
+    /// Per-emitter values the particle step needs, filled once per instance
+    /// step rather than per particle; reused so the step never allocates.
+    struct ParticleStepEmitter {
+        glm::mat4 xf{1.0f};      // model * bone
+        float gravity = 0.0f;
+        float dragFactor = 1.0f; // exp(-drag * dt)
+        float drag = 0.0f;
+    };
+    std::vector<ParticleStepEmitter> particleStepScratch_;
     void updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt);
 
     // Helper to allocate descriptor sets

@@ -1271,8 +1271,8 @@ bool AddonManager::loadFrameXml(const std::string& frameXmlDir) {
         "  f:SetScript('OnDragStop', function(self) self:StopMovingOrSizing() end)\n"
         "end\n"
         "for i = 1, 13 do draggable(_G['ContainerFrame' .. i]) end\n"
-        // Not CharacterFrame: it is a fixed UIPanel in 3.3.5 (no movable, no
-        // drag registration), the panel manager re-anchors it on every show,
+        // Not CharacterFrame: it is a fixed UIPanel in 3.3.5 (movable="true"
+        // but no drag registration), the panel manager re-anchors it on show,
         // and players read a sheet that slides away with the cursor as a bug.
         // The PvP window (H), the battlemaster's list and the scoreboard -
         // asked for with the rest, and fixed panels in 3.3.5 for the same

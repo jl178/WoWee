@@ -142,6 +142,19 @@ public:
     [[nodiscard]] float getBrightness() const { return brightness_; }
     void setIntoxication(float amount) { intoxication_ = glm::clamp(amount, 0.0f, 1.0f); }
     [[nodiscard]] float getIntoxication() const { return intoxication_; }
+    /// The ghost world: 1 desaturates the scene toward a cold grey-blue, as
+    /// the stock client does while the player is a spirit (Light.dbc's death
+    /// slot does the lighting half). Runs in the FXAA pass, which it keeps
+    /// alive; anti-aliasing itself still follows only the user's setting.
+    void setGhostDesaturation(float amount) {
+        ghost_ = ghostPassFailed_ ? 0.0f : glm::clamp(amount, 0.0f, 1.0f);
+    }
+    /// Whether this frame's scene actually goes through the desaturation -
+    /// false until the pass's resources exist, so a caller can cover the gap.
+    [[nodiscard]] bool isGhostDesaturationActive() const {
+        return ghost_ > 0.001f && fxaa_.pipeline != VK_NULL_HANDLE &&
+               fxaa_.sceneFramebuffer != VK_NULL_HANDLE;
+    }
 
 private:
     VkContext* vkCtx_ = nullptr;
@@ -155,8 +168,12 @@ private:
     // Brightness
     float brightness_ = 1.0f;
     float intoxication_ = 0.0f;
+    float ghost_ = 0.0f;
+    bool ghostPassFailed_ = false;
 
-    [[nodiscard]] bool needsFXAAPass() const { return fxaa_.enabled || intoxication_ > 0.001f; }
+    [[nodiscard]] bool needsFXAAPass() const {
+        return fxaa_.enabled || intoxication_ > 0.001f || ghost_ > 0.001f;
+    }
 
     // FSR 1.0 upscaling state
     struct FSRState {

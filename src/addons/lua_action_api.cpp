@@ -16,9 +16,40 @@
 #include <filesystem>
 #include "game/current_action.hpp"
 #include "game/pet_action.hpp"
+#include "addons/lua_services.hpp"
+#include "audio/audio_coordinator.hpp"
+#include "audio/audio_engine.hpp"
+#include "audio/sound_data.hpp"
+#include "audio/ui_sound_manager.hpp"
+#include <cstdlib>
 #include <SDL3/SDL_keyboard.h>
 
 namespace wowee::addons {
+
+namespace {
+/// The item's own pickup or put-down sound, as the stock client plays it
+/// when an item goes onto or comes off the cursor: ItemDisplayInfo's
+/// GroupSoundIndex names an ItemGroupSounds row (PickUpCloth_Leather /
+/// PutDownClothLeather, PickUpMetalLarge, PickUpRing, PickUpBook...).
+/// displayId may be 0, and the item cache is asked for it.
+void playItemFoley(lua_State* L, uint32_t itemId, uint32_t displayId, bool pickup) {
+    auto* svc = getLuaServices(L);
+    auto* ac = svc ? svc->audioCoordinator : nullptr;
+    const auto* data = ac ? ac->getSoundData() : nullptr;
+    if (!data) return;
+    if (displayId == 0 && itemId != 0) {
+        if (auto* gh = getGameHandler(L)) {
+            if (const auto* info = gh->getItemInfo(itemId)) displayId = info->displayInfoId;
+        }
+    }
+    const audio::SoundEntry* entry = data->sound(data->itemFoleySound(displayId, pickup));
+    if (!entry || entry->files.empty()) return;
+    float volume = entry->volume;
+    if (auto* ui = ac->getUiSoundManager()) volume *= ui->getVolumeScale();
+    const auto& file = entry->files[static_cast<size_t>(std::rand()) % entry->files.size()];
+    audio::AudioEngine::instance().playSound2D(file, volume, 1.0f);
+}
+} // namespace
 
 // What the interface is holding.
 //
@@ -86,9 +117,12 @@ uint32_t cursorItemId() {
 }
 
 int cursorEquipSlot() {
-    // s_cursorBag is -1 only for a pickup off the paperdoll, where s_cursorSlot
-    // is the one-based slot the item came out of.
-    return (s_cursorType == CursorType::ITEM && s_cursorBag == -1) ? s_cursorSlot : 0;
+    // s_cursorBag is -1 for a pickup off the paperdoll, where s_cursorSlot is
+    // the one-based slot the item came out of - but also for the bank's own
+    // squares (BANK_CONTAINER is -1), so the equipped flag decides. Without it
+    // lifting bank slot 5 greyed the chest slot on the character sheet.
+    return (s_cursorType == CursorType::ITEM && s_cursorBag == -1 &&
+            cursorItemSlot().equipped) ? s_cursorSlot : 0;
 }
 
 bool cursorItemCameFromInventory() {
@@ -790,7 +824,25 @@ static bool cursorWireSlot(uint8_t& bag, uint8_t& slot) {
 }
 
 /// Put the cursor down.
+///
+/// And unlock the slot the item came out of. The lock is nothing but "this
+/// slot's item is on the cursor" (IsInventoryItemLocked, GetContainerItemInfo's
+/// locked), so it ends here - but the paperdoll and the bags only re-read it on
+/// ITEM_LOCK_CHANGED. Only some put-down paths said so; putting an item back on
+/// the character sheet slot it came from (PickupInventoryItem on the same
+/// slot), ClearCursor, AutoEquipCursorItem and the rest did not, and no item
+/// update follows a move that changed nothing, so the slot stayed dark grey.
+/// Fired here, once, after the state is cleared, so every path is covered and
+/// the handler reads "unlocked".
 static void clearCursorItem(lua_State* L) {
+    const bool hadInventoryItem = s_cursorType == CursorType::ITEM &&
+                                  game::slots::cursorSourceIsInventory(s_cursorBag);
+    const auto wasHeld = cursorItemSlot();
+    const int wasBag = s_cursorBag, wasSlot = s_cursorSlot;
+    // Putting an item down, wherever it lands (back in its slot included),
+    // makes its put-down sound.
+    if (s_cursorType == CursorType::ITEM && s_cursorId != 0)
+        playItemFoley(L, static_cast<uint32_t>(s_cursorId), 0, /*pickup=*/false);
     s_cursorMoney = 0;
     s_cursorSplit = 0;
     setCursorType(L, CursorType::NONE);
@@ -799,7 +851,22 @@ static void clearCursorItem(lua_State* L) {
     s_cursorBag = -1;
     wowee::ui::frameXmlSetCursorItem(std::string());
     cursorItemSlot() = {};
+    if (hadInventoryItem && wasSlot > 0) {
+        if (auto* gh = getGameHandler(L)) {
+            // An equipment slot is the slot alone - the paperdoll's handler is
+            // `not arg2 and arg1 == self:GetID()`. A bag slot (the bank's own
+            // squares are container -1) is the container and the slot.
+            if (wasHeld.equipped) {
+                gh->fireAddonEvent("ITEM_LOCK_CHANGED", {std::to_string(wasSlot)});
+            } else {
+                gh->fireAddonEvent("ITEM_LOCK_CHANGED",
+                                   {std::to_string(wasBag), std::to_string(wasSlot)});
+            }
+        }
+    }
 }
+
+void clearCursor(lua_State* L) { clearCursorItem(L); }
 
 static bool droppedItemFromNowhere(lua_State* L) {
     if (s_cursorType != CursorType::ITEM) return false;
@@ -898,6 +965,7 @@ static void pickupFromContainerSlot(lua_State* L, game::GameHandler* gh,
     if (itemSlot && !itemSlot->empty()) {
         setCursorType(L, CursorType::ITEM);
         s_cursorId = itemSlot->item.itemId;
+        playItemFoley(L, itemSlot->item.itemId, itemSlot->item.displayInfoId, /*pickup=*/true);
         s_cursorBag = bag;
         s_cursorSlot = slot;
         uint32_t displayId = itemSlot->item.displayInfoId;
@@ -1053,14 +1121,10 @@ static int lua_PickupContainerItem(lua_State* L) {
         // the bank, so dropping the helm on bank slot one read as putting it
         // back where it came from and quietly did nothing.
         if (s_cursorBag == bag && s_cursorSlot == slot && !cursorItemSlot().equipped) {
-            const int sameBag = bag, sameSlot = slot;
-            clearCursorItem(L);
-            gh->fireAddonEvent("ITEM_LOCK_CHANGED",
-                               {std::to_string(sameBag), std::to_string(sameSlot)});
+            clearCursorItem(L);   // fires ITEM_LOCK_CHANGED for this slot
             return 0;
         }
 
-        const int wasBag = s_cursorBag, wasSlot = s_cursorSlot;
         // Part of a stack moves as a split rather than a swap: a swap would
         // send the whole thing, which is not what was picked up.
         if (s_cursorSplit > 0) {
@@ -1069,9 +1133,9 @@ static int lua_PickupContainerItem(lua_State* L) {
         } else {
             gh->swapContainerItems(srcBag, srcSlot, dstBag, dstSlot);
         }
+        // Unlocks the source in the form its frame listens for (slot alone for
+        // a worn item, bag+slot otherwise); the destination is said here.
         clearCursorItem(L);
-        gh->fireAddonEvent("ITEM_LOCK_CHANGED",
-                           {std::to_string(wasBag), std::to_string(wasSlot)});
         gh->fireAddonEvent("ITEM_LOCK_CHANGED",
                            {std::to_string(bag), std::to_string(slot)});
         return 0;
@@ -1183,6 +1247,7 @@ static int lua_PickupBagFromSlot(lua_State* L) {
     }
     setCursorType(L, CursorType::ITEM);
     s_cursorId = held.item.itemId;
+    playItemFoley(L, held.item.itemId, held.item.displayInfoId, /*pickup=*/true);
     s_cursorSlot = slot;
     s_cursorBag = -1;
     // The shared cursor as well as this file's own. Everything that receives a
@@ -1232,9 +1297,20 @@ static int lua_PickupInventoryItem(lua_State* L) {
     // Carrying something: equip it here, which is the other half of the drag.
     uint8_t srcBag = 0, srcSlot = 0;
     if (cursorWireSlot(srcBag, srcSlot)) {
-        gh->swapContainerItems(srcBag, srcSlot, 0xFF,
-                               static_cast<uint8_t>(slot - 1));
+        // Back on the slot it came off: put it down. Sending a swap of a slot
+        // with itself only earns an SMSG_INVENTORY_CHANGE_FAILURE and no item
+        // update, so nothing would redraw the slot.
+        const bool sameSlot = cursorItemSlot().equipped && s_cursorSlot == slot;
+        if (!sameSlot) {
+            gh->swapContainerItems(srcBag, srcSlot, 0xFF,
+                                   static_cast<uint8_t>(slot - 1));
+        }
+        // Fires ITEM_LOCK_CHANGED for the source slot, which is what clears the
+        // dark grey on the paperdoll (or the bag square the item came from).
         clearCursorItem(L);
+        // And the destination, which redraws as soon as the server's update
+        // lands; saying it now costs one UpdateLock.
+        if (!sameSlot) gh->fireAddonEvent("ITEM_LOCK_CHANGED", {std::to_string(slot)});
         return 0;
     }
 
@@ -1243,6 +1319,7 @@ static int lua_PickupInventoryItem(lua_State* L) {
     if (!eq.empty()) {
         setCursorType(L, CursorType::ITEM);
         s_cursorId = eq.item.itemId;
+        playItemFoley(L, eq.item.itemId, eq.item.displayInfoId, /*pickup=*/true);
         s_cursorSlot = slot;
         s_cursorBag = -1;
         // The same three things a container pickup does, which this had none
@@ -2361,11 +2438,11 @@ void registerActionLuaAPI(lua_State* L) {
                 // clickable. The client has tracked pet spell cooldowns all
                 // along - they arrive on the same packet as the player's.
                 //
-                // Only the remaining time is kept, not the original duration,
-                // so the cooldown is reported as starting now and lasting what
-                // is left. That draws exactly the remaining arc, which is the
-                // part anyone reads, and it is what the item cooldown beside it
-                // does for the same reason.
+                // The start is wound back by however much of the cooldown has
+                // already run, against the total recorded when it began. Asked
+                // as "now, for what is left", every PET_BAR_UPDATE_COOLDOWN -
+                // which comes with each of the player's own cooldown changes -
+                // restarted the pet's swirl from full.
                 {"GetPetActionCooldown", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
@@ -2377,14 +2454,16 @@ void registerActionLuaAPI(lua_State* L) {
             }
             const uint32_t packed = gh->getPetActionSlot(index - 1);
             // A command or a stance has no cooldown of its own.
-            const float remaining = game::pet::isPetSpellAction(packed)
-                ? gh->getSpellCooldown(game::pet::petActionId(packed)) : 0.0f;
+            const bool isSpell = game::pet::isPetSpellAction(packed);
+            const uint32_t petSpell = isSpell ? game::pet::petActionId(packed) : 0;
+            const float remaining = isSpell ? gh->getSpellCooldown(petSpell) : 0.0f;
             if (remaining <= 0.01f) {
                 lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 1);
                 return 3;
             }
-            lua_pushnumber(L, luaGetTimeNow());
-            lua_pushnumber(L, remaining);
+            const float total = std::max(remaining, gh->getSpellCooldownTotal(petSpell));
+            lua_pushnumber(L, luaGetTimeNow() - (total - remaining));
+            lua_pushnumber(L, total);
             lua_pushnumber(L, 1);
             return 3;
         }},

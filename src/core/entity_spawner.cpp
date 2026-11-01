@@ -89,42 +89,114 @@ void EntitySpawner::update() {
     processPendingTransportDoodads();
     processPendingMount();
     processPendingRemotePlayerMounts();
-    syncCreatureStealthVisuals();
+    // After the creature queue, which is what builds a morph's model.
+    processPendingPlayerMorphs();
+    syncUnitPresentation();
 }
 
-void EntitySpawner::syncCreatureStealthVisuals() {
-    if (!renderer_ || !gameHandler_) return;
-    auto* characterRenderer = renderer_->getCharacterRenderer();
-    if (!characterRenderer) return;
+bool EntitySpawner::isStealthAuraSpell(uint32_t spellId) {
+    if (spellId == 0 || !gameHandler_) return false;
+    if (auto it = stealthAuraSpells_.find(spellId); it != stealthAuraSpells_.end())
+        return it->second;
+    // Spell.dbc EffectApplyAuraName. Asking for the name is what fills the
+    // cache entry that carries it.
+    constexpr uint32_t kAuraModStealth = 16;
+    constexpr uint32_t kAuraModInvisibility = 18;
+    gameHandler_->getSpellName(spellId);
+    const auto& cache = gameHandler_->spellNameCacheRef();
+    auto it = cache.find(spellId);
+    if (it == cache.end()) return false;  // not loaded yet: ask again next time
+    bool stealth = false;
+    for (uint32_t aura : it->second.effectAuraIds) {
+        if (aura == kAuraModStealth || aura == kAuraModInvisibility) stealth = true;
+    }
+    stealthAuraSpells_[spellId] = stealth;
+    return stealth;
+}
 
-    // Stealth flags flip rarely, but this scan visits every spawned creature.
-    // Doing that each frame with the mutex-locked getEntity() plus a
-    // dynamic_pointer_cast per creature was a measurable main-thread cost in
-    // crowded areas - a few sweeps per second is visually indistinguishable.
-    if (++stealthSyncFrameCounter_ % 15 != 0) return;
+float EntitySpawner::unitPresentationAlpha(uint64_t guid, const game::Unit& unit, bool isLocal) {
+    // Stock 3.3.5a draws both at half opacity: a ghost you can see (only
+    // another ghost can), and a stealthed or invisible unit you can see -
+    // your own character among them. Undetected stealth never reaches the
+    // client; the server culls it.
+    constexpr float kSeeThrough = 0.5f;
+    constexpr uint32_t kPlayerFlagsGhost = 0x10;
+    if (isLocal) {
+        if (gameHandler_->isPlayerGhost()) return kSeeThrough;
+    } else if (unit.getType() == game::ObjectType::PLAYER) {
+        const uint16_t flagsIdx = game::fieldIndex(game::UF::PLAYER_FLAGS);
+        if (flagsIdx != 0xFFFF && (unit.getField(flagsIdx) & kPlayerFlagsGhost) != 0)
+            return kSeeThrough;
+    }
+    // UNIT_FIELD_BYTES_1 visibility byte: CREEP is what MOD_STEALTH sets, for
+    // rogues, cats and Shadowmeld alike.
+    if (unit.hasCreepVisibility()) return kSeeThrough;
+    // Invisibility (a mage's, a potion's) sets no visibility flag; the aura
+    // is the only sign of it. The local player's own list, or whatever this
+    // client was told about the unit.
+    const std::vector<game::AuraSlot>* auras =
+        isLocal ? &gameHandler_->getPlayerAuras() : gameHandler_->getUnitAuras(guid);
+    if (auras) {
+        for (const auto& aura : *auras) {
+            if (!aura.isEmpty() && isStealthAuraSpell(aura.spellId)) return kSeeThrough;
+        }
+    }
+    return 1.0f;
+}
+
+void EntitySpawner::presentUnitAlpha(uint64_t guid, uint32_t instanceId, float alpha) {
+    auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    if (!cr || instanceId == 0) return;
+    auto [it, inserted] = unitPresentedAlpha_.try_emplace(guid, PresentedAlpha{instanceId, alpha});
+    if (inserted) {
+        // First look at an opaque unit: leave its spawn fade-in alone.
+        if (alpha < 0.999f) cr->setInstanceOpacity(instanceId, alpha);
+        return;
+    }
+    if (it->second.instanceId == instanceId && it->second.alpha == alpha) return;
+    it->second = {instanceId, alpha};
+    cr->setInstanceOpacity(instanceId, alpha);
+}
+
+void EntitySpawner::syncUnitPresentation() {
+    if (!renderer_ || !gameHandler_) return;
+    if (!renderer_->getCharacterRenderer()) return;
 
     // EntitySpawner::update() runs on the main thread, so the unlocked
-    // getEntities() reference is safe and avoids a mutex acquire per creature.
+    // getEntities() reference is safe and avoids a mutex acquire per unit.
     const auto& entities = gameHandler_->getEntityManager().getEntities();
-
-    // Undetected stealth is culled by the server. Units that are sent with the
-    // CREEP visibility flag use the translucent detected-stealth presentation.
-    constexpr float kDetectedStealthOpacity = 0.35f;
-    for (const auto& [guid, instanceId] : creatureInstances_) {
+    auto unitFor = [&](uint64_t guid) -> const game::Unit* {
         auto entIt = entities.find(guid);
-        if (entIt == entities.end() || !entIt->second) continue;
+        if (entIt == entities.end() || !entIt->second) return nullptr;
         const game::Entity* entity = entIt->second.get();
         if (entity->getType() != game::ObjectType::UNIT &&
-            entity->getType() != game::ObjectType::PLAYER) continue;
-        const auto* unit = static_cast<const game::Unit*>(entity);
+            entity->getType() != game::ObjectType::PLAYER) return nullptr;
+        return static_cast<const game::Unit*>(entity);
+    };
 
-        const bool stealthed = unit->hasCreepVisibility();
-        auto [it, inserted] = creatureWasStealthed_.try_emplace(guid, stealthed);
-        if (!inserted && it->second == stealthed) continue;
+    // The local player every frame: one unit, and the one whose stealth the
+    // player is watching for.
+    if (const uint64_t self = gameHandler_->getPlayerGuid(); self != 0) {
+        const uint32_t drawn = renderer_->getCharacterInstanceId();
+        if (const auto* unit = unitFor(self); unit && drawn != 0) {
+            presentUnitAlpha(self, drawn, unitPresentationAlpha(self, *unit, /*isLocal=*/true));
+        }
+    }
 
-        it->second = stealthed;
-        characterRenderer->setInstanceOpacity(
-            instanceId, stealthed ? kDetectedStealthOpacity : 1.0f);
+    // Everyone else a few times a second. The flags flip rarely, and this
+    // visits every spawned unit; each frame it was a measurable main-thread
+    // cost in crowded areas.
+    if (++stealthSyncFrameCounter_ % 15 != 0) return;
+    for (const auto& [guid, instanceId] : creatureInstances_) {
+        if (const auto* unit = unitFor(guid))
+            presentUnitAlpha(guid, instanceId, unitPresentationAlpha(guid, *unit, false));
+    }
+    // Other players - drawn as themselves or as their morph, which is what
+    // this map holds while one is drawn. Their ghosts were never translucent
+    // before, and neither was a stealthed rogue in the party.
+    for (const auto& [guid, instanceId] : playerInstances_) {
+        if (const auto* unit = unitFor(guid))
+            presentUnitAlpha(guid, instanceId, unitPresentationAlpha(guid, *unit, false));
     }
 }
 
@@ -144,13 +216,16 @@ void EntitySpawner::shutdown() {
     creatureWalkingState_.clear();
     creatureFlyingState_.clear();
     creatureActiveEmotes_.clear();
-    creatureWasStealthed_.clear();
+    unitPresentedAlpha_.clear();
     creatureWeaponsAttached_.clear();
     creatureWeaponAttachAttempts_.clear();
     playerInstances_.clear();
     onlinePlayerAppearance_.clear();
     remotePlayerMounts_.clear();
     pendingRemotePlayerMounts_.clear();
+    playerMorphs_.clear();
+    pendingPlayerMorphs_.clear();
+    corpseBonesInstances_.clear();
     gameObjectInstances_.clear();
 }
 
@@ -160,7 +235,16 @@ void EntitySpawner::resetAllState() {
         if (load.future.valid()) load.future.wait();
     }
 
-    // Despawn all entities (renderer cleanup)
+    // Despawn all entities (renderer cleanup). The local player's morph
+    // first: it is in no instance map, and the renderer's character slot
+    // has to be handed back to the character before that goes too.
+    {
+        std::vector<uint64_t> morphed;
+        morphed.reserve(playerMorphs_.size());
+        for (const auto& [g, _] : playerMorphs_) morphed.push_back(g);
+        for (auto g : morphed) clearPlayerMorph(g);
+        pendingPlayerMorphs_.clear();
+    }
     despawnAllCreatures();
     despawnAllPlayers();
     despawnAllGameObjects();
@@ -193,7 +277,8 @@ void EntitySpawner::resetAllState() {
     // Carried over, a stale entry matching the creature's current stealth state
     // suppresses the opacity call that would apply it, so a stealthed NPC came
     // back fully opaque after a relog. shutdown() already cleared this.
-    creatureWasStealthed_.clear();
+    unitPresentedAlpha_.clear();
+    corpseBonesModels_.clear();
     creatureWeaponsAttached_.clear();
     creatureWeaponAttachAttempts_.clear();
     modelIdIsWolfLike_.clear();
@@ -367,8 +452,10 @@ void EntitySpawner::despawnAllCreatures() {
 
 void EntitySpawner::despawnAllPlayers() {
     std::vector<uint64_t> guids;
-    guids.reserve(playerInstances_.size());
+    guids.reserve(playerInstances_.size() + corpseBonesInstances_.size());
     for (const auto& [g, _] : playerInstances_) guids.push_back(g);
+    // Bones are drawn under their corpse's guid and despawned with it.
+    for (const auto& [g, _] : corpseBonesInstances_) guids.push_back(g);
     for (auto g : guids) despawnPlayer(g);
 }
 
@@ -632,6 +719,11 @@ uint32_t EntitySpawner::unitIdleAnim(uint64_t guid, uint32_t instanceId) {
     auto entity = gameHandler_->getEntityManager().getEntity(guid);
     if (!entity || !entity->isUnit()) return STAND;
     auto unit = std::static_pointer_cast<game::Unit>(entity);
+    // Stealthed (the CREEP visibility flag): the crouched StealthStand, as
+    // the local character's animator already picks for itself.
+    if (unit->getHealth() != 0 && unit->hasCreepVisibility() &&
+        cr->hasAnimation(instanceId, STEALTH_STAND))
+        return STEALTH_STAND;
     if (unit->getHealth() == 0 || (unit->getUnitFlags() & game::UNIT_FLAG_IN_COMBAT) == 0)
         return STAND;
     const uint32_t want = readyAnim(unitWeaponLoadout(guid),
@@ -639,6 +731,19 @@ uint32_t EntitySpawner::unitIdleAnim(uint64_t guid, uint32_t instanceId) {
     auto has = [&](uint32_t id) { return cr->hasAnimation(instanceId, id); };
     const uint32_t id = firstPlayable(has, {want});
     return id != 0 ? id : STAND;
+}
+
+uint32_t EntitySpawner::unitMoveAnim(uint64_t guid, uint32_t instanceId, uint32_t moveAnim) {
+    using namespace rendering::anim;
+    if (moveAnim != WALK && moveAnim != RUN) return moveAnim;
+    auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    if (!cr || !gameHandler_ || instanceId == 0) return moveAnim;
+    auto entity = gameHandler_->getEntityManager().getEntity(guid);
+    if (!entity || !entity->isUnit()) return moveAnim;
+    if (!std::static_pointer_cast<game::Unit>(entity)->hasCreepVisibility()) return moveAnim;
+    if (moveAnim == RUN && cr->hasAnimation(instanceId, STEALTH_RUN)) return STEALTH_RUN;
+    if (cr->hasAnimation(instanceId, STEALTH_WALK)) return STEALTH_WALK;
+    return moveAnim;
 }
 
 void EntitySpawner::playSheathSound(const ItemDbcRow& item, bool drawing, const glm::vec3& renderPos) {
@@ -681,6 +786,10 @@ void EntitySpawner::playSheathSound(const ItemDbcRow& item, bool drawing, const 
 }
 
 void EntitySpawner::syncUnitSheath(uint64_t guid, uint32_t instanceId) {
+    // A player drawn as a form: the weapons belong to the character's own
+    // (hidden) model, never to the bear or the sheep that stands in for it.
+    if (auto morph = playerMorphs_.find(guid); morph != playerMorphs_.end())
+        instanceId = morph->second.nativeInstanceId;
     auto it = unitSheathAttached_.find(guid);
     if (it == unitSheathAttached_.end() || instanceId == 0) return;
     auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
@@ -732,7 +841,7 @@ void EntitySpawner::syncUnitSheath(uint64_t guid, uint32_t instanceId) {
     for (int i = 0; i < 2; ++i) {
         if (displays[i] == 0) continue;
         const auto inv = static_cast<uint8_t>(items[i].inventoryType);
-        spots[i] = sheathSpotFor(hands[i], sheathPlacementInvType(items[i].sheatheType, inv));
+        spots[i] = sheathSpotFor(sheathedAttachment(items[i].sheatheType, hands[i], inv));
     }
     // Drawing or putting away the ranged weapon reaches for the back.
     if ((state == 2 || it->second == 2) && displays[2] != 0) spots[0] = rendering::SheathSpot::BACK;
@@ -781,9 +890,8 @@ bool EntitySpawner::attachUnitWeapons(uint64_t guid, uint32_t instanceId,
 
     // Every point a weapon-slot item can sit on, held or put away, so an
     // item that moved leaves no copy behind.
-    constexpr uint32_t kShieldMount = 0, kRightHand = 1, kLeftHand = 2, kBack = 12,
-                       kSheathShield = 28, kHipLeft = 32, kHipRight = 33;
-    for (uint32_t a : {kShieldMount, kRightHand, kLeftHand, kBack, kSheathShield, kHipLeft, kHipRight})
+    constexpr uint32_t kShieldMount = 0, kRightHand = 1, kLeftHand = 2, kBack = 12;
+    for (uint32_t a : {kShieldMount, kRightHand, kLeftHand, kBack, 26u, 27u, 28u, 30u, 31u, 32u, 33u})
         charRenderer->detachWeapon(instanceId, a);
 
     auto attachDisplay = [&](uint32_t displayId, uint32_t attachmentId,
@@ -810,20 +918,40 @@ bool EntitySpawner::attachUnitWeapons(uint64_t guid, uint32_t instanceId,
     };
 
     bool any = false;
-    bool backTaken = false;
+    std::vector<uint32_t> taken;
+    auto isTaken = [&](uint32_t a) { return std::find(taken.begin(), taken.end(), a) != taken.end(); };
+    // Put away: on the sheath point (identity - the point's bone carries the
+    // orientation), or, for a model without that point or with it already
+    // used, on the plain Back point laid out by weaponLocalTransform.
+    auto attachAway = [&](uint32_t displayId, uint32_t attachmentId) -> bool {
+        if (!isTaken(attachmentId) && attachDisplay(displayId, attachmentId, glm::mat4(1.0f))) {
+            taken.push_back(attachmentId);
+            return true;
+        }
+        if (isLegacyBackFallbackPoint(attachmentId) && !isTaken(kBack) &&
+            attachDisplay(displayId, kBack,
+                          weaponLocalTransform(true, game::EquipSlot::MAIN_HAND, game::InvType::TWO_HAND))) {
+            taken.push_back(kBack);
+            return true;
+        }
+        return false;
+    };
     const bool meleeDrawn = (sheath == 1);
     const game::EquipSlot hands[2] = {game::EquipSlot::MAIN_HAND, game::EquipSlot::OFF_HAND};
     for (int i = 0; i < 2; ++i) {
         if (displayIds[i] == 0) continue;
         const auto inv = static_cast<uint8_t>(items[i].inventoryType);
-        // Held by inventory type (a shield on its mount, a weapon in its
-        // hand); put away by the item's own sheathe type.
-        const uint8_t place = meleeDrawn ? inv : sheathPlacementInvType(items[i].sheatheType, inv);
-        const uint32_t attachmentId = weaponAttachment(!meleeDrawn, hands[i], place);
-        if (attachmentId == UINT32_MAX) continue;
-        if (attachDisplay(displayIds[i], attachmentId, weaponLocalTransform(!meleeDrawn, hands[i], place))) {
-            any = true;
-            if (attachmentId == kBack) backTaken = true;
+        if (meleeDrawn) {
+            // Held by inventory type: a shield on its mount, a weapon in its hand.
+            const uint32_t attachmentId = weaponAttachment(false, hands[i], inv);
+            if (attachDisplay(displayIds[i], attachmentId, glm::mat4(1.0f))) {
+                taken.push_back(attachmentId);
+                any = true;
+            }
+        } else {
+            // Put away by the item's own sheathe type.
+            const uint32_t attachmentId = sheathedAttachment(items[i].sheatheType, hands[i], inv);
+            if (attachmentId != UINT32_MAX && attachAway(displayIds[i], attachmentId)) any = true;
         }
     }
 
@@ -840,10 +968,8 @@ bool EntitySpawner::attachUnitWeapons(uint64_t guid, uint32_t instanceId,
                                                : inv == game::InvType::THROWN;
         if (sheath == 2) {
             any |= attachDisplay(displayIds[2], isBow ? kLeftHand : kRightHand, glm::mat4(1.0f));
-        } else if (!hiddenWhenAway && !backTaken) {
-            any |= attachDisplay(displayIds[2], kBack,
-                                 weaponLocalTransform(true, game::EquipSlot::MAIN_HAND,
-                                                      game::InvType::TWO_HAND));
+        } else if (!hiddenWhenAway) {
+            any |= attachAway(displayIds[2], rangedSheathAttachment());
         }
     }
     return any;

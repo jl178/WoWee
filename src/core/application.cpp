@@ -899,6 +899,21 @@ bool Application::initialize() {
             gameHandler->setAddonEventCallback([this](const std::string& event, const std::vector<std::string>& args) {
                 if (addonManager_ && addonsLoaded_) {
                     addonManager_->fireEvent(event, args);
+                    // The stance and pet bars' halves of the same news. The
+                    // real client raises these beside the action bar's own
+                    // whenever a cooldown starts or ends or usability moves -
+                    // bonusactionbarframe.lua redraws the stance buttons'
+                    // swirls and dimming only on these, and petactionbarframe
+                    // its cooldowns only on PET_BAR_UPDATE_COOLDOWN. Pet spell
+                    // cooldowns arrive on the player's own SMSG_SPELL_COOLDOWN
+                    // path, so one hook covers every place that fires the
+                    // action bar's event, the expiry tick included.
+                    if (event == "ACTIONBAR_UPDATE_COOLDOWN") {
+                        addonManager_->fireEvent("UPDATE_SHAPESHIFT_COOLDOWN", {});
+                        addonManager_->fireEvent("PET_BAR_UPDATE_COOLDOWN", {});
+                    } else if (event == "ACTIONBAR_UPDATE_USABLE") {
+                        addonManager_->fireEvent("UPDATE_SHAPESHIFT_USABLE", {});
+                    }
                 }
             });
             // How a keybinding reaches the frame that replaced this client's own
@@ -2301,7 +2316,8 @@ void Application::setState(AppState newState) {
             spawnedAppearanceBytes_ = 0;
             spawnedFacialFeatures_ = 0;
             if (renderer && renderer->getCharacterRenderer()) {
-                uint32_t oldInst = renderer->getCharacterInstanceId();
+                // The character itself; a form over it goes with the spawner.
+                uint32_t oldInst = renderer->getNativeCharacterInstanceId();
                 if (oldInst > 0) {
                     renderer->setCharacterFollow(0);
                     if (auto* ac = renderer->getAnimationController()) ac->clearMount();
@@ -3582,17 +3598,20 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                                 }
                             }
                         }
+                        // Sneaking: StealthWalk/StealthRun where the model has them.
+                        targetAnim = entitySpawner_->unitMoveAnim(guid, instanceId, targetAnim);
                         charRenderer->playAnimation(instanceId, targetAnim, /*loop=*/true);
                     }
                 }
 
                 // Combat starting or ending while the creature stands still:
                 // Stand <-> Ready, over an idle only (never over a swing, an
-                // emote loop or a death).
+                // emote loop or a death). Stealth in and out the same way.
                 if (!isMovingNow && !isSwimmingNow && !isFlyingNow && !deadOrCorpse) {
                     uint32_t curIdle = 0; float idleT = 0.0f, idleD = 0.0f;
                     if (charRenderer->getAnimationState(instanceId, curIdle, idleT, idleD) &&
-                        (curIdle == rendering::anim::STAND || rendering::anim::isReadyStance(curIdle))) {
+                        (curIdle == rendering::anim::STAND || rendering::anim::isReadyStance(curIdle) ||
+                         curIdle == rendering::anim::STEALTH_STAND)) {
                         uint32_t idle = entitySpawner_->unitIdleAnim(guid, instanceId);
                         auto emoteIt = _creatureActiveEmotes.find(guid);
                         if (idle == rendering::anim::STAND && emoteIt != _creatureActiveEmotes.end() &&
@@ -3811,16 +3830,19 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                             // In combat, the drawn weapon's Ready stance.
                             else targetAnim = entitySpawner_->unitIdleAnim(guid, instanceId);
                         }
+                        // A stealthed rogue, cat or night elf sneaks.
+                        targetAnim = entitySpawner_->unitMoveAnim(guid, instanceId, targetAnim);
                         charRenderer->playAnimation(instanceId, targetAnim, /*loop=*/true);
                     }
                 }
 
                 // Combat starting or ending while the player stands still:
-                // Stand <-> Ready, over an idle only.
+                // Stand <-> Ready, over an idle only. Stealth in and out too.
                 if (!remoteMount && !isMovingNow && !isSwimmingNow && !isFlyingNow && !deadOrCorpse) {
                     uint32_t curIdle = 0; float idleT = 0.0f, idleD = 0.0f;
                     if (charRenderer->getAnimationState(instanceId, curIdle, idleT, idleD) &&
-                        (curIdle == rendering::anim::STAND || rendering::anim::isReadyStance(curIdle))) {
+                        (curIdle == rendering::anim::STAND || rendering::anim::isReadyStance(curIdle) ||
+                         curIdle == rendering::anim::STEALTH_STAND)) {
                         const uint32_t idle = entitySpawner_->unitIdleAnim(guid, instanceId);
                         if (idle != curIdle) charRenderer->playAnimation(instanceId, idle, /*loop=*/true);
                     }
@@ -4430,17 +4452,13 @@ void Application::render() {
 
                         // The zoom buttons move a number on the frame, and the
                         // map has to be told: Minimap:SetZoom is the interface
-                        // saying what it wants, not the map changing. Five
-                        // levels as WoW has them, zero furthest out.
+                        // saying what it wants, not the map changing. Six
+                        // levels as WoW has them (0-5), zero furthest out; the
+                        // yards per level are the stock table in minimap.hpp.
                         static int appliedZoom = -1;
                         if (mm->zoomLevel != appliedZoom) {
                             appliedZoom = mm->zoomLevel;
-                            static const float kRadius[5] = {
-                                800.0f, 620.0f, 460.0f, 320.0f, 200.0f
-                            };
-                            const int lvl = (mm->zoomLevel < 0) ? 0
-                                          : (mm->zoomLevel > 4 ? 4 : mm->zoomLevel);
-                            map->setViewRadius(kRadius[lvl]);
+                            map->setZoomLevel(mm->zoomLevel);
                         }
 
                         // Minimap:PingLocation, which is all Minimap_OnClick
@@ -5872,7 +5890,8 @@ void Application::refreshPlayerCharacterModel() {
     const glm::vec3 savedPos = renderer ? renderer->getCharacterPosition() : glm::vec3(0.0f);
 
     if (renderer && renderer->getCharacterRenderer()) {
-        uint32_t oldInst = renderer->getCharacterInstanceId();
+        // The character itself; a form over it is rebuilt by the spawner.
+        uint32_t oldInst = renderer->getNativeCharacterInstanceId();
         if (oldInst > 0) {
             renderer->setCharacterFollow(0);
             if (auto* ac = renderer->getAnimationController()) ac->clearMount();

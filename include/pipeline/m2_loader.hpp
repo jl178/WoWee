@@ -228,6 +228,25 @@ struct M2RibbonEmitter {
     uint16_t textureCols = 1;
 };
 
+/// An M2 event name ("$CSS") as the uint32 its four bytes make, little-endian.
+constexpr uint32_t m2EventTag(const char (&name)[5]) {
+    return static_cast<uint32_t>(static_cast<uint8_t>(name[0])) |
+           (static_cast<uint32_t>(static_cast<uint8_t>(name[1])) << 8) |
+           (static_cast<uint32_t>(static_cast<uint8_t>(name[2])) << 16) |
+           (static_cast<uint32_t>(static_cast<uint8_t>(name[3])) << 24);
+}
+
+/// The M2 events that make a sound and are kept in M2Model::soundEvents
+/// besides $CSD (see there).
+constexpr bool isM2SoundEventTag(uint32_t tag) {
+    if (tag == m2EventTag("$CSS") || tag == m2EventTag("$CAH") || tag == m2EventTag("$WNG")) return true;
+    const uint32_t stem = tag & 0x00FFFFFFu;
+    const uint32_t last = tag >> 24;
+    if (stem == (m2EventTag("$AH0") & 0x00FFFFFFu)) return last >= '0' && last <= '3';
+    if (stem == (m2EventTag("$FD1") & 0x00FFFFFFu)) return last >= '1' && last <= '5';
+    return false;
+}
+
 // Complete M2 model structure
 struct M2Model {
     // Model metadata
@@ -256,9 +275,16 @@ struct M2Model {
     // event's data field is a SoundEntries id: character models carry one per
     // vocal emote (EmoteLaugh -> HumanMaleEmoteLaugh, EmoteCry, EmoteKiss,
     // EmoteChicken, EmoteApplaud -> ClapSounds). Empty inner list = none.
+    //
+    // The same list carries the other events that make a sound, with
+    // soundEntryId 0 and the event's name in tag (its four bytes read as a
+    // little-endian uint32, see m2EventTag): $CSS weapon swoosh, $CAH the
+    // blow landing, $AH0-$AH3 CreatureSoundData custom attacks, $FD1-$FD5
+    // fidgets, $WNG wing flaps. $FSD footfalls stay in footstepEventTimes.
     struct SoundEvent {
         uint32_t timeMs;        // from the start of the sequence
-        uint32_t soundEntryId;  // SoundEntries.dbc id
+        uint32_t soundEntryId;  // SoundEntries.dbc id ($CSD), 0 for the others
+        uint32_t tag = 0x44534324u;  // '$CSD'
     };
     std::vector<std::vector<SoundEvent>> soundEvents;
 

@@ -67,6 +67,9 @@ private:
     // One-shot tracking for jump start/end animations
     bool jumpStartSeen_ = false;
     bool jumpEndSeen_ = false;
+    /// Last frame's in.jumping, so a new jump is seen on its rising edge even
+    /// where the landing between two jumps was never observed.
+    bool wasJumping_ = false;
 
     static constexpr float kGraceSec = 0.12f;
     static constexpr float kFallDelaySec = 0.25f;  ///< airborne this long without a jump is a fall

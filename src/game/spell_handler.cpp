@@ -1,4 +1,5 @@
 #include "game/spell_handler.hpp"
+#include "game/combat_text_filter.hpp"
 #include "game/global_strings.hpp"
 #include "addons/lua_api_registrations.hpp"
 #include "game/protocol_constants.hpp"
@@ -325,28 +326,39 @@ audio::SpellSoundManager::MagicSchool SpellHandler::resolveSpellSchool(uint32_t 
     return audio::SpellSoundManager::MagicSchool::PHYSICAL;
 }
 
-bool SpellHandler::spellVisualPlaysSounds(uint32_t spellId) {
+bool SpellHandler::spellVisualPlaysSounds(uint32_t spellId, SpellSoundMoment moment) {
     const uint32_t visualId = resolveSpellVisualId(spellId);
     if (visualId == 0) return false;
     auto* renderer = owner_.services().renderer;
     auto* svs = renderer ? renderer->getSpellVisualSystem() : nullptr;
-    return svs && svs->hasVisual(visualId);
+    if (!svs) return false;
+    using KM = rendering::SpellVisualSystem::KitSoundMoment;
+    KM km = KM::ANY;
+    switch (moment) {
+        case SpellSoundMoment::PRECAST: km = KM::PRECAST; break;
+        case SpellSoundMoment::CAST:    km = KM::CAST; break;
+        case SpellSoundMoment::IMPACT:  km = KM::IMPACT; break;
+        case SpellSoundMoment::ANY:     km = KM::ANY; break;
+    }
+    return svs->visualHasKitSound(visualId, km);
 }
 
 void SpellHandler::playSpellCastSound(uint32_t spellId) {
+    auto* ac = owner_.services().audioCoordinator;
+    auto* ssm = ac ? ac->getSpellSoundManager() : nullptr;
+    if (!ssm) return;
     // Fireball's cast kit plays "Fire Cast" (SoundEntries 1484) at the caster;
     // the school bank's fire cast on top of it was the same moment twice.
-    if (spellVisualPlaysSounds(spellId)) return;
-    auto* ac = owner_.services().audioCoordinator;
-    if (!ac) return;
-    auto* ssm = ac->getSpellSoundManager();
-    if (!ssm) return;
+    if (spellVisualPlaysSounds(spellId, SpellSoundMoment::ANY)) {
+        ssm->stopPrecast();  // nothing to stop unless a fallback hum started
+        return;
+    }
     ssm->playCast(resolveSpellSchool(spellId));
 }
 
 void SpellHandler::playSpellImpactSound(uint32_t spellId) {
     // The impact kit's sound plays on the target as it lands.
-    if (spellVisualPlaysSounds(spellId)) return;
+    if (spellVisualPlaysSounds(spellId, SpellSoundMoment::ANY)) return;
     auto* ac = owner_.services().audioCoordinator;
     if (!ac) return;
     auto* ssm = ac->getSpellSoundManager();
@@ -367,8 +379,26 @@ void SpellHandler::syncAuraStateVisuals(uint64_t guid, const std::vector<AuraSlo
     }
     std::vector<uint32_t> visuals;
     visuals.reserve(auras.size());
+    owner_.loadSpellNameCache();
+    const auto& cache = owner_.spellNameCacheRef();
     for (const auto& a : auras) {
         if (a.isEmpty()) continue;
+        // Only an aura the client shows gets its state visual. A guard's
+        // Stealth Detection (8279, 18950, 37691...) carries the eye
+        // (StateKit 7034, detectstealth_state_head) on a passive aura the
+        // server puts on the creature: Attributes 0x110/0x190 with
+        // AttributesEx 0x10000000 (SPELL_ATTR1_DONT_DISPLAY_IN_AURA_BAR),
+        // or 0x40 (SPELL_ATTR0_PASSIVE) on the Invisibility Detection ranks.
+        // Renew (0x10000/0), Power Word: Shield (0x50800/0) and Ice Block
+        // (0x50000/0x8000) have none of these bits.
+        auto it = cache.find(a.spellId);
+        if (it != cache.end()) {
+            constexpr uint32_t kAttr0Passive = 0x40, kAttr0HiddenClientside = 0x80;
+            constexpr uint32_t kAttr1DontDisplayInAuraBar = 0x10000000;
+            if ((it->second.attr & (kAttr0Passive | kAttr0HiddenClientside)) ||
+                (it->second.attrEx & kAttr1DontDisplayInAuraBar))
+                continue;
+        }
         if (const uint32_t vid = resolveSpellVisualId(a.spellId)) visuals.push_back(vid);
     }
     svs->syncUnitStateVisuals(guid, visuals);
@@ -1821,6 +1851,16 @@ void SpellHandler::loadTalentDbc() {
         const uint32_t ttClassField = ttL ? (*ttL)["ClassMask"]      : 20;
         const uint32_t ttOrderField = ttL ? (*ttL)["OrderIndex"]     : 22;
         const uint32_t ttBgField    = ttL ? (*ttL)["BackgroundFile"] : 23;
+        // The tree's icon. Every expansion's TalentTab puts SpellIconID two
+        // columns before ClassMask (RaceMask sits between them), so a layout
+        // file installed before the column was named still finds it.
+        uint32_t ttIconField = ttL ? ttL->tryField("SpellIconID") : 0xFFFFFFFFu;
+        if (ttIconField == 0xFFFFFFFFu && ttClassField != 0xFFFFFFFFu && ttClassField >= 2) {
+            ttIconField = ttClassField - 2;
+        }
+        if (ttIconField != 0xFFFFFFFFu && ttIconField >= tabDbc->getFieldCount()) {
+            ttIconField = 0xFFFFFFFFu;
+        }
 
         uint32_t count = tabDbc->getRecordCount();
         for (uint32_t i = 0; i < count; ++i) {
@@ -1832,6 +1872,7 @@ void SpellHandler::loadTalentDbc() {
             entry.classMask = tabDbc->getUInt32(i, ttClassField);
             entry.orderIndex = static_cast<uint8_t>(tabDbc->getUInt32(i, ttOrderField));
             entry.backgroundFile = tabDbc->getString(i, ttBgField);
+            if (ttIconField != 0xFFFFFFFFu) entry.spellIconId = tabDbc->getUInt32(i, ttIconField);
 
             talentTabCache_[entry.tabId] = entry;
 
@@ -2329,7 +2370,8 @@ void SpellHandler::handleSpellStart(network::Packet& packet) {
         // Play precast sound - skip profession/tradeskill spells, and spells
         // whose precast kit plays its own (Fireball: "Precast Fire Low",
         // looping at the caster until the cast resolves).
-        if (!owner_.isProfessionSpell(data.spellId) && !spellVisualPlaysSounds(data.spellId)) {
+        if (!owner_.isProfessionSpell(data.spellId) &&
+            !spellVisualPlaysSounds(data.spellId, SpellSoundMoment::ANY)) {
             if (auto* ac = owner_.services().audioCoordinator) {
                 if (auto* ssm = ac->getSpellSoundManager()) {
                     owner_.loadSpellNameCache();
@@ -2472,11 +2514,35 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
             if (owner_.meleeSwingCallbackRef()) owner_.meleeSwingCallbackRef()(sid, 0);
         }
         if (isMeleeAbility && meleeRangeSpell) {
+            // A weapon ability is a swing like any other: the weapon's swoosh
+            // and its blow on what it struck (WeaponImpactSounds), at the
+            // ability animation's $CSS / $CAH. The primary target's outcome;
+            // SPELL_GO does not say whether it crit.
             if (auto* ac = owner_.services().audioCoordinator) {
                 if (auto* csm = ac->getCombatSoundManager()) {
-                    csm->playWeaponSwing(audio::CombatSoundManager::WeaponSize::MEDIUM, false);
-                    csm->playImpact(audio::CombatSoundManager::WeaponSize::MEDIUM,
-                                    audio::CombatSoundManager::ImpactType::FLESH, false);
+                    using MO = audio::CombatSoundManager::MeleeOutcome;
+                    uint64_t victim = 0;
+                    MO outcome = MO::HIT;
+                    if (!data.hitTargets.empty()) {
+                        victim = data.hitTargets.front();
+                    } else if (!data.missTargets.empty()) {
+                        victim = data.missTargets.front().targetGuid;
+                        switch (data.missTargets.front().missType) {
+                            case SpellMissInfo::DODGE: outcome = MO::DODGE; break;
+                            case SpellMissInfo::PARRY: outcome = MO::PARRY; break;
+                            case SpellMissInfo::BLOCK: outcome = MO::BLOCK; break;
+                            case SpellMissInfo::EVADE: case SpellMissInfo::IMMUNE:
+                            case SpellMissInfo::IMMUNE2: outcome = MO::NONE; break;
+                            default: outcome = MO::MISS; break;
+                        }
+                    }
+                    // Heroic Strike's and Slam's cast kits play their own
+                    // special swing (SwingWeaponSpecialWarrior); the weapon's
+                    // swoosh is then left out.
+                    const bool kitSwings = spellVisualPlaysSounds(sid, SpellSoundMoment::CAST);
+                    csm->onMelee(owner_.getPlayerGuid(), victim, outcome, /*offHand=*/false,
+                                 /*animated=*/true, /*injureVictim=*/true, /*ourCombat=*/true,
+                                 /*withSwoosh=*/!kitSwings);
                 }
             }
         }
@@ -2604,6 +2670,7 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
             }
             CombatTextEntry::Type ct = combatTextTypeFromSpellMissInfo(m.missType);
             owner_.addCombatText(ct, 0, data.spellId, playerIsCaster, 0, spellCasterGuid, m.targetGuid);
+            announceSpellMissToCombatText(data.spellId, m.targetGuid, ct);
         }
     }
 
@@ -2802,9 +2869,39 @@ void SpellHandler::handleAuraUpdate(network::Packet& packet, bool isAll) {
                 auraList->resize(maxSlot + 1);
             }
         }
+        // Gains and losses on the player, for Blizzard_CombatText's "<Name>"
+        // and "<Name> fades" lines (fctAuras). Only a change of what is in a
+        // slot - a refresh of the same aura is neither - and never the whole
+        // list sent at login, which is not news. Passives sit in the list too
+        // and the real client announces none of them.
+        const bool announceAuras = !isAll && data.guid == owner_.getPlayerGuid();
+        const auto isPassive = [this](uint32_t spellId) {
+            owner_.loadSpellNameCache();
+            auto it = owner_.spellNameCacheRef().find(spellId);
+            return it != owner_.spellNameCacheRef().end() && (it->second.attr & 0x40) != 0;
+        };
         for (auto [slot, aura] : data.updates) {
             if (aura.durationMs >= 0) {
                 aura.receivedAtMs = nowMs;
+            }
+            if (announceAuras) {
+                const AuraSlot& was = (*auraList)[slot];
+                const bool had = !was.isEmpty() && was.spellId != 0;
+                const bool has = !aura.isEmpty() && aura.spellId != 0;
+                if (had && (!has || was.spellId != aura.spellId) && !isPassive(was.spellId)) {
+                    const std::string& n = owner_.getSpellName(was.spellId);
+                    if (!n.empty()) {
+                        owner_.fireCombatTextUpdate(data.guid,
+                            {(was.flags & 0x80) ? "SPELL_AURA_END_HARMFUL" : "SPELL_AURA_END", n});
+                    }
+                }
+                if (has && (!had || was.spellId != aura.spellId) && !isPassive(aura.spellId)) {
+                    const std::string& n = owner_.getSpellName(aura.spellId);
+                    if (!n.empty()) {
+                        owner_.fireCombatTextUpdate(data.guid,
+                            {(aura.flags & 0x80) ? "SPELL_AURA_START_HARMFUL" : "SPELL_AURA_START", n});
+                    }
+                }
             }
             (*auraList)[slot] = aura;
         }
@@ -3076,7 +3173,25 @@ void SpellHandler::handleTalentsInfo(network::Packet& packet) {
 
     loadTalentDbc();
 
+    // Whether this packet is a spec change or only a refresh. AzerothCore
+    // sends SMSG_TALENTS_INFO after every learned rank, so most of them are
+    // the same spec again - and the interface treats ACTIVE_TALENT_GROUP_CHANGED
+    // as a real swap: the talent UI runs MainMenuBar_ToPlayerArt on it, which
+    // slides the whole action bar out and back. Firing it per packet made the
+    // bar vanish for a moment every time Learn was pressed.
+    const uint8_t previousTalentGroup = activeTalentSpec_;
+    const bool talentGroupChanged =
+        talentsInitialized_ && previousTalentGroup != activeTalentGroup;
+
     activeTalentSpec_ = activeTalentGroup;
+    // The server's own count: 1 until dual spec is bought. GetNumTalentGroups
+    // answers from this, and the talent frame draws a spec tab per group.
+    talentGroupCount_ = std::clamp<uint8_t>(talentGroupCount, 1, 2);
+    if (talentGroupCount_ < 2) {
+        learnedTalents_[1].clear();
+        learnedGlyphs_[1].fill(0);
+        unspentTalentPoints_[1] = 0;
+    }
 
     for (uint8_t g = 0; g < talentGroupCount && g < 2; ++g) {
         if (!packet.hasRemaining(1)) break;
@@ -3111,7 +3226,12 @@ void SpellHandler::handleTalentsInfo(network::Packet& packet) {
         // error against nothing. These fire on a full refresh rather than an
         // increment, so nothing was gained and nothing is announced.
         owner_.addonEventCallbackRef()("CHARACTER_POINTS_CHANGED", {"0", "0"});
-        owner_.addonEventCallbackRef()("ACTIVE_TALENT_GROUP_CHANGED", {});
+        if (talentGroupChanged) {
+            // (newGroup, previousGroup), 1-based, as the client sends it.
+            owner_.addonEventCallbackRef()("ACTIVE_TALENT_GROUP_CHANGED",
+                {std::to_string(activeTalentGroup + 1),
+                 std::to_string(previousTalentGroup + 1)});
+        }
         owner_.addonEventCallbackRef()("PLAYER_TALENT_UPDATE", {});
     }
 
@@ -3463,6 +3583,7 @@ void SpellHandler::resetTalentState() {
     unspentTalentPoints_[0] = 0;
     unspentTalentPoints_[1] = 0;
     activeTalentSpec_ = 0;
+    talentGroupCount_ = 1;
 }
 
 void SpellHandler::clearUnitCaches() {
@@ -3695,8 +3816,11 @@ void SpellHandler::loadSpellNameCache() const {
             if (descriptionField != 0xFFFFFFFF) {
                 entry.description = dbc->getString(i, descriptionField);
             }
-            if (entry.description.empty() && tooltipField != 0xFFFFFFFF) {
-                entry.description = dbc->getString(i, tooltipField);
+            if (tooltipField != 0xFFFFFFFF) {
+                entry.auraDescription = dbc->getString(i, tooltipField);
+            }
+            if (entry.description.empty()) {
+                entry.description = entry.auraDescription;
             }
             if (descVarField != 0xFFFFFFFF) {
                 entry.descriptionVariableId = dbc->getUInt32(i, descVarField);
@@ -4031,6 +4155,12 @@ const std::string& SpellHandler::getSpellDescription(uint32_t spellId) const {
     loadSpellNameCache();
     auto it = owner_.spellNameCacheRef().find(spellId);
     return (it != owner_.spellNameCacheRef().end()) ? it->second.description : SPELL_EMPTY_STRING;
+}
+
+const std::string& SpellHandler::getSpellAuraDescription(uint32_t spellId) const {
+    loadSpellNameCache();
+    auto it = owner_.spellNameCacheRef().find(spellId);
+    return (it != owner_.spellNameCacheRef().end()) ? it->second.auraDescription : SPELL_EMPTY_STRING;
 }
 
 std::string SpellHandler::getEnchantName(uint32_t enchantId) const {
@@ -4594,7 +4724,29 @@ void SpellHandler::handleSpellLogMiss(network::Packet& packet) {
             // Enemy spell missed us (we dodged/parried/blocked/resisted/etc.)
             owner_.addCombatText(ct, 0, spellId, false, 0, casterGuid, victimGuid);
         }
+        announceSpellMissToCombatText(spellId, victimGuid, ct);
     }
+}
+
+/// A spell that missed the player, as Blizzard_CombatText hears it.
+///
+/// The same miss can come twice - in SMSG_SPELL_GO's miss list and again as
+/// SMSG_SPELLLOGMISS - and the addon would draw both. One message per spell
+/// and kind inside a quarter of a second is the miss; a second is the echo.
+void SpellHandler::announceSpellMissToCombatText(uint32_t spellId, uint64_t victimGuid,
+                                                 CombatTextEntry::Type ct) {
+    if (victimGuid == 0 || victimGuid != owner_.getPlayerGuid()) return;
+    const char* type = combatTextSpellMissType(ct);
+    if (!type) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (spellId == lastMissTextSpell_ && type == lastMissTextType_ &&
+        now - lastMissTextAt_ < std::chrono::milliseconds(250)) {
+        return;
+    }
+    lastMissTextSpell_ = spellId;
+    lastMissTextType_ = type;
+    lastMissTextAt_ = now;
+    owner_.fireCombatTextUpdate(victimGuid, {type});
 }
 
 void SpellHandler::handleSpellFailure(network::Packet& packet) {
@@ -4811,7 +4963,7 @@ void SpellHandler::handlePeriodicAuraLog(network::Packet& packet) {
             if (!packet.hasRemaining(dotSz)) break;
             uint32_t dmg      = packet.readUInt32();
             if (periodicWotlk) /*uint32_t overkill=*/ packet.readUInt32();
-            /*uint32_t school=*/ packet.readUInt32();
+            const uint32_t dotSchool = packet.readUInt32();
             uint32_t abs      = packet.readUInt32();
             uint32_t res      = packet.readUInt32();
             bool dotCrit = false;
@@ -4826,6 +4978,13 @@ void SpellHandler::handlePeriodicAuraLog(network::Packet& packet) {
             if (res > 0)
                 owner_.addCombatText(CombatTextEntry::RESIST, static_cast<int32_t>(res),
                               spellId, isPlayerCaster, 0, casterGuid, victimGuid);
+            // A tick is a hit like any other to the addon; a bleed is
+            // physical and so plain DAMAGE.
+            if (isPlayerVictim) {
+                const bool magical = dotSchool != 0 && dotSchool != 1;
+                owner_.fireCombatTextUpdate(victimGuid,
+                    combatTextUpdateForHit(magical, dotCrit, dmg, res, 0, abs));
+            }
         } else if (auraType == 8 || auraType == 20) {
             // Classic/TBC: heal(4)
             // WotLK: heal(4)+overheal(4)+absorbed(4)+isCrit(1)
@@ -4846,6 +5005,12 @@ void SpellHandler::handlePeriodicAuraLog(network::Packet& packet) {
             if (hotAbs > 0)
                 owner_.addCombatText(CombatTextEntry::ABSORB, static_cast<int32_t>(hotAbs),
                               spellId, isPlayerCaster, 0, casterGuid, victimGuid);
+            // PERIODIC_HEAL, healer's name then amount, as HEAL. The addon has
+            // no periodic crit; a critical tick is still a tick.
+            if (isPlayerVictim && heal > 0) {
+                owner_.fireCombatTextUpdate(victimGuid,
+                    {"PERIODIC_HEAL", owner_.lookupName(casterGuid), std::to_string(heal)});
+            }
         } else if (auraType == 21 || auraType == 24) {
             // OBS_MOD_POWER / PERIODIC_ENERGIZE: miscValue(powerType) + amount
             // Common in WotLK: Replenishment, Mana Spring Totem, Divine Plea, etc.
@@ -4855,6 +5020,7 @@ void SpellHandler::handlePeriodicAuraLog(network::Packet& packet) {
             if ((isPlayerVictim || isPlayerCaster) && amount > 0)
                 owner_.addCombatText(CombatTextEntry::ENERGIZE, static_cast<int32_t>(amount),
                               spellId, isPlayerCaster, periodicPowerType, casterGuid, victimGuid);
+            if (isPlayerVictim && amount > 0) announceEnergizeToCombatText(true, periodicPowerType, amount);
         } else if (auraType == 64) {
             // PERIODIC_MANA_LEECH: miscValue(powerType) + amount + float multiplier
             if (!packet.hasRemaining(12)) break;
@@ -4906,7 +5072,21 @@ void SpellHandler::handleSpellEnergizeLog(network::Packet& packet) {
     bool isPlayerCaster = (casterGuid == owner_.getPlayerGuid());
     if ((isPlayerVictim || isPlayerCaster) && amount > 0)
         owner_.addCombatText(CombatTextEntry::ENERGIZE, amount, spellId, isPlayerCaster, energizePowerType, casterGuid, victimGuid);
+    if (isPlayerVictim && amount > 0)
+        announceEnergizeToCombatText(false, energizePowerType, static_cast<uint32_t>(amount));
     packet.skipAll();
+}
+
+/// ENERGIZE or PERIODIC_ENERGIZE for power the player gained: the amount, then
+/// the power's token, which is what the addon names and colours it by. Rage
+/// and runic power travel in tenths and are shown whole, as the bars show them.
+void SpellHandler::announceEnergizeToCombatText(bool periodic, uint8_t powerType, uint32_t amount) {
+    const char* token = combatTextPowerToken(powerType);
+    if (!token) return;
+    if (powerType == 1 || powerType == 6) amount /= 10;
+    if (amount == 0) return;
+    owner_.fireCombatTextUpdate(owner_.getPlayerGuid(),
+        {periodic ? "PERIODIC_ENERGIZE" : "ENERGIZE", std::to_string(amount), token});
 }
 
 void SpellHandler::handleExtraAuraInfo(network::Packet& packet, bool isInit) {

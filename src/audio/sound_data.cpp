@@ -29,7 +29,17 @@ namespace emo { constexpr uint32_t kFields = 7, kAnim = 2; }     // Emotes
 namespace cmd { constexpr uint32_t kFields = 28, kSound = 13; }
 namespace csd { constexpr uint32_t kFields = 38, kExertion = 1, kExertionCritical = 2, kInjury = 3,
                 kInjuryCritical = 4, kDeath = 6, kStand = 8, kFootstep = 9, kJumpStart = 26,
-                kJumpEnd = 27, kSubmerge = 35, kSubmerged = 36; }
+                kJumpEnd = 27, kSubmerge = 35, kSubmerged = 36, kWingFlap = 11, kFidget0 = 14,
+                kCustomAttack0 = 19, kImpactType = 25; }
+namespace wss { constexpr uint32_t kFields = 4, kSwingType = 1, kCrit = 2, kSound = 3; }  // WeaponSwingSounds2
+// WeaponImpactSounds: ID, WeaponSubClassID, ParrySoundType (1 metal weapon,
+// 0 wood), ImpactSoundID[10], CritImpactSoundID[10].
+namespace wis { constexpr uint32_t kFields = 23, kSubclass = 1, kParryType = 2, kImpact0 = 3, kCrit0 = 13; }
+// FootstepTerrainLookup: ID, CreatureFootstepID, TerrainSoundID, SoundID, SoundIDSplash.
+namespace ftl { constexpr uint32_t kFields = 5, kFootstep = 1, kTerrain = 2, kSound = 3, kSplash = 4; }
+// ItemGroupSounds: ID, Sound[4] - pickup, put-down, and two the 3.3.5 rows leave unused.
+namespace igs { constexpr uint32_t kFields = 5, kPickup = 1, kPutDown = 2; }
+namespace idi { constexpr uint32_t kFields = 25, kGroupSound = 12; }  // ItemDisplayInfo
 
 constexpr int kMaxParentDepth = 16;
 
@@ -68,6 +78,13 @@ bool SoundData::load(const Loader& loadDbc) {
     emoteTextSoundAnims_.clear();
     soundCache_.clear();
     creatureSoundCache_.clear();
+    swingSounds_.clear();
+    impactRows_.clear();
+    footsteps_.clear();
+    itemGroupSounds_.clear();
+    loader_ = loadDbc;
+    itemDisplayInfo_.reset();
+    itemDisplayInfoTried_ = false;
 
     soundEntries_ =table(loadDbc, "SoundEntries.dbc", se::kFields);
     if (!soundEntries_) return false;
@@ -168,10 +185,85 @@ bool SoundData::load(const Loader& loadDbc) {
     modelData_ = table(loadDbc, "CreatureModelData.dbc", cmd::kFields);
     creatureSounds_ = table(loadDbc, "CreatureSoundData.dbc", csd::kFields);
 
+    if (auto dbc = table(loadDbc, "WeaponSwingSounds2.dbc", wss::kFields)) {
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            const uint32_t key = (dbc->getUInt32(i, wss::kSwingType) << 1) | (dbc->getUInt32(i, wss::kCrit) ? 1u : 0u);
+            swingSounds_[key] = dbc->getUInt32(i, wss::kSound);
+        }
+    }
+    if (auto dbc = table(loadDbc, "WeaponImpactSounds.dbc", wis::kFields)) {
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            ImpactRow row;
+            for (uint32_t s = 0; s < static_cast<uint32_t>(ImpactSlot::COUNT); ++s) {
+                row.normal[s] = dbc->getUInt32(i, wis::kImpact0 + s);
+                row.crit[s] = dbc->getUInt32(i, wis::kCrit0 + s);
+            }
+            const uint32_t key = (dbc->getUInt32(i, wis::kSubclass) << 1) | (dbc->getUInt32(i, wis::kParryType) ? 1u : 0u);
+            impactRows_[key] = row;
+        }
+    }
+    if (auto dbc = table(loadDbc, "FootstepTerrainLookup.dbc", ftl::kFields)) {
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            const uint32_t key = (dbc->getUInt32(i, ftl::kFootstep) << 8) | (dbc->getUInt32(i, ftl::kTerrain) & 0xFF);
+            // The file repeats a few keys (footstep set 6, ground 1); the
+            // first row is kept.
+            footsteps_.emplace(key, std::make_pair(dbc->getUInt32(i, ftl::kSound), dbc->getUInt32(i, ftl::kSplash)));
+        }
+    }
+    if (auto dbc = table(loadDbc, "ItemGroupSounds.dbc", igs::kFields)) {
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            itemGroupSounds_[dbc->getUInt32(i, 0)] = {dbc->getUInt32(i, igs::kPickup), dbc->getUInt32(i, igs::kPutDown)};
+        }
+    }
+
     loaded_ = true;
     LOG_INFO("SoundData: ", soundEntries_->getRecordCount(), " sounds, ", zoneMusic_.size(), " music sets, ",
-             ambience_.size(), " ambiences, ", areas_.size(), " areas");
+             ambience_.size(), " ambiences, ", areas_.size(), " areas, ", impactRows_.size(),
+             " weapon impact rows, ", footsteps_.size(), " footstep rows, ", itemGroupSounds_.size(),
+             " item sound groups");
     return true;
+}
+
+uint32_t SoundData::weaponSwingSound(uint32_t swingType, bool crit) const {
+    auto it = swingSounds_.find((swingType << 1) | (crit ? 1u : 0u));
+    if (it == swingSounds_.end() && crit) it = swingSounds_.find(swingType << 1);
+    return it == swingSounds_.end() ? 0 : it->second;
+}
+
+uint32_t SoundData::weaponImpactSound(uint32_t weaponSubclass, bool metalWeapon, ImpactSlot slot, bool crit) const {
+    const auto s = static_cast<uint32_t>(slot);
+    if (s >= static_cast<uint32_t>(ImpactSlot::COUNT)) return 0;
+    auto it = impactRows_.find((weaponSubclass << 1) | (metalWeapon ? 1u : 0u));
+    if (it == impactRows_.end()) it = impactRows_.find((weaponSubclass << 1) | (metalWeapon ? 0u : 1u));
+    if (it == impactRows_.end()) return 0;
+    const uint32_t id = crit ? it->second.crit[s] : it->second.normal[s];
+    return id != 0 ? id : it->second.normal[s];
+}
+
+uint32_t SoundData::footstepSound(uint32_t creatureFootstepId, uint32_t terrainSoundId, bool splash) const {
+    auto it = footsteps_.find((creatureFootstepId << 8) | (terrainSoundId & 0xFF));
+    // Ground the set has no row for: its dirt step (TerrainSoundID 1), then
+    // the "none" row (0) a few sets carry.
+    if (it == footsteps_.end()) it = footsteps_.find((creatureFootstepId << 8) | 1u);
+    if (it == footsteps_.end()) it = footsteps_.find(creatureFootstepId << 8);
+    if (it == footsteps_.end()) return 0;
+    if (splash && it->second.second != 0) return it->second.second;
+    return it->second.first;
+}
+
+uint32_t SoundData::itemFoleySound(uint32_t itemDisplayId, bool pickup) const {
+    if (itemDisplayId == 0 || itemGroupSounds_.empty()) return 0;
+    if (!itemDisplayInfoTried_) {
+        itemDisplayInfoTried_ = true;
+        if (loader_) itemDisplayInfo_ = table(loader_, "ItemDisplayInfo.dbc", idi::kFields);
+    }
+    if (!itemDisplayInfo_) return 0;
+    const int32_t row = itemDisplayInfo_->findRecordById(itemDisplayId);
+    if (row < 0) return 0;
+    const uint32_t group = itemDisplayInfo_->getUInt32(static_cast<uint32_t>(row), idi::kGroupSound);
+    auto it = itemGroupSounds_.find(group);
+    if (it == itemGroupSounds_.end()) return 0;
+    return pickup ? it->second.first : it->second.second;
 }
 
 const SoundEntry* SoundData::sound(uint32_t id) const {
@@ -309,6 +401,10 @@ const CreatureSounds* SoundData::displaySounds(uint32_t displayId) const {
     cs.jumpEnd = creatureSounds_->getUInt32(r, csd::kJumpEnd);
     cs.submerge = creatureSounds_->getUInt32(r, csd::kSubmerge);
     cs.submerged = creatureSounds_->getUInt32(r, csd::kSubmerged);
+    cs.wingFlap = creatureSounds_->getUInt32(r, csd::kWingFlap);
+    for (uint32_t i = 0; i < 5; ++i) cs.fidget[i] = creatureSounds_->getUInt32(r, csd::kFidget0 + i);
+    for (uint32_t i = 0; i < 4; ++i) cs.customAttack[i] = creatureSounds_->getUInt32(r, csd::kCustomAttack0 + i);
+    cs.impactType = creatureSounds_->getUInt32(r, csd::kImpactType);
     return &(creatureSoundCache_[soundDataId] = cs);
 }
 

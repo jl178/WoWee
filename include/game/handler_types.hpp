@@ -37,6 +37,9 @@ struct TalentTabEntry {
     uint32_t classMask = 0;
     uint8_t orderIndex = 0;
     std::string backgroundFile;
+    // SpellIcon.dbc row for the tree's own icon - what GetTalentTabInfo hands
+    // back as its texture and what the spec tab shows for a talented spec.
+    uint32_t spellIconId = 0;
 };
 
 // ---- Spell / cast state ----

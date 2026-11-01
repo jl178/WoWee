@@ -32,26 +32,63 @@ constexpr uint32_t kAttachBack = 12;
 // The model's own sheath points, which carry the sheathed orientation. Its
 // plain hip points do not, and some models name a second hip point at the
 // feet.
+// The model's own sheath points, each on a bone of its own that carries the
+// put-away orientation, so the item model goes on with no extra rotation
+// (HumanMale: 26/27 high on the back by each shoulder, 30/31 mid-back either
+// side of the spine, 28 the centre of the back, 32/33 the hips).
+constexpr uint32_t kAttachSheathMainHand = 26;
+constexpr uint32_t kAttachSheathOffHand = 27;
 constexpr uint32_t kAttachSheathShield = 28;
+constexpr uint32_t kAttachLargeWeaponLeft = 30;
+constexpr uint32_t kAttachLargeWeaponRight = 31;
 constexpr uint32_t kAttachHipWeaponLeft = 32;
 constexpr uint32_t kAttachHipWeaponRight = 33;
 
 } // namespace
 
-uint8_t sheathPlacementInvType(uint32_t sheatheType, uint8_t inventoryType) {
-    // Item.dbc SheatheType, which is what the stock client puts away by - a
-    // big one-handed axe (sheathe type 1) goes on the back, a fist weapon
-    // or a blacksmith's hammer (0) is not shown at all:
-    //   0 none, 1 two-handed weapon (back), 2 staff (back), 3 one-handed
-    //   (hip), 4 shield (back), 5 enchanter's rod, 6 off-hand, 7 fist/misc.
-    // UINT32_MAX is "no Item.dbc row": what the inventory type alone suggests.
-    switch (sheatheType) {
-        case 0: return game::InvType::NON_EQUIP;   // nowhere: hidden
-        case 1: case 2: return game::InvType::TWO_HAND;
-        case 3: case 5: case 6: case 7: return game::InvType::ONE_HAND;
-        case 4: return game::InvType::SHIELD;
-        default: return inventoryType;
+uint32_t sheathedAttachment(uint32_t sheatheType, game::EquipSlot slot, uint8_t inventoryType) {
+    // Item.dbc SheatheType is what the stock client puts away by - a big
+    // one-handed axe (type 1) goes on the back, a fist weapon or a
+    // blacksmith's hammer (0) is not shown:
+    //   0 none, 1 two-handed weapon, 2 staff, 3 one-handed, 4 shield,
+    //   5 enchanter's rod, 6 off-hand, 7 fist/misc.
+    // UINT32_MAX is "no Item.dbc row": what the inventory type suggests.
+    if (sheatheType == UINT32_MAX) {
+        switch (inventoryType) {
+            case game::InvType::TWO_HAND: sheatheType = 1; break;
+            case game::InvType::SHIELD:   sheatheType = 4; break;
+            case game::InvType::ONE_HAND:
+            case game::InvType::MAIN_HAND:
+            case game::InvType::OFF_HAND: sheatheType = 3; break;
+            default:                      sheatheType = 0; break;
+        }
     }
+    const bool off = slot == game::EquipSlot::OFF_HAND;
+    switch (sheatheType) {
+        // A two-hander hangs from its grip by the shoulder, the weapon running
+        // down across the back.
+        case 1: return off ? kAttachSheathOffHand : kAttachSheathMainHand;
+        // A staff or polearm is held at mid-shaft, so it sits across the
+        // middle of the back with its head over the shoulder.
+        case 2: return off ? kAttachLargeWeaponRight : kAttachLargeWeaponLeft;
+        // A main hand on the left hip, drawn across the body; an off hand
+        // on the right.
+        case 3: case 5: case 7: return off ? kAttachHipWeaponRight : kAttachHipWeaponLeft;
+        case 6: return kAttachHipWeaponRight;
+        case 4: return kAttachSheathShield;
+        default: return UINT32_MAX;
+    }
+}
+
+uint32_t rangedSheathAttachment() {
+    // Bows, guns and crossbows ride the back by the off-hand shoulder, clear
+    // of a two-hander at the main-hand one.
+    return kAttachSheathOffHand;
+}
+
+bool isLegacyBackFallbackPoint(uint32_t attachmentId) {
+    return attachmentId == kAttachSheathMainHand || attachmentId == kAttachSheathOffHand ||
+           attachmentId == kAttachLargeWeaponLeft || attachmentId == kAttachLargeWeaponRight;
 }
 
 uint32_t weaponAttachment(bool sheathed, game::EquipSlot slot, uint8_t inventoryType) {
@@ -59,18 +96,7 @@ uint32_t weaponAttachment(bool sheathed, game::EquipSlot slot, uint8_t inventory
         if (inventoryType == game::InvType::SHIELD) return kAttachShield;
         return slot == game::EquipSlot::OFF_HAND ? kAttachLeftHand : kAttachRightHand;
     }
-
-    if (inventoryType == game::InvType::TWO_HAND) return kAttachBack;
-    if (inventoryType == game::InvType::SHIELD) return kAttachSheathShield;
-    if (inventoryType == game::InvType::ONE_HAND ||
-        inventoryType == game::InvType::MAIN_HAND) {
-        // Main hand on the left hip, drawn across the body.
-        return slot == game::EquipSlot::OFF_HAND ? kAttachHipWeaponRight : kAttachHipWeaponLeft;
-    }
-
-    // Holdables and other items with no sheath position are hidden, matching
-    // the original client rather than pinning books/orbs to an arbitrary bone.
-    return UINT32_MAX;
+    return sheathedAttachment(UINT32_MAX, slot, inventoryType);
 }
 
 glm::mat4 weaponLocalTransform(bool sheathed, game::EquipSlot /*slot*/,
@@ -403,7 +429,8 @@ bool AppearanceComposer::loadWeaponM2(const std::string& m2Path, pipeline::M2Mod
 // helmet model, and hair left showing through where one should be.
 void AppearanceComposer::loadEquippedHelm(game::Inventory& inventory) {
     auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
-    const uint32_t charInstanceId = renderer_ ? renderer_->getCharacterInstanceId() : 0;
+    // The character's own model: in a form the helm stays on it, hidden.
+    const uint32_t charInstanceId = renderer_ ? renderer_->getNativeCharacterInstanceId() : 0;
     if (!charRenderer || charInstanceId == 0 || !assetManager_ || !gameHandler_) return;
 
     // Only the helm point. Detaching 0 as well would drop the shield.
@@ -453,17 +480,22 @@ void AppearanceComposer::loadEquippedHelm(game::Inventory& inventory) {
 namespace {
 /// Where the local character's item is put away: its Item.dbc SheatheType,
 /// as for every other unit, else its inventory type.
-uint8_t localSheathPlacement(EntitySpawner* spawner, uint32_t itemId, uint8_t inventoryType) {
+uint32_t localSheathAttachment(EntitySpawner* spawner, game::EquipSlot slot, uint32_t itemId,
+                               uint8_t inventoryType) {
     const auto* row = spawner ? spawner->lookupItemDbc(itemId) : nullptr;
-    return sheathPlacementInvType(row ? row->sheatheType : UINT32_MAX, inventoryType);
+    return sheathedAttachment(row ? row->sheatheType : UINT32_MAX, slot, inventoryType);
 }
 } // namespace
 
-rendering::SheathSpot sheathSpotFor(game::EquipSlot slot, uint8_t placementInvType) {
-    switch (weaponAttachment(true, slot, placementInvType)) {
+rendering::SheathSpot sheathSpotFor(uint32_t sheathedAttachmentId) {
+    switch (sheathedAttachmentId) {
         case kAttachHipWeaponLeft:
         case kAttachHipWeaponRight: return rendering::SheathSpot::HIP;
         case kAttachBack:
+        case kAttachSheathMainHand:
+        case kAttachSheathOffHand:
+        case kAttachLargeWeaponLeft:
+        case kAttachLargeWeaponRight:
         case kAttachSheathShield:   return rendering::SheathSpot::BACK;
         default:                    return rendering::SheathSpot::NONE;
     }
@@ -554,14 +586,14 @@ rendering::SheathSpot AppearanceComposer::sheathSpot(game::EquipSlot slot) const
     if (!gameHandler_) return rendering::SheathSpot::NONE;
     const auto& equipped = gameHandler_->getInventory().getEquipSlot(slot);
     if (equipped.empty()) return rendering::SheathSpot::NONE;
-    return sheathSpotFor(slot, localSheathPlacement(entitySpawner_, equipped.item.itemId,
-                                                    equipped.item.inventoryType));
+    return sheathSpotFor(localSheathAttachment(entitySpawner_, slot, equipped.item.itemId,
+                                               equipped.item.inventoryType));
 }
 
 void AppearanceComposer::loadEquippedWeapons() {
     // Equipment refreshes can arrive during a gather cast. Keep the temporary
     // tool authoritative until the cast-end callback restores real equipment.
-    const uint32_t currentInstanceId = renderer_ ? renderer_->getCharacterInstanceId() : 0;
+    const uint32_t currentInstanceId = renderer_ ? renderer_->getNativeCharacterInstanceId() : 0;
     if (showingMiningPick_ && currentInstanceId == miningPickInstanceId_) return;
     if (showingMiningPick_) {
         showingMiningPick_ = false;
@@ -575,7 +607,9 @@ void AppearanceComposer::loadEquippedWeapons() {
     if (!gameHandler_) return;
 
     auto* charRenderer = renderer_->getCharacterRenderer();
-    uint32_t charInstanceId = renderer_->getCharacterInstanceId();
+    // Weapons go on the character's own model, never on a form drawn in its
+    // place; a bear has no hand to hold them and the stock client shows none.
+    uint32_t charInstanceId = renderer_->getNativeCharacterInstanceId();
     if (charInstanceId == 0) return;
 
     auto& inventory = gameHandler_->getInventory();
@@ -622,7 +656,9 @@ void AppearanceComposer::loadEquippedWeapons() {
     // Clear both held and sheathed locations so old copies never remain behind.
     const uint32_t weaponAttachmentPoints[] = {
         kAttachShield, kAttachRightHand, kAttachLeftHand, kAttachBack,
-        kAttachSheathShield, kAttachHipWeaponLeft, kAttachHipWeaponRight
+        kAttachSheathMainHand, kAttachSheathOffHand, kAttachLargeWeaponLeft,
+        kAttachLargeWeaponRight, kAttachSheathShield, kAttachHipWeaponLeft,
+        kAttachHipWeaponRight
     };
     for (uint32_t attachmentId : weaponAttachmentPoints) {
         charRenderer->detachWeapon(charInstanceId, attachmentId);
@@ -639,12 +675,12 @@ void AppearanceComposer::loadEquippedWeapons() {
             continue;
         }
 
-        // Held by the inventory type; put away by the item's sheathe type.
-        const uint8_t placementInvType = weaponsSheathed_
-            ? localSheathPlacement(entitySpawner_, equipSlot.item.itemId, equipSlot.item.inventoryType)
-            : equipSlot.item.inventoryType;
-        const uint32_t attachmentId = weaponAttachment(
-            weaponsSheathed_, ws.slot, placementInvType);
+        // Held by the inventory type; put away on the sheath point the item's
+        // sheathe type names.
+        uint32_t attachmentId = weaponsSheathed_
+            ? localSheathAttachment(entitySpawner_, ws.slot, equipSlot.item.itemId,
+                                    equipSlot.item.inventoryType)
+            : weaponAttachment(false, ws.slot, equipSlot.item.inventoryType);
         if (attachmentId == UINT32_MAX) continue;
 
         uint32_t displayInfoId = equipSlot.item.displayInfoId;
@@ -692,11 +728,16 @@ void AppearanceComposer::loadEquippedWeapons() {
         }
 
         uint32_t weaponModelId = entitySpawner_->allocateWeaponModelId();
-        const glm::mat4 localTransform = weaponLocalTransform(
-            weaponsSheathed_, ws.slot, placementInvType);
+        // The sheath points carry their own orientation: identity. Only the
+        // plain Back point, for a model without them, needs the layout.
         bool ok = charRenderer->attachWeapon(charInstanceId, attachmentId,
-                                              weaponModel, weaponModelId, texturePath,
-                                              localTransform);
+                                              weaponModel, weaponModelId, texturePath);
+        if (!ok && weaponsSheathed_ && isLegacyBackFallbackPoint(attachmentId)) {
+            attachmentId = kAttachBack;
+            ok = charRenderer->attachWeapon(charInstanceId, attachmentId, weaponModel, weaponModelId,
+                                            texturePath,
+                                            weaponLocalTransform(true, ws.slot, game::InvType::TWO_HAND));
+        }
         if (ok) {
             LOG_INFO("Equipped weapon: ", m2Path, " at attachment ", attachmentId,
                      weaponsSheathed_ ? " (sheathed)" : " (held)");
@@ -736,15 +777,26 @@ void AppearanceComposer::loadEquippedWeapons() {
                     }
 
                     uint32_t weaponModelId = entitySpawner_->allocateWeaponModelId();
-                    const uint32_t rangedAttachment = weaponsSheathed_
-                        ? kAttachBack : kAttachRightHand;
-                    const glm::mat4 localTransform = weaponsSheathed_
-                        ? weaponLocalTransform(true, game::EquipSlot::MAIN_HAND,
-                                               game::InvType::TWO_HAND)
-                        : glm::mat4(1.0f);
-                    bool ok = charRenderer->attachWeapon(charInstanceId, rangedAttachment,
-                                                          weaponModel, weaponModelId, texturePath,
-                                                          localTransform);
+                    // Put away on the back's own sheath point (identity: the
+                    // point carries the orientation); wands and thrown
+                    // weapons are not shown put away.
+                    const bool hiddenAway = rangedSlot.item.inventoryType == game::InvType::THROWN ||
+                                            rangedSlot.item.subclassName == "Wand";
+                    uint32_t rangedAttachment = weaponsSheathed_
+                        ? rangedSheathAttachment() : kAttachRightHand;
+                    bool ok = false;
+                    if (!(weaponsSheathed_ && hiddenAway)) {
+                        ok = charRenderer->attachWeapon(charInstanceId, rangedAttachment,
+                                                        weaponModel, weaponModelId, texturePath);
+                        if (!ok && weaponsSheathed_) {
+                            rangedAttachment = kAttachBack;
+                            ok = charRenderer->attachWeapon(
+                                charInstanceId, rangedAttachment, weaponModel, weaponModelId,
+                                texturePath,
+                                weaponLocalTransform(true, game::EquipSlot::MAIN_HAND,
+                                                     game::InvType::TWO_HAND));
+                        }
+                    }
                     if (ok) {
                         LOG_INFO("Equipped ranged weapon: ", m2Path, " at attachment ",
                                  rangedAttachment, weaponsSheathed_ ? " (sheathed)" : " (held)");
@@ -771,7 +823,7 @@ void AppearanceComposer::showMiningPick(bool show) {
     }
 
     auto* charRenderer = renderer_->getCharacterRenderer();
-    const uint32_t charInstanceId = renderer_->getCharacterInstanceId();
+    const uint32_t charInstanceId = renderer_->getNativeCharacterInstanceId();
     if (charInstanceId == 0) return;
 
     // Item 2901 (Mining Pick) resolves to ItemDisplayInfo 6568 in the WotLK DBC.
@@ -891,7 +943,7 @@ void AppearanceComposer::showFishingPole(bool show) {
     }
 
     auto* charRenderer = renderer_->getCharacterRenderer();
-    const uint32_t charInstanceId = renderer_->getCharacterInstanceId();
+    const uint32_t charInstanceId = renderer_->getNativeCharacterInstanceId();
     if (charInstanceId == 0) return;
     charRenderer->detachWeapon(charInstanceId, kAttachRightHand);
     const uint32_t modelId = entitySpawner_->allocateWeaponModelId();
@@ -914,7 +966,7 @@ void AppearanceComposer::showRangedWeapon(bool show) {
         return;
 
     auto* charRenderer = renderer_->getCharacterRenderer();
-    uint32_t charInstanceId = renderer_->getCharacterInstanceId();
+    uint32_t charInstanceId = renderer_->getNativeCharacterInstanceId();
     if (charInstanceId == 0) return;
 
     if (!show) {

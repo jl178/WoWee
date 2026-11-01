@@ -5,6 +5,9 @@
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/vk_utils.hpp"
+#include "pipeline/asset_manager.hpp"
+#include "pipeline/blp_loader.hpp"
+#include "core/application.hpp"
 #include "core/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <random>
@@ -15,6 +18,7 @@ namespace wowee {
 namespace rendering {
 
 namespace {
+
 // Seeded RNG for weather particle positions and cycle durations.
 // Replaces bare rand() which defaults to seed 1 without srand(),
 // producing identical weather patterns on every launch.
@@ -25,6 +29,44 @@ std::mt19937& weatherRng() {
 float weatherRandFloat() {
     return std::uniform_real_distribution<float>(0.0f, 1.0f)(weatherRng());
 }
+float weatherRandRange(float lo, float hi) {
+    return lo + (hi - lo) * weatherRandFloat();
+}
+
+// The client's weather sprites (textures\weather in the 3.3.5 data).
+constexpr const char* kSpritePaths[] = {
+    "Textures\\Weather\\RainDrop01.blp",        // 16x128 streak
+    "Textures\\Weather\\RainDropSplash01.blp",  // 256x256, 4x4 sheet
+    "Textures\\Weather\\SnowFlake01.blp",       // 64x64 flake
+};
+
+// The column of air the weather fills around the camera, in yards.
+struct Volume {
+    float radius;   // half the box's width
+    float above;    // how far above the camera drops start
+    float below;    // how far below the camera a drop that found no ground ends
+};
+constexpr Volume kRainVolume{32.0f, 36.0f, 40.0f};
+constexpr Volume kSnowVolume{26.0f, 26.0f, 30.0f};
+
+// Rain: a streak about a yard and a half long, as wide as the texture's 1:8
+// aspect makes it, falling at some twenty-six yards a second.
+constexpr float kRainHalfLength = 0.70f;
+constexpr float kRainHalfWidth  = 0.0875f;
+constexpr float kRainFallSpeed  = 26.0f;
+constexpr float kStormFallSpeed = 32.0f;
+// Snow: flakes about a quarter yard across, drifting down at a walk.
+constexpr float kSnowHalfSize   = 0.11f;
+constexpr float kSnowFallSpeed  = 2.4f;
+// Splashes: only where a drop lands this close, for this long.
+constexpr float kSplashRadius   = 22.0f;
+constexpr float kSplashLife     = 0.30f;
+constexpr float kSplashHalfSize = 0.32f;
+
+const Volume& volumeFor(Weather::Type type) {
+    return type == Weather::Type::SNOW ? kSnowVolume : kRainVolume;
+}
+
 } // namespace
 
 Weather::Weather() {
@@ -35,39 +77,63 @@ Weather::~Weather() {
 }
 
 /// Builds the one pipeline this effect draws with, vertex layout and all.
-///
-/// initialize() and recreatePipelines() described it identically, which is two
-/// statements of what a weather particle vertex is in one file.
 void Weather::buildPipelines(VkDevice device,
                              const VkPipelineShaderStageCreateInfo& vertStage,
                              const VkPipelineShaderStageCreateInfo& fragStage) {
-    // Vertex input: position only (vec3), stride = 3 * sizeof(float)
     VkVertexInputBindingDescription binding{};
     binding.binding = 0;
-    binding.stride = 3 * sizeof(float);
+    binding.stride = sizeof(Vertex);
     binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription posAttr{};
-    posAttr.location = 0;
-    posAttr.binding = 0;
-    posAttr.format = VK_FORMAT_R32G32B32_SFLOAT;
-    posAttr.offset = 0;
-
-    // Dynamic viewport and scissor
-    std::vector<VkDynamicState> dynamicStates = viewportAndScissorDynamic();
+    std::vector<VkVertexInputAttributeDescription> attrs = {
+        {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT,
+         .offset = static_cast<uint32_t>(offsetof(Vertex, pos))},
+        {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT,
+         .offset = static_cast<uint32_t>(offsetof(Vertex, uv))},
+        {.location = 2, .binding = 0, .format = VK_FORMAT_R32_SFLOAT,
+         .offset = static_cast<uint32_t>(offsetof(Vertex, alpha))},
+    };
 
     pipeline = PipelineBuilder()
         .setShaders(vertStage, fragStage)
-        .setVertexInput({binding}, {posAttr})
-        .setTopology(VK_PRIMITIVE_TOPOLOGY_POINT_LIST)
+        .setVertexInput({binding}, attrs)
+        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
         .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-        .setDepthTest(true, false, VK_COMPARE_OP_LESS)  // depth test on, write off (transparent particles)
+        .setDepthTest(true, false, VK_COMPARE_OP_LESS)  // tested, not written
         .setColorBlendAttachment(PipelineBuilder::blendAlpha())
         .setMultisample(vkCtx->getMsaaSamples())
         .setLayout(pipelineLayout)
         .setRenderPass(vkCtx->getImGuiRenderPass())
-        .setDynamicStates(dynamicStates)
+        .setDynamicStates(viewportAndScissorDynamic())
         .build(device, vkCtx->getPipelineCache());
+}
+
+bool Weather::createDescriptors() {
+    VkDevice device = vkCtx->getDevice();
+    VkDescriptorSetLayoutBinding sampler{};
+    sampler.binding = 0;
+    sampler.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    sampler.descriptorCount = 1;
+    sampler.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    textureSetLayout_ = createDescriptorSetLayout(device, {sampler});
+    if (!textureSetLayout_) return false;
+
+    VkDescriptorPoolSize size{};
+    size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    size.descriptorCount = SPRITE_COUNT;
+    VkDescriptorPoolCreateInfo pool{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pool.maxSets = SPRITE_COUNT;
+    pool.poolSizeCount = 1;
+    pool.pPoolSizes = &size;
+    if (vkCreateDescriptorPool(device, &pool, nullptr, &descriptorPool_) != VK_SUCCESS) return false;
+
+    std::array<VkDescriptorSetLayout, SPRITE_COUNT> layouts{};
+    layouts.fill(textureSetLayout_);
+    VkDescriptorSetAllocateInfo alloc{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    alloc.descriptorPool = descriptorPool_;
+    alloc.descriptorSetCount = SPRITE_COUNT;
+    alloc.pSetLayouts = layouts.data();
+    return vkAllocateDescriptorSets(device, &alloc, textureSets_.data()) == VK_SUCCESS;
 }
 
 bool Weather::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
@@ -76,49 +142,51 @@ bool Weather::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
     vkCtx = ctx;
     VkDevice device = vkCtx->getDevice();
 
-    // Load SPIR-V shaders
-    auto shaders = loadShaderPair(device, "assets/shaders/weather.vert.spv", "assets/shaders/weather.frag.spv", "weather");
-    if (!shaders) return false;
-    const auto& vertStage = shaders.vertStage;
-    const auto& fragStage = shaders.fragStage;
+    if (!createDescriptors()) {
+        LOG_ERROR("Failed to create weather descriptors");
+        return false;
+    }
 
-    // Push constant range: { float particleSize; float pad0; float pad1; float pad2; vec4 particleColor; } = 32 bytes
+    auto shaders = loadShaderPair(device, "assets/shaders/weather.vert.spv",
+                                  "assets/shaders/weather.frag.spv", "weather");
+    if (!shaders) return false;
+
+    // Push constant: vec4 tint
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pushRange.offset = 0;
-    pushRange.size = 32;  // 4 floats + vec4
+    pushRange.size = sizeof(glm::vec4);
 
-    // Create pipeline layout with perFrameLayout (set 0) + push constants
-    pipelineLayout = createPipelineLayout(device, {perFrameLayout}, {pushRange});
+    pipelineLayout = createPipelineLayout(device, {perFrameLayout, textureSetLayout_}, {pushRange});
     if (pipelineLayout == VK_NULL_HANDLE) {
         LOG_ERROR("Failed to create weather pipeline layout");
         return false;
     }
 
-    buildPipelines(device, vertStage, fragStage);
-
-
+    buildPipelines(device, shaders.vertStage, shaders.fragStage);
     if (pipeline == VK_NULL_HANDLE) {
         LOG_ERROR("Failed to create weather pipeline");
         return false;
     }
 
-    // Create a dynamic mapped vertex buffer large enough for MAX_PARTICLES
-    dynamicVBSize = MAX_PARTICLES * sizeof(glm::vec3);
-    AllocatedBuffer buf = createBuffer(vkCtx->getAllocator(), dynamicVBSize,
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    dynamicVB = buf.buffer;
-    dynamicVBAlloc = buf.allocation;
-    dynamicVBAllocInfo = buf.info;
-
-    if (dynamicVB == VK_NULL_HANDLE) {
-        LOG_ERROR("Failed to create weather dynamic vertex buffer");
-        return false;
+    // Six vertices a quad: every particle, and every splash.
+    frameBufferSize_ = static_cast<VkDeviceSize>(MAX_PARTICLES + MAX_SPLASHES) * 6 * sizeof(Vertex);
+    frameBuffers_.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& fb : frameBuffers_) {
+        AllocatedBuffer buf = createBuffer(vkCtx->getAllocator(), frameBufferSize_,
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        fb.buffer = buf.buffer;
+        fb.alloc = buf.allocation;
+        fb.info = buf.info;
+        if (fb.buffer == VK_NULL_HANDLE || !fb.info.pMappedData) {
+            LOG_ERROR("Failed to create weather vertex buffer");
+            return false;
+        }
     }
 
-    // Reserve space for particles
     particles.reserve(MAX_PARTICLES);
-    particlePositions.reserve(MAX_PARTICLES);
+    splashes_.reserve(MAX_SPLASHES);
+    vertices_.reserve(static_cast<size_t>(MAX_PARTICLES + MAX_SPLASHES) * 6);
 
     LOG_INFO("Weather system initialized");
     return true;
@@ -130,192 +198,296 @@ void Weather::recreatePipelines() {
 
     destroy(device, pipeline);
 
-    auto shaders = loadShaderPair(device, "assets/shaders/weather.vert.spv", "assets/shaders/weather.frag.spv", "weather");
+    auto shaders = loadShaderPair(device, "assets/shaders/weather.vert.spv",
+                                  "assets/shaders/weather.frag.spv", "weather");
     if (!shaders) return;
-    const auto& vertStage = shaders.vertStage;
-    const auto& fragStage = shaders.fragStage;
 
-    buildPipelines(device, vertStage, fragStage);
-
-
+    buildPipelines(device, shaders.vertStage, shaders.fragStage);
     if (pipeline == VK_NULL_HANDLE) {
         LOG_ERROR("Weather::recreatePipelines: failed to create pipeline");
     }
 }
 
-void Weather::update(const Camera& camera, float deltaTime) {
-    if (!enabled || weatherType == Type::NONE) {
-        return;
-    }
+void Weather::loadTextures(pipeline::AssetManager* assetManager) {
+    if (texturesAttempted_ || !assetManager || !vkCtx || !descriptorPool_) return;
+    texturesAttempted_ = true;
 
-    // Initialize particles if needed
-    if (particles.empty()) {
-        resetParticles(camera);
-    }
-
-    // Calculate active particle count based on intensity
-    int targetParticleCount =
-        static_cast<int>(MAX_PARTICLES * intensity * densityScale_);
-
-    // Adjust particle count
-    while (static_cast<int>(particles.size()) < targetParticleCount) {
-        Particle p;
-        p.position = getRandomPosition(camera.getPosition());
-        p.position.y = camera.getPosition().y + SPAWN_HEIGHT;
-        p.lifetime = 0.0f;
-
-        if (weatherType == Type::RAIN) {
-            p.velocity = glm::vec3(0.0f, -50.0f, 0.0f);  // Fast downward
-            p.maxLifetime = 5.0f;
-        } else if (weatherType == Type::STORM) {
-            // Storm: faster, angled rain with wind
-            p.velocity = glm::vec3(15.0f, -70.0f, 8.0f);
-            p.maxLifetime = 3.5f;
-        } else {  // SNOW
-            p.velocity = glm::vec3(0.0f, -5.0f, 0.0f);   // Slow downward
-            p.maxLifetime = 10.0f;
+    VkDevice device = vkCtx->getDevice();
+    for (uint32_t i = 0; i < SPRITE_COUNT; ++i) {
+        pipeline::BLPImage image = assetManager->loadTexture(kSpritePaths[i]);
+        if (!image.isValid() ||
+            !textures_[i].upload(*vkCtx, image.data.data(), image.width, image.height,
+                                 VK_FORMAT_R8G8B8A8_UNORM, true)) {
+            LOG_WARNING("Weather: failed to load ", kSpritePaths[i]);
+            continue;
         }
-
-        particles.push_back(p);
-    }
-
-    while (static_cast<int>(particles.size()) > targetParticleCount) {
-        particles.pop_back();
-    }
-
-    // Combined update + position copy. Hoist camera.getPosition() out of
-    // the per-particle call (each was re-reading the camera member) and
-    // fold the position-copy pass into the update loop so we only walk
-    // the particle vector once.
-    const glm::vec3 cameraPos = camera.getPosition();
-    particlePositions.clear();
-    particlePositions.reserve(particles.size());
-    for (auto& particle : particles) {
-        updateParticle(particle, cameraPos, deltaTime);
-        particlePositions.push_back(particle.position);
+        textures_[i].createSampler(device, VK_FILTER_LINEAR, VK_FILTER_LINEAR,
+                                   VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+        if (!textures_[i].isValid()) {
+            LOG_WARNING("Weather: ", kSpritePaths[i], " is not sampleable");
+            continue;
+        }
+        VkDescriptorImageInfo imageInfo = textures_[i].descriptorInfo();
+        VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = textureSets_[i];
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &imageInfo;
+        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        textureReady_[i] = true;
     }
 }
 
-void Weather::updateParticle(Particle& particle, const glm::vec3& cameraPos, float deltaTime) {
-    // Update lifetime
-    particle.lifetime += deltaTime;
+// ---------------------------------------------------------------------------
+// Simulation
+// ---------------------------------------------------------------------------
 
-    // Reset if lifetime exceeded or too far from camera
-    glm::vec3 toCamera = particle.position - cameraPos;
-    float distSq = glm::dot(toCamera, toCamera);
+float Weather::resolveGround(const glm::vec3& at, const glm::vec3& cameraPos) const {
+    const Volume& vol = volumeFor(particlesType_);
+    const float fallback = cameraPos.z - vol.below;
+    if (!groundQuery_) return fallback;
+    const glm::vec2 d(at.x - cameraPos.x, at.y - cameraPos.y);
+    if (glm::dot(d, d) > kSplashRadius * kSplashRadius) return fallback;
+    if (auto ground = groundQuery_(at.x, at.y, cameraPos.z + vol.above)) return *ground;
+    return fallback;
+}
 
-    if (particle.lifetime >= particle.maxLifetime || distSq > SPAWN_VOLUME_SIZE * SPAWN_VOLUME_SIZE ||
-        particle.position.y < cameraPos.y - 20.0f) {
-        // Respawn at top
-        particle.position = getRandomPosition(cameraPos);
-        particle.position.y = cameraPos.y + SPAWN_HEIGHT;
-        particle.lifetime = 0.0f;
+void Weather::spawnParticle(Particle& p, const glm::vec3& cameraPos, bool anywhereInColumn) {
+    const Volume& vol = volumeFor(particlesType_);
+    p.position.x = cameraPos.x + weatherRandRange(-vol.radius, vol.radius);
+    p.position.y = cameraPos.y + weatherRandRange(-vol.radius, vol.radius);
+    p.position.z = anywhereInColumn
+        ? cameraPos.z + weatherRandRange(-vol.below * 0.5f, vol.above)
+        : cameraPos.z + vol.above + weatherRandRange(0.0f, 4.0f);
+    p.phase = weatherRandRange(0.0f, 6.2831853f);
+
+    switch (particlesType_) {
+        case Type::SNOW:
+            p.velocity = glm::vec3(0.6f, 0.3f, -kSnowFallSpeed * weatherRandRange(0.8f, 1.2f));
+            p.size = weatherRandRange(0.7f, 1.3f);
+            break;
+        case Type::STORM:
+            p.velocity = glm::vec3(7.0f, 3.5f, -kStormFallSpeed * weatherRandRange(0.9f, 1.1f));
+            p.size = weatherRandRange(0.85f, 1.2f);
+            break;
+        default:
+            p.velocity = glm::vec3(1.5f, 0.8f, -kRainFallSpeed * weatherRandRange(0.9f, 1.1f));
+            p.size = weatherRandRange(0.8f, 1.15f);
+            break;
     }
 
-    // Add wind effect for snow
-    if (weatherType == Type::SNOW) {
-        float windX = std::sin(particle.lifetime * 0.5f) * 2.0f;
-        float windZ = std::cos(particle.lifetime * 0.3f) * 2.0f;
-        particle.velocity.x = windX;
-        particle.velocity.z = windZ;
-    }
-    // Storm: gusty, turbulent wind with varying direction
-    if (weatherType == Type::STORM) {
-        float gust = std::sin(particle.lifetime * 1.5f + particle.position.x * 0.1f) * 5.0f;
-        particle.velocity.x = 15.0f + gust;
-        particle.velocity.z = 8.0f + std::cos(particle.lifetime * 2.0f) * 3.0f;
+    // Where it will come down: below the spot it reaches the camera's height,
+    // carried that far by the wind.
+    const float fallTime = std::max(0.0f, (p.position.z - cameraPos.z) / -p.velocity.z);
+    const glm::vec3 landing = p.position + glm::vec3(p.velocity.x, p.velocity.y, 0.0f) * fallTime;
+    const float fallback = cameraPos.z - vol.below;
+    p.groundZ = resolveGround(landing, cameraPos);
+    p.lands = p.groundZ != fallback && particlesType_ != Type::SNOW;
+    // Started under the ground (the column reaches below the camera): move it up.
+    if (p.position.z < p.groundZ) p.position.z = cameraPos.z + vol.above;
+}
+
+void Weather::update(const Camera& camera, float deltaTime) {
+    loadTextures(core::Application::getInstance().getAssetManager());
+
+    vertices_.clear();
+    particleVertexCount_ = 0;
+    splashVertexCount_ = 0;
+    time_ += deltaTime;
+
+    const glm::vec3 cameraPos = camera.getPosition();
+    if (!enabled || weatherType == Type::NONE) {
+        particles.clear();
+        splashes_.clear();
+        particlesType_ = Type::NONE;
+        return;
     }
 
-    // Update position
-    particle.position += particle.velocity * deltaTime;
+    // A different kind of weather starts over, filling the column at once.
+    if (particlesType_ != weatherType) {
+        particles.clear();
+        splashes_.clear();
+        particlesType_ = weatherType;
+    }
+    const Volume& vol = volumeFor(particlesType_);
+
+    // How many: the server's intensity times the Weather Detail setting.
+    const float typeScale = particlesType_ == Type::SNOW ? 0.7f : 1.0f;
+    const int target = static_cast<int>(MAX_PARTICLES * typeScale * intensity * densityScale_);
+    const bool filling = particles.empty();
+    while (static_cast<int>(particles.size()) < target) {
+        Particle p;
+        spawnParticle(p, cameraPos, filling || weatherRandFloat() < 0.5f);
+        particles.push_back(p);
+    }
+    if (static_cast<int>(particles.size()) > target) particles.resize(std::max(target, 0));
+
+    // A teleport or a long fall: start the column again around the new spot.
+    if (haveLastCamera_ && glm::length(cameraPos - lastCameraPos_) > vol.radius * 2.0f) {
+        for (auto& p : particles) spawnParticle(p, cameraPos, true);
+        splashes_.clear();
+    }
+    lastCameraPos_ = cameraPos;
+    haveLastCamera_ = true;
+
+    // Storm gusts.
+    const float gust = particlesType_ == Type::STORM ? 1.0f + 0.35f * std::sin(time_ * 0.7f) : 1.0f;
+
+    for (auto& p : particles) {
+        glm::vec3 v = p.velocity;
+        if (particlesType_ == Type::SNOW) {
+            v.x += std::sin(time_ * 1.3f + p.phase) * 0.5f;
+            v.y += std::cos(time_ * 1.1f + p.phase * 1.7f) * 0.5f;
+        } else {
+            v.x *= gust;
+            v.y *= gust;
+        }
+        p.position += v * deltaTime;
+
+        // Keep the column around the camera: what drifts out of the box on
+        // one side comes back in on the other.
+        bool wrapped = false;
+        for (int axis = 0; axis < 2; ++axis) {
+            const float d = p.position[axis] - cameraPos[axis];
+            if (d > vol.radius)  { p.position[axis] -= 2.0f * vol.radius; wrapped = true; }
+            if (d < -vol.radius) { p.position[axis] += 2.0f * vol.radius; wrapped = true; }
+        }
+        if (wrapped) {
+            const float fallback = cameraPos.z - vol.below;
+            p.groundZ = resolveGround(p.position, cameraPos);
+            p.lands = p.groundZ != fallback && particlesType_ != Type::SNOW;
+        }
+
+        if (p.position.z <= p.groundZ || p.position.z < cameraPos.z - vol.below) {
+            if (p.lands && p.position.z <= p.groundZ &&
+                static_cast<int>(splashes_.size()) < MAX_SPLASHES) {
+                splashes_.push_back({.position = glm::vec3(p.position.x, p.position.y, p.groundZ),
+                                     .age = 0.0f,
+                                     .variant = static_cast<uint8_t>(weatherRng()() % 4u)});
+            }
+            spawnParticle(p, cameraPos, false);
+        }
+    }
+
+    for (auto& s : splashes_) s.age += deltaTime;
+    std::erase_if(splashes_, [](const Splash& s) { return s.age >= kSplashLife; });
+
+    buildVertices(camera);
+}
+
+void Weather::buildVertices(const Camera& camera) {
+    const glm::vec3 cameraPos = camera.getPosition();
+    const glm::vec3 camRight = camera.getRight();
+    const glm::vec3 camUp = camera.getUp();
+    const Volume& vol = volumeFor(particlesType_);
+    const bool snow = particlesType_ == Type::SNOW;
+
+    auto quad = [&](const glm::vec3& a, const glm::vec3& b, const glm::vec3& c, const glm::vec3& d,
+                    const glm::vec2& uv0, const glm::vec2& uv1, float alpha) {
+        // a b
+        // d c   with uv0 at a and uv1 at c
+        vertices_.push_back({a, uv0, alpha});
+        vertices_.push_back({b, {uv1.x, uv0.y}, alpha});
+        vertices_.push_back({c, uv1, alpha});
+        vertices_.push_back({a, uv0, alpha});
+        vertices_.push_back({c, uv1, alpha});
+        vertices_.push_back({d, {uv0.x, uv1.y}, alpha});
+    };
+
+    // Streaks or flakes.
+    const bool haveParticleSprite = textureReady_[snow ? SNOW_FLAKE : RAIN_STREAK];
+    if (haveParticleSprite) {
+        for (const auto& p : particles) {
+            const glm::vec3 toCam = cameraPos - p.position;
+            const float dist = glm::length(toCam);
+            // Not in the lens, and not past the box's edge where it wraps.
+            const float horiz = glm::length(glm::vec2(toCam));
+            float alpha = glm::smoothstep(0.6f, 2.5f, dist) *
+                          (1.0f - glm::smoothstep(vol.radius * 0.7f, vol.radius, horiz));
+            if (alpha <= 0.01f) continue;
+
+            if (snow) {
+                const glm::vec3 r = camRight * (kSnowHalfSize * p.size);
+                const glm::vec3 u = camUp * (kSnowHalfSize * p.size);
+                quad(p.position - r + u, p.position + r + u, p.position + r - u, p.position - r - u,
+                     {0.0f, 0.0f}, {1.0f, 1.0f}, alpha);
+            } else {
+                // Along the way it falls, turned about that line to face the eye.
+                const glm::vec3 axis = glm::normalize(p.velocity);
+                glm::vec3 side = glm::cross(axis, toCam);
+                const float sideLen = glm::length(side);
+                if (sideLen < 1e-4f) continue;
+                side *= (kRainHalfWidth * p.size) / sideLen;
+                const glm::vec3 half = axis * (kRainHalfLength * p.size);
+                const glm::vec3 top = p.position - half;
+                const glm::vec3 bottom = p.position + half;
+                quad(top - side, top + side, bottom + side, bottom - side,
+                     {0.0f, 0.0f}, {1.0f, 1.0f}, alpha);
+            }
+        }
+    }
+    particleVertexCount_ = static_cast<uint32_t>(vertices_.size());
+
+    // Splashes: standing on the ground, turned to the eye about the vertical.
+    if (!snow && textureReady_[RAIN_SPLASH]) {
+        for (const auto& s : splashes_) {
+            glm::vec2 toCam(cameraPos.x - s.position.x, cameraPos.y - s.position.y);
+            const float len = glm::length(toCam);
+            if (len < 1e-3f) continue;
+            toCam /= len;
+            const glm::vec3 right(-toCam.y * kSplashHalfSize, toCam.x * kSplashHalfSize, 0.0f);
+            const glm::vec3 up(0.0f, 0.0f, kSplashHalfSize * 2.0f);
+            const glm::vec3 base = s.position + glm::vec3(0.0f, 0.0f, 0.02f);
+            // Four frames across, four kinds of splash down.
+            const int frame = std::min(3, static_cast<int>(s.age / kSplashLife * 4.0f));
+            const glm::vec2 uv0(frame * 0.25f, s.variant * 0.25f);
+            const glm::vec2 uv1 = uv0 + glm::vec2(0.25f);
+            const float alpha = 1.0f - glm::smoothstep(0.6f, 1.0f, s.age / kSplashLife);
+            quad(base - right + up, base + right + up, base + right, base - right, uv0, uv1, alpha);
+        }
+    }
+    splashVertexCount_ = static_cast<uint32_t>(vertices_.size()) - particleVertexCount_;
+    builtType_ = particlesType_;
 }
 
 void Weather::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
-    if (!enabled || weatherType == Type::NONE || particlePositions.empty() ||
-        pipeline == VK_NULL_HANDLE) {
+    if (!enabled || weatherType == Type::NONE || vertices_.empty() ||
+        pipeline == VK_NULL_HANDLE || frameBuffers_.empty()) {
         return;
     }
 
-    // Upload particle positions to mapped buffer
-    VkDeviceSize uploadSize = particlePositions.size() * sizeof(glm::vec3);
-    if (uploadSize > 0 && dynamicVBAllocInfo.pMappedData) {
-        std::memcpy(dynamicVBAllocInfo.pMappedData, particlePositions.data(), uploadSize);
-    }
+    const FrameBuffer& fb = frameBuffers_[vkCtx->getCurrentFrame() % frameBuffers_.size()];
+    const VkDeviceSize bytes = std::min<VkDeviceSize>(vertices_.size() * sizeof(Vertex),
+                                                      frameBufferSize_);
+    std::memcpy(fb.info.pMappedData, vertices_.data(), static_cast<size_t>(bytes));
+    const uint32_t vertexLimit = static_cast<uint32_t>(bytes / sizeof(Vertex));
 
-    // Push constant data: { float particleSize; float pad0; float pad1; float pad2; vec4 particleColor; }
-    struct WeatherPush {
-        float particleSize;
-        float pad0;
-        float pad1;
-        float pad2;
-        glm::vec4 particleColor;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
+                            0, 1, &perFrameSet, 0, nullptr);
+    VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &fb.buffer, &offset);
+
+    auto draw = [&](Sprite sprite, uint32_t first, uint32_t count, const glm::vec4& tint) {
+        if (count == 0 || !textureReady_[sprite] || first >= vertexLimit) return;
+        count = std::min(count, vertexLimit - first);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
+                                1, 1, &textureSets_[sprite], 0, nullptr);
+        vkCmdPushConstants(cmd, pipelineLayout,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(tint), &tint);
+        vkCmdDraw(cmd, count, 1, first, 0);
     };
 
-    WeatherPush push{};
-    if (weatherType == Type::RAIN) {
-        push.particleSize = 3.0f;
-        push.particleColor = glm::vec4(0.7f, 0.8f, 0.9f, 0.6f);
-    } else if (weatherType == Type::STORM) {
-        push.particleSize = 3.5f;
-        push.particleColor = glm::vec4(0.6f, 0.65f, 0.75f, 0.7f);  // Darker, more opaque
-    } else {  // SNOW
-        push.particleSize = 8.0f;
-        push.particleColor = glm::vec4(1.0f, 1.0f, 1.0f, 0.9f);
+    if (builtType_ == Type::SNOW) {
+        draw(SNOW_FLAKE, 0, particleVertexCount_, glm::vec4(1.0f, 1.0f, 1.0f, 0.95f));
+    } else {
+        const float a = builtType_ == Type::STORM ? 0.8f : 0.7f;
+        draw(RAIN_STREAK, 0, particleVertexCount_, glm::vec4(0.85f, 0.88f, 0.92f, a));
+        draw(RAIN_SPLASH, particleVertexCount_, splashVertexCount_,
+             glm::vec4(0.85f, 0.88f, 0.92f, 0.75f));
     }
-
-    // Bind pipeline
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-
-    // Bind per-frame descriptor set (set 0 - camera UBO)
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-        0, 1, &perFrameSet, 0, nullptr);
-
-    // Push constants
-    vkCmdPushConstants(cmd, pipelineLayout,
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        0, sizeof(push), &push);
-
-    // Bind vertex buffer
-    VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &dynamicVB, &offset);
-
-    // Draw particles as points
-    vkCmdDraw(cmd, static_cast<uint32_t>(particlePositions.size()), 1, 0, 0);
-}
-
-void Weather::resetParticles(const Camera& camera) {
-    particles.clear();
-
-    int particleCount = static_cast<int>(MAX_PARTICLES * intensity * densityScale_);
-    glm::vec3 cameraPos = camera.getPosition();
-
-    for (int i = 0; i < particleCount; ++i) {
-        Particle p;
-        p.position = getRandomPosition(cameraPos);
-        p.position.y = cameraPos.y + SPAWN_HEIGHT * (weatherRandFloat());
-        p.lifetime = 0.0f;
-
-        if (weatherType == Type::RAIN) {
-            p.velocity = glm::vec3(0.0f, -50.0f, 0.0f);
-            p.maxLifetime = 5.0f;
-        } else {  // SNOW
-            p.velocity = glm::vec3(0.0f, -5.0f, 0.0f);
-            p.maxLifetime = 10.0f;
-        }
-
-        particles.push_back(p);
-    }
-}
-
-glm::vec3 Weather::getRandomPosition(const glm::vec3& center) const {
-    // Reuse the shared weather RNG to avoid duplicate generator state
-    static std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-
-    float x = center.x + dist(weatherRng()) * SPAWN_VOLUME_SIZE;
-    float z = center.z + dist(weatherRng()) * SPAWN_VOLUME_SIZE;
-    float y = center.y;
-
-    return glm::vec3(x, y, z);
 }
 
 void Weather::setIntensity(float intensity) {
@@ -328,18 +500,27 @@ int Weather::getParticleCount() const {
 
 void Weather::shutdown() {
     if (vkCtx) {
-        destroyParticleResources(vkCtx->getDevice(), vkCtx->getAllocator(),
-                                 pipeline, pipelineLayout, dynamicVB,
-                                 dynamicVBAlloc);
+        VkDevice device = vkCtx->getDevice();
+        VmaAllocator allocator = vkCtx->getAllocator();
+        for (auto& texture : textures_) texture.destroy(device, allocator);
+        textureReady_.fill(false);
+        for (auto& fb : frameBuffers_) destroy(allocator, fb.buffer, fb.alloc);
+        frameBuffers_.clear();
+        destroyPipeline(device, pipeline, pipelineLayout);
+        destroy(device, descriptorPool_);
+        destroy(device, textureSetLayout_);
+        textureSets_.fill(VK_NULL_HANDLE);
+        texturesAttempted_ = false;
     }
 
     vkCtx = nullptr;
     particles.clear();
-    particlePositions.clear();
+    splashes_.clear();
+    vertices_.clear();
 }
 
 // ---------------------------------------------------------------------------
-// Zone-based weather configuration
+// Zone-based weather configuration (single-player, no server weather)
 // ---------------------------------------------------------------------------
 
 void Weather::setZoneWeather(uint32_t zoneId, Type type, float minIntensity, float maxIntensity, float probability) {
@@ -351,9 +532,6 @@ void Weather::initializeZoneWeatherDefaults() {
     zoneWeatherInitialized_ = true;
 
     // Eastern Kingdoms zones
-    // Duskwood's persistent atmosphere is supplied by its lighting fog profile.
-    // Do not synthesize rain here: the streak particles read as wind-blown fog.
-    // Renderer also suppresses server rain in Duskwood so its fog stays legible.
     setZoneWeather(11,   Type::RAIN, 0.1f, 0.4f, 0.15f);  // Wetlands - moderate rain
     setZoneWeather(8,    Type::RAIN, 0.1f, 0.5f, 0.2f);   // Swamp of Sorrows
     setZoneWeather(33,   Type::RAIN, 0.2f, 0.7f, 0.25f);  // Stranglethorn Vale
@@ -407,19 +585,15 @@ void Weather::updateZoneWeather(uint32_t zoneId, float deltaTime) {
 
         auto it = zoneWeatherTable_.find(zoneId);
         if (it == zoneWeatherTable_.end()) {
-            // Zone has no configured weather - clear gradually
             targetIntensity_ = 0.0f;
         } else {
-            // Roll whether weather is active based on probability
             float roll = weatherRandFloat();
             zoneWeatherActive_ = (roll < it->second.probability);
 
             if (zoneWeatherActive_) {
                 weatherType = it->second.type;
-                // Random intensity within configured range
                 float t = weatherRandFloat();
                 targetIntensity_ = glm::mix(it->second.minIntensity, it->second.maxIntensity, t);
-                // Random cycle duration: 3-8 minutes
                 zoneWeatherCycleDuration_ = 180.0f + weatherRandFloat() * 300.0f;
             } else {
                 targetIntensity_ = 0.0f;
@@ -436,7 +610,6 @@ void Weather::updateZoneWeather(uint32_t zoneId, float deltaTime) {
         intensity = std::max(intensity - transitionSpeed, targetIntensity_);
     }
 
-    // If intensity reached zero and target is zero, clear weather type
     if (intensity <= 0.01f && targetIntensity_ <= 0.01f) {
         if (weatherType != Type::NONE) {
             weatherType = Type::NONE;
@@ -462,7 +635,6 @@ void Weather::updateZoneWeather(uint32_t zoneId, float deltaTime) {
                 targetIntensity_ = 0.0f;
             }
 
-            // New cycle duration
             zoneWeatherCycleDuration_ = 180.0f + weatherRandFloat() * 300.0f;
         }
     }

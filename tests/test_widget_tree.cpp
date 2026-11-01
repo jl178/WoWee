@@ -1142,6 +1142,41 @@ TEST_CASE("A size just set reads back before the next layout", "[widget][layout]
     REQUIRE(tree.get(stretched)->rectH == Catch::Approx(768.0f));
 }
 
+TEST_CASE("SetWidth(0) on a label already sized to its text changes nothing",
+          "[widget][layout]") {
+    // PanelTemplates_TabResize ends every tab with tabText:SetWidth(0), and
+    // the talent frame resizes its tabs on every point clicked. The draw runs
+    // after the interface's handlers and before the next measure, so a label
+    // zeroed here was drawn with no width for a frame: the tab names jumped.
+    WidgetTree tree;
+    const uint32_t label = tree.create(WidgetKind::FontString, tree.root(), "Label");
+    tree.addPoint(label, Anchor{"CENTER", 0, "CENTER", 0.0f, 0.0f});
+    Widget* w = tree.get(label);
+    w->text = "Arcane";
+    // As the renderer's measure leaves it.
+    w->width = 36.0f;
+    w->measuredWidth = 36.0f;
+    w->height = 12.0f;
+    w->autoSized = true;
+    w->measuredText = "Arcane";
+    tree.layout(1024.0f, 768.0f);
+    REQUIRE(tree.get(label)->rectW == Catch::Approx(36.0f));
+
+    tree.setWidth(label, 0.0f);
+    REQUIRE(tree.get(label)->width == Catch::Approx(36.0f));
+    REQUIRE(tree.get(label)->rectW == Catch::Approx(36.0f));
+    REQUIRE(tree.get(label)->autoSized);
+
+    // A label given a width of its own does go back to measuring itself, but
+    // keeps its last rect to draw with until it has been measured.
+    tree.setWidth(label, 20.0f);
+    tree.layout(1024.0f, 768.0f);
+    tree.setWidth(label, 0.0f);
+    REQUIRE(tree.get(label)->width == Catch::Approx(0.0f));
+    REQUIRE_FALSE(tree.get(label)->autoSized);
+    REQUIRE(tree.get(label)->rectW == Catch::Approx(20.0f));
+}
+
 TEST_CASE("A moved frame keeps its size and lands where it was dropped",
           "[widget][layout]") {
     // StartMoving has to detach a frame from whatever it was anchored to,

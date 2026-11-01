@@ -220,21 +220,20 @@ void frameXmlNoteAddOnLoaded(const std::string& addOnName) {
 }
 
 bool frameXmlDrawsCombatText() {
-    // False while the client sends no COMBAT_TEXT_UPDATE, whatever is loaded.
+    // Whether Blizzard_CombatText is drawing the *incoming* text - what
+    // happened to the player - which it does from COMBAT_TEXT_UPDATE, now sent
+    // from the combat log and packet paths with the stock arguments.
     //
-    // Standing down for Blizzard_CombatText assumed it would draw what this
-    // client had stopped drawing. It cannot: every damage and healing number it
-    // shows arrives on COMBAT_TEXT_UPDATE, and this client has never fired that
-    // event once. What it does fire reaches the addon as the bare event name -
-    // which is why entering combat still announces itself from the middle of
-    // the screen while nothing else does, and why the handover read as working.
+    // Only the incoming half. The numbers over a target - the player's own
+    // damage and heals landing on someone else - are the C client's world text
+    // in 3.3.5, governed by CombatDamage / CombatHealing rather than by
+    // enableCombatText, and no addon draws them. So CombatUI keeps drawing those
+    // whatever this says, and stands down only for what the addon now shows.
     //
-    // The two are not the same element either. Blizzard's is a column beside
-    // the player frame; this client's is drawn in the world at whoever dealt or
-    // took the damage. Restoring COMBAT_TEXT_UPDATE would put a second copy of
-    // the numbers in that column, not on top of these, and this returns to
-    // gCombatTextAddOn on the day it is sent.
-    return false;
+    // The addon loads at world entry when enableCombatText is on: the combat
+    // text panel's enable box runs its setFunc on PLAYER_ENTERING_WORLD and
+    // that loads it.
+    return gCombatTextAddOn.load(std::memory_order_relaxed);
 }
 
 void frameXmlNoteWorldEntry() { gWorldEntered.store(true, std::memory_order_relaxed); }
@@ -455,7 +454,7 @@ const Check kChecks[] = {
         {UiElement::MicroMenu,    "CharacterMicroButton MainMenuBarPerformanceBar"},
         // MainMenuExpBar is the bar itself; ExhaustionTick is the rested
         // marker that rides on it. Checked against the XML rather than
-        // guessed - a name invented here reports NOT BUILT forever and reads
+        // guessed - a name invented here reports NOT BUILT enhanced and reads
         // as a fault in the interface rather than in this list.
         {UiElement::XpBar,        "MainMenuExpBar ExhaustionTick"},
         // Both hang off the minimap cluster, so if either is in the wrong

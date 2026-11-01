@@ -56,6 +56,15 @@ public:
     // sounds (SpellVisualKit.SoundID), so the school-sound fallback stays quiet.
     bool hasVisual(uint32_t visualId);
 
+    // Whether the kit this visual plays at one moment of the cast names a
+    // sound: the build-up (PrecastKit or ChannelKit), the release (CastKit,
+    // or the missile's own MissileSound) or the landing (ImpactKit,
+    // TargetImpactKit or ImpactAreaKit); ANY: any of those or the area and
+    // state kits. The school-sound fallback plays only for a spell with no
+    // kit sound at all (ANY false), as the stock client plays only kits.
+    enum class KitSoundMoment { PRECAST, CAST, IMPACT, ANY };
+    bool visualHasKitSound(uint32_t visualId, KitSoundMoment moment);
+
     // Whether this visual flies a missile: SpellVisual.HasMissile set and a
     // MissileModel to fly. (Divine Spirit's row names a model with
     // HasMissile 0; the stock client shows nothing.)

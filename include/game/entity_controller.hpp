@@ -246,6 +246,7 @@ private:
         uint16_t sCrit1, rating1;
         uint16_t expertise, offhandExpertise;
         uint16_t manaRegen, manaRegenCasting;
+        uint16_t baseAttackTime, minDamage, minRangedDamage;
         static PlayerFieldIndices resolve();
     };
     struct UnitFieldUpdateResult {

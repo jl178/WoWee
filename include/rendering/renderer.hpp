@@ -160,12 +160,13 @@ public:
     Weather* getWeather() const { return weather.get(); }
     Lightning* getLightning() const { return lightning.get(); }
     CharacterRenderer* getCharacterRenderer() const { return characterRenderer.get(); }
-    /// M2 $CSD sound event hook (instanceId, animationId, soundEntryId,
-    /// render-space position). Kept here because the character renderer is
-    /// created with the world, after the core callbacks are installed; it is
-    /// applied to the current one and to any created later.
+    /// M2 sound event hook (instanceId, animationId, eventTag, soundEntryId,
+    /// render-space position) - see CharacterRenderer::AnimSoundEventCallback.
+    /// Kept here because the character renderer is created with the world,
+    /// after the core callbacks are installed; it is applied to the current
+    /// one and to any created later.
     using CharacterAnimSoundEventCallback =
-        std::function<void(uint32_t, uint32_t, uint32_t, const glm::vec3&)>;
+        std::function<void(uint32_t, uint32_t, uint32_t, uint32_t, const glm::vec3&)>;
     void setCharacterAnimSoundEventCallback(CharacterAnimSoundEventCallback cb);
     WMORenderer* getWMORenderer() const { return wmoRenderer.get(); }
     M2Renderer* getM2Renderer() const { return m2Renderer.get(); }
@@ -196,7 +197,21 @@ public:
     // Third-person character follow
     void setCharacterFollow(uint32_t instanceId);
     glm::vec3& getCharacterPosition() { return characterPosition; }
+    /// The instance the local player is drawn and animated with right now:
+    /// the character itself, or the creature model of a shapeshift, polymorph
+    /// or costume while UNIT_FIELD_DISPLAYID differs from the native display.
     uint32_t getCharacterInstanceId() const { return characterInstanceId; }
+    /// The character's own model, morphed or not. Equipment, geosets and
+    /// skin belong to this one; while a morph is drawn it is kept, hidden,
+    /// so turning back is instant and wears what it wore.
+    uint32_t getNativeCharacterInstanceId() const {
+        return nativeCharacterInstanceId_ != 0 ? nativeCharacterInstanceId_ : characterInstanceId;
+    }
+    /// Draw the local player with another instance (a creature display), or
+    /// with its own model again given 0. The camera and the animation
+    /// controller follow the drawn instance, so the pivot sits on the form's
+    /// head and the form plays its own Stand/Run/Attack.
+    void setCharacterMorphInstance(uint32_t morphInstanceId);
     float getCharacterYaw() const { return characterYaw; }
     void setCharacterYaw(float yawDeg) { characterYaw = yawDeg; }
     /// The yaw the player model is DRAWN at: the facing plus the eased turn
@@ -462,6 +477,9 @@ private:
     // Third-person character state
     glm::vec3 characterPosition = glm::vec3(0.0f);
     uint32_t characterInstanceId = 0;
+    /// The character's own instance while a morph is drawn in its place; 0
+    /// when the character is drawn as itself.
+    uint32_t nativeCharacterInstanceId_ = 0;
     float characterYaw = 0.0f;
     // Eased yaw the drawn model is turned by while strafing (degrees); see
     // getCharacterVisualYaw.

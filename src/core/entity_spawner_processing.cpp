@@ -1947,6 +1947,15 @@ void EntitySpawner::despawnCreature(uint64_t guid) {
         return;
     }
 
+    const uint32_t instanceId = releaseCreatureInstance(guid);
+    if (instanceId == 0) return;
+    if (renderer_ && renderer_->getCharacterRenderer()) {
+        renderer_->getCharacterRenderer()->removeInstance(instanceId);
+    }
+    LOG_DEBUG("Despawned creature: guid=0x", std::hex, guid, std::dec);
+}
+
+uint32_t EntitySpawner::releaseCreatureInstance(uint64_t guid) {
     pendingCreatureSpawnGuids_.erase(guid);
     requestedCreatureDisplayIds_.erase(guid);
     creatureActiveEmotes_.erase(guid);
@@ -1958,11 +1967,8 @@ void EntitySpawner::despawnCreature(uint64_t guid) {
     deadCreatureGuids_.erase(guid);
 
     auto it = creatureInstances_.find(guid);
-    if (it == creatureInstances_.end()) return;
-
-    if (renderer_ && renderer_->getCharacterRenderer()) {
-        renderer_->getCharacterRenderer()->removeInstance(it->second);
-    }
+    if (it == creatureInstances_.end()) return 0;
+    const uint32_t instanceId = it->second;
 
     creatureInstances_.erase(it);
     creatureModelIds_.erase(guid);
@@ -1980,9 +1986,8 @@ void EntitySpawner::despawnCreature(uint64_t guid) {
     creatureSwimmingState_.erase(guid);
     creatureWalkingState_.erase(guid);
     creatureFlyingState_.erase(guid);
-    creatureWasStealthed_.erase(guid);
-
-    LOG_DEBUG("Despawned creature: guid=0x", std::hex, guid, std::dec);
+    unitPresentedAlpha_.erase(guid);
+    return instanceId;
 }
 
 namespace {

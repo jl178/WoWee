@@ -758,43 +758,72 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
     // Particle update (sequential - uses RNG, not thread-safe)
     // Only iterate instances that have particle emitters (pre-built list).
     //
-    // Off screen, an emitter is stepped one frame in kParticleOffscreenStride,
-    // by the time it has missed. The particle pass draws nothing for it (it
-    // tests the same sphere, padded the same 30 yards), so what is saved is
-    // the per-emitter track sampling for the ~2/3 of 3000 emitters behind the
-    // camera - most of the 3 ms this loop cost. Stepping it at all rather than
-    // freezing it keeps a fire burning when the camera turns back to it: the
-    // population is the same, born in clumps of up to four frames, and those
-    // have run out a lifespan later. Spell effects and anything within 80 yards
-    // run every frame regardless; a kit's end is timed by its live particles.
+    // An emitter the particle pass will not draw - out of range, or outside
+    // the frustum padded as that pass pads it - is dormant: its particles are
+    // dropped and it neither emits nor steps. Stepping them anyway (every
+    // frame within 80 yards, one in four beyond) kept ~110k particles alive
+    // for ~20k drawn, and was most of this loop's 2-3 ms.
+    //
+    // Its clock keeps running (advanceClock above), and the step that wakes
+    // it emits over a window as long as each emitter's lifespan, every
+    // particle aged by when in that window it was born (emitParticles). So
+    // the fire the camera turns back to is already burning, at the standing
+    // population and spread of ages it would have had - and the wake happens
+    // in the update of the same frame, against the same frustum, before the
+    // pass that draws it. A wider pad to fall asleep than to wake keeps an
+    // emitter at the edge from being dropped and rebuilt frame after frame.
+    //
+    // Spell effects and emitters told to stop are left as they were, stepped
+    // whenever in range: a kit's end is timed by its live particles.
     ++particleFrame_;
-    constexpr uint32_t kParticleOffscreenStride = 4;
-    constexpr float kParticleAlwaysStepSq = 80.0f * 80.0f;
-    constexpr float kParticleViewPad = 30.0f;  // = renderM2Particles' pad
-    uint64_t particlesFull = 0, particlesThrottled = 0, particlesLive = 0;
+    constexpr float kParticleViewPad = 30.0f;   // = renderM2Particles' pad
+    constexpr float kParticleSleepPad = 60.0f;  // wake at 30, sleep beyond 60
+    constexpr float kParticleWarmWindow = 3600.0f;  // "since enhanced": capped at each lifespan
+    uint64_t particlesFull = 0, particlesDormant = 0, particlesLive = 0;
     for (size_t idx : particleInstanceIndices_) {
         if (idx >= instances.size()) continue;
         auto& instance = instances[idx];
         advanceClock(instance);
-        // Distance cull: only update particles within visible range
-        glm::vec3 toCam = instance.position - cachedCamPos_;
-        float distSq = glm::dot(toCam, toCam);
-        if (distSq > cachedMaxRenderDistSq_) continue;
         if (!instance.cachedModel) continue;
         const M2ModelGPU& pmodel = *instance.cachedModel;
-        const bool onScreen = pmodel.isSpellEffect || distSq <= kParticleAlwaysStepSq ||
-            instance.cachedPaddedRadius <= 0.0f ||
-            updateFrustum.intersectsSphere(instance.cachedCullCenter,
-                                           instance.cachedPaddedRadius + kParticleViewPad);
-        if (onScreen ||
-            ((particleFrame_ + static_cast<uint32_t>(idx)) % kParticleOffscreenStride) == 0) {
-            const float stepDt = deltaTime + instance.particleDtDebt;
-            instance.particleDtDebt = 0.0f;
-            emitParticles(instance, pmodel, stepDt);
-            updateParticles(instance, stepDt);
-            ++(onScreen ? particlesFull : particlesThrottled);
+        glm::vec3 toCam = instance.position - cachedCamPos_;
+        float distSq = glm::dot(toCam, toCam);
+        const bool inRange = distSq <= cachedMaxRenderDistSq_;
+        const bool keepStepping = pmodel.isSpellEffect || instance.emissionStopped;
+        if (keepStepping) {
+            if (!inRange) continue;
+            instance.particlesDormant = false;
+            updateParticles(instance, deltaTime);
+            emitParticles(instance, pmodel, deltaTime);
+            ++particlesFull;
         } else {
-            instance.particleDtDebt += deltaTime;
+            const bool inView = inRange &&
+                (instance.cachedPaddedRadius <= 0.0f ||
+                 updateFrustum.intersectsSphere(instance.cachedCullCenter,
+                     instance.cachedPaddedRadius +
+                     (instance.particlesDormant ? kParticleViewPad : kParticleSleepPad)));
+            if (!inView) {
+                if (!instance.particlesDormant) {
+                    instance.particles.clear();  // keeps capacity for the wake
+                    instance.particlesDormant = true;
+                    instance.particleDtDebt = 0.0f;
+                }
+                instance.particleDtDebt += deltaTime;
+                ++particlesDormant;
+                // Out of range is as before: no ribbon step either.
+                if (!inRange) continue;
+            } else if (instance.particlesDormant) {
+                instance.particlesDormant = false;
+                instance.particleDtDebt = 0.0f;
+                emitParticles(instance, pmodel, kParticleWarmWindow);
+                ++particlesFull;
+            } else {
+                // Step the living, then add what was born during the step,
+                // each already aged by its share of it.
+                updateParticles(instance, deltaTime);
+                emitParticles(instance, pmodel, deltaTime);
+                ++particlesFull;
+            }
         }
         particlesLive += instance.particles.size();
         // Ribbons every frame: a trail stepped in leaps lays its edges down in
@@ -804,7 +833,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         }
     }
     updateProf_.particleFull += particlesFull;
-    updateProf_.particleThrottled += particlesThrottled;
+    updateProf_.particleDormant += particlesDormant;
     updateProf_.particleLive += particlesLive;
 
     // Where update/m2 join goes. Reported by the world renderer only - the
@@ -861,16 +890,18 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
                         p.shadowRebuilds, " times in ", p.frames, " frames");
             LOG_WARNING("  m2 collision queries: ", p.queryMs / n, "ms in ",
                         p.queryCalls / p.frames, " calls per frame (camera, movement)");
-            LOG_WARNING("  m2 particles: ", p.particleFull / p.frames, " emitters stepped on screen, ",
-                        p.particleThrottled / p.frames, " off screen (1 frame in 4), ",
+            LOG_WARNING("  m2 particles: ", p.particleFull / p.frames, " emitters stepped (in view), ",
+                        p.particleDormant / p.frames, " dormant (off screen or out of range, none live), ",
                         p.particleLive / p.frames, " live particles, ",
                         particleVertsDrawn_.load(std::memory_order_relaxed),
                         " drawn last frame");
-            // Which models those emitters belong to, the six most numerous:
+            // Which models those emitters belong to: the six most numerous -
             // a count in the thousands is a placed doodad (lamps, fireflies,
-            // lava), not spell effects. Once per window, over the short list.
+            // lava), not spell effects - and the six with the most particles
+            // alive, which is where the step's time goes. Once per window,
+            // over the short list.
             {
-                struct EmitterCensus { uint32_t count = 0, inRange = 0; size_t live = 0; };
+                struct EmitterCensus { uint32_t count = 0, inRange = 0, awake = 0; size_t live = 0; };
                 std::unordered_map<const M2ModelGPU*, EmitterCensus> census;
                 for (size_t idx : particleInstanceIndices_) {
                     if (idx >= instances.size() || !instances[idx].cachedModel) continue;
@@ -879,20 +910,31 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
                     ++c.count;
                     const glm::vec3 d = inst.position - cachedCamPos_;
                     if (glm::dot(d, d) <= cachedMaxRenderDistSq_) ++c.inRange;
+                    if (!inst.particlesDormant) ++c.awake;
                     c.live += inst.particles.size();
                 }
                 std::vector<std::pair<const M2ModelGPU*, EmitterCensus>> top(census.begin(), census.end());
                 const size_t keep = std::min<size_t>(6, top.size());
-                std::partial_sort(top.begin(), top.begin() + keep, top.end(),
-                                  [](const auto& a, const auto& b) { return a.second.count > b.second.count; });
-                for (size_t k = 0; k < keep; ++k) {
-                    const M2ModelGPU& m = *top[k].first;
-                    LOG_WARNING("    emitters: ", top[k].second.count, " x '", m.name, "' (",
-                                top[k].second.inRange, " in range, ", top[k].second.live,
-                                " live particles, ", m.particleEmitters.size(), " emitters, ",
-                                m.ribbonEmitters.size(), " ribbons",
+                const auto say = [](const char* tag, const M2ModelGPU& m, const EmitterCensus& c) {
+                    float maxLife = 0.0f;
+                    for (const auto& em : m.particleEmitters)
+                        for (const auto& s : em.lifespan.sequences)
+                            for (float v : s.floatValues) maxLife = std::max(maxLife, v);
+                    LOG_WARNING(tag, c.count, " x '", m.name, "' (",
+                                c.inRange, " in range, ", c.awake, " awake, ", c.live,
+                                " live particles, ", m.particleEmitters.size(), " emitters, longest life ",
+                                maxLife, " s, ", m.ribbonEmitters.size(), " ribbons",
                                 m.isGroundDetail ? ", ground clutter" : "",
                                 m.isFireflyEffect ? ", fireflies" : "", ")");
+                };
+                std::partial_sort(top.begin(), top.begin() + keep, top.end(),
+                                  [](const auto& a, const auto& b) { return a.second.count > b.second.count; });
+                for (size_t k = 0; k < keep; ++k) say("    emitters: ", *top[k].first, top[k].second);
+                std::partial_sort(top.begin(), top.begin() + keep, top.end(),
+                                  [](const auto& a, const auto& b) { return a.second.live > b.second.live; });
+                for (size_t k = 0; k < keep; ++k) {
+                    if (top[k].second.live == 0) break;
+                    say("    by live particles: ", *top[k].first, top[k].second);
                 }
             }
             p = UpdateProfile{};
