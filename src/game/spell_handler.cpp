@@ -2838,6 +2838,21 @@ void SpellHandler::mirrorAurasByGuid(uint64_t guid, const std::vector<AuraSlot>&
     if (&cached != &auras) cached = auras;
 }
 
+/// Clearing the list on a target change and letting the next partial
+/// SMSG_AURA_UPDATE fill it held that one slot and nothing else - and that
+/// list was then synced to the unit's state visuals (every other aura's state
+/// kit retired, its done kit played, and back again on the next update) and
+/// mirrored over the unit's cache, so targeting someone restarted their aura
+/// visuals and lost their other buffs.
+void SpellHandler::loadTargetAuras(uint64_t guid) {
+    targetAuras_.clear();
+    // The player's own auras stay in playerAuras_ (updates for the player go
+    // there whoever is targeted).
+    if (guid == 0 || guid == owner_.getPlayerGuid()) return;
+    if (auto it = unitAurasCache_.find(guid); it != unitAurasCache_.end())
+        targetAuras_ = it->second;
+}
+
 void SpellHandler::handleAuraUpdate(network::Packet& packet, bool isAll) {
     AuraUpdateData data;
     if (!owner_.getPacketParsers()->parseAuraUpdate(packet, data, isAll)) return;

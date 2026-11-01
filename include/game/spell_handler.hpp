@@ -164,7 +164,10 @@ public:
     [[nodiscard]] bool hasKnownSpell(uint32_t spellId) const { return knownSpells_.count(spellId) > 0; }
 
     // Target aura mutation (formerly accessed via friend)
-    void clearTargetAuras() { for (auto& slot : targetAuras_) slot = AuraSlot{}; }
+    /// The new target's auras as already known (every unit in range has its
+    /// SMSG_AURA_UPDATEs cached), not an empty list: the server sends no
+    /// AURA_UPDATE_ALL on a target change.
+    void loadTargetAuras(uint64_t guid);
 
     // Player aura mutation (formerly accessed via friend)
     void resetPlayerAuras(size_t capacity) { playerAuras_.clear(); playerAuras_.resize(capacity); }

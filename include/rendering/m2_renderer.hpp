@@ -652,6 +652,9 @@ public:
     /// in lockstep, and take their first bones from a sibling that is already
     /// mid-animation. A spell cast has to start at its beginning instead.
     void restartInstanceAnimation(uint32_t instanceId);
+    /// Let the sequence the instance is playing run once and stay on its last
+    /// frame instead of starting over (a one-shot spell kit model).
+    void holdInstanceAnimationAtEnd(uint32_t instanceId);
     /// Play an animation once and stay on its last frame.
     ///
     /// skipToEnd puts the model there immediately, which is what a door that

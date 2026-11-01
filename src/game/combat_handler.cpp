@@ -1530,9 +1530,9 @@ void CombatHandler::setTarget(uint64_t guid) {
 
     owner_.setTargetGuidRaw(guid);
 
-    // Clear stale aura data from the previous target so the buff bar shows
-    // an empty state until the server sends SMSG_AURA_UPDATE_ALL for the new target.
-    if (owner_.getSpellHandler()) owner_.getSpellHandler()->clearTargetAuras();
+    // The new target's auras as already cached from its SMSG_AURA_UPDATEs;
+    // the server sends no AURA_UPDATE_ALL for a target change.
+    if (owner_.getSpellHandler()) owner_.getSpellHandler()->loadTargetAuras(guid);
 
     // Clear previous target's cast bar on target change
     // (the new target's cast state is naturally fetched from spellHandler_->unitCastStates_ by GUID)
