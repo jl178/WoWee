@@ -377,6 +377,9 @@ struct M2Instance {
     /// The shadow candidate generation in which this instance moved; see
     /// M2Renderer::shadowMovers_.
     uint32_t shadowMoverStamp = 0;
+    /// The static shadow list build that holds this instance as a caster;
+    /// see M2Renderer::shadowStaticMark_.
+    uint32_t shadowStaticMark = 0;
     /// No new particles or ribbon edges; the live ones run out their lives.
     /// A spell effect at the end of its life is kept this way until they do.
     bool emissionStopped = false;
@@ -1214,6 +1217,7 @@ private:
     // Shadow-pass texture descriptor cache (reused each frame, cleared via pool reset)
     std::unordered_map<VkImageView, VkDescriptorSet> shadowTexSetCache_;
     /// The casters this frame, grouped by model: [0] solid, [1] foliage.
+    /// Only the movers' now; the rest are kept in shadowStaticCasters_.
     ///
     /// The shadow pass used to walk every instance in the world twice - once
     /// per pass - and draw them in whatever order they happened to sit in,
@@ -1249,10 +1253,71 @@ private:
     std::vector<uint32_t> shadowMovers_;
     /// shadowMovers_ resolved to (index, id) for this frame; reused storage.
     std::vector<std::pair<uint32_t, uint32_t>> shadowMoverPairs_;
+
+    /// The candidates' share of the casters - every candidate that has not
+    /// moved - culled and sorted by model as (modelId, index), [0] solid and
+    /// [1] foliage, and kept from frame to frame while nothing the cull reads
+    /// has changed. Only the movers are culled every frame.
+    ///
+    /// The cull of an unmoved candidate reads its position, flags, model and
+    /// scale, which change only through the paths that bump shadowStaticGen_,
+    /// and the light-space matrix, centre and radius, which are compared
+    /// exactly. So a kept list is the list the cull would build again, and
+    /// the matrices it put at the front of a frame slot's caster buffer are
+    /// still the instances' matrices. WOWEE_SHADOW_CACHE=0 rebuilds it every
+    /// frame. See renderShadow.
+    std::vector<std::pair<uint32_t, uint32_t>> shadowStaticCasters_[2];
+    /// A model's run in shadowStaticCasters_[b], [begin, end), and where its
+    /// matrices start in the caster buffer.
+    struct ShadowCasterGroup { uint32_t begin, end, base; };
+    std::vector<ShadowCasterGroup> shadowStaticGroups_[2];
+    /// Matrices the static groups take at the front of the caster buffer.
+    uint32_t shadowStaticCount_ = 0;
+    glm::mat4 shadowStaticLightSpace_{0.0f};
+    glm::vec3 shadowStaticCenter_{0.0f};
+    float shadowStaticRadius_ = -1.0f;
+    /// Bumped by everything that can change the static casters: a list
+    /// build, a static caster turned mover, a removal that takes one of
+    /// them, castsShadow, a model marked as a spell effect or unloaded.
+    uint32_t shadowStaticGen_ = 0;
+    uint32_t shadowStaticBuiltGen_ = ~0u;
+    enum ShadowGenSource : uint8_t {
+        kShadowGenRebuild, kShadowGenMover, kShadowGenRemoval,
+        kShadowGenCastsShadow, kShadowGenModel, kShadowGenLayout, kShadowGenCount
+    };
+    void bumpShadowStatic(ShadowGenSource source) {
+        ++shadowStaticGen_;
+        ++updateProf_.shadowGenBumps[source];
+    }
+    /// Numbers the static list builds; a caster on the current list carries
+    /// it in M2Instance::shadowStaticMark, so a first move of anything else
+    /// leaves the list alone.
+    uint32_t shadowStaticMark_ = 1;
+    /// The candidates whose verdict depends on the centre or the matrix,
+    /// with how far each is from turning (see renderShadow's CullSlack) and
+    /// the verdict (-1 none, 0 solid, 1 foliage). A frame whose centre and
+    /// matrix moved by less than every probe's slack keeps the list; probes
+    /// within it are re-tested, and the list is kept if none turned.
+    struct ShadowStaticProbe {
+        uint32_t index, id;
+        float slackDist, slackClip;
+        int8_t bucket;
+    };
+    std::vector<ShadowStaticProbe> shadowStaticProbes_;
+    std::vector<std::pair<uint32_t, uint32_t>> shadowRecheck_[2];
+    /// Which build of the static list is current, and which one each frame
+    /// slot's caster buffer holds at its front (0 = none).
+    uint64_t shadowStaticEpoch_ = 0;
+    uint64_t casterSlotEpoch_[2] = {0, 0};
+    /// A removal of `idx` with `lastIdx` moved into its place: a static
+    /// caster removed means a rebuild; otherwise the moved one's index is
+    /// patched (on the list and the probes), and its matrix in the caster
+    /// buffers is still right.
+    void patchShadowStaticRemoval(size_t idx, size_t lastIdx);
     /// The margin the current list was gathered with.
     float shadowCandMargin_ = 0.0f;
-    /// A new instance at `idx`: put it on the candidate list if it could
-    /// reach the disc the list was built for.
+    /// A new instance at `idx`: if it could reach the disc the list was
+    /// built for, ask it every frame as a mover until the next build.
     void noteShadowCandidate(size_t idx);
     /// An instance moved: track it as a mover until the next build.
     void noteShadowMover(M2Instance& inst) {
@@ -1261,6 +1326,9 @@ private:
         if (inst.cachedModel && inst.cachedModel->isSpellEffect) return;
         inst.shadowMoverStamp = shadowCandStamp_;
         shadowMovers_.push_back(inst.id);
+        // Only a caster on the static list changes it by leaving; any other
+        // candidate was culled out of it already.
+        if (inst.shadowStaticMark == shadowStaticMark_) bumpShadowStatic(kShadowGenMover);
     }
 
     // Ribbon draw-call list (reused each frame)
@@ -1331,6 +1399,17 @@ private:
         double preMs = 0.0, animLoopMs = 0.0, bonesMs = 0.0, particlesMs = 0.0;
         uint64_t animatedListed = 0, boneWork = 0, staticPoseSkips = 0, particleListed = 0;
         uint64_t shadowCandidates = 0, shadowCasters = 0, shadowRebuilds = 0, shadowMovers = 0;
+        uint64_t shadowStaticReuses = 0;
+        /// Why the static shadow list was not kept, per frame: generation
+        /// bumped, radius changed, or a candidate's verdict turned (or came
+        /// within rounding of turning) after the centre or matrix moved.
+        uint64_t shadowMissGen = 0, shadowMissRadius = 0, shadowMissFlip = 0;
+        /// Frames whose centre or light matrix differed from the build's,
+        /// kept or not; kept within the slack; candidates re-tested.
+        uint64_t shadowCentreDiffers = 0, shadowLightDiffers = 0;
+        uint64_t shadowKeptInSlack = 0, shadowRechecks = 0;
+        /// Generation bumps by source (ShadowGenSource).
+        uint64_t shadowGenBumps[6] = {};
         uint64_t particleFull = 0, particleDormant = 0, particleLive = 0;
         double queryMs = 0.0;
         uint64_t queryCalls = 0;

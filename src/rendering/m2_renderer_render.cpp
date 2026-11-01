@@ -25,6 +25,7 @@
 #include "core/profiler.hpp"
 #include <chrono>
 #include <cctype>
+#include <cstring>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/quaternion.hpp>
@@ -919,7 +920,19 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
             LOG_WARNING("  m2 shadow: ", p.shadowCandidates / p.frames, " candidates, ",
                         p.shadowMovers / p.frames, " movers, ",
                         p.shadowCasters / p.frames, " casters drawn per frame; candidate list rebuilt ",
-                        p.shadowRebuilds, " times in ", p.frames, " frames");
+                        p.shadowRebuilds, " times in ", p.frames, " frames; static casters kept in ",
+                        p.shadowStaticReuses, " frames (", p.shadowKeptInSlack, " within slack, ",
+                        p.shadowRechecks, " probes re-tested)");
+            LOG_WARNING("  m2 shadow static misses: gen ", p.shadowMissGen, ", radius ",
+                        p.shadowMissRadius, ", verdict turned ", p.shadowMissFlip,
+                        "; centre differed in ", p.shadowCentreDiffers, " frames, light matrix in ",
+                        p.shadowLightDiffers, "; gen bumps: rebuild ",
+                        p.shadowGenBumps[kShadowGenRebuild], ", mover ",
+                        p.shadowGenBumps[kShadowGenMover], ", removal ",
+                        p.shadowGenBumps[kShadowGenRemoval], ", castsShadow ",
+                        p.shadowGenBumps[kShadowGenCastsShadow], ", model ",
+                        p.shadowGenBumps[kShadowGenModel], ", layout ",
+                        p.shadowGenBumps[kShadowGenLayout]);
             LOG_WARNING("  m2 collision queries: ", p.queryMs / n, "ms in ",
                         p.queryCalls / p.frames, " calls per frame (camera, movement)");
             LOG_WARNING("  m2 particles: ", p.particleFull / p.frames, " emitters stepped (in view), ",
@@ -2632,6 +2645,7 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
                 return false;
             }
             casterMapped_[i] = allocInfo.pMappedData;
+            casterSlotEpoch_[i] = 0;  // holds no static casters yet
             VkDescriptorSetAllocateInfo setAi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
             setAi.descriptorPool = casterDescPool_;
             setAi.descriptorSetCount = 1;
@@ -2822,6 +2836,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
             shadowCandLayoutGen_ = casterLayoutGen_;
             shadowCandBuiltAt_ = now;
             ++updateProf_.shadowRebuilds;
+            bumpShadowStatic(kShadowGenRebuild);  // movers folded back in, new candidates
         }
         updateProf_.shadowCandidates += shadowCandidates_.size();
         updateProf_.shadowMovers += shadowMovers_.size();
@@ -2837,9 +2852,31 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         shadowMoverPairs_.emplace_back(static_cast<uint32_t>(it->second), moverId);
     }
 
-    const auto considerCaster = [&](uint32_t i, uint32_t candidateId, bool fromMovers) {
+    // How far a candidate's verdict is from turning, for the static list
+    // (see the kept-list test below). dist in yards of centre movement, clip
+    // per unit of light-matrix change times the position's L1 size; both
+    // less a rounding allowance, so a change below them provably leaves the
+    // verdict as it was. Infinite where the verdict does not depend on the
+    // centre or the matrix at all (flags, no model, a spell effect).
+    constexpr float kSlackInf = std::numeric_limits<float>::infinity();
+    // |pos - centre| in float carries ~1e-3 yd of error at world coordinates
+    // of ~1e4; the clip coordinates sum terms of ~1e2 into ~1, ~1e-5 each.
+    constexpr float kDistAllow = 0.02f;
+    constexpr float kClipAllow = 1e-3f;
+    struct CullSlack { float dist = kSlackInf, clip = kSlackInf; };
+    const auto considerCaster = [&](uint32_t i, uint32_t candidateId, bool fromMovers,
+                                    std::vector<std::pair<uint32_t, uint32_t>>* out,
+                                    CullSlack* slack = nullptr) {
+        if (slack) *slack = CullSlack{};
         if (i >= instances.size()) return;
         const auto& instance = instances[i];
+        const auto setSlack = [&](float rawDist, float rawClip) {
+            if (!slack) return;
+            const glm::vec3& p = instance.position;
+            slack->dist = rawDist - kDistAllow;
+            slack->clip = (rawClip - kClipAllow) /
+                (std::abs(p.x) + std::abs(p.y) + std::abs(p.z) + 1.0f);
+        };
         if (instance.id != candidateId) return;
         if (!fromMovers && instance.shadowMoverStamp == shadowCandStamp_) return;
         if (!instance.cachedIsValid || instance.cachedIsSmoke ||
@@ -2852,11 +2889,13 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         // shadow map at its distance draws for nothing. Both were most of the
         // casters, and each caster is a push constant and a draw per batch.
         if (instance.cachedIsGroundDetail || !instance.castsShadow) return;
+        float distSlack = kSlackInf;
         {
             const glm::vec3 d = instance.position - shadowCenter;
             const float reach = shadowRadius + instance.cachedPaddedRadius;
             const float distSq = glm::dot(d, d);
-            if (distSq > reach * reach) return;
+            const float dist = std::sqrt(distSq);
+            if (distSq > reach * reach) { setSlack(dist - reach, kSlackInf); return; }
             // The projected-size cap: a caster is kept while its radius over
             // its distance from the player (whom the camera follows) exceeds
             // 1/ratio - at 150, about six pixels of radius on a 1080p screen.
@@ -2866,7 +2905,9 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                 const float r = (v && *v) ? static_cast<float>(std::atof(v)) : 0.0f;
                 return r > 1.0f ? r : 150.0f;
             }();
-            if (instance.cachedPaddedRadius * kTexelsPerYardOfRadius < std::sqrt(distSq)) return;
+            const float cap = instance.cachedPaddedRadius * kTexelsPerYardOfRadius;
+            if (cap < std::sqrt(distSq)) { setSlack(dist - cap, kSlackInf); return; }
+            distSlack = std::min(reach - dist, cap - dist);
         }
         if (!instance.cachedModel) return;
         const M2ModelGPU& model = *instance.cachedModel;
@@ -2887,20 +2928,151 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         // Inflate by the model's bounding sphere converted to NDC
         // (shadowRadius ≈ frustum half-extent; overshoot is harmless).
         const float margin = (model.boundRadius * instance.scale) / shadowRadius * 1.5f;
-        if (std::abs(clip.x) > 1.0f + margin || std::abs(clip.y) > 1.0f + margin) return;
-        if (clip.z < -margin || clip.z > 1.0f + margin) return;
+        const float lim = 1.0f + margin;
+        const float ax = std::abs(clip.x), ay = std::abs(clip.y);
+        const float zLo = clip.z + margin, zHi = 1.0f + margin - clip.z;
+        if (std::abs(clip.x) > 1.0f + margin || std::abs(clip.y) > 1.0f + margin) {
+            setSlack(kSlackInf, std::max(ax - lim, ay - lim));
+            return;
+        }
+        if (clip.z < -margin || clip.z > 1.0f + margin) {
+            setSlack(kSlackInf, std::max(-zLo, -zHi));
+            return;
+        }
+        setSlack(distSlack, std::min(std::min(lim - ax, lim - ay), std::min(zLo, zHi)));
 
-        shadowCasters_[model.shadowWindFoliage ? 1 : 0].emplace_back(instance.modelId, i);
+        out[model.shadowWindFoliage ? 1 : 0].emplace_back(instance.modelId, i);
     };
-    for (const auto& [i, candidateId] : shadowCandidates_) considerCaster(i, candidateId, false);
-    for (const auto& [i, moverId] : shadowMoverPairs_) considerCaster(i, moverId, true);
+
+    // The unmoved candidates are culled again only when something that cull
+    // reads has changed; see shadowStaticCasters_. Walking ~8k candidates and
+    // sorting ~5.5k casters every frame was most of this pass.
+    //
+    // The flags, positions and models are covered by shadowStaticGen_. The
+    // centre and the light matrix move by a hair from frame to frame even
+    // with the player standing still, so they are not compared for equality:
+    // each candidate whose verdict depends on them carries how far it was
+    // from turning when the list was built (its slack, less a rounding
+    // allowance). A centre and matrix that moved by less than a probe's slack
+    // cannot have turned it; the probes they did move past are tested again
+    // at the current values, and the list is kept only if every one comes
+    // out as it did. Either way the list is the one the cull would build
+    // now, so the map is the same.
+    static const bool shadowCacheOn = [] {
+        const char* v = std::getenv("WOWEE_SHADOW_CACHE");
+        return !(v && v[0] == '0');
+    }();
+    bool staticKept = false;
+    if (!shadowCacheOn) {
+        // Culled every frame, as before the list was kept.
+    } else if (shadowStaticBuiltGen_ != shadowStaticGen_) {
+        ++updateProf_.shadowMissGen;
+    } else if (shadowStaticRadius_ != shadowRadius) {
+        ++updateProf_.shadowMissRadius;
+    } else {
+        const bool centreSame = shadowStaticCenter_ == shadowCenter;
+        const bool lightSame =
+            std::memcmp(&shadowStaticLightSpace_, &lightSpaceMatrix, sizeof(glm::mat4)) == 0;
+        if (!centreSame) ++updateProf_.shadowCentreDiffers;
+        if (!lightSame) ++updateProf_.shadowLightDiffers;
+        staticKept = true;
+        if (!centreSame || !lightSame) {
+            const float centreMoved = glm::length(shadowCenter - shadowStaticCenter_);
+            // The largest change in any entry of the rows that give clip x,
+            // y and z: |delta clip| <= that * (|x| + |y| + |z| + 1).
+            float matrixMoved = 0.0f;
+            for (int c = 0; c < 4; ++c)
+                for (int r = 0; r < 3; ++r)
+                    matrixMoved = std::max(matrixMoved,
+                        std::abs(lightSpaceMatrix[c][r] - shadowStaticLightSpace_[c][r]));
+            for (const auto& probe : shadowStaticProbes_) {
+                if (centreMoved < probe.slackDist && matrixMoved < probe.slackClip) continue;
+                ++updateProf_.shadowRechecks;
+                shadowRecheck_[0].clear();
+                shadowRecheck_[1].clear();
+                considerCaster(probe.index, probe.id, false, shadowRecheck_);
+                const int8_t now = !shadowRecheck_[0].empty() ? 0 : (!shadowRecheck_[1].empty() ? 1 : -1);
+                if (now != probe.bucket) {
+                    staticKept = false;
+                    break;
+                }
+            }
+            if (staticKept) ++updateProf_.shadowKeptInSlack;
+            else ++updateProf_.shadowMissFlip;
+        }
+    }
+    if (staticKept) {
+        ++updateProf_.shadowStaticReuses;
+    } else {
+        for (auto& bucket : shadowStaticCasters_) bucket.clear();
+        shadowStaticProbes_.clear();
+        ++shadowStaticMark_;
+        if (shadowStaticMark_ == 0) ++shadowStaticMark_;  // 0 is "never on a list"
+        for (const auto& [i, candidateId] : shadowCandidates_) {
+            CullSlack slack;
+            const std::size_t solidBefore = shadowStaticCasters_[0].size();
+            const std::size_t foliageBefore = shadowStaticCasters_[1].size();
+            considerCaster(i, candidateId, false, shadowStaticCasters_, &slack);
+            const int8_t bucket = shadowStaticCasters_[0].size() != solidBefore ? 0
+                : (shadowStaticCasters_[1].size() != foliageBefore ? 1 : -1);
+            if (bucket >= 0) instances[i].shadowStaticMark = shadowStaticMark_;
+            if (slack.dist != kSlackInf || slack.clip != kSlackInf)
+                shadowStaticProbes_.push_back({.index = i, .id = candidateId,
+                                               .slackDist = slack.dist, .slackClip = slack.clip,
+                                               .bucket = bucket});
+        }
+        // Each model's run, and its place at the front of the caster buffer:
+        // solid first, then foliage. A run that would overflow the buffer is
+        // left out, as the draw loop always left it.
+        uint32_t base = 0;
+        for (int b = 0; b < 2; ++b) {
+            auto& casters = shadowStaticCasters_[b];
+            std::sort(casters.begin(), casters.end());
+            auto& groups = shadowStaticGroups_[b];
+            groups.clear();
+            for (std::size_t g = 0; g < casters.size();) {
+                std::size_t groupEnd = g;
+                while (groupEnd < casters.size() && casters[groupEnd].first == casters[g].first) ++groupEnd;
+                const uint32_t count = static_cast<uint32_t>(groupEnd - g);
+                if (base + count <= MAX_SHADOW_CASTERS) {
+                    groups.push_back({.begin = static_cast<uint32_t>(g),
+                                      .end = static_cast<uint32_t>(groupEnd), .base = base});
+                    base += count;
+                }
+                g = groupEnd;
+            }
+        }
+        shadowStaticCount_ = base;
+        shadowStaticLightSpace_ = lightSpaceMatrix;
+        shadowStaticCenter_ = shadowCenter;
+        shadowStaticRadius_ = shadowRadius;
+        shadowStaticBuiltGen_ = shadowStaticGen_;
+        ++shadowStaticEpoch_;
+    }
+    // The movers, every frame, wherever they are now.
+    for (const auto& [i, moverId] : shadowMoverPairs_) considerCaster(i, moverId, true, shadowCasters_);
     for (auto& bucket : shadowCasters_) {
         std::sort(bucket.begin(), bucket.end());
     }
 
-    // Helper lambda to draw instances with a given foliageSway setting
+    // The static casters' matrices go to the front of this frame slot's
+    // buffer once per build of the list, not every frame: an unmoved
+    // instance's matrix is unchanged (each write to one makes it a mover)
+    // and nothing else writes that part of the buffer.
     glm::mat4* casterMatrices = static_cast<glm::mat4*>(casterMapped_[frameIdx]);
-    uint32_t castersWritten = 0;
+    if (casterMatrices && casterSlotEpoch_[frameIdx] != shadowStaticEpoch_) {
+        for (int b = 0; b < 2; ++b) {
+            const auto& casters = shadowStaticCasters_[b];
+            for (const auto& group : shadowStaticGroups_[b]) {
+                glm::mat4* dst = casterMatrices + group.base;
+                for (uint32_t k = group.begin; k < group.end; ++k)
+                    *dst++ = instances[casters[k].second].modelMatrix;
+            }
+        }
+        casterSlotEpoch_[frameIdx] = shadowStaticEpoch_;
+    }
+    // The movers' matrices follow them, written every frame.
+    uint32_t castersWritten = shadowStaticCount_;
     auto drawPass = [&](bool foliagePass) {
         // What this pass is, carried with each draw rather than written into a
         // buffer both passes share. The uniform buffer this used to be is read
@@ -2921,17 +3093,13 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
             0, 1, &shadowParams_.set, 0, nullptr);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
             1, 1, &casterSet_[frameIdx], 0, nullptr);
+        // What set 0 holds now, so a batch whose set is already bound does
+        // not bind it again.
+        VkDescriptorSet boundSet0 = shadowParams_.set;
 
-        const auto& casters = shadowCasters_[foliagePass ? 1 : 0];
-        for (std::size_t g = 0; g < casters.size();) {
-            const uint32_t modelId = casters[g].first;
-            std::size_t groupEnd = g;
-            while (groupEnd < casters.size() && casters[groupEnd].first == modelId) ++groupEnd;
-
-            const auto& firstInstance = instances[casters[g].second];
-            if (!firstInstance.cachedModel) { g = groupEnd; continue; }
-            const M2ModelGPU& model = *firstInstance.cachedModel;
-
+        // One model's casters, groupSize matrices from casterBase in the
+        // caster buffer; every batch draws them all with one instanced draw.
+        const auto drawGroup = [&](const M2ModelGPU& model, uint32_t casterBase, uint32_t groupSize) {
             // Once per model, not once per instance: the bend comes from the
             // model's own bounds and its kind, and so do the buffers.
             //
@@ -2944,17 +3112,17 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
             const M2Sway sway = swayOfModel(model, false);
             const int swayFlag = sway.mode == 1 ? 1 : (sway.mode == 5 ? 2 : 0);
             const glm::vec2 modelSwayZW(sway.refHeight, sway.amp);
-            // The group's matrices go into the caster buffer once; every batch
-            // below draws them all with a single instanced draw.
-            const uint32_t groupSize = static_cast<uint32_t>(groupEnd - g);
-            if (!casterMatrices || castersWritten + groupSize > MAX_SHADOW_CASTERS) { g = groupEnd; continue; }
-            const uint32_t casterBase = castersWritten;
-            for (std::size_t k = g; k < groupEnd; ++k) {
-                casterMatrices[castersWritten++] = instances[casters[k].second].modelMatrix;
-            }
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &model.vertexBuffer, &offset);
             vkCmdBindIndexBuffer(cmd, model.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+            // Once per model too: nothing in it depends on the batch.
+            ShadowPush push{
+                .lightSpaceModel = lightSpaceMatrix,  // light space only; the model is per caster
+                .sway = glm::vec4(0.0f, 0.0f, modelSwayZW.x, modelSwayZW.y),
+                .flags = glm::ivec4(passFlags.x, passFlags.y, swayFlag, static_cast<int>(casterBase)),
+                .wind = wind};
+            vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(ShadowPush), &push);
 
             for (const auto& batch : model.batches) {
                 if (batch.submeshLevel > 0) continue;
@@ -2977,26 +3145,53 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                 }
                 // Once per batch, where it used to be once per batch per
                 // instance: the texture is the batch's, and every instance of
-                // this model shares it.
-                if (foliagePass && batch.hasAlpha && batch.texture) {
-                    VkDescriptorSet texSet = getTexDescSet(batch.texture);
-                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        shadowPipelineLayout_, 0, 1, &texSet, 0, nullptr);
-                } else if (foliagePass) {
-                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        shadowPipelineLayout_, 0, 1, &shadowParams_.set, 0, nullptr);
+                // this model shares it. Bound only when it differs from the
+                // set already bound - most foliage batches of a run share the
+                // white set or one sheet.
+                if (foliagePass) {
+                    const VkDescriptorSet texSet = (batch.hasAlpha && batch.texture)
+                        ? getTexDescSet(batch.texture) : shadowParams_.set;
+                    if (texSet != boundSet0) {
+                        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            shadowPipelineLayout_, 0, 1, &texSet, 0, nullptr);
+                        boundSet0 = texSet;
+                    }
                 }
 
-                ShadowPush push{
-                    .lightSpaceModel = lightSpaceMatrix,  // light space only; the model is per caster
-                    .sway = glm::vec4(0.0f, 0.0f, modelSwayZW.x, modelSwayZW.y),
-                    .flags = glm::ivec4(passFlags.x, passFlags.y, swayFlag, static_cast<int>(casterBase)),
-                    .wind = wind};
-                vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   0, sizeof(ShadowPush), &push);
                 vkCmdDrawIndexed(cmd, batch.indexCount, groupSize, batch.indexStart, 0, 0);
             }
-            castersDrawn[foliagePass ? 1 : 0] += static_cast<uint32_t>(groupEnd - g);
+            castersDrawn[foliagePass ? 1 : 0] += groupSize;
+        };
+
+        // The static casters, whose matrices are already in place.
+        const int b = foliagePass ? 1 : 0;
+        if (casterMatrices) {
+            const auto& staticCasters = shadowStaticCasters_[b];
+            for (const auto& group : shadowStaticGroups_[b]) {
+                const auto& firstInstance = instances[staticCasters[group.begin].second];
+                if (!firstInstance.cachedModel) continue;
+                drawGroup(*firstInstance.cachedModel, group.base, group.end - group.begin);
+            }
+        }
+
+        // The movers. A model with casters on both lists draws twice; the
+        // depth test keeps the nearest surface whatever the order, so that
+        // leaves the map as one draw would.
+        const auto& casters = shadowCasters_[b];
+        for (std::size_t g = 0; g < casters.size();) {
+            const uint32_t modelId = casters[g].first;
+            std::size_t groupEnd = g;
+            while (groupEnd < casters.size() && casters[groupEnd].first == modelId) ++groupEnd;
+
+            const auto& firstInstance = instances[casters[g].second];
+            if (!firstInstance.cachedModel) { g = groupEnd; continue; }
+            const uint32_t groupSize = static_cast<uint32_t>(groupEnd - g);
+            if (!casterMatrices || castersWritten + groupSize > MAX_SHADOW_CASTERS) { g = groupEnd; continue; }
+            const uint32_t casterBase = castersWritten;
+            for (std::size_t k = g; k < groupEnd; ++k) {
+                casterMatrices[castersWritten++] = instances[casters[k].second].modelMatrix;
+            }
+            drawGroup(*firstInstance.cachedModel, casterBase, groupSize);
             g = groupEnd;
         }
     };

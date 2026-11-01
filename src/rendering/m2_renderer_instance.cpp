@@ -373,6 +373,7 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
         for (auto& c : shadowCandidates_)
             if (c.first == lastIdx) c.first = static_cast<uint32_t>(idx);
     }
+    patchShadowStaticRemoval(idx, lastIdx);
     if (idx < lastIdx) {
         uint32_t movedId = instances.back().id;
         instances[idx] = std::move(instances.back());
@@ -431,7 +432,9 @@ void M2Renderer::setSkipWallCollision(uint32_t instanceId, bool skip) {
 void M2Renderer::setInstanceCastsShadow(uint32_t instanceId, bool casts) {
     auto idxIt = instanceIndexById.find(instanceId);
     if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) return;
-    instances[idxIt->second].castsShadow = casts;
+    auto& inst = instances[idxIt->second];
+    if (inst.castsShadow != casts) bumpShadowStatic(kShadowGenCastsShadow);
+    inst.castsShadow = casts;
 }
 
 void M2Renderer::noteShadowCandidate(size_t idx) {
@@ -441,7 +444,32 @@ void M2Renderer::noteShadowCandidate(size_t idx) {
     const glm::vec3 d = inst.position - shadowCandCenter_;
     const float reach = shadowCandRadius_ + inst.cachedPaddedRadius + shadowCandMargin_;
     if (glm::dot(d, d) > reach * reach) return;
-    shadowCandidates_.emplace_back(static_cast<uint32_t>(idx), inst.id);
+    // Asked every frame as a mover until the next build, rather than put on
+    // the candidate list: appended there it changed the static list, which
+    // then had to be culled again whole for each instance created.
+    M2Instance& added = instances[idx];
+    added.shadowMoverStamp = shadowCandStamp_;
+    shadowMovers_.push_back(added.id);
+}
+
+void M2Renderer::patchShadowStaticRemoval(size_t idx, size_t lastIdx) {
+    if (idx >= instances.size()) return;
+    if (instances[idx].shadowStaticMark == shadowStaticMark_) {
+        bumpShadowStatic(kShadowGenRemoval);
+        return;
+    }
+    if (idx >= lastIdx || lastIdx >= instances.size()) return;
+    const M2Instance& moved = instances[lastIdx];
+    if (moved.shadowStaticMark == shadowStaticMark_) {
+        for (auto& bucket : shadowStaticCasters_)
+            for (auto& c : bucket)
+                if (c.second == lastIdx) c.second = static_cast<uint32_t>(idx);
+    }
+    // Clutter is never a candidate, so never a probe; anything else may be.
+    if (!moved.cachedIsGroundDetail) {
+        for (auto& probe : shadowStaticProbes_)
+            if (probe.index == lastIdx) probe.index = static_cast<uint32_t>(idx);
+    }
 }
 
 void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
@@ -495,6 +523,8 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
             instanceIndexById.erase(inst.id);
 
             const size_t lastIdx = instances.size() - 1;
+            // Current indices, as the static casters hold them.
+            patchShadowStaticRemoval(idx, lastIdx);
             if (idx < lastIdx) {
                 const auto oit = origAt.find(lastIdx);
                 const size_t orig = (oit != origAt.end()) ? oit->second : lastIdx;
@@ -664,6 +694,9 @@ void M2Renderer::clear() {
     shadowCandidates_.clear();
     shadowMovers_.clear();
     shadowCandRadius_ = -1.0f;  // rebuilt on the next shadow pass
+    for (auto& bucket : shadowStaticCasters_) bucket.clear();
+    shadowStaticProbes_.clear();
+    bumpShadowStatic(kShadowGenLayout);
     smokeEmitAccum = 0.0f;
 
     // Clear texture cache so stale textures don't block loads for the next
@@ -688,6 +721,9 @@ void M2Renderer::clearInstances() {
     shadowCandidates_.clear();
     shadowMovers_.clear();
     shadowCandRadius_ = -1.0f;  // rebuilt on the next shadow pass
+    for (auto& bucket : shadowStaticCasters_) bucket.clear();
+    shadowStaticProbes_.clear();
+    bumpShadowStatic(kShadowGenLayout);
     spatialGrid.clear();
     instanceIndexById.clear();
     boneSeedInstanceByModel_.clear();
@@ -718,6 +754,7 @@ void M2Renderer::rebuildSpatialIndex() {
     // Every path that compacts or reorders `instances` comes through here;
     // the shadow candidate list holds indices into it.
     ++casterLayoutGen_;
+    bumpShadowStatic(kShadowGenLayout);
     spatialGrid.clear();
     instanceIndexById.clear();
     boneSeedInstanceByModel_.clear();
@@ -854,6 +891,7 @@ void M2Renderer::cleanupUnusedModels() {
         if (it != models.end()) {
             destroyModelGPU(it->second);
             models.erase(it);
+            bumpShadowStatic(kShadowGenModel);
             // Record the eviction so owners caching "uploaded" model IDs can
             // drop it; otherwise their next spawn skips the load as a stale hit
             // and pushes an empty placeholder (missing doodads on revisit).
@@ -878,6 +916,7 @@ void M2Renderer::unloadModel(uint32_t modelId) {
     if (vkCtx_) vkDeviceWaitIdle(vkCtx_->getDevice());
     destroyModelGPU(it->second);
     models.erase(it);
+    bumpShadowStatic(kShadowGenModel);
     modelUnusedSince_.erase(modelId);
     pinnedModelIds_.erase(modelId);
     reapedModelIds_.push_back(modelId);

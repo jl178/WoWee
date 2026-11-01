@@ -11,6 +11,7 @@
 #include "core/logger.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <type_traits>
@@ -675,6 +676,21 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     currentParams_.dayIntensity = dayIntensity;
     currentParams_.nightIntensity = nightIntensity;
     currentParams_.directionalDir = glm::normalize(glm::mix(currentParams_.directionalDir, newParams.directionalDir, blendFactor));
+    // Settled exactly once within a millionth of the target. The blend comes
+    // to rest an ulp or two short of it, and for most directions it then
+    // flips between neighbouring floats from frame to frame for as long as
+    // the hour holds: invisible, but a new shadow projection every frame, and
+    // the M2 shadow pass keeps its static casters only while the projection
+    // is unchanged (M2Renderer::renderShadow). WOWEE_SHADOW_CACHE=0 leaves
+    // the blend as it was.
+    static const bool settleSunDir = [] {
+        const char* v = std::getenv("WOWEE_SHADOW_CACHE");
+        return !(v && v[0] == '0');
+    }();
+    if (settleSunDir) {
+        const glm::vec3 d = currentParams_.directionalDir - newParams.directionalDir;
+        if (glm::dot(d, d) < 1e-12f) currentParams_.directionalDir = newParams.directionalDir;
+    }
 }
 
 std::vector<LightingManager::WeightedVolume> LightingManager::findLightVolumes(const glm::vec3& playerPos, uint32_t mapId) const {
