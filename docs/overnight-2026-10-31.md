@@ -461,3 +461,18 @@ Other fixes:
   - Can't reproduce from a Lua test yet: JUMP polls the keyboard, which SDL_PushEvent doesn't update, and JumpOrAscendStart isn't implemented.
   - Next: log the cancel path and implement JumpOrAscendStart/AscendStop (stock FrameXML bindings use them).
 - WPTEST has gmlevel 3 on the lab (for test setup commands).
+- `fbe620b`: quest givers are re-asked when the quest log changes.
+  - AzerothCore completes most quests through update fields alone, with no packet.
+  - The client now sends CMSG_QUESTGIVER_STATUS_MULTIPLE_QUERY on any slot-state change.
+  - Learning a spell no longer plays the quest-accept sound; stock's is SpellVisualKit 362 from the server.
+- `aa42cc2`: equipment textures are layered in the stock CCharacterComponent order (DAT_009f6a00), with one shared helper for all four composite sites. Belts now paint over trousers.
+- `47cc6f1`: combat animations.
+  - Remote casters take a weapon stance and hold their cast loop. The sheath byte stays 0 for bots, so it can't be used.
+  - One-shot spell kits hold their last frame instead of looping back; this removes the double Judgement hammer and the repeating seal.
+  - Target auras load from the cache on target change.
+- All 239 tests pass, including sweep_guard. Smoke login is clean.
+- Still open:
+  - Jump-during-cast interrupt; needs JumpOrAscendStart and logging.
+  - LEARNED_SPELL_IN_TAB passes the spell id instead of the tab index.
+  - Bots' weapons stay sheathed (server sheath 0). Need a stock comparison of whether the stock client draws them anyway.
+  - Restart Jered's client.
