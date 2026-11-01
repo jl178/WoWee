@@ -305,7 +305,13 @@ void CharacterRenderer::buildMainPassPipelines(VkDevice device, VkRenderPass mai
                         charFrag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
             .setVertexInput({charBinding}, charAttrs)
             .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-            .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+            // Counter-clockwise front: M2 triangles wind counter-clockwise
+            // about their outward normals (8483 of 8638 in UI_Human, 6289 of
+            // 6356 in HumanMale), and the camera's Y-flipped projection keeps
+            // that winding on screen. With the builder's clockwise default
+            // every face turned to the camera reported !gl_FrontFacing, and
+            // character.frag turned its normal inward: lit from behind.
+            .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE)
             .setDepthTest(true, depthWrite, VK_COMPARE_OP_LESS)
             .setDepthBias(0.0f, 0.0f)
             .setColorBlendAttachment(blendState)

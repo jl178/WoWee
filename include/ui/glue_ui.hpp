@@ -142,5 +142,49 @@ void tooltip(ImDrawList* dl, ImVec2 at, const std::string& text);
 /// Answers true on the frame the button is clicked.
 bool dialog(PaperUI& ui, const char* id, const std::string& message, const char* buttonLabel);
 
+/// The glue panel button's art and label with no behaviour of its own, for a
+/// caller that has already decided hover and press (the paper skin).
+void drawButton(ImDrawList* dl, ImVec2 a, ImVec2 b, const char* label, ButtonStyle style,
+                bool enabled, bool hovered, bool held, float labelPx);
+
+/// OptionsSliderTemplate: UI-SliderBar-Background inside UI-SliderBar-Border,
+/// UI-SliderBar-Button-Horizontal for the thumb, `widthPx` wide and 17 units
+/// tall with its top left at `at`. `label` is drawn white above it, `low` and
+/// `high` small and gold under its ends; any may be null. The value moves in
+/// `step`s from `lo` (0 for none). Answers true while dragging changes it.
+bool slider(PaperUI& ui, ImDrawList* dl, const char* id, ImVec2 at, float widthPx,
+            float* value, float lo, float hi, float step, const char* label,
+            const char* low, const char* high, bool enabled = true);
+
+/// GlueDropDownMenuTemplate: the CharacterCreate-LabelFrame box with the
+/// chat frame's scroll-down button, `widthUnits` across its middle, the
+/// frame's top left at `at` (the art reaches 17 units above that, as the
+/// template's does). `label` is drawn small and gold over it.
+///
+/// The list it opens is drawn by dropdownList(), which a screen calls once
+/// after everything else, so the list lies over every control drawn after
+/// the box. A choice made in the list is answered here on the next frame:
+/// `*index` is set and this returns true.
+bool dropdown(PaperUI& ui, ImDrawList* dl, const char* id, ImVec2 at, float widthUnits,
+              const char* label, const std::vector<std::string>& items, int* index,
+              bool enabled = true);
+/// Whether a glue dropdown's list is open. A screen asks at the top of its
+/// frame and holds its other controls inert while it is.
+bool dropdownOpen();
+void closeDropdown();
+/// The open list, if any: drawn into `dl` (the screen's top list) and its
+/// clicks taken. A click outside it closes it and is not heard by anything
+/// else, as the screen was inert for the frame.
+void dropdownList(PaperUI& ui, ImDrawList* dl);
+
+/// The skin that draws PaperUI's controls as the glue's: the dialog
+/// backdrop for a sheet, the panel buttons, the edit box backdrop, the
+/// UI-CheckBox and radio art, the slider bar, FRIZQT with its outline.
+/// Owned here; never null.
+PaperSkin* paperSkin();
+/// Whether the art it draws with is there to draw - false before the
+/// archives are open, where a screen should stay on paper.
+bool paperSkinAvailable();
+
 }  // namespace glue
 }  // namespace wowee::ui
