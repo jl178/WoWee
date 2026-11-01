@@ -12,6 +12,7 @@
 #include <imgui_internal.h>
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 
@@ -190,6 +191,22 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
         gameHandler.selectCharacter(character.guid);
         if (onCharacterSelected) onCharacterSelected(character.guid);
     };
+    if (!autoEnterTried_ && !characterSelected) {
+        autoEnterTried_ = true;
+        if (const char* env = std::getenv("WOWEE_AUTO_CHARACTER"); env && *env) {
+            const std::string wanted(env);
+            bool found = false;
+            for (const auto& character : characters) {
+                if (character.name == wanted) {
+                    LOG_WARNING("Auto entering world as ", wanted);
+                    enterWorld(character);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) LOG_WARNING("WOWEE_AUTO_CHARACTER: no character named ", wanted);
+        }
+    }
 
     {
         const PaperUI::ListResult picked = ui_.list(
