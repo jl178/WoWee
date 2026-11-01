@@ -18,8 +18,7 @@ void registerLfgLuaAPI(lua_State* L);
 void registerSocketLuaAPI(lua_State* L);
 void registerSocialLuaAPI(lua_State* L);
 void registerSystemLuaAPI(lua_State* L);
-/// The QuestPOI functions over the world map (lua_quest_api.cpp). After the
-/// system set and the world map, which bind older versions of the same names.
+/// The QuestPOI functions over the world map (lua_quest_api.cpp).
 void registerQuestPoiLuaAPI(lua_State* L);
 
 /// The shaded quest areas WorldMapBlobFrame shows, as polygons in fractions of

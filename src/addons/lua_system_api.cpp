@@ -25,6 +25,7 @@
 #include "ui/widget_tree.hpp"
 #include "rendering/camera_controller.hpp"
 #include "addons/lua_engine.hpp"
+#include "addons/world_map_api.hpp"
 #include "game/bg_score_defs.hpp"
 #include "game/calendar_month.hpp"
 #include "game/calendar_data.hpp"
@@ -5519,7 +5520,6 @@ void registerSystemLuaAPI(lua_State* L) {
         }},
                 {"VehicleAimGetNormAngle",   lua_ReturnZero},
                 {"VehicleAimGetNormPower",   lua_ReturnZero},
-                {"GetMapInfo",               lua_GetMapInfo},
                 {"GetExpansionLevel",        lua_GetExpansionLevel},
                 // The difficulty the player is set to, which this client is
                 // told by SMSG_INSTANCE_DIFFICULTY and kept answering as one.
@@ -6287,16 +6287,6 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"IsReferAFriendLinked",     lua_ReturnFalse},
                 {"IsStereoVideoAvailable",   lua_ReturnFalse},
                 {"IsVoiceChatEnabled",       lua_ReturnFalse},
-                // False always, which is what disabled the zoom-out button at
-                // every level of the map. The only way back out of a zone was
-                // the right-click that reaches the same handler without
-                // asking this first.
-                {"IsZoomOutAvailable", [](lua_State* L) -> int {
-            auto* svc = getLuaServices(L);
-            const bool can = svc && svc->canZoomMapOut && svc->canZoomMapOut();
-            lua_pushboolean(L, can ? 1 : 0);
-            return 1;
-        }},
                 {"HasDebugZoneMap",          lua_ReturnFalse},
                 {"CanQueueForWintergrasp",   lua_ReturnFalse},
                 {"CancelSkillUps",           lua_ReturnNothing},
@@ -6345,7 +6335,6 @@ void registerSystemLuaAPI(lua_State* L) {
             lua_pushnumber(L, gh ? static_cast<double>(gh->getJoinedChannels().size()) : 0.0);
             return 1;
         }},
-                {"GetNumMapOverlays",        lua_GetNumMapOverlays},
                 {"GetNumMapDebugObjects",    lua_ReturnZero},
                 // How many team mates the battleground has reported. The loop
                 // that draws them does not use this - it walks to
@@ -6357,19 +6346,6 @@ void registerSystemLuaAPI(lua_State* L) {
             return 1;
         }},
                 {"GetBattlefieldPosition",   lua_GetBattlefieldPosition},
-                // Both of these want a position normalised to the map frame
-                // currently on screen, which only the map that is drawing knows
-                // - and this client draws its own, so FrameXML's WorldMapFrame
-                // is suppressed and neither is reached.
-                //
-                // Zero is not a placeholder here, it is the answer: both call
-                // sites read `if ( x == 0 and y == 0 )` and hide the marker.
-                // The corpse and the spirit healer are drawn by this client's
-                // own map, from getCorpseCanonicalPos and
-                // getDeathReleaseLocation. Handing the world map over means
-                // giving these the projection, not just filling them in.
-                {"GetCorpseMapPosition",     lua_GetBattlefieldPosition},
-                {"GetDeathReleasePosition",  lua_GetBattlefieldPosition},
                 {"GetNumBattlefieldVehicles", lua_ReturnZero},
                 {"GetBattlefieldVehicleInfo", lua_ReturnNil},
                 {"GetChatWindowInfo",        lua_GetChatWindowInfo},
@@ -6506,7 +6482,6 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"GetBattlefieldFlagPosition",     lua_GetBattlefieldFlagPosition},
                 // Time left on a loot roll that is not running, which
                 // GroupLootFrame compares against a bar range at once.
-                {"GetNumDungeonMapLevels",   lua_ReturnZero},
                 // Bar offsets, added to a page number the line they
                 // are read on. No bonus or multi-cast bar is showing,
                 // and that is zero rather than nothing.
@@ -6528,7 +6503,6 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"GetNumBattlegroundTypes",  lua_GetNumBattlegroundTypes},
                 {"GetBattlegroundInfo",      lua_GetBattlegroundInfo},
                 {"RequestBattlegroundInstanceInfo", lua_RequestBattlegroundInstanceInfo},
-                {"GetCurrentMapDungeonLevel", lua_ReturnZero},
                 {"Sound_GameSystem_GetNumOutputDrivers", lua_Sound_GetNumOutputDrivers},
                 {"Sound_ChatSystem_GetNumInputDrivers",  lua_ReturnZero},
                 {"Sound_ChatSystem_GetNumOutputDrivers", lua_ReturnZero},
@@ -6547,7 +6521,6 @@ void registerSystemLuaAPI(lua_State* L) {
                 // ever looked selected however many times it was clicked.
                 {"GetSelectedSkill", [](lua_State* L) -> int {
             lua_pushnumber(L, selectedSkill()); return 1; }},
-                {"DungeonUsesTerrainMap",    lua_ReturnFalse},
                 // GetChannelDisplayInfo(i) → name, header, collapsed,
                 //   channelNumber, count, active, category, voiceEnabled,
                 //   voiceActive
@@ -6822,7 +6795,6 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"Sound_GameSystem_GetOutputDriverNameByIndex", lua_Sound_GetOutputDriverNameByIndex},
                 {"PlaySound",           lua_PlaySound},
                 {"PlaySoundFile",       lua_PlaySoundFile},
-                {"GetPlayerMapPosition", lua_GetPlayerMapPosition},
                 {"GetPlayerFacing",     lua_GetPlayerFacing},
                 {"GetCVar",             lua_GetCVar},
                 {"GetCVarBool",         lua_GetCVarBool},
@@ -6856,109 +6828,9 @@ void registerSystemLuaAPI(lua_State* L) {
             lua_pushstring(L, token);
             return 1; }},
                 {"GetBuildInfo",      lua_GetBuildInfo},
-                {"GetCurrentMapAreaID", lua_GetCurrentMapAreaID},
-                {"SetMapToCurrentZone", lua_SetMapToCurrentZone},
-                {"GetCurrentMapContinent", lua_GetCurrentMapContinent},
-                {"GetCurrentMapZone",   lua_GetCurrentMapZone},
-                {"SetMapZoom",          lua_SetMapZoom},
-                {"GetMapContinents",    lua_GetMapContinents},
-                {"GetMapZones",         lua_GetMapZones},
-                {"GetNumMapLandmarks",  lua_GetNumMapLandmarks},
-                // The rest of the world map's own calls. None of them was
-                // bound, and two run on every open: WorldMapFrame_OnUpdate
-                // asks UpdateMapHighlight for whatever is under the cursor on
-                // every frame the mouse is over the map, and the zoom-out
-                // button reaches ZoomOut whenever the map is not a continent.
-                //
-                // Answered rather than filled in. This client draws its own
-                // world map and keeps its zones, overlays and area POIs in
-                // rendering/world_map, which no callback reaches from here yet
-                // - so these say "nothing there" honestly instead of raising,
-                // and the map opens empty rather than not at all.
-                //
-                // Nothing under the cursor: eight values, and the first is the
-                // area name the label is set from. Nil leaves it blank, which
-                // is what a cursor over no zone should do.
-                // UpdateMapHighlight(x, y) →
-                //   name, fileName, texPercentageX, texPercentageY,
-                //   textureX, textureY, scrollChildX, scrollChildY
-                //
-                // Asked on every frame the cursor is over the map, and only
-                // the first value is read for anything this client can answer:
-                // WorldMapFrame_OnUpdate sets the area label from it. The
-                // other seven place a highlight *texture* over the zone, which
-                // needs the per-zone highlight art the client's own map layer
-                // loads on demand - nil leaves the label named and the glow
-                // off, which is the honest half.
-                {"UpdateMapHighlight", [](lua_State* L) -> int {
-            auto* svc = getLuaServices(L);
-            const float u = static_cast<float>(luaL_optnumber(L, 1, -1.0));
-            const float v = static_cast<float>(luaL_optnumber(L, 2, -1.0));
-            std::string name;
-            if (svc && svc->getMapZoneNameAt) name = svc->getMapZoneNameAt(u, v);
-            if (name.empty()) lua_pushnil(L);
-            else              lua_pushstring(L, name.c_str());
-            for (int i = 0; i < 7; ++i) lua_pushnil(L);
-            return 8;
-        }},
-                // Clicking a continent drills into the zone under the point.
-                // Doing nothing leaves the map where it was, which is a map
-                // that does not zoom rather than one that zooms wrongly.
-                // Clicking a continent drills into the zone under the point,
-                // which is the same ZMP lookup the hover uses.
-                {"ProcessMapClick", [](lua_State* L) -> int {
-            auto* svc = getLuaServices(L);
-            if (svc && svc->clickMapPoint) {
-                svc->clickMapPoint(static_cast<float>(luaL_optnumber(L, 1, -1.0)),
-                                   static_cast<float>(luaL_optnumber(L, 2, -1.0)));
-            }
-            fireWorldMapUpdate(L);
-            return 0;
-        }},
-                // Zoom out one step. SetMapZoom answers the continent and
-                // cosmic cases beside it; this is the dungeon-floor and cosmic
-                // step, and neither is reachable while GetNumDungeonMapLevels
-                // answers none.
-                {"ZoomOut", [](lua_State* L) -> int {
-            auto* svc = getLuaServices(L);
-            if (svc && svc->zoomMapOut) svc->zoomMapOut();
-            fireWorldMapUpdate(L);
-            return 0;
-        }},
-                // Show a zone by its WorldMapArea id. Nothing at all before,
-                // which is how the quest log's "show on map" and the map's own
-                // windowed-size toggle both landed wherever the map already
-                // was.
-                {"SetMapByID", [](lua_State* L) -> int {
-            auto* svc = getLuaServices(L);
-            const auto id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
-            if (svc && svc->setMapWorldAreaId && id != 0) svc->setMapWorldAreaId(id);
-            fireWorldMapUpdate(L);
-            return 0;
-        }},
-                {"SetDungeonMapLevel",  lua_ReturnNothing},
-                {"ClickLandmark",       lua_ReturnNothing},
-                // Landmark rows, which GetNumMapLandmarks already reports none
-                // of. Bound so that stays true if it ever reports some.
-                {"GetMapLandmarkInfo",  lua_GetMapLandmarkInfo},
-                {"GetMapOverlayInfo",   lua_GetMapOverlayInfo},
-                // Which map a quest's objectives are on, and what a quest item
-                // drops from. Both are read while building the map's quest
-                // list; nil is "not on this map", which is what the list does
-                // with a quest it cannot place.
-                // Which map a quest wants opened, and on which dungeon floor.
-                // Nothing here tracks either, and the answer for "none" is a
-                // pair of zeroes rather than nil because that is what the
-                // caller tests: WorldMap_OpenToQuest asks `if ( mapID ~= 0 )`
-                // and then `if ( floorNumber ~= 0 )`, and nil ~= 0 is true in
-                // Lua - so answering nil ran both branches, on the path the
-                // quest tracker takes every time a tracked quest is clicked.
-                // SetMapByID drops a zero id and SetDungeonMapLevel does
-                // nothing at all, so it was inert; it was inert by luck.
-                {"GetQuestWorldMapAreaID", [](lua_State* L) -> int {
-            lua_pushnumber(L, 0);   // mapID
-            lua_pushnumber(L, 0);   // floorNumber
-            return 2; }},
+                // What a quest item drops from, read while building the map's
+                // quest list; nil is "not on this map", which is what the list
+                // does with a quest it cannot place.
                 {"GetQuestLogItemDrop",    lua_ReturnNil},
                 // How many of those there are. Unbound, so the world map's
                 // quest tooltip called a nil global and raised - the guard
@@ -8295,5 +8167,96 @@ void registerSystemLuaAPI(lua_State* L) {
         lua_setglobal(L, name);
     }
 }
+
+// The world map's fallbacks: what each of its functions answers while the
+// client data is not loaded or is not 3.3.5-shaped. They are this client's own
+// map, reached through LuaServices, and were bound here under the same names
+// until the stock world map took the names over. Bound by nobody now - the
+// world map hands each one to its function of the same name, so every name
+// has one binding and its fallback is not settled by load order.
+namespace worldmap::fallback {
+
+int GetMapContinents(lua_State* L)       { return lua_GetMapContinents(L); }
+int GetMapZones(lua_State* L)            { return lua_GetMapZones(L); }
+int SetMapZoom(lua_State* L)             { return lua_SetMapZoom(L); }
+int SetMapToCurrentZone(lua_State* L)    { return lua_SetMapToCurrentZone(L); }
+int GetCurrentMapContinent(lua_State* L) { return lua_GetCurrentMapContinent(L); }
+int GetCurrentMapZone(lua_State* L)      { return lua_GetCurrentMapZone(L); }
+int GetCurrentMapAreaID(lua_State* L)    { return lua_GetCurrentMapAreaID(L); }
+int GetMapInfo(lua_State* L)             { return lua_GetMapInfo(L); }
+int GetNumMapOverlays(lua_State* L)      { return lua_GetNumMapOverlays(L); }
+int GetMapOverlayInfo(lua_State* L)      { return lua_GetMapOverlayInfo(L); }
+int GetNumMapLandmarks(lua_State* L)     { return lua_GetNumMapLandmarks(L); }
+int GetMapLandmarkInfo(lua_State* L)     { return lua_GetMapLandmarkInfo(L); }
+int GetPlayerMapPosition(lua_State* L)   { return lua_GetPlayerMapPosition(L); }
+
+// Zero is the answer rather than a placeholder for these two: both call sites
+// read `if ( x == 0 and y == 0 )` and hide the marker.
+int GetCorpseMapPosition(lua_State* L)    { return lua_GetBattlefieldPosition(L); }
+int GetDeathReleasePosition(lua_State* L) { return lua_GetBattlefieldPosition(L); }
+
+int GetNumDungeonMapLevels(lua_State* L)    { return lua_ReturnZero(L); }
+int GetCurrentMapDungeonLevel(lua_State* L) { return lua_ReturnZero(L); }
+int SetDungeonMapLevel(lua_State* L)        { return lua_ReturnNothing(L); }
+int DungeonUsesTerrainMap(lua_State* L)     { return lua_ReturnFalse(L); }
+int ClickLandmark(lua_State* L)             { return lua_ReturnNothing(L); }
+
+// UpdateMapHighlight(x, y) →
+//   name, fileName, texPercentageX, texPercentageY,
+//   textureX, textureY, scrollChildX, scrollChildY
+//
+// Only the first value is answered: WorldMapFrame_OnUpdate sets the area label
+// from it. The other seven place a highlight texture over the zone, which
+// needs per-zone highlight art - nil leaves the label named and the glow off.
+int UpdateMapHighlight(lua_State* L) {
+    auto* svc = getLuaServices(L);
+    const float u = static_cast<float>(luaL_optnumber(L, 1, -1.0));
+    const float v = static_cast<float>(luaL_optnumber(L, 2, -1.0));
+    std::string name;
+    if (svc && svc->getMapZoneNameAt) name = svc->getMapZoneNameAt(u, v);
+    if (name.empty()) lua_pushnil(L);
+    else              lua_pushstring(L, name.c_str());
+    for (int i = 0; i < 7; ++i) lua_pushnil(L);
+    return 8;
+}
+
+// Clicking a continent drills into the zone under the point, which is the
+// same ZMP lookup the hover uses.
+int ProcessMapClick(lua_State* L) {
+    auto* svc = getLuaServices(L);
+    if (svc && svc->clickMapPoint) {
+        svc->clickMapPoint(static_cast<float>(luaL_optnumber(L, 1, -1.0)),
+                           static_cast<float>(luaL_optnumber(L, 2, -1.0)));
+    }
+    fireWorldMapUpdate(L);
+    return 0;
+}
+
+// Zoom out one step. SetMapZoom answers the continent and cosmic cases beside
+// it; this is the dungeon-floor and cosmic step.
+int ZoomOut(lua_State* L) {
+    auto* svc = getLuaServices(L);
+    if (svc && svc->zoomMapOut) svc->zoomMapOut();
+    fireWorldMapUpdate(L);
+    return 0;
+}
+
+int IsZoomOutAvailable(lua_State* L) {
+    auto* svc = getLuaServices(L);
+    const bool can = svc && svc->canZoomMapOut && svc->canZoomMapOut();
+    lua_pushboolean(L, can ? 1 : 0);
+    return 1;
+}
+
+// Show a zone by its WorldMapArea id.
+int SetMapByID(lua_State* L) {
+    auto* svc = getLuaServices(L);
+    const auto id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
+    if (svc && svc->setMapWorldAreaId && id != 0) svc->setMapWorldAreaId(id);
+    fireWorldMapUpdate(L);
+    return 0;
+}
+
+}  // namespace worldmap::fallback
 
 } // namespace wowee::addons

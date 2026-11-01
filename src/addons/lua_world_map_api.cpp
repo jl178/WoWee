@@ -997,8 +997,8 @@ bool ensureReady(lua_State* L) {
 // Lua
 // ---------------------------------------------------------------------------
 
-/// Bound over an earlier binding of the same name, which is kept as upvalue 1
-/// and answers instead while the client data is not loaded.
+/// Bound with its fallback (worldmap::fallback, lua_system_api.cpp) as upvalue
+/// 1, which answers instead while the client data is not loaded.
 #define WM_FALLBACK(L)                                                   \
     do {                                                                 \
         if (!ensureReady(L)) {                                           \
@@ -1698,34 +1698,36 @@ int lua_ClickLandmark(lua_State* L) {
 struct Binding {
     const char* name;
     lua_CFunction fn;
+    lua_CFunction fallback;   // upvalue 1, see WM_FALLBACK
 };
 
 const Binding kBindings[] = {
-    {"GetMapContinents", lua_GetMapContinents},
-    {"GetMapZones", lua_GetMapZones},
-    {"SetMapZoom", lua_SetMapZoom},
-    {"SetMapToCurrentZone", lua_SetMapToCurrentZone},
-    {"GetCurrentMapContinent", lua_GetCurrentMapContinent},
-    {"GetCurrentMapZone", lua_GetCurrentMapZone},
-    {"GetCurrentMapAreaID", lua_GetCurrentMapAreaID},
-    {"SetMapByID", lua_SetMapByID},
-    {"GetMapInfo", lua_GetMapInfo},
-    {"GetNumMapOverlays", lua_GetNumMapOverlays},
-    {"GetMapOverlayInfo", lua_GetMapOverlayInfo},
-    {"GetNumMapLandmarks", lua_GetNumMapLandmarks},
-    {"GetMapLandmarkInfo", lua_GetMapLandmarkInfo},
-    {"ProcessMapClick", lua_ProcessMapClick},
-    {"UpdateMapHighlight", lua_UpdateMapHighlight},
-    {"ZoomOut", lua_ZoomOut},
-    {"IsZoomOutAvailable", lua_IsZoomOutAvailable},
-    {"GetPlayerMapPosition", lua_GetPlayerMapPosition},
-    {"GetCorpseMapPosition", lua_GetCorpseMapPosition},
-    {"GetDeathReleasePosition", lua_GetDeathReleasePosition},
-    {"GetNumDungeonMapLevels", lua_GetNumDungeonMapLevels},
-    {"GetCurrentMapDungeonLevel", lua_GetCurrentMapDungeonLevel},
-    {"SetDungeonMapLevel", lua_SetDungeonMapLevel},
-    {"DungeonUsesTerrainMap", lua_DungeonUsesTerrainMap},
-    {"ClickLandmark", lua_ClickLandmark},
+    {"GetMapContinents", lua_GetMapContinents, fallback::GetMapContinents},
+    {"GetMapZones", lua_GetMapZones, fallback::GetMapZones},
+    {"SetMapZoom", lua_SetMapZoom, fallback::SetMapZoom},
+    {"SetMapToCurrentZone", lua_SetMapToCurrentZone, fallback::SetMapToCurrentZone},
+    {"GetCurrentMapContinent", lua_GetCurrentMapContinent, fallback::GetCurrentMapContinent},
+    {"GetCurrentMapZone", lua_GetCurrentMapZone, fallback::GetCurrentMapZone},
+    {"GetCurrentMapAreaID", lua_GetCurrentMapAreaID, fallback::GetCurrentMapAreaID},
+    {"SetMapByID", lua_SetMapByID, fallback::SetMapByID},
+    {"GetMapInfo", lua_GetMapInfo, fallback::GetMapInfo},
+    {"GetNumMapOverlays", lua_GetNumMapOverlays, fallback::GetNumMapOverlays},
+    {"GetMapOverlayInfo", lua_GetMapOverlayInfo, fallback::GetMapOverlayInfo},
+    {"GetNumMapLandmarks", lua_GetNumMapLandmarks, fallback::GetNumMapLandmarks},
+    {"GetMapLandmarkInfo", lua_GetMapLandmarkInfo, fallback::GetMapLandmarkInfo},
+    {"ProcessMapClick", lua_ProcessMapClick, fallback::ProcessMapClick},
+    {"UpdateMapHighlight", lua_UpdateMapHighlight, fallback::UpdateMapHighlight},
+    {"ZoomOut", lua_ZoomOut, fallback::ZoomOut},
+    {"IsZoomOutAvailable", lua_IsZoomOutAvailable, fallback::IsZoomOutAvailable},
+    {"GetPlayerMapPosition", lua_GetPlayerMapPosition, fallback::GetPlayerMapPosition},
+    {"GetCorpseMapPosition", lua_GetCorpseMapPosition, fallback::GetCorpseMapPosition},
+    {"GetDeathReleasePosition", lua_GetDeathReleasePosition, fallback::GetDeathReleasePosition},
+    {"GetNumDungeonMapLevels", lua_GetNumDungeonMapLevels, fallback::GetNumDungeonMapLevels},
+    {"GetCurrentMapDungeonLevel", lua_GetCurrentMapDungeonLevel,
+     fallback::GetCurrentMapDungeonLevel},
+    {"SetDungeonMapLevel", lua_SetDungeonMapLevel, fallback::SetDungeonMapLevel},
+    {"DungeonUsesTerrainMap", lua_DungeonUsesTerrainMap, fallback::DungeonUsesTerrainMap},
+    {"ClickLandmark", lua_ClickLandmark, fallback::ClickLandmark},
 };
 
 /// The player arrow. CreateWorldMapArrowFrame (0x00545E60 -> 0x00544750)
@@ -1796,7 +1798,7 @@ end
 
 void registerWorldMapLuaAPI(lua_State* L) {
     for (const Binding& b : kBindings) {
-        lua_getglobal(L, b.name);   // the earlier binding, kept as the fallback
+        lua_pushcfunction(L, b.fallback);
         lua_pushcclosure(L, b.fn, 1);
         lua_setglobal(L, b.name);
     }

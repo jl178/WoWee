@@ -818,46 +818,6 @@ std::string WorldMapFacade::zoneNameAtMapPoint(float u, float v) const {
     return zones[static_cast<size_t>(idx)].areaName;
 }
 
-bool WorldMapFacade::highlightAtMapPoint(float u, float v, MapHighlight& out) {
-    auto& d = *impl_;
-    const int idx = zoneAtMapPoint(u, v);   // continent view only
-    if (idx < 0) return false;
-    const auto& zones = d.data.zones();
-    const Zone& z = zones[static_cast<size_t>(idx)];
-    out = MapHighlight{};
-    out.name = zoneNameAtMapPoint(u, v);
-    if (!d.zoneHighlightLayer || z.areaName.empty()) return !out.name.empty();
-
-    // The zone's rectangle on the continent, through the same bounds the
-    // native highlight layer projects with.
-    bool isContinent = false;
-    const ZoneBounds cb = projectionBoundsFor(zones, d.viewState.continentIdx(), isContinent);
-    const float du = cb.locLeft - cb.locRight;
-    const float dv = cb.locTop - cb.locBottom;
-    if (std::abs(du) < 0.001f || std::abs(dv) < 0.001f) return !out.name.empty();
-    const float zu0 = std::clamp((cb.locLeft - z.bounds.locLeft) / du, 0.0f, 1.0f);
-    const float zu1 = std::clamp((cb.locLeft - z.bounds.locRight) / du, 0.0f, 1.0f);
-    const float zv0 = std::clamp((cb.locTop - z.bounds.locTop) / dv, 0.0f, 1.0f);
-    const float zv1 = std::clamp((cb.locTop - z.bounds.locBottom) / dv, 0.0f, 1.0f);
-    if (zu1 - zu0 < 0.001f || zv1 - zv0 < 0.001f) return !out.name.empty();
-
-    if (!d.zoneHighlightLayer->getHighlightTexture(z.areaName)) return !out.name.empty();
-    int texW = 0, texH = 0, cx0 = 0, cy0 = 0, cx1 = 0, cy1 = 0;
-    if (!d.zoneHighlightLayer->getHighlightExtent(z.areaName, texW, texH, cx0, cy0, cx1, cy1))
-        return !out.name.empty();
-
-    out.fileName = z.areaName;
-    // The zone fills the top-left of its power-of-two texture at one texel
-    // per map pixel; the interface crops with SetTexCoord(0, x, 0, y).
-    out.texPercentageX = std::min(1.0f, (zu1 - zu0) * 1002.0f / static_cast<float>(texW));
-    out.texPercentageY = std::min(1.0f, (zv1 - zv0) * 668.0f / static_cast<float>(texH));
-    out.textureX = zu1 - zu0;
-    out.textureY = zv1 - zv0;
-    out.scrollChildX = zu0;
-    out.scrollChildY = zv0;
-    return true;
-}
-
 bool WorldMapFacade::clickMapPoint(float u, float v) {
     // ProcessMapClick: what a left click on the map does at every level, as
     // the native input path does it when the map is not hosted.
