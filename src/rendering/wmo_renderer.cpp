@@ -461,6 +461,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
     modelData.boundingBoxMin = model.boundingBoxMin;
     modelData.boundingBoxMax = model.boundingBoxMax;
     modelData.wmoAmbientColor = model.ambientColor;
+    modelData.wmoId = model.wmoId;
     std::string lowerSourcePath = model.sourcePath;
     std::replace(lowerSourcePath.begin(), lowerSourcePath.end(), '/', '\\');
     std::transform(lowerSourcePath.begin(), lowerSourcePath.end(), lowerSourcePath.begin(),
@@ -4063,7 +4064,8 @@ uint32_t WMORenderer::gatherLavaLights(const glm::vec3& cameraPos,
 /// model matrix and multiplying is the expensive part, and a building whose
 /// own bounds contain the point usually has no *group* that does.
 bool WMORenderer::isInsideWMOGroups(float glX, float glY, float glZ,
-                                    bool interiorOnly, uint32_t* outModelId) const {
+                                    bool interiorOnly, uint32_t* outModelId,
+                                    AreaHit* outHit) const {
     const glm::vec3 queryMin(glX - 0.5f, glY - 0.5f, glZ - 0.5f);
     const glm::vec3 queryMax(glX + 0.5f, glY + 0.5f, glZ + 0.5f);
     gatherCandidates(queryMin, queryMax, tl_candidateScratch);
@@ -4091,12 +4093,20 @@ bool WMORenderer::isInsideWMOGroups(float glX, float glY, float glZ,
 
         const glm::vec3 localPos =
             glm::vec3(instance.invModelMatrix * glm::vec4(glX, glY, glZ, 1.0f));
-        for (const auto& group : model.groups) {
+        for (size_t gi = 0; gi < model.groups.size(); ++gi) {
+            const auto& group = model.groups[gi];
             if (interiorOnly && !(group.groupFlags & kWMOGroupIndoor)) continue;
             if (localPos.x >= group.boundingBoxMin.x && localPos.x <= group.boundingBoxMax.x &&
                 localPos.y >= group.boundingBoxMin.y && localPos.y <= group.boundingBoxMax.y &&
                 localPos.z >= group.boundingBoxMin.z && localPos.z <= group.boundingBoxMax.z) {
                 if (outModelId) *outModelId = instance.modelId;
+                if (outHit) {
+                    outHit->modelId = instance.modelId;
+                    outHit->wmoId = model.wmoId;
+                    outHit->groupIndex = static_cast<int32_t>(gi);
+                    outHit->nameSet = instance.nameSet;
+                    outHit->interior = (group.groupFlags & kWMOGroupIndoor) != 0;
+                }
                 return true;
             }
         }
@@ -4107,6 +4117,17 @@ bool WMORenderer::isInsideWMOGroups(float glX, float glY, float glZ,
 bool WMORenderer::isInsideWMO(float glX, float glY, float glZ, uint32_t* outModelId) const {
     QueryTimer timer(&queryTimeMs, &queryCallCount);
     return isInsideWMOGroups(glX, glY, glZ, /*interiorOnly=*/false, outModelId);
+}
+
+bool WMORenderer::insideWmoArea(float glX, float glY, float glZ, AreaHit* out) const {
+    QueryTimer timer(&queryTimeMs, &queryCallCount);
+    return isInsideWMOGroups(glX, glY, glZ, /*interiorOnly=*/false, nullptr, out);
+}
+
+void WMORenderer::setInstanceNameSet(uint32_t instanceId, uint16_t nameSet) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return;
+    instances[idxIt->second].nameSet = nameSet;
 }
 
 bool WMORenderer::isInsideInteriorWMO(float glX, float glY, float glZ) const {

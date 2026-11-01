@@ -18,6 +18,8 @@ namespace sa  { constexpr uint32_t kFields = 3, kAmbience = 1; }
 namespace at  { constexpr uint32_t kFields = 36, kParent = 2, kAmbience = 7, kZoneMusic = 8,
                 kIntroSound = 9, kName = 11; }
 namespace zi  { constexpr uint32_t kFields = 5, kSoundId = 2, kMinDelayMinutes = 4; }
+namespace wa  { constexpr uint32_t kFields = 28, kWmoId = 1, kNameSet = 2, kGroup = 3, kAmbience = 6,
+                kZoneMusic = 7, kIntroSound = 8, kAreaTable = 10, kName = 11; }
 namespace cr  { constexpr uint32_t kFields = 69, kMaleDisplay = 4, kFemaleDisplay = 5, kClientFileString = 11; }
 namespace cdi { constexpr uint32_t kFields = 16, kModel = 1, kSound = 2; }
 namespace cmd { constexpr uint32_t kFields = 28, kSound = 13; }
@@ -56,6 +58,7 @@ bool SoundData::load(const Loader& loadDbc) {
     ambience_.clear();
     intros_.clear();
     areas_.clear();
+    wmoAreas_.clear();
     soundCache_.clear();
     creatureSoundCache_.clear();
 
@@ -101,6 +104,20 @@ bool SoundData::load(const Loader& loadDbc) {
             area.introId = dbc->getUInt32(i, at::kIntroSound);
             area.name = dbc->getString(i, at::kName);
             areas_[dbc->getUInt32(i, 0)] = std::move(area);
+        }
+    }
+    if (auto dbc = table(loadDbc, "WMOAreaTable.dbc", wa::kFields)) {
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            WmoAreaSounds row;
+            row.wmoId = dbc->getUInt32(i, wa::kWmoId);
+            row.nameSet = static_cast<uint16_t>(dbc->getUInt32(i, wa::kNameSet));
+            row.groupIndex = dbc->getInt32(i, wa::kGroup);
+            row.ambienceId = dbc->getUInt32(i, wa::kAmbience);
+            row.zoneMusicId = dbc->getUInt32(i, wa::kZoneMusic);
+            row.introId = dbc->getUInt32(i, wa::kIntroSound);
+            row.areaId = dbc->getUInt32(i, wa::kAreaTable);
+            row.name = dbc->getString(i, wa::kName);
+            wmoAreas_[row.wmoId].push_back(std::move(row));
         }
     }
     chrRaces_ = table(loadDbc, "ChrRaces.dbc", cr::kFields);
@@ -194,6 +211,31 @@ bool SoundData::areaAmbience(uint32_t areaId, uint32_t& daySoundId, uint32_t& ni
         areaId = a->parent;
     }
     return false;
+}
+
+bool SoundData::ambience(uint32_t ambienceId, uint32_t& daySoundId, uint32_t& nightSoundId) const {
+    auto it = ambience_.find(ambienceId);
+    if (it == ambience_.end()) return false;
+    daySoundId = it->second.first;
+    nightSoundId = it->second.second;
+    return daySoundId != 0 || nightSoundId != 0;
+}
+
+const WmoAreaSounds* SoundData::wmoArea(uint32_t wmoId, uint16_t nameSet, int32_t groupIndex) const {
+    auto it = wmoAreas_.find(wmoId);
+    if (it == wmoAreas_.end()) return nullptr;
+    const WmoAreaSounds* best = nullptr;
+    int bestRank = 0;
+    for (const WmoAreaSounds& row : it->second) {
+        if (row.groupIndex != groupIndex && row.groupIndex != -1) continue;
+        if (row.nameSet != nameSet && row.nameSet != 0) continue;
+        const int rank = (row.groupIndex == groupIndex ? 2 : 0) + (row.nameSet == nameSet ? 1 : 0) + 1;
+        if (rank > bestRank) {
+            bestRank = rank;
+            best = &row;
+        }
+    }
+    return best;
 }
 
 const CreatureSounds* SoundData::displaySounds(uint32_t displayId) const {

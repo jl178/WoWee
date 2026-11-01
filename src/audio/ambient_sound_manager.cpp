@@ -298,7 +298,10 @@ void AmbientSoundManager::update(float deltaTime, const glm::vec3& cameraPos, bo
     updateWeatherAmbience(deltaTime, isIndoor);
     updateWaterAmbience(deltaTime, isSwimming);
     if (areaAmbienceDriven_) {
-        updateAreaAmbience(isIndoor || isBlacksmith);
+        // Indoors is not silent: a room with no ambience of its own in
+        // WMOAreaTable sounds like the area it stands in. The forge is the
+        // one place with a loop of its own here.
+        updateAreaAmbience(isBlacksmith);
     } else {
         updateZoneAmbience(deltaTime, isIndoor);
         updateCityAmbience(deltaTime);

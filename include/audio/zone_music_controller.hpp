@@ -14,6 +14,7 @@ namespace audio {
 /// What the controller needs to know each frame.
 struct ZoneMusicInput {
     uint32_t areaId = 0;        ///< AreaTable id under the player, 0 = unknown.
+    uint32_t zoneMusicOverride = 0;  ///< A ZoneMusic id that wins over the area's: a room's row in WMOAreaTable.
     bool isDay = true;
     bool trackPlaying = false;  ///< The music channel has a track running.
     bool trackLoading = false;  ///< A track is being read and will start.

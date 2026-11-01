@@ -48,6 +48,18 @@ struct AreaSounds {
     std::string name;
 };
 
+/// One WMOAreaTable.dbc row: what a building, or one room of it, sounds like.
+struct WmoAreaSounds {
+    uint32_t wmoId = 0;
+    uint16_t nameSet = 0;
+    int32_t groupIndex = -1;  ///< -1 covers the whole building
+    uint32_t ambienceId = 0;  ///< SoundAmbience.dbc
+    uint32_t zoneMusicId = 0; ///< ZoneMusic.dbc
+    uint32_t introId = 0;
+    uint32_t areaId = 0;      ///< AreaTable.dbc, 0 when the row has none
+    std::string name;
+};
+
 /// The sound ids one CreatureSoundData.dbc row gives a model.
 struct CreatureSounds {
     uint32_t exertion = 0;
@@ -95,6 +107,12 @@ public:
     [[nodiscard]] const ZoneMusicSet* areaMusic(uint32_t areaId) const;
     [[nodiscard]] uint32_t areaIntro(uint32_t areaId) const;
     [[nodiscard]] bool areaAmbience(uint32_t areaId, uint32_t& daySoundId, uint32_t& nightSoundId) const;
+    /// Day and night loops for a SoundAmbience id.
+    [[nodiscard]] bool ambience(uint32_t ambienceId, uint32_t& daySoundId, uint32_t& nightSoundId) const;
+
+    /// The WMOAreaTable row for a room: the group's own row first, then the
+    /// building's -1 row, each with the placement's name set and then set 0.
+    [[nodiscard]] const WmoAreaSounds* wmoArea(uint32_t wmoId, uint16_t nameSet, int32_t groupIndex) const;
 
     /// ChrRaces -> CreatureDisplayInfo -> CreatureModelData -> CreatureSoundData.
     [[nodiscard]] const CreatureSounds* playerSounds(uint32_t raceId, bool female) const;
@@ -122,6 +140,7 @@ private:
     std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> ambience_;
     std::unordered_map<uint32_t, ZoneIntro> intros_;
     std::unordered_map<uint32_t, AreaSounds> areas_;
+    std::unordered_map<uint32_t, std::vector<WmoAreaSounds>> wmoAreas_;  // by wmoId
 
     // SoundEntries has ten thousand rows and a handful are ever asked for.
     mutable std::unordered_map<uint32_t, SoundEntry> soundCache_;

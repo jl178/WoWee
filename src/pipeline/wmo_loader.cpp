@@ -120,7 +120,7 @@ WMOModel WMOLoader::load(const std::vector<uint8_t>& wmoData) {
                 model.ambientColor.r = ((ambColor >> 16) & 0xFF) / 255.0f;
                 model.ambientColor.g = ((ambColor >>  8) & 0xFF) / 255.0f;
                 model.ambientColor.b = ((ambColor >>  0) & 0xFF) / 255.0f;
-                [[maybe_unused]] uint32_t wmoID = read<uint32_t>(wmoData, offset);
+                model.wmoId = read<uint32_t>(wmoData, offset);
 
                 model.boundingBoxMin.x = read<float>(wmoData, offset);
                 model.boundingBoxMin.y = read<float>(wmoData, offset);

@@ -1986,8 +1986,10 @@ void Renderer::update(float deltaTime) {
     const bool canQueryWmo = (camera && wmoRenderer);
     const glm::vec3 camPos = camera ? camera->getPosition() : glm::vec3(0.0f);
     uint32_t insideWmoId = 0;
+    WMORenderer::AreaHit wmoHit;
     const bool insideWmo = canQueryWmo &&
-        wmoRenderer->isInsideWMO(camPos.x, camPos.y, camPos.z, &insideWmoId);
+        wmoRenderer->insideWmoArea(camPos.x, camPos.y, camPos.z, &wmoHit);
+    if (insideWmo) insideWmoId = wmoHit.modelId;
     // Announce the crossing. zonetext.lua and worldstateframe.lua both listen
     // for ZONE_CHANGED_INDOORS, and WoW answers the way back out with a plain
     // ZONE_CHANGED - there is no outdoors counterpart. Nothing fired either,
@@ -2263,6 +2265,11 @@ void Renderer::update(float deltaTime) {
         zctx.isSwimming = cameraController ? cameraController->isSwimming() : false;
         zctx.insideWmo = insideWmo;
         zctx.insideWmoId = insideWmoId;
+        if (insideWmo) {
+            zctx.wmoRootId = wmoHit.wmoId;
+            zctx.wmoGroupIndex = wmoHit.groupIndex;
+            zctx.wmoNameSet = wmoHit.nameSet;
+        }
         if (weather) {
             auto wt = weather->getWeatherType();
             if (wt == Weather::Type::RAIN)       zctx.weatherType = 1;

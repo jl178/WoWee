@@ -393,6 +393,17 @@ public:
      */
     bool isInsideWMO(float glX, float glY, float glZ, uint32_t* outModelId = nullptr) const;
 
+    /// Which building and which room a point is in, for the sound tables.
+    struct AreaHit {
+        uint32_t modelId = 0;
+        uint32_t wmoId = 0;       ///< MOHD wmoID
+        int32_t groupIndex = -1;  ///< index of the containing group
+        uint16_t nameSet = 0;
+        bool interior = false;    ///< the group has the indoor flag
+    };
+    bool insideWmoArea(float glX, float glY, float glZ, AreaHit* out) const;
+    void setInstanceNameSet(uint32_t instanceId, uint16_t nameSet);
+
     /**
      * Check if a position is inside an interior WMO group (flag 0x2000).
      * Used to dim M2 lighting for doodads placed indoors.
@@ -627,6 +638,7 @@ private:
         glm::vec3 boundingBoxMin;
         glm::vec3 boundingBoxMax;
         glm::vec3 wmoAmbientColor{0.5f, 0.5f, 0.5f};  // From MOHD, used for interior lighting
+        uint32_t wmoId = 0;  // MOHD wmoID, the WMOAreaTable key
         bool isLowPlatform = false;
 
         // Doodad templates (M2 models placed in WMO, stored for instancing)
@@ -707,6 +719,9 @@ private:
         /// Loaded, positioned, and not in the world right now. See
         /// setInstanceHidden.
         bool hidden = false;
+        /// MODF nameSet of the placement: with the model's wmoId and a group,
+        /// the WMOAreaTable key.
+        uint16_t nameSet = 0;
 
         void updateModelMatrix();
     };
@@ -721,7 +736,8 @@ private:
     /// Whether a point is inside any of a WMO's groups, or only its
     /// interior ones. The two public queries above differ by that flag.
     bool isInsideWMOGroups(float glX, float glY, float glZ,
-                           bool interiorOnly, uint32_t* outModelId) const;
+                           bool interiorOnly, uint32_t* outModelId,
+                           AreaHit* outHit = nullptr) const;
 
     /// Whether a point is inside an instance's world bounds, with the Z
     /// window widened by the caller's margins.

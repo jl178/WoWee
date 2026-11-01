@@ -223,3 +223,24 @@ TEST_CASE("SoundData finds the misspelt female rows", "[sound_data]") {
     REQUIRE(data.playerJumpSound(4, true)->id == 3285);
     REQUIRE(data.playerJumpSound(4, false) == nullptr);
 }
+
+TEST_CASE("SoundData picks the room's WMOAreaTable row over the building's", "[sound_data]") {
+    Fixture f;
+    Strings wa;
+    f.tables["WMOAreaTable.dbc"] = table(28, {
+        row(28, {{0, 20327}, {1, 53}, {2, 0}, {3, 0xFFFFFFFFu}, {6, 170}, {7, 14}, {11, wa.add("Lion's Pride Inn")}}),
+        row(28, {{0, 20256}, {1, 53}, {2, 1}, {3, 893}, {6, 0}, {7, 15}, {10, 2104}}),
+        row(28, {{0, 20255}, {1, 53}, {2, 1}, {3, 0xFFFFFFFFu}, {6, 171}, {7, 14}, {10, 2104}, {11, wa.add("Deepwater Tavern")}}),
+    }, wa.block);
+    SoundData data;
+    REQUIRE(data.load(f.loader()));
+    const auto* inn = data.wmoArea(53, 0, 5);
+    REQUIRE(inn != nullptr);
+    REQUIRE(inn->name == "Lion's Pride Inn");
+    REQUIRE(inn->zoneMusicId == 14);
+    REQUIRE(inn->ambienceId == 170);
+    // Name set 1 is Menethil's copy of the same building.
+    REQUIRE(data.wmoArea(53, 1, 5)->name == "Deepwater Tavern");
+    REQUIRE(data.wmoArea(53, 1, 893)->zoneMusicId == 15);
+    REQUIRE(data.wmoArea(99, 0, -1) == nullptr);
+}

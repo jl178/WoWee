@@ -24,21 +24,25 @@ ZoneMusicAction ZoneMusicController::update(const ZoneMusicInput& in) {
     elapsed_ += in.deltaTime;
     const bool running = in.trackPlaying || in.trackLoading;
 
-    if (in.areaId != 0 && in.areaId != lastAreaId_) {
-        lastAreaId_ = in.areaId;
-        const ZoneMusicSet* set = data_.areaMusic(in.areaId);
-        const uint32_t setId = set ? set->id : 0;
-        if (setId != currentSetId_) {
-            currentSetId_ = setId;
-            silenceLeft_ = 0.0f;
-            trackSeen_ = false;
-            if (!set) {
-                return {running ? ZoneMusicAction::Kind::Stop : ZoneMusicAction::Kind::None, {}, 1.0f};
-            }
+    // The set that should be playing: a room's own music over the area's.
+    // Nothing is decided while the area is unknown (its chunk not resident).
+    const bool areaChanged = in.areaId != 0 && in.areaId != lastAreaId_;
+    if (in.areaId != 0) lastAreaId_ = in.areaId;
+    const ZoneMusicSet* desired = in.zoneMusicOverride ? data_.zoneMusic(in.zoneMusicOverride)
+                                : in.areaId ? data_.areaMusic(in.areaId) : nullptr;
+    const uint32_t desiredId = desired ? desired->id : 0;
+    if ((in.areaId != 0 || in.zoneMusicOverride != 0) && desiredId != currentSetId_) {
+        currentSetId_ = desiredId;
+        silenceLeft_ = 0.0f;
+        trackSeen_ = false;
+        if (!desired) {
+            return {running ? ZoneMusicAction::Kind::Stop : ZoneMusicAction::Kind::None, {}, 1.0f};
+        }
+        if (areaChanged && in.zoneMusicOverride == 0) {
             ZoneMusicAction intro = playIntro(in.areaId);
             if (intro.kind == ZoneMusicAction::Kind::Play) return intro;
-            return start(*set, in);
         }
+        return start(*desired, in);
     }
 
     const ZoneMusicSet* set = data_.zoneMusic(currentSetId_);

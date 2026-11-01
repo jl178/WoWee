@@ -246,3 +246,25 @@ TEST_CASE("Zone music ignores an unknown area", "[zone_music]") {
     c.reset();
     REQUIRE(c.currentSetId() == 0);
 }
+
+TEST_CASE("Zone music follows a room's own set and returns to the area's", "[zone_music]") {
+    World w;
+    ZoneMusicController c(w.data, 1);
+    Channel ch;
+    ch.apply(c.update(at(12, true, ch)), 100.0f);
+    REQUIRE(ch.track == "Forest\\Day.mp3");
+    // Step into a tavern: WMOAreaTable names set 13 for the room.
+    ZoneMusicInput in = at(12, true, ch);
+    in.zoneMusicOverride = 13;
+    auto a = c.update(in);
+    REQUIRE(a.kind == ZoneMusicAction::Kind::Play);
+    REQUIRE(a.path == "City\\City.mp3");  // no intro: the room is not a new area
+    ch.apply(a, 100.0f);
+    REQUIRE(c.currentSetId() == 13);
+    // Same room, next frame: nothing changes.
+    REQUIRE(c.update(in).kind == ZoneMusicAction::Kind::None);
+    // Back outside: the area's set again, at once.
+    a = c.update(at(12, true, ch));
+    REQUIRE(a.kind == ZoneMusicAction::Kind::Play);
+    REQUIRE(a.path == "Forest\\Day.mp3");
+}
