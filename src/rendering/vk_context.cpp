@@ -323,12 +323,14 @@ void VkContext::flushDeferredCleanup() {
 }
 
 void VkContext::runDeferredCleanup(uint32_t frameIndex) {
-    auto& q = deferredCleanup_[frameIndex];
-    if (q.empty()) return;
+    // Taken out first: a cleanup may defer more work (a retired preview
+    // shuts down renderers that defer their own buffers), which would push
+    // into the vector being walked.
+    auto q = std::move(deferredCleanup_[frameIndex]);
+    deferredCleanup_[frameIndex].clear();
     for (auto& fn : q) {
         if (fn) fn();
     }
-    q.clear();
 }
 
 VkSampler VkContext::getOrCreateSampler(const VkSamplerCreateInfo& info) {

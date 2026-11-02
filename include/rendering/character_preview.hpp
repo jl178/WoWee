@@ -35,6 +35,12 @@ public:
     /// which is what every caller wanted before there was a choice.
     bool initialize(pipeline::AssetManager* am, int width = 640, int height = 800);
     void shutdown();
+    // Destroys a preview without breaking the frame being recorded: it stops
+    // being composited now and its GPU objects go once no frame uses them.
+    // Destroying it outright mid-frame invalidated the command buffer, which
+    // crashed the NVIDIA driver when the character screens rebuilt the
+    // preview after a window resize.
+    static void retire(std::unique_ptr<CharacterPreview> preview);
 
     bool loadCharacter(game::Race race, game::Gender gender,
                        uint8_t skin, uint8_t face,

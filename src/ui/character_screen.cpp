@@ -361,7 +361,7 @@ void CharacterScreen::drawScene(const game::Character& character, float screenW,
                              std::abs(static_cast<float>(preview_->getHeight()) - screenH) > 2.0f;
         previewResizeTimer_ = differs ? previewResizeTimer_ + ImGui::GetIO().DeltaTime : 0.0f;
         if (previewResizeTimer_ > 0.3f) {
-            preview_.reset();  // waits for the GPU and unregisters itself
+            rendering::CharacterPreview::retire(std::move(preview_));
             previewInitialized_ = false;
             previewGuid_ = 0;  // reload the character into the new preview
             previewResizeTimer_ = 0.0f;
