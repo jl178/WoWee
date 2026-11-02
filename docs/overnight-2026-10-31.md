@@ -519,3 +519,4 @@ Other fixes:
   - Quest blob art on the world map, the minimap arrow size, the item-into-bag icon animation, recolour by chat id, message fading.
   - Pending frames read nil while loading, as in stock.
   - missing_api.txt: 226 -> 203 entries; no Lua errors.
+- Windows package rebuilt from 10b029f (everything through the widget methods), zip refreshed, share restarted (port 8081).
