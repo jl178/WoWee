@@ -268,6 +268,11 @@ public:
     void setGravityDisabled(bool disabled) { gravityDisabled_ = disabled; }
     void setFeatherFallActive(bool active) { featherFallActive_ = active; }
     void setWaterWalkActive(bool active) { waterWalkActive_ = active; }
+    /// The player's collision box (stock 0x6E9570): width and height from the
+    /// display model, and the step height. Drives the wall radius, the step-up
+    /// reach and the swim depths.
+    void setPlayerCollider(const game::stock_movement::Collider& c) { collider_ = c; }
+    [[nodiscard]] const game::stock_movement::Collider& getPlayerCollider() const { return collider_; }
     /// Permission to fly - a flying mount where flight is allowed, or .gm fly.
     /// Not the same as being in the air: see isFlightAirborne.
     void setFlyingActive(bool active);
@@ -801,12 +806,23 @@ private:
     // this it holds depth. Retail lets a character idle underwater - and drown
     // doing it - so buoyancy cannot reach all the way down.
     static constexpr float SWIM_FLOAT_BAND = 1.3f;
-    // How far the feet float below the surface while treading, which is what
-    // decides where the waterline crosses the body. The neck pivot is 1.6 above
-    // the feet, so 0.9 put the line around the knee and left the character
-    // riding on top of the water; retail treads with the shoulders out and the
-    // water at the chest.
-    static constexpr float WATER_SURFACE_OFFSET = 1.45f;
+    // How far the feet float below the surface while treading: three quarters
+    // of the collision height (stock 0x75F9D0 runs the swim trace with a box
+    // 0.75 h tall against the liquid surface, which is a ceiling to it). 1.52
+    // for a human, 0.79 for a gnome, 1.91 for a draenei.
+    [[nodiscard]] float swimFloatDepth() const {
+        return game::stock_movement::swimFloatDepth(collider_.height);
+    }
+
+    // The player's collision box: CreatureModelData's CollisionWidth/Height of
+    // the current display (shapeshift form included), or the mount's
+    // MountHeight on top of the rider (game/stock_movement.hpp). Until the
+    // model is known, a human's.
+    game::stock_movement::Collider collider_{};
+    // Set by the frame whose swimmer jumped out at the surface: the JUMP goes
+    // out from the water, and stock sends no STOP_SWIM / STOP_ASCEND for it
+    // (the jump clears both flags itself, 0x988370).
+    bool surfaceHopThisFrame_ = false;
 
     // Movement input suppression (after teleport/portal, ignore held keys)
     float movementSuppressTimer_ = 0.0f;

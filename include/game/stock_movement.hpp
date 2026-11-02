@@ -276,4 +276,92 @@ inline float swimExitDepth(float collisionHeight) {
     return collisionHeight * kSwimDepthFactor - kSwimExitHysteresis;
 }
 
+// ---- The collision box (docs/re/movement-camera.md section 7) ----
+
+/// 0xA12098 / 0xA32848: the box a unit has before its model is known.
+inline constexpr float kDefaultCollisionHalfWidth = 1.0f / 3.0f;
+inline constexpr float kDefaultCollisionHeight = 2.02777767f;
+/// 0xA12098 again, in 0x730D10: a swimmer holding ascend within this far of
+/// its float line (depth - 0.75 h) jumps out of the water.
+inline constexpr float kSurfaceHopWindow = 1.0f / 3.0f;
+
+/// The axis-aligned box the stock client moves a unit as (0x75CD00): x and y
+/// within halfWidth of the position, z from the feet to feet + height. The
+/// step height is how far the ground mover climbs when a wall blocks it
+/// (0x761B00 traces up by it, 0x6E9520 reads it).
+struct Collider {
+    float halfWidth = 0.30555556f;  // HumanMale: CollisionWidth 0.611 / 2
+    float height = 2.03126550f;     // HumanMale: CollisionHeight
+    float stepHeight = kStepHeightPlayer;
+};
+
+/// The box for a model (0x6D78C0 -> 0x6E9570), from CreatureModelData's
+/// CollisionWidth / CollisionHeight (fields 14 / 15).
+///
+/// modelScale is the display's CreatureModelScale times the model's
+/// ModelScale (0x71C110). The object scale (OBJECT_FIELD_SCALE_X) counts only
+/// when it enlarges - 0x6CF350 clamps it to at least 1 - so a shrink effect
+/// does not shrink the box. The width is halved; the height is not. For a
+/// player-controlled unit the step height is that same clamped object scale
+/// (+0xD0 = full scale / model scale): 1 yd normally, more for a unit grown
+/// by an effect.
+inline Collider colliderFromModel(float collisionWidth, float collisionHeight,
+                                  float modelScale = 1.0f, float objectScale = 1.0f) {
+    const float grow = std::max(1.0f, objectScale);
+    const float s = modelScale * grow;
+    Collider c;
+    c.halfWidth = collisionWidth * s * 0.5f;
+    c.height = collisionHeight * s;
+    c.stepHeight = grow;
+    return c;
+}
+
+/// The height of a mounted unit's box (0x6D7720), in the rider's model units
+/// (the caller scales it as colliderFromModel does): half the rider's
+/// CollisionHeight plus the mount's MountHeight (CreatureModelData field 16)
+/// times the mount display's CreatureModelScale, never less than the rider on
+/// foot. The width stays the rider's.
+inline float mountedCollisionHeight(float riderCollisionHeight, float mountDisplayScale,
+                                    float mountModelMountHeight) {
+    const float h = riderCollisionHeight * 0.5f + mountDisplayScale * mountModelMountHeight;
+    return std::max(h, riderCollisionHeight);
+}
+
+// ---- Water (0x730D10, 0x75F9D0, 0x760B40) ----
+
+/// How far under the surface a swimmer's feet float. While swimming, the
+/// liquid surface is a ceiling to the swim trace, and that trace runs the box
+/// at 0.75 of its height against the liquid set (0x75F9D0: SWIMMING and the
+/// liquid list scale +0xCC by 0x9E9EE4) - so the top of that shortened box
+/// rests on the surface, exactly where swimming starts (swimEnterDepth).
+inline float swimFloatDepth(float collisionHeight) {
+    return collisionHeight * kSwimDepthFactor;
+}
+
+/// Whether a unit that is not swimming starts to (0x730D10): the liquid is
+/// deeper over its feet than 0.75 h, it is swimmable, and the unit is not on
+/// the rising half of a jump (0x986EA0).
+inline bool startsSwimming(float depthOverFeet, float collisionHeight, bool swimmable,
+                           bool risingInJump) {
+    return swimmable && !risingInJump && depthOverFeet > swimEnterDepth(collisionHeight);
+}
+
+/// Whether a swimmer keeps swimming (0x730D10): it stops when there is no
+/// liquid, the liquid is not swimmable, or the depth over its feet drops
+/// below 0.75 h - 1/36. A flier (FLYING) is never stopped here.
+inline bool keepsSwimming(float depthOverFeet, float collisionHeight, bool hasLiquid,
+                          bool swimmable, bool flying = false) {
+    if (flying) return true;
+    return hasLiquid && swimmable && depthOverFeet >= swimExitDepth(collisionHeight);
+}
+
+/// Whether a swimmer holding ascend (ASCENDING) jumps out of the water this
+/// frame (0x730D10 -> 0x72EB80, a JUMP event): its feet are within
+/// kSurfaceHopWindow of the float line, i.e. at the surface. The jump is the
+/// water one, kWaterJumpVelocity (0x9883F0), which is how a swimmer gets onto
+/// a dock: it rises 2.14 yd from 0.75 h under the surface.
+inline bool surfaceHopDue(bool ascending, float depthOverFeet, float collisionHeight) {
+    return ascending && depthOverFeet - swimFloatDepth(collisionHeight) < kSurfaceHopWindow;
+}
+
 }  // namespace wowee::game::stock_movement

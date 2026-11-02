@@ -1863,6 +1863,28 @@ static int lua_AscendStop(lua_State* L) {
     ui::KeybindingManager::getInstance().setVirtualCommand("JUMP", "lua", false);
     return 0;
 }
+// MoveForwardStart / MoveForwardStop and the rest of the stock movement
+// binding functions (Bindings.xml: MOVEFORWARD runs MoveForwardStart on the
+// press and MoveForwardStop on the release). Held as the binding's command,
+// as JumpOrAscendStart holds JUMP.
+#define WOWEE_MOVE_COMMAND_PAIR(startName, stopName, command)                  \
+    static int lua_##startName(lua_State* L) {                                 \
+        (void)L;                                                               \
+        ui::KeybindingManager::getInstance().setVirtualCommand(command, "lua", true); \
+        return 0;                                                              \
+    }                                                                          \
+    static int lua_##stopName(lua_State* L) {                                  \
+        (void)L;                                                               \
+        ui::KeybindingManager::getInstance().setVirtualCommand(command, "lua", false); \
+        return 0;                                                              \
+    }
+WOWEE_MOVE_COMMAND_PAIR(MoveForwardStart, MoveForwardStop, "MOVEFORWARD")
+WOWEE_MOVE_COMMAND_PAIR(MoveBackwardStart, MoveBackwardStop, "MOVEBACKWARD")
+WOWEE_MOVE_COMMAND_PAIR(StrafeLeftStart, StrafeLeftStop, "STRAFELEFT")
+WOWEE_MOVE_COMMAND_PAIR(StrafeRightStart, StrafeRightStop, "STRAFERIGHT")
+WOWEE_MOVE_COMMAND_PAIR(TurnLeftStart, TurnLeftStop, "TURNLEFT")
+WOWEE_MOVE_COMMAND_PAIR(TurnRightStart, TurnRightStop, "TURNRIGHT")
+#undef WOWEE_MOVE_COMMAND_PAIR
 // The override-binding family, none of which this client implements - only
 // the Click variant was ever *bound*, and the other four raised. They are
 // reached from restrictedframes.lua, the secure-frame machinery behind action
@@ -2204,6 +2226,18 @@ void registerActionLuaAPI(lua_State* L) {
                 {"RunBinding",          lua_RunBinding},
                 {"JumpOrAscendStart",   lua_JumpOrAscendStart},
                 {"AscendStop",          lua_AscendStop},
+                {"MoveForwardStart",    lua_MoveForwardStart},
+                {"MoveForwardStop",     lua_MoveForwardStop},
+                {"MoveBackwardStart",   lua_MoveBackwardStart},
+                {"MoveBackwardStop",    lua_MoveBackwardStop},
+                {"StrafeLeftStart",     lua_StrafeLeftStart},
+                {"StrafeLeftStop",      lua_StrafeLeftStop},
+                {"StrafeRightStart",    lua_StrafeRightStart},
+                {"StrafeRightStop",     lua_StrafeRightStop},
+                {"TurnLeftStart",       lua_TurnLeftStart},
+                {"TurnLeftStop",        lua_TurnLeftStop},
+                {"TurnRightStart",      lua_TurnRightStart},
+                {"TurnRightStop",       lua_TurnRightStop},
                 {"SetOverrideBindingClick", lua_SetOverrideBindingClick},
                 {"SetOverrideBinding",      lua_SetOverrideBinding},
                 {"SetOverrideBindingSpell", lua_SetOverrideBindingSpell},

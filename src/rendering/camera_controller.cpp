@@ -297,8 +297,14 @@ glm::vec3 CameraController::sweepAgainstWalls(const glm::vec3& from, const glm::
     if (distSq <= 1e-4f) return to;   // stationary: not worth a collision call
 
     const float dist = std::sqrt(distSq);
-    // Tighter steps indoors, where the geometry is closer together.
-    const float stepSize = cachedInsideWMO ? 0.20f : 0.35f;
+    // The character's own box (CreatureModelData, per race, form and mount):
+    // a gnome is 1.06 tall and a draenei 0.43 wide where everyone was a 0.45
+    // or 0.5 cylinder 2 yd tall.
+    const WMORenderer::Body body{collider_.halfWidth, collider_.height, collider_.stepHeight};
+    // Tighter steps indoors, where the geometry is closer together - and never
+    // longer than the radius, or a sub-step could start outside a thin wall
+    // and end past its plane without either end being inside the cylinder.
+    const float stepSize = std::min(cachedInsideWMO ? 0.20f : 0.35f, 0.9f * body.radius);
     const int steps = std::max(1, std::min(8, static_cast<int>(std::ceil(dist / stepSize))));
     const glm::vec3 stepDelta = delta / static_cast<float>(steps);
 
@@ -308,7 +314,7 @@ glm::vec3 CameraController::sweepAgainstWalls(const glm::vec3& from, const glm::
 
         if (wmoRenderer) {
             glm::vec3 adjusted;
-            if (wmoRenderer->checkWallCollision(stepPos, candidate, adjusted, cachedInsideWMO)) {
+            if (wmoRenderer->checkWallCollision(stepPos, candidate, adjusted, cachedInsideWMO, &body)) {
                 candidate.x = adjusted.x;
                 candidate.y = adjusted.y;
                 // Up is a ramp; down would be a wall pulling the feet under the floor.
@@ -318,7 +324,7 @@ glm::vec3 CameraController::sweepAgainstWalls(const glm::vec3& from, const glm::
 
         if (includeDoodads && m2Renderer && !externalFollow_) {
             glm::vec3 adjusted;
-            if (m2Renderer->checkCollision(stepPos, candidate, adjusted)) {
+            if (m2Renderer->checkCollision(stepPos, candidate, adjusted, body.radius)) {
                 candidate.x = adjusted.x;
                 candidate.y = adjusted.y;
             }
@@ -366,24 +372,23 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
     }
 
     if (!externalFollow_) {
-        // Enter swim only when water is deep enough (waist-deep+),
-        // not for shallow wading.
+        // Whether the character swims: the stock rule (0x730D10), the liquid
+        // over the feet against the collision box's height - in deeper than
+        // 0.75 h, out below 0.75 h - 1/36. A wader standing on the bottom has
+        // the feet on the floor, so that is the water over the floor; a body
+        // falling in is measured where it is, and not while it is still on the
+        // way up out of a jump. The thresholds scale with the race: a gnome
+        // swims in 0.79 yd of water, a human 1.52, a draenei 1.91. They were a
+        // fixed 1.15 in / 0.85 out of water over the floor for everyone.
+        namespace sm = game::stock_movement;
+        const float colliderH = collider_.height;
         std::optional<float> waterH;
         if (waterRenderer) {
             waterH = waterRenderer->getWaterHeightAt(targetPos.x, targetPos.y);
         }
         constexpr float MAX_SWIM_DEPTH_FROM_SURFACE = 12.0f;
-        // Hysteresis: starting to swim needs deeper water than continuing to
-        // swim does. With one threshold, a character wading at the boundary
-        // flipped between swim and walk every frame - each flip restarts the
-        // locomotion animation and sends a START_SWIM/STOP_SWIM pair, which
-        // is what made walking out of water stutter. The two bounds sit
-        // either side of the single 1.0 this replaces.
-        constexpr float SWIM_ENTER_WATER_DEPTH = 1.15f;
-        constexpr float SWIM_EXIT_WATER_DEPTH  = 0.85f;
-        const float MIN_SWIM_WATER_DEPTH =
-            swimming ? SWIM_EXIT_WATER_DEPTH : SWIM_ENTER_WATER_DEPTH;
         bool inWater = false;
+        surfaceHopThisFrame_ = false;
         // Water Walk: treat water surface as ground - player walks on top, not through.
         if (waterWalkActive_ && waterH && targetPos.z >= *waterH - 0.5f) {
             // Clamp to water surface so the player stands on it
@@ -407,48 +412,20 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
             bool depthAllowed = swimming || isOcean ||
                                 ((*waterH - targetPos.z) <= MAX_SWIM_DEPTH_FROM_SURFACE);
             if (depthAllowed) {
-                std::optional<float> terrainH;
-                std::optional<float> wmoH;
-                std::optional<float> m2H;
-                if (terrainManager) terrainH = terrainManager->getHeightAt(targetPos.x, targetPos.y);
-                if (wmoRenderer) wmoH = wmoRenderer->getFloorHeight(targetPos.x, targetPos.y, targetPos.z + 2.0f);
-                if (m2Renderer) m2H = m2Renderer->getFloorHeight(targetPos.x, targetPos.y, targetPos.z + 1.0f);
-                auto floorH = selectHighestFloor(terrainH, wmoH, m2H);
+                const float depthFromFeet = *waterH - targetPos.z;
+                const bool risingInJump = !swimming && !grounded && verticalVelocity > 0.0f;
+                inWater = swimming
+                    ? sm::keepsSwimming(depthFromFeet, colliderH, true, true)
+                    : sm::startsSwimming(depthFromFeet, colliderH, true, risingInJump);
 
-                // Prefer measured depth from floor; if floor sample is missing,
-                // fall back to feet-to-surface depth.
-                float depthFromFeet = (*waterH - targetPos.z);
-                inWater = (floorH && ((*waterH - *floorH) >= MIN_SWIM_WATER_DEPTH)) ||
-                          (!floorH && (depthFromFeet >= MIN_SWIM_WATER_DEPTH));
-
-                // Ramp exit assist: when swimming forward near the surface toward a
-                // reachable floor (dock/shore ramp), switch to walking sooner.
-                if (swimming && inWater && floorH && f.nowForward) {
-                    float floorDelta = *floorH - targetPos.z;
-                    float waterOverFloor = *waterH - *floorH;
-                    // Measured from where a swimmer actually floats, not from
-                    // a bare number.
-                    //
-                    // depthFromFeet is WATER_SURFACE_OFFSET exactly while
-                    // swimming - the feet are pinned that far under the
-                    // surface - so this constant was really "the float depth
-                    // plus a little". It was 1.45 against a float depth of 0.9.
-                    // Raising the float depth to 1.45 so the character treads at
-                    // chest height put the test exactly on its own threshold,
-                    // and the assist that walks a swimmer up a shore stopped
-                    // firing: the character stayed swimming in ankle-deep water,
-                    // shuddering on the boundary, and never fully left it.
-                    bool nearSurface = depthFromFeet <= WATER_SURFACE_OFFSET + 0.55f;
-                    bool reachableRamp = (floorDelta >= -0.30f && floorDelta <= 1.10f);
-                    bool shallowRampWater = waterOverFloor <= 1.55f;
-                    bool notDiving = f.forward3D.z > -0.20f && !f.xDown;
-                    if (nearSurface && reachableRamp && shallowRampWater && notDiving) {
-                        inWater = false;
-                    }
-                }
-
-                // Forward plank/ramp assist: sample structure floors ahead so water exit
-                // can happen when the ramp is in front of us (not only under our feet).
+                // Ledge exits. The stock swim trace has no step: a swimmer
+                // meets a dock or a shelf as a wall and hops out at the surface
+                // (below). Wowee's wall test leaves anything within a step of
+                // the feet to the floor pass, which a swimmer does not run, so
+                // a ledge in front of or under a swimmer heading for it ends
+                // the swim and the ground mover's step takes it - when the
+                // water over that ledge is shallower than the stock exit depth.
+                const float exitDepth = sm::swimExitDepth(colliderH);
                 if (swimming && inWater && f.nowForward && f.forward3D.z > -0.20f && !f.xDown) {
                     auto queryFloorAt = [&](float x, float y, float probeZ) -> std::optional<float> {
                         std::optional<float> best;
@@ -467,32 +444,45 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
                         }
                         return best;
                     };
-
+                    const float step = collider_.stepHeight;
+                    const float probeZ = targetPos.z + step + 1.0f;
+                    // Under the feet, then ahead along the swim.
+                    std::optional<float> ledge;
+                    if (auto h = queryFloorAt(targetPos.x, targetPos.y, probeZ)) ledge = h;
                     glm::vec2 fwd2(f.forward.x, f.forward.y);
                     float fwdLenSq = glm::dot(fwd2, fwd2);
                     if (fwdLenSq > 1e-8f) {
                         fwd2 *= glm::inversesqrt(fwdLenSq);
-                        std::optional<float> aheadFloor;
-                        const float probeZ = targetPos.z + 2.0f;
-                        const float dists[] = {0.45f, 0.90f, 1.25f};
-                        for (float d : dists) {
-                            float sx = targetPos.x + fwd2.x * d;
-                            float sy = targetPos.y + fwd2.y * d;
-                            auto h = queryFloorAt(sx, sy, probeZ);
-                            if (h && (!aheadFloor || *h > *aheadFloor)) aheadFloor = h;
-                        }
-
-                        if (aheadFloor) {
-                            float floorDelta = *aheadFloor - targetPos.z;
-                            float waterOverFloor = *waterH - *aheadFloor;
-                            bool nearSurface = depthFromFeet <= 1.65f;
-                            bool reachableRamp = (floorDelta >= -0.35f && floorDelta <= 1.25f);
-                            bool shallowRampWater = waterOverFloor <= 1.75f;
-                            if (nearSurface && reachableRamp && shallowRampWater) {
-                                inWater = false;
-                            }
+                        const float reach = std::max(collider_.halfWidth, step * sm::kTan50);
+                        for (float d : {0.45f, 0.90f, reach}) {
+                            auto h = queryFloorAt(targetPos.x + fwd2.x * d,
+                                                  targetPos.y + fwd2.y * d, probeZ);
+                            if (h && (!ledge || *h > *ledge)) ledge = h;
                         }
                     }
+                    if (ledge) {
+                        const float rise = *ledge - targetPos.z;
+                        const bool nearSurface = depthFromFeet <= swimFloatDepth() + 0.2f;
+                        const bool withinStep = rise >= -0.35f && rise <= step;
+                        const bool shallowOverLedge = (*waterH - *ledge) < exitDepth;
+                        if (nearSurface && withinStep && shallowOverLedge) inWater = false;
+                    }
+                }
+
+                // Ascend held at the surface jumps out of the water (0x730D10:
+                // ASCENDING within 1/3 yd of the float line -> 0x72EB80, a
+                // JUMP from the water at 9.0967 yd/s). On foot always; mounted
+                // only while moving or able to fly. Rooted refuses it as it
+                // refuses any jump (0x9883F0).
+                const bool moving = f.nowForward || f.nowBackward ||
+                                    f.nowStrafeLeft || f.nowStrafeRight;
+                if (swimming && inWater && useWoWSpeed && f.spaceHeld && !movementRooted_ &&
+                    (!mounted_ || moving || flyingActive_) &&
+                    sm::surfaceHopDue(true, depthFromFeet, colliderH)) {
+                    inWater = false;
+                    surfaceHopThisFrame_ = true;
+                    verticalVelocity = sm::kWaterJumpVelocity;
+                    grounded = false;
                 }
             }
         }
@@ -512,7 +502,7 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
         float swimSpeed = useWoWSpeed ? stockSp.swim
             : ((swimSpeedOverride_ > 0.0f && swimSpeedOverride_ < 100.0f && !std::isnan(swimSpeedOverride_))
                    ? swimSpeedOverride_ : f.speed * SWIM_SPEED_FACTOR);
-        float waterSurfaceZ = waterH ? (*waterH - WATER_SURFACE_OFFSET) : targetPos.z;
+        float waterSurfaceZ = waterH ? (*waterH - swimFloatDepth()) : targetPos.z;
 
         // For auto-run/auto-swim: use character facing (immune to camera pan)
         // For manual W key: use camera direction (swim where you look)
@@ -602,9 +592,10 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
 
         targetPos.z += verticalVelocity * f.physicsDeltaTime;
 
-        // Don't rise above water surface
-        if (waterH && targetPos.z > *waterH - WATER_SURFACE_OFFSET) {
-            targetPos.z = *waterH - WATER_SURFACE_OFFSET;
+        // The surface is a ceiling to the top of a box 0.75 h tall (0x75F9D0),
+        // so the feet stop at the float depth.
+        if (waterH && targetPos.z > *waterH - swimFloatDepth()) {
+            targetPos.z = *waterH - swimFloatDepth();
             if (verticalVelocity > 0.0f) verticalVelocity = 0.0f;
         }
 
@@ -680,8 +671,13 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
         } else {
             floorH = cachedFloorHeight;
         }
+        // The bottom holds the box's feet, as any floor does (stock swims the
+        // box through the same triangles it walks on). It held them half a
+        // yard up, which a wader felt as 0.5 yd less water than there was:
+        // with the stock exit depth that would end the swim in water deep
+        // enough to start it again.
         if (floorH) {
-            float swimFloor = *floorH + 0.5f;
+            float swimFloor = *floorH;
             if (targetPos.z < swimFloor) {
                 targetPos.z = swimFloor;
                 if (verticalVelocity < 0.0f) verticalVelocity = 0.0f;
@@ -723,16 +719,16 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
 
         grounded = false;
         } else {
-        // Exiting water - boost upward to help climb onto shore/stairs.
-        if (wasSwimming) {
+        // Out of the water by wading or a ledge: on the ground, with the full
+        // step. Stock has no lift here - the step height (1 yd) is what gets a
+        // wader onto a stair lip, and the half-yard boost this used to give
+        // only added a hop. A surface hop is a jump and keeps its arc.
+        if (wasSwimming && !surfaceHopThisFrame_) {
             // Anchor lastGroundZ to current position so WMO floor probes
             // start from a sensible height instead of stale pre-swim values.
             lastGroundZ = targetPos.z;
             grounded = true;  // Treat as grounded so step-up budget is full
-            // Small upward boost to clear stair lip geometry
-            if (verticalVelocity < 1.5f) {
-                verticalVelocity = 1.5f;
-            }
+            if (verticalVelocity > 0.0f) verticalVelocity = 0.0f;
         }
         swimming = false;
 
@@ -1488,7 +1484,9 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
             const float moveLen = glm::length(move);
             if (moveLen > 1e-4f && moveLen < 8.0f) {
                 const float feetZ = prevTargetPos.z;
-                const float reach = feetZ + movement::kMaxStepUp + 0.05f;
+                // As far up as the step reaches: everything the floor pick
+                // could stand the character on is judged for slope.
+                const float reach = feetZ + collider_.stepHeight + 0.05f;
                 // Uphill direction of the too-steep surface a step to p would
                 // climb onto, or nothing if that step is allowed.
                 const auto steepClimbAt = [&](const glm::vec2& p) -> std::optional<glm::vec2> {
@@ -1658,9 +1656,13 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
             }
         }
 
-        // Grounded: the stock step height. Airborne: only what the feet crossed.
+        // Grounded: the stock step height - the object scale, at least 1 yd
+        // (0x6E9520 via 0x761B00), which is also where the WMO and doodad wall
+        // tests stop calling geometry a wall. It was 0.6, so a riser between
+        // 0.6 and 1 yd was neither a wall nor a step: walked into rather than
+        // onto. Airborne: only what the feet crossed.
         float stepUpBudget = grounded
-            ? movement::kMaxStepUp
+            ? collider_.stepHeight
             : std::clamp(crossTop - targetPos.z, 0.10f, 3.0f);
         // 1. Center-only sample for terrain/WMO floor selection.
         //    Using only the center prevents tunnel entrances from snapping
@@ -2812,24 +2814,13 @@ void CameraController::updateFreeFlyCamera(float /*deltaTime*/, FrameInput& f) {
         if (!depthAllowed) {
             inWater = false;
         } else {
-        std::optional<float> terrainH;
-        std::optional<float> wmoH;
-        std::optional<float> m2H;
-        if (terrainManager) terrainH = terrainManager->getHeightAt(newPos.x, newPos.y);
-        if (wmoRenderer) wmoH = wmoRenderer->getFloorHeight(newPos.x, newPos.y, feetZ + 2.0f);
-        if (m2Renderer && !externalFollow_) m2H = m2Renderer->getFloorHeight(newPos.x, newPos.y, feetZ + 1.0f);
-        auto floorH = selectHighestFloor(terrainH, wmoH, m2H);
-        // Hysteresis: starting to swim needs deeper water than continuing to
-        // swim does. With one threshold, a character wading at the boundary
-        // flipped between swim and walk every frame - each flip restarts the
-        // locomotion animation and sends a START_SWIM/STOP_SWIM pair, which
-        // is what made walking out of water stutter. The two bounds sit
-        // either side of the single 1.0 this replaces.
-        constexpr float SWIM_ENTER_WATER_DEPTH = 1.15f;
-        constexpr float SWIM_EXIT_WATER_DEPTH  = 0.85f;
-        const float MIN_SWIM_WATER_DEPTH =
-            swimming ? SWIM_EXIT_WATER_DEPTH : SWIM_ENTER_WATER_DEPTH;
-        inWater = (floorH && ((*waterH - *floorH) >= MIN_SWIM_WATER_DEPTH)) || (isOcean && !floorH);
+        // The stock rule, as the followed character's (0x730D10): the liquid
+        // over the feet against the collision height.
+        const float depthFromFeet = *waterH - feetZ;
+        inWater = swimming
+            ? game::stock_movement::keepsSwimming(depthFromFeet, collider_.height, true, true)
+            : game::stock_movement::startsSwimming(depthFromFeet, collider_.height, true,
+                                                   !grounded && verticalVelocity > 0.0f);
         }
     }
 
@@ -2839,7 +2830,7 @@ void CameraController::updateFreeFlyCamera(float /*deltaTime*/, FrameInput& f) {
         float swimSpeed = useWoWSpeed ? stockSpeeds().swim
             : ((swimSpeedOverride_ > 0.0f && swimSpeedOverride_ < 100.0f && !std::isnan(swimSpeedOverride_))
                    ? swimSpeedOverride_ : f.speed * SWIM_SPEED_FACTOR);
-        float waterSurfaceCamZ = waterH ? (*waterH - WATER_SURFACE_OFFSET + eyeHeight) : newPos.z;
+        float waterSurfaceCamZ = waterH ? (*waterH - swimFloatDepth() + eyeHeight) : newPos.z;
         bool diveIntent = f.nowForward && (f.forward3D.z < -0.28f);
 
         float movLenSq = glm::dot(f.movement, f.movement);
@@ -2868,8 +2859,8 @@ void CameraController::updateFreeFlyCamera(float /*deltaTime*/, FrameInput& f) {
         newPos.z += verticalVelocity * f.physicsDeltaTime;
 
         // Don't rise above water surface (feet at water level)
-        if (waterH && (newPos.z - eyeHeight) > *waterH - WATER_SURFACE_OFFSET) {
-            newPos.z = *waterH - WATER_SURFACE_OFFSET + eyeHeight;
+        if (waterH && (newPos.z - eyeHeight) > *waterH - swimFloatDepth()) {
+            newPos.z = *waterH - swimFloatDepth() + eyeHeight;
             if (verticalVelocity > 0.0f) verticalVelocity = 0.0f;
         }
 
@@ -3555,6 +3546,13 @@ void CameraController::update(float deltaTime) {
             !movementRooted_) {
             movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_JUMP));
         }
+        // A swimmer's hop at the surface is a jump from the water (0x730D10 ->
+        // 0x72EB80 -> event 0xA): sent while SWIMMING is still set, so it
+        // carries the water jump's 9.0967, and the jump clears SWIMMING and
+        // ASCENDING itself (0x988370) - no STOP_SWIM or STOP_ASCEND follows.
+        if (surfaceHopThisFrame_) {
+            movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_JUMP));
+        }
 
         // Walk/run mode. The stock toggle sends SET_WALK_MODE / SET_RUN_MODE
         // and sets WALKING (0x100) in the flags (0x98B0E0), so the server and
@@ -3587,7 +3585,7 @@ void CameraController::update(float deltaTime) {
     if (movementCallback) {
         if (swimming && !wasSwimming) {
             movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_START_SWIM));
-        } else if (!swimming && wasSwimming) {
+        } else if (!swimming && wasSwimming && !surfaceHopThisFrame_) {
             movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_STOP_SWIM));
         }
     }
@@ -3615,7 +3613,9 @@ void CameraController::update(float deltaTime) {
             }
         } else {
             // Left flight mode: clear any lingering vertical movement states
-            if (wasAscending_) {
+            // (a surface hop's jump already cleared them).
+            if (surfaceHopThisFrame_) {
+            } else if (wasAscending_) {
                 movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_STOP_ASCEND));
             } else if (wasDescending_) {
                 movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_STOP_ASCEND));

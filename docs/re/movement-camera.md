@@ -208,6 +208,84 @@ On ground too steep to stand on the unit is therefore falling, and the air
 step (0x7618B0) slides it down. More than five consecutive zero-progress
 slices stop the step.
 
+### 7.1 Box size in detail (0x725F50, 0x6D78C0, 0x6D7720, 0x6E9570)
+
+- **Who sizes it.** 0x725F50 runs on a display change (form, morph, mount).
+  A player (type mask 0x10) goes to 0x6D78C0, which reads the display's
+  CreatureModelData; a model whose width or height is under 9.5e-7 logs
+  `NOCOLLISIONBOX` and keeps the old box. A creature without model data gets
+  the defaults (width 2/3 at 0x9FC830, so r = 1/3; height 2.0278).
+- **Scale** (0x6CF350): `full = (CreatureDisplayInfo.CreatureModelScale x
+  CreatureModelData.ModelScale, 0x71C110) x max(1, object scale)` - the
+  object scale (OBJECT_FIELD_SCALE_X, vfunc +0x3C) is **clamped to at least
+  1**, so a shrink never shrinks the box. 0x6E9570 then sets
+  `r = CollisionWidth x full / 2`, `h = CollisionHeight x full` and
+  **+0xD0 = full / model scale = max(1, object scale)**, which is the step
+  height 0x6E9520 / 0x6E8FC0 return for a player-controlled unit (2.0,
+  0xA4040C, for anything else).
+- The local player's box only grows when it fits: unless forced, 0x6E8FF0 ->
+  0x75E500 tests the new box against the world first (0x6D78C0 returns 0 and
+  the old box stays). For a player-controlled unit 0x6E9570 writes h only when
+  forced (param 6).
+- **Mounted** (0x73D5D0 stores the mount display's CreatureModelScale at
+  CGUnit +0x990 and calls 0x6D7720 with the mount model's **MountHeight**,
+  CreatureModelData field 16 at +0x40):
+  `h = max(riderH, riderH / 2 + mountDisplayScale x MountHeight)`, times the
+  rider's full scale; the width is the rider's current one. A human on a
+  riding horse (MountHeight 1.866) is 2.88 tall.
+- **Hover / step in progress** (0x6E9520): with SPLINE_ELEVATION (0x4000000)
+  set the step budget shrinks by `z - +0x88`.
+
+### 7.2 The step (0x761B00)
+
+Called by the ground walker when the next triangle is not walkable:
+
+1. If the blocking surface's normal z is between 0 and cos 50 (a steep slope,
+   not a wall), the probe direction is into it: `-(n.x, n.y)` normalised.
+2. Trace **up** by the step height (0x6E9520).
+3. Trace **forward** by `max(r + 1/720, stepScale x tan 50)` (`stepScale` =
+   +0xD0, so 1.19 yd for a scale-1 player, always more than r).
+4. If that went the full distance or further than r, trace **down** by the
+   climb and require walkable ground there (0x75B690 / 0x7619C0).
+5. On success the position is put **back** where it started and SPLINE_
+   ELEVATION (0x4000000) is set with +0x88 = the start z: the climb is then
+   taken by the ground walker over the following slices, and 0x6E9520 charges
+   it against the remaining step. On failure the flag is cleared and the unit
+   slides along the wall (0x75E0C0).
+
+So a player climbs anything up to **1.0 yd** (its object scale if larger)
+with walkable ground within 1.19 yd beyond the edge, and the box must fit
+(the up trace is the box). Nothing in the step depends on race; only r does,
+and r is under 1.19 for every playable model.
+
+### 8.1 The float line and the surface hop (0x75F9D0, 0x760B40, 0x730D10)
+
+- **Float depth.** The swim mover (0x760B40) traces the box against the world
+  set (0xADBA34) and, unless the unit may leave the water (0x6E9AD0: flags2
+  0x4, or LEVITATING 0x400, or a spline that allows it), against the liquid
+  set (0xADBA54, the liquid surface with its normals flipped by 0x75FF90).
+  0x75F9D0 shortens the box to **0.75 h** (0x9E9EE4 x +0xCC) when the unit is
+  SWIMMING and the set is the liquid one. The surface therefore stops the top
+  of a 0.75 h box: **the feet float 0.75 h under the surface** - exactly the
+  depth that starts swimming, and 0.028 yd inside the band that keeps it.
+  A human's feet float 1.52 under, a gnome's 0.79, a draenei's 1.91. The model
+  is drawn at the feet: HumanMale's SwimIdle / Swim root bone moves z by only
+  -0.05..-0.17, so the neck pivot (1.6) sits just above the water.
+- **Surface hop.** Every frame, a swimmer with ASCENDING whose
+  `depth - 0.75 h < 1/3` (0xA12098) calls 0x72EB80 (local player only,
+  0x4D43C0). Not mounted it queues a JUMP event (0x6ECC20, event 0xA);
+  mounted, only if the mount model has flag 0x400, the unit has CAN_FLY or
+  unit flag 0x10000000, or it is moving with a direction. The jump starts
+  from the water (0x9883F0(1): 9.096748) and clears SWIMMING / ASCENDING.
+  0x760B40 does the same when an ascending swimmer's trace hits the surface.
+  Holding space at the surface therefore hops 2.14 yd - enough to land on a
+  ledge 0.6 yd above the water - and falls back in.
+- **Re-entry** waits for the top of the arc: 0x986EA0 is "FALLING, vertical
+  speed nonzero and fall time x 0.001 < speed x -0.0518 (1/g)", i.e. still
+  rising; 0x730D10 starts swimming only when it is not.
+- **Stop** also needs "not FLYING" (CGUnit +0x7CC & 0x2000000): a flier is
+  never taken out of the water by this rule.
+
 ## 8. Water (0x730D10, 0x760B40)
 
 Every frame the unit compares the liquid level to its feet (depth `d`) and its
@@ -310,24 +388,32 @@ first-person model fade.
 | 14 | SET_FACING at >= 0.1 rad from the last packet's facing, no time limit | > 3 deg from the last SET_FACING, max 10 Hz | stock rule on WotLK (pre-WotLK keeps the old pacing) |
 | 15 | The walk toggle sends SET_WALK_MODE / SET_RUN_MODE and sets WALKING (0x100) | never sent, WALKING never set: the server and other clients saw a walker as a runner | sent on the toggle, flag kept |
 | 16 | A swimmer's space/descend is ASCENDING/DESCENDING: START_ASCEND sent, straight up at the swim speed, or 45 degrees at the swim speed with a direction (0x987700) | 8 yd/s vertical on top of the full swim speed, no packet | stock split and packets (no FLYING added in water) |
+| 17 | Collision box per model: r = CollisionWidth/2, h = CollisionHeight, times scale; mounted h from MountHeight (7.1) | a 0.45 / 0.5 cylinder 2 yd tall for everyone | `colliderFromModel` / `mountedCollisionHeight`, resolved in `Application::applyServerMovementState`, used by the WMO wall test (radius, height, step) and the doodad test (radius) |
+| 18 | Step height max(1, object scale) = 1.0 yd (7.2) | floor pick reached 0.6, while the wall tests ignored anything under 1.0: a 0.6-1.0 riser was walked into | grounded floor pick and slope check reach `collider_.stepHeight` |
+| 19 | Swim in at depth over feet > 0.75 h, out < 0.75 h - 1/36, not while rising (8) | water over the floor, 1.15 in / 0.85 out, any race | `startsSwimming` / `keepsSwimming` |
+| 20 | Float with the feet 0.75 h under (8.1) | fixed 1.45 | `swimFloatDepth()`; in game a human treads at z -1.524 in sea-level water |
+| 21 | Bottom holds the feet; walking out has no lift | swim floor at bottom + 0.5; +1.5 yd/s boost on leaving the water | bottom at the feet; no boost |
+| 22 | Ascend held within 1/3 yd of the float line jumps out at 9.0967 (8.1), JUMP sent from the water, no STOP_SWIM | clamped at the surface | the hop, its JUMP, flags cleared by the jump; in game held space hops once a second to feet z +0.616 (rise 2.14) |
 
 Still different (not changed here; each needs in-game checking):
 
-- **Step height.** Stock steps up 1.0 yd (scale-1 player) only when a wall
-  blocks; Wowee's floor picker accepts any floor within `kMaxStepUp` = 0.6
-  of the feet every frame and has many heuristics built on that number
-  (`movement_limits.hpp`). Raising it to 1.0 would also lift the player onto
-  low overhead floors in WMOs; it needs the wall-triggered step to be safe.
-- **Collision shape.** Stock is an axis-aligned box of r = CollisionWidth/2
-  and h = CollisionHeight per model; Wowee sweeps a fixed radius against WMO
-  walls and M2s. Per-race sizes are in the table in section 7.
-- **Swim depth.** Stock starts swimming at 0.75 h of water over the feet
-  (1.52 yd for a human, 0.79 for a gnome) and floats there; Wowee uses fixed
-  1.15 / 0.85 water-over-floor thresholds and a fixed 1.45 surface offset,
-  plus ramp-exit assists. Needs the model's collision height in the camera
-  controller.
-- **Jumping out of the water** (ascend into the surface jumps with 9.0967):
-  Wowee clamps at the surface.
+- **Step mechanics.** Stock steps only when a wall blocks and climbs over the
+  next slices (7.2); Wowee's floor pick now reaches the stock 1.0 yd every
+  frame, which also lifts the player onto a walkable top within 1 yd that it
+  stands beside rather than walks into. The heuristics around the floor pick
+  (`movement_limits.hpp`, `kMaxStepUp` = 0.6) still use 0.6 as their ground
+  tolerance.
+- **Box against cylinder.** Stock is an axis-aligned box (corners reach
+  r x 1.41); Wowee sweeps a cylinder of radius r. The doodad test
+  (`m2_renderer_instance.cpp`) still uses a fixed 2 yd height and 1 yd step;
+  only its radius follows the model.
+- **Swim ledge exits.** Stock swimming has no step: a swimmer gets onto a
+  ledge only by the hop. Wowee keeps an exit to walking when a ledge within
+  the step lies under or ahead of a swimmer at the surface and the water over
+  it is shallower than the stock exit depth, because its wall tests leave
+  such a ledge to the floor pass, which a swimmer does not run.
+- **Steep ground.** Stock is FALLING on it and the air step slides the box
+  down; Wowee slides terrain only, with its own acceleration.
 - **Air keys**: stock sends START_FORWARD etc. in the air (with the pending
   flag) and applies them on landing; Wowee sends them on landing.
 - **FALL_LAND** after any fall over 1/36 yd; Wowee needs 0.15 s airborne
