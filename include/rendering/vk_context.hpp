@@ -175,8 +175,9 @@ public:
     // the cost of each is the gap between its mark and the next. Names are
     // string literals held by pointer, never copied - this is per pass per
     // frame and must not allocate.
-    /// Record a point in the frame. Does nothing when the device or the queue
-    /// cannot timestamp, which is checked once at device selection.
+    /// Record a point in the frame. Does nothing beyond the checkpoint unless
+    /// WOWEE_FRAME_PROFILE is set and the device and queue can timestamp,
+    /// which is checked once at device selection.
     void gpuMark(VkCommandBuffer cmd, const char* label);
     [[nodiscard]] bool gpuTimingSupported() const { return gpuTimingSupported_; }
     /// A named point the driver reports as the last one each queue reached
