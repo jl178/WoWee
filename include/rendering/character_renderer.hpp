@@ -421,7 +421,31 @@ private:
         VmaAllocation boneAlloc[2] = {};
         void* boneMapped[2] = {};
         VkDescriptorSet boneSet[2] = {};
+        /// Bumped each time boneMatrices is computed; and per frame slot, the
+        /// pose that slot's bone buffer holds (0: none yet). See uploadBones.
+        uint32_t poseSerial = 1;
+        uint32_t uploadedPoseSerial[2] = {};
+
+        /// The batches the shadow pass draws, by the same filter it always
+        /// applied (opaque and alpha-keyed only, geosets), worked out once
+        /// rather than with a hash lookup per batch per frame. Cleared by
+        /// setActiveGeosets, the one input that changes after creation.
+        struct ShadowBatchRef {
+            uint32_t batch = 0;
+            bool alphaKeyed = false;  // blend mode 1: casts its texture's shape
+        };
+        std::vector<ShadowBatchRef> shadowBatches;
+        bool shadowBatchesValid = false;
     };
+
+    /// Copy the instance's bones into this frame slot's bone buffer, unless
+    /// the slot already holds this pose. The shadow pass and the main pass
+    /// read the same buffer in the same frame; each used to copy the bones
+    /// in, and the shadow pass copied them for every unit in range whether or
+    /// not its skeleton had moved (off screen it is not posed at all). Off
+    /// with WOWEE_CHAR_BONE_REUSE=0: every call copies, as both passes did.
+    /// True when it copied.
+    bool uploadBones(CharacterInstance& inst, uint32_t frameIndex, int numBones);
 
     void setupModelBuffers(M2ModelGPU& gpuModel);
     void calculateBindPose(M2ModelGPU& gpuModel);
@@ -569,6 +593,22 @@ private:
 
     std::unordered_map<uint32_t, M2ModelGPU> models;
     std::unordered_map<uint32_t, CharacterInstance> instances;
+    /// Bumped whenever `instances` gains or loses an entry. An element of an
+    /// unordered_map stays where it is until erased, so a list of pointers
+    /// into it is good until this moves.
+    uint64_t instancesGeneration_ = 0;
+    /// The shadow pass's walk: every instance, in the map's order, as a dense
+    /// list rather than a walk of the map's nodes. Rebuilt when
+    /// instancesGeneration_ moves.
+    std::vector<CharacterInstance*> shadowInstances_;
+    uint64_t shadowInstancesGeneration_ = ~0ull;
+    /// Shadow pass counts under WOWEE_FRAME_PROFILE: instances walked, in
+    /// range, dropped by the light-space cull, drawn, bone copies made and
+    /// skipped, frames.
+    struct ShadowProfile {
+        uint64_t walked = 0, inRange = 0, lightCulled = 0, drawn = 0;
+        uint64_t boneCopies = 0, boneReuses = 0, frames = 0;
+    } shadowProf_;
 
     uint32_t nextInstanceId = 1;
 

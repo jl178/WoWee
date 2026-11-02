@@ -1204,6 +1204,12 @@ wowee_add_test(test_frustum
 wowee_add_test(test_anim_cull
     SOURCES test_anim_cull.cpp)
 
+# ── test_shadow_draw_list ────────────────────────────────────
+# The light-box cull, the terrain draw merge, the appended tile grouping and
+# the mega-buffer slot pool the shadow passes keep their draws with.
+wowee_add_test(test_shadow_draw_list
+    SOURCES test_shadow_draw_list.cpp)
+
 # ── test_m2_track_cursor ─────────────────────────────────────
 # Bone track sampling from a key cursor answers what the binary search does.
 wowee_add_test(test_m2_track_cursor
