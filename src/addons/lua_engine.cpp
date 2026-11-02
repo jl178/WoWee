@@ -1578,6 +1578,35 @@ int lua_MessageFrame_RemoveMessagesByAccessID(lua_State* L) {
     return 0;
 }
 
+/// UpdateColorByID(id, r, g, b) - recolour the lines already in the frame that
+/// were added under that id.
+///
+/// ChatFrame_OnEvent calls it on UPDATE_CHAT_COLOR, after writing the new
+/// colour into ChatTypeInfo, so changing a channel's colour in the chat menu
+/// repaints what that channel has already said as well as what it says next.
+/// The id is AddMessage's fifth argument, which chat passes as info.id.
+int lua_MessageFrame_UpdateColorByID(lua_State* L) {
+    auto* w = widgetOf(L, 1);
+    if (!w || !lua_isnumber(L, 2)) return 0;
+    wowee::ui::recolorMessagesById(*w, lua_tonumber(L, 2),
+                                   static_cast<float>(luaL_optnumber(L, 3, 1.0)),
+                                   static_cast<float>(luaL_optnumber(L, 4, 1.0)),
+                                   static_cast<float>(luaL_optnumber(L, 5, 1.0)));
+    return 0;
+}
+
+/// SetFading(bool) / GetFading - whether lines fade out once their time is up.
+/// Off, they stay lit whatever SetTimeVisible says.
+int lua_MessageFrame_SetFading(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) w->messageFading = lua_toboolean(L, 2) != 0;
+    return 0;
+}
+int lua_MessageFrame_GetFading(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushboolean(L, (!w || w->messageFading) ? 1 : 0);
+    return 1;
+}
+
 /// SetTimeVisible(seconds) - how long a line stays before it fades.
 ///
 /// Zero, the default, means for good, which is what a chat frame wants.
@@ -3386,6 +3415,87 @@ int lua_Minimap_PingLocation(lua_State* L) {
     return 0;
 }
 
+/// Minimap:SetPlayerTextureWidth / SetPlayerTextureHeight - the size of the
+/// player arrow, in interface units. MinimapPing_OnLoad sets both to 40. The
+/// map is drawn by the client rather than by the widget renderer, so the size
+/// is kept on the widget and the frame loop hands it to the map (see
+/// rendering::Minimap::setPlayerArrowSize).
+int lua_Minimap_SetPlayerTextureWidth(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) {
+        w->minimapPlayerTexW = std::max(0.0f, static_cast<float>(luaL_optnumber(L, 2, 0)));
+    }
+    return 0;
+}
+int lua_Minimap_SetPlayerTextureHeight(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) {
+        w->minimapPlayerTexH = std::max(0.0f, static_cast<float>(luaL_optnumber(L, 2, 0)));
+    }
+    return 0;
+}
+
+/// The QuestPOIFrame ("Blob") setters WorldMapBlobFrame_OnLoad calls, and that
+/// WorldMapFrame_SetOpacity calls again with the alphas scaled by the map's
+/// opacity slider. Kept on the widget; WidgetRenderer::drawQuestBlobs reads
+/// them when it shades the areas.
+int lua_QuestBlobFrame_SetFillTexture(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) w->blobFillTexture = luaL_optstring(L, 2, "");
+    return 0;
+}
+int lua_QuestBlobFrame_SetBorderTexture(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) w->blobBorderTexture = luaL_optstring(L, 2, "");
+    return 0;
+}
+/// 0-255, as the C client takes it - FrameXML passes 128 and 192.
+int lua_QuestBlobFrame_SetFillAlpha(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) {
+        w->blobFillAlpha = std::clamp(static_cast<float>(luaL_optnumber(L, 2, 255)), 0.0f, 255.0f);
+    }
+    return 0;
+}
+int lua_QuestBlobFrame_SetBorderAlpha(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) {
+        w->blobBorderAlpha = std::clamp(static_cast<float>(luaL_optnumber(L, 2, 255)), 0.0f, 255.0f);
+    }
+    return 0;
+}
+int lua_QuestBlobFrame_SetBorderScalar(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) {
+        w->blobBorderScalar = std::max(0.0f, static_cast<float>(luaL_optnumber(L, 2, 1.0)));
+    }
+    return 0;
+}
+
+/// Model:ReplaceIconTexture(path), Model:SetSequence(id) and
+/// Model:SetSequenceTime(id, ms).
+///
+/// The one caller in this interface is ItemAnim_OnEvent: on ITEM_PUSH the bag
+/// button's ForcedBackpackItem model is given the item's icon, set to sequence
+/// 0 at time 0, and shown; ItemAnim_OnAnimFinished hides it again. This client
+/// does not render arbitrary M2 files in the interface, so the renderer draws
+/// that model's one textured quad from its own tracks (ui::itemPushAnimPose)
+/// and OnAnimFinished waits until the sequence has run - see
+/// drainPendingAnimFinished. A sequence other than 0 is recorded but has
+/// nothing to play: the model has only the one.
+int lua_Model_ReplaceIconTexture(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) w->modelIconTexture = luaL_optstring(L, 2, "");
+    return 0;
+}
+int lua_Model_SetSequence(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) {
+        w->modelSequence = static_cast<int>(luaL_optnumber(L, 2, 0));
+        w->modelSequenceStart = wowee::core::appTimeSeconds();
+    }
+    return 0;
+}
+int lua_Model_SetSequenceTime(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) {
+        w->modelSequence = static_cast<int>(luaL_optnumber(L, 2, 0));
+        const double ms = luaL_optnumber(L, 3, 0.0);
+        w->modelSequenceStart = wowee::core::appTimeSeconds() - ms / 1000.0;
+    }
+    return 0;
+}
+
 /// Enable and Disable, with the handlers that go with them.
 ///
 /// A disabled button is greyed and takes no clicks, and FrameXML both sets
@@ -3540,14 +3650,14 @@ int lua_Region_Show(lua_State* L) {
         if (auto* tree = wowee::addons::getWidgetTree(L)) tree->noteVisibilityCandidate(w->id);
     }
     lua_pushboolean(L, 1); lua_setfield(L, 1, "__visible");
-    // A frame shown to play a model animation has already finished it.
+    // A frame shown to play a model animation owes an OnAnimFinished.
     //
     // The bag buttons each carry a <Model> that shows itself on ITEM_PUSH and
     // hides itself again from OnAnimFinished - the item flying into the bag.
-    // This client plays no model sequences: SetSequence is one of the handful
-    // of widget methods that answer with a no-op, so there is no animation to
-    // finish and nothing ever fired that script. The frame went up on the first
-    // item looted and stayed up, one per bag button, until a reload.
+    // Nothing used to fire that script, so the frame went up on the first item
+    // looted and stayed up, one per bag button, until a reload. It now fires
+    // once the model's sequence has run (drainPendingAnimFinished), or on the
+    // next frame for a model with nothing to play.
     //
     // Queued rather than called here, for the same reason the text change is:
     // the handler runs Hide, and running it inside Show is the sort of ordering
@@ -6241,6 +6351,9 @@ void LuaEngine::registerCoreAPI() {
         {"GetNumMessages",  lua_MessageFrame_GetNumMessages},
         {"GetMessageInfo",  lua_MessageFrame_GetMessageInfo},
         {"RemoveMessagesByAccessID", lua_MessageFrame_RemoveMessagesByAccessID},
+        {"UpdateColorByID", lua_MessageFrame_UpdateColorByID},
+        {"SetFading",       lua_MessageFrame_SetFading},
+        {"GetFading",       lua_MessageFrame_GetFading},
         {"SetMaxLines",     lua_MessageFrame_SetMaxLines},
         {"SetWordWrap",     lua_FontString_SetWordWrap},
         {"CanWordWrap",     lua_FontString_CanWordWrap},
@@ -6277,7 +6390,17 @@ void LuaEngine::registerCoreAPI() {
         {"GetZoom",         lua_Minimap_GetZoom},
         {"GetZoomLevels",   lua_Minimap_GetZoomLevels},
         {"PingLocation",    lua_Minimap_PingLocation},
+        {"SetPlayerTextureWidth",  lua_Minimap_SetPlayerTextureWidth},
+        {"SetPlayerTextureHeight", lua_Minimap_SetPlayerTextureHeight},
         {"DrawQuestBlob",   lua_QuestBlobFrame_DrawQuestBlob},
+        {"SetFillTexture",   lua_QuestBlobFrame_SetFillTexture},
+        {"SetBorderTexture", lua_QuestBlobFrame_SetBorderTexture},
+        {"SetFillAlpha",     lua_QuestBlobFrame_SetFillAlpha},
+        {"SetBorderAlpha",   lua_QuestBlobFrame_SetBorderAlpha},
+        {"SetBorderScalar",  lua_QuestBlobFrame_SetBorderScalar},
+        {"ReplaceIconTexture", lua_Model_ReplaceIconTexture},
+        {"SetSequence",      lua_Model_SetSequence},
+        {"SetSequenceTime",  lua_Model_SetSequenceTime},
         {"UpdateMouseOverTooltip", lua_QuestBlobFrame_UpdateMouseOverTooltip},
         {"GetNumTooltips",  lua_QuestBlobFrame_GetNumTooltips},
         {"GetTooltipIndex", lua_QuestBlobFrame_GetTooltipIndex},
@@ -7039,6 +7162,18 @@ void LuaEngine::registerCoreAPI() {
         "    if self.__fontString then return self.__fontString:GetText() end\n"
         "    return self.__text\n"
         "end\n"
+        // Frame:IgnoreDepth(flag) / IsIgnoringDepth. In 3.3.5 a frame has a
+        // depth used only by the stereoscopic 3D renderer (SetDepth/GetDepth),
+        // and IgnoreDepth says not to inherit the parent's - WorldFrame_OnLoad
+        // turns it on for the world. This client has no stereo rendering, so
+        // the flag changes nothing on screen; it is kept so the frame answers
+        // IsIgnoringDepth as it was told.
+        "function mt:IgnoreDepth(flag)\n"
+        "    rawset(self, '__ignoreDepth', flag and true or false)\n"
+        "end\n"
+        "function mt:IsIgnoringDepth()\n"
+        "    return rawget(self, '__ignoreDepth') == true\n"
+        "end\n"
     );
 
     // Catch-all for unimplemented widget methods. Frames are logic-only stubs (not
@@ -7097,7 +7232,9 @@ void LuaEngine::registerCoreAPI() {
         "GetUIPanel=1,GetUpperEmblemTexture=1,GetValue=1,\n"
         "GetVerticalScroll=1,GetVerticalScrollRange=1,GetWidth=1,\n"
         "GetZoom=1,GetZoomLevels=1,HasFocus=1,HasScript=1,Hide=1,HideUIPanel=1,\n"
-        "HighlightText=1,HookScript=1,IgnoreDepth=1,InitializeTabardColors=1,Insert=1,\n"
+        // IgnoreDepth is a real method now (with IsIgnoringDepth), defined
+        // with the frame metatable's Lua methods.
+        "HighlightText=1,HookScript=1,InitializeTabardColors=1,Insert=1,\n"
         "IsEnabled=1,IsEquippedItem=1,IsEventRegistered=1,IsMouseEnabled=1,\n"
         "IsObjectType=1,IsProtected=1,IsShown=1,IsUnderMouse=1,\n"
         "IsUnit=1,IsVisible=1,LockHighlight=1,Lower=1,MoveUIPanel=1,\n"
@@ -7105,18 +7242,24 @@ void LuaEngine::registerCoreAPI() {
         // PingLocation is a real binding now, applied after this set.
         "Play=1,Raise=1,RefreshValue=1,RegisterAutoHide=1,RegisterEvent=1,\n"
         "RegisterForClicks=1,RegisterForDrag=1,ReleaseFrame=1,\n"
-        "RemoveMessagesByAccessID=1,ReplaceIconTexture=1,Reset=1,Reuse=1,Run=1,\n"
+        // ReplaceIconTexture, SetSequence and SetSequenceTime are real
+        // bindings now (the bag buttons' item animation), applied after this
+        // set.
+        "RemoveMessagesByAccessID=1,Reset=1,Reuse=1,Run=1,\n"
         "RunAttribute=1,RunFor=1,Save=1,ScrollDown=1,ScrollToBottom=1,ScrollUp=1,\n"
         "SelectWindow=1,SetAction=1,SetAllPoints=1,SetAlpha=1,SetAlphaGradient=1,\n"
         "SetAnchorType=1,SetAttribute=1,SetBackdrop=1,\n"
         "SetBackdropBorderColor=1,SetBackdropColor=1,SetBagItem=1,SetBinding=1,\n"
         "SetBindingClick=1,SetBindingItem=1,SetBindingMacro=1,SetBindingSpell=1,\n"
-        "SetBlendMode=1,SetBorderAlpha=1,SetBorderScalar=1,SetBorderTexture=1,\n"
+        // The QuestPOIFrame setters - SetFillTexture, SetBorderTexture,
+        // SetFillAlpha, SetBorderAlpha, SetBorderScalar - are real bindings
+        // now, applied after this set.
+        "SetBlendMode=1,\n"
         "SetButtonState=1,SetCamera=1,SetChecked=1,SetCheckedTexture=1,\n"
         "SetClampedToScreen=1,SetCooldown=1,\n"
         "SetCursorPosition=1,SetDesaturated=1,SetDisabledCheckedTexture=1,\n"
         "SetDisabledFontObject=1,SetDisabledTexture=1,SetDrawLayer=1,\n"
-        "SetFacing=1,SetFillAlpha=1,SetFillTexture=1,SetFocus=1,\n"
+        "SetFacing=1,SetFocus=1,\n"
         // SetFontObject is a real binding now, applied after this set.
         "SetFontString=1,SetFormattedText=1,SetFrameLevel=1,\n"
         "SetFrameRate=1,SetFrameStrata=1,SetHeight=1,SetHighlightFontObject=1,\n"
@@ -7131,13 +7274,15 @@ void LuaEngine::registerCoreAPI() {
         "SetMinMaxValues=1,SetModel=1,SetModelScale=1,\n"
         "SetMovable=1,SetMultiLine=1,SetNormalFontObject=1,SetNormalTexture=1,\n"
         "SetNumber=1,SetNumeric=1,SetOwner=1,SetParent=1,SetPetAction=1,\n"
-        "SetPlayerTextureHeight=1,SetPlayerTextureWidth=1,SetPoint=1,SetPosition=1,\n"
+        // SetPlayerTextureWidth and SetPlayerTextureHeight are real bindings
+        // now, applied after this set.
+        "SetPoint=1,SetPosition=1,\n"
         "SetPossession=1,SetPropagateKeyboardInput=1,SetPushedTexture=1,SetQuestItem=1,\n"
 
         "SetRotation=1,SetScale=1,SetScript=1,\n"
-        "SetScrollChild=1,SetSelection=1,SetSequence=1,\n"
+        "SetScrollChild=1,SetSelection=1,\n"
         // SetShadowOffset is a real binding now, applied after this set.
-        "SetSequenceTime=1,SetShown=1,SetSize=1,\n"
+        "SetShown=1,SetSize=1,\n"
         "SetSpacing=1,SetSpell=1,SetSpellByID=1,SetStartDelay=1,SetStatusBarColor=1,\n"
         // Tooltip setters for things this client cannot describe yet. They
         // belong here rather than nowhere: a name the metatable does not answer
@@ -7161,8 +7306,17 @@ void LuaEngine::registerCoreAPI() {
         "ShowUIPanelFailed=1,StartMovie=1,StartMoving=1,Stop=1,\n"
         "StopMovie=1,StopMovingOrSizing=1,ToggleInputLanguage=1,\n"
         "UIParentManageFramePositions=1,UnlockHighlight=1,UnregisterAllEvents=1,\n"
-        "UnregisterAutoHide=1,UnregisterEvent=1,UpdateColorByID=1,\n"
-        "UpdateMouseOverTooltip=1,UpdateTooltip=1,\n"
+        // UpdateColorByID is a real binding now, applied after this set.
+        //
+        // UpdateTooltip is not a widget method at all and has left the set.
+        // It is a field FrameXML puts on a tooltip's owner - actionbutton,
+        // containerframe, paperdollframe and a dozen more assign
+        // `self.UpdateTooltip = SomeFunction` and set it back to nil - and
+        // GameTooltip_OnUpdate refreshes through it only behind
+        // `if ( owner and owner.UpdateTooltip )`. Answering it with a no-op
+        // made that test pass for every owner that had cleared it.
+        "UnregisterAutoHide=1,UnregisterEvent=1,\n"
+        "UpdateMouseOverTooltip=1,\n"
         "UpdateUIPanelPositions=1,\n"
         "}\n"
     );
@@ -7959,15 +8113,12 @@ void LuaEngine::registerCoreAPI() {
         // none of them.
         "PlayerMiniArrowEffectFrame = CreateFrame('Frame', 'PlayerMiniArrowEffectFrame')\n"
         "WorldMapBlobFrame = CreateFrame('Frame', 'WorldMapBlobFrame')\n"
-        // Only the methods with no implementation behind them. Show, Hide,
-        // SetScale and SetFrameLevel are real widget methods, and defining
-        // them here would put a no-op table field in front of each.
-        // DrawQuestBlob is a real binding now and must not be shadowed by a
-        // field on this table: worldmapframe.xml declares its own
-        // WorldMapBlobFrame over this one, and either way the method comes
-        // from the widget metatable.
-        "function WorldMapBlobFrame:SetFillAlpha() end\n"
-        "function WorldMapBlobFrame:SetBorderAlpha() end\n"
+        // No methods are defined on this table: Show, Hide, SetScale,
+        // SetFrameLevel, DrawQuestBlob and the blob setters (SetFillAlpha,
+        // SetBorderAlpha and the rest) are real widget methods, and a field
+        // here would put a no-op in front of each. worldmapframe.xml declares
+        // its own WorldMapBlobFrame over this one, and either way the methods
+        // come from the widget metatable.
         // GetNumTooltips, GetTooltipIndex and UpdateMouseOverTooltip are real
         // bindings on the widget metatable now (lua_quest_api.cpp) and must
         // not be shadowed by fields here either. GetNumTooltips still answers
@@ -9865,6 +10016,7 @@ void LuaEngine::installMissingApiFallback() {
         "  StopwatchTicker = true, TimeManagerClockButton = true,\n"
         "  TimeManagerFrame = true,\n"
         "}\n"
+        "__WoweeFrameXmlPending = {}\n"
         "local seen = {}\n"
         "setmetatable(_G, { __index = function(_, k)\n"
         "  if type(k) ~= 'string' then return nil end\n"
@@ -9909,6 +10061,16 @@ void LuaEngine::installMissingApiFallback() {
         // the ones FrameXML feature-detects, and every use of them sits behind
         // that test.
         "  if __WoweeLoadOnDemandFrames[k] then return nil end\n"
+        // A frame a FrameXML file further down the manifest will create, read
+        // before that file has loaded. Nil, as it is in the real client at
+        // that point: these reads are guarded - UIParent_ManageFramePositions
+        // runs during the load and tests `if ( DurabilityFrame )`, `if (
+        // VehicleSeatIndicator )`, `if ( PossessBarFrame and ... )`;
+        // FCFDock_SelectWindow tests `if ( ChatFrameMenuButton )`. The stand-in
+        // walked those guards and on into DurabilityShield:IsShown() and the
+        // like. Filled and emptied file by file by AddonManager::loadFrameXml
+        // (LuaEngine::setFrameXmlPending), so it is empty once the load is done.
+        "  if __WoweeFrameXmlPending[k] then return nil end\n"
         // Punctuation means this is not an API name at all. A Lua identifier
         // cannot contain a hyphen, so _G["KEY_-"] is a table lookup built by
         // concatenation - GetBindingText does exactly that for the key bound
@@ -9941,6 +10103,19 @@ void LuaEngine::declareDeferredGlobals(const std::vector<std::string>& names) {
     lua_pop(L_, 1);
     LOG_INFO("LuaEngine: ", added, " name(s) an unloaded addon defines will "
              "read as absent until it loads");
+}
+
+void LuaEngine::setFrameXmlPending(const std::vector<std::string>& names, bool pending) {
+    if (!L_ || names.empty()) return;
+    lua_getglobal(L_, "__WoweeFrameXmlPending");
+    if (!lua_istable(L_, -1)) { lua_pop(L_, 1); return; }
+    for (const auto& name : names) {
+        if (name.empty()) continue;
+        if (pending) lua_pushboolean(L_, 1);
+        else         lua_pushnil(L_);
+        lua_setfield(L_, -2, name.c_str());
+    }
+    lua_pop(L_, 1);
 }
 
 void LuaEngine::reportMissingApi() const {
@@ -10052,6 +10227,10 @@ void LuaEngine::reportMissingApi() const {
     //                                   and assigns it later; reading it before
     //                                   then is reading a variable that has not
     //                                   been set, which is what it is for.
+    //                                   loadFrameXml now declares every such
+    //                                   `X = nil` line, so it reads as nil and
+    //                                   is not recorded; kept for an interface
+    //                                   loaded some other way.
     //   LFRRaidList                     the raid browser's list, assigned by
     //                                   LFRQueueFrame_Update the first time the
     //                                   browser is filled. lfrframe.lua reads it
@@ -11946,7 +12125,8 @@ void LuaEngine::expireMessages(float elapsed) {
         const auto* seen = std::as_const(widgets_).get(id);
         if (!seen || !seen->isMessageFrame || seen->messageDuration <= 0.0f) continue;
         auto* w = widgets_.get(id);
-        const bool readingBack = w->messageScroll > 0;
+        // SetFading(false) holds every line lit, the same as reading back.
+        const bool readingBack = w->messageScroll > 0 || !w->messageFading;
         const float life = w->messageDuration;
         const float fade = w->messageFadeDuration > 0.0f ? w->messageFadeDuration : 0.0f;
         for (auto& m : w->messages) {
@@ -11966,8 +12146,13 @@ void LuaEngine::expireMessages(float elapsed) {
 /// The queue is taken and cleared before anything runs, so a handler that sets
 /// text again is queued for the next frame rather than extending this drain -
 /// which is what stops MoneyInputFrame's own edits from chasing their own tail.
-/// Run the OnAnimFinished handlers owed by frames shown to play an animation
-/// this client does not play.
+/// Run the OnAnimFinished handlers owed by frames shown to play an animation.
+///
+/// A model that was given an icon and a sequence - the bag buttons' item
+/// animation - waits until its sequence has run (ui::kItemPushAnimSeconds,
+/// the length of ForcedBackpackItem.m2's only sequence) while the renderer
+/// draws it; anything else finishes on the next frame, as it always has,
+/// because there is nothing drawn for it to wait on.
 void LuaEngine::drainPendingAnimFinished() {
     if (!L_) return;
     lua_getglobal(L_, "__WoweePendingAnimFinished");
@@ -11975,13 +12160,28 @@ void LuaEngine::drainPendingAnimFinished() {
     const int count = static_cast<int>(lua_objlen(L_, -1));
     if (count == 0) { lua_pop(L_, 1); return; }
     lua_newtable(L_);
+    lua_pushvalue(L_, -1);
     lua_setglobal(L_, "__WoweePendingAnimFinished");
+    // Stack: old queue, new queue.
+    const double now = core::appTimeSeconds();
     for (int i = 1; i <= count; ++i) {
-        lua_rawgeti(L_, -1, i);
-        if (lua_istable(L_, -1)) callScriptOnTable(L_, lua_gettop(L_), "OnAnimFinished", 0);
+        lua_rawgeti(L_, -2, i);
+        if (!lua_istable(L_, -1)) { lua_pop(L_, 1); continue; }
+        const auto* w = std::as_const(widgets_).get(widgetIdOf(L_, -1));
+        const bool playing = w && w->shown && !w->modelIconTexture.empty() &&
+                             w->modelSequence >= 0 &&
+                             now - w->modelSequenceStart < ui::kItemPushAnimSeconds;
+        if (playing) {
+            // Back on the new queue, after whatever a handler run earlier in
+            // this drain has already put there.
+            const int at = static_cast<int>(lua_objlen(L_, -2)) + 1;
+            lua_rawseti(L_, -2, at);
+            continue;
+        }
+        callScriptOnTable(L_, lua_gettop(L_), "OnAnimFinished", 0);
         lua_pop(L_, 1);
     }
-    lua_pop(L_, 1);
+    lua_pop(L_, 2);
 }
 
 void LuaEngine::drainPendingTextChanged() {

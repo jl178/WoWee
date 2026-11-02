@@ -1088,6 +1088,11 @@ struct Emitter {
         if (const std::string* im = node.attr("insertMode"); im && !im->empty()) {
             line(var + ":SetInsertMode(" + quote(*im) + ")");
         }
+        // fade="false" is the XML side of SetFading(false): lines stay lit.
+        if ((node.name == "ScrollingMessageFrame" || node.name == "MessageFrame") &&
+            node.attr("fade")) {
+            line(var + ":SetFading(" + (node.attrBool("fade") ? "true" : "false") + ")");
+        }
         // A cooldown that counts the other way, and the bright spoke along its
         // sweeping edge. The target frame's aura timers and the totem bar ask
         // for the first and were drawn backwards without it.

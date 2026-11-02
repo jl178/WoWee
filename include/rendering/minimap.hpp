@@ -90,6 +90,18 @@ public:
 
     void setOpacity(float opacity) { opacity_ = opacity; }
 
+    /// The player arrow's size in interface units, as Minimap:SetPlayerTexture-
+    /// Width/Height set it on the FrameXML Minimap. Held here because the
+    /// arrow is drawn by the UI marker pass (game_screen_minimap.cpp), which
+    /// reads the map rather than the widget. 40x40 until told otherwise -
+    /// what MinimapPing_OnLoad asks for.
+    void setPlayerArrowSize(float w, float h) {
+        playerArrowW_ = w > 0.0f ? w : kDefaultPlayerArrowSize;
+        playerArrowH_ = h > 0.0f ? h : kDefaultPlayerArrowSize;
+    }
+    [[nodiscard]] float playerArrowWidth() const { return playerArrowW_; }
+    [[nodiscard]] float playerArrowHeight() const { return playerArrowH_; }
+
     /// Where the map is drawn, in pixels from the top-left of the window.
     ///
     /// Unset, it goes in the top-right corner at its own size, which is where
@@ -187,9 +199,13 @@ private:
     int lastCenterTileY = -1;
 
     // No arrow texture here: the player arrow is Interface\Minimap\MinimapArrow
-    // drawn by the UI marker pass (game_screen_minimap.cpp) at the stock 40x40
-    // that Minimap.lua asks for with SetPlayerTextureWidth/Height. The display
-    // shader used to draw a triangle of its own as well and no longer does.
+    // drawn by the UI marker pass (game_screen_minimap.cpp) at the size
+    // Minimap.lua asks for with SetPlayerTextureWidth/Height, kept below. The
+    // display shader used to draw a triangle of its own as well and no longer
+    // does.
+    static constexpr float kDefaultPlayerArrowSize = 40.0f;
+    float playerArrowW_ = kDefaultPlayerArrowSize;
+    float playerArrowH_ = kDefaultPlayerArrowSize;
 };
 
 } // namespace rendering

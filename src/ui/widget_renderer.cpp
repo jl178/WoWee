@@ -1350,24 +1350,42 @@ void WidgetRenderer::drawCooldown(ImDrawList* dl, const Widget& w,
 void WidgetRenderer::drawQuestBlobs(ImDrawList* dl, const Widget& w,
                                     float x0, float y0, float x1, float y1) {
     if (!questBlobSource_) return;
+    // Nothing named, nothing drawn: a Blob frame shades with the art it was
+    // given, and before WorldMapBlobFrame_OnLoad names it there is none.
+    const bool haveFill = !w.blobFillTexture.empty();
+    const bool haveEdge = !w.blobBorderTexture.empty();
+    if (!haveFill && !haveEdge) return;
     const auto polygons = questBlobSource_();
     if (polygons.empty()) return;
     const float width = x1 - x0;
     const float height = y1 - y0;
-    // WorldMapBlobFrame_OnLoad: UI-QuestBlob-Inside at a fill alpha of 128 and
-    // UI-QuestBlob-Outside at a border alpha of 192. Both are flat colour - the
-    // inside a solid (56,108,248), the outside a (101,185,248) edge that fades
-    // out over the first half of its sixteen rows - so they are drawn as the
-    // colours themselves rather than sampled, which also keeps the areas
-    // visible before the art has been uploaded.
+    // The art is flat colour - the stock inside a solid (56,108,248), the
+    // outside a (101,185,248) edge that fades out over the first half of its
+    // sixteen rows - so it is drawn as its colour and coverage, read once off
+    // the file (blobArt), rather than sampled per pixel. That also keeps the
+    // areas visible before the art has been uploaded.
+    //
+    // SetFillAlpha and SetBorderAlpha are 0-255 on top of the art's own alpha.
+    // WorldMapFrame_SetOpacity passes them already scaled by the opacity
+    // slider, and the frame's own alpha applies as it does to anything drawn.
     const float alpha = std::clamp(w.alpha, 0.0f, 1.0f);
-    const ImU32 fill = IM_COL32(56, 108, 248, static_cast<int>(128.0f * alpha));
-    const ImU32 edge = IM_COL32(101, 185, 248, static_cast<int>(220.0f * 192.0f / 255.0f * alpha));
-    const ImU32 edgeClear = IM_COL32(101, 185, 248, 0);
+    const BlobArt fillArt = haveFill ? blobArt(w.blobFillTexture, false) : BlobArt{};
+    const BlobArt edgeArt = haveEdge ? blobArt(w.blobBorderTexture, true) : BlobArt{};
+    auto colour = [](const BlobArt& art, float a) {
+        return IM_COL32(static_cast<int>(art.rgb[0] * 255.0f + 0.5f),
+                        static_cast<int>(art.rgb[1] * 255.0f + 0.5f),
+                        static_cast<int>(art.rgb[2] * 255.0f + 0.5f),
+                        static_cast<int>(std::clamp(a, 0.0f, 1.0f) * 255.0f + 0.5f));
+    };
+    const ImU32 fill = colour(fillArt, fillArt.alpha * (w.blobFillAlpha / 255.0f) * alpha);
+    const ImU32 edge = colour(edgeArt, edgeArt.alpha * (w.blobBorderAlpha / 255.0f) * alpha);
+    const ImU32 edgeClear = colour(edgeArt, 0.0f);
     const ImVec2 white = ImGui::GetFontTexUvWhitePixel();
-    // The edge's width: half of the texture's sixteen rows, on a map drawn at
-    // its 1002x668 authoring size, and scaled with it.
-    const float band = std::max(1.5f, 8.0f * (height / 668.0f));
+    // The edge's width: the part of the texture's sixteen rows that is not
+    // yet faded out, on a map drawn at its 1002x668 authoring size and scaled
+    // with it, times SetBorderScalar.
+    const float band = std::max(1.5f, 16.0f * edgeArt.reach * (height / 668.0f) *
+                                          w.blobBorderScalar);
 
     dl->PushClipRect(ImVec2(x0, y0), ImVec2(x1, y1), true);
     for (const auto& poly : polygons) {
@@ -1390,9 +1408,12 @@ void WidgetRenderer::drawQuestBlobs(ImDrawList* dl, const Widget& w,
         std::vector<glm::vec2> ring;
         ring.reserve(pts.size());
         for (const ImVec2& p : pts) ring.emplace_back(p.x, p.y);
-        const std::vector<uint16_t> tris = rendering::triangulateSimplePolygon(ring);
+        const std::vector<uint16_t> tris =
+            haveFill ? rendering::triangulateSimplePolygon(ring) : std::vector<uint16_t>{};
         unsigned int base = 0;
-        if (!tris.empty()) {
+        if (!haveFill) {
+            // No fill art named, so only the edge is drawn.
+        } else if (!tris.empty()) {
             dl->PrimReserve(static_cast<int>(tris.size()), n);
             base = dl->_VtxCurrentIdx;
             for (const ImVec2& p : pts) dl->PrimWriteVtx(p, white, fill);
@@ -1410,8 +1431,9 @@ void WidgetRenderer::drawQuestBlobs(ImDrawList* dl, const Widget& w,
         }
 
         // Edge: a band along the inside of each side, opaque at the line and
-        // clear inward, as the outside texture is laid.
-        for (int i = 0; i < n; ++i) {
+        // clear inward, as the outside texture is laid. Skipped without
+        // border art.
+        for (int i = 0; haveEdge && i < n; ++i) {
             const ImVec2 a = pts[static_cast<size_t>(i)];
             const ImVec2 b = pts[static_cast<size_t>((i + 1) % n)];
             const float dx = b.x - a.x, dy = b.y - a.y;
@@ -1440,6 +1462,87 @@ void WidgetRenderer::drawQuestBlobs(ImDrawList* dl, const Widget& w,
         }
     }
     dl->PopClipRect();
+}
+
+const WidgetRenderer::BlobArt& WidgetRenderer::blobArt(const std::string& path, bool border) {
+    const std::string key = border ? path + "|edge" : path;
+    if (auto it = blobArt_.find(key); it != blobArt_.end()) return it->second;
+
+    // The stock art's figures, for when the file cannot be read: the inside a
+    // solid (56,108,248); the outside (101,185,248) at 220 in its brightest
+    // row, fading out over the first half of its rows.
+    BlobArt art;
+    if (border) {
+        art.rgb[0] = 101.0f / 255.0f; art.rgb[1] = 185.0f / 255.0f; art.rgb[2] = 248.0f / 255.0f;
+        art.alpha = 220.0f / 255.0f;
+        art.reach = 0.5f;
+    } else {
+        art.rgb[0] = 56.0f / 255.0f; art.rgb[1] = 108.0f / 255.0f; art.rgb[2] = 248.0f / 255.0f;
+        art.alpha = 1.0f;
+        art.reach = 1.0f;
+    }
+
+    std::string resolved;
+    const auto data = assets_ ? readTextureFile(path, resolved) : std::vector<uint8_t>{};
+    const auto image = data.empty() ? pipeline::BLPImage{} : pipeline::BLPLoader::load(data);
+    if (image.isValid() && image.width > 0 && image.height > 0 &&
+        image.data.size() >= static_cast<size_t>(image.width) * image.height * 4) {
+        const int w = image.width;
+        const int h = image.height;
+        double sum[3] = {0.0, 0.0, 0.0};
+        double alphaSum = 0.0;
+        std::vector<double> rowAlpha(static_cast<size_t>(h), 0.0);
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const uint8_t* px = &image.data[(static_cast<size_t>(y) * w + x) * 4];
+                const double a = px[3] / 255.0;
+                sum[0] += px[0] * a;
+                sum[1] += px[1] * a;
+                sum[2] += px[2] * a;
+                alphaSum += a;
+                rowAlpha[static_cast<size_t>(y)] += a;
+            }
+            rowAlpha[static_cast<size_t>(y)] /= w;
+        }
+        if (alphaSum > 0.0) {
+            for (int c = 0; c < 3; ++c) art.rgb[c] = static_cast<float>(sum[c] / alphaSum / 255.0);
+            if (border) {
+                // The edge is laid with its first row on the outline, so how
+                // strong it is there and how far in it carries are what count.
+                const double peak = *std::max_element(rowAlpha.begin(), rowAlpha.end());
+                int last = 0;
+                for (int y = 0; y < h; ++y) {
+                    if (rowAlpha[static_cast<size_t>(y)] > peak * 0.05) last = y;
+                }
+                art.alpha = static_cast<float>(peak);
+                art.reach = static_cast<float>(last + 1) / static_cast<float>(h);
+            } else {
+                art.alpha = static_cast<float>(alphaSum / (static_cast<double>(w) * h));
+                art.reach = 1.0f;
+            }
+        }
+    }
+    return blobArt_.emplace(key, art).first->second;
+}
+
+void WidgetRenderer::drawItemPushModel(ImDrawList* dl, const Widget& w,
+                                       float ox, float oy, float scale) {
+    const double elapsed = core::appTimeSeconds() - w.modelSequenceStart;
+    if (elapsed < 0.0) return;
+    const ItemPushPose pose = itemPushAnimPose(elapsed);
+    if (pose.finished || pose.alpha <= 0.0f) return;
+    // Loaded on first use and cached either way; the icon is almost always
+    // resident already, since the bag that received the item shows it.
+    const VkDescriptorSet tex = texture(w.modelIconTexture);
+    if (tex == kMissing) return;
+    // Model units are the height of the 768-unit interface; screen y runs
+    // down where the model's runs up.
+    const float unit = 768.0f * scale;
+    const ImVec2 a(ox + pose.x0 * unit, oy - pose.y1 * unit);
+    const ImVec2 b(ox + pose.x1 * unit, oy - pose.y0 * unit);
+    const float tint[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    dl->AddImage(reinterpret_cast<ImTextureID>(tex), a, b, ImVec2(0.0f, 0.0f),
+                 ImVec2(1.0f, 1.0f), packColor(tint, pose.alpha * w.alpha));
 }
 
 
@@ -2864,6 +2967,10 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
                              ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
                              packColor(w->color, w->alpha));
             }
+            // The bag buttons' item animation: the looted item's icon popping
+            // up beside the bag and dropping into it, placed from the frame's
+            // bottom-left corner.
+            if (playsItemPushModel(*w)) drawItemPushModel(dl, *w, x0, y1, ws);
             // A tooltip's rows, counted once: the box below is drawn to hold
             // them and the text further down is laid out by them.
             //

@@ -94,10 +94,28 @@ public:
 
 private:
     QuestBlobSource questBlobSource_;
-    /// Draws the source's polygons in the frame's rect the way
-    /// WorldMapBlobFrame_OnLoad sets the frame up: UI-QuestBlob-Inside at a
-    /// fill alpha of 128, edged with UI-QuestBlob-Outside at 192.
+    /// Draws the source's polygons in the frame's rect with the art and alphas
+    /// the frame was given (SetFillTexture, SetBorderTexture, SetFillAlpha,
+    /// SetBorderAlpha, SetBorderScalar) - WorldMapBlobFrame_OnLoad asks for
+    /// UI-QuestBlob-Inside at 128, edged with UI-QuestBlob-Outside at 192.
     void drawQuestBlobs(ImDrawList* dl, const Widget& w, float x0, float y0, float x1, float y1);
+    /// What a quest-blob texture looks like, read off its pixels once: its
+    /// colour (alpha-weighted mean), its alpha (the mean for a fill, the
+    /// brightest row for an edge), and for an edge how far into the texture
+    /// the edge reaches before it has faded out, as a fraction of its height.
+    /// Falls back to the stock art's figures when the file cannot be read.
+    struct BlobArt {
+        float rgb[3] = {1.0f, 1.0f, 1.0f};
+        float alpha = 1.0f;
+        float reach = 1.0f;
+    };
+    const BlobArt& blobArt(const std::string& path, bool border);
+    std::unordered_map<std::string, BlobArt> blobArt_;
+    /// A Model frame playing the bag buttons' item animation: the icon
+    /// ReplaceIconTexture gave it, posed by ui::itemPushAnimPose. Pixel origin
+    /// (ox, oy) is the frame's bottom-left on screen; scale is pixels per
+    /// interface unit for this frame.
+    void drawItemPushModel(ImDrawList* dl, const Widget& w, float ox, float oy, float scale);
     /// Descriptor set for an Interface\ path, loading it on first use. Returns
     /// VK_NULL_HANDLE for anything missing, and remembers the failure so a
     /// mistyped path is not re-read every frame.

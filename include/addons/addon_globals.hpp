@@ -69,6 +69,45 @@ inline void collectLuaGlobals(const std::string& text, std::vector<std::string>&
     }
 }
 
+/// The variables one Lua file declares by setting them to nil at the left
+/// margin - zonetext.lua opens with `ZonePVPType = nil;` and compares against
+/// it later. Such a name is a variable the file owns whose resting value is
+/// nil, and the fallback's stand-in in its place turns `ZonePVPType ~= pvpType`
+/// true where the real client reads nil ~= nil.
+///
+/// Only `= nil`: any other column-zero assignment leaves the name set once
+/// the file has run, so the fallback never sees it.
+inline void collectLuaNilDeclarations(const std::string& text, std::vector<std::string>& out) {
+    size_t at = 0;
+    while (at <= text.size()) {
+        const size_t eol = text.find('\n', at);
+        const std::string line = text.substr(at, eol == std::string::npos ? eol : eol - at);
+        at = (eol == std::string::npos) ? text.size() + 1 : eol + 1;
+
+        size_t end = 0;
+        while (end < line.size() &&
+               (std::isalnum(static_cast<unsigned char>(line[end])) || line[end] == '_'))
+            ++end;
+        if (end == 0) continue;
+        const std::string name = line.substr(0, end);
+        if (!isIdentifier(name)) continue;
+        size_t i = line.find_first_not_of(" \t", end);
+        if (i == std::string::npos || line[i] != '=') continue;
+        if (i + 1 < line.size() && line[i + 1] == '=') continue;  // a comparison
+        i = line.find_first_not_of(" \t", i + 1);
+        if (i == std::string::npos || line.compare(i, 3, "nil") != 0) continue;
+        // `nil` as a whole word, followed by nothing but a semicolon or a
+        // comment - `X = nilOrSomething` and `X = nil or Y` are not this.
+        size_t rest = i + 3;
+        if (rest < line.size() &&
+            (std::isalnum(static_cast<unsigned char>(line[rest])) || line[rest] == '_'))
+            continue;
+        rest = line.find_first_not_of(" \t;\r", rest);
+        if (rest != std::string::npos && line.compare(rest, 2, "--") != 0) continue;
+        out.push_back(name);
+    }
+}
+
 /// The frames one XML file names. Virtual elements are templates rather than
 /// frames, so their name never becomes a global and listing one would make a
 /// real global of the same name read as absent.
