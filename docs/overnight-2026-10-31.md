@@ -530,3 +530,4 @@ Other fixes:
   - Checked in game: Ironforge -> Ironforge; Undercity -> Undercity / Trade Quarter; Goldshire unchanged.
   - WMO minimap tiles are not implemented yet (plan in the agent notes: md5translate.trs WMO keys, 128-yd tiles at 2 px/yd).
 - Orgrimmar re-profiled: 81 fps (62 on the earlier tour). Main thread is led by shadow_pass at 1.82 ms (terrain 0.77, characters 0.60). An agent is on it; another agent is on the WMO indoor minimap.
+- `0843d4e`: the stock indoor minimap inside WMOs, using md5translate WMO tiles. Ironforge shows its floor plan and the outdoor terrain minimap is unchanged (screenshots).
