@@ -507,3 +507,7 @@ Other fixes:
 - `63677af`: classic plus: shoreline foam and wet ground in rain (settings; off on Low/Classic). Builds and tests pass, and the test client ran clean.
   - Open: a screenshot of the foam with a shore in view. The Crystal Lake teleport faced away from the water.
   - Wet ground can't be seen on the lab while game_weather chances are zeroed.
+- `8faf563`: M2 and terrain recording split across two workers, and terrain uses a tile-level cull. Stormwind: m2 1.78 -> 1.35 ms; 79.5 -> 82 fps; screenshots identical.
+- Stormwind is now GPU-bound: beginFrame/acquire waits ~3 ms per frame.
+  - GPU passes timed: shadows 0.66 ms, volumetric fog 1.05 ms, post-process 2.87 ms (at 1251x986).
+  - Next: break down post-process and time the scene pass (agent running).
