@@ -7014,6 +7014,34 @@ bool Application::getRenderPositionForGuid(uint64_t guid, glm::vec3& outPos) con
     return false;
 }
 
+bool Application::getNamePositionForGuid(uint64_t guid, glm::vec3& outPos, float* outModelHeight) const {
+    if (outModelHeight) *outModelHeight = 0.0f;
+    glm::vec3 base;
+    if (!getRenderPositionForGuid(guid, base)) return false;
+    auto* cr = renderer ? renderer->getCharacterRenderer() : nullptr;
+    const uint32_t inst = (cr && entitySpawner_) ? entitySpawner_->characterInstanceIdForGuid(guid) : 0;
+    float height = 0.0f;
+    if (inst != 0 && cr->getInstanceHeight(inst, height) && outModelHeight) *outModelHeight = height;
+    glm::mat4 xf(1.0f);
+    if (inst != 0 && cr->getAttachmentTransform(inst, 18, xf)) {
+        outPos = glm::vec3(xf[3]);
+        return true;
+    }
+    // No PlayerName attachment: the top of the model, or of its bounds.
+    if (height > 0.1f) {
+        outPos = base + glm::vec3(0.0f, 0.0f, height);
+        return true;
+    }
+    glm::vec3 center;
+    float radius = 0.0f;
+    if (getRenderBoundsForGuid(guid, center, radius)) {
+        outPos = glm::vec3(base.x, base.y, std::max(base.z + 0.5f, center.z + radius));
+        return true;
+    }
+    outPos = base + glm::vec3(0.0f, 0.0f, 2.0f);
+    return true;
+}
+
 void Application::loadQuestMarkerModels() {
     // Nothing to do up front. The marks are the stock TalkToMe*.m2 models,
     // which QuestMarkerRenderer loads into the M2 renderer the first time a

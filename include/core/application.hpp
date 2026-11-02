@@ -149,6 +149,12 @@ public:
     /// one. Guid 0 takes the light off whatever had it.
     void setPressedGameObject(uint64_t guid);
     bool getRenderPositionForGuid(uint64_t guid, glm::vec3& outPos) const;
+    /// Where the stock client hangs a unit's name, plate, numbers and chat
+    /// bubble from (CGUnit_C vtable +0x20, 0x71fef0): the model's M2
+    /// attachment 18 "PlayerName", posed as drawn; without one, the top of the
+    /// model. Render coordinates. `outModelHeight` is the drawn model's
+    /// height with its scale (0 when unknown), which sizes the name text.
+    bool getNamePositionForGuid(uint64_t guid, glm::vec3& outPos, float* outModelHeight = nullptr) const;
 
     // Character skin composite state - delegated to AppearanceComposer
     [[nodiscard]] const std::string& getBodySkinPath() const { return appearanceComposer_ ? appearanceComposer_->getBodySkinPath() : emptyString_; }

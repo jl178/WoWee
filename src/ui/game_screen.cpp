@@ -2,6 +2,7 @@
 #include "game/game_utils.hpp"
 #include "game/interaction_rules.hpp"
 #include "ui/game_screen.hpp"
+#include "ui/stock_unit_color.hpp"
 #include "ui/gamepad_controls.hpp"
 #include "core/gamepad.hpp"
 
@@ -737,7 +738,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     reportRecordingFailure();
 
     // ---- New UI elements ----
-    renderNameplates(gameHandler);  // player names always shown; NPC plates gated by the enemyplates row
+    renderNameplates(gameHandler);  // plates (V / Shift-V), then names and raid marks over heads
     combatUI_.playSoundsForNewChat(gameHandler);
     offerPendingTradeItem(gameHandler);
     // Two things, as in the stock client. The numbers over a target - the
@@ -969,52 +970,16 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                     circleRadius = stockSelectionRadius(
                         selectionBoxHalfDiagonal(unit->getDisplayId(), unit->getMountDisplayId()), scale);
 
-                    // Colour: the UnitSelectionColor rules the circle asks for
-                    // (Wow.exe 0x521BF0, extended set): CImVector constants
-                    // there are red FF0000, orange FF8000, yellow FFFF00,
-                    // green 00FF00, grey 7F7F7F, blue 6060FF.
+                    // Colour: UnitSelectionColor (Wow.exe 0x521BF0, extended
+                    // set) - the same rule as the name over the head, so the
+                    // two are worked out in one place.
                     constexpr uint32_t kUnitFlagPlayerControlled = 0x00000008;
-                    constexpr uint8_t kPvpFlag = 0x01;        // UNIT_FIELD_BYTES_2 byte 1
-                    constexpr uint8_t kSanctuaryFlag = 0x08;
                     const int react = gameHandler.unitReactionToPlayer(*unit);
                     const bool hostile = react <= 2 ||
                                          gameHandler.isAggressiveTowardPlayer(target->getGuid());
-                    // FACTION_BAR_COLORS by reaction: hated and hostile red,
-                    // unfriendly orange, neutral yellow, friendly and up green.
-                    const glm::vec3 reactionColor =
-                        hostile    ? glm::vec3(1.0f, 0.0f, 0.0f)
-                        : react == 3 ? glm::vec3(1.0f, 0.5f, 0.0f)
-                        : react == 4 ? glm::vec3(1.0f, 1.0f, 0.0f)
-                                     : glm::vec3(0.0f, 1.0f, 0.0f);
                     const bool playerControlled = target->getType() == game::ObjectType::PLAYER ||
                                                   (unit->getUnitFlags() & kUnitFlagPlayerControlled) != 0;
-                    if (!playerControlled) {
-                        // A creature: grey once dead, else by reaction. Tapped
-                        // by someone else does not grey the circle.
-                        const bool dead = (unit->getHealth() == 0 && unit->getMaxHealth() > 0) ||
-                                          (unit->getDynamicFlags() & game::UNIT_DYNFLAG_DEAD) != 0;
-                        circleColor = dead ? glm::vec3(127.0f / 255.0f) : reactionColor;
-                    } else {
-                        // A player or a player's pet: red when it can be fought,
-                        // by reaction while it is PvP flagged, else the
-                        // unflagged blue.
-                        auto pvpByte = [](const game::Entity& e) {
-                            return static_cast<uint8_t>(
-                                (e.getField(game::fieldIndex(game::UF::UNIT_FIELD_BYTES_2)) >> 8) & 0xFF);
-                        };
-                        const uint8_t targetPvp = pvpByte(*unit);
-                        const auto self = gameHandler.getEntityManager().getEntity(gameHandler.getPlayerGuid());
-                        const bool selfSanctuary = self && (pvpByte(*self) & kSanctuaryFlag) != 0;
-                        const bool flagged = (targetPvp & kPvpFlag) != 0 &&
-                                             (targetPvp & kSanctuaryFlag) == 0 && !selfSanctuary;
-                        if (hostile && flagged) {
-                            circleColor = glm::vec3(1.0f, 0.0f, 0.0f);
-                        } else if (flagged) {
-                            circleColor = reactionColor;
-                        } else {
-                            circleColor = glm::vec3(96.0f / 255.0f, 96.0f / 255.0f, 1.0f);
-                        }
-                    }
+                    circleColor = stockUnitColor(gameHandler, *unit, /*attackRed=*/false);
 
                     // While the player is attacking (an attack target, or an
                     // auto-repeat shot), a target it could attack has a red

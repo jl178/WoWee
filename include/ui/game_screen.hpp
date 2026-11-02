@@ -283,6 +283,12 @@ private:
                              float centerY, float mapRadius);
     void refreshQuestObjectiveCache(game::GameHandler& gameHandler);
     void renderNameplates(game::GameHandler& gameHandler);
+    /// Names over heads and the raid mark over a head (stock PlayerName.cpp),
+    /// for the units the plates did not take.
+    void renderUnitNames(game::GameHandler& gameHandler,
+                         const std::vector<std::shared_ptr<game::Entity>>& nearby,
+                         const glm::mat4& viewProj, const glm::mat4& proj,
+                         const glm::vec3& camPos, float screenW, float screenH);
 
     /**
      * Inventory screen

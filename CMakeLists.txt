@@ -1035,6 +1035,7 @@ set(WOWEE_SOURCES
     src/ui/scene_pick.cpp
     src/ui/game_screen_frames.cpp
     src/ui/game_screen_hud.cpp
+    src/ui/game_screen_world_ui.cpp
     src/ui/game_screen_minimap.cpp
     src/ui/chat_panel.cpp
     src/ui/macro_text.cpp

@@ -1383,6 +1383,11 @@ target_link_libraries(test_nameplate_stacking PRIVATE catch2_main)
 add_test(NAME nameplate_stacking COMMAND test_nameplate_stacking)
 register_test_target(test_nameplate_stacking)
 
+# ── test_world_ui_rules ──────────────────────────────────────
+# The stock in-world interface rules: nameplates, names over heads, world
+# text and chat bubbles (docs/re/world-ui.md). Header-only.
+wowee_add_test(test_world_ui_rules SOURCES test_world_ui_rules.cpp)
+
 # ── test_combat_text_filter ──────────────────────────────────
 add_executable(test_combat_text_filter
     test_combat_text_filter.cpp

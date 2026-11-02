@@ -128,11 +128,18 @@ inline CombatTextFilterRule combatTextFilterFor(CombatTextEntry::Type type,
             [[fallthrough]];
         case T::SPELL_DAMAGE: case T::CRIT_DAMAGE:
         case T::GLANCING: case T::CRUSHING:
+            // A pet's spell has its own row too (0x722340: PetSpellDamage).
+            if (type != T::MELEE_DAMAGE && petGuid != 0 && srcGuid == petGuid) {
+                return {.cvar = "PetSpellDamage", .fallback = "1"};
+            }
             if (!isPlayerSource) return {};
             return {.cvar = "CombatDamage", .fallback = "1"};
-        case T::PERIODIC_DAMAGE: case T::PERIODIC_HEAL:
+        case T::PERIODIC_DAMAGE:
             if (!isPlayerSource) return {};
             return {.cvar = "CombatLogPeriodicSpells", .fallback = "1"};
+        // A heal over time is a heal: stock gates every heal of the player's
+        // by CombatHealing alone (0x722440).
+        case T::PERIODIC_HEAL:
         case T::HEAL: case T::CRIT_HEAL:
             if (!isPlayerSource) return {};
             return {.cvar = "CombatHealing", .fallback = "1"};

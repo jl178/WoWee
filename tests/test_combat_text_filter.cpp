@@ -48,7 +48,7 @@ TEST_CASE("periodic and healing have their own rows", "[combattext]") {
     CHECK(std::string(ruleFor(T::PERIODIC_DAMAGE, true, kPlayer, kTarget).cvar)
           == "CombatLogPeriodicSpells");
     CHECK(std::string(ruleFor(T::PERIODIC_HEAL, true, kPlayer, kPlayer).cvar)
-          == "CombatLogPeriodicSpells");
+          == "CombatHealing");
     CHECK(std::string(ruleFor(T::HEAL, true, kPlayer, kPlayer).cvar) == "CombatHealing");
     CHECK(std::string(ruleFor(T::CRIT_HEAL, true, kPlayer, kPlayer).cvar) == "CombatHealing");
 }
@@ -103,4 +103,10 @@ TEST_CASE("spell misses and power tokens use the addon's names", "[combattext]")
     CHECK(std::string(combatTextPowerToken(0)) == "MANA");
     CHECK(std::string(combatTextPowerToken(6)) == "RUNIC_POWER");
     CHECK(combatTextPowerToken(4) == nullptr);
+}
+
+TEST_CASE("a pet's spell answers to PetSpellDamage", "[combattext]") {
+    CHECK(std::string(ruleFor(T::SPELL_DAMAGE, false, kPet, kTarget).cvar) == "PetSpellDamage");
+    CHECK(std::string(ruleFor(T::CRIT_DAMAGE, false, kPet, kTarget).cvar) == "PetSpellDamage");
+    CHECK(std::string(ruleFor(T::MELEE_DAMAGE, false, kPet, kTarget).cvar) == "PetMeleeDamage");
 }

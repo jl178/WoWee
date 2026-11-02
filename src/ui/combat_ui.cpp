@@ -19,6 +19,8 @@
 #include "rendering/renderer.hpp"
 #include "rendering/camera.hpp"
 #include "game/game_handler.hpp"
+#include "ui/world_ui_rules.hpp"
+#include <unordered_map>
 #include "game/bg_score_defs.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "audio/audio_coordinator.hpp"
@@ -96,6 +98,120 @@ void CombatUI::playSoundsForNewChat(game::GameHandler& gameHandler) {
 // Blizzard_CombatText's and drawn from COMBAT_TEXT_UPDATE. This client draws it
 // only as a stand-in while that addon is not loaded (drawIncoming), in the
 // addon's own words and colours: "-N" red, spell damage "-N" purple, "+N" green.
+namespace {
+
+/// The world-text type (WorldText.cpp's table at 0xaf4748) and text for one
+/// line the player or the player's pet caused, or -1 when stock draws nothing
+/// over the unit for it.
+int stockWorldText(const game::CombatTextEntry& entry, bool fromPet, char* text, size_t n) {
+    using T = game::CombatTextEntry;
+    namespace su = wowee::ui::stockui;
+    switch (entry.type) {
+        case T::MELEE_DAMAGE: case T::SPELL_DAMAGE: case T::PERIODIC_DAMAGE:
+        case T::GLANCING: case T::CRUSHING:
+            snprintf(text, n, "%d", entry.amount);
+            return su::kWtDamage;
+        case T::CRIT_DAMAGE:
+            snprintf(text, n, "%d", entry.amount);
+            return su::kWtCritDamage;
+        // Heals are the player's own only (0x722440).
+        case T::HEAL: case T::PERIODIC_HEAL:
+            if (fromPet) return -1;
+            snprintf(text, n, "+%d", entry.amount);
+            return su::kWtHeal;
+        case T::CRIT_HEAL:
+            if (fromPet) return -1;
+            snprintf(text, n, "+%d", entry.amount);
+            return su::kWtCritHeal;
+        // The miss kinds, as the COMBAT_TEXT_* global strings spell them; an
+        // absorb is its own type (0xa34c20).
+        case T::ABSORB:  snprintf(text, n, "Absorb");  return su::kWtAbsorb;
+        case T::MISS:    snprintf(text, n, "Miss");    return su::kWtMiss;
+        case T::DODGE:   snprintf(text, n, "Dodge");   return su::kWtMiss;
+        case T::PARRY:   snprintf(text, n, "Parry");   return su::kWtMiss;
+        case T::BLOCK:   snprintf(text, n, "Block");   return su::kWtMiss;
+        case T::EVADE:   snprintf(text, n, "Evade");   return su::kWtMiss;
+        case T::IMMUNE:  snprintf(text, n, "Immune");  return su::kWtMiss;
+        case T::DEFLECT: snprintf(text, n, "Deflect"); return su::kWtMiss;
+        case T::REFLECT: snprintf(text, n, "Reflect"); return su::kWtMiss;
+        case T::RESIST:  snprintf(text, n, "Resist");  return su::kWtMiss;
+        default: return -1;
+    }
+}
+
+}  // namespace
+
+void CombatUI::drawWorldText(game::GameHandler& gameHandler, const game::CombatTextEntry& entry,
+                             std::unordered_map<uint64_t, int>& onUnit, const glm::mat4& viewProj,
+                             const rendering::Camera* camera, float screenW, float screenH,
+                             ImFont* font) {
+    namespace su = wowee::ui::stockui;
+    const uint64_t playerGuid = gameHandler.getPlayerGuid();
+    if (!camera || entry.dstGuid == 0 || entry.dstGuid == playerGuid) return;
+    // Mine, or my pet's or guardian's (0x7190a0); anyone else's makes no text.
+    const bool fromPlayer = entry.isPlayerSource || entry.srcGuid == playerGuid;
+    bool fromPet = false;
+    if (!fromPlayer && entry.srcGuid != 0) {
+        if (entry.srcGuid == gameHandler.getPetGuid()) {
+            fromPet = true;
+        } else if (auto src = gameHandler.getEntityManager().getEntity(entry.srcGuid)) {
+            fromPet = game::unitSummonedByGuid(*src) == playerGuid;
+        }
+    }
+    if (!fromPlayer && !fromPet) return;
+
+    char text[64];
+    const int type = stockWorldText(entry, fromPet, text, sizeof(text));
+    if (type < 0) return;
+    const float ms = entry.age * 1000.0f;
+    if (ms >= static_cast<float>(su::worldTextTiming(type).durationMs)) return;
+    if (++onUnit[entry.dstGuid] > su::kWorldTextPerUnit) return;
+
+    // The type's colour, which the source overrides (0x7e6030's fourth
+    // argument): the player's spells and every pet spell yellow, a pet's
+    // swing orange. Heals keep their green.
+    ImVec4 color(1.0f, 1.0f, 1.0f, 1.0f);
+    const bool heal = type == su::kWtHeal || type == su::kWtCritHeal;
+    if (heal) {
+        color = ImVec4(0.0f, 1.0f, 0.0f, 1.0f);
+    } else if (entry.spellId != 0) {
+        color = ImVec4(1.0f, 222.0f / 255.0f, 0.0f, 1.0f);
+    } else if (fromPet) {
+        color = ImVec4(1.0f, 132.0f / 255.0f, 0.0f, 1.0f);
+    }
+    const float alpha = su::worldTextAlpha(type, ms);
+    if (alpha <= 0.0f) return;
+    color.w = alpha;
+
+    // From a third of a yard under the unit's name, rising in the world.
+    glm::vec3 base;
+    if (!core::Application::getInstance().getNamePositionForGuid(entry.dstGuid, base)) {
+        auto e = gameHandler.getEntityManager().getEntity(entry.dstGuid);
+        if (!e) return;
+        base = core::coords::canonicalToRender(glm::vec3(e->getX(), e->getY(), e->getZ() + 2.0f));
+    }
+    base.z += -su::kWorldTextDropYards + su::worldTextRise(type, ms);
+    const glm::vec4 clip = viewProj * glm::vec4(base, 1.0f);
+    if (clip.w <= 0.01f) return;
+    const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+    if (ndc.x < -1.0f || ndc.x > 1.0f) return;
+
+    const float px = su::ddcPixels(su::worldTextHeight(type, ms), screenW, screenH);
+    if (px < 1.0f) return;
+    const ImVec2 ts = font->CalcTextSizeA(px, FLT_MAX, 0.0f, text);
+    // Centred on the point and kept whole on the screen.
+    float sx = (ndc.x * 0.5f + 0.5f) * screenW - ts.x * 0.5f;
+    float sy = (ndc.y * 0.5f + 0.5f) * screenH - ts.y * 0.5f;
+    sx = std::clamp(sx, 0.0f, std::max(0.0f, screenW - ts.x));
+    sy = std::clamp(sy, 0.0f, std::max(0.0f, screenH - ts.y));
+    const float sh = su::ddcPixels(su::kWorldTextShadowDdc, screenW, screenH);
+    ImDrawList* drawList = ImGui::GetBackgroundDrawList();
+    drawList->AddText(font, px, ImVec2(std::round(sx + sh), std::round(sy + sh)),
+                      IM_COL32(0, 0, 0, static_cast<int>(alpha * 127.0f)), text);
+    drawList->AddText(font, px, ImVec2(std::round(sx), std::round(sy)),
+                      ImGui::ColorConvertFloat4ToU32(color), text);
+}
+
 void CombatUI::renderCombatText(game::GameHandler& gameHandler, bool drawIncoming) {
     const auto& entries = gameHandler.getCombatText();
     if (entries.empty()) return;
@@ -164,6 +280,8 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler, bool drawIncomin
         }
     };
 
+    // At most four texts on a unit at once; a fifth is dropped (0x7e5c30).
+    std::unordered_map<uint64_t, int> worldTextOnUnit;
     for (const auto& entry : entries) {
         const float alpha = 1.0f - (entry.age / game::CombatTextEntry::LIFETIME);
         // Incoming is anything that landed on the player, or that belongs to
@@ -175,6 +293,14 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler, bool drawIncomin
             entry.type == game::CombatTextEntry::HONOR_GAIN ||
             entry.type == game::CombatTextEntry::PROC_TRIGGER;
         if (incoming && !drawIncoming) continue;
+        // What the player and the player's pet do to other units is the
+        // engine's world text (WorldText.cpp), by its own rules; nothing else
+        // the player causes is drawn over a unit.
+        if (!incoming) {
+            drawWorldText(gameHandler, entry, worldTextOnUnit, viewProj, camera, screenW, screenH,
+                          font);
+            continue;
+        }
         // The fct* switches are the floating text's; the world text over a
         // target was filtered by its own CVars when the line was raised.
         if (incoming && !wanted(entry.type)) continue;
