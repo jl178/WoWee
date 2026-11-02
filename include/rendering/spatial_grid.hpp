@@ -24,9 +24,12 @@ namespace rendering {
 /// them all is what it replaces.
 ///
 /// A miss here does not crash. It hands the caller too few candidates and the
-/// player walks through a wall, so both callers keep a fallback that scans
-/// everything when the grid answers nothing, and the arithmetic below is
-/// pinned by tests/test_spatial_grid.cpp.
+/// player walks through a wall. Both callers used to cover for that by scanning
+/// every instance whenever the grid answered nothing, which on open ground is
+/// every query and cost 24 ms a frame in Hellfire Peninsula; they now trust an
+/// empty answer, and what makes that safe - every box overlapping the query is
+/// offered, through any sequence of files, erases and refiles - is pinned by
+/// tests/test_spatial_grid.cpp.
 
 /// 64 world units, which is a little under an ADT chunk.
 inline constexpr float kSpatialCellSize = 64.0f;

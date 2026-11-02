@@ -857,20 +857,33 @@ void M2Renderer::gatherCandidates(const glm::vec3& queryMin, const glm::vec3& qu
                   }
               });
 
-    // Only a list the grid answered is kept. The fallback below is every
-    // instance, which an unfiled clutter tuft joins without moving the
-    // generation.
-    if (cacheEnabled && !outIndices.empty()) {
-        tl_m2_candidateCache.store(layoutGen, minCell, maxCell, outIndices);
-    }
-
-    // Safety fallback to preserve collision correctness if the spatial index
-    // misses candidates (e.g. during streaming churn).
-    if (outIndices.empty() && !instances.empty()) {
+    // An empty answer is an answer. This used to be followed by a "safety
+    // fallback" that handed back every instance whenever the grid found
+    // nothing, for a grid that might lag behind streaming. It never lags: every
+    // add, move and removal files or refiles the instance before returning
+    // (rebuildSpatialIndex for the compacting paths), so an empty cell range
+    // means nothing collidable reaches the box. And anything the fallback did
+    // add lay outside the box, which a query with even one doodad nearby
+    // never sees either.
+    //
+    // What it cost: stand where no doodad is filed - most of Hellfire
+    // Peninsula's open ground, around the .tele point - and every floor probe
+    // the camera makes (dozens a frame) walked all ~70k instances, each a
+    // cache miss on its bounds just to fail the focus test. 24 ms a frame in
+    // update/pre/camera. WOWEE_COLLISION_SCAN_ON_MISS=1 restores the scan.
+    static const bool scanOnMiss = core::envFlagEnabled("WOWEE_COLLISION_SCAN_ON_MISS", false);
+    if (scanOnMiss && outIndices.empty() && !instances.empty()) {
+        // Not cached: an unfiled clutter tuft joins this list without moving
+        // the generation.
         outIndices.reserve(instances.size());
         for (size_t i = 0; i < instances.size(); i++) {
             outIndices.push_back(i);
         }
+        return;
+    }
+
+    if (cacheEnabled) {
+        tl_m2_candidateCache.store(layoutGen, minCell, maxCell, outIndices);
     }
 }
 
@@ -1978,6 +1991,8 @@ void M2Renderer::recreatePipelines() {
     destroy(device, additivePipeline_);
     destroy(device, particlePipeline_);
     destroy(device, particleAdditivePipeline_);
+    destroy(device, particleGpuPipeline_);
+    destroy(device, particleGpuAdditivePipeline_);
     destroy(device, smokePipeline_);
     destroy(device, ribbonPipeline_);
     destroy(device, ribbonAdditivePipeline_);

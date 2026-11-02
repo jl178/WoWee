@@ -11,6 +11,8 @@
 #include <catch_amalgamated.hpp>
 
 #include <algorithm>
+#include <optional>
+#include <random>
 #include <unordered_set>
 #include <vector>
 
@@ -340,4 +342,95 @@ TEST_CASE("the query cache keeps the last few answers", "[spatialgrid]") {
     CHECK(cache.find(gen, GridCell{0, 0, 0}, GridCell{0, 0, 0}) == nullptr);
     CHECK(cache.find(gen, GridCell{1, 0, 0}, GridCell{1, 0, 0}) != nullptr);
     CHECK(cache.find(gen, GridCell{99, 0, 0}, GridCell{99, 0, 0}) != nullptr);
+}
+
+// ---- an empty answer is trustworthy ----
+//
+// Both renderers used to scan every instance whenever the grid answered
+// nothing. On open ground that is every query, and the camera asks dozens a
+// frame: 24 ms in Hellfire Peninsula. They now return the empty answer, which
+// is only right if the grid never drops a box that overlaps the query - after
+// any mix of files, refiles and erases, at any position, either side of zero.
+
+namespace {
+
+struct Box {
+    glm::vec3 lo;
+    glm::vec3 hi;
+};
+
+bool overlaps(const Box& a, const Box& b) {
+    return a.lo.x <= b.hi.x && a.hi.x >= b.lo.x &&
+           a.lo.y <= b.hi.y && a.hi.y >= b.lo.y &&
+           a.lo.z <= b.hi.z && a.hi.z >= b.lo.z;
+}
+
+Box randomBox(std::mt19937& rng, float maxSize) {
+    std::uniform_real_distribution<float> pos(-700.0f, 700.0f);
+    std::uniform_real_distribution<float> size(0.0f, maxSize);
+    const glm::vec3 lo(pos(rng), pos(rng), pos(rng) * 0.2f);
+    return Box{lo, lo + glm::vec3(size(rng), size(rng), size(rng))};
+}
+
+}  // namespace
+
+TEST_CASE("the grid offers every box overlapping a query, after any churn",
+          "[spatialgrid]") {
+    std::mt19937 rng(0x5eed);
+    SpatialGrid grid;
+    std::vector<std::optional<Box>> filed(400);   // by id; nullopt once erased
+    for (uint32_t id = 0; id < filed.size(); ++id) {
+        filed[id] = randomBox(rng, id % 10 == 0 ? 200.0f : 12.0f);
+        insertBounds(grid, filed[id]->lo, filed[id]->hi, id);
+    }
+
+    std::uniform_int_distribution<uint32_t> pickId(0, static_cast<uint32_t>(filed.size() - 1));
+    std::uniform_real_distribution<float> step(-40.0f, 40.0f);
+    size_t emptyAnswers = 0;
+    for (int round = 0; round < 2000; ++round) {
+        // Churn: move one, sometimes erase or re-file one.
+        const uint32_t id = pickId(rng);
+        if (filed[id]) {
+            if (round % 7 == 0) {
+                eraseBounds(grid, filed[id]->lo, filed[id]->hi, id);
+                filed[id].reset();
+            } else {
+                const glm::vec3 d(step(rng), step(rng), step(rng) * 0.1f);
+                const Box moved{filed[id]->lo + d, filed[id]->hi + d};
+                refileBounds(grid, filed[id]->lo, filed[id]->hi, moved.lo, moved.hi, id);
+                filed[id] = moved;
+            }
+        } else {
+            filed[id] = randomBox(rng, 12.0f);
+            insertBounds(grid, filed[id]->lo, filed[id]->hi, id);
+        }
+
+        // The floor probe's box is 4 x 4 x 14; walls and rays ask for more.
+        const Box q = randomBox(rng, round % 3 == 0 ? 14.0f : 90.0f);
+        const std::vector<uint32_t> got = query(grid, q.lo, q.hi);
+        if (got.empty()) ++emptyAnswers;
+        for (uint32_t other = 0; other < filed.size(); ++other) {
+            if (!filed[other] || !overlaps(*filed[other], q)) continue;
+            INFO("round " << round << ", id " << other);
+            CHECK(std::binary_search(got.begin(), got.end(), other));
+        }
+        // And nothing erased comes back.
+        for (uint32_t g : got) {
+            INFO("round " << round << ", id " << g);
+            CHECK(filed[g].has_value());
+        }
+    }
+    // The property is only interesting if empty answers were exercised.
+    CHECK(emptyAnswers > 100);
+}
+
+TEST_CASE("an empty answer is cached like any other", "[spatialgrid]") {
+    // Open ground answers nothing on every probe; that answer has to be
+    // reusable, not mistaken for a miss and rebuilt each time.
+    GridQueryCache<size_t> cache;
+    const uint64_t gen = nextGridLayoutGen();
+    cache.store(gen, GridCell{5, 5, 0}, GridCell{5, 5, 0}, std::vector<size_t>{});
+    const auto* hit = cache.find(gen, GridCell{5, 5, 0}, GridCell{5, 5, 0});
+    REQUIRE(hit != nullptr);
+    CHECK(hit->empty());
 }
