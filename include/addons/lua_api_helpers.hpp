@@ -350,6 +350,8 @@ inline uint64_t resolveUnitGuid(game::GameHandler* gh, const std::string& uid) {
     if (uid == "focus")       return gh->getFocusGuid();
     if (uid == "mouseover")   return gh->getMouseoverGuid();
     if (uid == "pet")         return gh->getPetGuid();
+    // The vehicle the player sits in (the passenger's vehicle, 0xF60).
+    if (uid == "vehicle")     return gh->playerVehicleGuid();
     // The NPC whose window is open, which is how FrameXML titles three of
     // them: GossipFrameNpcNameText and BankFrameTitleText both read
     // UnitName("npc"), and QuestFrameNpcNameText reads UnitName("questnpc").

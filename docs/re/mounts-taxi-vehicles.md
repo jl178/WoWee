@@ -10,7 +10,11 @@ spline every unit runs, the walk/run pick), `docs/re/movement-camera.md`
 The code: `include/rendering/animation/mount_rules.hpp` and `mount_fsm.*`
 (mount animation), `include/game/taxi_rules.hpp` / `src/game/taxi_rules.cpp`
 (route and errors), `include/game/vehicle_rules.hpp`, `vehicle_data.*` and
-`src/game/game_handler_vehicles.cpp` (seats). Tests:
+`src/game/game_handler_vehicles.cpp` (seats, the vehicle bar, aim, seat
+requests, trajectory casts), `MovementHandler::setActiveMover` (driving),
+`syncVehiclePassengers` / `applyVehicleCamera` in `src/core/application.cpp`
+(seats, arcs, camera, fade), the vehicle Lua in `src/addons/lua_*_api.cpp`.
+Tests:
 `tests/test_mount_rules.cpp`, `test_taxi_rules.cpp`, `test_vehicle_rules.cpp`.
 
 ## 1. Mounting (0x73D5D0)
@@ -226,6 +230,169 @@ standard 3.3.5 column order; seat i is `VehicleSeat[veh + 0x18 + 4i]`
 | 312 / 313 | Traveler's / Grand Caravan Mammoth | seat 0 empty (the driver rides as a mount); seats 1/2 att 14/13 ride 91 |
 | 318 | Mechano-hog / Chopper | seat 1 att 14 ride 500 (ReclinedMountPassenger) |
 
+### Driving: the active mover (0x729010, 0x72CCA0)
+
+The client moves one unit, the **active mover** (`0xCA1238`). The input
+control (0x5F95D0 / 0x5FBBC0) steers that unit's CMovement, at that unit's
+own speeds and turn rate.
+
+- **SMSG_CLIENT_CONTROL_UPDATE** (0x159, handler 0x72D0B0 -> 0x72CCA0):
+  packed guid + u8 allow. 0x71C930 sets the unit's "client controls me" bit
+  (`+0xA30 & 0x400`). If the unit is the one the player should control, an
+  allow makes it the mover; a revoke of the mover makes the other controlled
+  unit the mover, or nobody. AzerothCore sends `(vehicle, 1)` when the
+  player takes a control seat (Unit::SetCharmedBy, CHARM_TYPE_VEHICLE) and
+  `(vehicle, 0)` then `(player, 1)` when it leaves (RemoveCharmedBy). There
+  is no SMSG_CONTROL_VEHICLE in 3.3.5a.
+- **The switch** (0x729010): the old mover stops (0x6EE920 clears its
+  direction keys); if the old mover was the player and has no spline running,
+  `CMSG_MOVE_NOT_ACTIVE_MOVER` (0x2D1) with its movement; then
+  **CMSG_SET_ACTIVE_MOVER** (0x26A, plain u64 guid); then 0x747F40.
+- **0x747F40**: `VEHICLE_UPDATE`; `VEHICLE_ANGLE_SHOW` (1 for Vehicle.flags
+  0x400), `VEHICLE_POWER_SHOW` (1 for 0x800) (0x74C5A0);
+  `VEHICLE_ANGLE_UPDATE` (normalized angle, angle) (0x5FA910).
+- Every movement packet then carries the **mover's guid** and movement; the
+  forced changes (0x7307A0: root 0xE8/0xEA, speeds 0xE2.., knockback 0xEF,
+  teleport ack 0xC7 -> 0x72D2D0) are applied to and acknowledged for the
+  mover. The vehicle runs at its own speeds (its create block, then the
+  SMSG_FORCE_*_SPEED_CHANGE the server sends the controller with the
+  vehicle's guid). Vehicle.dbc TurnSpeed / PitchSpeed are not read by the
+  movement code; the unit's turn and pitch rates are.
+- The vehicle's MOVEMENTFLAG2 (AzerothCore Vehicle::InitMovementInfoForBase
+  from Vehicle.flags): NO_STRAFE 0x1, NO_JUMPING 0x2, FULL_SPEED_TURNING 0x8,
+  ALWAYS_ALLOW_PITCHING 0x20 (pitch written in every movement block, not only
+  swimming/flying), FULL_SPEED_PITCHING 0x10.
+- **FIXED_POSITION** (Vehicle.flags 0x200000, 0x6EAA50): the facing is held
+  to the create-block aim -FacingLimitRight .. +FacingLimitLeft.
+
+### Aim (InputControl 0x5FB3A0 ...)
+
+The aim angle **is the mover's pitch** (vtable +0x14C).
+
+- Limits (0x5FB3A0): with CUSTOM_PITCH (0x40) Vehicle.PitchMin..PitchMax,
+  else -pi/2..pi/2 (0x9F1FF4 / 0x9E8D88).
+- Set (0x5FB3A0): without FULL_SPEED_PITCHING (flags2 0x10) at once,
+  `MSG_MOVE_SET_PITCH` (0x72EAD0 -> 0x6EE460 -> 0x6E9380, opcode 0xDB); with
+  it, pitching up or down at the pitch rate (`MSG_MOVE_START_PITCH_UP/DOWN`)
+  and a scheduled `MSG_MOVE_STOP_PITCH` (0x72D470 -> 0x6EF490 / 0x6EF7A0).
+  Vehicle.flags 0x400 then fires `VEHICLE_ANGLE_UPDATE` (norm, angle).
+- Lua: VehicleAimIncrement/Decrement(delta = 0.1) (0x5FB770), RequestAngle
+  (0x5FB820, only with 0x400), RequestNormAngle (0x5FB8C0: min + (max-min) x
+  n), GetAngle (0x5F9E10), GetNormAngle (0x5F9E60: (pitch-min)/(max-min), 0
+  when equal), Up/DownStart/Stop (input bits 0x400 / 0x800: pitching while
+  held), SetNormPower / GetNormPower (a global 0..1, 0xC24958). Mouselook in
+  a vehicle sets the aim to -camera pitch + Vehicle.MouseLookOffsetPitch
+  (0x5FA9B0).
+
+### The vehicle's spells (0x5D4AD0, 0x5A83C0, 0x5D4210)
+
+- SMSG_PET_SPELLS with the vehicle's guid (AzerothCore
+  Player::VehicleSpellInitialize: slot i = spell | (i + 8) << 24) is the
+  "pet" bar. When the unit the player controls is that pet and it has a bar,
+  and - for a vehicle - the player's seat has **VehicleSeat.
+  VehicleAbilityDisplay (field 41) == 1**, the bonus bar flag is set:
+  **GetBonusBarOffset = 5** (0x5A83C0) and action slots **121-130 are pet
+  slots 0-9** (0x5AB800 with 0x5D3240 = `i | 0x10000000`), 131-132 empty.
+  PetHasActionBar is false meanwhile (0x5D3720).
+- GetActionInfo on such a slot (0x5A8F10): "spell", id, "pet", id.
+- UseAction (0x5ABBC0 -> 0x5D4210): a spell type (1, 8-17) is cast **from
+  the vehicle**: CMSG_PET_CAST_SPELL (0x1F0: u64 caster, u8 castCount, u32
+  spell, u8 castFlags, targets) - the caster is not the player (0x80AC90);
+  commands and stances (6, 7) go as CMSG_PET_ACTION.
+- **Trajectory spells** (Spell.dbc field 227 SpellMissileID, SpellRec
+  +0x28C; SpellMissile.dbc flag 0x1): only for the active mover ("Missile
+  trajectory does not have active mover caster"). 0x809F80 -> 0x6FCD60:
+  elevation = the vehicle's pitch with ALLOW_PITCHING (0x10, held to the
+  limits with 0x40), else the middle of DefaultPitch; speed = DefaultSpeedMin
+  + (Max - Min) x power with ADJUST_AIM_POWER (0x800), else the middle; plus
+  RandomizeFacing/Pitch/Speed and a jitter of 0.01; then the flight in 0.1 s
+  steps (velocity x 0.1, Gravity x 0.01 off z a step, half on the first), at
+  most 200 steps, each segment tested against the world (0x77F310, flags
+  0x100111). The cast carries **targets 0x60** (source + destination
+  location: the launch point and where the flight met the world),
+  **castFlags 0x2**, then elevation, speed, `1`, u32 MSG_MOVE_STOP (0xB7) and
+  the mover's packed guid and movement (0x71F060). AzerothCore reads these in
+  HandleClientCastFlags and aims TARGET_DEST_TRAJ (89) with them.
+  Hurl Boulder (Wintergrasp Demolisher 50896, Salvaged Demolisher 62306):
+  missile 526 / 1682, pitch 0.52..1.57, speed 65, gravity 30; Plague Barrel
+  (catapult) 1022: speed 45; Fire Cannon (turret) 1023: gravity 40.
+
+### Seats: exit and switch (0x74C7F0, 0x74C8B0, 0x74C9A0, 0x74CA90)
+
+- **VehicleExit** (0x5FB660): the seat must have 0x2000000 (else
+  SPELL_FAILED_CANT_DO_THAT_RIGHT_NOW). The driver - the player's vehicle is
+  the mover - sends **CMSG_DISMISS_CONTROLLED_VEHICLE** (0x46D: the vehicle's
+  packed guid and movement; 0x5D46F0 -> 0x74BB20, event 0x34); anyone else
+  CMSG_REQUEST_VEHICLE_EXIT (0x476, empty).
+- **Prev / Next seat** (seat flag 0x4000000): the driver sends
+  **CMSG_CHANGE_SEATS_ON_CONTROLLED_VEHICLE** (0x49B: vehicle packed guid,
+  movement, packed accessory guid 0, i8 -1 / 1; event 0x37); a passenger
+  CMSG_REQUEST_VEHICLE_PREV_SEAT / NEXT_SEAT (0x477 / 0x478, empty).
+- **UnitSwitchToVehicleSeat("player", i)** (0x6139B0 -> 0x74CA90): the
+  virtual seat i of the root vehicle (0x757550: seats in order, a seat
+  holding an accessory vehicle - a unit that is no player - replaced by that
+  vehicle's seats); free, with 0x4000000, the player's seat with 0x4000000.
+  The driver: 0x49B with the accessory guid and the seat; a passenger:
+  CMSG_REQUEST_VEHICLE_SWITCH_SEAT (0x479: packed vehicle guid, u8 seat).
+- UnitVehicleSeatCount (0x613830 -> 0x757470), UnitVehicleSeatInfo (0x7579E0):
+  controlType "Root" (seat 0x800 on the root vehicle), "Child" (0x800 on an
+  accessory), "None"; occupant name and realm; canEject flagsB 0x20;
+  canSwitchSeats flags 0x4000000. GetVehicleUIIndicator(id) (0x614E60):
+  VehicleUIIndicator background, seat count; GetVehicleUIIndicatorSeat
+  (0x614EF0): VehicleUIIndSeat virtual seat index, x, y (file order).
+- **Events** (0x748810): UNIT_ENTERING / UNIT_ENTERED_VEHICLE = (unit, has
+  vehicle UI (seat 0x20000000), skin, EnterUISound name, control seat (0x800),
+  Vehicle.VehicleUIIndicatorID) - VehicleSeatIndicator reads the sixth;
+  UNIT_EXITED_VEHICLE = (unit, ExitUISound name); PLAYER_GAINS_VEHICLE_DATA
+  (unit, indicator) when the player becomes a vehicle (0x74BBD0).
+
+### Boarding and leaving (VehiclePassenger_C 0x74A200, 0x74A7F0, 0x747D70)
+
+States 1 (enter pre-delay: EnterPreDelay, <= 10 s), 2 (the arc), 3 (seated),
+4 (ExitPreDelay), 5 (the arc out). The arc runs from where the passenger was
+(+0x84) to the seat point (0x749E40 -> 0x7493B0), or from the seat to the
+passenger's own position:
+
+- T = distance / (EnterSpeed - the vehicle's speed toward it), or distance /
+  ExitSpeed, clamped to Min..MaxDuration (MaxDuration capped at 10, 1.5 when
+  unset).
+- Progress p = t / T eased by the seat flags: entering 0x20 = p^2, 0x40 =
+  1-(1-p)^2, both = 0.5 - 0.5 cos(pi p); leaving 0x80 / 0x100.
+- Position lerp(start, end, p) raised by 0.5 g t (T - t) x k, t = p T,
+  g = Enter/ExitGravity (0.1 when zero and an arc height is asked), k so the
+  top g T^2 / 8 sits in Min..MaxArcHeight.
+- Animations: the enter pair during 1-2 with seat flag 0x1, the exit pair
+  during 4-5 (0x747B20).
+
+### The vehicle camera (VehicleCamera_C 0x759200, 0x759D80, 0x759580)
+
+The camera orbits the vehicle - or, with flagsB 0x100, the passenger's seat
+point (0x749D80) - moved by the seat's **CameraOffset built as (Y, -X, Z)
+and turned by the vehicle's facing**. CameraPosChaseRate > 0 chases the
+target with a spring of stiffness 20 / rate (0x6FF4C0); CameraFacingChaseRate
+the facing. The target height above a non-player unit is min(its collision
+height, 2.0278) - 0.1667 (0x718080). Only 21 of the 720 seats have an
+offset, 19 a chase rate; none of the Argent, Wintergrasp, Ulduar, mammoth or
+Skytalon seats do.
+
+The camera does not keep out of a big vehicle; the **vehicle fades** instead
+(Camera.cpp, the alpha pass around 0x6077A0): for the followed unit's vehicle
+with Vehicle.flags **0x80000**, alpha 255 beyond CameraFadeDistScalarMax x
+the Stand sequence's bounds radius (0x82CED0, M2Sequence +0x38, unscaled) between
+the camera and the point it looks at (0x5FECF0; the zoom), 0 within CameraFadeDistScalarMin x it,
+eased (0x8CA080) between (FUN_004F8660 sets it). The siege engines,
+demolishers and Argent mounts are 1.0 / 1.5.
+
+### A creature's MSG_MOVE_TELEPORT (0xC5)
+
+Registered with the unit movement handler 0x741B60 (with 0xC3 and the other
+MSG_MOVE_* relays) -> 0x740D30 case 0xC5 -> 0x7189A0: a **packed guid and a
+movement block** for that unit, which is placed there. MSG_MOVE_TELEPORT_ACK
+(0xC7) is the mover's (0x732450 -> 0x7307A0 -> 0x72D2D0: placed, then
+`0xC7` back with the guid, counter and time). AzerothCore sends 0xC5 to the
+units' viewers (Unit::SendTeleportPacket, self excluded) - Dalaran's Gold
+Mages (32341, guid 0xF130007E55...) on every blink.
+
 ## 5. Wowee against this
 
 | # | Area | Stock | Wowee before | Now |
@@ -249,16 +416,38 @@ standard 3.3.5 column order; seat i is `VehicleSeat[veh + 0x18 + 4i]`
 | V2 | Vehicle id, seat byte | read | dropped | **Fixed** (UpdateBlock::vehicleId / transportSeat) |
 | V3 | Passengers | seated by VehicleSeat | left where they were, run animations | **Fixed**: seat attachment (remapped), offset, own size, yaw, passenger point; ride anims; vehicle ride loop; flag 0x200 hides |
 | V4 | Player in a vehicle | seated; visible | hidden; "in vehicle" from 0x4A7 | **Fixed**: seated and visible; the camera follows the vehicle |
-| V5 | Lua | seat flags | stubs | UnitInVehicle/UsingVehicle for any unit, UnitControllingVehicle, UnitVehicleSkin, CanExitVehicle; UnitHasVehicleUI still false (VehicleMenuBar's readers unbound) |
-| V6 | Driving | the client moves the vehicle it controls | not done | open |
+| V5 | Lua | seat flags | stubs | **Fixed**: UnitHasVehicleUI (0x20000000), UnitInVehicleControlSeat, UnitControllingVehicle (UNIT_FIELD_CHARM is the vehicle), UnitVehicleSeatCount / SeatInfo / SwitchToVehicleSeat over virtual seats (accessories expanded), CanSwitchVehicleSeat(s), IsUsingVehicleControls, CanExitVehicle, IsVehicleAim*Adjustable (1 / nil, as stock - VehicleMenuBar_SetSkin adds 1 to it), the VehicleAim* family, GetVehicleUIIndicator(Seat), Can/EjectPassengerFromSeat, UnitTargetsVehicleInRaidUI, the "vehicle" unit token; the events with the stock arguments (UNIT_ENTERING/ENTERED_VEHICLE's six, VEHICLE_ANGLE_SHOW/UPDATE, VEHICLE_POWER_SHOW, PLAYER_GAINS/LOSES_VEHICLE_DATA) |
+| V6 | Driving | the client moves the vehicle it controls | not done | **Fixed**: SMSG_CLIENT_CONTROL_UPDATE makes the vehicle the active mover (CMSG_MOVE_NOT_ACTIVE_MOVER, CMSG_SET_ACTIVE_MOVER); movement, force acks (speeds, root, flags, knockback, teleport ack) for the mover's guid; the player's own state kept aside and acknowledged as the player's; the vehicle's speeds, turn rate, flags2 (NO_STRAFE / NO_JUMPING honoured, pitch written with ALWAYS_ALLOW_PITCHING), collision box; the vehicle's entity and locomotion follow the controls |
+| V7 | Vehicle bar | pet bar on 121-130, bonus offset 5 (VehicleAbilityDisplay 1) | pet bar only | **Fixed**: GetBonusBarOffset 5, the action functions answer slots 121-132 from the pet bar, UseAction casts CMSG_PET_CAST_SPELL from the vehicle; PetHasActionBar false meanwhile |
+| V8 | Trajectory spells | src + dest locations, castFlags 0x2, elevation, speed, movement (0x6FCD60) | none | **Fixed**: SpellMissile.dbc flight in 0.1 s steps against the terrain and building floors; elevation from the aim, speed from the power |
+| V9 | Aim | the mover's pitch, limits, SET_PITCH / pitching at the pitch rate | none | **Fixed** |
+| V10 | Seats | DISMISS_CONTROLLED_VEHICLE / CHANGE_SEATS_ON_CONTROLLED_VEHICLE for the driver, the 0x476-0x479 requests otherwise | exit request only | **Fixed** |
+| V11 | Boarding / leaving | arcs (speed, duration, gravity, arc heights, easing) and the enter/exit animations | snap | **Fixed** for the model (CharacterRenderer seat arc); the local player rides its TransportExit spline after leaving |
+| V12 | Vehicle camera | seat point (flagsB 0x100), CameraOffset (Y, -X, Z) turned by facing, chase rate; fade (0x80000) | the vehicle's position | **Fixed** |
+| V13 | MSG_MOVE_TELEPORT (0xC5) | another unit's movement block, applied (0x7189A0) | read as our TELEPORT_ACK: a counter out of the movement flags, the creature placed at garbage and logged as "MSG_MOVE_TELEPORT_ACK: guid=0xF130..." | **Fixed**: snapped to the block; only 0xC7 is acknowledged, and for a driven vehicle with its guid. Not a regression from the passenger work - the two opcodes shared a handler since the file was written |
+| T7 | Taxi camera | the camera's collision runs on a flight | only the ground under the camera tested; a ridge or rock between rider and camera put the view inside it | **Fixed**: WMO, doodad collision meshes and the terrain march pull the camera in at once |
 
 ## 6. Open
 
-- Driving a vehicle (the player as its mover: SMSG_CLIENT_CONTROL_UPDATE,
-  CMSG_SET_ACTIVE_MOVER, movement for the vehicle guid), the vehicle action
-  bar (VehicleMenuBar: GetVehicleUIIndicator, the aim functions), seat
-  switching, the enter/exit arcs and their animations, the vehicle camera
-  offsets and chase.
+- FIXED_POSITION facing limits (Vehicle.flags 0x200000, 0x6EAA50) are not
+  applied: a turret turns freely under the controls.
+- Mouselook does not drive the aim (0x5FA9B0: -camera pitch +
+  Vehicle.MouseLookOffsetPitch); the aim keys, the pitch buttons and the
+  slider do.
+- A trajectory's launch point is the vehicle's position + 1.5 yd, not the
+  spell visual's missile attachment (0x720BF0); the 0.01 random jitter is not
+  applied; the flight is tested against the terrain and WMO floors, not
+  doodads.
+- The camera's entering/exiting blend (VehicleCamera_C states 1-4,
+  CameraEntering/ExitingDelay/Duration) and CameraFacingChaseRate are not
+  done; the target jumps to the seat. At the default zoom (5.55) a vehicle
+  whose Stand radius is above 5.55 / FadeMin is fully faded - a Wyrmrest
+  Skytalon (5.77) is invisible until the player zooms out. That follows the
+  stock rule as read; it was not compared against the stock client.
+- Vehicle UI sounds (EnterUISoundID / ExitUISoundID) are passed in the events,
+  not played.
+- The exit arc of other units ends at their entity position, which their
+  server spline moves meanwhile.
 - The roll sign of a taxi's bank is taken as into the turn; the decompile
   (0x98CA00, 0x4C5820) was not followed to the quaternion's axis.
 - Price tiers by reputation (T6); the hard-coded faction gate on taxi nodes.

@@ -190,6 +190,11 @@ public:
     void setMounted(uint32_t mountInstId, uint32_t mountDisplayId,
                     float heightOffset, const std::string& modelPath = "");
     void setTaxiFlight(bool onTaxi) { taxiFlight_ = onTaxi; }
+    /// In a vehicle's seat: the seat animates the character (Application::
+    /// syncVehiclePassengers, 0x747B20), not its own locomotion - even while
+    /// it drives and the controls are moving the vehicle.
+    void setSeatedInVehicle(bool seated) { seatedInVehicle_ = seated; }
+    [[nodiscard]] bool isSeatedInVehicle() const { return seatedInVehicle_; }
     // M2 transport riding (Deeprun Tram, Thunder Bluff lifts): the ride-lock code in
     // Application overwrites the character's render position directly every frame, so
     // the camera controller's own gravity/collision never finds real ground beneath a
@@ -273,6 +278,7 @@ private:
     bool mountJumpSounded_ = false;
     bool mountWasAirborne_ = false;
     bool taxiFlight_ = false;
+    bool seatedInVehicle_ = false;
     bool m2TransportRiding_ = false;
 
     // ── Private helpers ──────────────────────────────────────────────────

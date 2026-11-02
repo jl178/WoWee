@@ -842,7 +842,7 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
         // Mounted the same: the stock client jumps a mount as it jumps a
         // character (0x9883F0 has no mounted test).
         bool canJump = (grounded || coyoteTimer > 0.0f) && (jumpBufferTimer > 0.0f) &&
-                       !onSteepSlope_ && !movementRooted_;
+                       !onSteepSlope_ && !movementRooted_ && !noJump_;
         if (canJump) {
             verticalVelocity = f.jumpVel;
             grounded = false;
@@ -2449,7 +2449,8 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
         // are not relevant for camera pivoting.
         cachedPivotLift_ = 0.0f;
     }
-    glm::vec3 pivot = targetPos + glm::vec3(0.0f, 0.0f, followedPivotHeight() + mountedOffset + pivotLift);
+    glm::vec3 pivot = targetPos + pivotOffset_ +
+                      glm::vec3(0.0f, 0.0f, followedPivotHeight() + mountedOffset + pivotLift);
 
     // Camera direction from yaw/pitch (already computed as forward3D)
     glm::vec3 camDir = -f.forward3D;  // Camera looks at pivot, so it's behind
@@ -2880,7 +2881,7 @@ void CameraController::updateFreeFlyCamera(float /*deltaTime*/, FrameInput& f) {
         if (f.nowJump) jumpBufferTimer = JUMP_BUFFER_TIME;
         if (grounded) coyoteTimer = COYOTE_TIME;
 
-        if ((grounded || coyoteTimer > 0.0f) && jumpBufferTimer > 0.0f) {
+        if ((grounded || coyoteTimer > 0.0f) && jumpBufferTimer > 0.0f && !noJump_) {
             verticalVelocity = f.jumpVel;
             grounded = false;
             jumpBufferTimer = 0.0f;
@@ -3006,7 +3007,27 @@ void CameraController::update(float deltaTime) {
             // Camera direction from yaw/pitch
             glm::vec3 camDir = -forward3D;
 
-            // Use current distance
+            // The camera keeps its collision on a flight. The stock pull-in
+            // (FUN_00605d60's world intersect, see updateOrbitCamera) runs
+            // whatever moves the character - the taxi only turns smart
+            // follow off - so a ridge, a building or a rock between the rider
+            // and the camera brings the camera in front of it, at once,
+            // instead of leaving it inside the stone. Without it only the
+            // ground under the camera was tested, and a flight skimming a
+            // cliff looked out from inside it.
+            float hitLimit = currentDistance;
+            if (currentDistance > MIN_DISTANCE) {
+                auto limitBy = [&](float hit) {
+                    if (hit < currentDistance)
+                        hitLimit = std::min(hitLimit, std::max(MIN_DISTANCE, hit - CAM_SPHERE_RADIUS - CAM_EPSILON));
+                };
+                if (wmoRenderer) limitBy(wmoRenderer->raycastBoundingBoxes(pivot, camDir, currentDistance));
+                if (m2Renderer) limitBy(m2Renderer->raycastCollisionMeshes(pivot, camDir, currentDistance));
+                if (terrainManager)
+                    hitLimit = std::min(hitLimit, raymarchTerrainCameraLimit(pivot, camDir, currentDistance));
+            }
+            collisionDistance = hitLimit;
+            const bool pulledIn = hitLimit < currentDistance - 1.0e-3f;
             float actualDist = std::min(currentDistance, collisionDistance);
 
             // Compute camera position
@@ -3024,7 +3045,8 @@ void CameraController::update(float deltaTime) {
             if (glm::dot(smoothedCamPos, smoothedCamPos) < 1e-4f) {
                 smoothedCamPos = actualCam;
             }
-            float camLerp = (mouseButtonDown && !smoothCameraFollow_)
+            // The pull-in is instant, as the stock one is.
+            float camLerp = ((mouseButtonDown && !smoothCameraFollow_) || pulledIn)
                 ? 1.0f : (1.0f - std::exp(-camSmoothSpeed_ * deltaTime));
             smoothedCamPos += (actualCam - smoothedCamPos) * camLerp;
 
@@ -3205,8 +3227,8 @@ void CameraController::update(float deltaTime) {
     const int turnVote = sm::resolveTurn(keyA, keyD, rightButtonSteering);
     bool nowForward = !movBlocked && forwardVote > 0;
     bool nowBackward = !movBlocked && forwardVote < 0;
-    bool nowStrafeLeft = !movBlocked && strafeVote > 0;
-    bool nowStrafeRight = !movBlocked && strafeVote < 0;
+    bool nowStrafeLeft = !movBlocked && !noStrafe_ && strafeVote > 0;
+    bool nowStrafeRight = !movBlocked && !noStrafe_ && strafeVote < 0;
     bool nowTurnLeft = turnVote > 0;
     bool nowTurnRight = turnVote < 0;
 
@@ -3546,7 +3568,7 @@ void CameraController::update(float deltaTime) {
         // true only to keep the fall-damage checks quiet, so every press sent
         // the server a jump from mid-air.
         if (nowJump && !wasJumping && grounded && !isFlightAirborne() && !onSteepSlope_ &&
-            !movementRooted_) {
+            !movementRooted_ && !noJump_) {
             movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_JUMP));
         }
         // A swimmer's hop at the surface is a jump from the water (0x730D10 ->

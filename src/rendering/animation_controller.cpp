@@ -891,6 +891,12 @@ void AnimationController::updateCharacterAnimation() {
         }
     }
 
+    // In a vehicle's seat the seat plays the character (its ride loop).
+    if (seatedInVehicle_ && !isMounted()) {
+        lastPlayerAnimRequest_ = UINT32_MAX;
+        return;
+    }
+
     // When mounted, delegate to MountFSM and handle positioning
     if (isMounted()) {
         updateMountedAnimation(lastDeltaTime_);

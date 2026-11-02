@@ -63,6 +63,37 @@ public:
     void clearTransportAttachment(uint64_t childGuid);
     void updateAttachedTransportChildren(float deltaTime);
 
+    // ---- The active mover (stock 0x729010 / 0x72CCA0) ----
+    //
+    // The unit this client moves: the player, or the vehicle (or possessed
+    // unit) SMSG_CLIENT_CONTROL_UPDATE hands it. movementInfo and the speeds
+    // below are the active mover's; the player's own are kept aside while
+    // another unit is moved, and the movement packets, force acks and
+    // CMSG_SET_ACTIVE_MOVER carry the mover's guid.
+    [[nodiscard]] uint64_t activeMoverGuid() const;
+    [[nodiscard]] bool movingOtherUnit() const;
+    /// Make `guid` (0: the player) the active mover: stops the old one,
+    /// loads the new one's movement and speeds, sends CMSG_SET_ACTIVE_MOVER.
+    void setActiveMover(uint64_t guid);
+    /// The player is the mover again without a word to the server (a world
+    /// entry, which sends its own CMSG_SET_ACTIVE_MOVER).
+    void resetActiveMover() {
+        if (movingOtherUnit()) loadMoverState(playerState_);
+        moverGuid_ = 0;
+    }
+    /// The player's own movement while another unit is moved (else movementInfo).
+    [[nodiscard]] const MovementInfo& playerMovementInfo() const {
+        return movingOtherUnit() ? playerState_.info : movementInfo;
+    }
+    /// A movement packet of the active mover with `opcode`, then whatever
+    /// `extra` appends (CMSG_CHANGE_SEATS_ON_CONTROLLED_VEHICLE,
+    /// CMSG_DISMISS_CONTROLLED_VEHICLE, a cast's trajectory block).
+    void sendMoverPacket(Opcode opcode, const std::function<void(network::Packet&)>& extra);
+    /// The active mover's movement block as it would go out now, server axes.
+    [[nodiscard]] MovementInfo moverWireInfo();
+    /// Writes the active mover's packed guid and movement block into `packet`.
+    void writeMoverMovement(network::Packet& packet);
+
     // Movement info accessors
     [[nodiscard]] const MovementInfo& getMovementInfo() const { return movementInfo; }
     MovementInfo& getMovementInfoMut() { return movementInfo; }
@@ -76,6 +107,7 @@ public:
     [[nodiscard]] float getServerFlightBackSpeed() const { return serverFlightBackSpeed_; }
     [[nodiscard]] float getServerRunBackSpeed() const { return serverRunBackSpeed_; }
     [[nodiscard]] float getServerTurnRate() const { return serverTurnRate_; }
+    [[nodiscard]] float getServerPitchRate() const { return serverPitchRate_; }
 
     // CREATE_OBJECT/LIVING carries the authoritative speed table on login.
     // Apply it to the same cache used by camera movement and later force-speed
@@ -312,6 +344,26 @@ private:
     /// by 0x71F0C0). Unset until the first packet.
     float lastPacketOrientation_ = 0.0f;
     bool hasLastPacketOrientation_ = false;
+
+    // The active mover (0: the player) and the player's own movement and
+    // speeds while another unit is the mover.
+    uint64_t moverGuid_ = 0;
+    struct MoverState {
+        MovementInfo info;
+        float walk = 2.5f, run = 7.0f, runBack = 4.5f, swim = 4.722f, swimBack = 2.5f;
+        float flight = 7.0f, flightBack = 4.5f, turn = core::coords::PI, pitch = core::coords::PI;
+        bool allowed = true;
+    };
+    MoverState playerState_;
+    MoverState captureMoverState() const;
+    void loadMoverState(const MoverState& s);
+    /// Where a force-move packet about `guid` applies: the active mover's
+    /// state (movementInfo and the speeds), the player's kept-aside one, or
+    /// nothing (another unit).
+    enum class ForceTarget { Mover, KeptPlayer, None };
+    ForceTarget forceTargetOf(uint64_t guid) const;
+    network::Packet buildForceAckFor(Opcode ackOpcode, uint32_t counter, uint64_t guid,
+                                     const MovementInfo& info);
 
     // Speed state
     float serverRunSpeed_ = 7.0f;

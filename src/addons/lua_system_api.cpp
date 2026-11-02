@@ -30,6 +30,7 @@
 #include "game/calendar_month.hpp"
 #include "game/calendar_data.hpp"
 #include "game/pet_action.hpp"
+#include "network/world_socket.hpp"
 #include "audio/activity_sound_manager.hpp"
 #include "audio/ambient_sound_manager.hpp"
 #include "audio/audio_coordinator.hpp"
@@ -4165,26 +4166,158 @@ static int lua_IsArenaTeamCaptain(lua_State* L) { lua_pushboolean(L, 0); return 
 // Closing the battlemaster's window, which is a client-side dismissal.
 static int lua_CloseBattlefield(lua_State* L) { (void)L; return 0; }
 
-// Leaving a vehicle, and whether its aim can be raised or lowered. Vehicles
-// are not modelled here, so neither is possible.
-// CanExitVehicle() - whether the player is riding something they can get off.
+// The vehicle controls (InputControl, stock 0xAD19F0..; docs/re/
+// mounts-taxi-vehicles.md 4). The seat answers what the player may do
+// (0x5FB560: seated, and the seat's flags), the vehicle the player moves
+// answers how it aims (0x5F9D20: Vehicle.dbc flags and pitch limits).
 //
-// False always, so the leave-vehicle button on the main bar stayed hidden and
-// the unit menu's Leave Vehicle entry was removed from the menu every time it
-// was built. The state behind it has been tracked the whole time.
-// Stock: seated, on a seat with flag 0x2000000 (CAN_ENTER_OR_EXIT); a seat
-// whose row is not known yet lets the player try.
-static int lua_CanExitVehicle(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    bool can = false;
-    if (gh && gh->vehiclePassenger(gh->getPlayerGuid())) {
-        const auto* seat = gh->vehicleSeatOf(gh->getPlayerGuid());
-        can = !seat || (seat->flags & 0x2000000u) != 0;
-    }
-    lua_pushboolean(L, can ? 1 : 0);
+// Whether the player's seat has `flag`; a seat whose row is not known yet
+// lets the player try.
+static bool playerSeatAllows(wowee::game::GameHandler* gh, uint32_t flag) {
+    if (!gh || !gh->vehiclePassenger(gh->getPlayerGuid())) return false;
+    const auto* seat = gh->vehicleSeatOf(gh->getPlayerGuid());
+    return !seat || (seat->flags & flag) != 0;
+}
+/// 1 or nil, as the stock functions answer (0x5FB970 pushes 1.0 or nil):
+/// VehicleMenuBar_SetSkin adds 1 to IsVehicleAimAngleAdjustable's answer.
+static int pushOneOrNil(lua_State* L, bool yes) {
+    if (yes) lua_pushnumber(L, 1.0); else lua_pushnil(L);
     return 1;
 }
-static int lua_IsVehicleAimAngleAdjustable(lua_State* L) { lua_pushboolean(L, 0); return 1; }
+// CanExitVehicle() - seat flag 0x2000000 (CAN_ENTER_OR_EXIT).
+static int lua_CanExitVehicle(lua_State* L) {
+    return pushOneOrNil(L, playerSeatAllows(getGameHandler(L), 0x2000000u));
+}
+// CanSwitchVehicleSeats() - 0x4000000; IsUsingVehicleControls() - 0x800000.
+static int lua_CanSwitchVehicleSeats(lua_State* L) {
+    return pushOneOrNil(L, playerSeatAllows(getGameHandler(L), 0x4000000u));
+}
+static int lua_IsUsingVehicleControls(lua_State* L) {
+    return pushOneOrNil(L, playerSeatAllows(getGameHandler(L), 0x800000u));
+}
+// IsVehicleAimAngleAdjustable() / IsVehicleAimPowerAdjustable(): Vehicle.dbc
+// flags 0x400 / 0x800 of the vehicle the player moves (0x5F9F70, 0x5F9FE0).
+static int lua_IsVehicleAimAngleAdjustable(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const auto* v = gh && gh->isMovingOtherUnit() ? gh->aimVehicleRecord() : nullptr;
+    return pushOneOrNil(L, (v && (v->flags & wowee::game::vehicle::kVehicleAdjustAimAngle)));
+}
+static int lua_IsVehicleAimPowerAdjustable(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const auto* v = gh && gh->isMovingOtherUnit() ? gh->aimVehicleRecord() : nullptr;
+    return pushOneOrNil(L, (v && (v->flags & wowee::game::vehicle::kVehicleAdjustAimPower)));
+}
+// VehicleAimIncrement([delta]) / VehicleAimDecrement([delta]): the aim
+// angle by delta, 0.1 rad without one (0x5FB770 -> 0x5FB4B0 -> 0x5FB3A0).
+static int lua_VehicleAimIncrement(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    if (!gh) return 0;
+    const float d = static_cast<float>(luaL_optnumber(L, 1, 0.1));
+    gh->requestVehicleAimPitch(gh->vehicleAimPitch() + d);
+    return 0;
+}
+static int lua_VehicleAimDecrement(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    if (!gh) return 0;
+    const float d = static_cast<float>(luaL_optnumber(L, 1, 0.1));
+    gh->requestVehicleAimPitch(gh->vehicleAimPitch() - d);
+    return 0;
+}
+// VehicleAimRequestAngle(rad) / VehicleAimRequestNormAngle(0..1): only on a
+// vehicle whose aim angle is the player's (0x5FB820, 0x5FB8C0).
+static int lua_VehicleAimRequestAngle(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    if (!gh || !lua_isnumber(L, 1)) return 0;
+    const auto* v = gh->isMovingOtherUnit() ? gh->aimVehicleRecord() : nullptr;
+    if (!v || !(v->flags & wowee::game::vehicle::kVehicleAdjustAimAngle)) return 0;
+    gh->requestVehicleAimPitch(static_cast<float>(lua_tonumber(L, 1)));
+    return 0;
+}
+static int lua_VehicleAimRequestNormAngle(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    if (!gh || !lua_isnumber(L, 1)) return 0;
+    const auto* v = gh->isMovingOtherUnit() ? gh->aimVehicleRecord() : nullptr;
+    if (!v || !(v->flags & wowee::game::vehicle::kVehicleAdjustAimAngle)) return 0;
+    gh->requestVehicleAimPitch(
+        wowee::game::vehicle::aimFromNorm(v, static_cast<float>(lua_tonumber(L, 1))));
+    return 0;
+}
+// VehicleAimGetAngle() / VehicleAimGetNormAngle(): the mover's pitch, and
+// that across the vehicle's limits (0x5F9E10, 0x5F9E60).
+static int lua_VehicleAimGetAngle(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    lua_pushnumber(L, gh ? gh->vehicleAimPitch() : 0.0);
+    return 1;
+}
+static int lua_VehicleAimGetNormAngle(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    if (!gh) { lua_pushnumber(L, 0.0); return 1; }
+    lua_pushnumber(L, wowee::game::vehicle::aimNormAngle(
+        gh->isMovingOtherUnit() ? gh->aimVehicleRecord() : nullptr, gh->vehicleAimPitch()));
+    return 1;
+}
+// VehicleAimSetNormPower(0..1) / VehicleAimGetNormPower() (0x5F9F10, 0x5F9550).
+static int lua_VehicleAimSetNormPower(lua_State* L) {
+    if (auto* gh = getGameHandler(L); gh && lua_isnumber(L, 1))
+        gh->setVehicleAimPower(static_cast<float>(lua_tonumber(L, 1)));
+    return 0;
+}
+static int lua_VehicleAimGetNormPower(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    lua_pushnumber(L, gh ? gh->vehicleAimPower() : 0.0);
+    return 1;
+}
+// GetVehicleUIIndicator(id) -> background, numSeats; GetVehicleUIIndicatorSeat
+// (id, i) -> virtualSeatIndex, x, y (0x614E60, 0x614EF0).
+static int lua_GetVehicleUIIndicator(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    if (!gh || !lua_isnumber(L, 1)) return 0;
+    const auto* ind = gh->vehicleData().uiIndicator(
+        gh->services().assetManager, static_cast<uint32_t>(lua_tonumber(L, 1)));
+    if (!ind) return 0;
+    lua_pushstring(L, ind->background.c_str());
+    lua_pushnumber(L, static_cast<double>(ind->seats.size()));
+    return 2;
+}
+static int lua_GetVehicleUIIndicatorSeat(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    if (!gh || !lua_isnumber(L, 1) || !lua_isnumber(L, 2)) return 0;
+    const auto* ind = gh->vehicleData().uiIndicator(
+        gh->services().assetManager, static_cast<uint32_t>(lua_tonumber(L, 1)));
+    const int i = static_cast<int>(lua_tonumber(L, 2)) - 1;
+    if (!ind || i < 0 || i >= static_cast<int>(ind->seats.size())) return 0;
+    lua_pushnumber(L, ind->seats[static_cast<size_t>(i)].virtualSeatIndex);
+    lua_pushnumber(L, ind->seats[static_cast<size_t>(i)].x);
+    lua_pushnumber(L, ind->seats[static_cast<size_t>(i)].y);
+    return 3;
+}
+// CanEjectPassengerFromSeat(virtualSeat) / EjectPassengerFromSeat: the
+// player is the vehicle (a multi-seat mount's driver) and the seat's
+// flagsB has 0x20; CMSG_CONTROLLER_EJECT_PASSENGER with its occupant.
+static uint64_t ejectableOccupant(wowee::game::GameHandler* gh, int virtualSeat) {
+    if (!gh || gh->unitVehicleId(gh->getPlayerGuid()) == 0) return 0;
+    uint64_t veh = 0;
+    int seat = 0;
+    if (!gh->vehicleVirtualSeat(gh->getPlayerGuid(), virtualSeat - 1, veh, seat)) return 0;
+    const auto* rec = gh->vehicleData().seatOf(gh->unitVehicleId(veh), seat);
+    if (!rec || !(rec->flagsB & wowee::game::vehicle::kSeatBCanEject)) return 0;
+    return gh->vehicleSeatOccupant(veh, seat);
+}
+static int lua_CanEjectPassengerFromSeat(lua_State* L) {
+    lua_pushboolean(L, ejectableOccupant(getGameHandler(L),
+                                         static_cast<int>(luaL_optnumber(L, 1, 0))) != 0 ? 1 : 0);
+    return 1;
+}
+static int lua_EjectPassengerFromSeat(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const uint64_t who = ejectableOccupant(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+    if (who != 0 && gh->getSocket()) {
+        wowee::network::Packet p(wowee::game::wireOpcode(wowee::game::Opcode::CMSG_CONTROLLER_EJECT_PASSENGER));
+        p.writeUInt64(who);
+        gh->getSocket()->send(p);
+    }
+    return 0;
+}
 
 // HasKey() - whether the player carries a key ring at all. The keyring exists
 // and holds keys, so the button that opens it is offered.
@@ -5449,6 +5582,19 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"CloseBattlefield",             lua_CloseBattlefield},
                 {"CanExitVehicle",               lua_CanExitVehicle},
                 {"IsVehicleAimAngleAdjustable",  lua_IsVehicleAimAngleAdjustable},
+                {"IsVehicleAimPowerAdjustable",  lua_IsVehicleAimPowerAdjustable},
+                {"CanSwitchVehicleSeats",        lua_CanSwitchVehicleSeats},
+                {"IsUsingVehicleControls",       lua_IsUsingVehicleControls},
+                {"VehicleAimIncrement",          lua_VehicleAimIncrement},
+                {"VehicleAimDecrement",          lua_VehicleAimDecrement},
+                {"VehicleAimRequestAngle",       lua_VehicleAimRequestAngle},
+                {"VehicleAimRequestNormAngle",   lua_VehicleAimRequestNormAngle},
+                {"VehicleAimGetAngle",           lua_VehicleAimGetAngle},
+                {"VehicleAimSetNormPower",       lua_VehicleAimSetNormPower},
+                {"GetVehicleUIIndicator",        lua_GetVehicleUIIndicator},
+                {"GetVehicleUIIndicatorSeat",    lua_GetVehicleUIIndicatorSeat},
+                {"CanEjectPassengerFromSeat",    lua_CanEjectPassengerFromSeat},
+                {"EjectPassengerFromSeat",       lua_EjectPassengerFromSeat},
                 {"HasKey",                       lua_HasKey},
                 {"GetArenaTeam",             lua_GetArenaTeam},
                 {"GetRandomBGHonorCurrencyBonuses",  lua_GetRandomBGHonorCurrencyBonuses},
@@ -5569,23 +5715,50 @@ void registerSystemLuaAPI(lua_State* L) {
             return 1;
         }},
                 {"TurnInGuildCharter",       lua_ReturnNothing},
-                // Nothing is being driven, so aiming it does nothing
-                // and there is nothing to climb out of.
-                {"VehicleAimUpStart",        lua_ReturnNothing},
-                {"VehicleAimUpStop",         lua_ReturnNothing},
-                {"VehicleAimDownStart",      lua_ReturnNothing},
-                {"VehicleAimDownStop",       lua_ReturnNothing},
-                // The button and the slash command both end here, and it did
-                // nothing - so /leavevehicle, the main bar's button and the
-                // unit menu's entry were three ways of not getting off.
-                // CMSG_REQUEST_VEHICLE_EXIT was already written and had no
-                // caller outside this client's own bar.
-                {"VehicleExit", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->sendRequestVehicleExit();
+                // The aim keys (0x5FC8E0 ...): pitch up or down at the
+                // vehicle's pitch rate while held.
+                {"VehicleAimUpStart", [](lua_State* L) -> int {
+            if (auto* gh = getGameHandler(L)) gh->setVehicleAimDirection(1);
             return 0;
         }},
-                {"VehicleAimGetNormAngle",   lua_ReturnZero},
-                {"VehicleAimGetNormPower",   lua_ReturnZero},
+                {"VehicleAimUpStop", [](lua_State* L) -> int {
+            if (auto* gh = getGameHandler(L)) gh->setVehicleAimDirection(0);
+            return 0;
+        }},
+                {"VehicleAimDownStart", [](lua_State* L) -> int {
+            if (auto* gh = getGameHandler(L)) gh->setVehicleAimDirection(-1);
+            return 0;
+        }},
+                {"VehicleAimDownStop", [](lua_State* L) -> int {
+            if (auto* gh = getGameHandler(L)) gh->setVehicleAimDirection(0);
+            return 0;
+        }},
+                // VehicleExit (0x5FB660): a seat that lets the player off -
+                // else SPELL_FAILED_CANT_DO_THAT_RIGHT_NOW - and then the
+                // driver's dismiss or the passenger's request.
+                {"VehicleExit", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            if (!gh) return 0;
+            if (!playerSeatAllows(gh, 0x2000000u)) {
+                gh->addUIError("You can't do that right now.");
+                return 0;
+            }
+            gh->vehicleExit();
+            return 0;
+        }},
+                // VehiclePrevSeat / VehicleNextSeat (0x5FB6D0, 0x5FB720).
+                {"VehiclePrevSeat", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            if (gh && playerSeatAllows(gh, 0x4000000u)) gh->vehicleChangeSeat(false);
+            return 0;
+        }},
+                {"VehicleNextSeat", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            if (gh && playerSeatAllows(gh, 0x4000000u)) gh->vehicleChangeSeat(true);
+            return 0;
+        }},
+                {"VehicleAimGetNormAngle",   lua_VehicleAimGetNormAngle},
+                {"VehicleAimGetNormPower",   lua_VehicleAimGetNormPower},
                 {"GetExpansionLevel",        lua_GetExpansionLevel},
                 // The difficulty the player is set to, which this client is
                 // told by SMSG_INSTANCE_DIFFICULTY and kept answering as one.
@@ -6561,9 +6734,15 @@ void registerSystemLuaAPI(lua_State* L) {
                 // out here - a table of class-and-form guesses is not
                 // checkable, and this one is: cat 1, bear 3, moonkin 4, the
                 // three warrior stances 1 to 3, 0 for the travel forms.
+                //
+                // 5 while a vehicle's or a possessed unit's spells are the
+                // bar (0x5A83C0: the pet-bar flag wins over the form).
                 {"GetBonusBarOffset", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? static_cast<double>(gh->getBonusActionBarOffset()) : 0.0);
+            const double offset = !gh ? 0.0
+                : gh->vehicleBarActive() ? 5.0
+                : static_cast<double>(gh->getBonusActionBarOffset());
+            lua_pushnumber(L, offset);
             return 1;
         }},
                 {"GetNumBattlegroundTypes",  lua_GetNumBattlegroundTypes},

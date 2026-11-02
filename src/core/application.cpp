@@ -1,4 +1,5 @@
 #include "core/application.hpp"
+#include "game/stock_movement.hpp"
 #include "core/frame_pacer.hpp"
 #include "core/env_flag.hpp"
 #include "core/character_paths.hpp"
@@ -432,11 +433,14 @@ uint32_t vehicleModelOf(game::GameHandler& gh, rendering::Renderer* renderer, En
 /// position, the camera's target and the reported position follow it (the
 /// seat matrix places the model). False when the player sits nowhere.
 /// Seated in a vehicle: the vehicle carries the player (externally driven).
+/// A passenger who does not drive: the controls move nothing. One who drives
+/// (the vehicle is the active mover) moves the vehicle with them.
 bool playerSeatedInVehicle(game::GameHandler* gh) {
-    return gh && gh->vehiclePassenger(gh->getPlayerGuid()) != nullptr;
+    return gh && gh->vehiclePassenger(gh->getPlayerGuid()) != nullptr && !gh->isMovingOtherUnit();
 }
 
 bool placePlayerInVehicleSeat(game::GameHandler& gh, rendering::Renderer* renderer) {
+    if (gh.isMovingOtherUnit()) return false;
     const auto* seat = gh.vehiclePassenger(gh.getPlayerGuid());
     auto vehicle = seat ? gh.getEntityManager().getEntity(seat->vehicleGuid) : nullptr;
     if (!vehicle) return false;
@@ -459,33 +463,123 @@ bool placePlayerInVehicleSeat(game::GameHandler& gh, rendering::Renderer* render
 /// RideAnimLoop where the seat has them (flag 0x2), else its own stand -
 /// never Mount (91) for want of one. The vehicle plays the seat's
 /// VehicleRideAnimLoop (flag 0x20000). Seat flag 0x200 hides the passenger.
+///
+/// Boarding and leaving are arcs (states 1/2 and 4/5, 0x74A200 / 0x74A7F0):
+/// after the seat's pre-delay, from where the passenger stood to the seat
+/// (or from the seat to where the server put it), over the distance at the
+/// seat's Enter/ExitSpeed, a parabola at its gravity held to its arc
+/// heights, eased by the seat's flags; the enter (0x1) or exit animation
+/// plays meanwhile.
 void syncVehiclePassengers(game::GameHandler& gh, rendering::Renderer* renderer, EntitySpawner& spawner) {
     namespace veh = game::vehicle;
     auto* cr = renderer->getCharacterRenderer();
+    using clock = std::chrono::steady_clock;
+    const auto now = clock::now();
+    auto secondsSince = [&](clock::time_point t) {
+        return std::chrono::duration<float>(now - t).count();
+    };
+    struct Arc {
+        veh::SeatArc arc;
+        clock::time_point start;
+        glm::vec3 from{0.0f};
+        bool active = false;
+    };
     struct Seated {
         uint32_t instance = 0;
         uint32_t vehicleInstance = 0;
         uint32_t seatId = 0;
         uint32_t loop = veh::kNoAnim;
         bool hidden = false;
+        Arc enter;
+        veh::SeatRecord seat;
+        bool haveSeat = false;
+        int attachment = 0;
+        glm::vec3 offset{0.0f};
+        float yaw = 0.0f;
+        int passengerAttachment = -1;
+    };
+    struct Leaving {
+        uint32_t instance = 0;
+        uint32_t vehicleInstance = 0;
+        Arc exit;
+        bool hidden = false;
     };
     static std::unordered_map<uint64_t, Seated> seated;
+    static std::unordered_map<uint64_t, Leaving> leaving;
 
-    // Those who left their seat (or whose models went): unseat, show, and
-    // let their own animation take over again.
+    auto restoreOwnAnimation = [&](uint64_t guid, uint32_t inst) {
+        if (guid != gh.getPlayerGuid()) cr->playAnimation(inst, rendering::anim::STAND, true);
+        auto& loco = spawner.getUnitLocomotion();
+        if (auto l = loco.find(guid); l != loco.end()) l->second.needsReplay = true;
+    };
+    // Where a passenger's own position puts it (the destination of a
+    // leaving arc): the local character's position, else its entity's.
+    auto ownRenderPos = [&](uint64_t guid, glm::vec3& out) {
+        if (guid == gh.getPlayerGuid()) { out = renderer->getCharacterPosition(); return true; }
+        auto e = gh.getEntityManager().getEntity(guid);
+        if (!e) return false;
+        out = core::coords::canonicalToRender(glm::vec3(e->getX(), e->getY(), e->getZ()));
+        return true;
+    };
+
+    // Those who left their seat (or whose models went): the exit arc from
+    // the seat to where they now are, then on their own feet again.
     for (auto it = seated.begin(); it != seated.end();) {
         const auto* p = gh.vehiclePassenger(it->first);
         const uint32_t inst = unitInstanceOf(gh, renderer, spawner, it->first);
         if (p && inst == it->second.instance) { ++it; continue; }
-        if (it->second.instance != 0) {
-            cr->setInstanceSeatedOn(it->second.instance, 0, 0, glm::vec3(0.0f), 0.0f, -1);
-            if (it->second.hidden) cr->setInstanceVisible(it->second.instance, true);
-            if (inst == it->second.instance && it->first != gh.getPlayerGuid())
-                cr->playAnimation(inst, rendering::anim::STAND, true);
-            auto& loco = spawner.getUnitLocomotion();
-            if (auto l = loco.find(it->first); l != loco.end()) l->second.needsReplay = true;
+        Seated& was = it->second;
+        glm::vec3 seatPoint(0.0f), dest(0.0f);
+        const bool canArc = was.haveSeat && inst == was.instance && was.instance != 0 &&
+                            cr->getInstanceSeatPoint(was.instance, seatPoint) &&
+                            ownRenderPos(it->first, dest);
+        if (canArc) {
+            Leaving l;
+            l.instance = was.instance;
+            l.vehicleInstance = was.vehicleInstance;
+            l.hidden = was.hidden;
+            l.exit.arc = veh::seatArc(was.seat, false, glm::length(dest - seatPoint));
+            l.exit.start = now;
+            l.exit.from = seatPoint;
+            l.exit.active = l.exit.arc.duration > 0.0f;
+            if (l.exit.active) {
+                const veh::PassengerAnim a = veh::passengerAnim(was.seat, veh::PassengerState::Exiting);
+                if (a.start != veh::kNoAnim) cr->playAnimation(inst, a.start, false, a.loop != veh::kNoAnim ? a.loop : 0u);
+                else if (a.loop != veh::kNoAnim) cr->playAnimation(inst, a.loop, true);
+                leaving[it->first] = l;
+                it = seated.erase(it);
+                continue;
+            }
+        }
+        if (was.instance != 0) {
+            cr->setInstanceSeatedOn(was.instance, 0, 0, glm::vec3(0.0f), 0.0f, -1);
+            if (was.hidden) cr->setInstanceVisible(was.instance, true);
+            if (inst == was.instance) restoreOwnAnimation(it->first, inst);
         }
         it = seated.erase(it);
+    }
+    // The exit arcs under way: the seat point eases toward the passenger's
+    // own place (blend runs from the seat, 1, down to it, 0).
+    for (auto it = leaving.begin(); it != leaving.end();) {
+        Leaving& l = it->second;
+        const uint32_t inst = unitInstanceOf(gh, renderer, spawner, it->first);
+        const float t = secondsSince(l.exit.start) - l.exit.arc.preDelay;
+        glm::vec3 dest(0.0f);
+        const bool done = inst != l.instance || gh.vehiclePassenger(it->first) ||
+                          t >= l.exit.arc.duration || !ownRenderPos(it->first, dest);
+        if (done) {
+            if (inst == l.instance && !gh.vehiclePassenger(it->first)) {
+                cr->setInstanceSeatedOn(l.instance, 0, 0, glm::vec3(0.0f), 0.0f, -1);
+                if (l.hidden) cr->setInstanceVisible(l.instance, true);
+                restoreOwnAnimation(it->first, inst);
+            }
+            it = leaving.erase(it);
+            continue;
+        }
+        const float prog = veh::seatArcProgress(l.exit.arc, t < 0.0f ? 0.0f : t);
+        cr->setInstanceSeatArc(l.instance, dest, 1.0f - prog, veh::seatArcLift(l.exit.arc, prog));
+        cr->setInstancePosition(l.instance, glm::mix(l.exit.from, dest, prog));
+        ++it;
     }
 
     for (const auto& [guid, p] : gh.vehiclePassengers()) {
@@ -498,20 +592,43 @@ void syncVehiclePassengers(game::GameHandler& gh, rendering::Renderer* renderer,
         const int att = seat ? veh::seatM2Attachment(seat->attachmentId) : 0;
         const glm::vec3 offset = seat ? seat->attachmentOffset : glm::vec3(0.0f);
         Seated& s = seated[guid];
+        const bool boarding = s.instance == 0;
         const bool fresh = s.instance != inst || s.vehicleInstance != vInst ||
                            s.seatId != (seat ? seat->id : 0u);
         if (fresh) {
+            // Where it stood before the seat took it: the start of the arc.
+            glm::vec3 from(0.0f);
+            bool haveFrom = false;
+            if (auto lv = leaving.find(guid); lv != leaving.end()) leaving.erase(lv);
+            if (!boarding && cr->getInstanceSeatPoint(inst, from)) haveFrom = true;
+            else haveFrom = cr->getInstancePosition(inst, from);
             s.instance = inst;
             s.vehicleInstance = vInst;
             s.seatId = seat ? seat->id : 0u;
-            cr->setInstanceSeatedOn(inst, vInst, att, offset, seat ? seat->passengerYaw : 0.0f,
-                                    seat ? seat->passengerAttachmentId : -1);
+            s.haveSeat = seat != nullptr;
+            if (seat) s.seat = *seat;
+            s.attachment = att;
+            s.offset = offset;
+            s.yaw = seat ? seat->passengerYaw : 0.0f;
+            s.passengerAttachment = seat ? seat->passengerAttachmentId : -1;
+            cr->setInstanceSeatedOn(inst, vInst, att, offset, s.yaw, s.passengerAttachment);
             const bool hide = seat && (seat->flags & 0x200u);
             if (hide != s.hidden) cr->setInstanceVisible(inst, !hide);
             s.hidden = hide;
-            const veh::PassengerAnim a =
-                seat ? veh::passengerAnim(*seat, veh::PassengerState::Seated) : veh::PassengerAnim{};
-            s.loop = a.loop;
+            // The boarding arc, from where it stood to the vehicle.
+            s.enter.active = false;
+            glm::vec3 vPos(0.0f);
+            if (seat && haveFrom && cr->getInstancePosition(vInst, vPos)) {
+                s.enter.arc = veh::seatArc(*seat, true, glm::length(vPos - from));
+                s.enter.start = now;
+                s.enter.from = from;
+                s.enter.active = s.enter.arc.duration > 0.0f && glm::length(vPos - from) > 0.25f;
+            }
+            const veh::PassengerAnim a = seat
+                ? veh::passengerAnim(*seat, s.enter.active ? veh::PassengerState::Entering
+                                                           : veh::PassengerState::Seated)
+                : veh::PassengerAnim{};
+            s.loop = s.enter.active ? veh::kNoAnim : a.loop;
             if (a.start != veh::kNoAnim) {
                 cr->playAnimation(inst, a.start, false, a.loop != veh::kNoAnim ? a.loop : 0u);
             } else if (a.loop != veh::kNoAnim) {
@@ -530,10 +647,120 @@ void syncVehiclePassengers(game::GameHandler& gh, rendering::Renderer* renderer,
             if (cr->getAnimationState(inst, cur, t, d) && cur == rendering::anim::STAND)
                 cr->playAnimation(inst, s.loop, true);
         }
+        if (s.enter.active) {
+            const float t = secondsSince(s.enter.start) - s.enter.arc.preDelay;
+            if (t >= s.enter.arc.duration) {
+                // Seated (state 3): the ride animation from here on.
+                s.enter.active = false;
+                cr->setInstanceSeatArc(inst, s.enter.from, 1.0f, 0.0f);
+                if (s.haveSeat) {
+                    const veh::PassengerAnim a = veh::passengerAnim(s.seat, veh::PassengerState::Seated);
+                    s.loop = a.loop;
+                    if (a.start != veh::kNoAnim)
+                        cr->playAnimation(inst, a.start, false, a.loop != veh::kNoAnim ? a.loop : 0u);
+                    else if (a.loop != veh::kNoAnim) cr->playAnimation(inst, a.loop, true);
+                    else if (guid != gh.getPlayerGuid()) cr->playAnimation(inst, rendering::anim::STAND, true);
+                }
+            } else {
+                const float prog = veh::seatArcProgress(s.enter.arc, t < 0.0f ? 0.0f : t);
+                cr->setInstanceSeatArc(inst, s.enter.from, prog, veh::seatArcLift(s.enter.arc, prog));
+            }
+        }
         // Where the seat is, for the culling and whoever asks the instance.
         glm::vec3 vPos(0.0f);
         if (cr->getInstancePosition(vInst, vPos)) cr->setInstancePosition(inst, vPos);
     }
+}
+
+/// The vehicle camera (VehicleCamera_C 0x759200 / 0x759D80): it orbits the
+/// vehicle - or, with the seat's flagsB 0x100, the passenger's seat point -
+/// moved by the seat's CameraOffset turned with the vehicle's facing (stock
+/// builds it as (Y, -X, Z) before the turn), chased by CameraPosChaseRate
+/// when the seat has one (stiffness 20 / rate). On foot nothing moves it.
+void applyVehicleCamera(game::GameHandler& gh, rendering::Renderer* renderer, EntitySpawner& spawner, float dt) {
+    auto* cc = renderer->getCameraController();
+    if (!cc) return;
+    static glm::vec3 chased(0.0f);
+    static bool haveChase = false;
+    static uint32_t fadedInstance = 0;
+    static std::vector<uint32_t> fadedAccessories;
+    auto* cr = renderer->getCharacterRenderer();
+    if (cr) for (uint32_t ai : fadedAccessories) cr->setInstanceOpacity(ai, 1.0f);
+    fadedAccessories.clear();
+    const auto* p = gh.vehiclePassenger(gh.getPlayerGuid());
+    const game::vehicle::SeatRecord* seat = p ? gh.vehicleSeatOf(gh.getPlayerGuid()) : nullptr;
+    if (!seat) {
+        cc->setPivotOffset(glm::vec3(0.0f));
+        haveChase = false;
+        if (fadedInstance && cr) cr->setInstanceOpacity(fadedInstance, 1.0f);
+        fadedInstance = 0;
+        return;
+    }
+    const glm::vec3 base = renderer->getCharacterPosition();
+    glm::vec3 target = base;
+    if (seat->flagsB & game::vehicle::kSeatBCameraOnPassenger) {
+        glm::vec3 sp(0.0f);
+        if (cr && cr->getInstanceSeatPoint(renderer->getCharacterInstanceId(), sp)) {
+            target = sp;
+        }
+    }
+    const glm::vec3& o = seat->cameraOffset;
+    if (o.x != 0.0f || o.y != 0.0f || o.z != 0.0f) {
+        float facing = 0.0f;
+        if (auto v = gh.getEntityManager().getEntity(p->vehicleGuid))
+            facing = core::coords::canonicalToServerYaw(v->getOrientation());
+        // Render axes are the server's: x and y as the wire has them.
+        const float c = std::cos(facing), sn = std::sin(facing);
+        const glm::vec2 local(o.y, -o.x);
+        target += glm::vec3(local.x * c - local.y * sn, local.x * sn + local.y * c, o.z);
+    }
+    // A vehicle that fades (Vehicle.flags 0x80000) is seen through as the
+    // camera comes inside it.
+    const auto* vrec = gh.vehicleData().vehicle(gh.unitVehicleId(p->vehicleGuid));
+    const uint32_t vInst = vehicleModelOf(gh, renderer, spawner, p->vehicleGuid);
+    if (cr && vrec && vInst && (vrec->flags & game::vehicle::kVehicleCameraFade)) {
+        float r = 0.0f;
+        // The size is the Stand sequence's bounds radius (0x82CED0 output
+        // +0x30: M2Sequence +0x38), in model units as stock takes it.
+        std::vector<pipeline::M2Sequence> seqs;
+        if (cr->getAnimationSequences(vInst, seqs)) {
+            for (const auto& q : seqs) {
+                if (q.id == 0) { r = q.boundRadius; break; }
+            }
+        }
+        if (r > 0.0f) {
+            // From the camera to the point it looks at (0x5FECF0 between the
+            // camera and its target, vtable +4).
+            const float d = cc->getViewDistance();
+            const float alpha = game::vehicle::cameraFadeAlpha(*vrec, r, d);
+            static float lastLogged = -1.0f;
+            if (std::abs(alpha - lastLogged) > 0.25f) {
+                lastLogged = alpha;
+                LOG_INFO("Vehicle fade: size ", r, " camera at ", d, " alpha ", alpha);
+            }
+            cr->setInstanceOpacity(vInst, alpha);
+            fadedInstance = vInst;
+            // Its accessories (a siege engine's turret) are part of its body.
+            for (const auto& [g, q] : gh.vehiclePassengers()) {
+                if (q.vehicleGuid != p->vehicleGuid || gh.unitVehicleId(g) == 0) continue;
+                if (const uint32_t ai = unitInstanceOf(gh, renderer, spawner, g)) {
+                    cr->setInstanceOpacity(ai, alpha);
+                    fadedAccessories.push_back(ai);
+                }
+            }
+        }
+    } else if (fadedInstance && cr) {
+        cr->setInstanceOpacity(fadedInstance, 1.0f);
+        fadedInstance = 0;
+    }
+    if (seat->cameraPosChaseRate > 1.0e-4f && haveChase) {
+        const float k = 1.0f - std::exp(-dt * 20.0f / seat->cameraPosChaseRate);
+        chased += (target - chased) * k;
+    } else {
+        chased = target;
+    }
+    haveChase = true;
+    cc->setPivotOffset(chased - base);
 }
 
 /// A unit's speed and pace for the locomotion, when the stock motion drives it.
@@ -2822,6 +3049,30 @@ void Application::setState(AppState newState) {
                 cc->setUseWoWSpeed(true);
             }
             if (gameHandler) {
+                // Where a vehicle's missile meets the ground (the cast's
+                // landing point, GameHandler::useVehicleBarAction): the
+                // terrain or a building's floor under the segment's end.
+                gameHandler->setWorldSegmentHitCallback(
+                    [this](const glm::vec3& a, const glm::vec3& b, float& frac) -> bool {
+                        if (!renderer) return false;
+                        auto groundUnder = [this](const glm::vec3& canon) -> std::optional<float> {
+                            const glm::vec3 r = core::coords::canonicalToRender(canon);
+                            std::optional<float> best;
+                            if (auto* tm = renderer->getTerrainManager()) best = tm->getHeightAt(r.x, r.y);
+                            if (auto* wmo = renderer->getWMORenderer()) {
+                                if (auto f = wmo->getFloorHeight(r.x, r.y, r.z + 2.0f); f && (!best || *f > *best))
+                                    best = f;
+                            }
+                            return best;
+                        };
+                        const auto gb = groundUnder(b);
+                        if (!gb || b.z > *gb) return false;
+                        const auto ga = groundUnder(a);
+                        const float da = a.z - (ga ? *ga : *gb);
+                        const float db = b.z - *gb;
+                        frac = (da > 0.0f && da - db > 1.0e-4f) ? da / (da - db) : 0.0f;
+                        return true;
+                    });
                 gameHandler->setFaceCameraProvider([this]() -> float {
                     // Turn the character to the camera's look direction and report it in
                     // canonical space (same camera-yaw→canonical mapping as the per-frame
@@ -3210,6 +3461,97 @@ void Application::performLogoutToLogin() {
     }
 }
 
+// The body the controls move: a driven vehicle's NO_STRAFE / NO_JUMPING
+// (its movement's flags2) and collision box, or the player's - race, form,
+// mount.
+void Application::applyMoverBody() {
+    auto* cc = renderer->getCameraController();
+    const bool driving = gameHandler->isMovingOtherUnit();
+    const uint16_t f2 = driving ? gameHandler->getMovementInfo().flags2 : 0;
+    cc->setMoveRestrictions((f2 & 0x1) != 0, (f2 & 0x2) != 0);
+    auto body = std::dynamic_pointer_cast<game::Unit>(gameHandler->getEntityManager().getEntity(
+        driving ? gameHandler->activeMoverGuid() : gameHandler->getPlayerGuid()));
+    if (!body) return;
+    float objectScale = 1.0f;
+    const uint16_t si = game::fieldIndex(game::UF::OBJECT_FIELD_SCALE_X);
+    if (si != 0xFFFF) {
+        if (const uint32_t raw = body->getField(si); raw != 0) {
+            const float sc = std::bit_cast<float>(raw);
+            if (sc > 0.01f && sc < 100.0f) objectScale = sc;
+        }
+    }
+    if (auto c = playerColliderFor(assetManager.get(), body->getDisplayId(),
+                                   driving ? 0u : body->getMountDisplayId(), objectScale)) {
+        cc->setPlayerCollider(*c);
+    }
+}
+
+// Off a vehicle's seat the player rides the server's exit spline
+// (TransportExit) to where it puts them, as the stock unit motion runs any
+// unit's spline; the controls take over at its end.
+void Application::updateSeatExitFollow(float deltaTime, bool onTaxi) {
+    const bool inSeat = gameHandler && gameHandler->vehiclePassenger(gameHandler->getPlayerGuid());
+    if (wasInVehicleSeat_ && !inSeat) sinceVehicleExit_ = 0.0f;
+    else sinceVehicleExit_ += deltaTime;
+    wasInVehicleSeat_ = inSeat;
+    playerOnSeatSpline_ = false;
+    if (!inSeat && !onTaxi && gameHandler && sinceVehicleExit_ < 5.0f) {
+        if (auto pe = gameHandler->getEntityManager().getEntity(gameHandler->getPlayerGuid()))
+            playerOnSeatSpline_ = pe->hasStockMotion() && pe->stockMotionIsSpline();
+    }
+}
+
+// The active mover changed - a vehicle's control seat taken or left
+// (SMSG_CLIENT_CONTROL_UPDATE): the controls move it from where it is and
+// face its way.
+void Application::snapControlsToActiveMover() {
+    const uint64_t mover = gameHandler->activeMoverGuid();
+    if (mover == lastActiveMover_) return;
+    const bool snap = lastActiveMover_ != 0 &&
+        (mover != gameHandler->getPlayerGuid() || lastActiveMover_ != gameHandler->getPlayerGuid());
+    lastActiveMover_ = mover;
+    if (!snap) return;
+    const auto& mi = gameHandler->getMovementInfo();
+    const glm::vec3 rp = core::coords::canonicalToRender(glm::vec3(mi.x, mi.y, mi.z));
+    renderer->getCharacterPosition() = rp;
+    const float deg = core::coords::canonicalToCharacterYawDeg(mi.orientation);
+    renderer->setCharacterYaw(deg);
+    if (auto* cc = renderer->getCameraController()) {
+        cc->setFacingYaw(deg);
+        cc->clearMovementInputs();
+        if (glm::vec3* ft = cc->getFollowTargetMutable()) *ft = rp;
+    }
+    LOG_INFO("Controls now move 0x", std::hex, mover, std::dec, " at (", mi.x, ", ", mi.y,
+             ", ", mi.z, ")");
+}
+
+// The vehicle being driven is where the controls put it: its entity (what
+// everything else reads) and the direction it moves in (its locomotion). The
+// server does not echo a mover's own movement.
+void Application::syncDrivenVehicle() {
+    if (!gameHandler->isMovingOtherUnit()) return;
+    const auto& mv = gameHandler->getMovementInfo();
+    {
+        static auto lastLog = std::chrono::steady_clock::time_point{};
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastLog > std::chrono::seconds(2)) {
+            lastLog = now;
+            auto* cc = renderer->getCameraController();
+            LOG_DEBUG("Driving 0x", std::hex, gameHandler->activeMoverGuid(), std::dec, " at (", mv.x, ", ",
+                     mv.y, ", ", mv.z, ") flags=0x", std::hex, mv.flags, std::dec,
+                     " moving=", cc && cc->isMoving() ? 1 : 0, " rooted=", cc && cc->isMovementRooted() ? 1 : 0,
+                     " allowed=", gameHandler->getMovementHandler()->isServerMovementAllowed() ? 1 : 0);
+        }
+    }
+    if (auto veh = gameHandler->getEntityManager().getEntity(gameHandler->activeMoverGuid())) {
+        veh->setPosition(mv.x, mv.y, mv.z, mv.orientation);
+    }
+    if (entitySpawner_) {
+        entitySpawner_->getUnitMoveDirFlags()[gameHandler->activeMoverGuid()] =
+            mv.flags & game::stock_movement::kMovingMask;
+    }
+}
+
 // One frame of being in the world.
 //
 // The largest arm of update()'s state switch by a wide margin: input, the
@@ -3238,22 +3580,7 @@ void Application::applyServerMovementState(float deltaTime) {
         renderer->getCameraController()->setGravityDisabled(gameHandler->isGravityDisabled());
         renderer->getCameraController()->setFeatherFallActive(gameHandler->isFeatherFalling());
         renderer->getCameraController()->setWaterWalkActive(gameHandler->isWaterWalking());
-        // The collision box of the model the player is now: race, form, mount.
-        if (auto player = std::dynamic_pointer_cast<game::Unit>(
-                gameHandler->getEntityManager().getEntity(gameHandler->getPlayerGuid()))) {
-            float objectScale = 1.0f;
-            const uint16_t si = game::fieldIndex(game::UF::OBJECT_FIELD_SCALE_X);
-            if (si != 0xFFFF) {
-                if (const uint32_t raw = player->getField(si); raw != 0) {
-                    const float sc = std::bit_cast<float>(raw);
-                    if (sc > 0.01f && sc < 100.0f) objectScale = sc;
-                }
-            }
-            if (auto c = playerColliderFor(assetManager.get(), player->getDisplayId(),
-                                           player->getMountDisplayId(), objectScale)) {
-                renderer->getCameraController()->setPlayerCollider(*c);
-            }
-        }
+        applyMoverBody();
         // Flight physics engage on the CAN_FLY ability (flying mount
         // or .gm fly), not isPlayerFlying() which also needs the
         // FLYING flag the client only sets once already airborne.
@@ -3347,7 +3674,8 @@ void Application::applyServerMovementState(float deltaTime) {
     // A ship carries the player's reference frame, but it must not
     // freeze local controls like a taxi flight. On-deck walking is
     // folded into the transport-local offset in the sync block below.
-    const bool externallyDrivenMotion = onTaxi || playerSeatedInVehicle(gameHandler.get()) ||
+    updateSeatExitFollow(deltaTime, onTaxi);
+    const bool externallyDrivenMotion = onTaxi || playerOnSeatSpline_ || playerSeatedInVehicle(gameHandler.get()) ||
         (animationCallbacks_ && animationCallbacks_->isCharging());
     // Keep physics frozen (externalFollow) during landing clamp when terrain
     // hasn't loaded yet - prevents gravity from pulling player through void.
@@ -3487,7 +3815,11 @@ void Application::applyServerMovementState(float deltaTime) {
     }
     }
     if (renderer) {
-        if (auto* ac = renderer->getAnimationController()) ac->setTaxiFlight(onTaxi);
+        if (auto* ac = renderer->getAnimationController()) {
+            ac->setTaxiFlight(onTaxi);
+            ac->setSeatedInVehicle(gameHandler &&
+                                   gameHandler->vehiclePassenger(gameHandler->getPlayerGuid()) != nullptr);
+        }
         // Round to the character's face while the barber has them in the chair,
         // and back to the player's own view when either ends.
         //
@@ -3535,7 +3867,9 @@ void Application::applyServerMovementState(float deltaTime) {
         wasOnTransport = onTransportNowDbg;
     }
 
-    if (!placePlayerInVehicleSeat(*gameHandler, renderer.get()) && onTaxi) {
+    snapControlsToActiveMover();
+
+    if (!placePlayerInVehicleSeat(*gameHandler, renderer.get()) && (onTaxi || playerOnSeatSpline_)) {
         auto playerEntity = gameHandler->getEntityManager().getEntity(gameHandler->getPlayerGuid());
         glm::vec3 canonical(0.0f);
         bool haveCanonical = false;
@@ -3860,10 +4194,12 @@ void Application::applyServerMovementState(float deltaTime) {
             }
         }
 
+        syncDrivenVehicle();
+
         // Client-side transport board/disembark check - shared
         // with any other driver that knows the player's canonical position (see
         // GameHandler::updateM2TransportBoarding).
-        if (gameHandler->getTransportManager()) {
+        if (gameHandler->getTransportManager() && !gameHandler->isMovingOtherUnit()) {
             glm::vec3 playerCanonical = core::coords::renderToCanonical(renderPos);
             gameHandler->updateM2TransportBoarding(playerCanonical);
         }
@@ -4549,8 +4885,10 @@ void Application::syncPlayerRenderInstances(float deltaTime) {
             }
         }
     }
-    if (renderer && gameHandler && renderer->getCharacterRenderer())
+    if (renderer && gameHandler && renderer->getCharacterRenderer()) {
         syncVehiclePassengers(*gameHandler, renderer.get(), *entitySpawner_);
+        applyVehicleCamera(*gameHandler, renderer.get(), *entitySpawner_, deltaTime);
+    }
     {
         float psMs = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - playerSyncStart).count();

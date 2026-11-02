@@ -3170,7 +3170,6 @@ public:
     // that vehicle's Vehicle.dbc row. See game_handler_vehicles.cpp.
     bool isInVehicle() const { return vehicleId_ != 0; }
     uint32_t getVehicleId() const { return vehicleId_; }
-    void sendRequestVehicleExit();
 
     struct VehiclePassenger {
         uint64_t vehicleGuid = 0;
@@ -3197,6 +3196,70 @@ public:
     /// A unit left view: it is no vehicle and no passenger any more.
     void forgetVehicleUnit(uint64_t guid);
     VehicleData& vehicleData() { return vehicleData_; }
+
+    // ---- Driving and the vehicle interface (docs/re/mounts-taxi-vehicles.md 4) ----
+
+    /// The unit this client moves: the player, or what SMSG_CLIENT_CONTROL_UPDATE
+    /// handed it (a vehicle's control seat, a possessed unit).
+    uint64_t activeMoverGuid() const;
+    /// The player drives: the active mover is another unit.
+    bool isMovingOtherUnit() const;
+    /// The vehicle the player sits in, 0 when none.
+    uint64_t playerVehicleGuid() const {
+        auto it = vehiclePassengers_.find(playerGuid);
+        return it != vehiclePassengers_.end() ? it->second.vehicleGuid : 0;
+    }
+    /// Vehicle.dbc row of the unit the aim functions act on (0x5F9D20): the
+    /// active mover when it is a vehicle.
+    const vehicle::VehicleRecord* aimVehicleRecord();
+    /// The aim angle (the mover's pitch) and VehicleAimRequestAngle's change
+    /// of it: held to the vehicle's limits; MSG_MOVE_SET_PITCH, or with
+    /// FULL_SPEED_PITCHING a pitch at the pitch rate (0x5FB3A0).
+    float vehicleAimPitch() const;
+    void requestVehicleAimPitch(float pitch);
+    /// VehicleAimUp/DownStart/Stop: +1 up, -1 down, 0 stop.
+    void setVehicleAimDirection(int direction);
+    float vehicleAimPower() const { return vehicleAimPower_; }
+    void setVehicleAimPower(float power) { vehicleAimPower_ = power < 0.0f ? 0.0f : (power > 1.0f ? 1.0f : power); }
+    /// VehicleExit, VehiclePrevSeat / NextSeat, UnitSwitchToVehicleSeat
+    /// (0x74C7F0, 0x74C8B0, 0x74C9A0, 0x74CA90): a driver says it with its
+    /// vehicle's movement (CMSG_DISMISS_CONTROLLED_VEHICLE,
+    /// CMSG_CHANGE_SEATS_ON_CONTROLLED_VEHICLE), a passenger with the plain
+    /// requests.
+    void vehicleExit();
+    void vehicleChangeSeat(bool next);
+    bool switchToVehicleSeat(uint64_t vehicleGuid, int seat);
+    /// Whether the player's seat has `seatFlag` (0x5FB560).
+    bool playerSeatHasFlag(uint32_t seatFlag);
+    /// The vehicle's (or possessed unit's) spells are the bonus bar
+    /// (0x5D4AD0: GetBonusBarOffset 5, action slots 121-132 = its pet bar).
+    bool vehicleBarActive();
+    /// The pet-bar action behind action slot `slot0` (0-based), 0 when none.
+    uint32_t vehicleBarAction(int slot0);
+    /// Use it (0x5D4210): a spell goes out as CMSG_PET_CAST_SPELL from the
+    /// vehicle, a trajectory spell with its source, landing point, elevation
+    /// and speed (0x80AC90 / 0x6FCD60).
+    void useVehicleBarAction(int slot0, uint64_t target);
+    /// Where a missile's path meets the world (canonical from/to; fraction
+    /// along the segment). The application answers it from the terrain and
+    /// the buildings; without it a missile flies its whole duration.
+    using WorldSegmentHitCallback = std::function<bool(const glm::vec3&, const glm::vec3&, float&)>;
+    void setWorldSegmentHitCallback(WorldSegmentHitCallback cb) { worldSegmentHit_ = std::move(cb); }
+    /// Per frame: the aim keys, the bar's state.
+    void updateVehicle(float deltaTime);
+    /// The active mover changed (0x729010 -> 0x747F40): VEHICLE_UPDATE and
+    /// the aim and power controls of the new one.
+    void onActiveMoverChanged();
+    /// The seats of a vehicle as the interface numbers them (0x757550):
+    /// seats in order, a seat holding a vehicle (an accessory) replaced by
+    /// that vehicle's own. False past the last.
+    bool vehicleVirtualSeat(uint64_t rootVehicle, int virtualIndex, uint64_t& outVehicle, int& outSeat);
+    int vehicleVirtualSeatCount(uint64_t rootVehicle);
+    /// Who sits in `seat` of `vehicle`, 0 when it is free.
+    uint64_t vehicleSeatOccupant(uint64_t vehicle, int seat) const;
+    /// The vehicle at the bottom of a chain of seats (0x74C650): the
+    /// vehicle the unit's vehicle sits in, and so on.
+    uint64_t rootVehicleOf(uint64_t guid) const;
 
     // Vendor
     void openVendor(uint64_t npcGuid);
@@ -4844,6 +4907,12 @@ private:
 
     // Vehicle (WotLK): non-zero when player is seated in a vehicle
     uint32_t vehicleId_ = 0;
+    float vehicleAimPower_ = 0.0f;       // 0xC24958
+    int vehicleAimDirection_ = 0;
+    bool vehicleBarWasActive_ = false;
+    float vehicleAimTarget_ = 0.0f;      // FULL_SPEED_PITCHING: where the pitch is going
+    bool vehicleAimSeeking_ = false;
+    WorldSegmentHitCallback worldSegmentHit_;
     VehicleData vehicleData_;
     std::unordered_map<uint64_t, uint32_t> unitVehicleIds_;
     std::unordered_map<uint64_t, VehiclePassenger> vehiclePassengers_;

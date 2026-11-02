@@ -96,6 +96,19 @@ void MovementHandler::applyServerMovementSpeeds(float walk, float run, float run
             destination = value;
         }
     };
+    if (movingOtherUnit()) {
+        // The player's own speeds, kept aside while a vehicle is driven.
+        apply(walk, playerState_.walk);
+        apply(run, playerState_.run);
+        apply(runBack, playerState_.runBack);
+        apply(swim, playerState_.swim);
+        apply(swimBack, playerState_.swimBack);
+        apply(flight, playerState_.flight);
+        apply(flightBack, playerState_.flightBack);
+        apply(turn, playerState_.turn);
+        apply(pitch, playerState_.pitch);
+        return;
+    }
     apply(walk, serverWalkSpeed_);
     apply(run, serverRunSpeed_);
     apply(runBack, serverRunBackSpeed_);
@@ -249,10 +262,38 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
     };
     table[Opcode::SMSG_MOVE_KNOCK_BACK] = [this](network::Packet& packet) { handleMoveKnockBack(packet); };
 
-    // Teleport
-    for (auto op : { Opcode::MSG_MOVE_TELEPORT, Opcode::MSG_MOVE_TELEPORT_ACK }) {
-        table[op] = [this](network::Packet& packet) { handleTeleportAck(packet); };
-    }
+    // Teleport. Two opcodes, two different things (stock: 0xC5 goes to the
+    // unit movement handler 0x741B60 with the heartbeats, 0xC7 to the mover
+    // handler 0x732450 -> 0x72D2D0). MSG_MOVE_TELEPORT is the server telling
+    // everyone near a unit that it was put somewhere - packed guid and a
+    // movement block, no counter (AzerothCore Unit::SendTeleportPacket,
+    // SendMessageToSet with self excluded) - so it is that unit's movement.
+    // Read as the ack the first four bytes of the block went for a counter,
+    // and the creature was moved to whatever the rest decoded to.
+    // MSG_MOVE_TELEPORT_ACK is ours: the active mover is put somewhere and
+    // acknowledges.
+    table[Opcode::MSG_MOVE_TELEPORT] = [this](network::Packet& packet) {
+        if (owner_.getState() != WorldState::IN_WORLD) return;
+        if (!isActiveExpansion("wotlk")) { handleOtherPlayerMovement(packet); return; }
+        // 0x7189A0: the unit is put where the block says, at once (a seat
+        // change it carries is the passenger code's).
+        if (!packet.hasFullPackedGuid()) return;
+        const uint64_t guid = packet.readPackedGuid();
+        MovementInfo info{};
+        if (guid == 0 || guid == owner_.getPlayerGuid() || guid == activeMoverGuid() ||
+            !readMovementBlockWotlk(packet, info)) return;
+        auto entity = owner_.getEntityManager().getEntity(guid);
+        if (!entity) return;
+        const bool onTransport = (info.flags & static_cast<uint32_t>(MovementFlags::ONTRANSPORT)) &&
+                                 info.transportGuid != 0 && owner_.getTransportManager();
+        if (onTransport) { applyRemoteMovement(owner_, *entity, info, true); return; }
+        const glm::vec3 c = core::coords::serverToCanonical(glm::vec3(info.x, info.y, info.z));
+        entity->setPosition(c.x, c.y, c.z, core::coords::serverToCanonicalYaw(info.orientation));
+        if (entity->getType() == ObjectType::UNIT && owner_.creatureMoveCallbackRef())
+            owner_.creatureMoveCallbackRef()(guid, c.x, c.y, c.z, 0);
+        LOG_INFO("MSG_MOVE_TELEPORT: 0x", std::hex, guid, std::dec, " to (", c.x, ", ", c.y, ", ", c.z, ")");
+    };
+    table[Opcode::MSG_MOVE_TELEPORT_ACK] = [this](network::Packet& packet) { handleTeleportAck(packet); };
     table[Opcode::SMSG_NEW_WORLD] = [this](network::Packet& packet) { handleNewWorld(packet); };
 
     // Taxi
@@ -404,6 +445,27 @@ void MovementHandler::handleClientControlUpdate(network::Packet& packet) {
         return;
     }
     bool allowMovement = (packet.readUInt8() != 0);
+    LOG_INFO("SMSG_CLIENT_CONTROL_UPDATE: guid=0x", std::hex, controlGuid, std::dec,
+             " allow=", allowMovement ? 1 : 0, " mover=0x", std::hex, activeMoverGuid(), std::dec);
+    // Another unit (a vehicle's control seat, a possessed creature): it
+    // becomes the active mover, or stops being it (stock 0x72CCA0 ->
+    // 0x729010). AzerothCore sends (vehicle, 1) on taking the control seat
+    // and (vehicle, 0) then (player, 1) on leaving it.
+    if (controlGuid != 0 && controlGuid != owner_.getPlayerGuid()) {
+        if (allowMovement) {
+            setActiveMover(controlGuid);
+            serverMovementAllowed_ = true;
+        } else if (controlGuid == activeMoverGuid()) {
+            setActiveMover(0);
+        }
+        return;
+    }
+    if (movingOtherUnit()) {
+        // The player's own control while it drives something else: it
+        // applies when the player is the mover again.
+        playerState_.allowed = allowMovement;
+        return;
+    }
     if (controlGuid == 0 || controlGuid == owner_.getPlayerGuid()) {
         bool changed = (serverMovementAllowed_ != allowMovement);
         serverMovementAllowed_ = allowMovement;
@@ -539,6 +601,7 @@ void MovementHandler::sendMovement(Opcode opcode) {
     const char* heldReason = nullptr;
     if (!taxiAllowed) {
         if (!serverMovementAllowed_) heldReason = "the server has not given control of the character";
+        else if (movingOtherUnit()) heldReason = nullptr;
         else if (onTaxiFlight_) heldReason = "a taxi flight is in progress";
         else if (taxiMountActive_) heldReason = "a taxi mount is on";
         else if (owner_.resurrectPendingRef()) heldReason = "a resurrection is pending";
@@ -578,7 +641,7 @@ void MovementHandler::sendMovement(Opcode opcode) {
 
     // Cancel any timed non-channel cast, plus food/water restoration, the moment
     // the player starts moving. Other channels retain their normal behavior.
-    if (owner_.isCasting() && (!owner_.isChanneling() || owner_.isRestoring())) {
+    if (!movingOtherUnit() && owner_.isCasting() && (!owner_.isChanneling() || owner_.isRestoring())) {
         const bool isPositionalMove =
             opcode == Opcode::MSG_MOVE_START_FORWARD  ||
             opcode == Opcode::MSG_MOVE_START_BACKWARD ||
@@ -729,6 +792,18 @@ void MovementHandler::sendMovement(Opcode opcode) {
             // from however the swimmer was last angled.
             movementInfo.pitch = 0.0f;
             break;
+        case Opcode::MSG_MOVE_START_PITCH_UP:
+            movementInfo.flags &= ~static_cast<uint32_t>(MovementFlags::PITCH_DOWN);
+            movementInfo.flags |= static_cast<uint32_t>(MovementFlags::PITCH_UP);
+            break;
+        case Opcode::MSG_MOVE_START_PITCH_DOWN:
+            movementInfo.flags &= ~static_cast<uint32_t>(MovementFlags::PITCH_UP);
+            movementInfo.flags |= static_cast<uint32_t>(MovementFlags::PITCH_DOWN);
+            break;
+        case Opcode::MSG_MOVE_STOP_PITCH:
+            movementInfo.flags &= ~(static_cast<uint32_t>(MovementFlags::PITCH_UP) |
+                                    static_cast<uint32_t>(MovementFlags::PITCH_DOWN));
+            break;
         case Opcode::MSG_MOVE_START_DESCEND:
             // Must set DESCENDING so outgoing movement packets carry the correct
             // flag during flight descent. Only clearing ASCENDING left the flag
@@ -768,11 +843,14 @@ void MovementHandler::sendMovement(Opcode opcode) {
         movementInfo.fallTime = 0;
     }
 
-    if (onTaxiFlight_ || taxiMountActive_ || taxiActivatePending_ || taxiClientActive_) {
+    if (!movingOtherUnit() &&
+        (onTaxiFlight_ || taxiMountActive_ || taxiActivatePending_ || taxiClientActive_)) {
         sanitizeMovementForTaxi();
     }
 
-    bool includeTransportInWire = owner_.isOnTransport();
+    // A driven vehicle moves in the world; the ship or tram the player
+    // stands on is the player's.
+    bool includeTransportInWire = !movingOtherUnit() && owner_.isOnTransport();
     if (includeTransportInWire && owner_.getTransportManager()) {
         if (auto* tr = owner_.getTransportManager()->getTransport(owner_.playerTransportGuidRef()); tr && tr->isM2) {
             includeTransportInWire = false;
@@ -911,8 +989,8 @@ void MovementHandler::sendMovement(Opcode opcode) {
 
     // Build and send movement packet (expansion-specific format)
     auto packet = owner_.getPacketParsers()
-        ? owner_.getPacketParsers()->buildMovementPacket(opcode, wireInfo, owner_.getPlayerGuid())
-        : MovementPacket::build(opcode, wireInfo, owner_.getPlayerGuid());
+        ? owner_.getPacketParsers()->buildMovementPacket(opcode, wireInfo, activeMoverGuid())
+        : MovementPacket::build(opcode, wireInfo, activeMoverGuid());
     owner_.getSocket()->send(packet);
     lastSentPos_ = glm::vec3(movementInfo.x, movementInfo.y, movementInfo.z);
     hasSentMovement_ = true;
@@ -936,6 +1014,175 @@ void MovementHandler::sendMovement(Opcode opcode) {
     } else {
         lastNonHeartbeatMoveSendTimeMs_ = movementInfo.time;
     }
+}
+
+// ============================================================
+// The active mover (stock 0x729010)
+// ============================================================
+
+uint64_t MovementHandler::activeMoverGuid() const {
+    return moverGuid_ != 0 ? moverGuid_ : owner_.getPlayerGuid();
+}
+
+bool MovementHandler::movingOtherUnit() const {
+    return moverGuid_ != 0 && moverGuid_ != owner_.getPlayerGuid();
+}
+
+MovementHandler::MoverState MovementHandler::captureMoverState() const {
+    MoverState s;
+    s.info = movementInfo;
+    s.walk = serverWalkSpeed_;
+    s.run = serverRunSpeed_;
+    s.runBack = serverRunBackSpeed_;
+    s.swim = serverSwimSpeed_;
+    s.swimBack = serverSwimBackSpeed_;
+    s.flight = serverFlightSpeed_;
+    s.flightBack = serverFlightBackSpeed_;
+    s.turn = serverTurnRate_;
+    s.pitch = serverPitchRate_;
+    s.allowed = serverMovementAllowed_;
+    return s;
+}
+
+void MovementHandler::loadMoverState(const MoverState& s) {
+    movementInfo = s.info;
+    serverWalkSpeed_ = s.walk;
+    serverRunSpeed_ = s.run;
+    serverRunBackSpeed_ = s.runBack;
+    serverSwimSpeed_ = s.swim;
+    serverSwimBackSpeed_ = s.swimBack;
+    serverFlightSpeed_ = s.flight;
+    serverFlightBackSpeed_ = s.flightBack;
+    serverTurnRate_ = s.turn;
+    serverPitchRate_ = s.pitch;
+    serverMovementAllowed_ = s.allowed;
+}
+
+MovementHandler::ForceTarget MovementHandler::forceTargetOf(uint64_t guid) const {
+    if (guid == activeMoverGuid()) return ForceTarget::Mover;
+    if (movingOtherUnit() && guid == owner_.getPlayerGuid()) return ForceTarget::KeptPlayer;
+    return ForceTarget::None;
+}
+
+void MovementHandler::setActiveMover(uint64_t guid) {
+    const uint64_t player = owner_.getPlayerGuid();
+    if (guid == player) guid = 0;
+    if (guid == moverGuid_) return;
+    const uint64_t oldMover = activeMoverGuid();
+
+    // The old mover stops where it is (0x6EE920): its direction keys go.
+    constexpr uint32_t kSteer =
+        static_cast<uint32_t>(MovementFlags::FORWARD) | static_cast<uint32_t>(MovementFlags::BACKWARD) |
+        static_cast<uint32_t>(MovementFlags::STRAFE_LEFT) | static_cast<uint32_t>(MovementFlags::STRAFE_RIGHT) |
+        static_cast<uint32_t>(MovementFlags::TURN_LEFT) | static_cast<uint32_t>(MovementFlags::TURN_RIGHT) |
+        static_cast<uint32_t>(MovementFlags::PITCH_UP) | static_cast<uint32_t>(MovementFlags::PITCH_DOWN) |
+        static_cast<uint32_t>(MovementFlags::ASCENDING) | static_cast<uint32_t>(MovementFlags::DESCENDING);
+    movementInfo.flags &= ~kSteer;
+    if (moverGuid_ == 0) {
+        playerState_ = captureMoverState();
+        // The player hands its movement over (0x729010): with no spline of
+        // its own running, CMSG_MOVE_NOT_ACTIVE_MOVER with where it stands.
+        auto self = owner_.getEntityManager().getEntity(player);
+        const bool splineRunning = self && self->hasStockMotion() && self->stockMotionIsSpline();
+        if (!splineRunning && owner_.getSocket() && owner_.getState() == WorldState::IN_WORLD &&
+            wireOpcode(Opcode::CMSG_MOVE_NOT_ACTIVE_MOVER) != 0xFFFF) {
+            network::Packet p(wireOpcode(Opcode::CMSG_MOVE_NOT_ACTIVE_MOVER));
+            writeMoverMovement(p);
+            owner_.getSocket()->send(p);
+        }
+    }
+
+    if (guid == 0) {
+        // The player again, where the seat had them: the vehicle's spot,
+        // its facing. The exit spline that follows takes them off it.
+        const glm::vec3 at(movementInfo.x, movementInfo.y, movementInfo.z);
+        const float facing = movementInfo.orientation;
+        loadMoverState(playerState_);
+        movementInfo.x = at.x;
+        movementInfo.y = at.y;
+        movementInfo.z = at.z;
+        movementInfo.orientation = facing;
+        movementInfo.flags &= ~(kSteer | static_cast<uint32_t>(MovementFlags::FALLING));
+    } else {
+        // The unit's own movement and speeds, as its create block and the
+        // packets since gave them: a vehicle moves at its own run speed and
+        // turns at its own rate.
+        MoverState v;
+        v.info = MovementInfo{};
+        v.info.x = movementInfo.x;
+        v.info.y = movementInfo.y;
+        v.info.z = movementInfo.z;
+        v.info.orientation = movementInfo.orientation;
+        if (auto e = owner_.getEntityManager().getEntity(guid)) {
+            v.info.x = e->getX();
+            v.info.y = e->getY();
+            v.info.z = e->getZ();
+            v.info.orientation = e->getOrientation();
+            v.info.flags = e->baseMoveFlags() &
+                (static_cast<uint32_t>(MovementFlags::WALKING) | static_cast<uint32_t>(MovementFlags::SWIMMING) |
+                 static_cast<uint32_t>(MovementFlags::FLYING) | static_cast<uint32_t>(MovementFlags::CAN_FLY) |
+                 static_cast<uint32_t>(MovementFlags::HOVER));
+            v.info.flags2 = e->baseMoveFlags2() &
+                static_cast<uint16_t>(~0x0400u);  // not the interpolation bits a packet set
+            const auto& sp = e->moveSpeeds();
+            v.walk = sp.walk; v.run = sp.run; v.runBack = sp.runBack;
+            v.swim = sp.swim; v.swimBack = sp.swimBack;
+            v.flight = sp.flight; v.flightBack = sp.flightBack;
+            v.turn = sp.turnRate; v.pitch = sp.pitchRate;
+        }
+        v.allowed = true;
+        loadMoverState(v);
+    }
+    isFalling_ = false;
+    fallStartMs_ = 0;
+    moverGuid_ = guid;
+    hasLastPacketOrientation_ = false;
+    timeSinceLastMoveHeartbeat_ = 0.0f;
+    LOG_INFO("Active mover: 0x", std::hex, oldMover, " -> 0x", activeMoverGuid(), std::dec,
+             " run=", serverRunSpeed_, " turn=", serverTurnRate_, " flags=0x", std::hex,
+             movementInfo.flags, " flags2=0x", movementInfo.flags2, std::dec);
+    if (owner_.getSocket() && owner_.getState() == WorldState::IN_WORLD) {
+        owner_.getSocket()->send(SetActiveMoverPacket::build(activeMoverGuid()));
+    }
+    owner_.onActiveMoverChanged();
+}
+
+MovementInfo MovementHandler::moverWireInfo() {
+    MovementInfo wire = movementInfo;
+    wire.time = nextMovementTimestampMs();
+    if (!movingOtherUnit() && wire.hasFlag(MovementFlags::ONTRANSPORT)) {
+        wire.transportTime = wire.time;
+        wire.transportTime2 = wire.time;
+        const glm::vec3 t = core::coords::canonicalToServer(
+            glm::vec3(wire.transportX, wire.transportY, wire.transportZ));
+        wire.transportX = t.x;
+        wire.transportY = t.y;
+        wire.transportZ = t.z;
+    } else {
+        wire.flags &= ~static_cast<uint32_t>(MovementFlags::ONTRANSPORT);
+    }
+    const glm::vec3 p = core::coords::canonicalToServer(glm::vec3(wire.x, wire.y, wire.z));
+    wire.x = p.x;
+    wire.y = p.y;
+    wire.z = p.z;
+    wire.orientation = core::coords::canonicalToServerYaw(wire.orientation);
+    return wire;
+}
+
+void MovementHandler::writeMoverMovement(network::Packet& packet) {
+    packet.writePackedGuid(activeMoverGuid());
+    const MovementInfo wire = moverWireInfo();
+    if (owner_.getPacketParsers()) owner_.getPacketParsers()->writeMovementPayload(packet, wire);
+    else MovementPacket::writeMovementPayload(packet, wire);
+}
+
+void MovementHandler::sendMoverPacket(Opcode opcode,
+                                      const std::function<void(network::Packet&)>& extra) {
+    if (!owner_.getSocket() || wireOpcode(opcode) == 0xFFFF) return;
+    network::Packet packet(wireOpcode(opcode));
+    writeMoverMovement(packet);
+    if (extra) extra(packet);
+    owner_.getSocket()->send(packet);
 }
 
 // ============================================================
@@ -1091,17 +1338,22 @@ void MovementHandler::dismount() {
 // GUID + counter + movement payload with server-space coordinates. Centralised
 // here so transport coordinate conversion can't diverge between handlers.
 network::Packet MovementHandler::buildForceAck(Opcode ackOpcode, uint32_t counter) {
+    return buildForceAckFor(ackOpcode, counter, activeMoverGuid(), movementInfo);
+}
+
+network::Packet MovementHandler::buildForceAckFor(Opcode ackOpcode, uint32_t counter, uint64_t guid,
+                                                  const MovementInfo& info) {
     network::Packet ack(wireOpcode(ackOpcode));
     const bool legacyGuid =
         isActiveExpansion("classic") || isActiveExpansion("tbc") || isActiveExpansion("turtle");
     if (legacyGuid) {
-        ack.writeUInt64(owner_.getPlayerGuid());
+        ack.writeUInt64(guid);
     } else {
-        ack.writePackedGuid(owner_.getPlayerGuid());
+        ack.writePackedGuid(guid);
     }
     ack.writeUInt32(counter);
 
-    MovementInfo wire = movementInfo;
+    MovementInfo wire = info;
     wire.time = nextMovementTimestampMs();
     if (wire.hasFlag(MovementFlags::ONTRANSPORT)) {
         wire.transportTime = wire.time;
@@ -1144,7 +1396,10 @@ void MovementHandler::handleForceSpeedChange(network::Packet& packet, const char
     LOG_INFO("SMSG_FORCE_", name, "_CHANGE: guid=0x", std::hex, guid, std::dec,
              " counter=", counter, " speed=", newSpeed);
 
-    if (guid != owner_.getPlayerGuid()) return;
+    // The active mover's (a driven vehicle's included), or the player's own
+    // while it drives something else (kept aside, acknowledged as its own).
+    const ForceTarget target = forceTargetOf(guid);
+    if (target == ForceTarget::None) return;
 
     // Validate BEFORE sending ACK - if we echo a bad speed back to the server
     // but don't apply it locally, the client and server desync on movement speed.
@@ -1154,12 +1409,28 @@ void MovementHandler::handleForceSpeedChange(network::Packet& packet, const char
     }
 
     if (owner_.getSocket()) {
-        auto ack = buildForceAck(ackOpcode, counter);
+        auto ack = target == ForceTarget::Mover
+            ? buildForceAck(ackOpcode, counter)
+            : buildForceAckFor(ackOpcode, counter, guid, playerState_.info);
         ack.writeFloat(newSpeed);
         owner_.getSocket()->send(ack);
     }
 
-    if (speedStorage) *speedStorage = newSpeed;
+    if (!speedStorage) return;
+    if (target == ForceTarget::Mover) {
+        *speedStorage = newSpeed;
+    } else {
+        float* kept = speedStorage == &serverWalkSpeed_ ? &playerState_.walk
+                    : speedStorage == &serverRunSpeed_ ? &playerState_.run
+                    : speedStorage == &serverRunBackSpeed_ ? &playerState_.runBack
+                    : speedStorage == &serverSwimSpeed_ ? &playerState_.swim
+                    : speedStorage == &serverSwimBackSpeed_ ? &playerState_.swimBack
+                    : speedStorage == &serverFlightSpeed_ ? &playerState_.flight
+                    : speedStorage == &serverFlightBackSpeed_ ? &playerState_.flightBack
+                    : speedStorage == &serverTurnRate_ ? &playerState_.turn
+                    : speedStorage == &serverPitchRate_ ? &playerState_.pitch : nullptr;
+        if (kept) *kept = newSpeed;
+    }
 }
 
 void MovementHandler::handleForceRunSpeedChange(network::Packet& packet) {
@@ -1179,18 +1450,21 @@ void MovementHandler::handleForceMoveRootState(network::Packet& packet, bool roo
     LOG_INFO(rooted ? "SMSG_FORCE_MOVE_ROOT" : "SMSG_FORCE_MOVE_UNROOT",
              ": guid=0x", std::hex, guid, std::dec, " counter=", counter);
 
-    if (guid != owner_.getPlayerGuid()) return;
+    const ForceTarget target = forceTargetOf(guid);
+    if (target == ForceTarget::None) return;
+    MovementInfo& info = target == ForceTarget::Mover ? movementInfo : playerState_.info;
 
     if (rooted) {
-        movementInfo.flags |= static_cast<uint32_t>(MovementFlags::ROOT);
+        info.flags |= static_cast<uint32_t>(MovementFlags::ROOT);
     } else {
-        movementInfo.flags &= ~static_cast<uint32_t>(MovementFlags::ROOT);
+        info.flags &= ~static_cast<uint32_t>(MovementFlags::ROOT);
     }
 
     if (!owner_.getSocket()) return;
     Opcode ackOp = rooted ? Opcode::CMSG_FORCE_MOVE_ROOT_ACK : Opcode::CMSG_FORCE_MOVE_UNROOT_ACK;
     if (wireOpcode(ackOp) == 0xFFFF) return;
-    owner_.getSocket()->send(buildForceAck(ackOp, counter));
+    owner_.getSocket()->send(target == ForceTarget::Mover ? buildForceAck(ackOp, counter)
+                                                          : buildForceAckFor(ackOp, counter, guid, info));
 }
 
 void MovementHandler::handleForceMoveFlagChange(network::Packet& packet, const char* name,
@@ -1204,19 +1478,22 @@ void MovementHandler::handleForceMoveFlagChange(network::Packet& packet, const c
 
     LOG_INFO("SMSG_FORCE_", name, ": guid=0x", std::hex, guid, std::dec, " counter=", counter);
 
-    if (guid != owner_.getPlayerGuid()) return;
+    const ForceTarget target = forceTargetOf(guid);
+    if (target == ForceTarget::None) return;
+    MovementInfo& info = target == ForceTarget::Mover ? movementInfo : playerState_.info;
 
     if (flag != 0) {
         if (set) {
-            movementInfo.flags |= flag;
+            info.flags |= flag;
         } else {
-            movementInfo.flags &= ~flag;
+            info.flags &= ~flag;
         }
     }
 
     if (!owner_.getSocket()) return;
     if (wireOpcode(ackOpcode) == 0xFFFF) return;
-    auto ack = buildForceAck(ackOpcode, counter);
+    auto ack = target == ForceTarget::Mover ? buildForceAck(ackOpcode, counter)
+                                            : buildForceAckFor(ackOpcode, counter, guid, info);
     // The flag-change acks end with whether the change applied (the server's
     // HandleMoveFlagChangeOpcode reads a uint32 after the movement block for
     // all of them but the two gravity acks). Without it every water-walk,
@@ -1241,7 +1518,7 @@ void MovementHandler::handleMoveSetCollisionHeight(network::Packet& packet) {
     LOG_INFO("SMSG_MOVE_SET_COLLISION_HGT: guid=0x", std::hex, guid, std::dec,
              " counter=", counter, " height=", height);
 
-    if (guid != owner_.getPlayerGuid()) return;
+    if (forceTargetOf(guid) != ForceTarget::Mover) return;
     if (!owner_.getSocket()) return;
 
     if (wireOpcode(Opcode::CMSG_MOVE_SET_COLLISION_HGT_ACK) == 0xFFFF) return;
@@ -1268,7 +1545,7 @@ void MovementHandler::handleMoveKnockBack(network::Packet& packet) {
              " counter=", counter, " vcos=", vcos, " vsin=", vsin,
              " hspeed=", hspeed, " vspeed=", vspeed);
 
-    if (guid != owner_.getPlayerGuid()) return;
+    if (forceTargetOf(guid) != ForceTarget::Mover) return;
 
     if (owner_.knockBackCallbackRef()) {
         owner_.knockBackCallbackRef()(vcos, vsin, hspeed, vspeed);
@@ -1298,7 +1575,7 @@ void MovementHandler::handleMoveSetSpeed(network::Packet& packet) {
     if (!std::isfinite(speed) || speed <= 0.01f || speed > 200.0f) return;
 
     const uint16_t wireOp = packet.getOpcode();
-    if (moverGuid != owner_.getPlayerGuid()) {
+    if (moverGuid != activeMoverGuid()) {
         // Someone else's: their speed drives their motion and animation.
         SpeedKind kind = SpeedKind::Run;
         if      (wireOp == wireOpcode(Opcode::MSG_MOVE_SET_RUN_BACK_SPEED))    kind = SpeedKind::RunBack;
@@ -1328,7 +1605,7 @@ void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
     // tracked position staying frozen at wherever they were first spotted,
     // even while they kept walking.
     uint64_t moverGuid = packet.readPackedGuid();
-    if (moverGuid == owner_.getPlayerGuid() || moverGuid == 0) {
+    if (moverGuid == owner_.getPlayerGuid() || moverGuid == activeMoverGuid() || moverGuid == 0) {
         return;
     }
 
@@ -2125,7 +2402,25 @@ void MovementHandler::handleTeleportAck(network::Packet& packet) {
             entity->setPosition(canonical.x, canonical.y, canonical.z,
                                 core::coords::serverToCanonicalYaw(orientation));
         }
-        LOG_INFO("MSG_MOVE_TELEPORT_ACK for remote entity 0x", std::hex, guid, std::dec, " - ignored for local player");
+        if (guid != activeMoverGuid()) {
+            LOG_INFO("MSG_MOVE_TELEPORT_ACK for 0x", std::hex, guid, std::dec,
+                     ", not the active mover - placed, not acknowledged");
+            return;
+        }
+        // The vehicle this client drives was put somewhere (stock 0x72D2D0
+        // takes it as the mover's teleport): it goes there and says so.
+        movementInfo.x = canonical.x;
+        movementInfo.y = canonical.y;
+        movementInfo.z = canonical.z;
+        movementInfo.orientation = core::coords::serverToCanonicalYaw(orientation);
+        movementInfo.flags &= ~stock_movement::kMovingMask;
+        if (owner_.getSocket()) {
+            network::Packet ack(wireOpcode(Opcode::MSG_MOVE_TELEPORT_ACK));
+            ack.writePackedGuid(guid);
+            ack.writeUInt32(counter);
+            ack.writeUInt32(moveTime);
+            owner_.getSocket()->send(ack);
+        }
         return;
     }
 

@@ -2717,6 +2717,13 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
             if (findAttachmentStrict(rider.modelId, static_cast<uint32_t>(rider.seatPassengerAttachment), pb, pp))
                 m = m * glm::translate(glm::mat4(1.0f), -pp);
         }
+        rider.seatPoint = glm::vec3(m[3]);
+        rider.seatPointValid = true;
+        if (rider.seatArcBlend < 1.0f || rider.seatArcLift != 0.0f) {
+            const glm::vec3 at = glm::mix(rider.seatArcFrom, rider.seatPoint, rider.seatArcBlend) +
+                                 glm::vec3(0.0f, 0.0f, rider.seatArcLift);
+            m[3] = glm::vec4(at, 1.0f);
+        }
         rider.overrideModelMatrix = m;
         rider.hasOverrideModelMatrix = true;
     }
@@ -4680,11 +4687,32 @@ void CharacterRenderer::setInstanceSeatedOn(uint32_t passengerInstanceId, uint32
     auto it = instances.find(passengerInstanceId);
     if (it == instances.end()) return;
     if (it->second.mountedOn != 0 && vehicleInstanceId == 0) it->second.hasOverrideModelMatrix = false;
+    if (vehicleInstanceId == 0 || it->second.mountedOn != vehicleInstanceId) {
+        it->second.seatArcBlend = 1.0f;
+        it->second.seatArcLift = 0.0f;
+        it->second.seatPointValid = false;
+    }
     it->second.mountedOn = vehicleInstanceId;
     it->second.seatAttachment = attachmentId;
     it->second.seatOffset = offset;
     it->second.seatYaw = yaw;
     it->second.seatPassengerAttachment = passengerAttachmentId;
+}
+
+void CharacterRenderer::setInstanceSeatArc(uint32_t passengerInstanceId, const glm::vec3& from,
+                                           float blend, float lift) {
+    auto it = instances.find(passengerInstanceId);
+    if (it == instances.end()) return;
+    it->second.seatArcFrom = from;
+    it->second.seatArcBlend = std::clamp(blend, 0.0f, 1.0f);
+    it->second.seatArcLift = lift;
+}
+
+bool CharacterRenderer::getInstanceSeatPoint(uint32_t passengerInstanceId, glm::vec3& out) const {
+    auto it = instances.find(passengerInstanceId);
+    if (it == instances.end() || it->second.mountedOn == 0 || !it->second.seatPointValid) return false;
+    out = it->second.seatPoint;
+    return true;
 }
 
 void CharacterRenderer::setInstanceScale(uint32_t instanceId, float scale) {

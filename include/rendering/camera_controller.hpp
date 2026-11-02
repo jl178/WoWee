@@ -268,6 +268,16 @@ public:
     // Server turn rate in rad/s (SMSG_FORCE_TURN_RATE_CHANGE); 0 = use WOW_TURN_SPEED default
     void setTurnRateOverride(float rateRadS) { turnRateOverride_ = rateRadS; }
     void setMovementRooted(bool rooted) { movementRooted_ = rooted; }
+    /// A driven vehicle's MOVEMENTFLAG2_NO_STRAFE (0x1) / NO_JUMPING (0x2)
+    /// (Vehicle.flags 0x1 / 0x2): the strafe keys or the jump do nothing.
+    void setMoveRestrictions(bool noStrafe, bool noJump) { noStrafe_ = noStrafe; noJump_ = noJump; }
+    /// Moves the point the camera orbits off the followed position: a
+    /// vehicle seat's CameraOffset, or its seat point (VehicleCamera_C
+    /// 0x759200). Zero on foot.
+    void setPivotOffset(const glm::vec3& offset) { pivotOffset_ = offset; }
+    /// How far the camera sits from the point it looks at (the zoom, less
+    /// any collision pull-in).
+    [[nodiscard]] float getViewDistance() const { return std::min(currentDistance, collisionDistance); }
     [[nodiscard]] bool isMovementRooted() const { return movementRooted_; }
     void setGravityDisabled(bool disabled) { gravityDisabled_ = disabled; }
     void setFeatherFallActive(bool active) { featherFallActive_ = active; }
@@ -949,6 +959,9 @@ private:
     float turnRateOverride_ = 0.0f;  // rad/s; 0 = WOW_TURN_SPEED default (π rad/s)
     // Server-driven root state: when true, block all horizontal movement input.
     bool movementRooted_ = false;
+    bool noStrafe_ = false;
+    glm::vec3 pivotOffset_{0.0f};
+    bool noJump_ = false;
     // Server-driven gravity disable (levitate/hover): skip gravity accumulation.
     bool gravityDisabled_ = false;
     // Server-driven feather fall: cap downward velocity to slow-fall terminal.

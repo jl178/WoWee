@@ -196,10 +196,30 @@ static void setCursorType(lua_State* L, CursorType type) {
     }
 }
 
+/// The vehicle's (or possessed unit's) pet-bar action behind a bonus-bar
+/// slot: while its bar is up, slots 121-130 are its ten pet bar slots and
+/// 131-132 are empty (0x5D4AD0 -> 0x5AB800 / 0x5D3240). `slot0` is 0-based.
+/// Sets `isVehicleSlot` when the slot belongs to that bar at all.
+static uint32_t vehicleSlotPacked(game::GameHandler* gh, int slot0, bool& isVehicleSlot) {
+    isVehicleSlot = gh && slot0 >= 120 && slot0 < 132 && gh->vehicleBarActive();
+    return isVehicleSlot ? gh->vehicleBarAction(slot0) : 0u;
+}
+static uint32_t vehicleSlotSpell(game::GameHandler* gh, int slot0, bool& isVehicleSlot) {
+    const uint32_t packed = vehicleSlotPacked(gh, slot0, isVehicleSlot);
+    const uint32_t type = (packed >> 24) & 0x3F;
+    return (type == 6 || type == 7) ? 0u : (packed & 0xFFFFFFu);
+}
+
 static int lua_HasAction(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnFalse(L); }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1; // WoW uses 1-indexed slots
+    bool vehSlot = false;
+    const uint32_t vehPacked = vehicleSlotPacked(gh, slot, vehSlot);
+    if (vehSlot) {
+        lua_pushboolean(L, vehPacked != 0);
+        return 1;
+    }
     const auto& bar = gh->getActionBar();
     if (slot < 0 || slot >= static_cast<int>(bar.size())) {
         lua_pushboolean(L, 0);
@@ -214,6 +234,13 @@ static int lua_GetActionTexture(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnNil(L); }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
+    bool vehSlot = false;
+    const uint32_t spell = vehicleSlotSpell(gh, slot, vehSlot);
+    if (vehSlot) {
+        const std::string icon = spell ? gh->getSpellIconPath(spell) : std::string();
+        if (icon.empty()) lua_pushnil(L); else lua_pushstring(L, icon.c_str());
+        return 1;
+    }
     const auto& bar = gh->getActionBar();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) {
         lua_pushnil(L);
@@ -262,6 +289,13 @@ static int lua_IsUsableAction(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { lua_pushboolean(L, 0); lua_pushboolean(L, 0); return 2; }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
+    bool vehSlot = false;
+    const uint32_t spell = vehicleSlotSpell(gh, slot, vehSlot);
+    if (vehSlot) {
+        lua_pushboolean(L, spell != 0 ? 1 : 0);
+        lua_pushboolean(L, 0);
+        return 2;
+    }
     const auto& bar = gh->getActionBar();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) {
         lua_pushboolean(L, 0);
@@ -306,6 +340,9 @@ static int lua_IsActionInRange(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnNil(L); }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
+    bool vehSlot = false;
+    vehicleSlotSpell(gh, slot, vehSlot);
+    if (vehSlot) return luaReturnNil(L);
     const auto& bar = gh->getActionBar();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) {
         lua_pushnil(L);
@@ -328,6 +365,18 @@ static int lua_GetActionInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return 0; }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
+    // A vehicle bar slot is a pet spell (0x5A8F10's 0x10000000 branch):
+    // "spell", its id, "pet", its id.
+    bool vehSlot = false;
+    const uint32_t spell = vehicleSlotSpell(gh, slot, vehSlot);
+    if (vehSlot) {
+        if (spell == 0) return 0;
+        lua_pushstring(L, "spell");
+        lua_pushnumber(L, spell);
+        lua_pushstring(L, "pet");
+        lua_pushnumber(L, spell);
+        return 4;
+    }
     const auto& bar = gh->getActionBar();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) {
         return 0;
@@ -384,6 +433,12 @@ static int lua_GetActionCooldown(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 1); return 3; }
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
+    bool vehSlot = false;
+    vehicleSlotSpell(gh, slot, vehSlot);
+    if (vehSlot) {
+        lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 1);
+        return 3;
+    }
     const auto& bar = gh->getActionBar();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) {
         lua_pushnumber(L, 0);
@@ -440,6 +495,19 @@ static int lua_UseAction(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) return 0;
     int slot = static_cast<int>(luaL_checknumber(L, 1)) - 1;
+    // The vehicle's bar: its spell from the vehicle (0x5ABBC0 -> 0x5D4210).
+    bool vehSlot = false;
+    vehicleSlotPacked(gh, slot, vehSlot);
+    if (vehSlot) {
+        uint64_t target = gh->hasTarget() ? gh->getTargetGuid() : 0;
+        if (const char* unit = lua_tostring(L, 2); unit && *unit) {
+            std::string uid(unit);
+            toLowerInPlace(uid);
+            if (const uint64_t named = resolveUnitGuid(gh, uid)) target = named;
+        }
+        gh->useVehicleBarAction(slot, target);
+        return 0;
+    }
     const auto& bar = gh->getActionBar();
     if (slot < 0 || slot >= static_cast<int>(bar.size()) || bar[slot].isEmpty()) return 0;
     const auto& action = bar[slot];
