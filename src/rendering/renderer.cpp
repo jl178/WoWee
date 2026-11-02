@@ -1983,6 +1983,39 @@ void Renderer::updateLiveArea(uint32_t wmoId, uint16_t nameSet, uint32_t wmoGrou
     liveAreaValid_ = true;
 }
 
+void Renderer::updateMinimapWmo(uint32_t instanceId, int32_t tightGroupIndex) {
+    if (!minimap) return;
+    // WOWEE_WMO_MINIMAP=0 keeps the terrain map everywhere, as before.
+    static const bool enabled = [] {
+        const char* v = std::getenv("WOWEE_WMO_MINIMAP");
+        return !(v && v[0] == '0');
+    }();
+
+    bool indoors = false;
+    if (enabled && instanceId != 0 && tightGroupIndex >= 0 && wmoRenderer) {
+        Minimap::WmoView view;
+        const glm::vec3 probe = characterPosition + glm::vec3(0.0f, 0.0f, 1.0f);
+        if (wmoRenderer->getMinimapSource(instanceId, probe, view.modelMatrix, view.tileRoot,
+                                          view.groups, view.playerLocal)) {
+            view.currentGroup = static_cast<size_t>(tightGroupIndex);
+            // Only an indoor group switches the map, as in stock: a city
+            // street (Stormwind's, Silvermoon's) is outdoors and keeps the
+            // terrain. And only on its floor, by the same test that lets the
+            // WMO name the area: Ironforge's boxes reach up through the
+            // mountain, and standing on top of it is Dun Morogh.
+            if (view.currentGroup < view.groups.size() &&
+                (view.groups[view.currentGroup].flags & wmo_minimap::kGroupIndoor)) {
+                const float x = characterPosition.x, y = characterPosition.y, z = characterPosition.z;
+                const auto floor = wmoRenderer->getFloorHeight(x, y, z + 2.0f, nullptr, z);
+                std::optional<float> ground;
+                if (terrainManager && !terrainManager->isHoleAt(x, y)) ground = terrainManager->getHeightAt(x, y);
+                if (game::wmoDecidesArea(z, floor, ground)) indoors = minimap->setWmoView(view);
+            }
+        }
+    }
+    if (!indoors) minimap->clearWmoView();
+}
+
 void Renderer::fireZoneEvents() {
     auto* gh = core::Application::getInstance().getGameHandler();
     if (!gh) return;
@@ -2234,6 +2267,8 @@ void Renderer::update(float deltaTime) {
             updateLiveArea(0, 0, 0);
         }
         fireZoneEvents();
+        // And whether the minimap shows the building's own map.
+        updateMinimapWmo(unitInside ? unitHit.instanceId : 0, unitHit.tightGroupIndex);
     }
 
     // Update lighting system

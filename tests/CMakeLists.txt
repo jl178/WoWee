@@ -2504,6 +2504,12 @@ wowee_add_test(test_tab_target
 wowee_add_test(test_wmo_area
     SOURCES test_wmo_area.cpp)
 
+# ── test_wmo_minimap ─────────────────────────────────────────
+# The indoor minimap: a WMO group's md5translate tile keys and where each
+# tile lands, measured against Ironforge's groups.
+wowee_add_test(test_wmo_minimap
+    SOURCES test_wmo_minimap.cpp)
+
 # ── test_player_model_path ───────────────────────────────────
 # Which body a character wears. Gender alone does not answer it: a nonbinary
 # character picks one, and the preview, the world spawn and the skin textures

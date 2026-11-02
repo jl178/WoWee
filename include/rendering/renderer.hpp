@@ -537,6 +537,11 @@ private:
     /// wmoID, the placement's name set and the group's MOGP id.
     void updateLiveArea(uint32_t wmoId, uint16_t nameSet, uint32_t wmoGroupId);
     void fireZoneEvents();
+    /// Hand the minimap the WMO the player is in while it is an indoor group
+    /// they stand on, so it draws the building's own tiles (wmo_minimap.hpp);
+    /// instanceId 0 or WOWEE_WMO_MINIMAP=0 puts the terrain back.
+    /// tightGroupIndex is WMORenderer::AreaHit's.
+    void updateMinimapWmo(uint32_t instanceId, int32_t tightGroupIndex);
     bool deferredWorldInitEnabled_ = true;
     bool deferredWorldInitPending_ = false;
     uint8_t deferredWorldInitStage_ = 0;

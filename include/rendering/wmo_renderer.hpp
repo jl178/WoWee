@@ -4,6 +4,7 @@
 #include "rendering/vk_shader.hpp"
 #include "rendering/spatial_grid.hpp"
 #include "rendering/shadow_params.hpp"
+#include "rendering/wmo_minimap.hpp"
 
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/grass_clearing.hpp"
@@ -431,8 +432,23 @@ public:
         bool interior = false;    ///< the group has the indoor flag
         /// The group is lit as an interior: INDOOR and not EXTERIOR_LIT (0x40).
         bool interiorLit = false;
+        uint32_t instanceId = 0;
+        /// The tightest containing group, as an index into the loaded model's
+        /// groups (not the file index), -1 when none was found.
+        int32_t tightGroupIndex = -1;
     };
     bool insideWmoArea(float glX, float glY, float glZ, AreaHit* out) const;
+
+    /// What the indoor minimap needs of an instance: its model matrix, the
+    /// tile key prefix of its root (empty when the root's path is unknown),
+    /// every loaded group with its file index, header bounds and flags, and
+    /// where `worldPos` lies in the model's space. `groups` is in loaded-group
+    /// order, so AreaHit::tightGroupIndex indexes it. False when the instance
+    /// or its model is not loaded.
+    bool getMinimapSource(uint32_t instanceId, const glm::vec3& worldPos,
+                          glm::mat4& modelMatrix, std::string& tileRoot,
+                          std::vector<wmo_minimap::Group>& groups,
+                          glm::vec3& localPos) const;
     /// MOHD ambient of a loaded model (interior fill light); 0.5 grey if unknown.
     glm::vec3 getModelAmbient(uint32_t modelId) const {
         auto it = loadedModels.find(modelId);
@@ -541,6 +557,13 @@ private:
         uint32_t vertexCount = 0;
         glm::vec3 boundingBoxMin;
         glm::vec3 boundingBoxMax;
+        // The MOGP header's bounds, which the box above replaces with the
+        // vertices' own. The minimap tiles are laid out from these.
+        glm::vec3 headerBoxMin{0.0f};
+        glm::vec3 headerBoxMax{0.0f};
+        // Index in the root file. Empty groups are not loaded, so this and the
+        // group's place in ModelData::groups can differ; tile keys use this.
+        uint32_t fileIndex = 0;
 
         uint32_t groupFlags = 0;
         uint32_t wmoGroupId = 0;  ///< MOGP group id (global), see WMOGroup
@@ -702,6 +725,10 @@ private:
         glm::vec3 boundingBoxMax;
         glm::vec3 wmoAmbientColor{0.5f, 0.5f, 0.5f};  // From MOHD, used for interior lighting
         uint32_t wmoId = 0;  // MOHD wmoID, the WMOAreaTable key
+        // The md5translate key prefix of the root's minimap tiles, from its
+        // path (wmo_minimap::tileRoot). Empty when the loader did not say
+        // where the model came from.
+        std::string minimapTileRoot;
         bool isLowPlatform = false;
 
         // Doodad templates (M2 models placed in WMO, stored for instancing)

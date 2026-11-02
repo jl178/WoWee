@@ -4778,6 +4778,15 @@ void Application::render() {
                         // levels as WoW has them (0-5), zero furthest out; the
                         // yards per level are the stock table in minimap.hpp.
                         static int appliedZoom = -1;
+                        // Indoors the client zooms from a table of its own,
+                        // at a level of its own, and tells the interface with
+                        // MINIMAP_UPDATE_ZOOM so the buttons grey out right.
+                        if (map->isIndoors() != mm->minimapInside) {
+                            mm->minimapInside = map->isIndoors();
+                            std::swap(mm->zoomLevel, mm->otherZoomLevel);
+                            appliedZoom = -1;
+                            if (gameHandler) gameHandler->fireAddonEvent("MINIMAP_UPDATE_ZOOM", {});
+                        }
                         if (mm->zoomLevel != appliedZoom) {
                             appliedZoom = mm->zoomLevel;
                             map->setZoomLevel(mm->zoomLevel);

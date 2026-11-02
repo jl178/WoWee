@@ -1568,11 +1568,15 @@ static void applyCVarSideEffects(lua_State* L, const std::string& key,
     // client fires when the zoom changes under the interface, and it is what
     // greys the button that can no longer go any further - without it a map
     // restored at full zoom offers a zoom-in that does nothing.
-    if (key == "wowee_minimapzoom") {
+    // The indoor level (wowee_minimapInsideZoom) goes to whichever slot holds
+    // the indoor mode's level right now; see Widget::otherZoomLevel.
+    if (key == "wowee_minimapzoom" || key == "wowee_minimapinsidezoom") {
         if (auto* tree = getWidgetTree(L)) {
             if (auto* mm = tree->findByName("Minimap")) {
                 const int z = std::atoi(value.c_str());
-                mm->zoomLevel = (z < 0) ? 0 : (z > 5 ? 5 : z);  // stock 0-5
+                const bool inside = key == "wowee_minimapinsidezoom";
+                int& slot = (inside == mm->minimapInside) ? mm->zoomLevel : mm->otherZoomLevel;
+                slot = (z < 0) ? 0 : (z > 5 ? 5 : z);  // stock 0-5
                 lua_getfield(L, LUA_REGISTRYINDEX, "wowee_lua_engine");
                 auto* engine = static_cast<LuaEngine*>(lua_touserdata(L, -1));
                 lua_pop(L, 1);
