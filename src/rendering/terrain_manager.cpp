@@ -889,6 +889,8 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
                         doodadReady.model = std::move(m2Model);
                         doodadReady.worldPosition = worldPos;
                         doodadReady.modelMatrix = worldMatrix;
+                        doodadReady.wmoUniqueId = placement.uniqueId;
+                        doodadReady.moddIndex = doodadIdx;
                         pending->wmoDoodads.push_back(std::move(doodadReady));
                     }
                     }
@@ -1219,6 +1221,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                         continue;
                     }
                     wmoRenderer->setInstanceNameSet(wmoInstId, wmoReady.nameSet);
+                    wmoRenderer->setInstanceUniqueId(wmoInstId, wmoReady.uniqueId);
                     ft.wmoInstanceIds.push_back(wmoInstId);
                     if (wmoReady.uniqueId != 0) {
                         placedWmoIds.insert(wmoReady.uniqueId);
@@ -1287,6 +1290,10 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                     // blocking, but structural doodads such as Exodarplatform01
                     // carry the only authored floor for their walkable ramps.
                     m2Renderer->setSkipWallCollision(wmoDoodadInstId, true);
+                    if (wmoRenderer) {
+                        wmoRenderer->attachDoodadByUniqueId(doodad.wmoUniqueId, doodad.moddIndex,
+                                                            wmoDoodadInstId);
+                    }
                     ft.m2InstanceIds.push_back(wmoDoodadInstId);
                     addDoodadSounds(doodad.modelId, doodad.modelMatrix, ft.soundEmitterIds);
                 }

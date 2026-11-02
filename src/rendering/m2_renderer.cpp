@@ -826,7 +826,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     // Instance data SSBO - per-frame buffer holding per-instance transforms, fade, bones.
     // Shader reads instanceData[push.instanceDataOffset + gl_InstanceIndex].
     {
-        static_assert(sizeof(M2InstanceGPU) == 96, "M2InstanceGPU must be 96 bytes (std430)");
+        static_assert(sizeof(M2InstanceGPU) == 112, "M2InstanceGPU must be 112 bytes (std430)");
         const VkDeviceSize instBufSize = MAX_INSTANCE_DATA * sizeof(M2InstanceGPU);
 
         // Descriptor pool for 2 sets (double-buffered)

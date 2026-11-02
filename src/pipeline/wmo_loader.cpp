@@ -1,6 +1,7 @@
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/stock_wmo_liquid.hpp"
 #include "core/logger.hpp"
+#include <cmath>
 #include <cstring>
 #include <glm/gtc/quaternion.hpp>
 
@@ -371,11 +372,18 @@ WMOModel WMOLoader::load(const std::vector<uint8_t>& wmoData) {
                     WMOPortal portal;
                     portal.startVertex = read<uint16_t>(wmoData, offset);
                     portal.vertexCount = read<uint16_t>(wmoData, offset);
-                    portal.planeIndex = read<uint16_t>(wmoData, offset);
-                    portal.padding = read<uint16_t>(wmoData, offset);
-
-                    // Skip additional data (12 bytes)
-                    offset += 12;
+                    // The plane: normal then distance, n.p + d = 0.
+                    portal.normal.x = read<float>(wmoData, offset);
+                    portal.normal.y = read<float>(wmoData, offset);
+                    portal.normal.z = read<float>(wmoData, offset);
+                    portal.distance = read<float>(wmoData, offset);
+                    if (std::isnan(portal.normal.x) || std::isnan(portal.normal.y) ||
+                        std::isnan(portal.normal.z)) {
+                        portal.normal = glm::vec3(0.0f, 0.0f, 1.0f);
+                    }
+                    if (std::isnan(portal.distance)) portal.distance = 0.0f;
+                    portal.planeIndex = 0;
+                    portal.padding = 0;
 
                     model.portals.push_back(portal);
                 }
@@ -601,6 +609,13 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
                         } else {
                             group.vertices[i].color = glm::vec4(r/255.0f, g/255.0f, b/255.0f, a/255.0f);
                         }
+                    }
+                }
+                else if (subChunkId == 0x4D4F4452) { // MODR - the group's doodads
+                    const uint32_t count = subChunkSize / 2;
+                    group.doodadRefs.reserve(count);
+                    for (uint32_t i = 0; i < count; i++) {
+                        group.doodadRefs.push_back(read<uint16_t>(groupData, mogpOffset));
                     }
                 }
                 else if (subChunkId == MOBA) { // Batches

@@ -17,6 +17,7 @@ The pure rules are in header-only files with unit tests:
 | `include/rendering/stock_wmo_render.hpp` | EGxBlend factors, alpha reference, culling, wrap, effect table, env coordinate, Env/EnvMetal/Composite | `tests/test_stock_wmo_render.cpp` |
 | `include/pipeline/stock_wmo_liquid.hpp` | the MLIQ LiquidType | `tests/test_stock_wmo_render.cpp` |
 | `include/rendering/stock_wmo_light.hpp` | (earlier) MOCV fix, portal attenuation, light modes | `tests/test_stock_world_fx.cpp` |
+| `include/rendering/stock_wmo_portal.hpp` | the portal walk (rectangles, clip, inside/outside seeds), rectangle frustum planes, WMO doodad light from MODD colour | `tests/test_stock_wmo_portal.cpp` |
 
 Each section ends with what Wowee did before and does now. §9 is the gap
 list.
@@ -212,15 +213,12 @@ above (`kWmoMatShadowed`), applied to the outdoor pass whatever its mode.
   (0xcfbec0 set), any group reached that has 0x40000 puts the root's MOSB
   name into 0xcd861c (see §8).
 
-**Wowee:** portal culling exists (`getVisibleGroupsViaPortals`) but is **off
-unless `WOWEE_WMO_CULL=1`**, so every group is drawn; with no depth-hidden
-geometry in view that only costs time. Wowee also hides some exterior
-"shell" groups within 196 yards by name and size (`isLOD`: MOGP 0x10000
-groups under 5000 vertices in big WMOs, "facade" and "city.." groups,
-Stormwind's 0x80 interior cathedral shell). **The client has no such rule**:
-0x10000 means "draw whenever in the frustum". Left as it is (it hides
-duplicate shells Wowee would otherwise draw because it does not walk the
-portals); a gap.
+**Wowee before:** portal culling existed (`getVisibleGroupsViaPortals`, a
+breadth-first walk seeded from the camera's and the character's box-tested
+groups, every portal tested against the full frustum, no rectangles) but was
+off unless `WOWEE_WMO_CULL=1`, so every group was drawn. It also hid some
+exterior "shell" groups within 196 yards by name and size (`isLOD`). The
+client has no such rule. **After:** §10.
 
 ## 6. Doodads
 
@@ -231,20 +229,35 @@ portals); a gap.
 - **Creation** (0x7bef40): the MODD position, quaternion and scale; MODD
   flag 0x1 (byte 3) sets def flag 0x1000 (AcceptProjTex); the M2 starts
   its default sequence at offset 0.
-- **Light** (0x7c1ad0 at creation, 0x7c1730 each frame): the MODD colour
-  becomes two colours: `+0x88` the colour raised in value to at least
-  0x70/255 (HSV, 0x984f60..0x9851a0), `+0x84` the colour scaled down so its
-  largest channel is at most 0x60/255. A doodad in an interior group
-  (instance group flags & 0x48 == 0, def flag 2) is lit with **ambient =
-  +0x84** and **diffuse = +0x88 x +0x8c** from a fixed direction
-  (0xaeedf0..f8); with def flag 0x1000 the direction leans toward the
-  DayNight light by the MODD alpha. A doodad of an exterior group (flag 4)
-  takes the DayNight diffuse/ambient (0xce04a8 +0x7c..+0x9c). AreaTable
-  flag 0x8000 brightens the ambient by 0xadeebc, clamped.
+- **Light** (0x7c1ad0 at creation, 0x7c1150 each frame): the MODD colour
+  becomes two colours: `+0x88` the colour with its HSV value raised to
+  0x70/255 when its brightest channel is below 0x70 (0x984f60..0x9851a0),
+  `+0x84` the colour with every channel times `round(0x60 * 255 / max -
+  0.5)`, plus 0xff, shifted down 8, when its brightest channel is above
+  0x60. 0x7bf740 marks a doodad interior (def flag 2) unless its group is
+  exterior or exterior-lit (0x48) or the def is already flag 4; an exterior
+  doodad gets flag 4 and intensity +0x8c = 1.0.
+- 0x7bef40 hangs the light on the model through callback 0x780cd0, which
+  calls the def's vtable: for a WMO doodad def (vtable 0xa40318) that is
+  **0x7c1150**, not the entity version 0x7c1730 the earlier pass read.
+  0x7c1150, with 0x834d90 adding an ambient and 0x834dc0 a directional
+  light to the model:
+  - interior: ambient = `+0x84`, directional colour = `+0x88` (no
+    intensity, no lean toward the sun), direction fixed at 0xaeedf0 =
+    (-0.30822, -0.30822, -0.9), the same sense as the DayNight direction
+    (light travelling down);
+  - exterior: ambient = the Gx light's ambient (0xce04a8 +0x88), directional
+    = its diffuse (+0x94) x `+0x8c` along its direction (+0x7c) - the
+    outdoor light;
+  - the fog is DayNight's first set, or the second (+0xa0) when def flag
+    0x8000 is set (0x799310 sets it on groups reached from inside before any
+    exterior group); interior doodads get model flag 8.
+  0x7c1730 (entity base: units, game objects) is the variant with the
+  intensity, the lean by MODD alpha under flag 0x1000 and the AreaTable
+  ambient multiplier.
 
-**Wowee:** WMO doodads take the outdoor light (or the renderer's indoor
-ambient for units); MODD colour is not read. **Not changed here** - it is
-M2 lighting (m2_renderer, being edited by others). A gap.
+**Wowee before:** WMO doodads took the outdoor light; the MODD colour was not
+read. **After:** §10.
 
 ## 7. MOLT
 
@@ -303,19 +316,14 @@ name from "Environments\" on, since the Icecrown roots carry the artist's
 whole path; a name that is not a model path, like Sunken Temple's, is
 ignored); `WMORenderer::skyboxAt` returns it while the camera stands in a
 0x40000 group (by the group's box - Wowee does not walk the portals, so a
-flagged group seen through a portal from an unflagged one does not count);
+flagged group seen through a portal from an unflagged one does not count -
+since §10 the walk decides);
 `LightingManager::setWmoSkybox` puts it first in the sky model list and
 drops the second, as 0x7f31c0 does with slots 0 and 1.
 
 ## 9. Gaps and checks
 
 ### Gaps that remain
-- **Portal culling** is off by default (`WOWEE_WMO_CULL`), and the walk that
-  exists does not follow 0x7ac060 (no screen-rectangle clipping, both camera
-  and character seed it). Every group is drawn; the 196-yard `isLOD` hiding
-  of exterior shells and Stormwind's cathedral shell is Wowee's, not the
-  client's.
-- **Doodad light** from MODD colour (§6) is not applied - M2 territory.
 - **Specular**: the Specular and Metal vertex programs compute a specular
   term that no pixel program reads; nothing to do.
 - **The Opaque substitution** (shader 0, blend 0, texture without alpha ->
@@ -323,19 +331,23 @@ drops the second, as 0x7f31c0 does with slots 0 and 1.
   opaque batch, which nothing reads.
 - **Env under the shadow**: the shadow programs scale the whole colour; the
   env term is added after the shadow in wmo.frag.
-- **Per-batch frustum culling** (0x7a7630, MOBA boxes) is not done; Wowee
-  culls whole groups.
 - **ConstantAlpha** (blend 11) draws as Alpha; no WMO uses it.
-- **MOSB** is chosen by the camera's own group (box test), not by every
-  group the portal walk reaches.
 - **WMO liquid**: the per-vertex depth and colour attributes of the water
   shader are as world-lighting §7 says (unresolved), and the hard-coded
   Stormwind stair mask in `WaterRenderer::loadFromWMO` stays.
-- **MFOG** (+0x158) and the second fog set (group flag 0x8000, 0x7c1730)
-  are not used.
+- **MFOG** (+0x158) and the second fog set (def/group flag 0x8000,
+  0x7c1150 / 0x799310) are not used.
+- The portal walk's own gaps are listed in §10.
 
 
 ### What to look at in game
+- **Doorways** (§10): walking through a building's door, a city gate or a
+  dungeon hall, nothing appears or vanishes as the camera crosses the
+  portal; interiors are not drawn from outside unless a door shows them;
+  with the camera deep inside (Ironforge, a dungeon) the terrain and the
+  sky are not drawn at all until a gate comes into view.
+- **Interior doodads** (§10) take their MODD colour as light: tavern
+  furniture warm, crypt props dim, instead of the outdoor sun.
 - **One-sided walls**: floors and walls seen from behind or below are gone
   (Silvermoon's platforms from under the city, the backs of facades) where
   they used to draw their undersides.
@@ -364,3 +376,152 @@ loaded machine (the world server was at 300% CPU and other builds ran):
 No measurable cost; the vertex grew from 64 to 80 bytes, the pipelines
 from 4 to 24 (built once), and back faces now cull. Screenshots of both
 binaries are in the session scratchpad (`wmo-re/shots/before|after`).
+
+## 10. The portal walk, as Wowee now does it
+
+Follow-up to §5 and §6. The pure rules are in
+`include/rendering/stock_wmo_portal.hpp` (tests:
+`tests/test_stock_wmo_portal.cpp`); `WMORenderer::computeVisibility` runs
+them once a frame on the main thread, before the WMO, M2 and terrain culls.
+
+### Stock, in more detail
+- **The camera's group** (0x795d40, each frame): a segment from the camera
+  1760 yards (0xa3e6e8) straight down. 0x7a39f0 casts it against the world
+  first; 0x7d59b0 then takes the nearest map-object floor *nearer than that
+  hit* (the hit is passed in as the farthest distance), over the groups
+  whose MOGI box the segment crosses and whose flags lack 0x410080. A floor
+  of an exterior group (0x8) means "outside" (0xcd87a4 = 0). The group and
+  (from 0x7af280) a second one go into the list 0x7ad1f0 seeds from; if
+  either has 0x40140 the outdoor view opens over the whole screen at once.
+- **0x79a870** then draws: camera outside - everything through 0x79a790
+  with the full screen, each map object through 0x7b3a10 (its exterior
+  groups start walks, its 0x10000 groups are drawn, interior groups only
+  through portals). Camera inside - 0x7b3b20 -> 0x7ad1f0 walks from the
+  camera's group; then, **only if a portal opened the outdoors**
+  (0xadf59c >= 0), 0x79a790 draws terrain, sky and every map object
+  (including this one, from its exterior groups) restricted to the union of
+  the opened portals' rectangles. With nothing opened the sky is not drawn
+  (the clear colour is DayNight +0xa0) and no terrain or other map object is.
+- **The walk** (0x7ac060), with the details §5 left out:
+  - the ref leading back to the group the walk came from is skipped;
+  - a portal's rectangle (0x7a9090, cached per portal per frame by
+    0xd1c424): the whole screen when the camera is within 0.01 of its plane
+    (0x9f1968) and over its polygon (0x7a7210, flag 2); otherwise the
+    polygon (at most 12 points) is moved to world space, clipped (0x7a72a0)
+    and projected (0x7a85e0, w floored at 1e-4); fewer than three points
+    left is an empty rectangle (flag 1). A portal touching an exterior group
+    is also tested against the occluders (0x7ccfa0) - Wowee has none;
+  - the clip of the current rectangle by the portal's keeps one maximum
+    unclamped: 0x7ac32a..0x7ac363 compare the other axis' maximum twice. A
+    result thinner than 0.001 (0x9e1134, 0x482870) is dropped. Wowee does
+    the same (`clipStock`);
+  - the frustum is narrowed to the clipped rectangle (0x7a6da0, 0x790e20)
+    for the group behind, and every batch (0x7a7630, MOBA box) and every
+    doodad of that group is culled against it;
+  - from inside, a portal into a group with any of 0x50148 opens the outdoor
+    view over its own (unclipped) rectangle (0x7a8f20 -> 0x795d00) and the
+    walk goes on into that group only when it has neither 0x8 nor 0x10000;
+  - the depth limit is 0xd1bee4, copied at start-up from 0xadfe40 = 10.
+- **Doodads**: drawn by the group callback (0x799310 -> the group's doodad
+  list), so a doodad is drawn only when its group is, culled to that
+  group's rectangle; the 0x8000 fog flag marks groups reached from inside
+  before any exterior group.
+- **MOPT** is `{u16 first, u16 count, vec3 n, float d}`, plane n.p + d = 0;
+  MOPR side +1 means the owning group is on the positive side (checked
+  against the vertices near each portal: 795 of 810 refs in Stormwind and
+  Karazhan agree, the rest being straddling groups). The portal is walked
+  through when `(n.c + d) * side >= 0`.
+
+### What Wowee does now
+- The root loader reads MOPT's plane (it used to skip it and rebuild one
+  from the polygon's winding) and MODR (each group's doodads).
+- `computeVisibility` (`src/rendering/wmo_renderer.cpp`):
+  - finds the camera's group as 0x795d40 does, with the terrain height under
+    the camera standing in for 0x7a39f0 and Wowee's collision triangles
+    (MOPY 0x08, or drawn and not detail) for the BSP;
+  - walks the camera's instance from inside (`walkFromInside`), then every
+    other instance in the frustum from outside (`walkFromOutside`) - through
+    the outdoor rectangle when the camera is inside - and adds the camera's
+    instance's own exterior seen through that rectangle;
+  - reports "sealed" when the camera is in an interior and no portal opens
+    the outdoors; the renderer then skips terrain, grass and the sky, and
+    every other WMO instance is left out (0x79a870's branch);
+  - the MOSB sky comes from the walk (any 0x40000 group it reaches with the
+    camera inside), replacing the box test of §8.
+- `cullForRecording` draws a group only when the walk reached it, tests its
+  box against the planes of its rectangle, and hands those planes to the
+  recording, which culls each draw range on its own box (the per-batch
+  culling of 0x7a7630; merged batches keep a box per joined range).
+- The `isLOD` hiding by name and size (§5) is gone: 0x10000 groups draw
+  whenever they are in the frustum, the rest only when walked to.
+- **Doodads**: terrain_manager and the instance-map loader tell WMORenderer
+  which MODD index each placed M2 is (`attachDoodad`,
+  `attachDoodadByUniqueId`); each gets a visibility slot, set every frame
+  from its group's walk and a sphere test against the group's rectangle,
+  and M2Renderer's cull skips a doodad whose slot is clear.
+- **Doodad light**: a doodad of an interior group (flags & 0x48 == 0) is
+  drawn with `stock_wmo_portal::doodadLight` - ambient `+0x84`, diffuse
+  `+0x88` - from the fixed direction 0xaeedf0, with no sun shadow and no
+  specular (M2InstanceGPU grew to 112 bytes for the two packed colours;
+  flags bit 3). Exterior doodads keep the outdoor light, as stock does.
+- `WOWEE_WMO_PORTALS=0` turns the walk off (every group drawn, as before);
+  `WOWEE_WMO_PORTAL_DEBUG=1` logs per instance what the walk found;
+  `WOWEE_FRAME_PROFILE=1` logs a summary every ten seconds.
+
+### Not stock (yet)
+- The ray under the camera starts half a yard above the eye: Wowee's
+  third-person camera, pushed against a wall, can sit a hand's width under
+  the floor it looks across (Karazhan's gate passage: 0.24 yards), and
+  from there the ray finds the group below and calls the camera outside -
+  which hid the passage overhead.
+- When nothing at all lies under the camera (no terrain, no WMO floor -
+  a third-person camera pushed through a floor), Wowee takes the smallest
+  interior group box around it rather than calling the camera outside, so
+  a dungeon does not vanish for that frame.
+- A model with no portals and no exterior or 0x10000 group is drawn whole
+  from outside (stock would draw nothing of it).
+- Only terrain, grass and the sky are skipped when sealed; outdoor M2s
+  (ADT doodads) and water are still culled by the camera frustum alone, and
+  when the outdoors is open through a doorway the terrain is not narrowed
+  to the portal rectangle (0x79a790 narrows everything).
+- No occluders (0x7ccfa0), no second seed group (0x7af280), and the 0x8000
+  second fog set is not used.
+- Units and game objects are not culled by the walk.
+
+### Measured
+`WOWEE_FRAME_PROFILE=1`, one fresh client per place (the client's memory
+grows across teleports and the machine was swapping on long tours), median
+of the 10-second windows over a minute after a minute's settle, 1251x986
+window. "before" is the build before this work; "walk off" is this build
+with `WOWEE_WMO_PORTALS=0` (MODD light and the `isLOD` removal still in);
+"walk on" is this build. GPU is the profiler's last-frame GPU time, CPU is
+`renderWorld`, and the workers are the terrain / WMO / M2 recording threads.
+Other agents' clients and builds were running throughout; take +-10%.
+
+| place | before fps / GPU / CPU | walk off | walk on | workers t/w/m, before -> on |
+|---|---|---|---|---|
+| Stormwind, Trade District | 32.6 / 29.0 / 5.06 ms | 32.3 / 30.7 / 5.38 | **37.7 / 26.1 / 3.96** | 3.1/4.2/2.6 -> 3.2/1.3/1.8 |
+| Ironforge, the Commons | 34.0 / 28.8 / 5.85 | 36.0 / 26.1 / 6.05 | **63.2 / 15.2 / 2.05** | 3.1/5.2/2.1 -> 0/0.6/1.5 |
+| Undercity, Trade Quarter | 32.6 / 30.6 / 4.89 | 34.2 / 29.8 / 4.13 | **57.3 / 16.5 / 2.12** | 3.9/4.4/2.7 -> 0/0.3/1.5 |
+| Dalaran, the Violet Gate | 20.8 / 46.6 / 4.83 | 25.3 / 37.5 / 5.20 | **62.9 / 15.6 / 3.34** | 3.9/3.2/4.0 -> 0/0.2/2.6 |
+| Icecrown Citadel, Light's Hammer | 40.3 / 23.7 / 1.96 | 40.2 / 23.7 / 1.93 | **73.8 / 12.7 / 0.37** | 1.8/0.9/0.3 -> 0/0.1/0.2 |
+| Karazhan, outside the gate | 39.9 / 22.4 / 1.83 | 53.7 / 17.9 / 1.73 | **64.5 / 15.4 / 1.27** | 0.8/0.6/1.4 -> 0.6/0.4/0.9 |
+
+Ironforge, Undercity, Dalaran and ICC stand in sealed interiors: no
+terrain, sky or other building is drawn (terrain worker 0), and only the
+few groups the walk reaches are. In Stormwind the street groups are
+exterior-lit interiors (0x2040) whose seed opens the outdoors, so terrain
+stays and the gain is the shops and houses no longer drawn from the street
+(213 of 1161 groups, 406 of 19,531 city doodads). The Karazhan camera
+faced a different way in each run (the camera's yaw after a teleport is
+not deterministic), so that row is indicative only.
+
+Same-session checks (`WOWEE_WMO_PORTALS_ALTERNATE=2`, a shot every half
+second, so consecutive shots straddle the switch with the same camera): at
+Stormwind, Ironforge, Undercity, ICC and Karazhan the walk-on and walk-off
+frames differ by 0.01-0.04% of pixels at 10% fuzz, the same as two
+walk-on frames (NPCs, fog). Stepping through the Gates of Ironforge
+(15 `.go` steps across the exterior/interior portal, a shot each) showed
+whole geometry on both sides; the camera's direction differed from the old
+binary's run, so that one is not a pixel comparison. The
+Karazhan case found the camera-under-floor problem noted above.

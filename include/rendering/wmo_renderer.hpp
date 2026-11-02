@@ -5,6 +5,7 @@
 #include "rendering/spatial_grid.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/wmo_minimap.hpp"
+#include "rendering/stock_wmo_portal.hpp"
 
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/grass_clearing.hpp"
@@ -71,7 +72,7 @@ public:
     /**
      * Set M2 renderer for hierarchical transform updates (doodads follow parent WMO)
      */
-    void setM2Renderer(M2Renderer* renderer) { m2Renderer_ = renderer; }
+    void setM2Renderer(M2Renderer* renderer);
 
     /// Where loaded models register their geometry for the ray traced lighting.
     void setRtScene(RtScene* scene) { rtScene_ = scene; }
@@ -172,6 +173,30 @@ public:
      * @param localTransform Local transform relative to WMO origin
      */
     void addDoodadToInstance(uint32_t instanceId, uint32_t m2InstanceId, const glm::mat4& localTransform);
+
+    /// The MODF uniqueId an instance was placed with, so that doodads prepared
+    /// by another tile's worker (attachDoodadByUniqueId) can find it.
+    void setInstanceUniqueId(uint32_t instanceId, uint32_t uniqueId);
+    /// A placed M2 is MODD doodad `moddIndex` of a WMO instance. It is drawn
+    /// only while its group is (0x7ac060 draws a group's doodads with the
+    /// group) and lit as 0x7c1150 lights it: an interior group's doodad by its
+    /// MODD colour, an exterior one by the day/night light.
+    void attachDoodad(uint32_t instanceId, uint32_t moddIndex, uint32_t m2InstanceId);
+    /// The same by the placement's uniqueId; held until that instance exists.
+    void attachDoodadByUniqueId(uint32_t uniqueId, uint32_t moddIndex, uint32_t m2InstanceId);
+
+    /// The portal walk for this frame (docs/re/wmo-rendering.md §5, §10):
+    /// which groups of which instances are drawn, through which part of the
+    /// screen, and so which WMO doodads. Runs on the main thread before the
+    /// WMO and M2 culls. Returns true when the camera stands in an interior
+    /// group and no portal opens the outdoors (0x79a870 then draws no sky, no
+    /// terrain and no other map object).
+    /// `groundBelow` is the terrain height under the camera, when there is
+    /// terrain: 0x795d40 casts its ray against the world first and only
+    /// takes a map object floor that is nearer than the ground.
+    bool computeVisibility(const Camera& camera, std::optional<float> groundBelow = std::nullopt);
+    /// What computeVisibility found about the outdoors.
+    bool outdoorSealed() const { return visSealed_; }
 
     // Forward declare DoodadTemplate for public API
     struct DoodadTemplate {
@@ -604,7 +629,6 @@ private:
         uint16_t transBatchCount = 0;
         uint16_t intBatchCount = 0;
         bool allUntextured = false;  // True if ALL batches use fallback white texture (collision/placeholder group)
-        bool isLOD = false;          // Distance-only group (skip when camera is close)
         // A merged batch is cloth (clothDrop > 0): wmo.vert moves its vertices,
         // so the group's bounds do not hold what it draws and the frustum
         // test in render() leaves it alone.
@@ -669,6 +693,9 @@ private:
             bool clampS = false;            // F_CLAMP_S
             bool clampT = false;            // F_CLAMP_T
             float alphaRef = 0.0f;          // see WMOMaterialUBO::alphaRef
+            /// Each draw range's box in model space, parallel to draws: the
+            /// batch culling of 0x7a7630 against the group's portal frustum.
+            std::vector<std::pair<glm::vec3, glm::vec3>> drawBoxes;
             VkTexture* texture2 = nullptr;  // MOMT texture2 (env / layer 2), NOT owned
             float heightMapVariance = 0.0f; // variance of height map (low = flat texture)
             VkTexture* texture = nullptr;   // from cache, NOT owned
@@ -814,6 +841,17 @@ private:
         std::vector<PortalRef> portalRefs;
         // For each group: which portal refs belong to it (start index, count)
         std::vector<std::pair<uint16_t, uint16_t>> groupPortalRefs;
+        /// The portal graph by file group index (MOGP flags, MOPR ranges,
+        /// MOPT planes), what stock_wmo_portal walks.
+        stock_wmo_portal::Graph portalGraph;
+        /// MOGP header boxes by file group, the box 0x78fb20 tests.
+        std::vector<std::pair<glm::vec3, glm::vec3>> fileGroupBoxes;
+        /// File group index -> index into groups, -1 for an empty group.
+        std::vector<int32_t> fileToLoaded;
+        /// MODD index -> the file group whose MODR lists it (0xffff: none).
+        std::vector<uint16_t> doodadGroup;
+        /// MODD colour per doodad (BGRA as read).
+        std::vector<uint32_t> doodadColor;
 
         // Set once the textures and materials below have been populated, so a
         // resumed load skips straight to the groups it has left.
@@ -864,6 +902,18 @@ private:
             glm::mat4 localTransform;    // Local transform relative to WMO origin
         };
         std::vector<DoodadInfo> doodads;
+
+        /// MODF uniqueId (0 when unknown).
+        uint32_t uniqueId = 0;
+        /// Placed MODD doodads and the visibility slot each is drawn by.
+        struct PortalDoodad {
+            uint32_t slot;
+            uint32_t m2InstanceId;
+            uint16_t fileGroup;
+            float radius = -1.0f;        ///< world radius, -1 until asked
+            glm::vec3 localCenter{0.0f};
+        };
+        std::vector<PortalDoodad> portalDoodads;
 
         // A moving transport (ship hull, elevator). It keeps ordinary collision -
         // a rider gets exact deck height from getInstanceFloorHeight, but everyone
@@ -1135,6 +1185,9 @@ private:
         size_t instanceIndex;
         const ModelData* model = nullptr;     // cached pointer; saves a hashmap find per instance per frame
         std::vector<uint32_t> visibleGroups;  // group indices that passed culling
+        /// Per visible group, its portal frustum in model space; the draw
+        /// ranges are culled to it (0x7a7630). Empty: no batch culling.
+        std::vector<stock_wmo_portal::Planes> groupPlanes;
         uint32_t portalCulled = 0;
         uint32_t distanceCulled = 0;
         // Running total of recordCost over this list and every list before
@@ -1147,6 +1200,28 @@ private:
     // per batch, two binds per group. Set by cullForRecording.
     uint32_t recordCost_ = 0;
     std::unordered_set<uint32_t> portalVisibleGroupSet_; // reused per frame (portal culling scratch)
+
+    // The stock portal walk (computeVisibility). Per instance, by index into
+    // instances, valid for the frame it was computed in.
+    struct InstanceVis {
+        bool walked = false;   ///< false: draw as before (no graph, walk off)
+        stock_wmo_portal::WalkResult res;
+    };
+    std::vector<InstanceVis> instanceVis_;
+    bool visActive_ = false;           ///< the walk ran this frame
+    bool visSealed_ = false;
+    std::string visSkybox_;            ///< MOSB from the walk, camera inside
+    /// Doodad visibility by slot, read by M2Renderer's cull.
+    std::vector<uint8_t> doodadVisible_;
+    std::vector<uint32_t> freeDoodadSlots_;
+    std::unordered_map<uint32_t, uint32_t> instanceByUniqueId_;
+    struct PendingDoodad { uint32_t moddIndex; uint32_t m2InstanceId; };
+    std::unordered_map<uint32_t, std::vector<PendingDoodad>> pendingDoodads_;
+    void releasePortalDoodads(WMOInstance& inst);
+    /// The group the camera stands over (0x795d40): the nearest floor under it
+    /// within 1760 yards. Returns the instance index and its file group.
+    bool findCameraGroup(const glm::vec3& camPos, std::optional<float> groundBelow,
+                         size_t& outInstance, uint32_t& outFileGroup) const;
 
     // Collision query profiling - atomic because getFloorHeight is dispatched
     // on async threads from camera_controller while the main thread reads these.

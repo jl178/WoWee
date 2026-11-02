@@ -1,3 +1,4 @@
+#include <glm/gtc/packing.hpp>
 #include <cstdlib>
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_renderer_internal.h"
@@ -459,6 +460,17 @@ void M2Renderer::setSkipWallCollision(uint32_t instanceId, bool skip) {
             return;
         }
     }
+}
+
+void M2Renderer::setInstanceWmoDoodad(uint32_t instanceId, uint32_t slot, bool interiorLight,
+                                      const glm::vec3& ambient, const glm::vec3& diffuse) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) return;
+    auto& inst = instances[idxIt->second];
+    inst.portalSlot = slot;
+    inst.wmoInteriorLight = interiorLight;
+    inst.wmoAmbientPacked = glm::packUnorm4x8(glm::vec4(ambient, 1.0f));
+    inst.wmoDiffusePacked = glm::packUnorm4x8(glm::vec4(diffuse, 1.0f));
 }
 
 void M2Renderer::setInstanceCastsShadow(uint32_t instanceId, bool casts) {

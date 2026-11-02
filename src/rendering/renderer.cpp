@@ -3308,9 +3308,19 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
     const bool skipWMO = envSkipWMO || ablated(AblationPass::WMO);
     const bool skipChars = envSkipChars || ablated(AblationPass::Characters);
     const bool skipM2 = envSkipM2 || ablated(AblationPass::M2);
-    const bool skipTerrain = envSkipTerrain || ablated(AblationPass::Terrain);
-    const bool skipSky = envSkipSky || ablated(AblationPass::Sky);
-    const bool skipGrass = ablated(AblationPass::Grass);
+    // The WMO portal walk, before any cull reads it: which groups (and so
+    // which WMO doodads) are drawn, and whether the camera stands in an
+    // interior with no portal open to the outdoors - in which case the client
+    // draws no sky, no terrain and nothing outside (0x79a870, 0x7ad1f0).
+    std::optional<float> groundUnderCamera;
+    if (terrainManager && camera) {
+        groundUnderCamera = terrainManager->getHeightAt(camera->getPosition().x, camera->getPosition().y);
+    }
+    const bool sealedIndoors = wmoRenderer && camera && !skipWMO &&
+                               wmoRenderer->computeVisibility(*camera, groundUnderCamera);
+    const bool skipTerrain = envSkipTerrain || ablated(AblationPass::Terrain) || sealedIndoors;
+    const bool skipSky = envSkipSky || ablated(AblationPass::Sky) || sealedIndoors;
+    const bool skipGrass = ablated(AblationPass::Grass) || sealedIndoors;
     if (m2Renderer) {
         m2Renderer->setSkipGroundDetail(ablated(AblationPass::Clutter));
         // 250 yards: past the shadow distance and well past where a tree with

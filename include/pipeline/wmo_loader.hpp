@@ -92,6 +92,11 @@ struct WMOPortal {
     uint16_t vertexCount;
     uint16_t planeIndex;
     uint16_t padding;
+    /// MOPT's plane, n.p + d = 0 (the 16 bytes after the counts). The root
+    /// loader replaces a NaN plane with (0, 0, 1) (0x7d7470); the portal walk
+    /// tests the camera against it with the MOPR side (0x7ac060).
+    glm::vec3 normal{0.0f, 0.0f, 1.0f};
+    float distance = 0.0f;
 };
 
 // WMO Portal Plane
@@ -178,6 +183,10 @@ struct WMOGroup {
     // Portals
     std::vector<WMOPortal> portals;
     std::vector<glm::vec3> portalVertices;
+
+    /// MODR: the MODD doodads this group holds (0x7bf740 creates them per
+    /// group, lit by the group's flags).
+    std::vector<uint16_t> doodadRefs;
 
     // BSP tree (for collision - optional)
     std::vector<uint8_t> bspNodes;

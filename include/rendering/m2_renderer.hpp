@@ -382,6 +382,15 @@ struct alignas(64) M2Instance {
     int32_t groundNormalFlags = 0;
     // Whether the boat sits on water: -1 not known yet, 0 no, 1 afloat.
     int8_t afloat = -1;
+    /// A WMO doodad: its slot in WMORenderer's doodad visibility (drawn only
+    /// while its group is, 0x7ac060), ~0u for every other model.
+    uint32_t portalSlot = ~0u;
+    /// A doodad of an interior WMO group, lit by its MODD colour (0x7c1150):
+    /// these two packed RGB colours replace the day/night ambient and
+    /// diffuse, and the light comes along stock_wmo_portal's fixed direction.
+    bool wmoInteriorLight = false;
+    uint32_t wmoAmbientPacked = 0;
+    uint32_t wmoDiffusePacked = 0;
     glm::vec3 rotation;  // Euler angles in degrees
     float scale;
     glm::mat4 invModelMatrix;
@@ -894,6 +903,12 @@ public:
     void setInstanceIsGameObject(uint32_t instanceId, bool isGameObject);
     void setSkipCollision(uint32_t instanceId, bool skip);
     void setSkipWallCollision(uint32_t instanceId, bool skip);
+    /// Mark an instance as a WMO doodad (WMORenderer::attachDoodad): its
+    /// visibility slot and, when its group is an interior one, its light.
+    void setInstanceWmoDoodad(uint32_t instanceId, uint32_t slot, bool interiorLight,
+                              const glm::vec3& ambient, const glm::vec3& diffuse);
+    /// WMORenderer's doodad visibility, by slot; read by the cull. Null: none.
+    void setPortalVisibility(const std::vector<uint8_t>* vis) { portalVisibility_ = vis; }
     void setInstanceCastsShadow(uint32_t instanceId, bool casts);
     void clear();
     /** Drop all instances but keep models in GPU memory. Cheap path for the
@@ -1171,7 +1186,12 @@ private:
         int32_t boneBase;          //  4 bytes @ offset 80
         int32_t boneCount;         //  4 bytes @ offset 84 - clamps skinning reads
         float highlight = 0.0f;    //  4 bytes @ offset 88 - pressed-on lift
-        int32_t flags = {};        //  4 bytes @ offset 92 - bit 0: afloat (bobs on the water), bit 2: skinned
+        int32_t flags = {};        //  4 bytes @ offset 92 - bit 0: afloat (bobs on the water), bit 2: skinned,
+                                   //                         bit 3: WMO interior doodad light
+        uint32_t wmoAmbient = 0;   //  4 bytes @ offset 96 - packed RGB (packUnorm4x8)
+        uint32_t wmoDiffuse = 0;   //  4 bytes @ offset 100
+        uint32_t pad0 = 0;         //  4 bytes @ offset 104
+        uint32_t pad1 = 0;         //  4 bytes @ offset 108
     };
     // How many instances one frame may hand the GPU, not how many exist. Ground
     // clutter is what fills it: it is drawn by the thousand and every tuft
@@ -1180,6 +1200,7 @@ private:
     // as clutter blinking rather than as anything being over budget. Two
     // buffers of 96 bytes a slot, so this costs 6 MB rather than 3.
     static constexpr uint32_t MAX_INSTANCE_DATA = 32768;
+    const std::vector<uint8_t>* portalVisibility_ = nullptr;
     VkDescriptorSetLayout instanceSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool instanceDescPool_ = VK_NULL_HANDLE;
     ::VkBuffer instanceBuffer_[2] = {};

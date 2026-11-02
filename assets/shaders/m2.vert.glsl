@@ -48,7 +48,13 @@ struct InstanceData {
     float highlight;
     // Bit 0: a boat afloat, which rides the water. Also in what was padding.
     // Bit 2: skinned by the bone palette.
+    // Bit 3: a doodad of an interior WMO group, lit by wmoAmbient/wmoDiffuse.
     int flags;
+    // That doodad's two lights from its MODD colour (0x7c1ad0), packed RGBA8.
+    uint wmoAmbient;
+    uint wmoDiffuse;
+    uint pad0;
+    uint pad1;
 };
 layout(set = 3, binding = 0) readonly buffer InstanceSSBO {
     InstanceData instanceData[];
@@ -74,6 +80,8 @@ layout(location = 5) out float vFadeAlpha;
 layout(location = 6) flat out int vSkyMode;
 layout(location = 7) flat out float vHighlight;
 layout(location = 8) out vec2 TexCoord2;
+// x ambient, y diffuse (packed RGBA8), z 1 for a doodad lit by them.
+layout(location = 9) flat out uvec3 vWmoLight;
 
 #include "m2_combiner.glsli"
 
@@ -361,6 +369,8 @@ void main() {
     vFadeAlpha = fade;
     vSkyMode = push.isFoliage < 0 ? 1 : 0;
     vHighlight = instanceData[instIdx].highlight;
+    vWmoLight = uvec3(instanceData[instIdx].wmoAmbient, instanceData[instIdx].wmoDiffuse,
+                      (instanceData[instIdx].flags & 8) != 0 ? 1u : 0u);
 
     gl_Position = projection * view * worldPos;
     // A sky model sits on the far plane whatever its radius, so the depth

@@ -631,12 +631,6 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
     }
     modelData.wmoId = model.wmoId;
     if (!model.sourcePath.empty()) modelData.minimapTileRoot = wmo_minimap::tileRoot(model.sourcePath);
-    std::string lowerSourcePath = model.sourcePath;
-    std::replace(lowerSourcePath.begin(), lowerSourcePath.end(), '/', '\\');
-    std::transform(lowerSourcePath.begin(), lowerSourcePath.end(), lowerSourcePath.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    const bool isStormwindCityWmo =
-        lowerSourcePath.find("\\buildings\\stormwind\\stormwind.wmo") != std::string::npos;
     {
         glm::vec3 ext = model.boundingBoxMax - model.boundingBoxMin;
         float horiz = std::max(ext.x, ext.y);
@@ -750,21 +744,6 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
     modelData.setupDone = true;
     }  // end one-time setup
 
-    // Reads only the model, so it is rebuilt cheaply on every resumed call
-    // rather than kept alive across them.
-    // Helper: look up group name from MOGN raw data via MOGI nameOffset
-    auto getGroupName = [&](uint32_t groupIdx) -> std::string {
-        if (groupIdx < model.groupInfo.size()) {
-            int32_t nameOff = model.groupInfo[groupIdx].nameOffset;
-            if (nameOff >= 0 && static_cast<size_t>(nameOff) < model.groupNameRaw.size()) {
-                const char* str = reinterpret_cast<const char*>(model.groupNameRaw.data() + nameOff);
-                size_t maxLen = model.groupNameRaw.size() - nameOff;
-                return std::string(str, strnlen(str, maxLen));
-            }
-        }
-        return {};
-    };
-
     // Create GPU resources for each group, a bounded number per call. A model
     // with hundreds of groups would otherwise upload them all in one step: the
     // worst measured was 286 groups at 131ms, against an 8ms budget.
@@ -794,41 +773,11 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
         GroupResources resources;
         resources.fileIndex = static_cast<uint32_t>(gi);
         if (createGroupResources(wmoGroup, resources, wmoGroup.flags, model.ambientColor, model.mohdFlags, &model)) {
-            // Detect distance-only LOD/exterior shell groups:
-            // 1. ALWAYS_DRAW (0x10000) with low verts - distant LOD stand-ins
-            // 2. Pure OUTDOOR groups (0x8 set, 0x2000 not set) in large WMOs -
-            //    exterior cityscape shells (e.g. "city01" in Stormwind)
-            //
-            // A small vertex count is not one of them. That rule (under 100
-            // vertices, exterior, in a WMO of more than 50 groups) caught no
-            // LOD shell anywhere in the shipped data, only real pieces hidden
-            // within 196 yards: Darnassus' porch floors (house20, condoInt09),
-            // Sunwell's towers and doors, Karazhan's hall pieces, Dalaran's
-            // and Stratholme's. The client has no such rule.
-            bool alwaysDraw = (wmoGroup.flags & 0x10000) != 0;
-            size_t nVerts = wmoGroup.vertices.size();
-            bool isLargeWmo = model.nGroups > 50;
-            // Detect facade groups by name (exterior face of buildings)
-            std::string gname = getGroupName(static_cast<uint32_t>(gi));
-            bool isFacade = false;
-            bool isCityShell = false;
-            if (!gname.empty()) {
-                std::string lower = gname;
-                std::transform(lower.begin(), lower.end(), lower.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                isFacade = lower.find("facade") != std::string::npos;
-                // "city01" etc are exterior cityscape shells in large WMOs
-                isCityShell = (lower.find("city") == 0 && lower.size() <= 8);
-            }
-            bool isIndoor = (wmoGroup.flags & 0x2000) != 0;
-            const bool isStormwindCathedralShell = isStormwindCityWmo && isLargeWmo &&
-                                                   isIndoor && (wmoGroup.flags & 0x80) != 0;
-            if ((alwaysDraw && nVerts < 5000 && isLargeWmo && !isIndoor) ||
-                (isFacade && isLargeWmo && !isIndoor) ||
-                (isCityShell && !isIndoor && isLargeWmo) ||
-                isStormwindCathedralShell) {
-                resources.isLOD = true;
-            }
+            // No group is hidden by its name or size. Wowee used to hide
+            // "LOD shells" within 196 yards (0x10000 groups under 5000
+            // vertices in big WMOs, "facade" and "city.." groups, Stormwind's
+            // cathedral shell); the client has no such rule. The portal walk
+            // (computeVisibility) decides which groups are drawn.
             modelData.groups.push_back(resources);
             modelData.loadedGroups++;
         }
@@ -1295,6 +1244,28 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             // After the lava lights, which are placed one per authored range.
             if (!kWmoLegacyRecord) joinAdjacentDrawRanges(mb.draws);
             if (!mb.draws.empty()) mb.firstDraw = mb.draws.front();
+            // Each range's box, for the batch culling (0x7a7630 culls each
+            // MOBA batch by its box; a joined range takes the union).
+            mb.drawBoxes.clear();
+            mb.drawBoxes.reserve(mb.draws.size());
+            for (const auto& draw : mb.draws) {
+                glm::vec3 bMin(std::numeric_limits<float>::max());
+                glm::vec3 bMax(std::numeric_limits<float>::lowest());
+                const uint32_t indexEnd = std::min<uint32_t>(
+                    draw.firstIndex + draw.indexCount,
+                    static_cast<uint32_t>(groupRes.collisionIndices.size()));
+                for (uint32_t ii = draw.firstIndex; ii < indexEnd; ++ii) {
+                    const uint16_t vertexIndex = groupRes.collisionIndices[ii];
+                    if (vertexIndex >= groupRes.collisionVertices.size()) continue;
+                    bMin = glm::min(bMin, groupRes.collisionVertices[vertexIndex]);
+                    bMax = glm::max(bMax, groupRes.collisionVertices[vertexIndex]);
+                }
+                if (bMin.x > bMax.x) {  // nothing read: never culled
+                    bMin = glm::vec3(-1e30f);
+                    bMax = glm::vec3(1e30f);
+                }
+                mb.drawBoxes.emplace_back(bMin, bMax);
+            }
             if (mb.clothDrop > 0.0f) groupRes.hasCloth = true;
 
             groupRes.mergedBatches.push_back(std::move(mb));
@@ -1371,6 +1342,64 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
     modelData.groupPortalRefs.resize(model.groups.size(), {0, 0});
     for (size_t gi = 0; gi < model.groups.size(); gi++) {
         modelData.groupPortalRefs[gi] = {model.groups[gi].portalStart, model.groups[gi].portalCount};
+    }
+
+    // The stock portal graph, by file group index.
+    {
+        namespace sp = stock_wmo_portal;
+        sp::Graph& g = modelData.portalGraph;
+        const size_t nFile = model.groups.size();
+        g.groupFlags.resize(nFile);
+        g.groupRefs.resize(nFile);
+        modelData.fileGroupBoxes.resize(nFile);
+        modelData.fileToLoaded.assign(nFile, -1);
+        for (size_t gi = 0; gi < nFile; ++gi) {
+            const auto& wg = model.groups[gi];
+            // MOGI's flags are the ones the walk reads (0x7ae7b0); the group
+            // file's MOGP flags agree but for the cleared 0x40000 below.
+            uint32_t flags = gi < model.groupInfo.size() ? model.groupInfo[gi].flags : wg.flags;
+            // An empty MOSB clears 0x40000 on every group (0x7d7470).
+            if (modelData.skyboxName.empty()) flags &= ~sp::kGroupShowSkybox;
+            g.groupFlags[gi] = flags;
+            g.groupRefs[gi] = {wg.portalStart, wg.portalCount};
+            modelData.fileGroupBoxes[gi] = {wg.boundingBoxMin, wg.boundingBoxMax};
+        }
+        for (size_t li = 0; li < modelData.groups.size(); ++li) {
+            const uint32_t fi = modelData.groups[li].fileIndex;
+            if (fi < nFile) modelData.fileToLoaded[fi] = static_cast<int32_t>(li);
+        }
+        g.refs.clear();
+        for (const auto& ref : model.portalRefs) {
+            g.refs.push_back({ref.portalIndex, ref.groupIndex, ref.side});
+        }
+        g.portals.clear();
+        for (const auto& portal : model.portals) {
+            sp::Portal p;
+            p.firstVertex = portal.startVertex;
+            p.vertexCount = portal.vertexCount;
+            p.normal = portal.normal;
+            p.d = portal.distance;
+            g.portals.push_back(sp::sanitisePortal(p));
+        }
+        g.vertices = model.portalVertices;
+        // MODR: which group holds each MODD doodad, and the doodad's colour.
+        modelData.doodadGroup.assign(model.doodads.size(), 0xffff);
+        modelData.doodadColor.assign(model.doodads.size(), 0xff7f7f7fu);
+        for (size_t gi = 0; gi < nFile; ++gi) {
+            for (uint16_t ref : model.groups[gi].doodadRefs) {
+                if (ref < modelData.doodadGroup.size() && modelData.doodadGroup[ref] == 0xffff) {
+                    modelData.doodadGroup[ref] = static_cast<uint16_t>(gi);
+                }
+            }
+        }
+        for (size_t di = 0; di < model.doodads.size(); ++di) {
+            const glm::vec4& c = model.doodads[di].color;
+            const auto byte = [](float v) {
+                return static_cast<uint32_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
+            };
+            modelData.doodadColor[di] = (byte(c.a) << 24) | (byte(c.r) << 16) |
+                                        (byte(c.g) << 8) | byte(c.b);
+        }
     }
 
     if (!modelData.portals.empty()) {
@@ -1691,6 +1720,7 @@ void WMORenderer::removeInstance(uint32_t instanceId) {
                 m2Renderer_->removeInstance(doodad.m2InstanceId);
             }
         }
+        releasePortalDoodads(*it);
         instances.erase(it);
         rebuildSpatialIndex();
         core::Logger::getInstance().debug("Removed WMO instance ", instanceId);
@@ -1714,6 +1744,9 @@ void WMORenderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
         }
     }
 
+    for (auto& inst : instances) {
+        if (toRemove.count(inst.id)) releasePortalDoodads(inst);
+    }
     const size_t oldSize = instances.size();
     instances.erase(std::remove_if(instances.begin(), instances.end(),
                    [&toRemove](const WMOInstance& inst) {
@@ -1739,6 +1772,11 @@ void WMORenderer::clearInstances() {
     instances.clear();
     spatialGrid.clear();
     instanceIndexById.clear();
+    instanceByUniqueId_.clear();
+    pendingDoodads_.clear();
+    std::fill(doodadVisible_.begin(), doodadVisible_.end(), uint8_t{1});
+    freeDoodadSlots_.clear();
+    for (uint32_t i = 0; i < doodadVisible_.size(); ++i) freeDoodadSlots_.push_back(i);
     precomputedFloorGrid.clear();  // Invalidate floor cache when instances change
     core::Logger::getInstance().info("Cleared all WMO instances");
 }
@@ -2062,9 +2100,6 @@ void WMORenderer::cullForRecording(const Camera& camera, const glm::vec3* viewer
     bool doPortalCull = portalCulling && cullingEnabled_;
     bool doDistanceCull = distanceCulling && cullingEnabled_;
 
-    // LOD shell groups render only beyond this distance squared (190 units)
-    static constexpr float LOD_SHELL_DIST_SQ = 196.0f * 196.0f;
-
     auto cullInstance = [&](size_t instIdx, InstanceDrawList& result) {
         // Retire the slot before anything can return. drawLists_ is reused
         // across frames, so a slot that bails out below would otherwise keep
@@ -2106,6 +2141,47 @@ void WMORenderer::cullForRecording(const Camera& camera, const glm::vec3* viewer
         }
 
         result.model = &model;   // cache so the draw-list loop doesn't redo the hash lookup
+        result.groupPlanes.clear();
+
+        // The stock portal walk ran for this instance (computeVisibility):
+        // a group is drawn when the walk reached it, and culled - with its
+        // batches - to the part of the screen it was reached through.
+        if (visActive_ && instIdx < instanceVis_.size() &&
+            instanceVis_[instIdx].walked) {
+            const auto& res = instanceVis_[instIdx].res;
+            const glm::mat4 localClip = viewProj * instance.modelMatrix;
+            for (size_t gi = 0; gi < model.groups.size(); ++gi) {
+                const auto& group = model.groups[gi];
+                const uint32_t fi = group.fileIndex;
+                if (fi >= res.drawn.size() || !res.drawn[fi]) {
+                    result.portalCulled++;
+                    continue;
+                }
+                if (cullingEnabled_ && gi < instance.worldGroupBounds.size()) {
+                    const auto& [gMin, gMax] = instance.worldGroupBounds[gi];
+                    const glm::vec3 closestPoint = glm::clamp(camPos, gMin, gMax);
+                    const float distSq = glm::dot(closestPoint - camPos, closestPoint - camPos);
+                    const float groupViewDistance = doDistanceCull
+                        ? std::min(viewDistance_, maxGroupDistance) : viewDistance_;
+                    if (distSq > groupViewDistance * groupViewDistance) {
+                        result.distanceCulled++;
+                        continue;
+                    }
+                }
+                if (group.groupFlags & 0x4000000) continue;  // antiportal
+                if (group.vertexBuffer == VK_NULL_HANDLE || group.indexBuffer == VK_NULL_HANDLE) continue;
+                const stock_wmo_portal::Planes planes =
+                    stock_wmo_portal::rectPlanes(localClip, res.rects[fi]);
+                if (!group.hasCloth &&
+                    !stock_wmo_portal::boxVisible(planes, group.boundingBoxMin, group.boundingBoxMax)) {
+                    continue;
+                }
+                result.visibleGroups.push_back(static_cast<uint32_t>(gi));
+                result.groupPlanes.push_back(planes);
+                result.costEnd += 2 + 2 * static_cast<uint32_t>(group.mergedBatches.size());
+            }
+            return;
+        }
 
         // Portal-based visibility - reuse member scratch buffer (avoid per-frame alloc)
         bool usePortalCulling = doPortalCull && !model.portals.empty() && !model.portalRefs.empty();
@@ -2206,14 +2282,6 @@ void WMORenderer::cullForRecording(const Camera& camera, const glm::vec3* viewer
             // Only skip antiportal geometry
             if (group.groupFlags & 0x4000000) continue;
 
-            // Skip distance-only LOD shell groups when camera is close to the group
-            if (group.isLOD) {
-                glm::vec3 groupCenter = instance.modelMatrix * glm::vec4(
-                    (group.boundingBoxMin + group.boundingBoxMax) * 0.5f, 1.0f);
-                float groupDistSq = glm::dot(camPos - groupCenter, camPos - groupCenter);
-                if (groupDistSq < LOD_SHELL_DIST_SQ) continue;
-            }
-
             // Skip groups with invalid GPU resources
             if (group.vertexBuffer == VK_NULL_HANDLE || group.indexBuffer == VK_NULL_HANDLE) continue;
 
@@ -2299,9 +2367,12 @@ void WMORenderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         glm::vec4 pushedCloth(0.0f);
 
         // Render visible groups. cullForRecording has already skipped the
-        // antiportals, the near LOD shells and groups without buffers.
-        for (uint32_t gi : dl.visibleGroups) {
+        // antiportals and groups without buffers.
+        const bool cullRanges = dl.groupPlanes.size() == dl.visibleGroups.size();
+        for (size_t vg = 0; vg < dl.visibleGroups.size(); ++vg) {
+            const uint32_t gi = dl.visibleGroups[vg];
             const auto& group = model.groups[gi];
+            const stock_wmo_portal::Planes* planes = cullRanges ? &dl.groupPlanes[vg] : nullptr;
 
             // Bind vertex + index buffers
             VkDeviceSize offset = 0;
@@ -2311,6 +2382,25 @@ void WMORenderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             // Render each merged batch
             for (const auto& mb : group.mergedBatches) {
                 if (!mb.materialSet) continue;
+
+                // Each batch is culled on its own box against the group's
+                // portal frustum before anything is bound for it (0x7a7630).
+                // Cloth moves off its box, so it is left alone.
+                uint64_t rangeMask = ~0ull;
+                const bool cullThis = planes && mb.clothDrop <= 0.0f &&
+                                      mb.drawBoxes.size() == mb.draws.size();
+                if (cullThis) {
+                    rangeMask = 0;
+                    const size_t n = std::min<size_t>(mb.draws.size(), 64);
+                    for (size_t di = 0; di < n; ++di) {
+                        const auto& box = mb.drawBoxes[di];
+                        if (stock_wmo_portal::boxVisible(*planes, box.first, box.second)) {
+                            rangeMask |= (1ull << di);
+                        }
+                    }
+                    if (mb.draws.size() > 64) rangeMask |= (1ull << 63);  // the tail is drawn
+                    if (rangeMask == 0) continue;
+                }
 
                 // The batch's blend and culling (render states 6 and 0x11).
                 const int neededPipeline = wireframeMode ? -1 : mb.pipelineSlot;
@@ -2350,8 +2440,10 @@ void WMORenderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     }
                     continue;
                 }
-                for (const auto& dr : mb.draws) {
+                for (size_t di = 0; di < mb.draws.size(); ++di) {
+                    const auto& dr = mb.draws[di];
                     if (dr.indexCount == 0) continue;
+                    if (!(rangeMask & (1ull << std::min<size_t>(di, 63)))) continue;
                     vkCmdDrawIndexed(cmd, dr.indexCount, 1, dr.firstIndex, 0, 0);
                     drawCalls++;
                 }
@@ -2477,7 +2569,6 @@ void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceM
             if (group.groupFlags & 0x4000000) continue;
 
             // Skip LOD groups in shadow pass (they overlap real geometry)
-            if (group.isLOD) continue;
 
             // Per-group AABB cull against shadow frustum
             if (gi < instance.worldGroupBounds.size()) {
@@ -2917,6 +3008,9 @@ bool WMORenderer::isGroupVisible(const GroupResources& group, const glm::mat4& m
 }
 
 std::string WMORenderer::skyboxAt(const glm::vec3& worldPos) const {
+    // The walk decides when it ran (0x7ac060: any group it reaches with
+    // 0x40000 while the camera is inside).
+    if (visActive_) return visSkybox_;
     for (const auto& instance : instances) {
         if (instance.hidden) continue;
         if (glm::any(glm::lessThan(worldPos, instance.worldBoundsMin)) ||
@@ -4159,7 +4253,6 @@ void WMORenderer::debugDumpGroupsAtPosition(float glX, float glY, float glZ) con
                         " verts=", group.collisionVertices.size(),
                         " tris=", group.collisionIndices.size()/3,
                         " batches=", group.mergedBatches.size(),
-                        " isLOD=", group.isLOD,
                         " floorHits=", floorTris,
                         " bestHitZ=", bestHitZ,
                         " lowestHitZ=", (floorTris ? lowestHitZ : -999999.0f),
@@ -5044,7 +5137,7 @@ void WMORenderer::registerRtModel(uint32_t modelId, const ModelData& model) {
     for (const auto& group : model.groups) {
         // Distance shells and groups the renderer never draws would cast
         // shadows the player cannot see the source of.
-        if (group.isLOD || group.allUntextured || (group.groupFlags & 0x4000000u)) continue;
+        if (group.allUntextured || (group.groupFlags & 0x4000000u)) continue;
         if (group.collisionVertices.empty()) continue;
         const uint32_t base = static_cast<uint32_t>(src.positions.size());
         src.positions.insert(src.positions.end(), group.collisionVertices.begin(),
@@ -5125,6 +5218,407 @@ void WMORenderer::syncRtScene() {
         } else {
             ++it;
         }
+    }
+}
+
+
+// ── The stock portal walk (docs/re/wmo-rendering.md §5, §10) ────────────
+
+void WMORenderer::setM2Renderer(M2Renderer* renderer) {
+    if (m2Renderer_ && m2Renderer_ != renderer) m2Renderer_->setPortalVisibility(nullptr);
+    m2Renderer_ = renderer;
+    if (m2Renderer_) m2Renderer_->setPortalVisibility(&doodadVisible_);
+}
+
+bool WMORenderer::findCameraGroup(const glm::vec3& camPos, std::optional<float> groundBelow,
+                                  size_t& outInstance, uint32_t& outFileGroup) const {
+    namespace sp = stock_wmo_portal;
+    // 0x795d40 -> 0x7d59b0: a segment from the camera 1760 yards straight
+    // down, against every map object; the nearest floor it meets decides. A
+    // floor of an exterior group means the camera is outside.
+    // The ray starts half a yard above the eye. Wowee's third-person camera,
+    // pushed against a wall, can end up a hand's width under the floor it
+    // looks across (Karazhan's gate passage: the eye 0.24 below the floor),
+    // and a ray from there finds the group below instead. Not stock: the
+    // client's camera never sinks into a floor.
+    constexpr float kRayLift = 0.5f;
+    const glm::vec3 rayStart = camPos + glm::vec3(0.0f, 0.0f, kRayLift);
+    const glm::vec3 qMin(camPos.x - 0.5f, camPos.y - 0.5f, camPos.z - sp::kCameraRayLength);
+    const glm::vec3 qMax(camPos.x + 0.5f, camPos.y + 0.5f, rayStart.z + 0.5f);
+    gatherCandidates(qMin, qMax, tl_candidateScratch);
+    float best = sp::kCameraRayLength;
+    // 0x795d40 casts against the world first (0x7a39f0) and hands the hit
+    // on as the farthest a map object floor may be (0x7d59b0's param_3):
+    // ground nearer than any WMO floor means the camera is outside.
+    bool groundHit = false;
+    if (groundBelow && *groundBelow <= rayStart.z && rayStart.z - *groundBelow < best) {
+        best = rayStart.z - *groundBelow;
+        groundHit = true;
+    }
+    bool found = false;
+    size_t bestInst = 0;
+    uint32_t bestGroup = 0;
+    uint32_t bestFlags = 0;
+    for (size_t idx : tl_candidateScratch) {
+        const auto& instance = instances[idx];
+        auto it = loadedModels.find(instance.modelId);
+        if (it == loadedModels.end()) continue;
+        const ModelData& model = it->second;
+        const glm::vec3 localOrigin = glm::vec3(instance.invModelMatrix * glm::vec4(rayStart, 1.0f));
+        // Unnormalised, so t is in world yards whatever the scale.
+        const glm::vec3 localDir = glm::vec3(instance.invModelMatrix * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f));
+        for (size_t gi = 0; gi < model.groups.size(); ++gi) {
+            const auto& group = model.groups[gi];
+            const uint32_t fi = group.fileIndex;
+            const uint32_t flags = fi < model.portalGraph.groupFlags.size()
+                ? model.portalGraph.groupFlags[fi] : group.groupFlags;
+            if (flags & sp::kGroupNotUnderCamera) continue;
+            if (!trianglesAlongRay(group, localOrigin, localDir, tl_triScratch)) continue;
+            const auto& verts = group.collisionVertices;
+            const auto& indices = group.collisionIndices;
+            for (uint32_t triStart : tl_triScratch) {
+                if (triStart + 2 >= indices.size()) continue;
+                // What the BSP holds: collidable triangles (MOPY 0x08), or
+                // drawn ones that are not detail.
+                const size_t triIdx = triStart / 3;
+                if (!group.triMopyFlags.empty() && triIdx < group.triMopyFlags.size()) {
+                    const uint8_t mopy = group.triMopyFlags[triIdx];
+                    const bool collides = (mopy & 0x08) || ((mopy & 0x20) && !(mopy & 0x04));
+                    if (!collides) continue;
+                }
+                const float t = rayTriangleIntersect(localOrigin, localDir,
+                                                     verts[indices[triStart]],
+                                                     verts[indices[triStart + 1]],
+                                                     verts[indices[triStart + 2]]);
+                if (t >= 0.0f && t < best) {
+                    best = t;
+                    found = true;
+                    bestInst = idx;
+                    bestGroup = fi;
+                    bestFlags = flags;
+                }
+            }
+        }
+    }
+    if (found) {
+        if (bestFlags & sp::kGroupExterior) return false;
+        outInstance = bestInst;
+        outFileGroup = bestGroup;
+        return true;
+    }
+    if (groundHit) return false;  // the ground is the floor under the camera
+    // Nothing under the camera at all (a third-person camera pushed into a
+    // wall or below a floor). The client would call that outside and draw no
+    // interior; Wowee takes the smallest interior group box around the camera
+    // instead, so a dungeon does not vanish for a frame. Not stock.
+    float bestVolume = std::numeric_limits<float>::max();
+    for (size_t idx : tl_candidateScratch) {
+        const auto& instance = instances[idx];
+        auto it = loadedModels.find(instance.modelId);
+        if (it == loadedModels.end()) continue;
+        const ModelData& model = it->second;
+        const glm::vec3 local = glm::vec3(instance.invModelMatrix * glm::vec4(camPos, 1.0f));
+        for (const auto& group : model.groups) {
+            const uint32_t fi = group.fileIndex;
+            const uint32_t flags = fi < model.portalGraph.groupFlags.size()
+                ? model.portalGraph.groupFlags[fi] : group.groupFlags;
+            if (flags & (sp::kGroupExterior | sp::kGroupNotUnderCamera)) continue;
+            if (glm::any(glm::lessThan(local, group.boundingBoxMin)) ||
+                glm::any(glm::greaterThan(local, group.boundingBoxMax))) continue;
+            const glm::vec3 size = group.boundingBoxMax - group.boundingBoxMin;
+            const float volume = size.x * size.y * size.z;
+            if (volume < bestVolume) {
+                bestVolume = volume;
+                outInstance = idx;
+                outFileGroup = fi;
+            }
+        }
+    }
+    return bestVolume < std::numeric_limits<float>::max();
+}
+
+bool WMORenderer::computeVisibility(const Camera& camera, std::optional<float> groundBelow) {
+    namespace sp = stock_wmo_portal;
+    static const bool walkOn = core::envFlagEnabled("WOWEE_WMO_PORTALS", true);
+    // WOWEE_WMO_PORTALS_ALTERNATE=N: the walk on for N seconds, off for N,
+    // and so on - an A/B measurement in one session, same camera and window.
+    static const long altSeconds = [] {
+        const char* v = std::getenv("WOWEE_WMO_PORTALS_ALTERNATE");
+        return v ? std::strtol(v, nullptr, 10) : 0L;
+    }();
+    bool active = walkOn;
+    if (altSeconds > 0) {
+        static const auto altStart = std::chrono::steady_clock::now();
+        const auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - altStart).count();
+        active = ((secs / altSeconds) % 2) == 0;
+        static int lastState = -1;
+        if (lastState != (active ? 1 : 0)) {
+            lastState = active ? 1 : 0;
+            LOG_WARNING("wmo portal walk ", active ? "ON" : "OFF", " (alternating)");
+        }
+    }
+    if (!active) {
+        if (visActive_) std::fill(doodadVisible_.begin(), doodadVisible_.end(), uint8_t{1});
+        visActive_ = false;
+        visSealed_ = false;
+        visSkybox_.clear();
+        return false;
+    }
+    visActive_ = true;
+
+    const glm::mat4 viewProj = camera.getProjectionMatrix() * camera.getViewMatrix();
+    const glm::vec3 camPos = camera.getPosition();
+    instanceVis_.resize(instances.size());
+    for (auto& iv : instanceVis_) iv.walked = false;
+
+    // The group the camera stands in, if it stands in an interior one.
+    size_t camInst = std::numeric_limits<size_t>::max();
+    uint32_t camGroup = 0;
+    const bool inside = findCameraGroup(camPos, groundBelow, camInst, camGroup);
+    sp::Rect outdoor = sp::Rect::full();
+    visSkybox_.clear();
+    if (inside) {
+        const WMOInstance& inst = instances[camInst];
+        auto it = loadedModels.find(inst.modelId);
+        if (it != loadedModels.end() && !it->second.portalGraph.groupFlags.empty()) {
+            const ModelData& model = it->second;
+            const glm::mat4 localClip = viewProj * inst.modelMatrix;
+            const glm::vec3 camLocal = glm::vec3(inst.invModelMatrix * glm::vec4(camPos, 1.0f));
+            const sp::Planes full = sp::rectPlanes(localClip, sp::Rect::full());
+            auto& iv = instanceVis_[camInst];
+            sp::walkFromInside(model.portalGraph, localClip, camLocal, camGroup,
+                               [&](uint32_t gi) {
+                                   const auto& b = model.fileGroupBoxes[gi];
+                                   return sp::boxVisible(full, b.first, b.second);
+                               }, iv.res);
+            iv.walked = true;
+            outdoor = iv.res.outdoor;
+            if (iv.res.skybox) visSkybox_ = model.skyboxName;
+        } else {
+            camInst = std::numeric_limits<size_t>::max();
+        }
+    }
+    const bool camInside = camInst != std::numeric_limits<size_t>::max();
+    visSealed_ = camInside && outdoor.empty();
+
+    // Every other instance, and the camera's own exterior, from outside -
+    // through the outdoor view when the camera is inside (0x79a790 with the
+    // portal rectangle, 0x79a160 -> 0x7b3a10).
+    Frustum frustum;
+    frustum.extractFromMatrix(viewProj);
+    sp::WalkResult scratch;
+    // WOWEE_WMO_PORTAL_DEBUG=1: one frame in ten seconds, every instance walked.
+    static const bool dbg = core::envFlagEnabled("WOWEE_WMO_PORTAL_DEBUG", false);
+    bool dbgThisFrame = false;
+    if (dbg) {
+        static auto lastDbg = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastDbg > std::chrono::seconds(10)) {
+            lastDbg = now;
+            dbgThisFrame = true;
+        }
+    }
+    for (size_t i = 0; i < instances.size(); ++i) {
+        const WMOInstance& inst = instances[i];
+        auto& iv = instanceVis_[i];
+        auto it = loadedModels.find(inst.modelId);
+        if (it == loadedModels.end() || it->second.portalGraph.groupFlags.empty()) continue;
+        const ModelData& model = it->second;
+        const size_t nFile = model.portalGraph.groupFlags.size();
+        const bool isCam = camInside && i == camInst;
+        if (!isCam) {
+            iv.walked = true;
+            iv.res.reset(nFile);
+        }
+        if (visSealed_ || inst.hidden) continue;
+        // A model with no portals and nothing exterior would never be drawn
+        // from outside; draw it as before rather than trust that.
+        if (!isCam && model.portalGraph.portals.empty()) {
+            bool anyOutside = false;
+            for (uint32_t f : model.portalGraph.groupFlags) {
+                if (f & (sp::kGroupExterior | sp::kGroupAlwaysDraw)) { anyOutside = true; break; }
+            }
+            if (!anyOutside) { iv.walked = false; continue; }
+        }
+        const glm::vec3 closest = glm::clamp(camPos, inst.worldBoundsMin, inst.worldBoundsMax);
+        if (cullingEnabled_ &&
+            glm::dot(closest - camPos, closest - camPos) > viewDistance_ * viewDistance_) continue;
+        if (!frustum.intersectsAABB(inst.worldBoundsMin, inst.worldBoundsMax)) continue;
+        const glm::mat4 localClip = viewProj * inst.modelMatrix;
+        const glm::vec3 camLocal = glm::vec3(inst.invModelMatrix * glm::vec4(camPos, 1.0f));
+        const sp::Planes screenPlanes = sp::rectPlanes(localClip, outdoor);
+        sp::WalkResult& out = isCam ? scratch : iv.res;
+        sp::walkFromOutside(model.portalGraph, localClip, camLocal, outdoor,
+                            [&](uint32_t gi) {
+                                const auto& b = model.fileGroupBoxes[gi];
+                                return sp::boxVisible(screenPlanes, b.first, b.second);
+                            }, out);
+        if (dbgThisFrame) {
+            {
+                size_t ext = 0, extIn = 0, drawn = 0;
+                std::string detail;
+                for (uint32_t gi = 0; gi < nFile; ++gi) {
+                    const uint32_t f = model.portalGraph.groupFlags[gi];
+                    const auto& b = model.fileGroupBoxes[gi];
+                    const bool vis = sp::boxVisible(screenPlanes, b.first, b.second);
+                    if (f & (sp::kGroupExterior | sp::kGroupAlwaysDraw)) {
+                        ++ext;
+                        if (vis) ++extIn;
+                    }
+                    drawn += out.drawn[gi];
+                    if (nFile <= 16) {
+                        detail += " " + std::to_string(gi) + ((f & sp::kGroupExterior) ? "e" : "i") +
+                                  (vis ? "v" : "-") + (out.drawn[gi] ? "D" : "");
+                    }
+                }
+                LOG_WARNING("  portal debug: model ", inst.modelId, " groups ", nFile, " exterior ", ext,
+                            " in view ", extIn, " drawn ", drawn, " cam local (", camLocal.x, ", ",
+                            camLocal.y, ", ", camLocal.z, ")", detail);
+            }
+        }
+        if (isCam) {
+            for (size_t g = 0; g < nFile && g < iv.res.drawn.size(); ++g) {
+                if (!scratch.drawn[g]) continue;
+                iv.res.drawn[g] = 1;
+                iv.res.rects[g].unite(scratch.rects[g]);
+            }
+        }
+    }
+
+    // The doodads: drawn with their group, culled to the group's rectangle.
+    std::vector<sp::Planes> groupPlanes;
+    std::vector<uint8_t> groupPlanesMade;
+    for (size_t i = 0; i < instances.size(); ++i) {
+        WMOInstance& inst = instances[i];
+        if (inst.portalDoodads.empty()) continue;
+        const auto& iv = instanceVis_[i];
+        if (!iv.walked) {
+            for (const auto& d : inst.portalDoodads) {
+                if (d.slot < doodadVisible_.size()) doodadVisible_[d.slot] = 1;
+            }
+            continue;
+        }
+        const glm::mat4 localClip = viewProj * inst.modelMatrix;
+        groupPlanes.assign(iv.res.drawn.size(), sp::Planes{});
+        groupPlanesMade.assign(iv.res.drawn.size(), 0);
+        for (auto& d : inst.portalDoodads) {
+            if (d.slot >= doodadVisible_.size()) continue;
+            uint8_t vis = 0;
+            if (d.fileGroup < iv.res.drawn.size() && iv.res.drawn[d.fileGroup]) {
+                vis = 1;
+                if (d.radius < 0.0f && m2Renderer_) {
+                    glm::vec3 c;
+                    float r = 0.0f;
+                    if (m2Renderer_->getInstanceBounds(d.m2InstanceId, c, r) && r > 0.0f) {
+                        d.localCenter = glm::vec3(inst.invModelMatrix * glm::vec4(c, 1.0f));
+                        d.radius = r;
+                    }
+                }
+                if (d.radius > 0.0f) {
+                    if (!groupPlanesMade[d.fileGroup]) {
+                        groupPlanesMade[d.fileGroup] = 1;
+                        groupPlanes[d.fileGroup] = sp::rectPlanes(localClip, iv.res.rects[d.fileGroup]);
+                    }
+                    if (!sp::sphereVisible(groupPlanes[d.fileGroup], d.localCenter, d.radius)) vis = 0;
+                }
+            }
+            doodadVisible_[d.slot] = vis;
+        }
+    }
+
+    static const bool prof = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
+    if (prof) {
+        static auto lastSaid = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastSaid > std::chrono::seconds(10)) {
+            lastSaid = now;
+            size_t walked = 0, groupsDrawn = 0, groupsTotal = 0, doodads = 0, doodadsShown = 0;
+            for (size_t i = 0; i < instanceVis_.size() && i < instances.size(); ++i) {
+                if (!instanceVis_[i].walked) continue;
+                ++walked;
+                groupsTotal += instanceVis_[i].res.drawn.size();
+                for (uint8_t d : instanceVis_[i].res.drawn) groupsDrawn += d;
+                doodads += instances[i].portalDoodads.size();
+                for (const auto& d : instances[i].portalDoodads) {
+                    if (d.slot < doodadVisible_.size()) doodadsShown += doodadVisible_[d.slot];
+                }
+            }
+            LOG_WARNING("  wmo portal walk: camera ", camInside ? "inside" : "outside",
+                        camInside ? " group " + std::to_string(camGroup) : std::string(),
+                        visSealed_ ? " (sealed)" : "", ", ", walked, " instances walked, groups ",
+                        groupsDrawn, "/", groupsTotal, ", doodads ", doodadsShown, "/", doodads,
+                        visSkybox_.empty() ? "" : ", sky ", visSkybox_);
+        }
+    }
+    return visSealed_;
+}
+
+void WMORenderer::setInstanceUniqueId(uint32_t instanceId, uint32_t uniqueId) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end() || uniqueId == 0) return;
+    instances[idxIt->second].uniqueId = uniqueId;
+    instanceByUniqueId_[uniqueId] = instanceId;
+    auto pend = pendingDoodads_.find(uniqueId);
+    if (pend != pendingDoodads_.end()) {
+        const auto list = std::move(pend->second);
+        pendingDoodads_.erase(pend);
+        for (const auto& d : list) attachDoodad(instanceId, d.moddIndex, d.m2InstanceId);
+    }
+}
+
+void WMORenderer::attachDoodadByUniqueId(uint32_t uniqueId, uint32_t moddIndex, uint32_t m2InstanceId) {
+    if (uniqueId == 0) return;
+    auto it = instanceByUniqueId_.find(uniqueId);
+    if (it != instanceByUniqueId_.end() && instanceIndexById.count(it->second)) {
+        attachDoodad(it->second, moddIndex, m2InstanceId);
+        return;
+    }
+    pendingDoodads_[uniqueId].push_back({moddIndex, m2InstanceId});
+}
+
+void WMORenderer::attachDoodad(uint32_t instanceId, uint32_t moddIndex, uint32_t m2InstanceId) {
+    namespace sp = stock_wmo_portal;
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end() || !m2Renderer_) return;
+    WMOInstance& inst = instances[idxIt->second];
+    auto it = loadedModels.find(inst.modelId);
+    if (it == loadedModels.end()) return;
+    const ModelData& model = it->second;
+    if (moddIndex >= model.doodadGroup.size()) return;
+    const uint16_t fileGroup = model.doodadGroup[moddIndex];
+    if (fileGroup == 0xffff || fileGroup >= model.portalGraph.groupFlags.size()) return;
+
+    uint32_t slot;
+    if (!freeDoodadSlots_.empty()) {
+        slot = freeDoodadSlots_.back();
+        freeDoodadSlots_.pop_back();
+    } else {
+        slot = static_cast<uint32_t>(doodadVisible_.size());
+        doodadVisible_.push_back(1);
+    }
+    doodadVisible_[slot] = 1;
+    inst.portalDoodads.push_back({slot, m2InstanceId, fileGroup});
+
+    // 0x7bf740: lit as an interior doodad unless its group is exterior or
+    // exterior-lit; 0x7c1150 then gives it the MODD colour's two lights.
+    const uint32_t groupFlags = model.portalGraph.groupFlags[fileGroup];
+    const bool interior = sp::doodadLitAsInterior(groupFlags);
+    const sp::DoodadLight light = sp::doodadLight(model.doodadColor[moddIndex]);
+    m2Renderer_->setInstanceWmoDoodad(m2InstanceId, slot, interior, light.ambient, light.diffuse);
+}
+
+void WMORenderer::releasePortalDoodads(WMOInstance& inst) {
+    for (const auto& d : inst.portalDoodads) {
+        if (d.slot < doodadVisible_.size()) {
+            doodadVisible_[d.slot] = 1;
+            freeDoodadSlots_.push_back(d.slot);
+        }
+    }
+    inst.portalDoodads.clear();
+    if (inst.uniqueId != 0) {
+        auto it = instanceByUniqueId_.find(inst.uniqueId);
+        if (it != instanceByUniqueId_.end() && it->second == inst.id) instanceByUniqueId_.erase(it);
     }
 }
 

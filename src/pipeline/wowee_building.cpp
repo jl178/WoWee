@@ -464,6 +464,16 @@ bool WoweeBuildingLoader::toWMOModel(const WoweeBuilding& building, WMOModel& ou
         portal.vertexCount = static_cast<uint16_t>(wp.vertices.size());
         portal.planeIndex = 0;
         for (const auto& v : wp.vertices) outModel.portalVertices.push_back(v);
+        // The plane MOPT would carry, from the polygon's winding.
+        if (wp.vertices.size() >= 3) {
+            const glm::vec3 n = glm::cross(wp.vertices[1] - wp.vertices[0],
+                                           wp.vertices[2] - wp.vertices[0]);
+            const float len = glm::length(n);
+            if (len > 1e-6f) {
+                portal.normal = n / len;
+                portal.distance = -glm::dot(portal.normal, wp.vertices[0]);
+            }
+        }
         uint16_t portalIdx = static_cast<uint16_t>(outModel.portals.size());
         outModel.portals.push_back(portal);
         if (wp.groupA >= 0) {

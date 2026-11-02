@@ -170,6 +170,10 @@ struct PendingTile {
         pipeline::M2Model model;
         glm::vec3 worldPosition;   // For frustum culling
         glm::mat4 modelMatrix;     // Pre-computed world transform
+        /// The placement's MODF uniqueId and the doodad's MODD index, so
+        /// WMORenderer can draw it with its group and light it by it.
+        uint32_t wmoUniqueId = 0;
+        uint32_t moddIndex = 0;
     };
     std::vector<WMODoodadReady> wmoDoodads;
 

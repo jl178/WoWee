@@ -1591,6 +1591,19 @@ target_link_libraries(test_minimap_projection PRIVATE catch2_main)
 wowee_test_link_glm(test_minimap_projection)
 add_test(NAME minimap_projection COMMAND test_minimap_projection)
 register_test_target(test_minimap_projection)
+
+# ── test_minimap_stock ───────────────────────────────────────
+add_executable(test_minimap_stock
+    test_minimap_stock.cpp
+)
+target_include_directories(test_minimap_stock PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_minimap_stock SYSTEM PRIVATE
+    ${TEST_SYSTEM_INCLUDE_DIRS}
+)
+target_link_libraries(test_minimap_stock PRIVATE catch2_main)
+wowee_test_link_glm(test_minimap_stock)
+add_test(NAME minimap_stock COMMAND test_minimap_stock)
+register_test_target(test_minimap_stock)
 register_test_target(test_text_wrap)
 
 # ── test_chat_markup_parser ──────────────────────────────────
@@ -3023,3 +3036,14 @@ wowee_add_test(test_stock_world_fx SOURCES test_stock_world_fx.cpp)
 # culling, wrap, effect, env coordinate - and the MLIQ liquid type
 # (stock_wmo_render, stock_wmo_liquid). Header-only.
 wowee_add_test(test_stock_wmo_render SOURCES test_stock_wmo_render.cpp)
+
+# ── test_stock_wmo_portal ────────────────────────────────────
+# The stock WMO portal walk (0x7ac060 and its callers) and the WMO doodad
+# light (0x7c1ad0, 0x7c1150). Header-only.
+wowee_add_test(test_stock_wmo_portal SOURCES test_stock_wmo_portal.cpp)
+
+# ── test_world_map_lua_arith ─────────────────────────────────
+# The world map Lua API's arithmetic (addons/world_map_api.hpp, detail):
+# rounding of Lua arguments, rectangle tests, .zmp cells, landmark icon slots,
+# texture sizes. Header-only.
+wowee_add_test(test_world_map_lua_arith SOURCES test_world_map_lua_arith.cpp)
