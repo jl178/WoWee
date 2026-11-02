@@ -86,6 +86,11 @@ public:
     // ── Targeting / combat ─────────────────────────────────────────────────
     void setTargetPosition(const glm::vec3* pos);
     void setInCombat(bool combat);
+    /// The local character has an attack target: from the right-click (or
+    /// any attack command) until the attack stops. Drives the Ready stance.
+    void setAttacking(bool attacking);
+    /// Auto Shot (or Shoot, Throw) is on; see CharacterAnimator::setAutoRepeatShot.
+    void setAutoRepeatShot(bool on);
     [[nodiscard]] bool isInCombat() const { return inCombat_; }
     [[nodiscard]] const glm::vec3* getTargetPosition() const { return targetPosition_; }
     void resetCombatVisualState();
@@ -95,6 +100,10 @@ public:
     /// An auto-attack swing. offHand comes from the swing's HITINFO_OFFHAND
     /// bit, so a dual wielder swings the hand the server says it swung.
     void triggerMeleeSwing(bool offHand = false);
+    /// The rest of the whole-body swing playing now at `speed`, the swing
+    /// state lasting as much longer: a swing that missed, was dodged or
+    /// evaded finishes at half speed from its blow (Wow.exe 0x735CC0).
+    void slowMeleeSwing(float speed);
     /// inventoryType: WoW inventory type (0=unarmed, 13=1H, 17=2H, 21=main-hand, …)
     /// is2HLoose: true for polearms/staves (use ATTACK_2H_LOOSE instead of ATTACK_2H)
     /// isFist/isDagger describe the main hand; offHandIsFist/offHandIsDagger
@@ -236,6 +245,8 @@ private:
     uint32_t specialAttackAnimId_ = 0;
     WeaponLoadout weaponLoadout_;
     bool meleeOffHandTurn_ = false;
+    /// Moving last frame, for cutting a whole-body swing when a move starts.
+    bool movingLastFrame_ = false;
 
     // ── Ranged weapon state ──────────────────────────────────────────────
     float rangedShootTimer_ = 0.0f;
@@ -260,6 +271,11 @@ private:
 
     // ── Private helpers ──────────────────────────────────────────────────
     uint32_t resolveMeleeAnimId();
+    /// Play a swing (or a flinch) on the upper body alone when the legs are
+    /// busy (walking, running, strafing, backing, in the air or swimming)
+    /// and it is one the stock client splits that way; false when it takes
+    /// the whole body instead. See playsOnUpperBody().
+    bool playSwingOnUpperBody(uint32_t animId);
     void updateMountedAnimation(float deltaTime);
     void applyMountPositioning(float mountBob, float mountRoll, float characterYaw);
 };

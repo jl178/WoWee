@@ -2342,31 +2342,13 @@ void Renderer::update(float deltaTime) {
         } else if (cameraController->isMoving() || cameraController->isRightMouseHeld() ||
                    cameraController->isTurningLeft() || cameraController->isTurningRight()) {
             characterYaw = cameraController->getFacingYaw();
-        } else if (animationController_ && animationController_->isInCombat() &&
-                   animationController_->getTargetPosition() && !animationController_->isEmoteActive() && !(animationController_ && animationController_->isMounted())) {
-            glm::vec3 toTarget = *animationController_->getTargetPosition() - characterPosition;
-            if (toTarget.x * toTarget.x + toTarget.y * toTarget.y > 0.01f) {
-                // Go through canonical, the way spawning and the camera do.
-                // Taking atan2 of the render delta directly yields a heading in
-                // a different convention - a mirror about 135 degrees - so the
-                // spin looked roughly right but the frame loop then converted it
-                // back to a canonical yaw that pointed somewhere else, and the
-                // server rejected the cast for not facing the target.
-                const glm::vec3 toTargetCanonical = ::wowee::core::coords::renderToCanonical(toTarget);
-                const float canonYawToTarget =
-                    std::atan2(-toTargetCanonical.y, toTargetCanonical.x);
-                float targetYaw = ::wowee::core::coords::canonicalToCharacterYawDeg(canonYawToTarget);
-                float diff = targetYaw - characterYaw;
-                while (diff > 180.0f) diff -= 360.0f;
-                while (diff < -180.0f) diff += 360.0f;
-                float rotSpeed = 360.0f * deltaTime;
-                if (std::abs(diff) < rotSpeed) {
-                    characterYaw = targetYaw;
-                } else {
-                    characterYaw += (diff > 0 ? rotSpeed : -rotSpeed);
-                }
-            }
         }
+        // Nothing else turns the character: not a target, not a fight. The
+        // stock client never faces the player toward what it attacks or what
+        // hits it; a swing at something behind is refused until the player
+        // turns. This used to spin the idle character toward its target
+        // whenever it was in combat, which also changed the facing sent to
+        // the server.
         // Drawn body yaw and look twist, as the stock 3.3.5a client does it
         // (CGUnit_C update 0x0073DAB0; see animation/body_facing.hpp). The
         // logical facing (characterYaw: what the server and melee arcs use)
@@ -2722,8 +2704,9 @@ void Renderer::runDeferredWorldInitStep(float deltaTime) {
     deferredWorldInitCooldown_ = 0.12f;
 }
 
-void Renderer::setSelectionCircle(const glm::vec3& pos, float radius, const glm::vec3& color) {
-    if (overlaySystem_) overlaySystem_->setSelectionCircle(pos, radius, color);
+void Renderer::setSelectionCircle(const glm::vec3& pos, float radius, const glm::vec3& color,
+                                  float alpha, float attackPulse) {
+    if (overlaySystem_) overlaySystem_->setSelectionCircle(pos, radius, color, alpha, attackPulse);
 }
 
 void Renderer::clearSelectionCircle() {

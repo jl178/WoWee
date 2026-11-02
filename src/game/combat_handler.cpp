@@ -47,6 +47,16 @@ CombatRelation combatRelationOf(GameHandler& gh, uint64_t guid) {
     return (unit && gh.unitReactionToPlayer(*unit) <= 3)
         ? CombatRelation::HostilePlayer : CombatRelation::FriendlyPlayer;
 }
+
+/// The unit's attack target, which holds it in its Ready stance with its
+/// weapons drawn (CGUnit_C +0xA20 in Wow.exe). The local player's is set the
+/// moment it asks to attack, as CGPlayer_C::StartAttack (0x6E2610) does,
+/// rather than a round trip later on SMSG_ATTACKSTART.
+void setUnitAttackTarget(GameHandler& gh, uint64_t unitGuid, uint64_t targetGuid) {
+    if (unitGuid == 0) return;
+    if (auto entity = gh.getEntityManager().getEntity(unitGuid); entity && entity->isUnit())
+        std::static_pointer_cast<Unit>(entity)->setAttackTarget(targetGuid);
+}
 }  // namespace
 
 CombatHandler::CombatHandler(GameHandler& owner)
@@ -73,7 +83,12 @@ bool CombatHandler::threatWarningWanted() const {
 void CombatHandler::registerOpcodes(DispatchTable& table) {
     // ---- Combat clearing ----
     table[Opcode::SMSG_ATTACKSWING_DEADTARGET] = [this](network::Packet& /*packet*/) {
+        // The stock client stops the attack outright here (Wow.exe 0x756800
+        // -> CGPlayer_C::StopAttack 0x6E1660): no retry, no Ready stance.
+        setUnitAttackTarget(owner_, owner_.getPlayerGuid(), 0);
         autoAttacking_ = false;
+        autoAttackRequested_ = false;
+        autoAttackRetryPending_ = false;
         autoAttackTarget_ = 0;
     };
     // A list emptied or shortened changes the standing of whoever was on it,
@@ -124,6 +139,7 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
         fireSituation(unitGuid, {victimGuid});
     };
     table[Opcode::SMSG_CANCEL_COMBAT] = [this](network::Packet& /*packet*/) {
+        setUnitAttackTarget(owner_, owner_.getPlayerGuid(), 0);
         autoAttacking_ = false;
         autoAttackTarget_ = 0;
         autoAttackRequested_ = false;
@@ -389,43 +405,19 @@ void CombatHandler::startAutoAttack(uint64_t targetGuid) {
         }
     }
 
-    // Client-side range gate to avoid starting "swing forever" loops when
-    // target is already clearly out of range.
-    if (auto target = owner_.getEntityManager().getEntity(targetGuid)) {
-        float dx = owner_.movementInfoRef().x - target->getLatestX();
-        float dy = owner_.movementInfoRef().y - target->getLatestY();
-        float dz = owner_.movementInfoRef().z - target->getLatestZ();
-        float dist3d = std::sqrt(dx * dx + dy * dy + dz * dz);
-        // Use longer range limit when a ranged weapon is equipped
-        const auto& rangedSlot = owner_.getInventory().getEquipSlot(game::EquipSlot::RANGED);
-        bool hasRangedWeapon = !rangedSlot.empty() &&
-            (rangedSlot.item.inventoryType == game::InvType::RANGED_BOW ||
-             rangedSlot.item.inventoryType == game::InvType::RANGED_GUN ||
-             rangedSlot.item.inventoryType == game::InvType::THROWN);
-        float maxRange = hasRangedWeapon ? 40.0f : 8.0f;
-        if (dist3d > maxRange) {
-            if (autoAttackRangeWarnCooldown_ <= 0.0f) {
-                owner_.raiseUiError("Target is too far away.");
-                autoAttackRangeWarnCooldown_ = 1.25f;
-            }
-            return;
-        }
-    }
+    // No range check. The stock client sends CMSG_ATTACKSWING for a target at
+    // any distance (CGPlayer_C::StartAttack, Wow.exe 0x6E2610) and draws the
+    // weapons and takes the Ready stance at once; the server keeps the attack
+    // on and answers SMSG_ATTACKSWING_NOTINRANGE until the player closes in,
+    // when the first swing lands without another click. Refusing here beyond
+    // 8 yards meant a right-click on a wolf across the clearing did nothing
+    // but select it, and the player had to click again on arrival.
 
-    // Only dismount once this is a valid attack attempt. Doing it before the
-    // target/range gate knocked the player off a mount even though no combat
-    // request was sent.
-    //
-    // Never in the air, unless Auto Dismount in Flight asks for it: a hostile
-    // right-clicked from a flying mount dropped the player out of the sky.
-    if (owner_.isMounted()) {
-        if (owner_.isPlayerFlying() && !owner_.isTaxiMountActive() &&
-            addons::storedCVarValue("autoDismountFlying", "0") == "0") {
-            owner_.addUIError("You can't do that while flying.");
-            return;
-        }
-        owner_.dismount();
-    }
+    // No dismount. The stock client asks to attack from the saddle as from
+    // the ground (StartAttack 0x6E2610 and its caller 0x6E4950 never touch
+    // the mount); the server refuses a mounted attacker (AzerothCore
+    // Unit::Attack) and answers SMSG_ATTACKSTOP, which ends the attack. The
+    // player gets off the mount to fight. Wowee used to dismount here.
 
     autoAttackRequested_ = true;
     autoAttackRetryPending_ = true;
@@ -455,6 +447,7 @@ void CombatHandler::startAutoAttack(uint64_t targetGuid) {
             }
         }
     }
+    setUnitAttackTarget(owner_, owner_.getPlayerGuid(), targetGuid);
     if (owner_.getState() == WorldState::IN_WORLD && owner_.getSocket()) {
         auto packet = AttackSwingPacket::build(targetGuid);
         owner_.getSocket()->send(packet);
@@ -471,6 +464,7 @@ void CombatHandler::stopAutoAttack() {
     autoAttackOutOfRange_ = false;
     autoAttackOutOfRangeTime_ = 0.0f;
     autoAttackResendTimer_ = 0.0f;
+    setUnitAttackTarget(owner_, owner_.getPlayerGuid(), 0);
     if (owner_.getState() == WorldState::IN_WORLD && owner_.getSocket()) {
         auto packet = AttackStopPacket::build();
         owner_.getSocket()->send(packet);
@@ -707,6 +701,16 @@ void CombatHandler::handleAttackStart(network::Packet& packet) {
     revealCombatant(data.attackerGuid);
     revealCombatant(data.victimGuid);
 
+    // The attacker's target, kept for every unit in view as the stock client
+    // keeps it (Wow.exe 0x756800 -> 0x754FF0): it draws the attacker's
+    // weapons for as long as the swinging lasts, whatever UNIT_FIELD_BYTES_2
+    // says - which for a playerbot, or a creature whose addon sheathes it,
+    // stays 0 through the whole fight.
+    if (auto attacker = owner_.getEntityManager().getEntity(data.attackerGuid);
+        attacker && attacker->isUnit()) {
+        std::static_pointer_cast<Unit>(attacker)->setAttackTarget(data.victimGuid);
+    }
+
     if (data.attackerGuid == owner_.getPlayerGuid()) {
         autoAttackRequested_ = true;
         autoAttacking_ = true;
@@ -747,8 +751,21 @@ void CombatHandler::handleAttackStop(network::Packet& packet) {
     AttackStopData data;
     if (!AttackStopParser::parse(packet, data)) return;
 
+    // Whoever stopped, its weapons go back to what its sheath byte says
+    // (Wow.exe 0x756770 clears the target whatever the victim).
+    if (auto attacker = owner_.getEntityManager().getEntity(data.attackerGuid);
+        attacker && attacker->isUnit()) {
+        std::static_pointer_cast<Unit>(attacker)->setAttackTarget(0);
+    }
+
     // Keep intent, but clear server-confirmed active state until ATTACKSTART resumes.
-    if (data.attackerGuid == owner_.getPlayerGuid()) {
+    // Not from the saddle: that stop is the server refusing a mounted
+    // attacker, and asking again would only be refused again.
+    if (data.attackerGuid == owner_.getPlayerGuid() && owner_.isMounted()) {
+        autoAttacking_ = false;
+        autoAttackRequested_ = false;
+        autoAttackRetryPending_ = false;
+    } else if (data.attackerGuid == owner_.getPlayerGuid()) {
         autoAttacking_ = false;
         autoAttackRetryPending_ = autoAttackRequested_;
         autoAttackResendTimer_ = 0.0f;
@@ -795,16 +812,23 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
 
     // The victim's reaction: dodge, parry, block or flinch. Which parry and
     // which block is the victim's weapons' business, decided where they are
-    // known.
-    if (owner_.hitReactionCallbackRef() && !data.isMiss() && !data.noAnimation() &&
-        data.victimState != VICTIMSTATE_EVADES && data.victimState != VICTIMSTATE_IS_IMMUNE) {
+    // known; when it plays is the attacker's swing's (a defence at its $CPP,
+    // a flinch at its $CAH). An ability's blow (HITINFO_NO_ANIMATION: the
+    // attacker's animation is the spell's) still makes the victim react, as
+    // in the stock client, whose victim side (Wow.exe 0x755E40) does not
+    // look at that flag. A deflect is a dodge to look at (0x756240). A miss
+    // or an evade moves no victim but is passed on all the same: the
+    // attacker's swing finishes at half speed from its $CAH.
+    if (owner_.hitReactionCallbackRef() && data.victimState != VICTIMSTATE_IS_IMMUNE) {
         using HR = GameHandler::HitReaction;
         HR reaction = HR::WOUND;
-        if (data.victimState == VICTIMSTATE_DODGE) reaction = HR::DODGE;
+        if (data.isMiss() || data.victimState == VICTIMSTATE_EVADES) reaction = HR::MISS;
+        else if (data.victimState == VICTIMSTATE_DODGE) reaction = HR::DODGE;
+        else if (data.victimState == VICTIMSTATE_DEFLECTS) reaction = HR::DEFLECT;
         else if (data.victimState == VICTIMSTATE_PARRY) reaction = HR::PARRY;
         else if (data.victimState == VICTIMSTATE_BLOCKS || data.blocked > 0) reaction = HR::BLOCK;
         else if (data.isCrit()) reaction = HR::CRIT_WOUND;
-        owner_.hitReactionCallbackRef()(data.targetGuid, reaction);
+        owner_.hitReactionCallbackRef()(data.targetGuid, reaction, data.attackerGuid);
     }
 
     // The swing and the blow, heard for every fight in view as in the stock
@@ -935,10 +959,15 @@ void CombatHandler::handleSpellDamageLog(network::Packet& packet) {
     bool isPlayerSource = (data.attackerGuid == owner_.getPlayerGuid());
     bool isPlayerTarget = (data.targetGuid == owner_.getPlayerGuid());
     // Spell damage makes the victim flinch, as a melee hit does - any
-    // victim in view, not only in the player's own fights.
-    if (owner_.hitReactionCallbackRef() && data.damage > 0) {
+    // victim in view, not only in the player's own fights. Not for a spell
+    // that flies a missile: this log comes with its SPELL_GO, and the stock
+    // client flinches the target as the missile lands (Wow.exe 0x702DB0),
+    // which the spell visual system does.
+    auto* spells = owner_.getSpellHandler();
+    if (owner_.hitReactionCallbackRef() && data.damage > 0 &&
+        !(spells && spells->spellFliesMissile(data.spellId))) {
         owner_.hitReactionCallbackRef()(data.targetGuid, data.isCrit
-            ? GameHandler::HitReaction::CRIT_WOUND : GameHandler::HitReaction::WOUND);
+            ? GameHandler::HitReaction::CRIT_WOUND : GameHandler::HitReaction::WOUND, 0);
     }
     // And cries out as a melee blow can make it: its injury voice
     // (CreatureSoundData), the crit one on a crit. The local character's is
@@ -1052,12 +1081,11 @@ void CombatHandler::updateAutoAttack(float deltaTime) {
                         owner_.addUIError("Target is too far away.");
                         autoAttackRangeWarnCooldown_ = 1.25f;
                     }
-                    // Stop chasing stale swings when the target remains out of range.
-                    if (autoAttackOutOfRangeTime_ > 2.0f && dist3d > 9.0f) {
-                        stopAutoAttack();
-                        owner_.raiseUiError("Auto-attack stopped: target out of range.");
-                        allowResync = false;
-                    }
+                    // The attack stays on while the target is out of reach,
+                    // as in the stock client: running up to it ends in a
+                    // swing, not in having to attack again. It used to be
+                    // dropped after two seconds beyond 9 yards, which also
+                    // ended every fight the moment a creature fled.
                 } else {
                     autoAttackOutOfRange_ = false;
                     autoAttackOutOfRangeTime_ = 0.0f;

@@ -57,6 +57,11 @@ public:
     // --- Public API (delegated from GameHandler) ---
     void castSpell(uint32_t spellId, uint64_t targetGuid = 0);
 
+    /// Whether the spell flies a missile to its target (its visual has one
+    /// and the spell a speed). Its target flinches when the missile lands,
+    /// not when the damage is announced (Wow.exe 0x702DB0).
+    bool spellFliesMissile(uint32_t spellId);
+
     /// Spell.dbc EffectImplicitTargetA, or 0 when the spell is unknown. 21 means
     /// the spell has to be aimed at a friendly unit.
     [[nodiscard]] uint32_t getSpellImplicitTargetA(uint32_t spellId) const;
@@ -458,8 +463,11 @@ private:
     float resolveSpellMissileSpeed(uint32_t spellId);
     /// Fly the spell's missile from the caster to one target. True when one
     /// launched, which then plays the impact kit itself when it lands.
+    /// castReleased: the caster plays the spell's release animation now (a
+    /// cast or instant of its own, not a triggered spell), and the missile
+    /// waits for that animation's release event before it leaves.
     bool launchSpellMissile(uint32_t spellId, uint32_t visualId, uint64_t casterGuid,
-                            uint64_t targetGuid, bool impactAtEnd);
+                            uint64_t targetGuid, bool impactAtEnd, bool castReleased = false);
     // Resolve render-space position for a unit GUID (player or entity).
     bool resolveUnitPosition(uint64_t guid, glm::vec3& outPos);
     // Put the spell's build-up (PrecastKit, or ChannelKit for a channel) on
@@ -469,7 +477,7 @@ private:
     // Take a caster's build-up off (its cast went off, failed or ended).
     void cancelCastVisual(uint64_t casterGuid);
     // Play the impact visual effect at the target's position.
-    void triggerImpactVisual(uint32_t spellId, uint64_t targetGuid);
+    void triggerImpactVisual(uint32_t spellId, uint64_t targetGuid, bool targetIsCaster = false);
     void launchRangedWeaponProjectile(uint32_t spellId, uint64_t targetGuid);
     void refreshRestorationFromPlayerAuras();
     void stopRestorationPresentation();

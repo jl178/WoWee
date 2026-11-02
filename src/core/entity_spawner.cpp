@@ -748,6 +748,25 @@ uint8_t EntitySpawner::unitSheathState(uint64_t guid) const {
     return static_cast<uint8_t>(entity->getField(idx) & 0xFF);
 }
 
+uint8_t EntitySpawner::presentedSheathState(uint64_t guid, uint32_t instanceId) const {
+    const uint8_t server = unitSheathState(guid);
+    auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    if (!cr || !gameHandler_ || instanceId == 0 || server > 2) return server;
+    auto entity = gameHandler_->getEntityManager().getEntity(guid);
+    if (!entity || !entity->isUnit()) return server;
+    auto unit = std::static_pointer_cast<game::Unit>(entity);
+    uint32_t anim = 0;
+    float t = 0.0f, d = 0.0f;
+    if (!cr->getAnimationState(instanceId, anim, t, d)) return server;
+    auto shown = unitSheathAttached_.find(guid);
+    const uint8_t was = shown != unitSheathAttached_.end() ? std::min<uint8_t>(shown->second, 2) : server;
+    // The dead have no target: the stock client drops it with the death.
+    const bool attacking = unit->getAttackTarget() != 0 && unit->getHealth() != 0;
+    using rendering::anim::SheathState;
+    return static_cast<uint8_t>(rendering::anim::presentedSheath(
+        static_cast<SheathState>(server), static_cast<SheathState>(was), anim, attacking));
+}
+
 uint32_t EntitySpawner::unitIdleAnim(uint64_t guid, uint32_t instanceId) {
     using namespace rendering::anim;
     auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
@@ -767,7 +786,11 @@ uint32_t EntitySpawner::unitIdleAnim(uint64_t guid, uint32_t instanceId) {
     if (unit->getHealth() != 0)
         if (const uint32_t hold = unitCastHold(guid); hold != 0 && cr->hasAnimation(instanceId, hold))
             return hold;
-    if (unit->getHealth() == 0 || (unit->getUnitFlags() & game::UNIT_FLAG_IN_COMBAT) == 0)
+    // The Ready stance is held by an attack target (SMSG_ATTACKSTART until
+    // SMSG_ATTACKSTOP), not by being in combat: the stock client picks it in
+    // 0x71E0D0 from CGUnit_C +0xA20. A caster in combat between casts, or a
+    // creature that has stopped swinging, stands at ease.
+    if (unit->getHealth() == 0 || unit->getAttackTarget() == 0)
         return STAND;
     const uint32_t want = readyAnim(unitWeaponLoadout(guid),
                                     static_cast<SheathState>(std::min<uint8_t>(unitSheathState(guid), 2)));
@@ -871,7 +894,7 @@ void EntitySpawner::syncUnitSheath(uint64_t guid, uint32_t instanceId) {
         return;
     }
 
-    const uint8_t state = unitSheathState(guid);
+    const uint8_t state = presentedSheathState(guid, instanceId);
     if (state == it->second) return;
 
     // Start the reach: Sheath (89) to the back, HipSheath (90) to the hip,
@@ -927,8 +950,9 @@ bool EntitySpawner::attachUnitWeapons(uint64_t guid, uint32_t instanceId,
     auto displayInfoDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
     if (!displayInfoDbc) return false;
 
-    // UNIT_FIELD_BYTES_2 byte 0: 0 nothing drawn, 1 melee drawn, 2 ranged drawn.
-    const uint8_t sheath = unitSheathState(guid);
+    // 0 nothing drawn, 1 melee drawn, 2 ranged drawn: the server's byte as
+    // the unit's animation and attack target change it.
+    const uint8_t sheath = presentedSheathState(guid, instanceId);
     unitSheathAttached_[guid] = sheath;
 
     // Every point a weapon-slot item can sit on, held or put away, so an

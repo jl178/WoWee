@@ -166,10 +166,11 @@ AnimCapabilitySet AnimCapabilityProbe::probe(Renderer* renderer, uint32_t instan
         caps.resolvedReadyUnarmed = pick(readyUnarmedCands, 2);
     }
     {
-        // A fist weapon fights unarmed in 3.3.5, which has no fist animations.
+        // A fist weapon swings unarmed in 3.3.5, but stands in Ready1H like
+        // any one-hander (Wow.exe 0x714DD0 counts subclass 13 with them).
         static const uint32_t readyFistCands[] = {
-            anim::READY_UNARMED, anim::READY_1H};
-        caps.resolvedReadyFist = pick(readyFistCands, 2);
+            anim::READY_1H, anim::READY_2H, anim::READY_UNARMED};
+        caps.resolvedReadyFist = pick(readyFistCands, 3);
     }
     {
         static const uint32_t readyBowCands[] = {
@@ -218,6 +219,10 @@ AnimCapabilitySet AnimCapabilityProbe::probe(Renderer* renderer, uint32_t instan
     }
     caps.resolvedLoadBow = has(anim::LOAD_BOW) ? anim::LOAD_BOW : 0;
     caps.resolvedLoadRifle = has(anim::LOAD_RIFLE) ? anim::LOAD_RIFLE : 0;
+    caps.resolvedLoadThrown = has(anim::LOAD_THROWN) ? anim::LOAD_THROWN : 0;
+    caps.resolvedHoldBow = has(anim::HOLD_BOW) ? anim::HOLD_BOW : 0;
+    caps.resolvedHoldRifle = has(anim::HOLD_RIFLE) ? anim::HOLD_RIFLE : 0;
+    caps.resolvedHoldThrown = has(anim::HOLD_THROWN) ? anim::HOLD_THROWN : 0;
 
     // ── Special attacks ─────────────────────────────────────────────────
     caps.resolvedSpecial1H = has(anim::SPECIAL_1H) ? anim::SPECIAL_1H : 0;

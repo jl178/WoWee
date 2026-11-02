@@ -36,7 +36,12 @@ public:
     // unit's feet (terrain, WMO, M2), additive, faded by height through the
     // box. `pos` is the unit's feet; `radius` is the half-width of the
     // projected square (CGUnit_C +0xB0C, see GameScreen), not the ring's.
-    void setSelectionCircle(const glm::vec3& pos, float radius, const glm::vec3& color);
+    // `alpha` scales the texture's (the stock colour's alpha byte).
+    // attackPulse in [0, 1) is how far through its half second the ring
+    // that closes in on a unit the player has just been told to attack is
+    // (Wow.exe 0x725980); below 0 there is none.
+    void setSelectionCircle(const glm::vec3& pos, float radius, const glm::vec3& color,
+                            float alpha = 1.0f, float attackPulse = -1.0f);
     void clearSelectionCircle();
     void renderSelectionCircle(const glm::mat4& view, const glm::mat4& projection,
                                VkCommandBuffer cmd,
@@ -100,6 +105,8 @@ private:
     glm::vec3 selCirclePos_{0.0f};
     glm::vec3 selCircleColor_{1.0f, 0.0f, 0.0f};
     float selCircleRadius_ = 1.2f;
+    float selCircleAlpha_ = 1.0f;
+    float selPulseT_ = -1.0f;
     bool selCircleVisible_ = false;
 
     // Floor lattice cache. The decal is draped over a world-aligned lattice so

@@ -117,3 +117,62 @@ TEST_CASE("Vanilla model buckets global-timeline footfall events per sequence", 
     REQUIRE(runIdx >= 0);
     CHECK(model.footstepEventTimes[runIdx] == std::vector<uint32_t>{233, 567});
 }
+
+// $CSL / $CSR / $CST: the frame of a cast animation where the spell leaves the
+// hand. The stock client holds a missile until one of them fires (Wow.exe
+// 0x734390). HumanMale's SpellCastDirected (53) lets go from the left hand
+// ($CSL) 200 ms in, SpellCastOmni (54) from the chest ($CST) at 300 ms, and
+// the ReadySpell hold (51) has none.
+TEST_CASE("WotLK human male cast release events", "[m2][cast_release]") {
+    auto data = wowee::test::readFile("Data/character/human/male/humanmale.m2");
+    if (data.empty()) {
+        SUCCEED("model asset not extracted; optional real-asset coverage skipped");
+        return;
+    }
+    M2Model model = M2Loader::load(data);
+    REQUIRE(model.version >= 264);
+    REQUIRE(model.castReleaseEvents.size() == model.sequences.size());
+
+    const int directedIdx = findSequenceIndex(model, 53);
+    REQUIRE(directedIdx >= 0);
+    CHECK(model.castReleaseEvents[directedIdx].timeMs == 200);
+    // The left hand's side of the model (+Y), about hand height.
+    CHECK(model.castReleaseEvents[directedIdx].position.y > 0.3f);
+
+    const int omniIdx = findSequenceIndex(model, 54);
+    REQUIRE(omniIdx >= 0);
+    CHECK(model.castReleaseEvents[omniIdx].timeMs == 300);
+
+    const int readyIdx = findSequenceIndex(model, 51);
+    REQUIRE(readyIdx >= 0);
+    CHECK(model.castReleaseEvents[readyIdx].timeMs == UINT32_MAX);
+}
+
+// $CPP is the frame of an attack where the victim's dodge, parry or block
+// plays (Wow.exe 0x756240), well before the blow lands at $CAH. It makes no
+// sound but is kept with the other tagged events. HumanMale Attack1H (17)
+// raises the defence 67 ms in, lands the blow at 400 ms.
+TEST_CASE("M2 $CPP defence events are kept with the tagged events", "[m2][sound_event]") {
+    using wowee::pipeline::isM2SoundEventTag;
+    using wowee::pipeline::m2EventTag;
+    STATIC_REQUIRE(isM2SoundEventTag(m2EventTag("$CPP")));
+    STATIC_REQUIRE(isM2SoundEventTag(m2EventTag("$CAH")));
+    STATIC_REQUIRE_FALSE(isM2SoundEventTag(m2EventTag("$CST")));
+
+    auto data = wowee::test::readFile("Data/character/human/male/humanmale.m2");
+    if (data.empty()) {
+        SUCCEED("model asset not extracted; optional real-asset coverage skipped");
+        return;
+    }
+    M2Model model = M2Loader::load(data);
+    const int attackIdx = findSequenceIndex(model, 17);
+    REQUIRE(attackIdx >= 0);
+    REQUIRE(static_cast<size_t>(attackIdx) < model.soundEvents.size());
+    uint32_t cpp = UINT32_MAX, cah = UINT32_MAX;
+    for (const auto& ev : model.soundEvents[attackIdx]) {
+        if (ev.tag == m2EventTag("$CPP")) cpp = ev.timeMs;
+        if (ev.tag == m2EventTag("$CAH")) cah = ev.timeMs;
+    }
+    CHECK(cpp == 67);
+    CHECK(cah == 400);
+}

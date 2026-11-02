@@ -30,14 +30,18 @@ public:
     void initialize(M2Renderer* m2Renderer, Renderer* renderer);
     void shutdown();
 
-    // Play a SpellVisual's CastKit (useImpactKit=false) or ImpactKit (true) on
-    // a unit. Every effect slot the kit fills (head, chest, base, both hands,
-    // breath, weapons, specials) spawns its own model at that unit's matching
-    // attachment point. attachInstanceId is the unit's CharacterRenderer
-    // instance (0 = not drawn: the effects stand at worldPosition, the unit's
-    // feet, raised to the slot's usual height).
+    // Play a SpellVisual's CastKit (useImpactKit=false) or its impact on a
+    // unit (true). Every effect slot the kit fills (head, chest, base, both
+    // hands, breath, weapons, specials) spawns its own model at that unit's
+    // matching attachment point. attachInstanceId is the unit's
+    // CharacterRenderer instance (0 = not drawn: the effects stand at
+    // worldPosition, the unit's feet, raised to the slot's usual height).
+    // The impact is the stock client's choice of kit (Wow.exe 0x800D00):
+    // TargetImpactKit on a target, CasterImpactKit on a caster hit by its
+    // own spell, ImpactKit where the visual names neither.
     void playSpellVisual(uint32_t visualId, const glm::vec3& worldPosition,
-                         bool useImpactKit = false, uint32_t attachInstanceId = 0);
+                         bool useImpactKit = false, uint32_t attachInstanceId = 0,
+                         bool targetIsCaster = false);
 
     // Play one SpellVisualKit by its own id - what SMSG_PLAY_SPELL_VISUAL and
     // SMSG_PLAY_SPELL_IMPACT carry (SpellVisualKit.dbc, not SpellVisual.dbc).
@@ -89,10 +93,30 @@ public:
     // MissileSound plays on it, looping while it flies when its SoundEntries
     // row loops. groundTarget: end is a point on the ground (a destination
     // location), aimed at exactly, and the landing plays ImpactAreaKit there.
+    //
+    // launchDelay: the missile waits that long before it leaves - the time of
+    // the release event ($CSL/$CSR/$CST) in the caster's cast animation
+    // (releaseAnim), as the stock client holds a missile until the hand lets
+    // it go (Wow.exe 0x734390). It then leaves from that event's point and
+    // flies faster to land when it would have (0x7022D0: at most twice the
+    // speed). targetGuid is for the impact callback.
     bool playSpellMissile(uint32_t visualId, const glm::vec3& start, const glm::vec3& end,
                           float speed, bool impactAtEnd,
                           uint32_t casterInstanceId = 0, uint32_t targetInstanceId = 0,
-                          bool groundTarget = false);
+                          bool groundTarget = false, float launchDelay = 0.0f,
+                          uint32_t releaseAnim = 0, uint64_t targetGuid = 0);
+
+    // Called as a missile carrying its impact lands on a unit (targetGuid as
+    // given to playSpellMissile): the stock client makes a living target
+    // flinch then (Wow.exe 0x702DB0), not when the damage was announced.
+    using MissileImpactCallback = std::function<void(uint64_t targetGuid, uint32_t visualId)>;
+    void setMissileImpactCallback(MissileImpactCallback cb) { missileImpactCallback_ = std::move(cb); }
+    [[nodiscard]] bool hasMissileImpactCallback() const { return static_cast<bool>(missileImpactCallback_); }
+
+    // SpellVisual.Flags (0 when unknown). 0x40: the target does not flinch
+    // when the missile hits; 0x200: the missile attachments are raw M2
+    // attachment ids, not the stock table's indices.
+    uint32_t visualFlags(uint32_t visualId);
 
     // A spell cast at a point on the ground (SPELL_GO's destination location):
     // InstantAreaKit there now, ImpactAreaKit when it lands (now, unless a
@@ -120,7 +144,13 @@ public:
     // 0 where the kit names none: e.g. Fireball 51/53 (ReadySpellDirected,
     // SpellCastDirected), Flash Heal 52/54 (the Omni pair), Arcane Missiles'
     // channel 124 (ChannelCastDirected).
-    struct KitAnimations { uint32_t precast = 0; uint32_t cast = 0; uint32_t channel = 0; };
+    // precastStart is the precast kit's StartAnimID: the one-shot before its
+    // loop. Stock plays only that; a kit without one goes straight to the loop.
+    struct KitAnimations {
+        uint32_t precast = 0; uint32_t cast = 0; uint32_t channel = 0;
+        uint32_t precastStart = 0; bool hasPrecastKit = false;
+        uint32_t impact = 0;  // the impact kit's, on the target (CombatWound for Frostbolt)
+    };
     KitAnimations getKitAnimations(uint32_t visualId);
 
     // Launch a physical weapon projectile (arrow, bullet, or thrown item)
@@ -172,8 +202,10 @@ private:
         uint64_t areaOwner = 0;     // a channel's ground area: the caster
         // Birth (sequence 0), then Hold (158) looping for a kit that outlives
         // its birth, then Decay (159) as it ends - the stock spell models'
-        // three sequences. Without them it just stops emitting.
-        bool hasHold = false, hasDecay = false, holding = false;
+        // three sequences. Without them it just stops emitting. A precast kit
+        // never takes Hold: the stock client replays its birth (Wow.exe
+        // 0x7435A0); state and channel kits do (0x7449C0).
+        bool hasHold = false, hasDecay = false, holding = false, noHold = false;
         float birthDuration = 0.0f;
         // Ending: no new particles; kept until the live ones have run out.
         bool retiring = false;
@@ -193,15 +225,22 @@ private:
         std::vector<KitEffect> effects;
         std::string worldEffect;  // WorldEffect: stands in the world at the kit's point
         uint32_t animId = 0;
+        uint32_t startAnimId = 0;
         uint32_t soundId = 0;     // SoundEntries.dbc
+        uint32_t flags = 0;       // SpellVisualKit.Flags; 0x20: a state loops Stand, not Hold
     };
     struct VisualRow {
         uint32_t precastKit = 0, castKit = 0, impactKit = 0, channelKit = 0;
         uint32_t stateKit = 0, stateDoneKit = 0;
-        uint32_t targetImpactKit = 0;  // plays on the target with the impact (Blizzard's ticks)
+        uint32_t targetImpactKit = 0;  // the impact on a target, in place of ImpactKit
+        uint32_t casterImpactKit = 0;  // the impact on the caster itself, in place of ImpactKit
         uint32_t instantAreaKit = 0, impactAreaKit = 0, persistentAreaKit = 0;
-        int32_t missileAttachment = -1;      // KitSlot, -1 = default (the hands)
-        int32_t missileDestination = SLOT_CHEST;
+        uint32_t flags = 0;                  // SpellVisual.Flags
+        // M2 attachment ids, resolved from the DBC's indices through the stock
+        // table (see kMissileAttachmentIds). -1: the default - the release
+        // event's point for the source, the chest for the destination.
+        int32_t missileAttachment = -1;
+        int32_t missileDestination = 34;
         std::string missilePath;
         bool hasMissile = false;             // HasMissile
         uint32_t missileSound = 0;           // SoundEntries.dbc
@@ -244,7 +283,8 @@ private:
         glm::vec3 end{0.0f};        // where it is going (re-aimed each frame)
         glm::vec3 endFeet{0.0f};    // target's feet when it launched (fallback)
         uint32_t targetInstanceId = 0;
-        int32_t destSlot = SLOT_CHEST;
+        uint64_t targetGuid = 0;
+        int32_t destAttachment = 34;  // M2 attachment id on the target
         float speed = 0.0f;
         float elapsed = 0.0f;
         float startDistance = 0.0f;
@@ -260,11 +300,29 @@ private:
         bool groundTarget = false;
     };
 
+    // A missile waiting for its caster's hand to let it go.
+    struct PendingMissile {
+        uint32_t visualId = 0;
+        glm::vec3 start{0.0f}, end{0.0f};
+        float speed = 0.0f;
+        bool impactAtEnd = false;
+        uint32_t casterInstanceId = 0, targetInstanceId = 0;
+        bool groundTarget = false;
+        uint32_t releaseAnim = 0;
+        uint64_t targetGuid = 0;
+        float delay = 0.0f, waited = 0.0f;
+    };
+
     // A kit to spawn: where, on whom, for how long, and what it belongs to.
     struct KitSpawn {
         glm::vec3 feetPos{0.0f};
         uint32_t attachInstanceId = 0;
+        // Played at a point on the ground (the area kits): the stock client
+        // puts only the kit's base and world effects there (Wow.exe 0x745230,
+        // flag 0x2000) - a head or hand effect has no unit to sit on.
+        bool atPoint = false;
         bool isPrecast = false;
+        bool loopBirth = false;   // a precast kit: replay the birth, never Hold
         uint64_t ownerGuid = 0;
         float lifetime = 0.0f;  // <= 0: the model's own length; infinity: until ended
         uint64_t stateGuid = 0;
@@ -300,6 +358,14 @@ private:
     // False when only the fallback was available.
     bool slotTransform(uint8_t slot, uint32_t attachInstanceId, const glm::vec3& feetPos,
                        glm::mat4& out) const;
+    // The same for one M2 attachment id (a missile's source or destination):
+    // the stock fallbacks 15 (ChestBloodFront) then 19 (Base) where the model
+    // lacks it, else the feet raised to fallbackHeight.
+    bool attachmentTransform(int32_t attachmentId, uint32_t attachInstanceId,
+                             const glm::vec3& feetPos, float fallbackHeight,
+                             glm::mat4& out) const;
+    // Launch one missile now (p.waited: how long it was held for its release).
+    bool launchSpellMissile(const PendingMissile& p);
     void placeSpellMissile(const SpellMissile& missile, const glm::vec3& dir,
                            const MotionOut* motion = nullptr);
     // Start ending one visual: Decay or stop emitting, fade the mesh, keep it
@@ -323,6 +389,8 @@ private:
     std::vector<SpellVisualInstance> activeSpellVisuals_;
     std::vector<PhysicalProjectile> physicalProjectiles_;
     std::vector<SpellMissile> spellMissiles_;
+    std::vector<PendingMissile> pendingMissiles_;
+    MissileImpactCallback missileImpactCallback_;
     std::unordered_map<uint32_t, VisualRow> visuals_;  // SpellVisual.dbc id → kits + missile
     std::unordered_map<uint32_t, KitRow> kits_;        // SpellVisualKit.dbc id → effects
     std::unordered_map<std::string, uint32_t> spellVisualModelIds_;   // M2 path → M2Renderer modelId
@@ -347,7 +415,11 @@ private:
     static constexpr float SPELL_AREA_MAX_DURATION = 120.0f;
     // How long an ended effect may keep its particles alive.
     static constexpr float SPELL_LINGER_CAP = 1.5f;
-    static constexpr float SPELL_MESH_FADE = 0.25f;
+    // The stock CEffect fades an ended model out over 0.15 s (Wow.exe
+    // 0x6F87C0, the constant at 0x9F23D4).
+    static constexpr float SPELL_MESH_FADE = 0.15f;
+    // A missile waits at most this long for its release (Wow.exe 0x734390).
+    static constexpr float SPELL_RELEASE_MAX_WAIT = 2.0f;
 };
 
 } // namespace rendering

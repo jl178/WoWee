@@ -257,7 +257,10 @@ bool parseGameObjectQueryBody(network::Packet& packet,
     // whichever way it is settled, the change is one number and a failing
     // test rather than an archaeology exercise. The alignment check after the
     // data fields below is what asks the server, so one TBC session answers it.
-    for (int i = 0; i < extraStrings; ++i) packet.readString();
+    for (int i = 0; i < extraStrings; ++i) {
+        std::string text = packet.readString();
+        if (i == 0) data.iconName = std::move(text);
+    }
 
     // Read 24 type-specific data fields
     size_t remaining = packet.getRemainingSize();

@@ -198,6 +198,16 @@ void AnimationController::stopLooting() {
 // ── Hit reactions ────────────────────────────────────────────────────────────
 
 void AnimationController::triggerHitReaction(uint32_t animId) {
+    if (animId != 0) {
+        // On the move the flinch, parry or dodge goes on the upper body over
+        // the run, as the stock client plays it (Wow.exe 0x736640 picks the
+        // upper-body track unless the unit stands idle or in its stance).
+        // The combat state machine dropped it altogether while moving.
+        if (playSwingOnUpperBody(animId)) return;
+        // Not over a swing of our own: the swing state would take the body
+        // straight back and start the swing again from its first frame.
+        if (meleeSwingTimer_ > 0.0f) return;
+    }
     characterAnimator_.triggerHitReaction(animId);
 }
 
@@ -242,7 +252,14 @@ void AnimationController::setTargetPosition(const glm::vec3* pos) {
 
 void AnimationController::setInCombat(bool combat) {
     inCombat_ = combat;
-    characterAnimator_.setInCombat(combat);
+}
+
+void AnimationController::setAttacking(bool attacking) {
+    characterAnimator_.setAttacking(attacking);
+}
+
+void AnimationController::setAutoRepeatShot(bool on) {
+    characterAnimator_.setAutoRepeatShot(on);
 }
 
 void AnimationController::resetCombatVisualState() {
@@ -259,7 +276,8 @@ void AnimationController::resetCombatVisualState() {
     charging_ = false;
 
     // Reset all CharacterAnimator combat state
-    characterAnimator_.setInCombat(false);
+    characterAnimator_.setAttacking(false);
+    characterAnimator_.setAutoRepeatShot(false);
     characterAnimator_.setStunned(false);
     characterAnimator_.setCharging(false);
     characterAnimator_.setLowHealth(false);
@@ -289,6 +307,14 @@ void AnimationController::triggerMeleeSwing(bool offHand) {
     // two hands' swing timers differ, so blind alternation drifts off them.
     meleeOffHandTurn_ = offHand && weaponLoadout_.hasOffHand;
     const uint32_t swingAnim = resolveMeleeAnimId();
+    if (swingAnim != 0 && playSwingOnUpperBody(swingAnim)) {
+        // The whole-body swing state is not entered: the legs stay with the
+        // locomotion, and stopping mid-swing does not start it over.
+        meleeSwingTimer_ = 0.0f;
+        specialAttackAnimId_ = 0;
+        meleeSwingCooldown_ = 0.1f;
+        return;
+    }
     // CombatFSM alternates hands on its own; a dual wielder's swing is
     // handed to it explicitly so it plays the hand named here.
     if (weaponLoadout_.hasOffHand && swingAnim != 0) specialAttackAnimId_ = swingAnim;
@@ -298,9 +324,10 @@ void AnimationController::triggerMeleeSwing(bool offHand) {
     if (durationSec > 1.0f) durationSec = 1.0f;
     meleeSwingTimer_ = durationSec;
 
-    if (renderer_->getAudioCoordinator()->getActivitySoundManager()) {
-        renderer_->getAudioCoordinator()->getActivitySoundManager()->playMeleeSwing();
-    }
+    // No sound here: the swing's swoosh and blow come from the combat
+    // sounds at the animation's $CSS and $CAH, as for every other unit.
+    // A fixed whoosh as the swing started doubled the swoosh, and sounded
+    // for misses the stock client gives only "Combat Miss".
 }
 
 void AnimationController::setEquippedWeaponType(uint32_t inventoryType, bool is2HLoose,
@@ -348,6 +375,12 @@ void AnimationController::triggerAbilityAnimation(uint32_t kitAnimId) {
         triggerMeleeSwing(false);
         return;
     }
+    if (playSwingOnUpperBody(specAnim)) {
+        meleeSwingTimer_ = 0.0f;
+        specialAttackAnimId_ = 0;
+        meleeSwingCooldown_ = 0.1f;
+        return;
+    }
 
     specialAttackAnimId_ = specAnim;
     meleeSwingCooldown_ = 0.1f;
@@ -367,10 +400,36 @@ void AnimationController::triggerAbilityAnimation(uint32_t kitAnimId) {
     if (dur > (anim::isMeleeAttackAnim(specAnim) ? 1.0f : 3.0f))
         dur = anim::isMeleeAttackAnim(specAnim) ? 1.0f : 3.0f;
     meleeSwingTimer_ = dur;
-    if (anim::isMeleeAttackAnim(specAnim) &&
-        renderer_->getAudioCoordinator()->getActivitySoundManager()) {
-        renderer_->getAudioCoordinator()->getActivitySoundManager()->playMeleeSwing();
-    }
+}
+
+void AnimationController::slowMeleeSwing(float speed) {
+    auto* characterRenderer = renderer_->getCharacterRenderer();
+    const uint32_t instanceId = renderer_->getCharacterInstanceId();
+    if (!characterRenderer || instanceId == 0 || meleeSwingTimer_ <= 0.0f || speed <= 0.0f) return;
+    uint32_t cur = 0;
+    float t = 0.0f, d = 0.0f;
+    if (!characterRenderer->getAnimationState(instanceId, cur, t, d) || d <= t) return;
+    characterRenderer->setAnimationSpeed(instanceId, speed);
+    // The swing state ends with the animation, which now takes longer; left
+    // as it was, the stance would cut the slowed follow-through short.
+    meleeSwingTimer_ = std::max(meleeSwingTimer_, (d - t) / 1000.0f / speed);
+}
+
+bool AnimationController::playSwingOnUpperBody(uint32_t animId) {
+    // The stock client splits an animation between the legs and the upper
+    // body when the unit is moving (Wow.exe 0x7385C0 via 0x723E30: movement
+    // flags 0x2E000FF - a direction, a turn, swimming, flying) and the
+    // animation is an upper-body one (0x71D800). Otherwise it takes the whole
+    // body, which on a running character slid it along the ground in its
+    // attack pose for the length of the swing.
+    auto* characterRenderer = renderer_->getCharacterRenderer();
+    auto* cameraController = renderer_->getCameraController();
+    const uint32_t instanceId = renderer_->getCharacterInstanceId();
+    if (!characterRenderer || !cameraController || instanceId == 0) return false;
+    const bool legsBusy = cameraController->isMoving() || cameraController->isSwimming() ||
+                          !cameraController->isGrounded() || cameraController->isJumping();
+    if (!legsBusy || !anim::playsOnUpperBody(animId)) return false;
+    return characterRenderer->playUpperBodyAnimation(instanceId, animId, animId, animId);
 }
 
 // ── Ranged combat ────────────────────────────────────────────────────────────
@@ -837,6 +896,20 @@ bool AnimationController::isFootstepAnimationState() const {
 // ── Melee timers ─────────────────────────────────────────────────────────────
 
 void AnimationController::updateMeleeTimers(float deltaTime) {
+    // Starting to move cuts a whole-body swing short: the stock client picks
+    // the run the moment movement starts and it takes the body from the
+    // attack (0x73AC30 -> 0x7385C0). Held on, the swing kept the character
+    // gliding in its attack pose until the swing timer ran out.
+    {
+        auto* cc = renderer_->getCameraController();
+        const bool moving = cc && cc->isMoving();
+        if (moving && !movingLastFrame_ && meleeSwingTimer_ > 0.0f &&
+            (specialAttackAnimId_ == 0 || anim::playsOnUpperBody(specialAttackAnimId_))) {
+            meleeSwingTimer_ = 0.0f;
+            specialAttackAnimId_ = 0;
+        }
+        movingLastFrame_ = moving;
+    }
     if (meleeSwingCooldown_ > 0.0f) {
         meleeSwingCooldown_ = std::max(0.0f, meleeSwingCooldown_ - deltaTime);
     }

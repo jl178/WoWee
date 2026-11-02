@@ -2442,14 +2442,10 @@ void QuestHandler::classifyGossipQuests(bool updateQuestLog) {
 void QuestHandler::handleGossipComplete(network::Packet& packet) {
     (void)packet;
 
-    // Play farewell sound before closing
-    if (owner_.npcFarewellCallbackRef() && currentGossip_.npcGuid != 0) {
-        auto entity = owner_.getEntityManager().getEntity(currentGossip_.npcGuid);
-        if (entity && entity->getType() == ObjectType::UNIT) {
-            glm::vec3 pos(entity->getX(), entity->getY(), entity->getZ());
-            owner_.npcFarewellCallbackRef()(currentGossip_.npcGuid, pos);
-        }
-    }
+    // No farewell here: the NPC says it when it stops being the interact
+    // target (GameHandler::updateInteractTarget, 0x720860), which also covers
+    // walking away and Escape, and does not say it when another window from
+    // the same NPC takes over.
 
     gossipWindowOpen_ = false;
     if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("GOSSIP_CLOSED", {});

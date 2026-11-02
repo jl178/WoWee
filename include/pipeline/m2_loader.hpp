@@ -236,10 +236,14 @@ constexpr uint32_t m2EventTag(const char (&name)[5]) {
            (static_cast<uint32_t>(static_cast<uint8_t>(name[3])) << 24);
 }
 
-/// The M2 events that make a sound and are kept in M2Model::soundEvents
-/// besides $CSD (see there).
+/// The M2 events kept in M2Model::soundEvents besides $CSD (see there): the
+/// ones that make a sound, and $CPP, the moment in an attack animation the
+/// victim's dodge, parry or block plays (Wow.exe 0x756240), which is silent
+/// but rides the same list to reach the same callback.
 constexpr bool isM2SoundEventTag(uint32_t tag) {
-    if (tag == m2EventTag("$CSS") || tag == m2EventTag("$CAH") || tag == m2EventTag("$WNG")) return true;
+    if (tag == m2EventTag("$CSS") || tag == m2EventTag("$CAH") || tag == m2EventTag("$WNG") ||
+        tag == m2EventTag("$CPP"))
+        return true;
     const uint32_t stem = tag & 0x00FFFFFFu;
     const uint32_t last = tag >> 24;
     if (stem == (m2EventTag("$AH0") & 0x00FFFFFFu)) return last >= '0' && last <= '3';
@@ -280,7 +284,8 @@ struct M2Model {
     // soundEntryId 0 and the event's name in tag (its four bytes read as a
     // little-endian uint32, see m2EventTag): $CSS weapon swoosh, $CAH the
     // blow landing, $AH0-$AH3 CreatureSoundData custom attacks, $FD1-$FD5
-    // fidgets, $WNG wing flaps. $FSD footfalls stay in footstepEventTimes.
+    // fidgets, $WNG wing flaps; and the silent $CPP, the victim's defence.
+    // $FSD footfalls stay in footstepEventTimes.
     struct SoundEvent {
         uint32_t timeMs;        // from the start of the sequence
         uint32_t soundEntryId;  // SoundEntries.dbc id ($CSD), 0 for the others
@@ -317,6 +322,19 @@ struct M2Model {
     // weapon moves between hand and back or hip (HumanMale: 500 of 1000 on
     // Sheath, 567 on HipSheath). UINT32_MAX = the sequence has none.
     std::vector<uint32_t> sheathEventTimes;
+
+    // The spell's release ($CSL / $CSR / $CST) per sequence index: the frame
+    // of a cast animation where the spell leaves the hand, and the bone and
+    // point it leaves from. The earliest of the three per sequence, as the
+    // stock client launches a waiting missile on whichever fires first
+    // (Wow.exe 0x732650 -> 0x715A50). HumanMale: SpellCastDirected $CSL at
+    // 200 of 1000 ms, SpellCastOmni $CST at 300. timeMs UINT32_MAX = none.
+    struct CastReleaseEvent {
+        uint32_t timeMs = UINT32_MAX;
+        uint32_t bone = 0;
+        glm::vec3 position{0.0f};
+    };
+    std::vector<CastReleaseEvent> castReleaseEvents;
 
     // Bone lookup table (vertex bone indices reference this to get global bone index)
     std::vector<uint16_t> boneLookupTable;

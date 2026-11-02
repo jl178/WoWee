@@ -21,7 +21,8 @@ namespace wowee::rendering::m2_particle {
 /// - Always: every sample gives `value` (no keys anywhere, or a global
 ///   sequence whose keys are a single value).
 /// - PerSequence: every sequence holds one key of the same value; a sequence
-///   index outside the track gives the default, 0, as the sampler does.
+///   index past the track reads array 0, the same value, as the sampler does
+///   (and the stock client, 0x8284d0); no sequence (index < 0) gives 0.
 /// - Sampled: anything else, sampled as before.
 /// One key per sequence is required, not merely equal values: glm::mix of a
 /// value with itself is not always the value to the last bit.
@@ -86,8 +87,7 @@ inline float sampleTrack(const TrackConst& c, const pipeline::M2AnimationTrack& 
         case TrackConst::Kind::Always:
             return c.value;
         case TrackConst::Kind::PerSequence:
-            return (sequenceIndex >= 0 && static_cast<uint32_t>(sequenceIndex) < c.sequenceCount)
-                ? c.value : 0.0f;
+            return (sequenceIndex >= 0 && c.sequenceCount > 0) ? c.value : 0.0f;
         case TrackConst::Kind::Sampled:
             break;
     }

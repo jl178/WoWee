@@ -609,7 +609,10 @@ static int lua_UnitDistanceSquared(lua_State* L) {
 }
 
 // CheckInteractDistance(unit, distIndex) → boolean
-// distIndex: 1=inspect(28yd), 2=trade(11yd), 3=duel(10yd), 4=follow(28yd)
+//
+// The stock table (0x51B240, squared yards at 0xAC8A64..70): 1 inspect 30,
+// 2 trade 11.11, 3 duel 10, 4 follow 30, compared strictly, centre to centre
+// in 3D. Any other index answers false.
 static int lua_CheckInteractDistance(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnFalse(L); }
@@ -622,18 +625,12 @@ static int lua_CheckInteractDistance(lua_State* L) {
     auto targetEnt = gh->getEntityManager().getEntity(guid);
     auto playerEnt = gh->getEntityManager().getEntity(gh->getPlayerGuid());
     if (!targetEnt || !playerEnt) { return luaReturnFalse(L); }
+    static constexpr float kMaxDistSq[4] = {900.0f, 123.45678f, 100.0f, 900.0f};
+    if (distIdx < 1 || distIdx > 4) { return luaReturnFalse(L); }
     float dx = playerEnt->getX() - targetEnt->getX();
     float dy = playerEnt->getY() - targetEnt->getY();
     float dz = playerEnt->getZ() - targetEnt->getZ();
-    float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
-    float maxDist = 28.0f; // default: follow/inspect range
-    switch (distIdx) {
-        case 1: maxDist = 28.0f; break; // inspect
-        case 2: maxDist = 11.11f; break; // trade
-        case 3: maxDist = 9.9f; break; // duel
-        case 4: maxDist = 28.0f; break; // follow
-    }
-    lua_pushboolean(L, dist <= maxDist);
+    lua_pushboolean(L, dx * dx + dy * dy + dz * dz < kMaxDistSq[distIdx - 1]);
     return 1;
 }
 

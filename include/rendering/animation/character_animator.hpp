@@ -50,7 +50,14 @@ public:
     void setCharging(bool charging) override;
     void setStandState(uint8_t state) override;
     void setStealthed(bool stealth) override;
-    void setInCombat(bool combat) override;
+    /// The character has an attack target (it asked to attack, until the
+    /// attack stops). This, not being in combat, is what holds the stock
+    /// client's Ready stance (Wow.exe 0x71E0D0 reads CGUnit_C +0xA20): a
+    /// character hit while not attacking stands at ease and flinches.
+    void setAttacking(bool attacking) { attacking_ = attacking; }
+    /// An auto-repeat shot (Auto Shot, Shoot, Throw) is on: with the ranged
+    /// weapon out, the stance between shots is its Load and Hold.
+    void setAutoRepeatShot(bool on) { autoRepeatShot_ = on; }
     void setLowHealth(bool low) override;
     void setSprintAuraActive(bool active) override;
 
@@ -135,7 +142,8 @@ private:
     bool stealthed_ = false;
     bool sprintAura_ = false;
     bool lowHealth_ = false;
-    bool inCombat_ = false;
+    bool attacking_ = false;
+    bool autoRepeatShot_ = false;
     bool rangedWeaponActive_ = false;
 
     float lastDt_ = 0.0f;

@@ -70,7 +70,23 @@ TEST_CASE("ActivityFSM: looting starts and stops", "[activity]") {
     auto out = fsm.resolve(in, caps);
     REQUIRE(out.valid);
 
-    // stopLooting transitions through LOOT_END (KNEEL_END one-shot) before NONE
+    // A 3.3.5a model has no LootHold, so there is no LootUp to play: stopping
+    // goes straight back to the idle, as the stock chooser does (0x724280).
+    fsm.stopLooting();
+    CHECK(fsm.getState() == ActivityFSM::State::NONE);
+}
+
+TEST_CASE("ActivityFSM: LootUp follows only a real LootHold", "[activity]") {
+    ActivityFSM fsm;
+    auto caps = makeActivityCaps();
+    fsm.startLooting();
+    fsm.setState(ActivityFSM::State::LOOT_KNEELING);
+    auto in = idleInput();
+    in.haveAnimState = true;
+    in.currentAnimId = anim::LOOT_HOLD;
+    auto out = fsm.resolve(in, caps);
+    REQUIRE(out.valid);
+    CHECK(out.animId == anim::LOOT_HOLD);
     fsm.stopLooting();
     CHECK(fsm.getState() == ActivityFSM::State::LOOT_END);
 }

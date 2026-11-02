@@ -23,6 +23,10 @@ inline constexpr uint32_t kMiningRanks[] = {2575, 2576, 3564, 10248, 29354};
 /// Herb Gathering, the same five tiers.
 inline constexpr uint32_t kHerbRanks[] = {2366, 2368, 3570, 11993, 28695};
 
+/// Skinning, Apprentice through Grand Master: the spell the stock client
+/// casts at a skinnable corpse (0x6D6F40, SPELL_EFFECT_SKINNING).
+inline constexpr uint32_t kSkinningRanks[] = {8613, 8617, 8618, 10768, 32678, 50305};
+
 inline constexpr size_t kMiningRankCount = sizeof(kMiningRanks) / sizeof(kMiningRanks[0]);
 inline constexpr size_t kHerbRankCount = sizeof(kHerbRanks) / sizeof(kHerbRanks[0]);
 

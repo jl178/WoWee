@@ -90,10 +90,6 @@ void CharacterAnimator::setStealthed(bool stealth) {
     stealthed_ = stealth;
 }
 
-void CharacterAnimator::setInCombat(bool combat) {
-    inCombat_ = combat;
-}
-
 void CharacterAnimator::setLowHealth(bool low) {
     lowHealth_ = low;
 }
@@ -127,7 +123,8 @@ AnimOutput CharacterAnimator::resolveAnimation() {
 
     // ── Build combat input ──────────────────────────────────────────────
     CombatFSM::Input combatIn;
-    combatIn.inCombat = inCombat_;
+    // The Ready stance is the attack's, not the fight's (see setAttacking).
+    combatIn.inCombat = attacking_;
     combatIn.grounded = fi.grounded;
     combatIn.jumping = fi.jumping;
     combatIn.swimming = fi.swimming;
@@ -135,6 +132,7 @@ AnimOutput CharacterAnimator::resolveAnimation() {
     combatIn.sprinting = fi.sprinting;
     combatIn.lowHealth = lowHealth_;
     combatIn.rangedWeaponActive = rangedWeaponActive_;
+    combatIn.autoRepeatShot = autoRepeatShot_ && rangedWeaponActive_;
     combatIn.meleeSwingTimer = fi.meleeSwingTimer;
     combatIn.rangedShootTimer = fi.rangedShootTimer;
     combatIn.specialAttackAnimId = fi.specialAttackAnimId;

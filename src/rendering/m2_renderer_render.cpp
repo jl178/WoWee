@@ -73,10 +73,19 @@ M2Sway swayOfModel(const M2ModelGPU& mdl, bool sky) {
 void M2Renderer::seedInstanceAnimation(const M2ModelGPU& model, uint32_t modelId,
                                        M2Instance& instance) {
         if (!model.sequences.empty()) {
-            instance.currentSequenceIndex = 0;
-            instance.idleSequenceIndex = 0;
-            instance.animDuration = static_cast<float>(model.sequences[0].duration);
-            instance.animTime = static_cast<float>(randRange(std::max(1u, model.sequences[0].duration)));
+            // Stand (or the first sequence), its variation rolled by
+            // frequency, from time 0: the stock client starts every model -
+            // doodad, game object or spell effect - this way (0x834540,
+            // 0x7becd0 and 0x7bef40 pass a start offset of 0). Nothing in it
+            // randomises the phase; doodads drift apart only because they
+            // are created at different times. A spell effect's fades are
+            // authored from its first frame (Frost Armor's shell is opaque
+            // only from 134 ms to 2.2 s), so a random phase broke them.
+            const int seq = anim::defaultSequenceIndex(model.sequences, model.bones);
+            instance.currentSequenceIndex = seq;
+            instance.idleSequenceIndex = seq;
+            instance.animDuration = static_cast<float>(model.sequences[seq].duration);
+            instance.animTime = 0.0f;
             instance.variationTimer = randFloat(rendering::M2_VARIATION_TIMER_MIN_MS, rendering::M2_VARIATION_TIMER_MAX_MS);
         }
 
@@ -115,7 +124,7 @@ void M2Renderer::seedUnanimatedSequence(const M2ModelGPU& model, M2Instance& ins
     instance.currentSequenceIndex = 0;
     instance.idleSequenceIndex = 0;
     instance.animDuration = static_cast<float>(model.sequences[0].duration);
-    instance.animTime = static_cast<float>(randRange(model.sequences[0].duration));
+    instance.animTime = 0.0f;  // from its first frame, as the stock client starts it
 }
 
 uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
@@ -155,6 +164,12 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
 
     M2Instance instance;
     instance.id = nextInstanceId++;
+    // The clocks start now. Left at 0 the first advanceClock added the whole
+    // session's scene time to animTime and globalSequenceTime, so a new
+    // instance began at an arbitrary phase and a one-shot spell effect was
+    // pushed past its end on its first frame (Frost Armor at 3000 ms 64 ms
+    // after the cast).
+    instance.clockStampMs = sceneTimeMs_;
     instance.modelId = modelId;
     instance.position = position;
     if (mdlRef.isGroundDetail) {
@@ -273,6 +288,12 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
 
     M2Instance instance;
     instance.id = nextInstanceId++;
+    // The clocks start now. Left at 0 the first advanceClock added the whole
+    // session's scene time to animTime and globalSequenceTime, so a new
+    // instance began at an arbitrary phase and a one-shot spell effect was
+    // pushed past its end on its first frame (Frost Armor at 3000 ms 64 ms
+    // after the cast).
+    instance.clockStampMs = sceneTimeMs_;
     instance.modelId = modelId;
     instance.position = position;  // Used for frustum culling
     instance.rotation = glm::vec3(0.0f);
@@ -303,13 +324,10 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     if (mdl2.hasAnimation && !mdl2.disableAnimation) {
         seedInstanceAnimation(mdl2, modelId, instance);
     } else {
-        // A model with no skeleton can still have particle emitters, and their
-        // rate and lifespan tracks are sampled at animTime. Starting every
-        // instance at zero puts a courtyard of identical torches in lockstep,
-        // so the phase is spread.
-        //
-        // createInstance above now does the same.
-        instance.animTime = randFloat(0.0f, 10000.0f);
+        // A model with no skeleton still plays its sequence from time 0, as
+        // the stock client does; its particles are what tell two identical
+        // torches apart, not a randomised clock.
+        instance.animTime = 0.0f;
         seedUnanimatedSequence(mdl2, instance);
     }
 
@@ -2320,7 +2338,10 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
                     // Opaque gate - transparent glow cards were handled above so their
                     // sprites are generated before the mesh moves to pass 2.
-                    const bool rawTransparent = (batch.blendMode >= 2) || model.isSpellEffect;
+                    // A batch whose alpha plays is drawn per instance in pass 2,
+                    // where each instance's time gives its alpha.
+                    const bool rawTransparent = (batch.blendMode >= 2) || model.isSpellEffect ||
+                                                batch.alphaAnimates;
                     if (rawTransparent) continue;
 
                     // Particle-dominant effects: emission geometry - skip opaque
@@ -2580,7 +2601,7 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             // instance, every batch, since the opaque pass left it out.
             {
                 const bool rawTransparent = (batch.blendMode >= 2) || model.isSpellEffect ||
-                                            instanceFaded;
+                                            batch.alphaAnimates || instanceFaded;
                 if (!rawTransparent) continue;
             }
 
@@ -2621,6 +2642,31 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
             if (particleDominantEffect) continue; // emission-only mesh
 
+            // The batch's alpha tracks, played at the instance's time, for
+            // every model whose batch has one that can change (constant ones
+            // were baked into batchOpacity). The stock client multiplies the
+            // colour alpha by the texture weight (and the model's own alpha,
+            // here instanceFadeAlpha) and draws nothing under 1e-4 (0x821a20):
+            // the Judgement hammer is unseen as it falls and shows only as it
+            // lands, Frost Armor's shell fades in over 134 ms.
+            float trackAlpha = 1.0f;
+            if (batch.alphaAnimates) {
+                const int seq = instance.currentSequenceIndex;
+                const float t = instance.animTime, g = instance.globalSequenceTime;
+                if (batch.colorAlphaTrack >= 0 &&
+                    static_cast<size_t>(batch.colorAlphaTrack) < model.colorAlphaTracks.size()) {
+                    trackAlpha *= m2_track::sampleFloat(model.colorAlphaTracks[batch.colorAlphaTrack],
+                                                        seq, t, g, model.globalSequenceDurations, 1.0f);
+                }
+                if (batch.textureWeightTrack >= 0 &&
+                    static_cast<size_t>(batch.textureWeightTrack) < model.textureWeightTracks.size()) {
+                    trackAlpha *= m2_track::sampleFloat(model.textureWeightTracks[batch.textureWeightTrack],
+                                                        seq, t, g, model.globalSequenceDurations, 1.0f);
+                }
+                trackAlpha = std::clamp(trackAlpha, 0.0f, 1.0f);
+                if (trackAlpha * batch.batchOpacity < 1e-4f) continue;
+            }
+
             // Compute UV offset for this instance + batch
             //
             // WOWEE_SKY_M2_NO_TEXANIM=1 freezes the sky's scrolling. Nine of
@@ -2658,7 +2704,7 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             auto& e = instSSBO[drawOffset];
             e.model = instance.modelMatrix;
             e.uvOffset = uvOffset;
-            e.fadeAlpha = instanceFadeAlpha;
+            e.fadeAlpha = instanceFadeAlpha * trackAlpha;
             e.useBones = (needsBones && !kM2NoSkinning) ? 1 : 0;
             e.boneBase = needsBones ? static_cast<int32_t>(instance.megaBoneOffset) : 0;
             e.boneCount = static_cast<int32_t>(instance.boneMatrices.size());
@@ -2679,8 +2725,12 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 case 2: desiredPipeline = alphaPipeline_; break;
                 default: desiredPipeline = additivePipeline_; break;
             }
-            // An opaque layer of a faded instance: blended by its fade.
-            if (instanceFaded && effectiveBlendMode <= 1) desiredPipeline = alphaPipeline_;
+            // An opaque layer of a faded instance, or one whose alpha plays:
+            // blended by it, as the stock client switches an opaque or
+            // alpha-keyed layer to alpha blending once its alpha is below 1
+            // (the blend table at 0xa453b0, rows 1 and 2).
+            if ((instanceFaded || batch.alphaAnimates) && effectiveBlendMode <= 1)
+                desiredPipeline = alphaPipeline_;
             if (desiredPipeline != currentPipeline) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
                 currentPipeline = desiredPipeline;

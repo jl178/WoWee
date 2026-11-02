@@ -32,13 +32,6 @@ constexpr float kMinGameObjectPickRadius = 0.6f;
 /// GAMEOBJECT_TYPE_CHAIR.
 constexpr uint32_t kGoTypeChair = 7;
 
-/// GAMEOBJECT_TYPE_FISHINGNODE: the bobber is reeled in from casting range.
-constexpr uint32_t kGoTypeFishingNode = 17;
-/// How near a game object has to be to be used. The server's
-/// INTERACTION_DISTANCE is 5.5 yards to the object's edge; a click from
-/// further out does nothing, so the stock client offers none: no cursor, no
-/// pick. Measured from the character to the object's pick sphere.
-constexpr float kGameObjectUseRange = 5.0f;
 /// How far the pick ray looks for walls and ground at all. Bounded because
 /// the hover runs this every frame and the WMO test walks every group the
 /// ray's box reaches; past this, nothing occludes.
@@ -175,15 +168,6 @@ ScenePick pickScene(game::GameHandler& gameHandler,
     const glm::vec3 wmoHit = ray.origin + ray.direction * wmoT;
     const glm::vec3 m2Hit = ray.origin + ray.direction * m2T;
 
-    // The character, for the use range of game objects.
-    glm::vec3 playerRender(0.0f);
-    bool havePlayer = false;
-    if (auto me = gameHandler.getEntityManager().getEntity(myGuid)) {
-        playerRender = core::coords::canonicalToRender(
-            glm::vec3(me->getX(), me->getY(), me->getZ()));
-        havePlayer = true;
-    }
-
     for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
         if (!entity) continue;
         const auto type = entity->getType();
@@ -309,16 +293,11 @@ ScenePick pickScene(game::GameHandler& gameHandler,
             }
         }
 
-        // A game object out of use range is not offered at all - no cursor,
-        // no click - which is the one rule for every object type, chairs and
-        // benches included. The fishing bobber is the exception: it is
-        // reeled in from casting range.
-        if (type == game::ObjectType::GAMEOBJECT && havePlayer &&
-            !(goInfo && goInfo->type == kGoTypeFishingNode) &&
-            guid != gameHandler.getHookedFishingBobberGuid()) {
-            const float edgeDist = glm::length(hitCenter - playerRender) - hitRadius;
-            if (edgeDist > kGameObjectUseRange) continue;
-        }
+        // Reach is not the picker's business. The stock client finds an
+        // object wherever the pointer is on it and keeps its highlight and
+        // name out of reach; only the cursor turns "Unable" (CanUseNow
+        // 0x70FA70 behind 0x70CE10), and a click from there is refused with
+        // "You are too far away." (0x70F680).
 
         if (type == game::ObjectType::UNIT || type == game::ObjectType::PLAYER) {
             // Rank the living ahead of the dead rather than by distance alone. A

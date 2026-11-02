@@ -148,7 +148,6 @@ bool CombatSoundManager::initialize(pipeline::AssetManager* assets) {
 void CombatSoundManager::shutdown() {
     initialized_ = false;
     pendingBlows_.clear();
-    lastInjuryMs_.clear();
 }
 
 bool CombatSoundManager::loadSound(const std::string& path, CombatSample& sample, pipeline::AssetManager* assets) {
@@ -308,28 +307,19 @@ bool CombatSoundManager::playEntry3D(uint32_t soundId, const glm::vec3& position
                               entry->volume * volumeScale_ * volumeMul, 1.0f, maxDistance);
 }
 
-uint32_t CombatSoundManager::pickInjury(uint64_t victimGuid, uint32_t displayId, bool crit) {
+uint32_t CombatSoundManager::pickInjury(uint32_t displayId, bool victimIsPlayer, bool crit) {
     const CreatureSounds* cs = soundData_ ? soundData_->displaySounds(displayId) : nullptr;
     if (!cs) return 0;
-    const double now = nowMs();
-    if (lastInjuryMs_.size() > 512) {
-        for (auto it = lastInjuryMs_.begin(); it != lastInjuryMs_.end();)
-            it = (now - it->second > 10000.0) ? lastInjuryMs_.erase(it) : std::next(it);
+    // The stock client's odds (Wow.exe 0x747310 for creatures, 0x7631A0 for
+    // players: a roll of 0-100 against a table per sound type, 0xADB5D8 and
+    // 0xADBA74): a crit always cries out, an ordinary hit 60 times in 100 on a
+    // creature and 30 on a player. No spacing between cries beyond that.
+    if (!crit) {
+        const int chance = victimIsPlayer ? 30 : 60;
+        if (std::uniform_int_distribution<int>(0, 100)(gen) > chance) return 0;
+        return cs->injury;
     }
-    double& last = lastInjuryMs_[victimGuid];
-    // A crit always cries out (InjuryCritical, or the plain injury for a
-    // model without one). An ordinary hit does about one time in three and
-    // never twice inside a second, so a flurry of blows is not a stream of
-    // grunts.
-    if (crit) {
-        if (now - last < 300.0) return 0;
-        last = now;
-        return cs->injuryCritical != 0 ? cs->injuryCritical : cs->injury;
-    }
-    if (now - last < 1000.0) return 0;
-    if (std::uniform_int_distribution<int>(0, 2)(gen) != 0) return 0;
-    last = now;
-    return cs->injury;
+    return cs->injuryCritical != 0 ? cs->injuryCritical : cs->injury;
 }
 
 void CombatSoundManager::playBlowSwing(PendingBlow& blow) {
@@ -381,7 +371,27 @@ void CombatSoundManager::onMelee(uint64_t attackerGuid, uint64_t victimGuid, Mel
     PendingBlow blow;
     blow.attackerPos = attacker.position;
     blow.victimPos = haveVictim ? victim.position : attacker.position;
-    blow.swingSound = withSwoosh ? soundData_->weaponSwingSound(swingTypeFor(armed ? &weapon : nullptr), crit) : 0;
+    // The swoosh at $CSS is for a swing that connects (Wow.exe 0x756240 skips
+    // it for victim states 0, 2 and 6: a miss, a dodge, an evade). Those get
+    // "Combat Miss 1H" or "2H" by the attacker's main hand instead, at the
+    // attacker, with the combat text at $CAH (0x755A60 -> 0x4D0850).
+    const bool missed = outcome == MeleeOutcome::MISS || outcome == MeleeOutcome::DODGE;
+    if (missed) {
+        const CombatItem& main = attacker.mainHand;
+        bool twoHanded = false;
+        if (main.isWeapon()) {
+            switch (main.subclass) {  // 0x714C80
+                case 1: case 5: case 6: case 8: case 10: case 12: case 17: case 20: twoHanded = true; break;
+                default: break;
+            }
+        }
+        const SoundEntry* miss = soundData_->soundByName(twoHanded ? "(DONOTRENAME)Combat Miss 2H"
+                                                                   : "(DONOTRENAME)Combat Miss 1H");
+        blow.impactSound = miss ? miss->id : 0;
+        blow.victimPos = attacker.position;
+    } else if (withSwoosh) {
+        blow.swingSound = soundData_->weaponSwingSound(swingTypeFor(armed ? &weapon : nullptr), crit);
+    }
 
     if (outcome == MeleeOutcome::HIT || outcome == MeleeOutcome::CRIT ||
         outcome == MeleeOutcome::PARRY || outcome == MeleeOutcome::BLOCK) {
@@ -407,7 +417,7 @@ void CombatSoundManager::onMelee(uint64_t attackerGuid, uint64_t victimGuid, Mel
         blow.impactSound = soundData_->weaponImpactSound(subclass, metal, slot, crit);
         if ((outcome == MeleeOutcome::HIT || outcome == MeleeOutcome::CRIT) && injureVictim && haveVictim &&
             !victim.isLocalPlayer) {
-            blow.injurySound = pickInjury(victimGuid, victim.displayId, crit);
+            blow.injurySound = pickInjury(victim.displayId, victim.isPlayer, crit);
         }
     }
 
@@ -436,7 +446,7 @@ void CombatSoundManager::onWounded(uint64_t victimGuid, bool crit) {
     if (!initialized_ || !soundData_ || !unitResolver_) return;
     CombatUnitInfo victim;
     if (!unitResolver_(victimGuid, victim) || victim.isLocalPlayer) return;
-    playEntry3D(pickInjury(victimGuid, victim.displayId, crit), victim.position);
+    playEntry3D(pickInjury(victim.displayId, victim.isPlayer, crit), victim.position);
 }
 
 void CombatSoundManager::onMeleeAnimEvent(uint32_t instanceId, uint32_t tag) {

@@ -105,6 +105,11 @@ public:
     /// The model's weapon hand-off time ($SHL/$SHR) in an animation, in ms;
     /// UINT32_MAX when the model or the sequence has none.
     [[nodiscard]] uint32_t getSheathEventTime(uint32_t instanceId, uint32_t animationId) const;
+    /// The model's spell release ($CSL/$CSR/$CST) in an animation: its time
+    /// in ms and, when worldPos is given, where that event's point is now.
+    /// False when the model or the sequence has none.
+    bool getCastReleaseEvent(uint32_t instanceId, uint32_t animationId, uint32_t& timeMs,
+                             glm::vec3* worldPos = nullptr);
     /// Length of an animation on this instance's model, in ms (0 if absent).
     [[nodiscard]] uint32_t getAnimationDurationMs(uint32_t instanceId, uint32_t animationId) const;
 
@@ -173,6 +178,19 @@ public:
     /// Whether the sequence the instance is playing now carries an event
     /// with this tag ($CSS, $CAH ...).
     [[nodiscard]] bool currentAnimHasEvent(uint32_t instanceId, uint32_t eventTag) const;
+    /// Whether the animation playing on the upper body (playUpperBodyAnimation)
+    /// carries an event with this tag; false when none plays there.
+    [[nodiscard]] bool upperBodyAnimHasEvent(uint32_t instanceId, uint32_t eventTag) const;
+    /// Plays the rest of the whole-body animation at `speed` (1 = as authored);
+    /// the next playAnimation starts at 1 again. The stock client slows a
+    /// swing that missed to half speed from its blow (Wow.exe 0x735CC0).
+    void setAnimationSpeed(uint32_t instanceId, float speed);
+    /// Asked whenever a Stand or Ready stance with more than one variation
+    /// starts or laps on an instance: true holds it on its first variation,
+    /// as the stock client does for a unit that is attacking or casting
+    /// (Wow.exe 0x737EF0), so it does not fidget.
+    using FirstVariationPredicate = std::function<bool(uint32_t instanceId)>;
+    void setFirstVariationPredicate(FirstVariationPredicate p) { firstVariationPredicate_ = std::move(p); }
     [[nodiscard]] bool hasAnimation(uint32_t instanceId, uint32_t animationId) const;
     bool getAnimationSequences(uint32_t instanceId, std::vector<pipeline::M2Sequence>& out) const;
     bool getInstanceModelName(uint32_t instanceId, std::string& modelName) const;
@@ -336,6 +354,7 @@ private:
         // playAnimation. Index 0/1 the arms, 2 the torso; -1 = follows the body.
         int upperSequenceIndex[3] = {-1, -1, -1};
         float upperTime = -1.0f;      // ms into the overlay; < 0 = none
+        float animationSpeed = 1.0f;  // setAnimationSpeed; reset by playAnimation
         float upperDurationMs = 0.0f;
         std::vector<int8_t> boneUpper;  // Per bone: 0 left arm, 1 right arm, 2 torso/head, -1 lower body
         float animationTime = 0.0f;
@@ -655,6 +674,10 @@ private:
     std::vector<std::future<void>> animFutures_;
     std::vector<std::reference_wrapper<CharacterInstance>> toUpdate_;  // reused across frames
     AnimSoundEventCallback animSoundEventCallback_;
+    FirstVariationPredicate firstVariationPredicate_;
+    /// The variation of `animationId` to start: its first while
+    /// firstVariationPredicate_ holds the instance there, else rolled.
+    int pickLoopVariation(uint32_t instanceId, const pipeline::M2Model& model, uint32_t animationId) const;
     // setAnimCullView: the frame's view-projection and shadow ray direction.
     bool animCullValid_ = false;
     glm::mat4 animCullViewProj_{1.0f};

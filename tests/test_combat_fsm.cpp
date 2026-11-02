@@ -204,3 +204,96 @@ TEST_CASE("CombatFSM: a drawn wand takes the directed spell stance, not the rifl
     fsm.setState(CombatFSM::State::COMBAT_IDLE);
     CHECK(fsm.resolve(in, caps, loadout).animId == anim::READY_RIFLE);
 }
+
+// Auto Shot sets no attack target, so the stock client's stance between shots
+// is the ranged weapon's Load, then its Hold, replayed while the shot stays
+// on (Wow.exe 0x714F90, 0x73B510) - never ReadyBow.
+TEST_CASE("CombatFSM: Auto Shot loads, then holds, between shots", "[combat][ranged]") {
+    CombatFSM fsm;
+    auto caps = makeCombatCaps();
+    caps.resolvedLoadBow = anim::LOAD_BOW;
+    caps.resolvedHoldBow = anim::HOLD_BOW;
+    caps.resolvedLoadRifle = anim::LOAD_RIFLE;
+    caps.resolvedHoldRifle = anim::HOLD_RIFLE;
+    caps.resolvedHoldThrown = anim::HOLD_THROWN;
+    WeaponLoadout loadout;
+    loadout.rangedType = RangedWeaponType::BOW;
+
+    CombatFSM::Input in;
+    in.grounded = true;
+    in.rangedWeaponActive = true;
+    in.autoRepeatShot = true;
+
+    // Standing, no attack target: the load, as a one-shot.
+    auto load = fsm.resolve(in, caps, loadout);
+    REQUIRE(load.valid);
+    CHECK(fsm.getState() == CombatFSM::State::RANGED_LOAD);
+    CHECK(load.animId == anim::LOAD_BOW);
+    CHECK_FALSE(load.loop);
+
+    // Still loading: it stays.
+    in.haveAnimState = true;
+    in.currentAnimId = anim::LOAD_BOW;
+    in.currentAnimDuration = 1000.0f;
+    in.currentAnimTime = 300.0f;
+    CHECK(fsm.resolve(in, caps, loadout).animId == anim::LOAD_BOW);
+
+    // The load ends: the hold, looping.
+    in.currentAnimTime = 1000.0f;
+    auto hold = fsm.resolve(in, caps, loadout);
+    CHECK(fsm.getState() == CombatFSM::State::RANGED_HOLD);
+    CHECK(hold.animId == anim::HOLD_BOW);
+    CHECK(hold.loop);
+
+    // Moving lets the run take over; standing again loads afresh.
+    in.moving = true;
+    CHECK_FALSE(fsm.resolve(in, caps, loadout).valid);
+    in.moving = false;
+    CHECK(fsm.resolve(in, caps, loadout).animId == anim::LOAD_BOW);
+
+    // The shot stops: back to standing.
+    in.autoRepeatShot = false;
+    CHECK_FALSE(fsm.resolve(in, caps, loadout).valid);
+    CHECK(fsm.getState() == CombatFSM::State::INACTIVE);
+}
+
+TEST_CASE("CombatFSM: Auto Shot stance by ranged weapon", "[combat][ranged]") {
+    auto caps = makeCombatCaps();
+    caps.resolvedLoadRifle = anim::LOAD_RIFLE;
+    caps.resolvedHoldRifle = anim::HOLD_RIFLE;
+    caps.resolvedHoldThrown = anim::HOLD_THROWN;
+    CombatFSM::Input in;
+    in.grounded = true;
+    in.rangedWeaponActive = true;
+    in.autoRepeatShot = true;
+
+    // A crossbow loads like a gun (LoadRifle), not like a bow.
+    {
+        CombatFSM fsm;
+        WeaponLoadout loadout;
+        loadout.rangedType = RangedWeaponType::CROSSBOW;
+        CHECK(fsm.resolve(in, caps, loadout).animId == anim::LOAD_RIFLE);
+    }
+    // A wand has nothing to load and holds HoldThrown at once.
+    {
+        CombatFSM fsm;
+        WeaponLoadout loadout;
+        loadout.rangedType = RangedWeaponType::WAND;
+        auto out = fsm.resolve(in, caps, loadout);
+        CHECK(fsm.getState() == CombatFSM::State::RANGED_HOLD);
+        CHECK(out.animId == anim::HOLD_THROWN);
+    }
+    // With a melee attack target the Ready stance comes first, as 0x71E0D0
+    // is asked before 0x714F90.
+    {
+        CombatFSM fsm;
+        caps.resolvedReady1H = anim::READY_1H;
+        WeaponLoadout loadout;
+        loadout.inventoryType = wowee::game::InvType::ONE_HAND;
+        loadout.rangedType = RangedWeaponType::GUN;
+        in.inCombat = true;
+        in.rangedWeaponActive = false;
+        in.autoRepeatShot = false;
+        CHECK(fsm.resolve(in, caps, loadout).animId == anim::READY_1H);
+    }
+}

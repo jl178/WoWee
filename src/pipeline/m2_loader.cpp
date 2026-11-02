@@ -1089,6 +1089,35 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
             // are embedded on every character model checked.
             const bool isSheath = std::memcmp(m2Data.data() + base, "$SHL", 4) == 0 ||
                                   std::memcmp(m2Data.data() + base, "$SHR", 4) == 0;
+            // $CSL / $CSR / $CST: where and when a cast animation lets the
+            // spell go - the missile leaves from this point at this frame.
+            const bool isCastRelease = std::memcmp(m2Data.data() + base, "$CSL", 4) == 0 ||
+                                       std::memcmp(m2Data.data() + base, "$CSR", 4) == 0 ||
+                                       std::memcmp(m2Data.data() + base, "$CST", 4) == 0;
+            if (isCastRelease && wotlkEvents) {
+                if (model.castReleaseEvents.size() < model.sequences.size())
+                    model.castReleaseEvents.resize(model.sequences.size());
+                glm::vec3 pos(0.0f);
+                std::memcpy(&pos, m2Data.data() + base + 12, sizeof(float) * 3);
+                if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z))
+                    pos = glm::vec3(0.0f);
+                const uint32_t bone = rd32(base + 8);
+                const uint32_t nArrays = rd32(base + trackOfs + 4);
+                const uint32_t ofsArrays = rd32(base + trackOfs + 8);
+                const uint32_t count = std::min<uint32_t>(nArrays, model.sequences.size());
+                for (uint32_t s = 0; s < count; s++) {
+                    if (!(model.sequences[s].flags & kM2SeqFlagEmbeddedData)) continue;
+                    const uint32_t nTs = rd32(ofsArrays + s * 8);
+                    const uint32_t ofsTs = rd32(ofsArrays + s * 8 + 4);
+                    if (nTs == 0 || nTs > 64) continue;
+                    if (ofsTs + nTs * sizeof(uint32_t) > m2Data.size()) continue;
+                    auto& ev = model.castReleaseEvents[s];
+                    for (uint32_t ts : readArray<uint32_t>(m2Data, ofsTs, nTs)) {
+                        if (ts < ev.timeMs) ev = {ts, bone, pos};
+                    }
+                }
+                continue;
+            }
             if (isSheath && wotlkEvents) {
                 if (model.sheathEventTimes.size() < model.sequences.size())
                     model.sheathEventTimes.resize(model.sequences.size(), UINT32_MAX);
@@ -1153,7 +1182,8 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                 continue;
             }
             // The other sound-making events ($CSS, $CAH, $AHn, $FDn, $WNG)
-            // ride in soundEvents with their tag and no sound id.
+            // and the silent $CPP ride in soundEvents with their tag and no
+            // sound id.
             const uint32_t eventTag = rd32(base);
             const bool isTagged = !isFootfall && !isSound && isM2SoundEventTag(eventTag);
             if (!isFootfall && !isSound && !isTagged) continue;

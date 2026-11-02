@@ -1440,8 +1440,14 @@ public:
     void setNpcSwingCallback(NpcSwingCallback cb) { npcSwingCallback_ = std::move(cb); }
 
     // Hit reaction callback - triggers victim animation (dodge, block, wound, crit wound)
-    enum class HitReaction : uint8_t { WOUND, CRIT_WOUND, DODGE, PARRY, BLOCK, SHIELD_BLOCK };
-    using HitReactionCallback = std::function<void(uint64_t victimGuid, HitReaction reaction)>;
+    // MISS (a miss or an evade) moves nobody: the attacker's swing finishes
+    // at half speed (Wow.exe 0x756240). DEFLECT looks like a dodge but is not
+    // slowed.
+    enum class HitReaction : uint8_t { WOUND, CRIT_WOUND, DODGE, PARRY, BLOCK, SHIELD_BLOCK, MISS, DEFLECT };
+    /// attackerGuid is the melee attacker whose blow it is (its $CPP and
+    /// $CAH time the reaction), 0 for a spell's damage.
+    using HitReactionCallback = std::function<void(uint64_t victimGuid, HitReaction reaction,
+                                                   uint64_t attackerGuid)>;
     void setHitReactionCallback(HitReactionCallback cb) { hitReactionCallback_ = std::move(cb); }
 
     // Stun state callback - fires when UNIT_FLAG_STUNNED changes on the local player
@@ -2098,6 +2104,14 @@ public:
 
     // ---- Loot ----
     void lootTarget(uint64_t guid);
+    /// A right-click on a corpse, as CGUnit_C::OnRightClick (0x731260) does
+    /// it: loot it when it is lootable, skin it when it is skinnable.
+    /// `autoLootModifier` is the auto-loot key (Shift) being held, which flips
+    /// autoLootDefault for this loot (0x513700).
+    void rightClickCorpse(uint64_t guid, bool autoLootModifier);
+    /// Auto-loot for whatever the next loot is, decided now: autoLootDefault
+    /// flipped by the auto-loot key (0x513700, latched by 0x6CDE50).
+    void latchAutoLootForClick(bool autoLootModifier);
     void lootItem(uint8_t slotIndex, bool confirmed = false);
     void confirmPendingLoot();
     void confirmBindOnUse();
@@ -2173,6 +2187,17 @@ public:
     // NPC Gossip
     void interactWithNpc(uint64_t guid);
     void interactWithGameObject(uint64_t guid);
+    /// The unit or object whose window is open - the stock client's interact
+    /// target (CGGameUI 0xBD07A8). Zero when none is.
+    uint64_t getInteractTargetGuid() const { return interactTargetGuid_; }
+    /// Whether this unit turns to face the player because the player is
+    /// talking to it: the interact target with no target of its own, standing
+    /// and free to turn (CGUnit_C facing update 0x735F60).
+    bool interactTargetFacesPlayer(uint64_t guid) const;
+    /// Whether the player stands where a game object can be used from: its
+    /// model box grown by its type's reach (0x70FA70). nullopt when the box
+    /// is not known.
+    std::optional<bool> gameObjectInUseReach(uint64_t guid) const;
     uint64_t getHookedFishingBobberGuid() const { return hookedFishingBobberGuid_; }
     void selectGossipOption(uint32_t optionId, const std::string& code = "");
     void selectGossipQuest(uint32_t questId);
@@ -4736,6 +4761,12 @@ private:
     void performGameObjectInteractionNow(uint64_t guid);
     bool deferGameObjectClickUntilQueried(uint64_t guid);
     void updateDeferredGameObjectClick(float deltaTime);
+    /// Keeps the interact target and closes its windows when the player walks
+    /// out of reach (CGGameUI 0x51FDE0, polled every frame).
+    void updateInteractTarget();
+    /// A UI error by its GameError name, in the stock interface's own words.
+    void raiseGameError(const char* errorName, const char* fallback);
+    uint64_t interactTargetGuid_ = 0;
 
     // Quest details
     bool questDetailsOpen = false;

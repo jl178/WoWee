@@ -1,5 +1,6 @@
 // lua_social_api.cpp - Chat, guild, friends, ignore, gossip, party management, and emotes Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
+#include "game/interaction_rules.hpp"
 #include <algorithm>
 #include <cctype>
 #include <iterator>
@@ -349,9 +350,9 @@ int setAllAddOnsEnabled(lua_State* L, bool enabled) {
 
 /// Whether an npc a dialog is waiting on is still close enough to talk to.
 ///
-/// Five yards is AzerothCore's INTERACTION_DISTANCE, which is the figure the
-/// server itself refuses a request beyond - so a dialog that stays open past
-/// it is offering a button that cannot work.
+/// The stock client's own NPC reach: the NPC's combat reach plus four yards,
+/// centre to centre in 3D - the check the innkeeper's and the spirit healer's
+/// confirmations make before they send (0x6D2120, 0x6DB010).
 ///
 /// An npc with no entity here answers *yes*, and the distinction matters: not
 /// knowing where someone is is not the same as knowing they are far away. Both
@@ -367,8 +368,12 @@ bool npcWithinInteractRange(game::GameHandler* gh, uint64_t npcGuid) {
     const float dx = player->getX() - npc->getX();
     const float dy = player->getY() - npc->getY();
     const float dz = player->getZ() - npc->getZ();
-    constexpr float kInteractionDistance = 5.0f;
-    return dx * dx + dy * dy + dz * dz <= kInteractionDistance * kInteractionDistance;
+    float reach = 1.5f;
+    if (auto* unit = dynamic_cast<game::Unit*>(npc.get()); unit && unit->getCombatReach() > 0.0f) {
+        reach = unit->getCombatReach();
+    }
+    const float range = game::interaction::npcInteractRange(reach);
+    return dx * dx + dy * dy + dz * dz <= range * range;
 }
 
 /// Which arena team a one-based index names, or zero for none.

@@ -8,6 +8,12 @@ namespace rendering {
 
 // ── One-shot completion helper ───────────────────────────────────────────────
 
+void CombatFSM::enterRangedLoad() {
+    state_ = State::RANGED_LOAD;
+    rangedLoadSeen_ = false;
+    rangedLoadFrames_ = 0;
+}
+
 bool CombatFSM::oneShotComplete(const Input& in, uint32_t expectedAnimId) const {
     if (!in.haveAnimState) return false;
     // Renderer auto-returns one-shots to STAND; detect that OR normal completion
@@ -185,6 +191,10 @@ void CombatFSM::updateTransitions(const Input& in) {
         case State::INACTIVE:
             if (in.inCombat && in.grounded && !in.swimming && !in.moving) {
                 state_ = in.hasUnsheathe ? State::UNSHEATHE : State::COMBAT_IDLE;
+            } else if (in.autoRepeatShot && in.grounded && !in.swimming && !in.moving && !in.jumping) {
+                // Standing again with Auto Shot on: the weapon is loaded
+                // afresh (moving cleared the loaded state, 0x72AFE0).
+                enterRangedLoad();
             }
             break;
 
@@ -210,23 +220,38 @@ void CombatFSM::updateTransitions(const Input& in) {
 
         case State::RANGED_SHOOT:
             if (in.rangedShootTimer <= 0.0f) {
-                if (in.swimming) {
+                if (in.swimming || !in.grounded) {
                     state_ = State::INACTIVE;
-                } else if (in.inCombat && in.grounded) {
-                    state_ = State::RANGED_LOAD;
+                } else if (in.autoRepeatShot) {
+                    enterRangedLoad();
+                } else if (in.inCombat) {
+                    state_ = State::COMBAT_IDLE;
                 } else {
                     state_ = State::INACTIVE;
                 }
             }
             break;
 
+        // While an auto-repeat shot runs, the base animation between shots
+        // is the ranged weapon's Load (0x714F90), which on its end becomes
+        // its Hold, replayed for as long as the shot stays on (0x73B510).
+        // Moving takes the body for the run; standing again loads again.
         case State::RANGED_LOAD:
+        case State::RANGED_HOLD:
             if (in.swimming || in.jumping || !in.grounded || in.moving) {
                 state_ = State::INACTIVE;
-            } else if (in.inCombat) {
-                state_ = State::COMBAT_IDLE;
-            } else {
-                state_ = State::INACTIVE;
+            } else if (!in.autoRepeatShot) {
+                state_ = in.inCombat ? State::COMBAT_IDLE : State::INACTIVE;
+            } else if (state_ == State::RANGED_LOAD) {
+                const uint32_t load = rangedLoadAnim_;
+                if (load == 0) {
+                    state_ = State::RANGED_HOLD;
+                } else if (in.haveAnimState && in.currentAnimId == load) {
+                    rangedLoadSeen_ = true;
+                    if (oneShotComplete(in, load)) state_ = State::RANGED_HOLD;
+                } else if (rangedLoadSeen_ || ++rangedLoadFrames_ > 10) {
+                    state_ = State::RANGED_HOLD;
+                }
             }
             break;
 
@@ -361,10 +386,13 @@ AnimOutput CombatFSM::resolve(const Input& in, const AnimCapabilitySet& caps,
             } else if (loadout.is2HLoose) {
                 animId = caps.resolvedReady2HLoose;
             } else if (loadout.inventoryType == game::InvType::TWO_HAND) {
-                animId = caps.resolvedReady2H;
+                // Gripped with something else in the off hand: Ready1H
+                // (Wow.exe 0x714DD0), as readyAnim() has it.
+                animId = (loadout.hasOffHand || loadout.hasShield) ? caps.resolvedReady1H
+                                                                   : caps.resolvedReady2H;
             } else if (loadout.isFist) {
                 animId = caps.resolvedReadyFist;
-            } else if (loadout.inventoryType == game::InvType::NON_EQUIP) {
+            } else if (loadout.inventoryType == game::InvType::NON_EQUIP && !loadout.hasOffHand) {
                 animId = caps.resolvedReadyUnarmed;
             } else {
                 animId = caps.resolvedReady1H;
@@ -414,13 +442,37 @@ AnimOutput CombatFSM::resolve(const Input& in, const AnimCapabilitySet& caps,
             break;
 
         case State::RANGED_LOAD:
+            // 0x714F90: a bow LoadBow, a gun or a crossbow LoadRifle, thrown
+            // LoadThrown; a wand has nothing to load and holds HoldThrown.
             switch (loadout.rangedType) {
                 case RangedWeaponType::BOW:      animId = caps.resolvedLoadBow; break;
-                case RangedWeaponType::GUN:      animId = caps.resolvedLoadRifle; break;
-                case RangedWeaponType::CROSSBOW: animId = caps.resolvedLoadBow; break;
+                case RangedWeaponType::GUN:
+                case RangedWeaponType::CROSSBOW: animId = caps.resolvedLoadRifle; break;
+                case RangedWeaponType::THROWN:   animId = caps.resolvedLoadThrown; break;
                 default: break;
             }
-            loop = false;
+            rangedLoadAnim_ = animId;
+            if (animId != 0) {
+                loop = false;
+                break;
+            }
+            // Nothing to load: straight to the hold.
+            state_ = State::RANGED_HOLD;
+            [[fallthrough]];
+
+        case State::RANGED_HOLD:
+            // 0x73B510: LoadBow ends in HoldBow, LoadRifle in HoldRifle, and
+            // LoadThrown (and a wand's hold) in HoldThrown.
+            switch (loadout.rangedType) {
+                case RangedWeaponType::BOW:      animId = caps.resolvedHoldBow; break;
+                case RangedWeaponType::GUN:
+                case RangedWeaponType::CROSSBOW: animId = caps.resolvedHoldRifle; break;
+                case RangedWeaponType::THROWN:
+                case RangedWeaponType::WAND:     animId = caps.resolvedHoldThrown; break;
+                default:                         animId = 0; break;
+            }
+            if (animId == 0) return AnimOutput::stay();
+            loop = true;
             break;
 
         case State::SPELL_PRECAST:
