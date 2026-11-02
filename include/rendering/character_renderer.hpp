@@ -391,6 +391,13 @@ private:
         // Pre-classified at load time to avoid per-batch string ops in render loop
         bool isKoboldFlame = false;
         bool isSkyBird = false;
+        /// A character model: it has a slot the character composite fills
+        /// (texture type 1 body, 2 cape, 6 hair or 8 skin extra). Its geosets
+        /// are the component's to choose, so with none chosen the cloak and
+        /// eye-glow groups stay off. A creature model has none of these and
+        /// stock draws every one of its sections (CM2Model init 0x832EA0
+        /// turns them all on), capes included.
+        bool hasCompositeSlots = false;
         /// Particle emitters or ribbons: drawn through an M2Renderer twin
         /// (poseModelEmitters). emitterModelId is that renderer's model, 0
         /// before it is loaded; emitterModelFailed stops retrying.
@@ -593,6 +600,13 @@ public:
     /** Load a BLP texture from MPQ and return VkTexture* (cached). */
     VkTexture* loadTexture(const std::string& path);
     [[nodiscard]] VkTexture* getTransparentTexture() const { return transparentTexture_.get(); }
+    /// What stock binds to a creature skin slot whose display names no skin
+    /// (opaque black), and what it loads a missing file as (white). Both are
+    /// final: the draw path never replaces them with another slot's texture.
+    [[nodiscard]] VkTexture* getUnboundTexture() const { return unboundTexture_.get(); }
+    [[nodiscard]] VkTexture* getDefaultTexture() const { return defaultTexture_.get(); }
+    /// The placeholder an unset slot holds; loadTexture returns it on failure.
+    [[nodiscard]] VkTexture* getWhiteTexture() const { return whiteTexture_.get(); }
 
     /** Replace a loaded model's texture at the given slot. */
     void setModelTexture(uint32_t modelId, uint32_t textureSlot, VkTexture* texture);
@@ -707,6 +721,8 @@ private:
     uint32_t textureBudgetRejectWarnings_ = 0;
     std::unique_ptr<VkTexture> whiteTexture_;
     std::unique_ptr<VkTexture> transparentTexture_;
+    std::unique_ptr<VkTexture> unboundTexture_;
+    std::unique_ptr<VkTexture> defaultTexture_;
     std::unique_ptr<VkTexture> flatNormalTexture_;
 
     std::unordered_map<uint32_t, M2ModelGPU> models;

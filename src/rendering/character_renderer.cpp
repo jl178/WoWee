@@ -542,6 +542,8 @@ void CharacterRenderer::shutdown() {
     // The singletons the cache never held. Same reason as above.
     if (whiteTexture_)       { whiteTexture_->destroy(device, alloc);       whiteTexture_.reset(); }
     if (transparentTexture_) { transparentTexture_->destroy(device, alloc); transparentTexture_.reset(); }
+    if (unboundTexture_)     { unboundTexture_->destroy(device, alloc);     unboundTexture_.reset(); }
+    if (defaultTexture_)     { defaultTexture_->destroy(device, alloc);     defaultTexture_.reset(); }
     if (flatNormalTexture_)  { flatNormalTexture_->destroy(device, alloc);  flatNormalTexture_.reset(); }
     texturePropsByPtr_.clear();
     normalMapByTexPtr_.clear();
@@ -556,6 +558,8 @@ void CharacterRenderer::shutdown() {
 
     whiteTexture_.reset();
     transparentTexture_.reset();
+    unboundTexture_.reset();
+    defaultTexture_.reset();
     flatNormalTexture_.reset();
 
     models.clear();
@@ -673,6 +677,8 @@ void CharacterRenderer::clear() {
     // Recreate default textures (needed by loadModel/loadTexture fallbacks)
     whiteTexture_.reset();
     transparentTexture_.reset();
+    unboundTexture_.reset();
+    defaultTexture_.reset();
     flatNormalTexture_.reset();
     createFallbackTextures(device);
 
@@ -711,6 +717,26 @@ void CharacterRenderer::createFallbackTextures(VkDevice device) {
         transparentTexture_ = std::make_unique<VkTexture>();
         transparentTexture_->upload(*vkCtx_, transparent, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, false);
         transparentTexture_->createSampler(device, VK_FILTER_NEAREST, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_REPEAT);
+    }
+    // What the stock client binds to a creature skin slot (type 11-13) whose
+    // display names no skin: nothing. A sampler with no texture reads
+    // (0, 0, 0, 1) - opaque black, and no light at all when added. Kept
+    // apart from the white texture, which the draw path treats as "not set
+    // yet" and replaces with a body texture (core/creature_skin_rules.hpp).
+    {
+        uint8_t black[] = {0, 0, 0, 255};
+        unboundTexture_ = std::make_unique<VkTexture>();
+        unboundTexture_->upload(*vkCtx_, black, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, false);
+        unboundTexture_->createSampler(device, VK_FILTER_NEAREST, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_REPEAT);
+    }
+    // The stock default texture (0x4B5280): solid 0xFFFFFFFF, what a named
+    // file that is not there loads as. White like whiteTexture_, but a slot
+    // holding it is decided, not empty, so nothing substitutes for it.
+    {
+        uint8_t white[] = {255, 255, 255, 255};
+        defaultTexture_ = std::make_unique<VkTexture>();
+        defaultTexture_->upload(*vkCtx_, white, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, false);
+        defaultTexture_->createSampler(device, VK_FILTER_NEAREST, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_REPEAT);
     }
     // Flat normal: neutral normal map (128,128,255) + 0.5 height in alpha channel
     {
@@ -1899,6 +1925,13 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
             ((lowerName.find("candle") != std::string::npos) ||
              (lowerName.find("torch") != std::string::npos) ||
              (lowerName.find("mine") != std::string::npos));
+    }
+
+    for (const auto& tex : gpuModel.data.textures) {
+        if (tex.type == 1 || tex.type == 2 || tex.type == 6 || tex.type == 8) {
+            gpuModel.hasCompositeSlots = true;
+            break;
+        }
     }
 
     models[id] = std::move(gpuModel);
@@ -3377,8 +3410,13 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     // cloak texture to bind, a white sheet. An NPC that owns a
                     // cape says so by naming the geoset; one that says nothing
                     // has none.
+                    //
+                    // Only on a character model. A creature model's sections
+                    // are all on in stock (0x832EA0), and its cloak is skin
+                    // art: skipping group 15 there took the capes off the
+                    // Four Horsemen, Rexxar, fel orcs and eredar.
                     uint16_t grp = batch.submeshId / 100;
-                    if (grp == 17 || grp == 18 || grp == 15) continue;
+                    if (gpuModel.hasCompositeSlots && (grp == 17 || grp == 18 || grp == 15)) continue;
                 }
                 // One line per head batch, for the first few instances: which
                 // texture slot it resolved to and what type that slot is. The
@@ -4041,7 +4079,7 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
         const bool applyGeosetFilter = !inst.activeGeosets.empty();
         if (applyGeosetFilter &&
             inst.activeGeosets.find(batch.submeshId) == inst.activeGeosets.end()) return -1;
-        if (!applyGeosetFilter) {
+        if (!applyGeosetFilter && gpuModel.hasCompositeSlots) {
             uint16_t grp = batch.submeshId / 100;
             if (grp == 17 || grp == 18) return -1;
         }

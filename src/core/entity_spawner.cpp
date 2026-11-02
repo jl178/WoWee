@@ -4,6 +4,7 @@
 #include "core/appearance_composer.hpp"
 #include "pipeline/char_sections.hpp"
 #include "core/geoset_rules.hpp"
+#include "core/creature_skin_rules.hpp"
 #include "pipeline/item_textures.hpp"
 #include "core/helm_visual.hpp"
 
@@ -1313,60 +1314,10 @@ void EntitySpawner::buildCreatureDisplayLookups() {
         for (char& c : s) if (c == '/') c = '\\';
         return toLower(s);
     };
-    // A display with no skin of its own, on a model that asks for one.
-    //
-    // CreatureDisplayInfo leaves Skin1 empty in 545 of its rows. 517 of those
-    // carry an ExtraDisplayId: they are characters whose appearance is baked
-    // from CreatureDisplayInfoExtra instead, and they have to stay empty or the
-    // bake never runs. The other 28 are ordinary creatures with nothing to put
-    // in the slot their model marks replaceable (texture type 11), so the slot
-    // kept the white fallback and the creature drew untextured.
-    //
-    // 24 of those 28 have a sibling that names one - another display on the
-    // same model FILE. Several model IDs point at one .m2: 110 and 3105 are
-    // both WaterElemental.mdx, and 3105's only display is the empty one, so
-    // matching by model ID finds nothing and matching by path finds the
-    // skin every other water elemental in the game uses. That is the same
-    // recovery the taxi mounts below do, for the same reason.
-    {
-        struct SkinDonor {
-            uint32_t displayId = 0;
-            std::string skin1, skin2, skin3;
-        };
-        std::unordered_map<std::string, SkinDonor> donorByPath;
-        for (const auto& [dispId, data] : displayDataMap_) {
-            if (data.skin1.empty()) continue;
-            auto itPath = modelIdToPath_.find(data.modelId);
-            if (itPath == modelIdToPath_.end()) continue;
-            const std::string key = normalizePath(itPath->second);
-            auto it = donorByPath.find(key);
-            // Lowest display id wins, so the choice does not depend on the
-            // order an unordered_map happens to walk in.
-            if (it == donorByPath.end() || dispId < it->second.displayId) {
-                donorByPath[key] = SkinDonor{dispId, data.skin1, data.skin2, data.skin3};
-            }
-        }
-
-        int recovered = 0;
-        for (auto& [dispId, data] : displayDataMap_) {
-            (void)dispId;
-            if (!data.skin1.empty() || data.extraDisplayId != 0) continue;
-            auto itPath = modelIdToPath_.find(data.modelId);
-            if (itPath == modelIdToPath_.end()) continue;
-            auto donor = donorByPath.find(normalizePath(itPath->second));
-            if (donor == donorByPath.end()) continue;
-            data.skin1 = donor->second.skin1;
-            data.skin2 = donor->second.skin2;
-            data.skin3 = donor->second.skin3;
-            ++recovered;
-        }
-        if (recovered > 0) {
-            // Said out loud: this repairs the table the rest of the client
-            // trusts, and an NPC drawn white is the only other sign of it.
-            LOG_WARNING("Recovered skins for ", recovered,
-                     " creature display(s) whose own CreatureDisplayInfo row names none");
-        }
-    }
+    // A display whose CreatureDisplayInfo row names no skin keeps those slots
+    // empty, as stock does (core/creature_skin_rules.hpp): no sibling display's
+    // skin is borrowed. Borrowing drew the Saronite Animus (28992, a water
+    // elemental with no skin, black in stock) as a blue water elemental.
 
     auto resolveDisplayIdForExactPath = [&](const std::string& exactPath) -> uint32_t {
         const std::string target = normalizePath(exactPath);
@@ -1794,47 +1745,6 @@ EntitySpawner::getCreatureSkinPaths(uint32_t displayId,
     auto it = displayDataMap_.find(displayId);
     if (it == displayDataMap_.end()) return out;
 
-    std::string modelDir;
-    if (const size_t slash = modelPath.rfind('\\'); slash != std::string::npos) {
-        modelDir = modelPath.substr(0, slash + 1);
-    }
-
-    // Same resolution the spawner makes: the field may carry a directory or
-    // not, and may carry the extension or not.
-    auto resolve = [&](const std::string& skinField) -> std::string {
-        if (skinField.empty()) return "";
-        std::string raw = skinField;
-        std::replace(raw.begin(), raw.end(), '/', '\\');
-        auto isSpace = [](unsigned char c) { return std::isspace(c) != 0; };
-        raw.erase(raw.begin(), std::find_if(raw.begin(), raw.end(),
-                  [&](unsigned char c) { return !isSpace(c); }));
-        raw.erase(std::find_if(raw.rbegin(), raw.rend(),
-                  [&](unsigned char c) { return !isSpace(c); }).base(), raw.end());
-        if (raw.empty()) return "";
-
-        std::string lower = raw;
-        std::transform(lower.begin(), lower.end(), lower.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        const bool hasExt = lower.size() >= 4 &&
-                            lower.compare(lower.size() - 4, 4, ".blp") == 0;
-        const bool hasDir = raw.find('\\') != std::string::npos;
-
-        std::vector<std::string> candidates;
-        if (hasDir) {
-            candidates.push_back(raw);
-            if (!hasExt) candidates.push_back(raw + ".blp");
-        } else {
-            candidates.push_back(modelDir + raw);
-            if (!hasExt) candidates.push_back(modelDir + raw + ".blp");
-            candidates.push_back(raw);
-            if (!hasExt) candidates.push_back(raw + ".blp");
-        }
-        for (const std::string& c : candidates) {
-            if (assetManager_->fileExists(c)) return c;
-        }
-        return "";
-    };
-
     // The bake first, where the display has one: it is the whole appearance
     // already composited, and the world puts it over these same slots. It is
     // what a goblin, a naga or a broken has instead of skin fields - those are
@@ -1844,12 +1754,16 @@ EntitySpawner::getCreatureSkinPaths(uint32_t displayId,
         for (uint32_t texType : {1u, 11u, 12u, 13u}) out.emplace_back(texType, bake);
     }
 
+    // The same file the spawner binds (core/creature_skin_rules.hpp): model
+    // directory + TextureVariation, extension made .blp, and only a file the
+    // install has.
+    const std::string modelDir = core::creatureModelDirectory(modelPath);
     const std::pair<uint32_t, const std::string*> kSkins[] = {
         {11u, &it->second.skin1}, {12u, &it->second.skin2}, {13u, &it->second.skin3},
     };
     for (const auto& [texType, field] : kSkins) {
-        std::string path = resolve(*field);
-        if (!path.empty()) out.emplace_back(texType, std::move(path));
+        std::string path = core::creatureSkinFile(modelDir, *field);
+        if (!path.empty() && assetManager_->fileExists(path)) out.emplace_back(texType, std::move(path));
     }
     return out;
 }
@@ -2450,11 +2364,6 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
     // path is asked for here rather than passed in - the caller had it only
     // because it needed it for something else.
     const std::string m2Path = getModelPathForDisplayId(displayId);
-    std::string modelDir;
-    const size_t lastSlash = m2Path.find_last_of("\\/");
-    if (lastSlash != std::string::npos) {
-        modelDir = m2Path.substr(0, lastSlash + 1);
-    }
 
     LOG_DEBUG("DisplayId ", displayId, " skins: '", dispData.skin1, "', '", dispData.skin2, "', '", dispData.skin3,
               "' extraDisplayId=", dispData.extraDisplayId);
@@ -2704,85 +2613,11 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
         }
     }
 
-    // Apply creature skin textures (for non-humanoid creatures)
+    // Creature skins (types 11-13), as stock binds them. A humanoid display's
+    // composite owns those slots instead - it puts its bake over 11-13 - and
+    // the character models it uses have no other skin slots.
     if (!hasHumanoidTexture && modelData) {
-        auto resolveCreatureSkinPath = [&](const std::string& skinField) -> std::string {
-            if (skinField.empty()) return "";
-
-            std::string raw = skinField;
-            std::replace(raw.begin(), raw.end(), '/', '\\');
-            auto isSpace = [](unsigned char c) { return std::isspace(c) != 0; };
-            raw.erase(raw.begin(), std::find_if(raw.begin(), raw.end(), [&](unsigned char c) { return !isSpace(c); }));
-            raw.erase(std::find_if(raw.rbegin(), raw.rend(), [&](unsigned char c) { return !isSpace(c); }).base(), raw.end());
-            if (raw.empty()) return "";
-
-            auto hasBlpExt = [](const std::string& p) {
-                if (p.size() < 4) return false;
-                std::string ext = p.substr(p.size() - 4);
-                std::transform(ext.begin(), ext.end(), ext.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                return ext == ".blp";
-            };
-            auto addCandidate = [](std::vector<std::string>& out, const std::string& p) {
-                if (p.empty()) return;
-                if (std::find(out.begin(), out.end(), p) == out.end()) out.push_back(p);
-            };
-
-            std::vector<std::string> candidates;
-            const bool hasDir = (raw.find('\\') != std::string::npos || raw.find('/') != std::string::npos);
-            const bool hasExt = hasBlpExt(raw);
-
-            if (hasDir) {
-                addCandidate(candidates, raw);
-                if (!hasExt) addCandidate(candidates, raw + ".blp");
-            } else {
-                addCandidate(candidates, modelDir + raw);
-                if (!hasExt) addCandidate(candidates, modelDir + raw + ".blp");
-                addCandidate(candidates, raw);
-                if (!hasExt) addCandidate(candidates, raw + ".blp");
-            }
-
-            for (const auto& c : candidates) {
-                if (assetManager_->fileExists(c)) return c;
-            }
-            return "";
-        };
-
-        for (size_t ti = 0; ti < modelData->textures.size(); ti++) {
-            const auto& tex = modelData->textures[ti];
-            std::string skinPath;
-
-            // Creature skin types: 11 = skin1, 12 = skin2, 13 = skin3
-            if (tex.type == 11 && !dispData.skin1.empty()) {
-                skinPath = resolveCreatureSkinPath(dispData.skin1);
-            } else if (tex.type == 12 && !dispData.skin2.empty()) {
-                skinPath = resolveCreatureSkinPath(dispData.skin2);
-            } else if (tex.type == 13 && !dispData.skin3.empty()) {
-                skinPath = resolveCreatureSkinPath(dispData.skin3);
-            }
-
-            if (!skinPath.empty()) {
-                rendering::VkTexture* skinTex = charRenderer->loadTexture(skinPath);
-                if (skinTex) {
-                    charRenderer->setModelTexture(modelId, static_cast<uint32_t>(ti), skinTex);
-                    LOG_DEBUG("Applied creature skin texture: ", skinPath, " to slot ", ti);
-                } else {
-                    // The row named a skin, the path was built, and the file
-                    // behind it did not load. Said nothing before: the slot
-                    // kept whatever it had and the creature drew wrong with
-                    // no line anywhere saying which texture had not arrived.
-                    LOG_WARNING("Creature skin did not load for displayId ", displayId,
-                                " slot ", ti, " type ", tex.type, ": ", skinPath);
-                }
-            } else if ((tex.type == 11 && !dispData.skin1.empty()) ||
-                       (tex.type == 12 && !dispData.skin2.empty()) ||
-                       (tex.type == 13 && !dispData.skin3.empty())) {
-                LOG_WARNING("Creature skin texture not found for displayId ", displayId,
-                            " slot ", ti, " type ", tex.type,
-                            " (skin fields: '", dispData.skin1, "', '",
-                            dispData.skin2, "', '", dispData.skin3, "')");
-            }
-        }
+        bindCreatureSkins(modelId, displayId, m2Path, dispData);
     }
 
     // Clear pre-decoded cache after applying all display textures
@@ -2796,6 +2631,61 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
                         " hasPreDec=", hasPreDec, " extra=", dispData.extraDisplayId);
         }
     }
+}
+
+int EntitySpawner::bindCreatureSkins(uint32_t modelId, uint32_t displayId,
+                                     const std::string& m2Path,
+                                     const CreatureDisplayData& dispData) {
+    auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    if (!charRenderer || !assetManager_) return 0;
+    const auto* modelData = charRenderer->getModelData(modelId);
+    if (!modelData) return 0;
+
+    std::vector<core::CreatureModelSlot> slots;
+    slots.reserve(modelData->textures.size());
+    for (const auto& t : modelData->textures) slots.push_back({t.type, t.filename});
+    const std::string skins[3] = {dispData.skin1, dispData.skin2, dispData.skin3};
+    const auto resolved = core::resolveCreatureSlotTextures(
+        slots, m2Path, skins,
+        [this](const std::string& path) { return assetManager_->fileExists(path); });
+
+    int bound = 0;
+    for (size_t ti = 0; ti < resolved.size(); ++ti) {
+        const auto& r = resolved[ti];
+        rendering::VkTexture* tex = nullptr;
+        switch (r.source) {
+            case core::CreatureSlotSource::DisplaySkin:
+                tex = charRenderer->loadTexture(r.path);
+                // A file that is there but will not decode is stock's default
+                // too - and must not stay the "unset" white, or the draw path
+                // fills it with the body texture.
+                if (!tex || tex == charRenderer->getWhiteTexture()) {
+                    LOG_WARNING("Creature skin did not load for displayId ", displayId,
+                                " slot ", ti, ": ", r.path);
+                    tex = charRenderer->getDefaultTexture();
+                }
+                break;
+            case core::CreatureSlotSource::MissingFile:
+                // Eleven skins in the shipped data name files the game never
+                // had (TrollSkin, ImpSkinHologramPink...). Stock draws its
+                // default white there, and so does this.
+                LOG_DEBUG("Creature skin file absent for displayId ", displayId,
+                          " slot ", ti, ": ", r.path, " - stock default (white)");
+                tex = charRenderer->getDefaultTexture();
+                break;
+            case core::CreatureSlotSource::Unbound:
+                tex = charRenderer->getUnboundTexture();
+                break;
+            case core::CreatureSlotSource::ModelFile:
+            case core::CreatureSlotSource::NotCreature:
+                continue;
+        }
+        if (tex) {
+            charRenderer->setModelTexture(modelId, static_cast<uint32_t>(ti), tex);
+            ++bound;
+        }
+    }
+    return bound;
 }
 
 float EntitySpawner::creatureModelScale(uint32_t displayId) const {
@@ -2997,6 +2887,22 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
     // at once - a cape and no cape, a robe skirt over trousers. Pick one per
     // clothing group and leave every other batch of the model alone.
     normalizeHumanoidClothingGeosets(instanceId, modelId, displayId);
+
+    // CreatureGeosetData (CDI column 14, 0x4E7790): a creature model's
+    // sections are all on (0x832EA0), and for groups 1-8 a non-zero nibble
+    // turns the group off and its one variant on. 39 displays carry it - armour
+    // and weapon variants of one model - and without it they drew every
+    // variant at once. The character composite owns an Extra display's.
+    if (auto dIt = displayDataMap_.find(displayId);
+        dIt != displayDataMap_.end() && dIt->second.extraDisplayId == 0 &&
+        dIt->second.creatureGeosetData != 0) {
+        if (const auto* md = charRenderer->getModelData(modelId)) {
+            std::unordered_set<uint16_t> on;
+            for (const auto& b : md->batches) on.insert(b.submeshId);
+            core::applyCreatureGeosetData(on, dIt->second.creatureGeosetData);
+            charRenderer->setActiveGeosets(instanceId, on);
+        }
+    }
 
     // Try attaching NPC held weapons; if update fields are not ready yet,
     // IN_GAME retry loop will attempt again shortly.

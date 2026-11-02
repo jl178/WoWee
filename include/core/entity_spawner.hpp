@@ -477,6 +477,15 @@ private:
     void applyCreatureDisplayTextures(uint32_t displayId, uint32_t modelId,
                                       const CreatureDisplayData& dispData);
 
+    /// Bind the creature skin slots (M2 types 11-13) of an uploaded model the
+    /// way stock does (core/creature_skin_rules.hpp): the display's own
+    /// TextureVariation from the model's directory, the default white for a
+    /// file that is not there, and nothing - black - for an empty one. The one
+    /// place a creature, a mount or another player's mount gets its skins.
+    /// Returns how many slots were bound.
+    int bindCreatureSkins(uint32_t modelId, uint32_t displayId, const std::string& m2Path,
+                          const CreatureDisplayData& dispData);
+
     struct HumanoidDisplayExtra {
         uint8_t raceId = 0;
         uint8_t sexId = 0;

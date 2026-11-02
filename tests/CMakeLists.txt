@@ -293,6 +293,15 @@ target_link_libraries(test_geoset_rules PRIVATE catch2_main)
 add_test(NAME geoset_rules COMMAND test_geoset_rules)
 register_test_target(test_geoset_rules)
 
+# ── test_creature_skin_rules ────────────────────────────────
+# What stock binds to a creature display's skin slots. Pure header.
+add_executable(test_creature_skin_rules test_creature_skin_rules.cpp ${TEST_COMMON_SOURCES})
+target_include_directories(test_creature_skin_rules PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_creature_skin_rules SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_creature_skin_rules PRIVATE catch2_main)
+add_test(NAME creature_skin_rules COMMAND test_creature_skin_rules)
+register_test_target(test_creature_skin_rules)
+
 # ── test_framexml ───────────────────────────────────────────
 add_executable(test_framexml
     test_framexml.cpp

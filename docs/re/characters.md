@@ -377,8 +377,37 @@ No scale, offset or fade; they live as long as the item model.
   that × `unit+0x9C` × OBJECT_FIELD_SCALE_X × (mounted ? the mount display's
   scale : 1). Player displays: tauren male CDI 1.35, tauren female CMD 1.25,
   gnomes CDI 1.15.
-- **Skins** (0x4F20C0): the CMD model's directory + CDI.TextureVariation[i] →
-  M2 texture type 11 + i; empty names skip; character models skip this.
+- **Skins** (CDI_SetSkins 0x4F20C0, called for every CDI by the unit model
+  setup 0x73FCC0, the mount 0x73D5D0 and the preview paths): copy
+  CMD.ModelName, cut it after the **last backslash** (no backslash: the name
+  alone), append CDI.TextureVariation[i], `CreateTexture` (0x4B9760), and
+  `CM2Model::SetReplaceableTexture(11 + i, tex)` (0x825260), which stores it
+  in every slot (`model+0xA4[slot]`) whose M2 texture type is 11 + i. Then
+  0x4EA9E0 sets the three skin colours. Details:
+  - An **empty** variation is skipped: the slot keeps what model init
+    (0x832EA0) gave it, which for a non-zero type is **null**.
+  - The name is never looked for anywhere but the model's directory, and no
+    other display's skins are ever used.
+  - **Extension**: 0x4B51C0 finds the last `.` after the last slash, and the
+    loaders replace from there with `.blp` (0x4B8BE0, string 0x9F1018) or
+    `.tga` (0x4B95B0, 0x9F1020); with no dot the extension is appended.
+    `DraeneiMaleKid_01.` (display 19092) therefore asks for
+    `DraeneiMaleKid_01.blp`; the shipped file is `DraeneiMaleKid_01..blp`.
+  - A named file that is **not there** loads as the **default texture**
+    (0x4B5280 fills every mip with 0xFF: solid white) and logs "Texture %s not
+    loaded -- replaced with default." (0x4B5EE0).
+  - A **null** slot is drawn anyway: the batch setup (0x81F450) passes the
+    null to the texture stage (0x685F50), and the D3D device binds nothing
+    (0x6A4900 `SetTexture(stage, 0)`). A sampler with nothing bound reads
+    (0, 0, 0, 1): **opaque black**, and adds nothing on additive batches.
+    The Saronite Animus (28992, WaterElemental.m2 with no variations) is the
+    visible case: a black water elemental.
+  - The character component never binds 11-13: it sets types 1 (0x4F1FC0),
+    2 (0x4F21E0, 0x4EAA70), 6 (0x4EA150) and 8 (0x4EA0B0) only.
+- **Sections**: CM2Model init (0x832EA0) turns **every** skin section on
+  (`model+0x9C[i] = 1`). A creature model is drawn whole - capes (group 15)
+  and eye glows (17) included - unless CreatureGeosetData below changes it;
+  only the character component chooses geosets.
 - **ParticleColor**: as for items, from CDI column 13 (`+0x34`); 560 displays
   (etherials, elementals, wisps, imps).
 - **Collision** (0x6D78C0): CMD CollisionWidth `+0x38`, Height `+0x3C`;
@@ -387,6 +416,80 @@ No scale, offset or fade; they live as long as the item model.
   Mounted, the box top rises by MountHeight `+0x40` (0x71ED80).
 - **CreatureModelAlpha** (CDI `+0x14`) / 255 is the unit's base alpha
   (0x715B50). 1,264 displays are below 255 (440 at 128).
+
+### Creature skins in Wowee (audit, 2026-11-02)
+
+`tools/creature_skin_audit.py` walks every CreatureDisplayInfo row, applies
+the rule above to each M2 texture slot and each batch (stage 0 of its texture
+combo, from the model's `00.skin`), and lists the displays that draw a batch
+with no real file. On the 3.3.5a data (24,262 rows; 21,384 used by
+creature_template_model):
+
+| slots | count |
+|---|---|
+| type 0, the model's own file | 34,506 |
+| 11-13, skin file found | 10,924 |
+| 11-13, named but not shipped (stock: white) | 11 |
+| 11-13, no variation (stock: black) | 60 |
+| 11-13 on an Extra display (Wowee puts the bake there) | 517 |
+| 1/2/6/8, the composite's | 45,013 |
+
+Wowee had the rule in four places (the creature spawner, the portrait's
+`getCreatureSkinPaths`, the local mount and other players' mounts) and between
+them five fallbacks stock does not have. Against stock, batch by batch, on the
+non-Extra displays (scratch `audit3.py`, which replays the old code):
+
+| | before | after |
+|---|---|---|
+| batches that match stock | 28,517 | all |
+| stock black, Wowee drew another display's skin or the body skin | 100 (29 used) | 0 |
+| stock black, Wowee drew white | 11 (10 used) | 0 |
+| stock draws a skin, Wowee hid the section (group 15/17/18 skipped) | 55 (34 used) | 0 |
+| a different file | 1 | 0 |
+
+The causes, all fixed (`core/creature_skin_rules.hpp`,
+`EntitySpawner::bindCreatureSkins`):
+
+1. **Borrowed skins**: a row with no Skin1 took the skins of the lowest
+   display on the same model file (`buildCreatureDisplayLookups`), the mounts
+   did the same by model id, and a mount with no skin bound got skin1 forced
+   onto an empty hard-coded slot or a guessed `Gryphon_Skin.blp`. Saronite
+   Animus drew blue, the Riding Wyvern display 19608 brown; the bear mount
+   22463 took the brown armour over its own green.
+2. **Body texture on an empty slot**: an empty skin slot stayed on the white
+   placeholder, and the draw path replaces a white batch in groups 0-5, 7-9
+   and 13 with the first type 1/11 texture - a quillboar's, a kodo's or a
+   gryphon's skin1 on its armour slot. Empty slots are now bound to an
+   explicit black texture (`CharacterRenderer::getUnboundTexture`) and
+   missing files to the stock default (`getDefaultTexture`), neither of which
+   the draw path replaces.
+3. **Names looked for elsewhere**: a name not in the model's directory was
+   tried at the root; the extension was appended, not replaced.
+4. **Hidden sections**: with no geoset filter every model skipped groups 15,
+   17 and 18, meant for character models. On creature models those are skin
+   art: the capes of the Four Horsemen, Rexxar, fel orcs, eredar and blood
+   elf NPC models. Now only a model with composite slots (types 1/2/6/8)
+   skips them.
+5. **CreatureGeosetData** (G4) is now applied to non-Extra displays: the 39
+   iron dwarf displays drew every beard and armour variant at once.
+
+In game (GM Island, 2026-11-02): the Saronite Animus draws as a huge black
+elemental instead of a translucent blue one; its opaque batch is combo
+[skin 11, WaterElementalReflect] with `combiners_opaque_add`, so stock adds a
+reflection over the black that Wowee, binding one texture per batch, still
+leaves out (L9). Fel orc loincloths (1301/1501) now draw.
+
+Not a skin fault: the "pale naked human" in the Firelord screenshot of
+2026-11-02 is the test character (a naked level-4 human, falling after the
+teleport); the Firelords (11668, display 12231, FireElemental.m2 +
+FireElementalSkin) resolve and draw their skin.
+
+Open: the type 1/2/6/8 slots of the 70 displays on a character-style model
+without an Extra (the race displays 49-60 the server uses for players, Winter
+Reveler 15713, Velen 17822 ...) are left as they were. Players get their
+composite from their own fields; for an NPC on one of these stock's model
+init leaves the slots null, but whether nothing else fills them was not
+traced and not checked in game.
 
 ## 6. Shadow, highlight, translucency
 
@@ -484,7 +587,10 @@ No scale, offset or fade; they live as long as the item model.
 | G1 | Equipment geosets | FUN_004ED900, exact ids | four hand-written versions | **Fixed**: `core::stockEquipmentGeosets` + `buildStockCharacterGeosets` for the player, other players, Extra NPCs and the portrait |
 | G2 | Helm masks | 7 race bitmasks | any non-zero column hides hair; ears, facial hair, glow never hidden | **Fixed** |
 | G3 | DK eye glow 1703 | class 6 | missing | **Fixed** (player and other players) |
-| G4 | CreatureGeosetData | nibbles | ignored | pure rule added and tested; not wired for non-Extra creatures |
+| G4 | CreatureGeosetData | nibbles | ignored | **Fixed**: applied to non-Extra displays at spawn (39 iron dwarf displays) |
+| G5 | Creature sections | all on (0x832EA0) | groups 15/17/18 skipped on every unfiltered model | **Fixed**: skipped only on character models |
+| K1 | Creature skins 11-13 | own TextureVariation, model dir, `.blp` extension | borrowed sibling skins, root lookup, appended extension | **Fixed** (`creature_skin_rules.hpp`, §5) |
+| K2 | Empty / missing skin | null (black) / default white | white placeholder, then the body texture | **Fixed** (unbound and default textures) |
 | A1 | Glows on other players and NPCs | yes | none | **Fixed** (`attachUnitWeapons`) |
 | A2 | Glow priority | display, perm, temp | temp over perm, display ignored | **Fixed** (`chooseWeaponItemVisual`) |
 | A3 | Missing weapon point | dropped | piled at the grip | **Fixed** (strict lookup) |
