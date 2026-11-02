@@ -109,6 +109,14 @@ public:
     [[nodiscard]] uint32_t getAnimationDurationMs(uint32_t instanceId, uint32_t animationId) const;
 
     void update(float deltaTime, const glm::vec3& cameraPos = glm::vec3(0.0f));
+    /// The view the coming frame draws from, and the way shadow rays travel
+    /// (zero when shadows are off). update() then skips the skeleton of a unit
+    /// that neither the view nor the unit's shadow reaches; its clocks, sound
+    /// events and sequence changes still run, and anything that asks for its
+    /// bones (attachments, a cross-fade) has them computed on the spot. Never
+    /// called, nothing is skipped - the preview renderers rely on that.
+    /// WOWEE_CHAR_ANIM_CULL=0 turns the skipping off.
+    void setAnimCullView(const glm::mat4& viewProjection, const glm::vec3& shadowRayDir);
 
     /** Pre-allocate GPU resources (bone SSBOs, descriptors) on main thread before parallel render. */
     void prepareRender(uint32_t frameIndex);
@@ -399,6 +407,13 @@ private:
 
         // Bone update throttling for characters outside normal gameplay range.
         uint32_t boneUpdateCounter = 0;
+        // Skeleton skipped by the view cull since it was last computed:
+        // boneMatrices and localPose describe an earlier time. refreshStalePose
+        // brings them up to date for whoever needs them before the next frame.
+        bool poseStale = false;
+        // Per bone and track (translation, rotation, scale), the key the last
+        // sample landed on; a hint for the next search, see m2_track::KeyCursor.
+        std::vector<uint32_t> keyCursor;
         const M2ModelGPU* cachedModel = nullptr;  // Avoid per-frame hash lookups
 
         // Per-instance bone SSBO (double-buffered per frame)
@@ -411,10 +426,17 @@ private:
     void setupModelBuffers(M2ModelGPU& gpuModel);
     void calculateBindPose(M2ModelGPU& gpuModel);
     void calculateBoneMatrices(CharacterInstance& instance);
+    /// Computes the skeleton now if the view cull skipped it.
+    void refreshStalePose(CharacterInstance& instance) {
+        if (instance.poseStale) calculateBoneMatrices(instance);
+    }
     glm::mat4 getBoneTransform(const pipeline::M2Bone& bone, float animTime, float globalSeqTime,
                                int sequenceIndex, const std::vector<uint32_t>& globalSeqDurations);
+    /// `cursors`, when given, is three key hints (translation, rotation,
+    /// scale) the searches start from and leave updated; the pose is the same.
     static BoneLocalPose sampleBonePose(const pipeline::M2Bone& bone, float animTime, float globalSeqTime,
-                                        int sequenceIndex, const std::vector<uint32_t>& globalSeqDurations);
+                                        int sequenceIndex, const std::vector<uint32_t>& globalSeqDurations,
+                                        uint32_t* cursors = nullptr);
     static glm::mat4 composeBoneTransform(const pipeline::M2Bone& bone, const BoneLocalPose& pose);
     [[nodiscard]] glm::mat4 getModelMatrix(const CharacterInstance& instance) const;
     void destroyModelGPU(M2ModelGPU& gpuModel, bool defer = false);
@@ -593,6 +615,10 @@ private:
     std::vector<std::future<void>> animFutures_;
     std::vector<std::reference_wrapper<CharacterInstance>> toUpdate_;  // reused across frames
     AnimSoundEventCallback animSoundEventCallback_;
+    // setAnimCullView: the frame's view-projection and shadow ray direction.
+    bool animCullValid_ = false;
+    glm::mat4 animCullViewProj_{1.0f};
+    glm::vec3 animCullShadowDir_{0.0f};
 
     // Shadow pipeline resources
     VkPipeline shadowPipeline_ = VK_NULL_HANDLE;

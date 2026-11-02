@@ -3,6 +3,7 @@
 #include <glm/glm.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -111,16 +112,20 @@ inline void eraseBounds(SpatialGrid& grid, const glm::vec3& boundsMin,
 /// units per frame inside cells 64 wide. Refiling anyway is not merely wasted
 /// work, it is a linear erase across every cell the instance touches, once per
 /// moving instance per frame.
-inline void refileBounds(SpatialGrid& grid,
+///
+/// Answers whether the grid changed, which is what a cache of query answers
+/// (GridQueryCache below) has to be told.
+inline bool refileBounds(SpatialGrid& grid,
                          const glm::vec3& oldMin, const glm::vec3& oldMax,
                          const glm::vec3& newMin, const glm::vec3& newMax,
                          uint32_t id) {
     if (toSpatialCell(oldMin) == toSpatialCell(newMin) &&
         toSpatialCell(oldMax) == toSpatialCell(newMax)) {
-        return;
+        return false;
     }
     eraseBounds(grid, oldMin, oldMax, id);
     insertBounds(grid, newMin, newMax, id);
+    return true;
 }
 
 /// The distinct ids filed in any cell the query box reaches, in the order the
@@ -147,6 +152,61 @@ inline void gatherIds(const SpatialGrid& grid, const glm::vec3& queryMin,
         }
     }
 }
+
+/// A fresh layout generation, never handed out before in this process.
+///
+/// One counter for every grid, so that a generation identifies one grid in one
+/// state: a renderer destroyed and another built at the same address cannot
+/// hand a cache the answer the first one gave.
+inline uint64_t nextGridLayoutGen() {
+    static std::atomic<uint64_t> counter{1};
+    return counter.fetch_add(1, std::memory_order_relaxed);
+}
+
+/// The last few answers a grid query gave, keyed by the cells the query box
+/// reached and the grid's layout generation.
+///
+/// A query's answer depends on its box only through the run of cells it
+/// covers, so two queries a yard apart inside one 64-yard cell get the same
+/// list. The M2 grid in a city holds hundreds of ids per cell, and the
+/// player's floor and wall probes asked for that same list nine times a frame,
+/// each time deduplicating it through a hash set and mapping every id back to
+/// an index: about 20 microseconds a query. The owner bumps the generation
+/// whenever the answer could change (the grid, its id map, or anything else
+/// the answer was built from), and a stale entry then simply never matches.
+///
+/// Per thread, as the scratch sets are: the queries run on the camera's async
+/// threads as well as the main one.
+template <typename T>
+struct GridQueryCache {
+    static constexpr size_t kEntries = 4;
+    struct Entry {
+        uint64_t gen = 0;   // 0 is never handed out, so an empty slot never matches
+        GridCell minCell{0, 0, 0};
+        GridCell maxCell{0, 0, 0};
+        std::vector<T> items;
+    };
+    Entry entries[kEntries];
+    size_t nextSlot = 0;
+
+    [[nodiscard]] const std::vector<T>* find(uint64_t gen, const GridCell& minCell,
+                                             const GridCell& maxCell) const {
+        for (const auto& e : entries) {
+            if (e.gen == gen && e.minCell == minCell && e.maxCell == maxCell) return &e.items;
+        }
+        return nullptr;
+    }
+
+    void store(uint64_t gen, const GridCell& minCell, const GridCell& maxCell,
+               const std::vector<T>& items) {
+        Entry& e = entries[nextSlot];
+        nextSlot = (nextSlot + 1) % kEntries;
+        e.gen = gen;
+        e.minCell = minCell;
+        e.maxCell = maxCell;
+        e.items.assign(items.begin(), items.end());
+    }
+};
 
 
 /// A rectangle of cells in a dense grid, inclusive at both ends.

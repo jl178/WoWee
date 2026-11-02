@@ -1244,6 +1244,15 @@ private:
 
     SpatialGrid spatialGrid;
     std::unordered_map<uint32_t, size_t> instanceIndexById;
+    /// The generation gatherCandidates' per-thread cache keys on. Replaced
+    /// (from nextGridLayoutGen) whenever its answer could change: an id filed
+    /// in or out of a cell, an id given a different index, or the instance
+    /// count changing, which the empty-answer fallback scans. A move that
+    /// stays inside its cells changes none of those and keeps it.
+    std::atomic<uint64_t> candidateLayoutGen_{nextGridLayoutGen()};
+    void noteCandidateLayoutChanged() {
+        candidateLayoutGen_.store(nextGridLayoutGen(), std::memory_order_relaxed);
+    }
     // Instance to copy bone matrices from when spawning another of the same
     // model. Finding one by scanning every instance is O(n) per spawn, which
     // became 18ms for a single createInstance once a zone held tens of

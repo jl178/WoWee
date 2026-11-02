@@ -1151,6 +1151,7 @@ void M2Renderer::shutdown() {
     instances.clear();
     spatialGrid.clear();
     instanceIndexById.clear();
+    noteCandidateLayoutChanged();
     instanceDedupMap_.clear();
     // Model and bone destruction above is deferred; drain it now while the
     // descriptor pools are still alive.

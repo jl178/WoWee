@@ -275,3 +275,69 @@ TEST_CASE("a flat group does not divide by zero", "[spatialgrid]") {
     REQUIRE(range.has_value());
     CHECK(range->minY == 0);
 }
+
+// ---- refileBounds' answer, and the query cache it feeds ----
+
+TEST_CASE("a refile says whether the grid changed", "[spatialgrid]") {
+    // The M2 renderer moves its query-cache generation on this answer, so a
+    // move inside one cell must say no and a move across a boundary yes.
+    SpatialGrid grid;
+    insertBounds(grid, {10.0f, 0.0f, 0.0f}, {20.0f, 0.0f, 0.0f}, 1);
+    CHECK_FALSE(refileBounds(grid, {10.0f, 0.0f, 0.0f}, {20.0f, 0.0f, 0.0f},
+                             {11.0f, 0.0f, 0.0f}, {21.0f, 0.0f, 0.0f}, 1));
+    CHECK(refileBounds(grid, {11.0f, 0.0f, 0.0f}, {21.0f, 0.0f, 0.0f},
+                       {100.0f, 0.0f, 0.0f}, {110.0f, 0.0f, 0.0f}, 1));
+}
+
+TEST_CASE("layout generations are never handed out twice", "[spatialgrid]") {
+    const uint64_t a = nextGridLayoutGen();
+    const uint64_t b = nextGridLayoutGen();
+    CHECK(a != 0u);   // 0 marks an empty cache slot
+    CHECK(b != a);
+}
+
+TEST_CASE("the query cache answers only the cells and generation it was given",
+          "[spatialgrid]") {
+    GridQueryCache<size_t> cache;
+    const GridCell lo{0, 0, 0};
+    const GridCell hi{1, 0, 0};
+    const uint64_t gen = nextGridLayoutGen();
+    CHECK(cache.find(gen, lo, hi) == nullptr);
+
+    cache.store(gen, lo, hi, std::vector<size_t>{4, 2, 9});
+    const auto* hit = cache.find(gen, lo, hi);
+    REQUIRE(hit != nullptr);
+    // The same list in the same order: the callers' collision responses are
+    // applied in candidate order.
+    CHECK(*hit == std::vector<size_t>{4, 2, 9});
+
+    CHECK(cache.find(gen, lo, lo) == nullptr);                  // other cells
+    CHECK(cache.find(nextGridLayoutGen(), lo, hi) == nullptr);  // grid changed since
+}
+
+TEST_CASE("a fresh cache answers nothing", "[spatialgrid]") {
+    // Empty slots carry generation 0 with zero cells. Generations start at 1,
+    // so a query for cell 0..0 never reads an empty slot as an empty answer.
+    GridQueryCache<size_t> cache;
+    CHECK(cache.find(nextGridLayoutGen(), GridCell{0, 0, 0}, GridCell{0, 0, 0}) == nullptr);
+}
+
+TEST_CASE("the query cache keeps the last few answers", "[spatialgrid]") {
+    GridQueryCache<size_t> cache;
+    const uint64_t gen = nextGridLayoutGen();
+    for (int i = 0; i < static_cast<int>(GridQueryCache<size_t>::kEntries); ++i) {
+        cache.store(gen, GridCell{i, 0, 0}, GridCell{i, 0, 0},
+                    std::vector<size_t>{static_cast<size_t>(i)});
+    }
+    for (int i = 0; i < static_cast<int>(GridQueryCache<size_t>::kEntries); ++i) {
+        INFO("entry " << i);
+        const auto* hit = cache.find(gen, GridCell{i, 0, 0}, GridCell{i, 0, 0});
+        REQUIRE(hit != nullptr);
+        CHECK(*hit == std::vector<size_t>{static_cast<size_t>(i)});
+    }
+    // One more evicts the oldest.
+    cache.store(gen, GridCell{99, 0, 0}, GridCell{99, 0, 0}, std::vector<size_t>{99});
+    CHECK(cache.find(gen, GridCell{0, 0, 0}, GridCell{0, 0, 0}) == nullptr);
+    CHECK(cache.find(gen, GridCell{1, 0, 0}, GridCell{1, 0, 0}) != nullptr);
+    CHECK(cache.find(gen, GridCell{99, 0, 0}, GridCell{99, 0, 0}) != nullptr);
+}

@@ -1199,6 +1199,16 @@ wowee_add_test(test_frustum
     SOURCES test_frustum.cpp
             ${CMAKE_SOURCE_DIR}/src/rendering/frustum.cpp)
 
+# ── test_anim_cull ───────────────────────────────────────────
+# The sphere a unit's skeleton is view-culled with, shadow included.
+wowee_add_test(test_anim_cull
+    SOURCES test_anim_cull.cpp)
+
+# ── test_m2_track_cursor ─────────────────────────────────────
+# Bone track sampling from a key cursor answers what the binary search does.
+wowee_add_test(test_m2_track_cursor
+    SOURCES test_m2_track_cursor.cpp)
+
 # ── test_rt_bvh ──────────────────────────────────────────────
 # The hierarchy the software ray tracer walks, against a brute-force scan.
 wowee_add_test(test_rt_bvh

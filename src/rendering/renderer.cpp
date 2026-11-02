@@ -2487,6 +2487,10 @@ void Renderer::update(float deltaTime) {
     section("update/before m2");
     // Update character animations (runs in parallel with M2 animation above)
     if (characterRenderer && camera) {
+        // What this frame will draw from, so units nobody can see - nor see
+        // the shadow of - keep their clocks but skip their skeletons.
+        characterRenderer->setAnimCullView(camera->getViewProjectionMatrix(),
+                                           shadowsEnabled ? shadowRayDirection() : glm::vec3(0.0f));
         characterRenderer->update(deltaTime, camera->getPosition());
     }
     section("update/characters");
@@ -4441,12 +4445,7 @@ void Renderer::renderHUD() {
 // initShadowMap() and compileShadowShader() removed - shadow resources now created
 // in createPerFrameResources() as part of the Vulkan shadow infrastructure.
 
-glm::mat4 Renderer::computeLightSpaceMatrix() {
-    const float kShadowHalfExtent = shadowDistance_;
-    const float kShadowLightDistance = shadowDistance_ * 3.0f;
-    constexpr float kShadowNearPlane = 1.0f;
-    const float kShadowFarPlane = shadowDistance_ * 6.5f;
-
+glm::vec3 Renderer::shadowRayDirection() const {
     // Use active lighting direction so shadow projection matches main shading.
     // Fragment shaders derive lighting with `ldir = normalize(-lightDir.xyz)`,
     // therefore shadow rays must use -directionalDir to stay aligned.
@@ -4468,6 +4467,16 @@ glm::mat4 Renderer::computeLightSpaceMatrix() {
         sunDir.z = -0.15f;
         sunDir = glm::normalize(sunDir);
     }
+    return sunDir;
+}
+
+glm::mat4 Renderer::computeLightSpaceMatrix() {
+    const float kShadowHalfExtent = shadowDistance_;
+    const float kShadowLightDistance = shadowDistance_ * 3.0f;
+    constexpr float kShadowNearPlane = 1.0f;
+    const float kShadowFarPlane = shadowDistance_ * 6.5f;
+
+    const glm::vec3 sunDir = shadowRayDirection();
 
     // LightingManager already smooths the directional light every frame. Keep
     // that continuous direction for the shadow projection as well. Quantizing

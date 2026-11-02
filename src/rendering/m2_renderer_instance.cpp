@@ -14,6 +14,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "core/logger.hpp"
+#include "core/env_flag.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <algorithm>
@@ -30,6 +31,7 @@ namespace rendering {
 namespace m2_internal {
 thread_local std::vector<size_t> tl_m2_candidateScratch;
 thread_local std::unordered_set<uint32_t> tl_m2_candidateIdScratch;
+thread_local GridQueryCache<size_t> tl_m2_candidateCache;
 thread_local std::vector<uint32_t> tl_m2_collisionTriScratch;
 } // namespace m2_internal
 
@@ -59,9 +61,11 @@ void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& posit
     }
 
     // Incrementally update spatial grid
-    if (m2GridHolds(inst))
+    if (m2GridHolds(inst) &&
         refileBounds(spatialGrid, oldBoundsMin, oldBoundsMax,
-                     inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
+                     inst.worldBoundsMin, inst.worldBoundsMax, instanceId)) {
+        noteCandidateLayoutChanged();
+    }
 }
 
 void M2Renderer::setInstanceFade(uint32_t instanceId, float alpha) {
@@ -340,9 +344,11 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
     }
 
     // Incrementally update spatial grid (remove old cells, add new cells)
-    if (m2GridHolds(inst))
+    if (m2GridHolds(inst) &&
         refileBounds(spatialGrid, oldBoundsMin, oldBoundsMax,
-                     inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
+                     inst.worldBoundsMin, inst.worldBoundsMax, instanceId)) {
+        noteCandidateLayoutChanged();
+    }
     // No spatialIndexDirty_ = true - handled incrementally
 }
 
@@ -353,6 +359,7 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
     if (idx >= instances.size()) return;
 
     auto& inst = instances[idx];
+    noteCandidateLayoutChanged();
 
     // Remove from spatial grid incrementally (same pattern as the move-update path)
     if (m2GridHolds(inst))
@@ -485,6 +492,7 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
     if (instanceIds.empty() || instances.empty()) {
         return;
     }
+    noteCandidateLayoutChanged();
 
     // A batch that is a small share of the world is swap-removed one by one,
     // as removeInstance does, with the index lists patched once at the end.
@@ -688,6 +696,7 @@ void M2Renderer::clear() {
     instances.clear();
     spatialGrid.clear();
     instanceIndexById.clear();
+    noteCandidateLayoutChanged();
     boneSeedInstanceByModel_.clear();
     instanceDedupMap_.clear();
     for (auto& ids : cullSubmittedIds_) ids.clear();
@@ -735,6 +744,7 @@ void M2Renderer::clearInstances() {
     bumpShadowStatic(kShadowGenLayout);
     spatialGrid.clear();
     instanceIndexById.clear();
+    noteCandidateLayoutChanged();
     boneSeedInstanceByModel_.clear();
     instanceDedupMap_.clear();
     for (auto& ids : cullSubmittedIds_) ids.clear();
@@ -766,6 +776,7 @@ void M2Renderer::rebuildSpatialIndex() {
     bumpShadowStatic(kShadowGenLayout);
     spatialGrid.clear();
     instanceIndexById.clear();
+    noteCandidateLayoutChanged();
     boneSeedInstanceByModel_.clear();
     instanceDedupMap_.clear();
     instanceIndexById.reserve(instances.size());
@@ -821,6 +832,23 @@ void M2Renderer::gatherCandidates(const glm::vec3& queryMin, const glm::vec3& qu
                                   std::vector<size_t>& outIndices) const {
     outIndices.clear();
 
+    // The answer depends on the box only through the cells it reaches, and on
+    // the grid only through candidateLayoutGen_ (see GridQueryCache). The
+    // player's floor and wall probes all fall in the same cell or two, so
+    // after the first query of a frame - and across frames, while nothing
+    // streams in or out - the list is copied rather than rebuilt. Same ids,
+    // same order. WOWEE_M2_CANDIDATE_CACHE=0 rebuilds it every time.
+    static const bool cacheEnabled = core::envFlagEnabled("WOWEE_M2_CANDIDATE_CACHE", true);
+    const GridCell minCell = toSpatialCell(queryMin);
+    const GridCell maxCell = toSpatialCell(queryMax);
+    const uint64_t layoutGen = candidateLayoutGen_.load(std::memory_order_relaxed);
+    if (cacheEnabled) {
+        if (const auto* cached = tl_m2_candidateCache.find(layoutGen, minCell, maxCell)) {
+            outIndices.assign(cached->begin(), cached->end());
+            return;
+        }
+    }
+
     gatherIds(spatialGrid, queryMin, queryMax, tl_m2_candidateIdScratch,
               [&](uint32_t id) {
                   auto idxIt = instanceIndexById.find(id);
@@ -828,6 +856,13 @@ void M2Renderer::gatherCandidates(const glm::vec3& queryMin, const glm::vec3& qu
                       outIndices.push_back(idxIt->second);
                   }
               });
+
+    // Only a list the grid answered is kept. The fallback below is every
+    // instance, which an unfiled clutter tuft joins without moving the
+    // generation.
+    if (cacheEnabled && !outIndices.empty()) {
+        tl_m2_candidateCache.store(layoutGen, minCell, maxCell, outIndices);
+    }
 
     // Safety fallback to preserve collision correctness if the spatial index
     // misses candidates (e.g. during streaming churn).
