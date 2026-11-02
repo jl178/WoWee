@@ -24,6 +24,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
 
 #include "rt_lighting.glsli"
 #include "wet_surface.glsli"
+#include "stock_fog.glsli"
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
 
@@ -31,9 +32,9 @@ layout(set = 1, binding = 1) uniform WMOMaterial {
     int hasTexture;
     int alphaTest;
     int unlit;
-    int isInterior;
+    int lightModeA;   // stock light mode (0x7a8b10): 0 none, 1 outdoor, 2 F_WINDOW, 3 MOHD ambient
     float specularIntensity;
-    int reserved0;
+    int lightModeB;   // a trans batch's room pass (0 or 3); -1 otherwise
     int enableNormalMap;
     int enablePOM;
     float pomScale;
@@ -47,7 +48,7 @@ layout(set = 1, binding = 1) uniform WMOMaterial {
     int emissive;
     int hasVertexColors;
     uint sidnColor;   // F_SIDN night glow, 0x00RRGGBB; 0 = none
-    int padding2;
+    int stockFlags;   // 1 unified (MapObjU), 2 F_UNFOGGED, 4 alpha from texture, 8 extras
 };
 
 layout(set = 1, binding = 2) uniform sampler2D uNormalHeightMap;
@@ -61,6 +62,7 @@ layout(location = 2) in vec2 TexCoord;
 layout(location = 3) in vec4 VertColor;
 layout(location = 4) in vec3 Tangent;
 layout(location = 5) in vec3 Bitangent;
+layout(location = 6) flat in float SidnNight;
 
 layout(location = 0) out vec4 outColor;
 
@@ -200,7 +202,7 @@ vec4 fogVolumeAt(vec3 worldPos) {
 // everything between the camera and that, sunlit shafts and torch glow
 // included.
 vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
-    float fogFactor = clamp((fogParams.y - dist) / (fogParams.y - fogParams.x), 0.0, 1.0);
+    float fogFactor = stockFogVisibility(worldPos);
     color = mix(fogColor.rgb, color, fogFactor);
     if (volumetricParams.x > 0.5) {
         vec4 air = fogVolumeAt(worldPos);
@@ -274,11 +276,9 @@ void main() {
         norm = normalize(mix(vertexNormal, worldNormal, blend));
     }
 
-    vec3 result;
-
-    // Sample the sun shadow map. Interior groups ignore it below.
+    // Sample the sun shadow map. Only the outdoor light modes take it.
     float shadow = 1.0;
-    if (shadowParams.x > 0.5) {
+    if (shadowParams.x > 0.5 && (lightModeA == 1 || lightModeA == 2)) {
         vec3 ldir = normalize(-lightDir.xyz);
         float normalOffset = shadowTexel() * 2.0 * (1.0 - abs(dot(norm, ldir)));
         vec3 biasedPos = FragPos + norm * normalOffset;
@@ -296,162 +296,124 @@ void main() {
     RtLight rt = rtLightAt(FragPos);
     shadow = rtShadow(rt, shadow);
 
-    if (emissive == 1) {
-        // Authored luminous glass must remain bright in direct sun and shadow.
-        // A small warm bias keeps low-valued texels from reading as dark glass.
-        vec3 glass = texColor.rgb * 2.0 + vec3(0.16, 0.07, 0.015);
-
-        // Gentle guttering, weaker than the clock's open fire - these are steady
-        // lamps, not flames in the wind.
-        //
-        // Every lamp in a building shares one batch, so a uniform phase would
-        // pulse a whole street in lockstep. The phase is hashed from the lamp's
-        // world position instead, quantised into cells a few units across: large
-        // enough that one lamp's glass falls in a single cell, small enough that
-        // neighbouring lamps land in different ones.
-        vec3 cell = floor(FragPos * 0.2);
-        float h = fract(sin(dot(cell, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
-        float phase = h * 6.2831853;
-        float t = fogParams.z;
-        float flicker = 0.93
-                      + 0.05 * sin(t * 1.3 + phase)
-                      + 0.02 * sin(t * 2.9 + phase * 1.7);
-        result = glass * flicker;
-    } else if (emissive == 2) {
-        // Firelit from behind (Darkshire's clock face): the surface is still lit
-        // by the sun so it belongs to the building by day, with a warm glow
-        // seeping through it as if a fire burned in the tower.
-        vec3 ldir = normalize(-lightDir.xyz);
-        float diff = max(dot(norm, ldir), 0.0);
-        vec3 lit = texColor.rgb * (ambientColor.rgb + lightColor.rgb * diff * shadow);
-
-        // Three detuned sines: a slow breathing sway, a quicker wobble, and a
-        // faint fast jitter. Their periods share no common multiple over any
-        // watchable span, so the flame never visibly loops.
-        float t = fogParams.z;
-        float flicker = 0.84
-                      + 0.10 * sin(t * 1.3)
-                      + 0.05 * sin(t * 2.9 + 1.7)
-                      + 0.03 * sin(t * 6.7 + 0.6);
-
-        // Firelight only competes with daylight once the sun is down, so fade the
-        // glow up as the scene darkens. A small floor keeps it faintly visible in
-        // daytime shade rather than switching on at dusk.
-        float daylight = clamp(dot(ambientColor.rgb + lightColor.rgb,
-                                   vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
-        float night = mix(1.0, 0.22, daylight);
-
-        const vec3 kFireColor = vec3(1.0, 0.58, 0.22);
-        result = lit + kFireColor * (0.30 * flicker * night);
-
-        // Glass covering the dial: a tight sun highlight plus a Fresnel sheen
-        // that picks up sky colour at grazing angles, which is what sells a pane
-        // in front of the face rather than paint on stone. Both are additive and
-        // unaffected by the fire, since they live on the outer surface.
-        vec3 viewDir = normalize(viewPos.xyz - FragPos);
-        vec3 halfDir = normalize(ldir + viewDir);
-        float gloss  = pow(max(dot(norm, halfDir), 0.0), 96.0);
-        float fresnel = pow(1.0 - clamp(dot(norm, viewDir), 0.0, 1.0), 4.0);
-        result += lightColor.rgb * (gloss * 0.55 * shadow)
-                + ambientColor.rgb * (fresnel * 0.35);
-    } else if (isLava != 0) {
-        // Lava is self-luminous - bright emissive, no shadows
-        result = texColor.rgb * 1.5;
-    } else if (isInterior != 0) {
-        // WMO interior. The renderer has already run the client's
-        // FixColorVertexAlpha over the vertex colours (interiorVertexLight in
-        // wmo_renderer.cpp): rgb is the baked light at half scale, rebased off
-        // the MOHD ambient, and alpha is how much of the outdoors reaches the
-        // vertex - 0 in the room, rising across the trans batches at an
-        // opening, 1 on the exterior batches.
-        //
-        // Indoors the light is the ambient plus the baked colour doubled,
-        // which is the MOCV as authored. The sun's shadow map is not applied
-        // to it: the roof always shadows the room. A small floor stays for the
-        // roots that carry no ambient at all (Darnassus is one).
-        vec3 wmoAmbient = vec3(wmoAmbientR, wmoAmbientG, wmoAmbientB);
-        vec3 baked = VertColor.rgb * 2.0;
-        vec3 interiorLight = max(wmoAmbient + baked, vec3(0.12));
-        vec3 light = interiorLight;
-        // Toward an opening the room's light gives way to the outdoor light,
-        // sun and shadow included, the way an exterior group is lit. The baked
-        // colour has already been faded by the same alpha, so it goes to
-        // nothing where the opening does.
-        float outdoors = clamp(VertColor.a, 0.0, 1.0);
-        if (outdoors > 0.0) {
-            vec3 ldir = normalize(-lightDir.xyz);
-            float diff = max(dot(norm, ldir), 0.0);
-            vec3 exteriorLight = rtAmbient(rt, ambientColor.rgb)
-                               + shadow * diff * lightColor.rgb + baked;
-            light = mix(interiorLight, exteriorLight, outdoors);
-        }
-        result = texColor.rgb * light;
-    } else if (unlit != 0) {
-        // F_UNLIT: the client does no lighting on these, so they are drawn
-        // at the texture's own brightness, in sun or shade. Darnassus'
-        // glowing amber screens (MM_DRNSS_SCREEN_01) on the sides of its
-        // houses are unlit, and they stand under the canopy's shadow: taking
-        // the shadow made them black squares.
-        result = texColor.rgb;
-    } else {
-        vec3 ldir = normalize(-lightDir.xyz);
-        float diff = max(dot(norm, ldir), 0.0);
-
-        vec3 viewDir = normalize(viewPos.xyz - FragPos);
-        vec3 halfDir = normalize(ldir + viewDir);
-        float spec = pow(max(dot(norm, halfDir), 0.0), 32.0) * specularIntensity;
-
-        // Rain-wet walls and paving (wet_surface.glsli). Here and not in the
-        // interior branch, so a room never takes it. 0, and untouched, while
-        // it is dry or the setting is off.
-        float wet = wetSurfaceAmount(vertexNormal);
-        vec3 albedo = wet > 0.0 ? wetSurfaceAlbedo(texColor.rgb, wet) : texColor.rgb;
-
-        result = rtAmbient(rt, ambientColor.rgb) * albedo
-               + shadow * (diff * lightColor.rgb * albedo + spec * lightColor.rgb);
-        if (wet > 0.0) {
-            result += wetSurfaceSheen(normalize(mix(vertexNormal, norm, 0.5)), FragPos,
-                                      length(viewPos.xyz - FragPos), wet, shadow);
-        }
-
-        // An exterior group's vertex colours play no part in its light. The
-        // client's FixColorVertexAlpha gives every vertex of an EXTERIOR group
-        // (past its trans batches, and exterior groups have none) an alpha of
-        // 255, and that alpha is the interior/exterior blend: at 255 the
-        // surface takes the outdoor light alone, the same ambient and sun the
-        // doodads and the terrain take. 296 of the 352 exterior groups in the
-        // data that carry MOCV ship that alpha already.
-        //
-        // They were multiplied in once (Stormwind's two exterior groups with
-        // MOCV, mean 8 of 255, drew near black), then added at half, which put
-        // a lamp-pool glow on walls that the stock client draws plain.
-    }
-
-    // F_SIDN: windows and lamps glow at night in the material's sidnColor,
-    // added to whatever light the surface already has. The client fades it
-    // in by the time of day; that is not in this shader's inputs, so how dark
-    // the outdoor light is stands in for it, as the clock face's fire does
-    // above. An unlit material is at full brightness already.
-    if (sidnColor != 0u && unlit == 0 && emissive == 0 && isLava == 0) {
+    // The stock light (Wow.exe 3.3.5a; stock_wmo_light.hpp has the same sums
+    // on the CPU, and docs/re/world-lighting.md the addresses).
+    //
+    // The vertex programs MapObjDiffuse_T1 / MapObjUDiffuse_T1 light with
+    // L = clamp(ambient + diffuse * clamp(N.L), 0, 1) in one of four modes
+    // (0x7a8b10): 0 lighting off, 1 the outdoor light, 2 the F_WINDOW light
+    // (the mean of the sky's diffuse and ambient, the ambient 16/255 brighter),
+    // 3 the root's MOHD ambient alone. Then
+    //     classic  2 * clamp(C * L + e / 2)
+    //     unified  2 * clamp(L * 127/255 + C + e / 2)   (MOHD flag 0x2)
+    //     mode 0   2 * C
+    // with C the vertex colour as the loader fixed it (no MOCV: 0x7f7f7f, or
+    // black on the unified path) and e the material's F_SIDN colour for the
+    // hour. The pixel program multiplies the texture by that.
+    //
+    // A trans batch is two passes, the outdoor one (mode A) over the room one
+    // (mode B), blended by the vertex alpha the portals gave it - so a doorway
+    // fades from the room's baked light to the sky's.
+    //
+    // The sun shadow scales the outdoor pass by 0.7..1 (shadowParams.y = 0.3),
+    // the way the client's shadow-map programs scale the whole lit colour.
+    vec3 C = VertColor.rgb;
+    bool unified = (stockFlags & 1) != 0;
+    vec3 e = vec3(0.0);
+    if (sidnColor != 0u) {
         vec3 sidn = vec3(float((sidnColor >> 16) & 0xFFu),
                          float((sidnColor >> 8) & 0xFFu),
                          float(sidnColor & 0xFFu)) / 255.0;
-        float daylight = clamp(dot(ambientColor.rgb + lightColor.rgb,
-                                   vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
-        float night = 1.0 - smoothstep(0.25, 0.65, daylight);
-        result += texColor.rgb * sidn * night;
+        float night = SidnNight;
+        if (night < 0.0) {
+            // Not told the hour: how dark the outdoor light is stands in.
+            float daylight = clamp(dot(ambientColor.rgb + lightColor.rgb,
+                                       vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
+            night = 1.0 - smoothstep(0.25, 0.65, daylight);
+        }
+        e = sidn * floor(night * 255.0 + 0.0) / 256.0;
+    }
+    float nDotL = clamp(dot(norm, normalize(-lightDir.xyz)), 0.0, 1.0);
+    vec3 skyAmbient = rtAmbient(rt, ambientColor.rgb);
+    vec3 mohdAmbient = vec3(wmoAmbientR, wmoAmbientG, wmoAmbientB);
+
+    vec3 passA, passB = vec3(0.0);
+    for (int pass = 0; pass < 2; ++pass) {
+        int mode = pass == 0 ? lightModeA : lightModeB;
+        if (mode < 0) break;
+        vec3 c;
+        if (mode == 0) {
+            c = 2.0 * C;
+        } else {
+            vec3 L;
+            if (mode == 1) {
+                L = clamp(skyAmbient + lightColor.rgb * nDotL, 0.0, 1.0);
+            } else if (mode == 2) {
+                vec3 mean = (lightColor.rgb + ambientColor.rgb) * 0.5;
+                L = clamp(min(mean + 16.0 / 255.0, vec3(1.0)) + mean * nDotL, 0.0, 1.0);
+            } else {
+                L = clamp(mohdAmbient, 0.0, 1.0);
+            }
+            c = unified ? 2.0 * clamp(L * (127.0 / 255.0) + C + e * 0.5, 0.0, 1.0)
+                        : 2.0 * clamp(C * L + e * 0.5, 0.0, 1.0);
+            if (mode == 1 || mode == 2) c *= shadow;
+        }
+        if (pass == 0) passA = c; else passB = c;
+    }
+    vec3 light = passA;
+    if (lightModeB >= 0) {
+        float w = clamp(VertColor.a, 0.0, 1.0);
+        if ((stockFlags & 4) != 0) w *= texColor.a;
+        light = mix(passB, passA, w);
     }
 
+    // Rain-wet walls and paving (wet_surface.glsli), a Wowee extra: only on
+    // surfaces lit by the outdoor light alone, and 0 - untouched - while dry
+    // or with the setting off.
+    float wet = (lightModeA == 1 && lightModeB < 0) ? wetSurfaceAmount(vertexNormal) : 0.0;
+    vec3 albedo = wet > 0.0 ? wetSurfaceAlbedo(texColor.rgb, wet) : texColor.rgb;
+    vec3 result = albedo * light;
+    if (wet > 0.0) {
+        result += wetSurfaceSheen(normalize(mix(vertexNormal, norm, 0.5)), FragPos,
+                                  length(viewPos.xyz - FragPos), wet, shadow);
+    }
+
+    // WOWEE_WMO_EXTRAS: non-stock looks picked by texture name.
+    if (emissive == 1) {
+        vec3 cell = floor(FragPos * 0.2);
+        float h = fract(sin(dot(cell, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+        float t = fogParams.z;
+        float flicker = 0.93 + 0.05 * sin(t * 1.3 + h * 6.2831853)
+                      + 0.02 * sin(t * 2.9 + h * 10.681);
+        result = (texColor.rgb * 2.0 + vec3(0.16, 0.07, 0.015)) * flicker;
+    } else if (emissive == 2) {
+        float t = fogParams.z;
+        float flicker = 0.84 + 0.10 * sin(t * 1.3) + 0.05 * sin(t * 2.9 + 1.7)
+                      + 0.03 * sin(t * 6.7 + 0.6);
+        float daylight = clamp(dot(ambientColor.rgb + lightColor.rgb,
+                                   vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
+        result += vec3(1.0, 0.58, 0.22) * (0.30 * flicker * mix(1.0, 0.22, daylight));
+    } else if (isLava != 0) {
+        result = texColor.rgb * 1.5;
+    }
+
+    // Wowee's point lights (torches and the like): an extra the stock world
+    // does not have, empty unless the renderer hands some in.
     if (isLava == 0)
         result += localLightContribution(FragPos, norm, texColor.rgb);
 
+    // F_UNFOGGED (MOMT 0x2) materials are drawn with the fog off (0x7a8440).
     float dist = length(viewPos.xyz - FragPos);
-    result = applyFog(result, FragPos, dist);
+    if ((stockFlags & 2) == 0) result = applyFog(result, FragPos, dist);
 
     // Opaque and alpha-key materials write their texture's alpha unused;
     // blended ones (blend mode 2 and up) are drawn by the transparent
     // pipeline with it.
-    float alpha = texColor.a;
+    // The pixel programs' alpha: MapObjDiffuse (MOMT shader 0) and Composite
+    // write vertex alpha times texture alpha, the rest the vertex alpha alone.
+    // A trans batch's vertex alpha is its doorway blend, used up above.
+    float vertA = lightModeB >= 0 ? 1.0 : clamp(VertColor.a, 0.0, 1.0);
+    float alpha = (stockFlags & 4) != 0 ? texColor.a * vertA : vertA;
 
     outColor = vec4(result, alpha);
 }

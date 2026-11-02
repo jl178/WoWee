@@ -29,6 +29,7 @@
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "core/character_geosets.hpp"
 #include "game/game_handler.hpp"
 #include "game/game_services.hpp"
 #include "game/transport_manager.hpp"
@@ -130,34 +131,99 @@ bool EntitySpawner::isStealthAuraSpell(uint32_t spellId) {
     return stealth;
 }
 
-float EntitySpawner::unitPresentationAlpha(uint64_t guid, const game::Unit& unit, bool isLocal) {
-    // Stock 3.3.5a draws both at half opacity: a ghost you can see (only
-    // another ghost can), and a stealthed or invisible unit you can see -
-    // your own character among them. Undetected stealth never reaches the
-    // client; the server culls it.
-    constexpr float kSeeThrough = 0.5f;
-    constexpr uint32_t kPlayerFlagsGhost = 0x10;
-    if (isLocal) {
-        if (gameHandler_->isPlayerGhost()) return kSeeThrough;
-    } else if (unit.getType() == game::ObjectType::PLAYER) {
-        const uint16_t flagsIdx = game::fieldIndex(game::UF::PLAYER_FLAGS);
-        if (flagsIdx != 0xFFFF && (unit.getField(flagsIdx) & kPlayerFlagsGhost) != 0)
-            return kSeeThrough;
-    }
-    // UNIT_FIELD_BYTES_1 visibility byte: CREEP is what MOD_STEALTH sets, for
-    // rogues, cats and Shadowmeld alike.
-    if (unit.hasCreepVisibility()) return kSeeThrough;
-    // Invisibility (a mage's, a potion's) sets no visibility flag; the aura
-    // is the only sign of it. The local player's own list, or whatever this
-    // client was told about the unit.
-    const std::vector<game::AuraSlot>* auras =
-        isLocal ? &gameHandler_->getPlayerAuras() : gameHandler_->getUnitAuras(guid);
-    if (auras) {
-        for (const auto& aura : *auras) {
-            if (!aura.isEmpty() && isStealthAuraSpell(aura.spellId)) return kSeeThrough;
+float EntitySpawner::creatureDisplayAlpha(uint32_t displayId) const {
+    auto it = displayDataMap_.find(displayId);
+    return it != displayDataMap_.end() ? it->second.modelAlpha : 1.0f;
+}
+
+float EntitySpawner::playerRaceDisplayScale(uint8_t raceId, uint8_t genderId) {
+    if (!assetManager_) return 1.0f;
+    auto races = assetManager_->loadDBC("ChrRaces.dbc");
+    if (!races || !races->isLoaded() || races->getFieldCount() < 6) return 1.0f;
+    const int32_t row = races->findRecordById(raceId);
+    if (row < 0) return 1.0f;
+    // MaleDisplayId 4, FemaleDisplayId 5.
+    const uint32_t displayId = races->getUInt32(static_cast<uint32_t>(row), genderId == 0 ? 4u : 5u);
+    const float s = creatureDisplayScale(displayId) * creatureModelScale(displayId);
+    return s > 0.0f ? s : 1.0f;
+}
+
+float EntitySpawner::auraKitTransparency(uint32_t spellId) {
+    if (spellId == 0 || !assetManager_) return -1.0f;
+    if (auto it = auraKitTransparency_.find(spellId); it != auraKitTransparency_.end()) return it->second;
+    float result = -1.0f;
+    auto spellDbc = assetManager_->loadDBC("Spell.dbc");
+    auto visualDbc = assetManager_->loadDBC("SpellVisual.dbc");
+    auto kitDbc = assetManager_->loadDBC("SpellVisualKit.dbc");
+    if (spellDbc && visualDbc && kitDbc && kitDbc->getFieldCount() >= 25) {
+        const auto* spL = pipeline::getActiveDBCLayout()
+            ? pipeline::getActiveDBCLayout()->getLayout("Spell") : nullptr;
+        const uint32_t visualField = spL ? (*spL)["SpellVisualID"] : 131u;
+        const int32_t sRow = spellDbc->findRecordById(spellId);
+        if (sRow >= 0 && visualField < spellDbc->getFieldCount()) {
+            const uint32_t visual = spellDbc->getUInt32(static_cast<uint32_t>(sRow), visualField);
+            const int32_t vRow = visual ? visualDbc->findRecordById(visual) : -1;
+            // SpellVisual.StateKit (column 4): the kit held while the aura is up.
+            const uint32_t kit = (vRow >= 0 && visualDbc->getFieldCount() > 4)
+                ? visualDbc->getUInt32(static_cast<uint32_t>(vRow), 4) : 0;
+            const int32_t kRow = kit ? kitDbc->findRecordById(kit) : -1;
+            if (kRow >= 0) {
+                // CharProc[4] at 17-20, CharParamZero[4] at 21-24.
+                for (uint32_t k = 0; k < 4; ++k) {
+                    if (kitDbc->getUInt32(static_cast<uint32_t>(kRow), 17 + k) == 14) {
+                        result = kitDbc->getFloat(static_cast<uint32_t>(kRow), 21 + k);
+                        break;
+                    }
+                }
+            }
         }
     }
-    return 1.0f;
+    auraKitTransparency_[spellId] = result;
+    return result;
+}
+
+float EntitySpawner::unitPresentationAlpha(uint64_t guid, const game::Unit& unit, bool isLocal) {
+    // Stock (0x71ABE0, 0x715B50): the target alpha is the display's
+    // CreatureModelAlpha/255 times the transparency of the unit's active
+    // effect, which is the spell visual's StateKit CharProc 14 - Stealth,
+    // Prowl and Shadowmeld 0.3, Invisibility 0.5 (or 0.35), Ghost 0.5. It
+    // used to be 0.5 for all of them and the display alpha was ignored.
+    // Undetected stealth never reaches the client; the server culls it.
+    constexpr float kGhost = 0.5f;          // kit 989 (spell 8326)
+    constexpr float kStealth = 0.3f;        // kit 312 (1784, 5215, 58984)
+    constexpr float kInvisibility = 0.5f;   // kit 3450 (spell 66)
+    constexpr uint32_t kPlayerFlagsGhost = 0x10;
+    float effect = 1.0f;
+    bool haveEffect = false;
+    auto take = [&](float a) { if (a >= 0.0f && (!haveEffect || a < effect)) { effect = a; haveEffect = true; } };
+
+    const std::vector<game::AuraSlot>* auras =
+        isLocal ? &gameHandler_->getPlayerAuras() : gameHandler_->getUnitAuras(guid);
+    bool stealthAura = false;
+    if (auras) {
+        for (const auto& aura : *auras) {
+            if (aura.isEmpty()) continue;
+            take(auraKitTransparency(aura.spellId));
+            if (isStealthAuraSpell(aura.spellId)) stealthAura = true;
+        }
+    }
+    bool ghost = false;
+    if (isLocal) {
+        ghost = gameHandler_->isPlayerGhost();
+    } else if (unit.getType() == game::ObjectType::PLAYER) {
+        const uint16_t flagsIdx = game::fieldIndex(game::UF::PLAYER_FLAGS);
+        ghost = flagsIdx != 0xFFFF && (unit.getField(flagsIdx) & kPlayerFlagsGhost) != 0;
+    }
+    // Without the aura in hand (another unit's list is often unknown), the
+    // state still says which: CREEP visibility is what MOD_STEALTH sets.
+    if (!haveEffect) {
+        if (ghost) take(kGhost);
+        else if (unit.hasCreepVisibility()) take(kStealth);
+        else if (stealthAura) take(kInvisibility);
+    }
+    float alpha = haveEffect ? effect : 1.0f;
+    if (unit.getType() == game::ObjectType::UNIT) alpha *= creatureDisplayAlpha(unit.getDisplayId());
+    return std::clamp(alpha, 0.0f, 1.0f);
 }
 
 void EntitySpawner::presentUnitAlpha(uint64_t guid, uint32_t instanceId, float alpha) {
@@ -365,6 +431,7 @@ void EntitySpawner::removeRemotePlayerMount(uint64_t guid) {
             if (it->second.instanceId != 0) cr->removeInstance(it->second.instanceId);
             auto playerIt = playerInstances_.find(guid);
             if (playerIt != playerInstances_.end()) {
+                cr->setInstanceMountedOn(playerIt->second, 0);
                 cr->playAnimation(playerIt->second, rendering::anim::STAND, true);
             }
         }
@@ -961,6 +1028,28 @@ bool EntitySpawner::attachUnitWeapons(uint64_t guid, uint32_t instanceId,
     for (uint32_t a : {kShieldMount, kRightHand, kLeftHand, kBack, 26u, 27u, 28u, 30u, 31u, 32u, 33u})
         charRenderer->detachWeapon(instanceId, a);
 
+    // The glow a weapon slot shows (stock 0x759050): the display's own
+    // ItemVisual, else - players only - the permanent enchant's, else the
+    // temporary one's. NPCs have no enchant data and show the display's own.
+    auto visualsDbc = assetManager_->loadDBC("ItemVisuals.dbc");
+    const auto* layouts = pipeline::getActiveDBCLayout();
+    const std::array<uint32_t, 3>* enchants =
+        gameHandler_ ? gameHandler_->getOtherPlayerWeaponEnchants(guid) : nullptr;
+    auto weaponItemVisual = [&](uint32_t displayId, int hand) -> uint32_t {
+        const uint32_t own = pipeline::itemDisplayItemVisual(
+            displayInfoDbc.get(), displayId, visualsDbc.get(),
+            layouts ? layouts->getLayout("ItemDisplayInfo") : nullptr);
+        if (own != 0 || !enchants || hand < 0 || hand > 2) return own;
+        const uint32_t packed = (*enchants)[hand];
+        if (packed == 0) return 0;
+        auto sieDbc = assetManager_->loadDBC("SpellItemEnchantment.dbc");
+        const auto* sieL = layouts ? layouts->getLayout("SpellItemEnchantment") : nullptr;
+        return pipeline::chooseWeaponItemVisual(
+            0, pipeline::enchantItemVisual(sieDbc.get(), packed & 0xFFFFu, sieL),
+            pipeline::enchantItemVisual(sieDbc.get(), packed >> 16, sieL));
+    };
+    int currentHand = -1;  // which of displayIds attachDisplay is placing
+
     auto attachDisplay = [&](uint32_t displayId, uint32_t attachmentId,
                              const glm::mat4& localTransform) -> bool {
         const int32_t recIdx = displayInfoDbc->findRecordById(displayId);
@@ -980,8 +1069,13 @@ bool EntitySpawner::attachUnitWeapons(uint64_t guid, uint32_t instanceId,
                 if (!assetManager_->fileExists(texturePath)) texturePath.clear();
             }
         }
-        return charRenderer->attachWeapon(instanceId, attachmentId, model, nextWeaponModelId_++,
-                                          texturePath, localTransform);
+        if (!charRenderer->attachWeapon(instanceId, attachmentId, model, nextWeaponModelId_++,
+                                        texturePath, localTransform)) {
+            return false;
+        }
+        charRenderer->applyWeaponItemVisual(instanceId, attachmentId,
+                                            weaponItemVisual(displayId, currentHand));
+        return true;
     };
 
     bool any = false;
@@ -1007,6 +1101,7 @@ bool EntitySpawner::attachUnitWeapons(uint64_t guid, uint32_t instanceId,
     const game::EquipSlot hands[2] = {game::EquipSlot::MAIN_HAND, game::EquipSlot::OFF_HAND};
     for (int i = 0; i < 2; ++i) {
         if (displayIds[i] == 0) continue;
+        currentHand = i;
         const auto inv = static_cast<uint8_t>(items[i].inventoryType);
         if (meleeDrawn) {
             // Held by inventory type: a shield on its mount, a weapon in its hand.
@@ -1026,6 +1121,7 @@ bool EntitySpawner::attachUnitWeapons(uint64_t guid, uint32_t instanceId,
     // hand, guns, crossbows, wands and thrown weapons in the right), on the
     // back otherwise. Wands and thrown weapons are not shown put away.
     if (displayIds[2] != 0) {
+        currentHand = 2;
         namespace WS = rendering::anim::WeaponSubclass;
         const bool knownClass = items[2].itemClass == rendering::anim::kItemClassWeapon;
         const uint32_t sub = items[2].subclass;
@@ -1113,6 +1209,13 @@ void EntitySpawner::buildCreatureDisplayLookups() {
                 const float displayScale = cdi->getFloat(i, scaleField);
                 if (displayScale > 0.0f) data.displayScale = displayScale;
             }
+            // CreatureModelAlpha follows the scale (wotlk 5); geoset data is
+            // column 14. Only on the 16-column WotLK record.
+            if (scaleField != 0xFFFFFFFF && scaleField + 1 < cdi->getFieldCount()) {
+                const uint32_t a = cdi->getUInt32(i, scaleField + 1);
+                if (a > 0 && a < 255) data.modelAlpha = static_cast<float>(a) / 255.0f;
+            }
+            if (cdi->getFieldCount() >= 16) data.creatureGeosetData = cdi->getUInt32(i, 14);
             displayDataMap_[cdi->getUInt32(i, cdiL ? (*cdiL)["ID"] : 0)] = data;
         }
         LOG_INFO("Loaded ", displayDataMap_.size(), " display→model mappings");
@@ -1880,6 +1983,7 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         uint16_t selectedFacial200 = 201;
         uint16_t selectedFacial300 = 301;
         uint32_t equipChestGG = 0, equipLegsGG = 0, equipFeetGG = 0, equipGlovesGG = 0, equipCapeGG = 0, equipRobeGG = 0, equipKneeGG = 0;
+        core::CharacterGeosetQuery extraGeosets;  // the stock rule's inputs
         if (itDisplayData != displayDataMap_.end() &&
             itDisplayData->second.extraDisplayId != 0) {
             auto itExtra = humanoidExtraMap_.find(itDisplayData->second.extraDisplayId);
@@ -1887,6 +1991,12 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
                 hasHumanoidExtra = true;
                 extraRaceId = itExtra->second.raceId;
                 extraSexId = itExtra->second.sexId;
+                // CreatureDisplayInfoExtra.NPCItemDisplay runs in the
+                // component's own kind order (head .. cape).
+                for (int k = 0; k < core::StockGeosetInput::KindCount; ++k)
+                    extraGeosets.displays[k] = itExtra->second.equipDisplayId[k];
+                extraGeosets.race = extraRaceId;
+                extraGeosets.gender = extraSexId;
                 hasEquippedTabard = (itExtra->second.equipDisplayId[9] != 0);
                 equipHeadDisplayId = itExtra->second.equipDisplayId[0];
                 const uint32_t hairKey = appearanceKey(
@@ -1899,6 +2009,11 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
                     extraRaceId, extraSexId, itExtra->second.facialHairId);
                 auto itFacial = facialHairGeosetMap_.find(facialKey);
                 if (itFacial != facialHairGeosetMap_.end()) {
+                    extraGeosets.haveFacialRow = true;
+                    extraGeosets.facial100 = itFacial->second.geoset100;
+                    extraGeosets.facial200 = itFacial->second.geoset200;
+                    extraGeosets.facial300 = itFacial->second.geoset300;
+                    extraGeosets.facial1700 = itFacial->second.geoset1700;
                     // A zero variant means the character has none of that
                     // feature, and x00 is an id no model carries - which is
                     // what resolveGeoset reads as "none" further down.
@@ -2148,6 +2263,16 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
             core::helmHidesHair(*assetManager_, equipHeadDisplayId, extraSexId)) {
             normalizedGeosets.erase(selectedHairScalp);
             normalizedGeosets.insert(1);
+        }
+
+        // A CreatureDisplayInfoExtra humanoid is dressed by the same routine
+        // as a player (FUN_004ed900): everything above stays for the other
+        // humanoid displays. The cloak only where a texture exists for it,
+        // so a missing one does not draw a white sheet.
+        if (hasHumanoidExtra) {
+            extraGeosets.hairScalp = selectedHairScalp;
+            extraGeosets.cloakShown = hasRenderableCape;
+            normalizedGeosets = core::buildStockCharacterGeosets(*assetManager_, extraGeosets);
         }
 
         if (!normalizedGeosets.empty()) {
@@ -2462,7 +2587,8 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
                                 if (!npcFaceLower.empty()) { def.overlayPaths.push_back(npcFaceLower); allPaths.push_back(npcFaceLower); }
                                 if (!npcFaceUpper.empty()) { def.overlayPaths.push_back(npcFaceUpper); allPaths.push_back(npcFaceUpper); }
                                 // The beard over the face (CharSections section 2).
-                                for (const std::string* fh : {&sections.facialLower, &sections.facialUpper}) {
+                                for (const std::string* fh : {&sections.facialLower, &sections.facialUpper,
+                                                              &sections.scalpLower, &sections.scalpUpper}) {
                                     if (!fh->empty()) { def.overlayPaths.push_back(*fh); allPaths.push_back(*fh); }
                                 }
                                 for (const auto& uw : npcUnderwear) { def.overlayPaths.push_back(uw); allPaths.push_back(uw); }

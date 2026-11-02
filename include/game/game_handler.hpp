@@ -621,6 +621,14 @@ public:
         auto it = otherPlayerVisibleItemEntries_.find(guid);
         return (it != otherPlayerVisibleItemEntries_.end()) ? &it->second : nullptr;
     }
+    /// PLAYER_VISIBLE_ITEM_n_ENCHANTMENT of another player's main hand, off
+    /// hand and ranged slot (15, 16, 17): permanent enchant in the low 16 bits,
+    /// temporary in the high 16. Null when none was read (no such field in
+    /// the layout, or a TBC display-id layout).
+    const std::array<uint32_t, 3>* getOtherPlayerWeaponEnchants(uint64_t guid) const {
+        auto it = otherPlayerWeaponEnchants_.find(guid);
+        return (it != otherPlayerWeaponEnchants_.end()) ? &it->second : nullptr;
+    }
 
     // Server info commands
     void queryServerTime(bool announce = false);
@@ -3690,6 +3698,7 @@ public:
     auto& inspectedPlayerItemEntriesRef() { return inspectedPlayerItemEntries_; }
     auto& otherPlayerVisibleDirtyRef() { return otherPlayerVisibleDirty_; }
     auto& otherPlayerVisibleItemEntriesRef() { return otherPlayerVisibleItemEntries_; }
+    auto& otherPlayerWeaponEnchantsRef() { return otherPlayerWeaponEnchants_; }
     auto& otherPlayerMoveTimeMsRef() { return otherPlayerMoveTimeMs_; }
     auto& pendingItemPushNotifsRef() { return pendingItemPushNotifs_; }
     auto& pendingItemQueriesRef() { return pendingItemQueries_; }
@@ -4489,6 +4498,7 @@ private:
     int visibleItemStride_ = 2;
     bool visibleItemLayoutVerified_ = false;  // true once heuristic confirms/overrides default
     std::unordered_map<uint64_t, std::array<uint32_t, 19>> otherPlayerVisibleItemEntries_;
+    std::unordered_map<uint64_t, std::array<uint32_t, 3>> otherPlayerWeaponEnchants_;
     std::unordered_set<uint64_t> otherPlayerVisibleDirty_;
     std::unordered_map<uint64_t, uint32_t> otherPlayerMoveTimeMs_;
 

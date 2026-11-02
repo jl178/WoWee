@@ -159,6 +159,20 @@ public:
                fxaa_.sceneFramebuffer != VK_NULL_HANDLE;
     }
 
+    /// The stock full-screen glow (ffxGlow, EffectGlow.cpp): the scene plus
+    /// its quarter-size blur squared times `amount` (LightParams.Glow, see
+    /// stock_screen_fx::glowAmount), and swapped toward that blur by `blend`
+    /// (under water / drunk, stock_screen_fx::glowBlend). Runs in the FXAA
+    /// pass, which it keeps alive - except under FSR 1, whose upscale the
+    /// FXAA pass would displace, where the glow is simply left out.
+    void setGlow(float amount, float blend) {
+        glowAmount_ = glm::clamp(amount, 0.0f, 1.0f);
+        glowBlend_ = glm::clamp(blend, 0.0f, 1.0f);
+    }
+    /// The ffxGlow switch (stock default on).
+    void setGlowEnabled(bool enabled) { glowEnabled_ = enabled; }
+    [[nodiscard]] bool isGlowEnabled() const { return glowEnabled_; }
+
 private:
     VkContext* vkCtx_ = nullptr;
 
@@ -175,8 +189,17 @@ private:
     float ghost_ = 0.0f;
     bool ghostPassFailed_ = false;
 
+    // The glow (see setGlow). Wanted whatever this frame's amount is, so a
+    // zone with no glow does not tear the pass down and stall the device.
+    bool glowEnabled_ = true;
+    float glowAmount_ = 0.0f;
+    float glowBlend_ = 0.0f;
+    [[nodiscard]] bool glowWanted() const {
+        return glowEnabled_ && !(fsr_.enabled && !fsr2_.enabled);
+    }
+
     [[nodiscard]] bool needsFXAAPass() const {
-        return fxaa_.enabled || intoxication_ > 0.001f || ghost_ > 0.001f;
+        return fxaa_.enabled || intoxication_ > 0.001f || ghost_ > 0.001f || glowWanted();
     }
 
     // FSR 1.0 upscaling state
@@ -235,11 +258,21 @@ private:
         // Per-frame descriptor sets to avoid race with in-flight command buffers
         static constexpr uint32_t DESC_SET_COUNT = 2; // matches MAX_FRAMES_IN_FLIGHT
         VkDescriptorSet      descSet[DESC_SET_COUNT] = {};
+
+        /// The glow's blur source: the scene boxed down by blits, mip 0 at
+        /// half size and mip 1 at a quarter - the stock FFXBox4 target. The
+        /// shader runs the Gauss4 taps on mip 1. Absent where the format
+        /// cannot be blitted, and then the glow and ghost blur are off.
+        AllocatedImage glowImage{};
     };
     FXAAState fxaa_;
     bool initFXAAResources();
     void destroyFXAAResources();
     void renderFXAAPass();
+    /// Fill glowImage from the scene image (left by its pass in PRESENT_SRC)
+    /// and leave both readable by the fragment shader. Stands in for the
+    /// plain PRESENT_SRC -> SHADER_READ_ONLY transition of that image.
+    void prepareSceneForFXAA(VkImage scene);
 
     // FSR 2.2 temporal upscaling state
     struct FSR2State {

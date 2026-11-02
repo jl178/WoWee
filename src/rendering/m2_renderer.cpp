@@ -66,6 +66,9 @@ float estimateParticleReach(const std::vector<pipeline::M2ParticleEmitter>& emit
         const float fall = 0.5f * trackMax(em.gravity) * life * life;
         float size = 0.0f;
         for (float v : em.particleScale.floatValues) size = std::max(size, std::abs(v));
+        for (const auto& v : em.particleScale.vec2Values) size = std::max(size, std::abs(v.y));
+        // A tail reaches back as far as the particle travels in its length.
+        if (em.flags & m2_particle::kFlagTail) size += speed * std::max(em.tailLength, 0.0f);
         const float area = 0.5f * std::max(trackMax(em.emissionAreaLength), trackMax(em.emissionAreaWidth));
         reach = std::max(reach, speed * life + fall + area + size);
     }
@@ -317,7 +320,7 @@ bool M2Renderer::buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout) {
 
     // --- Load shaders ---
     rendering::VkShaderModule m2Vert, m2Frag;
-    rendering::VkShaderModule particleVert, particleFrag, particleGpuVert;
+    rendering::VkShaderModule particleVert, particleFrag, particleGpuVert, particleGpuFrag;
     rendering::VkShaderModule smokeVert, smokeFrag;
 
     (void)m2Vert.loadFromFile(device, "assets/shaders/m2.vert.spv");
@@ -325,6 +328,7 @@ bool M2Renderer::buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout) {
     (void)particleVert.loadFromFile(device, "assets/shaders/m2_particle.vert.spv");
     (void)particleGpuVert.loadFromFile(device, "assets/shaders/m2_particle_gpu.vert.spv");
     (void)particleFrag.loadFromFile(device, "assets/shaders/m2_particle.frag.spv");
+    (void)particleGpuFrag.loadFromFile(device, "assets/shaders/m2_particle_gpu.frag.spv");
     (void)smokeVert.loadFromFile(device, "assets/shaders/m2_smoke.vert.spv");
     (void)smokeFrag.loadFromFile(device, "assets/shaders/m2_smoke.frag.spv");
 
@@ -442,38 +446,56 @@ bool M2Renderer::buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout) {
         particlePipeline_ = buildParticlePipeline(PipelineBuilder::blendAlpha());
         particleAdditivePipeline_ = buildParticlePipeline(PipelineBuilder::blendAdditive());
 
-        // The compact-record pipelines: the same points, fragment shader and
-        // state, fed one m2_particle::ParticleRecord per particle; the vertex
-        // shader works out colour, alpha and size from the curve buffer.
-        if (particleGpuVert.isValid() && particleGpuPipelineLayout_) {
-            static_assert(sizeof(m2_particle::ParticleRecord) == 24);
-            VkVertexInputBindingDescription gBind{};
-            gBind.binding = 0;
-            gBind.stride = sizeof(m2_particle::ParticleRecord);
-            gBind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-            std::vector<VkVertexInputAttributeDescription> gAttrs = {
-                {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0},   // position
-                {.location = 1, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 12},        // life ratio
-                {.location = 2, .binding = 0, .format = VK_FORMAT_R32_UINT, .offset = 16},          // curve base
-                {.location = 3, .binding = 0, .format = VK_FORMAT_R32_UINT, .offset = 20},          // tile + flags
-            };
-            auto buildGpuPipeline = [&](VkPipelineColorBlendAttachmentState blend) -> VkPipeline {
-                return PipelineBuilder()
-                    .setShaders(particleGpuVert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
-                                particleFrag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
-                    .setVertexInput({gBind}, gAttrs)
-                    .setTopology(VK_PRIMITIVE_TOPOLOGY_POINT_LIST)
-                    .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-                    .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
-                    .setColorBlendAttachment(blend)
-                    .setMultisample(vkCtx_->getMsaaSamples())
-                    .setLayout(particleGpuPipelineLayout_)
-                    .setRenderPass(mainPass)
-                    .setDynamicStates(viewportAndScissorDynamic())
-                    .build(device, vkCtx_->getPipelineCache());
-            };
-            particleGpuPipeline_ = buildGpuPipeline(PipelineBuilder::blendAlpha());
-            particleGpuAdditivePipeline_ = buildGpuPipeline(PipelineBuilder::blendAdditive());
+    }
+
+    // The particle quads: one record per instance, four strip vertices each,
+    // expanded in m2_particle_gpu.vert. One pipeline per M2 blend type with
+    // the stock state for it: blend table 0xA453B0 row 0, depth written only
+    // for opaque and alpha key (the emitter setup at 0x833E18 clears the
+    // depth-write bit for every other blend). Never culled.
+    if (particleGpuVert.isValid() && particleGpuFrag.isValid() && particleGpuPipelineLayout_) {
+        static_assert(sizeof(m2_particle::ParticleRecord) == 48);
+        VkVertexInputBindingDescription gBind{};
+        gBind.binding = 0;
+        gBind.stride = sizeof(m2_particle::ParticleRecord);
+        gBind.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+        std::vector<VkVertexInputAttributeDescription> gAttrs = {
+            {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 0},   // position, life
+            {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 16},  // vec, size x
+            {.location = 2, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 32},        // angle, size y
+            {.location = 3, .binding = 0, .format = VK_FORMAT_R32G32_UINT, .offset = 40},          // curve, packed
+        };
+        const auto blendState = [](VkBlendFactor src, VkBlendFactor dst) {
+            VkPipelineColorBlendAttachmentState st = PipelineBuilder::blendAlpha();
+            st.srcColorBlendFactor = src;
+            st.dstColorBlendFactor = dst;
+            st.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            st.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            return st;
+        };
+        const VkPipelineColorBlendAttachmentState states[7] = {
+            PipelineBuilder::blendDisabled(),                                       // 0 opaque
+            PipelineBuilder::blendDisabled(),                                       // 1 alpha key
+            PipelineBuilder::blendAlpha(),                                          // 2 alpha
+            blendState(VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE),                   // 3 one + one
+            PipelineBuilder::blendAdditive(),                                       // 4 add
+            blendState(VK_BLEND_FACTOR_DST_COLOR, VK_BLEND_FACTOR_ZERO),            // 5 mod
+            blendState(VK_BLEND_FACTOR_DST_COLOR, VK_BLEND_FACTOR_SRC_COLOR),       // 6 mod 2x
+        };
+        for (int b = 0; b < 7; ++b) {
+            particleGpuPipelines_[b] = PipelineBuilder()
+                .setShaders(particleGpuVert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
+                            particleGpuFrag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+                .setVertexInput({gBind}, gAttrs)
+                .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP)
+                .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+                .setDepthTest(true, b <= 1, VK_COMPARE_OP_LESS_OR_EQUAL)
+                .setColorBlendAttachment(states[b])
+                .setMultisample(vkCtx_->getMsaaSamples())
+                .setLayout(particleGpuPipelineLayout_)
+                .setRenderPass(mainPass)
+                .setDynamicStates(viewportAndScissorDynamic())
+                .build(device, vkCtx_->getPipelineCache());
         }
     }
 
@@ -564,6 +586,7 @@ bool M2Renderer::buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout) {
     // Clean up shader modules
     m2Vert.destroy(); m2Frag.destroy();
     particleVert.destroy(); particleFrag.destroy();
+    particleGpuVert.destroy(); particleGpuFrag.destroy();
     smokeVert.destroy(); smokeFrag.destroy();
 
     return true;
@@ -1042,9 +1065,17 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         // The compact-record path's layout: the same two sets and push
         // range, and set 2 for the curve buffer. instanceSetLayout_ is one
         // vertex-stage storage buffer, which is what that is.
+        // Its push block, {vec2 tileCount; uint blendType; uint pad}, is read by
+        // both stages: the vertex shader places the cell, the fragment shader
+        // picks the blend's alpha test and fog.
         VkDescriptorSetLayout gpuLayouts[] = {perFrameLayout, particleTexLayout_, instanceSetLayout_};
+        VkPushConstantRange gpuPush{};
+        gpuPush.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        gpuPush.offset = 0;
+        gpuPush.size = 16;
         ci.setLayoutCount = 3;
         ci.pSetLayouts = gpuLayouts;
+        ci.pPushConstantRanges = &gpuPush;
         vkCreatePipelineLayout(device, &ci, nullptr, &particleGpuPipelineLayout_);
     }
 
@@ -1083,11 +1114,6 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         bci.size = MAX_SMOKE_PARTICLES * 6 * sizeof(float);
         vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &smokeVB_, &smokeVBAlloc_, &allocInfo);
         smokeVBMapped_ = allocInfo.pMappedData;
-
-        // M2 particle buffer
-        bci.size = MAX_M2_PARTICLE_VERTS * 9 * sizeof(float);
-        vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &m2ParticleVB_, &m2ParticleVBAlloc_, &allocInfo);
-        m2ParticleVBMapped_ = allocInfo.pMappedData;
 
         // The GPU path's records and curves, one of each per frame in flight
         // so a frame's writes never land in what the previous frame is still
@@ -1274,7 +1300,6 @@ void M2Renderer::shutdown() {
 
     // Clean up particle/ribbon buffers
     destroy(alloc, smokeVB_, smokeVBAlloc_);
-    destroy(alloc, m2ParticleVB_, m2ParticleVBAlloc_);
     destroy(alloc, glowVB_, glowVBAlloc_);
     destroy(alloc, ribbonVB_, ribbonVBAlloc_);
     // Particle record and curve buffers (sets freed with their pool)
@@ -1296,8 +1321,7 @@ void M2Renderer::shutdown() {
     destroyPipeline(additivePipeline_);
     destroyPipeline(particlePipeline_);
     destroyPipeline(particleAdditivePipeline_);
-    destroyPipeline(particleGpuPipeline_);
-    destroyPipeline(particleGpuAdditivePipeline_);
+    for (VkPipeline& p : particleGpuPipelines_) destroyPipeline(p);
     destroyPipeline(smokePipeline_);
     destroyPipeline(ribbonPipeline_);
     destroyPipeline(ribbonAdditivePipeline_);

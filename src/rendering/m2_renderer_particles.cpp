@@ -1,7 +1,7 @@
 #include "rendering/m2_renderer.hpp"
-#include <unordered_set>
 #include "rendering/m2_renderer_internal.h"
 #include "rendering/m2_particle_look.hpp"
+#include "rendering/m2_particle_stock.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_buffer.hpp"
 #include "rendering/vk_texture.hpp"
@@ -12,65 +12,78 @@
 #include "pipeline/asset_manager.hpp"
 #include "core/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
-#include <glm/gtx/quaternion.hpp>
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <cstring>
 #include <limits>
-#include <mutex>
-#include <set>
+
+// M2 particle and ribbon emitters, run and drawn the way the stock 3.3.5a
+// client's CParticleEmitter2 and CRibbonEmitter do. docs/re/particles.md has
+// the reverse engineering and the addresses; m2_particle_stock.hpp holds the
+// pure arithmetic both this file and the tests use.
 
 namespace wowee {
 namespace rendering {
 
-// --- M2 Particle Emitter Helpers ---
+namespace {
+
+namespace mp = m2_particle;
+
+/// The lower key of a uint8 track: the stock never interpolates those
+/// (0x82B270), so a visibility or enabled flag switches at its key.
+float sampleStep(const pipeline::M2AnimationTrack& track, int seq, float animTime,
+                 float globalTime, const std::vector<uint32_t>& gsd, float def) {
+    const auto t = m2_track::resolveTime(track, seq, animTime, globalTime, gsd);
+    const auto* keys = m2_track::keysFor(track, t);
+    if (!keys) return def;
+    const size_t count = std::min(keys->timestamps.size(), keys->floatValues.size());
+    if (count == 0) return def;
+    return keys->floatValues[m2_track::lowerKeyIndex(keys->timestamps, count, t.timeMs)];
+}
+
+float uniform01(std::mt19937& rng) {
+    return std::uniform_real_distribution<float>(0.0f, 1.0f)(rng);
+}
+float uniform11(std::mt19937& rng) {
+    return std::uniform_real_distribution<float>(-1.0f, 1.0f)(rng);
+}
+
+glm::vec3 randomUnit(std::mt19937& rng) {
+    const float z = uniform11(rng);
+    const float a = uniform01(rng) * 6.2831853f;
+    const float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
+    return {r * std::cos(a), r * std::sin(a), z};
+}
+
+/// A point on the emitter's spline (type 3), uniform along its length. The
+/// stock walks its own spline object (0x981500); the points are the same.
+glm::vec3 splinePoint(const std::vector<glm::vec3>& pts, float u) {
+    if (pts.empty()) return glm::vec3(0.0f);
+    if (pts.size() == 1) return pts[0];
+    float total = 0.0f;
+    for (size_t i = 1; i < pts.size(); ++i) total += glm::length(pts[i] - pts[i - 1]);
+    float want = u * total;
+    for (size_t i = 1; i < pts.size(); ++i) {
+        const float seg = glm::length(pts[i] - pts[i - 1]);
+        if (want <= seg || i + 1 == pts.size()) {
+            const float t = seg > 0.0f ? std::clamp(want / seg, 0.0f, 1.0f) : 0.0f;
+            return glm::mix(pts[i - 1], pts[i], t);
+        }
+        want -= seg;
+    }
+    return pts.back();
+}
+
+} // namespace
 
 float M2Renderer::interpFloat(const pipeline::M2AnimationTrack& track, float animTime,
-                                float globalTime, int seqIdx,
-                                const std::vector<uint32_t>& globalSeqDurations) {
+                              float globalTime, int seqIdx,
+                              const std::vector<uint32_t>& globalSeqDurations) {
     return m2_track::sampleFloat(track, seqIdx, animTime, globalTime,
                                  globalSeqDurations, 0.0f);
-}
-
-// Interpolate an M2 FBlock (particle lifetime curve) at a given life ratio [0..1].
-// FBlocks store per-lifetime keyframes for particle color, alpha, and scale.
-// NOTE: interpFBlockFloat and interpFBlockVec3 share identical interpolation logic -
-// if you fix a bug in one, update the other to match.
-float M2Renderer::interpFBlockFloat(const pipeline::M2FBlock& fb, float lifeRatio) {
-    if (fb.floatValues.empty()) return 1.0f;
-    if (fb.floatValues.size() == 1 || fb.timestamps.empty()) return fb.floatValues[0];
-    lifeRatio = glm::clamp(lifeRatio, 0.0f, 1.0f);
-    for (size_t i = 0; i < fb.timestamps.size() - 1; i++) {
-        if (lifeRatio <= fb.timestamps[i + 1]) {
-            float t0 = fb.timestamps[i];
-            float t1 = fb.timestamps[i + 1];
-            float dur = t1 - t0;
-            float frac = (dur > 0.0f) ? (lifeRatio - t0) / dur : 0.0f;
-            size_t v0 = std::min(i, fb.floatValues.size() - 1);
-            size_t v1 = std::min(i + 1, fb.floatValues.size() - 1);
-            return glm::mix(fb.floatValues[v0], fb.floatValues[v1], frac);
-        }
-    }
-    return fb.floatValues.back();
-}
-
-glm::vec3 M2Renderer::interpFBlockVec3(const pipeline::M2FBlock& fb, float lifeRatio) {
-    if (fb.vec3Values.empty()) return glm::vec3(1.0f);
-    if (fb.vec3Values.size() == 1 || fb.timestamps.empty()) return fb.vec3Values[0];
-    lifeRatio = glm::clamp(lifeRatio, 0.0f, 1.0f);
-    for (size_t i = 0; i < fb.timestamps.size() - 1; i++) {
-        if (lifeRatio <= fb.timestamps[i + 1]) {
-            float t0 = fb.timestamps[i];
-            float t1 = fb.timestamps[i + 1];
-            float dur = t1 - t0;
-            float frac = (dur > 0.0f) ? (lifeRatio - t0) / dur : 0.0f;
-            size_t v0 = std::min(i, fb.vec3Values.size() - 1);
-            size_t v1 = std::min(i + 1, fb.vec3Values.size() - 1);
-            return glm::mix(fb.vec3Values[v0], fb.vec3Values[v1], frac);
-        }
-    }
-    return fb.vec3Values.back();
 }
 
 std::vector<glm::vec3> M2Renderer::getWaterVegetationPositions(const glm::vec3& camPos, float maxDist) const {
@@ -106,534 +119,392 @@ void M2Renderer::ensureParticleCurves(const M2ModelGPU& gpu) {
             t.gravity = m2_particle::classifyTrack(em.gravity, gsd);
             t.areaL = m2_particle::classifyTrack(em.emissionAreaLength, gsd);
             t.areaW = m2_particle::classifyTrack(em.emissionAreaWidth, gsd);
+            t.zSource = m2_particle::classifyTrack(em.deceleration, gsd);
         }
         gpu.particleTracks = std::move(tracks);
     }
-    if (gpu.particleCurves.size() == gpu.particleEmitters.size()) return;
-    using Curve = M2ModelGPU::ParticleCurve;
-    std::vector<Curve> curves(gpu.particleEmitters.size());
-    for (size_t e = 0; e < curves.size(); ++e) {
-        const auto& em = gpu.particleEmitters[e];
-        for (int k = 0; k <= Curve::kSteps; ++k) {
-            const float r = static_cast<float>(k) / static_cast<float>(Curve::kSteps);
-            const glm::vec3 c = interpFBlockVec3(em.particleColor, r);
-            const float a = std::min(interpFBlockFloat(em.particleAlpha, r), 1.0f);
-            curves[e].colorAlpha[k] = glm::vec4(c, a);
-            curves[e].scale[k] = interpFBlockFloat(em.particleScale, r);
-        }
+    const size_t want = gpu.particleEmitters.size() * mp::kCurveVec4s;
+    if (gpu.particleCurves.size() == want) return;
+    std::vector<glm::vec4> curves(want);
+    for (size_t e = 0; e < gpu.particleEmitters.size(); ++e) {
+        mp::packCurve(gpu.particleEmitters[e], curves.data() + e * mp::kCurveVec4s);
     }
     gpu.particleCurves = std::move(curves);
 }
 
-namespace {
-// Moves a particle t seconds along under gravity g (down world or bone Z) and
-// drag k, in closed form: what the per-frame step does in many small steps,
-// for a particle born part way through a step or warmed up on waking.
-inline void advanceParticle(glm::vec3& pos, glm::vec3& vel, float g, float k, float t) {
-    if (t <= 0.0f) return;
-    if (k > 1e-4f) {
-        const float e = std::exp(-k * t);
-        const glm::vec3 vInf(0.0f, 0.0f, -g / k);
-        pos += vInf * t + (vel - vInf) * ((1.0f - e) / k);
-        vel = vInf + (vel - vInf) * e;
-    } else {
-        pos += vel * t;
-        pos.z -= 0.5f * g * t * t;
-        vel.z -= g * t;
-    }
-}
-} // namespace
-
-void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt,
-                               ParticleWorker* worker) {
-    // Instance portals were skipped here and drawn as a glow sprite instead,
-    // but the portal IS its emitters: InstancePortal.m2's only mesh has a
-    // texture weight of 0, and the blue vortex is two sphere emitters on
-    // bones spinning about the model X axis. Skipping them left nothing but
-    // the sprite on the ground.
-    if (inst.emissionStopped) return;
-    if (!(dt > 0.0f)) return;
+// ---------------------------------------------------------------------------
+// Particle emitters (CParticleEmitter2)
+// ---------------------------------------------------------------------------
+void M2Renderer::stepParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt,
+                               ParticleWorker& worker) {
+    const size_t numEm = gpu.particleEmitters.size();
+    if (numEm == 0 || !(dt > 0.0f)) return;
     ensureParticleCurves(gpu);
+    if (inst.emitterStates.size() != numEm) inst.emitterStates.assign(numEm, {});
+    std::mt19937& rng = worker.rng;
+    const auto& gsd = gpu.globalSequenceDurations;
+    const glm::mat4 rz90 = mp::emitterRotation();
+    const bool fastTracks = gpu.particleTracks.size() == numEm;
 
-    if (inst.emitterAccumulators.size() != gpu.particleEmitters.size()) {
-        inst.emitterAccumulators.resize(gpu.particleEmitters.size(), 0.0f);
-    }
-
-    std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
-    std::uniform_real_distribution<float> distN(-1.0f, 1.0f);
-    std::uniform_int_distribution<int> distTile;
-    const glm::mat4 identity(1.0f);
-
-    // Where births go and whose random stream they draw from. Without a
-    // worker, straight onto the instance from the renderer's stream; with
-    // one, onto the worker's list, merged in by emitter at the end. The
-    // count against MAX_M2_PARTICLES is the instance's either way.
-    std::mt19937& rng = worker ? worker->rng : particleRng_;
-    std::vector<M2Particle>& out = worker ? worker->births : inst.particles;
-    if (worker) worker->births.clear();
-    const size_t outBase = worker ? inst.particles.size() : 0;
-    const bool fastTracks = worker && gpu.particleTracks.size() == gpu.particleEmitters.size();
-
-    for (size_t ei = 0; ei < gpu.particleEmitters.size(); ei++) {
-        const auto& em = gpu.particleEmitters[ei];
-        if (!em.enabled) continue;
-
-        // The same value either way; the classified track skips the key
-        // search when the track holds one value (m2_particle::TrackConst).
-        const auto* tracks = fastTracks ? &gpu.particleTracks[ei] : nullptr;
-        const auto sampleTrack = [&](const m2_particle::TrackConst M2ModelGPU::ParticleTracks::* c,
-                                     const pipeline::M2AnimationTrack& t) {
-            return tracks
-                ? m2_particle::sampleTrack(tracks->*c, t, inst.currentSequenceIndex,
-                                           inst.animTime, inst.globalSequenceTime,
-                                           gpu.globalSequenceDurations)
+    // Per frame, as CM2Model feeds its emitters (0x82D2F0, 0x8309C0) and
+    // CParticleEmitter2::Update starts (0x97EB10): the tracks, the emitter's
+    // frame this frame, its motion since the last, and what that motion
+    // gives the flags that use it.
+    float longestLife = 0.0f;
+    for (size_t e = 0; e < numEm; ++e) {
+        const auto& em = gpu.particleEmitters[e];
+        auto& st = inst.emitterStates[e];
+        const auto track = [&](const m2_particle::TrackConst M2ModelGPU::ParticleTracks::* c,
+                               const pipeline::M2AnimationTrack& t) {
+            return fastTracks
+                ? m2_particle::sampleTrack(gpu.particleTracks[e].*c, t, inst.currentSequenceIndex,
+                                           inst.animTime, inst.globalSequenceTime, gsd)
                 : interpFloat(t, inst.animTime, inst.globalSequenceTime,
-                              inst.currentSequenceIndex, gpu.globalSequenceDurations);
+                              inst.currentSequenceIndex, gsd);
         };
         using PT = M2ModelGPU::ParticleTracks;
-        float rate = sampleTrack(&PT::rate, em.emissionRate);
-        float life = sampleTrack(&PT::life, em.lifespan);
-        // What the player asked to see of it, before the floor below. The order
-        // is the whole point: thinning first and flooring second lets a low
-        // setting take smoke, dust and spell effects down while a candle is
-        // pulled back up to the handful of particles that still reads as fire.
-        rate *= particleDensity_;
-
-        // A flame reads as a flame only when enough particles are alive at once.
-        // Authored rates vary wildly for the same visual intent - a candle asks
-        // for 40/s over half a second, CHANDELIER01 for 1/s over six seconds,
-        // which sustains a single speck per candle and looks like a bare glow.
-        // Steady-state population is rate x lifespan, so floor the rate against
-        // the lifespan to hold every fixture at a comparable density. Do not lower
-        // this: at 7 the flames disappear entirely, as they do under any change
-        // that reduces how many particles are alive or how far they travel. The
-        // effect is only visible because a scattering of particles reaches open
-        // air, so thinning it drops the whole thing below the threshold.
-        if (rate > 0.0f && life > 0.0f &&
-            (gpu.isLanternLike || gpu.isTorch || gpu.isBrazierOrFire || gpu.isKoboldFlame)) {
-            constexpr float kMinLiveParticles = 15.0f;
-            rate = std::max(rate, kMinLiveParticles / std::max(life, 0.1f));
+        // The enabled track is a uint8; with no keys the emitter is on.
+        st.enabled = em.enabled &&
+            sampleStep(em.enabledTrack, inst.currentSequenceIndex, inst.animTime,
+                       inst.globalSequenceTime, gsd, 1.0f) != 0.0f;
+        if (st.enabled) {
+            st.rate = std::max(track(&PT::rate, em.emissionRate), 0.0f);  // SetRate 0x97BD80
+            st.life = track(&PT::life, em.lifespan);
+            st.speed = track(&PT::speed, em.emissionSpeed);
+            st.speedVar = track(&PT::speedVar, em.speedVariation);
+            st.vRange = track(&PT::vRange, em.verticalRange);
+            st.hRange = track(&PT::hRange, em.horizontalRange);
+            st.gravity = track(&PT::gravity, em.gravity);
+            st.areaL = track(&PT::areaL, em.emissionAreaLength);
+            st.areaW = track(&PT::areaW, em.emissionAreaWidth);
+            st.zSource = track(&PT::zSource, em.deceleration);
+            if (std::abs(st.zSource) < 0.001f) st.zSource = 0.0f;  // 0x978DA0
+        } else {
+            st.rate = 0.0f;
         }
+        longestLife = std::max(longestLife, std::max(st.life, 0.001f));
 
-        if (rate <= 0.0f || life <= 0.0f) {
-            // Diagnostic: a lamp or flame whose emitter never fires produces a
-            // fixture that glows but shows no flame. Report each model once so a
-            // default-level log says whether emission is the cause.
-            if (gpu.isLanternLike || gpu.isTorch || gpu.isBrazierOrFire) {
-                // Locked: the step runs on more than one thread.
-                static std::mutex reportedMutex;
-                static std::unordered_set<std::string> reported;
-                bool first;
-                {
-                    std::lock_guard<std::mutex> lock(reportedMutex);
-                    first = reported.insert(gpu.name).second;
-                }
-                if (first) {
-                    LOG_WARNING("Flame emitter idle: '", gpu.name, "' emitter=", ei,
-                                " rate=", rate, " life=", life,
-                                " animTime=", inst.animTime,
-                                " seqIdx=", inst.currentSequenceIndex,
-                                " gsTime=", inst.globalSequenceTime,
-                                " rateSeqs=", em.emissionRate.sequences.size(),
-                                " lifeSeqs=", em.lifespan.sequences.size(),
-                                " rateGlobalSeq=", em.emissionRate.globalSequence);
-                }
+        const glm::mat4& bone = (em.bone < inst.boneMatrices.size())
+            ? inst.boneMatrices[em.bone] : glm::mat4(1.0f);
+        st.xf = inst.modelMatrix * bone * glm::translate(glm::mat4(1.0f), em.position) * rz90;
+        const glm::vec3 pos(st.xf[3]);
+        st.prevPos = st.havePos ? st.pos : pos;
+        st.pos = pos;
+        st.havePos = true;
+        const glm::vec3 moved = st.pos - st.prevPos;
+
+        // Flag 0x4000: live particles are dragged along by the emitter's
+        // motion, by a factor of its speed (followSpeed/Scale 1 and 2 make a
+        // line through two points, 0x978DD0), clamped to [0, 1].
+        st.followMove = glm::vec3(0.0f);
+        if (em.flags & mp::kFlagFollowEmitter) {
+            const float ds = em.followSpeed2 - em.followSpeed1;
+            float slope = 0.0f, intercept = 0.0f;
+            if (std::abs(ds) >= 2.384185791015625e-07f) {
+                slope = (em.followScale2 - em.followScale1) / ds;
+                intercept = em.followScale1 - slope * em.followSpeed1;
             }
-            continue;
+            const float speed = glm::length(moved) / dt;
+            st.followMove = moved * std::clamp(slope * speed + intercept, 0.0f, 1.0f);
         }
-
-        // Only the last lifespan of the window can still be alive at its end,
-        // so a long window (a dormant emitter waking) spawns that and no more:
-        // the standing population, at evenly spread ages.
-        const float window = std::min(dt, life);
-        float& acc = inst.emitterAccumulators[ei];
-        acc += rate * window;
-        if (acc < 1.0f) continue;  // nothing due: skip the spawn-track sampling
-
-        // Everything below depends on the emitter and the clock, not on the
-        // particle: sampled once per emitter step, not once per particle.
-        const float baseSpeed = sampleTrack(&PT::speed, em.emissionSpeed);
-        const float vRange = sampleTrack(&PT::vRange, em.verticalRange);
-        const float hRange = sampleTrack(&PT::hRange, em.horizontalRange);
-        const float speedVar = sampleTrack(&PT::speedVar, em.speedVariation);
-        const bool isSphere = (em.emitterType == kParticleEmitterSphere);
-        float rMax = 0.0f, rMin = 0.0f;
-        if (isSphere) {
-            const float areaL = sampleTrack(&PT::areaL, em.emissionAreaLength);
-            const float areaW = sampleTrack(&PT::areaW, em.emissionAreaWidth);
-            rMax = std::max(areaL, areaW);
-            rMin = std::min(areaL, areaW);
-        }
-        const float gravity = sampleTrack(&PT::gravity, em.gravity);
-        const float drag = em.drag;
-        const glm::mat4& boneXform = (em.bone < inst.boneMatrices.size())
-            ? inst.boneMatrices[em.bone] : identity;
-        const glm::mat4 xf = inst.modelMatrix * boneXform;
-        const glm::mat3 rotMat(xf);
-        const bool noTrail = (em.flags & kParticleFlagNoTrail) != 0;
-        const uint32_t tilesX = std::max<uint16_t>(em.textureCols, 1);
-        const uint32_t tilesY = std::max<uint16_t>(em.textureRows, 1);
-        const uint32_t totalTiles = tilesX * tilesY;
-        const bool randomTile = (em.flags & kParticleFlagTiled) && totalTiles > 1 &&
-                                (em.flags & kParticleFlagRandomized);
-        if (randomTile) {
-            distTile = std::uniform_int_distribution<int>(0, static_cast<int>(totalTiles - 1));
-        }
-        const float invRate = 1.0f / rate;
-
-        while (acc >= 1.0f && outBase + out.size() < MAX_M2_PARTICLES) {
-            acc -= 1.0f;
-            // Born when the accumulator crossed this integer: what is left
-            // of it is how far into the window that was from the end.
-            const float age = std::min(acc * invRate, window);
-
-            M2Particle p;
-            p.emitterIndex = static_cast<uint16_t>(ei);
-            p.life = age;
-            p.maxLife = life;
-            p.tileIndex = 0;
-
-            // Position: emitter position transformed by bone matrix
-            glm::vec3 localPos = em.position;
-            p.position = glm::vec3(xf * glm::vec4(localPos, 1.0f));
-
-            // Velocity: emission speed in upward direction + random spread
-            float speed = baseSpeed * (1.0f + distN(rng) * speedVar);
-
-            glm::vec3 dir;
-            if (isSphere) {
-                // Sphere emitter: born on a shell around the emitter and sent
-                // out along the radius (in, for a negative speed). The polar
-                // angle from bone +Z spans +-verticalRange and the azimuth
-                // +-horizontalRange, azimuth 0 being bone +Y. That zero is
-                // fixed by InstancePortal.m2: vRange pi, hRange 0, a 4.17
-                // shell, speed -3.3, on bones spinning about X - a ring in
-                // the YZ plane of the portal's own frame, drawn inward and
-                // spun into the vortex. Any other zero puts the ring edge-on.
-                const float theta = distN(rng) * vRange;
-                const float phi = distN(rng) * hRange;
-                dir = glm::vec3(std::sin(theta) * std::sin(phi),
-                                std::sin(theta) * std::cos(phi),
-                                std::cos(theta));
-                const float radius = (rMin > 0.0f)
-                    ? rMin + (rMax - rMin) * dist01(rng)
-                    : rMax;
-                if (radius > 0.0f) {
-                    localPos += dir * radius;
-                    p.position = glm::vec3(xf * glm::vec4(localPos, 1.0f));
-                }
-            } else {
-                // Emitter +Z tilted by a random polar angle within verticalRange
-                // (radians) at a random azimuth. vRange 0 = straight up the bone Z.
-                const float theta = distN(rng) * vRange;
-                const float phi = dist01(rng) * 6.2831853f;
-                dir = glm::vec3(std::sin(theta) * std::cos(phi),
-                                std::sin(theta) * std::sin(phi),
-                                std::cos(theta));
-            }
-
-            glm::vec3 localVel = dir * speed;
-            // When emission speed is ~0 and bone animation isn't loaded (.anim files),
-            // particles pile up at the same position. Give them a drift so they
-            // spread outward like a mist/spray effect instead of clustering.
-            if (std::abs(speed) < 0.01f) {
-                // Authored zero speed means the particle stays where it was
-                // born (candle/chandelier glow cards). Only fireflies drift.
-                if (gpu.isFireflyEffect) {
-                    localVel = glm::vec3(
-                        distN(rng) * 0.6f,
-                        distN(rng) * 0.6f,
-                        distN(rng) * 0.3f
-                    );
-                } else {
-                    localVel = glm::vec3(0.0f);
-                }
-            }
-
-            // "Do not trail": the particle lives in its emitter bone's frame and
-            // is carried by it, instead of being left behind in the world. The
-            // portal's swirl is exactly this - particles drawn inward while the
-            // bones turn them, so each one traces a spiral.
-            if (noTrail) {
-                // Velocity stays in the bone's frame; see M2Particle.
-                advanceParticle(localPos, localVel, gravity, drag, age);
-                p.localPos = localPos;
-                p.velocity = localVel;
-                p.position = glm::vec3(xf * glm::vec4(localPos, 1.0f));
-            } else {
-                // Transform direction by bone + model orientation (rotation only)
-                p.velocity = rotMat * localVel;
-                advanceParticle(p.position, p.velocity, gravity, drag, age);
-            }
-
-            if (randomTile) {
-                p.tileIndex = static_cast<uint16_t>(distTile(rng));
-            }
-
-            out.push_back(p);
-
-            // Diagnostic: log first particle birth per spell effect instance
-            if (inst.spellVisual && outBase + out.size() == 1) {
-                LOG_INFO("SpellEffect: first particle for '", gpu.name,
-                         "' pos=(", p.position.x, ",", p.position.y, ",", p.position.z,
-                         ") rate=", rate, " life=", life,
-                         " bone=", em.bone, " boneCount=", inst.boneMatrices.size(),
-                         " globalSeqs=", gpu.globalSequenceDurations.size());
+        // Flag 0x40: what births inherit, refreshed every thirtieth of a
+        // second from the last frame's motion. The stock scales it by
+        // burst / (30 x the time since the refresh), not by the time the
+        // motion took; that is kept.
+        if (em.flags & mp::kFlagInheritVelocity) {
+            st.inheritTimer += dt;
+            if (st.inheritTimer > 0.033333335f) {
+                const float f = st.inheritTimer * 29.999998f;
+                st.inheritTimer = 0.0f;
+                st.inheritVel = st.live == 0 ? glm::vec3(0.0f) : moved * (em.burstMultiplier / f);
             }
         }
-        // Cap accumulator to avoid bursts after lag
-        if (inst.emitterAccumulators[ei] > 2.0f) {
-            inst.emitterAccumulators[ei] = 0.0f;
+        // Flag 0x8000: an emitter that bursts when it turns on, and never
+        // emits otherwise (0x8309C0 sets runtime 0x40 on the rising edge).
+        if (em.flags & mp::kFlagBurstOnEnable) {
+            const bool on = st.enabled && st.rate > 0.0f && !inst.emissionStopped;
+            if (on && !st.wasEmitting) st.acc = -1.0f;  // marks the burst for the first sub-step
+            st.wasEmitting = on;
+        }
+        // The pool keeps room for the peak rate's worth over the longest
+        // life (0x97EDF0, run on every emitting step); it never shrinks.
+        if (st.enabled) {
+            st.poolCap = std::max(st.poolCap,
+                                  mp::poolSize(st.rate, em.emissionRateVary, st.life, em.lifespanVary));
         }
     }
-    if (worker) m2_particle::mergeByEmitter(inst.particles, worker->births);
-}
 
-void M2Renderer::updateParticles(M2Instance& inst, float dt, ParticleWorker* worker) {
-    if (!inst.cachedModel || inst.particles.empty()) return;
-    const auto& gpu = *inst.cachedModel;
+    // A long step is cut into tenths of a second, no more of them than a
+    // lifespan holds (0x97ACB0). The warm-up of an emitter that lay dormant
+    // asks for as long as its life; a Wowee-only case (the stock never lets
+    // a visible emitter sleep), so its tenths are capped at 40 steps, each
+    // proportionally longer, to keep a wake from costing hundreds of steps.
+    mp::Substeps sub = mp::substeps(dt, longestLife);
+    float wholeStep = 0.1f;
+    constexpr int kMaxWarmSteps = 40;
+    if (sub.whole > kMaxWarmSteps) {
+        wholeStep = 0.1f * static_cast<float>(sub.whole) / static_cast<float>(kMaxWarmSteps);
+        sub.whole = kMaxWarmSteps;
+    }
+    const float followShare = 1.0f / static_cast<float>(sub.whole + 1);
 
-    // Everything per emitter hoisted out of the per-particle loop: gravity
-    // (a track sample), the drag factor (an exp) and, for "do not trail"
-    // emitters, the model * bone matrix. Each was being worked out again for
-    // every particle, though hundreds share one emitter. The scratch array is
-    // the renderer's (or the worker's), so the step never allocates.
-    const size_t numEm = gpu.particleEmitters.size();
-    auto& ems = worker ? worker->ems : particleStepScratch_;
+    auto& ems = worker.ems;
     if (ems.size() < numEm) ems.resize(numEm);
-    const bool fastTracks = worker && gpu.particleTracks.size() == numEm;
-    const glm::mat4 identity(1.0f);
-    for (size_t e = 0; e < numEm; ++e) {
-        const auto& pem = gpu.particleEmitters[e];
-        auto& s = ems[e];
-        // Authored gravity as-is: 0 means no gravity (candle flames,
-        // chandelier glows), never a substituted fall.
-        s.gravity = fastTracks
-            ? m2_particle::sampleTrack(gpu.particleTracks[e].gravity, pem.gravity,
-                                       inst.currentSequenceIndex, inst.animTime,
-                                       inst.globalSequenceTime, gpu.globalSequenceDurations)
-            : interpFloat(pem.gravity,
-                          inst.animTime, inst.globalSequenceTime,
-                          inst.currentSequenceIndex, gpu.globalSequenceDurations);
-        s.drag = pem.drag;
-        s.dragFactor = (pem.drag > 0.0f) ? std::exp(-pem.drag * dt) : 1.0f;
-        s.noTrail = (pem.flags & kParticleFlagNoTrail) != 0;
-        if (s.noTrail) {
-            const glm::mat4& boneXform = (pem.bone < inst.boneMatrices.size())
-                ? inst.boneMatrices[pem.bone] : identity;
-            s.xf = inst.modelMatrix * boneXform;
-        }
-    }
+    const auto runSubstep = [&](float s) {
+        // Births first (0x97D8C0, through each emitter type's create), then
+        // every particle, the new ones too, ages and moves by s (0x97DD20).
+        worker.births.clear();
+        for (size_t e = 0; e < numEm; ++e) {
+            const auto& em = gpu.particleEmitters[e];
+            auto& st = inst.emitterStates[e];
+            const bool modelSpace = (em.flags & mp::kFlagModelSpace) != 0;
 
-    if (worker) {
-        // In order, so the emitters stay grouped for the particle pass.
-        const size_t left = m2_particle::stepAndCompact(
-            inst.particles.data(), inst.particles.size(), ems.data(), numEm, dt);
-        inst.particles.resize(left);
-        return;
-    }
+            float lod = 1.0f;
+            if (!inst.spellVisual) lod = mp::distanceRateFactor(glm::length(cachedCamPos_ - st.pos));
+            const float rate = particleDensity_ * (st.rate + em.emissionRateVary * uniform11(rng)) * lod;
 
-    M2Particle* const ps = inst.particles.data();
-    size_t n = inst.particles.size();
-    for (size_t i = 0; i < n; ) {
-        M2Particle& p = ps[i];
-        p.life += dt;
-        if (p.life >= p.maxLife) {
-            // Swap-and-pop removal; the vector is shrunk once at the end.
-            p = ps[n - 1];
-            --n;
-            continue;
-        }
-        const size_t e = p.emitterIndex;
-        if (e < numEm) {
-            const auto& s = ems[e];
-            if (s.noTrail) {
-                // Stepped in the emitter bone's frame, then placed through the
-                // bone as it is now - see kParticleFlagNoTrail and M2Particle.
-                p.velocity.z -= s.gravity * dt;
-                p.velocity *= s.dragFactor;
-                p.localPos += p.velocity * dt;
-                p.position = glm::vec3(s.xf * glm::vec4(p.localPos, 1.0f));
-                ++i;
-                continue;
+            int count = 0;
+            float birthDt = s;
+            if (em.flags & mp::kFlagBurstOnEnable) {
+                if (st.acc < 0.0f) {
+                    st.acc = 0.0f;
+                    count = std::max(0, static_cast<int>(rate));  // truncated (FPU in chop mode)
+                    birthDt = 0.0f;
+                }
+            } else if (st.enabled && !inst.emissionStopped) {
+                st.acc += rate * s;
+                count = std::max(0, static_cast<int>(st.acc + 0.5f));
             }
-            p.velocity.z -= s.gravity * dt;
-            p.velocity *= s.dragFactor;
+            if (count == 0) continue;
+            const uint32_t room = st.poolCap > st.live ? st.poolCap - st.live : 0u;
+            const size_t instRoom = MAX_M2_PARTICLES > inst.particles.size() + worker.births.size()
+                ? MAX_M2_PARTICLES - inst.particles.size() - worker.births.size() : 0;
+            const int made = static_cast<int>(std::min<size_t>(
+                std::min<uint32_t>(static_cast<uint32_t>(count), room), instRoom));
+            if (!(em.flags & mp::kFlagBurstOnEnable)) st.acc -= static_cast<float>(made);
+            st.live += static_cast<uint32_t>(made);
+
+            const glm::mat3 rot(st.xf);
+            const uint32_t tiles = static_cast<uint32_t>(std::max<uint16_t>(em.textureRows, 1)) *
+                                   std::max<uint16_t>(em.textureCols, 1);
+            const bool randomTile = (em.flags & mp::kFlagRandomTile) && tiles > 1 &&
+                                    em.headCell.floatValues.empty();
+            for (int k = 0; k < made; ++k) {
+                M2Particle p{};
+                p.emitterIndex = static_cast<uint16_t>(e);
+                p.life = uniform01(rng) * birthDt;
+                glm::vec3 lp(0.0f), lv(0.0f);
+                const float speed = (uniform11(rng) * st.speedVar + 1.0f) * st.speed;  // 0x9792D0
+                if (em.emitterType == mp::kEmitterSphere) {
+                    // 0x981950: a shell between the two area radii.
+                    const float radius = uniform01(rng) * (st.areaW - st.areaL) + st.areaL;
+                    const glm::vec3 d = mp::sphereDirection(st.vRange, st.hRange, uniform11(rng),
+                                                            uniform11(rng));
+                    lp = d * radius;
+                    glm::vec3 dir = d;
+                    if (st.zSource != 0.0f) {
+                        dir = lp - glm::vec3(0.0f, 0.0f, st.zSource);
+                        const float l2 = glm::dot(dir, dir);
+                        if (l2 > 2.384185791015625e-07f) dir *= 1.0f / std::sqrt(l2);
+                    } else if (em.flags & mp::kFlagSphereVelocityUp) {
+                        dir = glm::vec3(0.0f, 0.0f, 1.0f);
+                    }
+                    lv = dir * speed;
+                } else if (em.emitterType == mp::kEmitterSpline) {
+                    // 0x979870: on the spline, any direction.
+                    lp = splinePoint(em.splinePoints, uniform01(rng));
+                    lv = randomUnit(rng) * speed;
+                } else {
+                    // 0x9815C0: a length by width rectangle, centred.
+                    lp = glm::vec3(uniform11(rng) * st.areaL * 0.5f, uniform11(rng) * st.areaW * 0.5f, 0.0f);
+                    if (st.zSource != 0.0f) {
+                        glm::vec3 dir = lp - glm::vec3(0.0f, 0.0f, st.zSource);
+                        dir *= 1.0f / std::sqrt(glm::dot(dir, dir));
+                        lv = dir * speed;
+                    } else {
+                        lv = mp::planeDirection(st.vRange, st.hRange, uniform11(rng), uniform11(rng)) * speed;
+                    }
+                }
+                if (modelSpace) {
+                    p.position = lp;
+                    p.velocity = lv;
+                } else {
+                    p.position = glm::vec3(st.xf * glm::vec4(lp, 1.0f));
+                    p.velocity = rot * lv;
+                    // Flag 0x800: born anywhere along the emitter's last move.
+                    if (em.flags & mp::kFlagSpawnAlongPath)
+                        p.position += (st.prevPos - st.pos) * (1.0f - uniform01(rng));
+                }
+                if (em.flags & mp::kFlagInheritVelocity) {
+                    if (em.emitterType == mp::kEmitterSpline) p.velocity += st.inheritVel;
+                    else p.velocity += st.inheritVel * (uniform11(rng) * st.speedVar + 1.0f);
+                }
+                p.maxLife = std::max(st.life + uniform11(rng) * em.lifespanVary, 0.001f);
+                p.sizeVary = mp::scaleVariation(em, uniform11(rng), uniform11(rng));
+                float spinBase = em.baseSpin + uniform11(rng) * em.baseSpinVary;
+                float spinSpeed = em.spin + uniform11(rng) * em.spinVary;
+                if ((em.flags & mp::kFlagRandomSpinDirection) && (rng() & 1u)) {
+                    spinBase = -spinBase;
+                    spinSpeed = -spinSpeed;
+                }
+                p.spinBase = spinBase;
+                p.spinSpeed = spinSpeed;
+                p.tileIndex = randomTile
+                    ? static_cast<uint16_t>(std::min<uint32_t>(
+                          static_cast<uint32_t>(uniform01(rng) * static_cast<float>(tiles)), tiles - 1))
+                    : 0;
+                p.phase = static_cast<uint16_t>(rng() & 127u);
+                worker.births.push_back(p);
+            }
         }
-        p.position += p.velocity * dt;
-        ++i;
-    }
-    inst.particles.resize(n);
+        mp::mergeByEmitter(inst.particles, worker.births);
+
+        for (size_t e = 0; e < numEm; ++e) {
+            const auto& em = gpu.particleEmitters[e];
+            const auto& st = inst.emitterStates[e];
+            const bool modelSpace = (em.flags & mp::kFlagModelSpace) != 0;
+            auto& se = ems[e];
+            se.gravity = st.gravity;
+            se.drag = em.drag;
+            se.windTime = em.windTime;
+            se.wind = em.windVector;
+            se.follow = (!modelSpace && (em.flags & mp::kFlagFollowEmitter))
+                ? st.followMove * followShare : glm::vec3(0.0f);
+            se.center = modelSpace ? glm::vec3(0.0f) : st.pos;
+            se.killPastCenter = em.emitterType == mp::kEmitterSphere &&
+                                (em.flags & mp::kFlagSphereKillPastCenter);
+        }
+        const size_t left = mp::stepAndCompact(inst.particles.data(), inst.particles.size(),
+                                               ems.data(), numEm, s);
+        inst.particles.resize(left);
+        for (auto& st : inst.emitterStates) st.live = 0;
+        for (const auto& p : inst.particles)
+            if (p.emitterIndex < numEm) ++inst.emitterStates[p.emitterIndex].live;
+    };
+    for (int i = 0; i < sub.whole; ++i) runSubstep(wholeStep);
+    if (sub.last > 0.0f) runSubstep(sub.last);
 }
 
 // ---------------------------------------------------------------------------
-// Ribbon emitter simulation
+// Ribbon emitters (CRibbonEmitter)
 // ---------------------------------------------------------------------------
 void M2Renderer::resetRibbons(M2Instance& inst) {
     for (auto& edges : inst.ribbonEdges) edges.clear();
-    for (float& accum : inst.ribbonEdgeAccumulators) accum = 0.0f;
     for (auto& track : inst.ribbonTracks) track = M2Instance::RibbonTrack{};
 }
 
 void M2Renderer::updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt) {
     const auto& emitters = gpu.ribbonEmitters;
     if (emitters.empty()) return;
-
-    // Grow per-instance state arrays if needed
-    if (inst.ribbonEdges.size() != emitters.size()) {
-        inst.ribbonEdges.resize(emitters.size());
-    }
-    if (inst.ribbonEdgeAccumulators.size() != emitters.size()) {
-        inst.ribbonEdgeAccumulators.resize(emitters.size(), 0.0f);
-    }
-    if (inst.ribbonTracks.size() != emitters.size()) {
-        inst.ribbonTracks.resize(emitters.size());
-    }
-
-    // How far a spine may move in one step and still be the same trail. The
-    // stock emitter joins whatever its carrier does, and never has to: what it
-    // is attached to glides. Here a unit can be snapped - a large position
-    // correction, a re-attached kit, a carrier that teleports - and the step
-    // after it would lay a straight edge from the old spot to the new one,
-    // a line as long as the jump. Past this it starts a new strip instead.
-    // The fastest spell missiles fly 400 yd/s (7000 is "instant"), Charge 42.
-    constexpr float kRibbonSnapMinDist = 12.0f;
-    constexpr float kRibbonSnapMaxSpeed = 500.0f;
-    const float snapDist = std::max(kRibbonSnapMinDist, kRibbonSnapMaxSpeed * dt);
+    if (inst.ribbonEdges.size() != emitters.size()) inst.ribbonEdges.resize(emitters.size());
+    if (inst.ribbonTracks.size() != emitters.size()) inst.ribbonTracks.resize(emitters.size());
+    const auto& gsd = gpu.globalSequenceDurations;
+    const int seq = inst.currentSequenceIndex;
 
     for (size_t ri = 0; ri < emitters.size(); ri++) {
         const auto& em = emitters[ri];
-        auto& edges    = inst.ribbonEdges[ri];
-        auto& accum    = inst.ribbonEdgeAccumulators[ri];
-        auto& state    = inst.ribbonTracks[ri];
+        auto& edges = inst.ribbonEdges[ri];
+        auto& st = inst.ribbonTracks[ri];
 
-        // Determine bone world position for spine
-        glm::vec3 spineWorld = inst.position;
-        // Use referenced bone; fall back to bone 0 if out of range (common for spell effects
-        // where ribbon bone fields may be unset/garbage, e.g. bone=4294967295)
-        uint32_t boneIdx = em.bone;
-        if (boneIdx >= inst.boneMatrices.size() && !inst.boneMatrices.empty()) {
-            boneIdx = 0;
-        }
-        if (boneIdx < inst.boneMatrices.size()) {
-            glm::vec4 local(em.position.x, em.position.y, em.position.z, 1.0f);
-            spineWorld = glm::vec3(inst.modelMatrix * inst.boneMatrices[boneIdx] * local);
+        // The emitter's frame: bone * T(position) * world, no turn (0x828A00).
+        // A bone past the skeleton means the model's root.
+        glm::mat4 xf = inst.modelMatrix;
+        if (em.bone < inst.boneMatrices.size()) xf = xf * inst.boneMatrices[em.bone];
+        else if (!inst.boneMatrices.empty()) xf = xf * inst.boneMatrices[0];
+        xf = xf * glm::translate(glm::mat4(1.0f), em.position);
+        const glm::vec3 pos(xf[3]);
+        if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z)) continue;
+
+        // Tracks, each frame, in the playing sequence (0x828A00).
+        const float visibility = sampleStep(em.visibilityTrack, seq, inst.animTime,
+                                            inst.globalSequenceTime, gsd, 1.0f);
+        const glm::vec3 color = m2_track::sampleVec3(em.colorTrack, seq, inst.animTime,
+                                                     inst.globalSequenceTime, gsd, glm::vec3(1.0f));
+        // The model's alpha is applied when the trail is drawn, to all of it
+        // (a ribbon element's alpha is the model's times the track's), so a
+        // missile fading out at impact takes its whole trail with it.
+        const float alpha = m2_track::sampleFloat(em.alphaTrack, seq, inst.animTime,
+                                                  inst.globalSequenceTime, gsd, 1.0f);
+        // With no keys the heights stay at the 10 the emitter starts with (0x9808A0).
+        const float above = m2_track::sampleFloat(em.heightAboveTrack, seq, inst.animTime,
+                                                  inst.globalSequenceTime, gsd, 10.0f);
+        const float below = m2_track::sampleFloat(em.heightBelowTrack, seq, inst.animTime,
+                                                  inst.globalSequenceTime, gsd, 10.0f);
+        st.texSlot = static_cast<uint32_t>(std::max(0.0f, sampleStep(
+            em.texSlotTrack, seq, inst.animTime, inst.globalSequenceTime, gsd,
+            static_cast<float>(st.texSlot))));
+        const bool visible = visibility != 0.0f && !inst.emissionStopped;
+
+        // SetMatrix (0x97F940): the previous frame becomes the one before; a
+        // ribbon just shown (or new) starts with the previous frame equal to
+        // this one, so it never joins a spot it was not at.
+        const glm::vec3 axisY(xf[1]), axisZ(xf[2]);
+        if (visible) {
+            if (!st.hasPrev) {
+                st.prevPos = pos; st.prevY = axisY; st.prevZ = axisZ;
+                st.hasPrev = true;
+            } else {
+                st.prevPos = st.curPos; st.prevY = st.curY; st.prevZ = st.curZ;
+            }
+            st.curPos = pos; st.curY = axisY; st.curZ = axisZ;
         } else {
-            glm::vec4 local(em.position.x, em.position.y, em.position.z, 1.0f);
-            spineWorld = glm::vec3(inst.modelMatrix * local);
+            st.hasPrev = false;  // 0x97F570
         }
 
-        // Skip emitters that produce NaN positions (garbage bone/position data)
-        if (std::isnan(spineWorld.x) || std::isnan(spineWorld.y) || std::isnan(spineWorld.z))
-            continue;
+        // Update (0x980090).
+        const float rate = std::ceil(em.edgesPerSecond);
+        const float life = em.edgeLifetime;
+        float step = dt;
+        if (!st.stepped && rate > 0.0f) step = 1.0f / rate + 1e-4f;  // the first lays one edge
+        step = std::clamp(step, 0.0f, life);
+        while (!edges.empty() && edges.front().age + step > life) edges.pop_front();
 
-        // Evaluate animated tracks (use first available sequence key, or fallback value)
-        auto getFloatVal = [&](const pipeline::M2AnimationTrack& track, float fallback) -> float {
-            for (const auto& seq : track.sequences) {
-                if (!seq.floatValues.empty()) return seq.floatValues[0];
-            }
-            return fallback;
-        };
-        auto getVec3Val = [&](const pipeline::M2AnimationTrack& track, glm::vec3 fallback) -> glm::vec3 {
-            for (const auto& seq : track.sequences) {
-                if (!seq.vec3Values.empty()) return seq.vec3Values[0];
-            }
-            return fallback;
-        };
-
-        float visibility  = getFloatVal(em.visibilityTrack, 1.0f);
-        float heightAbove = getFloatVal(em.heightAboveTrack, 0.5f);
-        float heightBelow = getFloatVal(em.heightBelowTrack, 0.5f);
-        glm::vec3 color   = getVec3Val(em.colorTrack, glm::vec3(1.0f));
-        float alpha       = getFloatVal(em.alphaTrack, 1.0f);
-
-        // Age existing edges and remove expired ones
-        for (auto& e : edges) {
-            e.age += dt;
-            // Apply gravity
-            if (em.gravity != 0.0f) {
-                e.worldPos.z -= em.gravity * dt * dt * 0.5f;
-            }
-        }
-        while (!edges.empty() && edges.front().age >= em.edgeLifetime) {
-            edges.pop_front();
-        }
-        // The oldest edge left may have been joined to one that just expired.
-        if (!edges.empty()) edges.front().breakBefore = false;
-
-        // Emit new edges based on edgesPerSecond
-        if (visibility > 0.5f && !inst.emissionStopped) {
-            // The edges born during this step lie along the spine's path
-            // through it, each as old as the time since it was due - the
-            // stock CRibbonEmitter's interpolation between its previous and
-            // current frames. Laid all on the spine's new spot instead, a
-            // carrier moving a yard or more a frame (a charge, a missile)
-            // left its trail in clumps with straight runs between them.
-            bool joined = state.hasLastSpine;
-            if (joined) {
-                const glm::vec3 moved = spineWorld - state.lastSpine;
-                if (glm::dot(moved, moved) > snapDist * snapDist) joined = false;
-            }
-            if (!joined && !edges.empty()) state.breakPending = true;
-            const glm::vec3 from = joined ? state.lastSpine : spineWorld;
-
-            const float accumBefore = accum;
-            accum += em.edgesPerSecond * dt;
-            int born = 0;
-            while (accum >= 1.0f) {
-                accum -= 1.0f;
-                // When in the step this edge was due, from its start.
-                const float dueAt = (static_cast<float>(born + 1) - accumBefore) / em.edgesPerSecond;
-                ++born;
-                const float t = dt > 0.0f ? std::clamp(dueAt / dt, 0.0f, 1.0f) : 1.0f;
+        if (visible && st.hasPrev) {
+            const float total = step * rate + st.frac;
+            const float dist = glm::length(st.curPos - st.prevPos);
+            const glm::vec3 prevBottom = st.prevPos - st.prevY * below;
+            const glm::vec3 prevTop = st.prevPos + st.prevY * above;
+            const glm::vec3 curBottom = st.curPos - st.curY * below;
+            const glm::vec3 curTop = st.curPos + st.curY * above;
+            const glm::vec3 prevZd = st.prevZ * dist, curZd = st.curZ * dist;
+            const auto edgeAt = [&](float t, float age) {
                 M2Instance::RibbonEdge e;
-                e.worldPos    = glm::mix(from, spineWorld, t);
-                e.color       = color;
-                e.alpha       = alpha;
-                // Scaled into world units here, where the instance is at hand.
-                // The spine is a world position the model matrix produced, and
-                // these two were model-space lengths added straight to it - so
-                // a doodad placed at any scale but 1 got a trail the right
-                // length and the wrong width.
-                e.heightAbove = heightAbove * inst.scale;
-                e.heightBelow = heightBelow * inst.scale;
-                e.age         = std::max(dt - dueAt, 0.0f);
-                e.breakBefore = state.breakPending && !edges.empty();
-                state.breakPending = false;
-                edges.push_back(e);
-
-                // Diagnostic: log first ribbon edge per spell effect instance+emitter
-                if (gpu.isSpellEffect && edges.size() == 1) {
-                    LOG_INFO("SpellEffect: ribbon edge[0] for '", gpu.name,
-                             "' emitter=", ri, " pos=(", spineWorld.x, ",", spineWorld.y,
-                             ",", spineWorld.z, ") hA=", heightAbove, " hB=", heightBelow,
-                             " vis=", visibility, " eps=", em.edgesPerSecond,
-                             " edgeLife=", em.edgeLifetime, " bone=", em.bone);
-                }
-
-                // Cap trail length
-                if (edges.size() > 128) {
-                    edges.pop_front();
-                    edges.front().breakBefore = false;
+                e.bottom = mp::ribbonEdgePoint(prevBottom, curBottom, prevZd, curZd, t);
+                e.top = mp::ribbonEdgePoint(prevTop, curTop, prevZd, curZd, t);
+                e.color = color;
+                e.alpha = alpha;
+                e.age = age;
+                return e;
+            };
+            if (total >= 1.0f) {
+                const int n = static_cast<int>(std::floor(total - 1.0f)) + 1;
+                for (int k = 1; k <= n; ++k) {
+                    // When in the step edge k was due; it is that much older
+                    // than the step's end (the stock lays it at -t dt and the
+                    // ageing below adds the step).
+                    const float t = (static_cast<float>(k) - st.frac) / (total - st.frac);
+                    edges.push_back(edgeAt(t, -t * step));
                 }
             }
-            state.lastSpine = spineWorld;
-            state.hasLastSpine = true;
-            state.live = true;
-        } else {
-            accum = 0.0f;
-            // Hidden or stopped: the stock emitter forgets its previous frame
-            // (CRibbonEmitter clears it with visibility), so a ribbon shown
-            // again starts where it then is rather than joining the old spot.
-            state.hasLastSpine = false;
-            state.live = false;
-            if (!edges.empty()) state.breakPending = true;
+            st.frac = total - std::floor(total);
+            st.head = edgeAt(1.0f, 0.0f);
+            st.hasHead = true;
         }
+        for (auto& e : edges) {
+            const float rise = mp::ribbonGravityStep(e.age, step, em.gravity);
+            e.bottom.z += rise;
+            e.top.z += rise;
+            e.age += step;
+        }
+        // A ring as long as the life holds at the rate, plus two (0x9808A0).
+        const size_t ringMax = static_cast<size_t>(std::ceil(life * rate)) + 2;
+        while (edges.size() > ringMax) edges.pop_front();
+        st.stepped = true;
     }
 }
 
 // ---------------------------------------------------------------------------
-// Ribbon rendering
+// Ribbon rendering (0x980B70)
 // ---------------------------------------------------------------------------
 void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
     if (!ribbonPipeline_ || !ribbonAdditivePipeline_ || !ribbonVB_ || !ribbonVBMapped_) return;
@@ -641,205 +512,80 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     static const bool kNoRibbons = envFlagEnabled("WOWEE_M2_NO_RIBBONS");
     if (kNoRibbons) return;
 
-    // A ribbon's width runs across the trail and across the view, and it has to
-    // be computed per edge from the direction the trail is actually going.
-    //
-    // This used a fixed world Z, which is only right for a trail travelling
-    // horizontally. A flame licks upward, so its spine ran along the very axis
-    // the strip was being widened on: the top and bottom vertices of every
-    // edge landed on the spine itself, the quad collapsed, and the whole trail
-    // drew as one tall thin sliver with the fire texture smeared up it. That
-    // is the bonfire at Grom'gol standing four times the height of the huts
-    // behind it.
-    const glm::vec3 camPos = cachedCamPos_;
-    const glm::vec3 upWorld(0.0f, 0.0f, 1.0f);
-
-    float* dst     = static_cast<float*>(ribbonVBMapped_);
+    float* dst = static_cast<float*>(ribbonVBMapped_);
     size_t written = 0;
-
     ribbonDraws_.clear();
     auto& draws = ribbonDraws_;
 
     // Only the instances the update steps ribbons for - those on the emitter
-    // list; nothing else ever has an edge. This walked all 88k instances in
-    // the world, for a few dozen trails: 1.5-2.3 ms of the M2 worker, which is
-    // the critical path of renderWorld.
+    // list; nothing else ever has an edge.
     for (size_t instIdx : particleInstanceIndices_) {
         if (instIdx >= instances.size()) continue;
         const auto& inst = instances[instIdx];
         if (!inst.cachedModel) continue;
         const auto& gpu = *inst.cachedModel;
-        if (gpu.ribbonEmitters.empty()) continue;
-        if (inst.ribbonEdges.empty()) continue;
-        // On screen if the instance is (padded as the particle pass pads it),
-        // or if the line from the trail's head to its tail is - a missile's
-        // trail can reach well past its carrier's own sphere.
+        if (gpu.ribbonEmitters.empty() || inst.ribbonEdges.empty()) continue;
         const bool instOnScreen = inst.cachedPaddedRadius <= 0.0f ||
             cachedFrustum_.intersectsSphere(inst.cachedCullCenter, inst.cachedPaddedRadius + 30.0f);
 
-        for (size_t ri = 0; ri < gpu.ribbonEmitters.size(); ri++) {
-            if (ri >= inst.ribbonEdges.size()) continue;
+        for (size_t ri = 0; ri < gpu.ribbonEmitters.size() && ri < inst.ribbonEdges.size(); ri++) {
             const auto& edges = inst.ribbonEdges[ri];
-            if (edges.empty()) continue;
+            if (edges.empty()) continue;  // the stock draws nothing with no laid edge
+            const auto& st = inst.ribbonTracks[ri];
+            const auto& em = gpu.ribbonEmitters[ri];
             if (!instOnScreen) {
-                const glm::vec3& head = edges.back().worldPos;
-                const glm::vec3& tail = edges.front().worldPos;
-                const float width = std::max(std::abs(edges.back().heightAbove),
-                                             std::abs(edges.back().heightBelow));
+                const glm::vec3 head = 0.5f * (edges.back().bottom + edges.back().top);
+                const glm::vec3 tail = 0.5f * (edges.front().bottom + edges.front().top);
+                const float width = glm::length(edges.back().top - edges.back().bottom);
                 if (!cachedFrustum_.intersectsSphere(0.5f * (head + tail),
                         0.5f * glm::length(head - tail) + width + 10.0f)) continue;
             }
-
-            const auto& em = gpu.ribbonEmitters[ri];
-
-            // Select blend pipeline based on material blend mode
-            bool additive = false;
-            if (em.materialIndex < gpu.batches.size()) {
-                additive = (gpu.batches[em.materialIndex].blendMode >= 3);
-            }
+            // The material's blend (the model's material table, not a batch).
+            const bool additive = em.blendMode == 3 || em.blendMode == 4;
             VkPipeline pipe = additive ? ribbonAdditivePipeline_ : ribbonPipeline_;
+            VkDescriptorSet texSet = (ri < gpu.ribbonTexSets.size()) ? gpu.ribbonTexSets[ri] : VK_NULL_HANDLE;
+            if (!texSet) continue;
 
-            // Descriptor set for texture
-            VkDescriptorSet texSet = (ri < gpu.ribbonTexSets.size())
-                                     ? gpu.ribbonTexSets[ri] : VK_NULL_HANDLE;
-            if (!texSet) {
-                if (gpu.isSpellEffect) {
-                    static bool ribbonTexWarn = false;
-                    if (!ribbonTexWarn) {
-                        LOG_WARNING("SpellEffect: ribbon[", ri, "] for '", gpu.name,
-                                    "' has null texSet - descriptor pool may be exhausted");
-                        ribbonTexWarn = true;
-                    }
+            // The texture cell and its rectangle (0x97F510): u runs along the
+            // trail by age over the edge life, one cell wide; the bottom
+            // edge is v = 0, the top v = 1, one cell tall.
+            const uint32_t cols = std::max<uint16_t>(em.textureCols, 1);
+            const uint32_t rows = std::max<uint16_t>(em.textureRows, 1);
+            const float cellW = 1.0f / static_cast<float>(cols);
+            const float cellH = 1.0f / static_cast<float>(rows);
+            const float u0 = static_cast<float>(st.texSlot % cols) * cellW;
+            const float v0 = static_cast<float>(st.texSlot / cols) * cellH;
+            const float invLife = em.edgeLifetime > 0.0f ? 1.0f / em.edgeLifetime : 0.0f;
+            const float modelAlpha = std::clamp(inst.fade, 0.0f, 1.0f);
+            if (!(modelAlpha > 0.0f)) continue;
+
+            const uint32_t firstVert = static_cast<uint32_t>(written);
+            const auto put = [&](const M2Instance::RibbonEdge& e) {
+                if (written + 2 > MAX_RIBBON_VERTS) return;
+                const float u = e.age * cellW * invLife + u0;
+                const glm::vec3* ends[2] = {&e.bottom, &e.top};
+                const float vs[2] = {v0, v0 + cellH};
+                for (int k = 0; k < 2; ++k) {
+                    float* d = dst + written * 9;
+                    d[0] = ends[k]->x; d[1] = ends[k]->y; d[2] = ends[k]->z;
+                    d[3] = e.color.r; d[4] = e.color.g; d[5] = e.color.b;
+                    d[6] = e.alpha * modelAlpha;
+                    d[7] = u;
+                    d[8] = vs[k];
+                    ++written;
                 }
-                continue;
-            }
-
-            // The live head: an emitting ribbon runs on to the emitter itself,
-            // as the stock one does with its current edge, rather than ending
-            // at the last edge it laid down.
-            const M2Instance::RibbonTrack* state =
-                ri < inst.ribbonTracks.size() ? &inst.ribbonTracks[ri] : nullptr;
-            const bool withHead = state && state->live && !state->breakPending &&
-                glm::distance(state->lastSpine, edges.back().worldPos) > 1e-3f;
-
-            // One triangle strip per unbroken run of edges: 2 verts per edge
-            // (top + bottom). A run ends where the trail was broken - a
-            // carrier that snapped, a ribbon hidden and shown again - so the
-            // two sides of the gap are never joined by a stretched quad.
-            size_t runStart = 0;
-            while (runStart < edges.size()) {
-                size_t runEnd = runStart + 1;
-                while (runEnd < edges.size() && !edges[runEnd].breakBefore) ++runEnd;
-                auto& strip = ribbonStrip_;
-                strip.assign(edges.begin() + static_cast<std::ptrdiff_t>(runStart),
-                             edges.begin() + static_cast<std::ptrdiff_t>(runEnd));
-                if (withHead && runEnd == edges.size()) {
-                    M2Instance::RibbonEdge head = edges.back();
-                    head.worldPos = state->lastSpine;
-                    head.age = 0.0f;
-                    strip.push_back(head);
-                }
-                runStart = runEnd;
-                if (strip.size() < 2) continue;
-
-                uint32_t firstVert = static_cast<uint32_t>(written);
-                for (size_t ei = 0; ei < strip.size(); ei++) {
-                    if (written + 2 > MAX_RIBBON_VERTS) break;
-                    const auto& e = strip[ei];
-                    // The texture runs along the trail by age, as the stock
-                    // emitter maps it: u = age / lifetime, 0 at the emitter
-                    // and 1 where the edges expire. Spell trails are drawn
-                    // with gradients bright at u = 0 (Charge's GRAD3A), so a
-                    // trail fades out behind its carrier. Spread by edge index
-                    // from the oldest it was reversed and stretched: the far
-                    // end of a long trail - the spot a charge started from -
-                    // burned brightest and the end at the warrior was black.
-                    // The stock vertex colour is the emitter's colour and
-                    // alpha, unfaded; the texture does the fading.
-                    const float u = (em.edgeLifetime > 0.0f)
-                        ? std::clamp(e.age / em.edgeLifetime, 0.0f, 1.0f) : 0.0f;
-                    const float a = e.alpha;
-
-                    // The trail's own direction here, from the edges either side.
-                    const glm::vec3& prev = strip[ei > 0 ? ei - 1 : ei].worldPos;
-                    const glm::vec3& next = strip[ei + 1 < strip.size() ? ei + 1 : ei].worldPos;
-                    glm::vec3 spineDir = next - prev;
-                    float spineLen = glm::length(spineDir);
-                    // Widen across the trail and across the line of sight. Where
-                    // the trail doubles back on itself or points straight at the
-                    // eye there is no such direction, and world up is as good an
-                    // answer as any.
-                    glm::vec3 side = upWorld;
-                    if (spineLen > 1e-5f) {
-                        glm::vec3 toEye = camPos - e.worldPos;
-                        glm::vec3 cross = glm::cross(spineDir / spineLen, toEye);
-                        float crossLen = glm::length(cross);
-                        if (crossLen > 1e-5f) side = cross / crossLen;
-                    }
-
-                    // Top vertex (one side of the spine)
-                    glm::vec3 top = e.worldPos + side * e.heightAbove;
-                    dst[written * 9 + 0] = top.x;
-                    dst[written * 9 + 1] = top.y;
-                    dst[written * 9 + 2] = top.z;
-                    dst[written * 9 + 3] = e.color.r;
-                    dst[written * 9 + 4] = e.color.g;
-                    dst[written * 9 + 5] = e.color.b;
-                    dst[written * 9 + 6] = a;
-                    dst[written * 9 + 7] = u;
-                    dst[written * 9 + 8] = 0.0f; // v = top
-                    written++;
-
-                    // Bottom vertex (the other side)
-                    glm::vec3 bot = e.worldPos - side * e.heightBelow;
-                    dst[written * 9 + 0] = bot.x;
-                    dst[written * 9 + 1] = bot.y;
-                    dst[written * 9 + 2] = bot.z;
-                    dst[written * 9 + 3] = e.color.r;
-                    dst[written * 9 + 4] = e.color.g;
-                    dst[written * 9 + 5] = e.color.b;
-                    dst[written * 9 + 6] = a;
-                    dst[written * 9 + 7] = u;
-                    dst[written * 9 + 8] = 1.0f; // v = bottom
-                    written++;
-                }
-
-                uint32_t vertCount = static_cast<uint32_t>(written) - firstVert;
-                if (vertCount >= 4) {
-                    draws.push_back({.texSet = texSet, .pipeline = pipe, .firstVertex = firstVert, .vertexCount = vertCount});
-                } else {
-                    // Rollback if too few verts
-                    written = firstVert;
-                }
+            };
+            // Oldest first, then the live head at the emitter.
+            for (const auto& e : edges) put(e);
+            if (st.hasHead) put(st.head);
+            const uint32_t vertCount = static_cast<uint32_t>(written) - firstVert;
+            if (vertCount >= 4) {
+                draws.push_back({.texSet = texSet, .pipeline = pipe, .firstVertex = firstVert, .vertexCount = vertCount});
+            } else {
+                written = firstVert;
             }
         }
     }
-
-    // Periodic diagnostic: spell ribbon draw count
-    {
-        static uint32_t ribbonDiagFrame_ = 0;
-        if (++ribbonDiagFrame_ % 300 == 1) {
-            size_t spellRibbonDraws = 0;
-            size_t spellRibbonVerts = 0;
-            for (size_t instIdx : particleInstanceIndices_) {
-                if (instIdx >= instances.size()) continue;
-                const auto& inst = instances[instIdx];
-                if (!inst.cachedModel || !inst.cachedModel->isSpellEffect) continue;
-                for (const auto& ribbonEdge : inst.ribbonEdges) {
-                    if (ribbonEdge.size() >= 2) {
-                        spellRibbonDraws++;
-                        spellRibbonVerts += ribbonEdge.size() * 2;
-                    }
-                }
-            }
-            if (spellRibbonDraws > 0 || !draws.empty()) {
-                LOG_INFO("SpellEffect: ", spellRibbonDraws, " spell ribbon strips (",
-                         spellRibbonVerts, " verts), total draws=", draws.size(),
-                         " written=", written);
-            }
-        }
-    }
-
     if (draws.empty() || written == 0) return;
 
     VkExtent2D ext = vkCtx_->getSwapchainExtent();
@@ -870,221 +616,11 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     }
 }
 
-size_t M2Renderer::writeParticleVertsCpu() {
-    // Collect all particles from all instances, grouped by texture+blend.
-    auto& groups = particleGroups_;
-
-    // Written straight into the mapped buffer rather than accumulated into a
-    // vector per group and copied in afterwards; see ParticleRun.
-    float* const vbBase = static_cast<float*>(m2ParticleVBMapped_);
-    uint32_t vbWritten = 0;
-    ParticleGroup* runGroup = nullptr;
-
-    size_t totalParticles = 0;
-
-    for (size_t idx : particleDrawOrder_) {
-        auto& inst = instances[idx];
-        const auto& gpu = *inst.cachedModel;
-
-
-        // Cache the last emitter's per-emitter state so adjacent particles
-        // sharing an emitter (the common case - particles from one source
-        // cluster together) skip the texture/key/map-lookup work entirely.
-        int lastEmitterIdx = -1;
-        VkTexture* cachedTex = nullptr;
-        uint16_t cachedTilesX = 1, cachedTilesY = 1;
-        uint32_t cachedTotalTiles = 1;
-        uint16_t cachedBlendType = 0;
-        const pipeline::M2ParticleEmitter* cachedEm = nullptr;
-        ParticleGroup* cachedGroup = nullptr;
-        // animFrame depends only on inst.animTime + totalTiles, so it's also
-        // emitter-stable within one frame.
-        uint32_t cachedAnimFrame = 0;
-        float cachedTilesFloat = 1.0f;
-        bool cachedIsTiled = false;
-        float invAnimMs = 1.0f / 1000.0f;
-        // The emitter's lifetime curves as tables (see M2ModelGPU::ParticleCurve);
-        // null only if the update never emitted for this model, when the
-        // FBlocks are walked as before.
-        using Curve = M2ModelGPU::ParticleCurve;
-        const bool haveCurves = gpu.particleCurves.size() == gpu.particleEmitters.size();
-        const Curve* cachedCurve = nullptr;
-        // The model's class, the same for every particle it has.
-        const bool isFlameFixture = gpu.isLanternLike || gpu.isTorch ||
-                                    gpu.isBrazierOrFire || gpu.isKoboldFlame;
-        const bool isPlainDoodad = !gpu.isSpellEffect && !gpu.isFireflyEffect && !isFlameFixture;
-
-        // How far this instance's particles actually reach, against how far
-        // the model says it extends. A fire twice the height of the hut behind
-        // it is either particles outliving their authored lifespan, flying at
-        // the wrong speed, or drawn at the wrong size - and none of those says
-        // which model it is. This does.
-        float highestParticleZ = -std::numeric_limits<float>::max();
-        float widestParticle = 0.0f;
-
-        for (const auto& p : inst.particles) {
-            if (p.emitterIndex >= gpu.particleEmitters.size()) continue;
-
-            if (p.emitterIndex != lastEmitterIdx) {
-                lastEmitterIdx = p.emitterIndex;
-                cachedEm = &gpu.particleEmitters[p.emitterIndex];
-                cachedCurve = haveCurves ? &gpu.particleCurves[p.emitterIndex] : nullptr;
-
-                cachedTex = whiteTexture_.get();
-                if (p.emitterIndex < static_cast<int>(gpu.particleTextures.size())) {
-                    cachedTex = gpu.particleTextures[p.emitterIndex];
-                }
-                cachedTilesX = std::max<uint16_t>(cachedEm->textureCols, 1);
-                cachedTilesY = std::max<uint16_t>(cachedEm->textureRows, 1);
-                cachedTotalTiles = static_cast<uint32_t>(cachedTilesX) *
-                                   static_cast<uint32_t>(cachedTilesY);
-                cachedBlendType = cachedEm->blendingType;
-                ParticleGroupKey key{.texture = cachedTex, .blendType = static_cast<uint8_t>(cachedBlendType), .tilesX = cachedTilesX, .tilesY = cachedTilesY};
-                cachedGroup = &groups[key];
-                cachedGroup->texture = cachedTex;
-                cachedGroup->blendType = cachedBlendType;
-                cachedGroup->tilesX = cachedTilesX;
-                cachedGroup->tilesY = cachedTilesY;
-                if (cachedGroup->preAllocSet == VK_NULL_HANDLE &&
-                    p.emitterIndex < static_cast<int>(gpu.particleTexSets.size())) {
-                    cachedGroup->preAllocSet = gpu.particleTexSets[p.emitterIndex];
-                }
-
-                cachedIsTiled = (cachedEm->flags & kParticleFlagTiled) && cachedTotalTiles > 1;
-                if (cachedIsTiled) {
-                    float animSeconds = inst.animTime * invAnimMs;
-                    cachedAnimFrame = static_cast<uint32_t>(std::floor(animSeconds * cachedTotalTiles))
-                                      % cachedTotalTiles;
-                    cachedTilesFloat = static_cast<float>(cachedTotalTiles);
-                }
-            }
-
-            const auto& em = *cachedEm;
-            float lifeRatio = p.life / std::max(p.maxLife, 0.001f);
-            glm::vec3 color;
-            float alpha, rawScale;
-            if (cachedCurve) {
-                const float f = glm::clamp(lifeRatio, 0.0f, 1.0f) * static_cast<float>(Curve::kSteps);
-                const int k = std::min(static_cast<int>(f), Curve::kSteps - 1);
-                const float t = f - static_cast<float>(k);
-                const glm::vec4 ca = glm::mix(cachedCurve->colorAlpha[k], cachedCurve->colorAlpha[k + 1], t);
-                color = glm::vec3(ca);
-                alpha = ca.a;
-                rawScale = glm::mix(cachedCurve->scale[k], cachedCurve->scale[k + 1], t);
-            } else {
-                color = interpFBlockVec3(em.particleColor, lifeRatio);
-                alpha = std::min(interpFBlockFloat(em.particleAlpha, lifeRatio), 1.0f);
-                rawScale = interpFBlockFloat(em.particleScale, lifeRatio);
-            }
-
-            if (isPlainDoodad) {
-                color = glm::mix(color, glm::vec3(1.0f), 0.7f);
-                if (rawScale > 2.0f) alpha *= 0.02f;
-                if (cachedBlendType == 3 || cachedBlendType == 4) alpha *= 0.05f;
-            }
-            // Flame fixtures: the authored curves can leave a particle with
-            // effectively no colour or alpha for most of its life. CHANDELIER01
-            // ramps scale from zero over a six second life and its candles spend
-            // nearly all of that time contributing nothing - and because these
-            // draw additively, a near-black particle adds literally nothing to
-            // the frame. Floor colour and alpha so a lit fixture always shows
-            // flame. Floors only lift the dim end, leaving torches and candles
-            // that already read correctly untouched.
-            if (isFlameFixture) {
-                color = glm::max(color, glm::vec3(0.50f, 0.26f, 0.09f));
-                alpha = std::max(alpha, 0.30f);
-            }
-
-            float scale = rawScale;
-            if (gpu.isSpellEffect) {
-                // The authored size, as every other emitter draws it. This
-                // was raised by half on top, which nothing in the data asks
-                // for: kits on the caster's hands and missiles came out a
-                // size larger than the stock client's. Only the sub-pixel
-                // floor the flame fixtures also get stays.
-                scale = std::max(rawScale, 0.15f);
-            } else if (!gpu.isFireflyEffect) {
-                scale = std::min(rawScale, 1.5f);
-                // Candle flames are authored at a fraction of a unit, which lands
-                // sub-pixel at any normal viewing distance - the fixture glows
-                // with no visible flame. Small effect-heavy models dodge this by
-                // being classified as spell effects (three or more emitters and
-                // few vertices) and picking up that path's floor, but a
-                // chandelier is a real fixture at 370 vertices and misses the
-                // cut, so its five candles rendered as nothing. Give flame
-                // fixtures the same floor without making them spell effects,
-                // which would also change how they blend.
-                if (isFlameFixture) {
-                    scale = std::max(scale, 0.15f);
-                }
-            }
-
-            if (vbWritten >= MAX_M2_PARTICLE_VERTS) break;
-            // A run per stretch of particles sharing a group. The group only
-            // changes when the emitter does, and particles from one emitter
-            // are adjacent, so this closes a run about once per emitter.
-            if (cachedGroup != runGroup) {
-                runGroup = cachedGroup;
-                particleRuns_.push_back({.group = cachedGroup, .first = vbWritten, .count = 0});
-            }
-            highestParticleZ = std::max(highestParticleZ, p.position.z);
-            widestParticle = std::max(widestParticle, scale);
-
-            float* vd = vbBase + static_cast<size_t>(vbWritten) * 9;
-            vd[0] = p.position.x;
-            vd[1] = p.position.y;
-            vd[2] = p.position.z;
-            vd[3] = color.r;
-            vd[4] = color.g;
-            vd[5] = color.b;
-            vd[6] = alpha;
-            vd[7] = scale;
-            float tileIndex = p.tileIndex;
-            if (cachedIsTiled) {
-                tileIndex = p.tileIndex + static_cast<float>(cachedAnimFrame);
-                while (tileIndex >= cachedTilesFloat) {
-                    tileIndex -= cachedTilesFloat;
-                }
-            }
-            vd[8] = tileIndex;
-            ++vbWritten;
-            ++particleRuns_.back().count;
-            totalParticles++;
-        }
-
-        // Said once per model, on an absolute reach rather than a ratio
-        // against the model's own bounds. A bonfire's authored box is 25 to 32
-        // yards tall - it has to hold the flame's full extent - so a ratio
-        // test can never trip on the one model anybody is complaining about.
-        // Nothing that stands on the ground should be throwing particles eight
-        // yards into the air.
-        if (highestParticleZ > -std::numeric_limits<float>::max()) {
-            const float reach = highestParticleZ - inst.position.z;
-            if (reach > 8.0f) {
-                static std::set<std::string> saidTall;
-                if (saidTall.insert(gpu.name).second) {
-                    LOG_WARNING("Particles reach ", reach, " yd above '", gpu.name,
-                                "' (model bound ", gpu.boundMax.z, " yd, scale ", inst.scale,
-                                ", ", gpu.particleEmitters.size(), " emitters, ",
-                                inst.particles.size(), " live, largest ", widestParticle, " yd)");
-                }
-            }
-        }
-    }
-    return totalParticles;
-}
-
+// ---------------------------------------------------------------------------
+// Particle records (0x97E730 / 0x97BE80)
+// ---------------------------------------------------------------------------
 size_t M2Renderer::writeParticleRecordsGpu(uint32_t frame) {
-    // The same walk as writeParticleVertsCpu - same emitters, same order,
-    // same runs and groups - writing 24 bytes per particle instead of 36,
-    // with nothing worked out per particle but its life ratio and tile.
-    // Colour, alpha and size are m2_particle_gpu.vert's, from the emitter's
-    // curve table uploaded here once per frame per distinct curve (instances
-    // of one model share theirs) and the class flags in the record.
-    using Curve = M2ModelGPU::ParticleCurve;
-    using m2_particle::ParticleRecord;
-    static_assert(Curve::kSteps == m2_particle::kCurveSteps,
-                  "the shader's curve layout assumes ParticleCurve's resolution");
+    using mp::ParticleRecord;
     auto& groups = particleGroups_;
     auto* const recBase = static_cast<ParticleRecord*>(particleRecordMapped_[frame]);
     auto* const curveData = static_cast<glm::vec4*>(particleCurveMapped_[frame]);
@@ -1093,67 +629,107 @@ size_t M2Renderer::writeParticleRecordsGpu(uint32_t frame) {
     uint32_t curvesUsed = 0;
     particleCurveSlots_.clear();
     ParticleGroup* runGroup = nullptr;
-    constexpr float invAnimMs = 1.0f / 1000.0f;
+    const glm::vec3 camPos = cachedCamPos_;
 
     for (size_t idx : particleDrawOrder_) {
         if (written >= budget) break;
         const auto& inst = instances[idx];
         const auto& gpu = *inst.cachedModel;
-        // Made by the model's first emit, so a model with live particles has
-        // them; the CPU path's FBlock fallback has nothing to do here.
-        if (gpu.particleCurves.size() != gpu.particleEmitters.size()) continue;
-        const bool isFlameFixture = gpu.isLanternLike || gpu.isTorch ||
-                                    gpu.isBrazierOrFire || gpu.isKoboldFlame;
+        const size_t numEm = gpu.particleEmitters.size();
+        if (gpu.particleCurves.size() != numEm * mp::kCurveVec4s) continue;
+        if (inst.emitterStates.size() != numEm) continue;
+        const float modelAlpha = std::clamp(inst.fade, 0.0f, 1.0f);
 
-        int lastEmitterIdx = -1;
+        int lastEmitter = -1;
         bool emitterDrawn = false;
-        ParticleGroup* cachedGroup = nullptr;
-        uint32_t cachedCurveBase = 0;
-        uint32_t cachedFlags = 0;
-        uint32_t cachedTotalTiles = 1;
-        uint32_t cachedAnimFrame = 0;
-        bool cachedIsTiled = false;
-        float highestParticleZ = -std::numeric_limits<float>::max();
+        ParticleGroup* group = nullptr;
+        const pipeline::M2ParticleEmitter* em = nullptr;
+        const M2Instance::EmitterState* st = nullptr;
+        uint32_t curveBase = 0;
+        uint32_t emitterFirst = 0;
+        uint32_t emitterCount = 0;
+        uint32_t emitterCap = 0;
+        bool modelSpace = false, head = false, tail = false, spins = false, lit = false,
+             unfogged = false, sortDepth = false;
+        mp::RecordKind headKind = mp::kKindBillboard;
+        glm::vec3 xyQuat(0.0f);
+        float sizeScale = 1.0f;
+        glm::mat3 rot(1.0f);
+
+        const auto closeEmitter = [&]() {
+            // Flag 0x2: back to front within the emitter (0x97E580).
+            if (sortDepth && written > emitterFirst + 1) {
+                std::sort(recBase + emitterFirst, recBase + written,
+                          [&](const ParticleRecord& a, const ParticleRecord& b) {
+                              const glm::vec3 da = a.position - camPos, db = b.position - camPos;
+                              return glm::dot(da, da) > glm::dot(db, db);
+                          });
+            }
+        };
 
         for (const auto& p : inst.particles) {
-            if (p.emitterIndex >= gpu.particleEmitters.size()) continue;
-
-            if (p.emitterIndex != lastEmitterIdx) {
-                lastEmitterIdx = p.emitterIndex;
-                const auto& em = gpu.particleEmitters[p.emitterIndex];
+            if (p.emitterIndex >= numEm) continue;
+            if (p.emitterIndex != lastEmitter) {
+                closeEmitter();
+                lastEmitter = p.emitterIndex;
+                em = &gpu.particleEmitters[p.emitterIndex];
+                st = &inst.emitterStates[p.emitterIndex];
+                emitterFirst = written;
+                emitterCount = 0;
 
                 VkTexture* tex = whiteTexture_.get();
-                if (p.emitterIndex < static_cast<int>(gpu.particleTextures.size())) {
+                if (p.emitterIndex < static_cast<int>(gpu.particleTextures.size()))
                     tex = gpu.particleTextures[p.emitterIndex];
-                }
-                const uint16_t tilesX = std::max<uint16_t>(em.textureCols, 1);
-                const uint16_t tilesY = std::max<uint16_t>(em.textureRows, 1);
-                cachedTotalTiles = static_cast<uint32_t>(tilesX) * static_cast<uint32_t>(tilesY);
-                const uint16_t blendType = em.blendingType;
-                ParticleGroupKey key{.texture = tex, .blendType = static_cast<uint8_t>(blendType), .tilesX = tilesX, .tilesY = tilesY};
-                cachedGroup = &groups[key];
-                cachedGroup->texture = tex;
-                cachedGroup->blendType = blendType;
-                cachedGroup->tilesX = tilesX;
-                cachedGroup->tilesY = tilesY;
-                if (cachedGroup->preAllocSet == VK_NULL_HANDLE &&
+                const uint16_t tilesX = std::max<uint16_t>(em->textureCols, 1);
+                const uint16_t tilesY = std::max<uint16_t>(em->textureRows, 1);
+                const uint8_t blendType = static_cast<uint8_t>(std::min<uint8_t>(em->blendingType, 6));
+                ParticleGroupKey key{.texture = tex, .blendType = blendType, .tilesX = tilesX, .tilesY = tilesY};
+                group = &groups[key];
+                group->texture = tex;
+                group->blendType = blendType;
+                group->tilesX = tilesX;
+                group->tilesY = tilesY;
+                if (group->preAllocSet == VK_NULL_HANDLE &&
                     p.emitterIndex < static_cast<int>(gpu.particleTexSets.size())) {
-                    cachedGroup->preAllocSet = gpu.particleTexSets[p.emitterIndex];
+                    group->preAllocSet = gpu.particleTexSets[p.emitterIndex];
                 }
 
-                cachedIsTiled = (em.flags & kParticleFlagTiled) && cachedTotalTiles > 1;
-                if (cachedIsTiled) {
-                    float animSeconds = inst.animTime * invAnimMs;
-                    cachedAnimFrame = static_cast<uint32_t>(std::floor(animSeconds * cachedTotalTiles))
-                                      % cachedTotalTiles;
+                const uint32_t f = em->flags;
+                modelSpace = (f & mp::kFlagModelSpace) != 0;
+                head = (f & mp::kFlagHead) != 0;
+                tail = (f & mp::kFlagTail) != 0;
+                spins = mp::emitterSpins(*em);
+                lit = !(f & mp::kFlagUnlit);
+                unfogged = (f & mp::kFlagUnfogged) != 0;
+                sortDepth = (f & mp::kFlagSortByDepth) != 0;
+                // The stock draws at most 0x4000 vertices an emitter, four a quad.
+                {
+                    const uint32_t quads = (head ? 1u : 0u) + (tail ? 1u : 0u);
+                    emitterCap = quads ? 0x4000u / (4u * quads) : 0u;
                 }
-                cachedFlags = m2_particle::lookFlagsFor(gpu.isSpellEffect, gpu.isFireflyEffect,
-                                                        isFlameFixture, blendType);
+                rot = glm::mat3(st->xf);
+                // Flag 0x20: sizes grow with the emitter matrix's scale (+0x1EC).
+                sizeScale = (f & mp::kFlagInheritScale) ? glm::length(glm::vec3(st->xf[0])) : 1.0f;
+                headKind = (f & mp::kFlagXYQuad) ? mp::kKindXYQuad : mp::kKindBillboard;
+                if (headKind == mp::kKindXYQuad) {
+                    // The quad lies in the particle space's XY plane: the
+                    // world's for world-space particles, the emitter's
+                    // (normalised) for model-space ones.
+                    glm::quat q(1.0f, 0.0f, 0.0f, 0.0f);
+                    if (modelSpace) {
+                        const glm::vec3 ax = glm::normalize(glm::vec3(st->xf[0]));
+                        const glm::vec3 ay = glm::normalize(glm::vec3(st->xf[1]));
+                        const glm::vec3 az = glm::normalize(glm::cross(ax, ay));
+                        q = glm::quat_cast(glm::mat3(ax, glm::cross(az, ax), az));
+                    }
+                    if (q.w < 0.0f) q = -q;
+                    xyQuat = glm::vec3(q.x, q.y, q.z);
+                }
 
-                // This emitter's curve, uploaded the first time this frame
-                // anything uses it.
-                const Curve& curve = gpu.particleCurves[p.emitterIndex];
-                auto [slot, fresh] = particleCurveSlots_.try_emplace(&curve, 0u);
+                // This emitter's curves, uploaded the first time this frame
+                // anything uses them.
+                const glm::vec4* curve = gpu.particleCurves.data() + p.emitterIndex * mp::kCurveVec4s;
+                auto [slot, fresh] = particleCurveSlots_.try_emplace(curve, 0u);
                 if (fresh) {
                     if (curvesUsed >= kMaxParticleCurvesPerFrame) {
                         particleCurveSlots_.erase(slot);
@@ -1166,111 +742,101 @@ size_t M2Renderer::writeParticleRecordsGpu(uint32_t frame) {
                         }
                         continue;
                     }
-                    slot->second = curvesUsed * m2_particle::kCurveVec4s;
-                    m2_particle::packCurve(curve.colorAlpha, curve.scale, curveData + slot->second);
+                    slot->second = curvesUsed * mp::kCurveVec4s;
+                    std::memcpy(static_cast<void*>(curveData + slot->second), curve,
+                                sizeof(glm::vec4) * mp::kCurveVec4s);
                     ++curvesUsed;
                 }
-                cachedCurveBase = slot->second;
-                emitterDrawn = true;
+                curveBase = slot->second;
+                emitterDrawn = head || tail;
             }
-            if (!emitterDrawn) continue;
+            if (!emitterDrawn || emitterCount >= emitterCap) continue;
 
-            if (written >= budget) break;
-            if (cachedGroup != runGroup) {
-                runGroup = cachedGroup;
-                particleRuns_.push_back({.group = cachedGroup, .first = written, .count = 0});
+            const float age = p.life;
+            const mp::Twinkle tw = mp::twinkle(*em, p.phase, age);
+            if (!tw.visible) continue;
+            const float r = age / std::max(p.maxLife, 0.001f);
+            const glm::vec2 size = p.sizeVary * (tw.scale * sizeScale);
+            const glm::vec3 wpos = modelSpace ? glm::vec3(st->xf * glm::vec4(p.position, 1.0f)) : p.position;
+            const glm::vec3 wvel = modelSpace ? rot * p.velocity : p.velocity;
+            const float angle = spins ? age * p.spinSpeed + p.spinBase : 0.0f;
+
+            const uint32_t need = (head ? 1u : 0u) + (tail ? 1u : 0u);
+            if (written + need > budget) break;
+            if (group != runGroup) {
+                runGroup = group;
+                particleRuns_.push_back({.group = group, .first = written, .count = 0});
             }
-            highestParticleZ = std::max(highestParticleZ, p.position.z);
-
-            ParticleRecord& r = recBase[written];
-            r.position = p.position;
-            r.lifeRatio = p.life / std::max(p.maxLife, 0.001f);
-            r.curveBase = cachedCurveBase;
-            r.tileFlags = m2_particle::packTileFlags(
-                m2_particle::particleTile(p.tileIndex, cachedIsTiled, cachedAnimFrame, cachedTotalTiles),
-                cachedFlags);
-            ++written;
-            ++particleRuns_.back().count;
-        }
-
-        // The same once-per-model report as the CPU path's. The size is not
-        // worked out here any more, so the largest is found only when the
-        // report is actually made.
-        if (highestParticleZ > -std::numeric_limits<float>::max()) {
-            const float reach = highestParticleZ - inst.position.z;
-            if (reach > 8.0f) {
-                static std::set<std::string> saidTall;
-                if (saidTall.insert(gpu.name).second) {
-                    float widestParticle = 0.0f;
-                    for (const auto& p : inst.particles) {
-                        if (p.emitterIndex >= gpu.particleEmitters.size()) continue;
-                        const auto& c = gpu.particleCurves[p.emitterIndex];
-                        const uint32_t flags = m2_particle::lookFlagsFor(
-                            gpu.isSpellEffect, gpu.isFireflyEffect, isFlameFixture,
-                            gpu.particleEmitters[p.emitterIndex].blendingType);
-                        widestParticle = std::max(widestParticle, m2_particle::lookFromCurve(
-                            c.colorAlpha, c.scale, p.life / std::max(p.maxLife, 0.001f), flags).scale);
-                    }
-                    LOG_WARNING("Particles reach ", reach, " yd above '", gpu.name,
-                                "' (model bound ", gpu.boundMax.z, " yd, scale ", inst.scale,
-                                ", ", gpu.particleEmitters.size(), " emitters, ",
-                                inst.particles.size(), " live, largest ", widestParticle, " yd)");
+            if (head) {
+                ParticleRecord& rec = recBase[written++];
+                rec.position = wpos;
+                rec.lifeRatio = r;
+                rec.sizeX = size.x;
+                rec.sizeY = size.y;
+                rec.angle = angle;
+                rec.curveBase = curveBase;
+                // A head cell from its curve, else the particle's random cell.
+                int32_t cell = mp::particleCell(em->headCell, r);
+                if (cell < 0) cell = p.tileIndex;
+                mp::RecordKind kind = headKind;
+                rec.vec = xyQuat;
+                // Flag 0x4: stretched along the velocity, while it has one.
+                if ((em->flags & mp::kFlagVelocityQuad) &&
+                    glm::dot(p.velocity, p.velocity) > 2.384185791015625e-07f) {
+                    kind = mp::kKindVelocity;
+                    rec.vec = -wvel;
                 }
+                rec.packed = mp::packRecord(static_cast<uint32_t>(std::max(cell, 0)), kind,
+                                            spins && kind != mp::kKindVelocity, lit, unfogged, modelAlpha);
+                ++particleRuns_.back().count;
             }
+            if (tail) {
+                ParticleRecord& rec = recBase[written++];
+                float tailLen = em->tailLength;
+                if ((em->flags & mp::kFlagClampTailToAge) && age < tailLen) tailLen = age;
+                rec.position = wpos;
+                rec.lifeRatio = r;
+                rec.vec = -wvel * tailLen;
+                rec.sizeX = size.x;
+                rec.sizeY = size.y;
+                rec.angle = 0.0f;
+                rec.curveBase = curveBase;
+                const int32_t cell = std::max(mp::particleCell(em->tailCell, r), 0);
+                rec.packed = mp::packRecord(static_cast<uint32_t>(cell), mp::kKindTail, false, lit,
+                                            unfogged, modelAlpha);
+                ++particleRuns_.back().count;
+            }
+            ++emitterCount;
         }
+        closeEmitter();
     }
     return written;
 }
 
 void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
-    if (!particlePipeline_ || !m2ParticleVB_) return;
     // Diagnostic: WOWEE_M2_NO_PARTICLES=1 drops every M2 particle draw, which
     // tells a particle artifact apart from a skinned-geometry one.
     static const bool kNoParticles = envFlagEnabled("WOWEE_M2_NO_PARTICLES");
     if (kNoParticles) return;
 
-    // Two ways to fill the frame's particles. By default one compact record
-    // per particle, colour and size worked out in m2_particle_gpu.vert;
-    // WOWEE_PARTICLE_CPU_QUADS=1 is the path that worked them out here and
-    // wrote nine floats each, kept for A/B. Both draw the same point sprites
-    // through the same fragment shader. The GPU path also falls back to the
-    // CPU one if its shader or buffers are missing.
-    static const bool kCpuQuads = envFlagEnabled("WOWEE_PARTICLE_CPU_QUADS");
     const uint32_t frame = vkCtx_->getCurrentFrame() % 2;
-    const bool gpuPath = !kCpuQuads && particleGpuPipeline_ && particleGpuAdditivePipeline_ &&
-                         particleRecordMapped_[frame] && particleCurveMapped_[frame] &&
-                         particleCurveSet_[frame];
+    bool ready = particleRecordMapped_[frame] && particleCurveMapped_[frame] && particleCurveSet_[frame];
+    for (VkPipeline p : particleGpuPipelines_) ready = ready && p != VK_NULL_HANDLE;
     static bool saidPath = false;
     if (!saidPath) {
         saidPath = true;
-        LOG_INFO("M2 particles: ", gpuPath ? "compact records, look in the vertex shader (budget "
-                                           : "CPU-built vertices (budget ",
-                 gpuPath ? particleRecordBudget_ : static_cast<uint32_t>(MAX_M2_PARTICLE_VERTS), ")",
-                 (!gpuPath && !kCpuQuads) ? " - GPU path unavailable, m2_particle_gpu.vert.spv missing?" : "");
+        if (ready) LOG_INFO("M2 particles: stock quads from records (budget ", particleRecordBudget_, ")");
+        else LOG_WARNING("M2 particles: quad pipelines unavailable (m2_particle_gpu.*.spv missing?) - not drawn");
     }
-    if (!gpuPath && !m2ParticleVBMapped_) return;
+    if (!ready) return;
 
     // Reuse persistent map - keep the bucket structure, drop last frame's set.
-    for (auto& [k, g] : particleGroups_) {
-        g.preAllocSet = VK_NULL_HANDLE;
-    }
+    for (auto& [k, g] : particleGroups_) g.preAllocSet = VK_NULL_HANDLE;
     particleRuns_.clear();
 
-    // Only the instances that carry emitters, not every instance in the world.
-    //
-    // particleInstanceIndices_ is built and maintained for exactly this and
-    // the update path above already uses it; this pass walked all 66211
-    // instances instead, asking each whether its particle vector was empty.
-    // That walk was 2.0ms of a 16ms frame - two thirds of the M2 worker,
-    // which is the critical path of renderWorld. The smoke pass beside this
-    // one does the same kind of work against a flat list and costs 0.003ms.
-    // Two passes over the fixed vertex budget: emitters near the camera -
-    // spell kits, missiles, a campfire - claim it first. The budget was full
-    // of distant portals and lava every frame, and spell effects, created
-    // last and so at the end of the list, got no vertices at all.
-    //
-    // One walk sorts the drawable emitters into near and far, so each
-    // instance's cache lines are pulled in once rather than once per pass.
+    // Only the instances that carry emitters, in two passes over the fixed
+    // record budget: emitters near the camera - spell kits, missiles, a
+    // campfire - claim it first.
     constexpr float kNearFirstSq = 80.0f * 80.0f;
     particleDrawOrder_.clear();
     size_t nearCount = 0;
@@ -1284,69 +850,36 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
         const float d2 = glm::dot(toCam, toCam);
         const bool fullRange = inst.spellVisual || inst.emissionStopped;
         if (d2 > (fullRange ? cachedMaxRenderDistSq_ : particleRangeSq(inst, *inst.cachedModel))) continue;
-        // Off screen: no vertices for what cannot be seen.
         if (inst.cachedPaddedRadius > 0.0f &&
             !cachedFrustum_.intersectsSphere(inst.cachedCullCenter, inst.cachedPaddedRadius + 30.0f)) continue;
         particleDrawOrder_.push_back(idx);
         if (d2 <= kNearFirstSq) std::swap(particleDrawOrder_[nearCount++], particleDrawOrder_.back());
     }
-    const size_t totalParticles = gpuPath ? writeParticleRecordsGpu(frame) : writeParticleVertsCpu();
-
-    // Periodic diagnostic: spell effect particle count
-    {
-        static uint32_t spellParticleDiagFrame_ = 0;
-        if (++spellParticleDiagFrame_ % 300 == 1) {
-            size_t spellPtc = 0;
-            for (size_t instIdx : particleInstanceIndices_) {
-                if (instIdx >= instances.size()) continue;
-                const auto& inst = instances[instIdx];
-                if (inst.cachedModel && inst.cachedModel->isSpellEffect)
-                    spellPtc += inst.particles.size();
-            }
-            if (spellPtc > 0) {
-                LOG_INFO("SpellEffect: rendering ", spellPtc, " spell particles (",
-                         totalParticles, " total)");
-            }
-        }
-    }
-
-    particleVertsDrawn_.store(static_cast<uint32_t>(totalParticles), std::memory_order_relaxed);
+    const size_t totalRecords = writeParticleRecordsGpu(frame);
+    particleVertsDrawn_.store(static_cast<uint32_t>(totalRecords), std::memory_order_relaxed);
     particleRunsDrawn_.store(static_cast<uint32_t>(particleRuns_.size()), std::memory_order_relaxed);
-    if (totalParticles == 0) return;
+    if (totalRecords == 0) return;
 
-    // Bind per-frame set (set 0) for particle pipeline, and on the GPU path
-    // the frame's curves (set 2), which stay bound across the runs.
-    const VkPipelineLayout layout = gpuPath ? particleGpuPipelineLayout_ : particlePipelineLayout_;
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            layout, 0, 1, &perFrameSet, 0, nullptr);
-    if (gpuPath) {
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                layout, 2, 1, &particleCurveSet_[frame], 0, nullptr);
-    }
-
+    const VkPipelineLayout layout = particleGpuPipelineLayout_;
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &perFrameSet, 0, nullptr);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 2, 1, &particleCurveSet_[frame], 0, nullptr);
     VkDeviceSize vbOffset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, gpuPath ? &particleRecordBuf_[frame] : &m2ParticleVB_, &vbOffset);
-    VkPipeline const alphaPipe = gpuPath ? particleGpuPipeline_ : particlePipeline_;
-    VkPipeline const additivePipe = gpuPath ? particleGpuAdditivePipeline_ : particleAdditivePipeline_;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &particleRecordBuf_[frame], &vbOffset);
 
     VkPipeline currentPipeline = VK_NULL_HANDLE;
-
     for (auto& run : particleRuns_) {
         if (run.count == 0 || !run.group) continue;
         ParticleGroup& group = *run.group;
-
-        uint8_t blendType = group.blendType;
-        VkPipeline desiredPipeline = (blendType == 3 || blendType == 4)
-            ? additivePipe : alphaPipe;
-        if (desiredPipeline != currentPipeline) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
-            currentPipeline = desiredPipeline;
+        const uint32_t blendType = std::min<uint32_t>(group.blendType, 6);
+        VkPipeline desired = particleGpuPipelines_[blendType];
+        if (desired != currentPipeline) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desired);
+            currentPipeline = desired;
         }
 
         // Use pre-allocated stable descriptor set; fall back to per-frame alloc only if unavailable
         VkDescriptorSet texSet = group.preAllocSet;
         if (texSet == VK_NULL_HANDLE) {
-            // Fallback: allocate per-frame (pool exhaustion risk - should not happen in practice)
             VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
             ai.descriptorPool = materialDescPool_;
             ai.descriptorSetCount = 1;
@@ -1366,23 +899,16 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
             }
         }
         if (texSet != VK_NULL_HANDLE) {
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    layout, 1, 1, &texSet, 0, nullptr);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 1, 1, &texSet, 0, nullptr);
         }
 
-        // Push constants: tileCount + alphaKey
-        struct { float tileX, tileY; int alphaKey; } pc = {
+        struct { float tileX, tileY; uint32_t blend, pad; } pc = {
             .tileX = static_cast<float>(group.tilesX), .tileY = static_cast<float>(group.tilesY),
-            .alphaKey = (blendType == 1) ? 1 : 0
-        };
-        vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+            .blend = blendType, .pad = 0};
+        vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                            sizeof(pc), &pc);
-
-        // The vertices are already in the buffer, at this run's own offset.
-        // Both used to be wrong: every group copied to offset zero and drew
-        // from vertex zero, so with more than one group up they all drew
-        // whatever had been copied last.
-        vkCmdDraw(cmd, run.count, 1, run.first, 0);
+        // Four strip corners per record; the records are this run's instances.
+        vkCmdDraw(cmd, 4, run.count, 0, run.first);
     }
 }
 

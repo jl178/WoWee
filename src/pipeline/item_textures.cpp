@@ -19,10 +19,13 @@ std::string resolveItemRegionTexture(AssetManager& assets, int region,
     if (dir[0] == '\0') return {};
 
     const std::string base = std::string("Item\\TextureComponents\\") + dir + "\\" + texName;
-    std::string gendered = base + (isFemale ? "_F.blp" : "_M.blp");
-    if (assets.fileExists(gendered)) return gendered;
+    // Stock (0x4E6FB0) asks for _U first and swaps the U for M or F only when
+    // that is missing; 93 textures in the data have both. The bare name is
+    // never tried there; it stays last here for loose replacement assets.
     std::string unisex = base + "_U.blp";
     if (assets.fileExists(unisex)) return unisex;
+    std::string gendered = base + (isFemale ? "_F.blp" : "_M.blp");
+    if (assets.fileExists(gendered)) return gendered;
     std::string plain = base + ".blp";
     if (assets.fileExists(plain)) return plain;
     return {};

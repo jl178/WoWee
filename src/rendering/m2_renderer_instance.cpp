@@ -2007,8 +2007,7 @@ void M2Renderer::recreatePipelines() {
     destroy(device, additivePipeline_);
     destroy(device, particlePipeline_);
     destroy(device, particleAdditivePipeline_);
-    destroy(device, particleGpuPipeline_);
-    destroy(device, particleGpuAdditivePipeline_);
+    for (VkPipeline& p : particleGpuPipelines_) destroy(device, p);
     destroy(device, smokePipeline_);
     destroy(device, ribbonPipeline_);
     destroy(device, ribbonAdditivePipeline_);

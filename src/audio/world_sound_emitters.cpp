@@ -18,12 +18,6 @@ std::mt19937& rng() {
     return gen;
 }
 
-const std::string* pickFile(const SoundEntry& entry) {
-    if (entry.files.empty()) return nullptr;
-    std::uniform_int_distribution<size_t> d(0, entry.files.size() - 1);
-    return &entry.files[d(rng())];
-}
-
 // A loop already playing keeps going a little past its cutoff, so standing on
 // the edge does not start and stop it every few steps.
 constexpr float kStopSlack = 1.1f;
@@ -49,7 +43,7 @@ bool WorldSoundEmitters::resolve(Emitter& e) const {
     }
     e.volume = entry->volume > 0.0f ? entry->volume : 1.0f;
     // A cutoff of 0 is "unset" in a few rows; the engine's own default then.
-    e.cutoff = entry->distanceCutoff > 0.0f ? entry->distanceCutoff : 30.0f;
+    e.cutoff = entry->distanceCutoff > 0.0f ? entry->distanceCutoff : stock::kDefaultCutoff;
     e.minDistance = entry->minDistance > 0.0f ? entry->minDistance : -1.0f;
     return true;
 }
@@ -141,10 +135,13 @@ void WorldSoundEmitters::setMap(uint32_t mapId) {
 
 bool WorldSoundEmitters::start(Emitter& e, float volumeScale) {
     const SoundEntry* entry = soundData_ ? soundData_->sound(e.soundId) : nullptr;
-    const std::string* file = entry ? pickFile(*entry) : nullptr;
+    const std::string* file = entry ? soundData_->nextFile(*entry) : nullptr;
     if (!file) return false;
+    SoundOptions opts;
+    opts.kitId = e.soundId;
+    opts.randomStart = true;  // a loop opens anywhere in itself (0x879760)
     e.handle = AudioEngine::instance().playSound3DStoppable(*file, e.position, e.volume * volumeScale,
-                                                            e.cutoff, /*loop=*/true, e.minDistance);
+                                                            e.cutoff, /*loop=*/true, e.minDistance, opts);
     return e.handle != 0;
 }
 
@@ -171,8 +168,14 @@ void WorldSoundEmitters::update(float deltaTime, const glm::vec3& listenerPos, f
         const glm::vec3 d = e.position - listenerPos;
         if (glm::dot(d, d) > e.cutoff * e.cutoff || volumeScale <= 0.0f) continue;
         const SoundEntry* entry = soundData_ ? soundData_->sound(e.soundId) : nullptr;
-        if (const std::string* file = entry ? pickFile(*entry) : nullptr) {
-            engine.playSound3D(*file, e.position, e.volume * volumeScale, 1.0f, e.cutoff);
+        if (const std::string* file = entry ? soundData_->nextFile(*entry) : nullptr) {
+            SoundOptions opts;
+            opts.minDistance = e.minDistance;
+            opts.kitId = e.soundId;
+            opts.noDuplicate = (entry->flags & stock::kFlagNoDuplicate) != 0;
+            engine.playSound3D(*file, e.position,
+                               stock::kitVolume(entry->volume, entry->flags, volumeScale, rng()),
+                               stock::kitPitch(entry->flags, rng()), e.cutoff, opts);
         }
     }
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "audio/stock_sound_rules.hpp"
+
 #include <vector>
 #include <memory>
 #include <string>
@@ -104,12 +106,12 @@ public:
     /// A $FSD footfall: FootstepTerrainLookup for the display's footstep set
     /// on this ground (TerrainType.SoundID), the splash column in water.
     void playFootstep(uint32_t displayId, uint32_t terrainSoundId, bool inWater, const glm::vec3& position);
-    /// Play a SoundEntries row at a point. False when it has no files.
-    /// `vary` turns pitch by up to 4% and level by up to 1.5 dB and never
-    /// picks the file this row played last - for weapon impacts, which come
-    /// in runs where one sample on repeat is easy to hear.
+    /// Play a SoundEntries row at a point the stock way: the row's file bag,
+    /// its own random pitch and level flags, its MinDistance and cutoff, and
+    /// the category's cap on how many may sound at once. False when it does
+    /// not start.
     bool playEntry3D(uint32_t soundId, const glm::vec3& position, float volumeMul = 1.0f,
-                     bool vary = false);
+                     stock::Category category = stock::Category::Sfx);
 
     // Weapon swing sounds (whoosh sounds before impact)
     enum class WeaponSize {
@@ -199,7 +201,6 @@ private:
     const SoundData* soundData_ = nullptr;
     UnitResolver unitResolver_;
     std::unordered_map<uint32_t, PendingBlow> pendingBlows_;  // by attacker instance
-    std::unordered_map<uint32_t, size_t> lastVariedFile_;     // by SoundEntries row; see playEntry3D
     const void* lastImpactLibrary_ = nullptr;                 // the fallback bank, see playImpact
     size_t lastImpactIndex_ = SIZE_MAX;
 

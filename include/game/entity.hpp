@@ -17,6 +17,7 @@
 #include <chrono>
 #include "math/spline.hpp"
 #include "game/flat_field_map.hpp"
+#include "game/unit_motion.hpp"
 
 namespace wowee {
 namespace game {
@@ -123,11 +124,100 @@ public:
         usePathMode_ = false;
         deadReckon_ = false;
         activeSpline_.reset();
+        stopStockMotion();
     }
+
+    // ── Stock unit motion (game/unit_motion.hpp, docs/re/unit-motion.md) ──
+    //
+    // A unit this client does not control moves the way Wow.exe moves it: a
+    // server spline evaluated as the client's own CMovementSpline, or a
+    // remote player's movement packets replayed on their sender's spacing
+    // and run on between them by their flags and speeds. Both work in server
+    // coordinates, in the world or in a transport's frame; x/y/z and
+    // orientation are what they come to each frame.
+
+    /// What a motion frame produced besides the position, for the caller
+    /// that can see other entities and the renderer.
+    enum MotionEvent : uint32_t {
+        MOTION_JUMP_STARTED = 1u << 0,   // a parabolic spline left the ground
+        MOTION_LANDED = 1u << 1,         // a falling or parabolic spline ended
+        MOTION_TIER_CHANGED = 1u << 2,   // an Animation spline reached its effect
+        MOTION_SPLINE_DONE = 1u << 3,    // a spline reached its end
+        MOTION_REMOTE_APPLIED = 1u << 4, // a remote movement packet took effect (its time came)
+        MOTION_REMOTE_JUMPED = 1u << 5,  // ... and it was a jump leaving the ground
+    };
+    struct SplineFinish {
+        motion::FinalFacing kind = motion::FinalFacing::None;
+        float serverAngle = 0.0f;
+        glm::vec3 spot{0.0f};          // in the spline's frame (server axes)
+        uint64_t target = 0;
+    };
+
+    /// SMSG_MONSTER_MOVE(_TRANSPORT). `transportFrame`: the spec is in the
+    /// transport's local server coordinates.
+    motion::MonsterMovePlan startMonsterMove(const motion::MonsterMoveSpec& spec,
+                                             bool transportFrame);
+    /// A spline the object's create block was already running.
+    bool startCreateSpline(const motion::CreateSplineSpec& spec, bool transportFrame);
+    /// A remote player's MSG_MOVE_*.
+    void receiveRemoteMovement(const motion::MovementSample& sample, bool transportFrame);
+    /// End whatever stock motion is running; the unit stays where it is.
+    void stopStockMotion() {
+        motionKind_ = MotionKind::None;
+        unitSpline_.reset();
+        if (remoteMover_) remoteMover_->reset();
+        motionEvents_ = 0;
+    }
+    [[nodiscard]] bool hasStockMotion() const { return motionKind_ != MotionKind::None; }
+    [[nodiscard]] bool stockMotionIsSpline() const { return motionKind_ == MotionKind::Spline; }
+    [[nodiscard]] bool stockMotionInTransportFrame() const {
+        return motionKind_ != MotionKind::None && motionTransportFrame_;
+    }
+    /// The motion's last frame was a transport's (it may have ended since).
+    [[nodiscard]] bool stockMotionFrameValidInTransport() const {
+        return motionTransportFrame_ && motionFrameValid_;
+    }
+    /// Server-axis position and facing in the motion's frame.
+    [[nodiscard]] const glm::vec3& stockMotionFramePosition() const { return motionFramePos_; }
+    [[nodiscard]] float stockMotionFrameFacing() const { return motionFrameFacing_; }
+    /// The movement flags the motion is running on (a spline: forward, plus
+    /// what the unit had); 0 with no motion.
+    [[nodiscard]] uint32_t stockMotionFlags() const { return motionFlags_; }
+    /// Speed over the path now (a spline's length over its duration, or the
+    /// speed the flags select), 0 standing.
+    [[nodiscard]] float stockMotionSpeed() const { return motionSpeed_; }
+    /// In the air on a jump, a fall or a parabolic spline.
+    [[nodiscard]] bool stockMotionAirborne() const { return motionAirborne_; }
+    /// Pitch while swimming or flying (server radians).
+    [[nodiscard]] float stockMotionPitch() const { return motionPitch_; }
+    [[nodiscard]] uint8_t stockMotionAnimTier() const { return motionAnimTier_; }
+    uint32_t takeMotionEvents() { const uint32_t e = motionEvents_; motionEvents_ = 0; return e; }
+    std::optional<SplineFinish> takeSplineFinish() {
+        auto f = splineFinish_;
+        splineFinish_.reset();
+        return f;
+    }
+    motion::MoveSpeeds& moveSpeeds() { return moveSpeeds_; }
+    [[nodiscard]] const motion::MoveSpeeds& moveSpeeds() const { return moveSpeeds_; }
+    /// Movement flags a unit carries outside any motion (UPDATE_OBJECT, the
+    /// spline mode opcodes): walking, swimming, flying.
+    void setBaseMoveFlags(uint32_t flags, uint32_t mask) {
+        baseMoveFlags_ = (baseMoveFlags_ & ~mask) | (flags & mask);
+    }
+    [[nodiscard]] uint32_t baseMoveFlags() const { return baseMoveFlags_; }
+    /// A transport placed the unit (world coordinates) without ending the
+    /// motion that runs in its frame.
+    void setWorldPositionFromFrame(float px, float py, float pz, float o) {
+        x = px; y = py; z = pz; orientation = o;
+    }
+    /// The clock the motion runs on (ms, steady). Tests may replace it.
+    static uint32_t motionClockMs();
+    static void setMotionClockOverride(uint32_t (*clock)());
 
     // Multi-segment path movement (Catmull-Rom spline interpolation)
     void startMoveAlongPath(const std::vector<std::array<float, 3>>& serverPath, float destO, float totalDuration) {
         if (serverPath.empty()) return;
+        stopStockMotion();
         if (serverPath.size() == 1 || totalDuration <= 0.0f) {
             startMoveTo(serverPath.back()[0], serverPath.back()[1], serverPath.back()[2], destO, totalDuration);
             return;
@@ -215,6 +305,7 @@ public:
     // a stop is not dead-reckoned: the unit really does halt there.
     void startMoveTo(float destX, float destY, float destZ, float destO, float durationSec,
                      bool deadReckon = false) {
+        stopStockMotion();
         usePathMode_ = false;
         activeSpline_.reset();
         if (durationSec <= 0.0f) {
@@ -280,12 +371,18 @@ public:
 
     /// True when the overrun past this segment's destination is extrapolated
     /// and should be drawn where getX/Y/Z are, rather than held at getLatest.
-    [[nodiscard]] bool extrapolatesPastDestination() const { return deadReckon_; }
+    [[nodiscard]] bool extrapolatesPastDestination() const {
+        return deadReckon_ || motionKind_ != MotionKind::None;
+    }
 
     /// Speed over the ground, from the smoothed velocity.
     [[nodiscard]] float planarSpeed() const { return std::sqrt(velX_ * velX_ + velY_ * velY_); }
 
     void updateMovement(float deltaTime) {
+        if (motionKind_ != MotionKind::None) {
+            updateStockMotion();
+            return;
+        }
         if (!isMoving_) return;
         moveElapsed_ += deltaTime;
         if (moveElapsed_ < moveDuration_) {
@@ -339,12 +436,15 @@ public:
         }
     }
 
-    [[nodiscard]] bool isEntityMoving() const { return isMoving_; }
+    [[nodiscard]] bool isEntityMoving() const {
+        return motionKind_ != MotionKind::None ? motionTranslating_ : isMoving_;
+    }
 
     /// True only during the active interpolation phase (before reaching destination).
     /// Unlike isEntityMoving(), this does NOT include the dead-reckoning overrun window,
     /// so animations (Run/Walk) should use this to avoid "running in place" after arrival.
     [[nodiscard]] bool isActivelyMoving() const {
+        if (motionKind_ != MotionKind::None) return motionTranslating_;
         if (!isMoving_) return false;
         if (moveElapsed_ < moveDuration_) return true;
         // A dead-reckoned unit is still travelling while it extrapolates, so
@@ -357,9 +457,10 @@ public:
     // Returns the latest server-authoritative position: destination if moving, current if not.
     // Unlike getX/Y/Z (which only update via updateMovement), this always reflects the
     // last known server position regardless of distance culling.
-    [[nodiscard]] float getLatestX() const { return isMoving_ ? moveEndX_ : x; }
-    [[nodiscard]] float getLatestY() const { return isMoving_ ? moveEndY_ : y; }
-    [[nodiscard]] float getLatestZ() const { return isMoving_ ? moveEndZ_ : z; }
+    // A stock motion is where it is: its position is evaluated, not chased.
+    [[nodiscard]] float getLatestX() const { return (isMoving_ && motionKind_ == MotionKind::None) ? moveEndX_ : x; }
+    [[nodiscard]] float getLatestY() const { return (isMoving_ && motionKind_ == MotionKind::None) ? moveEndY_ : y; }
+    [[nodiscard]] float getLatestZ() const { return (isMoving_ && motionKind_ == MotionKind::None) ? moveEndZ_ : z; }
 
     // Object type
     [[nodiscard]] ObjectType getType() const { return type; }
@@ -412,6 +513,29 @@ protected:
     // CatmullRom spline for multi-segment path movement (replaces linear pathPoints_/pathSegDists_)
     std::optional<math::CatmullRomSpline> activeSpline_;
     uint32_t splineDurationMs_ = 0;
+
+    // Stock unit motion.
+    enum class MotionKind : uint8_t { None, Spline, Remote };
+    void updateStockMotion();
+    void publishMotionFrame(const glm::vec3& serverPos, float serverFacing);
+    MotionKind motionKind_ = MotionKind::None;
+    bool motionTransportFrame_ = false;
+    bool motionFrameValid_ = false;
+    bool motionTranslating_ = false;
+    bool motionAirborne_ = false;
+    std::optional<motion::UnitSpline> unitSpline_;
+    std::optional<motion::RemoteMover> remoteMover_;
+    motion::MoveSpeeds moveSpeeds_;
+    glm::vec3 motionFramePos_{0.0f};
+    float motionFrameFacing_ = 0.0f;
+    float motionPitch_ = 0.0f;
+    float motionSpeed_ = 0.0f;
+    uint32_t motionFlags_ = 0;
+    uint32_t baseMoveFlags_ = 0;
+    uint32_t motionEvents_ = 0;
+    uint8_t motionAnimTier_ = 0;
+    uint32_t remoteAppliedSeen_ = 0;
+    std::optional<SplineFinish> splineFinish_;
 };
 
 /**

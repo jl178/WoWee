@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rendering/m2_particle_stock.hpp"
+
 #include <glm/glm.hpp>
 
 #include <algorithm>
@@ -8,140 +10,138 @@
 
 namespace wowee::rendering::m2_particle {
 
-/// How a particle looks at a given point of its life: colour, alpha and size,
-/// from its emitter's lifetime curves and the model's class.
+/// What the particle pass hands m2_particle_gpu.vert, one record per quad:
+/// a particle with a head and a tail (flags 0x20000 and 0x40000) is two.
+/// The shader expands each record into the four corners of the stock quad
+/// (CParticleEmitter2 0x97BE80) and reads the colour, alpha and size from the
+/// emitter's lifetime curves, packed into the frame's curve buffer at
+/// curveBase. lookFromPacked is that read in C++; keep the two in step, the
+/// tests hold lookFromPacked to the curves.
 ///
-/// The particle pass used to work this out on the CPU for every particle and
-/// write nine floats per particle into the vertex buffer. The GPU path writes
-/// a 24-byte record (ParticleRecord) instead, and m2_particle_gpu.vert does
-/// the curve lookup and the class adjustments. The functions here are both
-/// sides of that: lookFromCurve is what the CPU path computes, and
-/// lookFromPacked is the shader's arithmetic in C++, reading the curve from
-/// the layout packCurve writes into the storage buffer. Keep lookFromPacked
-/// and the shader in step; the tests hold lookFromPacked to lookFromCurve.
+/// `vec` depends on the kind:
+/// - billboard: unused;
+/// - velocity: the negated velocity, world space;
+/// - XY quad: the quad's rotation as a unit quaternion's xyz (w >= 0);
+/// - tail: the tail, world space: negated velocity times the tail length.
+struct ParticleRecord {
+    glm::vec3 position;  // world
+    float lifeRatio;
+    glm::vec3 vec;
+    float sizeX;         // size factor: scale variation, twinkle, inherited scale
+    float angle;         // spin, radians
+    float sizeY;
+    uint32_t curveBase;  // in vec4s
+    uint32_t packed;     // see kPacked*
+};
+static_assert(sizeof(ParticleRecord) == 48);
 
-/// Curve table resolution; the same as M2ModelGPU::ParticleCurve::kSteps.
-inline constexpr int kCurveSteps = 64;
-
-/// One curve in the storage buffer, in vec4s: the kSteps + 1 colour+alpha
-/// entries, then the kSteps + 1 scales four to a vec4, the last one padded.
-inline constexpr uint32_t kCurveVec4s =
-    static_cast<uint32_t>(kCurveSteps + 1) + static_cast<uint32_t>(kCurveSteps + 1 + 3) / 4;
-
-/// The model's class and the emitter's blend, as the look depends on them.
-/// Packed into the top byte of ParticleRecord::tileFlags.
-enum LookFlags : uint32_t {
-    kLookPlainDoodad   = 1u << 0,  // not spell effect, firefly or flame fixture
-    kLookFlameFixture  = 1u << 1,  // lantern, torch, brazier, kobold flame
-    kLookSpellEffect   = 1u << 2,
-    kLookFirefly       = 1u << 3,
-    kLookAdditiveBlend = 1u << 4,  // emitter blending type 3 or 4
+enum RecordKind : uint32_t {
+    kKindBillboard = 0,
+    kKindVelocity = 1,
+    kKindXYQuad = 2,
+    kKindTail = 3,
 };
 
-inline constexpr uint32_t kTileBits = 24;
-inline constexpr uint32_t kTileMask = (1u << kTileBits) - 1u;
+inline constexpr uint32_t kPackedCellMask = 0xFFFFu;
+inline constexpr uint32_t kPackedKindShift = 16;
+inline constexpr uint32_t kPackedSpin = 1u << 18;
+inline constexpr uint32_t kPackedLit = 1u << 19;
+inline constexpr uint32_t kPackedUnfogged = 1u << 20;
+inline constexpr uint32_t kPackedAlphaShift = 24;
 
-inline uint32_t lookFlagsFor(bool spellEffect, bool firefly, bool flameFixture,
-                             uint16_t blendType) {
-    uint32_t f = 0;
-    if (!spellEffect && !firefly && !flameFixture) f |= kLookPlainDoodad;
-    if (flameFixture) f |= kLookFlameFixture;
-    if (spellEffect) f |= kLookSpellEffect;
-    if (firefly) f |= kLookFirefly;
-    if (blendType == 3 || blendType == 4) f |= kLookAdditiveBlend;
-    return f;
+inline uint32_t packRecord(uint32_t cell, RecordKind kind, bool spin, bool lit, bool unfogged,
+                           float modelAlpha) {
+    const uint32_t a = static_cast<uint32_t>(std::lround(std::clamp(modelAlpha, 0.0f, 1.0f) * 255.0f));
+    return (std::min(cell, kPackedCellMask)) | (static_cast<uint32_t>(kind) << kPackedKindShift) |
+           (spin ? kPackedSpin : 0u) | (lit ? kPackedLit : 0u) | (unfogged ? kPackedUnfogged : 0u) |
+           (a << kPackedAlphaShift);
 }
 
-/// What one particle hands the vertex shader. Position and life ratio are
-/// the particle's; curveBase (in vec4s, into the frame's curve buffer) and
-/// the flags in tileFlags' top byte are its emitter's; the low 24 bits are
-/// the atlas tile, animation frame already added.
-struct ParticleRecord {
-    glm::vec3 position;
-    float lifeRatio;
-    uint32_t curveBase;
-    uint32_t tileFlags;
-};
-static_assert(sizeof(ParticleRecord) == 24);
+/// One curve in the storage buffer, in vec4s: a header with the three key
+/// counts, then kCurveKeys colour keys (r, g, b, time), kCurveKeys alpha keys
+/// (alpha, time, -, -) and kCurveKeys scale keys (x, y, time, -). The data
+/// has at most seven keys a curve.
+inline constexpr uint32_t kCurveKeys = 8;
+inline constexpr uint32_t kCurveVec4s = 1 + 3 * kCurveKeys;
+
+/// The key count the shader evaluates with: 0 for no keys (the default),
+/// 1 when the first key holds (one key, or no times for the rest), else the
+/// shorter list, at most kCurveKeys.
+template <class V>
+inline uint32_t packedCount(const pipeline::M2FBlock& fb, const std::vector<V>& values) {
+    if (values.empty()) return 0;
+    if (values.size() == 1 || fb.timestamps.size() < 2) return 1;
+    return std::min<uint32_t>(fblockCount(fb, values), kCurveKeys);
+}
+
+inline void packCurve(const pipeline::M2ParticleEmitter& em, glm::vec4* out) {
+    std::memset(static_cast<void*>(out), 0, sizeof(glm::vec4) * kCurveVec4s);
+    const auto& c = em.particleColor;
+    const auto& a = em.particleAlpha;
+    const auto& s = em.particleScale;
+    const uint32_t nc = packedCount(c, c.vec3Values);
+    const uint32_t na = packedCount(a, a.floatValues);
+    const bool scale2 = !s.vec2Values.empty();
+    const uint32_t ns = scale2 ? packedCount(s, s.vec2Values) : packedCount(s, s.floatValues);
+    out[0] = glm::vec4(static_cast<float>(nc), static_cast<float>(na), static_cast<float>(ns), 0.0f);
+    const auto ts = [](const pipeline::M2FBlock& fb, uint32_t k) {
+        return k < fb.timestamps.size() ? fb.timestamps[k] : 0.0f;
+    };
+    for (uint32_t k = 0; k < nc; ++k) out[1 + k] = glm::vec4(c.vec3Values[k], ts(c, k));
+    for (uint32_t k = 0; k < na; ++k) out[1 + kCurveKeys + k] = glm::vec4(a.floatValues[k], ts(a, k), 0, 0);
+    for (uint32_t k = 0; k < ns; ++k) {
+        const glm::vec2 v = scale2 ? s.vec2Values[k] : glm::vec2(s.floatValues[k]);
+        out[1 + 2 * kCurveKeys + k] = glm::vec4(v, ts(s, k), 0.0f);
+    }
+}
 
 struct Look {
     glm::vec3 color;
     float alpha;
-    float scale;
+    glm::vec2 scale;
 };
 
-/// The model-class adjustments the particle pass makes to the curve values.
-/// See renderM2Particles for why each one is there.
-inline Look adjustLook(glm::vec3 color, float alpha, float rawScale, uint32_t flags) {
-    if (flags & kLookPlainDoodad) {
-        color = glm::mix(color, glm::vec3(1.0f), 0.7f);
-        if (rawScale > 2.0f) alpha *= 0.02f;
-        if (flags & kLookAdditiveBlend) alpha *= 0.05f;
+namespace detail {
+/// fblockSegment over a packed track whose time is component `tc` of each key.
+inline Segment packedSegment(const glm::vec4* keys, uint32_t n, int tc, float r) {
+    float ts[kCurveKeys];
+    for (uint32_t k = 0; k < n && k < kCurveKeys; ++k) ts[k] = keys[k][tc];
+    return fblockSegment(ts, n, r);
+}
+}  // namespace detail
+
+/// m2_particle_gpu.vert's curve read: the stock evaluation of each track
+/// from the packed layout at `base`.
+inline Look lookFromPacked(const glm::vec4* data, uint32_t base, float r) {
+    const glm::vec4 h = data[base];
+    const uint32_t nc = static_cast<uint32_t>(h.x), na = static_cast<uint32_t>(h.y),
+                   ns = static_cast<uint32_t>(h.z);
+    const glm::vec4* ck = data + base + 1;
+    const glm::vec4* ak = ck + kCurveKeys;
+    const glm::vec4* sk = ak + kCurveKeys;
+    Look l{glm::vec3(1.0f), 1.0f, glm::vec2(1.0f)};
+    if (nc == 1) l.color = glm::vec3(ck[0]);
+    if (nc > 1) {
+        const Segment s = detail::packedSegment(ck, nc, 3, r);
+        l.color = glm::mix(glm::vec3(ck[s.i0]), glm::vec3(ck[s.i1]), s.f);
     }
-    if (flags & kLookFlameFixture) {
-        color = glm::max(color, glm::vec3(0.50f, 0.26f, 0.09f));
-        alpha = std::max(alpha, 0.30f);
+    if (na == 1) l.alpha = ak[0].x;
+    if (na > 1) {
+        const Segment s = detail::packedSegment(ak, na, 1, r);
+        l.alpha = ak[s.i0].x + (ak[s.i1].x - ak[s.i0].x) * s.f;
     }
-    float scale = rawScale;
-    if (flags & kLookSpellEffect) {
-        scale = std::max(rawScale, 0.15f);
-    } else if (!(flags & kLookFirefly)) {
-        scale = std::min(rawScale, 1.5f);
-        if (flags & kLookFlameFixture) scale = std::max(scale, 0.15f);
+    if (ns == 1) l.scale = glm::vec2(sk[0]);
+    if (ns > 1) {
+        const Segment s = detail::packedSegment(sk, ns, 2, r);
+        l.scale = glm::vec2(sk[s.i0]) + (glm::vec2(sk[s.i1]) - glm::vec2(sk[s.i0])) * s.f;
     }
-    return {color, alpha, scale};
+    return l;
 }
 
-/// The CPU path: the curve tables as M2ModelGPU::ParticleCurve holds them.
-inline Look lookFromCurve(const glm::vec4* colorAlpha, const float* scale,
-                          float lifeRatio, uint32_t flags) {
-    const float f = glm::clamp(lifeRatio, 0.0f, 1.0f) * static_cast<float>(kCurveSteps);
-    const int k = std::min(static_cast<int>(f), kCurveSteps - 1);
-    const float t = f - static_cast<float>(k);
-    const glm::vec4 ca = glm::mix(colorAlpha[k], colorAlpha[k + 1], t);
-    const float rawScale = glm::mix(scale[k], scale[k + 1], t);
-    return adjustLook(glm::vec3(ca), ca.a, rawScale, flags);
-}
-
-/// Writes one curve in the storage buffer's layout: kCurveVec4s vec4s.
-inline void packCurve(const glm::vec4* colorAlpha, const float* scale, glm::vec4* out) {
-    constexpr size_t n = kCurveSteps + 1;
-    std::memcpy(static_cast<void*>(out), colorAlpha, n * sizeof(glm::vec4));
-    float tail[(n + 3) / 4 * 4] = {};
-    std::memcpy(tail, scale, n * sizeof(float));
-    std::memcpy(static_cast<void*>(out + n), tail, sizeof(tail));
-}
-
-/// m2_particle_gpu.vert's arithmetic: the curve read from the packed layout
-/// at `base`, then the same adjustments.
-inline Look lookFromPacked(const glm::vec4* data, uint32_t base, float lifeRatio,
-                           uint32_t flags) {
-    const float f = glm::clamp(lifeRatio, 0.0f, 1.0f) * static_cast<float>(kCurveSteps);
-    const int k = std::min(static_cast<int>(f), kCurveSteps - 1);
-    const float t = f - static_cast<float>(k);
-    const uint32_t uk = static_cast<uint32_t>(k);
-    const glm::vec4 ca = glm::mix(data[base + uk], data[base + uk + 1u], t);
-    const uint32_t sb = base + static_cast<uint32_t>(kCurveSteps + 1);
-    const float s0 = data[sb + uk / 4u][static_cast<int>(uk & 3u)];
-    const float s1 = data[sb + (uk + 1u) / 4u][static_cast<int>((uk + 1u) & 3u)];
-    const float rawScale = glm::mix(s0, s1, t);
-    return adjustLook(glm::vec3(ca), ca.a, rawScale, flags);
-}
-
-/// The atlas tile a particle draws: its own tile, advanced by the emitter's
-/// animation frame and wrapped, when the emitter is tiled. The CPU path did
-/// this in float with a subtract loop; for tiles below totalTiles the result
-/// is the same integer.
-inline uint32_t particleTile(uint32_t ownTile, bool tiled, uint32_t animFrame,
-                             uint32_t totalTiles) {
-    if (!tiled || totalTiles == 0) return ownTile;
-    uint32_t t = ownTile + animFrame;
-    while (t >= totalTiles) t -= totalTiles;
-    return t;
-}
-
-inline uint32_t packTileFlags(uint32_t tile, uint32_t flags) {
-    return (std::min(tile, kTileMask)) | (flags << kTileBits);
+/// The curves read straight from the emitter, as the stock evaluator does
+/// (0x979E90): what lookFromPacked has to agree with.
+inline Look lookFromEmitter(const pipeline::M2ParticleEmitter& em, float r) {
+    return {particleColor(em, r), particleAlpha(em, r), particleScale(em, r)};
 }
 
 } // namespace wowee::rendering::m2_particle

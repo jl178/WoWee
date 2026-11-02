@@ -7,6 +7,7 @@
 #include "ui/keybinding_manager.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "rendering/movement_limits.hpp"
+#include "game/stock_movement.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -505,8 +506,12 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
         swimming = true;
         // Swim movement follows look pitch (f.forward/back), while strafe stays
         // lateral for stable control.
-        float swimSpeed = (swimSpeedOverride_ > 0.0f && swimSpeedOverride_ < 100.0f && !std::isnan(swimSpeedOverride_))
-                              ? swimSpeedOverride_ : f.speed * SWIM_SPEED_FACTOR;
+        // The swim pair is its own (0x987570): walking does not slow a
+        // swimmer, and with no server value the defaults are 4.72 / 2.5.
+        const game::stock_movement::Speeds stockSp = stockSpeeds();
+        float swimSpeed = useWoWSpeed ? stockSp.swim
+            : ((swimSpeedOverride_ > 0.0f && swimSpeedOverride_ < 100.0f && !std::isnan(swimSpeedOverride_))
+                   ? swimSpeedOverride_ : f.speed * SWIM_SPEED_FACTOR);
         float waterSurfaceZ = waterH ? (*waterH - WATER_SURFACE_OFFSET) : targetPos.z;
 
         // For auto-run/auto-swim: use character facing (immune to camera pan)
@@ -525,9 +530,10 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
         // Use character's facing direction for strafe, not camera's right vector
         glm::vec3 swimRight = f.right;  // Character's right (horizontal facing), not camera's
 
-        float swimBackSpeed = (swimBackSpeedOverride_ > 0.0f && swimBackSpeedOverride_ < 100.0f
-                                && !std::isnan(swimBackSpeedOverride_))
-                                   ? swimBackSpeedOverride_ : swimSpeed * 0.5f;
+        float swimBackSpeed = useWoWSpeed ? std::min(stockSp.swimBack, swimSpeed)
+            : ((swimBackSpeedOverride_ > 0.0f && swimBackSpeedOverride_ < 100.0f
+                && !std::isnan(swimBackSpeedOverride_))
+                   ? swimBackSpeedOverride_ : swimSpeed * 0.5f);
 
         glm::vec3 swimMove(0.0f);
         if (f.nowForward) swimMove += swimForward;
@@ -535,18 +541,38 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
         if (f.nowStrafeLeft) swimMove += swimRight;
         if (f.nowStrafeRight) swimMove -= swimRight;
 
-        float swimMoveLenSq = glm::dot(swimMove, swimMove);
-        if (swimMoveLenSq > 1e-6f) {
-            swimMove *= glm::inversesqrt(swimMoveLenSq);
-            // Use backward swim speed when moving backwards only (not when combining with strafe)
-            float applySpeed = (f.nowBackward && !f.nowForward) ? swimBackSpeed : swimSpeed;
-            targetPos += swimMove * applySpeed * f.physicsDeltaTime;
-        }
-
         // Spacebar = swim up, X = swim down (both continuous, not a jump)
         bool diveKey = f.xDown;
         bool diveIntent = diveKey || (f.nowForward && (f.forward3D.z < -0.28f));
-        if (f.spaceHeld) {
+        // Ascending or descending is a direction of its own, at the swim speed
+        // (0x987B50): straight up or down alone (case 0x10/0x12), and with a
+        // horizontal direction the two at 45 degrees - the flat direction
+        // times 0.7071 and up or down times 0.7071 (0x987700) - so the total
+        // is still the swim speed, not the swim speed plus a climb.
+        const bool stockVertical = useWoWSpeed && (f.spaceHeld || diveKey);
+
+        float swimMoveLenSq = glm::dot(swimMove, swimMove);
+        // Use backward swim speed when moving backwards (with or without a strafe)
+        float applySpeed = (f.nowBackward && !f.nowForward) ? swimBackSpeed : swimSpeed;
+        if (swimMoveLenSq > 1e-6f) {
+            if (stockVertical) {
+                glm::vec3 flat(swimMove.x, swimMove.y, 0.0f);
+                const float flatLenSq = glm::dot(flat, flat);
+                if (flatLenSq > 1e-6f) {
+                    flat *= glm::inversesqrt(flatLenSq) * game::stock_movement::kHalfSqrt2;
+                    targetPos += flat * applySpeed * f.physicsDeltaTime;
+                }
+            } else {
+                swimMove *= glm::inversesqrt(swimMoveLenSq);
+                targetPos += swimMove * applySpeed * f.physicsDeltaTime;
+            }
+        }
+
+        if (stockVertical) {
+            const float climb = (swimMoveLenSq > 1e-6f)
+                ? applySpeed * game::stock_movement::kHalfSqrt2 : swimSpeed;
+            verticalVelocity = f.spaceHeld ? climb : -climb;
+        } else if (f.spaceHeld) {
             verticalVelocity = SWIM_BUOYANCY;
         } else if (diveKey) {
             verticalVelocity = -SWIM_BUOYANCY;
@@ -744,12 +770,17 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
             float flyMoveLenSq = glm::dot(flyMove, flyMove);
             if (flyMoveLenSq > 1e-6f) {
                 flyMove *= glm::inversesqrt(flyMoveLenSq);
-                float flyFwdSpeed = (flightSpeedOverride_ > 0.0f && flightSpeedOverride_ < 200.0f
-                                     && !std::isnan(flightSpeedOverride_))
-                                        ? flightSpeedOverride_ : f.speed;
-                float flyBackSpeed = (flightBackSpeedOverride_ > 0.0f && flightBackSpeedOverride_ < 200.0f
-                                      && !std::isnan(flightBackSpeedOverride_))
-                                         ? flightBackSpeedOverride_ : flyFwdSpeed * 0.5f;
+                // The flight pair (0x987570); walking does not slow a flier,
+                // and the defaults are 7.0 / 4.5.
+                const game::stock_movement::Speeds flySp = stockSpeeds();
+                float flyFwdSpeed = useWoWSpeed ? flySp.flight
+                    : ((flightSpeedOverride_ > 0.0f && flightSpeedOverride_ < 200.0f
+                        && !std::isnan(flightSpeedOverride_))
+                           ? flightSpeedOverride_ : f.speed);
+                float flyBackSpeed = useWoWSpeed ? std::min(flySp.flightBack, flyFwdSpeed)
+                    : ((flightBackSpeedOverride_ > 0.0f && flightBackSpeedOverride_ < 200.0f
+                        && !std::isnan(flightBackSpeedOverride_))
+                           ? flightBackSpeedOverride_ : flyFwdSpeed * 0.5f);
                 float flySpeed = (f.nowBackward && !f.nowForward) ? flyBackSpeed : flyFwdSpeed;
                 targetPos += flyMove * flySpeed * f.physicsDeltaTime;
             }
@@ -810,8 +841,10 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
         // On the ground, or (with a grace time set) just off it. Not from
         // ground too steep to stand on: the stock client is falling there, and
         // hopping up a cliff a jump at a time is what that stops.
+        // Not while rooted either: the stock jump refuses ROOT, FALLING and
+        // FLYING (0x9883F0 tests 0x2001800).
         bool canJump = (grounded || coyoteTimer > 0.0f) && (jumpBufferTimer > 0.0f) &&
-                       !mounted_ && !onSteepSlope_;
+                       !mounted_ && !onSteepSlope_ && !movementRooted_;
         if (canJump) {
             verticalVelocity = f.jumpVel;
             grounded = false;
@@ -829,6 +862,8 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
         // them should be fallen through. Entering the world is faster than
         // streaming the tile under it on a slow device, so without this the
         // character falls from the spawn point until the server kills it.
+        float fallDzThisFrame = 0.0f;
+        bool fallDzSet = false;
         if (seatedInChair_) {
             // In a chair, and the chair's height is the server's to decide.
             //
@@ -849,13 +884,22 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
             // Float in place: bleed off any downward velocity, allow upward to decay slowly
             if (verticalVelocity < 0.0f) verticalVelocity = 0.0f;
             else verticalVelocity *= std::max(0.0f, 1.0f - 3.0f * f.physicsDeltaTime);
+        } else if (useWoWSpeed && f.gravity != 0.0f) {
+            // The stock fall (0x986F00): constant gravity in closed form, so
+            // the arc is the same at any frame rate, up to the fall speed cap
+            // - 60.148 yd/s, or 7.0 under Feather Fall / Slow Fall (0x986E10).
+            fallDzThisFrame = game::stock_movement::fallStep(
+                verticalVelocity, f.physicsDeltaTime, featherFallActive_);
+            fallDzSet = true;
         } else {
             verticalVelocity += f.gravity * f.physicsDeltaTime;
-            // Feather Fall / Slow Fall: cap downward terminal velocity to ~2 m/s
-            if (featherFallActive_ && verticalVelocity < -2.0f)
-                verticalVelocity = -2.0f;
+            // Feather Fall / Slow Fall: the stock cap is 7 yd/s (0xB2D9EC).
+            if (featherFallActive_ &&
+                verticalVelocity < -game::stock_movement::kSafeFallTerminalVelocity) {
+                verticalVelocity = -game::stock_movement::kSafeFallTerminalVelocity;
+            }
         }
-        targetPos.z += verticalVelocity * f.physicsDeltaTime;
+        targetPos.z += fallDzSet ? fallDzThisFrame : verticalVelocity * f.physicsDeltaTime;
         } // end ground physics (not airborne in flight)
         } // end !inWater
     } else {
@@ -2792,8 +2836,9 @@ void CameraController::updateFreeFlyCamera(float /*deltaTime*/, FrameInput& f) {
 
     if (inWater) {
         swimming = true;
-        float swimSpeed = (swimSpeedOverride_ > 0.0f && swimSpeedOverride_ < 100.0f && !std::isnan(swimSpeedOverride_))
-                              ? swimSpeedOverride_ : f.speed * SWIM_SPEED_FACTOR;
+        float swimSpeed = useWoWSpeed ? stockSpeeds().swim
+            : ((swimSpeedOverride_ > 0.0f && swimSpeedOverride_ < 100.0f && !std::isnan(swimSpeedOverride_))
+                   ? swimSpeedOverride_ : f.speed * SWIM_SPEED_FACTOR);
         float waterSurfaceCamZ = waterH ? (*waterH - WATER_SURFACE_OFFSET + eyeHeight) : newPos.z;
         bool diveIntent = f.nowForward && (f.forward3D.z < -0.28f);
 
@@ -3103,8 +3148,16 @@ void CameraController::update(float deltaTime) {
         }
     };
 
-    if (keyW || keyS) {
+    // Pressing forward or backward ends autorun (CGInputControl 0x5FA170
+    // clears 0x1000 on the key going down, not while it is held, so autorun
+    // can still be toggled on with forward held).
+    const bool movePressEdge = !uiWantsKeyboard && !sitting && !movementSuppressed &&
+        (bindings.isCommandPressed("MOVEFORWARD") || bindings.isCommandPressed("MOVEBACKWARD"));
+    if (movePressEdge) {
         autoRunning = false;
+        doCancelAutoFollow();
+    }
+    if (keyW || keyS) {
         doCancelAutoFollow();
     }
 
@@ -3146,35 +3199,43 @@ void CameraController::update(float deltaTime) {
     const bool movBlocked = movementRooted_;
     // Auto-follow uses run speed (same as auto-run), not walk speed
     if (autoFollowMove) autoRunning = true;
-    bool nowForward = !movBlocked && (keyW || mouseAutorun || autoRunning);
-    bool nowBackward = !movBlocked && keyS;
-    bool nowStrafeLeft = false;
-    bool nowStrafeRight = false;
-    bool nowTurnLeft = false;
-    bool nowTurnRight = false;
-
-    // WoW-like third-person keyboard behavior:
-    // - RMB held: A/D strafe
-    // - RMB released: A/D turn character+camera, Q/E strafe
+    // The stock votes (CGInputControl 0x5FAE70 / 0x5FAFB0 / 0x5FB0B0): forward,
+    // autorun and both mouse buttons count one way and backward the other, so
+    // forward and backward held together stand still - and send nothing -
+    // rather than setting both flags; the same for the two strafes and the
+    // two turns. With the right button steering the turn keys strafe.
     // Turning is allowed even while rooted; only positional movement is blocked.
-    if (thirdPerson && !rightMouseDown) {
-        nowTurnLeft = keyA;
-        nowTurnRight = keyD;
-        nowStrafeLeft = !movBlocked && keyQ;
-        nowStrafeRight = !movBlocked && keyE;
-    } else {
-        nowStrafeLeft = !movBlocked && (keyA || keyQ);
-        nowStrafeRight = !movBlocked && (keyD || keyE);
-    }
+    namespace sm = game::stock_movement;
+    const bool rightButtonSteering = !thirdPerson || rightMouseDown;
+    const int forwardVote = sm::resolveForwardBack(keyW, keyS, autoRunning, mouseAutorun);
+    const int strafeVote = sm::resolveStrafe(keyQ, keyE, keyA, keyD, rightButtonSteering);
+    const int turnVote = sm::resolveTurn(keyA, keyD, rightButtonSteering);
+    bool nowForward = !movBlocked && forwardVote > 0;
+    bool nowBackward = !movBlocked && forwardVote < 0;
+    bool nowStrafeLeft = !movBlocked && strafeVote > 0;
+    bool nowStrafeRight = !movBlocked && strafeVote < 0;
+    bool nowTurnLeft = turnVote > 0;
+    bool nowTurnRight = turnVote < 0;
 
     // Mid-air the stock client keeps the movement it left the ground with:
     // a standing jump lands where it started whatever is pressed, a running
     // jump carries on if the key is released, and only the facing can change.
     // The keys are latched on the first airborne frame and released on the
     // ground. Swimming and flight steer freely and are not latched.
+    //
+    // One exception (0x988A20 / 0x988B00): a fall that started with no
+    // direction at all takes the first direction pressed in the air, at walk
+    // speed, and keeps that one. airSpeed_ below says which case this is.
+    bool airLatchedNow = false;   // the latch was (re)taken this frame
+    bool airDriftStart = false;   // ...from a standing fall, at walk speed
     if (!grounded && !swimming && !isFlightAirborne()) {
-        if (!airMoveLatched_) {
+        const bool anyKeyDir = nowForward || nowBackward || nowStrafeLeft || nowStrafeRight;
+        const bool latchedNoDir = airMoveLatched_ && !airForward_ && !airBackward_ &&
+                                  !airStrafeLeft_ && !airStrafeRight_;
+        if (!airMoveLatched_ || (latchedNoDir && anyKeyDir)) {
+            airDriftStart = airMoveLatched_;
             airMoveLatched_ = true;
+            airLatchedNow = true;
             airForward_ = nowForward;
             airBackward_ = nowBackward;
             airStrafeLeft_ = nowStrafeLeft;
@@ -3186,6 +3247,7 @@ void CameraController::update(float deltaTime) {
         nowStrafeRight = airStrafeRight_;
     } else {
         airMoveLatched_ = false;
+        airSpeed_ = 0.0f;
     }
 
     // Keyboard turning turns the character, and the camera with it.
@@ -3203,11 +3265,22 @@ void CameraController::update(float deltaTime) {
                                        && !std::isnan(turnRateOverride_))
                                          ? glm::degrees(turnRateOverride_)
                                          : WOW_TURN_SPEED;
+    // Three quarters of the rate while moving, falling, ascending or
+    // descending (0x987770: kMovingMask, unless flags2 FULL_SPEED_TURNING).
+    uint32_t stockMoveFlags = 0;
+    if (nowForward) stockMoveFlags |= sm::kForward;
+    if (nowBackward) stockMoveFlags |= sm::kBackward;
+    if (nowStrafeLeft) stockMoveFlags |= sm::kStrafeLeft;
+    if (nowStrafeRight) stockMoveFlags |= sm::kStrafeRight;
+    if (!grounded && !swimming && !isFlightAirborne()) stockMoveFlags |= sm::kFalling;
+    if ((swimming || isFlightAirborne()) && spaceHeld) stockMoveFlags |= sm::kAscending;
+    const float turnRateDeg = glm::degrees(
+        sm::keyboardTurnRate(glm::radians(activeTurnSpeedDeg), stockMoveFlags));
     float turnDeltaDeg = 0.0f;
     if (nowTurnLeft && !nowTurnRight) {
-        turnDeltaDeg = activeTurnSpeedDeg * deltaTime;
+        turnDeltaDeg = turnRateDeg * deltaTime;
     } else if (nowTurnRight && !nowTurnLeft) {
-        turnDeltaDeg = -activeTurnSpeedDeg * deltaTime;
+        turnDeltaDeg = -turnRateDeg * deltaTime;
     }
     if (turnDeltaDeg != 0.0f) {
         facingYaw += turnDeltaDeg;
@@ -3237,19 +3310,14 @@ void CameraController::update(float deltaTime) {
     // Calculate movement speed based on direction and modifiers
     float speed;
     if (useWoWSpeed) {
-        // Movement speeds (WoW-like: Ctrl walk, default run, backpedal slower)
-        if (nowBackward && !nowForward) {
-            speed = (runBackSpeedOverride_ > 0.0f && runBackSpeedOverride_ < 100.0f
-                     && !std::isnan(runBackSpeedOverride_))
-                        ? runBackSpeedOverride_ : WOW_BACK_SPEED;
-        } else if (walking) {
-            speed = (walkSpeedOverride_ > 0.0f && walkSpeedOverride_ < 100.0f && !std::isnan(walkSpeedOverride_))
-                        ? walkSpeedOverride_ : WOW_WALK_SPEED;
-        } else if (runSpeedOverride_ > 0.0f && runSpeedOverride_ < 100.0f && !std::isnan(runSpeedOverride_)) {
-            speed = runSpeedOverride_;
-        } else {
-            speed = WOW_RUN_SPEED;
-        }
+        // CMovement::GetSpeed (0x987570, stock_movement::selectSpeed): walking
+        // is min(walk, run) whichever way the character goes - a walker backs
+        // up at walk speed, not at the run-back speed - and backing up at a
+        // run is min(runBack, run).
+        uint32_t groundFlags = stockMoveFlags & (sm::kForward | sm::kBackward |
+                                                 sm::kStrafeLeft | sm::kStrafeRight);
+        if (walking) groundFlags |= sm::kWalking;
+        speed = sm::selectSpeed(groundFlags, stockSpeeds());
     } else {
         // Exploration mode (original behavior)
         speed = movementSpeed;
@@ -3377,6 +3445,29 @@ void CameraController::update(float deltaTime) {
     if (nowStrafeLeft) movement += right;
     if (nowStrafeRight) movement -= right;
 
+    // In the air the path is the one the fall started on (see the latch
+    // above): a world direction and a speed, fixed until the ground is back.
+    if (airMoveLatched_ && useWoWSpeed) {
+        if (airLatchedNow) {
+            const float len = glm::length(glm::vec2(movement));
+            if (len > 1e-4f) {
+                airDirX_ = movement.x / len;
+                airDirY_ = movement.y / len;
+                // A drift started from a standing fall is priced as walking
+                // (GetSpeed with its force-walk argument, 0x987570).
+                airSpeed_ = airDriftStart
+                    ? std::min(stockSpeeds().walk, stockSpeeds().run)
+                    : speed;
+            } else {
+                airDirX_ = forward.x;
+                airDirY_ = forward.y;
+                airSpeed_ = 0.0f;
+            }
+        }
+        movement = (airSpeed_ > 0.0f) ? glm::vec3(airDirX_, airDirY_, 0.0f) : glm::vec3(0.0f);
+        speed = airSpeed_;
+    }
+
     if (glm::dot(movement, movement) > 0.0001f) {
         travelYaw_ = glm::degrees(std::atan2(movement.y, movement.x));
     } else {
@@ -3460,8 +3551,19 @@ void CameraController::update(float deltaTime) {
         // Jump. Not in flight, where space climbs - and where grounded is held
         // true only to keep the fall-damage checks quiet, so every press sent
         // the server a jump from mid-air.
-        if (nowJump && !wasJumping && grounded && !isFlightAirborne() && !onSteepSlope_) {
+        if (nowJump && !wasJumping && grounded && !isFlightAirborne() && !onSteepSlope_ &&
+            !movementRooted_) {
             movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_JUMP));
+        }
+
+        // Walk/run mode. The stock toggle sends SET_WALK_MODE / SET_RUN_MODE
+        // and sets WALKING (0x100) in the flags (0x98B0E0), so the server and
+        // every other client know the character walks; without it a walker
+        // was a runner at walk speed to everyone else.
+        if (walking != wasWalkMode_) {
+            movementCallback(static_cast<uint32_t>(walking ? game::Opcode::MSG_MOVE_SET_WALK_MODE
+                                                           : game::Opcode::MSG_MOVE_SET_RUN_MODE));
+            wasWalkMode_ = walking;
         }
 
         // Fall landing, for a fall that actually happened.
@@ -3492,9 +3594,12 @@ void CameraController::update(float deltaTime) {
 
     // Flight ascend/descend transitions (Space = ascend, X = descend while mounted+flying)
     if (movementCallback && !externalFollow_) {
-        const bool airborne = isFlightAirborne();
+        // In water too: the stock JumpOrAscendStart ascends a swimmer (event
+        // 6, START_ASCEND 0x359), and the server and other clients see the
+        // climb from the flag.
+        const bool airborne = isFlightAirborne() || swimming;
         const bool nowAscending = airborne && spaceHeld;
-        const bool nowDescending = airborne && xDown && mounted_;
+        const bool nowDescending = airborne && xDown && (mounted_ || swimming);
 
         if (airborne) {
             if (nowAscending && !wasAscending_) {
@@ -4195,7 +4300,7 @@ void CameraController::triggerMountJump() {
     // Apply physics-driven mount jump: vz = sqrt(2 * g * h)
     // Desired height and gravity are configurable constants
     // The stock client jumps a mount exactly as it jumps a character.
-    if ((grounded || coyoteTimer > 0.0f) && !onSteepSlope_) {
+    if ((grounded || coyoteTimer > 0.0f) && !onSteepSlope_ && !movementRooted_) {
         verticalVelocity = useWoWSpeed ? WOW_JUMP_VELOCITY : JUMP_VELOCITY;
         grounded = false;
         coyoteTimer = 0.0f;

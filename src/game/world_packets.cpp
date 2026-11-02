@@ -1026,7 +1026,8 @@ bool UpdateObjectParser::parseMovementBlock(network::Packet& packet, UpdateBlock
         // Full movement block for living units
         uint32_t moveFlags = packet.readUInt32();
         uint16_t moveFlags2 = packet.readUInt16();
-        /*uint32_t time =*/ packet.readUInt32();
+        block.moveFlags2 = moveFlags2;
+        block.moveTime = packet.readUInt32();
 
         // Position
         block.x = packet.readFloat();
@@ -1076,20 +1077,20 @@ bool UpdateObjectParser::parseMovementBlock(network::Packet& packet, UpdateBlock
             (moveFlags & 0x02000000) /* FLYING */ ||
             (moveFlags2 & 0x0020)    /* MOVEMENTFLAG2_ALWAYS_ALLOW_PITCHING */) {
             if (rem() < 4) return false;
-            /*float pitch =*/ packet.readFloat();
+            block.pitch = packet.readFloat();
         }
 
         // Fall time
         if (rem() < 4) return false;
-        /*uint32_t fallTime =*/ packet.readUInt32();
+        block.fallTime = packet.readUInt32();
 
         // Jumping
         if (moveFlags & 0x00001000) { // MOVEMENTFLAG_FALLING
             if (rem() < 16) return false;
-            /*float jumpVelocity =*/ packet.readFloat();
-            /*float jumpSinAngle =*/ packet.readFloat();
-            /*float jumpCosAngle =*/ packet.readFloat();
-            /*float jumpXYSpeed =*/ packet.readFloat();
+            block.jumpVelocity = packet.readFloat();
+            block.jumpDirX = packet.readFloat();     // AzerothCore's "sin"
+            block.jumpDirY = packet.readFloat();     // and "cos"
+            block.jumpXYSpeed = packet.readFloat();
         }
 
         // Spline elevation
@@ -1118,6 +1119,27 @@ bool UpdateObjectParser::parseMovementBlock(network::Packet& packet, UpdateBlock
             if (!parseWotlkMoveUpdateSpline(packet, splineData, entityPos)) {
                 LOG_WARNING("WotLK spline parse failed for guid=0x", std::hex, block.guid, std::dec);
                 return false;
+            }
+            block.hasSpline = !splineData.nodes.empty();
+            block.splineFlags = splineData.splineFlags;
+            block.splineTimePassed = splineData.timePassed;
+            block.splineDuration = splineData.duration;
+            block.splineDurationMod = splineData.durationMod;
+            block.splineDurationModNext = splineData.durationModNext;
+            block.splineVerticalAccel = splineData.verticalAcceleration;
+            block.splineEffectStart = splineData.parabolicStartTime;
+            block.splineNodes = std::move(splineData.nodes);
+            block.splineMode = splineData.splineMode;
+            block.splineEndPoint = splineData.endPoint;
+            if (splineData.hasFinalPoint) {
+                block.splineFacingKind = 1;
+                block.splineFacingSpot = splineData.finalPoint;
+            } else if (splineData.hasFinalTarget) {
+                block.splineFacingKind = 2;
+                block.splineFacingTarget = splineData.finalTarget;
+            } else if (splineData.hasFinalAngle) {
+                block.splineFacingKind = 3;
+                block.splineFacingAngle = splineData.finalAngle;
             }
         }
     }

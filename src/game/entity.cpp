@@ -1,6 +1,8 @@
 #include "game/entity.hpp"
+#include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include <algorithm>
+#include <chrono>
 
 namespace wowee {
 namespace game {
@@ -95,6 +97,244 @@ void EntityManager::getEntitiesNear(float x, float y, float radius,
             }
         }
     }
+}
+
+// ── Stock unit motion ────────────────────────────────────────────────────
+
+namespace {
+uint32_t (*g_motionClockOverride)() = nullptr;
+}  // namespace
+
+uint32_t Entity::motionClockMs() {
+    if (g_motionClockOverride) return g_motionClockOverride();
+    using namespace std::chrono;
+    static const auto t0 = steady_clock::now();
+    return static_cast<uint32_t>(duration_cast<milliseconds>(steady_clock::now() - t0).count());
+}
+
+void Entity::setMotionClockOverride(uint32_t (*clock)()) { g_motionClockOverride = clock; }
+
+void Entity::publishMotionFrame(const glm::vec3& serverPos, float serverFacing) {
+    motionFramePos_ = serverPos;
+    motionFrameFacing_ = serverFacing;
+    motionFrameValid_ = true;
+    if (motionTransportFrame_) return;  // the transport places it
+    const glm::vec3 c = core::coords::serverToCanonical(serverPos);
+    x = c.x;
+    y = c.y;
+    z = c.z;
+    orientation = core::coords::serverToCanonicalYaw(serverFacing);
+}
+
+namespace {
+
+motion::MoverSnapshot snapshotFor(const glm::vec3& framePos, float frameFacing, float run) {
+    motion::MoverSnapshot m;
+    m.position = framePos;
+    m.facing = frameFacing;
+    m.runSpeed = run;
+    return m;
+}
+
+}  // namespace
+
+motion::MonsterMovePlan Entity::startMonsterMove(const motion::MonsterMoveSpec& spec,
+                                                 bool transportFrame) {
+    const uint32_t now = motionClockMs();
+    // Where this client has the unit now, in the spline's frame.
+    if (motionKind_ != MotionKind::None) updateStockMotion();
+    glm::vec3 pos;
+    float facing;
+    if (!transportFrame) {
+        pos = core::coords::canonicalToServer(glm::vec3(x, y, z));
+        facing = core::coords::canonicalToServerYaw(orientation);
+    } else if (motionTransportFrame_ && motionFrameValid_) {
+        pos = motionFramePos_;
+        facing = motionFrameFacing_;
+    } else {
+        // Newly on this transport: where it is on the deck is the packet's word.
+        pos = spec.start;
+        facing = core::coords::canonicalToServerYaw(orientation);
+    }
+
+    // Leaving any other motion; the new one starts from here.
+    isMoving_ = false;
+    usePathMode_ = false;
+    deadReckon_ = false;
+    activeSpline_.reset();
+    if (remoteMover_) remoteMover_->reset();
+    unitSpline_.reset();
+    motionKind_ = MotionKind::None;
+    motionTransportFrame_ = transportFrame;
+    motionTranslating_ = false;
+    motionAirborne_ = false;
+    motionSpeed_ = 0.0f;
+    motionFlags_ = 0;
+
+    motion::MonsterMovePlan plan =
+        motion::planMonsterMove(spec, snapshotFor(pos, facing, moveSpeeds_.run), now);
+    switch (plan.kind) {
+        case motion::MonsterMovePlan::Kind::Stop:
+            publishMotionFrame(pos, facing);
+            break;
+        case motion::MonsterMovePlan::Kind::Place: {
+            float f = facing;
+            if (plan.immediateFacing == motion::FinalFacing::Angle) {
+                f = plan.immediateAngle;
+            } else if (plan.immediateFacing == motion::FinalFacing::Spot) {
+                const glm::vec3 d = plan.immediateSpot - plan.position;
+                if (d.x * d.x + d.y * d.y > 1e-6f) f = std::atan2(d.y, d.x);
+            }
+            publishMotionFrame(plan.position, f);
+            break;
+        }
+        case motion::MonsterMovePlan::Kind::Spline: {
+            unitSpline_ = std::move(plan.spline);
+            plan.spline.reset();
+            motionKind_ = MotionKind::Spline;
+            motionFlags_ = motion::MoveFlags::Forward |
+                           (baseMoveFlags_ & (motion::MoveFlags::Walking |
+                                              motion::MoveFlags::Swimming |
+                                              motion::MoveFlags::Flying));
+            // An effect that starts at once starts now (0x6E96C0, 0x6E9780).
+            if (unitSpline_->effectStartMs == 0) {
+                if (unitSpline_->flags & motion::SplineFlags::Parabolic) {
+                    unitSpline_->effectStarted = true;
+                    motionEvents_ |= MOTION_JUMP_STARTED;
+                } else if (unitSpline_->flags & motion::SplineFlags::Animation) {
+                    unitSpline_->effectStarted = true;
+                    motionAnimTier_ = static_cast<uint8_t>(unitSpline_->flags &
+                                                           motion::SplineFlags::AnimationMask);
+                    motionEvents_ |= MOTION_TIER_CHANGED;
+                }
+            }
+            motionFramePos_ = pos;
+            motionFrameFacing_ = facing;
+            updateStockMotion();
+            break;
+        }
+    }
+    return plan;
+}
+
+bool Entity::startCreateSpline(const motion::CreateSplineSpec& spec, bool transportFrame) {
+    auto sp = motion::splineFromCreate(spec, motionClockMs());
+    if (!sp) return false;
+    isMoving_ = false;
+    usePathMode_ = false;
+    deadReckon_ = false;
+    activeSpline_.reset();
+    if (remoteMover_) remoteMover_->reset();
+    unitSpline_ = std::move(sp);
+    motionKind_ = MotionKind::Spline;
+    motionTransportFrame_ = transportFrame;
+    motionFlags_ = motion::MoveFlags::Forward |
+                   (baseMoveFlags_ & (motion::MoveFlags::Walking | motion::MoveFlags::Swimming |
+                                      motion::MoveFlags::Flying));
+    motionFramePos_ = unitSpline_->curve.evaluate(0.0f).position;
+    motionFrameFacing_ = core::coords::canonicalToServerYaw(orientation);
+    updateStockMotion();
+    return true;
+}
+
+void Entity::receiveRemoteMovement(const motion::MovementSample& sample, bool transportFrame) {
+    const uint32_t now = motionClockMs();
+    if (!remoteMover_) remoteMover_.emplace();
+    if (motionKind_ != MotionKind::Remote || motionTransportFrame_ != transportFrame) {
+        remoteMover_->reset();
+        remoteAppliedSeen_ = 0;
+        if (motionTransportFrame_ != transportFrame) motionFrameValid_ = false;
+    }
+    isMoving_ = false;
+    usePathMode_ = false;
+    deadReckon_ = false;
+    activeSpline_.reset();
+    unitSpline_.reset();
+    motionKind_ = MotionKind::Remote;
+    motionTransportFrame_ = transportFrame;
+    remoteMover_->speeds = moveSpeeds_;
+    remoteMover_->receive(sample, now);
+    updateStockMotion();
+}
+
+void Entity::updateStockMotion() {
+    const uint32_t now = motionClockMs();
+    if (motionKind_ == MotionKind::Spline && unitSpline_) {
+        const motion::UnitSpline::Frame f =
+            unitSpline_->update(now, motionFlags_ | baseMoveFlags_);
+        float facing = f.facing.value_or(motionFrameFacing_);
+        if (f.hasPitch) motionPitch_ = f.pitch;
+        motionSpeed_ = unitSpline_->speed();
+        const uint32_t sf = unitSpline_->flags;
+        motionAirborne_ = !f.finished &&
+            (((sf & motion::SplineFlags::Parabolic) && unitSpline_->effectStarted) ||
+             (sf & motion::SplineFlags::Falling));
+        if (f.jumpStarted) motionEvents_ |= MOTION_JUMP_STARTED;
+        if (f.animationStarted) {
+            motionAnimTier_ = f.animationTier;
+            motionEvents_ |= MOTION_TIER_CHANGED;
+        }
+        if (!f.finished) {
+            motionTranslating_ = motionSpeed_ > 0.0f;
+            publishMotionFrame(f.position, facing);
+            return;
+        }
+        // The end (0x6EB0B0): on the end point, the facing it asked for.
+        glm::vec3 endPos = f.position;
+        SplineFinish fin;
+        fin.kind = unitSpline_->finalFacing;
+        fin.serverAngle = unitSpline_->facingAngle;
+        fin.spot = unitSpline_->facingSpot;
+        fin.target = unitSpline_->facingTarget;
+        if (fin.kind == motion::FinalFacing::Angle) {
+            facing = fin.serverAngle;
+        } else if (fin.kind == motion::FinalFacing::Spot) {
+            const glm::vec3 d = fin.spot - endPos;
+            if (d.x * d.x + d.y * d.y > 1e-6f) facing = std::atan2(d.y, d.x);
+        }
+        if (fin.kind != motion::FinalFacing::None) splineFinish_ = fin;
+        motionEvents_ |= MOTION_SPLINE_DONE;
+        if (f.landed) motionEvents_ |= MOTION_LANDED;
+        publishMotionFrame(endPos, facing);
+        unitSpline_.reset();
+        motionKind_ = MotionKind::None;
+        motionTranslating_ = false;
+        motionAirborne_ = false;
+        motionSpeed_ = 0.0f;
+        motionFlags_ = 0;
+        isMoving_ = false;
+        return;
+    }
+    if (motionKind_ == MotionKind::Remote && remoteMover_) {
+        remoteMover_->speeds = moveSpeeds_;
+        const uint32_t prevFlags = remoteMover_->state().flags;
+        remoteMover_->update(now);
+        const motion::MoveState& st = remoteMover_->state();
+        if (remoteMover_->appliedCount() != remoteAppliedSeen_) {
+            // A packet took effect: its flags reach the animation now, not
+            // when it arrived (the stock movement event fires at apply time).
+            remoteAppliedSeen_ = remoteMover_->appliedCount();
+            motionEvents_ |= MOTION_REMOTE_APPLIED;
+            const auto& applied = remoteMover_->lastApplied();
+            if ((applied.flags & motion::MoveFlags::Falling) &&
+                !(prevFlags & motion::MoveFlags::Falling) && applied.jumpVelocity < 0.0f &&
+                applied.fallTimeMs < 100) {
+                motionEvents_ |= MOTION_REMOTE_JUMPED;
+            }
+        }
+        motionFlags_ = st.flags;
+        motionPitch_ = st.pitch;
+        motionAirborne_ = st.falling();
+        motionTranslating_ = (st.flags & (motion::MoveFlags::Directions |
+                                          motion::MoveFlags::Ascending |
+                                          motion::MoveFlags::Descending)) != 0;
+        motionSpeed_ = !motionTranslating_ ? 0.0f
+                     : st.falling() ? st.jumpXYSpeed
+                                    : motion::selectSpeed(moveSpeeds_, st.flags);
+        if (remoteMover_->appliedCount() > 0) publishMotionFrame(st.position, st.facing);
+        return;
+    }
+    motionKind_ = MotionKind::None;
 }
 
 } // namespace game

@@ -11,6 +11,7 @@
 #include "rendering/camera.hpp"
 #include "rendering/frustum.hpp"
 #include "rendering/lighting_manager.hpp"
+#include "rendering/stock_liquid.hpp"
 #include "pipeline/adt_loader.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
@@ -40,16 +41,20 @@ struct WaterMaterialUBO {
 // Push constants matching water.vert.glsl
 struct WaterPushConstants {
     glm::mat4 model;
-    float waveAmp;
-    float waveFreq;
-    float waveSpeed;
+    // The liquid texture's transform (stock texture matrix, 0x8a5590 and
+    // 0x8a6090): its scale, and the magma scroll's offset this frame. These
+    // were Gerstner wave parameters, always fed an amplitude of 0 - the stock
+    // surface is flat.
+    float texScale = 1.0f;
+    float texOffsetU = 0.0f;
+    float texOffsetV = 0.0f;
     float liquidBasicType; // 0=water, 1=ocean, 2=magma, 3=slime
     glm::vec2 screenSize;  // target size, for screen-space UVs
     glm::vec2 depthRange;  // camera near, far - the shader linearises SceneDepth with these
     float sceneValid = 0.0f; // 1 once captureSceneHistory has run; the shader used to guess this per pixel
     float liquidTexValid = 0.0f; // 1 when set 3 holds a frame of this liquid's texture
     float shoreFoam = 0.0f;      // 1 draws the shoreline foam band, 0 the stock water
-    float pad2 = 0.0f;
+    float depthRamp = 0.0f;      // LiquidInfo::depthRamp: 0 river, 1 ocean, 2 WMO water
 };
 static_assert(sizeof(WaterPushConstants) == 112, "the two shader declarations of this range are laid out for 112 bytes");
 
@@ -552,6 +557,29 @@ void WaterRenderer::loadLiquidTextures(pipeline::AssetManager* assetManager) {
             info.textureSet = loadLiquidTextureSequence(assetManager, path);
             break;
         }
+        // How the sequence moves (see LiquidInfo): 14 MaterialID (2 is the
+        // magma material, which magma and slime use), 23-24 Float[0..1],
+        // 42 Int[1].
+        {
+            std::string ramp = dbc->getString(row, 16);
+            std::transform(ramp.begin(), ramp.end(), ramp.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (ramp.find("wmowater") != std::string::npos) info.depthRamp = 2;
+            else if (ramp.find("ocean") != std::string::npos) info.depthRamp = 1;
+            else if (ramp.empty() && info.basicType == 1) info.depthRamp = 1;
+        }
+        if (dbc->getFieldCount() >= 43) {
+            const bool magmaMaterial = dbc->getUInt32(row, 14) == 2 || info.basicType >= 2;
+            info.framePeriodMs = stock_liquid::framePeriodMs(dbc->getUInt32(row, 42), magmaMaterial);
+            const float f0 = dbc->getFloat(row, 23);
+            const float f1 = dbc->getFloat(row, 24);
+            if (magmaMaterial) {
+                info.scrollU = f0;
+                info.scrollV = f1;
+            } else if (f0 > 0.0f) {
+                info.texScale = f0;
+            }
+        }
         liquidInfoById_[static_cast<uint16_t>(id)] = info;
     }
     LOG_INFO("Water: ", liquidInfoById_.size(), " liquid types, ",
@@ -564,6 +592,7 @@ WaterRenderer::LiquidInfo WaterRenderer::resolveLiquid(uint16_t liquidType) cons
         info = it->second;
     } else {
         info.basicType = static_cast<uint8_t>((liquidType == 0) ? 0 : ((liquidType - 1) % 4));
+        info.depthRamp = info.basicType == 1 ? 1 : 0;
     }
     if (info.textureSet < 0) info.textureSet = defaultTextureSetByBasic_[info.basicType & 3];
     return info;
@@ -1386,31 +1415,24 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             if (!frustum.intersectsAABB(aabbMin, aabbMax)) continue;
         }
 
-        bool isWmoWater = (surface.wmoId != 0);
-        bool canalProfile = isWmoWater || (surface.liquidType == 5);
         // Basic type and texture sequence from LiquidType.dbc, not from the
         // ID's position in the table: Naxxramas slime is ID 21 and a magma.
+        // The surface is the flat sheet the ADT and WMO give it: the stock
+        // liquid has no wave displacement (vsLiquidWater moves no vertex).
         const LiquidInfo liquid = resolveLiquid(surface.liquidType);
         uint8_t basicType = liquid.basicType;
-        // No wave displacement. The 3.3.5 liquid is the flat sheet the ADT and
-        // WMO give it; moving the surface up and down slid the waterline up
-        // and down every character and post standing in it, which is the
-        // silhouette that moved around when facing water.
-        float waveAmp = 0.0f;
-        float waveFreq = canalProfile ? 0.35f : (basicType == 1 ? 0.20f : 0.30f);
-        float waveSpeed = canalProfile ? 1.00f : (basicType == 1 ? 1.20f : 1.40f);
+        const auto timeMs = static_cast<uint64_t>(std::max(0.0f, time) * 1000.0f);
 
-        // The sequence's frame for now: the stock liquids step through their
-        // frames at 30 a second.
+        // The sequence's frame for now (0x8a1d60): the whole sequence once
+        // every LiquidType Int[1] ms - 1250, so lake_a's 30 frames run at 24
+        // a second and fast_a's 16 at 12.8 - not a fixed 30 a second.
         VkDescriptorSet liquidSet = blankLiquidSet_;
         bool liquidTexValid = false;
         if (liquid.textureSet >= 0 &&
             static_cast<size_t>(liquid.textureSet) < liquidTextureSets_.size()) {
             const auto& sets = liquidTextureSets_[liquid.textureSet].sets;
             if (!sets.empty()) {
-                constexpr float kLiquidFramesPerSecond = 30.0f;
-                const auto frame = static_cast<size_t>(
-                    std::max(0.0f, time) * kLiquidFramesPerSecond) % sets.size();
+                const size_t frame = stock_liquid::frameIndex(timeMs, liquid.framePeriodMs, sets.size());
                 liquidSet = sets[frame];
                 liquidTexValid = true;
             }
@@ -1419,9 +1441,9 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
         WaterPushConstants push{};
         push.model = glm::mat4(1.0f);
-        push.waveAmp = waveAmp;
-        push.waveFreq = waveFreq;
-        push.waveSpeed = waveSpeed;
+        push.texScale = liquid.texScale;
+        push.texOffsetU = stock_liquid::scrollOffset(timeMs, liquid.scrollU);
+        push.texOffsetV = stock_liquid::scrollOffset(timeMs, liquid.scrollV);
         push.liquidBasicType = static_cast<float>(basicType);
         push.screenSize = glm::vec2(static_cast<float>(renderExtent_.width),
                                     static_cast<float>(renderExtent_.height));
@@ -1434,6 +1456,14 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         // Magma and slime return before the foam in the shader; only water
         // and ocean take it.
         push.shoreFoam = shorelineFoam_ ? 1.0f : 0.0f;
+        // Water inside a WMO is LiquidType 13 or 17 in the stock client
+        // (0x793d20 swaps an interior group's water for 17), and both draw
+        // proceduralWmoWaterTex. The type Wowee has for a WMO liquid is the
+        // MLIQ material, not always a LiquidType ID, so a WMO's plain water
+        // takes the WMO ramp whatever ID it carries.
+        uint8_t depthRamp = liquid.depthRamp;
+        if (surface.wmoId != 0 && basicType == 0) depthRamp = 2;
+        push.depthRamp = static_cast<float>(depthRamp);
 
         vkCmdPushConstants(cmd, pipelineLayout,
                             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

@@ -161,11 +161,11 @@ bool parseMonsterMoveFacing(network::Packet& packet, MonsterMoveData& data, bool
     }
 
     if (data.moveType == 2) {
-        // FacingSpot - a point to look at, which nothing here needs; read past.
+        // FacingSpot - the point the unit turns to when it gets there.
         if (!packet.hasRemaining(12)) return false;
-        packet.readFloat();
-        packet.readFloat();
-        packet.readFloat();
+        data.facingSpotX = packet.readFloat();
+        data.facingSpotY = packet.readFloat();
+        data.facingSpotZ = packet.readFloat();
     } else if (data.moveType == 3) {
         // FacingTarget
         if (!packet.hasRemaining(8)) return false;
@@ -390,6 +390,21 @@ bool parseWotlkMoveUpdateSpline(
         out.splineMode = mode;
         out.endPoint = glm::vec3(epX, epY, epZ);
         out.hasEndPoint = true;
+        // Keep the nodes when they were whole points (AzerothCore's create
+        // block writes every node as a Vector3).
+        out.nodes.clear();
+        if (!compressed && pc > 0) {
+            const size_t afterAll = packet.getReadPos();
+            packet.setReadPos(prePointCount + 4);
+            out.nodes.reserve(pc);
+            for (uint32_t i = 0; i < pc; ++i) {
+                const float nx = packet.readFloat();
+                const float ny = packet.readFloat();
+                const float nz = packet.readFloat();
+                out.nodes.emplace_back(nx, ny, nz);
+            }
+            packet.setReadPos(afterAll);
+        }
         LOG_DEBUG("  Spline pointCount=", pc, " compressed=", compressed,
                   " endPt=(", epX, ",", epY, ",", epZ, ") (", tag, ")");
         return true;
@@ -402,8 +417,8 @@ bool parseWotlkMoveUpdateSpline(
     // Some servers (ChromieCraft) always write vertAccel+effectStart unconditionally.
     bool splineParsed = false;
     if (bytesAvailable(8)) {
-        /*float durationMod =*/ packet.readFloat();
-        /*float durationModNext =*/ packet.readFloat();
+        out.durationMod = packet.readFloat();
+        out.durationModNext = packet.readFloat();
         bool wotlkOk = true;
         if (out.splineFlags & SplineFlagWotlk::ANIMATION) {
             if (!bytesAvailable(5)) { wotlkOk = false; }
@@ -417,8 +432,8 @@ bool parseWotlkMoveUpdateSpline(
         if (wotlkOk) {
             if (!bytesAvailable(8)) { wotlkOk = false; }
             else {
-                /*float vertAccel =*/ packet.readFloat();
-                /*uint32_t effectStart =*/ packet.readUInt32();
+                out.verticalAcceleration = packet.readFloat();
+                out.parabolicStartTime = packet.readUInt32();
             }
         }
         if (wotlkOk) {

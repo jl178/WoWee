@@ -552,6 +552,31 @@ struct UpdateBlock {
     // Used to initialise swim/walk/fly state on entity spawn (cold-join).
     uint32_t moveFlags = 0;
 
+    // The rest of a WotLK living block, for a unit already under way when it
+    // comes into view (game/unit_motion_glue.hpp).
+    uint16_t moveFlags2 = 0;
+    uint32_t moveTime = 0;
+    float pitch = 0.0f;
+    uint32_t fallTime = 0;
+    float jumpVelocity = 0.0f, jumpDirX = 0.0f, jumpDirY = 0.0f, jumpXYSpeed = 0.0f;
+    // MOVEMENTFLAG_SPLINE_ENABLED: the spline it is on, as the server wrote
+    // it (padded nodes included).
+    bool hasSpline = false;
+    uint32_t splineFlags = 0;
+    uint32_t splineTimePassed = 0;
+    uint32_t splineDuration = 0;
+    float splineDurationMod = 1.0f;
+    float splineDurationModNext = 1.0f;
+    float splineVerticalAccel = 0.0f;
+    uint32_t splineEffectStart = 0;
+    std::vector<glm::vec3> splineNodes;
+    uint8_t splineMode = 0;
+    glm::vec3 splineEndPoint{0.0f};
+    uint8_t splineFacingKind = 0;   // 0 none, 1 spot, 2 target, 3 angle
+    glm::vec3 splineFacingSpot{0.0f};
+    uint64_t splineFacingTarget = 0;
+    float splineFacingAngle = 0.0f;
+
     // Transport data from LIVING movement block (MOVEMENTFLAG_ONTRANSPORT)
     bool onTransport = false;
     uint64_t transportGuid = 0;
@@ -2035,8 +2060,18 @@ struct MonsterMoveData {
     uint8_t moveType = 0;  // 0=Normal, 1=Stop, 2=FacingSpot, 3=FacingTarget, 4=FacingAngle
     float facingAngle = 0;
     uint64_t facingTarget = 0;
+    float facingSpotX = 0, facingSpotY = 0, facingSpotZ = 0;  // moveType 2 (server coords)
+    uint32_t splineId = 0;
     uint32_t splineFlags = 0;
     uint32_t duration = 0;
+    // Animation (WotLK flag 0x00200000): the tier it moves to, and when.
+    bool hasAnimation = false;
+    uint8_t animationType = 0;
+    uint32_t animationStartTime = 0;
+    // Parabolic (0x00000800): MoveJump's vertical acceleration, and when.
+    bool hasParabolic = false;
+    float verticalAcceleration = 0.0f;
+    uint32_t parabolicStartTime = 0;
     // Destination (final point of the spline, server coords)
     float destX = 0, destY = 0, destZ = 0;
     bool hasDest = false;
@@ -2049,6 +2084,10 @@ class MonsterMoveParser {
 public:
     // WotLK 3.3.5a format: PackedGUID + uint8 unk + float[3] + uint32 splineId + uint8 moveType + ...
     static bool parse(network::Packet& packet, MonsterMoveData& data);
+    // Everything after the mover's guid (the uint8 unk on): the common part
+    // SMSG_MONSTER_MOVE_TRANSPORT shares once its transport guid and seat
+    // are read. data.guid is left as it is.
+    static bool parseBody(network::Packet& packet, MonsterMoveData& data);
     // Vanilla 1.12 format: PackedGUID + float[3] + uint32 timeInMs + uint8 moveType + ...
     // Used for Classic/TBC/Turtle WoW servers (no splineId, timeInMs before moveType)
     static bool parseVanilla(network::Packet& packet, MonsterMoveData& data);

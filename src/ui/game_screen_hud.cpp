@@ -4,6 +4,7 @@
 #include "ui/ui_texture_load.hpp"
 #include "ui/ui_upload_budget.hpp"
 #include "core/helm_visual.hpp"
+#include "core/character_geosets.hpp"
 #include "ui/ui_raid_icons.hpp"
 #include "ui/ui_colors.hpp"
 #include "ui/ui_helpers.hpp"
@@ -167,207 +168,39 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
         geosets = core::bareCharacterGeosets(0, 0, 0, 0, 0);
     }
 
-    auto eraseGroup = [&](uint16_t group) {
-        for (auto it = geosets.begin(); it != geosets.end();) {
-            if ((*it / 100) == group) it = geosets.erase(it);
-            else ++it;
-        }
-    };
-
-    // Build set of geoset IDs present in the model for validation.
-    // Races like Gnome (no 501) and Tauren (only 505) need fallback.
-    std::unordered_set<uint16_t> modelGeosets;
-    if (const auto* modelData = charRenderer->getInstanceModelData(instanceId)) {
-        for (const auto& batch : modelData->batches) {
-            modelGeosets.insert(batch.submeshId);
-        }
+    // Stock's rule (FUN_004ed900 with HelmetGeosetVisData by race), shared
+    // with other players, the NPCs and the portrait. The hair and facial
+    // values come out of the bare set built above.
+    core::CharacterGeosetQuery gq;
+    gq.haveFacialRow = !geosets.empty();
+    for (uint16_t id : geosets) {
+        const uint16_t g = id / 100, v = id % 100;
+        if (g == 0 && id != 0 && id != 1) gq.hairScalp = id;
+        else if (g == 1) gq.facial100 = v;
+        else if (g == 2) gq.facial200 = v;
+        else if (g == 3) gq.facial300 = v;
+        else if (g == 17) gq.facial1700 = v;
     }
-
-    // The same rule the player, NPC and portrait paths use, from
-    // core::geoset_rules - ask for a variant, get the one this model has.
-    auto pickGeoset = [&](uint16_t preferred) {
-        return core::resolveGeoset(preferred, modelGeosets);
-    };
-
-    eraseGroup(4);
-    eraseGroup(5);
-    eraseGroup(8);
-    eraseGroup(13);
-    eraseGroup(15);
-    eraseGroup(12);
-
-    // CharGeosets mapping (verified via vertex bounding boxes):
-    //   Group 4 (401+) = GLOVES (forearm area, Z~1.1-1.4)
-    //   Group 5 (501+) = BOOTS  (shin area, Z~0.1-0.6)
-    //   Group 8 (801+) = WRISTBANDS/SLEEVES (controlled by chest armor)
-    //   Group 9 (901+) = KNEEPADS
-    //   Group 13 (1301+) = TROUSERS/PANTS
-    //   Group 15 (1501+) = CAPE/CLOAK
-    //   Group 20 (2002) = FEET
-
-    // Gloves: inventoryType 10 → group 4 (forearms)
-    {
-        uint32_t did = findEquippedDisplayId({10});
-        uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-        geosets.insert(pickGeoset(gg > 0 ? core::equippedGeoset(core::equipment::kGlovesBare, gg)
-                                          : core::kGeosetBareForearms));
+    for (int s = 0; s < game::Inventory::NUM_EQUIP_SLOTS; s++) {
+        const auto& slot = inventory.getEquipSlot(static_cast<game::EquipSlot>(s));
+        if (slot.empty()) continue;
+        const int kind = core::geosetKindForInventoryType(slot.item.inventoryType);
+        if (kind >= 0 && gq.displays[kind] == 0) gq.displays[kind] = slot.item.displayInfoId;
     }
-
-    // Boots: inventoryType 8 → group 5 (shins/lower legs)
-    {
-        uint32_t did = findEquippedDisplayId({8});
-        uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-        uint16_t selectedShin = pickGeoset(gg > 0 ? core::equippedGeoset(core::equipment::kBootsBare, gg)
-                                                  : core::kGeosetBareShins);
-        geosets.insert(selectedShin);
-    }
-
-    // Chest/Shirt: inventoryType 4 (shirt), 5 (chest), 20 (robe)
-    // Controls group 8 (wristbands/sleeve length): 801=bare wrists, 802+=sleeve styles
-    // Also controls group 13 (trousers) via GeosetGroup[2] for robes
-    {
-        // The chest or robe wins over the shirt under it: a shirt sits in an
-        // earlier slot and was found first, so robes never set the skirt.
-        uint32_t did = findEquippedDisplayId({5, 20});
-        if (did == 0) did = findEquippedDisplayId({4});
-        uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-        geosets.insert(gg > 0 ? core::equippedGeoset(core::equipment::kChestBare, gg)
-                              : core::kGeosetBareSleeves);
-        uint32_t gg3 = getGeosetGroup(did, geosetGroup3Field);
-        if (gg3 > 0) {
-            geosets.insert(core::equippedGeoset(core::equipment::kRobeKiltBare, gg3));
-        }
-        LOG_INFO("Player geosets: chest display ", did, " skirt group ", gg3,
-                 " model has 1302=", modelGeosets.count(1302));
-    }
-
-    // Kneepads: group 9 from the legs item's GeosetGroup[1] (902, 903); none
-    // otherwise. A robe or dress skirt covers them.
-    {
-        const uint32_t legsDid = findEquippedDisplayId({7});
-        const uint32_t kneeGG = getGeosetGroup(legsDid, geosetGroup3Field - 1);
-        const uint32_t chestDid = findEquippedDisplayId({5, 20});
-        const bool skirt = getGeosetGroup(chestDid, geosetGroup3Field) > 0 ||
-                           getGeosetGroup(legsDid, geosetGroup3Field) > 0;
-        if (kneeGG > 0 && !skirt) geosets.insert(pickGeoset(static_cast<uint16_t>(901 + kneeGG)));
-        if (skirt) {
-            // Boot tops would poke through the skirt: bare shins under it.
-            for (auto it = geosets.begin(); it != geosets.end();) {
-                if (*it / 100 == 5) it = geosets.erase(it); else ++it;
-            }
-            geosets.insert(pickGeoset(core::kGeosetBareShins));
-        }
-    }
-
-    // Legs/Pants: inventoryType 7 → group 13 (trousers/thighs)
-    // 1301=bare legs, 1302+=pant/kilt styles
-    {
-        uint32_t did = findEquippedDisplayId({7});
-        uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-        // Only add if robe hasn't already set a kilt geoset
-        // Only when the robe above has not already put a kilt on the legs.
-        // 1302 and 1303 are the first two kilt variants; anything in group 13
-        // beyond the bare one means something is already covering them.
-        const bool kiltAlreadySet = std::any_of(
-            geosets.begin(), geosets.end(), [](uint16_t g) {
-                return core::geosetGroup(g) == core::geosetGroup(core::kGeosetBarePants) &&
-                       !core::geosetMeansNone(g);
-            });
-        if (!kiltAlreadySet) {
-            // Legs GeosetGroup[2] is a dress or kilt; [0] is group 11 pant
-            // flaps and never the skirt.
-            const uint32_t legsGG3 = getGeosetGroup(did, geosetGroup3Field);
-            geosets.insert(legsGG3 > 0 ? core::equippedGeoset(core::equipment::kRobeKiltBare, legsGG3)
-                                       : core::kGeosetBarePants);
-        }
-        (void)gg;
-    }
-
-    // Whether a helm and a cloak are *shown*, which is not the same question as
-    // whether one is worn. Both toggles hide the model and neither was reaching
-    // the geosets, so turning the cloak off left the cloak's own body geoset on
-    // and turning the helm off left the player bald under nothing.
-    bool helmShown = true, cloakShown = true;
     if (auto* gh = app.getGameHandler()) {
-        helmShown = gh->isHelmVisible();
-        cloakShown = gh->isCloakVisible();
-    }
-
-    // Back/Cloak: inventoryType 16 → group 15
-    uint32_t capeGG = getGeosetGroup(findEquippedDisplayId({16}), geosetGroup1Field);
-    geosets.insert((hasEquippedType({16}) && cloakShown) ? core::cloakGeoset(capeGG)
-                                                         : core::kGeosetNoCape);
-
-    // Tabard: inventoryType 19 → group 12
-    if (hasEquippedType({19})) {
-        geosets.insert(core::kGeosetDefaultTabard);
-    }
-
-    // Hide hair under a helm: drop the style scalp and put the bald cap on.
-    // Group 0 holds the body plus one scalp; 0 itself is the body and stays.
-    // The other-player path has always done this, so a helm covered their hair
-    // and not yours.
-    // Only while it is actually on the head. The show-helm toggle takes the
-    // model away and left this branch running, so hiding a helm hid the hair
-    // with it and the player stood there bald wearing nothing.
-    if (hasEquippedType({1}) && helmShown) {
-        const uint32_t headDisplayId = findEquippedDisplayId({1});
-        uint8_t genderId = 0;
-        if (auto* gh = app.getGameHandler()) {
-            if (const auto* ch = gh->getActiveCharacter()) {
-                genderId = static_cast<uint8_t>(ch->gender);
-            }
-        }
-        // A circlet, tiara or crown sits over the hair rather than covering it,
-        // and the data says which does what - see core::helmHidesHair.
-        if (auto* assets = app.getAssetManager();
-            assets && core::helmHidesHair(*assets, headDisplayId, genderId)) {
-            for (auto it = geosets.begin(); it != geosets.end();) {
-                if (*it != 0 && (*it / 100) == 0) it = geosets.erase(it);
-                else ++it;
-            }
-            geosets.insert(1);
+        // Whether a helm and a cloak are *shown*: both toggles take the model
+        // away, and with it what the helm hides and the cloak's geoset.
+        gq.helmShown = gh->isHelmVisible();
+        gq.cloakShown = gh->isCloakVisible();
+        if (const auto* ch = gh->getActiveCharacter()) {
+            gq.race = static_cast<uint8_t>(ch->race);
+            gq.gender = static_cast<uint8_t>(ch->gender);
+            gq.deathKnight = static_cast<uint8_t>(ch->characterClass) == 6;
         }
     }
-
-    // Bald with nothing on your head, which is the reported bug and the one
-    // thing this function can say for certain about it.
-    //
-    // Group 0 holds the body (geoset 0) and one scalp. Wearing a helm that
-    // covers hair replaces the style scalp with 1, the bald cap - that is the
-    // branch above. With no helm equipped there is nothing to do that, so a
-    // set whose only group-0 members are 0 and 1 means the scalp was never
-    // selected rather than removed, and the fault is upstream in
-    // buildDefaultPlayerGeosets or the hair map it reads.
-    //
-    // Silent whenever it is working: it can only fire when the character is
-    // bare-headed and bald. The measurement that ruled out the DBC is at
-    // entity_spawner.cpp, and what remains unproven is which of the two
-    // possible answers this is.
-    if (!hasEquippedType({1})) {
-        bool hasStyleScalp = false;
-        for (uint16_t g : geosets) {
-            if (g / 100 == 0 && g != 0 && g != 1) { hasStyleScalp = true; break; }
-        }
-        if (!hasStyleScalp && geosets.count(1) > 0) {
-            LOG_WARNING("Player geosets carry the bald cap with no helm equipped - "
-                        "the hair scalp was never selected. Hair style byte and "
-                        "CharHairGeosets lookup are the two places to look.");
-        }
-    }
-
-    // Groups 17 and 18 are the Death Knight / Night Elf eye glow. Nothing here
-    // should ever select one, and the renderer only auto-skips them when no
-    // geoset filter is applied - with a filter, whatever is in this set is what
-    // gets drawn. Glowing eyes on a character that should not have them come
-    // from exactly this, so say so rather than leaving it to be spotted.
-    for (uint16_t g : geosets) {
-        const uint16_t group = g / 100;
-        if (group == 17 || group == 18) {
-            LOG_WARNING("Player geosets include eye-glow geoset ", g,
-                        " (group ", group, ") - this will draw glowing eyes");
-        }
-    }
+    (void)getGeosetGroup; (void)findEquippedDisplayId; (void)hasEquippedType;
+    (void)geosetGroup1Field; (void)geosetGroup3Field;
+    if (assetManager) geosets = core::buildStockCharacterGeosets(*assetManager, gq);
 
     charRenderer->setActiveGeosets(instanceId, geosets);
 }

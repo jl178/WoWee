@@ -506,7 +506,7 @@ std::string readString(const std::vector<uint8_t>& data, uint32_t offset, uint32
     return std::string(reinterpret_cast<const char*>(&data[offset]), actualLen);
 }
 
-enum class TrackType { VEC3, QUAT_COMPRESSED, FLOAT, FIXED16, BYTE_BOOL };
+enum class TrackType { VEC3, QUAT_COMPRESSED, FLOAT, FIXED16, BYTE_BOOL, UINT16 };
 
 // M2 sequence flag: when set, keyframe data is embedded in the M2 file.
 // When clear, data lives in an external .anim file and the M2 offsets are
@@ -562,6 +562,7 @@ void parseAnimTrack(const std::vector<uint8_t>& data,
         if (type == TrackType::FLOAT) keyElementSize = sizeof(float);
         else if (type == TrackType::FIXED16) keyElementSize = sizeof(int16_t);
         else if (type == TrackType::BYTE_BOOL) keyElementSize = sizeof(uint8_t);
+        else if (type == TrackType::UINT16) keyElementSize = sizeof(uint16_t);
         else if (type == TrackType::VEC3) keyElementSize = sizeof(float) * 3;
         else keyElementSize = sizeof(int16_t) * 4;
         if (keyOffset + keyCount * keyElementSize > data.size()) {
@@ -590,6 +591,11 @@ void parseAnimTrack(const std::vector<uint8_t>& data,
                 track.sequences[i].floatValues.push_back(
                     readValue<uint8_t>(data, keyOffset + k) != 0 ? 1.0f : 0.0f);
             }
+        } else if (type == TrackType::UINT16) {
+            // A ribbon's texture cell: an index, held as a float.
+            auto raw = readArray<uint16_t>(data, keyOffset, keyCount);
+            track.sequences[i].floatValues.reserve(raw.size());
+            for (uint16_t v : raw) track.sequences[i].floatValues.push_back(static_cast<float>(v));
         } else if (type == TrackType::VEC3) {
             // Translation/scale: float[3] per key
             struct Vec3Disk { float x, y, z; };
@@ -759,32 +765,31 @@ void parseAnimTrackVanilla(const std::vector<uint8_t>& data,
 
 // Parse an FBlock (particle lifetime curve) from a 16-byte on-disk header.
 // FBlocks are like M2Track but WITHOUT the interpolationType/globalSequence prefix.
+// valueType: 0 colour (C3Vector, 0..255), 1 alpha (fixed16), 2 scale (C2Vector),
+// 3 cell index (uint16).
 void parseFBlock(const std::vector<uint8_t>& data, uint32_t offset,
                  M2FBlock& fb, int valueType) {
-    // valueType: 0 = color (C3Vector, 3 floats in 0-255 range), 1 = alpha (uint16), 2 = scale (float pair)
     if (offset + sizeof(FBlockDisk) > data.size()) return;
 
     FBlockDisk disk = readValue<FBlockDisk>(data, offset);
     if (disk.nTimestamps == 0 || disk.nKeys == 0) return;
-    // Sanity cap: particle FBlocks typically have 3 keyframes
+    // Sanity cap: the data has at most 7 keys per curve.
     if (disk.nTimestamps > 1024 || disk.nKeys > 1024) return;
 
-    // FBlock timestamps are uint16 (not sub-arrays), stored directly
-    if (disk.ofsTimestamps + disk.nTimestamps * sizeof(uint16_t) > data.size()) return;
+    if (static_cast<size_t>(disk.ofsTimestamps) + disk.nTimestamps * sizeof(int16_t) > data.size())
+        return;
 
-    auto rawTs = readArray<uint16_t>(data, disk.ofsTimestamps, disk.nTimestamps);
-    uint16_t maxTs = 1;
-    for (auto t : rawTs) { if (t > maxTs) maxTs = t; }
+    // The timestamps are fixed16 life fractions. The stock evaluator divides
+    // each by 32767 (0x9793B0); dividing by the largest key instead put a
+    // curve whose last key is short of 32767 on the wrong times.
+    auto rawTs = readArray<int16_t>(data, disk.ofsTimestamps, disk.nTimestamps);
     fb.timestamps.reserve(rawTs.size());
-    for (auto t : rawTs) {
-        fb.timestamps.push_back(static_cast<float>(t) / static_cast<float>(maxTs));
-    }
+    for (auto t : rawTs) fb.timestamps.push_back(static_cast<float>(t) / 32767.0f);
 
-    uint32_t nKeys = disk.nKeys;
-    uint32_t ofsKeys = disk.ofsKeys;
+    const uint32_t nKeys = disk.nKeys;
+    const size_t ofsKeys = disk.ofsKeys;
 
     if (valueType == 0) {
-        // Color: C3Vector (3 × float per key, values in 0-255 range)
         if (ofsKeys + nKeys * 12 > data.size()) return;
         fb.vec3Values.reserve(nKeys);
         for (uint32_t i = 0; i < nKeys; i++) {
@@ -794,21 +799,27 @@ void parseFBlock(const std::vector<uint8_t>& data, uint32_t offset,
             fb.vec3Values.emplace_back(r / 255.0f, g / 255.0f, b / 255.0f);
         }
     } else if (valueType == 1) {
-        // Alpha: uint16 per key
-        if (ofsKeys + nKeys * sizeof(uint16_t) > data.size()) return;
-        auto rawAlpha = readArray<uint16_t>(data, ofsKeys, nKeys);
+        // Signed, as the stock reads it (movsx in 0x9794F0).
+        if (ofsKeys + nKeys * sizeof(int16_t) > data.size()) return;
+        auto rawAlpha = readArray<int16_t>(data, ofsKeys, nKeys);
         fb.floatValues.reserve(nKeys);
-        for (auto a : rawAlpha) {
-            fb.floatValues.push_back(static_cast<float>(a) / 32767.0f);
-        }
+        for (auto a : rawAlpha) fb.floatValues.push_back(static_cast<float>(a) / 32767.0f);
     } else if (valueType == 2) {
-        // Scale: float pair {x, y} per key, store x
+        // Both axes: a particle's quad is scale.x by scale.y (0x979480).
         if (ofsKeys + nKeys * 8 > data.size()) return;
         fb.floatValues.reserve(nKeys);
+        fb.vec2Values.reserve(nKeys);
         for (uint32_t i = 0; i < nKeys; i++) {
-            float x = readValue<float>(data, ofsKeys + i * 8);
+            const float x = readValue<float>(data, ofsKeys + i * 8);
+            const float y = readValue<float>(data, ofsKeys + i * 8 + 4);
             fb.floatValues.push_back(x);
+            fb.vec2Values.emplace_back(x, y);
         }
+    } else if (valueType == 3) {
+        if (ofsKeys + nKeys * sizeof(uint16_t) > data.size()) return;
+        auto raw = readArray<uint16_t>(data, ofsKeys, nKeys);
+        fb.floatValues.reserve(nKeys);
+        for (auto c : raw) fb.floatValues.push_back(static_cast<float>(c));
     }
 }
 
@@ -1762,8 +1773,55 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                 parseFBlock(m2Data, base + 0x104, em.particleColor, 0);
                 parseFBlock(m2Data, base + 0x114, em.particleAlpha, 1);
                 parseFBlock(m2Data, base + 0x124, em.particleScale, 2);
-                em.drag = readValue<float>(m2Data, base + 0x174);
-                if (!std::isfinite(em.drag) || em.drag < 0.0f) em.drag = 0.0f;
+                parseFBlock(m2Data, base + 0x13C, em.headCell, 3);
+                parseFBlock(m2Data, base + 0x14C, em.tailCell, 3);
+                const auto rf = [&](uint32_t off) {
+                    const float v = readValue<float>(m2Data, base + off);
+                    return std::isfinite(v) ? v : 0.0f;
+                };
+                em.lifespanVary = rf(0xAC);
+                em.emissionRateVary = rf(0xC4);
+                em.scaleVary = glm::vec2(rf(0x134), rf(0x138));
+                em.tailLength = rf(0x15C);
+                em.twinkleSpeed = rf(0x160);
+                em.twinklePercent = rf(0x164);
+                em.twinkleScaleMin = rf(0x168);
+                em.twinkleScaleMax = rf(0x16C);
+                em.burstMultiplier = rf(0x170);
+                em.drag = rf(0x174);
+                if (em.drag < 0.0f) em.drag = 0.0f;
+                em.baseSpin = rf(0x178);
+                em.baseSpinVary = rf(0x17C);
+                em.spin = rf(0x180);
+                em.spinVary = rf(0x184);
+                em.tumbleMin = glm::vec3(rf(0x188), rf(0x18C), rf(0x190));
+                em.tumbleMax = glm::vec3(rf(0x194), rf(0x198), rf(0x19C));
+                em.windVector = glm::vec3(rf(0x1A0), rf(0x1A4), rf(0x1A8));
+                em.windTime = rf(0x1AC);
+                em.followSpeed1 = rf(0x1B0);
+                em.followScale1 = rf(0x1B4);
+                em.followSpeed2 = rf(0x1B8);
+                em.followScale2 = rf(0x1BC);
+                em.particleColorIndex = readValue<uint16_t>(m2Data, base + 0x2A);
+                em.particleType = readValue<uint8_t>(m2Data, base + 0x2C);
+                em.headOrTail = readValue<uint8_t>(m2Data, base + 0x2D);
+                {
+                    const uint32_t nSp = readValue<uint32_t>(m2Data, base + 0x1C0);
+                    const uint32_t oSp = readValue<uint32_t>(m2Data, base + 0x1C4);
+                    if (nSp > 0 && nSp < 4096 &&
+                        static_cast<size_t>(oSp) + nSp * 12 <= m2Data.size()) {
+                        em.splinePoints.reserve(nSp);
+                        for (uint32_t k = 0; k < nSp; ++k) {
+                            em.splinePoints.emplace_back(readValue<float>(m2Data, oSp + k * 12),
+                                                         readValue<float>(m2Data, oSp + k * 12 + 4),
+                                                         readValue<float>(m2Data, oSp + k * 12 + 8));
+                        }
+                    }
+                }
+                if (base + 0x1C8 + sizeof(M2TrackDisk) <= m2Data.size()) {
+                    parseAnimTrack(m2Data, readValue<M2TrackDisk>(m2Data, base + 0x1C8),
+                                   em.enabledTrack, TrackType::BYTE_BOOL, emSeqFlags);
+                }
             }
 
             model.particleEmitters.push_back(std::move(em));
@@ -1867,6 +1925,18 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                 if (base + 0x98 + sizeof(M2TrackDisk) <= m2Data.size()) {
                     parseAnimTrack(m2Data, readValue<M2TrackDisk>(m2Data, base + 0x98),
                                    rib.visibilityTrack, TrackType::BYTE_BOOL, ribSeqFlags);
+                }
+                // texSlotTrack at 0x84 - uint16 cell index (CRibbonEmitter 0x97F5F0).
+                if (base + 0x84 + sizeof(M2TrackDisk) <= m2Data.size()) {
+                    parseAnimTrack(m2Data, readValue<M2TrackDisk>(m2Data, base + 0x84),
+                                   rib.texSlotTrack, TrackType::UINT16, ribSeqFlags);
+                }
+                // The material index is into the model's material table, which
+                // is what the stock setup reads the blend and render flags from
+                // (0x833900: materials at H+0x74).
+                if (rib.materialIndex < model.materials.size()) {
+                    rib.blendMode = model.materials[rib.materialIndex].blendMode;
+                    rib.materialFlags = model.materials[rib.materialIndex].flags;
                 }
 
                 // An emitter with no bone has nothing to trail behind.

@@ -450,6 +450,7 @@ private:
     void loadQuestMarkerModels();  // No-op; the models load on first use
     void updateQuestMarkers();     // Places, turns and removes the marker instances
     void updateLootSparkles();     // The glitter over corpses with loot
+    void updateUnitHighlights();   // Mouseover and target emissive (stock 0x743C70)
 };
 
 } // namespace core

@@ -18,6 +18,7 @@ namespace wowee {
 namespace game {
 
 class GameHandler;
+enum class SpeedKind : uint8_t;  // game/unit_motion_glue.hpp
 
 class MovementHandler {
 public:
@@ -180,6 +181,14 @@ public:
 
     // Heartbeat / movement timing (for GameHandler::update())
     float& timeSinceLastMoveHeartbeatRef() { return timeSinceLastMoveHeartbeat_; }
+    /// Whether the stock client would be sending heartbeats now: a direction,
+    /// falling, ascending or descending (stock_movement::kMovingMask, 0x6F09F0).
+    /// Turning in place, pitching and treading water send none.
+    [[nodiscard]] bool inStockHeartbeatMotion() const;
+    /// Whether a facing change is worth a MSG_MOVE_SET_FACING: at least 0.1 rad
+    /// from the facing the last movement packet of any kind carried (0x71AE80).
+    /// canonicalYaw is in the same space as movementInfo.orientation.
+    [[nodiscard]] bool facingChangeWorthSending(float canonicalYaw) const;
     [[nodiscard]] float getMoveHeartbeatInterval() const { return moveHeartbeatInterval_; }
     [[nodiscard]] bool isServerMovementAllowed() const { return serverMovementAllowed_; }
     /// Whether the player is in the air on a flying mount, as the movement
@@ -232,6 +241,9 @@ public:
     void applyTaxiMountForCurrentNode();
 
 private:
+    /// Another unit's speed that a spline speed opcode sets.
+    static SpeedKind remoteSpeedKind(float MovementHandler::* member);
+
     // --- Packet handlers ---
     void handleMonsterMove(network::Packet& packet);
     void handleMonsterMoveTransport(network::Packet& packet);
@@ -312,6 +324,11 @@ private:
     const char* movementHeldReason_ = nullptr;
     uint32_t lastFacingSendTimeMs_ = 0;
     float lastFacingSentOrientation_ = 0.0f;
+    /// The facing the last movement packet of any kind carried, the reference
+    /// the stock client measures a facing change from (CGUnit +0xA50, written
+    /// by 0x71F0C0). Unset until the first packet.
+    float lastPacketOrientation_ = 0.0f;
+    bool hasLastPacketOrientation_ = false;
 
     // Speed state
     float serverRunSpeed_ = 7.0f;

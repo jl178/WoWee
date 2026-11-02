@@ -73,8 +73,8 @@ struct ZoneAudioContext {
 /// Owned by Application; Renderer and UI components access through Application.
 class AudioCoordinator {
 public:
-    /// Loop Music, from the audio options. Takes effect on the next
-    /// track; a track already running is not restarted to obey it.
+    /// Loop Music, from the audio options: the stock Sound_ZoneMusicNoDelay.
+    /// With it on, the next zone track follows the last with no silence.
     void setZoneMusicLooping(bool loop);
 
     AudioCoordinator();
@@ -130,7 +130,7 @@ public:
     WorldSoundEmitters* getWorldSoundEmitters() { return worldSoundEmitters_.get(); }
 
 private:
-    void playZoneMusic(const std::string& music);
+    void playZoneMusic(const std::string& music, float fadeMs = stock::kMusicFadeSeconds * 1000.0f);
     void updateTableMusic(const ZoneAudioContext& ctx, uint32_t zoneId, bool suppressed);
     void updateTableAmbience(const ZoneAudioContext& ctx);
     void updateReverb(const ZoneAudioContext& ctx);
@@ -145,7 +145,7 @@ private:
     bool reverbUnderwater_ = false;
     std::string underwaterLoopPath_;  ///< from SoundEntries, resolved once the tables load
     float underwaterLoopVolume_ = 0.69f;
-    bool loopMusic_ = false;  ///< Loop Music setting: repeat the track instead of resting between tracks  ///< area id and room ambience the loops were chosen for
+    bool loopMusic_ = false;  ///< Loop Music: Sound_ZoneMusicNoDelay, no rest between tracks
 
     std::unique_ptr<MusicManager> musicManager_;
     std::unique_ptr<FootstepManager> footstepManager_;

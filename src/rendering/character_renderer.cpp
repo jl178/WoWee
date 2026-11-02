@@ -38,6 +38,11 @@
 #include "rendering/m2_model_classifier.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
+#include "pipeline/dbc_layout.hpp"
+#include "pipeline/m2_asset_loader.hpp"
+#include "rendering/m2_renderer.hpp"
+#include "rendering/unit_light_rules.hpp"
+#include "rendering/character_composite_rules.hpp"
 #include "core/env_flag.hpp"
 #include "core/geoset_rules.hpp"
 #include "core/logger.hpp"
@@ -252,7 +257,9 @@ struct CharMaterialUBO {
     float heightMapVariance;
     float normalMapStrength;
     int32_t hairMaterial;
-    float _pad[1];
+    float ambientMul;   // unit-only ambient boost (0x783429)
+    float highlight;    // 1 for the mouseover / target (0x743C70)
+    float _pad[2];
 };
 
 // GPU vertex struct with tangent (expanded from M2Vertex for normal mapping)
@@ -632,6 +639,10 @@ void CharacterRenderer::clear() {
     // Destroy bone buffers for all instances
     for (auto& pair : instances) {
         destroyInstanceBones(pair.second);
+        // Weapon glows hosted by M2Renderer are not ours to clear with the map.
+        for (const auto& wa : pair.second.weaponAttachments)
+            for (const auto& fx : wa.effects)
+                if (fx.m2InstanceId != 0 && effectRenderer_) effectRenderer_->removeInstance(fx.m2InstanceId);
     }
 
     // See CharacterRenderer::shutdown: ~VkTexture frees nothing on its own.
@@ -1005,10 +1016,16 @@ static void blitOverlay(std::vector<uint8_t>& composite, int compW, int compH,
 // that arrives larger than the region it belongs in was pasted at its own size
 // and covered several regions of the atlas. Nearest-neighbour is enough here:
 // these are small atlas patches, and the alternative was no resize at all.
+static void blitOverlayScaledN(std::vector<uint8_t>& composite, int compW, int compH,
+                                const pipeline::BLPImage& overlay, int dstX, int dstY, int scale);
 static void blitOverlayResampled(std::vector<uint8_t>& composite, int compW, int compH,
                                  const pipeline::BLPImage& overlay,
                                  int dstX, int dstY, int dstW, int dstH) {
     if (dstW <= 0 || dstH <= 0 || overlay.width <= 0 || overlay.height <= 0) return;
+    if (dstW == overlay.width * 2 && dstH == overlay.height * 2) {
+        blitOverlayScaledN(composite, compW, compH, overlay, dstX, dstY, 2);
+        return;
+    }
     for (int y = 0; y < dstH; ++y) {
         const int dy = dstY + y;
         if (dy < 0 || dy >= compH) continue;
@@ -1044,6 +1061,16 @@ static void blitOverlayResampled(std::vector<uint8_t>& composite, int compW, int
 static void blitOverlayScaledN(std::vector<uint8_t>& composite, int compW, int compH,
                                 const pipeline::BLPImage& overlay, int dstX, int dstY, int scale) {
     if (scale < 1) scale = 1;
+    // Stock grows a 256-composite texture onto a 512 one with neighbour
+    // averaging (0x4E89F0 and its siblings), not by repeating texels.
+    if (scale == 2 && !overlay.data.empty()) {
+        pipeline::BLPImage grown;
+        grown.width = overlay.width * 2;
+        grown.height = overlay.height * 2;
+        grown.data = composite::stockUpscale2x(overlay.data.data(), overlay.width, overlay.height);
+        blitOverlay(composite, compW, compH, grown, dstX, dstY);
+        return;
+    }
     for (int sy = 0; sy < overlay.height; sy++) {
         for (int sx = 0; sx < overlay.width; sx++) {
             size_t srcIdx = (static_cast<size_t>(sy) * overlay.width + sx) * 4;
@@ -1136,9 +1163,13 @@ struct AtlasRegion256 { int x, y, w, h; bool known; };
 AtlasRegion256 regionFor(const std::string& pathLower) {
     // FacialUpperHair/FacialLowerHair (CharSections section 2) paint the same
     // two face regions as the face itself, on top of it.
+    // Scalps (CharSections hair tex 2/3, ScalpUpperHairNN_CC) paint the same
+    // two head regions, after the facial hair (stock 0x4F0AD0 / 0x4F0B70).
     if (pathLower.find("faceupper") != std::string::npos ||
+        pathLower.find("scalpupper") != std::string::npos ||
         pathLower.find("facialupper") != std::string::npos) return {  .x = 0, .y = 160, .w = 128, .h = 32, .known = true};
     if (pathLower.find("facelower") != std::string::npos ||
+        pathLower.find("scalplower") != std::string::npos ||
         pathLower.find("faciallower") != std::string::npos) return {  .x = 0, .y = 192, .w = 128, .h = 64, .known = true};
     if (pathLower.find("pelvis")    != std::string::npos) return {.x = 128,  .y = 96, .w = 128, .h = 64, .known = true};
     if (pathLower.find("torso")     != std::string::npos) return {.x = 128,   .y = 0, .w = 128, .h = 64, .known = true};
@@ -2247,6 +2278,13 @@ void CharacterRenderer::setAnimCullView(const glm::mat4& viewProjection,
 }
 
 void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
+    // Stock eases the unit ambient multiplier as cur += (target - cur) * dt,
+    // snapping within 0.01 (0x783429..0x7834DF).
+    {
+        const float d = unitAmbientTarget_ - unitAmbientMul_;
+        unitAmbientMul_ = (std::abs(d) < 0.01f) ? unitAmbientTarget_
+                                                : unitAmbientMul_ + d * std::min(1.0f, deltaTime);
+    }
     // Distance culling for animation updates in dense areas. The default is the
     // render radius (WOWEE_CHAR_RENDER_RADIUS, 130): at 120 a unit drawn 120-130
     // yards out stood frozen mid-stride, its clock stopped with its bones.
@@ -2555,6 +2593,32 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
         }
     }
 
+    // Riders on their mount's attachment 0 (stock 0x73D5D0), before the
+    // weapons, which hang off the rider's matrix: mount world x seat bone x
+    // the point's position x 1/mount scale, so the rider keeps its own size.
+    for (auto& pair : instances) {
+        auto& rider = pair.second;
+        if (rider.mountedOn == 0) continue;
+        auto mIt = instances.find(rider.mountedOn);
+        uint16_t seatBone = 0;
+        glm::vec3 seatPos(0.0f);
+        if (mIt == instances.end() ||
+            !findAttachmentStrict(mIt->second.modelId, 0, seatBone, seatPos)) {
+            if (mIt == instances.end()) rider.mountedOn = 0;
+            rider.hasOverrideModelMatrix = false;
+            continue;
+        }
+        const auto& mount = mIt->second;
+        const glm::mat4 mountMat = mount.hasOverrideModelMatrix ? mount.overrideModelMatrix
+                                                                : getModelMatrix(mount);
+        const glm::mat4 seat = seatBone < mount.boneMatrices.size() ? mount.boneMatrices[seatBone]
+                                                                     : glm::mat4(1.0f);
+        const float k = rider.scale / std::max(0.001f, mount.scale);
+        rider.overrideModelMatrix = mountMat * seat * glm::translate(glm::mat4(1.0f), seatPos) *
+                                    glm::scale(glm::mat4(1.0f), glm::vec3(k));
+        rider.hasOverrideModelMatrix = true;
+    }
+
     // Update weapon attachment transforms (after all bone matrices are computed)
     for (auto& pair : instances) {
         auto& instance = pair.second;
@@ -2642,12 +2706,25 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
             weapIt->second.overrideModelMatrix = weaponMat;
             weapIt->second.hasOverrideModelMatrix = true;
 
-            // Enchant visuals ride the weapon, offset to their attachment point on it.
+            // Item visuals ride their attachment on the weapon: the weapon's
+            // matrix, then the attachment bone's pose, then the point's
+            // position in that bone (stock makes them children of the bone).
             for (const auto& fx : wa.effects) {
+                glm::mat4 fxBone(1.0f);
+                if (fx.boneIndex < weapIt->second.boneMatrices.size())
+                    fxBone = weapIt->second.boneMatrices[fx.boneIndex];
+                const glm::mat4 fxMat = weaponMat * fxBone * glm::translate(glm::mat4(1.0f), fx.offset);
+                if (fx.m2InstanceId != 0) {
+                    if (effectRenderer_) {
+                        effectRenderer_->setInstanceTransform(fx.m2InstanceId, fxMat);
+                        effectRenderer_->setInstanceFade(
+                            fx.m2InstanceId, instance.visible ? instance.opacity : 0.0f);
+                    }
+                    continue;
+                }
                 auto fxIt = instances.find(fx.effectInstanceId);
                 if (fxIt == instances.end()) continue;
-                fxIt->second.overrideModelMatrix =
-                    weaponMat * glm::translate(glm::mat4(1.0f), fx.offset);
+                fxIt->second.overrideModelMatrix = fxMat;
                 fxIt->second.hasOverrideModelMatrix = true;
                 // Keep the effect near the character so animation distance culling
                 // (which works off instance position) treats it like its wielder.
@@ -3426,9 +3503,11 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                        (blendMode == 0 && alphaCutout) ||
                        (blendMode >= 2 && !alphaCutout) ||
                        hairMaterial);
-                // Enchant glows emit their own light; scene lighting must not tint them.
-                const bool unlit = ((materialFlags & 0x01) != 0) || (blendMode >= 3) ||
-                                   instance.isEffectModel;
+                // Stock: only render flag 0x01 is unlit (0x8201A9 moves the
+                // diffuse into the emissive). Additive batches are lit like any
+                // other. Effect models (glows hosted here for the preview)
+                // emit their own light.
+                const bool unlit = ((materialFlags & 0x01) != 0) || instance.isEffectModel;
 
                 // Hair textures are authored as alpha-cut cards. If they use the
                 // translucent pipeline they form a soft shell around the head.
@@ -3498,7 +3577,9 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     currentPipeline = desiredPipeline;
                 }
 
-                float emissiveBoost = 1.0f;
+                // Unlit is the texture at its own brightness (stock: texture x
+                // M2Color), not doubled: the shader draws tex * (1 + tint * boost).
+                float emissiveBoost = 0.0f;
                 glm::vec3 emissiveTint(1.0f, 1.0f, 1.0f);
                 const bool koboldCandleFlame = colorKeyBlack && gpuModel.isKoboldFlame;
                 if (unlit && koboldCandleFlame) {
@@ -3572,6 +3653,9 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 matData.heightMapVariance = useAdvancedMaterials ? batchHeightVariance : 0.0f;
                 matData.normalMapStrength = normalMapStrength_;
                 matData.hairMaterial = hairMaterial ? 1 : 0;
+                matData.ambientMul = instance.isSceneModel ? 1.0f : unitAmbientMul_;
+                matData.highlight = (pair.first != 0 &&
+                                     (pair.first == highlightA_ || pair.first == highlightB_)) ? 1.0f : 0.0f;
 
                 // The base humanoid mesh samples a mirrored character atlas,
                 // with the face sitting directly beside a UV seam. Parallax
@@ -3717,6 +3801,8 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             matData.heightMapVariance = 0.0f;
             matData.normalMapStrength = normalMapStrength_;
             matData.hairMaterial = 0;
+            matData.ambientMul = unitAmbientMul_;
+            matData.highlight = 0.0f;
             if (usePreviewSimpleShader) {
                 matData.enableNormalMap = 0;
                 matData.enablePOM = kPreviewSimpleTextureMode;
@@ -4355,12 +4441,6 @@ const pipeline::M2Model* CharacterRenderer::getModelData(uint32_t modelId) const
     return &it->second.data;
 }
 
-const pipeline::M2Model* CharacterRenderer::getInstanceModelData(uint32_t instanceId) const {
-    auto instIt = instances.find(instanceId);
-    if (instIt == instances.end()) return nullptr;
-    return getModelData(instIt->second.modelId);
-}
-
 void CharacterRenderer::startFadeIn(uint32_t instanceId, float durationSeconds) {
     auto it = instances.find(instanceId);
     if (it == instances.end()) return;
@@ -4395,6 +4475,37 @@ void CharacterRenderer::setInstanceOpacity(uint32_t instanceId, float opacity) {
             }
         }
     }
+}
+
+void CharacterRenderer::setUnitAmbientArea(uint32_t areaId) {
+    if (areaId == 0 || areaId == unitAmbientAreaId_ || !assetManager) return;
+    unitAmbientAreaId_ = areaId;
+    auto areas = assetManager->loadDBC("AreaTable.dbc");
+    // AmbientMultiplier is column 34 of the 36-column WotLK record.
+    if (!areas || !areas->isLoaded() || areas->getFieldCount() < 36) return;
+    int32_t row = areas->findRecordById(areaId);
+    if (row < 0) return;
+    const uint32_t parent = areas->getUInt32(static_cast<uint32_t>(row), 2);
+    const uint32_t flags = areas->getUInt32(static_cast<uint32_t>(row), 4);
+    if (unit_light::subareaUsesParent(parent, flags)) {
+        const int32_t parentRow = areas->findRecordById(parent);
+        if (parentRow >= 0) row = parentRow;
+    }
+    const float m = areas->getFloat(static_cast<uint32_t>(row), 34);
+    unitAmbientTarget_ = unit_light::ambientMultiplier(std::clamp(m, 0.0f, 4.0f));
+}
+
+void CharacterRenderer::setInstanceMountedOn(uint32_t riderInstanceId, uint32_t mountInstanceId) {
+    auto it = instances.find(riderInstanceId);
+    if (it == instances.end()) return;
+    if (it->second.mountedOn != 0 && mountInstanceId == 0) it->second.hasOverrideModelMatrix = false;
+    it->second.mountedOn = mountInstanceId;
+}
+
+void CharacterRenderer::setInstanceScale(uint32_t instanceId, float scale) {
+    auto it = instances.find(instanceId);
+    if (it == instances.end() || !(scale > 0.0f)) return;
+    it->second.scale = scale;
 }
 
 void CharacterRenderer::setActiveGeosets(uint32_t instanceId, const std::unordered_set<uint16_t>& geosets) {
@@ -4466,12 +4577,11 @@ void CharacterRenderer::removeInstance(uint32_t instanceId) {
     // once the instances are gone.
     auto attachments = it->second.weaponAttachments;
     for (const auto& wa : attachments) {
-        for (const auto& fx : wa.effects) removeInstance(fx.effectInstanceId);
+        for (const auto& fx : wa.effects) removeWeaponEffect(fx);
         removeInstance(wa.weaponInstanceId);
     }
     for (const auto& wa : attachments) {
         unloadModelIfUnused(wa.weaponModelId);
-        for (const auto& fx : wa.effects) unloadModelIfUnused(fx.effectModelId);
     }
 
     // Defer bone buffer destruction - in-flight command buffers may still
@@ -4831,10 +4941,7 @@ void CharacterRenderer::detachWeapon(uint32_t charInstanceId, uint32_t attachmen
             // ones no instance still uses (each attach allocates a fresh id).
             std::vector<uint32_t> modelIds;
             modelIds.push_back(it->weaponModelId);
-            for (const auto& fx : it->effects) {
-                removeInstance(fx.effectInstanceId);
-                modelIds.push_back(fx.effectModelId);
-            }
+            for (const auto& fx : it->effects) removeWeaponEffect(fx);
             removeInstance(it->weaponInstanceId);
             attachments.erase(it);
             for (uint32_t mid : modelIds) unloadModelIfUnused(mid);
@@ -4877,12 +4984,15 @@ bool CharacterRenderer::attachWeaponEffect(uint32_t charInstanceId, uint32_t att
         }
     }
 
-    // The ItemVisuals slot names the attachment point on the weapon model itself.
-    // Weapons carry few attachments, so fall back to the weapon's origin.
+    // The ItemVisuals slot names the attachment point on the weapon model
+    // itself. A weapon without it gets nothing for the slot: stock looks the
+    // id up and gives up (0x831630). The origin fallback this replaces piled
+    // up to five glows on the grip of 545 weapon models.
     uint16_t boneIndex = 0;
     glm::vec3 offset(0.0f);
-    if (!findAttachmentBone(waIt->weaponModelId, visualSlot, boneIndex, offset)) {
-        offset = glm::vec3(0.0f);
+    if (!findAttachmentStrict(waIt->weaponModelId, visualSlot, boneIndex, offset)) {
+        unloadModelIfUnused(effectModelId);
+        return false;
     }
 
     uint32_t effectInstanceId = createInstance(effectModelId, glm::vec3(0.0f));
@@ -4898,6 +5008,7 @@ bool CharacterRenderer::attachWeaponEffect(uint32_t charInstanceId, uint32_t att
     WeaponEffectAttachment fx;
     fx.effectModelId = effectModelId;
     fx.effectInstanceId = effectInstanceId;
+    fx.boneIndex = boneIndex;
     fx.offset = offset;
     waIt->effects.push_back(fx);
 
@@ -4911,16 +5022,114 @@ void CharacterRenderer::setInstanceSceneModel(uint32_t instanceId, bool isScene)
     if (it != instances.end()) it->second.isSceneModel = isScene;
 }
 
-void CharacterRenderer::detachWeaponEffects(uint32_t charInstanceId, uint32_t attachmentId) {
-    auto charIt = instances.find(charInstanceId);
-    if (charIt == instances.end()) return;
-
-    for (auto& wa : charIt->second.weaponAttachments) {
-        if (wa.attachmentId != attachmentId) continue;
-        for (const auto& fx : wa.effects) removeInstance(fx.effectInstanceId);
-        wa.effects.clear();
+void CharacterRenderer::removeWeaponEffect(const WeaponEffectAttachment& fx) {
+    if (fx.m2InstanceId != 0) {
+        if (effectRenderer_) effectRenderer_->removeInstance(fx.m2InstanceId);
         return;
     }
+    if (fx.effectInstanceId != 0) removeInstance(fx.effectInstanceId);
+    if (fx.effectModelId != 0) unloadModelIfUnused(fx.effectModelId);
+}
+
+bool CharacterRenderer::findAttachmentStrict(uint32_t modelId, uint32_t attachmentId,
+                                             uint16_t& outBoneIndex, glm::vec3& outOffset) const {
+    auto modelIt = models.find(modelId);
+    if (modelIt == models.end()) return false;
+    const auto& model = modelIt->second.data;
+    if (attachmentId >= model.attachmentLookup.size()) return false;
+    const uint16_t idx = model.attachmentLookup[attachmentId];
+    if (idx >= model.attachments.size()) return false;  // 0xFFFF: not on this model
+    const auto& att = model.attachments[idx];
+    if (att.bone >= model.bones.size()) return false;
+    outBoneIndex = att.bone;
+    outOffset = att.position;
+    return true;
+}
+
+int CharacterRenderer::applyWeaponItemVisual(uint32_t charInstanceId, uint32_t attachmentId,
+                                             uint32_t itemVisualId) {
+    auto charIt = instances.find(charInstanceId);
+    if (charIt == instances.end()) return 0;
+    auto waIt = std::find_if(charIt->second.weaponAttachments.begin(),
+                             charIt->second.weaponAttachments.end(),
+                             [attachmentId](const WeaponAttachment& wa) {
+                                 return wa.attachmentId == attachmentId;
+                             });
+    if (waIt == charIt->second.weaponAttachments.end()) return 0;
+    // Same row already on: nothing to rebuild (a refresh after a re-equip of
+    // the same item, or an enchant change that resolves to the same visual).
+    if (waIt->itemVisualId == itemVisualId && (itemVisualId == 0 || !waIt->effects.empty()))
+        return static_cast<int>(waIt->effects.size());
+
+    // Stock 0x4EA8F0 drops every child of the item model first.
+    for (const auto& fx : waIt->effects) removeWeaponEffect(fx);
+    waIt->effects.clear();
+    waIt->itemVisualId = itemVisualId;
+    if (itemVisualId == 0 || !assetManager) return 0;
+
+    auto visualsDbc = assetManager->loadDBC("ItemVisuals.dbc");
+    auto effectsDbc = assetManager->loadDBC("ItemVisualEffects.dbc");
+    if (!visualsDbc || !visualsDbc->isLoaded() || !effectsDbc || !effectsDbc->isLoaded()) return 0;
+    const auto paths = pipeline::resolveItemVisualModels(itemVisualId, visualsDbc.get(), effectsDbc.get());
+
+    const uint32_t weaponModelId = waIt->weaponModelId;
+    int attached = 0;
+    for (uint32_t slot = 0; slot < paths.size(); ++slot) {
+        if (paths[slot].empty()) continue;
+        uint16_t bone = 0;
+        glm::vec3 offset(0.0f);
+        if (!findAttachmentStrict(weaponModelId, slot, bone, offset)) continue;
+
+        // DBC paths say .mdx; the shipped files are .m2. ItemVisualEffects 61
+        // is a bare directory and fails here, as it does in stock.
+        std::string m2Path = paths[slot];
+        const size_t dot = m2Path.rfind('.');
+        const size_t sep = m2Path.find_last_of("\\/");
+        if (dot != std::string::npos && (sep == std::string::npos || dot > sep))
+            m2Path.resize(dot);
+        m2Path += ".m2";
+
+        if (effectRenderer_) {
+            const uint32_t m2ModelId =
+                static_cast<uint32_t>(std::hash<std::string>{}(m2Path + "#item-visual"));
+            if (!effectRenderer_->hasModel(m2ModelId)) {
+                pipeline::M2Model model;
+                if (!pipeline::loadM2WithSkin(*assetManager, m2Path, model)) continue;
+                if (model.name.empty()) model.name = m2Path;
+                if (!effectRenderer_->loadModel(model, m2ModelId)) continue;
+                // Transient-style model: animated, no shadow, never deduplicated
+                // by position (five copies of one glow sit on one blade).
+                effectRenderer_->markModelAsSpellEffect(m2ModelId);
+            }
+            const uint32_t m2Inst = effectRenderer_->createInstance(
+                m2ModelId, glm::vec3(charIt->second.position), glm::vec3(0.0f), 1.0f,
+                /*allowPositionDedup=*/false);
+            if (m2Inst == 0) continue;
+            WeaponEffectAttachment fx;
+            fx.m2InstanceId = m2Inst;
+            fx.boneIndex = bone;
+            fx.offset = offset;
+            waIt->effects.push_back(fx);
+            ++attached;
+        } else {
+            pipeline::M2Model model;
+            if (!pipeline::loadM2WithSkin(*assetManager, m2Path, model)) continue;
+            static uint32_t nextLocalEffectModelId = 0x70000000u;
+            if (attachWeaponEffect(charInstanceId, attachmentId, slot, model, nextLocalEffectModelId++))
+                ++attached;
+        }
+        // createInstance inserts into the instance map, and a rehash leaves
+        // both iterators dangling: find them again.
+        charIt = instances.find(charInstanceId);
+        if (charIt == instances.end()) return attached;
+        waIt = std::find_if(charIt->second.weaponAttachments.begin(),
+                            charIt->second.weaponAttachments.end(),
+                            [attachmentId](const WeaponAttachment& wa) {
+                                return wa.attachmentId == attachmentId;
+                            });
+        if (waIt == charIt->second.weaponAttachments.end()) return attached;
+    }
+    return attached;
 }
 
 bool CharacterRenderer::getAttachmentTransform(uint32_t instanceId, uint32_t attachmentId, glm::mat4& outTransform) {

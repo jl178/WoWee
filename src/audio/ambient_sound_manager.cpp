@@ -828,8 +828,11 @@ void AmbientSoundManager::updateAreaAmbience(bool isIndoor) {
         }
         return;
     }
+    // Day to night, area to area, out of doors and in: the stock client
+    // crossfades its ambience over 5 s each way (Wow.exe 0x4c9910).
+    constexpr float kFadeMs = stock::kAmbienceFadeSeconds * 1000.0f;
     if (areaLoopId_ != 0) {
-        AudioEngine::instance().fadeOutSound(areaLoopId_, 1500.0f);
+        AudioEngine::instance().fadeOutSound(areaLoopId_, kFadeMs);
         areaLoopId_ = 0;
     }
     areaLoopPath_ = want;
@@ -843,7 +846,15 @@ void AmbientSoundManager::updateAreaAmbience(bool isIndoor) {
         it = areaSamples_.emplace(want, std::move(sample)).first;
     }
     if (!it->second.loaded) return;
-    areaLoopId_ = AudioEngine::instance().playSound2DStoppable(it->second.data, volume, /*loop=*/true, 1500.0f);
+    // A loop starts at a random point of itself (0x879760), so two visits
+    // to one area do not open on the same bird. Priority 100, as the stock
+    // client gives its zone ambience, so no sound effect takes its voice.
+    SoundOptions opts;
+    opts.priority = stock::kPriorityZone;
+    opts.category = stock::Category::Ambience;
+    opts.randomStart = true;
+    areaLoopId_ = AudioEngine::instance().playSound2DStoppable(it->second.data, volume, /*loop=*/true, kFadeMs,
+                                                               SoundBus::World, opts);
     areaLoopVolume_ = volume;
     LOG_INFO("Zone ambience: ", want);
 }

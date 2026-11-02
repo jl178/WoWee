@@ -52,6 +52,12 @@ struct SkyParams {
     float cloudDensity = 0.0f;      // 0-1
     float fogDensity = 0.0f;        // 0-1
     float horizonGlow = 0.3f;       // 0-1
+    /// LightParams.HighlightSky (0 or 1, blended across lights): whether the
+    /// dome takes the stock dawn/dusk highlight (0x7f0530).
+    float highlightSky = 0.0f;
+    /// The camera's forward vector, for the glare's view alignment (0x7ef6e0).
+    /// Filled by SkySystem::renderOverlays from the camera.
+    glm::vec3 cameraForward{1.0f, 0.0f, 0.0f};
     float weatherIntensity = 0.0f;  // 0-1 (rain/snow intensity, attenuates lens flare)
     // How much of the line from the eye to the sun is blocked, 0 clear to 1
     // solid. The lens flare had no such input: it asked only whether the sun

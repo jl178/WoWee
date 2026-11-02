@@ -14,6 +14,7 @@
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/char_sections.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "core/character_geosets.hpp"
 #include "core/appearance_composer.hpp"
 #include "core/geoset_rules.hpp"
 #include "core/helm_visual.hpp"
@@ -667,7 +668,12 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
         facialLowerPath = sections.facialLower;
         facialUpperPath = sections.facialUpper;
         hairScalpPath   = sections.hair;
-        underwearPaths  = sections.underwear;
+        // Scalps ride with the base overlays (head regions, after the facial
+        // hair; stock 0x4F0AD0 / 0x4F0B70).
+        underwearPaths.clear();
+        for (const std::string* sc : {&sections.scalpLower, &sections.scalpUpper})
+            if (!sc->empty()) underwearPaths.push_back(*sc);
+        underwearPaths.insert(underwearPaths.end(), sections.underwear.begin(), sections.underwear.end());
 
         LOG_INFO("CharSections lookup: skin=",
                  bodySkinPath_.empty() ? "(not found)" : bodySkinPath_,
@@ -879,119 +885,28 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     // provides the variant offset per equipped item; base IDs are per-group constants.
     std::unordered_set<uint16_t> geosets = buildBaseGeosets();
 
-    auto eraseGroup = [&](uint16_t group) {
-        for (auto it = geosets.begin(); it != geosets.end();) {
-            if ((*it / 100) == group) {
-                it = geosets.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    };
-
-    // CharGeosets: group 4=gloves(forearm), 5=boots(shin), 8=sleeves, 13=pants
-    std::unordered_set<uint16_t> modelGeosets;
-    if (const auto* modelData = charRenderer_->getModelData(PREVIEW_MODEL_ID)) {
-        for (const auto& batch : modelData->batches) {
-            modelGeosets.insert(batch.submeshId);
-        }
+    // Stock's rule, the one the world paths use (core::buildStockCharacterGeosets).
+    // The preview draws no helm model, so the helm hides nothing here.
+    core::CharacterGeosetQuery gq;
+    gq.haveFacialRow = true;
+    for (uint16_t id : geosets) {
+        const uint16_t g = id / 100, v = id % 100;
+        if (g == 0 && id != 0 && id != 1) gq.hairScalp = id;
+        else if (g == 1) gq.facial100 = v;
+        else if (g == 2) gq.facial200 = v;
+        else if (g == 3) gq.facial300 = v;
+        else if (g == 17) gq.facial1700 = v;
     }
-
-    // core/geoset_rules.hpp, the same rule the world paths use.
-    //
-    // This copy took a second id as its fallback rather than looking inside the
-    // group, so where the two ids given were the same - which every call below
-    // does - it could only answer "the model has it" or "nothing", and a model
-    // spelling that part with a different variant lost it entirely.
-    auto pickGeoset = [&](uint16_t preferred, uint16_t fallback) -> uint16_t {
-        const uint16_t chosen = core::resolveGeoset(preferred, modelGeosets);
-        if (chosen != 0) return chosen;
-        return (fallback != 0 && modelGeosets.count(fallback) > 0) ? fallback : 0;
-    };
-
-    auto lowestInGroup = [&](uint16_t group) -> uint16_t {
-        return core::resolveGeoset(static_cast<uint16_t>(group * 100 + 2), modelGeosets);
-    };
-
-    uint16_t geosetGloves = pickGeoset(core::kGeosetBareForearms, core::kGeosetBareForearms);
-    uint16_t geosetBoots = pickGeoset(core::kGeosetBareShins, lowestInGroup(5));
-    uint16_t geosetSleeves = pickGeoset(core::kGeosetBareSleeves, core::kGeosetBareSleeves);
-    uint16_t geosetPants = pickGeoset(core::kGeosetBarePants, core::kGeosetBarePants);
-
-    bool robeSkirt = false;
-    // Chest/Shirt/Robe → group 8 (sleeves)
-    {
-        // Chest or robe over the shirt beneath it.
-        uint32_t did = findDisplayId({5, 20});
-        if (did == 0) did = findDisplayId({4});
-        uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-        if (gg > 0) geosetSleeves = pickGeoset(core::equippedGeoset(core::equipment::kChestBare, gg), core::kGeosetBareSleeves);
-        // Robe kilt legs
-        uint32_t gg3 = getGeosetGroup(did, geosetGroup3Field);
-        if (gg3 > 0) { geosetPants = pickGeoset(core::equippedGeoset(core::equipment::kRobeKiltBare, gg3), core::kGeosetBarePants); robeSkirt = true; }
+    for (const auto& it : equipment) {
+        if (it.displayModel == 0) continue;
+        const int kind = core::geosetKindForInventoryType(it.inventoryType);
+        if (kind >= 0 && gq.displays[kind] == 0) gq.displays[kind] = it.displayModel;
     }
-    // Legs: GeosetGroup[2] is a dress or kilt (group 13). [0] is group 11
-    // pant flaps, never the skirt. A robe's skirt wins.
-    {
-        uint32_t did = findDisplayId({7});
-        uint32_t gg3 = getGeosetGroup(did, geosetGroup3Field);
-        if (gg3 > 0 && !robeSkirt) { geosetPants = pickGeoset(core::equippedGeoset(core::equipment::kRobeKiltBare, gg3), core::kGeosetBarePants); robeSkirt = true; }
-    }
-    // Boots → group 5 (shins); a skirt hides the boot tops
-    {
-        uint32_t did = findDisplayId({8});
-        uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-        if (gg > 0 && !robeSkirt) geosetBoots = pickGeoset(core::equippedGeoset(core::equipment::kBootsBare, gg), lowestInGroup(5));
-    }
-    // Gloves → group 4 (forearms)
-    {
-        uint32_t did = findDisplayId({10});
-        uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-        if (gg > 0) geosetGloves = pickGeoset(core::equippedGeoset(core::equipment::kGlovesBare, gg), core::kGeosetBareForearms);
-    }
-    // Wrists/Bracers → group 8 (sleeves, only if chest/shirt didn't set it)
-    {
-        uint32_t did = findDisplayId({9});
-        if (did != 0 && geosetSleeves == pickGeoset(core::kGeosetBareSleeves, core::kGeosetBareSleeves)) {
-            uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-            if (gg > 0) geosetSleeves = pickGeoset(core::equippedGeoset(core::equipment::kChestBare, gg), core::kGeosetBareSleeves);
-        }
-    }
-    // Belt → group 18 (buckle), falling back to the base variant so the waist
-    // is not left empty - see the spawner's copy for what that costs.
-    uint16_t geosetBelt = 0;
-    {
-        uint32_t did = findDisplayId({6});
-        uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-        geosetBelt = pickGeoset(
-            gg > 0 ? core::equippedGeoset(core::equipment::kBeltBase, gg) : 0,
-            core::equipment::kBeltBase);
-    }
-
-    eraseGroup(4);
-    eraseGroup(5);
-    eraseGroup(8);
-    eraseGroup(13);
-    eraseGroup(15);
-    eraseGroup(18);
-    if (geosetGloves != 0) geosets.insert(geosetGloves);
-    if (geosetBoots != 0) geosets.insert(geosetBoots);
-    if (geosetSleeves != 0) geosets.insert(geosetSleeves);
-    if (geosetPants != 0) geosets.insert(geosetPants);
-    if (geosetBelt != 0) geosets.insert(geosetBelt);
-    uint32_t capeGG = getGeosetGroup(findDisplayId({16}), geosetGroup1Field);
-    uint16_t geosetCape = pickGeoset(
-        hasInvType({16}) ? core::cloakGeoset(capeGG) : core::kGeosetNoCape,
-        core::kGeosetNoCape);
-    if (geosetCape != 0) geosets.insert(geosetCape); // Cloak mesh toggle (visual may still be limited)
-    if (hasInvType({19})) {
-        uint16_t geosetTabard = pickGeoset(core::kGeosetDefaultTabard, 0);
-        if (geosetTabard != 0) geosets.insert(geosetTabard);
-    }
-
-    // Keep hair visible in the preview. The in-world renderer can hide hair
-    // because it attaches helmet models, but this preview path does not yet
-    // render head-slot attachments; hiding hair here leaves bald characters.
+    gq.race = static_cast<uint8_t>(race_);
+    gq.gender = static_cast<uint8_t>(gender_);
+    gq.helmShown = false;
+    (void)hasInvType; (void)getGeosetGroup; (void)geosetGroup1Field; (void)geosetGroup3Field;
+    geosets = core::buildStockCharacterGeosets(*assetManager_, gq);
 
     charRenderer_->setActiveGeosets(instanceId_, geosets);
 
@@ -1293,7 +1208,19 @@ void CharacterPreview::attachWeapons(const std::vector<game::EquipmentItem>& equ
                                          weaponModelId, texturePath)) {
             continue;
         }
-        attachWeaponEnchantVisual(ws.attachmentId, itemVisualId);
+        // The display's own glow wins over the enchant's (stock 0x759050).
+        {
+            auto visualsDbc = assetManager_->loadDBC("ItemVisuals.dbc");
+            const auto* layouts = pipeline::getActiveDBCLayout();
+            const uint32_t own = pipeline::itemDisplayItemVisual(
+                displayInfoDbc.get(), displayId, visualsDbc.get(),
+                layouts ? layouts->getLayout("ItemDisplayInfo") : nullptr);
+            itemVisualId = pipeline::chooseWeaponItemVisual(own, itemVisualId, 0);
+        }
+        // The world's own rule for hanging the row's effects (slot i at the
+        // weapon's attachment i, none where the model lacks it). This
+        // renderer has no M2Renderer to host them, so they stay its own.
+        charRenderer_->applyWeaponItemVisual(instanceId_, ws.attachmentId, itemVisualId);
     }
 }
 
@@ -1303,34 +1230,6 @@ uint32_t CharacterPreview::previewModelIdFor(const std::string& assetKey) {
     uint32_t id = nextPreviewModelId_++;
     previewModelIds_.emplace(assetKey, id);
     return id;
-}
-
-void CharacterPreview::attachWeaponEnchantVisual(uint32_t attachmentId, uint32_t itemVisualId) {
-    if (itemVisualId == 0 || !charRenderer_ || !assetManager_) return;
-
-    auto visualsDbc = assetManager_->loadDBC("ItemVisuals.dbc");
-    auto effectsDbc = assetManager_->loadDBC("ItemVisualEffects.dbc");
-    if (!visualsDbc || !visualsDbc->isLoaded() || !effectsDbc || !effectsDbc->isLoaded()) return;
-
-    auto effectModels = pipeline::resolveItemVisualModels(itemVisualId, visualsDbc.get(),
-                                                          effectsDbc.get());
-
-    for (uint32_t visualSlot = 0; visualSlot < effectModels.size(); ++visualSlot) {
-        const std::string& modelName = effectModels[visualSlot];
-        if (modelName.empty()) continue;
-
-        std::string m2Path = modelName;
-        size_t dot = m2Path.rfind('.');
-        m2Path = (dot != std::string::npos ? m2Path.substr(0, dot) : m2Path) + ".m2";
-
-        pipeline::M2Model effectModel;
-        if (!loadPreviewM2(m2Path, effectModel)) {
-            LOG_WARNING("CharacterPreview: failed to load enchant visual ", m2Path);
-            continue;
-        }
-        charRenderer_->attachWeaponEffect(instanceId_, attachmentId, visualSlot,
-                                          effectModel, previewModelIdFor(m2Path));
-    }
 }
 
 void CharacterPreview::loadRacialBackdrop(game::Race race) {
@@ -1739,10 +1638,7 @@ void CharacterPreview::compositePass(VkCommandBuffer cmd, uint32_t frameIndex) {
     // character but do not write it.
     // Their own shaders and push constants; the per-frame set is not bound.
     if (sceneParticles_ && !sceneParticles_->empty()) {
-        const glm::mat4 proj = camera_->getProjectionMatrix();
-        const float pixelsPerUnit = std::abs(proj[1][1]) * static_cast<float>(fboHeight_) * 0.5f;
-        sceneParticles_->render(cmd, proj * camera_->getViewMatrix(), camera_->getPosition(),
-                                pixelsPerUnit, fi);
+        sceneParticles_->render(cmd, camera_->getViewMatrix(), camera_->getProjectionMatrix(), fi);
     }
 
     renderTarget_->endPass(cmd);

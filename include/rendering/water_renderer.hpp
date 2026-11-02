@@ -197,9 +197,25 @@ private:
 
     // What LiquidType.dbc says about a liquid: its basic type (0 water,
     // 1 ocean, 2 magma, 3 slime) and which texture sequence it draws.
+    //
+    // The rest is how the stock client animates that texture (0x8a27c0 copies
+    // these out of the row; 0x8a5590 and 0x8a6090 use them): the sequence's
+    // period in ms (Int[1], field 42 - 1250 for every water and ocean; magma
+    // and slime always 1250), the texture's scale (Float[0], field 23; 1, or
+    // 0.25 for WMO ocean) on the water material, and on magma and slime its
+    // scroll in repeats per second (Float[0] and Float[1]).
     struct LiquidInfo {
         uint8_t basicType = 0;
         int textureSet = -1;
+        uint32_t framePeriodMs = 1250;
+        float texScale = 1.0f;
+        float scrollU = 0.0f;
+        float scrollV = 0.0f;
+        /// Which depth ramp texture 2 (field 16) names: 0 proceduralRiverDepthTex
+        /// (river close -> far), 1 proceduralOceanDepthTex (ocean close ->
+        /// far), 2 proceduralWmoWaterTex (river far alone, 0x8a2ac0). Only the
+        /// alpha runs shallow -> deep on the WMO ramp.
+        uint8_t depthRamp = 0;
     };
     LiquidInfo resolveLiquid(uint16_t liquidType) const;
     int loadLiquidTextureSequence(pipeline::AssetManager* assetManager, const std::string& pattern);

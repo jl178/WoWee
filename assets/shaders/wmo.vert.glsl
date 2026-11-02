@@ -23,6 +23,9 @@ layout(push_constant) uniform Push {
     /// with STORMWINDBANNER01 for a texture - so the batch that draws one is
     /// told where its bar is and moves the cloth below it here.
     vec4 cloth;
+    /// x: how much of the F_SIDN night glow is on (stock table 0xaf4c80 by
+    /// the time of day), negative when the renderer has not said.
+    vec4 frame;
 } push;
 
 layout(location = 0) in vec3 aPos;
@@ -37,6 +40,7 @@ layout(location = 2) out vec2 TexCoord;
 layout(location = 3) out vec4 VertColor;
 layout(location = 4) out vec3 Tangent;
 layout(location = 5) out vec3 Bitangent;
+layout(location = 6) flat out float SidnNight;
 
 void main() {
     vec3 pos = aPos;
@@ -84,6 +88,7 @@ void main() {
     Normal = normalMatrix * aNormal;
     TexCoord = aTexCoord;
     VertColor = aColor;
+    SidnNight = push.frame.x;
 
     // Compute TBN basis vectors for normal mapping
     vec3 T = normalize(normalMatrix * aTangent.xyz);

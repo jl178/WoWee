@@ -42,6 +42,12 @@ struct SplineBlockData {
     glm::vec3 destination{0};
     bool hasDest = false;
 
+    // Create-block extras (WotLK): the duration mods and the path's nodes as
+    // written (uncompressed only; empty when a compressed layout was read).
+    float durationMod = 1.0f;
+    float durationModNext = 1.0f;
+    std::vector<glm::vec3> nodes;
+
     // SplineMode (movement update WotLK only)
     uint8_t splineMode = 0;
     glm::vec3 endPoint{0};
@@ -98,7 +104,13 @@ namespace SplineFlagWotlk {
     constexpr uint32_t ANIMATION       = 0x00200000;
     constexpr uint32_t FROZEN          = 0x00400000;
 
-    constexpr uint32_t UNCOMPRESSED_MASK = CATMULLROM | CYCLIC | ENTER_CYCLE;
+    // The 3.3.5 client reads twelve-byte nodes exactly when the spline is
+    // smooth, Catmull-Rom or Flying (Wow.exe 0x73C8E0 tests 0x42000), and
+    // AzerothCore writes them under the same test (Mask_CatmullRom). Cyclic
+    // alone is a compressed ground loop. Flying alone - every flying
+    // creature's move, since EnableFlying clears Catmullrom - was read as
+    // packed deltas, which misread the whole path.
+    constexpr uint32_t UNCOMPRESSED_MASK = CATMULLROM | FLYING;
 } // namespace SplineFlagWotlk
 
 [[nodiscard]] constexpr bool isPreWotlkSplineWalking(uint32_t splineFlags) {

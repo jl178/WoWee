@@ -80,7 +80,7 @@ private:
                              const VkPipelineShaderStageCreateInfo& vertStage,
                              const VkPipelineShaderStageCreateInfo& fragStage);
     void drawSprite(VkCommandBuffer cmd, Sprite sprite, const glm::vec3& dir, float halfSize,
-                    const glm::vec4& color, bool alphaBlended);
+                    const glm::vec4& color, bool alphaBlended, bool horizonClip);
 
     VkContext*            vkCtx_          = nullptr;
     VkPipeline            pipeline_       = VK_NULL_HANDLE;
@@ -93,6 +93,12 @@ private:
     bool texturesAttempted_ = false;
 
     bool renderingEnabled_ = true;
+
+    // The glares' eased visibility (0x7ef6e0), and the time since the last
+    // render to ease them by.
+    float sunGlareVis_ = 0.0f;
+    float moonGlareVis_ = 0.0f;
+    float pendingDt_ = 0.0f;
 
     // Moon phase bookkeeping, for the performance HUD.
     float whiteLadyPhase_ = 0.5f;

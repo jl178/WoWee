@@ -1,6 +1,7 @@
 #include "rendering/celestial.hpp"
 #include "rendering/sky_system.hpp"
 #include "rendering/stock_day_night.hpp"
+#include "rendering/stock_sky.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/vk_pipeline.hpp"
@@ -25,13 +26,8 @@ constexpr const char* kSpritePaths[] = {
     "Textures\\MoonGlare.blp",
 };
 
-// Angular half sizes, in radians. The sun's core is about seven degrees
-// across with its glare reaching some twenty degrees out; the moon is a
-// little smaller than the sun's core.
-constexpr float kSunCenterHalfSize = 0.060f;
-constexpr float kSunGlareHalfSize  = 0.340f;
-constexpr float kMoonHalfSize      = 0.050f;
-constexpr float kMoonGlareHalfSize = 0.110f;
+// Sizes come from stock_sky (0x7eecc0 / 0x7ef6e0): quads `size` yards on a
+// side twelve yards from the eye.
 
 /// Premultiplied blending, so one pipeline draws both the additive sprites
 /// (alpha written as 0) and the alpha-blended moon.
@@ -185,12 +181,13 @@ glm::vec3 Celestial::moonDirection(float timeOfDayHours) {
 }
 
 void Celestial::drawSprite(VkCommandBuffer cmd, Sprite sprite, const glm::vec3& dir,
-                           float halfSize, const glm::vec4& color, bool alphaBlended) {
+                           float halfSize, const glm::vec4& color, bool alphaBlended,
+                           bool horizonClip) {
     if (!textureReady_[sprite] || color.a <= 0.002f) return;
     CelestialPush push{};
     push.dirAndSize = glm::vec4(glm::normalize(dir), halfSize);
     push.color = color;
-    push.mode = glm::vec4(alphaBlended ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+    push.mode = glm::vec4(alphaBlended ? 1.0f : 0.0f, horizonClip ? 1.0f : 0.0f, 0.0f, 0.0f);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
                             1, 1, &textureSets_[sprite], 0, nullptr);
     vkCmdPushConstants(cmd, pipelineLayout_,
@@ -206,31 +203,58 @@ void Celestial::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const S
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
                             0, 1, &perFrameSet, 0, nullptr);
 
-    // Through cloud only as much as LightFloatBand 2 lets it: 1 in almost
-    // every set, 0 in the death set and the storm sets' heaviest hours.
-    const float throughCloud =
-        glm::mix(1.0f, glm::clamp(params.celestialGlowThrough, 0.0f, 1.0f),
-                 glm::clamp(params.cloudDensity, 0.0f, 1.0f));
+    // The stock client draws the sun and the White Lady whenever the
+    // procedural sky is up (0x7f09b0); the horizon clip in the shader is what
+    // hides them by day or night. Both take LightIntBand 9 as their colour
+    // and fade out with the storm (0x7f3230: alpha = 1 - storm).
+    using namespace stock_sky;
+    const float dayFraction = glm::fract(params.timeOfDay / 24.0f);
+    const float storm = stormFactor(params.weatherIntensity);
+    const glm::vec3 tint = glm::max(params.sunColor, glm::vec3(0.0f));
+    const float bodyAlpha = 1.0f - storm;
+    const glm::vec3 forward = glm::length(params.cameraForward) > 1e-4f
+                                  ? glm::normalize(params.cameraForward)
+                                  : glm::vec3(1.0f, 0.0f, 0.0f);
+    const float dt = glm::clamp(pendingDt_, 0.0f, 0.25f);
+    pendingDt_ = 0.0f;
+    // What blocks the line to the sun (renderer's ray test) stands in for
+    // the stock ray cast and occlusion query (0x9abc60, 0x9abe00).
+    const float clearLine = 1.0f - glm::clamp(params.sunOcclusion, 0.0f, 1.0f);
 
-    // --- Moon: behind the sun's glare, so drawn first ---
-    const float night = glm::clamp(params.nightIntensity, 0.0f, 1.0f) * throughCloud;
-    if (night > 0.002f) {
-        const glm::vec3 moonDir = moonDirection(params.timeOfDay);
-        if (moonDir.z > -0.1f) {
-            drawSprite(cmd, MOON_GLARE, moonDir, kMoonGlareHalfSize,
-                       glm::vec4(1.0f, 1.0f, 1.0f, night), false);
-            drawSprite(cmd, MOON, moonDir, kMoonHalfSize,
-                       glm::vec4(1.0f, 1.0f, 1.0f, night), true);
+    // --- White Lady and her glare ---
+    const glm::vec3 moonDir = moonDirection(params.timeOfDay);
+    const float moonSize = whiteLadySize(dayFraction);
+    {
+        const float align = glareAlignment(glm::dot(forward, moonDir), kMoonGlare);
+        const float target = sample(kMoonGlareDayKeys, dayFraction);
+        moonGlareVis_ = easeGlare(moonGlareVis_, target, dt, kMoonGlare);
+        const float size = moonSize * kMoonGlare.baseScale;
+        const float alpha = bodyAlpha * glm::mix(kMoonGlare.alphaMin, kMoonGlare.alphaMax, align) *
+                            moonGlareVis_;
+        if (moonDir.z > -0.2f) {
+            drawSprite(cmd, MOON_GLARE, moonDir, spriteHalfAngle(size), glm::vec4(tint, alpha),
+                       false, false);
+            drawSprite(cmd, MOON, moonDir, spriteHalfAngle(moonSize), glm::vec4(tint, bodyAlpha),
+                       false, true);
         }
     }
 
-    // --- Sun ---
-    const float day = glm::clamp(params.dayIntensity, 0.0f, 1.0f) * throughCloud;
+    // --- Sun and its glare ---
     const glm::vec3 sunDir = glm::normalize(params.sunDir);
-    if (day > 0.002f && sunDir.z > -0.1f) {
-        const glm::vec3 sunColor = glm::max(params.sunColor, glm::vec3(0.0f));
-        drawSprite(cmd, SUN_GLARE, sunDir, kSunGlareHalfSize, glm::vec4(sunColor, day), false);
-        drawSprite(cmd, SUN_CENTER, sunDir, kSunCenterHalfSize, glm::vec4(sunColor, day), false);
+    {
+        const float align = glareAlignment(glm::dot(forward, sunDir), kSunGlare);
+        const float target = sample(kSunGlareDayKeys, dayFraction) * clearLine;
+        sunGlareVis_ = easeGlare(sunGlareVis_, target, dt, kSunGlare);
+        const float size =
+            glm::mix(kSunGlare.sizeMin, kSunGlare.sizeMax, align) * kSunGlare.baseScale;
+        const float alpha = bodyAlpha * glm::mix(kSunGlare.alphaMin, kSunGlare.alphaMax, align) *
+                            sunGlareVis_;
+        if (sunDir.z > -0.2f) {
+            drawSprite(cmd, SUN_CENTER, sunDir, spriteHalfAngle(sunSize(dayFraction)),
+                       glm::vec4(tint, bodyAlpha), false, true);
+            drawSprite(cmd, SUN_GLARE, sunDir, spriteHalfAngle(size), glm::vec4(tint, alpha),
+                       false, false);
+        }
     }
 }
 
@@ -239,6 +263,7 @@ void Celestial::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const S
 // ---------------------------------------------------------------------------
 
 void Celestial::update(float deltaTime) {
+    pendingDt_ += deltaTime;
     if (!moonPhaseCycling_) return;
     moonPhaseTimer_ += deltaTime;
     whiteLadyPhase_ = std::fmod(moonPhaseTimer_ / MOON_CYCLE_DURATION, 1.0f);

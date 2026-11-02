@@ -51,6 +51,10 @@ inline SkyParams skyParamsFromLighting(float timeOfDay, float gameTime,
         params.cloudDensity = lighting->cloudDensity;
         params.fogDensity = lighting->fogDensity;
         params.horizonGlow = lighting->horizonGlow;
+        // LightParams.HighlightSky, carried in horizonGlow: LightingManager
+        // writes the row's HighlightSky (0/1) there and blends it with the
+        // rest. Nothing else reads horizonGlow.
+        params.highlightSky = glm::clamp(lighting->horizonGlow, 0.0f, 1.0f);
     }
     params.weatherIntensity = weatherIntensity;
     params.skyboxModelId = 0;

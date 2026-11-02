@@ -1,4 +1,5 @@
 #include "game/game_handler.hpp"
+#include "game/unit_motion_glue.hpp"
 #include "game/reputation_standing.hpp"
 #include "game/spell_classification.hpp"
 
@@ -206,6 +207,7 @@ void GameHandler::disconnect() {
             gameObjectDespawnCallback_(guid);
     }
     otherPlayerVisibleItemEntries_.clear();
+    otherPlayerWeaponEnchants_.clear();
     otherPlayerVisibleDirty_.clear();
     otherPlayerMoveTimeMs_.clear();
     if (spellHandler_) spellHandler_->clearUnitCastStates();
@@ -514,6 +516,9 @@ for (const auto& [guid, entity] : entityController_->getEntityManager().getEntit
     (void)guid;
     if (entity && entity->isUnit()) {
         entity->updateMovement(deltaTime);
+        // Jumps, landings, tier changes, a finished spline's facing, and a
+        // unit walking a deck (game/unit_motion_glue.hpp).
+        processStockMotionFrame(*this, *entity);
     }
 }
 }
@@ -838,8 +843,10 @@ void GameHandler::update(float deltaTime) {
         // The stock client sends a heartbeat only while the character is in
         // motion; standing still, the server already has the position from the
         // stop packet. Taxi flights and the classic combat sync keep their own
-        // cadence regardless.
-        const bool inMotion = (movementInfo.flags & kLocomotionFlags) != 0;
+        // cadence regardless. Motion is the stock mask (0x6F09F0: a direction,
+        // falling, ascending, descending) - turning in place or treading water
+        // sends none - and every movement packet restarts the 500 ms.
+        const bool inMotion = movementHandler_ && movementHandler_->inStockHeartbeatMotion();
         const bool forcedCadence = onRealTaxiFlight || taxiActivatePending_ || taxiClientActive_ ||
                                    classicLikeCombatSync;
         if (movementHandler_ && (inMotion || forcedCadence) &&

@@ -422,6 +422,13 @@ private:
         /// 1.5 for a giant, over ten displays. Nothing read it, so every
         /// creature sharing a model drew at that model's own size.
         float displayScale = 1.0f;
+        /// CreatureDisplayInfo.CreatureModelAlpha / 255: the display's base
+        /// opacity (stock 0x715B50). 1,264 displays are below 1 - ghosts,
+        /// spirits, wisps.
+        float modelAlpha = 1.0f;
+        /// CreatureDisplayInfo.CreatureGeosetData: geoset variant nibbles for
+        /// groups 1-8 (stock 0x4E7790).
+        uint32_t creatureGeosetData = 0;
     };
 
     /// CreatureModelData.ModelScale for a model id, the second half of the
@@ -589,6 +596,20 @@ private:
     /// spellId -> whether one of its effects applies stealth or invisibility.
     std::unordered_map<uint32_t, bool> stealthAuraSpells_;
     bool isStealthAuraSpell(uint32_t spellId);
+    /// The transparency an aura's spell visual asks for: its StateKit's
+    /// SpellVisualKit CharProc 14 parameter (stock: Stealth 0.3, Invisibility
+    /// 0.5 or 0.35, Ghost 0.5). Negative when it asks for none.
+    float auraKitTransparency(uint32_t spellId);
+    std::unordered_map<uint32_t, float> auraKitTransparency_;
+public:
+    /// CreatureDisplayInfo.CreatureModelAlpha / 255 for a display (1 if unknown).
+    float creatureDisplayAlpha(uint32_t displayId) const;
+    /// The size a playable race draws at: its ChrRaces display's
+    /// CreatureModelScale x CreatureModelData.ModelScale (stock 0x71C110) -
+    /// tauren males 1.35, tauren females 1.25, gnomes 1.15. Players were all
+    /// drawn at 1.0.
+    float playerRaceDisplayScale(uint8_t raceId, uint8_t genderId);
+private:
 
     // --- Creature async loads ---
     struct PreparedCreatureModel {

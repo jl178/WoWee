@@ -35,6 +35,9 @@ CharacterSectionTextures resolveCharacterSections(
     bool haveAltFace = false;
 
     bool foundSkin = false, foundUnderwear = false, foundFacialHair = false;
+    // Hair style 1 in the character's colour: a bald male's hair texture
+    // (0x4EA2F0 loads it before style 0's, which names none for most races).
+    std::string style1Hair;
 
     for (uint32_t r = 0; r < charSections->getRecordCount(); r++) {
         if (charSections->getUInt32(r, f.raceId) != who.raceId) continue;
@@ -51,10 +54,17 @@ CharacterSectionTextures resolveCharacterSections(
                 foundSkin = true;
             }
             out.skinExtra = charSections->getString(r, f.texture2);
+            if (f.flags < charSections->getFieldCount())
+                out.specialSkin = (charSections->getUInt32(r, f.flags) & 0x8u) != 0;
         } else if (section == kSectionHair && !out.haveHair &&
                    variation == who.hairStyleId && colour == who.hairColorId) {
             out.hair = charSections->getString(r, f.texture1);
             out.haveHair = !out.hair.empty();
+            out.scalpLower = charSections->getString(r, f.texture2);
+            out.scalpUpper = charSections->getString(r, f.texture3);
+        } else if (section == kSectionHair && style1Hair.empty() &&
+                   variation == 1 && colour == who.hairColorId) {
+            style1Hair = charSections->getString(r, f.texture1);
         } else if (section == kSectionFace && !out.exactFace &&
                    variation == who.faceId && colour == who.skinId) {
             out.faceLower = charSections->getString(r, f.texture1);
@@ -96,6 +106,19 @@ CharacterSectionTextures resolveCharacterSections(
         out.faceLower = altFaceLower;
         out.faceUpper = altFaceUpper;
         out.haveFace = true;
+    }
+    // A bald male (style 0) takes style 1's hair texture in his colour, so a
+    // beard on a bald head is the hair colour (0x4EA2F0).
+    if (out.hair.empty() && who.sexId == 0 && who.hairStyleId == 0 && !style1Hair.empty()) {
+        out.hair = style1Hair;
+        out.haveHair = true;
+    }
+    // Special skins carry their own face and wear no underwear.
+    if (out.specialSkin) {
+        out.faceLower.clear();
+        out.faceUpper.clear();
+        out.haveFace = false;
+        out.underwear.clear();
     }
     return out;
 }

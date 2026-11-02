@@ -137,7 +137,9 @@
     "TextureLegLower": 21,
     "TextureLegUpper": 20,
     "TextureTorsoLower": 19,
-    "TextureTorsoUpper": 18
+    "TextureTorsoUpper": 18,
+    "ItemVisual": 23,
+    "ParticleColorID": 24
   },
   "ItemSet": {
     "ID": 0,

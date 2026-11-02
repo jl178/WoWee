@@ -1,5 +1,7 @@
 #pragma once
 
+#include "audio/stock_sound_rules.hpp"
+
 #include <glm/glm.hpp>
 #include <atomic>
 #include <memory>
@@ -23,6 +25,23 @@ struct ReverbSettings;
 /// button click is not in the cave with the player.
 enum class SoundBus { World, Interface };
 
+/// How a sound competes for a voice and fades with distance, the stock way
+/// (stock_sound_rules.hpp). The defaults are a bare file at FMOD's default
+/// priority with SoundEntries' commonest MinDistance.
+struct SoundOptions {
+    /// SoundEntries.MinDistance: full volume inside it. 0 or less: 8 yd.
+    float minDistance = -1.0f;
+    /// SoundEntries id, for the three-voices-per-kit limit. 0 for none.
+    uint32_t kitId = 0;
+    int priority = stock::kPriorityDefault;
+    stock::Category category = stock::Category::Sfx;
+    /// SoundEntries flag 0x20: refused while the same kit is playing.
+    bool noDuplicate = false;
+    /// A loop that is not music starts at a random point of itself
+    /// (Wow.exe 0x879760).
+    bool randomStart = false;
+};
+
 /**
  * AudioEngine: Singleton managing miniaudio device and playback.
  * Replaces process-spawning audio system with proper non-blocking library.
@@ -37,6 +56,11 @@ public:
     [[nodiscard]] bool initialize();
     void shutdown();
     [[nodiscard]] bool isInitialized() const { return initialized_; }
+
+    /// Sound_NumChannels: how many sounds may play at once, music included.
+    /// Clamped to the stock 12..128; 32 by default.
+    void setNumChannels(int channels);
+    [[nodiscard]] int getNumChannels() const { return numChannels_; }
 
     /// The playback device miniaudio actually opened, by name.
     ///
@@ -72,14 +96,14 @@ public:
 
     // Simple 2D sound playback (non-blocking)
     bool playSound2D(const std::vector<uint8_t>& wavData, float volume = 1.0f, float pitch = 1.0f,
-                     SoundBus bus = SoundBus::World);
+                     SoundBus bus = SoundBus::World, const SoundOptions& opts = {});
     bool playSound2D(const std::string& mpqPath, float volume = 1.0f, float pitch = 1.0f,
-                     SoundBus bus = SoundBus::World);
+                     SoundBus bus = SoundBus::World, const SoundOptions& opts = {});
 
     // Stoppable 2D sound - returns a non-zero handle, or 0 on failure
     uint32_t playSound2DStoppable(const std::vector<uint8_t>& wavData, float volume = 1.0f,
                                   bool loop = false, float fadeInMs = 0.0f,
-                                  SoundBus bus = SoundBus::World);
+                                  SoundBus bus = SoundBus::World, const SoundOptions& opts = {});
 
     /// The room the world's sounds are heard in; WorldFx eases to it over
     /// about a second. A wet of 0 is a dry mix.
@@ -94,20 +118,31 @@ public:
     void fadeOutSound(uint32_t id, float fadeMs);
     // Stop a sound started with playSound2DStoppable (no-op if already finished)
     void stopSound(uint32_t id);
+    /// True while a stoppable sound is still sounding: for "never talk over
+    /// your own last line", the stock client's handle check (0x4c5be0).
+    [[nodiscard]] bool isSoundPlaying(uint32_t id) const;
 
     // 3D positional sound playback
+    ///
+    /// Heard through the stock rolloff (stock::rolloffGain): full volume
+    /// inside opts.minDistance, inverse falloff at scale 4 beyond it, a
+    /// linear fade over the last tenth of maxDistance (SoundEntries
+    /// DistanceCutoff) and silence past it. Panned by direction, no Doppler.
     bool playSound3D(const std::vector<uint8_t>& wavData, const glm::vec3& position,
-                     float volume = 1.0f, float pitch = 1.0f, float maxDistance = 100.0f);
+                     float volume = 1.0f, float pitch = 1.0f, float maxDistance = stock::kDefaultCutoff,
+                     const SoundOptions& opts = {});
     bool playSound3D(const std::string& mpqPath, const glm::vec3& position,
-                     float volume = 1.0f, float pitch = 1.0f, float maxDistance = 100.0f);
+                     float volume = 1.0f, float pitch = 1.0f, float maxDistance = stock::kDefaultCutoff,
+                     const SoundOptions& opts = {});
     /// A positional sound its owner keeps hold of - a missile's flight loop.
     /// Returns a non-zero id for stopSound / fadeOutSound / setSoundPosition,
     /// or 0 on failure. A looping one plays until it is stopped.
     /// minDistance, when given, is how far out it stays at full volume (a
     /// SoundEntries row's MinDistance); otherwise the engine's default.
     uint32_t playSound3DStoppable(const std::string& mpqPath, const glm::vec3& position,
-                                  float volume = 1.0f, float maxDistance = 100.0f,
-                                  bool loop = false, float minDistance = -1.0f);
+                                  float volume = 1.0f, float maxDistance = stock::kDefaultCutoff,
+                                  bool loop = false, float minDistance = -1.0f,
+                                  const SoundOptions& opts = {});
     /// Move a stoppable 3D sound (no-op once it has finished).
     void setSoundPosition(uint32_t id, const glm::vec3& position);
 
@@ -154,7 +189,7 @@ private:
     /// success; 0 on failure.
     uint32_t startSound3D(const std::vector<uint8_t>& wavData, const glm::vec3& position,
                           float volume, float pitch, float maxDistance, bool loop,
-                          bool stoppable, float minDistance = -1.0f);
+                          bool stoppable, const SoundOptions& opts);
 
     // Track active one-shot sounds for cleanup
     struct ActiveSound {
@@ -162,7 +197,25 @@ private:
         void* buffer;  // ma_audio_buffer* - Keep audio buffer alive
         std::shared_ptr<const std::vector<uint8_t>> pcmDataRef;  // Keep decoded PCM alive
         uint32_t id = 0;  // 0 = anonymous (not stoppable)
+        // What the voice limiter and the rolloff need.
+        float baseVolume = 1.0f;      ///< the caller's volume, before distance
+        bool spatial = false;
+        bool loop = false;
+        glm::vec3 position{0.0f};
+        float minDistance = stock::kDefaultMinDistance;
+        float maxDistance = stock::kDefaultCutoff;
+        int priority = stock::kPriorityDefault;
+        uint32_t kitId = 0;
+        stock::Category category = stock::Category::Sfx;
     };
+    /// The volume a voice is mixed at: its own, times the rolloff for a
+    /// positional one at its distance from the listener.
+    [[nodiscard]] float voiceGain(const ActiveSound& s) const;
+    /// Make room for a sound by the stock rules, stopping what it displaces.
+    /// False when the sound may not start.
+    bool admitVoice(const ActiveSound& incoming, bool noDuplicate);
+    void releaseActive(size_t index);
+    int numChannels_ = stock::kDefaultNumChannels;
     std::vector<ActiveSound> activeSounds_;
     uint32_t nextSoundId_ = 1;
 

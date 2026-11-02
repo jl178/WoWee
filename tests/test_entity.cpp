@@ -1,6 +1,7 @@
 // Entity, Unit, Player, GameObject, EntityManager tests
 #include <catch_amalgamated.hpp>
 #include "game/entity.hpp"
+#include "core/coordinates.hpp"
 #include <algorithm>
 #include <memory>
 
@@ -100,6 +101,63 @@ TEST_CASE("A spline path starts where the model is", "[entity][movement]") {
     e.updateMovement(0.001f);
     REQUIRE(e.getX() == Catch::Approx(1.0f).margin(0.05f));
     REQUIRE(e.getY() == Catch::Approx(0.5f).margin(0.05f));
+}
+
+namespace {
+uint32_t g_testClock = 0;
+uint32_t testClock() { return g_testClock; }
+}  // namespace
+
+TEST_CASE("A monster move runs as the stock spline, in canonical space", "[entity][movement][unit_motion]") {
+    Entity::setMotionClockOverride(&testClock);
+    g_testClock = 10000;
+    Entity e;
+    // Server (0,0,0) is canonical (0,0,0); the unit faces server +x.
+    e.setPosition(0.0f, 0.0f, 0.0f, wowee::core::coords::serverToCanonicalYaw(0.0f));
+    motion::MonsterMoveSpec spec;
+    spec.start = {0, 0, 0};
+    spec.points = {{0, 10, 0}};   // ten yards along server +y
+    spec.durationMs = 1000;
+    spec.moveType = 4;
+    spec.facingAngle = 0.5f;
+    const auto plan = e.startMonsterMove(spec, false);
+    REQUIRE(plan.kind == motion::MonsterMovePlan::Kind::Spline);
+    g_testClock = 10500;
+    e.updateMovement(0.5f);
+    // Half way: server (0,5,0) is canonical (5,0,0); facing along the path.
+    REQUIRE(e.getX() == Catch::Approx(5.0f));
+    REQUIRE(e.getY() == Catch::Approx(0.0f).margin(1e-4));
+    REQUIRE(e.isActivelyMoving());
+    REQUIRE(e.getOrientation() ==
+            Catch::Approx(wowee::core::coords::serverToCanonicalYaw(1.5707964f)).margin(1e-4));
+    // At the end it stops and takes the asked facing.
+    g_testClock = 11000;
+    e.updateMovement(0.5f);
+    REQUIRE(e.getX() == Catch::Approx(10.0f));
+    REQUIRE_FALSE(e.isActivelyMoving());
+    REQUIRE(e.getOrientation() ==
+            Catch::Approx(wowee::core::coords::serverToCanonicalYaw(0.5f)).margin(1e-4));
+    REQUIRE((e.takeMotionEvents() & Entity::MOTION_SPLINE_DONE) != 0);
+    Entity::setMotionClockOverride(nullptr);
+}
+
+TEST_CASE("Another player's packets drive its dead reckoning", "[entity][movement][unit_motion]") {
+    Entity::setMotionClockOverride(&testClock);
+    g_testClock = 20000;
+    Entity e;
+    motion::MovementSample s;
+    s.time = 5000;
+    s.flags = motion::MoveFlags::Forward;
+    s.position = {0, 0, 0};
+    s.facing = 0.0f;
+    e.receiveRemoteMovement(s, false);
+    g_testClock = 20400;
+    e.updateMovement(0.4f);
+    // 0.4 s at run speed along server +x, which is canonical +y.
+    REQUIRE(e.getY() == Catch::Approx(2.8f));
+    REQUIRE(e.isActivelyMoving());
+    REQUIRE(e.stockMotionSpeed() == Catch::Approx(7.0f));
+    Entity::setMotionClockOverride(nullptr);
 }
 
 TEST_CASE("Entity field set/get/has", "[entity]") {

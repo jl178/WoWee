@@ -21,7 +21,9 @@
  * It lives here now, with a test, and the call sites ask rather than decide.
  */
 
+#include <array>
 #include <cstdint>
+#include <iterator>
 #include <unordered_set>
 
 namespace wowee {
@@ -233,6 +235,118 @@ constexpr uint16_t kTabardBase = 1200;                 ///< group 12
 /// wore trousers under it while a player in the same robe did not.
 constexpr uint16_t kRobeKiltBare = kGeosetBarePants;   ///< group 13
 }  // namespace equipment
+
+/// What stock's equipment geoset pass reads (FUN_004ed900, run for players and
+/// for CreatureDisplayInfoExtra NPCs alike).
+///
+/// `gg[kind][i]` is ItemDisplayInfo.GeosetGroup[i] of the item worn in that
+/// kind, 0 when nothing is worn. The kinds are CreatureDisplayInfoExtra's
+/// NPCItemDisplay order, which is also the order of the component's item array.
+struct StockGeosetInput {
+    enum Kind { Head, Shoulder, Shirt, Chest, Belt, Legs, Boots, Wrist, Gloves, Tabard, Cape, KindCount };
+    uint32_t gg[KindCount][3] = {};
+    /// The chest's ItemDisplayInfo flag that hides the legs (component flag
+    /// 0x20): long robes whose texture covers the legs.
+    bool chestHidesLegs = false;
+    /// Something over the shirt paints the lower arm (ArmLower layers 1-6):
+    /// then the shirt's sleeves (group 8 from the shirt) are not shown.
+    bool armLowerCoveredAboveShirt = false;
+    /// A guild tabard (component flag 0x40).
+    bool guildTabard = false;
+    /// A death knight (class 6, or a face whose CharSections row has flag 4):
+    /// group 17 is 1703, the rune glow.
+    bool deathKnight = false;
+};
+
+/// Stock's default value per group, 0..18 (0x4dfda0): variant 1 everywhere,
+/// ears 702.
+inline std::array<uint16_t, 19> stockDefaultGeosetValues() {
+    std::array<uint16_t, 19> v{};
+    for (uint16_t g = 0; g < 19; ++g) v[g] = static_cast<uint16_t>(g * 100 + 1);
+    v[0] = 1;
+    v[7] = kGeosetDefaultEars;
+    return v;
+}
+
+/// The geoset ids stock enables for a character (FUN_004ed900), as a set of
+/// exact ids. `base` is the value per group before equipment: hair (group 0),
+/// facial hair (1-3, 16, 17) and whatever the helm hid (HelmetGeosetVisData),
+/// the defaults otherwise. Id 0, the body, is always on.
+///
+/// Exact ids only: a model that lacks one draws nothing for it. Stock does
+/// not substitute another member of the group.
+inline std::unordered_set<uint16_t> stockEquipmentGeosets(const std::array<uint16_t, 19>& base,
+                                                          const StockGeosetInput& in) {
+    std::unordered_set<uint16_t> on;
+    auto rangeOff = [&](uint16_t lo, uint16_t hi) {
+        for (auto it = on.begin(); it != on.end();)
+            it = (*it >= lo && *it <= hi) ? on.erase(it) : std::next(it);
+    };
+    auto set = [&](uint32_t id) { on.insert(static_cast<uint16_t>(id)); };
+    using K = StockGeosetInput;
+    auto gg = [&](int kind, int i) { return in.gg[kind][i]; };
+
+    set(0);
+    for (uint16_t g = 0; g < 19; ++g)
+        set((g == 17 && in.deathKnight) ? 1703u : base[g]);
+
+    // Hands: gloves own group 4 and hide the chest's sleeves.
+    if (gg(K::Gloves, 0)) { rangeOff(401, 499); set(401 + gg(K::Gloves, 0)); }
+    else if (gg(K::Chest, 0)) set(801 + gg(K::Chest, 0));
+    if (!in.armLowerCoveredAboveShirt && gg(K::Shirt, 0)) set(801 + gg(K::Shirt, 0));
+
+    bool robeChest = false, robeLegs = false, tabardOn = false;
+    auto robeOff = [&] { rangeOff(501, 599); rangeOff(902, 999); rangeOff(1100, 1199); rangeOff(1300, 1399); };
+    if (gg(K::Chest, 2)) {
+        robeOff(); set(1301 + gg(K::Chest, 2)); robeChest = true;
+    } else if (gg(K::Legs, 2) && !in.chestHidesLegs) {
+        robeOff(); set(1301 + gg(K::Legs, 2)); robeLegs = true;
+    } else {
+        if (gg(K::Boots, 0)) { rangeOff(501, 599); set(901); set(501 + gg(K::Boots, 0)); }
+        else if (gg(K::Legs, 1) && !in.chestHidesLegs) set(901 + gg(K::Legs, 1));
+        else set(901);
+        if (gg(K::Tabard, 0)) { set(1201 + gg(K::Tabard, 0)); tabardOn = true; }
+    }
+    if (in.guildTabard) { set(1201); if (!robeChest && !robeLegs) set(1202); }
+    if (!robeChest) {
+        if (!tabardOn && gg(K::Shirt, 1)) set(1001 + gg(K::Shirt, 1));
+        if (!in.chestHidesLegs && gg(K::Legs, 0)) {
+            if (gg(K::Legs, 0) >= 3) { rangeOff(1300, 1399); set(1101 + gg(K::Legs, 0)); }
+            else if (!tabardOn) set(1101 + gg(K::Legs, 0));
+        }
+    }
+    if (gg(K::Cape, 0)) { rangeOff(1500, 1599); set(1501 + gg(K::Cape, 0)); }
+    if (gg(K::Belt, 0)) { rangeOff(1800, 1899); set(1801 + gg(K::Belt, 0)); }
+    return on;
+}
+
+/// One row of HelmetGeosetVisData: seven race bitmasks, each tested with
+/// 1 << race (0x4ef0d0). Column 0 hides the hair, 1-3 the facial hair, 4 the
+/// ears, 5 group 16, 6 the eye glow.
+struct HelmGeosetVis {
+    uint32_t mask[7] = {};
+};
+
+/// Apply a helm's HelmetGeosetVisData row to the per-group values: a column
+/// whose bit for this race is set puts its group to variant 1 (none).
+inline void applyHelmGeosetVis(std::array<uint16_t, 19>& v, const HelmGeosetVis& row, uint8_t race) {
+    static constexpr uint8_t kGroup[7] = {0, 1, 2, 3, 7, 16, 17};
+    if (race >= 32) return;
+    for (int c = 0; c < 7; ++c)
+        if (row.mask[c] & (1u << race)) v[kGroup[c]] = static_cast<uint16_t>(kGroup[c] * 100 + 1);
+}
+
+/// CreatureDisplayInfo.CreatureGeosetData (0x4e7790): for groups 1-8, nibble
+/// g-1 = v, when non-zero, turns the group off and puts on 100g + v.
+inline void applyCreatureGeosetData(std::unordered_set<uint16_t>& on, uint32_t data) {
+    for (uint16_t g = 1; g <= 8; ++g) {
+        const uint32_t v = (data >> (4 * (g - 1))) & 0xF;
+        if (v == 0) continue;
+        for (auto it = on.begin(); it != on.end();)
+            it = (*it >= g * 100 && *it <= g * 100 + 99) ? on.erase(it) : std::next(it);
+        on.insert(static_cast<uint16_t>(g * 100 + v));
+    }
+}
 
 }  // namespace core
 }  // namespace wowee

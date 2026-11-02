@@ -29,7 +29,17 @@ layout(push_constant) uniform PC {
     float intoxication;
     float ghost;
     float antialias;
+    float pad0;
+    float pad1;
+    float glowAmount;   // LightParams.Glow: the blur, squared, added at this strength
+    float glowBlend;    // how far the picture is swapped for its blur (water, drink)
+    float glowSource;   // 1 when uGlow holds this frame's boxed-down scene
+    float pad2;
 } pc;
+
+// The scene boxed down to a quarter (mip 1 of a half-size image), the stock
+// FFXBox4 target the glow and the ghost world blur from.
+layout(set = 0, binding = 1) uniform sampler2D uGlow;
 
 // The reference's default tuning. Subpix 0.75 is what it calls the default
 // amount of filtering; 0.50 is the value it names as sharper, if this still
@@ -48,15 +58,42 @@ float luma(vec3 c) {
     return dot(c, vec3(0.299, 0.587, 0.114));
 }
 
-// The spirit world: colour drained toward its own brightness and leaned cold,
-// a little blue. The stock client's ghost screen is this over Light.dbc's
-// death lighting; it replaces a flat blue-grey quad that dimmed and fogged
-// the whole picture rather than taking the colour out of it.
-vec3 ghostWorld(vec3 c) {
+// The stock blur (FFXGauss4 across then down, on the quarter-size scene):
+// four bilinear taps a side at -2.5, -0.5, +0.5, +2.5 quarter texels,
+// weighted 1/8, 3/8, 3/8, 1/8. Taken as the 4x4 product in one pass, which
+// is the same filter. Without a quarter-size scene, the pixel itself.
+vec3 stockBlur(vec2 uv) {
+    if (pc.glowSource < 0.5) return texture(uScene, uv).rgb;
+    const float offs[4] = float[](-2.5, -0.5, 0.5, 2.5);
+    const float wts[4]  = float[](0.125, 0.375, 0.375, 0.125);
+    vec2 texel = 1.0 / vec2(textureSize(uGlow, 1));
+    vec3 sum = vec3(0.0);
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            sum += wts[x] * wts[y] *
+                   textureLod(uGlow, uv + vec2(offs[x], offs[y]) * texel, 1.0).rgb;
+        }
+    }
+    return sum;
+}
+
+// What the stock client lays over the finished picture. Alive, ffxGlow
+// (ffxglow.bls): lerp(scene, blur, blend) + blur^2 * glow. A ghost, ffxDeath
+// (ffxdeath.bls) in its place: the scene plus the same glow, drained to grey
+// by (0.299, 0.587, 0.144) - the shader's own 0.144 - and the cold tint
+// (0x53, 0x93, 0xa8) laid on the mid-greys, 4 * grey * (1 - grey).
+vec3 stockScreenEffect(vec3 c, vec2 uv) {
     float g = clamp(pc.ghost, 0.0, 1.0);
-    if (g <= 0.0) return c;
-    vec3 grey = vec3(luma(c)) * vec3(0.88, 0.95, 1.10);
-    return mix(c, clamp(grey, 0.0, 1.0), 0.85 * g);
+    bool glow = pc.glowAmount > 0.0 || pc.glowBlend > 0.0;
+    if (g <= 0.0 && !glow) return c;
+    vec3 blur = stockBlur(uv);
+    vec3 alive = mix(c, blur, pc.glowBlend) + blur * blur * pc.glowAmount;
+    if (g <= 0.0) return alive;
+    vec3 lit = c + blur * blur * pc.glowAmount;
+    float grey = clamp(dot(lit, vec3(0.299, 0.587, 0.144)), 0.0, 1.0);
+    float t = clamp(4.0 * grey * (1.0 - grey), 0.0, 1.0);
+    vec3 dead = vec3(grey) + vec3(83.0, 147.0, 168.0) / 255.0 * t;
+    return mix(alive, dead, g);
 }
 
 void main() {
@@ -84,7 +121,7 @@ void main() {
 
     // FXAA switched off: the pass is here for the colour alone.
     if (pc.antialias < 0.5) {
-        outColor = vec4(ghostWorld(rgbM), 1.0);
+        outColor = vec4(stockScreenEffect(rgbM, uv), 1.0);
         return;
     }
 
@@ -100,7 +137,7 @@ void main() {
     float range    = rangeMax - rangeMin;
 
     if (range < max(FXAA_EDGE_THRESHOLD_MIN, rangeMax * FXAA_EDGE_THRESHOLD)) {
-        outColor = vec4(ghostWorld(rgbM), 1.0);
+        outColor = vec4(stockScreenEffect(rgbM, uv), 1.0);
         return;
     }
 
@@ -208,5 +245,5 @@ void main() {
         fxaaResult = clamp(fxaaResult + s * (fxaaResult - blur), 0.0, 1.0);
     }
 
-    outColor = vec4(ghostWorld(fxaaResult), 1.0);
+    outColor = vec4(stockScreenEffect(fxaaResult, uv), 1.0);
 }

@@ -294,8 +294,8 @@ private:
         float viewDistance   = kDefaultViewDistance;
         /// How far distance fog takes the sky's colour, 0 to 1. See
         /// LightingManager::setFogSkyBlend.
-        float fogSkyBlend    = 0.7f;
-        float fogStrength    = 0.4f;
+        float fogSkyBlend    = 0.0f;
+        float fogStrength    = 1.0f;
         bool  sharpStars     = true;
         int  antiAliasing    = 1;   // 0=Off 1=2x 2=4x 3=8x
         bool fxaa            = false;

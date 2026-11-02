@@ -23,6 +23,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
 };
 
 #include "rt_lighting.glsli"
+#include "stock_fog.glsli"
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
 
@@ -163,7 +164,7 @@ vec4 fogVolumeAt(vec3 worldPos) {
 // everything between the camera and that, sunlit shafts and torch glow
 // included.
 vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
-    float fogFactor = clamp((fogParams.y - dist) / (fogParams.y - fogParams.x), 0.0, 1.0);
+    float fogFactor = stockFogVisibility(worldPos);
     color = mix(fogColor.rgb, color, fogFactor);
     if (volumetricParams.x > 0.5) {
         vec4 air = fogVolumeAt(worldPos);
@@ -373,8 +374,11 @@ void main() {
         // true Light.dbc blend it left trees darker than the ground they
         // stand on. The stock client lights foliage like any other M2.
         vec3 ambientTerm = rtAmbient(rt, ambientColor.rgb);
-        result = ambientTerm * texColor.rgb
-               + shadow * (diff * lightColor.rgb * texColor.rgb + spec * lightColor.rgb);
+        // Clamped at one per channel, as the stock vertex shaders clamp
+        // ambient + diffuse * N.L before the texture (shaders/vertex/arbvp1/
+        // diffuse_t1.bls: MIN R0, R0, 1).
+        vec3 light = min(ambientTerm + shadow * diff * lightColor.rgb, vec3(1.0));
+        result = light * texColor.rgb + shadow * spec * lightColor.rgb;
         // No leaf glow (sss unused): stock foliage is lit like any other M2.
 
         if (interiorDarken > 0.0) {
@@ -408,7 +412,7 @@ void main() {
         // Distance can only take an additive contribution away, and so can
         // the air in front of it: its own light is already in the scene
         // behind the card.
-        float fogFactor = clamp((fogParams.y - dist) / (fogParams.y - fogParams.x), 0.0, 1.0);
+        float fogFactor = stockFogVisibility(FragPos);
         result *= fogFactor;
         if (volumetricParams.x > 0.5) result *= fogVolumeAt(FragPos).a;
     } else {

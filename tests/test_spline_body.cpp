@@ -217,3 +217,45 @@ TEST_CASE("an implausible point count is refused", "[splinebody]") {
     SplineBlockData out;
     CHECK_FALSE(parseMonsterMoveSplineBodyVanilla(packet, out, 0, glm::vec3(0.0f)));
 }
+
+TEST_CASE("a WotLK flying spline's nodes are whole points", "[splinebody]") {
+    // Flying alone (0x2000) - every flying creature's move, since
+    // EnableFlying clears Catmullrom - is smooth, and the 3.3.5 client reads
+    // twelve-byte nodes for it (Wow.exe 0x73C8E0 tests 0x42000), as
+    // AzerothCore writes them (Mask_CatmullRom).
+    Writer w;
+    w.u32(3000);        // duration
+    w.u32(3);           // three nodes, all absolute
+    w.vec3(1.0f, 2.0f, 3.0f);
+    w.vec3(4.0f, 5.0f, 6.0f);
+    w.vec3(7.0f, 8.0f, 9.0f);
+    wowee::network::Packet packet(0, w.bytes);
+
+    SplineBlockData out;
+    REQUIRE(parseMonsterMoveSplineBody(packet, out, SplineFlagWotlk::FLYING,
+                                       glm::vec3(0.0f), false, SplineFlagSet::Wotlk));
+    REQUIRE(out.waypoints.size() == 2);
+    CHECK(out.waypoints[0] == glm::vec3(1.0f, 2.0f, 3.0f));
+    CHECK(out.waypoints[1] == glm::vec3(4.0f, 5.0f, 6.0f));
+    CHECK(out.destination == glm::vec3(7.0f, 8.0f, 9.0f));
+    CHECK(packet.getRemainingSize() == 0);
+}
+
+TEST_CASE("a WotLK cyclic ground loop is still packed", "[splinebody]") {
+    // Cyclic without Catmullrom or Flying is a linear path: destination,
+    // then packed offsets from the midpoint.
+    Writer w;
+    w.u32(3000);
+    w.u32(2);
+    w.vec3(10.0f, 0.0f, 0.0f);  // destination
+    w.u32(0);                   // the middle node at the midpoint
+    wowee::network::Packet packet(0, w.bytes);
+
+    SplineBlockData out;
+    REQUIRE(parseMonsterMoveSplineBody(packet, out, SplineFlagWotlk::CYCLIC,
+                                       glm::vec3(0.0f), false, SplineFlagSet::Wotlk));
+    REQUIRE(out.waypoints.size() == 1);
+    CHECK(out.waypoints[0] == glm::vec3(5.0f, 0.0f, 0.0f));
+    CHECK(out.destination == glm::vec3(10.0f, 0.0f, 0.0f));
+    CHECK(packet.getRemainingSize() == 0);
+}

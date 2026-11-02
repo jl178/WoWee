@@ -615,6 +615,7 @@ set(WOWEE_SOURCES
     src/core/entity_spawner_processing.cpp
     src/core/appearance_composer.cpp
     src/core/helm_visual.cpp
+    src/core/character_geosets.cpp
     src/core/world_loader.cpp
     src/core/npc_interaction_callback_handler.cpp
     src/core/audio_callback_handler.cpp
@@ -699,6 +700,8 @@ set(WOWEE_SOURCES
     src/game/world_packets_world.cpp
     src/game/world_packets_economy.cpp
     src/game/spline_packet.cpp
+    src/game/unit_motion.cpp
+    src/game/unit_motion_glue.cpp
     src/game/shapeshift_forms.cpp
     src/game/calendar_data.cpp
     src/game/faction_hostility.cpp
@@ -725,6 +728,7 @@ set(WOWEE_SOURCES
     src/audio/sound_data.cpp
     src/audio/world_sound_emitters.cpp
     src/audio/zone_music_controller.cpp
+    src/audio/stock_sound_rules.cpp
 
     # Pipeline (asset loaders)
     src/pipeline/blp_loader.cpp

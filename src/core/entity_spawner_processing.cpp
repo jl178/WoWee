@@ -476,6 +476,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                                 for (const std::string* path : {&sections.bodySkin, &sections.skinExtra,
                                                                 &sections.faceLower, &sections.faceUpper,
                                                                 &sections.facialLower, &sections.facialUpper,
+                                                                &sections.scalpLower, &sections.scalpUpper,
                                                                 &sections.hair}) {
                                     if (!path->empty()) displaySkinPaths.push_back(*path);
                                 }
@@ -1696,8 +1697,13 @@ void EntitySpawner::processPendingMount() {
     // Create mount instance at player position
     glm::vec3 mountPos = renderer_->getCharacterPosition();
     float yawRad = glm::radians(renderer_->getCharacterYaw());
+    // Stock (0x73D5D0, 0x71C0E0): the mount draws at the unit's render scale
+    // times its own display's CreatureModelScale; the rider keeps its size.
+    float riderScale = 1.0f;
+    if (uint32_t riderInst = renderer_->getCharacterInstanceId())
+        riderScale = charRenderer->getInstanceScale(riderInst);
     uint32_t instanceId = charRenderer->createInstance(modelId, mountPos,
-        glm::vec3(0.0f, 0.0f, yawRad), 1.0f);
+        glm::vec3(0.0f, 0.0f, yawRad), riderScale * creatureDisplayScale(mountDisplayId));
 
     if (instanceId == 0) {
         LOG_WARNING("Failed to create mount instance");
@@ -1904,8 +1910,13 @@ void EntitySpawner::processPendingRemotePlayerMounts() {
 
         glm::vec3 pos(0.0f);
         cr->getInstancePosition(playerIt->second, pos);
-        uint32_t mountInstance = cr->createInstance(modelId, pos, glm::vec3(0.0f), 1.0f);
+        // The unit's render scale times the mount display's scale (stock
+        // 0x71C0E0); the rider rides attachment 0 at its own size (0x73D5D0).
+        const float riderScale = cr->getInstanceScale(playerIt->second);
+        uint32_t mountInstance = cr->createInstance(modelId, pos, glm::vec3(0.0f),
+                                                    riderScale * creatureDisplayScale(displayId));
         if (mountInstance != 0) {
+            cr->setInstanceMountedOn(playerIt->second, mountInstance);
             const bool moving = gameHandler_ && [&] {
                 auto entity = gameHandler_->getEntityManager().getEntity(guid);
                 return entity && entity->isActivelyMoving();

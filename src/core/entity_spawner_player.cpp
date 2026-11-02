@@ -1,5 +1,6 @@
 #include "core/entity_spawner.hpp"
 #include "core/helm_visual.hpp"
+#include "core/character_geosets.hpp"
 #include "core/geoset_rules.hpp"
 #include "core/character_paths.hpp"
 #include "pipeline/char_sections.hpp"
@@ -190,7 +191,20 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     // Create instance at server position
     glm::vec3 renderPos = core::coords::canonicalToRender(glm::vec3(x, y, z));
     float renderYaw = orientation + glm::radians(90.0f);
-    uint32_t instanceId = charRenderer->createInstance(modelId, renderPos, glm::vec3(0.0f, 0.0f, renderYaw), 1.0f);
+    // Drawn at the race display's size times OBJECT_FIELD_SCALE_X (0x71C0E0).
+    float unitScale = playerRaceDisplayScale(raceId, genderId);
+    if (gameHandler_) {
+        if (auto e = gameHandler_->getEntityManager().getEntity(guid)) {
+            const uint16_t scaleIdx = game::fieldIndex(game::UF::OBJECT_FIELD_SCALE_X);
+            if (scaleIdx != 0xFFFF) {
+                const uint32_t raw = e->getField(scaleIdx);
+                float s = 0.0f;
+                std::memcpy(&s, &raw, sizeof(s));
+                if (raw != 0 && s > 0.01f && s < 100.0f) unitScale *= s;
+            }
+        }
+    }
+    uint32_t instanceId = charRenderer->createInstance(modelId, renderPos, glm::vec3(0.0f, 0.0f, renderYaw), unitScale);
     if (instanceId == 0) return;
 
     // The character's textures, through the one reader in
@@ -240,7 +254,12 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
         facialLowerPath = sections.facialLower;
         facialUpperPath = sections.facialUpper;
         hairTexturePath = sections.hair;
-        underwearPaths = sections.underwear;
+        // Scalps ride with the base overlays (head regions, after the facial
+        // hair; stock 0x4F0AD0 / 0x4F0B70).
+        underwearPaths.clear();
+        for (const std::string* sc : {&sections.scalpLower, &sections.scalpUpper})
+            if (!sc->empty()) underwearPaths.push_back(*sc);
+        underwearPaths.insert(underwearPaths.end(), sections.underwear.begin(), sections.underwear.end());
 
         if (!sections.exactFace) {
             LOG_WARNING("spawnOnlinePlayer: no DBC face match for face=",
@@ -399,24 +418,6 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     if (!displayInfoDbc) return;
     const auto* idiL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
 
-    auto getGeosetGroup = [&](uint32_t displayInfoId, uint32_t fieldIdx) -> uint32_t {
-        if (displayInfoId == 0) return 0;
-        int32_t recIdx = displayInfoDbc->findRecordById(displayInfoId);
-        if (recIdx < 0) return 0;
-        return displayInfoDbc->getUInt32(static_cast<uint32_t>(recIdx), fieldIdx);
-    };
-
-    auto findDisplayIdByInvType = [&](std::initializer_list<uint8_t> types) -> uint32_t {
-        for (int s = 0; s < 19; s++) {
-            uint8_t inv = inventoryTypes[s];
-            if (inv == 0 || displayInfoIds[s] == 0) continue;
-            for (uint8_t t : types) {
-                if (inv == t) return displayInfoIds[s];
-            }
-        }
-        return 0;
-    };
-
     auto hasInvType = [&](std::initializer_list<uint8_t> types) -> bool {
         for (int s = 0; s < 19; s++) {
             uint8_t inv = inventoryTypes[s];
@@ -429,186 +430,32 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     };
 
     // --- Geosets ---
-    // Mirror the same group-range logic as CharacterPreview::applyEquipment to
-    // keep other-player rendering consistent with the local character preview.
-    // Group 4 (4xx) = forearms/gloves, 5 (5xx) = shins/boots, 8 (8xx) = wrists/sleeves,
-    // 13 (13xx) = legs/trousers.  Missing defaults caused the shin-mesh gap (status.md).
+    // Stock's rule (FUN_004ed900 with HelmetGeosetVisData), shared with the
+    // local player, the NPCs and the portrait: core::buildStockCharacterGeosets.
     uint8_t hairStyleId = static_cast<uint8_t>((st.appearanceBytes >> 16) & 0xFF);
-    const uint16_t selectedHairScalp = selectHairScalpGeoset(hairGeosetMap_, st.raceId, st.genderId, hairStyleId);
-    auto itFacial = facialHairGeosetMap_.find(
-        appearanceKey(st.raceId, st.genderId, st.facialFeatures));
-    // The same bare set as everywhere else. This built its own and had drifted:
-    // it named ears 701 where the other three name 702, which is the variant
-    // that has ears on it - so a player composed through this path lost them.
-    std::unordered_set<uint16_t> geosets = bareGeosetsFor(
-        selectedHairScalp,
-        itFacial != facialHairGeosetMap_.end() ? &itFacial->second : nullptr, st.raceId);
-
-    const uint32_t geosetGroup1Field = idiL ? (*idiL)["GeosetGroup1"] : 7;
-    const uint32_t geosetGroup3Field = idiL ? (*idiL)["GeosetGroup3"] : 9;
-
-    std::unordered_set<uint16_t> modelGeosets;
-    if (const auto* modelData = charRenderer->getModelData(st.modelId)) {
-        for (const auto& batch : modelData->batches) {
-            modelGeosets.insert(batch.submeshId);
+    core::CharacterGeosetQuery gq;
+    for (int s = 0; s < 19; ++s) {
+        const int kind = core::geosetKindForInventoryType(inventoryTypes[s]);
+        if (kind >= 0 && displayInfoIds[s] != 0 && gq.displays[kind] == 0) gq.displays[kind] = displayInfoIds[s];
+    }
+    gq.hairScalp = selectHairScalpGeoset(hairGeosetMap_, st.raceId, st.genderId, hairStyleId);
+    if (auto itFacial = facialHairGeosetMap_.find(appearanceKey(st.raceId, st.genderId, st.facialFeatures));
+        itFacial != facialHairGeosetMap_.end()) {
+        gq.haveFacialRow = true;
+        gq.facial100 = itFacial->second.geoset100;
+        gq.facial200 = itFacial->second.geoset200;
+        gq.facial300 = itFacial->second.geoset300;
+        gq.facial1700 = itFacial->second.geoset1700;
+    }
+    gq.race = st.raceId;
+    gq.gender = st.genderId;
+    if (gameHandler_) {
+        if (auto e = gameHandler_->getEntityManager().getEntity(guid)) {
+            const uint32_t bytes0 = e->getField(game::fieldIndex(game::UF::UNIT_FIELD_BYTES_0));
+            gq.deathKnight = ((bytes0 >> 8) & 0xFF) == 6;
         }
     }
-
-    auto eraseGroup = [&](uint16_t group) {
-        for (auto it = geosets.begin(); it != geosets.end();) {
-            if ((*it / 100) == group) {
-                it = geosets.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    };
-
-    // NOTE (2026-08-11, unverified): this does NOT use core::resolveGeoset,
-    // and the character preview's identically-named lambda does.
-    //
-    // geoset_rules.hpp says of that rule "it lives here now, with a test, and
-    // the call sites ask rather than decide". This call site still decides -
-    // it takes an exact match or the caller's fallback and nothing else.
-    //
-    // Where the two differ: an *equipped* geoset (a real variant, not a bare
-    // 401/501/801/1301, which both treat as none and never substitute) that
-    // the model does not carry. The preview substitutes the lowest member of
-    // that group and shows some armour mesh; this returns the bare default, or
-    // nothing at all if the model lacks that too. So a race whose model is
-    // missing a variant would look bare in the world and dressed on the
-    // character screen.
-    //
-    // Deliberately not changed here. It is a difference in what gets drawn on
-    // the character you play, in the same area as the unresolved bare-shin
-    // width bug, and it wants someone looking at the screen - which is the one
-    // thing this pass could not do.
-    auto pickGeoset = [&](uint16_t preferred, uint16_t fallback) -> uint16_t {
-        if (preferred != 0 && modelGeosets.count(preferred) > 0) return preferred;
-        if (fallback != 0 && modelGeosets.count(fallback) > 0) return fallback;
-        return 0;
-    };
-
-    // Find the lowest submesh ID in a group (e.g., group 5 → lowest 5xx).
-    // Races like Gnome (no 501) and Tauren (only 505) need this fallback.
-    auto lowestInGroup = [&](uint16_t group) -> uint16_t {
-        uint16_t best = 0;
-        for (uint16_t g : modelGeosets) {
-            if (g / 100 == group && (best == 0 || g < best)) best = g;
-        }
-        return best;
-    };
-
-    // Per-group defaults - overridden below when equipment provides a geoset value.
-    uint16_t geosetGloves  = pickGeoset(kGeosetBareForearms, kGeosetBareForearms);
-    uint16_t geosetBoots   = pickGeoset(kGeosetBareShins, lowestInGroup(5));
-    uint16_t geosetSleeves = pickGeoset(kGeosetBareSleeves, kGeosetBareSleeves);
-    uint16_t geosetPants   = pickGeoset(kGeosetBarePants, kGeosetBarePants);
-    uint32_t kneeGG = 0;
-
-    bool robeSkirt = false;
-    // Chest/Shirt/Robe (invType 4,5,20) → wrist/sleeve group 8
-    {
-        // Chest or robe over the shirt beneath it (the shirt's slot comes first).
-        uint32_t did = findDisplayIdByInvType({5, 20});
-        if (did == 0) did = findDisplayIdByInvType({4});
-        uint32_t gg1 = getGeosetGroup(did, geosetGroup1Field);
-        if (gg1 > 0) geosetSleeves = pickGeoset(equippedGeoset(equipment::kChestBare, gg1), kGeosetBareSleeves);
-        // Robe kilt → leg group 13
-        uint32_t gg3 = getGeosetGroup(did, geosetGroup3Field);
-        if (gg3 > 0) {
-            geosetPants = pickGeoset(equippedGeoset(equipment::kRobeKiltBare, gg3), kGeosetBarePants);
-            robeSkirt = true;
-        }
-    }
-
-    // Legs (invType 7) → leg group 13
-    {
-        uint32_t did = findDisplayIdByInvType({7});
-        uint32_t gg1 = getGeosetGroup(did, geosetGroup1Field);
-        // Legs GeosetGroup[2] is a dress or kilt (group 13); [0] is group 11
-        // pant flaps and never the skirt. A robe's skirt wins.
-        uint32_t gg3 = getGeosetGroup(did, geosetGroup3Field);
-        if (gg3 > 0 && !robeSkirt) {
-            geosetPants = pickGeoset(equippedGeoset(equipment::kRobeKiltBare, gg3), kGeosetBarePants);
-            robeSkirt = true;
-        }
-        (void)gg1;
-        // Kneepads, group 9, from GeosetGroup[1]; none otherwise or under a skirt.
-        kneeGG = getGeosetGroup(did, geosetGroup3Field - 1);
-    }
-
-    // Feet/Boots (invType 8) → shin group 5
-    {
-        uint32_t did = findDisplayIdByInvType({8});
-        uint32_t gg1 = getGeosetGroup(did, geosetGroup1Field);
-        if (gg1 > 0 && !robeSkirt) geosetBoots = pickGeoset(equippedGeoset(equipment::kBootsBare, gg1), lowestInGroup(5));
-    }
-
-    // Hands/Gloves (invType 10) → forearm group 4
-    {
-        uint32_t did = findDisplayIdByInvType({10});
-        uint32_t gg1 = getGeosetGroup(did, geosetGroup1Field);
-        if (gg1 > 0) geosetGloves = pickGeoset(equippedGeoset(equipment::kGlovesBare, gg1), kGeosetBareForearms);
-    }
-
-    // Wrists/Bracers (invType 9) → sleeve group 8 (only if chest/shirt didn't set it)
-    {
-        uint32_t did = findDisplayIdByInvType({9});
-        if (did != 0 && geosetSleeves == kGeosetBareSleeves) {
-            uint32_t gg1 = getGeosetGroup(did, geosetGroup1Field);
-            if (gg1 > 0) geosetSleeves = pickGeoset(equippedGeoset(equipment::kChestBare, gg1), kGeosetBareSleeves);
-        }
-    }
-
-    // Waist/Belt (invType 6) → buckle group 18
-    //
-    // The base variant when no belt is worn, rather than nothing. Group 18 is
-    // erased below, and on the Legion human male 1801 is the waist itself, so
-    // dropping it with nothing in its place left a gap between the torso and
-    // the legs. The older models carry no 1801, where pickGeoset resolves this
-    // to nothing exactly as before.
-    uint16_t geosetBelt = 0;
-    {
-        uint32_t did = findDisplayIdByInvType({6});
-        uint32_t gg1 = getGeosetGroup(did, geosetGroup1Field);
-        geosetBelt = pickGeoset(gg1 > 0 ? equippedGeoset(equipment::kBeltBase, gg1) : 0,
-                                equipment::kBeltBase);
-    }
-
-    eraseGroup(4);
-    eraseGroup(5);
-    eraseGroup(8);
-    eraseGroup(13);
-    eraseGroup(15);
-    eraseGroup(18);
-    if (geosetGloves != 0) geosets.insert(geosetGloves);
-    if (geosetBoots != 0) geosets.insert(geosetBoots);
-    if (geosetSleeves != 0) geosets.insert(geosetSleeves);
-    if (geosetPants != 0) geosets.insert(geosetPants);
-    for (auto it = geosets.begin(); it != geosets.end();) {
-        if (*it / 100 == 9) it = geosets.erase(it); else ++it;
-    }
-    if (kneeGG > 0 && !robeSkirt) {
-        if (uint16_t k = pickGeoset(static_cast<uint16_t>(901 + kneeGG), 0)) geosets.insert(k);
-    }
-    if (geosetBelt != 0) geosets.insert(geosetBelt);
-    // Back/Cloak (invType 16)
-    uint32_t capeGG = getGeosetGroup(findDisplayIdByInvType({16}), geosetGroup1Field);
-    uint16_t geosetCape = pickGeoset(
-        hasInvType({16}) ? cloakGeoset(capeGG) : kGeosetNoCape,
-        kGeosetNoCape);
-    if (geosetCape != 0) geosets.insert(geosetCape);
-    // Tabard (invType 19)
-    if (hasInvType({19})) geosets.insert(kGeosetDefaultTabard);
-
-    // Hide hair under helmets: replace style-specific scalp with bald scalp
-    // HEAD slot is index 0 in the 19-element equipment array
-    if (displayInfoIds[0] != 0 && hairStyleId > 0 &&
-        core::helmHidesHair(*assetManager_, displayInfoIds[0], st.genderId)) {
-        geosets.erase(selectedHairScalp);                              // Remove style scalp
-        geosets.insert(1);    // Bald scalp cap (group 0)
-    }
+    std::unordered_set<uint16_t> geosets = core::buildStockCharacterGeosets(*assetManager_, gq);
 
     charRenderer->setActiveGeosets(st.instanceId, geosets);
 

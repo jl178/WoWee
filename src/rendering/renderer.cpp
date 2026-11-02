@@ -1,6 +1,7 @@
 #include "rendering/renderer.hpp"
 #include "rendering/sun_direction.hpp"
 
+#include <bit>
 #include <fstream>
 #include <iterator>
 #include "addons/lua_api_registrations.hpp"
@@ -83,6 +84,8 @@
 #include "rendering/amd_fsr3_runtime.hpp"
 #include "rendering/spell_visual_system.hpp"
 #include "rendering/post_process_pipeline.hpp"
+#include "rendering/stock_screen_fx.hpp"
+#include "rendering/stock_wmo_light.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/render_graph.hpp"
 #include "rendering/overlay_system.hpp"
@@ -631,7 +634,14 @@ void Renderer::updatePerFrameUBO() {
             currentFrameData.localLightColorIntensity + localLightCount,
             MAX_LOCAL_LIGHTS - localLightCount);
     }
-    currentFrameData.localLightMeta = glm::ivec4(static_cast<int32_t>(localLightCount), 0, 0, 0);
+    // y carries the stock fog curve's exponent as float bits
+    // (stock_fog.glsli): 1 on Azeroth and Kalimdor, 1.5-7 on maps from 530
+    // on, where the stock fog runs to the far clip. The free slot is here
+    // because every .w of the float vectors already carries something.
+    const float fogExponent =
+        lightingManager ? lightingManager->getLightingParams().fogExponent : 1.0f;
+    currentFrameData.localLightMeta = glm::ivec4(static_cast<int32_t>(localLightCount),
+                                                 std::bit_cast<int32_t>(fogExponent), 0, 0);
 
     if (rtLighting_) {
         const RtLighting::ConsumerData rt = rtLighting_->consumerData();
@@ -2199,11 +2209,10 @@ void Renderer::update(float deltaTime) {
             float uLen = glm::length(up);
             up = (uLen < 1e-6f) ? glm::vec3(0.0f, 0.0f, 1.0f) : up / uLen;
             // At the character, facing where the camera looks: stock 3.3.5's
-            // Sound_ListenerAtCharacter (on by default). At the camera, the
-            // player's own voice and anything they stand next to sat 10+ yd
-            // away and played at a fraction of its volume.
+            // Sound_ListenerAtCharacter (on by default), 2 yd back along the
+            // view and 4 yd up (Wow.exe 0x4fa5f0; audio::stock::listenerPosition).
             const glm::vec3 listenerPos = (characterInstanceId > 0)
-                ? characterPosition + glm::vec3(0.0f, 0.0f, 1.5f)
+                ? audio::stock::listenerPosition(characterPosition, fwd)
                 : camera->getPosition();
             audio::AudioEngine::instance().setListenerPosition(listenerPos);
             audio::AudioEngine::instance().setListenerOrientation(fwd, up);
@@ -2281,11 +2290,20 @@ void Renderer::update(float deltaTime) {
         // not while the player swims at it, which kept the underwater set up
         // with the camera in open air.
         bool isUnderwater = false;
+        uint32_t cameraLiquid = 0;
+        float cameraLiquidDepth = 0.0f;
         if (waterRenderer && camera) {
             const glm::vec3 eye = camera->getPosition();
             const auto surface = waterRenderer->getNearestWaterHeightAt(eye.x, eye.y, eye.z, 200.0f);
             isUnderwater = surface && eye.z < *surface;
+            if (isUnderwater) {
+                // Which liquid and how deep, for its own light (magma, slime)
+                // and its darkening with depth (ocean).
+                if (auto lt = waterRenderer->getWaterTypeAt(eye.x, eye.y)) cameraLiquid = *lt;
+                cameraLiquidDepth = *surface - eye.z;
+            }
         }
+        lightingManager->setCameraLiquid(cameraLiquid, cameraLiquidDepth);
         // The sound goes under with the picture; see updateZoneAudio.
         cameraUnderwater_ = isUnderwater;
         const uint32_t resolvedZoneId = getCurrentZoneId();
@@ -2296,6 +2314,12 @@ void Renderer::update(float deltaTime) {
                                 gameTime, stormIntensity, isUnderwater);
         // The water's Light.dbc colours and alphas follow the same lights.
         if (waterRenderer) waterRenderer->setLiquidLighting(lightingManager->getLightingParams());
+        // Window glass (MOMT F_SIDN) glows by the stock night table
+        // (0x7a8520), from the same clock.
+        if (wmoRenderer) {
+            wmoRenderer->setSidnNightFactor(
+                stock_wmo::sidnNightFactor(lightingManager->getTimeOfDay()));
+        }
 
         // Sync weather visual renderer with game state
         if (weather && gh) {
@@ -2306,13 +2330,14 @@ void Renderer::update(float deltaTime) {
             // sends fine weather on entering a zone that has none, and this
             // drew a random zone weather over it. Fog and sandstorms have no
             // particles here, so they draw nothing rather than rain.
+            Weather::Type wanted = Weather::Type::NONE;
             switch (game::weatherKind(wType)) {
-                case game::WeatherKind::RAIN:         weather->setWeatherType(Weather::Type::RAIN); break;
-                case game::WeatherKind::SNOW:         weather->setWeatherType(Weather::Type::SNOW); break;
-                case game::WeatherKind::THUNDERSTORM: weather->setWeatherType(Weather::Type::STORM); break;
-                default:                              weather->setWeatherType(Weather::Type::NONE); break;
+                case game::WeatherKind::RAIN:         wanted = Weather::Type::RAIN; break;
+                case game::WeatherKind::SNOW:         wanted = Weather::Type::SNOW; break;
+                case game::WeatherKind::THUNDERSTORM: wanted = Weather::Type::STORM; break;
+                default:                              break;
             }
-            weather->setIntensity(weather->getWeatherType() == Weather::Type::NONE ? 0.0f : wInt);
+            weather->followServerWeather(wanted, wInt, deltaTime);
             weather->setEnabled(!insideWmo);
 
             // Lightning flash disabled
@@ -2565,6 +2590,7 @@ void Renderer::update(float deltaTime) {
         // the shadow of - keep their clocks but skip their skeletons.
         characterRenderer->setAnimCullView(camera->getViewProjectionMatrix(),
                                            shadowsEnabled ? shadowRayDirection() : glm::vec3(0.0f));
+        characterRenderer->setUnitAmbientArea(getCurrentAreaId());
         characterRenderer->update(deltaTime, camera->getPosition());
     }
     section("update/characters");
@@ -3238,6 +3264,14 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
     // the post pass; the tint quad below only covers frames where that pass
     // is not there yet (or could not be made).
     if (postProcessPipeline_) postProcessPipeline_->setGhostDesaturation(ghostMode_ ? 1.0f : 0.0f);
+    // The stock full-screen glow: LightParams.Glow of the light around the
+    // camera, and a third of the picture swapped for its blur under water
+    // (stock_screen_fx, 0x4f8770).
+    if (postProcessPipeline_ && lightingManager) {
+        postProcessPipeline_->setGlow(
+            stock_screen_fx::glowAmount(lightingManager->getLightingParams().glow),
+            stock_screen_fx::glowBlend(cameraUnderwater_, 0.0f));
+    }
 
     uint32_t frameIdx = vkCtx->getCurrentFrame();
     VkDescriptorSet perFrameSet = perFrameDescSets[frameIdx];
@@ -3277,14 +3311,17 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
     // stand in for hand over halfway, where both are at half and a switch is
     // least visible - rather than staying away until the last model has faded.
     const bool drawSkyModels = skyboxModelRenderer_ && !skyLayers_.empty();
-    float skyModelCoverage = 0.0f;
+    // The procedural sky goes only when a sky model takes the whole of it:
+    // one above 0.99 weight whose LightSkybox flags lack bit 2 (0x7f09b0).
+    // Below that the dome, sun, moons and clouds stay, with the models over
+    // them at their weights.
+    bool skyModelReplacesSky = false;
     if (lightingManager) {
-        // The night stars are drawn over the plain sky, not in place of it.
         for (const auto& layer : lightingManager->getSkyboxLayers()) {
-            if (!layer.stars) skyModelCoverage += layer.weight;
+            if (layer.replacesSky) skyModelReplacesSky = true;
         }
     }
-    const bool useOriginalSkybox = drawSkyModels && skyModelCoverage >= 0.5f;
+    const bool useOriginalSkybox = drawSkyModels && skyModelReplacesSky;
 
     // ── Multithreaded secondary command buffer recording ──
     // Terrain, WMO, and M2 record on worker threads while main thread handles
@@ -4218,6 +4255,8 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         }
         characterRenderer->setAnimSoundEventCallback(characterAnimSoundEventCallback_);
     }
+    // Weapon glows are particle emitters: M2Renderer draws them.
+    if (characterRenderer) characterRenderer->setEffectRenderer(m2Renderer.get());
 
     // Initialize AnimationController (§4.2)
     if (!animationController_) {
