@@ -4779,6 +4779,10 @@ void Application::render() {
                             appliedZoom = mm->zoomLevel;
                             map->setZoomLevel(mm->zoomLevel);
                         }
+                        // Minimap:SetPlayerTextureWidth/Height, for the
+                        // marker pass that draws the arrow. Zero (never set)
+                        // keeps the stock 40.
+                        map->setPlayerArrowSize(mm->minimapPlayerTexW, mm->minimapPlayerTexH);
 
                         // Minimap:PingLocation, which is all Minimap_OnClick
                         // does. The offsets are minimap-local interface units

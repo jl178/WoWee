@@ -425,6 +425,15 @@ public:
     /// and the missing-API fallback answering those with a truthy no-op makes
     /// every one of those guards read as "already loaded".
     void declareDeferredGlobals(const std::vector<std::string>& names);
+    /// Frames a FrameXML file has yet to create, which read as nil until that
+    /// file has loaded - as they do in the real client - rather than as the
+    /// fallback's truthy stand-in. FrameXML reads many of them early behind a
+    /// guard (`if ( DurabilityFrame ) then`, `if ( VehicleSeatIndicator )`,
+    /// `if ( ChatFrameMenuButton )`), and the stand-in walked every one of
+    /// those guards. pending=false withdraws the names again, which the
+    /// loader does file by file as it goes; a name whose file then failed to
+    /// create it goes back to the fallback.
+    void setFrameXmlPending(const std::vector<std::string>& names, bool pending);
 private:
 
     uint32_t hoverWid_ = 0;

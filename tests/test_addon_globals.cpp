@@ -89,5 +89,36 @@ TEST_CASE("templates and built names are not claimed") {
     REQUIRE(out.empty());
 }
 
+TEST_CASE("a variable set to nil at the margin is declared nil") {
+    std::vector<std::string> out;
+    wowee::addons::collectLuaNilDeclarations(
+        // zonetext.lua's own line, and the same without the semicolon or
+        // with a comment after it.
+        "ZonePVPType = nil;\n"
+        "Other=nil\n"
+        "Third = nil -- set by the first zone change\n",
+        out);
+    REQUIRE(has(out, "ZonePVPType"));
+    REQUIRE(has(out, "Other"));
+    REQUIRE(has(out, "Third"));
+}
+
+TEST_CASE("only a bare nil at the margin is a nil declaration") {
+    std::vector<std::string> out;
+    wowee::addons::collectLuaNilDeclarations(
+        // Indented: inside a function, and maybe a local.
+        "\tIndented = nil;\n"
+        // Not nil, or not only nil.
+        "Value = 1;\n"
+        "Either = nil or {};\n"
+        "Named = nilOrNot;\n"
+        // A comparison, not an assignment.
+        "Compare == nil\n"
+        // A field, not a global.
+        "Table.field = nil;\n",
+        out);
+    REQUIRE(out.empty());
+}
+
 }  // namespace
 

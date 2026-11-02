@@ -641,7 +641,11 @@ local function replacingBagCall(original)
 end
 
 ToggleBackpack = replacing(ToggleBackpack)
-ToggleAllBags  = replacing(ToggleAllBags)
+-- ToggleAllBags is a later client's function and 3.3.5 has none, so this
+-- defines it rather than wrapping one. Read raw: a plain read goes through the
+-- client's fallback for unknown names, which hands back a stand-in and logs
+-- the name as an API the interface asked for and could not find.
+ToggleAllBags  = replacing(rawget(_G, "ToggleAllBags"))
 ToggleBag      = replacingBagCall(ToggleBag)
 OpenBackpack   = replacingWith(OpenBackpack, openOurs)
 OpenAllBags    = replacingWith(OpenAllBags, openOurs)

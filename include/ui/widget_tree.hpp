@@ -199,6 +199,15 @@ struct Widget {
     /// a paperdoll by keeping its own running total and calling SetRotation
     /// with it, so this is absolute rather than a delta.
     float modelFacing = 0.0f;
+    /// Model:ReplaceIconTexture - the texture put on the model's item-icon
+    /// slot. The bag buttons' ItemAnim model (ForcedBackpackItem.m2) is the
+    /// one user: ITEM_PUSH hands it the looted item's icon.
+    std::string modelIconTexture;
+    /// Model:SetSequence / SetSequenceTime - which animation the model is
+    /// playing and the app time (core::appTimeSeconds) its frame zero fell
+    /// on. -1 is "none asked for".
+    int modelSequence = -1;
+    double modelSequenceStart = 0.0;
     /// A label whose size came from measuring its own text, and the text that
     /// was measured. Without the second, a label sized once keeps that size
     /// forever - the character sheet's level line stayed the width of the
@@ -479,6 +488,9 @@ struct Widget {
     /// displayDuration="5" and every error was staying on screen for good.
     float messageDuration = 0.0f;
     float messageFadeDuration = 3.0f;
+    /// ScrollingMessageFrame:SetFading. Off, lines stay lit whatever the
+    /// duration says - the stock switch that sits beside SetTimeVisible.
+    bool  messageFading = true;
     /// Whether a new message goes above the ones already there. UIErrorsFrame
     /// asks for insertMode="TOP"; a chat frame does not.
     bool  messagesInsertTop = false;
@@ -639,6 +651,22 @@ struct Widget {
     /// frame loop picks it up and clears the flag.
     bool pingRequested = false;
     float pingX = 0.0f, pingY = 0.0f;
+    /// Minimap:SetPlayerTextureWidth / SetPlayerTextureHeight - the player
+    /// arrow's size in interface units. Zero is "not set", which the map
+    /// draws at the 40x40 MinimapPing_OnLoad asks for.
+    float minimapPlayerTexW = 0.0f, minimapPlayerTexH = 0.0f;
+
+    /// A QuestPOIFrame ("Blob") - WorldMapBlobFrame - and how it shades the
+    /// quest areas: SetFillTexture / SetBorderTexture name the art,
+    /// SetFillAlpha / SetBorderAlpha take 0-255, SetBorderScalar scales the
+    /// width of the edge. The alphas start at what WorldMapBlobFrame_OnLoad
+    /// sets; an empty texture draws nothing for that part, as in the real
+    /// client before OnLoad has named one.
+    std::string blobFillTexture;
+    std::string blobBorderTexture;
+    float blobFillAlpha = 128.0f;
+    float blobBorderAlpha = 192.0f;
+    float blobBorderScalar = 1.0f;
 
     // Filled in by layout(). Screen rect in WoW coordinates: origin bottom-left.
     float left = 0.0f, bottom = 0.0f, rectW = 0.0f, rectH = 0.0f;
@@ -1306,6 +1334,40 @@ private:
 /// the input mapping a cursor back onto it.
 void hsvToRgb(const float hsv[3], float rgb[3]);
 void rgbToHsv(const float rgb[3], float hsv[3]);
+
+/// ScrollingMessageFrame:UpdateColorByID(id, r, g, b) - recolour every line
+/// that was added with that id (AddMessage's fifth argument, which chat passes
+/// as ChatTypeInfo[type].id). Answers how many lines changed. The line's
+/// alpha is its fade and is left alone.
+int recolorMessagesById(Widget& w, double id, float r, float g, float b);
+
+/// Where the bag buttons' item animation - ForcedBackpackItem.m2 in
+/// Interface/ItemAnimations, sequence 0 - has its icon quad at a given time.
+///
+/// The model is one bone and one quad, and its tracks are reproduced here
+/// rather than rendered: the quad spans x 0.003-0.0318, y 0.0395-0.0683 in
+/// model units, scales about (0.01758, 0.05396) through 1.0, 1.2 at 133 ms,
+/// 1.0 at 267 ms and 0.0144 at 1000 ms, translates by (0.0104, -0.0402)
+/// between 500 ms and 1000 ms, and its texture weight goes 0, 1 at 133 ms,
+/// 1 at 267 ms, 0 at 1000 ms - all linear. The sequence is 1000 ms long.
+///
+/// Coordinates are model units from the model frame's bottom-left, y up; one
+/// unit is the height of the 768-unit interface.
+struct ItemPushPose {
+    float x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f;
+    float alpha = 0.0f;
+    bool finished = false;
+};
+inline constexpr double kItemPushAnimSeconds = 1.0;
+ItemPushPose itemPushAnimPose(double elapsedSeconds);
+
+/// A model frame that has been given an icon and a sequence - the bag
+/// buttons' item animation - and so has something for the renderer to draw
+/// while it is shown. ItemAnim_OnAnimFinished hides it again.
+inline bool playsItemPushModel(const Widget& w) {
+    return w.kind == WidgetKind::Frame && !w.modelIconTexture.empty() &&
+           w.modelSequence >= 0;
+}
 
 } // namespace ui
 } // namespace wowee

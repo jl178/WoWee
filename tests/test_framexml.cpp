@@ -1352,3 +1352,17 @@ TEST_CASE("every other handler keeps its named arguments", "[framexml][emit]") {
     REQUIRE(has(r.lua, ":SetScript(\"OnUpdate\", function(self, elapsed, ...)"));
     REQUIRE_FALSE(has(r.lua, "local arg1"));
 }
+
+TEST_CASE("a message frame's fade attribute becomes SetFading", "[framexml][emit]") {
+    // fade="false" in XML is SetFading(false) in code: lines stay lit
+    // whatever displayDuration says. Not emitted for a frame that does not
+    // say, which keeps the default of fading.
+    XmlNode root = parseOrFail(
+        "<Ui><ScrollingMessageFrame name=\"Held\" fade=\"false\" displayDuration=\"10\"/>"
+        "<ScrollingMessageFrame name=\"Plain\"/></Ui>");
+    const std::string lua = emitFrameXml(root).lua;
+    INFO(lua);
+    CHECK(has(lua, ":SetFading(false)"));
+    CHECK(has(lua, ":SetTimeVisible(10)"));
+    CHECK_FALSE(has(lua, ":SetFading(true)"));
+}

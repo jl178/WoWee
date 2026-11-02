@@ -1473,8 +1473,12 @@ void WidgetTree::collectDrawOrder() {
             !(w.isTooltip && !w.tooltipLines.empty()) &&
             // The world map's quest areas, which the frame paints itself
             // (WidgetRenderer::drawQuestBlobs) the way CGQuestPOIFrame does.
-            w.name != "WorldMapBlobFrame") return;
-        if (w.rectW <= 0.0f || w.rectH <= 0.0f) return;
+            w.name != "WorldMapBlobFrame" &&
+            !playsItemPushModel(w)) return;
+        // The item animation's model frame has no size of its own - its XML
+        // gives one anchor and no <Size> - and the quad is placed from the
+        // frame's corner in model units, so a zero rect is what it always has.
+        if ((w.rectW <= 0.0f || w.rectH <= 0.0f) && !playsItemPushModel(w)) return;
         // A texture with nothing to show is dropped - unless it is the colour
         // picker's, whose art is generated rather than loaded.
         //
@@ -1603,6 +1607,63 @@ void rgbToHsv(const float rgb[3], float hsv[3]) {
     else              h = 4.0f + (r - g) / span;
     h /= 6.0f;
     hsv[0] = h - std::floor(h);
+}
+
+int recolorMessagesById(Widget& w, double id, float r, float g, float b) {
+    int changed = 0;
+    for (auto& m : w.messages) {
+        if (m.lineId != id) continue;
+        m.color[0] = r;
+        m.color[1] = g;
+        m.color[2] = b;
+        ++changed;
+    }
+    return changed;
+}
+
+namespace {
+struct Key { float t; float v; };
+/// A linear track sampled at t seconds, held at its ends.
+template <size_t N>
+float sampleLinear(const Key (&keys)[N], float t) {
+    if (t <= keys[0].t) return keys[0].v;
+    for (size_t i = 1; i < N; ++i) {
+        if (t <= keys[i].t) {
+            const float span = keys[i].t - keys[i - 1].t;
+            const float f = span > 0.0f ? (t - keys[i - 1].t) / span : 1.0f;
+            return keys[i - 1].v + (keys[i].v - keys[i - 1].v) * f;
+        }
+    }
+    return keys[N - 1].v;
+}
+} // namespace
+
+ItemPushPose itemPushAnimPose(double elapsedSeconds) {
+    // The tracks of ForcedBackpackItem.m2 - see the header for where each
+    // number comes from.
+    static constexpr Key kScale[] = {
+        {0.000f, 1.0f}, {0.133f, 1.2f}, {0.267f, 1.0f}, {1.000f, 0.0144155f}};
+    static constexpr Key kAlpha[] = {
+        {0.000f, 0.0f}, {0.133f, 1.0f}, {0.267f, 1.0f}, {1.000f, 0.0f}};
+    static constexpr Key kMoveX[] = {{0.0f, 0.0f}, {0.5f, 0.0f}, {1.0f, 0.0103946f}};
+    static constexpr Key kMoveY[] = {{0.0f, 0.0f}, {0.5f, 0.0f}, {1.0f, -0.0401674f}};
+    constexpr float kQuadX0 = 0.0030f, kQuadX1 = 0.0318f;
+    constexpr float kQuadY0 = 0.0395f, kQuadY1 = 0.0683f;
+    constexpr float kPivotX = 0.0175809f, kPivotY = 0.0539585f;
+
+    ItemPushPose pose;
+    const double clamped = std::clamp(elapsedSeconds, 0.0, kItemPushAnimSeconds);
+    const float t = static_cast<float>(clamped);
+    const float s = sampleLinear(kScale, t);
+    const float dx = sampleLinear(kMoveX, t);
+    const float dy = sampleLinear(kMoveY, t);
+    pose.x0 = kPivotX + (kQuadX0 - kPivotX) * s + dx;
+    pose.x1 = kPivotX + (kQuadX1 - kPivotX) * s + dx;
+    pose.y0 = kPivotY + (kQuadY0 - kPivotY) * s + dy;
+    pose.y1 = kPivotY + (kQuadY1 - kPivotY) * s + dy;
+    pose.alpha = std::clamp(sampleLinear(kAlpha, t), 0.0f, 1.0f);
+    pose.finished = elapsedSeconds >= kItemPushAnimSeconds;
+    return pose;
 }
 
 } // namespace ui

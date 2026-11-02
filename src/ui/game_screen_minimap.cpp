@@ -119,7 +119,8 @@ namespace {
 
     constexpr float kStockMinimapSize = 140.0f;  // Minimap.xml: <AbsDimension x="140" y="140"/>
     constexpr float kBlipSize = 16.0f;           // one ObjectIcons / PartyRaidBlips cell
-    constexpr float kPlayerArrowSize = 40.0f;    // Minimap.lua: SetPlayerTextureWidth/Height(40)
+    // The player arrow's size comes from the map (Minimap:SetPlayerTexture-
+    // Width/Height, 40 in Minimap.lua) - see rendering::Minimap.
     constexpr float kEdgeArrowSize = 32.0f;      // the rotating rim arrows
     constexpr float kPoiIconSize = 16.0f;        // WorldMap_GetPOITextureCoords' worldMapIconDimension
 
@@ -187,18 +188,24 @@ namespace {
 
     /// A whole texture whose art points up, turned so up lands on (dirX, dirY)
     /// in screen space (a unit vector, +y down).
-    void drawRotated(ImDrawList* dl, VkDescriptorSet tex, float cx, float cy, float size,
-                     float dirX, float dirY) {
+    void drawRotated(ImDrawList* dl, VkDescriptorSet tex, float cx, float cy,
+                     float width, float height, float dirX, float dirY) {
         if (!tex) return;
         const float c = -dirY;
         const float s = dirX;
-        const float h = size * 0.5f;
+        const float hw = width * 0.5f;
+        const float hh = height * 0.5f;
         auto corner = [&](float lx, float ly) {
             return ImVec2(cx + lx * c - ly * s, cy + lx * s + ly * c);
         };
-        dl->AddImageQuad(texId(tex), corner(-h, -h), corner(h, -h), corner(h, h), corner(-h, h),
+        dl->AddImageQuad(texId(tex), corner(-hw, -hh), corner(hw, -hh), corner(hw, hh),
+                         corner(-hw, hh),
                          ImVec2(0.0f, 0.0f), ImVec2(1.0f, 0.0f), ImVec2(1.0f, 1.0f),
                          ImVec2(0.0f, 1.0f));
+    }
+    void drawRotated(ImDrawList* dl, VkDescriptorSet tex, float cx, float cy, float size,
+                     float dirX, float dirY) {
+        drawRotated(dl, tex, cx, cy, size, size, dirX, dirY);
     }
 
     /// Where a direction from the centre meets the rim - the circle, or the
@@ -1528,12 +1535,15 @@ void GameScreen::renderMinimapPlayerArrow(const MinimapFrame& frame) {
         float nx =  std::sin(arrowAngle); // screen +X = east
         float ny = -std::cos(arrowAngle); // screen -Y = north
 
-        // The stock arrow, Interface\Minimap\MinimapArrow, at the 40x40 that
-        // Minimap.lua sets with SetPlayerTextureWidth/Height.
+        // The stock arrow, Interface\Minimap\MinimapArrow, at the size
+        // Minimap.lua sets with SetPlayerTextureWidth/Height (40x40), which
+        // the frame loop passes to the map.
         if (VkDescriptorSet arrow = minimapArt(kPlayerArrowPath, services_.assetManager,
                                                services_.window)) {
+            const float artScale = minimapArtScale(frame.mapRadius);
             drawRotated(frame.drawList, arrow, frame.centerX, frame.centerY,
-                        kPlayerArrowSize * minimapArtScale(frame.mapRadius), nx, ny);
+                        minimap->playerArrowWidth() * artScale,
+                        minimap->playerArrowHeight() * artScale, nx, ny);
             return;
         }
 

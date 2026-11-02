@@ -3265,3 +3265,93 @@ TEST_CASE("The draw order from the visible mirror matches a scan of every widget
     CHECK_FALSE(tree.get(tip)->visible);
     CHECK(checkBothWays() == 3 * 4);
 }
+
+// ── Widget methods that used to answer with a no-op ────────────────────────
+
+TEST_CASE("UpdateColorByID recolours the lines added under that id",
+          "[widget][message]") {
+    Widget w;
+    auto add = [&](double id, float r) {
+        Widget::Message m;
+        m.text = "line";
+        m.color[0] = r; m.color[1] = r; m.color[2] = r; m.color[3] = 0.5f;
+        m.lineId = id;
+        w.messages.push_back(m);
+    };
+    add(7.0, 1.0f);   // a whisper, say
+    add(3.0, 1.0f);   // something else
+    add(7.0, 1.0f);
+
+    REQUIRE(recolorMessagesById(w, 7.0, 1.0f, 0.5f, 1.0f) == 2);
+    CHECK(w.messages[0].color[1] == Catch::Approx(0.5f));
+    CHECK(w.messages[2].color[1] == Catch::Approx(0.5f));
+    // Another id's line is left alone, and so is every line's fade.
+    CHECK(w.messages[1].color[1] == Catch::Approx(1.0f));
+    CHECK(w.messages[0].color[3] == Catch::Approx(0.5f));
+    REQUIRE(recolorMessagesById(w, 99.0, 0.0f, 0.0f, 0.0f) == 0);
+}
+
+TEST_CASE("The item push animation follows ForcedBackpackItem.m2's tracks",
+          "[widget][model]") {
+    // Frame zero: full size, not yet faded in.
+    const ItemPushPose start = itemPushAnimPose(0.0);
+    CHECK(start.x0 == Catch::Approx(0.0030f));
+    CHECK(start.x1 == Catch::Approx(0.0318f));
+    CHECK(start.y0 == Catch::Approx(0.0395f));
+    CHECK(start.y1 == Catch::Approx(0.0683f));
+    CHECK(start.alpha == Catch::Approx(0.0f));
+    CHECK_FALSE(start.finished);
+
+    // 133 ms: fully in, and at its 1.2 peak about the pivot.
+    const ItemPushPose peak = itemPushAnimPose(0.133);
+    CHECK(peak.alpha == Catch::Approx(1.0f));
+    CHECK((peak.x1 - peak.x0) == Catch::Approx(0.0288f * 1.2f).epsilon(1e-3));
+
+    // Still where it started until half way, then moving right and down.
+    const ItemPushPose half = itemPushAnimPose(0.5);
+    const float halfCentreX = (half.x0 + half.x1) * 0.5f;
+    const ItemPushPose late = itemPushAnimPose(0.9);
+    CHECK((late.x0 + late.x1) * 0.5f > halfCentreX);
+    CHECK((late.y0 + late.y1) * 0.5f < (half.y0 + half.y1) * 0.5f);
+    CHECK(late.alpha < half.alpha);
+
+    // The sequence is a second long, and it ends shrunk away and clear.
+    const ItemPushPose end = itemPushAnimPose(kItemPushAnimSeconds);
+    CHECK(end.finished);
+    CHECK(end.alpha == Catch::Approx(0.0f));
+    CHECK((end.x1 - end.x0) < 0.001f);
+    CHECK(itemPushAnimPose(5.0).finished);
+}
+
+TEST_CASE("A model frame playing the item animation is drawn with no size of its own",
+          "[widget][draworder][model]") {
+    WidgetTree tree;
+    const uint32_t button = tree.create(WidgetKind::Frame, 0, "BagSlot");
+    tree.get(button)->width = 30.0f;
+    tree.get(button)->height = 30.0f;
+    tree.addPoint(button, Anchor{});
+
+    // ItemAnimTemplate: one anchor, no <Size>.
+    const uint32_t anim = tree.create(WidgetKind::Frame, button, "BagSlotItemAnim");
+    Anchor a;
+    a.point = "BOTTOMRIGHT";
+    a.relativePoint = "BOTTOMRIGHT";
+    a.x = -10.0f;
+    tree.addPoint(anim, a);
+
+    tree.layout(kScreenW, kScreenH);
+    CHECK(tree.drawOrder().empty());
+
+    // ITEM_PUSH: ReplaceIconTexture, SetSequence(0), SetSequenceTime(0, 0).
+    tree.get(anim)->modelIconTexture = "Interface\\Icons\\INV_Misc_Bag_08";
+    tree.get(anim)->modelSequence = 0;
+    REQUIRE(playsItemPushModel(*tree.get(anim)));
+    tree.layout(kScreenW, kScreenH);
+    REQUIRE(tree.drawOrder().size() == 1);
+    CHECK(tree.drawOrder()[0]->id == anim);
+
+    // ItemAnim_OnAnimFinished hides it again.
+    tree.get(anim)->shown = false;
+    tree.layout(kScreenW, kScreenH);
+    CHECK(tree.drawOrder().empty());
+}

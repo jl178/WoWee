@@ -720,7 +720,81 @@ bool AddonManager::loadFrameXml(const std::string& frameXmlDir) {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::steady_clock::now() - from).count();
     };
-    for (const auto& filename : toc->files) {
+
+    // What each manifest entry will define, read before any of it runs.
+    //
+    // The frames an XML file names (and the XML files it includes) read as nil
+    // until that file has loaded, as in the real client, instead of as the
+    // fallback's truthy stand-in: FrameXML reads a good many of them early and
+    // guards each read - UIParent_ManageFramePositions runs while the action
+    // bars load and tests DurabilityFrame, VehicleMenuBar, PossessBarFrame and
+    // VehicleSeatIndicator, which come from files much further down. With the
+    // stand-in those guards passed and the code behind them went on to
+    // DurabilityShield:IsShown() and the rest. Withdrawn file by file as the
+    // load goes, so a frame whose file failed to make it falls back to the
+    // stand-in afterwards rather than staying nil.
+    //
+    // And the variables a Lua file declares as `X = nil` read as nil for good,
+    // which is what that line says they are (collectLuaNilDeclarations).
+    std::vector<std::vector<std::string>> pendingByFile(toc->files.size());
+    std::vector<std::string> pendingAll;
+    std::vector<std::string> nilDeclared;
+    for (size_t fi = 0; fi < toc->files.size(); ++fi) {
+        std::vector<std::string> queue{toc->files[fi]};
+        std::set<std::string> visited;
+        for (size_t qi = 0; qi < queue.size(); ++qi) {
+            const std::string rel = queue[qi];
+            if (!visited.insert(rel).second) continue;
+            const std::filesystem::path file = resolvePath(dir, rel);
+            if (file.empty()) continue;
+            std::ifstream in(file, std::ios::binary);
+            if (!in) continue;
+            const std::string text((std::istreambuf_iterator<char>(in)),
+                                   std::istreambuf_iterator<char>());
+            std::string ext = file.extension().string();
+            for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (ext == ".lua") {
+                collectLuaNilDeclarations(text, nilDeclared);
+                continue;
+            }
+            collectXmlNames(text, pendingByFile[fi]);
+            // Scripts and includes the file pulls in, which run as part of it.
+            for (const char* tag : {"<Script", "<Include"}) {
+                for (size_t at = text.find(tag); at != std::string::npos;
+                     at = text.find(tag, at + 1)) {
+                    const size_t close = text.find('>', at);
+                    const size_t fileAt = text.find("file=\"", at);
+                    if (fileAt == std::string::npos || (close != std::string::npos && fileAt > close))
+                        continue;
+                    const size_t start = fileAt + 6;
+                    const size_t end = text.find('"', start);
+                    if (end == std::string::npos) break;
+                    std::string inc = text.substr(start, end - start);
+                    std::replace(inc.begin(), inc.end(), '\\', '/');
+                    if (!inc.empty()) queue.push_back(inc);
+                }
+            }
+        }
+        pendingAll.insert(pendingAll.end(), pendingByFile[fi].begin(), pendingByFile[fi].end());
+    }
+    luaEngine_.declareDeferredGlobals(nilDeclared);
+    luaEngine_.setFrameXmlPending(pendingAll, true);
+    // Emptied whichever way this returns, so nothing stays nil past the load.
+    struct PendingReset {
+        LuaEngine& e;
+        const std::vector<std::string>& names;
+        ~PendingReset() { e.setFrameXmlPending(names, false); }
+    } pendingReset{luaEngine_, pendingAll};
+
+    for (size_t fileIndex = 0; fileIndex < toc->files.size(); ++fileIndex) {
+        const std::string& filename = toc->files[fileIndex];
+        // This entry's frames stop reading as pending once it has been
+        // through, loaded or not.
+        struct FileDone {
+            LuaEngine& e;
+            const std::vector<std::string>& names;
+            ~FileDone() { e.setFrameXmlPending(names, false); }
+        } fileDone{luaEngine_, pendingByFile[fileIndex]};
         const auto fileStart = std::chrono::steady_clock::now();
         // Named before it is loaded, not after. Timing it afterwards says
         // nothing about the one case that matters - a file that never returns
