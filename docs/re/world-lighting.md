@@ -559,7 +559,7 @@ Character/M2 territory - not changed here.
 | F_UNFOGGED | no fog | fogged | stock |
 | alpha | Diffuse: vA*tA, others vA | tA | stock |
 | lamp glass / clock fire / lava scroll | none | always | off unless WOWEE_WMO_EXTRAS=1 |
-| Env/EnvMetal sphere map | yes | no | **gap** (needs a second texture binding) |
+| Env/EnvMetal env map | yes | no | stock (wmo-rendering.md §2) |
 | shadow-map darkening | whole colour x(0.7+0.3 lit) | diffuse term only | outdoor pass x shadow (shadowParams.y = 0.3 -> 0.7..1) |
 | N.L | per vertex | per pixel (normal maps optional) | unchanged (setting) |
 | fog | view-depth, exponent | radial linear | stock_fog.glsli |
@@ -823,14 +823,14 @@ Ultra as well. The presets were left as they are; that is a taste call.
     recovered;
   - the per-vertex colour (attribute 4) is not resolved and is assumed white;
   - texture rotation (Float[1]) is not applied;
-  - WMO liquids use the MLIQ material index rather than the stock LiquidType
-    resolution (0x793d20).
+  - (done, see wmo-rendering.md §8) WMO liquids now take the stock
+    LiquidType (0x7d82e0, 0x793d20) and their per-vertex heights.
 - **WMO:**
-  - the Env/EnvMetal sphere map is missing;
+  - (done, see wmo-rendering.md §2) the Env/EnvMetal env map;
   - the portal planes are rebuilt from MOPV, because the loader drops MOPT's
     plane;
-  - which groups the shadow map darkens (0x8745d0) is not decoded;
-  - the alpha test is still on texture alpha.
+  - (done, see wmo-rendering.md §4) which draws the shadow map darkens (0x8745d0);
+  - (done, see wmo-rendering.md §3) the alpha test is the blend's reference against the program's alpha.
 - **Sky:**
   - the Blue Child is not drawn;
   - the sky models are drawn before the sun, moons and clouds instead of

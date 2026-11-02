@@ -6,6 +6,7 @@
 #include "rendering/shadow_params.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/stock_wmo_light.hpp"
+#include "rendering/stock_wmo_render.hpp"
 #include "rendering/rt_bvh.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/wmo_material_class.hpp"
@@ -199,43 +200,73 @@ bool WMORenderer::buildMainPassPipelines(VkDevice device,
         return false;
     }
 
-    // --- Build transparent pipeline (derivative of opaque) ---
-    transparentPipeline_ = PipelineBuilder()
-        .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
-                    fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
-        .setVertexInput({ vertexBinding }, vertexAttribs)
-        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE)
-        .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
-        .setColorBlendAttachment(PipelineBuilder::blendAlpha())
-        .setMultisample(vkCtx_->getMsaaSamples())
-        .setLayout(pipelineLayout_)
-        .setRenderPass(mainPass)
-        .setDynamicStates(viewportAndScissorDynamic())
-        .setFlags(VK_PIPELINE_CREATE_DERIVATIVE_BIT)
-        .setBasePipeline(opaquePipeline_)
-        .build(device, vkCtx_->getPipelineCache());
-
-    if (!transparentPipeline_) {
-        core::Logger::getInstance().warning("WMORenderer: transparent pipeline not available");
+    // --- The per-batch states: every EGxBlend, culled and two-sided ---
+    //
+    // The client sets the blend (render state 6) and the culling (0x11) per
+    // batch from MOMT: blend straight from blendMode, culling on unless
+    // F_UNCULLED. The factors are the GL device's (0xad8d90 / 0xad8dc0);
+    // AlphaKey is Opaque's state, its key the shader's alpha test. Depth is
+    // written throughout - nothing in the WMO draw loops turns it off.
+    blendPipelines_[0][0] = opaquePipeline_;
+    const auto vkFactor = [](stock_wmo::BlendFactor f) {
+        switch (f) {
+            case stock_wmo::BlendFactor::Zero: return VK_BLEND_FACTOR_ZERO;
+            case stock_wmo::BlendFactor::One: return VK_BLEND_FACTOR_ONE;
+            case stock_wmo::BlendFactor::SrcColor: return VK_BLEND_FACTOR_SRC_COLOR;
+            case stock_wmo::BlendFactor::SrcAlpha: return VK_BLEND_FACTOR_SRC_ALPHA;
+            case stock_wmo::BlendFactor::OneMinusSrcAlpha: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            case stock_wmo::BlendFactor::DstColor: return VK_BLEND_FACTOR_DST_COLOR;
+            case stock_wmo::BlendFactor::ConstantAlpha: return VK_BLEND_FACTOR_CONSTANT_ALPHA;
+            case stock_wmo::BlendFactor::OneMinusConstantAlpha: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
+        }
+        return VK_BLEND_FACTOR_ONE;
+    };
+    for (uint32_t blend = 0; blend < kBlendPipelineCount; ++blend) {
+        // AlphaKey draws with Opaque's pipelines; ConstantAlpha (unused by any
+        // WMO) with Alpha's, as there is no constant to give it.
+        if (blend == 1 || blend == 11) continue;
+        const stock_wmo::BlendFactors bf = stock_wmo::gxBlendFactors(blend);
+        VkPipelineColorBlendAttachmentState attachment = PipelineBuilder::blendDisabled();
+        if (bf.enabled) {
+            attachment.blendEnable = VK_TRUE;
+            attachment.srcColorBlendFactor = vkFactor(bf.src);
+            attachment.dstColorBlendFactor = vkFactor(bf.dst);
+            attachment.colorBlendOp = VK_BLEND_OP_ADD;
+            // The target's alpha as the alpha blend leaves it, kept by the rest.
+            attachment.srcAlphaBlendFactor = blend == 2 ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ZERO;
+            attachment.dstAlphaBlendFactor = blend == 2 ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
+                                                        : VK_BLEND_FACTOR_ONE;
+            attachment.alphaBlendOp = VK_BLEND_OP_ADD;
+        }
+        for (int cull = 0; cull < 2; ++cull) {
+            if (blend == 0 && cull == 0) continue;  // the base, built above
+            blendPipelines_[blend][cull] = PipelineBuilder()
+                .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
+                            fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+                .setVertexInput({ vertexBinding }, vertexAttribs)
+                .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+                .setRasterization(VK_POLYGON_MODE_FILL,
+                                  cull ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE,
+                                  VK_FRONT_FACE_COUNTER_CLOCKWISE)
+                .setDepthTest(true, true, VK_COMPARE_OP_LESS_OR_EQUAL)
+                .setColorBlendAttachment(attachment)
+                .setMultisample(vkCtx_->getMsaaSamples())
+                .setLayout(pipelineLayout_)
+                .setRenderPass(mainPass)
+                .setDynamicStates(viewportAndScissorDynamic())
+                .setFlags(VK_PIPELINE_CREATE_DERIVATIVE_BIT)
+                .setBasePipeline(opaquePipeline_)
+                .build(device, vkCtx_->getPipelineCache());
+            if (!blendPipelines_[blend][cull]) {
+                core::Logger::getInstance().warning("WMORenderer: blend ", blend,
+                                                    " cull ", cull, " pipeline not available");
+            }
+        }
     }
-
-    // --- Build glass pipeline (derivative - alpha blend WITH depth write for windows) ---
-    glassPipeline_ = PipelineBuilder()
-        .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
-                    fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
-        .setVertexInput({ vertexBinding }, vertexAttribs)
-        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE)
-        .setDepthTest(true, true, VK_COMPARE_OP_LESS_OR_EQUAL)
-        .setColorBlendAttachment(PipelineBuilder::blendAlpha())
-        .setMultisample(vkCtx_->getMsaaSamples())
-        .setLayout(pipelineLayout_)
-        .setRenderPass(mainPass)
-        .setDynamicStates(viewportAndScissorDynamic())
-        .setFlags(VK_PIPELINE_CREATE_DERIVATIVE_BIT)
-        .setBasePipeline(opaquePipeline_)
-        .build(device, vkCtx_->getPipelineCache());
+    for (int cull = 0; cull < 2; ++cull) {
+        blendPipelines_[1][cull] = blendPipelines_[0][cull];
+        blendPipelines_[11][cull] = blendPipelines_[2][cull];
+    }
 
     // --- Build wireframe pipeline (derivative of opaque) ---
     wireframePipeline_ = PipelineBuilder()
@@ -259,6 +290,43 @@ bool WMORenderer::buildMainPassPipelines(VkDevice device,
     }
 
     return opaquePipeline_ != VK_NULL_HANDLE;
+}
+
+void WMORenderer::destroyMainPassPipelines(VkDevice device) {
+    for (uint32_t blend = 0; blend < kBlendPipelineCount; ++blend) {
+        for (int cull = 0; cull < 2; ++cull) {
+            // 1 and 11 share 0's and 2's, and [0][0] is the base below.
+            if (blend != 1 && blend != 11 && !(blend == 0 && cull == 0)) {
+                destroy(device, blendPipelines_[blend][cull]);
+            }
+            blendPipelines_[blend][cull] = VK_NULL_HANDLE;
+        }
+    }
+    destroy(device, opaquePipeline_);
+    destroy(device, wireframePipeline_);
+}
+
+VkSampler WMORenderer::wrapSampler(bool clampS, bool clampT) {
+    const int slot = (clampS ? 1 : 0) + (clampT ? 2 : 0);
+    if (slot == 0 || !vkCtx_) return VK_NULL_HANDLE;
+    if (!wrapSamplers_[slot]) {
+        // The same filtering as the textures' own sampler (createSampler in
+        // loadTexture), with the clamped axes changed. The context owns it.
+        VkSamplerCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        info.minFilter = VK_FILTER_LINEAR;
+        info.magFilter = VK_FILTER_LINEAR;
+        info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        info.addressModeU = clampS ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE : VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        info.addressModeV = clampT ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE : VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        info.maxAnisotropy = 1.0f;
+        info.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+        info.minLod = 0.0f;
+        info.maxLod = VK_LOD_CLAMP_NONE;
+        wrapSamplers_[slot] = vkCtx_->getOrCreateSampler(info);
+    }
+    return wrapSamplers_[slot];
 }
 
 bool WMORenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout,
@@ -295,7 +363,8 @@ bool WMORenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
     // binding 0: sampler2D (diffuse texture)
     // binding 1: uniform buffer (WMOMaterial)
     // binding 2: sampler2D (normal+height map)
-    std::vector<VkDescriptorSetLayoutBinding> materialBindings(3);
+    // binding 3: sampler2D (MOMT texture2: env map / composite layer 2)
+    std::vector<VkDescriptorSetLayoutBinding> materialBindings(4);
     materialBindings[0] = {};
     materialBindings[0].binding = 0;
     materialBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -311,6 +380,8 @@ bool WMORenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
     materialBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     materialBindings[2].descriptorCount = 1;
     materialBindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    materialBindings[3] = materialBindings[2];
+    materialBindings[3].binding = 3;
 
     materialSetLayout_ = createDescriptorSetLayout(device, materialBindings);
     if (!materialSetLayout_) {
@@ -320,7 +391,7 @@ bool WMORenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
 
     // --- Create descriptor pool ---
     VkDescriptorPoolSize poolSizes[] = {
-        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_MATERIAL_SETS * 2 },  // diffuse + normal/height
+        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_MATERIAL_SETS * 3 },  // diffuse + normal/height + texture2
         { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_MATERIAL_SETS },
     };
 
@@ -453,10 +524,7 @@ void WMORenderer::shutdown() {
     vkCtx_->flushDeferredCleanup();
 
     // Destroy pipelines
-    destroy(device, opaquePipeline_);
-    destroy(device, transparentPipeline_);
-    destroy(device, glassPipeline_);
-    destroy(device, wireframePipeline_);
+    destroyMainPassPipelines(device);
     destroy(device, pipelineLayout_);
     destroy(device, materialDescPool_);
     destroy(device, materialSetLayout_);
@@ -548,6 +616,19 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
     modelData.boundingBoxMax = model.boundingBoxMax;
     modelData.wmoAmbientColor = model.ambientColor;
     modelData.mohdFlags = model.mohdFlags;
+    // MOSB, from "Environments\..." on: three Icecrown roots name it with
+    // the artist's whole path (W:\PROJECTS\WOW\FINALDATA\...\DATA\).
+    {
+        std::string sky = model.skyboxName;
+        std::string lower = sky;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (const size_t at = lower.find("environments\\"); at != std::string::npos) sky = sky.substr(at);
+        // MOSB is a free string; only a model path is a skybox (Sunken
+        // Temple's names the dungeon and flags no group).
+        if (lower.find(".md") == std::string::npos && lower.find(".m2") == std::string::npos) sky.clear();
+        modelData.skyboxName = sky;
+    }
     modelData.wmoId = model.wmoId;
     if (!model.sourcePath.empty()) modelData.minimapTileRoot = wmo_minimap::tileRoot(model.sourcePath);
     std::string lowerSourcePath = model.sourcePath;
@@ -653,6 +734,14 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
         modelData.materialFlags.push_back(mat.flags);
         modelData.materialSidnColors.push_back(mat.color1);  // MOMT sidnColor, BGRA
         modelData.materialShaders.push_back(mat.shader);
+        // texture2 as the client binds it on stage 1 (MOMT +0x18, 0x7d7710):
+        // the env map or the second layer, or none.
+        {
+            const uint32_t idx2 = (mat.texture2 != 0) ? t2 : std::numeric_limits<uint32_t>::max();
+            modelData.materialTexture2Indices.push_back(
+                (idx2 < model.textures.size() && !model.textures[idx2].empty())
+                    ? idx2 : std::numeric_limits<uint32_t>::max());
+        }
 
     }
 
@@ -775,8 +864,17 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             int8_t lightModeA;
             int8_t lightModeB;
             uint8_t stockFlags;
+            // The rest of the per-batch state (0x7ac9f0): blend, culling,
+            // effect, wrap and the second texture.
+            uint8_t gxBlend;
+            bool cullBack;
+            uint8_t effect;
+            uint8_t wrap;
+            uintptr_t tex2Ptr;
             bool operator==(const BatchKey& o) const {
-                return texPtr == o.texPtr && alphaTest == o.alphaTest &&
+                return gxBlend == o.gxBlend && cullBack == o.cullBack && effect == o.effect &&
+                       wrap == o.wrap && tex2Ptr == o.tex2Ptr &&
+                       texPtr == o.texPtr && alphaTest == o.alphaTest &&
                        unlit == o.unlit && isTransparent == o.isTransparent &&
                        sidnColor == o.sidnColor &&
                        emissiveLevel == o.emissiveLevel && lightModeA == o.lightModeA &&
@@ -791,10 +889,17 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                        (std::hash<bool>()(k.isTransparent) << 3) ^
                        (std::hash<uint32_t>()(k.sidnColor) << 5) ^
                        (std::hash<uint8_t>()(k.emissiveLevel) << 4) ^
-                       (std::hash<int>()(k.lightModeA * 7 + k.lightModeB * 31 + k.stockFlags * 131) << 6);
+                       (std::hash<int>()(k.lightModeA * 7 + k.lightModeB * 31 + k.stockFlags * 131) << 6) ^
+                       (std::hash<uintptr_t>()(k.tex2Ptr) << 7) ^
+                       std::hash<int>()(k.gxBlend * 1009 + k.effect * 9176 + k.wrap * 65537 +
+                                        (k.cullBack ? 3001 : 0));
             }
         };
         std::unordered_map<BatchKey, GroupResources::MergedBatch, BatchKeyHash> batchMap;
+        // The first MOBA batch each merged batch draws: the client draws a
+        // group's batches in file order, with depth written, so blended ones
+        // are drawn in that order too.
+        std::unordered_map<const GroupResources::MergedBatch*, size_t> firstSource;
 
         const bool unifiedRoot = (modelData.mohdFlags & 0x2u) != 0;
         const bool groupHasMocv = (groupRes.groupFlags & 0x4u) != 0;
@@ -915,7 +1020,6 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                 }
             }
 
-            const bool isTransparent = (blendMode >= 2);
 
             // The stock light for this batch (0x7ac6a0, 0x7ac9f0, 0x7a9380):
             // which of the four light modes of 0x7a8b10 it takes, and for a
@@ -949,23 +1053,78 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             if (batch.materialId < modelData.materialShaders.size()) {
                 matShader = modelData.materialShaders[batch.materialId];
             }
+            // The effect, as table 0xd1c3f0 / 0xd1c3d4 picks it. The Opaque
+            // substitution for alpha-less textures (0x4b54f0) changes only the
+            // alpha written, which an opaque batch does not use, so the
+            // texture is taken to have alpha.
+            const stock_wmo::Effect effect = stock_wmo::effectFor(matShader, blendMode, true, unifiedRoot);
             uint8_t stockFlags = 0;
             if (unifiedRoot) stockFlags |= kWmoMatUnified;
             if (matFlags & kMatUnfogged) stockFlags |= kWmoMatUnfogged;
-            if (matShader == 0 || matShader == 6) stockFlags |= kWmoMatTexAlpha;
+            if (stock_wmo::alphaFromTexture(effect)) stockFlags |= kWmoMatTexAlpha;
             if (kWmoExtras) stockFlags |= kWmoMatExtras;
+            // Which draws take the sun's shadow map (0x8745d0(0) binds the map,
+            // 0x8745d0(1) the white stand-in): the outdoor pass of a trans
+            // batch, and the batches of an exterior group on the no-MOCV and
+            // unified paths. The classic MOCV path's B and C batches do not.
+            const bool shadowed = isTrans || (groupExteriorLit && (unifiedRoot || !groupHasMocv));
+            if (shadowed) stockFlags |= kWmoMatShadowed;
+
+            // Blend and alpha test. A trans batch is drawn SrcAlphaOpaque then
+            // InvSrcAlphaAdd whatever its material says (0x7ac9f0, 0x7a9380):
+            // together an opaque draw, and with no alpha test, since neither
+            // of those blends has a reference. Everything else is drawn with
+            // the material's own blend and that blend's reference.
+            const uint8_t gxBlend = static_cast<uint8_t>(
+                lightModeB >= 0 ? 0u : std::min<uint32_t>(blendMode, kBlendPipelineCount - 1));
+            const float alphaRef = lightModeB >= 0 ? 0.0f : stock_wmo::gxAlphaRef(blendMode);
+            alphaTest = alphaRef > 0.0f;
+            const bool isBlended = stock_wmo::gxBlendFactors(gxBlend).enabled;
+            const bool cullBack = stock_wmo::cullsBackFaces(matFlags);
+            const stock_wmo::Wrap wrap = stock_wmo::textureWrap(matFlags);
+
+            // The second texture, for the two effects that read it.
+            VkTexture* tex2 = nullptr;
+            if ((effect == stock_wmo::Effect::Env || effect == stock_wmo::Effect::EnvMetal ||
+                 effect == stock_wmo::Effect::Composite) &&
+                batch.materialId < modelData.materialTexture2Indices.size()) {
+                const uint32_t ti2 = modelData.materialTexture2Indices[batch.materialId];
+                if (ti2 < modelData.textures.size() && modelData.textures[ti2] &&
+                    modelData.textures[ti2] != whiteTexture_.get()) {
+                    tex2 = modelData.textures[ti2];
+                }
+            }
+            // Without its texture the effect is the plain diffuse one.
+            const stock_wmo::Effect drawnEffect =
+                (tex2 == nullptr && effect != stock_wmo::Effect::Diffuse &&
+                 effect != stock_wmo::Effect::Specular && effect != stock_wmo::Effect::Metal &&
+                 effect != stock_wmo::Effect::Opaque)
+                    ? stock_wmo::Effect::Metal : effect;
 
             BatchKey key{ .texPtr = reinterpret_cast<uintptr_t>(tex), .alphaTest = alphaTest, .unlit = unlit,
-                          .isTransparent = isTransparent, .sidnColor = sidnColor,
+                          .isTransparent = isBlended, .sidnColor = sidnColor,
                           .emissiveLevel = emissiveLevel, .lightModeA = lightModeA,
-                          .lightModeB = lightModeB, .stockFlags = stockFlags };
+                          .lightModeB = lightModeB, .stockFlags = stockFlags,
+                          .gxBlend = gxBlend, .cullBack = cullBack,
+                          .effect = static_cast<uint8_t>(drawnEffect),
+                          .wrap = static_cast<uint8_t>((wrap.s ? 0 : 1) | (wrap.t ? 0 : 2)),
+                          .tex2Ptr = reinterpret_cast<uintptr_t>(tex2) };
             auto& mb = batchMap[key];
             if (mb.draws.empty()) {
                 mb.texture = tex;
                 mb.hasTexture = hasTexture;
                 mb.alphaTest = alphaTest;
                 mb.unlit = unlit;
-                mb.isTransparent = isTransparent;
+                mb.isTransparent = isBlended;
+                mb.gxBlend = gxBlend;
+                mb.cullBack = cullBack;
+                mb.pipelineSlot = static_cast<uint8_t>(gxBlend * 2 + (cullBack ? 1 : 0));
+                mb.effect = static_cast<uint8_t>(drawnEffect);
+                mb.clampS = !wrap.s;
+                mb.clampT = !wrap.t;
+                mb.alphaRef = alphaRef;
+                mb.texture2 = tex2;
+                firstSource[&mb] = batchIndex;
                 mb.sidnColor = sidnColor;
                 mb.isLava = isLava;
                 mb.emissiveLevel = emissiveLevel;
@@ -996,7 +1155,13 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
         // Allocate descriptor sets and UBOs for each merged batch
         groupRes.mergedBatches.reserve(batchMap.size());
         bool anyTextured = false;
-        for (auto& [key, mb] : batchMap) {
+        std::vector<GroupResources::MergedBatch*> inFileOrder;
+        inFileOrder.reserve(batchMap.size());
+        for (auto& [key, mb] : batchMap) inFileOrder.push_back(&mb);
+        std::sort(inFileOrder.begin(), inFileOrder.end(),
+                  [&](const auto* a, const auto* b) { return firstSource[a] < firstSource[b]; });
+        for (GroupResources::MergedBatch* mbp : inFileOrder) {
+            auto& mb = *mbp;
             if (mb.hasTexture) anyTextured = true;
 
             // Create material UBO
@@ -1010,7 +1175,8 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             // Write material params
             WMOMaterialUBO matData{};
             matData.hasTexture = mb.hasTexture ? 1 : 0;
-            matData.alphaTest = mb.alphaTest ? 1 : 0;
+            matData.alphaRef = mb.alphaRef;
+            matData.effect = mb.effect;
             matData.unlit = mb.unlit ? 1 : 0;
             matData.lightModeA = mb.lightModeA;
             matData.lightModeB = mb.lightModeB;
@@ -1053,13 +1219,17 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             };
             VkTexture* texToUse = pick(mb.texture, whiteTexture_.get());
             VkTexture* nhMap = pick(mb.normalHeightMap, flatNormalTexture_.get());
-            if ((!texToUse || !nhMap) && mb.materialSet) {
+            VkTexture* tex2ToUse = pick(mb.texture2, whiteTexture_.get());
+            if ((!texToUse || !nhMap || !tex2ToUse) && mb.materialSet) {
                 vkFreeDescriptorSets(vkCtx_->getDevice(), materialDescPool_, 1,
                                      &mb.materialSet);
                 mb.materialSet = VK_NULL_HANDLE;
             }
             if (mb.materialSet) {
                 VkDescriptorImageInfo imgInfo = texToUse->descriptorInfo();
+                // F_CLAMP_S / F_CLAMP_T: texture 0's wrap (0x681450).
+                if (VkSampler clamp = wrapSampler(mb.clampS, mb.clampT)) imgInfo.sampler = clamp;
+                VkDescriptorImageInfo tex2Info = tex2ToUse->descriptorInfo();
 
                 VkDescriptorBufferInfo bufInfo{};
                 bufInfo.buffer = mb.materialUBO;
@@ -1068,7 +1238,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
 
                 VkDescriptorImageInfo nhImgInfo = nhMap->descriptorInfo();
 
-                VkWriteDescriptorSet writes[3] = {};
+                VkWriteDescriptorSet writes[4] = {};
                 writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 writes[0].dstSet = mb.materialSet;
                 writes[0].dstBinding = 0;
@@ -1090,7 +1260,11 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                 writes[2].descriptorCount = 1;
                 writes[2].pImageInfo = &nhImgInfo;
 
-                vkUpdateDescriptorSets(vkCtx_->getDevice(), 3, writes, 0, nullptr);
+                writes[3] = writes[2];
+                writes[3].dstBinding = 3;
+                writes[3].pImageInfo = &tex2Info;
+
+                vkUpdateDescriptorSets(vkCtx_->getDevice(), 4, writes, 0, nullptr);
             }
 
             if (mb.isLava) {
@@ -2101,8 +2275,8 @@ void WMORenderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
                              0, 1, &perFrameSet, 0, nullptr);
 
-    // Track which pipeline is currently bound: 0=opaque, 1=transparent, 2=glass
-    int currentPipelineKind = 0;
+    // The bound pipeline: a blendPipelines_ slot, or -1 for the wireframe.
+    int currentPipelineKind = wireframeMode ? -1 : 0;
     // Counted here and added once: more than one slice may be recording.
     uint32_t drawCalls = 0;
 
@@ -2138,20 +2312,12 @@ void WMORenderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             for (const auto& mb : group.mergedBatches) {
                 if (!mb.materialSet) continue;
 
-                // Determine which pipeline this batch needs
-                // By the material's blend mode alone: opaque (0) and alpha
-                // key (1, discarded in the shader) here, blended (2+) in the
-                // transparent pipeline.
-                int neededPipeline = 0; // opaque
-                if (mb.isTransparent && transparentPipeline_) {
-                    neededPipeline = 1; // transparent (alpha blend, no depth write)
-                }
-
-                // Switch pipeline if needed (descriptor sets and push constants
-                // are preserved across compatible pipeline layout switches)
+                // The batch's blend and culling (render states 6 and 0x11).
+                const int neededPipeline = wireframeMode ? -1 : mb.pipelineSlot;
                 if (neededPipeline != currentPipelineKind) {
-                    VkPipeline targetPipeline = activePipeline;
-                    if (neededPipeline == 1) targetPipeline = transparentPipeline_;
+                    VkPipeline targetPipeline = neededPipeline < 0
+                        ? activePipeline
+                        : blendPipelines_[neededPipeline >> 1][neededPipeline & 1];
                     if (targetPipeline == VK_NULL_HANDLE) continue;
 
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, targetPipeline);
@@ -2486,6 +2652,7 @@ bool WMORenderer::createGroupResources(const pipeline::WMOGroup& group, GroupRes
         vd.texCoord = v.texCoord;
         vd.color = v.color;
         vd.tangent = glm::vec4(0.0f);
+        vd.layer2 = glm::vec4(v.texCoord2, v.color2Alpha, 0.0f);
         vertices.push_back(vd);
     }
     stockVertexColors(group, groupFlags, mohdFlags, model, vertices);
@@ -2747,6 +2914,20 @@ bool WMORenderer::isGroupVisible(const GroupResources& group, const glm::mat4& m
 
     // Test if AABB intersects view frustum
     return frustum.intersectsAABB(boundsMin, boundsMax);
+}
+
+std::string WMORenderer::skyboxAt(const glm::vec3& worldPos) const {
+    for (const auto& instance : instances) {
+        if (instance.hidden) continue;
+        if (glm::any(glm::lessThan(worldPos, instance.worldBoundsMin)) ||
+            glm::any(glm::greaterThan(worldPos, instance.worldBoundsMax))) continue;
+        auto it = loadedModels.find(instance.modelId);
+        if (it == loadedModels.end() || it->second.skyboxName.empty()) continue;
+        const glm::vec3 local(instance.invModelMatrix * glm::vec4(worldPos, 1.0f));
+        const int g = findContainingGroup(it->second, local);
+        if (g >= 0 && (it->second.groups[g].groupFlags & 0x40000u)) return it->second.skyboxName;
+    }
+    return {};
 }
 
 int WMORenderer::findContainingGroup(const ModelData& model, const glm::vec3& localPos) const {
@@ -4801,10 +4982,7 @@ void WMORenderer::recreatePipelines() {
     VkDevice device = vkCtx_->getDevice();
 
     // Destroy old main-pass pipelines (NOT shadow, NOT pipeline layout)
-    destroy(device, opaquePipeline_);
-    destroy(device, transparentPipeline_);
-    destroy(device, glassPipeline_);
-    destroy(device, wireframePipeline_);
+    destroyMainPassPipelines(device);
 
     // --- Load shaders ---
     VkShaderModule vertShader, fragShader;

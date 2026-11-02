@@ -1,4 +1,5 @@
 #include "pipeline/wmo_loader.hpp"
+#include "pipeline/stock_wmo_liquid.hpp"
 #include "core/logger.hpp"
 #include <cstring>
 #include <glm/gtc/quaternion.hpp>
@@ -234,6 +235,14 @@ WMOModel WMOLoader::load(const std::vector<uint8_t>& wmoData) {
                     model.groupInfo.push_back(info);
                 }
                 core::Logger::getInstance().debug("WMO group info: ", model.groupInfo.size());
+                break;
+            }
+
+            case 0x4D4F5342: {  // MOSB, the skybox model
+                const size_t end = std::min<size_t>(offset + chunkSize, wmoData.size());
+                size_t n = 0;
+                while (offset + n < end && wmoData[offset + n] != 0) ++n;
+                model.skyboxName.assign(reinterpret_cast<const char*>(wmoData.data() + offset), n);
                 break;
             }
 
@@ -489,6 +498,8 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
 
             // Parse sub-chunks within MOGP
             int groupLogCount = 0;
+            int motvSeen = 0;
+            int mocvSeen = 0;
             while (mogpOffset + 8 < chunkEnd) {
                 uint32_t subChunkId = read<uint32_t>(groupData, mogpOffset);
                 uint32_t subChunkSize = read<uint32_t>(groupData, mogpOffset);
@@ -562,31 +573,34 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
                     }
                 }
                 else if (subChunkId == MOTV) { // Texture coords
-                    // Update texture coords for existing vertices
+                    // A group with flag 0x2000000 carries a second MOTV after
+                    // its MOCV (0x7d7c30 reads it into +0xf4). It used to be
+                    // read over the first, so Icecrown's composite walls drew
+                    // their second layer's coordinates for both.
+                    const bool second = motvSeen++ > 0;
                     uint32_t texCoordCount = subChunkSize / 8;
-                    core::Logger::getInstance().debug("  MOTV: ", texCoordCount, " tex coords for ", group.vertices.size(), " vertices");
                     for (uint32_t i = 0; i < texCoordCount && i < group.vertices.size(); i++) {
-                        group.vertices[i].texCoord.x = read<float>(groupData, mogpOffset);
-                        group.vertices[i].texCoord.y = read<float>(groupData, mogpOffset);
-                    }
-                    if (texCoordCount > 0 && !group.vertices.empty()) {
-                        core::Logger::getInstance().debug("    First UV: (", group.vertices[0].texCoord.x, ", ", group.vertices[0].texCoord.y, ")");
+                        glm::vec2 uv;
+                        uv.x = read<float>(groupData, mogpOffset);
+                        uv.y = read<float>(groupData, mogpOffset);
+                        (second ? group.vertices[i].texCoord2 : group.vertices[i].texCoord) = uv;
                     }
                 }
                 else if (subChunkId == MOCV) { // Vertex colors
-                    // Update vertex colors
+                    // Likewise a second MOCV (flag 0x1000000, +0x10c): only its
+                    // alpha is read, by MapObjComposite as the layer blend.
+                    const bool second = mocvSeen++ > 0;
                     uint32_t colorCount = subChunkSize / 4;
-                    core::Logger::getInstance().debug("  MOCV: ", colorCount, " vertex colors for ", group.vertices.size(), " vertices");
                     for (uint32_t i = 0; i < colorCount && i < group.vertices.size(); i++) {
                         uint8_t b = read<uint8_t>(groupData, mogpOffset);
                         uint8_t g = read<uint8_t>(groupData, mogpOffset);
                         uint8_t r = read<uint8_t>(groupData, mogpOffset);
                         uint8_t a = read<uint8_t>(groupData, mogpOffset);
-                        group.vertices[i].color = glm::vec4(r/255.0f, g/255.0f, b/255.0f, a/255.0f);
-                    }
-                    if (colorCount > 0 && !group.vertices.empty()) {
-                        const auto& c = group.vertices[0].color;
-                        core::Logger::getInstance().debug("    First color: (", c.r, ", ", c.g, ", ", c.b, ", ", c.a, ")");
+                        if (second) {
+                            group.vertices[i].color2Alpha = a / 255.0f;
+                        } else {
+                            group.vertices[i].color = glm::vec4(r/255.0f, g/255.0f, b/255.0f, a/255.0f);
+                        }
                     }
                 }
                 else if (subChunkId == MOBA) { // Batches
@@ -673,9 +687,11 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
                             group.liquid.flags.resize(tileCount, 0);
                         }
 
-                        if (group.liquid.materialId == 0) {
-                            group.liquid.materialId = static_cast<uint16_t>(group.liquidType);
-                        }
+                        // The type, as the client resolves it when the group
+                        // loads: from the MOGP field, or from the tiles.
+                        group.liquid.groupFlags = group.flags;
+                        group.liquid.liquidTypeId = stock_wmo_liquid::groupLiquidType(
+                            group.liquidType, model.mohdFlags, group.flags, group.liquid.flags);
                     }
                 }
 

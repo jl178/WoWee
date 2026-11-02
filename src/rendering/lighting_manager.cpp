@@ -233,6 +233,13 @@ bool LightingManager::loadLightParamsDbc(pipeline::AssetManager* assetManager) {
     return true;
 }
 
+void LightingManager::setWmoSkybox(std::string path) {
+    if (path != wmoSkybox_) {
+        LOG_INFO("WMO skybox (MOSB): ", path.empty() ? std::string("none") : path);
+    }
+    wmoSkybox_ = std::move(path);
+}
+
 bool LightingManager::loadLightSkyboxDbc(pipeline::AssetManager* assetManager) {
     auto dbcData = assetManager->readFile("DBFilesClient\\LightSkybox.dbc");
     if (dbcData.empty()) {
@@ -678,6 +685,18 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         }
         std::sort(layers.begin(), layers.end(),
                   [](const SkyboxLayer& a, const SkyboxLayer& b) { return a.weight > b.weight; });
+        // A WMO skybox (MOSB) takes slot 0 and empties slot 1; the stars and
+        // any third model stay.
+        if (!wmoSkybox_.empty()) {
+            std::vector<SkyboxLayer> withWmo;
+            withWmo.push_back({.path = wmoSkybox_, .weight = 1.0f});
+            size_t models = 0;
+            for (auto& l : layers) {
+                if (l.stars) { withWmo.push_back(std::move(l)); continue; }
+                if (++models >= 3) withWmo.push_back(std::move(l));
+            }
+            layers = std::move(withWmo);
+        }
         skyboxLayers_ = std::move(layers);
     }
 }

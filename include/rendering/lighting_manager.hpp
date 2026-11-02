@@ -317,6 +317,10 @@ public:
      * Set whether player is indoors (disables outdoor lighting)
      */
     void setIndoors(bool indoors) { isIndoors_ = indoors; }
+    /// A WMO's MOSB sky model while the camera is in one of its 0x40000
+    /// groups, empty otherwise. The client puts it in sky slot 0 and empties
+    /// slot 1 (0x79a870 -> 0x7f31c0); the dome is drawn as usual.
+    void setWmoSkybox(std::string path);
     /// How far the distance fog is pulled toward the sky's horizon colour.
     /// 0 keeps LightParams' own fog colour, as stock does, and is the
     /// default; 1 is the sky itself. A Wowee option. See
@@ -483,6 +487,7 @@ private:
     /// When update last ran, for smoothing by real time rather than by frame.
     std::chrono::steady_clock::time_point lastUpdate_{};
     bool isIndoors_ = false;
+    std::string wmoSkybox_;
     bool playerDead_ = false;
     float fogSkyBlend_ = 0.0f;
     float fogStrength_ = 1.0f;

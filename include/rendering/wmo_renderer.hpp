@@ -537,7 +537,10 @@ private:
     // WMO material UBO - matches WMOMaterial in wmo.frag.glsl
     struct WMOMaterialUBO {
         int32_t hasTexture;        // 0
-        int32_t alphaTest;         // 4
+        /// The alpha reference of the batch's blend (0x873ee0): 224/255 for
+        /// AlphaKey, 1/255 for Alpha..ModAdd, 0 for no test. Tested against
+        /// the alpha the pixel program writes.
+        float alphaRef;            // 4
         int32_t unlit;             // 8
         /// The stock light mode (0x7a8b10) of the batch, or of its outdoor
         /// pass when it is a trans batch: 0 none, 1 the outdoor light, 2 the
@@ -563,11 +566,15 @@ private:
         /// kWmoMat* bits: unified (MapObjU) formula, F_UNFOGGED, which
         /// alpha the shader writes.
         int32_t stockFlags;         // 76
-    };  // 80 bytes total
+        /// stock_wmo::Effect: which pixel program (0x7afee0 tables).
+        int32_t effect;             // 80
+        int32_t pad0, pad1, pad2;   // 84..95
+    };  // 96 bytes total
     static constexpr int32_t kWmoMatUnified = 0x1;      ///< MOHD 0x2: MapObjU programs
     static constexpr int32_t kWmoMatUnfogged = 0x2;     ///< MOMT F_UNFOGGED (0x2)
     static constexpr int32_t kWmoMatTexAlpha = 0x4;     ///< MOMT shader 0/6: alpha = vertex a * texture a
     static constexpr int32_t kWmoMatExtras = 0x8;       ///< WOWEE_WMO_EXTRAS: lamp glass, clock fire, lava scroll
+    static constexpr int32_t kWmoMatShadowed = 0x10;    ///< the outdoor pass takes the shadow map (0x8745d0)
 
     /**
      * WMO group GPU resources
@@ -641,6 +648,8 @@ private:
             float clothCentreX = 0.0f;
             float clothCentreY = 0.0f;
             bool isTransparent = false;     // blendMode >= 2
+            /// blendPipelines_ slot: gxBlend * 2 + cullBack.
+            uint8_t pipelineSlot = 0;
             // End of what the draw loop reads.
             bool hasTexture = false;
             bool alphaTest = false;
@@ -654,6 +663,13 @@ private:
             int8_t lightModeA = 1;          // see WMOMaterialUBO::lightModeA
             int8_t lightModeB = -1;         // see WMOMaterialUBO::lightModeB
             uint8_t stockFlags = 0;         // WMOMaterialUBO::kWmoMat* bits
+            uint8_t gxBlend = 0;            // EGxBlend this batch is drawn with
+            bool cullBack = false;          // !F_UNCULLED
+            uint8_t effect = 0;             // stock_wmo::Effect
+            bool clampS = false;            // F_CLAMP_S
+            bool clampT = false;            // F_CLAMP_T
+            float alphaRef = 0.0f;          // see WMOMaterialUBO::alphaRef
+            VkTexture* texture2 = nullptr;  // MOMT texture2 (env / layer 2), NOT owned
             float heightMapVariance = 0.0f; // variance of height map (low = flat texture)
             VkTexture* texture = nullptr;   // from cache, NOT owned
             VkTexture* normalHeightMap = nullptr;  // generated from diffuse, NOT owned
@@ -663,6 +679,7 @@ private:
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Winvalid-offsetof"
         static_assert(offsetof(MergedBatch, isTransparent) < 64);
+        static_assert(offsetof(MergedBatch, pipelineSlot) < 64);
 #pragma GCC diagnostic pop
         std::vector<MergedBatch> mergedBatches;
         // The ranges of every merged batch, sorted and joined, for the shadow
@@ -783,8 +800,13 @@ private:
         std::vector<uint32_t> materialSidnColors;
         // MOMT shader per material (0 Diffuse .. 6 Composite)
         std::vector<uint32_t> materialShaders;
+        /// MOMT texture2, resolved to an index into textures: the env map of
+        /// MapObjEnv / EnvMetal, the second layer of MapObjUComposite.
+        std::vector<uint32_t> materialTexture2Indices;
         // MOHD flags (0x2 unified render path, 0x8 colours not fixed)
         uint16_t mohdFlags = 0;
+        /// MOSB, empty when the root names none.
+        std::string skyboxName;
 
         // Portal visibility data
         std::vector<PortalData> portals;
@@ -903,6 +925,12 @@ private:
      * @return Group index or -1 if outside all groups
      */
     int findContainingGroup(const ModelData& model, const glm::vec3& localPos) const;
+public:
+    /// The MOSB sky model to draw for a camera at `worldPos`: the root's name
+    /// when the camera stands in a group with MOGP flag 0x40000 (0x7ac060
+    /// sets 0xcd861c while the camera is inside), else empty.
+    std::string skyboxAt(const glm::vec3& worldPos) const;
+private:
 
     /**
      * Get visible groups via portal traversal
@@ -985,10 +1013,20 @@ private:
     std::string mapName_;
 
     // Vulkan pipelines
-    VkPipeline opaquePipeline_ = VK_NULL_HANDLE;
-    VkPipeline transparentPipeline_ = VK_NULL_HANDLE;
-    VkPipeline glassPipeline_ = VK_NULL_HANDLE;      // alpha blend + depth write (windows)
+    VkPipeline opaquePipeline_ = VK_NULL_HANDLE;  // blend 0, two-sided; base of the rest
+    /// One pipeline per EGxBlend and culling, [blend][1 = back faces culled],
+    /// as the client sets render states 6 and 0x11 per batch (0x7ac9f0).
+    /// AlphaKey shares Opaque's (the key is the shader's alpha test);
+    /// [0][0] is opaquePipeline_. Depth is written by all of them: the WMO
+    /// draw loops never turn it off.
+    static constexpr uint32_t kBlendPipelineCount = 12;
+    VkPipeline blendPipelines_[kBlendPipelineCount][2] = {};
     VkPipeline wireframePipeline_ = VK_NULL_HANDLE;
+    void destroyMainPassPipelines(VkDevice device);
+    /// The clamp samplers F_CLAMP_S / F_CLAMP_T (MOMT 0x40 / 0x80) ask for,
+    /// [clampS + 2 * clampT]; [0] is unused (the texture's own repeat).
+    VkSampler wrapSamplers_[4] = {};
+    VkSampler wrapSampler(bool clampS, bool clampT);
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
     // Shadow rendering (Phase 7)
