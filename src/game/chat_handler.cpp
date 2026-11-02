@@ -1,3 +1,4 @@
+#include "ui/world_ui_rules.hpp"
 #include "game/chat_handler.hpp"
 
 #include <set>
@@ -361,17 +362,20 @@ void ChatHandler::sendChatMessage(ChatType type, const std::string& message, con
 
 void ChatHandler::showChatBubble(uint64_t senderGuid, ChatType type, const std::string& message) {
     if (!owner_.chatBubbleCallbackRef() || senderGuid == 0 || message.empty()) return;
-    bool bubble = (type == ChatType::SAY || type == ChatType::YELL ||
-                   type == ChatType::MONSTER_SAY || type == ChatType::MONSTER_YELL ||
-                   type == ChatType::MONSTER_PARTY);
-    // Party Chat Bubbles, a separate box beside the one for say and yell. Off
-    // unless asked for, as it ships, since a five-person group talking is a
-    // lot of text over the fight. The leader's lines are party lines too.
-    if (!bubble && (type == ChatType::PARTY || type == ChatType::RAID ||
-                    type == ChatType::PARTY_LEADER || type == ChatType::RAID_LEADER)) {
-        bubble = addons::storedCVarValue("chatBubblesParty", "0") != "0";
+    // Stock (0x720010): say, yell and the monster say and yell answer to
+    // chatBubbles, which the bubble manager reads; party and party leader to
+    // chatBubblesParty, on as it ships. Nothing else makes a bubble - no raid,
+    // no monster party line, no whisper or emote.
+    const int gate = ui::stockui::chatBubbleGate(static_cast<uint8_t>(type));
+    if (gate == 0) return;
+    if (gate == 2 && addons::storedCVarValue("chatBubblesParty", "1") == "0") return;
+    std::string text = message;
+    // A monster's line has its "%%" collapsed to "%" first (0x509dd0).
+    if (type == ChatType::MONSTER_SAY || type == ChatType::MONSTER_YELL) {
+        for (size_t at = text.find("%%"); at != std::string::npos; at = text.find("%%", at + 1))
+            text.erase(at, 1);
     }
-    if (bubble) owner_.chatBubbleCallbackRef()(senderGuid, message, static_cast<uint8_t>(type));
+    owner_.chatBubbleCallbackRef()(senderGuid, text, static_cast<uint8_t>(type));
 }
 
 void ChatHandler::sendAddonMessage(ChatType type, const std::string& message, const std::string& target) {

@@ -1030,6 +1030,9 @@ public:
     uint32_t getCreatureType(uint32_t entry) const {
         return entityController_->getCreatureType(entry);
     }
+    uint32_t getCreatureTypeFlags(uint32_t entry) const {
+        return entityController_->getCreatureTypeFlags(entry);
+    }
     // Returns creature family (e.g. pet family for beasts) or 0
     uint32_t getCreatureFamily(uint32_t entry) const {
         return entityController_->getCreatureFamily(entry);

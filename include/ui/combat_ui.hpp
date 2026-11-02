@@ -7,9 +7,12 @@
 #include <vector>
 #include <cstdint>
 #include <functional>
+#include <unordered_map>
+#include <glm/glm.hpp>
 
 namespace wowee {
-namespace game { class GameHandler; }
+namespace game { class GameHandler; struct CombatTextEntry; }
+namespace rendering { class Camera; }
 namespace pipeline { class AssetManager; }
 namespace ui {
 
@@ -47,6 +50,12 @@ public:
     void setServices(const UIServices& services) { services_ = services; }
 
 private:
+    /// One number over a unit, by the stock world-text rules (0x7e5c30).
+    void drawWorldText(game::GameHandler& gameHandler, const game::CombatTextEntry& entry,
+                       std::unordered_map<uint64_t, int>& onUnit, const glm::mat4& viewProj,
+                       const rendering::Camera* camera, float screenW, float screenH,
+                       ImFont* font);
+
     UIServices services_;
 };
 

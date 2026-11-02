@@ -301,8 +301,8 @@ public:
 
     // ---- Config toggles (read by GameScreen rendering, edited by Interface tab) ----
     float nameplateScale_ = 1.0f; // Scale multiplier for nameplate bar dimensions
-    bool showFriendlyNameplates_ = true;  // Shift+V toggles friendly player nameplates
-    bool showEnemyNameplates_ = true;     // V toggles nameplates over hostile and neutral units
+    bool showFriendlyNameplates_ = false; // Shift+V: nameplateShowFriends, off as it ships
+    bool showEnemyNameplates_ = false;    // V: nameplateShowEnemies, off as it ships
     bool showDPSMeter_ = false;
     /// Where the meter was dragged to: its left and top edges in interface
     /// units from the screen's bottom-left. Negative until it has been moved,

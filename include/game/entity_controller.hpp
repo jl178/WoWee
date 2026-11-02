@@ -54,6 +54,12 @@ public:
         auto it = creatureInfoCache.find(entry);
         return (it != creatureInfoCache.end()) ? it->second.creatureType : 0;
     }
+    /// creature_template.type_flags as the query response gave them; 0 until
+    /// the response has arrived.
+    [[nodiscard]] uint32_t getCreatureTypeFlags(uint32_t entry) const {
+        auto it = creatureInfoCache.find(entry);
+        return (it != creatureInfoCache.end()) ? it->second.typeFlags : 0;
+    }
     [[nodiscard]] uint32_t getCreatureFamily(uint32_t entry) const {
         auto it = creatureInfoCache.find(entry);
         return (it != creatureInfoCache.end()) ? it->second.family : 0;
