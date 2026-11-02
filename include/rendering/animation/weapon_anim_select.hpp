@@ -119,18 +119,33 @@ inline bool isTwoHandMainHand(const WeaponLoadout& w) {
     return w.inventoryType == game::InvType::TWO_HAND || w.is2HLoose;
 }
 
-/// The chain an auto-attack swing walks, for one hand.
+/// A two-hander held with something in the other hand (Titan's Grip). The
+/// stock client gives it the one-handed swing, stance and parry: each of its
+/// picks takes 2H minus one when the off-hand slot holds an item.
+inline bool isGrippedTwoHander(const WeaponLoadout& w) {
+    return w.inventoryType == game::InvType::TWO_HAND && !w.is2HLoose &&
+           (w.hasOffHand || w.hasShield);
+}
+
+/// The chain an auto-attack swing walks, for one hand. The head is what the
+/// stock client picks on SMSG_ATTACKERSTATEUPDATE (Wow.exe 0x755130), from
+/// the swinging hand's item:
+///  - off hand (HITINFO_OFFHAND): a dagger AttackOffPierce, any other weapon
+///    (a fist weapon too) AttackOff, no weapon there AttackUnarmedOff;
+///  - main hand: a dagger Attack1HPierce; a polearm, staff, spear or fishing
+///    pole Attack2HL; a two-handed axe, mace or sword Attack2H (Attack1H when
+///    gripped with something else); other one-handers Attack1H; a fist
+///    weapon, or nothing, AttackUnarmed.
 inline MeleeChain swingChain(const WeaponLoadout& w, bool offHand) {
-    if (offHand && w.hasOffHand) {
-        if (w.offHandIsFist)   return MeleeChain::OffHandFist;
-        if (w.offHandIsDagger) return MeleeChain::OffHandPierce;
-        return MeleeChain::OffHand;
+    if (offHand) {
+        if (!w.hasOffHand) return MeleeChain::OffHandUnarmed;
+        return w.offHandIsDagger ? MeleeChain::OffHandPierce : MeleeChain::OffHand;
     }
-    if (offHand && w.inventoryType == game::InvType::NON_EQUIP) return MeleeChain::OffHandUnarmed;
     if (w.isFist)   return MeleeChain::Fist;
     if (w.isDagger) return MeleeChain::Dagger;
     if (w.is2HLoose) return MeleeChain::TwoHandLoose;
-    if (w.inventoryType == game::InvType::TWO_HAND) return MeleeChain::TwoHand;
+    if (w.inventoryType == game::InvType::TWO_HAND)
+        return isGrippedTwoHander(w) ? MeleeChain::OneHand : MeleeChain::TwoHand;
     if (w.inventoryType == game::InvType::NON_EQUIP) return MeleeChain::Unarmed;
     return MeleeChain::OneHand;
 }
@@ -203,11 +218,13 @@ inline std::vector<uint32_t> abilityAnimCandidates(uint32_t kitAnim, const Weapo
     return out;
 }
 
-/// The parry for the weapon that parries.
+/// The parry for the weapon that parries (Wow.exe 0x73B050: the main hand's
+/// subclass; a fist weapon or an empty hand ParryUnarmed, a gripped
+/// two-hander Parry1H).
 inline uint32_t parryAnim(const WeaponLoadout& w) {
     if (isUnarmedMainHand(w)) return PARRY_UNARMED;
     if (w.is2HLoose) return PARRY_2H_LOOSE;
-    if (w.inventoryType == game::InvType::TWO_HAND) return PARRY_2H;
+    if (w.inventoryType == game::InvType::TWO_HAND) return isGrippedTwoHander(w) ? PARRY_1H : PARRY_2H;
     return PARRY_1H;
 }
 
@@ -232,10 +249,114 @@ inline uint32_t readyAnim(const WeaponLoadout& w, SheathState sheath) {
             default: break;
         }
     }
-    if (isUnarmedMainHand(w)) return READY_UNARMED;
+    // The melee stance from the main hand's weapon, else the off hand's
+    // (Wow.exe 0x714DD0): a fist weapon takes Ready1H like any one-hander -
+    // it is only the swing that is a punch - and nothing in either hand
+    // ReadyUnarmed.
+    if (w.inventoryType == game::InvType::NON_EQUIP)
+        return w.hasOffHand ? READY_1H : READY_UNARMED;
     if (w.is2HLoose) return READY_2H_LOOSE;
-    if (w.inventoryType == game::InvType::TWO_HAND) return READY_2H;
+    if (w.inventoryType == game::InvType::TWO_HAND) return isGrippedTwoHander(w) ? READY_1H : READY_2H;
     return READY_1H;
+}
+
+/// Whether an animation may play on the upper body alone, over legs that
+/// keep walking or running (Wow.exe 0x71D800, by AnimationData BehaviorID).
+/// While the unit moves, the stock client plays these on the upper-body bone
+/// set and leaves the locomotion on the rest (0x7385C0, 0x723E30): attacks,
+/// parries, wounds, Ready stances, spell casts, ranged shots, emotes, the
+/// sheath reach. Anything else (Kick, Whirlwind, Death) takes the whole body.
+inline bool isUpperBodyBehavior(uint32_t b) {
+    if (b == 2 || (b >= 8 && b <= 10) || (b >= 14 && b <= 36) || (b >= 46 && b <= 49) ||
+        (b >= 51 && b <= 74) || (b >= 76 && b <= 78) || (b >= 80 && b <= 90) ||
+        (b >= 105 && b <= 113) || b == 117 || b == 118 || (b >= 122 && b <= 125) ||
+        (b >= 128 && b <= 130) || b == 133 || b == 134 || (b >= 136 && b <= 138) ||
+        (b >= 153 && b <= 156) || b == 185 || b == 186 || b == 195 ||
+        (b >= 213 && b <= 222) || b == 225)
+        return true;
+    return false;
+}
+inline bool playsOnUpperBody(uint32_t anim) { return isUpperBodyBehavior(dbcBehavior(anim)); }
+
+/// The locomotion animations (Wow.exe 0x714E80): walk, run, sprint, the
+/// shuffles and strafes' base, backpedal, the jump phases, swimming,
+/// stealth walk and run, JumpLandRun. A unit playing one of these is moving
+/// its legs, so a swing or a flinch goes to its upper body.
+inline bool isLocomotionAnim(uint32_t id) {
+    switch (id) {
+        case 4: case 5: case 11: case 12: case 13: case 37: case 38: case 39:
+        case 42: case 43: case 44: case 45: case 119: case 135: case 143: case 187: case 223:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/// The flinch a blow plays on its victim (Wow.exe 0x736640, from 0x755E40
+/// when the swing has HITINFO_AFFECTS_VICTIM): CombatCritical for a crit;
+/// otherwise CombatWound while the victim has an attack target of its own,
+/// StandWound when it is not fighting back.
+inline uint32_t woundAnim(bool crit, bool attacking) {
+    if (crit) return COMBAT_CRITICAL;
+    return attacking ? COMBAT_WOUND : STAND_WOUND;
+}
+
+/// The sheath state a unit's weapons are shown in, which in the stock client
+/// is not the server's byte alone (Wow.exe 0x738180, run on every animation
+/// change). In order:
+///  - an animation that always puts them away (WeaponFlags 0x04: spell casts,
+///    swimming, mounted, loot) puts them away;
+///  - a ranged weapon out stays out, unless an animation that is not a shot
+///    puts it away (0x10) or draws the melee weapons (0x20);
+///  - an animation that puts away (0x10: emotes, ReadyUnarmed) or draws
+///    (0x20: Attack1H/2H, Ready1H/2H, Special*) does that - except that a
+///    unit with an attack target keeps them drawn through its combat moves
+///    (parries, wounds, swings);
+///  - a unit with an attack target (SMSG_ATTACKSTART until SMSG_ATTACKSTOP)
+///    has them drawn;
+///  - otherwise the server's byte.
+/// So a playerbot (whose byte AzerothCore leaves at 0, as it sends no
+/// CMSG_SET_SHEATHED) and a creature whose addon sheathes it draw when they
+/// swing, and an NPC that talks puts its sword away for the emote.
+/// `shown` is what the unit shows now. Left out: the play flag that keeps
+/// the state (bit 5 of the play call's flags) and the cast of a spell
+/// without SPELL_ATTR0_DO_NOT_SHEATH, whose cast animations put the weapons
+/// away already.
+inline bool isCombatMoveBehavior(uint32_t b) {
+    switch (b) {
+        case 10: case 16: case 17: case 18: case 19: case 20: case 21: case 22: case 23:
+        case 24: case 30: case 36: case 57: case 58: case 59: case 85: case 86: case 87:
+        case 88: case 95: case 117: case 118: case 212:
+            return true;
+        default:
+            return b >= 170 && b <= 179;
+    }
+}
+inline bool isRangedShotBehavior(uint32_t b) {
+    return b == ATTACK_BOW || b == ATTACK_RIFLE || (b >= 105 && b <= 112);
+}
+inline SheathState presentedSheath(SheathState server, SheathState shown, uint32_t anim,
+                                   bool hasAttackTarget) {
+    const uint32_t wf = dbcWeaponFlags(anim);
+    const uint32_t behavior = dbcBehavior(anim);
+    if (wf & ANIM_WF_PUT_AWAY_ALWAYS) return SheathState::UNARMED;
+    // This client never draws the ranged weapon on its own, so a ranged
+    // state that the server's byte no longer backs was changed by the
+    // server - the field update the stock client takes as it comes.
+    if (shown == SheathState::RANGED && server != SheathState::RANGED) shown = server;
+    if (shown == SheathState::RANGED) {
+        if (!isRangedShotBehavior(behavior)) {
+            if (wf & ANIM_WF_PUT_AWAY) return SheathState::UNARMED;
+            if (wf & ANIM_WF_DRAW) return SheathState::MELEE;
+        }
+        return SheathState::RANGED;
+    }
+    if (!hasAttackTarget || !isCombatMoveBehavior(behavior)) {
+        if (wf & ANIM_WF_PUT_AWAY) return SheathState::UNARMED;
+        if (wf & ANIM_WF_DRAW) return SheathState::MELEE;
+    }
+    if (hasAttackTarget) return SheathState::MELEE;
+    return server;
 }
 
 /// The reach for an item put away (or drawn from) a spot: Sheath (89) for

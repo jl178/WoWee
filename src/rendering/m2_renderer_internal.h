@@ -287,11 +287,14 @@ constexpr uint32_t kM2BoneSphericalBillboard = 0x8;
 /// Start a cross-fade before switching `instance` to sequence `newSeq`. Call it
 /// while currentSequenceIndex/animTime still describe the old sequence.
 ///
-/// The stock client fades bone transforms from the old sequence into the new
-/// one over the incoming sequence's blendTime rather than cutting; a sequence
-/// that says 0 gets 150 ms, the value nearly every 3.3.5 sequence carries.
-/// A static-pose model only ever has its pose recomputed on a sequence change,
-/// so it is left to cut.
+/// The stock client fades from the old sequence into the new one over the
+/// incoming sequence's blendTime (0x826c40). A blendTime of 0 is a cut: the
+/// fade's end is set to now and its weight is 0 from the first frame. There
+/// is no cap on the length. When a fade is already running and the outgoing
+/// sequence still has more than half the weight, that fade is left as it is
+/// - its source and its timer - and the new sequence simply takes the
+/// incoming side. A static-pose model only ever has its pose recomputed on a
+/// sequence change, so it is left to cut.
 inline void beginM2SequenceBlend(const M2ModelGPU& model, M2Instance& instance, int newSeq) {
     const int oldSeq = instance.currentSequenceIndex;
     const int seqCount = static_cast<int>(model.sequences.size());
@@ -303,11 +306,20 @@ inline void beginM2SequenceBlend(const M2ModelGPU& model, M2Instance& instance, 
         instance.blendDurationMs = 0.0f;
         return;
     }
+    if (instance.blendDurationMs > 0.0f && instance.blendElapsedMs < instance.blendDurationMs) {
+        const float outgoing = 1.0f - m2_track::sequenceBlendWeight(
+            instance.blendElapsedMs / instance.blendDurationMs);
+        if (outgoing > 0.5f) return;
+    }
     const uint32_t blendMs = model.sequences[newSeq].blendTime;
+    if (blendMs == 0) {
+        instance.blendDurationMs = 0.0f;
+        return;
+    }
     instance.blendFromSequence = oldSeq;
     instance.blendFromTime = instance.animTime;
     instance.blendElapsedMs = 0.0f;
-    instance.blendDurationMs = static_cast<float>(blendMs > 0 ? std::min<uint32_t>(blendMs, 1000) : 150);
+    instance.blendDurationMs = static_cast<float>(blendMs);
 }
 
 /// Bone transforms for one instance.
@@ -327,8 +339,9 @@ inline void computeBoneMatrices(const M2ModelGPU& model, M2Instance& instance,
                           instance.blendElapsedMs < instance.blendDurationMs &&
                           instance.blendFromSequence >= 0 &&
                           instance.blendFromSequence < static_cast<int>(model.sequences.size());
+    // Eased, as the stock client weights the two (see sequenceBlendWeight).
     const float blendWeight = blending
-        ? glm::clamp(instance.blendElapsedMs / instance.blendDurationMs, 0.0f, 1.0f)
+        ? m2_track::sequenceBlendWeight(instance.blendElapsedMs / instance.blendDurationMs)
         : 1.0f;
 
     for (size_t i = 0; i < numBones; i++) {

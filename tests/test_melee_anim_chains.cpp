@@ -42,13 +42,13 @@ TEST_CASE("each chain asks first for what the weapon actually is", "[anim]") {
     // animation still never plays it.
     CHECK(chain(MeleeChain::OneHand).front() == ATTACK_1H);
     CHECK(chain(MeleeChain::TwoHand).front() == ATTACK_2H);
-    CHECK(chain(MeleeChain::TwoHandLoose).front() == ATTACK_2H_LOOSE_PIERCE);
+    CHECK(chain(MeleeChain::TwoHandLoose).front() == ATTACK_2H_LOOSE);
     CHECK(chain(MeleeChain::Dagger).front() == ATTACK_1H_PIERCE);
     CHECK(chain(MeleeChain::Fist).front() == ATTACK_UNARMED);   // 3.3.5 has no fist animations
     CHECK(chain(MeleeChain::Unarmed).front() == ATTACK_UNARMED);
     CHECK(chain(MeleeChain::OffHand).front() == ATTACK_OFF);
     CHECK(chain(MeleeChain::OffHandPierce).front() == ATTACK_OFF_PIERCE);
-    CHECK(chain(MeleeChain::OffHandFist).front() == ATTACK_UNARMED_OFF);
+    CHECK(chain(MeleeChain::OffHandFist).front() == ATTACK_OFF);
     CHECK(chain(MeleeChain::OffHandUnarmed).front() == ATTACK_UNARMED_OFF);
 }
 
@@ -60,15 +60,13 @@ TEST_CASE("a dagger never falls back to a swing", "[anim]") {
     CHECK(std::find(dagger.begin(), dagger.end(), ATTACK_2H_LOOSE) == dagger.end());
 }
 
-TEST_CASE("a polearm tries the thrust before the swing", "[anim]") {
-    // Order, not membership: both are in the chain, and the pierce has to come
-    // first or every polearm swings like a greatsword on a model that has both.
+TEST_CASE("a polearm auto-attack swings Attack2HL, never the pierce", "[anim]") {
+    // Wow.exe 0x755130 picks Attack2HL (19) for a polearm, staff, spear or
+    // fishing pole. Attack2HLoosePierce is an ability's animation; a model
+    // that has both swung the pierce on every auto-attack.
     const auto loose = chain(MeleeChain::TwoHandLoose);
-    const auto pierceAt = std::find(loose.begin(), loose.end(), ATTACK_2H_LOOSE_PIERCE);
-    const auto swingAt = std::find(loose.begin(), loose.end(), ATTACK_2H_LOOSE);
-    REQUIRE(pierceAt != loose.end());
-    REQUIRE(swingAt != loose.end());
-    CHECK(pierceAt < swingAt);
+    CHECK(loose.front() == ATTACK_2H_LOOSE);
+    CHECK(std::find(loose.begin(), loose.end(), ATTACK_2H_LOOSE_PIERCE) == loose.end());
 }
 
 TEST_CASE("every off-hand chain prefers an off-hand animation", "[anim]") {

@@ -57,9 +57,11 @@ inline std::span<const uint32_t> meleeAnimChain(MeleeChain kind) {
     static constexpr uint32_t kTwoHand[] = {
         ATTACK_2H, ATTACK_1H, ATTACK_UNARMED,
         ATTACK_2H_LOOSE, PARRY_UNARMED, PARRY_1H};
+    // Attack2HL, as the stock client swings a polearm or a staff (Wow.exe
+    // 0x755130), then its AnimationData fallbacks. Attack2HLoosePierce is
+    // an ability's (its kit names it); no auto-attack plays it.
     static constexpr uint32_t kTwoHandLoose[] = {
-        ATTACK_2H_LOOSE_PIERCE, ATTACK_2H_LOOSE,
-        ATTACK_2H, ATTACK_1H, ATTACK_UNARMED};
+        ATTACK_2H_LOOSE, ATTACK_2H, ATTACK_1H, ATTACK_UNARMED};
     static constexpr uint32_t kDagger[] = {
         ATTACK_1H_PIERCE, ATTACK_1H, ATTACK_UNARMED};
     // Punches: 3.3.5 has no fist-weapon animations of its own.
@@ -68,14 +70,20 @@ inline std::span<const uint32_t> meleeAnimChain(MeleeChain kind) {
     static constexpr uint32_t kUnarmed[] = {
         ATTACK_UNARMED, ATTACK_1H, ATTACK_2H,
         ATTACK_2H_LOOSE, PARRY_UNARMED, PARRY_1H};
+    // The off-hand chains follow AnimationData's fallbacks, as the stock
+    // client does for a model without the one it picked (0x7176F0):
+    // AttackUnarmedOff -> AttackOff -> AttackOffPierce -> AttackUnarmed.
     static constexpr uint32_t kOffHand[] = {
-        ATTACK_OFF, ATTACK_1H, ATTACK_UNARMED};
+        ATTACK_OFF, ATTACK_OFF_PIERCE, ATTACK_UNARMED};
     static constexpr uint32_t kOffHandPierce[] = {
         ATTACK_OFF_PIERCE, ATTACK_OFF, ATTACK_1H_PIERCE, ATTACK_1H};
+    // An off-hand fist weapon swings AttackOff like any off-hand weapon
+    // (0x755130 checks only for a dagger); AttackUnarmedOff is for an off
+    // hand that holds no weapon.
     static constexpr uint32_t kOffHandFist[] = {
-        ATTACK_UNARMED_OFF, ATTACK_OFF, ATTACK_UNARMED, ATTACK_1H};
+        ATTACK_OFF, ATTACK_OFF_PIERCE, ATTACK_UNARMED};
     static constexpr uint32_t kOffHandUnarmed[] = {
-        ATTACK_UNARMED_OFF, ATTACK_UNARMED, ATTACK_OFF, ATTACK_1H};
+        ATTACK_UNARMED_OFF, ATTACK_OFF, ATTACK_OFF_PIERCE, ATTACK_UNARMED};
     static constexpr uint32_t kGeneric[] = {
         ATTACK_1H, ATTACK_2H, ATTACK_2H_LOOSE, ATTACK_UNARMED};
 

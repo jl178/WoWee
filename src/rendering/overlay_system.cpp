@@ -100,10 +100,13 @@ void OverlaySystem::recreatePipelines() {
     destroy(device, brightnessPipeline_);
 }
 
-void OverlaySystem::setSelectionCircle(const glm::vec3& pos, float radius, const glm::vec3& color) {
+void OverlaySystem::setSelectionCircle(const glm::vec3& pos, float radius, const glm::vec3& color,
+                                       float alpha, float attackPulse) {
     selCirclePos_ = pos;
     selCircleRadius_ = std::max(radius, 0.05f);
     selCircleColor_ = color;
+    selCircleAlpha_ = std::clamp(alpha, 0.0f, 1.0f);
+    selPulseT_ = attackPulse < 1.0f ? attackPulse : -1.0f;
     selCircleVisible_ = true;
     // Here rather than at draw time: this runs from the UI update, outside
     // command recording, so the one-off upload's queue submit cannot meet a
@@ -310,7 +313,24 @@ void OverlaySystem::renderSelectionCircle(const glm::mat4& view, const glm::mat4
     }
 
     const glm::vec3 feet = selCirclePos_;
-    const float r = selCircleRadius_;
+    // The attack pulse (0x725980, the second draw): over 500 ms its box
+    // closes from 1.6R + 2.3 to R along (1 - t)^3, and its alpha - the
+    // circle's, times 1 - (1 - t)^3 - fades in as fast and, past halfway,
+    // back out by 1 - (2t - 1)^2.
+    const float rMain = selCircleRadius_;
+    const float rPulseMax = 1.6f * rMain + 2.3f;
+    float rPulse = 0.0f, pulseAlpha = 0.0f;
+    if (selPulseT_ >= 0.0f) {
+        const float t = selPulseT_;
+        const float k = (1.0f - t) * (1.0f - t) * (1.0f - t);
+        rPulse = rMain + (rPulseMax - rMain) * k;
+        pulseAlpha = 1.0f - k;
+        if (t > 0.5f) pulseAlpha *= 1.0f - (2.0f * t - 1.0f) * (2.0f * t - 1.0f);
+    }
+    // The lattice covers the pulse's largest box for as long as it runs, so
+    // its spacing (and the floor cache) holds still while the ring closes;
+    // both decals are draped over the same floor samples.
+    const float r = selPulseT_ >= 0.0f ? rPulseMax : rMain;
 
     // Lattice spacing: the box (2R) plus a cell of slack fits in the grid
     // wherever the lattice happens to fall, never finer than kSelMinSpacing.
@@ -378,8 +398,8 @@ void OverlaySystem::renderSelectionCircle(const glm::mat4& view, const glm::mat4
 
     SelCirclePush push{};
     push.viewProj = projection * view;
-    push.color = glm::vec4(selCircleColor_, 1.0f);
-    push.center = glm::vec4(feet, r);
+    push.color = glm::vec4(selCircleColor_, selCircleAlpha_);
+    push.center = glm::vec4(feet, rMain);
     push.facing = glm::vec4(facing, kSelSurfaceLift, 0.0f);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, selCirclePipeline_);
@@ -392,6 +412,14 @@ void OverlaySystem::renderSelectionCircle(const glm::mat4& view, const glm::mat4
         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         0, sizeof(push), &push);
     vkCmdDrawIndexed(cmd, static_cast<uint32_t>(selCircleVertCount_), 1, 0, 0, 0);
+    if (pulseAlpha > 0.0f) {
+        push.color.a = selCircleAlpha_ * pulseAlpha;
+        push.center.w = rPulse;
+        vkCmdPushConstants(cmd, selCirclePipelineLayout_,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0, sizeof(push), &push);
+        vkCmdDrawIndexed(cmd, static_cast<uint32_t>(selCircleVertCount_), 1, 0, 0, 0);
+    }
 }
 
 void OverlaySystem::initOverlayPipeline() {

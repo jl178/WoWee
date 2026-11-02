@@ -109,6 +109,24 @@ inline uint32_t pickSequenceExtraLaps(const pipeline::M2Sequence& s) {
     return laps > 0 ? laps - 1 : 0;
 }
 
+/// The sequence a model plays when it is created, as the stock client picks
+/// it (CM2Model setup on load, 0x834540): Stand (id 0) if the model has it,
+/// else the id of its first sequence, with the variation rolled by frequency
+/// (0x826e60). Returns the sequence index whose keyframes play (aliases
+/// followed), or 0 when nothing better is found.
+inline int defaultSequenceIndex(const std::vector<pipeline::M2Sequence>& seqs,
+                                const std::vector<pipeline::M2Bone>& bones) {
+    if (seqs.empty()) return 0;
+    uint32_t animId = seqs[0].id;
+    for (const auto& s : seqs) {
+        if (s.id == 0) { animId = 0; break; }
+    }
+    int idx = pickSequenceVariation(seqs, bones, animId);
+    idx = resolveSequenceAlias(seqs, idx);
+    if (idx < 0 || idx >= static_cast<int>(seqs.size())) return 0;
+    return idx;
+}
+
 /// Whether `animId` has more than one variation on this model.
 inline bool hasSequenceVariations(const std::vector<pipeline::M2Sequence>& seqs, uint32_t animId) {
     int n = 0;

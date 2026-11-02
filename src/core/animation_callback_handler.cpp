@@ -19,6 +19,7 @@
 #include "audio/audio_engine.hpp"
 #include "audio/ui_sound_manager.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <algorithm>
 
@@ -278,68 +279,50 @@ void AnimationCallbackHandler::setupCallbacks() {
             for (uint32_t id : chain) if (has(id)) { anim = id; break; }
         }
         if (anim == 0) return;  // a model with no attack at all stays as it is
+        // A unit on the move swings with its upper body and keeps running
+        // (Wow.exe 0x7385C0 / 0x723E30): a creature chasing a fleeing
+        // player used to stop dead in its attack pose and slide.
+        if (isLocomotionAnim(cur) && playsOnUpperBody(anim)) {
+            cr->playUpperBodyAnimation(instanceId, anim, anim, anim);
+            return;
+        }
         cr->playAnimation(instanceId, anim, false, entitySpawner_.unitIdleAnim(guid, instanceId));
     });
 
-    // Hit reaction callback - plays one-shot dodge/parry/block/wound animation on the victim
-    gameHandler_.setHitReactionCallback([this](uint64_t victimGuid, game::GameHandler::HitReaction reaction) {
-        auto* cr = renderer_.getCharacterRenderer();
-        if (!cr) return;
-        using namespace rendering::anim;
-        const bool isLocalPlayer = (victimGuid == gameHandler_.getPlayerGuid());
-        auto* ac = renderer_.getAnimationController();
-
-        uint32_t instanceId = 0;
-        if (isLocalPlayer) {
-            instanceId = renderer_.getCharacterInstanceId();
-        } else {
-            instanceId = entitySpawner_.getCreatureInstanceId(victimGuid);
-            if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(victimGuid);
+    // The victim's reaction to a melee blow waits for the blow. The stock
+    // client keeps the swing's SMSG_ATTACKERSTATEUPDATE on the attacker
+    // (CGUnit_C +0xB98, Wow.exe 0x756800) and acts it out when the attacker's
+    // attack animation reaches its events (0x756240, see onMeleeAnimEvent):
+    // a dodge, parry or block as the swing begins ($CPP), the flinch, the
+    // blood and the blow's sound as the weapon lands ($CAH), not when the
+    // packet does, half a swing early. A blow still waiting when the
+    // same attacker swings again is played out first (0x756180), and one
+    // whose event never comes (a model without it, a swing cut short) after
+    // kBlowFallbackMs. A spell's damage has no attacker swing and reacts at
+    // once.
+    gameHandler_.setHitReactionCallback([this](uint64_t victimGuid, game::GameHandler::HitReaction reaction,
+                                               uint64_t attackerGuid) {
+        uint32_t attackerInstance = 0;
+        if (attackerGuid != 0) {
+            if (attackerGuid == gameHandler_.getPlayerGuid()) {
+                attackerInstance = renderer_.getCharacterInstanceId();
+            } else {
+                attackerInstance = entitySpawner_.getCreatureInstanceId(attackerGuid);
+                if (attackerInstance == 0) attackerInstance = entitySpawner_.getPlayerInstanceId(attackerGuid);
+            }
         }
-        if (instanceId == 0) return;
-
-        // The parry and the block are the victim's weapons': Parry1H/2H/2HL/
-        // Unarmed for what parried it, ShieldBlock for a shield (only a shield
-        // blocks; Block for a model without ShieldBlock). The parry used to
-        // play the hit flinch and a block never showed the shield.
-        const rendering::WeaponLoadout weapons = isLocalPlayer
-            ? (ac ? ac->getWeaponLoadout() : rendering::WeaponLoadout{})
-            : entitySpawner_.unitWeaponLoadout(victimGuid);
-        uint32_t want = COMBAT_WOUND;
-        switch (reaction) {
-            case game::GameHandler::HitReaction::DODGE:        want = DODGE; break;
-            case game::GameHandler::HitReaction::PARRY:        want = parryAnim(weapons); break;
-            case game::GameHandler::HitReaction::BLOCK:
-            case game::GameHandler::HitReaction::SHIELD_BLOCK: want = SHIELD_BLOCK; break;
-            case game::GameHandler::HitReaction::CRIT_WOUND:   want = COMBAT_CRITICAL; break;
-            case game::GameHandler::HitReaction::WOUND:        want = COMBAT_WOUND; break;
-        }
-        auto has = [&](uint32_t id) { return cr->hasAnimation(instanceId, id); };
-        const uint32_t animId = want == SHIELD_BLOCK
-            ? firstPlayable(has, {SHIELD_BLOCK, BLOCK})
-            : firstPlayable(has, {want});
-        if (animId == 0) return;
-
-        // For local player: use AnimationController state
-        if (isLocalPlayer) {
-            if (ac) ac->triggerHitReaction(animId);
+        if (attackerInstance == 0) {
+            if (reaction != game::GameHandler::HitReaction::MISS)
+                playHitReaction(victimGuid, static_cast<uint8_t>(reaction));
             return;
         }
-
-        // Not over a swing, an ability, a cast, a death or a stride, as the
-        // stock client does: the reaction is a one-shot on the whole body.
-        uint32_t cur = 0; float t = 0.0f, d = 0.0f;
-        const bool haveState = cr->getAnimationState(instanceId, cur, t, d);
-        const bool busy = haveState &&
-            ((cur >= ATTACK_UNARMED && cur <= ATTACK_2H_LOOSE) ||
-             (cur >= SPECIAL_1H && cur <= SHIELD_BASH) ||
-             (cur >= ATTACK_1H_PIERCE && cur <= ATTACK_OFF_PIERCE) ||
-             cur == ATTACK_UNARMED_OFF || cur == SPECIAL_UNARMED || cur == WHIRLWIND ||
-             cur == KICK || cur == MUTILATE || cur == DEATH ||
-             cur == WALK || cur == RUN || cur == SWIM || cur == WALK_BACKWARDS ||
-             isSpellCastFamily(cur));
-        if (!busy)
-            cr->playAnimation(instanceId, animId, false, entitySpawner_.unitIdleAnim(victimGuid, instanceId));
+        if (auto old = pendingReactions_.find(attackerInstance); old != pendingReactions_.end()) {
+            const PendingReaction p = old->second;
+            pendingReactions_.erase(old);
+            flushPendingReaction(p);
+        }
+        pendingReactions_[attackerInstance] =
+            PendingReaction{victimGuid, static_cast<uint8_t>(reaction), nowMs() + kBlowFallbackMs};
     });
 
     // Stun state callback - enters/exits STUNNED animation on local player
@@ -554,8 +537,19 @@ void AnimationCallbackHandler::setupCallbacks() {
                 if (std::find(family.begin(), family.end(), a) == family.end() ||
                     !cr->hasAnimation(instanceId, a)) a = 0;
             };
-            keep(kitAnims.precast, {READY_SPELL_DIRECTED, READY_SPELL_OMNI});
-            keep(kitAnims.channel, {CHANNEL_CAST_DIRECTED, CHANNEL_CAST_OMNI});
+            // The build-up holds whatever its kit names, as the stock client
+            // plays a kit's AnimID as it is (Wow.exe 0x73B140): UseStandingLoop
+            // for an item being used, ReadyThrown, ChannelCastOmni for a
+            // precast, EmoteRoar. Not a wound or a death - those are a
+            // flinch and the death path's, not a pose to hold.
+            auto keepHold = [&](uint32_t& a) {
+                const uint32_t b = dbcBehavior(a);
+                if (a == 0 || b == DEATH || b == DEAD || b == STAND_WOUND ||
+                    b == COMBAT_WOUND || b == COMBAT_CRITICAL || !cr->hasAnimation(instanceId, a))
+                    a = 0;
+            };
+            keepHold(kitAnims.precast);
+            keepHold(kitAnims.channel);
             keep(kitAnims.cast, {SPELL_CAST_DIRECTED, SPELL_CAST_OMNI, SPELL_CAST_AREA});
         }
 
@@ -693,9 +687,15 @@ void AnimationCallbackHandler::setupCallbacks() {
                 }
             } else {
             // Precast wind-up (one-shot, non-channels only)
+            // From the precast kit's StartAnimID when the spell has a kit:
+            // Frostbolt's and Fireball's name none and go straight to
+            // ReadySpellDirected. SpellPrecast only for spells without kits.
             uint32_t precastAnim = 0;
             if (!isChannel) {
-                precastAnim = pickFirst({rendering::anim::SPELL_PRECAST});
+                precastAnim = kitAnims.hasPrecastKit
+                    ? (kitAnims.precastStart && cr->hasAnimation(instanceId, kitAnims.precastStart)
+                           ? kitAnims.precastStart : 0)
+                    : pickFirst({rendering::anim::SPELL_PRECAST});
             }
 
             // Cast hold (looping while cast bar fills / channel active)
@@ -903,6 +903,174 @@ void AnimationCallbackHandler::setupCallbacks() {
         if (open) ac->startLooting();
         else      ac->stopLooting();
     });
+}
+
+double AnimationCallbackHandler::nowMs() {
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+namespace {
+using HitReaction = game::GameHandler::HitReaction;
+bool isDefence(HitReaction r) {
+    return r == HitReaction::DODGE || r == HitReaction::DEFLECT || r == HitReaction::PARRY ||
+           r == HitReaction::BLOCK || r == HitReaction::SHIELD_BLOCK;
+}
+} // namespace
+
+// The pending blow acted out by the attacker's animation events, as the stock
+// client's handler for them does (Wow.exe 0x756240):
+//   $CPP  the victim's defence - parry, dodge (a deflect too) or, with a
+//         blocked amount, ShieldBlock - and HITINFO_AFFECTS_VICTIM is cleared
+//         from the blow, so the blow then makes no flinch;
+//   $CAH  after a miss, a dodge or an evade the rest of the swing runs at half
+//         speed; then the victim side (0x755E40), whose flinch (0x736640) is
+//         for any blow still carrying HITINFO_AFFECTS_VICTIM. AzerothCore sets
+//         that bit on every swing that is not a miss, so a defence whose $CPP
+//         never came - an attack animation without the event - is a flinch.
+void AnimationCallbackHandler::onMeleeAnimEvent(uint32_t attackerInstanceId, uint32_t eventTag) {
+    auto it = pendingReactions_.find(attackerInstanceId);
+    if (it == pendingReactions_.end()) return;
+    PendingReaction& p = it->second;
+    const auto reaction = static_cast<HitReaction>(p.reaction);
+    if (eventTag == pipeline::m2EventTag("$CPP")) {
+        if (isDefence(reaction) && !p.defended) {
+            p.defended = true;
+            playHitReaction(p.victimGuid, p.reaction);
+        }
+        return;
+    }
+    if (eventTag != pipeline::m2EventTag("$CAH")) return;
+    const PendingReaction done = p;
+    pendingReactions_.erase(it);
+    if (reaction == HitReaction::MISS || reaction == HitReaction::DODGE)
+        slowAttackerSwing(attackerInstanceId);
+    if (reaction == HitReaction::MISS || done.defended) return;
+    if (isDefence(reaction)) {
+        playHitReaction(done.victimGuid, static_cast<uint8_t>(HitReaction::WOUND));
+        return;
+    }
+    playHitReaction(done.victimGuid, done.reaction);
+}
+
+void AnimationCallbackHandler::flushPendingReaction(const PendingReaction& p) {
+    // Not the stock client's: its blow without events shows only its combat
+    // text (0x756180). Here an event can also be missed by a model swapped
+    // or culled mid-swing, so the reaction still plays, late.
+    if (p.defended || static_cast<HitReaction>(p.reaction) == HitReaction::MISS) return;
+    playHitReaction(p.victimGuid, p.reaction);
+}
+
+void AnimationCallbackHandler::slowAttackerSwing(uint32_t attackerInstanceId) {
+    auto* cr = renderer_.getCharacterRenderer();
+    if (!cr) return;
+    // 0x735CC0 slows the model's whole-body track. Only when that track is
+    // the swing: a swing on the upper body of a running unit leaves the run
+    // at its own pace.
+    if (!cr->currentAnimHasEvent(attackerInstanceId, pipeline::m2EventTag("$CAH"))) return;
+    if (attackerInstanceId == renderer_.getCharacterInstanceId()) {
+        if (auto* ac = renderer_.getAnimationController()) ac->slowMeleeSwing(0.5f);
+        return;
+    }
+    cr->setAnimationSpeed(attackerInstanceId, 0.5f);
+}
+
+void AnimationCallbackHandler::updatePendingReactions() {
+    if (pendingReactions_.empty()) return;
+    const double now = nowMs();
+    for (auto it = pendingReactions_.begin(); it != pendingReactions_.end();) {
+        if (now < it->second.deadlineMs) { ++it; continue; }
+        const PendingReaction p = it->second;
+        it = pendingReactions_.erase(it);
+        flushPendingReaction(p);
+    }
+}
+
+void AnimationCallbackHandler::playHitReaction(uint64_t victimGuid, uint8_t reactionCode) {
+    auto* cr = renderer_.getCharacterRenderer();
+    if (!cr) return;
+    using namespace rendering::anim;
+    using HR = game::GameHandler::HitReaction;
+    const HR reaction = static_cast<HR>(reactionCode);
+    const bool isLocalPlayer = (victimGuid == gameHandler_.getPlayerGuid());
+    auto* ac = renderer_.getAnimationController();
+
+    uint32_t instanceId = 0;
+    if (isLocalPlayer) {
+        instanceId = renderer_.getCharacterInstanceId();
+    } else {
+        instanceId = entitySpawner_.getCreatureInstanceId(victimGuid);
+        if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(victimGuid);
+    }
+    if (instanceId == 0) return;
+
+    // The parry and the block are the victim's weapons': Parry1H/2H/2HL/
+    // Unarmed for what parried it, ShieldBlock for a shield (only a shield
+    // blocks; Block for a model without ShieldBlock). A dodge (and a deflect)
+    // is Dodge (Wow.exe 0x756240 at $CPP: victim state 2 or 8).
+    const rendering::WeaponLoadout weapons = isLocalPlayer
+        ? (ac ? ac->getWeaponLoadout() : rendering::WeaponLoadout{})
+        : entitySpawner_.unitWeaponLoadout(victimGuid);
+    // The flinch is the victim's own business too (0x736640): a crit's
+    // CombatCritical; CombatWound while it is attacking something itself,
+    // StandWound while it is not - a character hit while standing at ease
+    // flinches at ease rather than in its combat stance.
+    const game::Unit* victim = gameHandler_.getUnitByGuid(victimGuid);
+    const bool victimAttacking = victim && victim->getAttackTarget() != 0;
+    // Weapons put away parry bare-handed (0x73B050 reads UNIT_FIELD_BYTES_2
+    // byte 0). The local character's byte is its own and always current;
+    // for anyone else it is what is shown, since AzerothCore leaves the byte
+    // at 0 for units that draw their weapons without saying so (playerbots).
+    bool sheathed = false;
+    if (reaction == HR::PARRY) {
+        sheathed = isLocalPlayer
+            ? entitySpawner_.unitSheathState(victimGuid) == 0
+            : entitySpawner_.presentedSheathState(victimGuid, instanceId) == 0;
+    }
+    uint32_t want = COMBAT_WOUND;
+    switch (reaction) {
+        case HR::MISS:         return;
+        case HR::DODGE:
+        case HR::DEFLECT:      want = DODGE; break;
+        case HR::PARRY:        want = sheathed ? PARRY_UNARMED : parryAnim(weapons); break;
+        case HR::BLOCK:
+        case HR::SHIELD_BLOCK: want = SHIELD_BLOCK; break;
+        case HR::CRIT_WOUND:   want = woundAnim(true, victimAttacking); break;
+        case HR::WOUND:        want = woundAnim(false, victimAttacking); break;
+    }
+    auto has = [&](uint32_t id) { return cr->hasAnimation(instanceId, id); };
+    uint32_t animId = 0;
+    if (want == SHIELD_BLOCK)       animId = firstPlayable(has, {SHIELD_BLOCK, BLOCK});
+    else if (want == STAND_WOUND)   animId = firstPlayable(has, {STAND_WOUND, COMBAT_WOUND});
+    else if (want == COMBAT_WOUND)  animId = firstPlayable(has, {COMBAT_WOUND, STAND_WOUND});
+    else                            animId = firstPlayable(has, {want});
+    if (animId == 0) return;
+
+    // For local player: use AnimationController state
+    if (isLocalPlayer) {
+        if (ac) ac->triggerHitReaction(animId);
+        return;
+    }
+
+    // Not over a swing, an ability, a cast or a death. Over a walk or a run
+    // the reaction goes on the upper body, the legs keeping their stride, as
+    // the stock client plays it on a moving unit (0x736640 takes the
+    // upper-body track); it used to be dropped.
+    uint32_t cur = 0; float t = 0.0f, d = 0.0f;
+    const bool haveState = cr->getAnimationState(instanceId, cur, t, d);
+    if (haveState && isLocomotionAnim(cur)) {
+        if (playsOnUpperBody(animId)) cr->playUpperBodyAnimation(instanceId, animId, animId, animId);
+        return;
+    }
+    const bool busy = haveState &&
+        ((cur >= ATTACK_UNARMED && cur <= ATTACK_2H_LOOSE) ||
+         (cur >= SPECIAL_1H && cur <= SHIELD_BASH) ||
+         (cur >= ATTACK_1H_PIERCE && cur <= ATTACK_OFF_PIERCE) ||
+         cur == ATTACK_UNARMED_OFF || cur == SPECIAL_UNARMED || cur == WHIRLWIND ||
+         cur == KICK || cur == MUTILATE || cur == DEATH ||
+         isSpellCastFamily(cur));
+    if (!busy)
+        cr->playAnimation(instanceId, animId, false, entitySpawner_.unitIdleAnim(victimGuid, instanceId));
 }
 
 }} // namespace wowee::core

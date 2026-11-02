@@ -14,7 +14,7 @@ namespace rendering {
 // Pure logic state machine for combat animation. No renderer dependency.
 // States: INACTIVE · COMBAT_IDLE · MELEE_SWING · RANGED_SHOOT · RANGED_LOAD ·
 //         SPELL_PRECAST · SPELL_CASTING · SPELL_FINALIZE · HIT_REACTION ·
-//         STUNNED · CHARGE · UNSHEATHE · SHEATHE
+//         STUNNED · CHARGE · UNSHEATHE · SHEATHE · RANGED_HOLD
 //
 // Stun overrides all combat states. Spell state cleared on interrupts.
 // offHandTurn_ alternation managed internally.
@@ -35,6 +35,7 @@ public:
         CHARGE,
         UNSHEATHE,
         SHEATHE,
+        RANGED_HOLD,  // Auto Shot running: HoldBow/HoldRifle/HoldThrown after the load
     };
 
     struct Input {
@@ -46,6 +47,10 @@ public:
         bool sprinting = false;
         bool lowHealth = false;
         bool rangedWeaponActive = false;
+        /// An auto-repeat shot (Auto Shot, Shoot, Throw) is running with the
+        /// ranged weapon out: between shots the stance is the weapon's
+        /// Load, then its Hold (Wow.exe 0x714F90, 0x73B510).
+        bool autoRepeatShot = false;
         float meleeSwingTimer = 0.0f;   // >0 = melee active
         float rangedShootTimer = 0.0f;  // >0 = ranged active
         uint32_t specialAttackAnimId = 0;
@@ -102,6 +107,13 @@ private:
     uint32_t hitReactionAnimId_ = 0;
     bool hitReactionAnimSeen_ = false;  ///< the wound anim has started playing
     uint8_t hitReactionFrames_ = 0;     ///< frames waited for it to start
+
+    // RANGED_LOAD: the load animation resolved for it, whether it has been
+    // seen playing, and the frames waited for it to start.
+    uint32_t rangedLoadAnim_ = 0;
+    bool rangedLoadSeen_ = false;
+    uint8_t rangedLoadFrames_ = 0;
+    void enterRangedLoad();
 
     // Stun
     bool stunned_ = false;

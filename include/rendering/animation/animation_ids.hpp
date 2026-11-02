@@ -566,6 +566,19 @@ void validateAgainstDBC(const std::shared_ptr<wowee::pipeline::DBCFile>& dbc);
 /// answers UINT32_MAX ("no fallback known"). Zero is a real answer: Stand.
 uint32_t dbcFallback(uint32_t id);
 
+/// AnimationData.dbc's WeaponFlags: what the stock client does with a unit's
+/// weapons while it plays the animation (see presentedSheath). Zero, "leave
+/// them be", until validateAgainstDBC has read the file.
+constexpr uint32_t ANIM_WF_PUT_AWAY_ALWAYS = 0x04;  // Spell casts, Swim, Mount, Loot, chairs
+constexpr uint32_t ANIM_WF_PUT_AWAY = 0x10;         // Emotes, ReadyUnarmed, AttackUnarmed, bows
+constexpr uint32_t ANIM_WF_DRAW = 0x20;             // Attack1H/2H, Ready1H/2H, Special*, Whirlwind
+uint32_t dbcWeaponFlags(uint32_t id);
+/// AnimationData.dbc's BehaviorID: the ground animation a variant stands for
+/// (FlyAttack1H -> Attack1H). The id itself until the file has been read.
+uint32_t dbcBehavior(uint32_t id);
+/// Set one row of the two above; validateAgainstDBC fills them, tests too.
+void setDbcWeaponRow(uint32_t id, uint32_t weaponFlags, uint32_t behavior);
+
 /// The loop a unit holds for a server stand state (UnitStandStateType, byte 0
 /// of UNIT_FIELD_BYTES_1). Zero for standing, and for dead, which the death
 /// path owns. The chair states pick the chair height the server chose.

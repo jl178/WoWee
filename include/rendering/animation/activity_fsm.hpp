@@ -21,8 +21,8 @@ public:
         NONE,
         EMOTE,
         LOOTING,        // One-shot LOOT anim
-        LOOT_KNEELING,  // KNEEL_LOOP until loot window closes
-        LOOT_END,       // One-shot KNEEL_END exit anim
+        LOOT_KNEELING,  // LOOT_HOLD (188) until the loot window closes
+        LOOT_END,       // One-shot LOOT_UP (189), only after a real LootHold
         SIT_DOWN,
         SITTING,
         SIT_UP,
@@ -107,6 +107,7 @@ private:
     uint8_t lootFrames_ = 0;
     bool lootEndAnimSeen_ = false;
     uint8_t lootEndFrames_ = 0;
+    bool lootHoldPlayed_ = false;  // the model has LootHold, so LootUp follows
 
     void updateTransitions(const Input& in);
     [[nodiscard]] bool oneShotComplete(const Input& in, uint32_t expectedAnimId) const;

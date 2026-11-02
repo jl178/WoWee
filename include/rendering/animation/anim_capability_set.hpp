@@ -99,6 +99,10 @@ struct AnimCapabilitySet {
     uint32_t resolvedAttackWand = 0;
     uint32_t resolvedLoadBow = 0;
     uint32_t resolvedLoadRifle = 0;
+    uint32_t resolvedLoadThrown = 0;
+    uint32_t resolvedHoldBow = 0;
+    uint32_t resolvedHoldRifle = 0;
+    uint32_t resolvedHoldThrown = 0;
 
     // ── Special attacks ─────────────────────────────────────────────────
     uint32_t resolvedSpecial1H = 0;

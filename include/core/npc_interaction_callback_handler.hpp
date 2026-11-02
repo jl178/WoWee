@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <unordered_map>
 #include <glm/glm.hpp>
 #include "audio/npc_voice_manager.hpp"
@@ -25,14 +26,22 @@ public:
 
     void setupCallbacks();
 
+    /// Told of every $CPP (the victim's defence) and $CAH (the blow landing)
+    /// on a unit's model, with the event's tag, so the victim's reaction can
+    /// wait for the attacker's animation.
+    void setMeleeEventHook(std::function<void(uint32_t instanceId, uint32_t eventTag)> hook) {
+        meleeEventHook_ = std::move(hook);
+    }
+
+    /// The unit a character render instance draws: the local character, an
+    /// other player or a creature. 0 for anything else (mounts, previews).
+    uint64_t guidForInstance(uint32_t instanceId);
+
 private:
     /// Resolve NPC voice type from GUID (eliminates 4x copy-paste of display-ID lookup)
     [[nodiscard]] audio::VoiceType resolveNpcVoiceType(uint64_t guid) const;
     [[nodiscard]] uint32_t resolveNpcDisplayId(uint64_t guid) const;
 
-    /// The unit a character render instance draws: the local character, an
-    /// other player or a creature. 0 for anything else (mounts, previews).
-    uint64_t guidForInstance(uint32_t instanceId);
     /// What the combat sounds need to know about a unit (its weapons, worn
     /// chest, display, render instance and position).
     bool resolveCombatUnit(uint64_t guid, audio::CombatUnitInfo& out);
@@ -43,6 +52,7 @@ private:
     /// fidgets, wing flaps, custom attacks and the death cry.
     void handleUnitAnimEvent(uint32_t instanceId, uint32_t eventTag, const glm::vec3& position);
 
+    std::function<void(uint32_t instanceId, uint32_t eventTag)> meleeEventHook_;
     std::unordered_map<uint32_t, uint64_t> instanceGuids_;
     double instanceGuidsBuiltMs_ = -1.0e9;
 

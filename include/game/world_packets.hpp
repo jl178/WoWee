@@ -1836,6 +1836,10 @@ struct GameObjectQueryResponseData {
     std::string name;
     uint32_t type = 0;       // GameObjectType (e.g. 3=chest, 2=questgiver, 15=MO_TRANSPORT)
     uint32_t displayId = 0;
+    /// The template's cursor name ("Gunner", "Directions"), the first of the
+    /// 2.0.3 strings. Empty on vanilla, which has none. The stock client wears
+    /// it over every other cursor the type would choose (0x70CE10).
+    std::string iconName;
     uint32_t data[24] = {};  // Type-specific data fields (e.g. data[0]=taxiPathId for MO_TRANSPORT)
     bool hasData = false;    // Whether data[] was parsed
 

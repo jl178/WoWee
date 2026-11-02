@@ -137,11 +137,17 @@ void ActivityFSM::startLooting() {
     state_ = State::LOOTING;
     lootAnimSeen_ = false;
     lootFrames_ = 0;
+    lootHoldPlayed_ = false;
 }
 
 void ActivityFSM::stopLooting() {
+    // The stock chooser (0x724280) asks for LootUp (189) only when LootHold
+    // (188) is what is playing, and no 3.3.5a character model has either: a
+    // request for 188 lands on Loot (50) through AnimationData's fallback, so
+    // the stock client never gets to LootUp and simply goes back to its idle.
+    // LOOT_END stays for a model that does carry LootHold.
     if (state_ == State::LOOTING || state_ == State::LOOT_KNEELING) {
-        state_ = State::LOOT_END;
+        state_ = lootHoldPlayed_ ? State::LOOT_END : State::NONE;
         lootEndAnimSeen_ = false;
         lootEndFrames_ = 0;
     }
@@ -183,6 +189,8 @@ void ActivityFSM::updateTransitions(const Input& in) {
             if (in.swimming || (in.jumping && !in.grounded) || in.moving) {
                 state_ = State::NONE;
             }
+            // Whether the model really has LootHold, or fell back to Loot.
+            if (in.haveAnimState && in.currentAnimId == anim::LOOT_HOLD) lootHoldPlayed_ = true;
             // Stays in LOOT_KNEELING until stopLooting() transitions to LOOT_END
             break;
 
@@ -190,8 +198,8 @@ void ActivityFSM::updateTransitions(const Input& in) {
             if (in.swimming || (in.jumping && !in.grounded) || in.moving) {
                 state_ = State::NONE;
             } else if (in.haveAnimState) {
-                if (in.currentAnimId == anim::KNEEL_END) lootEndAnimSeen_ = true;
-                if (lootEndAnimSeen_ && oneShotComplete(in, anim::KNEEL_END)) {
+                if (in.currentAnimId == anim::LOOT_UP) lootEndAnimSeen_ = true;
+                if (lootEndAnimSeen_ && oneShotComplete(in, anim::LOOT_UP)) {
                     state_ = State::NONE;
                 }
                 // Safety timeout
@@ -293,13 +301,16 @@ AnimOutput ActivityFSM::resolve(const Input& in, const AnimCapabilitySet& /*caps
             loop = false;
             break;
 
+        // Loot (50) when CMSG_LOOT goes out (0x6DAD90), LootHold (188) while
+        // the loot is open and LootUp (189) after it (0x724280). KneelLoop and
+        // KneelEnd are the /kneel emote's and stock never plays them here.
         case State::LOOT_KNEELING:
-            animId = anim::KNEEL_LOOP;
+            animId = anim::LOOT_HOLD;
             loop = true;
             break;
 
         case State::LOOT_END:
-            animId = anim::KNEEL_END;
+            animId = anim::LOOT_UP;
             loop = false;
             break;
 

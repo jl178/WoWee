@@ -3,6 +3,9 @@
 #include "addons/lua_api_registrations.hpp"
 #include "game/spell_description_eval.hpp"
 #include "game/gather_spells.hpp"
+#include "game/interaction_rules.hpp"
+#include "game/global_strings.hpp"
+#include "game/quest_giver_status.hpp"
 #include "game/packed_time.hpp"
 #include "game/inventory_slots.hpp"
 #include "game/game_utils.hpp"
@@ -258,8 +261,10 @@ std::optional<bool> withinGameObjectReach(pipeline::AssetManager* assets,
                                           const Entity& go, const glm::vec3& point) {
     if (!assets || !info) return std::nullopt;
     constexpr uint32_t kGoTypeSpellFocus = 8;
-    constexpr uint32_t kGoTypeFishingNode = 17;
-    const float reach = info->type == kGoTypeFishingNode ? 100.0f : 5.0f;
+    // The type handler's own reach: five yards for most, 5.56 for a quest
+    // giver or a sign, ten for a binder, three for a chair, a hundred for the
+    // bobber (interaction_rules.hpp).
+    const float reach = interaction::gameObjectUseRange(info->type);
     const glm::vec3 offset = point - glm::vec3(go.getX(), go.getY(), go.getZ());
     if (info->type == kGoTypeSpellFocus) return glm::length(offset) <= reach;
 
@@ -2846,8 +2851,98 @@ void GameHandler::offerPetition(uint64_t petitionGuid, uint64_t targetGuid) {
 // Loot, Gossip, Vendor
 // ============================================================
 
+void GameHandler::latchAutoLootForClick(bool autoLootModifier) {
+    if (inventoryHandler_) inventoryHandler_->latchAutoLoot(isAutoLoot() != autoLootModifier);
+}
+
 void GameHandler::lootTarget(uint64_t guid) {
     if (inventoryHandler_) inventoryHandler_->lootTarget(guid);
+}
+
+// The corpse half of CGUnit_C::OnRightClick (0x731260), with the loot request
+// itself (0x6DAD90) and the skinning cast (0x6D6F40).
+void GameHandler::rightClickCorpse(uint64_t guid, bool autoLootModifier) {
+    if (!isInWorld() || !socket) return;
+    // A dead player who has not released does nothing with a click.
+    if (isPlayerDead() && !isPlayerGhost()) return;
+    auto entity = getEntityManager().getEntity(guid);
+    if (!entity || entity->getType() != ObjectType::UNIT) return;
+    auto unit = std::static_pointer_cast<Unit>(entity);
+    if (!isUnitCorpseState(unit->getHealth(), unit->getMaxHealth(), unit->getDynamicFlags())) return;
+
+    // autoLootDefault, flipped while the auto-loot key is held (0x513700).
+    const bool autoLoot = isAutoLoot() != autoLootModifier;
+
+    float myReach = 1.5f;
+    if (auto me = std::dynamic_pointer_cast<Unit>(getEntityManager().getEntity(playerGuid))) {
+        if (me->getCombatReach() > 0.0f) myReach = me->getCombatReach();
+    }
+    const float dx = movementInfo.x - unit->getX();
+    const float dy = movementInfo.y - unit->getY();
+    const float dz = movementInfo.z - unit->getZ();
+    const float dist2 = dx * dx + dy * dy + dz * dz;
+
+    if (unit->getDynamicFlags() & UNIT_DYNFLAG_LOOTABLE) {
+        // Sitting: stand up when autoStand allows, else say so.
+        if (standState_ != 0) {
+            if (addons::storedCVarValue("autoStand", "1") == "0") {
+                raiseGameError("ERR_LOOT_NOTSTANDING", "You need to be standing up to loot something!");
+                return;
+            }
+            setStandState(0);
+        }
+        // 0x6D5A60: in melee reach of the corpse, no other loot open, not
+        // falling. Refused in silence - the cursor already said "unable".
+        const float reach = interaction::meleeReach(myReach, unit->getCombatReach());
+        if (dist2 > reach * reach) return;
+        if (isLootWindowOpen()) return;
+        if (movementInfo.flags & static_cast<uint32_t>(MovementFlags::FALLING)) return;
+        // Not while moving, turning, pitching or flying up or down (0xC010FF).
+        constexpr uint32_t kLootBlockingMoves = 0x00C010FFu;
+        if (movementInfo.flags & kLootBlockingMoves) return;
+        // Mounted: down with autoDismount, else refused.
+        if (isMounted() && !isTaxiMountActive()) {
+            if (addons::storedCVarValue("autoDismount", "1") == "0") {
+                raiseGameError("ERR_NOT_WHILE_MOUNTED", "You can't do that while mounted.");
+                return;
+            }
+            dismount();
+        }
+        if (inventoryHandler_) inventoryHandler_->latchAutoLoot(autoLoot);
+        lootTarget(guid);
+        // Loot (50) as the request goes out, before any answer (0x6DAD90).
+        if (lootWindowCallback_) lootWindowCallback_(true);
+        return;
+    }
+
+    if (unit->getUnitFlags() & interaction::kUnitFlagSkinnable) {
+        // The skill the corpse is gathered with, by its creature type flags
+        // (0x715E50): herbs, ore (mining or engineering), else hide.
+        uint32_t typeFlags = 0;
+        const auto& cache = getCreatureInfoCache();
+        if (auto it = cache.find(unit->getEntry()); it != cache.end()) typeFlags = it->second.typeFlags;
+        const uint32_t* ranks = kSkinningRanks;
+        size_t count = sizeof(kSkinningRanks) / sizeof(kSkinningRanks[0]);
+        const char* skillName = "Skinning";
+        if (typeFlags & 0x100) {
+            ranks = kHerbRanks; count = kHerbRankCount; skillName = "Herbalism";
+        } else if (typeFlags & (0x200 | 0x8000)) {
+            ranks = kMiningRanks; count = kMiningRankCount; skillName = "Mining";
+        }
+        uint32_t spellId = 0;
+        const auto& known = getKnownSpells();
+        for (size_t i = count; i > 0 && spellId == 0; --i) {
+            if (known.count(ranks[i - 1])) spellId = ranks[i - 1];
+        }
+        if (spellId == 0) {
+            addUIError(std::string("Requires ") + skillName);
+            return;
+        }
+        // The cast's own range and skill checks decide the rest; the stock
+        // client casts it from wherever the player stands (0x6D6F40).
+        if (inventoryHandler_) inventoryHandler_->latchAutoLoot(autoLoot);
+        castSpell(spellId, guid);
+    }
 }
 
 void GameHandler::lootItem(uint8_t slotIndex, bool confirmed) {
@@ -2960,83 +3055,268 @@ void GameHandler::lootMasterGive(uint8_t lootSlot, uint64_t targetGuid) {
     if (inventoryHandler_) inventoryHandler_->lootMasterGive(lootSlot, targetGuid);
 }
 
+void GameHandler::raiseGameError(const char* errorName, const char* fallback) {
+    // CGGameUI::DisplayError (0x5216F0) shows the GameError's GlobalStrings
+    // text; the English is the fallback when the interface files are absent.
+    std::string text = globalString(services_.assetManager, errorName);
+    addUIError(text.empty() ? std::string(fallback) : text);
+}
+
+// A right-click on a friendly NPC, as CGUnit_C::OnRightClick (0x731260) and
+// CGPlayer_C::OnNpcInteract (0x6DDBB0) do it. The client measures the reach
+// itself and says so when it is too far; it sends exactly one packet, picked
+// by the NPC's flags; and it neither stops, turns nor dismounts the player.
 void GameHandler::interactWithNpc(uint64_t guid) {
     if (!isInWorld()) return;
+    auto entity = getEntityManager().getEntity(guid);
+    auto* unit = dynamic_cast<Unit*>(entity.get());
     // A dead player at an area spirit healer is a different conversation. The
     // battleground ones do not answer a gossip hello at all - they answer
     // CMSG_AREA_SPIRIT_HEALER_QUERY with the seconds to the next mass
-    // resurrection, and the client has to ask. Nothing here ever asked, so the
-    // reply never came, the countdown never appeared, and the queue that
-    // actually resurrects anyone was never joined.
-    if (isPlayerDead() || isPlayerGhost()) {
-        auto entity = getEntityManager().getEntity(guid);
-        if (auto* unit = dynamic_cast<Unit*>(entity.get())) {
-            constexpr uint32_t kSpiritFlags = NPC_FLAG_SPIRIT_GUIDE | NPC_FLAG_SPIRIT_HEALER;
-            if (unit->getNpcFlags() & kSpiritFlags) {
-                queryAreaSpiritHealer(guid);
-            }
+    // resurrection, and the client has to ask (0x6DB180).
+    if (unit && (isPlayerDead() || isPlayerGhost())) {
+        constexpr uint32_t kSpiritFlags = NPC_FLAG_SPIRIT_GUIDE | NPC_FLAG_SPIRIT_HEALER;
+        if (unit->getNpcFlags() & kSpiritFlags) {
+            queryAreaSpiritHealer(guid);
         }
     }
-    // Only to a unit the server says has something to say. UNIT_NPC_FLAGS is
-    // zero for a creature that is not a questgiver, vendor, trainer, healer or
-    // any of the rest, and a hello sent to one of those is answered with the
-    // default gossip text - which is how a dog came to greet the player by
-    // name through a full conversation window with nothing in it but Goodbye.
-    //
-    // Zero is a real answer rather than a missing one: an update block carries
-    // only the fields that are set, so a creature with no NPC flags and one
-    // whose flags have not arrived are the same case and both mean there is
-    // nothing here to talk to.
-    if (auto entity = getEntityManager().getEntity(guid)) {
-        if (auto* unit = dynamic_cast<Unit*>(entity.get())) {
-            if (!unit->isInteractable()) {
-                LOG_DEBUG("interactWithNpc: 0x", std::hex, guid, std::dec,
-                          " has no NPC flags; no gossip hello sent");
-                return;
-            }
-            // Sent anyway - the server is the judge - but said, because the
-            // server says nothing: an NPC whose faction regards the player as
-            // Unfriendly or worse is refused the conversation in silence.
-            if (const int reaction = unitReactionToPlayer(*unit); reaction <= 3) {
-                static std::unordered_set<uint64_t> said;
-                if (said.insert(guid).second) {
-                    LOG_WARNING("interactWithNpc: ", unit->getName(), " (faction template ",
-                                unit->getFactionTemplate(), ") regards you as ",
-                                kReputationStandings[std::max(reaction, 1) - 1].name,
-                                " - the server will not talk to you below Neutral");
-                }
-            }
+    // UNIT_NPC_FLAGS zero is a creature with nothing to say, and an update
+    // block leaves zero fields out, so "not arrived" means the same thing.
+    if (!unit || !unit->isInteractable()) {
+        LOG_DEBUG("interactWithNpc: 0x", std::hex, guid, std::dec, " has no NPC flags; nothing sent");
+        return;
+    }
+    // Reach: the NPC's combat reach plus four yards, centre to centre in 3D.
+    // Nothing is sent from further out; the player is told instead.
+    {
+        const float dx = movementInfo.x - unit->getX();
+        const float dy = movementInfo.y - unit->getY();
+        const float dz = movementInfo.z - unit->getZ();
+        const float reach = interaction::npcInteractRange(unit->getCombatReach());
+        if (dx * dx + dy * dy + dz * dz > reach * reach) {
+            raiseGameError("ERR_TOO_FAR_TO_INTERACT",
+                           "You need to be closer to interact with that target.");
+            return;
+        }
+    }
+    // Already the one whose window is open: the second click does nothing.
+    if (guid == interactTargetGuid_) return;
+
+    // Sent anyway - the server is the judge - but said, because the server
+    // says nothing: an NPC whose faction regards the player as Unfriendly or
+    // worse is refused the conversation in silence.
+    if (const int reaction = unitReactionToPlayer(*unit); reaction <= 3) {
+        static std::unordered_set<uint64_t> said;
+        if (said.insert(guid).second) {
+            LOG_WARNING("interactWithNpc: ", unit->getName(), " (faction template ",
+                        unit->getFactionTemplate(), ") regards you as ",
+                        kReputationStandings[std::max(reaction, 1) - 1].name,
+                        " - the server will not talk to you below Neutral");
         }
     }
 
-    auto packet = GossipHelloPacket::build(guid);
-    socket->send(packet);
-
-    // The greeting plays on the right-click, as stock does, whatever window
-    // the server answers with: vendors, trainers, bankers and quest givers
-    // open no gossip and used to stay silent.
-    if (npcGreetingCallback_) {
-        if (auto entity = getEntityManager().getEntity(guid)) {
-            npcGreetingCallback_(guid, glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
-        }
+    // One packet, by the first flag in the stock order. Every one of these is
+    // the NPC's guid and nothing else.
+    const auto status = static_cast<uint8_t>(getQuestGiverStatus(guid));
+    const interaction::NpcHello hello = interaction::npcHelloFor(unit->getNpcFlags(), status);
+    auto sendGuidPacket = [&](Opcode op) {
+        const auto* table = getActiveOpcodeTable();
+        if (table && !table->hasOpcode(op)) return false;
+        network::Packet packet(wireOpcode(op));
+        packet.writeUInt64(guid);
+        socket->send(packet);
+        return true;
+    };
+    bool sent = true;
+    switch (hello) {
+        case interaction::NpcHello::Gossip:
+            sent = sendGuidPacket(Opcode::CMSG_GOSSIP_HELLO); break;
+        case interaction::NpcHello::QuestGiver:
+            sent = sendGuidPacket(Opcode::CMSG_QUESTGIVER_HELLO); break;
+        case interaction::NpcHello::Taxi:
+            sent = sendGuidPacket(Opcode::CMSG_TAXIQUERYAVAILABLENODES); break;
+        case interaction::NpcHello::Vendor:
+            sent = sendGuidPacket(Opcode::CMSG_LIST_INVENTORY); break;
+        case interaction::NpcHello::Trainer:
+            sent = sendGuidPacket(Opcode::CMSG_TRAINER_LIST); break;
+        case interaction::NpcHello::SpiritHealer:
+        case interaction::NpcHello::Innkeeper:
+            // Both ask before they act: the stock client raises CONFIRM_XP_LOSS
+            // or CONFIRM_BINDER itself and sends the activate on the answer.
+            // CMSG_SPIRIT_HEALER_ACTIVATE or CMSG_BINDER_ACTIVATE sent now
+            // would resurrect or bind with no question asked, so the hello is
+            // sent instead and the server's own confirmation is the question.
+            sent = sendGuidPacket(Opcode::CMSG_GOSSIP_HELLO); break;
+        case interaction::NpcHello::SpiritGuide:
+            queryAreaSpiritHealer(guid); break;
+        case interaction::NpcHello::Banker:
+            sent = sendGuidPacket(Opcode::CMSG_BANKER_ACTIVATE); break;
+        case interaction::NpcHello::Petitioner:
+            requestPetitionShowlist(guid); break;
+        case interaction::NpcHello::TabardDesigner:
+            sent = sendGuidPacket(Opcode::MSG_TABARDVENDOR_ACTIVATE); break;
+        case interaction::NpcHello::Battlemaster:
+            sent = sendGuidPacket(Opcode::CMSG_BATTLEMASTER_HELLO); break;
+        case interaction::NpcHello::Auctioneer:
+            // The window opens on the server's MSG_AUCTION_HELLO answer.
+            sent = sendGuidPacket(Opcode::MSG_AUCTION_HELLO); break;
+        case interaction::NpcHello::StableMaster:
+            stableMasterGuid_ = guid;
+            requestStabledPetList(); break;
+        case interaction::NpcHello::GuildBanker:
+            openGuildBank(guid); break;
+        case interaction::NpcHello::SpellClick:
+            sent = sendGuidPacket(Opcode::CMSG_SPELLCLICK); break;
+        case interaction::NpcHello::Mailbox:
+            openMailbox(guid); break;
+        case interaction::NpcHello::None:
+            return;
     }
+    // A table without the specific opcode still has the gossip hello, which
+    // AzerothCore answers for any NPC flag.
+    if (!sent) sendGuidPacket(Opcode::CMSG_GOSSIP_HELLO);
 
     pendingNpcHello_ = PendingNpcHello{};
     pendingNpcHello_.guid = guid;
     pendingNpcHello_.sentAt = std::chrono::steady_clock::now();
-    if (auto entity = getEntityManager().getEntity(guid)) {
-        const float dx = movementInfo.x - entity->getX();
-        const float dy = movementInfo.y - entity->getY();
-        const float dz = movementInfo.z - entity->getZ();
+    {
+        const float dx = movementInfo.x - unit->getX();
+        const float dy = movementInfo.y - unit->getY();
+        const float dz = movementInfo.z - unit->getZ();
         pendingNpcHello_.distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-        if (auto* unit = dynamic_cast<Unit*>(entity.get())) {
-            pendingNpcHello_.name = unit->getName();
-            pendingNpcHello_.reaction = unitReactionToPlayer(*unit);
-            pendingNpcHello_.npcFlags = unit->getNpcFlags();
-        }
+        pendingNpcHello_.name = unit->getName();
+        pendingNpcHello_.reaction = unitReactionToPlayer(*unit);
+        pendingNpcHello_.npcFlags = unit->getNpcFlags();
     }
-    LOG_DEBUG("interactWithNpc: hello to ", pendingNpcHello_.name, " at ",
-              pendingNpcHello_.distance, " yards");
+    LOG_DEBUG("interactWithNpc: hello ", static_cast<int>(hello), " to ", pendingNpcHello_.name,
+              " at ", pendingNpcHello_.distance, " yards");
+}
+
+bool GameHandler::interactTargetFacesPlayer(uint64_t guid) const {
+    if (guid == 0 || guid != interactTargetGuid_) return false;
+    auto entity = entityController_ ? entityController_->getEntityManager().getEntity(guid) : nullptr;
+    if (!entity || entity->getType() != ObjectType::UNIT) return false;
+    auto unit = std::static_pointer_cast<Unit>(entity);
+    // 0x735F60 turns a unit to the active player only when it has no target
+    // or channel object of its own, stands (stand state 0), is not stunned
+    // (UNIT_FLAG_STUNNED 0x40000) or possessed (0x01000000), and is alive.
+    // An NPC emote state whose Emotes.dbc row lacks flag 0x2000 keeps the NPC
+    // at its work instead; with the flag, the emote stops while it talks
+    // (0x7171C0). Only the no-emote case is taken here, so an NPC at work is
+    // never turned while still working.
+    constexpr uint32_t kNoTurnFlags = 0x00040000u | 0x01000000u;
+    return unit->getHealth() > 0 && unit->getStandState() == 0 &&
+           (unit->getUnitFlags() & kNoTurnFlags) == 0 && unit->getNpcEmoteState() == 0 &&
+           unitTargetGuid(*unit) == 0;
+}
+
+std::optional<bool> GameHandler::gameObjectInUseReach(uint64_t guid) const {
+    auto entity = entityController_ ? entityController_->getEntityManager().getEntity(guid) : nullptr;
+    if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return std::nullopt;
+    const auto* info = getCachedGameObjectInfo(std::static_pointer_cast<GameObject>(entity)->getEntry());
+    return withinGameObjectReach(services_.assetManager, info, *entity,
+                                 glm::vec3(movementInfo.x, movementInfo.y, movementInfo.z));
+}
+
+// The interact target: whoever's window is open. The stock client keeps one
+// (CGGameUI 0xBD07A8), set when a window opens (0x51FCE0), and every frame
+// (0x51FDE0, from CGWorldFrame 0x4FA040) gives it up when the player is out of
+// reach of it, it is gone, or it is no longer something to talk to. Giving it
+// up closes every window bound to it (0x512E60) - gossip, quest, vendor,
+// trainer, taxi, bank, guild bank, auction, mail, stable, petition, trade - and
+// a unit says its NPCSounds greeting when it becomes the target and its
+// farewell when it stops being one (0x720860).
+void GameHandler::updateInteractTarget() {
+    struct Bound {
+        bool open;
+        uint64_t guid;
+        std::function<void()> close;
+    };
+    auto* inv = inventoryHandler_.get();
+    const Bound windows[] = {
+        {inv && inv->isTradeOpen(), inv ? inv->getTradePeerGuid() : 0, [this] { cancelTrade(); }},
+        {isVendorWindowOpen(), getVendorGuid(), [this] { closeVendor(); }},
+        {isTrainerWindowOpen(), getTrainerSpells().trainerGuid, [this] { closeTrainer(); }},
+        {isTaxiWindowOpen(), movementHandler_ ? movementHandler_->getTaxiNpcGuid() : 0,
+         [this] { closeTaxi(); }},
+        {isQuestDetailsOpen(), getQuestDetails().npcGuid, [this] { declineQuest(true); }},
+        {isQuestRequestItemsOpen(), getQuestRequestItems().npcGuid,
+         [this] { closeQuestRequestItems(true); }},
+        {isQuestOfferRewardOpen(), getQuestOfferReward().npcGuid,
+         [this] { closeQuestOfferReward(true); }},
+        {isGossipWindowOpen(), getCurrentGossip().npcGuid, [this] { closeGossip(); }},
+        {isBankOpen(), getBankerGuid(), [this] { closeBank(); }},
+        {isGuildBankOpen(), inv ? inv->getGuildBankerGuid() : 0, [this] { closeGuildBank(); }},
+        {isAuctionHouseOpen(), getAuctioneerGuid(), [this] { closeAuctionHouse(); }},
+        {isMailboxOpen(), inv ? inv->getMailboxGuid() : 0, [this] { closeMailbox(); }},
+        {isStableWindowOpen(), getStableMasterGuid(), [this] { closeStableWindow(); }},
+        {hasPetitionShowlist(), getPetitionNpcGuid(), [this] { closePetitionVendor(); }},
+    };
+
+    uint64_t current = 0;
+    for (const auto& w : windows) {
+        if (w.open && w.guid != 0) { current = w.guid; break; }
+    }
+
+    // Out of reach, gone, or no longer an NPC: let go of it.
+    auto stillInReach = [&](uint64_t guid) -> bool {
+        auto entity = getEntityManager().getEntity(guid);
+        if (!entity) {
+            // An item is a target with no place in the world (a quest offered
+            // from a bag): never out of reach. Anything else that has left
+            // view has gone.
+            return guid == playerGuid || (guid >> 48) == 0x4000;
+        }
+        const glm::vec3 me(movementInfo.x, movementInfo.y, movementInfo.z);
+        const glm::vec3 it(entity->getX(), entity->getY(), entity->getZ());
+        const float d2 = glm::dot(me - it, me - it);
+        if (entity->getType() == ObjectType::PLAYER) {
+            return d2 <= interaction::kPlayerInteractRangeSq;
+        }
+        if (entity->getType() == ObjectType::UNIT) {
+            auto unit = std::static_pointer_cast<Unit>(entity);
+            if (unit->getNpcFlags() == 0) return false;
+            // A creature always has a combat reach; zero is one whose field
+            // has not been read, and the default 1.5 stands in for it.
+            const float reachField = unit->getCombatReach();
+            const float reach = interaction::npcInteractRange(reachField > 0.0f ? reachField : 1.5f);
+            return d2 <= reach * reach;
+        }
+        if (entity->getType() == ObjectType::GAMEOBJECT) {
+            if (auto inReach = gameObjectInUseReach(guid)) return *inReach;
+            // No model box to grow: its type's reach plus a few yards of body.
+            const auto* info = getCachedGameObjectInfo(
+                std::static_pointer_cast<GameObject>(entity)->getEntry());
+            const float reach = interaction::gameObjectUseRange(info ? info->type : 0) + 5.0f;
+            return d2 <= reach * reach;
+        }
+        return true;
+    };
+
+    if (current != 0 && !stillInReach(current)) {
+        LOG_INFO("Interact target 0x", std::hex, current, std::dec,
+                 " out of reach: closing its windows");
+        for (const auto& w : windows) {
+            if (w.open && w.guid == current) w.close();
+        }
+        current = 0;
+    }
+
+    if (current == interactTargetGuid_) return;
+    const uint64_t previous = interactTargetGuid_;
+    interactTargetGuid_ = current;
+    auto voice = [&](uint64_t guid, auto& callback) {
+        if (!callback) return;
+        auto entity = getEntityManager().getEntity(guid);
+        if (!entity || entity->getType() != ObjectType::UNIT) return;
+        auto unit = std::static_pointer_cast<Unit>(entity);
+        if (unit->getHealth() == 0 || isPlayerDead()) return;
+        callback(guid, glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
+    };
+    // Farewell only when the target is let go of, not when another replaces
+    // it (0x518D50 passes "replaced" to 0x720860).
+    if (previous != 0 && current == 0) voice(previous, npcFarewellCallback_);
+    if (current != 0) voice(current, npcGreetingCallback_);
 }
 
 void GameHandler::queryAreaSpiritHealer(uint64_t guid) {
@@ -3082,29 +3362,27 @@ void GameHandler::interactWithGameObject(uint64_t guid) {
         addUIError("You can't do that while flying.");
         return;
     }
-    // Always clear melee intent before GO interactions.
-    stopAutoAttack();
-    // And get off the mount. Opening a chest, gathering a node or using very
-    // nearly anything else puts a player on foot in WoW, and staying mounted
-    // through it both looks wrong and leaves the server refusing the actions
-    // that check for it.
-    //
-    // Only for something within reach. The server lets an object be used from
-    // five yards or so - ten for a few kinds - and refuses anything further,
-    // so a click on one across the valley cost the mount and did nothing.
-    //
-    // Not on a taxi: the flight's mount is not the player's to dismiss, and
-    // there is nothing to interact with mid-flight anyway.
+    // An open loot is released first (0x711140 -> 0x523640). An auto-attack
+    // is left running: the stock client does not stop it to use an object.
+    if (isLootWindowOpen()) closeLoot();
+    // Getting down (0x711470, 0x7116C0). A mailbox is used from the saddle,
+    // and so is anything whose template allows it (0x710390); for the rest
+    // autoDismount takes the player down, and with it off the use is refused.
+    // Only within reach: the stock client checks the reach before it gets
+    // anyone off a mount, so a click across the valley costs nothing.
     if (isMounted() && !isTaxiMountActive()) {
-        constexpr float kGameObjectReach = 12.0f;
-        bool inReach = true;
-        if (auto entity = getEntityManager().getEntity(guid)) {
-            const float dx = movementInfo.x - entity->getX();
-            const float dy = movementInfo.y - entity->getY();
-            const float dz = movementInfo.z - entity->getZ();
-            inReach = dx * dx + dy * dy + dz * dz <= kGameObjectReach * kGameObjectReach;
+        const GameObjectQueryResponseData* goInfo = nullptr;
+        if (auto entity = getEntityManager().getEntity(guid);
+            entity && entity->getType() == ObjectType::GAMEOBJECT) {
+            goInfo = getCachedGameObjectInfo(std::static_pointer_cast<GameObject>(entity)->getEntry());
         }
-        if (inReach) {
+        const bool allowsMounted = goInfo &&
+            interaction::gameObjectAllowsMounted(goInfo->type, goInfo->hasData ? goInfo->data : nullptr);
+        if (!allowsMounted && gameObjectInUseReach(guid).value_or(true)) {
+            if (addons::storedCVarValue("autoDismount", "1") == "0") {
+                raiseGameError("ERR_NOT_WHILE_MOUNTED", "You can't do that while mounted.");
+                return;
+            }
             LOG_DEBUG("[GO-DIAG] dismounting before interacting");
             dismount();
         }
@@ -3178,8 +3456,6 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
     lastInteractGuid = guid;
     lastInteractTime = now;
 
-    // Ensure GO interaction isn't blocked by stale or active melee state.
-    stopAutoAttack();
     auto entity = entityController_->getEntityManager().getEntity(guid);
     uint32_t goEntry = 0;
     uint32_t goType = 0;
@@ -3224,25 +3500,22 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
             ? std::nullopt
             : withinGameObjectReach(services_.assetManager, goInfo, *entity,
                                     glm::vec3(movementInfo.x, movementInfo.y, movementInfo.z));
-        const float maxInteractDistance = (guid == hookedFishingBobberGuid_) ? 30.0f : 10.0f;
+        const float maxInteractDistance = (guid == hookedFishingBobberGuid_)
+            ? 30.0f : interaction::gameObjectUseRange(goType) + 5.0f;
         if (inReach ? !*inReach : dist3d > maxInteractDistance) {
-            raiseUiError("Too far away.");
+            raiseGameError("ERR_USE_TOO_FAR", "You are too far away.");
             return;
         }
-        // Stop movement before interacting - servers may reject GO use or
-        // immediately cancel the resulting spell cast if the player is moving.
-        const uint32_t moveFlags = movementInfo.flags;
-        const bool isMoving = (moveFlags & 0x00000001u) || // FORWARD
-                              (moveFlags & 0x00000002u) || // BACKWARD
-                              (moveFlags & 0x00000004u) || // STRAFE_LEFT
-                              (moveFlags & 0x00000008u);   // STRAFE_RIGHT
-        if (isMoving) {
-            movementInfo.flags &= ~0x0000000Fu; // clear directional movement flags
-            sendMovement(Opcode::MSG_MOVE_STOP);
+        // A chest that says "not in combat" stays shut in a fight (0x710340).
+        if (goInfo && isInCombat() &&
+            !interaction::gameObjectUsableInCombat(goInfo->type, goInfo->hasData ? goInfo->data : nullptr)) {
+            raiseGameError("ERR_NOT_IN_COMBAT", "You can't do that while in combat");
+            return;
         }
-        if (std::abs(dx) > 0.01f || std::abs(dy) > 0.01f) {
-            faceCanonicalYaw(std::atan2(-dy, dx));
-        }
+        // The stock client neither stops nor turns the player to use an object
+        // (CGGameObject_C::OnRightClick 0x711140, Use 0x70F680): a gather
+        // started on the move is the cast's to refuse. Only the position is
+        // brought up to date, which nothing on screen shows.
         sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
     }
 
@@ -3391,9 +3664,15 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
                  " entry=", goEntry, " name='", goName, "'");
     }
 
-    // Every expansion activates game objects through CMSG_GAMEOBJ_USE.
-    auto usePacket = GameObjectUsePacket::build(guid);
-    socket->send(usePacket);
+    // CMSG_GAMEOBJ_USE is the generic type handler's use (0x7116C0). A
+    // mailbox (0x70C9D0), a guild vault (0x70ECB0) and a sign (0x70C850) have
+    // their own, which open their window here and send no USE; only the
+    // CMSG_GAMEOBJ_REPORT_USE after it goes out for them too (0x70F680).
+    const bool ownUse = isMailbox || isGuildBank || (goInfo && goInfo->type == 9);
+    if (!ownUse) {
+        auto usePacket = GameObjectUsePacket::build(guid);
+        socket->send(usePacket);
+    }
     lastInteractedGoGuid_ = guid;
     if (guid == hookedFishingBobberGuid_) {
         LOG_WARNING("Fishing bobber reel sent: guid=0x", std::hex, guid, std::dec,

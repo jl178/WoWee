@@ -39,6 +39,18 @@ constexpr uint32_t kSoundFlagLoops = 0x200;
 constexpr uint32_t kAnimHold = 158;
 constexpr uint32_t kAnimDecay = 159;
 constexpr float kDegToRad = glm::pi<float>() / 180.0f;
+// SpellVisual.Flags 0x200: MissileAttachment / MissileDestinationAttachment
+// are M2 attachment ids rather than indices into the table below.
+constexpr uint32_t kVisualFlagRawAttachments = 0x200;
+// SpellVisualKit.Flags 0x20: a state kit loops its birth, not Hold.
+constexpr uint32_t kKitFlagLoopStand = 0x20;
+// Wow.exe 0xADAA20: SpellVisual's missile attachment index -> M2 attachment.
+// Head, Chest, Base, SpellLeftHand, SpellRightHand, Breath, Special1-3,
+// ChestBloodFront, ChestBloodBack, SpellHandOmni, SpellHandDirected,
+// SpellRightHand again, and 47/48 (the feet). The first nine are the kit
+// effect columns without the weapons (see kSlotAttach).
+constexpr int32_t kMissileAttachmentIds[] = {20, 34, 19, 21, 22, 17, 23, 24, 25,
+                                             15, 16, 37, 38, 22, 47, 48};
 }  // namespace
 
 SpellVisualSystem::~SpellVisualSystem() {
@@ -131,10 +143,15 @@ void SpellVisualSystem::loadSpellVisualDbc() {
     }
     uint32_t kitAnimField = kitLayout ? kitLayout->tryField("AnimID") : kNone;
     if (kitAnimField == kNone && kitFields[SLOT_HEAD] == 3) kitAnimField = 2;
+    uint32_t kitStartAnimField = kitLayout ? kitLayout->tryField("StartAnimID") : kNone;
+    if (kitStartAnimField == kNone && kitFields[SLOT_HEAD] == 3) kitStartAnimField = 1;
     // 3.3.5a SpellVisualKit (38 columns): 14 WorldEffect, 15 SoundID. Used
     // from the layout when it names them, else only on a file of that shape.
     uint32_t kitWorldField = kitLayout ? kitLayout->tryField("WorldEffect") : kNone;
     uint32_t kitSoundField = kitLayout ? kitLayout->tryField("SoundID") : kNone;
+    // 37 Flags: the kit's play flags (0x20 a state loops Stand instead of
+    // Hold, 0x100 the caster keeps its weapons out).
+    uint32_t kitFlagsField = kitLayout ? kitLayout->tryField("Flags") : kNone;
 
     // Load SpellVisualEffectName.dbc - ID → M2 path
     auto fxDbc = cachedAssetManager_->loadDBC("SpellVisualEffectName.dbc");
@@ -167,6 +184,7 @@ void SpellVisualSystem::loadSpellVisualDbc() {
         if (fc == 38) {
             if (kitWorldField == kNone) kitWorldField = 14;
             if (kitSoundField == kNone) kitSoundField = 15;
+            if (kitFlagsField == kNone) kitFlagsField = 37;
         }
         for (uint32_t i = 0; i < kitDbc->getRecordCount(); ++i) {
             uint32_t kitId = kitDbc->getUInt32(i, 0);
@@ -184,6 +202,10 @@ void SpellVisualSystem::loadSpellVisualDbc() {
                 const int32_t anim = kitDbc->getInt32(i, kitAnimField);
                 row.animId = anim > 0 ? static_cast<uint32_t>(anim) : 0;
             }
+            if (kitStartAnimField < fc) {
+                const int32_t anim = kitDbc->getInt32(i, kitStartAnimField);
+                row.startAnimId = anim > 0 ? static_cast<uint32_t>(anim) : 0;
+            }
             if (kitWorldField < fc) {
                 auto fxIt = effectPaths.find(kitDbc->getUInt32(i, kitWorldField));
                 if (fxIt != effectPaths.end()) row.worldEffect = fxIt->second;
@@ -192,10 +214,11 @@ void SpellVisualSystem::loadSpellVisualDbc() {
                 const int32_t snd = kitDbc->getInt32(i, kitSoundField);
                 row.soundId = snd > 0 ? static_cast<uint32_t>(snd) : 0;
             }
+            if (kitFlagsField < fc) row.flags = kitDbc->getUInt32(i, kitFlagsField);
             kitEffects += static_cast<uint32_t>(row.effects.size());
             // A kit that is only a sound (Blizzard's persistent area: the
             // falling-ice clatter) or only a world effect is still a kit.
-            if (!row.effects.empty() || row.animId || row.soundId || !row.worldEffect.empty())
+            if (!row.effects.empty() || row.animId || row.startAnimId || row.soundId || !row.worldEffect.empty())
                 kits_[kitId] = std::move(row);
         }
     }
@@ -226,6 +249,8 @@ void SpellVisualSystem::loadSpellVisualDbc() {
     const uint32_t svStateKitField      = field("StateKit", 4);
     const uint32_t svStateDoneKitField  = field("StateDoneKit", 5);
     const uint32_t svTargetImpactField  = field("TargetImpactKit", 15);
+    const uint32_t svCasterImpactField  = field("CasterImpactKit", 14);
+    const uint32_t svFlagsField         = field("Flags", 13);
     const uint32_t svHasMissileField    = field("HasMissile", 7);
     const uint32_t svPathTypeField      = field("MissilePathType", 9);
     const uint32_t svMissileSoundField  = field("MissileSound", 11);
@@ -255,6 +280,8 @@ void SpellVisualSystem::loadSpellVisualDbc() {
         v.stateKit     = readField(i, svStateKitField);
         v.stateDoneKit = readField(i, svStateDoneKitField);
         v.targetImpactKit = readField(i, svTargetImpactField);
+        v.casterImpactKit = readField(i, svCasterImpactField);
+        v.flags = readField(i, svFlagsField);
         v.instantAreaKit    = readField(i, svInstantAreaField);
         v.impactAreaKit     = readField(i, svImpactAreaField);
         v.persistentAreaKit = readField(i, svPersistentAreaField);
@@ -267,10 +294,19 @@ void SpellVisualSystem::loadSpellVisualDbc() {
         v.followGroundHeight    = static_cast<float>(readInt(i, svFgHeightField)) / 100.0f;
         v.followGroundDropSpeed = static_cast<float>(readInt(i, svFgDropField)) / 100.0f;
         v.followGroundApproach  = static_cast<float>(readInt(i, svFgApproachField)) / 100.0f;
+        // The DBC's attachment columns are indices into the stock table
+        // (Wow.exe 0xADAA20, read at 0x7FAA40 for the source and 0x732FF0 for
+        // the destination), or raw attachment ids with Flags 0x200.
+        auto attachmentOf = [&](int32_t value, int32_t fallback) -> int32_t {
+            if (value < 0) return fallback;
+            if (v.flags & kVisualFlagRawAttachments) return value;
+            return value < static_cast<int32_t>(std::size(kMissileAttachmentIds))
+                ? kMissileAttachmentIds[value] : fallback;
+        };
         if (svMissileAttachField < svFc)
-            v.missileAttachment = svDbc->getInt32(i, svMissileAttachField);
+            v.missileAttachment = attachmentOf(svDbc->getInt32(i, svMissileAttachField), -1);
         if (svMissileDestField < svFc)
-            v.missileDestination = svDbc->getInt32(i, svMissileDestField);
+            v.missileDestination = attachmentOf(svDbc->getInt32(i, svMissileDestField), 34);
         // The missile flies from caster to target; it is never a stand-in
         // for a missing cast or impact kit.
         if (const uint32_t eff = readField(i, svMissileField)) {
@@ -303,23 +339,27 @@ void SpellVisualSystem::loadSpellVisualDbc() {
 // ---------------------------------------------------------------------------
 // Kit slot → model attachment point
 // ---------------------------------------------------------------------------
-// Every creature and character model carries the spell attachment set
-// 15 ChestBloodFront, 17 Breath, 19 Base, 20 Head, 21 SpellLeftHand,
-// 22 SpellRightHand (checked on humanmale, orcmale, kobold, wolf, murloc,
-// dragonwhelp); the older ids follow as fallbacks. 11 (Helm) is missing on
-// creatures, so a head effect aimed there fell back to the feet.
+// The stock client's own mapping (CGUnit_C::PlaySpellVisualKit, Wow.exe
+// 0x745230, and 0x73A6C0 for the weapons): head 20, chest 34 (Chest - not 15,
+// ChestBloodFront, which is the blood spray's point and turned with it),
+// base 19, hands 21/22, breath 17, weapons 2/1 (the hands that hold them),
+// specials 23/24/25 (Special1-3). The later ids are this client's fallbacks
+// for a model that lacks the first: 11 (Helm) is missing on creatures, and
+// few models carry Special1-3, whose effects then stand at the base.
 namespace {
 struct SlotAttach { uint32_t ids[3]; float fallbackHeight; };
 constexpr SlotAttach kSlotAttach[SpellVisualSystem::SLOT_COUNT] = {
     /* HEAD         */ {{20, 11, 0},  1.9f},
-    /* CHEST        */ {{15, 34, 0},  1.3f},
+    /* CHEST        */ {{34, 15, 0},  1.3f},
     /* BASE         */ {{19, 0, 0},   0.0f},
     /* LEFT_HAND    */ {{21, 2, 0},   1.0f},
     /* RIGHT_HAND   */ {{22, 1, 0},   1.0f},
     /* BREATH       */ {{17, 20, 11}, 1.7f},
     /* LEFT_WEAPON  */ {{2, 21, 0},   1.0f},
     /* RIGHT_WEAPON */ {{1, 22, 0},   1.0f},
-    /* SPECIAL0..2  */ {{19, 0, 0},   0.0f}, {{19, 0, 0}, 0.0f}, {{19, 0, 0}, 0.0f},
+    /* SPECIAL0     */ {{23, 19, 0},  0.0f},
+    /* SPECIAL1     */ {{24, 19, 0},  0.0f},
+    /* SPECIAL2     */ {{25, 19, 0},  0.0f},
 };
 // Base and special effects stand on the ground under the unit (19 Base).
 // A 0 ends a list: id 0 (Shield/MountMain) is never a spell slot.
@@ -342,6 +382,23 @@ bool SpellVisualSystem::slotTransform(uint8_t slot, uint32_t attachInstanceId,
     return false;
 }
 
+bool SpellVisualSystem::attachmentTransform(int32_t attachmentId, uint32_t attachInstanceId,
+                                            const glm::vec3& feetPos, float fallbackHeight,
+                                            glm::mat4& out) const {
+    if (attachInstanceId != 0 && renderer_) {
+        if (auto* cr = renderer_->getCharacterRenderer()) {
+            // Wow.exe 0x7022D0: the attachment asked for, else 15, else 19.
+            for (int32_t id : {attachmentId, 15, 19}) {
+                if (id < 0) continue;
+                if (cr->getAttachmentTransform(attachInstanceId, static_cast<uint32_t>(id), out))
+                    return true;
+            }
+        }
+    }
+    out = glm::translate(glm::mat4(1.0f), feetPos + glm::vec3(0.0f, 0.0f, fallbackHeight));
+    return false;
+}
+
 // One kit on one unit (or at one point): each slot the kit fills gets its
 // own model at that slot's attachment, riding it from then on; the world
 // effect stands where the kit was played; the kit's sound plays at the unit.
@@ -353,8 +410,11 @@ void SpellVisualSystem::spawnKit(uint32_t kitId, const KitSpawn& spawn) {
 
     float longest = 0.0f;  // the kit's models' lifetime, for a looping sound
     const size_t before = activeSpellVisuals_.size();
-    for (const auto& fx : kit.effects)
+    for (const auto& fx : kit.effects) {
+        // At a point on the ground only the base effect has a place to be.
+        if (spawn.atPoint && fx.slot != SLOT_BASE) continue;
         spawnKitModel(kitId, fx.path, fx.slot, /*world=*/false, spawn);
+    }
     if (!kit.worldEffect.empty())
         spawnKitModel(kitId, kit.worldEffect, SLOT_BASE, /*world=*/true, spawn);
     for (size_t i = before; i < activeSpellVisuals_.size(); ++i)
@@ -412,6 +472,11 @@ bool SpellVisualSystem::spawnKitModel(uint32_t kitId, const std::string& path, u
     sv.birthDuration = animDurMs / 1000.0f;
     sv.hasHold = m2Renderer_->hasAnimation(instanceId, kAnimHold);
     sv.hasDecay = m2Renderer_->hasAnimation(instanceId, kAnimDecay);
+    // A precast kit replays its birth for as long as the cast lasts, and a
+    // state kit flagged 0x20 loops it too; the others go on to Hold.
+    if (auto kIt = kits_.find(kitId); spawn.loopBirth ||
+        (kIt != kits_.end() && (kIt->second.flags & kKitFlagLoopStand)))
+        sv.noHold = true;
     float duration = spawn.lifetime;
     if (duration <= 0.0f) {
         duration = (animDurMs > 100.0f)
@@ -523,9 +588,14 @@ SpellVisualSystem::KitAnimations SpellVisualSystem::getKitAnimations(uint32_t vi
         auto kIt = kits_.find(kitId);
         return kIt != kits_.end() ? kIt->second.animId : 0u;
     };
+    out.hasPrecastKit = vIt->second.precastKit != 0;
+    if (auto kIt = kits_.find(vIt->second.precastKit); kIt != kits_.end())
+        out.precastStart = kIt->second.startAnimId;
     out.precast = anim(vIt->second.precastKit);
     out.cast    = anim(vIt->second.castKit);
     out.channel = anim(vIt->second.channelKit);
+    out.impact  = anim(vIt->second.targetImpactKit ? vIt->second.targetImpactKit
+                                                   : vIt->second.impactKit);
     return out;
 }
 
@@ -556,6 +626,7 @@ void SpellVisualSystem::playSpellVisualPrecast(uint32_t visualId, const glm::vec
     s.feetPos = worldPosition;
     s.attachInstanceId = attachInstanceId;
     s.isPrecast = true;
+    s.loopBirth = !channel;  // a channel kit is a state kit to the stock client
     s.ownerGuid = casterGuid;
     s.lifetime = (durationMs > 0)
         ? std::min(static_cast<float>(durationMs) / 1000.0f + 1.0f, SPELL_PRECAST_MAX_DURATION)
@@ -628,7 +699,8 @@ uint32_t SpellVisualSystem::loadSpellModel(const std::string& modelPath) {
 }
 
 void SpellVisualSystem::playSpellVisual(uint32_t visualId, const glm::vec3& worldPosition,
-                                         bool useImpactKit, uint32_t attachInstanceId) {
+                                         bool useImpactKit, uint32_t attachInstanceId,
+                                         bool targetIsCaster) {
     if (!m2Renderer_ || visualId == 0) return;
     if (!cachedAssetManager_)
         cachedAssetManager_ = core::Application::getInstance().getAssetManager();
@@ -640,15 +712,26 @@ void SpellVisualSystem::playSpellVisual(uint32_t visualId, const glm::vec3& worl
     // The kit asked for and no other. A missing cast kit used to borrow the
     // impact kit (and the reverse), so Sinister Strike - whose cast kit is an
     // animation only - burst its impact on the rogue as well as the target.
-    const uint32_t kitId = useImpactKit ? vIt->second.impactKit : vIt->second.castKit;
+    const VisualRow& v = vIt->second;
+    uint32_t kitId = v.castKit;
+    if (useImpactKit) {
+        // One impact per unit hit (Wow.exe 0x800D00): TargetImpactKit in
+        // place of ImpactKit on a target - Blizzard's tick spell 42208 has
+        // only that one - CasterImpactKit on the caster. Both used to play,
+        // so the 19 visuals naming two different kits burst twice.
+        const uint32_t own = targetIsCaster ? v.casterImpactKit : v.targetImpactKit;
+        kitId = own ? own : v.impactKit;
+    }
     KitSpawn s;
     s.feetPos = worldPosition;
     s.attachInstanceId = attachInstanceId;
     spawnKit(kitId, s);
-    // TargetImpactKit goes with the impact (208 visuals; Blizzard's tick
-    // spell 42208 has only this one: Blizzard_Impact_Base and the clatter).
-    if (useImpactKit && vIt->second.targetImpactKit != kitId)
-        spawnKit(vIt->second.targetImpactKit, s);
+}
+
+uint32_t SpellVisualSystem::visualFlags(uint32_t visualId) {
+    if (visualId == 0 || !ensureLoaded()) return 0;
+    auto it = visuals_.find(visualId);
+    return it != visuals_.end() ? it->second.flags : 0u;
 }
 
 bool SpellVisualSystem::hasSpellMissile(uint32_t visualId) {
@@ -666,6 +749,7 @@ void SpellVisualSystem::playSpellAreaVisual(uint32_t visualId, const glm::vec3& 
     const VisualRow& v = vIt->second;
     KitSpawn s;
     s.feetPos = groundPos;
+    s.atPoint = true;
     // Shadowfury's burst, Mass Dispel's ring: once, where it was cast.
     spawnKit(v.instantAreaKit, s);
 
@@ -693,7 +777,8 @@ void SpellVisualSystem::cancelChannelAreaVisuals(uint64_t casterGuid) {
 bool SpellVisualSystem::playSpellMissile(uint32_t visualId, const glm::vec3& start,
                                          const glm::vec3& end, float speed, bool impactAtEnd,
                                          uint32_t casterInstanceId, uint32_t targetInstanceId,
-                                         bool groundTarget) {
+                                         bool groundTarget, float launchDelay,
+                                         uint32_t releaseAnim, uint64_t targetGuid) {
     if (!m2Renderer_ || !hasSpellMissile(visualId)) return false;
     if (!cachedAssetManager_) return false;
     // Speed 0 flies nothing. 454 spells with a real missile (HasMissile and
@@ -702,19 +787,57 @@ bool SpellVisualSystem::playSpellMissile(uint32_t visualId, const glm::vec3& sta
     // the stock client shows a missile for one, the spell it triggers has the
     // speed: Death Coil's damage spell 47632 flies the same visual at 24.
     if (!std::isfinite(speed) || speed <= 0.0f) return false;
+    if (loadSpellModel(visuals_.at(visualId).missilePath) == 0) return false;
 
-    const VisualRow& v = visuals_.at(visualId);
+    PendingMissile p;
+    p.visualId = visualId;
+    p.start = start;
+    p.end = end;
+    p.speed = speed;
+    p.impactAtEnd = impactAtEnd;
+    p.casterInstanceId = casterInstanceId;
+    p.targetInstanceId = targetInstanceId;
+    p.groundTarget = groundTarget;
+    p.releaseAnim = releaseAnim;
+    p.targetGuid = targetGuid;
+    p.delay = std::clamp(std::isfinite(launchDelay) ? launchDelay : 0.0f, 0.0f,
+                         SPELL_RELEASE_MAX_WAIT);
+    // Held until the cast animation lets it go: Frostbolt leaves the left
+    // hand 200 ms into SpellCastDirected, not as the cast bar fills.
+    if (p.delay > 0.0f) {
+        pendingMissiles_.push_back(p);
+        return true;
+    }
+    return launchSpellMissile(p);
+}
+
+bool SpellVisualSystem::launchSpellMissile(const PendingMissile& p) {
+    const uint32_t visualId = p.visualId;
+    const glm::vec3& start = p.start;
+    const glm::vec3& end = p.end;
+    const uint32_t casterInstanceId = p.casterInstanceId;
+    const uint32_t targetInstanceId = p.targetInstanceId;
+    const bool groundTarget = p.groundTarget;
+    auto vIt = visuals_.find(visualId);
+    if (vIt == visuals_.end()) return false;
+    const VisualRow& v = vIt->second;
     const uint32_t modelId = loadSpellModel(v.missilePath);
     if (modelId == 0) return false;
 
-    // Launch point: the caster attachment SpellVisual names, or for the
-    // default (-1, nearly every bolt) the point between the casting hands -
-    // in front of the caster as SpellCastDirected brings them together.
+    // Launch point (Wow.exe 0x7FAA40, 0x734390): the caster attachment
+    // SpellVisual names; else, for the default (-1, nearly every bolt), the
+    // point of the release event that let it go ($CSL: the left hand
+    // thrusting forward in SpellCastDirected); else between the hands.
     glm::vec3 launch;
     glm::mat4 xf;
-    if (v.missileAttachment >= 0 && v.missileAttachment < SLOT_COUNT) {
-        slotTransform(static_cast<uint8_t>(v.missileAttachment), casterInstanceId, start, xf);
+    uint32_t releaseMs = 0;
+    auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    if (v.missileAttachment >= 0 && casterInstanceId != 0 && cr &&
+        cr->getAttachmentTransform(casterInstanceId, static_cast<uint32_t>(v.missileAttachment), xf)) {
         launch = glm::vec3(xf[3]);
+    } else if (casterInstanceId != 0 && cr && p.releaseAnim != 0 &&
+               cr->getCastReleaseEvent(casterInstanceId, p.releaseAnim, releaseMs, &launch)) {
+        // launch is the event's point
     } else {
         glm::mat4 l, r;
         const bool hasL = slotTransform(SLOT_LEFT_HAND, casterInstanceId, start, l);
@@ -724,16 +847,27 @@ bool SpellVisualSystem::playSpellMissile(uint32_t visualId, const glm::vec3& sta
         else if (hasL)     launch = glm::vec3(l[3]);
         else { slotTransform(SLOT_CHEST, 0, start, xf); launch = glm::vec3(xf[3]); }
     }
-    const int32_t destSlot = (v.missileDestination >= 0 && v.missileDestination < SLOT_COUNT)
-        ? v.missileDestination : static_cast<int32_t>(SLOT_CHEST);
+    const int32_t destAttachment = v.missileDestination;
     glm::vec3 aim = end;  // a ground point is aimed at as it is
     if (!groundTarget) {
-        slotTransform(static_cast<uint8_t>(destSlot), targetInstanceId, end, xf);
+        attachmentTransform(destAttachment, targetInstanceId, end,
+                            kSlotAttach[SLOT_CHEST].fallbackHeight, xf);
         aim = glm::vec3(xf[3]);
     }
     const glm::vec3 d = aim - launch;
     const float distance = glm::length(d);
     const glm::vec3 dir = distance > 1e-4f ? d / distance : glm::vec3(1, 0, 0);
+
+    // A missile that waited for its release still lands when the server's
+    // flight time says: the time left is the flight less the wait, and the
+    // speed is what covers the distance in it - at most twice the spell's
+    // (Wow.exe 0x7022D0).
+    float speed = p.speed;
+    if (p.waited > 0.0f && distance > 0.0f) {
+        const float left = distance / p.speed - p.waited;
+        speed = left > 0.0f ? std::min(distance / left, p.speed * 2.0f) : p.speed * 2.0f;
+    }
+    const bool impactAtEnd = p.impactAtEnd;
 
     // The motion script decides how many fly (Drunken Missiles: 5); only the
     // first carries the impact and the sound.
@@ -760,7 +894,8 @@ bool SpellVisualSystem::playSpellMissile(uint32_t visualId, const glm::vec3& sta
         m.end = aim;
         m.endFeet = end;
         m.targetInstanceId = groundTarget ? 0u : targetInstanceId;
-        m.destSlot = destSlot;
+        m.targetGuid = groundTarget ? 0u : p.targetGuid;
+        m.destAttachment = destAttachment;
         m.speed = speed;
         m.startDistance = distance;
         m.motionId = motionId;
@@ -1065,23 +1200,37 @@ void SpellVisualSystem::retireMissileModel(uint32_t instanceId) {
 
 void SpellVisualSystem::update(float deltaTime) {
     refreshUnitStates(deltaTime);
-    if (activeSpellVisuals_.empty() && physicalProjectiles_.empty() && spellMissiles_.empty())
+    if (activeSpellVisuals_.empty() && physicalProjectiles_.empty() && spellMissiles_.empty() &&
+        pendingMissiles_.empty())
         return;
 
     // Missiles home on the target's attachment at the spell's speed, so one
     // fired at a running target still lands on it. Arrivals are collected
     // first: the impact spawns into activeSpellVisuals_ on the target.
-    struct Arrival { uint32_t visualId; glm::vec3 feet; uint32_t targetInstanceId; bool ground; };
+    struct Arrival {
+        uint32_t visualId; glm::vec3 feet; uint32_t targetInstanceId; bool ground;
+        uint64_t targetGuid;
+    };
     std::vector<Arrival> arrivals;
     std::vector<uint32_t> landed;
     auto& audioEngine = audio::AudioEngine::instance();
+    // Missiles still in the caster's hand: each goes when its release comes.
+    for (size_t i = 0; i < pendingMissiles_.size(); ) {
+        PendingMissile& p = pendingMissiles_[i];
+        p.waited += deltaTime;
+        if (p.waited < p.delay) { ++i; continue; }
+        const PendingMissile ready = p;
+        pendingMissiles_[i] = pendingMissiles_.back();
+        pendingMissiles_.pop_back();
+        launchSpellMissile(ready);
+    }
     for (auto it = spellMissiles_.begin(); it != spellMissiles_.end(); ) {
         SpellMissile& m = *it;
         m.elapsed += deltaTime;
         if (m.targetInstanceId != 0) {
             glm::mat4 xf;
-            if (slotTransform(static_cast<uint8_t>(m.destSlot), m.targetInstanceId,
-                              m.endFeet, xf))
+            if (attachmentTransform(m.destAttachment, m.targetInstanceId, m.endFeet,
+                                    kSlotAttach[SLOT_CHEST].fallbackHeight, xf))
                 m.end = glm::vec3(xf[3]);
         }
         const glm::vec3 toEnd = m.end - m.pos;
@@ -1094,7 +1243,7 @@ void SpellVisualSystem::update(float deltaTime) {
             landed.push_back(m.instanceId);
             if (m.impactAtEnd)
                 arrivals.push_back({m.visualId, m.groundTarget ? m.end : m.endFeet,
-                                    m.targetInstanceId, m.groundTarget});
+                                    m.targetInstanceId, m.groundTarget, m.targetGuid});
             it = spellMissiles_.erase(it);
             continue;
         }
@@ -1160,10 +1309,13 @@ void SpellVisualSystem::update(float deltaTime) {
             if (vIt != visuals_.end()) {
                 KitSpawn s;
                 s.feetPos = a.feet;
+                s.atPoint = true;
                 spawnKit(vIt->second.impactAreaKit, s);
             }
         } else {
             playSpellVisual(a.visualId, a.feet, /*useImpactKit=*/true, a.targetInstanceId);
+            if (missileImpactCallback_ && a.targetGuid != 0)
+                missileImpactCallback_(a.targetGuid, a.visualId);
         }
     }
 
@@ -1195,7 +1347,7 @@ void SpellVisualSystem::update(float deltaTime) {
                        (sv.emissionStopped && sv.linger >= fadeFrom + SPELL_MESH_FADE &&
                         !m2Renderer_->instanceHasLiveParticles(sv.instanceId));
             }
-        } else if (sv.instanceId != 0 && sv.hasHold && !sv.holding &&
+        } else if (sv.instanceId != 0 && sv.hasHold && !sv.noHold && !sv.holding &&
                    sv.birthDuration > 0.0f && sv.elapsed >= sv.birthDuration &&
                    sv.duration > sv.birthDuration + 0.1f) {
             // Born; now hold for as long as the kit lasts.
@@ -1397,6 +1549,7 @@ void SpellVisualSystem::reset() {
         if (missile.soundHandle) audio::AudioEngine::instance().stopSound(missile.soundHandle);
     }
     spellMissiles_.clear();
+    pendingMissiles_.clear();
     // Aura states stay known (the auras have not changed); they are put
     // back on their units as the units are drawn again.
     for (auto& [guid, recs] : unitStates_)

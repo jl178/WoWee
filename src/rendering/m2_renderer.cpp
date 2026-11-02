@@ -2353,6 +2353,19 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
 
     // Copy texture transform data for UV animation
     gpuModel.textureTransforms = model.textureTransforms;
+    // The alpha tracks only where one of them can change: a doodad's are a
+    // constant nearly always, baked into batchOpacity below.
+    {
+        auto animates = [](const std::vector<pipeline::M2AnimationTrack>& tracks) {
+            for (const auto& track : tracks)
+                if (m2_track::trackVaries(track, 1.0f)) return true;
+            return false;
+        };
+        if (animates(model.colorAlphaTracks) || animates(model.textureWeightTracks)) {
+            gpuModel.colorAlphaTracks = model.colorAlphaTracks;
+            gpuModel.textureWeightTracks = model.textureWeightTracks;
+        }
+    }
     gpuModel.textureTransformLookup = model.textureTransformLookup;
     gpuModel.hasTextureAnimation = false;
 
@@ -2568,27 +2581,46 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                 }
             }
 
-            // Apply at-rest transparency and color alpha from the M2 animation tracks.
-            // These provide per-batch opacity for ghosts, ethereal effects, fading doodads, etc.
-            // Skip zero values: some animated tracks start at 0 and animate up, and baking
-            // that first keyframe would make the entire batch permanently invisible.
+            // The batch's alpha, as the stock client builds it (0x821a20): its
+            // M2Color's alpha (when colorIndex names one) times its texture
+            // weight through the lookup (when it has textures). A track that
+            // cannot change is baked here - zero included, which hides the
+            // batch as the stock client does (alpha under 1e-4 is not drawn).
+            // A track that can change is played per frame in the transparent
+            // pass, for every model: an animated fade is authored from the
+            // sequence's first frame, so its first key is no at-rest value.
+            if (batch.colorIndex < model.colorRGB.size()) {
+                // The batch's authored colour. A glow card is painted
+                // white and coloured here, so without it every fire in the
+                // world burns white: Orgrimmar's carries (1.0, 0.329, 0.0).
+                bgpu.tint = model.colorRGB[batch.colorIndex];
+            }
             if (bgpu.batchOpacity > 0.0f) {
-                float animAlpha = 1.0f;
-                if (batch.colorIndex < model.colorRGB.size()) {
-                    // The batch's authored colour. A glow card is painted
-                    // white and coloured here, so without it every fire in the
-                    // world burns white: Orgrimmar's carries (1.0, 0.329, 0.0).
-                    bgpu.tint = model.colorRGB[batch.colorIndex];
+                float bakedAlpha = 1.0f;
+                if (batch.colorIndex < model.colorAlphaTracks.size()) {
+                    const auto& track = model.colorAlphaTracks[batch.colorIndex];
+                    if (m2_track::trackVaries(track, 1.0f))
+                        bgpu.colorAlphaTrack = static_cast<int16_t>(batch.colorIndex);
+                    else
+                        bakedAlpha *= m2_track::trackConstant(track, 1.0f);
                 }
-                if (batch.colorIndex < model.colorAlphas.size()) {
-                    float ca = model.colorAlphas[batch.colorIndex];
-                    if (ca > 0.001f) animAlpha *= ca;
+                if (batch.textureCount != 0 &&
+                    batch.transparencyIndex < model.textureWeightLookup.size()) {
+                    const uint16_t t = model.textureWeightLookup[batch.transparencyIndex];
+                    if (t < model.textureWeightTracks.size()) {
+                        const auto& track = model.textureWeightTracks[t];
+                        if (m2_track::trackVaries(track, 1.0f))
+                            bgpu.textureWeightTrack = static_cast<int16_t>(t);
+                        else
+                            bakedAlpha *= m2_track::trackConstant(track, 1.0f);
+                    }
                 }
-                if (batch.transparencyIndex < model.textureWeights.size()) {
-                    float tw = model.textureWeights[batch.transparencyIndex];
-                    if (tw > 0.001f) animAlpha *= tw;
-                }
-                bgpu.batchOpacity *= animAlpha;
+                if (bakedAlpha < 1e-4f) bakedAlpha = 0.0f;
+                bgpu.batchOpacity *= bakedAlpha;
+                bgpu.bakedTrackAlpha = 1.0f;
+                bgpu.alphaAnimates = bgpu.colorAlphaTrack >= 0 || bgpu.textureWeightTrack >= 0;
+                // Drawn per instance in the blended pass, where its alpha is.
+                if (bgpu.alphaAnimates) gpuModel.hasTransparentBatches = true;
             }
 
             // Compute batch center and radius for glow sprite positioning

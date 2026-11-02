@@ -310,9 +310,10 @@ private:
     std::unordered_map<uint32_t, uint32_t> spellIconIds_;
     bool spellIconDbLoaded_ = false;
     VkDescriptorSet getSpellIcon(uint32_t spellId, pipeline::AssetManager* am);
-    /// The vendor cursor, drawn in place of the pointer. True when it drew, so
-    /// the caller knows not to also ask for the hand.
-    bool drawVendorCursor(game::GameHandler& gameHandler, const ui::ScenePick& pick);
+    /// The cursor a unit under the pointer wears, as the stock world frame
+    /// chooses it (0x4F7A50): the NPC's service, the corpse's loot or skin,
+    /// the enemy's attack, each "Unable" out of reach. True when it drew.
+    bool drawUnitCursor(game::GameHandler& gameHandler, const ui::ScenePick& pick);
     /// The cursor the real client shows over what is under the pointer.
     ///
     /// A door, a chest and a mailbox are each their own picture there, and the

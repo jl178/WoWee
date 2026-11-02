@@ -486,6 +486,12 @@ public:
         visibilityFlags &= static_cast<uint8_t>(~UNIT_VIS_FLAG_CREEP);
     }
 
+    /// Who this unit is swinging at: set by SMSG_ATTACKSTART, cleared by
+    /// SMSG_ATTACKSTOP, as the stock client keeps it (CGUnit_C +0xA20). It
+    /// draws the unit's weapons whatever its sheath byte says.
+    [[nodiscard]] uint64_t getAttackTarget() const { return attackTarget; }
+    void setAttackTarget(uint64_t guid) { attackTarget = guid; }
+
     // Dynamic flags (UNIT_DYNAMIC_FLAGS, index 147)
     [[nodiscard]] uint32_t getDynamicFlags() const { return dynamicFlags; }
     void setDynamicFlags(uint32_t f) { dynamicFlags = f; }
@@ -530,6 +536,7 @@ protected:
     uint32_t mountDisplayId = 0;
     uint32_t unitFlags = 0;
     uint8_t visibilityFlags = 0;
+    uint64_t attackTarget = 0;
     uint32_t dynamicFlags = 0;
     uint32_t npcFlags = 0;
     uint32_t npcEmoteState = 0;

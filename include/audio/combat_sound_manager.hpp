@@ -65,10 +65,13 @@ public:
     //    for an empty hand or a creature's claws) and the weapon's material,
     //    in the column for what it struck: the victim's body (flesh, a
     //    player's mail or plate, CreatureImpactType stone), the victim's
-    //    shield on a block, the victim's weapon on a parry. A dodge and a miss
-    //    are the swoosh alone. It plays at the attack animation's $CAH event.
+    //    shield on a block, the victim's weapon on a parry. It plays at the
+    //    attack animation's $CAH event.
+    //  - A miss or a dodge has no swoosh and no blow: "Combat Miss 1H" or
+    //    "2H" plays at the attacker at $CAH.
     //  - The victim's injury voice (CreatureSoundData) plays with the blow:
-    //    the crit one on a crit, the normal one on some hits.
+    //    the crit one on a crit, the normal one on 60% of the hits on a
+    //    creature and 30% on a player.
     // Animations without those events play the sounds when the server
     // reports the swing.
     enum class MeleeOutcome { HIT, CRIT, MISS, DODGE, PARRY, BLOCK, NONE };
@@ -192,11 +195,10 @@ private:
     };
     void playBlowSwing(PendingBlow& blow);
     void playBlowImpact(PendingBlow& blow);
-    uint32_t pickInjury(uint64_t victimGuid, uint32_t displayId, bool crit);
+    uint32_t pickInjury(uint32_t displayId, bool victimIsPlayer, bool crit);
     const SoundData* soundData_ = nullptr;
     UnitResolver unitResolver_;
     std::unordered_map<uint32_t, PendingBlow> pendingBlows_;  // by attacker instance
-    std::unordered_map<uint64_t, double> lastInjuryMs_;       // by victim
     std::unordered_map<uint32_t, size_t> lastVariedFile_;     // by SoundEntries row; see playEntry3D
     const void* lastImpactLibrary_ = nullptr;                 // the fallback bank, see playImpact
     size_t lastImpactIndex_ = SIZE_MAX;

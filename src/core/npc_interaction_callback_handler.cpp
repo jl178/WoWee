@@ -136,8 +136,13 @@ bool NPCInteractionCallbackHandler::resolveCombatUnit(uint64_t guid, audio::Comb
     }
 
     if (cr && out.instanceId != 0) {
-        out.animHasSwingEvent = cr->currentAnimHasEvent(out.instanceId, pipeline::m2EventTag("$CSS"));
-        out.animHasHitEvent = cr->currentAnimHasEvent(out.instanceId, pipeline::m2EventTag("$CAH"));
+        // The swing may be on the upper body over a run; its events fire
+        // from there too.
+        auto hasEvent = [&](uint32_t tag) {
+            return cr->currentAnimHasEvent(out.instanceId, tag) || cr->upperBodyAnimHasEvent(out.instanceId, tag);
+        };
+        out.animHasSwingEvent = hasEvent(pipeline::m2EventTag("$CSS"));
+        out.animHasHitEvent = hasEvent(pipeline::m2EventTag("$CAH"));
     }
     return true;
 }
@@ -174,9 +179,12 @@ void NPCInteractionCallbackHandler::footstepGround(const glm::vec3& p, uint32_t&
 
 void NPCInteractionCallbackHandler::handleUnitAnimEvent(uint32_t instanceId, uint32_t eventTag,
                                                         const glm::vec3& position) {
+    using pipeline::m2EventTag;
+    if (meleeEventHook_ && (eventTag == m2EventTag("$CAH") || eventTag == m2EventTag("$CPP")))
+        meleeEventHook_(instanceId, eventTag);
+    if (eventTag == m2EventTag("$CPP")) return;  // silent
     auto* csm = audioCoordinator_ ? audioCoordinator_->getCombatSoundManager() : nullptr;
     if (!csm) return;
-    using pipeline::m2EventTag;
     if (eventTag == m2EventTag("$CSS") || eventTag == m2EventTag("$CAH")) {
         csm->onMeleeAnimEvent(instanceId, eventTag);
         return;
@@ -279,15 +287,12 @@ void NPCInteractionCallbackHandler::setupCallbacks() {
     }
 
     // NPC greeting callback - play voice line
+    // Said when the NPC's window opens (GameHandler::updateInteractTarget). The
+    // stock client plays the NPCSounds greeting and nothing else: no welcome
+    // animation (0x51FCE0 only re-picks the NPC's idle, 0x720860 plays the
+    // sound). A talk animation, when there is one, is the emote the server
+    // names in the quest giver packets.
     gameHandler_.setNpcGreetingCallback([this](uint64_t guid, const glm::vec3& position) {
-        // Play NPC_WELCOME animation on the NPC
-        if (renderer_) {
-            auto* cr = renderer_->getCharacterRenderer();
-            if (cr) {
-                uint32_t instanceId = entitySpawner_.getCreatureInstanceId(guid);
-                if (instanceId != 0) cr->playAnimation(instanceId, rendering::anim::NPC_WELCOME, false);
-            }
-        }
         if (audioCoordinator_ && audioCoordinator_->getNpcVoiceManager()) {
             // Convert canonical to render coords for 3D audio
             glm::vec3 renderPos = core::coords::canonicalToRender(position);

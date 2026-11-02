@@ -2055,9 +2055,9 @@ void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId,
     // one-shot plays its primary (variationIndex 0), whose length the swing
     // and cast timers were measured against.
     instance.variationLapsLeft = 0;
+    instance.animationSpeed = 1.0f;
     if (loop) {
-        instance.currentSequenceIndex =
-            anim::pickSequenceVariation(model.sequences, model.bones, animationId);
+        instance.currentSequenceIndex = pickLoopVariation(instanceId, model, animationId);
         if (instance.currentSequenceIndex >= 0) {
             instance.variationLapsLeft =
                 anim::pickSequenceExtraLaps(model.sequences[instance.currentSequenceIndex]);
@@ -2120,8 +2120,9 @@ void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId,
 
     // Cross-fade out of whatever the bones were doing. The stock client fades
     // over the incoming sequence's blendTime (150 ms on nearly every 3.3.5
-    // character and creature sequence); a sequence that says 0 gets the same
-    // 150 ms so a switch never pops. Needs a pose computed for this skeleton:
+    // character and creature sequence), uncapped, and a sequence that says 0
+    // cuts (CM2Model 0x826c40 sets the fade's end to now). Needs a pose
+    // computed for this skeleton:
     // a fresh instance has nothing to fade from.
     //
     // Nor does one the view cull has left unposed (poseStale): its localPose
@@ -2133,7 +2134,7 @@ void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId,
         const uint32_t blendMs = model.sequences[instance.currentSequenceIndex].blendTime;
         instance.blendFromPose = instance.localPose;
         instance.blendElapsedMs = 0.0f;
-        instance.blendDurationMs = static_cast<float>(blendMs > 0 ? std::min<uint32_t>(blendMs, 1000) : 150);
+        instance.blendDurationMs = static_cast<float>(blendMs);
     } else {
         instance.blendDurationMs = 0.0f;
     }
@@ -2176,6 +2177,42 @@ void CharacterRenderer::playDeath(uint32_t instanceId, bool alreadyDead) {
     // death cry, which the stock client plays as the Death animation starts.
     if (!alreadyDead && animSoundEventCallback_)
         animSoundEventCallback_(instanceId, anim::DEATH, kAnimEventDeathStart, 0, inst.position);
+}
+
+bool CharacterRenderer::upperBodyAnimHasEvent(uint32_t instanceId, uint32_t eventTag) const {
+    auto it = instances.find(instanceId);
+    if (it == instances.end() || !it->second.cachedModel) return false;
+    const auto& inst = it->second;
+    const int upSeq = inst.upperSequenceIndex[2];
+    const auto& events = inst.cachedModel->data.soundEvents;
+    if (inst.upperTime < 0.0f || upSeq < 0 || upSeq >= static_cast<int>(events.size())) return false;
+    for (const auto& ev : events[upSeq])
+        if (ev.tag == eventTag) return true;
+    return false;
+}
+
+void CharacterRenderer::setAnimationSpeed(uint32_t instanceId, float speed) {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return;
+    it->second.animationSpeed = std::clamp(speed, 0.05f, 4.0f);
+}
+
+int CharacterRenderer::pickLoopVariation(uint32_t instanceId, const pipeline::M2Model& model,
+                                         uint32_t animationId) const {
+    // Stand and the Ready stances (BehaviorID 0 and 25-29) are the ones the
+    // stock client pins to their first variation (0x737EF0).
+    const bool stance = animationId == anim::STAND ||
+                        (animationId >= anim::READY_UNARMED && animationId <= anim::READY_BOW);
+    if (stance && firstVariationPredicate_ && anim::hasSequenceVariations(model.sequences, animationId) &&
+        firstVariationPredicate_(instanceId)) {
+        for (size_t i = 0; i < model.sequences.size(); i++) {
+            const int idx = static_cast<int>(i);
+            if (model.sequences[i].id == animationId && model.sequences[i].variationIndex == 0 &&
+                anim::sequencePlayable(model.sequences, model.bones, idx))
+                return idx;
+        }
+    }
+    return anim::pickSequenceVariation(model.sequences, model.bones, animationId);
 }
 
 bool CharacterRenderer::currentAnimHasEvent(uint32_t instanceId, uint32_t eventTag) const {
@@ -2277,9 +2314,26 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
         // Advance global sequence timer (accumulates independently of animation wrapping)
         inst.globalSequenceTime += deltaTime * 1000.0f;
 
-        // Upper-body overlay clock; it ends by itself.
+        // Upper-body overlay clock; it ends by itself. The torso part's
+        // events fire as the whole body's do below: a swing or a flinch on
+        // the upper body over a run reaches its $CPP and $CAH, and its blow
+        // is heard, instead of waiting out the fallback timers.
         if (inst.upperTime >= 0.0f) {
+            const float prevUpper = inst.upperTime;
             inst.upperTime += deltaTime * 1000.0f;
+            const int upSeq = inst.upperSequenceIndex[2];
+            if (animSoundEventCallback_ && inst.cachedModel && upSeq >= 0 &&
+                upSeq < static_cast<int>(inst.cachedModel->data.soundEvents.size())) {
+                const auto& seqs = inst.cachedModel->data.sequences;
+                const uint32_t upAnim = seqs[upSeq].id;
+                const float upEnd = static_cast<float>(seqs[upSeq].duration);
+                for (const auto& ev : inst.cachedModel->data.soundEvents[upSeq]) {
+                    const float t = static_cast<float>(ev.timeMs);
+                    // A one-shot: [prev, now), and its last frame once.
+                    if (t >= prevUpper && (t < inst.upperTime || (inst.upperTime >= upEnd && t <= upEnd)))
+                        animSoundEventCallback_(pair.first, upAnim, ev.tag, ev.soundEntryId, inst.position);
+                }
+            }
             if (inst.upperTime >= inst.upperDurationMs) inst.upperTime = -1.0f;
         }
 
@@ -2300,7 +2354,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
             }
             const auto& seq = inst.cachedModel->data.sequences[inst.currentSequenceIndex];
             const float prevAnimTime = inst.animationTime;
-            inst.animationTime += deltaTime * 1000.0f;
+            inst.animationTime += deltaTime * 1000.0f * inst.animationSpeed;
 
             // Sound events ($CSD, $CSS, $CAH, $AHn, $FDn, $WNG) and $FSD
             // footfalls whose timestamps the sequence just passed:
@@ -2367,7 +2421,8 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
                         const auto& seqs = inst.cachedModel->data.sequences;
                         const auto& bones = inst.cachedModel->data.bones;
                         if (anim::hasSequenceVariations(seqs, inst.currentAnimationId)) {
-                            int next = anim::pickSequenceVariation(seqs, bones, inst.currentAnimationId);
+                            int next = pickLoopVariation(pair.first, inst.cachedModel->data,
+                                                         inst.currentAnimationId);
                             if (next >= 0) {
                                 inst.variationLapsLeft = anim::pickSequenceExtraLaps(seqs[next]);
                                 next = anim::resolveSequenceAlias(seqs, next);
@@ -2380,8 +2435,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
                                     const uint32_t blendMs = seqs[next].blendTime;
                                     inst.blendFromPose = inst.localPose;
                                     inst.blendElapsedMs = 0.0f;
-                                    inst.blendDurationMs = static_cast<float>(
-                                        blendMs > 0 ? std::min<uint32_t>(blendMs, 1000) : 150);
+                                    inst.blendDurationMs = static_cast<float>(blendMs);
                                 }
                                 inst.currentSequenceIndex = next;
                                 const float nextDur = static_cast<float>(seqs[next].duration);
@@ -2672,6 +2726,33 @@ uint32_t CharacterRenderer::getSheathEventTime(uint32_t instanceId, uint32_t ani
     return UINT32_MAX;
 }
 
+bool CharacterRenderer::getCastReleaseEvent(uint32_t instanceId, uint32_t animationId,
+                                            uint32_t& timeMs, glm::vec3* worldPos) {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return false;
+    auto mIt = models.find(it->second.modelId);
+    if (mIt == models.end()) return false;
+    const auto& model = mIt->second.data;
+    for (size_t i = 0; i < model.sequences.size() && i < model.castReleaseEvents.size(); i++) {
+        if (model.sequences[i].id != animationId || model.sequences[i].variationIndex != 0) continue;
+        const auto& ev = model.castReleaseEvents[i];
+        if (ev.timeMs == UINT32_MAX) return false;
+        timeMs = ev.timeMs;
+        if (worldPos) {
+            // The pose of now, as getAttachmentTransform gives it.
+            refreshStalePose(it->second);
+            const auto& instance = it->second;
+            glm::mat4 boneMat(1.0f);
+            if (ev.bone < instance.boneMatrices.size()) boneMat = instance.boneMatrices[ev.bone];
+            const glm::mat4 modelMat = instance.hasOverrideModelMatrix
+                ? instance.overrideModelMatrix : getModelMatrix(instance);
+            *worldPos = glm::vec3(modelMat * boneMat * glm::vec4(ev.position, 1.0f));
+        }
+        return true;
+    }
+    return false;
+}
+
 uint32_t CharacterRenderer::getAnimationDurationMs(uint32_t instanceId, uint32_t animationId) const {
     auto it = instances.find(instanceId);
     if (it == instances.end()) return 0;
@@ -2716,12 +2797,13 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
     // call, after it, instead of on a bone the loop happens to reach.
     static int diagFrames = 0;
 
-    // Cross-fade weight of the new sequence: 0 at the switch, 1 when done.
+    // Cross-fade weight of the new sequence: 0 at the switch, 1 when done,
+    // eased as the stock client eases it (m2_track::sequenceBlendWeight).
     const bool blending = instance.blendDurationMs > 0.0f &&
                           instance.blendElapsedMs < instance.blendDurationMs &&
                           instance.blendFromPose.size() == numBones;
     const float blendWeight = blending
-        ? glm::clamp(instance.blendElapsedMs / instance.blendDurationMs, 0.0f, 1.0f)
+        ? m2_track::sequenceBlendWeight(instance.blendElapsedMs / instance.blendDurationMs)
         : 1.0f;
     instance.localPose.resize(numBones);
 

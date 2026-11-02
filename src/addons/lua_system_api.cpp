@@ -981,6 +981,8 @@ static void pushCvarDefault(lua_State* L, const std::string& n) {
     // itself declares as the default. Only reached before the handler exists;
     // once it does, the branch above answers from the setting itself.
     else if (n == "autolootdefault") lua_pushstring(L, "0");
+    // Stock defaults; the loot click reads them (0x6DAD90).
+    else if (n == "autodismount" || n == "autostand") lua_pushstring(L, "1");
     // On, as it is for a fresh account. The XP bar and the unit frames put
     // their whole tooltip behind this one: GameTooltip_AddNewbieTip is called
     // with noNormalText set, so with tips off it does nothing at all and

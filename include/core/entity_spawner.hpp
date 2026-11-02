@@ -212,6 +212,10 @@ public:
     rendering::WeaponLoadout unitWeaponLoadout(uint64_t guid);
     /// UNIT_FIELD_BYTES_2 byte 0: 0 nothing drawn, 1 melee, 2 ranged.
     uint8_t unitSheathState(uint64_t guid) const;
+    /// The sheath state the unit's weapons are shown in: the byte above as
+    /// the stock client changes it for the animation playing and for an
+    /// attack target (rendering::anim::presentedSheath).
+    uint8_t presentedSheathState(uint64_t guid, uint32_t instanceId) const;
     /// Re-attach a unit's weapons when its sheath state changed since the
     /// last look. Cheap when nothing changed; called every frame.
     void syncUnitSheath(uint64_t guid, uint32_t instanceId);

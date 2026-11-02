@@ -93,6 +93,18 @@ struct M2ModelGPU {
         bool volumetricBeam = false;
         uint8_t glowTint = 0; // 0=warm, 1=cool, 2=red
         float batchOpacity = 1.0f; // Resolved texture weight opacity (0=transparent, skip batch)
+        // The batch's alpha tracks that can change (its M2Color's alpha, and
+        // its texture weight through the lookup), as indices into the model's
+        // copies below; -1 for none, or for a constant one, which is baked
+        // into batchOpacity instead. Every model plays them per frame, as the
+        // stock client does: the Judgement hammer is invisible as it falls
+        // and shows from 267 to 534 ms, Frost Armor's shell fades in over
+        // 134 ms and out from 2.2 s. bakedTrackAlpha is the share of
+        // batchOpacity taken from them, now always 1 (kept for the diagnostics).
+        int16_t colorAlphaTrack = -1;
+        int16_t textureWeightTrack = -1;
+        float bakedTrackAlpha = 1.0f;
+        bool alphaAnimates = false;  // colorAlphaTrack or textureWeightTrack set
         glm::vec3 center = glm::vec3(0.0f); // Center of batch geometry (model space)
         float glowSize = 1.0f;              // Approx radius of batch geometry
 
@@ -262,6 +274,10 @@ struct M2ModelGPU {
     std::vector<pipeline::M2RibbonEmitter> ribbonEmitters;
     std::vector<VkTexture*> ribbonTextures;       // Resolved texture per ribbon emitter
     std::vector<VkDescriptorSet> ribbonTexSets;   // Descriptor sets per ribbon emitter
+
+    // The alpha tracks the batches name (colorAlphaTrack, textureWeightTrack).
+    std::vector<pipeline::M2AnimationTrack> colorAlphaTracks;
+    std::vector<pipeline::M2AnimationTrack> textureWeightTracks;
 
     // Texture transform data for UV animation
     std::vector<pipeline::M2TextureTransform> textureTransforms;

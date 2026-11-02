@@ -41,17 +41,6 @@ bool ActivitySoundManager::initialize(pipeline::AssetManager* assets) {
     preloadLandingSet(FootstepSurface::WATER, "Water");
     preloadLandingSet(FootstepSurface::SNOW, "Snow");
 
-    preloadCandidates(meleeSwingClips, {
-        "Sound\\Item\\Weapons\\WeaponSwings\\mWooshMedium1.wav",
-        "Sound\\Item\\Weapons\\WeaponSwings\\mWooshMedium2.wav",
-        "Sound\\Item\\Weapons\\WeaponSwings\\mWooshMedium3.wav",
-        "Sound\\Item\\Weapons\\WeaponSwings\\mWooshLarge1.wav",
-        "Sound\\Item\\Weapons\\WeaponSwings\\mWooshLarge2.wav",
-        "Sound\\Item\\Weapons\\WeaponSwings\\mWooshLarge3.wav",
-        "Sound\\Item\\Weapons\\MissSwings\\MissWhoosh1Handed.wav",
-        "Sound\\Item\\Weapons\\MissSwings\\MissWhoosh2Handed.wav"
-    });
-
     initialized = true;
     core::Logger::getInstance().info("Activity SFX loaded: jump=", jumpClips.size(),
                                      " splash=", splashEnterClips.size(),
@@ -69,7 +58,6 @@ void ActivitySoundManager::shutdown() {
     splashExitClips.clear();
     swimLoopClips.clear();
     hardLandClips.clear();
-    meleeSwingClips.clear();
     swimmingActive = false;
     swimMoving = false;
     initialized = false;
@@ -269,31 +257,6 @@ void ActivitySoundManager::playLanding(FootstepSurface surface, bool hardLanding
     // ordinary jump. A hard landing from a fall keeps its clip.
     if (hardLanding && !hardLandClips.empty()) {
         playVoice(hardLandClips);
-    }
-}
-
-void ActivitySoundManager::playMeleeSwing() {
-    if (!AudioEngine::instance().isInitialized() || meleeSwingClips.empty()) {
-        if (meleeSwingClips.empty() && !meleeSwingWarned) {
-            core::Logger::getInstance().warning("No melee swing SFX found in assets");
-            meleeSwingWarned = true;
-        }
-        return;
-    }
-
-    auto now = std::chrono::steady_clock::now();
-    if (lastMeleeSwingAt.time_since_epoch().count() != 0) {
-        if (std::chrono::duration<float>(now - lastMeleeSwingAt).count() < 0.12f) return;
-    }
-
-    std::uniform_int_distribution<size_t> dist(0, meleeSwingClips.size() - 1);
-    const Sample& sample = meleeSwingClips[dist(rng)];
-
-    std::uniform_real_distribution<float> volumeDist(0.76f, 0.84f);
-    std::uniform_real_distribution<float> pitchDist(0.96f, 1.04f);
-
-    if (AudioEngine::instance().playSound2D(sample.data, volumeDist(rng) * volumeScale, pitchDist(rng))) {
-        lastMeleeSwingAt = now;
     }
 }
 

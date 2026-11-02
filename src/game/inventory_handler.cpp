@@ -1226,6 +1226,9 @@ void InventoryHandler::handleLootResponse(network::Packet& packet) {
         LOG_DEBUG("Ignoring empty SMSG_LOOT_RESPONSE during pending gather/open");
         return;
     }
+    // Auto-loot as decided when the loot was asked for, else the option.
+    const bool autoLootThis = latchedAutoLootSet_ ? latchedAutoLoot_ : autoLoot_;
+    latchedAutoLootSet_ = false;
     lootWindowOpen_ = true;
     if (owner_.lootWindowCallbackRef()) owner_.lootWindowCallbackRef()(true);
     if (owner_.addonEventCallbackRef()) {
@@ -1234,7 +1237,7 @@ void InventoryHandler::handleLootResponse(network::Packet& packet) {
         // closes with CloseLoot(autoLoot == 0) - so an absent argument
         // compares false and tells the server the window opened when it did
         // not.
-        owner_.addonEventCallbackRef()("LOOT_OPENED", {autoLoot_ ? "1" : "0"});
+        owner_.addonEventCallbackRef()("LOOT_OPENED", {autoLootThis ? "1" : "0"});
         owner_.addonEventCallbackRef()("LOOT_READY", {});
     }
     if (currentLoot_.lootGuid == lastInteractedGoGuid) {
@@ -1248,7 +1251,10 @@ void InventoryHandler::handleLootResponse(network::Packet& packet) {
         owner_.queryItemInfo(item.itemId, 0);
     }
 
-    if (currentLoot_.gold > 0) {
+    // The coin is taken by itself only when looting automatically: the stock
+    // client sends CMSG_LOOT_MONEY from its auto-loot pass (0x588F90) and
+    // otherwise leaves the coin in the window for the player to click.
+    if (currentLoot_.gold > 0 && autoLootThis) {
         if (owner_.getState() == WorldState::IN_WORLD && owner_.getSocket()) {
             bool suppressFallback = false;
             auto cooldownIt = recentLootMoneyAnnounceCooldowns_.find(currentLoot_.lootGuid);
@@ -1276,7 +1282,7 @@ void InventoryHandler::handleLootResponse(network::Packet& packet) {
     // Autostore their returned items even when general creature auto-loot is off;
     // otherwise right-click opens server loot but never grants the objective item.
     const bool autoStoreGameObjectLoot = isLastInteractedGoLoot;
-    if ((autoLoot_ || autoStoreGameObjectLoot) &&
+    if ((autoLootThis || autoStoreGameObjectLoot) &&
         owner_.getState() == WorldState::IN_WORLD && owner_.getSocket() &&
         !localLoot.itemAutoLootSent) {
         for (const auto& item : currentLoot_.items) {
@@ -1902,7 +1908,6 @@ void InventoryHandler::dispatchUseItem(uint8_t wowBag, uint8_t wowSlot, uint64_t
                                        const ItemDef& item, bool confirmed,
                                        uint64_t unitTarget) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    if (owner_.isRestoring()) owner_.cancelCast();
 
     // Bind-on-use, and not yet bound. Same warning as the equip prompt, one
     // step earlier: using the item is what binds it.
@@ -2784,14 +2789,8 @@ void InventoryHandler::handleListInventory(network::Packet& packet) {
         }
     }
 
-    // Play vendor sound
-    if (owner_.npcVendorCallbackRef() && currentVendorItems_.vendorGuid != 0) {
-        auto entity = owner_.getEntityManager().getEntity(currentVendorItems_.vendorGuid);
-        if (entity && entity->getType() == ObjectType::UNIT) {
-            glm::vec3 pos(entity->getX(), entity->getY(), entity->getZ());
-            owner_.npcVendorCallbackRef()(currentVendorItems_.vendorGuid, pos);
-        }
-    }
+    // No voice line here: the stock client has one greeting per NPC, said when
+    // its window opens (GameHandler::updateInteractTarget, 0x720860).
 
     for (const auto& item : currentVendorItems_.items) {
         owner_.queryItemInfo(item.itemId, 0);

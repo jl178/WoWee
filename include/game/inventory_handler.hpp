@@ -103,6 +103,10 @@ public:
     bool isLootWindowOpen() const { return lootWindowOpen_; }
     const LootResponseData& getCurrentLoot() const { return currentLoot_; }
     void setAutoLoot(bool enabled) { autoLoot_ = enabled; }
+    /// Auto-loot decided at the click, for the loot that click opens. The
+    /// stock client latches it on the player (0x6CDE50) rather than reading
+    /// the option when the loot arrives.
+    void latchAutoLoot(bool enabled) { latchedAutoLoot_ = enabled; latchedAutoLootSet_ = true; }
     bool isAutoLoot() const { return autoLoot_; }
     void setAutoSellGrey(bool enabled) { autoSellGrey_ = enabled; }
     bool isAutoSellGrey() const { return autoSellGrey_; }
@@ -315,6 +319,7 @@ public:
         [[nodiscard]] bool occupied() const { return itemGuid != 0; }
     };
     bool isMailboxOpen() const { return mailboxOpen_; }
+    uint64_t getMailboxGuid() const { return mailboxGuid_; }
     const std::vector<MailMessage>& getMailInbox() const { return mailInbox_; }
     /// Writable, for the backfill that fills in a mail's sender once the name
     /// packet for that guid arrives.
@@ -458,6 +463,7 @@ public:
     // Deposit an inventory item into the first free slot of the viewed tab.
     void guildBankDepositFromInventory(uint8_t srcBag, uint8_t srcSlot);
     bool isGuildBankOpen() const { return guildBankOpen_; }
+    uint64_t getGuildBankerGuid() const { return guildBankerGuid_; }
     const GuildBankData& getGuildBankData() const { return guildBankData_; }
     /// The guild bank's balance as SMSG_GUILD_EVENT reports it. The bank list
     /// is only sent to whoever is standing at the banker; everyone else learns
@@ -501,7 +507,7 @@ public:
     float getAuctionSearchDelay() const { return auctionSearchDelayTimer_; }
     // Ticked from GameHandler::update - this member is the authoritative
     // timer (GameHandler used to decrement its own never-set copy, leaving
-    // the search button disabled forever after the first search).
+    // the search button disabled enhanced after the first search).
     void tickAuctionSearchDelay(float deltaTime) {
         if (auctionSearchDelayTimer_ > 0.0f) {
             auctionSearchDelayTimer_ -= deltaTime;
@@ -658,6 +664,8 @@ private:
     // ---- Loot state ----
     bool lootWindowOpen_ = false;
     bool autoLoot_ = false;
+    bool latchedAutoLoot_ = false;
+    bool latchedAutoLootSet_ = false;
     bool autoSellGrey_ = false;
     bool autoRepair_ = false;
     LootResponseData currentLoot_;

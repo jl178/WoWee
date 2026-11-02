@@ -128,6 +128,10 @@ void M2Renderer::setInstanceAnimationFrozen(uint32_t instanceId, bool frozen) {
     auto idxIt = instanceIndexById.find(instanceId);
     if (idxIt == instanceIndexById.end()) return;
     auto& inst = instances[idxIt->second];
+    // Bring the clocks up to scene time before the sequence changes, so
+    // the new one starts from 0 now rather than from 0 minus however long
+    // the instance went unread (advanceClock adds that on its next read).
+    advanceClock(inst);
     if (!frozen && inst.thenLoopSequence >= 0) {
         // Already playing a state's motion or its loop (Open into Opened):
         // running is what it is doing. Dropping holdAtEnd here would loop
@@ -158,6 +162,10 @@ void M2Renderer::restartInstanceAnimation(uint32_t instanceId) {
     auto idxIt = instanceIndexById.find(instanceId);
     if (idxIt == instanceIndexById.end()) return;
     auto& inst = instances[idxIt->second];
+    // Bring the clocks up to scene time before the sequence changes, so
+    // the new one starts from 0 now rather than from 0 minus however long
+    // the instance went unread (advanceClock adds that on its next read).
+    advanceClock(inst);
     inst.animTime = 0.0f;
     inst.animTimeAlt = 0.0f;
     inst.animDir = 1.0f;
@@ -186,6 +194,10 @@ void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animatio
     auto idxIt = instanceIndexById.find(instanceId);
     if (idxIt == instanceIndexById.end()) return;
     auto& inst = instances[idxIt->second];
+    // Bring the clocks up to scene time before the sequence changes, so
+    // the new one starts from 0 now rather than from 0 minus however long
+    // the instance went unread (advanceClock adds that on its next read).
+    advanceClock(inst);
     if (!inst.cachedModel) return;
     const auto& seqs = inst.cachedModel->sequences;
     int loopIdx = -1;
@@ -231,6 +243,10 @@ void M2Renderer::setInstanceAnimation(uint32_t instanceId, uint32_t animationId,
     auto idxIt = instanceIndexById.find(instanceId);
     if (idxIt == instanceIndexById.end()) return;
     auto& inst = instances[idxIt->second];
+    // Bring the clocks up to scene time before the sequence changes, so
+    // the new one starts from 0 now rather than from 0 minus however long
+    // the instance went unread (advanceClock adds that on its next read).
+    advanceClock(inst);
     if (!inst.cachedModel) return;
     const auto& seqs = inst.cachedModel->sequences;
     // Find the first sequence matching the requested animation ID

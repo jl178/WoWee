@@ -1221,6 +1221,12 @@ wowee_add_test(test_terrain_mega_slots
 wowee_add_test(test_m2_track_cursor
     SOURCES test_m2_track_cursor.cpp)
 
+# ── test_m2_track_stock ──────────────────────────────────────
+# Track evaluation, sequence blending and the starting sequence as the stock
+# client does them (docs/re/m2-runtime.md).
+wowee_add_test(test_m2_track_stock
+    SOURCES test_m2_track_stock.cpp)
+
 # ── test_m2_particle_step ────────────────────────────────────
 # Classified emitter tracks, the in-order particle step, the birth merge and
 # the weight split the threaded particle update uses.
@@ -1594,6 +1600,11 @@ wowee_add_test(test_scene_pick SOURCES test_scene_pick.cpp)
 # Which game objects the stock client lets the mouse find and use. Every object
 # was offered, so an instance portal's aura wore a name and a cursor.
 wowee_add_test(test_game_object_affordance SOURCES test_game_object_affordance.cpp)
+
+# ── test_interaction_rules ───────────────────────────────────
+# The stock client's interaction reach, right-click packet and cursors
+# (docs/re/interactions.md).
+wowee_add_test(test_interaction_rules SOURCES test_interaction_rules.cpp)
 
 # ── test_plural_escape ───────────────────────────────────────
 # WoW's |4singular:plural; escape, which nothing resolved - so the logout

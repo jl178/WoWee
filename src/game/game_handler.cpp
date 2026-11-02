@@ -859,14 +859,9 @@ void GameHandler::update(float deltaTime) {
             checkAreaTriggers();
         }
 
-        // Cancel GO interaction cast if player enters combat (auto-attack).
-        if (pendingGameObjectInteractGuid_ != 0 &&
-            combatHandler_ && (combatHandler_->isAutoAttacking() || combatHandler_->hasAutoAttackIntent())) {
-            pendingGameObjectInteractGuid_ = 0;
-            if (spellHandler_) spellHandler_->resetCastState();
-            addUIError("Interrupted.");
-            addSystemChatMessage("Interrupted.");
-        }
+        // An object's cast is not cancelled here when an auto-attack runs: the
+        // stock client uses objects mid-fight and leaves interrupting the cast
+        // to the server.
         // Check if client-side cast timer expired (tick-down is in SpellHandler::updateTimers).
         // Three paths depending on whether this is a GO interaction or craft-queue cast:
         if (spellHandler_ && spellHandler_->isCasting() && spellHandler_->getCastTimeRemaining() <= 0.0f) {
@@ -928,21 +923,6 @@ void GameHandler::update(float deltaTime) {
 
         updateAutoAttack(deltaTime);
         section("gameHandler/world/autoAttack");
-        auto closeIfTooFar = [&](bool windowOpen, uint64_t npcGuid, auto closeFn, const char* label) {
-            if (!windowOpen || npcGuid == 0) return;
-            auto npc = entityController_->getEntityManager().getEntity(npcGuid);
-            if (!npc) return;
-            float dx = movementInfo.x - npc->getX();
-            float dy = movementInfo.y - npc->getY();
-            const float distance = std::sqrt(dx * dx + dy * dy);
-            if (distance > game::NPC_INTERACT_MAX_DISTANCE) {
-                closeFn();
-                // Warning: a window closing by itself is a report waiting to
-                // happen, and the client is the one deciding.
-                LOG_WARNING(label, " closed: ", distance, " yards from the NPC, past ",
-                            game::NPC_INTERACT_MAX_DISTANCE);
-            }
-        };
         // A hello the server never answered. It says nothing when it refuses,
         // so this is the only place the refusal can be seen.
         if (pendingNpcHello_.guid != 0 &&
@@ -972,16 +952,11 @@ void GameHandler::update(float deltaTime) {
                         "or regards you as Unfriendly or worse");
             pendingNpcHello_.guid = 0;
         }
-        closeIfTooFar(isVendorWindowOpen(), getVendorItems().vendorGuid, [this]{ closeVendor(); }, "Vendor");
-        closeIfTooFar(isGossipWindowOpen(), getCurrentGossip().npcGuid, [this]{ closeGossip(); }, "Gossip");
-        // The movement handler's guid, not a copy of it: the one this class
-        // kept was never assigned, so this asked about guid 0, found no NPC and
-        // returned - the only one of these four windows that stayed open when
-        // the player walked away from it.
-        closeIfTooFar(isTaxiWindowOpen(),
-                      movementHandler_ ? movementHandler_->getTaxiNpcGuid() : 0,
-                      [this]{ closeTaxi(); }, "Taxi window");
-        closeIfTooFar(isTrainerWindowOpen(), getTrainerSpells().trainerGuid, [this]{ closeTrainer(); }, "Trainer");
+        updateInteractTarget();
+        // Moving, turning, pitching, rising or sinking closes the loot window:
+        // each movement start calls 0x523640, which releases the loot, and
+        // a loot that arrives while moving is closed on arrival (0x6D53B0).
+        if (isLootWindowOpen() && (movementInfo.flags & 0x00C000FFu) != 0) closeLoot();
         section("gameHandler/world");
 
         updateEntityInterpolation(deltaTime);

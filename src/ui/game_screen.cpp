@@ -1,5 +1,6 @@
 #include "ui/graphics_choices.hpp"
 #include "game/game_utils.hpp"
+#include "game/interaction_rules.hpp"
 #include "ui/game_screen.hpp"
 #include "ui/gamepad_controls.hpp"
 #include "core/gamepad.hpp"
@@ -900,9 +901,15 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     // Update renderer face-target position and selection circle
     auto* renderer = services_.renderer;
     if (renderer) {
-        if (auto* ac = renderer->getAnimationController()) ac->setInCombat(gameHandler.isInCombat() &&
-                              !gameHandler.isPlayerDead() &&
-                              !gameHandler.isPlayerGhost());
+        if (auto* ac = renderer->getAnimationController()) {
+            const bool alive = !gameHandler.isPlayerDead() && !gameHandler.isPlayerGhost();
+            ac->setInCombat(gameHandler.isInCombat() && alive);
+            // The Ready stance follows the character's attack target, set on
+            // the click that starts the attack and cleared when it stops.
+            const auto* me = gameHandler.getUnitByGuid(gameHandler.getPlayerGuid());
+            ac->setAttacking(alive && me && me->getAttackTarget() != 0);
+            ac->setAutoRepeatShot(alive && gameHandler.getAutoRepeatSpellId() != 0);
+        }
         // The character's translucency (ghost, stealth) is no longer set
         // here: EntitySpawner::syncUnitPresentation sets it for every unit,
         // the local player included. A second writer here put a stealthed
@@ -944,6 +951,8 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                                            target->getGuid() != gameHandler.getPlayerGuid();
                 glm::vec3 circleColor(1.0f, 1.0f, 0.0f);
                 float circleRadius = 1.2f;
+                float circleAlpha = 1.0f;
+                float attackPulse = -1.0f;
                 if (showSelectionCircle) {
                     auto unit = std::static_pointer_cast<game::Unit>(target);
 
@@ -1006,6 +1015,41 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                             circleColor = glm::vec3(96.0f / 255.0f, 96.0f / 255.0f, 1.0f);
                         }
                     }
+
+                    // While the player is attacking (an attack target, or an
+                    // auto-repeat shot), a target it could attack has a red
+                    // circle whose alpha runs 0 to 128 and back each second
+                    // (Wow.exe 0x73DAB0 sets CGUnit_C +0xA30 bit 0x10 when the
+                    // player can attack the locked target, 0x729740; vtable
+                    // +0x78, 0x718AC0, then answers the colour at 0xADAA98,
+                    // red, with that alpha). For half a second after the
+                    // attack is ordered a second ring closes in on it
+                    // (0x725980, timed from player +0x1934, set by 0x6E4950).
+                    static uint64_t lastAttackTarget = 0;
+                    static auto attackOrderedAt = std::chrono::steady_clock::time_point{};
+                    const auto* meUnit = gameHandler.getUnitByGuid(gameHandler.getPlayerGuid());
+                    const uint64_t myAttackTarget = meUnit ? meUnit->getAttackTarget() : 0;
+                    const auto now = std::chrono::steady_clock::now();
+                    if (myAttackTarget != 0 && myAttackTarget != lastAttackTarget) attackOrderedAt = now;
+                    lastAttackTarget = myAttackTarget;
+                    const bool attacking = myAttackTarget != 0 || gameHandler.getAutoRepeatSpellId() != 0;
+                    const bool targetDead = (unit->getHealth() == 0 && unit->getMaxHealth() > 0) ||
+                                            (unit->getDynamicFlags() & game::UNIT_DYNFLAG_DEAD) != 0;
+                    // CanAttack, near enough: a creature that is not friendly,
+                    // a player or pet only when the red rule above holds.
+                    const bool attackable = !targetDead &&
+                        (playerControlled ? circleColor == glm::vec3(1.0f, 0.0f, 0.0f) : react <= 4 || hostile);
+                    if (attacking && attackable) {
+                        circleColor = glm::vec3(1.0f, 0.0f, 0.0f);
+                        const double ms = std::chrono::duration<double, std::milli>(
+                            now.time_since_epoch()).count();
+                        const double phase = std::fmod(ms, 1000.0) / 500.0;  // 0..2
+                        circleAlpha = static_cast<float>(phase < 1.0 ? phase : 2.0 - phase) * (128.0f / 255.0f);
+                        const double sinceOrder = std::chrono::duration<double, std::milli>(
+                            now - attackOrderedAt).count();
+                        if (sinceOrder >= 0.0 && sinceOrder < 500.0)
+                            attackPulse = static_cast<float>(sinceOrder / 500.0);
+                    }
                 }
                 // Nothing else gets one. A game object is used rather than
                 // selected, and a ring on the floor around one reads as a
@@ -1020,7 +1064,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                     if (core::Application::getInstance().getRenderPositionForGuid(target->getGuid(), originPos)) {
                         circleFeet = originPos;
                     }
-                    renderer->setSelectionCircle(circleFeet, circleRadius, circleColor);
+                    renderer->setSelectionCircle(circleFeet, circleRadius, circleColor, circleAlpha, attackPulse);
                 } else {
                     renderer->clearSelectionCircle();
                 }
@@ -1151,93 +1195,102 @@ void drawCursorTexture(VkDescriptorSet tex) {
         (ImTextureID)(uintptr_t)tex, at, ImVec2(at.x + kSize, at.y + kSize));
 }
 
-/// Which cursor a game object wears, by its GameObjectType.
-///
-/// The numbers are 3.3.5's own: 0 door, 1 button, 2 questgiver, 3 chest,
-/// 7 chair, 17 fishing node, 19 mailbox, 20 auction house. Anything else is
-/// something to interact with, which is what the hand with the gear says.
-const char* objectCursorPath(uint32_t goType) {
-    switch (goType) {
-        case 2:  return "Interface\\Cursor\\Quest.blp";
-        case 3:  return "Interface\\Cursor\\LootAll.blp";
-        case 17: return "Interface\\Cursor\\Fishing.blp";
-        case 19: return "Interface\\Cursor\\Mail.blp";
-        default: return "Interface\\Cursor\\Interact.blp";
+/// LockType.dbc's CursorName for a lock's first key (0x70F9B0 reads
+/// Lock.Index[0] and the LockType row's CursorName). Only four LockTypes name
+/// one, and their ids are the same in every expansion's LockType.dbc.
+static const char* lockTypeCursor(uint32_t lockTypeId) {
+    switch (lockTypeId) {
+        case 1:  return "PickLock";
+        case 2:  return "GatherHerbs";
+        case 3:  return "Mine";
+        case 19: return "FishingCursor";
+        default: return "";
     }
 }
 
-/// Interface\\Cursor\\Buy.blp under the pointer while it is over a vendor.
-///
-/// Every interactable answered the same hand cursor, so a merchant looked like
-/// a door: what a unit is for is known before it is clicked, and the real
-/// client says so with the art. The bag is the one WoW uses for a vendor.
-///
-/// False when the unit is not a vendor to trade with, and the caller falls back
-/// to the hand. A hostile is not one - it is the attack cursor's business - and
-/// neither is a corpse, which is loot.
-bool GameScreen::drawVendorCursor(game::GameHandler& gameHandler,
-                                  const ui::ScenePick& pick) {
-    // resolve(), not closestGuid. closestGuid is whatever the ray touched
-    // nearest of anything pickable - and a game object's fallback sphere is 2.5
-    // yards against a unit's 1.8, so the rug, the stall or the chair a merchant
-    // stands on was usually nearer than the merchant. resolve() is what a click
-    // acts on, which is the whole reason the hover uses the click's picker:
-    // asking it a different question put the two back into disagreement, and
-    // the vendor cursor lost every argument to the scenery around the vendor.
-    const uint64_t guid = pick.resolve();
-    if (guid == 0 || guid == pick.hostileUnitGuid || guid == pick.deadUnitGuid) {
-        return false;
+/// The LockType a game object's lock opens with: Lock.dbc Index[0] (column 9)
+/// of the row its template names. Zero when there is none.
+static uint32_t gameObjectLockType(pipeline::AssetManager* assets,
+                            const game::GameObjectQueryResponseData* info) {
+    if (!assets || !info || !info->hasData) return 0;
+    const int field = game::interaction::gameObjectLockField(info->type);
+    if (field < 0) return 0;
+    const uint32_t lockId = info->data[field];
+    if (lockId == 0) return 0;
+    static std::unordered_map<uint32_t, uint32_t> cache;
+    if (auto it = cache.find(lockId); it != cache.end()) return it->second;
+    uint32_t lockType = 0;
+    if (auto lock = assets->loadDBC("Lock.dbc"); lock && lock->isLoaded() && lock->getFieldCount() > 9) {
+        const int32_t row = lock->findRecordById(lockId);
+        if (row >= 0) lockType = lock->getUInt32(static_cast<uint32_t>(row), 9);
     }
+    cache.emplace(lockId, lockType);
+    return lockType;
+}
+
+bool GameScreen::drawUnitCursor(game::GameHandler& gameHandler, const ui::ScenePick& pick) {
+    // resolve(), not closestGuid: what a click would act on.
+    const uint64_t guid = pick.resolve();
+    if (guid == 0) return false;
     auto entity = gameHandler.getEntityManager().getEntity(guid);
     if (!entity || entity->getType() != game::ObjectType::UNIT) return false;
     auto unit = std::static_pointer_cast<game::Unit>(entity);
-    if ((unit->getNpcFlags() & game::NPC_FLAG_ANY_VENDOR) == 0) return false;
+    namespace ix = game::interaction;
 
-    // Only a successful upload is cached, so a transient descriptor-pool
-    // failure is retried rather than leaving the cursor plain for good.
-    static VkDescriptorSet cursorTex = VK_NULL_HANDLE;
-    if (!cursorTex) {
-        ui::UiTextureLoad why = ui::UiTextureLoad::Ok;
-        cursorTex = ui::uploadUiTextureFromBlp(
-            services_.assetManager, "Interface\\Cursor\\Buy.blp", services_.window, &why);
-        // Said once. A cursor that will not load and a unit that is not a
-        // vendor both end as the plain hand, and from the chair they are the
-        // same thing - so the one that is a fault has to name itself.
-        if (!cursorTex) {
-            static bool said = false;
-            if (!said) {
-                said = true;
-                LOG_WARNING("Vendor cursor: Interface\\Cursor\\Buy.blp did not load (",
-                            static_cast<int>(why),
-                            ") - the pointer stays the plain hand over merchants");
-            }
-        }
+    const auto& me = gameHandler.getMovementInfo();
+    const float dx = me.x - unit->getX(), dy = me.y - unit->getY(), dz = me.z - unit->getZ();
+    const float dist2 = dx * dx + dy * dy + dz * dz;
+    float myReach = 1.5f;
+    if (auto self = std::dynamic_pointer_cast<game::Unit>(
+            gameHandler.getEntityManager().getEntity(gameHandler.getPlayerGuid()))) {
+        if (self->getCombatReach() > 0.0f) myReach = self->getCombatReach();
     }
-    if (!cursorTex) return false;
+    const float melee = ix::meleeReach(myReach, unit->getCombatReach());
+    const bool corpse = game::isUnitCorpseState(unit->getHealth(), unit->getMaxHealth(),
+                                                unit->getDynamicFlags());
+    const bool hostile = unit->isHostile() || gameHandler.isAggressiveTowardPlayer(guid);
 
-    // Drawn in place of the pointer rather than beside it, which is what a
-    // cursor is - so the arrow goes for as long as the bag is up. The tip sits
-    // at the mouse position, the way the art is authored.
-    ImGui::SetMouseCursor(ImGuiMouseCursor_None);
-    const ImVec2 at = ImGui::GetIO().MousePos;
-    constexpr float kSize = 32.0f;
-    ImGui::GetForegroundDrawList()->AddImage(
-        (ImTextureID)(uintptr_t)cursorTex, at,
-        ImVec2(at.x + kSize, at.y + kSize));
+    ix::UnitCursorInput in;
+    std::string icon;
+    if (!corpse) {
+        in.npcInteractable = unit->isInteractable() && !hostile;
+        in.npcFlags = unit->getNpcFlags();
+        in.questGiverStatus = static_cast<uint8_t>(gameHandler.getQuestGiverStatus(guid));
+        const auto& cache = gameHandler.getCreatureInfoCache();
+        if (auto it = cache.find(unit->getEntry()); it != cache.end()) icon = it->second.iconName;
+        in.iconName = icon;
+        const float reach = ix::npcInteractRange(unit->getCombatReach());
+        in.npcOutOfRange = dist2 > reach * reach;
+        in.attackable = hostile;
+        in.outOfMeleeRange = dist2 > melee * melee;
+    } else {
+        in.lootable = (unit->getDynamicFlags() & game::UNIT_DYNFLAG_LOOTABLE) != 0;
+        in.isCurrentLoot = gameHandler.isLootWindowOpen() &&
+                           gameHandler.getCurrentLoot().lootGuid == guid;
+        in.canLootNow = dist2 <= melee * melee && !gameHandler.isLootWindowOpen();
+        in.autoLoot = gameHandler.isAutoLoot() != ImGui::GetIO().KeyShift;
+        in.skinnable = (unit->getUnitFlags() & ix::kUnitFlagSkinnable) != 0;
+        const auto& cache = gameHandler.getCreatureInfoCache();
+        if (auto it = cache.find(unit->getEntry()); it != cache.end()) {
+            in.creatureTypeFlags = it->second.typeFlags;
+        }
+        in.skinOutOfRange = dist2 > melee * melee;
+    }
+    const std::string name = ix::unitCursorName(in);
+    if (name.empty()) return false;
+    VkDescriptorSet tex = cursorTexture(services_.assetManager, services_.window,
+                                        ix::cursorPath(name).c_str());
+    if (!tex) return false;
+    drawCursorTexture(tex);
     return true;
 }
 
 bool GameScreen::drawWorldObjectCursor(game::GameHandler& gameHandler,
                                        const ui::ScenePick& pick) {
-    // resolve(), for the reason the vendor cursor gives: it is what a click
-    // would act on, and asking the hover a different question puts the two
-    // back into disagreement.
-    //
-    // ...and where a click would act on nothing, the object the pointer is on
-    // anyway. A signpost, a banner, a shop's board are generic scenery: WoW
-    // uses none of them either, and all three carry the name that is the whole
-    // point of them - "Mage Quarter", "Everyday Merchandise". Named, with no
-    // cursor of its own, since nothing will happen if it is clicked.
+    // resolve(), for the reason the unit cursor gives: it is what a click
+    // would act on. Where a click would act on nothing, the object the pointer
+    // is on anyway - a signpost, a banner, a shop's board - is named under the
+    // plain pointer, since nothing will happen if it is clicked.
     uint64_t guid = pick.resolve();
     const bool usable = guid != 0;
     if (guid == 0) guid = pick.namedObjectGuid;
@@ -1248,10 +1301,30 @@ bool GameScreen::drawWorldObjectCursor(game::GameHandler& gameHandler,
     auto go = std::static_pointer_cast<game::GameObject>(entity);
     const auto* info = gameHandler.getCachedGameObjectInfo(go->getEntry());
     if (usable) {
-        VkDescriptorSet tex = cursorTexture(services_.assetManager, services_.window,
-                                            objectCursorPath(info ? info->type : 0u));
-        if (!tex) return false;
-        drawCursorTexture(tex);
+        namespace ix = game::interaction;
+        ix::GameObjectCursorInput in;
+        in.interactable = true;
+        in.type = info ? info->type : 0u;
+        if (info) in.iconName = info->iconName;
+        const uint32_t lockType = gameObjectLockType(services_.assetManager, info);
+        in.lockTypeId = lockType;
+        in.lockCursor = lockTypeCursor(lockType);
+        // CanUseNow (0x711470): alive, in reach of the object's box, and not
+        // a "not in combat" chest in a fight. Out of reach the object keeps
+        // its name and only the cursor changes.
+        const bool inReach = gameHandler.getHookedFishingBobberGuid() == guid ||
+                             gameHandler.gameObjectInUseReach(guid).value_or(true);
+        in.usableNow = inReach && !gameHandler.isPlayerDead() &&
+                       !(info && gameHandler.isInCombat() &&
+                         !ix::gameObjectUsableInCombat(info->type, info->hasData ? info->data : nullptr));
+        in.questGiverStatus = static_cast<uint8_t>(gameHandler.getQuestGiverStatus(guid));
+        const std::string name = ix::gameObjectCursorName(in);
+        if (!name.empty()) {
+            if (VkDescriptorSet tex = cursorTexture(services_.assetManager, services_.window,
+                                                    ix::cursorPath(name).c_str())) {
+                drawCursorTexture(tex);
+            }
+        }
     }
 
     // ...and what it is, beside the pointer, which is the whole of what the
@@ -1647,10 +1720,11 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
             // tighter sphere critters get, which this copy did not have.
             const ui::ScenePick hoverPick =
                 ui::pickScene(gameHandler, ray, ui::ScenePickParams{});
-            if (hoverPick.closestGuid != 0) {
-                if (!drawVendorCursor(gameHandler, hoverPick) &&
-                    !drawWorldObjectCursor(gameHandler, hoverPick)) {
-                    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            // The stock cursors only: a unit or object with nothing special
+            // keeps the plain pointer, as it does in the real client.
+            if (hoverPick.closestGuid != 0 || hoverPick.namedObjectGuid != 0) {
+                if (!drawUnitCursor(gameHandler, hoverPick)) {
+                    drawWorldObjectCursor(gameHandler, hoverPick);
                 }
             }
         }
@@ -1868,24 +1942,15 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
             }
         }
 
-        // If a gameobject is already targeted, prioritize interacting with that target
-        // instead of re-picking under cursor (which can hit nearby decorative GOs).
-        // Exclude chair-type GOs (type 7): otherwise any right-click (including the
-        // start of a camera rotate) auto-sits the player whenever a chair is targeted.
-        if (gameHandler.hasTarget()) {
-            auto target = gameHandler.getTarget();
-            if (target && target->getType() == game::ObjectType::GAMEOBJECT) {
-                auto go = std::static_pointer_cast<game::GameObject>(target);
-                auto* goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
-                if (!goInfo || goInfo->type != 7) {
-                    LOG_DEBUG("[GO-DIAG] Right-click: re-interacting with targeted GO 0x",
-                                std::hex, target->getGuid(), std::dec);
-                    gameHandler.setTarget(target->getGuid());
-                    gameHandler.interactWithGameObject(target->getGuid());
-                    return;
-                }
-            }
-        }
+        // Only what is under the pointer is acted on. The stock world frame
+        // passes the mouseover object to the right-click (0x4F7880 ->
+        // 0x5277B0) and does nothing at all when the pointer is on the ground;
+        // the current target is not a fallback. A touch tap is the exception:
+        // it has no pointer, and interacts with the unit it targeted.
+        bool pickedUnit = false;
+        // The auto-loot key (Shift by default) flips autoLootDefault for the
+        // loot this click opens (0x513700).
+        const bool autoLootModifier = ImGui::GetIO().KeyShift;
 
         // If no target or right-clicking in world, try to pick one under cursor
         {
@@ -1973,21 +2038,25 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                         LOG_DEBUG("[GO-DIAG] Right-click: raypick hit GO 0x",
                                     std::hex, closestGuid, std::dec);
                         gameHandler.setTarget(closestGuid);
+                        gameHandler.latchAutoLootForClick(autoLootModifier);
                         gameHandler.interactWithGameObject(closestGuid);
                         return;
                     }
                     gameHandler.setTarget(closestGuid);
+                    pickedUnit = true;
                 }
             }
         }
-        if (gameHandler.hasTarget()) {
+        if ((pickedUnit || tapInteract) && gameHandler.hasTarget()) {
             auto target = gameHandler.getTarget();
             if (target) {
                 if (target->getType() == game::ObjectType::UNIT) {
-                    // Check if unit is dead (health == 0) → loot, otherwise interact/attack
+                    // A corpse is looted or skinned and never attacked
+                    // (0x731260); the living are spoken to or attacked.
                     auto unit = std::static_pointer_cast<game::Unit>(target);
-                    if (unit->getHealth() == 0 && unit->getMaxHealth() > 0) {
-                        gameHandler.lootTarget(target->getGuid());
+                    if (game::isUnitCorpseState(unit->getHealth(), unit->getMaxHealth(),
+                                                unit->getDynamicFlags())) {
+                        gameHandler.rightClickCorpse(target->getGuid(), autoLootModifier);
                     } else {
                         // Interact with service NPCs; otherwise treat non-interactable living units
                         // as attackable fallback (covers bad faction-template classification).

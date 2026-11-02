@@ -264,7 +264,9 @@ public:
     SwimEffects* getSwimEffects() const { return swimEffects.get(); }
 
     // Selection circle for targeted entity
-    void setSelectionCircle(const glm::vec3& pos, float radius, const glm::vec3& color);
+    /// See OverlaySystem::setSelectionCircle.
+    void setSelectionCircle(const glm::vec3& pos, float radius, const glm::vec3& color,
+                            float alpha = 1.0f, float attackPulse = -1.0f);
     void clearSelectionCircle();
 
     // CPU timing stats (milliseconds, last frame).

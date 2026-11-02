@@ -452,8 +452,17 @@ float SpellHandler::resolveSpellMissileSpeed(uint32_t spellId) {
     return (it != owner_.spellNameCacheRef().end()) ? it->second.missileSpeed : 0.0f;
 }
 
+bool SpellHandler::spellFliesMissile(uint32_t spellId) {
+    auto* renderer = owner_.services().renderer;
+    auto* svs = renderer ? renderer->getSpellVisualSystem() : nullptr;
+    const uint32_t visualId = resolveSpellVisualId(spellId);
+    if (!svs || visualId == 0 || !svs->hasSpellMissile(visualId)) return false;
+    const float speed = resolveSpellMissileSpeed(spellId);
+    return std::isfinite(speed) && speed >= 1.0f && speed <= 200.0f;
+}
+
 bool SpellHandler::launchSpellMissile(uint32_t spellId, uint32_t visualId, uint64_t casterGuid,
-                                      uint64_t targetGuid, bool impactAtEnd) {
+                                      uint64_t targetGuid, bool impactAtEnd, bool castReleased) {
     if (targetGuid == 0 || targetGuid == casterGuid) return false;
     auto* renderer = owner_.services().renderer;
     auto* svs = renderer ? renderer->getSpellVisualSystem() : nullptr;
@@ -467,11 +476,51 @@ bool SpellHandler::launchSpellMissile(uint32_t spellId, uint32_t visualId, uint6
     glm::vec3 start, end;
     if (!resolveUnitPosition(casterGuid, start) || !resolveUnitPosition(targetGuid, end))
         return false;
+
+    // The target flinches as the missile lands (Wow.exe 0x702DB0): living,
+    // and unless the visual says not (SpellVisual.Flags 0x40). The damage
+    // log, which comes with the SPELL_GO, leaves missile spells to this.
+    if (!svs->hasMissileImpactCallback()) {
+        svs->setMissileImpactCallback([this](uint64_t target, uint32_t visual) {
+            if (!owner_.hitReactionCallbackRef()) return;
+            if (owner_.services().renderer) {
+                if (auto* sv = owner_.services().renderer->getSpellVisualSystem())
+                    if (sv->visualFlags(visual) & 0x40u) return;
+            }
+            if (target != owner_.getPlayerGuid()) {
+                auto entity = owner_.getEntityManager().getEntity(target);
+                if (!entity || !entity->isUnit()) return;
+                if (std::static_pointer_cast<Unit>(entity)->getHealth() == 0) return;
+            } else if (owner_.isPlayerDead()) {
+                return;
+            }
+            owner_.hitReactionCallbackRef()(target, GameHandler::HitReaction::WOUND, 0);
+        });
+    }
+
+    // The animation the missile leaves in, and when. A cast holds its missile
+    // until the release event of the caster's cast animation (the kit's, or
+    // SpellCastDirected): Wow.exe 0x734390 launches the waiting missiles on
+    // that event, or after two seconds. A triggered missile (Arcane Missiles'
+    // bolts, a proc) goes at once, from the same hand.
+    const uint32_t casterInstance = owner_.resolveUnitRenderInstance(casterGuid);
+    uint32_t releaseAnim = 0;
+    float delay = 0.0f;
+    if (casterInstance != 0) {
+        const auto kit = svs->getKitAnimations(visualId);
+        releaseAnim = kit.cast ? kit.cast
+                    : kit.channel ? kit.channel
+                    : static_cast<uint32_t>(rendering::anim::SPELL_CAST_DIRECTED);
+        uint32_t releaseMs = 0;
+        if (auto* cr = renderer->getCharacterRenderer();
+            castReleased && cr && cr->getCastReleaseEvent(casterInstance, releaseAnim, releaseMs))
+            delay = static_cast<float>(releaseMs) / 1000.0f;
+    }
     // Feet positions; the visual system picks the caster and target
     // attachments SpellVisual.dbc names and homes on the target as it moves.
-    return svs->playSpellMissile(visualId, start, end, speed, impactAtEnd,
-                                 owner_.resolveUnitRenderInstance(casterGuid),
-                                 owner_.resolveUnitRenderInstance(targetGuid));
+    return svs->playSpellMissile(visualId, start, end, speed, impactAtEnd, casterInstance,
+                                 owner_.resolveUnitRenderInstance(targetGuid),
+                                 /*groundTarget=*/false, delay, releaseAnim, targetGuid);
 }
 
 bool SpellHandler::resolveUnitPosition(uint64_t guid, glm::vec3& outPos) {
@@ -522,7 +571,7 @@ void SpellHandler::cancelCastVisual(uint64_t casterGuid) {
         }
 }
 
-void SpellHandler::triggerImpactVisual(uint32_t spellId, uint64_t targetGuid) {
+void SpellHandler::triggerImpactVisual(uint32_t spellId, uint64_t targetGuid, bool targetIsCaster) {
     auto* renderer = owner_.services().renderer;
     if (!renderer) return;
     auto* svs = renderer->getSpellVisualSystem();
@@ -533,7 +582,7 @@ void SpellHandler::triggerImpactVisual(uint32_t spellId, uint64_t targetGuid) {
     if (!resolveUnitPosition(targetGuid, targetPos)) return;
     // On the target itself, at the kit's slots (chest, head, base...).
     svs->playSpellVisual(visualId, targetPos, /*useImpactKit=*/true,
-                         owner_.resolveUnitRenderInstance(targetGuid));
+                         owner_.resolveUnitRenderInstance(targetGuid), targetIsCaster);
 }
 
 void SpellHandler::launchRangedWeaponProjectile(uint32_t spellId, uint64_t targetGuid) {
@@ -829,9 +878,11 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     LOG_DEBUG("castSpell: spellId=", spellId, " target=0x", std::hex, targetGuid, std::dec);
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
 
-    // Food and water are server auras, but using any action interrupts them.
-    // Cancel the aura and stand first, then allow the requested action to proceed.
-    if (restorationActive_) cancelCast();
+    // Nothing to end here while eating or drinking. The server stands a
+    // seated caster up unless the spell may be cast sitting (Attributes
+    // 0x08000000) or is itself seated food or drink (AuraInterruptFlags
+    // NOT_SEATED), and standing ends the food aura. Cancelling it here made
+    // drinking end the meal, where stock keeps both going.
 
     // Attack routes to auto-attack instead of cast
     if (spellId == SPELL_ID_ATTACK) {
@@ -2561,8 +2612,11 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
 
         // Instant spell cast animation - if this wasn't a timed cast and isn't a
         // melee ability, play a brief spell cast animation (one-shot)
+        // Not a triggered spell (CAST_FLAG_PENDING): Judgement's damage and a
+        // seal's proc arrive as SPELL_GOs of their own and played the cast
+        // a second time.
         if (!wasInTimedCast && !isMeleeAbility && !rangedWeaponAttack && !restorationLoop &&
-            !owner_.isProfessionSpell(data.spellId)) {
+            (data.castFlags & 0x1u) == 0 && !owner_.isProfessionSpell(data.spellId)) {
             // Classify instant spell from SPELL_GO packet target info
             SpellCastType goType = SpellCastType::OMNI;
             if (data.targetGuid != 0 && data.targetGuid != data.casterUnit)
@@ -2575,6 +2629,10 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
                 // distinguish potions from generic instant magic.
                 currentCastSpellId_ = data.spellId;
                 owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), true, false, goType);
+                // Straight to the release, as for other units below: there is
+                // no cast to hold, and nothing else ends one, so the
+                // character stood in ReadySpell with its hands up.
+                owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), false, false, goType);
             }
         }
 
@@ -2648,13 +2706,16 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
         // Strike or War Stomp) plays its kit's animation through the swing
         // path, with the caster's weapons - not a spell wind-up and release.
         const bool abilityAnim = !wasTrackedCast && playsAsAbility;
+        const bool triggered = (data.castFlags & 0x1u) != 0;
         if (abilityAnim) {
             if (owner_.npcSwingCallbackRef())
                 owner_.npcSwingCallbackRef()(data.casterUnit, 0, data.spellId);
-        } else if (!wasTrackedCast && !rangedWeaponAttack && owner_.spellCastAnimCallbackRef()) {
+        } else if (!wasTrackedCast && !triggered && !rangedWeaponAttack &&
+                   owner_.spellCastAnimCallbackRef()) {
             owner_.spellCastAnimCallbackRef()(data.casterUnit, true, false, npcGoType);
         }
-        if (!abilityAnim && !rangedWeaponAttack && owner_.spellCastAnimCallbackRef()) {
+        if (!abilityAnim && (wasTrackedCast || !triggered) && !rangedWeaponAttack &&
+            owner_.spellCastAnimCallbackRef()) {
             owner_.spellCastAnimCallbackRef()(data.casterUnit, false, false,
                 wasTrackedCast ? castIt->second.castType : npcGoType);
         }
@@ -2732,17 +2793,20 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
             // take their impacts at once.
             const bool atPoint = data.hasDest && data.targetGuid == 0 &&
                                  data.destTransportGuid == 0;
+            // A spell of the caster's own (not triggered) is let go by its
+            // cast animation, and its missile waits for the release.
+            const bool castReleased = (data.castFlags & 0x1u) == 0;
             for (const auto& tgt : data.hitTargets) {
                 if (tgt == 0) continue;
                 if (atPoint || !launchSpellMissile(data.spellId, visualId, data.casterUnit, tgt,
-                                                   /*impactAtEnd=*/true)) {
-                    triggerImpactVisual(data.spellId, tgt);
+                                                   /*impactAtEnd=*/true, castReleased)) {
+                    triggerImpactVisual(data.spellId, tgt, tgt == data.casterUnit);
                 }
             }
             if (!atPoint) {
                 for (const auto& miss : data.missTargets) {
                     launchSpellMissile(data.spellId, visualId, data.casterUnit, miss.targetGuid,
-                                       /*impactAtEnd=*/false);
+                                       /*impactAtEnd=*/false, castReleased);
                 }
             }
             // Cast at a point on the ground: the area kits stand there.

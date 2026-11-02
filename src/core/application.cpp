@@ -3880,6 +3880,11 @@ void Application::syncCreatureRenderInstances(float deltaTime) {
                     }
                     const float fdx = tp.x - entity->getX(), fdy = tp.y - entity->getY();
                     if (haveTp && fdx * fdx + fdy * fdy > 0.01f) wantYaw = std::atan2(-fdy, fdx);
+                } else if (havePlayerPos && gameHandler->interactTargetFacesPlayer(guid)) {
+                    // The NPC whose window is open turns to the player, on
+                    // the client alone (0x735F60).
+                    const float fdx = playerPos.x - entity->getX(), fdy = playerPos.y - entity->getY();
+                    if (fdx * fdx + fdy * fdy > 0.01f) wantYaw = std::atan2(-fdy, fdx);
                 }
             }
             auto [yawIt, firstSeen] = creatureRenderYaw_.try_emplace(guid, wantYaw);
@@ -4268,6 +4273,8 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     // Always unsheath on combat engage.
     inGameStep = "auto-unsheathe";
     updateCheckpoint = "in_game: auto-unsheathe";
+    // Melee reactions whose blow ($CAH) never came play out now.
+    if (animationCallbacks_) animationCallbacks_->updatePendingReactions();
     if (gameHandler) {
         const bool autoAttacking = gameHandler->isAutoAttacking();
         // Keep the attachment state consistent with the ongoing attack, not
@@ -5976,6 +5983,24 @@ void Application::setupUICallbacks() {
     npcInteractionCallbacks_ = std::make_unique<NPCInteractionCallbackHandler>(
         *entitySpawner_, renderer.get(), *gameHandler, audioCoordinator_.get());
     npcInteractionCallbacks_->setupCallbacks();
+    npcInteractionCallbacks_->setMeleeEventHook([this](uint32_t instanceId, uint32_t eventTag) {
+        if (animationCallbacks_) animationCallbacks_->onMeleeAnimEvent(instanceId, eventTag);
+    });
+    // No idle fidgets for a unit that is attacking or casting: its Stand and
+    // Ready stances hold their first variation (Wow.exe 0x737EF0 asks for an
+    // attack target, a cast or a channel).
+    if (auto* cr = renderer->getCharacterRenderer()) {
+        cr->setFirstVariationPredicate([this](uint32_t instanceId) {
+            if (!npcInteractionCallbacks_ || !gameHandler) return false;
+            const uint64_t guid = npcInteractionCallbacks_->guidForInstance(instanceId);
+            if (guid == 0) return false;
+            const auto* unit = gameHandler->getUnitByGuid(guid);
+            if (unit && unit->getAttackTarget() != 0) return true;
+            if (guid == gameHandler->getPlayerGuid())
+                return gameHandler->isCasting() || gameHandler->isChanneling();
+            return entitySpawner_ && entitySpawner_->unitCastHold(guid) != 0;
+        });
+    }
 
     // ── Audio: music, sound effects, level-up, achievement, LFG ──
     audioCallbacks_ = std::make_unique<AudioCallbackHandler>(
