@@ -2066,6 +2066,8 @@ void GameScreen::saveSettings() {
     out << "mist_density=" << settingsPanel_.pendingVolumetricDensity << "\n";
     out << "sharp_stars=" << (settingsPanel_.pendingSharpStars ? 1 : 0) << "\n";
     out << "sun_shafts=" << (settingsPanel_.pendingSunShafts ? 1 : 0) << "\n";
+    out << "shoreline_foam=" << (settingsPanel_.pendingShorelineFoam ? 1 : 0) << "\n";
+    out << "wet_ground=" << (settingsPanel_.pendingWetGround ? 1 : 0) << "\n";
     out << "brightness=" << settingsPanel_.pendingBrightness << "\n";
     out << "water_refraction=" << (settingsPanel_.pendingWaterRefraction ? 1 : 0) << "\n";
     out << "antialiasing=" << settingsPanel_.pendingAntiAliasing << "\n";
@@ -2331,6 +2333,8 @@ void GameScreen::loadSettings() {
             else if (key == "mist_density") settingsPanel_.pendingVolumetricDensity = std::clamp(std::stof(val), 0.0f, 3.0f);
             else if (key == "sharp_stars") settingsPanel_.pendingSharpStars = (val == "1");
             else if (key == "sun_shafts") settingsPanel_.pendingSunShafts = (val == "1");
+            else if (key == "shoreline_foam") settingsPanel_.pendingShorelineFoam = (val == "1");
+            else if (key == "wet_ground") settingsPanel_.pendingWetGround = (val == "1");
             // No apply here either: brightness is on the graphics load list,
             // which is walked once the renderer exists. This branch ran from
             // the constructor, where services_.renderer is still null.

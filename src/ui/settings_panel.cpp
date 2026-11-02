@@ -95,7 +95,7 @@ constexpr const char* kGraphicsPresetKeys[] = {
     "groundclutter",
     "grassenabled", "grassdensity", "grassheight", "grassdistance",
     "foliagewind", "shadowstrength", "lightshafts", "fogstrength", "fogskyblend",
-    "lensflare", "sharpstars", "sunshafts",
+    "lensflare", "sharpstars", "sunshafts", "shorelinefoam", "wetground",
 };
 
 // The fog is Light.dbc's own at the default view distance; see
@@ -123,7 +123,7 @@ constexpr const char* kGraphicsApplyKeys[] = {
     "fsrsharpness", "framegen", "brightness", "uiopacity", "minimapsquare",
     "minimapnpcdots", "minimapclock", "minimapcoords", "minimaprotate", "latencymeter",
     "fogskyblend", "fogstrength", "sharpstars", "lensflare", "lightshafts", "mistdensity", "sunshafts",
-    "raytracedlighting", "shadowstrength", "foliagewind",
+    "raytracedlighting", "shadowstrength", "foliagewind", "shorelinefoam", "wetground",
     // Moved off the game's own Effects panel, so this list is now what
     // applies them at startup; the cvar store used to do it.
     "groundclutterdistance", "particledensity", "weatherdetail",
@@ -191,6 +191,8 @@ void SettingsPanel::applyGraphicsPreset(GraphicsPreset preset) {
         pendingLensFlare         = p.lensFlare;
         pendingSharpStars        = p.sharpStars;
         pendingSunShafts         = p.sunShafts;
+        pendingShorelineFoam     = p.shorelineFoam;
+        pendingWetGround         = p.wetGround;
         // Each one goes to the thing it affects through the one function that
         // knows where that is, rather than through a second copy of the same
         // renderer calls written out here.
@@ -242,7 +244,9 @@ void SettingsPanel::updateGraphicsPresetFromCurrentSettings() {
             std::abs(pendingFogSkyBlend - p.fogSkyBlend) <= 0.03f &&
             std::abs(pendingLensFlare - p.lensFlare) <= 0.05f &&
             pendingSharpStars == p.sharpStars &&
-            pendingSunShafts == p.sunShafts;
+            pendingSunShafts == p.sunShafts &&
+            pendingShorelineFoam == p.shorelineFoam &&
+            pendingWetGround == p.wetGround;
         if (matches) {
             pendingGraphicsPreset = static_cast<GraphicsPreset>(i + 1);
             // Both halves: saveSettings writes currentGraphicsPreset, and with
@@ -342,6 +346,8 @@ constexpr FieldBinding kFieldBindings[] = {
     {.key = "parallax",          .asBool  = &SettingsPanel::pendingPOM},
     {.key = "sharpstars",        .asBool  = &SettingsPanel::pendingSharpStars},
     {.key = "sunshafts",         .asBool  = &SettingsPanel::pendingSunShafts},
+    {.key = "shorelinefoam",     .asBool  = &SettingsPanel::pendingShorelineFoam},
+    {.key = "wetground",         .asBool  = &SettingsPanel::pendingWetGround},
     {.key = "parallaxquality",   .asInt   = &SettingsPanel::pendingPOMQuality},
 
     // --- Upscaling ---
@@ -670,6 +676,10 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
         if (renderer) renderer->setSharpStars(pendingSharpStars);
     } else if (key == "sunshafts") {
         if (renderer) renderer->setSunShaftsEnabled(pendingSunShafts);
+    } else if (key == "shorelinefoam") {
+        if (renderer) renderer->setShorelineFoam(pendingShorelineFoam);
+    } else if (key == "wetground") {
+        if (renderer) renderer->setWetGround(pendingWetGround);
     } else if (key == "parallaxquality") {
         if (wmo) wmo->setPOMQuality(pendingPOMQuality);
         if (chars) chars->setPOMQuality(pendingPOMQuality);

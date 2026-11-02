@@ -74,6 +74,8 @@ struct GraphicsPresetValues {
     float lensFlare;         ///< lensflare: 0 is none
     bool  sharpStars;        ///< off is the sky model's own star texture
     bool  sunShafts;
+    bool  shorelineFoam;     ///< shorelinefoam: off is the stock water edge
+    bool  wetGround;         ///< wetground: off is the stock dry ground in rain
 };
 
 // Normal mapping and parallax are on from Medium up, by choice: Jered
@@ -96,24 +98,26 @@ struct GraphicsPresetValues {
 // and up each time (the frame profile's beginFrame/grass+misc). It stays in
 // the panel for anyone who wants it.
 // The enhancement columns on Low to Ultra are each setting's own default, bar
-// Low's lighter mist. Classic sets every one of them to the stock picture:
-// still trees and cloth, Light.dbc's shadow darkness, fog and fog colour
-// exactly, no mist, flare or sun shafts, the sky's own stars, and no normal
-// maps or parallax (the ground's relief follows normal mapping, so it is flat
-// too). Shadows stay on, as on every row; the rest of its quality columns are
+// Low's lighter mist and its plain shorelines and dry rain: those two cost a
+// little on every water and ground pixel, which is what Low is for saving.
+// Classic sets every one of them to the stock picture: still trees and cloth,
+// Light.dbc's shadow darkness, fog and fog colour exactly, no mist, flare or
+// sun shafts, the sky's own stars, no shoreline foam or wet ground, and no
+// normal maps or parallax (the ground's relief follows normal mapping, so it
+// is flat too). Shadows stay on, as on every row; the rest of its quality columns are
 // High's, at the default view distance, where the fog is Light.dbc's own
 // (LightingManager::kFogReferenceViewDistance).
 constexpr GraphicsPresetValues kGraphicsPresets[] = {
     /* Low    */ { .viewDistance = 600.0f, .shadows = true,  .shadowDistance = 100.0f, .antiAliasing = 0, .fxaa = false, .normalMapping = false, .normalMapStrength = 0.6f, .parallax = false, .parallaxQuality = 0,  .groundClutter = 25,  .grass = false, .grassDensity = 70, .grassHeight = 50, .grassDistance = 215,
-                   .foliageWind = 1.0f, .shadowStrength = 1.0f, .lightShafts = 1, .fogStrength = 0.4f, .fogSkyBlend = 0.7f, .lensFlare = 1.0f, .sharpStars = true, .sunShafts = true},
+                   .foliageWind = 1.0f, .shadowStrength = 1.0f, .lightShafts = 1, .fogStrength = 0.4f, .fogSkyBlend = 0.7f, .lensFlare = 1.0f, .sharpStars = true, .sunShafts = true, .shorelineFoam = false, .wetGround = false},
     /* Medium */ {.viewDistance = 1000.0f, .shadows = true,  .shadowDistance = 200.0f, .antiAliasing = 1, .fxaa = false, .normalMapping = true, .normalMapStrength = 0.6f, .parallax = true, .parallaxQuality = 0,  .groundClutter = 60,  .grass = false, .grassDensity = 70, .grassHeight = 50, .grassDistance = 215,
-                   .foliageWind = 1.0f, .shadowStrength = 1.0f, .lightShafts = 2, .fogStrength = 0.4f, .fogSkyBlend = 0.7f, .lensFlare = 1.0f, .sharpStars = true, .sunShafts = true},
+                   .foliageWind = 1.0f, .shadowStrength = 1.0f, .lightShafts = 2, .fogStrength = 0.4f, .fogSkyBlend = 0.7f, .lensFlare = 1.0f, .sharpStars = true, .sunShafts = true, .shorelineFoam = true, .wetGround = true},
     /* High   */ {.viewDistance = 1600.0f, .shadows = true,  .shadowDistance = 350.0f, .antiAliasing = 2, .fxaa = false, .normalMapping = true, .normalMapStrength = 0.8f, .parallax = true, .parallaxQuality = 1, .groundClutter = 100, .grass = false, .grassDensity = 70, .grassHeight = 50, .grassDistance = 215,
-                   .foliageWind = 1.0f, .shadowStrength = 1.0f, .lightShafts = 2, .fogStrength = 0.4f, .fogSkyBlend = 0.7f, .lensFlare = 1.0f, .sharpStars = true, .sunShafts = true},
+                   .foliageWind = 1.0f, .shadowStrength = 1.0f, .lightShafts = 2, .fogStrength = 0.4f, .fogSkyBlend = 0.7f, .lensFlare = 1.0f, .sharpStars = true, .sunShafts = true, .shorelineFoam = true, .wetGround = true},
     /* Ultra  */ {.viewDistance = 2400.0f, .shadows = true,  .shadowDistance = 500.0f, .antiAliasing = 3, .fxaa = false, .normalMapping = true, .normalMapStrength = 1.2f, .parallax = true, .parallaxQuality = 2, .groundClutter = 150, .grass = false, .grassDensity = 70, .grassHeight = 50, .grassDistance = 215,
-                   .foliageWind = 1.0f, .shadowStrength = 1.0f, .lightShafts = 2, .fogStrength = 0.4f, .fogSkyBlend = 0.7f, .lensFlare = 1.0f, .sharpStars = true, .sunShafts = true},
+                   .foliageWind = 1.0f, .shadowStrength = 1.0f, .lightShafts = 2, .fogStrength = 0.4f, .fogSkyBlend = 0.7f, .lensFlare = 1.0f, .sharpStars = true, .sunShafts = true, .shorelineFoam = true, .wetGround = true},
     /* Classic */ {.viewDistance = kDefaultViewDistance, .shadows = true, .shadowDistance = 350.0f, .antiAliasing = 2, .fxaa = false, .normalMapping = false, .normalMapStrength = 0.8f, .parallax = false, .parallaxQuality = 1, .groundClutter = 100, .grass = false, .grassDensity = 70, .grassHeight = 50, .grassDistance = 215,
-                   .foliageWind = 0.0f, .shadowStrength = 1.0f, .lightShafts = 0, .fogStrength = 1.0f, .fogSkyBlend = 0.0f, .lensFlare = 0.0f, .sharpStars = false, .sunShafts = false},
+                   .foliageWind = 0.0f, .shadowStrength = 1.0f, .lightShafts = 0, .fogStrength = 1.0f, .fogSkyBlend = 0.0f, .lensFlare = 0.0f, .sharpStars = false, .sunShafts = false, .shorelineFoam = false, .wetGround = false},
 };
 
 /// The number of presets, not counting Custom - which is not a set of values

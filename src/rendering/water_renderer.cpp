@@ -48,7 +48,8 @@ struct WaterPushConstants {
     glm::vec2 depthRange;  // camera near, far - the shader linearises SceneDepth with these
     float sceneValid = 0.0f; // 1 once captureSceneHistory has run; the shader used to guess this per pixel
     float liquidTexValid = 0.0f; // 1 when set 3 holds a frame of this liquid's texture
-    float pad1 = 0.0f, pad2 = 0.0f;
+    float shoreFoam = 0.0f;      // 1 draws the shoreline foam band, 0 the stock water
+    float pad2 = 0.0f;
 };
 static_assert(sizeof(WaterPushConstants) == 112, "the two shader declarations of this range are laid out for 112 bytes");
 
@@ -1430,6 +1431,9 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         push.depthRange = glm::vec2(camera.getNearPlane(), camera.getFarPlane());
         push.sceneValid = sceneHistoryReady ? 1.0f : 0.0f;
         push.liquidTexValid = liquidTexValid ? 1.0f : 0.0f;
+        // Magma and slime return before the foam in the shader; only water
+        // and ocean take it.
+        push.shoreFoam = shorelineFoam_ ? 1.0f : 0.0f;
 
         vkCmdPushConstants(cmd, pipelineLayout,
                             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

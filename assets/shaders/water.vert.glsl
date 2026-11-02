@@ -30,7 +30,8 @@ layout(push_constant) uniform Push {
     vec2 depthRange;
     float sceneValid;
     float liquidTexValid;
-    float pad1, pad2;
+    float shoreFoam;
+    float pad2;
 } push;
 
 layout(location = 0) in vec3 aPos;
