@@ -69,6 +69,17 @@ audio::CombatItem combatItem(const EntitySpawner::ItemDbcRow* row) {
     }
     return item;
 }
+// A unit's emote voice, at the unit: the row's own MinDistance and
+// DistanceCutoff, as every positional kit plays (Wow.exe 0x4c6a40 ->
+// set3DMinMaxDistance), rather than a fixed 60 yd cutoff that was still
+// heard where the row says the stock client has gone silent.
+void playEntryAtUnit(const audio::SoundEntry& entry, const std::string& file, const glm::vec3& position) {
+    audio::SoundOptions opts;
+    opts.minDistance = entry.minDistance;
+    opts.kitId = entry.id;
+    const float cutoff = entry.distanceCutoff > 0.0f ? entry.distanceCutoff : audio::stock::kDefaultCutoff;
+    audio::AudioEngine::instance().playSound3D(file, position, entry.volume, 1.0f, cutoff, opts);
+}
 } // namespace
 
 uint64_t NPCInteractionCallbackHandler::guidForInstance(uint32_t instanceId) {
@@ -238,7 +249,7 @@ void NPCInteractionCallbackHandler::setupCallbacks() {
         const auto& file = entry->files[std::uniform_int_distribution<size_t>(0, entry->files.size() - 1)(rng)];
         const glm::vec3 pos = core::coords::canonicalToRender(
             glm::vec3(unit->getX(), unit->getY(), unit->getZ()));
-        audio::AudioEngine::instance().playSound3D(file, pos, entry->volume, 1.0f, 60.0f);
+        playEntryAtUnit(*entry, file, pos);
     });
 
     // M2 $CSD animation sound events: the emote voices EmotesTextSound has no
@@ -274,8 +285,7 @@ void NPCInteractionCallbackHandler::setupCallbacks() {
                 static std::mt19937 rng{std::random_device{}()};
                 const auto& file =
                     entry->files[std::uniform_int_distribution<size_t>(0, entry->files.size() - 1)(rng)];
-                const float maxDistance = entry->distanceCutoff > 0.0f ? entry->distanceCutoff : 60.0f;
-                audio::AudioEngine::instance().playSound3D(file, position, entry->volume, 1.0f, maxDistance);
+                playEntryAtUnit(*entry, file, position);
             });
     }
 

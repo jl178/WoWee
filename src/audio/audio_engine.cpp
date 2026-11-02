@@ -1,5 +1,6 @@
 #define MINIAUDIO_IMPLEMENTATION
 #include "audio/audio_engine.hpp"
+#include "audio/positional_sound.hpp"
 #include "audio/world_fx.hpp"
 #include "core/logger.hpp"
 #include "pipeline/asset_manager.hpp"
@@ -713,14 +714,11 @@ uint32_t AudioEngine::startSound3D(const std::vector<uint8_t>& wavData, const gl
     }
     sound.markInitialised();
 
-    // Position for panning only. The distance gain is the stock rolloff
-    // callback's (stock::rolloffGain), applied through the volume here and in
-    // update() as the listener moves: miniaudio's own models have no fade to
-    // zero at the cutoff. No Doppler: the stock client never gives FMOD a
-    // velocity.
-    ma_sound_set_position(sound.get(), position.x, position.y, position.z);
-    ma_sound_set_attenuation_model(sound.get(), ma_attenuation_model_none);
-    ma_sound_set_doppler_factor(sound.get(), 0.0f);
+    // Panned by direction; the distance gain is the stock rolloff callback's
+    // (stock::rolloffGain), applied through the volume here and in update()
+    // as the listener moves: miniaudio's own models have no fade to zero at
+    // the cutoff.
+    placeForPanning(sound.get(), position);
     ma_sound_set_volume(sound.get(), voiceGain(voice));
     ma_sound_set_pitch(sound.get(), pitch);
     if (loop) ma_sound_set_looping(sound.get(), MA_TRUE);

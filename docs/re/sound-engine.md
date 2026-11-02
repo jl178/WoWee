@@ -406,6 +406,8 @@ none fades the loop out.
 | Default cutoff | per row | 100 yd | 45 yd (the table's commonest) |
 | Listener | character - 2 x camera forward + 4 up | character + 1.5 up | `stock::listenerPosition` (renderer.cpp) |
 | Doppler | none | miniaudio default (no velocities set) | doppler factor 0 |
+| Panning | FMOD 3D pan (level 1) for every sound given a position | miniaudio's | kept: inverse model at rolloff 0 (`placeForPanning`). Its `attenuation_model_none` turns the spatializer off, panning and all, which put every unit's sounds in the listener's head |
+| Unit sounds | at the unit (vtable +0x2c position): swing 0x4d0720, impact 0x4d0540/0x4d0660, injury and exertion 0x747310; only the active player's own are 2D | some 2D school-bank fallbacks for other units | other casters' casts and the player's hits on others play only their kits' sounds, at the unit; rows' MinDistance and cutoff for emote, $CSD, sheath and spell kit sounds |
 | Voice limit | 32 real, priority then audibility, 400 ms virtual window | none | `stock::decideVoice` in `AudioEngine::admitVoice`, 32 voices, music reserved |
 | Per-kit limit | 3 audible, steal lowest | none | 3, steal least important |
 | Category caps | 18 categories, e.g. 6 footsteps, 4 impacts, 1 exertion | none | `SoundOptions::category` on footsteps, impacts, swings, injuries, exertion, error speech |

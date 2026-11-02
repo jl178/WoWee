@@ -2719,12 +2719,11 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
             owner_.spellCastAnimCallbackRef()(data.casterUnit, false, false,
                 wasTrackedCast ? castIt->second.castType : npcGoType);
         }
-        bool targetsPlayer = false;
-        for (const auto& tgt : data.hitTargets) {
-            if (tgt == owner_.getPlayerGuid()) { targetsPlayer = true; break; }
-        }
-        if (targetsPlayer && !rangedWeaponAttack)
-            playSpellCastSound(data.spellId);
+        // Another unit's cast is heard only through its kit's sound, at the
+        // caster (the visual below). The school bank's cast sound is not
+        // positional and the stock client has no such fallback: played for
+        // a cast on the player, it put a caster thirty yards off in the
+        // listener's head.
     }
 
     // Clear unit cast bar
@@ -2745,12 +2744,13 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
         }
     }
 
-    // Impact sound
+    // Impact sound. The school bank plays in the listener's head, so only
+    // for a spell landing on the player's own character, whose sounds the
+    // stock client plays in 2D anyway; an impact on anything else is its
+    // impact kit's sound, at the target.
     bool playerIsHit = false;
-    bool playerHitEnemy = false;
     for (const auto& tgt : data.hitTargets) {
         if (tgt == owner_.getPlayerGuid()) { playerIsHit = true; }
-        if (data.casterUnit == owner_.getPlayerGuid() && tgt != owner_.getPlayerGuid() && tgt != 0) { playerHitEnemy = true; }
     }
 
     // Fire UNIT_SPELLCAST_SUCCEEDED
@@ -2760,7 +2760,7 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
             owner_.addonEventCallbackRef()("UNIT_SPELLCAST_SUCCEEDED", spellcastArgs(unitId, data.spellId));
     }
 
-    if ((playerIsHit || playerHitEnemy) && !rangedWeaponAttack)
+    if (playerIsHit && !rangedWeaponAttack)
         playSpellImpactSound(data.spellId);
 
     // The cast went off: the build-up in the caster's hands is done (any
