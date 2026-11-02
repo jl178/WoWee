@@ -162,10 +162,13 @@ void SRP::computeClientEphemeral() {
 void SRP::computeSessionKey() {
     LOG_DEBUG("Computing session key");
 
-    // u = H(A | B) - scrambling parameter
-    // Use natural BigNum sizes to match TrinityCore's UpdateBigNumbers behavior
-    std::vector<uint8_t> A_bytes_u = A.toArray(true);
-    std::vector<uint8_t> B_bytes_u = B.toArray(true);
+    // u = H(A | B) - scrambling parameter. A and B are hashed as the 32-byte
+    // arrays they travel as, the way the stock client and AzerothCore's SRP6
+    // (EphemeralKey = std::array<uint8, 32>) do. Natural sizes dropped a
+    // leading zero byte - about one login in 128 failed with "account not
+    // found" (status 4, which is also the server's answer to a bad proof).
+    std::vector<uint8_t> A_bytes_u = A.toArray(true, 32);
+    std::vector<uint8_t> B_bytes_u = B.toArray(true, 32);
 
     std::vector<uint8_t> AB;
     AB.insert(AB.end(), A_bytes_u.begin(), A_bytes_u.end());
@@ -199,8 +202,16 @@ void SRP::computeSessionKey() {
     // Split S into even and odd bytes, hash each half, then interleave
     std::vector<uint8_t> S_bytes = S.toArray(true, 32);  // 32 bytes for WoW
 
+    // Leading zero bytes are skipped, an even number of them, before the
+    // halves are hashed: SRP6::SHA1Interleave on the server, and the stock
+    // client before it. Without this one login in 256 had a different K.
+    size_t skip = 0;
+    while (skip < S_bytes.size() && S_bytes[skip] == 0) ++skip;
+    if (skip & 1) ++skip;
+    skip /= 2;
+
     std::vector<uint8_t> S1, S2;
-    for (size_t i = 0; i < 16; ++i) {
+    for (size_t i = skip; i < 16; ++i) {
         S1.push_back(S_bytes[i * 2]);       // Even indices
         S2.push_back(S_bytes[i * 2 + 1]);   // Odd indices
     }
@@ -244,10 +255,10 @@ void SRP::computeProofs(const std::string& username) {
     // Compute H(username)
     std::vector<uint8_t> user_hash = Crypto::sha1(upperUser);
 
-    // Get A, B, and salt as byte arrays - natural sizes for hash inputs
-    std::vector<uint8_t> A_bytes = A.toArray(true);
-    std::vector<uint8_t> B_bytes = B.toArray(true);
-    std::vector<uint8_t> s_bytes = s.toArray(true);
+    // A, B and the salt as their fixed 32-byte arrays (see computeSessionKey).
+    std::vector<uint8_t> A_bytes = A.toArray(true, 32);
+    std::vector<uint8_t> B_bytes = B.toArray(true, 32);
+    std::vector<uint8_t> s_bytes = s.toArray(true, 32);
 
     // M1 = H( H(N)^H(g) | H(I) | s | A | B | K )
     std::vector<uint8_t> M1_input;
