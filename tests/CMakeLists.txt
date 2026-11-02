@@ -824,6 +824,15 @@ wowee_add_test(test_unit_motion
     SOURCES test_unit_motion.cpp
             ${CMAKE_SOURCE_DIR}/src/game/unit_motion.cpp)
 
+# ── test_taxi_rules / test_vehicle_rules ─────────────────────
+# Stock taxi and vehicle rules (docs/re/mounts-taxi-vehicles.md).
+wowee_add_test(test_taxi_rules
+    SOURCES test_taxi_rules.cpp
+            ${CMAKE_SOURCE_DIR}/src/game/taxi_rules.cpp
+            ${CMAKE_SOURCE_DIR}/src/game/unit_motion.cpp)
+wowee_add_test(test_vehicle_rules
+    SOURCES test_vehicle_rules.cpp)
+
 # ── test_spline ──────────────────────────────────────────────
 wowee_add_test(test_spline
     SOURCES test_spline.cpp
@@ -1254,6 +1263,13 @@ wowee_add_test(test_m2_track_cursor
 wowee_add_test(test_m2_track_stock
     SOURCES test_m2_track_stock.cpp)
 
+# ── test_m2_effect_select ────────────────────────────────────
+# The stock M2 batch shader selection: runtime shader ids, the folding of
+# env and alpha layers, and the combiner and UV sources per stage
+# (docs/re/m2-runtime.md §3).
+wowee_add_test(test_m2_effect_select
+    SOURCES test_m2_effect_select.cpp)
+
 # ── test_m2_particle_step ────────────────────────────────────
 # Classified emitter tracks, the in-order particle step, the birth merge and
 # the weight split the threaded particle update uses.
@@ -1427,6 +1443,19 @@ target_include_directories(test_activity_fsm SYSTEM PRIVATE ${TEST_SYSTEM_INCLUD
 target_link_libraries(test_activity_fsm PRIVATE catch2_main)
 add_test(NAME activity_fsm COMMAND test_activity_fsm)
 register_test_target(test_activity_fsm)
+
+# ── test_mount_rules ─────────────────────────────────────────
+add_executable(test_mount_rules
+    test_mount_rules.cpp
+    ${TEST_COMMON_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/rendering/animation/mount_fsm.cpp
+    ${CMAKE_SOURCE_DIR}/src/rendering/animation/locomotion_fsm.cpp
+)
+target_include_directories(test_mount_rules PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_mount_rules SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_mount_rules PRIVATE catch2_main)
+add_test(NAME mount_rules COMMAND test_mount_rules)
+register_test_target(test_mount_rules)
 
 # NPC animator tests removed - NpcAnimator replaced by generic CharacterAnimator
 
@@ -2930,6 +2959,7 @@ wowee_add_test(test_sound_data SOURCES
     ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/sound_data.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/stock_sound_rules.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/stock_sound_advanced.cpp
 )
 wowee_add_test(test_zone_music_controller SOURCES
     test_zone_music_controller.cpp
@@ -2938,6 +2968,7 @@ wowee_add_test(test_zone_music_controller SOURCES
     ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/sound_data.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/stock_sound_rules.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/stock_sound_advanced.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/zone_music_controller.cpp
 )
 # ── test_stock_sound_rules ───────────────────────────────────
@@ -2946,6 +2977,15 @@ wowee_add_test(test_zone_music_controller SOURCES
 # listener and the day window. Pure.
 wowee_add_test(test_stock_sound_rules SOURCES
     test_stock_sound_rules.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/stock_sound_rules.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/stock_sound_advanced.cpp
+)
+# ── test_stock_sound_advanced ────────────────────────────────
+# SoundEntriesAdvanced as Wow.exe 3.3.5a applies it: the 2D/3D blend, the
+# time window, the replay schedule and the ducking. Pure.
+wowee_add_test(test_stock_sound_advanced SOURCES
+    test_stock_sound_advanced.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/stock_sound_advanced.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/stock_sound_rules.cpp
 )
 # ── test_positional_sound ────────────────────────────────────

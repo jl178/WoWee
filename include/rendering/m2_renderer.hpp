@@ -74,7 +74,18 @@ struct M2ModelGPU {
         uint16_t blendMode = 0;   // 0=Opaque, 1=AlphaKey, 2=Alpha, 3=Add, etc.
         uint16_t materialFlags = 0; // M2 material flags (0x01=Unlit, 0x04=TwoSided, 0x10=NoDepthWrite)
         uint16_t submeshLevel = 0; // LOD level: 0=base, 1=LOD1, 2=LOD2, 3=LOD3
-        uint8_t textureUnit = 0;  // UV set index (0=texCoords[0], 1=texCoords[1])
+        // Each texture stage's coordinate source, as the vertex shader's
+        // texCoordSet push constant takes it: bits 0-1 the first stage,
+        // 2-3 the second (m2fx::UvSource: 0 UV0, 1 UV1, 2 sphere env map).
+        uint8_t textureUnit = 0;
+        // The stock pixel shader and its stage count (m2_effect_select.hpp).
+        uint8_t combiner = 1;
+        uint8_t texStages = 1;
+        VkTexture* texture2 = nullptr;  // the second stage's texture, NOT owned
+        /// The second stage's texture transform (index into
+        /// textureTransforms), -1 for none.
+        int16_t stage2Transform = -1;
+        uint8_t tex2Flags = 0;  // the second texture's M2Texture.flags (wrap S/T)
         uint8_t texFlags = 0;     // M2Texture.flags (bit0=WrapS, bit1=WrapT)
         bool lanternGlowHint = false; // Texture/model hints this batch is a glow-card billboard
         bool glowCardLike = false; // Batch likely is a flat emissive card that should be sprite-replaced
@@ -629,6 +640,10 @@ struct M2MaterialUBO {
     /// A flame card. Fades out over the top of its own model, so the card's
     /// upper edge is not where the fire stops.
     int32_t fireCard;
+    /// The stock pixel shader (m2fx::Combiner) and how many texture stages
+    /// it reads.
+    int32_t combiner;
+    int32_t texStages;
 };
 
 // M2 params UBO - matches M2Params in m2.vert.glsl (set 1, binding 1)
@@ -1070,7 +1085,14 @@ private:
     uint32_t lastFoliageCasters_ = 0;
     VkPipeline alphaTestPipeline_ = VK_NULL_HANDLE;     // blend mode 1
     VkPipeline alphaPipeline_ = VK_NULL_HANDLE;         // blend mode 2
-    VkPipeline additivePipeline_ = VK_NULL_HANDLE;      // blend mode 3+
+    VkPipeline additivePipeline_ = VK_NULL_HANDLE;      // blend mode 4 (SrcAlpha, One)
+    // The rest of the stock blend table (0xA453B0): 3 is One + One, 5 is
+    // Mod (DstColor, Zero), 6 is Mod2x (DstColor, SrcColor).
+    VkPipeline addOnePipeline_ = VK_NULL_HANDLE;
+    VkPipeline modPipeline_ = VK_NULL_HANDLE;
+    VkPipeline mod2xPipeline_ = VK_NULL_HANDLE;
+    /// The main-pass pipeline for a stock M2 blend mode.
+    [[nodiscard]] VkPipeline pipelineForBlend(uint16_t blendMode) const;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
     // Shadow rendering (Phase 7)
@@ -1143,11 +1165,13 @@ private:
         glm::mat4 model;           // 64 bytes @ offset 0
         glm::vec2 uvOffset;        //  8 bytes @ offset 64
         float fadeAlpha;           //  4 bytes @ offset 72
-        int32_t useBones;          //  4 bytes @ offset 76
+        // The second texture stage's UV translation as two halves
+        // (glm::packHalf2x16). Whether to skin is flags bit 2 now.
+        uint32_t uvOffset2 = 0;    //  4 bytes @ offset 76
         int32_t boneBase;          //  4 bytes @ offset 80
         int32_t boneCount;         //  4 bytes @ offset 84 - clamps skinning reads
         float highlight = 0.0f;    //  4 bytes @ offset 88 - pressed-on lift
-        int32_t flags = {};        //  4 bytes @ offset 92 - bit 0: afloat (bobs on the water)
+        int32_t flags = {};        //  4 bytes @ offset 92 - bit 0: afloat (bobs on the water), bit 2: skinned
     };
     // How many instances one frame may hand the GPU, not how many exist. Ground
     // clutter is what fills it: it is drawn by the thousand and every tuft

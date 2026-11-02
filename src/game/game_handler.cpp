@@ -442,12 +442,17 @@ if (!onTaxiFlight_ && taxiMountActive_) {
 // Keep non-taxi mount state server-authoritative.
 // Some server paths don't emit explicit mount field updates in lockstep
 // with local visual state changes, so reconcile continuously.
-if (!(movementHandler_ && movementHandler_->isOnTaxiFlight()) && !taxiMountActive_) {
+// On a taxi too: the server mounts the flyer through this field.
+if (!taxiMountActive_) {
     auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
     auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity);
     if (playerUnit) {
         uint32_t serverMountDisplayId = playerUnit->getMountDisplayId();
-        if (serverMountDisplayId != currentMountDisplayId_) {
+        // A dismount just asked for: the field keeps the old mount for a few
+        // frames, which would put the player straight back on it.
+        const bool dismountPending = movementHandler_ && movementHandler_->isDismountPending();
+        if (serverMountDisplayId != currentMountDisplayId_ &&
+            !(dismountPending && serverMountDisplayId != 0)) {
             LOG_INFO("Mount reconcile: server=", serverMountDisplayId,
                      " local=", currentMountDisplayId_);
             currentMountDisplayId_ = serverMountDisplayId;
@@ -1168,6 +1173,24 @@ int GameHandler::getRecipeDifficulty(uint32_t spellId) const {
     const uint32_t yellow = se.minSkillRank +
                             (se.trivialSkillLow - se.minSkillRank) / 2;
     if (skill >= yellow) return 1;
+    return 0;
+}
+
+uint32_t GameHandler::getMountAuraSpellVisual(uint64_t guid) const {
+    const std::vector<AuraSlot>* auras =
+        guid == playerGuid ? &getPlayerAuras() : getUnitAuras(guid);
+    if (!auras) return 0;
+    loadSpellNameCache();
+    constexpr uint32_t kAuraMounted = 78;
+    for (const auto& a : *auras) {
+        if (a.isEmpty()) continue;
+        auto cit = spellNameCache_.find(a.spellId);
+        if (cit == spellNameCache_.end()) continue;
+        const auto& se = cit->second;
+        for (uint32_t aura : se.effectAuraIds) {
+            if (aura == kAuraMounted) return se.spellVisualId;
+        }
+    }
     return 0;
 }
 

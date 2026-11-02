@@ -1,4 +1,5 @@
 #include "rendering/animation/footstep_driver.hpp"
+#include <cctype>
 #include "rendering/renderer.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/character_renderer.hpp"
@@ -33,26 +34,18 @@ bool containsAnyToken(const std::string& text, std::initializer_list<const char*
     return false;
 }
 
-FootprintFallback fallbackForMount(audio::MountFamily family) {
-    switch (family) {
-        case audio::MountFamily::HORSE:
-        case audio::MountFamily::UNDEAD_HORSE:
-        case audio::MountFamily::RAM:
-        case audio::MountFamily::MECHANOSTRIDER:
-            return FootprintFallback::HOOF;
-        case audio::MountFamily::WOLF:
-        case audio::MountFamily::TIGER:
-            return FootprintFallback::PAW;
-        case audio::MountFamily::RAPTOR:
-        case audio::MountFamily::TALLSTRIDER:
-        case audio::MountFamily::DRAGON:
-            return FootprintFallback::CLAW;
-        case audio::MountFamily::KODO:
-            return FootprintFallback::CLOVEN;
-        case audio::MountFamily::UNKNOWN:
-            return FootprintFallback::BIPED;
-    }
-    return FootprintFallback::BIPED;
+/// The footprint a mount leaves when the footprint renderer knows nothing of
+/// its model, by the model's name.
+FootprintFallback fallbackForMountModel(std::string name) {
+    for (auto& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (containsAnyToken(name, {"wolf", "tiger", "saber", "cat", "bear", "lion"}))
+        return FootprintFallback::PAW;
+    if (containsAnyToken(name, {"raptor", "strider", "drake", "dragon", "gryphon", "hippogryph",
+                                "wyvern", "turtle", "proto"}))
+        return FootprintFallback::CLAW;
+    if (containsAnyToken(name, {"kodo", "mammoth", "elekk", "talbuk", "yak"}))
+        return FootprintFallback::CLOVEN;
+    return FootprintFallback::HOOF;
 }
 
 void spawnFootprint(Renderer* renderer, CharacterRenderer* characterRenderer,
@@ -262,36 +255,15 @@ void FootstepDriver::update(float deltaTime, Renderer* renderer,
                     return mountFootstepLastNormTime_ < eventNorm || eventNorm <= norm;
                 };
 
-                auto* mountSounds = renderer->getAudioCoordinator()->getMountSoundManager();
-                const auto family = mountSounds
-                    ? mountSounds->getCurrentMountFamily()
-                    : audio::MountFamily::UNKNOWN;
-
-                // Bank: hooves for horse-like mounts, heavy thuds for kodos,
-                // softened character steps for padded paws and everything else.
-                audio::FootstepBank bank = audio::FootstepBank::CHARACTER;
-                switch (family) {
-                    case audio::MountFamily::HORSE:
-                    case audio::MountFamily::UNDEAD_HORSE:
-                    case audio::MountFamily::RAM:
-                        bank = audio::FootstepBank::HORSE;
-                        break;
-                    case audio::MountFamily::KODO:
-                        bank = audio::FootstepBank::HEAVY;
-                        break;
-                    default:
-                        break;
-                }
-
-                // Beat timing: prefer the model's authored $FSD footfall
-                // keyframes (exact hoof-strike sync). Models without them fall
-                // back to a synthetic gait: quadrupeds gallop - four beats
-                // clustered in the first half of the stride, then airborne
-                // suspension; two-legged striders alternate biped steps.
+                // The mount's own $FSD footfalls, and nothing synthesised for a
+                // model without them (stock has no timer beyond the events).
+                // The sound is the event's (FootstepTerrainLookup for the mount
+                // display, NPCInteractionCallbackHandler::handleUnitAnimEvent);
+                // here only the footprint is left.
                 bool beat = false;
                 const std::vector<uint32_t>* eventTimes =
                     characterRenderer->getFootstepEventTimes(mountInstanceId);
-                if (eventTimes && !eventTimes->empty()) {
+                if (eventTimes) {
                     for (uint32_t t : *eventTimes) {
                         float eventNorm = std::min(static_cast<float>(t) / animDurationMs, 0.999f);
                         if (crossed(eventNorm)) {
@@ -299,23 +271,17 @@ void FootstepDriver::update(float deltaTime, Renderer* renderer,
                             break;
                         }
                     }
-                } else {
-                    const bool biped = family == audio::MountFamily::MECHANOSTRIDER ||
-                                       family == audio::MountFamily::TALLSTRIDER ||
-                                       family == audio::MountFamily::DRAGON;
-                    beat = biped
-                        ? (crossed(0.25f) || crossed(0.75f))
-                        : (crossed(0.05f) || crossed(0.20f) || crossed(0.35f) || crossed(0.50f));
                 }
 
                 if (beat) {
                     const auto surface = resolveFootstepSurface(renderer);
-                    footstepManager->playMountFootstep(surface, bank);
                     if (surface == audio::FootstepSurface::WATER) {
                         playWaterStepExtras(renderer);
                     } else {
+                        std::string mountModel;
+                        characterRenderer->getInstanceModelName(mountInstanceId, mountModel);
                         spawnFootprint(renderer, characterRenderer, mountInstanceId,
-                                       nextMountFootLeft_, fallbackForMount(family));
+                                       nextMountFootLeft_, fallbackForMountModel(mountModel));
                         nextMountFootLeft_ = !nextMountFootLeft_;
                     }
                 }

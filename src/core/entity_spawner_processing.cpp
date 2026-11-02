@@ -1422,6 +1422,19 @@ void EntitySpawner::processPendingTransportDoodads() {
     if (vkCtx) vkCtx->endUploadBatch();
 }
 
+namespace {
+// What a mount model plays (mount_fsm.hpp): its locomotion, jump, swim set
+// (flight), Fly on a taxi, Hover, MountSpecial. The rest would stall the load.
+const std::initializer_list<uint32_t> kMountExternalAnims = {
+    rendering::anim::STAND, rendering::anim::WALK, rendering::anim::RUN,
+    rendering::anim::SPRINT, rendering::anim::WALK_BACKWARDS, rendering::anim::JUMP_START,
+    rendering::anim::JUMP, rendering::anim::JUMP_END, rendering::anim::FALL,
+    rendering::anim::JUMP_LAND_RUN, rendering::anim::SWIM_IDLE, rendering::anim::SWIM,
+    rendering::anim::SWIM_LEFT, rendering::anim::SWIM_RIGHT, rendering::anim::SWIM_BACKWARDS,
+    rendering::anim::FLY, rendering::anim::HOVER, rendering::anim::MOUNT_SPECIAL,
+    rendering::anim::SHUFFLE_LEFT, rendering::anim::SHUFFLE_RIGHT};
+}  // namespace
+
 void EntitySpawner::processPendingMount() {
     if (pendingMountDisplayId_ == 0) return;
     uint32_t mountDisplayId = pendingMountDisplayId_;
@@ -1469,11 +1482,9 @@ void EntitySpawner::processPendingMount() {
             }
         }
 
-        // Load external .anim files (only idle + run needed for mounts)
-        // Only what a mount does while standing still; the rest would stall.
+        // External .anim files: what a mount plays (kMountExternalAnims).
         pipeline::loadExternalAnimations(
-            *assetManager_, m2Path, m2Data, model,
-            {rendering::anim::STAND, rendering::anim::WALK, rendering::anim::RUN});
+            *assetManager_, m2Path, m2Data, model, kMountExternalAnims);
 
         if (!charRenderer->loadModel(model, modelId)) {
             LOG_WARNING("Failed to load mount model: ", m2Path);
@@ -1619,21 +1630,9 @@ void EntitySpawner::processPendingMount() {
 
     if (auto* ac = renderer_->getAnimationController()) ac->setMounted(instanceId, mountDisplayId, heightOffset, m2Path);
 
-    // For taxi mounts, start with flying animation; for ground mounts, start with stand
-    bool isTaxi = gameHandler_ && gameHandler_->isOnTaxiFlight();
-    uint32_t startAnim = rendering::anim::STAND;
-    if (isTaxi) {
-        // Try WotLK fly anims first, then Vanilla-friendly fallbacks
-        using namespace rendering::anim;
-        uint32_t taxiCandidates[] = {FLY_FORWARD, FLY_IDLE, FLY_RUN, FLY_SPELL, FLY_RISE, SPELL_KNEEL_LOOP, FLY_CUSTOM_SPELL_10, DEAD, RUN};
-        for (uint32_t anim : taxiCandidates) {
-            if (charRenderer->hasAnimation(instanceId, anim)) {
-                startAnim = anim;
-                break;
-            }
-        }
-        // If none found, startAnim stays 0 (Stand/hover) which is fine for flying creatures
-    }
+    // Stand until the mount machine picks the unit's movement next frame
+    // (Fly on a taxi's spline, the swim set in the air, the pace on the ground).
+    const uint32_t startAnim = rendering::anim::STAND;
     charRenderer->playAnimation(instanceId, startAnim, true);
 
     LOG_INFO("processPendingMount: DONE displayId=", mountDisplayId, " model=", m2Path, " heightOffset=", heightOffset);
@@ -1670,9 +1669,7 @@ bool EntitySpawner::loadRemoteMountModel(uint32_t displayId, uint32_t& modelId,
         if (!model.isValid()) return false;
 
         pipeline::loadExternalAnimations(
-            *assetManager_, modelPath, m2Data, model,
-            {rendering::anim::STAND, rendering::anim::WALK, rendering::anim::RUN,
-             rendering::anim::FLY_IDLE, rendering::anim::FLY_FORWARD});
+            *assetManager_, modelPath, m2Data, model, kMountExternalAnims);
 
         modelId = nextCreatureModelId_++;
         if (!cr->loadModel(model, modelId)) return false;
@@ -1750,19 +1747,8 @@ void EntitySpawner::processPendingRemotePlayerMounts() {
         if (mountInstance != 0) {
             cr->setInstanceParticleColor(mountInstance, creatureDisplayParticleColor(displayId));
             cr->setInstanceMountedOn(playerIt->second, mountInstance);
-            const bool moving = gameHandler_ && [&] {
-                auto entity = gameHandler_->getEntityManager().getEntity(guid);
-                return entity && entity->isActivelyMoving();
-            }();
-            const bool flying = creatureFlyingState_.count(guid) > 0;
-            const bool walking = creatureWalkingState_.count(guid) > 0;
-            uint32_t mountAnim = moving
-                ? (flying ? rendering::anim::FLY_FORWARD
-                          : (walking ? rendering::anim::WALK : rendering::anim::RUN))
-                : (flying ? rendering::anim::FLY_IDLE : rendering::anim::STAND);
-            if (!cr->hasAnimation(mountInstance, mountAnim)) {
-                mountAnim = moving ? rendering::anim::RUN : rendering::anim::STAND;
-            }
+            // Stand until the sync loop drives it as the rider moves.
+            const uint32_t mountAnim = rendering::anim::STAND;
             cr->playAnimation(mountInstance, mountAnim, true);
             cr->playAnimation(playerIt->second, rendering::anim::MOUNT, true);
             remotePlayerMounts_[guid] = {.displayId = displayId, .modelId = modelId,

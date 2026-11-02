@@ -36,6 +36,9 @@ public:
     /// The unit a character render instance draws: the local character, an
     /// other player or a creature. 0 for anything else (mounts, previews).
     uint64_t guidForInstance(uint32_t instanceId);
+    /// The display of the mount whose model this instance is (the local
+    /// player's or another player's), 0 for anything else.
+    uint32_t mountDisplayForInstance(uint32_t instanceId) const;
 
 private:
     /// Resolve NPC voice type from GUID (eliminates 4x copy-paste of display-ID lookup)

@@ -79,7 +79,7 @@ void ActivitySoundManager::update([[maybe_unused]] float deltaTime) {
 
             // Play as one-shot 2D sound
             float volume = 0.6f * volumeScale;
-            AudioEngine::instance().playSound2D(sample.data, volume, false);
+            playOwn(sample.data, volume, 1.0f);
 
             lastSwimStrokeAt = now;
         }
@@ -138,11 +138,23 @@ void ActivitySoundManager::replaceFromEntry(std::vector<Sample>& out, const Soun
 }
 
 // Voice clips play as recorded: the stock client does not retune a grunt.
-bool ActivitySoundManager::playVoice(const std::vector<Sample>& clips) {
+bool ActivitySoundManager::playVoice(const std::vector<Sample>& clips, stock::Category category) {
     if (!AudioEngine::instance().isInitialized() || clips.empty()) return false;
     std::uniform_int_distribution<size_t> dist(0, clips.size() - 1);
     const Sample& sample = clips[dist(rng)];
-    return AudioEngine::instance().playSound2D(sample.data, sample.volume * volumeScale, 1.0f);
+    SoundOptions opts;
+    opts.ownCharacter = true;
+    opts.category = category;
+    return AudioEngine::instance().playSound2D(sample.data, sample.volume * volumeScale, 1.0f, SoundBus::World,
+                                               opts);
+}
+
+// Everything this manager plays is the character's own: in the head at 0.65
+// of its level with the listener at the character, priority 110.
+bool ActivitySoundManager::playOwn(const std::vector<uint8_t>& data, float volume, float pitch) {
+    SoundOptions opts;
+    opts.ownCharacter = true;
+    return AudioEngine::instance().playSound2D(data, volume, pitch, SoundBus::World, opts);
 }
 
 void ActivitySoundManager::preloadLandingSet(FootstepSurface surface, const std::string& material) {
@@ -249,7 +261,7 @@ void ActivitySoundManager::playLanding(FootstepSurface surface, bool hardLanding
         std::uniform_real_distribution<float> volumeDist(baseVolume * 0.95f, baseVolume * 1.05f);
         std::uniform_real_distribution<float> pitchDist(0.95f, 1.03f);
 
-        AudioEngine::instance().playSound2D(sample.data, volumeDist(rng) * volumeScale, pitchDist(rng));
+        playOwn(sample.data, volumeDist(rng) * volumeScale, pitchDist(rng));
         lastLandAt = now;
     }
 
@@ -388,7 +400,7 @@ bool ActivitySoundManager::playSplash(const std::vector<Sample>& clips) {
     std::uniform_int_distribution<size_t> clipDist(0, clips.size() - 1);
     const Sample& sample = clips[clipDist(rng)];
     std::uniform_real_distribution<float> pitchDist(0.95f, 1.05f);
-    return AudioEngine::instance().playSound2D(sample.data, 0.95f * volumeScale, pitchDist(rng));
+    return playOwn(sample.data, 0.95f * volumeScale, pitchDist(rng));
 }
 
 void ActivitySoundManager::playWaterEnter() {
@@ -516,32 +528,25 @@ void ActivitySoundManager::rebuildCombatVocalClipsForProfile(const std::string& 
     }
 }
 
-void ActivitySoundManager::playAttackGrunt() {
+void ActivitySoundManager::playAttackGrunt(bool isCrit) {
     if (!AudioEngine::instance().isInitialized() || attackGruntClips.empty()) return;
-    auto now = std::chrono::steady_clock::now();
-    if (lastAttackGruntAt.time_since_epoch().count() != 0) {
-        if (std::chrono::duration<float>(now - lastAttackGruntAt).count() < 1.5f) return;
-    }
-    // ~30% chance per swing to grunt (not every hit)
-    std::uniform_int_distribution<int> chance(0, 9);
-    if (chance(rng) > 2) return;
-
-    if (playVoice(attackGruntClips)) {
-        lastAttackGruntAt = now;
-    }
+    // Wow.exe 0x7631a0: a roll of 0..100 against the player table (0xadba74),
+    // 35 for an exertion and 100 for a critical one, and no timer: the
+    // exertion category's cap of one keeps them from piling up.
+    const auto kind = isCrit ? stock::UnitSoundKind::ExertionCritical : stock::UnitSoundKind::Exertion;
+    if (std::uniform_int_distribution<int>(0, 100)(rng) > stock::unitSoundChance(kind, true)) return;
+    playVoice(attackGruntClips, stock::unitSoundCategory(kind, true));
 }
 
 void ActivitySoundManager::playWound(bool isCrit) {
     if (!AudioEngine::instance().isInitialized()) return;
     auto& clips = (isCrit && !woundCritClips.empty()) ? woundCritClips : woundClips;
     if (clips.empty()) return;
-    auto now = std::chrono::steady_clock::now();
-    if (lastWoundAt.time_since_epoch().count() != 0) {
-        if (std::chrono::duration<float>(now - lastWoundAt).count() < 0.8f) return;
-    }
-    if (playVoice(clips)) {
-        lastWoundAt = now;
-    }
+    // 30 in 100, always on a crit; the active player's own cries are
+    // category 12, one at a time (0x7631a0).
+    const auto kind = isCrit ? stock::UnitSoundKind::InjuryCritical : stock::UnitSoundKind::Injury;
+    if (std::uniform_int_distribution<int>(0, 100)(rng) > stock::unitSoundChance(kind, true)) return;
+    playVoice(clips, stock::unitSoundCategory(kind, true));
 }
 } // namespace audio
 } // namespace wowee

@@ -264,6 +264,9 @@ void Entity::updateStockMotion() {
             unitSpline_->update(now, motionFlags_ | baseMoveFlags_);
         float facing = f.facing.value_or(motionFrameFacing_);
         if (f.hasPitch) motionPitch_ = f.pitch;
+        motionHasAttitude_ = f.hasAttitude && !f.finished;
+        motionAttitudePitch_ = f.attitudePitch;
+        motionBank_ = f.bank;
         motionSpeed_ = unitSpline_->speed();
         const uint32_t sf = unitSpline_->flags;
         motionAirborne_ = !f.finished &&
@@ -300,6 +303,7 @@ void Entity::updateStockMotion() {
         motionKind_ = MotionKind::None;
         motionTranslating_ = false;
         motionAirborne_ = false;
+        motionHasAttitude_ = false;
         motionSpeed_ = 0.0f;
         motionFlags_ = 0;
         isMoving_ = false;

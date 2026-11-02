@@ -4,10 +4,12 @@
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/character_renderer.hpp"
+#include "rendering/animation_controller.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "game/game_handler.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/npc_voice_manager.hpp"
+#include "audio/footstep_manager.hpp"
 #include "audio/audio_engine.hpp"
 #include "audio/sound_data.hpp"
 #include "game/update_field_table.hpp"
@@ -73,10 +75,13 @@ audio::CombatItem combatItem(const EntitySpawner::ItemDbcRow* row) {
 // DistanceCutoff, as every positional kit plays (Wow.exe 0x4c6a40 ->
 // set3DMinMaxDistance), rather than a fixed 60 yd cutoff that was still
 // heard where the row says the stock client has gone silent.
-void playEntryAtUnit(const audio::SoundEntry& entry, const std::string& file, const glm::vec3& position) {
+// The local character's own: in the head at 0.65 (0x746d60, 0x747310).
+void playEntryAtUnit(const audio::SoundEntry& entry, const std::string& file, const glm::vec3& position,
+                     bool own = false) {
     audio::SoundOptions opts;
     opts.minDistance = entry.minDistance;
     opts.kitId = entry.id;
+    opts.ownCharacter = own;
     const float cutoff = entry.distanceCutoff > 0.0f ? entry.distanceCutoff : audio::stock::kDefaultCutoff;
     audio::AudioEngine::instance().playSound3D(file, position, entry.volume, 1.0f, cutoff, opts);
 }
@@ -98,6 +103,18 @@ uint64_t NPCInteractionCallbackHandler::guidForInstance(uint32_t instanceId) {
     for (const auto& [guid, id] : entitySpawner_.getPlayerInstances()) instanceGuids_[id] = guid;
     hit = instanceGuids_.find(instanceId);
     return hit != instanceGuids_.end() ? hit->second : 0;
+}
+
+uint32_t NPCInteractionCallbackHandler::mountDisplayForInstance(uint32_t instanceId) const {
+    if (instanceId == 0) return 0;
+    if (renderer_) {
+        if (auto* ac = renderer_->getAnimationController();
+            ac && ac->isMounted() && ac->getMountInstanceId() == instanceId)
+            return ac->getMountDisplayId();
+    }
+    for (const auto& [guid, m] : entitySpawner_.getRemotePlayerMounts())
+        if (m.instanceId == instanceId) return m.displayId;
+    return 0;
 }
 
 bool NPCInteractionCallbackHandler::resolveCombatUnit(uint64_t guid, audio::CombatUnitInfo& out) {
@@ -203,6 +220,30 @@ void NPCInteractionCallbackHandler::handleUnitAnimEvent(uint32_t instanceId, uin
     // Everything below is heard only nearby; the instance lookup and the
     // ground probe are skipped for the rest.
     if (glm::distance(audio::AudioEngine::instance().getListenerPosition(), position) > 60.0f) return;
+    // A mount's own model: its events sound with the mount display's
+    // CreatureSoundData. The stock client points a mounted unit's creature
+    // sounds at the mount (0x73D5D0 stores 0x7195D0's answer at CGUnit
+    // +0x978, which 0x71A3F0 prefers): hooves on the ground, wing flaps in
+    // the air. The local player's mount included - its footstep driver only
+    // leaves the footprints.
+    if (const uint32_t mountDisplay = mountDisplayForInstance(instanceId)) {
+        using BS2 = audio::CombatSoundManager::BodySound;
+        // The local player's mount is the local player's unit: its sounds
+        // take the own-unit rule, in the head at 0.65.
+        auto* anim = renderer_ ? renderer_->getAnimationController() : nullptr;
+        const bool ownMount = anim && anim->isMounted() && anim->getMountInstanceId() == instanceId;
+        if (eventTag == m2EventTag("$FSD")) {
+            uint32_t ground = 0;
+            bool inWater = false;
+            footstepGround(position, ground, inWater);
+            auto* fsm = audioCoordinator_ ? audioCoordinator_->getFootstepManager() : nullptr;
+            csm->playFootstep(mountDisplay, ground, inWater, position, ownMount,
+                              fsm ? fsm->getVolumeScale() : 1.0f);
+        } else if (eventTag == m2EventTag("$WNG")) {
+            csm->playBodySound(mountDisplay, BS2::WING_FLAP, 0, position, ownMount);
+        }
+        return;
+    }
     const uint64_t guid = guidForInstance(instanceId);
     if (guid == 0) return;
     auto entity = gameHandler_.getEntityManager().getEntity(guid);
@@ -213,22 +254,27 @@ void NPCInteractionCallbackHandler::handleUnitAnimEvent(uint32_t instanceId, uin
     using BS = audio::CombatSoundManager::BodySound;
     const uint32_t stem = eventTag & 0x00FFFFFFu;
     const uint32_t last = eventTag >> 24;
+    // The local character's own sounds play by the own-unit rule: in the
+    // listener's head at 0.65 (Wow.exe 0x4cf170, 0x747310).
+    const bool own = guid == gameHandler_.getPlayerGuid();
     if (eventTag == m2EventTag("$FSD")) {
-        // The local character's own steps come from its footstep driver,
-        // which also leaves its footprints.
-        if (guid == gameHandler_.getPlayerGuid()) return;
+        // The local character's steps come from here too once the footstep
+        // manager has handed them over to the tables; until then its footstep
+        // driver plays them from its own bank.
+        auto* fsm = audioCoordinator_ ? audioCoordinator_->getFootstepManager() : nullptr;
+        if (own && !(fsm && fsm->ownStepsFromTables())) return;
         uint32_t ground = 0;
         bool inWater = false;
         footstepGround(position, ground, inWater);
-        csm->playFootstep(displayId, ground, inWater, position);
+        csm->playFootstep(displayId, ground, inWater, position, own, fsm ? fsm->getVolumeScale() : 1.0f);
     } else if (eventTag == rendering::CharacterRenderer::kAnimEventDeathStart) {
-        csm->playBodySound(displayId, BS::DEATH, 0, position);
+        csm->playBodySound(displayId, BS::DEATH, 0, position, own);
     } else if (eventTag == m2EventTag("$WNG")) {
-        csm->playBodySound(displayId, BS::WING_FLAP, 0, position);
+        csm->playBodySound(displayId, BS::WING_FLAP, 0, position, own);
     } else if (stem == (m2EventTag("$FD1") & 0x00FFFFFFu) && last >= '1' && last <= '5') {
-        csm->playBodySound(displayId, BS::FIDGET, last - '1', position);
+        csm->playBodySound(displayId, BS::FIDGET, last - '1', position, own);
     } else if (stem == (m2EventTag("$AH0") & 0x00FFFFFFu) && last >= '0' && last <= '3') {
-        csm->playBodySound(displayId, BS::CUSTOM_ATTACK, last - '0', position);
+        csm->playBodySound(displayId, BS::CUSTOM_ATTACK, last - '0', position, own);
     }
 }
 
@@ -249,7 +295,7 @@ void NPCInteractionCallbackHandler::setupCallbacks() {
         const auto& file = entry->files[std::uniform_int_distribution<size_t>(0, entry->files.size() - 1)(rng)];
         const glm::vec3 pos = core::coords::canonicalToRender(
             glm::vec3(unit->getX(), unit->getY(), unit->getZ()));
-        playEntryAtUnit(*entry, file, pos);
+        playEntryAtUnit(*entry, file, pos, guid == gameHandler_.getPlayerGuid());
     });
 
     // M2 $CSD animation sound events: the emote voices EmotesTextSound has no
@@ -285,7 +331,8 @@ void NPCInteractionCallbackHandler::setupCallbacks() {
                 static std::mt19937 rng{std::random_device{}()};
                 const auto& file =
                     entry->files[std::uniform_int_distribution<size_t>(0, entry->files.size() - 1)(rng)];
-                playEntryAtUnit(*entry, file, position);
+                playEntryAtUnit(*entry, file, position,
+                                renderer_ && instanceId == renderer_->getCharacterInstanceId());
             });
     }
 

@@ -17,6 +17,28 @@ constexpr std::array<int, static_cast<size_t>(Category::Count)> kCaps = {
 };
 }  // namespace
 
+int unitSoundChance(UnitSoundKind kind, bool player) {
+    static constexpr int kCreature[13] = {70, 100, 60, 100, 100, 40, 100, 100, 100, 100, 100, 100, 100};
+    static constexpr int kPlayer[13] = {35, 100, 30, 100, 100, 40, 100, 100, 100, 100, 100, 100, 100};
+    const auto i = static_cast<size_t>(kind);
+    if (i >= 13) return 100;
+    return player ? kPlayer[i] : kCreature[i];
+}
+
+Category unitSoundCategory(UnitSoundKind kind, bool ownPlayer) {
+    switch (kind) {
+        case UnitSoundKind::Exertion:
+        case UnitSoundKind::ExertionCritical:
+            return Category::CreatureExertion;
+        case UnitSoundKind::Injury:
+        case UnitSoundKind::InjuryCritical:
+        case UnitSoundKind::InjuryCrushingBlow:
+            return ownPlayer ? Category::PlayerInjury : Category::CreatureInjury;
+        default:
+            return Category::Sfx;
+    }
+}
+
 int categoryCap(Category c) {
     const auto i = static_cast<size_t>(c);
     return i < kCaps.size() ? kCaps[i] : 0;

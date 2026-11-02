@@ -1377,6 +1377,22 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
         model.textureLookup = readArray<uint16_t>(m2Data, header.ofsTexLookup, header.nTexLookup);
     }
 
+    // Texture coordinate combos and, for a model flagged 0x08, the texture
+    // combiner combos that follow the 3.3.5 header (0x130). Both feed the
+    // stock shader selection (rendering/m2_effect_select.hpp).
+    if (header.nTexUnits > 0 && header.ofsTexUnits > 0 && header.nTexUnits < 65536) {
+        model.textureCoordCombos = readArray<int16_t>(m2Data, header.ofsTexUnits, header.nTexUnits);
+    }
+    if (header.version >= 264 && (header.globalFlags & 0x08) != 0 &&
+        m2Data.size() >= sizeof(M2Header) + 8) {
+        uint32_t nCombos = 0, ofsCombos = 0;
+        std::memcpy(&nCombos, m2Data.data() + sizeof(M2Header), 4);
+        std::memcpy(&ofsCombos, m2Data.data() + sizeof(M2Header) + 4, 4);
+        if (nCombos > 0 && nCombos < 65536 && ofsCombos > 0) {
+            model.textureCombinerCombos = readArray<uint16_t>(m2Data, ofsCombos, nCombos);
+        }
+    }
+
     // Parse color animation alpha tracks (M2Color: vec3 color track + fixed16 alpha track).
     // WotLK: two 20-byte M2TrackDisk headers (40 bytes/color).
     // Vanilla/TBC (<264): two 28-byte M2TrackDiskVanilla headers (56 bytes/color).

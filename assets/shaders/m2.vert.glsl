@@ -17,7 +17,10 @@ layout(set = 0, binding = 0) uniform PerFrame {
 
 // Per-draw push constants (batch-level data only)
 layout(push_constant) uniform Push {
-    int texCoordSet;         // UV set index (0 or 1)
+    // Where each texture stage's coordinates come from (m2fx::UvSource):
+    // bits 0-1 the first stage, 2-3 the second; 0 UV set 0, 1 UV set 1,
+    // 2 the sphere environment map.
+    int texCoordSet;
     int isFoliage;           // -1 sky, 0 none, 1 foliage, 2 clutter, 3 hanging cloth,
                              // 4 standing cloth, 5 canvas on a frame
     int instanceDataOffset;  // Base index into InstanceSSBO for this draw group
@@ -35,13 +38,16 @@ struct InstanceData {
     mat4 model;
     vec2 uvOffset;
     float fadeAlpha;
-    int useBones;
+    // The second texture stage's UV translation, two halves (packHalf2x16).
+    // This slot used to say whether to skin, which is flags bit 2 now.
+    uint uvOffset2;
     int boneBase;
     int boneCount;
     // 0 for an ordinary instance, 1 while the player is pressing on it. Sits
     // in what was padding, so the entry is the same 96 bytes it always was.
     float highlight;
     // Bit 0: a boat afloat, which rides the water. Also in what was padding.
+    // Bit 2: skinned by the bone palette.
     int flags;
 };
 layout(set = 3, binding = 0) readonly buffer InstanceSSBO {
@@ -67,6 +73,14 @@ layout(location = 4) out float ModelHeight;
 layout(location = 5) out float vFadeAlpha;
 layout(location = 6) flat out int vSkyMode;
 layout(location = 7) flat out float vHighlight;
+layout(location = 8) out vec2 TexCoord2;
+
+#include "m2_combiner.glsli"
+
+vec2 stageUv(int src, vec2 env, vec2 offset) {
+    if (src == 2) return env;
+    return (src == 1 ? aTexCoord2 : aTexCoord) + offset;
+}
 
 void main() {
     // Fetch per-instance data from SSBO
@@ -74,7 +88,7 @@ void main() {
     mat4 model = instanceData[instIdx].model;
     vec2 uvOff = instanceData[instIdx].uvOffset;
     float fade = instanceData[instIdx].fadeAlpha;
-    int uBones = instanceData[instIdx].useBones;
+    int uBones = instanceData[instIdx].flags & 4;
     int bBase  = instanceData[instIdx].boneBase;
 
     vec4 pos = vec4(aPos, 1.0);
@@ -328,7 +342,16 @@ void main() {
         Normal = vec3(g, sqrt(max(1.0 - dot(g, g), 0.0)));
     }
 
-    TexCoord = (push.texCoordSet == 1 ? aTexCoord2 : aTexCoord) + uvOff;
+    // The stock vertex shaders' stage coordinates (Diffuse_T1, _T2, _Env and
+    // their pairs): a UV set through the stage's transform, or the sphere map.
+    int src0 = push.texCoordSet & 3;
+    int src1 = (push.texCoordSet >> 2) & 3;
+    vec2 env = vec2(0.0);
+    if (src0 == 2 || src1 == 2) {
+        env = m2SphereEnvUv((view * worldPos).xyz, mat3(view) * Normal);
+    }
+    TexCoord = stageUv(src0, env, uvOff);
+    TexCoord2 = stageUv(src1, env, unpackHalf2x16(instanceData[instIdx].uvOffset2));
 
     InstanceOrigin = model[3].xyz;
     // How far up the plant this vertex is, as a fraction of the plant's own

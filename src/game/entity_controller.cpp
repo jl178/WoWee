@@ -250,6 +250,7 @@ void EntityController::processOutOfRangeObjects(const std::vector<uint64_t>& gui
         transportGuids_.erase(guid);
         serverUpdatedTransportGuids_.erase(guid);
         owner_.clearTransportAttachment(guid);
+        owner_.forgetVehicleUnit(guid);
         if (owner_.playerTransportGuidRef() == guid) {
             owner_.clearPlayerTransport();
         }
@@ -436,6 +437,16 @@ void EntityController::applyUpdateObjectBlock(const UpdateBlock& block, bool& ne
 void EntityController::updateNonPlayerTransportAttachment(const UpdateBlock& block,
                                                            const std::shared_ptr<Entity>& entity,
                                                            ObjectType entityType) {
+    // A seat in a vehicle - a unit, not a ship (0x74B8B0): the passenger is
+    // placed by its seat (GameHandler::setVehiclePassenger), the player too.
+    if (block.hasMovement && (entityType == ObjectType::UNIT || entityType == ObjectType::PLAYER)) {
+        if (block.onTransport && owner_.isVehicleTransport(block.transportGuid)) {
+            owner_.setVehiclePassenger(block.guid, block.transportGuid, block.transportSeat);
+            if (block.guid != owner_.getPlayerGuid()) owner_.clearTransportAttachment(block.guid);
+            return;
+        }
+        if (owner_.vehiclePassenger(block.guid)) owner_.setVehiclePassenger(block.guid, 0, -1);
+    }
     if (block.guid == owner_.getPlayerGuid()) return;
     if (entityType != ObjectType::UNIT && entityType != ObjectType::GAMEOBJECT) return;
 
@@ -540,40 +551,9 @@ void EntityController::syncPreWotlkAurasFromFields(const std::shared_ptr<Entity>
 // Detect player mount/dismount from UNIT_FIELD_MOUNTDISPLAYID changes
 void EntityController::detectPlayerMountChange(uint32_t newMountDisplayId,
                                                 const FlatFieldMap& blockFields) {
-    // Live-confirmed: CMaNGOS can push a player values-update mid-taxi-flight
-    // that zeroes UNIT_FIELD_MOUNTDISPLAYID before the client's own flight
-    // simulation actually finishes (same early-completion behavior already
-    // seen and guarded for SMSG_DISMOUNT) - obeying it here cut the mount
-    // animation while MovementHandler::updateClientTaxi() kept flying the
-    // real path for several more seconds. But some cores finalize taxi
-    // flights server-side, so a bare "ignore while flying" guard could let
-    // the client fly past a genuine server landing if local spline timing
-    // ever drifts. Distinguish using the server's own UNIT_FLAG_TAXI_FLIGHT,
-    // same as the SMSG_DISMOUNT guard: still set means premature (ignore,
-    // let the client spline finish naturally); already cleared means the
-    // server considers the flight over (honor it now).
-    const bool onRealTaxiFlight = owner_.getMovementHandler() && owner_.getMovementHandler()->isOnTaxiFlight();
-    if (onRealTaxiFlight && newMountDisplayId == 0) {
-        bool serverStillTaxiing = false;
-        auto playerEntity = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
-        auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity);
-        if (playerUnit) {
-            serverStillTaxiing = (playerUnit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0;
-        }
-        const bool nearDestination = owner_.getMovementHandler()->isNearTaxiDestination();
-        if (serverStillTaxiing || !nearDestination) {
-            owner_.getMovementHandler()->deferServerTaxiCompletion();
-            if (!nearDestination) {
-                LOG_WARNING("Deferring premature taxi mount clear until landing zone");
-            }
-            return;
-        }
-        // Authoritative server completion ahead of our own spline - stop the
-        // client flight now rather than snapping to a final waypoint that may
-        // not match where the server actually stopped us.
-        owner_.getMovementHandler()->finishClientTaxiFlight(/*snapToFinalWaypoint=*/false);
-        return;
-    }
+    // The mount field is the mount, on a taxi as anywhere (the stock client
+    // draws whatever UNIT_FIELD_MOUNTDISPLAYID says; the server mounts the
+    // flyer and dismounts it at the end of its spline).
     uint32_t old = owner_.currentMountDisplayIdRef();
 
     // A dismount the player just asked for has not reached this field yet: it
@@ -2163,7 +2143,9 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
         if ((unit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0 && owner_.taxiLandingCooldownRef() <= 0.0f) {
             owner_.taxiStartGraceRef() = std::max(owner_.taxiStartGraceRef(), 2.0f);
             owner_.sanitizeMovementForTaxi();
-            if (owner_.getMovementHandler()) owner_.getMovementHandler()->applyTaxiMountForCurrentNode();
+            // Mid-flight (a login or a teleport on a long route): the flight
+            // is the spline the create block carries; follow it.
+            if (owner_.getMovementHandler()) owner_.getMovementHandler()->onTaxiFlightRef() = true;
         }
     }
     if (block.guid == owner_.getPlayerGuid()) {
@@ -2707,6 +2689,8 @@ void EntityController::handleCreateObject(const UpdateBlock& block, bool& newIte
 
     // 3a: Create entity from block type
     std::shared_ptr<Entity> entity = createEntityFromBlock(block);
+    // UPDATEFLAG_VEHICLE: a unit with seats (0x73C260 -> 0x74C750).
+    if (block.vehicleId != 0) owner_.setUnitVehicleId(block.guid, block.vehicleId);
 
     // Set position from movement block (server → canonical)
     if (block.hasMovement) {
@@ -2954,6 +2938,7 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
             }
         }
         owner_.clearTransportAttachment(data.guid);
+        owner_.forgetVehicleUnit(data.guid);
         entityManager.removeEntity(data.guid);
         LOG_INFO("Destroyed entity: 0x", std::hex, data.guid, std::dec,
                  " (", (data.isDeath ? "death" : "despawn"), ")");

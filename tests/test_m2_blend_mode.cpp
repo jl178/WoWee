@@ -88,13 +88,19 @@ TEST_CASE("an additive card is not colour keyed", "[m2]") {
     CHECK_FALSE(m2BatchWantsColorKey(3, true));
 }
 
+TEST_CASE("a modulating card is not colour keyed", "[m2]") {
+    // Mod and Mod2x multiply what is behind by the texture, so black is the
+    // darkening itself (stock blend table 0xA453B0).
+    CHECK_FALSE(m2BatchWantsColorKey(5, true));
+    CHECK_FALSE(m2BatchWantsColorKey(6, true));
+}
+
 TEST_CASE("everything else that asked for the key still gets it", "[m2]") {
     // The key is how a black-backed card survives being drawn opaquely, which
     // is still what happens for every non-additive mode.
     CHECK(m2BatchWantsColorKey(0, true));
     CHECK(m2BatchWantsColorKey(1, true));
     CHECK(m2BatchWantsColorKey(2, true));
-    CHECK(m2BatchWantsColorKey(5, true));
 
     // And a texture nothing marked is never keyed, whatever it blends as.
     for (uint8_t mode = 0; mode <= 6; ++mode) {

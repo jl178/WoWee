@@ -444,6 +444,19 @@ float UnitSpline::speed() const {
     return curve.length() / static_cast<float>(durationMs) * 1000.0f;
 }
 
+float flyingSplineBank(const glm::vec3& tangent, const glm::vec3& pos, const glm::vec3& ahead) {
+    glm::vec2 t(tangent.x, tangent.y);
+    glm::vec2 a(ahead.x - pos.x, ahead.y - pos.y);
+    const float tl = glm::length(t), al = glm::length(a);
+    if (tl < 1e-6f || al < 1e-6f) return 0.0f;
+    t /= tl;
+    a /= al;
+    const float dot = std::clamp(t.x * a.x + t.y * a.y, -1.0f, 1.0f);
+    float angle = std::acos(dot);
+    if (t.x * a.y - t.y * a.x < 0.0f) angle = -angle;  // ahead to the right
+    return std::clamp(angle + angle, -kPi * 0.5f, kPi * 0.5f);
+}
+
 UnitSpline::Frame UnitSpline::update(uint32_t nowMs, uint32_t moveFlags) {
     Frame f;
     if (!curve.valid()) {
@@ -498,6 +511,19 @@ UnitSpline::Frame UnitSpline::update(uint32_t nowMs, uint32_t moveFlags) {
     if (moveFlags & (MoveFlags::Swimming | MoveFlags::Flying)) {
         f.hasPitch = true;
         f.pitch = std::asin(std::clamp(s.direction.z, -1.0f, 1.0f));
+    } else if (flags & SplineFlags::Flying) {
+        // The look-ahead is one second on (0x98CA00: (passed + 1000) / d,
+        // a cyclic path wrapping past its end).
+        float ta = 1.0f;
+        if (effDur > 0.0f) {
+            ta = (static_cast<float>(std::max<int32_t>(passed, 0)) + 1000.0f) / effDur;
+            if ((flags & SplineFlags::Cyclic) && ta > 1.0f) ta -= 1.0f;
+            ta = std::clamp(ta, 0.0f, 1.0f);
+        }
+        const glm::vec3 ahead = curve.evaluate(ta).position;
+        f.hasAttitude = true;
+        f.attitudePitch = std::asin(std::clamp(s.direction.z, -1.0f, 1.0f));
+        f.bank = flyingSplineBank(s.direction, s.position, ahead);
     }
 
     const uint32_t passedU = passed > 0 ? static_cast<uint32_t>(passed) : 0u;

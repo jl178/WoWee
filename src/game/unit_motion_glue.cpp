@@ -105,8 +105,10 @@ void syncTransportAttachment(GameHandler& gh, Entity& e, uint64_t transportGuid)
 
 void applyStockMonsterMove(GameHandler& gh, Entity& e, const MonsterMoveData& data) {
     // 0xDD carries no transport: whatever the unit stood on, it has left
-    // (0x73C8E0 -> 0x6F0C70 with no transport guid).
+    // (0x73C8E0 -> 0x6F0C70 with no transport guid) - a vehicle's seat too
+    // (the exit spline, TransportExit).
     gh.clearTransportAttachment(e.getGuid());
+    if (gh.vehiclePassenger(e.getGuid())) gh.setVehiclePassenger(e.getGuid(), 0, -1);
     const motion::MonsterMovePlan plan = e.startMonsterMove(specFrom(data), false);
     afterMonsterMove(gh, e, plan);
 }
@@ -118,9 +120,16 @@ bool handleStockMonsterMoveTransport(GameHandler& gh, network::Packet& packet) {
     if (!packet.hasRemaining(2)) return false;
     const uint64_t transportGuid = packet.readPackedGuid();
     if (!packet.hasRemaining(1)) return false;
-    /*int8_t seat =*/ packet.readUInt8();
+    const int8_t seat = static_cast<int8_t>(packet.readUInt8());
     if (data.guid == 0 || transportGuid == 0) return false;
     if (!MonsterMoveParser::parseBody(packet, data)) return false;
+    // Into a vehicle's seat (the boarding spline, TransportEnter): the seat
+    // places the passenger (VehiclePassenger_C); the boarding arc is not
+    // drawn.
+    if (gh.isVehicleTransport(transportGuid)) {
+        gh.setVehiclePassenger(data.guid, transportGuid, seat);
+        return true;
+    }
     auto entity = gh.getEntityManager().getEntity(data.guid);
     if (!entity) return true;
     const motion::MonsterMovePlan plan = entity->startMonsterMove(specFrom(data), true);
@@ -198,6 +207,17 @@ void applyRemoteMovement(GameHandler& gh, Entity& e, const MovementInfo& info, b
     s.jumpSin = info.jumpCosAngle;
     s.jumpXYSpeed = info.jumpXYSpeed;
 
+    // On a vehicle's seat (a unit, 0x74B8B0): the seat places it; the
+    // packet's world position is where it is meanwhile.
+    if (onTransport && gh.isVehicleTransport(info.transportGuid)) {
+        gh.setVehiclePassenger(e.getGuid(), info.transportGuid, info.transportSeat);
+        gh.clearTransportAttachment(e.getGuid());
+        s.position = glm::vec3(info.x, info.y, info.z);
+        s.facing = info.orientation;
+        e.receiveRemoteMovement(s, false);
+        return;
+    }
+    if (gh.vehiclePassenger(e.getGuid())) gh.setVehiclePassenger(e.getGuid(), 0, -1);
     if (!onTransport) gh.clearTransportAttachment(e.getGuid());
     e.receiveRemoteMovement(s, onTransport);
     if (onTransport) {

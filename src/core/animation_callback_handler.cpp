@@ -130,13 +130,8 @@ void AnimationCallbackHandler::setupCallbacks() {
         if (ac) ac->setSprintAuraActive(active);
     });
 
-    // Vehicle state callback - hide player character when inside a vehicle
-    gameHandler_.setVehicleStateCallback([this](bool entered, uint32_t /*vehicleId*/) {
-        auto* cr = renderer_.getCharacterRenderer();
-        uint32_t instId = renderer_.getCharacterInstanceId();
-        if (!cr || instId == 0) return;
-        cr->setInstanceVisible(instId, !entered);
-    });
+    // A passenger is seen in its seat (stock hides one only on a seat with
+    // flag 0x200): the seat placement is Application::syncVehiclePassengers'.
 
     // Charge callback - warrior rushes toward target
     gameHandler_.setChargeCallback([this](uint64_t targetGuid, float tx, float ty, float tz) {

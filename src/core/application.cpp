@@ -19,6 +19,8 @@
 #include "rendering/animation/weapon_anim_select.hpp"
 #include "rendering/animation/anim_capability_probe.hpp"
 #include "rendering/animation/unit_locomotion.hpp"
+#include "rendering/animation/mount_rules.hpp"
+#include "game/vehicle_rules.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/spell_visual_system.hpp"
 #include <bit>
@@ -381,7 +383,158 @@ struct UnitLocomotionSync {
     /// and the animation plays at speed / MoveSpeed (0x7385C0).
     float speed = -1.0f;
     float walkSpeed = 2.5f;
+    /// The model is a mounted player's mount: it plays the rider's movement
+    /// (0x7385C0 -> 0x7176F0 with the mount), idles in Stand and never
+    /// sneaks; in the air it swims (callers pass flying as swimming).
+    bool mountModel = false;
 };
+
+/// A mounted unit's rider pose: Mount (91), or the StateKit animation of its
+/// SPELL_AURA_MOUNTED aura's visual (stock 0x724820 -> CGUnit +0xB7C): the
+/// flying carpets, the Mechano-hog's ReclinedMount.
+uint32_t riderAnimForUnit(game::GameHandler& gh, rendering::Renderer* renderer, uint64_t guid) {
+    int32_t kitAnim = -1;
+    if (const uint32_t visual = gh.getMountAuraSpellVisual(guid)) {
+        if (auto* svs = renderer ? renderer->getSpellVisualSystem() : nullptr) {
+            const uint32_t a = svs->getKitAnimations(visual).state;
+            if (a != 0) kitAnim = static_cast<int32_t>(a);
+        }
+    }
+    return rendering::anim::mountRiderAnim(kitAnim);
+}
+
+/// The render instance drawing a unit (the local character, another player,
+/// a creature), 0 when none.
+uint32_t unitInstanceOf(game::GameHandler& gh, rendering::Renderer* renderer, EntitySpawner& spawner,
+                        uint64_t guid) {
+    if (guid == gh.getPlayerGuid()) return renderer->getCharacterInstanceId();
+    const auto& creatures = spawner.getCreatureInstances();
+    if (auto it = creatures.find(guid); it != creatures.end()) return it->second;
+    const auto& players = spawner.getPlayerInstances();
+    if (auto it = players.find(guid); it != players.end()) return it->second;
+    return 0;
+}
+
+/// The model a vehicle's seats hang off: a creature's own, or for a player
+/// on a multi-seat mount (the Traveler's Mammoth) the mount's.
+uint32_t vehicleModelOf(game::GameHandler& gh, rendering::Renderer* renderer, EntitySpawner& spawner,
+                        uint64_t vehicleGuid) {
+    if (vehicleGuid == gh.getPlayerGuid()) {
+        if (auto* ac = renderer->getAnimationController(); ac && ac->isMounted())
+            return ac->getMountInstanceId();
+    } else if (const auto* m = spawner.getRemotePlayerMount(vehicleGuid)) {
+        return m->instanceId;
+    }
+    return unitInstanceOf(gh, renderer, spawner, vehicleGuid);
+}
+
+/// The player in a vehicle's seat sits where the vehicle is: the character
+/// position, the camera's target and the reported position follow it (the
+/// seat matrix places the model). False when the player sits nowhere.
+/// Seated in a vehicle: the vehicle carries the player (externally driven).
+bool playerSeatedInVehicle(game::GameHandler* gh) {
+    return gh && gh->vehiclePassenger(gh->getPlayerGuid()) != nullptr;
+}
+
+bool placePlayerInVehicleSeat(game::GameHandler& gh, rendering::Renderer* renderer) {
+    const auto* seat = gh.vehiclePassenger(gh.getPlayerGuid());
+    auto vehicle = seat ? gh.getEntityManager().getEntity(seat->vehicleGuid) : nullptr;
+    if (!vehicle) return false;
+    const glm::vec3 canonical(vehicle->getX(), vehicle->getY(), vehicle->getZ());
+    const glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
+    renderer->getCharacterPosition() = renderPos;
+    if (auto* cc = renderer->getCameraController()) {
+        if (glm::vec3* followTarget = cc->getFollowTargetMutable()) *followTarget = renderPos;
+    }
+    auto& mi = gh.movementInfoRef();
+    mi.x = canonical.x;
+    mi.y = canonical.y;
+    mi.z = canonical.z;
+    return true;
+}
+
+/// Every passenger on its seat (stock VehiclePassenger_C, 0x7493B0 /
+/// 0x7490F0): on the vehicle model's seat attachment and offset, at its own
+/// size, turned by PassengerYaw; playing the seat's RideAnimStart then
+/// RideAnimLoop where the seat has them (flag 0x2), else its own stand -
+/// never Mount (91) for want of one. The vehicle plays the seat's
+/// VehicleRideAnimLoop (flag 0x20000). Seat flag 0x200 hides the passenger.
+void syncVehiclePassengers(game::GameHandler& gh, rendering::Renderer* renderer, EntitySpawner& spawner) {
+    namespace veh = game::vehicle;
+    auto* cr = renderer->getCharacterRenderer();
+    struct Seated {
+        uint32_t instance = 0;
+        uint32_t vehicleInstance = 0;
+        uint32_t seatId = 0;
+        uint32_t loop = veh::kNoAnim;
+        bool hidden = false;
+    };
+    static std::unordered_map<uint64_t, Seated> seated;
+
+    // Those who left their seat (or whose models went): unseat, show, and
+    // let their own animation take over again.
+    for (auto it = seated.begin(); it != seated.end();) {
+        const auto* p = gh.vehiclePassenger(it->first);
+        const uint32_t inst = unitInstanceOf(gh, renderer, spawner, it->first);
+        if (p && inst == it->second.instance) { ++it; continue; }
+        if (it->second.instance != 0) {
+            cr->setInstanceSeatedOn(it->second.instance, 0, 0, glm::vec3(0.0f), 0.0f, -1);
+            if (it->second.hidden) cr->setInstanceVisible(it->second.instance, true);
+            if (inst == it->second.instance && it->first != gh.getPlayerGuid())
+                cr->playAnimation(inst, rendering::anim::STAND, true);
+            auto& loco = spawner.getUnitLocomotion();
+            if (auto l = loco.find(it->first); l != loco.end()) l->second.needsReplay = true;
+        }
+        it = seated.erase(it);
+    }
+
+    for (const auto& [guid, p] : gh.vehiclePassengers()) {
+        const uint32_t inst = unitInstanceOf(gh, renderer, spawner, guid);
+        const uint32_t vInst = vehicleModelOf(gh, renderer, spawner, p.vehicleGuid);
+        if (inst == 0 || vInst == 0) continue;
+        const veh::SeatRecord* seat = gh.vehicleSeatOf(guid);
+        // A seat whose row is not known yet: the vehicle's attachment 0 (the
+        // mount point), standing.
+        const int att = seat ? veh::seatM2Attachment(seat->attachmentId) : 0;
+        const glm::vec3 offset = seat ? seat->attachmentOffset : glm::vec3(0.0f);
+        Seated& s = seated[guid];
+        const bool fresh = s.instance != inst || s.vehicleInstance != vInst ||
+                           s.seatId != (seat ? seat->id : 0u);
+        if (fresh) {
+            s.instance = inst;
+            s.vehicleInstance = vInst;
+            s.seatId = seat ? seat->id : 0u;
+            cr->setInstanceSeatedOn(inst, vInst, att, offset, seat ? seat->passengerYaw : 0.0f,
+                                    seat ? seat->passengerAttachmentId : -1);
+            const bool hide = seat && (seat->flags & 0x200u);
+            if (hide != s.hidden) cr->setInstanceVisible(inst, !hide);
+            s.hidden = hide;
+            const veh::PassengerAnim a =
+                seat ? veh::passengerAnim(*seat, veh::PassengerState::Seated) : veh::PassengerAnim{};
+            s.loop = a.loop;
+            if (a.start != veh::kNoAnim) {
+                cr->playAnimation(inst, a.start, false, a.loop != veh::kNoAnim ? a.loop : 0u);
+            } else if (a.loop != veh::kNoAnim) {
+                cr->playAnimation(inst, a.loop, true);
+            } else if (guid != gh.getPlayerGuid()) {
+                cr->playAnimation(inst, rendering::anim::STAND, true);
+            }
+            if (seat) {
+                const uint32_t vAnim = veh::vehicleRideAnim(*seat);
+                if (vAnim != veh::kNoAnim) cr->playAnimation(vInst, vAnim, true);
+            }
+        } else if (s.loop != veh::kNoAnim) {
+            // Something else played on the passenger (a hit, a cast that
+            // ended): back to the ride loop once it is done.
+            uint32_t cur = 0; float t = 0.0f, d = 0.0f;
+            if (cr->getAnimationState(inst, cur, t, d) && cur == rendering::anim::STAND)
+                cr->playAnimation(inst, s.loop, true);
+        }
+        // Where the seat is, for the culling and whoever asks the instance.
+        glm::vec3 vPos(0.0f);
+        if (cr->getInstancePosition(vInst, vPos)) cr->setInstancePosition(inst, vPos);
+    }
+}
 
 /// A unit's speed and pace for the locomotion, when the stock motion drives it.
 void fillStockLocomotionSpeed(const game::Entity& e, UnitLocomotionSync& s) {
@@ -427,7 +580,7 @@ void driveUnitLocomotion(rendering::Renderer* renderer, rendering::CharacterRend
                          const UnitLocomotionSync& s) {
     using namespace rendering::anim;
     using State = rendering::LocomotionFSM::State;
-    auto& loco = spawner.getUnitLocomotion()[guid];
+    auto& loco = s.mountModel ? spawner.getMountLocomotion()[guid] : spawner.getUnitLocomotion()[guid];
     if (loco.instanceId != instanceId) {
         // A new model (first sight, a display swap): probe it. Its spawner
         // set its idle, so Stand is what it already shows. A jump the hint
@@ -460,7 +613,8 @@ void driveUnitLocomotion(rendering::Renderer* renderer, rendering::CharacterRend
     const bool haveState = cr->getAnimationState(instanceId, cur, curT, curDur);
     // A cast hold is not an idle a turn may shuffle out of (ReadySpellDirected
     // counts as a Ready stance for a wand, and a caster turns to its target).
-    frame.idleFree = (!haveState || isLocomotionIdle(cur)) && spawner.unitCastHold(guid) == 0;
+    frame.idleFree = (!haveState || isLocomotionIdle(cur)) &&
+                     (s.mountModel || spawner.unitCastHold(guid) == 0);
 
     rendering::LocomotionFSM::Input in = unitLocomotionInput(loco, frame);
     if (s.speed > game::motion::kSprintSpeed && !s.swimming) in.sprintAura = true;
@@ -487,7 +641,7 @@ void driveUnitLocomotion(rendering::Renderer* renderer, rendering::CharacterRend
             cur != prevRequest) {
             return;
         }
-        play = spawner.unitIdleAnim(guid, instanceId);
+        play = s.mountModel ? STAND : spawner.unitIdleAnim(guid, instanceId);
         if (s.creature && play == STAND) {
             const auto& emotes = spawner.getCreatureActiveEmotes();
             const auto emoteIt = emotes.find(guid);
@@ -495,7 +649,7 @@ void driveUnitLocomotion(rendering::Renderer* renderer, rendering::CharacterRend
                 play = emoteIt->second;
             }
         }
-    } else if (state == State::WALK || state == State::RUN) {
+    } else if ((state == State::WALK || state == State::RUN) && !s.mountModel) {
         play = spawner.unitMoveAnim(guid, instanceId, play);  // StealthWalk/StealthRun
     } else if (state == State::JUMP_START && cr->hasAnimation(instanceId, JUMP)) {
         // JumpStart flows into the jump loop, not a frame of Stand.
@@ -3193,7 +3347,7 @@ void Application::applyServerMovementState(float deltaTime) {
     // A ship carries the player's reference frame, but it must not
     // freeze local controls like a taxi flight. On-deck walking is
     // folded into the transport-local offset in the sync block below.
-    const bool externallyDrivenMotion = onTaxi ||
+    const bool externallyDrivenMotion = onTaxi || playerSeatedInVehicle(gameHandler.get()) ||
         (animationCallbacks_ && animationCallbacks_->isCharging());
     // Keep physics frozen (externalFollow) during landing clamp when terrain
     // hasn't loaded yet - prevents gravity from pulling player through void.
@@ -3381,7 +3535,7 @@ void Application::applyServerMovementState(float deltaTime) {
         wasOnTransport = onTransportNowDbg;
     }
 
-    if (onTaxi) {
+    if (!placePlayerInVehicleSeat(*gameHandler, renderer.get()) && onTaxi) {
         auto playerEntity = gameHandler->getEntityManager().getEntity(gameHandler->getPlayerGuid());
         glm::vec3 canonical(0.0f);
         bool haveCanonical = false;
@@ -3771,6 +3925,8 @@ void Application::syncCreatureRenderInstances(float deltaTime) {
         for (const auto& [guid, instanceId] : _creatureInstances) {
             auto entity = gameHandler->getEntityManager().getEntity(guid);
             if (!entity || entity->getType() != game::ObjectType::UNIT) continue;
+            // In a vehicle's seat: syncVehiclePassengers places and animates it.
+            if (gameHandler->vehiclePassenger(guid)) continue;
 
             if (npcWeaponRetryTick &&
                 weaponAttachesThisTick < EntitySpawner::MAX_WEAPON_ATTACHES_PER_TICK) {
@@ -4105,9 +4261,16 @@ void Application::syncPlayerRenderInstances(float deltaTime) {
         const uint64_t playerTargetGuid = gameHandler->hasTarget()
             ? gameHandler->getTargetGuid() : 0;
         const uint64_t playerAutoAttackGuid = gameHandler->getAutoAttackTargetGuid();
+        auto riderAnimFor = [&](uint64_t g) {
+            return riderAnimForUnit(*gameHandler, renderer.get(), g);
+        };
+        // The local rider's pose, by the same rule.
+        if (auto* ac = renderer->getAnimationController(); ac && ac->isMounted())
+            ac->setMountRiderAnim(riderAnimFor(gameHandler->getPlayerGuid()));
         for (const auto& [guid, instanceId] : _playerInstances) {
             auto entity = gameHandler->getEntityManager().getEntity(guid);
             if (!entity || entity->getType() != game::ObjectType::PLAYER) continue;
+            if (gameHandler->vehiclePassenger(guid)) continue;  // syncVehiclePassengers
 
             // Distance cull
             if (havePPos) {
@@ -4211,8 +4374,6 @@ void Application::syncPlayerRenderInstances(float deltaTime) {
                 const bool isSwimmingNow = _pCreatureSwimmingState.count(guid) > 0;
                 const bool isWalkingNow  = _pCreatureWalkingState.count(guid) > 0;
                 const bool isFlyingNow   = _pCreatureFlyingState.count(guid) > 0;
-                // In Mount in the air too: 3.3.5 has no rider flight poses.
-                const uint32_t mountedRiderAnim = rendering::anim::MOUNT;
                 bool prevMoving   = _pCreatureWasMoving[guid];
                 bool prevSwimming = _pCreatureWasSwimming[guid];
                 bool prevFlying   = _pCreatureWasFlying[guid];
@@ -4253,21 +4414,9 @@ void Application::syncPlayerRenderInstances(float deltaTime) {
                     if (!gotState || curAnimId != rendering::anim::DEATH) {
                         uint32_t targetAnim;
                         if (remoteMount) {
-                            // The rider keeps the mounted seat pose; locomotion
-                            // belongs to the separately rendered mount model.
-                            targetAnim = mountedRiderAnim;
-                            uint32_t mountAnim = rendering::anim::STAND;
-                            if (isMovingNow) {
-                                if (isFlyingNow) mountAnim = rendering::anim::FLY_FORWARD;
-                                else if (isWalkingNow) mountAnim = rendering::anim::WALK;
-                                else mountAnim = rendering::anim::RUN;
-                            } else if (isFlyingNow) {
-                                mountAnim = rendering::anim::FLY_IDLE;
-                            }
-                            if (!charRenderer->hasAnimation(remoteMount->instanceId, mountAnim)) {
-                                mountAnim = isMovingNow ? rendering::anim::RUN : rendering::anim::STAND;
-                            }
-                            charRenderer->playAnimation(remoteMount->instanceId, mountAnim, true);
+                            // The rider keeps its seat pose; the mount model
+                            // is driven every frame below.
+                            targetAnim = riderAnimFor(guid);
                         } else if (isMovingNow) {
                             if (isFlyingNow)        targetAnim = rendering::anim::FLY_FORWARD;
                             else if (isSwimmingNow) targetAnim = rendering::anim::SWIM;
@@ -4301,7 +4450,33 @@ void Application::syncPlayerRenderInstances(float deltaTime) {
                 // field and replace the one-shot mounted pose with Stand. A
                 // rider's mount field is authoritative, so repair that pose
                 // even when their movement state did not transition this frame.
+                if (remoteMount && !deadOrCorpse) {
+                    // The mount plays the rider's movement (stock 0x7385C0
+                    // resolves it against the mount): Walk/Run/Sprint by
+                    // pace, WalkBackwards, the jump, and in water or in the
+                    // air the swim set; Fly on a taxi's Flying spline.
+                    UnitLocomotionSync msync;
+                    msync.moving = isMovingNow;
+                    msync.walking = isWalkingNow;
+                    msync.swimming = isSwimmingNow || isFlyingNow;
+                    msync.dt = deltaTime;
+                    msync.mountModel = true;
+                    fillStockLocomotionSpeed(*entity, msync);
+                    if (rendering::anim::onFlyingSpline(entity->stockMotionSplineFlags())) {
+                        uint32_t cur = 0; float ct = 0.0f, cd = 0.0f;
+                        const uint32_t want = isMovingNow ? rendering::anim::FLY
+                                                          : rendering::anim::mountIdleOnSpline();
+                        if (!charRenderer->getAnimationState(remoteMount->instanceId, cur, ct, cd) ||
+                            cur != want)
+                            charRenderer->playAnimation(remoteMount->instanceId, want, true);
+                        entitySpawner_->getMountLocomotion()[guid].needsReplay = true;
+                    } else {
+                        driveUnitLocomotion(renderer.get(), charRenderer, *entitySpawner_, guid,
+                                            remoteMount->instanceId, msync);
+                    }
+                }
                 if (remoteMount) {
+                    const uint32_t mountedRiderAnim = riderAnimFor(guid);
                     uint32_t riderAnim = 0;
                     float riderTime = 0.0f, riderDuration = 0.0f;
                     const bool haveRiderState = charRenderer->getAnimationState(
@@ -4374,6 +4549,8 @@ void Application::syncPlayerRenderInstances(float deltaTime) {
             }
         }
     }
+    if (renderer && gameHandler && renderer->getCharacterRenderer())
+        syncVehiclePassengers(*gameHandler, renderer.get(), *entitySpawner_);
     {
         float psMs = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - playerSyncStart).count();

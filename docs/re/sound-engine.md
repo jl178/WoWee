@@ -133,30 +133,102 @@ callers of the row.
 - `props[4]`, `props[5]`: fade-in and fade-out seconds (linear, SE update
   ~0x87a3d0 adds `dt/fadeIn` to the channel's fade gain each frame).
 
-### SoundEntriesAdvanced (0x4cb580, 0x4ca7b0 per frame)
-1641 rows. A kit with an advanced row (and no caller-supplied instance) is
-not played directly: an instance is queued and the per-frame update plays
-it. Columns: ID, SoundEntryID, InnerRadius2D, TimeA..D, RandomOffsetRange,
-Usage, TimeIntervalMin/Max, VolumeSliderCategory, DuckToSFX/Music/Ambience,
-InnerRadiusOfInfluence, OuterRadiusOfInfluence, TimeToDuck, TimeToUnduck,
-InsideAngle, OutsideAngle, OutsideVolume, OuterRadius2D, Name.
-- **Usage** 0: play once while inside the time window; 1: replay every
-  random TimeIntervalMin..Max ms while in the window; 2: play at once.
-- **TimeA..D** are game-clock ms of the day (wrapping at 86400000), offset
-  by a random RandomOffsetRange: the instance volume ramps 0->1 from A to
-  B, holds to C, ramps 1->0 to D (0x4ca7b0, kept at instance+0x54 and
-  applied through the volume callback 0x4cb220).
-- **InnerRadius2D / OuterRadius2D**: `set3DPanLevel` (0x8787b0): 0 (heard
-  in the head, unpanned) inside the inner radius, 1 (fully 3D) outside the
-  outer, linear between.
-- **Ducking** (0x4ca1e0, 0x4ca4f0): while the listener is within
-  InnerRadiusOfInfluence (or OuterRadiusOfInfluence once ducking), the SFX,
-  music and ambience categories are pulled down to DuckToSFX/Music/Ambience
-  over TimeToDuck ms, and back to 1 over TimeToUnduck once out of range.
-  The lowest duck of all active duckers wins; the ducker itself is exempt.
-  The boss and narrator lines (0.3 SFX, 0.75 music, 1000/3000 ms) use it.
-- **VolumeSliderCategory** becomes the instance's category (props[0]).
-- **Inside/OutsideAngle, OutsideVolume**: FMOD cone settings.
+### SoundEntriesAdvanced (SoundInterface2AdvancedKitProperties.cpp)
+1641 rows; 1617 kits name one (kit +0xa8, from SoundEntries.SoundEntriesAdvancedID;
+two rows' own SoundEntryID disagree with the kit that names them, and the
+kit's column is the one followed). Columns: ID, SoundEntryID, InnerRadius2D,
+TimeA..D, RandomOffsetRange, Usage, TimeIntervalMin/Max,
+VolumeSliderCategory, DuckToSFX/Music/Ambience, InnerRadiusOfInfluence,
+OuterRadiusOfInfluence, TimeToDuck, TimeToUnduck, InsideAngle, OutsideAngle,
+OutsideVolume, OuterRadius2D, Name. Usage counts: 1487 rows 2, 132 rows 0,
+22 rows 1; 1369 rows duck something (857 of them SFX 0.3 / music 0.75,
+500 SFX 0.3 alone); 235 have 2D radii (69 of them 8..20 yd); one has a time
+window (542, a waterfall emitter); every category is 0 but 17 ambience and
+one music.
+
+**Instance creation (0x4cb580)**, called from PlaySoundKit when the kit has a
+row and the caller passed no instance:
+`0x4cb580(row, kitId, position, coneDir = props[0x16], userHandle, 0, 0,
+dupCheck = PlaySoundKit's 7th argument, forceLoop = props[7] == 1)`.
+- dupCheck and a position: refused (0xf) while an instance of the same kit
+  sits within sqrt(6) yd (0x4ca130, squared 6.0 at 0x9e8cf8). Every unit and
+  model caller passes 1.
+- The row is copied, normalised: TimeB, C, D each get +86400000 when before
+  the time preceding it; a DuckTo* outside [0, 1] becomes 1;
+  InnerRadiusOfInfluence and InsideAngle are clamped to their outer partners;
+  forceLoop makes usage 0.
+- Two draws (0x4c9d90, `min + (rand32 * (max - min)) >> 32`, or max when
+  max <= min): the window offset +0x50 in [-RandomOffsetRange,
+  RandomOffsetRange) and the interval countdown +0x5c in
+  [TimeIntervalMin, TimeIntervalMax).
+- The time volume +0x54 starts at 1. Usage 2 plays at once (0x4c9dc0) and,
+  if it started, ducks at once (0x4ca1e0) whatever the distance.
+
+**Play (0x4c9dc0)**: fresh props, category = VolumeSliderCategory.
+- usage 0: loop (props[7] = 1), fades in and out **3 s** (0x9ebbc4; 0.7 s,
+  0x9e2ec0, when the creator asked), keep-alive (props[0xe]), second sound
+  group mute-with-fade (props[0xc] = 0); always at the instance position.
+- usage 1 and 2: once (props[7] = 2), fades 0.01 s (0x9f1968); 2D when the
+  position is (0, 0, 0).
+- Inside/OutsideAngle and OutsideVolume go to props[0x13..0x15], the cone
+  direction to props[0x16] (null when zero).
+
+**Per frame (0x4ca7b0, under 0x4ca4f0's ducker update)**, `dt` = game-clock
+ms since the last frame:
+- not playing: usage 2, or usage 0 already stopped once (+0xc), or no
+  handle: the instance is deleted (0x4ca080). Else, inside the window
+  (0x4c9cf0): usage 0 plays; usage 1 counts +0x5c down by dt and plays when
+  it goes negative, drawing a new interval. **The interval only runs while
+  nothing plays.**
+- playing, outside the window: stopped with its own fade (0x4c6390 with
+  -1, 0x9e2ef4), +0xc set.
+- playing, inside: usage 0 with more than one file and both interval
+  bounds > 0 counts down and, at zero, stops (0x4c9d50) and plays again - a
+  new file from the bag every 20-60 s for the emitter rows.
+- playing: with OuterRadius2D > 0, the pan level from the listener
+  distance: 0 inside InnerRadius2D, 1 beyond OuterRadius2D, linear between;
+  `Channel::set3DPanLevel` (0x8787b0 -> 0x8d0e00). Without one, 1. **Only in
+  this branch** is the radius of influence looked at: within
+  InnerRadiusOfInfluence a ducker starts (0x4ca1e0).
+- playing, usage not 2, with a window: the time volume. With `t` the clock
+  (plus a day when D + offset passes midnight and the clock is still before
+  A + offset): before B + offset `(t - A) / (B - A)`, before C + offset 1,
+  after `1 - (t - C) / (D - C)`; clamped to [0, 1]. The ramps use the
+  unshifted times, the window edges the shifted ones. In-window
+  (0x4c9cf0) is `A + offset <= t <= D + offset`, always true with no times.
+
+**Ducking (0x4ca1e0 make, 0x4ca4f0 move, 0x4c9fe0 read, 0x4ca080 release)**.
+A ducker is made only when some DuckTo* is strictly inside (0, 1), and only
+one per instance. It holds a level per group (SFX, music, ambience), starting
+at 1, and TimeToUnduck. Each frame, per group:
+- instance gone (released): level += dt / TimeToUnduck up to 1 (TimeToUnduck
+  < 1: at once);
+- instance at (0, 0, 0) - 2D - or closer than InnerRadiusOfInfluence, or
+  closer than OuterRadiusOfInfluence while already ducking: level -= dt /
+  TimeToDuck down to its DuckTo* (TimeToDuck < 1: at once); ducking flag set;
+- else: ducking cleared and the instance lets go of its ducker (the groups
+  after this one start back up in the same pass).
+A ducker back at 1 on all three with no instance is deleted. The level a
+sound is mixed at (volume callback 0x4cb220, every channel) is the instance's
+time volume times the **lowest** level any ducker holds for its group,
+skipping the ducker of its own instance. Group by category: 0 and 7..17 SFX,
+1 music, 2 ambience, 3..6 none.
+
+So a 2D boss line (SMSG_PLAY_SOUND, usage 2, SFX 0.3 / music 0.75) ducks the
+rest of the mix over 1 s while it plays and lets it back over 3 s after; the
+same line played at a unit with no radius of influence (most rows: 0, 0)
+ducks nothing.
+
+**SoundEmitters.** The emitter rows' kits are 426 usage 0 (loop, new file
+every 20-60 s) and 68 usage 1 ("Emitter_IceCracking_Oneshots", the Dalaran
+pet shop's frogs: one-shots every few seconds); 138 have no row. Where the
+SoundEmitters table is played from was not found (the loader at 0x8b6820 is
+reached only through the DB registration); the usage is taken from the row,
+which those names bear out.
+
+**Cone.** The angles are FMOD cone settings with the instance's direction;
+1628 rows carry the defaults 180 / 270 / 0. Not applied in Wowee: nothing
+that plays these kits has an orientation to give.
 
 ## 3. Playing a kit: PlaySoundKit (0x4c6a40)
 
@@ -246,11 +318,33 @@ take its voice.
 - **Per category**: the caps in the table above, refusing newcomers.
 
 ### Own-character sounds
-With Sound_ListenerAtCharacter on, sounds of the player's own unit are
-played **2D** (position nulled) at **0.65** x volume (0x9f2818) and
-priority 110: unit sounds 0x747310/0x7631a0, footsteps 0x4cf170 (max
-distance 20, or 50 by a unit-size test at 0x754f40), greetings 0x73a890, emotes 0x746d60,
-spell sounds 0x7469c0.
+Every caller that plays a sound for a unit asks whether the unit is the
+active player (its GUID against 0xca1238/0xca123c, or 0x4cee50 / 0x4d43c0)
+and, if so: priority **110** (0x6e) always, and with Sound_ListenerAtCharacter
+on, position nulled (**2D**) and the volume multiplier props[2] = **0.65**
+(0x9f2818) - so `row.VolumeFloat x 0.65`. With the CVar off the sound is
+placed at the unit at full volume, still at 110. The callers (every xref of
+0x9f2818):
+
+| Address | What |
+|---|---|
+| 0x4cf170 | footsteps: own steps 2D x0.65, priority **115**, category 17; others' category 13 |
+| 0x4cfc10 | a table-driven sound at a point, z-offset (0x00a4040c) |
+| 0x6da130 | kit 10063 (0x274f) on some UI events for the active player |
+| 0x6f7b00 | an effect model's `$SND` event (Effect_C.cpp) on the player |
+| 0x6f9840 | another model-event path (not traced further) |
+| 0x71cba0 | scales a volume by 0.65 directly |
+| 0x73a890 | a sound the unit repeats every 2000 ms in some movement state |
+| 0x746720 | the unit's own kit at unit +0x8f0 (category 8) |
+| 0x7469c0 | spell kit sounds on the unit |
+| 0x746d60 | emote voice (EmotesTextSound / `$CSD`) |
+| 0x7470d0 | kit 0xca12cc on the unit |
+| 0x747310 | creature sounds (CreatureSoundData kinds) of a unit |
+| 0x7474b0 | pet sounds (Sound_EnablePetSounds) |
+| 0x7631a0 | the player unit's CreatureSoundData kinds (own injury: category 12) |
+
+Weapon swings (0x4d0720) and impacts (0x4d0540, 0x4d0660) are **not** in
+the list: the character's own swings are placed at it like anyone's.
 
 ## 4. 3D audio
 
@@ -428,12 +522,15 @@ none fades the loop out.
 | NPC greeting | no talk-over; 5 hellos then annoyed lines in order; no timer | 2 s per-NPC timer | stock (`NpcVoiceManager::playFromTables`) |
 | Creature exertion | 70% roll, one at a time world-wide | 1.25 s per-creature timer | stock |
 | Error speech | one line at a time, no timer | 1 s timer | no timer with the table; category cap 1 |
-| Volume defaults | music 0.4, ambience 0.6 | music 30%, ambient 100% (settings_panel.hpp) | **not changed** (UI) |
-| Reverb | Sound_EnableReverb 0: off by default | always on (WorldFx) | **not changed** |
-| SoundEntriesAdvanced | 2D radius, time windows, ducking, usage | none | **not done** |
-| Own-character 2D x0.65 | voice/steps/swings in 2D at 0.65, priority 110 | voices and steps 2D at their own levels | steps get priority 115 and cap 4; the 0.65 is **not applied** |
+| Volume defaults | music 0.4, ambience 0.6 | music 30%, ambient 100% (settings_panel.hpp) | 40 / 60 in the settings; GetCVarDefault answers 0.4 / 0.6 |
+| Reverb | Sound_EnableReverb 0: off by default | always on (WorldFx) | gated on the CVar, default 0 (`AudioCoordinator::updateReverb`); a "Reverb" row on the Sound page; GetCVarDefault no longer answers it "1" |
+| SoundEntriesAdvanced | 2D radius, time windows, ducking, usage | none | `stock_sound_advanced.hpp`: every kit the engine starts with a row gets the pan blend, time volume, category, duplicate radius and ducking (`AudioEngine::attachAdvanced`, `update`); music is ducked too. Emitters run usage 0/1 schedules (`WorldSoundEmitters::stepAdvanced`). Cone not applied |
+| Own-character 2D x0.65 | own unit's voice, steps, emotes, model/spell/mount sounds 2D at 0.65, priority 110 (steps 115); swings placed | voices and steps 2D at their own levels | `SoundOptions::ownCharacter`, applied by the engine: activity, mount, movement, spell-fallback banks, emotes, `$CSD`, body sounds, spell kit and effect `$SND` sounds. Own steps now come from `$FSD` + FootstepTerrainLookup (2D x0.65, 115, category 17) |
 | Stand sound | 40%, 10 s client-wide spacing | (not played) | not done |
 | Category volumes | slider x kit, groups SFX/MUSIC/AMBIENCE | per-manager scales | unchanged |
+| Sound_NumChannels | Sound panel slider, 32 or 64 (SoundPanelOptions), restarts sound | CVar applied, control hidden | "Sound channels" row on the Sound page (32..64 step 32), live |
+| Sound_ListenerAtCharacter | on: listener at the character, own sounds 2D x0.65; off: camera | always at the character | the CVar, a "Sound at character" row; off puts the listener at the camera and own sounds back in 3D at full |
+| Own exertion / injury | 35% / 30% rolls (100 on crits), categories 9 and 12, no timers | 30% grunt with 1.5 s timer, wounds 0.8 s timer | stock rolls and caps (`stock::unitSoundChance`, `unitSoundCategory`) |
 | Background mute | mute on focus loss by default | `setSuspended` on focus loss | already stock |
 
 ## 9. In game
@@ -461,19 +558,44 @@ none fades the loop out.
   3D-placed sounds are a little further off, sounds behind the camera pan
   slightly differently than before.
 
+- Boss and narrator lines sent as SMSG_PLAY_SOUND pull the rest of the
+  sound effects down to 0.3 and the music to 0.75 over a second, and let
+  them back over three after the line ends.
+- The Dalaran pet shop's frogs and pigs, Icecrown's ice cracking: one-shots
+  with seconds of silence between, not a loop of one clip. A waterfall
+  emitter changes its file every 20-60 s with a 3 s crossfade.
+- Your own footsteps, jump and land grunts, emotes and spell sounds sit in
+  the middle of the head, a little quieter than before (0.65); other
+  players' are placed where they stand. Turning "Sound at character" off
+  moves the listener to the camera and places your own sounds too.
+- Sound channels on the Sound page: 32 or 64.
+
 ## 10. Unresolved
 
-- SoundEntriesAdvanced (2D radius, time windows, ducking, intervals) is not
-  implemented; boss lines do not duck music.
-- Own-character sounds are not uniformly 2D at 0.65 with priority 110: the
-  hand-made banks in activity, footstep and mount managers keep their own
-  levels.
-- The volume slider defaults and the reverb default live in the UI and
-  WorldFx and were left alone: stock is music 0.4, ambience 0.6, reverb off.
+- SoundEntriesAdvanced cone (Inside/OutsideAngle, OutsideVolume): not
+  applied; the callers have no orientation to give, and FMOD's cone with a
+  null direction was not traced.
+- The pan level is approximated: miniaudio has no FMOD-style 3D pan level,
+  so a sound below level 1 is moved towards straight ahead of the listener
+  at the same distance (`AudioEngine::pannedPosition`), which centres it the
+  same way.
+- Where SoundEmitters.dbc rows are played from in Wow.exe was not found;
+  emitters take the usage from their advanced row (the row names - "...
+  Oneshots" with usage 1 - fit that).
+- Usage 0 and 1 schedules run for the emitters only. Any other caller that
+  plays such a kit (rare) gets the pan, time volume and ducking but plays
+  the file once, as before.
+- The own-character hand-made banks (landing, splash, swim, mount, school
+  spell fallbacks) now take 0.65 on their own invented base levels; the
+  stock sounds they stand in for are kits whose VolumeFloat was not matched.
+- M2 `$SND` events played through EntitySpawner (entity_spawner.cpp, owned
+  by other work at the time) were not given the own-character flag.
 - The FMOD virtual-voice behaviour is approximated: a sound that would be
   virtual is dropped at once instead of waiting 400 ms for a voice, and a
   looping sound that loses its voice is stopped rather than resumed.
-- Kinds 4 (stun), 5 (stand, 10 s spacing), 8 (alert) and the player's own
-  injury category 12 have no Wowee caller to attach to.
+- Kinds 4 (stun), 5 (stand, 10 s spacing) and 8 (alert) have no Wowee
+  caller: 0x747310 and 0x7631a0 are virtual (CGUnit vtable entry 0xa34ea8,
+  CGPlayer 0xa327e0), so the call sites passing those kinds were not found.
 - The meaning of category 8 (unit+0x8f0 kit) and of model flag 0x20
-  (categories 15/16) was not traced.
+  (categories 15/16) was not traced; nor 0x4cfc10, 0x6f9840, 0x71cba0,
+  0x73a890 beyond their own-unit handling.

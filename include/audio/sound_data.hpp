@@ -1,5 +1,6 @@
 #pragma once
 
+#include "audio/stock_sound_advanced.hpp"
 #include "audio/stock_sound_rules.hpp"
 
 #include <array>
@@ -157,6 +158,10 @@ public:
     [[nodiscard]] bool loaded() const { return loaded_; }
 
     [[nodiscard]] const SoundEntry* sound(uint32_t id) const;
+    /// The SoundEntriesAdvanced row a kit names (its SoundEntriesAdvancedID),
+    /// normalised the way an instance copies it. Null for a plain kit. Read
+    /// in full at load and never changed after, so any thread may ask.
+    [[nodiscard]] const stock::AdvancedKit* advancedKit(uint32_t soundId) const;
     /// The file a kit plays next, drawn the stock way (stock::pickKitFile):
     /// weighted by Freq, each file once before any repeats, never the same
     /// file twice running. Null when the row has no file to give.
@@ -290,6 +295,7 @@ private:
     std::unordered_map<uint64_t, uint32_t> emoteSounds_;  // (emote<<16 | race<<8 | sex) -> sound
     std::unordered_set<uint32_t> emoteTextSoundAnims_;    // anim ids voiced by EmotesTextSound
     std::unordered_map<uint32_t, std::vector<MapSoundEmitter>> mapEmitters_;  // SoundEmitters, by map
+    std::unordered_map<uint32_t, stock::AdvancedKit> advancedByKit_;          // by SoundEntries id
 
     // WeaponSwingSounds2: (swingType << 1 | crit) -> sound.
     std::unordered_map<uint32_t, uint32_t> swingSounds_;

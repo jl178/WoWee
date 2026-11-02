@@ -4,6 +4,7 @@
 #include "rendering/shadow_params.hpp"
 
 #include "pipeline/m2_loader.hpp"
+#include "rendering/m2_effect_select.hpp"
 #include "pipeline/blp_loader.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
@@ -167,6 +168,14 @@ public:
     /// of the mount's attachment 0, its whole transform (position and
     /// orientation) from that point, at the rider's own size. 0 unseats.
     void setInstanceMountedOn(uint32_t riderInstanceId, uint32_t mountInstanceId);
+    /// Seat a passenger in a vehicle seat the stock way (0x7493B0 / 0x7490F0):
+    /// on the vehicle model's M2 attachment `attachmentId` (-1: the vehicle's
+    /// base), moved by the seat's AttachmentOffset in that space, turned by
+    /// -PassengerYaw, at the passenger's own size, with the passenger's own
+    /// attachment `passengerAttachmentId` (-1 none) brought onto the seat.
+    void setInstanceSeatedOn(uint32_t passengerInstanceId, uint32_t vehicleInstanceId,
+                             int attachmentId, const glm::vec3& offset, float yaw,
+                             int passengerAttachmentId);
     /// The units stock lights up (CGObject_C::SetHighlight 0x743C70): the
     /// mouseover and the current target get the unit ambient added as
     /// emissive. 0 for none.
@@ -253,7 +262,6 @@ public:
                          float& outAnimTimeMs, float& outGlobalSeqTimeMs) const;
 
     /** Debug: Log all available animations for an instance */
-    void dumpAnimations(uint32_t instanceId) const;
 
     /** Attach a weapon model to a character instance at the given attachment point. */
     bool attachWeapon(uint32_t charInstanceId, uint32_t attachmentId,
@@ -388,6 +396,11 @@ private:
         // pure overhead.
         std::vector<size_t> sortedBatchIndices;
 
+        // The stock shader of each batch, parallel to data.batches: its pixel
+        // combiner, the textures and coordinates of its two stages, and the
+        // layers an earlier batch absorbed (m2_effect_select.hpp).
+        std::vector<m2fx::BatchEffect> batchEffects;
+
         // Pre-classified at load time to avoid per-batch string ops in render loop
         bool isKoboldFlame = false;
         bool isSkyBird = false;
@@ -492,7 +505,11 @@ private:
 
         // Override model matrix (used for weapon instances positioned by parent bone)
         bool hasOverrideModelMatrix = false;
-        uint32_t mountedOn = 0;  // see setInstanceMountedOn
+        uint32_t mountedOn = 0;  // see setInstanceMountedOn / setInstanceSeatedOn
+        int seatAttachment = 0;          // the vehicle's M2 attachment, -1 its base
+        glm::vec3 seatOffset{0.0f};      // VehicleSeat AttachmentOffset
+        float seatYaw = 0.0f;            // VehicleSeat PassengerYaw
+        int seatPassengerAttachment = -1;
         glm::mat4 overrideModelMatrix{1.0f};
 
         // Enchant visual attached to a weapon. Such a model is nothing but the
@@ -644,6 +661,11 @@ private:
     VkPipeline alphaTestPipeline_ = VK_NULL_HANDLE;
     VkPipeline alphaPipeline_ = VK_NULL_HANDLE;
     VkPipeline additivePipeline_ = VK_NULL_HANDLE;
+    // The rest of the stock M2 blend table (0xA453B0): 3 One + One, 5 Mod
+    // (DstColor, Zero), 6 Mod2x (DstColor, SrcColor).
+    VkPipeline addOnePipeline_ = VK_NULL_HANDLE;
+    VkPipeline modPipeline_ = VK_NULL_HANDLE;
+    VkPipeline mod2xPipeline_ = VK_NULL_HANDLE;
     // Whole-instance fades (ghost form, spawn fade-in): alpha blend with depth
     // write kept on, so the faded model still self-occludes instead of showing
     // backfaces and under-armor skin through the body.
@@ -662,6 +684,9 @@ private:
         VkImageView normal = VK_NULL_HANDLE;
         VkSampler diffuseSampler = VK_NULL_HANDLE;
         VkSampler normalSampler = VK_NULL_HANDLE;
+        // The second texture stage (binding 3).
+        VkImageView stage2 = VK_NULL_HANDLE;
+        VkSampler stage2Sampler = VK_NULL_HANDLE;
         bool operator==(const MaterialDescriptorKey&) const = default;
     };
     struct MaterialDescriptorKeyHash {
@@ -670,7 +695,9 @@ private:
             const size_t b = std::hash<VkImageView>{}(key.normal);
             const size_t c = std::hash<VkSampler>{}(key.diffuseSampler);
             const size_t d = std::hash<VkSampler>{}(key.normalSampler);
-            return a ^ (b << 1) ^ (c << 2) ^ (d << 3);
+            const size_t e = std::hash<VkImageView>{}(key.stage2);
+            const size_t f = std::hash<VkSampler>{}(key.stage2Sampler);
+            return a ^ (b << 1) ^ (c << 2) ^ (d << 3) ^ (e << 4) ^ (f << 5);
         }
     };
     std::unordered_map<MaterialDescriptorKey, VkDescriptorSet, MaterialDescriptorKeyHash>

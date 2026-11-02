@@ -6,6 +6,7 @@
 #include "core/env_flag.hpp"
 #include "rendering/m2_renderer_internal.h"
 #include "rendering/m2_blend_mode.hpp"
+#include "rendering/m2_effect_select.hpp"
 #include "rendering/m2_particle_look.hpp"
 #include "pipeline/model_bounds.hpp"
 #include "rendering/render_constants.hpp"
@@ -412,6 +413,24 @@ bool M2Renderer::buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout) {
                                      VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
     additivePipeline_ = buildM2Pipeline(PipelineBuilder::blendAdditive(), false,
                                         VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
+    // The rest of the stock blend table (0xA453B0, docs/re/m2-runtime.md §3).
+    // The framebuffer's alpha is left as it was, as the particle pipelines do.
+    {
+        const auto colourOnly = [](VkBlendFactor src, VkBlendFactor dst) {
+            VkPipelineColorBlendAttachmentState st = PipelineBuilder::blendAlpha();
+            st.srcColorBlendFactor = src;
+            st.dstColorBlendFactor = dst;
+            st.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            st.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            return st;
+        };
+        addOnePipeline_ = buildM2Pipeline(colourOnly(VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE), false,
+                                          VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
+        modPipeline_ = buildM2Pipeline(colourOnly(VK_BLEND_FACTOR_DST_COLOR, VK_BLEND_FACTOR_ZERO), false,
+                                       VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
+        mod2xPipeline_ = buildM2Pipeline(colourOnly(VK_BLEND_FACTOR_DST_COLOR, VK_BLEND_FACTOR_SRC_COLOR),
+                                         false, VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
+    }
 
     // --- Build particle pipelines ---
     if (particleVert.isValid() && particleFrag.isValid()) {
@@ -630,10 +649,11 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
 
     // --- Descriptor set layouts ---
 
-    // Material set layout (set 1): binding 0 = sampler2D, binding 2 = M2Material UBO
+    // Material set layout (set 1): binding 0 = sampler2D, binding 2 = M2Material UBO,
+    // binding 3 = the second texture stage's sampler2D
     // (M2Params moved to push constants alongside model matrix)
     {
-        VkDescriptorSetLayoutBinding bindings[2] = {};
+        VkDescriptorSetLayoutBinding bindings[3] = {};
         bindings[0].binding = 0;
         bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         bindings[0].descriptorCount = 1;
@@ -642,9 +662,13 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         bindings[1].descriptorCount = 1;
         bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings[2].binding = 3;
+        bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[2].descriptorCount = 1;
+        bindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
         VkDescriptorSetLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 2;
+        ci.bindingCount = 3;
         ci.pBindings = bindings;
         vkCreateDescriptorSetLayout(device, &ci, nullptr, &materialSetLayout_);
     }
@@ -694,7 +718,9 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     // --- Descriptor pools ---
     {
         VkDescriptorPoolSize sizes[] = {
-            {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_MATERIAL_SETS + 256},
+            // Two per material set (the batch's two texture stages), one per
+            // particle, ribbon and glow set.
+            {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 2 * MAX_MATERIAL_SETS + 256},
             {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_MATERIAL_SETS + 256},
         };
         VkDescriptorPoolCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -1324,6 +1350,9 @@ void M2Renderer::shutdown() {
     destroyPipeline(alphaTestPipeline_);
     destroyPipeline(alphaPipeline_);
     destroyPipeline(additivePipeline_);
+    destroyPipeline(addOnePipeline_);
+    destroyPipeline(modPipeline_);
+    destroyPipeline(mod2xPipeline_);
     destroyPipeline(particlePipeline_);
     destroyPipeline(particleAdditivePipeline_);
     for (VkPipeline& p : particleGpuPipelines_) destroyPipeline(p);
@@ -1422,6 +1451,19 @@ void M2Renderer::destroyModelGPU(M2ModelGPU& model) {
 void M2Renderer::destroyInstanceBones(M2Instance& inst, bool defer) {
     if (!vkCtx_) return;
     releaseInstanceBones(*vkCtx_, boneDescPool_, boneDescPoolGeneration_, inst, defer);
+}
+
+VkPipeline M2Renderer::pipelineForBlend(uint16_t blendMode) const {
+    // Stock blend table 0xA453B0, row 0 (docs/re/m2-runtime.md §3).
+    switch (blendMode) {
+        case 0: return opaquePipeline_;
+        case 1: return alphaTestPipeline_;
+        case 2: return alphaPipeline_;
+        case 3: return addOnePipeline_ ? addOnePipeline_ : additivePipeline_;
+        case 5: return modPipeline_ ? modPipeline_ : alphaPipeline_;
+        case 6: return mod2xPipeline_ ? mod2xPipeline_ : alphaPipeline_;
+        default: return additivePipeline_;
+    }
 }
 
 VkDescriptorSet M2Renderer::allocateMaterialSet() {
@@ -2401,7 +2443,16 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     // Build per-batch GPU entries
     if (!model.batches.empty()) {
         bool beamBatchSeen = false;
+        // The stock shader for each batch: which pixel combiner, which
+        // textures and coordinates on its two stages, and which batches an
+        // earlier one has absorbed as its second stage (m2_effect_select.hpp).
+        const std::vector<m2fx::BatchEffect> batchEffects = m2fx::resolveBatchEffects(model);
         for (const auto& batch : model.batches) {
+            const m2fx::BatchEffect& effect =
+                batchEffects[static_cast<size_t>(&batch - model.batches.data())];
+            // Folded into the batch before it (shader 0x8000): stock never
+            // draws it on its own.
+            if (effect.hidden) continue;
             // A submesh that reaches past the model's own indices is not drawn.
             //
             // vkCmdDrawIndexed does not check this and the GPU does not survive
@@ -2583,10 +2634,28 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                     }
                 }
             }
-            // textureCoordIndex is an index into a texture coord combo table, not directly
-            // a UV set selector. Most batches have index=0 (UV set 0). We always use UV set 0
-            // since we don't have the full combo table - dual-UV effects are rare edge cases.
-            bgpu.textureUnit = 0;
+            // The stock vertex and pixel shader. textureCoordIndex names an entry
+            // of the texture coordinate combos, which is where UV set 1 and the
+            // sphere environment map come from (m2_effect_select.hpp).
+            bgpu.textureUnit = static_cast<uint8_t>(static_cast<uint8_t>(effect.uv[0]) |
+                                                    (static_cast<uint8_t>(effect.uv[1]) << 2));
+            bgpu.combiner = static_cast<uint8_t>(effect.combiner);
+            bgpu.texStages = effect.stages;
+            if (effect.stages > 1) {
+                bgpu.texture2 = whiteTexture_.get();
+                const int32_t t2 = effect.texture[1];
+                if (t2 >= 0 && static_cast<size_t>(t2) < allTextures.size() && allTextures[t2] &&
+                    !(static_cast<size_t>(t2) < textureLoadFailed.size() && textureLoadFailed[t2])) {
+                    bgpu.texture2 = allTextures[t2];
+                }
+                if (t2 >= 0 && static_cast<size_t>(t2) < model.textures.size())
+                    bgpu.tex2Flags = static_cast<uint8_t>(model.textures[t2].flags & 0x3);
+                if (effect.transform[1] >= 0 &&
+                    static_cast<size_t>(effect.transform[1]) < model.textureTransforms.size()) {
+                    bgpu.stage2Transform = static_cast<int16_t>(effect.transform[1]);
+                    gpuModel.hasTextureAnimation = true;
+                }
+            }
 
             // Start at full opacity; hide only if texture failed to load.
             bgpu.batchOpacity = (texFailed && !groundDetailModel) ? 0.0f : 1.0f;
@@ -2880,6 +2949,8 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             // merge had put the 0.5 back).
             mat.specularIntensity = 0.0f;
             mat.emissiveBoost = bgpu.preserveGlowMesh ? 2.4f : 1.0f;
+            mat.combiner = bgpu.combiner;
+            mat.texStages = bgpu.texStages;
             memcpy(matAllocInfo.pMappedData, &mat, sizeof(mat));
             bgpu.materialUBOMapped = matAllocInfo.pMappedData;
 
@@ -2929,7 +3000,15 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             matBufInfo.offset = 0;
             matBufInfo.range = sizeof(M2MaterialUBO);
 
-            VkWriteDescriptorSet writes[2] = {};
+            // The second stage: white for a one-stage batch, so the binding is
+            // always valid.
+            VkTexture* stage2Tex = (bgpu.texture2 && bgpu.texture2->isValid())
+                ? bgpu.texture2 : batchTex;
+            if (bgpu.texStages < 2 && whiteTexture_ && whiteTexture_->isValid())
+                stage2Tex = whiteTexture_.get();
+            VkDescriptorImageInfo img2Info = stage2Tex->descriptorInfo();
+
+            VkWriteDescriptorSet writes[3] = {};
             // binding 0: texture
             writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[0].dstSet = bgpu.materialSet;
@@ -2944,8 +3023,15 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             writes[1].descriptorCount = 1;
             writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
             writes[1].pBufferInfo = &matBufInfo;
+            // binding 3: second texture stage
+            writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[2].dstSet = bgpu.materialSet;
+            writes[2].dstBinding = 3;
+            writes[2].descriptorCount = 1;
+            writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[2].pImageInfo = &img2Info;
 
-            vkUpdateDescriptorSets(vkCtx_->getDevice(), 2, writes, 0, nullptr);
+            vkUpdateDescriptorSets(vkCtx_->getDevice(), 3, writes, 0, nullptr);
         }
     }
 

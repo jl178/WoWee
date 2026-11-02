@@ -36,6 +36,9 @@ public:
     // Water interaction sounds
     void playEnterWater(CharacterSize size);        // Jumping into water
     void playWaterFootstep(CharacterSize size);     // Walking/running in water
+    /// With the sound tables read, a step in water is the FootstepTerrainLookup
+    /// splash column the $FSD event plays; this bank then stays quiet for it.
+    void setWaterStepsFromTables(bool on) { waterStepsFromTables_ = on; }
 
 private:
     struct MovementSample {
@@ -55,6 +58,7 @@ private:
 
     // State tracking
     float volumeScale_ = 1.0f;
+    bool waterStepsFromTables_ = false;
     bool initialized_ = false;
 
     // Helper methods

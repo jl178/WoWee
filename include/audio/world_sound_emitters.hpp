@@ -1,5 +1,7 @@
 #pragma once
 
+#include "audio/stock_sound_advanced.hpp"
+
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -23,6 +25,12 @@ class SoundData;
 /// A loop starts once the listener is inside its SoundEntries distance cutoff
 /// and stops when they leave it again; the nearest kMaxLoops play when more
 /// are in range. Positions are render coordinates, as the listener's are.
+///
+/// A sound whose kit has a SoundEntriesAdvanced row plays as that row's
+/// instance does in the stock client (stock::advancedStep): usage 0 loops
+/// with 3 s fades and moves to its next file every TimeIntervalMin..Max,
+/// usage 1 is a one-shot replayed after every interval - the Dalaran pet
+/// shop's frogs, the ice cracking in Icecrown - rather than a loop of it.
 class WorldSoundEmitters {
 public:
     WorldSoundEmitters() = default;
@@ -69,12 +77,22 @@ private:
         float retryS = 0.0f;      // a loop that failed to start waits this long
         bool resolved = false;    // volume and cutoff read from SoundEntries
         bool dead = false;        // the sound id has no files: never plays
+        // A kit with a usage 0 or 1 SoundEntriesAdvanced row: its instance,
+        // alive while the emitter is in range.
+        const stock::AdvancedKit* advanced = nullptr;
+        bool instanceAlive = false;
+        stock::AdvancedSchedule schedule;
+        int32_t offsetMs = 0;
     };
 
     bool resolve(Emitter& e) const;
     uint32_t add(Emitter e);
     void stop(Emitter& e);
     bool start(Emitter& e, float volumeScale);
+    /// One frame of an advanced instance (0x4ca7b0).
+    void stepAdvanced(Emitter& e, float deltaTime, float volumeScale);
+    /// Begin a fresh instance as the emitter comes into range (0x4cb580).
+    void beginInstance(Emitter& e);
 
     const SoundData* soundData_ = nullptr;
     std::unordered_map<uint32_t, Emitter> emitters_;

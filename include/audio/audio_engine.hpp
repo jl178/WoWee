@@ -1,9 +1,12 @@
 #pragma once
 
+#include "audio/stock_sound_advanced.hpp"
 #include "audio/stock_sound_rules.hpp"
 
 #include <glm/glm.hpp>
 #include <atomic>
+#include <climits>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -40,6 +43,21 @@ struct SoundOptions {
     /// A loop that is not music starts at a random point of itself
     /// (Wow.exe 0x879760).
     bool randomStart = false;
+    /// A sound of the player's own unit - its voice, steps, emotes, the
+    /// sounds its model and its spells make. With the listener at the
+    /// character (Sound_ListenerAtCharacter, on by default) the stock client
+    /// plays these in 2D at 0.65 of their volume (0x9f2818); either way at
+    /// priority 110 unless the caller gives another (the own steps' 115).
+    /// Wow.exe 0x747310, 0x7631a0, 0x746720, 0x746d60, 0x7469c0, 0x73a890,
+    /// 0x6f7b00, 0x4cf170.
+    bool ownCharacter = false;
+    /// Fade in over this long (0: at once). Positional and 2D stoppable sounds.
+    float fadeInMs = 0.0f;
+    /// For a kit with a SoundEntriesAdvanced row: the instance's random shift
+    /// of its time-of-day window, when the caller keeps the instance (the
+    /// emitters) and drew it already. kDrawAdvancedOffset: the engine draws.
+    static constexpr int32_t kDrawAdvancedOffset = INT32_MIN;
+    int32_t advancedOffsetMs = kDrawAdvancedOffset;
 };
 
 /**
@@ -61,6 +79,26 @@ public:
     /// Clamped to the stock 12..128; 32 by default.
     void setNumChannels(int channels);
     [[nodiscard]] int getNumChannels() const { return numChannels_; }
+
+    /// Where SoundEntriesAdvanced rows come from: the row a kit id names, or
+    /// null. With it every sound started with a SoundOptions::kitId whose
+    /// row has one gets the stock instance behaviour - the 2D/3D blend by
+    /// distance, the time-of-day volume, the category the row names and the
+    /// ducking of everything else (stock_sound_advanced.hpp). The answer must
+    /// stay valid for as long as the lookup is installed.
+    using AdvancedLookup = std::function<const stock::AdvancedKit*(uint32_t kitId)>;
+    void setAdvancedLookup(AdvancedLookup lookup) { advancedLookup_ = std::move(lookup); }
+    /// The game clock, ms into the day: what the advanced rows' time windows
+    /// are measured against.
+    void setTimeOfDayMs(int32_t ms) { timeOfDayMs_ = ((ms % stock::kDayMs) + stock::kDayMs) % stock::kDayMs; }
+    [[nodiscard]] int32_t getTimeOfDayMs() const { return timeOfDayMs_; }
+    /// Sound_ListenerAtCharacter. On (the default) the listener stands at the
+    /// character and the character's own sounds play in 2D at 0.65; off, the
+    /// listener is the camera and the own sounds are placed like any other.
+    void setListenerAtCharacter(bool on) { listenerAtCharacter_ = on; }
+    [[nodiscard]] bool isListenerAtCharacter() const { return listenerAtCharacter_; }
+    /// The level the duckers hold a group at right now, 1 for none.
+    [[nodiscard]] float getDuckLevel(stock::DuckGroup group) const { return duck_.level(group); }
 
     /// The playback device miniaudio actually opened, by name.
     ///
@@ -207,7 +245,33 @@ private:
         int priority = stock::kPriorityDefault;
         uint32_t kitId = 0;
         stock::Category category = stock::Category::Sfx;
+        // A kit with a SoundEntriesAdvanced row: its instance.
+        bool hasAdvanced = false;
+        stock::AdvancedKit advanced;
+        uint32_t instance = 0;      ///< the ducker key; 0 for no instance
+        int32_t timeOffsetMs = 0;   ///< the window's random shift
+        float timeVolume = 1.0f;    ///< instance +0x54
     };
+    /// Take on the advanced row of opts.kitId, if it has one: the instance
+    /// and its first time volume.
+    void attachAdvanced(ActiveSound& voice, const SoundOptions& opts);
+    /// Once admitted under the caller's category, an advanced instance plays
+    /// in its row's VolumeSliderCategory.
+    void adoptAdvancedCategory(ActiveSound& voice);
+    /// The own-character rule: 2D at 0.65 with the listener at the
+    /// character, priority 110 unless the caller chose one. Returns whether
+    /// the sound is still to be placed in 3D.
+    bool applyOwnCharacter(SoundOptions& opts, float& volume, bool positional) const;
+    /// A positional instance of an advanced kit already plays within
+    /// sqrt(6) yd of `position` (0x4ca130): the newcomer is refused.
+    [[nodiscard]] bool advancedDuplicateNear(uint32_t kitId, const glm::vec3& position) const;
+    /// Where a positional sound is put for miniaudio's panner: at its place,
+    /// or pulled towards straight ahead of the listener as an advanced row's
+    /// pan level falls below 1 (FMOD's set3DPanLevel blends towards
+    /// unpanned the same way). The distance is kept.
+    [[nodiscard]] glm::vec3 pannedPosition(const ActiveSound& s) const;
+    /// Remove whatever bookkeeping a voice leaves behind - its ducker.
+    void forgetVoice(const ActiveSound& s);
     /// The volume a voice is mixed at: its own, times the rolloff for a
     /// positional one at its distance from the listener.
     [[nodiscard]] float voiceGain(const ActiveSound& s) const;
@@ -216,6 +280,14 @@ private:
     bool admitVoice(const ActiveSound& incoming, bool noDuplicate);
     void releaseActive(size_t index);
     int numChannels_ = stock::kDefaultNumChannels;
+    AdvancedLookup advancedLookup_;
+    stock::DuckMixer duck_;
+    uint32_t nextInstance_ = 1;
+    int32_t timeOfDayMs_ = 12 * 3600 * 1000;
+    float duckClockMs_ = 0.0f;     ///< the fraction of a ms the duck clock still owes
+    float musicDuckApplied_ = 1.0f;
+    bool listenerAtCharacter_ = true;
+    std::mt19937 rng_{std::random_device{}()};
     std::vector<ActiveSound> activeSounds_;
     uint32_t nextSoundId_ = 1;
 

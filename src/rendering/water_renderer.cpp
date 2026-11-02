@@ -2,6 +2,7 @@
 #include "rendering/water_surface_grid.hpp"
 #include "rendering/water_mask.hpp"
 #include "rendering/water_renderer.hpp"
+#include "pipeline/stock_wmo_liquid.hpp"
 #include "rendering/water_mask.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_pipeline.hpp"
@@ -1220,13 +1221,19 @@ void WaterRenderer::loadFromWMO([[maybe_unused]] const pipeline::WMOLiquid& liqu
     surface.tileX = -1;
     surface.tileY = -1;
     surface.wmoId = wmoId;
-    surface.liquidType = liquid.materialId;
+    // The LiquidType the client draws (0x793d20): the group's, resolved at
+    // load (stock_wmo_liquid::groupLiquidType), with water in a group that is
+    // not exterior turned into 17, "WMO Water - Interior". None of the water
+    // types carries the LiquidType flag 0x200 that would keep it, so the DBC
+    // is not needed here. MLIQ's own field is a MOMT material, not a type.
+    surface.liquidType = static_cast<uint16_t>(pipeline::stock_wmo_liquid::drawnLiquidType(
+        liquid.liquidTypeId != 0 ? liquid.liquidTypeId : 13u, liquid.groupFlags, 0u));
     surface.xOffset = 0;
     surface.yOffset = 0;
     surface.width = static_cast<uint8_t>(std::min<uint32_t>(255, liquid.xTiles));
     surface.height = static_cast<uint8_t>(std::min<uint32_t>(255, liquid.yTiles));
 
-    constexpr float WMO_LIQUID_TILE_SIZE = 4.1666625f;
+    constexpr float WMO_LIQUID_TILE_SIZE = pipeline::stock_wmo_liquid::kLiquidTileSize;
     const glm::vec3 localBase(liquid.basePosition.x, liquid.basePosition.y, liquid.basePosition.z);
     const glm::vec3 localStepX(WMO_LIQUID_TILE_SIZE, 0.0f, 0.0f);
     const glm::vec3 localStepY(0.0f, WMO_LIQUID_TILE_SIZE, 0.0f);
@@ -1251,14 +1258,25 @@ void WaterRenderer::loadFromWMO([[maybe_unused]] const pipeline::WMOLiquid& liqu
     const int gridHeight = static_cast<int>(surface.height) + 1;
     const int vertexCount = gridWidth * gridHeight;
 
-    // WMO liquid base heights sit ~2 units above the visual waterline.
-    constexpr float WMO_WATER_Z_OFFSET = -1.0f;
-    float adjustedZ = surface.origin.z + WMO_WATER_Z_OFFSET;
-    surface.heights.assign(vertexCount, adjustedZ);
-    surface.minHeight = adjustedZ;
-    surface.maxHeight = adjustedZ;
-    surface.origin.z = adjustedZ;
-    surface.position.z = adjustedZ;
+    // Each vertex at its own height (0x7c8c60): MLIQ's 8-byte vertices end in
+    // a float that is the surface's z in the model, and the client builds the
+    // sheet from those - x and y from the corner in 25/6-yard steps, z from
+    // the vertex. This used to be a flat sheet a yard below the corner's z.
+    surface.heights.resize(vertexCount);
+    surface.minHeight = std::numeric_limits<float>::max();
+    surface.maxHeight = std::numeric_limits<float>::lowest();
+    for (int y = 0; y < gridHeight; ++y) {
+        for (int x = 0; x < gridWidth; ++x) {
+            const size_t i = static_cast<size_t>(y) * gridWidth + x;
+            const float h = i < liquid.heights.size() ? liquid.heights[i] : liquid.basePosition.z;
+            const glm::vec3 local = localBase + localStepX * static_cast<float>(x) +
+                                    localStepY * static_cast<float>(y);
+            const float z = (modelMatrix * glm::vec4(local.x, local.y, h, 1.0f)).z;
+            surface.heights[i] = z;
+            surface.minHeight = std::min(surface.minHeight, z);
+            surface.maxHeight = std::max(surface.maxHeight, z);
+        }
+    }
 
     if (surface.origin.z > 2000.0f || surface.origin.z < -500.0f) return;
 

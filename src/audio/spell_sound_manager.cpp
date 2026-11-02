@@ -10,6 +10,17 @@ namespace wowee {
 namespace audio {
 
 namespace {
+// The fallback school sounds are only ever the local character's own casts:
+// in the head at 0.65 of their level, priority 110 (the own-unit rule,
+// Wow.exe 0x7469c0).
+SoundOptions ownSound() {
+    SoundOptions o;
+    o.ownCharacter = true;
+    return o;
+}
+}  // namespace
+
+namespace {
     std::random_device rd;
     std::mt19937 gen(rd());
 }
@@ -145,7 +156,7 @@ void SpellSoundManager::playSound(const std::vector<SpellSample>& library, float
     if (!initialized_ || library.empty() || !library[0].loaded) return;
 
     float volume = 0.75f * volumeScale_ * volumeMultiplier;
-    AudioEngine::instance().playSound2D(library[0].data, volume, 1.0f);
+    AudioEngine::instance().playSound2D(library[0].data, volume, 1.0f, SoundBus::World, ownSound());
 }
 
 void SpellSoundManager::playRandomSound(const std::vector<SpellSample>& library, float volumeMultiplier) {
@@ -155,7 +166,7 @@ void SpellSoundManager::playRandomSound(const std::vector<SpellSample>& library,
     const SpellSample* chosen = pickLoadedSample(library, gen);
     if (!chosen) return;
     const float volume = 0.75f * volumeScale_ * volumeMultiplier;
-    AudioEngine::instance().playSound2D(chosen->data, volume, 1.0f);
+    AudioEngine::instance().playSound2D(chosen->data, volume, 1.0f, SoundBus::World, ownSound());
 }
 
 void SpellSoundManager::setVolumeScale(float scale) {
@@ -201,7 +212,8 @@ void SpellSoundManager::playPrecast(MagicSchool school, SpellPower power) {
     if (library && !library->empty() && (*library)[0].loaded) {
         stopPrecast();  // Stop any previous precast still playing
         float volume = 0.75f * volumeScale_;
-        activePrecastId_ = AudioEngine::instance().playSound2DStoppable((*library)[0].data, volume);
+        activePrecastId_ = AudioEngine::instance().playSound2DStoppable((*library)[0].data, volume, false, 0.0f,
+                                                                        SoundBus::World, ownSound());
     }
 }
 

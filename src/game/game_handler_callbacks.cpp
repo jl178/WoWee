@@ -955,6 +955,8 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     taxiStartGrace_ = 0.0f;
     currentMountDisplayId_ = 0;
     vehicleId_ = 0;
+    vehiclePassengers_.clear();
+    unitVehicleIds_.clear();
     if (mountCallback_) {
         mountCallback_(0);
     }
@@ -1246,7 +1248,7 @@ void GameHandler::sendRequestVehicleExit() {
     // CMSG_REQUEST_VEHICLE_EXIT has no payload - opcode only
     network::Packet pkt(wireOpcode(Opcode::CMSG_REQUEST_VEHICLE_EXIT));
     socket->send(pkt);
-    vehicleId_ = 0;  // Optimistically clear; server will confirm via SMSG_PLAYER_VEHICLE_DATA(0)
+    // The seat ends when the server moves the player off it.
 }
 
 const std::vector<GameHandler::EquipmentSetInfo>& GameHandler::getEquipmentSets() const {

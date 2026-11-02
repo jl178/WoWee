@@ -745,47 +745,6 @@ void GameHandler::registerCoreOpcodes() {
             return;
         }
 
-        // Live-confirmed: CMaNGOS sends this partway through a taxi flight (its
-        // own server-side flight-completion estimate firing early, well before
-        // the client-simulated path actually finishes) - obeying it unconditionally
-        // cancelled the taxi mount animation while updateClientTaxi() kept flying
-        // the real path for several more seconds, seen as "walking in the air".
-        // But other cores (e.g. AzerothCore) finalize taxi flights server-side -
-        // dismounting/stopping the player is the *authoritative* completion
-        // signal there, not a premature estimate - so a blanket "ignore while
-        // flying" guard could let the client fly past a real landing if local
-        // spline timing ever drifts from the server's. Distinguish the two using
-        // the server's own UNIT_FLAG_TAXI_FLIGHT: still set means this is the
-        // premature-estimate quirk (ignore, let updateClientTaxi() finish
-        // naturally); already cleared means the server considers the flight
-        // genuinely over (honor it now instead of waiting on our own spline).
-        const bool onTaxiFlight = movementHandler_ && movementHandler_->isOnTaxiFlight();
-        bool serverStillTaxiing = false;
-        if (onTaxiFlight) {
-            auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
-            auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity);
-            if (playerUnit) {
-                serverStillTaxiing = (playerUnit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0;
-            }
-        }
-        const bool nearDestination = onTaxiFlight && movementHandler_ &&
-                                     movementHandler_->isNearTaxiDestination();
-        LOG_INFO("SMSG_DISMOUNT received: onTaxiFlight=", onTaxiFlight,
-                 " serverStillTaxiing=", serverStillTaxiing,
-                 " nearDestination=", nearDestination);
-        if (onTaxiFlight && (serverStillTaxiing || !nearDestination)) {
-            movementHandler_->deferServerTaxiCompletion();
-            LOG_WARNING("Deferring premature SMSG_DISMOUNT until taxi landing zone");
-            return;
-        }
-        if (onTaxiFlight && movementHandler_) {
-            // Authoritative server completion ahead of our own spline - stop the
-            // client flight now rather than snapping to a final waypoint that may
-            // not match where the server actually stopped us.
-            movementHandler_->finishClientTaxiFlight(/*snapToFinalWaypoint=*/false);
-            return;
-        }
-
         // UNIT_FIELD_MOUNTDISPLAYID is the authoritative persistent mount
         // state.  Some realms emit an isolated SMSG_DISMOUNT while processing
         // damage (notably periodic poison) without actually removing the mount
@@ -1725,44 +1684,15 @@ void GameHandler::registerRemainingOpcodes() {
     // PackedGuid (player guid) + uint32 vehicleId
     // vehicleId == 0 means the player left the vehicle
     dispatchTable_[Opcode::SMSG_PLAYER_VEHICLE_DATA] = [this](network::Packet& packet) {
-        // PackedGuid (player guid) + uint32 vehicleId
-        // vehicleId == 0 means the player left the vehicle
-        //
-        // Sent to everyone in range, about whoever mounted a multi-seat mount,
-        // so it is ours only when the guid is - otherwise anyone nearby
-        // mounting a mammoth hid this player's own model.
-        if (!packet.hasRemaining(1) || packet.readPackedGuid() != playerGuid) {
-            packet.skipAll();
-            return;
-        }
-        uint32_t newVehicleId = 0;
-        if (packet.hasRemaining(4)) {
-            newVehicleId = packet.readUInt32();
-        }
-        bool wasInVehicle = vehicleId_ != 0;
-        bool nowInVehicle = newVehicleId != 0;
-        vehicleId_ = newVehicleId;
-        if (wasInVehicle != nowInVehicle) {
-            if (vehicleStateCallback_) vehicleStateCallback_(nowInVehicle, newVehicleId);
-            // Announced as well as stored. The state was kept and handed to
-            // this client's own bar, and the interface heard nothing - so the
-            // leave-vehicle button, which redraws on VEHICLE_UPDATE, never
-            // learned there was a vehicle to leave.
-            fireAddonEvent("VEHICLE_UPDATE", {});
-            // The -ING half first, as the real client sends it: the player
-            // frame and the main menu bar start their slide-out on it and
-            // finish on the -ED one. Its second argument is whether the vehicle
-            // brings its own bar (UnitHasVehicleUI, false here) and the third
-            // that bar's skin.
-            if (nowInVehicle) {
-                fireAddonEvent("UNIT_ENTERING_VEHICLE", {"player", kEventNil, ""});
-                fireAddonEvent("UNIT_ENTERED_VEHICLE", {"player", kEventNil});
-            } else {
-                fireAddonEvent("UNIT_EXITING_VEHICLE", {"player"});
-                fireAddonEvent("UNIT_EXITED_VEHICLE", {"player"});
-            }
-            fireAddonEvent("UPDATE_BONUS_ACTIONBAR", {});
-        }
+        // Packed guid + u32 vehicle id: that unit is now a vehicle (or no
+        // longer, id 0) - the stock client's 0x716DB0 sets or drops its
+        // Vehicle_C. Sent to everyone in range when a player mounts a
+        // multi-seat mount. It is not "the player entered a vehicle": that is
+        // the player's movement going onto a vehicle's seat.
+        if (!packet.hasRemaining(1)) return;
+        const uint64_t guid = packet.readPackedGuid();
+        const uint32_t id = packet.hasRemaining(4) ? packet.readUInt32() : 0u;
+        setUnitVehicleId(guid, id);
     };
     // guid(8) + status(1): status 1 = NPC has available/new routes for this player
     dispatchTable_[Opcode::SMSG_TAXINODE_STATUS] = [this](network::Packet& packet) {
@@ -1815,8 +1745,10 @@ void GameHandler::registerRemainingOpcodes() {
     };
     // A plain guid: Unit::SendMountSpecialAnim writes GetGUID(), not the
     // packed form, so reading it packed consumed the wrong number of bytes.
-    dispatchTable_[Opcode::SMSG_MOUNTSPECIAL_ANIM] = [](network::Packet& packet) {
-        if (packet.hasRemaining(8)) (void)packet.readUInt64();
+    dispatchTable_[Opcode::SMSG_MOUNTSPECIAL_ANIM] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(8)) return;
+        const uint64_t guid = packet.readUInt64();
+        if (mountSpecialCallback_) mountSpecialCallback_(guid);
     };
     dispatchTable_[Opcode::SMSG_CHAR_CUSTOMIZE] = [this](network::Packet& packet) {
         if (packet.hasRemaining(1)) {
@@ -2656,18 +2588,9 @@ void GameHandler::registerRemainingOpcodes() {
         // without it the panel sat on whatever it had when it opened.
         fireAddonEvent("INSPECT_ACHIEVEMENT_READY", {});
     };
-    dispatchTable_[Opcode::SMSG_ON_CANCEL_EXPECTED_RIDE_VEHICLE_AURA] = [this](network::Packet& packet) {
-        const bool wasRiding = vehicleId_ != 0;
-        vehicleId_ = 0;  // Vehicle ride cancelled; clear UI
-        if (vehicleStateCallback_) {
-            vehicleStateCallback_(false, 0);
-        }
-        if (wasRiding) {
-            fireAddonEvent("VEHICLE_UPDATE", {});
-            fireAddonEvent("UNIT_EXITING_VEHICLE", {"player"});
-            fireAddonEvent("UNIT_EXITED_VEHICLE", {"player"});
-            fireAddonEvent("UPDATE_BONUS_ACTIONBAR", {});
-        }
+    // AzerothCore sends this to a player who becomes a vehicle. It is no
+    // seat change of the player's; the seat follows the movement.
+    dispatchTable_[Opcode::SMSG_ON_CANCEL_EXPECTED_RIDE_VEHICLE_AURA] = [](network::Packet& packet) {
         packet.skipAll();
     };
     // uint32 type (0=normal, 1=heavy, 2=tired/restricted) + uint32 minutes played

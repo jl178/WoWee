@@ -32,6 +32,7 @@
 #include <cstring>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <glm/gtc/packing.hpp>
 #include <glm/gtx/quaternion.hpp>
 #include <unordered_set>
 #include <functional>
@@ -1070,6 +1071,29 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
 // drawn by the particle or ribbon systems.
 static const bool kM2NoSkinning = envFlagEnabled("WOWEE_M2_NO_SKINNING");
 
+// M2InstanceGPU::flags bit 2: skin by the bone palette (m2.vert.glsl).
+static constexpr int32_t kInstanceSkinnedFlag = 4;
+
+// The second texture stage's UV translation at this instance's time, packed
+// as two halves for M2InstanceGPU::uvOffset2. A wrapped axis is taken modulo
+// one first, which changes nothing it samples and keeps the halves precise
+// however far a scroll has run.
+static uint32_t stage2UvOffset(const M2ModelGPU& model, const M2ModelGPU::BatchGPU& batch,
+                               const M2Instance& inst) {
+    if (batch.stage2Transform < 0 ||
+        static_cast<size_t>(batch.stage2Transform) >= model.textureTransforms.size()) {
+        return 0;
+    }
+    const glm::vec3 t = m2_track::sampleVec3(
+        model.textureTransforms[static_cast<size_t>(batch.stage2Transform)].translation,
+        inst.currentSequenceIndex, inst.animTime, inst.globalSequenceTime,
+        model.globalSequenceDurations, glm::vec3(0.0f));
+    glm::vec2 uv(t.x, t.y);
+    if (batch.tex2Flags & 0x1) uv.x -= std::floor(uv.x);
+    if (batch.tex2Flags & 0x2) uv.y -= std::floor(uv.y);
+    return glm::packHalf2x16(uv);
+}
+
 void M2Renderer::prepareRender(uint32_t frameIndex, const Camera& camera) {
     if (!initialized_ || instances.empty()) return;
     (void)camera;  // reserved for future frustum-based culling
@@ -2060,12 +2084,13 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 auto& e = instSSBO[baseSSBOOffset + k];
                 e.model = inst.modelMatrix;
                 e.uvOffset = glm::vec2(0.0f);
+                e.uvOffset2 = 0;
                 e.fadeAlpha = p.fadeAlpha;
-                e.useBones = (p.useBones && !kM2NoSkinning) ? 1 : 0;
                 e.boneBase = p.useBones ? static_cast<int32_t>(inst.megaBoneOffset) : 0;
                 e.boneCount = static_cast<int32_t>(inst.boneMatrices.size());
                 e.highlight = inst.highlight;
-                e.flags = (inst.afloat > 0 ? 1 : 0) | inst.groundNormalFlags;
+                e.flags = (inst.afloat > 0 ? 1 : 0) | inst.groundNormalFlags |
+                          ((p.useBones && !kM2NoSkinning) ? kInstanceSkinnedFlag : 0);
             }
 
             // Drop what did not fit. The loop above stops writing at the cap,
@@ -2309,7 +2334,7 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     // Handle texture animation: if this batch has per-instance uvOffset,
                     // write a separate SSBO range with the correct offsets.
                     bool hasBatchTexAnim = (batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation)
-                                           || model.isLavaModel;
+                                           || model.isLavaModel || batch.stage2Transform >= 0;
                     uint32_t drawOffset = groupSSBOOffset;
                     uint32_t animBase = 0;
                     if (hasBatchTexAnim && claimInstanceSlots(groupSize, true, animBase) == groupSize) {
@@ -2349,12 +2374,13 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                             auto& e = instSSBO[animBase + (j - lodIdx)];
                             e.model = inst.modelMatrix;
                             e.uvOffset = uvOffset;
+                            e.uvOffset2 = stage2UvOffset(model, batch, inst);
                             e.fadeAlpha = p.fadeAlpha;
-                            e.useBones = (p.useBones && !kM2NoSkinning) ? 1 : 0;
                             e.boneBase = p.useBones ? static_cast<int32_t>(inst.megaBoneOffset) : 0;
                             e.boneCount = static_cast<int32_t>(inst.boneMatrices.size());
                             e.highlight = inst.highlight;
-                            e.flags = (inst.afloat > 0 ? 1 : 0) | inst.groundNormalFlags;
+                            e.flags = (inst.afloat > 0 ? 1 : 0) | inst.groundNormalFlags |
+                                      ((p.useBones && !kM2NoSkinning) ? kInstanceSkinnedFlag : 0);
                         }
                     }
 
@@ -2410,23 +2436,19 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                          m2BatchNeedsAlphaTest(batch.blendMode, batch.hasAlpha) ||
                          batch.colorKeyBlack);
 
+                    // Each blend mode on its own stock pipeline (0xA453B0). A
+                    // forge's flame card keyed off its black backing is added
+                    // (SrcAlpha, One), as it has been; nothing else is moved off
+                    // its material's blend.
                     uint8_t effectiveBlendMode = batch.blendMode;
-                    if (model.isSpellEffect || fireEffectModel) {
-                        if (effectiveBlendMode <= 1) effectiveBlendMode = 3;
-                        else if (effectiveBlendMode == 4 || effectiveBlendMode == 5) effectiveBlendMode = 3;
-                    }
+                    if (fireEffectModel && effectiveBlendMode <= 1) effectiveBlendMode = 4;
                     if (forceCutout) effectiveBlendMode = 1;
 
                     VkPipeline desiredPipeline;
                     if (forceCutout) {
                         desiredPipeline = cutoutPipeline_;
                     } else {
-                        switch (effectiveBlendMode) {
-                            case 0: desiredPipeline = opaquePipeline_; break;
-                            case 1: desiredPipeline = alphaTestPipeline_; break;
-                            case 2: desiredPipeline = alphaPipeline_; break;
-                            default: desiredPipeline = additivePipeline_; break;
-                        }
+                        desiredPipeline = pipelineForBlend(effectiveBlendMode);
                     }
                     if (desiredPipeline != currentPipeline) {
                         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
@@ -2663,27 +2685,24 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             auto& e = instSSBO[drawOffset];
             e.model = instance.modelMatrix;
             e.uvOffset = uvOffset;
+            e.uvOffset2 = (skyMode_ && skyNoTexAnim) ? 0u : stage2UvOffset(model, batch, instance);
             e.fadeAlpha = instanceFadeAlpha * trackAlpha;
-            e.useBones = (needsBones && !kM2NoSkinning) ? 1 : 0;
             e.boneBase = needsBones ? static_cast<int32_t>(instance.megaBoneOffset) : 0;
             e.boneCount = static_cast<int32_t>(instance.boneMatrices.size());
             e.highlight = instance.highlight;
-            e.flags = (instance.afloat > 0 ? 1 : 0) | instance.groundNormalFlags;
+            e.flags = (instance.afloat > 0 ? 1 : 0) | instance.groundNormalFlags |
+                      ((needsBones && !kM2NoSkinning) ? kInstanceSkinnedFlag : 0);
 
-            // Pipeline selection
+            // Pipeline selection: the material's own blend (stock 0xA453B0).
+            // Spell effects used to be pushed onto additive whatever they
+            // asked for, which drew potion bottles, parachutes and nets as
+            // glowing ghosts and Mod (5) layers as light; stock draws each
+            // as its material says. Matches the opaque pass: a forge's
+            // flame cards are additive, the forge itself is not.
             uint8_t effectiveBlendMode = batch.blendMode;
-            if (model.isSpellEffect || batch.forgeFireCard) {
-                // Matches the opaque pass: a forge's flame cards are additive,
-                // the forge itself is not.
-                if (effectiveBlendMode <= 1) effectiveBlendMode = 3;
-                else if (effectiveBlendMode == 4 || effectiveBlendMode == 5) effectiveBlendMode = 3;
-            }
+            if (batch.forgeFireCard && effectiveBlendMode <= 1) effectiveBlendMode = 4;
 
-            VkPipeline desiredPipeline;
-            switch (effectiveBlendMode) {
-                case 2: desiredPipeline = alphaPipeline_; break;
-                default: desiredPipeline = additivePipeline_; break;
-            }
+            VkPipeline desiredPipeline = pipelineForBlend(effectiveBlendMode);
             // An opaque layer of a faded instance, or one whose alpha plays:
             // blended by it, as the stock client switches an opaque or
             // alpha-keyed layer to alpha blending once its alpha is below 1

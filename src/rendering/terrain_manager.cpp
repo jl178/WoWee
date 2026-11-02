@@ -1237,12 +1237,10 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                     while (ft.wmoLiquidGroupIndex < groups.size() && liquidGroupsLoaded < kLiquidGroupsPerStep) {
                         const auto& group = groups[ft.wmoLiquidGroupIndex];
                         ft.wmoLiquidGroupIndex++;
+                        // Interior water is drawn too, as LiquidType 17 (0x793d20).
+                        // It used to be left out, when the sheet was drawn flat
+                        // a yard under its corner and poked through floors.
                         if (!group.liquid.hasLiquid()) continue;
-                        if (group.flags & 0x2000) {
-                            uint16_t lt = group.liquid.materialId;
-                            uint8_t basicType = (lt == 0) ? 0 : ((lt - 1) % 4);
-                            if (basicType < 2) continue;
-                        }
                         waterRenderer->loadFromWMO(group.liquid, modelMatrix, wmoInstId);
                         liquidGroupsLoaded++;
                     }

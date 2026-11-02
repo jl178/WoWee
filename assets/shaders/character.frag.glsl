@@ -24,8 +24,11 @@ layout(set = 0, binding = 0) uniform PerFrame {
 
 #include "rt_lighting.glsli"
 #include "stock_fog.glsli"
+#include "m2_combiner.glsli"
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
+// The batch's second texture stage (white when it has one).
+layout(set = 1, binding = 3) uniform sampler2D uTexture2;
 
 layout(set = 1, binding = 1) uniform CharMaterial {
     float opacity;
@@ -52,6 +55,11 @@ layout(set = 1, binding = 1) uniform CharMaterial {
     // Mouseover/target highlight (0x743C70): 1 adds the unit ambient as
     // emissive before the saturate.
     float highlight;
+    // The stock pixel shader (m2_combiner.glsli), its texture stage count,
+    // and the M2 blend mode.
+    int combiner;
+    int texStages;
+    int blendMode;
 };
 
 layout(set = 1, binding = 2) uniform sampler2D uNormalHeightMap;
@@ -64,6 +72,7 @@ layout(location = 1) in vec3 Normal;
 layout(location = 2) in vec2 TexCoord;
 layout(location = 3) in vec3 Tangent;
 layout(location = 4) in vec3 Bitangent;
+layout(location = 5) in vec2 TexCoord2;
 
 layout(location = 0) out vec4 outColor;
 
@@ -284,7 +293,12 @@ void main() {
             texColor.a *= ck;
             if (texColor.a < 0.01) discard;
         }
-        outColor = vec4(texColor.rgb, texColor.a * opacity);
+        // The stock combiner here too, so a preview keeps the shine its
+        // folded layer used to draw on its own.
+        vec4 previewTex2 = texStages > 1 ? texture(uTexture2, TexCoord2) : vec4(1.0);
+        M2Combined pc = m2Combine(combiner, texColor, previewTex2, opacity);
+        vec3 previewRgb = pc.mul * (blendMode == 6 ? 0.5 : 1.0) + pc.add;
+        outColor = vec4(previewRgb, texColor.a * opacity);
         return;
     }
 
@@ -367,6 +381,13 @@ void main() {
         if (texColor.a < 0.01) discard;
     }
 
+    // The stock combiner (m2_combiner.glsli): what the lit material colour
+    // multiplies, and what is added unlit after it - an armour or elemental
+    // env shine on its second stage, say.
+    vec4 texColor2 = texStages > 1 ? texture(uTexture2, TexCoord2) : vec4(1.0);
+    M2Combined cmb = m2Combine(combiner, texColor, texColor2, opacity);
+    bool modBlend = (blendMode == 5 || blendMode == 6);
+
     // Compute normal (with normal mapping if enabled)
     vec3 norm = vertexNormal;
     if (useNormalMap) {
@@ -381,10 +402,13 @@ void main() {
 
     vec3 result;
 
-    if (isUnlit) {
+    if (modBlend) {
+        // Mod and Mod2x: diffuse 0, emissive 1 or 0.5 (0x81FE90) - no light.
+        result = cmb.mul * (blendMode == 6 ? 0.5 : 1.0);
+    } else if (isUnlit) {
         vec3 emissiveTint = vec3(emissiveTintR, emissiveTintG, emissiveTintB);
         vec3 warm = emissiveTint * emissiveBoost;
-        result = texColor.rgb * (1.0 + warm);
+        result = cmb.mul * (1.0 + warm);
     } else {
         vec3 ldir = normalize(-lightDir.xyz);
         float diff = max(dot(norm, ldir), 0.0);
@@ -437,14 +461,30 @@ void main() {
         lit = clamp(lit, 0.0, 1.0);
         // The highlight is the world unit ambient, added as emissive.
         lit = clamp(lit + highlight * ambientColor.rgb, 0.0, 1.0);
-        result = texColor.rgb * lit;
+        result = cmb.mul * lit;
     }
+    result += cmb.add;
 
     float dist = length(viewPos.xyz - FragPos);
-    if (!unfogged) result = applyFog(result, FragPos, dist);
+    if (!unfogged) {
+        if (blendMode >= 3 && blendMode <= 6) {
+            // Fog toward what leaves the framebuffer as it is (0xA45390):
+            // black for the additive modes, white for Mod, grey for Mod2x.
+            vec3 neutral = blendMode == 5 ? vec3(1.0) : (blendMode == 6 ? vec3(0.5) : vec3(0.0));
+            result = mix(neutral, result, stockFogVisibility(FragPos));
+            if (volumetricParams.x > 0.5) result = mix(neutral, result, fogVolumeAt(FragPos).a);
+        } else {
+            result = applyFog(result, FragPos, dist);
+        }
+    }
     if (!finiteVec3(result)) {
         result = texColor.rgb;
     }
 
-    outColor = vec4(result, texColor.a * opacity);
+    // A cutout's alpha is its sharpened coverage, as before; otherwise the
+    // combiner's alpha, which for an opaque stage is the batch alpha alone.
+    float outAlpha = alphaTest != 0 ? texColor.a * opacity : cmb.aMul * opacity + cmb.aAdd;
+    if (colorKeyBlack != 0 && alphaTest == 0) outAlpha = texColor.a * opacity;
+    if (blendMode >= 2 && alphaTest == 0 && outAlpha < 1.0 / 255.0) discard;
+    outColor = vec4(result, outAlpha);
 }
