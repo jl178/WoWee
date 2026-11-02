@@ -293,5 +293,16 @@ private:
     mutable std::unordered_map<uint32_t, CreatureSounds> creatureSoundCache_;
 };
 
+/// The SoundEntries name Wow.exe plays with a UI message, by the message's
+/// GlobalStrings key: "ERR_DUEL_REQUESTED" -> "LEVELUP".
+///
+/// Wow.exe keeps one table of every UI message (0xac8af0: key, how it is
+/// shown, sound name, vocal line, chat type) and plays the sound column by
+/// name whenever it raises the message (0x5216f0). 40 of its 730 rows name a
+/// sound; the rest are silent or speak a VocalUISounds line instead. Null for
+/// a key that names no sound or is not in the table. Names are as the table
+/// spells them ("FRIENDJOINGAME"); SoundEntries lookups ignore case.
+[[nodiscard]] const char* uiMessageSoundName(std::string_view messageKey);
+
 } // namespace audio
 } // namespace wowee

@@ -380,6 +380,43 @@ TEST_CASE("SoundData finds an area's and a room's reverb", "[sound_data]") {
     REQUIRE(wowee::audio::reverbFromProvider(*data.providerPref(11)).wet <= 0.45f);
 }
 
+TEST_CASE("UI messages play the sound Wow.exe's message table names", "[sound_data]") {
+    using wowee::audio::uiMessageSoundName;
+    auto named = [](std::string_view key) {
+        const char* s = uiMessageSoundName(key);
+        return s ? std::string(s) : std::string();
+    };
+    // First, last and a spread of rows between, so a misordered row (which
+    // the binary search would miss) shows up.
+    REQUIRE(named("ERR_ARENA_TEAM_CREATE_S") == "LEVELUP");
+    REQUIRE(named("ERR_TRADE_REQUEST_S") == "LEVELUP");
+    REQUIRE(named("ERR_DUEL_REQUESTED") == "LEVELUP");
+    REQUIRE(named("ERR_INVITED_TO_GUILD_SSS") == "LEVELUP");
+    REQUIRE(named("ERR_DECLINE_GROUP_S") == "igPlayerInviteDecline");
+    REQUIRE(named("ERR_FRIEND_ONLINE_SS") == "FRIENDJOINGAME");
+    REQUIRE(named("ERR_NEWTAXIPATH") == "TaxiNodeDiscovered");
+    REQUIRE(named("ERR_MEETING_STONE_IN_QUEUE_S") == "PVPENTERQUEUE");
+    REQUIRE(named("ERR_PETITION_SIGNED") == "igPlayerInviteAccept");
+    REQUIRE(named("ERR_PETITION_SIGNED_S") == "igPlayerInviteAccept");
+    REQUIRE(named("ERR_PETITION_DECLINED_S") == "igPlayerInviteDecline");
+    REQUIRE(named("ERR_PETITION_NOT_ENOUGH_SIGNATURES") == "igPlayerInviteDecline");
+    REQUIRE(named("ERR_QUEST_ACCEPTED_S") == "QUESTADDED");
+    REQUIRE(named("ERR_QUEST_FAILED_S") == "igQuestFailed");
+    REQUIRE(named("ERR_QUEST_LOG_FULL") == "igQuestFailed");
+    REQUIRE(named("ERR_QUEST_MUST_CHOOSE") == "igQuestFailed");
+    REQUIRE(named("ERR_RECEIVE_ITEM_S") == "ITEMGENERICSOUND");
+
+    // Rows that are silent or speak a vocal line instead, a message that is
+    // not in the table, and keys that are near misses.
+    REQUIRE(uiMessageSoundName("ERR_INV_FULL") == nullptr);
+    REQUIRE(uiMessageSoundName("ERR_OUT_OF_RANGE") == nullptr);
+    REQUIRE(uiMessageSoundName("ERR_JOINED_GROUP_S") == nullptr);
+    REQUIRE(uiMessageSoundName("ERR_LFG_JOINED_QUEUE") == nullptr);
+    REQUIRE(uiMessageSoundName("err_duel_requested") == nullptr);
+    REQUIRE(uiMessageSoundName("ERR_QUEST_FAILED") == nullptr);
+    REQUIRE(uiMessageSoundName("") == nullptr);
+}
+
 TEST_CASE("WorldFx is transparent when dry and muffles under water", "[sound_data]") {
     wowee::audio::WorldFx fx;
     fx.prepare(48000, 2);

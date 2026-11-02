@@ -406,6 +406,8 @@ bool SpellVisualSystem::spawnKitModel(uint32_t kitId, const std::string& path, u
 
     SpellVisualInstance sv;
     sv.instanceId = instanceId;
+    sv.modelId = modelId;
+    sv.effectPos = glm::vec3(xf[3]);
     const float animDurMs = m2Renderer_->getInstanceAnimDuration(instanceId);
     sv.birthDuration = animDurMs / 1000.0f;
     sv.hasHold = m2Renderer_->hasAnimation(instanceId, kAnimHold);
@@ -470,6 +472,18 @@ void SpellVisualSystem::playSpellVisualKit(uint32_t kitId, const glm::vec3& worl
     s.feetPos = worldPosition;
     s.attachInstanceId = attachInstanceId;
     spawnKit(kitId, s);
+}
+
+bool SpellVisualSystem::playEffectModel(const std::string& modelPath, const glm::vec3& feetPos,
+                                        uint32_t attachInstanceId) {
+    if (!m2Renderer_ || modelPath.empty()) return false;
+    if (!cachedAssetManager_)
+        cachedAssetManager_ = core::Application::getInstance().getAssetManager();
+    if (!cachedAssetManager_) return false;
+    KitSpawn s;
+    s.feetPos = feetPos;
+    s.attachInstanceId = attachInstanceId;
+    return spawnKitModel(0, modelPath, SLOT_BASE, /*world=*/false, s);
 }
 
 bool SpellVisualSystem::visualHasKitSound(uint32_t visualId, KitSoundMoment moment) {
@@ -603,6 +617,11 @@ uint32_t SpellVisualSystem::loadSpellModel(const std::string& modelPath) {
             return 0;
         }
         m2Renderer_->markModelAsSpellEffect(modelId);
+        std::vector<EffectSound> sounds;
+        sounds.reserve(model.effectSounds.size());
+        for (const auto& s : model.effectSounds) sounds.push_back({s.soundEntryId, s.timeMs});
+        if (sounds.empty()) modelEffectSounds_.erase(modelId);
+        else modelEffectSounds_[modelId] = std::move(sounds);
         LOG_INFO("SpellVisual: loaded model id=", modelId, " path=", modelPath);
     }
     return modelId;
@@ -1196,6 +1215,23 @@ void SpellVisualSystem::update(float deltaTime) {
             if (slotTransform(sv.slot, sv.attachInstanceId, glm::vec3(0.0f), xf)) {
                 if (sv.instanceId) m2Renderer_->setInstanceTransform(sv.instanceId, xf);
                 if (sv.soundHandle) audioEngine.setSoundPosition(sv.soundHandle, glm::vec3(xf[3]));
+                sv.effectPos = glm::vec3(xf[3]);
+            }
+        }
+        // The model's own $SND events, each once as the birth sequence passes
+        // its time. Not after the model starts to end: Decay is a different
+        // sequence with no events of its own.
+        if (sv.instanceId != 0 && !sv.retiring) {
+            auto snd = modelEffectSounds_.find(sv.modelId);
+            if (snd != modelEffectSounds_.end()) {
+                const float nowMs = sv.elapsed * 1000.0f;
+                const auto& list = snd->second;
+                while (sv.nextEffectSound < list.size() &&
+                       static_cast<float>(list[sv.nextEffectSound].timeMs) <= nowMs) {
+                    playSoundEntry(list[sv.nextEffectSound].soundEntryId, sv.effectPos,
+                                   /*keepLoop=*/false);
+                    ++sv.nextEffectSound;
+                }
             }
         }
         ++i;

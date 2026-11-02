@@ -457,6 +457,10 @@ private:
                             uint64_t targetGuid, bool impactAtEnd);
     // Resolve render-space position for a unit GUID (player or entity).
     bool resolveUnitPosition(uint64_t guid, glm::vec3& outPos);
+    // One effect model on a unit's base, its $SND events included (see
+    // SpellVisualSystem::playEffectModel). False when the unit is not known
+    // or the model cannot be shown.
+    bool playUnitEffectModel(uint64_t guid, const char* modelPath);
     // Put the spell's build-up (PrecastKit, or ChannelKit for a channel) on
     // the caster until the cast resolves.
     void triggerCastVisual(uint32_t spellId, uint64_t casterGuid, uint32_t castTimeMs = 0,

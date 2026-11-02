@@ -1178,6 +1178,8 @@ void GameHandler::registerCoreOpcodes() {
     };
     dispatchTable_[Opcode::SMSG_NEW_TAXI_PATH] = [this](network::Packet& /*packet*/) {
         addSystemChatMessage("New flight path discovered!");
+        // TaxiNodeDiscovered, ERR_NEWTAXIPATH's sound (Wow.exe 0x6e3054)
+        playUiMessageSound("ERR_NEWTAXIPATH");
     };
 
     // (MSG_TALENT_WIPE_CONFIRM → registered by SpellHandler, which owns the
@@ -1484,11 +1486,12 @@ void GameHandler::registerCoreOpcodes() {
                             addSystemChatMessage("You have reached level " +
                                                  std::to_string(newLevel) + "!");
                         }
-                        // LEVELUP (888): in the stock client it is the $SND
-                        // event of Spells\LevelUp\LevelUp.m2, which the
-                        // level-up effect here draws without its events.
-                        withSoundManager(&audio::AudioCoordinator::getUiSoundManager, [](auto* sfx) { sfx->playLevelUp(); });
+                        // LEVELUP (888) is the $SND event of
+                        // Spells\LevelUp\LevelUp.m2, which the callback shows
+                        // on the player; it plays the sound by itself only
+                        // when the model cannot be shown.
                         if (levelUpCallback_) levelUpCallback_(newLevel);
+                        else withSoundManager(&audio::AudioCoordinator::getUiSoundManager, [](auto* sfx) { sfx->playLevelUp(); });
                         // All nine, in the order the interface reads them:
                         // level, health, power, talent points, then the five
                         // stats. The chat frame tests the third against zero
@@ -1905,6 +1908,9 @@ void GameHandler::registerRemainingOpcodes() {
                     "You are now in the Meeting Stone queue for zone %u (levels %u-%u).",
                     zoneId, levelMin, levelMax);
             addSystemChatMessage(buf);
+            // ERR_MEETING_STONE_IN_QUEUE_S, the line this stands for, plays
+            // PVPENTERQUEUE.
+            playUiMessageSound("ERR_MEETING_STONE_IN_QUEUE_S");
             LOG_INFO("SMSG_MEETINGSTONE_SETQUEUE: zone=", zoneId,
                      " levels=", static_cast<int>(levelMin), "-", static_cast<int>(levelMax));
         }

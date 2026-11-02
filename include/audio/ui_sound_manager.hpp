@@ -4,7 +4,9 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <cstdint>
+#include <glm/vec3.hpp>
 
 namespace wowee {
 namespace pipeline {
@@ -46,6 +48,18 @@ public:
     /// stock client does, at the row's volume times the interface volume.
     bool playEntry(const SoundEntry* entry);
 
+    /// The same row played at a point in the world: the same file pick, at
+    /// the row's volume, heard out to its DistanceCutoff. For sounds the
+    /// server ties to an object (SMSG_PLAY_OBJECT_SOUND), which are world
+    /// sounds and go through the world's mix rather than the interface's.
+    bool playEntryAt(const SoundEntry* entry, const glm::vec3& position);
+
+    /// The sound Wow.exe plays with a UI message, by the message's
+    /// GlobalStrings key ("ERR_NEWTAXIPATH"): see audio::uiMessageSoundName.
+    /// Call it where the message is raised. False for a message the table
+    /// leaves silent, so most keys are a cheap no-op.
+    bool playUiMessage(std::string_view messageKey);
+
     /// Play a sound by path, which is what PlaySoundFile takes. Cached the
     /// same way and by the same store as the rows' files.
     bool playFile(const std::string& path, float volume = 0.7f);
@@ -58,8 +72,6 @@ public:
     // the stock client plays for that moment; the file after it in the .cpp
     // is the no-table fallback and is the file that row names.
 
-    /// QUESTADDED: the stock client's ERR_QUEST_ACCEPTED_S message carries it.
-    void playQuestActivate();
     /// igQuestListComplete: SMSG_QUESTGIVER_QUEST_COMPLETE (Wow.exe 0x6d0e10).
     void playQuestComplete();
     /// igQuestFailed: every ERR_QUEST_FAILED_* / ERR_QUEST_LOG_FULL message.

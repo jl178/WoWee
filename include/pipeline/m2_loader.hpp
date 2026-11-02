@@ -300,6 +300,18 @@ struct M2Model {
     };
     std::vector<DoodadSound> doodadSounds;
 
+    // A spell effect model's own sounds: $SND events, at timeMs into its
+    // first sequence (the birth), sorted by time. The data field is a
+    // SoundEntries id. Twenty 3.3.5 models carry one, all under Spells\:
+    // LevelUp.m2 plays LEVELUP (888) 33 ms in, Achievement_OnRoot.m2
+    // AchievementSound (12891), ReputationLevelUp.m2 8473, the meteor and
+    // infernal impacts 3181.
+    struct EffectSound {
+        uint32_t soundEntryId = 0;
+        uint32_t timeMs = 0;
+    };
+    std::vector<EffectSound> effectSounds;
+
     // Weapon hand-off ($SHL / $SHR) per sequence index, in ms: the frame of
     // Sheath (89) / HipSheath (90) where the hand reaches the sheath and the
     // weapon moves between hand and back or hip (HumanMale: 500 of 1000 on

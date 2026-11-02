@@ -563,9 +563,18 @@ private:
     void handleLfgRoleCheckUpdate(network::Packet& packet);
     void handleLfgUpdatePlayer(network::Packet& packet);
     void handleLfgUpdateParty(network::Packet& packet);
-    void readLfgDungeonList(network::Packet& packet);
+    /// Returns how many dungeons the list named.
+    uint8_t readLfgDungeonList(network::Packet& packet);
     void applyLfgUpdate(uint8_t updateType, bool extraInfo, bool queued,
                         bool inDungeon);
+    /// The joined and queued flags one kind of LFG update (player or party)
+    /// last carried. Wow.exe keeps one of these per kind and plays its queue
+    /// sounds on the differences; see playLfgUpdateSound.
+    struct LfgFlagsSeen { bool joined = false; bool queued = false; };
+    void playLfgUpdateSound(LfgFlagsSeen& last, uint8_t updateType, bool joined,
+                            bool queued, bool joinCounts);
+    LfgFlagsSeen lfgPlayerFlagsSeen_;
+    LfgFlagsSeen lfgPartyFlagsSeen_;
     void handleLfgPlayerReward(network::Packet& packet);
     void handleLfgBootProposalUpdate(network::Packet& packet);
     void handleLfgTeleportDenied(network::Packet& packet);

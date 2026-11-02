@@ -1557,11 +1557,9 @@ void QuestHandler::acceptQuest() {
     // "show all when nothing tracked" fallback still applies to those.
     owner_.setQuestTracked(questId, true);
 
-    // QUESTADDED, the sound of the stock ERR_QUEST_ACCEPTED_S message
-    if (auto* ac = owner_.services().audioCoordinator) {
-        if (auto* sfx = ac->getUiSoundManager())
-            sfx->playQuestActivate();
-    }
+    // No sound here: QUESTADDED plays when the quest reaches the server's
+    // quest log (applyQuestStateFromFields), not on the click, which the
+    // server may still refuse.
 
     dismissQuestDetails();
 
@@ -2151,6 +2149,20 @@ void QuestHandler::applyQuestStateFromFields(const FlatFieldMap& fields) {
     // until the giver respawned for the client.
     if (questSlotStatesSeeded_ && slotStates != questSlotStatesSeen_) {
         requeryNearbyQuestGiverStatus();
+    }
+    // QUESTADDED, the sound of ERR_QUEST_ACCEPTED_S, which Wow.exe raises when
+    // a quest log slot's update field takes a new quest id (0x6df370) - the
+    // server's word that the quest is in the log, whether it came from an
+    // accept, a shared quest or an escort. Once however many arrived. Not on
+    // the login snapshot, which is the log as it already was.
+    if (questSlotStatesSeeded_) {
+        for (const auto& [questId, state] : slotStates) {
+            (void)state;
+            if (questSlotStatesSeen_.count(questId) == 0) {
+                owner_.playUiMessageSound("ERR_QUEST_ACCEPTED_S");
+                break;
+            }
+        }
     }
     questSlotStatesSeen_ = std::move(slotStates);
     questSlotStatesSeeded_ = true;

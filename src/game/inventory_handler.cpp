@@ -4086,6 +4086,9 @@ void InventoryHandler::handleTradeStatus(network::Packet& packet) {
                 break;
             }
             owner_.addSystemChatMessage(tradePeerName_ + " wants to trade with you.");
+            // ERR_TRADE_REQUEST_S's sound, LEVELUP. The TRADE popup FrameXML
+            // shows for this has no sound of its own.
+            owner_.playUiMessageSound("ERR_TRADE_REQUEST_S");
             if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("TRADE_REQUEST", {tradePeerName_});
             break;
         }

@@ -718,6 +718,18 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_PETITION_QUERY_RESPONSE] = [this](network::Packet& packet) { handlePetitionQueryResponse(packet); };
     table[Opcode::SMSG_PETITION_SHOW_SIGNATURES] = [this](network::Packet& packet) { handlePetitionShowSignatures(packet); };
     table[Opcode::SMSG_PETITION_SIGN_RESULTS] = [this](network::Packet& packet) { handlePetitionSignResults(packet); };
+    // To the charter's owner: who declined to sign it (uint64 guid). Wow.exe
+    // (0x6cf140) says ERR_PETITION_DECLINED_S, which plays igPlayerInviteDecline.
+    table[Opcode::MSG_PETITION_DECLINE] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(8)) { packet.skipAll(); return; }
+        const uint64_t who = packet.readUInt64();
+        auto nit = owner_.getPlayerNameCache().find(who);
+        const std::string name = nit != owner_.getPlayerNameCache().end() ? nit->second : std::string();
+        if (name.empty()) owner_.queryPlayerName(who);
+        owner_.addSystemChatMessage((name.empty() ? std::string("Someone") : name) +
+                                    " has declined to sign your petition.");
+        owner_.playUiMessageSound("ERR_PETITION_DECLINED_S");
+    };
 
     // ---- Battlefield / BG ----
     table[Opcode::SMSG_BATTLEFIELD_STATUS] = [this](network::Packet& packet) { handleBattlefieldStatus(packet); };
@@ -1846,8 +1858,12 @@ void SocialHandler::handleDuelRequested(network::Packet& packet) {
     duelChallengerGuid_ = packet.readUInt64();
     // The server sends this to both players. The one who issued the challenge
     // keeps the flag, to be able to call it off, and is not asked to accept it.
+    // Wow.exe (0x5cfcd0) tells that player ERR_DUEL_REQUESTED, which plays
+    // LEVELUP.
     if (duelChallengerGuid_ == owner_.getPlayerGuid()) {
         pendingDuelRequest_ = false;
+        owner_.addSystemChatMessage("You have requested a duel.");
+        owner_.playUiMessageSound("ERR_DUEL_REQUESTED");
         return;
     }
     duelChallengerName_.clear();
@@ -2267,6 +2283,7 @@ void SocialHandler::handleGroupDecline(network::Packet& packet) {
     GroupDeclineData data;
     if (!GroupDeclineResponseParser::parse(packet, data)) return;
     owner_.addSystemChatMessage(data.playerName + " has declined your group invitation.");
+    owner_.playUiMessageSound("ERR_DECLINE_GROUP_S");  // igPlayerInviteDecline (0x6cbd40)
 }
 
 void SocialHandler::handleGroupList(network::Packet& packet) {
@@ -2274,8 +2291,30 @@ void SocialHandler::handleGroupList(network::Packet& packet) {
     const bool hasBattleGroupFlag = isActiveExpansion("tbc");
     const uint8_t prevLootMethod = partyData.lootMethod;
     const bool wasInGroup = !partyData.isEmpty();
+    std::vector<uint64_t> prevMembers;
+    prevMembers.reserve(partyData.members.size());
+    for (const auto& m : partyData.members) prevMembers.push_back(m.guid);
     partyData = GroupListData{};
     if (!GroupListParser::parse(packet, partyData, hasRoles, hasBattleGroupFlag)) return;
+
+    // igPlayerInviteAccept, which Wow.exe's roster handler (0x6d8870) plays
+    // when someone in the player's own subgroup arrives: anyone at all when
+    // the player was in no group, and in a party (not a raid) anyone who was
+    // not on the last roster. Once per roster, however many arrived.
+    {
+        const bool raid = groupIsRaid(partyData.groupType);
+        bool arrived = false;
+        for (const auto& m : partyData.members) {
+            if (m.guid == 0 || m.guid == owner_.getPlayerGuid() || m.subGroup != partyData.subGroup)
+                continue;
+            if (!wasInGroup ||
+                (!raid && std::find(prevMembers.begin(), prevMembers.end(), m.guid) == prevMembers.end())) {
+                arrived = true;
+                break;
+            }
+        }
+        if (arrived) owner_.playUiSoundByName("igPlayerInviteAccept");
+    }
 
     // The roster carries online state in isOnline; the per-member stat updates
     // carry it in the onlineStatus bitmask. Seed the bitmask from the roster so
@@ -2708,13 +2747,22 @@ void SocialHandler::handleGuildEvent(network::Packet& packet) {
             // said. The transition is still tracked when the message is
             // suppressed - the roster's idea of who is online is not the
             // player's idea of what is worth reading.
+            //
+            // A member who is also on the friends list is left to the friend
+            // list's own line, as Wow.exe does (0x6d92d0 checks the friends
+            // list first): the two announced the same arrival twice. The line
+            // is ERR_FRIEND_ONLINE_SS and plays its sound, FRIENDJOINGAME.
             if (data.numStrings >= 1 && guildMemberOnlineTransition(data.strings[0], true) &&
-                addons::storedCVarValue("guildMemberNotify", "1") != "0")
+                addons::storedCVarValue("guildMemberNotify", "1") != "0" &&
+                owner_.friendsCacheRef().count(data.strings[0]) == 0) {
                 msg = "|Hplayer:" + data.strings[0] + "|h[" + data.strings[0] + "]|h has come online.";
+                owner_.playUiMessageSound("ERR_FRIEND_ONLINE_SS");
+            }
             break;
         case GuildEvent::SIGNED_OFF:
             if (data.numStrings >= 1 && guildMemberOnlineTransition(data.strings[0], false) &&
-                addons::storedCVarValue("guildMemberNotify", "1") != "0")
+                addons::storedCVarValue("guildMemberNotify", "1") != "0" &&
+                owner_.friendsCacheRef().count(data.strings[0]) == 0)
                 msg = data.strings[0] + " has gone offline.";
             break;
         // The bank's half of the event list. The server broadcasts these to
@@ -2845,6 +2893,9 @@ void SocialHandler::handleGuildInvite(network::Packet& packet) {
     pendingGuildInviterName_ = data.inviterName;
     pendingGuildInviteGuildName_ = data.guildName;
     owner_.addSystemChatMessage(data.inviterName + " has invited you to join " + data.guildName + ".");
+    // ERR_INVITED_TO_GUILD_SSS, raised by both of Wow.exe's guild invite
+    // handlers (0x6cc3b0, 0x6cc910), plays LEVELUP.
+    owner_.playUiMessageSound("ERR_INVITED_TO_GUILD_SSS");
     if (owner_.addonEventCallbackRef())
         owner_.addonEventCallbackRef()("GUILD_INVITE_REQUEST", {data.inviterName, data.guildName});
 }
@@ -2860,6 +2911,8 @@ void SocialHandler::handleGuildCommandResult(network::Packet& packet) {
         switch (data.command) {
             case 0:
                 owner_.addSystemChatMessage("Guild created.");
+                // ERR_GUILD_CREATE_S (Wow.exe 0x6cc590, command 0, result 0)
+                owner_.playUiMessageSound("ERR_GUILD_CREATE_S");
                 membershipChanged = true;
                 break;
             case 1:
@@ -3047,16 +3100,46 @@ void SocialHandler::handlePetitionSignResults(network::Packet& packet) {
         case 3: owner_.raiseUiError("You cannot sign your own petition."); break;
         default: owner_.addSystemChatMessage("Cannot sign petition (error " + std::to_string(result) + ")."); break;
     }
+    // The message Wow.exe (0x6cefd0) raises for the result, for its sound:
+    // a result naming someone else is the owner hearing of a signature
+    // (ERR_PETITION_SIGNED_S); the player's own is one per PetitionSigns code.
+    const char* key = nullptr;
+    if (playerGuid != owner_.getPlayerGuid()) {
+        key = "ERR_PETITION_SIGNED_S";
+    } else {
+        switch (result) {
+            case 0:  key = "ERR_PETITION_SIGNED"; break;
+            case 1:  key = "ERR_PETITION_ALREADY_SIGNED"; break;
+            case 2:  key = "ERR_PETITION_IN_GUILD"; break;
+            case 3:  key = "ERR_PETITION_CREATOR"; break;
+            case 5:  key = "ERR_PETITION_NOT_SAME_SERVER"; break;
+            case 8:  key = "ERR_PETITION_FULL"; break;
+            case 10: key = "ERR_PETITION_ALREADY_SIGNED_OTHER"; break;
+            case 11: key = "ERR_PETITION_RESTRICTED_ACCOUNT"; break;
+            default: break;
+        }
+    }
+    if (key) owner_.playUiMessageSound(key);
 }
 
 void SocialHandler::handleTurnInPetitionResults(network::Packet& packet) {
     uint32_t result = 0;
     if (!TurnInPetitionResultsParser::parse(packet, result)) return;
+    // PetitionTurns, as AzerothCore (Guild.h) and Wow.exe (0x6cf1a0) number
+    // them: 2 already in a guild, 4 more signatures needed, 11 no permission.
+    // These were 1, 2 and 3 here, so a charter short of signatures reported
+    // "already in a guild".
     switch (result) {
         case 0: owner_.addSystemChatMessage("Guild created successfully!"); break;
-        case 1: owner_.addSystemChatMessage("Guild creation failed: already in a guild."); break;
-        case 2: owner_.addSystemChatMessage("Guild creation failed: not enough signatures."); break;
-        case 3: owner_.addSystemChatMessage("Guild creation failed: name already taken."); break;
+        case 2:
+            owner_.addSystemChatMessage("You are already in a guild.");
+            owner_.playUiMessageSound("ERR_PETITION_IN_GUILD");
+            break;
+        case 4:
+            owner_.addSystemChatMessage("You need more signatures.");
+            owner_.playUiMessageSound("ERR_PETITION_NOT_ENOUGH_SIGNATURES");
+            break;
+        case 11: owner_.addSystemChatMessage("You don't have permission to do that."); break;
         default: owner_.addSystemChatMessage("Guild creation failed (error " + std::to_string(result) + ")."); break;
     }
 }
@@ -3344,7 +3427,10 @@ void SocialHandler::handleFriendStatus(network::Packet& packet) {
     switch (data.status) {
         case kDbError:      owner_.addSystemChatMessage("Your friends list could not be reached."); break;
         case kListFull:     owner_.addSystemChatMessage("Your friends list is full."); break;
-        case kOnline:       owner_.addSystemChatMessage(playerName + " is now online."); break;
+        case kOnline:
+            owner_.addSystemChatMessage(playerName + " is now online.");
+            owner_.playUiMessageSound("ERR_FRIEND_ONLINE_SS");  // FRIENDJOINGAME
+            break;
         case kOffline:      owner_.addSystemChatMessage(playerName + " is now offline."); break;
         case kNotFound:     owner_.addSystemChatMessage("Player not found."); break;
         case kRemoved:      owner_.addSystemChatMessage(playerName + " has been removed from your friends list."); break;
@@ -3834,6 +3920,11 @@ enum : uint32_t {
     kProposalSuccess    = 2,
 };
 
+// SoundEntries rows Wow.exe's Dungeon Finder handler (0x55bdc0) plays by id.
+constexpr uint32_t kSoundLfgDungeonReady = 17318;  // LFG_DungeonReady
+constexpr uint32_t kSoundLfgDenied       = 17341;  // LFG_Denied
+constexpr uint32_t kSoundPvpEnterQueue   = 8462;   // PVPENTERQUEUE
+
 }  // namespace
 
 void SocialHandler::handleLfgProposalUpdate(network::Packet& packet) {
@@ -3871,6 +3962,15 @@ void SocialHandler::handleLfgProposalUpdate(network::Packet& packet) {
         m.answered  = packet.readUInt8() != 0;
         m.accepted  = packet.readUInt8() != 0;
         lfgProposalMembers_.push_back(m);
+    }
+    // LFG_Denied when the player, or someone in the player's own group,
+    // answered no (Wow.exe 0x55bdc0, with ERR_LFG_PROPOSAL_DECLINED_SELF or
+    // _PARTY). A stranger declining is not announced.
+    for (const auto& m : lfgProposalMembers_) {
+        if (m.answered && !m.accepted && (m.isSelf || m.sameGroup)) {
+            owner_.playUiSoundEntry(kSoundLfgDenied);
+            break;
+        }
     }
 
     lfgDungeonId_ = dungeonId; lfgProposalId_ = proposalId;
@@ -3944,7 +4044,7 @@ void SocialHandler::handleLfgRoleCheckUpdate(network::Packet& packet) {
     // the values they test for.
     if (!packet.hasRemaining(6)) return;
     const uint32_t roleCheckState = packet.readUInt32();
-    packet.readUInt8();   // initiating
+    const bool initiating = packet.readUInt8() != 0;
 
     // The dungeons being checked for, and how many are in the group. Both were
     // stopped at: the count was read and the list behind it left on the wire.
@@ -3968,6 +4068,13 @@ void SocialHandler::handleLfgRoleCheckUpdate(network::Packet& packet) {
     if (roleCheckState == 1) lfgState_ = LfgState::Queued;
     else if (roleCheckState == 3) { lfgState_ = LfgState::None; owner_.addUIError("Dungeon Finder: Role check failed - missing required role."); owner_.addSystemChatMessage("Dungeon Finder: Role check failed - missing required role."); }
     else if (roleCheckState == 2) { lfgState_ = LfgState::RoleCheck; owner_.addSystemChatMessage("Dungeon Finder: Performing role check..."); }
+    // Wow.exe's Dungeon Finder handler (0x55bdc0) plays LFG_DungeonReady
+    // (17318) as a role check begins - the initiating flag, with
+    // ERR_LFG_ROLE_CHECK_INITIATED - and LFG_Denied (17341) when one ends
+    // aborted (5, someone left; ERR_LFG_ROLE_CHECK_ABORTED) or with someone
+    // choosing no role (6).
+    if (initiating) owner_.playUiSoundEntry(kSoundLfgDungeonReady);
+    if (roleCheckState == 5 || roleCheckState == 6) owner_.playUiSoundEntry(kSoundLfgDenied);
     // Likewise GetLFGRoleUpdate, which reports the check in progress.
     if (owner_.addonEventCallbackRef()) {
         owner_.addonEventCallbackRef()("LFG_ROLE_CHECK_UPDATE", {});
@@ -3993,40 +4100,37 @@ void SocialHandler::handleLfgRoleCheckUpdate(network::Packet& packet) {
 /// body itself - which is where the server says whether you are queued - was
 /// skipped three bytes at a time.
 ///
-/// The numbers were a version out too. Under 3.3.5's LfgUpdateType, 15 is
-/// UPDATE_STATUS, the refresh the server sends whenever the queue state is
-/// restated; this read it as "left the queue", set the state to none and said
-/// so in chat. So a player queued for a dungeon was thrown out of the queue by
-/// the packet whose whole job is to confirm they are still in it - locally,
-/// while the server kept them queued, which is what made it look like being
-/// dropped for no reason.
+/// An update type once read as "left the queue" was the server's periodic
+/// restatement of it, so a player queued for a dungeon was thrown out of the
+/// queue by the packet whose whole job is to confirm they are still in it -
+/// locally, while the server kept them queued, which is what made it look
+/// like being dropped for no reason.
 ///
 /// Reading the flags instead of the type is what stops that returning: the
 /// server states the queue in the packet, and the update type only decides
 /// what to say about it.
 namespace {
 
-// 3.3.5 LfgUpdateType, as the server writes it.
+// 3.3.5 LfgUpdateType, as the server writes it: AzerothCore's LFG.h, and the
+// numbers Wow.exe's own handler (0x55bdc0) tests - 7 and 15 for leaving the
+// queue, 10 for a group found, 16 for a party disbanding. This table used to
+// run one high from 6 on (15 as UPDATE_STATUS, which is 14), with 6 taken as
+// a second spelling of the join.
 enum : uint8_t {
     kLfgDefault             = 0,
     kLfgLeaderUnk1          = 1,
     kLfgRoleCheckAborted    = 4,
-    // Five, observed: it arrives the moment a queue is joined, carrying a body
-    // that says queued. The listings of this enum disagree about whether the
-    // join is 5 or 6, so both are treated as one - the flags in the body decide
-    // the state either way, and this only decides the wording.
     kLfgJoinQueue           = 5,
-    kLfgJoinQueueAlt        = 6,
-    kLfgRoleCheckFailed     = 7,
-    kLfgRemovedFromQueue    = 8,
-    kLfgProposalFailed      = 9,
-    kLfgProposalDeclined    = 10,
-    kLfgGroupFound          = 11,
-    kLfgAddedToQueue        = 13,
-    kLfgProposalBegin       = 14,
-    kLfgUpdateStatus        = 15,
-    kLfgGroupMemberOffline  = 16,
-    kLfgGroupDisband        = 17,
+    kLfgRoleCheckFailed     = 6,
+    kLfgRemovedFromQueue    = 7,
+    kLfgProposalFailed      = 8,
+    kLfgProposalDeclined    = 9,
+    kLfgGroupFound          = 10,
+    kLfgAddedToQueue        = 12,
+    kLfgProposalBegin       = 13,
+    kLfgUpdateStatus        = 14,
+    kLfgGroupMemberOffline  = 15,
+    kLfgGroupDisband        = 16,
 };
 
 /// What to say about an update, or nullptr for the ones that are not news.
@@ -4036,8 +4140,7 @@ enum : uint8_t {
 /// with it.
 const char* lfgUpdateMessage(uint8_t updateType) {
     switch (updateType) {
-        case kLfgJoinQueue:
-        case kLfgJoinQueueAlt:     return "Dungeon Finder: You have joined the queue.";
+        case kLfgJoinQueue:        return "Dungeon Finder: You have joined the queue.";
         case kLfgAddedToQueue:     return "Dungeon Finder: Added to the queue.";
         case kLfgRemovedFromQueue: return "Dungeon Finder: Removed from the queue.";
         case kLfgRoleCheckFailed:  return "Dungeon Finder: The role check failed.";
@@ -4073,6 +4176,9 @@ void SocialHandler::handleLfgUpdatePlayer(network::Packet& packet) {
         readLfgDungeonList(packet);
     }
     applyLfgUpdate(updateType, extraInfo, queued, /*inDungeon=*/false);
+    // For the player's own update Wow.exe counts the body's presence as
+    // having joined.
+    playLfgUpdateSound(lfgPlayerFlagsSeen_, updateType, extraInfo, queued, /*joinCounts=*/true);
 }
 
 void SocialHandler::handleLfgUpdateParty(network::Packet& packet) {
@@ -4097,27 +4203,57 @@ void SocialHandler::handleLfgUpdateParty(network::Packet& packet) {
     const bool extraInfo = packet.readUInt8() != 0;
     bool queued = false;
     bool joined = false;
+    uint8_t dungeonCount = 0;
     if (extraInfo && packet.hasRemaining(8)) {
         joined = packet.readUInt8() != 0;
         queued = packet.readUInt8() != 0;
         for (int i = 0; i < 5; ++i) packet.readUInt8();
-        readLfgDungeonList(packet);
+        dungeonCount = readLfgDungeonList(packet);
     }
     // The party's join flag covers being in the dungeon as well as being in the
     // queue, so it only means "in a dungeon" when the queue flag is off.
     applyLfgUpdate(updateType, extraInfo, queued, joined && !queued);
+    // A party join only counts as entering the queue with dungeons named.
+    playLfgUpdateSound(lfgPartyFlagsSeen_, updateType, joined, queued,
+                       /*joinCounts=*/dungeonCount != 0);
+}
+
+/// The queue sounds of Wow.exe's Dungeon Finder handler (0x55bdc0), from the
+/// difference between this update and the last of its kind:
+///
+///   - joined where the last was not: PVPENTERQUEUE (8462), with
+///     ERR_LFG_JOINED_QUEUE or _LIST;
+///   - a join, or failing that a queue, the last update held and this one
+///     does not, when the update type is REMOVED_FROM_QUEUE (7) or
+///     GROUP_MEMBER_OFFLINE (15): LFG_Denied (17341), with ERR_LFG_LEFT_QUEUE
+///     or _LIST. Leaving by entering the dungeon is silent.
+void SocialHandler::playLfgUpdateSound(LfgFlagsSeen& last, uint8_t updateType, bool joined,
+                                       bool queued, bool joinCounts) {
+    const LfgFlagsSeen before = last;
+    last.joined = joined;
+    last.queued = queued;
+    if (joined == before.joined && queued == before.queued) return;
+    const bool leftType = updateType == kLfgRemovedFromQueue || updateType == kLfgGroupMemberOffline;
+    if (joined && !before.joined && joinCounts) {
+        owner_.playUiSoundEntry(kSoundPvpEnterQueue);
+        return;
+    }
+    const bool lostJoin = !joined && before.joined;
+    const bool lostQueue = !queued && before.queued;
+    if ((lostJoin || lostQueue) && leftType) owner_.playUiSoundEntry(kSoundLfgDenied);
 }
 
 /// The dungeons the update is about. The first is the one the queue window
 /// names; the comment after them is the group's listing text, which this
 /// client does not offer a way to set.
-void SocialHandler::readLfgDungeonList(network::Packet& packet) {
-    if (!packet.hasRemaining(1)) return;
+uint8_t SocialHandler::readLfgDungeonList(network::Packet& packet) {
+    if (!packet.hasRemaining(1)) return 0;
     const uint8_t count = packet.readUInt8();
     for (uint8_t i = 0; i < count && packet.hasRemaining(4); ++i) {
         const uint32_t dungeonEntry = packet.readUInt32();
         if (i == 0) lfgDungeonId_ = dungeonEntry & 0x00FFFFFFu;
     }
+    return count;
 }
 
 /// The state the packet describes, and a word about it if it moved.
@@ -4405,14 +4541,19 @@ void SocialHandler::handleArenaTeamCommandResult(network::Packet& packet) {
     if (!playerName.empty())
         about = about.empty() ? playerName : about + " / " + playerName;
 
+    // Wow.exe (0x6ccb20) raises ERR_ARENA_TEAM_CREATE_S for a create that
+    // worked and ERR_INVITED_TO_ARENA_TEAM for error 4 from any command; its
+    // message table gives both LEVELUP.
     if (error == 0) {
         owner_.addSystemChatMessage(std::string(cmdName) + " succeeded" +
                                     (about.empty() ? "." : ": " + about));
+        if (command == 0x00) owner_.playUiMessageSound("ERR_ARENA_TEAM_CREATE_S");
         return;
     }
     owner_.addSystemChatMessage(std::string(cmdName) + " failed" +
                                 (about.empty() ? "" : " (" + about + ")") +
                                 ": " + arenaTeamErrorString(error));
+    if (error == 4) owner_.playUiMessageSound("ERR_INVITED_TO_ARENA_TEAM");
 }
 
 void SocialHandler::handleArenaTeamQueryResponse(network::Packet& packet) {

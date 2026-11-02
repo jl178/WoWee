@@ -100,6 +100,8 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
             threatLists_.erase(it);
         }
         playerTopThreatOn_.erase(unitGuid);
+        playerOverTankOn_.erase(unitGuid);
+        threatVictims_.erase(unitGuid);
         fireSituation(unitGuid, victims);
     };
     table[Opcode::SMSG_THREAT_REMOVE] = [this, fireSituation](network::Packet& packet) {
@@ -115,7 +117,10 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
                 list.end());
             if (list.empty()) threatLists_.erase(it);
         }
-        if (victimGuid == owner_.getPlayerGuid()) playerTopThreatOn_.erase(unitGuid);
+        if (victimGuid == owner_.getPlayerGuid()) {
+            playerTopThreatOn_.erase(unitGuid);
+            playerOverTankOn_.erase(unitGuid);
+        }
         fireSituation(unitGuid, {victimGuid});
     };
     table[Opcode::SMSG_CANCEL_COMBAT] = [this](network::Packet& /*packet*/) {
@@ -227,7 +232,9 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
             uint64_t unitGuid = packet.readPackedGuid();
             if (hasVictimGuid) {
                 if (!packet.hasRemaining(1)) return;
-                (void)packet.readPackedGuid();  // the new highest-threat target
+                // The new highest-threat target, which is the mob's victim:
+                // AzerothCore sends this when the victim changes.
+                threatVictims_[unitGuid] = packet.readPackedGuid();
             }
             if (!packet.hasRemaining(4)) return;
             uint32_t cnt = packet.readUInt32();
@@ -250,27 +257,48 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
             // silent by design; in the real client the warning noise is the
             // client's, which is why nothing in this tree ever made it.
             //
-            // The sound marks the moment the player becomes the one being
-            // fought, not every update while they are: the list arrives on
-            // every threat change and a warning per packet would be a siren.
-            const bool topNow = !list.empty() &&
-                                list.front().victimGuid == owner_.getPlayerGuid();
-            const bool topBefore = playerTopThreatOn_.count(unitGuid) != 0;
-            if (topNow != topBefore) {
-                if (topNow) playerTopThreatOn_.insert(unitGuid);
-                else        playerTopThreatOn_.erase(unitGuid);
-                if (topNow && threatWarningWanted() &&
-                    addons::storedCVarValue("threatPlaySounds", "0") != "0") {
-                    // Aggro_Pulled_Aggro (SoundEntries 15263), which Wow.exe
-                    // plays by id from its threat update (0x737620) under
-                    // threatPlaySounds; Error.wav played here was no row's.
-                    if (auto* ac = owner_.services().audioCoordinator) {
-                        if (auto* sfx = ac->getUiSoundManager()) {
-                            if (const auto* data = ac->getSoundData())
-                                sfx->playEntry(data->sound(15263));
-                        }
-                    }
-                }
+            // The sounds mark moments, not every update while they hold: the
+            // list arrives on every threat change and a sound per packet would
+            // be a siren. Both are Wow.exe's, by id, under threatPlaySounds.
+            //
+            // The tank is the mob's victim - the target SMSG_HIGHEST_THREAT_UPDATE
+            // names, then the mob's own target field, then the head of the
+            // list. Not simply the head of the list: a mob keeps its victim
+            // until someone passes 110% (130% at range) of the victim's
+            // threat, and the warning is for the stretch in between.
+            const uint64_t me = owner_.getPlayerGuid();
+            uint64_t tank = 0;
+            if (auto vIt = threatVictims_.find(unitGuid); vIt != threatVictims_.end()) tank = vIt->second;
+            if (tank == 0) tank = unitTargetGuid(owner_.getEntityManager().getEntity(unitGuid));
+            if (tank == 0 && !list.empty()) tank = list.front().victimGuid;
+            uint32_t myThreat = 0, tankThreat = 0;
+            bool onList = false;
+            for (const ThreatEntry& e : list) {
+                if (e.victimGuid == me) { myThreat = e.threat; onList = true; }
+                if (e.victimGuid == tank) tankThreat = e.threat;
+            }
+            const bool soundsWanted = threatWarningWanted() &&
+                                      addons::storedCVarValue("threatPlaySounds", "0") != "0";
+
+            // Aggro_Pulled_Aggro (15263): the player becomes the tank (Wow.exe's
+            // threat update, 0x737620). Error.wav played here was no row's.
+            const bool tankNow = onList && tank == me;
+            const bool tankBefore = playerTopThreatOn_.count(unitGuid) != 0;
+            if (tankNow != tankBefore) {
+                if (tankNow) playerTopThreatOn_.insert(unitGuid);
+                else         playerTopThreatOn_.erase(unitGuid);
+                if (tankNow && soundsWanted) owner_.playUiSoundEntry(15263);
+            }
+
+            // Aggro_Enter_Warning_State (15262): the player, not tanking,
+            // reaches 100% of the tank's threat from below (Wow.exe's threat
+            // entry update, 0x71c3b0, on its status going from 1 to 2).
+            const bool overNow = onList && !tankNow && tankThreat > 0 && myThreat >= tankThreat;
+            const bool overBefore = playerOverTankOn_.count(unitGuid) != 0;
+            if (overNow != overBefore) {
+                if (overNow) playerOverTankOn_.insert(unitGuid);
+                else         playerOverTankOn_.erase(unitGuid);
+                if (overNow && soundsWanted) owner_.playUiSoundEntry(15262);
             }
 
             threatLists_[unitGuid] = std::move(list);
