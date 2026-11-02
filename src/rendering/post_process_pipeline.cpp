@@ -187,6 +187,7 @@ bool PostProcessPipeline::executePostProcessing(VkCommandBuffer cmd, uint32_t im
     camera_ = camera;
     lastDeltaTime_ = deltaTime;
     bool inlineMode = false;
+    outputPassLabel_ = "post-process";
 
     if (fsr2_.enabled && fsr2_.sceneFramebuffer) {
         // End the off-screen scene render pass
@@ -196,6 +197,7 @@ bool PostProcessPipeline::executePostProcessing(VkCommandBuffer cmd, uint32_t im
         if (fsr2_.useAmdBackend) {
             // Compute passes: motion vectors -> temporal accumulation
             dispatchMotionVectors();
+            vkCtx_->gpuMark(currentCmd_, "fsr2 motion vectors");
             if (fsr2_.amdFsr3FramegenEnabled && fsr2_.amdFsr3FramegenRuntimeReady) {
                 dispatchAmdFsr3Framegen();
                 if (!fsr2_.amdFsr3FramegenRuntimeActive) {
@@ -204,6 +206,7 @@ bool PostProcessPipeline::executePostProcessing(VkCommandBuffer cmd, uint32_t im
             } else {
                 dispatchAmdFsr2();
             }
+            vkCtx_->gpuMark(currentCmd_, "fsr2 upscale");
 
             // Transition post-FSR input for sharpen pass.
             if (fsr2_.amdFsr3FramegenRuntimeActive && fsr2_.framegenOutput.image) {
@@ -258,6 +261,7 @@ bool PostProcessPipeline::executePostProcessing(VkCommandBuffer cmd, uint32_t im
             vkCmdSetScissor(currentCmd_, 0, 1, &sharpenSc);
             renderFSR2Sharpen();
             vkCmdEndRenderPass(currentCmd_);
+            vkCtx_->gpuMark(currentCmd_, "fsr2 sharpen");
             // The pass leaves it in PRESENT_SRC; FXAA samples it as read-only.
             transitionImageLayout(currentCmd_, fxaa_.sceneColor.image,
                 VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -296,9 +300,11 @@ bool PostProcessPipeline::executePostProcessing(VkCommandBuffer cmd, uint32_t im
         if (fxaaAfterSharpen) {
             // Over the sharpened image RCAS just wrote.
             renderFXAAPass();
+            outputPassLabel_ = "fxaa";
         } else {
             // Draw RCAS sharpening from accumulated history buffer
             renderFSR2Sharpen();
+            outputPassLabel_ = "fsr2 sharpen";
         }
 
         // Maintain frame bookkeeping
@@ -350,6 +356,7 @@ bool PostProcessPipeline::executePostProcessing(VkCommandBuffer cmd, uint32_t im
 
         // Draw FXAA pass
         renderFXAAPass();
+        outputPassLabel_ = "fxaa";
 
     } else if (fsr_.enabled && fsr_.sceneFramebuffer) {
         inlineMode = true;
@@ -392,6 +399,7 @@ bool PostProcessPipeline::executePostProcessing(VkCommandBuffer cmd, uint32_t im
         vkCmdSetScissor(currentCmd_, 0, 1, &fsrSc);
 
         renderFSRUpscale();
+        outputPassLabel_ = "fsr1 upscale";
     }
 
     currentCmd_ = VK_NULL_HANDLE;

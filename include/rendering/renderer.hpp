@@ -645,6 +645,12 @@ private:
     VkExtent2D sceneRenderExtent() const;
     void recordRtLighting(VkImage sceneDepth, VkExtent2D sceneExtent, bool depthIsMsaa);
     bool rtRecordedThisFrame_ = false;
+    /// GPU mark for the pass that just closed over the world: the scene pass,
+    /// or the water continuation drawn after the refraction copy. Called
+    /// right after vkCmdEndRenderPass, which is the only place a mark can go:
+    /// the scene pass is begun for secondary buffers.
+    void markWorldPassClosed();
+    bool waterPassOpen_ = false;
     float volumetricFogDensity_ = 1.0f;
     /// Whether this frame builds the volume, decided where the per-frame block
     /// is written so the block's switch and the dispatch cannot disagree.

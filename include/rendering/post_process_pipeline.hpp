@@ -81,6 +81,9 @@ public:
     /// render pass was started (affects ImGui recording mode).
     bool executePostProcessing(VkCommandBuffer cmd, uint32_t imageIndex,
                                Camera* camera, float deltaTime);
+    /// What the inline pass executePostProcessing left open draws, for the
+    /// GPU mark the caller writes once it has closed that pass. A literal.
+    [[nodiscard]] const char* outputPassLabel() const { return outputPassLabel_; }
 
     // --- MSAA interop (called from Renderer::applyMsaaChange) ---
 
@@ -164,6 +167,7 @@ private:
     VkCommandBuffer currentCmd_ = VK_NULL_HANDLE;
     Camera* camera_ = nullptr;
     float lastDeltaTime_ = 0.0f;
+    const char* outputPassLabel_ = "post-process";
 
     // Brightness
     float brightness_ = 1.0f;

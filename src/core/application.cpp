@@ -5871,7 +5871,11 @@ void Application::reportStageTimes() {
                 (void)name;
                 if (ms < 0.02) ++collapsed;
             }
-            if (collapsed >= 2 && total > 1.0) {
+            // Three, not two: the passes between the scene's marks are real
+            // and some are small - the culls, a sun shaft blur, a refraction
+            // copy - and two of those under 20us is no sign of anything. A
+            // collapsed scene pass empties five or more.
+            if (collapsed >= 3 && total > 1.0) {
                 std::ostringstream note;
                 note << "    (" << collapsed << " of those read under 20us: this driver "
                         "resolves a timestamp to its render pass, so the first mark in a "

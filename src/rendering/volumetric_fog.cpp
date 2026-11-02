@@ -452,6 +452,8 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
     vkCmdDispatch(cmd, (size_.x + kInjectGroup - 1) / kInjectGroup,
                   (size_.y + kInjectGroup - 1) / kInjectGroup,
                   (size_.z + kInjectGroup - 1) / kInjectGroup);
+    // The renderer's mark after record() closes the integrate pass.
+    ctx_->gpuMark(cmd, "volumetric fog inject");
 
     VkMemoryBarrier2 cells{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
     cells.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;

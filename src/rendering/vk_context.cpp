@@ -7,6 +7,7 @@
 #include <fstream>
 #include "rendering/vk_utils.hpp"
 #include "core/logger.hpp"
+#include "core/env_flag.hpp"
 #include "pipeline/blp_loader.hpp"
 #include <VkBootstrap.h>
 #include <SDL3/SDL_vulkan.h>
@@ -1425,6 +1426,16 @@ bool VkContext::createCommandPools() {
 }
 
 void VkContext::createGpuQueryPools() {
+    // Only when a profile is asked for. A bottom-of-pipe timestamp waits for
+    // everything before it to drain, so each mark stops the pass after it
+    // from overlapping the pass before - a small cost, but one a normal
+    // session pays for a breakdown nobody reads. Without the pool every mark
+    // is a checkpoint alone.
+    if (!core::envFlagEnabled("WOWEE_FRAME_PROFILE", false)) {
+        gpuTimingSupported_ = false;
+        return;
+    }
+
     // A period of zero means the device does not timestamp; a queue family can
     // report zero valid bits even on a device that does, which MoltenVK and
     // some mobile drivers do. Both have to hold.

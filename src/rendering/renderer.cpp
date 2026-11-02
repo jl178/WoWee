@@ -922,6 +922,7 @@ bool Renderer::initialize(core::Window* win) {
     // scene pass. A multisampled scene in an off-screen target never leaves
     // it early, so the pass records here instead, as the upscaler takes over.
     postProcessPipeline_->setSceneClosedHook([this](VkCommandBuffer) {
+        markWorldPassClosed();
         if (rtRecordedThisFrame_ || !postProcessPipeline_) return;
         recordRtLighting(postProcessPipeline_->getSceneDepthImage(),
                          postProcessPipeline_->getSceneRenderExtent(),
@@ -1375,6 +1376,7 @@ void Renderer::beginFrame() {
     if (rtLighting_ && rtLighting_->prepare(sceneRenderExtent())) writeRtLightingBindings();
 
     rtRecordedThisFrame_ = false;
+    waterPassOpen_ = false;
     section("beginFrame/uploads+swapchain");
 
     // Acquire swapchain image and begin command buffer
@@ -1501,8 +1503,9 @@ void Renderer::endFrame() {
     // it swapped the scene pass for an INLINE one no longer matters to the
     // caller: the UI is drawn in the overlay pass, which this function opens
     // itself once whichever pass is current has been closed.
+    bool postProcessed = false;
     if (postProcessPipeline_) {
-        postProcessPipeline_->executePostProcessing(
+        postProcessed = postProcessPipeline_->executePostProcessing(
             currentCmd, currentImageIndex, camera.get(), lastDeltaTime_);
     }
 
@@ -1515,7 +1518,15 @@ void Renderer::endFrame() {
     // After the end, not before: when nothing post-processed, the pass still
     // open is the scene pass, begun for secondary buffers, and a checkpoint or
     // timestamp recorded inline into it is invalid.
-    if (postProcessPipeline_ && vkCtx) vkCtx->gpuMark(currentCmd, "post-process");
+    //
+    // And named for what that pass was. With no post-processing on, it is the
+    // scene or the water after it, and labelling it "post-process" put the
+    // whole world under a pass that had drawn nothing.
+    if (postProcessed) {
+        vkCtx->gpuMark(currentCmd, postProcessPipeline_->outputPassLabel());
+    } else {
+        markWorldPassClosed();
+    }
 
     // Only when water could not be moved out of the scene pass (MSAA). Otherwise
     // renderWorld already took the copy at the one point in the frame where the
@@ -1531,6 +1542,7 @@ void Renderer::endFrame() {
             vkCtx->getSwapchainExtent(),
             vkCtx->isDepthCopySourceMsaa(),
             vkCtx->getCurrentFrame());
+        vkCtx->gpuMark(currentCmd, "water refraction copy");
     }
 
     // The picture is finished and out of every pass that drew it: the one
@@ -3678,6 +3690,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
     // brightness applied to the water compounded through the loop and pumped.
     if (waterDrawsInContinuePass() && camera) {
         vkCmdEndRenderPass(currentCmd);
+        markWorldPassClosed();
 
         VkImage sceneColor = VK_NULL_HANDLE;
         VkImage sceneDepth = VK_NULL_HANDLE;
@@ -3697,10 +3710,15 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         // lighting reads its depth here, for the surfaces of the next frame.
         recordRtLighting(sceneDepth, sceneExtent, depthIsMsaa);
 
-        if (sceneColor != VK_NULL_HANDLE && waterRenderer->isRefractionEnabled()) {
+        // Only with water loaded to refract it, as the MSAA path in endFrame
+        // already asks: the copy is the whole colour and depth of the frame,
+        // and with no surface to sample it nothing reads it.
+        if (sceneColor != VK_NULL_HANDLE && waterRenderer->isRefractionEnabled() &&
+            waterRenderer->hasSurfaces()) {
             waterRenderer->captureSceneHistory(currentCmd, sceneColor, sceneDepth,
                                                sceneExtent, depthIsMsaa,
                                                vkCtx->getCurrentFrame());
+            vkCtx->gpuMark(currentCmd, "water refraction copy");
         }
 
         // Without MSAA the water continues into the scene's own framebuffer. With
@@ -3720,6 +3738,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         }
         contRp.renderArea.extent = waterExtent;
         vkCmdBeginRenderPass(currentCmd, &contRp, VK_SUBPASS_CONTENTS_INLINE);
+        waterPassOpen_ = true;
 
         VkViewport vp{};
         vp.width = static_cast<float>(waterExtent.width);
@@ -4747,6 +4766,7 @@ void Renderer::renderReflectionPass() {
     }
 
     waterRenderer->endReflectionPass(currentCmd);
+    vkCtx->gpuMark(currentCmd, "water reflection");
 }
 
 void Renderer::renderShadowPass() {
@@ -5067,7 +5087,7 @@ void Renderer::renderVolumetricFog() {
     in.density = fogExtinction_;
     in.layerBase = fogLayerBase_;
     volumetricFog_->record(currentCmd, frame, perFrameDescSets[frame], in);
-    if (vkCtx) vkCtx->gpuMark(currentCmd, "volumetric fog");
+    if (vkCtx) vkCtx->gpuMark(currentCmd, "volumetric fog integrate");
 
     // What it was built from, every few seconds, for the report that says the
     // fog is too thick or missing: INFO, so it costs nothing unless asked for.
@@ -5129,9 +5149,20 @@ void Renderer::recordSunShafts() {
     }
     // Called every frame, strength zero included, so the composite knows
     // there is nothing of this frame's to add.
-    sunShafts_->record(currentCmd, vkCtx->getCurrentFrame(),
-                       currentImageIndex < images.size() ? images[currentImageIndex] : VK_NULL_HANDLE,
-                       vkCtx->getSwapchainExtent(), in);
+    if (sunShafts_->record(currentCmd, vkCtx->getCurrentFrame(),
+                           currentImageIndex < images.size() ? images[currentImageIndex] : VK_NULL_HANDLE,
+                           vkCtx->getSwapchainExtent(), in)) {
+        vkCtx->gpuMark(currentCmd, "sun shafts");
+    }
+}
+
+void Renderer::markWorldPassClosed() {
+    if (!vkCtx || currentCmd == VK_NULL_HANDLE) return;
+    // The scene pass holds terrain, sky, buildings, characters and doodads
+    // together; WOWEE_PASS_ABLATION splits it. The water pass after the
+    // refraction copy holds the water, its spray and the minimap.
+    vkCtx->gpuMark(currentCmd, waterPassOpen_ ? "water" : "scene pass");
+    waterPassOpen_ = false;
 }
 
 // Build the per-frame render graph for off-screen pre-passes.
@@ -5178,7 +5209,10 @@ void Renderer::buildFrameGraph(game::GameHandler* gameHandler) {
 
     // Shadow pre-pass → outputs shadow_depth
     renderGraph_->addPass("shadow_pass", {}, {shadowDepth},
-        [this](VkCommandBuffer) {
+        [this](VkCommandBuffer cmd) {
+            // Closes the span from the frame's start: the M2 and grass cull
+            // dispatches and the composites above, which run first.
+            vkCtx->gpuMark(cmd, "culling + composites");
             // Not gated on shadowsEnabled: renderShadowPass is what clears the
             // map and leaves it in the layout its readers expect, and it
             // already skips the casters on its own when shadows are off.

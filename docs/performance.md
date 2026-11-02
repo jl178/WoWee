@@ -24,7 +24,14 @@ Every ten seconds the log carries one block:
 - `beginFrame waits: frame fence X ms, swapchain acquire Y ms`: the two
   places a frame waits on something outside the CPU
 - `GPU, last frame`: the GPU's own pass timings, with the caveat the line
-  prints when a driver resolves timestamps per render pass
+  prints when a driver resolves timestamps per render pass. Timestamps are
+  written only under `WOWEE_FRAME_PROFILE`. In order: `culling +
+  composites`, `shadows`, `volumetric fog inject` / `integrate`, `water
+  reflection`, `scene pass` (terrain, sky, WMO, characters, doodads - split
+  it with `WOWEE_PASS_ABLATION=1`), `rt_lighting`, `water refraction copy`,
+  `water`, the post-process sub-passes that are on (`fsr2 motion vectors`,
+  `fsr2 upscale`, `fsr2 sharpen`, `fxaa`, `fsr1 upscale`), `sun shafts`
+  and `interface` (which includes the sun shaft composite)
 - `renderWorld: prepare ... workers terrain T wmo W m2 M`: the parallel
   command recording, whose wall time is the slowest worker
 - `m2 record: cull C, sort S, draws D over V visible of N instances`

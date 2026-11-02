@@ -114,6 +114,62 @@ float sunVisibility(vec3 p) {
     return mix(lit, 1.0, smoothstep(0.8, 1.0, max(edge.x, edge.y)));
 }
 
+// The local lights that reach any cell of this workgroup, in their original
+// order. A group is a 4x4x4 block of cells, a small chunk of the frustum, and
+// a torch's reach is a dozen yards: of the sixty-odd lights a city gathers, a
+// block sees a handful. Testing every light against every cell was most of
+// the pass. A light is dropped only where it is certain to miss every point
+// in the block, and the cells walk what is left in the same order, so the sum
+// each cell adds up is the one it added before, term for term.
+shared uint sLightCount;
+shared uint sLightHit[64];
+shared uint sLightList[64];
+
+void gatherGroupLights() {
+    uint lane = gl_LocalInvocationIndex;   // 64 invocations, one light each
+    uint count = uint(clamp(localLightMeta.x, 0, 64));
+
+    // The block's sample points lie inside the cells it covers, whose corners
+    // span these uv and depth ranges. Rays one yard deep through a rectangle
+    // of uv lie on one plane, so the block is a frustum slab: the convex hull
+    // of its eight corners, which a sphere around those corners contains.
+    vec3 lo = vec3(gl_WorkGroupID * gl_WorkGroupSize);
+    vec3 hi = lo + vec3(gl_WorkGroupSize);
+    vec2 uv0 = lo.xy / vec2(vol.dims.xy);
+    vec2 uv1 = hi.xy / vec2(vol.dims.xy);
+    float d0 = sliceDepth(lo.z);
+    float d1 = sliceDepth(hi.z);
+    vec3 corners[8];
+    vec3 centre = vec3(0.0);
+    for (int i = 0; i < 8; ++i) {
+        vec2 uv = vec2((i & 1) != 0 ? uv1.x : uv0.x, (i & 2) != 0 ? uv1.y : uv0.y);
+        corners[i] = vol.rayOrigin.xyz + rayAt(uv) * ((i & 4) != 0 ? d1 : d0);
+        centre += corners[i];
+    }
+    centre *= 0.125;
+    float reach = 0.0;
+    for (int i = 0; i < 8; ++i) reach = max(reach, distance(corners[i], centre));
+
+    uint hit = 0u;
+    if (lane < count) {
+        float radius = localLightPosRadius[lane].w;
+        // A margin for the rounding in placing the corners and the cells,
+        // which only ever lets an extra light through.
+        float limit = radius + reach + 0.05 + 0.001 * (radius + reach);
+        if (radius > 0.0 && distance(localLightPosRadius[lane].xyz, centre) < limit) hit = 1u;
+    }
+    sLightHit[lane] = hit;
+    barrier();
+    if (lane == 0u) {
+        uint n = 0u;
+        for (uint i = 0u; i < count; ++i) {
+            if (sLightHit[i] != 0u) sLightList[n++] = i;
+        }
+        sLightCount = n;
+    }
+    barrier();
+}
+
 // Henyey-Greenstein, scaled so scattering evenly in every direction is 1.
 float phaseHG(float cosTheta, float g) {
     float g2 = g * g;
@@ -121,6 +177,10 @@ float phaseHG(float cosTheta, float g) {
 }
 
 void main() {
+    // Every invocation takes part, those past the edge of the volume too:
+    // the gather has barriers in it.
+    gatherGroupLights();
+
     ivec3 cell = ivec3(gl_GlobalInvocationID);
     if (any(greaterThanEqual(cell, vol.dims.xyz))) return;
 
@@ -157,7 +217,8 @@ void main() {
     // Torches, braziers and lava: the same set, falloff and intensity the
     // surfaces are lit by, so the halo is where the pool of light is.
     vec3 local = vec3(0.0);
-    for (int i = 0; i < min(localLightMeta.x, 64); ++i) {
+    for (uint l = 0u; l < sLightCount; ++l) {
+        uint i = sLightList[l];
         vec3 toLight = localLightPosRadius[i].xyz - p;
         float radius = localLightPosRadius[i].w;
         float distSq = dot(toLight, toLight);
