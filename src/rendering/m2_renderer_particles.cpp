@@ -469,6 +469,12 @@ void M2Renderer::updateParticles(M2Instance& inst, float dt, ParticleWorker* wor
 // ---------------------------------------------------------------------------
 // Ribbon emitter simulation
 // ---------------------------------------------------------------------------
+void M2Renderer::resetRibbons(M2Instance& inst) {
+    for (auto& edges : inst.ribbonEdges) edges.clear();
+    for (float& accum : inst.ribbonEdgeAccumulators) accum = 0.0f;
+    for (auto& track : inst.ribbonTracks) track = M2Instance::RibbonTrack{};
+}
+
 void M2Renderer::updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt) {
     const auto& emitters = gpu.ribbonEmitters;
     if (emitters.empty()) return;
@@ -480,11 +486,26 @@ void M2Renderer::updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt
     if (inst.ribbonEdgeAccumulators.size() != emitters.size()) {
         inst.ribbonEdgeAccumulators.resize(emitters.size(), 0.0f);
     }
+    if (inst.ribbonTracks.size() != emitters.size()) {
+        inst.ribbonTracks.resize(emitters.size());
+    }
+
+    // How far a spine may move in one step and still be the same trail. The
+    // stock emitter joins whatever its carrier does, and never has to: what it
+    // is attached to glides. Here a unit can be snapped - a large position
+    // correction, a re-attached kit, a carrier that teleports - and the step
+    // after it would lay a straight edge from the old spot to the new one,
+    // a line as long as the jump. Past this it starts a new strip instead.
+    // The fastest spell missiles fly 400 yd/s (7000 is "instant"), Charge 42.
+    constexpr float kRibbonSnapMinDist = 12.0f;
+    constexpr float kRibbonSnapMaxSpeed = 500.0f;
+    const float snapDist = std::max(kRibbonSnapMinDist, kRibbonSnapMaxSpeed * dt);
 
     for (size_t ri = 0; ri < emitters.size(); ri++) {
         const auto& em = emitters[ri];
         auto& edges    = inst.ribbonEdges[ri];
         auto& accum    = inst.ribbonEdgeAccumulators[ri];
+        auto& state    = inst.ribbonTracks[ri];
 
         // Determine bone world position for spine
         glm::vec3 spineWorld = inst.position;
@@ -537,14 +558,36 @@ void M2Renderer::updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt
         while (!edges.empty() && edges.front().age >= em.edgeLifetime) {
             edges.pop_front();
         }
+        // The oldest edge left may have been joined to one that just expired.
+        if (!edges.empty()) edges.front().breakBefore = false;
 
         // Emit new edges based on edgesPerSecond
         if (visibility > 0.5f && !inst.emissionStopped) {
+            // The edges born during this step lie along the spine's path
+            // through it, each as old as the time since it was due - the
+            // stock CRibbonEmitter's interpolation between its previous and
+            // current frames. Laid all on the spine's new spot instead, a
+            // carrier moving a yard or more a frame (a charge, a missile)
+            // left its trail in clumps with straight runs between them.
+            bool joined = state.hasLastSpine;
+            if (joined) {
+                const glm::vec3 moved = spineWorld - state.lastSpine;
+                if (glm::dot(moved, moved) > snapDist * snapDist) joined = false;
+            }
+            if (!joined && !edges.empty()) state.breakPending = true;
+            const glm::vec3 from = joined ? state.lastSpine : spineWorld;
+
+            const float accumBefore = accum;
             accum += em.edgesPerSecond * dt;
+            int born = 0;
             while (accum >= 1.0f) {
                 accum -= 1.0f;
+                // When in the step this edge was due, from its start.
+                const float dueAt = (static_cast<float>(born + 1) - accumBefore) / em.edgesPerSecond;
+                ++born;
+                const float t = dt > 0.0f ? std::clamp(dueAt / dt, 0.0f, 1.0f) : 1.0f;
                 M2Instance::RibbonEdge e;
-                e.worldPos    = spineWorld;
+                e.worldPos    = glm::mix(from, spineWorld, t);
                 e.color       = color;
                 e.alpha       = alpha;
                 // Scaled into world units here, where the instance is at hand.
@@ -554,7 +597,9 @@ void M2Renderer::updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt
                 // length and the wrong width.
                 e.heightAbove = heightAbove * inst.scale;
                 e.heightBelow = heightBelow * inst.scale;
-                e.age         = 0.0f;
+                e.age         = std::max(dt - dueAt, 0.0f);
+                e.breakBefore = state.breakPending && !edges.empty();
+                state.breakPending = false;
                 edges.push_back(e);
 
                 // Diagnostic: log first ribbon edge per spell effect instance+emitter
@@ -567,10 +612,22 @@ void M2Renderer::updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt
                 }
 
                 // Cap trail length
-                if (edges.size() > 128) edges.pop_front();
+                if (edges.size() > 128) {
+                    edges.pop_front();
+                    edges.front().breakBefore = false;
+                }
             }
+            state.lastSpine = spineWorld;
+            state.hasLastSpine = true;
+            state.live = true;
         } else {
             accum = 0.0f;
+            // Hidden or stopped: the stock emitter forgets its previous frame
+            // (CRibbonEmitter clears it with visibility), so a ribbon shown
+            // again starts where it then is rather than joining the old spot.
+            state.hasLastSpine = false;
+            state.live = false;
+            if (!edges.empty()) state.breakPending = true;
         }
     }
 }
@@ -623,7 +680,7 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
         for (size_t ri = 0; ri < gpu.ribbonEmitters.size(); ri++) {
             if (ri >= inst.ribbonEdges.size()) continue;
             const auto& edges = inst.ribbonEdges[ri];
-            if (edges.size() < 2) continue;
+            if (edges.empty()) continue;
             if (!instOnScreen) {
                 const glm::vec3& head = edges.back().worldPos;
                 const glm::vec3& tail = edges.front().worldPos;
@@ -657,67 +714,103 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
                 continue;
             }
 
-            uint32_t firstVert = static_cast<uint32_t>(written);
+            // The live head: an emitting ribbon runs on to the emitter itself,
+            // as the stock one does with its current edge, rather than ending
+            // at the last edge it laid down.
+            const M2Instance::RibbonTrack* state =
+                ri < inst.ribbonTracks.size() ? &inst.ribbonTracks[ri] : nullptr;
+            const bool withHead = state && state->live && !state->breakPending &&
+                glm::distance(state->lastSpine, edges.back().worldPos) > 1e-3f;
 
-            // Emit triangle strip: 2 verts per edge (top + bottom)
-            for (size_t ei = 0; ei < edges.size(); ei++) {
-                if (written + 2 > MAX_RIBBON_VERTS) break;
-                const auto& e = edges[ei];
-                float t = (em.edgeLifetime > 0.0f)
-                          ? 1.0f - (e.age / em.edgeLifetime) : 1.0f;
-                float a = e.alpha * t;
-                float u = static_cast<float>(ei) / static_cast<float>(edges.size() - 1);
+            // One triangle strip per unbroken run of edges: 2 verts per edge
+            // (top + bottom). A run ends where the trail was broken - a
+            // carrier that snapped, a ribbon hidden and shown again - so the
+            // two sides of the gap are never joined by a stretched quad.
+            size_t runStart = 0;
+            while (runStart < edges.size()) {
+                size_t runEnd = runStart + 1;
+                while (runEnd < edges.size() && !edges[runEnd].breakBefore) ++runEnd;
+                auto& strip = ribbonStrip_;
+                strip.assign(edges.begin() + static_cast<std::ptrdiff_t>(runStart),
+                             edges.begin() + static_cast<std::ptrdiff_t>(runEnd));
+                if (withHead && runEnd == edges.size()) {
+                    M2Instance::RibbonEdge head = edges.back();
+                    head.worldPos = state->lastSpine;
+                    head.age = 0.0f;
+                    strip.push_back(head);
+                }
+                runStart = runEnd;
+                if (strip.size() < 2) continue;
 
-                // The trail's own direction here, from the edges either side.
-                const glm::vec3& prev = edges[ei > 0 ? ei - 1 : ei].worldPos;
-                const glm::vec3& next = edges[ei + 1 < edges.size() ? ei + 1 : ei].worldPos;
-                glm::vec3 spineDir = next - prev;
-                float spineLen = glm::length(spineDir);
-                // Widen across the trail and across the line of sight. Where
-                // the trail doubles back on itself or points straight at the
-                // eye there is no such direction, and world up is as good an
-                // answer as any.
-                glm::vec3 side = upWorld;
-                if (spineLen > 1e-5f) {
-                    glm::vec3 toEye = camPos - e.worldPos;
-                    glm::vec3 cross = glm::cross(spineDir / spineLen, toEye);
-                    float crossLen = glm::length(cross);
-                    if (crossLen > 1e-5f) side = cross / crossLen;
+                uint32_t firstVert = static_cast<uint32_t>(written);
+                for (size_t ei = 0; ei < strip.size(); ei++) {
+                    if (written + 2 > MAX_RIBBON_VERTS) break;
+                    const auto& e = strip[ei];
+                    // The texture runs along the trail by age, as the stock
+                    // emitter maps it: u = age / lifetime, 0 at the emitter
+                    // and 1 where the edges expire. Spell trails are drawn
+                    // with gradients bright at u = 0 (Charge's GRAD3A), so a
+                    // trail fades out behind its carrier. Spread by edge index
+                    // from the oldest it was reversed and stretched: the far
+                    // end of a long trail - the spot a charge started from -
+                    // burned brightest and the end at the warrior was black.
+                    // The stock vertex colour is the emitter's colour and
+                    // alpha, unfaded; the texture does the fading.
+                    const float u = (em.edgeLifetime > 0.0f)
+                        ? std::clamp(e.age / em.edgeLifetime, 0.0f, 1.0f) : 0.0f;
+                    const float a = e.alpha;
+
+                    // The trail's own direction here, from the edges either side.
+                    const glm::vec3& prev = strip[ei > 0 ? ei - 1 : ei].worldPos;
+                    const glm::vec3& next = strip[ei + 1 < strip.size() ? ei + 1 : ei].worldPos;
+                    glm::vec3 spineDir = next - prev;
+                    float spineLen = glm::length(spineDir);
+                    // Widen across the trail and across the line of sight. Where
+                    // the trail doubles back on itself or points straight at the
+                    // eye there is no such direction, and world up is as good an
+                    // answer as any.
+                    glm::vec3 side = upWorld;
+                    if (spineLen > 1e-5f) {
+                        glm::vec3 toEye = camPos - e.worldPos;
+                        glm::vec3 cross = glm::cross(spineDir / spineLen, toEye);
+                        float crossLen = glm::length(cross);
+                        if (crossLen > 1e-5f) side = cross / crossLen;
+                    }
+
+                    // Top vertex (one side of the spine)
+                    glm::vec3 top = e.worldPos + side * e.heightAbove;
+                    dst[written * 9 + 0] = top.x;
+                    dst[written * 9 + 1] = top.y;
+                    dst[written * 9 + 2] = top.z;
+                    dst[written * 9 + 3] = e.color.r;
+                    dst[written * 9 + 4] = e.color.g;
+                    dst[written * 9 + 5] = e.color.b;
+                    dst[written * 9 + 6] = a;
+                    dst[written * 9 + 7] = u;
+                    dst[written * 9 + 8] = 0.0f; // v = top
+                    written++;
+
+                    // Bottom vertex (the other side)
+                    glm::vec3 bot = e.worldPos - side * e.heightBelow;
+                    dst[written * 9 + 0] = bot.x;
+                    dst[written * 9 + 1] = bot.y;
+                    dst[written * 9 + 2] = bot.z;
+                    dst[written * 9 + 3] = e.color.r;
+                    dst[written * 9 + 4] = e.color.g;
+                    dst[written * 9 + 5] = e.color.b;
+                    dst[written * 9 + 6] = a;
+                    dst[written * 9 + 7] = u;
+                    dst[written * 9 + 8] = 1.0f; // v = bottom
+                    written++;
                 }
 
-                // Top vertex (one side of the spine)
-                glm::vec3 top = e.worldPos + side * e.heightAbove;
-                dst[written * 9 + 0] = top.x;
-                dst[written * 9 + 1] = top.y;
-                dst[written * 9 + 2] = top.z;
-                dst[written * 9 + 3] = e.color.r;
-                dst[written * 9 + 4] = e.color.g;
-                dst[written * 9 + 5] = e.color.b;
-                dst[written * 9 + 6] = a;
-                dst[written * 9 + 7] = u;
-                dst[written * 9 + 8] = 0.0f; // v = top
-                written++;
-
-                // Bottom vertex (the other side)
-                glm::vec3 bot = e.worldPos - side * e.heightBelow;
-                dst[written * 9 + 0] = bot.x;
-                dst[written * 9 + 1] = bot.y;
-                dst[written * 9 + 2] = bot.z;
-                dst[written * 9 + 3] = e.color.r;
-                dst[written * 9 + 4] = e.color.g;
-                dst[written * 9 + 5] = e.color.b;
-                dst[written * 9 + 6] = a;
-                dst[written * 9 + 7] = u;
-                dst[written * 9 + 8] = 1.0f; // v = bottom
-                written++;
-            }
-
-            uint32_t vertCount = static_cast<uint32_t>(written) - firstVert;
-            if (vertCount >= 4) {
-                draws.push_back({.texSet = texSet, .pipeline = pipe, .firstVertex = firstVert, .vertexCount = vertCount});
-            } else {
-                // Rollback if too few verts
-                written = firstVert;
+                uint32_t vertCount = static_cast<uint32_t>(written) - firstVert;
+                if (vertCount >= 4) {
+                    draws.push_back({.texSet = texSet, .pipeline = pipe, .firstVertex = firstVert, .vertexCount = vertCount});
+                } else {
+                    // Rollback if too few verts
+                    written = firstVert;
+                }
             }
         }
     }

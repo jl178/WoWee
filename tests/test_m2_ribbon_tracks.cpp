@@ -15,6 +15,7 @@
 // skips when there is none.
 #include <catch_amalgamated.hpp>
 
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -116,4 +117,51 @@ TEST_CASE("ribbon track sequences line up with their timestamps",
             }
         }
     }
+}
+
+namespace {
+
+template <typename T>
+void put(std::vector<uint8_t>& buffer, size_t offset, T value) {
+    std::memcpy(buffer.data() + offset, &value, sizeof(T));
+}
+
+}  // namespace
+
+// The emitter array's stride. WotLK ribbon emitters are 0xB0 bytes apiece -
+// Wow.exe strides the array by 0xB0 - and the loader read them at 0xAC, so
+// every emitter after the first came from four bytes further back than the
+// one before: the second's bone was its ribbonId (-1) and it was dropped, the
+// rest read garbage. Synthetic, so it always runs.
+TEST_CASE("ribbon emitters are read at the 0xB0 stride", "[m2][ribbon]") {
+    constexpr size_t kRibbonOffset = 0x200;
+    constexpr size_t kStride = 0xB0;
+    constexpr uint32_t kCount = 3;
+    std::vector<uint8_t> data(kRibbonOffset + kCount * kStride + 0x40, 0);
+    std::memcpy(data.data(), "MD20", 4);
+    put<uint32_t>(data, 0x04, 264);
+    put<uint32_t>(data, 0x120, kCount);
+    put<uint32_t>(data, 0x124, static_cast<uint32_t>(kRibbonOffset));
+
+    struct Expected { uint32_t bone; float edgesPerSecond; float lifetime; };
+    // The last asks for a life under the stock floor of a quarter second.
+    const Expected expected[kCount] = {{3, 30.0f, 0.5f}, {7, 44.0f, 1.65f}, {9, 20.0f, 0.1f}};
+    for (uint32_t i = 0; i < kCount; ++i) {
+        const size_t base = kRibbonOffset + i * kStride;
+        put<int32_t>(data, base + 0x00, -1);
+        put<uint32_t>(data, base + 0x04, expected[i].bone);
+        put<float>(data, base + 0x74, expected[i].edgesPerSecond);
+        put<float>(data, base + 0x78, expected[i].lifetime);
+    }
+
+    const M2Model model = M2Loader::load(data);
+    REQUIRE(model.ribbonEmitters.size() == kCount);
+    for (uint32_t i = 0; i < kCount; ++i) {
+        INFO("emitter " << i);
+        CHECK(model.ribbonEmitters[i].bone == expected[i].bone);
+        CHECK(model.ribbonEmitters[i].edgesPerSecond == expected[i].edgesPerSecond);
+    }
+    CHECK(model.ribbonEmitters[0].edgeLifetime == 0.5f);
+    CHECK(model.ribbonEmitters[1].edgeLifetime == 1.65f);
+    CHECK(model.ribbonEmitters[2].edgeLifetime == 0.25f);
 }

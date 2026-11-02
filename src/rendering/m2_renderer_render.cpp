@@ -849,6 +849,11 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         const bool inRange = distSq <= (keepStepping ? cachedMaxRenderDistSq_
                                                      : particleRangeSq(instance, pmodel));
         uint8_t mode = kWorkStep;
+        // Out of range nothing steps, ribbons included, and an edge left
+        // there would never age out: it stayed drawn where it was laid, and
+        // the trail resumed from it when its carrier came back into range -
+        // a line from wherever that had been. The trail starts over instead.
+        if (!inRange && !instance.ribbonEdges.empty()) resetRibbons(instance);
         if (keepStepping) {
             if (!inRange) continue;
             instance.particlesDormant = false;

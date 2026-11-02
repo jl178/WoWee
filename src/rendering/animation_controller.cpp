@@ -16,7 +16,6 @@
 #include "rendering/water_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/levelup_effect.hpp"
-#include "rendering/charge_effect.hpp"
 #include "rendering/spell_visual_system.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/asset_manager.hpp"
@@ -562,35 +561,6 @@ void AnimationController::triggerLevelUpEffect(const glm::vec3& position) {
     }
 
     levelUpEffect->trigger(position);
-}
-
-void AnimationController::startChargeEffect(const glm::vec3& position, const glm::vec3& direction) {
-    auto* chargeEffect = renderer_->getChargeEffect();
-    if (!chargeEffect) return;
-
-    if (!chargeEffect->isActive()) {
-        auto* m2Renderer = renderer_->getM2Renderer();
-        if (m2Renderer) {
-            auto* assetManager = core::Application::getInstance().getAssetManager();
-            if (assetManager) {
-                chargeEffect->tryLoadM2Models(m2Renderer, assetManager);
-            }
-        }
-    }
-
-    chargeEffect->start(position, direction);
-}
-
-void AnimationController::emitChargeEffect(const glm::vec3& position, const glm::vec3& direction) {
-    if (auto* chargeEffect = renderer_->getChargeEffect()) {
-        chargeEffect->emit(position, direction);
-    }
-}
-
-void AnimationController::stopChargeEffect() {
-    if (auto* chargeEffect = renderer_->getChargeEffect()) {
-        chargeEffect->stop();
-    }
 }
 
 // ── Mount ────────────────────────────────────────────────────────────────────

@@ -38,7 +38,7 @@ Wowee follows a modular architecture with clear separation of concerns:
     ├─ WaterRenderer (refraction, lava, slime)
     ├─ SkySystem (skybox, stars, clouds, lens flare) + Weather
     ├─ LightingManager (Light.dbc volumes)
-    └─ SwimEffects, ChargeEffect, Lightning
+    └─ SwimEffects, Lightning
 ```
 
 ## Core Systems
