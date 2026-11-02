@@ -491,12 +491,12 @@ No scale, offset or fade; they live as long as the item model.
 | A4 | Glow follows the weapon bone | yes | offset only | **Fixed** |
 | A5 | Glow particles | drawn | **never drawn**: CharacterRenderer draws no emitters | **Fixed**: glows are M2Renderer instances driven by the weapon bone |
 | A6 | Enchant field for other players | field 284+2n | not read | **Fixed** (`getOtherPlayerWeaponEnchants`) |
-| A7 | Hand grip, ParticleColor, quivers | yes | no | open (ParticleColor is the particle owner's) |
+| A7 | Hand grip, ParticleColor, quivers | yes | no | ParticleColor **fixed** (particles.md §8); hand grip and quivers open |
 | S1 | Player race scale | tauren 1.35/1.25, gnome 1.15 | 1.0 | **Fixed** (local and remote) |
 | S2 | Mount scale | unit scale × mount CDI scale | 1.0 | **Fixed** |
 | S3 | Rider seat | attachment 0, full transform, rider own size | remote: fixed height; local: offsets, 35% tilt | **Fixed for remote riders**; the local rider (animation_controller) is unchanged |
 | S4 | Rider anim from mount kit | yes | always 91 | open |
-| S5 | Creature particles in general | drawn | CharacterRenderer draws no emitters (fire elementals, wisps) | open: the biggest remaining creature gap |
+| S5 | Creature particles in general | drawn | CharacterRenderer draws no emitters (fire elementals, wisps) | **Fixed**: emitter twins in M2Renderer, with the item models' own (particles.md §8) |
 
 ## 9. In game
 

@@ -486,6 +486,8 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
                 const bool attached = charRenderer->attachWeapon(
                     st.instanceId, kAttachHelm, helmModel, helmModelId, helm.texturePath);
                 if (attached) {
+                    charRenderer->setAttachmentParticleColor(st.instanceId, kAttachHelm,
+                                                             helm.particleColorId);
                     LOG_DEBUG("Attached player helmet: ", helmPath, " tex: ", helm.texturePath);
                 }
             }

@@ -2613,6 +2613,15 @@ void Renderer::update(float deltaTime) {
     }
 
     section("update/m2 join");
+    // The emitters of the models CharacterRenderer draws (creatures, players,
+    // their weapons and armour) and the weapon glows: posed from this frame's
+    // skeletons, now that M2Renderer's update is done with its instances,
+    // then stepped (stock steps every CM2Model's emitters alike).
+    if (characterRenderer && m2Renderer && camera) {
+        characterRenderer->poseModelEmitters();
+        m2Renderer->updatePosedEmitters(deltaTime);
+    }
+    section("update/model emitters");
     // Footsteps: age visual prints, then let authored footfall events add new ones.
     if (footprintRenderer) footprintRenderer->update(deltaTime);
     if (animationController_) animationController_->updateFootsteps(deltaTime);

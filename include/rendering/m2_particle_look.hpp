@@ -5,6 +5,7 @@
 #include <glm/glm.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 
@@ -74,7 +75,65 @@ inline uint32_t packedCount(const pipeline::M2FBlock& fb, const std::vector<V>& 
     return std::min<uint32_t>(fblockCount(fb, values), kCurveKeys);
 }
 
-inline void packCurve(const pipeline::M2ParticleEmitter& em, glm::vec4* out) {
+/// A ParticleColor.dbc row as CM2Model::SetParticleColor hands it to the
+/// emitters (stock 0x4EA9E0 -> 0x825410 -> CParticleEmitter2 0x97A990).
+///
+/// The row's columns are Start[3], Mid[3], End[3]; slot i (column i of each)
+/// goes to every emitter of the model whose colour index (file +0x2A) is
+/// 11 + i. The emitter keeps the three colours (em+0xF4) and sets runtime
+/// flag 0x10, and its colour evaluation (0x9795D0) then reads the colour at
+/// key k of its own colour block from them instead of from the file - the
+/// timing (which keys, how far between) stays the file's. A colour block
+/// with one key ignores the override.
+struct ParticleColorOverride {
+    /// [slot][key]: slot 0..2 is colour index 11..13; key 0 start, 1 mid,
+    /// 2 end. RGB in 0..1, as the loader keeps the file's colours.
+    std::array<std::array<glm::vec3, 3>, 3> colors{};
+};
+inline constexpr uint16_t kParticleColorFirstIndex = 11;
+
+/// A BGRA word of the table as the RGB the curves hold.
+inline glm::vec3 particleColorRgb(uint32_t bgra) {
+    return glm::vec3(static_cast<float>((bgra >> 16) & 0xFFu), static_cast<float>((bgra >> 8) & 0xFFu),
+                     static_cast<float>(bgra & 0xFFu)) / 255.0f;
+}
+
+/// The override a ParticleColor.dbc row gives: its nine BGRA words.
+inline ParticleColorOverride particleColorFromRow(const std::array<uint32_t, 3>& start,
+                                                  const std::array<uint32_t, 3>& mid,
+                                                  const std::array<uint32_t, 3>& end) {
+    ParticleColorOverride o;
+    for (int i = 0; i < 3; ++i) {
+        o.colors[i] = {particleColorRgb(start[i]), particleColorRgb(mid[i]), particleColorRgb(end[i])};
+    }
+    return o;
+}
+
+/// What 0x4EA9E0 sets for a non-zero id the table has no row for:
+/// 0xFF00FF00 (green) for all nine colours. No shipped creature or item
+/// model with emitters on 11-13 meets one (the 570 item displays naming the
+/// missing row 354 have none), but that is the stock answer.
+inline ParticleColorOverride particleColorMissingRow() {
+    return particleColorFromRow({0xFF00FF00u, 0xFF00FF00u, 0xFF00FF00u},
+                                {0xFF00FF00u, 0xFF00FF00u, 0xFF00FF00u},
+                                {0xFF00FF00u, 0xFF00FF00u, 0xFF00FF00u});
+}
+
+/// The override's colours for an emitter, or null when it keeps its own.
+inline const std::array<glm::vec3, 3>* particleColorSlot(const ParticleColorOverride* ov,
+                                                          const pipeline::M2ParticleEmitter& em) {
+    if (!ov) return nullptr;
+    const int slot = static_cast<int>(em.particleColorIndex) - kParticleColorFirstIndex;
+    if (slot < 0 || slot > 2) return nullptr;
+    return &ov->colors[static_cast<size_t>(slot)];
+}
+
+/// `ov` recolours the emitter as ParticleColor.dbc does (see
+/// ParticleColorOverride): key k of the colour block takes the override's
+/// colour k. Stock reads past the three for a block with more keys (one
+/// item emitter has five); those keys take the end colour here.
+inline void packCurve(const pipeline::M2ParticleEmitter& em, glm::vec4* out,
+                      const ParticleColorOverride* ov = nullptr) {
     std::memset(static_cast<void*>(out), 0, sizeof(glm::vec4) * kCurveVec4s);
     const auto& c = em.particleColor;
     const auto& a = em.particleAlpha;
@@ -87,7 +146,11 @@ inline void packCurve(const pipeline::M2ParticleEmitter& em, glm::vec4* out) {
     const auto ts = [](const pipeline::M2FBlock& fb, uint32_t k) {
         return k < fb.timestamps.size() ? fb.timestamps[k] : 0.0f;
     };
-    for (uint32_t k = 0; k < nc; ++k) out[1 + k] = glm::vec4(c.vec3Values[k], ts(c, k));
+    const auto* recolor = nc > 1 ? particleColorSlot(ov, em) : nullptr;
+    for (uint32_t k = 0; k < nc; ++k) {
+        const glm::vec3 rgb = recolor ? (*recolor)[std::min<uint32_t>(k, 2)] : c.vec3Values[k];
+        out[1 + k] = glm::vec4(rgb, ts(c, k));
+    }
     for (uint32_t k = 0; k < na; ++k) out[1 + kCurveKeys + k] = glm::vec4(a.floatValues[k], ts(a, k), 0, 0);
     for (uint32_t k = 0; k < ns; ++k) {
         const glm::vec2 v = scale2 ? s.vec2Values[k] : glm::vec2(s.floatValues[k]);

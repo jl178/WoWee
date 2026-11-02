@@ -639,10 +639,13 @@ void CharacterRenderer::clear() {
     // Destroy bone buffers for all instances
     for (auto& pair : instances) {
         destroyInstanceBones(pair.second);
-        // Weapon glows hosted by M2Renderer are not ours to clear with the map.
+        // Weapon glows and emitter twins hosted by M2Renderer are not ours
+        // to clear with the map.
         for (const auto& wa : pair.second.weaponAttachments)
             for (const auto& fx : wa.effects)
                 if (fx.m2InstanceId != 0 && effectRenderer_) effectRenderer_->removeInstance(fx.m2InstanceId);
+        if (pair.second.emitterInstanceId != 0 && effectRenderer_)
+            effectRenderer_->removeInstance(pair.second.emitterInstanceId);
     }
 
     // See CharacterRenderer::shutdown: ~VkTexture frees nothing on its own.
@@ -1796,6 +1799,20 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
         model.name, model.boundMin, model.boundMax,
         model.vertices.size(), model.particleEmitters.size());
     gpuModel.isSkyBird = classification.isSkyBird;
+    gpuModel.hasEmitters = !model.particleEmitters.empty() || !model.ribbonEmitters.empty();
+    {
+        const auto keyed = [](const pipeline::M2AnimationTrack& t) {
+            for (const auto& seq : t.sequences)
+                if (seq.timestamps.size() > 1) return true;
+            return false;
+        };
+        for (const auto& bone : model.bones) {
+            if (keyed(bone.rotation) || keyed(bone.translation) || keyed(bone.scale)) {
+                gpuModel.bonesMove = true;
+                break;
+            }
+        }
+    }
 
     // Every model this renderer takes on, named once.
     //
@@ -2278,6 +2295,7 @@ void CharacterRenderer::setAnimCullView(const glm::mat4& viewProjection,
 }
 
 void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
+    lastCameraPos_ = cameraPos;
     // Stock eases the unit ambient multiplier as cur += (target - cur) * dt,
     // snapping within 0.01 (0x783429..0x7834DF).
     {
@@ -2342,7 +2360,12 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
 
         // Skip weapon instances for animation - their transforms are set by parent
         // bones. Enchant visuals are the exception: they are pure animated FX.
-        if (inst.hasOverrideModelMatrix && !inst.isEffectModel) continue;
+        // So is an item model that moves or emits (an epic weapon's glow, a
+        // helm's flames): stock animates every attached CM2Model on its own
+        // clock, and its emitters follow its bones and tracks.
+        const bool animatesItself = inst.isAttachedItem && inst.cachedModel &&
+                                    (inst.cachedModel->hasEmitters || inst.cachedModel->bonesMove);
+        if (inst.hasOverrideModelMatrix && !inst.isEffectModel && !animatesItself) continue;
 
         float distSq = glm::distance2(inst.position, cameraPos);
         const bool isSkyBird = inst.cachedModel && inst.cachedModel->isSkyBird;
@@ -2407,7 +2430,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
                                          !soundEvents[seqIdx].empty();
             const bool haveFootfalls = seqIdx < static_cast<int>(footfalls.size()) &&
                                        !footfalls[seqIdx].empty();
-            if (animSoundEventCallback_ && (haveSoundEvents || haveFootfalls)) {
+            if (animSoundEventCallback_ && !inst.isAttachedItem && (haveSoundEvents || haveFootfalls)) {
                 const float dur = static_cast<float>(seq.duration);
                 const float now = inst.animationTime;
                 static constexpr uint32_t kFootfallTag = pipeline::m2EventTag("$FSD");
@@ -2705,21 +2728,25 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
             }
             weapIt->second.overrideModelMatrix = weaponMat;
             weapIt->second.hasOverrideModelMatrix = true;
+            // Where the item is, for the animation range test of an item
+            // that animates itself (see the loop above).
+            weapIt->second.position = glm::vec3(weaponMat[3]);
 
             // Item visuals ride their attachment on the weapon: the weapon's
             // matrix, then the attachment bone's pose, then the point's
             // position in that bone (stock makes them children of the bone).
-            for (const auto& fx : wa.effects) {
+            for (auto& fx : wa.effects) {
                 glm::mat4 fxBone(1.0f);
                 if (fx.boneIndex < weapIt->second.boneMatrices.size())
                     fxBone = weapIt->second.boneMatrices[fx.boneIndex];
                 const glm::mat4 fxMat = weaponMat * fxBone * glm::translate(glm::mat4(1.0f), fx.offset);
                 if (fx.m2InstanceId != 0) {
-                    if (effectRenderer_) {
-                        effectRenderer_->setInstanceTransform(fx.m2InstanceId, fxMat);
-                        effectRenderer_->setInstanceFade(
-                            fx.m2InstanceId, instance.visible ? instance.opacity : 0.0f);
-                    }
+                    // Handed over in poseModelEmitters: M2Renderer's update
+                    // runs on another thread while this one does, and moving
+                    // its instance here raced it (the matrix, the grid).
+                    fx.worldMatrix = fxMat;
+                    fx.fade = instance.visible ? instance.opacity : 0.0f;
+                    fx.posePending = true;
                     continue;
                 }
                 auto fxIt = instances.find(fx.effectInstanceId);
@@ -4584,6 +4611,10 @@ void CharacterRenderer::removeInstance(uint32_t instanceId) {
         unloadModelIfUnused(wa.weaponModelId);
     }
 
+    // Its emitters' twin in M2Renderer goes with it.
+    if (it->second.emitterInstanceId != 0 && effectRenderer_)
+        effectRenderer_->removeInstance(it->second.emitterInstanceId);
+
     // Defer bone buffer destruction - in-flight command buffers may still
     // reference these descriptor sets.
     destroyInstanceBones(it->second, /*defer=*/true);
@@ -4813,7 +4844,17 @@ bool CharacterRenderer::attachWeapon(uint32_t charInstanceId, uint32_t attachmen
     auto weapIt = instances.find(weaponInstanceId);
     if (weapIt != instances.end()) {
         weapIt->second.hasOverrideModelMatrix = true;
+        weapIt->second.isAttachedItem = true;
         weapIt->second.opacity = charInstance.opacity;
+        weapIt->second.visible = charInstance.visible;
+        // An item model plays its default sequence like any loaded model
+        // (stock 0x834540: Stand if it has one, else the first).
+        const auto& seqs = weapIt->second.cachedModel->data.sequences;
+        if (!seqs.empty()) {
+            weapIt->second.currentSequenceIndex =
+                anim::defaultSequenceIndex(seqs, weapIt->second.cachedModel->data.bones);
+            weapIt->second.currentAnimationId = seqs[weapIt->second.currentSequenceIndex].id;
+        }
     }
 
     // Store attachment on parent character instance
@@ -5130,6 +5171,151 @@ int CharacterRenderer::applyWeaponItemVisual(uint32_t charInstanceId, uint32_t a
         if (waIt == charIt->second.weaponAttachments.end()) return attached;
     }
     return attached;
+}
+
+// ---------------------------------------------------------------------------
+// Emitters of the models drawn here (stock: one CParticleEmitter2 system for
+// every CM2Model, units and their items included; docs/re/particles.md §8)
+// ---------------------------------------------------------------------------
+uint32_t CharacterRenderer::ensureEmitterTwin(CharacterInstance& inst) {
+    if (!effectRenderer_ || !inst.cachedModel || !inst.cachedModel->hasEmitters) return 0;
+    if (inst.emitterInstanceId != 0) {
+        if (effectRenderer_->hasInstance(inst.emitterInstanceId)) return inst.emitterInstanceId;
+        inst.emitterInstanceId = 0;  // dropped by a renderer-wide clear: make another
+    }
+    auto modelIt = models.find(inst.modelId);
+    if (modelIt == models.end()) return 0;
+    M2ModelGPU& gpu = modelIt->second;
+    if (gpu.emitterModelFailed) return 0;
+    if (gpu.emitterModelId == 0 || !effectRenderer_->hasModel(gpu.emitterModelId)) {
+        // Keyed by the file: every display of a creature model, and every
+        // copy of an item model (they get a fresh id here per attach), share
+        // one emitter model there.
+        const std::string& name = gpu.data.name;
+        const uint32_t key = static_cast<uint32_t>(
+            std::hash<std::string>{}((name.empty() ? std::to_string(inst.modelId) : name) + "#unit-emitters"));
+        if (!effectRenderer_->hasModel(key)) {
+            // The emitters, their textures and the clocks they read; none of
+            // the geometry, which this renderer draws.
+            pipeline::M2Model twin = gpu.data;
+            twin.vertices.clear();
+            twin.indices.clear();
+            twin.batches.clear();
+            twin.collisionVertices.clear();
+            twin.collisionIndices.clear();
+            twin.collisionNormals.clear();
+            twin.soundEvents.clear();
+            twin.doodadSounds.clear();
+            twin.effectSounds.clear();
+            twin.lights.clear();
+            twin.cameras.clear();
+            if (twin.name.empty()) twin.name = "unit-emitters-" + std::to_string(inst.modelId);
+            if (!effectRenderer_->loadModel(twin, key)) {
+                gpu.emitterModelFailed = true;
+                return 0;
+            }
+        }
+        gpu.emitterModelId = key;
+    }
+    inst.emitterInstanceId = effectRenderer_->createPosedEmitterInstance(gpu.emitterModelId);
+    if (inst.emitterInstanceId != 0) applyEmitterColors(inst);
+    return inst.emitterInstanceId;
+}
+
+void CharacterRenderer::applyEmitterColors(const CharacterInstance& inst) {
+    if (!effectRenderer_ || inst.emitterInstanceId == 0) return;
+    if (inst.particleColorId == 0 || !assetManager) {
+        effectRenderer_->setInstanceParticleColors(inst.emitterInstanceId, nullptr);
+        return;
+    }
+    // 0x4EA9E0: the row's Start/Mid/End columns i go to colour index 11 + i;
+    // an id with no row paints 0xFF00FF00.
+    m2_particle::ParticleColorOverride colors = m2_particle::particleColorMissingRow();
+    auto dbc = assetManager->loadDBC("ParticleColor.dbc");
+    if (dbc && dbc->isLoaded() && dbc->getFieldCount() >= 10) {
+        const int32_t row = dbc->findRecordById(inst.particleColorId);
+        if (row >= 0) {
+            const auto r = static_cast<uint32_t>(row);
+            std::array<uint32_t, 3> start{}, mid{}, end{};
+            for (uint32_t i = 0; i < 3; ++i) {
+                start[i] = dbc->getUInt32(r, 1 + i);
+                mid[i] = dbc->getUInt32(r, 4 + i);
+                end[i] = dbc->getUInt32(r, 7 + i);
+            }
+            colors = m2_particle::particleColorFromRow(start, mid, end);
+        }
+    }
+    effectRenderer_->setInstanceParticleColors(inst.emitterInstanceId, &colors);
+}
+
+void CharacterRenderer::setInstanceParticleColor(uint32_t instanceId, uint32_t particleColorId) {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return;
+    if (it->second.particleColorId == particleColorId) return;
+    it->second.particleColorId = particleColorId;
+    applyEmitterColors(it->second);
+}
+
+void CharacterRenderer::setAttachmentParticleColor(uint32_t charInstanceId, uint32_t attachmentId,
+                                                   uint32_t particleColorId) {
+    auto it = instances.find(charInstanceId);
+    if (it == instances.end()) return;
+    for (const auto& wa : it->second.weaponAttachments) {
+        if (wa.attachmentId == attachmentId) {
+            setInstanceParticleColor(wa.weaponInstanceId, particleColorId);
+            return;
+        }
+    }
+}
+
+void CharacterRenderer::poseModelEmitters() {
+    if (!effectRenderer_) return;
+    // Beyond it a unit is neither drawn nor posed (update's animation radius,
+    // the same 130 yd as the draw's): its emitters stop with it.
+    const float radius = static_cast<float>(envSizeOrDefault("WOWEE_CHAR_RENDER_RADIUS", 130));
+    const float radiusSq = radius * radius;
+    constexpr float kDefaultCullRadius = 4.0f;
+    for (auto& pair : instances) {
+        auto& inst = pair.second;
+        // Weapon glows hosted there, placed where update() put them.
+        for (auto& wa : inst.weaponAttachments) {
+            for (auto& fx : wa.effects) {
+                if (fx.m2InstanceId == 0 || !fx.posePending) continue;
+                fx.posePending = false;
+                effectRenderer_->setInstanceTransform(fx.m2InstanceId, fx.worldMatrix);
+                effectRenderer_->setInstanceFade(fx.m2InstanceId, fx.fade);
+            }
+        }
+
+        if (inst.isEffectModel || inst.isSceneModel) continue;
+        if (!inst.cachedModel || !inst.cachedModel->hasEmitters) continue;
+        // An item model before its owner first placed it has no matrix yet.
+        if (inst.isAttachedItem && !inst.hasOverrideModelMatrix) continue;
+        const uint32_t twin = ensureEmitterTwin(inst);
+        if (twin == 0) continue;
+
+        M2Renderer::EmitterPose pose;
+        pose.model = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix : getModelMatrix(inst);
+        pose.bones = &inst.boneMatrices;
+        pose.sequenceIndex = std::max(inst.currentSequenceIndex, 0);
+        pose.animTimeMs = inst.animationTime;
+        pose.globalSeqTimeMs = inst.globalSequenceTime;
+        pose.alpha = inst.opacity;
+        const glm::vec3 origin(pose.model[3]);
+        pose.visible = inst.visible && glm::distance2(origin, lastCameraPos_) <= radiusSq;
+        // The draw's bounds: the model's box through its matrix.
+        const auto& gm = *inst.cachedModel;
+        const float scale = glm::length(glm::vec3(pose.model[0]));
+        if (gm.visualBoundRadius > 0.0f) {
+            const glm::vec3 c = 0.5f * (gm.visualBoundMin + gm.visualBoundMax);
+            pose.cullCenter = glm::vec3(pose.model * glm::vec4(c, 1.0f));
+            pose.cullRadius = std::max(gm.visualBoundRadius * scale, 0.25f);
+        } else {
+            pose.cullCenter = origin;
+            pose.cullRadius = kDefaultCullRadius;
+        }
+        if (!effectRenderer_->setPosedEmitterPose(twin, pose)) inst.emitterInstanceId = 0;
+    }
 }
 
 bool CharacterRenderer::getAttachmentTransform(uint32_t instanceId, uint32_t attachmentId, glm::mat4& outTransform) {

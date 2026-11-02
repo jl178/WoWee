@@ -301,7 +301,7 @@ Files: `include/rendering/m2_particle_stock.hpp` (new, the pure arithmetic),
 | 41 | Per-emitter draw cap | 0x4000 vertices | none | **Fixed** |
 | 42 | Soft round sprite edge | none | smoothstep circle | **Removed** |
 | 43 | Draw order with batches | sorted with the model's transparent batches | separate pass after | open |
-| 44 | ParticleColor.dbc override (0x2A) | per creature display | ignored | open |
+| 44 | ParticleColor.dbc override (0x2A) | per creature display and item display (§8) | ignored | **Fixed** (§8) |
 | 45 | Ground snap 0x2000, model particles, child emitters | §1 | none | open (157, 54, few emitters) |
 | 46 | Spline emitters | spline object | uniform on the polyline | approximated (133 emitters) |
 | 47 | RNG | Blizzard's generator, per-slot seeds | std::mt19937, per-particle draws | statistical match only |
@@ -337,3 +337,83 @@ Ribbons:
   and count, without the floors; smoke (lit) darkens at night.
 - **Waterfalls / spray**: XY quads and velocity quads lie as authored.
 - **Dalaran**: many lit, sorted and tiled emitters; check the frame rate.
+
+## 8. Units, their items, and ParticleColor.dbc
+
+### Every model's emitters
+Nothing in the particle code is per kind of model. A creature, a player, a
+weapon, a helm or shoulder pad is a CM2Model like a doodad, its emitters are
+created at load (0x832EA0) and stepped by 0x828A00 / 0x82D2F0 / 0x8309C0
+whenever the model is animated. An item model is a child linked at an
+attachment (0x831630) and is animated through its parent (0x830DC0,
+m2-runtime.md §4), so its bones, tracks and emitters run on its own sequence
+and clocks while it hangs off the unit. Particle alpha is the model's alpha
+(§2), so a stealthed or fading unit takes its effects with it. The only
+model-kind switch found is runtime 0x400000 (no distance thinning) for spell
+models.
+
+### ParticleColor.dbc (0x4EA9E0, 0x825410, 0x97A990, 0x9795D0)
+- **Who asks.** Creature skins 0x4F20C0 (also used for mounts, 0x73D5D0) passes
+  CreatureDisplayInfo.ParticleColorID (record +0x34, column 13). The item model
+  loader 0x4EAA70 (weapons 0x4EACD0, helm 0x4EF0D0, shoulders 0x4EF3B0 /
+  0x4EF840) passes ItemDisplayInfo.ParticleColorID (record +0x60, column 24)
+  for the item model, after attaching it. Item visual (glow) models are not
+  recoloured.
+- **0x4EA9E0** (id in EAX, model on the stack): id 0 does nothing. An id
+  outside the table's range or with no row sets **0xFF00FF00** (green) for
+  all nine colours. Otherwise, for i = 0..2,
+  `SetParticleColor(11 + i, Start[i], Mid[i], End[i])` with the row's
+  columns 1-3, 4-6, 7-9 (BGRA words).
+- **CM2Model::SetParticleColor 0x825410** (index, start, mid, end): if the
+  model is not loaded yet (+0x10 bit 0 clear) the call is queued (deferred
+  call type 0xB, `M2Model.cpp` line 0x819) and replayed once it is
+  (0x834452 in 0x832EA0). Loaded: every emitter `e` of the header (H+0x128,
+  0x1DC bytes each) whose **file colour index (+0x2A) equals `index`** gets
+  0x97A990 on the instance's emitter `model+0x2C4[e]`. Per instance: two
+  creatures sharing a model keep their own colours.
+- **0x97A990**: the three colours as floats 0..255, RGB from bytes 2, 1, 0,
+  into `em+0xF4`, `+0x100`, `+0x10C`; runtime flag 0x10 set. An emitter with
+  the precomputed curve table (0x1000000, §2) has its base colour and deltas
+  patched the same way.
+- **Colour evaluation 0x9795D0**: a colour block with exactly **one key**
+  returns that key from the file, override or not. Otherwise the segment
+  `(i0, i1, f)` comes from 0x9793B0 over the **file's** key times and count
+  (§2), and with flag 0x10 the two colours are `em+0xF4 + 12 i0` and
+  `+ 12 i1`. So the override replaces values, not timing: a three-key block
+  runs start, mid, end at its own middle time; a **two-key block runs start
+  to mid**; a block of more than three keys reads past the three (into
+  `em+0x118`).
+- **Data**: creature models have 252 emitters on 11-13 (161, 63, 28), all
+  three-key; item models 567 (5 with two keys, one with five). 560
+  CreatureDisplayInfo rows name a colour, every one a real row (etherials,
+  elementals, wisps, imps). 634 ItemDisplayInfo rows name one, but 574 name
+  a missing row (570 of them id 354); none of those displays' models has an
+  emitter on 11-13, so the green never shows. 28 item displays with real
+  rows do reach such emitters (tier 9/10 raid helms and shoulders, Icecrown
+  axes, a Nexus polearm, a Horde covenant staff).
+
+### Wowee before and now
+
+| # | Item | Stock | Wowee before | Now |
+|---|---|---|---|---|
+| U1 | Emitters of creatures and players | stepped and drawn like any model's | CharacterRenderer draws no emitters: fire elementals, wisps, glowing creatures had no particles or ribbons | **Fixed**: each such instance has an emitter-only twin in M2Renderer (`createPosedEmitterInstance`), posed every frame from the unit's model matrix, bones, sequence, clocks and alpha (`CharacterRenderer::poseModelEmitters`) and stepped by the same `stepParticles` / `updateRibbons` (`M2Renderer::updatePosedEmitters`), drawn in the same particle and ribbon passes |
+| U2 | Emitters of weapons, helms, shoulders | the attached model's own | none | **Fixed** through the same twins |
+| U3 | Attached item animation | the item model plays its default sequence on its own clock | item models never animated (bones at rest, tracks at time 0) | **Fixed** for item models that emit or whose bones are keyed: they play Stand (or the first sequence) on their own clock |
+| U4 | ParticleColor.dbc | per creature display, mount, and item display; index 11-13; one-key blocks keep the file | ignored | **Fixed**: `m2_particle::ParticleColorOverride`, `packCurve(em, out, override)`; per-instance curves shared by model and colours (`setInstanceParticleColors`) |
+| U5 | Missing row | 0xFF00FF00 | - | same (never reached by the data) |
+| U6 | More than three colour keys | reads past the three colours | - | the end colour (one emitter in the data) |
+| U7 | Hidden or distant unit | not animated, nothing emitted | - | the twin drops its particles and trails while the unit is hidden or beyond the 130 yd unit range; out of view it sleeps and warms up like any emitter |
+
+The twins step after M2Renderer's own update has joined (that update runs on
+a worker thread while the units are posed), on the main thread, so a unit's
+emitters use this frame's skeleton. The weapon glows' matrices are handed
+over at the same point; they were written into M2Renderer from the unit
+update while M2Renderer's update ran.
+
+In game:
+- **Fire elementals, wisps, imps, etherials**: their flames, sparks and glows
+  follow the body; the displays with a ParticleColorID take its colours.
+- **Epic weapons, helms and shoulders**: the item model's own emitters on
+  the weapon in hand or on the back, on the head and the shoulders; the raid
+  sets and weapons with a ParticleColorID in its colours.
+

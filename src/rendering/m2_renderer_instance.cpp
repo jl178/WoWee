@@ -812,6 +812,12 @@ void M2Renderer::rebuildSpatialIndex() {
         auto mdlIt = models.find(inst.modelId);
         inst.cachedModel = (mdlIt != models.end()) ? &mdlIt->second : nullptr;
 
+        // An owner-posed emitter set is on the particle list and nothing else.
+        if (inst.posedExternally) {
+            particleInstanceIndices_.push_back(i);
+            continue;
+        }
+
         // Rebuild dedup map (skip ground detail)
         if (!inst.cachedIsGroundDetail) {
             DedupKey dk{.modelId = inst.modelId,
@@ -2026,6 +2032,7 @@ void M2Renderer::collectGrassClearings(float minX, float minY, float maxX, float
         // The ground detail IS the grass's kin - clutter clearing the ground
         // around clutter would eat the whole field.
         if (inst.cachedIsGroundDetail) continue;
+        if (inst.posedExternally) continue;  // emitters only, no footprint
 
         // Footprint radius from the horizontal bounds, capped: a fence post
         // clears its foot, a wagon its wheelbase, and a tree its trunk - not

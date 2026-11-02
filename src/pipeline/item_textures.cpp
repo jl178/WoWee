@@ -31,6 +31,20 @@ std::string resolveItemRegionTexture(AssetManager& assets, int region,
     return {};
 }
 
+uint32_t readItemDisplayParticleColor(const DBCFile& itemDisplayInfo, uint32_t recordIndex) {
+    const auto* layout = getActiveDBCLayout()
+        ? getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
+    // Column 24 of the 25-column 3.3.5 record, after ItemVisual (23); the
+    // 23-column overlay builds have neither.
+    const uint32_t fieldCount = itemDisplayInfo.getFieldCount();
+    uint32_t field = fieldCount >= 25 ? 24u : 0xFFFFFFFFu;
+    if (layout) {
+        const uint32_t f = layout->field("ParticleColorID");
+        if (f != 0xFFFFFFFF && f < fieldCount) field = f;
+    }
+    return field < fieldCount ? itemDisplayInfo.getUInt32(recordIndex, field) : 0u;
+}
+
 ItemDisplayArt readItemDisplayArt(const DBCFile& itemDisplayInfo, uint32_t recordIndex) {
     const auto* layout = getActiveDBCLayout()
         ? getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
@@ -40,6 +54,7 @@ ItemDisplayArt readItemDisplayArt(const DBCFile& itemDisplayInfo, uint32_t recor
     const uint32_t texRight    = layout ? (*layout)["RightModelTexture"] : 4u;
 
     ItemDisplayArt art;
+    art.particleColorId = readItemDisplayParticleColor(itemDisplayInfo, recordIndex);
     art.modelFile   = itemDisplayInfo.getString(recordIndex, modelLeft);
     art.textureName = itemDisplayInfo.getString(recordIndex, texLeft);
     if (art.modelFile.empty()) {

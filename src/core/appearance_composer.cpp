@@ -460,6 +460,7 @@ void AppearanceComposer::loadEquippedHelm(game::Inventory& inventory) {
     const bool attached = charRenderer->attachWeapon(charInstanceId, kAttachHelm, helmModel,
                                                      helmModelId, helm.texturePath);
     if (attached) {
+        charRenderer->setAttachmentParticleColor(charInstanceId, kAttachHelm, helm.particleColorId);
         LOG_INFO("Equipped helm: ", helmPath, " tex: ", helm.texturePath);
     }
 }
@@ -756,6 +757,7 @@ void AppearanceComposer::loadEquippedWeapons() {
         if (ok) {
             LOG_INFO("Equipped weapon: ", m2Path, " at attachment ", attachmentId,
                      weaponsSheathed_ ? " (sheathed)" : " (held)");
+            charRenderer->setAttachmentParticleColor(charInstanceId, attachmentId, art.particleColorId);
             if (ws.slot == game::EquipSlot::MAIN_HAND) rightHandFilled = true;
             applyEnchantVisuals(charInstanceId, static_cast<int>(ws.slot), attachmentId,
                                 displayInfoId);
@@ -816,6 +818,8 @@ void AppearanceComposer::loadEquippedWeapons() {
                     if (ok) {
                         LOG_INFO("Equipped ranged weapon: ", m2Path, " at attachment ",
                                  rangedAttachment, weaponsSheathed_ ? " (sheathed)" : " (held)");
+                        charRenderer->setAttachmentParticleColor(charInstanceId, rangedAttachment,
+                                                                 art.particleColorId);
                         applyEnchantVisuals(charInstanceId,
                                             static_cast<int>(game::EquipSlot::RANGED),
                                             rangedAttachment, displayInfoId);
@@ -1041,6 +1045,9 @@ void AppearanceComposer::showRangedWeapon(bool show) {
     uint32_t weaponModelId = entitySpawner_->allocateWeaponModelId();
     bool ok = charRenderer->attachWeapon(charInstanceId, 1, weaponModel, weaponModelId, texturePath);
     if (ok) {
+        charRenderer->setAttachmentParticleColor(
+            charInstanceId, 1,
+            pipeline::readItemDisplayParticleColor(*displayInfoDbc, static_cast<uint32_t>(recIdx)));
         showingRanged_ = true;
         if (renderer_->getAnimationController())
             renderer_->getAnimationController()->setRangedWeaponActive(true);

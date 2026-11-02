@@ -429,6 +429,11 @@ private:
         /// CreatureDisplayInfo.CreatureGeosetData: geoset variant nibbles for
         /// groups 1-8 (stock 0x4E7790).
         uint32_t creatureGeosetData = 0;
+        /// CreatureDisplayInfo.ParticleColorID (column 13): the
+        /// ParticleColor.dbc row for the model's emitters on colour index
+        /// 11-13 (stock 0x4F20C0 -> 0x4EA9E0). 560 displays: etherials,
+        /// elementals, wisps, imps.
+        uint32_t particleColorId = 0;
     };
 
     /// CreatureModelData.ModelScale for a model id, the second half of the
@@ -446,6 +451,8 @@ private:
     /// the display is unknown - an unknown display is already drawn at the
     /// model's own size, and guessing smaller would hide it.
     float creatureDisplayScale(uint32_t displayId) const;
+    /// CreatureDisplayInfo.ParticleColorID for a display, 0 if none or unknown.
+    uint32_t creatureDisplayParticleColor(uint32_t displayId) const;
 
     /// Apply the textures a creature display names: its own skin variations,
     /// and for a humanoid the composited body, face, hair and equipment. Once

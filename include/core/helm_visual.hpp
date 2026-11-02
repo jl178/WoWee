@@ -101,6 +101,7 @@ struct HelmVisual {
     std::string racialModelPath;   ///< Empty when the race has no known suffix.
     std::string baseModelPath;
     std::string texturePath;       ///< Already resolved against what exists.
+    uint32_t particleColorId = 0;  ///< ItemDisplayInfo.ParticleColorID (0x4EAA70)
 
     [[nodiscard]] bool valid() const { return !baseModelPath.empty(); }
 };

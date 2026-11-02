@@ -637,6 +637,11 @@ size_t M2Renderer::writeParticleRecordsGpu(uint32_t frame) {
         const auto& gpu = *inst.cachedModel;
         const size_t numEm = gpu.particleEmitters.size();
         if (gpu.particleCurves.size() != numEm * mp::kCurveVec4s) continue;
+        // A ParticleColor.dbc override's curves (setInstanceParticleColors),
+        // else the model's.
+        const glm::vec4* curveSet = gpu.particleCurves.data();
+        if (inst.particleCurveOverride && inst.particleCurveOverride->size() == numEm * mp::kCurveVec4s)
+            curveSet = inst.particleCurveOverride->data();
         if (inst.emitterStates.size() != numEm) continue;
         const float modelAlpha = std::clamp(inst.fade, 0.0f, 1.0f);
 
@@ -728,7 +733,7 @@ size_t M2Renderer::writeParticleRecordsGpu(uint32_t frame) {
 
                 // This emitter's curves, uploaded the first time this frame
                 // anything uses them.
-                const glm::vec4* curve = gpu.particleCurves.data() + p.emitterIndex * mp::kCurveVec4s;
+                const glm::vec4* curve = curveSet + p.emitterIndex * mp::kCurveVec4s;
                 auto [slot, fresh] = particleCurveSlots_.try_emplace(curve, 0u);
                 if (fresh) {
                     if (curvesUsed >= kMaxParticleCurvesPerFrame) {

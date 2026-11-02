@@ -82,9 +82,16 @@ std::string resolveItemRegionTexture(AssetManager& assets, int region,
 struct ItemDisplayArt {
     std::string modelFile;
     std::string textureName;   ///< no folder and no extension, as the table has it
+    /// ParticleColorID (column 24, record +0x60): the ParticleColor.dbc row
+    /// for the model's emitters on colour index 11-13 (stock 0x4EAA70 ->
+    /// 0x4EA9E0). 0 none.
+    uint32_t particleColorId = 0;
 };
 
 ItemDisplayArt readItemDisplayArt(const DBCFile& itemDisplayInfo, uint32_t recordIndex);
+/// ItemDisplayInfo.ParticleColorID of a record (see ItemDisplayArt), 0 when
+/// the file has no such column.
+uint32_t readItemDisplayParticleColor(const DBCFile& itemDisplayInfo, uint32_t recordIndex);
 
 /// Every path a cape's texture might be at, in the order to try them.
 ///

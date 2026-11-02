@@ -46,6 +46,11 @@ struct WeaponEffectAttachment {
     uint32_t m2InstanceId = 0;      // M2Renderer instance (0 when a character instance)
     uint16_t boneIndex = 0;         // the weapon bone the attachment rides
     glm::vec3 offset{0.0f};         // attachment position in that bone's space
+    // Where update() put it this frame, handed to M2Renderer by
+    // poseModelEmitters once M2Renderer's own update has finished.
+    glm::mat4 worldMatrix{1.0f};
+    float fade = 1.0f;
+    bool posePending = false;
 };
 
 // Weapon attached to a character instance at a bone attachment point
@@ -299,8 +304,30 @@ public:
                               uint32_t itemVisualId);
 
     /** Where weapon glows are drawn: M2Renderer draws their particles and
-     *  ribbons, which this renderer does not. Null keeps them here. */
+     *  ribbons, which this renderer does not. Null keeps them here. It also
+     *  steps and draws the emitters of the models drawn here (creatures,
+     *  players, their weapons, helms and shoulders); see poseModelEmitters. */
     void setEffectRenderer(M2Renderer* m2) { effectRenderer_ = m2; }
+
+    /**
+     * Hand M2Renderer this frame's pose of every model drawn here that has
+     * particle emitters or ribbons, and of the weapon glows it hosts. The
+     * stock client runs one emitter system for every CM2Model; this renderer
+     * draws none itself, so each such instance has an emitter-only twin in
+     * M2Renderer (createPosedEmitterInstance) that takes its matrix, bones,
+     * sequence, clocks and alpha from here. Call after update() and after
+     * M2Renderer::update() has finished (it runs on another thread), then
+     * M2Renderer::updatePosedEmitters.
+     */
+    void poseModelEmitters();
+
+    /** CreatureDisplayInfo/ItemDisplayInfo ParticleColorID of an instance's
+     *  model (stock 0x4EA9E0): its emitters on colour index 11-13 take the
+     *  ParticleColor.dbc row's colours. 0 keeps the model's own. */
+    void setInstanceParticleColor(uint32_t instanceId, uint32_t particleColorId);
+    /** The same for the item model at one of the instance's attachments. */
+    void setAttachmentParticleColor(uint32_t charInstanceId, uint32_t attachmentId,
+                                    uint32_t particleColorId);
 
     /** Mark an instance as a scene backdrop: no culling, no character material heuristics. */
     void setInstanceSceneModel(uint32_t instanceId, bool isScene);
@@ -364,6 +391,17 @@ private:
         // Pre-classified at load time to avoid per-batch string ops in render loop
         bool isKoboldFlame = false;
         bool isSkyBird = false;
+        /// Particle emitters or ribbons: drawn through an M2Renderer twin
+        /// (poseModelEmitters). emitterModelId is that renderer's model, 0
+        /// before it is loaded; emitterModelFailed stops retrying.
+        bool hasEmitters = false;
+        uint32_t emitterModelId = 0;
+        bool emitterModelFailed = false;
+        /// Some bone has more than one key somewhere: the model moves. An
+        /// item model that moves or emits is animated on its own clock, as
+        /// stock animates an attached CM2Model; one that does neither has
+        /// nothing to animate.
+        bool bonesMove = false;
     };
 
     // One bone's local animated pose, before the pivot bracket.
@@ -454,6 +492,12 @@ private:
         // additive FX batches that attached weapons otherwise drop, and it still
         // needs its animation advanced even though its transform comes from the parent.
         bool isEffectModel = false;
+        /// An item model on another instance's attachment (attachWeapon).
+        bool isAttachedItem = false;
+        /// ParticleColor.dbc row for this model's emitters (0 none), and the
+        /// M2Renderer twin carrying them (0 none yet); see poseModelEmitters.
+        uint32_t particleColorId = 0;
+        uint32_t emitterInstanceId = 0;
 
         // A scene rather than a character: the glue-screen backdrops. Two things
         // follow. Their origin can sit hundreds of units from their geometry, so
@@ -573,6 +617,11 @@ private:
     bool findAttachmentStrict(uint32_t modelId, uint32_t attachmentId,
                               uint16_t& outBoneIndex, glm::vec3& outOffset) const;
     void removeWeaponEffect(const WeaponEffectAttachment& fx);
+    /// The M2Renderer twin of an instance's emitters, made on first need;
+    /// 0 when the model has none or cannot be loaded there.
+    uint32_t ensureEmitterTwin(CharacterInstance& inst);
+    void applyEmitterColors(const CharacterInstance& inst);
+    glm::vec3 lastCameraPos_{0.0f};
     VkSampleCountFlagBits msaaSamplesOverride_ = VK_SAMPLE_COUNT_1_BIT;
     pipeline::AssetManager* assetManager = nullptr;
 

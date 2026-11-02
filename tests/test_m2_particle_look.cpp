@@ -122,3 +122,57 @@ TEST_CASE("the shader's curve read is the stock evaluation", "[m2][particles]") 
         }
     }
 }
+
+// ParticleColor.dbc (stock 0x4EA9E0 -> 0x825410 -> 0x97A990 / 0x9795D0): an
+// emitter whose colour index is 11..13 takes the row's slot index-11 colours
+// at its own keys' times; any other index, and a one-key block, keep the file.
+TEST_CASE("ParticleColor override recolours the keys, keeps the timing",
+          "[m2_particle_look][particle_color]") {
+    // Row 282 of the 3.3.5 table (an etherial display's).
+    const auto ov = m2_particle::particleColorFromRow({0xff000766u, 0xff005966u, 0xff006266u},
+                                                      {0xff6d72c6u, 0xff008ea3u, 0xff00badd},
+                                                      {0xff385bb6u, 0xff00e8d4u, 0xffb5fdffu});
+    REQUIRE(ov.colors[0][0].r == Catch::Approx(0.0f));
+    REQUIRE(ov.colors[0][0].g == Catch::Approx(7.0f / 255.0f));
+    REQUIRE(ov.colors[0][0].b == Catch::Approx(0x66 / 255.0f));
+    REQUIRE(ov.colors[2][2].r == Catch::Approx(0xb5 / 255.0f));  // 0xffb5fdff: B G R A bytes
+
+    M2ParticleEmitter em{};
+    em.particleColor.timestamps = {0.0f, 0.25f, 1.0f};
+    em.particleColor.vec3Values = {glm::vec3(1.0f), glm::vec3(0.5f), glm::vec3(0.0f)};
+    std::vector<glm::vec4> buf(m2_particle::kCurveVec4s);
+
+    // Index 12: slot 1's start, mid, end, split at the file's 0.25.
+    em.particleColorIndex = 12;
+    m2_particle::packCurve(em, buf.data(), &ov);
+    const auto mid = m2_particle::lookFromPacked(buf.data(), 0, 0.125f).color;
+    const glm::vec3 want = glm::mix(ov.colors[1][0], ov.colors[1][1], 0.5f);
+    CHECK(mid.r == Catch::Approx(want.r));
+    CHECK(mid.g == Catch::Approx(want.g));
+    CHECK(mid.b == Catch::Approx(want.b));
+    const auto end = m2_particle::lookFromPacked(buf.data(), 0, 1.0f).color;
+    CHECK(end.b == Catch::Approx(ov.colors[1][2].b));
+
+    // Index 0: untouched.
+    em.particleColorIndex = 0;
+    m2_particle::packCurve(em, buf.data(), &ov);
+    CHECK(m2_particle::lookFromPacked(buf.data(), 0, 1.0f).color.r == Catch::Approx(0.0f));
+    CHECK(m2_particle::lookFromPacked(buf.data(), 0, 0.0f).color.r == Catch::Approx(1.0f));
+
+    // One key: the file's colour, override or not (0x9795D0's count test).
+    em.particleColorIndex = 11;
+    em.particleColor.timestamps = {0.0f};
+    em.particleColor.vec3Values = {glm::vec3(0.3f)};
+    m2_particle::packCurve(em, buf.data(), &ov);
+    CHECK(m2_particle::lookFromPacked(buf.data(), 0, 0.5f).color.g == Catch::Approx(0.3f));
+
+    // Two keys: start to mid - the keys are indices into the three colours.
+    em.particleColor.timestamps = {0.0f, 1.0f};
+    em.particleColor.vec3Values = {glm::vec3(1.0f), glm::vec3(1.0f)};
+    m2_particle::packCurve(em, buf.data(), &ov);
+    CHECK(m2_particle::lookFromPacked(buf.data(), 0, 1.0f).color.b == Catch::Approx(ov.colors[0][1].b));
+
+    // No row for a non-zero id: green.
+    const auto green = m2_particle::particleColorMissingRow();
+    CHECK(green.colors[2][1] == glm::vec3(0.0f, 1.0f, 0.0f));
+}
