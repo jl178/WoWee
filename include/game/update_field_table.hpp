@@ -82,6 +82,11 @@ enum class UF : uint16_t {
     PLAYER_SKILL_INFO_START,
     PLAYER_EXPLORED_ZONES_START,
     PLAYER_CHOSEN_TITLE,         // Active title index (-1 = no title)
+    // PLAYER_FIELD_BYTES: byte 0 holds the release-timer flags a death reads
+    // (0x08 RELEASE_TIMER, 0x10 NO_RELEASE_WINDOW). PLAYER_FIELD_BYTES2: byte
+    // 3 0x40 is the invisibility glow's screen effect. WotLK only here.
+    PLAYER_FIELD_BYTES,
+    PLAYER_FIELD_BYTES2,
 
     // Player spell power / healing bonus (WotLK: PRIVATE - int32 per school)
     PLAYER_FIELD_MOD_DAMAGE_DONE_POS,  // Spell damage bonus (first of 7 schools)

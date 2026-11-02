@@ -2351,6 +2351,21 @@ bool CharacterRenderer::isDeathLocked(uint32_t instanceId) const {
     return it != instances.end() && it->second.deathLocked;
 }
 
+bool CharacterRenderer::isDeathAnimationDone(uint32_t instanceId) const {
+    auto it = instances.find(instanceId);
+    if (it == instances.end() || !it->second.deathLocked) return false;
+    const auto& inst = it->second;
+    if (inst.currentAnimationId != anim::DEATH) return true;
+    const auto mIt = models.find(inst.modelId);
+    if (mIt == models.end() || inst.currentSequenceIndex < 0 ||
+        inst.currentSequenceIndex >= static_cast<int>(mIt->second.data.sequences.size())) {
+        return true;
+    }
+    const float duration =
+        static_cast<float>(mIt->second.data.sequences[inst.currentSequenceIndex].duration);
+    return inst.animationTime >= duration;
+}
+
 void CharacterRenderer::setAnimCullView(const glm::mat4& viewProjection,
                                         const glm::vec3& shadowRayDir) {
     animCullViewProj_ = viewProjection;

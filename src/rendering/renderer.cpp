@@ -2311,8 +2311,9 @@ void Renderer::update(float deltaTime) {
         cameraUnderwater_ = isUnderwater;
         const uint32_t resolvedZoneId = getCurrentZoneId();
 
-        // Light.dbc's death slot while the player is dead or a ghost.
-        lightingManager->setPlayerDead(gh && (gh->isPlayerDead() || gh->isPlayerGhost()));
+        // Light.dbc's death slot while the screen effect asks for it - the
+        // ghost's does; a corpse that has not released keeps the world's.
+        lightingManager->setPlayerDead(gh && gh->getScreenEffectLightSlot() == game::stock_death::kLightSlotDeath);
         lightingManager->update(characterPosition, mapId, resolvedZoneId,
                                 gameTime, stormIntensity, isUnderwater);
         // The water's Light.dbc colours and alphas follow the same lights.
@@ -3275,7 +3276,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
     lastM2RenderMs = 0.0;
 
     // Cache ghost state for use in overlay and FXAA passes this frame.
-    ghostMode_ = (gameHandler && gameHandler->isPlayerGhost());
+    ghostMode_ = (gameHandler && gameHandler->screenEffectIsDeathFx());
     // The spirit world's colour is a desaturation of the finished scene, in
     // the post pass; the tint quad below only covers frames where that pass
     // is not there yet (or could not be made).

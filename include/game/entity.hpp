@@ -640,6 +640,19 @@ public:
     [[nodiscard]] uint32_t getDynamicFlags() const { return dynamicFlags; }
     void setDynamicFlags(uint32_t f) { dynamicFlags = f; }
 
+    /// The death fall has played out (stock CGUnit_C +0xAC0, set by 0x73bbd0
+    /// when Death, Drown or DeathEnd ends and at creation of a unit already
+    /// dead). Only from then is a corpse lootable (0x717b60) and does it
+    /// sparkle (0x717ba0). The renderer reports it; a unit nobody draws
+    /// counts as settled.
+    [[nodiscard]] bool isCorpseSettled() const { return corpseSettled; }
+    void setCorpseSettled(bool settled) { corpseSettled = settled; }
+    /// UNIT_DYNFLAG_LOOTABLE on a corpse that has finished falling: what the
+    /// loot click, the loot cursor and the sparkle all ask (0x717b60).
+    [[nodiscard]] bool isLootableNow() const {
+        return (dynamicFlags & UNIT_DYNFLAG_LOOTABLE) != 0 && corpseSettled;
+    }
+
     // NPC flags (UNIT_NPC_FLAGS, index 82)
     [[nodiscard]] uint32_t getNpcFlags() const { return npcFlags; }
     void setNpcFlags(uint32_t f) { npcFlags = f; }
@@ -682,6 +695,7 @@ protected:
     uint8_t visibilityFlags = 0;
     uint64_t attackTarget = 0;
     uint32_t dynamicFlags = 0;
+    bool corpseSettled = false;
     uint32_t npcFlags = 0;
     uint32_t npcEmoteState = 0;
     uint8_t standState_ = 0;

@@ -1264,7 +1264,7 @@ bool GameScreen::drawUnitCursor(game::GameHandler& gameHandler, const ui::SceneP
         in.attackable = hostile;
         in.outOfMeleeRange = dist2 > melee * melee;
     } else {
-        in.lootable = (unit->getDynamicFlags() & game::UNIT_DYNFLAG_LOOTABLE) != 0;
+        in.lootable = unit->isLootableNow();
         in.isCurrentLoot = gameHandler.isLootWindowOpen() &&
                            gameHandler.getCurrentLoot().lootGuid == guid;
         in.canLootNow = dist2 <= melee * melee && !gameHandler.isLootWindowOpen();

@@ -2,6 +2,8 @@
 #include "addons/lua_api_registrations.hpp"
 #include "game/spell_classification.hpp"
 #include "game/item_text.hpp"
+#include "game/global_strings.hpp"
+#include "game/stock_death_rules.hpp"
 #include "game/inventory_slots.hpp"
 #include "core/app_clock.hpp"
 #include "game/game_handler.hpp"
@@ -44,6 +46,22 @@ constexpr uint32_t kBuybackWireSlotStart = 74;
 constexpr uint32_t kBuybackWireSlotCount = 12;
 constexpr uint32_t kBuybackWireSlotEnd =
     kBuybackWireSlotStart + kBuybackWireSlotCount;
+
+/// A GlobalStrings line by name, from the interface data, else the English
+/// text the stock rules carry.
+std::string stockGlobal(GameHandler& owner, const char* key) {
+    std::string text = globalString(owner.services().assetManager, key);
+    if (text.empty()) text = stock_death::englishGlobal(key);
+    return text;
+}
+
+/// A loot roll's chat line, CHAT_MSG_LOOT as the stock client sends them.
+void addLootRollLine(GameHandler& owner, const stock_death::LootRollLine& line) {
+    if (line.key.empty()) return;
+    const std::string fmt = stockGlobal(owner, line.key.c_str());
+    if (fmt.empty()) return;
+    owner.addLocalChatLine(ChatType::LOOT, stock_death::formatGlobal(fmt, line.args));
+}
 
 void synchronizeStationaryBandageCast(GameHandler& owner) {
     // Bandages are cast through CMSG_USE_ITEM and therefore bypass
@@ -268,14 +286,20 @@ void playLootSlotPickupSound(GameHandler& owner, const LootItem& item) {
 /// prints YOU_LOOT_MONEY or LOOT_MONEY_SPLIT; the clink comes from the
 /// PLAYER_FIELD_COINAGE update that follows (see applyPlayerStatFields), and
 /// it is LOOTWINDOWCOINSOUND whatever the amount.
-void InventoryHandler::announceLootMoney(uint64_t lootGuid, uint32_t amount) {
+///
+/// The line is CHAT_MSG_MONEY, "You loot 1 Silver, 5 Copper" - the coins
+/// spelled out by 0x7e7d80 - or "Your share of the loot is ..." for a share.
+/// It was a system line, "Looted: 1s 5c".
+void InventoryHandler::announceLootMoney(uint64_t lootGuid, uint32_t amount, bool soleLooter) {
     if (amount == 0) return;
     auto it = localLootState_.find(lootGuid);
     if (it != localLootState_.end()) {
         if (it->second.moneyTaken) return;
         it->second.moneyTaken = true;
     }
-    owner_.addSystemChatMessage("Looted: " + formatCopperAmount(amount));
+    owner_.addLocalChatLine(ChatType::MONEY,
+        stock_death::lootMoneyLine(amount, soleLooter,
+                                   [this](const char* key) { return stockGlobal(owner_, key); }));
     if (lootGuid != 0) recentLootMoneyAnnounceCooldowns_[lootGuid] = 1.5f;
 }
 
@@ -324,8 +348,8 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_LOOT_MONEY_NOTIFY] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(4)) return;
         uint32_t amount = packet.readUInt32();
-        if (packet.hasRemaining(1))
-            /*uint8_t soleLooter =*/ packet.readUInt8();
+        // 1 when the player took it alone (YOU_LOOT_MONEY), 0 for a share.
+        const bool soleLooter = !packet.hasRemaining(1) || packet.readUInt8() != 0;
         owner_.playerMoneyCopperRef() += amount;
         owner_.pendingMoneyDeltaRef() = amount;
         owner_.pendingMoneyDeltaTimerRef() = 2.0f;
@@ -333,7 +357,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         pendingLootMoneyGuid_ = 0;
         pendingLootMoneyAmount_ = 0;
         pendingLootMoneyNotifyTimer_ = 0.0f;
-        announceLootMoney(notifyGuid, amount);
+        announceLootMoney(notifyGuid, amount, soleLooter);
         if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("PLAYER_MONEY", {});
         // Both packets report the same thing and a server may send either, so
         // the coin goes on whichever arrives first.
@@ -378,7 +402,8 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         if (packet.getRemainingSize() < baseSz) return;
         const bool hasItemCount = packet.getRemainingSize() >= baseSz + 4;
         uint64_t objectGuid = packet.readUInt64();
-        if (hasMapId) packet.readUInt32(); // mapId
+        // A roll on another map is not this player's to see (0x6fb2c0).
+        const uint32_t rollMapId = hasMapId ? packet.readUInt32() : owner_.getCurrentMapId();
         uint32_t lootSlot = packet.readUInt32();
         uint32_t itemId   = packet.readUInt32();
         /*uint32_t randSuffix =*/ packet.readUInt32();
@@ -386,6 +411,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         if (hasItemCount) (void)packet.readUInt32(); // items in stack
         uint32_t countdown = packet.readUInt32();
         uint8_t  voteMask  = packet.readUInt8();
+        if (rollMapId != owner_.getCurrentMapId()) return;
 
         // Resolve item name from cache
         owner_.ensureItemInfo(itemId);
@@ -403,12 +429,16 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         roll.rollCountdownMs = countdown;
         roll.voteMask = voteMask;
         roll.rollStartedAt = std::chrono::steady_clock::now();
-        std::string link = buildItemLink(itemId, quality, itemName);
-        owner_.addSystemChatMessage("Loot roll started for " + link + ".");
+        // No chat line: the stock client says nothing when a roll starts (it
+        // used to print "Loot roll started for ..."). Four windows at most;
+        // a fifth waits for one to close.
+        int shownRolls = 0;
+        for (const auto& r : lootRolls_) if (r.shown) ++shownRolls;
+        roll.shown = shownRolls < stock_death::kMaxShownLootRolls;
         // The roll id the interface will ask every later question by. Its own
         // number: the slot plus one was unique only while one roll was open,
         // and two corpses both rolling their first item shared it.
-        if (owner_.addonEventCallbackRef()) {
+        if (roll.shown && owner_.addonEventCallbackRef()) {
             // ...and the time to roll in, which the packet carried all along
             // and this read past. GroupLootFrame_OpenNewFrame takes it as the
             // second argument and sizes the countdown bar from it; without one
@@ -432,7 +462,9 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         std::string allPassName = (allPassInfo && !allPassInfo->name.empty())
             ? allPassInfo->name : ("Item #" + std::to_string(itemId));
         uint32_t allPassQuality = allPassInfo ? allPassInfo->quality : 1u;
-        owner_.addSystemChatMessage("Everyone passed on " + buildItemLink(itemId, allPassQuality, allPassName) + ".");
+        // LOOT_ROLL_ALL_PASSED, CHAT_MSG_LOOT (0x6fb470).
+        addLootRollLine(owner_, {"LOOT_ROLL_ALL_PASSED",
+                                 {buildItemLink(itemId, allPassQuality, allPassName)}});
         endLootRoll(passedGuid, passedSlot);
     };
 
@@ -1392,15 +1424,35 @@ void InventoryHandler::endLootRoll(uint64_t objectGuid, uint32_t slot) {
     for (auto it = lootRolls_.begin(); it != lootRolls_.end(); ++it) {
         if (it->objectGuid != objectGuid || it->slot != slot) continue;
         const int rollId = it->rollId;
+        const bool shown = it->shown;
         lootRolls_.erase(it);
         // Named, so the window that closes is the one this roll opened. It was
         // the slot plus one here as well, which closed a different roll's
-        // window whenever two were up.
-        if (owner_.addonEventCallbackRef()) {
+        // window whenever two were up. A roll still waiting had no window.
+        if (shown && owner_.addonEventCallbackRef()) {
             owner_.addonEventCallbackRef()("CANCEL_LOOT_ROLL",
                                            {std::to_string(rollId)});
         }
+        showPendingLootRolls();
         return;
+    }
+}
+
+void InventoryHandler::showPendingLootRolls() {
+    int shownRolls = 0;
+    for (const auto& r : lootRolls_) if (r.shown) ++shownRolls;
+    for (auto& r : lootRolls_) {
+        if (shownRolls >= stock_death::kMaxShownLootRolls) return;
+        if (r.shown) continue;
+        r.shown = true;
+        ++shownRolls;
+        // With the countdown it arrived with, as 0x6fb180 does; the time left
+        // is measured from its arrival.
+        if (owner_.addonEventCallbackRef()) {
+            owner_.addonEventCallbackRef()("START_LOOT_ROLL",
+                                           {std::to_string(r.rollId),
+                                            std::to_string(r.rollCountdownMs)});
+        }
     }
 }
 
@@ -1423,12 +1475,12 @@ void InventoryHandler::handleLootRoll(network::Packet& packet) {
     uint64_t objectGuid = packet.readUInt64();
     uint32_t lootSlot   = packet.readUInt32();
     uint64_t playerGuid = packet.readUInt64();
-    /*uint32_t itemId     =*/ packet.readUInt32();
+    const uint32_t rolledItemId = packet.readUInt32();
     /*uint32_t randSuffix =*/ packet.readUInt32();
-    (void)packet.readUInt32(); // random property
+    const int32_t rolledRandProp = static_cast<int32_t>(packet.readUInt32());
     uint8_t rollNumber  = packet.readUInt8();
     uint8_t rollType    = packet.readUInt8();
-    /*uint8_t autoPass   =*/ packet.readUInt8();
+    const bool autoPass = packet.readUInt8() != 0;
 
     // Resolve player name
     std::string playerName;
@@ -1444,16 +1496,29 @@ void InventoryHandler::handleLootRoll(network::Packet& packet) {
         roll->playerRolls.push_back(result);
     }
 
-    // RollVote enum: 0=Pass, 1=Need, 2=Greed, 3=Disenchant.
-    const char* typeStr = "passed on";
-    if (rollType == 1) typeStr = "rolled Need";
-    else if (rollType == 2) typeStr = "rolled Greed";
-    else if (rollType == 3) typeStr = "rolled Disenchant";
-    if (rollType >= 1 && rollType <= 3) {
-        owner_.addSystemChatMessage(playerName + " " + typeStr + " - " + std::to_string(rollNumber));
-    } else {
-        owner_.addSystemChatMessage(playerName + " passed.");
+    // The stock line (0x6fa840), CHAT_MSG_LOOT: a choice ("has selected Need
+    // for:", "passed on:") while the number is 128, the roll itself after
+    // ("Need Roll - 54 for [item] by Name"). With showLootSpam off only the
+    // player's own automatic passes are said. It printed "Name rolled Need -
+    // 0" for every choice, the 0 being no roll at all.
+    owner_.ensureItemInfo(rolledItemId);
+    const auto* info = owner_.getItemInfo(rolledItemId);
+    std::string itemName = (info && !info->name.empty()) ? info->name
+                                                         : ("Item #" + std::to_string(rolledItemId));
+    if (rolledRandProp != 0) {
+        const std::string suffix = owner_.getRandomPropertyName(rolledRandProp);
+        if (!suffix.empty()) itemName += " " + suffix;
     }
+    const std::string link = buildItemLink(rolledItemId, info ? info->quality : 1u, itemName);
+    bool female = false;
+    if (auto e = owner_.getEntityManager().getEntity(playerGuid)) {
+        const uint16_t b0 = fieldIndex(UF::UNIT_FIELD_BYTES_0);
+        if (b0 != 0xFFFF) female = ((e->getField(b0) >> 16) & 0xFF) == 1;
+    }
+    const bool verbose = addons::storedCVarValue("showLootSpam", "1") != "0";
+    addLootRollLine(owner_, stock_death::lootRollVoteLine(
+        playerGuid == owner_.getPlayerGuid(), static_cast<int8_t>(rollNumber), rollType,
+        autoPass, female, verbose, playerName, link));
 }
 
 void InventoryHandler::handleLootRollWon(network::Packet& packet) {
@@ -1483,12 +1548,11 @@ void InventoryHandler::handleLootRollWon(network::Packet& packet) {
     uint32_t wonQuality = info ? info->quality : 1u;
     std::string link = buildItemLink(itemId, wonQuality, itemName);
 
-    // RollVote enum: 1=Need, 2=Greed, 3=Disenchant (0=Pass cannot win).
-    const char* typeStr = "Need";
-    if (rollType == 2) typeStr = "Greed";
-    else if (rollType == 3) typeStr = "Disenchant";
-
-    owner_.addSystemChatMessage(winnerName + " won " + link + " (" + typeStr + " - " + std::to_string(rollNumber) + ")");
+    // LOOT_ROLL_WON / LOOT_ROLL_YOU_WON, or the _NO_SPAM forms with the roll
+    // when showLootSpam is off (0x6fb700), CHAT_MSG_LOOT.
+    const bool verbose = addons::storedCVarValue("showLootSpam", "1") != "0";
+    addLootRollLine(owner_, stock_death::lootRollWonLine(
+        winnerGuid == owner_.getPlayerGuid(), rollNumber, rollType, verbose, winnerName, link));
     endLootRoll(wonGuid, wonSlot);
 }
 

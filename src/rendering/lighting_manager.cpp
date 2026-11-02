@@ -500,9 +500,9 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         }
     }
     if (!sampled && !isIndoors_ && !activeVolumes_.empty()) {
-        // While the player is dead or a ghost the stock client shows the map
-        // default light's death set and nothing else (0x7f3230, slot
-        // override 0xd38b58): no local lights, no storm.
+        // While the screen effect forces the death slot (a ghost) the stock
+        // client shows the map default light's death set and nothing else
+        // (0x7f3230, slot override 0xd38b58): no local lights, no storm.
         if (playerDead_) {
             const LightVolume* def = activeVolumes_.front().volume;
             const uint32_t id = paramsIdForSlot(def, LightVolume::SLOT_DEATH);

@@ -19,6 +19,7 @@ void ZoneMusicController::reset() {
     currentSetId_ = 0;
     currentSound_ = 0;
     currentIntroId_ = 0;
+    currentIsTop_ = false;
     trackSeen_ = false;
     startGrace_ = 0.0f;
     nextAllowedMs_ = 0.0;
@@ -42,6 +43,20 @@ uint32_t ZoneMusicController::resolveIntro(const ZoneMusicInput& in) const {
 
 ZoneMusicController::Choice ZoneMusicController::choose(const ZoneMusicInput& in, bool running) const {
     Choice c;
+    // Slot 10 first (0x4c88b0 walks 10 down to 0): the screen effect's set,
+    // ahead of an intro even while one plays, and not subject to the silence
+    // (0x4c87d0 applies it to slots 0-2 only).
+    if (in.screenEffectMusic) {
+        if (const ZoneMusicSet* top = data_.zoneMusic(in.screenEffectMusic)) {
+            const uint32_t sound = top->soundId[in.isDay ? 0 : 1];
+            if (sound != 0) {
+                c.kind = Choice::Kind::Sound;
+                c.soundId = sound;
+                c.top = true;
+                return c;
+            }
+        }
+    }
     // An intro under way plays to its end (0x4c88b0, slots 5..7).
     if (running && currentIntroId_ != 0) {
         c.kind = Choice::Kind::Sound;
@@ -76,7 +91,10 @@ ZoneMusicController::Choice ZoneMusicController::choose(const ZoneMusicInput& in
 }
 
 void ZoneMusicController::onTrackEnded(const ZoneMusicInput& in) {
-    if (currentIntroId_ != 0) {
+    if (currentIsTop_) {
+        // No end callback for slot 10 (0x4c9910 registers none past slot 7):
+        // no silence follows, and the track starts again if still chosen.
+    } else if (currentIntroId_ != 0) {
         // 0x4c9080: the intro may come again MinDelayMinutes after it ended.
         if (const ZoneIntro* intro = data_.intro(currentIntroId_)) {
             introReadyMs_[currentSound_] = nowMs_ + static_cast<double>(intro->minDelayMinutes) * 60000.0;
@@ -95,6 +113,7 @@ void ZoneMusicController::onTrackEnded(const ZoneMusicInput& in) {
     }
     currentSound_ = 0;
     currentIntroId_ = 0;
+    currentIsTop_ = false;
     trackSeen_ = false;
     startGrace_ = 0.0f;
 }
@@ -106,7 +125,7 @@ ZoneMusicAction ZoneMusicController::start(const Choice& c, const ZoneMusicInput
     float volume = entry->volume;
     // The client's own soundtrack shares the pool when asked for: as many
     // draws as it has tracks against the row's.
-    if (!c.intro && !in.extraTracks.empty()) {
+    if (!c.intro && !c.top && !in.extraTracks.empty()) {
         const size_t total = entry->files.size() + in.extraTracks.size();
         const size_t r = std::uniform_int_distribution<size_t>(0, total - 1)(rng_);
         if (r >= entry->files.size()) {
@@ -119,8 +138,11 @@ ZoneMusicAction ZoneMusicController::start(const Choice& c, const ZoneMusicInput
         if (!file) return {};
         path = *file;
     }
+    // Choosing a slot-10 piece over what plays clears the silence (0x4c8d80).
+    if (c.top && !currentIsTop_) nextAllowedMs_ = 0.0;
     currentSound_ = c.soundId;
     currentIntroId_ = c.intro ? resolveIntro(in) : 0;
+    currentIsTop_ = c.top;
     trackSeen_ = false;
     startGrace_ = kStartGraceSeconds;
 
@@ -138,7 +160,8 @@ ZoneMusicAction ZoneMusicController::update(const ZoneMusicInput& in) {
     const bool running = in.trackPlaying || in.trackLoading;
 
     // Nothing is decided while the place is unknown (its chunk not resident).
-    const bool known = in.areaId != 0 || in.zoneMusicOverride != 0 || in.introOverride != 0;
+    const bool known = in.areaId != 0 || in.zoneMusicOverride != 0 || in.introOverride != 0 ||
+                       in.screenEffectMusic != 0;
     if (known) {
         const ZoneMusicSet* set = resolveSet(in);
         currentSetId_ = set ? set->id : 0;
