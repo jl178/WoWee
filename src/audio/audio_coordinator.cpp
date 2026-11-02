@@ -140,7 +140,7 @@ void AudioCoordinator::updateReverb(const ZoneAudioContext& ctx) {
     int32_t id = 0;
     if (soundData_.loaded()) {
         if (ctx.wmoRootId != 0 && ctx.wmoInterior) {
-            id = soundData_.wmoReverb(ctx.wmoRootId, ctx.wmoNameSet, ctx.wmoGroupIndex, under);
+            id = soundData_.wmoReverb(ctx.wmoRootId, ctx.wmoNameSet, ctx.wmoGroupId, under);
             if (id == 0 && !under) {
                 if (const SoundProviderPref* room = soundData_.providerPrefByName("PRESET_ROOM")) {
                     id = static_cast<int32_t>(room->id);
@@ -168,11 +168,11 @@ void AudioCoordinator::updateReverb(const ZoneAudioContext& ctx) {
 
 void AudioCoordinator::updateTableAmbience(const ZoneAudioContext& ctx) {
     if (!ambientSoundManager_ || ctx.areaId == 0) return;
-    // A room with its own WMOAreaTable ambience sounds like itself; any other
-    // place, indoors or out, sounds like its area.
-    const WmoAreaSounds* room = ctx.wmoRootId
-        ? soundData_.wmoArea(ctx.wmoRootId, ctx.wmoNameSet, ctx.wmoGroupIndex) : nullptr;
-    const uint32_t roomAmbience = room ? room->ambienceId : 0;
+    // A room with its own WMOAreaTable ambience sounds like itself, a room in
+    // a building whose -1 row names one like the building; any other place,
+    // indoors or out, sounds like its area.
+    const uint32_t roomAmbience = ctx.wmoRootId
+        ? soundData_.wmoAmbience(ctx.wmoRootId, ctx.wmoNameSet, ctx.wmoGroupId) : 0;
     const uint64_t key = (static_cast<uint64_t>(roomAmbience) << 32) | ctx.areaId;
     if (key == ambienceKey_) return;
     ambienceKey_ = key;
@@ -202,9 +202,7 @@ void AudioCoordinator::updateTableMusic(const ZoneAudioContext& ctx, uint32_t zo
     ZoneMusicInput in;
     in.areaId = ctx.areaId;
     if (ctx.wmoRootId) {
-        if (const WmoAreaSounds* room = soundData_.wmoArea(ctx.wmoRootId, ctx.wmoNameSet, ctx.wmoGroupIndex)) {
-            in.zoneMusicOverride = room->zoneMusicId;
-        }
+        in.zoneMusicOverride = soundData_.wmoZoneMusic(ctx.wmoRootId, ctx.wmoNameSet, ctx.wmoGroupId);
     }
     in.isDay = isDaytimeHours(ctx.gameTimeHours);
     in.trackPlaying = musicManager_->isPlaying();
@@ -352,7 +350,7 @@ void AudioCoordinator::updateZoneAudio(const ZoneAudioContext& ctx) {
         // Tavern / inn detection, for data without WMOAreaTable rows. With the
         // tables loaded a tavern names its own music there.
         const bool tableKnowsRoom = soundData_.loaded() && ctx.wmoRootId != 0 &&
-            soundData_.wmoArea(ctx.wmoRootId, ctx.wmoNameSet, ctx.wmoGroupIndex) != nullptr;
+            soundData_.wmoArea(ctx.wmoRootId, ctx.wmoNameSet, ctx.wmoGroupId) != nullptr;
         if (!tableKnowsRoom &&
             (wmoModelId == 191 || wmoModelId == 71414 || wmoModelId == 190 ||
              wmoModelId == 220 || wmoModelId == 221 ||

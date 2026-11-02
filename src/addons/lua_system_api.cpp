@@ -2061,14 +2061,23 @@ static int lua_GetZoneText(lua_State* L) {
     return 1;
 }
 
-// GetSubZoneText() → subzone name (same as zone for now - server doesn't always send subzone)
+// GetSubZoneText() → subzone name
 // Empty when the player stands in no subzone, as stock answers. Returning
 // the zone made ZoneText_OnEvent treat subzone == zone, so subzone banners
 // ("Goldshire") never showed.
+//
+// Inside a WMO the room's WMOAreaTable name comes first: Ironforge's "The
+// Great Forge" and the Undercity's "Trade Quarter" are named there and have
+// no AreaTable row of their own.
 static std::string liveSubZoneName(lua_State* L) {
     auto* gh = getGameHandler(L);
     auto* svc = getLuaServices(L);
-    if (!gh || !svc || !svc->getLiveAreaId || !svc->getLiveZoneId) return {};
+    if (!gh || !svc) return {};
+    if (svc->getLiveWmoAreaName) {
+        std::string room = svc->getLiveWmoAreaName();
+        if (!room.empty()) return room;
+    }
+    if (!svc->getLiveAreaId || !svc->getLiveZoneId) return {};
     const uint32_t area = svc->getLiveAreaId();
     if (area == 0 || area == svc->getLiveZoneId()) return {};
     return gh->getWhoAreaName(area);

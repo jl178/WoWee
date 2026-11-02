@@ -322,6 +322,15 @@ TEST_CASE("SoundData picks the room's WMOAreaTable row over the building's", "[s
     REQUIRE(data.wmoArea(53, 1, 5)->name == "Deepwater Tavern");
     REQUIRE(data.wmoArea(53, 1, 893)->zoneMusicId == 15);
     REQUIRE(data.wmoArea(99, 0, -1) == nullptr);
+
+    // A room's own row names music but no ambience: the music is the room's,
+    // the ambience the building's.
+    REQUIRE(data.wmoZoneMusic(53, 1, 893) == 15);
+    REQUIRE(data.wmoAmbience(53, 1, 893) == 171);
+    // No row for the room: both the building's.
+    REQUIRE(data.wmoZoneMusic(53, 0, 5) == 14);
+    REQUIRE(data.wmoAmbience(53, 0, 5) == 170);
+    REQUIRE(data.wmoAmbience(99, 0, 5) == 0);
 }
 
 TEST_CASE("SoundData finds an area's and a room's reverb", "[sound_data]") {

@@ -178,8 +178,14 @@ public:
     SkySystem* getSkySystem() const { return skySystem.get(); }
     const std::string& getCurrentZoneName() const;
     uint32_t getCurrentZoneId() const;
-    /// AreaTable id of the chunk under the player (the subzone), 0 if unknown.
+    /// AreaTable id of the area the player is in, 0 if unknown: the WMO
+    /// group's WMOAreaTable area while one decides it (Ironforge, the
+    /// Undercity), else the terrain chunk's. Resolved once a frame.
     uint32_t getCurrentAreaId() const;
+    /// The WMOAreaTable name of the room the player is in ("The Great Forge",
+    /// "Trade Quarter"), the stock subzone text there. Empty outdoors and in
+    /// rooms the table leaves unnamed.
+    const std::string& getCurrentWmoAreaName() const { return liveWmoAreaName_; }
     /// The global id (MOGP group id) of the WMO group the player stands in,
     /// 0 outdoors. The world map picks a dungeon floor from it, through
     /// DungeonMapChunk, the way the client does.
@@ -515,6 +521,22 @@ private:
     bool cameraUnderwater_ = false;       // camera below the water's surface, for the audio
     glm::vec3 interiorAmbient_{0.5f};     // MOHD ambient of the WMO the camera is in
     bool playerIndoors_ = false;  // Cached WMO inside state for macro conditionals
+    // The area the player is in, resolved once a frame by updateLiveArea:
+    // WMOAreaTable's while the player stands in a WMO group that decides it,
+    // the terrain's otherwise.
+    bool liveAreaValid_ = false;
+    uint32_t liveAreaId_ = 0;
+    bool liveAreaFromWmo_ = false;
+    std::string liveWmoAreaName_;
+    // What the zone events last announced, so a crossing fires once.
+    uint32_t zoneEventMapId_ = 0xFFFFFFFFu;
+    uint32_t zoneEventZoneId_ = 0;
+    uint32_t zoneEventAreaId_ = 0;
+    std::string zoneEventWmoName_;
+    /// wmoId 0: the player is in no WMO group. Otherwise the root's MOHD
+    /// wmoID, the placement's name set and the group's MOGP id.
+    void updateLiveArea(uint32_t wmoId, uint16_t nameSet, uint32_t wmoGroupId);
+    void fireZoneEvents();
     bool deferredWorldInitEnabled_ = true;
     bool deferredWorldInitPending_ = false;
     uint8_t deferredWorldInitStage_ = 0;
