@@ -1071,6 +1071,9 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
 // drawn by the particle or ribbon systems.
 static const bool kM2NoSkinning = envFlagEnabled("WOWEE_M2_NO_SKINNING");
 
+// M2InstanceGPU::flags bit 3: lit as a doodad of an interior WMO group, by the
+// colours in wmoAmbient / wmoDiffuse (WMORenderer::attachDoodad, 0x7c1150).
+constexpr int32_t kInstanceWmoInteriorLightFlag = 8;
 // M2InstanceGPU::flags bit 2: skin by the bone palette (m2.vert.glsl).
 static constexpr int32_t kInstanceSkinnedFlag = 4;
 
@@ -1612,12 +1615,17 @@ bool M2Renderer::cullForRecording(const Camera& camera) {
         ? std::min<uint32_t>(std::max(4u, workerChunks), (totalInstances + 1023) / 1024)
         : 1;
     std::vector<VisibleChunk> chunks(chunkCount);
+    // WMO doodads go with their group: WMORenderer::computeVisibility has
+    // already decided which groups the portal walk reaches this frame.
+    const std::vector<uint8_t>* portalVis = forceNoCull_ ? nullptr : portalVisibility_;
+    const uint32_t portalVisSize = portalVis ? static_cast<uint32_t>(portalVis->size()) : 0u;
     auto classifyRange = [&](uint32_t chunk, uint32_t begin, uint32_t end) {
         auto& out = chunks[chunk];
         out.opaque.reserve((end - begin) / 3);
         out.transparent.reserve((end - begin) / 12);
         for (uint32_t i = begin; i < end; ++i) {
             const auto& instance = instances[i];
+            if (instance.portalSlot < portalVisSize && !(*portalVis)[instance.portalSlot]) continue;
             // The GPU's verdict first: ~80k of 88k are culled, and for them
             // the distance bound below is work thrown away.
             if (!forceNoCull_ && gpuCullAvailable && i < numInstances &&
@@ -2091,6 +2099,14 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 e.highlight = inst.highlight;
                 e.flags = (inst.afloat > 0 ? 1 : 0) | inst.groundNormalFlags |
                           ((p.useBones && !kM2NoSkinning) ? kInstanceSkinnedFlag : 0);
+                if (inst.wmoInteriorLight) {
+                    e.flags |= kInstanceWmoInteriorLightFlag;
+                    e.wmoAmbient = inst.wmoAmbientPacked;
+                    e.wmoDiffuse = inst.wmoDiffusePacked;
+                } else {
+                    e.wmoAmbient = 0;
+                    e.wmoDiffuse = 0;
+                }
             }
 
             // Drop what did not fit. The loop above stops writing at the cap,
@@ -2381,6 +2397,14 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                             e.highlight = inst.highlight;
                             e.flags = (inst.afloat > 0 ? 1 : 0) | inst.groundNormalFlags |
                                       ((p.useBones && !kM2NoSkinning) ? kInstanceSkinnedFlag : 0);
+                            if (inst.wmoInteriorLight) {
+                                e.flags |= kInstanceWmoInteriorLightFlag;
+                                e.wmoAmbient = inst.wmoAmbientPacked;
+                                e.wmoDiffuse = inst.wmoDiffusePacked;
+                            } else {
+                                e.wmoAmbient = 0;
+                                e.wmoDiffuse = 0;
+                            }
                         }
                     }
 
@@ -2692,6 +2716,14 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             e.highlight = instance.highlight;
             e.flags = (instance.afloat > 0 ? 1 : 0) | instance.groundNormalFlags |
                       ((needsBones && !kM2NoSkinning) ? kInstanceSkinnedFlag : 0);
+            if (instance.wmoInteriorLight) {
+                e.flags |= kInstanceWmoInteriorLightFlag;
+                e.wmoAmbient = instance.wmoAmbientPacked;
+                e.wmoDiffuse = instance.wmoDiffusePacked;
+            } else {
+                e.wmoAmbient = 0;
+                e.wmoDiffuse = 0;
+            }
 
             // Pipeline selection: the material's own blend (stock 0xA453B0).
             // Spell effects used to be pushed onto additive whatever they

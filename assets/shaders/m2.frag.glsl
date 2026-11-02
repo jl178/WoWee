@@ -64,6 +64,9 @@ layout(location = 5) in float vFadeAlpha;
 layout(location = 6) flat in int vSkyMode;
 layout(location = 7) flat in float vHighlight;
 layout(location = 8) in vec2 TexCoord2;
+// A doodad of an interior WMO group (0x7c1150): x its ambient, y its
+// diffuse (packed RGBA8, from the MODD colour by 0x7c1ad0), z 1 when set.
+layout(location = 9) flat in uvec3 vWmoLight;
 
 layout(location = 0) out vec4 outColor;
 
@@ -330,7 +333,12 @@ void main() {
     M2Combined cmb = m2Combine(combiner, texColor, texColor2, vFadeAlpha);
     vec3 albedo = cmb.mul * tint;
 
-    vec3 ldir = normalize(-lightDir.xyz);
+    // An interior WMO doodad is lit by its own two colours along a fixed
+    // direction (0xaeedf0), not by the day/night light.
+    bool wmoInterior = vWmoLight.z != 0u;
+    vec3 ldir = wmoInterior ? normalize(vec3(0.30822, 0.30822, 0.9))
+                            : normalize(-lightDir.xyz);
+    vec3 sunColor = wmoInterior ? unpackUnorm4x8(vWmoLight.y).rgb : lightColor.rgb;
         float nDotL = dot(norm, ldir);
         float diff = max(nDotL, 0.0);  // a leaf's back stays dark
 
@@ -356,12 +364,12 @@ void main() {
 
         float spec = 0.0;
         float shadow = 1.0;
-        if (!isFoliage && !groundDetail) {
+        if (!isFoliage && !groundDetail && !wmoInterior) {
             vec3 halfDir = normalize(ldir + viewDir);
             spec = pow(max(dot(norm, halfDir), 0.0), 32.0) * specularIntensity;
         }
 
-        if (shadowParams.x > 0.5) {
+        if (shadowParams.x > 0.5 && !wmoInterior) {
             float normalOffset = shadowTexel() * 2.0 * (1.0 - abs(dot(norm, ldir)));
             vec3 biasedPos = FragPos + norm * normalOffset;
             vec4 lsPos = lightSpaceMatrix * vec4(biasedPos, 1.0);
@@ -389,19 +397,20 @@ void main() {
         // ambient than the canopy underside, giving the crown depth instead
         // of a uniformly-lit blob.
         RtLight rt = rtLightAt(FragPos);
-        shadow = rtShadow(rt, shadow);
+        if (!wmoInterior) shadow = rtShadow(rt, shadow);
         // The area's ambient as the terrain, the WMO walls and the characters
         // take it. Foliage used to take 82-100% of it by how far the leaf
         // faced up, a darkening that dates from when the outdoor ambient
         // carried an extra +0.4 from LightingManager's defaults; against the
         // true Light.dbc blend it left trees darker than the ground they
         // stand on. The stock client lights foliage like any other M2.
-        vec3 ambientTerm = rtAmbient(rt, ambientColor.rgb);
+        vec3 ambientTerm = wmoInterior ? unpackUnorm4x8(vWmoLight.x).rgb
+                                       : rtAmbient(rt, ambientColor.rgb);
         // Clamped at one per channel, as the stock vertex shaders clamp
         // ambient + diffuse * N.L before the texture (shaders/vertex/arbvp1/
         // diffuse_t1.bls: MIN R0, R0, 1).
-        vec3 light = min(ambientTerm + shadow * diff * lightColor.rgb, vec3(1.0));
-        result = light * albedo + shadow * spec * lightColor.rgb;
+        vec3 light = min(ambientTerm + shadow * diff * sunColor, vec3(1.0));
+        result = light * albedo + shadow * spec * sunColor;
         // No leaf glow (sss unused): stock foliage is lit like any other M2.
 
         if (interiorDarken > 0.0) {
