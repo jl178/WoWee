@@ -1,9 +1,11 @@
 #include "ui/scene_pick.hpp"
+#include "ui/game_object_affordance.hpp"
 
 #include "core/application.hpp"
 #include "core/coordinates.hpp"
 #include "game/game_handler.hpp"
 #include "game/entity.hpp"
+#include "game/update_field_table.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/terrain_manager.hpp"
@@ -29,10 +31,6 @@ constexpr float kMaxGameObjectPickRadius = 3.0f;
 constexpr float kMinGameObjectPickRadius = 0.6f;
 /// GAMEOBJECT_TYPE_CHAIR.
 constexpr uint32_t kGoTypeChair = 7;
-/// GENERIC - decorative, no interaction - and FISHINGHOLE, which is fished
-/// rather than clicked. Neither may take a click from a unit.
-constexpr uint32_t kGoTypeGeneric = 5;
-constexpr uint32_t kGoTypeFishingHole = 25;
 
 /// GAMEOBJECT_TYPE_FISHINGNODE: the bobber is reeled in from casting range.
 constexpr uint32_t kGoTypeFishingNode = 17;
@@ -45,6 +43,60 @@ constexpr float kGameObjectUseRange = 5.0f;
 /// the hover runs this every frame and the WMO test walks every group the
 /// ray's box reaches; past this, nothing occludes.
 constexpr float kOcclusionReach = 120.0f;
+
+/// What the stock client lets the mouse do with this object - see
+/// game_object_affordance.hpp for the rule; this only gathers its inputs.
+GameObjectAffordance affordanceOf(game::GameHandler& gameHandler, uint64_t guid,
+                                  const game::GameObject& go,
+                                  const game::GameObjectQueryResponseData* info) {
+    GameObjectAffordanceInput in;
+    if (info) {
+        in.type = info->type;
+        in.typeKnown = true;
+        if (info->hasData) in.data = info->data;
+    }
+
+    auto field = [&](game::UF f, uint32_t fallback) {
+        const uint16_t idx = game::fieldIndex(f);
+        return idx != 0xFFFF && go.hasField(idx) ? go.getField(idx) : fallback;
+    };
+    in.flags = field(game::UF::GAMEOBJECT_FLAGS, 0);
+    // An expansion whose layout does not name the dynamic field is taken as
+    // activated, so an INTERACT_COND object is not shut for want of a field
+    // this client cannot read.
+    in.dynamicFlags = game::fieldIndex(game::UF::GAMEOBJECT_DYNAMIC) != 0xFFFF
+                          ? field(game::UF::GAMEOBJECT_DYNAMIC, 0) & 0xFFFF
+                          : kGoDynActivate;
+
+    const uint64_t myGuid = gameHandler.getPlayerGuid();
+    const uint64_t creator =
+        (static_cast<uint64_t>(field(game::UF::GAMEOBJECT_FIELD_CREATED_BY_HI, 0)) << 32) |
+        field(game::UF::GAMEOBJECT_FIELD_CREATED_BY_LO, 0);
+    in.createdByPlayer = creator != 0 && creator == myGuid;
+    // A bobber lives exactly as long as the fishing channel, so the player's
+    // own bobber is their channel object.
+    in.playersChannelObject =
+        in.createdByPlayer || guid == gameHandler.getHookedFishingBobberGuid();
+
+    // Whose side it is on: its maker's, if that is a unit in view, else its
+    // own faction's, else nobody's.
+    auto maker = creator != 0 && creator != myGuid
+                     ? gameHandler.getEntityManager().getEntity(creator) : nullptr;
+    if (maker && maker->isUnit()) {
+        in.hostile = std::static_pointer_cast<game::Unit>(maker)->isHostile();
+    } else if (const uint32_t faction = field(game::UF::GAMEOBJECT_FACTION, 0); faction != 0) {
+        in.hostile = gameHandler.isHostileFactionPublic(faction);
+    }
+
+    const int questField = gameObjectQuestField(in.type);
+    if (in.data && questField >= 0 && static_cast<int32_t>(in.data[questField]) > 0) {
+        const uint32_t questId = in.data[questField];
+        for (const auto& q : gameHandler.getQuestLog()) {
+            if (q.questId == questId) { in.questInLog = true; break; }
+        }
+    }
+    return gameObjectAffordance(in);
+}
 
 bool isDeadUnit(const std::shared_ptr<game::Entity>& entity) {
     auto unit = std::dynamic_pointer_cast<game::Unit>(entity);
@@ -149,10 +201,17 @@ ScenePick pickScene(game::GameHandler& gameHandler,
         }
 
         const game::GameObjectQueryResponseData* goInfo = nullptr;
+        GameObjectAffordance goAffordance;
         if (type == game::ObjectType::GAMEOBJECT) {
             auto go = std::static_pointer_cast<game::GameObject>(entity);
             goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
             if (params.skipChairs && goInfo && goInfo->type == kGoTypeChair) continue;
+            // An object the mouse may not find is not there for it at all: no
+            // hit, no name, no cursor, and the ray carries on to whatever
+            // stands behind it. An instance portal's aura, a decorative column,
+            // a ship. The stock pick drops these before it tests a single one.
+            goAffordance = affordanceOf(gameHandler, guid, *go, goInfo);
+            if (!goAffordance.highlight) continue;
         }
 
         glm::vec3 hitCenter;
@@ -288,8 +347,9 @@ ScenePick pickScene(game::GameHandler& gameHandler,
                 }
             }
         } else if (type == game::ObjectType::GAMEOBJECT) {
-            const bool interactive = !goInfo || (goInfo->type != kGoTypeGeneric &&
-                                                 goInfo->type != kGoTypeFishingHole);
+            // Found, but perhaps not usable: a signpost or an anvil is named
+            // under the plain pointer and takes no click.
+            const bool interactive = goAffordance.interact;
             // How well the ray is aimed at this one, as a fraction of its own
             // size: nought is dead centre and one is a graze. Ranked by that
             // rather than by which centre is nearest along the ray, because
@@ -304,8 +364,8 @@ ScenePick pickScene(game::GameHandler& gameHandler,
                 pick.objectCenterT = centerT;
                 pick.objectGuid = guid;
             }
-            // Named whatever it is. Scenery takes no click and still says what
-            // it is when the pointer is on it, which is how a sign is read.
+            // Named whether or not it can be used. A sign takes no click and
+            // still says what it is when the pointer is on it.
             if (aim < pick.namedObjectAim) {
                 pick.namedObjectAim = aim;
                 pick.namedObjectGuid = guid;

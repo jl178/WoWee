@@ -128,6 +128,14 @@ enum class UF : uint16_t {
 
     // GameObject fields
     GAMEOBJECT_DISPLAYID,
+    /// Who made the object (two fields, low half first), its GO_FLAG_* bits
+    /// and the faction template it fights for. What the stock client asks
+    /// before letting the mouse find or use an object - see
+    /// ui/game_object_affordance.hpp.
+    GAMEOBJECT_FIELD_CREATED_BY_LO,
+    GAMEOBJECT_FIELD_CREATED_BY_HI,
+    GAMEOBJECT_FLAGS,
+    GAMEOBJECT_FACTION,
     GAMEOBJECT_BYTES_1,
     // MO_TRANSPORT route clock. LEVEL carries the route's period in ms; the high
     // int16 of DYNAMIC carries how far through that period the transport is, as a
