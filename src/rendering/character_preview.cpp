@@ -243,6 +243,15 @@ bool CharacterPreview::initialize(pipeline::AssetManager* am, int width, int hei
     return true;
 }
 
+void CharacterPreview::retire(std::unique_ptr<CharacterPreview> preview) {
+    if (!preview) return;
+    if (auto* r = core::Application::getInstance().getRenderer()) r->unregisterPreview(preview.get());
+    VkContext* ctx = preview->vkCtx_;
+    if (!ctx) return;
+    std::shared_ptr<CharacterPreview> held(std::move(preview));
+    ctx->deferAfterAllFrameFences([held]() mutable { held.reset(); });
+}
+
 void CharacterPreview::shutdown() {
     // Unregister from renderer before destroying resources
     auto* appRenderer = core::Application::getInstance().getRenderer();

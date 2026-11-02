@@ -599,7 +599,7 @@ void CharacterCreateScreen::drawScene(float screenW, float screenH) {
                              std::abs(static_cast<float>(preview_->getHeight()) - screenH) > 2.0f;
         previewResizeTimer_ = differs ? previewResizeTimer_ + ImGui::GetIO().DeltaTime : 0.0f;
         if (previewResizeTimer_ > 0.3f) {
-            preview_.reset();    // waits for the GPU and unregisters itself
+            rendering::CharacterPreview::retire(std::move(preview_));
             prevSceneDK_ = -1;   // the new preview takes the scene override again
             previewResizeTimer_ = 0.0f;
         }
