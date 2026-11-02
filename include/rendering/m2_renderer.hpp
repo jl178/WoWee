@@ -997,6 +997,11 @@ private:
     VkPipeline particlePipeline_ = VK_NULL_HANDLE;       // M2 emitter particles
     VkPipeline particleAdditivePipeline_ = VK_NULL_HANDLE; // Additive particle blend
     VkPipelineLayout particlePipelineLayout_ = VK_NULL_HANDLE;
+    // The same particles from compact records (see m2_particle_look.hpp):
+    // set 0 = perFrame, 1 = particleTex, 2 = the frame's curve buffer.
+    VkPipeline particleGpuPipeline_ = VK_NULL_HANDLE;
+    VkPipeline particleGpuAdditivePipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout particleGpuPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline smokePipeline_ = VK_NULL_HANDLE;           // Smoke particles
     VkPipelineLayout smokePipelineLayout_ = VK_NULL_HANDLE;
 
@@ -1165,6 +1170,17 @@ private:
     ::VkBuffer m2ParticleVB_ = VK_NULL_HANDLE;
     VmaAllocation m2ParticleVBAlloc_ = VK_NULL_HANDLE;
     void* m2ParticleVBMapped_ = nullptr;
+    // The GPU path's buffers, one of each per frame in flight: the particle
+    // records (vertex buffer) and the curves they index (storage buffer,
+    // bound as set 2 through instanceSetLayout_'s one-SSBO layout).
+    ::VkBuffer particleRecordBuf_[2] = {};
+    VmaAllocation particleRecordAlloc_[2] = {};
+    void* particleRecordMapped_[2] = {};
+    ::VkBuffer particleCurveBuf_[2] = {};
+    VmaAllocation particleCurveAlloc_[2] = {};
+    void* particleCurveMapped_[2] = {};
+    VkDescriptorPool particleCurveDescPool_ = VK_NULL_HANDLE;
+    VkDescriptorSet particleCurveSet_[2] = {};
     // Dedicated glow sprite vertex buffer (separate from particle VB to avoid data race)
     static constexpr size_t MAX_GLOW_SPRITES = 8000;
     ::VkBuffer glowVB_ = VK_NULL_HANDLE;
@@ -1257,9 +1273,10 @@ private:
     std::unordered_map<uint32_t, size_t> instanceIndexById;
     /// The generation gatherCandidates' per-thread cache keys on. Replaced
     /// (from nextGridLayoutGen) whenever its answer could change: an id filed
-    /// in or out of a cell, an id given a different index, or the instance
-    /// count changing, which the empty-answer fallback scans. A move that
-    /// stays inside its cells changes none of those and keeps it.
+    /// in or out of a cell, or an id given a different index. A move that
+    /// stays inside its cells changes none of those and keeps it. An empty
+    /// answer is cached like any other; only the opt-in scan on a miss
+    /// (WOWEE_COLLISION_SCAN_ON_MISS) is not.
     std::atomic<uint64_t> candidateLayoutGen_{nextGridLayoutGen()};
     void noteCandidateLayoutChanged() {
         candidateLayoutGen_.store(nextGridLayoutGen(), std::memory_order_relaxed);
@@ -1483,6 +1500,24 @@ private:
     /// Vertices the particle buffer holds. Not MAX_M2_PARTICLES, which is the
     /// cap on one instance's particles: this has to hold a whole frame's.
     static constexpr size_t MAX_M2_PARTICLE_VERTS = 32768;
+    /// Particles the GPU path draws per frame: 49152 records of 24 bytes is
+    /// the memory the 32768 nine-float vertices took. Dalaran has ~39k live
+    /// in view and the old budget drew 32k of them. WOWEE_PARTICLE_BUDGET
+    /// overrides it (32768 matches the CPU path for an A/B), read at init.
+    static constexpr uint32_t kDefaultParticleRecordBudget = 49152;
+    uint32_t particleRecordBudget_ = kDefaultParticleRecordBudget;
+    /// Distinct emitter curves the GPU path can upload per frame; an emitter
+    /// whose curve does not fit is not drawn that frame.
+    static constexpr uint32_t kMaxParticleCurvesPerFrame = 2048;
+    /// Where each emitter curve went in this frame's curve buffer, in vec4s.
+    std::unordered_map<const void*, uint32_t> particleCurveSlots_;
+    /// The two halves of renderM2Particles' fill: the CPU path writes nine
+    /// floats per particle into m2ParticleVB_ (WOWEE_PARTICLE_CPU_QUADS=1),
+    /// the GPU path a ParticleRecord into particleRecordBuf_[frame] and the
+    /// curves into particleCurveBuf_[frame]. Both fill particleRuns_ and
+    /// return how many particles they wrote.
+    size_t writeParticleVertsCpu();
+    size_t writeParticleRecordsGpu(uint32_t frame);
 
     // Animation update buffers (avoid per-frame allocation)
     std::vector<size_t> boneWorkIndices_;        // Reused each frame

@@ -1,6 +1,7 @@
 #include "rendering/m2_renderer.hpp"
 #include <unordered_set>
 #include "rendering/m2_renderer_internal.h"
+#include "rendering/m2_particle_look.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_buffer.hpp"
 #include "rendering/vk_texture.hpp"
@@ -776,64 +777,18 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     }
 }
 
-void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
-    if (!particlePipeline_ || !m2ParticleVB_) return;
-    // Diagnostic: WOWEE_M2_NO_PARTICLES=1 drops every M2 particle draw, which
-    // tells a particle artifact apart from a skinned-geometry one.
-    static const bool kNoParticles = envFlagEnabled("WOWEE_M2_NO_PARTICLES");
-    if (kNoParticles) return;
-
+size_t M2Renderer::writeParticleVertsCpu() {
     // Collect all particles from all instances, grouped by texture+blend.
-    // Reuse persistent map - keep the bucket structure, drop last frame's set.
-    for (auto& [k, g] : particleGroups_) {
-        g.preAllocSet = VK_NULL_HANDLE;
-    }
     auto& groups = particleGroups_;
 
     // Written straight into the mapped buffer rather than accumulated into a
     // vector per group and copied in afterwards; see ParticleRun.
-    if (!m2ParticleVBMapped_) return;
     float* const vbBase = static_cast<float*>(m2ParticleVBMapped_);
     uint32_t vbWritten = 0;
-    particleRuns_.clear();
     ParticleGroup* runGroup = nullptr;
 
     size_t totalParticles = 0;
 
-    // Only the instances that carry emitters, not every instance in the world.
-    //
-    // particleInstanceIndices_ is built and maintained for exactly this and
-    // the update path above already uses it; this pass walked all 66211
-    // instances instead, asking each whether its particle vector was empty.
-    // That walk was 2.0ms of a 16ms frame - two thirds of the M2 worker,
-    // which is the critical path of renderWorld. The smoke pass beside this
-    // one does the same kind of work against a flat list and costs 0.003ms.
-    // Two passes over the fixed vertex budget: emitters near the camera -
-    // spell kits, missiles, a campfire - claim it first. The budget was full
-    // of distant portals and lava every frame, and spell effects, created
-    // last and so at the end of the list, got no vertices at all.
-    //
-    // One walk sorts the drawable emitters into near and far, so each
-    // instance's cache lines are pulled in once rather than once per pass.
-    constexpr float kNearFirstSq = 80.0f * 80.0f;
-    particleDrawOrder_.clear();
-    size_t nearCount = 0;
-    for (size_t idx : particleInstanceIndices_) {
-        if (idx >= instances.size()) continue;
-        const auto& inst = instances[idx];
-        if (inst.particles.empty() || !inst.cachedModel) continue;
-        // Out of range: the update pass stopped stepping these, so what is
-        // left in the vector is stale and would be drawn frozen.
-        const glm::vec3 toCam = inst.position - cachedCamPos_;
-        const float d2 = glm::dot(toCam, toCam);
-        const bool fullRange = inst.spellVisual || inst.emissionStopped;
-        if (d2 > (fullRange ? cachedMaxRenderDistSq_ : particleRangeSq(inst, *inst.cachedModel))) continue;
-        // Off screen: no vertices for what cannot be seen.
-        if (inst.cachedPaddedRadius > 0.0f &&
-            !cachedFrustum_.intersectsSphere(inst.cachedCullCenter, inst.cachedPaddedRadius + 30.0f)) continue;
-        particleDrawOrder_.push_back(idx);
-        if (d2 <= kNearFirstSq) std::swap(particleDrawOrder_[nearCount++], particleDrawOrder_.back());
-    }
     for (size_t idx : particleDrawOrder_) {
         auto& inst = instances[idx];
         const auto& gpu = *inst.cachedModel;
@@ -1023,6 +978,226 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
             }
         }
     }
+    return totalParticles;
+}
+
+size_t M2Renderer::writeParticleRecordsGpu(uint32_t frame) {
+    // The same walk as writeParticleVertsCpu - same emitters, same order,
+    // same runs and groups - writing 24 bytes per particle instead of 36,
+    // with nothing worked out per particle but its life ratio and tile.
+    // Colour, alpha and size are m2_particle_gpu.vert's, from the emitter's
+    // curve table uploaded here once per frame per distinct curve (instances
+    // of one model share theirs) and the class flags in the record.
+    using Curve = M2ModelGPU::ParticleCurve;
+    using m2_particle::ParticleRecord;
+    static_assert(Curve::kSteps == m2_particle::kCurveSteps,
+                  "the shader's curve layout assumes ParticleCurve's resolution");
+    auto& groups = particleGroups_;
+    auto* const recBase = static_cast<ParticleRecord*>(particleRecordMapped_[frame]);
+    auto* const curveData = static_cast<glm::vec4*>(particleCurveMapped_[frame]);
+    const uint32_t budget = particleRecordBudget_;
+    uint32_t written = 0;
+    uint32_t curvesUsed = 0;
+    particleCurveSlots_.clear();
+    ParticleGroup* runGroup = nullptr;
+    constexpr float invAnimMs = 1.0f / 1000.0f;
+
+    for (size_t idx : particleDrawOrder_) {
+        if (written >= budget) break;
+        const auto& inst = instances[idx];
+        const auto& gpu = *inst.cachedModel;
+        // Made by the model's first emit, so a model with live particles has
+        // them; the CPU path's FBlock fallback has nothing to do here.
+        if (gpu.particleCurves.size() != gpu.particleEmitters.size()) continue;
+        const bool isFlameFixture = gpu.isLanternLike || gpu.isTorch ||
+                                    gpu.isBrazierOrFire || gpu.isKoboldFlame;
+
+        int lastEmitterIdx = -1;
+        bool emitterDrawn = false;
+        ParticleGroup* cachedGroup = nullptr;
+        uint32_t cachedCurveBase = 0;
+        uint32_t cachedFlags = 0;
+        uint32_t cachedTotalTiles = 1;
+        uint32_t cachedAnimFrame = 0;
+        bool cachedIsTiled = false;
+        float highestParticleZ = -std::numeric_limits<float>::max();
+
+        for (const auto& p : inst.particles) {
+            if (p.emitterIndex >= gpu.particleEmitters.size()) continue;
+
+            if (p.emitterIndex != lastEmitterIdx) {
+                lastEmitterIdx = p.emitterIndex;
+                const auto& em = gpu.particleEmitters[p.emitterIndex];
+
+                VkTexture* tex = whiteTexture_.get();
+                if (p.emitterIndex < static_cast<int>(gpu.particleTextures.size())) {
+                    tex = gpu.particleTextures[p.emitterIndex];
+                }
+                const uint16_t tilesX = std::max<uint16_t>(em.textureCols, 1);
+                const uint16_t tilesY = std::max<uint16_t>(em.textureRows, 1);
+                cachedTotalTiles = static_cast<uint32_t>(tilesX) * static_cast<uint32_t>(tilesY);
+                const uint16_t blendType = em.blendingType;
+                ParticleGroupKey key{.texture = tex, .blendType = static_cast<uint8_t>(blendType), .tilesX = tilesX, .tilesY = tilesY};
+                cachedGroup = &groups[key];
+                cachedGroup->texture = tex;
+                cachedGroup->blendType = blendType;
+                cachedGroup->tilesX = tilesX;
+                cachedGroup->tilesY = tilesY;
+                if (cachedGroup->preAllocSet == VK_NULL_HANDLE &&
+                    p.emitterIndex < static_cast<int>(gpu.particleTexSets.size())) {
+                    cachedGroup->preAllocSet = gpu.particleTexSets[p.emitterIndex];
+                }
+
+                cachedIsTiled = (em.flags & kParticleFlagTiled) && cachedTotalTiles > 1;
+                if (cachedIsTiled) {
+                    float animSeconds = inst.animTime * invAnimMs;
+                    cachedAnimFrame = static_cast<uint32_t>(std::floor(animSeconds * cachedTotalTiles))
+                                      % cachedTotalTiles;
+                }
+                cachedFlags = m2_particle::lookFlagsFor(gpu.isSpellEffect, gpu.isFireflyEffect,
+                                                        isFlameFixture, blendType);
+
+                // This emitter's curve, uploaded the first time this frame
+                // anything uses it.
+                const Curve& curve = gpu.particleCurves[p.emitterIndex];
+                auto [slot, fresh] = particleCurveSlots_.try_emplace(&curve, 0u);
+                if (fresh) {
+                    if (curvesUsed >= kMaxParticleCurvesPerFrame) {
+                        particleCurveSlots_.erase(slot);
+                        emitterDrawn = false;
+                        static bool saidFull = false;
+                        if (!saidFull) {
+                            saidFull = true;
+                            LOG_WARNING("Particle curve buffer full (", kMaxParticleCurvesPerFrame,
+                                        " curves): emitters past it are not drawn");
+                        }
+                        continue;
+                    }
+                    slot->second = curvesUsed * m2_particle::kCurveVec4s;
+                    m2_particle::packCurve(curve.colorAlpha, curve.scale, curveData + slot->second);
+                    ++curvesUsed;
+                }
+                cachedCurveBase = slot->second;
+                emitterDrawn = true;
+            }
+            if (!emitterDrawn) continue;
+
+            if (written >= budget) break;
+            if (cachedGroup != runGroup) {
+                runGroup = cachedGroup;
+                particleRuns_.push_back({.group = cachedGroup, .first = written, .count = 0});
+            }
+            highestParticleZ = std::max(highestParticleZ, p.position.z);
+
+            ParticleRecord& r = recBase[written];
+            r.position = p.position;
+            r.lifeRatio = p.life / std::max(p.maxLife, 0.001f);
+            r.curveBase = cachedCurveBase;
+            r.tileFlags = m2_particle::packTileFlags(
+                m2_particle::particleTile(p.tileIndex, cachedIsTiled, cachedAnimFrame, cachedTotalTiles),
+                cachedFlags);
+            ++written;
+            ++particleRuns_.back().count;
+        }
+
+        // The same once-per-model report as the CPU path's. The size is not
+        // worked out here any more, so the largest is found only when the
+        // report is actually made.
+        if (highestParticleZ > -std::numeric_limits<float>::max()) {
+            const float reach = highestParticleZ - inst.position.z;
+            if (reach > 8.0f) {
+                static std::set<std::string> saidTall;
+                if (saidTall.insert(gpu.name).second) {
+                    float widestParticle = 0.0f;
+                    for (const auto& p : inst.particles) {
+                        if (p.emitterIndex >= gpu.particleEmitters.size()) continue;
+                        const auto& c = gpu.particleCurves[p.emitterIndex];
+                        const uint32_t flags = m2_particle::lookFlagsFor(
+                            gpu.isSpellEffect, gpu.isFireflyEffect, isFlameFixture,
+                            gpu.particleEmitters[p.emitterIndex].blendingType);
+                        widestParticle = std::max(widestParticle, m2_particle::lookFromCurve(
+                            c.colorAlpha, c.scale, p.life / std::max(p.maxLife, 0.001f), flags).scale);
+                    }
+                    LOG_WARNING("Particles reach ", reach, " yd above '", gpu.name,
+                                "' (model bound ", gpu.boundMax.z, " yd, scale ", inst.scale,
+                                ", ", gpu.particleEmitters.size(), " emitters, ",
+                                inst.particles.size(), " live, largest ", widestParticle, " yd)");
+                }
+            }
+        }
+    }
+    return written;
+}
+
+void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+    if (!particlePipeline_ || !m2ParticleVB_) return;
+    // Diagnostic: WOWEE_M2_NO_PARTICLES=1 drops every M2 particle draw, which
+    // tells a particle artifact apart from a skinned-geometry one.
+    static const bool kNoParticles = envFlagEnabled("WOWEE_M2_NO_PARTICLES");
+    if (kNoParticles) return;
+
+    // Two ways to fill the frame's particles. By default one compact record
+    // per particle, colour and size worked out in m2_particle_gpu.vert;
+    // WOWEE_PARTICLE_CPU_QUADS=1 is the path that worked them out here and
+    // wrote nine floats each, kept for A/B. Both draw the same point sprites
+    // through the same fragment shader. The GPU path also falls back to the
+    // CPU one if its shader or buffers are missing.
+    static const bool kCpuQuads = envFlagEnabled("WOWEE_PARTICLE_CPU_QUADS");
+    const uint32_t frame = vkCtx_->getCurrentFrame() % 2;
+    const bool gpuPath = !kCpuQuads && particleGpuPipeline_ && particleGpuAdditivePipeline_ &&
+                         particleRecordMapped_[frame] && particleCurveMapped_[frame] &&
+                         particleCurveSet_[frame];
+    static bool saidPath = false;
+    if (!saidPath) {
+        saidPath = true;
+        LOG_INFO("M2 particles: ", gpuPath ? "compact records, look in the vertex shader (budget "
+                                           : "CPU-built vertices (budget ",
+                 gpuPath ? particleRecordBudget_ : static_cast<uint32_t>(MAX_M2_PARTICLE_VERTS), ")",
+                 (!gpuPath && !kCpuQuads) ? " - GPU path unavailable, m2_particle_gpu.vert.spv missing?" : "");
+    }
+    if (!gpuPath && !m2ParticleVBMapped_) return;
+
+    // Reuse persistent map - keep the bucket structure, drop last frame's set.
+    for (auto& [k, g] : particleGroups_) {
+        g.preAllocSet = VK_NULL_HANDLE;
+    }
+    particleRuns_.clear();
+
+    // Only the instances that carry emitters, not every instance in the world.
+    //
+    // particleInstanceIndices_ is built and maintained for exactly this and
+    // the update path above already uses it; this pass walked all 66211
+    // instances instead, asking each whether its particle vector was empty.
+    // That walk was 2.0ms of a 16ms frame - two thirds of the M2 worker,
+    // which is the critical path of renderWorld. The smoke pass beside this
+    // one does the same kind of work against a flat list and costs 0.003ms.
+    // Two passes over the fixed vertex budget: emitters near the camera -
+    // spell kits, missiles, a campfire - claim it first. The budget was full
+    // of distant portals and lava every frame, and spell effects, created
+    // last and so at the end of the list, got no vertices at all.
+    //
+    // One walk sorts the drawable emitters into near and far, so each
+    // instance's cache lines are pulled in once rather than once per pass.
+    constexpr float kNearFirstSq = 80.0f * 80.0f;
+    particleDrawOrder_.clear();
+    size_t nearCount = 0;
+    for (size_t idx : particleInstanceIndices_) {
+        if (idx >= instances.size()) continue;
+        const auto& inst = instances[idx];
+        if (inst.particles.empty() || !inst.cachedModel) continue;
+        // Out of range: the update pass stopped stepping these, so what is
+        // left in the vector is stale and would be drawn frozen.
+        const glm::vec3 toCam = inst.position - cachedCamPos_;
+        const float d2 = glm::dot(toCam, toCam);
+        const bool fullRange = inst.spellVisual || inst.emissionStopped;
+        if (d2 > (fullRange ? cachedMaxRenderDistSq_ : particleRangeSq(inst, *inst.cachedModel))) continue;
+        // Off screen: no vertices for what cannot be seen.
+        if (inst.cachedPaddedRadius > 0.0f &&
+            !cachedFrustum_.intersectsSphere(inst.cachedCullCenter, inst.cachedPaddedRadius + 30.0f)) continue;
+        particleDrawOrder_.push_back(idx);
+        if (d2 <= kNearFirstSq) std::swap(particleDrawOrder_[nearCount++], particleDrawOrder_.back());
+    }
+    const size_t totalParticles = gpuPath ? writeParticleRecordsGpu(frame) : writeParticleVertsCpu();
 
     // Periodic diagnostic: spell effect particle count
     {
@@ -1046,12 +1221,20 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
     particleRunsDrawn_.store(static_cast<uint32_t>(particleRuns_.size()), std::memory_order_relaxed);
     if (totalParticles == 0) return;
 
-    // Bind per-frame set (set 0) for particle pipeline
+    // Bind per-frame set (set 0) for particle pipeline, and on the GPU path
+    // the frame's curves (set 2), which stay bound across the runs.
+    const VkPipelineLayout layout = gpuPath ? particleGpuPipelineLayout_ : particlePipelineLayout_;
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            particlePipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
+                            layout, 0, 1, &perFrameSet, 0, nullptr);
+    if (gpuPath) {
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                layout, 2, 1, &particleCurveSet_[frame], 0, nullptr);
+    }
 
     VkDeviceSize vbOffset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &m2ParticleVB_, &vbOffset);
+    vkCmdBindVertexBuffers(cmd, 0, 1, gpuPath ? &particleRecordBuf_[frame] : &m2ParticleVB_, &vbOffset);
+    VkPipeline const alphaPipe = gpuPath ? particleGpuPipeline_ : particlePipeline_;
+    VkPipeline const additivePipe = gpuPath ? particleGpuAdditivePipeline_ : particleAdditivePipeline_;
 
     VkPipeline currentPipeline = VK_NULL_HANDLE;
 
@@ -1061,7 +1244,7 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
 
         uint8_t blendType = group.blendType;
         VkPipeline desiredPipeline = (blendType == 3 || blendType == 4)
-            ? particleAdditivePipeline_ : particlePipeline_;
+            ? additivePipe : alphaPipe;
         if (desiredPipeline != currentPipeline) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
             currentPipeline = desiredPipeline;
@@ -1091,7 +1274,7 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
         }
         if (texSet != VK_NULL_HANDLE) {
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    particlePipelineLayout_, 1, 1, &texSet, 0, nullptr);
+                                    layout, 1, 1, &texSet, 0, nullptr);
         }
 
         // Push constants: tileCount + alphaKey
@@ -1099,7 +1282,7 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
             .tileX = static_cast<float>(group.tilesX), .tileY = static_cast<float>(group.tilesY),
             .alphaKey = (blendType == 1) ? 1 : 0
         };
-        vkCmdPushConstants(cmd, particlePipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+        vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                            sizeof(pc), &pc);
 
         // The vertices are already in the buffer, at this run's own offset.
