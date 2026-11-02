@@ -23,8 +23,11 @@
 #include "pipeline/blp_loader.hpp"
 #include "core/logger.hpp"
 #include "core/profiler.hpp"
+#include <atomic>
+#include <bit>
 #include <chrono>
 #include <cctype>
+#include <mutex>
 #include <cstring>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -1306,8 +1309,19 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
 }
 
 void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera) {
-    if (instances.empty() || !opaquePipeline_) {
+    if (!cullForRecording(camera)) return;
+    // Validate per-frame descriptor set before any Vulkan commands
+    if (!perFrameSet) {
+        LOG_ERROR("M2Renderer::render: perFrameSet is VK_NULL_HANDLE - skipping M2 render");
         return;
+    }
+    recordPart(cmd, perFrameSet, 0, 1);
+    recordGlowSprites(cmd, perFrameSet);
+}
+
+bool M2Renderer::cullForRecording(const Camera& camera) {
+    if (instances.empty() || !opaquePipeline_) {
+        return false;
     }
 
     // Debug: log once when we start rendering
@@ -1341,14 +1355,18 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
 
     // Reuse persistent buffers (clear instead of reallocating)
     glowSprites_.clear();
+    glowSpritesB_.clear();
+    recordCounts_[0] = {};
+    recordCounts_[1] = {};
 
     lastDrawCallCount = 0;
-    const float lavaAnimSeconds = std::chrono::duration<float>(
+    recordLavaSeconds_ = std::chrono::duration<float>(
         std::chrono::steady_clock::now() - kLavaAnimStart).count();
 
     // GPU cull results - dispatchCullCompute() already updated smoothedRenderDist_.
     // Use the cached value (set by dispatchCullCompute or fallback below).
     const uint32_t frameIndex = vkCtx_->getCurrentFrame();
+    recordFrameIndex_ = frameIndex;
     const uint32_t numInstances = std::min(static_cast<uint32_t>(instances.size()), MAX_CULL_INSTANCES);
     const uint32_t* visibility = static_cast<const uint32_t*>(cullOutputMapped_[frameIndex]);
     const bool gpuCullAvailable = (cullPipeline_ != VK_NULL_HANDLE && visibility != nullptr);
@@ -1442,17 +1460,16 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         maxRenderDistanceSq = smoothedRenderDist_ * smoothedRenderDist_;
     }
 
-    const float fadeStartFraction = 0.75f;
     const glm::vec3 camPos = camera.getPosition();
+    recordCamPos_ = camPos;
 
     // Where this pass's three milliseconds go.
     //
     // Recording the M2 secondary is the largest single piece of CPU work in
     // the frame - renderWorld waits on the slowest worker and this is always
     // it - and the stage around it cannot see whether that is the cull, the
-    // sort or the recording itself.
-    static const bool m2Profile = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
-    const auto m2T0 = std::chrono::steady_clock::now();
+    // sort or the recording itself. Reported by recordGlowSprites.
+    recordT0_ = std::chrono::steady_clock::now();
 
     // Build sorted visible instance list
     sortedVisible_.clear();
@@ -1675,18 +1692,106 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             visibleRunBounds.swap(next);
         }
     }
-    const auto m2T2 = std::chrono::steady_clock::now();
-    // Reported at the end of the pass; see m2Profile above.
-    struct M2Phases { double cull, sort, record; std::size_t visible, instances; };
-    const auto sayPhases = [&](const M2Phases& p) {
-        static auto lastSaid = std::chrono::steady_clock::now();
-        const auto now = std::chrono::steady_clock::now();
-        if (now - lastSaid <= std::chrono::seconds(10)) return;
-        lastSaid = now;
-        LOG_WARNING("  m2 record: cull ", p.cull, "ms, sort ", p.sort,
-                    "ms, draws ", p.record, "ms over ", p.visible,
-                    " visible of ", p.instances, " instances");
-    };
+    // Back to front for the blended pass. Sorted here rather than where that
+    // pass is recorded, so the sort counts as sorting in the profile line.
+    std::sort(transparentVisible_.begin(), transparentVisible_.end(),
+              [](const VisibleEntry& a, const VisibleEntry& b) { return a.distSq > b.distSq; });
+    recordT2_ = std::chrono::steady_clock::now();
+    recordT1_ = m2T1;
+
+    // Reset instance SSBO write cursor for this frame
+    instanceDataCount_.store(0, std::memory_order_relaxed);
+    opaqueSplit_ = sortedVisible_.size();
+    return true;
+}
+
+uint32_t M2Renderer::recordPartsWanted() {
+    // The M2 worker is the critical path of renderWorld once the WMO pass is
+    // split, and most of its time is the opaque pass: on this driver a draw
+    // is encoded as it is recorded, so the cost follows the draw count, plus
+    // the instance buffer writes. The opaque groups are cut in two at a model
+    // boundary. The first share is recorded on another worker into a buffer
+    // executed ahead of this one, the rest here, followed by the blended
+    // pass, which has to stay in one buffer and after every opaque draw. The
+    // draws reach the GPU in the order a single buffer would give them.
+    //
+    // WOWEE_M2_ONE_WORKER=1 keeps the whole pass on one buffer.
+    static const bool oneWorker = envFlagEnabled("WOWEE_M2_ONE_WORKER");
+    opaqueSplit_ = sortedVisible_.size();
+    if (oneWorker || skyMode_ || sortedVisible_.size() < 256) return 1;
+
+    // Weighed in draws rather than instances: a group's draws are its batches
+    // at one level of detail, and a draw costs the driver several times what
+    // writing one instance entry costs. Groups the pass will skip still count
+    // their instances, which keeps the estimate simple and costs nothing.
+    constexpr uint32_t kDrawWeight = 4;
+    std::vector<std::pair<size_t, uint32_t>>& groups = splitGroups_;  // (end, weight)
+    groups.clear();
+    uint64_t opaqueWeight = 0;
+    for (size_t vi = 0; vi < sortedVisible_.size();) {
+        const uint32_t modelId = sortedVisible_[vi].modelId;
+        size_t ge = vi;
+        while (ge < sortedVisible_.size() && sortedVisible_[ge].modelId == modelId) ++ge;
+        uint32_t weight = static_cast<uint32_t>(ge - vi);
+        const uint32_t first = sortedVisible_[vi].index;
+        if (first < instances.size() && instances[first].cachedModel) {
+            const M2ModelGPU& model = *instances[first].cachedModel;
+            const uint32_t levels = std::max(1, std::popcount(static_cast<unsigned>(model.availableLODs)));
+            weight += kDrawWeight * static_cast<uint32_t>(model.batches.size() / levels + 1);
+        }
+        groups.emplace_back(ge, weight);
+        opaqueWeight += weight;
+        vi = ge;
+    }
+    // The blended pass is a draw per layer per instance, and it rides with
+    // the second share, so the first takes half of both.
+    const uint64_t blendedWeight = uint64_t(kDrawWeight) * 2 * transparentVisible_.size();
+    const uint64_t target = std::min(opaqueWeight, (opaqueWeight + blendedWeight) / 2);
+    uint64_t running = 0;
+    for (const auto& [groupEnd, weight] : groups) {
+        running += weight;
+        if (running >= target) {
+            opaqueSplit_ = groupEnd;
+            break;
+        }
+    }
+    // The first share may take every opaque group when the blended pass
+    // outweighs them; with nothing blended either, there is nothing to split.
+    if (opaqueSplit_ >= sortedVisible_.size() && transparentVisible_.empty()) {
+        opaqueSplit_ = sortedVisible_.size();
+        return 1;
+    }
+    return 2;
+}
+
+uint32_t M2Renderer::claimInstanceSlots(uint32_t count, bool allOrNothing, uint32_t& base) {
+    uint32_t cur = instanceDataCount_.load(std::memory_order_relaxed);
+    uint32_t take;
+    do {
+        if (cur >= MAX_INSTANCE_DATA) return 0;
+        take = std::min(count, MAX_INSTANCE_DATA - cur);
+        if (allOrNothing && take < count) return 0;
+        if (take == 0) return 0;
+    } while (!instanceDataCount_.compare_exchange_weak(cur, cur + take, std::memory_order_relaxed));
+    base = cur;
+    return take;
+}
+
+void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                            uint32_t part, uint32_t parts) {
+    if (!perFrameSet || part >= parts || parts > 2) return;
+    // Part 0 holds the opaque groups before the split, the last part the rest
+    // and the blended pass. With one part that is all of it, in the order the
+    // single-buffer pass always recorded.
+    const bool lastPart = part + 1 == parts;
+    const size_t opaqueBegin = part == 0 ? 0 : opaqueSplit_;
+    const size_t opaqueEnd = lastPart ? sortedVisible_.size() : opaqueSplit_;
+    RecordCounts& counts = recordCounts_[part];
+    std::vector<GlowSprite>& glowOut = part == 0 ? glowSprites_ : glowSpritesB_;
+    const uint32_t frameIndex = recordFrameIndex_;
+    const glm::vec3 camPos = recordCamPos_;
+    const float lavaAnimSeconds = recordLavaSeconds_;
+    constexpr float fadeStartFraction = 0.75f;
 
     uint32_t currentModelId = UINT32_MAX;
     const M2ModelGPU* currentModel = nullptr;
@@ -1729,12 +1834,6 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         pc.plantHeight = sway.plantHeight;
     };
 
-    // Validate per-frame descriptor set before any Vulkan commands
-    if (!perFrameSet) {
-        LOG_ERROR("M2Renderer::render: perFrameSet is VK_NULL_HANDLE - skipping M2 render");
-        return;
-    }
-
     // Bind per-frame descriptor set (set 0) - shared across all draws
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             pipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
@@ -1759,8 +1858,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                                 pipelineLayout_, 3, 1, &instanceSet_[frameIndex], 0, nullptr);
     }
 
-    // Reset instance SSBO write cursor for this frame
-    instanceDataCount_ = 0;
+    // The instance buffer is shared by the parts; each claims its ranges.
     auto* instSSBO = static_cast<M2InstanceGPU*>(instanceMapped_[frameIndex]);
 
     // =====================================================================
@@ -1781,12 +1879,13 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         std::vector<PendingInstance> pending;
         pending.reserve(128);
 
-        size_t visStart = 0;
-        while (visStart < sortedVisible_.size()) {
+        // This part's groups; the split always falls on a model boundary.
+        size_t visStart = opaqueBegin;
+        while (visStart < opaqueEnd) {
             // Find group of consecutive entries with same modelId
             uint32_t groupModelId = sortedVisible_[visStart].modelId;
             size_t groupEnd = visStart;
-            while (groupEnd < sortedVisible_.size() && sortedVisible_[groupEnd].modelId == groupModelId)
+            while (groupEnd < opaqueEnd && sortedVisible_[groupEnd].modelId == groupModelId)
                 groupEnd++;
 
             // Pull the model through the first entry's instance.cachedModel pointer
@@ -1808,6 +1907,10 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
 
             bool modelNeedsAnimation = model.hasAnimation && !model.disableAnimation;
             const bool foliageLikeModel = model.isFoliageLike;
+            // The sway half of the push constants is the model's, not the
+            // batch's: worked out once for the group's draws.
+            M2PushConstants groupSway{};
+            fillSway(groupSway, model, skyMode_);
             const bool particleDominantEffect = model.isSpellEffect &&
                 !model.particleEmitters.empty() && model.batches.size() <= 2;
 
@@ -1817,6 +1920,15 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 const auto& entry = sortedVisible_[vi];
                 if (entry.index >= instances.size()) continue;
                 auto& instance = instances[entry.index];
+                // The instances of a group are scattered through the array,
+                // and each is read on two lines here and below (its matrix,
+                // and the line after it - see M2Instance). Asked for a few
+                // entries ahead so the misses overlap instead of queueing.
+                if (vi + 4 < groupEnd && sortedVisible_[vi + 4].index < instances.size()) {
+                    const M2Instance& ahead = instances[sortedVisible_[vi + 4].index];
+                    __builtin_prefetch(&ahead.modelMatrix);
+                    __builtin_prefetch(&ahead.boneMatrices);
+                }
 
                 // Distance-based fade alpha
                 float fadeFrac = model.disableAnimation ? 0.55f : fadeStartFraction;
@@ -1865,12 +1977,13 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             vkCmdBindIndexBuffer(cmd, model.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
             // Write base instance data to SSBO (uvOffset=0 - overridden for tex-anim batches)
-            uint32_t baseSSBOOffset = instanceDataCount_;
-            size_t writtenInstances = 0;
-            for (const auto& p : pending) {
-                if (instanceDataCount_ >= MAX_INSTANCE_DATA) break;
+            uint32_t baseSSBOOffset = 0;
+            const size_t writtenInstances = claimInstanceSlots(
+                static_cast<uint32_t>(pending.size()), false, baseSSBOOffset);
+            for (size_t k = 0; k < writtenInstances; ++k) {
+                const auto& p = pending[k];
                 auto& inst = instances[p.instanceIdx];
-                auto& e = instSSBO[instanceDataCount_];
+                auto& e = instSSBO[baseSSBOOffset + k];
                 e.model = inst.modelMatrix;
                 e.uvOffset = glm::vec2(0.0f);
                 e.fadeAlpha = p.fadeAlpha;
@@ -1879,8 +1992,6 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 e.boneCount = static_cast<int32_t>(inst.boneMatrices.size());
                 e.highlight = inst.highlight;
                 e.flags = (inst.afloat > 0 ? 1 : 0) | inst.groundNormalFlags;
-                instanceDataCount_++;
-                ++writtenInstances;
             }
 
             // Drop what did not fit. The loop above stops writing at the cap,
@@ -1896,9 +2007,8 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             // same order, so cutting the tail cuts whole instances rather than
             // splitting a range.
             if (writtenInstances < pending.size()) {
-                static bool warnedInstanceCap = false;
-                if (!warnedInstanceCap) {
-                    warnedInstanceCap = true;
+                static std::atomic<bool> warnedInstanceCap{false};
+                if (!warnedInstanceCap.exchange(true)) {
                     LOG_WARNING("M2Renderer: instance buffer full at ", MAX_INSTANCE_DATA,
                                 "; dropping ", pending.size() - writtenInstances,
                                 " instances of '", model.name, "' this frame");
@@ -1967,7 +2077,10 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     else if (!skyBatchAllowed(skyMode_, bi)) skipped = "sky batch rule";
                     else if (suppressBakedStars_ && batch.starLayer) skipped = "baked star layer";
                     if (diagThisModel) {
+                        // Both parts can match the name; see recordPartsWanted.
+                        static std::mutex saidDrawMutex;
                         static std::set<std::pair<const void*, size_t>> saidDraw;
+                        std::lock_guard<std::mutex> saidLock(saidDrawMutex);
                         if (saidDraw.size() < 64 && saidDraw.insert({&model, bi}).second) {
                             LOG_WARNING("M2 DRAW '", model.name, "' batch ", bi,
                                         " lod=", lod, " submeshLevel=", batch.submeshLevel,
@@ -2093,7 +2206,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                                 gs.color.a *= flicker;
                                 gs.size    *= 0.98f + 0.02f * flicker;
                             }
-                            glowSprites_.push_back(gs);
+                            glowOut.push_back(gs);
                             GlowSprite halo = gs;
                             halo.color.a *= batch.preserveGlowMesh ? 0.34f : 0.42f;
                             halo.size *= batch.preserveGlowMesh ? 2.2f : 1.8f;
@@ -2103,7 +2216,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                                 constexpr float kMaxFireHaloRadius = 0.85f;
                                 halo.size = std::min(halo.size, kMaxFireHaloRadius * inst.scale);
                             }
-                            glowSprites_.push_back(halo);
+                            glowOut.push_back(halo);
                         }
                         if (m2GlowSpriteReplacesMesh(glowCard)) continue;
                     }
@@ -2121,8 +2234,9 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     bool hasBatchTexAnim = (batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation)
                                            || model.isLavaModel;
                     uint32_t drawOffset = groupSSBOOffset;
-                    if (hasBatchTexAnim && instanceDataCount_ + groupSize <= MAX_INSTANCE_DATA) {
-                        drawOffset = instanceDataCount_;
+                    uint32_t animBase = 0;
+                    if (hasBatchTexAnim && claimInstanceSlots(groupSize, true, animBase) == groupSize) {
+                        drawOffset = animBase;
                         // Hoist per-batch lookups: the transform pointer is fixed for
                         // every instance in this group; only the sampled translation
                         // varies (per-instance animTime).
@@ -2155,7 +2269,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             // out of the base entry. instSSBO lives in write-combined
                             // upload memory: writing it is cheap, but reading it back is
                             // uncached and costs microseconds per instance.
-                            auto& e = instSSBO[instanceDataCount_];
+                            auto& e = instSSBO[animBase + (j - lodIdx)];
                             e.model = inst.modelMatrix;
                             e.uvOffset = uvOffset;
                             e.fadeAlpha = p.fadeAlpha;
@@ -2164,7 +2278,6 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             e.boneCount = static_cast<int32_t>(inst.boneMatrices.size());
                             e.highlight = inst.highlight;
                             e.flags = (inst.afloat > 0 ? 1 : 0) | inst.groundNormalFlags;
-                            instanceDataCount_++;
                         }
                     }
 
@@ -2270,14 +2383,13 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     }
 
                     // Push constants + instanced draw
-                    M2PushConstants pc;
+                    M2PushConstants pc = groupSway;
                     pc.texCoordSet = static_cast<int32_t>(batch.textureUnit);
-                    fillSway(pc, model, skyMode_);
                     pc.instanceDataOffset = static_cast<int32_t>(drawOffset);
                     vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
                     vkCmdDrawIndexed(cmd, batch.indexCount, groupSize, batch.indexStart, 0, 0);
-                    if (skyMode_) ++skyDiagDrawsOpaque_;
-                    lastDrawCallCount++;
+                    if (skyMode_) ++counts.skyOpaque;
+                    counts.draws++;
                 }
 
                 lodIdx = lodEnd;
@@ -2292,9 +2404,17 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     // =====================================================================
     // Transparent geometry must be drawn individually per instance in back-to-
     // front order for correct alpha compositing.  Each draw writes one
-    // M2InstanceGPU entry and issues a single-instance indexed draw.
-    std::sort(transparentVisible_.begin(), transparentVisible_.end(),
-              [](const VisibleEntry& a, const VisibleEntry& b) { return a.distSq > b.distSq; });
+    // M2InstanceGPU entry and issues a single-instance indexed draw. Sorted
+    // back to front in cullForRecording; recorded by the last part only, so
+    // it stays in one buffer after every opaque draw.
+    //
+    // With two parts this runs while the other part records its opaque
+    // groups. The two share no command buffer, and claim instance slots
+    // through claimInstanceSlots. The one material block both may write is
+    // an opaque layer of a faded instance whose model is also drawn unfaded,
+    // and both passes write it the same values (interiorDarken, the colour
+    // key threshold for blend modes 0 and 1, volumetricBeam, fireCard).
+    if (!lastPart) return;
 
     currentModelId = UINT32_MAX;
     currentModel = nullptr;
@@ -2436,9 +2556,9 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             }
 
             // Write single instance entry to SSBO
-            if (instanceDataCount_ >= MAX_INSTANCE_DATA) continue;
-            uint32_t drawOffset = instanceDataCount_;
-            auto& e = instSSBO[instanceDataCount_];
+            uint32_t drawOffset = 0;
+            if (claimInstanceSlots(1, true, drawOffset) == 0) continue;
+            auto& e = instSSBO[drawOffset];
             e.model = instance.modelMatrix;
             e.uvOffset = uvOffset;
             e.fadeAlpha = instanceFadeAlpha;
@@ -2447,7 +2567,6 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             e.boneCount = static_cast<int32_t>(instance.boneMatrices.size());
             e.highlight = instance.highlight;
             e.flags = (instance.afloat > 0 ? 1 : 0) | instance.groundNormalFlags;
-            instanceDataCount_++;
 
             // Pipeline selection
             uint8_t effectiveBlendMode = batch.blendMode;
@@ -2520,10 +2639,23 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             pc.instanceDataOffset = static_cast<int32_t>(drawOffset);
             vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
             vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
-            if (skyMode_) ++skyDiagDrawsTransparent_;
-            lastDrawCallCount++;
+            if (skyMode_) ++counts.skyTransparent;
+            counts.draws++;
         }
     }
+}
+
+void M2Renderer::recordGlowSprites(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+    // Both parts are done: their counts and sprites come together here, the
+    // sprites in the order one part would have generated them.
+    lastDrawCallCount = recordCounts_[0].draws + recordCounts_[1].draws;
+    skyDiagDrawsOpaque_ = recordCounts_[0].skyOpaque + recordCounts_[1].skyOpaque;
+    skyDiagDrawsTransparent_ = recordCounts_[0].skyTransparent + recordCounts_[1].skyTransparent;
+    if (!glowSpritesB_.empty()) {
+        glowSprites_.insert(glowSprites_.end(), glowSpritesB_.begin(), glowSpritesB_.end());
+        glowSpritesB_.clear();
+    }
+    if (!perFrameSet) return;
 
     // Render glow sprites as billboarded additive point lights
     if (!glowSprites_.empty() && particleAdditivePipeline_ && glowVB_ && glowTexDescSet_) {
@@ -2578,16 +2710,23 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         skyDiagLastTransparent_ = skyDiagDrawsTransparent_;
     }
 
+    // Where this pass's time goes; see cullForRecording. With two parts the
+    // draws figure is the wall time of both, not their sum.
+    static const bool m2Profile = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
     if (m2Profile) {
+        static auto lastSaid = std::chrono::steady_clock::now();
         const auto m2T3 = std::chrono::steady_clock::now();
-        const auto ms = [](auto a, auto b) {
-            return std::chrono::duration<double, std::milli>(b - a).count();
-        };
-        sayPhases({.cull = ms(m2T0, m2T1),
-                   .sort = ms(m2T1, m2T2),
-                   .record = ms(m2T2, m2T3),
-                   .visible = sortedVisible_.size(),
-                   .instances = instances.size()});
+        if (m2T3 - lastSaid > std::chrono::seconds(10)) {
+            lastSaid = m2T3;
+            const auto ms = [](auto a, auto b) {
+                return std::chrono::duration<double, std::milli>(b - a).count();
+            };
+            LOG_WARNING("  m2 record: cull ", ms(recordT0_, recordT1_), "ms, sort ",
+                        ms(recordT1_, recordT2_), "ms, draws ", ms(recordT2_, m2T3),
+                        "ms over ", sortedVisible_.size(), " visible of ", instances.size(),
+                        " instances, opaque split at ", opaqueSplit_,
+                        ", draws ", recordCounts_[0].draws, "+", recordCounts_[1].draws);
+        }
     }
 }
 

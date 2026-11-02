@@ -13,6 +13,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "core/logger.hpp"
+#include "core/env_flag.hpp"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
@@ -909,12 +910,63 @@ bool TerrainRenderer::writeMaterialDescriptors(VkDescriptorSet set, const Terrai
     return true;
 }
 
+namespace {
+/// WOWEE_TERRAIN_TILE_CULL=0 tests every loaded chunk again rather than
+/// tiles first; see TerrainRenderer::cullForRecording.
+const bool kTerrainTileCull = core::envFlagEnabled("WOWEE_TERRAIN_TILE_CULL", true);
+/// WOWEE_TERRAIN_ONE_WORKER=1 keeps the main pass in one command buffer on
+/// one thread; see TerrainRenderer::recordPartsWanted.
+const bool kTerrainOneWorker = core::envFlagEnabled("WOWEE_TERRAIN_ONE_WORKER", false);
+/// Below this many chunks the pass is recorded on one thread: the second
+/// buffer and the hand-off cost tens of microseconds, which a few hundred
+/// draws do not repay.
+constexpr size_t kTerrainSplitMinChunks = 512;
+}  // namespace
+
+void TerrainRenderer::groupChunksByTile(std::vector<ShadowTileGroup>& tiles) const {
+    tiles.clear();
+    std::unordered_map<uint64_t, size_t> tileSlot;
+    // A tile's chunks arrive together, so the map is only asked when the
+    // tile changes from one chunk to the next.
+    uint64_t lastKey = ~0ull;
+    size_t lastSlot = 0;
+    for (uint32_t ci = 0; ci < chunks.size(); ++ci) {
+        const auto& chunk = chunks[ci];
+        const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(chunk.tileX)) << 32) |
+                             static_cast<uint32_t>(chunk.tileY);
+        if (key != lastKey || tiles.empty()) {
+            auto [it, inserted] = tileSlot.try_emplace(key, tiles.size());
+            if (inserted) tiles.emplace_back();
+            lastKey = key;
+            lastSlot = it->second;
+        }
+        tiles[lastSlot].chunkIndices.push_back(ci);
+    }
+    for (auto& tile : tiles) {
+        glm::vec3 sum(0.0f);
+        for (uint32_t ci : tile.chunkIndices) sum += chunks[ci].boundingSphereCenter;
+        tile.center = sum / static_cast<float>(std::max<size_t>(1, tile.chunkIndices.size()));
+        float r = 0.0f;
+        for (uint32_t ci : tile.chunkIndices) {
+            r = std::max(r, glm::length(chunks[ci].boundingSphereCenter - tile.center) +
+                                chunks[ci].boundingSphereRadius);
+        }
+        tile.radius = r;
+    }
+}
+
 void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera) {
+    if (!cullForRecording(camera)) return;
+    recordPart(cmd, perFrameSet, 0, 1);
+}
+
+bool TerrainRenderer::cullForRecording(const Camera& camera) {
+    visibleChunks_.clear();
     if (chunks.empty() || !pipeline) {
         static int emptyLog = 0;
         if (++emptyLog <= 3)
             LOG_WARNING("TerrainRenderer::render: chunks=", chunks.size(), " pipeline=", (pipeline != VK_NULL_HANDLE));
-        return;
+        return false;
     }
 
     // One-time diagnostic: log chunk nearest to camera
@@ -944,17 +996,6 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
         }
     }
 
-    VkPipeline activePipeline = (wireframe && wireframePipeline) ? wireframePipeline : pipeline;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
-
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                             0, 1, &perFrameSet, 0, nullptr);
-
-    GPUPushConstants push{};
-    push.model = glm::mat4(1.0f);
-    vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-                        0, sizeof(GPUPushConstants), &push);
-
     Frustum frustum;
     if (frustumCullingEnabled) {
         glm::mat4 viewProj = camera.getProjectionMatrix() * camera.getViewMatrix();
@@ -968,6 +1009,97 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
     culledChunks = 0;
     furthestDrawnSq_ = 0.0f;
 
+    // The test every chunk is put to, unchanged; it decides what is drawn.
+    const auto testChunk = [&](uint32_t ci) {
+        const auto& chunk = chunks[ci];
+        if (!chunk.isValid() || !chunk.materialSet) return;
+
+        float dx = chunk.boundingSphereCenter.x - camPos.x;
+        float dy = chunk.boundingSphereCenter.y - camPos.y;
+        float distSq = dx * dx + dy * dy;
+        if (distSq > maxTerrainDistSq) {
+            culledChunks++;
+            return;
+        }
+
+        if (frustumCullingEnabled && !isChunkVisible(chunk, frustum)) {
+            culledChunks++;
+            return;
+        }
+        visibleChunks_.push_back(ci);
+        renderedChunks++;
+        if (distSq > furthestDrawnSq_) furthestDrawnSq_ = distSq;
+    };
+
+    if (!kTerrainTileCull) {
+        for (uint32_t ci = 0; ci < chunks.size(); ++ci) testChunk(ci);
+        return true;
+    }
+
+    // Tiles first, as the shadow pass does. Every loaded chunk was tested
+    // here each frame - 15k to 28k of them, each two cache lines of a
+    // ~190-byte struct - to keep a few thousand, and the walk alone was a
+    // large share of the terrain worker. A tile's sphere holds all of its
+    // chunks' spheres, so a tile beyond the distance (plus its radius, in
+    // the plane, which the chunk test also measures in) or wholly behind a
+    // frustum plane cannot hold a chunk that passes; the tiles that pass
+    // put their chunks through the same test as before. Padded a yard so
+    // rounding in the tile's sphere can never drop a chunk on the edge.
+    // Culled tiles count all their chunks as culled, unloaded ones included.
+    if (viewTilesGeneration_ != chunksGeneration_) {
+        viewTilesGeneration_ = chunksGeneration_;
+        groupChunksByTile(viewTiles_);
+    }
+    constexpr float kTilePad = 1.0f;
+    for (const auto& tile : viewTiles_) {
+        const float reach = tile.radius + kTilePad;
+        const float dx = tile.center.x - camPos.x;
+        const float dy = tile.center.y - camPos.y;
+        const float limit = maxViewDistance_ + reach;
+        if (dx * dx + dy * dy > limit * limit ||
+            (frustumCullingEnabled && !frustum.intersectsSphere(tile.center, reach))) {
+            culledChunks += static_cast<int>(tile.chunkIndices.size());
+            continue;
+        }
+        for (uint32_t ci : tile.chunkIndices) {
+            if (ci < chunks.size()) testChunk(ci);
+        }
+    }
+    // Drawn in the order of `chunks`, as before. The tiles hold their chunks
+    // in that order and normally follow it themselves; when they do not,
+    // the few thousand survivors are put back in order.
+    if (!std::is_sorted(visibleChunks_.begin(), visibleChunks_.end()))
+        std::sort(visibleChunks_.begin(), visibleChunks_.end());
+    return true;
+}
+
+uint32_t TerrainRenderer::recordPartsWanted() const {
+    // Each surviving chunk is a descriptor set bind and a draw, which this
+    // driver encodes as they are recorded. The list is cut in two: the first
+    // half recorded into a buffer executed ahead of the second, so the draws
+    // reach the GPU in the order one buffer would give them.
+    if (kTerrainOneWorker || visibleChunks_.size() < kTerrainSplitMinChunks) return 1;
+    return 2;
+}
+
+void TerrainRenderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                                 uint32_t part, uint32_t parts) {
+    if (!pipeline || part >= parts) return;
+    const size_t total = visibleChunks_.size();
+    const size_t begin = total * part / parts;
+    const size_t end = total * (part + 1) / parts;
+
+    VkPipeline activePipeline = (wireframe && wireframePipeline) ? wireframePipeline : pipeline;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
+
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
+                             0, 1, &perFrameSet, 0, nullptr);
+
+    GPUPushConstants push{};
+    push.model = glm::mat4(1.0f);
+    vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+                        0, sizeof(GPUPushConstants), &push);
+
     // Use mega VB + IB when available.
     // Bind mega buffers once, then use direct draws with base vertex/index offsets.
     const bool useMegaBuffers = (megaVB_ && megaIB_);
@@ -979,21 +1111,8 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
         megaBuffersBound = true;
     }
 
-    for (const auto& chunk : chunks) {
-        if (!chunk.isValid() || !chunk.materialSet) continue;
-
-        float dx = chunk.boundingSphereCenter.x - camPos.x;
-        float dy = chunk.boundingSphereCenter.y - camPos.y;
-        float distSq = dx * dx + dy * dy;
-        if (distSq > maxTerrainDistSq) {
-            culledChunks++;
-            continue;
-        }
-
-        if (frustumCullingEnabled && !isChunkVisible(chunk, frustum)) {
-            culledChunks++;
-            continue;
-        }
+    for (size_t vi = begin; vi < end; ++vi) {
+        const auto& chunk = chunks[visibleChunks_[vi]];
 
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                                  1, 1, &chunk.materialSet, 0, nullptr);
@@ -1021,10 +1140,7 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
             vkCmdDrawIndexed(cmd, chunk.indexCount, 1, 0, 0, 0);
             megaBuffersBound = false;
         }
-        renderedChunks++;
-        if (distSq > furthestDrawnSq_) furthestDrawnSq_ = distSq;
     }
-
 }
 
 bool TerrainRenderer::initializeShadow(VkRenderPass shadowRenderPass) {
@@ -1139,29 +1255,11 @@ void TerrainRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSp
     // of them, each a light-space transform on a ~200-byte struct - to keep
     // about 2000. A tile's sphere holds all of its chunks' spheres, so a tile
     // that fails the same test cannot hold a chunk that passes it.
+    // Grouped apart from the main pass's tiles, which the terrain worker
+    // reads; the two are rebuilt by the same function.
     if (shadowTilesGeneration_ != chunksGeneration_) {
         shadowTilesGeneration_ = chunksGeneration_;
-        shadowTiles_.clear();
-        std::unordered_map<uint64_t, size_t> tileSlot;
-        for (uint32_t ci = 0; ci < chunks.size(); ++ci) {
-            const auto& chunk = chunks[ci];
-            const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(chunk.tileX)) << 32) |
-                                 static_cast<uint32_t>(chunk.tileY);
-            auto [it, inserted] = tileSlot.try_emplace(key, shadowTiles_.size());
-            if (inserted) shadowTiles_.emplace_back();
-            shadowTiles_[it->second].chunkIndices.push_back(ci);
-        }
-        for (auto& tile : shadowTiles_) {
-            glm::vec3 sum(0.0f);
-            for (uint32_t ci : tile.chunkIndices) sum += chunks[ci].boundingSphereCenter;
-            tile.center = sum / static_cast<float>(std::max<size_t>(1, tile.chunkIndices.size()));
-            float r = 0.0f;
-            for (uint32_t ci : tile.chunkIndices) {
-                r = std::max(r, glm::length(chunks[ci].boundingSphereCenter - tile.center) +
-                                    chunks[ci].boundingSphereRadius);
-            }
-            tile.radius = r;
-        }
+        groupChunksByTile(shadowTiles_);
     }
 
     uint32_t shadowChunksDrawn = 0;

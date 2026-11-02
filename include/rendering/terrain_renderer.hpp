@@ -121,6 +121,17 @@ public:
      */
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera);
 
+    /// render() in steps, so the pass can be recorded into two command
+    /// buffers on two threads (Renderer::renderWorld). The cull first; false
+    /// means there is nothing to record at all.
+    bool cullForRecording(const Camera& camera);
+    /// 1, or 2 when the surviving chunks are worth cutting in two.
+    /// WOWEE_TERRAIN_ONE_WORKER=1 always answers 1.
+    [[nodiscard]] uint32_t recordPartsWanted() const;
+    /// Record one part of the culled chunks, in order: part 0's buffer is
+    /// executed first. The parts of one frame may be recorded concurrently.
+    void recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, uint32_t part, uint32_t parts);
+
     /**
      * Initialize terrain shadow pipeline (must be called after initialize()).
      * @param shadowRenderPass  Depth-only render pass used for the shadow map.
@@ -240,6 +251,14 @@ private:
     };
     std::vector<ShadowTileGroup> shadowTiles_;
     uint64_t shadowTilesGeneration_ = ~0ull;
+    /// The same grouping for the main pass's cull, kept apart because that
+    /// runs on the terrain worker.
+    std::vector<ShadowTileGroup> viewTiles_;
+    uint64_t viewTilesGeneration_ = ~0ull;
+    /// Fill `tiles` from `chunks`, in the order the chunks are in.
+    void groupChunksByTile(std::vector<ShadowTileGroup>& tiles) const;
+    /// The chunks cullForRecording kept, in `chunks` order.
+    std::vector<uint32_t> visibleChunks_;
 
     // Texture cache (path -> VkTexture)
     struct TextureCacheEntry {

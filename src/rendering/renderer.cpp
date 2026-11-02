@@ -3236,14 +3236,41 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         // then be reporting what terrain and grass cost together.
         const bool drawTerrain = terrainRenderer && camera && terrainEnabled && !skipTerrain;
         const bool drawGrass = grassRenderer_ && !skipGrass;
+        // With the WMO pass split, terrain is the next worker in line behind
+        // M2, and its cost is a bind and a draw per surviving chunk. Cut the
+        // same way as WMO and M2 below: the first half of the culled chunks
+        // is recorded into SEC_TERRAIN_A on another worker, executed just
+        // before SEC_TERRAIN, which takes the second half and then the grass.
+        // Set by the worker, read after it is joined.
+        bool terrainFirstHalf = false;
         if (drawTerrain || drawGrass) {
             terrainFuture = core::ThreadPool::frameWorkers().submit([&]() -> double {
                 auto t0 = std::chrono::steady_clock::now();
-                VkCommandBuffer cmd = beginSecondary(SEC_TERRAIN);
-                setSecondaryViewportScissor(cmd);
-                if (drawTerrain) terrainRenderer->render(cmd, perFrameSet, *camera);
-                if (drawGrass) grassRenderer_->render(cmd, frameIdx, perFrameSet);
-                vkEndCommandBuffer(cmd);
+                const bool terrainCulled = drawTerrain && terrainRenderer->cullForRecording(*camera);
+                const uint32_t parts = terrainCulled ? terrainRenderer->recordPartsWanted() : 1;
+                // Caller-runs-a-chunk, as on the WMO worker.
+                std::future<void> first;
+                if (parts > 1) {
+                    terrainFirstHalf = true;
+                    first = core::ThreadPool::frameWorkers().submit([&]() {
+                        VkCommandBuffer cmdA = beginSecondary(SEC_TERRAIN_A);
+                        setSecondaryViewportScissor(cmdA);
+                        terrainRenderer->recordPart(cmdA, perFrameSet, 0, parts);
+                        vkEndCommandBuffer(cmdA);
+                    });
+                }
+                try {
+                    VkCommandBuffer cmd = beginSecondary(SEC_TERRAIN);
+                    setSecondaryViewportScissor(cmd);
+                    if (terrainCulled) terrainRenderer->recordPart(cmd, perFrameSet, parts - 1, parts);
+                    if (drawGrass) grassRenderer_->render(cmd, frameIdx, perFrameSet);
+                    vkEndCommandBuffer(cmd);
+                } catch (...) {
+                    // The other half still holds references into this frame.
+                    if (first.valid()) first.wait();
+                    throw;
+                }
+                if (first.valid()) first.get();
                 return std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
             });
@@ -3291,13 +3318,43 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             });
         }
 
+        // The M2 worker is the critical path once WMO is split. Its opaque
+        // groups are cut in two after the cull (M2Renderer::recordPartsWanted):
+        // the first share is recorded into SEC_M2_A on another worker and
+        // executed just before SEC_M2, which takes the rest, the blended pass,
+        // the glow sprites and the particles, all of which must follow every
+        // opaque draw. Set by the worker, read after it is joined.
+        bool m2FirstShare = false;
         if (m2Renderer && camera && !skipM2) {
             m2Future = core::ThreadPool::frameWorkers().submit([&]() -> double {
                 auto t0 = std::chrono::steady_clock::now();
                 VkCommandBuffer cmd = beginSecondary(SEC_M2);
                 setSecondaryViewportScissor(cmd);
                 const auto tBegin = std::chrono::steady_clock::now();
-                m2Renderer->render(cmd, perFrameSet, *camera);
+                if (m2Renderer->cullForRecording(*camera)) {
+                    const uint32_t parts = perFrameSet ? m2Renderer->recordPartsWanted() : 1;
+                    // Caller-runs-a-chunk, as on the WMO worker.
+                    std::future<void> first;
+                    if (parts > 1) {
+                        m2FirstShare = true;
+                        first = core::ThreadPool::frameWorkers().submit([&]() {
+                            VkCommandBuffer cmdA = beginSecondary(SEC_M2_A);
+                            setSecondaryViewportScissor(cmdA);
+                            m2Renderer->recordPart(cmdA, perFrameSet, 0, parts);
+                            vkEndCommandBuffer(cmdA);
+                        });
+                    }
+                    try {
+                        m2Renderer->recordPart(cmd, perFrameSet, parts - 1, parts);
+                    } catch (...) {
+                        // The other share still holds references into this frame.
+                        if (first.valid()) first.wait();
+                        throw;
+                    }
+                    if (first.valid()) first.get();
+                    // Needs both shares' sprites, so after the join.
+                    m2Renderer->recordGlowSprites(cmd, perFrameSet);
+                }
                 const auto tModels = std::chrono::steady_clock::now();
                 m2Renderer->renderSmokeParticles(cmd, perFrameSet);
                 const auto tSmoke = std::chrono::steady_clock::now();
@@ -3488,8 +3545,10 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         // pixels leave no depth behind, so a sky drawn after them would paint
         // over whichever of them stood against it.
         const auto queue = [&](VkCommandBuffer buffer) { validCmds[numCmds++] = buffer; };
-        if (drawTerrain || drawGrass)
+        if (drawTerrain || drawGrass) {
+            if (terrainFirstHalf) queue(secondaryCmds_[SEC_TERRAIN_A][frameIdx]);
             queue(secondaryCmds_[SEC_TERRAIN][frameIdx]);
+        }
         queue(secondaryCmds_[SEC_SKY][frameIdx]);
         if (wmoRenderer && camera && !skipWMO) {
             queue(secondaryCmds_[SEC_WMO][frameIdx]);
@@ -3497,8 +3556,10 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         }
         queue(secondaryCmds_[SEC_SELECTION][frameIdx]);
         queue(secondaryCmds_[SEC_CHARS][frameIdx]);
-        if (m2Renderer && camera && !skipM2)
+        if (m2Renderer && camera && !skipM2) {
+            if (m2FirstShare) queue(secondaryCmds_[SEC_M2_A][frameIdx]);
             queue(secondaryCmds_[SEC_M2][frameIdx]);
+        }
         queue(secondaryCmds_[SEC_POST][frameIdx]);
 
         // No marks in here. This pass was begun for secondary buffers, and a
@@ -4526,7 +4587,7 @@ bool Renderer::createSecondaryCommandResources() {
 
     // Each concurrently recorded worker secondary owns a dedicated command pool.
     const uint32_t workerSecondaries[] = { SEC_TERRAIN, SEC_WMO, SEC_CHARS, SEC_M2, SEC_POST,
-                                           SEC_WMO_B };
+                                           SEC_WMO_B, SEC_M2_A, SEC_TERRAIN_A };
     static_assert(sizeof(workerSecondaries) / sizeof(workerSecondaries[0]) == NUM_WORKERS);
     for (uint32_t w = 0; w < NUM_WORKERS; ++w) {
         allocInfo.commandPool = workerCmdPools_[w];
