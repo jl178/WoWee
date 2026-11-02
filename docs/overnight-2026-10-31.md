@@ -511,3 +511,7 @@ Other fixes:
 - Stormwind is now GPU-bound: beginFrame/acquire waits ~3 ms per frame.
   - GPU passes timed: shadows 0.66 ms, volumetric fog 1.05 ms, post-process 2.87 ms (at 1251x986).
   - Next: break down post-process and time the scene pass (agent running).
+- `0f9b1df`: the GPU profile names the real passes. "post-process" had been the scene pass; post-processing records nothing with FXAA/FSR off. Fog inject culls lights per workgroup: fog 1.05 -> 0.75 ms. Stormwind GPU: 4.6 ms of a 12.3 ms frame (scene pass 2.96 ms).
+- `99b7b8a`: intermittent "Account not found" logins fixed.
+  - SRP6 now hashes A, B and the salt as 32-byte arrays, and the session-key interleave skips leading zeros, as AzerothCore and the stock client do.
+  - 500 lab logins: 12 failures before, 0 after. This would have hit every player about 2% of the time.
