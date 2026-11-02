@@ -3005,3 +3005,9 @@ wowee_add_test(test_stock_light_math SOURCES test_stock_light_math.cpp)
 # The stock client's water, sky, WMO light and weather/glow arithmetic
 # (stock_liquid, stock_sky, stock_wmo_light, stock_screen_fx). Header-only.
 wowee_add_test(test_stock_world_fx SOURCES test_stock_world_fx.cpp)
+
+# ── test_stock_wmo_render ────────────────────────────────────
+# The stock client's per-batch WMO state - blend factors, alpha reference,
+# culling, wrap, effect, env coordinate - and the MLIQ liquid type
+# (stock_wmo_render, stock_wmo_liquid). Header-only.
+wowee_add_test(test_stock_wmo_render SOURCES test_stock_wmo_render.cpp)

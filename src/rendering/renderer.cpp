@@ -2319,6 +2319,10 @@ void Renderer::update(float deltaTime) {
         if (waterRenderer) waterRenderer->setLiquidLighting(lightingManager->getLightingParams());
         // Window glass (MOMT F_SIDN) glows by the stock night table
         // (0x7a8520), from the same clock.
+        // A WMO's own sky model (MOSB) for the camera's group, next frame's.
+        lightingManager->setWmoSkybox(wmoRenderer && camera
+                                          ? wmoRenderer->skyboxAt(camera->getPosition())
+                                          : std::string());
         if (wmoRenderer) {
             wmoRenderer->setSidnNightFactor(
                 stock_wmo::sidnNightFactor(lightingManager->getTimeOfDay()));

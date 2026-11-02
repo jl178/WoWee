@@ -115,7 +115,15 @@ struct WMOLiquid {
     uint32_t xTiles = 0;        // Tiles in X (= xVerts - 1)
     uint32_t yTiles = 0;        // Tiles in Y (= yVerts - 1)
     glm::vec3 basePosition;     // Corner position in model space
-    uint16_t materialId = 0;    // Liquid material/type
+    /// MLIQ's own field: the MOMT material the client binds for the surface
+    /// (0x7d7c30 keeps it at +0x130). Not a liquid type.
+    uint16_t materialId = 0;
+    /// The group's LiquidType id as the client resolves it at load
+    /// (0x7d82e0 / 0x7d7310 / 0x7c8d80, stock_wmo::groupLiquidType): 13 WMO
+    /// Water, 14 WMO Ocean, 19 WMO Magma, 20 WMO Slime or a DBC id; 0 none.
+    uint32_t liquidTypeId = 0;
+    /// The owning group's MOGP flags, for the interior-water rule at draw.
+    uint32_t groupFlags = 0;
     std::vector<float> heights; // Height per vertex (xVerts * yVerts)
     std::vector<uint8_t> flags; // Flags per tile (xTiles * yTiles)
 
@@ -128,6 +136,11 @@ struct WMOVertex {
     glm::vec3 normal;
     glm::vec2 texCoord;
     glm::vec4 color;           // Vertex color
+    /// The second MOTV and MOCV (MOGP flags 0x2000000 / 0x1000000, 31
+    /// groups of Icecrown in the data). Only MapObjUComposite reads them:
+    /// UV set 1 for the second texture, MOCV2 alpha for the layer blend.
+    glm::vec2 texCoord2{0.0f};
+    float color2Alpha = 0.0f;
 };
 
 // WMO Batch (render batch)
@@ -198,6 +211,10 @@ struct WMOModel {
     /// the ambient when fixing vertex colours ("unified render path"), 0x4
     /// liquid type from the DBC, 0x8 do not fix vertex colours, only alpha.
     uint16_t mohdFlags = 0;
+    /// MOSB: the sky model the client puts in sky slot 0 while the camera is
+    /// in a group with flag 0x40000 (0x7ac060, 0x79a870). Empty: none, and
+    /// the client clears every group's 0x40000 (0x7d7470).
+    std::string skyboxName;
     glm::vec3 boundingBoxMin;
     glm::vec3 boundingBoxMax;
 

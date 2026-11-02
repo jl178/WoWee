@@ -30,7 +30,7 @@ layout(set = 1, binding = 0) uniform sampler2D uTexture;
 
 layout(set = 1, binding = 1) uniform WMOMaterial {
     int hasTexture;
-    int alphaTest;
+    float alphaRef;   // the blend's alpha reference (0x873ee0); 0 = no test
     int unlit;
     int lightModeA;   // stock light mode (0x7a8b10): 0 none, 1 outdoor, 2 F_WINDOW, 3 MOHD ambient
     float specularIntensity;
@@ -48,10 +48,14 @@ layout(set = 1, binding = 1) uniform WMOMaterial {
     int emissive;
     int hasVertexColors;
     uint sidnColor;   // F_SIDN night glow, 0x00RRGGBB; 0 = none
-    int stockFlags;   // 1 unified (MapObjU), 2 F_UNFOGGED, 4 alpha from texture, 8 extras
+    int stockFlags;   // 1 unified (MapObjU), 2 F_UNFOGGED, 4 alpha from texture, 8 extras, 16 shadowed
+    int effect;       // 0 Diffuse 1 Specular 2 Metal 3 Env 4 Opaque 5 EnvMetal 6 Composite
 };
 
 layout(set = 1, binding = 2) uniform sampler2D uNormalHeightMap;
+// MOMT texture2: the env map of MapObjEnv / EnvMetal, the second layer of
+// MapObjUComposite. White when the batch has none.
+layout(set = 1, binding = 3) uniform sampler2D uTexture2;
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
@@ -63,6 +67,8 @@ layout(location = 3) in vec4 VertColor;
 layout(location = 4) in vec3 Tangent;
 layout(location = 5) in vec3 Bitangent;
 layout(location = 6) flat in float SidnNight;
+layout(location = 7) in vec4 Layer2;
+layout(location = 8) in vec2 EnvCoord;
 
 layout(location = 0) out vec4 outColor;
 
@@ -261,7 +267,21 @@ void main() {
     }
 
     vec4 texColor = hasTexture != 0 ? textureGrad(uTexture, finalUV, uvDx, uvDy) : vec4(1.0);
-    if (alphaTest != 0 && texColor.a < 0.5) discard;
+    // MapObjComposite: the two layers blended by the second MOCV's alpha,
+    // colour and alpha alike, before the light.
+    if (effect == 6) {
+        vec4 t1 = texture(uTexture2, Layer2.xy);
+        texColor = mix(t1, texColor, clamp(Layer2.z, 0.0, 1.0));
+    }
+
+    // The pixel programs' alpha: MapObjDiffuse and Composite write vertex
+    // alpha times texture alpha, the rest the vertex alpha alone. A trans
+    // batch's vertex alpha is its doorway blend, used up below. The alpha
+    // test is the blend's reference against that (0x873ee0): AlphaKey
+    // 224/255, the blended modes 1/255, a trans batch none.
+    float vertA = lightModeB >= 0 ? 1.0 : clamp(VertColor.a, 0.0, 1.0);
+    float alpha = (stockFlags & 4) != 0 ? texColor.a * vertA : vertA;
+    if (alphaRef > 0.0 && alpha < alphaRef) discard;
 
     // Compute normal (with normal mapping if enabled)
     vec3 norm = vertexNormal;
@@ -276,9 +296,11 @@ void main() {
         norm = normalize(mix(vertexNormal, worldNormal, blend));
     }
 
-    // Sample the sun shadow map. Only the outdoor light modes take it.
+    // Sample the sun shadow map, for the draws the client binds it to
+    // (stockFlags 16, 0x8745d0): a trans batch's outdoor pass and the
+    // exterior groups of the no-MOCV and unified paths.
     float shadow = 1.0;
-    if (shadowParams.x > 0.5 && (lightModeA == 1 || lightModeA == 2)) {
+    if (shadowParams.x > 0.5 && (stockFlags & 16) != 0) {
         vec3 ldir = normalize(-lightDir.xyz);
         float normalOffset = shadowTexel() * 2.0 * (1.0 - abs(dot(norm, ldir)));
         vec3 biasedPos = FragPos + norm * normalOffset;
@@ -356,8 +378,9 @@ void main() {
             }
             c = unified ? 2.0 * clamp(L * (127.0 / 255.0) + C + e * 0.5, 0.0, 1.0)
                         : 2.0 * clamp(C * L + e * 0.5, 0.0, 1.0);
-            if (mode == 1 || mode == 2) c *= shadow;
         }
+        // The shadow-map programs scale the whole colour, lit or not.
+        if (pass == 0) c *= shadow;
         if (pass == 0) passA = c; else passB = c;
     }
     vec3 light = passA;
@@ -373,6 +396,12 @@ void main() {
     float wet = (lightModeA == 1 && lightModeB < 0) ? wetSurfaceAmount(vertexNormal) : 0.0;
     vec3 albedo = wet > 0.0 ? wetSurfaceAlbedo(texColor.rgb, wet) : texColor.rgb;
     vec3 result = albedo * light;
+    // MapObjEnv adds texture alpha times the env map, MapObjEnvMetal texture
+    // colour times its alpha times the env map; neither lit.
+    if (effect == 3 || effect == 5) {
+        vec3 env = texture(uTexture2, EnvCoord).rgb;
+        result += (effect == 5 ? texColor.rgb : vec3(1.0)) * texColor.a * env;
+    }
     if (wet > 0.0) {
         result += wetSurfaceSheen(normalize(mix(vertexNormal, norm, 0.5)), FragPos,
                                   length(viewPos.xyz - FragPos), wet, shadow);
@@ -405,15 +434,6 @@ void main() {
     // F_UNFOGGED (MOMT 0x2) materials are drawn with the fog off (0x7a8440).
     float dist = length(viewPos.xyz - FragPos);
     if ((stockFlags & 2) == 0) result = applyFog(result, FragPos, dist);
-
-    // Opaque and alpha-key materials write their texture's alpha unused;
-    // blended ones (blend mode 2 and up) are drawn by the transparent
-    // pipeline with it.
-    // The pixel programs' alpha: MapObjDiffuse (MOMT shader 0) and Composite
-    // write vertex alpha times texture alpha, the rest the vertex alpha alone.
-    // A trans batch's vertex alpha is its doorway blend, used up above.
-    float vertA = lightModeB >= 0 ? 1.0 : clamp(VertColor.a, 0.0, 1.0);
-    float alpha = (stockFlags & 4) != 0 ? texColor.a * vertA : vertA;
 
     outColor = vec4(result, alpha);
 }

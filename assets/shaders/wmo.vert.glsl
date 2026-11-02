@@ -33,6 +33,7 @@ layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
 layout(location = 3) in vec4 aColor;
 layout(location = 4) in vec4 aTangent;
+layout(location = 5) in vec4 aLayer2;   // second MOTV, second MOCV alpha
 
 layout(location = 0) out vec3 FragPos;
 layout(location = 1) out vec3 Normal;
@@ -41,6 +42,8 @@ layout(location = 3) out vec4 VertColor;
 layout(location = 4) out vec3 Tangent;
 layout(location = 5) out vec3 Bitangent;
 layout(location = 6) flat out float SidnNight;
+layout(location = 7) out vec4 Layer2;   // xy: layer-2 UV, z: its blend
+layout(location = 8) out vec2 EnvCoord;
 
 void main() {
     vec3 pos = aPos;
@@ -89,6 +92,14 @@ void main() {
     TexCoord = aTexCoord;
     VertColor = aColor;
     SidnNight = push.frame.x;
+
+    // The second layer MapObjUDiffuse_Comp passes on (attrib 7, secondary).
+    Layer2 = aLayer2;
+    // MapObjDiffuse_T1_Refl: the env map's coordinate is the view-space
+    // reflection of the eye ray, its x and y as they are.
+    vec3 viewP = (view * worldPos).xyz;
+    vec3 viewN = mat3(view) * normalMatrix * aNormal;
+    EnvCoord = reflect(normalize(viewP), normalize(viewN)).xy;
 
     // Compute TBN basis vectors for normal mapping
     vec3 T = normalize(normalMatrix * aTangent.xyz);
