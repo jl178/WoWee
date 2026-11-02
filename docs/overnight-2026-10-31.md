@@ -515,3 +515,7 @@ Other fixes:
 - `99b7b8a`: intermittent "Account not found" logins fixed.
   - SRP6 now hashes A, B and the salt as 32-byte arrays, and the session-key interleave skips leading zeros, as AzerothCore and the stock client do.
   - 500 lab logins: 12 failures before, 0 after. This would have hit every player about 2% of the time.
+- `b83af82`: FrameXML widget methods that were no-ops are implemented.
+  - Quest blob art on the world map, the minimap arrow size, the item-into-bag icon animation, recolour by chat id, message fading.
+  - Pending frames read nil while loading, as in stock.
+  - missing_api.txt: 226 -> 203 entries; no Lua errors.
