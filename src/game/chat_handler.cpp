@@ -352,37 +352,11 @@ void ChatHandler::sendChatMessage(ChatType type, const std::string& message, con
     }
     owner_.getSocket()->send(packet);
 
-    // Add local echo so the player sees their own message immediately
-    MessageChatData echo;
-    echo.senderGuid = owner_.getPlayerGuid();
-    echo.language = language;
-    echo.message = message;
-
-    auto nameIt = owner_.getPlayerNameCache().find(owner_.getPlayerGuid());
-    if (nameIt != owner_.getPlayerNameCache().end()) {
-        echo.senderName = nameIt->second;
-    } else if (const Character* active = owner_.getActiveCharacter()) {
-        echo.senderName = active->name;
-    }
-
-    if (type == ChatType::WHISPER) {
-        echo.type = ChatType::WHISPER_INFORM;
-        echo.receiverName = target;
-    } else {
-        echo.type = type;
-    }
-
-    if (type == ChatType::CHANNEL) {
-        echo.channelName = target;
-    }
-
-    addLocalChatMessage(echo);
-
-    // The player's own bubble. The server's echo of a /say is dropped in
-    // handleMessageChat in favour of the line above, and that echo was the
-    // only thing that ever raised a bubble - so nothing the player said
-    // floated over their own head, where the real client shows it.
-    showChatBubble(echo.senderGuid, type, message);
+    // No local echo. The stock client shows its own line - and raises its
+    // own bubble - only when the server sends the message back, so a line the
+    // server refuses (muted, a GM command, a language not known, a channel not
+    // joined) never appears, and every line carries what the server made of
+    // it. The local copy here had shown ".tele ..." as speech over the head.
 }
 
 void ChatHandler::showChatBubble(uint64_t senderGuid, ChatType type, const std::string& message) {
@@ -438,18 +412,10 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
              " (", getChatTypeString(data.type), ") sender=0x", std::hex, data.senderGuid, std::dec,
              " '", data.senderName, "' msg='", data.message.substr(0, 60), "'");
 
-    // WoW servers echo successful outgoing whispers as WHISPER_INFORM, but the
-    // client already creates a local WHISPER_INFORM row immediately on send.
-    if (data.type == ChatType::WHISPER_INFORM) {
-        return;
-    }
-
-    // Skip server echo of our own messages (we already added a local echo)
-    if (data.senderGuid == owner_.getPlayerGuid() && data.senderGuid != 0) {
-        if (data.type == ChatType::WHISPER && !data.senderName.empty()) {
-            owner_.lastWhisperSenderRef() = data.senderName;
-        }
-        return;
+    // A whisper to yourself still names you as the one to reply to.
+    if (data.senderGuid == owner_.getPlayerGuid() && data.senderGuid != 0 &&
+        data.type == ChatType::WHISPER && !data.senderName.empty()) {
+        owner_.lastWhisperSenderRef() = data.senderName;
     }
 
     deliverChatMessage(std::move(data), /*alreadyWaited=*/false);
