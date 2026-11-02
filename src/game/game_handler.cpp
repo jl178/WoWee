@@ -790,6 +790,9 @@ void GameHandler::update(float deltaTime) {
         clearTarget();
     }
 
+    // The vehicle the player drives: its aim keys, its action bar.
+    if (state == WorldState::IN_WORLD) updateVehicle(deltaTime);
+
     // Update auto-follow: refresh render position or cancel if entity disappeared
     if (followTargetGuid_ != 0) {
         auto followEnt = entityController_->getEntityManager().getEntity(followTargetGuid_);

@@ -277,6 +277,7 @@ void applyCreateMovement(Entity& e, const UpdateBlock& block) {
     e.setBaseMoveFlags(block.moveFlags, motion::MoveFlags::Walking | motion::MoveFlags::Swimming |
                                             motion::MoveFlags::Flying | motion::MoveFlags::CanFly |
                                             motion::MoveFlags::Hover);
+    e.setBaseMoveFlags2(block.moveFlags2);
     if (!isActiveExpansion("wotlk")) return;
     if (block.hasSpline && (block.moveFlags & motion::MoveFlags::SplineEnabled)) {
         motion::CreateSplineSpec spec;

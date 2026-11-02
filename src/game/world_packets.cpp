@@ -917,8 +917,12 @@ void MovementPacket::writeMovementPayload(network::Packet& packet, const Movemen
         }
     }
 
-    // Write pitch if swimming/flying
-    if (info.hasFlag(MovementFlags::SWIMMING) || info.hasFlag(MovementFlags::FLYING)) {
+    // Pitch while swimming or flying, and always for a mover with
+    // MOVEMENTFLAG2_ALWAYS_ALLOW_PITCHING (0x20) - an aiming vehicle
+    // (Vehicle.flags 0x10) - as the reader (0x4F4D40) and the server's
+    // ReadMovementInfo take it.
+    if (info.hasFlag(MovementFlags::SWIMMING) || info.hasFlag(MovementFlags::FLYING) ||
+        (info.flags2 & 0x0020)) {
         packet.writeFloat(info.pitch);
     }
 

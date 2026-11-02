@@ -2184,8 +2184,17 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"AddOrDelMute",        [](lua_State* L) -> int { (void)L; return 0; }},
                 {"ChannelSilenceVoice", [](lua_State* L) -> int { (void)L; return 0; }},
                 {"ChannelUnSilenceVoice", [](lua_State* L) -> int { (void)L; return 0; }},
-                // Vehicles are not modelled in the raid frames.
-                {"UnitTargetsVehicleInRaidUI", luaReturnFalse},
+                // UnitTargetsVehicleInRaidUI(unit): the seat's flagsB 0x8
+                // (0x613780) - the raid frame targets the vehicle.
+                {"UnitTargetsVehicleInRaidUI", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            std::string uid(luaL_optstring(L, 1, "player"));
+            toLowerInPlace(uid);
+            const uint64_t guid = gh ? resolveUnitGuid(gh, uid) : 0;
+            const auto* seat = guid ? gh->vehicleSeatOf(guid) : nullptr;
+            lua_pushboolean(L, (seat && (seat->flagsB & 0x8u)) ? 1 : 0);
+            return 1;
+        }},
                 {"GetNumLanguages",   lua_GetNumLanguages},
                 // The 1.12 client's own spelling, and not a typo on this side:
                 // stock ChatFrame.lua opens LanguageMenu_LoadLanguages with

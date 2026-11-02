@@ -920,6 +920,8 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     LOG_INFO("Orientation: ", data.orientation, " radians");
     LOG_INFO("Player is now in the game world");
 
+    // The player moves itself again: a vehicle it drove stays behind.
+    if (movementHandler_) movementHandler_->resetActiveMover();
     // Initialize movement info with world entry position (server → canonical)
     LOG_DEBUG("LOGIN_VERIFY_WORLD: server=(", data.x, ", ", data.y, ", ", data.z,
              ") canonical=(", canonical.x, ", ", canonical.y, ", ", canonical.z, ") mapId=", data.mapId);
@@ -1241,14 +1243,6 @@ void GameHandler::sendSetSheathed(uint32_t sheathState) {
     network::Packet pkt(wireOpcode(Opcode::CMSG_SET_SHEATHED));
     pkt.writeUInt32(sheathState);
     socket->send(pkt);
-}
-
-void GameHandler::sendRequestVehicleExit() {
-    if (state != WorldState::IN_WORLD || vehicleId_ == 0) return;
-    // CMSG_REQUEST_VEHICLE_EXIT has no payload - opcode only
-    network::Packet pkt(wireOpcode(Opcode::CMSG_REQUEST_VEHICLE_EXIT));
-    socket->send(pkt);
-    // The seat ends when the server moves the player off it.
 }
 
 const std::vector<GameHandler::EquipmentSetInfo>& GameHandler::getEquipmentSets() const {

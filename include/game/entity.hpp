@@ -217,6 +217,10 @@ public:
         baseMoveFlags_ = (baseMoveFlags_ & ~mask) | (flags & mask);
     }
     [[nodiscard]] uint32_t baseMoveFlags() const { return baseMoveFlags_; }
+    /// The second movement word the create block carried (a vehicle's
+    /// NO_STRAFE, NO_JUMPING, FULL_SPEED_TURNING, ALWAYS_ALLOW_PITCHING ...).
+    void setBaseMoveFlags2(uint16_t flags2) { baseMoveFlags2_ = flags2; }
+    [[nodiscard]] uint16_t baseMoveFlags2() const { return baseMoveFlags2_; }
     /// A transport placed the unit (world coordinates) without ending the
     /// motion that runs in its frame.
     void setWorldPositionFromFrame(float px, float py, float pz, float o) {
@@ -540,6 +544,7 @@ protected:
     bool motionAirborne_ = false;
     std::optional<motion::UnitSpline> unitSpline_;
     std::optional<motion::RemoteMover> remoteMover_;
+    uint16_t baseMoveFlags2_ = 0;
     motion::MoveSpeeds moveSpeeds_;
     glm::vec3 motionFramePos_{0.0f};
     float motionFrameFacing_ = 0.0f;

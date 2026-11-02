@@ -176,6 +176,13 @@ public:
     void setInstanceSeatedOn(uint32_t passengerInstanceId, uint32_t vehicleInstanceId,
                              int attachmentId, const glm::vec3& offset, float yaw,
                              int passengerAttachmentId);
+    /// A seated passenger on its way into (or out of) the seat (stock
+    /// VehiclePassenger_C states 2 and 5, 0x74A7F0): drawn at
+    /// mix(from, seat point, blend) raised by `lift`; blend 1 is the seat.
+    void setInstanceSeatArc(uint32_t passengerInstanceId, const glm::vec3& from, float blend, float lift);
+    /// Where the seat puts the passenger now (its seated model matrix's
+    /// origin), false when it is not seated or not placed yet.
+    bool getInstanceSeatPoint(uint32_t passengerInstanceId, glm::vec3& out) const;
     /// The units stock lights up (CGObject_C::SetHighlight 0x743C70): the
     /// mouseover and the current target get the unit ambient added as
     /// emissive. 0 for none.
@@ -510,6 +517,11 @@ private:
         glm::vec3 seatOffset{0.0f};      // VehicleSeat AttachmentOffset
         float seatYaw = 0.0f;            // VehicleSeat PassengerYaw
         int seatPassengerAttachment = -1;
+        glm::vec3 seatArcFrom{0.0f};     // setInstanceSeatArc
+        float seatArcBlend = 1.0f;
+        float seatArcLift = 0.0f;
+        glm::vec3 seatPoint{0.0f};       // the seat's origin, before the arc
+        bool seatPointValid = false;
         glm::mat4 overrideModelMatrix{1.0f};
 
         // Enchant visual attached to a weapon. Such a model is nothing but the
