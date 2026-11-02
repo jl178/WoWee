@@ -532,3 +532,4 @@ Other fixes:
 - Orgrimmar re-profiled: 81 fps (62 on the earlier tour). Main thread is led by shadow_pass at 1.82 ms (terrain 0.77, characters 0.60). An agent is on it; another agent is on the WMO indoor minimap.
 - `0843d4e`: the stock indoor minimap inside WMOs, using md5translate WMO tiles. Ironforge shows its floor plan and the outdoor terrain minimap is unchanged (screenshots).
 - `e7e8888`: terrain mega-buffer slots per tile (they had filled up after the first zone and were never reused). Cached, merged terrain shadow draws; character shadow bone reuse. Orgrimmar: 84 -> 88 fps.
+- `0f8f947`: near tiles migrate into terrain mega slots, and there are now 128 slots. Teleport chain: 0 near chunks on fallback buffers (was 6.6k-13.3k).
