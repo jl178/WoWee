@@ -2939,6 +2939,12 @@ wowee_add_test(test_stock_sound_rules SOURCES
     test_stock_sound_rules.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/stock_sound_rules.cpp
 )
+# ── test_positional_sound ────────────────────────────────────
+# A world sound as AudioEngine hands it to miniaudio: panned by direction
+# (FMOD's 3D pan in the stock client), its distance gain left to the stock
+# rolloff. Mixed offline through an engine with no device.
+wowee_add_test(test_positional_sound SOURCES test_positional_sound.cpp)
+target_link_libraries(test_positional_sound PRIVATE ${CMAKE_DL_LIBS})
 
 # ── test_stock_light_math ────────────────────────────────────
 # The stock client's light arithmetic (Wow.exe 3.3.5a, DayNight 0x7e-0x7f

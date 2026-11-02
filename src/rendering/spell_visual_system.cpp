@@ -523,11 +523,16 @@ uint32_t SpellVisualSystem::playSoundEntry(uint32_t soundEntryId, const glm::vec
     if (volume <= 0.0f) return 0;
     const auto& file = entry->files[std::uniform_int_distribution<size_t>(
         0, entry->files.size() - 1)(rng_)];
-    const float maxDistance = entry->distanceCutoff > 0.0f ? entry->distanceCutoff : 40.0f;
+    // The row's own MinDistance and DistanceCutoff, as every positional kit
+    // plays (Wow.exe 0x4c6a40 -> set3DMinMaxDistance).
+    const float maxDistance = entry->distanceCutoff > 0.0f ? entry->distanceCutoff : audio::stock::kDefaultCutoff;
+    audio::SoundOptions opts;
+    opts.minDistance = entry->minDistance;
+    opts.kitId = entry->id;
     auto& engine = audio::AudioEngine::instance();
     if (looping && keepLoop)
-        return engine.playSound3DStoppable(file, pos, volume, maxDistance, /*loop=*/true);
-    engine.playSound3D(file, pos, volume, 1.0f, maxDistance);
+        return engine.playSound3DStoppable(file, pos, volume, maxDistance, /*loop=*/true, entry->minDistance, opts);
+    engine.playSound3D(file, pos, volume, 1.0f, maxDistance, opts);
     return 0;
 }
 
