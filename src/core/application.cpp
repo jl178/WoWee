@@ -125,6 +125,86 @@ namespace core {
 
 namespace {
 
+// The player's collision box as the stock client sizes it (0x725F50 ->
+// 0x6D78C0 -> 0x6E9570; mounted 0x73D5D0 -> 0x6D7720): the display's
+// CreatureModelData CollisionWidth / CollisionHeight (fields 14 / 15), scaled
+// by the display's and the model's scale and an enlarging object scale, and
+// on a mount the mount model's MountHeight (field 16) times the mount
+// display's scale on top of half the rider. Remembered per display, mount and
+// scale; nothing when the tables or the display cannot be read, so the caller
+// keeps what it has.
+std::optional<game::stock_movement::Collider> playerColliderFor(
+        pipeline::AssetManager* assets, uint32_t displayId, uint32_t mountDisplayId,
+        float objectScale) {
+    namespace sm = game::stock_movement;
+    struct Key {
+        uint32_t display, mount;
+        float scale;
+        bool operator==(const Key&) const = default;
+    };
+    static std::vector<std::pair<Key, std::optional<sm::Collider>>> memo;
+    const Key key{displayId, mountDisplayId, objectScale};
+    for (const auto& [k, v] : memo) {
+        if (k == key) return v;
+    }
+    auto remember = [&](std::optional<sm::Collider> c) {
+        if (memo.size() > 64) memo.clear();
+        memo.emplace_back(key, c);
+        return c;
+    };
+    if (!assets || displayId == 0) return std::nullopt;
+    auto cdi = assets->loadDBC("CreatureDisplayInfo.dbc");
+    auto cmd = assets->loadDBC("CreatureModelData.dbc");
+    if (!cdi || !cdi->isLoaded() || !cmd || !cmd->isLoaded()) return std::nullopt;
+    const auto* layouts = pipeline::getActiveDBCLayout();
+    const auto* cdiL = layouts ? layouts->getLayout("CreatureDisplayInfo") : nullptr;
+    const auto* cmdL = layouts ? layouts->getLayout("CreatureModelData") : nullptr;
+    auto field = [](const pipeline::DBCFieldMap* l, const char* name, uint32_t fallback) {
+        const uint32_t f = l ? l->tryField(name) : 0xFFFFFFFFu;
+        return f == 0xFFFFFFFFu ? fallback : f;
+    };
+    const uint32_t modelCol = field(cdiL, "ModelID", 1);
+    const uint32_t displayScaleCol = field(cdiL, "CreatureModelScale", 4);
+    const uint32_t modelScaleCol = field(cmdL, "ModelScale", 4);
+    // CollisionWidth, CollisionHeight, MountHeight: columns 14-16 of the 3.3.5
+    // file (28 columns). Other layouts keep the default box.
+    uint32_t widthCol = field(cmdL, "CollisionWidth", 0xFFFFFFFFu);
+    if (widthCol == 0xFFFFFFFFu && cmd->getFieldCount() == 28) widthCol = 14;
+    if (widthCol == 0xFFFFFFFFu || widthCol + 2 >= cmd->getFieldCount()) return remember(std::nullopt);
+
+    struct Model { float width, height, mountHeight, scale; };
+    auto modelFor = [&](uint32_t display) -> std::optional<Model> {
+        const int32_t d = cdi->findRecordById(display);
+        if (d < 0) return std::nullopt;
+        const int32_t m = cmd->findRecordById(cdi->getUInt32(static_cast<uint32_t>(d), modelCol));
+        if (m < 0) return std::nullopt;
+        const auto row = static_cast<uint32_t>(m);
+        float scale = cdi->getFloat(static_cast<uint32_t>(d), displayScaleCol) *
+                      cmd->getFloat(row, modelScaleCol);
+        if (!(scale > 0.0f)) scale = 1.0f;
+        return Model{cmd->getFloat(row, widthCol), cmd->getFloat(row, widthCol + 1),
+                     cmd->getFloat(row, widthCol + 2), scale};
+    };
+    const auto rider = modelFor(displayId);
+    if (!rider) return remember(std::nullopt);
+    // NOCOLLISIONBOX (0x6D78C0): a model without one keeps the box it had.
+    constexpr float kTiny = 9.5367431640625e-07f;  // 0x9F1224
+    if (std::abs(rider->width) < kTiny || std::abs(rider->height) < kTiny) {
+        return remember(std::nullopt);
+    }
+    float height = rider->height;
+    if (mountDisplayId != 0) {
+        if (const int32_t md = cdi->findRecordById(mountDisplayId); md >= 0) {
+            if (const auto mount = modelFor(mountDisplayId)) {
+                const float mountDisplayScale = cdi->getFloat(static_cast<uint32_t>(md), displayScaleCol);
+                height = sm::mountedCollisionHeight(rider->height, mountDisplayScale,
+                                                    mount->mountHeight);
+            }
+        }
+    }
+    return remember(sm::colliderFromModel(rider->width, height, rider->scale, objectScale));
+}
+
 std::optional<float> movingEntityFloor(rendering::Renderer* renderer,
                                         const glm::vec3& renderPos,
                                         const std::optional<glm::vec3>& previousRenderPos) {
@@ -3004,6 +3084,22 @@ void Application::applyServerMovementState(float deltaTime) {
         renderer->getCameraController()->setGravityDisabled(gameHandler->isGravityDisabled());
         renderer->getCameraController()->setFeatherFallActive(gameHandler->isFeatherFalling());
         renderer->getCameraController()->setWaterWalkActive(gameHandler->isWaterWalking());
+        // The collision box of the model the player is now: race, form, mount.
+        if (auto player = std::dynamic_pointer_cast<game::Unit>(
+                gameHandler->getEntityManager().getEntity(gameHandler->getPlayerGuid()))) {
+            float objectScale = 1.0f;
+            const uint16_t si = game::fieldIndex(game::UF::OBJECT_FIELD_SCALE_X);
+            if (si != 0xFFFF) {
+                if (const uint32_t raw = player->getField(si); raw != 0) {
+                    const float sc = std::bit_cast<float>(raw);
+                    if (sc > 0.01f && sc < 100.0f) objectScale = sc;
+                }
+            }
+            if (auto c = playerColliderFor(assetManager.get(), player->getDisplayId(),
+                                           player->getMountDisplayId(), objectScale)) {
+                renderer->getCameraController()->setPlayerCollider(*c);
+            }
+        }
         // Flight physics engage on the CAN_FLY ability (flying mount
         // or .gm fly), not isPlayerFlying() which also needs the
         // FLYING flag the client only sets once already airborne.

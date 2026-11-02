@@ -4155,7 +4155,8 @@ float WMORenderer::raycastVisibleSolid(const glm::vec3& origin, const glm::vec3&
     return closestHit;
 }
 
-bool WMORenderer::checkWallCollision(const glm::vec3& from, const glm::vec3& to, glm::vec3& adjustedPos, bool insideWMO) const {
+bool WMORenderer::checkWallCollision(const glm::vec3& from, const glm::vec3& to, glm::vec3& adjustedPos,
+                                     bool insideWMO, const Body* body) const {
     QueryTimer timer(&queryTimeMs, &queryCallCount);
     adjustedPos = to;
     bool blocked = false;
@@ -4164,11 +4165,14 @@ bool WMORenderer::checkWallCollision(const glm::vec3& from, const glm::vec3& to,
     float moveDistSq = glm::dot(moveDir, moveDir);
     if (moveDistSq < 1e-6f) return false;
 
-    // Player collision parameters - WoW-style horizontal cylinder
-    // Tighter radius when inside for more responsive indoor collision
-    const float PLAYER_RADIUS = insideWMO ? 0.45f : 0.50f;
-    const float PLAYER_HEIGHT = 2.0f;       // Cylinder height for Z bounds
-    const float MAX_STEP_HEIGHT = 1.0f;     // Step-up threshold
+    // The mover as a horizontal cylinder. Given a body, its size is the stock
+    // collision box's (CreatureModelData per race and form, the mount's when
+    // riding - a box of half-width r is approximated by the cylinder of
+    // radius r) and the step is its step height; otherwise the old fixed
+    // cylinder, tighter indoors.
+    const float PLAYER_RADIUS = body ? body->radius : (insideWMO ? 0.45f : 0.50f);
+    const float PLAYER_HEIGHT = body ? body->height : 2.0f;     // Cylinder height for Z bounds
+    const float MAX_STEP_HEIGHT = body ? body->stepHeight : 1.0f;  // Step-up threshold
 
     glm::vec3 queryMin = glm::min(from, to) - glm::vec3(8.0f, 8.0f, 5.0f);
     glm::vec3 queryMax = glm::max(from, to) + glm::vec3(8.0f, 8.0f, 5.0f);

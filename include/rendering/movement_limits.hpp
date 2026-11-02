@@ -6,9 +6,14 @@
 
 namespace wowee::rendering::movement {
 
-// The retail client rejects ground steeper than 50 degrees and steps higher
-// than roughly 0.6 yards. Keep these limits shared by terrain, WMO, and M2
-// collision paths so release builds cannot silently diverge by surface type.
+// The retail client rejects ground steeper than 50 degrees. Keep these limits
+// shared by terrain, WMO, and M2 collision paths so release builds cannot
+// silently diverge by surface type.
+//
+// kMaxStepUp is not the stock step: that is 1 yd (the object scale, at least
+// 1; game::stock_movement::stepHeight, 0x6E9520), and the grounded floor pick
+// reaches it through the player's collider. This is the tolerance the floor
+// heuristics below use for "the ground the feet are on".
 inline constexpr float kMaxWalkableSlopeDegrees = 50.0f;
 inline constexpr float kMinWalkableNormalZ = 0.642787635f; // cos(50 degrees)
 inline constexpr float kMaxStepUp = 0.60f;

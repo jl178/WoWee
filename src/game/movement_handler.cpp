@@ -629,6 +629,12 @@ void MovementHandler::sendMovement(Opcode opcode) {
                 const bool fromWater =
                     (movementInfo.flags & static_cast<uint32_t>(MovementFlags::SWIMMING)) != 0;
                 movementInfo.jumpVelocity = -(fromWater ? sm::kWaterJumpVelocity : sm::kJumpVelocity);
+                // The jump leaves the water (0x988370 clears SWIMMING,
+                // ASCENDING and DESCENDING), so the packet goes out without
+                // them and no STOP_SWIM follows.
+                movementInfo.flags &= ~(static_cast<uint32_t>(MovementFlags::SWIMMING) |
+                                        static_cast<uint32_t>(MovementFlags::ASCENDING) |
+                                        static_cast<uint32_t>(MovementFlags::DESCENDING));
                 // Worked out in the wire's own frame (the stock facing), and
                 // laid down in the stock order: x first. The writers put
                 // jumpSinAngle first on the wire (AzerothCore's names for the

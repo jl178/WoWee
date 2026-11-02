@@ -205,3 +205,85 @@ TEST_CASE("swimming starts three quarters of the way up the body") {
     CHECK(sm::swimEnterDepth(human) == Approx(1.5235f).margin(1e-3));
     CHECK(sm::swimExitDepth(human) == Approx(1.5235f - 1.0f / 36.0f).margin(1e-3));
 }
+
+TEST_CASE("the collision box comes from CreatureModelData, halved across, scaled up only") {
+    // HumanMale: CollisionWidth 0.611, CollisionHeight 2.031 (fields 14 / 15).
+    const sm::Collider human = sm::colliderFromModel(0.6111111f, 2.0312655f);
+    CHECK(human.halfWidth == Approx(0.3056f).margin(1e-3));
+    CHECK(human.height == Approx(2.0313f).margin(1e-3));
+    CHECK(human.stepHeight == 1.0f);
+    // A gnome is as wide as a human and half as tall; a draenei the widest.
+    CHECK(sm::colliderFromModel(0.6944444f, 1.0555556f).height == Approx(1.0556f).margin(1e-3));
+    CHECK(sm::colliderFromModel(0.8666667f, 2.5413f).halfWidth == Approx(0.4333f).margin(1e-3));
+    // The display's model scale scales the box (0x71C110 -> 0x6E9570).
+    const sm::Collider tauren = sm::colliderFromModel(0.59f, 1.653f, 1.35f);
+    CHECK(tauren.halfWidth == Approx(0.59f * 1.35f * 0.5f));
+    CHECK(tauren.height == Approx(1.653f * 1.35f));
+    CHECK(tauren.stepHeight == 1.0f);
+    // The object scale only counts when it enlarges (0x6CF350 clamps it to 1),
+    // and then it is the step height too.
+    const sm::Collider shrunk = sm::colliderFromModel(0.611f, 2.031f, 1.0f, 0.5f);
+    CHECK(shrunk.height == Approx(2.031f));
+    CHECK(shrunk.stepHeight == 1.0f);
+    const sm::Collider grown = sm::colliderFromModel(0.611f, 2.031f, 1.0f, 1.5f);
+    CHECK(grown.height == Approx(2.031f * 1.5f));
+    CHECK(grown.halfWidth == Approx(0.611f * 1.5f * 0.5f));
+    CHECK(grown.stepHeight == 1.5f);
+    // Players step 1 yd, everything else 2 (0x6E8FC0).
+    CHECK(sm::stepHeight(true) == 1.0f);
+    CHECK(sm::stepHeight(false) == 2.0f);
+}
+
+TEST_CASE("mounted, the box is half the rider plus the mount's MountHeight") {
+    // A human on a riding horse (MountHeight 1.866, display scale 1).
+    CHECK(sm::mountedCollisionHeight(2.0313f, 1.0f, 1.866f) == Approx(2.8817f).margin(1e-3));
+    // Never shorter than the rider on foot: a mount with no MountHeight.
+    CHECK(sm::mountedCollisionHeight(2.0313f, 1.0f, 0.0f) == Approx(2.0313f));
+    // The mount display's scale scales its MountHeight.
+    CHECK(sm::mountedCollisionHeight(1.0556f, 2.0f, 1.0f) == Approx(0.5278f + 2.0f).margin(1e-3));
+}
+
+TEST_CASE("a swimmer floats with three quarters of its height under the surface") {
+    const float human = 2.0313f;
+    const float gnome = 1.0556f;
+    CHECK(sm::swimFloatDepth(human) == Approx(1.5235f).margin(1e-3));
+    CHECK(sm::swimFloatDepth(gnome) == Approx(0.7917f).margin(1e-3));
+    // Floating is a stable state: deep enough to keep swimming, and exactly
+    // at the depth that starts it.
+    CHECK(sm::keepsSwimming(sm::swimFloatDepth(human), human, true, true));
+    CHECK(sm::swimFloatDepth(human) == sm::swimEnterDepth(human));
+}
+
+TEST_CASE("start and stop swimming") {
+    const float h = 2.0313f;
+    // Wading in: deeper than 0.75 h, not before.
+    CHECK_FALSE(sm::startsSwimming(1.50f, h, true, false));
+    CHECK(sm::startsSwimming(1.53f, h, true, false));
+    // Not on the way up out of a jump, not in liquid that is not swimmable.
+    CHECK_FALSE(sm::startsSwimming(3.0f, h, true, true));
+    CHECK_FALSE(sm::startsSwimming(3.0f, h, false, false));
+    // Walking out: the 1/36 yd of hysteresis keeps a wader from flickering.
+    CHECK(sm::keepsSwimming(1.50f, h, true, true));
+    CHECK_FALSE(sm::keepsSwimming(1.49f, h, true, true));
+    CHECK_FALSE(sm::keepsSwimming(5.0f, h, false, true));
+    CHECK_FALSE(sm::keepsSwimming(5.0f, h, true, false));
+    // A flier is not stopped by the water rule.
+    CHECK(sm::keepsSwimming(0.0f, h, false, false, true));
+    // A gnome swims in less than half the water a human needs.
+    CHECK(sm::startsSwimming(0.80f, 1.0556f, true, false));
+    CHECK_FALSE(sm::startsSwimming(0.80f, h, true, false));
+}
+
+TEST_CASE("holding ascend at the surface jumps out of the water") {
+    const float h = 2.0313f;
+    // At the float line, or a little under it.
+    CHECK(sm::surfaceHopDue(true, sm::swimFloatDepth(h), h));
+    CHECK(sm::surfaceHopDue(true, sm::swimFloatDepth(h) + 0.3f, h));
+    // A third of a yard down is diving, not surfacing.
+    CHECK_FALSE(sm::surfaceHopDue(true, sm::swimFloatDepth(h) + 0.34f, h));
+    // Only while ascending.
+    CHECK_FALSE(sm::surfaceHopDue(false, sm::swimFloatDepth(h), h));
+    // The water jump clears a dock 0.6 yd above the surface from the float
+    // line: it rises 2.14 yd from 1.52 under.
+    CHECK(sm::jumpApexHeight(sm::kWaterJumpVelocity) - sm::swimFloatDepth(h) > 0.6f);
+}
