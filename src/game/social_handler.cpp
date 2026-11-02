@@ -2,6 +2,7 @@
 #include "core/local_time.hpp"
 #include "game/item_text.hpp"
 #include "game/social_handler.hpp"
+#include "game/spell_handler.hpp"
 #include "addons/lua_api_registrations.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "game/game_handler.hpp"
@@ -4893,10 +4894,14 @@ void SocialHandler::handleSetFactionStanding(network::Packet& packet) {
     //   WotLK:   RAF bonus (float), showVisual (uint8), count
     // Treating WotLK's first float byte as showVisual shifted the entire packet,
     // producing bogus counts, faction names, standings, and chat messages.
+    // AzerothCore sets showVisual when a rank went up (ReputationMgr's
+    // _sendFactionIncreased); the stock client answers it with
+    // ReputationLevelUp.m2 on the player, whose own $SND event is the sound.
+    bool showVisual = false;
     if (isActiveExpansion("wotlk")) {
         if (!packet.hasRemaining(9)) return;
         /*float rafBonus =*/ packet.readFloat();
-        /*uint8_t showVisual =*/ packet.readUInt8();
+        showVisual = packet.readUInt8() != 0;
     } else if (isActiveExpansion("tbc")) {
         if (!packet.hasRemaining(8)) return;
         /*float rafBonus =*/ packet.readFloat();
@@ -4949,6 +4954,10 @@ void SocialHandler::handleSetFactionStanding(network::Packet& packet) {
             owner_.fireCombatTextUpdate(owner_.getPlayerGuid(),
                                         {"FACTION", name, std::to_string(delta)});
         }
+    }
+    if (showVisual) {
+        if (auto* spells = owner_.getSpellHandler())
+            spells->playUnitEffectModel(owner_.getPlayerGuid(), "Spells\\ReputationLevelUp.m2");
     }
 }
 
