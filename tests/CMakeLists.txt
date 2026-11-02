@@ -1209,6 +1209,12 @@ wowee_add_test(test_anim_cull
 wowee_add_test(test_m2_track_cursor
     SOURCES test_m2_track_cursor.cpp)
 
+# ── test_m2_particle_step ────────────────────────────────────
+# Classified emitter tracks, the in-order particle step, the birth merge and
+# the weight split the threaded particle update uses.
+wowee_add_test(test_m2_particle_step
+    SOURCES test_m2_particle_step.cpp)
+
 # ── test_rt_bvh ──────────────────────────────────────────────
 # The hierarchy the software ray tracer walks, against a brute-force scan.
 wowee_add_test(test_rt_bvh
