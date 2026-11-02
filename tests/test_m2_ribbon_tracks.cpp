@@ -165,3 +165,127 @@ TEST_CASE("ribbon emitters are read at the 0xB0 stride", "[m2][ribbon]") {
     CHECK(model.ribbonEmitters[1].edgeLifetime == 1.65f);
     CHECK(model.ribbonEmitters[2].edgeLifetime == 0.25f);
 }
+
+// A ribbon's material index is into the model's material table: the blend it
+// draws with is that material's (stock 0x833900), not a skin batch's.
+TEST_CASE("a ribbon takes its blend from the material table", "[m2][ribbon]") {
+    constexpr size_t kRibbonOffset = 0x200, kMatOffset = 0x400, kIdxOffset = 0x420;
+    std::vector<uint8_t> data(0x500, 0);
+    std::memcpy(data.data(), "MD20", 4);
+    put<uint32_t>(data, 0x04, 264);
+    put<uint32_t>(data, 0x70, 2);  // materials
+    put<uint32_t>(data, 0x74, static_cast<uint32_t>(kMatOffset));
+    put<uint16_t>(data, kMatOffset + 0, 0);
+    put<uint16_t>(data, kMatOffset + 2, 2);   // material 0: alpha
+    put<uint16_t>(data, kMatOffset + 4, 23);
+    put<uint16_t>(data, kMatOffset + 6, 4);   // material 1: add, flags 0x17
+    put<uint32_t>(data, 0x120, 1);
+    put<uint32_t>(data, 0x124, static_cast<uint32_t>(kRibbonOffset));
+    put<uint32_t>(data, kRibbonOffset + 0x04, 7);
+    put<uint32_t>(data, kRibbonOffset + 0x1C, 1);
+    put<uint32_t>(data, kRibbonOffset + 0x20, static_cast<uint32_t>(kIdxOffset));
+    put<uint16_t>(data, kIdxOffset, 1);
+    put<float>(data, kRibbonOffset + 0x74, 10.0f);
+    put<float>(data, kRibbonOffset + 0x78, 0.6f);
+
+    const M2Model model = M2Loader::load(data);
+    REQUIRE(model.ribbonEmitters.size() == 1);
+    CHECK(model.ribbonEmitters[0].materialIndex == 1);
+    CHECK(model.ribbonEmitters[0].blendMode == 4);
+    CHECK(model.ribbonEmitters[0].materialFlags == 23);
+}
+
+// The WotLK particle emitter record (0x1DC bytes): every field the stock
+// runtime reads, at its offset. Synthetic, so it always runs.
+TEST_CASE("particle emitter fields are read at their WotLK offsets", "[m2][particles]") {
+    constexpr size_t kEm = 0x200, kData = 0x600;
+    std::vector<uint8_t> data(0x800, 0);
+    std::memcpy(data.data(), "MD20", 4);
+    put<uint32_t>(data, 0x04, 264);
+    put<uint32_t>(data, 0x128, 1);
+    put<uint32_t>(data, 0x12C, static_cast<uint32_t>(kEm));
+    put<uint32_t>(data, kEm + 0x04, 0x60009u);
+    put<uint16_t>(data, kEm + 0x14, 2);
+    put<uint8_t>(data, kEm + 0x28, 4);
+    put<uint8_t>(data, kEm + 0x29, 1);
+    put<uint16_t>(data, kEm + 0x30, 2);
+    put<uint16_t>(data, kEm + 0x32, 4);
+    put<float>(data, kEm + 0xAC, 0.25f);   // lifespan vary
+    put<float>(data, kEm + 0xC4, 3.0f);    // rate vary
+    // Scale FBlock: three keys at 0, 11468, 32767 of (x, y).
+    size_t o = kData;
+    put<uint32_t>(data, kEm + 0x124, 3);
+    put<uint32_t>(data, kEm + 0x128, static_cast<uint32_t>(o));
+    put<int16_t>(data, o, 0); put<int16_t>(data, o + 2, 11468); put<int16_t>(data, o + 4, 32767);
+    o += 8;
+    put<uint32_t>(data, kEm + 0x12C, 3);
+    put<uint32_t>(data, kEm + 0x130, static_cast<uint32_t>(o));
+    const float sx[3] = {3.77f, 2.0f, 1.0f}, sy[3] = {1.94f, 1.0f, 0.5f};
+    for (int k = 0; k < 3; ++k) {
+        put<float>(data, o + k * 8, sx[k]);
+        put<float>(data, o + k * 8 + 4, sy[k]);
+    }
+    o += 24;
+    // Alpha FBlock, two keys, the last short of 32767.
+    put<uint32_t>(data, kEm + 0x114, 2);
+    put<uint32_t>(data, kEm + 0x118, static_cast<uint32_t>(o));
+    put<int16_t>(data, o, 0); put<int16_t>(data, o + 2, 16384);
+    o += 4;
+    put<uint32_t>(data, kEm + 0x11C, 2);
+    put<uint32_t>(data, kEm + 0x120, static_cast<uint32_t>(o));
+    put<int16_t>(data, o, 32767); put<int16_t>(data, o + 2, 0);
+    o += 4;
+    // Head cell FBlock: cells 0 then 3.
+    put<uint32_t>(data, kEm + 0x13C, 2);
+    put<uint32_t>(data, kEm + 0x140, static_cast<uint32_t>(o));
+    put<int16_t>(data, o, 0); put<int16_t>(data, o + 2, 32767);
+    o += 4;
+    put<uint32_t>(data, kEm + 0x144, 2);
+    put<uint32_t>(data, kEm + 0x148, static_cast<uint32_t>(o));
+    put<uint16_t>(data, o, 0); put<uint16_t>(data, o + 2, 3);
+    put<float>(data, kEm + 0x134, 0.1f);   // scale vary x
+    put<float>(data, kEm + 0x15C, 1.2f);   // tail length
+    put<float>(data, kEm + 0x160, 10.0f);  // twinkle speed
+    put<float>(data, kEm + 0x164, 0.5f);   // twinkle percent
+    put<float>(data, kEm + 0x168, 0.7f);
+    put<float>(data, kEm + 0x16C, 1.0f);
+    put<float>(data, kEm + 0x170, 2.0f);   // burst
+    put<float>(data, kEm + 0x174, 0.5f);   // drag
+    put<float>(data, kEm + 0x17C, 3.14f);  // base spin vary
+    put<float>(data, kEm + 0x184, 0.35f);  // spin vary
+    put<float>(data, kEm + 0x1A0, 1.0f);   // wind x
+    put<float>(data, kEm + 0x1AC, 0.75f);  // wind time
+    put<float>(data, kEm + 0x1B0, 2.5f);   // follow speed 1
+
+    const M2Model model = M2Loader::load(data);
+    REQUIRE(model.particleEmitters.size() == 1);
+    const auto& em = model.particleEmitters[0];
+    CHECK(em.flags == 0x60009u);
+    CHECK(em.blendingType == 4);
+    CHECK(em.textureRows == 2);
+    CHECK(em.textureCols == 4);
+    CHECK(em.lifespanVary == 0.25f);
+    CHECK(em.emissionRateVary == 3.0f);
+    REQUIRE(em.particleScale.vec2Values.size() == 3);
+    CHECK(em.particleScale.vec2Values[0] == glm::vec2(3.77f, 1.94f));
+    CHECK(em.particleScale.floatValues[0] == 3.77f);
+    // Times are fixed16 over 32767, not over the last key.
+    CHECK(em.particleScale.timestamps[1] == Catch::Approx(11468.0f / 32767.0f));
+    CHECK(em.particleAlpha.timestamps[1] == Catch::Approx(16384.0f / 32767.0f));
+    CHECK(em.particleAlpha.floatValues[0] == Catch::Approx(1.0f));
+    REQUIRE(em.headCell.floatValues.size() == 2);
+    CHECK(em.headCell.floatValues[1] == 3.0f);
+    CHECK(em.scaleVary.x == 0.1f);
+    CHECK(em.tailLength == 1.2f);
+    CHECK(em.twinkleSpeed == 10.0f);
+    CHECK(em.twinklePercent == 0.5f);
+    CHECK(em.twinkleScaleMin == 0.7f);
+    CHECK(em.twinkleScaleMax == 1.0f);
+    CHECK(em.burstMultiplier == 2.0f);
+    CHECK(em.drag == 0.5f);
+    CHECK(em.baseSpinVary == 3.14f);
+    CHECK(em.spinVary == 0.35f);
+    CHECK(em.windVector.x == 1.0f);
+    CHECK(em.windTime == 0.75f);
+    CHECK(em.followSpeed1 == 2.5f);
+}

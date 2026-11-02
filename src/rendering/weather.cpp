@@ -5,6 +5,7 @@
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/vk_utils.hpp"
+#include "rendering/stock_screen_fx.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "core/application.hpp"
@@ -115,6 +116,30 @@ void Weather::buildPipelines(VkDevice device,
         .setRenderPass(vkCtx->getImGuiRenderPass())
         .setDynamicStates(viewportAndScissorDynamic())
         .build(device, vkCtx->getPipelineCache());
+
+    // Rain and splashes multiply what is behind them by twice the texture.
+    VkPipelineColorBlendAttachmentState mod2x{};
+    mod2x.blendEnable = VK_TRUE;
+    mod2x.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
+    mod2x.dstColorBlendFactor = VK_BLEND_FACTOR_SRC_COLOR;
+    mod2x.colorBlendOp = VK_BLEND_OP_ADD;
+    mod2x.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    mod2x.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    mod2x.alphaBlendOp = VK_BLEND_OP_ADD;
+    mod2x.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    mod2xPipeline_ = PipelineBuilder()
+        .setShaders(vertStage, fragStage)
+        .setVertexInput({binding}, attrs)
+        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+        .setDepthTest(true, false, VK_COMPARE_OP_LESS)
+        .setColorBlendAttachment(mod2x)
+        .setMultisample(vkCtx->getMsaaSamples())
+        .setLayout(pipelineLayout)
+        .setRenderPass(vkCtx->getImGuiRenderPass())
+        .setDynamicStates(viewportAndScissorDynamic())
+        .build(device, vkCtx->getPipelineCache());
 }
 
 bool Weather::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
@@ -179,6 +204,7 @@ void Weather::recreatePipelines() {
     VkDevice device = vkCtx->getDevice();
 
     destroy(device, pipeline);
+    destroy(device, mod2xPipeline_);
 
     auto shaders = loadShaderPair(device, "assets/shaders/weather.vert.spv",
                                   "assets/shaders/weather.frag.spv", "weather");
@@ -294,9 +320,12 @@ void Weather::update(const Camera& camera, float deltaTime) {
     }
     const Volume& vol = volumeFor(particlesType_);
 
-    // How many: the server's intensity times the Weather Detail setting.
+    // How many: the server's grade as the stock emitters take it - nothing
+    // below a quarter, all of it at one (stock_screen_fx::particleLevel,
+    // 0x784850) - times the Weather Detail setting.
     const float typeScale = particlesType_ == Type::SNOW ? 0.7f : 1.0f;
-    const int target = static_cast<int>(MAX_PARTICLES * typeScale * intensity * densityScale_);
+    const float level = stock_screen_fx::particleLevel(intensity);
+    const int target = static_cast<int>(MAX_PARTICLES * typeScale * level * densityScale_);
     const bool filling = particles.empty();
     while (static_cast<int>(particles.size()) < target) {
         Particle p;
@@ -464,9 +493,16 @@ void Weather::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &fb.buffer, &offset);
 
+    VkPipeline bound = pipeline;
     auto draw = [&](Sprite sprite, uint32_t first, uint32_t count, const glm::vec4& tint) {
         if (count == 0 || !textureReady_[sprite] || first >= vertexLimit) return;
         count = std::min(count, vertexLimit - first);
+        // tint.a < 0 asks for the stock Mod2x (see weather.frag).
+        VkPipeline want = (tint.a < 0.0f && mod2xPipeline_) ? mod2xPipeline_ : pipeline;
+        if (want != bound) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want);
+            bound = want;
+        }
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                                 1, 1, &textureSets_[sprite], 0, nullptr);
         vkCmdPushConstants(cmd, pipelineLayout,
@@ -475,18 +511,49 @@ void Weather::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
         vkCmdDraw(cmd, count, 1, first, 0);
     };
 
+    // As the stock client draws them (MapWeather.cpp): snow alpha-blended in
+    // the Weather.dbc colour (white on every row), neither lit nor fogged
+    // (snowpoint.bls writes no fog); rain and splashes in Mod2x, the drop's
+    // grey-128 texture times the Weather.dbc colour, fogged toward neutral
+    // grey (0x80808080) rather than the fog colour. Neither is lit by the
+    // scene: the rain darkens and brightens what is behind it instead.
     if (builtType_ == Type::SNOW) {
-        draw(SNOW_FLAKE, 0, particleVertexCount_, glm::vec4(1.0f, 1.0f, 1.0f, 0.95f));
+        draw(SNOW_FLAKE, 0, particleVertexCount_, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
     } else {
-        const float a = builtType_ == Type::STORM ? 0.8f : 0.7f;
-        draw(RAIN_STREAK, 0, particleVertexCount_, glm::vec4(0.85f, 0.88f, 0.92f, a));
+        draw(RAIN_STREAK, 0, particleVertexCount_, glm::vec4(1.0f, 1.0f, 1.0f, -1.0f));
         draw(RAIN_SPLASH, particleVertexCount_, splashVertexCount_,
-             glm::vec4(0.85f, 0.88f, 0.92f, 0.75f));
+             glm::vec4(1.0f, 1.0f, 1.0f, -1.0f));
     }
 }
 
-void Weather::setIntensity(float intensity) {
-    this->intensity = glm::clamp(intensity, 0.0f, 1.0f);
+void Weather::easeGrade(float target, float deltaTime) {
+    target = glm::clamp(target, 0.0f, 1.0f);
+    if (target != gradeTo_) {
+        gradeFrom_ = intensity;
+        gradeTo_ = target;
+        gradeElapsed_ = 0.0f;
+        gradeDuration_ = stock_screen_fx::particleTransitionSeconds(gradeFrom_, gradeTo_);
+    }
+    gradeElapsed_ += deltaTime;
+    const float t = gradeDuration_ > 0.0f ? std::min(gradeElapsed_ / gradeDuration_, 1.0f) : 1.0f;
+    intensity = glm::mix(gradeFrom_, gradeTo_, t);
+}
+
+void Weather::followServerWeather(Type type, float grade, float deltaTime) {
+    // Nothing falling yet: the new kind starts from a clear sky, not from
+    // whatever grade the last one was left at.
+    if (weatherType == Type::NONE) {
+        intensity = 0.0f;
+        gradeTo_ = 0.0f;
+        weatherType = type;
+    }
+    if (type != weatherType) {
+        // The old kind eases out first; only a clear sky changes it.
+        easeGrade(0.0f, deltaTime);
+        if (intensity <= 0.0f) weatherType = type;
+        return;
+    }
+    easeGrade(type == Type::NONE ? 0.0f : grade, deltaTime);
 }
 
 int Weather::getParticleCount() const {
@@ -501,6 +568,7 @@ void Weather::shutdown() {
         textureReady_.fill(false);
         for (auto& fb : frameBuffers_) destroy(allocator, fb.buffer, fb.alloc);
         frameBuffers_.clear();
+        destroy(device, mod2xPipeline_);
         destroyPipeline(device, pipeline, pipelineLayout);
         destroy(device, descriptorPool_);
         destroy(device, textureSetLayout_);
@@ -597,13 +665,8 @@ void Weather::updateZoneWeather(uint32_t zoneId, float deltaTime) {
         }
     }
 
-    // Smooth intensity transitions
-    float transitionSpeed = 0.15f * deltaTime; // ~7 seconds to full transition
-    if (intensity < targetIntensity_) {
-        intensity = std::min(intensity + transitionSpeed, targetIntensity_);
-    } else if (intensity > targetIntensity_) {
-        intensity = std::max(intensity - transitionSpeed, targetIntensity_);
-    }
+    // At the stock pace, the same as the server's weather.
+    easeGrade(targetIntensity_, deltaTime);
 
     if (intensity <= 0.01f && targetIntensity_ <= 0.01f) {
         if (weatherType != Type::NONE) {

@@ -26,6 +26,10 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
 };
 
+// The stock depth fog every other world surface takes, so a blade fades
+// into the haze exactly as the ground it stands on does.
+#include "stock_fog.glsli"
+
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
 layout(location = 0) in float vHeightT;
@@ -56,7 +60,7 @@ vec4 fogVolumeAt(vec3 worldPos) {
 // everything between the camera and that, sunlit shafts and torch glow
 // included.
 vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
-    float fogFactor = clamp((fogParams.y - dist) / (fogParams.y - fogParams.x), 0.0, 1.0);
+    float fogFactor = stockFogVisibility(worldPos);
     color = mix(fogColor.rgb, color, fogFactor);
     if (volumetricParams.x > 0.5) {
         vec4 air = fogVolumeAt(worldPos);

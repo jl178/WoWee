@@ -1239,6 +1239,13 @@ void SpellVisualSystem::update(float deltaTime) {
         // A missile still flying after this long has lost its target to a
         // teleport or a despawn; the server settled the hit long ago.
         if (remaining <= step || remaining < 1e-3f || m.elapsed >= SPELL_MISSILE_MAX_DURATION) {
+            // The stock impact (0x703410) puts the missile on the impact
+            // point before it fades over 0.15 s, so its trail ends there.
+            if (remaining > 1e-3f && m.elapsed < SPELL_MISSILE_MAX_DURATION) {
+                const glm::vec3 dirIn = toEnd / remaining;
+                m.pos = m.shown = m.end;
+                placeSpellMissile(m, dirIn);
+            }
             if (m.soundHandle && m.soundLoops) audioEngine.fadeOutSound(m.soundHandle, 150.0f);
             landed.push_back(m.instanceId);
             if (m.impactAtEnd)

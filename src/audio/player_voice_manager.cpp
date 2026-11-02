@@ -190,16 +190,20 @@ void PlayerVoiceManager::playError(PlayerErrorSpeech type, uint8_t raceId, uint8
     if (!AudioEngine::instance().isInitialized()) return;
 
     auto now = std::chrono::steady_clock::now();
-    if (lastPlayTime_.time_since_epoch().count() != 0) {
-        float elapsed = std::chrono::duration<float>(now - lastPlayTime_).count();
-        if (elapsed < PLAY_COOLDOWN) return;
-    }
 
     // With the table read, it alone decides: a race or line it has no sound
-    // for stays silent, as in the stock client.
+    // for stays silent, as in the stock client. Its only throttle is that a
+    // line is never spoken over another (Wow.exe 0x986d00 and the
+    // error-speech category's cap of one): the next error speaks as soon as
+    // the last line has finished.
     if (soundData_ && soundData_->loaded() && soundData_->hasVocalUiSounds()) {
         playFromTable(type, raceId, gender, now);
         return;
+    }
+
+    if (lastPlayTime_.time_since_epoch().count() != 0) {
+        float elapsed = std::chrono::duration<float>(now - lastPlayTime_).count();
+        if (elapsed < PLAY_COOLDOWN) return;
     }
 
     ensureLibrary(raceId, gender);
@@ -234,9 +238,14 @@ bool PlayerVoiceManager::playFromTable(PlayerErrorSpeech type, uint8_t raceId, u
     if (!entry) entry = soundData_->vocalUiSound(vocalEnum, raceId, female, false);
     if (!entry) return false;
 
-    std::uniform_int_distribution<size_t> choice(0, entry->files.size() - 1);
-    // As recorded: the kit's own volume, no pitch change.
-    if (!AudioEngine::instance().playSound2D(entry->files[choice(rng_)], entry->volume * volumeScale_, 1.0f)) {
+    const std::string* file = soundData_->nextFile(*entry);
+    if (!file) return false;
+    // As recorded: the kit's own volume and flags, in the listener's head.
+    SoundOptions opts;
+    opts.kitId = entry->id;
+    opts.category = stock::Category::ErrorSpeech;
+    if (!AudioEngine::instance().playSound2D(*file, stock::kitVolume(entry->volume, entry->flags, volumeScale_, rng_),
+                                             stock::kitPitch(entry->flags, rng_), SoundBus::World, opts)) {
         return false;
     }
     lastPlayTime_ = now;

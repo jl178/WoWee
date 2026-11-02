@@ -27,11 +27,21 @@ layout(location = 0) out vec4 outColor;
 
 void main() {
     vec4 tex = texture(uSprite, vUV);
+    if (push.tint.a < 0.0) {
+        // Rain and splashes, the stock GxBlend_Mod2x: the framebuffer is
+        // multiplied by twice this. The textures sit at grey 128, so a drop
+        // barely brightens what is behind it; with distance, and toward the
+        // edges of the box this keeps around the camera, it goes to the
+        // neutral 0.5 (the stock fog colour 0x80808080 for this blend). Alpha
+        // only cuts the sprite out (alpha test ref 1, 0xad8b7c).
+        if (tex.a < 1.0 / 255.0) discard;
+        vec3 c = mix(vec3(0.5), tex.rgb * push.tint.rgb, clamp(vFog * vAlpha, 0.0, 1.0));
+        outColor = vec4(c, 1.0);
+        return;
+    }
+    // Snow: the Weather.dbc colour over the flake, alpha-blended, unlit and
+    // unfogged as snowpoint.bls draws it.
     float alpha = tex.a * vAlpha * push.tint.a;
     if (alpha < 0.004) discard;
-    // Lit by the scene: rain at night is dark, at noon pale.
-    vec3 light = clamp(ambientColor.rgb + lightColor.rgb * 0.6, vec3(0.12), vec3(1.0));
-    vec3 color = tex.rgb * push.tint.rgb * light;
-    color = mix(fogColor.rgb, color, vFog);
-    outColor = vec4(color, alpha);
+    outColor = vec4(tex.rgb * push.tint.rgb, alpha);
 }

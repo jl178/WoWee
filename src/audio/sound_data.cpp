@@ -15,7 +15,8 @@ namespace {
 // Column indices for build 3.3.5.12340, from WoWDBDefs. kFields is the
 // layout's full width; a table narrower than that is from another build.
 namespace se  { constexpr uint32_t kFields = 30, kName = 2, kFile0 = 3, kFileCount = 10,
-                kDirectory = 23, kVolume = 24, kFlags = 25, kMinDistance = 26, kDistanceCutoff = 27; }
+                kFreq0 = 13, kDirectory = 23, kVolume = 24, kFlags = 25, kMinDistance = 26,
+                kDistanceCutoff = 27, kAdvanced = 29; }
 namespace zm  { constexpr uint32_t kFields = 8, kSetName = 1, kSilenceMin = 2, kSilenceMax = 4, kSounds = 6; }
 namespace sa  { constexpr uint32_t kFields = 3, kAmbience = 1; }
 namespace at  { constexpr uint32_t kFields = 36, kParent = 2, kReverb = 5, kReverbUnderwater = 6,
@@ -361,17 +362,36 @@ const SoundEntry* SoundData::sound(uint32_t id) const {
     SoundEntry entry;
     entry.id = id;
     entry.name = soundEntries_->getString(r, se::kName);
-    const std::string dir = soundEntries_->getString(r, se::kDirectory);
+    std::string dir = soundEntries_->getString(r, se::kDirectory);
+    if (!dir.empty() && dir.back() != '\\') dir += '\\';
+    // The kit ends at its first empty file (0x4cd4a0); the two rows with a
+    // gap never play what comes after it.
     for (uint32_t f = 0; f < se::kFileCount; ++f) {
         std::string file = soundEntries_->getString(r, se::kFile0 + f);
-        if (file.empty()) continue;
-        entry.files.push_back(dir.empty() ? std::move(file) : dir + "\\" + file);
+        if (file.empty()) break;
+        entry.files.push_back(dir + file);
+        entry.freq.push_back(soundEntries_->getUInt32(r, se::kFreq0 + f));
     }
     entry.volume = soundEntries_->getFloat(r, se::kVolume);
     entry.flags = soundEntries_->getUInt32(r, se::kFlags);
     entry.minDistance = soundEntries_->getFloat(r, se::kMinDistance);
     entry.distanceCutoff = soundEntries_->getFloat(r, se::kDistanceCutoff);
+    entry.advancedId = soundEntries_->getUInt32(r, se::kAdvanced);
     return &(soundCache_[id] = std::move(entry));
+}
+
+const std::string* SoundData::nextFile(const SoundEntry& entry) const {
+    if (entry.files.empty()) return nullptr;
+    std::vector<uint32_t> freq = entry.freq;
+    // A row built by hand (tests, fallbacks) with no weights draws evenly.
+    if (freq.size() != entry.files.size()) freq.assign(entry.files.size(), 1u);
+    const int i = stock::pickKitFile(entry.bag, freq, rng_);
+    return i < 0 ? nullptr : &entry.files[static_cast<size_t>(i)];
+}
+
+const std::string* SoundData::nextFile(uint32_t soundId) const {
+    const SoundEntry* entry = sound(soundId);
+    return entry ? nextFile(*entry) : nullptr;
 }
 
 const SoundEntry* SoundData::soundByName(std::string_view name) const {
@@ -459,6 +479,13 @@ uint32_t SoundData::wmoZoneMusic(uint32_t wmoId, uint16_t nameSet, int32_t group
     if (own && own->zoneMusicId != 0) return own->zoneMusicId;
     const WmoAreaSounds* building = groupId != -1 ? wmoArea(wmoId, nameSet, -1) : nullptr;
     return building ? building->zoneMusicId : 0;
+}
+
+uint32_t SoundData::wmoIntro(uint32_t wmoId, uint16_t nameSet, int32_t groupId) const {
+    const WmoAreaSounds* own = wmoArea(wmoId, nameSet, groupId);
+    if (own && own->introId != 0) return own->introId;
+    const WmoAreaSounds* building = groupId != -1 ? wmoArea(wmoId, nameSet, -1) : nullptr;
+    return building ? building->introId : 0;
 }
 
 const SoundProviderPref* SoundData::providerPref(int32_t id) const {

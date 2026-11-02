@@ -1,5 +1,7 @@
 #pragma once
 
+#include "audio/stock_sound_rules.hpp"
+
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -92,7 +94,8 @@ private:
     void loadVoiceSounds();
     void loadCreatureAggroSounds();
     bool loadSound(const std::string& path, VoiceSample& sample);
-    bool playSoundEntry(uint32_t soundId, const glm::vec3& position);
+    bool playSoundEntry(uint32_t soundId, const glm::vec3& position,
+                        stock::Category category = stock::Category::Sfx);
     bool playFromTables(uint64_t npcGuid, uint32_t displayId, SoundCategory category, const glm::vec3& position);
     const SoundData* soundData_ = nullptr;
     void playSound(uint64_t npcGuid, VoiceType voiceType, SoundCategory category, const glm::vec3& position);
@@ -120,6 +123,11 @@ private:
     std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> lastAggroTime_;
     std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> lastCombatVocalTime_;
     std::unordered_map<uint64_t, int> clickCount_;  // Track clicks for pissed sounds
+    // The stock greeting count (0xca1190) and whom it counts for (0xca1198),
+    // and each creature's last line, so none talks over itself.
+    uint64_t clickNpc_ = 0;
+    int greetCount_ = 0;
+    std::unordered_map<uint64_t, uint32_t> speaking_;
     static constexpr float GREETING_COOLDOWN = 2.0f;  // seconds
     static constexpr float AGGRO_COOLDOWN = 5.0f;     // duplicate AI_REACTION/ATTACKSTART guard
     static constexpr float COMBAT_VOCAL_COOLDOWN = 1.25f;

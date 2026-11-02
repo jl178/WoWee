@@ -1,9 +1,12 @@
 #pragma once
 
+#include "audio/stock_sound_rules.hpp"
+
 #include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <random>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -23,6 +26,12 @@ struct SoundEntry {
     uint32_t flags = 0;
     float minDistance = 0.0f;
     float distanceCutoff = 0.0f;
+    /// Freq per file: how many times each file sits in the kit's bag.
+    std::vector<uint32_t> freq;
+    uint32_t advancedId = 0;  ///< SoundEntriesAdvanced.dbc row, 0 for none
+    /// The kit's draw state. The stock client keeps it on the kit, so it
+    /// carries from one play of the row to the next, whoever plays it.
+    mutable stock::KitBag bag;
 };
 
 /// One SoundEmitters.dbc row: a looping sound placed in the world by hand -
@@ -148,6 +157,12 @@ public:
     [[nodiscard]] bool loaded() const { return loaded_; }
 
     [[nodiscard]] const SoundEntry* sound(uint32_t id) const;
+    /// The file a kit plays next, drawn the stock way (stock::pickKitFile):
+    /// weighted by Freq, each file once before any repeats, never the same
+    /// file twice running. Null when the row has no file to give.
+    [[nodiscard]] const std::string* nextFile(const SoundEntry& entry) const;
+    /// The same for a row by id.
+    [[nodiscard]] const std::string* nextFile(uint32_t soundId) const;
     /// Lookup by SoundEntries.Name, case-insensitive.
     [[nodiscard]] const SoundEntry* soundByName(std::string_view name) const;
     [[nodiscard]] const ZoneMusicSet* zoneMusic(uint32_t id) const;
@@ -173,6 +188,8 @@ public:
     /// their own only here and there and the city's row covers the rest.
     [[nodiscard]] uint32_t wmoAmbience(uint32_t wmoId, uint16_t nameSet, int32_t groupId) const;
     [[nodiscard]] uint32_t wmoZoneMusic(uint32_t wmoId, uint16_t nameSet, int32_t groupId) const;
+    /// A room's ZoneIntroMusicTable id, the same way.
+    [[nodiscard]] uint32_t wmoIntro(uint32_t wmoId, uint16_t nameSet, int32_t groupId) const;
 
     /// A SoundProviderPreferences row by id; null for 0, -1 or an unknown id.
     [[nodiscard]] const SoundProviderPref* providerPref(int32_t id) const;
@@ -294,6 +311,8 @@ private:
     Loader loader_;
     mutable std::shared_ptr<pipeline::DBCFile> itemDisplayInfo_;
     mutable bool itemDisplayInfoTried_ = false;
+
+    mutable std::mt19937 rng_{std::random_device{}()};
 
     // SoundEntries has ten thousand rows and a handful are ever asked for.
     mutable std::unordered_map<uint32_t, SoundEntry> soundCache_;

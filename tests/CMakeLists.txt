@@ -181,6 +181,11 @@ wowee_add_test(test_text_measure_cache
 wowee_add_test(test_hill_climbing
     SOURCES test_movement_limits.cpp)
 
+# The stock movement maths: jump arc, fall cap, slope limit, speed and
+# direction for a set of keys, the input votes. Header-only.
+wowee_add_test(test_stock_movement
+    SOURCES test_stock_movement.cpp)
+
 # ── test_spell_description_eval ─────────────────────────────
 # The expression language spell descriptions are written in. Sinister Strike's
 # tooltip read "percent>% of your normal weapon damage" because nothing read
@@ -273,6 +278,10 @@ wowee_add_test(test_shared_rules
 # CCharacterComponent does it. Pure header, synthetic items in.
 wowee_add_test(test_item_texture_layers
     SOURCES test_item_texture_layers.cpp ${TEST_COMMON_SOURCES})
+
+# ── test_unit_appearance_stock ───────────────────────────────
+# Stock unit appearance and lighting rules (docs/re/characters.md).
+wowee_add_test(test_unit_appearance_stock SOURCES test_unit_appearance_stock.cpp)
 
 # ── test_geoset_rules ────────────────────────────────────────
 # Choosing a geoset when the model lacks the one asked for. Pure header, so the
@@ -747,7 +756,8 @@ register_test_target(test_srp)
 
 # ── test_m2_ribbon_tracks ────────────────────────────────────
 # A ribbon emitter's alpha and visibility tracks, whose keys are fixed16 and
-# bytes rather than floats. Real-asset coverage; skips when unextracted.
+# bytes rather than floats (real-asset coverage; skips when unextracted), the
+# ribbon's material blend, and the particle emitter record's field offsets.
 add_executable(test_m2_ribbon_tracks
     test_m2_ribbon_tracks.cpp
     ${TEST_COMMON_SOURCES}
@@ -797,6 +807,13 @@ wowee_add_test(test_spline_body
             ${TEST_COMMON_SOURCES}
             ${CMAKE_SOURCE_DIR}/src/game/spline_packet.cpp
             ${CMAKE_SOURCE_DIR}/src/network/packet.cpp)
+
+# ── test_unit_motion ─────────────────────────────────────────
+# The stock client's movement of other units (docs/re/unit-motion.md):
+# monster-move splines, remote players' dead reckoning, the body's turn.
+wowee_add_test(test_unit_motion
+    SOURCES test_unit_motion.cpp
+            ${CMAKE_SOURCE_DIR}/src/game/unit_motion.cpp)
 
 # ── test_spline ──────────────────────────────────────────────
 wowee_add_test(test_spline
@@ -1079,6 +1096,7 @@ wowee_add_test(test_entity
     SOURCES test_entity.cpp
             ${TEST_COMMON_SOURCES}
             ${CMAKE_SOURCE_DIR}/src/game/entity.cpp
+            ${CMAKE_SOURCE_DIR}/src/game/unit_motion.cpp
             ${CMAKE_SOURCE_DIR}/src/math/spline.cpp)
 
 # ── test_dbc_loader ──────────────────────────────────────────
@@ -1234,10 +1252,16 @@ wowee_add_test(test_m2_particle_step
     SOURCES test_m2_particle_step.cpp)
 
 # ── test_m2_particle_look ────────────────────────────────────
-# The compact particle record: the shader's colour, alpha and size from the
-# packed curve against the CPU path's, and the tile packing.
+# The particle record and the packed curves: the shader's colour, alpha and
+# size read against the stock curve evaluation.
 wowee_add_test(test_m2_particle_look
     SOURCES test_m2_particle_look.cpp)
+
+# ── test_m2_particle_stock ───────────────────────────────────
+# The stock particle and ribbon arithmetic (docs/re/particles.md): quad
+# corners, curve segments, cells, twinkle, emission shapes, sub-steps.
+wowee_add_test(test_m2_particle_stock
+    SOURCES test_m2_particle_stock.cpp)
 
 # ── test_rt_bvh ──────────────────────────────────────────────
 # The hierarchy the software ray tracer walks, against a brute-force scan.
@@ -2109,9 +2133,8 @@ wowee_add_test(test_terrain_slope_limit
     SOURCES test_terrain_slope_limit.cpp)
 
 # ── test_particle_density_floor ─────────────────────────────
-# Particle density against the floor that holds a flame together. Applying
-# the setting after the floor instead of before it takes every candle in the
-# world out at the lowest setting.
+# Particle density as the stock applies it: a plain multiplier with the
+# distance thinning, and no floor for flames.
 wowee_add_test(test_particle_density_floor
     SOURCES test_particle_density_floor.cpp)
 
@@ -2897,6 +2920,7 @@ wowee_add_test(test_sound_data SOURCES
     ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp
     ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/sound_data.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/stock_sound_rules.cpp
 )
 wowee_add_test(test_zone_music_controller SOURCES
     test_zone_music_controller.cpp
@@ -2904,5 +2928,25 @@ wowee_add_test(test_zone_music_controller SOURCES
     ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp
     ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/sound_data.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/stock_sound_rules.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/zone_music_controller.cpp
 )
+# ── test_stock_sound_rules ───────────────────────────────────
+# How the stock client plays a sound (Wow.exe 3.3.5a SoundInterface2 and
+# SoundEngine): the rolloff curve, the kit file bag, the voice limits, the
+# listener and the day window. Pure.
+wowee_add_test(test_stock_sound_rules SOURCES
+    test_stock_sound_rules.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/stock_sound_rules.cpp
+)
+
+# ── test_stock_light_math ────────────────────────────────────
+# The stock client's light arithmetic (Wow.exe 3.3.5a, DayNight 0x7e-0x7f
+# range and the arbvp1 shaders): band sampling, the light-volume paint order
+# and weights, the fog curve, the terrain light. Header-only.
+wowee_add_test(test_stock_light_math SOURCES test_stock_light_math.cpp)
+
+# ── test_stock_world_fx ──────────────────────────────────────
+# The stock client's water, sky, WMO light and weather/glow arithmetic
+# (stock_liquid, stock_sky, stock_wmo_light, stock_screen_fx). Header-only.
+wowee_add_test(test_stock_world_fx SOURCES test_stock_world_fx.cpp)

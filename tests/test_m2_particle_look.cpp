@@ -1,12 +1,11 @@
-// The compact particle record (rendering/m2_particle_look.hpp).
+// The particle record and packed curves (rendering/m2_particle_look.hpp).
 //
-// The GPU particle path writes one 24-byte record per particle and leaves
-// colour, alpha and size to m2_particle_gpu.vert. lookFromPacked is that
-// shader's arithmetic in C++, reading the curve from the storage-buffer
-// layout packCurve writes. Here it is held to the CPU path - the code
-// renderM2Particles runs under WOWEE_PARTICLE_CPU_QUADS=1, copied below as it
-// stands - for random curves, every life ratio boundary and every model class
-// and blend; and the tile packing to the CPU path's float tile loop.
+// The particle pass writes one 48-byte record per quad and leaves colour,
+// alpha and size to m2_particle_gpu.vert, which reads the emitter's curves
+// from the layout packCurve writes. lookFromPacked is that shader's read in
+// C++; here it is held to the stock evaluation straight off the emitter
+// (m2_particle::particleColor and friends) for real curve shapes and random
+// ones, at every life ratio boundary.
 #include <catch_amalgamated.hpp>
 
 #include "rendering/m2_particle_look.hpp"
@@ -16,193 +15,110 @@
 #include <vector>
 
 using namespace wowee::rendering;
-using m2_particle::kCurveSteps;
+using wowee::pipeline::M2FBlock;
+using wowee::pipeline::M2ParticleEmitter;
 
 namespace {
 
-struct Curve {
-    glm::vec4 colorAlpha[kCurveSteps + 1];
-    float scale[kCurveSteps + 1];
-};
-
-Curve randomCurve(std::mt19937& rng) {
-    std::uniform_real_distribution<float> c(0.0f, 1.0f);
-    // Scales across the thresholds the classes test: 0.15, 1.5 and 2.
-    std::uniform_real_distribution<float> s(0.0f, 3.0f);
-    Curve curve{};
-    for (int k = 0; k <= kCurveSteps; ++k) {
-        curve.colorAlpha[k] = glm::vec4(c(rng), c(rng), c(rng), c(rng));
-        curve.scale[k] = s(rng);
-    }
-    return curve;
+/// Fireball_Missile_Low.m2 emitter 1, as the loader reads it.
+M2ParticleEmitter fireballEmitter1() {
+    M2ParticleEmitter em{};
+    const auto t = [](int v) { return static_cast<float>(v) / 32767.0f; };
+    em.particleColor.timestamps = {t(0), t(1079), t(9816), t(32767)};
+    em.particleColor.vec3Values = {glm::vec3(1.0f), glm::vec3(1.0f),
+                                   glm::vec3(1.0f, 109.0f / 255.0f, 46.0f / 255.0f),
+                                   glm::vec3(1.0f, 109.0f / 255.0f, 46.0f / 255.0f)};
+    em.particleAlpha.timestamps = {t(0), t(6553), t(32767)};
+    em.particleAlpha.floatValues = {0.0f, 31830.0f / 32767.0f, 0.0f};
+    em.particleScale.timestamps = {t(0), t(16895), t(32767)};
+    em.particleScale.vec2Values = {glm::vec2(0.2222222f), glm::vec2(0.2222222f), glm::vec2(0.16694446f)};
+    em.particleScale.floatValues = {0.2222222f, 0.2222222f, 0.16694446f};
+    return em;
 }
 
-// renderM2Particles' CPU path, per particle, from the curve tables on.
-m2_particle::Look cpuPathLook(const Curve& curve, float lifeRatio, bool isSpellEffect,
-                              bool isFireflyEffect, bool isFlameFixture,
-                              uint16_t cachedBlendType) {
-    const bool isPlainDoodad = !isSpellEffect && !isFireflyEffect && !isFlameFixture;
-    const float f = glm::clamp(lifeRatio, 0.0f, 1.0f) * static_cast<float>(kCurveSteps);
-    const int k = std::min(static_cast<int>(f), kCurveSteps - 1);
-    const float t = f - static_cast<float>(k);
-    const glm::vec4 ca = glm::mix(curve.colorAlpha[k], curve.colorAlpha[k + 1], t);
-    glm::vec3 color = glm::vec3(ca);
-    float alpha = ca.a;
-    const float rawScale = glm::mix(curve.scale[k], curve.scale[k + 1], t);
-
-    if (isPlainDoodad) {
-        color = glm::mix(color, glm::vec3(1.0f), 0.7f);
-        if (rawScale > 2.0f) alpha *= 0.02f;
-        if (cachedBlendType == 3 || cachedBlendType == 4) alpha *= 0.05f;
+M2FBlock randomBlock(std::mt19937& rng, int n, int dims, bool sortedTimes) {
+    std::uniform_real_distribution<float> u(0.0f, 1.0f);
+    M2FBlock fb;
+    std::vector<float> ts(static_cast<size_t>(n));
+    for (float& v : ts) v = u(rng);
+    if (sortedTimes) std::sort(ts.begin(), ts.end());
+    if (n > 0) ts[0] = 0.0f;
+    if (n > 1) ts.back() = 1.0f;
+    fb.timestamps = ts;
+    for (int k = 0; k < n; ++k) {
+        if (dims == 1) fb.floatValues.push_back(u(rng));
+        if (dims == 2) fb.vec2Values.emplace_back(u(rng) * 3.0f, u(rng) * 3.0f);
+        if (dims == 3) fb.vec3Values.emplace_back(u(rng), u(rng), u(rng));
     }
-    if (isFlameFixture) {
-        color = glm::max(color, glm::vec3(0.50f, 0.26f, 0.09f));
-        alpha = std::max(alpha, 0.30f);
-    }
-    float scale = rawScale;
-    if (isSpellEffect) {
-        scale = std::max(rawScale, 0.15f);
-    } else if (!isFireflyEffect) {
-        scale = std::min(rawScale, 1.5f);
-        if (isFlameFixture) {
-            scale = std::max(scale, 0.15f);
-        }
-    }
-    return {color, alpha, scale};
+    if (dims == 2) for (const auto& v : fb.vec2Values) fb.floatValues.push_back(v.x);
+    return fb;
 }
 
-// The CPU path's tile, in float as it was written into the vertex.
-float cpuPathTile(uint16_t ownTile, bool cachedIsTiled, uint32_t cachedAnimFrame,
-                  uint32_t cachedTotalTiles) {
-    const float cachedTilesFloat = static_cast<float>(cachedTotalTiles);
-    float tileIndex = ownTile;
-    if (cachedIsTiled) {
-        tileIndex = ownTile + static_cast<float>(cachedAnimFrame);
-        while (tileIndex >= cachedTilesFloat) {
-            tileIndex -= cachedTilesFloat;
-        }
+void checkPackedMatches(const M2ParticleEmitter& em) {
+    std::vector<glm::vec4> buf(3 * m2_particle::kCurveVec4s, glm::vec4(-7.0f));
+    const uint32_t base = m2_particle::kCurveVec4s;  // not at 0, as in a shared buffer
+    m2_particle::packCurve(em, buf.data() + base);
+    for (int i = 0; i <= 1000; ++i) {
+        const float r = static_cast<float>(i) / 1000.0f * 0.9999f;
+        const auto want = m2_particle::lookFromEmitter(em, r);
+        const auto got = m2_particle::lookFromPacked(buf.data(), base, r);
+        INFO("r " << r);
+        REQUIRE(got.color.r == Catch::Approx(want.color.r).margin(1e-5));
+        REQUIRE(got.color.g == Catch::Approx(want.color.g).margin(1e-5));
+        REQUIRE(got.color.b == Catch::Approx(want.color.b).margin(1e-5));
+        REQUIRE(got.alpha == Catch::Approx(want.alpha).margin(1e-5));
+        REQUIRE(got.scale.x == Catch::Approx(want.scale.x).margin(1e-5));
+        REQUIRE(got.scale.y == Catch::Approx(want.scale.y).margin(1e-5));
     }
-    return tileIndex;
-}
-
-void requireSame(const m2_particle::Look& a, const m2_particle::Look& b) {
-    constexpr float eps = 1e-6f;
-    REQUIRE(a.color.r == Catch::Approx(b.color.r).margin(eps));
-    REQUIRE(a.color.g == Catch::Approx(b.color.g).margin(eps));
-    REQUIRE(a.color.b == Catch::Approx(b.color.b).margin(eps));
-    REQUIRE(a.alpha == Catch::Approx(b.alpha).margin(eps));
-    REQUIRE(a.scale == Catch::Approx(b.scale).margin(eps));
-}
-
-std::vector<float> lifeRatios(std::mt19937& rng) {
-    std::vector<float> rs = {0.0f, 1.0f, -0.25f, 1.25f, 0.5f, 0.999999f, 1e-7f};
-    for (int k = 0; k <= kCurveSteps; ++k) {
-        rs.push_back(static_cast<float>(k) / kCurveSteps);
-    }
-    std::uniform_real_distribution<float> u(-0.1f, 1.1f);
-    for (int i = 0; i < 200; ++i) rs.push_back(u(rng));
-    return rs;
 }
 
 } // namespace
 
 TEST_CASE("the record is the layout the pipeline's attributes read", "[m2][particles]") {
-    using m2_particle::ParticleRecord;
-    STATIC_REQUIRE(sizeof(ParticleRecord) == 24);
-    STATIC_REQUIRE(offsetof(ParticleRecord, position) == 0);
-    STATIC_REQUIRE(offsetof(ParticleRecord, lifeRatio) == 12);
-    STATIC_REQUIRE(offsetof(ParticleRecord, curveBase) == 16);
-    STATIC_REQUIRE(offsetof(ParticleRecord, tileFlags) == 20);
-    // 65 colour+alpha vec4s and 65 scales in 17 vec4s.
-    STATIC_REQUIRE(m2_particle::kCurveVec4s == 82);
+    CHECK(sizeof(m2_particle::ParticleRecord) == 48);
+    CHECK(offsetof(m2_particle::ParticleRecord, position) == 0);
+    CHECK(offsetof(m2_particle::ParticleRecord, lifeRatio) == 12);
+    CHECK(offsetof(m2_particle::ParticleRecord, vec) == 16);
+    CHECK(offsetof(m2_particle::ParticleRecord, sizeX) == 28);
+    CHECK(offsetof(m2_particle::ParticleRecord, angle) == 32);
+    CHECK(offsetof(m2_particle::ParticleRecord, sizeY) == 36);
+    CHECK(offsetof(m2_particle::ParticleRecord, curveBase) == 40);
+    CHECK(offsetof(m2_particle::ParticleRecord, packed) == 44);
 }
 
-TEST_CASE("the shader's look from the packed curve is the CPU path's", "[m2][particles]") {
-    std::mt19937 rng(0x5eed);
-    // Several curves in one buffer, as a frame packs them, so a base other
-    // than zero is read too.
-    constexpr int kCurves = 4;
-    std::vector<Curve> curves;
-    std::vector<glm::vec4> buffer(kCurves * m2_particle::kCurveVec4s);
-    for (int c = 0; c < kCurves; ++c) {
-        curves.push_back(randomCurve(rng));
-        m2_particle::packCurve(curves.back().colorAlpha, curves.back().scale,
-                               buffer.data() + c * m2_particle::kCurveVec4s);
-    }
-    const std::vector<float> ratios = lifeRatios(rng);
-
-    // Every class a model can be (spell effect and firefly are exclusive of
-    // each other in practice but not here) and every blend type.
-    for (int cls = 0; cls < 8; ++cls) {
-        const bool spell = cls & 1, firefly = cls & 2, flame = cls & 4;
-        for (uint16_t blend = 0; blend < 8; ++blend) {
-            const uint32_t flags = m2_particle::lookFlagsFor(spell, firefly, flame, blend);
-            for (int c = 0; c < kCurves; ++c) {
-                const uint32_t base = static_cast<uint32_t>(c) * m2_particle::kCurveVec4s;
-                for (float r : ratios) {
-                    const auto want = cpuPathLook(curves[c], r, spell, firefly, flame, blend);
-                    requireSame(m2_particle::lookFromPacked(buffer.data(), base, r, flags), want);
-                    requireSame(m2_particle::lookFromCurve(curves[c].colorAlpha,
-                                                           curves[c].scale, r, flags), want);
-                }
-            }
-        }
-    }
-}
-
-TEST_CASE("the packed curve holds the tables unchanged", "[m2][particles]") {
-    std::mt19937 rng(7);
-    const Curve curve = randomCurve(rng);
-    std::vector<glm::vec4> buffer(m2_particle::kCurveVec4s, glm::vec4(-1.0f));
-    m2_particle::packCurve(curve.colorAlpha, curve.scale, buffer.data());
-    for (int k = 0; k <= kCurveSteps; ++k) {
-        REQUIRE(buffer[k] == curve.colorAlpha[k]);
-        REQUIRE(buffer[kCurveSteps + 1 + k / 4][k % 4] == curve.scale[k]);
-    }
-    // The padding after the last scale is written, not left as it was.
-    const auto& tail = buffer[m2_particle::kCurveVec4s - 1];
-    REQUIRE(tail[1] == 0.0f);
-    REQUIRE(tail[2] == 0.0f);
-    REQUIRE(tail[3] == 0.0f);
-}
-
-TEST_CASE("the packed tile is the CPU path's tile", "[m2][particles]") {
-    for (uint32_t total = 1; total <= 64; ++total) {
-        for (uint32_t frame = 0; frame < total; ++frame) {
-            for (uint32_t own = 0; own < total; ++own) {
-                for (bool tiled : {false, true}) {
-                    const bool isTiled = tiled && total > 1;
-                    const uint32_t tile = m2_particle::particleTile(own, isTiled, frame, total);
-                    REQUIRE(static_cast<float>(tile) ==
-                            cpuPathTile(static_cast<uint16_t>(own), isTiled, frame, total));
-                }
-            }
-        }
-    }
-}
-
-TEST_CASE("tile and flags share a word without overlapping", "[m2][particles]") {
-    const uint32_t allFlags = m2_particle::kLookPlainDoodad | m2_particle::kLookFlameFixture |
-                              m2_particle::kLookSpellEffect | m2_particle::kLookFirefly |
-                              m2_particle::kLookAdditiveBlend;
-    REQUIRE((allFlags >> 8) == 0u);  // fits the top byte
-    for (uint32_t tile : {0u, 1u, 63u, 4095u, m2_particle::kTileMask}) {
-        const uint32_t w = m2_particle::packTileFlags(tile, allFlags);
-        REQUIRE((w & m2_particle::kTileMask) == tile);
-        REQUIRE((w >> m2_particle::kTileBits) == allFlags);
-    }
-    // A tile past 24 bits is held at the largest, not spilled into the flags.
-    const uint32_t w = m2_particle::packTileFlags(1u << 25, 0u);
-    REQUIRE((w >> m2_particle::kTileBits) == 0u);
-}
-
-TEST_CASE("the class flags are the CPU path's class tests", "[m2][particles]") {
+TEST_CASE("the packed word keeps cell, kind, flags and alpha apart", "[m2][particles]") {
     using namespace m2_particle;
-    REQUIRE(lookFlagsFor(false, false, false, 0) == kLookPlainDoodad);
-    REQUIRE(lookFlagsFor(false, false, false, 3) == (kLookPlainDoodad | kLookAdditiveBlend));
-    REQUIRE(lookFlagsFor(false, false, false, 4) == (kLookPlainDoodad | kLookAdditiveBlend));
-    REQUIRE(lookFlagsFor(false, false, false, 2) == kLookPlainDoodad);
-    REQUIRE(lookFlagsFor(true, false, false, 1) == kLookSpellEffect);
-    REQUIRE(lookFlagsFor(false, true, false, 0) == kLookFirefly);
-    REQUIRE(lookFlagsFor(false, false, true, 4) == (kLookFlameFixture | kLookAdditiveBlend));
+    const uint32_t w = packRecord(0x1234u, kKindTail, true, false, true, 0.5f);
+    CHECK((w & kPackedCellMask) == 0x1234u);
+    CHECK(((w >> kPackedKindShift) & 3u) == kKindTail);
+    CHECK((w & kPackedSpin) != 0u);
+    CHECK((w & kPackedLit) == 0u);
+    CHECK((w & kPackedUnfogged) != 0u);
+    CHECK((w >> kPackedAlphaShift) == 128u);
+    CHECK((packRecord(0x12345u, kKindBillboard, false, false, false, 1.0f) & kPackedCellMask) == 0xFFFFu);
+    CHECK((packRecord(0, kKindBillboard, false, false, false, 1.0f) >> kPackedAlphaShift) == 255u);
+}
+
+TEST_CASE("the shader's curve read is the stock evaluation", "[m2][particles]") {
+    SECTION("Fireball's spark emitter") { checkPackedMatches(fireballEmitter1()); }
+    SECTION("empty curves are the defaults") {
+        M2ParticleEmitter em{};
+        std::vector<glm::vec4> buf(m2_particle::kCurveVec4s);
+        m2_particle::packCurve(em, buf.data());
+        const auto l = m2_particle::lookFromPacked(buf.data(), 0, 0.3f);
+        CHECK(l.color == glm::vec3(1.0f));
+        CHECK(l.alpha == 1.0f);
+        CHECK(l.scale == glm::vec2(1.0f));
+    }
+    SECTION("random curves of every length") {
+        std::mt19937 rng(11);
+        for (int iter = 0; iter < 200; ++iter) {
+            M2ParticleEmitter em{};
+            const int n = 1 + static_cast<int>(rng() % 7);
+            em.particleColor = randomBlock(rng, n, 3, true);
+            em.particleAlpha = randomBlock(rng, 1 + static_cast<int>(rng() % 7), 1, true);
+            em.particleScale = randomBlock(rng, 1 + static_cast<int>(rng() % 7), 2, true);
+            checkPackedMatches(em);
+        }
+    }
 }

@@ -30,7 +30,8 @@ class VkContext;
  *   where they land near the camera.
  * - Snow: camera-facing flakes (SnowFlake01.blp) drifting down.
  * - How many falls by the server's weather intensity, times the Weather
- *   Detail setting. Tinted by the scene's light and faded by its fog.
+ *   Detail setting, past the stock quarter-grade threshold. Rain multiplies
+ *   the scene (Mod2x); snow is white and unlit, as stock draws them.
  *
  * Particles live in a box around the camera that wraps as the camera moves,
  * so the fall stays even while the player runs. World space is Z-up.
@@ -79,14 +80,16 @@ public:
      */
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
 
-    void setWeatherType(Type type) { weatherType = type; }
     [[nodiscard]] Type getWeatherType() const { return weatherType; }
-
-    /**
-     * @brief Set weather intensity (0.0 = none, 1.0 = heavy)
-     */
-    void setIntensity(float intensity);
     [[nodiscard]] float getIntensity() const { return intensity; }
+
+    /// Follow the server's weather (SMSG_WEATHER) as the stock weather object
+    /// does (0x7846a0, 0x784850): the grade moves linearly to each new one
+    /// over (|change| + 0.001) * 10 s rather than snapping, and a change of
+    /// kind fades the old weather out before the new one starts (0x78d170).
+    /// Fine weather is NONE, which fades the current kind out. Call every
+    /// frame.
+    void followServerWeather(Type type, float grade, float deltaTime);
 
     /// How much of the weather to draw, as a fraction of what the current
     /// weather would use. The game's Weather Detail setting, which is a
@@ -155,6 +158,10 @@ private:
     // Vulkan objects
     VkContext* vkCtx = nullptr;
     VkPipeline pipeline = VK_NULL_HANDLE;
+    /// Rain and splashes: the stock GxBlend_Mod2x (dst = 2 * src * dst),
+    /// RainDrop01/RainDropSplash01 being grey 128 at rest (MapWeather 0x7891b0,
+    /// 0x78a030: blend 5, fog colour 0x80808080).
+    VkPipeline mod2xPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout textureSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
@@ -204,6 +211,14 @@ private:
     bool zoneWeatherActive_ = false;
     float targetIntensity_ = 0.0f;
     bool zoneWeatherInitialized_ = false;
+
+    /// The grade's current transition (stock 0x784850), restarted whenever
+    /// the target changes: from where it stood, over particleTransitionSeconds.
+    void easeGrade(float target, float deltaTime);
+    float gradeFrom_ = 0.0f;
+    float gradeTo_ = 0.0f;
+    float gradeElapsed_ = 0.0f;
+    float gradeDuration_ = 0.0f;
 };
 
 } // namespace rendering

@@ -237,5 +237,37 @@ std::array<std::string, 5> resolveItemVisualModels(uint32_t itemVisualId,
                                                    const DBCFile* itemVisuals,
                                                    const DBCFile* itemVisualEffects);
 
+/**
+ * ItemDisplayInfo.ItemVisual for a display id: the item's own glow (epic
+ * weapons that shine without an enchant). 0 when the display has none, when
+ * the file has no such column (it is field 23 of the 25-field TBC/WotLK
+ * record), or when the id names no ItemVisuals.dbc row - stock 0x759050 and
+ * 0x4EA8F0 only honour an id the table actually has.
+ */
+uint32_t itemDisplayItemVisual(const DBCFile* itemDisplayInfo, uint32_t displayId,
+                               const DBCFile* itemVisuals, const DBCFieldMap* idiL);
+
+/// SpellItemEnchantment.ItemVisual for an enchant id, or 0.
+uint32_t enchantItemVisual(const DBCFile* spellItemEnchantment, uint32_t enchantId,
+                           const DBCFieldMap* sieL);
+
+/**
+ * Which ItemVisuals.dbc row a weapon shows (stock 0x759050, applied by
+ * 0x6E1290 / 0x4EA8F0):
+ *   1. the display's own visual, when it names a row - enchants are ignored;
+ *   2. else the permanent enchant's visual (low half of
+ *      PLAYER_VISIBLE_ITEM_n_ENCHANTMENT);
+ *   3. else the temporary enchant's (high half);
+ *   4. else 0, nothing.
+ * The permanent enchant wins: a sharpening stone does not hide Crusader.
+ * NPCs pass 0 for both enchants. Inputs are visual ids, already validated.
+ */
+constexpr uint32_t chooseWeaponItemVisual(uint32_t displayVisual, uint32_t permEnchantVisual,
+                                          uint32_t tempEnchantVisual) {
+    if (displayVisual != 0) return displayVisual;
+    if (permEnchantVisual != 0) return permEnchantVisual;
+    return tempEnchantVisual;
+}
+
 } // namespace pipeline
 } // namespace wowee

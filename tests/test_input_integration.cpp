@@ -277,7 +277,8 @@ TEST_CASE_METHOD(Integration, "Real camera applies temporary Ctrl walking and a 
     CHECK(speed() == Catch::Approx(3.0f).margin(0.01));
     event(SDL_SCANCODE_W, false); event(SDL_SCANCODE_S);
     controller.setRunBackSpeedOverride(4);
-    CHECK(speed() == Catch::Approx(4.0f).margin(0.01));
+    // Walking backward is min(walk, run back) (Wow.exe 0x987570): still walking.
+    CHECK(speed() == Catch::Approx(3.0f).margin(0.01));
     event(SDL_SCANCODE_S, false); event(SDL_SCANCODE_W);
     manager.beginInputFrame();
     controller.setUseWoWSpeed(false);

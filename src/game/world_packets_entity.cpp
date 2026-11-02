@@ -687,7 +687,10 @@ bool MonsterMoveParser::parse(network::Packet& packet, MonsterMoveData& data) {
     // PackedGuid
     data.guid = packet.readPackedGuid();
     if (data.guid == 0) return false;
+    return parseBody(packet, data);
+}
 
+bool MonsterMoveParser::parseBody(network::Packet& packet, MonsterMoveData& data) {
     // uint8 unk (toggle for MOVEMENTFLAG2_UNK7)
     if (!packet.hasData()) return false;
     packet.readUInt8();
@@ -700,7 +703,7 @@ bool MonsterMoveParser::parse(network::Packet& packet, MonsterMoveData& data) {
 
     // uint32 splineId
     if (!packet.hasRemaining(4)) return false;
-    packet.readUInt32();
+    data.splineId = packet.readUInt32();
 
     // uint8 moveType
     {
@@ -723,6 +726,12 @@ bool MonsterMoveParser::parse(network::Packet& packet, MonsterMoveData& data) {
             return false;
         }
         data.duration = spline.duration;
+        data.hasAnimation = spline.hasAnimation;
+        data.animationType = spline.animationType;
+        data.animationStartTime = spline.animationStartTime;
+        data.hasParabolic = spline.hasParabolic;
+        data.verticalAcceleration = spline.verticalAcceleration;
+        data.parabolicStartTime = spline.parabolicStartTime;
         if (spline.hasDest) {
             data.destX = spline.destination.x;
             data.destY = spline.destination.y;

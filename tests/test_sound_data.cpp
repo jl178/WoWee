@@ -455,3 +455,45 @@ TEST_CASE("WorldFx is transparent when dry and muffles under water", "[sound_dat
     fx.setMuffle(0.0f);
     REQUIRE(run(300) == Catch::Approx(1.0).margin(0.01));
 }
+
+TEST_CASE("SoundData draws a kit's files the stock way and stops at the first gap", "[sound_data]") {
+    Fixture f;
+    Strings se;
+    const uint32_t dir = se.add("Sound\\Kit\\");  // a directory that ends in a backslash
+    // Four files, Freq 1 each; a gap after the fourth hides the fifth, as
+    // the stock kit builder (0x4cd4a0) stops at the first empty name.
+    f.tables["SoundEntries.dbc"] = table(30, {
+        row(30, {{0, 500}, {2, se.add("Kit")}, {3, se.add("a.wav")}, {4, se.add("b.wav")},
+                 {5, se.add("c.wav")}, {6, se.add("d.wav")}, {8, se.add("hidden.wav")},
+                 {13, 1}, {14, 1}, {15, 1}, {16, 1}, {18, 1},
+                 {23, dir}, {24, bits(0.8f)}, {25, 0x400}, {26, bits(12.0f)}, {27, bits(60.0f)},
+                 {29, 77}}),
+    }, se.block);
+    SoundData data;
+    REQUIRE(data.load(f.loader()));
+    const auto* kit = data.sound(500);
+    REQUIRE(kit != nullptr);
+    REQUIRE(kit->files.size() == 4);
+    REQUIRE(kit->files[0] == "Sound\\Kit\\a.wav");
+    REQUIRE(kit->freq == std::vector<uint32_t>{1, 1, 1, 1});
+    REQUIRE(kit->flags == 0x400);
+    REQUIRE(kit->minDistance == Catch::Approx(12.0f));
+    REQUIRE(kit->distanceCutoff == Catch::Approx(60.0f));
+    REQUIRE(kit->advancedId == 77);
+
+    // Each file once per four plays, never the same twice running; the bag
+    // lives with the row, so it carries from one caller to the next.
+    const std::string* last = nullptr;
+    for (int round = 0; round < 25; ++round) {
+        std::map<std::string, int> seen;
+        for (int i = 0; i < 4; ++i) {
+            const std::string* f1 = data.nextFile(500);
+            REQUIRE(f1 != nullptr);
+            REQUIRE(f1 != last);
+            last = f1;
+            ++seen[*f1];
+        }
+        REQUIRE(seen.size() == 4);
+    }
+    REQUIRE(data.nextFile(4242) == nullptr);
+}

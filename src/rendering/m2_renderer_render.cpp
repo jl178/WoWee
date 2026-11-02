@@ -825,8 +825,8 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
     // for ~20k drawn, and was most of this loop's 2-3 ms.
     //
     // Its clock keeps running (advanceClock above), and the step that wakes
-    // it emits over a window as long as each emitter's lifespan, every
-    // particle aged by when in that window it was born (emitParticles). So
+    // it runs the emitters over a window as long as their longest lifespan
+    // (stepParticles; the stock sub-steps never cover more). So
     // the fire the camera turns back to is already burning, at the standing
     // population and spread of ages it would have had - and the wake happens
     // in the update of the same frame, against the same frustum, before the
@@ -843,8 +843,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
     // touch nothing outside their own instance, split across threads by
     // weight (about one unit per live particle), each thread with its own
     // random stream and scratch (ParticleWorker). WOWEE_PARTICLE_LEGACY=1
-    // runs the second pass on this thread with the old step: swap-and-pop
-    // removal, births pushed straight on, the renderer's single stream.
+    // runs the second pass on this thread, with the first worker.
     ++particleFrame_;
     constexpr float kParticleViewPad = 30.0f;   // = renderM2Particles' pad
     constexpr float kParticleSleepPad = 60.0f;  // wake at 30, sleep beyond 60
@@ -927,12 +926,11 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
             auto& instance = instances[work.idx];
             const M2ModelGPU& pmodel = *instance.cachedModel;
             if (work.mode == kWorkStep) {
-                // Step the living, then add what was born during the step,
-                // each already aged by its share of it.
-                updateParticles(instance, deltaTime, worker);
-                emitParticles(instance, pmodel, deltaTime, worker);
+                stepParticles(instance, pmodel, deltaTime, *worker);
             } else if (work.mode == kWorkWake) {
-                emitParticles(instance, pmodel, kParticleWarmWindow, worker);
+                // Run as long as the longest life: the standing population,
+                // at its spread of ages (the sub-steps stop at a lifespan).
+                stepParticles(instance, pmodel, kParticleWarmWindow, *worker);
             }
             live += instance.particles.size();
             // Ribbons every frame: a trail stepped in leaps lays its edges down in
@@ -944,7 +942,8 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         return live;
     };
     if (kParticleLegacy) {
-        particlesLive = runParticleWork(0, particleWork_.size(), nullptr);
+        if (particleWorkers_.empty()) particleWorkers_.emplace_back(123u);
+        particlesLive = runParticleWork(0, particleWork_.size(), &particleWorkers_[0]);
         ++updateProf_.particleThreads;
     } else {
         // Two threads by default: the step is a fraction of a millisecond, and

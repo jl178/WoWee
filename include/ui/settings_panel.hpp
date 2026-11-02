@@ -59,9 +59,9 @@ public:
     float pendingViewDistance = kDefaultViewDistance;
     /// How far the distance fog takes the sky's colour. See
     /// LightingManager::setFogSkyBlend.
-    float pendingFogSkyBlend = 0.7f;
+    float pendingFogSkyBlend = 0.0f;
     /// How much distance fog. See LightingManager::setFogStrength.
-    float pendingFogStrength = 0.4f;
+    float pendingFogStrength = 1.0f;
     /// Volumetric fog: 0 off, 1-3 the volume's size. See VolumetricFog.
     int pendingVolumetricFog = 2;
     /// Ray traced lighting: 0 off, 1 sun, 2 + occlusion, 3 + bounce. See RtLighting.
@@ -82,8 +82,8 @@ public:
     bool pendingEnableAmbience = true;
     bool pendingErrorSpeech = true;
     bool pendingEnableSoundEffects = true;
-    int pendingMusicVolume = 30;
-    int pendingAmbientVolume = 100;
+    int pendingMusicVolume = 40;
+    int pendingAmbientVolume = 60;
     int pendingBellVolume = 50;
     /// One scale over every sound that is not music or ambience.
     ///

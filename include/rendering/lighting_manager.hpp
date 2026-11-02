@@ -29,6 +29,15 @@ struct LightingParams {
     float fogStart = 100.0f;                        // Fog start distance
     float fogEnd = 1000.0f;                         // Fog end distance
     float fogDensity = 0.001f;                      // Fog density
+    /// FloatBand 1, the fog start as a fraction of the end (0x7ebff0 clamps
+    /// it to [-1, 1]). Blended between lights; fogStart is end * this.
+    float fogScaler = 0.25f;
+    /// The fog curve's power (stock_light::Fog): 1 on Azeroth and Kalimdor,
+    /// 1.5 to 7 on maps from 530 on, where the fog runs to the far clip.
+    /// The shaders read it from localLightMeta.y (stock_fog.glsli): what
+    /// shows of a surface at view depth z is
+    /// 1 - clamp(pow(max((z - start) / (end - start), 0), this)).
+    float fogExponent = 1.0f;
 
     glm::vec3 skyTopColor{0.5f, 0.7f, 1.0f};       // Sky zenith color
     glm::vec3 skyMiddleColor{0.7f, 0.85f, 1.0f};   // Sky horizon color
@@ -51,6 +60,10 @@ struct LightingParams {
     glm::vec3 cloudLayer2AmbientColor{0.38f, 0.51f, 0.72f};  // ch 13
     /// LightFloatBand channel 2: how much the sun and moon show through cloud.
     float celestialGlowThrough = 1.0f;
+    /// LightParams.dbc field 4 (Glow): the stock ffxGlow strength, blended
+    /// between lights and toward the storm set like the floats (0x7ed4c0,
+    /// 0x7ec220). Read by Renderer for PostProcessPipeline::setGlow.
+    float glow = 0.5f;
     /// How dark the sun's shadow is, 0.4..0.9, from LightIntBand channel 8
     /// (SHADOW_COLOR): the darker that grey, the deeper the shadow. 0.8 is
     /// what every shadow was before, and roughly what noon in Elwynn reads.
@@ -128,6 +141,10 @@ struct LightVolume {
         SLOT_COUNT = 5
     };
     uint32_t lightParamsIds[SLOT_COUNT] = {};
+    /// The map's default light: the row Light.dbc places at 0,0,0 (radius
+    /// 0). The stock client lays it under every other light at full weight
+    /// (0x7ecb30, 0x7f3230); a map without one takes Light 1.
+    bool isMapDefault = false;
 };
 
 /**
@@ -137,6 +154,7 @@ struct ColorBand {
     uint8_t numKeyframes = 0;
     uint16_t times[16];        // Time keyframes (half-minutes since midnight)
     glm::vec3 colors[16];      // Color values (RGB 0-1)
+    uint32_t packed[16];       // The same as the file has them, 0x00RRGGBB
 };
 
 /**
@@ -208,6 +226,12 @@ struct LightParamsProfile {
     float waterDeepAlpha = 1.0f;
     float oceanShallowAlpha = 0.75f;
     float oceanDeepAlpha = 1.0f;
+    float glow = 0.5f;  ///< field 4
+
+    /// LightParams.dbc field 1 (HighlightSky): how strongly the dome's
+    /// dawn and dusk highlight shows (stock_sky::highlight; 0x7f0530 reads it
+    /// from DNLight [0x15]).
+    float highlightSky = 0.0f;
 
     ColorBand colorBands[COLOR_CHANNEL_COUNT];
 
@@ -276,6 +300,17 @@ public:
     /// Light.dbc column 11 (LightParams 4 nearly everywhere: the blue ghost
     /// world under DeathSkybox). Cheap to call every frame.
     void setPlayerDead(bool dead) { playerDead_ = dead; }
+
+    /// The liquid the camera is in (LiquidType.dbc id, 0 for none) and how
+    /// far below its surface, in yards. Set before update(). Magma and slime
+    /// name a light of their own (LiquidType field 10: Light 7 and 6), which
+    /// replaces Light.dbc's while the camera is in them (0x7f3230); ocean
+    /// darkens the fog, ambient and sun with depth, down to field 6's 30
+    /// yards (fields 7-9: fog and ambient to half, sun to three quarters).
+    void setCameraLiquid(uint32_t liquidTypeId, float depthBelowSurface) {
+        cameraLiquidType_ = liquidTypeId;
+        cameraLiquidDepth_ = depthBelowSurface;
+    }
     [[nodiscard]] bool isPlayerDead() const { return playerDead_; }
 
     /**
@@ -283,23 +318,22 @@ public:
      */
     void setIndoors(bool indoors) { isIndoors_ = indoors; }
     /// How far the distance fog is pulled toward the sky's horizon colour.
-    /// 0 keeps LightParams' own fog colour, 1 is the sky itself. See
+    /// 0 keeps LightParams' own fog colour, as stock does, and is the
+    /// default; 1 is the sky itself. A Wowee option. See
     /// LightingManager::update.
     void setFogSkyBlend(float blend) { fogSkyBlend_ = blend; }
     [[nodiscard]] float getFogSkyBlend() const { return fogSkyBlend_; }
     /// How much distance fog, as a multiplier on the zone's own fog distances.
-    /// 1 is the DBC unchanged, above 1 is thicker, 0 is none; the default
-    /// 0.4 thins the authored fog, which reads too heavy here. See
-    /// LightingManager::update.
+    /// 1 is the DBC unchanged (stock, and the default), above 1 is thicker,
+    /// 0 is none. A Wowee option. See LightingManager::update.
     void setFogStrength(float strength) { fogStrength_ = strength; }
     [[nodiscard]] float getFogStrength() const { return fogStrength_; }
-    /// The view distance setting, in yards, which the fog follows: beyond the
-    /// reference distance the fog moves out with it, and it always finishes
-    /// by where the world stops being drawn. See LightingManager::update.
+    /// The view distance setting, in yards: the stock client's far clip. The
+    /// fog always ends by it (0x7f16f0), and on maps from 530 on it is where
+    /// the fog ends (stock_light::lightFog). See LightingManager::update.
     void setViewDistance(float yards) { viewDistance_ = yards; }
-    /// The view distance at which the fog is exactly what Light.dbc and the
-    /// strength above ask for: the setting's default (ui::kDefaultViewDistance,
-    /// checked against it in settings_panel.cpp).
+    /// The view distance setting's default (ui::kDefaultViewDistance, checked
+    /// against it in settings_panel.cpp).
     static constexpr float kFogReferenceViewDistance = 1900.0f;
 
     /**
@@ -314,11 +348,16 @@ public:
     struct SkyboxLayer {
         std::string path;
         float weight = 0.0f;   ///< 0..1: the share of the lights here that name it
-        /// The night stars (Environments\Stars\Stars.mdx, LightSkybox 4) the
-        /// stock client puts over a sky that has no model of its own, at
-        /// dnc.db's night intensity. Not a zone sky: it does not stand in for
-        /// the sun, moon and clouds the way a LightSkybox model does.
+        /// The night stars (Environments\Stars\Stars.mdx, LightSkybox 4)
+        /// the stock client draws under its sky dome, at stars.mdl's own
+        /// table (stock_sky::starsAlpha: full to 03:00, gone by 04:30, back
+        /// from 22:30). Not a zone sky: it does not stand in for the sun,
+        /// moon and clouds the way a LightSkybox model does.
         bool stars = false;
+        /// A sky model at full weight (above 0.99) whose LightSkybox flags
+        /// lack bit 2: it takes the place of the whole procedural sky - dome,
+        /// sun, moons, clouds and stars (0x7f09b0).
+        bool replacesSky = false;
     };
     /// Every sky model the lights around the player name, heaviest first, at
     /// the weights those lights have - the same falloff the sky colours blend
@@ -348,6 +387,7 @@ private:
     bool loadLightParamsDbc(pipeline::AssetManager* assetManager);
 
     bool loadLightSkyboxDbc(pipeline::AssetManager* assetManager);
+    bool loadLiquidTypeDbc(pipeline::AssetManager* assetManager);
 
     /**
      * Load LightIntBand.dbc and LightFloatBand.dbc for time curves
@@ -363,7 +403,11 @@ private:
     };
 
     /**
-     * Find light volumes for blending (up to 4 with weight > 0)
+     * The lights around the player in the order the stock client paints them
+     * (0x7f1360): the map's default light first at weight 1, then every
+     * other light in range, farthest first, each with 0x7ee5d0's linear
+     * weight. Each is painted over the result so far, so the nearest ends on
+     * top.
      */
     [[nodiscard]] std::vector<WeightedVolume> findLightVolumes(const glm::vec3& playerPos, uint32_t mapId) const;
 
@@ -372,13 +416,6 @@ private:
      * the clear set where a slot is empty or names a missing row.
      */
     uint32_t paramsIdForSlot(const LightVolume* volume, LightVolume::ParamsSlot slot) const;
-
-    /**
-     * The profile a volume shows right now: the death set while the player is
-     * dead, otherwise the clear (or underwater) set, with the storm set the
-     * heavier one once the weather is past half.
-     */
-    uint32_t dominantParamsId(const LightVolume* volume, float stormIntensity, bool isUnderwater) const;
 
     /**
      * One volume's lighting: the clear (or underwater) set blended toward its
@@ -419,6 +456,22 @@ private:
     // LightParams profiles by ID
     std::map<uint32_t, LightParamsProfile> lightParamsProfiles_;
     std::map<uint32_t, std::string> lightSkyboxPaths_;
+    std::map<uint32_t, uint32_t> lightSkyboxFlags_;
+    /// Light 1, under any map without a default light of its own.
+    const LightVolume* globalDefaultLight_ = nullptr;
+    /// Every light by its Light.dbc id, for LiquidType's lights.
+    std::map<uint32_t, const LightVolume*> lightsById_;
+    /// LiquidType.dbc's underwater fields (0x7f3230 reads +0x18..+0x28).
+    struct LiquidLight {
+        float maxDarkenDepth = 0.0f;
+        float fogDarken = 0.0f;
+        float ambientDarken = 0.0f;
+        float diffuseDarken = 0.0f;
+        uint32_t lightId = 0;
+    };
+    std::map<uint32_t, LiquidLight> liquidLights_;
+    uint32_t cameraLiquidType_ = 0;
+    float cameraLiquidDepth_ = 0.0f;
 
     // Current state
     LightingParams currentParams_;
@@ -431,8 +484,15 @@ private:
     std::chrono::steady_clock::time_point lastUpdate_{};
     bool isIndoors_ = false;
     bool playerDead_ = false;
-    float fogSkyBlend_ = 0.7f;
-    float fogStrength_ = 0.4f;
+    float fogSkyBlend_ = 0.0f;
+    float fogStrength_ = 1.0f;
+    /// stock_light::usesFarClipFog for the map being drawn; read by
+    /// sampleLightParams, which shapes each light's fog the way 0x7ecd80
+    /// does before the lights are blended.
+    bool farClipFog_ = false;
+    /// The weather grade, capped at a quarter and eased at a quarter per ten
+    /// seconds, as the stock weather hands it to DayNight+0x4c (0x7849f4).
+    float stormEased_ = 0.0f;
     float viewDistance_ = kFogReferenceViewDistance;
 
     /// dnc.db's keys: half-minutes since midnight, day and night intensity.

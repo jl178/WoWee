@@ -1,4 +1,5 @@
 #include "audio/audio_coordinator.hpp"
+#include "addons/lua_api_registrations.hpp"
 #include "audio/audio_engine.hpp"
 #include "audio/music_manager.hpp"
 #include "audio/footstep_manager.hpp"
@@ -19,6 +20,7 @@
 #include "core/logger.hpp"
 
 #include <cstdlib>
+#include <random>
 
 namespace wowee {
 namespace audio {
@@ -106,10 +108,15 @@ void AudioCoordinator::loadSoundData(pipeline::AssetManager* assets) {
 
 bool AudioCoordinator::playInterfaceEntry(const SoundEntry* entry) {
     if (!audioAvailable_ || !entry || entry->files.empty()) return false;
-    float volume = entry->volume;
-    if (uiSoundManager_) volume *= uiSoundManager_->getVolumeScale();
-    const auto& file = entry->files[static_cast<size_t>(std::rand()) % entry->files.size()];
-    return AudioEngine::instance().playSound2D(file, volume, 1.0f, SoundBus::Interface);
+    static std::mt19937 rng{std::random_device{}()};
+    const float scale = uiSoundManager_ ? uiSoundManager_->getVolumeScale() : 1.0f;
+    const std::string* file = soundData_.nextFile(*entry);
+    if (!file) return false;
+    SoundOptions opts;
+    opts.kitId = entry->id;
+    opts.noDuplicate = (entry->flags & stock::kFlagNoDuplicate) != 0;
+    return AudioEngine::instance().playSound2D(*file, stock::kitVolume(entry->volume, entry->flags, scale, rng),
+                                               stock::kitPitch(entry->flags, rng), SoundBus::Interface, opts);
 }
 
 void AudioCoordinator::playCoinSound() {
@@ -154,6 +161,9 @@ void AudioCoordinator::updateReverb(const ZoneAudioContext& ctx) {
             }
         }
     }
+    // Dry unless Sound_EnableReverb is on, which stock leaves off by default
+    // (the Sound options' Enable Reverb box).
+    if (addons::storedCVarValue("Sound_EnableReverb", "0") == "0") id = 0;
     if (id == reverbPrefId_ && under == reverbUnderwater_) return;
     reverbPrefId_ = id;
     reverbUnderwater_ = under;
@@ -169,17 +179,22 @@ void AudioCoordinator::updateReverb(const ZoneAudioContext& ctx) {
 void AudioCoordinator::updateTableAmbience(const ZoneAudioContext& ctx) {
     if (!ambientSoundManager_ || ctx.areaId == 0) return;
     // A room with its own WMOAreaTable ambience sounds like itself, a room in
-    // a building whose -1 row names one like the building; any other place,
-    // indoors or out, sounds like its area.
+    // a building whose -1 row names one like the building. Outdoors, and in
+    // an outdoor group such as a city street, the area's. Indoors the stock
+    // client asks WMOAreaTable alone (Wow.exe 0x78e9a0): a room whose rows
+    // name no ambience has none, and the area's loop fades out at the door.
     const uint32_t roomAmbience = ctx.wmoRootId
         ? soundData_.wmoAmbience(ctx.wmoRootId, ctx.wmoNameSet, ctx.wmoGroupId) : 0;
-    const uint64_t key = (static_cast<uint64_t>(roomAmbience) << 32) | ctx.areaId;
+    const bool indoorsBare = roomAmbience == 0 && ctx.wmoRootId != 0 && ctx.wmoInterior;
+    const uint64_t key = (static_cast<uint64_t>(roomAmbience) << 32) | ctx.areaId |
+                         (indoorsBare ? (1ull << 63) : 0ull);
     if (key == ambienceKey_) return;
     ambienceKey_ = key;
     uint32_t day = 0, night = 0;
     std::string dayPath, nightPath;
     float volume = 1.0f;
     const bool found = roomAmbience ? soundData_.ambience(roomAmbience, day, night)
+                     : indoorsBare  ? false
                                     : soundData_.areaAmbience(ctx.areaId, day, night);
     if (found) {
         if (const SoundEntry* e = soundData_.sound(day); e && !e->files.empty()) {
@@ -203,7 +218,10 @@ void AudioCoordinator::updateTableMusic(const ZoneAudioContext& ctx, uint32_t zo
     in.areaId = ctx.areaId;
     if (ctx.wmoRootId) {
         in.zoneMusicOverride = soundData_.wmoZoneMusic(ctx.wmoRootId, ctx.wmoNameSet, ctx.wmoGroupId);
+        in.introOverride = soundData_.wmoIntro(ctx.wmoRootId, ctx.wmoNameSet, ctx.wmoGroupId);
+        in.indoors = ctx.wmoInterior;
     }
+    in.noDelay = loopMusic_;
     in.isDay = isDaytimeHours(ctx.gameTimeHours);
     in.trackPlaying = musicManager_->isPlaying();
     in.trackLoading = musicManager_->isLoading();
@@ -220,30 +238,32 @@ void AudioCoordinator::updateTableMusic(const ZoneAudioContext& ctx, uint32_t zo
     switch (action.kind) {
     case ZoneMusicAction::Kind::Play:
         musicManager_->setTrackGain(action.path.rfind("file:", 0) == 0 ? 1.0f : action.volume);
-        musicManager_->setLooping(loopMusic_);  // the player's Loop Music setting
-        playZoneMusic(action.path);
+        // A zone track plays once; Loop Music means no silence before the
+        // next one (Sound_ZoneMusicNoDelay), not the same track again.
+        musicManager_->setLooping(false);
+        playZoneMusic(action.path, action.fadeOutSeconds * 1000.0f);
         LOG_INFO("Zone music: ", action.path, " (set ", zoneMusic_->currentSetId(), ")");
         break;
     case ZoneMusicAction::Kind::Stop:
-        musicManager_->stopMusic();
+        musicManager_->stopMusic(action.fadeOutSeconds * 1000.0f);
         break;
     case ZoneMusicAction::Kind::None:
         break;
     }
 }
 
-void AudioCoordinator::playZoneMusic(const std::string& music) {
+void AudioCoordinator::playZoneMusic(const std::string& music, float fadeMs) {
     if (music.empty() || !musicManager_) return;
     if (music.rfind("file:", 0) == 0) {
-        musicManager_->crossfadeToFile(music.substr(5));
+        musicManager_->crossfadeToFile(music.substr(5), fadeMs);
     } else {
-        musicManager_->crossfadeTo(music);
+        musicManager_->crossfadeTo(music, fadeMs);
     }
 }
 
 void AudioCoordinator::setZoneMusicLooping(bool loop) {
+    // Sound_ZoneMusicNoDelay: read by the schedule on the next track end.
     loopMusic_ = loop;
-    if (musicManager_) musicManager_->setLooping(loop);
 }
 
 void AudioCoordinator::onOriginalSoundtrackDisabled(game::ZoneManager* zm) {

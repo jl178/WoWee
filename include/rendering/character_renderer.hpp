@@ -29,13 +29,23 @@ namespace rendering {
 class Camera;
 class VkContext;
 class VkTexture;
+class M2Renderer;
 
 // Enchant visual (glint, glow) attached to a weapon at one of the weapon model's
 // own item-visual attachment points.
+//
+// Stock (0x4EA8F0) attaches ItemVisuals slot i to attachment i of the item
+// model, as a child of that attachment's bone. The glow models are almost all
+// particle and ribbon emitters, which this renderer does not draw, so when an
+// effect renderer is set (setEffectRenderer) they live in M2Renderer as
+// m2InstanceId and are moved here every frame; otherwise (the off-screen
+// preview) they are character instances as before.
 struct WeaponEffectAttachment {
-    uint32_t effectModelId;
-    uint32_t effectInstanceId;
-    glm::vec3 offset;          // attachment position on the weapon model
+    uint32_t effectModelId = 0;     // CharacterRenderer model (0 when in M2Renderer)
+    uint32_t effectInstanceId = 0;  // CharacterRenderer instance (0 when in M2Renderer)
+    uint32_t m2InstanceId = 0;      // M2Renderer instance (0 when a character instance)
+    uint16_t boneIndex = 0;         // the weapon bone the attachment rides
+    glm::vec3 offset{0.0f};         // attachment position in that bone's space
 };
 
 // Weapon attached to a character instance at a bone attachment point
@@ -47,6 +57,7 @@ struct WeaponAttachment {
     glm::vec3 offset;
     glm::mat4 localTransform{1.0f}; // sheath/hand orientation after attachment point
     float sheathPush = 0.0f;   // smoothed outward push when the arm swings into the blade
+    uint32_t itemVisualId = 0; // ItemVisuals.dbc row whose effects hang on it (0 none)
     std::vector<WeaponEffectAttachment> effects;
 };
 
@@ -145,8 +156,25 @@ public:
     void moveInstanceTo(uint32_t instanceId, const glm::vec3& destination, float durationSeconds);
     void startFadeIn(uint32_t instanceId, float durationSeconds);
     void setInstanceOpacity(uint32_t instanceId, float opacity);
+    /// The uniform scale an instance draws at (its display's size).
+    void setInstanceScale(uint32_t instanceId, float scale);
+    /// Seat a rider on a mount the stock way (0x73D5D0): the rider is a child
+    /// of the mount's attachment 0, its whole transform (position and
+    /// orientation) from that point, at the rider's own size. 0 unseats.
+    void setInstanceMountedOn(uint32_t riderInstanceId, uint32_t mountInstanceId);
+    /// The units stock lights up (CGObject_C::SetHighlight 0x743C70): the
+    /// mouseover and the current target get the unit ambient added as
+    /// emissive. 0 for none.
+    void setHighlightedInstances(uint32_t mouseoverInstance, uint32_t targetInstance) {
+        highlightA_ = mouseoverInstance;
+        highlightB_ = targetInstance;
+    }
+    /// The unit-only ambient multiplier, 1 + 2 x AreaTable.AmbientMultiplier
+    /// of the player's area (stock 0x783429), eased toward per frame.
+    void setUnitAmbientMultiplierTarget(float m) { unitAmbientTarget_ = m; }
+    /// The same, from the player's AreaTable id (0 keeps the last target).
+    void setUnitAmbientArea(uint32_t areaId);
     [[nodiscard]] const pipeline::M2Model* getModelData(uint32_t modelId) const;
-    [[nodiscard]] const pipeline::M2Model* getInstanceModelData(uint32_t instanceId) const;
     void setActiveGeosets(uint32_t instanceId, const std::unordered_set<uint16_t>& geosets);
     /// Opt an instance into the Skin Extra head-detail batch. Only a character
     /// whose type 8 slot has been filled from CharSections should ask for it.
@@ -260,8 +288,19 @@ public:
     bool attachWeaponEffect(uint32_t charInstanceId, uint32_t attachmentId, uint32_t visualSlot,
                             const pipeline::M2Model& effectModel, uint32_t effectModelId);
 
-    /** Remove all enchant visuals from the weapon at the given attachment point. */
-    void detachWeaponEffects(uint32_t charInstanceId, uint32_t attachmentId);
+    /**
+     * Put an ItemVisuals.dbc row's effects on the weapon at attachmentId,
+     * replacing whatever was there (stock 0x4EA8F0). Slot i goes to the weapon
+     * model's own attachment i through its lookup table; a weapon without that
+     * point gets nothing for the slot, as in stock (312 of 1379 weapon models
+     * have none of 0-4 and never glow). 0 clears. Returns the effects attached.
+     */
+    int applyWeaponItemVisual(uint32_t charInstanceId, uint32_t attachmentId,
+                              uint32_t itemVisualId);
+
+    /** Where weapon glows are drawn: M2Renderer draws their particles and
+     *  ribbons, which this renderer does not. Null keeps them here. */
+    void setEffectRenderer(M2Renderer* m2) { effectRenderer_ = m2; }
 
     /** Mark an instance as a scene backdrop: no culling, no character material heuristics. */
     void setInstanceSceneModel(uint32_t instanceId, bool isScene);
@@ -408,6 +447,7 @@ private:
 
         // Override model matrix (used for weapon instances positioned by parent bone)
         bool hasOverrideModelMatrix = false;
+        uint32_t mountedOn = 0;  // see setInstanceMountedOn
         glm::mat4 overrideModelMatrix{1.0f};
 
         // Enchant visual attached to a weapon. Such a model is nothing but the
@@ -523,6 +563,16 @@ private:
     VkContext* vkCtx_ = nullptr;
     VkRenderPass renderPassOverride_ = VK_NULL_HANDLE;
     bool previewLit_ = false;  // see setPreviewLit
+    M2Renderer* effectRenderer_ = nullptr;  // see setEffectRenderer
+    uint32_t highlightA_ = 0, highlightB_ = 0;  // see setHighlightedInstances
+    float unitAmbientTarget_ = 1.0f;            // see setUnitAmbientMultiplierTarget
+    float unitAmbientMul_ = 1.0f;
+    uint32_t unitAmbientAreaId_ = 0;
+    // Stock attachment lookup only: the model's attachmentLookup[id], nothing
+    // else (0x831630 has no fallback). For effects on items.
+    bool findAttachmentStrict(uint32_t modelId, uint32_t attachmentId,
+                              uint16_t& outBoneIndex, glm::vec3& outOffset) const;
+    void removeWeaponEffect(const WeaponEffectAttachment& fx);
     VkSampleCountFlagBits msaaSamplesOverride_ = VK_SAMPLE_COUNT_1_BIT;
     pipeline::AssetManager* assetManager = nullptr;
 

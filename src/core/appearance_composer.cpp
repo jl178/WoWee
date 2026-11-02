@@ -199,7 +199,13 @@ PlayerTextureInfo AppearanceComposer::resolvePlayerTextures(pipeline::M2Model& m
         result.facialLowerPath = sections.facialLower;
         result.facialUpperPath = sections.facialUpper;
         if (!sections.hair.empty()) result.hairTexturePath = sections.hair;
-        result.underwearPaths = sections.underwear;
+        // Scalps ride with the base overlays (head regions, after the facial
+        // hair; stock 0x4F0AD0 / 0x4F0B70), so a re-composite keeps them.
+        result.underwearPaths.clear();
+        for (const std::string* sc : {&sections.scalpLower, &sections.scalpUpper})
+            if (!sc->empty()) result.underwearPaths.push_back(*sc);
+        result.underwearPaths.insert(result.underwearPaths.end(),
+                                     sections.underwear.begin(), sections.underwear.end());
 
         if (!sections.exactFace) {
             LOG_WARNING("No DBC face match for face=", static_cast<int>(charFaceId),
@@ -365,55 +371,36 @@ std::unordered_set<uint16_t> AppearanceComposer::buildDefaultPlayerGeosets(uint8
     return activeGeosets;
 }
 
+// The glows on a weapon (stock 0x759050 picks the row, 0x4EA8F0 hangs it).
+// The display's own ItemVisual wins when it names a row; otherwise the
+// permanent enchant's, then the temporary one's. This used to let a temporary
+// enchant (a sharpening stone) hide the permanent one, and ignored the item's
+// own glow outright.
 void AppearanceComposer::applyEnchantVisuals(uint32_t charInstanceId, int equipSlotIndex,
-                                             uint32_t attachmentId) {
+                                             uint32_t attachmentId, uint32_t displayInfoId) {
     auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
-    if (!charRenderer || !gameHandler_ || !assetManager_ || !entitySpawner_) return;
+    if (!charRenderer || !assetManager_) return;
 
-    charRenderer->detachWeaponEffects(charInstanceId, attachmentId);
-
-    uint64_t itemGuid = gameHandler_->getEquipSlotGuid(equipSlotIndex);
-    if (itemGuid == 0) return;
-
-    // A temporary enchant (sharpening stone, oil) masks the permanent one's visual.
-    auto [permEnchantId, tempEnchantId] = gameHandler_->getItemEnchantIds(itemGuid);
-    uint32_t enchantId = (tempEnchantId != 0) ? tempEnchantId : permEnchantId;
-    if (enchantId == 0) return;
-
-    auto sieDbc     = assetManager_->loadDBC("SpellItemEnchantment.dbc");
     auto visualsDbc = assetManager_->loadDBC("ItemVisuals.dbc");
-    auto effectsDbc = assetManager_->loadDBC("ItemVisualEffects.dbc");
-    if (!sieDbc || !sieDbc->isLoaded() || !visualsDbc || !visualsDbc->isLoaded() ||
-        !effectsDbc || !effectsDbc->isLoaded()) {
-        return;
+    auto displayDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
+    const auto* layouts = pipeline::getActiveDBCLayout();
+    const uint32_t displayVisual = pipeline::itemDisplayItemVisual(
+        displayDbc.get(), displayInfoId, visualsDbc.get(),
+        layouts ? layouts->getLayout("ItemDisplayInfo") : nullptr);
+
+    uint32_t permVisual = 0, tempVisual = 0;
+    const uint64_t itemGuid = gameHandler_ ? gameHandler_->getEquipSlotGuid(equipSlotIndex) : 0;
+    if (displayVisual == 0 && itemGuid != 0) {
+        auto [permEnchantId, tempEnchantId] = gameHandler_->getItemEnchantIds(itemGuid);
+        auto sieDbc = assetManager_->loadDBC("SpellItemEnchantment.dbc");
+        const auto* sieL = layouts ? layouts->getLayout("SpellItemEnchantment") : nullptr;
+        permVisual = pipeline::enchantItemVisual(sieDbc.get(), permEnchantId, sieL);
+        tempVisual = pipeline::enchantItemVisual(sieDbc.get(), tempEnchantId, sieL);
     }
-
-    const auto* sieL = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("SpellItemEnchantment") : nullptr;
-    auto effectModels = pipeline::resolveEnchantItemVisuals(enchantId, sieDbc.get(),
-                                                            visualsDbc.get(), effectsDbc.get(), sieL);
-
-    for (uint32_t visualSlot = 0; visualSlot < effectModels.size(); ++visualSlot) {
-        const std::string& modelName = effectModels[visualSlot];
-        if (modelName.empty()) continue;
-
-        // DBC stores .mdx paths; the shipped assets are .m2.
-        std::string m2Path = modelName;
-        size_t dotPos = m2Path.rfind('.');
-        m2Path = (dotPos != std::string::npos ? m2Path.substr(0, dotPos) : m2Path) + ".m2";
-
-        pipeline::M2Model effectModel;
-        if (!loadWeaponM2(m2Path, effectModel)) {
-            LOG_WARNING("Enchant visual: failed to load ", m2Path);
-            continue;
-        }
-
-        uint32_t effectModelId = entitySpawner_->allocateWeaponModelId();
-        if (charRenderer->attachWeaponEffect(charInstanceId, attachmentId, visualSlot,
-                                             effectModel, effectModelId)) {
-            LOG_INFO("Enchant visual: ", m2Path, " on attachment ", attachmentId,
-                     " (enchant ", enchantId, ", visual slot ", visualSlot, ")");
-        }
+    const uint32_t visual = pipeline::chooseWeaponItemVisual(displayVisual, permVisual, tempVisual);
+    const int n = charRenderer->applyWeaponItemVisual(charInstanceId, attachmentId, visual);
+    if (visual != 0) {
+        LOG_INFO("Item visual ", visual, " on attachment ", attachmentId, ": ", n, " effect(s)");
     }
 }
 
@@ -770,7 +757,8 @@ void AppearanceComposer::loadEquippedWeapons() {
             LOG_INFO("Equipped weapon: ", m2Path, " at attachment ", attachmentId,
                      weaponsSheathed_ ? " (sheathed)" : " (held)");
             if (ws.slot == game::EquipSlot::MAIN_HAND) rightHandFilled = true;
-            applyEnchantVisuals(charInstanceId, static_cast<int>(ws.slot), attachmentId);
+            applyEnchantVisuals(charInstanceId, static_cast<int>(ws.slot), attachmentId,
+                                displayInfoId);
         }
     }
 
@@ -828,6 +816,9 @@ void AppearanceComposer::loadEquippedWeapons() {
                     if (ok) {
                         LOG_INFO("Equipped ranged weapon: ", m2Path, " at attachment ",
                                  rangedAttachment, weaponsSheathed_ ? " (sheathed)" : " (held)");
+                        applyEnchantVisuals(charInstanceId,
+                                            static_cast<int>(game::EquipSlot::RANGED),
+                                            rangedAttachment, displayInfoId);
                     }
                 }
             }

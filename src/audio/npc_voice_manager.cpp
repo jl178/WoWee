@@ -368,9 +368,27 @@ void NpcVoiceManager::loadCreatureAggroSounds() {
              creatureAttackSoundByDisplay_.size(), " combat vocal banks");
 }
 
-bool NpcVoiceManager::playSoundEntry(uint32_t soundId, const glm::vec3& position) {
+bool NpcVoiceManager::playSoundEntry(uint32_t soundId, const glm::vec3& position, stock::Category category) {
     if (!assetManager_ || !AudioEngine::instance().isInitialized() || soundId == 0)
         return false;
+
+    // With the tables read: the stock kit play - the row's bag, its own
+    // flags, MinDistance and cutoff, and the category's cap.
+    if (soundData_ && soundData_->loaded()) {
+        const SoundEntry* entry = soundData_->sound(soundId);
+        if (!entry || entry->files.empty()) return false;
+        const std::string* file = soundData_->nextFile(*entry);
+        if (!file) return false;
+        SoundOptions opts;
+        opts.minDistance = entry->minDistance;
+        opts.kitId = soundId;
+        opts.category = category;
+        opts.noDuplicate = (entry->flags & stock::kFlagNoDuplicate) != 0;
+        const float cutoff = entry->distanceCutoff > 0.0f ? entry->distanceCutoff : stock::kDefaultCutoff;
+        return AudioEngine::instance().playSound3D(*file, position,
+                                                   stock::kitVolume(entry->volume, entry->flags, volumeScale_, rng_),
+                                                   stock::kitPitch(entry->flags, rng_), cutoff, opts);
+    }
 
     auto dbc = assetManager_->loadDBC("SoundEntries.dbc");
     if (!dbc || !dbc->isLoaded()) return false;
@@ -480,29 +498,66 @@ bool NpcVoiceManager::playFromTables(uint64_t npcGuid, uint32_t displayId, Sound
     if (!soundData_ || !soundData_->loaded() || !AudioEngine::instance().isInitialized()) return false;
     const NpcSounds* lines = soundData_->npcSounds(displayId);
     if (!lines) return false;
+    auto& engine = AudioEngine::instance();
+
+    // A creature never talks over its own last line (Wow.exe 0x72a680 asks
+    // its sound handle first). That is the only spacing between greetings:
+    // there is no timer.
+    if (auto it = speaking_.find(npcGuid); it != speaking_.end()) {
+        if (engine.isSoundPlaying(it->second)) return true;  // the fallback must not speak either
+        speaking_.erase(it);
+    }
+
     uint32_t soundId = 0;
+    int fileIndex = -1;    // a fixed file of the row; -1 draws from its bag
+    int nextClicks = -1;   // the click count to keep once the line is heard
     switch (category) {
         case SoundCategory::GREETING:
-        case SoundCategory::VENDOR:   soundId = lines->hello; break;
+        case SoundCategory::VENDOR: {
+            // 0x746900: five greetings, then the annoyed lines one by one in
+            // order, then a greeting and the count starts over. One count for
+            // the whole client, reset by speaking to someone else.
+            if (lines->hello == 0) return false;
+            if (npcGuid != clickNpc_) greetCount_ = 0;
+            clickNpc_ = npcGuid;
+            if (greetCount_ < PISSED_CLICK_THRESHOLD) {
+                soundId = lines->hello;
+                nextClicks = greetCount_ + 1;
+            } else {
+                const SoundEntry* pissed = soundData_->sound(lines->pissed);
+                const int line = greetCount_ - PISSED_CLICK_THRESHOLD;
+                if (!pissed || line >= static_cast<int>(pissed->files.size())) {
+                    soundId = lines->hello;
+                    nextClicks = 0;
+                } else {
+                    soundId = lines->pissed;
+                    fileIndex = line;
+                    nextClicks = greetCount_ + 1;
+                }
+            }
+            break;
+        }
         case SoundCategory::FAREWELL: soundId = lines->goodbye; break;
         case SoundCategory::PISSED:   soundId = lines->pissed; break;
         default: break;
     }
     const SoundEntry* entry = soundData_->sound(soundId);
     if (!entry || entry->files.empty()) return false;
-    const auto now = std::chrono::steady_clock::now();
-    if (category != SoundCategory::PISSED) {
-        auto it = lastPlayTime_.find(npcGuid);
-        if (it != lastPlayTime_.end() &&
-            std::chrono::duration<float>(now - it->second).count() < GREETING_COOLDOWN) {
-            return true;  // said something recently; the fallback must not speak either
-        }
-    }
-    std::uniform_int_distribution<size_t> choice(0, entry->files.size() - 1);
-    // As recorded: the stock client does not retune a voice line.
-    if (AudioEngine::instance().playSound3D(entry->files[choice(rng_)], position,
-                                            entry->volume * volumeScale_, 1.0f, 60.0f)) {
-        lastPlayTime_[npcGuid] = now;
+    const std::string* file = fileIndex >= 0 ? &entry->files[static_cast<size_t>(fileIndex)]
+                                             : soundData_->nextFile(*entry);
+    if (!file) return true;
+    SoundOptions opts;
+    opts.kitId = soundId;
+    opts.noDuplicate = (entry->flags & stock::kFlagNoDuplicate) != 0;
+    const float cutoff = entry->distanceCutoff > 0.0f ? entry->distanceCutoff : stock::kDefaultCutoff;
+    // As recorded: the row's own volume and flags, no retuning of our own.
+    const uint32_t id = engine.playSound3DStoppable(*file, position,
+                                                    stock::kitVolume(entry->volume, entry->flags, volumeScale_, rng_),
+                                                    cutoff, /*loop=*/false, entry->minDistance, opts);
+    if (id != 0) {
+        speaking_[npcGuid] = id;
+        if (nextClicks >= 0) greetCount_ = nextClicks;
+        lastPlayTime_[npcGuid] = std::chrono::steady_clock::now();
     }
     return true;
 }
@@ -583,15 +638,12 @@ void NpcVoiceManager::playCombatAttack(uint64_t npcGuid, uint32_t displayId,
     const auto sound = creatureAttackSoundByDisplay_.find(displayId);
     if (sound == creatureAttackSoundByDisplay_.end()) return;
 
-    const auto now = std::chrono::steady_clock::now();
-    auto recent = lastCombatVocalTime_.find(npcGuid);
-    if (recent != lastCombatVocalTime_.end() &&
-        std::chrono::duration<float>(now - recent->second).count() < COMBAT_VOCAL_COOLDOWN) {
-        return;
-    }
-
-    if (playSoundEntry(sound->second, position))
-        lastCombatVocalTime_[npcGuid] = now;
+    // Wow.exe 0x747310, kind 0: seventy swings in a hundred cry out (the
+    // roll against 0xadb5d8), and one creature's cry at a time across the
+    // whole world (category 9, cap 1). No per-creature timer.
+    if (std::uniform_int_distribution<int>(0, 99)(rng_) > 70) return;
+    if (playSoundEntry(sound->second, position, stock::Category::CreatureExertion))
+        lastCombatVocalTime_[npcGuid] = std::chrono::steady_clock::now();
 }
 } // namespace audio
 } // namespace wowee

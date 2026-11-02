@@ -81,6 +81,7 @@
 #include "ui/ui_services.hpp"
 #include "auth/auth_handler.hpp"
 #include "game/game_handler.hpp"
+#include "game/game_utils.hpp"
 #include "game/chat_handler.hpp"
 #include "game/faction_hostility.hpp"
 #include "game/transport_manager.hpp"
@@ -294,7 +295,44 @@ struct UnitLocomotionSync {
     bool swimming = false;
     bool creature = false;  // an NPC: a stop resumes its retained state emote
     float dt = 0.0f;
+    /// The unit's speed over the ground (game/unit_motion.hpp), or negative
+    /// when its motion is not the stock one. With it, walk or run is the
+    /// pace (above twice the walk speed runs, above 11 sprints, 0x717050)
+    /// and the animation plays at speed / MoveSpeed (0x7385C0).
+    float speed = -1.0f;
+    float walkSpeed = 2.5f;
 };
+
+/// A unit's speed and pace for the locomotion, when the stock motion drives it.
+void fillStockLocomotionSpeed(const game::Entity& e, UnitLocomotionSync& s) {
+    if (!e.hasStockMotion()) return;
+    s.speed = e.stockMotionSpeed();
+    s.walkSpeed = e.moveSpeeds().walk;
+}
+
+/// The stock playback rate for a moving unit's animation: its speed over the
+/// sequence's MoveSpeed (Wow.exe 0x7385C0). Played animations start at rate
+/// 1, so this runs every frame the unit moves.
+void syncLocomotionRate(rendering::CharacterRenderer* cr, rendering::anim::UnitLocomotion& loco,
+                        uint32_t instanceId, const UnitLocomotionSync& s) {
+    if (s.speed < 0.0f || !s.moving) return;
+    uint32_t cur = 0;
+    float t = 0.0f, d = 0.0f;
+    if (!cr->getAnimationState(instanceId, cur, t, d)) return;
+    if (cur != loco.rateAnimId) {
+        loco.rateAnimId = cur;
+        loco.rateMoveSpeed = 0.0f;
+        std::vector<pipeline::M2Sequence> seqs;
+        if (cr->getAnimationSequences(instanceId, seqs)) {
+            for (const auto& q : seqs) {
+                if (q.id == cur) { loco.rateMoveSpeed = q.movingSpeed; break; }
+            }
+        }
+    }
+    if (loco.rateMoveSpeed == 0.0f) return;
+    cr->setAnimationSpeed(instanceId,
+                          game::motion::locomotionPlaybackRate(s.speed, loco.rateMoveSpeed));
+}
 
 /// A remote player's or NPC's movement animation, through the same
 /// LocomotionFSM as the local player's (animation/unit_locomotion.hpp): Walk
@@ -330,8 +368,12 @@ void driveUnitLocomotion(rendering::Renderer* renderer, rendering::CharacterRend
     frame.moveFlags = dirIt != dirFlags.end() ? dirIt->second : 0u;
     frame.moving = s.moving;
     frame.walking = s.walking;
+    if (s.speed >= 0.0f && s.moving && !s.swimming) {
+        frame.walking = !(s.speed > s.walkSpeed + s.walkSpeed);
+    }
     frame.swimming = s.swimming;
     frame.dt = s.dt;
+    syncLocomotionRate(cr, loco, instanceId, s);
 
     uint32_t cur = 0;
     float curT = 0.0f, curDur = 0.0f;
@@ -341,6 +383,7 @@ void driveUnitLocomotion(rendering::Renderer* renderer, rendering::CharacterRend
     frame.idleFree = (!haveState || isLocomotionIdle(cur)) && spawner.unitCastHold(guid) == 0;
 
     rendering::LocomotionFSM::Input in = unitLocomotionInput(loco, frame);
+    if (s.speed > game::motion::kSprintSpeed && !s.swimming) in.sprintAura = true;
     in.currentAnimId = cur;
     in.currentAnimTime = curT;
     in.currentAnimDuration = curDur;
@@ -381,6 +424,7 @@ void driveUnitLocomotion(rendering::Renderer* renderer, rendering::CharacterRend
     // Already there (the one-shot's return animation): restarting is a hitch.
     if (out.loop && haveState && cur == play) return;
     cr->playAnimation(instanceId, play, out.loop, returnAnim);
+    syncLocomotionRate(cr, loco, instanceId, s);
 }
 
 } // namespace
@@ -3548,7 +3592,16 @@ void Application::applyServerMovementState(float deltaTime) {
             static_cast<uint32_t>(game::MovementFlags::TURN_LEFT) |
             static_cast<uint32_t>(game::MovementFlags::TURN_RIGHT);
         bool keyboardTurning = (mi.flags & kTurnFlags) != 0;
-        if (!keyboardTurning && facingSendCooldown_ <= 0.0f) {
+        // The stock rule (0x71AE80): no time limit, but nothing until the
+        // facing is 0.1 rad from the one the last movement packet of any kind
+        // carried. Pre-WotLK servers keep the old 3 degree / 10 Hz pacing.
+        if (!keyboardTurning && gameHandler->getMovementHandler() &&
+            !game::isPreWotlk()) {
+            if (gameHandler->getMovementHandler()->facingChangeWorthSending(canonicalYaw)) {
+                gameHandler->sendMovement(game::Opcode::MSG_MOVE_SET_FACING);
+                lastSentCanonicalYaw_ = canonicalYaw;
+            }
+        } else if (!keyboardTurning && facingSendCooldown_ <= 0.0f) {
             float yawDiff = core::coords::normalizeAngleRad(canonicalYaw - lastSentCanonicalYaw_);
             if (std::abs(yawDiff) > glm::radians(3.0f)) {
                 gameHandler->sendMovement(game::Opcode::MSG_MOVE_SET_FACING);
@@ -3670,7 +3723,10 @@ void Application::syncCreatureRenderInstances(float deltaTime) {
             // above a tunnel cannot move the model into/onto the WMO shell.
             const bool groundCreature = !_creatureFlyingState.count(guid) &&
                                         !_creatureSwimmingState.count(guid);
-            if (entity->isActivelyMoving() && groundCreature) {
+            // A unit on a server spline is drawn on the spline: the stock
+            // client places it there with no ground test (0x6E9E20).
+            const bool onStockSpline = entity->hasStockMotion() && entity->stockMotionIsSpline();
+            if (entity->isActivelyMoving() && groundCreature && !onStockSpline) {
                 if (auto floorZ = movingEntityFloor(renderer.get(), renderPos,
                                                     previousRenderPos)) {
                     renderPos.z = *floorZ;
@@ -3746,8 +3802,11 @@ void Application::syncCreatureRenderInstances(float deltaTime) {
                 // frame because the parent ship moves. That parent motion is
                 // not creature locomotion and must not trigger Run. Real
                 // transport-local spline movement still reports actively moving.
+                // A unit the stock motion drives says itself whether it is
+                // under way (a jump straight up moves it without travelling).
                 const bool positionOnlyLocomotion =
-                    posChanging && !entity->isEntityMoving() && !transportAttached;
+                    posChanging && !entity->isEntityMoving() && !transportAttached &&
+                    !entity->hasStockMotion();
                 const bool isMovingNow =
                     !deadOrCorpse && (entityIsMoving || positionOnlyLocomotion);
                 if (deadOrCorpse || largeCorrection) {
@@ -3799,6 +3858,7 @@ void Application::syncCreatureRenderInstances(float deltaTime) {
                     sync.swimming = isSwimmingNow;
                     sync.creature = true;
                     sync.dt = deltaTime;
+                    fillStockLocomotionSpeed(*entity, sync);
                     driveUnitLocomotion(renderer.get(), charRenderer, *entitySpawner_, guid,
                                         instanceId, sync);
                 } else {
@@ -3864,8 +3924,8 @@ void Application::syncCreatureRenderInstances(float deltaTime) {
             entitySpawner_->syncUnitSheath(guid, instanceId);
             // Facing. A creature in combat that stands still turns to its target,
             // as the stock client does on its own - AzerothCore sends nothing when
-            // a mob switches who it hits. Everything turns at 2*pi rad/s rather
-            // than snapping, server facings included.
+            // a mob switches who it hits. The drawn body then turns toward it
+            // (stepBodyFacing below), server facings included.
             float wantYaw = entity->getOrientation();
             if (entity->isUnit() && !entity->isActivelyMoving()) {
                 auto u = std::static_pointer_cast<game::Unit>(entity);
@@ -3890,10 +3950,12 @@ void Application::syncCreatureRenderInstances(float deltaTime) {
             auto [yawIt, firstSeen] = creatureRenderYaw_.try_emplace(guid, wantYaw);
             float turned = 0.0f;
             if (!firstSeen) {
-                const float d = std::remainder(wantYaw - yawIt->second, 2.0f * glm::pi<float>());
-                const float step = 2.0f * glm::pi<float>() * deltaTime;
-                turned = (std::abs(d) <= step) ? d : std::copysign(step, d);
-                yawIt->second = (std::abs(d) <= step) ? wantYaw : yawIt->second + std::copysign(step, d);
+                // The body follows the facing at eight times the unit's turn
+                // rate, never more than a quarter turn behind (0x73DAB0).
+                const float before = yawIt->second;
+                yawIt->second = game::motion::stepBodyFacing(
+                    before, wantYaw, entity->moveSpeeds().turnRate, deltaTime);
+                turned = std::remainder(yawIt->second - before, 2.0f * glm::pi<float>());
             }
             // The turn is the body's step (CCW positive): standing still, it
             // shuffles the feet next frame, as the stock client does for every
@@ -3985,10 +4047,16 @@ void Application::syncPlayerRenderInstances(float deltaTime) {
             // WMO overlap regions (tunnels, buildings, bridges).
             const bool groundPlayer = !_pCreatureFlyingState.count(guid) &&
                                       !_pCreatureSwimmingState.count(guid);
-            if (entity->isActivelyMoving() && groundPlayer) {
+            // A remote player's dead reckoning walks the ground (the stock
+            // client runs it through collision); in the air it falls on its
+            // arc and only the floor stops it. A server spline (a playerbot,
+            // a charge) is drawn on the spline.
+            const bool playerOnSpline = entity->hasStockMotion() && entity->stockMotionIsSpline();
+            if (entity->isActivelyMoving() && groundPlayer && !playerOnSpline) {
                 if (auto floorZ = movingEntityFloor(renderer.get(), renderPos,
                                                     previousMountPos)) {
-                    renderPos.z = *floorZ;
+                    renderPos.z = entity->stockMotionAirborne() ? std::max(renderPos.z, *floorZ)
+                                                                : *floorZ;
                 }
             }
 
@@ -4017,11 +4085,18 @@ void Application::syncPlayerRenderInstances(float deltaTime) {
                 const bool transportAttached =
                     gameHandler->transportAttachmentsRef().count(guid) != 0;
                 const bool positionOnlyLocomotion =
-                    posChanging2 && !entity->isEntityMoving() && !transportAttached;
+                    posChanging2 && !entity->isEntityMoving() && !transportAttached &&
+                    !entity->hasStockMotion();
                 const bool isMovingNow =
                     !deadOrCorpse && (entityIsMoving || positionOnlyLocomotion);
 
                 if (deadOrCorpse || largeCorrection) {
+                    charRenderer->setInstancePosition(instanceId, renderPos);
+                    if (remoteMount) {
+                        charRenderer->setInstancePosition(remoteMount->instanceId, mountRenderPos);
+                    }
+                } else if (entity->hasStockMotion()) {
+                    // The stock motion is evaluated per frame: draw it where it is.
                     charRenderer->setInstancePosition(instanceId, renderPos);
                     if (remoteMount) {
                         charRenderer->setInstancePosition(remoteMount->instanceId, mountRenderPos);
@@ -4066,6 +4141,7 @@ void Application::syncPlayerRenderInstances(float deltaTime) {
                     sync.swimming = isSwimmingNow;
                     sync.creature = false;
                     sync.dt = deltaTime;
+                    fillStockLocomotionSpeed(*entity, sync);
                     driveUnitLocomotion(renderer.get(), charRenderer, *entitySpawner_, guid,
                                         instanceId, sync);
                 } else {
@@ -4145,20 +4221,16 @@ void Application::syncPlayerRenderInstances(float deltaTime) {
             entitySpawner_->syncUnitSheath(guid, instanceId);
 
             // Orientation sync, eased rather than set. A remote player's facing
-            // arrives a packet at a time - every heartbeat while mouse-turning -
-            // so setting it outright turned the model in visible steps. An
-            // exponential approach (63% in 60ms) keeps up with a fast turn
-            // without the steps; a wide change (a turn-around, a teleport)
-            // still lands at once.
+            // arrives a packet at a time while mouse-turning (MSG_MOVE_SET_FACING
+            // snaps the movement facing), and the stock client's drawn body
+            // follows it at its own rate rather than in steps.
             const float wantYaw = entity->getOrientation();
             auto [yawIt, firstSeen] = creatureRenderYaw_.try_emplace(guid, wantYaw);
             if (!firstSeen) {
-                const float d = std::remainder(wantYaw - yawIt->second, 2.0f * glm::pi<float>());
-                if (std::abs(d) < 0.002f || std::abs(d) > glm::radians(150.0f)) {
-                    yawIt->second = wantYaw;
-                } else {
-                    yawIt->second += d * (1.0f - std::exp(-std::max(deltaTime, 0.0f) / 0.06f));
-                }
+                // As every unit's body (0x73DAB0): at eight times the turn
+                // rate, never more than a quarter turn behind its facing.
+                yawIt->second = game::motion::stepBodyFacing(
+                    yawIt->second, wantYaw, entity->moveSpeeds().turnRate, deltaTime);
             }
             // Drawn body yaw and look twist from that facing and the player's
             // movement flags, as the stock client does for every unit
@@ -4450,6 +4522,9 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     });
     runInGameStage("updateLootSparkles", [&] {
         updateLootSparkles();
+    });
+    runInGameStage("updateUnitHighlights", [&] {
+        updateUnitHighlights();
     });
     // Sync server run speed to camera controller
     inGameStep = "post-update sync";
@@ -6181,6 +6256,10 @@ void Application::spawnPlayerCharacter() {
 	            ? appearanceComposer_->buildDefaultPlayerGeosets(raceId, sexId, hairStyleId, facialId)
 	            : std::unordered_set<uint16_t>{};
 	        charRenderer->setActiveGeosets(instanceId, activeGeosets);
+	        // The race display's size (tauren 1.35/1.25, gnome 1.15), as stock
+	        // draws every player (0x71C110); this was created at 1.0.
+	        if (entitySpawner_ && raceId != 0)
+	            charRenderer->setInstanceScale(instanceId, entitySpawner_->playerRaceDisplayScale(raceId, sexId));
 	        // A rebuilt model starts bare. Equipment geosets and textures are
 	        // applied only when equipment is marked dirty, so without this a
 	        // rebuild after login (or a barber preview) dropped the robe skirt,
@@ -6328,6 +6407,23 @@ void Application::loadQuestMarkerModels() {
     // Nothing to do up front. The marks are the stock TalkToMe*.m2 models,
     // which QuestMarkerRenderer loads into the M2 renderer the first time a
     // quest giver needs each one - see updateQuestMarkers.
+}
+
+// Stock lights up the mouseover and the current target (CGObject_C::
+// SetHighlight 0x743C70, gated on the unitHighlights cvar, default on): the
+// unit ambient added as emissive. The renderer does the adding.
+void Application::updateUnitHighlights() {
+    if (!renderer || !gameHandler || !entitySpawner_) return;
+    auto* cr = renderer->getCharacterRenderer();
+    if (!cr) return;
+    auto instanceFor = [&](uint64_t guid) -> uint32_t {
+        if (guid == 0) return 0;
+        if (guid == gameHandler->getPlayerGuid()) return renderer->getCharacterInstanceId();
+        if (uint32_t id = entitySpawner_->getCreatureInstanceId(guid)) return id;
+        return entitySpawner_->getPlayerInstanceId(guid);
+    };
+    cr->setHighlightedInstances(instanceFor(gameHandler->getMouseoverGuid()),
+                                instanceFor(gameHandler->getTargetGuid()));
 }
 
 void Application::updateLootSparkles() {

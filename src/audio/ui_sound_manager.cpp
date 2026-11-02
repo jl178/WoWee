@@ -121,30 +121,52 @@ bool UiSoundManager::playEntry(const SoundEntry* entry) {
     // SoundEntries lists mp3s among its wavs. Claiming success for one of
     // those would skip the caller's fallback and play nothing at all.
     const size_t count = entry->files.size();
-    const size_t first = std::uniform_int_distribution<size_t>(0, count - 1)(uiRng());
+    const size_t first = firstFile(*entry);
+    SoundOptions opts;
+    opts.kitId = entry->id;
+    opts.noDuplicate = (entry->flags & stock::kFlagNoDuplicate) != 0;
     for (size_t i = 0; i < count; ++i) {
         const UISample* sample = cachedSample(entry->files[(first + i) % count]);
         if (!sample) continue;
-        if (AudioEngine::instance().playSound2D(sample->data, entry->volume * volumeScale_,
-                                                1.0f, SoundBus::Interface)) {
+        if (AudioEngine::instance().playSound2D(sample->data,
+                                                stock::kitVolume(entry->volume, entry->flags, volumeScale_, uiRng()),
+                                                stock::kitPitch(entry->flags, uiRng()), SoundBus::Interface, opts)) {
             return true;
         }
     }
     return false;
 }
 
+size_t UiSoundManager::firstFile(const SoundEntry& entry) const {
+    // The row's own bag when the tables are read (each file once before any
+    // repeats, never the same twice running); a plain draw otherwise.
+    if (soundData_) {
+        if (const std::string* f = soundData_->nextFile(entry)) {
+            return static_cast<size_t>(f - entry.files.data());
+        }
+    }
+    return std::uniform_int_distribution<size_t>(0, entry.files.size() - 1)(uiRng());
+}
+
 bool UiSoundManager::playEntryAt(const SoundEntry* entry, const glm::vec3& position) {
     if (!initialized_ || !entry || entry->files.empty()) return false;
     auto& engine = AudioEngine::instance();
-    const float maxDistance = entry->distanceCutoff > 0.0f ? entry->distanceCutoff : 40.0f;
-    // As playEntry: a random file, and the next one along when it will not
-    // load or decode.
+    const float maxDistance = entry->distanceCutoff > 0.0f ? entry->distanceCutoff : stock::kDefaultCutoff;
+    // As playEntry: the row's next file, and the next one along when it will
+    // not load or decode.
     const size_t count = entry->files.size();
-    const size_t first = std::uniform_int_distribution<size_t>(0, count - 1)(uiRng());
+    const size_t first = firstFile(*entry);
+    SoundOptions opts;
+    opts.minDistance = entry->minDistance;
+    opts.kitId = entry->id;
+    opts.noDuplicate = (entry->flags & stock::kFlagNoDuplicate) != 0;
     for (size_t i = 0; i < count; ++i) {
         const UISample* sample = cachedSample(entry->files[(first + i) % count]);
         if (!sample) continue;
-        if (engine.playSound3D(sample->data, position, entry->volume, 1.0f, maxDistance)) return true;
+        if (engine.playSound3D(sample->data, position, stock::kitVolume(entry->volume, entry->flags, 1.0f, uiRng()),
+                               stock::kitPitch(entry->flags, uiRng()), maxDistance, opts)) {
+            return true;
+        }
     }
     return false;
 }

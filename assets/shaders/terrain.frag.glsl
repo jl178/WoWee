@@ -24,6 +24,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
 
 #include "rt_lighting.glsli"
 #include "wet_surface.glsli"
+#include "stock_fog.glsli"
 
 layout(set = 1, binding = 0) uniform sampler2D uBaseTexture;
 layout(set = 1, binding = 1) uniform sampler2D uLayer1Texture;
@@ -45,11 +46,11 @@ layout(set = 1, binding = 7) uniform TerrainParams {
 // and UV as the alpha maps; chunks without one get the opaque 1x1.
 layout(set = 1, binding = 8) uniform sampler2D uBakedShadow;
 
-// How dark the baked shadow takes the sunlit term at most. Light.dbc's
-// shadow band (LightIntBand channel 8) is a grey of about 0.3 at noon, the
-// opacity later clients name; half the direct light lands close to that once
-// the ambient term is added, and stays on the subtle side where unsure.
-const float kBakedShadowStrength = 0.5;
+// What a shadow leaves of the ground (shaders\pixel\arbfp1\terrain1-3.bls:
+// light * (0.7 + 0.3 * lit)). One floor for the baked MCSH shadow and the
+// shadow map alike, taken as min(baked, map) first, and it darkens the whole
+// lit colour - ambient included - not only the sun's share.
+const float kStockShadowFloor = 0.7;
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
@@ -169,7 +170,7 @@ vec4 fogVolumeAt(vec3 worldPos) {
 // everything between the camera and that, sunlit shafts and torch glow
 // included.
 vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
-    float fogFactor = clamp((fogParams.y - dist) / (fogParams.y - fogParams.x), 0.0, 1.0);
+    float fogFactor = stockFogVisibility(worldPos);
     color = mix(fogColor.rgb, color, fogFactor);
     if (volumetricParams.x > 0.5) {
         vec4 air = fogVolumeAt(worldPos);
@@ -215,29 +216,25 @@ void main() {
     // Its derivatives come per 2x2 pixel quad, so on distant cracked ground
     // facing a low sun the tilted normals lit as blocky glitter.
 
-    // MCCV vertex colour, as the client applies it: the blended ground times
-    // twice the stored colour (the doubling is done on load).
-    finalColor.rgb *= VertColor;
-
     // Rain-wet ground (wet_surface.glsli): 0, and untouched, while it is dry
     // or the setting is off.
     vec3 geomNorm = normalize(Normal);
     float wet = wetSurfaceAmount(geomNorm);
     if (wet > 0.0) finalColor.rgb = wetSurfaceAlbedo(finalColor.rgb, wet);
 
+    // The stock terrain light (shaders\vertex\arbvp1\terrain.bls): the
+    // area's ambient plus its sun by Lambert, clamped at one per channel - it
+    // travels in a vertex colour - then times the MCCV colour (or a half
+    // without one) and doubled in the pixel shader. VertColor arrives already
+    // doubled, 1.0 neutral, so light * VertColor * texture is the same thing.
+    // The clamp is the client's: where ambient + sun passes one in some
+    // channel, that channel stops and the hue leans toward the others.
     vec3 lightDir2 = normalize(-lightDir.xyz);
-    vec3 ambient = ambientColor.rgb * finalColor.rgb;
-    // Lambert, as every other surface has it. This took abs() of the angle
-    // and floored it at 0.2, so a slope turned from the sun was lit as one
-    // turned toward it, and hills had no shape at low sun. The ambient term
-    // is what keeps the shaded side from black, as it does for the models
-    // standing on it.
     float diff = max(dot(norm, lightDir2), 0.0);
-    vec3 diffuse = diff * lightColor.rgb * finalColor.rgb;
 
     float shadow = 1.0;
     if (shadowParams.x > 0.5) {
-        vec3 ldir = normalize(-lightDir.xyz);
+        vec3 ldir = lightDir2;
         float normalOffset = shadowTexel() * 2.0 * (1.0 - abs(dot(norm, ldir)));
         vec3 biasedPos = FragPos + norm * normalOffset;
         vec4 lsPos = lightSpaceMatrix * vec4(biasedPos, 1.0);
@@ -246,20 +243,23 @@ void main() {
         if (proj.x >= 0.0 && proj.x <= 1.0 && proj.y >= 0.0 && proj.y <= 1.0 && proj.z >= 0.0 && proj.z <= 1.0) {
             float bias = max(0.0005 * (1.0 - abs(dot(norm, ldir))), 0.00005);
             shadow = sampleShadowPCF(uShadowMap, vec3(proj.xy, proj.z - bias));
-            shadow = mix(1.0, shadow, shadowParams.y);
+            // shadowParams.y is the player's shadow strength over the stock
+            // 0.3; 1 at the default leaves the map's 0..1 as it is.
+            shadow = mix(1.0, shadow, clamp(shadowParams.y / (1.0 - kStockShadowFloor), 0.0, 1.0));
         }
     }
 
     RtLight rt = rtLightAt(FragPos);
     shadow = rtShadow(rt, shadow);
-    // The baked shadow against the live one, the darker of the two: a tree
-    // the dynamic map already shades is not shaded twice, and ground beyond
-    // the dynamic map's reach keeps the shadow it was baked with.
-    float baked = 1.0 - kBakedShadowStrength * (1.0 - texture(uBakedShadow, LayerUV).r);
-    shadow = min(shadow, baked);
-    ambient = rtAmbient(rt, ambientColor.rgb) * finalColor.rgb;
+    // The baked shadow against the live one, the darker of the two (the
+    // stock shader's MIN): a tree the dynamic map already shades is not
+    // shaded twice, and ground beyond its reach keeps the baked shadow.
+    shadow = min(shadow, texture(uBakedShadow, LayerUV).r);
 
-    vec3 result = ambient + shadow * diffuse;
+    vec3 light = min(rtAmbient(rt, ambientColor.rgb) + diff * lightColor.rgb, vec3(1.0));
+    vec3 result = light * VertColor * finalColor.rgb;
+    result *= kStockShadowFloor + (1.0 - kStockShadowFloor) * shadow;
+
     result += localLightContribution(FragPos, norm, finalColor.rgb);
     // The film over the ground is smoother than the ground: half the bump.
     if (wet > 0.0) {

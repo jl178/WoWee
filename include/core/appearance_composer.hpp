@@ -144,7 +144,8 @@ private:
 
     // Attach the enchant visual (sharpening-stone glint, weapon glow) of the item in
     // the given equipment slot to the weapon already attached at attachmentId.
-    void applyEnchantVisuals(uint32_t charInstanceId, int equipSlotIndex, uint32_t attachmentId);
+    void applyEnchantVisuals(uint32_t charInstanceId, int equipSlotIndex, uint32_t attachmentId,
+                             uint32_t displayInfoId);
 
     rendering::Renderer* renderer_;
     pipeline::AssetManager* assetManager_;

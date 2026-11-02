@@ -62,7 +62,8 @@ inline const char* itemComponentDir(int region) {
 /// The path to one region's art for this wearer, or empty if none of the three
 /// spellings is on disk.
 ///
-/// Asks for the gendered file first, then the unisex one, then the bare name.
+/// Asks for the unisex file first (stock 0x4E6FB0), then the gendered one,
+/// then the bare name.
 /// `texName` is the value out of ItemDisplayInfo, without a folder or extension.
 std::string resolveItemRegionTexture(AssetManager& assets, int region,
                                      const std::string& texName, bool isFemale);

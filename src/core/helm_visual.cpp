@@ -102,30 +102,40 @@ VisColumns findVisColumns(pipeline::DBCFile& displayInfo, pipeline::DBCFile& vis
 
 } // namespace
 
-bool helmHidesHair(pipeline::AssetManager& assets,
-                   uint32_t itemDisplayInfoId,
-                   uint8_t genderId) {
+bool readHelmGeosetVis(pipeline::AssetManager& assets, uint32_t itemDisplayInfoId,
+                       uint8_t genderId, uint32_t (&masks)[7]) {
+    for (auto& m : masks) m = 0;
     if (itemDisplayInfoId == 0) return false;
-
     auto displayInfo = assets.loadDBC("ItemDisplayInfo.dbc");
     auto visData = assets.loadDBC("HelmetGeosetVisData.dbc");
-    if (!displayInfo || !visData) return true;  // no data: keep the old behaviour
+    if (!displayInfo || !visData) return false;
 
     static VisColumns columns = findVisColumns(*displayInfo, *visData);
     const uint32_t column = (genderId == 0) ? columns.male : columns.female;
-    if (column == 0xFFFFFFFFu) return true;
+    if (column == 0xFFFFFFFFu) return false;
 
     const int32_t row = displayInfo->findRecordById(itemDisplayInfoId);
-    if (row < 0) return true;
+    if (row < 0) return false;
     const uint32_t visId = displayInfo->getUInt32(static_cast<uint32_t>(row), column);
-    if (visId == 0) return false;  // hides nothing
-
+    if (visId == 0) return false;
     const int32_t visRow = visData->findRecordById(visId);
     if (visRow < 0) return false;
+    for (uint32_t c = 0; c < 7 && c + 1 < visData->getFieldCount(); ++c)
+        masks[c] = visData->getUInt32(static_cast<uint32_t>(visRow), c + 1);
+    return true;
+}
+
+bool helmHidesHair(pipeline::AssetManager& assets,
+                   uint32_t itemDisplayInfoId,
+                   uint8_t genderId,
+                   uint8_t raceId) {
+    if (itemDisplayInfoId == 0) return false;
+    uint32_t masks[7];
+    if (!readHelmGeosetVis(assets, itemDisplayInfoId, genderId, masks)) return false;
+    // Column 1, the hair, tested for this race the way stock does.
+    if (raceId != 0 && raceId < 32) return (masks[0] & (1u << raceId)) != 0;
     // Every mask zero is the row circlets, tiaras and crowns point at.
-    for (uint32_t f = 1; f < visData->getFieldCount(); ++f) {
-        if (visData->getUInt32(static_cast<uint32_t>(visRow), f) != 0) return true;
-    }
+    for (uint32_t m : masks) if (m != 0) return true;
     return false;
 }
 

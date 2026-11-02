@@ -293,6 +293,10 @@ public:
     void setNormalMapStrength(float s) { normalMapStrength_ = s; materialSettingsDirty_ = true; }
     void setPOMEnabled(bool enabled) { pomEnabled_ = enabled; materialSettingsDirty_ = true; }
     void setPOMQuality(int q) { pomQuality_ = q; materialSettingsDirty_ = true; }
+    /// How much of the F_SIDN night glow is on (stock_wmo::sidnNightFactor of
+    /// the time of day, 0x7a8520). Negative (the default) until the renderer
+    /// sets it: wmo.frag then estimates it from how dark the light is.
+    void setSidnNightFactor(float f) { sidnNightFactor_ = f; }
     // Nothing reads the WMO-only flag since the glass path went; the call
     // still marks materials for a refresh.
     void setWMOOnlyMap(bool) { materialSettingsDirty_ = true; }
@@ -526,9 +530,14 @@ private:
         int32_t hasTexture;        // 0
         int32_t alphaTest;         // 4
         int32_t unlit;             // 8
-        int32_t isInterior;        // 12
+        /// The stock light mode (0x7a8b10) of the batch, or of its outdoor
+        /// pass when it is a trans batch: 0 none, 1 the outdoor light, 2 the
+        /// F_WINDOW light, 3 the MOHD ambient. See stock_wmo_light.hpp.
+        int32_t lightModeA;        // 12
         float specularIntensity;   // 16
-        int32_t reserved0;         // 20 (was the glass path's isWindow)
+        /// A trans batch's room pass (0 or 3), blended with the outdoor pass
+        /// by the vertex alpha; -1 for every other batch.
+        int32_t lightModeB;        // 20
         int32_t enableNormalMap;   // 24
         int32_t enablePOM;         // 28
         float pomScale;            // 32 (height scale)
@@ -542,8 +551,14 @@ private:
         int32_t emissive;           // 64 (0 none, 1 lamp glass, 2 firelit)
         int32_t hasVertexColors;    // 68: the group carries MOCV (MOGP flag 0x4)
         uint32_t sidnColor;         // 72: F_SIDN night glow, MOMT sidnColor 0x00RRGGBB (0 = none)
-        int32_t padding2;           // 76
+        /// kWmoMat* bits: unified (MapObjU) formula, F_UNFOGGED, which
+        /// alpha the shader writes.
+        int32_t stockFlags;         // 76
     };  // 80 bytes total
+    static constexpr int32_t kWmoMatUnified = 0x1;      ///< MOHD 0x2: MapObjU programs
+    static constexpr int32_t kWmoMatUnfogged = 0x2;     ///< MOMT F_UNFOGGED (0x2)
+    static constexpr int32_t kWmoMatTexAlpha = 0x4;     ///< MOMT shader 0/6: alpha = vertex a * texture a
+    static constexpr int32_t kWmoMatExtras = 0x8;       ///< WOWEE_WMO_EXTRAS: lamp glass, clock fire, lava scroll
 
     /**
      * WMO group GPU resources
@@ -567,6 +582,11 @@ private:
 
         uint32_t groupFlags = 0;
         uint32_t wmoGroupId = 0;  ///< MOGP group id (global), see WMOGroup
+        /// MOGP trans / interior batch counts: MOBA runs A (trans), B
+        /// (interior), C (exterior), and the stock client lights each kind
+        /// differently (0x7ac9f0).
+        uint16_t transBatchCount = 0;
+        uint16_t intBatchCount = 0;
         bool allUntextured = false;  // True if ALL batches use fallback white texture (collision/placeholder group)
         bool isLOD = false;          // Distance-only group (skip when camera is close)
         // A merged batch is cloth (clothDrop > 0): wmo.vert moves its vertices,
@@ -622,6 +642,9 @@ private:
             // branch for how each level is shaded.
             uint8_t emissiveLevel = 0;
             uint32_t sidnColor = 0;         // F_SIDN night glow colour, 0x00RRGGBB (0 = none)
+            int8_t lightModeA = 1;          // see WMOMaterialUBO::lightModeA
+            int8_t lightModeB = -1;         // see WMOMaterialUBO::lightModeB
+            uint8_t stockFlags = 0;         // WMOMaterialUBO::kWmoMat* bits
             float heightMapVariance = 0.0f; // variance of height map (low = flat texture)
             VkTexture* texture = nullptr;   // from cache, NOT owned
             VkTexture* normalHeightMap = nullptr;  // generated from diffuse, NOT owned
@@ -749,6 +772,10 @@ private:
         std::vector<uint32_t> materialFlags;
         // MOMT sidnColor per material (BGRA as stored), the F_SIDN night glow
         std::vector<uint32_t> materialSidnColors;
+        // MOMT shader per material (0 Diffuse .. 6 Composite)
+        std::vector<uint32_t> materialShaders;
+        // MOHD flags (0x2 unified render path, 0x8 colours not fixed)
+        uint16_t mohdFlags = 0;
 
         // Portal visibility data
         std::vector<PortalData> portals;
@@ -847,12 +874,14 @@ private:
     /**
      * Create GPU resources for a WMO group
      *
-     * mohdAmbient and mohdFlags are the root's MOHD ambient colour and
-     * flags: an interior group's vertex colours are rebased on them the way
-     * the client does on load (see interiorVertexLight in the .cpp).
+     * mohdFlags are the root's MOHD flags and model the root, whose portals
+     * the trans vertices are attenuated by: the vertex colours are fixed the
+     * way the client does on load and first draw (stockVertexColors in the
+     * .cpp, stock_wmo_light.hpp).
      */
     bool createGroupResources(const pipeline::WMOGroup& group, GroupResources& resources, uint32_t groupFlags = 0,
-                              const glm::vec3& mohdAmbient = glm::vec3(0.0f), uint16_t mohdFlags = 0);
+                              const glm::vec3& mohdAmbient = glm::vec3(0.0f), uint16_t mohdFlags = 0,
+                              const pipeline::WMOModel* model = nullptr);
 
     /**
      * Check if group is visible in frustum
@@ -1010,6 +1039,7 @@ private:
     bool deferNormalMaps_ = false;       // skip normal map gen during streaming
     float normalMapStrength_ = 0.8f;     // 0.0 = flat, 1.0 = full, 2.0 = exaggerated
     bool pomEnabled_ = true;             // on by default
+    float sidnNightFactor_ = -1.0f;      // see setSidnNightFactor
     int pomQuality_ = 1;                 // 0=Low(16), 1=Medium(32), 2=High(64)
     bool materialSettingsDirty_ = false; // rebuild UBOs when settings change
 

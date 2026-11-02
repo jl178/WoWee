@@ -248,25 +248,17 @@ struct M2ModelGPU {
     float particleReach = 0.0f;
     std::vector<VkTexture*> particleTextures;    // Resolved Vulkan textures per emitter
     std::vector<VkDescriptorSet> particleTexSets; // Pre-allocated descriptor sets per emitter (stable, avoids per-frame alloc)
-    /// Each emitter's colour, alpha and scale lifetime curves (FBlocks)
-    /// sampled at kSteps + 1 even life ratios, so the particle pass reads
-    /// two table entries per particle instead of walking three key lists.
-    /// FBlock keys sit at 0, 0.5 and 1 in practice, on the grid, so the
-    /// linear read between entries is the curve itself. Built by the update
-    /// on first emission (M2Renderer::ensureParticleCurves) - before any
-    /// particle of the model exists for the draw pass to read.
-    struct ParticleCurve {
-        static constexpr int kSteps = 64;
-        glm::vec4 colorAlpha[kSteps + 1];  // rgb colour, a = min(alpha, 1)
-        float scale[kSteps + 1];
-    };
-    mutable std::vector<ParticleCurve> particleCurves;
+    /// Each emitter's lifetime curves packed as the particle shader reads
+    /// them (m2_particle::packCurve, kCurveVec4s vec4s an emitter). Built by
+    /// the update on first emission (M2Renderer::ensureParticleCurves) -
+    /// before any particle of the model exists for the draw pass to read.
+    mutable std::vector<glm::vec4> particleCurves;
     /// Each emitter's float tracks, classified once per model alongside the
     /// curves, so the per-frame setup skips the key search for the constant
     /// ones (see m2_particle::TrackConst).
     struct ParticleTracks {
         m2_particle::TrackConst rate, life, speed, speedVar, vRange, hRange,
-                                gravity, areaL, areaW;
+                                gravity, areaL, areaW, zSource;
     };
     mutable std::vector<ParticleTracks> particleTracks;
 
@@ -289,22 +281,26 @@ struct M2ModelGPU {
 
 /// A single M2 particle emitted from a particle emitter.
 ///
-/// 48 bytes, down from 68: the step reads and writes every live particle each
-/// frame. Emitter flag 0x10 ("do not trail") particles are simulated in the
-/// emitter bone's frame and placed through the bone each step, so they turn
-/// with it; for those, velocity is in the bone's frame and localPos is the
-/// position there. Nothing reads a world velocity for them, and whether a
-/// particle follows its emitter is the emitter's flag, not the particle's.
+/// Position and velocity are in the particle's space: world space, or for an
+/// emitter with flag 0x10 the emitter's own frame, placed through its current
+/// matrix when drawn - so the particles turn and travel with it, as the stock
+/// CParticleEmitter2 keeps them (runtime flag 0x200). Which it is, is the
+/// emitter's flag. What the stock draws per particle from its random seed
+/// (spin, size variation, random cell, twinkle phase) is drawn once at birth.
 struct M2Particle {
-    glm::vec3 position;         // world
+    glm::vec3 position;
     float life;                 // current age in seconds
-    glm::vec3 velocity;         // world, or bone frame for "do not trail"
+    glm::vec3 velocity;
     float maxLife;              // total lifespan
-    glm::vec3 localPos{0.0f};   // bone frame, "do not trail" only
+    glm::vec2 sizeVary{1.0f};   // scaleVary factors (0x979E90)
+    float spinBase = 0.0f;      // radians (0x97A130)
+    float spinSpeed = 0.0f;     // radians a second, its sign the spin direction
     uint16_t emitterIndex = 0;  // which emitter spawned this
-    uint16_t tileIndex = 0;     // texture atlas tile index
+    uint16_t tileIndex = 0;     // random head cell (flag 0x10000)
+    uint16_t phase = 0;         // twinkle phase into the random table
+    uint16_t pad = 0;
 };
-static_assert(sizeof(M2Particle) == 48);
+static_assert(sizeof(M2Particle) == 56);
 
 /**
  * Instance of an M2 model in the world
@@ -429,7 +425,25 @@ struct alignas(64) M2Instance {
     /// alone, every layer of it, since an opaque layer cannot fade otherwise.
 
     // Particle emitter state
-    std::vector<float> emitterAccumulators;  // fractional particle counter per emitter
+    /// Per emitter, what CParticleEmitter2 keeps between frames.
+    struct EmitterState {
+        glm::mat4 xf{1.0f};          // model * bone * T(position) * Rz90 this frame
+        glm::vec3 pos{0.0f};         // xf's translation (+0x1B4)
+        glm::vec3 prevPos{0.0f};     // last frame's (+0x1D0)
+        bool havePos = false;
+        float acc = 0.0f;            // births owed (+0x08)
+        float inheritTimer = 0.0f;   // +0x1DC
+        glm::vec3 inheritVel{0.0f};  // +0x1E0, flag 0x40
+        glm::vec3 followMove{0.0f};  // +0x1F4, flag 0x4000
+        uint32_t poolCap = 0;        // +0x30: room for this many
+        uint32_t live = 0;           // alive now
+        bool wasEmitting = false;    // +0x86, flag 0x8000's edge
+        // Tracks this frame (0x82D2F0, fed in by 0x8309C0).
+        bool enabled = false;
+        float rate = 0.0f, life = 0.0f, speed = 0.0f, speedVar = 0.0f, vRange = 0.0f,
+              hRange = 0.0f, gravity = 0.0f, areaL = 0.0f, areaW = 0.0f, zSource = 0.0f;
+    };
+    std::vector<EmitterState> emitterStates;
     std::vector<M2Particle> particles;
     /// Seconds of particle time skipped while off screen, paid on the next
     /// step; see the particle loop in M2Renderer::update.
@@ -453,28 +467,28 @@ struct alignas(64) M2Instance {
     /// a glowing mushroom, a wisp - is ranged by its size like the rest.
     bool spellVisual = false;
 
-    // Ribbon emitter state
+    // Ribbon emitter state (CRibbonEmitter, 0x97F940 / 0x980090).
     struct RibbonEdge {
-        glm::vec3 worldPos;   // Spine world position when this edge was born
-        glm::vec3 color;      // Interpolated color at birth
-        float     alpha;      // Interpolated alpha at birth
-        float     heightAbove;// Half-width above spine
-        float     heightBelow;// Half-width below spine
-        float     age;        // Seconds since spawned
-        bool      breakBefore;// Starts a new strip: not joined to the edge before it
+        glm::vec3 bottom{0.0f};  // spine - Y * below: texture v = 0
+        glm::vec3 top{0.0f};     // spine + Y * above: v = 1
+        glm::vec3 color{1.0f};   // the emitter's colour and alpha when laid
+        float alpha = 1.0f;
+        float age = 0.0f;        // seconds
     };
-    // One deque of edges per ribbon emitter on this instance
+    /// One deque of laid edges per ribbon emitter, oldest first.
     std::vector<std::deque<RibbonEdge>> ribbonEdges;
-    std::vector<float> ribbonEdgeAccumulators; // fractional edge counter per emitter
-    /// Where each emitter's spine was at its last step. The stock
-    /// CRibbonEmitter keeps the previous and current emitter frames and lays
-    /// the edges born in a step along the line between them, and it starts
-    /// over - nothing to interpolate from - whenever the ribbon is hidden.
+    /// The emitter frames a ribbon keeps: the previous and the current
+    /// position and Y and Z axes (scaled, as the matrix has them). Edges laid
+    /// in a step run from the one to the other.
     struct RibbonTrack {
-        glm::vec3 lastSpine{0.0f};
-        bool hasLastSpine = false;  // the next step may interpolate from lastSpine
-        bool breakPending = false;  // the next edge starts a new strip
-        bool live = false;          // emitting: the strip runs on to lastSpine
+        glm::vec3 prevPos{0.0f}, prevY{0.0f}, prevZ{0.0f};
+        glm::vec3 curPos{0.0f}, curY{0.0f}, curZ{0.0f};
+        bool hasPrev = false;   // +0x160 bit 0: cleared while hidden
+        bool stepped = false;   // +0x160 bit 0x10: the first step lays one edge
+        float frac = 0.0f;      // +0x1C: part of an edge owed
+        RibbonEdge head;        // the live end, at the emitter (not laid)
+        bool hasHead = false;
+        uint32_t texSlot = 0;   // +0x170: texture cell
     };
     std::vector<RibbonTrack> ribbonTracks;
 
@@ -1027,8 +1041,9 @@ private:
     VkPipelineLayout particlePipelineLayout_ = VK_NULL_HANDLE;
     // The same particles from compact records (see m2_particle_look.hpp):
     // set 0 = perFrame, 1 = particleTex, 2 = the frame's curve buffer.
-    VkPipeline particleGpuPipeline_ = VK_NULL_HANDLE;
-    VkPipeline particleGpuAdditivePipeline_ = VK_NULL_HANDLE;
+    // One quad pipeline per emitter blend type (0..6), the stock state for
+    // each (blend table 0xA453B0 row 0; depth write for 0 and 1 only).
+    VkPipeline particleGpuPipelines_[7] = {};
     VkPipelineLayout particleGpuPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline smokePipeline_ = VK_NULL_HANDLE;           // Smoke particles
     VkPipelineLayout smokePipelineLayout_ = VK_NULL_HANDLE;
@@ -1195,9 +1210,6 @@ private:
     ::VkBuffer smokeVB_ = VK_NULL_HANDLE;
     VmaAllocation smokeVBAlloc_ = VK_NULL_HANDLE;
     void* smokeVBMapped_ = nullptr;
-    ::VkBuffer m2ParticleVB_ = VK_NULL_HANDLE;
-    VmaAllocation m2ParticleVBAlloc_ = VK_NULL_HANDLE;
-    void* m2ParticleVBMapped_ = nullptr;
     // The GPU path's buffers, one of each per frame in flight: the particle
     // records (vertex buffer) and the curves they index (storage buffer,
     // bound as set 2 through instanceSetLayout_'s one-SSBO layout).
@@ -1477,8 +1489,6 @@ private:
         uint32_t        vertexCount;
     };
     std::vector<RibbonDrawCall> ribbonDraws_;
-    // One strip of a ribbon as drawn (its edges plus the live head), reused.
-    std::vector<M2Instance::RibbonEdge> ribbonStrip_;
 
     // Particle group structures (reused each frame)
     struct ParticleGroupKey {
@@ -1527,26 +1537,20 @@ private:
         uint32_t count = 0;
     };
     std::vector<ParticleRun> particleRuns_;
-    /// Vertices the particle buffer holds. Not MAX_M2_PARTICLES, which is the
-    /// cap on one instance's particles: this has to hold a whole frame's.
-    static constexpr size_t MAX_M2_PARTICLE_VERTS = 32768;
-    /// Particles the GPU path draws per frame: 49152 records of 24 bytes is
-    /// the memory the 32768 nine-float vertices took. Dalaran has ~39k live
-    /// in view and the old budget drew 32k of them. WOWEE_PARTICLE_BUDGET
-    /// overrides it (32768 matches the CPU path for an A/B), read at init.
-    static constexpr uint32_t kDefaultParticleRecordBudget = 49152;
+    /// Quads the particle pass draws per frame, one 48-byte record each (a
+    /// particle with a head and a tail is two). Dalaran has ~39k live in
+    /// view. WOWEE_PARTICLE_BUDGET overrides it, read at init.
+    static constexpr uint32_t kDefaultParticleRecordBudget = 65536;
     uint32_t particleRecordBudget_ = kDefaultParticleRecordBudget;
     /// Distinct emitter curves the GPU path can upload per frame; an emitter
     /// whose curve does not fit is not drawn that frame.
     static constexpr uint32_t kMaxParticleCurvesPerFrame = 2048;
     /// Where each emitter curve went in this frame's curve buffer, in vec4s.
     std::unordered_map<const void*, uint32_t> particleCurveSlots_;
-    /// The two halves of renderM2Particles' fill: the CPU path writes nine
-    /// floats per particle into m2ParticleVB_ (WOWEE_PARTICLE_CPU_QUADS=1),
-    /// the GPU path a ParticleRecord into particleRecordBuf_[frame] and the
-    /// curves into particleCurveBuf_[frame]. Both fill particleRuns_ and
-    /// return how many particles they wrote.
-    size_t writeParticleVertsCpu();
+    /// renderM2Particles' fill: a ParticleRecord per quad into
+    /// particleRecordBuf_[frame] and each emitter's curves into
+    /// particleCurveBuf_[frame]. Fills particleRuns_ and returns how many
+    /// records it wrote.
     size_t writeParticleRecordsGpu(uint32_t frame);
 
     // Animation update buffers (avoid per-frame allocation)
@@ -1670,18 +1674,6 @@ private:
     float interpFloat(const pipeline::M2AnimationTrack& track, float animTime,
                       float globalTime, int seqIdx,
                       const std::vector<uint32_t>& globalSeqDurations);
-    float interpFBlockFloat(const pipeline::M2FBlock& fb, float lifeRatio);
-    glm::vec3 interpFBlockVec3(const pipeline::M2FBlock& fb, float lifeRatio);
-    /// Per-emitter values the particle step needs, filled once per instance
-    /// step rather than per particle; reused so the step never allocates.
-    struct ParticleStepEmitter {
-        glm::mat4 xf{1.0f};      // model * bone
-        float gravity = 0.0f;
-        float dragFactor = 1.0f; // exp(-drag * dt)
-        float drag = 0.0f;
-        bool noTrail = false;    // kParticleFlagNoTrail
-    };
-    std::vector<ParticleStepEmitter> particleStepScratch_;
     /// What one thread of the particle step owns: its own random stream,
     /// emitter scratch and birth list. Instances are independent, so the
     /// emitter list is split across threads and each runs its share with
@@ -1689,7 +1681,7 @@ private:
     /// single-threaded step has always used).
     struct ParticleWorker {
         std::mt19937 rng;
-        std::vector<ParticleStepEmitter> ems;
+        std::vector<m2_particle::StepEmitter> ems;
         std::vector<M2Particle> births;
         explicit ParticleWorker(uint32_t seed) : rng(seed) {}
     };
@@ -1703,27 +1695,23 @@ private:
     std::vector<uint32_t> particleWorkWeight_;
     std::vector<size_t> particleWorkBounds_;
     std::vector<std::future<void>> particleFutures_;
-    /// Spawns what the emitters released over the last dt seconds, each
-    /// particle aged by how long ago in that window it was born. A long dt
-    /// is a warm-up: an emitter coming back into view after lying dormant
-    /// gets its standing population in one call (see M2Renderer::update).
+    /// Runs the instance's particle emitters for dt the way the stock
+    /// CParticleEmitter2::Update does (0x97EB10): emitter frames and tracks
+    /// once, then sub-steps of at most a tenth of a second, each spawning
+    /// and then moving. A long dt is a warm-up: an emitter coming back into
+    /// view after lying dormant gets its standing population in one call,
+    /// since the sub-steps never cover more than a lifespan (see
+    /// m2_particle::substeps and M2Renderer::update).
     ///
-    /// With a worker, the births go to its list and are merged in after the
-    /// last particle of their own emitter, the random draws come from its
-    /// stream and the tracks are read through gpu.particleTracks. Without
-    /// one (WOWEE_PARTICLE_LEGACY=1) it is the single-threaded step as it was.
-    void emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt,
-                       ParticleWorker* worker = nullptr);
-    /// Steps the live particles. With a worker the survivors keep their order
-    /// (m2_particle::stepAndCompact); without one, swap-and-pop as before.
-    void updateParticles(M2Instance& inst, float dt, ParticleWorker* worker = nullptr);
-    /// Builds gpu.particleCurves and gpu.particleTracks once per model; see
-    /// M2ModelGPU::ParticleCurve. Not thread-safe: the update calls it for
+    /// Births come from the worker's random stream and go to its list, then
+    /// are merged in after the last particle of their own emitter.
+    void stepParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt, ParticleWorker& worker);
+    /// Builds gpu.particleCurves and gpu.particleTracks once per model. Not thread-safe: the update calls it for
     /// every emitter it will step before the step is split across threads.
     void ensureParticleCurves(const M2ModelGPU& gpu);
     void updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt);
     /// Drops an instance's ribbon edges and its trails' continuity: the next
-    /// edge each emitter lays starts a fresh strip where the emitter then is.
+    /// step starts each trail afresh where its emitter then is.
     static void resetRibbons(M2Instance& inst);
 
     // Helper to allocate descriptor sets

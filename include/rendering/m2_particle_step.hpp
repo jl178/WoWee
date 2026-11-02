@@ -5,6 +5,8 @@
 #include <glm/glm.hpp>
 
 #include <cstdint>
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -95,40 +97,57 @@ inline float sampleTrack(const TrackConst& c, const pipeline::M2AnimationTrack& 
                                  globalSequenceDurations, 0.0f);
 }
 
-/// Ages and moves every particle by dt, drops the ones past their lifespan,
-/// and closes the gaps in order. Returns how many are left.
-///
-/// The order is kept so particles stay grouped by emitter: the particle pass
-/// closes a draw run and looks the emitter's texture group up again at every
-/// change of emitter. Swap-and-pop moved the last particle into each hole,
-/// which mixed the emitters of a model together within a few frames. Each
-/// survivor is written once either way, so keeping the order costs nothing.
-///
-/// `ems[e]` holds emitter e's gravity, dragFactor (exp(-drag * dt)), noTrail
-/// and xf (model * bone). A noTrail particle keeps its position and velocity
-/// in the bone's frame (localPos, velocity) and is placed through xf; the
-/// arithmetic per particle is the same, in the same order, as the step that
-/// kept a separate world velocity for those.
-template <class Particle, class EmitterStep>
-size_t stepAndCompact(Particle* ps, size_t n, const EmitterStep* ems, size_t numEm, float dt) {
+/// What the step needs of one emitter for one sub-step; filled per emitter,
+/// read for each of its particles.
+struct StepEmitter {
+    float gravity = 0.0f;      // down the particle space's Z
+    float drag = 0.0f;         // per second, linear
+    float windTime = 0.0f;     // wind blows on particles younger than this
+    glm::vec3 wind{0.0f};
+    glm::vec3 follow{0.0f};    // emitter motion this sub-step (flag 0x4000)
+    glm::vec3 center{0.0f};    // emitter position, particle space
+    bool killPastCenter = false;  // sphere flag 0x80
+};
+
+/// One particle's sub-step, CParticleEmitter2 0x97DD20 then 0x979BB0:
+/// - age; past the lifespan it dies;
+/// - wind while younger than windTime;
+/// - followed along with the emitter, once older than two sub-steps;
+/// - moved under gravity in closed form over the step;
+/// - drag takes min(drag * dt, 1) of the velocity, after the move;
+/// - a sphere particle with flag 0x80 dies once it moves away from the
+///   centre (one shot inward dies on crossing it).
+/// Returns false when the particle dies.
+template <class Particle>
+inline bool stepParticle(Particle& p, const StepEmitter& s, float dt) {
+    p.life += dt;
+    if (p.life >= p.maxLife) return false;
+    if (p.life < s.windTime) p.velocity += s.wind * dt;
+    if (p.life > dt + dt) p.position += s.follow;
+    const glm::vec3 v0 = p.velocity;
+    p.position += v0 * dt;
+    p.position.z -= s.gravity * dt * dt * 0.5f;
+    p.velocity.z -= s.gravity * dt;
+    if (s.drag != 0.0f) p.velocity -= p.velocity * std::min(dt * s.drag, 1.0f);
+    // 0x978B70: components below 1e-8 are flushed to zero.
+    for (int k = 0; k < 3; ++k)
+        if (std::abs(p.velocity[k]) < 1e-8f) p.velocity[k] = 0.0f;
+    if (s.killPastCenter && glm::dot(p.position - s.center, v0 * dt) > 0.0f) return false;
+    return true;
+}
+
+/// Steps every particle by dt and closes the gaps in order, returning how
+/// many are left. Order is kept so particles stay grouped by emitter: the
+/// draw closes a run at every change of emitter. A particle whose emitter is
+/// past `numEm` only ages and moves.
+template <class Particle>
+size_t stepAndCompact(Particle* ps, size_t n, const StepEmitter* ems, size_t numEm, float dt) {
+    static const StepEmitter kNone{};
     size_t w = 0;
     for (size_t i = 0; i < n; ++i) {
         Particle p = ps[i];
-        p.life += dt;
-        if (p.life >= p.maxLife) continue;
         const size_t e = p.emitterIndex;
-        if (e < numEm) {
-            const auto& s = ems[e];
-            p.velocity.z -= s.gravity * dt;
-            p.velocity *= s.dragFactor;
-            if (s.noTrail) {
-                p.localPos += p.velocity * dt;
-                p.position = glm::vec3(s.xf * glm::vec4(p.localPos, 1.0f));
-                ps[w++] = p;
-                continue;
-            }
-        }
-        p.position += p.velocity * dt;
+        if (!stepParticle(p, e < numEm ? ems[e] : kNone, dt)) continue;
         ps[w++] = p;
     }
     return w;

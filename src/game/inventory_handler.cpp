@@ -5668,6 +5668,21 @@ void InventoryHandler::updateOtherPlayerVisibleItems(uint64_t guid, const FlatFi
         old = newEntries;
         changed = true;
     }
+    // The weapon slots' enchant half (WotLK: entry, then enchantment, so the
+    // field after each entry). Stock picks the glow from it (0x759050) and
+    // refreshes the glows when only it changes (0x6E1E10 -> 0x6D6C10).
+    if (stride == 2 && !valuesAreDisplayIds) {
+        std::array<uint32_t, 3> enchants{};
+        for (int s = 15; s <= 17; ++s) {
+            auto it = fields.find(static_cast<uint16_t>(base + s * stride + 1));
+            if (it != fields.end()) enchants[s - 15] = it->second;
+        }
+        auto& oldEnchants = owner_.otherPlayerWeaponEnchantsRef()[guid];
+        if (oldEnchants != enchants) {
+            oldEnchants = enchants;
+            changed = true;
+        }
+    }
 
     if (valuesAreDisplayIds) {
         if (sparseTbcVisible && hasInspectedEntries) {

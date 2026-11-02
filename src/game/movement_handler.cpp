@@ -1,4 +1,6 @@
 #include "game/movement_handler.hpp"
+#include "game/stock_movement.hpp"
+#include "game/unit_motion_glue.hpp"
 #include "game/game_handler.hpp"
 #include "game/game_utils.hpp"
 #include "game/packet_parsers.hpp"
@@ -66,6 +68,20 @@ uint32_t findKnownReturnAreaTrigger(uint32_t triggerId) {
 }
 
 } // namespace
+
+/// Which of another unit's speeds a spline speed opcode sets, from the member
+/// the same opcode sets for the local player.
+SpeedKind MovementHandler::remoteSpeedKind(float MovementHandler::* member) {
+    if (member == &MovementHandler::serverWalkSpeed_) return SpeedKind::Walk;
+    if (member == &MovementHandler::serverRunBackSpeed_) return SpeedKind::RunBack;
+    if (member == &MovementHandler::serverSwimSpeed_) return SpeedKind::Swim;
+    if (member == &MovementHandler::serverSwimBackSpeed_) return SpeedKind::SwimBack;
+    if (member == &MovementHandler::serverFlightSpeed_) return SpeedKind::Flight;
+    if (member == &MovementHandler::serverFlightBackSpeed_) return SpeedKind::FlightBack;
+    if (member == &MovementHandler::serverTurnRate_) return SpeedKind::TurnRate;
+    if (member == &MovementHandler::serverPitchRate_) return SpeedKind::PitchRate;
+    return SpeedKind::Run;
+}
 
 MovementHandler::MovementHandler(GameHandler& owner)
     : owner_(owner), movementInfo(owner.movementInfoRef()) {}
@@ -167,6 +183,8 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
             float speed = packet.readFloat();
             if (guid == owner_.getPlayerGuid() && std::isfinite(speed) && speed > 0.01f && speed < 200.0f)
                 this->*member = speed;
+            else if (guid != owner_.getPlayerGuid())
+                applyRemoteSpeed(owner_, guid, remoteSpeedKind(member), speed);
         };
     };
     table[Opcode::SMSG_SPLINE_SET_RUN_SPEED]      = makeSplineSpeedHandler(&MovementHandler::serverRunSpeed_);
@@ -489,6 +507,15 @@ void MovementHandler::setFlightAirborne(bool airborne) {
     sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
 }
 
+bool MovementHandler::inStockHeartbeatMotion() const {
+    return (movementInfo.flags & stock_movement::kMovingMask) != 0;
+}
+
+bool MovementHandler::facingChangeWorthSending(float canonicalYaw) const {
+    if (!hasLastPacketOrientation_) return true;
+    return stock_movement::facingChangeWorthSending(lastPacketOrientation_, canonicalYaw);
+}
+
 void MovementHandler::sendMovement(Opcode opcode) {
     if (owner_.getState() != WorldState::IN_WORLD) {
         LOG_WARNING("Cannot send movement in state: ", (int)owner_.getState());
@@ -589,24 +616,43 @@ void MovementHandler::sendMovement(Opcode opcode) {
             isFalling_ = true;
             fallStartMs_ = movementInfo.time;
             movementInfo.fallTime = 0;
-            movementInfo.jumpVelocity = 7.96f;
             {
-                const float facingRad = movementInfo.orientation;
-                movementInfo.jumpCosAngle = std::cos(facingRad);
-                movementInfo.jumpSinAngle = std::sin(facingRad);
-                const uint32_t horizFlags =
-                    static_cast<uint32_t>(MovementFlags::FORWARD) |
-                    static_cast<uint32_t>(MovementFlags::BACKWARD) |
-                    static_cast<uint32_t>(MovementFlags::STRAFE_LEFT) |
-                    static_cast<uint32_t>(MovementFlags::STRAFE_RIGHT);
-                const bool movingHoriz = (movementInfo.flags & horizFlags) != 0;
-                if (movingHoriz) {
-                    const bool isWalking = (movementInfo.flags & static_cast<uint32_t>(MovementFlags::WALKING)) != 0;
-                    movementInfo.jumpXYSpeed = isWalking ? 2.5f : (serverRunSpeed_ > 0.0f ? serverRunSpeed_ : 7.0f);
-                } else {
-                    movementInfo.jumpXYSpeed = 0.0f;
-                }
+                // The stock jump block (CMovement 0x9883F0, written by
+                // 0x9872C0's packet builder): the vertical speed with the
+                // stock sign, DOWN positive - a jump goes out as -7.955547 (or
+                // -9.096748 from the water) - then the direction of travel and
+                // the speed along it, as CMovement holds them: +0x70/+0x74 is
+                // the movement direction (backward, strafe and diagonal
+                // included; the facing for a standing jump), +0x8C the speed
+                // GetSpeed picked (0 standing, walk or run-back included).
+                namespace sm = stock_movement;
+                const bool fromWater =
+                    (movementInfo.flags & static_cast<uint32_t>(MovementFlags::SWIMMING)) != 0;
+                movementInfo.jumpVelocity = -(fromWater ? sm::kWaterJumpVelocity : sm::kJumpVelocity);
+                // Worked out in the wire's own frame (the stock facing), and
+                // laid down in the stock order: x first. The writers put
+                // jumpSinAngle first on the wire (AzerothCore's names for the
+                // two), so x goes there.
+                const sm::Dir2 dir = sm::moveDirection(
+                    movementInfo.flags, core::coords::canonicalToServerYaw(movementInfo.orientation));
+                movementInfo.jumpSinAngle = dir.x;
+                movementInfo.jumpCosAngle = dir.y;
+                sm::Speeds sp;
+                sp.walk = serverWalkSpeed_;
+                sp.run = serverRunSpeed_;
+                sp.runBack = serverRunBackSpeed_;
+                sp.swim = serverSwimSpeed_;
+                sp.swimBack = serverSwimBackSpeed_;
+                sp.flight = serverFlightSpeed_;
+                sp.flightBack = serverFlightBackSpeed_;
+                movementInfo.jumpXYSpeed = sm::selectSpeed(movementInfo.flags, sp);
             }
+            break;
+        case Opcode::MSG_MOVE_SET_WALK_MODE:
+            movementInfo.flags |= static_cast<uint32_t>(MovementFlags::WALKING);
+            break;
+        case Opcode::MSG_MOVE_SET_RUN_MODE:
+            movementInfo.flags &= ~static_cast<uint32_t>(MovementFlags::WALKING);
             break;
         case Opcode::MSG_MOVE_START_TURN_LEFT:
             movementInfo.flags |= static_cast<uint32_t>(MovementFlags::TURN_LEFT);
@@ -637,7 +683,10 @@ void MovementHandler::sendMovement(Opcode opcode) {
             // A climb with flight allowed is a take-off, and the client is
             // the one that says so: FLYING goes out on this packet, not a
             // frame later. See setFlightAirborne for the landing.
-            if (movementInfo.flags & static_cast<uint32_t>(MovementFlags::CAN_FLY)) {
+            // A swimmer's climb is an ascent in the water (the camera sends
+            // START_ASCEND for it too), not a take-off.
+            if ((movementInfo.flags & static_cast<uint32_t>(MovementFlags::CAN_FLY)) &&
+                !(movementInfo.flags & static_cast<uint32_t>(MovementFlags::SWIMMING))) {
                 movementInfo.flags |= static_cast<uint32_t>(MovementFlags::FLYING);
             }
             break;
@@ -859,6 +908,11 @@ void MovementHandler::sendMovement(Opcode opcode) {
     owner_.getSocket()->send(packet);
     lastSentPos_ = glm::vec3(movementInfo.x, movementInfo.y, movementInfo.z);
     hasSentMovement_ = true;
+    // Every movement packet restarts the heartbeat's 500 ms (0x71F0C0 ->
+    // 0x6E9B70) and is the reference a later facing change is measured from.
+    timeSinceLastMoveHeartbeat_ = 0.0f;
+    lastPacketOrientation_ = movementInfo.orientation;
+    hasLastPacketOrientation_ = true;
     if (movementHeldReason_) {
         LOG_WARNING("Movement: sending again (was held while ", movementHeldReason_, ")");
         movementHeldReason_ = nullptr;
@@ -1237,8 +1291,19 @@ void MovementHandler::handleMoveSetSpeed(network::Packet& packet) {
     float speed = packet.readFloat();
     if (!std::isfinite(speed) || speed <= 0.01f || speed > 200.0f) return;
 
-    if (moverGuid != owner_.getPlayerGuid()) return;
     const uint16_t wireOp = packet.getOpcode();
+    if (moverGuid != owner_.getPlayerGuid()) {
+        // Someone else's: their speed drives their motion and animation.
+        SpeedKind kind = SpeedKind::Run;
+        if      (wireOp == wireOpcode(Opcode::MSG_MOVE_SET_RUN_BACK_SPEED))    kind = SpeedKind::RunBack;
+        else if (wireOp == wireOpcode(Opcode::MSG_MOVE_SET_WALK_SPEED))        kind = SpeedKind::Walk;
+        else if (wireOp == wireOpcode(Opcode::MSG_MOVE_SET_SWIM_SPEED))        kind = SpeedKind::Swim;
+        else if (wireOp == wireOpcode(Opcode::MSG_MOVE_SET_SWIM_BACK_SPEED))   kind = SpeedKind::SwimBack;
+        else if (wireOp == wireOpcode(Opcode::MSG_MOVE_SET_FLIGHT_SPEED))      kind = SpeedKind::Flight;
+        else if (wireOp == wireOpcode(Opcode::MSG_MOVE_SET_FLIGHT_BACK_SPEED)) kind = SpeedKind::FlightBack;
+        applyRemoteSpeed(owner_, moverGuid, kind, speed);
+        return;
+    }
     if      (wireOp == wireOpcode(Opcode::MSG_MOVE_SET_RUN_SPEED))        serverRunSpeed_      = speed;
     else if (wireOp == wireOpcode(Opcode::MSG_MOVE_SET_RUN_BACK_SPEED))   serverRunBackSpeed_  = speed;
     else if (wireOp == wireOpcode(Opcode::MSG_MOVE_SET_WALK_SPEED))       serverWalkSpeed_     = speed;
@@ -1258,6 +1323,23 @@ void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
     // even while they kept walking.
     uint64_t moverGuid = packet.readPackedGuid();
     if (moverGuid == owner_.getPlayerGuid() || moverGuid == 0) {
+        return;
+    }
+
+    // WotLK: the stock client's own handling (Wow.exe 0x740D30 -> 0x6ED990):
+    // the packet is applied when its sender spaced it, and the unit runs on
+    // its flags and speeds in between. See game/unit_motion_glue.hpp.
+    if (isActiveExpansion("wotlk")) {
+        MovementInfo stockInfo = {};
+        if (!readMovementBlockWotlk(packet, stockInfo)) return;
+        auto mover = owner_.getEntityManager().getEntity(moverGuid);
+        if (!mover) return;
+        const bool onTransport =
+            (stockInfo.flags & static_cast<uint32_t>(MovementFlags::ONTRANSPORT)) != 0 &&
+            stockInfo.transportGuid != 0 && owner_.getTransportManager() != nullptr;
+        // Its flags and its jump reach the animation when the packet takes
+        // effect (processStockMotionFrame), not when it arrives.
+        applyRemoteMovement(owner_, *mover, stockInfo, onTransport);
         return;
     }
 
@@ -1684,6 +1766,14 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
         return;
     }
 
+    // WotLK: the stock client's spline (Wow.exe 0x73C8E0): it starts where
+    // this client has the unit, runs linearly or as Catmull-Rom by its
+    // flags, faces along the path and turns at the end, jumps and falls.
+    if (isActiveExpansion("wotlk") && entity->isUnit()) {
+        applyStockMonsterMove(owner_, *entity, data);
+        return;
+    }
+
     // Classic/TBC creature patrols encode ground locomotion in the spline:
     // RUNMODE set means Run, while a clear bit means Walk. Publish it before
     // the render callback. WotLK uses the separate spline mode opcodes already
@@ -1824,6 +1914,12 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
 }
 
 void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
+    // WotLK: packed mover and transport guids and the seat, then the common
+    // monster-move body, run in the transport's frame (0x73F590).
+    if (isActiveExpansion("wotlk")) {
+        (void)handleStockMonsterMoveTransport(owner_, packet);
+        return;
+    }
     if (packet.getRemainingSize() < 8 + 1 + 8 + 12) return;
     uint64_t moverGuid = packet.readUInt64();
     /*uint8_t unk =*/ packet.readUInt8();
@@ -2304,6 +2400,7 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
         }
     }
     owner_.otherPlayerVisibleItemEntriesRef().clear();
+    owner_.otherPlayerWeaponEnchantsRef().clear();
     owner_.otherPlayerVisibleDirtyRef().clear();
     otherPlayerMoveTimeMs_.clear();
     if (owner_.getSpellHandler()) owner_.getSpellHandler()->clearUnitCastStates();
@@ -3679,7 +3776,13 @@ void MovementHandler::updateAttachedTransportChildren(float /*deltaTime*/) {
             continue;
         }
 
-        entity->setPosition(composed.x, composed.y, composed.z, composedOrientation);
+        // A unit whose own motion runs in the transport's frame is placed
+        // without ending that motion.
+        if (entity->hasStockMotion()) {
+            entity->setWorldPositionFromFrame(composed.x, composed.y, composed.z, composedOrientation);
+        } else {
+            entity->setPosition(composed.x, composed.y, composed.z, composedOrientation);
+        }
 
         if (attachment.type == ObjectType::UNIT) {
             if (owner_.creatureMoveCallbackRef()) {

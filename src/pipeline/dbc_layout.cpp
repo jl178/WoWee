@@ -307,6 +307,33 @@ uint32_t detectEnchantmentGemItemField(const DBCFile* dbc, const DBCFieldMap* si
     return gemField;
 }
 
+uint32_t itemDisplayItemVisual(const DBCFile* itemDisplayInfo, uint32_t displayId,
+                               const DBCFile* itemVisuals, const DBCFieldMap* idiL) {
+    if (!itemDisplayInfo || !itemVisuals || displayId == 0) return 0;
+    const uint32_t fieldCount = itemDisplayInfo->getFieldCount();
+    uint32_t field = fieldCount >= 25 ? 23u : 0xFFFFFFFFu;
+    if (idiL) {
+        const uint32_t f = idiL->field("ItemVisual");
+        if (f != 0xFFFFFFFF && f < fieldCount) field = f;
+    }
+    if (field >= fieldCount) return 0;
+    const int32_t row = itemDisplayInfo->findRecordById(displayId);
+    if (row < 0) return 0;
+    const uint32_t visual = itemDisplayInfo->getUInt32(static_cast<uint32_t>(row), field);
+    if (visual == 0 || itemVisuals->findRecordById(visual) < 0) return 0;
+    return visual;
+}
+
+uint32_t enchantItemVisual(const DBCFile* spellItemEnchantment, uint32_t enchantId,
+                           const DBCFieldMap* sieL) {
+    if (!spellItemEnchantment || enchantId == 0) return 0;
+    const int32_t row = spellItemEnchantment->findRecordById(enchantId);
+    if (row < 0) return 0;
+    const uint32_t field = detectEnchantmentItemVisualField(spellItemEnchantment, sieL);
+    if (field == 0) return 0;
+    return spellItemEnchantment->getUInt32(static_cast<uint32_t>(row), field);
+}
+
 std::array<std::string, 5> resolveItemVisualModels(uint32_t itemVisualId,
                                                    const DBCFile* itemVisuals,
                                                    const DBCFile* itemVisualEffects) {

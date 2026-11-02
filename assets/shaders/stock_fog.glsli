@@ -1,0 +1,25 @@
+// The stock client's distance fog. Include after the PerFrame block (it reads
+// view, fogParams and localLightMeta from it).
+//
+// Wow.exe 3.3.5a: DayNight 0x7f16f0 hands the renderer a fog start, end and
+// exponent; the arbvp1 shaders (shaders\vertex\arbvp1\terrain.bls,
+// diffuse_t1.bls, vsliquidwater.bls...) turn them into
+//     fogcoord = clamp(pow(max(z * c.x + c.y, 0), c.z), 0, 1)
+// with z the view-space depth (not the distance), c.x = 1 / (end - start),
+// c.y = -start / (end - start), c.z the exponent, and OPTION ARB_fog_linear
+// over 0..1 - so 1 - fogcoord of the surface shows. The exponent is 1 on
+// Azeroth and Kalimdor (plain linear fog) and 1.5-7 on maps from 530 on,
+// where the fog runs out to the far clip (stock_light_math.hpp).
+//
+// fogParams.x is the start, .y the end; the exponent rides in
+// localLightMeta.y as float bits (every float .w was taken). A block that
+// never set it (0) reads as linear.
+
+float stockFogVisibility(vec3 worldPos) {
+    float z = -(view * vec4(worldPos, 1.0)).z;
+    float range = max(fogParams.y - fogParams.x, 1e-3);
+    float e = intBitsToFloat(localLightMeta.y);
+    e = e > 0.0 ? e : 1.0;
+    float x = max((z - fogParams.x) / range, 0.0);
+    return 1.0 - clamp(pow(x, e), 0.0, 1.0);
+}

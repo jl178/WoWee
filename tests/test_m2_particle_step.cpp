@@ -50,55 +50,11 @@ struct P {
     float life = 0.0f;
     glm::vec3 velocity{0.0f};
     float maxLife = 1.0f;
-    glm::vec3 localPos{0.0f};
     uint16_t emitterIndex = 0;
     uint16_t tileIndex = 0;
 };
 
-struct E {
-    glm::mat4 xf{1.0f};
-    float gravity = 0.0f;
-    float dragFactor = 1.0f;
-    bool noTrail = false;
-};
-
-bool sameParticle(const P& a, const P& b) {
-    return std::memcmp(&a.position, &b.position, sizeof(a.position)) == 0 &&
-           std::memcmp(&a.velocity, &b.velocity, sizeof(a.velocity)) == 0 &&
-           std::memcmp(&a.localPos, &b.localPos, sizeof(a.localPos)) == 0 &&
-           sameBits(a.life, b.life) && sameBits(a.maxLife, b.maxLife) &&
-           a.emitterIndex == b.emitterIndex && a.tileIndex == b.tileIndex;
-}
-
-/// The step as it was: swap-and-pop removal, each particle moved in place.
-size_t legacyStep(P* ps, size_t n, const E* ems, size_t numEm, float dt) {
-    for (size_t i = 0; i < n;) {
-        P& p = ps[i];
-        p.life += dt;
-        if (p.life >= p.maxLife) {
-            p = ps[n - 1];
-            --n;
-            continue;
-        }
-        const size_t e = p.emitterIndex;
-        if (e < numEm) {
-            const E& s = ems[e];
-            if (s.noTrail) {
-                p.velocity.z -= s.gravity * dt;
-                p.velocity *= s.dragFactor;
-                p.localPos += p.velocity * dt;
-                p.position = glm::vec3(s.xf * glm::vec4(p.localPos, 1.0f));
-                ++i;
-                continue;
-            }
-            p.velocity.z -= s.gravity * dt;
-            p.velocity *= s.dragFactor;
-        }
-        p.position += p.velocity * dt;
-        ++i;
-    }
-    return n;
-}
+using E = m2_particle::StepEmitter;
 
 } // namespace
 
@@ -186,58 +142,104 @@ TEST_CASE("classified particle tracks sample as the sampler does", "[m2_particle
     }
 }
 
-TEST_CASE("the in-order particle step matches the swap-and-pop step", "[m2_particle]") {
+TEST_CASE("the particle step is the stock CParticleEmitter2 step", "[m2_particle]") {
+    // 0x97DD20 then 0x979BB0: age, wind, move under gravity in closed form,
+    // then linear drag.
+    E e;
+    e.gravity = 9.8f;
+    e.drag = 2.0f;
+    e.windTime = 0.5f;
+    e.wind = glm::vec3(1.0f, 0.0f, 0.0f);
+    P p;
+    p.velocity = glm::vec3(0.0f, 3.0f, 4.0f);
+    p.maxLife = 10.0f;
+    const float dt = 0.1f;
+    REQUIRE(m2_particle::stepParticle(p, e, dt));
+    CHECK(p.life == Catch::Approx(0.1f));
+    // Wind first: vx = 0.1, then moved by the post-wind velocity.
+    CHECK(p.position.x == Catch::Approx(0.1f * 0.1f));
+    CHECK(p.position.y == Catch::Approx(0.3f));
+    CHECK(p.position.z == Catch::Approx(0.4f - 9.8f * 0.01f * 0.5f));
+    // Gravity on z, then drag takes min(dt * drag, 1) = 0.2 of the velocity.
+    CHECK(p.velocity.z == Catch::Approx((4.0f - 0.98f) * 0.8f));
+    CHECK(p.velocity.y == Catch::Approx(3.0f * 0.8f));
+    CHECK(p.velocity.x == Catch::Approx(0.1f * 0.8f));
+
+    SECTION("dies at its lifespan") {
+        P q;
+        q.maxLife = 0.05f;
+        CHECK_FALSE(m2_particle::stepParticle(q, E{}, 0.05f));
+    }
+    SECTION("no wind once older than windTime") {
+        P q;
+        q.life = 0.45f;
+        q.maxLife = 2.0f;
+        REQUIRE(m2_particle::stepParticle(q, e, 0.1f));
+        CHECK(q.velocity.x == Catch::Approx(0.0f));
+    }
+    SECTION("drag never reverses the velocity") {
+        E heavy;
+        heavy.drag = 50.0f;
+        P q;
+        q.velocity = glm::vec3(1.0f);
+        q.maxLife = 2.0f;
+        REQUIRE(m2_particle::stepParticle(q, heavy, 0.1f));
+        CHECK(q.velocity == glm::vec3(0.0f));
+    }
+    SECTION("followed along once older than two steps") {
+        E f;
+        f.follow = glm::vec3(0.0f, 0.0f, 1.0f);
+        P young, old;
+        young.maxLife = old.maxLife = 2.0f;
+        old.life = 0.5f;
+        REQUIRE(m2_particle::stepParticle(young, f, 0.1f));
+        REQUIRE(m2_particle::stepParticle(old, f, 0.1f));
+        CHECK(young.position.z == Catch::Approx(0.0f));
+        CHECK(old.position.z == Catch::Approx(1.0f));
+    }
+    SECTION("a sphere particle with flag 0x80 dies past the centre") {
+        E k;
+        k.killPastCenter = true;
+        P in;
+        in.position = glm::vec3(1.0f, 0.0f, 0.0f);
+        in.velocity = glm::vec3(-5.0f, 0.0f, 0.0f);
+        in.maxLife = 5.0f;
+        REQUIRE(m2_particle::stepParticle(in, k, 0.1f));   // at 0.5, still inbound
+        CHECK_FALSE(m2_particle::stepParticle(in, k, 0.2f));  // at -0.5, past it
+    }
+}
+
+TEST_CASE("the in-order particle step keeps survivors in order", "[m2_particle]") {
     std::mt19937 rng(7);
     std::uniform_real_distribution<float> u(-3.0f, 3.0f);
     std::vector<E> ems(3);
     ems[0].gravity = 9.8f;
-    ems[0].dragFactor = 0.97f;
-    ems[1].noTrail = true;
-    ems[1].gravity = 1.5f;
-    ems[1].xf = glm::mat4(0.0f, 1.0f, 0.0f, 0.0f,
-                          -1.0f, 0.0f, 0.0f, 0.0f,
-                          0.0f, 0.0f, 1.0f, 0.0f,
-                          5.0f, 6.0f, 7.0f, 1.0f);
-    ems[2].dragFactor = 0.5f;
-
+    ems[0].drag = 0.3f;
+    ems[2].drag = 5.0f;
     std::vector<P> ps(500);
     for (size_t i = 0; i < ps.size(); ++i) {
         P& p = ps[i];
-        // Emitter 3 is past the table: moved without gravity or drag.
-        p.emitterIndex = static_cast<uint16_t>(i % 4);
+        p.emitterIndex = static_cast<uint16_t>(i % 4);  // emitter 3 is past the table
         p.position = {u(rng), u(rng), u(rng)};
         p.velocity = {u(rng), u(rng), u(rng)};
-        p.localPos = {u(rng), u(rng), u(rng)};
         p.maxLife = 1.0f + std::abs(u(rng));
         p.life = std::abs(u(rng));
         p.tileIndex = static_cast<uint16_t>(i);  // an id, for the order check
     }
-
     for (int frame = 0; frame < 30; ++frame) {
         const float dt = 0.016f + 0.01f * static_cast<float>(frame % 3);
-        std::vector<P> a = ps, b = ps;
+        std::vector<P> a = ps;
         const size_t na = m2_particle::stepAndCompact(a.data(), a.size(), ems.data(), ems.size(), dt);
-        const size_t nb = legacyStep(b.data(), b.size(), ems.data(), ems.size(), dt);
-        REQUIRE(na == nb);
         a.resize(na);
-        b.resize(nb);
-
-        // The same survivors, moved identically: each in-order survivor is
-        // found once among the swap-and-pop ones.
-        std::vector<bool> used(nb, false);
-        for (const P& p : a) {
-            bool found = false;
-            for (size_t k = 0; k < nb && !found; ++k) {
-                if (!used[k] && sameParticle(p, b[k])) used[k] = found = true;
-            }
-            REQUIRE(found);
-        }
-
-        // In order: survivors keep their relative order from before the step.
+        // Each survivor is the one-particle step of its original.
         size_t from = 0;
         for (const P& p : a) {
             while (from < ps.size() && ps[from].tileIndex != p.tileIndex) ++from;
             REQUIRE(from < ps.size());
+            P want = ps[from];
+            const E& e = want.emitterIndex < ems.size() ? ems[want.emitterIndex] : E{};
+            REQUIRE(m2_particle::stepParticle(want, e, dt));
+            REQUIRE(std::memcmp(&want.position, &p.position, sizeof(p.position)) == 0);
             ++from;
         }
         ps = a;

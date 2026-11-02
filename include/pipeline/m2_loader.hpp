@@ -170,21 +170,33 @@ struct M2Light {
     M2AnimationTrack visibility;        // byte, read as 0/1 floats
 };
 
+/// A particle's lifetime curve ("fake animation block"): keys over the
+/// particle's life ratio, with no interpolation type or global sequence.
+/// The stock client reads the timestamps as fixed16 fractions, value / 32767
+/// (CParticleEmitter2 0x9793B0), not normalised by the last key; they are
+/// stored here already divided. Which key pair is used and how the fraction is
+/// worked out is m2_particle::fblockSegment.
 struct M2FBlock {
-    std::vector<float> timestamps;      // Normalized 0..1
-    std::vector<float> floatValues;     // For alpha/scale
-    std::vector<glm::vec3> vec3Values;  // For color RGB
+    std::vector<float> timestamps;      // life ratio, s16 / 32767
+    std::vector<float> floatValues;     // alpha (s16 / 32767), scale x, cell index
+    std::vector<glm::vec3> vec3Values;  // colour, 0..1 (on disk 0..255)
+    std::vector<glm::vec2> vec2Values;  // scale x, y
 };
 
-// Particle emitter definition parsed from M2
+// Particle emitter definition parsed from M2 (WotLK M2Particle, 0x1DC bytes).
+// Offsets are into the on-disk record; docs/re/particles.md says what the
+// stock runtime does with each field.
 struct M2ParticleEmitter {
     int32_t particleId;
     uint32_t flags;
     glm::vec3 position;
     uint16_t bone;
     uint16_t texture;
-    uint8_t blendingType;   // 0=opaque,1=alphakey,2=alpha,4=add
-    uint8_t emitterType;    // 1=plane,2=sphere,3=spline
+    uint8_t blendingType;   // 0x28: 0 opaque, 1 alpha key, 2 alpha, 3 add (one, one), 4 add, 5 mod, 6 mod2x
+    uint8_t emitterType;    // 0x29: 1 plane, 2 sphere, 3 spline
+    uint16_t particleColorIndex = 0;  // 0x2A: ParticleColor.dbc override slot
+    uint8_t particleType = 0;         // 0x2C: not read by the 3.3.5 runtime
+    uint8_t headOrTail = 0;           // 0x2D: not read either; flags 0x20000/0x40000 decide
     int16_t textureTileRotation = 0;
     uint16_t textureRows = 1;
     uint16_t textureCols = 1;
@@ -194,14 +206,37 @@ struct M2ParticleEmitter {
     M2AnimationTrack horizontalRange;
     M2AnimationTrack gravity;
     M2AnimationTrack lifespan;
+    float lifespanVary = 0.0f;      // 0xAC
     M2AnimationTrack emissionRate;
+    float emissionRateVary = 0.0f;  // 0xC4
     M2AnimationTrack emissionAreaLength;
     M2AnimationTrack emissionAreaWidth;
     M2AnimationTrack deceleration;  // on-disk zSource (0xF0); not a deceleration
-    float drag = 0.0f;              // WotLK +0x174: velocity damping per second
-    M2FBlock particleColor;   // vec3 RGB at 3 timestamps
-    M2FBlock particleAlpha;   // float (from uint16/32767) at 3 timestamps
-    M2FBlock particleScale;   // float (x component of vec2) at 3 timestamps
+    M2FBlock particleColor;   // 0x104, vec3
+    M2FBlock particleAlpha;   // 0x114, fixed16
+    M2FBlock particleScale;   // 0x124, vec2 (floatValues holds x)
+    glm::vec2 scaleVary{0.0f};  // 0x134
+    M2FBlock headCell;        // 0x13C, uint16 cell index over life
+    M2FBlock tailCell;        // 0x14C
+    float tailLength = 0.0f;      // 0x15C, seconds of travel the tail covers
+    float twinkleSpeed = 0.0f;    // 0x160
+    float twinklePercent = 1.0f;  // 0x164
+    float twinkleScaleMin = 1.0f; // 0x168
+    float twinkleScaleMax = 1.0f; // 0x16C
+    float burstMultiplier = 1.0f; // 0x170
+    float drag = 0.0f;            // 0x174
+    float baseSpin = 0.0f;        // 0x178
+    float baseSpinVary = 0.0f;    // 0x17C
+    float spin = 0.0f;            // 0x180
+    float spinVary = 0.0f;        // 0x184
+    glm::vec3 tumbleMin{0.0f};    // 0x188 (model particles only)
+    glm::vec3 tumbleMax{0.0f};    // 0x194
+    glm::vec3 windVector{0.0f};   // 0x1A0
+    float windTime = 0.0f;        // 0x1AC
+    float followSpeed1 = 0.0f, followScale1 = 0.0f;  // 0x1B0
+    float followSpeed2 = 0.0f, followScale2 = 0.0f;  // 0x1B8
+    std::vector<glm::vec3> splinePoints;  // 0x1C0
+    M2AnimationTrack enabledTrack;  // 0x1C8, uint8
     bool enabled = true;
 };
 
@@ -213,6 +248,11 @@ struct M2RibbonEmitter {
 
     uint16_t textureIndex  = 0;     // First texture lookup index
     uint16_t materialIndex = 0;     // First material lookup index (blend mode)
+    /// The material's blend mode and render flags, from the model's material
+    /// table (M2Material). The ribbon's material index is into that table,
+    /// not into the skin's batches (stock 0x833900).
+    uint16_t blendMode = 4;
+    uint16_t materialFlags = 0;
 
     // Animated tracks
     M2AnimationTrack colorTrack;       // RGB 0..1
@@ -220,6 +260,7 @@ struct M2RibbonEmitter {
     M2AnimationTrack heightAboveTrack; // Half-width above bone
     M2AnimationTrack heightBelowTrack; // Half-width below bone
     M2AnimationTrack visibilityTrack;  // 0=hidden, 1=visible
+    M2AnimationTrack texSlotTrack;     // 0x84 uint16: which texture cell
 
     float edgesPerSecond = 15.0f;   // How many edge points are generated per second
     float edgeLifetime   = 0.5f;    // Seconds before edges expire

@@ -283,28 +283,31 @@ void CombatSoundManager::playImpact([[maybe_unused]] WeaponSize weaponSize, Impa
 // ---------------------------------------------------------------------------
 
 bool CombatSoundManager::playEntry3D(uint32_t soundId, const glm::vec3& position, float volumeMul,
-                                     bool vary) {
+                                     stock::Category category) {
     if (!initialized_ || !soundData_ || soundId == 0) return false;
     const SoundEntry* entry = soundData_->sound(soundId);
     if (!entry || entry->files.empty()) return false;
-    const float maxDistance = entry->distanceCutoff > 0.0f ? entry->distanceCutoff : 40.0f;
+    const float maxDistance = entry->distanceCutoff > 0.0f ? entry->distanceCutoff : stock::kDefaultCutoff;
     auto& engine = AudioEngine::instance();
     if (!engine.isInitialized()) return false;
     // Out of earshot: not started at all. Every unit in view now has steps,
     // fidgets and blows, and most of them are too far to hear.
     if (glm::distance(engine.getListenerPosition(), position) > maxDistance) return false;
-    if (vary) {
-        const auto lastIt = lastVariedFile_.try_emplace(soundId, SIZE_MAX).first;
-        const size_t file = pickAvoidingRepeat(entry->files.size(), lastIt->second, gen);
-        lastIt->second = file;
-        const SoundJitter jitter = soundJitter(gen);
-        return engine.playSound3D(entry->files[file], position,
-                                  std::min(1.0f, entry->volume * volumeScale_ * volumeMul * jitter.gain),
-                                  jitter.pitch, maxDistance);
-    }
-    std::uniform_int_distribution<size_t> pick(0, entry->files.size() - 1);
-    return engine.playSound3D(entry->files[pick(gen)], position,
-                              entry->volume * volumeScale_ * volumeMul, 1.0f, maxDistance);
+    // The stock kit play (Wow.exe 0x4c6a40): the row's bag picks the file -
+    // never the same one twice running - and the row's own flags alone turn
+    // its pitch (0x400) and level (0x800). The category caps how many of its
+    // kind sound at once across the whole world: six other units' steps,
+    // four weapon impacts, two swings, two wound cries.
+    const std::string* file = soundData_->nextFile(*entry);
+    if (!file) return false;
+    SoundOptions opts;
+    opts.minDistance = entry->minDistance;
+    opts.kitId = soundId;
+    opts.category = category;
+    opts.noDuplicate = (entry->flags & stock::kFlagNoDuplicate) != 0;
+    return engine.playSound3D(*file, position,
+                              stock::kitVolume(entry->volume, entry->flags, volumeScale_ * volumeMul, gen),
+                              stock::kitPitch(entry->flags, gen), maxDistance, opts);
 }
 
 uint32_t CombatSoundManager::pickInjury(uint32_t displayId, bool victimIsPlayer, bool crit) {
@@ -325,14 +328,14 @@ uint32_t CombatSoundManager::pickInjury(uint32_t displayId, bool victimIsPlayer,
 void CombatSoundManager::playBlowSwing(PendingBlow& blow) {
     if (blow.swingPlayed) return;
     blow.swingPlayed = true;
-    playEntry3D(blow.swingSound, blow.attackerPos);
+    playEntry3D(blow.swingSound, blow.attackerPos, 1.0f, stock::Category::WeaponSwing);
 }
 
 void CombatSoundManager::playBlowImpact(PendingBlow& blow) {
     if (blow.impactPlayed) return;
     blow.impactPlayed = true;
-    playEntry3D(blow.impactSound, blow.victimPos, 1.0f, /*vary=*/true);
-    playEntry3D(blow.injurySound, blow.victimPos);
+    playEntry3D(blow.impactSound, blow.victimPos, 1.0f, stock::Category::WeaponImpact);
+    playEntry3D(blow.injurySound, blow.victimPos, 1.0f, stock::Category::CreatureInjury);
 }
 
 void CombatSoundManager::onMelee(uint64_t attackerGuid, uint64_t victimGuid, MeleeOutcome outcome,
@@ -446,7 +449,8 @@ void CombatSoundManager::onWounded(uint64_t victimGuid, bool crit) {
     if (!initialized_ || !soundData_ || !unitResolver_) return;
     CombatUnitInfo victim;
     if (!unitResolver_(victimGuid, victim) || victim.isLocalPlayer) return;
-    playEntry3D(pickInjury(victim.displayId, victim.isPlayer, crit), victim.position);
+    playEntry3D(pickInjury(victim.displayId, victim.isPlayer, crit), victim.position, 1.0f,
+                stock::Category::CreatureInjury);
 }
 
 void CombatSoundManager::onMeleeAnimEvent(uint32_t instanceId, uint32_t tag) {
@@ -483,22 +487,36 @@ void CombatSoundManager::playBodySound(uint32_t displayId, BodySound which, uint
     const CreatureSounds* cs = soundData_ ? soundData_->displaySounds(displayId) : nullptr;
     if (!cs) return;
     uint32_t soundId = 0;
+    // The kinds Wow.exe 0x746b30 sorts into capped categories; the rest
+    // (death, wings, fidgets) play uncapped as plain SFX.
+    stock::Category category = stock::Category::Sfx;
     switch (which) {
         case BodySound::DEATH:         soundId = cs->death; break;
         case BodySound::WING_FLAP:     soundId = cs->wingFlap; break;
         case BodySound::FIDGET:        soundId = index < 5 ? cs->fidget[index] : 0; break;
-        case BodySound::CUSTOM_ATTACK: soundId = index < 4 ? cs->customAttack[index] : 0; break;
-        case BodySound::INJURY:        soundId = cs->injury; break;
-        case BodySound::INJURY_CRIT:   soundId = cs->injuryCritical; break;
+        case BodySound::CUSTOM_ATTACK:
+            soundId = index < 4 ? cs->customAttack[index] : 0;
+            category = stock::Category::WeaponImpact;  // $AH0..$AH3, 0x756240
+            break;
+        case BodySound::INJURY:
+            soundId = cs->injury;
+            category = stock::Category::CreatureInjury;
+            break;
+        case BodySound::INJURY_CRIT:
+            soundId = cs->injuryCritical;
+            category = stock::Category::CreatureInjury;
+            break;
     }
-    playEntry3D(soundId, position);
+    playEntry3D(soundId, position, 1.0f, category);
 }
 
 void CombatSoundManager::playFootstep(uint32_t displayId, uint32_t terrainSoundId, bool inWater,
                                       const glm::vec3& position) {
     const CreatureSounds* cs = soundData_ ? soundData_->displaySounds(displayId) : nullptr;
     if (!cs || cs->footstep == 0) return;
-    playEntry3D(soundData_->footstepSound(cs->footstep, terrainSoundId, inWater), position);
+    // Other units' steps: six at most at once, world-wide (0x4cf170).
+    playEntry3D(soundData_->footstepSound(cs->footstep, terrainSoundId, inWater), position, 1.0f,
+                stock::Category::Footstep);
 }
 } // namespace audio
 } // namespace wowee

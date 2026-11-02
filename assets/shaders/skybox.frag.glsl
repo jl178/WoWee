@@ -23,12 +23,12 @@ layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
 layout(push_constant) uniform Push {
     vec4 topColor;        // LightIntBand 2, the zenith
-    vec4 middleColor;     // 3, at 18 degrees
-    vec4 band1Color;      // 4, at 10 degrees
-    vec4 band2Color;      // 5, at 3 degrees
-    vec4 smogColor;       // 6, on the horizon
-    vec4 fogColorPush;    // 7, from 30 degrees below the horizon down
-    vec4 sunDirAndTime;   // xyz = sun direction, w = timeOfDay
+    vec4 middleColor;     // 3, ring 1 (about 16.8 degrees up)
+    vec4 band1Color;      // 4, ring 2 (9.8)
+    vec4 band2Color;      // 5, ring 3 (3.7)
+    vec4 smogColor;       // 6, ring 4 (1.8)
+    vec4 fogColorPush;    // 7, the horizon and everything below it
+    vec4 params;          // x = dawn/dusk highlight (0x7f0530), yzw unused
 } push;
 
 layout(location = 0) in vec2 TexCoord;
@@ -39,6 +39,42 @@ layout(location = 0) out vec4 outColor;
 // it lies behind everything, so it takes all the air there is.
 vec4 fogVolumeSky(vec2 uv) {
     return textureLod(uFogVolume, vec3(uv, 1.0), 0.0);
+}
+
+// The stock dome (0x7f2470): a unit sphere lowered cos(pi/4) below the eye,
+// rings at these polar angles (fractions of pi), Gouraud-shaded - so the
+// colour runs linearly in polar angle from ring to ring.
+const float kRingTheta[7] = float[](0.0, 0.17, 0.20, 0.23, 0.24, 0.25, 1.0);
+
+// 0x7ed3b0 over a six-key table: linear between keys, wrapping round.
+float sampleKeys6(const vec2 k[6], float t) {
+    int hi = 0;
+    while (hi < 6 && t > k[hi].x) ++hi;
+    int lo;
+    if (hi == 6 || hi == 0) { hi = 0; lo = 5; } else { lo = hi - 1; }
+    float span = k[hi].x - k[lo].x;
+    if (abs(span) < 0.001) return k[lo].y;
+    if (span < 0.0) span += 1.0;
+    float into = t - k[lo].x;
+    if (into < 0.0) into += 1.0;
+    return mix(k[lo].y, k[hi].y, into / span);
+}
+
+// 0xaf4bac: the highlight round the horizon by world azimuth.
+const vec2 kAzimuthGlow[6] = vec2[](vec2(0.125, 1.0), vec2(0.375, 0.0), vec2(0.5, -0.5),
+                                    vec2(0.625, -0.7), vec2(0.75, -0.5), vec2(0.875, 0.0));
+
+// One ring's colour as 0x7f0530 writes its vertices.
+vec3 ringColor(int ring, float g, float h) {
+    if (ring <= 0) return push.topColor.rgb;
+    if (ring >= 5) return push.fogColorPush.rgb;
+    vec3 normal = ring == 1 ? push.middleColor.rgb
+                : ring == 2 ? push.band1Color.rgb
+                : ring == 3 ? push.band2Color.rgb : push.smogColor.rgb;
+    if (h <= 0.0) return normal;
+    vec3 lit = mix(normal, push.middleColor.rgb, h);
+    if (g >= 0.0) return mix(normal, lit, (1.0 - g) * h);
+    return mix(lit, mix(lit, push.topColor.rgb, h * 0.7), -g * h);
 }
 
 void main() {
@@ -53,24 +89,28 @@ void main() {
     mat3 invViewRot = transpose(mat3(view));
     vec3 worldDir = normalize(invViewRot * viewDir);
 
-    // The stock dome: six colours at fixed elevations, linear between them
-    // in angle. Nothing else is added - the glow around the sun is its own
-    // glare sprite, drawn by Celestial.
-    float elevDeg = degrees(asin(clamp(worldDir.z, -1.0, 1.0)));
-    vec3 sky;
-    if (elevDeg >= 18.0) {
-        sky = mix(push.middleColor.rgb, push.topColor.rgb, (elevDeg - 18.0) / 72.0);
-    } else if (elevDeg >= 10.0) {
-        sky = mix(push.band1Color.rgb, push.middleColor.rgb, (elevDeg - 10.0) / 8.0);
-    } else if (elevDeg >= 3.0) {
-        sky = mix(push.band2Color.rgb, push.band1Color.rgb, (elevDeg - 3.0) / 7.0);
-    } else if (elevDeg >= 0.0) {
-        sky = mix(push.smogColor.rgb, push.band2Color.rgb, elevDeg / 3.0);
-    } else if (elevDeg >= -30.0) {
-        sky = mix(push.fogColorPush.rgb, push.smogColor.rgb, (elevDeg + 30.0) / 30.0);
-    } else {
-        sky = push.fogColorPush.rgb;
+    // Where the eye ray meets the lowered sphere, as a polar angle.
+    const float h0 = 0.70710678;
+    float dz = clamp(worldDir.z, -1.0, 1.0);
+    float t = -h0 * dz + sqrt(max(h0 * h0 * dz * dz - h0 * h0 + 1.0, 0.0));
+    float polar = acos(clamp(t * dz + h0, -1.0, 1.0)) / 3.14159265;
+    int ring = 5;
+    float f = 1.0;
+    for (int i = 0; i < 6; ++i) {
+        if (polar <= kRingTheta[i + 1]) {
+            ring = i;
+            f = (polar - kRingTheta[i]) / (kRingTheta[i + 1] - kRingTheta[i]);
+            break;
+        }
     }
+    float h = push.params.x;
+    // World azimuth: WoW's atan2(y, x), in render components (x = wowY).
+    float g = 0.0;
+    if (h > 0.0) {
+        float az = atan(worldDir.x, worldDir.y) / 6.28318531;
+        g = sampleKeys6(kAzimuthGlow, az - floor(az));
+    }
+    vec3 sky = mix(ringColor(ring, g, h), ringColor(ring + 1, g, h), clamp(f, 0.0, 1.0));
 
     if (volumetricParams.x > 0.5) {
         vec4 air = fogVolumeSky(TexCoord);

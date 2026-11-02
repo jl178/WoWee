@@ -84,11 +84,12 @@ constexpr SettingDesc kSchema[] = {
     {"fogstrength", "Fog thickness", SettingKind::Float, 0, 2, 0.05f, "Graphics", "Atmosphere",
      "How heavy the distance fog is, against the zone's own design.\n"
      "1 is as designed. Below 1 thins it and 0 removes it; above 1\n"
-     "brings it closer.", "", 0.4f},
+     "brings it closer.", "", 1.0f},
     {"fogskyblend", "Fog takes the sky's colour", SettingKind::Float, 0, 1, 0.05f, "Graphics", "",
      "How much distant fog is tinted toward the sky behind it, so the\n"
      "horizon does not stand out pale against a dark sky. 0 uses the\n"
-     "zone's fog colour alone; 1 matches the sky.", "", 0.7f},
+     "zone's fog colour alone, as the original client does; 1 matches\n"
+     "the sky.", "", 0.0f},
     // The light shafts' own thickness. Their switch and its quality are on
     // the Detail page; see there.
     {"mistdensity", "Mist density", SettingKind::Float, 0, 3, 0.1f, "Graphics", "",
@@ -786,7 +787,7 @@ constexpr SettingDesc kSchema[] = {
     {"enablemusic", "Enable music", SettingKind::Bool, 0, 0, 0, "Sound", "Music",
      "Off silences the score without disturbing the volume below.", "", 1},
     {"musicvolume", "Music volume", SettingKind::Int, 0, 100, 5, "Sound", "",
-     "The zone's music. With the WoWee soundtrack on, that too.", "", 30},
+     "The zone's music. With the WoWee soundtrack on, that too.", "", 40},
     {"woweemusic", "WoWee soundtrack", SettingKind::Bool, 0, 0, 0, "Sound", "",
      "Play this client's own music in the rotation alongside the game's.", "", 1},
     {"loopmusic", "Play without gaps", SettingKind::Bool, 0, 0, 0, "Sound", "",
@@ -796,7 +797,7 @@ constexpr SettingDesc kSchema[] = {
     {"enableambience", "Enable ambience", SettingKind::Bool, 0, 0, 0, "Sound", "Ambience",
      "Off silences the world's own noise without disturbing the volumes below.", "", 1},
     {"ambientvolume", "Ambience volume", SettingKind::Int, 0, 100, 5, "Sound", "",
-     "Wind, water, birds and the rest of the world's own noise.", "", 100},
+     "Wind, water, birds and the rest of the world's own noise.", "", 60},
     {"bellvolume", "City bells", SettingKind::Int, 0, 100, 5, "Sound", "",
      "The hour struck in the capital cities.", "", 50},
 

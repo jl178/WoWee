@@ -262,11 +262,9 @@ bool PostProcessPipeline::executePostProcessing(VkCommandBuffer cmd, uint32_t im
             renderFSR2Sharpen();
             vkCmdEndRenderPass(currentCmd_);
             vkCtx_->gpuMark(currentCmd_, "fsr2 sharpen");
-            // The pass leaves it in PRESENT_SRC; FXAA samples it as read-only.
-            transitionImageLayout(currentCmd_, fxaa_.sceneColor.image,
-                VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            // The pass leaves it in PRESENT_SRC; FXAA samples it as read-only
+            // (and the glow its boxed-down copy).
+            prepareSceneForFXAA(fxaa_.sceneColor.image);
         }
 
         // Begin swapchain render pass at full resolution for sharpening + ImGui
@@ -322,11 +320,9 @@ bool PostProcessPipeline::executePostProcessing(VkCommandBuffer cmd, uint32_t im
         vkCmdEndRenderPass(currentCmd_);
         if (sceneClosedHook_) sceneClosedHook_(currentCmd_);
 
-        // Transition resolved scene color: PRESENT_SRC_KHR → SHADER_READ_ONLY
-        transitionImageLayout(currentCmd_, fxaa_.sceneColor.image,
-            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        // Resolved scene color: PRESENT_SRC_KHR → SHADER_READ_ONLY, with the
+        // glow's boxed-down copy made on the way.
+        prepareSceneForFXAA(fxaa_.sceneColor.image);
 
         // Begin swapchain render pass (1x - no MSAA on the output pass)
         VkRenderPassBeginInfo rpInfo{};
@@ -1666,6 +1662,27 @@ bool PostProcessPipeline::initFXAAResources() {
         return false;
     }
 
+    // The glow's blur source, boxed down from the scene by two linear blits
+    // (half, then quarter size: the stock FFXBox4's 4x4 box). Only where the
+    // format can be blitted and filtered; without it the glow is left out.
+    {
+        VkFormatProperties props{};
+        vkGetPhysicalDeviceFormatProperties(vkCtx_->getPhysicalDevice(), colorFmt, &props);
+        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+                                          VK_FORMAT_FEATURE_BLIT_DST_BIT |
+                                          VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        if ((props.optimalTilingFeatures & need) == need) {
+            fxaa_.glowImage = createImage(device, alloc,
+                std::max(1u, ext.width / 2), std::max(1u, ext.height / 2), colorFmt,
+                VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                    VK_IMAGE_USAGE_SAMPLED_BIT,
+                VK_SAMPLE_COUNT_1_BIT, 2);
+        }
+        if (!fxaa_.glowImage.image) {
+            LOG_WARNING("FXAA: no glow target for this format; full-screen glow off");
+        }
+    }
+
     // sceneDepth: depth buffer at current MSAA sample count
     fxaa_.sceneDepth = createImage(device, alloc, ext.width, ext.height,
         depthFmt, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
@@ -1762,22 +1779,25 @@ bool PostProcessPipeline::initFXAAResources() {
         return false;
     }
 
-    // Descriptor set layout: binding 0 = combined image sampler
-    VkDescriptorSetLayoutBinding binding{};
-    binding.binding = 0;
-    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    binding.descriptorCount = 1;
-    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // Descriptor set layout: binding 0 = the scene, 1 = the glow's blur
+    // source (the scene again where there is none; the shader is told).
+    VkDescriptorSetLayoutBinding bindings[2]{};
+    for (uint32_t b = 0; b < 2; ++b) {
+        bindings[b].binding = b;
+        bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[b].descriptorCount = 1;
+        bindings[b].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 1;
-    layoutInfo.pBindings = &binding;
+    layoutInfo.bindingCount = 2;
+    layoutInfo.pBindings = bindings;
     vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &fxaa_.descSetLayout);
 
     constexpr uint32_t setCount = FXAAState::DESC_SET_COUNT;
     VkDescriptorPoolSize poolSize{};
     poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSize.descriptorCount = setCount;
+    poolSize.descriptorCount = setCount * 2;
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.maxSets = setCount;
@@ -1799,23 +1819,28 @@ bool PostProcessPipeline::initFXAAResources() {
     imgInfo.sampler = fxaa_.sceneSampler;
     imgInfo.imageView = fxaa_.sceneColor.imageView;
     imgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorImageInfo glowInfo = imgInfo;
+    if (fxaa_.glowImage.imageView) glowInfo.imageView = fxaa_.glowImage.imageView;
     for (auto& descSet : fxaa_.descSet) {
-        VkWriteDescriptorSet write{};
-        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = descSet;
-        write.dstBinding = 0;
-        write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        write.pImageInfo = &imgInfo;
-        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        VkWriteDescriptorSet writes[2]{};
+        for (uint32_t b = 0; b < 2; ++b) {
+            writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[b].dstSet = descSet;
+            writes[b].dstBinding = b;
+            writes[b].descriptorCount = 1;
+            writes[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[b].pImageInfo = b == 0 ? &imgInfo : &glowInfo;
+        }
+        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
     }
 
     // Pipeline layout - push constants: vec4(rcpFrame.xy, sharpness,
-    // intoxication), vec4(ghost, antialias, pad, pad)
+    // intoxication), vec4(ghost, antialias, pad, pad),
+    // vec4(glow amount, glow blend, glow source present, pad)
     VkPushConstantRange pc{};
     pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     pc.offset = 0;
-    pc.size = 32;  // two vec4
+    pc.size = 48;  // three vec4
     VkPipelineLayoutCreateInfo plCI{};
     plCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     plCI.setLayoutCount = 1;
@@ -1878,6 +1903,85 @@ void PostProcessPipeline::destroyFXAAResources() {
     destroyImage(device, alloc, fxaa_.sceneMsaaColor);
     destroyImage(device, alloc, fxaa_.sceneDepth);
     destroyImage(device, alloc, fxaa_.sceneColor);
+    destroyImage(device, alloc, fxaa_.glowImage);
+}
+
+void PostProcessPipeline::prepareSceneForFXAA(VkImage scene) {
+    if (currentCmd_ == VK_NULL_HANDLE || scene == VK_NULL_HANDLE) return;
+    // Without a blur to show, or with nothing to show it for, the plain
+    // transition the pass always had.
+    const bool blurWanted = (glowWanted() && (glowAmount_ > 0.0f || glowBlend_ > 0.0f)) ||
+                            ghost_ > 0.001f;
+    if (!fxaa_.glowImage.image || !blurWanted) {
+        transitionImageLayout(currentCmd_, scene,
+            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        if (fxaa_.glowImage.image) {
+            // Still readable (the shader skips it), whatever it held before.
+            transitionImageLayout(currentCmd_, fxaa_.glowImage.image,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        }
+        return;
+    }
+
+    auto barrier = [&](VkImage image, uint32_t mip, VkImageLayout from, VkImageLayout to,
+                       VkAccessFlags srcAccess, VkAccessFlags dstAccess,
+                       VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage) {
+        VkImageMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.srcAccessMask = srcAccess;
+        b.dstAccessMask = dstAccess;
+        b.oldLayout = from;
+        b.newLayout = to;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = image;
+        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, mip, 1, 0, 1};
+        vkCmdPipelineBarrier(currentCmd_, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
+    };
+    auto blit = [&](VkImage src, uint32_t srcMip, VkExtent2D srcExt,
+                    VkImage dst, uint32_t dstMip, VkExtent2D dstExt) {
+        VkImageBlit region{};
+        region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, srcMip, 0, 1};
+        region.srcOffsets[1] = {static_cast<int32_t>(srcExt.width),
+                                static_cast<int32_t>(srcExt.height), 1};
+        region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, dstMip, 0, 1};
+        region.dstOffsets[1] = {static_cast<int32_t>(dstExt.width),
+                                static_cast<int32_t>(dstExt.height), 1};
+        vkCmdBlitImage(currentCmd_, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region,
+                       VK_FILTER_LINEAR);
+    };
+
+    const VkExtent2D full = vkCtx_->getSwapchainExtent();
+    const VkExtent2D half = fxaa_.glowImage.extent;
+    const VkExtent2D quarter{std::max(1u, half.width / 2), std::max(1u, half.height / 2)};
+    const VkImage glow = fxaa_.glowImage.image;
+
+    barrier(scene, 0, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    for (uint32_t mip = 0; mip < 2; ++mip) {
+        barrier(glow, mip, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    }
+    blit(scene, 0, full, glow, 0, half);
+    barrier(glow, 0, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    blit(glow, 0, half, glow, 1, quarter);
+    barrier(glow, 0, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    barrier(glow, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    barrier(scene, 0, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 }
 
 void PostProcessPipeline::renderFXAAPass() {
@@ -1896,7 +2000,7 @@ void PostProcessPipeline::renderFXAAPass() {
     // anti-alias at all: the pass also runs for the ghost world and for
     // intoxication with FXAA switched off, and then only colours the scene.
     const float sharpness = 0.0f;
-    float pc[8] = {
+    float pc[12] = {
         1.0f / static_cast<float>(ext.width),
         1.0f / static_cast<float>(ext.height),
         sharpness,
@@ -1904,6 +2008,12 @@ void PostProcessPipeline::renderFXAAPass() {
         ghost_,
         fxaa_.enabled ? 1.0f : 0.0f,
         0.0f,
+        0.0f,
+        // The stock glow: strength, how far the picture is swapped for its
+        // blur, and whether there is a blur to read this frame.
+        glowWanted() ? glowAmount_ : 0.0f,
+        glowWanted() ? glowBlend_ : 0.0f,
+        fxaa_.glowImage.image ? 1.0f : 0.0f,
         0.0f
     };
     vkCmdPushConstants(currentCmd_, fxaa_.pipelineLayout,

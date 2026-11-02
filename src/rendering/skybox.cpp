@@ -7,6 +7,7 @@
 #include "core/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
+#include "rendering/stock_sky.hpp"
 
 namespace wowee {
 namespace rendering {
@@ -24,7 +25,7 @@ struct SkyPushConstants {
     glm::vec4 band2Color;     // 5
     glm::vec4 smogColor;      // 6
     glm::vec4 fogColor;       // 7
-    glm::vec4 sunDirAndTime;  // xyz = sun direction, w = timeOfDay
+    glm::vec4 params;         // x = dawn/dusk highlight (stock_sky::highlight)
 };
 static_assert(sizeof(SkyPushConstants) == 112, "SkyPushConstants size mismatch");
 
@@ -132,8 +133,6 @@ void Skybox::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyP
     }
 
     // Where the sun sprite is, which is not where the light comes from.
-    glm::vec3 sunDir = glm::normalize(params.sunDir);
-
     SkyPushConstants push{};
     push.topColor      = glm::vec4(params.skyTopColor, 1.0f);
     push.middleColor   = glm::vec4(params.skyMiddleColor, 1.0f);
@@ -141,7 +140,10 @@ void Skybox::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyP
     push.band2Color    = glm::vec4(params.skyBand2Color, 1.0f);
     push.smogColor     = glm::vec4(params.skySmogColor, 1.0f);
     push.fogColor      = glm::vec4(params.skyFogColor, 1.0f);
-    push.sunDirAndTime = glm::vec4(sunDir, params.timeOfDay);
+    // 0x7f0530: the bands pulled toward the middle colour at dawn and dusk,
+    // for LightParams with HighlightSky set.
+    const float dayFraction = glm::fract(params.timeOfDay / 24.0f);
+    push.params = glm::vec4(stock_sky::highlight(dayFraction, params.highlightSky), 0.0f, 0.0f, 0.0f);
 
     // Bind pipeline
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);

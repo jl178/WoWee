@@ -119,9 +119,20 @@ HelmVisual resolveHelmVisual(pipeline::AssetManager& assets,
 /// points at a HelmetGeosetVisData row per gender, and that row carries the
 /// masks of what to hide - the row circlets and crowns use is all zeroes, while
 /// a plate helm's is not. An id of 0 likewise hides nothing.
+///
+/// Each of HelmetGeosetVisData's columns is a race bitmask (stock 0x4ef0d0
+/// tests 1 << race), so a helm can hide hair on every race but tauren. A race
+/// of 0 keeps the old reading: any non-zero column.
 bool helmHidesHair(pipeline::AssetManager& assets,
                    uint32_t itemDisplayInfoId,
-                   uint8_t genderId);
+                   uint8_t genderId,
+                   uint8_t raceId = 0);
+
+/// The HelmetGeosetVisData row a head item names for this gender, as the
+/// seven race masks of core::HelmGeosetVis (geoset_rules.hpp). False when it
+/// names none.
+bool readHelmGeosetVis(pipeline::AssetManager& assets, uint32_t itemDisplayInfoId,
+                       uint8_t genderId, uint32_t (&masks)[7]);
 
 } // namespace core
 } // namespace wowee

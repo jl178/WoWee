@@ -708,6 +708,13 @@ static void applySoundCVars(lua_State* L) {
     // does, and now does.
     if (svc->reapplyAudioVolumes) svc->reapplyAudioVolumes();
 
+    // The voice cap. Stock reads Sound_NumChannels once at sound init
+    // (0x87c710) and the Sound panel restarts the sound system to change it;
+    // the cap here is only a number admitVoice consults, so it can simply
+    // follow the CVar. The engine clamps it to the stock 12..128.
+    audio::AudioEngine::instance().setNumChannels(static_cast<int>(
+        soundCVar("sound_numchannels", static_cast<float>(audio::stock::kDefaultNumChannels))));
+
     // Master, music and ambience are the client's own settings now, reached
     // through SetCVar above - this function must not write them too, or the two
     // fight and the last writer wins.
@@ -785,15 +792,16 @@ static void pushCvarDefault(lua_State* L, const std::string& n) {
              n == "sound_ambiencevolume") {
         lua_pushstring(L, "1");
     }
-    // Both at their maximum, because this client has no lower setting to be
-    // at. miniaudio mixes every voice it is given at the device's own rate:
-    // there is no channel cap to raise and no quality tier to pick. Falling
-    // through to the "0" at the end of this chain parked both sliders at the
-    // far left of the Sound panel - 32 channels and Low quality - which read
-    // as a client running at its worst and was not a setting at all.
+    // The stock voice cap, which AudioEngine starts at and applySoundCVars
+    // pushes: answering anything else would read back a cap nothing applies.
+    else if (n == "sound_numchannels")
+        lua_pushstring(L, std::to_string(audio::stock::kDefaultNumChannels).c_str());
+    // At its maximum, because this client has no lower setting to be at:
+    // miniaudio mixes at the device's own rate and there is no quality tier to
+    // pick. Falling through to the "0" at the end of this chain read as Low
+    // quality, a client running at its worst, which was not a setting at all.
     //
     // The controls are taken off the panels; see kRemovedControlsLua.
-    else if (n == "sound_numchannels") lua_pushstring(L, "64");
     else if (n == "sound_outputquality") lua_pushstring(L, "2");
     else if (n == "uiscale") lua_pushstring(L, "1");
     else if (n == "useuiscale") lua_pushstring(L, "1");
@@ -983,6 +991,8 @@ static void pushCvarDefault(lua_State* L, const std::string& n) {
     else if (n == "autolootdefault") lua_pushstring(L, "0");
     // Stock defaults; the loot click reads them (0x6DAD90).
     else if (n == "autodismount" || n == "autostand") lua_pushstring(L, "1");
+    // Off in stock; the reverb reads it (audio_coordinator).
+    else if (n == "sound_enablereverb") lua_pushstring(L, "0");
     // On, as it is for a fresh account. The XP bar and the unit frames put
     // their whole tooltip behind this one: GameTooltip_AddNewbieTip is called
     // with noNormalText set, so with tips off it does nothing at all and

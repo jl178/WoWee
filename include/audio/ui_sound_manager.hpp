@@ -47,6 +47,8 @@ public:
     /// Play one SoundEntries row: one of its files, picked each time as the
     /// stock client does, at the row's volume times the interface volume.
     bool playEntry(const SoundEntry* entry);
+    /// Where playEntry starts in a row's files: the row's stock bag draw.
+    [[nodiscard]] size_t firstFile(const SoundEntry& entry) const;
 
     /// The same row played at a point in the world: the same file pick, at
     /// the row's volume, heard out to its DistanceCutoff. For sounds the

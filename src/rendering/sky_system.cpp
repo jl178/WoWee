@@ -122,8 +122,12 @@ void SkySystem::renderDome(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 }
 
 void SkySystem::renderOverlays(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                               const Camera& /*camera*/, const SkyParams& params) {
+                               const Camera& camera, const SkyParams& paramsIn) {
     if (!initialized_) return;
+    // The glares size and brighten with how squarely the camera looks at the
+    // sun or moon (0x7ef6e0 reads the camera's forward vector, 0xd38b30).
+    SkyParams params = paramsIn;
+    params.cameraForward = camera.getForward();
 
     // --- Procedural stars: only when asked for ---
     // The stock night sky is Stars.mdx, which LightingManager puts up as a sky

@@ -5,6 +5,8 @@
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/vk_utils.hpp"
+#include "rendering/stock_sky.hpp"
+#include "rendering/stock_day_night.hpp"
 #include "core/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
@@ -74,7 +76,7 @@ bool Clouds::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     pushRange.offset     = 0;
-    pushRange.size       = sizeof(CloudPush); // 48 bytes
+    pushRange.size       = sizeof(CloudPush);
 
     // ------------------------------------------------------------------ pipeline layout
     pipelineLayout_ = createPipelineLayout(device, {perFrameLayout}, {pushRange});
@@ -129,35 +131,24 @@ void Clouds::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyP
         return;
     }
 
-    // The cloud light Light.dbc gives every set (LightIntBand 10-13): the
-    // sunlit side is the cloud sun colour over the cloud's own emissive and
-    // ambient, the shaded side the emissive and ambient alone. These follow
-    // the hour and the weather like every other band - the storm sets' are
-    // grey, the death set's black - rather than being the sky's horizon band
-    // brightened.
-    const glm::vec3 cloudShade = glm::clamp(
-        params.cloudEmissiveColor +
-            0.5f * (params.cloudLayer1AmbientColor + params.cloudLayer2AmbientColor),
-        glm::vec3(0.0f), glm::vec3(1.0f));
-    const glm::vec3 cloudSun = glm::clamp(params.cloudSunColor, glm::vec3(0.0f), glm::vec3(1.0f));
-
-    // Where the sun sprite is. Not -directionalDir, which in the stock client
-    // stays above the horizon all night; nor mirrored up when the sun is
-    // down, which lit the clouds at midnight as if at noon.
-    const glm::vec3 sunDir = glm::normalize(params.sunDir);
-    float sunAboveHorizon = glm::clamp(sunDir.z, 0.0f, 1.0f);
-
-    // Sun intensity based on elevation
-    float sunIntensity = sunAboveHorizon;
-
-    // Ambient light - brighter during day, dimmer at night
-    float ambient = glm::mix(0.3f, 0.7f, sunAboveHorizon);
+    // The stock cloud light (0x7efae0 / 0x7efd00): LightIntBand 12 as the
+    // base, 11 times a shade that is brighter where the cloud is thin, and
+    // the cloud sun colour (10) on the slopes facing the sun - or the White
+    // Lady outside 04:50..22:10 (0xa41ca4, 0xa41ca0). A storm drops the
+    // light lower (64 + 192 x storm texels) and dims it (1 - 0.75 x storm).
+    const float dayFraction = glm::fract(params.timeOfDay / 24.0f);
+    const bool sunLit = dayFraction >= 0.2013889f && dayFraction <= 0.9236111f;
+    const glm::vec3 bodyDir = sunLit ? glm::normalize(params.sunDir)
+                                     : stockMoonDirection(params.timeOfDay * 120.0f);
+    const float storm = stock_sky::stormFactor(params.weatherIntensity);
 
     CloudPush push{};
-    push.cloudColor    = glm::vec4(cloudSun, 1.0f);
-    push.sunDirDensity = glm::vec4(sunDir, density_);
-    push.windAndLight  = glm::vec4(windOffset_, sunIntensity, ambient, 0.0f);
-    push.cloudShade    = glm::vec4(cloudShade, 1.0f);
+    push.cloudColor    = glm::vec4(glm::clamp(params.cloudSunColor, glm::vec3(0.0f), glm::vec3(1.0f)),
+                                   1.0f - 0.75f * storm);
+    push.sunDirDensity = glm::vec4(bodyDir, density_);
+    push.windAndLight  = glm::vec4(windOffset_, 64.0f + 192.0f * storm, 0.0f, 0.0f);
+    push.cloudShade    = glm::vec4(glm::max(params.cloudEmissiveColor, glm::vec3(0.0f)), 1.0f);
+    push.layerAmbient  = glm::vec4(glm::max(params.cloudLayer1AmbientColor, glm::vec3(0.0f)), 1.0f);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
 
@@ -183,7 +174,11 @@ void Clouds::update(float deltaTime) {
     if (!enabled_) {
         return;
     }
-    windOffset_ += deltaTime * windSpeed_ * 0.05f; // Slow drift
+    // The noise's time axis: the stock clouds churn in place (0x7efd00
+    // advances the third noise coordinate) rather than sail across the sky.
+    // The client's rate is a field this file has not pinned down; a cell
+    // every twenty seconds is the stand-in.
+    windOffset_ += deltaTime * windSpeed_ * 0.05f;
 }
 
 // ---------------------------------------------------------------------------

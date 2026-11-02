@@ -1,60 +1,39 @@
-// Particle density against the floor that holds a flame together.
+// Particle density as the stock client applies it.
 //
-// A fire is only visible because a scattering of its particles reaches open
-// air, so thinning the emission does not make it smaller - below a threshold it
-// disappears. m2_renderer_particles.cpp floors the rate of flame-like emitters
-// for exactly that reason, and the density setting has to be applied *before*
-// that floor or it takes every candle in the world out with it.
+// The particleDensity CVar (0x78D860, 0.1..1) is a straight multiplier on
+// every emitter's rate (0x980ED0 reads it in 0x97D8C0), applied with the
+// distance thinning and the rate variation. There is no floor for flames or
+// any other class: Wowee had one, holding fixtures at 15 live particles,
+// because its point sprites drew flames too small to read; the stock quads
+// do not need it and it is gone.
 #include <catch_amalgamated.hpp>
 
-#include <algorithm>
+#include "rendering/m2_particle_stock.hpp"
+
+using namespace wowee::rendering;
 
 namespace {
 
-constexpr float kMinLiveParticles = 15.0f;
-
-/// The emission rate an emitter ends up with, in the order the renderer applies
-/// the two: the player's density first, the flame floor second.
-float rateAfter(float authoredRate, float lifespan, float density, bool flameLike) {
-    float rate = authoredRate * density;
-    if (rate > 0.0f && lifespan > 0.0f && flameLike) {
-        rate = std::max(rate, kMinLiveParticles / std::max(lifespan, 0.1f));
-    }
-    return rate;
+/// The rate an emitter spawns at: density x (rate + vary x r) x distance factor.
+float stockRate(float rate, float vary, float r, float density, float distance, bool spellVisual) {
+    const float lod = spellVisual ? 1.0f : m2_particle::distanceRateFactor(distance);
+    return density * (rate + vary * r) * lod;
 }
-
-/// How many are alive at once, which is what a flame is judged by.
-float livePopulation(float rate, float lifespan) { return rate * lifespan; }
 
 } // namespace
 
-TEST_CASE("Turning density down thins ordinary particles", "[particles][density]") {
-    const float full = rateAfter(40.0f, 0.5f, 1.0f, /*flameLike=*/false);
-    const float low  = rateAfter(40.0f, 0.5f, 0.1f, /*flameLike=*/false);
-    CHECK(low < full);
-    CHECK(low == Catch::Approx(4.0f));
+TEST_CASE("density thins every emitter alike", "[particles][density]") {
+    CHECK(stockRate(40.0f, 0.0f, 0.0f, 0.1f, 10.0f, false) == Catch::Approx(4.0f));
+    // A candle at a tenth is a tenth: no floor.
+    CHECK(stockRate(1.0f, 0.0f, 0.0f, 0.1f, 10.0f, false) == Catch::Approx(0.1f));
 }
 
-TEST_CASE("A candle survives the lowest density setting", "[particles][density]") {
-    // CHANDELIER01 asks for 1/s over six seconds - a single speck per candle.
-    // At a tenth of that it would be nothing at all; the floor is what stops it.
-    const float rate = rateAfter(1.0f, 6.0f, 0.1f, /*flameLike=*/true);
-    CHECK(livePopulation(rate, 6.0f) >= kMinLiveParticles);
+TEST_CASE("distance thins doodads but not spell effects", "[particles][density]") {
+    CHECK(stockRate(40.0f, 0.0f, 0.0f, 1.0f, 100.0f, false) == Catch::Approx(10.0f));
+    CHECK(stockRate(40.0f, 0.0f, 0.0f, 1.0f, 100.0f, true) == Catch::Approx(40.0f));
 }
 
-TEST_CASE("A bright flame is still allowed to thin", "[particles][density]") {
-    // Above the floor the setting has room to work, so a fire that emits far
-    // more than the minimum does get quieter - it just cannot go below it.
-    const float full = rateAfter(400.0f, 0.5f, 1.0f, /*flameLike=*/true);
-    const float low  = rateAfter(400.0f, 0.5f, 0.25f, /*flameLike=*/true);
-    CHECK(low < full);
-    CHECK(livePopulation(low, 0.5f) >= kMinLiveParticles);
-}
-
-TEST_CASE("The floor is what makes the order matter", "[particles][density]") {
-    // Flooring first and thinning second - the other way round - puts the
-    // candle back below the threshold, which is the bug this order avoids.
-    const float wrongWayRound =
-        std::max(1.0f, kMinLiveParticles / 6.0f) * 0.1f;
-    CHECK(livePopulation(wrongWayRound, 6.0f) < kMinLiveParticles);
+TEST_CASE("rate variation spreads around the track's rate", "[particles][density]") {
+    CHECK(stockRate(10.0f, 5.0f, 1.0f, 1.0f, 0.0f, false) == Catch::Approx(15.0f));
+    CHECK(stockRate(10.0f, 5.0f, -1.0f, 1.0f, 0.0f, false) == Catch::Approx(5.0f));
 }

@@ -2,6 +2,7 @@
 
 #include "rendering/camera.hpp"
 #include "core/input.hpp"
+#include "game/stock_movement.hpp"
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <functional>
@@ -701,6 +702,15 @@ private:
     bool airBackward_ = false;
     bool airStrafeLeft_ = false;
     bool airStrafeRight_ = false;
+    /// The world direction and speed the fall goes at, fixed when the ground
+    /// is left (CMovement +0x64/+0x8C are not recomputed while FALLING: see
+    /// 0x987EF0 / 0x9880C0). Turning in the air turns the character, not the
+    /// path. Zero speed for a standing jump until a direction key is pressed in
+    /// the air, which starts a drift at walk speed (0x988A20 / 0x988B00 force
+    /// the recompute with GetSpeed(walk)) - once per fall.
+    float airDirX_ = 0.0f;
+    float airDirY_ = 0.0f;
+    float airSpeed_ = 0.0f;
     /// Visual Z lag behind the physics feet after a grounded step (negative
     /// while the picture is still below a step just taken up). Decays to zero
     /// with RENDER_Z_SMOOTH_TAU; never applied to a landing, which is exact.
@@ -841,6 +851,9 @@ private:
     bool wasTurningLeft = false;
     bool wasTurningRight = false;
     bool wasJumping = false;
+    /// The walk/run mode last told the server (MSG_MOVE_SET_WALK_MODE /
+    /// SET_RUN_MODE, events 0x12 / 0x11 in 0x6EF860).
+    bool wasWalkMode_ = false;
     bool wasFalling = false;
     /// How long the player has been off the ground and moving downward.
     ///
@@ -877,14 +890,34 @@ private:
     static constexpr float WOW_WALK_SPEED = 2.5f;    // Walk
     static constexpr float WOW_BACK_SPEED = 4.5f;    // Backpedal
     static constexpr float WOW_TURN_SPEED = 180.0f;  // Keyboard turn deg/sec
-    static constexpr float WOW_GRAVITY = -19.29f;
-    static constexpr float WOW_JUMP_VELOCITY = 7.96f;
+    // Stock CMovement constants (game/stock_movement.hpp): gravity 0xA32F74,
+    // jump speed 0xAA33DC.
+    static constexpr float WOW_GRAVITY = -19.2911053f;
+    static constexpr float WOW_JUMP_VELOCITY = 7.95554733f;
     static constexpr float MOUNT_GRAVITY = -18.0f;       // Snappy WoW-feel jump
     static constexpr float MOUNT_JUMP_HEIGHT = 1.0f;    // Desired jump height in meters
 
     // Computed jump velocity using vz = sqrt(2 * g * h)
     static inline float getMountJumpVelocity() {
         return std::sqrt(2.0f * std::abs(MOUNT_GRAVITY) * MOUNT_JUMP_HEIGHT);
+    }
+
+    /// The speeds the server last gave, or the stock defaults where it gave
+    /// none (stock_movement::Speeds).
+    [[nodiscard]] game::stock_movement::Speeds stockSpeeds() const {
+        game::stock_movement::Speeds sp;
+        auto use = [](float v, float limit, float& out) {
+            if (v > 0.0f && v < limit && !std::isnan(v)) out = v;
+        };
+        use(walkSpeedOverride_, 100.0f, sp.walk);
+        use(runSpeedOverride_, 100.0f, sp.run);
+        use(runBackSpeedOverride_, 100.0f, sp.runBack);
+        use(swimSpeedOverride_, 100.0f, sp.swim);
+        use(swimBackSpeedOverride_, 100.0f, sp.swimBack);
+        use(flightSpeedOverride_, 200.0f, sp.flight);
+        use(flightBackSpeedOverride_, 200.0f, sp.flightBack);
+        use(turnRateOverride_, 20.0f, sp.turnRate);
+        return sp;
     }
 
     // Server-driven speed overrides (0 = use hardcoded default)

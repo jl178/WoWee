@@ -23,6 +23,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
 };
 
 #include "rt_lighting.glsli"
+#include "stock_fog.glsli"
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
 
@@ -45,6 +46,12 @@ layout(set = 1, binding = 1) uniform CharMaterial {
     float heightMapVariance;
     float normalMapStrength;
     int hairMaterial;
+    // Stock unit-only ambient boost, 1 + 2 x AreaTable.AmbientMultiplier
+    // (Wow.exe 0x783429). 0 reads as 1.
+    float ambientMul;
+    // Mouseover/target highlight (0x743C70): 1 adds the unit ambient as
+    // emissive before the saturate.
+    float highlight;
 };
 
 layout(set = 1, binding = 2) uniform sampler2D uNormalHeightMap;
@@ -96,25 +103,25 @@ float sampleShadowPCF(sampler2DShadow smap, vec3 coords) {
     return shadow / 9.0;
 }
 
-vec3 localLightContribution(vec3 pos, vec3 normal, vec3 albedo) {
+// The M2 point lights on a unit, stock (CM2Light ctor 0x834A40 sets the
+// attenuation to (0, 0.7, 0.03); diffuse_t1.bls lights per vertex with
+// colour * max(N.L, 0) / (0.7 d + 0.03 d^2)). Stock takes the four nearest
+// and has no range; the radius here only skips the far ones cheaply.
+vec3 unitPointLights(vec3 pos, vec3 normal) {
     vec3 sum = vec3(0.0);
     for (int i = 0; i < min(localLightMeta.x, 64); ++i) {
         vec3 toLight = localLightPosRadius[i].xyz - pos;
         float radius = localLightPosRadius[i].w;
-        // Rejected on the squared distance, before the square root and the
-        // divide: most of the sixty-four are out of range of any one pixel,
-        // and this is what each of them costs.
         float distSq = dot(toLight, toLight);
         if (radius <= 0.0 || distSq >= radius * radius) continue;
         float dist = sqrt(distSq);
-        float attenuation = 1.0 - dist / radius;
-        attenuation *= attenuation;
-        float wrappedDiffuse = 0.22 + 0.78 * max(dot(normal, toLight / max(dist, 0.001)), 0.0);
-        sum += albedo * localLightColorIntensity[i].rgb *
-               (localLightColorIntensity[i].w * attenuation * wrappedDiffuse);
+        float ndl = max(dot(normal, toLight / max(dist, 0.001)), 0.0);
+        sum += localLightColorIntensity[i].rgb * localLightColorIntensity[i].w * ndl /
+               max(0.7 * dist + 0.03 * distSq, 0.05);
     }
     return sum;
 }
+
 
 // LOD factor from screen-space UV derivatives
 float computeLodFactor() {
@@ -248,8 +255,9 @@ vec4 fogVolumeAt(vec3 worldPos) {
 // the far haze the sky is painted to meet, so it goes on first; the volume is
 // everything between the camera and that, sunlit shafts and torch glow
 // included.
+// The world's curve (stock_fog.glsli): view depth and the zone's exponent.
 vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
-    float fogFactor = clamp((fogParams.y - dist) / (fogParams.y - fogParams.x), 0.0, 1.0);
+    float fogFactor = stockFogVisibility(worldPos);
     color = mix(fogColor.rgb, color, fogFactor);
     if (volumetricParams.x > 0.5) {
         vec4 air = fogVolumeAt(worldPos);
@@ -381,10 +389,6 @@ void main() {
         vec3 ldir = normalize(-lightDir.xyz);
         float diff = max(dot(norm, ldir), 0.0);
 
-        vec3 viewDir = normalize(viewPos.xyz - FragPos);
-        vec3 halfDir = normalize(ldir + viewDir);
-        float spec = pow(max(dot(norm, halfDir), 0.0), 32.0) * specularIntensity;
-
         float shadow = 1.0;
         if (shadowParams.x > 0.5) {
             float normalOffset = shadowTexel() * 2.0 * (1.0 - abs(dot(norm, ldir)));
@@ -403,22 +407,38 @@ void main() {
         RtLight rt = rtLightAt(FragPos);
         shadow = rtShadow(rt, shadow);
 
-        // shadowParams.w: eased indoor factor. Indoors the sun is gone, so
-        // its direct term and shadow fade out instead of the roof's shadow
-        // edge cutting the light in one frame at the door.
+        // Stock unit light (CM2Lighting, docs/re/characters.md section 1):
+        //   lit = clamp(ambient + diffuse * max(N.L, 0) + points, 0, 1)
+        //   colour = texture * clamp(lit + emissive, 0, 1)
+        // No specular, no overbright.
+        float amul = ambientMul > 0.0 ? ambientMul : 1.0;
+        // Outdoors: the world's ambient and diffuse bands and the sun, the
+        // ambient boosted for units and clamped (0x7C1730, flag 0x8000).
+        vec3 outAmb = rtAmbient(rt, min(ambientColor.rgb * amul, vec3(1.0)));
+        vec3 outLit = outAmb + shadow * diff * lightColor.rgb;
+        // Indoors (0x7C1AD0): the building's colour split into a diffuse
+        // whose brightest channel is raised to 168/255 and an ambient whose
+        // brightest channel is capped at 96/255, lit from the fixed
+        // direction (-0.308, -0.308, -0.9) (0xAEEDF0). The sun is not
+        // switched off, it is replaced. Stock samples the MOCV under each
+        // unit; Wowee has the group's colour, handed over in the .w slots.
+        vec3 ic = vec3(lightDir.w, lightColor.w, ambientColor.w);
+        float m = max(max(ic.r, ic.g), ic.b);
+        vec3 inDiffC = (m > 0.0 && m < 168.0 / 255.0) ? ic * ((168.0 / 255.0) / m) : ic;
+        vec3 inAmb = (m > 96.0 / 255.0) ? ic * ((96.0 / 255.0) / m) : ic;
+        inAmb = rtAmbient(rt, min(inAmb * amul, vec3(1.0)));
+        float inN = max(dot(norm, normalize(vec3(0.30822, 0.30822, 0.9))), 0.0);
+        vec3 inLit = inAmb + inN * inDiffC;
+        // shadowParams.w: the eased indoor factor (stock eases the ambient
+        // over 0.5 s and snaps the diffuse; one factor here).
         float indoor = shadowParams.w;
-        float sunVis = mix(shadow, 1.0, indoor) * (1.0 - 0.85 * indoor);
-        // Indoors a unit takes the building's ambient in place of the sky's.
-        // The renderer hands it over in the .w slots of lightDir, lightColor
-        // and ambientColor, so that ambientColor.rgb - which every world
-        // shader reads - stays the area's wherever the camera is.
-        vec3 indoorAmbient = vec3(lightDir.w, lightColor.w, ambientColor.w);
-        vec3 unitAmbient = mix(ambientColor.rgb, indoorAmbient, indoor);
-        result = rtAmbient(rt, unitAmbient) * texColor.rgb
-               + sunVis * (diff * lightColor.rgb * texColor.rgb + spec * lightColor.rgb);
+        vec3 lit = mix(outLit, inLit, indoor);
+        lit += unitPointLights(FragPos, norm);
+        lit = clamp(lit, 0.0, 1.0);
+        // The highlight is the world unit ambient, added as emissive.
+        lit = clamp(lit + highlight * ambientColor.rgb, 0.0, 1.0);
+        result = texColor.rgb * lit;
     }
-
-    if (!isUnlit) result += localLightContribution(FragPos, norm, texColor.rgb);
 
     float dist = length(viewPos.xyz - FragPos);
     if (!unfogged) result = applyFog(result, FragPos, dist);

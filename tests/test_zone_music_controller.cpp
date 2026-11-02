@@ -162,7 +162,7 @@ TEST_CASE("Zone music changes at once when the set changes and stops where there
     REQUIRE(c.currentSetId() == 0);
 }
 
-TEST_CASE("Zone music plays a city intro once per its delay", "[zone_music]") {
+TEST_CASE("Zone music plays a city intro once per its delay, counted from its end", "[zone_music]") {
     World w;
     ZoneMusicController c(w.data, 1);
     Channel ch;
@@ -175,10 +175,147 @@ TEST_CASE("Zone music plays a city intro once per its delay", "[zone_music]") {
     REQUIRE(back.kind == ZoneMusicAction::Kind::Play);
     REQUIRE(back.path == "City\\City.mp3");
     ch.apply(back, 5.0f);
-    // An hour later the intro is due again.
-    run(c, ch, 1519, true, 3601.0f, 5.0f);
-    ch.apply(c.update(at(300, true, ch)), 0.0f);
-    REQUIRE(c.update(at(1519, true, ch)).path == "City\\Intro.mp3");
+    // The intro ended at 5 s; an hour after that it is due again and takes
+    // over from the city music while the player is still in the city, as the
+    // stock client checks it every frame.
+    run(c, ch, 1519, true, 3500.0f, 5.0f);
+    REQUIRE(ch.track != "City\\Intro.mp3");
+    bool introAgain = false;
+    for (int i = 0; i < 2000 && !introAgain; ++i) {
+        auto a = c.update(at(1519, true, ch));
+        if (a.kind == ZoneMusicAction::Kind::Play) introAgain = a.path == "City\\Intro.mp3";
+        ch.apply(a, 5.0f);
+        ch.tick(0.1f);
+    }
+    REQUIRE(introAgain);
+}
+
+TEST_CASE("Zone music: an intro under way is never cut off", "[zone_music]") {
+    World w;
+    ZoneMusicController c(w.data, 1);
+    Channel ch;
+    ch.apply(c.update(at(1519, true, ch)), 60.0f);
+    REQUIRE(ch.track == "City\\Intro.mp3");
+    // Out into the forest while it plays: it plays on to its end.
+    REQUIRE(run(c, ch, 12, true, 30.0f) == 0);
+    REQUIRE(ch.track == "City\\Intro.mp3");
+    REQUIRE(run(c, ch, 12, true, 31.0f) == 1);
+    REQUIRE(ch.track == "Forest\\Day.mp3");
+}
+
+TEST_CASE("Zone music: the silence is not cut short by a new area", "[zone_music]") {
+    World w;
+    ZoneMusicController c(w.data, 1);
+    Channel ch;
+    ch.apply(c.update(at(12, true, ch)), 5.0f);
+    run(c, ch, 12, true, 6.0f);
+    REQUIRE_FALSE(ch.playing);
+    const float rest = c.silenceRemaining();
+    REQUIRE(rest >= 9.0f);
+    // Into Stormwind's Old Town without its intro (a room naming set 13):
+    // the forest's rest still runs out first.
+    ZoneMusicInput in = at(12, true, ch);
+    in.zoneMusicOverride = 13;
+    REQUIRE(c.update(in).kind == ZoneMusicAction::Kind::None);
+    float waited = 0.0f;
+    ZoneMusicAction a;
+    while (waited < 30.0f) {
+        in = at(12, true, ch);
+        in.zoneMusicOverride = 13;
+        a = c.update(in);
+        waited += 0.1f;
+        if (a.kind != ZoneMusicAction::Kind::None) break;
+    }
+    REQUIRE(a.kind == ZoneMusicAction::Kind::Play);
+    REQUIRE(a.path == "City\\City.mp3");
+    REQUIRE(waited >= rest - 0.6f);
+}
+
+TEST_CASE("Zone music: a place with no music forgets the silence", "[zone_music]") {
+    World w;
+    ZoneMusicController c(w.data, 1);
+    Channel ch;
+    ch.apply(c.update(at(12, true, ch)), 5.0f);
+    run(c, ch, 12, true, 6.0f);
+    REQUIRE(c.silenceRemaining() > 0.0f);
+    REQUIRE(c.update(at(300, true, ch)).kind == ZoneMusicAction::Kind::None);
+    REQUIRE(c.silenceRemaining() == 0.0f);
+    REQUIRE(c.update(at(12, true, ch)).kind == ZoneMusicAction::Kind::Play);
+}
+
+TEST_CASE("Zone music: Loop Music leaves no silence between tracks", "[zone_music]") {
+    World w;
+    ZoneMusicController c(w.data, 1);
+    Channel ch;
+    int starts = 0;
+    for (int i = 0; i < 200; ++i) {
+        ZoneMusicInput in = at(12, true, ch);
+        in.noDelay = true;
+        auto a = c.update(in);
+        if (a.kind == ZoneMusicAction::Kind::Play) ++starts;
+        ch.apply(a, 5.0f);
+        ch.tick(0.1f);
+    }
+    // 20 s of 5 s tracks back to back.
+    REQUIRE(starts >= 4);
+}
+
+TEST_CASE("Zone music: 4 s crossfades, and a track from silence comes in at once", "[zone_music]") {
+    World w;
+    ZoneMusicController c(w.data, 1);
+    Channel ch;
+    auto first = c.update(at(12, true, ch));
+    REQUIRE(first.fadeInSeconds == Catch::Approx(0.01f));
+    ch.apply(first, 100.0f);
+    run(c, ch, 12, true, 1.0f);
+    ZoneMusicInput room = at(12, true, ch);
+    room.zoneMusicOverride = 13;  // a set change with no intro in the way
+    auto city = c.update(room);
+    REQUIRE(city.kind == ZoneMusicAction::Kind::Play);
+    REQUIRE(city.path == "City\\City.mp3");
+    REQUIRE(city.fadeInSeconds == Catch::Approx(4.0f));
+    REQUIRE(city.fadeOutSeconds == Catch::Approx(4.0f));
+    ch.apply(city, 100.0f);
+    auto stop = c.update(at(300, true, ch));
+    REQUIRE(stop.kind == ZoneMusicAction::Kind::Stop);
+    REQUIRE(stop.fadeOutSeconds == Catch::Approx(4.0f));
+}
+
+TEST_CASE("Zone music: indoors only the building's rows count", "[zone_music]") {
+    World w;
+    ZoneMusicController c(w.data, 1);
+    Channel ch;
+    ch.apply(c.update(at(12, true, ch)), 100.0f);
+    // An interior room whose WMOAreaTable rows name no music: none, though
+    // the forest outside has some (Wow.exe 0x78e9a0).
+    ZoneMusicInput in = at(12, true, ch);
+    in.indoors = true;
+    auto a = c.update(in);
+    REQUIRE(a.kind == ZoneMusicAction::Kind::Stop);
+    ch.apply(a, 0.0f);
+    // A room that names a set plays it.
+    in = at(12, true, ch);
+    in.indoors = true;
+    in.zoneMusicOverride = 13;
+    a = c.update(in);
+    REQUIRE(a.kind == ZoneMusicAction::Kind::Play);
+    REQUIRE(a.path == "City\\City.mp3");
+}
+
+TEST_CASE("Zone music: day and night swap at once, a night-silent set goes quiet", "[zone_music]") {
+    World w;
+    ZoneMusicController c(w.data, 1);
+    Channel ch;
+    ch.apply(c.update(at(12, true, ch)), 100.0f);
+    auto night = c.update(at(12, false, ch));
+    REQUIRE(night.kind == ZoneMusicAction::Kind::Play);
+    REQUIRE(night.path == "Forest\\Night.mp3");
+    ch.apply(night, 100.0f);
+    // Stormwind's set has no night sound: its intro first, then nothing.
+    ZoneMusicInput in = at(12, false, ch);
+    in.zoneMusicOverride = 13;
+    auto quiet = c.update(in);
+    REQUIRE(quiet.kind == ZoneMusicAction::Kind::Stop);
 }
 
 TEST_CASE("Zone music mixes extra tracks into the pool and waits for a slow start", "[zone_music]") {

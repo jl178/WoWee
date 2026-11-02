@@ -181,8 +181,12 @@ bool FootstepManager::playRandomStep(FootstepSurface surface, FootstepBank bank,
     if (volume > 1.0f) volume = 1.0f;
     if (volume < 0.1f) volume = 0.1f;
 
-    // Play using AudioEngine (non-blocking, no process spawn!)
-    bool success = AudioEngine::instance().playSound2D(sample.data, volume, pitch);
+    // The player's own steps: in the listener's head, at priority 115, four
+    // at most at once (Wow.exe 0x4cf170, category 17).
+    SoundOptions opts;
+    opts.priority = stock::kPriorityOwnFootstep;
+    opts.category = stock::Category::OwnFootstep;
+    bool success = AudioEngine::instance().playSound2D(sample.data, volume, pitch, SoundBus::World, opts);
 
     if (success) {
         lastPlayTime = now;

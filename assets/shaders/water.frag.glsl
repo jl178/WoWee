@@ -19,26 +19,28 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
 };
 
+#include "stock_fog.glsli"
+
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
 layout(push_constant) uniform Push {
     mat4 model;
-    float waveAmp;
-    float waveFreq;
-    float waveSpeed;
+    float texScale;   // LiquidType Float[0] on water (0.25 for WMO ocean), else 1
+    float texOffsetU; // magma/slime scroll this frame, LiquidType Float[0..1]
+    float texOffsetV;
     float liquidBasicType;
     vec2 screenSize;  // size of the target being drawn into
     vec2 depthRange;  // the camera's own near and far, for linearising SceneDepth
     float sceneValid; // 1 once the depth capture holds a frame, 0 before it
     float liquidTexValid; // 1 when set 3 holds this liquid's texture frame
     float shoreFoam;      // 1 draws the shoreline foam band (not stock), 0 off
-    float pad2;
+    float depthRamp;      // 0 river, 1 ocean, 2 WMO water (proceduralWmoWaterTex)
 } push;
 
 layout(set = 1, binding = 0) uniform WaterMaterial {
     vec4 waterColor;       // unused by the stock path: colours come from Light.dbc
     float waterAlpha;      // unused by the stock path: alpha comes from LightParams
-    float shimmerStrength; // sun glint strength
+    float shimmerStrength; // unused: the stock surface has no sun glint
     float alphaScale;
     float bodyFloor;       // unused by the stock path
 };
@@ -126,30 +128,6 @@ vec3 dualScrollWaveNormal(vec2 p, float time) {
     float dHy = c1 * d1.y * f1 * a1 + c2 * d2.y * f2 * a2 + c3 * d3.y * f3 * a3;
 
     return normalize(vec3(-dHx, -dHy, 1.0));
-}
-
-// ============================================================
-// GGX/Cook-Torrance BRDF
-// ============================================================
-float DistributionGGX(vec3 N, vec3 H, float roughness) {
-    float a = roughness * roughness;
-    float a2 = a * a;
-    float NdotH = max(dot(N, H), 0.0);
-    float NdotH2 = NdotH * NdotH;
-    float denom = NdotH2 * (a2 - 1.0) + 1.0;
-    return a2 / (3.14159265 * denom * denom + 1e-7);
-}
-
-float GeometrySmith(float NdotV, float NdotL, float roughness) {
-    float r = roughness + 1.0;
-    float k = (r * r) / 8.0;
-    float ggx1 = NdotV / (NdotV * (1.0 - k) + k);
-    float ggx2 = NdotL / (NdotL * (1.0 - k) + k);
-    return ggx1 * ggx2;
-}
-
-vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
-    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
 // ============================================================
@@ -266,7 +244,7 @@ vec4 fogVolumeAt(vec3 worldPos) {
 // everything between the camera and that, sunlit shafts and torch glow
 // included.
 vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
-    float fogFactor = clamp((fogParams.y - dist) / (fogParams.y - fogParams.x), 0.0, 1.0);
+    float fogFactor = stockFogVisibility(worldPos);
     color = mix(fogColor.rgb, color, fogFactor);
     if (volumetricParams.x > 0.5) {
         vec4 air = fogVolumeAt(worldPos);
@@ -312,7 +290,12 @@ void main() {
     // the CPU and bound as set 3. Tiled in world space so neighbouring chunks
     // and WMO liquids line up.
     bool hasLiquidTex = push.liquidTexValid > 0.5;
-    vec4 texel = texture(LiquidTexture, FragPos.xy / LIQUID_TEX_REPEAT);
+    // The stock texture matrix: scaled by LiquidType Float[0] on the water
+    // material, scrolled by Float[0..1] a second on magma and slime (0x8a34b0).
+    vec2 liquidUV = FragPos.xy / LIQUID_TEX_REPEAT;
+    if (basicType > 1.5) liquidUV += vec2(push.texOffsetU, push.texOffsetV);
+    else liquidUV *= push.texScale;
+    vec4 texel = texture(LiquidTexture, liquidUV);
 
     // ============================================================
     // Magma / Slime - the texture sequence itself, opaque and unlit
@@ -358,48 +341,59 @@ void main() {
     float depthBelow = waterDepthBelow(screenUV, waterLinDepth, near, far, abs(viewDir.z));
 
     // ============================================================
-    // Stock colour and alpha: Light.dbc close -> far by depth
+    // Stock colour and alpha (psLiquidWater, 0x8a5590)
     // ============================================================
-    bool isOcean = basicType > 0.5;
+    //   rgb = clamp(ambient + diffuse * N.L) * ramp.rgb + tex.rgb
+    //         + (specular + 0.25) * tex.a
+    //   a   = ramp.a
+    // ramp is the client's 8x64 depth texture: Light.dbc's close colour and
+    // LightParams' shallow alpha at row 0 stepping toward the far colour and
+    // deep alpha, 1/64 per row (0x8a2bf0); the ocean's last row a tenth
+    // darker. WMO water's ramp is the river far colour throughout, only the
+    // alpha running shallow to deep (0x8a2ac0).
+    bool isOcean = push.depthRamp > 0.5 && push.depthRamp < 1.5;
+    bool isWmoWater = push.depthRamp > 1.5;
     vec4 closeCol = isOcean ? oceanClose : riverClose;   // a = shallow alpha
     vec4 farCol   = isOcean ? oceanFar   : riverFar;     // a = deep alpha
     // Yards over which the ramp runs from the shallow end to the deep end.
     float rampDepth = isOcean ? OCEAN_RAMP_DEPTH : RIVER_RAMP_DEPTH;
     // Unknown depth is open water, the deep end.
     float depth01 = depthBelow < 0.0 ? 1.0 : clamp(depthBelow / rampDepth, 0.0, 1.0);
-    vec4 lerpCol = mix(closeCol, farCol, depth01);
+    // Where a bilinear lookup of the 64-row texture lands: row 0 in the
+    // shallowest half row, row 63 (63/64 of the way) in the deepest.
+    float rampT = clamp(depth01 * 64.0 - 0.5, 0.0, 63.0) / 64.0;
+    vec4 rampCol = mix(closeCol, farCol, rampT);
+    if (isWmoWater) rampCol.rgb = riverFar.rgb;
+    if (isOcean) rampCol.rgb *= mix(1.0, 0.9, clamp(depth01 * 64.0 - 62.5, 0.0, 1.0));
 
-    // The texture is a dark ripple layer added over the colour, as the stock
-    // liquid shader does; the alpha stays the depth ramp's.
-    vec3 color = lerpCol.rgb + (hasLiquidTex ? texel.rgb : vec3(0.0));
-    float alpha = lerpCol.a;
+    // The surface's light: the vertex colour register clamps the sum to 0..1
+    // before it multiplies the ramp. The normal is straight up.
+    vec3 surfaceLight = clamp(ambientColor.rgb + lightColor.rgb * max(ldir.z, 0.0),
+                              vec3(0.0), vec3(1.0));
+    vec3 color = rampCol.rgb * surfaceLight;
+    float alpha = rampCol.a;
+    if (hasLiquidTex) {
+        // The texture adds its ripples, and its alpha the shimmer: the
+        // specular colour is the local lights' alone (0x834f60), so under the
+        // sun only the constant 0.25 is left.
+        color += texel.rgb + vec3(0.25) * texel.a;
+    }
 
     // ============================================================
-    // Sun glint
+    // Sky reflection - only where the reflection pass drew one
     // ============================================================
+    // NOT in the stock default path: psLiquidWater has no reflection term
+    // (its second texture is the depth ramp). Kept as the classic-look sky
+    // tint it was asked to be; the reflection target holds the sky alone,
+    // and when the pass does not run it is black and nothing is mixed in.
     vec3 norm = vec3(0.0, 0.0, 1.0);
     float detailFade = 1.0 - smoothstep(250.0, 1400.0, dist);
     if (detailFade > 0.0) {
         norm = normalize(mix(norm, dualScrollWaveNormal(FragPos.xy, time), 0.45 * detailFade));
     }
     float NdotV = max(dot(norm, viewDir), 0.001);
-    float NdotL = max(dot(norm, ldir), 0.0);
     const vec3 F0 = vec3(0.02);
     float fresnel = F0.x + (1.0 - F0.x) * pow(1.0 - NdotV, 5.0);
-
-    float roughness = 0.22;
-    vec3 halfDir = normalize(ldir + viewDir);
-    float D = DistributionGGX(norm, halfDir, roughness);
-    float G = GeometrySmith(NdotV, NdotL, roughness);
-    vec3 F = fresnelSchlickRoughness(max(dot(halfDir, viewDir), 0.0), F0, roughness);
-    vec3 specular = (D * G * F) / (4.0 * NdotV * NdotL + 0.001) * lightColor.rgb * NdotL;
-    specular = min(specular * 0.6, vec3(1.0)) * shimmerStrength;
-
-    // ============================================================
-    // Sky reflection - only where the reflection pass drew one
-    // ============================================================
-    // The reflection target holds the sky alone. When the pass does not run
-    // it is black, and nothing is mixed in.
     vec4 reflClip = reflViewProj * vec4(FragPos, 1.0);
     if (reflClip.w > 0.1) {
         vec2 reflUV = reflClip.xy / reflClip.w * 0.5 + 0.5;
@@ -411,10 +405,6 @@ void main() {
         float valid = smoothstep(0.002, 0.05, dot(sky, vec3(0.299, 0.587, 0.114))) * edgeFade;
         color = mix(color, sky, clamp(fresnel * valid, 0.0, 0.35));
     }
-
-    color += specular;
-    // A glint shows over shallow, mostly clear water as well as deep.
-    alpha = max(alpha, clamp(dot(specular, vec3(0.333)), 0.0, 1.0));
 
     // ============================================================
     // Shoreline foam - not stock, the "Shoreline foam" setting

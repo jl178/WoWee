@@ -22,10 +22,11 @@ layout(set = 0, binding = 0) uniform PerFrame {
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
 layout(push_constant) uniform Push {
-    vec4 cloudColor;      // xyz = cloud sun colour (LightIntBand 10), w = unused
-    vec4 sunDirDensity;   // xyz = sun direction, w = density
-    vec4 windAndLight;    // x = windOffset, y = sunIntensity, z = ambient, w = unused
-    vec4 cloudShade;      // xyz = cloud emissive + ambient (LightIntBand 11-13)
+    vec4 cloudColor;      // xyz = cloud sun colour (LightIntBand 10), w = sun factor (1 - 0.75 storm)
+    vec4 sunDirDensity;   // xyz = the lighting body's direction (sun by day, moon by night), w = cover (LightFloatBand 3)
+    vec4 windAndLight;    // x = noise time (cells), y = light height in texels (64 + 192 storm), zw unused
+    vec4 cloudShade;      // xyz = cloud emissive (LightIntBand 11)
+    vec4 layerAmbient;    // xyz = cloud layer 1 ambient (LightIntBand 12)
 } push;
 
 layout(location = 0) in vec3 vWorldDir;
@@ -38,110 +39,108 @@ vec4 fogVolumeSky(vec2 uv) {
     return textureLod(uFogVolume, vec3(uv, 1.0), 0.0);
 }
 
-// --- Gradient noise (smoother than hash-based) ---
-vec2 hash2(vec2 p) {
-    p = vec2(dot(p, vec2(127.1, 311.7)),
-             dot(p, vec2(269.5, 183.3)));
-    return fract(sin(p) * 43758.5453);
+// The stock cloud layer (0x7efd00 builds it into a 128x128 texture on the
+// CPU, 0x7f20e0 the dome it is drawn on). Five octaves of 3D value noise -
+// the third axis is time, so the clouds churn in place rather than drift -
+// at 1/16 .. 1 cell a texel and weights 1 .. 1/16; a random table stands in
+// for the client's (0xd38688, filled at random on start).
+float hash3(vec3 c) {
+    return fract(sin(dot(c, vec3(127.1, 311.7, 74.7))) * 43758.5453) * 2.0 - 1.0;
 }
-
-float gradientNoise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-
-    // Quintic interpolation for smoother results
-    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-
-    float a = dot(hash2(i + vec2(0.0, 0.0)) * 2.0 - 1.0, f - vec2(0.0, 0.0));
-    float b = dot(hash2(i + vec2(1.0, 0.0)) * 2.0 - 1.0, f - vec2(1.0, 0.0));
-    float c = dot(hash2(i + vec2(0.0, 1.0)) * 2.0 - 1.0, f - vec2(0.0, 1.0));
-    float d = dot(hash2(i + vec2(1.0, 1.0)) * 2.0 - 1.0, f - vec2(1.0, 1.0));
-
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y) * 0.5 + 0.5;
+float valueNoise(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    vec3 u = f * f * (3.0 - 2.0 * f);
+    float a = mix(hash3(i), hash3(i + vec3(1, 0, 0)), u.x);
+    float b = mix(hash3(i + vec3(0, 1, 0)), hash3(i + vec3(1, 1, 0)), u.x);
+    float c = mix(hash3(i + vec3(0, 0, 1)), hash3(i + vec3(1, 0, 1)), u.x);
+    float d = mix(hash3(i + vec3(0, 1, 1)), hash3(i + vec3(1, 1, 1)), u.x);
+    return mix(mix(a, b, u.y), mix(c, d, u.y), u.z);
 }
-
-// Octave count per call: the shape and its sun-ward re-sample keep all five,
-// because the self-shadow is their difference and the two have to match.
-// The warp, the erosion and the cirrus are modulators on top of it, and
-// their fourth and fifth octaves were below a pixel from any distance the
-// sky is seen at. Seven evaluations a pixel became about five.
-float fbm(vec2 p, int octaves) {
-    float val = 0.0;
-    float amp = 0.5;
-    // Rotate between octaves so ridge artifacts don't align to the axes
-    const mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
-    for (int i = 0; i < octaves; i++) {
-        val += amp * gradientNoise(p);
-        p = rot * p * 2.02;
-        amp *= 0.5;
+// Returns x = the full sum, y = the first three octaves (what the client
+// takes its slopes from).
+vec2 cloudNoise(vec2 texel, float t) {
+    float sum = 0.0, low = 0.0;
+    float cellsPerTexel = 1.0 / 16.0;
+    float w = 1.0;
+    for (int k = 0; k < 5; ++k) {
+        sum += valueNoise(vec3(texel * cellsPerTexel, t + float(k) * 17.0)) * w;
+        if (k == 2) low = sum;
+        cellsPerTexel *= 2.0;
+        w *= 0.5;
     }
-    return val;
+    return vec2(sum, low);
 }
+
+float lowNoise(vec2 texel, float t) {
+    float sum = 0.0;
+    float cellsPerTexel = 1.0 / 16.0;
+    float w = 1.0;
+    for (int k = 0; k < 3; ++k) {
+        sum += valueNoise(vec3(texel * cellsPerTexel, t + float(k) * 17.0)) * w;
+        cellsPerTexel *= 2.0;
+        w *= 0.5;
+    }
+    return sum;
+}
+
+const float kRing[12] = float[](0.0, 0.025, 0.05, 0.075, 0.1, 0.125, 0.15, 0.175,
+                                0.205, 0.23, 0.245, 0.25);
+const float kRingAlpha[12] = float[](1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                                     0.50196, 0.0, 0.0);
 
 void main() {
     vec3 dir = normalize(vWorldDir);
-    float altitude = dir.z;
-    if (altitude < 0.0) discard;
 
-    vec3 sunDir = normalize(push.sunDirDensity.xyz);
-    float density = push.sunDirDensity.w;
-    float windOffset = push.windAndLight.x;
-    float sunIntensity = push.windAndLight.y;
-    float ambient = push.windAndLight.z;
+    // Where the ray meets the cloud dome (the sky's sphere, lowered
+    // cos(pi/4)), as a polar fraction; the dome stops at the horizon.
+    const float h0 = 0.70710678;
+    float dz = clamp(dir.z, -1.0, 1.0);
+    float tHit = -h0 * dz + sqrt(max(h0 * h0 * dz * dz - h0 * h0 + 1.0, 0.0));
+    float polar = acos(clamp(tHit * dz + h0, -1.0, 1.0)) / 3.14159265;
+    if (polar >= 0.25) discard;
+    float ring = 11.0;
+    for (int i = 0; i < 11; ++i) {
+        if (polar <= kRing[i + 1]) {
+            ring = float(i) + (polar - kRing[i]) / (kRing[i + 1] - kRing[i]);
+            break;
+        }
+    }
+    int ri = min(int(ring), 10);
+    float vertexAlpha = mix(kRingAlpha[ri], kRingAlpha[ri + 1], ring - float(ri));
+    if (vertexAlpha <= 0.0) discard;
 
-    // Project the view ray onto a flat cloud layer. The +0.08 bias tempers the
-    // extreme UV stretching right at the horizon.
-    vec2 uv = dir.xy / (altitude + 0.08);
-    vec2 wind = vec2(windOffset, windOffset * 0.6);
+    // Polar texture coordinates: radius ring/22 round the texture's centre.
+    vec2 horiz = length(dir.xy) > 1e-5 ? normalize(dir.xy) : vec2(0.0, 1.0);
+    vec2 texel = (vec2(0.5) + horiz * (ring / 22.0)) * 128.0;
 
-    // --- Cumulus layer: domain-warped FBM for billowy, irregular shapes ---
-    vec2 p = uv * 0.8 + wind;
-    vec2 q = vec2(fbm(p, 4), fbm(p + vec2(5.2, 1.3), 4));
-    float shape = fbm(p + q * 1.4, 5);
+    float t = push.windAndLight.x;
+    vec2 n = cloudNoise(texel, t);
+    float cover = clamp(push.sunDirDensity.w, 0.0, 1.0);
+    float v = floor(n.x * 64.0 + 128.5) - floor((1.0 - cover) * 255.0 + 0.5);
+    if (v <= 0.0) discard;
+    float alpha = 1.0 - pow(0.96, min(v, 255.0));
 
-    // Coverage: density opens the threshold; erosion breaks up the edges
-    float coverage = smoothstep(0.42 - density * 0.22, 0.74 - density * 0.10, shape);
-    float erosion = fbm(uv * 3.1 + wind * 1.6 + q, 3);
-    float cumulus = coverage * smoothstep(0.22, 0.55, erosion + coverage * 0.4);
+    // Slope of the low octaves, a texel each way, against a light hung over
+    // the body's place on the texture.
+    float gx = lowNoise(texel - vec2(1.0, 0.0), t) - n.y;
+    float gy = lowNoise(texel - vec2(0.0, 1.0), t) - n.y;
+    vec3 N = normalize(vec3(gx, gy, 1.0));
+    vec3 body = normalize(push.sunDirDensity.xyz);
+    float fromZenith = min(acos(clamp(body.z, -1.0, 1.0)), 0.78539816) * 1.2732395 * 0.5;
+    vec2 bodyHoriz = length(body.xy) > 1e-5 ? normalize(body.xy) : vec2(0.0);
+    vec2 bodyTexel = (vec2(0.5) + bodyHoriz * fromZenith) * 128.0;
+    vec3 L = normalize(vec3(bodyTexel - texel, push.windAndLight.y));
+    float nDotL = dot(N, L);
 
-    // --- Cirrus layer: thin, stretched, faster-drifting streaks ---
-    vec2 cuv = vec2(uv.x * 0.32, uv.y * 1.5) + wind * 1.8 + vec2(3.7, 9.1);
-    float cirrus = fbm(cuv, 3) * fbm(cuv * 2.3 + 4.0, 3);
-    cirrus = smoothstep(0.16, 0.5, cirrus) * 0.30 * (0.35 + 0.65 * density);
+    float a255 = floor(alpha * 255.0 + 0.5);
+    float shade = (floor((255.0 - a255) * 0.5) + 64.0) / 255.0;
+    vec3 cloudRgb = push.cloudShade.rgb * shade + push.layerAmbient.rgb;
+    if (nDotL > 0.0) cloudRgb += push.cloudColor.rgb * (nDotL * push.cloudColor.w);
+    cloudRgb = min(cloudRgb, vec3(1.0));
 
-    float cloud = clamp(cumulus + cirrus * (1.0 - cumulus), 0.0, 1.0);
-
-    // Overall visibility still follows DBC density (0 = clear sky)
-    cloud *= clamp(density * 1.6, 0.0, 1.0);
-
-    // Horizon fade
-    cloud *= smoothstep(0.0, 0.15, altitude);
-    if (cloud < 0.01) discard;
-
-    // --- Lighting ---
-    float sunUp = clamp(sunDir.z, 0.0, 1.0);      // day factor
-    float sunView = max(dot(dir, sunDir), 0.0);   // view alignment with the sun
-
-    // Self-shadowing: re-sample the shape a step toward the sun; if the cloud
-    // is denser upstream, this point sits in its own shadow.
-    float towardSun = fbm(p + q * 1.4 + sunDir.xy * 0.35, 5);
-    float shadow = clamp(1.0 - (towardSun - shape) * 2.2, 0.35, 1.0);
-
-    // Thick cores read darker - sunlight doesn't penetrate deep cloud
-    float coreDarken = mix(1.0, 0.55, cumulus * cumulus);
-
-    // Light.dbc's cloud colours, which already follow the hour: the shaded
-    // side is the emissive and ambient, the sunlit side adds the cloud sun
-    // colour. No scattering glow or silver lining - the stock clouds have
-    // neither.
-    vec3 shadowColor = push.cloudShade.rgb;
-    vec3 litColor = clamp(shadowColor + push.cloudColor.rgb, 0.0, 1.0);
-    vec3 cloudRgb = mix(shadowColor, litColor, shadow) * coreDarken;
-
-    // --- Edge softness for alpha ---
-    float alpha = cloud * smoothstep(0.0, 0.25, cloud);
-
-    if (alpha < 0.01) discard;
+    alpha *= vertexAlpha;
+    if (alpha < 0.004) discard;
 
     // Behind the air, as the sky it is drawn over is: blended by alpha, so
     // the cloud and the dome under it come out with the same air in front.

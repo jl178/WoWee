@@ -1,4 +1,5 @@
 #include "game/entity_controller.hpp"
+#include "game/unit_motion_glue.hpp"
 #include "core/env_flag.hpp"
 #include "game/game_handler.hpp"
 #include "game/protocol_constants.hpp"
@@ -233,6 +234,7 @@ void EntityController::processOutOfRangeObjects(const std::vector<uint64_t>& gui
         } else if (entity->getType() == ObjectType::PLAYER && owner_.playerDespawnCallbackRef()) {
             owner_.playerDespawnCallbackRef()(guid);
             owner_.otherPlayerVisibleItemEntriesRef().erase(guid);
+            owner_.otherPlayerWeaponEnchantsRef().erase(guid);
             owner_.otherPlayerVisibleDirtyRef().erase(guid);
             owner_.otherPlayerMoveTimeMsRef().erase(guid);
             owner_.inspectedPlayerItemEntriesRef().erase(guid);
@@ -2726,6 +2728,10 @@ void EntityController::handleCreateObject(const UpdateBlock& block, bool& newIte
         }
         // 3i: Track transport-relative children so they follow parent transport motion.
         updateNonPlayerTransportAttachment(block, entity, block.objectType);
+        // 3j: Speeds, and the motion a unit was already in (game/unit_motion_glue.hpp).
+        if (block.guid != owner_.getPlayerGuid() && entity->isUnit()) {
+            applyCreateMovement(*entity, block);
+        }
     }
 
     // Set fields
@@ -2928,6 +2934,7 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
                 // Player entities also need renderer cleanup on DESTROY_OBJECT, not just out-of-range.
                 owner_.playerDespawnCallbackRef()(data.guid);
                 owner_.otherPlayerVisibleItemEntriesRef().erase(data.guid);
+                owner_.otherPlayerWeaponEnchantsRef().erase(data.guid);
                 owner_.otherPlayerVisibleDirtyRef().erase(data.guid);
                 owner_.otherPlayerMoveTimeMsRef().erase(data.guid);
                 owner_.inspectedPlayerItemEntriesRef().erase(data.guid);

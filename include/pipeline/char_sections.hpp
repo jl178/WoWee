@@ -58,7 +58,16 @@ struct CharacterSectionTextures {
     std::string facialLower;
     std::string facialUpper;
     std::string hair;
+    /// The hair row's second and third textures: the scalp painted over the
+    /// face regions after the facial hair (stock 0x4F0AD0 / 0x4F0B70). 2,763
+    /// of the 3,446 hair rows carry them.
+    std::string scalpLower;
+    std::string scalpUpper;
     std::vector<std::string> underwear;
+    /// The skin row has flag 0x8 (the special skins): stock loads no face and
+    /// no underwear for it (0x4EA490, 0x4EA6B0) and paints the base skin into
+    /// the face regions.
+    bool specialSkin = false;
 
     /// True when the exact (face, skin) pair was found rather than approximated.
     bool exactFace = false;

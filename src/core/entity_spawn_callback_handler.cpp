@@ -171,8 +171,12 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
             // Nearby NPC position is evaluated from Entity's server spline in
             // Application::update. Starting a second renderer interpolation here
             // makes the two owners chase each other and produces jerky movement.
-            // Online players retain their existing interpolation path.
-            if (isPlayer) {
+            // Online players retain their existing interpolation path, unless
+            // the stock motion drives them: then the sync loop draws them
+            // where it is each frame, and a renderer glide would fight it.
+            auto moverEntity = gameHandler_.getEntityManager().getEntity(guid);
+            const bool stockDriven = moverEntity && moverEntity->hasStockMotion();
+            if (isPlayer && !stockDriven) {
                 glm::vec3 renderPos = core::coords::canonicalToRender(glm::vec3(x, y, z));
                 float durationSec = static_cast<float>(durationMs) / 1000.0f;
                 renderer_.getCharacterRenderer()->moveInstanceTo(instanceId, renderPos, durationSec);
