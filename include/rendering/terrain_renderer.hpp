@@ -4,6 +4,7 @@
 
 #include "rendering/vk_shader.hpp"
 #include "rendering/shadow_params.hpp"
+#include "rendering/shadow_draw_list.hpp"
 
 #include "pipeline/terrain_mesh.hpp"
 #include "pipeline/blp_loader.hpp"
@@ -12,6 +13,7 @@
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
@@ -181,7 +183,7 @@ public:
     void setRtScene(RtScene* scene) { rtScene_ = scene; }
 
 private:
-    TerrainChunkGPU uploadChunk(const pipeline::ChunkMesh& chunk);
+    TerrainChunkGPU uploadChunk(const pipeline::ChunkMesh& chunk, int tileX, int tileY);
     VkTexture* loadTexture(const std::string& path);
     VkTexture* createAlphaTexture(const std::vector<uint8_t>& alphaData);
     bool isChunkVisible(const TerrainChunkGPU& chunk, const Frustum& frustum);
@@ -238,27 +240,60 @@ private:
 
     // Loaded terrain chunks
     std::vector<TerrainChunkGPU> chunks;
-    /// Bumped whenever `chunks` gains or loses an entry, so the shadow pass
-    /// knows its per-tile grouping below is stale.
+    /// Bumped whenever `chunks` gains or loses an entry.
     uint64_t chunksGeneration_ = 0;
+    /// Bumped whenever `chunks` loses entries (removeTile, clear). The chunks
+    /// after a removed one shift down, so whatever holds chunk indices starts
+    /// again; an append leaves every index where it was.
+    uint64_t chunksRemovedGeneration_ = 0;
     /// The chunks grouped by tile with a sphere round each tile, for the
     /// shadow pass: a tile whose sphere misses the shadow map skips its 256
-    /// chunk tests. Rebuilt when chunksGeneration_ moves.
-    struct ShadowTileGroup {
-        glm::vec3 center{0.0f};
-        float radius = 0.0f;
-        std::vector<uint32_t> chunkIndices;
-    };
-    std::vector<ShadowTileGroup> shadowTiles_;
-    uint64_t shadowTilesGeneration_ = ~0ull;
+    /// chunk tests.
+    TileChunkGrouping shadowTiles_;
     /// The same grouping for the main pass's cull, kept apart because that
     /// runs on the terrain worker.
-    std::vector<ShadowTileGroup> viewTiles_;
-    uint64_t viewTilesGeneration_ = ~0ull;
-    /// Fill `tiles` from `chunks`, in the order the chunks are in.
-    void groupChunksByTile(std::vector<ShadowTileGroup>& tiles) const;
+    TileChunkGrouping viewTiles_;
+    /// Bring `grouping` up to date with `chunks`: appended chunks join their
+    /// tiles, and a removal since the last call starts it over. The slots
+    /// that changed go to `touched` (when given). True when it started over,
+    /// which changes every slot.
+    bool updateTileGrouping(TileChunkGrouping& grouping, std::vector<uint32_t>* touched) const;
     /// The chunks cullForRecording kept, in `chunks` order.
     std::vector<uint32_t> visibleChunks_;
+
+    /// The shadow pass's draws, kept between frames (renderShadow).
+    ///
+    /// Per tile slot of shadowTiles_, the chunks that passed the cull; and
+    /// from those, the draws, with the runs of chunks that sit end to end in
+    /// the mega buffers merged into one. Culled again whole when the light
+    /// matrix, the centre, the radius or a removal changes, and only for the
+    /// tiles that gained chunks when chunks were appended.
+    struct TerrainShadowDraw {
+        ::VkBuffer vertexBuffer = VK_NULL_HANDLE;  // null: the mega buffers
+        ::VkBuffer indexBuffer = VK_NULL_HANDLE;
+        IndexRange range;
+    };
+    std::vector<std::vector<uint32_t>> shadowTileKept_;
+    std::vector<TerrainShadowDraw> shadowDraws_;
+    uint32_t shadowDrawChunks_ = 0;
+    bool shadowListValid_ = false;
+    glm::mat4 shadowListLightSpace_{0.0f};
+    glm::vec3 shadowListCenter_{0.0f};
+    float shadowListRadius_ = 0.0f;
+    std::vector<uint32_t> shadowTouched_;
+    /// Frames the list was kept as it was, rebuilt from a full cull, and
+    /// patched for appended chunks; reported with the cast count.
+    uint32_t shadowListKept_ = 0, shadowListFull_ = 0, shadowListPatched_ = 0;
+    /// Cull tile `slot` of shadowTiles_ into shadowTileKept_[slot].
+    void cullShadowTile(uint32_t slot, const glm::mat4& lightSpaceMatrix,
+                        const glm::vec3& shadowCenter, float shadowRadius);
+    /// Rebuild shadowDraws_ from shadowTileKept_.
+    void buildShadowDraws();
+
+    /// The vertexOffset a mega chunk is drawn with: 0 when the mega index
+    /// buffer holds indices already offset to the chunk's vertices (see
+    /// uploadChunk), its base vertex otherwise.
+    [[nodiscard]] int32_t megaVertexOffset(const TerrainChunkGPU& chunk) const;
 
     // Texture cache (path -> VkTexture)
     struct TextureCacheEntry {
@@ -313,8 +348,33 @@ private:
     void* megaIBMapped_ = nullptr;
     uint32_t megaVBUsed_ = 0;  // vertices used
     uint32_t megaIBUsed_ = 0;  // indices used
-    static constexpr uint32_t MEGA_VB_MAX_VERTS   = 1536 * 1024; // ~1.5M verts × 44B ≈ 64MB
-    static constexpr uint32_t MEGA_IB_MAX_INDICES  = 6 * 1024 * 1024; // 6M indices × 4B = 24MB
+    static constexpr uint32_t MEGA_VB_MAX_VERTS   = 1536 * 1024; // ~1.5M verts × 56B ≈ 84MB
+    // A tile's worth of the mega buffers: 256 chunks of at most 145 vertices
+    // and 768 indices. Each tile takes one slot while it is loaded and gives
+    // it back when unloaded (WOWEE_TERRAIN_MEGA_SLOTS=0: one bump allocation
+    // that is never given back, so every chunk loaded after the first ~8k of
+    // the session fell back to its own buffers).
+    static constexpr uint32_t kMegaTileSlotVerts = 256 * 145;
+    static constexpr uint32_t kMegaTileSlotIndices = 256 * 768;
+    // As many tiles of indices as the vertex buffer holds tiles of vertices
+    // (42; 6M indices held 32). 8.26M indices × 4B ≈ 31.5MB.
+    static constexpr uint32_t MEGA_IB_MAX_INDICES =
+        (MEGA_VB_MAX_VERTS / kMegaTileSlotVerts) * kMegaTileSlotIndices;
+    struct MegaTileSlot {
+        uint32_t slot = 0;
+        uint32_t vertsUsed = 0;
+        uint32_t indicesUsed = 0;
+    };
+    std::unordered_map<uint64_t, MegaTileSlot> megaTileSlots_;
+    /// Shared with the deferred releases, which can run after this renderer
+    /// has cleared its own state.
+    struct MegaSlotPool {
+        std::mutex mutex;
+        LowestFreeSlots slots;
+    };
+    std::shared_ptr<MegaSlotPool> megaSlotPool_;
+    /// Give tile `key`'s mega slot back once no frame in flight can read it.
+    void releaseMegaTileSlot(uint64_t key);
 
     VkBuffer indirectBuffer_ = VK_NULL_HANDLE;
     VmaAllocation indirectAlloc_ = VK_NULL_HANDLE;
