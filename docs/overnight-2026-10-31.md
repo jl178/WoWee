@@ -500,3 +500,10 @@ Other fixes:
 - `c56b190`: gatherLocalLights skips light-giving M2s beyond 300 yd before their bone transforms. record+ubo 0.6 -> 0.15 ms; ~97 fps.
   - Same 2.6 GHz ceiling and test window throughout. This morning's Goldshire figure was 40-47 fps.
 - `8c4e518`: the stock event sounds Wowee never played, from the Wow.exe UI message table and LFG/threat code. Server sounds now play their row's random file at the row volume. M2 $SND events play, so level-up and achievement sound at any player. Verified with `.levelup`: LevelUp.m2 showed for us and for a nearby bot; all tests pass.
+- `5190227`: SMSG_SET_FACTION_STANDING's showVisual byte (AzerothCore's _sendFactionIncreased, set on a rank-up) now plays ReputationLevelUp.m2 on the player.
+- `1e72222`: WMO groups are frustum-tested, and recording is split across two workers (identical image; checked with screenshots).
+  - Stormwind: WMO worker 3.13 -> 0.40 ms; 68.5 -> 79.7 fps.
+  - Northshire: 91 -> 113.5 fps uncapped (2.6 GHz).
+- `63677af`: classic plus: shoreline foam and wet ground in rain (settings; off on Low/Classic). Builds and tests pass, and the test client ran clean.
+  - Open: a screenshot of the foam with a shore in view. The Crystal Lake teleport faced away from the water.
+  - Wet ground can't be seen on the lab while game_weather chances are zeroed.
