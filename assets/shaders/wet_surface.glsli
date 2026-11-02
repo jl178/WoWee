@@ -1,0 +1,42 @@
+// Wet ground in rain - not stock, the "Wet ground in rain" setting. Shared by
+// terrain.frag and wmo.frag (exterior groups only); needs the PerFrame block
+// declared above it.
+//
+// rtParams.w is how wet the world is, 0 dry .. 1 soaked, eased by the renderer
+// over 10-20 seconds as rain starts and stops (WetGround). It is 0 with the
+// setting off, in the reflection pass and in the character preview, and then
+// every function here returns its input unchanged.
+//
+// Water darkens a porous surface (it fills the pores, so less light scatters
+// back out) and lays a thin film over it that catches the sun and, at grazing
+// angles, the sky. Both are kept mild: the ground reads damp, not mirrored.
+
+// How wet this surface is. Surfaces facing up hold the water; a wall takes
+// half and the underside of an overhang none, which is the only roof test
+// there is - a porch floor under an exterior roof still darkens.
+float wetSurfaceAmount(vec3 geomNormal) {
+    float w = rtParams.w;
+    if (w <= 0.0) return 0.0;
+    return w * clamp(0.5 + 0.5 * geomNormal.z, 0.0, 1.0);
+}
+
+// The albedo darkened by the water in it: 20% at most.
+vec3 wetSurfaceAlbedo(vec3 albedo, float wet) {
+    return albedo * (1.0 - 0.20 * wet);
+}
+
+// The film's sheen, added to the lit colour before fog: a tight sun highlight
+// under the shadow, and a faint sky-coloured Fresnel rim. Faded out past the
+// middle distance, where it would only shimmer.
+vec3 wetSurfaceSheen(vec3 normal, vec3 worldPos, float dist, float wet, float shadow) {
+    float amount = wet * (1.0 - smoothstep(60.0, 220.0, dist));
+    if (amount <= 0.001) return vec3(0.0);
+    vec3 v = normalize(viewPos.xyz - worldPos);
+    vec3 l = normalize(-lightDir.xyz);
+    vec3 h = normalize(l + v);
+    float gloss = pow(max(dot(normal, h), 0.0), 64.0) * 0.30;
+    float fresnel = pow(1.0 - clamp(dot(normal, v), 0.0, 1.0), 5.0) * 0.18;
+    // No highlight on a face turned from the light.
+    float facing = smoothstep(0.0, 0.2, dot(normal, l));
+    return amount * (lightColor.rgb * (gloss * shadow * facing) + ambientColor.rgb * fresnel);
+}

@@ -166,6 +166,9 @@ public:
 
     void setRefractionEnabled(bool enabled);
     bool isRefractionEnabled() const { return refractionEnabled; }
+    /// The foam band along the shore (water.frag, push.shoreFoam). Not stock;
+    /// the "Shoreline foam" setting.
+    void setShorelineFoam(bool enabled) { shorelineFoam_ = enabled; }
     // Display brightness (1.0 = neutral). The scene-history capture used for
     // refraction bakes this in, so the shader divides it back out.
     // Size of the target the water is drawn into. Screen-space lookups derive
@@ -308,6 +311,7 @@ private:
     std::vector<WaterSurface> surfaces;
     bool renderingEnabled = true;
     bool refractionEnabled = false;
+    bool shorelineFoam_ = true;
     VkExtent2D renderExtent_{.width = 0, .height = 0};
 };
 

@@ -45,6 +45,8 @@ struct GPUPerFrameData {
     // find a surface in it (rt_lighting.glsli): the view-projection and camera
     // position it was traced with, and params.x = mode, 0 when there is no
     // result to read. Zero in the reflection pass and the character preview.
+    // rtParams.w is not the tracer's: it is how wet the ground is in rain,
+    // 0..1 (Renderer::updatePerFrameUBO, wet_surface.glsli).
     glm::mat4 rtViewProj;
     glm::vec4 rtCameraPos;
     glm::vec4 rtParams;

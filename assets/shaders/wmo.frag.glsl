@@ -23,6 +23,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
 };
 
 #include "rt_lighting.glsli"
+#include "wet_surface.glsli"
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
 
@@ -400,8 +401,18 @@ void main() {
         vec3 halfDir = normalize(ldir + viewDir);
         float spec = pow(max(dot(norm, halfDir), 0.0), 32.0) * specularIntensity;
 
-        result = rtAmbient(rt, ambientColor.rgb) * texColor.rgb
-               + shadow * (diff * lightColor.rgb * texColor.rgb + spec * lightColor.rgb);
+        // Rain-wet walls and paving (wet_surface.glsli). Here and not in the
+        // interior branch, so a room never takes it. 0, and untouched, while
+        // it is dry or the setting is off.
+        float wet = wetSurfaceAmount(vertexNormal);
+        vec3 albedo = wet > 0.0 ? wetSurfaceAlbedo(texColor.rgb, wet) : texColor.rgb;
+
+        result = rtAmbient(rt, ambientColor.rgb) * albedo
+               + shadow * (diff * lightColor.rgb * albedo + spec * lightColor.rgb);
+        if (wet > 0.0) {
+            result += wetSurfaceSheen(normalize(mix(vertexNormal, norm, 0.5)), FragPos,
+                                      length(viewPos.xyz - FragPos), wet, shadow);
+        }
 
         // An exterior group's vertex colours play no part in its light. The
         // client's FixColorVertexAlpha gives every vertex of an EXTERIOR group

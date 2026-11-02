@@ -31,7 +31,8 @@ layout(push_constant) uniform Push {
     vec2 depthRange;  // the camera's own near and far, for linearising SceneDepth
     float sceneValid; // 1 once the depth capture holds a frame, 0 before it
     float liquidTexValid; // 1 when set 3 holds this liquid's texture frame
-    float pad1, pad2;
+    float shoreFoam;      // 1 draws the shoreline foam band (not stock), 0 off
+    float pad2;
 } push;
 
 layout(set = 1, binding = 0) uniform WaterMaterial {
@@ -73,6 +74,12 @@ const float LIQUID_TEX_REPEAT = 33.333333 / 2.0;
 // Yards of depth over which the colour and alpha run from close to far.
 const float RIVER_RAMP_DEPTH = 6.0;
 const float OCEAN_RAMP_DEPTH = 15.0;
+// The shoreline foam: yards of depth the band reaches out to at most, how
+// opaque it gets on the ocean (rivers and lakes take 70% of that), and how
+// pale it is against the light falling on it.
+const float SHORE_FOAM_DEPTH = 0.5;
+const float SHORE_FOAM_OPACITY = 0.45;
+const float SHORE_FOAM_ALBEDO = 0.72;
 
 layout(location = 0) in vec3 FragPos;
 layout(location = 1) in vec3 Normal;
@@ -408,6 +415,38 @@ void main() {
     color += specular;
     // A glint shows over shallow, mostly clear water as well as deep.
     alpha = max(alpha, clamp(dot(specular, vec3(0.333)), 0.0, 1.0));
+
+    // ============================================================
+    // Shoreline foam - not stock, the "Shoreline foam" setting
+    // ============================================================
+    // A thin band where the water runs out over the bed: the same depth below
+    // the surface that drives the colour ramp, so it follows every beach,
+    // bank, rock and pier post without any authored data. The band's reach
+    // breathes slowly, out of step along the shore, and a scrolled noise
+    // breaks it into patches. Lit by the sky's ambient and sun as a flat
+    // pale surface would be, and fogged with the water below, so it stays a
+    // pale edge at dusk and a dim one at night rather than a white line.
+    // Two value-noise lookups for the pixels in the band, nothing elsewhere.
+    float shoreFoam = 0.0;
+    if (push.shoreFoam > 0.5 && depthBelow >= 0.0) {
+        float near01 = 1.0 - smoothstep(40.0, 150.0, dist);
+        float phase = noiseValue(FragPos.xy * 0.07) * 6.28318;
+        float reach = SHORE_FOAM_DEPTH * (0.75 + 0.25 * sin(time * 0.8 + phase));
+        float band = 1.0 - smoothstep(0.0, reach, depthBelow);
+        band *= band * near01;
+        if (band > 0.002) {
+            vec2 drift = vec2(time * 0.09, -time * 0.06);
+            float n = noiseValue(FragPos.xy * 0.9 + drift) * 0.6
+                    + noiseValue(FragPos.xy * 2.3 - drift * 1.7) * 0.4;
+            // Solid right at the waterline, broken up a little way out.
+            float cover = mix(smoothstep(0.30, 0.70, n), 1.0, band * 0.5);
+            shoreFoam = band * cover * (isOcean ? SHORE_FOAM_OPACITY : SHORE_FOAM_OPACITY * 0.7);
+            vec3 foamLight = ambientColor.rgb + lightColor.rgb * max(ldir.z, 0.0);
+            vec3 foamColor = min(SHORE_FOAM_ALBEDO * foamLight, vec3(1.0));
+            color = mix(color, foamColor, shoreFoam);
+            alpha = max(alpha, shoreFoam);
+        }
+    }
 
     // ============================================================
     // Wake froth - water churned up by something moving through it

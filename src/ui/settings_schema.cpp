@@ -37,8 +37,9 @@ constexpr SettingDesc kSchema[] = {
     // graphics_presets.hpp.
     {"graphicspreset", "Quality preset", SettingKind::Enum, 0, 5, 1, "Graphics", "Quality",
      "Sets every graphics option at once. Classic is the stock 3.3.5\n"
-     "picture: no wind, mist, flare, sun shafts or surface bumps, and\n"
-     "the zone's own fog. Change any option and this reads Custom.",
+     "picture: no wind, mist, flare, sun shafts, surface bumps, shore\n"
+     "foam or wet ground, and the zone's own fog. Change any option\n"
+     "and this reads Custom.",
      "Custom|Low|Medium|High|Ultra|Classic", 0},
     // Shadows off used to lose the device, and the row was taken away; off
     // now only stops the scene sampling the map, with the shadow pass run as
@@ -245,10 +246,21 @@ constexpr SettingDesc kSchema[] = {
      "How far out grass is drawn, in yards. Beyond 45 the field thins\n"
      "with distance and each blade fades in as you ride toward it.\n"
      "Farther costs more each time you move.", "", 150, "grassenabled"},
-    {"foliagewind", "Foliage and cloth wind", SettingKind::Float, 0, 2, 0.05f, "Grass", "Wind",
+    // The two switches after it are more of the enhancements over the stock
+    // picture, under the wind's heading because they are the weather's and
+    // the water's. A heading of their own would sit at the foot of the first
+    // column with the second switch alone at the top of the next.
+    {"foliagewind", "Foliage and cloth wind", SettingKind::Float, 0, 2, 0.05f, "Grass",
+     "Wind, water and rain",
      "How hard the wind moves trees, grass, banners and awnings.\n"
      "1 is the usual breeze; rain and storms stir it further and it\n"
      "drops away indoors. 0 holds everything still.", "", 1.0f},
+    {"shorelinefoam", "Shoreline foam", SettingKind::Bool, 0, 0, 0, "Grass", "",
+     "A soft band of foam where water laps at the shore, rocks and\n"
+     "posts, drifting slowly. Cheap. Off is the original water's edge.", "", 1},
+    {"wetground", "Wet ground in rain", SettingKind::Bool, 0, 0, 0, "Grass", "",
+     "Ground and outside walls darken and catch a faint sheen while\n"
+     "it rains, and dry off slowly after. Never indoors. Cheap.", "", 1},
 
 #if WOWEE_HAS_AMD_FSR3_FRAMEGEN
     {"framegen", "Frame generation", SettingKind::Bool, 0, 0, 0, "Upscaling", "",

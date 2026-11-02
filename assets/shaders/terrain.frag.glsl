@@ -23,6 +23,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
 };
 
 #include "rt_lighting.glsli"
+#include "wet_surface.glsli"
 
 layout(set = 1, binding = 0) uniform sampler2D uBaseTexture;
 layout(set = 1, binding = 1) uniform sampler2D uLayer1Texture;
@@ -281,6 +282,12 @@ void main() {
     // which reads the texture's own detail and not the painted tint.
     finalColor.rgb *= VertColor;
 
+    // Rain-wet ground (wet_surface.glsli): 0, and untouched, while it is dry
+    // or the setting is off.
+    vec3 geomNorm = normalize(Normal);
+    float wet = wetSurfaceAmount(geomNorm);
+    if (wet > 0.0) finalColor.rgb = wetSurfaceAlbedo(finalColor.rgb, wet);
+
     vec3 lightDir2 = normalize(-lightDir.xyz);
     vec3 ambient = ambientColor.rgb * finalColor.rgb;
     // Lambert, as every other surface has it. This took abs() of the angle
@@ -317,6 +324,11 @@ void main() {
 
     vec3 result = ambient + shadow * diffuse;
     result += localLightContribution(FragPos, norm, finalColor.rgb);
+    // The film over the ground is smoother than the ground: half the bump.
+    if (wet > 0.0) {
+        result += wetSurfaceSheen(normalize(mix(geomNorm, norm, 0.5)), FragPos, fragDist,
+                                  wet, shadow);
+    }
 
     result = applyFog(result, FragPos, fragDist);
 

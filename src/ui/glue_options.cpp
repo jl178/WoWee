@@ -113,7 +113,7 @@ constexpr const char* kPresetKeys[] = {
     "normalmapping", "normalmapstrength", "parallax", "parallaxquality", "groundclutter",
     "grassenabled", "grassdensity", "grassheight",    "grassdistance",
     "foliagewind", "shadowstrength", "lightshafts", "fogstrength", "fogskyblend",
-    "lensflare", "sharpstars", "sunshafts",
+    "lensflare", "sharpstars", "sunshafts", "shorelinefoam", "wetground",
 };
 
 bool isPresetKey(const std::string& key) {
@@ -201,6 +201,8 @@ void GlueOptionsFrame::set(const std::string& key, const std::string& v) {
         pending_["lensflare"] = settingNumberText(p.lensFlare);
         pending_["sharpstars"] = on(p.sharpStars);
         pending_["sunshafts"] = on(p.sunShafts);
+        pending_["shorelinefoam"] = on(p.shorelineFoam);
+        pending_["wetground"] = on(p.wetGround);
     } else if (isPresetKey(key)) {
         // Changed by hand, these are no longer the preset; Apply works out
         // whether they happen to be another one.
@@ -323,12 +325,13 @@ void GlueOptionsFrame::buildPages(SettingsPanel& sp) {
                             "environmentdetail", "weatherdetail", "texturefiltering"}),
                       1});
     pages_.push_back({"Advanced",
-                      "Anti-aliasing, upscaling, surface detail, fog, light and the sky.",
+                      "Anti-aliasing, upscaling, surface detail, fog, light, the sky, wind, "
+                      "water and rain.",
                       keep({"fxaa", "normalmapping", "normalmapstrength", "parallax",
                             "parallaxquality", "upscaling", "fsrquality", "fsrsharpness",
                             "framegen", "lightshafts", "mistdensity", "fogstrength",
                             "fogskyblend", "lensflare", "sharpstars", "sunshafts",
-                            "foliagewind"}),
+                            "foliagewind", "shorelinefoam", "wetground"}),
                       0});
     pages_.push_back({"Sound & Voice",
                       glueString("SOUND_SUBTEXT",
