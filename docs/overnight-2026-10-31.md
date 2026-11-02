@@ -521,3 +521,8 @@ Other fixes:
   - missing_api.txt: 226 -> 203 entries; no Lua errors.
 - Windows package rebuilt from 10b029f (everything through the widget methods), zip refreshed, share restarted (port 8081).
 - `6189089`: cached M2 collision candidates, off-screen characters skip posing, per-bone key cursor. Stormwind: renderer->update 1.84 -> 1.22 ms; 83 -> 86 fps.
+- Zone tour, 13 stops (Ironforge, Darnassus, Orgrimmar, Thunder Bluff, Undercity, Silvermoon, Westfall, Duskwood, Booty Bay, Barrens, Ashenvale, Tanaris, Gadgetzan): no errors, no crashes.
+  - fps: Orgrimmar 62, Ironforge 76, Ashenvale 81, Undercity 82, Duskwood 87, Silvermoon 90, Gadgetzan 107, Booty Bay 108, Westfall 111, Thunder Bluff 112, Tanaris 114, Darnassus 117, Barrens 120.
+- Chat: removed the local echo. Your own lines and bubbles now come from the server's copy, as in stock, so GM commands and refused lines no longer show.
+- Particles keep emitter order; constant tracks are precomputed; the step runs on two threads. update/m2 join 0.48 -> 0.05 ms; particle draw runs ~1500 -> 54.
+- Found: inside city WMOs (Ironforge, Undercity) GetZoneText / the minimap label read the terrain area (Dun Morogh, Tirisfal Glades) instead of the WMO area. Next.
