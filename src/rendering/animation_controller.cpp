@@ -26,7 +26,8 @@
 #include "audio/audio_engine.hpp"
 #include "audio/footstep_manager.hpp"
 #include "audio/activity_sound_manager.hpp"
-#include "audio/mount_sound_manager.hpp"
+#include "audio/combat_sound_manager.hpp"
+#include "audio/sound_data.hpp"
 #include "audio/music_manager.hpp"
 #include "audio/movement_sound_manager.hpp"
 #include "rendering/swim_effects.hpp"
@@ -627,263 +628,78 @@ void AnimationController::triggerLevelUpEffect(const glm::vec3& position) {
 void AnimationController::setMounted(uint32_t mountInstId, uint32_t mountDisplayId, float heightOffset, const std::string& modelPath) {
     auto* characterRenderer = renderer_->getCharacterRenderer();
     auto* cameraController = renderer_->getCameraController();
+    (void)modelPath;
 
     mountInstanceId_ = mountInstId;
+    mountDisplayId_ = mountDisplayId;
     mountHeightOffset_ = heightOffset;
-    mountSeatAttachmentId_ = -1;
-    smoothedMountSeatPos_ = renderer_->getCharacterPosition();
-    mountSeatSmoothingInit_ = false;
     mountPitch_ = 0.0f;
+    mountRoll_ = 0.0f;
+    mountRateAnimId_ = UINT32_MAX;
+    mountRateMoveSpeed_ = 0.0f;
+    lastMountAnimRequest_ = UINT32_MAX;
 
     if (cameraController) {
         cameraController->setMounted(true);
         cameraController->setMountHeightOffset(heightOffset);
     }
 
-    if (characterRenderer && mountInstId > 0) {
-        characterRenderer->dumpAnimations(mountInstId);
-    }
+    // The mount model plays the unit's movement animation (stock 0x7385C0
+    // resolves it against the mount, 0x7176F0): what it has of the
+    // locomotion set, nothing guessed from durations or ids.
+    AnimCapabilitySet caps;
+    if (characterRenderer && mountInstId > 0)
+        caps = AnimCapabilityProbe::probeLocomotion(renderer_, mountInstId);
+    characterAnimator_.configureMountFSM(caps);
 
-    // Discover mount animation capabilities (property-based, not hardcoded IDs)
-    LOG_DEBUG("=== Mount Animation Dump (Display ID ", mountDisplayId, ") ===");
-    if (characterRenderer) characterRenderer->dumpAnimations(mountInstId);
+    // The rider rides the mount's attachment 0 at its own size, the seat
+    // bone's whole transform driving it (0x73D5D0, 0x4E26F0), as other
+    // players' riders already do.
+    const uint32_t riderInst = renderer_->getCharacterInstanceId();
+    if (characterRenderer && riderInst != 0 && mountInstId != 0)
+        characterRenderer->setInstanceMountedOn(riderInst, mountInstId);
 
-    std::vector<pipeline::M2Sequence> sequences;
-    if (!characterRenderer || !characterRenderer->getAnimationSequences(mountInstId, sequences)) {
-        LOG_WARNING("Failed to get animation sequences for mount, using fallback IDs");
-        sequences.clear();
-    }
-
-    auto findFirst = [&](std::initializer_list<uint32_t> candidates) -> uint32_t {
-        for (uint32_t id : candidates) {
-            if (characterRenderer && characterRenderer->hasAnimation(mountInstId, id)) {
-                return id;
-            }
-        }
-        return 0;
-    };
-
-    // Property-based jump animation discovery with chain-based scoring
-    auto discoverJumpSet = [&]() {
-        LOG_DEBUG("=== Full sequence table for mount ===");
-        for (const auto& seq : sequences) {
-            LOG_DEBUG("SEQ id=", seq.id,
-                     " dur=", seq.duration,
-                     " flags=0x", std::hex, seq.flags, std::dec,
-                     " moveSpd=", seq.movingSpeed,
-                     " blend=", seq.blendTime,
-                     " next=", seq.nextAnimation,
-                     " alias=", seq.aliasNext);
-        }
-        LOG_DEBUG("=== End sequence table ===");
-
-        std::set<uint32_t> forbiddenIds = {53, 54, 16};
-
-        auto scoreNear = [](int a, int b) -> int {
-            int d = std::abs(a - b);
-            return (d <= 8) ? (20 - d) : 0;
-        };
-
-        auto isForbidden = [&](uint32_t id) {
-            return forbiddenIds.count(id) != 0;
-        };
-
-        auto findSeqById = [&](uint32_t id) -> const pipeline::M2Sequence* {
-            for (const auto& s : sequences) {
-                if (s.id == id) return &s;
-            }
-            return nullptr;
-        };
-
-        uint32_t runId = findFirst({anim::RUN, anim::WALK});
-        uint32_t standId = findFirst({anim::STAND});
-
-        std::vector<uint32_t> loops;
-        for (const auto& seq : sequences) {
-            if (isForbidden(seq.id)) continue;
-            bool isLoop = (seq.flags & 0x01) == 0;
-            if (isLoop && seq.duration >= 350 && seq.duration <= 1000 &&
-                seq.id != runId && seq.id != standId) {
-                loops.push_back(seq.id);
-            }
-        }
-
-        uint32_t loop = 0;
-        if (!loops.empty()) {
-            uint32_t best = loops[0];
-            int bestScore = -999;
-            for (uint32_t id : loops) {
-                int sc = 0;
-                sc += scoreNear(static_cast<int>(id), 38);
-                const auto* s = findSeqById(id);
-                if (s) sc += (s->duration >= 500 && s->duration <= 800) ? 5 : 0;
-                if (sc > bestScore) {
-                    bestScore = sc;
-                    best = id;
-                }
-            }
-            loop = best;
-        }
-
-        uint32_t start = 0, end = 0;
-        int bestStart = -999, bestEnd = -999;
-
-        for (const auto& seq : sequences) {
-            if (isForbidden(seq.id)) continue;
-            bool isLoop = (seq.flags & 0x01) == 0;
-            if (isLoop) continue;
-
-            if (seq.duration >= 450 && seq.duration <= 1100) {
-                int sc = 0;
-                if (loop) sc += scoreNear(static_cast<int>(seq.id), static_cast<int>(loop));
-                if (loop && (seq.nextAnimation == static_cast<int16_t>(loop) || seq.aliasNext == loop)) sc += 30;
-                if (loop && scoreNear(seq.nextAnimation, static_cast<int>(loop)) > 0) sc += 10;
-                if (seq.blendTime > 400) sc -= 5;
-
-                if (sc > bestStart) {
-                    bestStart = sc;
-                    start = seq.id;
-                }
-            }
-
-            if (seq.duration >= 650 && seq.duration <= 1600) {
-                int sc = 0;
-                if (loop) sc += scoreNear(static_cast<int>(seq.id), static_cast<int>(loop));
-                if (seq.nextAnimation == static_cast<int16_t>(runId) || seq.nextAnimation == static_cast<int16_t>(standId)) sc += 10;
-                if (seq.nextAnimation < 0) sc += 5;
-                if (sc > bestEnd) {
-                    bestEnd = sc;
-                    end = seq.id;
-                }
-            }
-        }
-
-        LOG_DEBUG("Property-based jump discovery: start=", start, " loop=", loop, " end=", end,
-                 " scores: start=", bestStart, " end=", bestEnd);
-        return std::make_tuple(start, loop, end);
-    };
-
-    auto [discoveredStart, discoveredLoop, discoveredEnd] = discoverJumpSet();
-
-    // Build MountAnimSet for MountFSM
-    MountFSM::MountAnimSet mountAnims;
-    mountAnims.jumpStart = discoveredStart > 0 ? discoveredStart : findFirst({anim::FALL, anim::JUMP_START});
-    mountAnims.jumpLoop  = discoveredLoop > 0 ? discoveredLoop : findFirst({anim::JUMP});
-    mountAnims.jumpEnd   = discoveredEnd > 0 ? discoveredEnd : findFirst({anim::JUMP_END});
-    mountAnims.rearUp    = findFirst({anim::MOUNT_SPECIAL, anim::RUN_RIGHT, anim::FALL});
-    mountAnims.run       = findFirst({anim::RUN, anim::WALK});
-    mountAnims.stand     = findFirst({anim::STAND});
-    // Discover flight animations (flying mounts only - may all be 0 for ground mounts)
-    //
-    // A 3.3.5 flying mount has Fly for moving and Hover for staying put - or
-    // Fly for that too, when it has no Hover (the wyvern) - and RunRight and
-    // RunLeft for strafing. Those two are the bank it leans into in the air:
-    // three or four seconds long, moving nothing, and carried by fliers alone -
-    // no ground mount has them - so they are strafing in flight, not on the
-    // ground. It has nothing for climbing, diving or backing up, so those stay
-    // empty and the FSM falls back.
-    mountAnims.flyForward   = findFirst({anim::FLY_FORWARD});
-    mountAnims.flyIdle      = findFirst({anim::FLY_IDLE, anim::FLY_FORWARD});
-    mountAnims.flyLeft      = findFirst({anim::RUN_LEFT});
-    mountAnims.flyRight     = findFirst({anim::RUN_RIGHT});
-
-    // Discover idle fidget animations using proper WoW M2 metadata
-    core::Logger::getInstance().debug("Scanning for fidget animations in ", sequences.size(), " sequences");
-
-    core::Logger::getInstance().debug("=== ALL potential fidgets (no metadata filter) ===");
-    for (const auto& seq : sequences) {
-        bool isLoop = (seq.flags & 0x01) == 0;
-        bool isStationary = std::abs(seq.movingSpeed) < 0.05f;
-        bool reasonableDuration = seq.duration >= 400 && seq.duration <= 2500;
-
-        if (!isLoop && reasonableDuration && isStationary) {
-            core::Logger::getInstance().debug("  ALL: id=", seq.id,
-                " dur=", seq.duration, "ms",
-                " freq=", seq.frequency,
-                " replay=", seq.replayMin, "-", seq.replayMax,
-                " flags=0x", std::hex, seq.flags, std::dec,
-                " next=", seq.nextAnimation);
-        }
-    }
-
-    for (const auto& seq : sequences) {
-        bool isLoop = (seq.flags & 0x01) == 0;
-        bool hasFrequency = seq.frequency > 0;
-        bool hasReplay = seq.replayMax > 0;
-        bool isStationary = std::abs(seq.movingSpeed) < 0.05f;
-        bool reasonableDuration = seq.duration >= 400 && seq.duration <= 2500;
-
-        if (!isLoop && reasonableDuration && isStationary && (hasFrequency || hasReplay)) {
-            core::Logger::getInstance().debug("  Candidate: id=", seq.id,
-                " dur=", seq.duration, "ms",
-                " freq=", seq.frequency,
-                " replay=", seq.replayMin, "-", seq.replayMax,
-                " next=", seq.nextAnimation,
-                " speed=", seq.movingSpeed);
-        }
-
-        bool isDeathOrWound = (seq.id >= 5 && seq.id <= 9);
-        bool isAttackOrCombat = (seq.id >= 11 && seq.id <= 21);
-        bool isSpecial = (seq.id == 2 || seq.id == 3);
-
-        if (!isLoop && (hasFrequency || hasReplay) && isStationary && reasonableDuration &&
-            !isDeathOrWound && !isAttackOrCombat && !isSpecial) {
-            bool chainsToStand = (seq.nextAnimation == static_cast<int16_t>(mountAnims.stand)) ||
-                                 (seq.aliasNext == mountAnims.stand) ||
-                                 (seq.nextAnimation == -1);
-
-            mountAnims.fidgets.push_back(seq.id);
-            core::Logger::getInstance().debug("  >> Selected fidget: id=", seq.id,
-                (chainsToStand ? " (chains to stand)" : ""));
-        }
-    }
-
-    if (mountAnims.run == 0) mountAnims.run = mountAnims.stand;
-
-    core::Logger::getInstance().debug("Mount animation set: jumpStart=", mountAnims.jumpStart,
-        " jumpLoop=", mountAnims.jumpLoop,
-        " jumpEnd=", mountAnims.jumpEnd,
-        " rearUp=", mountAnims.rearUp,
-        " run=", mountAnims.run,
-        " stand=", mountAnims.stand,
-        " fidgets=", mountAnims.fidgets.size());
-
-    // Configure MountFSM via CharacterAnimator.
-    //
-    // What is passed here is only what was true at this moment. The FSM takes
-    // the per-frame answer as well now, and either counts - a taxi sets the
-    // mount up before it says the flight has begun, so this one is false on
-    // every flight.
-    LOG_INFO("Mount configured: displayId=", mountDisplayId, " taxiFlight=", taxiFlight_);
-    characterAnimator_.configureMountFSM(mountAnims, taxiFlight_);
-
-    if (renderer_->getAudioCoordinator()->getMountSoundManager()) {
-        bool isFlying = taxiFlight_;
-        renderer_->getAudioCoordinator()->getMountSoundManager()->onMount(mountDisplayId, isFlying, modelPath);
-    }
+    LOG_INFO("Mount configured: displayId=", mountDisplayId, " taxiFlight=", taxiFlight_,
+             " swim=", caps.resolvedSwim, " sprint=", caps.resolvedSprint,
+             " jumpStart=", caps.resolvedJumpStart);
 }
 
 void AnimationController::clearMount() {
     LOG_INFO("Mount cleared: was taxiFlight=", taxiFlight_, " mountInstanceId=", mountInstanceId_);
+    if (auto* cr = renderer_->getCharacterRenderer()) {
+        if (uint32_t riderInst = renderer_->getCharacterInstanceId())
+            cr->setInstanceMountedOn(riderInst, 0);
+    }
     mountInstanceId_ = 0;
+    mountDisplayId_ = 0;
     mountHeightOffset_ = 0.0f;
     mountPitch_ = 0.0f;
     mountRoll_ = 0.0f;
-    mountSeatAttachmentId_ = -1;
-    smoothedMountSeatPos_ = glm::vec3(0.0f);
-    mountSeatSmoothingInit_ = false;
+    riderAnim_ = anim::MOUNT;
+    lastMountAnimRequest_ = UINT32_MAX;
 
-    // Clear MountFSM via CharacterAnimator
     characterAnimator_.clearMountFSM();
 
     if (auto* cameraController = renderer_->getCameraController()) {
         cameraController->setMounted(false);
         cameraController->setMountHeightOffset(0.0f);
     }
+}
 
-    if (renderer_->getAudioCoordinator()->getMountSoundManager()) {
-        renderer_->getAudioCoordinator()->getMountSoundManager()->onDismount();
-    }
+void AnimationController::playMountCreatureSound(bool jumpEnd) {
+    auto* coord = renderer_->getAudioCoordinator();
+    if (!coord || mountDisplayId_ == 0) return;
+    const auto* data = coord->getSoundData();
+    auto* csm = coord->getCombatSoundManager();
+    if (!data || !csm) return;
+    const auto* cs = data->displaySounds(mountDisplayId_);
+    if (!cs) return;
+    const uint32_t id = jumpEnd ? cs->jumpEnd : cs->jumpStart;
+    if (id != 0) csm->playEntry3D(id, renderer_->getCharacterPosition());
+}
+
+void AnimationController::playMountSpecial() {
+    characterAnimator_.getMountFSM().requestSpecial();
 }
 
 // ── Query helpers ────────────────────────────────────────────────────────────
@@ -927,214 +743,133 @@ void AnimationController::updateMeleeTimers(float deltaTime) {
     }
 }
 
-// ── Mount positioning helper ─────────────────────────────────────────────────
+// ── Mount positioning ────────────────────────────────────────────────────────
 
-// A seat that shifts more than this between frames is being carried, not
-// jittering: standing still on solid ground moves it by a fraction of this,
-// while a ferry at speed moves it by several times as much in a single frame.
-static constexpr float kSeatCarriedStepSq = 0.05f * 0.05f;
-
-void AnimationController::applyMountPositioning(float mountBob, float mountRoll, float characterYaw) {
+void AnimationController::applyMountPositioning(float characterYaw) {
     auto* characterRenderer = renderer_->getCharacterRenderer();
     uint32_t characterInstanceId = renderer_->getCharacterInstanceId();
-    if (!characterRenderer || characterInstanceId == 0) return;
+    if (!characterRenderer || characterInstanceId == 0 || mountInstanceId_ == 0) return;
 
-    float mountYawRad = glm::radians(characterYaw);
-
-    // Position mount model
-    if (mountInstanceId_ > 0) {
-        const glm::vec3& characterPosition = renderer_->getCharacterPosition();
-        characterRenderer->setInstancePosition(mountInstanceId_, characterPosition);
-        characterRenderer->setInstanceRotation(mountInstanceId_, glm::vec3(mountPitch_, mountRoll, mountYawRad));
-    }
-
-    // Use mount's attachment point for proper bone-driven rider positioning.
-    if (taxiFlight_) {
-        glm::mat4 mountSeatTransform(1.0f);
-        bool haveSeat = false;
-        static constexpr uint32_t kTaxiSeatAttachmentId = 0;
-        if (mountSeatAttachmentId_ == -1) {
-            mountSeatAttachmentId_ = static_cast<int>(kTaxiSeatAttachmentId);
-        }
-        if (mountSeatAttachmentId_ >= 0) {
-            haveSeat = characterRenderer->getAttachmentTransform(
-                mountInstanceId_, static_cast<uint32_t>(mountSeatAttachmentId_), mountSeatTransform);
-        }
-        // A failed lookup is "not yet", not "never". The seat is read off the
-        // mount's model, and a mount summoned before its M2 has finished
-        // loading answers no on the first frame or two - latching that closed
-        // left the rider on the guessed height for the whole ride.
-        if (haveSeat) {
-            glm::vec3 targetRiderPos = glm::vec3(mountSeatTransform[3]) + glm::vec3(0.0f, 0.0f, 0.02f);
-            mountSeatSmoothingInit_ = false;
-            smoothedMountSeatPos_ = targetRiderPos;
-            characterRenderer->setInstancePosition(characterInstanceId, targetRiderPos);
-        } else {
-            mountSeatSmoothingInit_ = false;
-            const glm::vec3& characterPosition = renderer_->getCharacterPosition();
-            glm::vec3 playerPos = characterPosition + glm::vec3(0.0f, 0.0f, mountHeightOffset_ + 0.10f);
-            characterRenderer->setInstancePosition(characterInstanceId, playerPos);
-        }
-
-        float riderPitch = mountPitch_ * 0.35f;
-        float riderRoll = mountRoll * 0.35f;
-        characterRenderer->setInstanceRotation(characterInstanceId, glm::vec3(riderPitch, riderRoll, mountYawRad));
-        return;
-    }
-
-    // Ground mounts: try a seat attachment first.
+    // The mount stands where the unit is, turned to its facing; in the air
+    // it takes the movement pitch, on a taxi the spline's bank as well. The
+    // rider's matrix is the seat's (CharacterRenderer, mountedOn); its
+    // position is kept on the seat for whatever asks where the player is.
+    const float yawRad = glm::radians(characterYaw);
     const glm::vec3& characterPosition = renderer_->getCharacterPosition();
-    bool moving = renderer_->getCameraController() && renderer_->getCameraController()->isMoving();
+    characterRenderer->setInstancePosition(mountInstanceId_, characterPosition);
+    characterRenderer->setInstanceRotation(mountInstanceId_, glm::vec3(mountPitch_, mountRoll_, yawRad));
 
-    glm::mat4 mountSeatTransform;
-    bool haveSeat = false;
-    if (mountSeatAttachmentId_ >= 0) {
-        haveSeat = characterRenderer->getAttachmentTransform(
-            mountInstanceId_, static_cast<uint32_t>(mountSeatAttachmentId_), mountSeatTransform);
-    } else if (mountSeatAttachmentId_ == -1) {
-        static constexpr uint32_t kSeatAttachments[] = {0, 5, 6, 7, 8};
-        for (uint32_t attId : kSeatAttachments) {
-            if (characterRenderer->getAttachmentTransform(mountInstanceId_, attId, mountSeatTransform)) {
-                mountSeatAttachmentId_ = static_cast<int>(attId);
-                haveSeat = true;
-                break;
-            }
-        }
-        // Left at -1 on failure, so the next frame probes again - see the note
-        // in the taxi branch above.
-    }
-
-    if (haveSeat) {
-        glm::vec3 mountSeatPos = glm::vec3(mountSeatTransform[3]);
-        glm::vec3 seatOffset = glm::vec3(0.0f, 0.0f, taxiFlight_ ? 0.04f : 0.08f);
-        glm::vec3 targetRiderPos = mountSeatPos + seatOffset;
-
-        // The smoothing below is for a rider sitting still, where it damps the
-        // jitter of a bone-driven seat. `moving` only reports movement *input*,
-        // though, and a player standing on a boat presses nothing while the world
-        // carries them at the ship's speed. The filter then trailed the rider
-        // behind the seat by its own time constant - about two yards at ferry
-        // speed, swinging out to one side as the hull turned. Reported as the
-        // character riding behind the direction of travel, alongside its mount.
-        //
-        // So ask whether the seat is actually moving in the world rather than
-        // whether the player asked for it to. This covers anything that carries a
-        // rider - ships, elevators, a moving platform - without naming any of them.
-        const glm::vec3 seatStep = targetRiderPos - lastMountSeatTarget_;
-        const bool seatCarried = mountSeatSmoothingInit_ &&
-                                 glm::dot(seatStep, seatStep) > kSeatCarriedStepSq;
-        lastMountSeatTarget_ = targetRiderPos;
-
-        if (moving || seatCarried) {
-            mountSeatSmoothingInit_ = false;
-            smoothedMountSeatPos_ = targetRiderPos;
-        } else if (!mountSeatSmoothingInit_) {
-            smoothedMountSeatPos_ = targetRiderPos;
-            mountSeatSmoothingInit_ = true;
-        } else {
-            float smoothHz = taxiFlight_ ? 10.0f : 14.0f;
-            float alpha = 1.0f - std::exp(-smoothHz * std::max(lastDeltaTime_, 0.001f));
-            smoothedMountSeatPos_ = glm::mix(smoothedMountSeatPos_, targetRiderPos, alpha);
-        }
-
-        characterRenderer->setInstancePosition(characterInstanceId, smoothedMountSeatPos_);
-
-        float yawRad = glm::radians(characterYaw);
-        float riderPitch = mountPitch_ * 0.35f;
-        float riderRoll = mountRoll * 0.35f;
-        characterRenderer->setInstanceRotation(characterInstanceId, glm::vec3(riderPitch, riderRoll, yawRad));
-    } else {
-        mountSeatSmoothingInit_ = false;
-        float yawRad = glm::radians(characterYaw);
-        glm::mat4 mountRotation = glm::mat4(1.0f);
-        mountRotation = glm::rotate(mountRotation, yawRad, glm::vec3(0.0f, 0.0f, 1.0f));
-        mountRotation = glm::rotate(mountRotation, mountRoll, glm::vec3(1.0f, 0.0f, 0.0f));
-        mountRotation = glm::rotate(mountRotation, mountPitch_, glm::vec3(0.0f, 1.0f, 0.0f));
-        glm::vec3 localOffset(0.0f, 0.0f, mountHeightOffset_ + mountBob);
-        glm::vec3 worldOffset = glm::vec3(mountRotation * glm::vec4(localOffset, 0.0f));
-        glm::vec3 playerPos = characterPosition + worldOffset;
-        characterRenderer->setInstancePosition(characterInstanceId, playerPos);
-        characterRenderer->setInstanceRotation(characterInstanceId, glm::vec3(mountPitch_, mountRoll, yawRad));
-    }
+    glm::mat4 seat(1.0f);
+    glm::vec3 riderPos = characterPosition + glm::vec3(0.0f, 0.0f, mountHeightOffset_);
+    if (characterRenderer->getAttachmentTransform(mountInstanceId_, 0, seat))
+        riderPos = glm::vec3(seat[3]);
+    characterRenderer->setInstancePosition(characterInstanceId, riderPos);
+    characterRenderer->setInstanceRotation(characterInstanceId, glm::vec3(mountPitch_, mountRoll_, yawRad));
 }
 
-// ── Mounted animation update (uses MountFSM) ────────────────────────────────
+// ── Mounted animation update (MountFSM) ──────────────────────────────────────
 
 void AnimationController::updateMountedAnimation(float deltaTime) {
     auto* characterRenderer = renderer_->getCharacterRenderer();
     auto* cameraController = renderer_->getCameraController();
     uint32_t characterInstanceId = renderer_->getCharacterInstanceId();
-    float characterYaw = renderer_->getCharacterYaw();
     auto& mountFSM = characterAnimator_.getMountFSM();
+    if (!characterRenderer || !cameraController) return;
 
-    // Build MountFSM input
-    MountFSM::Input mountIn;
-    mountIn.moving = cameraController->isMoving();
-    mountIn.movingBackward = cameraController->isMovingBackward();
-    mountIn.strafeLeft = cameraController->isStrafingLeft();
-    mountIn.strafeRight = cameraController->isStrafingRight();
-    mountIn.grounded = cameraController->isGrounded();
-    mountIn.jumpKeyPressed = cameraController->isJumpKeyPressed();
-    // In the air, not allowed to be: on the ground a flying mount runs.
-    mountIn.flying = cameraController->isFlightAirborne();
-    mountIn.swimming = cameraController->isSwimming();
-    mountIn.ascending = cameraController->isAscending();
-    mountIn.descending = cameraController->isDescending();
-    mountIn.taxiFlight = taxiFlight_;
-    mountIn.deltaTime = deltaTime;
-    mountIn.characterYaw = characterYaw;
-    // Mount animation state query
-    if (mountInstanceId_ > 0 && characterRenderer) {
-        mountIn.haveMountState = characterRenderer->getAnimationState(
-            mountInstanceId_, mountIn.curMountAnim, mountIn.curMountTime, mountIn.curMountDuration);
+    MountFSM::Input in;
+    in.moving = cameraController->isMoving();
+    in.movingBackward = cameraController->isMovingBackward();
+    in.strafeLeft = cameraController->isStrafingLeft();
+    in.strafeRight = cameraController->isStrafingRight();
+    in.grounded = cameraController->isGrounded();
+    in.jumping = cameraController->isJumping();
+    in.swimming = cameraController->isSwimming();
+    // In the air on a flying mount: the swim set. On the ground it runs.
+    in.flying = cameraController->isFlightAirborne();
+    in.flyingSpline = taxiFlight_;
+    in.speed = cameraController->currentMoveSpeed();
+    in.walkSpeed = cameraController->currentWalkSpeed();
+    in.deltaTime = deltaTime;
+    {
+        const bool still = !in.moving && in.grounded && !in.swimming && !in.flying && !taxiFlight_;
+        const float step = renderer_->getBodyFacingStep();
+        constexpr float kStepEps = 1.0e-5f;
+        in.turnLeft = still && (cameraController->isTurningLeft() || step > kStepEps);
+        in.turnRight = still && !in.turnLeft && (cameraController->isTurningRight() || step < -kStepEps);
+    }
+    in.haveAnimState = characterRenderer->getAnimationState(
+        mountInstanceId_, in.currentAnimId, in.currentAnimTime, in.currentAnimDuration);
+
+    // A mounted unit's creature sounds are the mount display's (0x73D5D0 sets
+    // CGUnit +0x978 from the mount's CreatureSoundData; 0x73ED10 plays kind
+    // 11, JumpStart, on a jump and kind 12, JumpEnd, on landing, both at
+    // 100%, 0xADBA74).
+    {
+        const bool airborne = !in.grounded && !in.swimming && !in.flying && !taxiFlight_;
+        if (in.jumping && !mountJumpSounded_) {
+            mountJumpSounded_ = true;
+            playMountCreatureSound(/*jumpEnd=*/false);
+        }
+        if (mountWasAirborne_ && !airborne && mountJumpSounded_) {
+            playMountCreatureSound(/*jumpEnd=*/true);
+        }
+        if (!airborne) mountJumpSounded_ = false;
+        mountWasAirborne_ = airborne;
     }
 
-    // Evaluate MountFSM
-    auto mountOut = mountFSM.evaluate(mountIn);
-
-    // Apply mount animation if changed
-    if (mountOut.mountAnimChanged && mountInstanceId_ > 0 && characterRenderer) {
-        characterRenderer->playAnimation(mountInstanceId_, mountOut.mountAnimId, mountOut.mountAnimLoop);
+    const MountFSM::Output out = mountFSM.evaluate(in);
+    if (out.anim.valid) {
+        const bool changed = out.anim.animId != lastMountAnimRequest_;
+        // Something else played on the mount (a model swap, a stray call):
+        // put the loop back, unless the model lacks it and plays a fallback.
+        const bool drifted = in.haveAnimState && out.anim.loop && in.currentAnimId != out.anim.animId &&
+                             characterRenderer->hasAnimation(mountInstanceId_, out.anim.animId);
+        if (changed || drifted) {
+            characterRenderer->playAnimation(mountInstanceId_, out.anim.animId, out.anim.loop, out.returnAnim);
+            if (changed)
+                LOG_INFO("Mount anim: ", out.anim.animId, " speed=", in.speed, " flying=", in.flying,
+                         " swim=", in.swimming, " taxi=", in.flyingSpline);
+            lastMountAnimRequest_ = out.anim.animId;
+        }
     }
 
-    // The rider sits in Mount, in the air as on the ground: 3.3.5 has no
-    // flight poses for a rider.
-    const uint32_t riderAnim = anim::MOUNT;
+    // A moving unit's animation plays at its speed over the sequence's
+    // MoveSpeed (0x7385C0). Ground only here: the speed above is the ground
+    // speed the keys select.
+    {
+        uint32_t cur = 0;
+        float t = 0.0f, d = 0.0f;
+        const bool ground = !in.swimming && !in.flying && !taxiFlight_;
+        if (characterRenderer->getAnimationState(mountInstanceId_, cur, t, d)) {
+            if (cur != mountRateAnimId_) {
+                mountRateAnimId_ = cur;
+                mountRateMoveSpeed_ = 0.0f;
+                std::vector<pipeline::M2Sequence> seqs;
+                if (characterRenderer->getAnimationSequences(mountInstanceId_, seqs)) {
+                    for (const auto& q : seqs) {
+                        if (q.id == cur) { mountRateMoveSpeed_ = q.movingSpeed; break; }
+                    }
+                }
+            }
+            float rate = 1.0f;
+            if (ground && in.moving && in.speed > 0.0f && mountRateMoveSpeed_ != 0.0f)
+                rate = in.speed / std::abs(mountRateMoveSpeed_);
+            characterRenderer->setAnimationSpeed(mountInstanceId_, rate);
+        }
+    }
 
-    // Apply rider animation
+    // The rider sits: Mount (91), or the mount aura's state-kit animation.
     uint32_t currentAnimId = 0;
     float currentAnimTimeMs = 0.0f, currentAnimDurationMs = 0.0f;
-    bool haveState = characterRenderer->getAnimationState(characterInstanceId, currentAnimId, currentAnimTimeMs, currentAnimDurationMs);
-    if (!haveState || currentAnimId != riderAnim) {
-        characterRenderer->playAnimation(characterInstanceId, riderAnim, true);
-        lastPlayerAnimRequest_ = riderAnim;
+    const bool haveState = characterRenderer->getAnimationState(
+        characterInstanceId, currentAnimId, currentAnimTimeMs, currentAnimDurationMs);
+    if (!haveState || currentAnimId != riderAnim_) {
+        characterRenderer->playAnimation(characterInstanceId, riderAnim_, true);
+        lastPlayerAnimRequest_ = riderAnim_;
         lastPlayerAnimLoopRequest_ = true;
     }
 
-    // Handle mount sounds
-    auto* mountSoundMgr = renderer_->getAudioCoordinator()->getMountSoundManager();
-    if (mountOut.playJumpSound && mountSoundMgr) {
-        mountSoundMgr->playJumpSound();
-    }
-    if (mountOut.playLandSound && mountSoundMgr) {
-        mountSoundMgr->playLandSound();
-    }
-    if (mountOut.playRearUpSound && mountSoundMgr) {
-        mountSoundMgr->playRearUpSound();
-    }
-    if (mountOut.playIdleSound && mountSoundMgr) {
-        mountSoundMgr->playIdleSound();
-    }
-    if (mountOut.triggerMountJump && cameraController) {
-        cameraController->triggerMountJump();
-    }
-
-    // Apply positioning (uses mountBob and mountRoll from MountFSM)
-    // For taxi flights, use external mountRoll_ set by setMountPitchRoll
-    // For ground mounts, use MountFSM's computed lean roll
-    float finalRoll = taxiFlight_ ? mountRoll_ : mountOut.mountRoll;
-    // Drawn yaw: a ground mount strafes on its run, turned toward travel.
-    applyMountPositioning(mountOut.mountBob, finalRoll, renderer_->getCharacterVisualYaw());
+    applyMountPositioning(renderer_->getCharacterVisualYaw());
 }
 
 // ── Character animation state machine (delegates to CharacterAnimator) ──────────

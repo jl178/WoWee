@@ -81,8 +81,13 @@ inline bool m2BatchNeedsAlphaTest(uint8_t blendMode, bool hasAlpha) {
 /// to white, so discarding everything below the threshold turns a soft falloff
 /// into a hard-edged disc. Orgrimmar's bonfires used a threshold of 0.7 on
 /// exactly such a card.
+///
+/// Nor does a Mod or Mod2x batch. Those multiply the framebuffer by the
+/// texture (DstColor blends, 0xA453B0), so black is the darkening the artist
+/// painted, not a backing.
 inline bool m2BatchWantsColorKey(uint8_t blendMode, bool textureIsKeyed) {
-    return textureIsKeyed && !m2BlendIsAdditive(blendMode);
+    return textureIsKeyed && !m2BlendIsAdditive(blendMode) && blendMode != M2_BLEND_MODULATE &&
+           blendMode != M2_BLEND_MODULATE2X;
 }
 
 }  // namespace wowee::rendering

@@ -783,6 +783,23 @@ constexpr SettingDesc kSchema[] = {
     {"soundinbackground", "Play while in the background", SettingKind::Bool, 0, 0, 0,
      "Sound", "",
      "Keep playing when another window has the focus.", "", 0},
+    // Three more from the game's own Sound panel, on its CVars as they were
+    // there. Sound Channels is that panel's slider as it shipped - 32 or 64
+    // (AudioOptionsPanels.lua, SoundPanelOptions) - and applies at once:
+    // stock restarted its sound system for it, here it is the voice cap
+    // AudioEngine::admitVoice consults.
+    {"soundchannels", "Sound channels", SettingKind::Int, 32, 64, 32, "Sound", "",
+     "How many sounds may play at once, music included. Past that the least\n"
+     "important is dropped for a newcomer that matters more.", "", 32,
+     "", "cvar:Sound_NumChannels"},
+    {"soundatcharacter", "Sound at character", SettingKind::Bool, 0, 0, 0, "Sound", "",
+     "Hear the world from your character rather than from the camera. Your\n"
+     "own character's sounds then play in your head.", "", 1,
+     "", "cvar:Sound_ListenerAtCharacter"},
+    {"soundreverb", "Reverb", SettingKind::Bool, 0, 0, 0, "Sound", "",
+     "Rooms, caves and halls ring with the sounds made in them. Off by\n"
+     "default, as the original client shipped it.", "", 0,
+     "", "cvar:Sound_EnableReverb"},
 
     {"enablemusic", "Enable music", SettingKind::Bool, 0, 0, 0, "Sound", "Music",
      "Off silences the score without disturbing the volume below.", "", 1},

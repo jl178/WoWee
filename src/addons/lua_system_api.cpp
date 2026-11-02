@@ -714,6 +714,10 @@ static void applySoundCVars(lua_State* L) {
     // follow the CVar. The engine clamps it to the stock 12..128.
     audio::AudioEngine::instance().setNumChannels(static_cast<int>(
         soundCVar("sound_numchannels", static_cast<float>(audio::stock::kDefaultNumChannels))));
+    // Sound_ListenerAtCharacter (on by default): the listener at the
+    // character, and the character's own sounds in the head at 0.65. Off,
+    // the listener is the camera and the own sounds are placed like any other.
+    audio::AudioEngine::instance().setListenerAtCharacter(soundCVar("sound_listeneratcharacter", 1.0f) != 0.0f);
 
     // Master, music and ambience are the client's own settings now, reached
     // through SetCVar above - this function must not write them too, or the two
@@ -787,9 +791,19 @@ static void pushCvarDefault(lua_State* L, const std::string& n) {
     // "1" - that rule swallows every name it starts with, so a default of any
     // other value has to be stated before it rather than after.
     if (n == "sound_enablesoundwhengameisinbg") lua_pushstring(L, "0");
+    // The other three switches stock registers off (Wow.exe 0x4d1050): the
+    // EAX reverb, which AudioCoordinator::updateReverb reads with the same
+    // "0", the hardware path and software HRTF. The prefix rule below would
+    // answer them "1" and a panel would show reverb on while it is off.
+    else if (n == "sound_enablereverb" || n == "sound_enablehardware" || n == "sound_enablesoftwarehrtf")
+        lua_pushstring(L, "0");
     else if (n.rfind("sound_enable", 0) == 0) lua_pushstring(L, "1");
-    else if (n == "sound_mastervolume" || n == "sound_musicvolume" ||
-             n == "sound_ambiencevolume") {
+    // On, as stock registers it (0x4d1600).
+    else if (n == "sound_listeneratcharacter") lua_pushstring(L, "1");
+    // Stock's own defaults (0x4d1600); master stays at full.
+    else if (n == "sound_musicvolume") lua_pushstring(L, "0.4");
+    else if (n == "sound_ambiencevolume") lua_pushstring(L, "0.6");
+    else if (n == "sound_mastervolume") {
         lua_pushstring(L, "1");
     }
     // The stock voice cap, which AudioEngine starts at and applySoundCVars
@@ -4158,9 +4172,16 @@ static int lua_CloseBattlefield(lua_State* L) { (void)L; return 0; }
 // False always, so the leave-vehicle button on the main bar stayed hidden and
 // the unit menu's Leave Vehicle entry was removed from the menu every time it
 // was built. The state behind it has been tracked the whole time.
+// Stock: seated, on a seat with flag 0x2000000 (CAN_ENTER_OR_EXIT); a seat
+// whose row is not known yet lets the player try.
 static int lua_CanExitVehicle(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->isInVehicle() ? 1 : 0);
+    bool can = false;
+    if (gh && gh->vehiclePassenger(gh->getPlayerGuid())) {
+        const auto* seat = gh->vehicleSeatOf(gh->getPlayerGuid());
+        can = !seat || (seat->flags & 0x2000000u) != 0;
+    }
+    lua_pushboolean(L, can ? 1 : 0);
     return 1;
 }
 static int lua_IsVehicleAimAngleAdjustable(lua_State* L) { lua_pushboolean(L, 0); return 1; }

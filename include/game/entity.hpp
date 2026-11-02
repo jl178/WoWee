@@ -183,6 +183,11 @@ public:
     /// The movement flags the motion is running on (a spline: forward, plus
     /// what the unit had); 0 with no motion.
     [[nodiscard]] uint32_t stockMotionFlags() const { return motionFlags_; }
+    /// The running spline's flags (MoveSpline +0x20), 0 with no spline: a
+    /// Flying one (0x2000) is a taxi's, which moves the unit in Fly (135).
+    [[nodiscard]] uint32_t stockMotionSplineFlags() const {
+        return (motionKind_ == MotionKind::Spline && unitSpline_) ? unitSpline_->flags : 0u;
+    }
     /// Speed over the path now (a spline's length over its duration, or the
     /// speed the flags select), 0 standing.
     [[nodiscard]] float stockMotionSpeed() const { return motionSpeed_; }
@@ -191,6 +196,13 @@ public:
     /// Pitch while swimming or flying (server radians).
     [[nodiscard]] float stockMotionPitch() const { return motionPitch_; }
     [[nodiscard]] uint8_t stockMotionAnimTier() const { return motionAnimTier_; }
+    /// On a Flying spline without the flying flag (a taxi): the path's pitch
+    /// and the bank into the turn ahead (server radians, positive left).
+    [[nodiscard]] bool stockMotionHasAttitude() const {
+        return motionKind_ == MotionKind::Spline && motionHasAttitude_;
+    }
+    [[nodiscard]] float stockMotionAttitudePitch() const { return motionAttitudePitch_; }
+    [[nodiscard]] float stockMotionBank() const { return motionBank_; }
     uint32_t takeMotionEvents() { const uint32_t e = motionEvents_; motionEvents_ = 0; return e; }
     std::optional<SplineFinish> takeSplineFinish() {
         auto f = splineFinish_;
@@ -519,6 +531,9 @@ protected:
     void updateStockMotion();
     void publishMotionFrame(const glm::vec3& serverPos, float serverFacing);
     MotionKind motionKind_ = MotionKind::None;
+    bool motionHasAttitude_ = false;
+    float motionAttitudePitch_ = 0.0f;
+    float motionBank_ = 0.0f;
     bool motionTransportFrame_ = false;
     bool motionFrameValid_ = false;
     bool motionTranslating_ = false;

@@ -75,6 +75,8 @@ void AudioCoordinator::shutdown() {
     footstepManager_.reset();
     musicManager_.reset();
 
+    // The lookup points into soundData_, which goes with this coordinator.
+    AudioEngine::instance().setAdvancedLookup(nullptr);
     // Shutdown audio engine last
     if (audioAvailable_) {
         AudioEngine::instance().shutdown();
@@ -90,11 +92,19 @@ void AudioCoordinator::loadSoundData(pipeline::AssetManager* assets) {
     if (soundData_.load([assets](const std::string& name) { return assets->loadDBCOptional(name); })) {
         zoneMusic_ = std::make_unique<ZoneMusicController>(soundData_);
         ambienceKey_ = 0;
+        // Every kit the engine starts finds its SoundEntriesAdvanced row
+        // here: the stock instance behaviour applies to whoever plays it.
+        AudioEngine::instance().setAdvancedLookup(
+            [this](uint32_t kitId) { return soundData_.advancedKit(kitId); });
         if (npcVoiceManager_) npcVoiceManager_->setSoundData(&soundData_);
         if (playerVoiceManager_) playerVoiceManager_->setSoundData(&soundData_);
         if (combatSoundManager_) combatSoundManager_->setSoundData(&soundData_);
         if (worldSoundEmitters_) worldSoundEmitters_->setSoundData(&soundData_);
         if (uiSoundManager_) uiSoundManager_->setSoundData(&soundData_);
+        // The character's own steps now come from its footfall events and
+        // FootstepTerrainLookup, as every unit's do.
+        if (footstepManager_) footstepManager_->setOwnStepsFromTables(true);
+        if (movementSoundManager_) movementSoundManager_->setWaterStepsFromTables(true);
         // The client looks this one up by name, hence the warning in it.
         const SoundEntry* loop = soundData_.soundByName("Underwater (DONOTRENAME)");
         if (!loop || loop->files.empty()) loop = soundData_.soundByName("UnderWaterLoop");
@@ -286,6 +296,8 @@ void AudioCoordinator::onOriginalSoundtrackDisabled(game::ZoneManager* zm) {
 
 void AudioCoordinator::updateZoneAudio(const ZoneAudioContext& ctx) {
     float deltaTime = ctx.deltaTime;
+    // The clock the advanced rows' time windows read (0x4ca7b0's game time).
+    AudioEngine::instance().setTimeOfDayMs(static_cast<int32_t>(ctx.gameTimeHours * 3600000.0f));
     // Blows still waiting on an attack animation's $CSS / $CAH event.
     if (combatSoundManager_) combatSoundManager_->update();
     if (musicSwitchCooldown_ > 0.0f) {

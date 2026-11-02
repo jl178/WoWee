@@ -2211,7 +2211,10 @@ void Renderer::update(float deltaTime) {
             // At the character, facing where the camera looks: stock 3.3.5's
             // Sound_ListenerAtCharacter (on by default), 2 yd back along the
             // view and 4 yd up (Wow.exe 0x4fa5f0; audio::stock::listenerPosition).
-            const glm::vec3 listenerPos = (characterInstanceId > 0)
+            // With the CVar off, the camera (0x4fa5f0 takes the camera's
+            // position when Sound_ListenerAtCharacter is 0).
+            const glm::vec3 listenerPos =
+                (characterInstanceId > 0 && audio::AudioEngine::instance().isListenerAtCharacter())
                 ? audio::stock::listenerPosition(characterPosition, fwd)
                 : camera->getPosition();
             audio::AudioEngine::instance().setListenerPosition(listenerPos);

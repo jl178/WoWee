@@ -134,6 +134,10 @@ public:
     // through the floor.
     void suppressVerticalPhysics() { verticalVelocity = 0.0f; grounded = true; }
     [[nodiscard]] bool isJumpKeyPressed() const { return jumpBufferTimer > 0.0f; }
+    /// The ground speed the last update moved at (CMovement::GetSpeed for the
+    /// keys held), 0 standing: a mount's pace and playback rate follow it.
+    [[nodiscard]] float currentMoveSpeed() const { return currentMoveSpeed_; }
+    [[nodiscard]] float currentWalkSpeed() const { return stockSpeeds().walk; }
     [[nodiscard]] bool isSprinting() const;
     [[nodiscard]] bool isMovingForward() const { return moveForwardActive; }
     [[nodiscard]] bool isMovingBackward() const { return moveBackwardActive; }
@@ -318,9 +322,6 @@ public:
     void setAutoFollow(const glm::vec3* targetPos) { autoFollowTarget_ = targetPos; }
     void cancelAutoFollow() { autoFollowTarget_ = nullptr; }
     [[nodiscard]] bool isAutoFollowing() const { return autoFollowTarget_ != nullptr; }
-
-    // Trigger mount jump (applies vertical velocity for physics hop)
-    void triggerMountJump();
 
     // Apply server-driven knockback impulse.
     // dir: render-space 2D direction unit vector (from vcos/vsin in packet)
@@ -937,6 +938,7 @@ private:
     }
 
     // Server-driven speed overrides (0 = use hardcoded default)
+    float currentMoveSpeed_ = 0.0f;
     float runSpeedOverride_ = 0.0f;
     float walkSpeedOverride_ = 0.0f;
     float swimSpeedOverride_ = 0.0f;

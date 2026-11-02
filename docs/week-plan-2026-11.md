@@ -51,3 +51,22 @@ through quests, dungeons, cities, flight paths and PvP areas, and compare
 with the RE specs). Add new enhancement ideas with toggles, and wowpack work
 (builder, Tol Barad module, Wowee sync). Add each new item to this file
 before starting it.
+- Nov 2 morning: positional sound fix committed (pan restored, row distances). Particles agent running.
+- Nov 2 morning: unit/item particles + ParticleColor committed (f6866a1). Found Firelord drawn with pale human skin; skin agent started. Collision/step/swim agent running.
+- Nov 2 07:08: collision and skin agents running; started fog-shader agent (particles, ribbons, weather).
+- Nov 2 ~08:20: stock collision box, step and swim committed. Fog and skin agents running.
+- Nov 2 ~08:40: stock fog curve fix + particle/ribbon/rain fog committed. Skin and sound agents running.
+- Nov 2 ~08:40: stock fog curve fix + particle/ribbon/rain fog committed. Skin and sound agents running.
+- Nov 2 ~09:00: creature skin/geoset rule committed (~150 batches fixed, audit tool). Sound agent running.
+
+## For Jered to decide
+
+- Captured Valgarde Child (display 19092) names `DraeneiMaleKid_01.`; the shipped
+  file is `DraeneiMaleKid_01..blp`. The stock extension rule finds nothing and draws
+  white, so we now draw white too. Revert to finding the file?
+- Water sky reflection: stock has none. Ours still does.
+- Nov 2 ~09:05: started M2 multitexture/blend agent and mounts/taxi/vehicles agent.
+- Nov 02 08:08: 3 agents running (sound, M2 materials, mounts/taxi). Nothing new to commit.
+- Nov 02 08:31: sound agent done (SoundEntriesAdvanced ducking/blend/time, own-character 2D x0.65, FSD footsteps, channels slider). Commit held until the mount agent finishes: they share npc_interaction_callback_handler.cpp and sweep_guard is red from in-progress mount work.
+- Nov 02 09:08: M2 materials and mounts/taxi agents running; sound commit held.
+- Nov 02 09:37: M2 shader selection/multitexture/Mod+Mod2x done (Dalaran fps unchanged within noise). Held with sound until mount agent finishes; shared CMakeLists and character_renderer.

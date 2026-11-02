@@ -7,6 +7,17 @@
 namespace wowee {
 namespace audio {
 
+namespace {
+// Every sound here is the character's own, or its mount's - one unit to the
+// stock client: in the head at 0.65 of its level with the listener at the
+// character, priority 110 (SoundOptions::ownCharacter).
+SoundOptions ownSound() {
+    SoundOptions o;
+    o.ownCharacter = true;
+    return o;
+}
+}  // namespace
+
 MountSoundManager::MountSoundManager() {
 }
 
@@ -331,38 +342,6 @@ void MountSoundManager::update(float deltaTime) {
     updateMountSounds();
 }
 
-void MountSoundManager::onMount(uint32_t creatureDisplayId, bool isFlying, const std::string& modelPath) {
-    mounted_ = true;
-    currentMountType_ = detectMountType(creatureDisplayId);
-
-    // Prefer model path detection (reliable) over display ID ranges (fragile)
-    if (!modelPath.empty()) {
-        currentMountFamily_ = detectMountFamilyFromPath(modelPath);
-    } else {
-        currentMountFamily_ = detectMountFamily(creatureDisplayId);
-    }
-
-    flying_ = isFlying;
-    moving_ = false;
-
-    LOG_INFO("Mount sound: mounted on display ID ", creatureDisplayId,
-             " type=", static_cast<int>(currentMountType_),
-             " family=", static_cast<int>(currentMountFamily_),
-             " flying=", flying_,
-             " model=", modelPath);
-
-    updateMountSounds();
-}
-
-void MountSoundManager::onDismount() {
-    stopAllMountSounds();
-    mounted_ = false;
-    currentMountType_ = MountType::NONE;
-    currentMountFamily_ = MountFamily::UNKNOWN;
-    flying_ = false;
-    moving_ = false;
-}
-
 void MountSoundManager::setMoving(bool moving) {
     if (moving_ != moving) {
         moving_ = moving;
@@ -400,7 +379,7 @@ void MountSoundManager::playRearUpSound() {
             std::uniform_int_distribution<size_t> dist(0, sounds.move.size() - 1);
             const auto& sample = sounds.move[dist(rng)];
             if (!sample.data.empty()) {
-                AudioEngine::instance().playSound2D(sample.data, 0.7f * volumeScale_, 1.0f);
+                AudioEngine::instance().playSound2D(sample.data, 0.7f * volumeScale_, 1.0f, SoundBus::World, ownSound());
             }
         }
     } else if (currentMountType_ == MountType::FLYING && !wingIdleSounds_.empty()) {
@@ -408,7 +387,7 @@ void MountSoundManager::playRearUpSound() {
         std::uniform_int_distribution<size_t> dist(0, wingIdleSounds_.size() - 1);
         const auto& sample = wingIdleSounds_[dist(rng)];
         if (!sample.data.empty()) {
-            AudioEngine::instance().playSound2D(sample.data, 0.6f * volumeScale_, 1.1f);
+            AudioEngine::instance().playSound2D(sample.data, 0.6f * volumeScale_, 1.1f, SoundBus::World, ownSound());
         }
     }
 }
@@ -428,7 +407,7 @@ void MountSoundManager::playJumpSound() {
             std::uniform_int_distribution<size_t> dist(0, sounds.jump.size() - 1);
             const auto& sample = sounds.jump[dist(rng)];
             if (!sample.data.empty()) {
-                AudioEngine::instance().playSound2D(sample.data, 0.5f * volumeScale_, 1.1f);
+                AudioEngine::instance().playSound2D(sample.data, 0.5f * volumeScale_, 1.1f, SoundBus::World, ownSound());
             }
         }
     } else if (currentMountType_ == MountType::FLYING && !wingFlapSounds_.empty()) {
@@ -436,7 +415,7 @@ void MountSoundManager::playJumpSound() {
         std::uniform_int_distribution<size_t> dist(0, wingFlapSounds_.size() - 1);
         const auto& sample = wingFlapSounds_[dist(rng)];
         if (!sample.data.empty()) {
-            AudioEngine::instance().playSound2D(sample.data, 0.4f * volumeScale_, 1.0f);
+            AudioEngine::instance().playSound2D(sample.data, 0.4f * volumeScale_, 1.0f, SoundBus::World, ownSound());
         }
     }
 }
@@ -456,7 +435,7 @@ void MountSoundManager::playLandSound() {
             std::uniform_int_distribution<size_t> dist(0, sounds.land.size() - 1);
             const auto& sample = sounds.land[dist(rng)];
             if (!sample.data.empty()) {
-                AudioEngine::instance().playSound2D(sample.data, 0.6f * volumeScale_, 0.85f);
+                AudioEngine::instance().playSound2D(sample.data, 0.6f * volumeScale_, 0.85f, SoundBus::World, ownSound());
             }
         }
     }
@@ -472,131 +451,10 @@ void MountSoundManager::playIdleSound() {
             std::uniform_int_distribution<size_t> dist(0, sounds.idle.size() - 1);
             const auto& sample = sounds.idle[dist(rng)];
             if (!sample.data.empty()) {
-                AudioEngine::instance().playSound2D(sample.data, 0.35f * volumeScale_, 0.95f);
+                AudioEngine::instance().playSound2D(sample.data, 0.35f * volumeScale_, 0.95f, SoundBus::World, ownSound());
             }
         }
     }
-}
-
-MountType MountSoundManager::detectMountType(uint32_t creatureDisplayId) const {
-    // Common flying mount display IDs (approximate ranges)
-    if (creatureDisplayId >= 2300 && creatureDisplayId <= 2320) return MountType::FLYING; // Gryphons
-    if (creatureDisplayId >= 1560 && creatureDisplayId <= 1580) return MountType::FLYING; // Wyverns
-    if (creatureDisplayId >= 25800 && creatureDisplayId <= 25900) return MountType::FLYING; // Drakes
-    if (creatureDisplayId >= 17880 && creatureDisplayId <= 17910) return MountType::FLYING; // Phoenixes
-
-    return MountType::GROUND;
-}
-
-MountFamily MountSoundManager::detectMountFamilyFromPath(const std::string& modelPath) const {
-    // Convert path to lowercase for matching
-    std::string lower = modelPath;
-    for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-
-    // Check creature model path for family keywords
-    if (lower.find("tallstrider") != std::string::npos ||
-        lower.find("plainstrider") != std::string::npos)
-        return MountFamily::TALLSTRIDER;
-    if (lower.find("wolf") != std::string::npos ||
-        lower.find("direwolf") != std::string::npos)
-        return MountFamily::WOLF;
-    if (lower.find("tiger") != std::string::npos ||
-        lower.find("nightsaber") != std::string::npos ||
-        lower.find("panther") != std::string::npos ||
-        lower.find("frostsaber") != std::string::npos)
-        return MountFamily::TIGER;
-    if (lower.find("raptor") != std::string::npos)
-        return MountFamily::RAPTOR;
-    if (lower.find("kodo") != std::string::npos)
-        return MountFamily::KODO;
-    if (lower.find("mechastrider") != std::string::npos ||
-        lower.find("mechanostrider") != std::string::npos)
-        return MountFamily::MECHANOSTRIDER;
-    if (lower.find("ram") != std::string::npos)
-        return MountFamily::RAM;
-    if (lower.find("horseundead") != std::string::npos ||
-        lower.find("skeletalhorse") != std::string::npos)
-        return MountFamily::UNDEAD_HORSE;
-    if (lower.find("horse") != std::string::npos)
-        return MountFamily::HORSE;
-    if (lower.find("hawkstrider") != std::string::npos)
-        return MountFamily::TALLSTRIDER;  // BC hawkstriders share tallstrider sounds
-    if (lower.find("dragon") != std::string::npos ||
-        lower.find("drake") != std::string::npos ||
-        lower.find("gryphon") != std::string::npos ||
-        lower.find("wyvern") != std::string::npos)
-        return MountFamily::DRAGON;
-
-    return MountFamily::UNKNOWN;  // Unknown family: stay silent
-}
-
-MountFamily MountSoundManager::detectMountFamily(uint32_t creatureDisplayId) const {
-    // Undead horses (skeletal warhorses) - check before generic horse range
-    // Display IDs: 10670 (Skeletal Horse), 10671-10672, 5765-5768
-    if ((creatureDisplayId >= 10670 && creatureDisplayId <= 10672) ||
-        (creatureDisplayId >= 5765 && creatureDisplayId <= 5768))
-        return MountFamily::UNDEAD_HORSE;
-
-    // Horses: common palomino/pinto/black stallion etc.
-    // 2402-2410 (standard horses), 14337-14348 (epic horses)
-    if ((creatureDisplayId >= 2402 && creatureDisplayId <= 2410) ||
-        (creatureDisplayId >= 14337 && creatureDisplayId <= 14348) ||
-        creatureDisplayId == 2404 || creatureDisplayId == 2405)
-        return MountFamily::HORSE;
-
-    // Rams: Dwarf ram mounts
-    // 2736-2737 (standard rams), 14347-14353 (epic rams), 14577-14578
-    if ((creatureDisplayId >= 2736 && creatureDisplayId <= 2737) ||
-        (creatureDisplayId >= 14347 && creatureDisplayId <= 14353) ||
-        (creatureDisplayId >= 14577 && creatureDisplayId <= 14578))
-        return MountFamily::RAM;
-
-    // Wolves: Orc wolf mounts
-    // 207-212 (dire wolves), 2320-2328 (epic wolves), 14573-14575
-    if ((creatureDisplayId >= 207 && creatureDisplayId <= 212) ||
-        (creatureDisplayId >= 2320 && creatureDisplayId <= 2330) ||
-        (creatureDisplayId >= 14573 && creatureDisplayId <= 14575))
-        return MountFamily::WOLF;
-
-    // Tigers/Nightsabers: Night elf cat mounts
-    // 6068-6074 (nightsabers), 6075-6080 (epic/frostsaber), 9991-9992, 14328-14332
-    if ((creatureDisplayId >= 6068 && creatureDisplayId <= 6080) ||
-        (creatureDisplayId >= 9991 && creatureDisplayId <= 9992) ||
-        (creatureDisplayId >= 14328 && creatureDisplayId <= 14332))
-        return MountFamily::TIGER;
-
-    // Raptors: Troll raptor mounts
-    // 6469-6474 (standard raptors), 14338-14344 (epic raptors), 4806
-    if ((creatureDisplayId >= 6469 && creatureDisplayId <= 6474) ||
-        (creatureDisplayId >= 14338 && creatureDisplayId <= 14344) ||
-        creatureDisplayId == 4806)
-        return MountFamily::RAPTOR;
-
-    // Kodo: Tauren kodo mounts
-    // 11641-11643 (standard kodo), 14348-14349 (great kodo), 12246
-    if ((creatureDisplayId >= 11641 && creatureDisplayId <= 11643) ||
-        (creatureDisplayId >= 14348 && creatureDisplayId <= 14349) ||
-        creatureDisplayId == 12246 || creatureDisplayId == 14349)
-        return MountFamily::KODO;
-
-    // Mechanostriders: Gnome mechanostrider mounts
-    // 6569-6571 (standard), 9473-9476 (epic), 10180, 14584
-    if ((creatureDisplayId >= 6569 && creatureDisplayId <= 6571) ||
-        (creatureDisplayId >= 9473 && creatureDisplayId <= 9476) ||
-        creatureDisplayId == 10180 || creatureDisplayId == 14584)
-        return MountFamily::MECHANOSTRIDER;
-
-    // Tallstriders (plainstrider mounts - Turtle WoW custom or future)
-    // 1961-1964
-    if (creatureDisplayId >= 1961 && creatureDisplayId <= 1964)
-        return MountFamily::TALLSTRIDER;
-
-    // Dragons/Drakes (flying)
-    if (creatureDisplayId >= 25800 && creatureDisplayId <= 25900)
-        return MountFamily::DRAGON;
-
-    // Unknown family: stay silent (avoid incorrect horse sounds on custom mounts)
-    return MountFamily::UNKNOWN;
 }
 
 void MountSoundManager::updateMountSounds() {
@@ -615,7 +473,7 @@ void MountSoundManager::updateMountSounds() {
                 std::uniform_real_distribution<float> volumeDist(0.4f, 0.5f);
                 std::uniform_real_distribution<float> pitchDist(0.95f, 1.05f);
                 AudioEngine::instance().playSound2D(
-                    sample.data, volumeDist(rng) * volumeScale_, pitchDist(rng));
+                    sample.data, volumeDist(rng) * volumeScale_, pitchDist(rng), SoundBus::World, ownSound());
                 soundLoopTimer_ = 0.0f;
             }
         } else if (!moving_ && !wingIdleSounds_.empty()) {
@@ -625,7 +483,7 @@ void MountSoundManager::updateMountSounds() {
                 std::uniform_real_distribution<float> volumeDist(0.3f, 0.4f);
                 std::uniform_real_distribution<float> pitchDist(0.98f, 1.02f);
                 AudioEngine::instance().playSound2D(
-                    sample.data, volumeDist(rng) * volumeScale_, pitchDist(rng));
+                    sample.data, volumeDist(rng) * volumeScale_, pitchDist(rng), SoundBus::World, ownSound());
                 soundLoopTimer_ = 0.0f;
             }
         }
@@ -648,7 +506,7 @@ void MountSoundManager::updateMountSounds() {
                 std::uniform_real_distribution<float> volumeDist(0.35f, 0.45f);
                 std::uniform_real_distribution<float> pitchDist(0.97f, 1.03f);
                 AudioEngine::instance().playSound2D(
-                    sample.data, volumeDist(rng) * volumeScale_, pitchDist(rng));
+                    sample.data, volumeDist(rng) * volumeScale_, pitchDist(rng), SoundBus::World, ownSound());
                 soundLoopTimer_ = 0.0f;
             }
         } else if (!moving_ && !sounds.idle.empty()) {
@@ -658,7 +516,7 @@ void MountSoundManager::updateMountSounds() {
                 std::uniform_real_distribution<float> volumeDist(0.25f, 0.35f);
                 std::uniform_real_distribution<float> pitchDist(0.98f, 1.02f);
                 AudioEngine::instance().playSound2D(
-                    sample.data, volumeDist(rng) * volumeScale_, pitchDist(rng));
+                    sample.data, volumeDist(rng) * volumeScale_, pitchDist(rng), SoundBus::World, ownSound());
                 soundLoopTimer_ = 0.0f;
             }
         }

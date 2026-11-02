@@ -9,6 +9,15 @@ namespace wowee {
 namespace audio {
 
 namespace {
+
+// Every sound here is the character's own, or its mount's - one unit to the
+// stock client: in the head at 0.65 of its level with the listener at the
+// character, priority 110 (SoundOptions::ownCharacter).
+SoundOptions ownSound() {
+    SoundOptions o;
+    o.ownCharacter = true;
+    return o;
+}
     std::random_device rd;
     std::mt19937 gen(rd());
 }
@@ -71,7 +80,7 @@ void MovementSoundManager::playSound(const std::vector<MovementSample>& library,
     if (!initialized_ || library.empty() || !library[0].loaded) return;
 
     float volume = 0.7f * volumeScale_ * volumeMultiplier;
-    AudioEngine::instance().playSound2D(library[0].data, volume, 1.0f);
+    AudioEngine::instance().playSound2D(library[0].data, volume, 1.0f, SoundBus::World, ownSound());
 }
 
 void MovementSoundManager::playRandomSound(const std::vector<MovementSample>& library, float volumeMultiplier) {
@@ -81,7 +90,7 @@ void MovementSoundManager::playRandomSound(const std::vector<MovementSample>& li
     const MovementSample* chosen = pickLoadedSample(library, gen);
     if (!chosen) return;
     const float volume = 0.7f * volumeScale_ * volumeMultiplier;
-    AudioEngine::instance().playSound2D(chosen->data, volume, 1.0f);
+    AudioEngine::instance().playSound2D(chosen->data, volume, 1.0f, SoundBus::World, ownSound());
 }
 
 void MovementSoundManager::setVolumeScale(float scale) {
@@ -104,6 +113,7 @@ void MovementSoundManager::playEnterWater(CharacterSize size) {
 }
 
 void MovementSoundManager::playWaterFootstep(CharacterSize size) {
+    if (waterStepsFromTables_) return;
     switch (size) {
         case CharacterSize::SMALL:
             playRandomSound(waterFootstepSmallSounds_, 0.6f);

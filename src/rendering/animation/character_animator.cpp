@@ -100,8 +100,8 @@ void CharacterAnimator::setSprintAuraActive(bool active) {
 
 // ── Mount ────────────────────────────────────────────────────────────────────
 
-void CharacterAnimator::configureMountFSM(const MountFSM::MountAnimSet& anims, bool taxiFlight) {
-    mount_.configure(anims, taxiFlight);
+void CharacterAnimator::configureMountFSM(const AnimCapabilitySet& mountCaps) {
+    mount_.configure(mountCaps);
 }
 
 void CharacterAnimator::clearMountFSM() {
@@ -115,8 +115,8 @@ AnimOutput CharacterAnimator::resolveAnimation() {
 
     // ── Mount takes over everything ─────────────────────────────────────
     if (mount_.isActive()) {
-        // MountFSM returns mount-specific output; rider anim is separate
-        // For the main character animation, we return MOUNT (or flight variant)
+        // The mount model is MountFSM's; the rider sits (AnimationController
+        // plays Mount or the mount aura's kit animation on it).
         uint32_t riderAnim = caps_.resolvedMount ? caps_.resolvedMount : anim::MOUNT;
         return AnimOutput::ok(riderAnim, true);
     }

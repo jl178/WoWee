@@ -88,19 +88,13 @@ void FootstepManager::playFootstep(FootstepSurface surface, bool sprinting) {
     if (!assetManager || sampleCount == 0 || !AudioEngine::instance().isInitialized()) {
         return;
     }
+    // The character's own steps come from its model's $FSD events and the
+    // FootstepTerrainLookup kit once the tables are read, as every other
+    // unit's do (Wow.exe 0x4cf170 plays both).
+    if (ownStepsFromTables_) return;
     playRandomStep(surface, FootstepBank::CHARACTER,
                    sprinting ? 0.09f : 0.14f,
                    sprinting ? 1.0f : 0.88f);
-}
-
-void FootstepManager::playMountFootstep(FootstepSurface surface, FootstepBank bank) {
-    if (!assetManager || sampleCount == 0 || !AudioEngine::instance().isInitialized()) {
-        return;
-    }
-    // Gallop hoofbeats land close together - allow a tighter interval than
-    // on-foot steps, and soften padded paws (wolf/tiger/raptor) slightly.
-    const float volumeMul = (bank == FootstepBank::CHARACTER) ? 0.85f : 1.0f;
-    playRandomStep(surface, bank, 0.06f, volumeMul);
 }
 
 void FootstepManager::preloadSurface(SurfaceSamples* bank, FootstepSurface surface,
@@ -181,11 +175,12 @@ bool FootstepManager::playRandomStep(FootstepSurface surface, FootstepBank bank,
     if (volume > 1.0f) volume = 1.0f;
     if (volume < 0.1f) volume = 0.1f;
 
-    // The player's own steps: in the listener's head, at priority 115, four
-    // at most at once (Wow.exe 0x4cf170, category 17).
+    // The player's own steps: in the listener's head at 0.65, at priority
+    // 115, four at most at once (Wow.exe 0x4cf170, category 17).
     SoundOptions opts;
     opts.priority = stock::kPriorityOwnFootstep;
     opts.category = stock::Category::OwnFootstep;
+    opts.ownCharacter = true;
     bool success = AudioEngine::instance().playSound2D(sample.data, volume, pitch, SoundBus::World, opts);
 
     if (success) {

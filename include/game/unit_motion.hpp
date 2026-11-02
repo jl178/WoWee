@@ -172,6 +172,13 @@ struct MoveSpeeds {
 /// sequence's MoveSpeed. 1 when the sequence has none.
 [[nodiscard]] float locomotionPlaybackRate(float unitSpeed, float sequenceMoveSpeed);
 
+/// The bank of a Flying spline's mover (0x98CA00): twice the signed angle
+/// from the path's horizontal direction `tangent` to the direction from the
+/// mover at `pos` to the point one second ahead, clamped to +-pi/2.
+/// Positive turns left (counter-clockwise seen from above).
+[[nodiscard]] float flyingSplineBank(const glm::vec3& tangent, const glm::vec3& pos,
+                                     const glm::vec3& ahead);
+
 /// One frame of the body turning toward the movement facing (0x73DAB0):
 /// past a quarter turn behind, the excess is taken at once; the rest at
 /// turnRate * 8 rad/s. Returns the new body facing in [-pi, pi).
@@ -273,6 +280,13 @@ public:
         bool animationStarted = false;// an Animation effect began: the tier
         uint8_t animationTier = 0;
         bool landed = false;          // a falling spline met its end height
+        /// A Flying spline on a unit with neither SWIMMING nor FLYING (a
+        /// taxi): the model takes the path's 3D direction - its pitch here -
+        /// and banks by twice the turn to the point one second ahead,
+        /// clamped to +-pi/2; positive is a turn to the left (0x98CA00).
+        bool hasAttitude = false;
+        float attitudePitch = 0.0f;
+        float bank = 0.0f;
     };
 
     /// 0x98CA00, plus the effect edges 0x6E9C30 reports. `moveFlags` are the

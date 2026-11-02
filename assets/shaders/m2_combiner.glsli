@@ -1,0 +1,123 @@
+// The stock M2 pixel combiners and environment texture coordinates, shared by
+// m2 and character shaders. docs/re/m2-runtime.md §3 "Shader selection".
+//
+// Wow.exe 3.3.5a draws each M2 batch with one of the Combiners_* pixel shaders
+// (shaders\pixel\arbfp1\combiners_*.bls), chosen per batch at load (0x836600,
+// 0x836C90; rendering/m2_effect_select.hpp, whose Combiner values these are).
+// Every one of them is, written out:
+//
+//     rgb   = mul * col.rgb + add
+//     alpha = aMul * col.a + aAdd
+//
+// with t0, t1 the two texture stages and col the vertex colour - the lit
+// material colour, whose alpha is the batch alpha. The split lets the caller
+// apply its own lighting where col.rgb stands; the part outside it (an env
+// shine added by Opaque_AddNA, say) is never lit.
+
+struct M2Combined {
+    vec3 mul;
+    vec3 add;
+    float aMul;
+    float aAdd;
+};
+
+const int M2C_OPAQUE = 0;
+const int M2C_MOD = 1;
+const int M2C_DECAL = 2;
+const int M2C_ADD = 3;
+const int M2C_MOD2X = 4;
+const int M2C_FADE = 5;
+const int M2C_OPAQUE_OPAQUE = 6;
+const int M2C_OPAQUE_MOD = 7;
+const int M2C_OPAQUE_ADD = 8;
+const int M2C_OPAQUE_MOD2X = 9;
+const int M2C_OPAQUE_MOD2XNA = 10;
+const int M2C_OPAQUE_ADDNA = 11;
+const int M2C_MOD_OPAQUE = 12;
+const int M2C_MOD_MOD = 13;
+const int M2C_MOD_ADD = 14;
+const int M2C_MOD_MOD2X = 15;
+const int M2C_MOD_MOD2XNA = 16;
+const int M2C_MOD_ADDNA = 17;
+const int M2C_ADD_MOD = 18;
+const int M2C_MOD2X_MOD2X = 19;
+const int M2C_OPAQUE_MOD2XNA_ALPHA = 20;
+const int M2C_OPAQUE_ADDALPHA = 21;
+const int M2C_OPAQUE_ADDALPHA_ALPHA = 22;
+
+// colA is only read by Decal and Fade, which blend toward col by its alpha
+// and are the two that do not split; no 3.3.5 batch selects either.
+M2Combined m2Combine(int id, vec4 t0, vec4 t1, float colA) {
+    M2Combined c;
+    c.mul = t0.rgb;
+    c.add = vec3(0.0);
+    c.aMul = t0.a;
+    c.aAdd = 0.0;
+    switch (id) {
+        case M2C_OPAQUE:
+            c.aMul = 1.0; break;
+        case M2C_MOD:
+            break;
+        case M2C_DECAL:
+            c.mul = vec3(colA); c.add = t0.rgb * (1.0 - colA); c.aMul = 1.0; break;
+        case M2C_ADD:
+            c.mul = vec3(1.0); c.add = t0.rgb; c.aMul = 1.0; c.aAdd = t0.a; break;
+        case M2C_MOD2X:
+            c.mul = t0.rgb * 2.0; c.aMul = t0.a * 2.0; break;
+        case M2C_FADE:
+            c.mul = vec3(1.0 - colA); c.add = t0.rgb * colA; c.aMul = 1.0; break;
+        case M2C_OPAQUE_OPAQUE:
+            c.mul = t0.rgb * t1.rgb; c.aMul = 1.0; break;
+        case M2C_OPAQUE_MOD:
+            c.mul = t0.rgb * t1.rgb; c.aMul = t1.a; break;
+        case M2C_OPAQUE_ADD:
+            c.add = t1.rgb; c.aMul = 1.0; c.aAdd = t1.a; break;
+        case M2C_OPAQUE_MOD2X:
+            c.mul = t0.rgb * t1.rgb * 2.0; c.aMul = t1.a * 2.0; break;
+        case M2C_OPAQUE_MOD2XNA:
+            c.mul = t0.rgb * t1.rgb * 2.0; c.aMul = 1.0; break;
+        case M2C_OPAQUE_ADDNA:
+            c.add = t1.rgb; c.aMul = 1.0; break;
+        case M2C_MOD_OPAQUE:
+            c.mul = t0.rgb * t1.rgb; break;
+        case M2C_MOD_MOD:
+            c.mul = t0.rgb * t1.rgb; c.aMul = t0.a * t1.a; break;
+        case M2C_MOD_ADD:
+            c.add = t1.rgb; c.aAdd = t1.a; break;
+        case M2C_MOD_MOD2X:
+            c.mul = t0.rgb * t1.rgb * 2.0; c.aMul = t0.a * t1.a * 2.0; break;
+        case M2C_MOD_MOD2XNA:
+            c.mul = t0.rgb * t1.rgb * 2.0; break;
+        case M2C_MOD_ADDNA:
+            c.add = t1.rgb; break;
+        case M2C_ADD_MOD:
+            // (t0 + col) * t1, alpha (t0.a + col.a) * t1.a.
+            c.mul = t1.rgb; c.add = t0.rgb * t1.rgb; c.aMul = t1.a; c.aAdd = t0.a * t1.a; break;
+        case M2C_MOD2X_MOD2X:
+            c.mul = t0.rgb * t1.rgb * 4.0; c.aMul = t0.a * t1.a * 4.0; break;
+        case M2C_OPAQUE_MOD2XNA_ALPHA:
+            // The shine where the base texture's alpha is 0, none where 1.
+            c.mul = mix(t0.rgb * t1.rgb * 2.0, t0.rgb, t0.a); c.aMul = 1.0; break;
+        case M2C_OPAQUE_ADDALPHA:
+            c.add = t1.rgb * t1.a; c.aMul = 1.0; break;
+        case M2C_OPAQUE_ADDALPHA_ALPHA:
+            c.mul = t0.rgb + t1.rgb * t1.a * (1.0 - t0.a); c.aMul = 1.0; break;
+        default:
+            break;
+    }
+    return c;
+}
+
+// The sphere environment coordinates of the Diffuse_*_Env vertex shaders
+// (shaders\vertex\arbvp1\diffuse_t1_env.bls). Stock works in a view space that
+// looks down +z and takes r = -reflect(p, n) with p the normalised view-space
+// position, then uv = r.xy / |r + (0, 0, 1)| * 0.5 + 0.5. In this client's view
+// space, which looks down -z, the same reflection is (-r.x, -r.y, r.z) of the
+// one computed here, so the map comes out turned half round from OpenGL's.
+vec2 m2SphereEnvUv(vec3 viewPos, vec3 viewNormal) {
+    vec3 p = normalize(viewPos);
+    vec3 n = normalize(viewNormal);
+    vec3 r = reflect(p, n);
+    float m = max(length(vec3(r.xy, r.z + 1.0)), 1e-4);
+    return 0.5 - r.xy / m * 0.5;
+}

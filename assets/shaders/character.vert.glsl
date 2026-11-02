@@ -17,9 +17,13 @@ layout(set = 0, binding = 0) uniform PerFrame {
 
 layout(push_constant) uniform Push {
     mat4 model;
-    // xy: the batch's M2 texture-animation translation (UV scroll), pushed
-    // per batch by CharacterRenderer; zero for batches without one.
+    // xy: the first texture stage's M2 texture-animation translation (UV
+    // scroll), zw the second stage's, pushed per batch by CharacterRenderer;
+    // zero for batches without one.
     vec4 uvOffset;
+    // x: where each stage's coordinates come from (m2fx::UvSource), bits
+    // 0-1 the first stage and 2-3 the second: 0 UV0, 1 UV1, 2 env map.
+    ivec4 stages;
 } push;
 
 layout(set = 2, binding = 0) readonly buffer BoneSSBO {
@@ -32,12 +36,21 @@ layout(location = 2) in uvec4 aBoneIndices;
 layout(location = 3) in vec3 aNormal;
 layout(location = 4) in vec2 aTexCoord;
 layout(location = 5) in vec4 aTangent;
+layout(location = 6) in vec2 aTexCoord2;
 
 layout(location = 0) out vec3 FragPos;
 layout(location = 1) out vec3 Normal;
 layout(location = 2) out vec2 TexCoord;
 layout(location = 3) out vec3 Tangent;
 layout(location = 4) out vec3 Bitangent;
+layout(location = 5) out vec2 TexCoord2;
+
+#include "m2_combiner.glsli"
+
+vec2 stageUv(int src, vec2 env, vec2 offset) {
+    if (src == 2) return env;
+    return (src == 1 ? aTexCoord2 : aTexCoord) + offset;
+}
 
 vec3 safeNormalize(vec3 v, vec3 fallback) {
     float len2 = dot(v, v);
@@ -69,7 +82,16 @@ void main() {
     mat3 modelMat3 = mat3(push.model);
     FragPos = worldPos.xyz;
     Normal = modelMat3 * skinnedNorm;
-    TexCoord = aTexCoord + push.uvOffset.xy;
+    // The stock vertex shaders' stage coordinates (Diffuse_T1, _T2, _Env and
+    // their pairs): a UV set through the stage's transform, or the sphere map.
+    int src0 = push.stages.x & 3;
+    int src1 = (push.stages.x >> 2) & 3;
+    vec2 env = vec2(0.0);
+    if (src0 == 2 || src1 == 2) {
+        env = m2SphereEnvUv((view * worldPos).xyz, mat3(view) * Normal);
+    }
+    TexCoord = stageUv(src0, env, push.uvOffset.xy);
+    TexCoord2 = stageUv(src1, env, push.uvOffset.zw);
 
     // Gram-Schmidt re-orthogonalize tangent w.r.t. normal
     vec3 N = safeNormalize(Normal, vec3(0.0, 0.0, 1.0));

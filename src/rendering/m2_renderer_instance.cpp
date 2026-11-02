@@ -2011,6 +2011,9 @@ void M2Renderer::recreatePipelines() {
     destroy(device, alphaTestPipeline_);
     destroy(device, alphaPipeline_);
     destroy(device, additivePipeline_);
+    destroy(device, addOnePipeline_);
+    destroy(device, modPipeline_);
+    destroy(device, mod2xPipeline_);
     destroy(device, particlePipeline_);
     destroy(device, particleAdditivePipeline_);
     for (VkPipeline& p : particleGpuPipelines_) destroy(device, p);

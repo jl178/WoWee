@@ -50,9 +50,6 @@ public:
     void shutdown();
     void update(float deltaTime);
 
-    // Called when mounting/dismounting
-    void onMount(uint32_t creatureDisplayId, bool isFlying, const std::string& modelPath = "");
-    void onDismount();
 
     // Update movement state
     void setMoving(bool moving);
@@ -71,9 +68,6 @@ public:
     [[nodiscard]] float getVolumeScale() const { return volumeScale_; }
 
 private:
-    [[nodiscard]] MountType detectMountType(uint32_t creatureDisplayId) const;
-    [[nodiscard]] MountFamily detectMountFamily(uint32_t creatureDisplayId) const;
-    [[nodiscard]] MountFamily detectMountFamilyFromPath(const std::string& modelPath) const;
     void updateMountSounds();
     void stopAllMountSounds();
     void loadMountSounds();

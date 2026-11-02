@@ -114,9 +114,26 @@ constexpr float kListenerUpDist = 4.0f;
 /// Doppler anywhere (set3DAttributes is given a null velocity).
 glm::vec3 listenerPosition(const glm::vec3& characterPosition, const glm::vec3& cameraForward);
 
-/// Sounds of the player's own unit (voice, steps, swings) play in 2D at this
-/// multiple of their volume while the listener is at the character.
+/// Sounds of the player's own unit (voice, steps, emotes, model and spell
+/// sounds - not its weapon swings, 0x4d0720 places those at the unit like
+/// anyone's) play in 2D at this multiple of their volume while the listener
+/// is at the character (0x9f2818). See SoundOptions::ownCharacter.
 constexpr float kOwnCharacterVolume = 0.65f;
+
+/// CreatureSoundData kinds (0x7461e0): 0 exertion, 1 exertion critical,
+/// 2 injury, 3 injury critical, 4 stun, 5 stand, 7 wing flap, 8 alert,
+/// 9 injury crushing blow, 10 wing glide, 11 jump start, 12 jump end.
+enum class UnitSoundKind : uint8_t {
+    Exertion = 0, ExertionCritical = 1, Injury = 2, InjuryCritical = 3, Stun = 4, Stand = 5,
+    WingFlap = 7, Alert = 8, InjuryCrushingBlow = 9, WingGlide = 10, JumpStart = 11, JumpEnd = 12,
+};
+/// The chance in 100 that an unforced unit sound plays: a roll against
+/// 0xadb5d8 for creatures (0x747310) and 0xadba74 for players (0x7631a0).
+/// Exertion 70 / 35, injury 60 / 30, stand 40 for both, the rest always.
+int unitSoundChance(UnitSoundKind kind, bool player);
+/// The category a unit sound plays in (0x746b30): exertion 9, injury 11,
+/// and for the active player's own injuries 12 (0x7631a0).
+Category unitSoundCategory(UnitSoundKind kind, bool ownPlayer);
 
 // ---------------------------------------------------------------------------
 // Volumes (CVars 0x4d1600; channel volume 0x878fd0)

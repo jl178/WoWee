@@ -839,8 +839,10 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
         // hopping up a cliff a jump at a time is what that stops.
         // Not while rooted either: the stock jump refuses ROOT, FALLING and
         // FLYING (0x9883F0 tests 0x2001800).
+        // Mounted the same: the stock client jumps a mount as it jumps a
+        // character (0x9883F0 has no mounted test).
         bool canJump = (grounded || coyoteTimer > 0.0f) && (jumpBufferTimer > 0.0f) &&
-                       !mounted_ && !onSteepSlope_ && !movementRooted_;
+                       !onSteepSlope_ && !movementRooted_;
         if (canJump) {
             verticalVelocity = f.jumpVel;
             grounded = false;
@@ -2878,7 +2880,7 @@ void CameraController::updateFreeFlyCamera(float /*deltaTime*/, FrameInput& f) {
         if (f.nowJump) jumpBufferTimer = JUMP_BUFFER_TIME;
         if (grounded) coyoteTimer = COYOTE_TIME;
 
-        if ((grounded || coyoteTimer > 0.0f) && jumpBufferTimer > 0.0f && !mounted_) {
+        if ((grounded || coyoteTimer > 0.0f) && jumpBufferTimer > 0.0f) {
             verticalVelocity = f.jumpVel;
             grounded = false;
             jumpBufferTimer = 0.0f;
@@ -3321,6 +3323,7 @@ void CameraController::update(float deltaTime) {
     }
 
     bool hasMoveInput = nowForward || nowBackward || nowStrafeLeft || nowStrafeRight;
+    currentMoveSpeed_ = hasMoveInput ? speed : 0.0f;
     if (useWoWSpeed) {
         // "Sprinting" flag drives run animation/stronger footstep set.
         // In WoW mode this means running pace (not walk/backpedal), not Shift.
@@ -4294,17 +4297,6 @@ void CameraController::clearMovementInputs() {
 
 bool CameraController::isSprinting() const {
     return enabled && camera && runPace;
-}
-
-void CameraController::triggerMountJump() {
-    // Apply physics-driven mount jump: vz = sqrt(2 * g * h)
-    // Desired height and gravity are configurable constants
-    // The stock client jumps a mount exactly as it jumps a character.
-    if ((grounded || coyoteTimer > 0.0f) && !onSteepSlope_ && !movementRooted_) {
-        verticalVelocity = useWoWSpeed ? WOW_JUMP_VELOCITY : JUMP_VELOCITY;
-        grounded = false;
-        coyoteTimer = 0.0f;
-    }
 }
 
 void CameraController::applyKnockBack(float vcos, float vsin, float hspeed, float vspeed) {

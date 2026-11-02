@@ -497,3 +497,42 @@ TEST_CASE("SoundData draws a kit's files the stock way and stops at the first ga
     }
     REQUIRE(data.nextFile(4242) == nullptr);
 }
+
+TEST_CASE("SoundData reads SoundEntriesAdvanced by the kit that names it", "[sound_data]") {
+    namespace stock = wowee::audio::stock;
+    Fixture f;
+    Strings se;
+    // Kit 600 names advanced row 9; kit 601 names none; row 10's own
+    // SoundEntryID points at 601, which does not name it back.
+    f.tables["SoundEntries.dbc"] = table(30, {
+        row(30, {{0, 600}, {2, se.add("BossLine")}, {3, se.add("a.wav")}, {29, 9}}),
+        row(30, {{0, 601}, {2, se.add("Plain")}, {3, se.add("b.wav")}}),
+    }, se.block);
+    Strings sa;
+    f.tables["SoundEntriesAdvanced.dbc"] = table(24, {
+        row(24, {{0, 9}, {1, 600}, {2, bits(8.0f)}, {3, 14400000}, {4, 10800000}, {5, 7200000}, {6, 3600000},
+                 {7, 7000}, {8, 1}, {9, 3000}, {10, 5000}, {11, 2}, {12, bits(0.3f)}, {13, bits(0.75f)},
+                 {14, bits(2.0f)}, {15, bits(60.0f)}, {16, bits(45.0f)}, {17, 1000}, {18, 3000},
+                 {19, bits(180.0f)}, {20, bits(270.0f)}, {21, bits(0.0f)}, {22, bits(20.0f)}, {23, sa.add("x")}}),
+        row(24, {{0, 10}, {1, 601}, {8, 2}, {23, sa.add("y")}}),
+    }, sa.block);
+    SoundData data;
+    REQUIRE(data.load(f.loader()));
+    REQUIRE(data.advancedKit(601) == nullptr);
+    const stock::AdvancedKit* k = data.advancedKit(600);
+    REQUIRE(k != nullptr);
+    REQUIRE(k->id == 9);
+    REQUIRE(k->usage == stock::AdvancedUsage::Interval);
+    REQUIRE(k->category == stock::Category::Ambience);
+    REQUIRE(k->innerRadius2D == Catch::Approx(8.0f));
+    REQUIRE(k->outerRadius2D == Catch::Approx(20.0f));
+    REQUIRE(k->intervalMinMs == 3000);
+    REQUIRE(k->intervalMaxMs == 5000);
+    REQUIRE(k->randomOffsetRange == 7000);
+    // Normalised as the instance copies it.
+    REQUIRE(k->time[3] == 3600000 + stock::kDayMs);
+    REQUIRE(k->duck[0] == Catch::Approx(0.3f));
+    REQUIRE(k->duck[2] == 1.0f);
+    REQUIRE(k->innerRadiusOfInfluence == Catch::Approx(45.0f));
+    REQUIRE(k->timeToUnduckMs == 3000);
+}

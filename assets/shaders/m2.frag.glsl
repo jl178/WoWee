@@ -24,8 +24,11 @@ layout(set = 0, binding = 0) uniform PerFrame {
 
 #include "rt_lighting.glsli"
 #include "stock_fog.glsli"
+#include "m2_combiner.glsli"
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
+// The batch's second texture stage (white when it has one stage).
+layout(set = 1, binding = 3) uniform sampler2D uTexture2;
 
 layout(set = 1, binding = 2) uniform M2Material {
     int hasTexture;
@@ -43,6 +46,10 @@ layout(set = 1, binding = 2) uniform M2Material {
     float tintB;
     int volumetricBeam;
     int fireCard;
+    // The stock pixel shader (m2_combiner.glsli) and how many texture stages
+    // it reads.
+    int combiner;
+    int texStages;
 };
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
@@ -56,6 +63,7 @@ layout(location = 4) in float ModelHeight;
 layout(location = 5) in float vFadeAlpha;
 layout(location = 6) flat in int vSkyMode;
 layout(location = 7) flat in float vHighlight;
+layout(location = 8) in vec2 TexCoord2;
 
 layout(location = 0) out vec4 outColor;
 
@@ -181,10 +189,14 @@ vec4 fogVolumeSky(vec2 uv) {
 
 void main() {
     vec4 texColor = hasTexture != 0 ? texture(uTexture, TexCoord) : vec4(1.0);
+    vec4 texColor2 = texStages > 1 ? texture(uTexture2, TexCoord2) : vec4(1.0);
     // The batch's authored colour. A glow card is painted white and coloured
     // here - Orgrimmar's bonfire carries (1.0, 0.329, 0.0) - so without it
-    // every fire in the world burns white.
-    texColor.rgb *= vec3(tintR, tintG, tintB);
+    // every fire in the world burns white. Stock puts it in the material
+    // colour (0x81FE90), which the combiner multiplies by the lit part only;
+    // Mod and Mod2x batches take none (diffuse 0, emissive 1 or 0.5).
+    bool modBlend = (blendMode == 5 || blendMode == 6);
+    vec3 tint = modBlend ? vec3(blendMode == 6 ? 0.5 : 1.0) : vec3(tintR, tintG, tintB);
 
     // Original client sky M2s carry their authored colour and alpha, and are
     // taken as they are. They are camera-centered and unlit, and must not be
@@ -207,17 +219,18 @@ void main() {
         // An opaque layer's alpha channel says nothing - it was never
         // blended - so only the fade is its alpha. That matters while the
         // sky crossfades between zones, when every layer is drawn blended.
-        float skyAlpha = (blendMode == 0) ? 1.0 : texColor.a;
+        M2Combined skyCmb = m2Combine(combiner, texColor, texColor2, vFadeAlpha);
+        float skyAlpha = skyCmb.aMul * vFadeAlpha + skyCmb.aAdd;
         // Behind all the air there is, as the procedural sky is. An
         // additive layer only loses what the air hides of it; the air's own
         // light is already in the layer it is added to.
-        vec3 skyColor = texColor.rgb;
+        vec3 skyColor = skyCmb.mul * tint + skyCmb.add;
         if (volumetricParams.x > 0.5) {
             vec4 clip = projection * view * vec4(FragPos, 1.0);
             vec4 air = fogVolumeSky(clip.xy / max(clip.w, 1e-4) * 0.5 + 0.5);
             skyColor = (blendMode >= 3) ? skyColor * air.a : skyColor * air.a + air.rgb;
         }
-        outColor = vec4(skyColor, skyAlpha * vFadeAlpha);
+        outColor = vec4(skyColor, skyAlpha);
         return;
     }
 
@@ -268,7 +281,7 @@ void main() {
         if (texColor.a < 1.0 / 255.0) discard;
     }
     if (colorKeyBlack != 0) {
-        float lum = dot(texColor.rgb, vec3(0.299, 0.587, 0.114));
+        float lum = dot(texColor.rgb * tint, vec3(0.299, 0.587, 0.114));
         if (lum < colorKeyThreshold) discard;
     }
     if (blendMode == 1 && texColor.a < 0.004) discard;
@@ -311,20 +324,30 @@ void main() {
         norm = normalize(norm + vec3(nx, ny, 0.0));
     }
 
+    // The stock combiner: what the lit material colour multiplies (albedo)
+    // and what is added unlit after it (an env shine, say). Taken after the
+    // cutout work above, which reads and sharpens the first stage's alpha.
+    M2Combined cmb = m2Combine(combiner, texColor, texColor2, vFadeAlpha);
+    vec3 albedo = cmb.mul * tint;
+
     vec3 ldir = normalize(-lightDir.xyz);
         float nDotL = dot(norm, ldir);
         float diff = max(nDotL, 0.0);  // a leaf's back stays dark
 
     vec3 result;
-    if (unlit != 0) {
-        result = texColor.rgb * emissiveBoost;
+    if (modBlend) {
+        // Mod and Mod2x: diffuse 0, emissive 1 or 0.5 (0x81FE90), so the
+        // colour is the combiner's output against a constant - no light.
+        result = albedo;
+    } else if (unlit != 0) {
+        result = albedo * emissiveBoost;
         if (emissiveBoost > 1.0) {
             // Weighted by the texel's own brightness. Added flat it lit the
             // whole quad, and a glow card is black everywhere but its middle,
             // so the card's rectangle appeared as an orange panel hanging on
             // whatever was behind the fire. Black has nothing to boost.
             float emissiveWeight =
-                dot(texColor.rgb, vec3(0.299, 0.587, 0.114));
+                dot(albedo, vec3(0.299, 0.587, 0.114));
             result += vec3(0.32, 0.14, 0.025) * (emissiveBoost - 1.0) *
                       emissiveWeight;
         }
@@ -378,7 +401,7 @@ void main() {
         // ambient + diffuse * N.L before the texture (shaders/vertex/arbvp1/
         // diffuse_t1.bls: MIN R0, R0, 1).
         vec3 light = min(ambientTerm + shadow * diff * lightColor.rgb, vec3(1.0));
-        result = light * texColor.rgb + shadow * spec * lightColor.rgb;
+        result = light * albedo + shadow * spec * lightColor.rgb;
         // No leaf glow (sss unused): stock foliage is lit like any other M2.
 
         if (interiorDarken > 0.0) {
@@ -401,10 +424,18 @@ void main() {
         result *= aoFactor;
     }
 
-    if (unlit == 0) result += localLightContribution(FragPos, norm, texColor.rgb);
+    if (unlit == 0 && !modBlend) result += localLightContribution(FragPos, norm, albedo);
+    // The combiner's unlit part (Opaque_AddNA's env shine and the like).
+    result += cmb.add;
 
     float dist = length(viewPos.xyz - FragPos);
-    if (blendMode >= 3) {
+    if (modBlend) {
+        // Mod and Mod2x fog toward the colour that leaves the framebuffer as
+        // it is: white for Mod, grey for Mod2x (table 0xA45390).
+        vec3 neutral = vec3(blendMode == 6 ? 0.5 : 1.0);
+        result = mix(neutral, result, stockFogVisibility(FragPos));
+        if (volumetricParams.x > 0.5) result = mix(neutral, result, fogVolumeAt(FragPos).a);
+    } else if (blendMode >= 3) {
         // Additive. Mixing toward the fog colour would give the card's black
         // corners the fog's colour, and additive then adds that to the scene -
         // the whole quad shows up as a lit rectangle hanging in the air, which
@@ -419,7 +450,7 @@ void main() {
         result = applyFog(result, FragPos, dist);
     }
 
-    float outAlpha = texColor.a * vFadeAlpha;
+    float outAlpha = cmb.aMul * vFadeAlpha + cmb.aAdd;
     // Cutout materials output the sharpened coverage alpha computed above -
     // alpha-to-coverage turns it into per-sample coverage for smooth edges.
     // Color-key-only materials have no meaningful texture alpha; keep them
@@ -427,6 +458,9 @@ void main() {
     if (colorKeyBlack != 0 && alphaTest == 0) {
         outAlpha = vFadeAlpha;
     }
+    // Stock's alpha reference for every blended mode is 1/255 (0x81FE90):
+    // a texel with no alpha leaves the framebuffer alone, whatever its colour.
+    if (blendMode >= 2 && alphaTest == 0 && colorKeyBlack == 0 && outAlpha < 1.0 / 255.0) discard;
     // The distance fade, for a batch drawn with no blending to fade through.
     // Sixteen ordered steps against the fragment's own screen position: a tree
     // at the edge of the draw distance thins out rather than switching off,

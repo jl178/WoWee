@@ -283,7 +283,8 @@ void CombatSoundManager::playImpact([[maybe_unused]] WeaponSize weaponSize, Impa
 // ---------------------------------------------------------------------------
 
 bool CombatSoundManager::playEntry3D(uint32_t soundId, const glm::vec3& position, float volumeMul,
-                                     stock::Category category) {
+                                     stock::Category category, const SoundOptions* base,
+                                     float scaleOverride) {
     if (!initialized_ || !soundData_ || soundId == 0) return false;
     const SoundEntry* entry = soundData_->sound(soundId);
     if (!entry || entry->files.empty()) return false;
@@ -300,13 +301,15 @@ bool CombatSoundManager::playEntry3D(uint32_t soundId, const glm::vec3& position
     // four weapon impacts, two swings, two wound cries.
     const std::string* file = soundData_->nextFile(*entry);
     if (!file) return false;
-    SoundOptions opts;
+    SoundOptions opts = base ? *base : SoundOptions{};
     opts.minDistance = entry->minDistance;
     opts.kitId = soundId;
     opts.category = category;
     opts.noDuplicate = (entry->flags & stock::kFlagNoDuplicate) != 0;
     return engine.playSound3D(*file, position,
-                              stock::kitVolume(entry->volume, entry->flags, volumeScale_ * volumeMul, gen),
+                              stock::kitVolume(entry->volume, entry->flags,
+                                               (scaleOverride >= 0.0f ? scaleOverride : volumeScale_) * volumeMul,
+                                               gen),
                               stock::kitPitch(entry->flags, gen), maxDistance, opts);
 }
 
@@ -483,7 +486,7 @@ void CombatSoundManager::update() {
 }
 
 void CombatSoundManager::playBodySound(uint32_t displayId, BodySound which, uint32_t index,
-                                       const glm::vec3& position) {
+                                       const glm::vec3& position, bool own) {
     const CreatureSounds* cs = soundData_ ? soundData_->displaySounds(displayId) : nullptr;
     if (!cs) return;
     uint32_t soundId = 0;
@@ -507,16 +510,27 @@ void CombatSoundManager::playBodySound(uint32_t displayId, BodySound which, uint
             category = stock::Category::CreatureInjury;
             break;
     }
-    playEntry3D(soundId, position, 1.0f, category);
+    SoundOptions base;
+    base.ownCharacter = own;
+    playEntry3D(soundId, position, 1.0f, category, &base);
 }
 
 void CombatSoundManager::playFootstep(uint32_t displayId, uint32_t terrainSoundId, bool inWater,
-                                      const glm::vec3& position) {
+                                      const glm::vec3& position, bool own, float ownVolumeScale) {
     const CreatureSounds* cs = soundData_ ? soundData_->displaySounds(displayId) : nullptr;
     if (!cs || cs->footstep == 0) return;
-    // Other units' steps: six at most at once, world-wide (0x4cf170).
-    playEntry3D(soundData_->footstepSound(cs->footstep, terrainSoundId, inWater), position, 1.0f,
-                stock::Category::Footstep);
+    const uint32_t sound = soundData_->footstepSound(cs->footstep, terrainSoundId, inWater);
+    if (!own) {
+        // Other units' steps: six at most at once, world-wide (0x4cf170).
+        playEntry3D(sound, position, 1.0f, stock::Category::Footstep);
+        return;
+    }
+    // The character's own: in the head at 0.65 with the listener at the
+    // character, priority 115, four at once (category 17).
+    SoundOptions base;
+    base.ownCharacter = true;
+    base.priority = stock::kPriorityOwnFootstep;
+    playEntry3D(sound, position, 1.0f, stock::Category::OwnFootstep, &base, ownVolumeScale);
 }
 } // namespace audio
 } // namespace wowee

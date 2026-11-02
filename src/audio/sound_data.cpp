@@ -58,6 +58,15 @@ namespace sem { constexpr uint32_t kFields = 10, kPos = 1, kSound = 7, kMap = 8,
 // VocalUISounds: ID, VocalUIEnum, RaceID, NormalSoundID[2] (male, female),
 // PissedSoundID[2]. An unused sound column holds 0 or 0xFFFFFFFF.
 namespace vui { constexpr uint32_t kFields = 7, kEnum = 1, kRace = 2, kSound0 = 3; }
+// SoundEntriesAdvanced: ID, SoundEntryID, InnerRadius2D, TimeA..D,
+// RandomOffsetRange, Usage, TimeIntervalMin, TimeIntervalMax,
+// VolumeSliderCategory, DuckToSFX, DuckToMusic, DuckToAmbience,
+// InnerRadiusOfInfluence, OuterRadiusOfInfluence, TimeToDuck, TimeToUnduck,
+// InsideAngle, OutsideAngle, OutsideVolume, OuterRadius2D, Name.
+namespace sea { constexpr uint32_t kFields = 24, kInner2D = 2, kTimeA = 3, kOffset = 7, kUsage = 8,
+                kIntervalMin = 9, kIntervalMax = 10, kCategory = 11, kDuck0 = 12, kInnerInfluence = 15,
+                kOuterInfluence = 16, kTimeToDuck = 17, kTimeToUnduck = 18, kInsideAngle = 19,
+                kOutsideAngle = 20, kOutsideVolume = 21, kOuter2D = 22; }
 
 constexpr int kMaxParentDepth = 16;
 
@@ -102,6 +111,7 @@ bool SoundData::load(const Loader& loadDbc) {
     footsteps_.clear();
     itemGroupSounds_.clear();
     vocalUiSounds_.clear();
+    advancedByKit_.clear();
     loader_ = loadDbc;
     itemDisplayInfo_.reset();
     itemDisplayInfoTried_ = false;
@@ -267,6 +277,42 @@ bool SoundData::load(const Loader& loadDbc) {
             vocalUiSounds_.emplace(key, ids);
         }
     }
+    // The advanced rows, by the kit that names them. The kit's own column is
+    // what the client follows (kit +0xa8, set by 0x4cd4a0), not the row's
+    // SoundEntryID: two rows name a kit that does not name them back.
+    if (auto dbc = table(loadDbc, "SoundEntriesAdvanced.dbc", sea::kFields)) {
+        std::unordered_map<uint32_t, stock::AdvancedKit> byId;
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            stock::AdvancedKit k;
+            k.id = dbc->getUInt32(i, 0);
+            k.soundEntryId = dbc->getUInt32(i, 1);
+            k.innerRadius2D = dbc->getFloat(i, sea::kInner2D);
+            k.outerRadius2D = dbc->getFloat(i, sea::kOuter2D);
+            for (uint32_t t = 0; t < 4; ++t) k.time[t] = dbc->getInt32(i, sea::kTimeA + t);
+            k.randomOffsetRange = dbc->getInt32(i, sea::kOffset);
+            k.usage = static_cast<stock::AdvancedUsage>(std::min<uint32_t>(dbc->getUInt32(i, sea::kUsage), 2));
+            k.intervalMinMs = dbc->getInt32(i, sea::kIntervalMin);
+            k.intervalMaxMs = dbc->getInt32(i, sea::kIntervalMax);
+            const uint32_t cat = dbc->getUInt32(i, sea::kCategory);
+            k.category = cat < static_cast<uint32_t>(stock::Category::Count) ? static_cast<stock::Category>(cat)
+                                                                             : stock::Category::Sfx;
+            for (uint32_t g = 0; g < 3; ++g) k.duck[g] = dbc->getFloat(i, sea::kDuck0 + g);
+            k.innerRadiusOfInfluence = dbc->getFloat(i, sea::kInnerInfluence);
+            k.outerRadiusOfInfluence = dbc->getFloat(i, sea::kOuterInfluence);
+            k.timeToDuckMs = dbc->getInt32(i, sea::kTimeToDuck);
+            k.timeToUnduckMs = dbc->getInt32(i, sea::kTimeToUnduck);
+            k.insideAngle = dbc->getFloat(i, sea::kInsideAngle);
+            k.outsideAngle = dbc->getFloat(i, sea::kOutsideAngle);
+            k.outsideVolume = dbc->getFloat(i, sea::kOutsideVolume);
+            byId[k.id] = stock::normaliseAdvancedKit(k);
+        }
+        for (uint32_t i = 0; i < soundEntries_->getRecordCount(); ++i) {
+            const uint32_t adv = soundEntries_->getUInt32(i, se::kAdvanced);
+            if (adv == 0) continue;
+            if (auto it = byId.find(adv); it != byId.end())
+                advancedByKit_[soundEntries_->getUInt32(i, 0)] = it->second;
+        }
+    }
     mapEmitters_.clear();
     size_t emitterCount = 0;
     if (auto dbc = table(loadDbc, "SoundEmitters.dbc", sem::kFields)) {
@@ -287,7 +333,8 @@ bool SoundData::load(const Loader& loadDbc) {
              ambience_.size(), " ambiences, ", areas_.size(), " areas, ", impactRows_.size(),
              " weapon impact rows, ", footsteps_.size(), " footstep rows, ", itemGroupSounds_.size(),
              " item sound groups, ", vocalUiSounds_.size(), " vocal UI rows, ", emitterCount,
-             " placed emitters on ", mapEmitters_.size(), " maps");
+             " placed emitters on ", mapEmitters_.size(), " maps, ",
+             advancedByKit_.size(), " advanced kits");
     return true;
 }
 
@@ -350,6 +397,11 @@ const SoundEntry* SoundData::coinSound() const {
     // at volume 0.7, so which one the name resolves to does not matter.
     const SoundEntry* entry = soundByName("LOOTWINDOWCOINSOUND");
     return entry && !entry->files.empty() ? entry : nullptr;
+}
+
+const stock::AdvancedKit* SoundData::advancedKit(uint32_t soundId) const {
+    auto it = advancedByKit_.find(soundId);
+    return it == advancedByKit_.end() ? nullptr : &it->second;
 }
 
 const SoundEntry* SoundData::sound(uint32_t id) const {

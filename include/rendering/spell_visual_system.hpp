@@ -150,6 +150,7 @@ public:
         uint32_t precast = 0; uint32_t cast = 0; uint32_t channel = 0;
         uint32_t precastStart = 0; bool hasPrecastKit = false;
         uint32_t impact = 0;  // the impact kit's, on the target (CombatWound for Frostbolt)
+        uint32_t state = 0;   // the state kit's: a mount aura's is the rider's pose (0x724820)
     };
     KitAnimations getKitAnimations(uint32_t visualId);
 
@@ -350,9 +351,10 @@ private:
                        const KitSpawn& spawn);
     // Play a SoundEntries row at pos. A looping row (flag 0x200) is kept and
     // its AudioEngine id returned when keepLoop; anything else plays once and
-    // 0 is returned. *loops says which the row was.
+    // 0 is returned. *loops says which the row was. own: on the local
+    // character (audio::SoundOptions::ownCharacter).
     uint32_t playSoundEntry(uint32_t soundEntryId, const glm::vec3& pos, bool keepLoop,
-                            bool* loops = nullptr);
+                            bool* loops = nullptr, bool own = false);
     // World transform of a kit slot on a unit: its attachment point when the
     // unit is drawn and has one, else the feet raised to the slot's height.
     // False when only the fallback was available.

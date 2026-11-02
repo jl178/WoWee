@@ -1,4 +1,6 @@
 #include "game/movement_handler.hpp"
+#include "game/taxi_rules.hpp"
+#include "game/global_strings.hpp"
 #include "game/stock_movement.hpp"
 #include "game/unit_motion_glue.hpp"
 #include "game/game_handler.hpp"
@@ -971,8 +973,6 @@ void MovementHandler::forceClearTaxiAndMovementState() {
     taxiActivatePending_ = false;
     taxiActivateTimer_ = 0.0f;
     taxiClientActive_ = false;
-    taxiClientPath_.clear();
-    taxiServerCompletionPending_ = false;
     taxiRecoverPending_ = false;
     taxiStartGrace_ = 0.0f;
     onTaxiFlight_ = false;
@@ -2386,8 +2386,6 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
     taxiMountActive_ = false;
     taxiActivatePending_ = false;
     taxiClientActive_ = false;
-    taxiClientPath_.clear();
-    taxiServerCompletionPending_ = false;
     taxiRecoverPending_ = false;
     taxiStartGrace_ = 0.0f;
     owner_.currentMountDisplayIdRef() = 0;
@@ -2575,26 +2573,28 @@ void MovementHandler::handleShowTaxiNodes(network::Packet& packet) {
 
     loadTaxiDbc();
 
-    if (taxiMaskInitialized_) {
-        for (uint32_t i = 0; i < TLK_TAXI_MASK_SIZE; ++i) {
-            uint32_t newBits = data.nodeMask[i] & ~knownTaxiMask_[i];
-            if (newBits == 0) continue;
-            for (uint32_t bit = 0; bit < 32; ++bit) {
-                if (newBits & (1u << bit)) {
-                    uint32_t nodeId = i * 32 + bit + 1;
-                    auto it = taxiNodes_.find(nodeId);
-                    if (it != taxiNodes_.end()) {
-                        owner_.addSystemChatMessage("Discovered flight path: " + it->second.name);
-                    }
-                }
-            }
-        }
-    }
-
+    // A new node is announced by SMSG_NEW_TAXI_PATH (ERR_NEWTAXIPATH), not
+    // by comparing masks here.
     for (uint32_t i = 0; i < TLK_TAXI_MASK_SIZE; ++i) {
         knownTaxiMask_[i] = data.nodeMask[i];
     }
     taxiMaskInitialized_ = true;
+
+    // Fewer than two known nodes: no map, ERR_TAXINOPATHS, and the gossip
+    // closes (0x6D6050).
+    {
+        uint32_t known = 0;
+        for (uint32_t i = 0; i < TLK_TAXI_MASK_SIZE; ++i)
+            known += static_cast<uint32_t>(__builtin_popcount(data.nodeMask[i]));
+        if (known < 2) {
+            owner_.raiseUiError(globalString(owner_.services().assetManager, "ERR_TAXINOPATHS"));
+            owner_.closeGossip();
+            return;
+        }
+    }
+    // Opening the map dismounts the player (0x6D6050 -> 0x7412E0,
+    // CMSG_CANCEL_MOUNT_AURA): TakeTaxiNode refuses a mounted player.
+    if (owner_.isMounted() && !onTaxiFlight_) dismount();
 
     currentTaxiData_ = data;
     taxiNpcGuid_ = data.npcGuid;
@@ -2613,344 +2613,51 @@ void MovementHandler::handleShowTaxiNodes(network::Packet& packet) {
     if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("TAXIMAP_OPENED", {});
 }
 
-void MovementHandler::applyTaxiMountForCurrentNode() {
-    if (taxiMountActive_ || !owner_.mountCallbackRef()) return;
-    auto it = taxiNodes_.find(currentTaxiData_.nearestNode);
-    if (it == taxiNodes_.end()) {
-        bool isAlliance = true;
-        switch (owner_.playerRaceRef()) {
-            case Race::ORC: case Race::UNDEAD: case Race::TAUREN: case Race::TROLL:
-            case Race::GOBLIN: case Race::BLOOD_ELF:
-                isAlliance = false; break;
-            default: break;
-        }
-        uint32_t mountId = isAlliance ? 1210u : 1310u;
-        taxiMountActive_ = true;
-        LOG_INFO("Taxi mount fallback (node ", currentTaxiData_.nearestNode, " not in DBC): displayId=", mountId);
-        owner_.mountCallbackRef()(mountId);
-        return;
-    }
-
-    bool isAlliance = true;
-    switch (owner_.playerRaceRef()) {
-        case Race::ORC:
-        case Race::UNDEAD:
-        case Race::TAUREN:
-        case Race::TROLL:
-        case Race::GOBLIN:
-        case Race::BLOOD_ELF:
-            isAlliance = false;
-            break;
-        default:
-            isAlliance = true;
-            break;
-    }
-    uint32_t mountId = isAlliance ? it->second.mountDisplayIdAlliance
-                                  : it->second.mountDisplayIdHorde;
-    if (mountId == 541) mountId = 0;
-    if (mountId == 0) {
-        mountId = isAlliance ? it->second.mountDisplayIdHorde
-                             : it->second.mountDisplayIdAlliance;
-        if (mountId == 541) mountId = 0;
-    }
-    if (mountId == 0) {
-        uint32_t gryphonId = owner_.services().gryphonDisplayId;
-        uint32_t wyvernId = owner_.services().wyvernDisplayId;
-        if (isAlliance && gryphonId != 0) mountId = gryphonId;
-        if (!isAlliance && wyvernId != 0) mountId = wyvernId;
-        if (mountId == 0) {
-            mountId = (isAlliance ? wyvernId : gryphonId);
-        }
-    }
-    if (mountId == 0) {
-        if (it->second.mountDisplayIdAlliance != 0) mountId = it->second.mountDisplayIdAlliance;
-        else if (it->second.mountDisplayIdHorde != 0) mountId = it->second.mountDisplayIdHorde;
-    }
-    if (mountId == 0) {
-        static constexpr uint32_t kAllianceTaxiDisplays[] = {1210u, 1211u, 1212u, 1213u};
-        static constexpr uint32_t kHordeTaxiDisplays[] = {1310u, 1311u, 1312u};
-        mountId = isAlliance ? kAllianceTaxiDisplays[0] : kHordeTaxiDisplays[0];
-    }
-    if (mountId == 0) {
-        mountId = isAlliance ? 30412u : 30413u;
-    }
-    if (mountId != 0) {
-        taxiMountActive_ = true;
-        LOG_INFO("Taxi mount apply: displayId=", mountId);
-        owner_.mountCallbackRef()(mountId);
-    }
+// The flight itself is the server's. AzerothCore's FlightPathMovementGenerator
+// sends the player an SMSG_MONSTER_MOVE with the path from where they stand
+// (spline flag Flying: twelve-byte nodes and a Catmull-Rom curve, at
+// TaxiFlightSpeed, 32), and the stock client runs it with the same code as
+// every other unit's spline (0x73C8E0 -> 0x6EB680, 0x98CA00 each frame): the
+// player's entity runs it here (Entity::startMonsterMove). TaxiPathNode is
+// never flown - the client reads it only for the map and the route choice -
+// and the mount is whatever UNIT_FIELD_MOUNTDISPLAYID says. While the spline
+// runs the player cannot move (0x5FA060). See docs/re/mounts-taxi-vehicles.md.
+std::string MovementHandler::taxiReplyErrorText(uint32_t result) const {
+    const char* key = taxi::replyErrorKey(result);
+    if (!key) key = "ERR_TAXIUNSPECIFIEDSERVERERROR";
+    std::string text = globalString(owner_.services().assetManager, key);
+    return text.empty() ? std::string(key) : text;
 }
 
-glm::vec3 MovementHandler::evalTaxiCatmullRom(const glm::vec3& p0, const glm::vec3& p1,
-                                               const glm::vec3& p2, const glm::vec3& p3, float t) {
-    float t2 = t * t;
-    float t3 = t2 * t;
-    return 0.5f * (
-        (2.0f * p1) +
-        (-p0 + p2) * t +
-        (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2 +
-        (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3
-    );
-}
-
-void MovementHandler::startClientTaxiPath(const std::vector<uint32_t>& pathNodes) {
-    taxiClientPath_.clear();
-    taxiClientIndex_ = 0;
-    taxiClientActive_ = false;
-    taxiClientSegmentProgress_ = 0.0f;
-
-    for (size_t i = 0; i + 1 < pathNodes.size(); i++) {
-        uint32_t fromNode = pathNodes[i];
-        uint32_t toNode = pathNodes[i + 1];
-        uint32_t pathId = 0;
-        for (const auto& edge : taxiPathEdges_) {
-            if (edge.fromNode == fromNode && edge.toNode == toNode) {
-                pathId = edge.pathId;
-                break;
-            }
-        }
-        if (pathId == 0) {
-            LOG_WARNING("No taxi path found from node ", fromNode, " to ", toNode);
-            continue;
-        }
-        auto pathIt = taxiPathNodes_.find(pathId);
-        if (pathIt != taxiPathNodes_.end()) {
-            for (const auto& wpNode : pathIt->second) {
-                glm::vec3 serverPos(wpNode.x, wpNode.y, wpNode.z);
-                glm::vec3 canonical = core::coords::serverToCanonical(serverPos);
-                taxiClientPath_.push_back(canonical);
-            }
-        } else {
-            LOG_WARNING("No spline waypoints found for taxi pathId ", pathId);
-        }
-    }
-
-    if (taxiClientPath_.size() < 2) {
-        taxiClientPath_.clear();
-        for (uint32_t nodeId : pathNodes) {
-            auto nodeIt = taxiNodes_.find(nodeId);
-            if (nodeIt == taxiNodes_.end()) continue;
-            glm::vec3 serverPos(nodeIt->second.x, nodeIt->second.y, nodeIt->second.z);
-            taxiClientPath_.push_back(core::coords::serverToCanonical(serverPos));
-        }
-    }
-
-    if (taxiClientPath_.size() < 2) {
-        LOG_WARNING("Taxi path too short: ", taxiClientPath_.size(), " waypoints");
-        return;
-    }
-
-    // Precompute each segment's real curve arc length (see taxiClientSegmentArcLengths_'s
-    // comment for why - pacing must use this, not the straight-line chord length, to keep
-    // total flight duration in line with the server's own identical-speed spline). Sampled
-    // numerically since the Catmull-Rom curve has no closed-form arc length; 16 sub-steps
-    // is more than enough resolution for a taxi path segment's typical curvature.
-    taxiClientSegmentArcLengths_.clear();
-    taxiClientSegmentArcLengths_.reserve(taxiClientPath_.size() - 1);
-    constexpr int kArcLengthSamples = 16;
-    for (size_t i = 0; i + 1 < taxiClientPath_.size(); i++) {
-        glm::vec3 p0 = (i > 0) ? taxiClientPath_[i - 1] : taxiClientPath_[i];
-        glm::vec3 p1 = taxiClientPath_[i];
-        glm::vec3 p2 = taxiClientPath_[i + 1];
-        glm::vec3 p3 = (i + 2 < taxiClientPath_.size()) ? taxiClientPath_[i + 2] : taxiClientPath_[i + 1];
-
-        float arcLength = 0.0f;
-        glm::vec3 prev = p1;
-        for (int s = 1; s <= kArcLengthSamples; s++) {
-            float t = static_cast<float>(s) / static_cast<float>(kArcLengthSamples);
-            glm::vec3 cur = evalTaxiCatmullRom(p0, p1, p2, p3, t);
-            arcLength += glm::length(cur - prev);
-            prev = cur;
-        }
-        taxiClientSegmentArcLengths_.push_back(arcLength);
-    }
-
-    // NOTE: this only builds taxiClientPath_ as pending data - it deliberately does
-    // NOT snap the player to the path start or set taxiClientActive_. CMSG_ACTIVATETAXI
-    // can still be rejected by the server at this point; see activateTaxi()'s comment
-    // and beginTaxiFlightMotion(), which does the actual activation once
-    // SMSG_ACTIVATETAXIREPLY confirms success.
-}
-
-void MovementHandler::beginTaxiFlightMotion() {
-    if (taxiClientPath_.size() < 2) return;
-
-    glm::vec3 start = taxiClientPath_[0];
-    glm::vec3 dir(0.0f);
-    float dirLenSq = 0.0f;
-    for (size_t i = 1; i < taxiClientPath_.size(); i++) {
-        dir = taxiClientPath_[i] - start;
-        dirLenSq = glm::dot(dir, dir);
-        if (dirLenSq >= 1e-6f) {
-            break;
-        }
-    }
-
-    float initialOrientation = movementInfo.orientation;
-    float initialRenderYaw = movementInfo.orientation;
-    float initialPitch = 0.0f;
-    float initialRoll = 0.0f;
-    if (dirLenSq >= 1e-6f) {
-        initialOrientation = std::atan2(dir.y, dir.x);
-        glm::vec3 renderDir = core::coords::canonicalToRender(dir);
-        initialRenderYaw = std::atan2(renderDir.y, renderDir.x);
-        glm::vec3 dirNorm = dir * glm::inversesqrt(dirLenSq);
-        initialPitch = std::asin(std::clamp(dirNorm.z, -1.0f, 1.0f));
-    }
-
-    movementInfo.x = start.x;
-    movementInfo.y = start.y;
-    movementInfo.z = start.z;
-    movementInfo.orientation = initialOrientation;
-    sanitizeMovementForTaxi();
-
-    auto playerEntity = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
-    if (playerEntity) {
-        playerEntity->setPosition(start.x, start.y, start.z, initialOrientation);
-    }
-
-    if (owner_.taxiOrientationCallbackRef()) {
-        owner_.taxiOrientationCallbackRef()(initialRenderYaw, initialPitch, initialRoll);
-    }
-
-    LOG_INFO("Taxi flight started with ", taxiClientPath_.size(), " spline waypoints");
-    taxiServerCompletionPending_ = false;
-    taxiClientActive_ = true;
-}
-
-// Ends the active client-simulated taxi flight. snapToFinalWaypoint controls
-// whether the player is teleported to the known landing position first:
-// - true: natural completion (the client spline reached its own end) - our
-//   own path data is authoritative for where "arrived" means.
-// - false: an authoritative server signal (SMSG_DISMOUNT with
-//   UNIT_FLAG_TAXI_FLIGHT already cleared, or the equivalent
-//   UNIT_FIELD_MOUNTDISPLAYID update) arrived ahead of our own spline
-//   finishing.
-//
-//   The server's stop point may not match our path's precomputed final
-//   waypoint - e.g. a genuinely interrupted/mid-route stop - so this does
-//   NOT unconditionally snap there. But per AzerothCore's own
-//   FlightPathMovementGenerator::DoFinalize() (confirmed by reading its
-//   source): "update z position to ground ... this prevent cheating with
-//   landing point at lags when client side flight end early in comparison
-//   server side" - the server itself anticipates exactly this scenario and
-//   corrects the player's own authoritative position to the true
-//   destination on the terminal leg. So: if we're within a generous sanity
-//   distance of our own known final waypoint (kAuthoritativeLandingSnapDist),
-//   treat this as that same normal "client finished slightly early" case
-//   and snap there - safety net for whatever spline/server pacing drift
-//   remains despite arc-length-parameterizing taxiClientPath_'s pacing (see
-//   taxiClientSegmentArcLengths_). Beyond the sanity distance, stay
-//   conservative and leave the player where the spline currently has them,
-//   per the original caution.
-//
-// The "known final waypoint" itself is taxiNodes_[taxiDestNodeId_]'s own
-// registered position (TaxiNodes.dbc), NOT taxiClientPath_.back() (the last
-// entry of the separate TaxiPathNode.dbc waypoint trace) - live-confirmed
-// the two can disagree by 100+ yards, since a taxi path's waypoint trace
-// doesn't necessarily terminate exactly on the destination node's actual
-// coordinate. TaxiNodes.dbc's own position is what GM teleports/.gps
-// validated as accurate throughout this whole effort, so it's the correct
-// "true destination" to trust here. Falls back to taxiClientPath_.back()
-// only if the destination node can't be resolved for some reason.
-void MovementHandler::finishClientTaxiFlight(bool snapToFinalWaypoint) {
-    glm::vec3 landingPos(0.0f);
-    bool haveLandingPos = false;
-    auto destNodeIt = taxiNodes_.find(taxiDestNodeId_);
-    if (destNodeIt != taxiNodes_.end()) {
-        landingPos = core::coords::serverToCanonical(
-            glm::vec3(destNodeIt->second.x, destNodeIt->second.y, destNodeIt->second.z));
-        haveLandingPos = true;
-    } else if (!taxiClientPath_.empty()) {
-        landingPos = taxiClientPath_.back();
-        haveLandingPos = true;
-    }
-
-    if (!snapToFinalWaypoint && haveLandingPos) {
-        constexpr float kAuthoritativeLandingSnapDist = 300.0f;
-        glm::vec3 gap = landingPos - glm::vec3(movementInfo.x, movementInfo.y, movementInfo.z);
-        if (glm::length(gap) <= kAuthoritativeLandingSnapDist) {
-            LOG_INFO("Taxi landing (authoritative early completion): within sanity "
-                     "distance of known final waypoint, snapping there instead of "
-                     "current spline position (gap=", glm::length(gap), ")");
-            snapToFinalWaypoint = true;
-        }
-    }
-    if (snapToFinalWaypoint && haveLandingPos) {
-        auto playerEntity = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
-        if (playerEntity) {
-            playerEntity->setPosition(landingPos.x, landingPos.y, landingPos.z,
-                                      movementInfo.orientation);
-        }
-        movementInfo.x = landingPos.x;
-        movementInfo.y = landingPos.y;
-        movementInfo.z = landingPos.z;
-        // Application's own per-frame render-position sync only runs while onTaxi
-        // is true (see its "Sync character render position" block) - by the time
-        // this function returns, onTaxiFlight_/taxiMountActive_ are already false,
-        // so that sync won't pick up this correction. Push it to the renderer
-        // directly instead - see playerPositionCorrectionCallbackRef()'s comment.
-        if (owner_.playerPositionCorrectionCallbackRef()) {
-            owner_.playerPositionCorrectionCallbackRef()(landingPos.x, landingPos.y, landingPos.z);
-        }
-        LOG_INFO("Taxi landing: snapped to final waypoint (",
-                 landingPos.x, ", ", landingPos.y, ", ", landingPos.z, ")");
-    }
+void MovementHandler::endTaxiFlight() {
     taxiClientActive_ = false;
     onTaxiFlight_ = false;
     taxiLandingCooldown_ = 2.0f;
-    if (taxiMountActive_ && owner_.mountCallbackRef()) {
-        owner_.mountCallbackRef()(0);
-    }
     taxiMountActive_ = false;
-    owner_.currentMountDisplayIdRef() = 0;
-    // Some WotLK servers expose the taxi mount through vehicle data.
-    // Clear that cached ID at landing so the dismount control does not
-    // remain visible after the flight has completed.
-    owner_.vehicleIdRef() = 0;
-    taxiClientPath_.clear();
-    taxiDestNodeId_ = 0;
-    taxiServerCompletionPending_ = false;
     taxiRecoverPending_ = false;
+    taxiSplineSeen_ = false;
     movementInfo.flags = 0;
     movementInfo.flags2 = 0;
+    if (owner_.taxiOrientationCallbackRef()) {
+        // Level again: no path pitch or bank on the ground.
+        owner_.taxiOrientationCallbackRef()(
+            glm::radians(core::coords::canonicalToCharacterYawDeg(movementInfo.orientation)), 0.0f, 0.0f);
+    }
     if (owner_.getSocket()) {
         sendMovement(Opcode::MSG_MOVE_STOP);
         sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
     }
-    LOG_INFO("Taxi flight landed (client path)");
-}
-
-void MovementHandler::deferServerTaxiCompletion() {
-    if (!taxiClientActive_) return;
-    taxiServerCompletionPending_ = true;
-}
-
-bool MovementHandler::isNearTaxiDestination(float maxDistance) const {
-    if (!taxiClientActive_ || taxiClientPath_.empty()) return false;
-
-    const glm::vec3& destination = taxiClientPath_.back();
-    const float dx = movementInfo.x - destination.x;
-    const float dy = movementInfo.y - destination.y;
-    const float dz = movementInfo.z - destination.z;
-    return dx * dx + dy * dy + dz * dz <= maxDistance * maxDistance;
+    LOG_INFO("Taxi flight landed (server spline)");
 }
 
 void MovementHandler::updateClientTaxi(float deltaTime) {
     if (dismountGraceRemaining_ > 0.0f) {
         dismountGraceRemaining_ -= deltaTime;
     }
+    if (taxiStartGrace_ > 0.0f) taxiStartGrace_ -= deltaTime;
 
-    // Live-confirmed: a CMSG_ACTIVATETAXI the server can't make sense of (e.g.
-    // a stale start node vs. the player's actual position) can go completely
-    // unanswered - no SMSG_ACTIVATETAXIREPLY at all, success or failure. Before
-    // activation was deferred to the reply (see activateTaxi()'s comment), the
-    // speculative flight start accidentally "recovered" from this since it
-    // never waited on a reply in the first place. Now that it correctly does,
-    // a dropped reply left taxiActivatePending_ true forever - every future
-    // activateTaxi() call silently no-ops on its pending-guard, permanently
-    // soft-locking the player's taxi system until relog. Time out and clear
-    // pending state the same way an explicit failure reply would.
+    // A CMSG_ACTIVATETAXI the server cannot make sense of can go unanswered;
+    // without a timeout the pending guard would refuse every later flight.
     if (taxiActivatePending_) {
         taxiActivateTimer_ += deltaTime;
         if (taxiActivateTimer_ > kTaxiActivateReplyTimeoutSeconds) {
@@ -2958,127 +2665,45 @@ void MovementHandler::updateClientTaxi(float deltaTime) {
                         kTaxiActivateReplyTimeoutSeconds, "s - clearing pending state");
             taxiActivatePending_ = false;
             taxiActivateTimer_ = 0.0f;
-            taxiClientPath_.clear();
-            taxiClientIndex_ = 0;
-            taxiClientSegmentProgress_ = 0.0f;
-            if (taxiMountActive_ && owner_.mountCallbackRef()) {
-                owner_.mountCallbackRef()(0);
-            }
-            taxiMountActive_ = false;
             onTaxiFlight_ = false;
         }
     }
 
-    if (!taxiClientActive_ || taxiClientPath_.size() < 2) return;
+    if (!onTaxiFlight_) return;
     auto playerEntity = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
-
-    if (taxiClientIndex_ + 1 >= taxiClientPath_.size()) {
-        finishClientTaxiFlight(/*snapToFinalWaypoint=*/true);
+    if (playerEntity && playerEntity->hasStockMotion() && playerEntity->stockMotionIsSpline()) {
+        // Where the spline has the player: the position the client reports
+        // and draws, facing along the path; the model takes the path's pitch
+        // and banks into the turn one second ahead (0x98CA00).
+        taxiSplineSeen_ = true;
+        taxiClientActive_ = true;
+        movementInfo.x = playerEntity->getX();
+        movementInfo.y = playerEntity->getY();
+        movementInfo.z = playerEntity->getZ();
+        movementInfo.orientation = playerEntity->getOrientation();
+        if (owner_.taxiOrientationCallbackRef()) {
+            const float renderYaw =
+                glm::radians(core::coords::canonicalToCharacterYawDeg(playerEntity->getOrientation()));
+            const bool att = playerEntity->stockMotionHasAttitude();
+            const float pitch = att ? playerEntity->stockMotionAttitudePitch() : 0.0f;
+            // The renderer's roll is positive for a right bank.
+            const float roll = att ? -playerEntity->stockMotionBank() : 0.0f;
+            owner_.taxiOrientationCallbackRef()(renderYaw, pitch, roll);
+        }
         return;
     }
+    taxiClientActive_ = false;
 
-    float remainingDistance = taxiClientSegmentProgress_ + (taxiClientSpeed_ * deltaTime);
-    glm::vec3 start(0.0f);
-    glm::vec3 end(0.0f);
-    glm::vec3 dir(0.0f);
-    float segmentLen = 0.0f;
-    float t = 0.0f;
-
-    while (true) {
-        if (taxiClientIndex_ + 1 >= taxiClientPath_.size()) {
-            finishClientTaxiFlight(/*snapToFinalWaypoint=*/true);
-            return;
-        }
-
-        start = taxiClientPath_[taxiClientIndex_];
-        end = taxiClientPath_[taxiClientIndex_ + 1];
-        dir = end - start;
-        float segLenSq = glm::dot(dir, dir);
-
-        if (segLenSq < 1e-4f) {
-            taxiClientIndex_++;
-            continue;
-        }
-        // Pace by the curve's real arc length, not the straight-line chord -
-        // see taxiClientSegmentArcLengths_'s comment. Fall back to the chord
-        // length only if the precomputed array is somehow missing/stale.
-        segmentLen = (taxiClientIndex_ < taxiClientSegmentArcLengths_.size())
-            ? taxiClientSegmentArcLengths_[taxiClientIndex_]
-            : std::sqrt(segLenSq);
-
-        if (remainingDistance >= segmentLen) {
-            remainingDistance -= segmentLen;
-            taxiClientIndex_++;
-            taxiClientSegmentProgress_ = 0.0f;
-            continue;
-        }
-
-        taxiClientSegmentProgress_ = remainingDistance;
-        t = taxiClientSegmentProgress_ / segmentLen;
-        break;
-    }
-
-    glm::vec3 p0 = (taxiClientIndex_ > 0) ? taxiClientPath_[taxiClientIndex_ - 1] : start;
-    glm::vec3 p1 = start;
-    glm::vec3 p2 = end;
-    glm::vec3 p3 = (taxiClientIndex_ + 2 < taxiClientPath_.size()) ?
-                   taxiClientPath_[taxiClientIndex_ + 2] : end;
-
-    glm::vec3 nextPos = evalTaxiCatmullRom(p0, p1, p2, p3, t);
-
-    float t2 = t * t;
-    glm::vec3 tangent = 0.5f * (
-        (-p0 + p2) +
-        2.0f * (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t +
-        3.0f * (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t2
-    );
-    float tangentLenSq = glm::dot(tangent, tangent);
-    if (tangentLenSq < 1e-8f) {
-        tangent = dir;
-        tangentLenSq = glm::dot(tangent, tangent);
-        if (tangentLenSq < 1e-8f) {
-            tangent = glm::vec3(std::cos(movementInfo.orientation), std::sin(movementInfo.orientation), 0.0f);
-            tangentLenSq = 1.0f; // unit vector
-        }
-    }
-
-    float targetOrientation = std::atan2(tangent.y, tangent.x);
-
-    glm::vec3 tangentNorm = tangent * glm::inversesqrt(std::max(tangentLenSq, 1e-8f));
-    float pitch = std::asin(std::clamp(tangentNorm.z, -1.0f, 1.0f));
-
-    float currentOrientation = movementInfo.orientation;
-    float orientDiff = targetOrientation - currentOrientation;
-    while (orientDiff > core::coords::PI) orientDiff -= core::coords::TWO_PI;
-    while (orientDiff < -core::coords::PI) orientDiff += core::coords::TWO_PI;
-    float roll = -orientDiff * 2.5f;
-    roll = std::clamp(roll, -0.7f, 0.7f);
-
-    float smoothOrientation = currentOrientation + orientDiff * std::min(1.0f, deltaTime * 3.0f);
-
-    if (playerEntity) {
-        playerEntity->setPosition(nextPos.x, nextPos.y, nextPos.z, smoothOrientation);
-    }
-    movementInfo.x = nextPos.x;
-    movementInfo.y = nextPos.y;
-    movementInfo.z = nextPos.z;
-    movementInfo.orientation = smoothOrientation;
-
-    // A server completion packet can arrive much earlier than the local DBC
-    // spline endpoint (observed on CMaNGOS), and it is commonly sent only once.
-    // Do not land at the packet's early position, but also do not discard it:
-    // consume it inside a small landing radius so the mount comes off promptly
-    // rather than lingering through the tail of a mismatched local path.
-    if (taxiServerCompletionPending_ && isNearTaxiDestination()) {
-        finishClientTaxiFlight(/*snapToFinalWaypoint=*/true);
-        return;
-    }
-
-    if (owner_.taxiOrientationCallbackRef()) {
-        glm::vec3 renderTangent = core::coords::canonicalToRender(tangent);
-        float renderYaw = std::atan2(renderTangent.y, renderTangent.x);
-        owner_.taxiOrientationCallbackRef()(renderYaw, pitch, roll);
-    }
+    // No spline: the flight is over once the server has cleared
+    // UNIT_FLAG_TAXI_FLIGHT (what UnitOnTaxi reads, 0x60F350), or, should the
+    // flag never have come, once the spline has run and the start grace is
+    // spent. The server dismounts through the mount field.
+    bool serverTaxi = false;
+    if (auto unit = std::dynamic_pointer_cast<Unit>(playerEntity))
+        serverTaxi = (unit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0;
+    if (serverTaxi || taxiStartGrace_ > 0.0f) return;
+    if (!taxiSplineSeen_ && taxiActivatePending_) return;
+    endTaxiFlight();
 }
 
 void MovementHandler::handleActivateTaxiReply(network::Packet& packet) {
@@ -3116,13 +2741,9 @@ void MovementHandler::handleActivateTaxiReply(network::Packet& packet) {
         }
         taxiActivatePending_ = false;
         taxiActivateTimer_ = 0.0f;
-        applyTaxiMountForCurrentNode();
-        // Now that the server has confirmed, actually move the player to the path
-        // start and start advancing the spline (see activateTaxi()'s comment).
-        beginTaxiFlightMotion();
-        if (owner_.getSocket()) {
-            sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
-        }
+        taxiSplineSeen_ = false;
+        // The server's spline (SMSG_MONSTER_MOVE for the player) and mount
+        // field follow this reply; updateClientTaxi reads the spline.
         LOG_INFO("Taxi flight started!");
     } else {
         if (onTaxiFlight_ || taxiClientActive_) {
@@ -3132,19 +2753,13 @@ void MovementHandler::handleActivateTaxiReply(network::Packet& packet) {
             return;
         }
         LOG_WARNING("Taxi activation failed, result=", data.result);
-        owner_.raiseUiError("Cannot take that flight path.");
+        // The error the reply names (0x6CEE90, table 0xAD9C94).
+        owner_.raiseUiError(taxiReplyErrorText(data.result));
         taxiActivatePending_ = false;
         taxiActivateTimer_ = 0.0f;
         // Clear the pending path data built speculatively by activateTaxi() -
         // it was never committed (taxiClientActive_ never went true), but drop it
         // explicitly so a retry can't somehow pick up stale waypoints.
-        taxiClientPath_.clear();
-        taxiClientIndex_ = 0;
-        taxiClientSegmentProgress_ = 0.0f;
-        taxiDestNodeId_ = 0;
-        if (taxiMountActive_ && owner_.mountCallbackRef()) {
-            owner_.mountCallbackRef()(0);
-        }
         taxiMountActive_ = false;
         onTaxiFlight_ = false;
     }
@@ -3181,30 +2796,40 @@ void MovementHandler::buildTaxiCostMap() {
     uint32_t startNode = currentTaxiData_.nearestNode;
     if (startNode == 0) return;
 
-    struct AdjEntry { uint32_t node; uint32_t cost; };
-    std::unordered_map<uint32_t, std::vector<AdjEntry>> adj;
-    for (const auto& edge : taxiPathEdges_) {
-        adj[edge.fromNode].push_back({.node = edge.toNode, .cost = edge.cost});
+    // Each TaxiPath's flown length: the 3D distances between its
+    // TaxiPathNode points (0x592580). Built once.
+    if (taxiRouteEdges_.size() != taxiPathEdges_.size()) {
+        taxiRouteEdges_.clear();
+        taxiRouteEdges_.reserve(taxiPathEdges_.size());
+        for (const auto& edge : taxiPathEdges_) {
+            taxi::Edge e;
+            e.from = edge.fromNode;
+            e.to = edge.toNode;
+            e.price = edge.cost;
+            auto pit = taxiPathNodes_.find(edge.pathId);
+            if (pit != taxiPathNodes_.end()) {
+                for (size_t i = 1; i < pit->second.size(); ++i) {
+                    const auto& p0 = pit->second[i - 1];
+                    const auto& p1 = pit->second[i];
+                    e.length += glm::length(glm::vec3(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z));
+                }
+            }
+            taxiRouteEdges_.push_back(e);
+        }
     }
 
-    std::deque<uint32_t> queue;
-    queue.push_back(startNode);
+    // The route to each known node is the shortest flight (0x592BB0 /
+    // 0x5926C0: total TaxiPathNode distance, through known nodes only), not
+    // the fewest hops; its price the sum of its TaxiPaths'.
+    auto known = [this](uint32_t node) { return currentTaxiData_.isNodeKnown(node); };
     taxiCostMap_[startNode] = 0;
-
-    while (!queue.empty()) {
-        uint32_t cur = queue.front();
-        queue.pop_front();
-        for (const auto& next : adj[cur]) {
-            // Flights only route through nodes the player has discovered -
-            // the server rejects paths crossing unknown nodes, so a cost map
-            // built over them would show routes/prices the server won't honor.
-            if (!currentTaxiData_.isNodeKnown(next.node)) continue;
-            if (taxiCostMap_.find(next.node) == taxiCostMap_.end()) {
-                taxiCostMap_[next.node] = taxiCostMap_[cur] + next.cost;
-                taxiPrevMap_[next.node] = cur;
-                queue.push_back(next.node);
-            }
-        }
+    for (const auto& [nodeId, node] : taxiNodes_) {
+        (void)node;
+        if (nodeId == startNode || !known(nodeId)) continue;
+        const std::vector<uint32_t> route = taxi::shortestRoute(taxiRouteEdges_, startNode, nodeId, known);
+        if (route.size() < 2) continue;
+        taxiCostMap_[nodeId] = taxi::routePrice(taxiRouteEdges_, route);
+        for (size_t i = 1; i < route.size(); ++i) taxiPrevMap_[route[i]] = route[i - 1];
     }
 }
 
@@ -3247,7 +2872,6 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
     uint32_t startNode = currentTaxiData_.nearestNode;
     if (startNode == 0 || destNodeId == 0 || startNode == destNodeId) return;
 
-    taxiDestNodeId_ = destNodeId;
 
     if (owner_.isMounted()) {
         LOG_INFO("Taxi activate: dismounting current mount");
@@ -3256,16 +2880,10 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
         dismount();
     }
 
-    {
-        auto destIt = taxiNodes_.find(destNodeId);
-        if (destIt != taxiNodes_.end() && !destIt->second.name.empty()) {
-            taxiDestName_ = destIt->second.name;
-            owner_.addSystemChatMessage("Requesting flight to " + destIt->second.name + "...");
-        } else {
-            taxiDestName_.clear();
-            owner_.addSystemChatMessage("Taxi: requesting flight...");
-        }
-    }
+    if (auto destIt = taxiNodes_.find(destNodeId); destIt != taxiNodes_.end())
+        taxiDestName_ = destIt->second.name;
+    else
+        taxiDestName_.clear();
 
     // The route the cost map already worked out, rather than a second search of
     // the same graph.
@@ -3281,7 +2899,7 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
     if (path.size() < 2) {
         LOG_WARNING("No taxi route through discovered nodes from ", startNode,
                     " to ", destNodeId);
-        owner_.addSystemChatMessage("No flight path available to that destination.");
+        owner_.raiseUiError(taxiReplyErrorText(2));  // ERR_TAXINOSUCHPATH (0x5914B0)
         return;
     }
 
@@ -3335,16 +2953,8 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
     }
     taxiActivatePending_ = true;
     taxiActivateTimer_ = 0.0f;
-    // Do NOT mount, set onTaxiFlight_, or activate the client spline here.
-    // CMSG_ACTIVATETAXI can be rejected by the server (insufficient gold, invalid
-    // route, distance/state restrictions). Starting the flight speculatively meant
-    // a rejection reply became indistinguishable from a stale/duplicate one once
-    // updateClientTaxi() started running unconditionally every frame - the client
-    // would just keep flying an unauthorized route. Everything that actually starts
-    // the flight (mount, onTaxiFlight_, taxiClientActive_) now happens only in the
-    // success branch of handleActivateTaxiReply(), once the server confirms.
-    // taxiClientPath_ is still built below as pending data - see
-    // startClientTaxiPath()'s comment.
+    // Nothing starts here: CMSG_ACTIVATETAXI can be refused. The flight is
+    // the server's spline, which follows a successful reply.
     if (owner_.getSocket()) {
         sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
     }
@@ -3379,7 +2989,6 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
     if (owner_.taxiFlightStartCallbackRef()) {
         owner_.taxiFlightStartCallbackRef()();
     }
-    startClientTaxiPath(path);
 }
 
 // ============================================================

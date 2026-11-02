@@ -10,6 +10,8 @@
 #include <unordered_map>
 #include <glm/vec3.hpp>
 
+namespace wowee { namespace audio { struct SoundOptions; } }
+
 namespace wowee {
 namespace pipeline {
 class AssetManager;
@@ -102,16 +104,23 @@ public:
 
     /// The creature-sound columns the model events and deaths name.
     enum class BodySound { DEATH, WING_FLAP, FIDGET, CUSTOM_ATTACK, INJURY, INJURY_CRIT };
-    void playBodySound(uint32_t displayId, BodySound which, uint32_t index, const glm::vec3& position);
+    /// own: the unit is the local character (SoundOptions::ownCharacter).
+    void playBodySound(uint32_t displayId, BodySound which, uint32_t index, const glm::vec3& position,
+                       bool own = false);
     /// A $FSD footfall: FootstepTerrainLookup for the display's footstep set
     /// on this ground (TerrainType.SoundID), the splash column in water.
-    void playFootstep(uint32_t displayId, uint32_t terrainSoundId, bool inWater, const glm::vec3& position);
+    /// own: the local character's step - in the head at 0.65, priority 115,
+    /// four at once (0x4cf170, category 17), under ownVolumeScale (the
+    /// footstep slider) rather than the combat one.
+    void playFootstep(uint32_t displayId, uint32_t terrainSoundId, bool inWater, const glm::vec3& position,
+                      bool own = false, float ownVolumeScale = 1.0f);
     /// Play a SoundEntries row at a point the stock way: the row's file bag,
     /// its own random pitch and level flags, its MinDistance and cutoff, and
     /// the category's cap on how many may sound at once. False when it does
     /// not start.
     bool playEntry3D(uint32_t soundId, const glm::vec3& position, float volumeMul = 1.0f,
-                     stock::Category category = stock::Category::Sfx);
+                     stock::Category category = stock::Category::Sfx, const SoundOptions* base = nullptr,
+                     float scaleOverride = -1.0f);
 
     // Weapon swing sounds (whoosh sounds before impact)
     enum class WeaponSize {

@@ -970,7 +970,34 @@ static int lua_TargetUnit(lua_State* L) {
     std::string uidStr(uid);
     toLowerInPlace(uidStr);
     uint64_t guid = resolveUnitGuid(gh, uidStr);
+    // Not a unit token: a name, as stock TargetUnit takes one - the nearest
+    // unit of that name.
+    if (guid == 0) {
+        const auto& mi = gh->getMovementInfo();
+        float best = 1e30f;
+        for (const auto& [g, e] : gh->getEntityManager().getEntities()) {
+            if (!e || !e->isUnit()) continue;
+            std::string n = std::static_pointer_cast<game::Unit>(e)->getName();
+            toLowerInPlace(n);
+            if (n.empty() || n != uidStr) continue;
+            const float dx = e->getX() - mi.x, dy = e->getY() - mi.y, dz = e->getZ() - mi.z;
+            const float d = dx * dx + dy * dy + dz * dz;
+            if (d < best) { best = d; guid = g; }
+        }
+    }
     if (guid != 0) gh->setTarget(guid);
+    return 0;
+}
+
+// InteractUnit(unit) - right-click a unit: talk to it, open its vendor or
+// flight map (stock 3.3.5a InputControl).
+static int lua_InteractUnit(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    if (!gh) return 0;
+    std::string uidStr(luaL_checkstring(L, 1));
+    toLowerInPlace(uidStr);
+    const uint64_t guid = resolveUnitGuid(gh, uidStr);
+    if (guid != 0 && guid != gh->getPlayerGuid()) gh->interactWithNpc(guid);
     return 0;
 }
 
@@ -1380,6 +1407,7 @@ void registerSpellLuaAPI(lua_State* L) {
                 {"CancelUnitBuff",      lua_CancelUnitBuff},
                 {"HasTarget",         lua_HasTarget},
                 {"TargetUnit",        lua_TargetUnit},
+                {"InteractUnit",      lua_InteractUnit},
                 {"ClearTarget",       lua_ClearTarget},
                 {"FocusUnit",         lua_FocusUnit},
                 {"ClearFocus",        lua_ClearFocus},

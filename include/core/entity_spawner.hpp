@@ -253,6 +253,9 @@ public:
         float riderHeight = 0.0f;
     };
     void setRemotePlayerMountDisplayId(uint64_t guid, uint32_t displayId);
+    const std::unordered_map<uint64_t, RemotePlayerMount>& getRemotePlayerMounts() const {
+        return remotePlayerMounts_;
+    }
     const RemotePlayerMount* getRemotePlayerMount(uint64_t guid) const {
         auto it = remotePlayerMounts_.find(guid);
         return it != remotePlayerMounts_.end() ? &it->second : nullptr;
@@ -343,6 +346,8 @@ public:
     /// Per remote player and NPC: the LocomotionFSM driving its movement
     /// animation (animation/unit_locomotion.hpp).
     std::unordered_map<uint64_t, rendering::anim::UnitLocomotion>& getUnitLocomotion() { return unitLocomotion_; }
+    /// The same, for the mount models of mounted players (keyed by the rider).
+    std::unordered_map<uint64_t, rendering::anim::UnitLocomotion>& getMountLocomotion() { return mountLocomotion_; }
     std::unordered_map<uint64_t, uint32_t>& getCreatureActiveEmotes() { return creatureActiveEmotes_; }
     std::unordered_map<uint32_t, bool>& getModelIdIsWolfLike() { return modelIdIsWolfLike_; }
 
@@ -589,6 +594,7 @@ private:
     std::unordered_map<uint64_t, RestingFloor> creatureRestingFloor_;
     std::unordered_map<uint64_t, rendering::anim::BodyFacingState> unitBodyFacing_;
     std::unordered_map<uint64_t, rendering::anim::UnitLocomotion> unitLocomotion_;
+    std::unordered_map<uint64_t, rendering::anim::UnitLocomotion> mountLocomotion_;
     // Server waypoint scripts hold work/chop emotes for many seconds. Locomotion
     // temporarily overrides them, then the idle transition restores this loop.
     std::unordered_map<uint64_t, uint32_t> creatureActiveEmotes_;

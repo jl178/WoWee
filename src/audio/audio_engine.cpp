@@ -12,6 +12,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <shared_mutex>
 #include <unordered_map>
@@ -352,6 +353,8 @@ void AudioEngine::shutdown() {
         std::free(buffer);
     }
     activeSounds_.clear();
+    duck_.clear();
+    musicDuckApplied_ = 1.0f;
     releaseWorldBus();
 
     capturing_.store(false, std::memory_order_release);
@@ -414,12 +417,16 @@ bool AudioEngine::playSound2D(const std::vector<uint8_t>& wavData, float volume,
     if (!initialized_ || !engine_ || wavData.empty()) return false;
     if (masterVolume_ <= 0.0f) return false;
 
+    SoundOptions o = opts;
+    applyOwnCharacter(o, volume, false);
     ActiveSound voice{};
     voice.baseVolume = volume;
-    voice.priority = opts.priority;
-    voice.kitId = opts.kitId;
-    voice.category = opts.category;
-    if (!admitVoice(voice, opts.noDuplicate)) return false;
+    voice.priority = o.priority;
+    voice.kitId = o.kitId;
+    voice.category = o.category;
+    attachAdvanced(voice, o);
+    if (!admitVoice(voice, o.noDuplicate)) return false;
+    adoptAdvancedCategory(voice);
 
     DecodedWavCacheEntry decoded;
     if (!decodeWavCached(wavData, decoded) || !decoded.pcmData || decoded.frames == 0) {
@@ -469,7 +476,7 @@ bool AudioEngine::playSound2D(const std::vector<uint8_t>& wavData, float volume,
     }
     sound.markInitialised();
 
-    ma_sound_set_volume(sound.get(), volume);
+    ma_sound_set_volume(sound.get(), voiceGain(voice));
     if (pitch != 1.0f) ma_sound_set_pitch(sound.get(), pitch);
 
     // Start playback
@@ -479,6 +486,9 @@ bool AudioEngine::playSound2D(const std::vector<uint8_t>& wavData, float volume,
         return false;
     }
 
+    // A usage-2 advanced kit ducks the moment it starts (0x4cb580).
+    if (voice.hasAdvanced && voice.advanced.usage == stock::AdvancedUsage::Once)
+        duck_.duck(voice.instance, voice.advanced);
     // Track this sound for cleanup (decoded PCM shared across plays)
     voice.sound = sound.release();
     voice.buffer = audioBuffer.release();
@@ -494,13 +504,18 @@ uint32_t AudioEngine::playSound2DStoppable(const std::vector<uint8_t>& wavData, 
     if (!initialized_ || !engine_ || wavData.empty()) return 0;
     if (masterVolume_ <= 0.0f) return 0;
 
+    SoundOptions o = opts;
+    applyOwnCharacter(o, volume, false);
+    if (fadeInMs <= 0.0f) fadeInMs = o.fadeInMs;
     ActiveSound voice{};
     voice.baseVolume = volume;
     voice.loop = loop;
-    voice.priority = opts.priority;
-    voice.kitId = opts.kitId;
-    voice.category = opts.category;
-    if (!admitVoice(voice, opts.noDuplicate)) return 0;
+    voice.priority = o.priority;
+    voice.kitId = o.kitId;
+    voice.category = o.category;
+    attachAdvanced(voice, o);
+    if (!admitVoice(voice, o.noDuplicate)) return 0;
+    adoptAdvancedCategory(voice);
 
     DecodedWavCacheEntry decoded;
     if (!decodeWavCached(wavData, decoded) || !decoded.pcmData || decoded.frames == 0) return 0;
@@ -527,9 +542,9 @@ uint32_t AudioEngine::playSound2DStoppable(const std::vector<uint8_t>& wavData, 
     }
     sound.markInitialised();
 
-    ma_sound_set_volume(sound.get(), volume);
+    ma_sound_set_volume(sound.get(), voiceGain(voice));
     if (loop) ma_sound_set_looping(sound.get(), MA_TRUE);
-    if (loop && opts.randomStart && decoded.frames > 1) {
+    if (loop && o.randomStart && decoded.frames > 1) {
         ma_sound_seek_to_pcm_frame(sound.get(), static_cast<ma_uint64>(std::rand()) % decoded.frames);
     }
     if (fadeInMs > 0.0f) {
@@ -538,6 +553,8 @@ uint32_t AudioEngine::playSound2DStoppable(const std::vector<uint8_t>& wavData, 
     if (ma_sound_start(sound.get()) != MA_SUCCESS) {
         return 0;
     }
+    if (voice.hasAdvanced && voice.advanced.usage == stock::AdvancedUsage::Once)
+        duck_.duck(voice.instance, voice.advanced);
 
     uint32_t id = nextSoundId_++;
     if (nextSoundId_ == 0) nextSoundId_ = 1;  // Skip 0 (sentinel)
@@ -584,6 +601,7 @@ void AudioEngine::stopSound(uint32_t id) {
     if (id == 0) return;
     for (auto it = activeSounds_.begin(); it != activeSounds_.end(); ++it) {
         if (it->id == id) {
+            forgetVoice(*it);
             ma_sound_stop(it->sound);
             ma_sound_uninit(it->sound);
             std::free(it->sound);
@@ -641,7 +659,10 @@ void AudioEngine::setSoundPosition(uint32_t id, const glm::vec3& position) {
     for (auto& active : activeSounds_) {
         if (active.id == id) {
             active.position = position;
-            ma_sound_set_position(active.sound, position.x, position.y, position.z);
+            if (active.spatial) {
+                const glm::vec3 p = pannedPosition(active);
+                ma_sound_set_position(active.sound, p.x, p.y, p.z);
+            }
             ma_sound_set_volume(active.sound, voiceGain(active));
             return;
         }
@@ -654,19 +675,24 @@ uint32_t AudioEngine::startSound3D(const std::vector<uint8_t>& wavData, const gl
     if (!initialized_ || !engine_ || wavData.empty()) return 0;
     if (masterVolume_ <= 0.0f) return 0;
 
+    SoundOptions o = opts;
+    const bool spatial = applyOwnCharacter(o, volume, true);
     ActiveSound voice{};
     voice.baseVolume = volume;
-    voice.spatial = true;
+    voice.spatial = spatial;
     voice.loop = loop;
     voice.position = position;
     voice.maxDistance = maxDistance > 0.0f ? maxDistance : stock::kDefaultCutoff;
-    voice.minDistance = opts.minDistance > 0.0f ? opts.minDistance : stock::kDefaultMinDistance;
-    voice.priority = opts.priority;
-    voice.kitId = opts.kitId;
-    voice.category = opts.category;
+    voice.minDistance = o.minDistance > 0.0f ? o.minDistance : stock::kDefaultMinDistance;
+    voice.priority = o.priority;
+    voice.kitId = o.kitId;
+    voice.category = o.category;
+    attachAdvanced(voice, o);
     // Past its cutoff a sound is silent from the first sample: not started.
-    if (voiceGain(voice) <= 0.0f && !loop) return 0;
-    if (!admitVoice(voice, opts.noDuplicate)) return 0;
+    if (spatial && voiceGain(voice) <= 0.0f && !loop) return 0;
+    if (spatial && voice.hasAdvanced && advancedDuplicateNear(voice.kitId, position)) return 0;
+    if (!admitVoice(voice, o.noDuplicate)) return 0;
+    adoptAdvancedCategory(voice);
 
     DecodedWavCacheEntry decoded;
     if (!decodeWavCached(wavData, decoded) || !decoded.pcmData || decoded.frames == 0) {
@@ -700,10 +726,13 @@ uint32_t AudioEngine::startSound3D(const std::vector<uint8_t>& wavData, const gl
     // Create 3D sound (spatialization enabled, pitch enabled)
     SoundStorage sound;
     if (!sound) return false;
+    // An own-character sound with the listener at the character is not
+    // placed at all: no spatializer, in the head.
     result = ma_sound_init_from_data_source(
         engine_,
         audioBuffer.get(),
-        MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_ASYNC,  // Removed NO_PITCH flag
+        MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_ASYNC |
+            (spatial ? 0u : static_cast<ma_uint32>(MA_SOUND_FLAG_NO_SPATIALIZATION)),
         groupFor(SoundBus::World),
         sound.get()
     );
@@ -718,18 +747,24 @@ uint32_t AudioEngine::startSound3D(const std::vector<uint8_t>& wavData, const gl
     // (stock::rolloffGain), applied through the volume here and in update()
     // as the listener moves: miniaudio's own models have no fade to zero at
     // the cutoff.
-    placeForPanning(sound.get(), position);
+    if (spatial) placeForPanning(sound.get(), pannedPosition(voice));
     ma_sound_set_volume(sound.get(), voiceGain(voice));
     ma_sound_set_pitch(sound.get(), pitch);
     if (loop) ma_sound_set_looping(sound.get(), MA_TRUE);
-    if (loop && opts.randomStart && decoded.frames > 1) {
+    if (loop && o.randomStart && decoded.frames > 1) {
         ma_sound_seek_to_pcm_frame(sound.get(), static_cast<ma_uint64>(std::rand()) % decoded.frames);
+    }
+    if (o.fadeInMs > 0.0f) {
+        // The fader multiplies the volume set above, so it runs 0 -> 1.
+        ma_sound_set_fade_in_milliseconds(sound.get(), 0.0f, 1.0f, static_cast<ma_uint64>(o.fadeInMs));
     }
 
     result = ma_sound_start(sound.get());
     if (result != MA_SUCCESS) {
         return 0;
     }
+    if (voice.hasAdvanced && voice.advanced.usage == stock::AdvancedUsage::Once)
+        duck_.duck(voice.instance, voice.advanced);
 
     // Track for cleanup; a stoppable sound gets an id its owner can stop,
     // move or fade it by, an anonymous one plays out and is reclaimed.
@@ -828,7 +863,8 @@ bool AudioEngine::playMusic(std::shared_ptr<const std::vector<uint8_t>> musicDat
     }
 
     // Set volume and looping
-    ma_sound_set_volume(musicSound_, volume);
+    musicDuckApplied_ = duck_.level(stock::DuckGroup::Music);
+    ma_sound_set_volume(musicSound_, volume * musicDuckApplied_);
     ma_sound_set_looping(musicSound_, loop ? MA_TRUE : MA_FALSE);
 
     // Start playback
@@ -914,16 +950,18 @@ bool AudioEngine::isMusicPlaying() const {
 void AudioEngine::setMusicVolume(float volume) {
     musicVolume_ = glm::clamp(volume, 0.0f, 1.0f);
     if (musicSound_) {
-        ma_sound_set_volume(musicSound_, musicVolume_);
+        ma_sound_set_volume(musicSound_, musicVolume_ * musicDuckApplied_);
     }
 }
 
 void AudioEngine::update(float deltaTime) {
-    (void)deltaTime;
-
     if (!initialized_ || !engine_) {
         return;
     }
+    // The advanced instances' clock, in whole ms as the client keeps it.
+    duckClockMs_ += std::max(deltaTime, 0.0f) * 1000.0f;
+    const auto dtMs = static_cast<int32_t>(duckClockMs_);
+    duckClockMs_ -= static_cast<float>(dtMs);
 
     // The outgoing track of a crossfade, once its fade has stopped it.
     if (retiringMusicSound_ && !ma_sound_is_playing(retiringMusicSound_)) {
@@ -939,23 +977,123 @@ void AudioEngine::update(float deltaTime) {
             continue;
         }
         ActiveSound& s = activeSounds_[i];
-        // The listener moves: positional sounds follow the rolloff.
-        if (s.spatial) ma_sound_set_volume(s.sound, voiceGain(s));
+        if (s.hasAdvanced) {
+            // 0x4ca7b0 per playing instance: the pan level by distance, a
+            // ducker once inside the radius of influence, the time volume.
+            if (s.spatial) {
+                const glm::vec3 p = pannedPosition(s);
+                ma_sound_set_position(s.sound, p.x, p.y, p.z);
+                if (stock::advancedDuckStarts(s.advanced, glm::distance(s.position, listenerPosition_)))
+                    duck_.duck(s.instance, s.advanced);
+            }
+            s.timeVolume = stock::advancedTimeVolume(s.advanced, s.timeOffsetMs, timeOfDayMs_);
+        }
         // A one-shot heard playing outranks a newcomer at the default
         // priority from then on (0x87a580), so a burst of new sounds takes
         // free voices rather than cutting the ones already under way.
         if (s.id == 0 && !s.loop && s.priority == stock::kPriorityDefault) s.priority = stock::kPriorityHeard;
         ++i;
     }
+
+    // The duckers move (0x4ca4f0), then every voice is mixed at its gain:
+    // the listener moves positional sounds along the rolloff, and the duck
+    // levels and time volumes multiply in through the volume callback
+    // (0x4cb220).
+    if (!duck_.empty()) {
+        duck_.update(dtMs, [this](uint32_t owner) -> float {
+            for (const ActiveSound& s : activeSounds_) {
+                if (s.instance != owner) continue;
+                return s.spatial ? glm::distance(s.position, listenerPosition_) : -1.0f;
+            }
+            return std::numeric_limits<float>::max();
+        });
+    }
+    for (ActiveSound& s : activeSounds_) {
+        ma_sound_set_volume(s.sound, voiceGain(s));
+    }
+    const float musicDuck = duck_.level(stock::DuckGroup::Music);
+    if (musicDuck != musicDuckApplied_) {
+        musicDuckApplied_ = musicDuck;
+        if (musicSound_) ma_sound_set_volume(musicSound_, musicVolume_ * musicDuck);
+    }
 }
 
 float AudioEngine::voiceGain(const ActiveSound& s) const {
-    if (!s.spatial) return s.baseVolume;
-    const float d = glm::distance(s.position, listenerPosition_);
-    return s.baseVolume * stock::rolloffGain(d, s.minDistance, s.maxDistance);
+    float gain = s.baseVolume;
+    if (s.spatial) {
+        const float d = glm::distance(s.position, listenerPosition_);
+        gain *= stock::rolloffGain(d, s.minDistance, s.maxDistance);
+    }
+    if (s.hasAdvanced) gain *= s.timeVolume;
+    if (!duck_.empty()) gain *= duck_.level(stock::duckGroup(s.category), s.instance);
+    return gain;
+}
+
+void AudioEngine::attachAdvanced(ActiveSound& voice, const SoundOptions& opts) {
+    if (opts.kitId == 0 || !advancedLookup_) return;
+    const stock::AdvancedKit* kit = advancedLookup_(opts.kitId);
+    if (!kit) return;
+    voice.hasAdvanced = true;
+    voice.advanced = *kit;
+    voice.instance = nextInstance_++;
+    if (nextInstance_ == 0) nextInstance_ = 1;
+    voice.timeOffsetMs = opts.advancedOffsetMs != SoundOptions::kDrawAdvancedOffset
+                             ? opts.advancedOffsetMs
+                             : stock::advancedRandomOffset(*kit, rng_);
+    voice.timeVolume = stock::advancedTimeVolume(*kit, voice.timeOffsetMs, timeOfDayMs_);
+}
+
+void AudioEngine::adoptAdvancedCategory(ActiveSound& voice) {
+    // The caller's category was checked against its cap (PlaySoundKit
+    // 0x4c6a40 does that before it hands over to the instance); the
+    // instance then plays with fresh properties in the row's category
+    // (0x4c9dc0), which is the one it counts and ducks under.
+    if (voice.hasAdvanced) voice.category = voice.advanced.category;
+}
+
+bool AudioEngine::applyOwnCharacter(SoundOptions& opts, float& volume, bool positional) const {
+    if (!opts.ownCharacter) return positional;
+    if (opts.priority == stock::kPriorityDefault) opts.priority = stock::kPriorityOwnCharacter;
+    if (!listenerAtCharacter_) return positional;
+    volume *= stock::kOwnCharacterVolume;
+    return false;
+}
+
+bool AudioEngine::advancedDuplicateNear(uint32_t kitId, const glm::vec3& position) const {
+    for (const ActiveSound& s : activeSounds_) {
+        if (!s.hasAdvanced || s.kitId != kitId || !s.spatial) continue;
+        const glm::vec3 d = s.position - position;
+        if (glm::dot(d, d) < stock::kAdvancedDuplicateDistanceSq) return true;
+    }
+    return false;
+}
+
+glm::vec3 AudioEngine::pannedPosition(const ActiveSound& s) const {
+    if (!s.hasAdvanced || s.advanced.outerRadius2D <= 0.0f) return s.position;
+    const glm::vec3 offset = s.position - listenerPosition_;
+    const float dist = glm::length(offset);
+    const float pan = stock::advancedPanLevel(s.advanced, dist);
+    if (pan >= 1.0f) return s.position;
+    glm::vec3 ahead = listenerForward_;
+    if (glm::dot(ahead, ahead) < 1e-8f) ahead = glm::vec3(0.0f, 1.0f, 0.0f);
+    ahead = glm::normalize(ahead);
+    // Straight ahead pans to the middle; the distance stays what it was so
+    // nothing else about the sound changes.
+    const float reach = std::max(dist, 0.01f);
+    const glm::vec3 dir = dist > 1e-4f ? offset / dist : ahead;
+    glm::vec3 blended = ahead * (1.0f - pan) + dir * pan;
+    if (glm::dot(blended, blended) < 1e-8f) blended = ahead;
+    return listenerPosition_ + glm::normalize(blended) * reach;
+}
+
+void AudioEngine::forgetVoice(const ActiveSound& s) {
+    // 0x4ca080: the instance's ducker lets go and climbs back over
+    // TimeToUnduck.
+    if (s.instance != 0) duck_.release(s.instance);
 }
 
 void AudioEngine::releaseActive(size_t i) {
+    forgetVoice(activeSounds_[i]);
     ma_sound_uninit(activeSounds_[i].sound);
     std::free(activeSounds_[i].sound);
     ma_audio_buffer* buffer = static_cast<ma_audio_buffer*>(activeSounds_[i].buffer);

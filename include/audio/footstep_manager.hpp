@@ -40,11 +40,16 @@ public:
 
     void update(float deltaTime);
     void playFootstep(FootstepSurface surface, bool sprinting);
-    void playMountFootstep(FootstepSurface surface, FootstepBank bank);
     void setVolumeScale(float scale) { volumeScale = scale; }
     [[nodiscard]] float getVolumeScale() const { return volumeScale; }
 
     [[nodiscard]] bool isInitialized() const { return assetManager != nullptr; }
+    /// With the sound tables read, the character's own steps on foot are
+    /// played from its model's footfall events through FootstepTerrainLookup
+    /// (CombatSoundManager::playFootstep) and this bank stays quiet for them.
+    /// Mounts keep the bank: a mount is not a unit the events can name.
+    void setOwnStepsFromTables(bool on) { ownStepsFromTables_ = on; }
+    [[nodiscard]] bool ownStepsFromTables() const { return ownStepsFromTables_; }
     [[nodiscard]] bool hasAnySamples() const { return sampleCount > 0; }
 
 private:
@@ -73,6 +78,7 @@ private:
 
     std::mt19937 rng;
     float volumeScale = 1.0f;
+    bool ownStepsFromTables_ = false;
     // The clip played last, so the next step never repeats it.
     const std::vector<Sample>* lastStepList_ = nullptr;
     size_t lastStepIndex_ = SIZE_MAX;

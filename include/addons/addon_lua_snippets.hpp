@@ -1332,11 +1332,12 @@ end
 
 inline constexpr const char* kRemovedControlsLua = R"LUA(
 local kRemoved = {
-    -- Sound is mixed in software at the device's own rate, with no effect
-    -- chain: no quality tiers, no reverb, no HRTF, no hardware path, no DSPs.
-    -- The voice cap does exist and follows Sound_NumChannels, but its control
-    -- sat in the Hardware section with these and goes with it; the CVar still
-    -- takes effect from the config or /console. The output device is whichever one the system
+    -- Sound is mixed in software at the device's own rate: no quality tiers,
+    -- no HRTF, no hardware path, no DSPs. The voice cap does exist and
+    -- follows Sound_NumChannels, and the reverb Sound_EnableReverb; their
+    -- controls are the Sound page's "Sound channels" (32 or 64, as this
+    -- slider offered) and "Reverb" rows now, beside "Sound at character", so
+    -- the Hardware section's copies go. The output device is whichever one the system
     -- hands over and cannot be switched. Emotes have no sound of their own,
     -- and a pet is voiced as any creature is.
     "AudioOptionsSoundPanelSoundQuality",

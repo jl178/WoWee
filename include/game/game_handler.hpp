@@ -36,6 +36,7 @@
 
 #include "game/spell_description_eval.hpp"
 #include "game/weather_state.hpp"
+#include "game/vehicle_data.hpp"
 #include <map>
 #include <optional>
 #include <algorithm>
@@ -1339,6 +1340,9 @@ public:
         if (spellHandler_) return spellHandler_->getUnitAuras(guid);
         return nullptr;
     }
+    /// The SpellVisual of the unit's SPELL_AURA_MOUNTED (78) aura, 0 if it has
+    /// none: its StateKit's animation is the rider's (stock 0x724820).
+    uint32_t getMountAuraSpellVisual(uint64_t guid) const;
 
     // Completed quests (populated from SMSG_QUERY_QUESTS_COMPLETED_RESPONSE)
     bool isQuestCompleted(uint32_t questId) const { return completedQuests_.count(questId) > 0; }
@@ -3060,6 +3064,11 @@ public:
     using MountCallback = std::function<void(uint32_t mountDisplayId)>;  // 0 = dismount
     void setMountCallback(MountCallback cb) { mountCallback_ = std::move(cb); }
 
+    // SMSG_MOUNTSPECIAL_ANIM: the unit's mount plays MountSpecial (94) once.
+    using MountSpecialCallback = std::function<void(uint64_t guid)>;
+    void setMountSpecialCallback(MountSpecialCallback cb) { mountSpecialCallback_ = std::move(cb); }
+    auto& mountSpecialCallbackRef() { return mountSpecialCallback_; }
+
     // Mount display changes for visible players other than the local character.
     using OtherPlayerMountCallback = std::function<void(uint64_t guid, uint32_t mountDisplayId)>;
     void setOtherPlayerMountCallback(OtherPlayerMountCallback cb) { otherPlayerMountCallback_ = std::move(cb); }
@@ -3156,10 +3165,38 @@ public:
         return it != taxiNpcHasRoutes_.end() && it->second;
     }
 
-    // Vehicle (WotLK)
+    // Vehicle (WotLK). "In a vehicle" is the player sitting in a vehicle's
+    // seat (its movement on a transport that is a unit, 0x74B8B0); the id is
+    // that vehicle's Vehicle.dbc row. See game_handler_vehicles.cpp.
     bool isInVehicle() const { return vehicleId_ != 0; }
     uint32_t getVehicleId() const { return vehicleId_; }
     void sendRequestVehicleExit();
+
+    struct VehiclePassenger {
+        uint64_t vehicleGuid = 0;
+        int8_t seat = -1;
+    };
+    /// A unit is a vehicle (UPDATEFLAG_VEHICLE, SMSG_PLAYER_VEHICLE_DATA for
+    /// any guid; 0 removes it).
+    void setUnitVehicleId(uint64_t guid, uint32_t vehicleId);
+    uint32_t unitVehicleId(uint64_t guid) const;
+    /// Whether a movement's transport guid is a unit to sit in rather than a
+    /// ship or a tram: a vehicle guid, a player, or a unit known as a vehicle.
+    bool isVehicleTransport(uint64_t transportGuid) const;
+    /// `guid` sits in seat `seat` of `vehicleGuid`; vehicleGuid 0: it left.
+    void setVehiclePassenger(uint64_t guid, uint64_t vehicleGuid, int8_t seat);
+    const std::unordered_map<uint64_t, VehiclePassenger>& vehiclePassengers() const {
+        return vehiclePassengers_;
+    }
+    const VehiclePassenger* vehiclePassenger(uint64_t guid) const {
+        auto it = vehiclePassengers_.find(guid);
+        return it != vehiclePassengers_.end() ? &it->second : nullptr;
+    }
+    /// The VehicleSeat row `guid` sits in, nullptr when none.
+    const vehicle::SeatRecord* vehicleSeatOf(uint64_t guid);
+    /// A unit left view: it is no vehicle and no passenger any more.
+    void forgetVehicleUnit(uint64_t guid);
+    VehicleData& vehicleData() { return vehicleData_; }
 
     // Vendor
     void openVendor(uint64_t npcGuid);
@@ -4807,6 +4844,9 @@ private:
 
     // Vehicle (WotLK): non-zero when player is seated in a vehicle
     uint32_t vehicleId_ = 0;
+    VehicleData vehicleData_;
+    std::unordered_map<uint64_t, uint32_t> unitVehicleIds_;
+    std::unordered_map<uint64_t, VehiclePassenger> vehiclePassengers_;
     /// The column the arena rosters are sorted by, so clicking it again knows
     /// to reverse rather than re-sort the same way.
     std::string arenaSortKey_;
@@ -5144,6 +5184,7 @@ private:
     OtherPlayerMountCallback otherPlayerMountCallback_;
     AchievementEarnedCallback achievementEarnedCallback_;
     MountCallback mountCallback_;
+    MountSpecialCallback mountSpecialCallback_;
     TaxiPrecacheCallback taxiPrecacheCallback_;
     TaxiOrientationCallback taxiOrientationCallback_;
     PlayerPositionCorrectionCallback playerPositionCorrectionCallback_;

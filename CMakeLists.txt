@@ -701,6 +701,9 @@ set(WOWEE_SOURCES
     src/game/world_packets_economy.cpp
     src/game/spline_packet.cpp
     src/game/unit_motion.cpp
+    src/game/taxi_rules.cpp
+    src/game/vehicle_data.cpp
+    src/game/game_handler_vehicles.cpp
     src/game/unit_motion_glue.cpp
     src/game/shapeshift_forms.cpp
     src/game/calendar_data.cpp
@@ -729,6 +732,7 @@ set(WOWEE_SOURCES
     src/audio/world_sound_emitters.cpp
     src/audio/zone_music_controller.cpp
     src/audio/stock_sound_rules.cpp
+    src/audio/stock_sound_advanced.cpp
 
     # Pipeline (asset loaders)
     src/pipeline/blp_loader.cpp

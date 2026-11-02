@@ -45,6 +45,12 @@ bool WorldSoundEmitters::resolve(Emitter& e) const {
     // A cutoff of 0 is "unset" in a few rows; the engine's own default then.
     e.cutoff = entry->distanceCutoff > 0.0f ? entry->distanceCutoff : stock::kDefaultCutoff;
     e.minDistance = entry->minDistance > 0.0f ? entry->minDistance : -1.0f;
+    // Usage 2 (play once at once) is played here as the plain loop it always
+    // was; the engine still gives it the row's blend and ducking.
+    if (const stock::AdvancedKit* k = soundData_->advancedKit(e.soundId);
+        k && k->usage != stock::AdvancedUsage::Once && !e.periodic) {
+        e.advanced = k;
+    }
     return true;
 }
 
@@ -84,9 +90,60 @@ uint32_t WorldSoundEmitters::addPeriodic(const glm::vec3& renderPos, uint32_t so
 
 void WorldSoundEmitters::stop(Emitter& e) {
     if (e.handle != 0) {
-        AudioEngine::instance().fadeOutSound(e.handle, 250.0f);
+        // An advanced loop goes with its 3 s fade-out (0x4c9dc0's props[5]).
+        const float fadeMs = e.advanced && e.advanced->usage == stock::AdvancedUsage::Loop
+                                 ? stock::kAdvancedLoopFadeSeconds * 1000.0f
+                                 : 250.0f;
+        AudioEngine::instance().fadeOutSound(e.handle, fadeMs);
         e.handle = 0;
     }
+    e.instanceAlive = false;
+}
+
+void WorldSoundEmitters::beginInstance(Emitter& e) {
+    e.instanceAlive = true;
+    e.schedule = {};
+    // 0x4cb580: a fresh instance draws its window shift and a first
+    // interval; a usage-1 kit waits that interval before its first play.
+    e.offsetMs = stock::advancedRandomOffset(*e.advanced, rng());
+    e.schedule.countdownMs = stock::advancedRandomInterval(*e.advanced, rng());
+}
+
+void WorldSoundEmitters::stepAdvanced(Emitter& e, float deltaTime, float volumeScale) {
+    auto& engine = AudioEngine::instance();
+    const stock::AdvancedKit& k = *e.advanced;
+    const bool playing = e.handle != 0 && engine.isSoundPlaying(e.handle);
+    if (!playing) e.handle = 0;
+    const SoundEntry* entry = soundData_ ? soundData_->sound(e.soundId) : nullptr;
+    if (!entry) return;
+    const bool inWindow = stock::advancedInTimeWindow(k, e.offsetMs, engine.getTimeOfDayMs());
+    const auto dtMs = static_cast<int32_t>(deltaTime * 1000.0f);
+    const stock::AdvancedStep step =
+        stock::advancedStep(k, e.schedule, playing, inWindow, entry->files.size(), dtMs, rng());
+    if (step == stock::AdvancedStep::Nothing) return;
+    if (step == stock::AdvancedStep::Stop || step == stock::AdvancedStep::Restart) {
+        if (e.handle != 0) {
+            engine.fadeOutSound(e.handle, stock::kAdvancedLoopFadeSeconds * 1000.0f);
+            e.handle = 0;
+        }
+        if (step == stock::AdvancedStep::Stop) return;
+    }
+    if (volumeScale <= 0.0f) return;
+    const std::string* file = soundData_->nextFile(*entry);
+    if (!file) return;
+    SoundOptions opts;
+    opts.kitId = e.soundId;
+    opts.minDistance = e.minDistance;
+    opts.category = stock::Category::Ambience;
+    opts.advancedOffsetMs = e.offsetMs;
+    const bool loop = k.usage == stock::AdvancedUsage::Loop;
+    if (loop) {
+        opts.randomStart = true;  // a loop that is not music opens anywhere (0x879760)
+        opts.fadeInMs = stock::kAdvancedLoopFadeSeconds * 1000.0f;
+    }
+    e.handle = engine.playSound3DStoppable(*file, e.position,
+                                           stock::kitVolume(entry->volume, entry->flags, volumeScale, rng()),
+                                           e.cutoff, loop, e.minDistance, opts);
 }
 
 void WorldSoundEmitters::remove(uint32_t id) {
@@ -139,6 +196,9 @@ bool WorldSoundEmitters::start(Emitter& e, float volumeScale) {
     if (!file) return false;
     SoundOptions opts;
     opts.kitId = e.soundId;
+    // Placed loops mix as ambience, as the client's world loops do (0x4d2390
+    // plays its loop as category 2).
+    opts.category = stock::Category::Ambience;
     opts.randomStart = true;  // a loop opens anywhere in itself (0x879760)
     e.handle = AudioEngine::instance().playSound3DStoppable(*file, e.position, e.volume * volumeScale,
                                                             e.cutoff, /*loop=*/true, e.minDistance, opts);
@@ -155,6 +215,11 @@ void WorldSoundEmitters::update(float deltaTime, const glm::vec3& listenerPos, f
         for (auto& [id, e] : emitters_) {
             if (e.handle != 0) engine.setSoundVolume(e.handle, e.volume * volumeScale);
         }
+    }
+
+    // Advanced instances in range run their schedule every frame.
+    for (auto& [id, e] : emitters_) {
+        if (e.advanced && e.instanceAlive) stepAdvanced(e, deltaTime, volumeScale);
     }
 
     // One-shots on their animation clock, heard only inside their cutoff.
@@ -191,10 +256,11 @@ void WorldSoundEmitters::update(float deltaTime, const glm::vec3& listenerPos, f
         if (e.retryS > 0.0f) e.retryS -= kScanIntervalS;
         const glm::vec3 d = e.position - listenerPos;
         const float distSq = glm::dot(d, d);
-        const float reach = e.handle != 0 ? e.cutoff * kStopSlack : e.cutoff;
+        const bool live = e.handle != 0 || e.instanceAlive;
+        const float reach = live ? e.cutoff * kStopSlack : e.cutoff;
         if (distSq <= reach * reach) {
             candidates_.emplace_back(distSq, id);
-        } else if (e.handle != 0) {
+        } else if (live) {
             stop(e);
         }
     }
@@ -203,6 +269,11 @@ void WorldSoundEmitters::update(float deltaTime, const glm::vec3& listenerPos, f
         Emitter& e = emitters_[candidates_[i].second];
         if (static_cast<int>(i) >= kMaxLoops || volumeScale <= 0.0f) {
             stop(e);
+            continue;
+        }
+        if (e.advanced) {
+            // In range: the instance exists and plays on its own schedule.
+            if (!e.instanceAlive) beginInstance(e);
             continue;
         }
         if (e.handle != 0 || e.retryS > 0.0f) continue;

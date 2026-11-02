@@ -206,6 +206,122 @@ per-bone sequence state (`bs+0x..`: 0xAC bytes per bone, array at
   `model+0x198 × ribbon alpha`, sorted by their priorityPlane at
   `ribbon+0xAC`.
 
+### Shader selection (CM2Shared::Initialize 0x837A40)
+
+There is no table of effects for M2 batches in the data:
+`shaders\effects\model2.wfx` holds only the four `Projected_*` effects.
+The client builds an effect per batch at load from a vertex shader name and
+a pixel shader name (strings at 0xA45664..0xA458A8) and caches it by the
+concatenated name (0x876530 find, 0x876BE0 create). Three steps, all on the
+skin's batches (`skin+0x28`, 0x18 bytes each: +2 shader id, +0xA material,
++0xC materialLayer, +0xE textureCount, +0x10 texture combo, +0x12 texture
+coordinate combo, +0x14 weight combo, +0x16 transform combo):
+
+1. **Runtime shader id** (0x836980), for every batch whose id lacks 0x8000.
+   The id is rewritten: bits 4-6 the first stage's combiner op and bit 7 its
+   env flag, bits 0-2 and 3 the same for the second stage, 0x4000 "the last
+   stage reads UV set 1". `tc[i]` below is the texture coordinate combo
+   (header 0x88, `H+0x8C`) at the batch's index + i, read unsigned, so the
+   env map's -1 is "above 2".
+   - **Model flag 0x08 clear** (no combiner combos): op = 0 (Opaque) for
+     blend 0, 1 (Mod) otherwise; env if `tc[0] > 2`; 0x4000 if `tc[0] == 1`.
+     One stage.
+   - **Flag 0x08 set**: for each of the batch's textures,
+     op = `textureCombinerCombos[fileShaderId + i]` (header 0x130, `H+0x134`),
+     forced to 0 for stage 0 of a blend-0 material; env if `tc[i] > 2`.
+2. **Layer folding** (0x837680), only when a batch has materialLayer != 0.
+   The textures and transforms are first resolved per batch (0x835E90;
+   lookup tables rebuilt by 0x837250/0x8374A0). Walking the batches in skin
+   order, a layer-0 batch is the base and resets two state machines (a
+   blend-0 base with textures also has its stage-0 op cleared):
+   - **A**: base is blend 0, two textures, stage-2 op Mod2x (4) or Mod2xNA
+     (6), `tc = (0, env)`. If the next layer is blend 1 or 2, one texture,
+     the same unlit bit (material flags & 1), the base's first texture and
+     the same texture weight, it is hidden (id 0x8000) and the base becomes
+     **0x8001**.
+   - **B**: base is blend 0, one texture, `tc = 0`. If the next layer is
+     blend 4 or 6, one texture, `tc > 2` (env) and the same weight, it is
+     hidden and the base takes its texture and transform as stage 2: id
+     **0x8002** for blend 4, **0x000E** (Opaque_Mod2xNA, stage 2 env) for
+     blend 6, textureCount 2. If the layer after that is blend 1 or 2, one
+     texture, the same unlit bit, the base's texture and weight, it is hidden
+     too and the base becomes **0x8003** (from 0x8002) or **0x8001**.
+   - A batch on the same material as the one before it skips the machines
+     and afterwards copies that batch's id, count, textures and transforms.
+3. **Effect** (0x836C90 -> 0x836600). 0x8000 draws nothing; 0x8001/2/3 are
+   `Diffuse_T1_Env` with `Combiners_Opaque_Mod2xNA_Alpha`, `_AddAlpha`,
+   `_AddAlpha_Alpha`. Otherwise, with s0/s1 the two stage ops:
+
+   | stages | vertex shader | pixel shader by op |
+   |---|---|---|
+   | 1 | Env if bit 7, else T1 if `tc[0] == 0`, else T2 | 0 Opaque, 2 Decal, 3 Add, 4 Mod2x, 5 Fade, else Mod |
+   | 2 | T1_T2, T1_Env, Env_T2, Env_Env by the two env bits | s0 0: s1 0 Opaque_Opaque, 3 Opaque_Add, 4 Opaque_Mod2x, 6 Opaque_Mod2xNA, 7 Opaque_AddNA, else Opaque_Mod |
+   | | | s0 1: the same with Mod_ (Mod_Opaque ... Mod_AddNA, else Mod_Mod) |
+   | | | s0 3, s1 1: Add_Mod. s0 4, s1 1: **Mod_Mod2x**; s0 4, s1 4: Mod2x_Mod2x |
+   | | | anything else: no shader; the effect is rebuilt with id **0x11** (Mod / Mod_Mod) |
+
+   A two-texture effect also sets the fixed-function stage ops from tables
+   0xAF5A08/0xAF59E8 (op -> colour op, alpha op), used only without shaders.
+4. **The draw** (0x81F450) binds texture `lookup[combo + i]` on stage i,
+   with its M2Texture wrap flags, and the texture matrix
+   `transformLookup[transformCombo + i]` into slot i (identity past the
+   transform count). An env stage of a normal id gets the env texgen
+   (0x873550) instead. A one-texture batch with 0x4000 puts its matrix in
+   slot 1, the one Diffuse_T2 reads; without vertex shaders (`0xD43020 == 0`)
+   the 0x800x ids bind only their first texture.
+
+**The shaders** (`shaders\vertex\arbvp1\diffuse_*.bls`, first variant):
+- T1: UV set 0 through matrix slot 0 (c6/c7). T2: UV set 1 through slot 1
+  (c8/c9). T1_T2: both. **Env_T2 reads UV set 0 through slot 0 for its second
+  stage**, despite the name.
+- Env: `p` the view-space position, `n` the view-space normal, both
+  normalised; `r = -reflect(p, n)`; `uv = r.xy / |r + (0,0,1)| * 0.5 + 0.5`.
+  The view space looks down +z (the map's centre is a surface facing the
+  camera), so in a -z view space the map is OpenGL's sphere map turned half
+  round: `uv = 0.5 - r.xy / (2 |r + (0,0,1)|)` with `r = reflect(p, n)`.
+- The pixel combiners (`shaders\pixel\arbfp1\combiners_*.bls`), with `c`
+  the vertex colour (lit material colour; alpha the batch alpha), all of the
+  form `rgb = M * c.rgb + A`, `a = Am * c.a + Aa`:
+
+  | combiner | rgb | alpha |
+  |---|---|---|
+  | Opaque | t0 c | c.a |
+  | Mod | t0 c | t0.a c.a |
+  | Mod2x | 2 t0 c | 2 t0.a c.a |
+  | Add | c + t0 | c.a + t0.a |
+  | Decal / Fade | lerp(t0, c, c.a) / lerp(c, t0, c.a) | c.a |
+  | Opaque_Opaque / _Mod | t0 t1 c | c.a / t1.a c.a |
+  | Opaque_Mod2x / _Mod2xNA | 2 t0 t1 c | 2 t1.a c.a / c.a |
+  | Opaque_Add / _AddNA | t0 c + t1 | c.a + t1.a / c.a |
+  | Mod_Opaque / Mod_Mod | t0 t1 c | t0.a c.a / t0.a t1.a c.a |
+  | Mod_Add / Mod_AddNA | t0 c + t1 | t0.a c.a + t1.a / t0.a c.a |
+  | Mod_Mod2x / _Mod2xNA | 2 t0 t1 c | 2 t0.a t1.a c.a / t0.a c.a |
+  | Add_Mod | (t0 + c) t1 | (t0.a + c.a) t1.a |
+  | Mod2x_Mod2x | 4 t0 t1 c | 4 t0.a t1.a c.a |
+  | Opaque_Mod2xNA_Alpha | lerp(2 t0 t1, t0, t0.a) c | c.a |
+  | Opaque_AddAlpha | t0 c + t1 t1.a | c.a |
+  | Opaque_AddAlpha_Alpha | (t0 + t1 t1.a (1 - t0.a)) c | c.a |
+
+  The second stage of the env combiners is never lit: Opaque_AddNA adds the
+  water elemental's reflection on top of the lit body.
+- **Mod and Mod2x batches** get diffuse 0 and emissive 1 or 0.5 (0x81FE90),
+  so `c = (1,1,1,a)` or `(0.5,0.5,0.5,a)`; Combiners_Mod then gives
+  `src = t0 / 2` for a Mod2x batch and the (DstColor, SrcColor) blend
+  `2 src dst = t0 dst`. Their fog colour is white / grey (table 0xA45390), so
+  a fogged texel leaves the framebuffer as it was.
+- **Alpha test** for every blend above 1 is 1/255 against the combiner's
+  alpha.
+
+**In the 3.3.5 data** (22,112 models, skin 00; the same counts from a Python
+transcription and from `m2fx::resolveBatchEffects`): 21,883 one-texture Mod
+and 20,597 Opaque batches; 7,248 layers hidden by folding; 4,521
+Opaque_Mod2xNA_Alpha (armour and creature shine: the northrend fire giant,
+warhorses, the gryphon pet); 898 Opaque_Mod2xNA and 646 Opaque_AddAlpha; 981
+one-texture Env Mod; 154 Opaque_AddNA and 11 Mod_AddNA (water elementals,
+the Ulduar train glass); 1,482 T1_T2 Mod_Mod2x and 767 Mod_Mod, almost all
+on sky domes; 64 one-texture T2 (the frost lord). No batch in the set falls
+back to 0x11.
+
 ## 4. Per instance, per model, and what is skipped
 
 - **Per instance:** all sequence state, the cached key indices, the global
@@ -261,11 +377,16 @@ per-bone sequence state (`bs+0x..`: 0xAC bytes per bone, array at
 | 19 | UV rotation and scale | full matrix: translate, then scale and rotate about (0.5, 0.5) | translation only | open; the instance SSBO carries a vec2 offset |
 | 20 | Flag 0x01 sequences | play `loops` laps, then hold the last frame | loop, unless the caller asked to hold | open for doodads. Spell kits hold one-shots through `holdInstanceAnimationAtEnd`, which matches for one lap |
 | 21 | Variation on a looping sequence | re-rolled every lap (CM2Model handler; replay ignored) | honours the replay range on laps | open (CGUnit's callback not traced) |
-| 22 | Blend table | 3 = One+One, 4 = SrcAlpha+One, 5 Mod, 6 Mod2x | every mode ≥ 3 additive (SrcAlpha, One); no Mod or Mod2x pipelines; spell effects force blend 0/1/4/5 to additive | open; visual risk, needs in-game comparison |
+| 22 | Blend table | 3 = One+One, 4 = SrcAlpha+One, 5 Mod, 6 Mod2x | every mode ≥ 3 additive (SrcAlpha, One); no Mod or Mod2x pipelines; spell effects force blend 0/1/4/5 to additive | **Fixed:** one pipeline per mode in M2Renderer and CharacterRenderer; Mod/Mod2x unlit at emissive 1/0.5 and fogged to white/grey, additive to black; spell effects draw their own blend (a forge's keyed flame card stays additive); Mod/Mod2x never colour keyed; alpha reference 1/255 above blend 1 |
 | 23 | Alpha-key reference | `alpha × 224/255` | shader cutoff 0.4/0.5, sharpened with alpha-to-coverage | open (a deliberate foliage choice) |
 | 24 | Render flags 0x04/0x08/0x10 | cull, depth test, depth write | every M2 pipeline is cull-none; depth write by pass | open |
 | 25 | Transparent order | distance, then priorityPlane, then layer | per instance, back to front | open |
 | 26 | Animation when culled | stops beyond 10 yd; time stays absolute | bones skipped off-screen and past LOD 3 (150 yd); clocks absolute | close enough; the LOD-3 bone skip is not stock |
+| 27 | Shader per batch | runtime id, layer folding and Combiners_* by stage (§3 "Shader selection") | one texture, `texture × light` | **Fixed:** `m2fx::resolveBatchEffects` (`include/rendering/m2_effect_select.hpp`), `assets/shaders/m2_combiner.glsli`; folded layers are not drawn |
+| 28 | Second texture stage | bound with its own wrap flags and matrix | never bound | **Fixed** (binding 3 of the material set in both renderers) |
+| 29 | Env coordinates | sphere map of the view-space reflection | none | **Fixed** (`m2SphereEnvUv`); stock's +z view space handled |
+| 30 | UV set 1 and per-stage transforms | T2 / T1_T2 read UV set 1 through the stage's own matrix | UV set 0 only, one translation per batch | **Fixed** for translation (second stage packed as halves in the instance SSBO, `uvOffset.zw` for characters); rotation and scale still open (#19) |
+| 31 | Weapon attachment FX batches | drawn | CharacterRenderer drops blend ≥ 3 batches on attached weapons | open; most weapon shine is now a folded second stage of an opaque base and so draws |
 
 ## 6. In game
 

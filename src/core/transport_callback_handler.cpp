@@ -53,6 +53,18 @@ void TransportCallbackHandler::setupCallbacks() {
         }
     });
 
+    // /mountspecial (SMSG_MOUNTSPECIAL_ANIM): MountSpecial (94) on the mount.
+    gameHandler_.setMountSpecialCallback([this](uint64_t guid) {
+        if (guid == gameHandler_.getPlayerGuid()) {
+            if (auto* ac = renderer_.getAnimationController()) ac->playMountSpecial();
+            return;
+        }
+        auto* cr = renderer_.getCharacterRenderer();
+        if (!cr) return;
+        if (const auto* m = entitySpawner_.getRemotePlayerMount(guid))
+            cr->playAnimation(m->instanceId, 94 /* MountSpecial */, false);
+    });
+
     // Taxi precache callback - preload terrain tiles along flight path
     gameHandler_.setTaxiPrecacheCallback([this](const std::vector<glm::vec3>& path) {
         if (!renderer_.getTerrainManager()) return;

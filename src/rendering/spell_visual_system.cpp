@@ -425,7 +425,9 @@ void SpellVisualSystem::spawnKit(uint32_t kitId, const KitSpawn& spawn) {
         const bool attached = slotTransform(SLOT_CHEST, spawn.attachInstanceId, spawn.feetPos, xf);
         const glm::vec3 at = spawn.attachInstanceId ? glm::vec3(xf[3]) : spawn.feetPos;
         bool loops = false;
-        const uint32_t handle = playSoundEntry(kit.soundId, at, /*keepLoop=*/true, &loops);
+        const bool own = spawn.attachInstanceId != 0 && renderer_ &&
+                         spawn.attachInstanceId == renderer_->getCharacterInstanceId();
+        const uint32_t handle = playSoundEntry(kit.soundId, at, /*keepLoop=*/true, &loops, own);
         if (handle != 0) {
             // A looping sound (the precast hum, a channel, Blizzard's clatter)
             // lasts as long as the kit does and fades out with it.
@@ -506,7 +508,7 @@ bool SpellVisualSystem::spawnKitModel(uint32_t kitId, const std::string& path, u
 }
 
 uint32_t SpellVisualSystem::playSoundEntry(uint32_t soundEntryId, const glm::vec3& pos,
-                                           bool keepLoop, bool* loops) {
+                                           bool keepLoop, bool* loops, bool own) {
     if (loops) *loops = false;
     if (soundEntryId == 0 || !renderer_) return 0;
     auto* ac = renderer_->getAudioCoordinator();
@@ -529,6 +531,9 @@ uint32_t SpellVisualSystem::playSoundEntry(uint32_t soundEntryId, const glm::vec
     audio::SoundOptions opts;
     opts.minDistance = entry->minDistance;
     opts.kitId = entry->id;
+    // On the local character: in the head at 0.65 (0x7469c0 kit sounds,
+    // 0x6f7b00 an effect model's $SND).
+    opts.ownCharacter = own;
     auto& engine = audio::AudioEngine::instance();
     if (looping && keepLoop)
         return engine.playSound3DStoppable(file, pos, volume, maxDistance, /*loop=*/true, entry->minDistance, opts);
@@ -599,6 +604,7 @@ SpellVisualSystem::KitAnimations SpellVisualSystem::getKitAnimations(uint32_t vi
     out.precast = anim(vIt->second.precastKit);
     out.cast    = anim(vIt->second.castKit);
     out.channel = anim(vIt->second.channelKit);
+    out.state   = anim(vIt->second.stateKit);
     out.impact  = anim(vIt->second.targetImpactKit ? vIt->second.targetImpactKit
                                                    : vIt->second.impactKit);
     return out;
@@ -1393,7 +1399,9 @@ void SpellVisualSystem::update(float deltaTime) {
                 while (sv.nextEffectSound < list.size() &&
                        static_cast<float>(list[sv.nextEffectSound].timeMs) <= nowMs) {
                     playSoundEntry(list[sv.nextEffectSound].soundEntryId, sv.effectPos,
-                                   /*keepLoop=*/false);
+                                   /*keepLoop=*/false, nullptr,
+                                   sv.attachInstanceId != 0 && renderer_ &&
+                                       sv.attachInstanceId == renderer_->getCharacterInstanceId());
                     ++sv.nextEffectSound;
                 }
             }

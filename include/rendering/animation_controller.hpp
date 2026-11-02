@@ -203,6 +203,12 @@ public:
     // for walk-while-riding to keep working).
     void setM2TransportRiding(bool riding) { m2TransportRiding_ = riding; }
     void setMountPitchRoll(float pitch, float roll) { mountPitch_ = pitch; mountRoll_ = roll; }
+    /// The rider's animation while mounted: Mount (91) or the mount aura's
+    /// state-kit animation (anim::mountRiderAnim).
+    void setMountRiderAnim(uint32_t animId) { riderAnim_ = animId; }
+    /// SMSG_MOUNTSPECIAL_ANIM for the local player: MountSpecial (94) once.
+    void playMountSpecial();
+    [[nodiscard]] uint32_t getMountDisplayId() const { return mountDisplayId_; }
     void clearMount();
     [[nodiscard]] bool isMounted() const { return mountInstanceId_ != 0; }
     [[nodiscard]] uint32_t getMountInstanceId() const { return mountInstanceId_; }
@@ -258,14 +264,14 @@ private:
     uint32_t mountInstanceId_ = 0;
     float mountHeightOffset_ = 0.0f;
     float mountPitch_ = 0.0f;
-    float mountRoll_ = 0.0f;       // External roll for taxi flights (lean roll computed by MountFSM)
-    int mountSeatAttachmentId_ = -1;
-    glm::vec3 smoothedMountSeatPos_ = glm::vec3(0.0f);
-    bool mountSeatSmoothingInit_ = false;
-    // Last frame's seat target, so the smoothing can tell a rider standing still
-    // from one being carried. Pressing no movement keys is not the same as not
-    // moving through the world, and on a boat the difference is the whole bug.
-    glm::vec3 lastMountSeatTarget_ = glm::vec3(0.0f);
+    float mountRoll_ = 0.0f;       // a taxi spline's bank (setMountPitchRoll)
+    uint32_t mountDisplayId_ = 0;
+    uint32_t riderAnim_ = 91;      // anim::MOUNT
+    uint32_t lastMountAnimRequest_ = UINT32_MAX;
+    uint32_t mountRateAnimId_ = UINT32_MAX;
+    float mountRateMoveSpeed_ = 0.0f;
+    bool mountJumpSounded_ = false;
+    bool mountWasAirborne_ = false;
     bool taxiFlight_ = false;
     bool m2TransportRiding_ = false;
 
@@ -277,7 +283,9 @@ private:
     /// the whole body instead. See playsOnUpperBody().
     bool playSwingOnUpperBody(uint32_t animId);
     void updateMountedAnimation(float deltaTime);
-    void applyMountPositioning(float mountBob, float mountRoll, float characterYaw);
+    void applyMountPositioning(float characterYaw);
+    /// The mount display's CreatureSoundData JumpStart or JumpEnd, at the unit.
+    void playMountCreatureSound(bool jumpEnd);
 };
 
 } // namespace rendering

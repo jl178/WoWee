@@ -476,8 +476,7 @@ The causes, all fixed (`core/creature_skin_rules.hpp`,
 In game (GM Island, 2026-11-02): the Saronite Animus draws as a huge black
 elemental instead of a translucent blue one; its opaque batch is combo
 [skin 11, WaterElementalReflect] with `combiners_opaque_add`, so stock adds a
-reflection over the black that Wowee, binding one texture per batch, still
-leaves out (L9). Fel orc loincloths (1301/1501) now draw.
+reflection over the black, which Wowee now draws too (L9). Fel orc loincloths (1301/1501) now draw.
 
 Not a skin fault: the "pale naked human" in the Firelord screenshot of
 2026-11-02 is the test character (a naked level-4 human, falling after the
@@ -572,7 +571,7 @@ traced and not checked in game.
 | L6 | Unlit | `tex × M2Color` | `tex × 2`, and every blend ≥ 3 unlit | **Fixed**: flag 0x01 only, no doubling; M2Color RGB on characters still open (scenes use it) |
 | L7 | Fog | world curve with exponent | linear distance | **Fixed** (`stock_fog.glsli`) |
 | L8 | Highlight | emissive = unit ambient, mouseover and target | none | **Fixed** (`setHighlightedInstances`, Application::updateUnitHighlights); no cvar toggle |
-| L9 | Env-mapped shine | sphere-map units on items | not reproduced | open |
+| L9 | Env-mapped shine | sphere-map units on items | not reproduced | **Fixed**: stock shader selection and combiners, second texture stage with sphere-map coordinates (m2-runtime.md §3 "Shader selection") |
 | L10 | Unit shadow | blob at default settings | shadow-map casters | open (Wowee's maps match stock quality ≥ 1) |
 | L11 | Terrain-shadow darkening, weather ×(1-0.35w) | yes | no / owned by lighting | open |
 | T1 | Transparency values | kit CharProc 14: 0.3 / 0.5 / 0.35 / 0.5 | 0.5 for all | **Fixed** (kit lookup, fallbacks 0.3/0.5) |
@@ -600,8 +599,8 @@ traced and not checked in game.
 | A7 | Hand grip, ParticleColor, quivers | yes | no | ParticleColor **fixed** (particles.md §8); hand grip and quivers open |
 | S1 | Player race scale | tauren 1.35/1.25, gnome 1.15 | 1.0 | **Fixed** (local and remote) |
 | S2 | Mount scale | unit scale × mount CDI scale | 1.0 | **Fixed** |
-| S3 | Rider seat | attachment 0, full transform, rider own size | remote: fixed height; local: offsets, 35% tilt | **Fixed for remote riders**; the local rider (animation_controller) is unchanged |
-| S4 | Rider anim from mount kit | yes | always 91 | open |
+| S3 | Rider seat | attachment 0, full transform, rider own size | remote: fixed height; local: offsets, 35% tilt | **Fixed** for remote riders, and for the local rider in mounts-taxi-vehicles.md (M5) |
+| S4 | Rider anim from mount kit | yes | always 91 | **Fixed** (mounts-taxi-vehicles.md M6) |
 | S5 | Creature particles in general | drawn | CharacterRenderer draws no emitters (fire elementals, wisps) | **Fixed**: emitter twins in M2Renderer, with the item models' own (particles.md §8) |
 
 ## 9. In game

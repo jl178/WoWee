@@ -879,7 +879,7 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
         if (auto* asm_ = ac->getActivitySoundManager()) {
             if (isPlayerAttacker && !data.isMiss() && data.victimState != VICTIMSTATE_DODGE &&
                 data.victimState != VICTIMSTATE_PARRY) {
-                asm_->playAttackGrunt();
+                asm_->playAttackGrunt(data.isCrit());
             }
             if (isPlayerTarget && !data.isMiss() && data.victimState != VICTIMSTATE_DODGE &&
                 data.victimState != VICTIMSTATE_PARRY) {

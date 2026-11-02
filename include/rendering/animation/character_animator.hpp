@@ -68,7 +68,7 @@ public:
     [[nodiscard]] const WeaponLoadout& getWeaponLoadout() const { return loadout_; }
 
     // ── Mount ───────────────────────────────────────────────────────────
-    void configureMountFSM(const MountFSM::MountAnimSet& anims, bool taxiFlight);
+    void configureMountFSM(const AnimCapabilitySet& mountCaps);
     void clearMountFSM();
     [[nodiscard]] bool isMountActive() const { return mount_.isActive(); }
     MountFSM& getMountFSM() { return mount_; }
