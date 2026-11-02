@@ -36,7 +36,7 @@ struct LightingParams {
     /// 1.5 to 7 on maps from 530 on, where the fog runs to the far clip.
     /// The shaders read it from localLightMeta.y (stock_fog.glsli): what
     /// shows of a surface at view depth z is
-    /// 1 - clamp(pow(max((z - start) / (end - start), 0), this)).
+    /// clamp(pow(max((end - z) / (end - start), 0), this)) (0x873210).
     float fogExponent = 1.0f;
 
     glm::vec3 skyTopColor{0.5f, 0.7f, 1.0f};       // Sky zenith color

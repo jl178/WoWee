@@ -543,9 +543,14 @@ bool M2Renderer::buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout) {
             // could drift.
             if (ribbonPipelineLayout_ == VK_NULL_HANDLE) {
                 VkDescriptorSetLayout ribLayouts[] = {perFrameLayout, particleTexLayout_};
+                // m2_ribbon.frag: the material's blend and unfogged flag.
+                VkPushConstantRange ribPush{.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+                                            .offset = 0, .size = 2 * sizeof(uint32_t)};
                 VkPipelineLayoutCreateInfo lci{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
                 lci.setLayoutCount = 2;
                 lci.pSetLayouts = ribLayouts;
+                lci.pushConstantRangeCount = 1;
+                lci.pPushConstantRanges = &ribPush;
                 vkCreatePipelineLayout(device, &lci, nullptr, &ribbonPipelineLayout_);
             }
 

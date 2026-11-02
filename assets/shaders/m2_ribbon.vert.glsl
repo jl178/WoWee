@@ -23,6 +23,8 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
 };
 
+#include "stock_fog.glsli"
+
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
 layout(location = 0) in vec3 aPos;
@@ -53,10 +55,9 @@ void main() {
     vec4 viewPos4  = view * worldPos;
     gl_Position    = projection * viewPos4;
 
-    float dist      = length(viewPos4.xyz);
-    float fogStart  = fogParams.x;
-    float fogEnd    = fogParams.y;
-    vFogFactor      = clamp((fogEnd - dist) / max(fogEnd - fogStart, 0.001), 0.0, 1.0);
+    // Per vertex, the world's curve: the ribbon draw (0x980B70) turns fog on
+    // with the M2 fog constant c30 its material's blend set up (0x81FB10).
+    vFogFactor = stockFogVisibility(aPos);
     if (volumetricParams.x > 0.5) vFogFactor *= fogVolumeAt(aPos).a;
 
     vColor = aColor;

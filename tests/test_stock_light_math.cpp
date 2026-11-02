@@ -149,9 +149,13 @@ TEST_CASE("Outland and Northrend fog runs to the far clip on a curve", "[light][
     const auto fog = sl::frameFog(lf, 1277.0f, true, false);
     CHECK(fog.end == Approx(1277.0f));
     CHECK(fog.start == Approx(1277.0f * 0.25f));
-    // Halfway through the fog only 0.5^4.525 of it has gathered.
+    // Halfway through the fog only 0.5^4.525 of the surface still shows
+    // (c30 = (-k, k*end, exponent), 0x873210): the power keeps a short band
+    // fog thick although its end moved out to the far clip.
     const float mid = (fog.start + fog.end) * 0.5f;
-    CHECK(sl::fogVisibility(mid, fog) == Approx(1.0f - std::pow(0.5f, 4.525f)));
+    CHECK(sl::fogVisibility(mid, fog) == Approx(std::pow(0.5f, 4.525f)));
+    CHECK(sl::fogVisibility(fog.start, fog) == 1.0f);
+    CHECK(sl::fogVisibility(fog.end, fog) == 0.0f);
 }
 
 TEST_CASE("a wide band fog keeps the gentlest curve", "[light][stock][fog]") {

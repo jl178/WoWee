@@ -2,14 +2,20 @@
 // view, fogParams and localLightMeta from it).
 //
 // Wow.exe 3.3.5a: DayNight 0x7f16f0 hands the renderer a fog start, end and
-// exponent; the arbvp1 shaders (shaders\vertex\arbvp1\terrain.bls,
-// diffuse_t1.bls, vsliquidwater.bls...) turn them into
+// exponent. 0x873210 uploads them for the M2 shaders as vertex constant c30
+// = (-k, k * end, exponent, 0) with k = 1 / (end - start) (0xd4300c, the
+// scale on the first term, is only ever 1.0, 0x872d09); vsLiquidWater's c4
+// has the same form (0x8a38b0), and terrain.bls reads its c12 the same way
+// (that upload is not traced). Every arbvp1 shader (terrain.bls,
+// diffuse_t1.bls, color_t1.bls, cdiffuse_t1.bls, vsliquidwater.bls...) writes
 //     fogcoord = clamp(pow(max(z * c.x + c.y, 0), c.z), 0, 1)
-// with z the view-space depth (not the distance), c.x = 1 / (end - start),
-// c.y = -start / (end - start), c.z the exponent, and OPTION ARB_fog_linear
-// over 0..1 - so 1 - fogcoord of the surface shows. The exponent is 1 on
-// Azeroth and Kalimdor (plain linear fog) and 1.5-7 on maps from 530 on,
-// where the fog runs out to the far clip (stock_light_math.hpp).
+//              = clamp(((end - z) / (end - start))^exponent, 0, 1)
+// with z the view-space depth (not the distance), and that is the fog factor
+// itself, D3D's oFog: 1 shows the surface, 0 the fog colour. The exponent is
+// 1 on Azeroth and Kalimdor (plain linear fog) and 1.5-7 on maps from 530 on,
+// where the end is the far clip; the larger exponents belong to zones whose
+// band fog was short, and pull the fog in toward the camera again
+// (stock_light_math.hpp).
 //
 // fogParams.x is the start, .y the end; the exponent rides in
 // localLightMeta.y as float bits (every float .w was taken). A block that
@@ -20,6 +26,6 @@ float stockFogVisibility(vec3 worldPos) {
     float range = max(fogParams.y - fogParams.x, 1e-3);
     float e = intBitsToFloat(localLightMeta.y);
     e = e > 0.0 ? e : 1.0;
-    float x = max((z - fogParams.x) / range, 0.0);
-    return 1.0 - clamp(pow(x, e), 0.0, 1.0);
+    float x = max((fogParams.y - z) / range, 0.0);
+    return clamp(pow(x, e), 0.0, 1.0);
 }

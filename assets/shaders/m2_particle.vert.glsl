@@ -19,6 +19,8 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
 };
 
+#include "stock_fog.glsli"
+
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
 layout(location = 0) in vec3 aPos;
@@ -49,9 +51,10 @@ void main() {
     gl_PointSize = clamp(aSize * 500.0 / max(dist, 1.0), 1.0, 128.0);
     vColor = aColor;
     vTile = aTile;
-    float worldDist = length(viewPos.xyz - aPos);
-    float fogRange = max(fogParams.y - fogParams.x, 0.001);
-    vFogVisibility = clamp((fogParams.y - worldDist) / fogRange, 0.0, 1.0);
+    // The world's fog curve, per vertex as the stock particle shaders take
+    // it. These sprites are only drawn additive (the glow pass), which fogs
+    // to black: m2_particle.frag scales the colour by it.
+    vFogVisibility = stockFogVisibility(aPos);
     // And thinned by the air in front of it, the way distance thins it:
     // a spark deep in a bank of mist is mostly the mist.
     if (volumetricParams.x > 0.5) vFogVisibility *= fogVolumeAt(aPos).a;
