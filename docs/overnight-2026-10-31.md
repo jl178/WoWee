@@ -499,3 +499,4 @@ Other fixes:
 - `31f9bd5`: M2Instance cull fields packed into one cache line; the WMO draw ranges are joined. Northshire: 86 -> 93.5 fps uncapped.
 - `c56b190`: gatherLocalLights skips light-giving M2s beyond 300 yd before their bone transforms. record+ubo 0.6 -> 0.15 ms; ~97 fps.
   - Same 2.6 GHz ceiling and test window throughout. This morning's Goldshire figure was 40-47 fps.
+- `8c4e518`: the stock event sounds Wowee never played, from the Wow.exe UI message table and LFG/threat code. Server sounds now play their row's random file at the row volume. M2 $SND events play, so level-up and achievement sound at any player. Verified with `.levelup`: LevelUp.m2 showed for us and for a nearby bot; all tests pass.
