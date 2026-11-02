@@ -28,7 +28,6 @@
 #include "rendering/sky_system.hpp"
 #include "rendering/swim_effects.hpp"
 #include "rendering/mount_dust.hpp"
-#include "rendering/charge_effect.hpp"
 #include "rendering/levelup_effect.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/character_preview.hpp"
@@ -856,9 +855,6 @@ bool Renderer::initialize(core::Window* win) {
     if (!mountDust->initialize(vkCtx, perFrameSetLayout))
         LOG_WARNING("Mount dust effect initialization failed (non-fatal)");
 
-    chargeEffect = std::make_unique<ChargeEffect>();
-    if (!chargeEffect->initialize(vkCtx, perFrameSetLayout))
-        LOG_WARNING("Charge effect initialization failed (non-fatal)");
 
     levelUpEffect = std::make_unique<LevelUpEffect>();
     lootSparkles_ = std::make_unique<LootSparkles>();
@@ -1202,7 +1198,6 @@ void Renderer::applyMsaaChange() {
         swimEffects->recreatePipelines();
     }
     if (mountDust) mountDust->recreatePipelines();
-    if (chargeEffect) chargeEffect->recreatePipelines();
 
     // Sky system sub-renderers
     if (skySystem) {
@@ -2561,10 +2556,6 @@ void Renderer::update(float deltaTime) {
     if (levelUpEffect) {
         levelUpEffect->update(deltaTime);
     }
-    // Update charge effect
-    if (chargeEffect) {
-        chargeEffect->update(deltaTime);
-    }
     section("update/pre/sky+weather+water+fx");
     // Update transient spell visual instances (delegated to SpellVisualSystem §4.4)
     if (spellVisualSystem_) spellVisualSystem_->update(deltaTime);
@@ -3575,7 +3566,6 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
                 swimEffects->render(cmd, perFrameSet);
             }
             if (mountDust && camera) mountDust->render(cmd, perFrameSet);
-            if (chargeEffect && camera) chargeEffect->render(cmd, perFrameSet);
             if (footprintRenderer && camera) footprintRenderer->render(cmd, perFrameSet, *camera);
 
             renderUnderwaterOverlay(cmd);
@@ -3772,7 +3762,6 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             swimEffects->render(currentCmd, perFrameSet);
         }
         if (mountDust && camera) mountDust->render(currentCmd, perFrameSet);
-        if (chargeEffect && camera) chargeEffect->render(currentCmd, perFrameSet);
         if (footprintRenderer && camera) footprintRenderer->render(currentCmd, perFrameSet, *camera);
         // The same one-line total the parallel path reports, so a profile taken
         // either way can be compared against the other.

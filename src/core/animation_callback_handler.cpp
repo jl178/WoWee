@@ -63,14 +63,13 @@ bool AnimationCallbackHandler::updateCharge(float deltaTime) {
     glm::vec3 renderPos = chargeStartPos_ + (chargeEndPos_ - chargeStartPos_) * s;
     renderer_.getCharacterPosition() = renderPos;
 
-    // Keep facing toward target and emit charge effect
+    // Keep facing toward target
     glm::vec3 dir = chargeEndPos_ - chargeStartPos_;
     float dirLenSq = glm::dot(dir, dir);
     if (dirLenSq > 1e-4f) {
         dir *= glm::inversesqrt(dirLenSq);
         float yawDeg = glm::degrees(std::atan2(dir.x, dir.y));
         renderer_.setCharacterYaw(yawDeg);
-        if (auto* ac = renderer_.getAnimationController()) ac->emitChargeEffect(renderPos, dir);
     }
 
     // Sync to game handler
@@ -89,7 +88,6 @@ bool AnimationCallbackHandler::updateCharge(float deltaTime) {
     if (t >= 1.0f) {
         chargeActive_ = false;
         if (auto* ac = renderer_.getAnimationController()) ac->setCharging(false);
-        if (auto* ac = renderer_.getAnimationController()) ac->stopChargeEffect();
         renderer_.getCameraController()->setExternalFollow(false);
         renderer_.getCameraController()->setExternalMoving(false);
 
@@ -178,9 +176,12 @@ void AnimationCallbackHandler::setupCallbacks() {
         renderer_.getCameraController()->clearMovementInputs();
         if (auto* ac = renderer_.getAnimationController()) ac->setCharging(true);
 
-        // Start charge visual effect (red haze + dust)
-        glm::vec3 chargeDir = glm::normalize(endRender - startRender);
-        if (auto* ac = renderer_.getAnimationController()) ac->startChargeEffect(startRender, chargeDir);
+        // No visual here either. Charge's cast kit (44) is the stock one:
+        // Spells\ChargeTrail (a ribbon on the chest) and DustCloud_Land at
+        // the feet, which the spell visual system attaches to the caster on
+        // SPELL_GO, the local player as anyone else. A hand-made red ribbon
+        // and dust drawn here as well put a second streak behind the local
+        // warrior that the stock client never shows.
 
         // No sound here. Charge's visual (867) has cast kit 44, whose sound is
         // SoundEntries 3330 ("HeroicLeap"), and the spell visual system plays

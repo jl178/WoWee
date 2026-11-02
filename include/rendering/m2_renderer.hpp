@@ -445,10 +445,22 @@ struct alignas(64) M2Instance {
         float     heightAbove;// Half-width above spine
         float     heightBelow;// Half-width below spine
         float     age;        // Seconds since spawned
+        bool      breakBefore;// Starts a new strip: not joined to the edge before it
     };
     // One deque of edges per ribbon emitter on this instance
     std::vector<std::deque<RibbonEdge>> ribbonEdges;
     std::vector<float> ribbonEdgeAccumulators; // fractional edge counter per emitter
+    /// Where each emitter's spine was at its last step. The stock
+    /// CRibbonEmitter keeps the previous and current emitter frames and lays
+    /// the edges born in a step along the line between them, and it starts
+    /// over - nothing to interpolate from - whenever the ribbon is hidden.
+    struct RibbonTrack {
+        glm::vec3 lastSpine{0.0f};
+        bool hasLastSpine = false;  // the next step may interpolate from lastSpine
+        bool breakPending = false;  // the next edge starts a new strip
+        bool live = false;          // emitting: the strip runs on to lastSpine
+    };
+    std::vector<RibbonTrack> ribbonTracks;
 
     // Cached model flags (set at creation to avoid per-frame hash lookups)
     bool cachedHasParticleEmitters = false;
@@ -1449,6 +1461,8 @@ private:
         uint32_t        vertexCount;
     };
     std::vector<RibbonDrawCall> ribbonDraws_;
+    // One strip of a ribbon as drawn (its edges plus the live head), reused.
+    std::vector<M2Instance::RibbonEdge> ribbonStrip_;
 
     // Particle group structures (reused each frame)
     struct ParticleGroupKey {
@@ -1692,6 +1706,9 @@ private:
     /// every emitter it will step before the step is split across threads.
     void ensureParticleCurves(const M2ModelGPU& gpu);
     void updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt);
+    /// Drops an instance's ribbon edges and its trails' continuity: the next
+    /// edge each emitter lays starts a fresh strip where the emitter then is.
+    static void resetRibbons(M2Instance& inst);
 
     // Helper to allocate descriptor sets
     VkDescriptorSet allocateMaterialSet();
