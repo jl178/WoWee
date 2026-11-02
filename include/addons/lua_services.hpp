@@ -183,7 +183,8 @@ struct LuaServices {
     std::function<void(uint32_t)> setMapWorldAreaId;
 
     /// The zone the player is standing in, worked out from the terrain under
-    /// them and refreshed every frame.
+    /// them - or from WMOAreaTable inside a WMO group, which is what names
+    /// Ironforge over Dun Morogh's terrain - and refreshed every frame.
     ///
     /// The server's zone is only told to us on SMSG_INIT_WORLD_STATES, which
     /// arrives when the server notices a zone change and not otherwise - so
@@ -191,8 +192,13 @@ struct LuaServices {
     /// server announced rather than the one being walked through. The real
     /// client works this out locally for exactly that reason.
     std::function<uint32_t()> getLiveZoneId;
-    /// The area (subzone) under the player, from the terrain. 0 when unknown.
+    /// The area (subzone) the player is in: the WMO group's WMOAreaTable area
+    /// when one decides it, else the terrain chunk's. 0 when unknown.
     std::function<uint32_t()> getLiveAreaId;
+    /// The WMOAreaTable name of the room the player is in ("The Great Forge",
+    /// "Trade Quarter"): the stock subzone text inside a WMO, which AreaTable
+    /// has no row for. Empty outdoors and in unnamed rooms.
+    std::function<std::string()> getLiveWmoAreaName;
     /// The WMO group the player stands in, by its global id (MOGP's group id,
     /// the number WMOAreaTable and DungeonMapChunk are keyed on). 0 outdoors
     /// or when unknown. The world map picks a dungeon floor from it.

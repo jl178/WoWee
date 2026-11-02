@@ -482,6 +482,12 @@ uint32_t ZoneManager::resolveAreaZoneId(uint32_t areaId) const {
     return current != 0 ? current : areaId;
 }
 
+WmoAreaInfo ZoneManager::resolveWmoArea(uint32_t wmoId, uint16_t nameSet, int32_t groupId) const {
+    auto it = wmoAreas_.find(wmoId);
+    if (wmoId == 0 || it == wmoAreas_.end()) return {};
+    return pickWmoArea(it->second, nameSet, groupId);
+}
+
 const ZoneInfo* ZoneManager::getZoneInfo(uint32_t zoneId) const {
     auto it = zones.find(zoneId);
     if (it != zones.end()) {
@@ -576,6 +582,30 @@ void ZoneManager::enrichFromDBC(pipeline::AssetManager* assets) {
         // and must carry 0x01000000, and 3703 is Shattrath and must carry the
         // sanctuary bit 0x800. A wrong column reads as zero forever.
         if (haveFlags) areaFlags_[areaId] = areaDbc->getUInt32(i, 4);
+    }
+
+    // WMOAreaTable: what names Ironforge "Ironforge" while the terrain under
+    // it is Dun Morogh's. Columns for the 28-wide layout TBC and WotLK share
+    // (WoWDBDefs): ID, WMOID, NameSetID, WMOGroupID, the sound columns,
+    // Flags, AreaTableID (10), AreaName_lang (11). Another width is another
+    // layout, and is skipped rather than misread, as SoundData does.
+    wmoAreas_.clear();
+    if (auto wmoDbc = assets->loadDBC("WMOAreaTable.dbc"); wmoDbc && wmoDbc->isLoaded()) {
+        constexpr uint32_t kFields = 28, kWmoId = 1, kNameSet = 2, kGroup = 3, kAreaTable = 10, kName = 11;
+        if (wmoDbc->getFieldCount() >= kFields) {
+            for (uint32_t i = 0; i < wmoDbc->getRecordCount(); ++i) {
+                WmoAreaRow row;
+                row.wmoId = wmoDbc->getUInt32(i, kWmoId);
+                row.nameSet = static_cast<uint16_t>(wmoDbc->getUInt32(i, kNameSet));
+                row.groupId = wmoDbc->getInt32(i, kGroup);
+                row.areaId = wmoDbc->getUInt32(i, kAreaTable);
+                row.name = wmoDbc->getString(i, kName);
+                wmoAreas_[row.wmoId].push_back(std::move(row));
+            }
+        } else {
+            LOG_WARNING("ZoneManager::enrichFromDBC: WMOAreaTable.dbc has ", wmoDbc->getFieldCount(),
+                        " fields, the TBC/WotLK layout has ", kFields, "; skipped");
+        }
     }
 
 

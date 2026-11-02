@@ -1313,8 +1313,9 @@ void GameHandler::registerCoreOpcodes() {
             uint32_t newZoneId = packet.readUInt32();
             if (newZoneId != worldStateZoneId_ && newZoneId != 0) {
                 worldStateZoneId_ = newZoneId;
-                    fireAddonEvent("ZONE_CHANGED_NEW_AREA", {});
-                    fireAddonEvent("ZONE_CHANGED", {});
+                // Once: the renderer's own area lookup usually saw the
+                // crossing first and announced it already.
+                if (announceZoneChange(newZoneId)) fireAddonEvent("ZONE_CHANGED", {});
             } else {
                 worldStateZoneId_ = newZoneId;
             }

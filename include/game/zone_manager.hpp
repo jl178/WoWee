@@ -1,5 +1,7 @@
 #pragma once
 
+#include "game/wmo_area.hpp"
+
 #include <string>
 #include <cstdint>
 #include <unordered_map>
@@ -37,6 +39,11 @@ public:
     [[nodiscard]] uint32_t getZoneId(int tileX, int tileY) const;
     [[nodiscard]] uint32_t resolveAreaZoneId(uint32_t areaId) const;
 
+    /// The area a WMO group is in, from WMOAreaTable (see wmo_area.hpp):
+    /// wmoId is the root's MOHD wmoID, nameSet the placement's MODF name set,
+    /// groupId the group's MOGP id. areaId 0 when no row names an area.
+    [[nodiscard]] WmoAreaInfo resolveWmoArea(uint32_t wmoId, uint16_t nameSet, int32_t groupId) const;
+
     /// Whether an area is a world PvP objective - one of the eleven the
     /// AREA_FLAG_OUTDOOR_PVP bit marks, or anywhere in Wintergrasp, which
     /// carries a flag of its own instead.
@@ -67,6 +74,8 @@ private:
     /// AreaTable's Flags column, by area id. Read in the same pass as the
     /// parents; the file is walked once either way.
     std::unordered_map<uint32_t, uint32_t> areaFlags_;
+    /// WMOAreaTable rows by root wmoID.
+    std::unordered_map<uint32_t, std::vector<WmoAreaRow>> wmoAreas_;
     std::string lastPlayedMusic_;
     bool useOriginalSoundtrack_ = false;
 };

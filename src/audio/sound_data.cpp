@@ -1,6 +1,7 @@
 #include "audio/sound_data.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "core/logger.hpp"
+#include "game/wmo_area.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -155,7 +156,7 @@ bool SoundData::load(const Loader& loadDbc) {
             WmoAreaSounds row;
             row.wmoId = dbc->getUInt32(i, wa::kWmoId);
             row.nameSet = static_cast<uint16_t>(dbc->getUInt32(i, wa::kNameSet));
-            row.groupIndex = dbc->getInt32(i, wa::kGroup);
+            row.groupId = dbc->getInt32(i, wa::kGroup);
             row.ambienceId = dbc->getUInt32(i, wa::kAmbience);
             row.zoneMusicId = dbc->getUInt32(i, wa::kZoneMusic);
             row.introId = dbc->getUInt32(i, wa::kIntroSound);
@@ -440,21 +441,24 @@ bool SoundData::ambience(uint32_t ambienceId, uint32_t& daySoundId, uint32_t& ni
     return daySoundId != 0 || nightSoundId != 0;
 }
 
-const WmoAreaSounds* SoundData::wmoArea(uint32_t wmoId, uint16_t nameSet, int32_t groupIndex) const {
+const WmoAreaSounds* SoundData::wmoArea(uint32_t wmoId, uint16_t nameSet, int32_t groupId) const {
     auto it = wmoAreas_.find(wmoId);
     if (it == wmoAreas_.end()) return nullptr;
-    const WmoAreaSounds* best = nullptr;
-    int bestRank = 0;
-    for (const WmoAreaSounds& row : it->second) {
-        if (row.groupIndex != groupIndex && row.groupIndex != -1) continue;
-        if (row.nameSet != nameSet && row.nameSet != 0) continue;
-        const int rank = (row.groupIndex == groupIndex ? 2 : 0) + (row.nameSet == nameSet ? 1 : 0) + 1;
-        if (rank > bestRank) {
-            bestRank = rank;
-            best = &row;
-        }
-    }
-    return best;
+    return game::findWmoAreaRow(it->second, nameSet, groupId);
+}
+
+uint32_t SoundData::wmoAmbience(uint32_t wmoId, uint16_t nameSet, int32_t groupId) const {
+    const WmoAreaSounds* own = wmoArea(wmoId, nameSet, groupId);
+    if (own && own->ambienceId != 0) return own->ambienceId;
+    const WmoAreaSounds* building = groupId != -1 ? wmoArea(wmoId, nameSet, -1) : nullptr;
+    return building ? building->ambienceId : 0;
+}
+
+uint32_t SoundData::wmoZoneMusic(uint32_t wmoId, uint16_t nameSet, int32_t groupId) const {
+    const WmoAreaSounds* own = wmoArea(wmoId, nameSet, groupId);
+    if (own && own->zoneMusicId != 0) return own->zoneMusicId;
+    const WmoAreaSounds* building = groupId != -1 ? wmoArea(wmoId, nameSet, -1) : nullptr;
+    return building ? building->zoneMusicId : 0;
 }
 
 const SoundProviderPref* SoundData::providerPref(int32_t id) const {
@@ -482,15 +486,15 @@ int32_t SoundData::areaReverb(uint32_t areaId, bool underwater) const {
     return 0;
 }
 
-int32_t SoundData::wmoReverb(uint32_t wmoId, uint16_t nameSet, int32_t groupIndex, bool underwater) const {
+int32_t SoundData::wmoReverb(uint32_t wmoId, uint16_t nameSet, int32_t groupId, bool underwater) const {
     // A group's own row may carry only a name or music and leave the reverb
     // to the building's -1 row.
     const auto pick = [underwater](const WmoAreaSounds* row) {
         return row ? (underwater ? row->reverbUnderwater : row->reverb) : 0;
     };
-    const int32_t own = pick(wmoArea(wmoId, nameSet, groupIndex));
+    const int32_t own = pick(wmoArea(wmoId, nameSet, groupId));
     if (own > 0) return own;
-    const int32_t building = groupIndex != -1 ? pick(wmoArea(wmoId, nameSet, -1)) : 0;
+    const int32_t building = groupId != -1 ? pick(wmoArea(wmoId, nameSet, -1)) : 0;
     return building > 0 ? building : 0;
 }
 

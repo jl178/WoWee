@@ -2497,6 +2497,13 @@ target_link_libraries(test_binding_commands PRIVATE imgui SDL3::SDL3)
 wowee_add_test(test_tab_target
     SOURCES test_tab_target.cpp)
 
+# ── test_wmo_area ────────────────────────────────────────────
+# Which WMOAreaTable row a WMO group belongs to - the group's own, then the
+# root's -1 row, name set before set 0 - and when the WMO rather than the
+# terrain decides the area. What names Ironforge over Dun Morogh's terrain.
+wowee_add_test(test_wmo_area
+    SOURCES test_wmo_area.cpp)
+
 # ── test_player_model_path ───────────────────────────────────
 # Which body a character wears. Gender alone does not answer it: a nonbinary
 # character picks one, and the preview, the world spawn and the skin textures

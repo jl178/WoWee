@@ -66,7 +66,7 @@ struct AreaSounds {
 struct WmoAreaSounds {
     uint32_t wmoId = 0;
     uint16_t nameSet = 0;
-    int32_t groupIndex = -1;  ///< -1 covers the whole building
+    int32_t groupId = -1;     ///< MOGP group id, not the file index; -1 covers the whole building
     uint32_t ambienceId = 0;  ///< SoundAmbience.dbc
     uint32_t zoneMusicId = 0; ///< ZoneMusic.dbc
     uint32_t introId = 0;
@@ -165,7 +165,14 @@ public:
 
     /// The WMOAreaTable row for a room: the group's own row first, then the
     /// building's -1 row, each with the placement's name set and then set 0.
-    [[nodiscard]] const WmoAreaSounds* wmoArea(uint32_t wmoId, uint16_t nameSet, int32_t groupIndex) const;
+    /// groupId is the group's MOGP id, which the table is keyed on - not its
+    /// index in the root file.
+    [[nodiscard]] const WmoAreaSounds* wmoArea(uint32_t wmoId, uint16_t nameSet, int32_t groupId) const;
+    /// A room's SoundAmbience and ZoneMusic ids: the group's own row, then the
+    /// building's -1 row when the group's names none. Ironforge's rooms name
+    /// their own only here and there and the city's row covers the rest.
+    [[nodiscard]] uint32_t wmoAmbience(uint32_t wmoId, uint16_t nameSet, int32_t groupId) const;
+    [[nodiscard]] uint32_t wmoZoneMusic(uint32_t wmoId, uint16_t nameSet, int32_t groupId) const;
 
     /// A SoundProviderPreferences row by id; null for 0, -1 or an unknown id.
     [[nodiscard]] const SoundProviderPref* providerPref(int32_t id) const;
@@ -176,7 +183,7 @@ public:
     [[nodiscard]] int32_t areaReverb(uint32_t areaId, bool underwater) const;
     /// The reverb a room asks for: the group's own row, then the building's
     /// -1 row when the group's names none. 0 when neither does.
-    [[nodiscard]] int32_t wmoReverb(uint32_t wmoId, uint16_t nameSet, int32_t groupIndex, bool underwater) const;
+    [[nodiscard]] int32_t wmoReverb(uint32_t wmoId, uint16_t nameSet, int32_t groupId, bool underwater) const;
 
     /// ChrRaces -> CreatureDisplayInfo -> CreatureModelData -> CreatureSoundData.
     [[nodiscard]] const CreatureSounds* playerSounds(uint32_t raceId, bool female) const;

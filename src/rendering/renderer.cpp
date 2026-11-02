@@ -1938,18 +1938,78 @@ uint32_t Renderer::loadSkyboxModel(const std::string& path) {
 }
 
 bool Renderer::isOnOutdoorPvpObjective() const {
-    if (!zoneManager || !terrainManager) return false;
-    if (const auto areaId = terrainManager->getAreaIdAt(
-            characterPosition.x, characterPosition.y)) {
-        return zoneManager->isOutdoorPvpArea(*areaId);
-    }
-    return false;
+    if (!zoneManager) return false;
+    const uint32_t areaId = getCurrentAreaId();
+    return areaId != 0 && zoneManager->isOutdoorPvpArea(areaId);
 }
 
 uint32_t Renderer::getCurrentAreaId() const {
+    if (liveAreaValid_) return liveAreaId_;
     if (!terrainManager) return 0;
     const auto areaId = terrainManager->getAreaIdAt(characterPosition.x, characterPosition.y);
     return areaId ? *areaId : 0u;
+}
+
+void Renderer::updateLiveArea(uint32_t wmoId, uint16_t nameSet, uint32_t wmoGroupId) {
+    const float x = characterPosition.x, y = characterPosition.y, z = characterPosition.z;
+    uint32_t area = 0;
+    if (terrainManager) {
+        if (const auto terrainArea = terrainManager->getAreaIdAt(x, y)) area = *terrainArea;
+    }
+    liveAreaFromWmo_ = false;
+    liveWmoAreaName_.clear();
+
+    // Inside a WMO group the stock client asks WMOAreaTable first: that is
+    // what names Ironforge and the Undercity, whose terrain chunks are Dun
+    // Morogh's and Tirisfal's. See game/wmo_area.hpp.
+    if (wmoId != 0 && wmoGroupId != 0 && zoneManager && wmoRenderer) {
+        const game::WmoAreaInfo info =
+            zoneManager->resolveWmoArea(wmoId, nameSet, static_cast<int32_t>(wmoGroupId));
+        if (info.areaId != 0 || !info.name.empty()) {
+            // The group is a bounding-box answer, and Ironforge's boxes reach up
+            // through the mountain it is cut into. Only a WMO floor the player
+            // is standing on, and that is not under the open ground, counts.
+            const auto floor = wmoRenderer->getFloorHeight(x, y, z + 2.0f, nullptr, z);
+            std::optional<float> ground;
+            if (terrainManager && !terrainManager->isHoleAt(x, y)) ground = terrainManager->getHeightAt(x, y);
+            if (game::wmoDecidesArea(z, floor, ground)) {
+                if (info.areaId != 0) area = info.areaId;
+                liveWmoAreaName_ = info.name;
+                liveAreaFromWmo_ = true;
+            }
+        }
+    }
+    liveAreaId_ = area;
+    liveAreaValid_ = true;
+}
+
+void Renderer::fireZoneEvents() {
+    auto* gh = core::Application::getInstance().getGameHandler();
+    if (!gh) return;
+    const uint32_t mapId = gh->getCurrentMapId();
+    const uint32_t areaId = getCurrentAreaId();
+    const uint32_t zoneId = (areaId != 0 && zoneManager) ? zoneManager->resolveAreaZoneId(areaId) : areaId;
+    if (zoneId == 0) return;  // nothing known here yet; keep the last answer
+
+    // A new map, or the first area known on it, is announced by world entry
+    // (PLAYER_ENTERING_WORLD and ZONE_CHANGED_NEW_AREA), not here.
+    const bool seed = mapId != zoneEventMapId_ || zoneEventZoneId_ == 0;
+    const bool zoneChanged = zoneId != zoneEventZoneId_;
+    const bool subzoneChanged = areaId != zoneEventAreaId_ || liveWmoAreaName_ != zoneEventWmoName_;
+    zoneEventMapId_ = mapId;
+    zoneEventZoneId_ = zoneId;
+    zoneEventAreaId_ = areaId;
+    zoneEventWmoName_ = liveWmoAreaName_;
+    if (seed || (!zoneChanged && !subzoneChanged)) return;
+
+    // The stock client works these out from its own lookup, as this does:
+    // ZONE_CHANGED_NEW_AREA for a new zone, ZONE_CHANGED_INDOORS for a new
+    // room or area inside a WMO, ZONE_CHANGED for a new subzone outdoors and
+    // for the way back out. zonetext.lua shows the zone banner on any of them
+    // once GetZoneText changes, so walking through Ironforge's gates names
+    // the city even before the server's SMSG_INIT_WORLD_STATES arrives.
+    if (zoneChanged) gh->announceZoneChange(zoneId);
+    gh->fireAddonEvent(liveAreaFromWmo_ ? "ZONE_CHANGED_INDOORS" : "ZONE_CHANGED", {});
 }
 
 uint32_t Renderer::getPlayerWmoGroupId() const {
@@ -1976,12 +2036,14 @@ uint32_t Renderer::getCurrentZoneId() const {
     }
 
     uint32_t tileZoneId = 0;
-    if (zoneManager && terrainManager) {
-        if (const auto areaId = terrainManager->getAreaIdAt(
-                characterPosition.x, characterPosition.y)) {
-            lastResolvedZoneId_ = zoneManager->resolveAreaZoneId(*areaId);
+    // The area the player is in, WMOAreaTable's inside a city like Ironforge.
+    if (zoneManager) {
+        if (const uint32_t areaId = getCurrentAreaId()) {
+            lastResolvedZoneId_ = zoneManager->resolveAreaZoneId(areaId);
             return lastResolvedZoneId_;
         }
+    }
+    if (zoneManager && terrainManager) {
         const auto tile = terrainManager->getCurrentTile();
         tileZoneId = zoneManager->getZoneId(tile.x, tile.y);
     }
@@ -2141,15 +2203,10 @@ void Renderer::update(float deltaTime) {
     const bool insideWmo = canQueryWmo &&
         wmoRenderer->insideWmoArea(camPos.x, camPos.y, camPos.z, &wmoHit);
     if (insideWmo) insideWmoId = wmoHit.modelId;
-    // Announce the crossing. zonetext.lua and worldstateframe.lua both listen
-    // for ZONE_CHANGED_INDOORS, and WoW answers the way back out with a plain
-    // ZONE_CHANGED - there is no outdoors counterpart. Nothing fired either,
-    // so the state was known here and never left this file.
-    if (insideWmo != playerIndoors_) {
-        if (auto* gh = core::Application::getInstance().getGameHandler()) {
-            gh->fireAddonEvent(insideWmo ? "ZONE_CHANGED_INDOORS" : "ZONE_CHANGED", {});
-        }
-    }
+    // The zone events are not fired from this camera test. They follow the
+    // area the player is in (fireZoneEvents, below), which is what the zone
+    // text reads: the camera swinging into a wall's group is not a new
+    // subzone, and walking into Ironforge is one whatever the camera does.
     playerIndoors_ = insideWmo;
     {
         // Ease characters between sun and interior light over about a second,
@@ -2168,6 +2225,15 @@ void Renderer::update(float deltaTime) {
         if (interior) interiorAmbient_ = wmoRenderer->getModelAmbient(unitHit.modelId);
         const float target = interior ? 1.0f : 0.0f;
         indoorFactor_ += (target - indoorFactor_) * (1.0f - std::exp(-deltaTime / 0.35f));
+
+        // The same group decides the area the player is in, before the
+        // lighting, audio and zone text below read it.
+        if (unitInside) {
+            updateLiveArea(unitHit.wmoId, unitHit.nameSet, unitHit.wmoGroupId);
+        } else {
+            updateLiveArea(0, 0, 0);
+        }
+        fireZoneEvents();
     }
 
     // Update lighting system
@@ -2530,7 +2596,7 @@ void Renderer::update(float deltaTime) {
         zctx.insideWmoId = insideWmoId;
         if (insideWmo) {
             zctx.wmoRootId = wmoHit.wmoId;
-            zctx.wmoGroupIndex = wmoHit.groupIndex;
+            zctx.wmoGroupId = static_cast<int32_t>(wmoHit.wmoGroupId);
             zctx.wmoNameSet = wmoHit.nameSet;
             zctx.wmoInterior = wmoHit.interior;
         }
@@ -2554,11 +2620,9 @@ void Renderer::update(float deltaTime) {
         // Use the precise MCNK area classification when available; this avoids
         // stale server world-state zones and whole-ADT ambiguity at river banks.
         zctx.serverZoneId = getCurrentZoneId();
-        if (terrainManager) {
-            if (const auto areaId = terrainManager->getAreaIdAt(characterPosition.x, characterPosition.y)) {
-                zctx.areaId = *areaId;
-            }
-        }
+        // The area the zone text names: inside Ironforge, Ironforge's music and
+        // ambience rather than the Dun Morogh chunk's under it.
+        zctx.areaId = getCurrentAreaId();
         zctx.zoneManager = zoneManager.get();
         // For SoundEmitters.dbc, which places its loops per map.
         if (terrainManager) {

@@ -905,6 +905,9 @@ bool Application::initialize() {
         luaSvc.getLiveAreaId = [r = renderer.get()]() -> uint32_t {
             return r ? r->getCurrentAreaId() : 0u;
         };
+        luaSvc.getLiveWmoAreaName = [r = renderer.get()]() -> std::string {
+            return r ? r->getCurrentWmoAreaName() : std::string();
+        };
         luaSvc.getLiveWmoGroupId = [r = renderer.get()]() -> uint32_t {
             return r ? r->getPlayerWmoGroupId() : 0u;
         };

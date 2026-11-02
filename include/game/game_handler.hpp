@@ -2978,6 +2978,16 @@ public:
     void fireAddonEvent(const std::string& event, const std::vector<std::string>& args = {}) {
         if (addonEventCallback_) addonEventCallback_(event, args);
     }
+    /// ZONE_CHANGED_NEW_AREA for a zone crossing, once per zone. The server
+    /// (SMSG_INIT_WORLD_STATES) and the client's own area lookup both notice
+    /// a crossing, a moment apart, and the second event would restart the
+    /// zone banner's fade from nothing. True when the event was fired.
+    bool announceZoneChange(uint32_t zoneId) {
+        if (zoneId == 0 || zoneId == lastAnnouncedZoneId_) return false;
+        lastAnnouncedZoneId_ = zoneId;
+        fireAddonEvent("ZONE_CHANGED_NEW_AREA", {});
+        return true;
+    }
     /// COMBAT_TEXT_UPDATE, the feed Blizzard_CombatText draws every incoming
     /// number from: args are the message type ("DAMAGE", "HEAL", "SPELL_MISS"
     /// ...) and its data, in the stock order. Only for what happened to the
@@ -4369,6 +4379,7 @@ private:
     // ---- World state and faction initialization snapshots ----
     uint32_t worldStateMapId_ = 0;
     uint32_t worldStateZoneId_ = 0;
+    uint32_t lastAnnouncedZoneId_ = 0;  ///< see announceZoneChange
     // The active non-combat companion and the spell that called it. Re-casting
     // that spell dismisses rather than re-summons, which is how a companion is
     // put away: it has no aura to cancel from the buff bar, so this toggle is

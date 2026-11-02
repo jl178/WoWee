@@ -50,8 +50,11 @@ struct ZoneAudioContext {
     uint32_t areaId = 0;
     // The building and room the camera is in, for WMOAreaTable: a tavern's
     // music and a crypt's ambience live there, not in AreaTable.
+    // The group is named by its MOGP id, the WMOAreaTable key, not its index
+    // in the root file: keyed on the index, no room row ever matched and
+    // every room took its building's -1 row.
     uint32_t wmoRootId = 0;
-    int32_t wmoGroupIndex = -1;
+    int32_t wmoGroupId = -1;
     uint16_t wmoNameSet = 0;
     // That group has the indoor flag: a room or a cave, whose reverb is its
     // own. An outdoor group - a city street - sounds like the area around it.
