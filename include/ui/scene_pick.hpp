@@ -88,11 +88,16 @@ struct ScenePick {
 
     /// The object best aimed at whether or not it can be used.
     ///
-    /// A signpost, a banner, a shop's hanging board are GameObjectType 5 -
-    /// generic scenery - and nothing uses them in WoW either. What they do have
-    /// is a name, and reading it off the sign is the whole point of a sign:
-    /// "Mage Quarter", "Trias' Cheese", "Everyday Merchandise". Kept apart from
+    /// A signpost or a shop's hanging board is GameObjectType 5 - generic
+    /// scenery - and nothing uses it in WoW either. What it does have is a name,
+    /// and reading it off the sign is the whole point of a sign: "Mage
+    /// Quarter", "Trias' Cheese", "Everyday Merchandise". Kept apart from
     /// objectGuid so a click still cannot land on scenery.
+    ///
+    /// Only objects the stock client lets the mouse find at all are here or in
+    /// objectGuid; the rest are skipped by the picker (game_object_affordance.hpp).
+    /// A sign is found because its template sets "highlight"; an instance
+    /// portal's aura does not, and is passed through.
     uint64_t namedObjectGuid = 0;
     float    namedObjectAim = 1e30f;
 

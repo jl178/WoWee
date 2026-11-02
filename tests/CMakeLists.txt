@@ -1590,6 +1590,11 @@ wowee_add_test(test_npc_flags SOURCES test_npc_flags.cpp)
 # vendor cursor was asking the wrong one.
 wowee_add_test(test_scene_pick SOURCES test_scene_pick.cpp)
 
+# ── test_game_object_affordance ──────────────────────────────
+# Which game objects the stock client lets the mouse find and use. Every object
+# was offered, so an instance portal's aura wore a name and a cursor.
+wowee_add_test(test_game_object_affordance SOURCES test_game_object_affordance.cpp)
+
 # ── test_plural_escape ───────────────────────────────────────
 # WoW's |4singular:plural; escape, which nothing resolved - so the logout
 # prompt read "5 |4Second:Seconds; until logout" and seventy-four other
