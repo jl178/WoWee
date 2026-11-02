@@ -1728,9 +1728,15 @@ void WMORenderer::gatherCandidates(const glm::vec3& queryMin, const glm::vec3& q
                   }
               });
 
-    // Safety fallback: if the grid misses due streaming/index drift, avoid
-    // tunneling by scanning all instances instead of returning no candidates.
-    if (outIndices.empty() && !instances.empty()) {
+    // An empty answer means nothing here, and is returned as such. The grid is
+    // refiled by every add, move and removal before it returns, so there is no
+    // drift for a scan of every instance to cover, and what such a scan found
+    // lay outside the box anyway - a query with one building nearby never saw
+    // it. The M2 renderer's copy of this scan cost 24 ms a frame on open
+    // ground in Hellfire Peninsula (see M2Renderer::gatherCandidates).
+    // WOWEE_COLLISION_SCAN_ON_MISS=1 restores it.
+    static const bool scanOnMiss = core::envFlagEnabled("WOWEE_COLLISION_SCAN_ON_MISS", false);
+    if (scanOnMiss && outIndices.empty() && !instances.empty()) {
         outIndices.reserve(instances.size());
         for (size_t i = 0; i < instances.size(); i++) {
             if (!instances[i].hidden) outIndices.push_back(i);
