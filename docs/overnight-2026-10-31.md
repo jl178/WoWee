@@ -526,3 +526,6 @@ Other fixes:
 - Chat: removed the local echo. Your own lines and bubbles now come from the server's copy, as in stock, so GM commands and refused lines no longer show.
 - Particles keep emitter order; constant tracks are precomputed; the step runs on two threads. update/m2 join 0.48 -> 0.05 ms; particle draw runs ~1500 -> 54.
 - Found: inside city WMOs (Ironforge, Undercity) GetZoneText / the minimap label read the terrain area (Dun Morogh, Tirisfal Glades) instead of the WMO area. Next.
+- `ed2884f`: the area inside WMOs comes from WMOAreaTable (zone, room subzone text, events). Interior audio was keyed by group index instead of MOGP id; it is now keyed by the room.
+  - Checked in game: Ironforge -> Ironforge; Undercity -> Undercity / Trade Quarter; Goldshire unchanged.
+  - WMO minimap tiles are not implemented yet (plan in the agent notes: md5translate.trs WMO keys, 128-yd tiles at 2 px/yd).
