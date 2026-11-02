@@ -71,8 +71,28 @@ inline bool wmoGroupLitAsInterior(uint32_t groupFlags) {
 /// WOWEE_WMO_LEGACY_RECORD=1 records batches as they were before adjacent
 /// draw ranges were joined and the first range was read from the batch
 /// itself: one vkCmdDrawIndexed per authored batch, every range read through
-/// the vector. For telling a change in the image from the recording.
+/// the vector. For telling a change in the image from the recording. It also
+/// turns off the two switches below.
 const bool kWmoLegacyRecord = envFlagEnabled("WOWEE_WMO_LEGACY_RECORD");
+
+/// Groups wholly outside the view frustum are not recorded. This is not the
+/// culling cullingEnabled_ switched off: that tested the instance against the
+/// MOHD header box, which is not always around the geometry, and dropped
+/// groups by portals and distance. This tests each group's box as fitted to
+/// its own vertices at load (padded half a unit), against the same matrix the
+/// vertex shader projects with, so a group it drops would have produced no
+/// fragment. Cloth groups, which the vertex shader moves, are never dropped.
+/// WOWEE_WMO_FRUSTUM=0 records every group again.
+const bool kWmoGroupFrustum = !kWmoLegacyRecord && core::envFlagEnabled("WOWEE_WMO_FRUSTUM", true);
+
+/// WOWEE_WMO_ONE_WORKER=1 keeps the recording in one command buffer on one
+/// thread; see WMORenderer::recordPartsWanted.
+const bool kWmoOneWorker = kWmoLegacyRecord || envFlagEnabled("WOWEE_WMO_ONE_WORKER");
+
+/// Below this many commands a frame is recorded on one thread: a second
+/// buffer and the hand-off to another worker cost tens of microseconds,
+/// which a few hundred commands do not repay.
+constexpr uint32_t kWmoSplitMinCost = 600;
 
 /// Join index ranges that follow on from each other into one.
 ///
@@ -1031,10 +1051,38 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             // After the lava lights, which are placed one per authored range.
             if (!kWmoLegacyRecord) joinAdjacentDrawRanges(mb.draws);
             if (!mb.draws.empty()) mb.firstDraw = mb.draws.front();
+            if (mb.clothDrop > 0.0f) groupRes.hasCloth = true;
 
             groupRes.mergedBatches.push_back(std::move(mb));
         }
         groupRes.allUntextured = !anyTextured && !groupRes.mergedBatches.empty();
+
+        // The shadow pass's ranges: every batch's, sorted, with ranges that
+        // touch or overlap made one. An overlap would only draw the same
+        // triangles twice, which leaves the same depth.
+        if (!kWmoLegacyRecord) {
+            auto& sd = groupRes.shadowDraws;
+            sd.clear();
+            for (const auto& mb : groupRes.mergedBatches) {
+                for (const auto& dr : mb.draws) {
+                    if (dr.indexCount != 0) sd.push_back(dr);
+                }
+            }
+            std::sort(sd.begin(), sd.end(), [](const auto& a, const auto& b) {
+                return a.firstIndex < b.firstIndex;
+            });
+            size_t out = 0;
+            for (size_t i = 1; i < sd.size(); ++i) {
+                auto& last = sd[out];
+                const uint32_t lastEnd = last.firstIndex + last.indexCount;
+                if (sd[i].firstIndex <= lastEnd) {
+                    last.indexCount = std::max(lastEnd, sd[i].firstIndex + sd[i].indexCount) - last.firstIndex;
+                } else {
+                    sd[++out] = sd[i];
+                }
+            }
+            if (!sd.empty()) sd.resize(out + 1);
+        }
     }
 
     vkCtx_->endUploadBatch();
@@ -1222,19 +1270,8 @@ uint32_t WMORenderer::createInstance(uint32_t modelId, const glm::vec3& position
     instance.rotation = rotation;
     instance.scale = scale;
     instance.updateModelMatrix();
-    const ModelData& model = loadedModels[modelId];
-    transformAABB(instance.modelMatrix, model.boundingBoxMin, model.boundingBoxMax,
-                  instance.worldBoundsMin, instance.worldBoundsMax);
-
     // Pre-compute world-space group bounds to avoid per-frame transformAABB
-    instance.worldGroupBounds.reserve(model.groups.size());
-    for (const auto& group : model.groups) {
-        glm::vec3 gMin, gMax;
-        transformAABB(instance.modelMatrix, group.boundingBoxMin, group.boundingBoxMax, gMin, gMax);
-        gMin -= glm::vec3(0.5f);
-        gMax += glm::vec3(0.5f);
-        instance.worldGroupBounds.emplace_back(gMin, gMax);
-    }
+    refreshInstanceBounds(instance);
 
     instances.push_back(instance);
     size_t idx = instances.size() - 1;
@@ -1263,11 +1300,20 @@ void WMORenderer::refreshInstanceBounds(WMOInstance& inst) {
                   inst.worldBoundsMin, inst.worldBoundsMax);
     inst.worldGroupBounds.clear();
     inst.worldGroupBounds.reserve(model.groups.size());
+    inst.drawBoundsValid = !model.groups.empty();
     for (const auto& group : model.groups) {
         glm::vec3 gMin, gMax;
         transformAABB(inst.modelMatrix, group.boundingBoxMin, group.boundingBoxMax, gMin, gMax);
         gMin -= glm::vec3(0.5f);
         gMax += glm::vec3(0.5f);
+        if (inst.worldGroupBounds.empty()) {
+            inst.drawBoundsMin = gMin;
+            inst.drawBoundsMax = gMax;
+        } else {
+            inst.drawBoundsMin = glm::min(inst.drawBoundsMin, gMin);
+            inst.drawBoundsMax = glm::max(inst.drawBoundsMax, gMax);
+        }
+        if (group.hasCloth) inst.drawBoundsValid = false;
         inst.worldGroupBounds.emplace_back(gMin, gMax);
     }
 }
@@ -1720,12 +1766,21 @@ void WMORenderer::prepareRender() {
 
 void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
                          const glm::vec3* viewerPos) {
+    cullForRecording(camera, viewerPos);
+    recordPart(cmd, perFrameSet, 0, 1);
+}
+
+uint32_t WMORenderer::recordPartsWanted() const {
+    return (!kWmoOneWorker && recordCost_ >= kWmoSplitMinCost) ? 2u : 1u;
+}
+
+void WMORenderer::cullForRecording(const Camera& camera, const glm::vec3* viewerPos) {
+    lastDrawCalls = 0;
+    recordCost_ = 0;
     if (!opaquePipeline_ || instances.empty()) {
-        lastDrawCalls = 0;
+        drawLists_.clear();
         return;
     }
-
-    lastDrawCalls = 0;
 
     // Extract frustum planes for proper culling
     glm::mat4 viewProj = camera.getProjectionMatrix() * camera.getViewMatrix();
@@ -1757,6 +1812,9 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
     bool doPortalCull = portalCulling && cullingEnabled_;
     bool doDistanceCull = distanceCulling && cullingEnabled_;
 
+    // LOD shell groups render only beyond this distance squared (190 units)
+    static constexpr float LOD_SHELL_DIST_SQ = 196.0f * 196.0f;
+
     auto cullInstance = [&](size_t instIdx, InstanceDrawList& result) {
         // Retire the slot before anything can return. drawLists_ is reused
         // across frames, so a slot that bails out below would otherwise keep
@@ -1767,6 +1825,7 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
         result.visibleGroups.clear();
         result.portalCulled = 0;
         result.distanceCulled = 0;
+        result.costEnd = 0;
         result.instanceIndex = instIdx;
 
         if (instIdx >= instances.size()) return;
@@ -1786,6 +1845,15 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
         auto mdlIt = loadedModels.find(instance.modelId);
         if (mdlIt == loadedModels.end()) return;
         const ModelData& model = mdlIt->second;
+        // Wholly outside the frustum: nothing it draws could reach the screen.
+        // See kWmoGroupFrustum. The bounds are only trusted while they were
+        // made from this model's groups.
+        const bool groupFrustum = kWmoGroupFrustum &&
+            instance.worldGroupBounds.size() == model.groups.size();
+        if (groupFrustum && instance.drawBoundsValid &&
+            !frustum.intersectsAABB(instance.drawBoundsMin, instance.drawBoundsMax)) {
+            return;
+        }
 
         result.model = &model;   // cache so the draw-list loop doesn't redo the hash lookup
 
@@ -1880,51 +1948,9 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
                 }
             }
 
-            result.visibleGroups.push_back(static_cast<uint32_t>(gi));
-        }
-    };
-
-    // Resize drawLists to match (reuses previous capacity)
-    drawLists_.resize(visibleInstances_.size());
-
-    // Sequential culling (parallel dispatch overhead > savings for typical instance counts)
-    for (size_t j = 0; j < visibleInstances_.size(); ++j) {
-        cullInstance(visibleInstances_[j], drawLists_[j]);
-    }
-
-    // ── Phase 2: Vulkan draw ────────────────────────────────
-    // Select pipeline based on wireframe mode
-    VkPipeline activePipeline = (wireframeMode && wireframePipeline_) ? wireframePipeline_ : opaquePipeline_;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
-
-    // Bind per-frame descriptor set (set 0)
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
-                             0, 1, &perFrameSet, 0, nullptr);
-
-    // Track which pipeline is currently bound: 0=opaque, 1=transparent, 2=glass
-    int currentPipelineKind = 0;
-
-    for (const auto& dl : drawLists_) {
-        if (dl.instanceIndex >= instances.size() || dl.model == nullptr) continue;
-        const auto& instance = instances[dl.instanceIndex];
-        const ModelData& model = *dl.model;
-
-
-        // Push model matrix. The cloth half is written per batch below; this
-        // sets the instance's matrix and clears the cloth for everything that
-        // is not one.
-        WMOPushConstants push{};
-        push.model = instance.modelMatrix;
-        push.cloth = glm::vec4(0.0f);
-        vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
-                            0, sizeof(WMOPushConstants), &push);
-        glm::vec4 pushedCloth(0.0f);
-
-        // LOD shell groups render only beyond this distance squared (190 units)
-        static constexpr float LOD_SHELL_DIST_SQ = 196.0f * 196.0f;
-
-        // Render visible groups
-        for (uint32_t gi : dl.visibleGroups) {
+            // The skips the draw loop used to make, made here instead, so that
+            // a visible group is one that is recorded and the frame can be cut
+            // into slices by what each will actually record.
             const auto& group = model.groups[gi];
 
             // Only skip antiportal geometry
@@ -1940,6 +1966,91 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
 
             // Skip groups with invalid GPU resources
             if (group.vertexBuffer == VK_NULL_HANDLE || group.indexBuffer == VK_NULL_HANDLE) continue;
+
+            // Behind the camera or off to the side. Most of a town's groups
+            // are, at any moment, and every one of them was recorded: two
+            // buffer binds and a set bind and a draw per batch, each encoded
+            // by the driver for a group the rasteriser then threw away whole.
+            if (groupFrustum && !group.hasCloth) {
+                const auto& [gMin, gMax] = instance.worldGroupBounds[gi];
+                if (!frustum.intersectsAABB(gMin, gMax)) continue;
+            }
+
+            result.visibleGroups.push_back(static_cast<uint32_t>(gi));
+            result.costEnd += 2 + 2 * static_cast<uint32_t>(group.mergedBatches.size());
+        }
+    };
+
+    // Resize drawLists to match (reuses previous capacity)
+    drawLists_.resize(visibleInstances_.size());
+
+    // Sequential culling (parallel dispatch overhead > savings for typical instance counts)
+    uint32_t cost = 0;
+    for (size_t j = 0; j < visibleInstances_.size(); ++j) {
+        InstanceDrawList& dl = drawLists_[j];
+        cullInstance(visibleInstances_[j], dl);
+        cost += dl.costEnd;
+        dl.costEnd = cost;
+        lastPortalCulledGroups += dl.portalCulled;
+        lastDistanceCulledGroups += dl.distanceCulled;
+    }
+    recordCost_ = cost;
+}
+
+void WMORenderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                             uint32_t part, uint32_t partCount) {
+    if (!opaquePipeline_ || drawLists_.empty() || part >= partCount) return;
+
+    // The slice: the lists whose running cost ends past part/partCount of the
+    // frame, up to those past (part+1)/partCount. Whole instances only, so
+    // each slice opens with an instance's push and nothing straddles a cut.
+    const auto sliceStart = [&](uint32_t p) -> size_t {
+        if (p == 0) return 0;
+        if (p >= partCount) return drawLists_.size();
+        const uint64_t cut = static_cast<uint64_t>(recordCost_) * p / partCount;
+        return static_cast<size_t>(std::partition_point(
+            drawLists_.begin(), drawLists_.end(),
+            [cut](const InstanceDrawList& dl) { return dl.costEnd <= cut; }) - drawLists_.begin());
+    };
+    const size_t sliceBegin = sliceStart(part);
+    const size_t sliceEnd = sliceStart(part + 1);
+    if (part > 0 && sliceBegin == sliceEnd) return;
+
+    // ── Phase 2: Vulkan draw ────────────────────────────────
+    // Select pipeline based on wireframe mode
+    VkPipeline activePipeline = (wireframeMode && wireframePipeline_) ? wireframePipeline_ : opaquePipeline_;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
+
+    // Bind per-frame descriptor set (set 0)
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
+                             0, 1, &perFrameSet, 0, nullptr);
+
+    // Track which pipeline is currently bound: 0=opaque, 1=transparent, 2=glass
+    int currentPipelineKind = 0;
+    // Counted here and added once: more than one slice may be recording.
+    uint32_t drawCalls = 0;
+
+    for (size_t li = sliceBegin; li < sliceEnd; ++li) {
+        const auto& dl = drawLists_[li];
+        if (dl.instanceIndex >= instances.size() || dl.model == nullptr) continue;
+        const auto& instance = instances[dl.instanceIndex];
+        const ModelData& model = *dl.model;
+
+
+        // Push model matrix. The cloth half is written per batch below; this
+        // sets the instance's matrix and clears the cloth for everything that
+        // is not one.
+        WMOPushConstants push{};
+        push.model = instance.modelMatrix;
+        push.cloth = glm::vec4(0.0f);
+        vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
+                            0, sizeof(WMOPushConstants), &push);
+        glm::vec4 pushedCloth(0.0f);
+
+        // Render visible groups. cullForRecording has already skipped the
+        // antiportals, the near LOD shells and groups without buffers.
+        for (uint32_t gi : dl.visibleGroups) {
+            const auto& group = model.groups[gi];
 
             // Bind vertex + index buffers
             VkDeviceSize offset = 0;
@@ -1992,21 +2103,19 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
                 if (!kWmoLegacyRecord && mb.draws.size() == 1) {
                     if (mb.firstDraw.indexCount != 0) {
                         vkCmdDrawIndexed(cmd, mb.firstDraw.indexCount, 1, mb.firstDraw.firstIndex, 0, 0);
-                        lastDrawCalls++;
+                        drawCalls++;
                     }
                     continue;
                 }
                 for (const auto& dr : mb.draws) {
                     if (dr.indexCount == 0) continue;
                     vkCmdDrawIndexed(cmd, dr.indexCount, 1, dr.firstIndex, 0, 0);
-                    lastDrawCalls++;
+                    drawCalls++;
                 }
             }
         }
-
-        lastPortalCulledGroups += dl.portalCulled;
-        lastDistanceCulledGroups += dl.distanceCulled;
     }
+    lastDrawCalls.fetch_add(drawCalls, std::memory_order_relaxed);
 }
 
 bool WMORenderer::initializeShadow(VkRenderPass shadowRenderPass) {
@@ -2083,6 +2192,16 @@ void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceM
     const float wmoCullRadius = std::max(shadowRadius, 180.0f);
     const float wmoCullRadiusSq = wmoCullRadius * wmoCullRadius;
 
+    // The shadow map's own volume, from the matrix the shadow vertex shader
+    // projects with. That shader moves no WMO vertex (no sway, no cloth) and
+    // the pipeline does not clamp depth, so a group whose vertex-fitted box
+    // lies outside it writes no texel. The radius above is a sphere of at
+    // least 180 units around the map's centre, wider than the map's square
+    // when the shadow distance is short, so it lets through casters that
+    // land beside the map.
+    Frustum lightFrustum;
+    lightFrustum.extractFromMatrix(lightSpaceMatrix);
+
     for (const auto& instance : instances) {
         // Distance cull using world bounding box - WMO origins can be far from
         // their geometry, so point-based culling misses large buildings.
@@ -2092,6 +2211,15 @@ void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceM
         auto modelIt = loadedModels.find(instance.modelId);
         if (modelIt == loadedModels.end()) continue;
         const ModelData& model = modelIt->second;
+        // Cloth does not move in this pass, so the union is good whether or
+        // not drawBoundsValid says so; only the group count has to match.
+        const bool groupFrustum = kWmoGroupFrustum &&
+            instance.worldGroupBounds.size() == model.groups.size() &&
+            !model.groups.empty();
+        if (groupFrustum &&
+            !lightFrustum.intersectsAABB(instance.drawBoundsMin, instance.drawBoundsMax)) {
+            continue;
+        }
 
         // A building does not sway, so the sway slot stays zero.
         ShadowPush push{.lightSpaceModel = lightSpaceMatrix * instance.modelMatrix};
@@ -2114,18 +2242,21 @@ void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceM
                 glm::vec3 gClosest = glm::clamp(shadowCenter, gMin, gMax);
                 glm::vec3 gDiff = gClosest - shadowCenter;
                 if (glm::dot(gDiff, gDiff) > wmoCullRadiusSq) continue;
+                if (groupFrustum && !lightFrustum.intersectsAABB(gMin, gMax)) continue;
             }
 
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &group.vertexBuffer, &offset);
             vkCmdBindIndexBuffer(cmd, group.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
-            for (const auto& mb : group.mergedBatches) {
-                // As in render(): a single range is read from the batch.
-                if (!kWmoLegacyRecord && mb.draws.size() == 1) {
-                    vkCmdDrawIndexed(cmd, mb.firstDraw.indexCount, 1, mb.firstDraw.firstIndex, 0, 0);
-                    continue;
+            // Every batch of the group drawn as one: see shadowDraws.
+            if (!kWmoLegacyRecord) {
+                for (const auto& dr : group.shadowDraws) {
+                    vkCmdDrawIndexed(cmd, dr.indexCount, 1, dr.firstIndex, 0, 0);
                 }
+                continue;
+            }
+            for (const auto& mb : group.mergedBatches) {
                 for (const auto& dr : mb.draws) {
                     vkCmdDrawIndexed(cmd, dr.indexCount, 1, dr.firstIndex, 0, 0);
                 }

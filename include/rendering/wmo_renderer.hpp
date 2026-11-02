@@ -11,6 +11,7 @@
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
 #include <atomic>
+#include <cstddef>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -222,6 +223,22 @@ public:
     /// neither alone is reliably the right place to start.
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
                 const glm::vec3* viewerPos = nullptr);
+
+    /// render() in two steps, so the recording can be shared between threads:
+    /// cullForRecording decides what is drawn, then recordPart(cmd, set, i, n)
+    /// records the i-th of n consecutive slices of it into its own command
+    /// buffer. Executed in order, the n buffers draw exactly what render()
+    /// draws, in the same order; each starts by binding the state the first
+    /// draw needs, as a secondary buffer inherits none. recordPart may run
+    /// on several threads at once after cullForRecording has returned.
+    void cullForRecording(const Camera& camera, const glm::vec3* viewerPos = nullptr);
+    void recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                    uint32_t part, uint32_t partCount);
+    /// How many slices this frame's recording is worth splitting into: 1 or 2.
+    /// 1 when the frame is small enough that a second buffer would cost more
+    /// than it saves, or when WOWEE_WMO_ONE_WORKER / WOWEE_WMO_LEGACY_RECORD
+    /// is set. Valid after cullForRecording.
+    uint32_t recordPartsWanted() const;
 
     /**
      * Initialize shadow pipeline (Phase 7)
@@ -529,6 +546,10 @@ private:
         uint32_t wmoGroupId = 0;  ///< MOGP group id (global), see WMOGroup
         bool allUntextured = false;  // True if ALL batches use fallback white texture (collision/placeholder group)
         bool isLOD = false;          // Distance-only group (skip when camera is close)
+        // A merged batch is cloth (clothDrop > 0): wmo.vert moves its vertices,
+        // so the group's bounds do not hold what it draws and the frustum
+        // test in render() leaves it alone.
+        bool hasCloth = false;
 
         // Material batches (start index, count, material ID)
         struct Batch {
@@ -539,19 +560,23 @@ private:
         std::vector<Batch> batches;
 
         // Pre-merged batches for efficient rendering (computed at load time)
-        struct MergedBatch {
-            VkTexture* texture = nullptr;   // from cache, NOT owned
-            VkTexture* normalHeightMap = nullptr;  // generated from diffuse, NOT owned
-            float heightMapVariance = 0.0f; // variance of height map (low = flat texture)
+        //
+        // Aligned to a cache line, with everything the draw loop reads in the
+        // first 64 bytes: the set, the ranges, the cloth and the blend flag.
+        // At 120 bytes from wherever the vector put it, a batch spanned two or
+        // three lines and those fields were spread over two of them; the first
+        // touch of each batch was the largest cost left in render().
+        struct alignas(64) MergedBatch {
             VkDescriptorSet materialSet = VK_NULL_HANDLE;  // set 1
-            ::VkBuffer materialUBO = VK_NULL_HANDLE;
-            VmaAllocation materialUBOAlloc = VK_NULL_HANDLE;
-            bool hasTexture = false;
-            bool alphaTest = false;
-            bool unlit = false;
-            bool isTransparent = false;     // blendMode >= 2
-            uint32_t sidnColor = 0;         // F_SIDN night glow colour, 0x00RRGGBB (0 = none)
-            bool isLava = false;            // lava/magma texture (UV scroll)
+            // For multi-draw: store index ranges
+            struct DrawRange { uint32_t firstIndex; uint32_t indexCount; };
+            // draws[0], copied here when the batch is built. Most batches are
+            // a single range once adjacent ranges are joined, and the draw
+            // loop reads this one beside the material set instead of
+            // following draws to its own heap block, which was a cache miss
+            // per batch drawn and half of WMORenderer::render's time.
+            DrawRange firstDraw{0, 0};
+            std::vector<DrawRange> draws;
             /// Cloth hung in the building's own mesh: where the bar is, how
             /// far the cloth drops below it, and where it hangs.
             ///
@@ -563,21 +588,33 @@ private:
             float clothDrop = 0.0f;
             float clothCentreX = 0.0f;
             float clothCentreY = 0.0f;
+            bool isTransparent = false;     // blendMode >= 2
+            // End of what the draw loop reads.
+            bool hasTexture = false;
+            bool alphaTest = false;
+            bool unlit = false;
+            bool isLava = false;            // lava/magma texture (UV scroll)
             // 0 = not luminous, 1 = authored lamp glass (bright), 2 = firelit
             // from behind with a flicker (clock faces). See wmo.frag's emissive
             // branch for how each level is shaded.
             uint8_t emissiveLevel = 0;
-            // For multi-draw: store index ranges
-            struct DrawRange { uint32_t firstIndex; uint32_t indexCount; };
-            // draws[0], copied here when the batch is built. Most batches are
-            // a single range once adjacent ranges are joined, and the draw
-            // loop reads this one beside the material set instead of
-            // following draws to its own heap block, which was a cache miss
-            // per batch drawn and half of WMORenderer::render's time.
-            DrawRange firstDraw{0, 0};
-            std::vector<DrawRange> draws;
+            uint32_t sidnColor = 0;         // F_SIDN night glow colour, 0x00RRGGBB (0 = none)
+            float heightMapVariance = 0.0f; // variance of height map (low = flat texture)
+            VkTexture* texture = nullptr;   // from cache, NOT owned
+            VkTexture* normalHeightMap = nullptr;  // generated from diffuse, NOT owned
+            ::VkBuffer materialUBO = VK_NULL_HANDLE;
+            VmaAllocation materialUBOAlloc = VK_NULL_HANDLE;
         };
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+        static_assert(offsetof(MergedBatch, isTransparent) < 64);
+#pragma GCC diagnostic pop
         std::vector<MergedBatch> mergedBatches;
+        // The ranges of every merged batch, sorted and joined, for the shadow
+        // pass. It binds nothing per batch and writes depth alone, which comes
+        // out the same whatever order or grouping the triangles arrive in, so
+        // a group is usually one draw there instead of one per material.
+        std::vector<MergedBatch::DrawRange> shadowDraws;
         // Local-space center/radius for each authored lava draw range.
         std::vector<glm::vec4> lavaLights;
 
@@ -728,6 +765,13 @@ private:
         glm::vec3 worldBoundsMin;
         glm::vec3 worldBoundsMax;
         std::vector<std::pair<glm::vec3, glm::vec3>> worldGroupBounds;
+        // The union of worldGroupBounds, which come from the vertices rather
+        // than the header and so hold everything the instance draws. Not
+        // valid when a group is cloth (see GroupResources::hasCloth) or the
+        // model had no groups when the bounds were made.
+        glm::vec3 drawBoundsMin{0.0f};
+        glm::vec3 drawBoundsMax{0.0f};
+        bool drawBoundsValid = false;
 
         // Doodad tracking: M2 instances that are children of this WMO
         struct DoodadInfo {
@@ -967,7 +1011,8 @@ private:
     float maxGroupDistance = 500.0f;
     float maxGroupDistanceSq = 250000.0f;  // maxGroupDistance^2
     float viewDistance_ = 1200.0f;
-    uint32_t lastDrawCalls = 0;
+    // Atomic because recordPart adds to it from more than one thread.
+    std::atomic<uint32_t> lastDrawCalls{0};
     mutable uint32_t lastPortalCulledGroups = 0;
     mutable uint32_t lastDistanceCulledGroups = 0;
 
@@ -988,9 +1033,15 @@ private:
         std::vector<uint32_t> visibleGroups;  // group indices that passed culling
         uint32_t portalCulled = 0;
         uint32_t distanceCulled = 0;
+        // Running total of recordCost over this list and every list before
+        // it, which is what recordPart cuts the frame at.
+        uint32_t costEnd = 0;
     };
     std::vector<size_t> visibleInstances_;      // reused per frame
     std::vector<InstanceDrawList> drawLists_;    // reused per frame
+    // Commands this frame's recording will issue, roughly: a bind and a draw
+    // per batch, two binds per group. Set by cullForRecording.
+    uint32_t recordCost_ = 0;
     std::unordered_set<uint32_t> portalVisibleGroupSet_; // reused per frame (portal culling scratch)
 
     // Collision query profiling - atomic because getFloorHeight is dispatched

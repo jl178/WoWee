@@ -20,6 +20,7 @@
 #include "rendering/clouds.hpp"
 #include "rendering/lens_flare.hpp"
 #include "rendering/weather.hpp"
+#include "rendering/wet_ground.hpp"
 #include "rendering/lightning.hpp"
 #include "rendering/lighting_manager.hpp"
 #include "core/profiler.hpp"
@@ -722,6 +723,28 @@ void Renderer::updatePerFrameUBO() {
     }
     currentFrameData.playerWake = glm::vec4(playerWakePos_, windStrength_);
     currentFrameData.fogColor.w = clothWindStrength_;
+
+    // Wet ground in rain, eased the same way as the wind but slower: about
+    // 12 s to soak and 18 s to dry (WetGround). Read from the weather's type
+    // and intensity rather than isEnabled, which goes false whenever the
+    // player steps into a building: the street outside stays wet while they
+    // are in the inn. Interiors themselves never take it - wmo.frag applies
+    // it to exterior groups only. Carried in rtParams.w, which the ray traced
+    // lighting leaves at 0; the reflection pass and the character preview
+    // zero the whole vector, so neither shows it.
+    {
+        float target = 0.0f;
+        if (weather) {
+            const Weather::Type type = weather->getWeatherType();
+            target = wetGroundTarget(type == Weather::Type::RAIN, type == Weather::Type::STORM,
+                                     weather->getIntensity());
+        }
+        wetness_ = wetGroundEnabled_ ? easeWetGround(wetness_, target, lastDeltaTime_) : 0.0f;
+    }
+    currentFrameData.rtParams.w = wetness_;
+    // The water renderer is built with the world, after the settings are
+    // applied, so it is told every frame rather than once.
+    if (waterRenderer) waterRenderer->setShorelineFoam(shorelineFoam_);
 
     // Water ripple gate: swimming and actually moving.
     if (cameraController) {
@@ -3226,13 +3249,43 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             });
         }
 
+        // The WMO worker is the critical path of renderWorld, and most of what
+        // it spends is the driver encoding its commands, which on this driver
+        // happens as they are recorded and at vkEndCommandBuffer. So a large
+        // frame is cut in two after the cull: the second half is recorded
+        // into SEC_WMO_B on another worker while this one records the first,
+        // and SEC_WMO_B is executed straight after SEC_WMO, so the draws reach
+        // the GPU in the order one buffer would have given them. Set by the
+        // worker, read after it is joined.
+        bool wmoSecondHalf = false;
         if (wmoRenderer && camera && !skipWMO) {
             wmoFuture = core::ThreadPool::frameWorkers().submit([&]() -> double {
                 auto t0 = std::chrono::steady_clock::now();
-                VkCommandBuffer cmd = beginSecondary(SEC_WMO);
-                setSecondaryViewportScissor(cmd);
-                wmoRenderer->render(cmd, perFrameSet, *camera, &characterPosition);
-                vkEndCommandBuffer(cmd);
+                wmoRenderer->cullForRecording(*camera, &characterPosition);
+                const uint32_t parts = wmoRenderer->recordPartsWanted();
+                // Caller-runs-a-chunk, as ThreadPool allows: this thread
+                // records its half before it waits on the other.
+                std::future<void> second;
+                if (parts > 1) {
+                    wmoSecondHalf = true;
+                    second = core::ThreadPool::frameWorkers().submit([&]() {
+                        VkCommandBuffer cmdB = beginSecondary(SEC_WMO_B);
+                        setSecondaryViewportScissor(cmdB);
+                        wmoRenderer->recordPart(cmdB, perFrameSet, 1, parts);
+                        vkEndCommandBuffer(cmdB);
+                    });
+                }
+                try {
+                    VkCommandBuffer cmd = beginSecondary(SEC_WMO);
+                    setSecondaryViewportScissor(cmd);
+                    wmoRenderer->recordPart(cmd, perFrameSet, 0, parts);
+                    vkEndCommandBuffer(cmd);
+                } catch (...) {
+                    // The other half still holds references into this frame.
+                    if (second.valid()) second.wait();
+                    throw;
+                }
+                if (second.valid()) second.get();
                 return std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
             });
@@ -3424,7 +3477,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         }
 
         // --- Execute all secondary buffers in correct draw order ---
-        VkCommandBuffer validCmds[8];
+        VkCommandBuffer validCmds[NUM_SECONDARIES];
         uint32_t numCmds = 0;
         // Terrain first, then the sky. Every sky layer sits on the far plane
         // and depth-tests against what is already there, so drawing it after
@@ -3438,8 +3491,10 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         if (drawTerrain || drawGrass)
             queue(secondaryCmds_[SEC_TERRAIN][frameIdx]);
         queue(secondaryCmds_[SEC_SKY][frameIdx]);
-        if (wmoRenderer && camera && !skipWMO)
+        if (wmoRenderer && camera && !skipWMO) {
             queue(secondaryCmds_[SEC_WMO][frameIdx]);
+            if (wmoSecondHalf) queue(secondaryCmds_[SEC_WMO_B][frameIdx]);
+        }
         queue(secondaryCmds_[SEC_SELECTION][frameIdx]);
         queue(secondaryCmds_[SEC_CHARS][frameIdx]);
         if (m2Renderer && camera && !skipM2)
@@ -4470,7 +4525,9 @@ bool Renderer::createSecondaryCommandResources() {
     allocInfo.commandBufferCount = 1;
 
     // Each concurrently recorded worker secondary owns a dedicated command pool.
-    const uint32_t workerSecondaries[] = { SEC_TERRAIN, SEC_WMO, SEC_CHARS, SEC_M2, SEC_POST };
+    const uint32_t workerSecondaries[] = { SEC_TERRAIN, SEC_WMO, SEC_CHARS, SEC_M2, SEC_POST,
+                                           SEC_WMO_B };
+    static_assert(sizeof(workerSecondaries) / sizeof(workerSecondaries[0]) == NUM_WORKERS);
     for (uint32_t w = 0; w < NUM_WORKERS; ++w) {
         allocInfo.commandPool = workerCmdPools_[w];
         for (uint32_t f = 0; f < MAX_FRAMES; ++f) {
