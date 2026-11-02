@@ -134,7 +134,7 @@ constexpr SettingDesc kSchema[] = {
      "is not there, so a short distance is a visible edge on open ground.", "", 140},
 
     {"normalmapping", "Surface bumps (normal mapping)", SettingKind::Bool, 0, 0, 0, "Detail", "Surfaces",
-     "Light stone, wood, metal and the ground by their surface texture,\n"
+     "Light stone, wood and metal by their surface texture,\n"
      "so they catch the light like the real material, not flat paint.", "", 1,
      // Off applies at once. On needs the bump maps, which are made as each
      // building's textures load and skipped while this is off - so turned on

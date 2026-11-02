@@ -211,75 +211,12 @@ void main() {
 
     vec3 norm = normalize(Normal);
 
-    // Derivative-based normal mapping: perturb vertex normal using texture detail.
-    // Fade out with distance and near chunk edges (dFdx/dFdy are invalid across
-    // chunk draw-call boundaries, producing visible seams if not faded).
-    float bumpFade = 1.0 - smoothstep(50.0, 125.0, fragDist);
-    float edgeDist = min(min(LayerUV.x, 1.0 - LayerUV.x), min(LayerUV.y, 1.0 - LayerUV.y));
-    bumpFade *= smoothstep(0.0, 0.06, edgeDist);
-    // And down on slopes. Terrain textures are projected straight down, so on
-    // a hillside each texel is smeared down the face by 1/cos of the slope;
-    // the luminance then changes sharply across the slope and hardly at all
-    // along it, and the bump turned that into lit ridges running down every
-    // mountain - streaks on top of the stretch the projection already has,
-    // and the "wrong and weird" mountains. It held full strength to 45
-    // degrees and a quarter on a cliff; mountainsides are mostly 30 to 60, so
-    // it was near full on exactly the ground it looks worst on. Now full only
-    // on ground that reads as flat (to about 25 degrees), a tenth by 55, so a
-    // mountain shows its painted rock as stock does and the meadow at its
-    // foot keeps its relief.
-    float flatness = smoothstep(0.57, 0.9, abs(norm.z));
-    bumpFade *= mix(0.1, 1.0, flatness);
-    // The Surface bumps setting and its strength (viewPos.w): 0 is the flat
-    // stock ground, 1 the default. Capped, so the top of the slider deepens
-    // the buildings' maps without turning the ground to gravel.
-    bumpFade *= clamp(viewPos.w, 0.0, 1.25);
-    if (bumpFade > 0.001) {
-        float lum = dot(finalColor.rgb, vec3(0.299, 0.587, 0.114));
-        float dLdx = dFdx(lum);
-        float dLdy = dFdy(lum);
-        vec3 dpdx = dFdx(FragPos);
-        vec3 dpdy = dFdy(FragPos);
-        // Unit tangents, not the raw position derivatives.
-        //
-        // cross(norm, dpdy) is as long as a pixel is wide in world space, and
-        // multiplying a luminance step by it made the perturbation grow with
-        // the size of the pixel's footprint on the ground. Standing in an inn
-        // a pixel covers a centimetre and this is invisible; looking out
-        // across a Dragonblight snowfield it covers tens of yards, so a
-        // luminance step of 0.02 became a perturbation many times longer than
-        // the unit normal it was subtracted from. The normal then pointed
-        // wherever the derivative did - constant across each triangle, because
-        // dFdx of a planar surface is - and the ground broke into hard-edged
-        // facets and streaks. Snow shows it worst: it has no real detail to
-        // enhance, so all that is amplified is sampling noise.
-        //
-        // Normalised, the strength means what it says: how far the normal
-        // tilts per unit of luminance change from one pixel to the next,
-        // whatever the pixel happens to cover.
-        vec3 tangentU = cross(norm, dpdy);
-        vec3 tangentV = cross(dpdx, norm);
-        float lenU = length(tangentU);
-        float lenV = length(tangentV);
-        if (lenU > 1e-6 && lenV > 1e-6) {
-            vec3 perturbation = (dLdx * (tangentU / lenU) + dLdy * (tangentV / lenV))
-                              * (9.0 * bumpFade);
-            // A texture edge is a step, not a slope. Left unbounded, one
-            // crossing a sharp boundary still turns the normal further than
-            // any real ground ever slopes. Tighter on a slope, where the
-            // geometry's own normal is what carries the mountain's shape.
-            float amount = length(perturbation);
-            float maxTilt = mix(0.3, 0.6, flatness);
-            if (amount > maxTilt) perturbation *= maxTilt / amount;
-            vec3 candidate = norm - perturbation;
-            float len2 = dot(candidate, candidate);
-            norm = (len2 > 1e-8) ? candidate * inversesqrt(len2) : norm;
-        }
-    }
+    // No bump from the texture's luminance, as stock has none on the ground.
+    // Its derivatives come per 2x2 pixel quad, so on distant cracked ground
+    // facing a low sun the tilted normals lit as blocky glitter.
 
     // MCCV vertex colour, as the client applies it: the blended ground times
-    // twice the stored colour (the doubling is done on load). After the bump,
-    // which reads the texture's own detail and not the painted tint.
+    // twice the stored colour (the doubling is done on load).
     finalColor.rgb *= VertColor;
 
     // Rain-wet ground (wet_surface.glsli): 0, and untouched, while it is dry
