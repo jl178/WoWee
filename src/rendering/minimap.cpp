@@ -21,10 +21,25 @@
 namespace wowee {
 namespace rendering {
 
-// Push constant for tile composite vertex shader
+// Push constant for tile composite vertex shader: where the image's four
+// corners land in the composite, in its clip space. uv00/uv10 are image
+// (0,0) and (1,0), uv01/uv11 are (0,1) and (1,1).
+//
+// A terrain tile is an axis-aligned ninth of the composite, turned a quarter
+// (the composite runs south along x and east along y, the image east along u
+// and south along v). A WMO tile is wherever the building's placement puts
+// it, at any yaw. Corners carry both.
 struct MinimapTilePush {
-    glm::vec2 gridOffset;  // 8 bytes
-};
+    glm::vec2 uv00, uv10;
+    glm::vec2 uv01, uv11;
+};  // 32 bytes
+
+namespace {
+
+/// Composite 0..1 space to the clip space the tile shader writes.
+glm::vec2 compositeToClip(const glm::vec2& c) { return c * 2.0f - 1.0f; }
+
+}  // namespace
 
 // Push constant for display vertex + fragment shaders
 struct MinimapDisplayPush {
@@ -156,6 +171,18 @@ bool Minimap::initialize(VkContext* ctx, VkDescriptorSetLayout /*perFrameLayout*
             tileDescSets[f][t] = allSets[f * 9 + t];
     displayDescSet = allSets[18];
 
+    // The WMO mode's tile sets, one per tile a composite can draw per frame.
+    {
+        std::vector<VkDescriptorSetLayout> wmoLayouts(2 * kMaxWmoTiles, samplerSetLayout);
+        VkDescriptorSetAllocateInfo wmoAlloc = allocInfo;
+        wmoAlloc.descriptorSetCount = static_cast<uint32_t>(wmoLayouts.size());
+        wmoAlloc.pSetLayouts = wmoLayouts.data();
+        if (vkAllocateDescriptorSets(device, &wmoAlloc, &wmoTileDescSets_[0][0]) != VK_SUCCESS) {
+            LOG_ERROR("Minimap: failed to allocate WMO tile descriptor sets");
+            return false;
+        }
+    }
+
     // --- Write display descriptor set → composite render target ---
     VkDescriptorImageInfo compositeImgInfo = compositeTarget->descriptorInfo();
     VkWriteDescriptorSet displayWrite{};
@@ -167,7 +194,7 @@ bool Minimap::initialize(VkContext* ctx, VkDescriptorSetLayout /*perFrameLayout*
     displayWrite.pImageInfo = &compositeImgInfo;
     vkUpdateDescriptorSets(device, 1, &displayWrite, 0, nullptr);
 
-    // --- Tile pipeline layout: samplerSetLayout + 8-byte push constant (vertex) ---
+    // --- Tile pipeline layout: samplerSetLayout + 32-byte push constant (vertex) ---
     VkPushConstantRange tilePush{};
     tilePush.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     tilePush.offset = 0;
@@ -213,6 +240,19 @@ bool Minimap::initialize(VkContext* ctx, VkDescriptorSetLayout /*perFrameLayout*
             .setDynamicStates(viewportAndScissorDynamic())
             .build(device, vkCtx->getPipelineCache());
 
+        wmoTilePipeline = PipelineBuilder()
+            .setShaders(vs.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
+                        fs.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+            .setVertexInput({ binding }, attrs)
+            .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+            .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+            .setNoDepthTest()
+            .setColorBlendAttachment(PipelineBuilder::blendAlpha())
+            .setLayout(tilePipelineLayout)
+            .setRenderPass(compositeTarget->getRenderPass())
+            .setDynamicStates(viewportAndScissorDynamic())
+            .build(device, vkCtx->getPipelineCache());
+
         vs.destroy();
         fs.destroy();
     }
@@ -233,7 +273,7 @@ bool Minimap::initialize(VkContext* ctx, VkDescriptorSetLayout /*perFrameLayout*
         fs.destroy();
     }
 
-    if (!tilePipeline || !displayPipeline) {
+    if (!tilePipeline || !wmoTilePipeline || !displayPipeline) {
         LOG_ERROR("Minimap: failed to create pipelines");
         return false;
     }
@@ -251,6 +291,7 @@ void Minimap::shutdown() {
     vkDeviceWaitIdle(device);
 
     destroy(device, tilePipeline);
+    destroy(device, wmoTilePipeline);
     destroy(device, displayPipeline);
     destroy(device, tilePipelineLayout);
     destroy(device, displayPipelineLayout);
@@ -338,6 +379,17 @@ void Minimap::parseTRS() {
 
         trsLookup[key] = hashFile;
         count++;
+
+        // A WMO's tiles: "WMO\...\ironforge_044_00_01". Kept again in lower
+        // case, and the root (everything before "_044_00_01") noted.
+        if (key.size() > 14 && (key[0] == 'W' || key[0] == 'w') &&
+            (key[1] == 'M' || key[1] == 'm') && (key[2] == 'O' || key[2] == 'o') && key[3] == '\\') {
+            std::string lower = key;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            wmoTileRoots_.insert(lower.substr(0, lower.size() - 10));
+            wmoTrsLookup_[std::move(lower)] = hashFile;
+        }
     }
 
     LOG_INFO("Parsed md5translate.trs: ", count, " entries");
@@ -356,8 +408,11 @@ VkTexture* Minimap::getOrLoadTileTexture(int tileX, int tileY) {
     if (trsIt == trsLookup.end())
         return noDataTexture.get();
 
-    const std::string& hash = trsIt->second;
+    VkTexture* tex = loadTextureByHash(trsIt->second);
+    return tex ? tex : noDataTexture.get();
+}
 
+VkTexture* Minimap::loadTextureByHash(const std::string& hash) {
     auto cacheIt = tileTextureCache.find(hash);
     if (cacheIt != tileTextureCache.end())
         return cacheIt->second.get();
@@ -367,7 +422,7 @@ VkTexture* Minimap::getOrLoadTileTexture(int tileX, int tileY) {
     auto blpImage = assetManager->loadTexture(blpPath);
     if (!blpImage.isValid()) {
         tileTextureCache[hash] = nullptr;  // Mark as failed
-        return noDataTexture.get();
+        return nullptr;
     }
 
     auto tex = std::make_unique<VkTexture>();
@@ -381,9 +436,15 @@ VkTexture* Minimap::getOrLoadTileTexture(int tileX, int tileY) {
     tileInsertionOrder.push_back(hash);
 
     // Evict oldest tiles when cache grows too large to bound GPU memory usage.
+    // Freed once no frame in flight can still be sampling it: a composite
+    // from the last frame may have it bound.
     while (tileInsertionOrder.size() > MAX_TILE_CACHE) {
-        const std::string& oldest = tileInsertionOrder.front();
-        tileTextureCache.erase(oldest);
+        auto oldIt = tileTextureCache.find(tileInsertionOrder.front());
+        if (oldIt != tileTextureCache.end()) {
+            std::shared_ptr<VkTexture> dying(std::move(oldIt->second));
+            if (dying) vkCtx->deferAfterAllFrameFences([dying]() {});
+            tileTextureCache.erase(oldIt);
+        }
         tileInsertionOrder.pop_front();
     }
 
@@ -435,9 +496,14 @@ void Minimap::compositePass(VkCommandBuffer cmd, const glm::vec3& centerWorldPos
 
     if (!trsParsed) parseTRS();
 
+    if (indoors_) {
+        compositeWmoPass(cmd, centerWorldPos);
+        return;
+    }
+
     // Check if composite needs refresh
     const auto now = std::chrono::steady_clock::now();
-    bool needsRefresh = !hasCachedFrame;
+    bool needsRefresh = !hasCachedFrame || compositeIsWmo_;
     if (!needsRefresh) {
         float mdx = centerWorldPos.x - lastUpdatePos.x;
         float mdy = centerWorldPos.y - lastUpdatePos.y;
@@ -475,9 +541,15 @@ void Minimap::compositePass(VkCommandBuffer cmd, const glm::vec3& centerWorldPos
                                     tilePipelineLayout, 0, 1,
                                     &tileDescSets[frameIdx][slot], 0, nullptr);
 
+            // The ninth at column dc + 1 and row dr + 1. The image's u runs
+            // down the composite and its v across, which is the quarter turn
+            // the shader used to make by sampling (v, u).
+            const glm::vec2 cell(static_cast<float>(dc + 1), static_cast<float>(dr + 1));
             MinimapTilePush push{};
-            push.gridOffset = glm::vec2(static_cast<float>(dc + 1),
-                                        static_cast<float>(dr + 1));
+            push.uv00 = compositeToClip(cell / 3.0f);
+            push.uv10 = compositeToClip((cell + glm::vec2(0.0f, 1.0f)) / 3.0f);
+            push.uv01 = compositeToClip((cell + glm::vec2(1.0f, 0.0f)) / 3.0f);
+            push.uv11 = compositeToClip((cell + glm::vec2(1.0f, 1.0f)) / 3.0f);
             vkCmdPushConstants(cmd, tilePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
                                0, sizeof(push), &push);
 
@@ -494,6 +566,158 @@ void Minimap::compositePass(VkCommandBuffer cmd, const glm::vec3& centerWorldPos
     lastUpdateTime = now;
     lastUpdatePos = centerWorldPos;
     hasCachedFrame = true;
+    compositeIsWmo_ = false;
+}
+
+// --------------------------------------------------------
+// WMO mode: a building's own minimap tiles
+// --------------------------------------------------------
+
+bool Minimap::setWmoView(const WmoView& view) {
+    if (!trsParsed) parseTRS();
+    if (view.tileRoot.empty() || !wmoTileRoots_.count(view.tileRoot) ||
+        view.currentGroup >= view.groups.size()) {
+        clearWmoView();
+        return false;
+    }
+
+    const std::vector<size_t> order =
+        wmo_minimap::groupsToDraw(view.groups, view.currentGroup, view.playerLocal.z);
+
+    // A different building, or a different set of rooms (a stair up to the
+    // next floor), wants a new composite now rather than at the next tick.
+    bool changed = !indoors_ || view.tileRoot != wmoRoot_ || order.size() != wmoDrawGroups_.size() ||
+                   view.modelMatrix != wmoModelMatrix_;
+    for (size_t i = 0; !changed && i < order.size(); ++i) {
+        changed = view.groups[order[i]].fileIndex != wmoDrawGroups_[i].fileIndex;
+    }
+    wmoPlayerLocalZ_ = view.playerLocal.z;
+    if (!changed) return true;
+
+    wmoRoot_ = view.tileRoot;
+    wmoModelMatrix_ = view.modelMatrix;
+    wmoDrawGroups_.clear();
+    for (size_t i : order) wmoDrawGroups_.push_back(view.groups[i]);
+    hasCachedFrame = false;
+    if (!indoors_) {
+        indoors_ = true;
+        viewRadius = kInsideZoomRadius[insideZoomLevel_];
+    }
+    return true;
+}
+
+void Minimap::clearWmoView() {
+    if (!indoors_) return;
+    indoors_ = false;
+    wmoRoot_.clear();
+    wmoDrawGroups_.clear();
+    viewRadius = kZoomRadius[zoomLevel_];
+    hasCachedFrame = false;
+}
+
+void Minimap::compositeWmoPass(VkCommandBuffer cmd, const glm::vec3& centerWorldPos) {
+    const auto now = std::chrono::steady_clock::now();
+    const float span = wmoCompositeSpan();
+    bool needsRefresh = !hasCachedFrame || !compositeIsWmo_ || span != wmoCompositeSpanUsed_;
+    if (!needsRefresh) {
+        float mdx = centerWorldPos.x - lastUpdatePos.x;
+        float mdy = centerWorldPos.y - lastUpdatePos.y;
+        float elapsed = std::chrono::duration<float>(now - lastUpdateTime).count();
+        needsRefresh = (mdx * mdx + mdy * mdy >= updateDistance * updateDistance) ||
+                       (elapsed >= updateIntervalSec);
+    }
+    if (!needsRefresh) return;
+
+    const uint32_t frameIdx = vkCtx->getCurrentFrame();
+    const glm::vec2 center(centerWorldPos.x, centerWorldPos.y);
+
+    // Every tile of every drawn group that lands in the composite. Tiles
+    // md5translate does not name are not there in the data either: the
+    // stock client leaves them black, as the clear below does.
+    std::vector<VkDescriptorImageInfo> imgInfos;
+    std::vector<MinimapTilePush> pushes;
+    imgInfos.reserve(kMaxWmoTiles);
+    pushes.reserve(kMaxWmoTiles);
+    for (const wmo_minimap::Group& g : wmoDrawGroups_) {
+        const int nx = wmo_minimap::tileCount(g.boxMax.x - g.boxMin.x);
+        const int ny = wmo_minimap::tileCount(g.boxMax.y - g.boxMin.y);
+        for (int x = 0; x < nx; ++x) {
+            for (int y = 0; y < ny; ++y) {
+                if (pushes.size() >= kMaxWmoTiles) break;
+                auto it = wmoTrsLookup_.find(wmo_minimap::tileKey(wmoRoot_, g.fileIndex, x, y));
+                if (it == wmoTrsLookup_.end()) continue;
+
+                // Placed before loading, so a tile out of view costs nothing.
+                // The image size is not known yet: the full 128 yards bounds it.
+                const wmo_minimap::TileCorners full = wmo_minimap::tileCorners(
+                    glm::vec2(g.boxMin), x, y,
+                    static_cast<uint32_t>(wmo_minimap::kTileYards * wmo_minimap::kPixelsPerYard),
+                    static_cast<uint32_t>(wmo_minimap::kTileYards * wmo_minimap::kPixelsPerYard));
+                auto toClip = [&](const glm::vec2& local) {
+                    const glm::vec4 r = wmoModelMatrix_ * glm::vec4(local, wmoPlayerLocalZ_, 1.0f);
+                    return compositeToClip(wmo_minimap::renderToComposite(glm::vec2(r), center, span));
+                };
+                const glm::vec2 f[4] = {toClip(full.uv00), toClip(full.uv10),
+                                        toClip(full.uv01), toClip(full.uv11)};
+                glm::vec2 lo = f[0], hi = f[0];
+                for (const glm::vec2& p : f) { lo = glm::min(lo, p); hi = glm::max(hi, p); }
+                if (hi.x < -1.0f || hi.y < -1.0f || lo.x > 1.0f || lo.y > 1.0f) continue;
+
+                VkTexture* tex = loadTextureByHash(it->second);
+                if (!tex || !tex->isValid()) continue;
+                const wmo_minimap::TileCorners c = wmo_minimap::tileCorners(
+                    glm::vec2(g.boxMin), x, y, tex->getWidth(), tex->getHeight());
+                MinimapTilePush push{};
+                push.uv00 = toClip(c.uv00);
+                push.uv10 = toClip(c.uv10);
+                push.uv01 = toClip(c.uv01);
+                push.uv11 = toClip(c.uv11);
+                pushes.push_back(push);
+                imgInfos.push_back(tex->descriptorInfo());
+            }
+        }
+    }
+
+    std::vector<VkWriteDescriptorSet> writes(pushes.size());
+    for (size_t i = 0; i < pushes.size(); ++i) {
+        writes[i] = {};
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = wmoTileDescSets_[frameIdx][i];
+        writes[i].dstBinding = 0;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[i].pImageInfo = &imgInfos[i];
+    }
+    if (!writes.empty()) {
+        vkUpdateDescriptorSets(vkCtx->getDevice(), static_cast<uint32_t>(writes.size()),
+                               writes.data(), 0, nullptr);
+    }
+
+    VkClearColorValue clearColor = {{ 0.0f, 0.0f, 0.0f, 1.0f }};
+    compositeTarget->beginPass(cmd, clearColor);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, wmoTilePipeline);
+    VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &quadVB, &offset);
+    for (size_t i = 0; i < pushes.size(); ++i) {
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                tilePipelineLayout, 0, 1,
+                                &wmoTileDescSets_[frameIdx][i], 0, nullptr);
+        vkCmdPushConstants(cmd, tilePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+                           0, sizeof(MinimapTilePush), &pushes[i]);
+        vkCmdDraw(cmd, 6, 1, 0, 0);
+    }
+    compositeTarget->endPass(cmd);
+
+    lastUpdateTime = now;
+    lastUpdatePos = centerWorldPos;
+    hasCachedFrame = true;
+    compositeIsWmo_ = true;
+    wmoCompositeCenter_ = center;
+    wmoCompositeSpanUsed_ = span;
+    // The terrain pass checks its tile against these to skip a refresh; make
+    // sure the way back out draws.
+    lastCenterTileX = -1;
+    lastCenterTileY = -1;
 }
 
 // --------------------------------------------------------
@@ -543,6 +767,18 @@ void Minimap::render(VkCommandBuffer cmd, const Camera& playerCamera,
     float playerV = (1.0f + fracNS) / 3.0f;
 
     float zoomRadius = viewRadius / (TILE_SIZE * 3.0f);
+
+    // A WMO composite is a square of its own around where the player was when
+    // it was drawn, in the same orientation, so only the scale and the origin
+    // differ. Whatever the last composite was decides it, not the mode: they
+    // part for the one frame a doorway is crossed in.
+    if (compositeIsWmo_) {
+        const glm::vec2 uv = wmo_minimap::renderToComposite(
+            glm::vec2(centerWorldPos.x, centerWorldPos.y), wmoCompositeCenter_, wmoCompositeSpanUsed_);
+        playerU = uv.x;
+        playerV = uv.y;
+        zoomRadius = viewRadius / wmoCompositeSpanUsed_;
+    }
 
     // Rotating with the camera is off everywhere: the saved setting is read and
     // dropped in loadSettings, since "Stabilize transports and correct minimap

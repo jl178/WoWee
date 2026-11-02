@@ -530,6 +530,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
     modelData.boundingBoxMax = model.boundingBoxMax;
     modelData.wmoAmbientColor = model.ambientColor;
     modelData.wmoId = model.wmoId;
+    if (!model.sourcePath.empty()) modelData.minimapTileRoot = wmo_minimap::tileRoot(model.sourcePath);
     std::string lowerSourcePath = model.sourcePath;
     std::replace(lowerSourcePath.begin(), lowerSourcePath.end(), '/', '\\');
     std::transform(lowerSourcePath.begin(), lowerSourcePath.end(), lowerSourcePath.begin(),
@@ -682,6 +683,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
         }
 
         GroupResources resources;
+        resources.fileIndex = static_cast<uint32_t>(gi);
         if (createGroupResources(wmoGroup, resources, wmoGroup.flags, model.ambientColor, model.mohdFlags)) {
             // Detect distance-only LOD/exterior shell groups:
             // 1. ALWAYS_DRAW (0x10000) with low verts - distant LOD stand-ins
@@ -2384,6 +2386,8 @@ bool WMORenderer::createGroupResources(const pipeline::WMOGroup& group, GroupRes
     resources.indexCount = group.indices.size();
     resources.boundingBoxMin = group.boundingBoxMin;
     resources.boundingBoxMax = group.boundingBoxMax;
+    resources.headerBoxMin = group.boundingBoxMin;
+    resources.headerBoxMax = group.boundingBoxMax;
 
     std::vector<WMOVertex> vertices;
     vertices.reserve(group.vertices.size());
@@ -4514,6 +4518,8 @@ bool WMORenderer::isInsideWMOGroups(float glX, float glY, float glZ,
                     outHit->wmoGroupId = tight >= 0
                         ? model.groups[static_cast<size_t>(tight)].wmoGroupId
                         : group.wmoGroupId;
+                    outHit->instanceId = instance.id;
+                    outHit->tightGroupIndex = tight >= 0 ? tight : static_cast<int32_t>(gi);
                 }
                 return true;
             }
@@ -4530,6 +4536,28 @@ bool WMORenderer::isInsideWMO(float glX, float glY, float glZ, uint32_t* outMode
 bool WMORenderer::insideWmoArea(float glX, float glY, float glZ, AreaHit* out) const {
     QueryTimer timer(&queryTimeMs, &queryCallCount);
     return isInsideWMOGroups(glX, glY, glZ, /*interiorOnly=*/false, nullptr, out);
+}
+
+bool WMORenderer::getMinimapSource(uint32_t instanceId, const glm::vec3& worldPos,
+                                   glm::mat4& modelMatrix, std::string& tileRoot,
+                                   std::vector<wmo_minimap::Group>& groups,
+                                   glm::vec3& localPos) const {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return false;
+    const WMOInstance& instance = instances[idxIt->second];
+    auto it = loadedModels.find(instance.modelId);
+    if (it == loadedModels.end()) return false;
+    const ModelData& model = it->second;
+
+    modelMatrix = instance.modelMatrix;
+    tileRoot = model.minimapTileRoot;
+    localPos = glm::vec3(instance.invModelMatrix * glm::vec4(worldPos, 1.0f));
+    groups.clear();
+    groups.reserve(model.groups.size());
+    for (const GroupResources& g : model.groups) {
+        groups.push_back({g.fileIndex, g.headerBoxMin, g.headerBoxMax, g.groupFlags});
+    }
+    return true;
 }
 
 void WMORenderer::setInstanceNameSet(uint32_t instanceId, uint16_t nameSet) {

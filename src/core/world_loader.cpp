@@ -365,6 +365,8 @@ void WorldLoader::loadMapGeometry(uint32_t mapId, const std::string& mapName,
             LOG_DEBUG("WMO-only: root WMO data size=", wmoData.size());
             if (!wmoData.empty()) {
                 pipeline::WMOModel wmoModel = pipeline::WMOLoader::load(wmoData);
+                // The path names the dungeon's minimap tiles; see wmo_minimap.hpp.
+                wmoModel.sourcePath = wdtInfo.rootWMOPath;
                 LOG_DEBUG("WMO-only: parsed WMO model, nGroups=", wmoModel.nGroups);
 
                 if (wmoModel.nGroups > 0) {

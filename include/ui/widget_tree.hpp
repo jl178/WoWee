@@ -637,6 +637,11 @@ struct Widget {
     /// Minimap zoom step, 0 to 4. Kept here rather than in Lua because the
     /// interface sets it through one button and reads it back through another.
     int zoomLevel = 0;
+    /// The minimap is indoors (a WMO's own map), where the client keeps a
+    /// second zoom (minimapInsideZoom). zoomLevel is always the one in use;
+    /// the other mode's waits here and the two swap at a doorway.
+    bool minimapInside = false;
+    int otherZoomLevel = 0;
 
     /// Whether a link drawn in this frame answers a click. FCF_SetUninteractable
     /// turns it off for a chat window the player has made click-through, and the

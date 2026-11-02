@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rendering/wmo_minimap.hpp"
+
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
@@ -7,7 +9,9 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <deque>
+#include <vector>
 #include <algorithm>
 
 namespace wowee {
@@ -74,19 +78,46 @@ public:
     /// takes 0 (furthest out) to 5. The outdoor map across, in yards, is
     /// 466 2/3, 400, 333 1/3, 266 2/3, 200 and 133 1/3 - the figures the
     /// coordinate libraries (Astrolabe, HereBeDragons) measured from the real
-    /// client. viewRadius is half of that. The indoor table (300 .. 50) is not
-    /// used: this map draws terrain tiles only, never a WMO's own minimap.
+    /// client. viewRadius is half of that.
+    ///
+    /// Indoors - while the map shows a WMO's own tiles, see setWmoView - the
+    /// stock table is 300, 240, 180, 120, 80 and 50 yards, and the level is
+    /// a second one (the client's minimapInsideZoom beside minimapZoom), so
+    /// zooming in inside Ironforge leaves the outdoor zoom where it was.
     static constexpr int kZoomLevels = 6;
     static constexpr float kZoomRadius[kZoomLevels] = {
         233.0f + 1.0f / 3.0f, 200.0f, 166.0f + 2.0f / 3.0f,
         133.0f + 1.0f / 3.0f, 100.0f, 66.0f + 2.0f / 3.0f};
+    static constexpr float kInsideZoomRadius[kZoomLevels] = {
+        150.0f, 120.0f, 90.0f, 60.0f, 40.0f, 25.0f};
+    /// Sets the level of whichever table is in use, indoor or outdoor.
     void setZoomLevel(int level) {
-        zoomLevel_ = std::clamp(level, 0, kZoomLevels - 1);
-        viewRadius = kZoomRadius[zoomLevel_];
+        int& active = indoors_ ? insideZoomLevel_ : zoomLevel_;
+        active = std::clamp(level, 0, kZoomLevels - 1);
+        viewRadius = indoors_ ? kInsideZoomRadius[active] : kZoomRadius[active];
     }
-    [[nodiscard]] int getZoomLevel() const { return zoomLevel_; }
-    void zoomIn() { setZoomLevel(zoomLevel_ + 1); }
-    void zoomOut() { setZoomLevel(zoomLevel_ - 1); }
+    [[nodiscard]] int getZoomLevel() const { return indoors_ ? insideZoomLevel_ : zoomLevel_; }
+    void zoomIn() { setZoomLevel(getZoomLevel() + 1); }
+    void zoomOut() { setZoomLevel(getZoomLevel() - 1); }
+
+    /// The WMO the player is in, for the indoor map. See wmo_minimap.hpp.
+    struct WmoView {
+        std::string tileRoot;            ///< wmo_minimap::tileRoot of the root
+        glm::mat4 modelMatrix{1.0f};     ///< the instance's, local to render space
+        std::vector<wmo_minimap::Group> groups;  ///< every loaded group
+        size_t currentGroup = 0;         ///< the group the player is in, into groups
+        glm::vec3 playerLocal{0.0f};     ///< a yard above the feet, local space
+    };
+    /// Draw the WMO's own tiles instead of the terrain, as the stock client
+    /// does in an indoor group. Called every frame the player is in one. A
+    /// root md5translate names no tiles for leaves the terrain map up, and
+    /// so does WOWEE_WMO_MINIMAP=0 (decided by the caller). True when the
+    /// map is in its WMO mode afterwards.
+    bool setWmoView(const WmoView& view);
+    /// Back to the terrain map and the outdoor zoom.
+    void clearWmoView();
+    /// The map is showing a WMO's tiles, and the indoor zoom table is in use.
+    [[nodiscard]] bool isIndoors() const { return indoors_; }
 
     void setOpacity(float opacity) { opacity_ = opacity; }
 
@@ -126,7 +157,7 @@ public:
     [[nodiscard]] float screenRectW() const { return rectW_; }
     [[nodiscard]] float screenRectH() const { return rectH_; }
 
-    // Public accessors for WorldMap
+    // Public accessors for WorldMap. Terrain tiles only.
     VkTexture* getOrLoadTileTexture(int tileX, int tileY);
     void ensureTRSParsed() { if (!trsParsed) parseTRS(); }
     [[nodiscard]] const std::string& getMapName() const { return mapName; }
@@ -134,6 +165,15 @@ public:
 private:
     void parseTRS();
     void updateTileDescriptors(uint32_t frameIdx, int centerTileX, int centerTileY);
+    /// A minimap BLP by its md5translate hash, cached. Null when it is missing.
+    VkTexture* loadTextureByHash(const std::string& hash);
+    /// The composite pass in WMO mode: the drawn groups' tiles around the
+    /// player, on black.
+    void compositeWmoPass(VkCommandBuffer cmd, const glm::vec3& centerWorldPos);
+    /// How many yards across the WMO composite is: the view's radius with room
+    /// for the corners of a square or rotated map, and for the player moving
+    /// between refreshes.
+    [[nodiscard]] float wmoCompositeSpan() const { return 2.0f * (viewRadius * 1.5f + 16.0f); }
 
     VkContext* vkCtx = nullptr;
     /// Null until something says otherwise - see setTargetPass.
@@ -144,11 +184,18 @@ private:
 
     // TRS lookup: "Azeroth\map32_49" → "e7f0dea73ee6baca78231aaf4b7e772a"
     std::unordered_map<std::string, std::string> trsLookup;
+    // The WMO tiles again, keyed in lower case ("wmo\khazmodan\...\ironforge_
+    // 044_00_01"), since a WMO's path and md5translate disagree on case; and
+    // the roots that have any, so a building without tiles keeps the terrain.
+    std::unordered_map<std::string, std::string> wmoTrsLookup_;
+    std::unordered_set<std::string> wmoTileRoots_;
     bool trsParsed = false;
 
     // Tile texture cache: hash → VkTexture
-    // Evicted (FIFO) when the count of successfully-loaded tiles exceeds MAX_TILE_CACHE.
-    static constexpr size_t MAX_TILE_CACHE = 128;
+    // Evicted (FIFO) when the count of successfully-loaded tiles exceeds
+    // MAX_TILE_CACHE. Room for a full WMO composite (kMaxWmoTiles) beside the
+    // terrain's nine, so one composite does not evict its own tiles.
+    static constexpr size_t MAX_TILE_CACHE = 256;
     std::unordered_map<std::string, std::unique_ptr<VkTexture>> tileTextureCache;
     std::deque<std::string> tileInsertionOrder;  // hashes of successfully loaded tiles, oldest first
     std::unique_ptr<VkTexture> noDataTexture;
@@ -165,12 +212,19 @@ private:
     // Descriptor resources (shared layout: 1 combined image sampler at binding 0)
     VkDescriptorSetLayout samplerSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool descPool = VK_NULL_HANDLE;
-    static constexpr uint32_t MAX_DESC_SETS = 24;
+    // The most WMO tiles one composite draws. Ironforge's level around the
+    // Great Forge is a few dozen.
+    static constexpr uint32_t kMaxWmoTiles = 128;
+    static constexpr uint32_t MAX_DESC_SETS = 19 + 2 * kMaxWmoTiles;
 
     // Tile composite pipeline (renders into VkRenderTarget)
     VkPipeline tilePipeline = VK_NULL_HANDLE;
     VkPipelineLayout tilePipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSet tileDescSets[2][9] = {};  // [frameInFlight][tileSlot]
+    // The same shaders and layout, blending: a WMO tile is transparent where
+    // the group has nothing, and groups overlap.
+    VkPipeline wmoTilePipeline = VK_NULL_HANDLE;
+    VkDescriptorSet wmoTileDescSets_[2][kMaxWmoTiles] = {};  // [frameInFlight][tile]
 
     // Display pipeline (renders into main render pass)
     VkPipeline displayPipeline = VK_NULL_HANDLE;
@@ -180,6 +234,18 @@ private:
     int mapSize = 200;
     float viewRadius = kZoomRadius[0];
     int zoomLevel_ = 0;
+    int insideZoomLevel_ = 0;
+
+    // WMO mode (setWmoView). indoors_ is what the next composite draws;
+    // compositeIsWmo_ is what the last one drew, which render() has to match.
+    bool indoors_ = false;
+    bool compositeIsWmo_ = false;
+    std::string wmoRoot_;
+    glm::mat4 wmoModelMatrix_{1.0f};
+    float wmoPlayerLocalZ_ = 0.0f;
+    std::vector<wmo_minimap::Group> wmoDrawGroups_;  // in draw order
+    glm::vec2 wmoCompositeCenter_{0.0f};  // render x/y the last WMO composite is centred on
+    float wmoCompositeSpanUsed_ = 1.0f;
     bool enabled = true;
     bool rotateWithCamera = false;
     bool squareShape = false;

@@ -6,6 +6,8 @@ layout(location = 0) in vec2 TexCoord;
 
 layout(location = 0) out vec4 outColor;
 
+// Sampled as is: the corners in the push constant carry any turn. The alpha
+// matters to WMO tiles, which are clear where the group has nothing.
 void main() {
-    outColor = texture(uTileTexture, vec2(TexCoord.y, TexCoord.x));
+    outColor = texture(uTileTexture, TexCoord);
 }
