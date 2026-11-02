@@ -587,8 +587,10 @@ private:
     static constexpr uint32_t SEC_POST      = 6;  // water + weather + effects (worker 4)
     static constexpr uint32_t SEC_IMGUI     = 7;  // ImGui (main thread, non-FSR only)
     static constexpr uint32_t SEC_WMO_B     = 8;  // second half of WMO (worker 5), see renderWorld
-    static constexpr uint32_t NUM_SECONDARIES = 9;
-    static constexpr uint32_t NUM_WORKERS = 6;
+    static constexpr uint32_t SEC_M2_A      = 9;  // first share of M2 opaque (worker 6), before SEC_M2
+    static constexpr uint32_t SEC_TERRAIN_A = 10; // first half of terrain (worker 7), before SEC_TERRAIN
+    static constexpr uint32_t NUM_SECONDARIES = 11;
+    static constexpr uint32_t NUM_WORKERS = 8;
 
     // Per-worker command pools (thread-safe: one pool per thread)
     VkCommandPool workerCmdPools_[NUM_WORKERS] = {};

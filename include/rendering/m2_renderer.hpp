@@ -323,9 +323,30 @@ struct alignas(64) M2Instance {
     uint8_t hizPrevCulledFrames = 2;
     const M2ModelGPU* cachedModel = nullptr;  // Avoid per-frame hash lookups
     // End of the first cache line.
+    //
+    // The second and third lines hold what the main pass reads to write a
+    // drawn instance's GPU entry (M2Renderer::recordPart): the matrix, then
+    // the bones, their slot, the highlight and the flag bits. These were on
+    // six lines spread over 600 bytes (matrix at 80, bones at 336, highlight
+    // 400, flags 533-543, slot 648), read for every drawn instance.
+    glm::mat4 modelMatrix;
+    std::vector<glm::mat4> boneMatrices;
+    // Mega bone SSBO offset - base bone index for this instance (set per-frame in prepareRender)
+    uint32_t megaBoneOffset = 0;
+    /// Lit while the player is pressing on this instance: 0 none, 1 full.
+    ///
+    /// A game object has no selection circle - it is used rather than selected
+    /// - so the press is the only thing that can say the click landed on this
+    /// one and not the scenery beside it.
+    float highlight = 0.0f;
+    /// Ground clutter: the terrain normal under it, packed into the GPU
+    /// entry's flags (bit 1 set, x and y as bytes in bits 8-15 and 16-23) so
+    /// m2.vert lights the piece as the ground it stands on. 0 for the rest.
+    int32_t groundNormalFlags = 0;
+    // Whether the boat sits on water: -1 not known yet, 0 no, 1 afloat.
+    int8_t afloat = -1;
     glm::vec3 rotation;  // Euler angles in degrees
     float scale;
-    glm::mat4 modelMatrix;
     glm::mat4 invModelMatrix;
     // Its RtScene instance and the matrix last given to it; see syncRtScene.
     uint32_t rtInstance = ~0u;
@@ -343,7 +364,7 @@ struct alignas(64) M2Instance {
     float animSpeed = 1.0f;      // Animation playback speed
     int currentSequenceIndex = 0;// Index into sequences array
     float animDuration = 0.0f;   // Duration of current animation (ms)
-    std::vector<glm::mat4> boneMatrices;
+    // boneMatrices sits after modelMatrix, with the other fields the draw reads.
 
     // Sequence cross-fade (see beginM2SequenceBlend): the old sequence keeps
     // playing on its own clock and is faded out over the incoming sequence's
@@ -375,12 +396,7 @@ struct alignas(64) M2Instance {
     /// glows or its coins glint; holding Open's last frame loses that.
     int thenLoopSequence = -1;
 
-    /// Lit while the player is pressing on this instance: 0 none, 1 full.
-    ///
-    /// A game object has no selection circle - it is used rather than selected
-    /// - so the press is the only thing that can say the click landed on this
-    /// one and not the scenery beside it.
-    float highlight = 0.0f;
+    // highlight sits after modelMatrix, with the other fields the draw reads.
     /// An alpha its owner sets on the whole model - the sky's crossfade
     /// between zones. Below one the instance is drawn in the blended pass
     /// alone, every layer of it, since an opaque layer cannot fade otherwise.
@@ -429,14 +445,10 @@ struct alignas(64) M2Instance {
     bool cachedIsLightBeam = false;
     bool cachedIsTransportDoodad = false;
     bool cachedIsBoat = false;
-    // Whether the boat sits on water: -1 not known yet, 0 no, 1 afloat.
-    int8_t afloat = -1;
+    // afloat and groundNormalFlags sit after modelMatrix, with the other
+    // fields the draw reads.
     uint8_t afloatTries = 0;
     float afloatRecheck = 0.0f;
-    /// Ground clutter: the terrain normal under it, packed into the GPU
-    /// entry's flags (bit 1 set, x and y as bytes in bits 8-15 and 16-23) so
-    /// m2.vert lights the piece as the ground it stands on. 0 for the rest.
-    int32_t groundNormalFlags = 0;
     bool skipCollision = false;    // Fully non-collidable visual/effect instance
     bool skipWallCollision = false; // No invented (bounding-box) wall blocking; an authored collision mesh still blocks
     /// Off for a marker floating over a unit - the quest giver's ! and ? - which
@@ -474,8 +486,7 @@ struct alignas(64) M2Instance {
     void* boneMapped[2] = {};
     VkDescriptorSet boneSet[2] = {};
 
-    // Mega bone SSBO offset - base bone index for this instance (set per-frame in prepareRender)
-    uint32_t megaBoneOffset = 0;
+    // megaBoneOffset sits after modelMatrix, with the other fields the draw reads.
 
     void updateModelMatrix();
 };
@@ -490,6 +501,11 @@ static_assert(offsetof(M2Instance, isGameObject) < 64);
 static_assert(offsetof(M2Instance, lastCullVisible) < 64);
 static_assert(offsetof(M2Instance, hizPrevCulledFrames) < 64);
 static_assert(offsetof(M2Instance, cachedModel) + sizeof(void*) <= 64);
+// ...and the main pass's per-drawn-instance reads inside the next two.
+static_assert(offsetof(M2Instance, modelMatrix) == 64);
+static_assert(offsetof(M2Instance, boneMatrices) >= 128);
+static_assert(offsetof(M2Instance, afloat) < 192);
+static_assert(offsetof(M2Instance, groundNormalFlags) + sizeof(int32_t) <= 192);
 #pragma GCC diagnostic pop
 
 /// Whether an instance is filed in M2Renderer's spatial grid, which only the
@@ -596,7 +612,23 @@ public:
     void prepareRender(uint32_t frameIndex, const Camera& camera);
     /** Dispatch GPU frustum culling compute shader on primary cmd before render pass. */
     void dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera);
+    /** The main pass on one command buffer: cullForRecording, recordPart(0, 1), recordGlowSprites. */
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera);
+
+    /// The main pass in steps, so it can be recorded into two command buffers
+    /// on two threads (Renderer::renderWorld). First the cull and the sorts;
+    /// false means there is nothing to record this frame.
+    bool cullForRecording(const Camera& camera);
+    /// 1, or 2 when the opaque groups are worth cutting in two. Call after
+    /// cullForRecording; WOWEE_M2_ONE_WORKER=1 always answers 1.
+    uint32_t recordPartsWanted();
+    /// Record one part. Part 0 is the opaque groups before the split, the
+    /// last part the rest plus the blended pass, so part 0's buffer is
+    /// executed first. The parts of one frame may be recorded concurrently.
+    void recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, uint32_t part, uint32_t parts);
+    /// After every part has finished: the glow sprites both generated, into
+    /// the last part's buffer, and the frame's counts and profile line.
+    void recordGlowSprites(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
 
     /** Gather the nearest authored glow cards as inexpensive scene point lights. */
     uint32_t gatherLocalLights(const glm::vec3& cameraPos,
@@ -1032,7 +1064,12 @@ private:
     void* casterMapped_[2] = {};
     VkDescriptorSet casterSet_[2] = {};
     VkDescriptorPool casterDescPool_ = VK_NULL_HANDLE;
-    uint32_t instanceDataCount_ = 0; // reset each frame in render()
+    // Write cursor into this frame's instance buffer, reset in
+    // cullForRecording. Atomic because two parts claim ranges of it at once.
+    std::atomic<uint32_t> instanceDataCount_{0};
+    /// Claim `count` contiguous instance slots, or as many as fit (none with
+    /// allOrNothing when not all do). Returns how many; `base` the first.
+    uint32_t claimInstanceSlots(uint32_t count, bool allOrNothing, uint32_t& base);
 
     // GPU Frustum Culling via Compute Shader
     // Compute shader tests each M2 instance against frustum planes + distance, writes visibility[].
@@ -1233,7 +1270,22 @@ private:
         glm::vec4 color;
         float size;
     };
-    std::vector<GlowSprite> glowSprites_;  // Reused each frame
+    std::vector<GlowSprite> glowSprites_;  // Reused each frame; part 0's, then all of them
+    std::vector<GlowSprite> glowSpritesB_; // The second part's, until recordGlowSprites
+
+    // The main pass between cullForRecording and recordGlowSprites.
+    struct alignas(64) RecordCounts {  // a line each: the parts count concurrently
+        uint32_t draws = 0;
+        uint32_t skyOpaque = 0;
+        uint32_t skyTransparent = 0;
+    };
+    RecordCounts recordCounts_[2];          // per part, summed by recordGlowSprites
+    size_t opaqueSplit_ = 0;                // first sortedVisible_ entry of the second part
+    std::vector<std::pair<size_t, uint32_t>> splitGroups_;  // scratch for recordPartsWanted
+    uint32_t recordFrameIndex_ = 0;
+    glm::vec3 recordCamPos_{0.0f};
+    float recordLavaSeconds_ = 0.0f;
+    std::chrono::steady_clock::time_point recordT0_, recordT1_, recordT2_;  // profile
 
     // Shadow-pass texture descriptor cache (reused each frame, cleared via pool reset)
     std::unordered_map<VkImageView, VkDescriptorSet> shadowTexSetCache_;
