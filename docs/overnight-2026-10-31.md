@@ -533,3 +533,5 @@ Other fixes:
 - `0843d4e`: the stock indoor minimap inside WMOs, using md5translate WMO tiles. Ironforge shows its floor plan and the outdoor terrain minimap is unchanged (screenshots).
 - `e7e8888`: terrain mega-buffer slots per tile (they had filled up after the first zone and were never reused). Cached, merged terrain shadow draws; character shadow bone reuse. Orgrimmar: 84 -> 88 fps.
 - `0f8f947`: near tiles migrate into terrain mega slots, and there are now 128 slots. Teleport chain: 0 near chunks on fallback buffers (was 6.6k-13.3k).
+- Tour, rest of the stops: Un'Goro 134 fps, Borean Tundra 88, Dalaran 64. No crashes in Outland or Northrend.
+- Found: Hellfire Peninsula at 32 fps, with update/pre/camera at 24 ms/frame. perf shows M2Renderer::getFloorHeight at 34% (large M2 collision meshes searched linearly). Agent working on it.
