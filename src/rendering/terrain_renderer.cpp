@@ -1,6 +1,7 @@
 #include "rendering/terrain_vertex.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/terrain_renderer.hpp"
+#include "rendering/terrain_mega_slots.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_texture.hpp"
@@ -17,6 +18,8 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <unordered_set>
 #include <limits>
@@ -46,6 +49,10 @@ const bool kTerrainShadowCache = core::envFlagEnabled("WOWEE_TERRAIN_SHADOW_CACH
 /// WOWEE_TERRAIN_TILE_APPEND=0 regroups every chunk by tile whenever one is
 /// added; see updateTileGrouping.
 const bool kTerrainTileAppend = core::envFlagEnabled("WOWEE_TERRAIN_TILE_APPEND", true);
+/// WOWEE_TERRAIN_SLOT_MIGRATE=0 leaves each tile where it landed when it
+/// loaded, in a slot or not, and keeps the 42-slot buffers; see
+/// updateMegaSlotPlacement.
+const bool kTerrainSlotMigrate = core::envFlagEnabled("WOWEE_TERRAIN_SLOT_MIGRATE", true);
 
 uint64_t terrainTileKey(int tileX, int tileY) {
     return (static_cast<uint64_t>(static_cast<uint32_t>(tileX)) << 32) | static_cast<uint32_t>(tileY);
@@ -245,10 +252,25 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
     {
         VmaAllocator allocator = vkCtx->getAllocator();
 
+        // How many tile slots. With placement on, enough for every tile the
+        // view can reach at its longest (2400 yards: ~85 tiles) with room
+        // for the shadow reach, so the nearest tiles fit whatever the
+        // setting; placement then keeps the slots on them. Off, the buffers
+        // stay the size they were.
+        if (kTerrainMegaSlots && (kTerrainSlotMigrate || std::getenv("WOWEE_TERRAIN_MEGA_TILE_SLOTS"))) {
+            const auto slots = static_cast<uint32_t>(
+                core::envIntClamped("WOWEE_TERRAIN_MEGA_TILE_SLOTS", 128, 8, 512));
+            megaVBMaxVerts_ = slots * kMegaTileSlotVerts;
+            megaIBMaxIndices_ = slots * kMegaTileSlotIndices;
+        } else {
+            megaVBMaxVerts_ = MEGA_VB_MAX_VERTS;
+            megaIBMaxIndices_ = MEGA_IB_MAX_INDICES;
+        }
+
         // Mega vertex buffer (host-visible for direct write during chunk upload)
         VkBufferCreateInfo vbCI{};
         vbCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        vbCI.size = static_cast<VkDeviceSize>(MEGA_VB_MAX_VERTS) * sizeof(pipeline::TerrainVertex);
+        vbCI.size = static_cast<VkDeviceSize>(megaVBMaxVerts_) * sizeof(pipeline::TerrainVertex);
         vbCI.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
         VmaAllocationCreateInfo vbAllocCI{};
         vbAllocCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
@@ -264,7 +286,7 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
         // Mega index buffer
         VkBufferCreateInfo ibCI{};
         ibCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        ibCI.size = static_cast<VkDeviceSize>(MEGA_IB_MAX_INDICES) * sizeof(uint32_t);
+        ibCI.size = static_cast<VkDeviceSize>(megaIBMaxIndices_) * sizeof(uint32_t);
         ibCI.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
         VmaAllocationCreateInfo ibAllocCI{};
         ibAllocCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
@@ -293,11 +315,22 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
         }
 
         megaSlotPool_ = std::make_shared<MegaSlotPool>();
-        megaSlotPool_->slots = LowestFreeSlots(std::min(MEGA_VB_MAX_VERTS / kMegaTileSlotVerts,
-                                                        MEGA_IB_MAX_INDICES / kMegaTileSlotIndices));
-        LOG_INFO("Terrain mega buffers: VB=", vbCI.size / (1024*1024), "MB IB=",
-                 ibCI.size / (1024*1024), "MB indirect=",
-                 indCI.size / 1024, "KB, ", megaSlotPool_->slots.capacity(), " tile slots");
+        megaSlotPool_->slots = LowestFreeSlots(std::min(megaVBMaxVerts_ / kMegaTileSlotVerts,
+                                                        megaIBMaxIndices_ / kMegaTileSlotIndices));
+        // Where the buffers landed matters as much as their size: without
+        // resizable BAR the host-visible VRAM is 256 MB, and a buffer that
+        // does not fit there goes to system memory, which the GPU reads
+        // across the bus every frame.
+        const auto deviceLocal = [allocator](VmaAllocation alloc) {
+            if (!alloc) return "none";
+            VkMemoryPropertyFlags flags = 0;
+            vmaGetAllocationMemoryProperties(allocator, alloc, &flags);
+            return (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? "VRAM" : "system memory";
+        };
+        LOG_WARNING("Terrain mega buffers: VB=", vbCI.size / (1024*1024), "MB (", deviceLocal(megaVBAlloc_),
+                    ") IB=", ibCI.size / (1024*1024), "MB (", deviceLocal(megaIBAlloc_), ") indirect=",
+                    indCI.size / 1024, "KB, ", megaSlotPool_->slots.capacity(), " tile slots, placement ",
+                    (kTerrainSlotMigrate && kTerrainMegaSlots) ? "on" : "off");
     }
 
     LOG_INFO("Terrain renderer initialized (Vulkan)");
@@ -380,7 +413,11 @@ void TerrainRenderer::shutdown() {
     if (megaSlotPool_) {
         std::lock_guard<std::mutex> lock(megaSlotPool_->mutex);
         megaSlotPool_->slots.releaseAll();
+        megaSlotPool_->releasing = 0;
     }
+    slotTiles_.reset();
+    slotTilesFallback_.clear();
+    slotRefused_.clear();
 
     vkCtx = nullptr;
 }
@@ -415,6 +452,7 @@ bool TerrainRenderer::loadTerrain(const pipeline::TerrainMesh& mesh,
 
             gpuChunk.tileX = tileX;
             gpuChunk.tileY = tileY;
+            gpuChunk.meshChunk = static_cast<int16_t>(y * 16 + x);
 
             // Create per-chunk params UBO
             // A failed allocation here is pressure rather than corruption, but
@@ -477,6 +515,7 @@ bool TerrainRenderer::loadTerrainIncremental(const pipeline::TerrainMesh& mesh,
 
         gpuChunk.tileX = tileX;
         gpuChunk.tileY = tileY;
+        gpuChunk.meshChunk = static_cast<int16_t>(cy * 16 + cx);
 
         if (!createChunkParamsUBO(gpuChunk)) {
             LOG_WARNING("Terrain[", tileX, ",", tileY, "] chunk UBO allocation failed"
@@ -642,8 +681,12 @@ TerrainChunkGPU TerrainRenderer::uploadChunk(const pipeline::ChunkMesh& chunk, i
         if (it == megaTileSlots_.end()) {
             int64_t slot = -1;
             {
+                // Not the slot placement is keeping for a nearer tile: freed
+                // by an eviction, it would otherwise go to whichever tile
+                // uploads first, which on a trip is one at the far edge.
                 std::lock_guard<std::mutex> lock(megaSlotPool_->mutex);
-                slot = megaSlotPool_->slots.acquire();
+                if (megaSlotPool_->slots.freeCount() > megaSlotsReserved_)
+                    slot = megaSlotPool_->slots.acquire();
             }
             if (slot >= 0) {
                 it = megaTileSlots_.emplace(key, MegaTileSlot{.slot = static_cast<uint32_t>(slot)}).first;
@@ -658,8 +701,8 @@ TerrainChunkGPU TerrainRenderer::uploadChunk(const pipeline::ChunkMesh& chunk, i
             it->second.indicesUsed += idxCount;
             haveMegaPlace = true;
         }
-    } else if (megaVBUsed_ + vertCount <= MEGA_VB_MAX_VERTS &&
-               megaIBUsed_ + idxCount <= MEGA_IB_MAX_INDICES) {
+    } else if (megaVBUsed_ + vertCount <= megaVBMaxVerts_ &&
+               megaIBUsed_ + idxCount <= megaIBMaxIndices_) {
         megaVertex = megaVBUsed_;
         megaIndex = megaIBUsed_;
         megaVBUsed_ += vertCount;
@@ -667,25 +710,31 @@ TerrainChunkGPU TerrainRenderer::uploadChunk(const pipeline::ChunkMesh& chunk, i
         haveMegaPlace = true;
     }
     if (haveMegaPlace) {
-        // Copy vertices
-        auto* vbDst = static_cast<pipeline::TerrainVertex*>(megaVBMapped_) + megaVertex;
-        std::memcpy(vbDst, chunk.vertices.data(), vertCount * sizeof(pipeline::TerrainVertex));
-        // Copy indices. Offset to the chunk's place in the vertex buffer when
-        // the shadow pass merges draws: every mega chunk is then drawn with a
-        // vertexOffset of 0, and chunks whose indices follow one another are
-        // one draw. The vertex each index names is the same either way.
-        auto* ibDst = static_cast<uint32_t*>(megaIBMapped_) + megaIndex;
-        if (kTerrainShadowMerge) {
-            for (uint32_t i = 0; i < idxCount; ++i) ibDst[i] = chunk.indices[i] + megaVertex;
-        } else {
-            std::memcpy(ibDst, chunk.indices.data(), idxCount * sizeof(uint32_t));
-        }
-
+        writeMegaChunk(chunk, megaVertex, megaIndex);
         gpuChunk.megaBaseVertex = static_cast<int32_t>(megaVertex);
         gpuChunk.megaFirstIndex = megaIndex;
     }
 
     return gpuChunk;
+}
+
+void TerrainRenderer::writeMegaChunk(const pipeline::ChunkMesh& chunk, uint32_t megaVertex,
+                                     uint32_t megaIndex) {
+    const auto vertCount = static_cast<uint32_t>(chunk.vertices.size());
+    const auto idxCount = static_cast<uint32_t>(chunk.indices.size());
+    // Copy vertices
+    auto* vbDst = static_cast<pipeline::TerrainVertex*>(megaVBMapped_) + megaVertex;
+    std::memcpy(vbDst, chunk.vertices.data(), vertCount * sizeof(pipeline::TerrainVertex));
+    // Copy indices. Offset to the chunk's place in the vertex buffer when
+    // the shadow pass merges draws: every mega chunk is then drawn with a
+    // vertexOffset of 0, and chunks whose indices follow one another are
+    // one draw. The vertex each index names is the same either way.
+    auto* ibDst = static_cast<uint32_t*>(megaIBMapped_) + megaIndex;
+    if (kTerrainShadowMerge) {
+        for (uint32_t i = 0; i < idxCount; ++i) ibDst[i] = chunk.indices[i] + megaVertex;
+    } else {
+        std::memcpy(ibDst, chunk.indices.data(), idxCount * sizeof(uint32_t));
+    }
 }
 
 int32_t TerrainRenderer::megaVertexOffset(const TerrainChunkGPU& chunk) const {
@@ -701,10 +750,192 @@ void TerrainRenderer::releaseMegaTileSlot(uint64_t key) {
     // Frames in flight may still draw from the slot; it is written again
     // only once the last of them has finished.
     std::shared_ptr<MegaSlotPool> pool = megaSlotPool_;
+    {
+        std::lock_guard<std::mutex> lock(pool->mutex);
+        ++pool->releasing;
+    }
     vkCtx->deferAfterAllFrameFences([pool, slot]() {
         std::lock_guard<std::mutex> lock(pool->mutex);
         pool->slots.release(slot);
+        if (pool->releasing > 0) --pool->releasing;
     });
+}
+
+uint32_t TerrainRenderer::countFallbackChunks(const TileChunkGroup& tile) const {
+    uint32_t n = 0;
+    for (uint32_t ci : tile.chunkIndices) {
+        if (ci < chunks.size() && chunks[ci].megaBaseVertex < 0) ++n;
+    }
+    return n;
+}
+
+bool TerrainRenderer::promoteTileToMegaSlot(uint32_t groupSlot, const pipeline::TerrainMesh& mesh) {
+    if (groupSlot >= slotTiles_.tiles.size() || !megaSlotPool_) return false;
+    const TileChunkGroup& tile = slotTiles_.tiles[groupSlot];
+    if (tile.chunkIndices.empty()) return false;
+    const TerrainChunkGPU& first = chunks[tile.chunkIndices.front()];
+    const uint64_t key = terrainTileKey(first.tileX, first.tileY);
+
+    // Everything is checked before a slot is taken: each chunk must be the
+    // one the mesh holds, the same size as what went into its own buffers,
+    // and the tile must fit. A tile that fails is not offered again.
+    uint32_t verts = 0;
+    uint32_t indices = 0;
+    for (uint32_t ci : tile.chunkIndices) {
+        const TerrainChunkGPU& c = chunks[ci];
+        if (c.meshChunk < 0 || c.meshChunk >= static_cast<int>(mesh.chunks.size()) ||
+            mesh.chunks[c.meshChunk].vertices.size() != c.vertexCount ||
+            mesh.chunks[c.meshChunk].indices.size() != c.indexCount) {
+            slotRefused_.insert(key);
+            return false;
+        }
+        verts += c.vertexCount;
+        indices += c.indexCount;
+    }
+    if (verts > kMegaTileSlotVerts || indices > kMegaTileSlotIndices) {
+        slotRefused_.insert(key);
+        return false;
+    }
+
+    int64_t slot = -1;
+    {
+        std::lock_guard<std::mutex> lock(megaSlotPool_->mutex);
+        slot = megaSlotPool_->slots.acquire();
+    }
+    if (slot < 0) return false;
+
+    // A slot the tile held already (some chunks in it, some not) goes back
+    // through the fences, since frames in flight may draw from it; the
+    // tile is written whole into the new one. That one came back through
+    // the fences itself, so nothing in flight reads it. The chunks are
+    // packed in `chunks` order, as uploadChunk packs them, so the shadow
+    // pass merges them the same way.
+    releaseMegaTileSlot(key);
+    MegaTileSlot placed{.slot = static_cast<uint32_t>(slot)};
+    for (uint32_t ci : tile.chunkIndices) {
+        TerrainChunkGPU& c = chunks[ci];
+        const uint32_t megaVertex = placed.slot * kMegaTileSlotVerts + placed.vertsUsed;
+        const uint32_t megaIndex = placed.slot * kMegaTileSlotIndices + placed.indicesUsed;
+        writeMegaChunk(mesh.chunks[c.meshChunk], megaVertex, megaIndex);
+        c.megaBaseVertex = static_cast<int32_t>(megaVertex);
+        c.megaFirstIndex = megaIndex;
+        placed.vertsUsed += c.vertexCount;
+        placed.indicesUsed += c.indexCount;
+    }
+    megaTileSlots_.emplace(key, placed);
+    slotTilesFallback_[groupSlot] = 0;
+    shadowDrawsStale_ = true;
+    return true;
+}
+
+void TerrainRenderer::evictTileFromMegaSlot(uint32_t groupSlot) {
+    if (groupSlot >= slotTiles_.tiles.size()) return;
+    const TileChunkGroup& tile = slotTiles_.tiles[groupSlot];
+    if (tile.chunkIndices.empty()) return;
+    // Every chunk kept its own buffers, so it draws from them from the next
+    // recording on; the slot is written again only after this frame and
+    // those before it have finished with it.
+    for (uint32_t ci : tile.chunkIndices) chunks[ci].megaBaseVertex = -1;
+    const TerrainChunkGPU& first = chunks[tile.chunkIndices.front()];
+    releaseMegaTileSlot(terrainTileKey(first.tileX, first.tileY));
+    slotTilesFallback_[groupSlot] = static_cast<uint32_t>(tile.chunkIndices.size());
+    shadowDrawsStale_ = true;
+}
+
+void TerrainRenderer::updateMegaSlotPlacement(const glm::vec3& cameraPos, const TileMeshLookup& meshOf) {
+    if (!kTerrainMegaSlots || !megaSlotPool_ || !megaVBMapped_ || !megaIBMapped_) return;
+
+    // The grouping, and with it the count of chunks on their own buffers
+    // per tile, for the tiles that gained chunks (all of them after a
+    // removal). The moves below keep the counts of the tiles they move.
+    updateTileGrouping(slotTiles_, &slotTouched_);
+    slotTilesFallback_.resize(slotTiles_.tiles.size(), 0);
+    for (uint32_t s : slotTouched_) slotTilesFallback_[s] = countFallbackChunks(slotTiles_.tiles[s]);
+
+    // How far the slots should reach: the main pass's view distance, and
+    // twice the shadow cull radius - the map is a box reaching toward the
+    // sun, so casters lie further out than the radius round the player.
+    // The margin is half a tile.
+    const float shadowReach = (slotShadowRadius_ > 0.0f && slotShadowRadius_ < 1.0e5f)
+                                  ? 2.0f * slotShadowRadius_ : 0.0f;
+    const float need = std::max(maxViewDistance_, shadowReach);
+    constexpr float kEvictMargin = 533.333f * 0.5f;
+
+    std::vector<TerrainSlotTile> states(slotTiles_.tiles.size());
+    uint32_t nearTiles = 0, nearSlotted = 0, nearFallback = 0;
+    bool wanted = false;
+    for (size_t s = 0; s < slotTiles_.tiles.size(); ++s) {
+        const TileChunkGroup& tile = slotTiles_.tiles[s];
+        if (tile.chunkIndices.empty()) {
+            states[s].distance = std::numeric_limits<float>::infinity();
+            continue;
+        }
+        const TerrainChunkGPU& first = chunks[tile.chunkIndices.front()];
+        const uint64_t key = terrainTileKey(first.tileX, first.tileY);
+        const float dx = tile.center.x - cameraPos.x;
+        const float dy = tile.center.y - cameraPos.y;
+        TerrainSlotTile& st = states[s];
+        st.distance = std::max(0.0f, std::sqrt(dx * dx + dy * dy) - tile.radius);
+        st.hasSlot = megaTileSlots_.count(key) != 0;
+        st.hasFallback = slotTilesFallback_[s] > 0;
+        if (st.distance <= need) {
+            ++nearTiles;
+            nearFallback += slotTilesFallback_[s];
+            nearSlotted += static_cast<uint32_t>(tile.chunkIndices.size()) - slotTilesFallback_[s];
+            // Only asked of the tiles that could be chosen.
+            st.promotable = st.hasFallback && !slotRefused_.count(key) && meshOf &&
+                            meshOf(first.tileX, first.tileY) != nullptr;
+            wanted = wanted || st.promotable;
+        }
+    }
+    // While a near tile waits, one free slot is kept for it (uploadChunk).
+    megaSlotsReserved_ = (kTerrainSlotMigrate && wanted) ? 1 : 0;
+
+    uint32_t freeSlots = 0, releasing = 0, capacity = 0;
+    {
+        std::lock_guard<std::mutex> lock(megaSlotPool_->mutex);
+        freeSlots = megaSlotPool_->slots.freeCount();
+        releasing = megaSlotPool_->releasing;
+        capacity = megaSlotPool_->slots.capacity();
+    }
+
+    if (kTerrainSlotMigrate) {
+        const TerrainSlotMove move = chooseTerrainSlotMove(states, freeSlots, releasing > 0, need, kEvictMargin);
+        if (move.kind != TerrainSlotMove::Kind::None) {
+            const auto t0 = std::chrono::steady_clock::now();
+            const TerrainChunkGPU& first = chunks[slotTiles_.tiles[move.tile].chunkIndices.front()];
+            if (move.kind == TerrainSlotMove::Kind::Promote) {
+                const pipeline::TerrainMesh* mesh = meshOf(first.tileX, first.tileY);
+                if (mesh && promoteTileToMegaSlot(static_cast<uint32_t>(move.tile), *mesh)) {
+                    ++slotMovesIn_;
+                    megaSlotsReserved_ = 0;  // asked again next frame
+                }
+            } else {
+                evictTileFromMegaSlot(static_cast<uint32_t>(move.tile));
+                ++slotMovesOut_;
+            }
+            slotLastMoveMs_ = std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - t0).count();
+        }
+    }
+
+    // Said when the near counts change, at most every two seconds, and at
+    // once when chunks near the player go onto or off their own buffers.
+    const double now = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const bool fallbackFlipped = (nearFallback == 0) != (slotLoggedNearFallback_ == 0);
+    if ((nearTiles != slotLoggedNearTiles_ || nearFallback != slotLoggedNearFallback_) &&
+        (fallbackFlipped || now - slotLoggedAt_ >= 2.0)) {
+        LOG_WARNING("Terrain mega slots: ", nearTiles, " tiles within ", static_cast<int>(need),
+                    " yd, ", nearSlotted, " chunks in slots, ", nearFallback,
+                    " on their own buffers; slots ", megaTileSlots_.size(), " of ", capacity,
+                    " held, ", freeSlots, " free, ", releasing, " coming back; moved in ", slotMovesIn_,
+                    ", out ", slotMovesOut_, " (last move ", slotLastMoveMs_, " ms), placement ",
+                    kTerrainSlotMigrate ? "on" : "off");
+        slotLoggedNearTiles_ = nearTiles;
+        slotLoggedNearFallback_ = nearFallback;
+        slotLoggedAt_ = now;
+    }
 }
 
 bool TerrainRenderer::evictTexturesFor(size_t needBytes) {
@@ -1331,7 +1562,9 @@ void TerrainRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSp
         shadowListRadius_ = shadowRadius;
         shadowListValid_ = true;
         ++shadowListFull_;
-    } else if (!shadowTouched_.empty()) {
+    } else if (!shadowTouched_.empty() || shadowDrawsStale_) {
+        // Also when tiles moved into or out of the mega buffers: the kept
+        // chunks are the same, but where each is drawn from is not.
         shadowTileKept_.resize(shadowTiles_.tiles.size());
         for (uint32_t slot : shadowTouched_)
             cullShadowTile(slot, lightSpaceMatrix, shadowCenter, shadowRadius);
@@ -1340,6 +1573,8 @@ void TerrainRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSp
     } else {
         ++shadowListKept_;
     }
+    shadowDrawsStale_ = false;
+    slotShadowRadius_ = shadowRadius;
 
     // Bind mega buffers once for shadow pass (same as opaque)
     const bool useMegaShadow = (megaVB_ && megaIB_);
@@ -1486,6 +1721,7 @@ void TerrainRenderer::removeTile(int tileX, int tileY) {
         LOG_DEBUG("Removed ", removed, " terrain chunks for tile [", tileX, ",", tileY, "]");
     }
     releaseMegaTileSlot(terrainTileKey(tileX, tileY));
+    slotRefused_.erase(terrainTileKey(tileX, tileY));
 }
 
 void TerrainRenderer::clear() {
@@ -1498,6 +1734,8 @@ void TerrainRenderer::clear() {
     ++chunksGeneration_;
     ++chunksRemovedGeneration_;
     while (!megaTileSlots_.empty()) releaseMegaTileSlot(megaTileSlots_.begin()->first);
+    slotRefused_.clear();
+    megaSlotsReserved_ = 0;
     renderedChunks = 0;
     // No chunk is holding anything now, so nothing needs protecting from the
     // next upload's point of view either.

@@ -244,6 +244,22 @@ void TerrainManager::update(const Camera& camera, float deltaTime) {
     const auto tUnloadStart = clock::now();
     processPendingUnloads();
     unloadMs = elapsedMs(tUnloadStart, clock::now());
+
+    // Keep the tiles nearest the camera in the terrain mega buffers' slots,
+    // with the tiles' CPU meshes as the source (one tile a frame at most).
+    // A tile whose terrain is uploaded but which is still finalizing has its
+    // mesh in the pending tile until it is committed.
+    terrainRenderer->updateMegaSlotPlacement(
+        camera.getPosition(), [this](int x, int y) -> const pipeline::TerrainMesh* {
+            const TileCoord coord{.x = x, .y = y};
+            if (auto it = loadedTiles.find(coord); it != loadedTiles.end() && it->second)
+                return &it->second->mesh;
+            for (const FinalizingTile& ft : finalizingTiles_) {
+                if (ft.pending && ft.pending->coord == coord && ft.terrainMeshDone) return &ft.pending->mesh;
+            }
+            return nullptr;
+        });
+
     const auto tClutter = clock::now();
     streamGroundClutter(camera.getPosition());
     lastPhases_.readyMs = readyMs;
@@ -1846,8 +1862,11 @@ void TerrainManager::unloadTile(int x, int y) {
     // Water may have already been loaded in TERRAIN phase, so clean it up.
     for (auto fit = finalizingTiles_.begin(); fit != finalizingTiles_.end(); ++fit) {
         if (fit->pending && fit->pending->coord == coord) {
-            // If terrain chunks were already uploaded, free their descriptor sets
-            if (fit->terrainMeshDone && terrainRenderer) {
+            // If terrain chunks were already uploaded, free their descriptor sets.
+            // Some may be even when the tile's upload had not finished: those
+            // stayed in the renderer for the rest of the session, holding their
+            // sets and the tile's mega slot.
+            if ((fit->terrainMeshDone || fit->terrainChunkNext > 0) && terrainRenderer) {
                 terrainRenderer->removeTile(x, y);
             }
             // If past TERRAIN phase, water was already loaded - remove it

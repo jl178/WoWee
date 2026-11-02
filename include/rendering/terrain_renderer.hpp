@@ -12,6 +12,7 @@
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -68,6 +69,10 @@ struct TerrainChunkGPU {
     float boundingSphereRadius = 0.0f;
     glm::vec3 boundingSphereCenter = glm::vec3(0.0f);
 
+    // Which chunk of the tile's TerrainMesh this is (cy * 16 + cx), so it can
+    // be written into a mega slot again later; -1 when not known.
+    int16_t meshChunk = -1;
+
     // Offsets into mega buffers for indirect drawing (-1 = not in mega buffer)
     int32_t megaBaseVertex = -1;
     uint32_t megaFirstIndex = 0;
@@ -112,6 +117,25 @@ public:
                                 int& chunkIndex, int maxChunksPerCall = 16);
 
     void removeTile(int tileX, int tileY);
+
+    /// The CPU mesh tile (x, y) was uploaded from, or null when it is not
+    /// at hand.
+    using TileMeshLookup = std::function<const pipeline::TerrainMesh*(int tileX, int tileY)>;
+
+    /// Keep the tiles nearest `cameraPos` in the mega buffers' slots.
+    ///
+    /// A tile takes a slot when it loads, if one is free; on a long trip the
+    /// tiles that end up next to the player can be ones that loaded while
+    /// every slot was held, and those draw each chunk from its own buffers
+    /// (a bind pair and a draw each, in both passes). Each call makes at most
+    /// one move: writes the nearest such tile within the view and shadow
+    /// reach into a free slot from its CPU mesh, or, with none free, sends
+    /// the farthest slotted tile beyond that reach back to its own buffers
+    /// (which every chunk keeps) so its slot comes free after the frames in
+    /// flight. Draws are the same either way. Main thread, where tiles are
+    /// loaded and removed. WOWEE_TERRAIN_SLOT_MIGRATE=0 moves nothing; the
+    /// summary line is logged either way.
+    void updateMegaSlotPlacement(const glm::vec3& cameraPos, const TileMeshLookup& meshOf);
 
     void uploadPreloadedTextures(const std::unordered_map<std::string, pipeline::BLPImage>& textures);
 
@@ -360,6 +384,13 @@ private:
     // (42; 6M indices held 32). 8.26M indices × 4B ≈ 31.5MB.
     static constexpr uint32_t MEGA_IB_MAX_INDICES =
         (MEGA_VB_MAX_VERTS / kMegaTileSlotVerts) * kMegaTileSlotIndices;
+    // The sizes the buffers were made with (initialize). With slot placement
+    // on (WOWEE_TERRAIN_SLOT_MIGRATE, the default) a whole number of slots,
+    // 128 unless WOWEE_TERRAIN_MEGA_TILE_SLOTS says otherwise: 2.73 MiB a
+    // slot (1.98 vertices, 0.75 indices), 350 MiB in all. Off, the sizes
+    // above: 42 slots, 115 MiB.
+    uint32_t megaVBMaxVerts_ = MEGA_VB_MAX_VERTS;
+    uint32_t megaIBMaxIndices_ = MEGA_IB_MAX_INDICES;
     struct MegaTileSlot {
         uint32_t slot = 0;
         uint32_t vertsUsed = 0;
@@ -371,10 +402,46 @@ private:
     struct MegaSlotPool {
         std::mutex mutex;
         LowestFreeSlots slots;
+        /// Slots released and not yet back (their frames still in flight).
+        uint32_t releasing = 0;
     };
     std::shared_ptr<MegaSlotPool> megaSlotPool_;
     /// Give tile `key`'s mega slot back once no frame in flight can read it.
     void releaseMegaTileSlot(uint64_t key);
+    /// Copy one chunk's vertices and indices to their place in the mapped
+    /// mega buffers, the indices offset as megaVertexOffset expects.
+    void writeMegaChunk(const pipeline::ChunkMesh& chunk, uint32_t megaVertex, uint32_t megaIndex);
+
+    /// Slot placement (updateMegaSlotPlacement). The chunks grouped by tile
+    /// once more, kept on the main thread with the other two; per tile slot,
+    /// how many of its chunks draw from their own buffers.
+    TileChunkGrouping slotTiles_;
+    std::vector<uint32_t> slotTilesFallback_;
+    std::vector<uint32_t> slotTouched_;
+    /// Tiles whose CPU mesh did not match what was uploaded; never offered
+    /// a slot again while loaded.
+    std::unordered_set<uint64_t> slotRefused_;
+    /// Free slots a loading tile may not take: 1 while a near tile waits
+    /// for one, so a slot an eviction freed reaches it (uploadChunk).
+    uint32_t megaSlotsReserved_ = 0;
+    /// Set when chunks moved in or out of the mega buffers, so the shadow
+    /// pass rebuilds its kept draws (renderShadow).
+    bool shadowDrawsStale_ = false;
+    /// The shadow pass's last cull radius, for the reach slots should cover.
+    float slotShadowRadius_ = 0.0f;
+    /// Tiles moved in and out so far, and what the last move cost.
+    uint32_t slotMovesIn_ = 0, slotMovesOut_ = 0;
+    float slotLastMoveMs_ = 0.0f;
+    /// What the last summary line said, so it is only said again on change.
+    uint32_t slotLoggedNearTiles_ = ~0u, slotLoggedNearFallback_ = ~0u;
+    double slotLoggedAt_ = -1e9;
+    /// Write tile slot `groupSlot` of slotTiles_ into a fresh mega slot from
+    /// `mesh`, giving back the one it held. False when it was not done.
+    bool promoteTileToMegaSlot(uint32_t groupSlot, const pipeline::TerrainMesh& mesh);
+    /// Send tile slot `groupSlot`'s chunks to their own buffers and give its
+    /// mega slot back.
+    void evictTileFromMegaSlot(uint32_t groupSlot);
+    [[nodiscard]] uint32_t countFallbackChunks(const TileChunkGroup& tile) const;
 
     VkBuffer indirectBuffer_ = VK_NULL_HANDLE;
     VmaAllocation indirectAlloc_ = VK_NULL_HANDLE;
