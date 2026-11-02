@@ -19,6 +19,10 @@ struct ZoneMusicInput {
     uint32_t zoneMusicOverride = 0;
     /// A ZoneIntroMusicTable id from WMOAreaTable, the same way.
     uint32_t introOverride = 0;
+    /// A ZoneMusic id in the top slot (10, 0x4c8fa0): the screen effect's,
+    /// GhostMusic for a ghost. It wins over intros and the area, plays with
+    /// no silence before it, and starts again as soon as a track ends.
+    uint32_t screenEffectMusic = 0;
     /// The player is in an interior WMO group (MOGP lacks the exterior
     /// flag). Indoors the stock client asks only WMOAreaTable (0x78e9a0): a
     /// room whose rows name no music has none, whatever the area outside.
@@ -84,6 +88,7 @@ private:
         enum class Kind { None, Wait, Sound } kind = Kind::None;
         uint32_t soundId = 0;
         bool intro = false;
+        bool top = false;  ///< the screen effect's slot
     };
     Choice choose(const ZoneMusicInput& in, bool running) const;
     void onTrackEnded(const ZoneMusicInput& in);
@@ -97,6 +102,7 @@ private:
     uint32_t currentSetId_ = 0;
     uint32_t currentSound_ = 0;     ///< the SoundEntries row we started
     uint32_t currentIntroId_ = 0;   ///< its ZoneIntroMusicTable row when it is an intro
+    bool currentIsTop_ = false;     ///< it came from the screen effect's slot
     bool trackSeen_ = false;        ///< it has been reported playing
     float startGrace_ = 0.0f;       ///< seconds to wait for it to report
     double nextAllowedMs_ = 0.0;    ///< 0xb4aaa0: no zone track before this

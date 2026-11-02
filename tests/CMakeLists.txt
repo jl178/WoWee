@@ -186,6 +186,13 @@ wowee_add_test(test_hill_climbing
 wowee_add_test(test_stock_movement
     SOURCES test_stock_movement.cpp)
 
+# ── test_stock_death_rules ──────────────────────────────────
+# Dying, the ghost world, the corpse and loot rolls as the stock client does
+# them: the release timer, the screen effect, the corpse range, the resurrect
+# offer and the loot chat lines. Header-only.
+wowee_add_test(test_stock_death_rules
+    SOURCES test_stock_death_rules.cpp)
+
 # ── test_spell_description_eval ─────────────────────────────
 # The expression language spell descriptions are written in. Sinister Strike's
 # tooltip read "percent>% of your normal weapon damage" because nothing read

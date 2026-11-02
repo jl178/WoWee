@@ -587,6 +587,9 @@ private:
     LootRollEntry& beginLootRoll(uint64_t objectGuid, uint32_t slot);
     LootRollEntry* findLootRoll(uint64_t objectGuid, uint32_t slot);
     void endLootRoll(uint64_t objectGuid, uint32_t slot);
+    /// Raise START_LOOT_ROLL for waiting rolls while fewer than four are up
+    /// (0x6fb180).
+    void showPendingLootRolls();
     void handleShowBank(network::Packet& packet);
     void handleBuyBankSlotResult(network::Packet& packet);
     void handleGuildBankList(network::Packet& packet);
@@ -682,7 +685,7 @@ private:
         bool itemAutoLootSent = false;
     };
     std::unordered_map<uint64_t, LocalLootState> localLootState_;
-    void announceLootMoney(uint64_t lootGuid, uint32_t amount);
+    void announceLootMoney(uint64_t lootGuid, uint32_t amount, bool soleLooter = true);
     /// The coin is gone from the open loot window, because the server has said
     /// so. Idempotent: both packets that report it call this.
     void clearLootMoney();

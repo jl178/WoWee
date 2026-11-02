@@ -111,6 +111,10 @@ public:
     /// caller then plays Stand or Rise.
     void clearDeath(uint32_t instanceId);
     [[nodiscard]] bool isDeathLocked(uint32_t instanceId) const;
+    /// Dead and down: Death has played to its last frame (or the model lies
+    /// in Dead, or came into view already dead). 0x73bbd0's moment, from
+    /// which a corpse may be looted and sparkles.
+    [[nodiscard]] bool isDeathAnimationDone(uint32_t instanceId) const;
     /// Play a one-shot on the upper body only - the lower spine and all above
     /// it - over whatever the legs are playing (a run, a walk, a stand), the
     /// way the stock client sheathes while moving. Each arm plays its own

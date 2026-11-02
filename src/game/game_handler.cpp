@@ -571,14 +571,10 @@ void GameHandler::updateTimers(float deltaTime) {
     // Announce the corpse-proximity crossing. FrameXML answers CORPSE_IN_RANGE
     // with StaticPopup "RECOVER_CORPSE", whose button calls RetrieveCorpse;
     // without the edge that prompt could never appear and this client's own
-    // button was the only way back from a corpse run.
-    {
-        const bool inRange = releasedSpirit_ && canReclaimCorpse();
-        if (inRange != corpseInRangeAnnounced_) {
-            corpseInRangeAnnounced_ = inRange;
-            fireAddonEvent(inRange ? "CORPSE_IN_RANGE" : "CORPSE_OUT_OF_RANGE", {});
-        }
-    }
+    // button was the only way back from a corpse run. With it, the release
+    // timer and the screen effect, which the stock client also keeps per
+    // frame (game_handler_callbacks.cpp).
+    updateDeathState();
 
     if (pendingMoneyDeltaTimer_ > 0.0f) {
         pendingMoneyDeltaTimer_ -= deltaTime;

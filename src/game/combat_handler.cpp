@@ -2057,6 +2057,11 @@ float CombatHandler::getCorpseReclaimDelaySec() const {
 
 void CombatHandler::reclaimCorpse() {
     if (!canReclaimCorpse() || !owner_.getSocket()) return;
+    // RetrieveCorpse (0x51b800) turns down a resurrection on offer before it
+    // asks for the body: the two cannot both be taken.
+    if (owner_.resurrectRequestPendingRef() && !owner_.resurrectIsSpiritHealerRef()) {
+        declineResurrect();
+    }
     if (owner_.corpseGuidRef() == 0) {
         LOG_WARNING("reclaimCorpse: corpse GUID not yet known (corpse object not received); cannot reclaim");
         return;

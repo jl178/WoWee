@@ -97,6 +97,12 @@ public:
     void loadSoundData(pipeline::AssetManager* assets);
     [[nodiscard]] const SoundData* getSoundData() const { return soundData_.loaded() ? &soundData_ : nullptr; }
 
+    /// The screen effect's sounds (ScreenEffect.dbc SoundAmbienceID and
+    /// ZoneMusicID, 0 for none): the top music and ambience slot (0x4c8fa0),
+    /// which wins over the area's. The ghost world's GhostState loop and
+    /// GhostMusic. 0, 0 hands both back to the area.
+    void setScreenEffectSounds(uint32_t soundAmbienceId, uint32_t zoneMusicId);
+
     /// LOOTWINDOWCOINSOUND, the stock client's only coin sound. Plays
     /// LootCoinSmall.wav directly when SoundEntries.dbc is missing.
     void playCoinSound();
@@ -146,6 +152,8 @@ private:
     std::string underwaterLoopPath_;  ///< from SoundEntries, resolved once the tables load
     float underwaterLoopVolume_ = 0.69f;
     bool loopMusic_ = false;  ///< Loop Music: Sound_ZoneMusicNoDelay, no rest between tracks
+    uint32_t screenEffectAmbience_ = 0;  ///< SoundAmbience row from the screen effect (slot 10)
+    uint32_t screenEffectMusic_ = 0;     ///< ZoneMusic row from the screen effect (slot 10)
 
     std::unique_ptr<MusicManager> musicManager_;
     std::unique_ptr<FootstepManager> footstepManager_;

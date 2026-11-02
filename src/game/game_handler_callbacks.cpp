@@ -2035,6 +2035,151 @@ bool GameHandler::canReclaimCorpse() const {
     return combatHandler_ ? combatHandler_->canReclaimCorpse() : false;
 }
 
+uint32_t GameHandler::playerFieldValue(UF field, bool* known) const {
+    if (known) *known = false;
+    const uint16_t idx = fieldIndex(field);
+    if (idx == 0xFFFF || playerGuid == 0) return 0;
+    auto entity = getEntityManager().getEntity(playerGuid);
+    if (!entity) return 0;
+    if (known) *known = true;
+    return entity->getField(idx);
+}
+
+void GameHandler::latchReleaseTimer() const {
+    if (releaseTimerLatched_ || !playerDead_ || releasedSpirit_) return;
+    releaseTimerLatched_ = true;
+    deathTimeMs_ = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    // Without the field (a layout that does not name it) there is no timer,
+    // which is what this client always answered.
+    bool known = false;
+    const uint32_t bytes = playerFieldValue(UF::PLAYER_FIELD_BYTES, &known);
+    releaseDelayMs_ = known && fieldIndex(UF::PLAYER_FIELD_BYTES) != 0xFFFF
+        ? stock_death::releaseDelayMs(static_cast<uint8_t>(bytes & 0xFF),
+                                      playerFieldValue(UF::PLAYER_FLAGS))
+        : -1;
+    LOG_INFO("Death: release timer ", releaseDelayMs_ < 0 ? std::string("none")
+             : std::to_string(releaseDelayMs_ / 1000) + " s",
+             " (PLAYER_FIELD_BYTES byte0=0x", std::hex, (bytes & 0xFF), std::dec, ")");
+}
+
+int GameHandler::getReleaseTimeRemaining() const {
+    latchReleaseTimer();
+    if (!playerDead_ || releasedSpirit_ || !releaseTimerLatched_) return -1;
+    const auto nowMs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    return stock_death::releaseSecondsRemaining(releaseDelayMs_, deathTimeMs_, nowMs);
+}
+
+bool GameHandler::isPlayerOutOfBounds() const {
+    return (playerFieldValue(UF::PLAYER_FLAGS) & stock_death::kPlayerFlagOutOfBounds) != 0;
+}
+
+uint32_t GameHandler::computeScreenEffectId() const {
+    // 0x4f88b0: the auras last to first, the first SCREEN_EFFECT one wins.
+    std::vector<uint32_t> fromAuras;
+    loadSpellNameCache();
+    for (const auto& aura : getPlayerAuras()) {
+        if (aura.isEmpty()) continue;
+        auto it = spellNameCache_.find(aura.spellId);
+        if (it == spellNameCache_.end()) continue;
+        for (int e = 0; e < 3; ++e) {
+            if (it->second.effectAuraIds[e] == stock_death::kAuraScreenEffect) {
+                fromAuras.push_back(static_cast<uint32_t>(it->second.effectMiscValues[e]));
+                break;
+            }
+        }
+    }
+    // The ghost flag as this client tracks it: PLAYER_FLAGS, or the login and
+    // corpse paths that set releasedSpirit_ before the field arrives.
+    uint32_t flags = playerFieldValue(UF::PLAYER_FLAGS);
+    if (releasedSpirit_) flags |= stock_death::kPlayerFlagGhost;
+    const uint8_t bytes2b3 = static_cast<uint8_t>(playerFieldValue(UF::PLAYER_FIELD_BYTES2) >> 24);
+    return stock_death::screenEffectId(fromAuras, flags, bytes2b3);
+}
+
+const stock_death::ScreenEffectRow* GameHandler::screenEffectRowFor(uint32_t id) {
+    if (!screenEffectRowsLoaded_) {
+        screenEffectRowsLoaded_ = true;
+        auto* am = services_.assetManager;
+        auto dbc = am ? am->loadDBC("ScreenEffect.dbc") : nullptr;
+        // ID, Name, Effect, Param[4], LightParamsID, SoundAmbienceID,
+        // ZoneMusicID: the 3.3.5a file, ten columns (0x4f7020 reads +0x8,
+        // +0x1c, +0x20, +0x24).
+        if (dbc && dbc->getFieldCount() >= 10) {
+            for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+                stock_death::ScreenEffectRow row;
+                row.id = dbc->getUInt32(r, 0);
+                row.effect = dbc->getUInt32(r, 2);
+                row.lightParamsSlot = static_cast<int32_t>(dbc->getUInt32(r, 7));
+                row.soundAmbienceId = dbc->getUInt32(r, 8);
+                row.zoneMusicId = dbc->getUInt32(r, 9);
+                screenEffectRows_[row.id] = row;
+            }
+        } else {
+            LOG_WARNING("ScreenEffect.dbc missing or not the 3.3.5a shape - "
+                        "the ghost world keeps its look but not its music or ambience");
+        }
+    }
+    auto it = screenEffectRows_.find(id);
+    return it != screenEffectRows_.end() ? &it->second : nullptr;
+}
+
+void GameHandler::updateDeathState() {
+    // 0x6dc070, at the death: the release timer from PLAYER_FIELD_BYTES,
+    // taken here on the first frame after the death if nothing asked first.
+    if (playerDead_ && !releasedSpirit_) {
+        latchReleaseTimer();
+        if (!deathSideEffectsDone_) {
+            deathSideEffectsDone_ = true;
+            // The rest of 0x6dc0f0 at the death: the target is cleared
+            // (0x524bf0(0)) and an open loot released (0x523640). The windows
+            // are FrameXML's, which closes them on PLAYER_DEAD.
+            if (targetGuid != 0) clearTarget();
+            if (isLootWindowOpen()) closeLoot();
+        }
+    } else {
+        releaseTimerLatched_ = false;
+        deathSideEffectsDone_ = false;
+    }
+
+    // 0x51f5c0 every frame: within 40 yards of the corpse. The edge is
+    // CORPSE_IN_INSTANCE rather than CORPSE_IN_RANGE when the corpse lies on
+    // another map than the one its position is given on (0x512c40).
+    {
+        const bool inRange = releasedSpirit_ && canReclaimCorpse();
+        if (inRange != corpseInRangeAnnounced_) {
+            corpseInRangeAnnounced_ = inRange;
+            const bool inInstance = corpseQueryTravelMapId_ == corpseMapId_ &&
+                                    corpseActualMapId_ != corpseMapId_;
+            fireAddonEvent(!inRange ? "CORPSE_OUT_OF_RANGE"
+                           : inInstance ? "CORPSE_IN_INSTANCE" : "CORPSE_IN_RANGE", {});
+        }
+    }
+
+    // 0x4f88b0: the screen effect, its light slot, music and ambience.
+    const uint32_t effectId = computeScreenEffectId();
+    if (effectId != screenEffectRow_.id) {
+        const stock_death::ScreenEffectRow* row = effectId ? screenEffectRowFor(effectId) : nullptr;
+        screenEffectRow_ = row ? *row : stock_death::ScreenEffectRow{};
+        if (effectId && !row) {
+            // The ghost's row is known even without the table: Effect 1,
+            // the death light, GhostState ambience 462, GhostMusic 36.
+            if (effectId == stock_death::kScreenEffectGhost) {
+                screenEffectRow_ = {stock_death::kScreenEffectGhost, 1, stock_death::kLightSlotDeath, 462, 36};
+            } else {
+                screenEffectRow_.id = effectId;
+            }
+        }
+        LOG_INFO("Screen effect: ", screenEffectRow_.id, " (effect ", screenEffectRow_.effect,
+                 ", light slot ", screenEffectRow_.lightParamsSlot, ", ambience ",
+                 screenEffectRow_.soundAmbienceId, ", music ", screenEffectRow_.zoneMusicId, ")");
+        if (auto* ac = services_.audioCoordinator) {
+            ac->setScreenEffectSounds(screenEffectRow_.soundAmbienceId, screenEffectRow_.zoneMusicId);
+        }
+    }
+}
+
 float GameHandler::getCorpseReclaimDelaySec() const {
     return combatHandler_ ? combatHandler_->getCorpseReclaimDelaySec() : 0.0f;
 }
@@ -2878,7 +3023,9 @@ void GameHandler::rightClickCorpse(uint64_t guid, bool autoLootModifier) {
     const float dz = movementInfo.z - unit->getZ();
     const float dist2 = dx * dx + dy * dy + dz * dz;
 
-    if (unit->getDynamicFlags() & UNIT_DYNFLAG_LOOTABLE) {
+    // Lootable once it is down (0x717b60): a body still falling is not yet
+    // a loot, and the click is judged as if it had none.
+    if (unit->isLootableNow()) {
         // Sitting: stand up when autoStand allows, else say so.
         if (standState_ != 0) {
             if (addons::storedCVarValue("autoStand", "1") == "0") {

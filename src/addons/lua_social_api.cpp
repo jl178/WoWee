@@ -2715,14 +2715,15 @@ void registerSocialLuaAPI(lua_State* L) {
             return 0;
         }},
                 // The popup hides itself and closes the gossip when this turns
-                // false, so it answers true for as long as the offer stands.
-                // The server withdraws the offer by other means; there is no
-                // distance to measure against a healer this client is not
-                // tracking the position of.
+                // false. Stock (0x6d1fc0) measures the ghost against the
+                // healer it remembered: inside its combat reach plus 4 yards,
+                // the reach every NPC window keeps. Walking off takes the
+                // XP_LOSS popup down.
                 {"CheckSpiritHealerDist", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             lua_pushboolean(L, gh && gh->resurrectRequestPendingRef() &&
-                                gh->resurrectIsSpiritHealerRef() ? 1 : 0);
+                                gh->resurrectIsSpiritHealerRef() &&
+                                npcWithinInteractRange(gh, gh->resurrectCasterGuidRef()) ? 1 : 0);
             return 1;
         }},
                 // GetResSicknessDuration() → how long the sickness lasts, as
@@ -3303,12 +3304,15 @@ void registerSocialLuaAPI(lua_State* L) {
                 // this file, so it was already the one in use. This copy was a
                 // flat false in a single value, dead and one value short of
                 // the contract if it had ever won.
-                // Seconds before the corpse is released automatically. -1 is
-                // WoW's "no timer", which is the branch that prints the release
-                // prompt without a countdown - right for a client that does not
-                // run one.
+                // Seconds before the corpse is released automatically
+                // (0x516210): six minutes from the death in the open world,
+                // -1 ("no timer", the DEATH popup's other text) where the
+                // server marks none. It answered -1 always, so the popup never
+                // counted down.
                 {"GetReleaseTimeRemaining", [](lua_State* L) -> int {
-            lua_pushnumber(L, -1); return 1;
+            auto* gh = getGameHandler(L);
+            lua_pushnumber(L, gh ? gh->getReleaseTimeRemaining() : -1);
+            return 1;
         }},
                 // Asked from an OnUpdate, so this runs on every frame the
                 // popup is up rather than once.
@@ -3317,7 +3321,11 @@ void registerSocialLuaAPI(lua_State* L) {
                 // falling-to-your-death variant, and nothing here says which
                 // it is.
                 {"IsOutOfBounds", [](lua_State* L) -> int {
-            lua_pushboolean(L, 0); return 1;
+            // PLAYER_FLAGS 0x4000 (0x6123c0), which the server sets for a
+            // fall through the world.
+            auto* gh = getGameHandler(L);
+            lua_pushboolean(L, gh && gh->isPlayerOutOfBounds() ? 1 : 0);
+            return 1;
         }},
                 {"CheckTalentMasterDist", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);

@@ -521,6 +521,9 @@ struct LootRollEntry {
     uint32_t rollCountdownMs = 60000;
     uint8_t  voteMask      = 0xFF;
     std::chrono::steady_clock::time_point rollStartedAt{};
+    /// Its GroupLootFrame is up. At most four are (0x6fb2c0); a fifth roll
+    /// waits, counting down unseen, until one of them closes (0x6fb180).
+    bool shown = false;
 
     struct PlayerRollResult {
         std::string playerName;

@@ -186,8 +186,41 @@ void AudioCoordinator::updateReverb(const ZoneAudioContext& ctx) {
              under ? " under water" : "", " wet=", reverb.wet, " decay=", reverb.decayTime, "s");
 }
 
+void AudioCoordinator::setScreenEffectSounds(uint32_t soundAmbienceId, uint32_t zoneMusicId) {
+    if (soundAmbienceId == screenEffectAmbience_ && zoneMusicId == screenEffectMusic_) return;
+    screenEffectAmbience_ = soundAmbienceId;
+    screenEffectMusic_ = zoneMusicId;
+    ambienceKey_ = 0;  // choose the ambience again on the next update
+    LOG_INFO("Screen effect sounds: ambience ", soundAmbienceId, ", music ", zoneMusicId);
+}
+
 void AudioCoordinator::updateTableAmbience(const ZoneAudioContext& ctx) {
-    if (!ambientSoundManager_ || ctx.areaId == 0) return;
+    if (!ambientSoundManager_) return;
+    // The screen effect's loop is the top slot (0x4c86f0 walks 10 down to
+    // 0): the ghost world sounds like GhostState wherever it is.
+    if (screenEffectAmbience_ != 0) {
+        const uint64_t key = (1ull << 62) | screenEffectAmbience_;
+        if (key == ambienceKey_) return;
+        uint32_t day = 0, night = 0;
+        std::string dayPath, nightPath;
+        float volume = 1.0f;
+        if (soundData_.ambience(screenEffectAmbience_, day, night)) {
+            if (const SoundEntry* e = soundData_.sound(day); e && !e->files.empty()) {
+                dayPath = e->files.front();
+                volume = e->volume;
+            }
+            if (const SoundEntry* e = soundData_.sound(night); e && !e->files.empty()) {
+                nightPath = e->files.front();
+            }
+            if (nightPath.empty()) nightPath = dayPath;
+            if (dayPath.empty()) dayPath = nightPath;
+        }
+        if (dayPath.empty()) return;  // keep the area's until the row resolves
+        ambienceKey_ = key;
+        ambientSoundManager_->setAreaAmbience(dayPath, nightPath, volume);
+        return;
+    }
+    if (ctx.areaId == 0) return;
     // A room with its own WMOAreaTable ambience sounds like itself, a room in
     // a building whose -1 row names one like the building. Outdoors, and in
     // an outdoor group such as a city street, the area's. Indoors the stock
@@ -231,6 +264,7 @@ void AudioCoordinator::updateTableMusic(const ZoneAudioContext& ctx, uint32_t zo
         in.introOverride = soundData_.wmoIntro(ctx.wmoRootId, ctx.wmoNameSet, ctx.wmoGroupId);
         in.indoors = ctx.wmoInterior;
     }
+    in.screenEffectMusic = screenEffectMusic_;
     in.noDelay = loopMusic_;
     in.isDay = isDaytimeHours(ctx.gameTimeHours);
     in.trackPlaying = musicManager_->isPlaying();

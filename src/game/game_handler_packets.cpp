@@ -638,6 +638,8 @@ void GameHandler::registerCoreOpcodes() {
         corpseY_ = cy;
         corpseZ_ = cz;
         corpseMapId_ = travelMapId;
+        corpseQueryTravelMapId_ = travelMapId;
+        corpseActualMapId_ = corpseMapId;
         corpsePositionValid_ = true;
         LOG_INFO("MSG_CORPSE_QUERY: walk to (", cx, ",", cy, ",", cz,
                  ") on map ", travelMapId,
@@ -875,41 +877,43 @@ void GameHandler::registerCoreOpcodes() {
         }
     };
     dispatchTable_[Opcode::SMSG_RESURRECT_REQUEST] = [this](network::Packet& packet) {
-        // Spell::SendResurrectRequest writes:
+        // The stock reader (0x6dbd00):
         //
         //   uint64 casterGuid
         //   uint32 nameLength      (the name plus its terminator)
-        //   char[] name            with that terminator
-        //   uint8  0               a second one, written explicitly
-        //   uint8  sickness        1 from a creature, 0 from a player
-        //   uint32 0               only when the spell overrides the timer
+        //   char[nameLength] name
+        //   uint8  -> ResurrectHasSickness
+        //   uint8  -> ResurrectHasTimer
         //
-        // The length was never read, so readString took the first byte of it
-        // as the whole name - a control character, for any name shorter than
-        // two hundred and fifty-five - and the dialog was raised offering a
-        // resurrection from that. Everything after it was out of step too, so
-        // the sickness flag was never read at all.
+        // and nothing after. The server's own comments call the first byte a
+        // second terminator and the second "sickness" (1 from a creature), but
+        // what the interface sees is what the client stored: a player's
+        // resurrection has neither, so FrameXML's ShowResurrectRequest picks
+        // RESURRECT_NO_TIMER; a creature's has the timer and gets
+        // RESURRECT_NO_SICKNESS. Reading the second byte as sickness offered
+        // every player's resurrection as the timed, sickness-free one.
         if (!packet.hasRemaining(12)) { packet.skipAll(); return; }
         const uint64_t casterGuid = packet.readUInt64();
         /*uint32_t nameLength =*/ packet.readUInt32();
         std::string casterName = packet.readString();
-        if (packet.hasRemaining(1)) packet.readUInt8();   // the second terminator
-        const bool sickness = packet.hasRemaining(1) && packet.readUInt8() != 0;
-        // The trailing word is present only when the spell waives the reclaim
-        // delay, so having one means there is no timer to wait out.
-        const bool hasTimer = !packet.hasRemaining(4);
+        const uint8_t first = packet.hasRemaining(1) ? packet.readUInt8() : 0;
+        const uint8_t second = packet.hasRemaining(1) ? packet.readUInt8() : 0;
         packet.skipAll();
 
         if (!casterGuid) return;
+        const auto offer = stock_death::resurrectOffer(first, second);
         resurrectCasterGuid_ = casterGuid;
-        // A creature offering this is a spirit healer, and that is what the
-        // sickness flag says - it is set for every non-player caster.
         resurrectIsSpiritHealer_ = false;
-        resurrectHasSickness_ = sickness;
-        resurrectHasTimer_ = hasTimer;
+        resurrectHasSickness_ = offer.sickness;
+        resurrectHasTimer_ = offer.timer;
         resurrectCasterName_ = casterName.empty() ? lookupName(casterGuid) : casterName;
         resurrectRequestPending_ = true;
-        fireAddonEvent("RESURRECT_REQUEST", {resurrectCasterName_});
+        // Raised only while the player is dead or a ghost (0x6dbd00 asks the
+        // player's vtable +0x128 first); an offer to the living is kept for
+        // AcceptResurrect but shows nothing.
+        if (playerDead_ || releasedSpirit_) {
+            fireAddonEvent("RESURRECT_REQUEST", {resurrectCasterName_});
+        }
     };
 
     // Time sync

@@ -7038,20 +7038,45 @@ void Application::updateUnitHighlights() {
 }
 
 void Application::updateLootSparkles() {
+    if (!gameHandler) return;
     auto* sparkles = renderer ? renderer->getLootSparkles() : nullptr;
-    if (!sparkles || !gameHandler) return;
     // Dead and marked lootable - the flag the server sends only to a player
-    // allowed to loot the body, so a corpse tapped by someone else stays dull.
+    // allowed to loot the body, so a corpse tapped by someone else stays dull
+    // - and down: the stock client starts the sparkle, and allows the loot,
+    // only when the Death animation has played out (0x73bbd0 -> 0x717ba0).
+    // This is where the renderer's word on that reaches the unit.
+    //
+    // A body the renderer never laid down (no instance, or a death reported
+    // some way that did not start the fall) is taken as down after two
+    // seconds, so nothing is left unlootable for want of an animation.
+    auto* cr = renderer ? renderer->getCharacterRenderer() : nullptr;
+    const auto now = std::chrono::steady_clock::now();
     std::vector<rendering::LootSparkles::Corpse> corpses;
     for (const auto& [guid, entity] : gameHandler->getEntityManager().getEntities()) {
         if (!entity || entity->getType() != game::ObjectType::UNIT) continue;
-        const auto* unit = static_cast<const game::Unit*>(entity.get());
-        if (unit->getHealth() != 0) continue;
-        if ((unit->getDynamicFlags() & game::UNIT_DYNFLAG_LOOTABLE) == 0) continue;
+        auto* unit = static_cast<game::Unit*>(entity.get());
+        if (unit->getHealth() != 0) {
+            unit->setCorpseSettled(false);
+            corpseDeathSeenAt_.erase(guid);
+            continue;
+        }
+        if (!unit->isCorpseSettled()) {
+            const auto seen = corpseDeathSeenAt_.try_emplace(guid, now).first->second;
+            const uint32_t inst = entitySpawner_ ? entitySpawner_->getCreatureInstanceId(guid) : 0;
+            const bool down = inst == 0 || !cr || cr->isDeathAnimationDone(inst) ||
+                              (!cr->isDeathLocked(inst) && now - seen > std::chrono::seconds(2));
+            if (down) unit->setCorpseSettled(true);
+        }
+        if (!sparkles || !unit->isLootableNow()) continue;
         glm::vec3 position;
         if (getRenderPositionForGuid(guid, position)) corpses.emplace_back(guid, position);
     }
-    sparkles->update(renderer->getM2Renderer(), assetManager.get(), corpses);
+    // Forget bodies that are gone.
+    for (auto it = corpseDeathSeenAt_.begin(); it != corpseDeathSeenAt_.end();) {
+        if (!gameHandler->getEntityManager().getEntity(it->first)) it = corpseDeathSeenAt_.erase(it);
+        else ++it;
+    }
+    if (sparkles) sparkles->update(renderer->getM2Renderer(), assetManager.get(), corpses);
 }
 
 void Application::updateQuestMarkers() {

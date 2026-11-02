@@ -18,6 +18,7 @@
 #include "game/movement_handler.hpp"
 #include "game/entity_controller.hpp"
 #include "game/game_services.hpp"
+#include "game/stock_death_rules.hpp"
 #include "network/packet.hpp"
 #include "core/logger.hpp"
 #include <glm/glm.hpp>
@@ -1892,6 +1893,25 @@ public:
     void respondInstanceLock(bool accept);
     bool isInstanceHeroic() const;
     bool isInInstance() const;
+
+    /// GetReleaseTimeRemaining (0x516210): whole seconds before the automatic
+    /// release, -1 when this death has no timer, 0 once it ran out. The
+    /// timer is the one 0x6dc070 starts at the moment of death from
+    /// PLAYER_FIELD_BYTES (six minutes in the open world).
+    int getReleaseTimeRemaining() const;
+    /// IsOutOfBounds (0x6123c0): PLAYER_FLAGS 0x4000.
+    bool isPlayerOutOfBounds() const;
+    /// The ScreenEffect.dbc row the world is drawn and heard with (0x4f88b0):
+    /// an aura's SCREEN_EFFECT, else the ghost's row 1, else none (id 0).
+    const stock_death::ScreenEffectRow& getScreenEffect() const { return screenEffectRow_; }
+    /// The row's Light.dbc slot override, -1 for none. The ghost's is 4,
+    /// the death set; a corpse that has not released has none.
+    int32_t getScreenEffectLightSlot() const { return stock_death::lightSlotOverride(screenEffectRow_); }
+    /// The ffxDeath pass (the grey ghost world) is the row's effect.
+    bool screenEffectIsDeathFx() const {
+        return screenEffectRow_.id != 0 &&
+               screenEffectRow_.effect == static_cast<uint32_t>(stock_death::ScreenEffectKind::Death);
+    }
 
     /** True when ghost is within 40 yards of corpse position (same map). */
     bool canReclaimCorpse() const;
@@ -4156,6 +4176,9 @@ public:
         // says which, and it is the only thing that distinguishes a tracking
         // spell (44 creatures, 45 resources) from any other buff.
         uint32_t effectAuraIds[3] = {0, 0, 0};
+        // Spell.dbc EffectMiscValue: what an aura applies to. For
+        // SCREEN_EFFECT (260) it is the ScreenEffect.dbc row.
+        int32_t effectMiscValues[3] = {0, 0, 0};
         // Spell.dbc EffectImplicitTargetA - what the spell expects to be aimed
         // at. 21 means a friendly unit, which is how heals and buffs are told
         // apart from damage that shares the same effect and school.
@@ -5275,6 +5298,33 @@ private:
     // event; CORPSE_IN_RANGE and CORPSE_OUT_OF_RANGE are edges, and FrameXML
     // raises its reclaim prompt from them.
     bool corpseInRangeAnnounced_ = false;
+    // The map the corpse lies on, from MSG_CORPSE_QUERY. Not corpseMapId_
+    // for a corpse in an instance: that one is the entrance's map, where the
+    // ghost walks to, and the prompt there is CORPSE_IN_INSTANCE.
+    // Both maps of the last MSG_CORPSE_QUERY answer; it applies while
+    // corpseMapId_ is still that answer's travel map.
+    uint32_t corpseActualMapId_ = 0;
+    uint32_t corpseQueryTravelMapId_ = 0xFFFFFFFFu;
+    // The release timer of this death (0x6dc070), latched once the death's
+    // fields are in: the delay (-1 none) and when it started.
+    // Taken on the first ask after the death too: FrameXML's DEATH popup
+    // reads the timer in its OnShow, on the PLAYER_DEAD that comes with the
+    // death's own update.
+    mutable bool releaseTimerLatched_ = false;
+    mutable int32_t releaseDelayMs_ = -1;
+    mutable uint64_t deathTimeMs_ = 0;
+    bool deathSideEffectsDone_ = false;
+    void latchReleaseTimer() const;
+    // The screen effect in force (0x4f88b0) and its ScreenEffect.dbc row.
+    stock_death::ScreenEffectRow screenEffectRow_;
+    std::unordered_map<uint32_t, stock_death::ScreenEffectRow> screenEffectRows_;
+    bool screenEffectRowsLoaded_ = false;
+    /// Per frame: the release timer latch, the corpse range events and the
+    /// screen effect. Stock does each of these every frame.
+    void updateDeathState();
+    uint32_t computeScreenEffectId() const;
+    const stock_death::ScreenEffectRow* screenEffectRowFor(uint32_t id);
+    uint32_t playerFieldValue(UF field, bool* known = nullptr) const;
     // Where the server says the spirit healer is - the graveyard a release
     // would send the player to. SMSG_DEATH_RELEASE_LOC carries it and it used
     // to be read and logged and nothing else, so this client knew exactly where
