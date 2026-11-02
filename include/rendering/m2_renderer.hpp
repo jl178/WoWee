@@ -1535,6 +1535,10 @@ private:
         VkPipeline      pipeline;
         uint32_t        firstVertex;
         uint32_t        vertexCount;
+        /// m2_ribbon.frag's push block: the material's M2 blend and whether
+        /// it is unfogged (flag 0x2), which pick the stock fog colour.
+        uint32_t        blendMode;
+        uint32_t        unfogged;
     };
     std::vector<RibbonDrawCall> ribbonDraws_;
 

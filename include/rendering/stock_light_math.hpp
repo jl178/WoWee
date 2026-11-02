@@ -19,9 +19,11 @@
 /// - Fog: 0x7f16f0, 0x7ecd80, 0x7ecd00, 0x7ed1b0. Linear between start and
 ///   end on Azeroth and Kalimdor; on maps from 530 on (Outland, Northrend and
 ///   later instances) the end moves out to the far clip and the curve gets an
-///   exponent of 1.5 to 7 instead. The stock vertex shaders turn that into
-///   fogcoord = clamp(pow(max(viewDepth*c12.x + c12.y, 0), c12.z), 0, 1) with
-///   OPTION ARB_fog_linear, so what shows of a surface is 1 - fogcoord.
+///   exponent of 1.5 to 7 instead. 0x873210 uploads it as c30 = (-k, k*end,
+///   exponent) with k = 1/(end - start), and the stock vertex shaders turn
+///   that into fogcoord = clamp(pow(max(viewDepth*c.x + c.y, 0), c.z), 0, 1)
+///   = clamp(((end - depth)/(end - start))^exponent): the fog factor, 1 the
+///   surface, 0 the fog colour.
 /// - Terrain (shaders\vertex\arbvp1\terrain.bls, pixel\arbfp1\terrain1-3.bls):
 ///   light = min(ambient + diffuse * clamp(N.L, 0, 1), 1) per channel, times
 ///   the MCCV colour (or 0.5 without one), times 2 in the pixel shader; the
@@ -151,8 +153,9 @@ inline bool paintedBefore(const VolumeKey& a, const VolumeKey& b) {
 struct Fog {
     float start = 0.0f;
     float end = 0.0f;
-    /// The fog curve's power: 1 is linear (Azeroth), above 1 holds the fog
-    /// back near the start and gathers it toward the far clip.
+    /// The fog curve's power: 1 is linear (Azeroth). It raises what shows of
+    /// a surface, so above 1 the fog closes in sooner after the start: the
+    /// far-clip maps give a short band fog a high power to keep it thick.
     float exponent = 1.0f;
 };
 
@@ -224,8 +227,8 @@ inline Fog frameFog(const LightFog& blended, float farClip, bool farClipFog, boo
 inline float fogVisibility(float depth, const Fog& fog) {
     const float range = fog.end - fog.start;
     if (range <= 1e-4f) return depth >= fog.end ? 0.0f : 1.0f;
-    const float x = std::max((depth - fog.start) / range, 0.0f);
-    return 1.0f - std::clamp(std::pow(x, fog.exponent), 0.0f, 1.0f);
+    const float x = std::max((fog.end - depth) / range, 0.0f);
+    return std::clamp(std::pow(x, fog.exponent), 0.0f, 1.0f);
 }
 
 /// terrain.bls: the light a terrain vertex carries, per channel, before the

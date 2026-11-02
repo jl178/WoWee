@@ -28,6 +28,8 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
 };
 
+#include "stock_fog.glsli"
+
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
 // Each emitter's curves, kCurveVec4s (25) vec4s: a header with the key
@@ -191,9 +193,10 @@ void main() {
     if ((packed & (1u << 20)) != 0u) {
         vFogVisibility = 1.0;
     } else {
-        float worldDist = length(viewPos.xyz - world);
-        float fogRange = max(fogParams.y - fogParams.x, 0.001);
-        vFogVisibility = clamp((fogParams.y - worldDist) / fogRange, 0.0, 1.0);
+        // Per vertex, as the stock Particle effect's vertex shaders
+        // (CDiffuse_T1 lit, Color_T1 unlit; shaders\effects\particle.wfx)
+        // write it from the M2 fog constant c30: the world's curve.
+        vFogVisibility = stockFogVisibility(world);
         if (volumetricParams.x > 0.5) vFogVisibility *= fogVolumeAt(world).a;
     }
     gl_Position = projection * viewPos4;

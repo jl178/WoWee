@@ -30,12 +30,13 @@ void main() {
     if (push.tint.a < 0.0) {
         // Rain and splashes, the stock GxBlend_Mod2x: the framebuffer is
         // multiplied by twice this. The textures sit at grey 128, so a drop
-        // barely brightens what is behind it; with distance, and toward the
-        // edges of the box this keeps around the camera, it goes to the
-        // neutral 0.5 (the stock fog colour 0x80808080 for this blend). Alpha
-        // only cuts the sprite out (alpha test ref 1, 0xad8b7c).
+        // barely brightens what is behind it; high above the eye (the stock
+        // rain fog, weather.vert), and toward the edges of the box this keeps
+        // around the camera (Wowee's wrap fade), it goes to the neutral grey
+        // 0x80 (the stock fog colour 0x80808080 for this blend). Alpha only
+        // cuts the sprite out (alpha test ref 1, 0xad8b7c).
         if (tex.a < 1.0 / 255.0) discard;
-        vec3 c = mix(vec3(0.5), tex.rgb * push.tint.rgb, clamp(vFog * vAlpha, 0.0, 1.0));
+        vec3 c = mix(vec3(128.0 / 255.0), tex.rgb * push.tint.rgb, clamp(vFog * vAlpha, 0.0, 1.0));
         outColor = vec4(c, 1.0);
         return;
     }

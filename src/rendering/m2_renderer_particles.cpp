@@ -580,7 +580,9 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
             if (st.hasHead) put(st.head);
             const uint32_t vertCount = static_cast<uint32_t>(written) - firstVert;
             if (vertCount >= 4) {
-                draws.push_back({.texSet = texSet, .pipeline = pipe, .firstVertex = firstVert, .vertexCount = vertCount});
+                draws.push_back({.texSet = texSet, .pipeline = pipe, .firstVertex = firstVert,
+                                 .vertexCount = vertCount, .blendMode = em.blendMode,
+                                 .unfogged = (em.materialFlags & 0x2u) ? 1u : 0u});
             } else {
                 written = firstVert;
             }
@@ -610,6 +612,9 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
         }
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 ribbonPipelineLayout_, 1, 1, &dc.texSet, 0, nullptr);
+        const uint32_t material[2] = {dc.blendMode, dc.unfogged};
+        vkCmdPushConstants(cmd, ribbonPipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(material), material);
         VkDeviceSize offset = 0;
         vkCmdBindVertexBuffers(cmd, 0, 1, &ribbonVB_, &offset);
         vkCmdDraw(cmd, dc.vertexCount, 1, dc.firstVertex, 0);

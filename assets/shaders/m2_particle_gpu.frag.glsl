@@ -4,6 +4,12 @@
 // particle's colour, with the alpha test and fog of the emitter's stock
 // blend state (CM2Model's blend table 0xA453B0, alpha reference from
 // 0x81FE90; docs/re/particles.md).
+//
+// The fog colour is the blend's (0x81FB10, table 0xA45390 by M2 blend):
+// opaque, alpha key and alpha take the scene's fog colour; the two adds fog
+// to black, Mod to white and Mod2x to 0x808080, the colours each blend
+// leaves the framebuffer alone with. How much fog is the vertex shader's
+// stock curve (stock_fog.glsli).
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
 
@@ -54,8 +60,8 @@ void main() {
             // Modulate: fog fades it to white, which changes nothing.
             outColor = vec4(mix(vec3(1.0), c.rgb, fog), c.a);
         } else {
-            // Modulate 2x: grey is the neutral colour.
-            outColor = vec4(mix(vec3(0.5), c.rgb, fog), c.a);
+            // Modulate 2x: grey 0x80 is the neutral colour.
+            outColor = vec4(mix(vec3(128.0 / 255.0), c.rgb, fog), c.a);
         }
     }
 }

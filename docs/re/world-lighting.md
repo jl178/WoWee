@@ -216,14 +216,31 @@ The colour channel order is confirmed at the consumers:
 ### The curve (every arbvp1 shader)
 ```
 fogcoord = clamp(pow(max(viewZ * c.x + c.y, 0), c.z), 0, 1)   // per vertex
-OPTION ARB_fog_linear over 0..1  ->  shown = 1 - fogcoord
+         = clamp(((end − viewZ)/(end − start))^exp, 0, 1)    // the fog factor
+shown    = mix(fogColour, colour, fogcoord)
 ```
 - `viewZ` is the **view-space depth**, not the distance.
-- `c.x = 1/(end − start)` and `c.y = −start/(end − start)`. This mapping is
-  inferred from Gx +0xb0 and the shader, not traced through the constant
-  upload.
-- So `shown = 1 − clamp(((z − start)/(end − start))^exp)`.
-- The water shaders read their fog the same way (c4 in vsLiquidWater).
+- **The constant upload (traced, 0x873210).** In shader mode
+  (`0xd43020 != 0`) the M2 fog goes to vertex constant **c30 =
+  (−s·k, k·end, exponent, 0)** with `k = 1/(end − start)` and `s =
+  0xd4300c`, which is only ever written once, to 1.0 (0x872d09). So
+  `c.x = −1/(end − start)`, `c.y = end/(end − start)`, and fogcoord is the
+  **fog factor itself** (D3D's oFog: 1 the surface, 0 the fog colour), with
+  the exponent on it. vsLiquidWater's c4 has the same form (0x8a38b0);
+  terrain.bls reads its c12 with the same instructions (that upload is not
+  traced). In fixed function (`0xd43020 == 0`) the same call sets Gx render
+  states 8/9 (start, end) and 10 (colour) instead.
+- **Correction (Nov 2026).** This section first read the curve as
+  `shown = 1 − clamp(((z − start)/(end − start))^exp)`, from an assumed
+  `c = (1/(end − start), −start/(end − start))` and `ARB_fog_linear` over
+  0..1. The upload says otherwise. Both agree for the linear fog of Azeroth
+  and Kalimdor (exponent 1). On the far-clip maps (≥ 530) the exponent
+  raises what **shows**, so a high exponent (a short band fog) pulls the
+  fog back in toward the camera although its end moved out to the far clip,
+  instead of holding it back. Example: band fog 75–300 yd, far clip 1277,
+  exponent 4.525: halfway between start (319) and end, 4.4% of a surface
+  shows (it was 95.6%). `stock_fog.glsli`, `stock_light::fogVisibility` and
+  its test now follow the upload.
 
 ### Height and underwater fog
 - **Height fog:** none. The fog depends on depth alone.
@@ -231,12 +248,59 @@ OPTION ARB_fog_linear over 0..1  ->  shown = 1 - fogcoord
   yards, teal). There is a separate liquid fog set at `0xd38bb0..0xd38bbc`
   (0x7ed1b0), and in mode 1 the exponent doubles. There is no screen overlay.
 
+### Particles and ribbons
+- **Shaders.** `shaders\effects\particle.wfx`: effect `Particle` is
+  vertex shader CDiffuse_T1 (lit), `Particle_Unlit` Color_T1, both with
+  pixel shader Combiners_Mod. Both write the fogcoord above from c30 (in
+  color_t1.bls: `DP4 R1.x, v0, c33` is the view depth, then `MAD c30.x,
+  c30.y; MAX 0; POW c30.z; MIN 1`). So particles take the **same curve and
+  view depth as every M2 batch**, per vertex.
+- **Fog per material** (0x81FB10, from the particle material 0x8214E0 and
+  the ribbon element 0x820F40 alike): no fog if the material is unfogged
+  or `1/(end − start) ≤ 0`; otherwise the fog colour by M2 blend from table
+  **0xA45390** = `{1,1,1,2,2,3,4}`:
+
+  | M2 blend | mode | fog colour |
+  |---|---|---|
+  | 0 opaque, 1 alpha key, 2 alpha | 1 | the scene's (Gx +0xb8..+0xc0 × 255) |
+  | 3 one+one, 4 add | 2 | black |
+  | 5 mod | 3 | white 0xffffff |
+  | 6 mod2x | 4 | grey 0x808080 |
+
+  then 0x873210(start, end, exponent, colour) and fog on (0x873390).
+- **Ribbons.** 0x820F40 points the element's material at the ribbon's
+  first material (model material table) and runs the batch setup
+  (0x81FB10, so the colour above). The draw (0x980B70) then turns fog on per
+  material layer from the layer's bit 1, which 0x833900 sets from the M2
+  material flags as `~flags & 0x2`: unfogged materials draw without fog.
+- Wowee before: particles and ribbons took a **radial** linear fog
+  (`length(camera − p)`), the ribbons faded to black whatever their blend.
+  Now: `stockFogVisibility` per vertex (m2_particle_gpu.vert,
+  m2_ribbon.vert, and m2_particle.vert for the glow sprites); the particle
+  colours were already the table's (Mod2x grey now exactly 128/255); the
+  ribbon fragment takes the table's colour from its material's blend and
+  unfogged flag (push constant). Wowee's volumetric fog still thins them on
+  top, as before.
+
+### Rain and splashes
+- Both rain draws (0x78A640 streaks with rain.bls, 0x78A030 splashes with
+  patter.bls) set **c0 = (0xd4300c × −0.2, 15, 1, 0)** (0xa3ebdc, 0x9e8d7c)
+  and fog on with colour **0x80808080**. Both shaders feed c0 the vertex's
+  **height above the camera** (`(v − c1).z`, c1 the camera position
+  0xcd8f5c), not its depth: `fogcoord = clamp(15 − 0.2·Δz)`. A drop goes to
+  the grey only from 70 to 75 yd above the eye, above the rain box, so in
+  practice stock rain is unfogged.
+- Snow (snowpoint.bls) writes no fogcoord.
+- Wowee before: rain and splashes faded with the scene's radial linear fog.
+  Now: weather.vert computes the stock height fade (snow still ignores it).
+  The fade toward the box's edge (`vAlpha`) is Wowee's and stays.
+
 ### Wowee before and after
 
 | Feature | Stock | Wowee before | Wowee after |
 |---|---|---|---|
 | Curve | linear on Azeroth; power 1.5–7 to the far clip on maps ≥ 530 | linear everywhere | stock (`stock_fog.glsli`, exponent in `localLightMeta.y`) |
-| Distance measure | view-space depth | radial distance | view depth (terrain, M2, WMO, water) |
+| Distance measure | view-space depth | radial distance | view depth (terrain, M2, WMO, water, characters, grass, particles, ribbons) |
 | Fog end vs far clip | min(band end, far clip); mode 1: far clip | band end ÷ strength 0.4, then stretched with the view distance | stock; the view distance is the far clip |
 | Fog colour | channel 7 | 70% pulled to the sky's middle colour | channel 7 (sky blend default 0) |
 | Fog strength | as authored | 0.4 (2.5× further) | 1.0 on every preset (`graphics_presets.hpp`, the schema, the login state) |
@@ -665,8 +729,8 @@ material 3: shaderPath ? CMaterialProcWater (vs/psLiquidProcWater%s, 0x8a3e00) :
 
 | Particle | Blend | Colour | Fog | Lit |
 |---|---|---|---|---|
-| Rain streak (rain.bls, 0x78a640/0x7891b0) | **Mod2x** (GxBlend 5; alpha-test reference table 0xad8b7c confirms the enum order) | Weather.dbc colour (white) × texture | fog colour forced to 0x80808080 (neutral for Mod2x) | no |
-| Splash (patter.bls) | Mod2x | as above | 0x80808080 | no |
+| Rain streak (rain.bls, 0x78a640/0x7891b0) | **Mod2x** (GxBlend 5; alpha-test reference table 0xad8b7c confirms the enum order) | Weather.dbc colour (white) × texture | fog colour forced to 0x80808080 (neutral for Mod2x); fogcoord by height above the camera, `clamp(15 − 0.2Δz)` (section 2) | no |
+| Splash (patter.bls, 0x78a030) | Mod2x | as above | 0x80808080, same height fade | no |
 | Snow (snowpoint.bls, 0x78aee0) | Alpha | Weather.dbc colour (white) | none (the shader writes no fogcoord) | no |
 | Sand (sand.bls, 0x78bee0) | Alpha | the fog colour (DayNight+0x8c) | n/a | no |
 | Mist (0x786e10) | Alpha | the fog colour | n/a | no |
@@ -704,7 +768,7 @@ RainDrop01.blp and RainDropSplash01.blp have RGB 123..164, which averages 128. U
 | Feature | Stock | Wowee before | Wowee after |
 |---|---|---|---|
 | Particles vs grade | `(g - 0.25) * 4/3`, nothing below 0.25 | linear in grade | stock (`stock_screen_fx::particleLevel`) |
-| Rain blend | Mod2x, unlit, fog → 0.5 grey | alpha 0.7, tinted by ambient + 0.6·diffuse, fog colour | stock Mod2x (second pipeline), fog to neutral |
+| Rain blend | Mod2x, unlit, fog → 0x80 grey by height above the eye (70–75 yd) | alpha 0.7, tinted by ambient + 0.6·diffuse, fog colour | stock Mod2x (second pipeline), stock height fog to 128/255 |
 | Splash blend | Mod2x | alpha 0.75, tinted | stock Mod2x |
 | Snow colour | white, unlit, unfogged, Alpha | lit-tinted, fogged, alpha 0.95 | stock |
 | Storm light | 4·min(g, 0.25)·Weather.dbc scale, 10 s ease | grade linear | stock: 4·min(g, 0.25), a quarter per 10 s (LightingManager); Weather.dbc scale not read |
@@ -780,17 +844,22 @@ Ultra as well. The presets were left as they are; that is a taste call.
     ScreenEffect washes are missing;
   - Weather.dbc's colour and storm scale are not read;
   - the drunk effect still uses Wowee's own blur.
-- **Other shaders still on the old radial linear fog:** character (the
-  character agent's), particles and ribbons (the particle agent's), grass,
-  clouds and the weather vertex shader. They should move to
-  `stock_fog.glsli`, and the exponent is already in the per-frame block.
+- **Old radial fog:** none left. Character, grass, particles, ribbons and
+  the glow sprites use `stock_fog.glsli`; rain uses its own stock height
+  fade. Clouds and sky have no distance fog (only Wowee's volumetric air).
+- **M2 batches with Mod/Mod2x** (m2.frag) still fog to black: Wowee draws
+  them additive (m2-runtime gap 22); with real Mod/Mod2x pipelines they
+  would fog to white / 0x80 like the particles.
+- **Ribbon blends.** Wowee has only alpha and additive ribbon pipelines, so
+  blends 0, 1, 5 and 6 draw as alpha; their fog colour is the stock one for
+  their blend regardless.
 
 ### What to look at in game
 - **Fog.**
   - Azeroth: haze starts where Light.dbc says, about 2.5× nearer than before,
     and ends at the band's distance in the zone's own fog colour.
-  - Northrend and Outland: clear near, thickening steeply toward the view
-    distance.
+  - Northrend and Outland: the fog runs to the view distance, but zones
+    with a short band fog (high exponent) close in well before it.
   - Saved settings keep their old fog strength (0.4) and sky blend (0.7). To
     see the stock fog, pick a preset again, or set Fog thickness 1 and the sky
     colour blend 0.
