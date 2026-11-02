@@ -456,6 +456,13 @@ public:
     void setFoliageWind(float strength) { foliageWindSetting_ = glm::clamp(strength, 0.0f, 2.0f); }
     /// A multiplier on the shadow darkness Light.dbc asks for; 1 is as set.
     void setShadowStrength(float strength) { shadowStrengthSetting_ = glm::clamp(strength, 0.5f, 1.5f); }
+    /// A soft foam band where water meets the shore, from the water's depth
+    /// over the scene under it. Handed to the water every frame, since the
+    /// water renderer is built with the world, after settings are applied.
+    void setShorelineFoam(bool enabled) { shorelineFoam_ = enabled; }
+    /// Darker, slightly glossy outdoor ground and walls while it rains, eased
+    /// in and out (WetGround). Off snaps the ground dry at once.
+    void setWetGround(bool enabled) { wetGroundEnabled_ = enabled; }
     /// The ground's relief: the terrain shader's bump from its own texture,
     /// which follows the Surface bumps setting and its strength as the
     /// buildings' normal maps do. 0 is the flat stock ground; 1 the default
@@ -497,6 +504,9 @@ private:
     float windStrength_ = 1.0f;           // setting x weather x outdoors, eased over ~4 s
     float clothWindStrength_ = 1.0f;      // setting x weather, eased: cloth breathes indoors too
     float shadowStrengthSetting_ = 1.0f;  // the "Shadow darkness" setting
+    bool shorelineFoam_ = true;           // the "Shoreline foam" setting
+    bool wetGroundEnabled_ = true;        // the "Wet ground in rain" setting
+    float wetness_ = 0.0f;                // 0 dry .. 1 soaked, eased (WetGround); rtParams.w
     float terrainRelief_ = 1.0f;          // see setTerrainRelief
     bool cameraUnderwater_ = false;       // camera below the water's surface, for the audio
     glm::vec3 interiorAmbient_{0.5f};     // MOHD ambient of the WMO the camera is in
@@ -576,8 +586,9 @@ private:
     static constexpr uint32_t SEC_M2        = 5;  // M2 + particles + glow (worker 3)
     static constexpr uint32_t SEC_POST      = 6;  // water + weather + effects (worker 4)
     static constexpr uint32_t SEC_IMGUI     = 7;  // ImGui (main thread, non-FSR only)
-    static constexpr uint32_t NUM_SECONDARIES = 8;
-    static constexpr uint32_t NUM_WORKERS = 5;
+    static constexpr uint32_t SEC_WMO_B     = 8;  // second half of WMO (worker 5), see renderWorld
+    static constexpr uint32_t NUM_SECONDARIES = 9;
+    static constexpr uint32_t NUM_WORKERS = 6;
 
     // Per-worker command pools (thread-safe: one pool per thread)
     VkCommandPool workerCmdPools_[NUM_WORKERS] = {};
