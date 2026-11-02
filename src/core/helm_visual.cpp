@@ -2,6 +2,7 @@
 
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/item_textures.hpp"
 #include "pipeline/m2_asset_loader.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "rendering/character_renderer.hpp"
@@ -49,6 +50,7 @@ HelmVisual resolveHelmVisual(pipeline::AssetManager& assets,
     const std::string suffix = raceGenderSuffix(raceId, genderId);
     if (!suffix.empty()) out.racialModelPath = kHeadDir + modelName + suffix + ".m2";
     out.baseModelPath = kHeadDir + modelName + ".m2";
+    out.particleColorId = pipeline::readItemDisplayParticleColor(*dbc, static_cast<uint32_t>(row));
 
     const std::string textureName = dbc->getString(static_cast<uint32_t>(row), textureField);
     if (!textureName.empty()) {
@@ -181,8 +183,11 @@ void attachShoulders(rendering::CharacterRenderer& renderer,
         const std::string textureName = dbc->getString(r, textureField);
         const std::string texturePath = textureName.empty()
             ? std::string{} : std::string(kShoulderDir) + textureName + ".blp";
-        renderer.attachWeapon(instanceId, side.attachmentId, model, allocModelId(modelPath),
-                              texturePath);
+        if (renderer.attachWeapon(instanceId, side.attachmentId, model, allocModelId(modelPath),
+                                  texturePath)) {
+            renderer.setAttachmentParticleColor(instanceId, side.attachmentId,
+                                                pipeline::readItemDisplayParticleColor(*dbc, r));
+        }
     }
 }
 
@@ -209,8 +214,12 @@ bool attachHelm(rendering::CharacterRenderer& renderer,
         modelPath = helm.baseModelPath;
         if (!pipeline::loadM2WithSkin(assets, modelPath, model)) return false;
     }
-    return renderer.attachWeapon(instanceId, kAttachHelm, model, allocModelId(modelPath),
-                                 helm.texturePath);
+    if (!renderer.attachWeapon(instanceId, kAttachHelm, model, allocModelId(modelPath),
+                               helm.texturePath)) {
+        return false;
+    }
+    renderer.setAttachmentParticleColor(instanceId, kAttachHelm, helm.particleColorId);
+    return true;
 }
 
 } // namespace core

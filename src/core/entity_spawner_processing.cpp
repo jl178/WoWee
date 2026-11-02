@@ -1709,6 +1709,7 @@ void EntitySpawner::processPendingMount() {
         LOG_WARNING("Failed to create mount instance");
         return;
     }
+    charRenderer->setInstanceParticleColor(instanceId, creatureDisplayParticleColor(mountDisplayId));
 
     mountInstanceId_ = instanceId;
 
@@ -1916,6 +1917,7 @@ void EntitySpawner::processPendingRemotePlayerMounts() {
         uint32_t mountInstance = cr->createInstance(modelId, pos, glm::vec3(0.0f),
                                                     riderScale * creatureDisplayScale(displayId));
         if (mountInstance != 0) {
+            cr->setInstanceParticleColor(mountInstance, creatureDisplayParticleColor(displayId));
             cr->setInstanceMountedOn(playerIt->second, mountInstance);
             const bool moving = gameHandler_ && [&] {
                 auto entity = gameHandler_->getEntityManager().getEntity(guid);

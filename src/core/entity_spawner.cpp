@@ -658,7 +658,10 @@ bool EntitySpawner::tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t inst
         }
 
         uint32_t weaponModelId = nextWeaponModelId_++;
-        return charRenderer->attachWeapon(instanceId, attachmentId, weaponModel, weaponModelId, texturePath);
+        if (!charRenderer->attachWeapon(instanceId, attachmentId, weaponModel, weaponModelId, texturePath))
+            return false;
+        charRenderer->setAttachmentParticleColor(instanceId, attachmentId, art.particleColorId);
+        return true;
     };
 
     auto hasResolvableWeaponModel = [&](uint32_t itemDisplayId) -> bool {
@@ -914,8 +917,11 @@ void EntitySpawner::playSheathSound(const ItemDbcRow& item, bool drawing, const 
     const audio::SoundEntry* entry = data ? data->sound(soundId) : nullptr;
     if (!entry || entry->files.empty()) return;
     const auto& file = entry->files[static_cast<size_t>(std::rand()) % entry->files.size()];
-    const float maxDistance = entry->distanceCutoff > 0.0f ? entry->distanceCutoff : 40.0f;
-    audio::AudioEngine::instance().playSound3D(file, renderPos, entry->volume, 1.0f, maxDistance);
+    const float maxDistance = entry->distanceCutoff > 0.0f ? entry->distanceCutoff : audio::stock::kDefaultCutoff;
+    audio::SoundOptions opts;
+    opts.minDistance = entry->minDistance;
+    opts.kitId = entry->id;
+    audio::AudioEngine::instance().playSound3D(file, renderPos, entry->volume, 1.0f, maxDistance, opts);
 }
 
 void EntitySpawner::syncUnitSheath(uint64_t guid, uint32_t instanceId) {
@@ -1073,6 +1079,7 @@ bool EntitySpawner::attachUnitWeapons(uint64_t guid, uint32_t instanceId,
                                         texturePath, localTransform)) {
             return false;
         }
+        charRenderer->setAttachmentParticleColor(instanceId, attachmentId, art.particleColorId);
         charRenderer->applyWeaponItemVisual(instanceId, attachmentId,
                                             weaponItemVisual(displayId, currentHand));
         return true;
@@ -1215,7 +1222,10 @@ void EntitySpawner::buildCreatureDisplayLookups() {
                 const uint32_t a = cdi->getUInt32(i, scaleField + 1);
                 if (a > 0 && a < 255) data.modelAlpha = static_cast<float>(a) / 255.0f;
             }
-            if (cdi->getFieldCount() >= 16) data.creatureGeosetData = cdi->getUInt32(i, 14);
+            if (cdi->getFieldCount() >= 16) {
+                data.creatureGeosetData = cdi->getUInt32(i, 14);
+                data.particleColorId = cdi->getUInt32(i, 13);
+            }
             displayDataMap_[cdi->getUInt32(i, cdiL ? (*cdiL)["ID"] : 0)] = data;
         }
         LOG_INFO("Loaded ", displayDataMap_.size(), " display→model mappings");
@@ -2800,6 +2810,11 @@ float EntitySpawner::creatureDisplayScale(uint32_t displayId) const {
     return it != displayDataMap_.end() ? it->second.displayScale : 1.0f;
 }
 
+uint32_t EntitySpawner::creatureDisplayParticleColor(uint32_t displayId) const {
+    auto it = displayDataMap_.find(displayId);
+    return it != displayDataMap_.end() ? it->second.particleColorId : 0u;
+}
+
 void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float x, float y, float z, float orientation, float scale) {
     if (!renderer_ || !renderer_->getCharacterRenderer() || !assetManager_) return;
 
@@ -2937,6 +2952,8 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
         LOG_WARNING("Failed to create creature instance for guid 0x", std::hex, guid, std::dec);
         return;
     }
+    // The display's particle colours (stock 0x4F20C0 -> 0x4EA9E0).
+    charRenderer->setInstanceParticleColor(instanceId, creatureDisplayParticleColor(displayId));
 
     // Per-instance hair, skin and head-detail overrides. These run for every
     // NPC, cached model or not, so two NPCs sharing a model still get their own

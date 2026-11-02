@@ -845,10 +845,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
     // random stream and scratch (ParticleWorker). WOWEE_PARTICLE_LEGACY=1
     // runs the second pass on this thread, with the first worker.
     ++particleFrame_;
-    constexpr float kParticleViewPad = 30.0f;   // = renderM2Particles' pad
-    constexpr float kParticleSleepPad = 60.0f;  // wake at 30, sleep beyond 60
     constexpr float kParticleWarmWindow = 3600.0f;  // "since forever": capped at each lifespan
-    enum : uint8_t { kWorkStep, kWorkWake, kWorkRibbonsOnly };
     static const bool kParticleLegacy = envFlagEnabled("WOWEE_PARTICLE_LEGACY");
     uint64_t particlesFull = 0, particlesDormant = 0, particlesLive = 0;
     particleWork_.clear();
@@ -857,52 +854,15 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
     for (size_t idx : particleInstanceIndices_) {
         if (idx >= instances.size()) continue;
         auto& instance = instances[idx];
+        // Posed by their owners and stepped after them (updatePosedEmitters).
+        if (instance.posedExternally) continue;
         advanceClock(instance);
         if (!instance.cachedModel) continue;
         const M2ModelGPU& pmodel = *instance.cachedModel;
-        glm::vec3 toCam = instance.position - cachedCamPos_;
-        float distSq = glm::dot(toCam, toCam);
-        const bool keepStepping = instance.spellVisual || instance.emissionStopped;
-        const bool inRange = distSq <= (keepStepping ? cachedMaxRenderDistSq_
-                                                     : particleRangeSq(instance, pmodel));
-        uint8_t mode = kWorkStep;
-        // Out of range nothing steps, ribbons included, and an edge left
-        // there would never age out: it stayed drawn where it was laid, and
-        // the trail resumed from it when its carrier came back into range -
-        // a line from wherever that had been. The trail starts over instead.
-        if (!inRange && !instance.ribbonEdges.empty()) resetRibbons(instance);
-        if (keepStepping) {
-            if (!inRange) continue;
-            instance.particlesDormant = false;
-            ++particlesFull;
-        } else {
-            const bool inView = inRange &&
-                (instance.cachedPaddedRadius <= 0.0f ||
-                 updateFrustum.intersectsSphere(instance.cachedCullCenter,
-                     instance.cachedPaddedRadius +
-                     (instance.particlesDormant ? kParticleViewPad : kParticleSleepPad)));
-            if (!inView) {
-                if (!instance.particlesDormant) {
-                    instance.particles.clear();  // keeps capacity for the wake
-                    instance.particlesDormant = true;
-                    instance.particleDtDebt = 0.0f;
-                }
-                instance.particleDtDebt += deltaTime;
-                ++particlesDormant;
-                // Out of range is as before: no ribbon step either.
-                if (!inRange) continue;
-                // Nothing to step, but ribbons still run (see below).
-                if (pmodel.ribbonEmitters.empty()) continue;
-                mode = kWorkRibbonsOnly;
-            } else if (instance.particlesDormant) {
-                instance.particlesDormant = false;
-                instance.particleDtDebt = 0.0f;
-                mode = kWorkWake;
-                ++particlesFull;
-            } else {
-                ++particlesFull;
-            }
-        }
+        const ParticleWorkMode mode = classifyParticleWork(instance, pmodel, updateFrustum, deltaTime);
+        if (instance.particlesDormant) ++particlesDormant;
+        if (mode == kWorkStep || mode == kWorkWake) ++particlesFull;
+        if (mode == kWorkSkip) continue;
         if (mode != kWorkRibbonsOnly) ensureParticleCurves(pmodel);
         // About one unit per live particle; an emitter's setup and a wake's
         // standing population are guesses, which is all the split needs.
@@ -3520,6 +3480,170 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                             "still is one of these crossing the light-space cull.");
             }
         }
+    }
+}
+
+M2Renderer::ParticleWorkMode M2Renderer::classifyParticleWork(M2Instance& instance,
+                                                              const M2ModelGPU& pmodel,
+                                                              const Frustum& frustum,
+                                                              float deltaTime) {
+    constexpr float kParticleViewPad = 30.0f;   // = renderM2Particles' pad
+    constexpr float kParticleSleepPad = 60.0f;  // wake at 30, sleep beyond 60
+    const glm::vec3 toCam = instance.position - cachedCamPos_;
+    const float distSq = glm::dot(toCam, toCam);
+    const bool keepStepping = instance.spellVisual || instance.emissionStopped;
+    const bool inRange = distSq <= (keepStepping ? cachedMaxRenderDistSq_
+                                                 : particleRangeSq(instance, pmodel));
+    // Out of range nothing steps, ribbons included, and an edge left
+    // there would never age out: it stayed drawn where it was laid, and
+    // the trail resumed from it when its carrier came back into range -
+    // a line from wherever that had been. The trail starts over instead.
+    if (!inRange && !instance.ribbonEdges.empty()) resetRibbons(instance);
+    if (keepStepping) {
+        if (!inRange) return kWorkSkip;
+        instance.particlesDormant = false;
+        return kWorkStep;
+    }
+    const bool inView = inRange &&
+        (instance.cachedPaddedRadius <= 0.0f ||
+         frustum.intersectsSphere(instance.cachedCullCenter,
+             instance.cachedPaddedRadius +
+             (instance.particlesDormant ? kParticleViewPad : kParticleSleepPad)));
+    if (!inView) {
+        if (!instance.particlesDormant) {
+            instance.particles.clear();  // keeps capacity for the wake
+            instance.particlesDormant = true;
+            instance.particleDtDebt = 0.0f;
+        }
+        instance.particleDtDebt += deltaTime;
+        // Out of range is as before: no ribbon step either.
+        if (!inRange) return kWorkSkip;
+        // Nothing to step, but ribbons still run (see below).
+        if (pmodel.ribbonEmitters.empty()) return kWorkSkip;
+        return kWorkRibbonsOnly;
+    }
+    if (instance.particlesDormant) {
+        instance.particlesDormant = false;
+        instance.particleDtDebt = 0.0f;
+        return kWorkWake;
+    }
+    return kWorkStep;
+}
+
+uint32_t M2Renderer::createPosedEmitterInstance(uint32_t modelId) {
+    auto modelIt = models.find(modelId);
+    if (modelIt == models.end()) return 0;
+    const M2ModelGPU& mdl = modelIt->second;
+    if (mdl.particleEmitters.empty() && mdl.ribbonEmitters.empty()) return 0;
+    modelUnusedSince_.erase(modelId);
+
+    M2Instance instance;
+    instance.id = nextInstanceId++;
+    instance.clockStampMs = sceneTimeMs_;
+    instance.modelId = modelId;
+    instance.position = glm::vec3(0.0f);
+    instance.rotation = glm::vec3(0.0f);
+    instance.scale = 1.0f;
+    instance.modelMatrix = glm::mat4(1.0f);
+    instance.invModelMatrix = glm::mat4(1.0f);
+    instance.worldBoundsMin = instance.worldBoundsMax = glm::vec3(0.0f);
+    instance.cachedHasParticleEmitters = true;
+    instance.cachedBoundRadius = mdl.boundRadius;
+    instance.cachedIsValid = false;  // no geometry here: never in the main pass
+    instance.cachedModel = &mdl;
+    instance.posedExternally = true;
+    instance.posedVisible = false;   // until the owner first poses it
+    instance.skipCollision = true;
+    instance.castsShadow = false;
+    instance.recomputeCachedCullFactors();
+
+    instances.push_back(std::move(instance));
+    const size_t idx = instances.size() - 1;
+    particleInstanceIndices_.push_back(idx);
+    instanceIndexById[instances[idx].id] = idx;
+    return instances[idx].id;
+}
+
+bool M2Renderer::setPosedEmitterPose(uint32_t instanceId, const EmitterPose& pose) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) return false;
+    M2Instance& inst = instances[idxIt->second];
+    if (!inst.posedExternally) return false;
+    for (int c = 0; c < 4; ++c)
+        for (int r = 0; r < 4; ++r)
+            if (!std::isfinite(pose.model[c][r])) return true;  // keep last frame's
+    inst.posedVisible = pose.visible;
+    inst.fade = std::clamp(pose.alpha, 0.0f, 1.0f);
+    inst.modelMatrix = pose.model;
+    inst.position = glm::vec3(pose.model[3]);
+    inst.scale = std::max(glm::length(glm::vec3(pose.model[0])), 1e-4f);
+    if (pose.bones) inst.boneMatrices = *pose.bones;
+    const int nSeq = inst.cachedModel ? static_cast<int>(inst.cachedModel->sequences.size()) : 0;
+    inst.currentSequenceIndex = (pose.sequenceIndex >= 0 && pose.sequenceIndex < nSeq) ? pose.sequenceIndex : 0;
+    inst.animTime = pose.animTimeMs;
+    inst.globalSequenceTime = pose.globalSeqTimeMs;
+    inst.clockStampMs = sceneTimeMs_;  // advanceClock adds nothing to the owner's clocks
+    // Range and view from the owner's bounds, as the owner is culled.
+    inst.cachedCullCenter = pose.cullCenter;
+    inst.cachedVisualRadius = pose.cullRadius;
+    inst.cachedPaddedRadius = std::max(pose.cullRadius * rendering::M2_PADDED_RADIUS_SCALE,
+                                       pose.cullRadius + rendering::M2_PADDED_RADIUS_MIN_MARGIN);
+    return true;
+}
+
+void M2Renderer::setInstanceParticleColors(uint32_t instanceId,
+                                           const m2_particle::ParticleColorOverride* colors) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) return;
+    M2Instance& inst = instances[idxIt->second];
+    inst.particleCurveOverride.reset();
+    if (!colors || !inst.cachedModel) return;
+    const M2ModelGPU& gpu = *inst.cachedModel;
+    // Only a model with an emitter on 11-13 changes; the rest keep theirs.
+    bool touched = false;
+    for (const auto& em : gpu.particleEmitters)
+        if (m2_particle::particleColorSlot(colors, em)) touched = true;
+    if (!touched) return;
+    ParticleColorKey key;
+    key.modelId = inst.modelId;
+    for (int i = 0; i < 3; ++i)
+        for (int k = 0; k < 3; ++k)
+            for (int c = 0; c < 3; ++c) key.rgb[static_cast<size_t>((i * 3 + k) * 3 + c)] = colors->colors[i][k][c];
+    auto& curves = particleColorCurves_[key];
+    if (!curves) {
+        auto built = std::make_shared<std::vector<glm::vec4>>(gpu.particleEmitters.size() * m2_particle::kCurveVec4s);
+        for (size_t e = 0; e < gpu.particleEmitters.size(); ++e)
+            m2_particle::packCurve(gpu.particleEmitters[e], built->data() + e * m2_particle::kCurveVec4s, colors);
+        curves = std::move(built);
+    }
+    inst.particleCurveOverride = curves;
+}
+
+void M2Renderer::updatePosedEmitters(float deltaTime) {
+    if (!(deltaTime > 0.0f)) return;
+    constexpr float kParticleWarmWindow = 3600.0f;  // as update(): capped at each lifespan
+    if (particleWorkers_.empty()) particleWorkers_.emplace_back(123u);
+    ParticleWorker& worker = particleWorkers_[0];
+    for (size_t idx : particleInstanceIndices_) {
+        if (idx >= instances.size()) continue;
+        M2Instance& inst = instances[idx];
+        if (!inst.posedExternally || !inst.cachedModel) continue;
+        const M2ModelGPU& pmodel = *inst.cachedModel;
+        // The owner is not drawn (hidden, despawning, first person): stock
+        // has no model to step, so nothing is left behind or kept.
+        if (!inst.posedVisible) {
+            inst.particles.clear();
+            if (!inst.ribbonEdges.empty()) resetRibbons(inst);
+            inst.particlesDormant = true;
+            inst.particleDtDebt = 0.0f;
+            continue;
+        }
+        const ParticleWorkMode mode = classifyParticleWork(inst, pmodel, cachedFrustum_, deltaTime);
+        if (mode == kWorkSkip) continue;
+        if (mode != kWorkRibbonsOnly) ensureParticleCurves(pmodel);
+        if (mode == kWorkStep) stepParticles(inst, pmodel, deltaTime, worker);
+        else if (mode == kWorkWake) stepParticles(inst, pmodel, kParticleWarmWindow, worker);
+        if (!pmodel.ribbonEmitters.empty()) updateRibbons(inst, pmodel, deltaTime);
     }
 }
 

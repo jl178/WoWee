@@ -10,11 +10,14 @@
 #include "pipeline/grass_clearing.hpp"
 #include "rendering/m2_model_classifier.hpp"
 #include "rendering/m2_particle_step.hpp"
+#include "rendering/m2_particle_look.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
+#include <array>
 #include <atomic>
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -466,6 +469,20 @@ struct alignas(64) M2Instance {
     /// end waits on them; a placed doodad that merely looks like an effect -
     /// a glowing mushroom, a wisp - is ranged by its size like the rest.
     bool spellVisual = false;
+    /// The emitters of a model another renderer draws: a creature, a player,
+    /// or an item on one (CharacterRenderer). It has no geometry here; its
+    /// owner hands it the model matrix, bones and clocks each frame
+    /// (setPosedEmitterPose) and M2Renderer only steps and draws its
+    /// particles and ribbons (updatePosedEmitters), so the stock emitter code
+    /// serves every model as CM2Model does. Kept out of every list but the
+    /// particle one: no animation, collision, shadow, light or grid entry.
+    bool posedExternally = false;
+    /// Its owner is drawn: when not, its particles and trails are dropped.
+    bool posedVisible = false;
+    /// The curves with a ParticleColor.dbc override applied, shared by every
+    /// instance of the model with the same colours; null for the model's own
+    /// (see setInstanceParticleColors).
+    std::shared_ptr<const std::vector<glm::vec4>> particleCurveOverride;
 
     // Ribbon emitter state (CRibbonEmitter, 0x97F940 / 0x980090).
     struct RibbonEdge {
@@ -569,6 +586,7 @@ static_assert(offsetof(M2Instance, groundNormalFlags) + sizeof(int32_t) <= 192);
 /// under a detail path that ships its own collision mesh stays filed: the
 /// floor query honours authored collision whatever the classifier says.
 inline bool m2GridHolds(const M2Instance& inst) {
+    if (inst.posedExternally) return false;  // emitters only: nothing to collide with
     return !inst.cachedIsGroundDetail ||
            (inst.cachedModel != nullptr && inst.cachedModel->collision.valid());
 }
@@ -782,6 +800,36 @@ public:
     void markInstanceSpellVisual(uint32_t instanceId);
     /// Whether any particle or ribbon edge of the instance is still alive.
     [[nodiscard]] bool instanceHasLiveParticles(uint32_t instanceId) const;
+
+    /// What the owner of a posed emitter instance (M2Instance::posedExternally)
+    /// says about it each frame.
+    struct EmitterPose {
+        glm::mat4 model{1.0f};                       // the owner's model matrix
+        const std::vector<glm::mat4>* bones = nullptr;  // its bone palette
+        int sequenceIndex = 0;                       // the sequence it plays
+        float animTimeMs = 0.0f;
+        float globalSeqTimeMs = 0.0f;
+        float alpha = 1.0f;                          // model alpha (particles x this)
+        bool visible = true;                         // drawn at all
+        glm::vec3 cullCenter{0.0f};                  // its bounds, for range and view
+        float cullRadius = 0.0f;
+    };
+    /// An instance that carries only the emitters of a model loaded here
+    /// (geometry stripped) and is posed by its owner; 0 when the model has no
+    /// emitters or ribbons, or is not loaded.
+    uint32_t createPosedEmitterInstance(uint32_t modelId);
+    /// False when the instance is gone (a renderer-wide clear): the owner
+    /// makes a new one.
+    bool setPosedEmitterPose(uint32_t instanceId, const EmitterPose& pose);
+    /// ParticleColor.dbc colours for the instance's emitters on colour index
+    /// 11-13 (stock CM2Model::SetParticleColor, 0x825410); null restores the
+    /// model's own.
+    void setInstanceParticleColors(uint32_t instanceId,
+                                   const m2_particle::ParticleColorOverride* colors);
+    /// Steps the posed emitter instances, after their owners posed them for
+    /// this frame and after update(): on the calling thread, never alongside
+    /// update().
+    void updatePosedEmitters(float deltaTime);
     /// Take the light off whatever has it, whichever instance that was.
     void clearInstanceHighlights();
     /// Set the animation sequence by animation ID (e.g. anim::OPEN, anim::CLOSE).
@@ -1619,6 +1667,21 @@ private:
     /// scene's range, cut down to what is big enough on screen to see.
     float particleRangeSq(const M2Instance& inst, const M2ModelGPU& model) const;
     std::vector<size_t> particleDrawOrder_;          // this frame's drawable emitters, near ones first
+    /// What an emitter instance does this frame: step, wake (warm up), step
+    /// its ribbons only, or nothing (out of range). Moves it in and out of
+    /// dormancy; shared by update() and updatePosedEmitters().
+    enum ParticleWorkMode : uint8_t { kWorkStep, kWorkWake, kWorkRibbonsOnly, kWorkSkip };
+    ParticleWorkMode classifyParticleWork(M2Instance& inst, const M2ModelGPU& model,
+                                          const Frustum& frustum, float deltaTime);
+    /// Override curves by model and colours (setInstanceParticleColors).
+    struct ParticleColorKey {
+        uint32_t modelId = 0;
+        std::array<float, 27> rgb{};
+        bool operator<(const ParticleColorKey& o) const {
+            return modelId != o.modelId ? modelId < o.modelId : rgb < o.rgb;
+        }
+    };
+    std::map<ParticleColorKey, std::shared_ptr<const std::vector<glm::vec4>>> particleColorCurves_;
 
     // Smoke particle system
     std::vector<SmokeParticle> smokeParticles;
