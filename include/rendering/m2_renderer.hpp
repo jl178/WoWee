@@ -9,6 +9,7 @@
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/grass_clearing.hpp"
 #include "rendering/m2_model_classifier.hpp"
+#include "rendering/m2_particle_step.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
@@ -248,6 +249,14 @@ struct M2ModelGPU {
         float scale[kSteps + 1];
     };
     mutable std::vector<ParticleCurve> particleCurves;
+    /// Each emitter's float tracks, classified once per model alongside the
+    /// curves, so the per-frame setup skips the key search for the constant
+    /// ones (see m2_particle::TrackConst).
+    struct ParticleTracks {
+        m2_particle::TrackConst rate, life, speed, speedVar, vRange, hRange,
+                                gravity, areaL, areaW;
+    };
+    mutable std::vector<ParticleTracks> particleTracks;
 
     // Ribbon emitter data (kept from M2Model)
     std::vector<pipeline::M2RibbonEmitter> ribbonEmitters;
@@ -262,22 +271,24 @@ struct M2ModelGPU {
     [[nodiscard]] bool isValid() const { return vertexBuffer != VK_NULL_HANDLE && indexCount > 0; }
 };
 
-/**
- * A single M2 particle emitted from a particle emitter
- */
+/// A single M2 particle emitted from a particle emitter.
+///
+/// 48 bytes, down from 68: the step reads and writes every live particle each
+/// frame. Emitter flag 0x10 ("do not trail") particles are simulated in the
+/// emitter bone's frame and placed through the bone each step, so they turn
+/// with it; for those, velocity is in the bone's frame and localPos is the
+/// position there. Nothing reads a world velocity for them, and whether a
+/// particle follows its emitter is the emitter's flag, not the particle's.
 struct M2Particle {
-    glm::vec3 position;
-    glm::vec3 velocity;
-    float life;        // current age in seconds
-    float maxLife;     // total lifespan
-    int emitterIndex;  // which emitter spawned this
-    float tileIndex = 0.0f; // texture atlas tile index
-    // Emitter flag 0x10 ("do not trail"): simulated in the emitter bone's
-    // frame and placed through the bone each step, so it turns with it.
-    bool followsEmitter = false;
-    glm::vec3 localPos{0.0f};
-    glm::vec3 localVel{0.0f};
+    glm::vec3 position;         // world
+    float life;                 // current age in seconds
+    glm::vec3 velocity;         // world, or bone frame for "do not trail"
+    float maxLife;              // total lifespan
+    glm::vec3 localPos{0.0f};   // bone frame, "do not trail" only
+    uint16_t emitterIndex = 0;  // which emitter spawned this
+    uint16_t tileIndex = 0;     // texture atlas tile index
 };
+static_assert(sizeof(M2Particle) == 48);
 
 /**
  * Instance of an M2 model in the world
@@ -1493,6 +1504,10 @@ private:
         /// Generation bumps by source (ShadowGenSource).
         uint64_t shadowGenBumps[6] = {};
         uint64_t particleFull = 0, particleDormant = 0, particleLive = 0;
+        /// The particle loop's first pass (clocks, range, view), and how
+        /// many threads its second pass ran on, summed over frames.
+        double particleClassifyMs = 0.0;
+        uint64_t particleThreads = 0;
         double queryMs = 0.0;
         uint64_t queryCalls = 0;
         uint32_t frames = 0;
@@ -1503,6 +1518,8 @@ private:
     /// Particle vertices the last particle pass wrote; written by the render
     /// worker, read by the update's profile line.
     std::atomic<uint32_t> particleVertsDrawn_{0};
+    /// Draw runs (texture group changes) the particle pass made last frame.
+    std::atomic<uint32_t> particleRunsDrawn_{0};
     std::vector<std::future<void>> animFutures_; // Reused each frame
     bool spatialIndexDirty_ = false;
 
@@ -1590,14 +1607,6 @@ private:
                       const std::vector<uint32_t>& globalSeqDurations);
     float interpFBlockFloat(const pipeline::M2FBlock& fb, float lifeRatio);
     glm::vec3 interpFBlockVec3(const pipeline::M2FBlock& fb, float lifeRatio);
-    /// Spawns what the emitters released over the last dt seconds, each
-    /// particle aged by how long ago in that window it was born. A long dt
-    /// is a warm-up: an emitter coming back into view after lying dormant
-    /// gets its standing population in one call (see M2Renderer::update).
-    void emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt);
-    void updateParticles(M2Instance& inst, float dt);
-    /// Builds gpu.particleCurves once per model; see M2ModelGPU::ParticleCurve.
-    void ensureParticleCurves(const M2ModelGPU& gpu);
     /// Per-emitter values the particle step needs, filled once per instance
     /// step rather than per particle; reused so the step never allocates.
     struct ParticleStepEmitter {
@@ -1605,8 +1614,48 @@ private:
         float gravity = 0.0f;
         float dragFactor = 1.0f; // exp(-drag * dt)
         float drag = 0.0f;
+        bool noTrail = false;    // kParticleFlagNoTrail
     };
     std::vector<ParticleStepEmitter> particleStepScratch_;
+    /// What one thread of the particle step owns: its own random stream,
+    /// emitter scratch and birth list. Instances are independent, so the
+    /// emitter list is split across threads and each runs its share with
+    /// one of these; stream t is seeded 123 + t (stream 0 is the seed the
+    /// single-threaded step has always used).
+    struct ParticleWorker {
+        std::mt19937 rng;
+        std::vector<ParticleStepEmitter> ems;
+        std::vector<M2Particle> births;
+        explicit ParticleWorker(uint32_t seed) : rng(seed) {}
+    };
+    std::vector<ParticleWorker> particleWorkers_;
+    /// The particle loop's per-frame lists; see M2Renderer::update.
+    struct ParticleWork {
+        uint32_t idx;
+        uint8_t mode;  // ParticleWorkMode
+    };
+    std::vector<ParticleWork> particleWork_;
+    std::vector<uint32_t> particleWorkWeight_;
+    std::vector<size_t> particleWorkBounds_;
+    std::vector<std::future<void>> particleFutures_;
+    /// Spawns what the emitters released over the last dt seconds, each
+    /// particle aged by how long ago in that window it was born. A long dt
+    /// is a warm-up: an emitter coming back into view after lying dormant
+    /// gets its standing population in one call (see M2Renderer::update).
+    ///
+    /// With a worker, the births go to its list and are merged in after the
+    /// last particle of their own emitter, the random draws come from its
+    /// stream and the tracks are read through gpu.particleTracks. Without
+    /// one (WOWEE_PARTICLE_LEGACY=1) it is the single-threaded step as it was.
+    void emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt,
+                       ParticleWorker* worker = nullptr);
+    /// Steps the live particles. With a worker the survivors keep their order
+    /// (m2_particle::stepAndCompact); without one, swap-and-pop as before.
+    void updateParticles(M2Instance& inst, float dt, ParticleWorker* worker = nullptr);
+    /// Builds gpu.particleCurves and gpu.particleTracks once per model; see
+    /// M2ModelGPU::ParticleCurve. Not thread-safe: the update calls it for
+    /// every emitter it will step before the step is split across threads.
+    void ensureParticleCurves(const M2ModelGPU& gpu);
     void updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt);
 
     // Helper to allocate descriptor sets

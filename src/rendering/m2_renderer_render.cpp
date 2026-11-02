@@ -23,6 +23,7 @@
 #include "pipeline/blp_loader.hpp"
 #include "core/logger.hpp"
 #include "core/profiler.hpp"
+#include <array>
 #include <atomic>
 #include <bit>
 #include <chrono>
@@ -796,8 +797,8 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
     }
 
     const profClock::time_point profParticlesStart = updateProfile ? profClock::now() : profClock::time_point{};
-    // Particle update (sequential - uses RNG, not thread-safe)
-    // Only iterate instances that have particle emitters (pre-built list).
+    // Particle update. Only iterate instances that have particle emitters
+    // (pre-built list).
     //
     // An emitter the particle pass will not draw - out of range, or outside
     // the frustum padded as that pass pads it - is dormant: its particles are
@@ -816,11 +817,26 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
     //
     // Spell visuals (kits, missiles) and emitters told to stop are left as they were, stepped
     // whenever in range: a kit's end is timed by its live particles.
+    //
+    // Two passes. The first, on this thread, does everything that decides
+    // what each instance does this frame - clocks, range, view, dormancy -
+    // and builds the per-model tables the step reads (ensureParticleCurves),
+    // which instances of one model share. The second runs the steps, which
+    // touch nothing outside their own instance, split across threads by
+    // weight (about one unit per live particle), each thread with its own
+    // random stream and scratch (ParticleWorker). WOWEE_PARTICLE_LEGACY=1
+    // runs the second pass on this thread with the old step: swap-and-pop
+    // removal, births pushed straight on, the renderer's single stream.
     ++particleFrame_;
     constexpr float kParticleViewPad = 30.0f;   // = renderM2Particles' pad
     constexpr float kParticleSleepPad = 60.0f;  // wake at 30, sleep beyond 60
     constexpr float kParticleWarmWindow = 3600.0f;  // "since forever": capped at each lifespan
+    enum : uint8_t { kWorkStep, kWorkWake, kWorkRibbonsOnly };
+    static const bool kParticleLegacy = envFlagEnabled("WOWEE_PARTICLE_LEGACY");
     uint64_t particlesFull = 0, particlesDormant = 0, particlesLive = 0;
+    particleWork_.clear();
+    particleWorkWeight_.clear();
+    uint64_t particleWeight = 0;
     for (size_t idx : particleInstanceIndices_) {
         if (idx >= instances.size()) continue;
         auto& instance = instances[idx];
@@ -832,11 +848,10 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         const bool keepStepping = instance.spellVisual || instance.emissionStopped;
         const bool inRange = distSq <= (keepStepping ? cachedMaxRenderDistSq_
                                                      : particleRangeSq(instance, pmodel));
+        uint8_t mode = kWorkStep;
         if (keepStepping) {
             if (!inRange) continue;
             instance.particlesDormant = false;
-            updateParticles(instance, deltaTime);
-            emitParticles(instance, pmodel, deltaTime);
             ++particlesFull;
         } else {
             const bool inView = inRange &&
@@ -854,24 +869,92 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
                 ++particlesDormant;
                 // Out of range is as before: no ribbon step either.
                 if (!inRange) continue;
+                // Nothing to step, but ribbons still run (see below).
+                if (pmodel.ribbonEmitters.empty()) continue;
+                mode = kWorkRibbonsOnly;
             } else if (instance.particlesDormant) {
                 instance.particlesDormant = false;
                 instance.particleDtDebt = 0.0f;
-                emitParticles(instance, pmodel, kParticleWarmWindow);
+                mode = kWorkWake;
                 ++particlesFull;
             } else {
-                // Step the living, then add what was born during the step,
-                // each already aged by its share of it.
-                updateParticles(instance, deltaTime);
-                emitParticles(instance, pmodel, deltaTime);
                 ++particlesFull;
             }
         }
-        particlesLive += instance.particles.size();
-        // Ribbons every frame: a trail stepped in leaps lays its edges down in
-        // clumps on one spot, and there are few of them.
-        if (!pmodel.ribbonEmitters.empty()) {
-            updateRibbons(instance, pmodel, deltaTime);
+        if (mode != kWorkRibbonsOnly) ensureParticleCurves(pmodel);
+        // About one unit per live particle; an emitter's setup and a wake's
+        // standing population are guesses, which is all the split needs.
+        const uint32_t emitters = static_cast<uint32_t>(pmodel.particleEmitters.size());
+        const uint32_t weight = static_cast<uint32_t>(instance.particles.size()) +
+                                16u * emitters + (mode == kWorkWake ? 64u * emitters : 0u) +
+                                8u * static_cast<uint32_t>(pmodel.ribbonEmitters.size());
+        particleWork_.push_back({.idx = static_cast<uint32_t>(idx), .mode = mode});
+        particleWorkWeight_.push_back(weight);
+        particleWeight += weight;
+    }
+    if (updateProfile) {
+        updateProf_.particleClassifyMs += std::chrono::duration<double, std::milli>(
+            profClock::now() - profParticlesStart).count();
+    }
+    // Steps particleWork_[begin, end); returns the live particles left.
+    const auto runParticleWork = [&](size_t begin, size_t end, ParticleWorker* worker) {
+        uint64_t live = 0;
+        for (size_t j = begin; j < end; ++j) {
+            const ParticleWork& work = particleWork_[j];
+            auto& instance = instances[work.idx];
+            const M2ModelGPU& pmodel = *instance.cachedModel;
+            if (work.mode == kWorkStep) {
+                // Step the living, then add what was born during the step,
+                // each already aged by its share of it.
+                updateParticles(instance, deltaTime, worker);
+                emitParticles(instance, pmodel, deltaTime, worker);
+            } else if (work.mode == kWorkWake) {
+                emitParticles(instance, pmodel, kParticleWarmWindow, worker);
+            }
+            live += instance.particles.size();
+            // Ribbons every frame: a trail stepped in leaps lays its edges down in
+            // clumps on one spot, and there are few of them.
+            if (!pmodel.ribbonEmitters.empty()) {
+                updateRibbons(instance, pmodel, deltaTime);
+            }
+        }
+        return live;
+    };
+    if (kParticleLegacy) {
+        particlesLive = runParticleWork(0, particleWork_.size(), nullptr);
+        ++updateProf_.particleThreads;
+    } else {
+        // Two threads by default: the step is a fraction of a millisecond, and
+        // each extra thread costs a pool hand-off and a wait.
+        static const size_t kParticleThreads = std::clamp<size_t>(
+            envSizeOrDefault("WOWEE_PARTICLE_THREADS", 2), 1, 8);
+        static const size_t kParticleMtMinWeight = envSizeOrDefault("WOWEE_PARTICLE_MT_MIN", 2048);
+        const size_t numThreads = (particleWeight >= kParticleMtMinWeight) ? kParticleThreads : 1;
+        updateProf_.particleThreads += numThreads;
+        while (particleWorkers_.size() < numThreads) {
+            particleWorkers_.emplace_back(123u + static_cast<uint32_t>(particleWorkers_.size()));
+        }
+        if (numThreads <= 1) {
+            particlesLive = runParticleWork(0, particleWork_.size(), &particleWorkers_[0]);
+        } else {
+            m2_particle::splitByWeight(particleWorkWeight_, numThreads, particleWorkBounds_);
+            std::array<uint64_t, 8> liveBy{};  // kParticleThreads is at most 8
+            particleFutures_.clear();
+            // All but the last share go to the pool; the last runs here, so
+            // this call makes progress even when it runs on a pool worker.
+            for (size_t t = 0; t + 1 < numThreads; ++t) {
+                const size_t b = particleWorkBounds_[t], e = particleWorkBounds_[t + 1];
+                if (b == e) continue;
+                particleFutures_.push_back(core::ThreadPool::frameWorkers().submit(
+                    [&runParticleWork, &liveBy, this, t, b, e]() {
+                        liveBy[t] = runParticleWork(b, e, &particleWorkers_[t]);
+                    }));
+            }
+            const size_t last = numThreads - 1;
+            liveBy[last] = runParticleWork(particleWorkBounds_[last], particleWorkBounds_[last + 1],
+                                           &particleWorkers_[last]);
+            for (auto& f : particleFutures_) f.get();
+            for (uint64_t live : liveBy) particlesLive += live;
         }
     }
     updateProf_.particleFull += particlesFull;
@@ -948,7 +1031,10 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
                         p.particleDormant / p.frames, " dormant (off screen or out of range, none live), ",
                         p.particleLive / p.frames, " live particles, ",
                         particleVertsDrawn_.load(std::memory_order_relaxed),
-                        " drawn last frame");
+                        " drawn in ", particleRunsDrawn_.load(std::memory_order_relaxed),
+                        " draw runs last frame; first pass ", p.particleClassifyMs / n,
+                        "ms, step on ", static_cast<double>(p.particleThreads) / n,
+                        " threads", kParticleLegacy ? " (legacy step)" : "");
             // Which models those emitters belong to: the six most numerous -
             // a count in the thousands is a placed doodad (lamps, fireflies,
             // lava), not spell effects - and the six with the most particles
