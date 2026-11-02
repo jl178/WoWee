@@ -535,3 +535,4 @@ Other fixes:
 - `0f8f947`: near tiles migrate into terrain mega slots, and there are now 128 slots. Teleport chain: 0 near chunks on fallback buffers (was 6.6k-13.3k).
 - Tour, rest of the stops: Un'Goro 134 fps, Borean Tundra 88, Dalaran 64. No crashes in Outland or Northrend.
 - Found: Hellfire Peninsula at 32 fps, with update/pre/camera at 24 ms/frame. perf shows M2Renderer::getFloorHeight at 34% (large M2 collision meshes searched linearly). Agent working on it.
+- `25eb1b7`: collision no longer scans all M2/WMO instances when the grid answer is empty. Hellfire Peninsula: camera 24 -> 0.03 ms; 32 -> 133.5 fps.
