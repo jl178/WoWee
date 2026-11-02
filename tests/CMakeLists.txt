@@ -1227,6 +1227,12 @@ wowee_add_test(test_m2_track_cursor
 wowee_add_test(test_m2_particle_step
     SOURCES test_m2_particle_step.cpp)
 
+# ── test_m2_particle_look ────────────────────────────────────
+# The compact particle record: the shader's colour, alpha and size from the
+# packed curve against the CPU path's, and the tile packing.
+wowee_add_test(test_m2_particle_look
+    SOURCES test_m2_particle_look.cpp)
+
 # ── test_rt_bvh ──────────────────────────────────────────────
 # The hierarchy the software ray tracer walks, against a brute-force scan.
 wowee_add_test(test_rt_bvh

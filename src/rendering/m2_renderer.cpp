@@ -6,6 +6,7 @@
 #include "core/env_flag.hpp"
 #include "rendering/m2_renderer_internal.h"
 #include "rendering/m2_blend_mode.hpp"
+#include "rendering/m2_particle_look.hpp"
 #include "pipeline/model_bounds.hpp"
 #include "rendering/render_constants.hpp"
 #include "rendering/m2_model_classifier.hpp"
@@ -316,12 +317,13 @@ bool M2Renderer::buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout) {
 
     // --- Load shaders ---
     rendering::VkShaderModule m2Vert, m2Frag;
-    rendering::VkShaderModule particleVert, particleFrag;
+    rendering::VkShaderModule particleVert, particleFrag, particleGpuVert;
     rendering::VkShaderModule smokeVert, smokeFrag;
 
     (void)m2Vert.loadFromFile(device, "assets/shaders/m2.vert.spv");
     (void)m2Frag.loadFromFile(device, "assets/shaders/m2.frag.spv");
     (void)particleVert.loadFromFile(device, "assets/shaders/m2_particle.vert.spv");
+    (void)particleGpuVert.loadFromFile(device, "assets/shaders/m2_particle_gpu.vert.spv");
     (void)particleFrag.loadFromFile(device, "assets/shaders/m2_particle.frag.spv");
     (void)smokeVert.loadFromFile(device, "assets/shaders/m2_smoke.vert.spv");
     (void)smokeFrag.loadFromFile(device, "assets/shaders/m2_smoke.frag.spv");
@@ -439,6 +441,40 @@ bool M2Renderer::buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout) {
 
         particlePipeline_ = buildParticlePipeline(PipelineBuilder::blendAlpha());
         particleAdditivePipeline_ = buildParticlePipeline(PipelineBuilder::blendAdditive());
+
+        // The compact-record pipelines: the same points, fragment shader and
+        // state, fed one m2_particle::ParticleRecord per particle; the vertex
+        // shader works out colour, alpha and size from the curve buffer.
+        if (particleGpuVert.isValid() && particleGpuPipelineLayout_) {
+            static_assert(sizeof(m2_particle::ParticleRecord) == 24);
+            VkVertexInputBindingDescription gBind{};
+            gBind.binding = 0;
+            gBind.stride = sizeof(m2_particle::ParticleRecord);
+            gBind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+            std::vector<VkVertexInputAttributeDescription> gAttrs = {
+                {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0},   // position
+                {.location = 1, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 12},        // life ratio
+                {.location = 2, .binding = 0, .format = VK_FORMAT_R32_UINT, .offset = 16},          // curve base
+                {.location = 3, .binding = 0, .format = VK_FORMAT_R32_UINT, .offset = 20},          // tile + flags
+            };
+            auto buildGpuPipeline = [&](VkPipelineColorBlendAttachmentState blend) -> VkPipeline {
+                return PipelineBuilder()
+                    .setShaders(particleGpuVert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
+                                particleFrag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+                    .setVertexInput({gBind}, gAttrs)
+                    .setTopology(VK_PRIMITIVE_TOPOLOGY_POINT_LIST)
+                    .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+                    .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
+                    .setColorBlendAttachment(blend)
+                    .setMultisample(vkCtx_->getMsaaSamples())
+                    .setLayout(particleGpuPipelineLayout_)
+                    .setRenderPass(mainPass)
+                    .setDynamicStates(viewportAndScissorDynamic())
+                    .build(device, vkCtx_->getPipelineCache());
+            };
+            particleGpuPipeline_ = buildGpuPipeline(PipelineBuilder::blendAlpha());
+            particleGpuAdditivePipeline_ = buildGpuPipeline(PipelineBuilder::blendAdditive());
+        }
     }
 
     // --- Build smoke pipeline ---
@@ -1002,6 +1038,14 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         ci.pushConstantRangeCount = 1;
         ci.pPushConstantRanges = &pushRange;
         vkCreatePipelineLayout(device, &ci, nullptr, &particlePipelineLayout_);
+
+        // The compact-record path's layout: the same two sets and push
+        // range, and set 2 for the curve buffer. instanceSetLayout_ is one
+        // vertex-stage storage buffer, which is what that is.
+        VkDescriptorSetLayout gpuLayouts[] = {perFrameLayout, particleTexLayout_, instanceSetLayout_};
+        ci.setLayoutCount = 3;
+        ci.pSetLayouts = gpuLayouts;
+        vkCreatePipelineLayout(device, &ci, nullptr, &particleGpuPipelineLayout_);
     }
 
     // Smoke pipeline layout: set 0 = perFrame
@@ -1044,6 +1088,55 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         bci.size = MAX_M2_PARTICLE_VERTS * 9 * sizeof(float);
         vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &m2ParticleVB_, &m2ParticleVBAlloc_, &allocInfo);
         m2ParticleVBMapped_ = allocInfo.pMappedData;
+
+        // The GPU path's records and curves, one of each per frame in flight
+        // so a frame's writes never land in what the previous frame is still
+        // drawing from.
+        particleRecordBudget_ = static_cast<uint32_t>(core::envIntClamped(
+            "WOWEE_PARTICLE_BUDGET", static_cast<int>(kDefaultParticleRecordBudget), 1024, 262144));
+        const VkDeviceSize curveBytes =
+            VkDeviceSize(kMaxParticleCurvesPerFrame) * m2_particle::kCurveVec4s * sizeof(glm::vec4);
+        VkDescriptorPoolSize curvePoolSize{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 2};
+        VkDescriptorPoolCreateInfo curvePoolCi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        curvePoolCi.maxSets = 2;
+        curvePoolCi.poolSizeCount = 1;
+        curvePoolCi.pPoolSizes = &curvePoolSize;
+        vkCreateDescriptorPool(device, &curvePoolCi, nullptr, &particleCurveDescPool_);
+        for (int i = 0; i < 2; i++) {
+            bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+            bci.size = VkDeviceSize(particleRecordBudget_) * sizeof(m2_particle::ParticleRecord);
+            vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &particleRecordBuf_[i],
+                            &particleRecordAlloc_[i], &allocInfo);
+            particleRecordMapped_[i] = allocInfo.pMappedData;
+
+            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+            bci.size = curveBytes;
+            vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &particleCurveBuf_[i],
+                            &particleCurveAlloc_[i], &allocInfo);
+            particleCurveMapped_[i] = allocInfo.pMappedData;
+
+            if (!particleCurveDescPool_ || !particleCurveBuf_[i]) continue;
+            VkDescriptorSetAllocateInfo setAi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            setAi.descriptorPool = particleCurveDescPool_;
+            setAi.descriptorSetCount = 1;
+            setAi.pSetLayouts = &instanceSetLayout_;
+            if (vkAllocateDescriptorSets(device, &setAi, &particleCurveSet_[i]) != VK_SUCCESS) {
+                particleCurveSet_[i] = VK_NULL_HANDLE;
+                continue;
+            }
+            VkDescriptorBufferInfo bufInfo{};
+            bufInfo.buffer = particleCurveBuf_[i];
+            bufInfo.offset = 0;
+            bufInfo.range = curveBytes;
+            VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            write.dstSet = particleCurveSet_[i];
+            write.dstBinding = 0;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            write.pBufferInfo = &bufInfo;
+            vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        }
+        bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
 
         // Dedicated glow sprite buffer (separate from particle VB to avoid data race)
         bci.size = MAX_GLOW_SPRITES * 9 * sizeof(float);
@@ -1184,6 +1277,14 @@ void M2Renderer::shutdown() {
     destroy(alloc, m2ParticleVB_, m2ParticleVBAlloc_);
     destroy(alloc, glowVB_, glowVBAlloc_);
     destroy(alloc, ribbonVB_, ribbonVBAlloc_);
+    // Particle record and curve buffers (sets freed with their pool)
+    for (int i = 0; i < 2; i++) {
+        destroy(alloc, particleRecordBuf_[i], particleRecordAlloc_[i]);
+        destroy(alloc, particleCurveBuf_[i], particleCurveAlloc_[i]);
+        particleRecordMapped_[i] = particleCurveMapped_[i] = nullptr;
+        particleCurveSet_[i] = VK_NULL_HANDLE;
+    }
+    destroy(device, particleCurveDescPool_);
     smokeParticles.clear();
 
     // Destroy pipelines
@@ -1195,12 +1296,15 @@ void M2Renderer::shutdown() {
     destroyPipeline(additivePipeline_);
     destroyPipeline(particlePipeline_);
     destroyPipeline(particleAdditivePipeline_);
+    destroyPipeline(particleGpuPipeline_);
+    destroyPipeline(particleGpuAdditivePipeline_);
     destroyPipeline(smokePipeline_);
     destroyPipeline(ribbonPipeline_);
     destroyPipeline(ribbonAdditivePipeline_);
 
     destroy(device, pipelineLayout_);
     destroy(device, particlePipelineLayout_);
+    destroy(device, particleGpuPipelineLayout_);
     destroy(device, smokePipelineLayout_);
     destroy(device, ribbonPipelineLayout_);
 
