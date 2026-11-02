@@ -229,9 +229,13 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     if (modelGivesLight(mdlRef)) lightInstanceIndices_.push_back(idx);
     instanceIndexById[instance.id] = idx;
     // The grid is for collision queries, and ground clutter never collides
-    // (collisionNoBlock, as in the stock client); see m2GridHolds.
-    if (m2GridHolds(instance))
+    // (collisionNoBlock, as in the stock client); see m2GridHolds. Appending
+    // moves no other instance, so only a filing changes what gatherCandidates
+    // answers.
+    if (m2GridHolds(instance)) {
         insertBounds(spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
+        noteCandidateLayoutChanged();
+    }
 
     return instance.id;
 }
@@ -338,8 +342,10 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     if (mdl2.isBoat) boatInstanceIndices_.push_back(idx);
     if (modelGivesLight(mdl2)) lightInstanceIndices_.push_back(idx);
     instanceIndexById[instance.id] = idx;
-    if (m2GridHolds(instance))
+    if (m2GridHolds(instance)) {
         insertBounds(spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
+        noteCandidateLayoutChanged();
+    }
 
     return instance.id;
 }

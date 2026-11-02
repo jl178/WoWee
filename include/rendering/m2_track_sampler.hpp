@@ -45,6 +45,46 @@ inline size_t lowerKeyIndex(const std::vector<uint32_t>& timestamps,
     return static_cast<size_t>(upper - timestamps.begin() - 1);
 }
 
+/// lowerKeyIndex, starting from where the last search on this track ended.
+///
+/// A track sampled every frame moves forward by a fraction of a key, so the
+/// answer is almost always the key it was last frame or the one after. Both
+/// are checked before falling back to the binary search, and `cursor` is left
+/// on the answer. For timestamps in order - which is what the format stores
+/// and what the binary search already relies on - the answer is the one
+/// lowerKeyIndex gives: key h is the last key at or before the time exactly
+/// when ts[h] <= t < ts[h + 1] (or h is the last key). The comparisons are made
+/// on the same float conversions, so a time between two keys never rounds to
+/// a different side.
+inline size_t lowerKeyIndexFrom(const std::vector<uint32_t>& timestamps,
+                                size_t keyCount, float timeMs, uint32_t& cursor) {
+    keyCount = std::min(keyCount, timestamps.size());
+    if (keyCount <= 1 || timeMs <= static_cast<float>(timestamps[0])) {
+        cursor = 0;
+        return 0;
+    }
+    const auto isLower = [&](size_t h) {
+        return h < keyCount && !(timeMs < static_cast<float>(timestamps[h])) &&
+               (h + 1 == keyCount || timeMs < static_cast<float>(timestamps[h + 1]));
+    };
+    const size_t h = cursor;
+    if (isLower(h)) return h;
+    if (isLower(h + 1)) {
+        cursor = static_cast<uint32_t>(h + 1);
+        return h + 1;
+    }
+    const size_t lower = lowerKeyIndex(timestamps, keyCount, timeMs);
+    cursor = static_cast<uint32_t>(lower);
+    return lower;
+}
+
+/// The search a sampler makes: from the cursor when there is one.
+inline size_t findLowerKey(const std::vector<uint32_t>& timestamps, size_t keyCount,
+                           float timeMs, uint32_t* cursor) {
+    return cursor ? lowerKeyIndexFrom(timestamps, keyCount, timeMs, *cursor)
+                  : lowerKeyIndex(timestamps, keyCount, timeMs);
+}
+
 inline float interpolationFraction(const pipeline::M2AnimationTrack& track,
                                    const std::vector<uint32_t>& timestamps,
                                    size_t lower, size_t keyCount, float timeMs) {
@@ -84,7 +124,7 @@ inline glm::vec3 sampleVec3(const pipeline::M2AnimationTrack& track,
                             int animationSequenceIndex, float animationTimeMs,
                             float globalTimeMs,
                             const std::vector<uint32_t>& globalSequenceDurations,
-                            const glm::vec3& defaultValue) {
+                            const glm::vec3& defaultValue, uint32_t* cursor = nullptr) {
     const auto sampleTime = resolveTime(track, animationSequenceIndex,
                                         animationTimeMs, globalTimeMs,
                                         globalSequenceDurations);
@@ -99,7 +139,7 @@ inline glm::vec3 sampleVec3(const pipeline::M2AnimationTrack& track,
         return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z)
             ? value : defaultValue;
     };
-    const size_t lower = lowerKeyIndex(keys.timestamps, count, sampleTime.timeMs);
+    const size_t lower = findLowerKey(keys.timestamps, count, sampleTime.timeMs, cursor);
     const float fraction = interpolationFraction(track, keys.timestamps, lower,
                                                  count, sampleTime.timeMs);
     return lower + 1 < count
@@ -110,7 +150,8 @@ inline glm::vec3 sampleVec3(const pipeline::M2AnimationTrack& track,
 inline glm::quat sampleQuat(const pipeline::M2AnimationTrack& track,
                             int animationSequenceIndex, float animationTimeMs,
                             float globalTimeMs,
-                            const std::vector<uint32_t>& globalSequenceDurations) {
+                            const std::vector<uint32_t>& globalSequenceDurations,
+                            uint32_t* cursor = nullptr) {
     const glm::quat identity(1.0f, 0.0f, 0.0f, 0.0f);
     const auto sampleTime = resolveTime(track, animationSequenceIndex,
                                         animationTimeMs, globalTimeMs,
@@ -127,7 +168,7 @@ inline glm::quat sampleQuat(const pipeline::M2AnimationTrack& track,
         return std::isfinite(lengthSquared) && lengthSquared >= 0.000001f
             ? glm::normalize(value) : identity;
     };
-    const size_t lower = lowerKeyIndex(keys.timestamps, count, sampleTime.timeMs);
+    const size_t lower = findLowerKey(keys.timestamps, count, sampleTime.timeMs, cursor);
     const float fraction = interpolationFraction(track, keys.timestamps, lower,
                                                  count, sampleTime.timeMs);
     return lower + 1 < count

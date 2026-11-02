@@ -33,6 +33,7 @@
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/frustum.hpp"
+#include "rendering/anim_cull.hpp"
 #include "rendering/m2_model_classifier.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
@@ -2118,7 +2119,11 @@ void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId,
     // character and creature sequence); a sequence that says 0 gets the same
     // 150 ms so a switch never pops. Needs a pose computed for this skeleton:
     // a fresh instance has nothing to fade from.
-    if (instance.currentSequenceIndex >= 0 &&
+    //
+    // Nor does one the view cull has left unposed (poseStale): its localPose
+    // is from whenever it was last on screen. Nobody sees the switch, and a
+    // pose computed here only to fade from would undo the saving.
+    if (!instance.poseStale && instance.currentSequenceIndex >= 0 &&
         instance.currentSequenceIndex < static_cast<int>(model.sequences.size()) &&
         !model.bones.empty() && instance.localPose.size() == model.bones.size()) {
         const uint32_t blendMs = model.sequences[instance.currentSequenceIndex].blendTime;
@@ -2193,6 +2198,13 @@ bool CharacterRenderer::isDeathLocked(uint32_t instanceId) const {
     return it != instances.end() && it->second.deathLocked;
 }
 
+void CharacterRenderer::setAnimCullView(const glm::mat4& viewProjection,
+                                        const glm::vec3& shadowRayDir) {
+    animCullViewProj_ = viewProjection;
+    animCullShadowDir_ = shadowRayDir;
+    animCullValid_ = true;
+}
+
 void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
     // Distance culling for animation updates in dense areas. The default is the
     // render radius (WOWEE_CHAR_RENDER_RADIUS, 130): at 120 a unit drawn 120-130
@@ -2205,6 +2217,22 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
     // as rendering so a visible bird never holds its last bone pose.
     const float birdUpdateRadius = static_cast<float>(envSizeOrDefault("WOWEE_CHAR_RENDER_RADIUS", 130));
     const float birdUpdateRadiusSq = birdUpdateRadius * birdUpdateRadius;
+
+    // View cull for skeletons (setAnimCullView). In a city most of the units
+    // in range stand behind or beside the camera, and each skeleton is a
+    // hundred-odd bones sampled three tracks apiece. Tested with the main
+    // pass's own culling sphere, grown to take in the unit's shadow and a
+    // margin for the camera turning before the frame is drawn.
+    static const bool animCullEnabled = core::envFlagEnabled("WOWEE_CHAR_ANIM_CULL", true);
+    static const float animCullMargin = static_cast<float>(
+        envSizeOrDefault("WOWEE_CHAR_ANIM_CULL_MARGIN", 2));
+    const bool viewCull = animCullEnabled && animCullValid_;
+    Frustum animFrustum;
+    if (viewCull) animFrustum.extractFromMatrix(animCullViewProj_);
+    animCullValid_ = false;  // one frame's view; a caller that stops setting it stops culling
+    // Same default as render(): bounds-less models and anything smaller.
+    constexpr float kDefaultCharacterCullRadius = 4.0f;
+    constexpr float kMaxShadowRun = 40.0f;
 
     // Single pass: fade-in, movement, and animation bone collection
     toUpdate_.clear();
@@ -2342,7 +2370,9 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
                             }
                             if (next >= 0 && next < static_cast<int>(seqs.size()) &&
                                 next != inst.currentSequenceIndex) {
-                                if (!bones.empty() && inst.localPose.size() == bones.size()) {
+                                // Out of view the fade is skipped, as in playAnimation.
+                                if (!inst.poseStale && !bones.empty() &&
+                                    inst.localPose.size() == bones.size()) {
                                     const uint32_t blendMs = seqs[next].blendTime;
                                     inst.blendFromPose = inst.localPose;
                                     inst.blendElapsedMs = 0.0f;
@@ -2388,8 +2418,28 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
         uint32_t boneInterval = 1;
         if (!isSkyBird && distSq > 80.0f * 80.0f) boneInterval = 2;
 
+        // Out of view, shadow and all: the clocks above ran, the skeleton
+        // waits. A unit with no pose yet, a scene backdrop and an attached
+        // enchant effect (drawn wherever its weapon is) are always posed.
+        if (viewCull && !inst.isSceneModel && !inst.hasOverrideModelMatrix &&
+            !inst.boneMatrices.empty() && inst.cachedModel) {
+            const float modelR = inst.cachedModel->data.boundRadius;
+            const float cullRadius = modelR > 0.01f
+                ? std::max(kDefaultCharacterCullRadius, modelR * std::max(0.001f, inst.scale))
+                : kDefaultCharacterCullRadius;
+            const float height = 2.0f * std::max(0.0f, modelR * inst.scale);
+            const AnimCullSphere s = animCullSphere(inst.position, cullRadius, height,
+                                                    animCullShadowDir_, kMaxShadowRun);
+            if (!animFrustum.intersectsSphere(s.center, s.radius + animCullMargin)) {
+                inst.poseStale = true;
+                continue;
+            }
+        }
+
         inst.boneUpdateCounter++;
-        bool needsBones = (inst.boneUpdateCounter >= boneInterval) || inst.boneMatrices.empty();
+        // A unit coming back into view is posed this frame, whatever its interval.
+        bool needsBones = (inst.boneUpdateCounter >= boneInterval) || inst.boneMatrices.empty() ||
+                          inst.poseStale;
         if (needsBones) {
             inst.boneUpdateCounter = 0;
             toUpdate_.push_back(std::ref(inst));
@@ -2480,7 +2530,10 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
             // the spine, so the arm pushes it instead of clipping. A single
             // sphere at the elbow joint missed forearm/upper-arm contact.
             constexpr uint32_t kAttachmentBack = 12;
-            if (wa.attachmentId == kAttachmentBack && weapIt->second.cachedModel) {
+            // Not for a wielder the view cull left unposed: the arm test would
+            // pose it (getAttachmentTransform), and nobody sees the blade.
+            if (wa.attachmentId == kAttachmentBack && weapIt->second.cachedModel &&
+                !instance.poseStale) {
                 constexpr uint32_t kAttachmentHandLeft = 2;
                 constexpr uint32_t kAttachmentElbowLeft = 4;
                 constexpr uint32_t kAttachmentShoulderLeft = 6;
@@ -2635,6 +2688,7 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
 
     size_t numBones = model.bones.size();
     instance.boneMatrices.resize(numBones);
+    instance.poseStale = false;
 
     const auto& gsd = model.globalSequenceDurations;
 
@@ -2665,6 +2719,19 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
         : 1.0f;
     instance.localPose.resize(numBones);
 
+    // Key hints, six per bone: the body's three tracks, then the upper-body
+    // overlay's, which plays another sequence and would only push the body's
+    // hints off their keys. Each thread owns the instances it poses, so the
+    // hints need no lock. The samples are the same either way (see
+    // m2_track::lowerKeyIndexFrom); WOWEE_CHAR_KEY_CURSOR=0 searches from
+    // scratch every time.
+    static const bool keyCursorEnabled = core::envFlagEnabled("WOWEE_CHAR_KEY_CURSOR", true);
+    uint32_t* cursors = nullptr;
+    if (keyCursorEnabled) {
+        if (instance.keyCursor.size() != numBones * 6) instance.keyCursor.assign(numBones * 6, 0u);
+        cursors = instance.keyCursor.data();
+    }
+
     for (size_t i = 0; i < numBones; i++) {
         const auto& bone = model.bones[i];
 
@@ -2674,7 +2741,7 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
         // Local transform includes pivot bracket: T(pivot)*T*R*S*T(-pivot)
         // At rest this is identity, so no separate bind pose is needed
         BoneLocalPose pose = sampleBonePose(bone, time, instance.globalSequenceTime,
-                                            sequence, gsd);
+                                            sequence, gsd, cursors ? cursors + i * 6 : nullptr);
         if (blending) {
             // Tracks on a global sequence run on their own clock whatever the
             // body plays, so they have nothing to fade from.
@@ -2698,7 +2765,8 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
                                             instance.upperDurationMs - instance.upperTime);
                 const float w = glm::clamp(edge / 150.0f, 0.0f, 1.0f);
                 const BoneLocalPose up = sampleBonePose(bone, upT, instance.globalSequenceTime,
-                                                        upSeq, gsd);
+                                                        upSeq, gsd,
+                                                        cursors ? cursors + i * 6 + 3 : nullptr);
                 pose.translation = glm::mix(pose.translation, up.translation, w);
                 pose.rotation = glm::normalize(glm::slerp(pose.rotation, up.rotation, w));
                 pose.scale = glm::mix(pose.scale, up.scale, w);
@@ -2765,20 +2833,21 @@ glm::mat4 CharacterRenderer::getBoneTransform(const pipeline::M2Bone& bone, floa
 
 CharacterRenderer::BoneLocalPose CharacterRenderer::sampleBonePose(
         const pipeline::M2Bone& bone, float animTime, float globalSeqTime,
-        int sequenceIndex, const std::vector<uint32_t>& globalSeqDurations) {
+        int sequenceIndex, const std::vector<uint32_t>& globalSeqDurations,
+        uint32_t* cursors) {
     // Resolve global sequences: bones with globalSequence >= 0 use sequence 0
     // with time wrapped at the global sequence duration, independent of the
     // character's current animation.
     BoneLocalPose pose;
     pose.translation = m2_track::sampleVec3(
         bone.translation, sequenceIndex, animTime, globalSeqTime,
-        globalSeqDurations, glm::vec3(0.0f));
+        globalSeqDurations, glm::vec3(0.0f), cursors ? cursors + 0 : nullptr);
     pose.rotation = m2_track::sampleQuat(
         bone.rotation, sequenceIndex, animTime, globalSeqTime,
-        globalSeqDurations);
+        globalSeqDurations, cursors ? cursors + 1 : nullptr);
     pose.scale = m2_track::sampleVec3(
         bone.scale, sequenceIndex, animTime, globalSeqTime,
-        globalSeqDurations, glm::vec3(1.0f));
+        globalSeqDurations, glm::vec3(1.0f), cursors ? cursors + 2 : nullptr);
     return pose;
 }
 
@@ -4669,6 +4738,9 @@ void CharacterRenderer::detachWeaponEffects(uint32_t charInstanceId, uint32_t at
 bool CharacterRenderer::getAttachmentTransform(uint32_t instanceId, uint32_t attachmentId, glm::mat4& outTransform) {
     auto instIt = instances.find(instanceId);
     if (instIt == instances.end()) return false;
+    // A mount seat, a spell's hand: whoever asks gets the pose of now, even for
+    // a unit the view cull left unposed.
+    refreshStalePose(instIt->second);
     const auto& instance = instIt->second;
 
     // Find attachment point using shared lookup logic

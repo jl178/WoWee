@@ -489,6 +489,10 @@ private:
     bool msaaChangePending_ = false;
     void renderShadowPass();
     glm::mat4 computeLightSpaceMatrix();
+    /// The way shadow rays travel (unit, Z clamped downward), as the shadow
+    /// projection uses it. Also tells character animation culling which way
+    /// an off-screen unit's shadow can reach into view.
+    [[nodiscard]] glm::vec3 shadowRayDirection() const;
 
     std::vector<pipeline::CustomZoneInfo> customZones_;
     pipeline::AssetManager* cachedAssetManager = nullptr;
