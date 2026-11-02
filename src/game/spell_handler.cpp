@@ -488,6 +488,15 @@ bool SpellHandler::resolveUnitPosition(uint64_t guid, glm::vec3& outPos) {
     return true;
 }
 
+bool SpellHandler::playUnitEffectModel(uint64_t guid, const char* modelPath) {
+    auto* renderer = owner_.services().renderer;
+    auto* svs = renderer ? renderer->getSpellVisualSystem() : nullptr;
+    if (!svs) return false;
+    glm::vec3 feet;
+    if (!resolveUnitPosition(guid, feet)) return false;
+    return svs->playEffectModel(modelPath, feet, owner_.resolveUnitRenderInstance(guid));
+}
+
 void SpellHandler::triggerCastVisual(uint32_t spellId, uint64_t casterGuid, uint32_t castTimeMs,
                                      bool channel) {
     auto* renderer = owner_.services().renderer;
@@ -3288,6 +3297,19 @@ void SpellHandler::handleAchievementEarned(network::Packet& packet) {
         ? nameIt->second : std::string();
 
     bool isSelf = (guid == owner_.getPlayerGuid());
+    // Spells\Achievement_OnRoot.m2 on whoever earned it - the stock client's
+    // hardcoded SpellVisualEffectName 4392, "Achievement Base" - and the
+    // achievement sound is that model's $SND event (AchievementSound, 12891),
+    // so it is heard at them, for anyone in sight. The server sends this
+    // packet through the say range for that reason. The player's own falls
+    // back to the sound alone when the model cannot be shown; once either
+    // way, as the toast once played it a second time.
+    if (!playUnitEffectModel(guid, "Spells\\Achievement_OnRoot.m2") && isSelf) {
+        if (auto* ac = owner_.services().audioCoordinator) {
+            if (auto* sfx = ac->getUiSoundManager())
+                sfx->playAchievementAlert();
+        }
+    }
     if (isSelf) {
         char buf[256];
         if (!achName.empty()) {
@@ -3299,13 +3321,6 @@ void SpellHandler::handleAchievementEarned(network::Packet& packet) {
 
         owner_.earnedAchievementsRef().insert(achievementId);
         owner_.achievementDatesRef()[achievementId] = earnDate;
-        // AchievementSound, the $SND event of the achievement visual
-        // (Spells\Achievement_OnRoot.m2). Once: the toast played it a second
-        // time on the same packet.
-        if (auto* ac = owner_.services().audioCoordinator) {
-            if (auto* sfx = ac->getUiSoundManager())
-                sfx->playAchievementAlert();
-        }
         if (owner_.achievementEarnedCallbackRef()) {
             owner_.achievementEarnedCallbackRef()(achievementId, achName);
         }

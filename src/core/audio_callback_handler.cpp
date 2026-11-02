@@ -3,11 +3,14 @@
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/animation_controller.hpp"
+#include "rendering/spell_visual_system.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "game/game_handler.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/music_manager.hpp"
+#include "audio/sound_data.hpp"
+#include "audio/ui_sound_manager.hpp"
 #include "audio/audio_engine.hpp"
 #include "ui/ui_manager.hpp"
 
@@ -45,15 +48,34 @@ std::optional<std::string> AudioCallbackHandler::resolveSoundEntryPath(uint32_t 
     return std::nullopt;
 }
 
+bool AudioCallbackHandler::showLevelUpEffect(uint64_t guid, const glm::vec3& feet) {
+    if (!renderer_) return false;
+    // Spells\LevelUp\LevelUp.m2 on whoever levelled - the stock client's
+    // hardcoded SpellVisualEffectName 21, "Unit Level Up" - and the level-up
+    // sound is that model's $SND event (LEVELUP, 888, 33 ms in), so it plays
+    // at them for anyone in sight, not only for the player. The spell visual
+    // system plays model events; LevelUpEffect draws the same model without
+    // them and stands in only when the first cannot load it.
+    if (auto* svs = renderer_->getSpellVisualSystem()) {
+        if (svs->playEffectModel("Spells\\LevelUp\\LevelUp.m2", feet,
+                                 gameHandler_.resolveUnitRenderInstance(guid)))
+            return true;
+    }
+    if (auto* ac = renderer_->getAnimationController()) ac->triggerLevelUpEffect(feet);
+    return false;
+}
+
 void AudioCallbackHandler::setupCallbacks() {
-    // Level-up callback - play sound, cheer emote, and trigger UI ding overlay + 3D effect
+    // Level-up callback - UI ding overlay, and the level-up effect with its sound
     gameHandler_.setLevelUpCallback([this](uint32_t newLevel) {
         if (uiManager_) {
             uiManager_->getGameScreen().toastManager().triggerDing(newLevel);
         }
-        if (renderer_) {
-            if (auto* ac = renderer_->getAnimationController()) ac->triggerLevelUpEffect(renderer_->getCharacterPosition());
-        }
+        const glm::vec3 feet = renderer_ ? renderer_->getCharacterPosition() : glm::vec3(0.0f);
+        if (showLevelUpEffect(gameHandler_.getPlayerGuid(), feet)) return;
+        // No model to carry it: the sound alone, as the interface would hear it.
+        if (auto* sfx = audioCoordinator_ ? audioCoordinator_->getUiSoundManager() : nullptr)
+            sfx->playLevelUp();
     });
 
     // No achievement callback: the badge is alertframes.lua's and the sound is
@@ -72,28 +94,31 @@ void AudioCallbackHandler::setupCallbacks() {
         }
     });
 
-    // SMSG_PLAY_SOUND: look up SoundEntries.dbc and play 2-D sound effect
+    // SMSG_PLAY_SOUND: the SoundEntries row, played as every other row is -
+    // one of its files picked at random, at the row's volume. This used to
+    // take the row's first file at full volume, so a row of several variants
+    // always played the same one, and louder than the stock client does.
     gameHandler_.setPlaySoundCallback([this](uint32_t soundId) {
-        auto path = resolveSoundEntryPath(soundId);
-        if (path) {
-            audio::AudioEngine::instance().playSound2D(*path);
-        }
+        auto* sfx = audioCoordinator_ ? audioCoordinator_->getUiSoundManager() : nullptr;
+        const audio::SoundData* data = audioCoordinator_ ? audioCoordinator_->getSoundData() : nullptr;
+        if (sfx && data) sfx->playEntry(data->sound(soundId));
     });
 
-    // SMSG_PLAY_OBJECT_SOUND / SMSG_PLAY_SPELL_IMPACT: play as 3D positional sound at source entity
+    // SMSG_PLAY_OBJECT_SOUND / SMSG_PLAY_SPELL_IMPACT: the same, at the object.
     gameHandler_.setPlayPositionalSoundCallback([this](uint32_t soundId, uint64_t sourceGuid) {
-        auto path = resolveSoundEntryPath(soundId);
-        if (!path) return;
-
-        // Play as 3D sound if source entity position is available.
+        auto* sfx = audioCoordinator_ ? audioCoordinator_->getUiSoundManager() : nullptr;
+        const audio::SoundData* data = audioCoordinator_ ? audioCoordinator_->getSoundData() : nullptr;
+        if (!sfx || !data) return;
+        const audio::SoundEntry* entry = data->sound(soundId);
+        if (!entry) return;
         // Entity stores canonical coords; listener uses render coords (camera).
+        // An object this client does not know is heard without a position.
         auto entity = gameHandler_.getEntityManager().getEntity(sourceGuid);
         if (entity) {
             glm::vec3 canonical{entity->getLatestX(), entity->getLatestY(), entity->getLatestZ()};
-            glm::vec3 pos = core::coords::canonicalToRender(canonical);
-            audio::AudioEngine::instance().playSound3D(*path, pos);
+            sfx->playEntryAt(entry, core::coords::canonicalToRender(canonical));
         } else {
-            audio::AudioEngine::instance().playSound2D(*path);
+            sfx->playEntry(entry);
         }
     });
 
@@ -101,12 +126,11 @@ void AudioCallbackHandler::setupCallbacks() {
     gameHandler_.setOtherPlayerLevelUpCallback([this](uint64_t guid, uint32_t newLevel) {
         if (!renderer_) return;
 
-        // Trigger 3D effect at the other player's position
+        // The level-up effect on the other player, with its sound at them.
         auto entity = gameHandler_.getEntityManager().getEntity(guid);
         if (entity) {
             glm::vec3 canonical(entity->getX(), entity->getY(), entity->getZ());
-            glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
-            if (auto* ac = renderer_->getAnimationController()) ac->triggerLevelUpEffect(renderPos);
+            showLevelUpEffect(guid, core::coords::canonicalToRender(canonical));
         }
 
         // Show chat message if in group

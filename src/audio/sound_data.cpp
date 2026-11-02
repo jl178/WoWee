@@ -2,7 +2,9 @@
 #include "pipeline/dbc_loader.hpp"
 #include "core/logger.hpp"
 
+#include <algorithm>
 #include <cctype>
+#include <iterator>
 
 namespace wowee {
 namespace audio {
@@ -574,6 +576,60 @@ const SoundEntry* SoundData::playerJumpSound(uint32_t raceId, bool female) const
 
 const SoundEntry* SoundData::playerLandSound(uint32_t raceId, bool female) const {
     return playerVoiceByName(raceId, female, "MainLand");
+}
+
+const char* uiMessageSoundName(std::string_view messageKey) {
+    // Every row of Wow.exe's UI message table (0xac8af0) whose sound column is
+    // not "NONE", read out of the 3.3.5a (12340) binary. 0x5216f0 plays that
+    // column by name when the row's vocal field holds 0x44, which every one of
+    // these does. Sorted by key for the binary search below.
+    struct Row { std::string_view key; const char* sound; };
+    static constexpr Row kRows[] = {
+        {"ERR_ARENA_TEAM_CREATE_S",                  "LEVELUP"},
+        {"ERR_DECLINE_GROUP_S",                      "igPlayerInviteDecline"},
+        {"ERR_DUEL_REQUESTED",                       "LEVELUP"},
+        {"ERR_FRIEND_ONLINE_SS",                     "FRIENDJOINGAME"},
+        {"ERR_GUILD_CREATE_S",                       "LEVELUP"},
+        {"ERR_INVITED_TO_ARENA_TEAM",                "LEVELUP"},
+        {"ERR_INVITED_TO_GUILD_SSS",                 "LEVELUP"},
+        {"ERR_MEETING_STONE_IN_QUEUE_S",             "PVPENTERQUEUE"},
+        {"ERR_NEWTAXIPATH",                          "TaxiNodeDiscovered"},
+        {"ERR_PETITION_ALREADY_SIGNED",              "igPlayerInviteDecline"},
+        {"ERR_PETITION_ALREADY_SIGNED_OTHER",        "igPlayerInviteDecline"},
+        {"ERR_PETITION_CREATOR",                     "igPlayerInviteDecline"},
+        {"ERR_PETITION_DECLINED_S",                  "igPlayerInviteDecline"},
+        {"ERR_PETITION_FULL",                        "igPlayerInviteDecline"},
+        {"ERR_PETITION_IN_GUILD",                    "igPlayerInviteDecline"},
+        {"ERR_PETITION_NOT_ENOUGH_SIGNATURES",       "igPlayerInviteDecline"},
+        {"ERR_PETITION_NOT_SAME_SERVER",             "igPlayerInviteDecline"},
+        {"ERR_PETITION_RESTRICTED_ACCOUNT",          "igPlayerInviteDecline"},
+        {"ERR_PETITION_SIGNED",                      "igPlayerInviteAccept"},
+        {"ERR_PETITION_SIGNED_S",                    "igPlayerInviteAccept"},
+        {"ERR_QUEST_ACCEPTED_S",                     "QUESTADDED"},
+        {"ERR_QUEST_ALREADY_DONE",                   "igQuestFailed"},
+        {"ERR_QUEST_ALREADY_DONE_DAILY",             "igQuestFailed"},
+        {"ERR_QUEST_ALREADY_ON",                     "igQuestFailed"},
+        {"ERR_QUEST_FAILED_BAG_FULL_S",              "igQuestFailed"},
+        {"ERR_QUEST_FAILED_CAIS",                    "igQuestFailed"},
+        {"ERR_QUEST_FAILED_EXPANSION",               "igQuestFailed"},
+        {"ERR_QUEST_FAILED_LOW_LEVEL",               "igQuestFailed"},
+        {"ERR_QUEST_FAILED_MAX_COUNT_S",             "igQuestFailed"},
+        {"ERR_QUEST_FAILED_MISSING_ITEMS",           "igQuestFailed"},
+        {"ERR_QUEST_FAILED_NOT_ENOUGH_MONEY",        "igQuestFailed"},
+        {"ERR_QUEST_FAILED_S",                       "igQuestFailed"},
+        {"ERR_QUEST_FAILED_TOO_MANY_DAILY_QUESTS_I", "igQuestFailed"},
+        {"ERR_QUEST_FAILED_WRONG_RACE",              "igQuestFailed"},
+        {"ERR_QUEST_LOG_FULL",                       "igQuestFailed"},
+        {"ERR_QUEST_MUST_CHOOSE",                    "igQuestFailed"},
+        {"ERR_QUEST_NEED_PREREQS",                   "igQuestFailed"},
+        {"ERR_QUEST_ONLY_ONE_TIMED",                 "igQuestFailed"},
+        {"ERR_RECEIVE_ITEM_S",                       "ITEMGENERICSOUND"},
+        {"ERR_TRADE_REQUEST_S",                      "LEVELUP"},
+    };
+    const auto* end = std::end(kRows);
+    const auto* it = std::lower_bound(std::begin(kRows), end, messageKey,
+                                      [](const Row& r, std::string_view k) { return r.key < k; });
+    return (it != end && it->key == messageKey) ? it->sound : nullptr;
 }
 
 } // namespace audio

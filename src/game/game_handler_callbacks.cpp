@@ -626,6 +626,26 @@ void GameHandler::playErrorSpeech(audio::PlayerErrorSpeech type) {
                      static_cast<uint8_t>(toServerGender(ch->gender)));
 }
 
+void GameHandler::playUiMessageSound(std::string_view messageKey) {
+    auto* ac = services_.audioCoordinator;
+    if (!ac) return;
+    if (auto* sfx = ac->getUiSoundManager()) sfx->playUiMessage(messageKey);
+}
+
+void GameHandler::playUiSoundEntry(uint32_t soundEntryId) {
+    auto* ac = services_.audioCoordinator;
+    if (!ac) return;
+    auto* sfx = ac->getUiSoundManager();
+    const audio::SoundData* data = ac->getSoundData();
+    if (sfx && data) sfx->playEntry(data->sound(soundEntryId));
+}
+
+void GameHandler::playUiSoundByName(const char* soundName) {
+    auto* ac = services_.audioCoordinator;
+    if (!ac || !soundName) return;
+    if (auto* sfx = ac->getUiSoundManager()) sfx->playByName(soundName);
+}
+
 void GameHandler::handleCharLoginFailed(network::Packet& packet) {
     uint8_t reason = packet.readUInt8();
 

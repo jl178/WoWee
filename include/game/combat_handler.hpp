@@ -231,10 +231,15 @@ private:
 
     // unitGuid → sorted threat list (descending by threat value)
     std::unordered_map<uint64_t, std::vector<ThreatEntry>> threatLists_;
-    /// Which mobs the player is currently top of the threat list for, so the
-    /// aggro warning sounds on becoming that rather than on every update that
-    /// says they still are. See the threat update handler.
+    /// Which mobs the player is currently tanking, so the pulled-aggro sound
+    /// plays on becoming the tank rather than on every update that says they
+    /// still are. See the threat update handler.
     std::unordered_set<uint64_t> playerTopThreatOn_;
+    /// Which mobs the player, not tanking, is at or over the tank's threat on:
+    /// the stretch Aggro_Enter_Warning_State marks the start of.
+    std::unordered_set<uint64_t> playerOverTankOn_;
+    /// Each mob's victim, as SMSG_HIGHEST_THREAT_UPDATE last named it.
+    std::unordered_map<uint64_t, uint64_t> threatVictims_;
     /// Whether an aggro warning applies at all where the player is - the same
     /// question IsThreatWarningEnabled answers for the indicator, asked from
     /// C++ so the sound and the picture agree about when they are wanted.

@@ -1137,6 +1137,21 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                     model.doodadSounds.push_back({soundId, pos, false, periodMs, ts % periodMs});
                 continue;
             }
+            // $SND: a spell effect model's sound, the data field a
+            // SoundEntries id, at its times in the birth sequence (index 0).
+            if (std::memcmp(m2Data.data() + base, "$SND", 4) == 0) {
+                const uint32_t soundId = rd32(base + 4);
+                if (soundId == 0 || !wotlkEvents || model.sequences.empty()) continue;
+                if (!(model.sequences[0].flags & kM2SeqFlagEmbeddedData)) continue;
+                if (rd32(base + trackOfs + 4) == 0) continue;
+                const uint32_t ofsArrays = rd32(base + trackOfs + 8);
+                const uint32_t nTs = rd32(ofsArrays);
+                const uint32_t ofsTs = rd32(ofsArrays + 4);
+                if (nTs == 0 || nTs > 64 || ofsTs + nTs * sizeof(uint32_t) > m2Data.size()) continue;
+                for (uint32_t ts : readArray<uint32_t>(m2Data, ofsTs, nTs))
+                    model.effectSounds.push_back({soundId, ts});
+                continue;
+            }
             // The other sound-making events ($CSS, $CAH, $AHn, $FDn, $WNG)
             // ride in soundEvents with their tag and no sound id.
             const uint32_t eventTag = rd32(base);
@@ -1193,6 +1208,10 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
         for (auto& list : model.footstepEventTimes) {
             std::sort(list.begin(), list.end());
         }
+        std::sort(model.effectSounds.begin(), model.effectSounds.end(),
+                  [](const M2Model::EffectSound& a, const M2Model::EffectSound& b) {
+                      return a.timeMs < b.timeMs;
+                  });
         for (auto& list : model.soundEvents) {
             std::sort(list.begin(), list.end(),
                       [](const M2Model::SoundEvent& a, const M2Model::SoundEvent& b) {

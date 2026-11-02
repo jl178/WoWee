@@ -133,6 +133,35 @@ bool UiSoundManager::playEntry(const SoundEntry* entry) {
     return false;
 }
 
+bool UiSoundManager::playEntryAt(const SoundEntry* entry, const glm::vec3& position) {
+    if (!initialized_ || !entry || entry->files.empty()) return false;
+    auto& engine = AudioEngine::instance();
+    const float maxDistance = entry->distanceCutoff > 0.0f ? entry->distanceCutoff : 40.0f;
+    // As playEntry: a random file, and the next one along when it will not
+    // load or decode.
+    const size_t count = entry->files.size();
+    const size_t first = std::uniform_int_distribution<size_t>(0, count - 1)(uiRng());
+    for (size_t i = 0; i < count; ++i) {
+        const UISample* sample = cachedSample(entry->files[(first + i) % count]);
+        if (!sample) continue;
+        if (engine.playSound3D(sample->data, position, entry->volume, 1.0f, maxDistance)) return true;
+    }
+    return false;
+}
+
+bool UiSoundManager::playUiMessage(std::string_view messageKey) {
+    const char* soundName = uiMessageSoundName(messageKey);
+    if (!soundName) return false;
+    if (playByName(soundName)) return true;
+    // No table: the preloaded file of the rows that have one.
+    const std::string_view name(soundName);
+    if (name == "igQuestFailed") playSound(questFailedSounds_);
+    else if (name == "QUESTADDED") playSound(questActivateSounds_);
+    else if (name == "LEVELUP") playSound(levelUpSounds_);
+    else return false;
+    return true;
+}
+
 bool UiSoundManager::playByName(const std::string& soundName) {
     if (!initialized_ || soundName.empty() || !soundData_) return false;
     return playEntry(soundData_->soundByName(soundName));
@@ -163,7 +192,6 @@ void UiSoundManager::setVolumeScale(float scale) {
 }
 
 // Quest sounds
-void UiSoundManager::playQuestActivate() { playStock("QUESTADDED", questActivateSounds_); }
 void UiSoundManager::playQuestComplete() { playStock("igQuestListComplete", questCompleteSounds_); }
 void UiSoundManager::playQuestFailed() { playStock("igQuestFailed", questFailedSounds_); }
 void UiSoundManager::playFishingBite() { playStock("Fishing Hooked", fishingBiteSounds_); }

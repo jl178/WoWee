@@ -4201,11 +4201,17 @@ void registerQuestLuaAPI(lua_State* L) {
                 // carries it. The flag is parsed now, so if one ever does this
                 // can read it from the same place.
                 {"QuestGetAutoAccept", [](lua_State* L) -> int { lua_pushboolean(L, 0); return 1; }},
-                // Shown when a reward is confirmed without one being picked.
-                // The message belongs to the server in the real client; there
-                // is nothing to say here, and the call is made for its effect
-                // rather than its answer.
-                {"QuestChooseRewardError", [](lua_State* L) -> int { (void)L; return 0; }},
+                // Called when a reward is confirmed without one being picked.
+                // Wow.exe's (call at 0x58c3a5) raises ERR_QUEST_MUST_CHOOSE, an error
+                // frame line with igQuestFailed, from the client: no packet
+                // is involved.
+                {"QuestChooseRewardError", [](lua_State* L) -> int {
+                    if (auto* gh = getGameHandler(L)) {
+                        gh->addUIError("You must choose a reward.");
+                        gh->playUiMessageSound("ERR_QUEST_MUST_CHOOSE");
+                    }
+                    return 0;
+                }},
                 {"GetQuestItemLink",        lua_GetQuestItemLink},
                 {"GetQuestSpellLink",       lua_GetQuestSpellLink},
                 {"GetQuestMoneyToGet",   lua_GetQuestMoneyToGet},

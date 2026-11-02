@@ -23,6 +23,7 @@
 #include <glm/glm.hpp>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <deque>
 #include <array>
@@ -2997,6 +2998,16 @@ public:
     // Play the player character's spoken error response ("Not enough mana", ...)
     // using the active character's race/gender. Gated by the Character Speech setting.
     void playErrorSpeech(audio::PlayerErrorSpeech type);
+    /// The sound the stock client plays with a UI message, by the message's
+    /// GlobalStrings key ("ERR_DUEL_REQUESTED"): Wow.exe's message table names
+    /// one for 40 messages (audio::uiMessageSoundName). Call it where the
+    /// message is raised; a key the table leaves silent does nothing.
+    void playUiMessageSound(std::string_view messageKey);
+    /// One SoundEntries row by id on the interface bus - what Wow.exe's
+    /// play-by-id (0x4c8fc0) does for the threat and Dungeon Finder sounds.
+    void playUiSoundEntry(uint32_t soundEntryId);
+    /// A SoundEntries row by name on the interface bus ("igPlayerInviteAccept").
+    void playUiSoundByName(const char* soundName);
 
     // Loot window open/close callback (for loot kneel animation)
     using LootWindowCallback = std::function<void(bool open)>;

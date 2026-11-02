@@ -44,6 +44,15 @@ public:
     void playSpellVisualKit(uint32_t kitId, const glm::vec3& worldPosition,
                             uint32_t attachInstanceId = 0);
 
+    // Play one effect model on a unit's base, as the stock client plays its
+    // hardcoded SpellVisualEffectName rows - 21 "Unit Level Up"
+    // (Spells\LevelUp\LevelUp.m2) on anyone who levels, 4392 "Achievement
+    // Base" (Spells\Achievement_OnRoot.m2) on anyone who earns one. Its $SND
+    // events play at it as they come due, like any kit model's. False when
+    // the model cannot be loaded.
+    bool playEffectModel(const std::string& modelPath, const glm::vec3& feetPos,
+                         uint32_t attachInstanceId = 0);
+
     // The caster's build-up while the cast bar fills (PrecastKit), or while a
     // channel runs (channel=true: ChannelKit). It stays on the caster until
     // cancelPrecastVisuals(casterGuid) - SPELL_GO, failure, interrupt, channel
@@ -170,7 +179,14 @@ private:
         bool retiring = false;
         float linger = 0.0f, lingerCap = 0.0f, decayDuration = 0.0f;
         bool emissionStopped = false;
+        // The model's $SND events (modelEffectSounds_), the next one due, and
+        // where the model stands for them.
+        uint32_t modelId = 0;
+        uint32_t nextEffectSound = 0;
+        glm::vec3 effectPos{0.0f};
     };
+    // A model's $SND events: SoundEntries id at ms into its birth sequence.
+    struct EffectSound { uint32_t soundEntryId = 0; uint32_t timeMs = 0; };
 
     struct KitEffect { uint8_t slot; std::string path; };
     struct KitRow {
@@ -311,6 +327,7 @@ private:
     std::unordered_map<uint32_t, KitRow> kits_;        // SpellVisualKit.dbc id → effects
     std::unordered_map<std::string, uint32_t> spellVisualModelIds_;   // M2 path → M2Renderer modelId
     std::unordered_set<uint32_t> spellVisualFailedModels_;           // modelIds that failed to load (negative cache)
+    std::unordered_map<uint32_t, std::vector<EffectSound>> modelEffectSounds_;  // modelId → $SND events
     uint32_t nextSpellVisualModelId_ = 999000; // Reserved range 999000-999799
     uint32_t nextProjectileModelId_ = 998000;  // Reserved range 998000-998999
     std::unordered_map<std::string, uint32_t> projectileModelIds_;
