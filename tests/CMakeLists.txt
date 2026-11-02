@@ -1210,6 +1210,12 @@ wowee_add_test(test_anim_cull
 wowee_add_test(test_shadow_draw_list
     SOURCES test_shadow_draw_list.cpp)
 
+# ── test_terrain_mega_slots ──────────────────────────────────
+# Which terrain tile is moved into or out of the mega-buffer slots so the
+# tiles nearest the camera draw from them.
+wowee_add_test(test_terrain_mega_slots
+    SOURCES test_terrain_mega_slots.cpp)
+
 # ── test_m2_track_cursor ─────────────────────────────────────
 # Bone track sampling from a key cursor answers what the binary search does.
 wowee_add_test(test_m2_track_cursor
