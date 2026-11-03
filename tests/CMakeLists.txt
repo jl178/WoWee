@@ -839,6 +839,12 @@ wowee_add_test(test_spline_body
             ${CMAKE_SOURCE_DIR}/src/game/spline_packet.cpp
             ${CMAKE_SOURCE_DIR}/src/network/packet.cpp)
 
+# ── test_glue_rules ──────────────────────────────────────────
+# Stock glue screen rules (docs/re/glue-screens.md).
+wowee_add_test(test_glue_rules
+    SOURCES test_glue_rules.cpp
+            ${CMAKE_SOURCE_DIR}/src/game/glue_rules.cpp)
+
 # ── test_unit_motion ─────────────────────────────────────────
 # The stock client's movement of other units (docs/re/unit-motion.md):
 # monster-move splines, remote players' dead reckoning, the body's turn.

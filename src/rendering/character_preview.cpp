@@ -23,6 +23,8 @@
 #include "core/logger.hpp"
 #include <cstdlib>
 #include "core/application.hpp"
+#include "game/glue_rules.hpp"
+#include "core/creature_skin_rules.hpp"
 #include <imgui.h>
 #include <backends/imgui_impl_vulkan.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -73,6 +75,28 @@ void frameCameraForModelBounds(Camera& camera, const glm::vec3& boundMin, const 
 
     camera.setPosition(glm::vec3(0.0f, distance, centerZ));
     camera.setRotation(270.0f, 0.0f);
+}
+
+/// A bone's rest transform with its parents': the pivot, the translation
+/// track's first key and the rotation's. The glue scenes animate almost
+/// nothing, so this is where their lights point and their marks face.
+void boneRestTransform(const pipeline::M2Model& model, int boneIndex, const glm::vec3& point,
+                       glm::quat& outRot, glm::vec3& outPos) {
+    outRot = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    outPos = point;
+    int guard = 0;
+    while (boneIndex >= 0 && boneIndex < static_cast<int>(model.bones.size()) && guard++ < 64) {
+        const auto& b = model.bones[boneIndex];
+        glm::quat r(1.0f, 0.0f, 0.0f, 0.0f);
+        for (const auto& sq : b.rotation.sequences)
+            if (!sq.quatValues.empty()) { r = sq.quatValues.front(); break; }
+        glm::vec3 tr(0.0f);
+        for (const auto& sq : b.translation.sequences)
+            if (!sq.vec3Values.empty()) { tr = sq.vec3Values.front(); break; }
+        outPos = b.pivot + tr + r * (outPos - b.pivot);
+        outRot = r * outRot;
+        boneIndex = b.parentBone;
+    }
 }
 
 } // namespace
@@ -819,6 +843,7 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
 
     modelLoaded_ = true;
     loadRacialBackdrop(race);
+    applyGhost();
     LOG_INFO("CharacterPreview: loaded ", m2Path,
              " skin=", static_cast<int>(skin), " face=", static_cast<int>(face),
              " hair=", static_cast<int>(hairStyle), " hairColor=", static_cast<int>(hairColor),
@@ -1260,6 +1285,8 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
     clearSceneLighting();
     previewStandPosition_ = glm::vec3(0.0f);
     previewViewDirection_ = glm::vec3(0.0f, 1.0f, 0.0f);
+    sceneMarkYaw_ = 0.0f;
+    currentSceneName_.clear();
     modelYaw_ = 90.0f;
     applyPreviewView();
 
@@ -1286,6 +1313,7 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
     if (!glueSceneOverride_.empty()) sceneName = glueSceneOverride_.c_str();
     if (!sceneName) return;
 
+    currentSceneName_ = sceneName;
     std::string scenePath = std::string("Interface\\Glues\\Models\\") + sceneName + "\\" +
                             sceneName + ".m2";
     pipeline::M2Model sceneModel;
@@ -1304,10 +1332,34 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
     }
     const auto& sceneCam = sceneModel.cameras[0];
 
-    // Attachment 0 is the character's mark on the scene's ground.
+    // Attachment 0 is the character's mark on the scene's ground. The stock
+    // client attaches the character to it (0x831630), so the mark's own
+    // orientation is the character's facing 0: SetCharacterSelectFacing and
+    // SetCharacterCreateFacing turn it from there. Most marks face +X; the
+    // human one is turned -16.5 degrees, the blood elf and death knight ones
+    // 143 - near, but not exactly, toward the camera.
     glm::vec3 standPos = sceneCam.targetBase;
+    sceneMarkYaw_ = 0.0f;
+    // Attachment 1 is the pet's mark (0x4e3cd0 attaches the hunter's or
+    // warlock's pet there).
+    petMarkValid_ = false;
     for (const auto& att : sceneModel.attachments) {
-        if (att.id == 0) { standPos = att.position; break; }
+        if (att.id != 1) continue;
+        glm::quat rot;
+        boneRestTransform(sceneModel, att.bone, att.position, rot, petMarkPos_);
+        const glm::vec3 fx = rot * glm::vec3(1.0f, 0.0f, 0.0f);
+        petMarkYaw_ = glm::degrees(std::atan2(fx.y, fx.x));
+        petMarkValid_ = true;
+        break;
+    }
+    for (const auto& att : sceneModel.attachments) {
+        if (att.id != 0) continue;
+        glm::quat rot;
+        boneRestTransform(sceneModel, att.bone, att.position, rot, standPos);
+        const glm::vec3 fx = rot * glm::vec3(1.0f, 0.0f, 0.0f);
+        if (std::abs(fx.x) + std::abs(fx.y) > 1e-4f)
+            sceneMarkYaw_ = glm::degrees(std::atan2(fx.y, fx.x));
+        break;
     }
 
     if (!charRenderer_->loadModel(sceneModel, PREVIEW_BACKDROP_MODEL_ID)) {
@@ -1328,16 +1380,18 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
     sceneCameraPos_ = sceneCam.positionBase;
     sceneCameraTarget_ = sceneCam.targetBase;
     sceneCameraFovDiagonal_ = (sceneCam.fov > 0.0f && sceneCam.fov < 3.14159f) ? sceneCam.fov : 0.0f;
+    sceneCameraNear_ = sceneCam.nearClip;
+    sceneCameraFar_ = sceneCam.farClip;
     sceneCameraValid_ = true;
     charRenderer_->playAnimation(backdropInstanceId_, 0, true);
-    setupSceneLighting(sceneModel, standPos);
+    setupSceneLighting(sceneModel, standPos, game::glue::sceneKey(sceneName));
     setSceneFog(sceneName);
 
     glm::vec3 toCamera = sceneCam.positionBase - sceneCam.targetBase;
     if (glm::length(toCamera) < 0.001f) toCamera = glm::vec3(0.0f, 1.0f, 0.0f);
     previewStandPosition_ = standPos;
     previewViewDirection_ = glm::normalize(toCamera);
-    modelYaw_ = glm::degrees(std::atan2(previewViewDirection_.y, previewViewDirection_.x));
+    modelYaw_ = sceneMarkYaw_ + sceneFacingDegrees_;
     applyPreviewView();
 
     LOG_INFO("CharacterPreview: racial backdrop ", scenePath,
@@ -1370,7 +1424,12 @@ bool CharacterPreview::loadGlueScene(const std::string& scenePath) {
     camera_->setRotation(glm::degrees(std::atan2(fwd.y, fwd.x)),
                          glm::degrees(std::asin(std::clamp(fwd.z, -1.0f, 1.0f))));
     if (cam.fov > 0.0f && cam.fov < 3.14159f) camera_->setFov(verticalFovFromDiagonal(cam.fov));
-    setupSceneLighting(sceneModel, cam.targetBase);
+    // The M2 camera's own clip planes, as the ModelFFX projection takes them
+    // (0x4becf0).
+    if (cam.nearClip > 0.0f && cam.farClip > cam.nearClip)
+        camera_->setClipPlanes(cam.nearClip, cam.farClip);
+    // AccountLogin calls no SetLighting: the scene's own lights.
+    setupSceneLighting(sceneModel, cam.targetBase, std::string());
     sceneOnly_ = true;
     LOG_INFO("CharacterPreview: glue scene ", scenePath);
     return true;
@@ -1419,7 +1478,8 @@ void CharacterPreview::setSceneFog(const std::string& sceneName) {
     }
 }
 
-void CharacterPreview::setupSceneLighting(const pipeline::M2Model& scene, const glm::vec3& focus) {
+void CharacterPreview::setupSceneLighting(const pipeline::M2Model& scene, const glm::vec3& focus,
+                                          const std::string& sceneKey) {
     // The first key of a track, which is all these scenes animate bar the
     // undead scene's torch flicker; fallback when the track has none.
     auto firstVec3 = [](const pipeline::M2AnimationTrack& t, const glm::vec3& fallback) {
@@ -1432,23 +1492,19 @@ void CharacterPreview::setupSceneLighting(const pipeline::M2Model& scene, const 
             if (!s.floatValues.empty()) return s.floatValues.front();
         return fallback;
     };
-    // A bone's rest transform, parents included: the pivot, the translation
-    // track's first key, and the rotation's.
     auto boneRest = [&](int boneIndex, glm::quat& outRot, glm::vec3& outPos, const glm::vec3& p) {
-        outRot = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-        outPos = p;
-        int guard = 0;
-        while (boneIndex >= 0 && boneIndex < static_cast<int>(scene.bones.size()) && guard++ < 64) {
-            const auto& b = scene.bones[boneIndex];
-            glm::quat r(1.0f, 0.0f, 0.0f, 0.0f);
-            for (const auto& s : b.rotation.sequences)
-                if (!s.quatValues.empty()) { r = s.quatValues.front(); break; }
-            const glm::vec3 tr = firstVec3(b.translation, glm::vec3(0.0f));
-            outPos = b.pivot + tr + r * (outPos - b.pivot);
-            outRot = r * outRot;
-            boneIndex = b.parentBone;
-        }
+        boneRestTransform(scene, boneIndex, p, outRot, outPos);
     };
+
+    // GlueParent.lua's SetLighting adds RaceLights[key] to the scene's and
+    // the character's light sets, and a set that has lights added uses none
+    // of the model's own directional lights - only its point lights. The
+    // rows repeat what most scene models carry, but not all: the orc scene
+    // (and the troll's, which is the same) has no directional light of its
+    // own, and is lit in the stock client by a cool and a warm one from the
+    // table. Without them the character stood in a 0.15 ambient.
+    const auto& raceRows = game::glue::raceLights(sceneKey);
+    const bool stockLights = !raceRows.empty();
 
     sceneLocalLights_.clear();
     sceneAmbient_ = glm::vec3(0.0f);
@@ -1461,11 +1517,14 @@ void CharacterPreview::setupSceneLighting(const pipeline::M2Model& scene, const 
     for (const auto& light : scene.lights) {
         if (firstFloat(light.visibility, 1.0f) < 0.5f) continue;
         ++visibleLights;
-        sceneAmbient_ += firstVec3(light.ambientColor, glm::vec3(1.0f)) *
-                         firstFloat(light.ambientIntensity, 0.0f);
+        if (!stockLights) {
+            sceneAmbient_ += firstVec3(light.ambientColor, glm::vec3(1.0f)) *
+                             firstFloat(light.ambientIntensity, 0.0f);
+        }
         const glm::vec3 diffuse = firstVec3(light.diffuseColor, glm::vec3(1.0f)) *
                                   firstFloat(light.diffuseIntensity, 0.0f);
         if (glm::dot(diffuse, glm::vec3(1.0f)) <= 1e-4f) continue;
+        if (light.type == 0 && stockLights) continue;  // RaceLights' instead
         glm::quat rot;
         glm::vec3 pos;
         boneRest(light.bone, rot, pos, light.position);
@@ -1485,6 +1544,18 @@ void CharacterPreview::setupSceneLighting(const pipeline::M2Model& scene, const 
             l.intensity = peak;
             sceneLocalLights_.push_back(l);
         }
+    }
+
+    if (stockLights) {
+        for (const auto& row : raceRows) {
+            sceneAmbient_ += row.ambColor * row.ambIntensity;
+            const glm::vec3 c = row.dirColor * row.dirIntensity;
+            if (glm::dot(c, glm::vec3(1.0f)) <= 1e-4f) continue;
+            const float len = glm::length(row.dir);
+            if (len < 1e-4f) continue;
+            directionals.push_back({row.dir / len, c});
+        }
+        visibleLights = std::max<int>(visibleLights, static_cast<int>(raceRows.size()));
     }
 
     if (visibleLights == 0) {
@@ -1512,7 +1583,8 @@ void CharacterPreview::setupSceneLighting(const pipeline::M2Model& scene, const 
 
     sceneLit_ = true;
     if (charRenderer_) charRenderer_->setPreviewLit(true);
-    LOG_INFO("CharacterPreview: scene lights ", visibleLights, " ambient=(", sceneAmbient_.r, ",",
+    LOG_INFO("CharacterPreview: scene lights ", visibleLights, stockLights ? " (RaceLights " : " (model ",
+             sceneKey, ") ambient=(", sceneAmbient_.r, ",",
              sceneAmbient_.g, ",", sceneAmbient_.b, ") sun=(", sceneLightColor_.r, ",",
              sceneLightColor_.g, ",", sceneLightColor_.b, ") local=", sceneLocalLights_.size());
 }
@@ -1646,7 +1718,102 @@ void CharacterPreview::compositePass(VkCommandBuffer cmd, uint32_t frameIndex) {
     compositeRendered_ = true;
 }
 
+void CharacterPreview::setSceneFacing(float degrees) {
+    sceneFacingDegrees_ = degrees;
+    if (!sceneCameraValid_) return;
+    modelYaw_ = sceneMarkYaw_ + degrees;
+    if (instanceId_ > 0 && charRenderer_) {
+        charRenderer_->setInstanceRotation(instanceId_, glm::vec3(0.0f, 0.0f, glm::radians(modelYaw_)));
+    }
+}
+
+void CharacterPreview::clearScenePet() {
+    if (petInstanceId_ != 0 && charRenderer_) charRenderer_->removeInstance(petInstanceId_);
+    petInstanceId_ = 0;
+}
+
+bool CharacterPreview::setScenePet(uint32_t displayId, uint32_t level, uint32_t family) {
+    clearScenePet();
+    if (displayId == 0 || !petMarkValid_ || !charRenderer_ || !assetManager_) return false;
+    // 0x4e3cd0: CreatureDisplayInfo -> CreatureModelData for the model; the
+    // size is the model's scale times the display's, unless the pet's
+    // CreatureFamily row has one - MinScale at MinScaleLevel growing to
+    // MaxScale at MaxScaleLevel, by the pet's level.
+    auto display = assetManager_->loadDBC("CreatureDisplayInfo.dbc");
+    auto modelData = assetManager_->loadDBC("CreatureModelData.dbc");
+    if (!display || !display->isLoaded() || !modelData || !modelData->isLoaded()) return false;
+    const int32_t drow = display->findRecordById(displayId);
+    if (drow < 0) return false;
+    const uint32_t dr = static_cast<uint32_t>(drow);
+    const int32_t mrow = modelData->findRecordById(display->getUInt32(dr, 1));
+    if (mrow < 0) return false;
+    std::string m2Path = modelData->getString(static_cast<uint32_t>(mrow), 2);
+    if (m2Path.empty()) return false;
+    {
+        std::string lower = m2Path;
+        for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const size_t dot = lower.rfind('.');
+        if (dot != std::string::npos && (lower.compare(dot, 4, ".mdx") == 0 || lower.compare(dot, 4, ".mdl") == 0))
+            m2Path = m2Path.substr(0, dot) + ".m2";
+    }
+    float scale = modelData->getFloat(static_cast<uint32_t>(mrow), 4) * display->getFloat(dr, 4);
+    if (!(scale > 0.0f)) scale = 1.0f;
+    if (family != 0) {
+        if (auto fam = assetManager_->loadDBC("CreatureFamily.dbc"); fam && fam->isLoaded()) {
+            const int32_t frow = fam->findRecordById(family);
+            if (frow >= 0) {
+                const uint32_t fr = static_cast<uint32_t>(frow);
+                const float minScale = fam->getFloat(fr, 1);
+                const int32_t minLevel = static_cast<int32_t>(fam->getUInt32(fr, 2));
+                const float maxScale = fam->getFloat(fr, 3);
+                const int32_t maxLevel = static_cast<int32_t>(fam->getUInt32(fr, 4));
+                const int32_t span = maxLevel - minLevel;
+                if (span > 0) {
+                    int32_t into = static_cast<int32_t>(level) - minLevel;
+                    into = std::clamp(into, 0, span);
+                    scale = (maxScale - minScale) * (static_cast<float>(into) / static_cast<float>(span)) + minScale;
+                }
+            }
+        }
+    }
+
+    pipeline::M2Model model;
+    if (!loadPreviewM2(m2Path, model)) return false;
+    if (!charRenderer_->loadModel(model, PREVIEW_PET_MODEL_ID)) return false;
+    // The display's skin variations, into the slots the model names.
+    const std::string dir = core::creatureModelDirectory(m2Path);
+    if (const auto* data = charRenderer_->getModelData(PREVIEW_PET_MODEL_ID)) {
+        for (size_t ti = 0; ti < data->textures.size(); ++ti) {
+            const uint32_t type = data->textures[ti].type;
+            if (type < 11 || type > 13) continue;
+            const std::string path = core::creatureSkinFile(dir, display->getString(dr, 6 + (type - 11)));
+            if (path.empty() || !assetManager_->fileExists(path)) continue;
+            if (VkTexture* tex = charRenderer_->loadTexture(path))
+                charRenderer_->setModelTexture(PREVIEW_PET_MODEL_ID, static_cast<uint32_t>(ti), tex);
+        }
+    }
+    petInstanceId_ = charRenderer_->createInstance(PREVIEW_PET_MODEL_ID, petMarkPos_,
+                                                   glm::vec3(0.0f, 0.0f, glm::radians(petMarkYaw_)), scale);
+    if (petInstanceId_ == 0) return false;
+    charRenderer_->playAnimation(petInstanceId_, rendering::anim::STAND, true);
+    LOG_INFO("CharacterPreview: scene pet display ", displayId, " ", m2Path, " scale ", scale);
+    return true;
+}
+
+void CharacterPreview::setGhost(bool ghost) {
+    ghost_ = ghost;
+    applyGhost();
+}
+
+void CharacterPreview::applyGhost() {
+    if (instanceId_ == 0 || !charRenderer_) return;
+    // SpellVisualKit 989 as 0x4e2ce0 applies it at character select.
+    charRenderer_->setInstanceDiffuseTint(instanceId_, ghost_ ? game::glue::kGhostTint : glm::vec3(1.0f));
+    charRenderer_->setInstanceOpacity(instanceId_, ghost_ ? game::glue::kGhostAlpha : 1.0f);
+}
+
 void CharacterPreview::rotate(float yawDelta) {
+    sceneFacingDegrees_ = std::fmod(sceneFacingDegrees_ + yawDelta, 360.0f);
     modelYaw_ = std::fmod(modelYaw_ + yawDelta, 360.0f);
     if (instanceId_ > 0 && charRenderer_) {
         charRenderer_->setInstanceRotation(instanceId_, glm::vec3(0.0f, 0.0f, glm::radians(modelYaw_)));
@@ -1725,15 +1892,17 @@ void CharacterPreview::capturePortraitCamera(const pipeline::M2Model& model) {
 }
 
 float CharacterPreview::verticalFovFromDiagonal(float diagonalRadians) const {
-    // A 3.3.5 M2 camera's field of view is diagonal, authored for the 4:3
-    // screen the glue scenes were built on. The vertical field is taken from
-    // that aspect and kept whatever the window's (Hor+): a wider window shows
-    // more of the scene at the sides, never less at the top and bottom.
-    // Converting by the window's own aspect narrowed the vertical field as the
-    // window widened - at 21:9 to 47 degrees from 4:3's 72 - and full screen
-    // zoomed in on the character's waist.
-    constexpr float kAuthoredAspect = 4.0f / 3.0f;
-    return glm::degrees(diagonalRadians / std::sqrt(1.0f + kAuthoredAspect * kAuthoredAspect));
+    // A 3.3.5 M2 camera's field of view is diagonal. The ModelFFX projection
+    // (0x6bfe00) turns it into the vertical one by the frame's own aspect:
+    // diagonal / sqrt(1 + aspect^2). The glue frames are never wider than
+    // 16:9 (GlueParent_OnLoad pillarboxes the rest), so the aspect is capped
+    // there: up to 16:9 this is the stock framing exactly, and a wider window
+    // keeps 16:9's vertical field and shows more at the sides where the
+    // stock client draws black bars. (This used a fixed 4:3, which framed a
+    // 16:9 window 22% wider than the client does.)
+    const float aspect = (fboHeight_ > 0) ? static_cast<float>(fboWidth_) / static_cast<float>(fboHeight_)
+                                          : 4.0f / 3.0f;
+    return glm::degrees(game::glue::verticalFovFromDiagonal(diagonalRadians, aspect));
 }
 
 void CharacterPreview::setSceneCameraFraming(bool on) {
@@ -1762,6 +1931,10 @@ void CharacterPreview::applyPreviewView() {
             if (defaultFovDegrees_ <= 0.0f) defaultFovDegrees_ = camera_->getFovDegrees();
             camera_->setFov(verticalFovFromDiagonal(sceneCameraFovDiagonal_));
         }
+        // The scene camera's clip planes (0.22 near; far from 28 yards in
+        // the orc scene to 2778 in the draenei one).
+        if (sceneCameraNear_ > 0.0f && sceneCameraFar_ > sceneCameraNear_)
+            camera_->setClipPlanes(sceneCameraNear_, sceneCameraFar_);
         if (instanceId_ > 0 && charRenderer_) {
             charRenderer_->setInstancePosition(instanceId_, previewStandPosition_);
             charRenderer_->setInstanceRotation(instanceId_, glm::vec3(0.0f, 0.0f, glm::radians(modelYaw_)));

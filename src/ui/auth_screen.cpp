@@ -17,6 +17,8 @@
 #include "rendering/character_preview.hpp"
 #include "ui/ui_texture_load.hpp"
 #include "ui/glue_ui.hpp"
+#include "ui/glue_audio.hpp"
+#include "game/glue_rules.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/music_manager.hpp"
@@ -342,6 +344,8 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
 
     drawBackdrop();
     updateMusic();
+    // AccountLogin_OnShow: PlayGlueAmbience(GlueAmbienceTracks["DARKPORTAL"], 4.0).
+    glue_audio::playAmbience(game::glue::kLoginAmbience, game::glue::kAmbienceFadeInSeconds);
 
     const ImVec2 screen = ImGui::GetIO().DisplaySize;
     // A share of the window rather than a count of pixels, so the card is the
@@ -1343,6 +1347,7 @@ void AuthScreen::renderGlueLogin(auth::AuthHandler& authHandler, float screenW, 
         const float optY1 = quitY1 - h - 80.0f * u;
         if (glue::button(ui_, dl, "glue.options", ImVec2(x1 - w, optY1 - h), ImVec2(x1, optY1),
                          "Options", glue::ButtonStyle::Blue, true, glue::kFontSmall)) {
+            glue_audio::play("gsTitleOptions");
             settingsOpen_ = true;
             loginGfxLoaded_ = false;
             ui_.swallowPress();
@@ -1588,15 +1593,6 @@ void AuthScreen::updateMusic() {
     auto* music = ac->getMusicManager();
     if (!music) return;
 
-    if (!loginMusicVolumeAdjusted_) {
-        savedMusicVolume_ = music->getVolume();
-        // Reduce music to 80% during login so UI button clicks and error sounds
-        // remain audible over the background track
-        int loginVolume = (savedMusicVolume_ * 80) / 100;
-        loginVolume = std::clamp(loginVolume, 0, 100);
-        music->setVolume(loginVolume);
-        loginMusicVolumeAdjusted_ = true;
-    }
     music->update(ImGui::GetIO().DeltaTime);
     if (music->isPlaying() || music->isLoading()) return;
 
@@ -1634,8 +1630,11 @@ void AuthScreen::updateMusic() {
         auto* assets = app.getAssetManager();
         for (const char* theme : kGlueThemes) {
             if (assets && !assets->fileExists(theme)) continue;
+            // GS_LichKing's VolumeFloat is 1.0. PlayGlueMusic starts it at
+            // once (its props set no fade-in) and loops it by restarting it
+            // when it ends (0x986080).
             music->setTrackGain(1.0f);
-            music->playMusic(theme, true, 1800.0f);
+            music->playMusic(theme, true, 0.0f);
             musicPlaying = music->isPlaying() || music->isLoading();
             if (musicPlaying) break;
         }
@@ -1647,6 +1646,9 @@ void AuthScreen::updateMusic() {
 }
 
 void AuthScreen::stopLoginMusic() {
+    // StopGlueAmbience (CharacterSelect_EnterWorld): the scene's loop goes
+    // with the glue screens, over a second.
+    glue_audio::stopAmbience(game::glue::kAmbienceFadeOutSeconds);
     auto& app = core::Application::getInstance();
     auto* ac = app.getAudioCoordinator();
     if (!ac) return;
@@ -1663,6 +1665,7 @@ void AuthScreen::stopLoginMusic() {
 }
 
 void AuthScreen::attemptAuth(auth::AuthHandler& authHandler) {
+    glue_audio::play("gsLogin");  // AccountLogin_Login
     // A new attempt: whatever it says, the glue dialog shows it.
     glueDismissedStatus_.clear();
     {

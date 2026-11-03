@@ -718,6 +718,7 @@ set(WOWEE_SOURCES
     src/game/spline_packet.cpp
     src/game/unit_motion.cpp
     src/game/taxi_rules.cpp
+    src/game/glue_rules.cpp
     src/game/vehicle_data.cpp
     src/game/game_handler_vehicles.cpp
     src/game/unit_motion_glue.cpp
@@ -1043,6 +1044,7 @@ set(WOWEE_SOURCES
     src/ui/ui_raid_icons.cpp
     src/ui/ui_texture_load.cpp
     src/ui/glue_ui.cpp
+    src/ui/glue_audio.cpp
     src/ui/glue_options.cpp
     src/ui/auth_screen.cpp
     src/ui/first_run_screen.cpp

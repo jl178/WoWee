@@ -1,6 +1,7 @@
 #include "ui/realm_screen.hpp"
 #include "ui/ui_colors.hpp"
 #include "ui/glue_ui.hpp"
+#include "ui/glue_audio.hpp"
 #include "core/application.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
@@ -100,6 +101,7 @@ void RealmScreen::render(auth::AuthHandler& authHandler) {
     const ImU32 white = IM_COL32_WHITE;
 
     const auto enterRealm = [&](const auth::Realm& realm) {
+        glue_audio::play("gsLoginChangeRealmOK");  // RealmListOkButton
         realmSelected = true;
         selectedRealmName = realm.name;
         selectedRealmAddress = realm.address;
@@ -107,6 +109,7 @@ void RealmScreen::render(auth::AuthHandler& authHandler) {
         if (onRealmSelected) onRealmSelected(selectedRealmName, selectedRealmAddress);
     };
     const auto cancel = [&]() {
+        glue_audio::play("gsLoginChangeRealmCancel");  // RealmListCancelButton
         if (onBack) onBack();
     };
 

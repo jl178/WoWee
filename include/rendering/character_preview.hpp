@@ -84,6 +84,23 @@ public:
     /// Load this glue scene ("UI_DeathKnight") instead of the race's own on
     /// the next loadCharacter. Empty goes back to the race's.
     void setGlueSceneOverride(const std::string& sceneName);
+    /// SetCharacterSelectFacing / SetCharacterCreateFacing: the character's
+    /// facing in degrees from its stand mark (the scene's attachment 0),
+    /// which the stock client attaches it to. Kept across loads; the screens
+    /// set it when the stock ones do (0 on each selection, -15 on entering
+    /// character create and on each race click).
+    void setSceneFacing(float degrees);
+    [[nodiscard]] float sceneFacing() const { return sceneFacingDegrees_; }
+    /// A dead character at character select: SpellVisualKit 989's light
+    /// blue colour and half alpha on the model (Wow.exe 0x4e2ce0).
+    void setGhost(bool ghost);
+    /// The character's pet on the scene's attachment 1, as the stock select
+    /// screen shows a hunter's or warlock's (SMSG_CHAR_ENUM's pet display,
+    /// level and family). Call after loadCharacter; 0 removes it.
+    bool setScenePet(uint32_t displayId, uint32_t level, uint32_t family);
+    void clearScenePet();
+    /// The glue scene the character stands in ("UI_Orc"), empty for none.
+    [[nodiscard]] const std::string& sceneName() const { return currentSceneName_; }
     void rotate(float yawDelta);
     void zoom(float wheelDelta);
     void resetView();
@@ -149,7 +166,12 @@ private:
     void applyPreviewView();
     // Light the preview with a glue scene's own M2 lights (or neutral full
     // light if it has none), as the client lights its glue screens.
-    void setupSceneLighting(const pipeline::M2Model& scene, const glm::vec3& focus);
+    /// sceneKey is GlueParent.lua's (glue::sceneKey): with a RaceLights row
+    /// its directional lights and ambient replace the model's, as
+    /// SetLighting's AddLight calls do; empty keeps the model's own.
+    void setupSceneLighting(const pipeline::M2Model& scene, const glm::vec3& focus,
+                            const std::string& sceneKey);
+    void applyGhost();
     void clearSceneLighting();
 
     pipeline::AssetManager* assetManager_ = nullptr;
@@ -188,6 +210,11 @@ private:
 
     static constexpr uint32_t PREVIEW_MODEL_ID = 9999;
     static constexpr uint32_t PREVIEW_BACKDROP_MODEL_ID = 9996;
+    static constexpr uint32_t PREVIEW_PET_MODEL_ID = 9995;
+    uint32_t petInstanceId_ = 0;
+    bool petMarkValid_ = false;
+    glm::vec3 petMarkPos_{0.0f};
+    float petMarkYaw_ = 0.0f;
 
     // CharacterRenderer::loadModel() keeps a model cache keyed by id and skips
     // loading when the id is already present, so a fixed id per hand would hand
@@ -249,6 +276,13 @@ private:
     glm::vec3 sceneCameraPos_{0.0f};
     glm::vec3 sceneCameraTarget_{0.0f};
     float sceneCameraFovDiagonal_ = 0.0f;
+    float sceneCameraNear_ = 0.0f;
+    float sceneCameraFar_ = 0.0f;
+    /// The stand mark's own yaw (degrees), and the facing from it.
+    float sceneMarkYaw_ = 0.0f;
+    float sceneFacingDegrees_ = 0.0f;
+    bool ghost_ = false;
+    std::string currentSceneName_;
     std::string glueSceneOverride_;
     std::string backdropSceneLoaded_;
     [[nodiscard]] float verticalFovFromDiagonal(float diagonalRadians) const;
