@@ -385,13 +385,25 @@ static_assert(sizeof(BlobPush) == 112, "must match unit_blob.*.glsl");
 constexpr float kBlobSpacing = 0.5f;   // yards between floor samples, at least
 constexpr int kBlobMaxCells = 18;      // per side, per blob
 constexpr int kBlobCacheMaxAge = 240;  // frames before the floor is asked again
-constexpr size_t kBlobCacheMaxEntries = 16384;
+// Only a backstop now: samples are asked again one by one as they age and
+// swept once nothing asks for them, so a crowd never reaches it.
+constexpr size_t kBlobCacheMaxEntries = 262144;
 
 uint64_t blobKey(int32_t ix, int32_t iy, int32_t probe, int32_t spacingCm) {
     return (static_cast<uint64_t>(static_cast<uint32_t>(ix) & 0xFFFFFu) << 44) |
            (static_cast<uint64_t>(static_cast<uint32_t>(iy) & 0xFFFFFu) << 24) |
            (static_cast<uint64_t>(static_cast<uint32_t>(probe) & 0xFFFu) << 12) |
            static_cast<uint64_t>(static_cast<uint32_t>(spacingCm) & 0xFFFu);
+}
+
+/// How many calls a blob floor sample is trusted for: between half the
+/// cache's age and all of it, spread by the key, so samples asked in the same
+/// frame (a crowd coming into view) are not all asked again in the same frame.
+uint32_t blobSampleMaxAge(uint64_t key) {
+    uint64_t h = key * 0x9E3779B97F4A7C15ull;
+    h ^= h >> 29;
+    const uint32_t half = static_cast<uint32_t>(kBlobCacheMaxAge) / 2;
+    return half + static_cast<uint32_t>(h % half);
 }
 
 }  // namespace
@@ -519,9 +531,20 @@ void OverlaySystem::renderUnitBlobs(const glm::mat4& viewProj, VkCommandBuffer c
     if (unitBlobs_.empty() || cmd == VK_NULL_HANDLE) return;
     if (blobPipeline_ == VK_NULL_HANDLE || blobSet_ == VK_NULL_HANDLE || !blobVertMapped_) return;
 
-    if (++blobFloorAge_ > kBlobCacheMaxAge || blobFloorCache_.size() > kBlobCacheMaxEntries) {
+    ++blobFloorCall_;
+    if (blobFloorCache_.size() > kBlobCacheMaxEntries) {
         blobFloorCache_.clear();
-        blobFloorAge_ = 0;
+        blobFloorSweptAt_ = blobFloorCall_;
+    } else if (blobFloorCall_ - blobFloorSweptAt_ >= static_cast<uint32_t>(kBlobCacheMaxAge)) {
+        // Samples no blob has asked for in a while (the unit walked on).
+        blobFloorSweptAt_ = blobFloorCall_;
+        for (auto it = blobFloorCache_.begin(); it != blobFloorCache_.end();) {
+            if (blobFloorCall_ - it->second.askedAt > static_cast<uint32_t>(kBlobCacheMaxAge)) {
+                it = blobFloorCache_.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
     // Each blob is draped over a world-aligned lattice of floor samples
     // (terrain and WMO floors: the stock receivers; doodads are not), as the
@@ -552,10 +575,12 @@ void OverlaySystem::renderUnitBlobs(const glm::mat4& viewProj, VkCommandBuffer c
                 const int32_t ix = ox + gx, iy = oy + gy;
                 const float wx = static_cast<float>(ix) * spacing;
                 const float wy = static_cast<float>(iy) * spacing;
-                auto [it, inserted] = blobFloorCache_.try_emplace(blobKey(ix, iy, probeBucket, spacingCm));
-                if (inserted) {
-                    if (terrainHeight) it->second.terrain = terrainHeight(wx, wy);
-                    if (wmoHeight) it->second.wmo = wmoHeight(wx, wy, probeAt);
+                const uint64_t key = blobKey(ix, iy, probeBucket, spacingCm);
+                auto [it, inserted] = blobFloorCache_.try_emplace(key);
+                if (inserted || blobFloorCall_ - it->second.askedAt > blobSampleMaxAge(key)) {
+                    it->second.terrain = terrainHeight ? terrainHeight(wx, wy) : std::nullopt;
+                    it->second.wmo = wmoHeight ? wmoHeight(wx, wy, probeAt) : std::nullopt;
+                    it->second.askedAt = blobFloorCall_;
                 }
                 float z = noFloor;
                 bool found = false;

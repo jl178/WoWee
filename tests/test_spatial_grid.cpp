@@ -434,3 +434,93 @@ TEST_CASE("an empty answer is cached like any other", "[spatialgrid]") {
     REQUIRE(hit != nullptr);
     CHECK(hit->empty());
 }
+
+// ── segmentBandColumns: the cells along a ray instead of the rectangle ──
+
+namespace {
+
+/// The cell a point lands in, by the grid's own arithmetic (truncate, clamp).
+std::pair<int, int> cellOf(int cellsX, int cellsY, float extentX, float extentY,
+                           const glm::vec2& origin, const glm::vec2& p) {
+    const auto r = cellRangeCovering(cellsX, cellsY, extentX, extentY, origin, p.x, p.y, p.x, p.y);
+    if (!r) return {-1, -1};
+    return {r->minX, r->minY};
+}
+
+}  // namespace
+
+TEST_CASE("the band holds every cell within the margin of the segment", "[spatialgrid][band]") {
+    std::mt19937 rng(1234);
+    std::uniform_real_distribution<float> u(0.0f, 1.0f);
+    for (int trial = 0; trial < 400; ++trial) {
+        const int cellsX = 1 + static_cast<int>(u(rng) * 64.0f);
+        const int cellsY = 1 + static_cast<int>(u(rng) * 64.0f);
+        const float extentX = 2.0f + u(rng) * 250.0f;
+        const float extentY = 2.0f + u(rng) * 250.0f;
+        const glm::vec2 origin(-100.0f + u(rng) * 200.0f, -100.0f + u(rng) * 200.0f);
+        // Segment ends inside the box or a little outside it, as a ray's
+        // entry and exit points are after the box test.
+        auto pt = [&] {
+            return origin + glm::vec2((u(rng) * 1.1f - 0.05f) * extentX, (u(rng) * 1.1f - 0.05f) * extentY);
+        };
+        const glm::vec2 a = pt();
+        const glm::vec2 b = trial % 7 == 0 ? a : pt();  // some vertical rays
+        const float margin = 1.0f;
+        const auto range = cellRangeCovering(cellsX, cellsY, extentX, extentY, origin,
+                                             std::min(a.x, b.x) - margin, std::min(a.y, b.y) - margin,
+                                             std::max(a.x, b.x) + margin, std::max(a.y, b.y) + margin);
+        if (!range) continue;
+        std::vector<ColumnSpan> spans;
+        segmentBandColumns(cellsX, cellsY, extentX, extentY, origin, a, b, margin, *range, spans);
+        REQUIRE(spans.size() == static_cast<size_t>(range->maxY - range->minY + 1));
+        auto inBand = [&](std::pair<int, int> c) {
+            if (c.second < range->minY || c.second > range->maxY) return false;
+            const ColumnSpan& s = spans[static_cast<size_t>(c.second - range->minY)];
+            return c.first >= s.minX && c.first <= s.maxX;
+        };
+        // Points on the segment and up to the margin off it, on both axes.
+        for (int k = 0; k < 60; ++k) {
+            const float t = u(rng);
+            const glm::vec2 off((u(rng) * 2.0f - 1.0f) * margin, (u(rng) * 2.0f - 1.0f) * margin);
+            const glm::vec2 p = a + (b - a) * t + (k % 3 == 0 ? glm::vec2(0.0f) : off);
+            const auto c = cellOf(cellsX, cellsY, extentX, extentY, origin, p);
+            if (c.first < 0) continue;  // off the grid altogether
+            INFO("trial " << trial << " t " << t);
+            CHECK(inBand(c));
+        }
+        // Never outside the rectangle the old query used.
+        for (const ColumnSpan& s : spans) {
+            if (s.minX > s.maxX) continue;
+            CHECK(s.minX >= range->minX);
+            CHECK(s.maxX <= range->maxX);
+        }
+    }
+}
+
+TEST_CASE("a diagonal across a full grid takes the band, not the square", "[spatialgrid][band]") {
+    // 64x64 cells of 4 yards: corner to corner.
+    const glm::vec2 origin(0.0f, 0.0f);
+    const glm::vec2 a(0.5f, 0.5f), b(255.5f, 255.5f);
+    const auto range = cellRangeCovering(64, 64, 256.0f, 256.0f, origin, -0.5f, -0.5f, 256.5f, 256.5f);
+    REQUIRE(range);
+    std::vector<ColumnSpan> spans;
+    segmentBandColumns(64, 64, 256.0f, 256.0f, origin, a, b, 1.0f, *range, spans);
+    size_t cells = 0;
+    for (const ColumnSpan& s : spans) cells += s.maxX >= s.minX ? static_cast<size_t>(s.maxX - s.minX + 1) : 0;
+    CHECK(range->count() == 4096);
+    CHECK(cells < 64 * 4);
+    CHECK(cells >= 64);
+}
+
+TEST_CASE("a vertical ray's band is the old rectangle", "[spatialgrid][band]") {
+    const glm::vec2 origin(10.0f, 20.0f);
+    const glm::vec2 p(17.3f, 29.9f);
+    const auto range = cellRangeCovering(32, 32, 64.0f, 64.0f, origin, p.x - 1.0f, p.y - 1.0f, p.x + 1.0f, p.y + 1.0f);
+    REQUIRE(range);
+    std::vector<ColumnSpan> spans;
+    segmentBandColumns(32, 32, 64.0f, 64.0f, origin, p, p, 1.0f, *range, spans);
+    for (const ColumnSpan& s : spans) {
+        CHECK(s.minX == range->minX);
+        CHECK(s.maxX == range->maxX);
+    }
+}

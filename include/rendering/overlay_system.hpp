@@ -206,8 +206,18 @@ private:
     VmaAllocation blobVertAlloc_ = VK_NULL_HANDLE;
     void* blobVertMapped_ = nullptr;
     /// Floor heights per lattice point (terrain, WMO), shared by every blob.
-    std::unordered_map<uint64_t, FloorSample> blobFloorCache_;
-    int blobFloorAge_ = 0;
+    /// A blob floor sample and the call it was asked on. Each one is asked
+    /// again on its own schedule (blobSampleMaxAge) rather than the whole
+    /// cache being dropped at once, which re-asked every sample of every blob
+    /// in one frame - a 45-55 ms renderWorld every few seconds in Dalaran.
+    struct BlobFloorSample {
+        std::optional<float> terrain;
+        std::optional<float> wmo;
+        uint32_t askedAt = 0;
+    };
+    std::unordered_map<uint64_t, BlobFloorSample> blobFloorCache_;
+    uint32_t blobFloorCall_ = 0;
+    uint32_t blobFloorSweptAt_ = 0;
     std::vector<float> blobVerts_;
     static constexpr uint32_t kBlobMaxVerts = 49152;  // per frame slice
 

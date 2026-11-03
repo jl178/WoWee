@@ -63,7 +63,26 @@ uint32_t WorldSoundEmitters::add(Emitter e) {
     uint32_t id = nextId_++;
     if (nextId_ == 0) nextId_ = 1;
     emitters_[id] = e;
+    orderDirty_ = true;
     return id;
+}
+
+void WorldSoundEmitters::refreshOrder() {
+    if (!orderDirty_) return;
+    orderDirty_ = false;
+    periodic_.clear();
+    uint32_t order = 0;
+    for (auto& [id, e] : emitters_) {
+        e.order = order++;
+        if (e.periodic) periodic_.push_back(&e);
+    }
+    // An insert can rehash, which reorders the walk the alive list follows.
+    std::sort(alive_.begin(), alive_.end(),
+              [](const Emitter* a, const Emitter* b) { return a->order < b->order; });
+}
+
+void WorldSoundEmitters::dropAlive(const Emitter* e) {
+    alive_.erase(std::remove(alive_.begin(), alive_.end(), e), alive_.end());
 }
 
 uint32_t WorldSoundEmitters::addLoop(const glm::vec3& renderPos, uint32_t soundEntryId) {
@@ -97,10 +116,17 @@ void WorldSoundEmitters::stop(Emitter& e) {
         AudioEngine::instance().fadeOutSound(e.handle, fadeMs);
         e.handle = 0;
     }
+    if (e.instanceAlive) dropAlive(&e);
     e.instanceAlive = false;
 }
 
 void WorldSoundEmitters::beginInstance(Emitter& e) {
+    if (!e.instanceAlive) {
+        // Kept in walk order: this runs in the scan, which is not that order.
+        const auto at = std::upper_bound(alive_.begin(), alive_.end(), &e,
+            [](const Emitter* a, const Emitter* b) { return a->order < b->order; });
+        alive_.insert(at, &e);
+    }
     e.instanceAlive = true;
     e.schedule = {};
     // 0x4cb580: a fresh instance draws its window shift and a first
@@ -151,6 +177,7 @@ void WorldSoundEmitters::remove(uint32_t id) {
     if (it == emitters_.end()) return;
     stop(it->second);
     emitters_.erase(it);
+    orderDirty_ = true;
 }
 
 void WorldSoundEmitters::clear() {
@@ -159,6 +186,9 @@ void WorldSoundEmitters::clear() {
         e.handle = 0;
     }
     emitters_.clear();
+    periodic_.clear();
+    alive_.clear();
+    orderDirty_ = true;
     mapId_ = 0xFFFFFFFFu;
 }
 
@@ -169,6 +199,7 @@ void WorldSoundEmitters::setMap(uint32_t mapId) {
         if (it->second.placed) {
             stop(it->second);
             it = emitters_.erase(it);
+            orderDirty_ = true;
         } else {
             ++it;
         }
@@ -217,14 +248,17 @@ void WorldSoundEmitters::update(float deltaTime, const glm::vec3& listenerPos, f
         }
     }
 
+    refreshOrder();
+
     // Advanced instances in range run their schedule every frame.
-    for (auto& [id, e] : emitters_) {
+    for (Emitter* p : alive_) {
+        Emitter& e = *p;
         if (e.advanced && e.instanceAlive) stepAdvanced(e, deltaTime, volumeScale);
     }
 
     // One-shots on their animation clock, heard only inside their cutoff.
-    for (auto& [id, e] : emitters_) {
-        if (!e.periodic) continue;
+    for (Emitter* p : periodic_) {
+        Emitter& e = *p;
         if (!resolve(e) || e.dead) continue;
         e.timerS -= deltaTime;
         if (e.timerS > 0.0f) continue;

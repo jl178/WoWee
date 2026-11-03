@@ -1,4 +1,5 @@
 #include "rendering/vk_utils.hpp"
+#include "rendering/image_create_policy.hpp"
 
 #include <cstdio>
 #include "rendering/vk_context.hpp"
@@ -38,6 +39,12 @@ void destroyBuffer(VmaAllocator allocator, AllocatedBuffer& buffer) {
     destroy(allocator, buffer.buffer, buffer.allocation);
 }
 
+namespace {
+bool gAvoidPrivateImageBindings = false;
+}  // namespace
+
+void setAvoidPrivateImageBindings(bool on) { gAvoidPrivateImageBindings = on; }
+
 AllocatedImage createImage(VkDevice device, VmaAllocator allocator,
     uint32_t width, uint32_t height, VkFormat format,
     VkImageUsageFlags usage, VkSampleCountFlagBits samples, uint32_t mipLevels,
@@ -58,6 +65,7 @@ AllocatedImage createImage(VkDevice device, VmaAllocator allocator,
     imgInfo.usage = usage;
     imgInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imgInfo.flags = sampledImageCreateFlags(gAvoidPrivateImageBindings, format, usage, samples, width, height, mipLevels);
 
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
