@@ -839,12 +839,6 @@ wowee_add_test(test_spline_body
             ${CMAKE_SOURCE_DIR}/src/game/spline_packet.cpp
             ${CMAKE_SOURCE_DIR}/src/network/packet.cpp)
 
-# ── test_glue_rules ──────────────────────────────────────────
-# Stock glue screen rules (docs/re/glue-screens.md).
-wowee_add_test(test_glue_rules
-    SOURCES test_glue_rules.cpp
-            ${CMAKE_SOURCE_DIR}/src/game/glue_rules.cpp)
-
 # ── test_unit_motion ─────────────────────────────────────────
 # The stock client's movement of other units (docs/re/unit-motion.md):
 # monster-move splines, remote players' dead reckoning, the body's turn.
@@ -860,6 +854,12 @@ wowee_add_test(test_taxi_rules
             ${CMAKE_SOURCE_DIR}/src/game/unit_motion.cpp)
 wowee_add_test(test_vehicle_rules
     SOURCES test_vehicle_rules.cpp)
+
+# ── test_glue_rules ──────────────────────────────────────────
+# Stock glue screen rules (docs/re/glue-screens.md).
+wowee_add_test(test_glue_rules
+    SOURCES test_glue_rules.cpp
+            ${CMAKE_SOURCE_DIR}/src/game/glue_rules.cpp)
 
 # ── test_spline ──────────────────────────────────────────────
 wowee_add_test(test_spline
@@ -1529,8 +1529,10 @@ wowee_add_test(test_light_tiles
     SOURCES test_light_tiles.cpp)
 
 # ── test_phase2_enhancements ─────────────────────────────────
-# Soft particles' fade, the streamed-scenery fade-in and the rain ripples'
-# strength (docs/enhancements-plan.md E4, E2, E5).
+# Soft particles' fade and the water's place around their pass, the
+# streamed-scenery fade-in, the rain ripples' strength, the corpses' slope
+# and the footfall dust's rules (docs/enhancements-plan.md E4, E2, E5, E8,
+# E21).
 wowee_add_test(test_phase2_enhancements
     SOURCES test_phase2_enhancements.cpp)
 

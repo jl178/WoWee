@@ -27,6 +27,14 @@ its measured cost are in 3.6 and under each entry in section 4.
 `test_phase2_enhancements` holds the logic; `test_enhancements_stock` still
 holds Classic to `Enhancements{}`.
 
+Done (2026-11-03, step 4 and E4/E2 follow-ups): E4's draw order fixed (the
+water, weather, spray and minimap come after the late particle pass in every
+configuration; a particle under water is under it again), E8 corpses settle
+to the slope (`corpsesettle`), E21 footfall dust for everyone's feet
+replacing the mount dust (`mountdust`, relabelled "Dust kicked up"), and E2
+now fades in ground clutter and server game objects. Each new row is
+recommended on and stock off; costs in 3.7, status under each entry.
+
 ## 1. Goal and rules
 
 The client now draws close to stock 3.3.5a (build 12340). Phase 2 adds
@@ -135,7 +143,7 @@ Each needs a toggle (or removal) before phase 2 adds anything new, or
 | U5 | Characters lit by every gathered light, not the 4 nearest M2 lights | `character.frag`, `characters.md` L3 | units lit by non-stock lights | part of `locallights`; off = stock 4 nearest | follows U3 |
 | U6 | Glow cards replaced by billboard sprites | `m2_glow_card.hpp`, `recordGlowSprites` | lamp halos and flame cards drawn as sprites | `glowsprites` "Soft lamp halos" | off until compared with stock cards |
 | U7 | Synthesised smoke particles for models named "smoke" | `m2_renderer_particles.cpp` (`smokeParticles`) | extra smoke puffs | `extrasmoke` or remove | off; check whether stock emitters already draw this smoke (double smoke) |
-| U8 | Mount dust | `mount_dust.cpp` | dust at a running mount's feet | fold into E13 "Dust and snow kicked up" | on |
+| U8 | Mount dust | `mount_dust.cpp` (retired) | dust at a running mount's feet | folded into E21: `mountdust` is now "Dust kicked up" (`footfall_dust.cpp`) | on |
 | U9 | Alpha-to-coverage on cutout foliage, cutoff 0.4/0.5 | `m2_renderer.cpp`, `character_renderer.cpp` | soft leaf edges under MSAA | `smoothleaves` "Smooth leaf edges"; off = stock ref 224/255 (`m2-runtime.md` #23) | on when MSAA is on |
 | U10 | 9-tap rotated Vogel-disk shadow filter | `sampleShadowPCF` (four shaders) | softer shadow edges | part of E3; off = stock 5-tap PCF | on |
 | U11 | Shoulder tone map | `postprocess.frag` (FSR 1 path only) | rolls off highlights above 0.9, on one path only | move under E18 or remove | off (stock) |
@@ -332,6 +340,35 @@ blocks are skipped). The whole recommended set stays inside the 3 ms GPU /
 0.5 ms CPU budget of 3.4 in all four windows; its largest item is still the
 light shafts' fog inject (0.85-1.0 ms), not these three.
 
+### 3.7 Measured cost of the E4 order fix, E8, E21 and the E2 gaps (2026-11-03)
+
+As 3.6 (Iris Xe, 1251x986, Ultra quality columns, Recommended set, noon,
+camera fixed, 5 s period, adjacent windows paired, `perf/parse2.py`),
+Goldshire and the Trade District, dry. The first run shared the CPU with
+builds (load average 12-14 falling to 4.5) and its Elwynn windows for the
+corpse and dust rows held a long hitch; those rows were run again at load
+4.3. GPU / CPU (renderer stages) ms, paired median:
+
+| Row | Elwynn | Stormwind |
+|---|---|---|
+| Soft particles (with the water now after the late pass) | +0.07 ±0.3 / +0.29; again -0.80 ±0.8 / +0.01 | +0.07 ±0.2 / +0.19 |
+| Bodies lie along the ground | -0.23 ±0.1 / +0.11 | -0.56 ±0.5 / -0.16 |
+| Dust kicked up | -0.05 ±0.2 / +0.03 | +0.05 ±0.2 / -0.03 |
+| Fade in new scenery (now with clutter and objects) | -0.50 ±1.1 / -0.07 | -0.22 ±0.3 / +0.07 |
+| Whole recommended set vs stock | +2.07 / +0.26 | +1.48 / +0.25 |
+
+The water pass itself reads 0.13-0.22 ms in the soft particle windows (it
+was inside the scene pass's figure before), and the late pass 0.08; the
+two together are a wash against the scene pass, as the GPU column says.
+The CPU side of the move is the extra pass begin and the frame's view and
+framebuffer, within the scatter. Corpses and dust cost nothing standing
+still: no corpse is measured and no footfall is near the camera on dirt.
+Moving, the dust is a queue entry per footfall in view, three height
+queries per walker every 2 yd, and at most 512 sprites rebuilt on the CPU
+(the probe's run peaked at 12); a corpse is five floor queries once. The
+whole recommended set stays within the 3 ms GPU / 0.5 ms CPU of 3.4 in both
+places; its largest item is still the light shafts' fog inject (0.95 ms).
+
 ## 4. Proposed enhancements
 
 Ranked by feel gained over cost and risk. "Cost" is implementation effort
@@ -419,10 +456,18 @@ stock, the budget, and how to verify.
   (`terrain_fade.frag.spv`), made when the row first goes on and released
   when it goes off; its push range grew by a vec4 for the fraction, which
   the stock shaders do not read. `WOWEE_STREAM_FADE_SECONDS=<s>` stretches
-  the dissolve for a look. Cost: 3.6, ~0. Gaps: ground clutter and server
-  game objects still pop (not stamped); a whole-world reload dissolves the
-  terrain against the sky and horizon, which reads as a 0.4 s sparkle - it
-  could be held back until the terrain under the camera is in.
+  the dissolve for a look. Cost: 3.6, ~0. Since (2026-11-03, second pass):
+  ground clutter is stamped as each chunk's tufts are made
+  (`TerrainManager::streamGroundClutter`; the near sweep after an arrival
+  fills in round the player in view, the far one past the clutter distance
+  where nothing sees it) and so are server game objects as they come into
+  range - M2 objects and WMO objects, both the cached and the incremental
+  upload path (`entity_spawner_player.cpp`, `entity_spawner_processing.cpp`):
+  a chest, a mailbox or a ship now dissolves in like the scenery. Units
+  already had their own 0.5 s opacity fade-in. Cost: the same flag byte per
+  fading instance; 3.7. Gap: a whole-world reload dissolves the terrain
+  against the sky and horizon, which reads as a 0.4 s sparkle - it could be
+  held back until the terrain under the camera is in.
 
 ### E3. Shadow quality: cascades and soft edges
 
@@ -485,17 +530,33 @@ stock, the budget, and how to verify.
   alpha for 2 and 4, colour to black for 3, to white for 5, to 0x80 grey
   for 6. A device with MSAA and no depth resolve has no one-sample depth
   and keeps the stock path. Cost: 3.6, about 0.1 ms (the pass itself
-  0.07). Ordering changes while on: the blended particles now draw after
-  everything else in the scene pass - in the configurations where water,
-  weather, spray, mount dust and footprints are still in that pass (MSAA
-  with the glow/FXAA target, the default) they go under the particles, and
-  a particle below a water surface shows over it; where water is in its
-  own continuation pass (no MSAA, or MSAA straight to the swapchain) the
-  late pass comes before the water as before. The minimap, which also
-  lived in that pass, moves to the end of the late pass
-  (`minimapDrawsLate_`). The brightness overlay no longer scales the
-  particles. Gaps: the stock glow cards (M2 batches, U6 off) and ribbons
-  are not softened; `extrasmoke` stays hard.
+  0.07). Ordering while on (fixed 2026-11-03, second pass): the late pass
+  draws after the scene pass, and the water, the weather, the spray and the
+  minimap always come after it (`water_pass_order.hpp`), so a particle under
+  a water surface is seen through the water and the rain falls over the
+  fire, as stock draws particles, water, then weather. In the default
+  configuration (MSAA into the glow/FXAA target) that used to leave the
+  water in the scene pass, under the particles; there the water now leaves
+  the scene pass for the single-sample water pass, drawn over the resolved
+  scene colour and depth (`sceneWater1xFramebuffer`, the depth-keeping
+  sibling of the 1x water pass), made on demand the first time it is wanted
+  - a session that started with MSAA never had one. The water's refraction
+  copy is then taken before the water, as in the other configurations,
+  instead of from the finished frame. Off, the water stays where it was in
+  every configuration (`test_phase2_enhancements` holds the old rule). The
+  minimap follows the water; a minimap, spray or weather made after the
+  pass decision is rebuilt for its pass before it is drawn there. The late
+  pass and the water pass own their per-frame views and framebuffers per
+  frame slot: a preview renderer shut down while the UI draws flushes
+  VkContext's deferred queue mid-frame, which destroyed them while the frame
+  still recorded. Remaining differences
+  while on: the water's shoreline edge is drawn single-sampled (as in the
+  MSAA-to-swapchain configuration), the brightness overlay scales neither
+  the particles nor the water (it is drawn in the scene pass; at the
+  default brightness of 1 it draws nothing), and the mount dust and
+  footprints stay in the scene pass, under the particles. Gaps: the stock
+  glow cards (M2 batches, U6 off) and ribbons are not softened;
+  `extrasmoke` stays hard.
 
 ### E5. Rain ripples on water and puddles
 
@@ -588,6 +649,31 @@ stock, the budget, and how to verify.
 - **Budget.** Four height queries once per death; nothing per frame.
 - **Verify.** Kill mobs on Thousand Needles slopes, stairs in Stormwind,
   a bridge. Loot and the corpse sparkle still sit on the body.
+- **Status (2026-11-03): done, row `corpsesettle` "Bodies lie along the
+  ground", recommended on.** `rendering/corpse_settle.hpp` (pure, tested)
+  and `CharacterRenderer::updateCorpseSettle`, run by the renderer on the
+  main thread after the M2 update has joined. Once a dead unit's Death
+  animation has 0.3 s left (or at once for a unit with only the looping Dead
+  pose), the floor is read five times - the centre and the two ends of the
+  body's footprint along and across its facing, half extent 0.45 x its
+  standing height held to 0.4-4 yd - as the selection circle reads it (the
+  highest terrain, WMO or M2 floor up to 1.5 yd above the body and 4 below),
+  a plane is fitted (a missing end uses the centre; no floor anywhere is
+  level), held to 25 degrees, and the tilt eases in over those 0.3 s so the
+  body lands on the slope. A corpse that comes into view lying there (or is
+  there when the row goes on) is drawn settled at once; one that moves more
+  than 0.25 yd is measured again; a rising unit eases back up. The tilt is
+  a rotation about the body's position on the ground, applied in
+  `getModelMatrix` only when non-zero, so everything that hangs off the
+  model (weapons, emitters, the shadow caster) follows. Level ground gives
+  exactly the stock matrix. Off: no query, no tilt, and the per-frame loop
+  is skipped once nothing is tilted. Verified with the player's own corpse
+  on the 20 degree road bank at (-9098, -185) in Elwynn: off, the legs stick
+  up out of the bank on one side and the head is buried on the other; on,
+  the body lies along it. Cost: 3.7, ~0. Gaps: the
+  footprint is a cross, not the body's actual outline, so a body lying
+  diagonally over a ridge takes the mean slope; stairs give the stair's
+  mean slope (no per-limb fit; that is E9's foot IK).
 
 ### E9. Foot placement on slopes
 
@@ -798,6 +884,40 @@ stock, the budget, and how to verify.
 - **Budget.** CPU under 0.05 ms; a few hundred particles at most.
 - **Verify.** Barrens road, Tanaris sand, Dun Morogh snow, a raid of
   mounted players. No dust on grass, water, wood or stone.
+- **Status (2026-11-03): dust done, row `mountdust` relabelled "Dust kicked
+  up", recommended on; snow not done.** One system for every footfall:
+  `FootfallDust` (`footfall_dust.cpp`, `footfall_dust.{vert,frag}.glsl`)
+  replaces `MountDust` (removed with its shaders) and keeps its row's keys,
+  so a saved "off" stays off. Feeds: every unit's model $FSD footfall
+  events (the same events that play its footstep sound) and, for the local
+  character and its mount, the footstep driver's own footfalls (it times
+  them with a fallback where the model has no $FSD). They are queued in the
+  character update and turned into dust after the M2 update has joined. The
+  ground is read the way the footstep sound reads it
+  (`footfall_dust_rules.hpp`, tested): water and building floors first,
+  then TerrainType.SoundID (1 dirt and 8 sand raise dust; grass, leaves,
+  snow, soggy, stone, wood, metal and water never), and for a layer with no
+  ground effect the texture's name (dirt, road, path, sand, desert...; any
+  name with grass, moss, mud, snow, swamp in it never). Nothing while it
+  rains or snows, nothing past 35 yd from the camera, and the ground is
+  asked again only after a walker has gone 2 yd. How much follows the
+  walker's speed between footfalls and its size: nothing under 1.8 yd/s, a
+  single wisp on about every other step at a walk, two small puffs at a run,
+  three under a galloping mount; peak opacity 0.22-0.46. Each puff is a
+  soft, slightly clumpy camera-facing sprite that starts at about 0.2 yd,
+  spreads to 3.5x while it rises slowly and is kicked back from the stride,
+  lit by the scene's ambient and sun and fogged like the world, and gone in
+  about a second. At most 512 sprites. Verified in Westfall (dirt) on foot
+  and mounted and that Elwynn's roads (grass by the
+  tables) and the Barrens around the Crossroads (stone and grass by the
+  tables) raise none - the dust follows what the footstep sound says, not
+  how the ground looks. `WOWEE_FOOTFALL_DUST_LOG=1` logs each footfall's
+  speed, ground and the sprite count; `WOWEE_FOOTFALL_DUST_GAIN=<k>` scales
+  the opacity for finding puffs in a shot. Cost: 3.7. Gaps: no landing puff
+  after a jump, no snow (the row is dust only; snow puffs on SoundID 4 would
+  be the same system with a white colour), and the puffs are not soft
+  where they meet the ground (they are small and faint enough that the cut
+  does not read).
 
 ### E22. Ambient life from stock assets
 
@@ -835,6 +955,8 @@ stock, the budget, and how to verify.
 3. E1 (blob), E4 (soft particles), E2 (fade-in), E5 (rain ripples).
    Done 2026-11-03 (3.6).
 4. E8 (corpse settle) and E21 (dust), both small and using existing events.
+   Done 2026-11-03 (3.7), with the E4 draw-order fix and E2's clutter and
+   game objects.
 5. E3 (shadow quality), with the instanced shadow casters.
 6. If time is left: E7 capes only, then E10.
 

@@ -864,6 +864,7 @@ void EntitySpawner::finishWmoSpawn(const PreparedGameObjectWMO& result, uint32_t
     if (instanceId == 0) return;
 
     gameObjectInstances_[result.guid] = {.modelId = modelId, .instanceId = instanceId, .isWmo = true};
+    wmoRenderer->markStreamedIn(instanceId);  // Fade in new scenery (no-op with it off)
 
     // The synchronous WMO path notifies TransportManager after creating the
     // render instance. Do the same here: unique/uncached transport WMOs (notably

@@ -23,6 +23,7 @@
 #include "rendering/animation/animation_ids.hpp"
 #include "rendering/animation/sequence_variation.hpp"
 #include "rendering/animation/anim_selection.hpp"
+#include "rendering/corpse_settle.hpp"
 #include "core/thread_pool.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/bone_slots.hpp"
@@ -4686,6 +4687,12 @@ glm::mat4 CharacterRenderer::getModelMatrix(const CharacterInstance& instance) c
     // Apply transformations: T * R * S
     model = glm::translate(model, instance.position);
 
+    // A corpse tilted onto the slope it lies on (updateCorpseSettle), about
+    // its position on the ground. Never set with the row off.
+    if (instance.corpseSettle > 0.0f) {
+        model *= glm::mat4_cast(corpse_settle::tilt(instance.corpseNormal, instance.corpseSettle));
+    }
+
     // Apply rotation (euler angles, Z-up)
     // Convention: yaw around Z, pitch around X, roll around Y.
     model = glm::rotate(model, instance.rotation.z, glm::vec3(0.0f, 0.0f, 1.0f));  // Yaw
@@ -4695,6 +4702,71 @@ glm::mat4 CharacterRenderer::getModelMatrix(const CharacterInstance& instance) c
     model = glm::scale(model, glm::vec3(instance.scale));
 
     return model;
+}
+
+void CharacterRenderer::updateCorpseSettle(float deltaTime, const FloorHeightFn* floor) {
+    if (!floor && !corpseSettleActive_) return;
+    namespace cs = corpse_settle;
+    bool active = false;
+    for (auto& [id, inst] : instances) {
+        (void)id;
+        if (!floor) {
+            inst.corpseSettle = 0.0f;
+            inst.corpseSampled = false;
+            continue;
+        }
+        const bool body = inst.isDead && inst.deathLocked && !inst.hasOverrideModelMatrix &&
+                          inst.mountedOn == 0 && !inst.isAttachedItem && !inst.isEffectModel &&
+                          !inst.isSceneModel && inst.cachedModel;
+        if (!body) {
+            // Risen (or never a body): back up over the same moment.
+            if (inst.corpseSettle > 0.0f) {
+                inst.corpseSettle = cs::step(inst.corpseSettle, false, deltaTime);
+                active = true;
+            } else {
+                inst.corpseSampled = false;
+            }
+            continue;
+        }
+        // Time left of the fall; negative once it is down (or for a unit
+        // whose model has only the looping Dead pose).
+        float msLeft = -1.0f;
+        if (inst.currentAnimationId == anim::DEATH && inst.currentSequenceIndex >= 0 &&
+            inst.currentSequenceIndex < static_cast<int>(inst.cachedModel->data.sequences.size())) {
+            const float dur = static_cast<float>(
+                inst.cachedModel->data.sequences[inst.currentSequenceIndex].duration);
+            msLeft = dur - inst.animationTime;
+            if (msLeft <= 0.0f) msLeft = -1.0f;
+        }
+        const bool settle = cs::settling(true, msLeft);
+        if (settle && (!inst.corpseSampled ||
+                       glm::distance(inst.position, inst.corpseSampledAt) > cs::kResampleDistance)) {
+            // A corpse that is already down the first time it is measured came
+            // into view lying there: it is drawn settled at once.
+            const bool alreadyDown = !inst.corpseSampled && msLeft < 0.0f;
+            float top = inst.cachedModel->visualBoundMax.z;
+            if (top <= 0.001f) top = inst.cachedModel->data.boundMax.z;
+            const float half = cs::footprintHalfExtent(std::max(0.1f, top) * std::max(0.001f, inst.scale));
+            const glm::vec3& p = inst.position;
+            const float yaw = inst.rotation.z;
+            const glm::vec2 ax(std::cos(yaw), std::sin(yaw));
+            const glm::vec2 ay(-std::sin(yaw), std::cos(yaw));
+            auto at = [&](const glm::vec2& off) { return (*floor)(p.x + off.x, p.y + off.y, p.z); };
+            cs::FootprintHeights h;
+            h.centre = at(glm::vec2(0.0f));
+            h.front = at(ax * half);
+            h.back = at(-ax * half);
+            h.left = at(ay * half);
+            h.right = at(-ay * half);
+            inst.corpseNormal = cs::groundNormal(h, yaw, half);
+            inst.corpseSampledAt = p;
+            inst.corpseSampled = true;
+            if (alreadyDown) inst.corpseSettle = 1.0f;
+        }
+        inst.corpseSettle = cs::step(inst.corpseSettle, settle, deltaTime);
+        active = true;
+    }
+    corpseSettleActive_ = active;
 }
 
 void CharacterRenderer::setInstancePosition(uint32_t instanceId, const glm::vec3& position) {

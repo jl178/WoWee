@@ -904,6 +904,9 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
             }
 
             gameObjectInstances_[guid] = {.modelId = modelId, .instanceId = instanceId, .isWmo = true};
+            // Fade in new scenery: a server object coming into range
+            // dissolves in as streamed scenery does (no-op with it off).
+            wmoRenderer->markStreamedIn(instanceId);
             LOG_DEBUG("Spawned gameobject WMO: guid=0x", std::hex, guid, std::dec,
                      " displayId=", displayId, " at (", x, ", ", y, ", ", z, ")");
 
@@ -1042,6 +1045,8 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
         // was hiding mailboxes/chests well inside the range the server still
         // considers them visible.
         m2Renderer->setInstanceIsGameObject(instanceId, true);
+        // Fade in new scenery (no-op with it off), as the WMO objects above.
+        m2Renderer->markStreamedIn(instanceId);
 
         // Deeprun Tram cars: riding never used real mesh collision to begin with (Z is
         // fully code-locked to the transport's simulated position while boarded, not

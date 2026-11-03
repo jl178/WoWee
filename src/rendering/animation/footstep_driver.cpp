@@ -278,6 +278,10 @@ void FootstepDriver::update(float deltaTime, Renderer* renderer,
                     if (surface == audio::FootstepSurface::WATER) {
                         playWaterStepExtras(renderer);
                     } else {
+                        // At the mount's hooves: its own position, not the rider's.
+                        glm::vec3 hooves = renderer->getCharacterPosition();
+                        (void)characterRenderer->getInstancePosition(mountInstanceId, hooves);
+                        renderer->noteLocalFootfall(mountInstanceId, hooves);
                         std::string mountModel;
                         characterRenderer->getInstanceModelName(mountInstanceId, mountModel);
                         spawnFootprint(renderer, characterRenderer, mountInstanceId,
@@ -303,6 +307,7 @@ void FootstepDriver::update(float deltaTime, Renderer* renderer,
             if (surface == audio::FootstepSurface::WATER) {
                 playWaterStepExtras(renderer);
             } else {
+                renderer->noteLocalFootfall(characterInstanceId, renderer->getCharacterPosition());
                 spawnFootprint(renderer, characterRenderer, characterInstanceId,
                                nextPlayerFootLeft_, FootprintFallback::BIPED);
                 nextPlayerFootLeft_ = !nextPlayerFootLeft_;
