@@ -4,6 +4,7 @@
 #include "game/global_strings.hpp"
 #include "game/combat_log_event.hpp"
 #include "game/social_handler.hpp"
+#include "game/guild_roster_throttle.hpp"
 #include "game/spell_handler.hpp"
 #include "addons/lua_api_registrations.hpp"
 #include "ui/framexml_takeover.hpp"
@@ -86,48 +87,6 @@ static const char* lfgJoinResultString(uint32_t result) {
         case 15: return "Cannot join dungeon finder.";  // LFG_JOIN_INTERNAL_ERROR
         case 16: return "No spec/role available.";
         default: return "Cannot join dungeon finder.";
-    }
-}
-
-// ArenaTeamCommandErrors, as SMSG_ARENA_TEAM_COMMAND_RESULT sends them. The
-// range is sparse - the server sends 0x08 for two different refusals and skips
-// most of what lies between - so a table indexed by the value would be mostly
-// holes and would answer the wrong sentence for anything the server adds.
-static const char* arenaTeamErrorString(uint32_t error) {
-    switch (error) {
-        case 0x01: return "Internal arena team error.";
-        case 0x02: return "You are already in an arena team of that size.";
-        case 0x03: return "That player is already in an arena team of that size.";
-        case 0x04: return "You have already been invited to an arena team.";
-        case 0x05: return "That player has already been invited to an arena team.";
-        case 0x06: return "That arena team name is invalid.";
-        case 0x07: return "That arena team name already exists.";
-        // The server reuses this value for the captain leaving and for acting
-        // without the rank to do so.
-        case 0x08: return "The captain cannot leave; permissions denied.";
-        case 0x09: return "You are not in an arena team of that size.";
-        case 0x0A: return "That player is not in your arena team.";
-        case 0x0B: return "No player of that name was found.";
-        case 0x0C: return "That player is of the opposing faction.";
-        case 0x13: return "That player is ignoring you.";
-        case 0x15: return "That player's level is too low.";
-        case 0x16: return "That player's level is too high.";
-        case 0x17: return "The arena team is full.";
-        case 0x1B: return "No arena team of that name was found.";
-        case 0x1E: return "Arena teams are locked for the season.";
-        default:   return "The arena team command was refused.";
-    }
-}
-
-static const char* lfgTeleportDeniedString(uint32_t reason) {
-    switch (reason) {
-        case 0:  return "You are not in a LFG group.";
-        case 1:  return "You are not in the dungeon.";
-        case 2:  return "You have a summon pending.";
-        case 3:  return "You are dead.";
-        case 4:  return "You have Deserter.";
-        case 5:  return "You do not meet the requirements.";
-        default: return "Teleport to dungeon denied.";
     }
 }
 
@@ -492,17 +451,12 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
         if (owner_.getState() == WorldState::IN_WORLD) handleWho(packet);
     };
     table[Opcode::SMSG_WHOIS] = [this](network::Packet& packet) {
+        // The GM whois answer goes to the console, not the chat frame:
+        // Wow.exe's handler (0x6B3280) hands the text to the console writer
+        // (0x765270) and nothing else.
         if (packet.getReadPos() < packet.getSize()) {
-            std::string whoisText = packet.readString();
-            if (!whoisText.empty()) {
-                std::string line;
-                for (char c : whoisText) {
-                    if (c == '\n') { if (!line.empty()) owner_.addSystemChatMessage("[Whois] " + line); line.clear(); }
-                    else line += c;
-                }
-                if (!line.empty()) owner_.addSystemChatMessage("[Whois] " + line);
-                LOG_INFO("SMSG_WHOIS: ", whoisText);
-            }
+            const std::string whoisText = packet.readString();
+            if (!whoisText.empty()) LOG_INFO("[console] SMSG_WHOIS: ", whoisText);
         }
     };
     table[Opcode::SMSG_FRIEND_STATUS] = [this](network::Packet& packet) {
@@ -573,7 +527,6 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
         partyData = GroupListData{};
         // ERR_GROUP_DISBANDED, once, as the system line it is.
         owner_.displayGameMessage("ERR_GROUP_DISBANDED", "Your group has been disbanded.");
-        groupDestroyedAnnounced_ = true;
         if (owner_.addonEventCallbackRef()) {
             owner_.addonEventCallbackRef()("GROUP_ROSTER_UPDATE", {});
             owner_.addonEventCallbackRef()("PARTY_MEMBERS_CHANGED", {});
@@ -588,7 +541,7 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_GROUP_CANCEL] = [this](network::Packet& /*packet*/) {
         pendingGroupInvite = false;
         pendingInviterName.clear();
-        owner_.addSystemChatMessage("Group invite cancelled.");
+        // The event alone (Wow.exe 0x6CBD10 -> 0x512560): no line.
         if (owner_.addonEventCallbackRef())
             owner_.addonEventCallbackRef()("PARTY_INVITE_CANCEL", {});
     };
@@ -767,12 +720,18 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_PETITION_SHOWLIST] = [this](network::Packet& packet) { handlePetitionShowlist(packet); };
     table[Opcode::SMSG_TURN_IN_PETITION_RESULTS] = [this](network::Packet& packet) { handleTurnInPetitionResults(packet); };
     table[Opcode::SMSG_OFFER_PETITION_ERROR] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(4)) {
-            uint32_t err = packet.readUInt32();
-            if (err == 1) owner_.addSystemChatMessage("Player is already in a guild.");
-            else if (err == 2) owner_.addSystemChatMessage("Player already has a petition.");
-            else owner_.raiseUiError("Cannot offer petition to that player.");
+        // Wow.exe (0x5CEA00) reads a guid and names it in
+        // ERR_ALREADY_IN_ARENA_TEAM_S, whatever the server meant by it.
+        if (packet.hasRemaining(8)) {
+            const uint64_t who = packet.readUInt64();
+            const std::string name = owner_.lookupName(who);
+            if (!name.empty())
+                owner_.displayGameMessage("ERR_ALREADY_IN_ARENA_TEAM_S",
+                                          name + " is already in an arena team of that size.", {name});
+            else
+                owner_.queryPlayerName(who);
         }
+        packet.skipAll();
     };
     table[Opcode::MSG_GUILD_EVENT_LOG_QUERY] = [this](network::Packet& packet) { handleGuildEventLog(packet); };
     table[Opcode::MSG_GUILD_BANK_LOG_QUERY] = [this](network::Packet& packet) { handleGuildBankLog(packet); };
@@ -786,18 +745,17 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
         const uint64_t who = packet.readUInt64();
         auto nit = owner_.getPlayerNameCache().find(who);
         const std::string name = nit != owner_.getPlayerNameCache().end() ? nit->second : std::string();
-        if (name.empty()) owner_.queryPlayerName(who);
-        owner_.addSystemChatMessage((name.empty() ? std::string("Someone") : name) +
-                                    " has declined to sign your petition.");
-        owner_.playUiMessageSound("ERR_PETITION_DECLINED_S");
+        if (name.empty()) { owner_.queryPlayerName(who); return; }
+        owner_.displayGameMessage("ERR_PETITION_DECLINED_S",
+                                  name + " has declined to sign your petition.", {name});
     };
 
     // ---- Battlefield / BG ----
     table[Opcode::SMSG_BATTLEFIELD_STATUS] = [this](network::Packet& packet) { handleBattlefieldStatus(packet); };
     table[Opcode::SMSG_BATTLEFIELD_LIST] = [this](network::Packet& packet) { handleBattlefieldList(packet); };
+    // Wow.exe (0x54D4B0): ERR_PLAYER_DEAD, the only reason it knows.
     table[Opcode::SMSG_BATTLEFIELD_PORT_DENIED] = [this](network::Packet& /*packet*/) {
-        owner_.addUIError("Battlefield port denied.");
-        owner_.addSystemChatMessage("Battlefield port denied.");
+        owner_.displayGameMessage("ERR_PLAYER_DEAD", "You can't do that when you're dead.");
     };
     table[Opcode::MSG_BATTLEGROUND_PLAYER_POSITIONS] = [this](network::Packet& packet) {
         bgPlayerPositions_.clear();
@@ -814,8 +772,20 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
             }
         }
     };
-    table[Opcode::SMSG_REMOVED_FROM_PVP_QUEUE] = [this](network::Packet& /*packet*/) {
-        owner_.addSystemChatMessage("You have been removed from the PvP queue.");
+    // The reason, as Wow.exe (0x526530 -> 0x522180) words it; other values
+    // say nothing.
+    table[Opcode::SMSG_REMOVED_FROM_PVP_QUEUE] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(4)) { packet.skipAll(); return; }
+        switch (packet.readUInt32()) {
+            case 0: owner_.displayGameMessage("ERR_REMOVE_FROM_PVP_QUEUE_GRANT_LEVEL",
+                        "You have been removed from a PVP queue because another player has granted you a level"); break;
+            case 1: owner_.displayGameMessage("ERR_REMOVE_FROM_PVP_QUEUE_XP_GAIN",
+                        "You have been removed from a PVP queue because you have changed your XP gain settings"); break;
+            case 2: owner_.displayGameMessage("ERR_REMOVE_FROM_PVP_QUEUE_FACTION_CHANGE",
+                        "You have been removed from a PvP Queue because you changed your faction."); break;
+            default: break;
+        }
+        packet.skipAll();
     };
     // The answer to a join, and most often a refusal. A positive value is the
     // battleground joined; the negative ones are the reasons a queue was
@@ -824,130 +794,184 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_GROUP_JOINED_BATTLEGROUND] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(4)) return;
         bgJoinPendingType_ = 0;  // answered
+        // Each answer is the GameError Wow.exe's handler (0x54B1C0) raises
+        // for it; -1 says nothing.
         const int32_t result = static_cast<int32_t>(packet.readUInt32());
-        std::string msg;
-        switch (result) {
-            case -1: return;  // nothing to say
-            case 0:   msg = "Your group has joined a battleground queue, but you are not eligible"; break;
-            case -2:  msg = "You cannot join the battleground yet because you or one of your party members is flagged as a Deserter."; break;
-            case -3:  msg = "Incorrect party size for this arena."; break;
-            case -4:  msg = "You can only be queued for 2 battles at once"; break;
-            case -5:  msg = "You cannot queue for a rated match while queued for other battles"; break;
-            case -6:  msg = "You cannot queue for another battle while queued for a rated arena match"; break;
-            case -7:  msg = "Your team has left the arena queue"; break;
-            case -8:  msg = "You can't do that in a battleground."; break;
-            case -10: msg = "Cannot join the queue unless all members of your party are in the same battleground level range."; break;
-            case -11: {
-                std::string who = "A party member";
-                if (packet.hasRemaining(8)) {
-                    auto it = owner_.getPlayerNameCache().find(packet.readUInt64());
-                    if (it != owner_.getPlayerNameCache().end() && !it->second.empty()) who = it->second;
-                }
-                msg = who + " was unavailable to join the queue.";
-                break;
+        struct Refusal { int32_t code; const char* key; const char* text; };
+        static constexpr Refusal kRefusals[] = {
+            {-2,  "ERR_GROUP_JOIN_BATTLEGROUND_DESERTERS", "You cannot join the battleground yet because you or one of your party members is flagged as a Deserter."},
+            {-3,  "ERR_ARENA_TEAM_PARTY_SIZE", "Incorrect party size for this arena."},
+            {-4,  "ERR_BATTLEGROUND_TOO_MANY_QUEUES", "You can only be queued for 2 battles at once"},
+            {-5,  "ERR_BATTLEGROUND_CANNOT_QUEUE_FOR_RATED", "You cannot queue for a rated match while queued for other battles"},
+            {-6,  "ERR_BATTLEDGROUND_QUEUED_FOR_RATED", "You cannot queue for another battle while queued for a rated arena match"},
+            {-7,  "ERR_BATTLEGROUND_TEAM_LEFT_QUEUE", "Your team has left the arena queue"},
+            {-8,  "ERR_BATTLEGROUND_NOT_IN_BATTLEGROUND", "You can't do that in a battleground."},
+            {-9,  "ERR_BATTLEGROUND_JOIN_XP_GAIN", "You can't join a battleground with your experience gain turned off."},
+            {-10, "ERR_BATTLEGROUND_JOIN_RANGE_INDEX", "Cannot join the queue unless all members of your party are in the same battleground level range."},
+            {-13, "ERR_LFG_CANT_USE_BATTLEGROUND", "You cannot queue for a battleground or arena while using the dungeon system."},
+            {-14, "ERR_IN_RANDOM_BG", "Can't do that while in a Random Battleground queue."},
+            {-15, "ERR_IN_NON_RANDOM_BG", "Can't queue for Random Battleground while in another Battleground queue."},
+        };
+        if (result == -1) return;
+        for (const auto& r : kRefusals) {
+            if (r.code == result) {
+                LOG_WARNING("Battleground join refused: ", result);
+                owner_.displayGameMessage(r.key, r.text);
+                return;
             }
-            case -12: msg = "Join as a group failed"; break;
-            case -13: msg = "You cannot queue for a battleground or arena while using the dungeon system."; break;
-            case -14: msg = "Can't do that while in a Random Battleground queue."; break;
-            case -15: msg = "Can't queue for Random Battleground while in another Battleground queue."; break;
-            default:
-                if (result > 0) {
-                    std::string bgName = "a battleground";
-                    for (const auto& kv : kBgNames)
-                        if (kv.first == static_cast<uint32_t>(result)) { bgName = kv.second; break; }
-                    owner_.addSystemChatMessage("Your group has joined the queue for " + bgName);
-                    return;
-                }
-                msg = "Could not join the battleground queue (" + std::to_string(result) + ").";
-                break;
         }
-        LOG_WARNING("Battleground join refused: ", result, " - ", msg);
-        owner_.addUIError(msg);
-        owner_.addSystemChatMessage(msg);
+        if (result == -11 || result == -12) {
+            // A member who did not answer, by name when the client knows it.
+            const uint64_t who = packet.hasRemaining(8) ? packet.readUInt64() : 0;
+            const std::string name = who ? owner_.lookupName(who) : std::string();
+            if (name.empty())
+                owner_.displayGameMessage("ERR_BATTLEGROUND_JOIN_FAILED", "Join as a group failed");
+            else
+                owner_.displayGameMessage("ERR_BATTLEGROUND_JOIN_TIMED_OUT",
+                                          name + " was unavailable to join the queue.", {name});
+            return;
+        }
+        if (result > 0) {
+            std::string bgName;
+            for (const auto& kv : kBgNames)
+                if (kv.first == static_cast<uint32_t>(result)) { bgName = kv.second; break; }
+            if (!bgName.empty()) {
+                owner_.displayGameMessage("ERR_GROUP_JOIN_BATTLEGROUND_S",
+                                          "Your group has joined the queue for " + bgName, {bgName});
+                return;
+            }
+        }
+        owner_.displayGameMessage("ERR_GROUP_JOIN_BATTLEGROUND_FAIL",
+                                  "Your group has joined a battleground queue, but you are not eligible");
     };
-    table[Opcode::SMSG_JOINED_BATTLEGROUND_QUEUE] = [this](network::Packet& /*packet*/) {
-        owner_.addSystemChatMessage("You have joined the battleground queue.");
-    };
+    // No handler in Wow.exe at all: the queue status update that follows is
+    // the announcement.
+    table[Opcode::SMSG_JOINED_BATTLEGROUND_QUEUE] = [](network::Packet& packet) { packet.skipAll(); };
+    // ERR_BG_PLAYER_JOINED_SS / ERR_BG_PLAYER_LEFT_S, chat lines (Wow.exe
+    // 0x54B510), once the name is known.
     table[Opcode::SMSG_BATTLEGROUND_PLAYER_JOINED] = [this](network::Packet& packet) {
         if (packet.hasRemaining(8)) {
-            uint64_t guid = packet.readUInt64();
-            auto it = owner_.getPlayerNameCache().find(guid);
-            if (it != owner_.getPlayerNameCache().end() && !it->second.empty())
-                owner_.addSystemChatMessage(it->second + " has entered the battleground.");
+            const std::string name = owner_.lookupName(packet.readUInt64());
+            if (!name.empty())
+                owner_.displayGameMessage("ERR_BG_PLAYER_JOINED_SS",
+                                          name + " has joined the battle", {name, name});
         }
     };
     table[Opcode::SMSG_BATTLEGROUND_PLAYER_LEFT] = [this](network::Packet& packet) {
         if (packet.hasRemaining(8)) {
-            uint64_t guid = packet.readUInt64();
-            auto it = owner_.getPlayerNameCache().find(guid);
-            if (it != owner_.getPlayerNameCache().end() && !it->second.empty())
-                owner_.addSystemChatMessage(it->second + " has left the battleground.");
+            const std::string name = owner_.lookupName(packet.readUInt64());
+            if (!name.empty())
+                owner_.displayGameMessage("ERR_BG_PLAYER_LEFT_S", name + " has left the battle", {name});
         }
     };
 
     // ---- Instance ----
-    for (auto op : { Opcode::SMSG_INSTANCE_DIFFICULTY, Opcode::MSG_SET_DUNGEON_DIFFICULTY }) {
-        table[op] = [this](network::Packet& packet) { handleInstanceDifficulty(packet); };
-    }
+    table[Opcode::SMSG_INSTANCE_DIFFICULTY] = [this](network::Packet& packet) {
+        handleInstanceDifficulty(packet, false);
+    };
+    table[Opcode::MSG_SET_DUNGEON_DIFFICULTY] = [this](network::Packet& packet) {
+        handleInstanceDifficulty(packet, true);
+    };
 
     // ---- Guild / RAF / PvP AFK (moved from GameHandler) ----
     table[Opcode::SMSG_GUILD_DECLINE] = [this](network::Packet& packet) {
+        // ERR_GUILD_DECLINE_S, a chat line (Wow.exe 0x6CC410).
         if (packet.hasData()) {
-            std::string name = packet.readString();
-            owner_.addSystemChatMessage(name + " declined your guild invitation.");
+            const std::string name = packet.readString();
+            owner_.displayGameMessage("ERR_GUILD_DECLINE_S",
+                                      name + " declines your guild invitation.", {name});
         }
     };
+    // Nothing said: Wow.exe (0x526530) drops the link from the friends list
+    // and fires FRIENDLIST_UPDATE.
     table[Opcode::SMSG_REFER_A_FRIEND_EXPIRED] = [this](network::Packet& packet) {
-        owner_.addSystemChatMessage("Your Recruit-A-Friend link has expired.");
         packet.skipAll();
+        owner_.fireAddonEvent("FRIENDLIST_UPDATE", {});
     };
+    // The reason as Wow.exe (0x5219E0) words it. Only reason 9 carries a
+    // name; 0 and anything past 13 say nothing.
     table[Opcode::SMSG_REFER_A_FRIEND_FAILURE] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(4)) {
-            uint32_t reason = packet.readUInt32();
-            static const char* kRafErrors[] = {
-                "Not eligible",            // 0
-                "Target not eligible",     // 1
-                "Too many referrals",      // 2
-                "Wrong faction",           // 3
-                "Not a recruit",           // 4
-                "Recruit requirements not met", // 5
-                "Level above requirement", // 6
-                "Friend needs account upgrade", // 7
-            };
-            const char* msg = (reason < 8) ? kRafErrors[reason]
-                                           : "Recruit-A-Friend failed.";
-            owner_.addSystemChatMessage(std::string("Recruit-A-Friend: ") + msg);
-        }
+        if (!packet.hasRemaining(4)) { packet.skipAll(); return; }
+        const uint32_t reason = packet.readUInt32();
+        std::string name;
+        if (reason == 9 && packet.hasData()) name = packet.readString();
         packet.skipAll();
+        switch (reason) {
+            case 1:  owner_.displayGameMessage("ERR_REFER_A_FRIEND_NOT_REFERRED_BY", "You were not referred by that player"); break;
+            case 2:  owner_.displayGameMessage("ERR_REFER_A_FRIEND_TARGET_TOO_HIGH", "That player's level is too high"); break;
+            case 3:  owner_.displayGameMessage("ERR_REFER_A_FRIEND_INSUFFICIENT_GRANTABLE_LEVELS", "You have not earned enough levels to grant any more levels"); break;
+            case 4:  owner_.displayGameMessage("ERR_REFER_A_FRIEND_TOO_FAR", "That player is too far away"); break;
+            case 5:  owner_.displayGameMessage("ERR_REFER_A_FRIEND_DIFFERENT_FACTION", "You cannot grant levels to a character of the opposite faction"); break;
+            case 6:  owner_.displayGameMessage("ERR_REFER_A_FRIEND_NOT_NOW", "You cannot grant that player a level right now."); break;
+            case 7:  owner_.displayGameMessage("ERR_REFER_A_FRIEND_GRANT_LEVEL_MAX_I", "You cannot grant levels to players level 60 or higher", {"60"}); break;
+            case 8:  owner_.displayGameMessage("ERR_GENERIC_NO_TARGET", "You have no target."); break;
+            case 9:  owner_.displayGameMessage("ERR_TARGET_NOT_IN_GROUP_S", name + " is not in your party.", {name}); break;
+            case 10: owner_.displayGameMessage("ERR_REFER_A_FRIEND_SUMMON_LEVEL_MAX_I", "You cannot summon players above level 60", {"60"}); break;
+            case 11: owner_.displayGameMessage("ERR_REFER_A_FRIEND_SUMMON_COOLDOWN", "You can only summon your friend once per hour"); break;
+            case 12: owner_.displayGameMessage("ERR_REFER_A_FRIEND_INSUF_EXPAN_LVL", "That player does not have the required expansion to access this area"); break;
+            case 13: owner_.displayGameMessage("ERR_REFER_A_FRIEND_SUMMON_OFFLINE_S", " is offline and cannot be summoned", {name}); break;
+            default: break;
+        }
     };
+    // Wow.exe (0x6E2E90) speaks only for results 5 and 6, the AFK-report
+    // system being switched on or off; every other result is silent.
     table[Opcode::SMSG_REPORT_PVP_AFK_RESULT] = [this](network::Packet& packet) {
         if (packet.hasRemaining(1)) {
-            uint8_t result = packet.readUInt8();
-            if (result == 0)
-                owner_.addSystemChatMessage("AFK report submitted.");
-            else
-                owner_.raiseUiError("Cannot report that player as AFK right now.");
+            const uint8_t result = packet.readUInt8();
+            if (result == 5)
+                owner_.addGlobalStringChatLine("PVP_REPORT_AFK_SYSTEM_ENABLED", "The PvP AFK reporting system has been enabled.");
+            else if (result == 6)
+                owner_.addGlobalStringChatLine("PVP_REPORT_AFK_SYSTEM_DISABLED", "The PvP AFK reporting system has been disabled.");
         }
         packet.skipAll();
     };
-    table[Opcode::SMSG_INSTANCE_SAVE_CREATED] = [this](network::Packet& /*packet*/) {
-        owner_.addSystemChatMessage("You are now saved to this instance.");
+    // INSTANCE_SAVED, a plain chat line, for a zero (Wow.exe 0x52BB10).
+    table[Opcode::SMSG_INSTANCE_SAVE_CREATED] = [this](network::Packet& packet) {
+        const uint32_t debug = packet.hasRemaining(4) ? packet.readUInt32() : 0;
+        if (debug == 0)
+            owner_.addGlobalStringChatLine("INSTANCE_SAVED", "You are now saved to this instance");
     };
+    // AzerothCore's RaidInstanceMessage types, as Wow.exe (0x50CA80) says
+    // them: 1-3 the lock warnings in hours or minutes, 4 the welcome (an
+    // event uiparent.lua words), 5 the lock expiring. Time in seconds.
     table[Opcode::SMSG_RAID_INSTANCE_MESSAGE] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(12)) return;
-        uint32_t msgType = packet.readUInt32();
-        uint32_t mapId   = packet.readUInt32();
-        packet.readUInt32(); // diff
+        if (!packet.hasRemaining(16)) { packet.skipAll(); return; }
+        const uint32_t msgType = packet.readUInt32();
+        const uint32_t mapId   = packet.readUInt32();
+        packet.readUInt32(); // difficulty
+        const uint32_t timeLeft = packet.readUInt32();
         std::string mapLabel = owner_.getMapName(mapId);
-        if (mapLabel.empty()) mapLabel = "instance #" + std::to_string(mapId);
-        if (msgType == 1 && packet.hasRemaining(4)) {
-            uint32_t timeLeft = packet.readUInt32();
-            owner_.addSystemChatMessage(mapLabel + " will reset in " + std::to_string(timeLeft / 60) + " minute(s).");
-        } else if (msgType == 2) {
-            owner_.addSystemChatMessage("You have been saved to " + mapLabel + ".");
-        } else if (msgType == 3) {
-            owner_.addSystemChatMessage("Welcome to " + mapLabel + ".");
+        switch (msgType) {
+            case 1:
+                owner_.addGlobalStringChatLine("RAID_INSTANCE_WARNING_HOURS",
+                    "Your instance lock for %s will expire in %d |4hour:hours;.",
+                    {mapLabel, std::to_string(timeLeft / 3600)});
+                break;
+            case 2:
+                owner_.addGlobalStringChatLine("RAID_INSTANCE_WARNING_MIN",
+                    "Your instance lock for %s will expire in %d |4minute:minutes;!",
+                    {mapLabel, std::to_string(timeLeft / 60)});
+                break;
+            case 3:
+                owner_.addGlobalStringChatLine("RAID_INSTANCE_WARNING_MIN_SOON",
+                    "Your instance lock for %s will expire in %d |4minute:minutes;.",
+                    {mapLabel, std::to_string(timeLeft / 60)});
+                break;
+            case 4: {
+                const bool locked = packet.hasRemaining(1) && packet.readUInt8() != 0;
+                const bool extended = packet.hasRemaining(1) && packet.readUInt8() != 0;
+                owner_.fireAddonEvent("RAID_INSTANCE_WELCOME",
+                                      {mapLabel, std::to_string(timeLeft),
+                                       locked ? "1" : "0", extended ? "1" : "0"});
+                break;
+            }
+            case 5:
+                owner_.addGlobalStringChatLine("RAID_INSTANCE_EXPIRED",
+                    "Your instance lock for %s has expired.", {mapLabel});
+                break;
+            default: break;
         }
+        packet.skipAll();
     };
     table[Opcode::SMSG_INSTANCE_RESET] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(4)) return;
@@ -955,23 +979,30 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
         auto it = std::remove_if(instanceLockouts_.begin(), instanceLockouts_.end(),
             [mapId](const InstanceLockout& lo){ return lo.mapId == mapId; });
         instanceLockouts_.erase(it, instanceLockouts_.end());
+        // INSTANCE_RESET_SUCCESS, a plain chat line (Wow.exe 0x50CCD0); the
+        // map id itself when Map.dbc has no name for it.
         std::string mapLabel = owner_.getMapName(mapId);
-        if (mapLabel.empty()) mapLabel = "instance #" + std::to_string(mapId);
-        owner_.addSystemChatMessage(mapLabel + " has been reset.");
+        if (mapLabel.empty()) mapLabel = std::to_string(mapId);
+        owner_.addGlobalStringChatLine("INSTANCE_RESET_SUCCESS", "%s has been reset.", {mapLabel});
     };
+    // The reason first, then the map (AzerothCore InstanceResetFailed::Write;
+    // Wow.exe 0x50CDA0 reads them in that order). Each reason is a plain
+    // chat line; any other prints nothing.
     table[Opcode::SMSG_INSTANCE_RESET_FAILED] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(8)) return;
-        uint32_t mapId  = packet.readUInt32();
-        uint32_t reason = packet.readUInt32();
-        static const char* resetFailReasons[] = {
-            "Not max level.", "Offline party members.", "Party members inside.",
-            "Party members changing zone.", "Heroic difficulty only."
-        };
-        const char* reasonMsg = (reason < 5) ? resetFailReasons[reason] : "Unknown reason.";
+        const uint32_t reason = packet.readUInt32();
+        const uint32_t mapId  = packet.readUInt32();
         std::string mapLabel = owner_.getMapName(mapId);
-        if (mapLabel.empty()) mapLabel = "instance #" + std::to_string(mapId);
-        owner_.addUIError("Cannot reset " + mapLabel + ": " + reasonMsg);
-        owner_.addSystemChatMessage("Cannot reset " + mapLabel + ": " + reasonMsg);
+        if (mapLabel.empty()) mapLabel = std::to_string(mapId);
+        switch (reason) {
+            case 0: owner_.addGlobalStringChatLine("INSTANCE_RESET_FAILED",
+                        "Cannot reset %s.  There are players still inside the instance.", {mapLabel}); break;
+            case 1: owner_.addGlobalStringChatLine("INSTANCE_RESET_FAILED_OFFLINE",
+                        "Cannot reset %s.  There are players offline in your party.", {mapLabel}); break;
+            case 2: owner_.addGlobalStringChatLine("INSTANCE_RESET_FAILED_ZONING",
+                        "Cannot reset %s.  There are players in your party attempting to zone into an instance.", {mapLabel}); break;
+            default: break;
+        }
     };
     table[Opcode::SMSG_INSTANCE_LOCK_WARNING_QUERY] = [this](network::Packet& packet) {
         // Nine bytes: a countdown in milliseconds, the mask of encounters
@@ -1013,8 +1044,12 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_LFG_PLAYER_REWARD] = [this](network::Packet& packet) { handleLfgPlayerReward(packet); };
     table[Opcode::SMSG_LFG_BOOT_PROPOSAL_UPDATE] = [this](network::Packet& packet) { handleLfgBootProposalUpdate(packet); };
     table[Opcode::SMSG_LFG_TELEPORT_DENIED] = [this](network::Packet& packet) { handleLfgTeleportDenied(packet); };
+    // Wow.exe (0x55BDC0): the queue state is wiped, LFG_UPDATE, and
+    // ERR_SYSTEM_DISABLED.
     table[Opcode::SMSG_LFG_DISABLED] = [this](network::Packet& /*packet*/) {
-        owner_.addSystemChatMessage("The Dungeon Finder is currently disabled.");
+        lfgState_ = LfgState::None;
+        owner_.fireAddonEvent("LFG_UPDATE", {});
+        owner_.displayGameMessage("ERR_SYSTEM_DISABLED", "This system is currently disabled.");
     };
     table[Opcode::SMSG_LFG_OFFER_CONTINUE] = [this](network::Packet& packet) {
         // uint32 dungeon entry, which the handler used to skip entirely - and
@@ -1030,9 +1065,10 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
             dungeonId = entry & 0x00FFFFFFu;
             typeId    = (entry >> 24) & 0xFFu;
         }
+        // The event alone (Wow.exe 0x55BDC0); the frame words the offer.
+        // An entry LFGDungeons.dbc does not know raises nothing.
         std::string name = owner_.getLfgDungeonName(dungeonId);
-        if (name.empty()) name = "your dungeon";
-        owner_.addSystemChatMessage("Dungeon Finder: You may continue " + name + ".");
+        if (name.empty()) return;
         if (owner_.addonEventCallbackRef()) {
             owner_.addonEventCallbackRef()("LFG_OFFER_CONTINUE",
                                            {name, std::to_string(dungeonId),
@@ -1044,22 +1080,18 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
         uint64_t roleGuid = packet.readUInt64();
         uint8_t  ready    = packet.readUInt8();
         uint32_t roles    = packet.readUInt32();
-        std::string roleName;
-        if (roles & 0x02) roleName += "Tank ";
-        if (roles & 0x04) roleName += "Healer ";
-        if (roles & 0x08) roleName += "DPS ";
-        if (roleName.empty()) roleName = "None";
-        std::string pName = "A player";
-        if (auto e = owner_.getEntityManager().getEntity(roleGuid))
-            if (auto u = std::dynamic_pointer_cast<Unit>(e))
-                pName = u->getName();
-        if (ready) owner_.addSystemChatMessage(pName + " has chosen: " + roleName);
-        // Announced as well as written to chat. The role-check window lists
-        // who has picked what as they pick it, and it learns that from this
-        // event alone - parsed here since the chat line needed the same three
-        // bits, and never fired, so the list stayed blank while the chat
-        // filled up beside it.
-        //
+        packet.skipAll();
+        // Wow.exe (0x55BDC0): a member who declined is
+        // ERR_LFG_PLAYER_DECLINED_ROLE_CHECK; one who chose is the event the
+        // role-check window lists them from, and no chat line. Both only for
+        // a member whose name is known.
+        const std::string pName = owner_.lookupName(roleGuid);
+        if (pName.empty()) { owner_.queryPlayerName(roleGuid); return; }
+        if (!ready) {
+            owner_.displayGameMessage("ERR_LFG_PLAYER_DECLINED_ROLE_CHECK",
+                                      pName + " has not selected any roles.", {pName});
+            return;
+        }
         // Booleans through eventBool: "0" is a number and true in Lua, so a
         // false argument in front of a true one cannot be spelled as text.
         if (owner_.addonEventCallbackRef()) {
@@ -1187,10 +1219,9 @@ void SocialHandler::inspectUnit(uint64_t guid) {
         return;
     }
     auto entity = owner_.getEntityManager().getEntity(guid);
-    if (!entity || entity->getType() != ObjectType::PLAYER) {
-        owner_.addSystemChatMessage("You can only inspect players.");
-        return;
-    }
+    // Silent, as NotifyInspect is for anything CanInspect refuses: the stock
+    // menus never offer inspecting a creature.
+    if (!entity || entity->getType() != ObjectType::PLAYER) return;
     auto packet = InspectPacket::build(guid);
     owner_.getSocket()->send(packet);
     userInspectGuid_ = guid;
@@ -1344,13 +1375,8 @@ void SocialHandler::handleInspectResults(network::Packet& packet) {
         } else {
             LOG_WARNING("SMSG_TALENTS_INFO: too short after guid, ", bytesLeft, " bytes");
         }
-        auto entity = owner_.getEntityManager().getEntity(guid);
-        std::string name = "Target";
-        if (entity) {
-            auto player = std::dynamic_pointer_cast<Player>(entity);
-            if (player && !player->getName().empty()) name = player->getName();
-        }
-        owner_.addSystemChatMessage("Inspecting " + name + " (no talent data available).");
+        // Nothing to the player: the stock client has no line for an
+        // answer without talents.
         return;
     }
 
@@ -1541,60 +1567,68 @@ void SocialHandler::queryWho(const std::string& playerName) {
 void SocialHandler::addFriend(const std::string& playerName, const std::string& note) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     if (playerName.empty()) { owner_.raiseUiError("You must specify a player name."); return; }
+    // Sent without a word (Wow.exe AddFriend 0x6B6AF0 -> 0x6B5400): the
+    // server's SMSG_FRIEND_STATUS is what the player hears.
     auto packet = AddFriendPacket::build(playerName, note);
     owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage("Sending friend request to " + playerName + "...");
     LOG_INFO("Sent friend request to: ", playerName);
 }
 
 void SocialHandler::removeFriend(const std::string& playerName) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     if (playerName.empty()) { owner_.raiseUiError("You must specify a player name."); return; }
+    // A name not on the list is ERR_FRIEND_NOT_FOUND (Wow.exe 0x6B6F00);
+    // otherwise the request goes without a word.
     auto it = owner_.friendsCacheRef().find(playerName);
     if (it == owner_.friendsCacheRef().end()) {
-        owner_.addSystemChatMessage(playerName + " is not in your friends list.");
+        owner_.displayGameMessage("ERR_FRIEND_NOT_FOUND", "Player not found.");
         return;
     }
     auto packet = DelFriendPacket::build(it->second);
     owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage("Removing " + playerName + " from friends list...");
     LOG_INFO("Sent remove friend request for: ", playerName);
 }
 
 void SocialHandler::setFriendNote(const std::string& playerName, const std::string& note) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     if (playerName.empty()) { owner_.raiseUiError("You must specify a player name."); return; }
+    // As RemoveFriend (Wow.exe 0x6B6F70).
     auto it = owner_.friendsCacheRef().find(playerName);
     if (it == owner_.friendsCacheRef().end()) {
-        owner_.addSystemChatMessage(playerName + " is not in your friends list.");
+        owner_.displayGameMessage("ERR_FRIEND_NOT_FOUND", "Player not found.");
         return;
     }
     auto packet = SetContactNotesPacket::build(it->second, note);
     owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage("Updated note for " + playerName);
     LOG_INFO("Set friend note for: ", playerName);
 }
 
 void SocialHandler::addIgnore(const std::string& playerName) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     if (playerName.empty()) { owner_.raiseUiError("You must specify a player name."); return; }
+    // Someone already ignored is ERR_IGNORE_ALREADY_S, said by the client
+    // (Wow.exe 0x6B5F70); otherwise the request goes without a word.
+    if (owner_.ignoreCacheRef().count(playerName)) {
+        owner_.displayGameMessage("ERR_IGNORE_ALREADY_S", playerName + " is already being ignored.",
+                                  {playerName});
+        return;
+    }
     auto packet = AddIgnorePacket::build(playerName);
     owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage("Adding " + playerName + " to ignore list...");
     LOG_INFO("Sent ignore request for: ", playerName);
 }
 
 void SocialHandler::removeIgnore(const std::string& playerName) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     if (playerName.empty()) { owner_.raiseUiError("You must specify a player name."); return; }
+    // ERR_IGNORE_NOT_FOUND for a name not on the list (Wow.exe 0x6B7040).
     auto it = owner_.ignoreCacheRef().find(playerName);
     if (it == owner_.ignoreCacheRef().end()) {
-        owner_.addSystemChatMessage(playerName + " is not in your ignore list.");
+        owner_.displayGameMessage("ERR_IGNORE_NOT_FOUND", "Player not found.");
         return;
     }
     auto packet = DelIgnorePacket::build(it->second);
     owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage("Removing " + playerName + " from ignore list...");
     // Don't erase from ignoreCache here - wait for the server's SMSG_IGNORE_LIST
     // response to confirm. Erasing optimistically desyncs the cache if the server
     // rejects the request. (Compare with removeFriend which also waits for
@@ -1639,7 +1673,7 @@ void SocialHandler::requestLogout(bool exitAfterLogout) {
             if (owner_.logoutCompleteCallbackRef()) owner_.logoutCompleteCallbackRef()(true);
             return;
         }
-        owner_.addSystemChatMessage("Already logging out.");
+        // A second /logout is ignored in silence (Wow.exe 0x6B1930).
         return;
     }
     auto packet = LogoutRequestPacket::build();
@@ -1651,13 +1685,14 @@ void SocialHandler::requestLogout(bool exitAfterLogout) {
 
 void SocialHandler::cancelLogout() {
     if (!owner_.getSocket()) return;
-    if (!loggingOut_) { owner_.addSystemChatMessage("Not currently logging out."); return; }
+    // CMSG_LOGOUT_CANCEL and nothing said (Wow.exe 0x6B18C0); the server's
+    // SMSG_LOGOUT_CANCEL_ACK closes the countdown popup.
+    if (!loggingOut_) return;
     auto packet = LogoutCancelPacket::build();
     owner_.getSocket()->send(packet);
     loggingOut_ = false;
     exitAfterLogout_ = false;
     logoutCountdown_ = 0.0f;
-    owner_.addSystemChatMessage("Logout cancelled.");
     LOG_INFO("Cancelled logout");
 }
 
@@ -1712,9 +1747,9 @@ void SocialHandler::setGuildMotd(const std::string& motd) {
 void SocialHandler::promoteGuildMember(const std::string& playerName) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     if (playerName.empty()) { owner_.raiseUiError("You must specify a player name."); return; }
+    // The server's guild event announces it.
     auto packet = GuildPromotePacket::build(playerName);
     owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage("Promoting " + playerName + "...");
 }
 
 void SocialHandler::demoteGuildMember(const std::string& playerName) {
@@ -1722,14 +1757,13 @@ void SocialHandler::demoteGuildMember(const std::string& playerName) {
     if (playerName.empty()) { owner_.raiseUiError("You must specify a player name."); return; }
     auto packet = GuildDemotePacket::build(playerName);
     owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage("Demoting " + playerName + "...");
 }
 
 void SocialHandler::leaveGuild() {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
+    // ERR_GUILD_QUIT_S comes back with the command result.
     auto packet = GuildLeavePacket::build();
     owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage("Leaving guild...");
 }
 
 void SocialHandler::inviteToGuild(const std::string& playerName) {
@@ -1926,25 +1960,27 @@ const char* SocialHandler::readyCheckStatusFor(uint64_t guid) const {
 void SocialHandler::acceptDuel() {
     if (!pendingDuelRequest_ || owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     pendingDuelRequest_ = false;
+    // CMSG_DUEL_ACCEPTED and nothing said (Wow.exe 0x5CFBD0).
     auto pkt = DuelAcceptPacket::build(duelArbiterGuid_);
     owner_.getSocket()->send(pkt);
-    owner_.addSystemChatMessage("You accept the duel.");
 }
 
 void SocialHandler::forfeitDuel() {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     pendingDuelRequest_ = false;
+    // CMSG_DUEL_CANCELLED and nothing said (Wow.exe 0x5CFC50); the server's
+    // SMSG_DUEL_COMPLETE / SMSG_DUEL_WINNER are the announcement.
     auto packet = DuelCancelPacket::build(duelArbiterGuid_);
     owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage("You have forfeited the duel.");
 }
 
 void SocialHandler::proposeDuel(uint64_t targetGuid) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     if (targetGuid == 0) { owner_.raiseUiError("You must target a player to challenge to a duel."); return; }
+    // The server's SMSG_DUEL_REQUESTED, which comes back to the challenger
+    // too, is where ERR_DUEL_REQUESTED is said.
     auto packet = DuelProposedPacket::build(targetGuid);
     owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage("You have challenged your target to a duel.");
 }
 
 void SocialHandler::reportPlayer(uint64_t targetGuid, const std::string& reason) {
@@ -1953,9 +1989,9 @@ void SocialHandler::reportPlayer(uint64_t targetGuid, const std::string& reason)
         owner_.raiseUiError("You must target a player to report.");
         return;
     }
+    // SMSG_COMPLAIN_RESULT answers it (COMPLAINT_ADDED).
     auto packet = ComplainPacket::build(targetGuid, reason);
     owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage("Player report submitted.");
     LOG_INFO("Reported player: 0x", std::hex, targetGuid, std::dec, " reason=", reason);
 }
 
@@ -1971,10 +2007,26 @@ void SocialHandler::handleDuelRequested(network::Packet& packet) {
     // keeps the flag, to be able to call it off, and is not asked to accept it.
     // Wow.exe (0x5cfcd0) tells that player ERR_DUEL_REQUESTED, which plays
     // LEVELUP.
+    // It also answers the server on that player's behalf with
+    // CMSG_DUEL_ACCEPTED (0x5CFBD0), which the server ignores from the
+    // initiator.
     if (duelChallengerGuid_ == owner_.getPlayerGuid()) {
         pendingDuelRequest_ = false;
-        owner_.addSystemChatMessage("You have requested a duel.");
-        owner_.playUiMessageSound("ERR_DUEL_REQUESTED");
+        owner_.displayGameMessage("ERR_DUEL_REQUESTED", "You have requested a duel.");
+        if (owner_.getSocket()) {
+            auto accept = DuelAcceptPacket::build(duelArbiterGuid_);
+            owner_.getSocket()->send(accept);
+        }
+        return;
+    }
+    // A challenge from someone ignored is refused at once, unseen
+    // (0x6B52E0, then CMSG_DUEL_CANCELLED).
+    if (owner_.ignoreListGuidsRef().count(duelChallengerGuid_)) {
+        if (owner_.getSocket()) {
+            auto refuse = DuelCancelPacket::build(duelArbiterGuid_);
+            owner_.getSocket()->send(refuse);
+        }
+        duelArbiterGuid_ = 0;
         return;
     }
     duelChallengerName_.clear();
@@ -1991,7 +2043,7 @@ void SocialHandler::handleDuelRequested(network::Packet& packet) {
         duelChallengerName_ = tmp;
     }
     pendingDuelRequest_ = true;
-    owner_.addSystemChatMessage(duelChallengerName_ + " challenges you to a duel!");
+    // The popup is the whole announcement; no chat line.
     // No sound of ours: DUEL_REQUESTED raises StaticPopupDialogs.DUEL_REQUESTED,
     // whose sound = "igPlayerInvite" plays as it shows. The target-select click
     // played here as well was neither.
@@ -2002,19 +2054,24 @@ void SocialHandler::handleDuelComplete(network::Packet& packet) {
     if (!packet.hasRemaining(1)) return;
     uint8_t started = packet.readUInt8();
     pendingDuelRequest_ = false;
-    if (!started) owner_.addSystemChatMessage("The duel was cancelled.");
+    // ERR_DUEL_CANCELLED, the yellow info text, for a duel that never began
+    // (Wow.exe 0x5CFA90).
+    if (!started) owner_.displayGameMessage("ERR_DUEL_CANCELLED", "Duel cancelled.");
     if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("DUEL_FINISHED", {});
 }
 
 void SocialHandler::handleDuelWinner(network::Packet& packet) {
     if (!packet.hasRemaining(3)) return;
     uint8_t duelType = packet.readUInt8();
-    std::string winner = packet.readString();
-    std::string loser  = packet.readString();
-    std::string msg = (duelType == 1)
-        ? loser + " has fled from the duel. " + winner + " wins!"
-        : winner + " has defeated " + loser + " in a duel!";
-    owner_.addSystemChatMessage(msg);
+    const std::string first  = packet.readString();
+    const std::string second = packet.readString();
+    // DUEL_WINNER_KNOCKOUT ("%1$s has defeated %2$s in a duel") or, for a
+    // flight, DUEL_WINNER_RETREAT ("%2$s has fled from %1$s in a duel"),
+    // a plain chat line (Wow.exe 0x5CFB20).
+    if (duelType == 0)
+        owner_.addGlobalStringChatLine("DUEL_WINNER_KNOCKOUT", "%1$s has defeated %2$s in a duel", {first, second});
+    else
+        owner_.addGlobalStringChatLine("DUEL_WINNER_RETREAT", "%2$s has fled from %1$s in a duel", {first, second});
 }
 
 // ============================================================
@@ -2183,9 +2240,10 @@ void SocialHandler::promoteToLeader(uint64_t guid) {
 void SocialHandler::uninvitePlayer(const std::string& playerName) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     if (playerName.empty()) { owner_.raiseUiError("You must specify a player name to uninvite."); return; }
+    // Nothing said (Wow.exe UninviteUnit 0x51A7A0): the roster update is
+    // the answer.
     auto packet = GroupUninvitePacket::build(playerName);
     owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage("Removed " + playerName + " from the group.");
 }
 
 // CMSG_LOOT_METHOD carries all three settings together, so changing one means
@@ -2252,34 +2310,36 @@ void SocialHandler::leaveParty() {
     leaveGroup();
 }
 
+// /maintank and /mainassist are party assignments (SetPartyAssignment,
+// MSG_PARTY_ASSIGNMENT), not raid target icons: these sent
+// MSG_RAID_TARGET_UPDATE with icon 0 or 1, which put a star or a circle on the
+// target and assigned nothing. The roster update announces the change; there
+// is no line of the client's own.
 void SocialHandler::setMainTank(uint64_t targetGuid) {
-    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     if (targetGuid == 0) { owner_.raiseUiError("You must have a target selected."); return; }
-    auto packet = RaidTargetUpdatePacket::build(0, targetGuid);
-    owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage("Main tank set.");
+    setPartyAssignment(0, targetGuid, true);
 }
 
 void SocialHandler::setMainAssist(uint64_t targetGuid) {
-    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     if (targetGuid == 0) { owner_.raiseUiError("You must have a target selected."); return; }
-    auto packet = RaidTargetUpdatePacket::build(1, targetGuid);
-    owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage("Main assist set.");
+    setPartyAssignment(1, targetGuid, true);
 }
 
+namespace {
+// GroupMemberFlags: MEMBER_FLAG_MAINTANK 0x02, MEMBER_FLAG_MAINASSIST 0x04.
+uint64_t memberWithFlag(const GroupListData& group, uint8_t flag) {
+    for (const auto& m : group.members)
+        if (m.flags & flag) return m.guid;
+    return 0;
+}
+}  // namespace
+
 void SocialHandler::clearMainTank() {
-    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    auto packet = RaidTargetUpdatePacket::build(0, 0);
-    owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage("Main tank cleared.");
+    setPartyAssignment(0, memberWithFlag(partyData, 0x02), false);
 }
 
 void SocialHandler::clearMainAssist() {
-    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    auto packet = RaidTargetUpdatePacket::build(1, 0);
-    owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage("Main assist cleared.");
+    setPartyAssignment(1, memberWithFlag(partyData, 0x04), false);
 }
 
 void SocialHandler::setRaidMarkLocally(uint64_t guid, uint8_t icon) {
@@ -2371,30 +2431,34 @@ void SocialHandler::handleGroupInvite(network::Packet& packet) {
     // pending that the server would never honour. Answering it is a refusal,
     // not an offer.
     if (!data.canAccept) {
-        owner_.addSystemChatMessage(
+        owner_.displayGameMessage("ERR_INVITED_ALREADY_IN_GROUP_SS",
             "|Hplayer:" + data.inviterName + "|h[" + data.inviterName +
-            "]|h invited you to a group, but you could not accept because you "
-            "are already in a group.");
+            "]|h has invited you to join a group, but you cannot accept because you are already in a group.",
+            {data.inviterName, data.inviterName});
         return;
     }
 
     pendingGroupInvite = true;
     pendingInviterName = data.inviterName;
-    // No line of its own: the PARTY_INVITE popup is what the stock client
-    // shows for an invite.
+    // The popup and a chat line: Wow.exe (0x6DF1A0) raises
+    // PARTY_INVITE_REQUEST and then ERR_INVITED_TO_GROUP_SS.
     // The invite sound belongs to the popup: uiparent.lua answers this event
     // with StaticPopup_Show("PARTY_INVITE"), whose entry carries
     // sound = "igPlayerInvite". Playing the quest-accept sound here as well
     // put a second, wrong sound under it.
     if (owner_.addonEventCallbackRef())
         owner_.addonEventCallbackRef()("PARTY_INVITE_REQUEST", {data.inviterName});
+    owner_.displayGameMessage("ERR_INVITED_TO_GROUP_SS",
+        "|Hplayer:" + data.inviterName + "|h[" + data.inviterName + "]|h has invited you to join a group.",
+        {data.inviterName, data.inviterName});
 }
 
 void SocialHandler::handleGroupDecline(network::Packet& packet) {
     GroupDeclineData data;
     if (!GroupDeclineResponseParser::parse(packet, data)) return;
-    owner_.addSystemChatMessage(data.playerName + " has declined your group invitation.");
-    owner_.playUiMessageSound("ERR_DECLINE_GROUP_S");  // igPlayerInviteDecline (0x6cbd40)
+    // ERR_DECLINE_GROUP_S, a chat line with igPlayerInviteDecline (0x6CBD40).
+    owner_.displayGameMessage("ERR_DECLINE_GROUP_S",
+                              data.playerName + " declines your group invitation.", {data.playerName});
 }
 
 void SocialHandler::handleGroupList(network::Packet& packet) {
@@ -2405,6 +2469,7 @@ void SocialHandler::handleGroupList(network::Packet& packet) {
     const uint8_t prevThreshold = partyData.lootThreshold;
     const bool wasInGroup = !partyData.isEmpty();
     const bool wasRaid = wasInGroup && groupIsRaid(partyData.groupType);
+    const uint8_t prevSubGroup = partyData.subGroup;
     std::vector<uint64_t> prevMembers;
     prevMembers.reserve(partyData.members.size());
     for (const auto& m : partyData.members) prevMembers.push_back(m.guid);
@@ -2447,6 +2512,74 @@ void SocialHandler::handleGroupList(network::Packet& packet) {
         if (arrived) owner_.playUiSoundByName("igPlayerInviteAccept");
     }
 
+    // Who came and went, as Wow.exe says it. In a party (0x6D8870): a member
+    // new to the player's subgroup "joins the party" (ERR_JOINED_GROUP_S) -
+    // or, for a leader whose party has just formed, the last one listed - and
+    // one who is gone "leaves the party" (ERR_LEFT_GROUP_S). In a raid
+    // (0x574F10): ERR_RAID_YOU_JOINED on becoming one, then
+    // ERR_RAID_MEMBER_ADDED_S / _REMOVED_S; ERR_RAID_YOU_LEFT when a raid
+    // becomes a party (0x572F90). Names that are not known are not said.
+    {
+        const uint64_t me = owner_.getPlayerGuid();
+        const bool nowRaid = groupIsRaid(partyData.groupType);
+        const bool nowInGroupHere = !partyData.isEmpty();
+        auto nameOf = [this](uint64_t guid, const std::string& listed) {
+            return listed.empty() ? owner_.lookupName(guid) : listed;
+        };
+        auto wasMember = [&](uint64_t guid, bool sameSubgroupOnly) {
+            for (const auto& p : prevStats)
+                if (p.guid == guid && (!sameSubgroupOnly || p.subGroup == prevSubGroup)) return true;
+            return false;
+        };
+        if (!nowRaid) {
+            if (wasInGroup && !wasRaid) {
+                for (const auto& m : partyData.members) {
+                    if (m.guid == 0 || m.guid == me || m.subGroup != partyData.subGroup) continue;
+                    if (wasMember(m.guid, true)) continue;
+                    const std::string n = nameOf(m.guid, m.name);
+                    if (!n.empty()) owner_.displayGameMessage("ERR_JOINED_GROUP_S", n + " joins the party.", {n});
+                }
+            } else if (!wasInGroup && nowInGroupHere && partyData.leaderGuid == me &&
+                       !partyData.members.empty()) {
+                const auto& last = partyData.members.back();
+                const std::string n = nameOf(last.guid, last.name);
+                if (!n.empty()) owner_.displayGameMessage("ERR_JOINED_GROUP_S", n + " joins the party.", {n});
+            }
+            // Not when the list is empty: that is the player leaving, said
+            // by the leave or the uninvite.
+            if (wasInGroup && !wasRaid && nowInGroupHere) {
+                for (const auto& p : prevStats) {
+                    if (p.guid == 0 || p.guid == me || p.subGroup != prevSubGroup) continue;
+                    bool still = false;
+                    for (const auto& m : partyData.members)
+                        if (m.guid == p.guid && m.subGroup == partyData.subGroup) { still = true; break; }
+                    if (still) continue;
+                    const std::string n = nameOf(p.guid, p.name);
+                    if (!n.empty()) owner_.displayGameMessage("ERR_LEFT_GROUP_S", n + " leaves the party.", {n});
+                }
+            }
+            if (wasRaid) owner_.displayGameMessage("ERR_RAID_YOU_LEFT", "You have left the raid group.");
+        } else {
+            if (!wasRaid) {
+                owner_.displayGameMessage("ERR_RAID_YOU_JOINED", "You have joined a raid group.");
+            } else {
+                for (const auto& m : partyData.members) {
+                    if (m.guid == 0 || m.guid == me || wasMember(m.guid, false)) continue;
+                    const std::string n = nameOf(m.guid, m.name);
+                    if (!n.empty()) owner_.displayGameMessage("ERR_RAID_MEMBER_ADDED_S", n + " has joined the raid group.", {n});
+                }
+                for (const auto& p : prevStats) {
+                    if (p.guid == 0 || p.guid == me) continue;
+                    bool still = false;
+                    for (const auto& m : partyData.members) if (m.guid == p.guid) { still = true; break; }
+                    if (still) continue;
+                    const std::string n = nameOf(p.guid, p.name);
+                    if (!n.empty()) owner_.displayGameMessage("ERR_RAID_MEMBER_REMOVED_S", n + " has left the raid group.", {n});
+                }
+            }
+        }
+    }
+
     // The roster carries online state in isOnline; the per-member stat updates
     // carry it in the onlineStatus bitmask. Seed the bitmask from the roster so
     // both readers agree until the first SMSG_PARTY_MEMBER_STATS arrives -
@@ -2458,16 +2591,15 @@ void SocialHandler::handleGroupList(network::Packet& packet) {
 
     const bool nowInGroup = !partyData.isEmpty();
     if (!nowInGroup && wasInGroup) {
-        // ERR_LEFT_GROUP_YOU, unless the group was disbanded under us and
-        // ERR_GROUP_DISBANDED already said so.
-        if (!groupDestroyedAnnounced_)
-            owner_.displayGameMessage("ERR_LEFT_GROUP_YOU", "You leave the group.");
+        // Said by the packet that ended it, not here: ERR_LEFT_GROUP_YOU with
+        // the leave's command result, ERR_UNINVITE_YOU with the uninvite,
+        // ERR_GROUP_DISBANDED with the group's end (Wow.exe 0x6CBEC0,
+        // 0x6CBE10). Said here as well, each was printed twice.
         LOG_INFO("Left group");
     } else if (nowInGroup && !wasInGroup) {
         // No "joined a group with" line: that is this client's invention.
         LOG_INFO("Joined group with ", partyData.memberCount, " members");
     }
-    if (nowInGroup) groupDestroyedAnnounced_ = false;
     // Loot method change: ERR_SET_LOOT_* ("Looting changed to Group Loot.").
     if (wasInGroup && nowInGroup && partyData.lootMethod != prevLootMethod) {
         static const char* const kKeys[] = {"ERR_SET_LOOT_FREEFORALL", "ERR_SET_LOOT_ROUNDROBIN",
@@ -2519,38 +2651,75 @@ void SocialHandler::handleGroupUninvite(network::Packet& packet) {
         owner_.addonEventCallbackRef()("PARTY_MEMBERS_CHANGED", {});
         owner_.addonEventCallbackRef()("RAID_ROSTER_UPDATE", {});
     }
-    owner_.addUIError("You have been removed from the group.");
-    owner_.addSystemChatMessage("You have been removed from the group.");
+    // ERR_UNINVITE_YOU, a chat line, and a pending summon is withdrawn
+    // (Wow.exe 0x6CBE10).
+    owner_.displayGameMessage("ERR_UNINVITE_YOU", "You have been removed from the group.");
+    owner_.fireAddonEvent("CANCEL_SUMMON", {});
 }
 
 void SocialHandler::handlePartyCommandResult(network::Packet& packet) {
     PartyCommandResultData data;
     if (!PartyCommandResultParser::parse(packet, data)) return;
-    if (data.result != PartyResult::OK) {
-        const char* errText = nullptr;
-        switch (data.result) {
-            case PartyResult::BAD_PLAYER_NAME:       errText = "No player named \"%s\" is currently online."; break;
-            case PartyResult::TARGET_NOT_IN_GROUP:   errText = "%s is not in your group."; break;
-            case PartyResult::TARGET_NOT_IN_INSTANCE:errText = "%s is not in your instance."; break;
-            case PartyResult::GROUP_FULL:            errText = "Your party is full."; break;
-            case PartyResult::ALREADY_IN_GROUP:      errText = "%s is already in a group."; break;
-            case PartyResult::NOT_IN_GROUP:          errText = "You are not in a group."; break;
-            case PartyResult::NOT_LEADER:            errText = "You are not the group leader."; break;
-            case PartyResult::PLAYER_WRONG_FACTION:  errText = "%s is the wrong faction for this group."; break;
-            case PartyResult::IGNORING_YOU:          errText = "%s is ignoring you."; break;
-            case PartyResult::LFG_PENDING:           errText = "You cannot do that while in a LFG queue."; break;
-            case PartyResult::INVITE_RESTRICTED:     errText = "Target is not accepting group invites."; break;
-            default:                                 errText = "Party command failed."; break;
+    // Every answer as Wow.exe's handler (0x6CBEC0) gives it: a success is
+    // ERR_INVITE_PLAYER_S for an invite and ERR_LEFT_GROUP_YOU for a leave,
+    // each failure its GameError, unknown codes nothing.
+    const std::string& name = data.name;
+    const uint32_t command = static_cast<uint32_t>(data.command);
+    const uint32_t result = static_cast<uint32_t>(data.result);
+    if (result == 0) {
+        if (command == 0 && !name.empty()) {
+            owner_.displayGameMessage("ERR_INVITE_PLAYER_S", "You have invited " + name + " to join your group.", {name});
+        } else if (command == 2) {
+            owner_.displayGameMessage("ERR_LEFT_GROUP_YOU", "You leave the group.");
+            owner_.fireAddonEvent("CANCEL_SUMMON", {});
         }
-        char buf[256];
-        if (!data.name.empty() && errText && std::strstr(errText, "%s"))
-            std::snprintf(buf, sizeof(buf), errText, data.name.c_str());
-        else if (errText)
-            std::snprintf(buf, sizeof(buf), "%s", errText);
-        else
-            std::snprintf(buf, sizeof(buf), "Party command failed (error %u).", static_cast<uint32_t>(data.result));
-        owner_.addUIError(buf);
-        owner_.addSystemChatMessage(buf);
+        return;
+    }
+    struct Answer { uint32_t code; const char* key; const char* text; };
+    static constexpr Answer kAnswers[] = {
+        {1,  "ERR_BAD_PLAYER_NAME_S", "Cannot find player '%s'."},
+        {2,  "ERR_TARGET_NOT_IN_GROUP_S", "%s is not in your party."},
+        {3,  "ERR_TARGET_NOT_IN_INSTANCE_S", "%s is not in your instance."},
+        {4,  "ERR_GROUP_FULL", "Your party is full."},
+        {5,  "ERR_ALREADY_IN_GROUP_S", "%s is already in a group."},
+        {6,  "ERR_NOT_IN_GROUP", "You aren't in a party."},
+        {7,  "ERR_NOT_LEADER", "You are not the party leader."},
+        {8,  "ERR_PLAYER_WRONG_FACTION", "Target is unfriendly."},
+        {9,  "ERR_IGNORING_YOU_S", "%s is ignoring you."},
+        {12, "ERR_LFG_PENDING", "You cannot do that while in a LFG queue."},
+        {13, "ERR_INVITE_RESTRICTED", "Trial accounts cannot invite characters into groups."},
+        {15, "ERR_INVITE_UNKNOWN_REALM", "You cannot invite players from that realm."},
+        {16, "ERR_INVITE_NO_PARTY_SERVER", "Unable to contact party server."},
+        {17, "ERR_INVITE_PARTY_BUSY", "Cannot do that now - the party server is busy."},
+        {18, "ERR_PARTY_TARGET_AMBIGUOUS", "Target name is ambiguous."},
+        {19, "ERR_PARTY_LFG_INVITE_RAID_LOCKED", "%s is locked to a different instance."},
+        {20, "ERR_PARTY_LFG_BOOT_LIMIT", "You cannot vote to kick any more players in this group."},
+        {22, "ERR_PARTY_LFG_BOOT_IN_PROGRESS", "A vote to kick is already in progress."},
+        {23, "ERR_PARTY_LFG_BOOT_TOO_FEW_PLAYERS", "There are too few players in the group to vote to kick."},
+        {25, "ERR_RAID_DISALLOWED_BY_LEVEL", "You cannot form a raid with players below level 10."},
+        {26, "ERR_PARTY_LFG_BOOT_IN_COMBAT", "You cannot vote to kick while in combat."},
+        {28, "ERR_PARTY_LFG_BOOT_DUNGEON_COMPLETE", "You cannot vote to kick once the dungeon is complete."},
+        {29, "ERR_PARTY_LFG_BOOT_LOOT_ROLLS", "You cannot vote to kick with loot rolls pending."},
+        {30, "ERR_PARTY_LFG_TELEPORT_IN_COMBAT", "You cannot teleport while in combat."},
+    };
+    if (result == 14) {
+        // A swap of subgroups that failed, or an invite in combat.
+        if (command == 4) {
+            owner_.displayGameMessage("ERR_GROUP_SWAP_FAILED", "Your party could not be swapped.");
+            owner_.fireAddonEvent("RAID_ROSTER_UPDATE", {});
+        } else {
+            owner_.displayGameMessage("ERR_INVITE_IN_COMBAT", "You can't invite players while in combat.");
+        }
+        return;
+    }
+    if (result == 27) {
+        owner_.fireAddonEvent("VOTE_KICK_REASON_NEEDED", {name});
+        return;
+    }
+    for (const auto& a : kAnswers) {
+        if (a.code != result) continue;
+        owner_.displayGameMessage(a.key, formatGlobalString(a.text, {name}), {name});
+        return;
     }
 }
 
@@ -2704,19 +2873,18 @@ void SocialHandler::handleGuildInfo(network::Packet& packet) {
             if (guildName_.empty()) guildName_ = data.guildName;
         }
     }
-    // SMSG_GUILD_INFO is pushed by the server on every guild roster sync
-    // (login, member join/leave, periodic refreshes). Only print when
-    // something the user can see has actually changed; otherwise the
-    // guild banner spams chat on every tick.
-    const bool changed = (guildInfoData_.guildName != data.guildName) ||
-                         (guildInfoData_.numMembers != data.numMembers) ||
-                         (guildInfoData_.numAccounts != data.numAccounts);
+    // The answer to /guildinfo (GuildInfo(), CMSG_GUILD_INFO), which the
+    // server sends only when asked. Wow.exe (0x6CC440) prints two plain chat
+    // lines every time: GUILD_NAME_TEMPLATE and GUILD_INFO_TEMPLATE, the
+    // date as month, day and year from the packed time.
     guildInfoData_ = data;
-    if (changed) {
-        owner_.addSystemChatMessage("Guild: " + data.guildName + " (" +
-                             std::to_string(data.numMembers) + " members, " +
-                             std::to_string(data.numAccounts) + " accounts)");
-    }
+    const uint32_t t = data.createdPacked;
+    const uint32_t day = (t >> 14) & 0x3F, month = (t >> 20) & 0x0F, year = (t >> 24) & 0x1F;
+    owner_.addGlobalStringChatLine("GUILD_NAME_TEMPLATE", "Guild: %s", {data.guildName});
+    owner_.addGlobalStringChatLine("GUILD_INFO_TEMPLATE",
+        "Guild created %1$d-%2$d-%3$d, %4$d players, %5$d accounts",
+        {std::to_string(month + 1), std::to_string(day + 1), std::to_string(year + 2000),
+         std::to_string(data.numMembers), std::to_string(data.numAccounts)});
 }
 
 void SocialHandler::handleGuildRoster(network::Packet& packet) {
@@ -3045,10 +3213,10 @@ void SocialHandler::handleGuildInvite(network::Packet& packet) {
     pendingGuildInvite_ = true;
     pendingGuildInviterName_ = data.inviterName;
     pendingGuildInviteGuildName_ = data.guildName;
-    owner_.addSystemChatMessage(data.inviterName + " has invited you to join " + data.guildName + ".");
-    // ERR_INVITED_TO_GUILD_SSS, raised by both of Wow.exe's guild invite
-    // handlers (0x6cc3b0, 0x6cc910), plays LEVELUP.
-    owner_.playUiMessageSound("ERR_INVITED_TO_GUILD_SSS");
+    // ERR_INVITED_TO_GUILD_SSS, a chat line with LEVELUP (Wow.exe 0x6CC3B0).
+    owner_.displayGameMessage("ERR_INVITED_TO_GUILD_SSS",
+        data.inviterName + " has invited you to join the guild, " + data.guildName + ".",
+        {data.inviterName, data.inviterName, data.guildName});
     if (owner_.addonEventCallbackRef())
         owner_.addonEventCallbackRef()("GUILD_INVITE_REQUEST", {data.inviterName, data.guildName});
 }
@@ -3056,6 +3224,11 @@ void SocialHandler::handleGuildInvite(network::Packet& packet) {
 void SocialHandler::handleGuildCommandResult(network::Packet& packet) {
     GuildCommandResultData data;
     if (!GuildCommandResultParser::parse(packet, data)) return;
+    const std::string& name = data.name;
+    // Every answer as Wow.exe's handler (0x6CC590) gives it - all of them
+    // GameErrors, most of them chat lines - and nothing for the codes it
+    // does not know. Commands and codes are AzerothCore's GuildCommandType
+    // and GuildCommandError (Guild.h): a quit is command 3.
     if (data.errorCode == 0) {
         // Whether the player's own membership changed, which is a different
         // question from whether the command worked: inviting someone succeeds
@@ -3063,21 +3236,32 @@ void SocialHandler::handleGuildCommandResult(network::Packet& packet) {
         bool membershipChanged = false;
         switch (data.command) {
             case 0:
-                owner_.addSystemChatMessage("Guild created.");
-                // ERR_GUILD_CREATE_S (Wow.exe 0x6cc590, command 0, result 0)
-                owner_.playUiMessageSound("ERR_GUILD_CREATE_S");
+                owner_.displayGameMessage("ERR_GUILD_CREATE_S", name + " created.", {name});
                 membershipChanged = true;
                 break;
             case 1:
-                if (!data.name.empty())
+                if (!name.empty())
                     owner_.displayGameMessage("ERR_GUILD_INVITE_S",
-                        "You have invited " + data.name + " to join your guild.", {data.name});
+                        "You have invited " + name + " to join your guild.", {name});
                 break;
-            case 2:
-                owner_.addSystemChatMessage("You have left the guild.");
+            case 3:
+                owner_.displayGameMessage("ERR_GUILD_QUIT_S", "You are no longer a member of " + name + ".", {name});
                 guildName_.clear(); guildRankNames_.clear();
                 guildRoster_ = GuildRosterData{}; hasGuildRoster_ = false;
                 membershipChanged = true;
+                break;
+            case 14:
+                owner_.displayGameMessage("ERR_GUILD_FOUNDER_S",
+                    "Congratulations, you are a founding member of " + name + "!", {name});
+                break;
+            case 19:
+            case 20:
+                // A note changed: the roster is stale, and the stock client
+                // clears GuildRoster's throttle and says so with
+                // GUILD_ROSTER_UPDATE(true), which the guild frame answers by
+                // asking again (0x5CA0F0).
+                clearGuildRosterThrottle();
+                owner_.fireAddonEvent("GUILD_ROSTER_UPDATE", {eventBool(true)});
                 break;
             default: break;
         }
@@ -3096,31 +3280,55 @@ void SocialHandler::handleGuildCommandResult(network::Packet& packet) {
         }
         return;
     }
-    const char* errStr = nullptr;
-    switch (data.errorCode) {
-        case 2:  errStr = "You are not in a guild."; break;
-        case 4:  errStr = "No player named \"%s\" is online."; break;
-        case 11: errStr = "\"%s\" is already in a guild."; break;
-        case 13: errStr = "You are already in a guild."; break;
-        case 14: errStr = "\"%s\" has already been invited to a guild."; break;
-        case 16: case 17: errStr = "You are not the guild leader."; break;
-        case 22: errStr = "That player is ignoring you."; break;
-        default: break;
+    struct Answer { uint32_t code; const char* key; const char* text; };
+    static constexpr Answer kAnswers[] = {
+        {1,  "ERR_GUILD_INTERNAL", "Internal guild error."},
+        {2,  "ERR_ALREADY_IN_GUILD", "You are already in a guild."},
+        {3,  "ERR_ALREADY_IN_GUILD_S", "%s is already in a guild."},
+        {4,  "ERR_INVITED_TO_GUILD", "You have already been invited into a guild."},
+        {5,  "ERR_ALREADY_INVITED_TO_GUILD_S", "%s has already been invited into a guild."},
+        {7,  "ERR_GUILD_NAME_EXISTS_S", "There is already a guild named \"%s\"."},
+        {9,  "ERR_GUILD_PLAYER_NOT_IN_GUILD", "You are not in a guild."},
+        {10, "ERR_GUILD_PLAYER_NOT_IN_GUILD_S", "%s is not in your guild."},
+        {11, "ERR_GUILD_PLAYER_NOT_FOUND_S", "\"%s\" not found."},
+        {12, "ERR_GUILD_NOT_ALLIED", "You cannot invite players from the opposing alliance."},
+        {13, "ERR_GUILD_RANK_TOO_HIGH_S", "%s's rank is too high."},
+        {14, "ERR_GUILD_RANK_TOO_LOW_S", "%s is already at the lowest rank."},
+        {17, "ERR_GUILD_RANKS_LOCKED", "Temporary guild error.  Please try again!"},
+        {18, "ERR_GUILD_RANK_IN_USE", "That guild rank is currently in use."},
+        {19, "ERR_IGNORING_YOU_S", "%s is ignoring you."},
+        {25, "ERR_GUILD_WITHDRAW_LIMIT", "You cannot withdraw that much from the guild bank."},
+        {26, "ERR_GUILD_NOT_ENOUGH_MONEY", "The guild bank does not have enough money"},
+        {28, "ERR_GUILD_BANK_FULL", "This guild bank tab is full"},
+        {29, "ERR_ITEM_NOT_FOUND", "The item was not found."},
+    };
+    const uint32_t code = data.errorCode;
+    if (code == 6) {
+        // An invalid guild name, worded by the name-check results (0x5218C0
+        // with 1: ERR_NAME_INVALID).
+        owner_.displayGameMessage("ERR_NAME_INVALID", "Invalid name");
+        return;
     }
-    std::string errorMsg;
-    if (errStr) {
-        std::string fmt = errStr;
-        auto pos = fmt.find("%s");
-        if (pos != std::string::npos && !data.name.empty()) fmt.replace(pos, 2, data.name);
-        else if (pos != std::string::npos) fmt.replace(pos, 2, "that player");
-        errorMsg = fmt;
-    } else {
-        errorMsg = "Guild command failed";
-        if (!data.name.empty()) errorMsg += " for " + data.name;
-        errorMsg += " (error " + std::to_string(data.errorCode) + ")";
+    if (code == 8) {
+        if (data.command == 3)
+            owner_.displayGameMessage("ERR_GUILD_LEADER_LEAVE", "You must promote a new Guild Master using /gleader before leaving the guild.");
+        else
+            owner_.displayGameMessage("ERR_GUILD_PERMISSIONS", "You don't have permission to do that.");
+        return;
     }
-    owner_.addUIError(errorMsg);
-    owner_.addSystemChatMessage(errorMsg);
+    if (code == 20) {
+        if (data.command == 5) {
+            clearGuildRosterThrottle();
+            owner_.fireAddonEvent("GUILD_ROSTER_UPDATE", {eventBool(true)});
+        }
+        return;
+    }
+    for (const auto& a : kAnswers) {
+        if (a.code != code) continue;
+        owner_.displayGameMessage(a.key, formatGlobalString(a.text, {name}), {name});
+        return;
+    }
+    LOG_DEBUG("SMSG_GUILD_COMMAND_RESULT: command ", data.command, " error ", code, " (silent)");
 }
 
 void SocialHandler::handlePetitionShowlist(network::Packet& packet) {
@@ -3241,61 +3449,49 @@ void SocialHandler::handlePetitionSignResults(network::Packet& packet) {
     uint64_t petGuid    = packet.readUInt64();
     uint64_t playerGuid = packet.readUInt64();
     uint32_t result     = packet.readUInt32();
+    if (result == 0 && petitionInfo_.petitionGuid == petGuid) {
+        petitionInfo_.signatureCount++;
+        PetitionSignature sig; sig.playerGuid = playerGuid;
+        petitionInfo_.signatures.push_back(sig);
+    }
+    // Wow.exe (0x6CEFD0): a result naming someone else is the owner hearing
+    // of a signature (0x5CF710, ERR_PETITION_SIGNED_S); the player's own is
+    // one GameError per PetitionSigns code, and anything else goes to the
+    // console only.
+    if (playerGuid != owner_.getPlayerGuid()) {
+        const std::string signer = owner_.lookupName(playerGuid);
+        if (signer.empty()) { owner_.queryPlayerName(playerGuid); return; }
+        owner_.displayGameMessage("ERR_PETITION_SIGNED_S", signer + " has signed your petition.", {signer});
+        return;
+    }
     switch (result) {
         case 0:
-            owner_.addSystemChatMessage("Petition signed successfully.");
-            if (petitionInfo_.petitionGuid == petGuid) {
-                petitionInfo_.signatureCount++;
-                PetitionSignature sig; sig.playerGuid = playerGuid;
-                petitionInfo_.signatures.push_back(sig);
-            }
+            owner_.displayGameMessage("ERR_PETITION_SIGNED", "Charter signed.");
+            owner_.fireAddonEvent("PETITION_CLOSED", {});
             break;
-        case 1: owner_.raiseUiError("You have already signed that petition."); break;
-        case 2: owner_.raiseUiError("You are already in a guild."); break;
-        case 3: owner_.raiseUiError("You cannot sign your own petition."); break;
-        default: owner_.addSystemChatMessage("Cannot sign petition (error " + std::to_string(result) + ")."); break;
+        case 1:  owner_.displayGameMessage("ERR_PETITION_ALREADY_SIGNED", "You have already signed that charter."); break;
+        case 2:  owner_.displayGameMessage("ERR_PETITION_IN_GUILD", "That player is already in a guild."); break;
+        case 3:  owner_.displayGameMessage("ERR_PETITION_CREATOR", "You can't sign your own charter."); break;
+        case 5:  owner_.displayGameMessage("ERR_PETITION_NOT_SAME_SERVER", "That player is not from your server"); break;
+        case 8:  owner_.displayGameMessage("ERR_PETITION_FULL", "That charter is full."); break;
+        case 10: owner_.displayGameMessage("ERR_PETITION_ALREADY_SIGNED_OTHER", "You've already signed another guild charter."); break;
+        case 11: owner_.displayGameMessage("ERR_PETITION_RESTRICTED_ACCOUNT", "Trial accounts cannot sign guild charters."); break;
+        default: LOG_INFO("[console] Petition error ", result); break;
     }
-    // The message Wow.exe (0x6cefd0) raises for the result, for its sound:
-    // a result naming someone else is the owner hearing of a signature
-    // (ERR_PETITION_SIGNED_S); the player's own is one per PetitionSigns code.
-    const char* key = nullptr;
-    if (playerGuid != owner_.getPlayerGuid()) {
-        key = "ERR_PETITION_SIGNED_S";
-    } else {
-        switch (result) {
-            case 0:  key = "ERR_PETITION_SIGNED"; break;
-            case 1:  key = "ERR_PETITION_ALREADY_SIGNED"; break;
-            case 2:  key = "ERR_PETITION_IN_GUILD"; break;
-            case 3:  key = "ERR_PETITION_CREATOR"; break;
-            case 5:  key = "ERR_PETITION_NOT_SAME_SERVER"; break;
-            case 8:  key = "ERR_PETITION_FULL"; break;
-            case 10: key = "ERR_PETITION_ALREADY_SIGNED_OTHER"; break;
-            case 11: key = "ERR_PETITION_RESTRICTED_ACCOUNT"; break;
-            default: break;
-        }
-    }
-    if (key) owner_.playUiMessageSound(key);
 }
 
 void SocialHandler::handleTurnInPetitionResults(network::Packet& packet) {
     uint32_t result = 0;
     if (!TurnInPetitionResultsParser::parse(packet, result)) return;
-    // PetitionTurns, as AzerothCore (Guild.h) and Wow.exe (0x6cf1a0) number
-    // them: 2 already in a guild, 4 more signatures needed, 11 no permission.
-    // These were 1, 2 and 3 here, so a charter short of signatures reported
-    // "already in a guild".
+    // PetitionTurns, as AzerothCore (Guild.h) and Wow.exe (0x6CF1A0) number
+    // them: 0 done (the registrar closes; the new guild says the rest),
+    // 2 already in a guild, 4 more signatures needed, 11 no permission.
     switch (result) {
-        case 0: owner_.addSystemChatMessage("Guild created successfully!"); break;
-        case 2:
-            owner_.addSystemChatMessage("You are already in a guild.");
-            owner_.playUiMessageSound("ERR_PETITION_IN_GUILD");
-            break;
-        case 4:
-            owner_.addSystemChatMessage("You need more signatures.");
-            owner_.playUiMessageSound("ERR_PETITION_NOT_ENOUGH_SIGNATURES");
-            break;
-        case 11: owner_.addSystemChatMessage("You don't have permission to do that."); break;
-        default: owner_.addSystemChatMessage("Guild creation failed (error " + std::to_string(result) + ")."); break;
+        case 0: owner_.fireAddonEvent("GUILD_REGISTRAR_CLOSED", {}); break;
+        case 2: owner_.displayGameMessage("ERR_PETITION_IN_GUILD", "That player is already in a guild."); break;
+        case 4: owner_.displayGameMessage("ERR_PETITION_NOT_ENOUGH_SIGNATURES", "You need more signatures."); break;
+        case 11: owner_.displayGameMessage("ERR_GUILD_PERMISSIONS", "You don't have permission to do that."); break;
+        default: LOG_INFO("[console] Petition error ", result); break;
     }
 }
 
@@ -3383,7 +3579,8 @@ void SocialHandler::handleWho(network::Packet& packet) {
     uint32_t onlineCount = packet.readUInt32();
     whoResults_.clear();
     whoOnlineCount_ = onlineCount;
-    if (displayCount == 0) { owner_.raiseUiError("No players found."); return; }
+    // No results is not an error: "0 players total" in chat, or an empty
+    // list in the panel, like any other answer.
     for (uint32_t i = 0; i < displayCount; ++i) {
         if (packet.getReadPos() >= packet.getSize()) break;
         std::string playerName = packet.readString();
@@ -3411,26 +3608,37 @@ void SocialHandler::handleWho(network::Packet& packet) {
     // client's to print rather than the interface's, which is why no FrameXML
     // file formats them. The count line carries a |4 escape, which resolves on
     // the way to the screen.
-    if (!whoToUI_) {
+    // Wow.exe (0x6B8720, 0x6B5030): with the panel not asking (SetWhoToUI)
+    // and no more than three rows, WHO_LIST_FORMAT or, with a guild,
+    // WHO_LIST_GUILD_FORMAT per row, then WHO_NUM_RESULTS - plain chat lines.
+    // Otherwise the rows go to the panel alone, through WHO_LIST_UPDATE.
+    constexpr size_t kWhoChatRows = 3;
+    const bool toChat = !whoToUI_ && whoResults_.size() <= kWhoChatRows;
+    if (toChat) {
         for (const auto& e : whoResults_) {
-            std::string line = "|Hplayer:" + e.name + "|h[" + e.name + "]|h: Level " +
-                               std::to_string(e.level) + " " +
-                               getRaceName(static_cast<Race>(e.raceId)) + std::string(" ") +
-                               getClassName(static_cast<Class>(e.classId));
-            if (!e.guildName.empty()) line += " <" + e.guildName + ">";
+            const std::string level = std::to_string(e.level);
+            const std::string race = getRaceName(static_cast<Race>(e.raceId));
+            const std::string cls = getClassName(static_cast<Class>(e.classId));
             const std::string zone = owner_.getWhoAreaName(e.zoneId);
-            if (!zone.empty()) line += " - " + zone;
-            owner_.addSystemChatMessage(line);
+            if (e.guildName.empty())
+                owner_.addGlobalStringChatLine("WHO_LIST_FORMAT",
+                    "|Hplayer:%s|h[%s]|h: Level %d %s %s - %s",
+                    {e.name, e.name, level, race, cls, zone});
+            else
+                owner_.addGlobalStringChatLine("WHO_LIST_GUILD_FORMAT",
+                    "|Hplayer:%s|h[%s]|h: Level %d %s %s <%s> - %s",
+                    {e.name, e.name, level, race, cls, e.guildName, zone});
         }
-        owner_.addSystemChatMessage(std::to_string(whoOnlineCount_) +
-                                    " |4player:players; total");
+        // The count of rows sent, the packet's first field, not its total.
+        owner_.addGlobalStringChatLine("WHO_NUM_RESULTS", "%d |4player:players; total",
+                                       {std::to_string(displayCount)});
     }
 
     // The who panel asked for this and redraws its rows on the answer coming
     // back. Every row was parsed and stored and only this client's own window
     // ever read them, so a /who through the interface filled a list nobody was
     // told about and the panel kept showing the previous search.
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("WHO_LIST_UPDATE", {});
+    else if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("WHO_LIST_UPDATE", {});
 }
 
 // ============================================================
@@ -3532,9 +3740,12 @@ void SocialHandler::handleFriendStatus(network::Packet& packet) {
 
     // Only update friendsCache when we have a resolved name - inserting an empty
     // key creates a phantom entry that masks the real one when the name arrives.
+    // FriendsResult numbering (below): online, offline and the two adds keep
+    // the name; a removal drops it.
     if (!playerName.empty()) {
-        if (data.status == 1 || data.status == 2) owner_.friendsCacheRef()[playerName] = data.guid;
-        else if (data.status == 0) owner_.friendsCacheRef().erase(playerName);
+        if (data.status == 2 || data.status == 3 || data.status == 6 || data.status == 7)
+            owner_.friendsCacheRef()[playerName] = data.guid;
+        else if (data.status == 5) owner_.friendsCacheRef().erase(playerName);
     }
 
     // AzerothCore's FriendsResult, read off SocialMgr.h rather than guessed.
@@ -3579,22 +3790,55 @@ void SocialHandler::handleFriendStatus(network::Packet& packet) {
             owner_.contactsRef().push_back(std::move(entry));
         }
     }
+    // What Wow.exe's friend handler (0x6B73A0) says for each result, all of
+    // them chat lines; the ones naming a player wait for the name.
+    const std::string N = GameHandler::kPlayerNameArg;
     switch (data.status) {
-        case kDbError:      owner_.addSystemChatMessage("Your friends list could not be reached."); break;
-        case kListFull:     owner_.addSystemChatMessage("Your friends list is full."); break;
+        case kDbError:
+        case kNotFound:     owner_.displayGameMessage("ERR_FRIEND_NOT_FOUND", "Player not found."); break;
+        case kListFull:     owner_.displayGameMessage("ERR_FRIEND_LIST_FULL", "You don't have room for any more friends."); break;
         case kOnline:
-            owner_.addSystemChatMessage(playerName + " is now online.");
-            owner_.playUiMessageSound("ERR_FRIEND_ONLINE_SS");  // FRIENDJOINGAME
+            owner_.displayGameMessageNaming(data.guid, "ERR_FRIEND_ONLINE_SS",
+                                            "|Hplayer:%s|h[%s]|h has come online.", {N, N});
             break;
-        case kOffline:      owner_.addSystemChatMessage(playerName + " is now offline."); break;
-        case kNotFound:     owner_.addSystemChatMessage("Player not found."); break;
-        case kRemoved:      owner_.addSystemChatMessage(playerName + " has been removed from your friends list."); break;
+        case kOffline:
+            owner_.displayGameMessageNaming(data.guid, "ERR_FRIEND_OFFLINE_S", "%s has gone offline.", {N});
+            break;
+        case kRemoved:
+            // A friend whose character is gone is ERR_FRIEND_DELETED.
+            if (playerName.empty()) owner_.displayGameMessage("ERR_FRIEND_DELETED", "Friend removed because the character no longer exists.");
+            else owner_.displayGameMessage("ERR_FRIEND_REMOVED_S", playerName + " removed from friends list.", {playerName});
+            break;
         case kAddedOnline:
-        case kAddedOffline: owner_.addSystemChatMessage(playerName + " has been added to your friends list."); break;
-        case kAlready:      owner_.addSystemChatMessage(playerName + " is already in your friends list."); break;
-        case kSelf:         owner_.addSystemChatMessage("You cannot add yourself as a friend."); break;
-        case kEnemy:        owner_.addSystemChatMessage(playerName + " belongs to the other faction."); break;
-        default: break;
+        case kAddedOffline:
+            owner_.displayGameMessageNaming(data.guid, "ERR_FRIEND_ADDED_S", "%s added to friends.", {N});
+            break;
+        case kAlready:
+            owner_.displayGameMessageNaming(data.guid, "ERR_FRIEND_ALREADY_S", "%s is already your friend.", {N});
+            break;
+        case kSelf:         owner_.displayGameMessage("ERR_FRIEND_SELF", "You can't put yourself on your friend list."); break;
+        case kEnemy:        owner_.displayGameMessage("ERR_FRIEND_WRONG_FACTION", "Friends must be part of your alliance."); break;
+        // The ignore list answers on the same opcode.
+        case 11: owner_.displayGameMessage("ERR_IGNORE_FULL", "You can't ignore any more players."); break;
+        case 12: owner_.displayGameMessage("ERR_IGNORE_SELF", "You can't ignore yourself."); break;
+        case 13: owner_.displayGameMessage("ERR_IGNORE_NOT_FOUND", "Player not found."); break;
+        case 14: owner_.displayGameMessageNaming(data.guid, "ERR_IGNORE_ALREADY_S", "%s is already being ignored.", {N}); break;
+        case 15: owner_.displayGameMessageNaming(data.guid, "ERR_IGNORE_ADDED_S", "%s is now being ignored.", {N}); break;
+        case 16: {
+            const std::string ignored = owner_.lookupName(data.guid);
+            if (ignored.empty()) owner_.displayGameMessage("ERR_IGNORE_DELETED", "Ignore removed because the character no longer exists.");
+            else owner_.displayGameMessage("ERR_IGNORE_REMOVED_S", ignored + " is no longer being ignored.", {ignored});
+            break;
+        }
+        case 17: owner_.displayGameMessage("ERR_IGNORE_AMBIGUOUS", "That name is ambiguous, type more of the player's server name"); break;
+        case 18: owner_.displayGameMessage("ERR_VOICE_IGNORE_FULL", "You can't mute any more players."); break;
+        case 19: owner_.displayGameMessage("ERR_VOICE_IGNORE_SELF", "You can't mute yourself."); break;
+        case 20: owner_.displayGameMessage("ERR_VOICE_IGNORE_NOT_FOUND", "Player not found."); break;
+        case 21: owner_.displayGameMessageNaming(data.guid, "ERR_VOICE_IGNORE_ALREADY_S", "%s is already muted.", {N}); break;
+        case 22: owner_.displayGameMessageNaming(data.guid, "ERR_VOICE_IGNORE_ADDED_S", "%s is now muted.", {N}); break;
+        case 24: owner_.displayGameMessage("ERR_VOICE_IGNORE_AMBIGUOUS", "That name is ambiguous, type more of the player's server name"); break;
+        case 25: case 26: case 27: break;   // silent updates (flags, area)
+        default: owner_.displayGameMessage("ERR_FRIEND_ERROR", "Unknown friend response from server."); break;
     }
     if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("FRIENDLIST_UPDATE", {});
 }
@@ -3602,14 +3846,14 @@ void SocialHandler::handleFriendStatus(network::Packet& packet) {
 void SocialHandler::handleRandomRoll(network::Packet& packet) {
     RandomRollData data;
     if (!RandomRollParser::parse(packet, data)) return;
-    std::string rollerName = (data.rollerGuid == owner_.getPlayerGuid()) ? "You" : "Someone";
-    if (data.rollerGuid != owner_.getPlayerGuid()) {
-        auto it = owner_.getPlayerNameCache().find(data.rollerGuid);
-        if (it != owner_.getPlayerNameCache().end()) rollerName = it->second;
-    }
-    std::string msg = rollerName + ((data.rollerGuid == owner_.getPlayerGuid()) ? " roll " : " rolls ");
-    msg += std::to_string(data.result) + " (" + std::to_string(data.minRoll) + "-" + std::to_string(data.maxRoll) + ")";
-    owner_.addSystemChatMessage(msg);
+    // RANDOM_ROLL_RESULT ("%s rolls %d (%d-%d)"), a plain chat line for
+    // everyone including the player, once the roller's name is known
+    // (Wow.exe 0x6E2E90); nothing from someone ignored.
+    if (owner_.ignoreListGuidsRef().count(data.rollerGuid)) return;
+    owner_.displayGameMessageNaming(data.rollerGuid, "RANDOM_ROLL_RESULT", "%s rolls %d (%d-%d)",
+                                    {GameHandler::kPlayerNameArg, std::to_string(data.result),
+                                     std::to_string(data.minRoll), std::to_string(data.maxRoll)},
+                                    /*plain=*/true);
 }
 
 // ============================================================
@@ -3620,8 +3864,8 @@ void SocialHandler::handleLogoutResponse(network::Packet& packet) {
     LogoutResponseData data;
     if (!LogoutResponseParser::parse(packet, data)) return;
     if (data.result == 0) {
-        if (data.instant) { owner_.addSystemChatMessage("Logging out..."); logoutCountdown_ = 0.0f; }
-        else { owner_.addSystemChatMessage("Logging out in 20 seconds..."); logoutCountdown_ = 20.0f; }
+        // No line: the countdown popup is the stock client's only word.
+        logoutCountdown_ = data.instant ? 0.0f : 20.0f;
         if (owner_.addonEventCallbackRef()) {
             owner_.addonEventCallbackRef()("PLAYER_LOGOUT", {});
             // The timer the server just imposed, announced so the interface can
@@ -3663,7 +3907,6 @@ void SocialHandler::handleLogoutComplete(network::Packet& /*packet*/) {
     // character is actually out of the world, and only then can the client leave -
     // to character select, or out of the game entirely for /quit and /exit.
     const bool exiting = exitAfterLogout_;
-    owner_.addSystemChatMessage("Logout complete.");
     loggingOut_ = false; exitAfterLogout_ = false; logoutCountdown_ = 0.0f;
     LOG_WARNING("Logout complete (exiting=", exiting ? "yes" : "no", ")");  // temporary: visible at default log level
     if (owner_.logoutCompleteCallbackRef()) owner_.logoutCompleteCallbackRef()(exiting);
@@ -3732,12 +3975,9 @@ void SocialHandler::handleBattlefieldStatus(network::Packet& packet) {
         LOG_WARNING("Battleground queue ", queueSlot + 1, ": status ", statusId,
                     " for type ", bgTypeId, " (", bgName, "), average wait ",
                     avgWaitSec, " s, waited ", timeInQueueSec, " s");
-        switch (statusId) {
-            case 1: owner_.addSystemChatMessage("Queued for " + bgName + "."); break;
-            case 2: owner_.addSystemChatMessage(bgName + " is ready!"); break;
-            case 3: owner_.addSystemChatMessage("Entered " + bgName + "."); break;
-            default: break;
-        }
+        // No line of the client's own: Wow.exe (0x54AE40) stores the queue
+        // and fires UPDATE_BATTLEFIELD_STATUS, and the interface does the
+        // telling (the minimap eye, the "enter battle" popup).
     }
     // The argument is which queue changed, counted from one, not what it
     // changed to. battlefieldframe.lua takes it as the index and raises the
@@ -3779,14 +4019,13 @@ void SocialHandler::acceptBattlefield(uint32_t queueSlot) {
     const BgQueueSlot* slot = nullptr;
     if (queueSlot == 0xFFFFFFFF) { for (const auto& s : bgQueues_) { if (s.statusId == 2) { slot = &s; break; } } }
     else if (queueSlot < bgQueues_.size() && bgQueues_[queueSlot].statusId == 2) slot = &bgQueues_[queueSlot];
-    if (!slot) { owner_.addSystemChatMessage("No battleground invitation pending."); return; }
+    if (!slot) return;
     network::Packet pkt(wireOpcode(Opcode::CMSG_BATTLEFIELD_PORT));
     pkt.writeUInt8(slot->arenaType); pkt.writeUInt8(0x00); pkt.writeUInt32(slot->bgTypeId);
     pkt.writeUInt16(0x0000); pkt.writeUInt8(1);
     owner_.getSocket()->send(pkt);
     uint32_t clearSlot = slot->queueSlot;
     if (clearSlot < bgQueues_.size()) bgQueues_[clearSlot].statusId = 3;
-    owner_.addSystemChatMessage("Accepting battleground invitation...");
 }
 
 // Leave the battleground the player is standing in, which is a different thing
@@ -3852,17 +4091,13 @@ void SocialHandler::declineBattlefield(uint32_t queueSlot) {
     else if (queueSlot < bgQueues_.size() &&
              (bgQueues_[queueSlot].statusId == 1 || bgQueues_[queueSlot].statusId == 2))
         slot = &bgQueues_[queueSlot];
-    if (!slot) { owner_.addSystemChatMessage("No battleground invitation pending."); return; }
-    const bool wasInvite = slot->statusId == 2;
-    const std::string bgName = slot->bgName;
+    if (!slot) return;
     network::Packet pkt(wireOpcode(Opcode::CMSG_BATTLEFIELD_PORT));
     pkt.writeUInt8(slot->arenaType); pkt.writeUInt8(0x00); pkt.writeUInt32(slot->bgTypeId);
     pkt.writeUInt16(0x0000); pkt.writeUInt8(0);
     owner_.getSocket()->send(pkt);
     uint32_t clearSlot = slot->queueSlot;
     if (clearSlot < bgQueues_.size()) bgQueues_[clearSlot] = BgQueueSlot{};
-    owner_.addSystemChatMessage(wasInvite ? "Battleground invitation declined."
-                                          : "Left the queue for " + bgName + ".");
     // The minimap icon and the panel read the queues on this event; without
     // it they kept showing the queue until the server's next word.
     if (owner_.addonEventCallbackRef())
@@ -3898,11 +4133,23 @@ void SocialHandler::handleRaidInstanceInfo(network::Packet& packet) {
     }
 }
 
-void SocialHandler::handleInstanceDifficulty(network::Packet& packet) {
+void SocialHandler::handleInstanceDifficulty(network::Packet& packet, bool dungeonSetting) {
     auto rem = [&]() { return packet.getRemainingSize(); };
     if (rem() < 4) return;
     uint32_t prevDifficulty = instanceDifficulty_;
     instanceDifficulty_ = packet.readUInt32();
+    // ERR_DUNGEON_DIFFICULTY_CHANGED_S with DUNGEON_DIFFICULTY<n+1>, a chat
+    // line, when the setting moves (Wow.exe 0x525530 -> 0x524720). Only for
+    // MSG_SET_DUNGEON_DIFFICULTY: SMSG_INSTANCE_DIFFICULTY is stored in
+    // silence.
+    if (dungeonSetting && instanceDifficulty_ != dungeonDifficultySetting_) {
+        dungeonDifficultySetting_ = instanceDifficulty_;
+        const std::string nameKey = "DUNGEON_DIFFICULTY" + std::to_string(instanceDifficulty_ + 1);
+        std::string label = globalString(owner_.services().assetManager, nameKey);
+        if (label.empty()) label = instanceDifficulty_ == 1 ? "5 Player (Heroic)" : "5 Player";
+        owner_.displayGameMessage("ERR_DUNGEON_DIFFICULTY_CHANGED_S",
+                                  "Dungeon Difficulty set to " + label + ".", {label});
+    }
     if (rem() >= 4) {
         uint32_t secondField = packet.readUInt32();
         if (rem() >= 4) instanceIsHeroic_ = (instanceDifficulty_ == 1);
@@ -3912,10 +4159,7 @@ void SocialHandler::handleInstanceDifficulty(network::Packet& packet) {
     }
     inInstance_ = true;
     if (instanceDifficulty_ != prevDifficulty) {
-        const char* diffLabel = instanceDifficultyName(instanceDifficulty_);
-        if (diffLabel) owner_.addSystemChatMessage(std::string("Dungeon difficulty set to ") + diffLabel + ".");
-        // Already noticed and already said - in chat, to the player. The
-        // minimap hangs a difficulty banner off its own corner and rereads
+        // The minimap hangs a difficulty banner off its own corner and rereads
         // GetInstanceInfo on this, which answers from the value just stored,
         // so the banner was the one thing not told the difficulty had changed.
         if (owner_.addonEventCallbackRef()) {
@@ -3943,8 +4187,10 @@ void SocialHandler::handleLfgJoinResult(network::Packet& packet) {
         // carries ERR_LFG_JOINED_QUEUE ("Joined (no client msg)", LFGMgr.h).
         lfgState_ = static_cast<LfgState>(state);
     } else {
-        // The ERR_LFG_* GameError for the result, a chat line. AzerothCore's
-        // LfgJoinResult comments are those GlobalStrings texts.
+        // The ERR_LFG_* GameError for the result, a chat line, from Wow.exe's
+        // own table (0xACDDA8, read by 0x55BDC0): 1 and 18 the failed role
+        // check - with a reason of 3 or 4 its timeout or "not viable" form -
+        // and 2, 4-17 one each. 3 and anything else say nothing.
         static const char* const kKeys[] = {
             nullptr, "ERR_LFG_ROLE_CHECK_FAILED", "ERR_LFG_GROUP_FULL", nullptr,
             "ERR_LFG_NO_LFG_OBJECT", "ERR_LFG_NO_SLOTS_PLAYER", "ERR_LFG_NO_SLOTS_PARTY",
@@ -3952,11 +4198,16 @@ void SocialHandler::handleLfgJoinResult(network::Packet& packet) {
             "ERR_LFG_MEMBERS_NOT_PRESENT", "ERR_LFG_GET_INFO_TIMEOUT", "ERR_LFG_INVALID_SLOT",
             "ERR_LFG_DESERTER_PLAYER", "ERR_LFG_DESERTER_PARTY", "ERR_LFG_RANDOM_COOLDOWN_PLAYER",
             "ERR_LFG_RANDOM_COOLDOWN_PARTY", "ERR_LFG_TOO_MANY_MEMBERS", "ERR_LFG_CANT_USE_DUNGEONS",
+            "ERR_LFG_ROLE_CHECK_FAILED",
         };
-        const char* key = result < sizeof(kKeys) / sizeof(kKeys[0]) ? kKeys[result] : nullptr;
-        const char* msg = lfgJoinResultString(result);
-        owner_.displayGameMessage(key ? key : "ERR_LFG_NO_LFG_OBJECT",
-                                  msg ? msg : "Internal LFG Error.");
+        if (result == 1 && state == 3) {
+            owner_.displayGameMessage("ERR_LFG_ROLE_CHECK_FAILED_TIMEOUT", "The role check has timed out.");
+        } else if (result == 1 && state == 4) {
+            owner_.displayGameMessage("ERR_LFG_ROLE_CHECK_FAILED_NOT_VIABLE", "Your group cannot be queued as it is.");
+        } else if (const char* key = result < sizeof(kKeys) / sizeof(kKeys[0]) ? kKeys[result] : nullptr) {
+            const char* msg = lfgJoinResultString(result);
+            owner_.displayGameMessage(key, msg ? msg : "");
+        }
     }
     // The queue state moved, either into a queue or back out of the attempt,
     // and LFG_UPDATE is how the panel is told to re-read it - the same event
@@ -4128,14 +4379,26 @@ void SocialHandler::handleLfgProposalUpdate(network::Packet& packet) {
         lfgProposalMembers_.push_back(m);
     }
     // LFG_Denied when the player, or someone in the player's own group,
-    // answered no (Wow.exe 0x55bdc0, with ERR_LFG_PROPOSAL_DECLINED_SELF or
-    // _PARTY). A stranger declining is not announced.
+    // answered no, with ERR_LFG_PROPOSAL_DECLINED_SELF or _PARTY (Wow.exe
+    // 0x55BDC0; the party's decline wins). A stranger declining is not
+    // announced here: the update putting the player back in the queue says
+    // ERR_LFG_PROPOSAL_FAILED.
+    bool declinedSelf = false, declinedParty = false;
     for (const auto& m : lfgProposalMembers_) {
-        if (m.answered && !m.accepted && (m.isSelf || m.sameGroup)) {
-            owner_.playUiSoundEntry(kSoundLfgDenied);
-            break;
-        }
+        if (!m.answered || m.accepted) continue;
+        if (m.isSelf) declinedSelf = true;
+        else if (m.sameGroup) declinedParty = true;
     }
+    if (declinedParty || declinedSelf) {
+        owner_.playUiSoundEntry(kSoundLfgDenied);
+        if (declinedParty)
+            owner_.displayGameMessage("ERR_LFG_PROPOSAL_DECLINED_PARTY",
+                "You have been removed from the Dungeon queue because someone in your party did not accept the invitation.");
+        else
+            owner_.displayGameMessage("ERR_LFG_PROPOSAL_DECLINED_SELF",
+                "You have been removed from the Dungeon queue because you did not accept the invitation.");
+    }
+    lfgProposalFailedUnsaid_ = proposalState == kProposalFailed && !declinedSelf && !declinedParty;
 
     lfgDungeonId_ = dungeonId; lfgProposalId_ = proposalId;
     switch (proposalState) {
@@ -4220,8 +4483,12 @@ void SocialHandler::handleLfgRoleCheckUpdate(network::Packet& packet) {
     lfgRoleCheckMembers_ = packet.hasRemaining(1) ? packet.readUInt8() : 0;
 
     if (roleCheckState == 1) lfgState_ = LfgState::Queued;
-    else if (roleCheckState == 3) { lfgState_ = LfgState::None; owner_.addUIError("Dungeon Finder: Role check failed - missing required role."); owner_.addSystemChatMessage("Dungeon Finder: Role check failed - missing required role."); }
-    else if (roleCheckState == 2) { lfgState_ = LfgState::RoleCheck; owner_.addSystemChatMessage("Dungeon Finder: Performing role check..."); }
+    // Wow.exe (0x55BDC0) says two things here: ERR_LFG_ROLE_CHECK_INITIATED
+    // as a check begins and ERR_LFG_ROLE_CHECK_ABORTED when one is aborted
+    // (5). A check that fails for a missing role (3) is told by the join
+    // result that follows (ERR_LFG_ROLE_CHECK_FAILED).
+    else if (roleCheckState == 3) lfgState_ = LfgState::None;
+    else if (roleCheckState == 2) lfgState_ = LfgState::RoleCheck;
     // LFG_ROLECHECK_WRONG_ROLES (4), ABORTED (5) and NO_ROLE (6) end the
     // check without a queue, the same as MISSING_ROLE (3): LFGMgr::
     // UpdateRoleCheck sends the join result and removes the group's state.
@@ -4233,8 +4500,14 @@ void SocialHandler::handleLfgRoleCheckUpdate(network::Packet& packet) {
     // ERR_LFG_ROLE_CHECK_INITIATED - and LFG_Denied (17341) when one ends
     // aborted (5, someone left; ERR_LFG_ROLE_CHECK_ABORTED) or with someone
     // choosing no role (6).
-    if (initiating) owner_.playUiSoundEntry(kSoundLfgDungeonReady);
+    if (initiating) {
+        owner_.displayGameMessage("ERR_LFG_ROLE_CHECK_INITIATED",
+            "A role check has been initiated. Your group will be queued when all members have selected a role.");
+        owner_.playUiSoundEntry(kSoundLfgDungeonReady);
+    }
     if (roleCheckState == 5 || roleCheckState == 6) owner_.playUiSoundEntry(kSoundLfgDenied);
+    if (roleCheckState == 5)
+        owner_.displayGameMessage("ERR_LFG_ROLE_CHECK_ABORTED", "Your group leader has cancelled the Role Check.");
     // Likewise GetLFGRoleUpdate, which reports the check in progress.
     if (owner_.addonEventCallbackRef()) {
         owner_.addonEventCallbackRef()("LFG_ROLE_CHECK_UPDATE", {});
@@ -4293,28 +4566,6 @@ enum : uint8_t {
     kLfgGroupDisband        = 16,
 };
 
-/// What to say about an update, or nullptr for the ones that are not news.
-///
-/// Said only when the state actually moves, because the server restates the
-/// same state on a schedule and every line here would otherwise arrive again
-/// with it.
-/// The GameError key the stock client prints for an update (the ERR_LFG_*
-/// rows of the GameError table, all chat lines), or nullptr for the updates
-/// that print nothing. The pairing is by meaning - each GlobalStrings text
-/// matches AzerothCore's comment for its update type - and was not read out of
-/// Wow.exe's own LFG handler.
-const char* lfgUpdateMessage(uint8_t updateType) {
-    switch (updateType) {
-        // Joining and leaving are said where 0x55bdc0 says them, with their
-        // sounds (playLfgUpdateSound), not by update type.
-        case kLfgRoleCheckFailed:  return "ERR_LFG_ROLE_CHECK_FAILED";
-        case kLfgRoleCheckAborted: return "ERR_LFG_ROLE_CHECK_ABORTED";
-        case kLfgProposalFailed:   return "ERR_LFG_PROPOSAL_FAILED";
-        case kLfgProposalDeclined: return "ERR_LFG_PROPOSAL_DECLINED_SELF";
-        default:                   return nullptr;
-    }
-}
-
 }  // namespace
 
 void SocialHandler::handleLfgUpdatePlayer(network::Packet& packet) {
@@ -4337,6 +4588,11 @@ void SocialHandler::handleLfgUpdatePlayer(network::Packet& packet) {
         packet.readUInt8();
         readLfgDungeonList(packet);
     }
+    // A proposal that was up when a solo player's update shows them back in
+    // the queue failed: Wow.exe (0x55BDC0, LFG_UPDATE_PLAYER) clears it and
+    // says ERR_LFG_PROPOSAL_FAILED. Checked before applyLfgUpdate moves the
+    // state on.
+    if (!owner_.isInGroup()) endProposalOnRequeue(updateType, extraInfo, queued);
     applyLfgUpdate(updateType, extraInfo, queued, /*inDungeon=*/false);
     // For the player's own update Wow.exe counts the body's presence as
     // having joined.
@@ -4372,6 +4628,8 @@ void SocialHandler::handleLfgUpdateParty(network::Packet& packet) {
         for (int i = 0; i < 5; ++i) packet.readUInt8();
         dungeonCount = readLfgDungeonList(packet);
     }
+    // The same for a group, on the party's update (its join flag).
+    if (owner_.isInGroup()) endProposalOnRequeue(updateType, joined, queued);
     // The party's join flag covers being in the dungeon as well as being in the
     // queue, so it only means "in a dungeon" when the queue flag is off.
     applyLfgUpdate(updateType, extraInfo, queued, joined && !queued);
@@ -4407,6 +4665,23 @@ void SocialHandler::playLfgUpdateSound(LfgFlagsSeen& last, uint8_t updateType, b
         owner_.playUiSoundEntry(kSoundLfgDenied);
         owner_.displayGameMessage("ERR_LFG_LEFT_QUEUE", "You are no longer queued in the Dungeon Finder.");
     }
+}
+
+/// ERR_LFG_PROPOSAL_FAILED for a proposal the update shows was given up: one
+/// was up, and the update is joined and queued again. Wow.exe tests only the
+/// flags; UPDATE_STATUS is left out here because AzerothCore restates the
+/// queue with it, queued set, while a proposal is still being answered
+/// (see applyLfgUpdate), which the stock client never meets from Blizzard's
+/// servers. The proposal's own FAILED state fires LFG_PROPOSAL_FAILED.
+void SocialHandler::endProposalOnRequeue(uint8_t updateType, bool joined, bool queued) {
+    // AzerothCore sends the proposal's FAILED state before the update, which
+    // already ended it here; that is remembered until the update comes.
+    const bool proposalUp = (lfgProposalId_ != 0 && lfgState_ == LfgState::Proposal) ||
+                            lfgProposalFailedUnsaid_;
+    if (!proposalUp || !joined || !queued || updateType == kLfgUpdateStatus) return;
+    lfgProposalFailedUnsaid_ = false;
+    owner_.displayGameMessage("ERR_LFG_PROPOSAL_FAILED",
+        "Someone has declined the dungeon invite. You have been returned to the front of the dungeon queue.");
 }
 
 /// The dungeons the update is about. The first is the one the queue window
@@ -4463,12 +4738,11 @@ void SocialHandler::applyLfgUpdate(uint8_t updateType, bool extraInfo,
         lfgState_ = LfgState::InDungeon;
     }
 
-    if (const char* message = lfgUpdateMessage(updateType)) {
-        // Only on a move. UPDATE_STATUS says nothing of its own and the rest
-        // repeat: the server restates the queue every few seconds, and each
-        // restatement used to arrive as a line of chat.
-        if (lfgState_ != previous) owner_.displayGameMessage(message, "");
-    } else if (updateType != kLfgUpdateStatus && updateType != kLfgDefault) {
+    // No line by update type: Wow.exe (0x55BDC0) speaks from the flags
+    // alone - joined or left (playLfgUpdateSound) and a proposal given up
+    // (endProposalOnRequeue). The role check, the proposal's declines and
+    // the join result have their own packets and say their own lines.
+    if (updateType > kLfgGroupDisband) {
         // An update type this client has no name for. Said once so it can be
         // added, rather than silently deciding the queue is over.
         static std::set<uint8_t> said;
@@ -4513,11 +4787,13 @@ void SocialHandler::handleLfgPlayerReward(network::Packet& packet) {
     reward.randomDungeonId = packet.readUInt32();
     reward.dungeonId       = packet.readUInt32();
     reward.done            = packet.readUInt8() != 0;
-    packet.readUInt32();   // the constant 1
+    // Wow.exe (0x55BDC0) names the rest: strangers, base money, base XP,
+    // variable money, variable XP - the variable parts paid per stranger.
+    const uint32_t strangers = packet.readUInt32();
     reward.money           = packet.readUInt32();
     reward.xp              = packet.readUInt32();
-    packet.readUInt32();
-    packet.readUInt32();
+    const uint32_t varMoney = packet.readUInt32();
+    const uint32_t varXp    = packet.readUInt32();
     const uint8_t itemNum = packet.readUInt8();
     for (uint8_t i = 0; i < itemNum && packet.hasRemaining(12); ++i) {
         LfgCompletionReward::Item item;
@@ -4529,20 +4805,22 @@ void SocialHandler::handleLfgPlayerReward(network::Packet& packet) {
     reward.valid = true;
     lfgCompletionReward_ = reward;
 
-    const uint32_t money = reward.money;
-    const uint32_t xp = reward.xp;
-    const std::string moneyBuf = game::formatCopperPrice(money);
-    std::string rewardMsg = std::string("Dungeon Finder reward: ") + moneyBuf + ", " + std::to_string(xp) + " XP";
-    if (!reward.items.empty()) {
-        const auto& first = reward.items.front();
-        std::string itemLabel = "item #" + std::to_string(first.itemId);
-        uint32_t lfgItemQuality = 1;
-        if (const ItemQueryResponseData* info = owner_.getItemInfo(first.itemId)) {
-            if (!info->name.empty()) itemLabel = info->name;
-            lfgItemQuality = info->quality;
-        }
-        rewardMsg += ", " + buildItemLink(first.itemId, lfgItemQuality, itemLabel);
-        if (first.count > 1) rewardMsg += " x" + std::to_string(first.count);
+    // Chat lines before the toast, as Wow.exe gives them:
+    // ERR_QUEST_REWARD_EXP_I for the base XP and again for the per-stranger
+    // XP, ERR_QUEST_REWARD_MONEY_S for each money part.
+    if (reward.xp > 0)
+        owner_.displayGameMessage("ERR_QUEST_REWARD_EXP_I", "Experience gained: " + std::to_string(reward.xp) + ".",
+                                  {std::to_string(reward.xp)});
+    if (strangers * varXp > 0)
+        owner_.displayGameMessage("ERR_QUEST_REWARD_EXP_I", "Experience gained: " + std::to_string(strangers * varXp) + ".",
+                                  {std::to_string(strangers * varXp)});
+    if (reward.money > 0) {
+        const std::string m = owner_.formatMoneyText(reward.money);
+        owner_.displayGameMessage("ERR_QUEST_REWARD_MONEY_S", "Received " + m + ".", {m});
+    }
+    if (strangers * varMoney > 0) {
+        const std::string m = owner_.formatMoneyText(strangers * varMoney);
+        owner_.displayGameMessage("ERR_QUEST_REWARD_MONEY_S", "Received " + m + ".", {m});
     }
     lfgState_ = LfgState::FinishedDungeon;
 
@@ -4551,9 +4829,6 @@ void SocialHandler::handleLfgPlayerReward(network::Packet& packet) {
     // be written before this fires.
     if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("LFG_COMPLETION_REWARD", {});
 
-    // No hand-built chat line: FrameXML announces the reward its own way, in
-    // a toast rather than a line, and printing both is two announcements of
-    // one reward.
 }
 
 void SocialHandler::handleLfgBootProposalUpdate(network::Packet& packet) {
@@ -4587,13 +4862,18 @@ void SocialHandler::handleLfgBootProposalUpdate(network::Packet& packet) {
     }
     if (inProgress) { lfgState_ = LfgState::Boot; }
     else {
+        // ERR_PARTY_LFG_BOOT_VOTE_SUCCEEDED or _FAILED naming the victim, a
+        // chat line (Wow.exe 0x55BDC0: failed when the votes fell short).
         const bool bootPassed = (bootVotes >= votesNeeded);
+        owner_.displayGameMessageNaming(lfgBootVictimGuid_,
+            bootPassed ? "ERR_PARTY_LFG_BOOT_VOTE_SUCCEEDED" : "ERR_PARTY_LFG_BOOT_VOTE_FAILED",
+            bootPassed ? "The vote to kick %s has passed." : "The vote to kick %s has failed.",
+            {GameHandler::kPlayerNameArg});
         lfgBootVotes_ = lfgBootTotal_ = lfgBootTimeLeft_ = lfgBootNeeded_ = 0;
         lfgBootTargetName_.clear(); lfgBootReason_.clear();
         lfgBootDidVote_ = lfgBootMyVote_ = lfgBootInProgress_ = false;
         lfgBootVictimGuid_ = 0;
         lfgState_ = LfgState::InDungeon;
-        owner_.addSystemChatMessage(bootPassed ? "Dungeon Finder: Vote kick passed - member removed." : "Dungeon Finder: Vote kick failed.");
     }
     // The vote-to-kick dialog, whose countdown starts on this.
     if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("LFG_BOOT_PROPOSAL_UPDATE", {});
@@ -4605,7 +4885,22 @@ void SocialHandler::handleLfgTeleportDenied(network::Packet& packet) {
     // to this handler would have inherited it.
     if (!packet.hasRemaining(4)) return;
     const uint32_t reason = packet.readUInt32();
-    owner_.addSystemChatMessage(std::string("Dungeon Finder: ") + lfgTeleportDeniedString(reason));
+    // Wow.exe's jump table (0x55D148): 1 dead, 2 falling, 3 locked out,
+    // 4 fatigued, 6 an invalid location (then "locked out" as well, its case
+    // falling through), past 7 locked out; 0, 5 and 7 say nothing.
+    switch (reason) {
+        case 1: owner_.displayGameMessage("ERR_PLAYER_DEAD", "You can't do that when you're dead."); break;
+        case 2: owner_.displayGameMessage("ERR_NOT_WHILE_FALLING", "You can't do that while jumping or falling"); break;
+        case 4: owner_.displayGameMessage("ERR_NOT_WHILE_FATIGUED", "You can't do that while fatigued"); break;
+        case 6:
+            owner_.displayGameMessage("ERR_INVALID_TELEPORT_LOCATION", "Invalid teleport location");
+            [[fallthrough]];
+        case 3:
+            owner_.displayGameMessage("ERR_CLIENT_LOCKED_OUT", "You can't do that right now.");
+            break;
+        case 0: case 5: case 7: break;
+        default: owner_.displayGameMessage("ERR_CLIENT_LOCKED_OUT", "You can't do that right now."); break;
+    }
 }
 
 // ============================================================
@@ -4713,39 +5008,56 @@ void SocialHandler::handleArenaTeamCommandResult(network::Packet& packet) {
     if (!packet.hasRemaining(4)) return;
     const uint32_t error = packet.readUInt32();
 
-    // ArenaTeamCommandTypes, and it is not a dense range: 2, and everything
-    // between 4 and 13, are values the server never sends. The old table read
-    // it as 0..5 in a row, so a quit reported itself as a remove and a change
-    // of captain fell off the end.
-    const char* cmdName = "arena team";
-    switch (command) {
-        case 0x00: cmdName = "arena team create"; break;
-        case 0x01: cmdName = "arena team invite"; break;
-        case 0x03: cmdName = "arena team quit"; break;
-        case 0x0E: cmdName = "arena team captain"; break;
-        default: break;
-    }
-
-    // Whichever name the result is about. A create names the team, an invite
-    // names the player, and both are sent for the ones that concern both.
-    std::string about;
-    if (!teamName.empty()) about = teamName;
-    if (!playerName.empty())
-        about = about.empty() ? playerName : about + " / " + playerName;
-
-    // Wow.exe (0x6ccb20) raises ERR_ARENA_TEAM_CREATE_S for a create that
-    // worked and ERR_INVITED_TO_ARENA_TEAM for error 4 from any command; its
-    // message table gives both LEVELUP.
+    // Every answer as Wow.exe's handler (0x6CCB20) gives it, all chat lines;
+    // codes it does not know say nothing.
+    const std::string& team = teamName;
+    const std::string& who = playerName;
     if (error == 0) {
-        owner_.addSystemChatMessage(std::string(cmdName) + " succeeded" +
-                                    (about.empty() ? "." : ": " + about));
-        if (command == 0x00) owner_.playUiMessageSound("ERR_ARENA_TEAM_CREATE_S");
+        switch (command) {
+            case 0x00: owner_.displayGameMessage("ERR_ARENA_TEAM_CREATE_S", team + " created.  To disband, use /teamdisband [2v2, 3v3, 5v5].", {team}); break;
+            case 0x01: owner_.displayGameMessage("ERR_ARENA_TEAM_INVITE_SS", "You have invited " + who + " to join " + team, {who, team}); break;
+            case 0x03: owner_.displayGameMessage("ERR_ARENA_TEAM_QUIT_S", "You are no longer a member of " + team, {team}); break;
+            case 0x0E: owner_.displayGameMessage("ERR_ARENA_TEAM_FOUNDER_S", "Congratulations, you are a founding member of " + team + "!  To leave, use /teamquit [2v2, 3v3, 5v5].", {team}); break;
+            default: break;
+        }
         return;
     }
-    owner_.addSystemChatMessage(std::string(cmdName) + " failed" +
-                                (about.empty() ? "" : " (" + about + ")") +
-                                ": " + arenaTeamErrorString(error));
-    if (error == 4) owner_.playUiMessageSound("ERR_INVITED_TO_ARENA_TEAM");
+    struct Answer { uint32_t code; const char* key; const char* text; bool team; };
+    static constexpr Answer kAnswers[] = {
+        {0x01, "ERR_ARENA_TEAM_INTERNAL", "Internal arena team error", false},
+        {0x02, "ERR_ALREADY_IN_ARENA_TEAM", "You are already in an arena team of that size", false},
+        {0x03, "ERR_ALREADY_IN_ARENA_TEAM_S", "%s is already in an arena team of that size", false},
+        {0x04, "ERR_INVITED_TO_ARENA_TEAM", "You have already been invited into an arena team", false},
+        {0x05, "ERR_ALREADY_INVITED_TO_ARENA_TEAM_S", "%s has already been invited to an arena team", false},
+        {0x06, "ERR_ARENA_TEAM_NAME_INVALID", "That name contains invalid characters, please enter a new name", false},
+        {0x07, "ERR_ARENA_TEAM_NAME_EXISTS_S", "There is already an arena team named \"%s\"", true},
+        {0x09, "ERR_ARENA_TEAM_PLAYER_NOT_IN_TEAM", "You are not in an arena team of that size", false},
+        {0x0B, "ERR_ARENA_TEAM_PLAYER_NOT_FOUND_S", "\"%s\" not found", false},
+        {0x0C, "ERR_ARENA_TEAM_NOT_ALLIED", "You cannot invite players from the opposing alliance", false},
+        {0x13, "ERR_IGNORING_YOU_S", "%s is ignoring you.", false},
+        {0x15, "ERR_ARENA_TEAM_TARGET_TOO_LOW_S", "%s is not high enough level to join your team", false},
+        {0x16, "ERR_ARENA_TEAM_TARGET_TOO_HIGH_S", "%s is too high level to join your team.", false},
+        {0x17, "ERR_ARENA_TEAM_TOO_MANY_MEMBERS_S", "%s has too many members.", true},
+        {0x1B, "ERR_ARENA_TEAM_NOT_FOUND", "Arena team not found.", false},
+        {0x1E, "ERR_ARENA_TEAMS_LOCKED", "Arena teams are locked for the season.", false},
+    };
+    if (error == 0x08) {
+        if (command == 0x03)
+            owner_.displayGameMessage("ERR_ARENA_TEAM_LEADER_LEAVE_S", "You must promote a new team captain using /teamcaptain before leaving the team", {team});
+        else
+            owner_.displayGameMessage("ERR_ARENA_TEAM_PERMISSIONS", "You don't have permission to do that");
+        return;
+    }
+    if (error == 0x0A) {
+        owner_.displayGameMessage("ERR_ARENA_TEAM_PLAYER_NOT_IN_TEAM_SS", who + " is not in " + team, {who, team});
+        return;
+    }
+    for (const auto& a : kAnswers) {
+        if (a.code != error) continue;
+        const std::string& arg = a.team ? team : who;
+        owner_.displayGameMessage(a.key, formatGlobalString(a.text, {arg}), {arg});
+        return;
+    }
 }
 
 void SocialHandler::handleArenaTeamQueryResponse(network::Packet& packet) {
@@ -4829,7 +5141,11 @@ void SocialHandler::handleArenaTeamRoster(network::Packet& packet) {
 void SocialHandler::handleArenaTeamInvite(network::Packet& packet) {
     std::string playerName = packet.readString();
     std::string teamName = packet.readString();
-    owner_.addSystemChatMessage(playerName + " has invited you to join " + teamName + ".");
+    // ARENA_TEAM_INVITE_REQUEST and a chat line - which Wow.exe (0x6CC910)
+    // words with the guild invitation's GameError, ERR_INVITED_TO_GUILD_SSS.
+    owner_.fireAddonEvent("ARENA_TEAM_INVITE_REQUEST", {playerName, teamName});
+    owner_.displayGameMessage("ERR_INVITED_TO_GUILD_SSS",
+        playerName + " invites you to join " + teamName + ".", {playerName, playerName, teamName});
 }
 
 void SocialHandler::handleArenaTeamEvent(network::Packet& packet) {
@@ -4837,20 +5153,29 @@ void SocialHandler::handleArenaTeamEvent(network::Packet& packet) {
     uint8_t event = packet.readUInt8();
     uint8_t strCount = 0;
     if (packet.hasRemaining(1)) strCount = packet.readUInt8();
-    std::string param1, param2;
-    if (strCount >= 1 && packet.getSize() > packet.getReadPos()) param1 = packet.readString();
-    if (strCount >= 2 && packet.getSize() > packet.getReadPos()) param2 = packet.readString();
-    std::string msg;
+    std::vector<std::string> p;
+    for (uint8_t i = 0; i < strCount && i < 3 && packet.getSize() > packet.getReadPos(); ++i)
+        p.push_back(packet.readString());
+    packet.skipAll();
+    // ArenaTeamEvents as Wow.exe (0x6CC980) words them, chat lines, with all
+    // the strings sent: 3 a join (the player's own is ERR_ARENA_TEAM_YOU_JOIN_S
+    // with the team alone), 4 a leave, 5 a removal, 6 the captain, 7 a new
+    // captain, 8 disbanded; anything else ERR_GUILD_INTERNAL.
+    auto at = [&](size_t i) { return i < p.size() ? p[i] : std::string(); };
     switch (event) {
-        case 0: msg = param1.empty() ? "A player has joined your arena team." : param1 + " has joined your arena team."; break;
-        case 1: msg = param1.empty() ? "A player has left the arena team." : param1 + " has left the arena team."; break;
-        case 2: msg = (!param1.empty() && !param2.empty()) ? param1 + " has been removed from the arena team by " + param2 + "." : "A player has been removed from the arena team."; break;
-        case 3: msg = param1.empty() ? "The arena team captain has changed." : param1 + " is now the arena team captain."; break;
-        case 4: msg = "Your arena team has been disbanded."; break;
-        case 5: msg = param1.empty() ? "Your arena team has been created." : "Arena team \"" + param1 + "\" has been created."; break;
-        default: msg = "Arena team event " + std::to_string(event); if (!param1.empty()) msg += ": " + param1; break;
+        case 3:
+            if (at(0) == owner_.lookupName(owner_.getPlayerGuid()))
+                owner_.displayGameMessage("ERR_ARENA_TEAM_YOU_JOIN_S", "You have joined " + at(1) + ".", {at(1)});
+            else
+                owner_.displayGameMessage("ERR_ARENA_TEAM_JOIN_SS", at(0) + " has joined " + at(1) + ".", p);
+            break;
+        case 4: owner_.displayGameMessage("ERR_ARENA_TEAM_LEAVE_SS", at(0) + " has left " + at(1) + ".", p); break;
+        case 5: owner_.displayGameMessage("ERR_ARENA_TEAM_REMOVE_SSS", at(0) + " has been kicked out of " + at(1) + " by " + at(2) + ".", p); break;
+        case 6: owner_.displayGameMessage("ERR_ARENA_TEAM_LEADER_IS_SS", at(0) + " is the captain of " + at(1) + ".", p); break;
+        case 7: owner_.displayGameMessage("ERR_ARENA_TEAM_LEADER_CHANGED_SSS", at(0) + " has made " + at(1) + " the new captain of " + at(2) + ".", p); break;
+        case 8: owner_.displayGameMessage("ERR_ARENA_TEAM_DISBANDED_S", at(0) + " has disbanded " + at(1) + ".", p); break;
+        default: owner_.displayGameMessage("ERR_GUILD_INTERNAL", "Internal guild error."); break;
     }
-    owner_.addSystemChatMessage(msg);
 }
 
 void SocialHandler::handleArenaTeamStats(network::Packet& packet) {
@@ -4876,15 +5201,16 @@ void SocialHandler::requestArenaTeamRoster(uint32_t teamId) {
 void SocialHandler::handleArenaError(network::Packet& packet) {
     if (!packet.hasRemaining(4)) return;
     uint32_t error = packet.readUInt32();
-    std::string msg;
-    switch (error) {
-        case 1: msg = "The other team is not big enough."; break;
-        case 2: msg = "That team is full."; break;
-        case 3: msg = "Not enough members to start."; break;
-        case 4: msg = "Too many members."; break;
-        default: msg = "Arena error (code " + std::to_string(error) + ")"; break;
+    // Wow.exe (0x6CCE90): 0 no team of the size (the size byte twice),
+    // 1 an expired account, 2 the dungeon system in the way.
+    if (error == 0) {
+        const std::string size = packet.hasRemaining(1) ? std::to_string(packet.readUInt8()) : std::string();
+        owner_.displayGameMessage("ERR_ARENA_NO_TEAM_II", "You are not in a " + size + "v" + size + " arena team", {size, size});
+    } else if (error == 1) {
+        owner_.displayGameMessage("ERR_ARENA_EXPIRED_CAIS", "You may not queue while your account has expired.");
+    } else if (error == 2) {
+        owner_.displayGameMessage("ERR_LFG_CANT_USE_BATTLEGROUND", "You cannot queue for a battleground or arena while using the dungeon system.");
     }
-    owner_.addSystemChatMessage(msg);
 }
 
 void SocialHandler::handlePvpLogData(network::Packet& packet) {
@@ -4999,11 +5325,10 @@ void SocialHandler::updateLogoutCountdown(float deltaTime) {
             }
             // RAID_MEMBERS_AFK / READY_CHECK_ALL_READY are plain GlobalStrings,
             // not GameErrors: 0x573390 prints them to the chat frame.
-            const std::string fmt = globalString(owner_.services().assetManager,
-                                                 away.empty() ? "READY_CHECK_ALL_READY" : "RAID_MEMBERS_AFK");
-            owner_.addSystemChatMessage(!fmt.empty() ? formatGlobalString(fmt, {away})
-                                        : away.empty() ? std::string("Everyone is Ready")
-                                                       : "The following players are Away: " + away);
+            if (away.empty())
+                owner_.addGlobalStringChatLine("READY_CHECK_ALL_READY", "Everyone is Ready");
+            else
+                owner_.addGlobalStringChatLine("RAID_MEMBERS_AFK", "The following players are Away: %s", {away});
             if (owner_.getSocket()) {
                 network::Packet fin(wireOpcode(Opcode::MSG_RAID_READY_CHECK_FINISHED));
                 owner_.getSocket()->send(fin);
@@ -5020,11 +5345,9 @@ void SocialHandler::updateLogoutCountdown(float deltaTime) {
             std::string name = "that battleground";
             for (const auto& kv : kBgNames)
                 if (kv.first == bgJoinPendingType_) { name = kv.second; break; }
-            const std::string msg = "The server did not answer the request to queue for " +
-                                    name + " - this realm may not offer it to you.";
-            LOG_WARNING("Battleground join unanswered: type ", bgJoinPendingType_);
-            owner_.addUIError(msg);
-            owner_.addSystemChatMessage(msg);
+            // Logged, not said: the stock client has no such message and
+            // waits in silence.
+            LOG_WARNING("Battleground join unanswered: type ", bgJoinPendingType_, " (", name, ")");
             bgJoinPendingType_ = 0;
         }
     }
@@ -5218,8 +5541,18 @@ void SocialHandler::handleGroupSetLeader(network::Packet& packet) {
     for (const auto& m : pd.members) {
         if (m.name == leaderName) { pd.leaderGuid = m.guid; break; }
     }
-    if (!leaderName.empty())
-        owner_.addSystemChatMessage(leaderName + " is now the group leader.");
+    // ERR_NEW_LEADER_YOU / ERR_NEW_LEADER_S (Wow.exe 0x6CBD70); a Dungeon
+    // Finder group says Dungeon Guide instead.
+    if (!leaderName.empty()) {
+        const bool lfg = isActiveExpansion("wotlk") && (partyData.groupType & 0x0C) != 0;
+        if (leaderName == owner_.lookupName(owner_.getPlayerGuid()))
+            owner_.displayGameMessage(lfg ? "ERR_NEW_GUIDE_YOU" : "ERR_NEW_LEADER_YOU",
+                                      lfg ? "You are now the Dungeon Guide." : "You are now the group leader.");
+        else
+            owner_.displayGameMessage(lfg ? "ERR_NEW_GUIDE_S" : "ERR_NEW_LEADER_S",
+                                      leaderName + (lfg ? " is now the Dungeon Guide." : " is now the group leader."),
+                                      {leaderName});
+    }
     owner_.fireAddonEvent("PARTY_LEADER_CHANGED", {});
     owner_.fireAddonEvent("GROUP_ROSTER_UPDATE", {});
 }
@@ -5280,12 +5613,8 @@ void SocialHandler::handleSummonRequest(network::Packet& packet) {
         owner_.summonerNameRef() = tmp;
     }
 
-    std::string msg = owner_.summonerNameRef() + " is summoning you";
-    std::string zoneName = owner_.getAreaName(zoneId);
-    if (!zoneName.empty())
-        msg += " to " + zoneName;
-    msg += '.';
-    owner_.addSystemChatMessage(msg);
+    // CONFIRM_SUMMON and its popup are the whole announcement (Wow.exe
+    // 0x6D8680 -> 0x513BF0); no chat line.
     LOG_INFO("SMSG_SUMMON_REQUEST: summoner=", owner_.summonerNameRef(),
              " zoneId=", zoneId, " timeout=", owner_.summonTimeoutSecRef(), "s");
     owner_.fireAddonEvent("CONFIRM_SUMMON", {});
@@ -5313,13 +5642,11 @@ void SocialHandler::sendSummonResponse(bool accept) {
 void SocialHandler::acceptSummon() {
     if (!owner_.pendingSummonRequestRef()) return;
     sendSummonResponse(true);
-    owner_.addSystemChatMessage("Accepting summon...");
     LOG_INFO("Accepted summon from ", owner_.summonerNameRef());
 }
 
 void SocialHandler::declineSummon() {
     sendSummonResponse(false);
-    owner_.addSystemChatMessage("Summon declined.");
 }
 
 // ============================================================
@@ -5617,7 +5944,7 @@ void SocialHandler::toggleHelm() {
     owner_.helmVisibleRef() = !owner_.helmVisibleRef();
     auto packet = ShowingHelmPacket::build(owner_.helmVisibleRef());
     owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage(owner_.helmVisibleRef() ? "Helm is now visible." : "Helm is now hidden.");
+    // No line: ShowHelm (Wow.exe 0x51C0B0) sets the flag and says nothing.
     // The flag alone changed nothing on screen: it was set, sent to the server
     // and never read. Mark equipment dirty so the helm model and the hair under
     // it are both rebuilt from it.
@@ -5634,7 +5961,6 @@ void SocialHandler::toggleCloak() {
     owner_.cloakVisibleRef() = !owner_.cloakVisibleRef();
     auto packet = ShowingCloakPacket::build(owner_.cloakVisibleRef());
     owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage(owner_.cloakVisibleRef() ? "Cloak is now visible." : "Cloak is now hidden.");
     LOG_INFO("Cloak visibility toggled: ", owner_.cloakVisibleRef());
 }
 

@@ -1214,11 +1214,22 @@ void GameHandler::handleMotd(network::Packet& packet) {
 
 void GameHandler::handleNotification(network::Packet& packet) {
     // SMSG_NOTIFICATION: single null-terminated string
+    // The red error line and the console, not chat (Wow.exe 0x401280).
+    // A leading "~" carries flags the stock client reads - ">" not on
+    // screen, "#" also in chat, "^N" the chat type - kept as far as Wowee can.
     std::string message = packet.readString();
-    if (!message.empty()) {
-        LOG_INFO("Server notification: ", message);
-        addSystemChatMessage(message);
-    }
+    if (message.rfind("DEBUGACTION: ", 0) == 0) message = message.substr(13);
+    if (message.empty()) return;
+    LOG_INFO("Server notification: ", message);
+    if (message[0] != '~') { addUIError(message); return; }
+    size_t at = 1;
+    bool onScreen = true, inChat = false;
+    if (at < message.size() && message[at] == '>') { onScreen = false; ++at; }
+    if (at < message.size() && message[at] == '#') { inChat = true; ++at; }
+    if (at + 1 < message.size() && message[at] == '^') at += 2;
+    const std::string text = message.substr(at);
+    if (onScreen) addUIError(text);
+    if (inChat) addSystemChatMessage(text);
 }
 
 void GameHandler::sendPing() {
@@ -3244,6 +3255,62 @@ void GameHandler::displayGameMessage(const char* key, const std::string& fallbac
     playUiMessageSound(key);
 }
 
+void GameHandler::addGlobalStringChatLine(const char* key, const std::string& fallback,
+                                          const std::vector<std::string>& args) {
+    // With no args the text goes out as it stands, as Wow.exe hands it to
+    // the chat frame unformatted: DURABILITYDAMAGE_DEATH's "10% durability"
+    // would otherwise lose "% d" to a printf conversion.
+    std::string text = globalString(services_.assetManager, key);
+    if (text.empty()) text = fallback;
+    if (!args.empty()) text = formatGlobalString(text, args);
+    if (!text.empty()) addSystemChatMessage(text);
+}
+
+void GameHandler::displayGameMessageNaming(uint64_t guid, const char* key, const std::string& fallback,
+                                           std::vector<std::string> args, bool plain) {
+    if (guid == 0) return;
+    const std::string name = lookupName(guid);
+    if (name.empty()) {
+        auto& held = messagesAwaitingName_[guid];
+        // A name that never answers must not hold an unbounded queue.
+        if (held.size() < 16) held.push_back({key, fallback, std::move(args), plain});
+        queryPlayerName(guid);
+        return;
+    }
+    for (auto& a : args)
+        if (a == kPlayerNameArg) a = name;
+    if (plain) addGlobalStringChatLine(key, fallback, args);
+    else displayGameMessage(key, formatGlobalString(fallback, args), args);
+}
+
+std::string GameHandler::formatMoneyText(uint32_t copper) const {
+    struct Part { uint32_t amount; const char* key; const char* fallback; };
+    const Part parts[] = {
+        {copper / 10000, "GOLD_AMOUNT", "%d Gold"},
+        {(copper / 100) % 100, "SILVER_AMOUNT", "%d Silver"},
+        {copper % 100, "COPPER_AMOUNT", "%d Copper"},
+    };
+    std::string out;
+    for (const auto& p : parts) {
+        if (p.amount == 0) continue;
+        std::string format = globalString(services_.assetManager, p.key);
+        if (format.empty()) format = p.fallback;
+        if (!out.empty()) out += ", ";
+        out += formatGlobalString(format, {std::to_string(p.amount)});
+    }
+    return out;
+}
+
+void GameHandler::flushMessagesAwaitingName(uint64_t guid) {
+    if (inventoryHandler_) inventoryHandler_->onPlayerNameKnown(guid);
+    auto it = messagesAwaitingName_.find(guid);
+    if (it == messagesAwaitingName_.end()) return;
+    auto held = std::move(it->second);
+    messagesAwaitingName_.erase(it);
+    if (lookupName(guid).empty()) return;
+    for (auto& m : held) displayGameMessageNaming(guid, m.key.c_str(), m.fallback, std::move(m.args), m.plain);
+}
+
 // A right-click on a friendly NPC, as CGUnit_C::OnRightClick (0x731260) and
 // CGPlayer_C::OnNpcInteract (0x6DDBB0) do it. The client measures the reach
 // itself and says so when it is too far; it sends exactly one packet, picked
@@ -3660,12 +3727,8 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
                          std::dec, " entry=", goEntry, " name='", goName, "'");
                 return;
             }
-            if (goType == 5 && !goName.empty()) {
-                std::string lower = lowerCopy(goName);
-                if (lower.rfind("doodad_", 0) != 0) {
-                    addSystemChatMessage(goName);
-                }
-            }
+            // A generic object's name is not said on a click; the stock
+            // client shows it on the tooltip and nowhere else.
         }
         // Face object and send heartbeat before use so strict servers don't require
         // a nudge movement to accept interaction.
@@ -3747,8 +3810,12 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
     if (gatherBaseSpellId != 0) {
         const uint32_t gatherSpellId = knownGatherRank(spellHandler_.get(), gatherBaseSpellId);
         if (gatherSpellId == 0) {
-            addSystemChatMessage(gatherBaseSpellId == kMiningBaseSpellId ? "Requires Mining."
-                                                    : "Requires Herbalism.");
+            // ERR_USE_LOCKED_WITH_SPELL_S naming the lock's skill, the red
+            // error (Wow.exe 0x7116C0, lock type 2 with the skill unknown).
+            {
+                const std::string skill = gatherBaseSpellId == kMiningBaseSpellId ? "Mining" : "Herbalism";
+                displayGameMessage("ERR_USE_LOCKED_WITH_SPELL_S", "Requires " + skill, {skill});
+            }
             LOG_INFO("GO gather skipped: no known rank for base spell=", gatherBaseSpellId,
                      " guid=0x", std::hex, guid, std::dec, " name='", goName, "'");
             return;

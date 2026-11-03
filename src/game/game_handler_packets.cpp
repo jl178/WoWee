@@ -4,6 +4,7 @@
 #include "game/achievement_criteria.hpp"
 #include "game/packed_time.hpp"
 #include "game/global_strings.hpp"
+#include "game/combat_log_event.hpp"
 #include "game/protocol_constants.hpp"
 #include "game/game_utils.hpp"
 #include "game/chat_handler.hpp"
@@ -340,16 +341,11 @@ void GameHandler::registerCoreOpcodes() {
     dispatchTable_[Opcode::SMSG_STABLE_RESULT] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(1)) return;
         uint8_t result = packet.readUInt8();
-        const char* msg = nullptr;
-        switch (result) {
-            case 0x01: msg = "Pet stored in stable."; break;
-            case 0x06: msg = "Pet retrieved from stable."; break;
-            case 0x07: msg = "Stable slot purchased."; break;
-            case 0x08: msg = "Stable list updated."; break;
-            case 0x09: msg = "Stable failed: not enough money or other error."; addUIError(msg); break;
-            default: break;
-        }
-        if (msg) addSystemChatMessage(msg);
+        // Wow.exe (0x5A17F0) has one word for the player: ERR_NOT_ENOUGH_MONEY
+        // for result 1. The rest refresh the list (8-10), raise
+        // PET_STABLE_UPDATE (11) or nothing at all.
+        if (result == 0x01) displayGameMessage("ERR_NOT_ENOUGH_MONEY", "You don't have enough money.");
+        if (result == 0x0B) fireAddonEvent("PET_STABLE_UPDATE", {});
         LOG_INFO("SMSG_STABLE_RESULT: result=", static_cast<int>(result));
         if (stableWindowOpen_ && stableMasterGuid_ != 0 && socket && result <= 0x08) {
             auto refreshPkt = ListStabledPetsPacket::build(stableMasterGuid_);
@@ -377,14 +373,6 @@ void GameHandler::registerCoreOpcodes() {
             else
                 titleStr = fmt;
         }
-        std::string msg;
-        if (!titleStr.empty()) {
-            msg = isLost ? ("Title removed: " + titleStr + ".") : ("Title earned: " + titleStr + "!");
-        } else {
-            char buf[64];
-            std::snprintf(buf, sizeof(buf), isLost ? "Title removed (bit %u)." : "Title earned (bit %u)!", titleBit);
-            msg = buf;
-        }
         if (isLost) knownTitleBits_.erase(titleBit);
         else        knownTitleBits_.insert(titleBit);
         // And announce it. The set is read by IsTitleKnown, which the character
@@ -392,7 +380,13 @@ void GameHandler::registerCoreOpcodes() {
         // rebuild, and this is what tells it. Without it a title earned mid
         // session did not appear in the list until the sheet was reopened.
         fireAddonEvent("KNOWN_TITLES_UPDATE", {});
-        addSystemChatMessage(msg);
+        // NEW_TITLE_EARNED / OLD_TITLE_LOST, plain chat lines with the title
+        // written out for the player (Wow.exe 0x50C520); an unknown title
+        // says nothing.
+        if (!titleStr.empty()) {
+            if (isLost) addGlobalStringChatLine("OLD_TITLE_LOST", "You have lost the title '%s'.", {titleStr});
+            else addGlobalStringChatLine("NEW_TITLE_EARNED", "You have earned the title '%s'.", {titleStr});
+        }
         LOG_INFO("SMSG_TITLE_EARNED: bit=", titleBit, " lost=", isLost, " title='", titleStr, "'");
     };
     dispatchTable_[Opcode::SMSG_LEARNED_DANCE_MOVES] = [](network::Packet& packet) {
@@ -413,18 +407,8 @@ void GameHandler::registerCoreOpcodes() {
                 /*uint64_t guid =*/ packet.readUInt64();
                 newName = packet.readString();
             }
-            if (result == 0) {
-                addSystemChatMessage("Character name changed to: " + newName);
-            } else {
-                static const char* kRenameErrors[] = {
-                    nullptr, "Name already in use.", "Name too short.", "Name too long.",
-                    "Name contains invalid characters.", "Name contains a profanity.",
-                    "Name is reserved.", "Character name does not meet requirements.",
-                };
-                const char* errMsg = (result < 8) ? kRenameErrors[result] : nullptr;
-                std::string renameErr = errMsg ? std::string("Rename failed: ") + errMsg : "Character rename failed.";
-                addUIError(renameErr); addSystemChatMessage(renameErr);
-            }
+            // A character-screen answer (Wow.exe 0x4DA090): the glue screen's
+            // dialog words a failure; nothing goes to the world's chat.
             LOG_INFO("SMSG_CHAR_RENAME: result=", static_cast<int>(result),
                      " newName=", newName);
         }
@@ -438,15 +422,13 @@ void GameHandler::registerCoreOpcodes() {
         /*uint64_t binderGuid =*/ packet.readUInt64();
         uint32_t mapId  = packet.readUInt32();
         uint32_t zoneId = packet.readUInt32();
-        bool changed = !hasHomeBind_ || homeBindMapId_ != mapId || homeBindZoneId_ != zoneId;
         homeBindMapId_  = mapId;
         homeBindZoneId_ = zoneId;
-        if (!changed) return;
-        std::string pbMsg = "Your home location has been set";
-        std::string zoneName = getAreaName(zoneId);
-        if (!zoneName.empty()) pbMsg += " to " + zoneName;
-        pbMsg += '.';
-        addSystemChatMessage(pbMsg);
+        // ERR_DEATHBIND_SUCCESS_S with the area's name, a chat line, every
+        // time (Wow.exe 0x6E2E90, opcode 0x158).
+        const std::string zoneName = getAreaName(zoneId);
+        if (!zoneName.empty())
+            displayGameMessage("ERR_DEATHBIND_SUCCESS_S", zoneName + " is now your home.", {zoneName});
     };
     // The innkeeper asking whether to make this the player's home. It was
     // skipped because this client's own gossip window never waited for it - it
@@ -464,47 +446,96 @@ void GameHandler::registerCoreOpcodes() {
     dispatchTable_[Opcode::SMSG_TOGGLE_XP_GAIN] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(1)) return;
         uint8_t enabled = packet.readUInt8();
-        addSystemChatMessage(enabled ? "XP gain enabled." : "XP gain disabled.");
+        // Console only (Wow.exe: "XP Gain Enabled" / "XP Gain Disabled").
+        LOG_INFO("[console] ", enabled ? "XP Gain Enabled" : "XP Gain Disabled");
     };
     dispatchTable_[Opcode::SMSG_BINDZONEREPLY] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
-            uint32_t result = packet.readUInt32();
-            if (result == 0) addSystemChatMessage("Your home is now set to this location.");
-            else { raiseUiError("You are too far from the innkeeper."); }
+            // Read and dropped: Wow.exe (opcode 0x157) says nothing.
+            (void)packet.readUInt32();
         }
     };
     dispatchTable_[Opcode::SMSG_CHANGEPLAYER_DIFFICULTY_RESULT] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
-            uint32_t result = packet.readUInt32();
-            if (result == 0) {
-                addSystemChatMessage("Difficulty changed.");
-            } else {
-                static const char* reasons[] = {
-                    "", "Error", "Too many members", "Already in dungeon",
-                    "You are in a battleground", "Raid not allowed in heroic",
-                    "You must be in a raid group", "Player not in group"
-                };
-                const char* msg = (result < 8) ? reasons[result] : "Difficulty change failed.";
-                addUIError(std::string("Cannot change difficulty: ") + msg);
-                addSystemChatMessage(std::string("Cannot change difficulty: ") + msg);
+            // The raid difficulty change's stages as Wow.exe (0x52C460) says
+            // them: 0 the new difficulty stored, 1-5 and 7 refusals (red),
+            // 8 a map's name as a chat line, 9 done -
+            // ERR_PLAYER_DIFFICULTY_CHANGED_S with PLAYER_DIFFICULTY<n+1>.
+            const uint32_t result = packet.readUInt32();
+            switch (result) {
+                case 0:
+                    if (packet.hasRemaining(1)) pendingPlayerDifficulty_ = packet.readUInt8();
+                    break;
+                case 1: {
+                    const uint32_t secs = packet.hasRemaining(4) ? packet.readUInt32() : 0;
+                    const std::string when = secs >= 60 ? std::to_string(secs / 60) + " min"
+                                                        : std::to_string(secs) + " sec";
+                    displayGameMessage("ERR_DIFFICULTY_CHANGE_COOLDOWN_S",
+                        "Raid difficulty has changed recently, and may not change again for " + when + ".", {when});
+                    break;
+                }
+                case 2: displayGameMessage("ERR_DIFFICULTY_CHANGE_WORLDSTATE", "Raid difficulty cannot be changed at this time. An event is in progress."); break;
+                case 3: displayGameMessage("ERR_DIFFICULTY_CHANGE_ENCOUNTER", "Raid difficulty cannot be changed at this time. An encounter is in progress."); break;
+                case 4: displayGameMessage("ERR_DIFFICULTY_CHANGE_COMBAT", "Raid difficulty cannot be changed at this time. A player is in combat."); break;
+                case 5: displayGameMessage("ERR_DIFFICULTY_CHANGE_PLAYER_BUSY", "Raid difficulty cannot be changed at this time. A player is busy."); break;
+                case 7: displayGameMessage("ERR_DIFFICULTY_CHANGE_ALREADY_STARTED", "A raid difficulty change is currently in progress."); break;
+                case 8: {
+                    const uint32_t mapId = packet.hasRemaining(4) ? packet.readUInt32() : 0;
+                    const std::string mapName = getMapName(mapId);
+                    if (!mapName.empty()) addSystemChatMessage(mapName);
+                    break;
+                }
+                case 9: {
+                    fireAddonEvent("PLAYER_DIFFICULTY_CHANGED", {});
+                    const std::string key = "PLAYER_DIFFICULTY" + std::to_string(pendingPlayerDifficulty_ + 1);
+                    std::string label = globalString(services_.assetManager, key);
+                    if (label.empty()) label = pendingPlayerDifficulty_ ? "Heroic" : "Normal";
+                    displayGameMessage("ERR_PLAYER_DIFFICULTY_CHANGED_S", "Difficulty set to " + label + ".", {label});
+                    break;
+                }
+                default: break;
             }
         }
+        packet.skipAll();
     };
+    // ERR_CORPSE_IS_NOT_IN_INSTANCE, the red error (Wow.exe 0x526530).
     dispatchTable_[Opcode::SMSG_CORPSE_NOT_IN_INSTANCE] = [this](network::Packet& /*packet*/) {
-        addUIError("Your corpse is outside this instance.");
-        addSystemChatMessage("Your corpse is outside this instance. Release spirit to retrieve it.");
+        displayGameMessage("ERR_CORPSE_IS_NOT_IN_INSTANCE", "Your corpse is not in that instance");
     };
     dispatchTable_[Opcode::SMSG_CROSSED_INEBRIATION_THRESHOLD] = [this](network::Packet& packet) {
         if (packet.hasRemaining(16)) {
             uint64_t guid      = packet.readUInt64();
             uint32_t threshold = packet.readUInt32();
             uint32_t itemId    = packet.readUInt32();
+            // DRUNK_MESSAGE_SELF<n+1> / _OTHER<n+1>, or the _ITEM_ forms
+            // naming what was drunk, as plain chat lines - for anyone the
+            // client can see, not only the player (Wow.exe 0x6D01B0,
+            // 0x6CFFF0).
+            {
+                const bool self = guid == playerGuid;
+                const std::string n = std::to_string(std::min(threshold, 3u) + 1);
+                std::string itemName;
+                if (itemId != 0) {
+                    if (const ItemQueryResponseData* info = getItemInfo(itemId)) itemName = info->name;
+                }
+                std::string who;
+                if (!self) {
+                    who = lookupName(guid);
+                    if (auto e = getEntityManager().getEntity(guid))
+                        if (auto* u = dynamic_cast<Unit*>(e.get()); u && !u->getName().empty()) who = u->getName();
+                }
+                if (self || !who.empty()) {
+                    if (!itemName.empty()) {
+                        if (self) addGlobalStringChatLine(("DRUNK_MESSAGE_ITEM_SELF" + n).c_str(), "%s", {itemName});
+                        else addGlobalStringChatLine(("DRUNK_MESSAGE_ITEM_OTHER" + n).c_str(), "%s %s", {who, itemName});
+                    } else {
+                        if (self) addGlobalStringChatLine(("DRUNK_MESSAGE_SELF" + n).c_str(), "");
+                        else addGlobalStringChatLine(("DRUNK_MESSAGE_OTHER" + n).c_str(), "%s", {who});
+                    }
+                }
+            }
             if (guid == playerGuid) {
                 const float amount = static_cast<float>(std::min(threshold, 3u)) / 3.0f;
-                if (threshold == 1) addSystemChatMessage("You feel tipsy.");
-                else if (threshold == 2) addSystemChatMessage("You feel drunk.");
-                else if (threshold >= 3) addSystemChatMessage("You feel completely smashed.");
-                else addSystemChatMessage("You feel sober again.");
                 if (auto* renderer = services_.renderer) {
                     if (auto* camera = renderer->getCameraController()) {
                         camera->setIntoxication(amount);
@@ -563,8 +594,9 @@ void GameHandler::registerCoreOpcodes() {
         corpseMapId_ = currentMapId_;
         corpsePositionValid_ = true;
         if (ghostStateCallback_) ghostStateCallback_(false);
+        // PLAYER_DEAD is the whole announcement (Wow.exe 0x6DC070,
+        // 0x520F70); there is no chat line.
         fireAddonEvent("PLAYER_DEAD", {});
-        addSystemChatMessage("You have been killed.");
         LOG_INFO("SMSG_FORCED_DEATH_UPDATE: player force-killed");
         packet.skipAll();
     };
@@ -648,9 +680,9 @@ void GameHandler::registerCoreOpcodes() {
                      ? " (the corpse itself is inside map " + std::to_string(corpseMapId) + ")"
                      : "");
     };
+    // ERR_FEIGN_DEATH_RESISTED ("Resisted"), the red error (Wow.exe 0x7FD950).
     dispatchTable_[Opcode::SMSG_FEIGN_DEATH_RESISTED] = [this](network::Packet& /*packet*/) {
-        addUIError("Your Feign Death was resisted.");
-        addSystemChatMessage("Your Feign Death attempt was resisted.");
+        displayGameMessage("ERR_FEIGN_DEATH_RESISTED", "Resisted");
     };
     dispatchTable_[Opcode::SMSG_CHANNEL_MEMBER_COUNT] = [](network::Packet& packet) {
         std::string chanName = packet.readString();
@@ -784,21 +816,24 @@ void GameHandler::registerCoreOpcodes() {
     dispatchTable_[Opcode::SMSG_MOUNTRESULT] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(4)) return;
         uint32_t result = packet.readUInt32();
-        if (result != 4) {
-            const char* msgs[] = { "Cannot mount here.", "Invalid mount spell.",
-                                   "Too far away to mount.", "Already mounted." };
-            std::string mountErr = result < 4 ? msgs[result] : "Cannot mount.";
-            addUIError(mountErr);
-            addSystemChatMessage(mountErr);
-        }
+        // MountResult 0-9, one GameError each (Wow.exe 0x6CEDF0, table
+        // 0xADA1AC); 10 (OK) and anything else say nothing.
+        static const char* const kKeys[] = {
+            "ERR_MOUNT_INVALIDMOUNTEE", "ERR_MOUNT_TOOFARAWAY", "ERR_MOUNT_ALREADYMOUNTED",
+            "ERR_MOUNT_NOTMOUNTABLE", "ERR_MOUNT_NOTYOURPET", "ERR_MOUNT_OTHER",
+            "ERR_MOUNT_LOOTING", "ERR_MOUNT_RACECANTMOUNT", "ERR_MOUNT_SHAPESHIFTED",
+            "ERR_MOUNT_FORCEDDISMOUNT",
+        };
+        if (result < 10) displayGameMessage(kKeys[result], "You can't mount now.");
     };
     dispatchTable_[Opcode::SMSG_DISMOUNTRESULT] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(4)) return;
         uint32_t result = packet.readUInt32();
-        if (result != 0) {
-            addUIError("Cannot dismount here.");
-            raiseUiError("Cannot dismount here.");
-        }
+        // DismountResult 0-2, one GameError each (Wow.exe 0x6CEE10, table
+        // 0xADA1D8); 3 (OK) says nothing. This raised its own sentence twice.
+        static const char* const kKeys[] = {"ERR_DISMOUNT_NOPET", "ERR_DISMOUNT_NOTMOUNTED",
+                                            "ERR_DISMOUNT_NOTYOURPET"};
+        if (result < 3) displayGameMessage(kKeys[result], "You can't dismount now.");
     };
 
     // Camera shake
@@ -827,8 +862,8 @@ void GameHandler::registerCoreOpcodes() {
         // social_handler raised the prompt with CONFIRM_SUMMON; uiparent.lua
         // takes this one down again. Told only in chat, the dialog stays on
         // screen offering a summon the server has already withdrawn.
+        // The event alone (Wow.exe 0x6CBCF0).
         fireAddonEvent("CANCEL_SUMMON", {});
-        addSystemChatMessage("Summon cancelled.");
     };
 
     // Bind point
@@ -849,13 +884,9 @@ void GameHandler::registerCoreOpcodes() {
             homeBindPos_ = canonical;
             if (bindPointCallback_)
                 bindPointCallback_(data.mapId, canonical.x, canonical.y, canonical.z);
-            if (wasSet && changed) {
-                std::string bindMsg = "Your home has been set";
-                std::string zoneName = getAreaName(data.zoneId);
-                if (!zoneName.empty()) bindMsg += " to " + zoneName;
-                bindMsg += '.';
-                addSystemChatMessage(bindMsg);
-            }
+            // Stored in silence (Wow.exe 0x6CEEC0): SMSG_PLAYERBOUND is the
+            // one that says "<zone> is now your home."
+            (void)wasSet; (void)changed;
         }
     };
 
@@ -988,12 +1019,10 @@ void GameHandler::registerCoreOpcodes() {
         areaSpiritHealerGuid_ = guid;
         areaSpiritHealerSeconds_ = static_cast<float>(timeMs) / 1000.0f;
 
-        char buf[128];
-        std::snprintf(buf, sizeof(buf), "You will be able to resurrect in %u seconds.",
-                      timeMs / 1000);
-        addSystemChatMessage(buf);
-
-        // Parsed and said in chat and announced to nobody. UIParent_OnEvent
+        // No line: Wow.exe (0x524B10) stores the time and raises
+        // AREA_SPIRIT_HEALER_IN_RANGE, whose dialog counts it down.
+        //
+        // Announced to nobody before, UIParent_OnEvent
         // answers this by joining the queue and raising the countdown dialog,
         // and it was never told - so the reply arrived, the line was printed,
         // and the resurrection it was counting down to was one this player had
@@ -1001,14 +1030,10 @@ void GameHandler::registerCoreOpcodes() {
         fireAddonEvent("AREA_SPIRIT_HEALER_IN_RANGE", {});
     };
     dispatchTable_[Opcode::SMSG_DURABILITY_DAMAGE_DEATH] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(4)) {
-            uint32_t pct = packet.readUInt32();
-            char buf[80];
-            std::snprintf(buf, sizeof(buf),
-                "You have lost %u%% of your gear's durability due to death.", pct);
-            addUIError(buf);
-            addSystemChatMessage(buf);
-        }
+        // DURABILITYDAMAGE_DEATH as it stands, a plain chat line; the
+        // percentage the server sends is not part of it (Wow.exe 0x50C810).
+        packet.skipAll();
+        addGlobalStringChatLine("DURABILITYDAMAGE_DEATH", "Your equipped items suffer a 10% durability loss.");
     };
 
     // (SMSG_INITIALIZE_FACTIONS, SMSG_SET_FACTION_STANDING,
@@ -1081,32 +1106,34 @@ void GameHandler::registerCoreOpcodes() {
         //
         // So a refusal always said something, and what it said was not why.
         if (!packet.hasRemaining(4)) { packet.skipAll(); return; }
-        /*uint32_t mapId =*/ packet.readUInt32();
+        const uint32_t mapId = packet.readUInt32();
         const uint8_t reason = packet.hasRemaining(1) ? packet.readUInt8() : 0;
-        const char* abortMsg = nullptr;
-        switch (reason) {
-            case 0x01: abortMsg = "Transfer aborted: an error occurred."; break;
-            case 0x02: abortMsg = "Transfer aborted: instance is full."; break;
-            case 0x03: abortMsg = "Transfer aborted: instance not found."; break;
-            case 0x04: abortMsg = "You have entered too many instances recently."; break;
-            case 0x06: abortMsg = "Unable to zone in while an encounter is in progress."; break;
-            case 0x07: abortMsg = "You do not have the expansion required to enter this area."; break;
-            case 0x08: abortMsg = "That difficulty is not available for this instance."; break;
-            case 0x09: abortMsg = "You cannot leave this place yet."; break;
-            case 0x0A: abortMsg = "Additional instances cannot be launched. Please try again later."; break;
-            case 0x0B: abortMsg = "Transfer aborted: you must be in a group to enter."; break;
-            case 0x0C:
-            case 0x0D:
-            case 0x0E: abortMsg = "Transfer aborted: instance not found."; break;
-            case 0x0F: abortMsg = "Transfer aborted: everyone in the party must be on the same realm."; break;
-            case 0x10: abortMsg = "This map cannot be entered at this time."; break;
-            default:   abortMsg = "Transfer aborted."; break;
-        }
+        const uint8_t extra = packet.hasRemaining(1) ? packet.readUInt8() : 0;
         packet.skipAll();
-        addUIError(abortMsg);
-        addSystemChatMessage(abortMsg);
+        // Each reason's TRANSFER_ABORT_* text with the map's name, a plain
+        // chat line (Wow.exe 0x403910); reason 5, unknown reasons and maps
+        // Map.dbc does not name say nothing.
+        std::string key;
+        switch (reason) {
+            case 0x01: key = "TRANSFER_ABORT_ERROR"; break;
+            case 0x02: key = "TRANSFER_ABORT_MAX_PLAYERS"; break;
+            case 0x03: case 0x0C: case 0x0D: case 0x0E: key = "TRANSFER_ABORT_NOT_FOUND"; break;
+            case 0x04: key = "TRANSFER_ABORT_TOO_MANY_INSTANCES"; break;
+            case 0x06: key = "TRANSFER_ABORT_ZONE_IN_COMBAT"; break;
+            case 0x07: key = "TRANSFER_ABORT_INSUF_EXPAN_LVL" + std::to_string(extra); break;
+            case 0x08: key = "TRANSFER_ABORT_DIFFICULTY" + std::to_string(extra + 1); break;
+            case 0x09: key = "TRANSFER_ABORT_UNIQUE_MESSAGE" + std::to_string(extra); break;
+            case 0x0A: key = "TRANSFER_ABORT_TOO_MANY_REALM_INSTANCES"; break;
+            case 0x0B: key = "TRANSFER_ABORT_NEED_GROUP"; break;
+            case 0x0F: key = "TRANSFER_ABORT_REALM_ONLY"; break;
+            case 0x10: key = "TRANSFER_ABORT_MAP_NOT_ALLOWED"; break;
+            default: break;
+        }
+        const std::string mapName = getMapName(mapId);
+        if (!key.empty() && !mapName.empty())
+            addGlobalStringChatLine(key.c_str(), "Transfer Aborted", {mapName});
         LOG_WARNING("SMSG_TRANSFER_ABORTED: reason 0x", std::hex,
-                    static_cast<int>(reason), std::dec, " - ", abortMsg);
+                    static_cast<int>(reason), std::dec, " map ", mapId);
     };
 
     // Taxi
@@ -1130,10 +1157,10 @@ void GameHandler::registerCoreOpcodes() {
             if (standStateCallback_) standStateCallback_(standState_);
         }
     };
+    // ERR_NEWTAXIPATH, the yellow info text with TaxiNodeDiscovered
+    // (Wow.exe 0x6E2E90, opcode 0x1AF).
     dispatchTable_[Opcode::SMSG_NEW_TAXI_PATH] = [this](network::Packet& /*packet*/) {
-        addSystemChatMessage("New flight path discovered!");
-        // TaxiNodeDiscovered, ERR_NEWTAXIPATH's sound (Wow.exe 0x6e3054)
-        playUiMessageSound("ERR_NEWTAXIPATH");
+        displayGameMessage("ERR_NEWTAXIPATH", "New flight path discovered!");
     };
 
     // (MSG_TALENT_WIPE_CONFIRM → registered by SpellHandler, which owns the
@@ -1166,8 +1193,8 @@ void GameHandler::registerCoreOpcodes() {
                 constexpr uint32_t kFishingBobberBiteAnimation = 153;
                 if (gameObjectCustomAnimCallback_)
                     gameObjectCustomAnimCallback_(guid, kFishingBobberBiteAnimation);
-                addUIError("A fish is on your line! Right-click to reel it in.");
-                addSystemChatMessage("A fish is on your line! Right-click to reel it in.");
+                // No words: the splash and its sound are the stock client's
+                // whole signal (Wow.exe 0x70BE90 plays the animation only).
                 // "Fishing Hooked" (3355): the bobber display's (668) custom
                 // animation sound, GameObjectDisplayInfo Sound[6].
                 withSoundManager(&audio::AudioCoordinator::getUiSoundManager,
@@ -1189,11 +1216,44 @@ void GameHandler::registerCoreOpcodes() {
 
     // Item refund / socket gems / item time
     dispatchTable_[Opcode::SMSG_ITEM_REFUND_RESULT] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(12)) {
-            packet.readUInt64(); // itemGuid
-            uint32_t result = packet.readUInt32();
-            addSystemChatMessage(result == 0 ? "Item returned. Refund processed."
-                                             : "Could not return item for refund.");
+        // Wow.exe (0x6D9B40): a refund is ITEM_REFUND_MSG and then a plain
+        // line for each part of it - the money, honor, arena points and up to
+        // five currencies (CURRENCY_AMOUNT_REFUND_FORMAT); a refusal is
+        // ERR_INV_FULL (10), ERR_CURRENCY_FULL (11) or the plain
+        // UNABLE_TO_REFUND_ITEM.
+        if (!packet.hasRemaining(12)) { packet.skipAll(); return; }
+        packet.readUInt64(); // itemGuid
+        const uint32_t result = packet.readUInt32();
+        if (result == 10) { displayGameMessage("ERR_INV_FULL", "Inventory is full."); packet.skipAll(); return; }
+        if (result == 11) { displayGameMessage("ERR_CURRENCY_FULL", "You can't carry any more of that currency."); packet.skipAll(); return; }
+        if (result != 0) {
+            addGlobalStringChatLine("UNABLE_TO_REFUND_ITEM", "Sorry, unable to refund that item.");
+            packet.skipAll();
+            return;
+        }
+        if (!packet.hasRemaining(12 + 40)) { packet.skipAll(); return; }
+        const uint32_t money = packet.readUInt32();
+        const uint32_t honor = packet.readUInt32();
+        const uint32_t arena = packet.readUInt32();
+        uint32_t items[5], counts[5];
+        for (int i = 0; i < 5; ++i) { items[i] = packet.readUInt32(); counts[i] = packet.readUInt32(); }
+        addGlobalStringChatLine("ITEM_REFUND_MSG", "Item was refunded. Received a refund of:");
+        if (money > 0) addSystemChatMessage(formatMoneyText(money));
+        auto currencyLine = [this](uint32_t amount, const std::string& what) {
+            addGlobalStringChatLine("CURRENCY_AMOUNT_REFUND_FORMAT", "%d %s", {std::to_string(amount), what});
+        };
+        if (honor > 0) {
+            std::string label = globalString(services_.assetManager, "HONOR_POINTS");
+            currencyLine(honor, label.empty() ? "Honor Points" : label);
+        }
+        if (arena > 0) {
+            std::string label = globalString(services_.assetManager, "ARENA_POINTS");
+            currencyLine(arena, label.empty() ? "Arena Points" : label);
+        }
+        for (int i = 0; i < 5; ++i) {
+            if (counts[i] == 0 || items[i] == 0) continue;
+            if (const ItemQueryResponseData* info = getItemInfo(items[i]))
+                currencyLine(counts[i], info->name);
         }
     };
     dispatchTable_[Opcode::SMSG_SOCKET_GEMS_RESULT] = [this](network::Packet& packet) {
@@ -1205,7 +1265,8 @@ void GameHandler::registerCoreOpcodes() {
         // gem always reported that it had failed.
         if (!packet.hasRemaining(8)) return;
         const uint64_t itemGuid = packet.readUInt64();
-        addSystemChatMessage("Gems socketed successfully.");
+        // Nothing said: Wow.exe (0x6E6330 -> 0x7081B0) writes the new
+        // enchantments into the item and refreshes it.
         LOG_DEBUG("SMSG_SOCKET_GEMS_RESULT: itemGuid=0x", std::hex, itemGuid, std::dec);
     };
     dispatchTable_[Opcode::SMSG_ITEM_TIME_UPDATE] = [](network::Packet& packet) {
@@ -1574,18 +1635,17 @@ void GameHandler::registerCoreOpcodes() {
         // uint32 result: 0=success, 1/3=not enough money, 2=not seated at barber
         if (packet.hasRemaining(4)) {
             uint32_t result = packet.readUInt32();
+            // Wow.exe (0x52E5B0): success is BARBER_SHOP_SUCCESS alone; 1 and 3
+            // ERR_NOT_ENOUGH_MONEY, 2 ERR_NOT_BARBER_SITTING.
             if (result == 0) {
-                addSystemChatMessage("Hairstyle changed.");
                 // Bought: the preview is now the real thing, so it is not
                 // put back, and the server's PLAYER_BYTES update confirms it.
                 fireAddonEvent("BARBER_SHOP_SUCCESS", {});
                 endBarberShop(true);
-            } else {
-                const char* msg = (result == 1 || result == 3) ? "Not enough money for new hairstyle."
-                                : (result == 2) ? "You are not at a barber shop."
-                                : "Barber shop unavailable.";
-                addUIError(msg);
-                addSystemChatMessage(msg);
+            } else if (result == 1 || result == 3) {
+                displayGameMessage("ERR_NOT_ENOUGH_MONEY", "You don't have enough money.");
+            } else if (result == 2) {
+                displayGameMessage("ERR_NOT_BARBER_SITTING", "You must be sitting in a barber chair");
             }
             LOG_DEBUG("SMSG_BARBER_SHOP_RESULT: result=", result);
         }
@@ -1632,39 +1692,41 @@ void GameHandler::registerRemainingOpcodes() {
     };
     // Server-script text message - display in system chat
     dispatchTable_[Opcode::SMSG_SCRIPT_MESSAGE] = [this](network::Packet& packet) {
-        // Server-script text message - display in system chat
+        // Wow.exe registers no handler for this opcode: whatever a server
+        // sends on it the stock client drops. Logged only.
         std::string msg = packet.readString();
-        if (!msg.empty()) {
-            addSystemChatMessage(msg);
-            LOG_INFO("SMSG_SCRIPT_MESSAGE: ", msg);
-        }
+        if (!msg.empty()) LOG_INFO("SMSG_SCRIPT_MESSAGE (not shown): ", msg);
     };
     // uint64 targetGuid + uint64 casterGuid + uint32 spellId + uint32 displayId + uint32 animType
     dispatchTable_[Opcode::SMSG_ENCHANTMENTLOG] = [this](network::Packet& packet) {
-        // uint64 targetGuid + uint64 casterGuid + uint32 spellId + uint32 displayId + uint32 animType
-        if (packet.hasRemaining(28)) {
-            uint64_t enchTargetGuid = packet.readUInt64();
-            uint64_t enchCasterGuid = packet.readUInt64();
-            uint32_t enchSpellId = packet.readUInt32();
-            /*uint32_t displayId =*/ packet.readUInt32();
-            /*uint32_t animType =*/ packet.readUInt32();
-            LOG_DEBUG("SMSG_ENCHANTMENTLOG: spellId=", enchSpellId);
-            // Show enchant message if the player is involved
-            if (enchTargetGuid == playerGuid || enchCasterGuid == playerGuid) {
-                const std::string& enchName = getSpellName(enchSpellId);
-                std::string casterName = lookupName(enchCasterGuid);
-                if (!enchName.empty()) {
-                    std::string msg;
-                    if (enchCasterGuid == playerGuid)
-                        msg = "You enchant with " + enchName + ".";
-                    else if (!casterName.empty())
-                        msg = casterName + " enchants your item with " + enchName + ".";
-                    else
-                        msg = "Your item has been enchanted with " + enchName + ".";
-                    addSystemChatMessage(msg);
-                }
-            }
-        }
+        // Packed target, packed caster, item id, enchantment id
+        // (AzerothCore EnchantmentLog). Wow.exe (0x751050) writes it to the
+        // combat log as ENCHANT_APPLIED - ENCHANT_REMOVED with no caster - and
+        // says nothing in chat; enchantments flagged 0x2 are not logged.
+        if (!packet.hasRemaining(2)) { packet.skipAll(); return; }
+        const uint64_t enchTargetGuid = packet.readPackedGuid();
+        const uint64_t enchCasterGuid = packet.readPackedGuid();
+        if (!packet.hasRemaining(8)) { packet.skipAll(); return; }
+        const uint32_t itemId = packet.readUInt32();
+        const uint32_t enchantId = packet.readUInt32();
+        packet.skipAll();
+        const std::string enchName = getEnchantName(enchantId);
+        if (enchName.empty() || !addonEventCallback_ || isClassicLikeExpansion()) return;
+        using namespace combat_log;
+        std::string itemName;
+        if (const ItemQueryResponseData* info = getItemInfo(itemId)) itemName = info->name;
+        const uint64_t me = playerGuid, pet = getPetGuid();
+        const std::vector<std::string> args = {
+            std::to_string(static_cast<int64_t>(std::time(nullptr))),
+            enchCasterGuid ? "ENCHANT_APPLIED" : "ENCHANT_REMOVED",
+            guidText(enchCasterGuid), textOrNil(lookupName(enchCasterGuid)),
+            std::to_string(unitFlags(enchCasterGuid, me, pet)),
+            guidText(enchTargetGuid), textOrNil(lookupName(enchTargetGuid)),
+            std::to_string(unitFlags(enchTargetGuid, me, pet)),
+            enchName, std::to_string(itemId), textOrNil(itemName),
+        };
+        addonEventCallback_("COMBAT_LOG_EVENT_UNFILTERED", args);
+        addonEventCallback_("COMBAT_LOG_EVENT", args);
     };
     // WotLK: uint64 playerGuid + uint8 teamCount + per-team fields
     dispatchTable_[Opcode::MSG_INSPECT_ARENA_TEAMS] = [this](network::Packet& packet) {
@@ -1733,8 +1795,8 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_TALENTS_INVOLUNTARILY_RESET] = [this](network::Packet& packet) {
         // Clear cached talent data so the talent screen reflects the reset.
         if (spellHandler_) spellHandler_->resetTalentState();
-        addUIError("Your talents have been reset by the server.");
-        addSystemChatMessage("Your talents have been reset by the server.");
+        // The event alone (Wow.exe 0x526530): uiparent.lua raises the
+        // TALENTS_INVOLUNTARILY_RESET popup, which is the whole announcement.
         // The talent frame rebuilds from this; the cached state was cleared
         // above and nothing told it to redraw, so it kept the old trees.
         if (addonEventCallback_) addonEventCallback_("TALENTS_INVOLUNTARILY_RESET", {});
@@ -1777,17 +1839,16 @@ void GameHandler::registerRemainingOpcodes() {
     };
     dispatchTable_[Opcode::SMSG_CHAR_CUSTOMIZE] = [this](network::Packet& packet) {
         if (packet.hasRemaining(1)) {
-            uint8_t result = packet.readUInt8();
-            addSystemChatMessage(result == 0 ? "Character customization complete."
-                                             : "Character customization failed.");
+            // A character-screen answer (Wow.exe 0x4D9190): the glue screen's
+            // dialog says it; nothing in the world's chat.
+            (void)packet.readUInt8();
         }
         packet.skipAll();
     };
     dispatchTable_[Opcode::SMSG_CHAR_FACTION_CHANGE] = [this](network::Packet& packet) {
         if (packet.hasRemaining(1)) {
-            uint8_t result = packet.readUInt8();
-            addSystemChatMessage(result == 0 ? "Faction change complete."
-                                             : "Faction change failed.");
+            // As the customization (Wow.exe 0x4D92D0).
+            (void)packet.readUInt8();
         }
         packet.skipAll();
     };
@@ -1936,27 +1997,42 @@ void GameHandler::registerRemainingOpcodes() {
     // against 1 - so a ticket that went through reported that it had not.
     constexpr uint32_t kTicketAlreadyExists = 1, kTicketCreated = 2,
                        kTicketUpdated = 4, kTicketDeleted = 9;
-    dispatchTable_[Opcode::SMSG_GMTICKET_CREATE] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(4)) {
-            const uint32_t res = packet.readUInt32();
-            addSystemChatMessage(
-                res == kTicketCreated       ? "GM ticket submitted."
-              : res == kTicketAlreadyExists ? "You already have a GM ticket open."
-                                            : "Failed to submit GM ticket.");
+    // A create's or an update's answer, as Wow.exe (0x5AD240) gives it:
+    // ERR_TICKET_ALREADY_EXISTS (1), ERR_TICKET_CREATE_ERROR (3),
+    // ERR_TICKET_UPDATE_ERROR (5); a success (2, 4) asks for the ticket again,
+    // and the answer redraws the help frame. No line of its own.
+    auto gmTicketResult = [this](uint32_t res) {
+        switch (res) {
+            case kTicketAlreadyExists: displayGameMessage("ERR_TICKET_ALREADY_EXISTS", "You already have an open ticket."); break;
+            case kTicketCreated:
+            case kTicketUpdated: requestGmTicket(); break;
+            case 3: displayGameMessage("ERR_TICKET_CREATE_ERROR", "There was an error creating your ticket. Please try again later."); break;
+            case 5: displayGameMessage("ERR_TICKET_UPDATE_ERROR", "There was an error updating your ticket. Please try again later."); break;
+            default: break;
         }
     };
-    dispatchTable_[Opcode::SMSG_GMTICKET_UPDATETEXT] = [this](network::Packet& packet) {
+    dispatchTable_[Opcode::SMSG_GMTICKET_CREATE] = [this, gmTicketResult](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
-            const uint32_t res = packet.readUInt32();
-            addSystemChatMessage(res == kTicketUpdated ? "GM ticket updated."
-                                                       : "Failed to update GM ticket.");
+            gmTicketResult(packet.readUInt32());
+        }
+    };
+    dispatchTable_[Opcode::SMSG_GMTICKET_UPDATETEXT] = [gmTicketResult](network::Packet& packet) {
+        if (packet.hasRemaining(4)) {
+            gmTicketResult(packet.readUInt32());
         }
     };
     dispatchTable_[Opcode::SMSG_GMTICKET_DELETETICKET] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
+            // Deleted (9): UPDATE_TICKET with no ticket; anything else
+            // ERR_TICKET_DB_ERROR (Wow.exe 0x5AD240).
             const uint32_t res = packet.readUInt32();
-            addSystemChatMessage(res == kTicketDeleted ? "GM ticket deleted."
-                                                       : "No ticket to delete.");
+            if (res == kTicketDeleted) {
+                gmTicketActive_ = false;
+                gmTicketText_.clear();
+                fireAddonEvent("UPDATE_TICKET", {});
+            } else {
+                displayGameMessage("ERR_TICKET_DB_ERROR", "Your ticket could not be retrieved. Please try again later.");
+            }
         }
     };
     // WotLK 3.3.5a format:
@@ -1984,18 +2060,8 @@ void GameHandler::registerRemainingOpcodes() {
             gmTicketWaitHours_ = (packet.hasRemaining(4))
                 ? packet.readFloat() : 0.0f;
             gmTicketActive_ = true;
-            char buf[256];
-            if (ageSec < 60) {
-                std::snprintf(buf, sizeof(buf),
-                    "You have an open GM ticket (submitted %us ago). Estimated wait: %.1f hours.",
-                    ageSec, gmTicketWaitHours_);
-            } else {
-                uint32_t ageMin = ageSec / 60;
-                std::snprintf(buf, sizeof(buf),
-                    "You have an open GM ticket (submitted %um ago). Estimated wait: %.1f hours.",
-                    ageMin, gmTicketWaitHours_);
-            }
-            addSystemChatMessage(buf);
+            // No chat line (Wow.exe 0x5AD240): the help frame draws it from
+            // UPDATE_TICKET.
             LOG_INFO("SMSG_GMTICKET_GETTICKET: open ticket age=", ageSec,
                      "s wait=", gmTicketWaitHours_, "h");
 
@@ -2025,7 +2091,6 @@ void GameHandler::registerRemainingOpcodes() {
         } else if (gmStatus == 3) {
             gmTicketActive_ = false;
             gmTicketText_.clear();
-            addSystemChatMessage("Your GM ticket has been closed.");
             LOG_INFO("SMSG_GMTICKET_GETTICKET: ticket closed");
             // No arguments at all is how the interface is told there is no
             // ticket: it reads the first one and stops if it is absent.
@@ -2052,9 +2117,7 @@ void GameHandler::registerRemainingOpcodes() {
         if (packet.hasRemaining(4)) {
             uint32_t sysStatus = packet.readUInt32();
             gmSupportAvailable_ = (sysStatus != 0);
-            addSystemChatMessage(gmSupportAvailable_
-                ? "GM support is currently available."
-                : "GM support is currently unavailable.");
+            // UPDATE_GM_STATUS alone (Wow.exe 0x6E2E90, opcode 0x21B).
             LOG_INFO("SMSG_GMTICKET_SYSTEMSTATUS: available=", gmSupportAvailable_);
             // The help frame disables its "open a ticket" button on anything
             // but GMTICKET_QUEUE_STATUS_ENABLED, which is the number 1 - and
@@ -2132,12 +2195,18 @@ void GameHandler::registerRemainingOpcodes() {
     // uint8 result: 0=success, 1=failed, 2=disabled
     dispatchTable_[Opcode::SMSG_COMPLAIN_RESULT] = [this](network::Packet& packet) {
         // uint8 result: 0=success, 1=failed, 2=disabled
+        // Wow.exe (0x6E2E90, opcode 0x3C8) reads two bytes and answers every
+        // one with COMPLAINT_ADDED: a calendar complaint (type 12) through
+        // CALENDAR_UPDATE_ERROR, any other as a plain chat line.
         if (packet.hasRemaining(1)) {
-            uint8_t result = packet.readUInt8();
-            if (result == 0)
-                addSystemChatMessage("Your complaint has been submitted.");
-            else if (result == 2)
-                addUIError("Report a Player is currently disabled.");
+            packet.readUInt8();
+            const uint8_t type = packet.hasRemaining(1) ? packet.readUInt8() : 0;
+            if (type == 12) {
+                std::string text = globalString(services_.assetManager, "COMPLAINT_ADDED");
+                fireAddonEvent("CALENDAR_UPDATE_ERROR", {text.empty() ? "Complaint Registered." : text});
+            } else {
+                addGlobalStringChatLine("COMPLAINT_ADDED", "Complaint Registered.");
+            }
         }
         packet.skipAll();
     };
@@ -2233,21 +2302,31 @@ void GameHandler::registerRemainingOpcodes() {
         if (packet.hasData()) {
             std::string charName = packet.readString();
             if (packet.hasRemaining(12)) {
-                /*uint64_t guid =*/ packet.readUInt64();
-                uint32_t achievementId = packet.readUInt32();
+                const uint64_t guid = packet.readUInt64();
+                const uint32_t achievementId = packet.readUInt32();
+                const uint32_t linkName = packet.hasRemaining(4) ? packet.readUInt32() : 0;
+                // An achievement chat line (CHAT_MSG_ACHIEVEMENT) from the
+                // earner: SERVER_FIRST_ACHIEVEMENT, or with the link flag
+                // PLAYER_SERVER_FIRST_ACHIEVEMENT, $a written out as the
+                // achievement's link (Wow.exe 0x50B010). The chat frame puts
+                // the earner's name into its %s.
+                const char* key = linkName ? "PLAYER_SERVER_FIRST_ACHIEVEMENT" : "SERVER_FIRST_ACHIEVEMENT";
+                std::string text = globalString(services_.assetManager, key);
+                if (text.empty()) text = "%s has earned the achievement $a!";
                 loadAchievementNameCache();
                 auto nit = achievementNameCache_.find(achievementId);
-                char buf[256];
-                if (nit != achievementNameCache_.end() && !nit->second.empty()) {
-                    std::snprintf(buf, sizeof(buf),
-                        "%s is the first on the realm to earn: %s!",
-                        charName.c_str(), nit->second.c_str());
-                } else {
-                    std::snprintf(buf, sizeof(buf),
-                        "%s is the first on the realm to earn achievement #%u!",
-                        charName.c_str(), achievementId);
-                }
-                addSystemChatMessage(buf);
+                const std::string achName = nit != achievementNameCache_.end() ? nit->second : std::string();
+                const std::string link = "|cffffff00|Hachievement:" + std::to_string(achievementId) +
+                                         ":0:0:0:0:0:0:0:0:0|h[" + achName + "]|h|r";
+                for (size_t pos; (pos = text.find("$a")) != std::string::npos;) text.replace(pos, 2, link);
+                MessageChatData line;
+                line.type = ChatType::ACHIEVEMENT;
+                line.language = ChatLanguage::UNIVERSAL;
+                line.senderGuid = guid;
+                line.senderName = charName;
+                line.achievementId = achievementId;
+                line.message = text;
+                addLocalChatMessage(line);
             }
         }
         packet.skipAll();
@@ -2278,14 +2357,10 @@ void GameHandler::registerRemainingOpcodes() {
     };
     dispatchTable_[Opcode::SMSG_PLAYERBINDERROR] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
-            uint32_t error = packet.readUInt32();
-            if (error == 0) {
-                addUIError("Your hearthstone is not bound.");
-                addSystemChatMessage("Your hearthstone is not bound.");
-            } else {
-                addUIError("Hearthstone bind failed.");
-                addSystemChatMessage("Hearthstone bind failed.");
-            }
+            // ERR_DEATHBINDALREADYBOUND, whatever the code (Wow.exe 0x6E2E90,
+            // opcode 0x1B6).
+            (void)packet.readUInt32();
+            displayGameMessage("ERR_DEATHBINDALREADYBOUND", "You are already bound here!");
         }
     };
     // The instance boot timer, which this read nothing of.
@@ -2302,13 +2377,21 @@ void GameHandler::registerRemainingOpcodes() {
     // graveyard. A player got one line of the wrong explanation and no
     // countdown at all.
     dispatchTable_[Opcode::SMSG_RAID_GROUP_ONLY] = [this](network::Packet& packet) {
-        uint32_t timerMs = 0;
+        uint32_t timerMs = 0, reason = 0;
         if (packet.hasRemaining(8)) {
             timerMs = packet.readUInt32();
-            packet.readUInt32();   // reason; only 0 and 1 are ever sent
+            reason = packet.readUInt32();
         }
         packet.skipAll();
 
+        // Wow.exe (0x6E2E90, opcode 0x286) speaks only when there is no
+        // timer: ERR_RAID_GROUP_LOWLEVEL, _ONLY, _FULL or
+        // _REQUIREMENTS_UNMATCH for reasons 1-4. The countdown has no line.
+        if (timerMs == 0) {
+            static const char* const kKeys[] = {"ERR_RAID_GROUP_LOWLEVEL", "ERR_RAID_GROUP_ONLY",
+                                                "ERR_RAID_GROUP_FULL", "ERR_RAID_GROUP_REQUIREMENTS_UNMATCH"};
+            if (reason >= 1 && reason <= 4) displayGameMessage(kKeys[reason - 1], "");
+        }
         if (timerMs == 0) {
             instanceBootDeadline_.reset();
             fireAddonEvent("INSTANCE_BOOT_STOP", {});
@@ -2316,19 +2399,13 @@ void GameHandler::registerRemainingOpcodes() {
         }
         instanceBootDeadline_ = std::chrono::steady_clock::now() +
                                 std::chrono::milliseconds(timerMs);
-        const std::string msg = "You are not in this instance's group. You will be "
-                                "teleported out in " + std::to_string(timerMs / 1000) +
-                                " seconds.";
-        addUIError(msg);
-        addSystemChatMessage(msg);
         fireAddonEvent("INSTANCE_BOOT_START", {});
     };
     dispatchTable_[Opcode::SMSG_RAID_READY_CHECK_ERROR] = [this](network::Packet& packet) {
         if (packet.hasRemaining(1)) {
-            uint8_t err = packet.readUInt8();
-            if (err == 0) { addUIError("Ready check failed: not in a group."); addSystemChatMessage("Ready check failed: not in a group."); }
-            else if (err == 1) { addUIError("Ready check failed: in instance."); addSystemChatMessage("Ready check failed: in instance."); }
-            else { addUIError("Ready check failed."); addSystemChatMessage("Ready check failed."); }
+            // ERR_READY_CHECK_THROTTLED, whatever the byte (Wow.exe 0x5725A0).
+            (void)packet.readUInt8();
+            displayGameMessage("ERR_READY_CHECK_THROTTLED", "You can't do that yet");
         }
     };
     dispatchTable_[Opcode::SMSG_RESET_FAILED_NOTIFY] = [this](network::Packet& packet) {
@@ -2577,9 +2654,10 @@ void GameHandler::registerRemainingOpcodes() {
             auto ent = entityController_->getEntityManager().getEntity(mentorGuid);
             if (auto* unit = dynamic_cast<Unit*>(ent.get())) mentorName = unit->getName();
             if (mentorName.empty()) mentorName = lookupName(mentorGuid);
-            addSystemChatMessage(mentorName.empty()
-                ? "A player is offering to grant you a level."
-                : (mentorName + " is offering to grant you a level."));
+            // LEVEL_GRANT_PROPOSED and its popup, no chat line (Wow.exe
+            // 0x513FD0).
+            if (!mentorName.empty()) fireAddonEvent("LEVEL_GRANT_PROPOSED", {mentorName});
+            else queryPlayerName(mentorGuid);
         }
         packet.skipAll();
     };
@@ -2622,23 +2700,17 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_PLAY_TIME_WARNING] = [this](network::Packet& packet) {
         // uint32 type (0=normal, 1=heavy, 2=tired/restricted) + uint32 minutes played
         if (packet.hasRemaining(4)) {
-            uint32_t warnType = packet.readUInt32();
-            uint32_t minutesPlayed = (packet.hasRemaining(4))
-                ? packet.readUInt32() : 0;
-            const char* severity = (warnType >= 2) ? "[Tired] " : "[Play Time] ";
-            char buf[128];
-            if (minutesPlayed > 0) {
-                uint32_t h = minutesPlayed / 60;
-                uint32_t m = minutesPlayed % 60;
-                if (h > 0)
-                    std::snprintf(buf, sizeof(buf), "%sYou have been playing for %uh %um.", severity, h, m);
-                else
-                    std::snprintf(buf, sizeof(buf), "%sYou have been playing for %um.", severity, m);
-            } else {
-                std::snprintf(buf, sizeof(buf), "%sYou have been playing for a long time.", severity);
-            }
-            addSystemChatMessage(buf);
-            addUIError(buf);
+            // Flags and seconds; Wow.exe (0x6CD270) picks the warning by flag
+            // and gives the time as "%2d:%02d" (hours, minutes), chat lines.
+            const uint32_t flags = packet.readUInt32();
+            const int32_t secs = packet.hasRemaining(4) ? static_cast<int32_t>(packet.readUInt32()) : 0;
+            char when[32];
+            std::snprintf(when, sizeof(when), "%2d:%02d", (secs / 60) / 60, (secs / 60) % 60);
+            if (flags & 0x1000) displayGameMessage("ERR_APPROACHING_PARTIAL_PLAY_TIME", "", {when});
+            else if (flags & 0x40000000) displayGameMessage("ERR_APPROACHING_PARTIAL_PLAY_TIME_2", "", {when});
+            else if (flags & 0x2000) displayGameMessage("ERR_APPROACHING_NO_PLAY_TIME", "", {when});
+            else if (flags & 0x20000000) displayGameMessage("ERR_APPROACHING_NO_PLAY_TIME_2", "", {when});
+            else if (flags & 0x80000000u) displayGameMessage("ERR_UNHEALTHY_TIME", "");
         }
     };
     // WotLK 3.3.5a format:
@@ -2703,17 +2775,7 @@ void GameHandler::registerRemainingOpcodes() {
         // Store the invitation so the UI can show a prompt
         bfMgrInvitePending_ = true;
         bfMgrZoneId_        = bfZoneId;
-        char buf[128];
-        std::string bfZoneName = getAreaName(bfZoneId);
-        if (!bfZoneName.empty())
-            std::snprintf(buf, sizeof(buf),
-                "You are invited to the outdoor battlefield in %s. Click to enter.",
-                bfZoneName.c_str());
-        else
-            std::snprintf(buf, sizeof(buf),
-                "You are invited to the outdoor battlefield in zone %u. Click to enter.",
-                bfZoneId);
-        addSystemChatMessage(buf);
+        // No chat line: the event and its popup are all Wow.exe (0x54B610) says.
         // The prompt to enter is a static popup the interface raises from this.
         // The zone id goes with it as the battle id: every handler in the group
         // opens `local battleID = ...` and passes it back when the player
@@ -2729,16 +2791,18 @@ void GameHandler::registerRemainingOpcodes() {
         if (packet.hasRemaining(7)) {
             const uint32_t bfBattleId = packet.readUInt32();
             bfMgrBattleId_ = bfBattleId;
-            packet.readUInt8();   // unk, always one
-            uint8_t isSafe  = packet.readUInt8();
-            uint8_t onQueue = packet.readUInt8();
+            // Wow.exe (0x5498C0): the third byte clears AFK and says so
+            // (CLEARED_AFK, a plain chat line); the event carries the battle
+            // id and the first two as booleans. Nothing else is said.
+            const uint8_t first = packet.readUInt8();
+            const uint8_t isSafe  = packet.readUInt8();
+            const uint8_t onQueue = packet.readUInt8();
             bfMgrInvitePending_ = false;
             bfMgrActive_        = true;
-            addSystemChatMessage(isSafe ? "You are in the battlefield zone (safe area)."
-                                        : "You have entered the battlefield!");
-            if (onQueue) addSystemChatMessage("You are in the battlefield queue.");
+            if (onQueue) addGlobalStringChatLine("CLEARED_AFK", "You are no longer Away.");
             if (addonEventCallback_)
-                addonEventCallback_("BATTLEFIELD_MGR_ENTERED", {std::to_string(bfMgrZoneId_)});
+                addonEventCallback_("BATTLEFIELD_MGR_ENTERED",
+                                    {std::to_string(bfBattleId), eventBool(first != 0), eventBool(isSafe != 0)});
             LOG_INFO("SMSG_BATTLEFIELD_MGR_ENTERED: isSafe=", static_cast<int>(isSafe), " onQueue=", static_cast<int>(onQueue));
         }
         packet.skipAll();
@@ -2756,10 +2820,7 @@ void GameHandler::registerRemainingOpcodes() {
         bfMgrBattleId_ = bfId;
         bfMgrInvitePending_ = true;
         bfMgrZoneId_        = bfId;
-        char buf[128];
-        std::snprintf(buf, sizeof(buf),
-            "A spot has opened in the battlefield queue (battlefield %u).", bfId);
-        addSystemChatMessage(buf);
+        // The event alone (Wow.exe 0x54B7A0).
         if (addonEventCallback_)
             // The warmup flag picks between two dialogs and was read off the
             // wire and thrown away, so the warmup one could never appear.
@@ -2777,29 +2838,18 @@ void GameHandler::registerRemainingOpcodes() {
         if (!packet.hasRemaining(11)) {
             packet.skipAll(); return;
         }
+        // Wow.exe (0x54B680) says nothing in chat; the event carries the
+        // battle id, accepted, warmup (third byte == 1), whether the player
+        // stands in the battle's zone, and the logged-in byte.
         uint32_t bfId2    = packet.readUInt32();
-        /*uint32_t teamId =*/ packet.readUInt32();
+        const uint32_t zoneId = packet.readUInt32();
         uint8_t accepted  = packet.readUInt8();
-        /*uint8_t logging =*/ packet.readUInt8();
+        const uint8_t loggedIn = packet.readUInt8();
         uint8_t result    = packet.readUInt8();
-        (void)bfId2;
-        if (accepted) {
-            addSystemChatMessage("You have joined the battlefield queue.");
-        } else {
-            static const char* kBfQueueErrors[] = {
-                "Queued for battlefield.", "Not in a group.", "Level too high.",
-                "Level too low.", "Battlefield in cooldown.", "Already queued for another battlefield.",
-                "Battlefield is full."
-            };
-            const char* msg = (result < 7) ? kBfQueueErrors[result]
-                                           : "Battlefield queue request failed.";
-            addSystemChatMessage(std::string("Battlefield: ") + msg);
-        }
-        // The battle id and whether the queue took, in that order - the
-        // interface reads both to say which battlefield answered and how.
         if (addonEventCallback_) {
             addonEventCallback_("BATTLEFIELD_MGR_QUEUE_REQUEST_RESPONSE",
-                                {std::to_string(bfId2), std::to_string(accepted)});
+                                {std::to_string(bfId2), eventBool(accepted != 0), eventBool(result == 1),
+                                 eventBool(zoneId != 0 && zoneId == worldStateZoneId_), eventBool(loggedIn != 0)});
         }
         LOG_INFO("SMSG_BATTLEFIELD_MGR_QUEUE_REQUEST_RESPONSE: accepted=", static_cast<int>(accepted),
                  " result=", static_cast<int>(result));
@@ -2815,15 +2865,13 @@ void GameHandler::registerRemainingOpcodes() {
         // one, and the frame that answers it is live.
         if (!packet.hasRemaining(4)) { packet.skipAll(); return; }
         const uint32_t battleId = packet.readUInt32();
+        // The byte after it picks between the two dialogs (Wow.exe 0x54B750);
+        // no chat line.
+        const bool remote = packet.hasRemaining(1) && packet.readUInt8() != 0;
         packet.skipAll();
-
-        addSystemChatMessage("You will be removed from the battlefield shortly.");
         LOG_INFO("SMSG_BATTLEFIELD_MGR_EJECT_PENDING: battle ", battleId);
-        // The second argument picks between two dialogs and nothing here knows
-        // which; nil is the local one, which is what a player being ejected
-        // from the battlefield they are standing in should see.
         fireAddonEvent("BATTLEFIELD_MGR_EJECT_PENDING",
-                       {std::to_string(battleId), kEventNil});
+                       {std::to_string(battleId), eventBool(remote)});
     };
     // uint64 battlefieldGuid + uint32 reason + uint32 battleStatus + uint8 relocated
     dispatchTable_[Opcode::SMSG_BATTLEFIELD_MGR_EJECTED] = [this](network::Packet& packet) {
@@ -2844,15 +2892,10 @@ void GameHandler::registerRemainingOpcodes() {
         const bool exited = (reason & kExited) != 0;
         const bool lowLevel = (reason & kLowLevel) != 0;
 
-        if (lowLevel) {
-            raiseUiError("You are not high enough level for this battlefield.");
-        } else if (reason & kClose) {
-            addSystemChatMessage("The battlefield has closed.");
-        } else if (exited) {
-            addSystemChatMessage("You have left the battlefield.");
-        } else {
-            addSystemChatMessage("You have been removed from the battlefield.");
-        }
+        // No chat line: Wow.exe (0x5499C0) raises the event, whose dialog
+        // says why. Its flags: the reason equal to 8 (exited) or 10 (low
+        // level), relocated, and the battle status equal to 2.
+        (void)kClose; (void)exited; (void)lowLevel;
 
         LOG_INFO("SMSG_BATTLEFIELD_MGR_EJECTED: battle ", battleId,
                  " reason 0x", std::hex, static_cast<int>(reason), std::dec,
@@ -2867,10 +2910,10 @@ void GameHandler::registerRemainingOpcodes() {
         // eventBool - a zero here would read as true and pick the wrong dialog.
         fireAddonEvent("BATTLEFIELD_MGR_EJECTED",
                        {std::to_string(battleId),
-                        eventBool(exited),
+                        eventBool(reason == kExited),
                         eventBool(relocated != 0),
-                        eventBool(battleStatus != 0),
-                        eventBool(lowLevel)});
+                        eventBool(battleStatus == 2),
+                        eventBool(reason == 10)});
     };
     // uint32 oldState + uint32 newState
     // States: 0=Waiting, 1=Starting, 2=InProgress, 3=Ending, 4=Cooldown
@@ -2878,15 +2921,11 @@ void GameHandler::registerRemainingOpcodes() {
         // uint32 oldState + uint32 newState
         // States: 0=Waiting, 1=Starting, 2=InProgress, 3=Ending, 4=Cooldown
         if (packet.hasRemaining(8)) {
-            /*uint32_t oldState =*/ packet.readUInt32();
+            // BATTLEFIELD_MGR_STATE_CHANGE with both numbers, no chat line
+            // (Wow.exe 0x54B7F0).
+            const uint32_t first = packet.readUInt32();
             uint32_t newState   = packet.readUInt32();
-            static const char* kBfStates[] = {
-                "waiting", "starting", "in progress", "ending", "in cooldown"
-            };
-            const char* stateStr = (newState < 5) ? kBfStates[newState] : "unknown state";
-            char buf[128];
-            std::snprintf(buf, sizeof(buf), "Battlefield is now %s.", stateStr);
-            addSystemChatMessage(buf);
+            fireAddonEvent("BATTLEFIELD_MGR_STATE_CHANGE", {std::to_string(first), std::to_string(newState)});
             LOG_INFO("SMSG_BATTLEFIELD_MGR_STATE_CHANGE: newState=", newState);
         }
         packet.skipAll();
@@ -2990,13 +3029,8 @@ void GameHandler::registerRemainingOpcodes() {
             // and stale for the rest of the session.
             if (countChanged && addonEventCallback_)
                 addonEventCallback_("CALENDAR_UPDATE_PENDING_INVITES", {});
-            if (numPending > 0) {
-                char buf[64];
-                std::snprintf(buf, sizeof(buf),
-                    "You have %u pending calendar invite%s.",
-                    numPending, numPending == 1 ? "" : "s");
-                addSystemChatMessage(buf);
-            }
+            // No chat line (Wow.exe 0x5B7CE0): the minimap's invite marker
+            // is the announcement.
             LOG_DEBUG("SMSG_CALENDAR_SEND_NUM_PENDING: ", numPending, " pending invites");
         }
     };
@@ -3073,9 +3107,8 @@ void GameHandler::registerRemainingOpcodes() {
             }
         }
         recountCalendarPending();
-        if (newPending && alert.senderGuid != getPlayerGuid()) {
-            addSystemChatMessage("Calendar invite: " + alert.event.title);
-        }
+        // No chat line for an invite (Wow.exe 0x5C3AB0): the pending-invite
+        // marker and the calendar's list carry it.
         fireAddonEvent("CALENDAR_UPDATE_EVENT_LIST", {});
         LOG_INFO("SMSG_CALENDAR_EVENT_INVITE_ALERT: '", alert.event.title,
                  "' status ", static_cast<int>(alert.status));
@@ -3378,14 +3411,8 @@ void GameHandler::registerRemainingOpcodes() {
             uint32_t difficulty = packet.readUInt32();
             const uint32_t secondsLeft = packet.readUInt32();
             const uint64_t instanceGuid = packet.readUInt64();
+            // Stored, no chat line (Wow.exe 0x5C37D0).
             applyLockout(mapId, difficulty, secondsLeft, instanceGuid, true);
-            std::string mapLabel = getMapName(mapId);
-            if (mapLabel.empty()) mapLabel = "map #" + std::to_string(mapId);
-            const char* diffStr = instanceDifficultyName(difficulty);
-            std::string msg = "Calendar: Raid lockout added for " + mapLabel;
-            if (diffStr) msg += std::string(" (") + diffStr + ")";
-            msg += '.';
-            addSystemChatMessage(msg);
             LOG_DEBUG("SMSG_CALENDAR_RAID_LOCKOUT_ADDED: mapId=", mapId, " difficulty=", difficulty);
         }
         packet.skipAll();
@@ -3396,14 +3423,8 @@ void GameHandler::registerRemainingOpcodes() {
         if (packet.hasRemaining(4 + 4)) {
             uint32_t mapId     = packet.readUInt32();
             uint32_t difficulty = packet.readUInt32();
+            // Stored, no chat line (Wow.exe 0x5C07E0).
             applyLockout(mapId, difficulty, 0, 0, false);
-            std::string mapLabel = getMapName(mapId);
-            if (mapLabel.empty()) mapLabel = "map #" + std::to_string(mapId);
-            const char* diffStr = instanceDifficultyName(difficulty);
-            std::string msg = "Calendar: Raid lockout removed for " + mapLabel;
-            if (diffStr) msg += std::string(" (") + diffStr + ")";
-            msg += '.';
-            addSystemChatMessage(msg);
             LOG_DEBUG("SMSG_CALENDAR_RAID_LOCKOUT_REMOVED: mapId=", mapId,
                       " difficulty=", difficulty);
         }
@@ -3436,16 +3457,9 @@ void GameHandler::registerRemainingOpcodes() {
         std::string reason;
         if (packet.hasData())
             reason = packet.readString();
-        (void)kickerGuid;  // not displayed; reasonType IS used below
-        std::string msg = "You have been removed from the group.";
-        if (!reason.empty())
-            msg = "You have been removed from the group: " + reason;
-        else if (reasonType == 1)
-            msg = "You have been removed from the group for being AFK.";
-        else if (reasonType == 2)
-            msg = "You have been removed from the group by vote.";
-        addSystemChatMessage(msg);
-        addUIError(msg);
+        // Kept for the disconnect screen by Wow.exe (0x4D9500); nothing is
+        // said in the world.
+        (void)kickerGuid;
         LOG_INFO("SMSG_KICK_REASON: reasonType=", reasonType,
                  " reason='", reason, "'");
     };
@@ -3453,16 +3467,10 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_GROUPACTION_THROTTLED] = [this](network::Packet& packet) {
         // uint32 throttleMs - rate-limited group action; notify the player
         if (packet.hasRemaining(4)) {
+            // ERR_GROUP_ACTION_THROTTLED, a chat line (Wow.exe 0x6CBE80).
             uint32_t throttleMs = packet.readUInt32();
-            char buf[128];
-            if (throttleMs > 0) {
-                std::snprintf(buf, sizeof(buf),
-                              "Group action throttled. Please wait %.1f seconds.",
-                              throttleMs / 1000.0f);
-            } else {
-                std::snprintf(buf, sizeof(buf), "Group action throttled.");
-            }
-            addSystemChatMessage(buf);
+            displayGameMessage("ERR_GROUP_ACTION_THROTTLED",
+                "You have attempted too many group actions in a short period of time.  Please wait momentarily before attempting further group actions.");
             LOG_DEBUG("SMSG_GROUPACTION_THROTTLED: throttleMs=", throttleMs);
         }
     };
@@ -3490,18 +3498,8 @@ void GameHandler::registerRemainingOpcodes() {
                 if (i == 0) responseText = t;
             }
         }
+        // No chat line (Wow.exe 0x5AD240): the help frame opens on the event.
         (void)ticketId;
-        std::string msg;
-        if (!responseText.empty())
-            msg = "[GM Response] " + responseText;
-        else if (!body.empty())
-            msg = "[GM Response] " + body;
-        else if (!subject.empty())
-            msg = "[GM Response] " + subject;
-        else
-            msg = "[GM Response] Your ticket has been answered.";
-        addSystemChatMessage(msg);
-        addUIError(msg);
         // The help frame takes the ticket's own text and the reply, and opens
         // the panel that lets the answer be accepted or more help asked for.
         // Both strings are parsed right here and were only ever said in chat,
@@ -3523,14 +3521,11 @@ void GameHandler::registerRemainingOpcodes() {
         if (packet.hasRemaining(1)) {
             const uint32_t ticketId = 0;
             const uint8_t  status   = packet.readUInt8() ? 2u : 1u;
-            const char* statusStr = (status == 1) ? "open"
-                                  : (status == 2) ? "answered"
-                                  : (status == 3) ? "needs more info"
-                                  : "updated";
-            char buf[128];
-            std::snprintf(buf, sizeof(buf),
-                          "[GM Ticket #%u] Status: %s.", ticketId, statusStr);
-            addSystemChatMessage(buf);
+            // GMSURVEY_DISPLAY for a survey, otherwise UPDATE_TICKET with no
+            // ticket; no chat line (Wow.exe 0x5AD240).
+            gmTicketActive_ = false;
+            gmTicketText_.clear();
+            fireAddonEvent(status == 2 ? "GMSURVEY_DISPLAY" : "UPDATE_TICKET", {});
             LOG_DEBUG("SMSG_GMRESPONSE_STATUS_UPDATE: ticketId=", ticketId,
                       " status=", static_cast<int>(status));
         }

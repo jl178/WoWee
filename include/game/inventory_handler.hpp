@@ -352,13 +352,6 @@ public:
     const std::vector<MailMessage>& getNextMailSenders() const { return nextMailSenders_; }
     void openMailbox(uint64_t guid);
     void closeMailbox();
-    /// What the server's mail refusal means, in words.
-    ///
-    /// SMSG_SEND_MAIL_RESULT carries a number from MailResponseResult and the
-    /// client printed it bare - "Failed to send mail (error 19)" says nothing
-    /// about what to do differently, and 19 is the one a player can actually
-    /// act on: something on the letter cannot be mailed.
-    static const char* mailResultText(uint32_t error);
 
     /// Put paper in the compose frame, so its Send button can be enabled.
     void selectDefaultStationery();
@@ -604,8 +597,19 @@ public:
                                 std::array<uint8_t, 19>& invTypes) const;
     void emitAllOtherPlayerEquipment();
     void handleItemQueryResponse(network::Packet& packet);
+    /// A player's name arrived: an open auction list naming them (seller,
+    /// or the bidder on one of yours) or an invoice in the open inbox is
+    /// redrawn, as stock's name-cache callbacks do (Wow.exe 0x59A3A0,
+    /// 0x59A3C0, 0x59A380, 0x56D4B0).
+    void onPlayerNameKnown(uint64_t guid);
 
 private:
+    void announceAuctionItem(uint32_t itemId, int32_t randomProp, const char* key);
+    struct AuctionNotice { uint32_t itemId; int32_t randomProp; const char* key; };
+    std::vector<AuctionNotice> pendingAuctionNotices_;
+    // The currency counts CURRENCY_DISPLAY_UPDATE was last fired for.
+    uint64_t currencySignature_ = 0;
+    bool currencySignatureKnown_ = false;
     // --- Packet handlers ---
     void handleLootResponse(network::Packet& packet);
     void handleLootReleaseResponse(network::Packet& packet);
@@ -744,6 +748,9 @@ private:
     std::deque<BuybackItem> buybackItems_;
     std::unordered_map<uint64_t, BuybackItem> pendingSellToBuyback_;
     std::array<uint64_t, 12> buybackSlotGuids_{};
+    // PLAYER_FIELD_BUYBACK_PRICE_1..12 and _TIMESTAMP_1..12, per ring slot.
+    std::array<uint32_t, 12> buybackPrices_{};
+    std::array<uint32_t, 12> buybackTimestamps_{};
     int pendingBuybackSlot_ = -1;
     uint32_t pendingBuybackWireSlot_ = 0;
     uint32_t pendingBuyItemId_ = 0;

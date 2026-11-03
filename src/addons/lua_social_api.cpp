@@ -1,6 +1,7 @@
 // lua_social_api.cpp - Chat, guild, friends, ignore, gossip, party management, and emotes Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include "game/interaction_rules.hpp"
+#include "game/guild_roster_throttle.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -1715,60 +1716,54 @@ void registerSocialLuaAPI(lua_State* L) {
                 return 10;
             }
             const auto& mail = inbox[static_cast<size_t>(index) - 1];
+            // As Wow.exe 0x56E9B0 answers it: an invoice only for a won, sold
+            // or sale-pending letter (the subject's response code), the type
+            // from that code, and the body read with as many fields as that
+            // kind writes. Anything else is nil, nil, nil and four zeros - a
+            // cancelled auction's letter was drawn as a purchase of nothing
+            // from "Unknown".
+            game::AuctionMailSubject subject;
             game::AuctionMailInvoice invoice;
             if (mail.messageType != 2 ||
-                !game::parseAuctionMailBody(mail.body, invoice)) {
-                for (int i = 0; i < 10; ++i) lua_pushnil(L);
-                return 10;
+                !game::parseAuctionMailSubject(mail.subject, subject) ||
+                !game::auctionMailIsInvoice(subject.response)) {
+                lua_pushnil(L); lua_pushnil(L); lua_pushnil(L);
+                for (int i = 0; i < 4; ++i) lua_pushnumber(L, 0);
+                return 7;
             }
-
-            // Which side of the sale this letter is. The auction house sends
-            // the buyer a "won" mail and the seller a "sold" one, and the two
-            // halves of OpenMail_Update draw entirely different panels from it
-            // - the buyer's shows what was paid, the seller's the deposit and
-            // the house's cut.
-            //
-            // The subject carries the response code that says which.
-            game::AuctionMailSubject subject;
-            const bool haveSubject =
-                game::parseAuctionMailSubject(mail.subject, subject);
-            // A sold-auction invoice names a deposit and a cut; a purchase
-            // does not, which is the difference the panel is drawn from.
-            const bool seller = invoice.deposit > 0 || invoice.consignment > 0;
-            lua_pushstring(L, seller ? "seller" : "buyer");
-
-            const uint32_t entry = haveSubject ? subject.itemEntry : 0;
-            const auto* info = entry ? gh->getItemInfo(entry) : nullptr;
+            game::parseAuctionMailBody(mail.body, invoice);
+            if (subject.response == 1) {
+                // A purchase writes the seller, the bid and the buyout only.
+                invoice.deposit = invoice.consignment = 0;
+                invoice.moneyDelay = invoice.eta = 0;
+            } else if (subject.response == 2) {
+                invoice.moneyDelay = invoice.eta = 0;
+            }
+            lua_pushstring(L, subject.response == 2   ? "seller"
+                              : subject.response == 6 ? "seller_temp_invoice"
+                                                      : "buyer");
+            const auto* info = subject.itemEntry ? gh->getItemInfo(subject.itemEntry) : nullptr;
             lua_pushstring(L, info ? info->name.c_str() : "");
 
-            // The other party. Their guid low is what the invoice carries, and
-            // the name cache is asked rather than the server: an invoice is
-            // read long after the sale and the seller may be anywhere.
+            // The other party, by the guid the body carries. Empty while the
+            // name is asked for, as stock answers it; the answer redraws the
+            // inbox (MAIL_INBOX_UPDATE, the callback at 0x56D4B0).
             std::string other;
             if (invoice.ownerGuidLow != 0) {
-                for (const auto& [guid, name] : gh->getPlayerNameCache()) {
-                    if (static_cast<uint32_t>(guid & 0xFFFFFFFFu) != invoice.ownerGuidLow) {
-                        continue;
-                    }
-                    other = name;
-                    break;
-                }
+                other = gh->lookupName(invoice.ownerGuidLow);
+                if (other.empty()) gh->queryPlayerName(invoice.ownerGuidLow);
             }
-            // A name, even an unknown one: FrameXML draws the whole panel
-            // behind `if ( playerName )`, so answering nothing here would keep
-            // it shut for the sake of a label.
-            lua_pushstring(L, other.empty() ? "Unknown" : other.c_str());
+            lua_pushstring(L, other.c_str());
 
             lua_pushnumber(L, invoice.bid);
             lua_pushnumber(L, invoice.buyout);
             lua_pushnumber(L, invoice.deposit);
             lua_pushnumber(L, invoice.consignment);
-            // The hour the money becomes available, which the server does not
-            // send. Nil rather than a guess: the panel guards each of these and
-            // shows "not yet sent" without them, which is true.
-            lua_pushnil(L);
-            lua_pushnil(L);
-            lua_pushnil(L);
+            lua_pushnumber(L, invoice.moneyDelay);
+            // When the money arrives, from the packed time the server writes
+            // (minute in the low six bits, hour in the five above).
+            lua_pushnumber(L, (invoice.eta >> 6) & 0x1F);
+            lua_pushnumber(L, invoice.eta & 0x3F);
             return 10;
         }},
                 // Stationery is the letterhead a mail is written on. The list
@@ -2282,7 +2277,8 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"GetGuildInfo",            lua_GetGuildInfoFunc},
                 {"GetNumGuildMembers",      lua_GetNumGuildMembers},
                 // At most one request per ten seconds from the interface, as
-                // the stock client throttles it. FriendsFrame_OnEvent answers
+                // the stock client throttles it (Wow.exe 0x5CA9B0: 10000 ms,
+                // see guild_roster_throttle.hpp). FriendsFrame_OnEvent answers
                 // GUILD_ROSTER_UPDATE(arg1) with another GuildRoster(), and
                 // every frame, addon and OnShow that wants fresh names asks
                 // too; unthrottled, each roster could ask for the next. The
@@ -2291,13 +2287,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"GuildRoster", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
-            using Clock = std::chrono::steady_clock;
-            static Clock::time_point lastSent{};
-            static bool sentOnce = false;
-            const auto now = Clock::now();
-            if (sentOnce && now - lastSent < std::chrono::seconds(10)) return 0;
-            sentOnce = true;
-            lastSent = now;
+            if (!game::takeGuildRosterSlot()) return 0;
             gh->requestGuildRoster();
             return 0;
         }},
@@ -2965,7 +2955,11 @@ void registerSocialLuaAPI(lua_State* L) {
             // than raising.
             if (!lua_checkstack(L, static_cast<int>(opts.size()) * 2 + 1)) return 0;
             int n = 0;
-            static constexpr const char* kIcons[] = {"gossip","vendor","taxi","trainer","spiritguide","innkeeper","banker","petition","tabard","battlemaster","auctioneer"};
+            // Wow.exe's own names (0x58A9E0, the table at 0xACEF20), which
+            // GossipFrame turns into Interface\GossipFrame\<name>GossipIcon:
+            // 4 is "healer" and 5 "binder" - there is no SpiritguideGossipIcon
+            // or InnkeeperGossipIcon texture - and 11-13 are "gossip" again.
+            static constexpr const char* kIcons[] = {"gossip","vendor","taxi","trainer","healer","binder","banker","petition","tabard","battlemaster","auctioneer"};
             for (const auto& o : opts) {
                 lua_pushstring(L, o.text.c_str());
                 lua_pushstring(L, o.icon < 11 ? kIcons[o.icon] : "gossip");
@@ -3614,17 +3608,20 @@ void registerSocialLuaAPI(lua_State* L) {
                     // Members are a separate question this client cannot answer,
                     // which is why ListChannelByName is still inert: it lists who
                     // is in one, and the server is never asked.
+                    // One CHAT_MSG_CHANNEL_LIST line, "[1. General] [2. Trade] ",
+                    // empty when there are none (Wow.exe 0x50DAE0).
                     auto* gh = getGameHandler(L);
                     if (!gh) return 0;
                     const auto& joined = gh->getJoinedChannels();
-                    if (joined.empty()) {
-                        gh->addSystemChatMessage("You are not in any channels.");
-                        return 0;
-                    }
-                    for (size_t i = 0; i < joined.size(); ++i) {
-                        gh->addSystemChatMessage(
-                            std::to_string(i + 1) + ". " + joined[i]);
-                    }
+                    std::string line;
+                    for (size_t i = 0; i < joined.size(); ++i)
+                        line += "[" + std::to_string(i + 1) + ". " + joined[i] + "] ";
+                    game::MessageChatData msg;
+                    msg.type = game::ChatType::CHANNEL_LIST;
+                    msg.language = game::ChatLanguage::UNIVERSAL;
+                    msg.message = line;
+                    msg.noSender = true;
+                    gh->addLocalChatMessage(msg);
                     return 0;
                 }},
                 {"ListChannelByName",        [](lua_State* L) -> int { (void)L; return 0; }},

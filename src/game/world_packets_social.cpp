@@ -386,7 +386,26 @@ bool ChannelNotifyParser::parse(network::Packet& packet, ChannelNotifyData& data
         data.constant = packet.readUInt8() != 0;
         return true;
     }
-    // Some notification types have additional fields (guid, etc.)
+    // What follows the name, as Wow.exe reads it per notice (0x50E120): a
+    // name for the notices about a player by name, two guids for kicks and
+    // bans, one guid for the rest that name a player.
+    switch (data.notifyType) {
+        case ChannelNotifyType::PLAYER_NOT_FOUND:
+        case ChannelNotifyType::CHANNEL_OWNER:
+        case ChannelNotifyType::PLAYER_NOT_BANNED:
+        case ChannelNotifyType::PLAYER_INVITED:
+        case ChannelNotifyType::PLAYER_INVITE_BANNED:
+            if (bytesLeft >= 1) data.playerName = packet.readString();
+            return true;
+        case ChannelNotifyType::PLAYER_KICKED:
+        case ChannelNotifyType::PLAYER_BANNED:
+        case ChannelNotifyType::PLAYER_UNBANNED:
+            if (bytesLeft >= 8) data.senderGuid = packet.readUInt64();
+            if (packet.hasRemaining(8)) data.targetGuid = packet.readUInt64();
+            return true;
+        default:
+            break;
+    }
     if (bytesLeft >= 8) {
         data.senderGuid = packet.readUInt64();
     }
@@ -968,10 +987,8 @@ bool GuildInfoParser::parse(network::Packet& packet, GuildInfoData& data) {
     // with AppendPackedTime, so reading a day, a month and a year took twelve
     // bytes where the server sent four - the date was nonsense and the two
     // counts after it were read from the wrong offset as well.
-    // Read and dropped. Nothing shows a guild's founding date since the roster
-    // window went to FrameXML, but the four bytes still have to come off the
-    // packet or the two counts after them are read from the wrong offset.
-    packet.readUInt32();
+    // GUILD_INFO_TEMPLATE prints it ("Guild created %1$d-%2$d-%3$d").
+    data.createdPacked = packet.readUInt32();
     data.numMembers = packet.readUInt32();
     data.numAccounts = packet.readUInt32();
     LOG_INFO("Parsed SMSG_GUILD_INFO: ", data.guildName, " members=", data.numMembers);

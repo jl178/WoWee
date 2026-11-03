@@ -3186,6 +3186,31 @@ public:
     /// sound. The fallback is used when the interface files are not there.
     void displayGameMessage(const char* key, const std::string& fallback,
                             const std::vector<std::string>& args = {});
+    /// A GlobalStrings text that is not a GameError, printed as a system
+    /// chat line the way Wow.exe prints those: FrameScript_GetText (0x819D40)
+    /// formatted into the chat frame's system line (0x509DD0) - "%s rolls
+    /// %d (%d-%d)", "Your instance lock for %s will expire ...". No sound.
+    /// The fallback is the English format, filled with the same args, for
+    /// when the interface files are absent.
+    void addGlobalStringChatLine(const char* key, const std::string& fallback,
+                                 const std::vector<std::string>& args = {});
+    /// The arg a message naming a player uses for the name.
+    static constexpr const char* kPlayerNameArg = "\x02name";
+    /// A message naming a player by guid, said once the name is known: at
+    /// once from the cache, or when the name query answers. Wow.exe resolves
+    /// such names through the name cache with a callback (0x67D770) and
+    /// prints from it, so a name not yet known still gets its line. Args
+    /// equal to kPlayerNameArg become the name; the fallback is a format
+    /// filled the same way. plain picks addGlobalStringChatLine over
+    /// displayGameMessage.
+    void displayGameMessageNaming(uint64_t guid, const char* key, const std::string& fallback,
+                                  std::vector<std::string> args, bool plain = false);
+    /// The messages displayGameMessageNaming held for this name.
+    void flushMessagesAwaitingName(uint64_t guid);
+    /// Money as the client writes it into a message (Wow.exe 0x7E7D80):
+    /// GOLD_AMOUNT, SILVER_AMOUNT and COPPER_AMOUNT for the parts that are
+    /// not zero, joined by ", " - "1 Gold, 40 Copper".
+    std::string formatMoneyText(uint32_t copper) const;
     void fireAddonEvent(const std::string& event, const std::vector<std::string>& args = {}) {
         if (addonEventCallback_) addonEventCallback_(event, args);
     }
@@ -4785,6 +4810,16 @@ private:
         std::array<uint64_t, 36> slotGuids{};  // max 36 slots
     };
     std::unordered_map<uint64_t, ContainerInfo> containerContents_;
+    struct MessageAwaitingName {
+        std::string key;
+        std::string fallback;
+        std::vector<std::string> args;
+        bool plain = false;
+    };
+    std::unordered_map<uint64_t, std::vector<MessageAwaitingName>> messagesAwaitingName_;
+    // The raid difficulty a change in progress goes to (stage 0 of
+    // SMSG_CHANGEPLAYER_DIFFICULTY_RESULT), named when it completes.
+    uint32_t pendingPlayerDifficulty_ = 0;
     int invSlotBase_ = -1;
     int packSlotBase_ = -1;
     FlatFieldMap lastPlayerFields_;

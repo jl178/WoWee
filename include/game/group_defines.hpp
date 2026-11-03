@@ -134,8 +134,11 @@ struct RaidSlot {
 /// `slot->guid`) and writes the player's own subgroup and flags in its header.
 /// GetNumRaidMembers counted the player while GetRaidRosterInfo and raidN
 /// indexed the list without them, so the last member of every raid was
-/// unreachable and the player was never in their own raid frames. Ordered by
-/// subgroup, the player first in theirs, the rest as the server sent them.
+/// unreachable and the player was never in their own raid frames.
+///
+/// In the order Wow.exe keeps it (the roster handler 0x6D8870 hands
+/// 0x574F10 the members as the packet lists them and appends the player
+/// last): the server's order, not sorted by subgroup, the player at the end.
 /// Empty when the group is not a raid.
 inline std::vector<RaidSlot> buildRaidSlots(const GroupListData& pd, uint64_t playerGuid) {
     std::vector<RaidSlot> out;
@@ -146,7 +149,6 @@ inline std::vector<RaidSlot> buildRaidSlots(const GroupListData& pd, uint64_t pl
     self.subGroup = pd.subGroup;
     self.flags = pd.flags;
     self.online = true;
-    out.push_back(self);
     for (const auto& m : pd.members) {
         if (m.guid == playerGuid) continue;
         RaidSlot s;
@@ -157,9 +159,7 @@ inline std::vector<RaidSlot> buildRaidSlots(const GroupListData& pd, uint64_t pl
         s.member = &m;
         out.push_back(s);
     }
-    std::stable_sort(out.begin(), out.end(), [](const RaidSlot& a, const RaidSlot& b) {
-        return a.subGroup < b.subGroup;
-    });
+    out.push_back(self);
     return out;
 }
 

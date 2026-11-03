@@ -325,8 +325,10 @@ static int lua_GetBuybackItemInfo(lua_State* L) {
     if (bi.item.displayInfoId != 0) iconPath = gh->getItemIconPath(bi.item.displayInfoId);
     if (!iconPath.empty()) lua_pushstring(L, iconPath.c_str());
     else lua_pushnil(L);
-    // What it costs to take back is what it sold for, times the stack.
-    lua_pushnumber(L, static_cast<double>(bi.item.sellPrice) * bi.count);
+    // The price the server put in PLAYER_FIELD_BUYBACK_PRICE for the slot;
+    // until it arrives, what it sold for times the stack.
+    lua_pushnumber(L, bi.price ? static_cast<double>(bi.price)
+                               : static_cast<double>(bi.item.sellPrice) * bi.count);
     lua_pushnumber(L, bi.count);
     lua_pushnumber(L, 1);
     // isUsable, the same test the merchant tab's slots make.
@@ -4954,8 +4956,13 @@ void registerInventoryLuaAPI(lua_State* L) {
             lua_pushstring(L, icon.empty() ? "Interface\\Icons\\INV_Misc_QuestionMark" : icon.c_str()); // texture
             lua_pushnumber(L, a.stackCount);        // count
             lua_pushnumber(L, quality);             // quality
-            lua_pushboolean(L, 1);                  // canUse
-            lua_pushnumber(L, info ? info->requiredLevel : 0); // level
+            // canUse: AuctionFrameBrowse_Update tints the icon red on nil,
+            // the same test the merchant's slots make (Wow.exe 0x59D5E0).
+            if (playerCanUseItem(gh, a.itemEntry)) lua_pushnumber(L, 1);
+            else lua_pushnil(L);
+            // Never below one (Wow.exe 0x59D5E0): the level column read 0
+            // for everything with no level requirement.
+            lua_pushnumber(L, (info && info->requiredLevel > 0) ? info->requiredLevel : 1); // level
             lua_pushnumber(L, a.startBid);          // minBid
             lua_pushnumber(L, a.minBidIncrement);   // minIncrement
             lua_pushnumber(L, a.buyoutPrice);       // buyoutPrice
@@ -4964,17 +4971,30 @@ void registerInventoryLuaAPI(lua_State* L) {
             // question as whether anybody does. It answered the second, so
             // every row with a bid on it - most of them - was labelled "Your
             // Bid", printed over the price it sits in front of.
-            const bool isHighBidder =
-                a.bidderGuid != 0 && a.bidderGuid == gh->getPlayerGuid();
-            lua_pushboolean(L, isHighBidder ? 1 : 0); // highBidder
-            // The seller column, which was two empty strings. The names are
-            // asked for when the list arrives (handleAuctionListResult queries
-            // every owner guid it does not know), so by the time a row is
-            // drawn twice this has an answer; before that it is empty, which
-            // is what an unknown seller looks like anyway.
+            //
+            // On the player's own auctions it is the high bidder's name
+            // instead (Wow.exe 0x59D5E0), which AuctionFrameAuctions_Update
+            // prints under the price; nil when nobody has bid or the name is
+            // not known yet. 1 or nil elsewhere, never false.
+            const uint64_t me = gh->getPlayerGuid();
+            if (t == "owner" && a.ownerGuid == me) {
+                const std::string bidder =
+                    a.bidderGuid ? gh->lookupName(a.bidderGuid) : std::string();
+                if (bidder.empty()) lua_pushnil(L);
+                else lua_pushstring(L, bidder.c_str());
+            } else if (a.bidderGuid != 0 && a.bidderGuid == me) {
+                lua_pushnumber(L, 1);
+            } else {
+                lua_pushnil(L);
+            }
+            // The seller column. The names are asked for when the list
+            // arrives (handleAuctionListResult queries every owner guid it
+            // does not know), so by the time a row is drawn twice this has an
+            // answer; before that it is nil, as stock answers an unknown one.
             const std::string ownerName =
                 a.ownerGuid ? gh->lookupName(a.ownerGuid) : std::string();
-            lua_pushstring(L, ownerName.c_str());   // owner
+            if (ownerName.empty()) lua_pushnil(L);
+            else lua_pushstring(L, ownerName.c_str()); // owner
             lua_pushnumber(L, 0);                   // saleStatus
             return 13;
         }},
@@ -5116,7 +5136,17 @@ void registerInventoryLuaAPI(lua_State* L) {
             const auto* mail = mailAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
             if (!mail) { return luaReturnNil(L); }
             if (!mail->read && mail->messageId != 0) gh->mailMarkAsRead(mail->messageId);
-            lua_pushstring(L, mail->body.c_str());
+            game::AuctionMailSubject subject;
+            const bool isAuction = mail->messageType == 2;
+            const bool isInvoice = isAuction &&
+                                   game::parseAuctionMailSubject(mail->subject, subject) &&
+                                   game::auctionMailIsInvoice(subject.response);
+            // An auction house letter has no text (Wow.exe 0x570BD0 answers
+            // nil for message type 2): its body is the invoice's fields,
+            // "9ca:500:500:0:0:0:0", which the open letter printed above
+            // the invoice panel.
+            if (isAuction) lua_pushnil(L);
+            else lua_pushstring(L, mail->body.c_str());
             lua_pushstring(L, game::stationeryTexture(mail->stationeryId, mail->messageType));
             // isTakeable: whether the letter's text can be taken as an item
             // (the OpenMailLetterButton, TakeInboxTextItem). mailframe.lua
@@ -5124,8 +5154,12 @@ void registerInventoryLuaAPI(lua_State* L) {
             // is not about coin or attachments, which have their own
             // buttons. A letter with no text has nothing to copy, and one
             // already copied (MAIL_CHECK_MASK_COPIED) cannot be copied again.
+            // Stock also refuses a calendar notice (type 5) and an auction
+            // letter that is not an invoice.
             lua_pushboolean(L, (!mail->body.empty() &&
-                                !(mail->flags & game::MAIL_CHECK_MASK_COPIED)) ? 1 : 0);
+                                !(mail->flags & game::MAIL_CHECK_MASK_COPIED) &&
+                                mail->messageType != 5 &&
+                                (!isAuction || isInvoice)) ? 1 : 0);
             // Whether this is an auction house invoice, which was answered no
             // for every letter. OpenMail_Update asks here first and only calls
             // GetInboxInvoiceInfo `if ( isInvoice )`, so saying no kept the
@@ -5134,9 +5168,6 @@ void registerInventoryLuaAPI(lua_State* L) {
             //
             // The body decides, not the sender: an auction mail's body parses
             // as an invoice and nothing else does.
-            game::AuctionMailInvoice invoice;
-            const bool isInvoice = mail->messageType == 2 &&
-                                   game::parseAuctionMailBody(mail->body, invoice);
             lua_pushboolean(L, isInvoice ? 1 : 0);
             return 4;
         }},

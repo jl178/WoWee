@@ -168,6 +168,9 @@ public:
     void showGameObjectPageText(uint64_t guid);
 
 private:
+    // PLAYER_FLAGS as last seen, for the PvP toggle's message.
+    uint32_t knownPlayerFlags_ = 0;
+    bool knownPlayerFlagsValid_ = false;
     void handlePageTextQueryResponse(network::Packet& packet);
 
     // --- Entity lifecycle ---

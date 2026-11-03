@@ -573,7 +573,8 @@ private:
     void handleBattlefieldStatus(network::Packet& packet);
     void handleBattlefieldList(network::Packet& packet);
     void handleRaidInstanceInfo(network::Packet& packet);
-    void handleInstanceDifficulty(network::Packet& packet);
+    void handleInstanceDifficulty(network::Packet& packet, bool dungeonSetting);
+    void endProposalOnRequeue(uint8_t updateType, bool joined, bool queued);
     void handleDuelRequested(network::Packet& packet);
     void handleDuelComplete(network::Packet& packet);
     void handleDuelWinner(network::Packet& packet);
@@ -687,9 +688,6 @@ private:
     uint32_t    readyCheckNotReadyCount_ = 0;
     std::string readyCheckInitiator_;
     uint64_t    readyCheckInitiatorGuid_ = 0;
-    /// SMSG_GROUP_DESTROYED said ERR_GROUP_DISBANDED; the empty group list
-    /// after it should not add ERR_LEFT_GROUP_YOU.
-    bool        groupDestroyedAnnounced_ = false;
     /// The player the interface asked to inspect; auto-inspects are others.
     uint64_t    userInspectGuid_ = 0;
     /// Seconds left on the check (Wow.exe 0x574d50: now + 30000 ms). The
@@ -703,6 +701,12 @@ private:
     /// Six item tabs and the money log after them.
     std::array<std::vector<GuildBankLogEntry>, 7> guildBankLogs_;
     uint32_t instanceDifficulty_ = 0;
+    // The dungeon difficulty setting as MSG_SET_DUNGEON_DIFFICULTY last
+    // stated it; zero, as Wow.exe starts it, before the first.
+    uint32_t dungeonDifficultySetting_ = 0;
+    // A proposal that failed through someone outside the player's group,
+    // whose ERR_LFG_PROPOSAL_FAILED the re-queue update has yet to say.
+    bool lfgProposalFailedUnsaid_ = false;
     bool instanceIsHeroic_ = false;
     bool inInstance_ = false;
 

@@ -423,6 +423,7 @@ public:
     bool playUnitEffectModel(uint64_t guid, const char* modelPath);
 
 private:
+    void announceLearnedSpell(uint32_t spellId);
     std::unordered_map<uint32_t, uint64_t> pendingPetNameQueries_;
     uint32_t nextPetNameQueryKey_ = 1;
 

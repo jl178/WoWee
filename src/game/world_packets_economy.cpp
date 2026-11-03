@@ -65,7 +65,7 @@ std::string formatAuctionMailSubject(const AuctionMailSubject& subject,
 // leading spaces (e.g. "           88a79:6000:6000:0:0:0:0"). The retail client
 // parses this into a formatted invoice rather than printing it verbatim.
 bool parseAuctionMailBody(const std::string& body, AuctionMailInvoice& result) {
-    std::array<uint32_t, 5> fields{};
+    std::array<uint32_t, 7> fields{};
     size_t fieldCount = 0;
     size_t start = 0;
     while (start <= body.size() && fieldCount < fields.size()) {
@@ -89,14 +89,16 @@ bool parseAuctionMailBody(const std::string& body, AuctionMailInvoice& result) {
     }
 
     // Minimum invoice is ownerGuid:bid:buyout (auction-won mail); a successful
-    // sale adds deposit and consignment. Any trailing fields (moneyDelay/eta on
-    // some cores) are ignored.
+    // sale adds deposit and consignment, and a sale pending the money's delay
+    // and arrival time.
     if (fieldCount < 3) return false;
     result.ownerGuidLow = fields[0];
     result.bid = fields[1];
     result.buyout = fields[2];
     result.deposit = fieldCount > 3 ? fields[3] : 0;
     result.consignment = fieldCount > 4 ? fields[4] : 0;
+    result.moneyDelay = fieldCount > 5 ? fields[5] : 0;
+    result.eta = fieldCount > 6 ? fields[6] : 0;
     return true;
 }
 

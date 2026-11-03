@@ -799,6 +799,9 @@ struct MessageChatData {
     std::string channelName;  // For channel messages
     uint8_t chatTag = 0;      // Player flags (AFK, DND, GM, etc.)
     uint32_t achievementId = 0; // Trailing field for ACHIEVEMENT/GUILD_ACHIEVEMENT
+    // A local line with no speaker (a Local Defense notice): the event's
+    // name is left empty rather than filled with the player's own.
+    bool noSender = false;
     std::chrono::system_clock::time_point timestamp = std::chrono::system_clock::now();
     // Monotonic id assigned by ChatHandler when the message enters history.
     // Stable cache key for the chat UI's formatted/parsed line cache.
@@ -934,6 +937,12 @@ struct ChannelNotifyData {
     ChannelNotifyType notifyType = ChannelNotifyType::YOU_JOINED;
     std::string channelName;
     uint64_t senderGuid = 0;
+    /// The second player of a two-player notice (kicked, banned, unbanned:
+    /// the one who did it).
+    uint64_t targetGuid = 0;
+    /// The player a notice names by string (not found, owner, not banned,
+    /// invited, invite banned).
+    std::string playerName;
     /// YOU_JOINED / YOU_LEFT only: the ChatChannels.dbc id (0 = custom).
     uint32_t channelId = 0;
     /// YOU_LEFT only: a built-in channel (General, Trade...), which the real
@@ -1403,6 +1412,7 @@ public:
 /** SMSG_GUILD_INFO data */
 struct GuildInfoData {
     std::string guildName;
+    uint32_t createdPacked = 0;   // packed date: day bits 14-19, month 20-23, year-2000 24-28
     uint32_t numMembers = 0;
     uint32_t numAccounts = 0;
 
@@ -3229,7 +3239,16 @@ struct AuctionMailInvoice {
     uint32_t buyout = 0;        // copper
     uint32_t deposit = 0;       // copper (successful-sale mail only)
     uint32_t consignment = 0;   // copper - auction house cut (successful sale)
+    uint32_t moneyDelay = 0;    // sale pending: seconds until the money is sent
+    uint32_t eta = 0;           // sale pending: packed time the money arrives
 };
+
+/// Whether an auction letter with this subject response is an invoice. Only
+/// won (1), sold (2) and sale pending (6) are (Wow.exe 0x56F716); cancelled,
+/// outbid and expired letters are plain ones with no text.
+inline bool auctionMailIsInvoice(uint32_t response) {
+    return response == 1 || response == 2 || response == 6;
+}
 
 bool parseAuctionMailSubject(const std::string& subject, AuctionMailSubject& result);
 std::string formatAuctionMailSubject(const AuctionMailSubject& subject,

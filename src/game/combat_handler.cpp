@@ -1,4 +1,5 @@
 #include "game/combat_handler.hpp"
+#include "game/global_strings.hpp"
 #include "game/combat_log_event.hpp"
 #include "game/classic_combat_chat.hpp"
 #include "audio/ui_sound_manager.hpp"
@@ -1376,31 +1377,36 @@ void CombatHandler::handleResistLog(network::Packet& packet) {
 // ============================================================
 
 void CombatHandler::handlePetTameFailure(network::Packet& packet) {
-    static const char* reasons[] = {
-        "Invalid creature", "Too many pets", "Already tamed",
-        "Wrong faction", "Level too low", "Creature not tameable",
-        "Can't control", "Can't command"
+    // ERR_TAME_FAILED ("%s.") with the reason's PETTAME_* text, the red
+    // error (Wow.exe 0x802090 -> 0x800390).
+    static const char* const kReasons[] = {
+        nullptr, "PETTAME_INVALIDCREATURE", "PETTAME_TOOMANY", "PETTAME_CREATUREALREADYOWNED",
+        "PETTAME_NOTTAMEABLE", "PETTAME_ANOTHERSUMMONACTIVE", "PETTAME_UNITSCANTTAME",
+        "PETTAME_NOPETAVAILABLE", "PETTAME_INTERNALERROR", "PETTAME_TOOHIGHLEVEL",
+        "PETTAME_DEAD", "PETTAME_NOTDEAD", "PETTAME_CANTCONTROLEXOTIC",
     };
     if (packet.hasRemaining(1)) {
-        uint8_t reason = packet.readUInt8();
-        const char* msg = (reason < 8) ? reasons[reason] : "Unknown reason";
-        std::string s = std::string("Failed to tame: ") + msg;
-        owner_.addUIError(s);
-        owner_.addSystemChatMessage(s);
+        const uint8_t reason = packet.readUInt8();
+        const char* key = (reason >= 1 && reason <= 12) ? kReasons[reason] : "PETTAME_UNKNOWNERROR";
+        std::string why = globalString(owner_.services().assetManager, key);
+        if (why.empty()) why = "Unknown error";
+        owner_.displayGameMessage("ERR_TAME_FAILED", why + ".", {why});
     }
 }
 
 void CombatHandler::handlePetActionFeedback(network::Packet& packet) {
-    static const char* kPetFeedback[] = {
-        nullptr,
-        "Your pet is dead.", "Your pet has nothing to attack.",
-        "Your pet cannot attack that target.", "That target is too far away.",
-        "Your pet cannot find a path to the target.",
-        "Your pet cannot attack an immune target.",
-    };
+    // Wow.exe (0x5D4DA0), red errors: 1 the pet is dead, 2 nothing to attack
+    // (ERR_GENERIC_NO_VALID_TARGETS for a spell that needs one), 3 an
+    // invalid target, 4 no path.
     if (!packet.hasRemaining(1)) return;
-    uint8_t msg = packet.readUInt8();
-    if (msg > 0 && msg < 7 && kPetFeedback[msg]) owner_.addSystemChatMessage(kPetFeedback[msg]);
+    const uint8_t msg = packet.readUInt8();
+    switch (msg) {
+        case 1: owner_.displayGameMessage("ERR_PET_SPELL_DEAD", "Your pet is dead."); break;
+        case 2: owner_.displayGameMessage("ERR_NO_ATTACK_TARGET", "There is nothing to attack."); break;
+        case 3: owner_.displayGameMessage("ERR_INVALID_ATTACK_TARGET", "You cannot attack that target."); break;
+        case 4: owner_.displayGameMessage("ERR_PET_SPELL_NOPATH", "No path available"); break;
+        default: break;
+    }
     packet.skipAll();
 }
 
@@ -1417,14 +1423,10 @@ void CombatHandler::handlePetCastFailed(network::Packet& packet) {
         LOG_DEBUG("SMSG_PET_CAST_FAILED: spell=", spellId,
                   " reason=", static_cast<int>(reason));
         if (reason != 0) {
+            // The cast failure's own text on the red error line, as the
+            // player's own failures are shown (Wow.exe 0x806C30 -> 0x805610).
             const char* reasonStr = getSpellCastResultString(reason);
-            const std::string& sName = owner_.getSpellName(spellId);
-            std::string errMsg;
-            if (reasonStr && *reasonStr)
-                errMsg = sName.empty() ? reasonStr : (sName + ": " + reasonStr);
-            else
-                errMsg = sName.empty() ? "Pet spell failed." : (sName + ": Pet spell failed.");
-            owner_.addSystemChatMessage(errMsg);
+            if (reasonStr && *reasonStr) owner_.addUIError(reasonStr);
         }
     }
     packet.skipAll();
@@ -1436,7 +1438,8 @@ void CombatHandler::handlePetBroken(network::Packet& packet) {
     owner_.petSpellListRef().clear();
     owner_.petAutocastSpellsRef().clear();
     memset(owner_.petActionSlotsRef(), 0, sizeof(owner_.petActionSlotsRef()));
-    owner_.addSystemChatMessage("Your pet has died.");
+    // ERR_PET_BROKEN, the red error (Wow.exe 0x5D3120).
+    owner_.displayGameMessage("ERR_PET_BROKEN", "Your pet has run away.");
     // The same pair SMSG_PET_SPELLS fires, because the same two things have to
     // be redrawn - the pet frame and the pet action bar. Losing the pet
     // outright announced nothing while *learning one spell* announced
@@ -1452,8 +1455,20 @@ void CombatHandler::handlePetLearnedSpell(network::Packet& packet) {
     if (packet.hasRemaining(4)) {
         uint32_t spellId = packet.readUInt32();
         owner_.petSpellListRef().push_back(spellId);
+        // ERR_PET_LEARN_SPELL_S, or _ABILITY_S for a passive-flagged one
+        // (Attributes 0x10), with the rank (Wow.exe 0x5D4C30).
         const std::string& sname = owner_.getSpellName(spellId);
-        owner_.addSystemChatMessage("Your pet has learned " + (sname.empty() ? "a new ability." : sname + "."));
+        if (!sname.empty()) {
+            uint32_t attr = 0;
+            auto& cache = owner_.spellNameCacheRef();
+            if (auto it = cache.find(spellId); it != cache.end()) attr = it->second.attr;
+            const std::string& rank = owner_.getSpellRank(spellId);
+            const std::string shown = rank.empty() ? sname : sname + " (" + rank + ")";
+            if (attr & 0x10)
+                owner_.displayGameMessage("ERR_PET_LEARN_ABILITY_S", "Your pet has learned a new ability: " + shown + ".", {shown});
+            else
+                owner_.displayGameMessage("ERR_PET_LEARN_SPELL_S", "Your pet has learned a new spell: " + shown + ".", {shown});
+        }
         LOG_DEBUG("SMSG_PET_LEARNED_SPELL: spellId=", spellId);
         owner_.fireAddonEvent("PET_BAR_UPDATE", {});
     }
@@ -1467,6 +1482,12 @@ void CombatHandler::handlePetUnlearnedSpell(network::Packet& packet) {
             std::remove(owner_.petSpellListRef().begin(), owner_.petSpellListRef().end(), spellId),
             owner_.petSpellListRef().end());
         owner_.petAutocastSpellsRef().erase(spellId);
+        const std::string& sname = owner_.getSpellName(spellId);
+        if (!sname.empty()) {
+            const std::string& rank = owner_.getSpellRank(spellId);
+            const std::string shown = rank.empty() ? sname : sname + " (" + rank + ")";
+            owner_.displayGameMessage("ERR_PET_SPELL_UNLEARNED_S", "Your pet has unlearned " + shown + ".", {shown});
+        }
         LOG_DEBUG("SMSG_PET_UNLEARNED_SPELL: spellId=", spellId);
     }
     packet.skipAll();
@@ -1505,12 +1526,9 @@ void CombatHandler::handlePetMode(network::Packet& packet) {
 
 void CombatHandler::handleResurrectFailed(network::Packet& packet) {
     if (packet.hasRemaining(4)) {
-        uint32_t reason = packet.readUInt32();
-        const char* msg = (reason == 1) ? "The target cannot be resurrected right now."
-                        : (reason == 2) ? "Cannot resurrect in this area."
-                        : "Resurrection failed.";
-        owner_.addUIError(msg);
-        owner_.addSystemChatMessage(msg);
+        // Nothing said: Wow.exe (0x6CE470 -> 0x520F70) only re-raises
+        // PLAYER_DEAD or PLAYER_ALIVE.
+        (void)packet.readUInt32();
     }
 }
 
@@ -1673,18 +1691,15 @@ void CombatHandler::setFocus(uint64_t guid) {
                 name = unit->getName();
             }
             if (name.empty()) name = owner_.lookupName(guid);
-            if (name.empty()) name = "Unknown";
-            owner_.addSystemChatMessage("Focus set: " + name);
-            LOG_INFO("Focus set: 0x", std::hex, guid, std::dec);
+            // No line: FocusUnit (Wow.exe 0x522480) says nothing; the focus
+            // frame is the answer.
+            LOG_INFO("Focus set: 0x", std::hex, guid, std::dec, " ", name);
         }
     }
 }
 
 void CombatHandler::clearFocus() {
-    if (owner_.focusGuidRef() != 0) {
-        owner_.addSystemChatMessage("Focus cleared.");
-        LOG_INFO("Focus cleared");
-    }
+    if (owner_.focusGuidRef() != 0) LOG_INFO("Focus cleared");
     owner_.focusGuidRef() = 0;
     owner_.fireAddonEvent("PLAYER_FOCUS_CHANGED", {});
 }
@@ -1702,10 +1717,8 @@ void CombatHandler::setMouseoverGuid(uint64_t guid) {
 }
 
 void CombatHandler::targetLastTarget() {
-    if (owner_.lastTargetGuidRef() == 0) {
-        owner_.addSystemChatMessage("No previous target.");
-        return;
-    }
+    // Nothing to go back to is silent (Wow.exe TargetLastTarget 0x525D70).
+    if (owner_.lastTargetGuidRef() == 0) return;
 
     // Swap current and last target
     uint64_t temp = owner_.getTargetGuid();
@@ -1737,8 +1750,9 @@ void CombatHandler::cycleTarget(bool reverse, const char* noneMessage,
     std::sort(cands.begin(), cands.end(),
               [](const Cand& a, const Cand& b) { return a.distSq < b.distSq; });
 
+    // Nobody in range is silent, as the stock targeting keys are.
     if (cands.empty()) {
-        owner_.addSystemChatMessage(noneMessage);
+        (void)noneMessage;
         return;
     }
 
@@ -1825,18 +1839,12 @@ void CombatHandler::targetNearestRaidMember(bool reverse) {
 }
 
 void CombatHandler::targetLastEnemy() {
-    if (lastEnemyTargetGuid_ == 0) {
-        owner_.addSystemChatMessage("No previous enemy target.");
-        return;
-    }
+    if (lastEnemyTargetGuid_ == 0) return;   // silent, as above
     setTarget(lastEnemyTargetGuid_);
 }
 
 void CombatHandler::targetLastFriend() {
-    if (lastFriendTargetGuid_ == 0) {
-        owner_.addSystemChatMessage("No previous friendly target.");
-        return;
-    }
+    if (lastFriendTargetGuid_ == 0) return;   // silent
     setTarget(lastFriendTargetGuid_);
 }
 
@@ -1986,8 +1994,9 @@ void CombatHandler::assistTarget() {
     // Who they have selected, read the one way it is read. See targetGuidOfUnit.
     const uint64_t assistTargetGuid = unitTargetGuid(target);
 
+    // A target with no target of its own is silent (Wow.exe AssistUnit
+    // 0x525EB0).
     if (assistTargetGuid == 0) {
-        owner_.addSystemChatMessage(targetName + " has no target.");
         LOG_INFO("Assist: ", targetName, " has no target");
         return;
     }
@@ -2007,19 +2016,10 @@ void CombatHandler::togglePvp() {
         return;
     }
 
+    // Sent and nothing said (Wow.exe TogglePVP 0x516840): the player flags
+    // coming back are what say it (EntityController, PLAYER_FLAGS).
     auto packet = TogglePvpPacket::build();
     owner_.getSocket()->send(packet);
-    auto entity = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
-    bool currentlyPvp = false;
-    if (entity) {
-        // UNIT_FIELD_FLAGS (index 59), bit 0x1000 = UNIT_FLAG_PVP
-        currentlyPvp = (entity->getField(59) & 0x00001000) != 0;
-    }
-    if (currentlyPvp) {
-        owner_.addSystemChatMessage("PvP flag disabled.");
-    } else {
-        owner_.addSystemChatMessage("PvP flag enabled.");
-    }
     LOG_INFO("Toggled PvP flag");
 }
 

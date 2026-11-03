@@ -174,15 +174,6 @@ static std::string questTypeName(game::GameHandler* gh, uint32_t type) {
 static const bool kQuestRowResolverInstalled =
     (game::questLogRowResolver() = &questLogRowForQuest, true);
 
-void openInterfaceQuestLog(game::GameHandler& gh, uint32_t questId) {
-    const int row = questLogRowForQuest(&gh, questId);
-    if (row > 0) {
-        gh.runInterfaceCommand("QuestLog_OpenToQuest(" + std::to_string(row) + ")");
-    } else {
-        gh.runInterfaceCommand("ToggleFrame(QuestLogFrame)");
-    }
-}
-
 namespace {
 
 /// The quest at a display index, or null when that row is a header or the index

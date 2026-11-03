@@ -481,10 +481,9 @@ void MovementHandler::handleClientControlUpdate(network::Packet& packet) {
             owner_.sendMovement(Opcode::MSG_MOVE_STOP_STRAFE);
             owner_.sendMovement(Opcode::MSG_MOVE_STOP_TURN);
             owner_.sendMovement(Opcode::MSG_MOVE_STOP_SWIM);
-            owner_.addSystemChatMessage("Movement disabled by server.");
+            // The events alone; the stock client has no line for it.
             owner_.fireAddonEvent("PLAYER_CONTROL_LOST", {});
         } else if (changed && allowMovement) {
-            owner_.addSystemChatMessage("Movement re-enabled.");
             owner_.fireAddonEvent("PLAYER_CONTROL_GAINED", {});
         }
     }
@@ -3816,7 +3815,7 @@ void MovementHandler::followTarget() {
         targetName = unit->getName();
     }
 
-    owner_.addSystemChatMessage("Now following " + targetName + ".");
+    // AUTOFOLLOW_BEGIN alone, whose status frame says it (Wow.exe 0x72B4A0).
     LOG_INFO("Following target: ", targetName, " (GUID: 0x", std::hex, owner_.getTargetGuid(), std::dec, ")");
     // The name goes with it: the status text is formatted from this argument,
     // and without one it formats a nil.
@@ -3835,7 +3834,6 @@ void MovementHandler::cancelFollow() {
     if (owner_.autoFollowCallbackRef()) {
         owner_.autoFollowCallbackRef()(nullptr);
     }
-    owner_.addSystemChatMessage("You stop following.");
     owner_.fireAddonEvent("AUTOFOLLOW_END", {});
 }
 

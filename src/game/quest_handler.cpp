@@ -1,6 +1,7 @@
 #include "ui/framexml_takeover.hpp"
 #include "game/item_text.hpp"
 #include "game/quest_handler.hpp"
+#include "game/global_strings.hpp"
 #include "game/quest_query_layout.hpp"
 #include "game/game_handler.hpp"
 #include "game/game_utils.hpp"
@@ -643,11 +644,9 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
 
     // ---- SMSG_QUESTLOG_FULL ----
     table[Opcode::SMSG_QUESTLOG_FULL] = [this](network::Packet& /*packet*/) {
-        const std::string msg = "Your quest log is full (" +
-            std::to_string(maxQuestLogSlots()) + " quests). Abandon a quest to make room.";
-        owner_.addUIError(msg);
-        owner_.addSystemChatMessage(msg);
-        playQuestFailedSound(owner_);
+        // ERR_QUEST_LOG_FULL, the red error with igQuestFailed (Wow.exe
+        // 0x6D7F10, opcode 0x195).
+        owner_.displayGameMessage("ERR_QUEST_LOG_FULL", "Your quest log is full.");
         // Roll back the optimistic local entries the server refused; without
         // this the local log drifts past the server cap with phantom quests.
         bool removed = false;
@@ -776,22 +775,30 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
             std::string questTitle;
             for (const auto& q : questLog_)
                 if (q.questId == questId && !q.title.empty()) { questTitle = q.title; break; }
-            const char* reasonStr = nullptr;
-            switch (reason) {
-                case 1: reasonStr = "failed conditions"; break;
-                case 2: reasonStr = "inventory full"; break;
-                case 3: reasonStr = "too far away"; break;
-                case 4: reasonStr = "another quest is blocking"; break;
-                case 5: reasonStr = "wrong time of day"; break;
-                case 6: reasonStr = "wrong race"; break;
-                case 7: reasonStr = "wrong class"; break;
+            if (questTitle.empty() && currentQuestDetails_.questId == questId)
+                questTitle = currentQuestDetails_.title;
+            // The InventoryResult the turn-in or accept failed on, as Wow.exe
+            // (0x6CDA70) words it: a full bag (4, 16, 50) is
+            // ERR_QUEST_FAILED_BAG_FULL_S and ERR_INV_FULL, a unique item
+            // (17) ERR_QUEST_FAILED_MAX_COUNT_S, too many dailies (74)
+            // ERR_QUEST_FAILED_TOO_MANY_DAILY_QUESTS_I, anything else
+            // ERR_QUEST_FAILED_S - but not for a quest still in the log.
+            if (reason == 4 || reason == 16 || reason == 50) {
+                if (!questTitle.empty())
+                    owner_.displayGameMessage("ERR_QUEST_FAILED_BAG_FULL_S", questTitle + " failed: Inventory is full.", {questTitle});
+                owner_.displayGameMessage("ERR_INV_FULL", "Inventory is full.");
+            } else if (reason == 17) {
+                if (!questTitle.empty())
+                    owner_.displayGameMessage("ERR_QUEST_FAILED_MAX_COUNT_S", questTitle + " failed: Duplicate item found.", {questTitle});
+            } else if (reason == 74) {
+                owner_.displayGameMessage("ERR_QUEST_FAILED_TOO_MANY_DAILY_QUESTS_I",
+                    "You have already completed 25 daily quests today", {"25"});
+            } else {
+                bool inLog = false;
+                for (const auto& q : questLog_) if (q.questId == questId) { inLog = true; break; }
+                if (!inLog && !questTitle.empty())
+                    owner_.displayGameMessage("ERR_QUEST_FAILED_S", questTitle + " failed.", {questTitle});
             }
-            std::string msg = questTitle.empty() ? "Quest" : ('"' + questTitle + '"');
-            msg += " failed";
-            if (reasonStr) msg += std::string(": ") + reasonStr;
-            msg += '.';
-            owner_.addSystemChatMessage(msg);
-            playQuestFailedSound(owner_);
         }
     };
 
@@ -835,10 +842,32 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
                     clearPendingQuestAccept(questId);
                 }
             }
-            // Only show error to user for real errors (not informational messages)
-            if (failReason != 13 && failReason != 18) {  // Don't spam "already on/completed"
-                owner_.addSystemChatMessage(std::string("Quest unavailable: ") + reasonStr);
-                playQuestFailedSound(owner_);
+            // QuestFailedReason as Wow.exe (0x6CD7C0) words it, chat lines
+            // with igQuestFailed; every reason says something, the ones it
+            // does not name ERR_QUEST_NEED_PREREQS.
+            struct Answer { uint32_t code; const char* key; const char* text; };
+            static constexpr Answer kAnswers[] = {
+                {1,  "ERR_QUEST_FAILED_LOW_LEVEL", "You are not high enough level for that quest."},
+                {6,  "ERR_QUEST_FAILED_WRONG_RACE", "That quest is not available to your race."},
+                {7,  "ERR_QUEST_ALREADY_DONE", "You have completed that quest."},
+                {12, "ERR_QUEST_ONLY_ONE_TIMED", "You can only be on one timed quest at a time."},
+                {13, "ERR_QUEST_ALREADY_ON", "You are already on that quest."},
+                {16, "ERR_QUEST_FAILED_EXPANSION", "This quest requires an expansion enabled account."},
+                {18, "ERR_QUEST_ALREADY_ON", "You are already on that quest."},
+                {21, "ERR_QUEST_FAILED_MISSING_ITEMS", "You don't have the required items with you.  Check storage."},
+                {23, "ERR_QUEST_FAILED_NOT_ENOUGH_MONEY", "You don't have enough money for that quest."},
+                {27, "ERR_QUEST_FAILED_CAIS", "You cannot complete quests once you have reached tired time."},
+                {29, "ERR_QUEST_ALREADY_DONE_DAILY", "You have completed that daily quest today."},
+            };
+            (void)reasonStr;
+            if (failReason == 26) {
+                owner_.displayGameMessage("ERR_QUEST_FAILED_TOO_MANY_DAILY_QUESTS_I",
+                    "You have already completed 25 daily quests today", {"25"});
+            } else {
+                const Answer* hit = nullptr;
+                for (const auto& a : kAnswers) if (a.code == failReason) hit = &a;
+                if (hit) owner_.displayGameMessage(hit->key, hit->text);
+                else owner_.displayGameMessage("ERR_QUEST_NEED_PREREQS", "You don't meet the requirements for that quest.");
             }
         }
     };
@@ -847,6 +876,11 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_QUESTGIVER_QUEST_COMPLETE] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             uint32_t questId = packet.readUInt32();
+            // The rewards after the id - XP, money, honor, talent points,
+            // arena points (AzerothCore SendQuestReward) - each said by
+            // Wow.exe after ERR_QUEST_COMPLETE_S (0x6D1110 -> 0x6D0E10).
+            uint32_t rewards[5] = {0, 0, 0, 0, 0};
+            for (auto& r : rewards) if (packet.hasRemaining(4)) r = packet.readUInt32();
             LOG_INFO("Quest completed: questId=", questId);
             if (pendingTurnInQuestId_ == questId) {
                 pendingTurnInQuestId_ = 0;
@@ -855,11 +889,30 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
             }
             for (auto it = questLog_.begin(); it != questLog_.end(); ++it) {
                 if (it->questId == questId) {
-                    // The turn-in's line in chat, which every one of the
-                    // supported clients writes there and nowhere else.
-                    if (!it->title.empty()) {
-                        owner_.addSystemChatMessage(it->title + " completed.");
+                    // ERR_QUEST_COMPLETE_S, then the rewards: ERR_QUEST_REWARD_EXP_I,
+                    // ERR_QUEST_REWARD_MONEY_S, COMBATLOG_HONORAWARD (honor
+                    // line), LEVEL_UP_CHAR_POINTS, COMBATLOG_ARENAPOINTSAWARD.
+                    if (!it->title.empty())
+                        owner_.displayGameMessage("ERR_QUEST_COMPLETE_S", it->title + " completed.", {it->title});
+                    if (rewards[0] > 0)
+                        owner_.displayGameMessage("ERR_QUEST_REWARD_EXP_I",
+                            "Experience gained: " + std::to_string(rewards[0]) + ".", {std::to_string(rewards[0])});
+                    if (static_cast<int32_t>(rewards[1]) > 0) {
+                        const std::string m = owner_.formatMoneyText(rewards[1]);
+                        owner_.displayGameMessage("ERR_QUEST_REWARD_MONEY_S", "Received " + m + ".", {m});
                     }
+                    if (static_cast<int32_t>(rewards[2]) > 0) {
+                        std::string fmt = globalString(owner_.services().assetManager, "COMBATLOG_HONORAWARD");
+                        if (fmt.empty()) fmt = "You have been awarded %d honor points.";
+                        owner_.addLocalChatLine(ChatType::COMBAT_HONOR_GAIN,
+                                                formatGlobalString(fmt, {std::to_string(rewards[2])}));
+                    }
+                    if (static_cast<int32_t>(rewards[3]) > 0)
+                        owner_.addGlobalStringChatLine("LEVEL_UP_CHAR_POINTS",
+                            "You have gained %d talent |4point:points;.", {std::to_string(rewards[3])});
+                    if (static_cast<int32_t>(rewards[4]) > 0)
+                        owner_.addGlobalStringChatLine("COMBATLOG_ARENAPOINTSAWARD",
+                            "You have been awarded %d arena points.", {std::to_string(rewards[4])});
                     // igQuestListComplete, which Wow.exe plays from its own
                     // SMSG_QUESTGIVER_QUEST_COMPLETE handler (0x6d0e10)
                     if (auto* ac = owner_.services().audioCoordinator) {
@@ -975,7 +1028,8 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
             for (auto& quest : questLog_) {
                 if (quest.questId == questId) {
                     quest.complete = true;
-                    owner_.addSystemChatMessage("Quest Complete: " + quest.title);
+                    // As the real SMSG_QUESTUPDATE_COMPLETE path says it.
+                    owner_.displayGameMessage("ERR_QUEST_UNKNOWN_COMPLETE", "Objective Complete.");
                     break;
                 }
             }
@@ -1034,7 +1088,9 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
                     maybeCompletedObjective = true;
                 }
             }
-            owner_.addSystemChatMessage("Quest item: " + buildItemLink(itemId, questItemQuality, itemLabel) + " (" + std::to_string(count) + ")");
+            // No line here: the "%s: %d/%d" text (ERR_QUEST_ADD_ITEM_SII) is
+            // said from the bag count, as Wow.exe does (0x6D7C30).
+            (void)questItemQuality; (void)itemLabel;
 
             if (owner_.addonEventCallbackRef() && updatedAny) {
                 // Once per quest this item counts towards, each named by its
@@ -1077,8 +1133,12 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
             for (auto& quest : questLog_) {
                 if (quest.questId == questId) {
                     quest.killCounts[entry] = {count, reqCount};
-                    owner_.addSystemChatMessage(quest.title + ": " + std::to_string(count) +
-                                                 "/" + std::to_string(reqCount));
+                    // The kill text the stock ADD_KILL path says.
+                    const std::string victim = owner_.getCachedCreatureName(entry);
+                    if (!victim.empty())
+                        owner_.displayGameMessage("ERR_QUEST_ADD_KILL_SII",
+                            victim + " slain: " + std::to_string(count) + "/" + std::to_string(reqCount),
+                            {victim, std::to_string(count), std::to_string(reqCount)});
                     announceQuestLogChanged(questId);
                     break;
                 }
@@ -1168,11 +1228,10 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
         }
         if (removed) {
             owner_.setQuestTracked(questId, false);
-            if (!removedTitle.empty()) {
-                owner_.addSystemChatMessage("Quest removed: " + removedTitle);
-            } else {
-                owner_.addSystemChatMessage("Quest removed (ID " + std::to_string(questId) + ").");
-            }
+            // ERR_QUEST_FORCE_REMOVED_S naming the quest (Wow.exe 0x6D8370).
+            if (!removedTitle.empty())
+                owner_.displayGameMessage("ERR_QUEST_FORCE_REMOVED_S",
+                    "The quest " + removedTitle + " has been removed from your quest log", {removedTitle});
             if (owner_.addonEventCallbackRef()) {
                 owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
                 owner_.addonEventCallbackRef()("UNIT_QUEST_LOG_CHANGED", {"player"});
@@ -1666,11 +1725,7 @@ void QuestHandler::acceptQuest() {
     // with a clearer message and no optimistic local entry to roll back.
     const int maxSlots = maxQuestLogSlots();
     if (static_cast<int>(questLog_.size()) >= maxSlots) {
-        const std::string msg = "Your quest log is full (" + std::to_string(maxSlots) +
-                                " quests). Abandon a quest to make room.";
-        owner_.addUIError(msg);
-        owner_.addSystemChatMessage(msg);
-        playQuestFailedSound(owner_);  // ERR_QUEST_LOG_FULL's sound, not Error.wav
+        owner_.displayGameMessage("ERR_QUEST_LOG_FULL", "Your quest log is full.");
         return;
     }
 

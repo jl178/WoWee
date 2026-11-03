@@ -59,13 +59,6 @@ bool hasText(Session& s, CombatTextEntry::Type type, uint32_t spellId) {
     });
 }
 
-bool chatHas(Session& s, const std::string& text) {
-    const auto& history = s.handler().getChatHistory();
-    return std::any_of(history.begin(), history.end(), [&](const auto& m) {
-        return m.message.find(text) != std::string::npos;
-    });
-}
-
 }  // namespace
 
 TEST_CASE("an interrupt in the execute log is effect 68", "[replay][execute]") {
@@ -106,6 +99,8 @@ TEST_CASE("feeding a pet is effect 101, with a packed caster on TBC too", "[repl
         Packet p = executeLog(kPlayer, 6991, kFeedPet);
         p.writeUInt32(4540);
         s.receive(p);
-        CHECK(chatHas(s, "You feed your pet"));
+        // The combat log's alone in the stock client, never a chat line;
+        // read whole, the packet leaves nothing behind.
+        CHECK(s.handler().getChatHistory().empty());
     }
 }
