@@ -67,7 +67,15 @@ public:
     void toggle() { enabled = !enabled; }
 
     void setViewRadius(float radius) { viewRadius = radius; }
+    /// rotateMinimap: the map turns so the player's facing is up. The name is
+    /// historical - it is the player's facing, not the camera's, that the
+    /// stock client turns it by (0x0057C6A0 reads the active unit's facing).
     void setRotateWithCamera(bool rotate) { rotateWithCamera = rotate; }
+    /// The player's facing in the client's own terms (0 north, a quarter turn
+    /// counter-clockwise west), handed in every frame by the marker pass,
+    /// which has the game state. Used only while rotating.
+    void setBearing(float facing) { bearing_ = facing; }
+    [[nodiscard]] float bearing() const { return rotateWithCamera ? bearing_ : 0.0f; }
     [[nodiscard]] bool isRotateWithCamera() const { return rotateWithCamera; }
 
     void setSquareShape(bool square) { squareShape = square; }
@@ -93,12 +101,14 @@ public:
     /// Sets the level of whichever table is in use, indoor or outdoor.
     void setZoomLevel(int level) {
         int& active = indoors_ ? insideZoomLevel_ : zoomLevel_;
-        active = std::clamp(level, 0, kZoomLevels - 1);
+        // 0x007F3AE0 compares unsigned: anything above 4, negatives included,
+        // is 5.
+        active = (static_cast<unsigned>(level) > 4u) ? kZoomLevels - 1 : level;
         viewRadius = indoors_ ? kInsideZoomRadius[active] : kZoomRadius[active];
     }
     [[nodiscard]] int getZoomLevel() const { return indoors_ ? insideZoomLevel_ : zoomLevel_; }
-    void zoomIn() { setZoomLevel(getZoomLevel() + 1); }
-    void zoomOut() { setZoomLevel(getZoomLevel() - 1); }
+    void zoomIn() { if (getZoomLevel() < kZoomLevels - 1) setZoomLevel(getZoomLevel() + 1); }
+    void zoomOut() { if (getZoomLevel() > 0) setZoomLevel(getZoomLevel() - 1); }
 
     /// The WMO the player is in, for the indoor map. See wmo_minimap.hpp.
     struct WmoView {
@@ -248,6 +258,7 @@ private:
     float wmoCompositeSpanUsed_ = 1.0f;
     bool enabled = true;
     bool rotateWithCamera = false;
+    float bearing_ = 0.0f;
     bool squareShape = false;
     float opacity_ = 1.0f;
     bool  haveRect_ = false;

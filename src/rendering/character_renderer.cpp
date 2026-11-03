@@ -266,6 +266,13 @@ struct CharMaterialUBO {
     // The M2 blend mode: Mod and Mod2x take no light and fog toward white
     // and grey, additive toward black (0xA45390).
     int32_t blendMode;
+    // The model's colour (CM2Model +0x180, Wow.exe 0x82E140): it scales the
+    // sun's diffuse light on the model, not the ambient. A spell's
+    // SpellVisualKit CharProc 1 or 13 sets it on a unit (0x720DB0) - the
+    // blue of a Frostbolt's chill, Immolate's orange.
+    float diffuseTintR;
+    float diffuseTintG;
+    float diffuseTintB;
 };
 
 // GPU vertex struct with tangent (expanded from M2Vertex for normal mapping)
@@ -2497,7 +2504,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
             }
             const auto& seq = inst.cachedModel->data.sequences[inst.currentSequenceIndex];
             const float prevAnimTime = inst.animationTime;
-            inst.animationTime += deltaTime * 1000.0f * inst.animationSpeed;
+            inst.animationTime += inst.animationFrozen ? 0.0f : deltaTime * 1000.0f * inst.animationSpeed;
 
             // Sound events ($CSD, $CSS, $CAH, $AHn, $FDn, $WNG) and $FSD
             // footfalls whose timestamps the sequence just passed:
@@ -2956,6 +2963,76 @@ bool CharacterRenderer::getCastReleaseEvent(uint32_t instanceId, uint32_t animat
         return true;
     }
     return false;
+}
+
+uint32_t CharacterRenderer::createWeaponCopy(uint32_t instanceId, uint32_t handAttachment,
+                                             const glm::vec3& position) {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return 0;
+    uint32_t modelId = 0;
+    for (const auto& wa : it->second.weaponAttachments)
+        if (wa.attachmentId == handAttachment) { modelId = wa.weaponModelId; break; }
+    if (modelId == 0) return 0;
+    // The textures live on the model (attachWeapon), so a new instance of it
+    // is dressed the same.
+    const uint32_t copy = createInstance(modelId, position);
+    if (auto cIt = instances.find(copy); cIt != instances.end() && cIt->second.cachedModel) {
+        const auto& seqs = cIt->second.cachedModel->data.sequences;
+        if (!seqs.empty()) {
+            cIt->second.currentSequenceIndex =
+                anim::defaultSequenceIndex(seqs, cIt->second.cachedModel->data.bones);
+            cIt->second.currentAnimationId = seqs[cIt->second.currentSequenceIndex].id;
+        }
+    }
+    return copy;
+}
+
+size_t CharacterRenderer::getWeaponAttachmentCount(uint32_t instanceId) const {
+    auto it = instances.find(instanceId);
+    return it != instances.end() ? it->second.weaponAttachments.size() : 0;
+}
+
+bool CharacterRenderer::getWeaponTrailPoints(uint32_t instanceId, size_t index, glm::vec3& bottom,
+                                             glm::vec3& top) {
+    auto it = instances.find(instanceId);
+    if (it == instances.end() || index >= it->second.weaponAttachments.size()) return false;
+    // Only a weapon in the hand swings (0x715BA0 asks for the drawn state).
+    const uint32_t att = it->second.weaponAttachments[index].attachmentId;
+    if (att != 1 && att != 2) return false;
+    auto wIt = instances.find(it->second.weaponAttachments[index].weaponInstanceId);
+    if (wIt == instances.end()) return false;
+    auto mIt = models.find(wIt->second.modelId);
+    if (mIt == models.end()) return false;
+    const auto& model = mIt->second.data;
+    if (model.weaponTrailBottom.bone == UINT32_MAX || model.weaponTrailTop.bone == UINT32_MAX)
+        return false;
+    // The pose of now, as getAttachmentTransform gives it, for the unit and
+    // the weapon riding its hand.
+    refreshStalePose(it->second);
+    refreshStalePose(wIt->second);
+    const auto& w = wIt->second;
+    const glm::mat4 modelMat = w.hasOverrideModelMatrix ? w.overrideModelMatrix : getModelMatrix(w);
+    auto place = [&](const pipeline::M2Model::WeaponTrailPoint& p) {
+        glm::mat4 bone(1.0f);
+        if (p.bone < w.boneMatrices.size()) bone = w.boneMatrices[p.bone];
+        return glm::vec3(modelMat * bone * glm::vec4(p.position, 1.0f));
+    };
+    bottom = place(model.weaponTrailBottom);
+    top = place(model.weaponTrailTop);
+    return true;
+}
+
+void CharacterRenderer::setInstanceAnimationFrozen(uint32_t instanceId, bool frozen, float atMs) {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return;
+    auto& inst = it->second;
+    if (frozen && atMs >= 0.0f && inst.cachedModel && inst.currentSequenceIndex >= 0 &&
+        inst.currentSequenceIndex < static_cast<int>(inst.cachedModel->data.sequences.size())) {
+        const float dur = static_cast<float>(
+            inst.cachedModel->data.sequences[static_cast<size_t>(inst.currentSequenceIndex)].duration);
+        inst.animationTime = dur > 0.0f ? std::min(atMs, dur) : atMs;
+    }
+    inst.animationFrozen = frozen;
 }
 
 uint32_t CharacterRenderer::getAnimationDurationMs(uint32_t instanceId, uint32_t animationId) const {
@@ -3831,6 +3908,9 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 matData.combiner = effect ? static_cast<int32_t>(effect->combiner) : 1;
                 matData.texStages = effect ? effect->stages : 1;
                 matData.blendMode = blendMode;
+                matData.diffuseTintR = instance.diffuseTint.r;
+                matData.diffuseTintG = instance.diffuseTint.g;
+                matData.diffuseTintB = instance.diffuseTint.b;
 
                 // The base humanoid mesh samples a mirrored character atlas,
                 // with the face sitting directly beside a UV seam. Parallax
@@ -3999,6 +4079,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             matData.hairMaterial = 0;
             matData.ambientMul = unitAmbientMul_;
             matData.highlight = 0.0f;
+            matData.diffuseTintR = matData.diffuseTintG = matData.diffuseTintB = 1.0f;
             if (usePreviewSimpleShader) {
                 matData.enableNormalMap = 0;
                 matData.enablePOM = kPreviewSimpleTextureMode;
@@ -4644,6 +4725,11 @@ void CharacterRenderer::startFadeIn(uint32_t instanceId, float durationSeconds) 
     it->second.opacity = 0.0f;
     it->second.fadeInTime = 0.0f;
     it->second.fadeInDuration = durationSeconds;
+}
+
+void CharacterRenderer::setInstanceDiffuseTint(uint32_t instanceId, const glm::vec3& tint) {
+    auto it = instances.find(instanceId);
+    if (it != instances.end()) it->second.diffuseTint = tint;
 }
 
 void CharacterRenderer::setInstanceOpacity(uint32_t instanceId, float opacity) {

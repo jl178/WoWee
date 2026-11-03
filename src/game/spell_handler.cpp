@@ -367,16 +367,68 @@ void SpellHandler::playSpellImpactSound(uint32_t spellId) {
                      audio::SpellSoundManager::SpellPower::MEDIUM);
 }
 
+void SpellHandler::ensureSpellVisualResolvers() {
+    auto* renderer = owner_.services().renderer;
+    auto* svs = renderer ? renderer->getSpellVisualSystem() : nullptr;
+    if (!svs || svs->hasUnitResolvers()) return;
+    svs->setUnitResolvers(
+        [this](uint64_t g) { return owner_.resolveUnitRenderInstance(g); },
+        [this](uint64_t g, glm::vec3& feet) { return resolveUnitPosition(g, feet); });
+    svs->setChannelTargetResolver([this](uint64_t caster) { return resolveChannelTarget(caster); });
+}
+
+uint64_t SpellHandler::resolveChannelTarget(uint64_t casterGuid) {
+    if (casterGuid == 0) return 0;
+    auto entity = owner_.getEntityManager().getEntity(casterGuid);
+    if (entity) {
+        const auto& fields = entity->getFields();
+        const uint16_t lo = fieldIndex(UF::UNIT_FIELD_CHANNEL_OBJECT_LO);
+        const uint16_t hi = fieldIndex(UF::UNIT_FIELD_CHANNEL_OBJECT_HI);
+        if (lo != 0xFFFF) {
+            auto loIt = fields.find(lo);
+            uint64_t guid = loIt != fields.end() ? loIt->second : 0;
+            if (hi != 0xFFFF)
+                if (auto hiIt = fields.find(hi); hiIt != fields.end())
+                    guid |= static_cast<uint64_t>(hiIt->second) << 32;
+            if (guid != 0) return guid;
+        }
+    }
+    // A table without the field, or a channel the update has not reached:
+    // the unit's target, which a channel at someone is cast at.
+    if (casterGuid == owner_.getPlayerGuid()) return owner_.getTargetGuid();
+    return entity ? unitTargetGuid(*entity) : 0;
+}
+
+float SpellHandler::resolveSpellAreaRadius(uint32_t spellId) {
+    static std::unordered_map<uint32_t, float> cache;
+    if (auto it = cache.find(spellId); it != cache.end()) return it->second;
+    float radius = 0.0f;
+    auto* am = owner_.services().assetManager;
+    if (am && am->isInitialized()) {
+        auto spells = am->loadDBC("Spell.dbc");
+        auto radii = am->loadDBC("SpellRadius.dbc");
+        // 3.3.5a Spell.dbc: EffectRadiusIndex[3] at 92-94 (234 columns).
+        // SpellRadius.dbc: 0 ID, 1 Radius, 2 RadiusPerLevel, 3 RadiusMax.
+        if (spells && spells->isLoaded() && spells->getFieldCount() == 234 && radii &&
+            radii->isLoaded() && radii->getFieldCount() >= 2) {
+            const int32_t row = spells->findRecordById(spellId);
+            for (uint32_t k = 0; row >= 0 && k < 3; ++k) {
+                const uint32_t idx = spells->getUInt32(static_cast<uint32_t>(row), 92 + k);
+                const int32_t rr = idx ? radii->findRecordById(idx) : -1;
+                if (rr >= 0) radius = std::max(radius, radii->getFloat(static_cast<uint32_t>(rr), 1));
+            }
+        }
+    }
+    cache[spellId] = radius;
+    return radius;
+}
+
 void SpellHandler::syncAuraStateVisuals(uint64_t guid, const std::vector<AuraSlot>& auras) {
     if (guid == 0) return;
     auto* renderer = owner_.services().renderer;
     auto* svs = renderer ? renderer->getSpellVisualSystem() : nullptr;
     if (!svs) return;
-    if (!svs->hasUnitResolvers()) {
-        svs->setUnitResolvers(
-            [this](uint64_t g) { return owner_.resolveUnitRenderInstance(g); },
-            [this](uint64_t g, glm::vec3& feet) { return resolveUnitPosition(g, feet); });
-    }
+    ensureSpellVisualResolvers();
     std::vector<uint32_t> visuals;
     visuals.reserve(auras.size());
     owner_.loadSpellNameCache();
@@ -435,7 +487,7 @@ void SpellHandler::triggerGroundAreaVisual(const SpellGoData& data, uint32_t vis
         }
     }
     svs->playSpellAreaVisual(visualId, ground, duration, channel ? data.casterUnit : 0,
-                             /*impactNow=*/!missile);
+                             /*impactNow=*/!missile, resolveSpellAreaRadius(data.spellId));
 }
 
 // ---- Spell visual effect helpers ----
@@ -558,6 +610,7 @@ void SpellHandler::triggerCastVisual(uint32_t spellId, uint64_t casterGuid, uint
     if (!resolveUnitPosition(casterGuid, casterPos)) return;
     LOG_DEBUG("SpellVisual: build-up spell=", spellId, " visual=", visualId, " caster=0x",
               std::hex, casterGuid, std::dec, " ms=", castTimeMs, channel ? " channel" : "");
+    ensureSpellVisualResolvers();
     svs->playSpellVisualPrecast(visualId, casterPos, castTimeMs,
                                 owner_.resolveUnitRenderInstance(casterGuid), casterGuid, channel);
 }
@@ -582,7 +635,7 @@ void SpellHandler::triggerImpactVisual(uint32_t spellId, uint64_t targetGuid, bo
     if (!resolveUnitPosition(targetGuid, targetPos)) return;
     // On the target itself, at the kit's slots (chest, head, base...).
     svs->playSpellVisual(visualId, targetPos, /*useImpactKit=*/true,
-                         owner_.resolveUnitRenderInstance(targetGuid), targetIsCaster);
+                         owner_.resolveUnitRenderInstance(targetGuid), targetIsCaster, targetGuid);
 }
 
 void SpellHandler::launchRangedWeaponProjectile(uint32_t spellId, uint64_t targetGuid) {
@@ -2511,6 +2564,20 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
         return spellclass::isMeleeRange(getSpellMaxRange(data.spellId));
     }();
 
+    // A triggered spell (CAST_FLAG_PENDING) going off while its caster
+    // channels or casts something else - Hellfire's and Blizzard's ticks,
+    // Arcane Missiles' bolts, a proc mid-cast - is not the end of that cast.
+    // It used to be taken for one: the cast state was cleared and the
+    // channel animation stopped at the first tick, so a channelling caster
+    // stood idle with the channel still running.
+    const bool triggeredMidCast = [&]() {
+        if ((data.castFlags & 0x1u) == 0) return false;
+        if (data.casterUnit == owner_.getPlayerGuid())
+            return casting_ && currentCastSpellId_ != 0 && currentCastSpellId_ != data.spellId;
+        auto it = unitCastStates_.find(data.casterUnit);
+        return it != unitCastStates_.end() && it->second.spellId != data.spellId;
+    }();
+
     if (data.casterUnit == owner_.getPlayerGuid()) {
         if (data.spellId == nextSwingSpellId_) nextSwingSpellId_ = 0;
         owner_.loadSpellNameCache();
@@ -2642,11 +2709,13 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
                     " lastGoGuid=0x", std::hex, owner_.lastInteractedGoGuidRef(),
                     " pendingGoGuid=0x", owner_.pendingGameObjectInteractGuidRef(), std::dec);
 
-        casting_ = false;
-        castIsChannel_ = false;
-        currentCastSpellId_ = 0;
-        castTimeRemaining_ = 0.0f;
-        castTimeTotal_ = 0.0f;
+        if (!triggeredMidCast) {
+            casting_ = false;
+            castIsChannel_ = false;
+            currentCastSpellId_ = 0;
+            castTimeRemaining_ = 0.0f;
+            castTimeTotal_ = 0.0f;
+        }
 
         // Gather node looting: re-send CMSG_LOOT now that the cast completed.
         if (wasInTimedCast && owner_.lastInteractedGoGuidRef() != 0) {
@@ -2659,11 +2728,12 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
         // and suppresses CMSG_CANCEL_CAST for ALL subsequent spell casts.
         owner_.pendingGameObjectInteractGuidRef() = 0;
 
-        if (owner_.spellCastAnimCallbackRef() && !rangedWeaponAttack && !restorationLoop) {
+        if (owner_.spellCastAnimCallbackRef() && !rangedWeaponAttack && !restorationLoop &&
+            !triggeredMidCast) {
             owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), false, false, SpellCastType::OMNI);
         }
 
-        if (owner_.addonEventCallbackRef() && !rangedWeaponAttack)
+        if (owner_.addonEventCallbackRef() && !rangedWeaponAttack && !triggeredMidCast)
             owner_.addonEventCallbackRef()("UNIT_SPELLCAST_STOP", spellcastArgs("player", data.spellId));
 
         // Craft queue: re-cast if more crafts remaining
@@ -2715,7 +2785,7 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
             owner_.spellCastAnimCallbackRef()(data.casterUnit, true, false, npcGoType);
         }
         if (!abilityAnim && (wasTrackedCast || !triggered) && !rangedWeaponAttack &&
-            owner_.spellCastAnimCallbackRef()) {
+            !triggeredMidCast && owner_.spellCastAnimCallbackRef()) {
             owner_.spellCastAnimCallbackRef()(data.casterUnit, false, false,
                 wasTrackedCast ? castIt->second.castType : npcGoType);
         }
@@ -2726,8 +2796,8 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
         // listener's head.
     }
 
-    // Clear unit cast bar
-    unitCastStates_.erase(data.casterUnit);
+    // Clear unit cast bar - not for a triggered spell under another cast.
+    if (!triggeredMidCast) unitCastStates_.erase(data.casterUnit);
 
     // Miss combat text
     if (!data.missTargets.empty()) {
@@ -2781,8 +2851,13 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
             if (resolveUnitPosition(data.casterUnit, casterPos)) {
                 if (auto* renderer = owner_.services().renderer) {
                     if (auto* svs = renderer->getSpellVisualSystem()) {
+                        // The caster and the hit list: a cast kit's chain
+                        // effect runs through them (Chain Lightning, Chain Heal).
+                        ensureSpellVisualResolvers();
                         svs->playSpellVisual(visualId, casterPos, /*useImpactKit=*/false,
-                                             owner_.resolveUnitRenderInstance(data.casterUnit));
+                                             owner_.resolveUnitRenderInstance(data.casterUnit),
+                                             /*targetIsCaster=*/false, data.casterUnit,
+                                             &data.hitTargets);
                     }
                 }
             }

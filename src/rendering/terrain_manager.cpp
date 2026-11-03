@@ -27,6 +27,9 @@
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/wmo_group_path.hpp"
 #include "pipeline/terrain_mesh.hpp"
+#include "pipeline/wdt_loader.hpp"
+#include "rendering/stock_terrain.hpp"
+#include "core/env_flag.hpp"
 #include "core/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -185,7 +188,60 @@ bool TerrainManager::initialize(pipeline::AssetManager* assets, TerrainRenderer*
     return true;
 }
 
+namespace {
+/// WOWEE_TERRAIN_SPECULAR=0: the plain tilesets and no highlight, as the
+/// stock client with its "Terrain highlights" (`specular`) option off.
+const bool kTerrainSpecular = core::envFlagEnabled("WOWEE_TERRAIN_SPECULAR", true);
+}  // namespace
+
+void TerrainManager::setMapName(const std::string& name) {
+    mapName = name;
+    if (mapWideDataFor_ != mapName) loadMapWideData();
+}
+
+void TerrainManager::loadMapWideData() {
+    if (!assetManager || !terrainRenderer) return;  // update() comes back for it
+    mapWideDataFor_ = mapName;
+    const std::string base = "World\\Maps\\" + mapName + "\\" + mapName;
+    // MPHD 0x4 decides how the layers blend (stock_terrain::layerWeights):
+    // Northrend has it, the older continents do not.
+    uint32_t mphd = 0;
+    const std::vector<uint8_t> wdt = assetManager->readFile(base + ".wdt");
+    if (!wdt.empty()) mphd = pipeline::parseWDT(wdt).mphdFlags;
+    mapBigAlpha_.store((mphd & stock_terrain::kMphdBigAlpha) != 0);
+    // The far mountains: the WDL's low-detail heights, drawn in the fog
+    // colour past the far clip (TerrainHorizon).
+    std::vector<stock_terrain::WdlTile> wdl;
+    const std::vector<uint8_t> wdlData = assetManager->readFile(base + ".wdl");
+    if (!wdlData.empty()) wdl = stock_terrain::parseWdl(wdlData);
+    terrainRenderer->setHorizonTiles(wdl);
+    LOG_INFO("Terrain map data for ", mapName, ": MPHD 0x", std::hex, mphd, std::dec,
+             ", ", wdl.size(), " WDL tiles");
+}
+
+void TerrainManager::markTerrainMaterial(pipeline::TerrainMesh& mesh) const {
+    mesh.bigAlpha = mapBigAlpha_.load();
+    // With specular on the client loads every tileset as its `_s` file, whose
+    // alpha is the highlight mask (0x7d6980). Not every tileset has one.
+    if (!kTerrainSpecular) return;
+    mesh.specularTextures.resize(mesh.textures.size());
+    for (size_t i = 0; i < mesh.textures.size(); ++i) {
+        std::string sp = stock_terrain::specularTexturePath(mesh.textures[i]);
+        if (!sp.empty() && assetManager->fileExists(sp)) mesh.specularTextures[i] = std::move(sp);
+    }
+}
+
+std::vector<std::string> TerrainManager::drawnTerrainTextures(const pipeline::TerrainMesh& mesh) {
+    // The file the renderer draws for each: the `_s` tileset where there is one.
+    std::vector<std::string> out = mesh.textures;
+    for (size_t i = 0; i < out.size() && i < mesh.specularTextures.size(); ++i) {
+        if (!mesh.specularTextures[i].empty()) out[i] = mesh.specularTextures[i];
+    }
+    return out;
+}
+
 void TerrainManager::update(const Camera& camera, float deltaTime) {
+    if (mapWideDataFor_ != mapName) loadMapWideData();
     ZoneScopedN("TerrainManager::update");
     lastPhases_ = UpdatePhases{};
     if (!streamingEnabled || !assetManager || !terrainRenderer) {
@@ -536,6 +592,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
         LOG_ERROR("Failed to generate terrain mesh for tile [", x, ",", y, "]");
         return nullptr;
     }
+    markTerrainMaterial(mesh);
 
     if (!workerRunning.load()) return nullptr;
 
@@ -959,7 +1016,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
 
     // Pre-load terrain texture BLP data on background thread so finalizeTile
     // doesn't block the main thread with file I/O.
-    for (const auto& texPath : pending->terrain.textures) {
+    for (const auto& texPath : drawnTerrainTextures(pending->mesh)) {
         if (pending->preloadedTextures.find(texPath) != pending->preloadedTextures.end()) continue;
         // Terrain tilesets and M2 skins stay in their blocks - both are only
         // sampled, and M2's transparency now comes from the blocks too. The

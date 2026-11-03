@@ -34,7 +34,20 @@ struct TerrainParamsUBO {
     int32_t hasLayer1;
     int32_t hasLayer2;
     int32_t hasLayer3;
+    int32_t layerFlags[4];  // MCLY flags, | kSpecularMaskBit for a `_s` texture
+    int32_t chunkMode[4];   // big alpha, any unlit layer, any scrolling layer
 };
+
+/// terrain.vert's push block: the model matrix and the highlight's colour
+/// (rgb) and power (w, 0 when off).
+struct TerrainPush {
+    glm::mat4 model;
+    glm::vec4 specular;
+};
+
+/// Beside the MCLY flags in TerrainParams: the layer's texture is the `_s`
+/// tileset, whose alpha is the specular mask.
+constexpr int32_t kSpecularMaskBit = 0x10000;
 
 namespace {
 /// WOWEE_TERRAIN_MEGA_SLOTS=0 goes back to one bump allocation of the mega
@@ -201,7 +214,7 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     pushRange.offset = 0;
-    pushRange.size = sizeof(GPUPushConstants);
+    pushRange.size = sizeof(TerrainPush);
 
     std::vector<VkDescriptorSetLayout> setLayouts = { perFrameLayout, materialSetLayout };
     pipelineLayout = createPipelineLayout(device, setLayouts, { pushRange });
@@ -245,6 +258,17 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
                                        VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
     textureCacheBudgetBytes_ =
         envSizeMBOrDefault("WOWEE_TERRAIN_TEX_CACHE_MB", 4096) * 1024ull * 1024ull;
+
+    // The distant mountains. Without them the far clip is a hard edge of sky.
+    // WOWEE_TERRAIN_HORIZON=0 leaves them out, as the stock showLowDetail off.
+    if (core::envFlagEnabled("WOWEE_TERRAIN_HORIZON", true)) {
+        horizon_ = std::make_unique<TerrainHorizon>();
+        if (!horizon_->initialize(vkCtx, perFrameLayout)) {
+            LOG_WARNING("TerrainRenderer: no horizon pipeline");
+            horizon_->shutdown();
+            horizon_.reset();
+        }
+    }
     LOG_INFO("Terrain texture cache budget: ", textureCacheBudgetBytes_ / (1024 * 1024), " MB");
 
     // Allocate mega vertex/index buffers and indirect draw buffer.
@@ -361,6 +385,11 @@ void TerrainRenderer::recreatePipelines() {
 
     vertShader.destroy();
     fragShader.destroy();
+    if (horizon_) horizon_->recreatePipeline();
+}
+
+void TerrainRenderer::setHorizonTiles(const std::vector<stock_terrain::WdlTile>& tiles) {
+    if (horizon_) horizon_->setTiles(tiles);
 }
 
 void TerrainRenderer::shutdown() {
@@ -372,6 +401,10 @@ void TerrainRenderer::shutdown() {
 
     vkDeviceWaitIdle(device);
 
+    if (horizon_) {
+        horizon_->shutdown();
+        horizon_.reset();
+    }
     clear();
     // clear() defers chunk destruction, and no further frames will run to drain
     // the queue - so run it now, while the descriptor pools those lambdas free
@@ -448,7 +481,7 @@ bool TerrainRenderer::loadTerrain(const pipeline::TerrainMesh& mesh,
             calculateBoundingSphere(gpuChunk, chunk);
 
             // Load textures for this chunk
-            bindChunkTextures(gpuChunk, chunk, texturePaths, tileX, tileY, x, y);
+            bindChunkTextures(gpuChunk, chunk, mesh, texturePaths, tileX, tileY, x, y);
 
             gpuChunk.tileX = tileX;
             gpuChunk.tileY = tileY;
@@ -511,7 +544,7 @@ bool TerrainRenderer::loadTerrainIncremental(const pipeline::TerrainMesh& mesh,
 
         calculateBoundingSphere(gpuChunk, chunk);
 
-        bindChunkTextures(gpuChunk, chunk, texturePaths, tileX, tileY, cx, cy);
+        bindChunkTextures(gpuChunk, chunk, mesh, texturePaths, tileX, tileY, cx, cy);
 
         gpuChunk.tileX = tileX;
         gpuChunk.tileY = tileY;
@@ -561,8 +594,22 @@ bool TerrainRenderer::loadTerrainIncremental(const pipeline::TerrainMesh& mesh,
 
 void TerrainRenderer::bindChunkTextures(TerrainChunkGPU& gpuChunk,
                                         const pipeline::ChunkMesh& chunk,
+                                        const pipeline::TerrainMesh& mesh,
                                         const std::vector<std::string>& texturePaths,
                                         int tileX, int tileY, int chunkX, int chunkY) {
+    gpuChunk.bigAlpha = mesh.bigAlpha;
+    // The `_s` tileset where the manager found one (stock_terrain): the same
+    // colours, and the highlight mask in its alpha.
+    const auto layerTexture = [&](uint32_t texId, int32_t& flags) -> VkTexture* {
+        if (texId < mesh.specularTextures.size() && !mesh.specularTextures[texId].empty()) {
+            VkTexture* t = loadTexture(mesh.specularTextures[texId]);
+            if (t != whiteTexture.get()) {
+                flags |= kSpecularMaskBit;
+                return t;
+            }
+        }
+        return loadTexture(texturePaths[texId]);
+    };
     // The baked shadow rides the alpha-map path: the same 64x64 R8 texture,
     // the same cache and eviction. No map = the opaque fallback = lit.
     gpuChunk.shadowTexture = chunk.shadowLight.empty() ? nullptr
@@ -573,8 +620,9 @@ void TerrainRenderer::bindChunkTextures(TerrainChunkGPU& gpuChunk,
     }
 
     uint32_t baseTexId = chunk.layers[0].textureId;
+    gpuChunk.layerFlags[0] = static_cast<int32_t>(chunk.layers[0].flags & 0xffff);
     if (baseTexId < texturePaths.size()) {
-        gpuChunk.baseTexture = loadTexture(texturePaths[baseTexId]);
+        gpuChunk.baseTexture = layerTexture(baseTexId, gpuChunk.layerFlags[0]);
     } else {
         LOG_WARNING("Terrain[", tileX, ",", tileY, "] chunk[", chunkX, ",", chunkY,
                     "] base textureId ", baseTexId, " >= texturePaths size ",
@@ -588,8 +636,9 @@ void TerrainRenderer::bindChunkTextures(TerrainChunkGPU& gpuChunk,
         int li = static_cast<int>(i) - 1;
 
         VkTexture* layerTex = whiteTexture.get();
+        gpuChunk.layerFlags[i] = static_cast<int32_t>(layer.flags & 0xffff);
         if (layer.textureId < texturePaths.size()) {
-            layerTex = loadTexture(texturePaths[layer.textureId]);
+            layerTex = layerTexture(layer.textureId, gpuChunk.layerFlags[i]);
         } else {
             LOG_WARNING("Terrain[", tileX, ",", tileY, "] chunk[", chunkX, ",", chunkY,
                         "] layer[", i, "] textureId ", layer.textureId,
@@ -614,6 +663,17 @@ bool TerrainRenderer::createChunkParamsUBO(TerrainChunkGPU& gpuChunk) {
     params.hasLayer1 = gpuChunk.layerCount >= 1 ? 1 : 0;
     params.hasLayer2 = gpuChunk.layerCount >= 2 ? 1 : 0;
     params.hasLayer3 = gpuChunk.layerCount >= 3 ? 1 : 0;
+    int32_t anyUnlit = 0, anyScroll = 0;
+    for (int i = 0; i < 4; ++i) {
+        params.layerFlags[i] = gpuChunk.layerFlags[i];
+        if (i > gpuChunk.layerCount) continue;
+        if (gpuChunk.layerFlags[i] & static_cast<int32_t>(stock_terrain::kLayerUnlit)) anyUnlit = 1;
+        if (gpuChunk.layerFlags[i] & static_cast<int32_t>(stock_terrain::kLayerAnimate)) anyScroll = 1;
+    }
+    params.chunkMode[0] = gpuChunk.bigAlpha ? 1 : 0;
+    params.chunkMode[1] = anyUnlit;
+    params.chunkMode[2] = anyScroll;
+    params.chunkMode[3] = 0;
 
     VkBufferCreateInfo bufCI{};
     bufCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -1312,6 +1372,25 @@ bool TerrainRenderer::cullForRecording(const Camera& camera) {
         }
     }
 
+    // WOWEE_TERRAIN_AB_PERIOD=<seconds>: the highlight and the horizon go
+    // off and on again every period, said in the log, so one run measures
+    // both from the same view.
+    static const int kAbPeriod = core::envIntClamped("WOWEE_TERRAIN_AB_PERIOD", 0, 0, 3600);
+    stockExtrasOff_ = false;
+    if (kAbPeriod > 0) {
+        static const auto t0 = std::chrono::steady_clock::now();
+        const auto s = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        stockExtrasOff_ = ((s / kAbPeriod) % 2) == 1;
+        static bool lastOff = false;
+        if (stockExtrasOff_ != lastOff) {
+            lastOff = stockExtrasOff_;
+            LOG_WARNING("TERRAIN_AB ", stockExtrasOff_ ? "off" : "on");
+        }
+    }
+    // The horizon's tiles, for the far clip the chunks are cut at.
+    if (horizon_) horizon_->cull(camera, stockExtrasOff_ ? 0.0f : maxViewDistance_);
+
     Frustum frustum;
     if (frustumCullingEnabled) {
         glm::mat4 viewProj = camera.getProjectionMatrix() * camera.getViewMatrix();
@@ -1408,10 +1487,12 @@ void TerrainRenderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                              0, 1, &perFrameSet, 0, nullptr);
 
-    GPUPushConstants push{};
+    TerrainPush push{};
     push.model = glm::mat4(1.0f);
+    static const bool kSpecularOn = core::envFlagEnabled("WOWEE_TERRAIN_SPECULAR", true);
+    push.specular = glm::vec4(sunSpecular_, kSpecularOn && !stockExtrasOff_ ? stock_terrain::kSpecularPower : 0.0f);
     vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-                        0, sizeof(GPUPushConstants), &push);
+                        0, sizeof(TerrainPush), &push);
 
     // Use mega VB + IB when available.
     // Bind mega buffers once, then use direct draws with base vertex/index offsets.
@@ -1454,6 +1535,10 @@ void TerrainRenderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
             megaBuffersBound = false;
         }
     }
+    // The horizon after the ground, as 0x795f80 follows the chunks: it fills
+    // only what nothing nearer covered. The last part draws it, which is the
+    // one executed last.
+    if (horizon_ && part + 1 == parts && !stockExtrasOff_) horizon_->record(cmd, perFrameSet);
 }
 
 bool TerrainRenderer::initializeShadow(VkRenderPass shadowRenderPass) {

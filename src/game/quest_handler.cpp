@@ -17,6 +17,7 @@
 #include "core/application.hpp"
 #include "core/logger.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -577,7 +578,7 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
     // ---- SMSG_GOSSIP_POI ----
     table[Opcode::SMSG_GOSSIP_POI] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(20)) return;
-        /*uint32_t flags =*/ packet.readUInt32();
+        const uint32_t flags = packet.readUInt32();
         float poiX = packet.readFloat();
         float poiY = packet.readFloat();
         uint32_t icon = packet.readUInt32();
@@ -585,6 +586,9 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
         std::string name = packet.readString();
         // Wire order is server X,Y; store canonical (swapped), like quest POIs.
         GossipPoi poi; poi.x = poiY; poi.y = poiX; poi.icon = icon; poi.data = data; poi.name = std::move(name);
+        poi.flags = flags;
+        poi.receivedMs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
         if (gossipPois_.size() >= 200) gossipPois_.erase(gossipPois_.begin());
         gossipPois_.push_back(std::move(poi));
         LOG_DEBUG("SMSG_GOSSIP_POI: x=", poiX, " y=", poiY, " icon=", icon);

@@ -344,6 +344,17 @@ public:
     // frequency: oscillation frequency in Hz
     // duration: shake duration in seconds
     void triggerShake(float magnitude, float frequency, float duration);
+    /// One CameraShakes.dbc row, as the stock camera keeps it (Wow.exe
+    /// 0x606330): type 0 a steady sine, 1 a damped one (exp(-t*coefficient));
+    /// direction 0 along the player's facing, 1 across it, 2 up and down;
+    /// amplitude in the row's units (1/36 yard); frequency and duration in
+    /// Hz and seconds; phase in seconds. source is where it went off: full
+    /// within 9 yards of the player, 0.7^((d-9)/9) out to 80 (0x6004B0).
+    void addStockShake(int type, int direction, float amplitude, float frequency,
+                       float duration, float phase, float coefficient, const glm::vec3& source);
+    /// For the debug Lua hook: put the camera at a yaw (degrees, relative to
+    /// the character's facing), pitch and distance.
+    void debugSetView(float yawOffsetDeg, float pitchDeg, float distance);
 
     /// How much of a shake to actually apply, 0 to 1.
     ///
@@ -1040,6 +1051,17 @@ private:
     glm::vec2 knockbackHorizVel_ = glm::vec2(0.0f); // render-space horizontal velocity (units/s)
     // Horizontal velocity decays via WoW-like drag so the player doesn't slide enhanced.
     static constexpr float KNOCKBACK_HORIZ_DRAG = 4.5f; // exponential decay rate (1/s)
+
+    // The stock camera's shakes (0x606970): the strongest of each direction
+    // plays.
+    struct StockShake {
+        int type = 0, direction = 0;
+        float amplitude = 0.0f, frequency = 0.0f, duration = 0.0f, phase = 0.0f, coefficient = 0.0f;
+        glm::vec3 source{0.0f};
+        float elapsed = 0.0f;
+    };
+    std::vector<StockShake> stockShakes_;
+    glm::vec3 stockShakeOffset(float deltaTime);
 
     // Camera shake state (SMSG_CAMERA_SHAKE)
     float shakeElapsed_   = 0.0f;

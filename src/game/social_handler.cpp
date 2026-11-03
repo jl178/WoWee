@@ -12,6 +12,7 @@
 #include "game/update_field_table.hpp"
 #include "game/opcode_table.hpp"
 #include "audio/audio_coordinator.hpp"
+#include "core/coordinates.hpp"
 #include "audio/ui_sound_manager.hpp"
 #include "network/world_socket.hpp"
 #include "rendering/renderer.hpp"
@@ -5006,24 +5007,26 @@ void SocialHandler::handleGroupSetLeader(network::Packet& packet) {
 void SocialHandler::sendMinimapPing(float wowX, float wowY) {
     if (owner_.getState() != WorldState::IN_WORLD) return;
 
-    // MSG_MINIMAP_PING (CMSG direction): float posX + float posY
-    // Server convention: posX = east/west axis = canonical Y (west)
-    //                    posY = north/south axis = canonical X (north)
-    const float serverX = wowY;  // canonical Y (west) → server posX
-    const float serverY = wowX;  // canonical X (north) → server posY
+    // Minimap:PingLocation (0x0057ED70): the spot goes to the server only in a
+    // party or a raid - nobody else would hear it - and is shown here either
+    // way, as the player's own ping. The wire carries it in world order.
+    const glm::vec3 server = core::coords::canonicalToServer(glm::vec3(wowX, wowY, 0.0f));
+    if (owner_.isInGroup()) {
+        network::Packet pkt(wireOpcode(Opcode::MSG_MINIMAP_PING));
+        pkt.writeFloat(server.x);
+        pkt.writeFloat(server.y);
+        owner_.getSocket()->send(pkt);
+    }
 
-    network::Packet pkt(wireOpcode(Opcode::MSG_MINIMAP_PING));
-    pkt.writeFloat(serverX);
-    pkt.writeFloat(serverY);
-    owner_.getSocket()->send(pkt);
-
-    // Add ping locally so the sender sees their own ping immediately
+    // The server sends the ping to the rest of the group and not back, so the
+    // sender's own copy is made here.
     GameHandler::MinimapPing localPing;
     localPing.senderGuid = owner_.activeCharacterGuidRef();
     localPing.wowX       = wowX;
     localPing.wowY       = wowY;
     localPing.age        = 0.0f;
     owner_.minimapPingsRef().push_back(localPing);
+    owner_.notifyMinimapPing(owner_.getPlayerGuid(), server.x, server.y);
 }
 
 // ============================================================

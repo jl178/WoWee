@@ -785,6 +785,21 @@ public:
      */
     void renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
 
+    /// A triangle strip drawn with the ribbons, built on the CPU by someone
+    /// else: a spell chain effect's bolt (SpellChainEffects, Wow.exe
+    /// 0x9AA210) or a weapon's swing trail (0x7E4CE0). verts holds 9 floats
+    /// a vertex, the ribbon layout: position, rgb, alpha, uv. gxBlend is the
+    /// stock EGxBlend (2 alpha, 3 add, ...).
+    struct EffectStrip {
+        VkTexture* texture = nullptr;  // null: white
+        uint8_t gxBlend = 2;
+        std::vector<float> verts;
+    };
+    /// The strips to draw from now on, until the next call replaces them.
+    void setEffectStrips(std::vector<EffectStrip> strips) { effectStrips_ = std::move(strips); }
+    /// A texture for an effect strip, wrapping in u (the bolts scroll it).
+    VkTexture* loadEffectTexture(const std::string& path) { return loadTexture(path, 0x3); }
+
     void setInstancePosition(uint32_t instanceId, const glm::vec3& position);
     /// WOWEE_M2_CENSUS: what a model is actually drawn at, said once each.
     void censusInstance(const M2Instance& instance);
@@ -1294,7 +1309,7 @@ private:
     std::vector<uint32_t> cullReadableIds_[2];
 
     // Dynamic ribbon vertex buffer (CPU-written triangle strip)
-    static constexpr size_t MAX_RIBBON_VERTS = 2048;  // 9 floats each
+    static constexpr size_t MAX_RIBBON_VERTS = 8192;  // 9 floats each
     ::VkBuffer ribbonVB_ = VK_NULL_HANDLE;
     VmaAllocation ribbonVBAlloc_ = VK_NULL_HANDLE;
     void* ribbonVBMapped_ = nullptr;
@@ -1586,6 +1601,10 @@ private:
         uint32_t        unfogged;
     };
     std::vector<RibbonDrawCall> ribbonDraws_;
+    std::vector<EffectStrip> effectStrips_;
+    /// A descriptor set per texture an effect strip has used.
+    std::unordered_map<VkTexture*, VkDescriptorSet> effectTexSets_;
+    VkDescriptorSet effectTextureSet(VkTexture* tex);
 
     // Particle group structures (reused each frame)
     struct ParticleGroupKey {

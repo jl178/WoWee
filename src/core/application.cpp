@@ -7,6 +7,7 @@
 #include "pipeline/m2_asset_loader.hpp"
 #include "core/coordinates.hpp"
 #include "ui/minimap_projection.hpp"
+#include "ui/minimap_stock.hpp"
 #include "core/profiler.hpp"
 #include "core/npc_interaction_callback_handler.hpp"
 #include "core/audio_callback_handler.hpp"
@@ -3073,6 +3074,16 @@ void Application::setState(AppState newState) {
                         frac = (da > 0.0f && da - db > 1.0e-4f) ? da / (da - db) : 0.0f;
                         return true;
                     });
+                // The minimap's radius and turn, for MINIMAP_PING and
+                // Minimap:GetPingPosition, which carry a ping as a fraction
+                // of the map rather than as a place.
+                gameHandler->setMinimapViewProvider([this](float& radius, float& bearing) {
+                    auto* map = renderer ? renderer->getMinimap() : nullptr;
+                    if (!map) return false;
+                    radius = map->getViewRadius();
+                    bearing = map->bearing();
+                    return true;
+                });
                 gameHandler->setFaceCameraProvider([this]() -> float {
                     // Turn the character to the camera's look direction and report it in
                     // canonical space (same camera-yaw→canonical mapping as the per-frame
@@ -5489,6 +5500,13 @@ void Application::render() {
                         // keeps the stock 40.
                         map->setPlayerArrowSize(mm->minimapPlayerTexW, mm->minimapPlayerTexH);
 
+                        // MinimapCompassTexture turns against the map
+                        // (0x0057D5B0, with minus the facing) while the map
+                        // rotates, and sits still otherwise.
+                        if (ui::Widget* compass = widgets.findByName("MinimapCompassTexture")) {
+                            ui::setTextureRotation(*compass, map->isRotateWithCamera() ? -map->bearing() : 0.0f);
+                        }
+
                         // Minimap:PingLocation, which is all Minimap_OnClick
                         // does. The offsets are minimap-local interface units
                         // from the centre with +y up; the projection works in
@@ -5496,27 +5514,21 @@ void Application::render() {
                         // is what carries the scale, so both being interface
                         // units is enough.
                         if (mm->pingRequested) {
+                            // 0x0057ED70: the click as a fraction of the
+                            // frame, turned back by the map's own turn, is
+                            // yards from the player.
                             mm->pingRequested = false;
-                            ui::MinimapView view;
-                            view.viewRadius = map->getViewRadius();
-                            view.mapRadius = mm->rectW * 0.5f;
-                            if (map->isRotateWithCamera()) {
-                                if (auto* cam = renderer->getCamera()) {
-                                    const glm::vec3 fwd = cam->getForward();
-                                    const float bearing = std::atan2(fwd.y, -fwd.x);
-                                    view.cosBearing = std::cos(bearing);
-                                    view.sinBearing = std::sin(bearing);
-                                }
+                            const glm::vec2 d = ui::minimap_stock::worldOffset(
+                                mm->pingX / mm->rectW, mm->pingY / mm->rectH,
+                                map->getViewRadius(), map->bearing());
+                            if (gameHandler) {
+                                const auto& mi = gameHandler->getMovementInfo();
+                                const glm::vec3 self = core::coords::canonicalToServer(
+                                    glm::vec3(mi.x, mi.y, mi.z));
+                                const glm::vec3 canon = core::coords::serverToCanonical(
+                                    glm::vec3(self.x + d.x, self.y + d.y, 0.0f));
+                                gameHandler->sendMinimapPing(canon.x, canon.y);
                             }
-                            glm::vec3 playerRender = renderer->getCharacterInstanceId() != 0
-                                ? renderer->getCharacterPosition()
-                                : (renderer->getCamera() ? renderer->getCamera()->getPosition()
-                                                         : glm::vec3(0.0f));
-                            const glm::vec2 d = ui::minimapOffsetToRenderDelta(
-                                mm->pingX, -mm->pingY, view);
-                            const glm::vec3 canon = core::coords::renderToCanonical(
-                                playerRender + glm::vec3(d.x, d.y, 0.0f));
-                            if (gameHandler) gameHandler->sendMinimapPing(canon.x, canon.y);
                         }
                     } else {
                         map->clearScreenRect();

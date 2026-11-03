@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cmath>
+
 // A retained widget tree with WoW's anchor layout.
 //
 // This is the thing the addon API was missing. CreateFrame answered, events
@@ -1372,6 +1374,30 @@ ItemPushPose itemPushAnimPose(double elapsedSeconds);
 inline bool playsItemPushModel(const Widget& w) {
     return w.kind == WidgetKind::Frame && !w.modelIconTexture.empty() &&
            w.modelSequence >= 0;
+}
+
+/// Texture:SetRotation(radians): the image turned counter-clockwise about its
+/// centre, by turning its corners' texture coordinates the other way - which
+/// is all the client does, so the corners of a square texture sample past its
+/// edge as they do there. MinimapPingSpinner and MinimapCompassTexture are the
+/// stock users. Zero puts the plain coordinates back.
+inline void setTextureRotation(Widget& w, float radians) {
+    if (radians == 0.0f) {
+        w.texCoordRotated = false;
+        return;
+    }
+    const float c = std::cos(radians), s = std::sin(radians);
+    // Upper-left, lower-left, upper-right, lower-right, as SetTexCoord orders
+    // them; each corner's offset from the centre, +y up.
+    const float corners[4][2] = {{-0.5f, 0.5f}, {-0.5f, -0.5f}, {0.5f, 0.5f}, {0.5f, -0.5f}};
+    for (int i = 0; i < 4; ++i) {
+        const float dx = corners[i][0], dy = corners[i][1];
+        const float tx = dx * c + dy * s;
+        const float ty = -dx * s + dy * c;
+        w.texCoordQuad[i * 2] = 0.5f + tx;
+        w.texCoordQuad[i * 2 + 1] = 0.5f - ty;
+    }
+    w.texCoordRotated = true;
 }
 
 } // namespace ui

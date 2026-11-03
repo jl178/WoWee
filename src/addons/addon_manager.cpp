@@ -589,10 +589,9 @@ void AddonManager::giveCoinAmountsClearance() {
         LOG_WARNING("About menu entry did not apply: ", luaEngine_.lastError());
     }
 
-    // The compass N, which sits on top of this client's zone name.
-    if (!luaEngine_.executeString(kMinimapNorthTagLua)) {
-        LOG_WARNING("Minimap north tag did not apply: ", luaEngine_.lastError());
-    }
+    // The compass N and ring are left as Minimap_UpdateRotationSetting sets
+    // them: the N tag is what the stock minimap shows north-up, the ring while
+    // it rotates (and the client turns the ring - see application.cpp).
 
     // Every control for something this client does not do, taken off the panel.
     if (!luaEngine_.executeString(kRemovedControlsLua)) {

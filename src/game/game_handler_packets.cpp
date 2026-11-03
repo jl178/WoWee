@@ -932,16 +932,19 @@ void GameHandler::registerCoreOpcodes() {
 
     // Minimap ping
     dispatchTable_[Opcode::MSG_MINIMAP_PING] = [this](network::Packet& packet) {
-        // A full guid in every expansion; WotLK does not pack this one.
+        // A full guid in every expansion; WotLK does not pack this one. Then
+        // the spot in world order, north then west - what 0x006E2E90 hands
+        // straight to 0x0057EB80.
         if (!packet.hasRemaining(8)) return;
         uint64_t senderGuid = packet.readUInt64();
         if (!packet.hasRemaining(8)) return;
-        float pingX = packet.readFloat();
-        float pingY = packet.readFloat();
+        const float serverX = packet.readFloat();
+        const float serverY = packet.readFloat();
+        const glm::vec3 canon = core::coords::serverToCanonical(glm::vec3(serverX, serverY, 0.0f));
         MinimapPing ping;
         ping.senderGuid = senderGuid;
-        ping.wowX = pingY;
-        ping.wowY = pingX;
+        ping.wowX = canon.x;
+        ping.wowY = canon.y;
         ping.age  = 0.0f;
         minimapPings_.push_back(ping);
         // MapPing is minimap.lua's: MinimapPing_OnEvent plays it on
@@ -950,20 +953,7 @@ void GameHandler::registerCoreOpcodes() {
         if (senderGuid != playerGuid && !ui::frameXmlOwns(ui::UiElement::Minimap)) {
             withSoundManager(&audio::AudioCoordinator::getUiSoundManager, [](auto* sfx) { sfx->playMinimapPing(); });
         }
-        // The ping is drawn by this client from minimapPings_ and was never
-        // announced, so a handed-over minimap heard the sound and showed
-        // nothing. The interface wants the unit that pinged and the position,
-        // and marks the spot itself.
-        //
-        // x then y, in that order, which is the reverse of how they are stored
-        // above: the wire sends them the other way round and this client swaps
-        // them on the way in. Passing the stored pair straight through would
-        // put every ping at its own mirror image.
-        std::string unitId = guidToUnitId(senderGuid);
-        if (unitId.empty()) unitId = "player";
-        fireAddonEvent("MINIMAP_PING", {unitId,
-                                        std::to_string(ping.wowY),
-                                        std::to_string(ping.wowX)});
+        notifyMinimapPing(senderGuid, serverX, serverY);
     };
     dispatchTable_[Opcode::SMSG_ZONE_UNDER_ATTACK] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {

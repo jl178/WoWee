@@ -575,6 +575,18 @@ int lua_Model_SetFacing(lua_State* L) {
     }
     return 0;
 }
+/// SetRotation: a texture turns its image (Texture:SetRotation, which the
+/// minimap's ping spinner and compass ring use); a model turns to the facing.
+int lua_Region_SetRotation(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) {
+        const float r = static_cast<float>(luaL_optnumber(L, 2, 0.0));
+        if (w->kind == wowee::ui::WidgetKind::Texture) {
+            wowee::ui::setTextureRotation(*w, r);
+        }
+        w->modelFacing = r;
+    }
+    return 0;
+}
 int lua_Model_GetFacing(lua_State* L) {
     const auto* w = widgetOf(L, 1);
     lua_pushnumber(L, w ? w->modelFacing : 0.0);
@@ -3356,21 +3368,22 @@ int lua_Region_GetNumPoints(lua_State* L) {
 // on nothing.
 int lua_Minimap_SetZoom(lua_State* L) {
     if (auto* w = widgetOf(L, 1)) {
-        int z = static_cast<int>(luaL_optnumber(L, 2, 0));
-        w->zoomLevel = (z < 0) ? 0 : (z > 5 ? 5 : z);
+        // 0x0057BFD0 rounds the number and 0x007F3AE0 compares it unsigned:
+        // anything above 4 - negatives included - is 5, the closest.
+        const int z = static_cast<int>(std::lround(luaL_optnumber(L, 2, 0)));
+        w->zoomLevel = (static_cast<unsigned>(z) > 4u) ? 5 : z;
         // And kept, because the player set it by using the map rather than by
         // setting a setting, and it was gone at every start: the ring came back
-        // at its widest however far in it had been left. Written to the CVar
-        // store, which is saved as it changes - see setStoredCVar - and read
-        // back once FrameXML has a Minimap to put it on.
+        // at its widest however far in it had been left. The client keeps it
+        // in two CVars of its own, minimapZoom outdoors and minimapInsideZoom
+        // indoors (0x007F6730 reads them back at world load); the store is
+        // saved as it changes - see setStoredCVar.
         //
         // Only for the map itself. SetZoom sits on the frame metatable, so any
         // frame can be sent one, and a stray call on another frame must not be
         // what the minimap opens at next time.
-        // Indoors it is the second level, kept apart as the client keeps
-        // minimapInsideZoom.
         if (w->name == "Minimap") {
-            setStoredCVar(w->minimapInside ? "wowee_minimapInsideZoom" : "wowee_minimapZoom",
+            setStoredCVar(w->minimapInside ? "minimapInsideZoom" : "minimapZoom",
                           std::to_string(w->zoomLevel));
         }
     }
@@ -3416,6 +3429,17 @@ int lua_Minimap_PingLocation(lua_State* L) {
         w->pingRequested = true;
     }
     return 0;
+}
+
+/// Minimap:GetPingPosition() - the last ping, wherever the player has moved
+/// since, as fractions of the map's width east and north of the centre
+/// (0x0057EFE0). 0, 0 before any ping.
+int lua_Minimap_GetPingPosition(lua_State* L) {
+    float fx = 0.0f, fy = 0.0f;
+    if (auto* gh = wowee::addons::getGameHandler(L)) gh->minimapPingPosition(fx, fy);
+    lua_pushnumber(L, fx);
+    lua_pushnumber(L, fy);
+    return 2;
 }
 
 /// Minimap:SetPlayerTextureWidth / SetPlayerTextureHeight - the size of the
@@ -6269,7 +6293,7 @@ void LuaEngine::registerCoreAPI() {
         // installed on textures and font strings alone - putting them there
         // gave the methods to everything except the things that use them.
         {"SetMovable",      lua_Frame_SetMovable},
-        {"SetRotation",     lua_Model_SetFacing},
+        {"SetRotation",     lua_Region_SetRotation},
         {"SetFacing",       lua_Model_SetFacing},
         {"GetFacing",       lua_Model_GetFacing},
         {"IsMovable",       lua_Frame_IsMovable},
@@ -6393,6 +6417,7 @@ void LuaEngine::registerCoreAPI() {
         {"GetZoom",         lua_Minimap_GetZoom},
         {"GetZoomLevels",   lua_Minimap_GetZoomLevels},
         {"PingLocation",    lua_Minimap_PingLocation},
+        {"GetPingPosition", lua_Minimap_GetPingPosition},
         {"SetPlayerTextureWidth",  lua_Minimap_SetPlayerTextureWidth},
         {"SetPlayerTextureHeight", lua_Minimap_SetPlayerTextureHeight},
         {"DrawQuestBlob",   lua_QuestBlobFrame_DrawQuestBlob},

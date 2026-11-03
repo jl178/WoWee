@@ -317,6 +317,11 @@ struct GossipPoi {
     float    y     = 0.0f;
     uint32_t icon  = 0;
     uint32_t data  = 0;
+    /// SMSG_GOSSIP_POI's flags: 0x2 draws the icon on the minimap.
+    uint32_t flags = 0;
+    /// When it arrived (steady clock, ms). The client keeps a gossip point for
+    /// 480 seconds (0x007F4870).
+    uint64_t receivedMs = 0;
     // SMSG_QUEST_POI objective index. -2 means this is a normal
     // SMSG_GOSSIP_POI; -1 identifies the quest endpoint/turn-in POI.
     int32_t  questObjectiveIndex = -2;

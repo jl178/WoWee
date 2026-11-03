@@ -23,6 +23,7 @@
 #include "addons/chat_window_background.hpp"
 #include "ui/display_modes.hpp"
 #include "ui/widget_tree.hpp"
+#include "ui/minimap_stock.hpp"
 #include "rendering/camera_controller.hpp"
 #include "addons/lua_engine.hpp"
 #include "addons/world_map_api.hpp"
@@ -1012,6 +1013,9 @@ static void pushCvarDefault(lua_State* L, const std::string& n) {
     else if (n == "autolootdefault") lua_pushstring(L, "0");
     // Stock defaults; the loot click reads them (0x6DAD90).
     else if (n == "autodismount" || n == "autostand") lua_pushstring(L, "1");
+    // The minimap's (0x007F6730, 0x0057E070): both zooms 0, no town tracking.
+    else if (n == "minimapzoom" || n == "minimapinsidezoom") lua_pushstring(L, "0");
+    else if (n == "minimaptrackedinfo") lua_pushstring(L, "");
     // Off in stock; the reverb reads it (audio_coordinator).
     else if (n == "sound_enablereverb") lua_pushstring(L, "0");
     // On, as it is for a fresh account. The XP bar and the unit frames put
@@ -1603,11 +1607,14 @@ static void applyCVarSideEffects(lua_State* L, const std::string& key,
     // restored at full zoom offers a zoom-in that does nothing.
     // The indoor level (wowee_minimapInsideZoom) goes to whichever slot holds
     // the indoor mode's level right now; see Widget::otherZoomLevel.
-    if (key == "wowee_minimapzoom" || key == "wowee_minimapinsidezoom") {
+    // The CVars are the client's own, minimapZoom and minimapInsideZoom; the
+    // wowee_ names are what this client wrote before and are still read.
+    if (key == "minimapzoom" || key == "minimapinsidezoom" ||
+        key == "wowee_minimapzoom" || key == "wowee_minimapinsidezoom") {
         if (auto* tree = getWidgetTree(L)) {
             if (auto* mm = tree->findByName("Minimap")) {
                 const int z = std::atoi(value.c_str());
-                const bool inside = key == "wowee_minimapinsidezoom";
+                const bool inside = key == "minimapinsidezoom" || key == "wowee_minimapinsidezoom";
                 int& slot = (inside == mm->minimapInside) ? mm->zoomLevel : mm->otherZoomLevel;
                 slot = (z < 0) ? 0 : (z > 5 ? 5 : z);  // stock 0-5
                 lua_getfield(L, LUA_REGISTRYINDEX, "wowee_lua_engine");
@@ -2512,62 +2519,129 @@ static bool trackingActive(game::GameHandler* gh, uint32_t spellId) {
     return false;
 }
 
-/// GetTrackingTexture() → the icon on the minimap button.
-///
-/// The button's own art is empty in the XML and comes entirely from here, so
-/// answering nil left a blank square on the minimap. Nothing tracked is not
-/// nothing to draw: it is the magnifying glass, which is what a stock client
-/// shows and what makes the button look like something to click.
+// ---- Town tracking ---------------------------------------------------------
+//
+// After the tracking spells the menu lists the client's own fifteen town
+// entries (ui::minimap_stock::kTownTracking, 0x00A11C50), those the player's
+// class is offered. One tracking is in force at a time: a town entry, or a
+// tracking spell's aura (see GameHandler::activeTownTracking).
+
+/// The town entries this player's class is offered, as indices into the table.
+static std::vector<int> offeredTownTracking(game::GameHandler* gh) {
+    std::vector<int> out;
+    const uint32_t classId = gh ? gh->getPlayerClass() : 0;
+    for (int i = 0; i < static_cast<int>(ui::minimap_stock::kTownTracking.size()); ++i) {
+        if (ui::minimap_stock::townTrackingOffered(ui::minimap_stock::kTownTracking[i], classId)) {
+            out.push_back(i);
+        }
+    }
+    return out;
+}
+
+/// "Interface\Minimap\Tracking\<name>", as 0x0057F1B0 builds it.
+static std::string townTrackingTexture(int index) {
+    return std::string("Interface\\Minimap\\Tracking\\") +
+           ui::minimap_stock::kTownTracking[static_cast<size_t>(index)].texture;
+}
+
+/// Choose a town entry (or none), and remember it the way the client does: by
+/// its GlobalStrings key in the minimapTrackedInfo CVar (0x0057E070).
+static void selectTownTracking(game::GameHandler* gh, int index) {
+    if (!gh) return;
+    gh->setActiveTownTracking(index);
+    const int now = gh->activeTownTracking();
+    setStoredCVar("minimapTrackedInfo",
+                  now >= 0 ? ui::minimap_stock::kTownTracking[static_cast<size_t>(now)].globalString
+                           : "");
+}
+
+/// The town entry minimapTrackedInfo names, put back at login (0x0057EA60).
+static void restoreTownTracking(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    if (!gh) return;
+    static bool restored = false;
+    if (restored) return;
+    restored = true;
+    const std::string saved = storedCVarValue("minimapTrackedInfo", "");
+    if (saved.empty()) return;
+    for (int i : offeredTownTracking(gh)) {
+        if (saved == ui::minimap_stock::kTownTracking[static_cast<size_t>(i)].globalString) {
+            gh->setActiveTownTracking(i);
+            return;
+        }
+    }
+}
+
+/// The text a GlobalStrings key reads as, or the key when it is not defined.
+static std::string globalStringText(lua_State* L, const char* key) {
+    lua_getglobal(L, key);
+    std::string text = lua_isstring(L, -1) ? lua_tostring(L, -1) : key;
+    lua_pop(L, 1);
+    return text;
+}
+
+/// GetTrackingTexture() → the icon on the minimap button (0x0057F4F0): the
+/// town entry's own icon, else the tracking spell's, else the magnifying
+/// glass, Tracking\None.
 static int lua_GetTrackingTexture(lua_State* L) {
     auto* gh = getGameHandler(L);
+    restoreTownTracking(L);
+    if (gh && gh->activeTownTracking() >= 0) {
+        lua_pushstring(L, townTrackingTexture(gh->activeTownTracking()).c_str());
+        return 1;
+    }
     for (uint32_t sid : trackingSpells(gh)) {
         if (!trackingActive(gh, sid)) continue;
         const std::string icon = gh->getSpellIconPath(sid);
         if (!icon.empty()) { lua_pushstring(L, icon.c_str()); return 1; }
     }
     // Nothing tracked, and what a stock client shows for that is not the same
-    // picture in every expansion. 3.x has a button whose art is empty in the
-    // XML and a magnifying glass to fill it with. 1.12 has neither: its
-    // Minimap.xml hides the tracking frame outright when this answers nil, and
-    // the 1.12 archives carry no Interface\Minimap\Tracking folder at all -
-    // interface.MPQ, patch.MPQ and patch-2.MPQ hold nothing under that path. So
-    // on turtle the answer named a file that does not exist, and the frame was
-    // shown with an empty icon in it rather than hidden.
-    //
-    // Only 1.12 changes. The tracking dropdown and its None entry are 2.x's and
-    // nothing here has been checked against a 2.4.3 tree, so every other
-    // interface keeps the answer it already had.
+    // picture in every expansion. 1.12 has no Interface\Minimap\Tracking
+    // folder at all and its Minimap.xml hides the frame when this answers nil.
     if (interfaceVersion(L) < 20000) return luaReturnNil(L);
     lua_pushstring(L, "Interface\\Minimap\\Tracking\\None");
     return 1;
 }
 
-/// GetNumTrackingTypes() → how many the player knows.
+/// GetNumTrackingTypes() → the tracking spells plus the town entries the
+/// class is offered (0x0057F170).
 static int lua_GetNumTrackingTypes(lua_State* L) {
-    lua_pushnumber(L, static_cast<lua_Number>(trackingSpells(getGameHandler(L)).size()));
+    auto* gh = getGameHandler(L);
+    size_t n = trackingSpells(gh).size();
+    if (interfaceVersion(L) >= 30000) n += offeredTownTracking(gh).size();
+    lua_pushnumber(L, static_cast<lua_Number>(n));
     return 1;
 }
 
-/// GetTrackingInfo(index) → name, texture, active, category.
+/// GetTrackingInfo(index) → name, texture, active, category (0x0057F1B0).
 ///
-/// "spell" for the category, because these are spell icons and the menu uses
-/// that to crop the icon's border - the same trim the action bar gives them.
-///
-/// Four values and not five. The spell id would have been useful to
-/// GameTooltip:SetTrackingSpell and belongs in none of them: 4.x defines a
-/// fifth of its own - whether the entry nests under the one above it - and a
-/// number in that position would be read as that. __WoweeActiveTrackingSpell
-/// carries it instead, under a name no interface will ever call.
+/// The spells first, "spell", then the town entries, "other". Active is 1 or
+/// nil. Four values and not five: 4.x defines a fifth of its own - whether
+/// the entry nests under the one above it - and a number in that position
+/// would be read as that. __WoweeActiveTrackingSpell carries the spell id
+/// GameTooltip:SetTrackingSpell needs instead.
 static int lua_GetTrackingInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
+    restoreTownTracking(L);
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
     const auto spells = trackingSpells(gh);
-    if (index < 1 || index > static_cast<int>(spells.size())) return 0;
-    const uint32_t sid = spells[static_cast<size_t>(index - 1)];
-    lua_pushstring(L, gh->getSpellName(sid).c_str());
-    lua_pushstring(L, gh->getSpellIconPath(sid).c_str());
-    lua_pushboolean(L, trackingActive(gh, sid) ? 1 : 0);
-    lua_pushstring(L, "spell");
+    if (index >= 1 && index <= static_cast<int>(spells.size())) {
+        const uint32_t sid = spells[static_cast<size_t>(index - 1)];
+        lua_pushstring(L, gh->getSpellName(sid).c_str());
+        lua_pushstring(L, gh->getSpellIconPath(sid).c_str());
+        if (trackingActive(gh, sid)) lua_pushnumber(L, 1); else lua_pushnil(L);
+        lua_pushstring(L, "spell");
+        return 4;
+    }
+    if (interfaceVersion(L) < 30000) return 0;
+    const auto town = offeredTownTracking(gh);
+    const int t = index - 1 - static_cast<int>(spells.size());
+    if (t < 0 || t >= static_cast<int>(town.size())) return 0;
+    const int entry = town[static_cast<size_t>(t)];
+    lua_pushstring(L, globalStringText(L, ui::minimap_stock::kTownTracking[static_cast<size_t>(entry)].globalString).c_str());
+    lua_pushstring(L, townTrackingTexture(entry).c_str());
+    if (gh && gh->activeTownTracking() == entry) lua_pushnumber(L, 1); else lua_pushnil(L);
+    lua_pushstring(L, "other");
     return 4;
 }
 
@@ -2586,18 +2660,34 @@ static int lua_ActiveTrackingSpell(lua_State* L) {
     return luaReturnNil(L);
 }
 
-/// SetTracking(index) - casting the spell is how tracking is turned on; there
-/// is no separate message for it. A nil index is the menu's "None" entry,
-/// which in a stock client cancels the running tracking aura. Cancelling a
-/// player's own buff is not wired up here, so that entry does nothing rather
-/// than casting something arbitrary.
+/// SetTracking(index) (0x0057F380). A spell is cast - its aura is the
+/// tracking, and arriving it ends any town entry. A town entry cancels the
+/// running tracking aura and takes over. Nil - the menu's "None" - cancels
+/// the aura and clears the town entry.
 static int lua_SetTracking(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (!gh || lua_isnoneornil(L, 1)) return 0;
+    if (!gh) return 0;
+    auto cancelTrackingAura = [gh]() {
+        for (uint32_t sid : trackingSpells(gh)) {
+            if (trackingActive(gh, sid)) gh->cancelAura(sid);
+        }
+    };
+    if (lua_isnoneornil(L, 1)) {
+        cancelTrackingAura();
+        selectTownTracking(gh, -1);
+        return 0;
+    }
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
     const auto spells = trackingSpells(gh);
-    if (index < 1 || index > static_cast<int>(spells.size())) return 0;
-    gh->castSpell(spells[static_cast<size_t>(index - 1)], 0);
+    if (index >= 1 && index <= static_cast<int>(spells.size())) {
+        gh->castSpell(spells[static_cast<size_t>(index - 1)], 0);
+        return 0;
+    }
+    const auto town = offeredTownTracking(gh);
+    const int t = index - 1 - static_cast<int>(spells.size());
+    if (t < 0 || t >= static_cast<int>(town.size())) return 0;
+    cancelTrackingAura();
+    selectTownTracking(gh, town[static_cast<size_t>(t)]);
     return 0;
 }
 

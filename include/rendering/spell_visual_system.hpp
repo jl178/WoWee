@@ -7,7 +7,10 @@
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
+#include <memory>
 #include <glm/glm.hpp>
+
+#include "rendering/spell_chain_effect.hpp"
 
 struct lua_State;
 
@@ -39,9 +42,15 @@ public:
     // The impact is the stock client's choice of kit (Wow.exe 0x800D00):
     // TargetImpactKit on a target, CasterImpactKit on a caster hit by its
     // own spell, ImpactKit where the visual names neither.
+    //
+    // unitGuid is the unit the kit plays on, for the kit's character
+    // procedures (SpellVisualKit CharProc: a tint, a flash, a chain effect).
+    // targets is the cast's hit list, which a cast kit's chain effect runs
+    // through (Chain Lightning: caster, first hit, second hit...).
     void playSpellVisual(uint32_t visualId, const glm::vec3& worldPosition,
                          bool useImpactKit = false, uint32_t attachInstanceId = 0,
-                         bool targetIsCaster = false);
+                         bool targetIsCaster = false, uint64_t unitGuid = 0,
+                         const std::vector<uint64_t>* targets = nullptr);
 
     // Play one SpellVisualKit by its own id - what SMSG_PLAY_SPELL_VISUAL and
     // SMSG_PLAY_SPELL_IMPACT carry (SpellVisualKit.dbc, not SpellVisual.dbc).
@@ -123,8 +132,10 @@ public:
     // missile is carrying it - impactNow=false), and PersistentAreaKit kept
     // there for lifetimeSec. channelOwnerGuid != 0 marks a channel's area
     // (Blizzard, Rain of Fire): it also ends with cancelChannelAreaVisuals.
+    // radius: the area's (the spell's effect radius), where its persistent
+    // kit's shards fall (CharProc 9).
     void playSpellAreaVisual(uint32_t visualId, const glm::vec3& groundPos, float lifetimeSec,
-                             uint64_t channelOwnerGuid, bool impactNow);
+                             uint64_t channelOwnerGuid, bool impactNow, float radius = 0.0f);
     // End a caster's channelled ground areas (the channel ended or broke).
     void cancelChannelAreaVisuals(uint64_t casterGuid);
 
@@ -135,6 +146,10 @@ public:
     using UnitInstanceResolver = std::function<uint32_t(uint64_t guid)>;
     using UnitPositionResolver = std::function<bool(uint64_t guid, glm::vec3& feet)>;
     void setUnitResolvers(UnitInstanceResolver instanceOf, UnitPositionResolver feetOf);
+    /// Who a unit channels at (UNIT_FIELD_CHANNEL_OBJECT), 0 for nobody: a
+    /// channel kit's chain effect runs to them (Drain Life, Mind Flay).
+    using ChannelTargetResolver = std::function<uint64_t(uint64_t casterGuid)>;
+    void setChannelTargetResolver(ChannelTargetResolver r) { channelTargetOf_ = std::move(r); }
     [[nodiscard]] bool hasUnitResolvers() const { return static_cast<bool>(unitInstanceOf_); }
     void syncUnitStateVisuals(uint64_t guid, const std::vector<uint32_t>& visualIds);
     // Forget every unit's aura states (logout, aura caches dropped).
@@ -172,6 +187,13 @@ public:
     // looping sound fades.
     void cancelPrecastVisuals(uint64_t casterGuid);
 
+    // One SpellChainEffects row (null when there is none) - for tests and
+    // the audit tools.
+    const ChainEffectRow* chainEffectRow(uint32_t id);
+    // How many chain effects (bolt sets) are alive, and how many bolts they
+    // draw this frame.
+    size_t activeChainEffectCount() const { return chains_.size(); }
+
     // Remove all active spell visual instances and reset caches.
     // Called on map change / combat reset.
     void reset();
@@ -201,6 +223,13 @@ private:
         uint64_t stateGuid = 0;     // aura state visual: the unit...
         uint32_t stateVisual = 0;   // ...and the aura's SpellVisual id
         uint64_t areaOwner = 0;     // a channel's ground area: the caster
+        // The kit's character procedures (tints, chain effects, area shards)
+        // live as long as this does; 0 = none.
+        uint32_t procToken = 0;
+        // A SpellVisualKitModelAttach model: the M2 attachment it rides
+        // (-1: by its kit slot) and its offset and turn from there.
+        int32_t rawAttachment = -1;
+        glm::mat4 attachLocal{1.0f};
         // Birth (sequence 0), then Hold (158) looping for a kit that outlives
         // its birth, then Decay (159) as it ends - the stock spell models'
         // three sequences. Without them it just stops emitting. A precast kit
@@ -216,14 +245,31 @@ private:
         // where the model stands for them.
         uint32_t modelId = 0;
         uint32_t nextEffectSound = 0;
+        uint32_t nextEffectShake = 0;  // the next $SHK camera shake due
         glm::vec3 effectPos{0.0f};
     };
     // A model's $SND events: SoundEntries id at ms into its birth sequence.
     struct EffectSound { uint32_t soundEntryId = 0; uint32_t timeMs = 0; };
 
     struct KitEffect { uint8_t slot; std::string path; };
+    // SpellVisualKit CharProc[4] with its four parameters (Wow.exe 0x7265C0):
+    // 0/12 a chain effect, 1 a tint, 8 a weapon swing trail, 9 an area's
+    // falling shards, 11 a frozen pose, 13 a flash, 14 transparency, 15 scale.
+    struct KitProc { int32_t type = -1; float p[4] = {0.0f, 0.0f, 0.0f, 0.0f}; };
+    // SpellVisualKitModelAttach: one more model, at an attachment (-1 the
+    // kit's point) with an offset and a turn (0x7FA9F0, 0x745230).
+    struct KitModelAttach {
+        std::string path;
+        int32_t attachment = -1;
+        glm::vec3 offset{0.0f};
+        float yaw = 0.0f, pitch = 0.0f, roll = 0.0f;
+    };
     struct KitRow {
         std::vector<KitEffect> effects;
+        KitProc procs[4];
+        bool hasProcs = false;
+        uint32_t shakeId = 0;     // SpellEffectCameraShakes.dbc
+        std::vector<KitModelAttach> attaches;
         std::string worldEffect;  // WorldEffect: stands in the world at the kit's point
         uint32_t animId = 0;
         uint32_t startAnimId = 0;
@@ -243,6 +289,9 @@ private:
         int32_t missileAttachment = -1;
         int32_t missileDestination = 34;
         std::string missilePath;
+        // MissileModel -1/-2: the caster's main or off hand weapon flies
+        // (Wow.exe 0x732FF0 -> 0x732400): Heroic Throw, Shattering Throw.
+        int32_t weaponMissile = 0;
         bool hasMissile = false;             // HasMissile
         uint32_t missileSound = 0;           // SoundEntries.dbc
         int32_t pathType = 0;                // MissilePathType: 2 = lobbed
@@ -273,6 +322,13 @@ private:
         float elapsed = 0.0f;
         float duration = 0.0f;
         bool spin = false;
+        // A spell's weapon missile (MissileModel -1/-2): it homes on the
+        // target's destination attachment and plays the impact as it lands.
+        uint32_t impactVisual = 0;
+        uint32_t targetInstanceId = 0;
+        uint64_t targetGuid = 0;
+        int32_t destAttachment = 34;
+        glm::vec3 endFeet{0.0f};
     };
 
     struct SpellMissile {
@@ -329,6 +385,14 @@ private:
         uint64_t stateGuid = 0;
         uint32_t stateVisual = 0;
         uint64_t areaOwner = 0;
+        // The unit the kit plays on (for its character procedures), the
+        // visual it came from, and the cast's targets for a chain effect.
+        uint64_t unitGuid = 0;
+        uint32_t visualId = 0;
+        const std::vector<uint64_t>* targets = nullptr;
+        bool channelKit = false;  // a channel kit: its chain runs to the channel target
+        // Ground areas: the spell's radius, for the falling shards.
+        float areaRadius = 0.0f;
     };
 
     // An aura state visual a unit should have, and the instance it is on.
@@ -348,7 +412,7 @@ private:
     void spawnKit(uint32_t kitId, const KitSpawn& spawn);
     // One effect model of a kit; false when it could not be made.
     bool spawnKitModel(uint32_t kitId, const std::string& path, uint8_t slot, bool world,
-                       const KitSpawn& spawn);
+                       const KitSpawn& spawn, const KitModelAttach* attach = nullptr);
     // Play a SoundEntries row at pos. A looping row (flag 0x200) is kept and
     // its AudioEngine id returned when keepLoop; anything else plays once and
     // 0 is returned. *loops says which the row was. own: on the local
@@ -368,6 +432,7 @@ private:
                              glm::mat4& out) const;
     // Launch one missile now (p.waited: how long it was held for its release).
     bool launchSpellMissile(const PendingMissile& p);
+    bool launchWeaponMissile(const PendingMissile& p);
     void placeSpellMissile(const SpellMissile& missile, const glm::vec3& dir,
                            const MotionOut* motion = nullptr);
     // Start ending one visual: Decay or stop emitting, fade the mesh, keep it
@@ -384,6 +449,96 @@ private:
     void retireUnitState(uint64_t guid, uint32_t visualId);
     void refreshUnitStates(float deltaTime);
 
+    // --- Character procedures (SpellVisualKit CharProc) -------------------
+    // Run a kit's procedures; the carrier visual (procToken) ends them.
+    uint32_t applyKitProcs(uint32_t kitId, const KitRow& kit, const KitSpawn& spawn);
+    void endProcs(uint32_t token);
+    // A chain effect: one bolt set (a SpellChainEffects row and its combo
+    // rows each make one) along the hops caster -> target -> target...
+    struct ChainHop {
+        uint16_t from = 0, to = 1;
+        float startMs = 0.0f, endMs = 0.0f;
+        std::unique_ptr<LightningBolt> bolt;
+    };
+    struct ChainEffect {
+        const ChainEffectRow* row = nullptr;
+        std::vector<uint64_t> points;  // [0] the source unit, then the targets
+        uint64_t channelCaster = 0;    // != 0: points[1] follows its channel target
+        uint32_t visualId = 0;
+        uint32_t castAnim = 0;         // the caster's kit animation, for its $CSL
+        bool persistent = false;       // lasts as long as its kit (CharParamTwo)
+        float ageMs = 0.0f, endMs = 0.0f;
+        uint32_t token = 0;
+        std::vector<ChainHop> hops;
+    };
+    void startChainEffect(uint32_t rowId, const KitProc& proc, const KitSpawn& spawn,
+                          uint32_t token, uint32_t castAnim);
+    // A strip to draw this frame: the texture by path, the stock blend.
+    struct StripOut { std::string texture; uint8_t gxBlend = 2; std::vector<ChainStripVertex> verts; };
+    void updateChainEffects(float deltaTime, std::vector<StripOut>& strips);
+    void submitStrips(std::vector<StripOut>& strips);
+    bool chainSourcePoint(const ChainEffect& c, uint64_t guid, glm::vec3& out);
+    bool chainTargetPoint(const ChainEffect& c, uint64_t guid, glm::vec3& out);
+    void loadChainEffects();
+    // A tint on a unit's model (CharProc 1): the newest one shows.
+    struct UnitTint { uint32_t instanceId = 0; uint32_t token = 0; uint32_t key = 0; glm::vec3 color{1.0f}; };
+    // A flash (CharProc 13): the colour for hold ms, then back to white over fade ms.
+    struct UnitFlash { uint32_t instanceId = 0; glm::vec3 color{1.0f}; float holdMs = 0.0f, fadeMs = 0.0f, ageMs = 0.0f; };
+    void updateUnitTints(float deltaTime);
+    // An area's falling shards (CharProc 9, the stock BlizzardObject,
+    // Wow.exe 0x7FB5B0 and 0x7FC220): ParamOne a second, anywhere in the
+    // radius, each one model played once.
+    struct ShardEmitter {
+        std::string model;
+        glm::vec3 center{0.0f};
+        float radius = 0.0f;
+        float rate = 0.0f;
+        float accum = 0.0f;
+        uint32_t token = 0;
+    };
+    struct PendingShard { std::string model; glm::vec3 pos{0.0f}; float delay = 0.0f; };
+    void updateShards(float deltaTime);
+    // A weapon's swing trail (CharProc 8, Wow.exe 0x715BA0 -> 0x7E4FF0):
+    // its $WTB/$WTT ends laid down each frame for DurationMs, fading as it
+    // goes (0x7E4CE0).
+    struct SwingTrail {
+        uint32_t instanceId = 0;
+        size_t weapon = 0;
+        glm::vec3 color{1.0f};
+        float alpha = 255.0f;     // the colour's alpha byte (CharParamThree)
+        float durationMs = 0.0f, elapsedMs = 0.0f;
+        std::vector<std::pair<glm::vec3, glm::vec3>> edges;  // oldest first
+    };
+    void updateSwingTrails(float deltaTime, std::vector<StripOut>& strips);
+    std::vector<SwingTrail> swingTrails_;
+    // A held pose (CharProc 11): the instance and the kit it belongs to.
+    struct FrozenPose { uint32_t instanceId = 0; uint32_t token = 0; };
+    std::vector<FrozenPose> frozenPoses_;
+    void loadAreaModels();
+    // Camera shakes: SpellEffectCameraShakes -> up to three CameraShakes.
+    void playCameraShake(uint32_t spellShakeId, const glm::vec3& source);
+    void loadCameraShakes();
+
+    std::vector<ChainEffect> chains_;
+    std::unordered_map<uint32_t, ChainEffectRow> chainRows_;
+    bool chainRowsLoaded_ = false;
+    std::vector<UnitTint> unitTints_;
+    std::vector<UnitFlash> unitFlashes_;
+    std::unordered_set<uint32_t> tintedInstances_;
+    std::vector<ShardEmitter> shardEmitters_;
+    std::vector<PendingShard> pendingShards_;
+    std::vector<std::string> areaModels_;  // SpellVisualKitAreaModel, by row order
+    bool areaModelsLoaded_ = false;
+    struct CameraShakeRow {
+        int32_t type = 0, direction = 0;
+        float amplitude = 0.0f, frequency = 0.0f, duration = 0.0f, phase = 0.0f, coefficient = 0.0f;
+    };
+    std::unordered_map<uint32_t, std::vector<CameraShakeRow>> spellShakes_;
+    bool cameraShakesLoaded_ = false;
+    bool hadStrips_ = false;
+    uint32_t nextProcToken_ = 1;
+    ChannelTargetResolver channelTargetOf_;
+
     M2Renderer* m2Renderer_ = nullptr;
     Renderer* renderer_ = nullptr;
     pipeline::AssetManager* cachedAssetManager_ = nullptr;
@@ -398,6 +553,9 @@ private:
     std::unordered_map<std::string, uint32_t> spellVisualModelIds_;   // M2 path → M2Renderer modelId
     std::unordered_set<uint32_t> spellVisualFailedModels_;           // modelIds that failed to load (negative cache)
     std::unordered_map<uint32_t, std::vector<EffectSound>> modelEffectSounds_;  // modelId → $SND events
+    // modelId → $SHK events (SpellEffectCameraShakes id in soundEntryId):
+    // the meteor and infernal impacts shake the camera (Wow.exe 0x704C30).
+    std::unordered_map<uint32_t, std::vector<EffectSound>> modelEffectShakes_;
     uint32_t nextSpellVisualModelId_ = 999000; // Reserved range 999000-999799
     uint32_t nextProjectileModelId_ = 998000;  // Reserved range 998000-998999
     std::unordered_map<std::string, uint32_t> projectileModelIds_;

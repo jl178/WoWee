@@ -1105,6 +1105,18 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
             const bool isCastRelease = std::memcmp(m2Data.data() + base, "$CSL", 4) == 0 ||
                                        std::memcmp(m2Data.data() + base, "$CSR", 4) == 0 ||
                                        std::memcmp(m2Data.data() + base, "$CST", 4) == 0;
+            // $WTB / $WTT: the ends of a weapon's swing trail.
+            if (std::memcmp(m2Data.data() + base, "$WTB", 4) == 0 ||
+                std::memcmp(m2Data.data() + base, "$WTT", 4) == 0) {
+                auto& pt = m2Data[base + 3] == 'B' ? model.weaponTrailBottom : model.weaponTrailTop;
+                glm::vec3 pos(0.0f);
+                std::memcpy(&pos, m2Data.data() + base + 12, sizeof(float) * 3);
+                if (std::isfinite(pos.x) && std::isfinite(pos.y) && std::isfinite(pos.z)) {
+                    pt.bone = rd32(base + 8);
+                    pt.position = pos;
+                }
+                continue;
+            }
             if (isCastRelease && wotlkEvents) {
                 if (model.castReleaseEvents.size() < model.sequences.size())
                     model.castReleaseEvents.resize(model.sequences.size());
@@ -1179,7 +1191,9 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
             }
             // $SND: a spell effect model's sound, the data field a
             // SoundEntries id, at its times in the birth sequence (index 0).
-            if (std::memcmp(m2Data.data() + base, "$SND", 4) == 0) {
+            if (std::memcmp(m2Data.data() + base, "$SND", 4) == 0 ||
+                std::memcmp(m2Data.data() + base, "$SHK", 4) == 0) {
+                const bool shake = m2Data[base + 2] == 'H';
                 const uint32_t soundId = rd32(base + 4);
                 if (soundId == 0 || !wotlkEvents || model.sequences.empty()) continue;
                 if (!(model.sequences[0].flags & kM2SeqFlagEmbeddedData)) continue;
@@ -1189,7 +1203,7 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                 const uint32_t ofsTs = rd32(ofsArrays + 4);
                 if (nTs == 0 || nTs > 64 || ofsTs + nTs * sizeof(uint32_t) > m2Data.size()) continue;
                 for (uint32_t ts : readArray<uint32_t>(m2Data, ofsTs, nTs))
-                    model.effectSounds.push_back({soundId, ts});
+                    (shake ? model.effectShakes : model.effectSounds).push_back({soundId, ts});
                 continue;
             }
             // The other sound-making events ($CSS, $CAH, $AHn, $FDn, $WNG)
@@ -1250,6 +1264,10 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
             std::sort(list.begin(), list.end());
         }
         std::sort(model.effectSounds.begin(), model.effectSounds.end(),
+                  [](const M2Model::EffectSound& a, const M2Model::EffectSound& b) {
+                      return a.timeMs < b.timeMs;
+                  });
+        std::sort(model.effectShakes.begin(), model.effectShakes.end(),
                   [](const M2Model::EffectSound& a, const M2Model::EffectSound& b) {
                       return a.timeMs < b.timeMs;
                   });

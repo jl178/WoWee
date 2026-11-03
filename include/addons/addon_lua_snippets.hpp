@@ -1304,32 +1304,6 @@ local rowHeight = about:GetHeight() or 21
 GameMenuFrame:SetHeight((GameMenuFrame:GetHeight() or 240) + rowHeight + 1)
 )LUA";
 
-inline constexpr const char* kMinimapNorthTagLua = R"LUA(
--- Both of them, because which one is showing depends on a CVar.
---
--- Minimap_UpdateRotationSetting shows the compass ring when rotateMinimap is 1
--- and the plain N tag when it is 0, and hides the other. Taking only the N tag
--- away left the compass - which carries its own N at the top - sitting over the
--- zone name on any config with rotation turned on, which is what was still
--- being seen after the first attempt at this.
-for _, name in ipairs({ "MinimapNorthTag", "MinimapCompassTexture" }) do
-local tag = _G[name]
-if tag then
-    if tag.Hide then tag:Hide() end
-    if tag.SetAlpha then tag:SetAlpha(0) end
-    -- Take the Show away rather than racing it.
-    --
-    -- Hiding it once and hooking Minimap_UpdateRotationSetting was not enough:
-    -- this snippet runs while the interface is still coming up, so the hook
-    -- either found no function to attach to yet or the tag was shown again by
-    -- one of the other paths that touch it, and the N was back over the zone
-    -- name by the time anyone looked. A texture that cannot be shown stays
-    -- hidden whoever asks.
-    tag.Show = function() end
-end
-end
-)LUA";
-
 inline constexpr const char* kRemovedControlsLua = R"LUA(
 local kRemoved = {
     -- Sound is mixed in software at the device's own rate: no quality tiers,

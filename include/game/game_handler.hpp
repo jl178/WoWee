@@ -1183,6 +1183,35 @@ public:
         [[nodiscard]] bool isExpired() const { return age >= LIFETIME; }
     };
     const std::vector<MinimapPing>& getMinimapPings() const { return minimapPings_; }
+
+    /// The minimap's radius in yards and the angle it is turned by (the
+    /// player's facing with rotateMinimap, else 0), from whoever draws it.
+    /// The stock MINIMAP_PING carries the ping as a fraction of the map, so
+    /// the map has to be asked.
+    /// Town tracking - Find Repair, Flight Master, Mailbox, Low Level Quests
+    /// and the rest - as an index into ui::minimap_stock::kTownTracking, -1
+    /// for none. The client holds one tracking at a time (0x00BEBA64 for
+    /// these, 0x00BEBA68 for a tracking spell): choosing a town entry cancels
+    /// the tracking aura, and a tracking aura arriving clears the town entry.
+    [[nodiscard]] int activeTownTracking() const { return activeTownTracking_; }
+    /// Sets it and fires MINIMAP_UPDATE_TRACKING, as 0x0057E070 does.
+    void setActiveTownTracking(int index);
+    /// The tracking spell whose aura the player has, 0 for none.
+    [[nodiscard]] uint32_t activeTrackingSpell() const;
+    /// Called when the player's auras are rebuilt: a tracking aura that was
+    /// not there before ends the town tracking (0x0057EA30).
+    void noteTrackingAuras();
+
+    using MinimapViewProvider = std::function<bool(float& radius, float& bearing)>;
+    void setMinimapViewProvider(MinimapViewProvider cb) { minimapViewProvider_ = std::move(cb); }
+    /// A ping arrived, or the player made one: remember it and announce it
+    /// the way 0x0057EB80 does - MINIMAP_PING with the pinging unit
+    /// ("player", "partyN", "raidN") and the spot as a fraction of the map's
+    /// width east and north of the player. `serverX/Y` are world (wire) order.
+    void notifyMinimapPing(uint64_t senderGuid, float serverX, float serverY);
+    /// Minimap:GetPingPosition (0x0057EFE0): the last ping relative to where
+    /// the player stands now, as fractions of the map. False with no ping.
+    bool minimapPingPosition(float& fx, float& fy) const;
     void tickMinimapPings(float dt) {
         for (auto& p : minimapPings_) p.age += dt;
         minimapPings_.erase(
@@ -3187,6 +3216,14 @@ public:
         auto it = taxiNpcHasRoutes_.find(guid);
         return it != taxiNpcHasRoutes_.end() && it->second;
     }
+    /// SMSG_TAXINODE_STATUS's answer for a flight master: true when the
+    /// player knows its node, false when not, nothing before it arrives. The
+    /// minimap marks an unknown one with the green ! (0x006D5FC0).
+    std::optional<bool> taxiNodeKnown(uint64_t guid) const {
+        auto it = taxiNpcHasRoutes_.find(guid);
+        if (it == taxiNpcHasRoutes_.end()) return std::nullopt;
+        return it->second;
+    }
 
     // Vehicle (WotLK). "In a vehicle" is the player sitting in a vehicle's
     // seat (its movement on a transport that is a unit, 0x74B8B0); the id is
@@ -4683,6 +4720,11 @@ private:
     uint32_t weaponProficiency_ = 0;  // bitmask from SMSG_SET_PROFICIENCY itemClass=2
     uint32_t armorProficiency_  = 0;  // bitmask from SMSG_SET_PROFICIENCY itemClass=4
     std::vector<MinimapPing> minimapPings_;
+    MinimapViewProvider minimapViewProvider_;
+    int activeTownTracking_ = -1;
+    uint32_t lastTrackingAuraSpell_ = 0;
+    bool haveMinimapPing_ = false;
+    float minimapPingServerX_ = 0.0f, minimapPingServerY_ = 0.0f;  // 0x00BEBA8C/90
     uint64_t pendingGameObjectInteractGuid_ = 0;
     // Owned fishing bobber whose bite animation has fired. Keeping this explicit
     // lets the UI target/reel it even while GAMEOBJECT_QUERY metadata is pending.

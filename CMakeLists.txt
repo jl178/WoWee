@@ -920,6 +920,7 @@ set(WOWEE_SOURCES
     src/rendering/camera_controller.cpp
     src/rendering/material.cpp
     src/rendering/terrain_renderer.cpp
+    src/rendering/terrain_horizon.cpp
     src/rendering/shadow_params.cpp
     src/rendering/terrain_manager.cpp
     src/rendering/frustum.cpp
@@ -991,6 +992,7 @@ set(WOWEE_SOURCES
     src/rendering/mount_dust.cpp
     src/rendering/levelup_effect.cpp
     src/rendering/spell_visual_system.cpp
+    src/rendering/spell_chain_effect.cpp
     src/rendering/post_process_pipeline.cpp
     src/rendering/overlay_system.cpp
     src/rendering/animation_controller.cpp
@@ -2565,6 +2567,7 @@ add_executable(wowee_editor
     src/rendering/vk_pipeline.cpp
     src/rendering/camera.cpp
     src/rendering/terrain_renderer.cpp
+    src/rendering/terrain_horizon.cpp
     src/rendering/shadow_params.cpp
     src/rendering/m2_renderer.cpp
     src/rendering/m2_renderer_instance.cpp

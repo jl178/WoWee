@@ -245,12 +245,14 @@ std::vector<TerrainVertex> TerrainMeshGenerator::generateVertices(const MapChunk
             vertex.color[2] = static_cast<float>(c[0]) * (2.0f / 255.0f);
         }
 
-        // Layer UV for alpha map sampling (0-1 range per chunk).
-        // Sample at texel centers of the 64x64 alpha map to avoid edge seams.
-        constexpr float alphaTexels = 64.0f;
-        constexpr float alphaStep = (alphaTexels - 1.0f) / 8.0f; // 63 texels across 8 quads
-        vertex.layerUV[0] = (offsetX * alphaStep + 0.5f) / alphaTexels;
-        vertex.layerUV[1] = (offsetY * alphaStep + 0.5f) / alphaTexels;
+        // Layer UV for the alpha and shadow maps: 0 to 1 across the chunk,
+        // the whole 64 texels, as the stock vertex program has it - the
+        // chunk's offset times 1/33.33 (terrain.bls, the last texture's c18+n
+        // from 0x7d0050). The last row and column of a four-bit map are a
+        // copy of the ones before (decodeLayerAlpha), so the edge of a chunk
+        // reads the last painted texel, clamped.
+        vertex.layerUV[0] = offsetX / 8.0f;
+        vertex.layerUV[1] = offsetY / 8.0f;
 
         vertices.push_back(vertex);
     }

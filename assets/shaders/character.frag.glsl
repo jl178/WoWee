@@ -60,6 +60,10 @@ layout(set = 1, binding = 1) uniform CharMaterial {
     int combiner;
     int texStages;
     int blendMode;
+    // The model's colour (CM2Model +0x180): scales the diffuse light only.
+    float diffuseTintR;
+    float diffuseTintG;
+    float diffuseTintB;
 };
 
 layout(set = 1, binding = 2) uniform sampler2D uNormalHeightMap;
@@ -439,7 +443,8 @@ void main() {
         // Outdoors: the world's ambient and diffuse bands and the sun, the
         // ambient boosted for units and clamped (0x7C1730, flag 0x8000).
         vec3 outAmb = rtAmbient(rt, min(ambientColor.rgb * amul, vec3(1.0)));
-        vec3 outLit = outAmb + shadow * diff * lightColor.rgb;
+        vec3 diffuseTint = vec3(diffuseTintR, diffuseTintG, diffuseTintB);
+        vec3 outLit = outAmb + shadow * diff * lightColor.rgb * diffuseTint;
         // Indoors (0x7C1AD0): the building's colour split into a diffuse
         // whose brightest channel is raised to 168/255 and an ambient whose
         // brightest channel is capped at 96/255, lit from the fixed
@@ -452,7 +457,7 @@ void main() {
         vec3 inAmb = (m > 96.0 / 255.0) ? ic * ((96.0 / 255.0) / m) : ic;
         inAmb = rtAmbient(rt, min(inAmb * amul, vec3(1.0)));
         float inN = max(dot(norm, normalize(vec3(0.30822, 0.30822, 0.9))), 0.0);
-        vec3 inLit = inAmb + inN * inDiffC;
+        vec3 inLit = inAmb + inN * inDiffC * diffuseTint;
         // shadowParams.w: the eased indoor factor (stock eases the ambient
         // over 0.5 s and snaps the diffuse; one factor here).
         float indoor = shadowParams.w;

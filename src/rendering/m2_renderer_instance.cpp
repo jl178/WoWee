@@ -662,6 +662,10 @@ void M2Renderer::clear() {
             // invalidated whatever was here, so a run that does not re-allocate
             // was leaving a dangling set behind to be bound.
             glowTexDescSet_ = VK_NULL_HANDLE;
+            // The effect strips' sets went with the pool, and their
+            // textures with the model data.
+            effectTexSets_.clear();
+            effectStrips_.clear();
             // Valid, not merely present. A texture whose upload or view
             // creation failed writes a null view into this set, and the glow
             // pass samples it - the same shape as the particle and ribbon sets.

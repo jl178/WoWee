@@ -5,6 +5,8 @@
 #include "rendering/vk_shader.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/shadow_draw_list.hpp"
+#include "rendering/stock_terrain.hpp"
+#include "rendering/terrain_horizon.hpp"
 
 #include "pipeline/terrain_mesh.hpp"
 #include "pipeline/blp_loader.hpp"
@@ -56,6 +58,10 @@ struct TerrainChunkGPU {
     // Baked shadow (MCSH) as light, binding 8; null = the opaque fallback, lit.
     VkTexture* shadowTexture = nullptr;
     int layerCount = 0;
+    /// Per layer, the MCLY flags and bit 16 for a `_s` texture; and the
+    /// map's big-alpha flag. What TerrainParams hands the shader.
+    int32_t layerFlags[4] = {0, 0, 0, 0};
+    bool bigAlpha = false;
 
     // World position for culling
     float worldX = 0.0f;
@@ -191,6 +197,12 @@ public:
     [[nodiscard]] bool isFogEnabled() const { return fogEnabled; }
     void setViewDistance(float distance) { maxViewDistance_ = std::clamp(distance, 400.0f, 2400.0f); }
 
+    /// The highlight's colour, the sun's (DayNight channel 9, the stock c27),
+    /// set each frame; drawn only where a `_s` tileset was loaded.
+    void setSunSpecular(const glm::vec3& colour) { sunSpecular_ = colour; }
+    /// The map's WDL, for the distant mountains (TerrainHorizon). Main thread.
+    void setHorizonTiles(const std::vector<stock_terrain::WdlTile>& tiles);
+
     void setShadowMap(VkDescriptorImageInfo /*depthInfo*/, const glm::mat4& /*lightSpaceMat*/) {}
     void clearShadowMap() {}
 
@@ -226,6 +238,7 @@ private:
     /// tile's texture list falls back to white rather than going unbound.
     void bindChunkTextures(TerrainChunkGPU& gpuChunk,
                            const pipeline::ChunkMesh& chunk,
+                           const pipeline::TerrainMesh& mesh,
                            const std::vector<std::string>& texturePaths,
                            int tileX, int tileY, int chunkX, int chunkY);
 
@@ -236,6 +249,10 @@ private:
 
     VkContext* vkCtx = nullptr;
     RtScene* rtScene_ = nullptr;
+    glm::vec3 sunSpecular_{0.0f};
+    /// WOWEE_TERRAIN_AB_PERIOD's off phase: no highlight, no horizon.
+    bool stockExtrasOff_ = false;
+    std::unique_ptr<TerrainHorizon> horizon_;
     void registerRtChunk(TerrainChunkGPU& gpuChunk, const pipeline::ChunkMesh& chunk);
     pipeline::AssetManager* assetManager = nullptr;
 

@@ -130,6 +130,11 @@ enum class UF : uint16_t {
     /// separates them is UNIT_FLAG_PLAYER_CONTROLLED and the creature type.
     UNIT_FIELD_SUMMONEDBY_LO,
     UNIT_FIELD_SUMMONEDBY_HI,
+    /// Whom the unit channels at (two fields, low half first): a channel
+    /// kit's chain effect runs to them (Drain Life, Mind Flay). Index 20 in
+    /// all four tables - TARGET 16/18 and PERSUADED 18 come before it.
+    UNIT_FIELD_CHANNEL_OBJECT_LO,
+    UNIT_FIELD_CHANNEL_OBJECT_HI,
 
     // GameObject fields
     GAMEOBJECT_DISPLAYID,

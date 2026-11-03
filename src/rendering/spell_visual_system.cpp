@@ -2,6 +2,8 @@
 #include "rendering/m2_renderer.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/character_renderer.hpp"
+#include "rendering/camera.hpp"
+#include "rendering/camera_controller.hpp"
 #include "rendering/placement_transform.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
@@ -152,6 +154,9 @@ void SpellVisualSystem::loadSpellVisualDbc() {
     // 37 Flags: the kit's play flags (0x20 a state loops Stand instead of
     // Hold, 0x100 the caster keeps its weapons out).
     uint32_t kitFlagsField = kitLayout ? kitLayout->tryField("Flags") : kNone;
+    // 16 ShakeID, 17-20 CharProc, 21-36 CharParamZero..Three (each [4]).
+    uint32_t kitShakeField = kitLayout ? kitLayout->tryField("ShakeID") : kNone;
+    uint32_t kitProcField = kitLayout ? kitLayout->tryField("CharProc") : kNone;
 
     // Load SpellVisualEffectName.dbc - ID → M2 path
     auto fxDbc = cachedAssetManager_->loadDBC("SpellVisualEffectName.dbc");
@@ -185,6 +190,8 @@ void SpellVisualSystem::loadSpellVisualDbc() {
             if (kitWorldField == kNone) kitWorldField = 14;
             if (kitSoundField == kNone) kitSoundField = 15;
             if (kitFlagsField == kNone) kitFlagsField = 37;
+            if (kitShakeField == kNone) kitShakeField = 16;
+            if (kitProcField == kNone) kitProcField = 17;
         }
         for (uint32_t i = 0; i < kitDbc->getRecordCount(); ++i) {
             uint32_t kitId = kitDbc->getUInt32(i, 0);
@@ -215,11 +222,53 @@ void SpellVisualSystem::loadSpellVisualDbc() {
                 row.soundId = snd > 0 ? static_cast<uint32_t>(snd) : 0;
             }
             if (kitFlagsField < fc) row.flags = kitDbc->getUInt32(i, kitFlagsField);
+            if (kitShakeField < fc) {
+                const int32_t shake = kitDbc->getInt32(i, kitShakeField);
+                row.shakeId = shake > 0 ? static_cast<uint32_t>(shake) : 0;
+            }
+            // CharProc[j] at procField + j, its parameters four columns
+            // apart after them (CharParamZero[j] .. CharParamThree[j]).
+            if (kitProcField + 19 < fc) {
+                for (uint32_t j = 0; j < 4; ++j) {
+                    KitProc& proc = row.procs[j];
+                    proc.type = kitDbc->getInt32(i, kitProcField + j);
+                    for (uint32_t q = 0; q < 4; ++q)
+                        proc.p[q] = kitDbc->getFloat(i, kitProcField + 4 + j + 4 * q);
+                    if (proc.type >= 0 && proc.type != 14) row.hasProcs = true;
+                }
+            }
             kitEffects += static_cast<uint32_t>(row.effects.size());
             // A kit that is only a sound (Blizzard's persistent area: the
-            // falling-ice clatter) or only a world effect is still a kit.
-            if (!row.effects.empty() || row.animId || row.startAnimId || row.soundId || !row.worldEffect.empty())
+            // falling-ice clatter), only a world effect or only a procedure
+            // (Chain Lightning's arcs) is still a kit.
+            if (!row.effects.empty() || row.animId || row.startAnimId || row.soundId ||
+                !row.worldEffect.empty() || row.hasProcs || row.shakeId)
                 kits_[kitId] = std::move(row);
+        }
+    }
+
+    // SpellVisualKitModelAttach.dbc (0 ID, 1 ParentSpellVisualKitID,
+    // 2 SpellVisualEffectNameID, 3 AttachmentID, 4-6 Offset, 7 Yaw, 8 Pitch,
+    // 9 Roll): more models a kit adds (Wow.exe 0x7FA9F0, 0x745230).
+    if (auto attachDbc = cachedAssetManager_->loadDBC("SpellVisualKitModelAttach.dbc");
+        attachDbc && attachDbc->isLoaded() && attachDbc->getFieldCount() >= 10) {
+        for (uint32_t i = 0; i < attachDbc->getRecordCount(); ++i) {
+            auto kIt = kits_.find(attachDbc->getUInt32(i, 1));
+            auto fxIt = effectPaths.find(attachDbc->getUInt32(i, 2));
+            if (fxIt == effectPaths.end()) continue;
+            if (kIt == kits_.end()) {
+                // A kit made only of attached models.
+                kIt = kits_.emplace(attachDbc->getUInt32(i, 1), KitRow{}).first;
+            }
+            KitModelAttach a;
+            a.path = fxIt->second;
+            a.attachment = attachDbc->getInt32(i, 3);
+            a.offset = glm::vec3(attachDbc->getFloat(i, 4), attachDbc->getFloat(i, 5),
+                                 attachDbc->getFloat(i, 6));
+            a.yaw = attachDbc->getFloat(i, 7);
+            a.pitch = attachDbc->getFloat(i, 8);
+            a.roll = attachDbc->getFloat(i, 9);
+            kIt->second.attaches.push_back(std::move(a));
         }
     }
 
@@ -309,6 +358,8 @@ void SpellVisualSystem::loadSpellVisualDbc() {
             v.missileDestination = attachmentOf(svDbc->getInt32(i, svMissileDestField), 34);
         // The missile flies from caster to target; it is never a stand-in
         // for a missing cast or impact kit.
+        if (const int32_t raw = readInt(i, svMissileField); raw == -1 || raw == -2)
+            v.weaponMissile = raw;
         if (const uint32_t eff = readField(i, svMissileField)) {
             auto fxIt = effectPaths.find(eff);
             if (fxIt != effectPaths.end()) { v.missilePath = fxIt->second; ++loadedMissile; }
@@ -417,8 +468,35 @@ void SpellVisualSystem::spawnKit(uint32_t kitId, const KitSpawn& spawn) {
     }
     if (!kit.worldEffect.empty())
         spawnKitModel(kitId, kit.worldEffect, SLOT_BASE, /*world=*/true, spawn);
+    // SpellVisualKitModelAttach: at an attachment of the unit, or at the
+    // kit's point (-1). At a point only the latter has a place (0x745230).
+    for (const auto& a : kit.attaches) {
+        if (spawn.atPoint && a.attachment >= 0) continue;
+        spawnKitModel(kitId, a.path, SLOT_BASE, /*world=*/a.attachment < 0, spawn, &a);
+    }
     for (size_t i = before; i < activeSpellVisuals_.size(); ++i)
         longest = std::max(longest, activeSpellVisuals_[i].duration);
+
+    // The kit's camera shake, from where it plays (0x73B140 -> 0x7FA620).
+    if (kit.shakeId != 0) playCameraShake(kit.shakeId, spawn.feetPos);
+
+    // Its character procedures, which last as long as a carrier visual of
+    // the kit's own lifetime: a state's until the aura goes, a channel's
+    // until it ends, a cast's or an impact's as long as its models.
+    if (kit.hasProcs) {
+        if (const uint32_t token = applyKitProcs(kitId, kit, spawn)) {
+            SpellVisualInstance carrier;
+            carrier.duration = spawn.lifetime > 0.0f ? spawn.lifetime
+                             : (longest > 0.0f ? longest : SPELL_VISUAL_DEFAULT_DURATION);
+            carrier.isPrecast = spawn.isPrecast;
+            carrier.ownerGuid = spawn.ownerGuid;
+            carrier.stateGuid = spawn.stateGuid;
+            carrier.stateVisual = spawn.stateVisual;
+            carrier.areaOwner = spawn.areaOwner;
+            carrier.procToken = token;
+            activeSpellVisuals_.push_back(carrier);
+        }
+    }
 
     if (kit.soundId != 0) {
         glm::mat4 xf;
@@ -449,13 +527,26 @@ void SpellVisualSystem::spawnKit(uint32_t kitId, const KitSpawn& spawn) {
 }
 
 bool SpellVisualSystem::spawnKitModel(uint32_t kitId, const std::string& path, uint8_t slot,
-                                      bool world, const KitSpawn& spawn) {
+                                      bool world, const KitSpawn& spawn,
+                                      const KitModelAttach* attach) {
     const uint32_t modelId = loadSpellModel(path);
     if (modelId == 0) return false;
     glm::mat4 xf;
     bool attached = false;
-    if (world) xf = glm::translate(glm::mat4(1.0f), spawn.feetPos);
+    // An attached model's own offset and turn (radians) from its point.
+    glm::mat4 local(1.0f);
+    if (attach) {
+        local = glm::translate(glm::mat4(1.0f), attach->offset);
+        local = glm::rotate(local, attach->yaw, glm::vec3(0.0f, 0.0f, 1.0f));
+        local = glm::rotate(local, attach->pitch, glm::vec3(0.0f, 1.0f, 0.0f));
+        local = glm::rotate(local, attach->roll, glm::vec3(1.0f, 0.0f, 0.0f));
+    }
+    if (world) xf = glm::translate(glm::mat4(1.0f), spawn.feetPos) * local;
+    else if (attach)
+        attached = attachmentTransform(attach->attachment, spawn.attachInstanceId, spawn.feetPos,
+                                       1.0f, xf);
     else attached = slotTransform(slot, spawn.attachInstanceId, spawn.feetPos, xf);
+    if (attach && !world) xf = xf * local;
     const uint32_t instanceId =
         m2Renderer_->createInstance(modelId, glm::vec3(xf[3]), glm::vec3(0.0f), 1.0f);
     if (instanceId == 0) {
@@ -501,6 +592,10 @@ bool SpellVisualSystem::spawnKitModel(uint32_t kitId, const std::string& path, u
     sv.stateGuid = spawn.stateGuid;
     sv.stateVisual = spawn.stateVisual;
     sv.areaOwner = spawn.areaOwner;
+    if (attach && !world) {
+        sv.rawAttachment = attach->attachment;
+        sv.attachLocal = local;
+    }
     activeSpellVisuals_.push_back(sv);
     LOG_DEBUG("SpellVisual: kit ", kitId, " slot ", static_cast<int>(slot), world ? " world" : "",
               " model ", path, " attached=", attached, " duration=", duration, "s");
@@ -639,6 +734,9 @@ void SpellVisualSystem::playSpellVisualPrecast(uint32_t visualId, const glm::vec
     s.isPrecast = true;
     s.loopBirth = !channel;  // a channel kit is a state kit to the stock client
     s.ownerGuid = casterGuid;
+    s.unitGuid = casterGuid;
+    s.visualId = visualId;
+    s.channelKit = channel;
     s.lifetime = (durationMs > 0)
         ? std::min(static_cast<float>(durationMs) / 1000.0f + 1.0f, SPELL_PRECAST_MAX_DURATION)
         : 1.0f;
@@ -704,6 +802,10 @@ uint32_t SpellVisualSystem::loadSpellModel(const std::string& modelPath) {
         for (const auto& s : model.effectSounds) sounds.push_back({s.soundEntryId, s.timeMs});
         if (sounds.empty()) modelEffectSounds_.erase(modelId);
         else modelEffectSounds_[modelId] = std::move(sounds);
+        std::vector<EffectSound> shakes;
+        for (const auto& sh : model.effectShakes) shakes.push_back({sh.soundEntryId, sh.timeMs});
+        if (shakes.empty()) modelEffectShakes_.erase(modelId);
+        else modelEffectShakes_[modelId] = std::move(shakes);
         LOG_INFO("SpellVisual: loaded model id=", modelId, " path=", modelPath);
     }
     return modelId;
@@ -711,7 +813,8 @@ uint32_t SpellVisualSystem::loadSpellModel(const std::string& modelPath) {
 
 void SpellVisualSystem::playSpellVisual(uint32_t visualId, const glm::vec3& worldPosition,
                                          bool useImpactKit, uint32_t attachInstanceId,
-                                         bool targetIsCaster) {
+                                         bool targetIsCaster, uint64_t unitGuid,
+                                         const std::vector<uint64_t>* targets) {
     if (!m2Renderer_ || visualId == 0) return;
     if (!cachedAssetManager_)
         cachedAssetManager_ = core::Application::getInstance().getAssetManager();
@@ -736,6 +839,9 @@ void SpellVisualSystem::playSpellVisual(uint32_t visualId, const glm::vec3& worl
     KitSpawn s;
     s.feetPos = worldPosition;
     s.attachInstanceId = attachInstanceId;
+    s.unitGuid = unitGuid;
+    s.visualId = visualId;
+    s.targets = targets;
     spawnKit(kitId, s);
 }
 
@@ -748,12 +854,13 @@ uint32_t SpellVisualSystem::visualFlags(uint32_t visualId) {
 bool SpellVisualSystem::hasSpellMissile(uint32_t visualId) {
     if (visualId == 0 || !ensureLoaded()) return false;
     auto it = visuals_.find(visualId);
-    return it != visuals_.end() && it->second.hasMissile && !it->second.missilePath.empty();
+    return it != visuals_.end() && it->second.hasMissile &&
+           (!it->second.missilePath.empty() || it->second.weaponMissile != 0);
 }
 
 void SpellVisualSystem::playSpellAreaVisual(uint32_t visualId, const glm::vec3& groundPos,
                                             float lifetimeSec, uint64_t channelOwnerGuid,
-                                            bool impactNow) {
+                                            bool impactNow, float radius) {
     if (visualId == 0 || !ensureLoaded()) return;
     auto vIt = visuals_.find(visualId);
     if (vIt == visuals_.end()) return;
@@ -761,6 +868,8 @@ void SpellVisualSystem::playSpellAreaVisual(uint32_t visualId, const glm::vec3& 
     KitSpawn s;
     s.feetPos = groundPos;
     s.atPoint = true;
+    s.visualId = visualId;
+    s.areaRadius = radius;
     // Shadowfury's burst, Mass Dispel's ring: once, where it was cast.
     spawnKit(v.instantAreaKit, s);
 
@@ -798,7 +907,8 @@ bool SpellVisualSystem::playSpellMissile(uint32_t visualId, const glm::vec3& sta
     // the stock client shows a missile for one, the spell it triggers has the
     // speed: Death Coil's damage spell 47632 flies the same visual at 24.
     if (!std::isfinite(speed) || speed <= 0.0f) return false;
-    if (loadSpellModel(visuals_.at(visualId).missilePath) == 0) return false;
+    if (visuals_.at(visualId).weaponMissile == 0 && loadSpellModel(visuals_.at(visualId).missilePath) == 0)
+        return false;
 
     PendingMissile p;
     p.visualId = visualId;
@@ -832,6 +942,7 @@ bool SpellVisualSystem::launchSpellMissile(const PendingMissile& p) {
     auto vIt = visuals_.find(visualId);
     if (vIt == visuals_.end()) return false;
     const VisualRow& v = vIt->second;
+    if (v.weaponMissile != 0) return launchWeaponMissile(p);
     const uint32_t modelId = loadSpellModel(v.missilePath);
     if (modelId == 0) return false;
 
@@ -933,6 +1044,50 @@ bool SpellVisualSystem::launchSpellMissile(const PendingMissile& p) {
               " distance=", distance, " speed=", speed, " eta=", distance / speed, "s",
               " motion=", motionId, " x", count, groundTarget ? " ground" : "");
     return launched;
+}
+
+// A weapon thrown as the missile (MissileModel -1 main hand, -2 off hand):
+// a copy of the caster's weapon model leaves its hand and spins to the target
+// at the spell's speed, and the impact plays where it lands.
+bool SpellVisualSystem::launchWeaponMissile(const PendingMissile& p) {
+    auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    auto vIt = visuals_.find(p.visualId);
+    if (!cr || p.casterInstanceId == 0 || vIt == visuals_.end()) return false;
+    const VisualRow& v = vIt->second;
+    const uint32_t hand = v.weaponMissile == -2 ? 2u : 1u;
+    glm::mat4 xf;
+    glm::vec3 start = p.start + glm::vec3(0.0f, 0.0f, 1.0f);
+    if (cr->getAttachmentTransform(p.casterInstanceId, hand, xf)) start = glm::vec3(xf[3]);
+    const uint32_t copy = cr->createWeaponCopy(p.casterInstanceId, hand, start);
+    if (copy == 0) return false;
+    glm::vec3 aim = p.end;
+    if (!p.groundTarget) {
+        attachmentTransform(v.missileDestination, p.targetInstanceId, p.end,
+                            kSlotAttach[SLOT_CHEST].fallbackHeight, xf);
+        aim = glm::vec3(xf[3]);
+    }
+    const float distance = glm::length(aim - start);
+    const float speed = std::max(p.speed, 1.0f);
+    float duration = distance / speed - p.waited;
+    duration = std::max(duration, distance / (speed * 2.0f));
+    const glm::vec3 d = aim - start;
+    glm::vec3 rotation(0.0f);
+    rotation.z = std::atan2(d.y, d.x);
+    PhysicalProjectile proj;
+    proj.instanceId = copy;
+    proj.start = start;
+    proj.end = aim;
+    proj.rotation = rotation;
+    proj.duration = std::max(duration, 0.05f);
+    proj.spin = true;
+    proj.impactVisual = p.impactAtEnd ? p.visualId : 0;
+    proj.targetInstanceId = p.groundTarget ? 0u : p.targetInstanceId;
+    proj.targetGuid = p.groundTarget ? 0u : p.targetGuid;
+    proj.destAttachment = v.missileDestination;
+    proj.endFeet = p.end;
+    physicalProjectiles_.push_back(proj);
+    if (v.missileSound != 0) playSoundEntry(v.missileSound, start, /*keepLoop=*/false);
+    return true;
 }
 
 // The missile models point down +X. Turn it to face along its path, with the
@@ -1177,6 +1332,12 @@ void SpellVisualSystem::retireVisual(SpellVisualInstance& sv) {
     if (sv.retiring) return;
     sv.retiring = true;
     sv.linger = 0.0f;
+    // The kit's procedures end with it: its tint, its lasting chain effect,
+    // its area's shards.
+    if (sv.procToken != 0) {
+        endProcs(sv.procToken);
+        sv.procToken = 0;
+    }
     if (sv.instanceId == 0) {
         if (sv.soundHandle) audio::AudioEngine::instance().fadeOutSound(sv.soundHandle, 300.0f);
         sv.soundHandle = 0;
@@ -1211,6 +1372,17 @@ void SpellVisualSystem::retireMissileModel(uint32_t instanceId) {
 
 void SpellVisualSystem::update(float deltaTime) {
     refreshUnitStates(deltaTime);
+    // The kits' character procedures: chain effects' bolts, area shards and
+    // the tints on units.
+    if (m2Renderer_) {
+        std::vector<StripOut> strips;
+        updateChainEffects(deltaTime, strips);
+        updateSwingTrails(deltaTime, strips);
+        if (!strips.empty() || hadStrips_) submitStrips(strips);
+        hadStrips_ = !strips.empty();
+    }
+    updateShards(deltaTime);
+    updateUnitTints(deltaTime);
     if (activeSpellVisuals_.empty() && physicalProjectiles_.empty() && spellMissiles_.empty() &&
         pendingMissiles_.empty())
         return;
@@ -1331,7 +1503,8 @@ void SpellVisualSystem::update(float deltaTime) {
                 spawnKit(vIt->second.impactAreaKit, s);
             }
         } else {
-            playSpellVisual(a.visualId, a.feet, /*useImpactKit=*/true, a.targetInstanceId);
+            playSpellVisual(a.visualId, a.feet, /*useImpactKit=*/true, a.targetInstanceId,
+                            /*targetIsCaster=*/false, a.targetGuid);
             if (missileImpactCallback_ && a.targetGuid != 0)
                 missileImpactCallback_(a.targetGuid, a.visualId);
         }
@@ -1382,10 +1555,26 @@ void SpellVisualSystem::update(float deltaTime) {
         // the way the stock client parents kit models to the unit.
         if (sv.attachInstanceId != 0 && charRenderer) {
             glm::mat4 xf;
-            if (slotTransform(sv.slot, sv.attachInstanceId, glm::vec3(0.0f), xf)) {
+            const bool rides = sv.rawAttachment >= 0
+                ? attachmentTransform(sv.rawAttachment, sv.attachInstanceId, glm::vec3(0.0f), 0.0f, xf)
+                : slotTransform(sv.slot, sv.attachInstanceId, glm::vec3(0.0f), xf);
+            if (sv.rawAttachment >= 0) xf = xf * sv.attachLocal;
+            if (rides) {
                 if (sv.instanceId) m2Renderer_->setInstanceTransform(sv.instanceId, xf);
                 if (sv.soundHandle) audioEngine.setSoundPosition(sv.soundHandle, glm::vec3(xf[3]));
                 sv.effectPos = glm::vec3(xf[3]);
+            }
+        }
+        // The model's own $SHK camera shakes, the same way (0x704C30).
+        if (sv.instanceId != 0 && !sv.retiring) {
+            auto shk = modelEffectShakes_.find(sv.modelId);
+            if (shk != modelEffectShakes_.end()) {
+                const float nowMs = sv.elapsed * 1000.0f;
+                while (sv.nextEffectShake < shk->second.size() &&
+                       static_cast<float>(shk->second[sv.nextEffectShake].timeMs) <= nowMs) {
+                    playCameraShake(shk->second[sv.nextEffectShake].soundEntryId, sv.effectPos);
+                    ++sv.nextEffectShake;
+                }
             }
         }
         // The model's own $SND events, each once as the birth sequence passes
@@ -1413,6 +1602,13 @@ void SpellVisualSystem::update(float deltaTime) {
     if (charRenderer) {
         for (auto it = physicalProjectiles_.begin(); it != physicalProjectiles_.end(); ) {
             it->elapsed += deltaTime;
+            // A thrown weapon follows its target.
+            if (it->targetInstanceId != 0) {
+                glm::mat4 xf;
+                if (attachmentTransform(it->destAttachment, it->targetInstanceId, it->endFeet,
+                                        kSlotAttach[SLOT_CHEST].fallbackHeight, xf))
+                    it->end = glm::vec3(xf[3]);
+            }
             const float t = std::min(it->elapsed / it->duration, 1.0f);
             charRenderer->setInstancePosition(
                 it->instanceId, glm::mix(it->start, it->end, t));
@@ -1423,6 +1619,16 @@ void SpellVisualSystem::update(float deltaTime) {
             }
             if (t >= 1.0f) {
                 charRenderer->removeInstance(it->instanceId);
+                if (it->impactVisual != 0) {
+                    const uint32_t visual = it->impactVisual;
+                    const uint64_t target = it->targetGuid;
+                    const uint32_t targetInst = it->targetInstanceId;
+                    const glm::vec3 feet = it->endFeet;
+                    it = physicalProjectiles_.erase(it);
+                    playSpellVisual(visual, feet, /*useImpactKit=*/true, targetInst, false, target);
+                    if (missileImpactCallback_ && target != 0) missileImpactCallback_(target, visual);
+                    continue;
+                }
                 it = physicalProjectiles_.erase(it);
             } else {
                 ++it;
@@ -1467,6 +1673,8 @@ void SpellVisualSystem::spawnUnitState(uint64_t guid, UnitStateRecord& rec) {
     s.lifetime = std::numeric_limits<float>::infinity();
     s.stateGuid = guid;
     s.stateVisual = rec.visualId;
+    s.unitGuid = guid;
+    s.visualId = rec.visualId;
     spawnKit(vIt->second.stateKit, s);
     rec.attachInstanceId = inst;
     rec.spawned = true;
@@ -1502,6 +1710,8 @@ void SpellVisualSystem::syncUnitStateVisuals(uint64_t guid, const std::vector<ui
                 KitSpawn s;
                 s.feetPos = feet;
                 s.attachInstanceId = unitInstanceOf_ ? unitInstanceOf_(guid) : 0u;
+                s.unitGuid = guid;
+                s.visualId = it->visualId;
                 spawnKit(vIt->second.stateDoneKit, s);
             }
         }
@@ -1579,8 +1789,516 @@ void SpellVisualSystem::reset() {
             renderer_->getCharacterRenderer()->removeInstance(projectile.instanceId);
     }
     physicalProjectiles_.clear();
+    // The procedures went with their kits.
+    chains_.clear();
+    swingTrails_.clear();
+    if (renderer_) {
+        if (auto* cr = renderer_->getCharacterRenderer())
+            for (const auto& f : frozenPoses_) cr->setInstanceAnimationFrozen(f.instanceId, false);
+    }
+    frozenPoses_.clear();
+    unitTints_.clear();
+    unitFlashes_.clear();
+    shardEmitters_.clear();
+    pendingShards_.clear();
+    if (renderer_) {
+        if (auto* cr = renderer_->getCharacterRenderer())
+            for (uint32_t inst : tintedInstances_) cr->setInstanceDiffuseTint(inst, glm::vec3(1.0f));
+    }
+    tintedInstances_.clear();
+    if (m2Renderer_) m2Renderer_->setEffectStrips({});
     // Reset the negative cache so models that failed during asset loading can retry.
     spellVisualFailedModels_.clear();
+}
+
+
+// ---------------------------------------------------------------------------
+// Character procedures (SpellVisualKit CharProc, Wow.exe 0x7265C0)
+// ---------------------------------------------------------------------------
+namespace {
+// A CharParam colour: 0xRRGGBB held in a float (0x720DB0 reads r from bits
+// 16-23).
+glm::vec3 procColour(float packed) {
+    const auto c = static_cast<uint32_t>(std::llround(std::max(packed, 0.0f)));
+    return glm::vec3(static_cast<float>((c >> 16) & 0xFFu), static_cast<float>((c >> 8) & 0xFFu),
+                     static_cast<float>(c & 0xFFu)) / 255.0f;
+}
+}  // namespace
+
+uint32_t SpellVisualSystem::applyKitProcs(uint32_t kitId, const KitRow& kit, const KitSpawn& spawn) {
+    (void)kitId;
+    const uint32_t token = nextProcToken_++;
+    if (nextProcToken_ == 0) nextProcToken_ = 1;
+    bool used = false;
+    for (const KitProc& proc : kit.procs) {
+        switch (proc.type) {
+            case 0:
+            case 12:
+                // A chain effect along the cast's targets, or to the channel
+                // target (0x7FC950 -> 0x7FC5F0). ParamZero the row, ParamTwo
+                // it lasts as long as the kit, ParamThree every hop starts at
+                // the source.
+                startChainEffect(static_cast<uint32_t>(std::lround(proc.p[0])), proc, spawn, token,
+                                 kit.animId);
+                used = true;
+                break;
+            case 1:
+                // The unit's model colour (0x7178E0 drops the spell's older
+                // one; the newest on the unit shows, 0x720DB0).
+                if (spawn.attachInstanceId != 0) {
+                    const uint32_t key = spawn.visualId;
+                    unitTints_.erase(std::remove_if(unitTints_.begin(), unitTints_.end(),
+                                                    [&](const UnitTint& t) {
+                                                        return t.instanceId == spawn.attachInstanceId &&
+                                                               key != 0 && t.key == key;
+                                                    }),
+                                     unitTints_.end());
+                    unitTints_.push_back({spawn.attachInstanceId, token, key, procColour(proc.p[0])});
+                    used = true;
+                }
+                break;
+            case 13:
+                // A flash: the colour for ParamOne seconds, then back to white
+                // over ParamTwo (0x71A9A0). Not tied to the kit.
+                if (spawn.attachInstanceId != 0) {
+                    unitFlashes_.erase(std::remove_if(unitFlashes_.begin(), unitFlashes_.end(),
+                                                      [&](const UnitFlash& f) {
+                                                          return f.instanceId == spawn.attachInstanceId;
+                                                      }),
+                                       unitFlashes_.end());
+                    unitFlashes_.push_back({spawn.attachInstanceId, procColour(proc.p[0]),
+                                            proc.p[1] * 1000.0f, proc.p[2] * 1000.0f, 0.0f});
+                }
+                break;
+            case 8:
+                // A swing trail on each weapon in hand: the colour ParamZero
+                // with ParamThree's alpha, for ParamTwo ms (0x7265C0 ->
+                // 0x715BA0). Not tied to the kit.
+                if (spawn.attachInstanceId != 0 && renderer_) {
+                    auto* cr = renderer_->getCharacterRenderer();
+                    const size_t n = cr ? cr->getWeaponAttachmentCount(spawn.attachInstanceId) : 0;
+                    for (size_t w = 0; w < n && w < 2; ++w) {
+                        // The swing restarts on a weapon already trailing (0x7E4FF0).
+                        swingTrails_.erase(std::remove_if(swingTrails_.begin(), swingTrails_.end(),
+                                                          [&](const SwingTrail& t) {
+                                                              return t.instanceId == spawn.attachInstanceId &&
+                                                                     t.weapon == w;
+                                                          }),
+                                           swingTrails_.end());
+                        SwingTrail t;
+                        t.instanceId = spawn.attachInstanceId;
+                        t.weapon = w;
+                        t.color = procColour(proc.p[0]);
+                        t.alpha = std::clamp(std::round(proc.p[3]), 0.0f, 255.0f);
+                        t.durationMs = std::max(proc.p[2], 0.0f);
+                        if (t.durationMs > 0.0f && t.alpha > 0.0f) swingTrails_.push_back(std::move(t));
+                    }
+                }
+                break;
+            case 11:
+                // The unit's pose held for as long as the kit lasts, at
+                // ParamZero seconds into its animation when that is set
+                // (0x6F80B0): Ice Block's frozen figure.
+                if (spawn.attachInstanceId != 0 && renderer_) {
+                    if (auto* cr = renderer_->getCharacterRenderer()) {
+                        cr->setInstanceAnimationFrozen(spawn.attachInstanceId, true,
+                                                       proc.p[0] > 0.0f ? proc.p[0] * 1000.0f : -1.0f);
+                        frozenPoses_.push_back({spawn.attachInstanceId, token});
+                        used = true;
+                    }
+                }
+                break;
+            case 9:
+                // An area's falling shards (DynamicObject_C 0x704F60 ->
+                // 0x7FBD70): the SpellVisualKitAreaModel row ParamZero, ParamOne
+                // of them a second, anywhere in the area's radius.
+                if (spawn.atPoint && spawn.areaRadius > 0.0f && proc.p[1] > 0.0f) {
+                    loadAreaModels();
+                    const auto idx = static_cast<size_t>(std::llround(proc.p[0])) & 0xFFu;
+                    ShardEmitter e;
+                    // A row past the table is Blizzard's (0x7FBD70).
+                    e.model = idx < areaModels_.size() ? areaModels_[idx]
+                            : (areaModels_.empty() ? std::string() : areaModels_.front());
+                    e.center = spawn.feetPos;
+                    e.radius = spawn.areaRadius;
+                    e.rate = proc.p[1];
+                    e.token = token;
+                    if (!e.model.empty()) {
+                        shardEmitters_.push_back(std::move(e));
+                        used = true;
+                    }
+                }
+                break;
+            default:
+                break;
+        }
+    }
+    return used ? token : 0u;
+}
+
+void SpellVisualSystem::endProcs(uint32_t token) {
+    if (token == 0) return;
+    unitTints_.erase(std::remove_if(unitTints_.begin(), unitTints_.end(),
+                                    [&](const UnitTint& t) { return t.token == token; }),
+                     unitTints_.end());
+    // A lasting chain goes with its kit; a timed one runs its hops out.
+    chains_.erase(std::remove_if(chains_.begin(), chains_.end(),
+                                 [&](const ChainEffect& c) { return c.token == token && c.persistent; }),
+                  chains_.end());
+    // A held pose lets go, unless another kit holds it too.
+    for (auto it = frozenPoses_.begin(); it != frozenPoses_.end();) {
+        if (it->token != token) { ++it; continue; }
+        const uint32_t inst = it->instanceId;
+        it = frozenPoses_.erase(it);
+        const bool still = std::any_of(frozenPoses_.begin(), frozenPoses_.end(),
+                                       [&](const FrozenPose& f) { return f.instanceId == inst; });
+        if (!still && renderer_)
+            if (auto* cr = renderer_->getCharacterRenderer()) cr->setInstanceAnimationFrozen(inst, false);
+    }
+    // The shards stop coming; those in the air land (0x7F9EE0).
+    shardEmitters_.erase(std::remove_if(shardEmitters_.begin(), shardEmitters_.end(),
+                                        [&](const ShardEmitter& e) { return e.token == token; }),
+                         shardEmitters_.end());
+}
+
+void SpellVisualSystem::updateUnitTints(float deltaTime) {
+    auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    if (!cr) return;
+    std::unordered_map<uint32_t, glm::vec3> want;
+    // The newest tint on each unit (the head of the unit's list).
+    for (const auto& t : unitTints_) want[t.instanceId] = t.color;
+    // A flash overrides it while it lasts, then fades to white (0x71A9A0).
+    for (auto it = unitFlashes_.begin(); it != unitFlashes_.end();) {
+        it->ageMs += deltaTime * 1000.0f;
+        if (it->ageMs < it->holdMs) {
+            want[it->instanceId] = it->color;
+        } else if (it->ageMs < it->holdMs + it->fadeMs) {
+            const float k = 1.0f - (it->ageMs - it->holdMs) / it->fadeMs;
+            want[it->instanceId] = glm::mix(glm::vec3(1.0f), it->color, k);
+        } else {
+            it = unitFlashes_.erase(it);
+            continue;
+        }
+        ++it;
+    }
+    for (auto it = tintedInstances_.begin(); it != tintedInstances_.end();) {
+        if (!want.count(*it)) {
+            cr->setInstanceDiffuseTint(*it, glm::vec3(1.0f));
+            it = tintedInstances_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (const auto& [inst, color] : want) {
+        cr->setInstanceDiffuseTint(inst, color);
+        if (tintedInstances_.insert(inst).second)
+            LOG_DEBUG("SpellVisual: tint on instance ", inst, " (", color.r, ", ", color.g, ", ", color.b, ")");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Chain effects (SpellChainEffects, Wow.exe 0x7FC5F0 / 0x7FA4D0 / 0x7FAE90)
+// ---------------------------------------------------------------------------
+void SpellVisualSystem::loadChainEffects() {
+    if (chainRowsLoaded_ || !cachedAssetManager_) return;
+    chainRowsLoaded_ = true;
+    auto dbc = cachedAssetManager_->loadDBC("SpellChainEffects.dbc");
+    if (!dbc || !dbc->isLoaded()) return;
+    for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+        ChainEffectRow row;
+        const bool ok = parseChainEffectRecord(
+            dbc->getRecord(i), dbc->getRecordSize(), dbc->getFieldCount(),
+            [&](uint32_t off) { return dbc->getStringByOffset(off); }, row);
+        if (ok) chainRows_[row.id] = std::move(row);
+    }
+    LOG_INFO("SpellVisual: loaded ", chainRows_.size(), " chain effects");
+}
+
+const ChainEffectRow* SpellVisualSystem::chainEffectRow(uint32_t id) {
+    if (!cachedAssetManager_) cachedAssetManager_ = core::Application::getInstance().getAssetManager();
+    loadChainEffects();
+    auto it = chainRows_.find(id);
+    return it != chainRows_.end() ? &it->second : nullptr;
+}
+
+void SpellVisualSystem::startChainEffect(uint32_t rowId, const KitProc& proc, const KitSpawn& spawn,
+                                         uint32_t token, uint32_t castAnim) {
+    const ChainEffectRow* first = chainEffectRow(rowId);
+    if (!first || spawn.unitGuid == 0) return;
+    // The hops' points: the unit the kit plays on, then whom it reaches - the
+    // channel's target for a channel kit (UNIT_FIELD_CHANNEL_OBJECT, 0x7265C0),
+    // else the cast's hit list in order (0x724F50 stores it backwards and
+    // 0x7FA4D0 reads it backwards again). The unit itself is left out.
+    std::vector<uint64_t> points{spawn.unitGuid};
+    uint64_t channelCaster = 0;
+    if (spawn.channelKit) {
+        channelCaster = spawn.unitGuid;
+        points.push_back(channelTargetOf_ ? channelTargetOf_(spawn.unitGuid) : 0);
+    } else if (spawn.targets) {
+        for (uint64_t g : *spawn.targets)
+            if (g != 0 && g != spawn.unitGuid) points.push_back(g);
+    }
+    if (points.size() < 2) return;
+    const bool persistent = proc.p[2] != 0.0f;
+    const bool star = proc.p[3] != 0.0f;
+    // The row and its combo rows each draw their own bolts along the hops.
+    std::vector<const ChainEffectRow*> rows{first};
+    for (uint32_t id : first->combo)
+        if (const ChainEffectRow* r = chainEffectRow(id)) rows.push_back(r);
+    for (const ChainEffectRow* row : rows) {
+        ChainEffect c;
+        c.row = row;
+        c.points = points;
+        c.channelCaster = channelCaster;
+        c.visualId = spawn.visualId;
+        c.castAnim = castAnim;
+        c.persistent = persistent;
+        c.token = token;
+        // Hop i starts SegDelay + i x DelayBetweenEffects ms in and lasts
+        // SegDuration (0x7FA4D0).
+        float startMs = static_cast<float>(row->segDelay);
+        for (size_t i = 0; i + 1 < points.size(); ++i) {
+            ChainHop hop;
+            hop.from = static_cast<uint16_t>(star ? 0 : i);
+            hop.to = static_cast<uint16_t>(i + 1);
+            hop.startMs = startMs;
+            hop.endMs = startMs + static_cast<float>(row->segDuration);
+            c.endMs = std::max(c.endMs, hop.endMs);
+            startMs += std::round(row->delayBetweenEffects);
+            c.hops.push_back(std::move(hop));
+        }
+        LOG_DEBUG("SpellVisual: chain effect ", row->id, " from 0x", std::hex, points[0], std::dec,
+                  " over ", points.size() - 1, " hop(s)", persistent ? " lasting" : "",
+                  channelCaster ? " (channel)" : "");
+        chains_.push_back(std::move(c));
+    }
+}
+
+// Where a bolt leaves the source unit (0x7FAA40): the visual's
+// MissileAttachment; else the cast animation's release point ($CSL); else
+// the chest.
+bool SpellVisualSystem::chainSourcePoint(const ChainEffect& c, uint64_t guid, glm::vec3& out) {
+    const uint32_t inst = unitInstanceOf_ ? unitInstanceOf_(guid) : 0u;
+    glm::vec3 feet(0.0f);
+    const bool hasFeet = unitFeetOf_ && unitFeetOf_(guid, feet);
+    if (inst == 0 && !hasFeet) return false;
+    auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    auto vIt = visuals_.find(c.visualId);
+    glm::mat4 xf;
+    if (cr && inst != 0) {
+        if (vIt != visuals_.end() && vIt->second.missileAttachment >= 0 &&
+            cr->getAttachmentTransform(inst, static_cast<uint32_t>(vIt->second.missileAttachment), xf)) {
+            out = glm::vec3(xf[3]);
+            return true;
+        }
+        uint32_t ms = 0;
+        for (uint32_t anim : {c.castAnim, 124u, 53u, 54u}) {
+            if (anim != 0 && cr->getCastReleaseEvent(inst, anim, ms, &out)) return true;
+        }
+    }
+    attachmentTransform(34, inst, feet, kSlotAttach[SLOT_CHEST].fallbackHeight, xf);
+    out = glm::vec3(xf[3]);
+    return true;
+}
+
+// Where a bolt reaches a unit (0x7FABF0): the visual's
+// MissileDestinationAttachment, as a missile lands.
+bool SpellVisualSystem::chainTargetPoint(const ChainEffect& c, uint64_t guid, glm::vec3& out) {
+    const uint32_t inst = unitInstanceOf_ ? unitInstanceOf_(guid) : 0u;
+    glm::vec3 feet(0.0f);
+    const bool hasFeet = unitFeetOf_ && unitFeetOf_(guid, feet);
+    if (inst == 0 && !hasFeet) return false;
+    int32_t dest = 34;
+    if (auto vIt = visuals_.find(c.visualId); vIt != visuals_.end()) dest = vIt->second.missileDestination;
+    glm::mat4 xf;
+    attachmentTransform(dest, inst, feet, kSlotAttach[SLOT_CHEST].fallbackHeight, xf);
+    out = glm::vec3(xf[3]);
+    return true;
+}
+
+void SpellVisualSystem::updateChainEffects(float deltaTime, std::vector<StripOut>& strips) {
+    if (chains_.empty()) return;
+    glm::vec3 camPos(0.0f);
+    if (renderer_ && renderer_->getCamera()) camPos = renderer_->getCamera()->getPosition();
+    for (auto it = chains_.begin(); it != chains_.end();) {
+        ChainEffect& c = *it;
+        c.ageMs += deltaTime * 1000.0f;
+        if (!c.persistent && c.ageMs >= c.endMs) { it = chains_.erase(it); continue; }
+        // A channel's target can arrive after the channel does, or change.
+        if (c.channelCaster != 0 && channelTargetOf_ && c.points.size() >= 2) {
+            if (const uint64_t t = channelTargetOf_(c.channelCaster)) c.points[1] = t;
+        }
+        for (auto& hop : c.hops) {
+            const bool live = c.persistent || (c.ageMs >= hop.startMs && c.ageMs < hop.endMs);
+            if (!live) {
+                if (!c.persistent && c.ageMs >= hop.endMs) hop.bolt.reset();
+                continue;
+            }
+            const uint64_t from = hop.from < c.points.size() ? c.points[hop.from] : 0;
+            const uint64_t to = hop.to < c.points.size() ? c.points[hop.to] : 0;
+            glm::vec3 a, b;
+            // An end that cannot be placed hides the bolt but keeps it
+            // (0x9A9770 clears its flag 2).
+            if (from == 0 || to == 0) continue;
+            const bool haveA = hop.from == 0 ? chainSourcePoint(c, from, a) : chainTargetPoint(c, from, a);
+            if (!haveA || !chainTargetPoint(c, to, b)) continue;
+            if (!hop.bolt) hop.bolt = std::make_unique<LightningBolt>(c.row, static_cast<uint32_t>(rng_()));
+            hop.bolt->update(deltaTime, a, b);
+            StripOut strip;
+            strip.texture = c.row->texture;
+            strip.gxBlend = c.row->blendMode;
+            hop.bolt->build(camPos, strip.verts);
+            if (strip.verts.size() >= 4) strips.push_back(std::move(strip));
+        }
+        ++it;
+    }
+}
+
+void SpellVisualSystem::updateSwingTrails(float deltaTime, std::vector<StripOut>& strips) {
+    auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    if (!cr) { swingTrails_.clear(); return; }
+    const float dtMs = deltaTime * 1000.0f;
+    for (auto it = swingTrails_.begin(); it != swingTrails_.end();) {
+        SwingTrail& t = *it;
+        // 0x7E4CE0: while the swing lasts each frame lays the blade's ends;
+        // the trail keeps alpha / step of them, step = the frame's ms / 300 x
+        // alpha, so 300 ms of blade; past half its duration the alpha drops
+        // a step a frame; under two edges it is gone.
+        if (t.elapsedMs < t.durationMs) {
+            glm::vec3 bottom, top;
+            if (cr->getWeaponTrailPoints(t.instanceId, t.weapon, bottom, top))
+                t.edges.emplace_back(bottom, top);
+        }
+        const float step = std::max(1.0f, std::round(dtMs * (1.0f / 300.0f) * t.alpha));
+        const int keep = static_cast<int>(t.alpha / step);
+        if (keep < 2 || (t.edges.empty() && t.elapsedMs >= t.durationMs)) { it = swingTrails_.erase(it); continue; }
+        while (static_cast<int>(t.edges.size()) > keep) t.edges.erase(t.edges.begin());
+        if (t.edges.size() >= 2) {
+            // Oldest first, each edge a step dimmer than the one before.
+            StripOut strip;
+            strip.gxBlend = 2;
+            float a = t.alpha;
+            for (const auto& [b, tp] : t.edges) {
+                a = std::max(a - step, 0.0f);
+                const glm::vec4 c(t.color, a / 255.0f);
+                strip.verts.push_back({b, c, glm::vec2(0.0f, 0.0f)});
+                strip.verts.push_back({tp, c, glm::vec2(0.0f, 1.0f)});
+            }
+            strips.push_back(std::move(strip));
+        }
+        if (t.elapsedMs > t.durationMs * 0.5f) t.alpha = std::max(t.alpha - step, 0.0f);
+        t.elapsedMs += dtMs;
+        ++it;
+    }
+}
+
+void SpellVisualSystem::submitStrips(std::vector<StripOut>& strips) {
+    if (!m2Renderer_) return;
+    std::vector<M2Renderer::EffectStrip> out;
+    out.reserve(strips.size());
+    for (auto& s : strips) {
+        M2Renderer::EffectStrip e;
+        e.texture = s.texture.empty() ? nullptr : m2Renderer_->loadEffectTexture(s.texture);
+        e.gxBlend = s.gxBlend;
+        e.verts.reserve(s.verts.size() * 9);
+        for (const auto& v : s.verts) {
+            e.verts.insert(e.verts.end(), {v.pos.x, v.pos.y, v.pos.z, v.color.r, v.color.g,
+                                           v.color.b, v.color.a, v.uv.x, v.uv.y});
+        }
+        out.push_back(std::move(e));
+    }
+    m2Renderer_->setEffectStrips(std::move(out));
+}
+
+// ---------------------------------------------------------------------------
+// Area shards (CharProc 9: the stock BlizzardObject, 0x7FB5B0 / 0x7FC220)
+// ---------------------------------------------------------------------------
+void SpellVisualSystem::loadAreaModels() {
+    if (areaModelsLoaded_ || !cachedAssetManager_) return;
+    areaModelsLoaded_ = true;
+    // SpellVisualKitAreaModel.dbc: 0 ID, 1 ModelName, 2 Enum. The procedure
+    // names a row by its place in the table (0x7FBD70 indexes the records).
+    auto dbc = cachedAssetManager_->loadDBC("SpellVisualKitAreaModel.dbc");
+    if (!dbc || !dbc->isLoaded() || dbc->getFieldCount() < 2) return;
+    for (uint32_t i = 0; i < dbc->getRecordCount(); ++i)
+        areaModels_.push_back(pipeline::modelPathToM2(dbc->getString(i, 1)));
+}
+
+void SpellVisualSystem::updateShards(float deltaTime) {
+    // 0x7FC220: Rate a second, the clock capped at 1/15 s a frame; each shard
+    // anywhere on the disc (a uniform fraction of the radius along a uniform
+    // direction), put down on the ground under it, and shown 0-510 ms later.
+    const float dt = std::min(deltaTime, 1.0f / 15.0f);
+    std::uniform_real_distribution<float> unit01(0.0f, 1.0f);
+    for (auto& e : shardEmitters_) {
+        e.accum += dt * e.rate;
+        while (e.accum > 1.0f) {
+            e.accum -= 1.0f;
+            const float r = unit01(rng_) * e.radius;
+            const float a = unit01(rng_) * glm::two_pi<float>();
+            glm::vec3 p = e.center + glm::vec3(std::cos(a) * r, std::sin(a) * r, 0.0f);
+            const float ground = groundHeightAt(p + glm::vec3(0.0f, 0.0f, 16.6667f));
+            if (std::isfinite(ground) && ground > e.center.z - 33.3333f && ground < e.center.z + 16.6667f)
+                p.z = ground;
+            const float delay = static_cast<float>(static_cast<int>(unit01(rng_) * 255.0f) & 0xFF) * 0.002f;
+            pendingShards_.push_back({e.model, p, delay});
+        }
+    }
+    for (size_t i = 0; i < pendingShards_.size();) {
+        PendingShard& ps = pendingShards_[i];
+        ps.delay -= deltaTime;
+        if (ps.delay > 0.0f) { ++i; continue; }
+        // One model, played once and gone (0x7FB2D0, 0x7FC200).
+        KitSpawn s;
+        s.feetPos = ps.pos;
+        s.atPoint = true;
+        spawnKitModel(0, ps.model, SLOT_BASE, /*world=*/true, s);
+        pendingShards_[i] = std::move(pendingShards_.back());
+        pendingShards_.pop_back();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Camera shakes (SpellEffectCameraShakes -> CameraShakes, 0x7FA620)
+// ---------------------------------------------------------------------------
+void SpellVisualSystem::loadCameraShakes() {
+    if (cameraShakesLoaded_ || !cachedAssetManager_) return;
+    cameraShakesLoaded_ = true;
+    auto shakes = cachedAssetManager_->loadDBC("CameraShakes.dbc");
+    auto spellShakes = cachedAssetManager_->loadDBC("SpellEffectCameraShakes.dbc");
+    if (!shakes || !shakes->isLoaded() || shakes->getFieldCount() < 8 || !spellShakes ||
+        !spellShakes->isLoaded() || spellShakes->getFieldCount() < 4)
+        return;
+    std::unordered_map<uint32_t, CameraShakeRow> rows;
+    for (uint32_t i = 0; i < shakes->getRecordCount(); ++i) {
+        CameraShakeRow r;
+        r.type = shakes->getInt32(i, 1);
+        r.direction = shakes->getInt32(i, 2);
+        r.amplitude = shakes->getFloat(i, 3);
+        r.frequency = shakes->getFloat(i, 4);
+        r.duration = shakes->getFloat(i, 5);
+        r.phase = shakes->getFloat(i, 6);
+        r.coefficient = shakes->getFloat(i, 7);
+        rows[shakes->getUInt32(i, 0)] = r;
+    }
+    for (uint32_t i = 0; i < spellShakes->getRecordCount(); ++i) {
+        auto& list = spellShakes_[spellShakes->getUInt32(i, 0)];
+        for (uint32_t k = 1; k <= 3; ++k)
+            if (auto it = rows.find(spellShakes->getUInt32(i, k)); it != rows.end())
+                list.push_back(it->second);
+    }
+}
+
+void SpellVisualSystem::playCameraShake(uint32_t spellShakeId, const glm::vec3& source) {
+    if (spellShakeId == 0 || !renderer_) return;
+    loadCameraShakes();
+    auto it = spellShakes_.find(spellShakeId);
+    if (it == spellShakes_.end()) return;
+    auto* cc = renderer_->getCameraController();
+    if (!cc) return;
+    for (const auto& r : it->second)
+        cc->addStockShake(r.type, r.direction, r.amplitude, r.frequency, r.duration, r.phase,
+                          r.coefficient, source);
 }
 
 } // namespace rendering

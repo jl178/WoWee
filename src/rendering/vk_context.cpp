@@ -710,12 +710,30 @@ bool VkContext::createLogicalDevice() {
     //
     // WOWEE_VK_NO_HOST_IMAGE_COPY=1 leaves all three off, the same as a device
     // that never offered them, so every texture takes the staging path.
-    static const bool noHostCopy = [] {
+    //
+    // Off by default on Intel. Mesa's ANV maps the memory of every image made
+    // with VK_IMAGE_USAGE_HOST_TRANSFER_BIT when it is bound
+    // (anv_image_bind_address -> anv_device_map_bo) and keeps the mapping for
+    // the image's life, from the start of the block to the image's end. VMA
+    // packs thousands of small textures (the terrain's 64x64 alpha maps) into
+    // one block, so each of them mapped up to ~150 MB of the same block: 4700
+    // mappings, 3 TB of address space and 6 GB of page tables a few seconds
+    // after entering the world, 43 GB of page tables before it was killed.
+    // WOWEE_VK_HOST_IMAGE_COPY=1 turns it back on there.
+    static const bool noHostCopyEnv = [] {
         const char* v = std::getenv("WOWEE_VK_NO_HOST_IMAGE_COPY");
         return v && *v && *v != '0';
     }();
-    if (noHostCopy) {
+    const bool intelMapsPerImage = gpuVendorId_ == 0x8086 && [] {
+        const char* v = std::getenv("WOWEE_VK_HOST_IMAGE_COPY");
+        return !(v && *v && *v != '0');
+    }();
+    const bool noHostCopy = noHostCopyEnv || intelMapsPerImage;
+    if (noHostCopyEnv) {
         LOG_WARNING("VK_EXT_host_image_copy disabled by WOWEE_VK_NO_HOST_IMAGE_COPY");
+    } else if (intelMapsPerImage) {
+        LOG_WARNING("VK_EXT_host_image_copy off on Intel: the driver maps every host-copy "
+                    "image's memory for the image's life (WOWEE_VK_HOST_IMAGE_COPY=1 forces it)");
     }
     const bool hostCopyDeps = !noHostCopy &&
         vkbPhysicalDevice_.enable_extension_if_present(VK_KHR_COPY_COMMANDS_2_EXTENSION_NAME) &&
