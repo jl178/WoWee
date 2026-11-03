@@ -29,6 +29,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
 #include "local_light_tiles.glsli"
 #include "wet_surface.glsli"
 #include "stock_fog.glsli"
+#include "stream_fade.glsli"
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
 
@@ -73,6 +74,7 @@ layout(location = 5) in vec3 Bitangent;
 layout(location = 6) flat in float SidnNight;
 layout(location = 7) in vec4 Layer2;
 layout(location = 8) in vec2 EnvCoord;
+layout(location = 9) flat in float StreamHide;  // stream_fade.glsli
 
 layout(location = 0) out vec4 outColor;
 
@@ -465,6 +467,15 @@ void main() {
         result += wetSurfaceSheen(normalize(mix(vertexNormal, norm, 0.5)), FragPos,
                                   length(viewPos.xyz - FragPos), wet, shadow);
     }
+    // Rain ripples in the puddles on exterior paving (wet_surface.glsli; wet
+    // is 0 indoors). rtParams.z is 0 while dry or with the setting off.
+    if (rtParams.z > 0.0) {
+        float rippleWidth = rainRippleWidth(FragPos.xy);
+        if (wet > 0.0) {
+            result += wetGroundRipples(vertexNormal, FragPos, length(viewPos.xyz - FragPos),
+                                       wet, rippleWidth);
+        }
+    }
 
     // WOWEE_WMO_EXTRAS: non-stock looks picked by texture name.
     if (emissive == 1) {
@@ -494,5 +505,8 @@ void main() {
     float dist = length(viewPos.xyz - FragPos);
     if ((stockFlags & 2) == 0) result = applyFog(result, FragPos, dist);
 
+    // A building that has just streamed in, dissolving in (after every
+    // texture read; see m2.frag).
+    if (streamFadeHidden(StreamHide)) discard;
     outColor = vec4(result, alpha);
 }

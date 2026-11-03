@@ -1,0 +1,35 @@
+// Soft particles - the "Soft particles" setting (not stock). Included by the
+// SOFT_PARTICLES builds of m2_particle_gpu.frag and m2_particle.frag only;
+// the stock builds of those shaders never see it.
+//
+// Those builds draw in the late particle pass (SoftParticlePass), a
+// single-sample pass after the scene has closed, with no depth attachment:
+// the scene's depth is a texture here instead (SOFT_DEPTH_SET, binding 0, the
+// one-sample depth - the scene's own without MSAA, its resolve with it). The
+// stock depth test (LESS_OR_EQUAL against what the scene wrote) is done here
+// against that texture, and where it passes, the particle thins out over the
+// last `range` yards in front of whatever is behind it, so a quad that cuts
+// into the ground or a wall fades to nothing at the cut instead of ending on
+// a hard line. Needs the PerFrame block's projection declared above it.
+
+layout(set = SOFT_DEPTH_SET, binding = 0) uniform sampler2D uSceneDepth;
+
+// View-space distance of a depth-buffer value, for a perspective projection
+// with depth 0..1 (GLM_FORCE_DEPTH_ZERO_TO_ONE): z_ndc = P22 + P32 / e.
+float softEyeDistance(float d) {
+    return projection[3][2] / (d + projection[2][2]);
+}
+
+// 0..1: how much of the particle shows at this pixel. Discards where the
+// scene is in front of it, as the depth test would. A range of 0 (quads laid
+// flat in the world, which lie on the ground by design) keeps the test and
+// skips the fade.
+float softParticleFade(float range) {
+    float scene = texelFetch(uSceneDepth, ivec2(gl_FragCoord.xy), 0).r;
+    if (gl_FragCoord.z > scene) discard;
+    if (range <= 0.0) return 1.0;
+    float gap = softEyeDistance(scene) - softEyeDistance(gl_FragCoord.z);
+    float f = clamp(gap / range, 0.0, 1.0);
+    // Smooth at both ends, so the fade has no visible start line either.
+    return f * f * (3.0 - 2.0 * f);
+}

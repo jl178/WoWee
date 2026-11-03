@@ -44,6 +44,10 @@ layout(location = 5) out vec3 Bitangent;
 layout(location = 6) flat out float SidnNight;
 layout(location = 7) out vec4 Layer2;   // xy: layer-2 UV, z: its blend
 layout(location = 8) out vec2 EnvCoord;
+// "Fade in new scenery": push.frame.y, how much of a just-streamed building
+// is still hidden (stream_fade.glsli). 0 for every other, and always with
+// the row off.
+layout(location = 9) flat out float StreamHide;
 
 void main() {
     vec3 pos = aPos;
@@ -92,6 +96,7 @@ void main() {
     TexCoord = aTexCoord;
     VertColor = aColor;
     SidnNight = push.frame.x;
+    StreamHide = push.frame.y;
 
     // The second layer MapObjUDiffuse_Comp passes on (attrib 7, secondary).
     Layer2 = aLayer2;

@@ -60,6 +60,8 @@ public:
     // The images behind getSceneFramebuffer(), so the scene can be copied for
     // water refraction after it is drawn but before the water goes over it.
     [[nodiscard]] VkImage getSceneColorImage() const;
+    /// The view of getSceneColorImage (the late particle pass draws on it).
+    [[nodiscard]] VkImageView getSceneColorImageView() const;
     [[nodiscard]] VkImage getSceneDepthImage() const;
     [[nodiscard]] bool sceneDepthIsMsaa() const;
 

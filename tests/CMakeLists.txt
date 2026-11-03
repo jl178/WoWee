@@ -1522,6 +1522,12 @@ wowee_add_test(test_indoor_shadows
 wowee_add_test(test_light_tiles
     SOURCES test_light_tiles.cpp)
 
+# ── test_phase2_enhancements ─────────────────────────────────
+# Soft particles' fade, the streamed-scenery fade-in and the rain ripples'
+# strength (docs/enhancements-plan.md E4, E2, E5).
+wowee_add_test(test_phase2_enhancements
+    SOURCES test_phase2_enhancements.cpp)
+
 # ── test_zone_ambience ─────────────────────────────────────────
 wowee_add_test(test_zone_ambience
     SOURCES test_zone_ambience.cpp

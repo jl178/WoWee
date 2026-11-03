@@ -88,6 +88,10 @@ struct TerrainChunkGPU {
     uint32_t rtMesh = ~0u;
     uint32_t rtInstance = ~0u;
 
+    /// "Fade in new scenery": the stream-fade clock when the chunk was
+    /// uploaded, or negative - always, with the row off.
+    float streamFadeStart = -1.0f;
+
     [[nodiscard]] bool isValid() const { return vertexBuffer != VK_NULL_HANDLE && indexBuffer != VK_NULL_HANDLE; }
 };
 
@@ -198,6 +202,13 @@ public:
     /// Terrain Highlights (stock CVar `specular`): the sun's glint on `_s`
     /// tilesets. Off, the push constant's power is 0 and terrain.vert skips it.
     void setSpecularEnabled(bool on) { specularEnabled_ = on; }
+    /// "Fade in new scenery" (Renderer::setEnhancements): a chunk uploaded
+    /// while it is on is drawn with terrain_fade.frag for its first
+    /// stream_fade::kSeconds, dissolving in. That pipeline is made when the
+    /// row first goes on and let go when it goes off; with it off nothing is
+    /// stamped and every chunk is drawn by the stock pipeline. Main thread.
+    void setStreamFadeIn(bool on);
+    void setStreamFadeClock(float seconds) { streamFadeClock_ = seconds; }
     void setViewDistance(float distance) { maxViewDistance_ = std::clamp(distance, 400.0f, 2400.0f); }
 
     /// The highlight's colour, the sun's (DayNight channel 9, the stock c27),
@@ -263,6 +274,12 @@ private:
     // Main pipelines
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkPipeline wireframePipeline = VK_NULL_HANDLE;
+    // Fade in new scenery (setStreamFadeIn): the fill pipeline with
+    // terrain_fade.frag, for chunks still dissolving in.
+    VkPipeline fadePipeline_ = VK_NULL_HANDLE;
+    bool streamFadeOn_ = false;
+    float streamFadeClock_ = 0.0f;
+    bool buildFadePipeline();
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout materialSetLayout = VK_NULL_HANDLE;
 

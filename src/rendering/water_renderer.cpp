@@ -59,8 +59,12 @@ struct WaterPushConstants {
     float depthRamp = 0.0f;      // LiquidInfo::depthRamp: 0 river, 1 ocean, 2 WMO water
     float texRotCos = 1.0f;      // the stage 1 rotation (LiquidInfo::texRotCos/Sin)
     float texRotSin = 0.0f;
+    // Rain ripples (not stock, the "Rain ripples" setting): how hard it rains
+    // for the rings, 0..1; 0 with the setting off or in dry weather, and
+    // water.frag then skips them. Only water.frag declares it.
+    float rainRipple = 0.0f;
 };
-static_assert(sizeof(WaterPushConstants) == 120, "the two shader declarations of this range are laid out for 120 bytes");
+static_assert(sizeof(WaterPushConstants) == 124, "water.frag's declaration of this range is laid out for 124 bytes");
 
 
 
@@ -1520,6 +1524,7 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         push.depthRamp = static_cast<float>(depthRamp);
         push.texRotCos = liquid.texRotCos;
         push.texRotSin = liquid.texRotSin;
+        push.rainRipple = rainRipple_;
 
         vkCmdPushConstants(cmd, pipelineLayout,
                             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

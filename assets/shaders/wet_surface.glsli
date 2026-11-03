@@ -25,6 +25,26 @@ vec3 wetSurfaceAlbedo(vec3 albedo, float wet) {
     return albedo * (1.0 - 0.20 * wet);
 }
 
+#include "rain_ripples.glsli"
+
+// Rain ripples on the ground (the "Rain ripples" setting): rtParams.z is how
+// hard it is raining for them, 0 while dry or with the setting off. Rings
+// form only where the ground would hold a puddle - level, soaked through,
+// and in the hollows a slow noise picks out - and near the eye. The caller
+// checks rtParams.z first, a uniform, so the width's derivative is taken in
+// uniform control flow and a dry frame costs one compare.
+vec3 wetGroundRipples(vec3 geomNormal, vec3 worldPos, float dist, float wet, float width) {
+    float level = smoothstep(0.88, 0.96, geomNormal.z);
+    float soaked = smoothstep(0.45, 0.85, wet);
+    float hollow = smoothstep(0.48, 0.62, rrNoise(worldPos.xy * 0.22));
+    float near = 1.0 - smoothstep(15.0, 28.0, dist);
+    float puddle = level * soaked * hollow * near;
+    if (puddle <= 0.0) return vec3(0.0);
+    vec2 slope = rainRippleSlope(worldPos.xy, fogParams.z, rtParams.z, width);
+    return rainRippleLight(slope, worldPos, viewPos.xyz,
+                           ambientColor.rgb * 0.7 + lightColor.rgb * 0.25) * puddle;
+}
+
 // The film's sheen, added to the lit colour before fog: a tight sun highlight
 // under the shadow, and a faint sky-coloured Fresnel rim. Faded out past the
 // middle distance, where it would only shimmer.

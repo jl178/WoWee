@@ -85,6 +85,10 @@ layout(location = 7) flat out float vHighlight;
 layout(location = 8) out vec2 TexCoord2;
 // x ambient, y diffuse (packed RGBA8), z 1 for a doodad lit by them.
 layout(location = 9) flat out uvec3 vWmoLight;
+// "Fade in new scenery": how much of a just-streamed doodad is still hidden,
+// from the instance flags' top byte (M2Renderer::streamFadeFlags). 0 for
+// everything else, always with the row off.
+layout(location = 10) flat out float vStreamHide;
 
 #include "m2_combiner.glsli"
 
@@ -378,6 +382,7 @@ void main() {
     vHighlight = instanceData[instIdx].highlight;
     vWmoLight = uvec3(instanceData[instIdx].wmoAmbient, instanceData[instIdx].wmoDiffuse,
                       (instanceData[instIdx].flags & 8) != 0 ? 1u : 0u);
+    vStreamHide = float((instFlags >> 24) & 0xFF) / 255.0;
 
     gl_Position = projection * view * worldPos;
     // A sky model sits on the far plane whatever its radius, so the depth

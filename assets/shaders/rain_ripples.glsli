@@ -1,0 +1,80 @@
+// Rain ripples - the "Rain ripples" setting (not stock). Drops ring the water
+// and the puddled ground while it rains. Shared by water.frag and, through
+// wet_surface.glsli's callers, terrain.frag and wmo.frag. Texture-free: the
+// surface is cut into cells, each cell takes at most one drop a cycle at a
+// spot and a moment of its own, and the drop's ring spreads and dies inside
+// the cell. Two layers of different size and pace overlap, so the pattern
+// has no grid to it.
+//
+// What comes back is the slope of the rings (the xy gradient of a height
+// that averages to nothing across a ring), which the callers turn into a
+// light that is as much darker on one side of a ring as brighter on the
+// other: the surface's colour at the ripple's mean is the stock colour.
+//
+// strength is how hard it rains for the ripples, 0..1 (the renderer eases it
+// from the weather; 0 with the setting off, and then nobody calls in).
+
+float rrHash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+// One layer. p in yards; cell the cell size; rate drops per cell a second
+// at full strength; w the ring's half width in yards.
+vec2 rrLayer(vec2 p, float t, float cell, float rate, float strength, float w) {
+    vec2 q = p / cell;
+    vec2 id = floor(q);
+    vec2 f = q - id;
+    float phase = rrHash(id);
+    float cyc = t * rate + phase;
+    float n = floor(cyc);
+    float age = cyc - n;
+    // Fewer drops in light rain: a cell sits a cycle out at random.
+    if (rrHash(id + vec2(n * 1.37, n * 0.71)) > strength) return vec2(0.0);
+    // Where in the cell, kept off its edges so the ring stays inside it.
+    vec2 c = vec2(0.3) + 0.4 * vec2(rrHash(id + vec2(n, 17.0)), rrHash(id + vec2(31.0, n)));
+    vec2 d = (f - c) * cell;              // yards from the drop
+    float dist = length(d);
+    float radius = age * 0.3 * cell;      // spreads to 0.3 of the cell
+    float x = (dist - radius) / w;
+    if (abs(x) > 3.0 || dist < 1e-4) return vec2(0.0);
+    // Height sin(pi x) e^(-x^2), fading as the ring spreads; its slope
+    // along the ring's radius.
+    float fade = (1.0 - age) * (1.0 - age);
+    float e = exp(-x * x);
+    float slope = (3.14159 * cos(3.14159 * x) - 2.0 * x * sin(3.14159 * x)) * e / w;
+    return d / dist * slope * fade * 0.006;
+}
+
+// The rings' slope at a point of the surface. w widens with the pixel's
+// footprint so a far ring blurs rather than shimmers.
+vec2 rainRippleSlope(vec2 worldXY, float t, float strength, float w) {
+    return rrLayer(worldXY, t, 0.6, 0.9, strength, w)
+         + rrLayer(worldXY + vec2(0.37, 0.71), t * 1.13 + 0.5, 0.9, 0.7, strength, w * 1.2);
+}
+
+// Smooth value noise, for where the ground holds puddles.
+float rrNoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = p - i;
+    f = f * f * (3.0 - 2.0 * f);
+    float a = rrHash(i), b = rrHash(i + vec2(1.0, 0.0));
+    float c = rrHash(i + vec2(0.0, 1.0)), d = rrHash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// The light a ring's slope catches: the side tilted toward the eye takes
+// the sky above it, the far side looks down into the surface, by the same
+// amount - so on average nothing changes. `sky` is the light to take.
+vec3 rainRippleLight(vec2 slope, vec3 worldPos, vec3 eyePos, vec3 sky) {
+    vec2 toEye = eyePos.xy - worldPos.xy;
+    float len = length(toEye);
+    if (len < 1e-3) return vec3(0.0);
+    return sky * dot(slope, toEye / len);
+}
+
+// The ring width for a pixel: about five centimetres, wider where a pixel
+// covers more than that.
+float rainRippleWidth(vec2 worldXY) {
+    vec2 fw = fwidth(worldXY);
+    return max(0.045, 0.75 * max(fw.x, fw.y));
+}

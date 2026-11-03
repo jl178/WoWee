@@ -29,6 +29,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
 #include "local_light_tiles.glsli"
 #include "stock_fog.glsli"
 #include "m2_combiner.glsli"
+#include "stream_fade.glsli"
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
 // The batch's second texture stage (white when it has one stage).
@@ -71,6 +72,7 @@ layout(location = 8) in vec2 TexCoord2;
 // A doodad of an interior WMO group (0x7c1150): x its ambient, y its
 // diffuse (packed RGBA8, from the MODD colour by 0x7c1ad0), z 1 when set.
 layout(location = 9) flat in uvec3 vWmoLight;
+layout(location = 10) flat in float vStreamHide;  // stream_fade.glsli
 
 layout(location = 0) out vec4 outColor;
 
@@ -665,5 +667,8 @@ void main() {
         if (blendMode >= 3) result *= tipFade;
     }
 
+    // A doodad that has just streamed in, dissolving in. After every
+    // texture read, so the pixels it drops take no derivative with them.
+    if (streamFadeHidden(vStreamHide)) discard;
     outColor = vec4(result, outAlpha);
 }

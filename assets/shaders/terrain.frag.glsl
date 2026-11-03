@@ -30,6 +30,17 @@ layout(set = 0, binding = 0) uniform PerFrame {
 #include "wet_surface.glsli"
 #include "stock_fog.glsli"
 
+#ifdef STREAM_FADE
+// terrain_fade.frag.spv, bound only for a chunk that has just streamed in
+// ("Fade in new scenery"): how much of it is still hidden, x of the vec4
+// after terrain.vert's model matrix and highlight (TerrainPush::streamFade).
+// The stock build has no discard at all, so it keeps its early depth test.
+layout(push_constant) uniform FadePush {
+    layout(offset = 80) vec4 streamFade;
+} fadePush;
+#include "stream_fade.glsli"
+#endif
+
 layout(set = 1, binding = 0) uniform sampler2D uBaseTexture;
 layout(set = 1, binding = 1) uniform sampler2D uLayer1Texture;
 layout(set = 1, binding = 2) uniform sampler2D uLayer2Texture;
@@ -337,8 +348,17 @@ void main() {
         result += wetSurfaceSheen(normalize(mix(geomNorm, norm, 0.5)), FragPos, fragDist,
                                   wet, shadow);
     }
+    // Rain ripples in the puddles (wet_surface.glsli); rtParams.z is 0 while
+    // dry or with the setting off.
+    if (rtParams.z > 0.0) {
+        float rippleWidth = rainRippleWidth(FragPos.xy);
+        if (wet > 0.0) result += wetGroundRipples(geomNorm, FragPos, fragDist, wet, rippleWidth);
+    }
 
     result = applyFog(result, FragPos, fragDist);
 
+#ifdef STREAM_FADE
+    if (streamFadeHidden(fadePush.streamFade.x)) discard;
+#endif
     outColor = vec4(result, 1.0);
 }

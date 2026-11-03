@@ -77,6 +77,7 @@ class RtScene;
 class RtLighting;
 class LootSparkles;
 class SunShafts;
+class SoftParticlePass;
 class ScreenCapture;
 
 class Renderer {
@@ -320,6 +321,25 @@ private:
     /// Whether the minimap follows water out of the scene pass, for the same
     /// reason the spray does - see syncSwimEffectsTargetPass.
     bool minimapDrawsWithWater_ = false;
+    /// Whether the minimap is drawn at the end of the late particle pass
+    /// instead (soft particles on, water still in the scene pass): that pass
+    /// draws after everything the scene pass holds, the minimap included,
+    /// and would put the particles over it.
+    bool minimapDrawsLate_ = false;
+
+    // Soft particles (the "Soft particles" row, SoftParticlePass). Decided
+    // once a frame in beginFrame, before anything is recorded: the M2
+    // renderer leaves its blended particles for the late pass only on a
+    // frame that will have one.
+    std::unique_ptr<SoftParticlePass> softParticlePass_;
+    bool softParticlesFrame_ = false;
+    bool softParticlesLateDone_ = false;
+    uint32_t softParticlesOffFrames_ = 0;
+    game::GameHandler* softParticlesGameHandler_ = nullptr;
+    void decideSoftParticles();
+    /// The late pass, at whichever point of the frame the scene pass closes
+    /// first; once a frame, and only on a frame decideSoftParticles allowed.
+    void recordSoftParticlePass(VkCommandBuffer cmd);
 
     void runDeferredWorldInitStep(float deltaTime);
 
@@ -554,6 +574,13 @@ private:
     uint32_t cameraLiquidType_ = 0;       // LiquidType the camera is in, 0 when not
     bool wetGroundEnabled_ = true;        // the "Wet ground in rain" setting
     float wetness_ = 0.0f;                // 0 dry .. 1 soaked, eased (WetGround); rtParams.w
+    float rainRipple_ = 0.0f;             // rain ripples: how hard it rains, eased (rain_ripples.hpp); rtParams.z
+    /// The clock "Fade in new scenery" stamps and reads (stream_fade.hpp):
+    /// drawn time, each frame's step held to a tenth of a second. A tile
+    /// that loads during a hitch - a teleport's reload draws nothing for
+    /// seconds - is stamped with the clock as it stood, and then fades in
+    /// over the frames that follow rather than having faded unseen.
+    float streamFadeClock_ = 0.0f;
     float terrainRelief_ = 1.0f;          // see setTerrainRelief
     bool cameraUnderwater_ = false;       // camera below the water's surface, for the audio
     glm::vec3 interiorAmbient_{0.5f};     // MOHD ambient of the WMO the camera is in

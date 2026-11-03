@@ -1,0 +1,18 @@
+// "Fade in new scenery" (not stock; rendering/stream_fade.hpp is the C++
+// twin). A streamed terrain chunk, building or doodad that has just arrived
+// is drawn with this fraction of its pixels dropped on a 4x4 ordered pattern,
+// shrinking to none over stream_fade::kSeconds: it dissolves in rather than
+// appearing whole. `hide` is 0 for everything else, always with the row off,
+// and then nothing is dropped.
+bool streamFadeHidden(float hide) {
+    if (hide <= 0.0) return false;
+    ivec2 p = ivec2(gl_FragCoord.xy);
+    int idx = (p.x & 3) + (p.y & 3) * 4;
+    const float m[16] = float[16](
+         0.0/16.0,  8.0/16.0,  2.0/16.0, 10.0/16.0,
+        12.0/16.0,  4.0/16.0, 14.0/16.0,  6.0/16.0,
+         3.0/16.0, 11.0/16.0,  1.0/16.0,  9.0/16.0,
+        15.0/16.0,  7.0/16.0, 13.0/16.0,  5.0/16.0
+    );
+    return (1.0 - hide) <= m[idx];
+}

@@ -2017,6 +2017,23 @@ float M2Renderer::raycastCollisionMeshes(const glm::vec3& origin, const glm::vec
     return closestHit;
 }
 
+void M2Renderer::markStreamedIn(uint32_t instanceId) {
+    // Only an instance made by the call just before: a placement that
+    // matched one already standing there got that one's id back, and it is
+    // not new.
+    if (!streamFadeOn_ || instanceId == 0 || instanceId != lastNewInstanceId_) return;
+    auto it = instanceIndexById.find(instanceId);
+    if (it == instanceIndexById.end() || it->second >= instances.size()) return;
+    instances[it->second].streamFadeStart = streamFadeClock_;
+}
+
+int32_t M2Renderer::streamFadeFlags(const M2Instance& inst) const {
+    // Bits 24-31 (m2.vert, vStreamHide). Nothing stamped, or the row off:
+    // 0, and the flags are the stock ones.
+    if (inst.streamFadeStart < 0.0f || !streamFadeOn_) return 0;
+    return stream_fade::m2Flags(inst.streamFadeStart, streamFadeClock_);
+}
+
 void M2Renderer::recreatePipelines() {
     if (!vkCtx_) return;
     VkDevice device = vkCtx_->getDevice();

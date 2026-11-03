@@ -34,6 +34,15 @@ layout(location = 0) in vec4 vColor;
 layout(location = 1) in vec2 vUV;
 layout(location = 2) in float vFogVisibility;
 
+#ifdef SOFT_PARTICLES
+// The late particle pass's build (m2_particle_gpu_soft.frag.spv): the scene
+// depth in set 3 and the fade over vSoftRange. Blend types 2-6 only; opaque
+// and alpha-key particles write depth and stay in the scene pass.
+layout(location = 3) in float vSoftRange;
+#define SOFT_DEPTH_SET 3
+#include "soft_particle.glsli"
+#endif
+
 layout(location = 0) out vec4 outColor;
 
 void main() {
@@ -49,6 +58,15 @@ void main() {
         outColor = vec4(mix(fogColor.rgb, c.rgb, fog), 1.0);
     } else {
         if (c.a < 1.0 / 255.0) discard;
+#ifdef SOFT_PARTICLES
+        // Faded the way fog fades each blend: alpha for the blends that use
+        // it, the colour toward the blend's neutral for those that do not.
+        float soft = softParticleFade(vSoftRange);
+        if (blend == 3u) c.rgb *= soft;
+        else if (blend == 5u) c.rgb = mix(vec3(1.0), c.rgb, soft);
+        else if (blend == 6u) c.rgb = mix(vec3(128.0 / 255.0), c.rgb, soft);
+        else c.a *= soft;
+#endif
         if (blend == 2u) {
             outColor = vec4(mix(fogColor.rgb, c.rgb, fog), c.a);
         } else if (blend == 3u) {

@@ -1186,6 +1186,8 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 }
                 uint32_t instId = m2Renderer->createInstance(p.modelId, p.position, p.rotation, p.scale);
                 if (instId) {
+                    // Fade in new scenery: dissolves in (no-op with it off).
+                    m2Renderer->markStreamedIn(instId);
                     ft.m2InstanceIds.push_back(instId);
                     addDoodadSounds(p.modelId, placementModelMatrix(p.position, p.rotation, p.scale),
                                     ft.soundEmitterIds);
@@ -1279,6 +1281,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                     }
                     wmoRenderer->setInstanceNameSet(wmoInstId, wmoReady.nameSet);
                     wmoRenderer->setInstanceUniqueId(wmoInstId, wmoReady.uniqueId);
+                    wmoRenderer->markStreamedIn(wmoInstId);  // Fade in new scenery
                     ft.wmoInstanceIds.push_back(wmoInstId);
                     if (wmoReady.uniqueId != 0) {
                         placedWmoIds.insert(wmoReady.uniqueId);
@@ -1347,6 +1350,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 uint32_t wmoDoodadInstId = m2Renderer->createInstanceWithMatrix(
                     doodad.modelId, doodad.modelMatrix, doodad.worldPosition);
                 if (wmoDoodadInstId) {
+                    m2Renderer->markStreamedIn(wmoDoodadInstId);  // Fade in new scenery
                     // WMO doodads should not add duplicate/over-aggressive wall
                     // blocking, but structural doodads such as Exodarplatform01
                     // carry the only authored floor for their walkable ramps.

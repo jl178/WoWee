@@ -1396,6 +1396,7 @@ void M2Renderer::shutdown() {
     destroyPipeline(addOnePipeline_);
     destroyPipeline(modPipeline_);
     destroyPipeline(mod2xPipeline_);
+    releaseSoftParticlePipelines();
     destroyPipeline(particlePipeline_);
     destroyPipeline(particleAdditivePipeline_);
     for (VkPipeline& p : particleGpuPipelines_) destroyPipeline(p);

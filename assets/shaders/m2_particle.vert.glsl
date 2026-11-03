@@ -31,6 +31,10 @@ layout(location = 3) in float aTile;
 layout(location = 0) out vec4 vColor;
 layout(location = 1) out float vTile;
 layout(location = 2) out float vFogVisibility;
+#ifdef SOFT_PARTICLES
+// The halo's fade depth for the late particle pass: half its world size.
+layout(location = 3) out float vSoftRange;
+#endif
 
 // The air between the camera and this point, out of the fog volume: rgb is
 // the light it scatters toward the camera, a how much of the point shows
@@ -59,4 +63,7 @@ void main() {
     // a spark deep in a bank of mist is mostly the mist.
     if (volumetricParams.x > 0.5) vFogVisibility *= fogVolumeAt(aPos).a;
     gl_Position = projection * viewPos4;
+#ifdef SOFT_PARTICLES
+    vSoftRange = clamp(0.5 * aSize, 0.15, 1.5);
+#endif
 }

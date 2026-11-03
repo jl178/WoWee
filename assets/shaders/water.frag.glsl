@@ -37,7 +37,10 @@ layout(push_constant) uniform Push {
     float depthRamp;      // 0 river, 1 ocean, 2 WMO water (proceduralWmoWaterTex)
     float texRotCos;      // the stage 1 texture matrix's rotation (WMO Ocean's
     float texRotSin;      // stock 145.14 degrees; identity elsewhere)
+    float rainRipple;     // rain ripples (not stock): how hard it rains, 0 off/dry
 } push;
+
+#include "rain_ripples.glsli"
 
 // Per surface: the stock vertex colour (attrib 4) - white, or for a WMO group
 // that is not exterior its liquid's MOMT colour - and whether that group's
@@ -309,6 +312,21 @@ void main() {
         // specular colour is the local lights' alone (0x834f60), so under the
         // sun only the constant 0.25 is left.
         color += texel.rgb + vec3(0.25) * texel.a;
+    }
+
+    // ============================================================
+    // Rain ripples - the "Rain ripples" setting (not stock)
+    // ============================================================
+    // Rings where the drops land, out to about 30 yards (past that they
+    // would only shimmer), never on water inside a building. 0 while it is
+    // dry or with the setting off, and the block is skipped.
+    if (push.rainRipple > 0.0) {
+        float rw = rainRippleWidth(FragPos.xy);
+        float near = 1.0 - smoothstep(18.0, 32.0, dist);
+        if (!isInterior && near > 0.0) {
+            vec2 slope = rainRippleSlope(FragPos.xy, time, push.rainRipple, rw);
+            color += rainRippleLight(slope, FragPos, viewPos.xyz, surfaceLight * 0.45 + vec3(0.04)) * near;
+        }
     }
 
     // ============================================================

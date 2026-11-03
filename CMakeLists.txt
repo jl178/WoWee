@@ -540,9 +540,17 @@ function(compile_shaders TARGET_NAME)
     # Extra builds of one source with different definitions: source, output,
     # then the extra glslc arguments. Ray queries need SPIR-V 1.4 or later,
     # hence the target environment on the hardware tracer.
+    # The stage comes from the source's name, as above. The SOFT_PARTICLES
+    # builds are the late particle pass's (SoftParticlePass); the stock
+    # particle shaders are the same sources without the definition.
     set(SHADER_VARIANTS
         "rt_prepare.comp.glsl|rt_prepare_ms.comp.spv|-DRT_MSAA"
         "rt_trace.comp.glsl|rt_trace_hw.comp.spv|-DRT_HARDWARE --target-env=vulkan1.2"
+        "m2_particle_gpu.vert.glsl|m2_particle_gpu_soft.vert.spv|-DSOFT_PARTICLES"
+        "m2_particle_gpu.frag.glsl|m2_particle_gpu_soft.frag.spv|-DSOFT_PARTICLES"
+        "m2_particle.vert.glsl|m2_particle_soft.vert.spv|-DSOFT_PARTICLES"
+        "m2_particle.frag.glsl|m2_particle_soft.frag.spv|-DSOFT_PARTICLES"
+        "terrain.frag.glsl|terrain_fade.frag.spv|-DSTREAM_FADE"
     )
     foreach(VARIANT ${SHADER_VARIANTS})
         string(REPLACE "|" ";" VARIANT_PARTS "${VARIANT}")
@@ -550,9 +558,16 @@ function(compile_shaders TARGET_NAME)
         list(GET VARIANT_PARTS 1 VARIANT_OUT)
         list(GET VARIANT_PARTS 2 VARIANT_ARGS)
         separate_arguments(VARIANT_ARGS UNIX_COMMAND "${VARIANT_ARGS}")
+        if(VARIANT_SRC MATCHES "\\.vert\\.glsl$")
+            set(VARIANT_STAGE vertex)
+        elseif(VARIANT_SRC MATCHES "\\.frag\\.glsl$")
+            set(VARIANT_STAGE fragment)
+        else()
+            set(VARIANT_STAGE compute)
+        endif()
         add_custom_command(
             OUTPUT ${SPV_DIR}/${VARIANT_OUT}
-            COMMAND ${GLSLC} -fshader-stage=compute ${VARIANT_ARGS} -O
+            COMMAND ${GLSLC} -fshader-stage=${VARIANT_STAGE} ${VARIANT_ARGS} -O
                     ${SHADER_DIR}/${VARIANT_SRC} -o ${SPV_DIR}/${VARIANT_OUT}
             DEPENDS ${SHADER_DIR}/${VARIANT_SRC} ${GLSL_INCLUDES}
             COMMENT "Compiling SPIR-V: ${VARIANT_SRC} -> ${VARIANT_OUT}"
@@ -955,6 +970,7 @@ set(WOWEE_SOURCES
     src/rendering/hiz_system.cpp
     src/rendering/volumetric_fog.cpp
     src/rendering/sun_shafts.cpp
+    src/rendering/soft_particle_pass.cpp
     src/rendering/screen_capture.cpp
     src/rendering/loot_sparkles.cpp
     src/rendering/grass_renderer.cpp
