@@ -41,6 +41,9 @@
 #include "rendering/hiz_system.hpp"
 #include "rendering/volumetric_fog.hpp"
 #include "rendering/sun_shafts.hpp"
+#include "rendering/soft_particle_pass.hpp"
+#include "rendering/rain_ripples.hpp"
+#include "rendering/stream_fade.hpp"
 #include "rendering/rt_lighting.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/screen_capture.hpp"
@@ -763,6 +766,39 @@ void Renderer::updatePerFrameUBO() {
         wetness_ = wetGroundEnabled_ ? easeWetGround(wetness_, target, lastDeltaTime_) : 0.0f;
     }
     currentFrameData.rtParams.w = wetness_;
+
+    // Rain ripples (the "Rain ripples" setting): how hard the drops fall for
+    // the rings, from the same weather as the wet ground but eased over a
+    // second or two - rings start with the rain, not with the soaking, and
+    // stop soon after it. rtParams.z, which the ray traced lighting leaves
+    // at 0; and the water's push. 0 with the setting off.
+    {
+        float target = 0.0f;
+        if (weather) {
+            const Weather::Type type = weather->getWeatherType();
+            target = rainRippleTarget(type == Weather::Type::RAIN, type == Weather::Type::STORM,
+                                      weather->getIntensity());
+        }
+        rainRipple_ = enh_.rainRipples ? easeRainRipple(rainRipple_, target, lastDeltaTime_) : 0.0f;
+    }
+    currentFrameData.rtParams.z = rainRipple_;
+    if (waterRenderer) waterRenderer->setRainRipple(rainRipple_);
+
+    // Fade in new scenery: the clock the streamed things are stamped with.
+    if (enh_.streamFadeIn) {
+        // WOWEE_STREAM_FADE_SECONDS=<s> stretches the dissolve for a look at
+        // it (a screenshot of a 0.4 s fade is mostly luck).
+        static const float kClockScale = [] {
+            const char* v = std::getenv("WOWEE_STREAM_FADE_SECONDS");
+            const float s = v ? static_cast<float>(std::atof(v)) : 0.0f;
+            return s > 0.0f ? stream_fade::kSeconds / s : 1.0f;
+        }();
+        streamFadeClock_ += kClockScale * std::clamp(lastDeltaTime_, 0.0f, 0.1f);
+        const float now = streamFadeClock_;
+        if (m2Renderer) m2Renderer->setStreamFadeClock(now);
+        if (wmoRenderer) wmoRenderer->setStreamFadeClock(now);
+        if (terrainRenderer) terrainRenderer->setStreamFadeClock(now);
+    }
     // The water renderer is built with the world, after the settings are
     // applied, so it is told every frame rather than once.
     if (waterRenderer) waterRenderer->setShorelineFoam(shorelineFoam_);
@@ -938,8 +974,9 @@ bool Renderer::initialize(core::Window* win) {
     // The ray traced lighting normally records where the water leaves the
     // scene pass. A multisampled scene in an off-screen target never leaves
     // it early, so the pass records here instead, as the upscaler takes over.
-    postProcessPipeline_->setSceneClosedHook([this](VkCommandBuffer) {
+    postProcessPipeline_->setSceneClosedHook([this](VkCommandBuffer cmd) {
         markWorldPassClosed();
+        recordSoftParticlePass(cmd);
         if (rtRecordedThisFrame_ || !postProcessPipeline_) return;
         recordRtLighting(postProcessPipeline_->getSceneDepthImage(),
                          postProcessPipeline_->getSceneRenderExtent(),
@@ -1013,6 +1050,7 @@ void Renderer::shutdown() {
         sunShafts_->shutdown();
         sunShafts_.reset();
     }
+    softParticlePass_.reset();
 
     LOG_DEBUG("Renderer::shutdown - skySystem...");
     if (skySystem) {
@@ -1287,6 +1325,12 @@ void Renderer::applyEnhancementsToSubsystems() {
         m2Renderer->setExtraSmoke(e.extraSmoke);
     }
 
+    // Distance. Soft particles are decided each frame (decideSoftParticles)
+    // and the rain ripples eased each frame (updatePerFrameUBO), from enh_.
+    if (m2Renderer) m2Renderer->setStreamFadeIn(e.streamFadeIn);
+    if (wmoRenderer) wmoRenderer->setStreamFadeIn(e.streamFadeIn);
+    if (terrainRenderer) terrainRenderer->setStreamFadeIn(e.streamFadeIn);
+
     // Sky and air.
     setVolumetricFogQuality(e.lightShafts);
     setVolumetricFogDensity(e.mistDensity);
@@ -1523,6 +1567,10 @@ void Renderer::beginFrame() {
     // Post-process resource management (§4.3 - delegates to PostProcessPipeline)
     if (postProcessPipeline_) postProcessPipeline_->manageResources();
 
+    // Whether this frame's blended particles wait for the late pass, which
+    // also decides where the minimap goes (syncSwimEffectsTargetPass).
+    decideSoftParticles();
+
     // The target that call may have just created or destroyed decides where
     // the water draws, and with it where the spray and the minimap go. Asked
     // again here, after the answer can have changed, rather than only at the
@@ -1714,6 +1762,8 @@ void Renderer::endFrame() {
         vkCtx->gpuMark(currentCmd, postProcessPipeline_->outputPassLabel());
     } else {
         markWorldPassClosed();
+        // The scene went straight to the swapchain: this is where it closed.
+        recordSoftParticlePass(currentCmd);
     }
 
     // Only when water could not be moved out of the scene pass (MSAA). Otherwise
@@ -3461,6 +3511,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
 
     worldDrawnLastFrame_ = true;
     worldDrawnThisFrame_ = true;
+    softParticlesGameHandler_ = gameHandler;
 
     auto renderStart = std::chrono::steady_clock::now();
     lastTerrainRenderMs = 0.0;
@@ -4047,6 +4098,10 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         // lighting reads its depth here, for the surfaces of the next frame.
         recordRtLighting(sceneDepth, sceneExtent, depthIsMsaa);
 
+        // The blended particles, before the water as they were in the scene
+        // pass, now that its depth can be read (soft particles only).
+        recordSoftParticlePass(currentCmd);
+
         // Only with water loaded to refract it, as the MSAA path in endFrame
         // already asks: the copy is the whole colour and depth of the frame,
         // and with no surface to sample it nothing reads it.
@@ -4143,9 +4198,20 @@ void Renderer::syncSwimEffectsTargetPass() {
     // Only when water has actually left the scene pass. Where it has not - MSAA
     // onto an off-screen scene, or no continuation pass at all - water is drawn
     // before this and the minimap is already on top of it.
+    //
+    // With soft particles on and water still in the scene pass, the late
+    // particle pass comes after everything that pass holds - the minimap
+    // included - so the minimap moves to the end of the late pass, which is
+    // single-sampled and has the overlay pass's attachments.
+    minimapDrawsLate_ = softParticlesFrame_ && !minimapDrawsWithWater_ &&
+                        vkCtx->getOverlayRenderPass() != VK_NULL_HANDLE;
     if (minimap) {
-        minimap->setTargetPass(minimapDrawsWithWater_ ? pass : VK_NULL_HANDLE,
-                               samples);
+        if (minimapDrawsLate_) {
+            minimap->setTargetPass(vkCtx->getOverlayRenderPass(), VK_SAMPLE_COUNT_1_BIT);
+        } else {
+            minimap->setTargetPass(minimapDrawsWithWater_ ? pass : VK_NULL_HANDLE,
+                                   samples);
+        }
     }
 }
 
@@ -4176,7 +4242,7 @@ void Renderer::renderPostSceneOverlays(VkCommandBuffer cmd,
 
     // Unless it is following water into the pass after this one, where it is
     // drawn instead - see renderMinimapOverlay's caller below the water.
-    if (!minimapDrawsWithWater_) renderMinimapOverlay(cmd, gameHandler);
+    if (!minimapDrawsWithWater_ && !minimapDrawsLate_) renderMinimapOverlay(cmd, gameHandler);
 }
 
 /// The minimap disc, over whatever has been drawn so far.
@@ -4217,6 +4283,85 @@ bool Renderer::waterDrawsInContinuePass() const {
         return !offscreenScene && waterRenderer->hasWater1xPass();
     }
     return vkCtx->getSceneContinueRenderPass() != VK_NULL_HANDLE;
+}
+
+// Soft particles: whether this frame has a late particle pass.
+//
+// It needs the pipelines (built the first time the row is on), the overlay
+// pass to draw in, and a one-sample depth of the scene to read - the scene's
+// own without MSAA, its resolve with it. A device that cannot resolve depth
+// under MSAA has none, and its particles stay in the scene pass as stock.
+// Everything is let go a few frames after the row goes off, once no frame in
+// flight can still be drawing with it.
+void Renderer::decideSoftParticles() {
+    softParticlesFrame_ = false;
+    softParticlesLateDone_ = false;
+    bool want = enh_.softParticles && m2Renderer && vkCtx &&
+                vkCtx->getOverlayRenderPass() != VK_NULL_HANDLE;
+    if (want) {
+        const bool offscreen = postProcessPipeline_ &&
+                               postProcessPipeline_->getSceneFramebuffer() != VK_NULL_HANDLE;
+        if (offscreen) {
+            want = postProcessPipeline_->getSceneColorImageView() != VK_NULL_HANDLE &&
+                   postProcessPipeline_->getSceneDepthImage() != VK_NULL_HANDLE &&
+                   !postProcessPipeline_->sceneDepthIsMsaa();
+        } else {
+            want = !vkCtx->getOverlayFramebuffers().empty() && !vkCtx->isDepthCopySourceMsaa();
+        }
+    }
+    if (want) {
+        if (!softParticlePass_) softParticlePass_ = std::make_unique<SoftParticlePass>();
+        want = softParticlePass_->initialize(vkCtx) &&
+               m2Renderer->ensureSoftParticlePipelines(vkCtx->getOverlayRenderPass(),
+                                                       softParticlePass_->depthLayout());
+    }
+    softParticlesFrame_ = want;
+    if (m2Renderer) m2Renderer->setSoftParticlesDeferred(want);
+    if (want) {
+        softParticlesOffFrames_ = 0;
+    } else if (softParticlePass_ && ++softParticlesOffFrames_ > 8) {
+        // Eight frames on, every command buffer that used them has finished.
+        if (m2Renderer) m2Renderer->releaseSoftParticlePipelines();
+        softParticlePass_.reset();
+        softParticlesOffFrames_ = 0;
+    }
+}
+
+void Renderer::recordSoftParticlePass(VkCommandBuffer cmd) {
+    if (!softParticlesFrame_ || softParticlesLateDone_ || !worldDrawnThisFrame_ ||
+        !softParticlePass_ || !m2Renderer || !vkCtx || cmd == VK_NULL_HANDLE) {
+        return;
+    }
+    softParticlesLateDone_ = true;
+
+    SoftParticlePass::Target t;
+    t.pass = vkCtx->getOverlayRenderPass();
+    if (postProcessPipeline_ && postProcessPipeline_->getSceneFramebuffer() != VK_NULL_HANDLE) {
+        t.colorView = postProcessPipeline_->getSceneColorImageView();
+        t.extent = postProcessPipeline_->getSceneRenderExtent();
+        t.depth = postProcessPipeline_->getSceneDepthImage();
+    } else {
+        const auto& fbs = vkCtx->getOverlayFramebuffers();
+        if (currentImageIndex < fbs.size()) t.framebuffer = fbs[currentImageIndex];
+        t.extent = vkCtx->getSwapchainExtent();
+        t.depth = vkCtx->getDepthCopySourceImage();
+    }
+    const VkDescriptorSet perFrameSet = perFrameDescSets[vkCtx->getCurrentFrame()];
+    const bool recorded = softParticlePass_->record(cmd, t, [&](VkCommandBuffer c, VkDescriptorSet depthSet) {
+        m2Renderer->renderSoftParticles(c, perFrameSet, depthSet);
+        // Over the particles, as it was over everything in the scene pass.
+        if (minimapDrawsLate_) renderMinimapOverlay(c, softParticlesGameHandler_);
+    });
+    if (recorded) {
+        vkCtx->gpuMark(cmd, "soft particles");
+    } else {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            LOG_WARNING("Soft particles: the late pass could not be recorded - "
+                        "blended particles were not drawn this frame");
+        }
+    }
 }
 
 // initPostProcess(), resizePostProcess(), shutdownPostProcess() removed -
@@ -4803,9 +4948,11 @@ void Renderer::refreshSwimEffectsPass() {
     if (!vkCtx) return;
     const bool sprayWasWithWater = swimEffectsDrawWithWater_;
     const bool minimapWasWithWater = minimapDrawsWithWater_;
+    const bool minimapWasLate = minimapDrawsLate_;
     syncSwimEffectsTargetPass();
     const bool sprayMoved = swimEffects && swimEffectsDrawWithWater_ != sprayWasWithWater;
-    const bool minimapMoved = minimap && minimapDrawsWithWater_ != minimapWasWithWater;
+    const bool minimapMoved = minimap && (minimapDrawsWithWater_ != minimapWasWithWater ||
+                                          minimapDrawsLate_ != minimapWasLate);
     if (!sprayMoved && !minimapMoved) return;
     vkDeviceWaitIdle(vkCtx->getDevice());
     if (sprayMoved) swimEffects->recreatePipelines();

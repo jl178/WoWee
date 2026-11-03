@@ -166,6 +166,7 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
 
     M2Instance instance;
     instance.id = nextInstanceId++;
+    lastNewInstanceId_ = instance.id;  // markStreamedIn: new, not a dedup hit
     // The clocks start now. Left at 0 the first advanceClock added the whole
     // session's scene time to animTime and globalSequenceTime, so a new
     // instance began at an arbitrary phase and a one-shot spell effect was
@@ -290,6 +291,7 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
 
     M2Instance instance;
     instance.id = nextInstanceId++;
+    lastNewInstanceId_ = instance.id;  // markStreamedIn: new, not a dedup hit
     // The clocks start now. Left at 0 the first advanceClock added the whole
     // session's scene time to animTime and globalSequenceTime, so a new
     // instance began at an arbitrary phase and a one-shot spell effect was
@@ -2104,7 +2106,8 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 e.boneCount = static_cast<int32_t>(inst.boneMatrices.size());
                 e.highlight = inst.highlight;
                 e.flags = (inst.afloat > 0 ? 1 : 0) | inst.groundNormalFlags |
-                          ((p.useBones && !kM2NoSkinning) ? kInstanceSkinnedFlag : 0);
+                          ((p.useBones && !kM2NoSkinning) ? kInstanceSkinnedFlag : 0) |
+                          streamFadeFlags(inst);
                 if (inst.wmoInteriorLight) {
                     e.flags |= kInstanceWmoInteriorLightFlag;
                     e.wmoAmbient = inst.wmoAmbientPacked;
@@ -2404,7 +2407,8 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                             e.boneCount = static_cast<int32_t>(inst.boneMatrices.size());
                             e.highlight = inst.highlight;
                             e.flags = (inst.afloat > 0 ? 1 : 0) | inst.groundNormalFlags |
-                                      ((p.useBones && !kM2NoSkinning) ? kInstanceSkinnedFlag : 0);
+                                      ((p.useBones && !kM2NoSkinning) ? kInstanceSkinnedFlag : 0) |
+                                      streamFadeFlags(inst);
                             if (inst.wmoInteriorLight) {
                                 e.flags |= kInstanceWmoInteriorLightFlag;
                                 e.wmoAmbient = inst.wmoAmbientPacked;
@@ -2723,7 +2727,8 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             e.boneCount = static_cast<int32_t>(instance.boneMatrices.size());
             e.highlight = instance.highlight;
             e.flags = (instance.afloat > 0 ? 1 : 0) | instance.groundNormalFlags |
-                      ((needsBones && !kM2NoSkinning) ? kInstanceSkinnedFlag : 0);
+                      ((needsBones && !kM2NoSkinning) ? kInstanceSkinnedFlag : 0) |
+                      streamFadeFlags(instance);
             if (instance.wmoInteriorLight) {
                 e.flags |= kInstanceWmoInteriorLightFlag;
                 e.wmoAmbient = instance.wmoAmbientPacked;
@@ -2822,6 +2827,26 @@ void M2Renderer::recordGlowSprites(VkCommandBuffer cmd, VkDescriptorSet perFrame
     }
     if (!perFrameSet) return;
 
+    // Soft particles: the halos are uploaded here and drawn in the late pass
+    // (renderSoftParticles), which reads the scene's depth.
+    glowSoftCount_ = 0;
+    if (softDeferred_ && !glowSprites_.empty() && glowVB_ && glowTexDescSet_) {
+        const size_t uploadCount = std::min(glowSprites_.size(), MAX_GLOW_SPRITES);
+        float* dst = static_cast<float*>(glowVBMapped_);
+        for (size_t gi = 0; gi < uploadCount; gi++) {
+            const auto& gs = glowSprites_[gi];
+            *dst++ = gs.worldPos.x;
+            *dst++ = gs.worldPos.y;
+            *dst++ = gs.worldPos.z;
+            *dst++ = gs.color.r;
+            *dst++ = gs.color.g;
+            *dst++ = gs.color.b;
+            *dst++ = gs.color.a;
+            *dst++ = gs.size;
+            *dst++ = 0.0f;
+        }
+        glowSoftCount_ = static_cast<uint32_t>(uploadCount);
+    } else
     // Render glow sprites as billboarded additive point lights
     if (!glowSprites_.empty() && particleAdditivePipeline_ && glowVB_ && glowTexDescSet_) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, particleAdditivePipeline_);

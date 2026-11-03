@@ -322,6 +322,13 @@ public:
     /// the time of day, 0x7a8520). Negative (the default) until the renderer
     /// sets it: wmo.frag then estimates it from how dark the light is.
     void setSidnNightFactor(float f) { sidnNightFactor_ = f; }
+    /// "Fade in new scenery" (Renderer::setEnhancements): a building that
+    /// arrives with a streamed tile dissolves in (push.frame.y, wmo.frag).
+    /// Off stamps nothing, and every instance draws as stock.
+    void setStreamFadeIn(bool on) { streamFadeOn_ = on; }
+    void setStreamFadeClock(float seconds) { streamFadeClock_ = seconds; }
+    /// An instance the terrain streamer just made: it fades in from now.
+    void markStreamedIn(uint32_t instanceId);
     // Nothing reads the WMO-only flag since the glass path went; the call
     // still marks materials for a refresh.
     void setWMOOnlyMap(bool) { materialSettingsDirty_ = true; }
@@ -880,6 +887,9 @@ private:
     struct WMOInstance {
         uint32_t id;
         uint32_t modelId;
+        /// The stream-fade clock when it came in with its tile
+        /// (markStreamedIn), or negative.
+        float streamFadeStart = -1.0f;
         glm::vec3 position;
         glm::vec3 rotation;  // Euler angles (radians)
         float scale;
@@ -1137,6 +1147,8 @@ private:
     float normalMapStrength_ = 0.8f;     // 0.0 = flat, 1.0 = full, 2.0 = exaggerated
     bool pomEnabled_ = true;             // on by default
     float sidnNightFactor_ = -1.0f;      // see setSidnNightFactor
+    bool streamFadeOn_ = false;          // see setStreamFadeIn
+    float streamFadeClock_ = 0.0f;
     int pomQuality_ = 1;                 // 0=Low(16), 1=Medium(32), 2=High(64)
     bool materialSettingsDirty_ = false; // rebuild UBOs when settings change
 

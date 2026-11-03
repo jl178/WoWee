@@ -5,6 +5,7 @@
 #include "rendering/wmo_vertex.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/wmo_renderer.hpp"
+#include "rendering/stream_fade.hpp"
 #include "rendering/stock_wmo_light.hpp"
 #include "rendering/stock_wmo_render.hpp"
 #include "rendering/rt_bvh.hpp"
@@ -1528,6 +1529,13 @@ void WMORenderer::cleanupUnusedModels() {
     }
 }
 
+void WMORenderer::markStreamedIn(uint32_t instanceId) {
+    if (!streamFadeOn_ || instanceId == 0) return;
+    auto it = instanceIndexById.find(instanceId);
+    if (it == instanceIndexById.end() || it->second >= instances.size()) return;
+    instances[it->second].streamFadeStart = streamFadeClock_;
+}
+
 uint32_t WMORenderer::createInstance(uint32_t modelId, const glm::vec3& position,
                                      const glm::vec3& rotation, float scale) {
     // Check if model is loaded
@@ -2361,7 +2369,11 @@ void WMORenderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         WMOPush push{};
         push.model = instance.modelMatrix;
         push.cloth = glm::vec4(0.0f);
-        push.frame = glm::vec4(sidnNightFactor_, 0.0f, 0.0f, 0.0f);
+        // y: how much of a just-streamed building is still hidden; 0, as
+        // stock, for every other and always with "Fade in new scenery" off.
+        const float streamHide = (streamFadeOn_ && instance.streamFadeStart >= 0.0f)
+            ? stream_fade::hidden(instance.streamFadeStart, streamFadeClock_) : 0.0f;
+        push.frame = glm::vec4(sidnNightFactor_, streamHide, 0.0f, 0.0f);
         vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
                             0, sizeof(WMOPush), &push);
         glm::vec4 pushedCloth(0.0f);

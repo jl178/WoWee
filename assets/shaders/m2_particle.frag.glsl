@@ -13,6 +13,19 @@ layout(location = 2) in float vFogVisibility;
 
 layout(location = 0) out vec4 outColor;
 
+#ifdef SOFT_PARTICLES
+// The late particle pass's build (m2_particle_soft.frag.spv), for the glow
+// halos: the scene depth in set 2. The projection for the fade is the
+// PerFrame block's, declared here only in this build.
+layout(set = 0, binding = 0) uniform PerFrame {
+    mat4 view;
+    mat4 projection;
+};
+layout(location = 3) in float vSoftRange;
+#define SOFT_DEPTH_SET 2
+#include "soft_particle.glsli"
+#endif
+
 void main() {
     vec2 p = gl_PointCoord;
     float tile = floor(vTile);
@@ -29,6 +42,9 @@ void main() {
     // Soft circular falloff for point-sprite edges.
     float edge = 1.0 - smoothstep(0.4, 0.5, length(p - 0.5));
     float alpha = texColor.a * vColor.a * edge * vFogVisibility;
+#ifdef SOFT_PARTICLES
+    alpha *= softParticleFade(vSoftRange);
+#endif
     vec3 rgb = texColor.rgb * vColor.rgb * alpha;
     outColor = vec4(rgb, alpha);
 }

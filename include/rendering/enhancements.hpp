@@ -73,6 +73,9 @@ struct Enhancements {
     bool  waterInsects = false;
     /// The sky mirrored in water. Stock water reflects nothing.
     bool  waterReflections = false;
+    /// Rings on lakes, rivers and puddled ground while it rains. Stock rain
+    /// leaves the water as it was.
+    bool  rainRipples = false;
 
     // ---- Motion ------------------------------------------------------------
     /// How hard the wind moves trees and cloth. 0 is stock: nothing sways.
@@ -96,6 +99,15 @@ struct Enhancements {
     /// Lamp and torch glow cards replaced by soft billboard halos. Off draws
     /// the cards the models carry, as stock does.
     bool  glowSprites = false;
+    /// Blended particles (and the soft lamp halos) fade where they meet the
+    /// ground or a wall instead of cutting a hard line. Off is the stock
+    /// depth test in the scene pass.
+    bool  softParticles = false;
+
+    // ---- Distance ----------------------------------------------------------
+    /// Terrain, buildings and doodads that finish streaming in dissolve in
+    /// over a moment instead of appearing in one frame, as stock does.
+    bool  streamFadeIn = false;
 
     // ---- Experimental ------------------------------------------------------
     bool  grass = false;

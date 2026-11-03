@@ -902,6 +902,10 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
         if (run.count == 0 || !run.group) continue;
         ParticleGroup& group = *run.group;
         const uint32_t blendType = std::min<uint32_t>(group.blendType, 6);
+        // Soft particles: the blended runs wait for the late pass, which
+        // reads the scene's depth (renderSoftParticles). Opaque and alpha-key
+        // particles write depth and stay here.
+        if (softDeferred_ && blendType >= 2) continue;
         VkPipeline desired = particleGpuPipelines_[blendType];
         if (desired != currentPipeline) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desired);
@@ -939,6 +943,219 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
         vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                            sizeof(pc), &pc);
         // Four strip corners per record; the records are this run's instances.
+        vkCmdDraw(cmd, 4, run.count, 0, run.first);
+    }
+}
+
+// The late pass's texture set for a group: the model's own, made at load,
+// else one made now as renderM2Particles does for a group without one.
+VkDescriptorSet M2Renderer::particleTexSet(ParticleGroup& group) {
+    if (group.preAllocSet != VK_NULL_HANDLE) return group.preAllocSet;
+    VkTexture* tex = (group.texture && group.texture->isValid()) ? group.texture : whiteTexture_.get();
+    if (!tex || !tex->isValid()) return VK_NULL_HANDLE;
+    VkDescriptorSet texSet = VK_NULL_HANDLE;
+    VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = materialDescPool_;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &particleTexLayout_;
+    if (vkAllocateDescriptorSets(vkCtx_->getDevice(), &ai, &texSet) != VK_SUCCESS) return VK_NULL_HANDLE;
+    VkDescriptorImageInfo imgInfo = tex->descriptorInfo();
+    VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = texSet;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &imgInfo;
+    vkUpdateDescriptorSets(vkCtx_->getDevice(), 1, &write, 0, nullptr);
+    group.preAllocSet = texSet;
+    return texSet;
+}
+
+// ---------------------------------------------------------------------------
+// Soft particles (the "Soft particles" row, SoftParticlePass)
+// ---------------------------------------------------------------------------
+bool M2Renderer::ensureSoftParticlePipelines(VkRenderPass latePass, VkDescriptorSetLayout depthLayout) {
+    if (!vkCtx_ || latePass == VK_NULL_HANDLE || depthLayout == VK_NULL_HANDLE) return false;
+    // Built once. A later late pass (the overlay pass is remade with the
+    // swapchain) has the same single attachment, so they stay compatible.
+    if (hasSoftParticlePipelines()) return true;
+    // A failure is not retried every frame.
+    static bool failed = false;
+    if (failed) return false;
+    VkDevice device = vkCtx_->getDevice();
+    if (!particleGpuPipelineLayout_ || !particleTexLayout_ || !instanceSetLayout_ || !perFrameLayout_) return false;
+
+    {
+        VkDescriptorSetLayout sets[] = {perFrameLayout_, particleTexLayout_, instanceSetLayout_, depthLayout};
+        VkPushConstantRange push{.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                 .offset = 0, .size = 16};
+        VkPipelineLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        ci.setLayoutCount = 4;
+        ci.pSetLayouts = sets;
+        ci.pushConstantRangeCount = 1;
+        ci.pPushConstantRanges = &push;
+        if (vkCreatePipelineLayout(device, &ci, nullptr, &particleSoftLayout_) != VK_SUCCESS)
+            particleSoftLayout_ = VK_NULL_HANDLE;
+    }
+    {
+        VkDescriptorSetLayout sets[] = {perFrameLayout_, particleTexLayout_, depthLayout};
+        VkPushConstantRange push{.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT, .offset = 0, .size = 12};
+        VkPipelineLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        ci.setLayoutCount = 3;
+        ci.pSetLayouts = sets;
+        ci.pushConstantRangeCount = 1;
+        ci.pPushConstantRanges = &push;
+        if (vkCreatePipelineLayout(device, &ci, nullptr, &glowSoftLayout_) != VK_SUCCESS)
+            glowSoftLayout_ = VK_NULL_HANDLE;
+    }
+
+    rendering::VkShaderModule qVert, qFrag, gVert, gFrag;
+    (void)qVert.loadFromFile(device, "assets/shaders/m2_particle_gpu_soft.vert.spv");
+    (void)qFrag.loadFromFile(device, "assets/shaders/m2_particle_gpu_soft.frag.spv");
+    (void)gVert.loadFromFile(device, "assets/shaders/m2_particle_soft.vert.spv");
+    (void)gFrag.loadFromFile(device, "assets/shaders/m2_particle_soft.frag.spv");
+
+    // The stock state of each blend (buildMainPassPipelines), without the
+    // depth attachment the late pass does not have: m2_particle_gpu.frag's
+    // SOFT_PARTICLES build tests against the scene depth itself.
+    if (qVert.isValid() && qFrag.isValid() && particleSoftLayout_) {
+        VkVertexInputBindingDescription gBind{};
+        gBind.binding = 0;
+        gBind.stride = sizeof(m2_particle::ParticleRecord);
+        gBind.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+        std::vector<VkVertexInputAttributeDescription> gAttrs = {
+            {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 0},
+            {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 16},
+            {.location = 2, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 32},
+            {.location = 3, .binding = 0, .format = VK_FORMAT_R32G32_UINT, .offset = 40},
+        };
+        const auto blendState = [](VkBlendFactor src, VkBlendFactor dst) {
+            VkPipelineColorBlendAttachmentState st = PipelineBuilder::blendAlpha();
+            st.srcColorBlendFactor = src;
+            st.dstColorBlendFactor = dst;
+            st.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            st.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            return st;
+        };
+        const VkPipelineColorBlendAttachmentState states[7] = {
+            PipelineBuilder::blendDisabled(),
+            PipelineBuilder::blendDisabled(),
+            PipelineBuilder::blendAlpha(),
+            blendState(VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE),
+            PipelineBuilder::blendAdditive(),
+            blendState(VK_BLEND_FACTOR_DST_COLOR, VK_BLEND_FACTOR_ZERO),
+            blendState(VK_BLEND_FACTOR_DST_COLOR, VK_BLEND_FACTOR_SRC_COLOR),
+        };
+        for (int b = 2; b < 7; ++b) {
+            particleSoftPipelines_[b] = PipelineBuilder()
+                .setShaders(qVert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
+                            qFrag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+                .setVertexInput({gBind}, gAttrs)
+                .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP)
+                .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+                .setNoDepthTest()
+                .setColorBlendAttachment(states[b])
+                .setMultisample(VK_SAMPLE_COUNT_1_BIT)
+                .setLayout(particleSoftLayout_)
+                .setRenderPass(latePass)
+                .setDynamicStates(viewportAndScissorDynamic())
+                .build(device, vkCtx_->getPipelineCache());
+        }
+    }
+    if (gVert.isValid() && gFrag.isValid() && glowSoftLayout_) {
+        VkVertexInputBindingDescription pBind{};
+        pBind.binding = 0;
+        pBind.stride = 9 * sizeof(float);
+        pBind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        std::vector<VkVertexInputAttributeDescription> pAttrs = {
+            {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0},
+            {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 3 * sizeof(float)},
+            {.location = 2, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 7 * sizeof(float)},
+            {.location = 3, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 8 * sizeof(float)},
+        };
+        glowSoftPipeline_ = PipelineBuilder()
+            .setShaders(gVert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
+                        gFrag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+            .setVertexInput({pBind}, pAttrs)
+            .setTopology(VK_PRIMITIVE_TOPOLOGY_POINT_LIST)
+            .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+            .setNoDepthTest()
+            .setColorBlendAttachment(PipelineBuilder::blendAdditive())
+            .setMultisample(VK_SAMPLE_COUNT_1_BIT)
+            .setLayout(glowSoftLayout_)
+            .setRenderPass(latePass)
+            .setDynamicStates(viewportAndScissorDynamic())
+            .build(device, vkCtx_->getPipelineCache());
+    }
+    qVert.destroy(); qFrag.destroy(); gVert.destroy(); gFrag.destroy();
+
+    bool ok = glowSoftPipeline_ != VK_NULL_HANDLE;
+    for (int b = 2; b < 7; ++b) ok = ok && particleSoftPipelines_[b] != VK_NULL_HANDLE;
+    if (!ok) {
+        LOG_WARNING("Soft particles: pipelines unavailable (m2_particle*_soft.*.spv missing?) - "
+                    "particles stay in the scene pass");
+        releaseSoftParticlePipelines();
+        failed = true;
+        return false;
+    }
+    LOG_INFO("Soft particles: late pass pipelines built");
+    return true;
+}
+
+void M2Renderer::releaseSoftParticlePipelines() {
+    if (!vkCtx_) return;
+    VkDevice device = vkCtx_->getDevice();
+    for (VkPipeline& p : particleSoftPipelines_) destroy(device, p);
+    destroy(device, glowSoftPipeline_);
+    destroy(device, particleSoftLayout_);
+    destroy(device, glowSoftLayout_);
+    softDeferred_ = false;
+}
+
+void M2Renderer::renderSoftParticles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                                     VkDescriptorSet depthSet) {
+    if (!softDeferred_ || !perFrameSet || !depthSet || !hasSoftParticlePipelines()) return;
+
+    // The halos first, as recordGlowSprites drew them before the particles.
+    if (glowSoftCount_ > 0 && glowSoftPipeline_ && glowVB_ && glowTexDescSet_) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, glowSoftPipeline_);
+        const VkDescriptorSet sets[] = {perFrameSet, glowTexDescSet_, depthSet};
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, glowSoftLayout_, 0, 3, sets, 0, nullptr);
+        struct { float tileX, tileY; int alphaKey; } push = {.tileX = 1.0f, .tileY = 1.0f, .alphaKey = 0};
+        vkCmdPushConstants(cmd, glowSoftLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+        VkDeviceSize offset = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &glowVB_, &offset);
+        vkCmdDraw(cmd, glowSoftCount_, 1, 0, 0);
+    }
+    glowSoftCount_ = 0;
+
+    // The blended runs renderM2Particles left, from the records it wrote.
+    const uint32_t frame = vkCtx_->getCurrentFrame() % 2;
+    if (particleRuns_.empty() || !particleRecordBuf_[frame] || !particleCurveSet_[frame]) return;
+    const VkPipelineLayout layout = particleSoftLayout_;
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &perFrameSet, 0, nullptr);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 2, 1, &particleCurveSet_[frame], 0, nullptr);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 3, 1, &depthSet, 0, nullptr);
+    VkDeviceSize vbOffset = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &particleRecordBuf_[frame], &vbOffset);
+    VkPipeline current = VK_NULL_HANDLE;
+    for (auto& run : particleRuns_) {
+        if (run.count == 0 || !run.group) continue;
+        ParticleGroup& group = *run.group;
+        const uint32_t blendType = std::min<uint32_t>(group.blendType, 6);
+        if (blendType < 2) continue;
+        if (particleSoftPipelines_[blendType] != current) {
+            current = particleSoftPipelines_[blendType];
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, current);
+        }
+        const VkDescriptorSet texSet = particleTexSet(group);
+        if (texSet == VK_NULL_HANDLE) continue;
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 1, 1, &texSet, 0, nullptr);
+        struct { float tileX, tileY; uint32_t blend, pad; } pc = {
+            .tileX = static_cast<float>(group.tilesX), .tileY = static_cast<float>(group.tilesY),
+            .blend = blendType, .pad = 0};
+        vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                           sizeof(pc), &pc);
         vkCmdDraw(cmd, 4, run.count, 0, run.first);
     }
 }

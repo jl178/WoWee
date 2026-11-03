@@ -54,6 +54,13 @@ layout(location = 3) in uvec2 aCurvePacked;
 layout(location = 0) out vec4 vColor;
 layout(location = 1) out vec2 vUV;
 layout(location = 2) out float vFogVisibility;
+#ifdef SOFT_PARTICLES
+// How many yards in front of the scene the particle fades over: about half
+// its size, so a spark thins over inches and a smoke puff over a yard. Flat
+// world quads (XY quads: ground glows, ripples) lie on the ground by design
+// and keep a hard test (0).
+layout(location = 3) out float vSoftRange;
+#endif
 
 const uint kKeys = 8u;
 const uint kKindBillboard = 0u;
@@ -200,4 +207,7 @@ void main() {
         if (volumetricParams.x > 0.5) vFogVisibility *= fogVolumeAt(world).a;
     }
     gl_Position = projection * viewPos4;
+#ifdef SOFT_PARTICLES
+    vSoftRange = kind == kKindXYQuad ? 0.0 : clamp(0.5 * max(size.x, size.y), 0.15, 1.5);
+#endif
 }

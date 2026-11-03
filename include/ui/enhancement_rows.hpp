@@ -207,6 +207,18 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .controls = "LightingManager fog colour blend",
      .asFloat = &Enhancements::fogSkyBlend},
 
+    // --------------------------------------------------------------- Distance
+    {.key = "streamfadein", .label = "Fade in new scenery", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageSky, .section = "Distance",
+     .tooltip = "Ground, buildings and trees that finish loading as you travel\n"
+                "dissolve in over a moment instead of appearing all at once.\n"
+                "Off is the original pop-in.",
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "stream_fade_in",
+     .controls = "the load-time stamp on streamed terrain chunks, WMOs and doodads "
+                 "and the dither in terrain_fade.frag, wmo.frag and m2.frag; off "
+                 "stamps nothing and the terrain never binds its fade pipeline",
+     .asBool = &Enhancements::streamFadeIn},
+
     // ------------------------------------------------------ Water and weather
     {.key = "shorelinefoam", .label = "Shoreline foam", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWater, .section = "Water and weather",
@@ -244,6 +256,18 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "water_reflections",
      .controls = "the reflection sky draw and its term in water.frag",
      .asBool = &Enhancements::waterReflections},
+    {.key = "rainripples", .label = "Rain ripples", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWater, .section = "",
+     .tooltip = "While it rains, drops ring the surface of lakes and rivers and\n"
+                "the puddled ground, harder in a downpour. The original rain\n"
+                "leaves the water as it was.",
+     // Measured in docs/enhancements-plan.md (E5): nothing while dry - the
+     // shaders skip the block on a zero strength - and a few tenths of a
+     // millisecond on water-heavy views in rain.
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "rain_ripples",
+     .controls = "the rain strength (rtParams.z, the water push) and the ring "
+                 "block in water.frag and wet_surface.glsli; zero while dry",
+     .asBool = &Enhancements::rainRipples},
 
     // ----------------------------------------------------------------- Motion
     {.key = "foliagewind", .label = "Foliage and cloth wind", .kind = SettingKind::Float,
@@ -306,6 +330,16 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "glow_sprites",
      .controls = "glow sprite generation and recordGlowSprites",
      .asBool = &Enhancements::glowSprites},
+    {.key = "softparticles", .label = "Soft particles", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWater, .section = "",
+     .tooltip = "Fire, smoke, spell clouds and spray fade out where they meet\n"
+                "the ground or a wall, instead of cutting a hard line through\n"
+                "it. Off is the original edge.",
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "soft_particles",
+     .controls = "the late particle pass (SoftParticlePass: a single-sample pass "
+                 "after the scene that reads its depth) and the soft particle "
+                 "pipelines; off draws every particle in the scene pass as stock",
+     .asBool = &Enhancements::softParticles},
 
     // ------------------------------------------------------------ Experimental
     {.key = "grassenabled", .label = "Grass (experimental)", .kind = SettingKind::Bool,

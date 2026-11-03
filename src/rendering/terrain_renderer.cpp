@@ -1,6 +1,7 @@
 #include "rendering/terrain_vertex.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/terrain_renderer.hpp"
+#include "rendering/stream_fade.hpp"
 #include "rendering/terrain_mega_slots.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/vk_context.hpp"
@@ -44,6 +45,12 @@ struct TerrainPush {
     glm::mat4 model;
     glm::vec4 specular;
 };
+/// The push range: TerrainPush for the vertex stage and, after it, the
+/// vec4 terrain_fade.frag reads (x: how much of the chunk is still hidden).
+/// The stock fragment shader reads none of it.
+constexpr uint32_t kTerrainStreamFadeOffset = sizeof(TerrainPush);
+constexpr uint32_t kTerrainPushRangeSize = sizeof(TerrainPush) + sizeof(glm::vec4);
+constexpr VkShaderStageFlags kTerrainPushStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
 /// Beside the MCLY flags in TerrainParams: the layer's texture is the `_s`
 /// tileset, whose alpha is the specular mask.
@@ -212,9 +219,9 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
 
     // --- Create pipeline layout ---
     VkPushConstantRange pushRange{};
-    pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pushRange.stageFlags = kTerrainPushStages;
     pushRange.offset = 0;
-    pushRange.size = sizeof(TerrainPush);
+    pushRange.size = kTerrainPushRangeSize;
 
     std::vector<VkDescriptorSetLayout> setLayouts = { perFrameLayout, materialSetLayout };
     pipelineLayout = createPipelineLayout(device, setLayouts, { pushRange });
@@ -368,6 +375,8 @@ void TerrainRenderer::recreatePipelines() {
     // Destroy old pipelines (keep layouts)
     destroy(device, pipeline);
     destroy(device, wireframePipeline);
+    const bool hadFade = fadePipeline_ != VK_NULL_HANDLE;
+    destroy(device, fadePipeline_);
 
     // Load shaders
     VkShaderModule vertShader, fragShader;
@@ -385,7 +394,58 @@ void TerrainRenderer::recreatePipelines() {
 
     vertShader.destroy();
     fragShader.destroy();
+    if (hadFade) (void)buildFadePipeline();
     if (horizon_) horizon_->recreatePipeline();
+}
+
+bool TerrainRenderer::buildFadePipeline() {
+    if (!vkCtx || !pipelineLayout || fadePipeline_) return fadePipeline_ != VK_NULL_HANDLE;
+    VkDevice device = vkCtx->getDevice();
+    VkShaderModule vertShader, fragShader;
+    if (!vertShader.loadFromFile(device, "assets/shaders/terrain.vert.spv") ||
+        !fragShader.loadFromFile(device, "assets/shaders/terrain_fade.frag.spv")) {
+        LOG_WARNING("TerrainRenderer: terrain_fade.frag.spv missing - terrain pops in as stock");
+        vertShader.destroy();
+        fragShader.destroy();
+        return false;
+    }
+    // The fill pipeline's state exactly, with the fade build of the fragment
+    // shader (buildMainPassPipelines).
+    fadePipeline_ = PipelineBuilder()
+        .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
+                    fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+        .setVertexInput({ perVertexBinding(sizeof(pipeline::TerrainVertex)) },
+                        toVkAttributes(kTerrainVertexAttributes))
+        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+        .setDepthTest(true, true, VK_COMPARE_OP_LESS_OR_EQUAL)
+        .setColorBlendAttachment(PipelineBuilder::blendDisabled())
+        .setMultisample(vkCtx->getMsaaSamples())
+        .setLayout(pipelineLayout)
+        .setRenderPass(vkCtx->getImGuiRenderPass())
+        .setDynamicStates(viewportAndScissorDynamic())
+        .build(device, vkCtx->getPipelineCache());
+    vertShader.destroy();
+    fragShader.destroy();
+    return fadePipeline_ != VK_NULL_HANDLE;
+}
+
+void TerrainRenderer::setStreamFadeIn(bool on) {
+    if (on == streamFadeOn_) return;
+    streamFadeOn_ = on;
+    if (on) {
+        (void)buildFadePipeline();
+        return;
+    }
+    // Off: nothing stays stamped, and the pipeline goes once no frame in
+    // flight can still be drawing with it.
+    for (auto& c : chunks) c.streamFadeStart = -1.0f;
+    if (fadePipeline_ && vkCtx) {
+        VkDevice device = vkCtx->getDevice();
+        VkPipeline p = fadePipeline_;
+        fadePipeline_ = VK_NULL_HANDLE;
+        vkCtx->deferAfterAllFrameFences([device, p]() { vkDestroyPipeline(device, p, nullptr); });
+    }
 }
 
 void TerrainRenderer::setHorizonTiles(const std::vector<stock_terrain::WdlTile>& tiles) {
@@ -426,6 +486,7 @@ void TerrainRenderer::shutdown() {
 
     destroy(device, pipeline);
     destroy(device, wireframePipeline);
+    destroy(device, fadePipeline_);
     destroy(device, pipelineLayout);
     destroy(device, materialDescPool);
     destroy(device, materialSetLayout);
@@ -507,6 +568,7 @@ bool TerrainRenderer::loadTerrain(const pipeline::TerrainMesh& mesh,
             }
 
             registerRtChunk(gpuChunk, chunk);
+            if (streamFadeOn_) gpuChunk.streamFadeStart = streamFadeClock_;
             chunks.push_back(std::move(gpuChunk));
             ++chunksGeneration_;
         }
@@ -582,6 +644,7 @@ bool TerrainRenderer::loadTerrainIncremental(const pipeline::TerrainMesh& mesh,
         }
 
         registerRtChunk(gpuChunk, chunk);
+        if (streamFadeOn_) gpuChunk.streamFadeStart = streamFadeClock_;
         chunks.push_back(std::move(gpuChunk));
         ++chunksGeneration_;
         uploaded++;
@@ -1495,7 +1558,7 @@ void TerrainRenderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     static const bool kSpecularAllowed = core::envFlagEnabled("WOWEE_TERRAIN_SPECULAR", true);
     push.specular = glm::vec4(sunSpecular_, kSpecularAllowed && specularEnabled_ && !stockExtrasOff_
                                                 ? stock_terrain::kSpecularPower : 0.0f);
-    vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+    vkCmdPushConstants(cmd, pipelineLayout, kTerrainPushStages,
                         0, sizeof(TerrainPush), &push);
 
     // Use mega VB + IB when available.
@@ -1509,8 +1572,30 @@ void TerrainRenderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
         megaBuffersBound = true;
     }
 
+    // Fade in new scenery: a chunk still dissolving in is drawn with the fade
+    // pipeline and its hidden fraction; the rest with the stock one. Neither
+    // the wireframe view nor the row off ever binds it.
+    const bool fadeChunks = streamFadeOn_ && fadePipeline_ != VK_NULL_HANDLE &&
+                            activePipeline == pipeline;
+    VkPipeline boundPipeline = activePipeline;
+
     for (size_t vi = begin; vi < end; ++vi) {
         const auto& chunk = chunks[visibleChunks_[vi]];
+
+        if (fadeChunks) {
+            const float hide = chunk.streamFadeStart >= 0.0f
+                ? stream_fade::hidden(chunk.streamFadeStart, streamFadeClock_) : 0.0f;
+            VkPipeline want = hide > 0.0f ? fadePipeline_ : activePipeline;
+            if (want != boundPipeline) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want);
+                boundPipeline = want;
+            }
+            if (hide > 0.0f) {
+                const glm::vec4 fade(hide, 0.0f, 0.0f, 0.0f);
+                vkCmdPushConstants(cmd, pipelineLayout, kTerrainPushStages,
+                                   kTerrainStreamFadeOffset, sizeof(glm::vec4), &fade);
+            }
+        }
 
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                                  1, 1, &chunk.materialSet, 0, nullptr);

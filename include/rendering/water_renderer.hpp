@@ -194,6 +194,10 @@ public:
         shorelineFoam_ = enabled;
         setRefractionEnabled(enabled);
     }
+    /// Rain ripples (water.frag, push.rainRipple): how hard it is raining for
+    /// the rings, 0..1. 0 - the "Rain ripples" setting off, or dry - draws
+    /// the stock surface. Set each frame by the renderer.
+    void setRainRipple(float strength) { rainRipple_ = strength; }
     /// The underwater motes a liquid asks for (LiquidType Flags 0x8 and the
     /// particle columns); `show` false when the row has none.
     struct ParticulateInfo { bool show = false; float scale = 1.0f; int movement = 0; int texSlots = 0; bool fogged = false; };
@@ -379,6 +383,7 @@ private:
     bool renderingEnabled = true;
     bool refractionEnabled = false;
     bool shorelineFoam_ = true;
+    float rainRipple_ = 0.0f;
     VkExtent2D renderExtent_{.width = 0, .height = 0};
 };
 

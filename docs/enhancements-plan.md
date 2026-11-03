@@ -20,6 +20,13 @@ refraction switch is gone. The stock behaviour for off came from new RE:
 characters.md §1 "Point lights: full rule" and §6 "Unit blob shadow: full
 rule", world-lighting.md "Shadow map filter (PCF taps)" and "Drunk".
 
+Done (2026-11-03, step 3 part): E4 soft particles, E2 streaming fade-in and
+E5 rain ripples, each a row (`softparticles`, `streamfadein`,
+`rainripples`), recommended on, stock off. Status, what each looks like and
+its measured cost are in 3.6 and under each entry in section 4.
+`test_phase2_enhancements` holds the logic; `test_enhancements_stock` still
+holds Classic to `Enhancements{}`.
+
 ## 1. Goal and rules
 
 The client now draws close to stock 3.3.5a (build 12340). Phase 2 adds
@@ -297,6 +304,34 @@ What changed:
   stock blob. Bringing it back into the set needs the casters recorded off
   the main thread (or instanced units) and a static-caster cache.
 
+### 3.6 Measured cost of E4, E2, E5 (2026-11-03)
+
+Measured as 3.5 (Iris Xe, 1251x986, Ultra quality columns, Recommended set,
+noon, camera fixed, `WOWEE_ENHANCE_AB` on a 5 s period, adjacent windows
+paired, `perf/parse2.py`). Elwynn (Goldshire) and Stormwind (Trade District)
+dry; Elwynn again under server rain (`.wchange 1 1`, weather state 5;
+Stormwind City has no weather, so its "rain" run was a second dry sample).
+The machine was busy (load average 5-10 from builds on the same CPU, which
+also feed the iGPU's power budget) and every frame here was CPU-bound
+(21-38 ms), so the GPU column over-states as 3.5 warns. GPU / CPU ms:
+
+| Row | Elwynn | Stormwind | Stormwind, 2nd | Elwynn in rain |
+|---|---|---|---|---|
+| Soft particles | +0.44 ±0.15 / ~0 (late pass itself 0.07) | +0.10 ±0.24 / ~0 (0.06) | +1.5 ±0.5 / ~0 (noisy window) | +0.47 ±0.6 / ~0 |
+| Fade in new scenery | ~0 (+0.3 ±0.6) / ~0 | ~0 (+0.5 ±0.4) / ~0 | - | - |
+| Rain ripples | ~0 (dry) | ~0 (dry) | ~0 (dry) | +0.42 ±0.54 / ~0 |
+| Whole recommended set vs stock | +2.7 / ~0 | +1.8 / ~0 | +0.3 / +0.2 | +2.0 / ~0 |
+
+The late particle pass's own timestamp ("soft particles" in the profile) is
+0.06-0.07 ms in both places; the rest of the soft particle rows' GPU figure
+is the scene pass moving by the same few tenths in both directions between
+windows. Fade-in costs nothing while standing still (no chunk is stamped)
+and one push or flag byte per fading chunk or instance while streaming.
+Ripples cost nothing dry (`rtParams.z` and `push.rainRipple` are 0 and the
+blocks are skipped). The whole recommended set stays inside the 3 ms GPU /
+0.5 ms CPU budget of 3.4 in all four windows; its largest item is still the
+light shafts' fog inject (0.85-1.0 ms), not these three.
+
 ## 4. Proposed enhancements
 
 Ranked by feel gained over cost and risk. "Cost" is implementation effort
@@ -365,6 +400,29 @@ stock, the budget, and how to verify.
   new geometry only. Under 0.1 ms.
 - **Verify.** Fly Dalaran to Crystalsong at 280%: record with A/B. Count
   frames where a tile appears whole (should be 0 with it on). Pixel test.
+- **Status (2026-11-03): done, row `streamfadein` "Fade in new scenery",
+  recommended on.** As planned, with these differences. The stamp is per
+  terrain *chunk* (`TerrainRenderer::loadTerrainIncremental` uploads 16 a
+  call, so a tile already arrived piecewise), per WMO instance and per
+  doodad and WMO doodad the streamer places (`markStreamedIn`; a placement
+  that matched an instance already standing gets its id back and is not
+  stamped). The clock is drawn time with each step held to 0.1 s
+  (`Renderer::streamFadeClock_`): a far teleport's reload draws nothing for
+  seconds, and a wall clock had every tile "faded" before it was first
+  seen; now they dissolve in over the frames after the hitch. Shaders:
+  `stream_fade.glsli` (the C++ twin `rendering/stream_fade.hpp`); M2 carries
+  the hidden fraction in instance flags bits 24-31 (`vStreamHide`), WMO in
+  `push.frame.y`, both a branch on a flat value that is 0 with the row off,
+  placed after every texture read. Terrain has no discard in its stock
+  shader (which keeps early depth), so a fading chunk binds a second
+  pipeline built from `terrain.frag` with `-DSTREAM_FADE`
+  (`terrain_fade.frag.spv`), made when the row first goes on and released
+  when it goes off; its push range grew by a vec4 for the fraction, which
+  the stock shaders do not read. `WOWEE_STREAM_FADE_SECONDS=<s>` stretches
+  the dissolve for a look. Cost: 3.6, ~0. Gaps: ground clutter and server
+  game objects still pop (not stamped); a whole-world reload dissolves the
+  terrain against the sky and horizon, which reads as a 0.4 s sparkle - it
+  could be held back until the terrain under the camera is in.
 
 ### E3. Shadow quality: cascades and soft edges
 
@@ -407,6 +465,37 @@ stock, the budget, and how to verify.
 - **Verify.** Campfire in Goldshire, Blizzard on flat ground, Hellfire
   Peninsula smoke columns: A/B shots. Mod2x particles must still fold to
   grey, not to black, at the fade.
+- **Status (2026-11-03): done, row `softparticles` "Soft particles",
+  recommended on.** Built differently from the plan: no depth copy. With
+  the row on, the scene pass draws only the particles that write depth
+  (blend 0 and 1) and uploads the glow halos without drawing them; the
+  blended runs and the halos are drawn in a *late particle pass*
+  (`rendering/soft_particle_pass.*`): single sample, colour only (the
+  overlay pass's attachment), recorded on the resolved scene colour as soon
+  as the scene pass closes (`Renderer::recordSoftParticlePass`, from the
+  water continuation, the post-process `sceneClosedHook`, or `endFrame`),
+  with the scene's one-sample depth (its own without MSAA, its resolve with
+  it) moved to `DEPTH_STENCIL_READ_ONLY_OPTIMAL` and bound as a texture,
+  then put back. The shaders (the `-DSOFT_PARTICLES` builds of
+  `m2_particle_gpu.*` and `m2_particle.*`, sharing `soft_particle.glsli`;
+  the stock builds are byte-identical to before) do the stock
+  LESS_OR_EQUAL test themselves and fade over the last half-size of the
+  quad in front of the scene (0.15-1.5 yd); flat world quads (XY quads:
+  ground glows) keep the hard test. Each blend fades the way fog does:
+  alpha for 2 and 4, colour to black for 3, to white for 5, to 0x80 grey
+  for 6. A device with MSAA and no depth resolve has no one-sample depth
+  and keeps the stock path. Cost: 3.6, about 0.1 ms (the pass itself
+  0.07). Ordering changes while on: the blended particles now draw after
+  everything else in the scene pass - in the configurations where water,
+  weather, spray, mount dust and footprints are still in that pass (MSAA
+  with the glow/FXAA target, the default) they go under the particles, and
+  a particle below a water surface shows over it; where water is in its
+  own continuation pass (no MSAA, or MSAA straight to the swapchain) the
+  late pass comes before the water as before. The minimap, which also
+  lived in that pass, moves to the end of the late pass
+  (`minimapDrawsLate_`). The brightness overlay no longer scales the
+  particles. Gaps: the stock glow cards (M2 batches, U6 off) and ribbons
+  are not softened; `extrasmoke` stays hard.
 
 ### E5. Rain ripples on water and puddles
 
@@ -424,6 +513,25 @@ stock, the budget, and how to verify.
   only; under 0.2 ms.
 - **Verify.** Grizzly Hills or Elwynn in server rain, a lake and a road.
   Check the stock water ramp colour is unchanged at the ripple's mean.
+- **Status (2026-11-03): done, row `rainripples` "Rain ripples",
+  recommended on.** Rings, not a wave normal: `rain_ripples.glsli` cuts the
+  surface into cells (two layers, 0.6 and 0.9 yd), each takes at most one
+  drop a cycle at its own spot and moment, and the ring's height
+  (sin(pi x) e^-x^2, fading as it spreads) gives a slope that catches the
+  light toward the eye on one side and away on the other by the same
+  amount, so the stock ramp colour is the ripple's mean. Drawn out to about
+  30 yd on water (`water.frag`, `push.rainRipple`, never on interior WMO
+  water) and 28 yd on ground (`wet_surface.glsli` `wetGroundRipples`: only
+  where the ground is level, soaked through and in the hollows a slow noise
+  picks out; exterior WMO groups only, as the wet ground). The strength
+  follows the server's rain and storm grade, eased over about a second
+  (`rendering/rain_ripples.hpp`, `rtParams.z`), and is also each cell's
+  chance of a drop, so a drizzle rings sparsely. Ring width widens with
+  the pixel footprint so far rings blur instead of shimmering. Verified in
+  server rain in Goldshire (puddles on the grass) and Booty Bay harbour
+  (Stormwind City has no weather to switch on). Cost: 3.6, ~0 dry, about
+  0.4 ms on a water-heavy view in rain. Gap: no splash particles where
+  drops land - the rings only.
 
 ### E6. Snow cover while it snows
 
@@ -725,6 +833,7 @@ stock, the budget, and how to verify.
    in section 2 (shafts, sun shafts, flare, stars, vignette, soundtrack,
    midges). Each is small and makes "off = stock" true.
 3. E1 (blob), E4 (soft particles), E2 (fade-in), E5 (rain ripples).
+   Done 2026-11-03 (3.6).
 4. E8 (corpse settle) and E21 (dust), both small and using existing events.
 5. E3 (shadow quality), with the instanced shadow casters.
 6. If time is left: E7 capes only, then E10.

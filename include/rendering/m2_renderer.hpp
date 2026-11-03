@@ -11,6 +11,7 @@
 #include "rendering/m2_model_classifier.hpp"
 #include "rendering/m2_particle_step.hpp"
 #include "rendering/m2_particle_look.hpp"
+#include "rendering/stream_fade.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
@@ -567,6 +568,10 @@ struct alignas(64) M2Instance {
     /// back and forth while its propeller turns one way.
     float animTimeAlt = 0.0f;
     float portalSpinAngle = 0.0f;  // Accumulated spin angle for portal rotation
+    /// "Fade in new scenery": the stream-fade clock when this doodad came in
+    /// with its tile (M2Renderer::markStreamedIn), or negative - always, with
+    /// the row off - for one that is simply there.
+    float streamFadeStart = -1.0f;
 
     void recomputeCachedCullFactors();
 
@@ -751,10 +756,39 @@ public:
                                     glm::vec4* outColorIntensity,
                                     uint32_t maxLights) const;
 
+    /// "Fade in new scenery" (Renderer::setEnhancements): doodads that
+    /// arrive with a streamed tile dissolve in (stream_fade.glsli) instead of
+    /// appearing whole. Off stamps nothing, and every instance draws as stock.
+    void setStreamFadeIn(bool on) { streamFadeOn_ = on; }
+    /// The renderer's clock for it, set each frame while it is on.
+    void setStreamFadeClock(float seconds) { streamFadeClock_ = seconds; }
+    /// A doodad the terrain streamer just placed: it fades in from now.
+    void markStreamedIn(uint32_t instanceId);
+
     /// Enhancement switches (Renderer::setEnhancements). Off is stock.
     void setLightFlicker(bool on) { lightFlicker_ = on; }
     void setGlowSprites(bool on) { glowSpritesOn_ = on; }
     void setExtraSmoke(bool on) { extraSmoke_ = on; }
+
+    /// Soft particles (the "Soft particles" row; SoftParticlePass). While
+    /// deferred for a frame, the scene pass draws only the opaque and
+    /// alpha-key particles - the ones that write depth - and the glow halos'
+    /// upload without their draw; renderSoftParticles then draws the blended
+    /// ones and the halos in the late pass, reading the scene's depth. Set
+    /// before the frame is recorded and left alone until it is.
+    void setSoftParticlesDeferred(bool on) { softDeferred_ = on; }
+    [[nodiscard]] bool softParticlesDeferred() const { return softDeferred_; }
+    /// Build the late pass's pipelines against `latePass` (single sample,
+    /// colour only), with the scene depth in `depthLayout`. Once; false while
+    /// they cannot be built, and then nothing is deferred.
+    bool ensureSoftParticlePipelines(VkRenderPass latePass, VkDescriptorSetLayout depthLayout);
+    /// Free them (the row went off, or the pass they were built for went).
+    /// Between frames only.
+    void releaseSoftParticlePipelines();
+    [[nodiscard]] bool hasSoftParticlePipelines() const { return particleSoftPipelines_[2] != VK_NULL_HANDLE; }
+    /// The deferred draws, inside the late pass, after the frame's scene
+    /// recording has finished.
+    void renderSoftParticles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, VkDescriptorSet depthSet);
 
     /** Set the HiZ system for occlusion culling (Phase 6.3). nullptr disables HiZ. */
     void setHiZSystem(HiZSystem* hiz) { hizSystem_ = hiz; }
@@ -1740,6 +1774,22 @@ private:
     bool lightFlicker_ = false;   // lamps gutter (enhancement)
     bool glowSpritesOn_ = false;  // glow cards drawn as halos (enhancement)
     bool extraSmoke_ = false;     // synthesised smoke over smoke models (enhancement)
+    // Fade in new scenery (setStreamFadeIn).
+    bool streamFadeOn_ = false;
+    float streamFadeClock_ = 0.0f;
+    uint32_t lastNewInstanceId_ = 0;  // the last createInstance* that made one
+    /// The draw's flags bits 24-31 for an instance (stream_fade::hideByte).
+    [[nodiscard]] int32_t streamFadeFlags(const M2Instance& inst) const;
+    // Soft particles (setSoftParticlesDeferred). Made on first use only.
+    bool softDeferred_ = false;
+    VkPipelineLayout particleSoftLayout_ = VK_NULL_HANDLE;  // sets: perFrame, tex, curves, depth
+    VkPipelineLayout glowSoftLayout_ = VK_NULL_HANDLE;      // sets: perFrame, tex, depth
+    VkPipeline particleSoftPipelines_[7] = {};         // blend types 2..6 used
+    VkPipeline glowSoftPipeline_ = VK_NULL_HANDLE;
+    uint32_t glowSoftCount_ = 0;                       // halos uploaded for the late pass
+    /// A particle group's texture set for this frame (the model's, else one
+    /// made now and kept on the group until the frame's next write).
+    VkDescriptorSet particleTexSet(ParticleGroup& group);
     static bool modelGivesLight(const M2ModelGPU& m) {
         return m.isLanternLike || m.isTorch || m.isBrazierOrFire || m.isForge || m.isLavaModel ||
                !m.stockPointLights.empty();
