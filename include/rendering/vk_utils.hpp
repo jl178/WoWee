@@ -121,6 +121,11 @@ AllocatedImage createImage(VkDevice device, VmaAllocator allocator,
 
 void destroyImage(VkDevice device, VmaAllocator allocator, AllocatedImage& image);
 
+/// Set by VkContext once the device exists: true on Intel GPUs. createImage
+/// then adds rendering/image_create_policy.hpp's flags (the terrain's R8 maps
+/// go uncompressed, so no submit has to walk them).
+void setAvoidPrivateImageBindings(bool on);
+
 /// Give a Vulkan object a name the validation layer will print.
 ///
 /// The leak report at vkDestroyDevice lists what was never destroyed as bare

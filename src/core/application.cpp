@@ -2101,7 +2101,10 @@ void Application::run() {
         // granularity is a millisecond or so, which is close enough for a
         // cap and far cheaper than spinning.
         if (window) {
+            const auto capStart = std::chrono::steady_clock::now();
             pacer.waitForCap(window->frameCap());
+            frameCapWaitMs_ = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - capStart).count();
         }
 
         // Delta, and the start of the frame the cap above will pace. Taken
@@ -6437,6 +6440,19 @@ void Application::render() {
     }
 
     stageStatFrames_ += 1;
+    if (frameProfileEnabled_) {
+        // Frame end to frame end. The cap's sleep comes first in the next
+        // iteration, so it was measured (frameCapWaitMs_) in this one.
+        const auto now = std::chrono::steady_clock::now();
+        if (lastFrameEnd_.time_since_epoch().count() != 0) {
+            const double wall = std::chrono::duration<double, std::milli>(now - lastFrameEnd_).count();
+            double waits = frameCapWaitMs_;
+            if (renderer && renderer->getVkContext()) waits += renderer->getVkContext()->takeLastBeginFrameWaitMs();
+            frameWallSamples_.push_back(static_cast<float>(wall));
+            frameCpuSamples_.push_back(static_cast<float>(std::max(0.0, wall - waits)));
+        }
+        lastFrameEnd_ = now;
+    }
     reportStageTimes();
     renderingFrame_ = false;
     processDeferredLogoutToLogin();
@@ -6523,7 +6539,23 @@ void Application::checkFrameSpike(std::int64_t frameNs, float stepSeconds) {
     suppressedSpikes_ = 0;
 }
 
+std::string Application::medianP95(std::vector<float> samples) {
+    if (samples.empty()) return "- -";
+    std::sort(samples.begin(), samples.end());
+    const auto at = [&](double q) {
+        const size_t i = std::min(samples.size() - 1, static_cast<size_t>(q * static_cast<double>(samples.size() - 1) + 0.5));
+        return samples[i];
+    };
+    std::ostringstream out;
+    out.setf(std::ios::fixed);
+    out.precision(2);
+    out << at(0.5) << " " << at(0.95);
+    return out.str();
+}
+
 void Application::resetStageWindow(std::chrono::steady_clock::time_point now) {
+    frameWallSamples_.clear();
+    frameCpuSamples_.clear();
     for (auto& [name, stat] : stageStats_) {
         (void)name;
         stat.totalMs = 0.0;
@@ -6572,7 +6604,14 @@ void Application::reportTaggedStageTimes(std::chrono::steady_clock::time_point n
              << " window_s=" << windowMs / 1000.0f << " frame_ms=" << frameMs
              << " fence_ms=" << fenceMs << " acquire_ms=" << acquireMs
              << " cpu_ms=" << (frameMs - fenceMs - acquireMs)
-             << " gpu_ms=" << gpuTotal << " gpu_frames=" << gpuFrames << " | gpu:";
+             << " gpu_ms=" << gpuTotal << " gpu_frames=" << gpuFrames;
+        {
+            std::istringstream fw(medianP95(frameWallSamples_)), fc(medianP95(frameCpuSamples_));
+            std::string a, b, c, d;
+            fw >> a >> b; fc >> c >> d;
+            line << " frame_med=" << a << " frame_p95=" << b << " cpu_med=" << c << " cpu_p95=" << d;
+        }
+        line << " | gpu:";
         for (const auto& [n, ms] : gpu) line << " " << n << "=" << ms << ";";
         line << " | cpu:";
         for (const auto& [name, stat] : stageStats_) {
@@ -6609,6 +6648,10 @@ void Application::reportStageTimes() {
         head << "frame budget over " << static_cast<int>(windowMs / 1000.0f)
              << "s: " << stageStatFrames_ << " frames, " << fps << " fps, "
              << windowMs / static_cast<float>(stageStatFrames_) << "ms each";
+        if (!frameCpuSamples_.empty()) {
+            head << "; median/p95 frame " << medianP95(frameWallSamples_)
+                 << " ms, cpu " << medianP95(frameCpuSamples_) << " ms";
+        }
         if (loud) LOG_WARNING(head.str()); else LOG_INFO(head.str());
         // Worst first: the stage to look at is the one taking the time, and a
         // long tail matters more than an average on a device that stutters.
@@ -6639,6 +6682,10 @@ void Application::reportStageTimes() {
         {
             double fenceMs = 0.0, acquireMs = 0.0;
             renderer->getVkContext()->takeBeginFrameWaits(fenceMs, acquireMs);
+            if (frameProfileEnabled_) {
+                LOG_WARNING("  ", renderer->getVkContext()->takeSubmitAndMemoryReport(),
+                            " (over the window)");
+            }
             std::ostringstream waits;
             waits << "  beginFrame waits: frame fence " << fenceMs << "ms, swapchain acquire "
                   << acquireMs << "ms per frame";
@@ -6698,6 +6745,8 @@ void Application::reportStageTimes() {
         stat.worstMs = 0.0f;
         stat.frames = 0;
     }
+    frameWallSamples_.clear();
+    frameCpuSamples_.clear();
     stageStatFrames_ = 0;
     stageStatsSince_ = now;
 }

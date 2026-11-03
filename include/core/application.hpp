@@ -257,6 +257,16 @@ private:
     /// that answers "where does the frame go" was never in the logs it was
     /// built for. With the flag set it is reported at warning instead.
     bool frameProfileEnabled_ = false;
+    /// Under WOWEE_FRAME_PROFILE, every frame's wall time and its CPU time
+    /// (the wall time less the frame cap's sleep and beginFrame's waits on the
+    /// GPU and the swapchain), so a window reports a median and a 95th
+    /// percentile and not only a mean. Cleared with the stage window.
+    std::vector<float> frameWallSamples_;
+    std::vector<float> frameCpuSamples_;
+    std::chrono::steady_clock::time_point lastFrameEnd_{};
+    double frameCapWaitMs_ = 0.0;
+    /// "median p95" of a sample list, for the profile lines.
+    static std::string medianP95(std::vector<float> samples);
     /// Rendered facing per creature, turned toward the wanted facing each frame.
     std::unordered_map<uint64_t, float> creatureRenderYaw_;
     std::map<std::string, StageStat> stageStats_;

@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#include <sstream>
 #include <vector>
 
 namespace wowee {
@@ -1013,6 +1014,19 @@ bool VkContext::createLogicalDevice() {
         }
     }
     setPipelineBarrier2Fn(cmdPipelineBarrier2_);
+
+    // The terrain's R8 maps uncompressed on Intel, so they stay off the list
+    // of images every submit walks (rendering/image_create_policy.hpp says
+    // why). WOWEE_VK_SMALL_IMAGE_CCS=1 keeps the driver's compression, for A/B.
+    {
+        const char* v = std::getenv("WOWEE_VK_SMALL_IMAGE_CCS");
+        const bool keepCcs = v && *v && *v != '0';
+        setAvoidPrivateImageBindings(gpuVendorId_ == 0x8086 && !keepCcs);
+        if (gpuVendorId_ == 0x8086) {
+            LOG_INFO("Terrain alpha and shadow maps ", keepCcs ? "keep" : "skip",
+                     " the driver's compression (WOWEE_VK_SMALL_IMAGE_CCS)");
+        }
+    }
 
     // Only present with VK_EXT_debug_utils, which comes with validation. When
     // it is absent naming is a no-op, which is what a release build wants.
@@ -2478,6 +2492,21 @@ bool VkContext::ensureUiTextureDescriptorPool() {
     return true;
 }
 
+std::string VkContext::takeSubmitAndMemoryReport() {
+    std::ostringstream out;
+    out << submitCount_ << " queue submits";
+    submitCount_ = 0;
+    if (allocator) {
+        VmaTotalStatistics st{};
+        vmaCalculateStatistics(allocator, &st);
+        out << "; VMA " << st.total.statistics.blockCount << " device memory blocks, "
+            << st.total.statistics.allocationCount << " allocations, "
+            << (st.total.statistics.blockBytes >> 20) << " MiB";
+    }
+    out << "; " << uiTextures_.size() << " UI textures with their own device memory";
+    return out.str();
+}
+
 VkDescriptorSet VkContext::uploadImGuiTexture(const uint8_t* rgba, int width, int height) {
     if (!device || !physicalDevice || width <= 0 || height <= 0 || !rgba)
         return VK_NULL_HANDLE;
@@ -2983,8 +3012,13 @@ VkCommandBuffer VkContext::beginFrame(uint32_t& imageIndex) {
     // Where beginFrame waits: on the GPU finishing an earlier frame, or on
     // the presentation engine handing an image back. The profile prints
     // both; they call for different fixes.
-    beginFrameFenceWaitMs_ += std::chrono::duration<double, std::milli>(fenceDone - waitStart).count();
-    beginFrameAcquireMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - acquireStart).count();
+    {
+        const double fenceWait = std::chrono::duration<double, std::milli>(fenceDone - waitStart).count();
+        const double acquireWait = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - acquireStart).count();
+        beginFrameFenceWaitMs_ += fenceWait;
+        beginFrameAcquireMs_ += acquireWait;
+        lastBeginFrameWaitMs_ += fenceWait + acquireWait;
+    }
     ++beginFrameWaitSamples_;
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
@@ -3107,6 +3141,7 @@ void VkContext::endFrame(VkCommandBuffer cmd, uint32_t imageIndex) {
     submitInfo.signalSemaphoreCount = static_cast<uint32_t>(signalSemaphores.size());
     submitInfo.pSignalSemaphores = signalSemaphores.data();
 
+    ++submitCount_;
     VkResult submitResult = vkQueueSubmit(graphicsQueue, 1, &submitInfo,
                                           frameTimeline_ != VK_NULL_HANDLE ? VK_NULL_HANDLE
                                                                            : frame.inFlightFence);
@@ -3166,7 +3201,11 @@ void VkContext::endFrame(VkCommandBuffer cmd, uint32_t imageIndex) {
     presentInfo.pSwapchains = &swapchain;
     presentInfo.pImageIndices = &imageIndex;
 
+    const auto presentStart = std::chrono::steady_clock::now();
     VkResult result = vkQueuePresentKHR(presentQueue, &presentInfo);
+    // Some drivers block here on the GPU or the compositor rather than in
+    // beginFrame; the frame profile counts it as a wait, not CPU work.
+    lastBeginFrameWaitMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - presentStart).count();
     // Presenting unrotated onto a rotated surface is suboptimal by definition,
     // and says so on every frame for as long as the swapchain lives. Rebuilding
     // on that answer rebuilds every frame, which is what stopped the client
@@ -3258,6 +3297,7 @@ void VkContext::endSingleTimeCommands(VkCommandBuffer cmd) {
     // Said once. If the device is gone, every subsequent call fails the same
     // way and a log full of it buries the first one.
     static bool reported = false;
+    ++submitCount_;
     const VkResult submitted = vkQueueSubmit(graphicsQueue, 1, &submitInfo, immFence);
     if (submitted != VK_SUCCESS && !reported) {
         reported = true;
@@ -3462,6 +3502,7 @@ void VkContext::endUploadBatch() {
         return v && *v && *v != '0';
     }();
     VkQueue targetQueue = (hasDedicatedTransfer_ && asyncUploadQueue) ? transferQueue_ : graphicsQueue;
+    ++submitCount_;
     noteDeviceLost("async upload batch submit", vkQueueSubmit(targetQueue, 1, &submitInfo, fence));
 
     // Said once, with the handle, because these are the only fences created
@@ -3564,6 +3605,7 @@ void VkContext::endUploadBatchSync() {
     // Both checked. These were the only unchecked waits between a world load
     // and the first frame's submit, so a device lost in one of them was first
     // reported by that submit, one stage later and with no name attached.
+    ++submitCount_;
     noteDeviceLost("sync upload batch submit", vkQueueSubmit(targetQueue, 1, &submitInfo, batchFence));
     noteDeviceLost("sync upload batch wait",
                    vkWaitForFences(device, 1, &batchFence, VK_TRUE, UINT64_MAX));

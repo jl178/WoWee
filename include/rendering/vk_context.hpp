@@ -10,6 +10,7 @@
 #include <vector>
 #include <functional>
 #include <cstdint>
+#include <string>
 #include <unordered_map>
 #include <mutex>
 
@@ -209,6 +210,17 @@ public:
     /// first-seen order, and the number of frames; then starts again.
     uint32_t takeGpuAverages(std::vector<std::pair<const char*, double>>& out);
 
+        /// WOWEE_FRAME_PROFILE: queue submits since the last call, and how much
+        /// device memory VMA holds in how many blocks.
+        std::string takeSubmitAndMemoryReport();
+        /// Milliseconds the frame waited since the last call: beginFrame's fence
+        /// and acquire, and endFrame's present. The frame profile's CPU time is
+        /// the frame less these.
+        double takeLastBeginFrameWaitMs() {
+            const double ms = lastBeginFrameWaitMs_;
+            lastBeginFrameWaitMs_ = 0.0;
+            return ms;
+        }
         /// Average milliseconds beginFrame spent waiting since the last call: on
         /// the frame fence, then on the swapchain acquire. Resets the counters.
         void takeBeginFrameWaits(double& fenceMs, double& acquireMs) {
@@ -443,6 +455,8 @@ private:
     double beginFrameFenceWaitMs_ = 0.0;
     double beginFrameAcquireMs_ = 0.0;
     uint32_t beginFrameWaitSamples_ = 0;
+    double lastBeginFrameWaitMs_ = 0.0;
+    uint32_t submitCount_ = 0;
     bool vsync_ = true;
     /// The present mode and vsync state the present-mode line last reported
     /// (mode * 2 + vsync), so a rebuild that changes nothing says nothing.

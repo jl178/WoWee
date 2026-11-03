@@ -83,7 +83,15 @@ private:
         bool instanceAlive = false;
         stock::AdvancedSchedule schedule;
         int32_t offsetMs = 0;
+        uint32_t order = 0;       // position in emitters_' iteration order (refreshOrder)
     };
+
+    /// The per-frame loops walk these instead of the whole map: the periodic
+    /// emitters, and the advanced instances alive (at most kMaxLoops), each
+    /// in emitters_' own iteration order so the shared random stream is drawn
+    /// in the same order the full walk drew it. Rebuilt when the map changes.
+    void refreshOrder();
+    void dropAlive(const Emitter* e);
 
     bool resolve(Emitter& e) const;
     uint32_t add(Emitter e);
@@ -101,6 +109,9 @@ private:
     float lastVolumeScale_ = -1.0f;
     float scanTimerS_ = 0.0f;
     std::vector<std::pair<float, uint32_t>> candidates_;  // scratch: (distSq, id)
+    std::vector<Emitter*> periodic_;
+    std::vector<Emitter*> alive_;
+    bool orderDirty_ = true;
 };
 
 } // namespace audio

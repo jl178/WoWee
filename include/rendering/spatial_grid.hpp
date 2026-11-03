@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -256,6 +257,67 @@ inline std::optional<CellRange> cellRangeCovering(
 
     if (range.minX > range.maxX || range.minY > range.maxY) return std::nullopt;
     return range;
+}
+
+/// The columns, row by row, of the cells a segment's band reaches: every cell
+/// holding a point within `margin` of the segment a-b on each axis.
+///
+/// A ray across a group used to gather the whole rectangle its entry and exit
+/// points span, and a diagonal ray across a 64x64 grid is 4096 cells for the
+/// ~190 it crosses. The band is the same margin around the same segment, so a
+/// triangle the segment meets - or comes within the margin of - is still in
+/// a cell it returns; the cells it drops are only those the rectangle had for
+/// being square. A row the band misses gets an empty span (min > max).
+///
+/// Rows outside the grid clamp into its edge rows and columns, as the
+/// rectangle's arithmetic (cellRangeCovering) does, so the edge rows and
+/// columns reach to infinity here too.
+struct ColumnSpan {
+    int minX = 1;
+    int maxX = 0;
+};
+
+inline void segmentBandColumns(int cellsX, int cellsY, float extentX, float extentY,
+                               const glm::vec2& gridOrigin, const glm::vec2& a,
+                               const glm::vec2& b, float margin, const CellRange& range,
+                               std::vector<ColumnSpan>& spans) {
+    spans.assign(static_cast<size_t>(range.maxY - range.minY + 1), ColumnSpan{});
+    const float invCellW = static_cast<float>(cellsX) / std::max(0.01f, extentX);
+    const float invCellH = static_cast<float>(cellsY) / std::max(0.01f, extentY);
+    const float cellH = 1.0f / invCellH;
+    // Generous at every comparison: a cell too many is a few triangles tested
+    // for nothing, a cell too few is a wall walked through.
+    const float slackY = margin + 1e-3f * cellH + 1e-4f;
+    const float slackX = margin + 1e-3f / invCellW + 1e-4f;
+    constexpr float kInf = std::numeric_limits<float>::infinity();
+    for (int cy = range.minY; cy <= range.maxY; ++cy) {
+        const float y0 = cy == 0 ? -kInf : gridOrigin.y + static_cast<float>(cy) * cellH;
+        const float y1 = cy == cellsY - 1 ? kInf : gridOrigin.y + static_cast<float>(cy + 1) * cellH;
+        const float lo = y0 - slackY, hi = y1 + slackY;
+        // The part of the segment whose y is within the row, widened.
+        float t0 = 0.0f, t1 = 1.0f;
+        const float dy = b.y - a.y;
+        if (std::abs(dy) < 1e-12f) {
+            if (a.y < lo || a.y > hi) continue;
+        } else {
+            float ta = (lo - a.y) / dy, tb = (hi - a.y) / dy;
+            if (ta > tb) std::swap(ta, tb);
+            t0 = std::max(0.0f, ta);
+            t1 = std::min(1.0f, tb);
+            if (t0 > t1) continue;
+        }
+        const float xa = a.x + (b.x - a.x) * t0;
+        const float xb = a.x + (b.x - a.x) * t1;
+        const float minX = std::min(xa, xb) - slackX;
+        const float maxX = std::max(xa, xb) + slackX;
+        ColumnSpan span;
+        span.minX = std::max(range.minX, static_cast<int>(std::max(-1.0e9f, (minX - gridOrigin.x) * invCellW)));
+        span.maxX = std::min(range.maxX, static_cast<int>(std::min(1.0e9f, (maxX - gridOrigin.x) * invCellW)));
+        // Truncation toward zero, as the grid's own arithmetic: a point left
+        // of the origin lands in column 0, and so must the span.
+        if ((minX - gridOrigin.x) * invCellW < 0.0f) span.minX = range.minX;
+        spans[static_cast<size_t>(cy - range.minY)] = span;
+    }
 }
 
 }  // namespace rendering

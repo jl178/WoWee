@@ -1528,6 +1528,12 @@ wowee_add_test(test_indoor_shadows
 wowee_add_test(test_light_tiles
     SOURCES test_light_tiles.cpp)
 
+# ── test_image_create_policy ─────────────────────────────────
+# The terrain's R8 alpha and shadow maps skip the driver's compression on Intel, so every
+# submit stops walking them (rendering/image_create_policy.hpp).
+wowee_add_test(test_image_create_policy
+    SOURCES test_image_create_policy.cpp)
+
 # ── test_phase2_enhancements ─────────────────────────────────
 # Soft particles' fade and the water's place around their pass, the
 # streamed-scenery fade-in, the rain ripples' strength, the corpses' slope

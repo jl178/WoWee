@@ -24,6 +24,10 @@
 //                                  or a negative hour for the game's clock
 //   WoweeDebug_UseObject(name)     right-click the nearest game object of
 //                                  that name (a mailbox, a guild vault)
+//   WoweeDebug_ProfileTag(label)   under WOWEE_FRAME_PROFILE, close the
+//                                  current profile window and open one
+//                                  named label (one PROFILE_AB line each,
+//                                  with frame and CPU median and p95)
 //   WoweeDebug_Quit()              close the client
 //
 // Events pushed this way reach only this client: SDL's queue is in-process.
@@ -32,6 +36,7 @@
 #include "addons/lua_engine.hpp"
 #include "core/application.hpp"
 #include "core/logger.hpp"
+#include "core/profile_tag.hpp"
 #include "game/entity.hpp"
 #include "game/game_handler.hpp"
 #include "rendering/camera_controller.hpp"
@@ -193,6 +198,11 @@ int luaDebugUseObject(lua_State* L) {
     return 1;
 }
 
+int luaDebugProfileTag(lua_State* L) {
+    setProfileTag(luaL_checkstring(L, 1));
+    return 0;
+}
+
 int luaDebugQuit(lua_State* L) {
     (void)L;
     SDL_Event ev{};
@@ -238,6 +248,7 @@ void debugLuaHookTick(addons::LuaEngine* engine, SDL_Window* window) {
     lua_register(L, "WoweeDebug_Screenshot", luaDebugScreenshot);
     lua_register(L, "WoweeDebug_PushKey", luaDebugPushKey);
     lua_register(L, "WoweeDebug_Quit", luaDebugQuit);
+    lua_register(L, "WoweeDebug_ProfileTag", luaDebugProfileTag);
     lua_register(L, "WoweeDebug_Mouse", luaDebugMouse);
     lua_register(L, "WoweeDebug_Camera", luaDebugCamera);
     lua_register(L, "WoweeDebug_TimeOfDay", luaDebugTimeOfDay);
