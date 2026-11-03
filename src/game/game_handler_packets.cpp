@@ -340,16 +340,37 @@ void GameHandler::registerCoreOpcodes() {
     };
     dispatchTable_[Opcode::SMSG_STABLE_RESULT] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(1)) return;
-        uint8_t result = packet.readUInt8();
-        // Wow.exe (0x5A17F0) has one word for the player: ERR_NOT_ENOUGH_MONEY
-        // for result 1. The rest refresh the list (8-10), raise
-        // PET_STABLE_UPDATE (11) or nothing at all.
-        if (result == 0x01) displayGameMessage("ERR_NOT_ENOUGH_MONEY", "You don't have enough money.");
-        if (result == 0x0B) fireAddonEvent("PET_STABLE_UPDATE", {});
+        const uint8_t result = packet.readUInt8();
         LOG_INFO("SMSG_STABLE_RESULT: result=", static_cast<int>(result));
-        if (stableWindowOpen_ && stableMasterGuid_ != 0 && socket && result <= 0x08) {
-            auto refreshPkt = ListStabledPetsPacket::build(stableMasterGuid_);
-            socket->send(refreshPkt);
+        // Wow.exe 0x5A17F0: 1 is ERR_NOT_ENOUGH_MONEY; 8 (stabled), 9
+        // (unstabled) and 10 (a slot bought - one more slot) ask for the list
+        // again; 11 raises PET_STABLE_UPDATE; 12 is the tame error for an
+        // exotic pet the player cannot control. The rest say nothing.
+        switch (result) {
+            case 0x01:
+                displayGameMessage("ERR_NOT_ENOUGH_MONEY", "You don't have enough money.");
+                break;
+            case 0x0A:
+                if (stableNumSlots_ < 4) ++stableNumSlots_;
+                [[fallthrough]];
+            case 0x08:
+            case 0x09:
+                if (stableMasterGuid_ != 0 && socket) {
+                    auto refreshPkt = ListStabledPetsPacket::build(stableMasterGuid_);
+                    socket->send(refreshPkt);
+                }
+                break;
+            case 0x0B:
+                fireAddonEvent("PET_STABLE_UPDATE", {});
+                break;
+            case 0x0C: {
+                std::string why = globalString(services().assetManager, "PETTAME_CANTCONTROLEXOTIC");
+                if (why.empty()) why = "You are unable to control exotic creatures";
+                displayGameMessage("ERR_TAME_FAILED", why + ".", {why});
+                break;
+            }
+            default:
+                break;
         }
     };
 
@@ -2517,10 +2538,38 @@ void GameHandler::registerRemainingOpcodes() {
     // These pet opcodes have incompatible formats - just consume the packet.
     // Previously they shared the unlearn handler, which misinterpreted sound IDs
     // or GUID lists as unlearn costs and could trigger a bogus unlearn dialog.
-    for (auto op : { Opcode::SMSG_PET_GUIDS, Opcode::SMSG_PET_DISMISS_SOUND,
-                     Opcode::SMSG_PET_ACTION_SOUND }) {
-        dispatchTable_[op] = [](network::Packet& packet) { packet.skipAll(); };
-    }
+    // The list of every unit the player controls, which the client keeps
+    // beside its pet (0x5D6550); nothing in this client reads past the first.
+    dispatchTable_[Opcode::SMSG_PET_GUIDS] = [](network::Packet& packet) { packet.skipAll(); };
+    // The pet's voice (Unit_C 0x716B90 -> 0x7474B0): action 0 is a special
+    // spell and plays the model's PetOrder sound, 1 an attack and its
+    // PetAttack sound, on the pet, while Sound_EnablePetSounds is on.
+    dispatchTable_[Opcode::SMSG_PET_ACTION_SOUND] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(12)) { packet.skipAll(); return; }
+        const uint64_t unitGuid = packet.readUInt64();
+        const uint32_t action = packet.readUInt32();
+        if (action > 1 || !petSoundCallback_) return;
+        auto e = getEntityManager().getEntity(unitGuid);
+        auto u = std::dynamic_pointer_cast<Unit>(e);
+        if (!u) return;
+        petSoundCallback_(unitGuid, u->getDisplayId(), action == 0 ? 1 : 2,
+                          u->getLatestX(), u->getLatestY(), u->getLatestZ());
+    };
+    // A dismissed pet's farewell, at where it stood (0x716C00): the
+    // CreatureModelData row's CreatureSoundData PetDismiss sound.
+    dispatchTable_[Opcode::SMSG_PET_DISMISS_SOUND] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(16)) { packet.skipAll(); return; }
+        const uint32_t modelId = packet.readUInt32();
+        const float x = packet.readFloat();
+        const float y = packet.readFloat();
+        const float z = packet.readFloat();
+        if (petSoundCallback_) {
+            // Server axes to the client's canonical ones, as positions are
+            // everywhere else (x north, y west).
+            const glm::vec3 canon = core::coords::serverToCanonical(glm::vec3(x, y, z));
+            petSoundCallback_(0, modelId, 3, canon.x, canon.y, canon.z);
+        }
+    };
     // Server signals that the pet can now be named (first tame)
     dispatchTable_[Opcode::SMSG_PET_RENAMEABLE] = [this](network::Packet& packet) {
         // Server signals that the pet can now be named (first tame)
@@ -2531,8 +2580,38 @@ void GameHandler::registerRemainingOpcodes() {
         packet.skipAll();
     };
     dispatchTable_[Opcode::SMSG_PET_NAME_INVALID] = [this](network::Packet& packet) {
-        addUIError("That pet name is invalid. Please choose a different name.");
-        raiseUiError("That pet name is invalid. Please choose a different name.");
+        // result(4), the name, a declension flag(1) and the five declined
+        // forms when set (0x6E2E90 case 0x178 -> 0x5218C0): the result picks
+        // the ERR_NAME_* line, and a demanded declension raises
+        // PET_FORCE_NAME_DECLENSION with the name and its forms.
+        if (!packet.hasRemaining(4)) { packet.skipAll(); return; }
+        const uint32_t result = packet.readUInt32();
+        static const struct { uint32_t code; const char* key; const char* text; } kNameErrors[] = {
+            {2, "ERR_NAME_NO_NAME", "Enter a name."},
+            {3, "ERR_NAME_TOO_SHORT", "Names must be at least 2 characters long."},
+            {4, "ERR_NAME_TOO_LONG", "Names must be no more than 12 characters long."},
+            {6, "ERR_NAME_MIXED_LANGUAGES", "Names must contain only one language."},
+            {7, "ERR_NAME_PROFANE", "That name contains mature language."},
+            {8, "ERR_NAME_RESERVED", "That name is unavailable."},
+            {11, "ERR_NAME_THREE_CONSECUTIVE", "You cannot use the same letter three times consecutively."},
+            {12, "ERR_NAME_INVALID_SPACE", "You cannot use an apostrophe as the first or last character of your name."},
+            {13, "ERR_NAME_CONSECUTIVE_SPACES", "You can only have one apostrophe."},
+            {14, "ERR_NAME_RUSSIAN_CONSECUTIVE_SILENT_CHARACTERS", "Invalid name."},
+            {15, "ERR_NAME_RUSSIAN_SILENT_CHARACTER_AT_BEGINNING_OR_END", "Invalid name."},
+            {16, "ERR_NAME_DECLENSION_DOESNT_MATCH_BASE_NAME", "Invalid name."},
+        };
+        const char* key = "ERR_NAME_INVALID";
+        const char* text = "Names must contain only letters.";
+        for (const auto& e : kNameErrors) {
+            if (e.code == result) { key = e.key; text = e.text; break; }
+        }
+        displayGameMessage(key, text);
+        const std::string name = packet.hasRemaining(1) ? packet.readString() : std::string();
+        if (packet.hasRemaining(1) && packet.readUInt8() != 0) {
+            std::vector<std::string> args{name};
+            for (int i = 0; i < 5; ++i) args.push_back(packet.hasRemaining(1) ? packet.readString() : std::string());
+            fireAddonEvent("PET_FORCE_NAME_DECLENSION", args);
+        }
         packet.skipAll();
     };
     // Classic 1.12: PackedGUID + 19×uint32 itemEntries (EQUIPMENT_SLOT_END=19)

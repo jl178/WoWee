@@ -1844,47 +1844,100 @@ const game::GameHandler::StabledPet* activePet(game::GameHandler* gh) {
     return nullptr;
 }
 
-/// Which slot the player has clicked. Held here because it is a fact about the
-/// window rather than about the character, and the server is never told.
-int& selectedStableSlot() {
-    static int slot = 0;
-    return slot;
+/// Which pet the player has clicked, as the client keeps it (0xC0F6D0): a
+/// stabled pet's number, kSelectedCurrent for the pet that is out, or 0 for
+/// none. Kept by number, not slot, because every stable or unstable sends the
+/// list again; and each list resets it to none (0x5A11A0), which is what makes
+/// PetStable_Update pick the current pet, or the first, afresh.
+constexpr uint32_t kSelectedCurrent = 0xFFFFFFFFu;
+uint32_t& selectedStablePet(game::GameHandler* gh) {
+    static uint32_t number = 0;
+    static uint32_t listSeen = 0;
+    if (gh && gh->getStableListGeneration() != listSeen) {
+        listSeen = gh->getStableListGeneration();
+        number = 0;
+    }
+    return number;
+}
+
+/// GetSelectedStablePet's numbering (0x5A0E40, plus one): 0 the pet that is
+/// out, 1.. a stabled one, -1 none.
+int selectedStableSlot(game::GameHandler* gh) {
+    const uint32_t sel = selectedStablePet(gh);
+    if (sel == kSelectedCurrent) return 0;
+    if (sel == 0) return -1;
+    const auto stabled = stabledOnly(gh);
+    for (size_t i = 0; i < stabled.size(); ++i) {
+        if (stabled[i]->petNumber == sel) return static_cast<int>(i) + 1;
+    }
+    return -1;
+}
+
+/// The stable entry behind a slot: 0 the current one, 1.. the stabled ones.
+const game::GameHandler::StabledPet* stableEntry(game::GameHandler* gh, int slot) {
+    if (slot == 0) return activePet(gh);
+    const auto stabled = stabledOnly(gh);
+    if (slot >= 1 && slot <= static_cast<int>(stabled.size())) return stabled[static_cast<size_t>(slot - 1)];
+    return nullptr;
+}
+
+/// A stabled pet's family, from its template - asked for when unknown, with
+/// PET_STABLE_UPDATE raised when it arrives (0x67B6A0 with 0x5A0E80).
+const game::CreatureFamilyInfo* stableFamily(game::GameHandler* gh, uint32_t entry) {
+    if (!gh || entry == 0) return nullptr;
+    const auto& cache = gh->getCreatureInfoCache();
+    auto it = cache.find(entry);
+    if (it == cache.end()) {
+        gh->queryCreatureInfo(entry, 0);
+        return nullptr;
+    }
+    return gh->petDbc().family(it->second.family);
+}
+
+/// The pet talent tree a family trains, by TalentTab's PetTalentMask.
+std::string petTreeName(game::GameHandler* gh, const game::CreatureFamilyInfo* fam) {
+    if (!gh || !fam || fam->petTalentType < 0) return {};
+    gh->loadTalentDbc();
+    const uint32_t bit = 1u << static_cast<uint32_t>(fam->petTalentType);
+    for (const auto& [id, tab] : gh->getAllTalentTabs()) {
+        if (tab.petTalentMask & bit) return tab.name;
+    }
+    return {};
+}
+
+/// The player's own hunter pet's family, or null for any other pet.
+const game::CreatureFamilyInfo* hunterPetFamily(game::GameHandler* gh) {
+    if (!gh || !gh->isHunterPet()) return nullptr;
+    return gh->petDbc().family(gh->petCreatureFamily());
 }
 
 } // namespace
 
-// GetStablePetInfo(slot) → icon, name, level, family, talent
+// GetStablePetInfo(slot) → icon, name, level, family, talent (0x5A1330)
 //
-// The icon is what says a slot is occupied: the frame tests it before deciding
-// whether the slot reads as a pet or as an empty box, so an occupied slot must
-// answer something and an empty one must answer nil.
-//
-// Family and talent tree are blank. They come from the creature's family, and
-// the stable packet carries the creature entry without it - this client's own
-// stable window shows a name and a level for the same reason.
+// Slot 0 is the pet that is out, 1.. the stabled ones. The icon and the two
+// names come from the pet's CreatureFamily row, which the client finds through
+// the pet's creature template; until that is known the slot answers
+// nil, nil, 0 and reads as empty, and the template's arrival redraws it. The
+// talent tree is the fifth return only for a family that trains one.
 static int lua_GetStablePetInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const int slot = static_cast<int>(luaL_optnumber(L, 1, -1));
-    if (!gh || slot < 0) { return luaReturnNil(L); }
-
-    const game::GameHandler::StabledPet* pet = nullptr;
-    if (slot == 0) {
-        pet = activePet(gh);
-    } else {
-        const auto stabled = stabledOnly(gh);
-        if (slot <= static_cast<int>(stabled.size())) {
-            pet = stabled[static_cast<size_t>(slot - 1)];
-        }
+    const int slot = static_cast<int>(luaL_checknumber(L, 1));
+    const auto* pet = gh ? stableEntry(gh, slot) : nullptr;
+    const auto* fam = pet ? stableFamily(gh, pet->entry) : nullptr;
+    if (!pet || !fam) {
+        lua_pushnil(L);
+        lua_pushnil(L);
+        lua_pushnumber(L, 0);
+        return 3;
     }
-    if (!pet) { return luaReturnNil(L); }
-
-    lua_pushstring(L, "Interface\\Icons\\Ability_Hunter_BeastTaming");
-    lua_pushstring(L, pet->name.empty()
-                          ? ("Pet #" + std::to_string(pet->petNumber)).c_str()
-                          : pet->name.c_str());
+    lua_pushstring(L, fam->icon.c_str());
+    lua_pushstring(L, pet->name.c_str());
     lua_pushnumber(L, pet->level);
-    lua_pushstring(L, "");   // family
-    lua_pushstring(L, "");   // pet talent tree
+    lua_pushstring(L, fam->name.c_str());
+    const std::string tree = petTreeName(gh, fam);
+    if (tree.empty()) return 4;
+    lua_pushstring(L, tree.c_str());
     return 5;
 }
 
@@ -1900,100 +1953,128 @@ static int lua_GetNumStableSlots(lua_State* L) {
 }
 
 static int lua_GetSelectedStablePet(lua_State* L) {
-    lua_pushnumber(L, selectedStableSlot());
+    lua_pushnumber(L, selectedStableSlot(getGameHandler(L)));
     return 1;
 }
 
+// ClickStablePet(slot) (0x5A1CA0): with no stable pet on the cursor, select
+// the slot and answer true (the frame redraws on that). With one, the drop:
+// the pet that is out onto an empty slot stables it (CMSG_STABLE_PET), onto an
+// occupied one swaps (CMSG_STABLE_SWAP_PET); a stabled pet onto the current
+// slot unstables it (CMSG_UNSTABLE_PET), or swaps when a pet is out. The
+// cursor clears and the answer is nil; the server's list redraws.
 static int lua_ClickStablePet(lua_State* L) {
-    selectedStableSlot() = static_cast<int>(luaL_optnumber(L, 1, 0));
-    // The model preview shows whichever pet is selected, so selecting a
-    // different one is exactly when it has to be redrawn. Nothing else changes
-    // it, and the frame will not redraw on its own.
-    lua_getfield(L, LUA_REGISTRYINDEX, "wowee_lua_engine");
-    auto* engine = static_cast<LuaEngine*>(lua_touserdata(L, -1));
-    lua_pop(L, 1);
-    if (engine) engine->fireEvent("PET_STABLE_UPDATE_PAPERDOLL", {});
-    return 0;
-}
-
-// ---- What a pet eats, and what it trains into ----
-//
-// Both come from the creature's family. This client learns a family from
-// SMSG_CREATURE_QUERY_RESPONSE, which only ever arrives for creatures it has
-// seen - and a stabled pet is by definition not in the world, so its family is
-// never known. Mapping a family to a diet would need CreatureFamily.dbc on top
-// of that, whose field layout does not read cleanly enough to trust.
-//
-// So these answer absent, and the frame is built for that: GetPetIcon and
-// GetPetFoodTypes are both tested before use, and the talent tree is taken as
-// `GetPetTalentTree() or ""`.
-static int lua_GetPetIcon(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (!gh || !activePet(gh)) { return luaReturnNil(L); }
-    lua_pushstring(L, "Interface\\Icons\\Ability_Hunter_BeastTaming");
+    const int slot = static_cast<int>(luaL_checknumber(L, 1));
+    if (!gh) return 0;
+    const int carried = cursorStableSlot();
+    if (carried < 0) {
+        if (slot == 0) selectedStablePet(gh) = kSelectedCurrent;
+        else if (const auto* p = stableEntry(gh, slot)) selectedStablePet(gh) = p->petNumber;
+        else selectedStablePet(gh) = 0;
+        gh->fireAddonEvent("PET_STABLE_UPDATE_PAPERDOLL", {});
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    const auto* clicked = stableEntry(gh, slot);
+    const auto* held = stableEntry(gh, carried);
+    const auto r = game::pet::stableClick(carried, slot, clicked != nullptr,
+                                          clicked ? clicked->petNumber : 0,
+                                          held ? held->petNumber : 0, held != nullptr,
+                                          gh->getStableSlots(), gh->hasPet());
+    switch (r.op) {
+        case game::pet::StableClick::Stable:   gh->stablePet(0); break;
+        case game::pet::StableClick::Swap:     gh->swapStablePet(r.petNumber); break;
+        case game::pet::StableClick::Unstable: gh->unstablePet(r.petNumber); break;
+        default: break;
+    }
+    clearCursor(L);
+    lua_pushnil(L);
     return 1;
 }
-static int lua_GetPetTalentTree(lua_State* L) { return luaReturnNil(L); }
-static int lua_GetPetFoodTypes(lua_State* L)  { return luaReturnNil(L); }
 
-/// SetPetStablePaperdoll(model) - put the selected pet in the preview frame.
-///
-/// This was a deliberate no-op on the reading that there was no path putting
-/// an arbitrary creature in a model frame. There is one now: the portraits
-/// needed it, so CharacterPreview will load any M2 by path and the display
-/// lookup turns a creature's display id into one.
-///
-/// The slot is the window's own state, held beside ClickStablePet. The list the
-/// server sent carries a creature *template entry* - there is no display id on
-/// that wire at all - so it is resolved here, at the read, rather than stored
-/// converted: the resolution asks the server the first time and answers zero
-/// until the reply lands, and a value frozen at parse time would keep that zero
-/// for the life of the window. What is written is the display id; the render
-/// loop is where the model is built, because that is where the offscreen views
-/// live.
+// GetPetIcon / GetPetFoodTypes / GetPetTalentTree: the player's hunter pet's
+// family icon (0x5D3CE0), diet names (0x5D3BD0) and pet talent tree's name
+// (0x5D3D80), from CreatureFamily. Any other pet - a warlock's demon, a
+// ghoul, a water elemental - has none of them.
+static int lua_GetPetIcon(lua_State* L) {
+    const auto* fam = hunterPetFamily(getGameHandler(L));
+    if (!fam || fam->icon.empty()) { return luaReturnNil(L); }
+    lua_pushstring(L, fam->icon.c_str());
+    return 1;
+}
+static int lua_GetPetTalentTree(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const std::string tree = petTreeName(gh, hunterPetFamily(gh));
+    if (tree.empty()) { return luaReturnNil(L); }
+    lua_pushstring(L, tree.c_str());
+    return 1;
+}
+static int lua_GetPetFoodTypes(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const auto* fam = hunterPetFamily(gh);
+    if (!fam) return 0;
+    const auto names = gh->petDbc().foodNames(fam->petFoodMask);
+    for (const auto& n : names) lua_pushstring(L, n.c_str());
+    return static_cast<int>(names.size());
+}
+
+/// SetPetStablePaperdoll(model) (0x5A1530): the selected pet in the preview -
+/// the pet that is out from its own unit when it is a hunter's pet in view,
+/// otherwise the template of the stable entry, by its first display.
 static int lua_SetPetStablePaperdoll(lua_State* L) {
     auto* gh = getGameHandler(L);
     auto* tree = getWidgetTree(L);
-    if (!gh || !tree || !lua_istable(L, 1)) return 0;
+    if (!gh || !tree || !lua_istable(L, 1)) {
+        return luaL_error(L, "Usage: SetPetStablePaperdoll(characterModel)");
+    }
     lua_getfield(L, 1, "__wid");
     const uint32_t id = static_cast<uint32_t>(lua_tointeger(L, -1));
     lua_pop(L, 1);
     auto* w = tree->get(id);
     if (!w) return 0;
-
-    // Slots count from one and the active pet is slot zero, which the stable
-    // list carries as its own entry rather than as a slot.
-    const int slot = selectedStableSlot();
-    const auto& pets = gh->getStabledPets();
-    w->modelDisplayId = 0;
-    if (slot >= 1 && slot <= static_cast<int>(pets.size())) {
-        w->modelDisplayId = gh->getCreatureDisplayIdForEntry(
-            pets[static_cast<size_t>(slot) - 1].entry);
+    const int slot = selectedStableSlot(gh);
+    uint32_t display = 0;
+    if (slot == 0) {
+        if (gh->hasPet() && gh->isHunterPet()) {
+            if (auto* u = gh->getUnitByGuid(gh->getPetGuid())) display = u->getDisplayId();
+        }
+        if (display == 0) {
+            if (const auto* cur = activePet(gh)) display = gh->getCreatureDisplayIdForEntry(cur->entry);
+        }
+    } else if (const auto* p = stableEntry(gh, slot)) {
+        display = gh->getCreatureDisplayIdForEntry(p->entry);
     }
+    w->modelDisplayId = display;
     return 0;
 }
 
-/// PickupStablePet(slot) - start dragging a pet between stable slots.
-///
-/// Also a deliberate no-op. Moving a pet by dragging needs a cursor that can
-/// hold one, and this client's cursor holds items and spells; the buttons the
-/// stable frame offers for the same moves go through stablePet and
-/// unstablePet, which do work. So the frame loses the drag and keeps the
-/// operation.
-static int lua_PickupStablePet(lua_State* L) { (void)L; return 0; }
+/// PickupStablePet(slot) (0x5A0FE0 -> 0x520C60): a pet whose family is known
+/// goes onto the cursor with its family icon; ClickStablePet on another slot
+/// is the drop.
+static int lua_PickupStablePet(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const int slot = static_cast<int>(luaL_checknumber(L, 1));
+    clearCursor(L);
+    const auto* pet = gh ? stableEntry(gh, slot) : nullptr;
+    const auto* fam = pet ? stableFamily(gh, pet->entry) : nullptr;
+    if (!fam || fam->icon.empty()) return 0;
+    pickUpStablePet(L, slot, fam->icon);
+    return 0;
+}
 
-/// GetStablePetFoodTypes(slot) - and the one that cannot answer nil.
-///
-/// Its result goes straight into format(PET_DIET_TEMPLATE,
-/// BuildListString(...)) with no test in between. BuildListString hands nil
-/// back for nil, and string.format raises on a nil where it wants a string, so
-/// answering honestly there takes the stable window down as it opens. An empty
-/// string is the one value that says "not known" without doing that: the diet
-/// line comes out blank instead of wrong.
+/// GetStablePetFoodTypes(slot) (0x5A16A0): the slot's diet names, one return
+/// each. Nothing for an unknown family - and the frame formats the list
+/// without testing it, so a known pet always has at least one.
 static int lua_GetStablePetFoodTypes(lua_State* L) {
-    (void)L;
-    lua_pushstring(L, "");
-    return 1;
+    auto* gh = getGameHandler(L);
+    const int slot = static_cast<int>(luaL_checknumber(L, 1));
+    const auto* pet = gh ? stableEntry(gh, slot) : nullptr;
+    const auto* fam = pet ? stableFamily(gh, pet->entry) : nullptr;
+    if (!fam) return 0;
+    const auto names = gh->petDbc().foodNames(fam->petFoodMask);
+    for (const auto& n : names) lua_pushstring(L, n.c_str());
+    return static_cast<int>(names.size());
 }
 
 static int lua_ClosePetStables(lua_State* L) {
@@ -2008,13 +2089,25 @@ static int lua_IsAtStableMaster(lua_State* L) {
 }
 
 // GetNextStableSlotCost() → what the next slot costs, in copper.
-//
-// Zero, because the server never says. It reaches a money frame, which divides
-// it into gold and silver the moment the window opens, so it has to be a number
-// - and a made-up price shown as though the server had quoted it is worse than
-// a visible nothing.
+// StablePet() / UnstablePet(slot) (0x5A19C0 / 0x5A1AC0): the API forms of
+// the two moves, which the stable frame itself does by dragging.
+static int lua_StablePet(lua_State* L) {
+    if (auto* gh = getGameHandler(L); gh && gh->isStableWindowOpen()) gh->stablePet(0);
+    return 0;
+}
+static int lua_UnstablePet(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const int slot = static_cast<int>(luaL_checknumber(L, 1));
+    if (!gh || gh->hasPet() || !gh->isStableWindowOpen()) return 0;
+    if (const auto* p = stableEntry(gh, slot); p && slot >= 1) gh->unstablePet(p->petNumber);
+    return 0;
+}
+
 static int lua_GetNextStableSlotCost(lua_State* L) {
-    lua_pushnumber(L, 0);
+    // StableSlotPrices.dbc's row for the next slot (0x5A14D0): 5s, 50s, 50g
+    // and 150g in 3.3.5; 0 past the fourth.
+    auto* gh = getGameHandler(L);
+    lua_pushnumber(L, gh ? gh->petDbc().stableSlotPrice(gh->getStableSlots() + 1u) : 0);
     return 1;
 }
 
@@ -2202,20 +2295,260 @@ TalentSource talentSource(game::GameHandler* gh, bool inspect, int talentGroup) 
     return src;
 }
 
-/// The fourth argument asks for the *pet's* tree.
-///
-/// Nothing here tracks pet talents - no packet fills them and no table holds
-/// them - and ignoring the argument answered out of the player's trees
-/// instead, so a hunter's pet tab drew the hunter's own talents. Ten nils is
-/// the honest answer and leaves the tab empty; talentframebase treats a nil
-/// name as "no talent here", which is what it is.
+/// The `pet` argument: the pet's tree rather than the player's.
 static bool wantsPetTalents(lua_State* L, int index) {
     return lua_toboolean(L, index) != 0;
 }
 
+// ── The pet's talent tree (TalentInfo.cpp; docs/re/pets.md) ────────────────
+//
+// One tree, the TalentTab whose PetTalentMask has the bit of the pet family's
+// PetTalentType (0x5C64D0), for the family SMSG_PET_SPELLS named (0x5C9DF0).
+// Its talents are every Talent.dbc row of that tab; a row whose CategoryMask
+// leaves the family out answers as an empty button (0x5C5A20). Ranks and the
+// unspent count are the pet's SMSG_TALENTS_INFO (type 1). The preview is the
+// pet's own, kept apart from the player's.
+
+/// The pet's family row, or null when the pet has no talents.
+static const game::CreatureFamilyInfo* petTalentFamily(game::GameHandler* gh) {
+    if (!gh || !gh->hasPet() || gh->getPetFamily() == 0) return nullptr;
+    const auto* fam = gh->petDbc().family(gh->getPetFamily());
+    return (fam && fam->petTalentType >= 0) ? fam : nullptr;
+}
+
+/// The pet's talent tabs, in TalentTab order (one in 3.3.5).
+static std::vector<const game::GameHandler::TalentTabEntry*> petTalentTabs(game::GameHandler* gh) {
+    std::vector<const game::GameHandler::TalentTabEntry*> tabs;
+    const auto* fam = petTalentFamily(gh);
+    if (!fam) return tabs;
+    gh->loadTalentDbc();
+    const uint32_t bit = 1u << static_cast<uint32_t>(fam->petTalentType);
+    for (const auto& [tabId, tab] : gh->getAllTalentTabs()) {
+        if (tab.petTalentMask & bit) tabs.push_back(&tab);
+    }
+    std::sort(tabs.begin(), tabs.end(), [](const auto* a, const auto* b) { return a->tabId < b->tabId; });
+    return tabs;
+}
+
+/// The talents of a pet tab, by row, column and id - the id breaking the tie
+/// between two family-specific talents that share a square.
+static std::vector<const game::GameHandler::TalentEntry*> petTabTalents(game::GameHandler* gh, int tabIndex) {
+    std::vector<const game::GameHandler::TalentEntry*> out;
+    const auto tabs = petTalentTabs(gh);
+    if (tabIndex < 1 || tabIndex > static_cast<int>(tabs.size())) return out;
+    const uint32_t tabId = tabs[static_cast<size_t>(tabIndex - 1)]->tabId;
+    for (const auto& [id, entry] : gh->getAllTalents()) {
+        if (entry.tabId == tabId) out.push_back(&entry);
+    }
+    std::sort(out.begin(), out.end(), [](const auto* a, const auto* b) {
+        if (a->row != b->row) return a->row < b->row;
+        if (a->column != b->column) return a->column < b->column;
+        return a->talentId < b->talentId;
+    });
+    return out;
+}
+
+const game::TalentEntry* petTalentAt(game::GameHandler* gh, int tabIndex, int talentIndex) {
+    const auto talents = petTabTalents(gh, tabIndex);
+    if (talentIndex < 1 || talentIndex > static_cast<int>(talents.size())) return nullptr;
+    return talents[static_cast<size_t>(talentIndex - 1)];
+}
+
+/// Whether the pet's family is offered this talent (0x5C5A20).
+bool petTalentShown(game::GameHandler* gh, const game::TalentEntry* talent) {
+    const auto* fam = petTalentFamily(gh);
+    return fam && talent &&
+           game::pet::petTalentForFamily(talent->categoryMask[0], talent->categoryMask[1], fam->categoryEnumId);
+}
+
+int petTalentRank(game::GameHandler* gh, uint32_t talentId) {
+    if (!gh) return 0;
+    const auto& ranks = gh->getPetTalents();
+    auto it = ranks.find(talentId);
+    return it != ranks.end() ? it->second : 0;
+}
+
+/// Points staged in the pet's preview, and the pet talent packet a Learn is
+/// waiting on: the staged points stay drawn until the server's answer lands,
+/// so the tree does not drop back to the old ranks for a round trip.
+static std::unordered_map<uint32_t, int>& petPreviewPoints() {
+    static std::unordered_map<uint32_t, int> points;
+    return points;
+}
+static bool& petPreviewSent() { static bool sent = false; return sent; }
+static uint32_t& petPreviewGeneration() { static uint32_t g = 0; return g; }
+static uint64_t& petPreviewPet() { static uint64_t g = 0; return g; }
+
+static void settlePetPreview(game::GameHandler* gh) {
+    if (!gh) return;
+    // Another pet, or none: its staged points mean nothing now.
+    if (petPreviewPet() != gh->getPetGuid()) {
+        petPreviewPoints().clear();
+        petPreviewSent() = false;
+        petPreviewPet() = gh->getPetGuid();
+    }
+    if (petPreviewSent() && gh->getPetTalentGeneration() != petPreviewGeneration()) {
+        petPreviewPoints().clear();
+        petPreviewSent() = false;
+    }
+}
+
+static int petPreviewTotal() {
+    int total = 0;
+    for (const auto& [id, n] : petPreviewPoints()) { (void)id; total += n; }
+    return total;
+}
+
+static int petPreviewOf(uint32_t talentId) {
+    auto it = petPreviewPoints().find(talentId);
+    return it != petPreviewPoints().end() ? it->second : 0;
+}
+
+static int petGetTalentTabInfo(lua_State* L, game::GameHandler* gh, int tabIndex) {
+    settlePetPreview(gh);
+    const auto tabs = petTalentTabs(gh);
+    if (tabIndex < 1 || tabIndex > static_cast<int>(tabs.size())) {
+        lua_pushnil(L); lua_pushnil(L); lua_pushinteger(L, 0); lua_pushnil(L); lua_pushinteger(L, 0);
+        return 5;
+    }
+    const auto* tab = tabs[static_cast<size_t>(tabIndex - 1)];
+    int spent = 0, preview = 0;
+    for (const auto* talent : petTabTalents(gh, tabIndex)) {
+        spent += petTalentRank(gh, talent->talentId);
+        preview += petPreviewOf(talent->talentId);
+    }
+    const std::string icon = tab->spellIconId ? gh->getIconPath(tab->spellIconId) : std::string{};
+    lua_pushstring(L, tab->name.c_str());
+    if (icon.empty()) lua_pushnil(L); else lua_pushstring(L, icon.c_str());
+    lua_pushinteger(L, spent);
+    lua_pushstring(L, tab->backgroundFile.c_str());
+    lua_pushinteger(L, preview);
+    return 5;
+}
+
+static int petGetTalentInfo(lua_State* L, game::GameHandler* gh, int tabIndex, int talentIndex) {
+    settlePetPreview(gh);
+    const auto* talent = petTalentAt(gh, tabIndex, talentIndex);
+    if (!talent || !petTalentShown(gh, talent)) {
+        // The row 0x5C7800 answers for a talent the family is not offered.
+        lua_pushnil(L); lua_pushnil(L);
+        lua_pushnumber(L, 1); lua_pushnumber(L, 1);
+        lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 0);
+        lua_pushnil(L);
+        lua_pushnumber(L, 0);
+        lua_pushnil(L);
+        return 10;
+    }
+    const int rank = petTalentRank(gh, talent->talentId);
+    const int previewRank = rank + petPreviewOf(talent->talentId);
+    const uint32_t shownSpell = talent->rankSpells[rank > 0 ? rank - 1 : 0];
+    std::string name = gh->getSpellName(talent->rankSpells[0]);
+    const std::string icon = gh->getSpellIconPath(shownSpell ? shownSpell : talent->rankSpells[0]);
+    if (name.empty()) lua_pushnil(L); else lua_pushstring(L, name.c_str());
+    if (icon.empty()) lua_pushnil(L); else lua_pushstring(L, icon.c_str());
+    lua_pushnumber(L, talent->row + 1);
+    lua_pushnumber(L, talent->column + 1);
+    lua_pushnumber(L, rank);
+    lua_pushnumber(L, talent->maxRank);
+    if (talent->flags & 1u) lua_pushboolean(L, 1); else lua_pushnil(L);
+    // A pet talent has no required spell to know (0x5C7800 asks that only of
+    // the player's), so both answers are yes; the arrows are
+    // GetTalentPrereqs' business.
+    lua_pushboolean(L, 1);
+    lua_pushnumber(L, previewRank);
+    lua_pushboolean(L, 1);
+    return 10;
+}
+
+static int petGetTalentPrereqs(lua_State* L, game::GameHandler* gh, int tabIndex, int talentIndex) {
+    settlePetPreview(gh);
+    const auto* talent = petTalentAt(gh, tabIndex, talentIndex);
+    if (!talent) return 0;
+    int pushed = 0;
+    for (int p = 0; p < 3; ++p) {
+        const uint32_t prereqId = talent->prereqTalent[p];
+        if (prereqId == 0) continue;
+        const auto* prereq = gh->getTalentEntry(prereqId);
+        if (!prereq) continue;
+        const int needed = static_cast<int>(talent->prereqRank[p]) + 1;
+        const int have = petTalentRank(gh, prereqId);
+        lua_pushnumber(L, prereq->row + 1);
+        lua_pushnumber(L, prereq->column + 1);
+        if (have >= needed) lua_pushboolean(L, 1); else lua_pushnil(L);
+        if (have + petPreviewOf(prereqId) >= needed) lua_pushboolean(L, 1); else lua_pushnil(L);
+        pushed += 4;
+    }
+    return pushed;
+}
+
+static void petAddPreview(lua_State* L, game::GameHandler* gh, int tabIndex, int talentIndex, int delta) {
+    settlePetPreview(gh);
+    const auto* talent = petTalentAt(gh, tabIndex, talentIndex);
+    if (!talent || !petTalentShown(gh, talent) || petPreviewSent()) return;
+    const int have = petTalentRank(gh, talent->talentId);
+    int& staged = petPreviewPoints()[talent->talentId];
+    const int before = staged;
+    int upper = static_cast<int>(talent->maxRank) - have;
+    if (delta > 0) {
+        const int pool = static_cast<int>(gh->getPetUnspentTalents()) - petPreviewTotal();
+        upper = std::min(upper, staged + std::max(0, pool));
+    }
+    staged = std::clamp(staged + delta, 0, std::max(0, upper));
+    const int change = staged - before;
+    if (staged == 0) petPreviewPoints().erase(talent->talentId);
+    if (change != 0) {
+        // (talentIndex, tabIndex, groupIndex, points) - 0x5C9590.
+        gh->fireAddonEvent("PREVIEW_PET_TALENT_POINTS_CHANGED",
+                           {std::to_string(talentIndex), std::to_string(tabIndex), "1",
+                            std::to_string(change)});
+    }
+    (void)L;
+}
+
+static void petResetPreview(game::GameHandler* gh) {
+    settlePetPreview(gh);
+    const int total = petPreviewTotal();
+    petPreviewPoints().clear();
+    petPreviewSent() = false;
+    if (gh && total != 0) {
+        gh->fireAddonEvent("PREVIEW_PET_TALENT_POINTS_CHANGED", {"0", "0", "1", std::to_string(-total)});
+    }
+}
+
+static void petLearnPreview(game::GameHandler* gh) {
+    settlePetPreview(gh);
+    if (!gh || petPreviewPoints().empty() || petPreviewSent()) return;
+    // In unlock order - tier, then column, never ahead of a staged
+    // prerequisite - each talent once at its final rank, counted from zero,
+    // as AzerothCore's LearnPetTalent takes it.
+    std::vector<const game::TalentEntry*> staged;
+    for (const auto& [id, n] : petPreviewPoints()) {
+        if (n <= 0) continue;
+        if (const auto* talent = gh->getTalentEntry(id)) staged.push_back(talent);
+    }
+    std::sort(staged.begin(), staged.end(), [](const auto* a, const auto* b) {
+        if (a->row != b->row) return a->row < b->row;
+        if (a->column != b->column) return a->column < b->column;
+        return a->talentId < b->talentId;
+    });
+    std::vector<std::pair<uint32_t, uint32_t>> request;
+    for (const auto* talent : staged) {
+        const int finalRank = petTalentRank(gh, talent->talentId) + petPreviewOf(talent->talentId);
+        if (finalRank > 0) request.emplace_back(talent->talentId, static_cast<uint32_t>(finalRank - 1));
+    }
+    if (request.empty()) return;
+    gh->learnPreviewPetTalents(request);
+    petPreviewSent() = true;
+    petPreviewGeneration() = gh->getPetTalentGeneration();
+}
+
 static int lua_GetNumTalentTabs(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (wantsPetTalents(L, 2)) { return luaReturnZero(L); }
+    if (wantsPetTalents(L, 2)) {
+        // No inspected pet's tree (0x5C5CC0).
+        lua_pushnumber(L, lua_toboolean(L, 1) ? 0 : static_cast<double>(petTalentTabs(gh).size()));
+        return 1;
+    }
     if (!gh) { return luaReturnZero(L); }
     // Count tabs matching the class in question
     uint8_t classId = talentClassId(gh, lua_toboolean(L, 1) != 0);
@@ -2242,7 +2575,10 @@ static int lua_GetTalentTabInfo(lua_State* L) {
     if (!gh || tabIndex < 1) {
         return luaReturnNil(L);
     }
-    if (wantsPetTalents(L, 3)) return luaReturnNil(L);
+    if (wantsPetTalents(L, 3)) {
+        if (lua_toboolean(L, 2)) return luaReturnNil(L);
+        return petGetTalentTabInfo(L, gh, tabIndex);
+    }
     const bool inspect = lua_toboolean(L, 2) != 0;
     // Argument 4 is the talent group (TalentFrame.talentGroup): the inactive
     // spec's tab totals its own points, not the active spec's.
@@ -2296,7 +2632,10 @@ static int lua_GetNumTalents(lua_State* L) {
     // The counts belong to the same family as the readers below and were
     // missed with them: a pet tab whose talents all answer nil still asked how
     // many to lay out, and got the player's tree's count.
-    if (wantsPetTalents(L, 3)) { return luaReturnZero(L); }
+    if (wantsPetTalents(L, 3)) {
+        lua_pushnumber(L, lua_toboolean(L, 2) ? 0 : static_cast<double>(petTabTalents(gh, tabIndex).size()));
+        return 1;
+    }
     if (!gh || tabIndex < 1) { return luaReturnZero(L); }
     uint8_t classId = talentClassId(gh, lua_toboolean(L, 2) != 0);
     const auto classTabs = classTalentTabs(gh, classId);
@@ -2386,8 +2725,8 @@ static int lua_GetTalentInfo(lua_State* L) {
     settlePreview(gh);
     const bool inspect = lua_toboolean(L, 3) != 0;
     if (wantsPetTalents(L, 4)) {
-        for (int i = 0; i < 10; i++) lua_pushnil(L);
-        return 10;
+        if (inspect || !gh) { for (int i = 0; i < 10; i++) lua_pushnil(L); return 10; }
+        return petGetTalentInfo(L, gh, tabIndex, talentIndex);
     }
     // Argument 5 is the talent group, as GetTalentTabInfo's 4 is.
     const TalentSource src =
@@ -2420,7 +2759,8 @@ static int lua_GetTalentInfo(lua_State* L) {
     lua_pushnumber(L, talent->column + 1);     // 4: column (1-indexed)
     lua_pushnumber(L, rank);                   // 5: rank
     lua_pushnumber(L, talent->maxRank);        // 6: maxRank
-    lua_pushboolean(L, 0);                     // 7: isExceptional
+    // 7: isExceptional - Talent.dbc Flags bit 1 (0x5C7800), true or nil.
+    if (talent->flags & 1u) lua_pushboolean(L, 1); else lua_pushnil(L);
     // Was hardcoded true, which drew every talent as learnable however deep in
     // a chain it sat.
     lua_pushboolean(L, talentPrereqsMet(gh, talent, /*withPreview=*/false, src) ? 1 : 0);
@@ -2975,7 +3315,10 @@ static int lua_AddPreviewTalentPoints(lua_State* L) {
     const int delta = static_cast<int>(luaL_optnumber(L, 3, 1));
     // The pet tree again: staging a preview point there resolved against the
     // player's trees, and LearnPreviewTalents would then have spent it.
-    if (wantsPetTalents(L, 4)) return 0;
+    if (wantsPetTalents(L, 4)) {
+        petAddPreview(L, gh, tab, index, delta);
+        return 0;
+    }
     settlePreview(gh);
     const uint32_t id = resolveTalentId(gh, tab, index);
     if (!gh || id == 0) return 0;
@@ -3034,7 +3377,10 @@ static int lua_GetTalentPrereqs(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int tabIndex = static_cast<int>(luaL_checknumber(L, 1));
     const int talentIndex = static_cast<int>(luaL_checknumber(L, 2));
-    if (wantsPetTalents(L, 4)) return 0;
+    if (wantsPetTalents(L, 4)) {
+        if (lua_toboolean(L, 3) || !gh) return 0;
+        return petGetTalentPrereqs(L, gh, tabIndex, talentIndex);
+    }
     settlePreview(gh);
     // (tab, index, inspect, pet, talentGroup) - talentframebase.lua:195. The
     // inspected player's class and ranks, or the group asked for: the
@@ -3071,6 +3417,11 @@ static int lua_GetTalentPrereqs(lua_State* L) {
 // GetGroupPreviewTalentPointsSpent(pet, group) → points staged
 static int lua_GetGroupPreviewTalentPointsSpent(lua_State* L) {
     auto* gh = getGameHandler(L);
+    if (wantsPetTalents(L, 1)) {
+        settlePetPreview(gh);
+        lua_pushnumber(L, petPreviewTotal());
+        return 1;
+    }
     settlePreview(gh);
     int total = 0;
     for (const auto& [id, n] : previewPoints()) { (void)id; total += n; }
@@ -3084,6 +3435,10 @@ static int lua_GetGroupPreviewTalentPointsSpent(lua_State* L) {
 
 // ResetGroupPreviewTalentPoints(pet, group)
 static int lua_ResetGroupPreviewTalentPoints(lua_State* L) {
+    if (wantsPetTalents(L, 1)) {
+        petResetPreview(getGameHandler(L));
+        return 0;
+    }
     previewPoints().clear();
     // Ranks already sent still arrive and show as learned when they do; there
     // is nothing left to hold for them.
@@ -3156,7 +3511,10 @@ static std::vector<PreviewSend> inUnlockOrder(std::vector<PreviewSend> sends) {
 static int lua_LearnPreviewTalents(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) return 0;
-    if (wantsPetTalents(L, 1)) return 0;
+    if (wantsPetTalents(L, 1)) {
+        petLearnPreview(gh);
+        return 0;
+    }
     settlePreview(gh);
     auto& committed = committedPreview();
     // A fresh baseline unless an earlier Learn is still being answered: its
@@ -3211,7 +3569,16 @@ static int lua_LearnTalent(lua_State* L) {
     // Pet talents are not modelled, and this is the argument that made that
     // dangerous rather than merely blank: clicking in a pet tree resolved the
     // same tab and index against the *player's* trees and spent a point there.
-    if (wantsPetTalents(L, 3)) return 0;
+    if (wantsPetTalents(L, 3)) {
+        // CMSG_PET_LEARN_TALENT for the next rank, counted from zero (0x5C80E0).
+        const auto* talent = petTalentAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)),
+                                         static_cast<int>(luaL_optnumber(L, 2, 0)));
+        if (gh && talent && petTalentShown(gh, talent)) {
+            const int have = petTalentRank(gh, talent->talentId);
+            if (have < talent->maxRank) gh->learnPetTalent(talent->talentId, static_cast<uint32_t>(have));
+        }
+        return 0;
+    }
     const uint32_t id = resolveTalentId(gh, static_cast<int>(luaL_optnumber(L, 1, 0)),
                                             static_cast<int>(luaL_optnumber(L, 2, 0)));
     if (gh && id != 0) gh->learnTalent(id, gh->getTalentRank(id) + 1);
@@ -3221,7 +3588,12 @@ static int lua_LearnTalent(lua_State* L) {
 // GetUnspentTalentPoints(inspect, pet, group) → points
 static int lua_GetUnspentTalentPoints(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (!gh || wantsPetTalents(L, 2)) { lua_pushnumber(L, 0); return 1; }
+    if (!gh) { lua_pushnumber(L, 0); return 1; }
+    if (wantsPetTalents(L, 2)) {
+        // The pet's own count (0x5C6310 -> 0x5C5FC0 +0x38); none inspected.
+        lua_pushnumber(L, (lua_toboolean(L, 1) || !petTalentFamily(gh)) ? 0 : gh->getPetUnspentTalents());
+        return 1;
+    }
     // inspect: the target's unspent count, which arrives with their talents
     // (talentframebase.lua:525 asks with TalentFrame.inspect). The viewer's
     // own was answered before.
@@ -3261,7 +3633,9 @@ static int lua_GetNumTalentGroups(lua_State* L) {
     // because one group means "show the unit's face". Zero is what the client
     // answers with no talented pet, and it hides that tab.
     if (wantsPetTalents(L, 2)) {
-        lua_pushnumber(L, 0);
+        // One group for a pet whose family has a tree, none otherwise
+        // (0x5C5DF0) - which is what shows or hides the pet's spec tab.
+        lua_pushnumber(L, (!lua_toboolean(L, 1) && !petTalentTabs(gh).empty()) ? 1 : 0);
         return 1;
     }
     // Two only once the second is actually bought: the frame draws a spec tab
@@ -3297,7 +3671,19 @@ static int lua_SetActiveTalentGroup(lua_State* L) {
 // (blizzard_talentui.lua:438, inspecttalentframe.lua:6)
 static int lua_GetTalentLink(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (wantsPetTalents(L, 4)) { lua_pushnil(L); return 1; }
+    if (wantsPetTalents(L, 4)) {
+        const auto* talent = lua_toboolean(L, 3) ? nullptr
+            : petTalentAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)), static_cast<int>(luaL_optnumber(L, 2, 0)));
+        if (!gh || !talent || !petTalentShown(gh, talent)) { lua_pushnil(L); return 1; }
+        int rank = petTalentRank(gh, talent->talentId);
+        if (lua_toboolean(L, 6)) rank += petPreviewOf(talent->talentId);
+        std::string name = gh->getSpellName(talent->rankSpells[0]);
+        if (name.empty()) name = "Talent";
+        const std::string link = "|cff4e96f7|Htalent:" + std::to_string(talent->talentId) + ":" +
+                                 std::to_string(rank - 1) + "|h[" + name + "]|h|r";
+        lua_pushstring(L, link.c_str());
+        return 1;
+    }
     // The tree and ranks the frame is drawing: an inspected player's link is
     // their talent at their rank, and the inactive spec's is that spec's.
     const TalentSource src = talentSource(gh, lua_toboolean(L, 3) != 0,
@@ -3321,6 +3707,8 @@ static int lua_GetTalentLink(lua_State* L) {
 
 static int lua_GetActiveTalentGroup(lua_State* L) {
     auto* gh = getGameHandler(L);
+    // The pet has one group, always the first (0x5C5810).
+    if (!lua_toboolean(L, 1) && wantsPetTalents(L, 2)) { lua_pushnumber(L, 1); return 1; }
     if (gh && lua_toboolean(L, 1)) {
         // Which of the target's specs the talents just read belong to. The
         // inspect frame keeps this as its talentGroup and passes it back into
@@ -4074,6 +4462,8 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"ClosePetStables",        lua_ClosePetStables},
                 {"IsAtStableMaster",       lua_IsAtStableMaster},
                 {"GetNextStableSlotCost",  lua_GetNextStableSlotCost},
+        {"StablePet",              lua_StablePet},
+        {"UnstablePet",            lua_UnstablePet},
                 {"GetSkillLineInfo",        lua_GetSkillLineInfo},
                 // Opening and closing a heading. The index is a position in
                 // the drawn rows, and a click on a skill row rather than a

@@ -383,6 +383,7 @@ public:
     void requestStabledPetList();
     void stablePet(uint8_t slot);
     void unstablePet(uint32_t petNumber);
+    void swapStablePet(uint32_t petNumber);
 
     // DBC cache loading (called from GameHandler during login)
     void loadSpellNameCache() const;

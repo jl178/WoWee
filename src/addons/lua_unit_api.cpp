@@ -742,6 +742,10 @@ static int lua_UnitCanCooperate(lua_State* L) {
 
 // UnitCreatureFamily(unit) → familyName or nil
 static int lua_UnitCreatureFamily(lua_State* L) {
+    // (0x611820) The family's name from CreatureFamily.dbc, by the unit's
+    // template; nil for a player or a creature without one. This used a
+    // table by hand that was off by one from Raptor on and missed Felguard,
+    // so a raptor read "Beast" and everything from Moth up was a family over.
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnNil(L); }
     const char* uid = luaL_optstring(L, 1, "target");
@@ -754,18 +758,10 @@ static int lua_UnitCreatureFamily(lua_State* L) {
     auto unit = std::dynamic_pointer_cast<game::Unit>(entity);
     if (!unit) { return luaReturnNil(L); }
     uint32_t family = gh->getCreatureFamily(unit->getEntry());
-    if (family == 0) { return luaReturnNil(L); }
-    static constexpr const char* kFamilies[] = {
-        "", "Wolf", "Cat", "Spider", "Bear", "Boar", "Crocolisk", "Carrion Bird",
-        "Crab", "Gorilla", "Raptor", "", "Tallstrider", "", "", "Felhunter",
-        "Voidwalker", "Succubus", "", "Doomguard", "Scorpid", "Turtle", "",
-        "Imp", "Bat", "Hyena", "Bird of Prey", "Wind Serpent", "", "Dragonhawk",
-        "Ravager", "Warp Stalker", "Sporebat", "Nether Ray", "Serpent", "Moth",
-        "Chimaera", "Devilsaur", "Ghoul", "Silithid", "Worm", "Rhino", "Wasp",
-        "Core Hound", "Spirit Beast"
-    };
-    lua_pushstring(L, (family < sizeof(kFamilies)/sizeof(kFamilies[0]) && kFamilies[family][0])
-        ? kFamilies[family] : "Beast");
+    if (family == 0 && guid == gh->getPetGuid()) family = gh->getPetFamily();
+    const auto* info = family ? gh->petDbc().family(family) : nullptr;
+    if (!info || info->name.empty()) { return luaReturnNil(L); }
+    lua_pushstring(L, info->name.c_str());
     return 1;
 }
 
@@ -1354,12 +1350,23 @@ static int lua_PetCanBeDismissed(lua_State* L) {
 // UNIT_FIELD_BYTES_2 byte 2 carries UNIT_CAN_BE_ABANDONED (0x02) on them and on
 // no other. The pet menu offers Rename, Abandon and the pet paperdoll on it.
 static int lua_PetCanBeAbandoned(lua_State* L) {
+    // (0x5D3780) And the pet must be the player's own creation (CREATEDBY):
+    // a charmed or summoned unit with the flag is not the player's to give up.
     auto* gh = getGameHandler(L);
     const uint64_t pet = gh ? gh->getPetGuid() : 0;
     auto entity = pet ? gh->getEntityManager().getEntity(pet) : nullptr;
     constexpr uint32_t kCanBeAbandoned = 0x02;
     const uint32_t bytes2 = entity ? entity->getField(game::fieldIndex(game::UF::UNIT_FIELD_BYTES_2)) : 0;
-    lua_pushboolean(L, ((bytes2 >> 16) & kCanBeAbandoned) != 0);
+    bool mine = entity != nullptr;
+    if (entity) {
+        const uint16_t cb = game::fieldIndex(game::UF::UNIT_FIELD_CREATEDBY_LO);
+        if (cb != 0xFFFF) {
+            const uint64_t creator = (static_cast<uint64_t>(entity->getField(cb + 1)) << 32) | entity->getField(cb);
+            mine = creator == gh->getPlayerGuid();
+        }
+    }
+    // True or nil, as the client answers.
+    if (mine && ((bytes2 >> 16) & kCanBeAbandoned) != 0) lua_pushboolean(L, 1); else lua_pushnil(L);
     return 1;
 }
 
@@ -3519,10 +3526,12 @@ void registerUnitLuaAPI(lua_State* L) {
                 {"GetUnitPowerModifier",    [](lua_State* L) -> int {
             lua_pushnumber(L, 1.0); return 1; }},
                 {"GetPetExperience", [](lua_State* L) -> int {
-            // currXP, nextXP - off the pet unit's own fields, not the player's.
+            // currXP, nextXP off the pet unit's own fields - a hunter's pet
+            // only (0x5D3A20); anyone else's answers 0, 0.
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getPetExperience() : 0);
-            lua_pushnumber(L, gh ? gh->getPetNextLevelExp() : 0);
+            const bool hunter = gh && gh->isHunterPet();
+            lua_pushnumber(L, hunter ? gh->getPetExperience() : 0);
+            lua_pushnumber(L, hunter ? gh->getPetNextLevelExp() : 0);
             return 2;
         }},
                 // GetCompanionCooldown(mode, index) → start, duration, enabled.

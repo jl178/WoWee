@@ -2399,13 +2399,21 @@ int lua_Tooltip_SetTalent(lua_State* L) {
     // 461/468, inspecttalentframe.lua 16/23. The tree and ranks the frame is
     // drawing: an inspect tooltip used the viewer's class and ranks, and the
     // inactive spec's tab described the active spec's rank.
-    if (lua_toboolean(L, 5)) { lua_pushboolean(L, 0); return 1; }  // pet trees are not modelled
+    const bool petTree = lua_toboolean(L, 5) != 0;
     const auto src = wowee::addons::talentSource(gh, lua_toboolean(L, 4) != 0,
                                                  static_cast<int>(luaL_optnumber(L, 6, 0)));
-    const auto* talent = wowee::addons::talentAt(gh, tabIndex, talentIndex, src.classId);
-    if (!talent) { lua_pushboolean(L, 0); return 1; }
+    // The pet's tree reads the pet's talents and ranks (and none of an
+    // inspected player's pet).
+    const auto* talent = petTree
+        ? (lua_toboolean(L, 4) ? nullptr : wowee::addons::petTalentAt(gh, tabIndex, talentIndex))
+        : wowee::addons::talentAt(gh, tabIndex, talentIndex, src.classId);
+    if (!talent || (petTree && !wowee::addons::petTalentShown(gh, talent))) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
 
-    const uint8_t rank = static_cast<uint8_t>(src.rank(talent->talentId));
+    const uint8_t rank = static_cast<uint8_t>(petTree ? wowee::addons::petTalentRank(gh, talent->talentId)
+                                                      : src.rank(talent->talentId));
     // Rank 1's spell names the talent whatever the player has in it, and is the
     // only entry guaranteed to be filled.
     const uint32_t titleSpell = talent->rankSpells[0];
@@ -9388,7 +9396,6 @@ void LuaEngine::registerCoreAPI() {
         "CONTAINER_BAG_OFFSET = 19\n"
         "MAX_SKILLLINE_TABS = 8\n"
         "TRADE_ENCHANT_SLOT = 7\n"
-        "function GetPetActionsUsable() return false end\n"
     );
 
     // WoW table/string utility functions used by many addons

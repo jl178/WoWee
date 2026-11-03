@@ -1080,6 +1080,14 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
         } else if (key == ufi.flags) {
             uint32_t oldFlags = unit->getUnitFlags();
             unit->setUnitFlags(val);
+            // The pet's UNIT_FLAG_PET_IN_COMBAT is IsPetAttackActive, and its
+            // edges are PET_ATTACK_START / PET_ATTACK_STOP (0x73C330 for a
+            // unit charmed or summoned by the player -> 0x5D30A0).
+            constexpr uint32_t kPetInCombat = 0x00000800;
+            if (block.guid == owner_.petGuidRef() && block.guid != 0 &&
+                ((oldFlags ^ val) & kPetInCombat) != 0) {
+                owner_.setPetAttacking((val & kPetInCombat) != 0, /*fromFlag=*/true);
+            }
             // UNIT_FIELD_FLAGS is the server's authoritative combat state. Spell-only
             // attackers do not necessarily produce SMSG_ATTACKSTOP, so retaining them
             // after this bit clears leaves the client permanently "in combat".
@@ -1124,6 +1132,11 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
         }
         else if (ufi.auraState != 0xFFFF && key == ufi.auraState) {
             unit->setAuraState(val);
+            // The player's or the target's aura state decides which pet
+            // abilities are usable (0x716810 -> PET_BAR_UPDATE_USABLE).
+            if (owner_.hasPet() && (block.guid == owner_.getPlayerGuid() ||
+                                    block.guid == owner_.getTargetGuid()))
+                pendingEvents_.emit("PET_BAR_UPDATE_USABLE", {});
         }
         else if (ufi.bytes1 != 0xFFFF && key == ufi.bytes1) {
             // Byte 0 is the stand state. It was never read for anyone: the
@@ -1382,6 +1395,20 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
     // never moved again.
     if (petExperienceChanged && owner_.addonEventCallbackRef()) {
         owner_.addonEventCallbackRef()("UNIT_PET_EXPERIENCE", {"pet"});
+    }
+    // The pet number changing on the player's pet redraws the pet interface
+    // (0x72CFF0 -> PET_UI_UPDATE); the name stamp changing on a unit the
+    // player owns is a rename (0x72CF70 -> LOCALPLAYER_PET_RENAMED), and the
+    // name is asked for again.
+    if (block.guid != 0 && block.guid == owner_.petGuidRef()) {
+        const uint16_t petNumber = fieldIndex(UF::UNIT_FIELD_PETNUMBER);
+        const uint16_t nameStamp = fieldIndex(UF::UNIT_FIELD_PET_NAME_TIMESTAMP);
+        if (petNumber != 0xFFFF && block.fields.find(petNumber) != block.fields.end())
+            pendingEvents_.emit("PET_UI_UPDATE", {});
+        if (nameStamp != 0xFFFF && block.fields.find(nameStamp) != block.fields.end()) {
+            pendingEvents_.emit("LOCALPLAYER_PET_RENAMED", {});
+            if (auto* sh = owner_.getSpellHandler()) sh->requestPetName(block.guid);
+        }
     }
     // The pet tab redraws its stat block on these, named for the pet.
     if (petStatsChanged && owner_.addonEventCallbackRef()) {
@@ -3212,6 +3239,17 @@ void EntityController::handleCreatureQueryResponse(network::Packet& packet) {
         if (owner_.addonEventCallbackRef() &&
             questObjectiveNames(owner_.getQuestLog(), data.entry, false)) {
             owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
+        }
+        // A stabled pet's family and model come from its template, which the
+        // stable asks for as it draws; the answer redraws the slots and the
+        // preview (0x5A0E80 / 0x5A0EA0).
+        if (owner_.addonEventCallbackRef() && owner_.isStableWindowOpen()) {
+            for (const auto& sp : owner_.getStabledPets()) {
+                if (sp.entry != data.entry) continue;
+                owner_.addonEventCallbackRef()("PET_STABLE_UPDATE", {});
+                owner_.addonEventCallbackRef()("PET_STABLE_UPDATE_PAPERDOLL", {});
+                break;
+            }
         }
     }
 }

@@ -128,6 +128,10 @@ struct CreatureSounds {
     uint32_t fidget[5] = {};     ///< the model's $FD1..$FD5 events
     uint32_t customAttack[4] = {};  ///< the model's $AH0..$AH3 events
     uint32_t impactType = 0;     ///< CreatureImpactType: the victim column of WeaponImpactSounds
+    uint32_t aggro = 0;          ///< SoundAggroID
+    uint32_t petAttack = 0;      ///< SoundPetAttackID: SMSG_PET_ACTION_SOUND action 1
+    uint32_t petOrder = 0;       ///< SoundPetOrderID: SMSG_PET_ACTION_SOUND action 0
+    uint32_t petDismiss = 0;     ///< SoundPetDismissID: SMSG_PET_DISMISS_SOUND
 };
 
 /// WeaponImpactSounds.dbc columns 3..12 (and the crit set 13..22): what a
@@ -210,6 +214,9 @@ public:
     /// ChrRaces -> CreatureDisplayInfo -> CreatureModelData -> CreatureSoundData.
     [[nodiscard]] const CreatureSounds* playerSounds(uint32_t raceId, bool female) const;
     [[nodiscard]] const CreatureSounds* displaySounds(uint32_t displayId) const;
+    /// CreatureModelData -> CreatureSoundData, for a model id alone (what
+    /// SMSG_PET_DISMISS_SOUND names).
+    [[nodiscard]] const CreatureSounds* modelSounds(uint32_t modelId) const;
     /// CreatureDisplayInfo.NPCSoundID -> NPCSounds: the greeting, farewell
     /// and annoyed lines a display speaks. Null when the display has none.
     [[nodiscard]] const NpcSounds* npcSounds(uint32_t displayId) const;
@@ -323,6 +330,7 @@ private:
     // SoundEntries has ten thousand rows and a handful are ever asked for.
     mutable std::unordered_map<uint32_t, SoundEntry> soundCache_;
     mutable std::unordered_map<uint32_t, CreatureSounds> creatureSoundCache_;
+    [[nodiscard]] const CreatureSounds* soundDataRow(uint32_t soundDataId) const;
 };
 
 /// The SoundEntries name Wow.exe plays with a UI message, by the message's

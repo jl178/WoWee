@@ -1433,20 +1433,11 @@ void CombatHandler::handlePetCastFailed(network::Packet& packet) {
 }
 
 void CombatHandler::handlePetBroken(network::Packet& packet) {
-    // Pet bond broken (died or forcibly dismissed) - clear pet state
-    owner_.petGuidRef() = 0;
-    owner_.petSpellListRef().clear();
-    owner_.petAutocastSpellsRef().clear();
-    memset(owner_.petActionSlotsRef(), 0, sizeof(owner_.petActionSlotsRef()));
-    // ERR_PET_BROKEN, the red error (Wow.exe 0x5D3120).
+    // ERR_PET_BROKEN, the red error, and nothing else (Wow.exe 0x5D3120).
+    // The pet itself goes with the SMSG_PET_SPELLS that empties the bar,
+    // which is what raises UNIT_PET; clearing it here as well made that
+    // packet look like no change, and the pet frame stayed up.
     owner_.displayGameMessage("ERR_PET_BROKEN", "Your pet has run away.");
-    // The same pair SMSG_PET_SPELLS fires, because the same two things have to
-    // be redrawn - the pet frame and the pet action bar. Losing the pet
-    // outright announced nothing while *learning one spell* announced
-    // PET_BAR_UPDATE, so a dead pet's frame and its whole ability bar stayed on
-    // screen until the next login.
-    owner_.fireAddonEvent("UNIT_PET", {"player"});
-    owner_.fireAddonEvent("PET_UI_UPDATE", {});
     LOG_INFO("SMSG_PET_BROKEN: pet bond broken");
     packet.skipAll();
 }
@@ -1494,27 +1485,18 @@ void CombatHandler::handlePetUnlearnedSpell(network::Packet& packet) {
 }
 
 void CombatHandler::handlePetMode(network::Packet& packet) {
-    // uint64 petGuid, uint32 mode
-    // mode bits: low byte = command state, next byte = react state
+    // uint64 petGuid, uint32 mode - the same word SMSG_PET_SPELLS carries,
+    // react in the low byte and command above it (0x5D3630). It replaces the
+    // client's copy for the pet it names and redraws the bar; it says nothing
+    // about attacking, which belongs to the pet's in-combat flag.
     if (packet.hasRemaining(12)) {
-        uint64_t modeGuid = packet.readUInt64();
-        uint32_t mode     = packet.readUInt32();
-        if (modeGuid == owner_.petGuidRef()) {
-            // COMMAND_ATTACK is 2. The pet frame lights its attack indicator on
-            // the start and clears it on the stop, so only the crossing matters
-            // - this packet arrives for every mode change, and firing on each
-            // would relight an indicator that is already lit.
-            constexpr uint8_t kCommandAttack = 2;
-            const bool wasAttacking = owner_.petCommandRef() == kCommandAttack;
-            owner_.petCommandRef() = static_cast<uint8_t>(mode & 0xFF);
-            owner_.petReactRef()   = static_cast<uint8_t>((mode >> 8) & 0xFF);
-            const bool nowAttacking = owner_.petCommandRef() == kCommandAttack;
-            if (nowAttacking != wasAttacking && owner_.addonEventCallbackRef()) {
-                owner_.addonEventCallbackRef()(
-                    nowAttacking ? "PET_ATTACK_START" : "PET_ATTACK_STOP", {});
-            }
-            LOG_DEBUG("SMSG_PET_MODE: command=", static_cast<int>(owner_.petCommandRef()),
-                      " react=", static_cast<int>(owner_.petReactRef()));
+        const uint64_t modeGuid = packet.readUInt64();
+        const uint32_t mode = packet.readUInt32();
+        if (modeGuid == owner_.petGuidRef() && modeGuid != 0) {
+            owner_.petModeRef() = mode;
+            owner_.fireAddonEvent("PET_BAR_UPDATE", {});
+            LOG_DEBUG("SMSG_PET_MODE: command=", static_cast<int>(owner_.getPetCommand()),
+                      " react=", static_cast<int>(owner_.getPetReact()));
         }
     }
     packet.skipAll();

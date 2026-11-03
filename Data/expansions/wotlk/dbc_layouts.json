@@ -349,10 +349,12 @@
     "SpecialEffect2": 13
   },
   "Talent": {
+    "CategoryMask0": 21,
     "Column": 3,
+    "Flags": 19,
     "ID": 0,
-    "PrereqRank0": 12,
-    "PrereqTalent0": 9,
+    "PrereqRank0": 16,
+    "PrereqTalent0": 13,
     "RankSpell0": 4,
     "Row": 2,
     "TabID": 1
@@ -363,6 +365,7 @@
     "ID": 0,
     "Name": 1,
     "OrderIndex": 22,
+    "PetTalentMask": 21,
     "SpellIconID": 18
   },
   "TaxiNodes": {

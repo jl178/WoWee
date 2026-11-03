@@ -142,6 +142,13 @@ enum class UF : uint16_t {
     /// all four tables - TARGET 16/18 and PERSUADED 18 come before it.
     UNIT_FIELD_CHANNEL_OBJECT_LO,
     UNIT_FIELD_CHANNEL_OBJECT_HI,
+    // A pet's creator (CREATEDBY, the hunter or warlock), its number (non-zero
+    // on a player's permanent pet) and the time its name was last set. The
+    // stock client keys HasPetUI's hunter test, the pet interface's redraw
+    // and LOCALPLAYER_PET_RENAMED on these (docs/re/pets.md).
+    UNIT_FIELD_CREATEDBY_LO,
+    UNIT_FIELD_PETNUMBER,
+    UNIT_FIELD_PET_NAME_TIMESTAMP,
 
     // GameObject fields
     GAMEOBJECT_DISPLAYID,

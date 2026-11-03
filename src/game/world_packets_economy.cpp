@@ -940,9 +940,12 @@ network::Packet ListStabledPetsPacket::build(uint64_t stableMasterGuid) {
 }
 
 network::Packet StablePetPacket::build(uint64_t stableMasterGuid, uint8_t slot) {
+    // The stable master and nothing else (Wow.exe 0x5A19C0, AzerothCore's
+    // HandleStablePet): the server puts the pet in the first free slot. The
+    // slot byte this wrote was left unread on the end.
+    (void)slot;
     network::Packet p(wireOpcode(Opcode::CMSG_STABLE_PET));
     p.writeUInt64(stableMasterGuid);
-    p.writeUInt8(slot);
     return p;
 }
 

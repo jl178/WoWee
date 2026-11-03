@@ -2760,6 +2760,10 @@ void GameHandler::stablePet(uint8_t slot) {
     if (spellHandler_) spellHandler_->stablePet(slot);
 }
 
+void GameHandler::swapStablePet(uint32_t petNumber) {
+    if (spellHandler_) spellHandler_->swapStablePet(petNumber);
+}
+
 void GameHandler::buyStableSlot() {
     if (spellHandler_) spellHandler_->buyStableSlot();
 }

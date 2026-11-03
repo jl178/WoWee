@@ -43,7 +43,8 @@ namespace cmd { constexpr uint32_t kFields = 28, kSound = 13; }
 namespace csd { constexpr uint32_t kFields = 38, kExertion = 1, kExertionCritical = 2, kInjury = 3,
                 kInjuryCritical = 4, kDeath = 6, kStand = 8, kFootstep = 9, kJumpStart = 26,
                 kJumpEnd = 27, kSubmerge = 35, kSubmerged = 36, kWingFlap = 11, kFidget0 = 14,
-                kCustomAttack0 = 19, kImpactType = 25; }
+                kCustomAttack0 = 19, kImpactType = 25, kAggro = 10, kPetAttack = 28,
+                kPetOrder = 29, kPetDismiss = 30; }
 namespace wss { constexpr uint32_t kFields = 4, kSwingType = 1, kCrit = 2, kSound = 3; }  // WeaponSwingSounds2
 // WeaponImpactSounds: ID, WeaponSubClassID, ParrySoundType (1 metal weapon,
 // 0 wood), ImpactSoundID[10], CritImpactSoundID[10].
@@ -587,7 +588,18 @@ const CreatureSounds* SoundData::displaySounds(uint32_t displayId) const {
         const int32_t modelRow = modelData_->findRecordById(modelId);
         if (modelRow >= 0) soundDataId = modelData_->getUInt32(static_cast<uint32_t>(modelRow), cmd::kSound);
     }
-    if (soundDataId == 0) return nullptr;
+    return soundDataRow(soundDataId);
+}
+
+const CreatureSounds* SoundData::modelSounds(uint32_t modelId) const {
+    if (modelId == 0 || !modelData_ || !creatureSounds_) return nullptr;
+    const int32_t modelRow = modelData_->findRecordById(modelId);
+    if (modelRow < 0) return nullptr;
+    return soundDataRow(modelData_->getUInt32(static_cast<uint32_t>(modelRow), cmd::kSound));
+}
+
+const CreatureSounds* SoundData::soundDataRow(uint32_t soundDataId) const {
+    if (soundDataId == 0 || !creatureSounds_) return nullptr;
     auto cached = creatureSoundCache_.find(soundDataId);
     if (cached != creatureSoundCache_.end()) return &cached->second;
     const int32_t row = creatureSounds_->findRecordById(soundDataId);
@@ -609,6 +621,10 @@ const CreatureSounds* SoundData::displaySounds(uint32_t displayId) const {
     for (uint32_t i = 0; i < 5; ++i) cs.fidget[i] = creatureSounds_->getUInt32(r, csd::kFidget0 + i);
     for (uint32_t i = 0; i < 4; ++i) cs.customAttack[i] = creatureSounds_->getUInt32(r, csd::kCustomAttack0 + i);
     cs.impactType = creatureSounds_->getUInt32(r, csd::kImpactType);
+    cs.aggro = creatureSounds_->getUInt32(r, csd::kAggro);
+    cs.petAttack = creatureSounds_->getUInt32(r, csd::kPetAttack);
+    cs.petOrder = creatureSounds_->getUInt32(r, csd::kPetOrder);
+    cs.petDismiss = creatureSounds_->getUInt32(r, csd::kPetDismiss);
     return &(creatureSoundCache_[soundDataId] = cs);
 }
 

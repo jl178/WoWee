@@ -122,6 +122,23 @@ void AudioCallbackHandler::setupCallbacks() {
         }
     });
 
+    // The pet's voice (Wow.exe 0x716B90 / 0x716C00 -> 0x7474B0): an order or
+    // an attack cry from the pet's own CreatureSoundData, at the pet; a
+    // dismissed pet's farewell from the model's, where it stood.
+    gameHandler_.setPetSoundCallback([this](uint64_t unitGuid, uint32_t id, int kind,
+                                            float x, float y, float z) {
+        auto* sfx = audioCoordinator_ ? audioCoordinator_->getUiSoundManager() : nullptr;
+        const audio::SoundData* data = audioCoordinator_ ? audioCoordinator_->getSoundData() : nullptr;
+        if (!sfx || !data) return;
+        const audio::CreatureSounds* cs = kind == 3 ? data->modelSounds(id) : data->displaySounds(id);
+        if (!cs) return;
+        const uint32_t soundId = kind == 1 ? cs->petOrder : kind == 2 ? cs->petAttack : cs->petDismiss;
+        const audio::SoundEntry* entry = soundId ? data->sound(soundId) : nullptr;
+        if (!entry) return;
+        (void)unitGuid;
+        sfx->playEntryAt(entry, core::coords::canonicalToRender(glm::vec3(x, y, z)));
+    });
+
     // Other player level-up callback - trigger 3D effect + chat notification
     gameHandler_.setOtherPlayerLevelUpCallback([this](uint64_t guid, uint32_t newLevel) {
         if (!renderer_) return;
