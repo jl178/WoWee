@@ -64,8 +64,20 @@ bool SoftParticlePass::initialize(VkContext* ctx) {
     return true;
 }
 
+void SoftParticlePass::destroyRetired(uint32_t slot) {
+    if (!ctx_) return;
+    VkDevice device = ctx_->getDevice();
+    Retired& r = retired_[slot % kSlots];
+    if (r.framebuffer) vkDestroyFramebuffer(device, r.framebuffer, nullptr);
+    if (r.view) vkDestroyImageView(device, r.view, nullptr);
+    r = Retired{};
+}
+
 void SoftParticlePass::shutdown() {
     if (!ctx_) return;
+    // Released a few frames after the row goes off (Renderer::
+    // decideSoftParticles), when no frame in flight still uses them.
+    for (uint32_t i = 0; i < kSlots; ++i) destroyRetired(i);
     VkDevice device = ctx_->getDevice();
     destroy(device, pool_);  // frees the sets
     for (auto& s : sets_) s = VK_NULL_HANDLE;
@@ -125,11 +137,14 @@ bool SoftParticlePass::record(VkCommandBuffer cmd, const Target& t,
         return false;
     }
     VkDevice device = ctx_->getDevice();
+    const uint32_t slot = ctx_->getCurrentFrame() % kSlots;
+    // What this slot made last time: its fence has passed.
+    destroyRetired(slot);
 
     // The view and, for an off-screen scene, the framebuffer are made for this
-    // frame and destroyed once its fence has passed: the images behind them
-    // are rebuilt on every resize, sample count and upscaler change, and a
-    // handle cached across those could name an image that has gone.
+    // frame and destroyed once its slot comes round again: the images behind
+    // them are rebuilt on every resize, sample count and upscaler change, and
+    // a handle cached across those could name an image that has gone.
     VkImageViewCreateInfo vi{.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     vi.image = t.depth;
     vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -137,7 +152,7 @@ bool SoftParticlePass::record(VkCommandBuffer cmd, const Target& t,
     vi.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
     VkImageView depthView = VK_NULL_HANDLE;
     if (vkCreateImageView(device, &vi, nullptr, &depthView) != VK_SUCCESS) return false;
-    ctx_->deferAfterFrameFence([device, depthView]() { vkDestroyImageView(device, depthView, nullptr); });
+    retired_[slot].view = depthView;
 
     VkFramebuffer fb = t.framebuffer;
     if (fb == VK_NULL_HANDLE) {
@@ -149,10 +164,10 @@ bool SoftParticlePass::record(VkCommandBuffer cmd, const Target& t,
         fci.height = t.extent.height;
         fci.layers = 1;
         if (vkCreateFramebuffer(device, &fci, nullptr, &fb) != VK_SUCCESS) return false;
-        ctx_->deferAfterFrameFence([device, fb]() { vkDestroyFramebuffer(device, fb, nullptr); });
+        retired_[slot].framebuffer = fb;
     }
 
-    const VkDescriptorSet set = sets_[ctx_->getCurrentFrame() % kSlots];
+    const VkDescriptorSet set = sets_[slot];
     VkDescriptorImageInfo ii{.sampler = sampler_, .imageView = depthView,
                              .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL};
     VkWriteDescriptorSet w{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};

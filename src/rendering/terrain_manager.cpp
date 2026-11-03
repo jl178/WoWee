@@ -1833,6 +1833,9 @@ void TerrainManager::streamGroundClutter(const glm::vec3& cameraPos) {
                     if (const uint32_t id = m2Renderer->createInstance(
                             p.modelId, p.position, glm::vec3(0.0f, 0.0f, p.yaw), p.scale)) {
                         m2Renderer->setInstanceGroundNormal(id, p.groundNormal);
+                        // Fade in new scenery: the near sweep after an arrival
+                        // fills in round the player in view (no-op with it off).
+                        m2Renderer->markStreamedIn(id);
                         ids.push_back(id);
                         ++tile->clutterLive;
                         ++created;

@@ -84,8 +84,14 @@ struct Enhancements {
     bool  foliagePush = false;
     /// Moored boats rise, fall and rock with the water.
     bool  boatBob = false;
-    /// Dust thrown up at a running mount's feet.
-    bool  mountDust = false;
+    /// Small puffs of dust at the footfalls of players, creatures and mounts
+    /// on dry dirt and sand, more the faster they go (FootfallDust). Stock
+    /// throws up nothing. Saved under the old mount dust key it replaced.
+    bool  footfallDust = false;
+    /// A dead unit's body lies along the slope or floor under it instead of
+    /// level with half of it in the air (CharacterRenderer::updateCorpseSettle).
+    /// Stock draws the corpse level.
+    bool  corpseSettle = false;
     /// Extra smoke puffs over models named for smoke.
     bool  extraSmoke = false;
     /// Wowee's own drunk view: a wavy, blurred picture and a swaying camera.

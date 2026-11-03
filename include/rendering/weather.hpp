@@ -61,6 +61,16 @@ public:
 
     void recreatePipelines();
 
+    /// The pass the next recreatePipelines() builds for: the scene pass at
+    /// its sample count (null, the default), or the single-sampled water pass
+    /// the soft particles move the water into, where the weather follows it so
+    /// that the blended particles stay under both (Renderer::
+    /// syncSwimEffectsTargetPass).
+    void setTargetPass(VkRenderPass pass, VkSampleCountFlagBits samples) {
+        targetPass_ = pass;
+        targetSamples_ = samples;
+    }
+
     /// The pipeline state both initialize() and recreatePipelines() need.
     void buildPipelines(VkDevice device,
                         const VkPipelineShaderStageCreateInfo& vertStage,
@@ -157,6 +167,8 @@ private:
 
     // Vulkan objects
     VkContext* vkCtx = nullptr;
+    VkRenderPass targetPass_ = VK_NULL_HANDLE;  // null: the scene pass
+    VkSampleCountFlagBits targetSamples_ = VK_SAMPLE_COUNT_1_BIT;
     VkPipeline pipeline = VK_NULL_HANDLE;
     /// Rain and splashes: the stock GxBlend_Mod2x (dst = 2 * src * dst),
     /// RainDrop01/RainDropSplash01 being grey 128 at rest (MapWeather 0x7891b0,

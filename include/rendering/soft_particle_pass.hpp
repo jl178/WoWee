@@ -67,6 +67,17 @@ private:
     VkSampler sampler_ = VK_NULL_HANDLE;  // owned by VkContext's sampler cache
     static constexpr uint32_t kSlots = 2;  // MAX_FRAMES_IN_FLIGHT
     VkDescriptorSet sets_[kSlots] = {};
+    /// The view and framebuffer each frame slot made, destroyed the next time
+    /// that slot records (its fence has passed by then) or at shutdown. Not
+    /// VkContext's deferred queue: a preview renderer shut down while the UI
+    /// draws flushes that queue mid-frame, and the pass is recorded before the
+    /// UI when the water follows it (water_pass_order.hpp).
+    struct Retired {
+        VkImageView view = VK_NULL_HANDLE;
+        VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    };
+    Retired retired_[kSlots] = {};
+    void destroyRetired(uint32_t slot);
 };
 
 }  // namespace rendering

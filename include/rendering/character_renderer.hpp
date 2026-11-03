@@ -21,6 +21,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <atomic>
+#include <optional>
 
 namespace wowee {
 namespace pipeline { class AssetManager; }
@@ -178,6 +179,16 @@ public:
 
     void setInstancePosition(uint32_t instanceId, const glm::vec3& position);
     void setInstanceRotation(uint32_t instanceId, const glm::vec3& rotation);
+
+    /// The floor under a point: the highest floor (terrain, building, doodad)
+    /// at most a little above zRef, or nothing near it.
+    using FloorHeightFn = std::function<std::optional<float>(float x, float y, float zRef)>;
+    /// "Corpses settle to the slope" (corpse_settle.hpp): each dead unit's body
+    /// is tilted onto the ground under it as its fall ends, the slope measured
+    /// once with `floor`. Null `floor` (the row off) puts every body back to
+    /// stock at once and, with nothing tilted, costs nothing. Main thread,
+    /// after M2Renderer's update has joined (the floor queries walk its index).
+    void updateCorpseSettle(float deltaTime, const FloorHeightFn* floor);
     /// Look twist: yaw on the SpineLow key bone and, on top of it, the Head
     /// key bone (radians, CCW positive). See animation/body_facing.hpp.
     void setInstanceTorsoYaw(uint32_t instanceId, float deltaYawRad, float headYawRad = 0.0f);
@@ -509,6 +520,13 @@ private:
         // next variation is rolled. See animation/sequence_variation.hpp.
         uint32_t variationLapsLeft = 0;
         bool isDead = false;  // Prevents movement while in death state
+        // Corpse settle (updateCorpseSettle): the ground normal under the body,
+        // measured once where it lies, and how far the body is tilted onto it
+        // (0-1). 0 - always, with the row off - leaves the model matrix stock.
+        glm::vec3 corpseNormal{0.0f, 0.0f, 1.0f};
+        glm::vec3 corpseSampledAt{0.0f};
+        float corpseSettle = 0.0f;
+        bool corpseSampled = false;
         bool deathLocked = false;  // playDeath: nothing but Death/Dead plays until clearDeath
         std::vector<glm::mat4> boneMatrices;  // Current bone transforms
 
@@ -820,6 +838,7 @@ private:
 
     std::unordered_map<uint32_t, M2ModelGPU> models;
     std::unordered_map<uint32_t, CharacterInstance> instances;
+    bool corpseSettleActive_ = false;  // some body is tilted or measured
     /// Bumped whenever `instances` gains or loses an entry. An element of an
     /// unordered_map stays where it is until erased, so a list of pointers
     /// into it is good until this moves.

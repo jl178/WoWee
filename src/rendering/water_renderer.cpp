@@ -2455,6 +2455,14 @@ bool WaterRenderer::createWater1xPass(VkFormat colorFormat, VkFormat depthFormat
         LOG_ERROR("WaterRenderer: failed to create 1x water render pass");
         return false;
     }
+    // The sibling that keeps the depth: identical but for the store op, so
+    // the pipelines below draw in either.
+    attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    if (vkCreateRenderPass(device, &rpCI, nullptr, &water1xKeepDepthRenderPass_) != VK_SUCCESS) {
+        water1xKeepDepthRenderPass_ = VK_NULL_HANDLE;
+        LOG_WARNING("WaterRenderer: failed to create the depth-keeping 1x water pass");
+    }
+    attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 
     // Build 1x water pipeline against this render pass
     VkShaderModule vertShader, fragShader;
@@ -2538,6 +2546,10 @@ void WaterRenderer::destroyWater1xResources() {
     water1xFramebuffers.clear();
     destroy(device, water1xPipeline);
     if (water1xRenderPass) { vkDestroyRenderPass(device, water1xRenderPass, nullptr); water1xRenderPass = VK_NULL_HANDLE; }
+    if (water1xKeepDepthRenderPass_) {
+        vkDestroyRenderPass(device, water1xKeepDepthRenderPass_, nullptr);
+        water1xKeepDepthRenderPass_ = VK_NULL_HANDLE;
+    }
 }
 } // namespace rendering
 } // namespace wowee

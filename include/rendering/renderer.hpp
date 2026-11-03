@@ -51,7 +51,7 @@ class Weather;
 class Lightning;
 class LightingManager;
 class SwimEffects;
-class MountDust;
+class FootfallDust;
 class LevelUpEffect;
 class CharacterRenderer;
 class WMORenderer;
@@ -175,6 +175,14 @@ public:
     WorldMap* getWorldMap() const { return worldMap.get(); }
     QuestMarkerRenderer* getQuestMarkerRenderer() const { return questMarkerRenderer.get(); }
     FootprintRenderer* getFootprintRenderer() const { return footprintRenderer.get(); }
+    /// A footfall of the local character or its mount, from the footstep
+    /// driver (which times them for the sounds, with a fallback where the
+    /// model has no $FSD): the "Dust kicked up" row's feed for those two.
+    /// Everyone else's come from their models' events. Nothing with the row off.
+    void noteLocalFootfall(uint32_t instanceId, const glm::vec3& position) {
+        if (enh_.footfallDust && pendingFootfalls_.size() < 512)
+            pendingFootfalls_.push_back({instanceId, position});
+    }
     SkySystem* getSkySystem() const { return skySystem.get(); }
     const std::string& getCurrentZoneName() const;
     uint32_t getCurrentZoneId() const;
@@ -326,6 +334,30 @@ private:
     /// draws after everything the scene pass holds, the minimap included,
     /// and would put the particles over it.
     bool minimapDrawsLate_ = false;
+    /// Whether the weather follows the water into its continuation pass:
+    /// only with soft particles on, so the blended particles - drawn in the
+    /// late pass between the scene and the water - stay under the rain and
+    /// snow as they stay under the water. Off, the weather is where it was.
+    bool weatherDrawsWithWater_ = false;
+    /// The spray, minimap and weather objects the last refresh built for.
+    /// One made since (the minimap comes with the world, after the first
+    /// decision) built its pipelines for the scene pass whatever the flags
+    /// say, so it is rebuilt for where it now draws.
+    const void* passBuiltFor_[3] = {};
+    /// The framebuffer for the water continuation over an off-screen MSAA
+    /// scene (soft particles on): its resolved colour and depth, made for the
+    /// frame and released after its fence.
+    VkFramebuffer sceneWater1xFramebuffer(VkExtent2D& extent);
+    /// Its view and framebuffer per frame slot, destroyed when the slot next
+    /// makes them (its fence has passed) or at shutdown - not through
+    /// VkContext's deferred queue, which a preview renderer's shutdown during
+    /// the UI flushes while this frame still records.
+    struct SceneWaterRetired {
+        VkImageView view = VK_NULL_HANDLE;
+        VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    };
+    SceneWaterRetired sceneWaterRetired_[2] = {};
+    void destroySceneWaterRetired(uint32_t slot);
 
     // Soft particles (the "Soft particles" row, SoftParticlePass). Decided
     // once a frame in beginFrame, before anything is recorded: the M2
@@ -369,10 +401,31 @@ private:
     std::unique_ptr<LightingManager> lightingManager;
     std::unique_ptr<SkySystem> skySystem;  // Coordinator for sky rendering
     std::unique_ptr<SwimEffects> swimEffects;
-    std::unique_ptr<MountDust> mountDust;
-    /// Frames since mount dust went off; it is released past the frames in flight.
-    uint32_t mountDustIdleFrames_ = 0;
-    bool mountDustFailed_ = false;
+    std::unique_ptr<FootfallDust> footfallDust_;
+    /// Frames since the dust went off; it is released past the frames in flight.
+    uint32_t footfallDustIdleFrames_ = 0;
+    bool footfallDustFailed_ = false;
+    /// Footfalls ($FSD) reported by the character update this frame, turned
+    /// into dust after the M2 update has joined (updateFootfallDust).
+    struct PendingFootfall {
+        uint32_t instanceId;
+        glm::vec3 position;
+    };
+    std::vector<PendingFootfall> pendingFootfalls_;
+    /// Each walker's last footfall, for its speed, and the ground there.
+    struct LastFootfall {
+        glm::vec3 position;
+        float time;
+        glm::vec3 groundAt;
+        uint8_t ground;  // footfall_dust::Ground
+    };
+    std::unordered_map<uint32_t, LastFootfall> lastFootfall_;
+    float footfallClock_ = 0.0f;
+    /// The character renderer's event callback: the footfalls for the dust (row
+    /// on) ahead of the sounds' callback. Installed only when one of the two
+    /// wants events, so with neither the character update fires none.
+    void installCharacterAnimEventCallback();
+    bool animEventCallbackHasDust_ = false;
     std::unique_ptr<LevelUpEffect> levelUpEffect;
     std::unique_ptr<LootSparkles> lootSparkles_;
     std::unique_ptr<CharacterRenderer> characterRenderer;
@@ -532,9 +585,13 @@ private:
     void updateUnitBlobs();
     /// WOWEE_FREEZE_CLOCK, read once.
     void readFrozenClock();
-    /// The "Dust under mounts" enhancement: made on first use, stepped,
-    /// spawned under a running mount, released a few frames after it goes off.
-    void updateMountDust(float fxDt);
+    /// The "Dust kicked up" enhancement (FootfallDust): made on first use,
+    /// fed this frame's dry-ground footfalls, stepped, released a few frames
+    /// after it goes off.
+    void updateFootfallDust(float fxDt);
+    /// The "Corpses settle to the slope" enhancement
+    /// (CharacterRenderer::updateCorpseSettle).
+    void updateCorpseSettle(float fxDt);
     /// The local lights culled to a screen grid for this frame's camera
     /// (GPUPerFrameData::localLightTiles). Only with the point lights on.
     void buildLocalLightTiles(uint32_t count);

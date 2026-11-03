@@ -137,6 +137,11 @@ public:
     void destroyWater1xResources();
     bool hasWater1xPass() const { return water1xRenderPass != VK_NULL_HANDLE; }
     VkRenderPass getWater1xRenderPass() const { return water1xRenderPass; }
+    /// The same pass (compatible with every pipeline made for it) that stores
+    /// the depth it loads instead of discarding it: for an off-screen scene's
+    /// resolved depth, which the post-processing reads after the water. Made
+    /// with the 1x pass; the soft particles' water continuation uses it.
+    VkRenderPass getWater1xKeepDepthRenderPass() const { return water1xKeepDepthRenderPass_; }
     VkFramebuffer getWater1xFramebuffer(uint32_t index) const {
         return index < water1xFramebuffers.size() ? water1xFramebuffers[index] : VK_NULL_HANDLE;
     }
@@ -376,6 +381,7 @@ private:
 
     // Separate 1x water pass (used when MSAA is active)
     VkRenderPass water1xRenderPass = VK_NULL_HANDLE;
+    VkRenderPass water1xKeepDepthRenderPass_ = VK_NULL_HANDLE;
     VkPipeline water1xPipeline = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> water1xFramebuffers;
 

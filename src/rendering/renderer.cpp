@@ -28,7 +28,9 @@
 #include "core/thread_pool.hpp"
 #include "rendering/sky_system.hpp"
 #include "rendering/swim_effects.hpp"
-#include "rendering/mount_dust.hpp"
+#include "rendering/footfall_dust.hpp"
+#include "rendering/footfall_dust_rules.hpp"
+#include "rendering/water_pass_order.hpp"
 #include "rendering/levelup_effect.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/character_preview.hpp"
@@ -107,6 +109,7 @@
 #include "stb_image_write.h"
 #include <cstdlib>
 #include <optional>
+#include <random>
 #include <unordered_map>
 #include <unordered_set>
 #include <set>
@@ -1051,6 +1054,10 @@ void Renderer::shutdown() {
         sunShafts_.reset();
     }
     softParticlePass_.reset();
+    // The water continuation's views and framebuffers (the device is idle:
+    // the water renderer's shutdown above waited for it).
+    destroySceneWaterRetired(0);
+    destroySceneWaterRetired(1);
 
     LOG_DEBUG("Renderer::shutdown - skySystem...");
     if (skySystem) {
@@ -1197,49 +1204,163 @@ void Renderer::buildLocalLightTiles(uint32_t count) {
                                        0.0f, 0.0f);
 }
 
-void Renderer::updateMountDust(float fxDt) {
-    // Not stock: nothing is stepped or spawned with the setting off, and what
-    // was in the air is dropped.
-    // Made on first use and released a few frames after it goes off, once
-    // no frame in flight can still be drawing from its buffer.
-    if (!enh_.mountDust) {
-        if (mountDust) {
-            mountDust->clear();
-            if (++mountDustIdleFrames_ > MAX_FRAMES + 1) mountDust.reset();
+void Renderer::updateFootfallDust(float fxDt) {
+    // Not stock: nothing is made, queued or spawned with the row off, and what
+    // was in the air is dropped. Made on first use and released a few frames
+    // after it goes off, once no frame in flight can still draw from it.
+    if (!enh_.footfallDust) {
+        pendingFootfalls_.clear();
+        if (!lastFootfall_.empty()) lastFootfall_.clear();
+        if (footfallDust_) {
+            footfallDust_->clear();
+            if (++footfallDustIdleFrames_ > MAX_FRAMES + 1) footfallDust_.reset();
         }
-    } else {
-        mountDustIdleFrames_ = 0;
-        if (!mountDust && !mountDustFailed_) {
-            mountDust = std::make_unique<MountDust>();
-            if (!mountDust->initialize(vkCtx, perFrameSetLayout)) {
-                LOG_WARNING("Mount dust effect initialization failed (non-fatal)");
-                mountDust.reset();
-                mountDustFailed_ = true;
-            }
+        return;
+    }
+    footfallDustIdleFrames_ = 0;
+    if (!footfallDust_ && !footfallDustFailed_ && vkCtx) {
+        footfallDust_ = std::make_unique<FootfallDust>();
+        if (!footfallDust_->initialize(vkCtx, perFrameSetLayout)) {
+            LOG_WARNING("Footfall dust initialization failed (non-fatal)");
+            footfallDust_.reset();
+            footfallDustFailed_ = true;
         }
     }
-    if (mountDust && enh_.mountDust) {
-        mountDust->update(fxDt);
+    footfallClock_ += fxDt;
+    if (!footfallDust_ || !camera) {
+        pendingFootfalls_.clear();
+        return;
+    }
 
-        // Spawn dust when mounted and moving on ground
-        if ((animationController_ && animationController_->isMounted()) && camera && cameraController && !(animationController_ && animationController_->isTaxiFlight())) {
-            bool isMoving = cameraController->isMoving();
-            bool onGround = cameraController->isGrounded();
+    // Rain and snow lay the dust: none while either falls.
+    bool wet = false;
+    if (weather) {
+        const Weather::Type wt = weather->getWeatherType();
+        wet = wt != Weather::Type::NONE && weather->getIntensity() > 0.05f;
+    }
+    namespace fd = footfall_dust;
+    const glm::vec3 camPos = camera->getPosition();
+    for (const PendingFootfall& f : pendingFootfalls_) {
+        auto [it, fresh] = lastFootfall_.try_emplace(f.instanceId);
+        LastFootfall& last = it->second;
+        const float speed = fresh ? 0.0f
+            : fd::stepSpeed(last.position, last.time, f.position, footfallClock_);
+        const glm::vec3 prevPos = fresh ? f.position : last.position;
+        last.position = f.position;
+        last.time = footfallClock_;
+        if (wet || speed <= 0.0f || glm::distance(f.position, camPos) > fd::kMaxDistance) continue;
 
-            if (isMoving && onGround) {
-                // Calculate velocity from camera direction and speed
-                glm::vec3 forward = camera->getForward();
-                float speed = cameraController->getMovementSpeed();
-                glm::vec3 velocity = forward * speed;
-                velocity.z = 0.0f;  // Ignore vertical component
-
-                // Spawn dust at mount's feet (slightly below character position)
-                float mho = animationController_ ? animationController_->getMountHeightOffset() : 0.0f;
-                glm::vec3 dustPos = characterPosition - glm::vec3(0.0f, 0.0f, mho * 0.8f);
-                mountDust->spawnDust(dustPos, velocity, isMoving);
+        // The ground as the footstep sound reads it, asked again only once the
+        // walker has gone a couple of yards from where it last was.
+        if (fresh || glm::distance(last.groundAt, f.position) > 2.0f) {
+            const glm::vec3& p = f.position;
+            bool inWater = false, onFloor = false;
+            if (waterRenderer) {
+                if (auto h = waterRenderer->getWaterHeightAt(p.x, p.y); h && p.z < *h + 0.25f) inWater = true;
             }
+            const auto ground = terrainManager ? terrainManager->getHeightAt(p.x, p.y) : std::nullopt;
+            if (!inWater && wmoRenderer) {
+                const auto floor = wmoRenderer->getFloorHeight(p.x, p.y, p.z + 1.5f);
+                onFloor = floor && std::abs(*floor - p.z) <= 2.5f && (!ground || *floor >= *ground - 0.1f);
+            }
+            std::optional<uint32_t> soundType;
+            std::string texture;
+            if (!inWater && !onFloor && terrainManager) {
+                soundType = terrainManager->getTerrainSoundTypeAt(p.x, p.y);
+                if (!soundType) {
+                    if (auto t = terrainManager->getDominantTextureAt(p.x, p.y)) texture = *t;
+                }
+            }
+            last.ground = static_cast<uint8_t>(fd::groundFor(soundType, texture, inWater, onFloor));
+            last.groundAt = f.position;
+        }
+        const auto ground = static_cast<fd::Ground>(last.ground);
+        // WOWEE_FOOTFALL_DUST_LOG=1: each footfall near the camera, its speed
+        // and ground, and how many puffs are in the air - for checking which
+        // grounds raise dust and how much.
+        static const bool logDust = [] {
+            const char* v = std::getenv("WOWEE_FOOTFALL_DUST_LOG");
+            return v && *v && *v != '0';
+        }();
+        if (logDust) {
+            LOG_WARNING("Footfall dust: instance ", f.instanceId, " at (", f.position.x, ", ", f.position.y,
+                        ") speed ", speed, " ground ", static_cast<int>(last.ground), " sprites ",
+                        footfallDust_->spriteCount());
+        }
+        if (ground == fd::Ground::None) continue;
+
+        float radius = 1.0f;
+        glm::vec3 centre;
+        if (characterRenderer) (void)characterRenderer->getInstanceBounds(f.instanceId, centre, radius);
+        std::uniform_real_distribution<float> roll(0.0f, 1.0f);
+        static std::mt19937 rng{0xd057u};
+        const fd::Puff puff = fd::puffFor(speed, radius, roll(rng));
+        if (puff.sprites == 0) continue;
+        glm::vec2 dir(f.position.x - prevPos.x, f.position.y - prevPos.y);
+        const float len = glm::length(dir);
+        dir = len > 1e-3f ? dir / len : glm::vec2(0.0f);
+        footfallDust_->spawn(f.position, dir, puff, fd::colourFor(ground));
+    }
+    pendingFootfalls_.clear();
+    // Walkers long gone (out of range, despawned) are forgotten.
+    if (lastFootfall_.size() > 256) {
+        for (auto it = lastFootfall_.begin(); it != lastFootfall_.end();) {
+            it = (footfallClock_ - it->second.time > 3.0f) ? lastFootfall_.erase(it) : std::next(it);
         }
     }
+    footfallDust_->update(fxDt, *camera);
+}
+
+void Renderer::installCharacterAnimEventCallback() {
+    if (!characterRenderer) return;
+    const bool dust = enh_.footfallDust;
+    if (!dust) {
+        // The sounds' callback as it was, or none: with the row off the
+        // character update fires exactly the events it fired before.
+        characterRenderer->setAnimSoundEventCallback(characterAnimSoundEventCallback_);
+        animEventCallbackHasDust_ = false;
+        return;
+    }
+    characterRenderer->setAnimSoundEventCallback(
+        [this](uint32_t instanceId, uint32_t animationId, uint32_t eventTag, uint32_t soundEntryId,
+               const glm::vec3& position) {
+            static constexpr uint32_t kFootfall = pipeline::m2EventTag("$FSD");
+            // The local character and its mount come from the footstep
+            // driver instead (noteLocalFootfall), which times their steps
+            // even on a model without $FSD.
+            const bool local = instanceId == characterInstanceId ||
+                (animationController_ && instanceId == animationController_->getMountInstanceId());
+            if (eventTag == kFootfall && enh_.footfallDust && !local && pendingFootfalls_.size() < 512) {
+                pendingFootfalls_.push_back({instanceId, position});
+            }
+            if (characterAnimSoundEventCallback_) {
+                characterAnimSoundEventCallback_(instanceId, animationId, eventTag, soundEntryId, position);
+            }
+        });
+    animEventCallbackHasDust_ = true;
+}
+
+void Renderer::updateCorpseSettle(float fxDt) {
+    if (!characterRenderer) return;
+    if (!enh_.corpseSettle) {
+        characterRenderer->updateCorpseSettle(fxDt, nullptr);  // free once nothing is tilted
+        return;
+    }
+    // The floor under a point as the selection circle reads it: the highest
+    // of terrain, building and doodad floors at most 1.5 yd above the body
+    // and no more than 4 below it.
+    const CharacterRenderer::FloorHeightFn floor = [this](float x, float y, float z) -> std::optional<float> {
+        const float from = z + 1.5f;
+        std::optional<float> best;
+        auto consider = [&](std::optional<float> h) {
+            if (h && *h <= from && *h >= z - 4.0f && (!best || *h > *best)) best = h;
+        };
+        if (terrainManager) consider(terrainManager->getHeightAt(x, y));
+        if (wmoRenderer) consider(wmoRenderer->getFloorHeight(x, y, from));
+        if (m2Renderer) consider(m2Renderer->getFloorHeight(x, y, from));
+        return best;
+    };
+    characterRenderer->updateCorpseSettle(fxDt, &floor);
 }
 
 void Renderer::readFrozenClock() {
@@ -1300,6 +1421,10 @@ void Renderer::applyEnhancementsToSubsystems() {
     if (!changed) return;
     enhDirty_ = false;
     const Enhancements& e = enh_;
+
+    // The footfalls for the dust ride the character events (see
+    // installCharacterAnimEventCallback); re-installed as the row flips.
+    if (characterRenderer && animEventCallbackHasDust_ != e.footfallDust) installCharacterAnimEventCallback();
 
     // Light and shadow. Off is the stock blob under each unit
     // (OverlaySystem::renderUnitBlobShadows) and the baked MCSH shadows.
@@ -1431,7 +1556,7 @@ void Renderer::applyMsaaChange() {
         syncSwimEffectsTargetPass();
         swimEffects->recreatePipelines();
     }
-    if (mountDust) mountDust->recreatePipelines();
+    if (footfallDust_) footfallDust_->recreatePipelines();
 
     // Sky system sub-renderers
     if (skySystem) {
@@ -2799,7 +2924,6 @@ void Renderer::update(float deltaTime) {
                                   travelDir, intensity, wading);
     }
 
-    updateMountDust(fxDt);
     // Update level-up effect
     if (levelUpEffect) {
         levelUpEffect->update(fxDt);
@@ -2867,6 +2991,10 @@ void Renderer::update(float deltaTime) {
     // Footsteps: age visual prints, then let authored footfall events add new ones.
     if (footprintRenderer) footprintRenderer->update(fxDt);
     if (animationController_) animationController_->updateFootsteps(deltaTime);
+    // The dust from this frame's footfalls, and the corpses' slopes: both ask
+    // the floors, so both wait for the M2 update above to have joined.
+    updateFootfallDust(fxDt);
+    updateCorpseSettle(fxDt);
 
     // Activity SFX + mount ambient sounds: delegated to AnimationController (§4.2)
     if (animationController_) animationController_->updateSfxState(deltaTime);
@@ -3856,12 +3984,12 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
                 waterRenderer->setRenderExtent(activeRenderExtent_);
                 waterRenderer->render(cmd, perFrameSet, *camera, globalTime, false, frameIdx);
             }
-            if (weather && camera) weather->render(cmd, perFrameSet);
+            if (weather && camera && !weatherDrawsWithWater_) weather->render(cmd, perFrameSet);
             if (lightning && camera && lightning->isEnabled()) lightning->render(cmd, perFrameSet);
             if (swimEffects && camera && !swimEffectsDrawWithWater_) {
                 swimEffects->render(cmd, perFrameSet);
             }
-            if (mountDust && camera) mountDust->render(cmd, perFrameSet);
+            if (footfallDust_ && camera) footfallDust_->render(cmd, perFrameSet);
             if (footprintRenderer && camera) footprintRenderer->render(cmd, perFrameSet, *camera);
 
             renderPostSceneOverlays(cmd, gameHandler);
@@ -4051,12 +4179,12 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             waterRenderer->render(currentCmd, perFrameSet, *camera, globalTime, false, frameIdx);
             if (vkCtx) vkCtx->gpuMark(currentCmd, "water");
         }
-        if (weather && camera) weather->render(currentCmd, perFrameSet);
+        if (weather && camera && !weatherDrawsWithWater_) weather->render(currentCmd, perFrameSet);
         if (lightning && camera && lightning->isEnabled()) lightning->render(currentCmd, perFrameSet);
         if (swimEffects && camera && !swimEffectsDrawWithWater_) {
             swimEffects->render(currentCmd, perFrameSet);
         }
-        if (mountDust && camera) mountDust->render(currentCmd, perFrameSet);
+        if (footfallDust_ && camera) footfallDust_->render(currentCmd, perFrameSet);
         if (footprintRenderer && camera) footprintRenderer->render(currentCmd, perFrameSet, *camera);
         // The same one-line total the parallel path reports, so a profile taken
         // either way can be compared against the other.
@@ -4076,7 +4204,23 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
     // that copy from the finished frame instead fed the water its own output:
     // a moving object left one sharp copy per frame (a train of ghosts) and the
     // brightness applied to the water compounded through the loop and pumped.
-    if (waterDrawsInContinuePass() && camera) {
+    // Over an off-screen MSAA scene (soft particles on) the water pass needs a
+    // framebuffer made for the frame; asked before the scene pass is closed,
+    // so that if it cannot be made (out of memory) the pass stays open, the
+    // frame goes on without its water, and the post-processing closes it.
+    VkFramebuffer sceneWaterFb = VK_NULL_HANDLE;
+    VkExtent2D sceneWaterExtent{};
+    const bool sceneWaterPass = waterDrawsInContinuePass() && camera &&
+        vkCtx->getMsaaSamples() > VK_SAMPLE_COUNT_1_BIT &&
+        postProcessPipeline_ && postProcessPipeline_->getSceneFramebuffer() != VK_NULL_HANDLE;
+    if (sceneWaterPass) {
+        sceneWaterFb = sceneWater1xFramebuffer(sceneWaterExtent);
+        if (sceneWaterFb == VK_NULL_HANDLE) {
+            static bool said = false;
+            if (!said) { said = true; LOG_ERROR("Water continuation: no framebuffer for the scene"); }
+        }
+    }
+    if (waterDrawsInContinuePass() && camera && (!sceneWaterPass || sceneWaterFb != VK_NULL_HANDLE)) {
         vkCmdEndRenderPass(currentCmd);
         markWorldPassClosed();
 
@@ -4120,7 +4264,15 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         VkRenderPassBeginInfo contRp{};
         contRp.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         VkExtent2D waterExtent = activeRenderExtent_;
-        if (msaaOn) {
+        const bool offscreenScene =
+            postProcessPipeline_ && postProcessPipeline_->getSceneFramebuffer() != VK_NULL_HANDLE;
+        if (msaaOn && offscreenScene) {
+            // Soft particles over an off-screen MSAA scene: its resolved
+            // colour and depth, the depth kept for the post-processing.
+            contRp.renderPass = waterRenderer->getWater1xKeepDepthRenderPass();
+            contRp.framebuffer = sceneWaterFb;
+            waterExtent = sceneWaterExtent;
+        } else if (msaaOn) {
             contRp.renderPass = waterRenderer->getWater1xRenderPass();
             contRp.framebuffer = waterRenderer->getWater1xFramebuffer(currentImageIndex);
             waterExtent = vkCtx->getSwapchainExtent();
@@ -4144,21 +4296,74 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         waterRenderer->setRenderExtent(waterExtent);
         waterRenderer->render(currentCmd, perFrameSet, *camera, globalTime, msaaOn, frameIdx);
 
+        // Rain and snow over the water, as in the scene pass, when they came
+        // out of it with the water (soft particles on).
+        if (weather && weatherDrawsWithWater_ && weather.get() == passBuiltFor_[2]) weather->render(currentCmd, perFrameSet);
+
         // Spray belongs on top of the surface it is thrown off. Recorded in the
         // scene pass it went under the water instead, which the sheet then hid -
         // barely at the shore where alpha sits near its floor, completely in the
         // deeper water you swim in.
-        if (swimEffects && camera && swimEffectsDrawWithWater_) {
+        if (swimEffects && camera && swimEffectsDrawWithWater_ && swimEffects.get() == passBuiltFor_[0]) {
             swimEffects->render(currentCmd, perFrameSet);
         }
 
         // And the minimap, last of all: it is the interface rather than the
         // world, and nothing in the world belongs over it.
-        if (minimapDrawsWithWater_) renderMinimapOverlay(currentCmd, gameHandler);
+        // Only once it has been built for this pass (refreshSwimEffectsPass):
+        // one made this frame still has the scene pass's pipelines.
+        if (minimapDrawsWithWater_ && minimap.get() == passBuiltFor_[1]) renderMinimapOverlay(currentCmd, gameHandler);
     }
 
     auto renderEnd = std::chrono::steady_clock::now();
     lastRenderMs = std::chrono::duration<double, std::milli>(renderEnd - renderStart).count();
+}
+
+VkFramebuffer Renderer::sceneWater1xFramebuffer(VkExtent2D& extent) {
+    if (!vkCtx || !waterRenderer || !postProcessPipeline_) return VK_NULL_HANDLE;
+    const VkRenderPass pass = waterRenderer->getWater1xKeepDepthRenderPass();
+    const VkImageView color = postProcessPipeline_->getSceneColorImageView();
+    const VkImage depth = postProcessPipeline_->getSceneDepthImage();
+    if (pass == VK_NULL_HANDLE || color == VK_NULL_HANDLE || depth == VK_NULL_HANDLE ||
+        postProcessPipeline_->sceneDepthIsMsaa()) {
+        return VK_NULL_HANDLE;
+    }
+    extent = postProcessPipeline_->getSceneRenderExtent();
+    // Made for this frame and destroyed when this slot next comes round, as
+    // the late particle pass makes its own: the images behind them are
+    // rebuilt on every resize, sample count and upscaler change.
+    VkDevice device = vkCtx->getDevice();
+    const uint32_t slot = vkCtx->getCurrentFrame() % 2;
+    destroySceneWaterRetired(slot);
+    VkImageViewCreateInfo vi{.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vi.image = depth;
+    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vi.format = vkCtx->getDepthFormat();
+    vi.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    VkImageView depthView = VK_NULL_HANDLE;
+    if (vkCreateImageView(device, &vi, nullptr, &depthView) != VK_SUCCESS) return VK_NULL_HANDLE;
+    sceneWaterRetired_[slot].view = depthView;
+    const VkImageView views[2] = {color, depthView};
+    VkFramebufferCreateInfo fci{.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    fci.renderPass = pass;
+    fci.attachmentCount = 2;
+    fci.pAttachments = views;
+    fci.width = extent.width;
+    fci.height = extent.height;
+    fci.layers = 1;
+    VkFramebuffer fb = VK_NULL_HANDLE;
+    if (vkCreateFramebuffer(device, &fci, nullptr, &fb) != VK_SUCCESS) return VK_NULL_HANDLE;
+    sceneWaterRetired_[slot].framebuffer = fb;
+    return fb;
+}
+
+void Renderer::destroySceneWaterRetired(uint32_t slot) {
+    if (!vkCtx) return;
+    VkDevice device = vkCtx->getDevice();
+    SceneWaterRetired& r = sceneWaterRetired_[slot % 2];
+    if (r.framebuffer) vkDestroyFramebuffer(device, r.framebuffer, nullptr);
+    if (r.view) vkDestroyImageView(device, r.view, nullptr);
+    r = SceneWaterRetired{};
 }
 
 // Water can leave the scene pass only when there is a continuation pass to draw
@@ -4190,6 +4395,10 @@ void Renderer::syncSwimEffectsTargetPass() {
     }
 
     if (swimEffects) swimEffects->setTargetPass(pass, samples);
+    // The weather follows the water only for the late particle pass (see
+    // weatherDrawsWithWater_): stock draws particles, water, then weather.
+    weatherDrawsWithWater_ = softParticlesFrame_ && swimEffectsDrawWithWater_;
+    if (weather) weather->setTargetPass(weatherDrawsWithWater_ ? pass : VK_NULL_HANDLE, samples);
     // The minimap for the same reason as the spray, and it is the more visible
     // of the two: it is a fixed disc in the corner of the screen, so any water
     // on screen behind it painted straight over the terrain it draws. The
@@ -4275,14 +4484,19 @@ void Renderer::renderMinimapOverlay(VkCommandBuffer cmd,
 
 bool Renderer::waterDrawsInContinuePass() const {
     if (!waterRenderer || !vkCtx) return false;
-    if (vkCtx->getMsaaSamples() > VK_SAMPLE_COUNT_1_BIT) {
-        // The 1x water pass targets the swapchain directly, so it cannot serve a
-        // frame whose scene went to an off-screen post-processing target.
-        const bool offscreenScene =
-            postProcessPipeline_ && postProcessPipeline_->getSceneFramebuffer() != VK_NULL_HANDLE;
-        return !offscreenScene && waterRenderer->hasWater1xPass();
-    }
-    return vkCtx->getSceneContinueRenderPass() != VK_NULL_HANDLE;
+    // The 1x water pass targets the swapchain directly, so it cannot serve a
+    // frame whose scene went to an off-screen post-processing target - unless
+    // soft particles are on, whose late pass must come before the water
+    // (water_pass_order.hpp); then it draws over the resolved scene colour and
+    // depth (sceneWater1xFramebuffer). With them off nothing here changed.
+    water_pass_order::Frame f;
+    f.msaa = vkCtx->getMsaaSamples() > VK_SAMPLE_COUNT_1_BIT;
+    f.offscreenScene = postProcessPipeline_ && postProcessPipeline_->getSceneFramebuffer() != VK_NULL_HANDLE;
+    f.softParticles = softParticlesFrame_;
+    f.water1xPass = waterRenderer->hasWater1xPass();
+    f.water1xKeepDepth = waterRenderer->getWater1xKeepDepthRenderPass() != VK_NULL_HANDLE;
+    f.sceneContinuePass = vkCtx->getSceneContinueRenderPass() != VK_NULL_HANDLE;
+    return water_pass_order::waterAfterScene(f);
 }
 
 // Soft particles: whether this frame has a late particle pass.
@@ -4317,6 +4531,15 @@ void Renderer::decideSoftParticles() {
     }
     softParticlesFrame_ = want;
     if (m2Renderer) m2Renderer->setSoftParticlesDeferred(want);
+    // The water has to come after this frame's late pass (water_pass_order),
+    // and under MSAA that needs the 1x water pass - which is otherwise made
+    // only when the sample count or the swapchain changes, so a session that
+    // started with MSAA has none. Made here, once it is wanted.
+    if (want && waterRenderer && !waterRenderer->hasWater1xPass() &&
+        vkCtx->getMsaaSamples() > VK_SAMPLE_COUNT_1_BIT &&
+        vkCtx->getDepthResolveImageView() != VK_NULL_HANDLE) {
+        setupWater1xPass();
+    }
     if (want) {
         softParticlesOffFrames_ = 0;
     } else if (softParticlePass_ && ++softParticlesOffFrames_ > 8) {
@@ -4350,7 +4573,7 @@ void Renderer::recordSoftParticlePass(VkCommandBuffer cmd) {
     const bool recorded = softParticlePass_->record(cmd, t, [&](VkCommandBuffer c, VkDescriptorSet depthSet) {
         m2Renderer->renderSoftParticles(c, perFrameSet, depthSet);
         // Over the particles, as it was over everything in the scene pass.
-        if (minimapDrawsLate_) renderMinimapOverlay(c, softParticlesGameHandler_);
+        if (minimapDrawsLate_ && minimap.get() == passBuiltFor_[1]) renderMinimapOverlay(c, softParticlesGameHandler_);
     });
     if (recorded) {
         vkCtx->gpuMark(cmd, "soft particles");
@@ -4376,7 +4599,7 @@ void Renderer::setActiveMapName(const std::string& name) {
 
 void Renderer::setCharacterAnimSoundEventCallback(CharacterAnimSoundEventCallback cb) {
     characterAnimSoundEventCallback_ = std::move(cb);
-    if (characterRenderer) characterRenderer->setAnimSoundEventCallback(characterAnimSoundEventCallback_);
+    installCharacterAnimEventCallback();
 }
 
 bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const std::string& mapName) {
@@ -4519,7 +4742,7 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
             if (!characterRenderer->initializeShadow(shadowRenderPass))
                 LOG_WARNING("Character shadow pipeline initialization failed");
         }
-        characterRenderer->setAnimSoundEventCallback(characterAnimSoundEventCallback_);
+        installCharacterAnimEventCallback();
     }
     // Weapon glows are particle emitters: M2Renderer draws them.
     if (characterRenderer) characterRenderer->setEffectRenderer(m2Renderer.get());
@@ -4949,14 +5172,27 @@ void Renderer::refreshSwimEffectsPass() {
     const bool sprayWasWithWater = swimEffectsDrawWithWater_;
     const bool minimapWasWithWater = minimapDrawsWithWater_;
     const bool minimapWasLate = minimapDrawsLate_;
+    const bool weatherWasWithWater = weatherDrawsWithWater_;
     syncSwimEffectsTargetPass();
-    const bool sprayMoved = swimEffects && swimEffectsDrawWithWater_ != sprayWasWithWater;
-    const bool minimapMoved = minimap && (minimapDrawsWithWater_ != minimapWasWithWater ||
-                                          minimapDrawsLate_ != minimapWasLate);
-    if (!sprayMoved && !minimapMoved) return;
+    bool sprayMoved = swimEffects && swimEffectsDrawWithWater_ != sprayWasWithWater;
+    bool minimapMoved = minimap && (minimapDrawsWithWater_ != minimapWasWithWater ||
+                                    minimapDrawsLate_ != minimapWasLate);
+    bool weatherMoved = weather && weatherDrawsWithWater_ != weatherWasWithWater;
+    // Made since the last refresh: built for the scene pass, which is only
+    // right if that is where it draws.
+    const void* now[3] = {swimEffects.get(), minimap.get(), weather.get()};
+    const bool sprayNew = now[0] != passBuiltFor_[0] && swimEffectsDrawWithWater_;
+    const bool minimapNew = now[1] != passBuiltFor_[1] && (minimapDrawsWithWater_ || minimapDrawsLate_);
+    const bool weatherNew = now[2] != passBuiltFor_[2] && weatherDrawsWithWater_;
+    for (int i = 0; i < 3; ++i) passBuiltFor_[i] = now[i];
+    sprayMoved = sprayMoved || (swimEffects && sprayNew);
+    minimapMoved = minimapMoved || (minimap && minimapNew);
+    weatherMoved = weatherMoved || (weather && weatherNew);
+    if (!sprayMoved && !minimapMoved && !weatherMoved) return;
     vkDeviceWaitIdle(vkCtx->getDevice());
     if (sprayMoved) swimEffects->recreatePipelines();
     if (minimapMoved) minimap->recreatePipelines();
+    if (weatherMoved) weather->recreatePipelines();
 }
 
 // ========================= Multithreaded Secondary Command Buffers =========================

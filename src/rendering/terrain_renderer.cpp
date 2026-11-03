@@ -1705,7 +1705,9 @@ void TerrainRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSp
     // Terrain is already in world space, so the model matrix it used to push
     // was the identity: the combined matrix is the light-space one.
     ShadowPush push{.lightSpaceModel = lightSpaceMatrix};
-    vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
+    // Both stages, as the layout's range declares them (the fragment stage
+    // reads the alpha-test flags); the vertex stage alone is a validation error.
+    vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(ShadowPush), &push);
 
     // Tiles first. Every loaded chunk was tested here each frame - 15k to 28k

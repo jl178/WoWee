@@ -291,12 +291,30 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "boat_bob",
      .controls = "the boat motion in m2.vert",
      .asBool = &Enhancements::boatBob},
-    {.key = "mountdust", .label = "Dust under mounts", .kind = SettingKind::Bool,
+    // One system for everyone's feet; it replaced the player's mount dust and
+    // keeps that row's keys, so a saved "off" stays off.
+    {.key = "mountdust", .label = "Dust kicked up", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWater, .section = "",
-     .tooltip = "A running mount kicks up dust at its feet.",
+     .tooltip = "Small puffs of dust where players, creatures and mounts run\n"
+                "on dry dirt and sand - more at a gallop, none on grass, snow,\n"
+                "stone or in the rain. The original throws up nothing.",
+     // Measured in docs/enhancements-plan.md (E21): nothing standing still,
+     // a few hundredths of a millisecond with a crowd running by.
      .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "mount_dust",
-     .controls = "MountDust spawning and its draw",
-     .asBool = &Enhancements::mountDust},
+     .controls = "FootfallDust (made on first use), the footfall queue and its "
+                 "ground lookups; off installs no event hook and draws nothing",
+     .asBool = &Enhancements::footfallDust},
+    {.key = "corpsesettle", .label = "Bodies lie along the ground", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWater, .section = "",
+     .tooltip = "A fallen body settles onto the slope or steps under it as it\n"
+                "lands, instead of lying level with half of it in the air. The\n"
+                "original draws every body level.",
+     // Measured in docs/enhancements-plan.md (E8): five floor queries once
+     // per death, a branch per unit each frame while any body is tilted.
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "corpse_settle",
+     .controls = "CharacterRenderer::updateCorpseSettle: the floor queries and the "
+                 "tilt in getModelMatrix; off leaves every model matrix stock",
+     .asBool = &Enhancements::corpseSettle},
     {.key = "extrasmoke", .label = "Extra chimney smoke", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWater, .section = "",
      .tooltip = "Additional smoke puffs over chimneys and smoke stacks, on top\n"

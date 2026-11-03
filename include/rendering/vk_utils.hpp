@@ -90,10 +90,10 @@ inline void destroyPipeline(VkDevice device, VkPipeline& pipeline,
 
 /// Everything a particle system holds on the device.
 ///
-/// MountDust and Weather are the same system with different sprites, and each
+/// The particle systems drawn from one buffer (the lens flare among them) each
 /// wrote this out: a pipeline, its layout, and one dynamic vertex buffer with
 /// its allocation. A teardown that forgets one of the four leaks for the run,
-/// and nothing reports it, so the two are better off unable to disagree.
+/// and nothing reports it, so they are better off unable to disagree.
 inline void destroyParticleResources(VkDevice device, VmaAllocator allocator,
                                      VkPipeline& pipeline,
                                      VkPipelineLayout& layout,

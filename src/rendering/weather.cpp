@@ -104,6 +104,9 @@ void Weather::buildPipelines(VkDevice device,
          .offset = static_cast<uint32_t>(offsetof(Vertex, alpha))},
     };
 
+    const VkRenderPass pass = targetPass_ ? targetPass_ : vkCtx->getImGuiRenderPass();
+    const VkSampleCountFlagBits samples = targetPass_ ? targetSamples_ : vkCtx->getMsaaSamples();
+
     pipeline = PipelineBuilder()
         .setShaders(vertStage, fragStage)
         .setVertexInput({binding}, attrs)
@@ -111,9 +114,9 @@ void Weather::buildPipelines(VkDevice device,
         .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
         .setDepthTest(true, false, VK_COMPARE_OP_LESS)  // tested, not written
         .setColorBlendAttachment(PipelineBuilder::blendAlpha())
-        .setMultisample(vkCtx->getMsaaSamples())
+        .setMultisample(samples)
         .setLayout(pipelineLayout)
-        .setRenderPass(vkCtx->getImGuiRenderPass())
+        .setRenderPass(pass)
         .setDynamicStates(viewportAndScissorDynamic())
         .build(device, vkCtx->getPipelineCache());
 
@@ -135,9 +138,9 @@ void Weather::buildPipelines(VkDevice device,
         .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
         .setDepthTest(true, false, VK_COMPARE_OP_LESS)
         .setColorBlendAttachment(mod2x)
-        .setMultisample(vkCtx->getMsaaSamples())
+        .setMultisample(samples)
         .setLayout(pipelineLayout)
-        .setRenderPass(vkCtx->getImGuiRenderPass())
+        .setRenderPass(pass)
         .setDynamicStates(viewportAndScissorDynamic())
         .build(device, vkCtx->getPipelineCache());
 }
