@@ -2956,6 +2956,19 @@ void Renderer::update(float deltaTime) {
         characterRenderer->setAnimCullView(camera->getViewProjectionMatrix(),
                                            shadowsEnabled ? shadowRayDirection() : glm::vec3(0.0f));
         characterRenderer->setUnitAmbientArea(getCurrentAreaId());
+        // Capes, tails and hair (E7) take the foliage's wind: its direction
+        // (m2.vert's kWindDir) and its eased, outdoor strength, about 5 yd/s
+        // of air at the usual breeze. Other units' smoothing (E10) leaves the
+        // player's own character, native form and mount alone.
+        {
+            constexpr float kClothWindSpeed = 5.0f;
+            const glm::vec2 windDir = glm::normalize(glm::vec2(0.80f, 0.60f));
+            const glm::vec3 wind(windDir * (windStrength_ * kClothWindSpeed), 0.0f);
+            characterRenderer->setMotionEnhancements(
+                enh_.secondaryMotion, wind, enh_.remoteSmoothing, characterInstanceId,
+                nativeCharacterInstanceId_,
+                animationController_ ? animationController_->getMountInstanceId() : 0u);
+        }
         characterRenderer->update(fxDt, camera->getPosition());
     }
     updateUnitBlobs();

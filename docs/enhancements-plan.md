@@ -35,6 +35,13 @@ replacing the mount dust (`mountdust`, relabelled "Dust kicked up"), and E2
 now fades in ground clutter and server game objects. Each new row is
 recommended on and stock off; costs in 3.7, status under each entry.
 
+Done (2026-11-03, step 6): E7 capes, robe flaps, tails and hair
+(`secondarymotion`, Off / Capes and robes / everything, recommended
+everything) and E10 smoother other units (`remotesmoothing`, recommended
+on), both stock off; one spring chain system for all of E7, its bones chosen
+from each model by a documented rule. Costs in 3.8, status under each entry;
+`test_secondary_motion` holds the solver and the rules.
+
 ## 1. Goal and rules
 
 The client now draws close to stock 3.3.5a (build 12340). Phase 2 adds
@@ -369,6 +376,32 @@ queries per walker every 2 yd, and at most 512 sprites rebuilt on the CPU
 whole recommended set stays within the 3 ms GPU / 0.5 ms CPU of 3.4 in both
 places; its largest item is still the light shafts' fog inject (0.95 ms).
 
+### 3.8 Measured cost of E7 and E10 (2026-11-03)
+
+As 3.7 (Iris Xe, Ultra quality columns, Recommended set, noon, camera fixed,
+5 s period, adjacent windows paired, `perf/parse2.py`), Goldshire and the
+Trade District (Stormwind's guards and citizens carry cloaks and tabards).
+Two runs; the machine was busy both times (load average 13-22 in the first,
+from another agent's LTO build, 6-9 in the second) and the compositor put
+the second run's window at 621x986. The rows do no GPU work (the bones are
+uploaded every frame either way), so their GPU column is the scatter; the
+CPU they cost runs in `update/characters` (the springs on the animation
+workers, the smoothing in the instance loop), measured by itself as well.
+GPU / CPU (renderer stages) ms, paired median, and `update/characters`:
+
+| Row | Elwynn | Stormwind | `update/characters` |
+|---|---|---|---|
+| Capes, tails and hair (Off vs all) | +0.36 ±0.7 / +0.02; +0.62 ±0.5 / +0.07 | -0.09 ±3.6 / +0.07; (second window disturbed, 78 ms frames) | +0.006 to +0.024 |
+| Smoother other players | +1.12 ±0.8 / +0.02; -0.23 ±0.7 / +0.11 | -0.05 ±0.5 / +0.04; +0.89 ±0.8 / -0.13 | -0.012 to +0.010 |
+| Whole recommended set vs stock | (first window held a hitch); +6.1 / +0.57 | +3.14 / +0.62; +7.6 / +0.37 | +0.04 to +0.08 |
+
+The two new rows cost at most a few hundredths of a millisecond of CPU and
+nothing on the GPU. The whole set read over the 3 ms / 0.5 ms budget in
+these runs, but its excess is the light shafts' fog (inject and integrate,
++1.2 to +7.3 ms here against 0.95 in 3.7) and the scene pass, under the
+load and at the odd window size, not these rows; it wants measuring again
+on a quiet machine before anything else is added to the set.
+
 ## 4. Proposed enhancements
 
 Ranked by feel gained over cost and risk. "Cost" is implementation effort
@@ -633,6 +666,79 @@ stock, the budget, and how to verify.
   every race and gender with a long cape; a tauren tail. Screenshot series.
   With it off, bone matrices compare equal to a build without the code
   (test: same sampled pose in, same matrices out).
+- **Status (2026-11-03): done, row `secondarymotion` "Capes, tails and
+  hair" (Off / Capes and robes / Capes, robes, tails and hair), recommended
+  "Capes, robes, tails and hair", stock Off.** One system:
+  `rendering/secondary_motion.hpp` (pure, `test_secondary_motion`) and
+  `CharacterRenderer::analyzeSpringChains` / `stepSprings`, applied in
+  `calculateBoneMatrices` (on the animation workers) after the stock pose,
+  the blend and the look twist: each chosen bone gets an extra rotation about
+  its own pivot, its model-space axis taken into the parent's frame. No
+  table, no audit tool: the bones are chosen from the model itself when the
+  row first goes on (the rule below), and the survey of all 972 character
+  and creature models in 3.3.5a that settled the rule found 68 cloth, 27
+  hair and 135 tail chains (96 parent-to-child, 39 flat fans).
+  - **The rule.** A bone is *free* when it is not a key bone, has no key
+    bone below it and has vertices. A *chain* is a run of free bones, each
+    the one free child of the last, from where the free tree starts or
+    branches to a leaf, 2-12 bones; a *fan* is 3-12 free leaf siblings on
+    the midline behind their parent (the wolf's and the great dragons' tail
+    bones all hang off the pelvis). Cloth: >= 60% of the chain's vertex
+    weight in the cloak (15xx), tabard (12xx) or robe (13xx) geosets and
+    <= 10% in the body (geoset 0) - on HumanMale the back flap 5-12 the
+    cloak and tabard hang from and the front flap 6-13-19. Hair: below the
+    Head key bone, >= 60% in hair or facial hair geosets (1-399) -
+    ponytails, the dwarf's and tauren's braids. Tail: nearest key ancestor
+    the Waist (key bone 5), not below the Head, >= 60% body weight, pointing
+    back (|dx| >= |dz|/2, |dy| <= |dx|/3), starting within a tenth of the
+    model's height of the midline, at least 8% of it long and, unless a fan,
+    above 12% of it (which leaves the legs out). Wings hang off the chest
+    and spread sideways and never pass; the mechanical models (catapults,
+    gyrocopters) have no Waist. Found that way: draenei tails, cats, wolves,
+    raptors, wyverns, gryphons, kodos, drakes and the great dragons; the
+    tauren tail rides the cloak chain (it is skinned to the back flap).
+    At most 32 bones a model.
+  - **The spring.** Per bone a two-way swing (out from the body - for a
+    tail, up - and sideways), a damped spring back to the authored pose
+    whose steady answer to a push is shared along the chain, the tip softer
+    than the root (cloth 2.4 -> 1.5 Hz, hair 3 -> 2, tail 2 -> 1.2, slower
+    with the square root of the length past 1.5 yd). The push is the
+    pseudo-force on a probe point out behind the root as the model moves
+    (minus its acceleration, from the drawn model matrix, so mounts, seats
+    and E10's glide all count) plus air drag against its velocity relative
+    to the wind - the foliage wind's direction and eased outdoor strength,
+    5 yd/s at 1, with the foliage gust and a flutter; with foliage wind off
+    there is none. Hanging kinds also take half the vertical push: a fall
+    floats a cloak out, a landing drops it. Hard limits per chain: cloth 29
+    degrees out, 4 toward the legs, 14 aside; hair 15 / 3 / 10; tail 12 up,
+    10 down, 20 aside. Semi-implicit Euler in 1/120 s substeps, at most
+    50 ms simulated a frame; a frame over 250 ms, a probe jump over 4 yd or
+    a non-finite value starts the chain over from rest.
+  - **Looks like.** A cloak lifts a few degrees more behind a runner, swings
+    out when setting off, aside when turning, floats on a fall, drops on
+    landing and settles in about a second when standing; standing in the
+    wind it stirs by a degree or few. Tails and braids follow with a lag.
+    The authored swing is all still there; the spring rides on top. In the
+    Goldshire probe (human male, cloak 3511, `WOWEE_SPRING_LOG=1` logs the
+    player's chains) the cloak chain reached at most 25 degrees out and 12
+    aside over runs, turns, stops and jumps, a degree or two standing in the
+    breeze.
+  - **Cost.** Only units drawn this frame (the anim cull) within 45 yd,
+    full to 30 yd and fading out to 45; per bone a mat3 inverse and a
+    quaternion; on the animation workers. 3.8: about 0.02 ms of CPU, no GPU.
+  - **Off = stock.** `springLevel_` 0: `calculateBoneMatrices` compares one
+    int and never looks at a spring slot; no model is searched; turning the
+    row off clears every state.
+  - **Gaps.** No collision capsule: the toward-the-legs limit is the only
+    guard against a cloak entering the body, so a strong turn can still put
+    a cloak edge into a leg for a frame, as the authored animation already
+    does. Chains are found per model, not per item: a cloak geoset that is
+    hidden still has its (invisible) chain stepped. Long hair that is
+    skinned to the Head bone alone (most styles) has no chain and does not
+    move. Robes (13xx) follow the legs and get only the front and back
+    flap motion. The verification so far is the player (human male, cloak
+    3511) and a raptor mount in Goldshire; other races and the great
+    dragons were checked by the chain survey, not on screen.
 
 ### E8. Corpse settles to the ground slope
 
@@ -710,6 +816,32 @@ stock, the budget, and how to verify.
   Keep the floor short and exclude combat.
 - **Verify.** Watch a playerbot group run and stop, a guard patrol turn;
   recording at 60 fps, A/B.
+- **Status (2026-11-03): done, row `remotesmoothing` "Smoother other
+  players", recommended on, stock off.** `rendering/remote_smoothing.hpp`
+  (pure, in `test_secondary_motion`) and `CharacterRenderer`: for every
+  instance but the player's character, native form and mount (and attached
+  items, effects, backdrops, riders and passengers, which follow their
+  seat), each frame a step in the position that the unit's own recent
+  velocity does not explain - more than 0.25 yd beyond the prediction and
+  under 5 yd moved (a teleport or a long correction still snaps) - becomes
+  an offset, held to 2 yd, that decays with a 0.1 s time constant; a turn
+  of more than 0.6 rad in one frame likewise becomes a yaw offset decaying
+  over 0.08 s (the stock body ease, `stepBodyFacing`, already turns
+  everything smaller). `getModelMatrix` draws the offsets; the unit's real
+  position (selection, range, nameplates, the blob) is untouched. In
+  `beginSequenceBlend`, another unit's switch between two locomotion
+  sequences (Stand, SwimIdle and the moving animations other than the
+  jumps) fades over at least 150 ms where the sequence's own blendTime is
+  shorter (about 4% of the 3.3.5 character and creature locomotion
+  sequences have 0: some Stand, Walk and Run on bogbeasts and fel orcs, the
+  guard and citizen NPC models' WalkBackwards); attacks, casts, deaths,
+  emotes and jumps keep the stock timing. Off: no offset is kept and the
+  matrix and every blend are stock. Cost: 3.8. Gaps: the position snaps
+  that Wowee itself makes for remote units in `Application` (its own
+  large-correction and creature render-position cache) are upstream of
+  this and unchanged; an offset is drawn but not passed to the unit's
+  name plate or selection circle, which can lead the model by its decaying
+  part of a step.
 
 ### E11. Horizon detail: lit WDL and far WMOs
 
@@ -958,7 +1090,8 @@ stock, the budget, and how to verify.
    Done 2026-11-03 (3.7), with the E4 draw-order fix and E2's clutter and
    game objects.
 5. E3 (shadow quality), with the instanced shadow casters.
-6. If time is left: E7 capes only, then E10.
+6. If time is left: E7 capes only, then E10. Done 2026-11-03 (3.8): E7
+   with tails and hair as well, and E10.
 
 The rest (E6, E9, E11-E22) waits for after Friday. Each new item goes into
 `week-plan-2026-11.md` before it starts, per the plan's rule.

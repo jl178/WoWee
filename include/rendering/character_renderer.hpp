@@ -5,6 +5,8 @@
 
 #include "pipeline/m2_loader.hpp"
 #include "rendering/m2_effect_select.hpp"
+#include "rendering/remote_smoothing.hpp"
+#include "rendering/secondary_motion.hpp"
 #include "pipeline/blp_loader.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
@@ -189,6 +191,16 @@ public:
     /// stock at once and, with nothing tilted, costs nothing. Main thread,
     /// after M2Renderer's update has joined (the floor queries walk its index).
     void updateCorpseSettle(float deltaTime, const FloorHeightFn* floor);
+    /// The motion enhancements, before each update() (docs/enhancements-plan.md
+    /// E7 and E10). `secondaryMotion`: 0 off, 1 capes and robes, 2 also tails
+    /// and hair (secondary_motion.hpp); `windWorld` the air's velocity in yd/s
+    /// (the foliage wind's direction and eased strength). `remoteSmoothing`
+    /// glides other units over position steps and floors their locomotion
+    /// blends (remote_smoothing.hpp); the local instances (the player's
+    /// character, its native form, its mount; 0 for none) are never smoothed.
+    /// Never called (the previews), or at 0 and false, nothing of either runs.
+    void setMotionEnhancements(int secondaryMotion, const glm::vec3& windWorld, bool remoteSmoothing,
+                               uint32_t localA, uint32_t localB, uint32_t localC);
     /// Look twist: yaw on the SpineLow key bone and, on top of it, the Head
     /// key bone (radians, CCW positive). See animation/body_facing.hpp.
     void setInstanceTorsoYaw(uint32_t instanceId, float deltaYawRad, float headYawRad = 0.0f);
@@ -479,6 +491,16 @@ private:
         /// stock animates an attached CM2Model; one that does neither has
         /// nothing to animate.
         bool bonesMove = false;
+
+        /// Secondary motion (secondary_motion.hpp): the model's spring chains,
+        /// found once the row is first on. springSlot maps a bone to its index
+        /// in the chains' bones taken in order (-1 none); springSlotChain and
+        /// springSlotIndex give that slot's chain and place in it.
+        bool springAnalyzed = false;
+        std::vector<secondary_motion::Chain> springChains;
+        std::vector<int16_t> springSlot;
+        std::vector<uint8_t> springSlotChain;
+        std::vector<uint8_t> springSlotIndex;
     };
 
     // One bone's local animated pose, before the pivot bracket.
@@ -616,6 +638,18 @@ private:
         bool isSceneModel = false;
 
 
+        // Secondary motion (E7): per spring slot of the model, the swing; per
+        // chain, its view of the probe's motion; the clock reading it last
+        // stepped at (< 0 never) and the distance fade it is drawn with.
+        std::vector<secondary_motion::BoneState> springBones;
+        std::vector<secondary_motion::ChainState> springChainStates;
+        float springStamp = -1.0f;
+        float springWeight = 0.0f;
+        // Remote smoothing (E10): the drawn offsets; smoothActive while the
+        // row is on and this is another unit, else the matrix is stock.
+        remote_smoothing::State smooth;
+        bool smoothActive = false;
+
         // Bone update throttling for characters outside normal gameplay range.
         uint32_t boneUpdateCounter = 0;
         // Skeleton skipped by the view cull since it was last computed:
@@ -661,6 +695,13 @@ private:
     void setupModelBuffers(M2ModelGPU& gpuModel);
     void calculateBindPose(M2ModelGPU& gpuModel);
     void calculateBoneMatrices(CharacterInstance& instance);
+    /// E7: find the model's spring chains (main thread; once).
+    void analyzeSpringChains(M2ModelGPU& gpuModel);
+    /// E7: step the instance's chains for this pose; false when none applies.
+    bool stepSprings(CharacterInstance& instance);
+    /// E10: is this one of the other units (not the player's own, not an
+    /// attached item, effect or backdrop)?
+    [[nodiscard]] bool isRemoteUnit(const CharacterInstance& instance) const;
     /// Computes the skeleton now if the view cull skipped it.
     void refreshStalePose(CharacterInstance& instance) {
         if (instance.poseStale) calculateBoneMatrices(instance);
@@ -839,6 +880,12 @@ private:
     std::unordered_map<uint32_t, M2ModelGPU> models;
     std::unordered_map<uint32_t, CharacterInstance> instances;
     bool corpseSettleActive_ = false;  // some body is tilted or measured
+    // Motion enhancements (setMotionEnhancements).
+    int springLevel_ = 0;
+    glm::vec3 springWind_{0.0f};
+    float springClock_ = 0.0f;
+    bool remoteSmoothing_ = false;
+    uint32_t localInstances_[3] = {0, 0, 0};
     /// Bumped whenever `instances` gains or loses an entry. An element of an
     /// unordered_map stays where it is until erased, so a list of pointers
     /// into it is good until this moves.
@@ -908,7 +955,7 @@ private:
     /// Start the cross-fade into sequence `newSeq` (0x826C40): the playing
     /// sequence becomes the outgoing one, unless a fade still more than half
     /// on the old side is running, which is kept as it is. blendTime 0 cuts.
-    static void beginSequenceBlend(CharacterInstance& inst, const pipeline::M2Model& model, int newSeq,
+    void beginSequenceBlend(CharacterInstance& inst, const pipeline::M2Model& model, int newSeq,
                                    int fromSeq, float fromTime, float fromSpeed, bool fromLoop,
                                    uint8_t fromMode);
     // setAnimCullView: the frame's view-projection and shadow ray direction.

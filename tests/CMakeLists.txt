@@ -3124,3 +3124,10 @@ wowee_add_test(test_talent_macro_logic SOURCES test_talent_macro_logic.cpp)
 
 # GameError message kinds (Wow.exe 0xAC8AF0) and GlobalStrings formatting.
 wowee_add_test(test_game_messages SOURCES test_game_messages.cpp)
+
+# ── test_secondary_motion ─────────────────────────────────────
+# Capes, tails and hair (E7): which bones the spring chains take, and the
+# solver's stability and limits at any frame rate; smoother other units
+# (E10): the step, decay, snap and blend floor rules.
+wowee_add_test(test_secondary_motion
+    SOURCES test_secondary_motion.cpp)

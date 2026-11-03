@@ -315,6 +315,33 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .controls = "CharacterRenderer::updateCorpseSettle: the floor queries and the "
                  "tilt in getModelMatrix; off leaves every model matrix stock",
      .asBool = &Enhancements::corpseSettle},
+    {.key = "secondarymotion", .label = "Capes, tails and hair", .kind = SettingKind::Enum,
+     .minValue = 0, .maxValue = 2, .step = 1, .category = kEnhPageWater, .section = "",
+     .tooltip = "Cloaks, robe and tabard flaps swing a little as characters run,\n"
+                "turn, jump and land, and stir in the wind; tails and long hair\n"
+                "follow with a lag. The animation still moves them as before.\n"
+                "Off is the original: they move only as animated.",
+     // Measured in docs/enhancements-plan.md (E7): a spring per chosen bone,
+     // only for units within 45 yd that are drawn.
+     .choices = "Off|Capes and robes|Capes, robes, tails and hair",
+     .stockValue = 0, .recommendedValue = 2, .saveKey = "secondary_motion",
+     .controls = "CharacterRenderer's spring chains (secondary_motion.hpp): the chain "
+                 "search per model and the per-bone springs in calculateBoneMatrices; "
+                 "off searches nothing and poses every bone from its tracks",
+     .asInt = &Enhancements::secondaryMotion},
+    {.key = "remotesmoothing", .label = "Smoother other players", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWater, .section = "",
+     .tooltip = "Other players and creatures glide over small position\n"
+                "corrections instead of jumping, and always ease between\n"
+                "standing, walking and running. Off is the original: they are\n"
+                "put where each update says.",
+     // Measured in docs/enhancements-plan.md (E10): a few vector operations
+     // per unit per frame.
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "remote_smoothing",
+     .controls = "the drawn-position and facing offsets in CharacterRenderer::update and "
+                 "getModelMatrix, and the locomotion blend floor in beginSequenceBlend; "
+                 "off draws every unit where it is set and every blend as authored",
+     .asBool = &Enhancements::remoteSmoothing},
     {.key = "extrasmoke", .label = "Extra chimney smoke", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWater, .section = "",
      .tooltip = "Additional smoke puffs over chimneys and smoke stacks, on top\n"

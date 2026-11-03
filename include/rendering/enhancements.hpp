@@ -92,6 +92,16 @@ struct Enhancements {
     /// level with half of it in the air (CharacterRenderer::updateCorpseSettle).
     /// Stock draws the corpse level.
     bool  corpseSettle = false;
+    /// Capes, robe and tabard flaps, tails and long hair swing a little with
+    /// the unit's running, turning, jumping and the wind, on top of the
+    /// animation (secondary_motion.hpp, CharacterRenderer). 0 is stock: every
+    /// bone is the animation's; 1 capes and robes; 2 also tails and hair.
+    int   secondaryMotion = 0;
+    /// Other units' position corrections and turns glide instead of stepping,
+    /// and their switches between moving animations always fade
+    /// (remote_smoothing.hpp). Stock puts them where each packet says and cuts
+    /// where a sequence's blend time is 0.
+    bool  remoteSmoothing = false;
     /// Extra smoke puffs over models named for smoke.
     bool  extraSmoke = false;
     /// Wowee's own drunk view: a wavy, blurred picture and a swaying camera.
