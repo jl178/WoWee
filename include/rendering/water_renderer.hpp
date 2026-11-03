@@ -49,6 +49,19 @@ struct WaterSurface {
 
     std::vector<float> heights;
     std::vector<uint8_t> mask;
+    /// Per vertex, the stock depth byte (docs/re/water.md): the depth ramp's
+    /// row is byte / 42 for river types and byte / 255 for ocean and WMO
+    /// ones. Empty for magma and slime.
+    std::vector<uint8_t> depths;
+    /// Per vertex, the liquid texture's uv when the data carries one (magma
+    /// and slime) or the WMO cell grid gives it; two floats a vertex. Empty:
+    /// the shader takes world x,y x 0.06 (0x7ce390).
+    std::vector<float> uvs;
+    /// The vertex colour (attrib4): white, or for a WMO group that is not
+    /// exterior the liquid's MOMT colour (0x7a6d70); and that group's fixed
+    /// interior light (0x7d4f40: every colour 1).
+    glm::vec4 vertexColor{1.0f};
+    bool interior = false;
 
     // Vulkan render data
     ::VkBuffer vertexBuffer = VK_NULL_HANDLE;
@@ -99,7 +112,10 @@ public:
     void loadFromTerrain(const pipeline::ADTTerrain& terrain, bool append = false,
                          int tileX = -1, int tileY = -1);
 
-    void loadFromWMO(const pipeline::WMOLiquid& liquid, const glm::mat4& modelMatrix, uint32_t wmoId);
+    /// `momtColor` is the liquid's MOMT colour (material materialId, +0x1c),
+    /// the vertex colour of a group that is not exterior.
+    void loadFromWMO(const pipeline::WMOLiquid& liquid, const glm::mat4& modelMatrix, uint32_t wmoId,
+                     uint32_t momtColor = 0xFFFFFFFFu);
 
     /// Load the animated texture sequences LiquidType.dbc names for each
     /// liquid (XTextures\river\lake_a.%d.blp and the rest). Once; later
@@ -148,6 +164,10 @@ public:
 
     // Update the reflection UBO with reflected viewProj matrix
     void updateReflectionUBO(const glm::mat4& reflViewProj);
+    /// No reflection this frame: the matrix goes to zero, which the shader
+    /// reads as "nothing drawn" (w <= 0), so a pass that did not run - the
+    /// setting off, the camera under the surface - leaves no stale sky.
+    void clearReflection() { frameUBO_.reflViewProj = glm::mat4(0.0f); }
 
     /// Feed the surface disturbance left by something moving through the water.
     /// `intensity` is 0 when nothing is disturbing the surface. `wading` picks
@@ -168,7 +188,22 @@ public:
     bool isRefractionEnabled() const { return refractionEnabled; }
     /// The foam band along the shore (water.frag, push.shoreFoam). Not stock;
     /// the "Shoreline foam" setting.
-    void setShorelineFoam(bool enabled) { shorelineFoam_ = enabled; }
+    /// The foam is the only reader of the scene's depth copy, so the copy is
+    /// taken only while it is on.
+    void setShorelineFoam(bool enabled) {
+        shorelineFoam_ = enabled;
+        setRefractionEnabled(enabled);
+    }
+    /// The underwater motes a liquid asks for (LiquidType Flags 0x8 and the
+    /// particle columns); `show` false when the row has none.
+    struct ParticulateInfo { bool show = false; float scale = 1.0f; int movement = 0; int texSlots = 0; bool fogged = false; };
+    [[nodiscard]] ParticulateInfo particulatesFor(uint16_t liquidType) const {
+        const LiquidInfo info = resolveLiquid(liquidType);
+        return {(info.flags & 0x8u) != 0, info.particleScale, info.particleMovement,
+                info.particleTexSlots, (info.flags & 0x10u) != 0};
+    }
+    /// The wake froth (not stock) off: no points, nothing drawn.
+    void clearWake();
     // Display brightness (1.0 = neutral). The scene-history capture used for
     // refraction bakes this in, so the shader divides it back out.
     // Size of the target the water is drawn into. Screen-space lookups derive
@@ -187,7 +222,6 @@ public:
     /// underwater detection from elevated WMO water far above the camera.
     std::optional<float> getNearestWaterHeightAt(float glX, float glY, float queryZ, float maxAbove = 15.0f) const;
     std::optional<uint16_t> getWaterTypeAt(float glX, float glY) const;
-    bool isWmoWaterAt(float glX, float glY) const;
 
     int getSurfaceCount() const { return static_cast<int>(surfaces.size()); }
 
@@ -216,6 +250,25 @@ private:
         /// far), 2 proceduralWmoWaterTex (river far alone, 0x8a2ac0). Only the
         /// alpha runs shallow -> deep on the WMO ramp.
         uint8_t depthRamp = 0;
+        /// LiquidType Flags (field 2) and the particulate columns: 0x8 shows
+        /// the underwater motes, 0x10 fogs them; ParticleScale (11),
+        /// ParticleMovement (12) and ParticleTexSlots (13).
+        uint32_t flags = 0;
+        /// The depth byte's divisor for the ramp row: 42 for LiquidType Int[0]
+        /// 0 (the river table 0xcdf7d0), 255 for 1 (ocean and WMO, 0xcdfbd0).
+        /// Applied per vertex when the mesh is built.
+        float depthDivisor = 255.0f;
+        /// Float[2]: the ramp coordinate's scale (stage 0 matrix); 1 bar
+        /// Orange Slime's 8.5.
+        float rampScale = 1.0f;
+        /// The stage 1 rotation, as stock computes it: Float[1] x 57.29578
+        /// taken as radians (0x9ed910 - a degrees/radians slip). Only WMO
+        /// Ocean has one: 180 -> about 145.14 degrees.
+        float texRotCos = 1.0f;
+        float texRotSin = 0.0f;
+        float particleScale = 1.0f;
+        int particleMovement = 0;
+        int particleTexSlots = 0;
     };
     LiquidInfo resolveLiquid(uint16_t liquidType) const;
     int loadLiquidTextureSequence(pipeline::AssetManager* assetManager, const std::string& pattern);
@@ -238,8 +291,6 @@ private:
     VkDescriptorSet blankLiquidSet_ = VK_NULL_HANDLE;
     bool liquidTexturesLoaded_ = false;
 
-    glm::vec4 getLiquidColor(uint16_t liquidType) const;
-    float getLiquidAlpha(uint16_t liquidType) const;
 
     void updateMaterialUBO(WaterSurface& surface);
     VkDescriptorSet allocateMaterialSet();

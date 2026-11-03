@@ -30,13 +30,6 @@ static std::vector<std::string> parseEmoteCommands(const std::string& raw) {
     return out;
 }
 
-static bool isLoopingEmote(const std::string& command) {
-    static const std::unordered_set<std::string> kLooping = {
-        "dance", "train", "dead", "eat", "work", "sleep",
-    };
-    return kLooping.find(command) != kLooping.end();
-}
-
 static std::unordered_map<uint32_t, uint32_t> makeFallbackEmotesIdMap() {
     // Emotes.dbc IDs used on classic-family MaNGOS/CMaNGOS servers.
     return {
@@ -157,6 +150,7 @@ void EmoteRegistry::loadFromDbc() {
     }
 
     std::unordered_map<uint32_t, uint32_t> emoteIdToAnim;
+    std::unordered_map<uint32_t, std::pair<uint8_t, uint8_t>> emoteSpec;  // proc, param
     animByEmotesId_.clear();
     stateEmoteIds_.clear();
     if (auto emotesDbc = assetManager->loadDBC("Emotes.dbc"); emotesDbc && emotesDbc->isLoaded()) {
@@ -169,9 +163,14 @@ void EmoteRegistry::loadFromDbc() {
         for (uint32_t r = 0; r < emotesDbc->getRecordCount(); ++r) {
             uint32_t emoteId = emotesDbc->getUInt32(r, emL ? (*emL)["ID"] : 0);
             uint32_t animId = emotesDbc->getUInt32(r, emL ? (*emL)["AnimID"] : 2);
-            if (emotesDbc->getUInt32(r, specField) != 0) {
+            const uint32_t spec = emotesDbc->getUInt32(r, specField);
+            if (spec != 0) {
                 stateEmoteIds_.insert(emoteId);
             }
+            // EmoteSpecProcParam follows EmoteSpecProc in every layout.
+            const uint32_t param = specField + 1 < emotesDbc->getFieldCount()
+                ? emotesDbc->getUInt32(r, specField + 1) : 0;
+            emoteSpec[emoteId] = {static_cast<uint8_t>(spec), static_cast<uint8_t>(param)};
             if (animId != 0) {
                 emoteIdToAnim[emoteId] = animId;
                 animByEmotesId_[emoteId] = animId;
@@ -222,7 +221,15 @@ void EmoteRegistry::loadFromDbc() {
             EmoteInfo info;
             info.animId = animId;
             info.dbcId = recordId;
-            info.loop = isLoopingEmote(cmd);
+            // A state emote (EmoteSpecProc 2: /dance, /cower) loops - the
+            // server holds it as the unit's UNIT_NPC_EMOTESTATE, which the
+            // stock chooser plays as the idle (0x7171C0). Every other emote
+            // plays once (0x73AB90) and the end of its lap re-picks.
+            if (auto sp = emoteSpec.find(emoteRef); sp != emoteSpec.end()) {
+                info.specProc = sp->second.first;
+                info.specParam = sp->second.second;
+            }
+            info.loop = info.specProc == 2;
             info.textNoTarget = textNoTarget;
             info.textTarget = textTarget;
             info.othersNoTarget = oNoTarget;
@@ -238,12 +245,13 @@ void EmoteRegistry::loadFromDbc() {
     // /laugh and /flirt should resolve from Emotes.dbc (70 and 83), but these
     // serve as backup if Emotes.dbc failed to load.
     // /fart and /stink have EmoteRef=0 in EmotesText.dbc - no Emotes.dbc link.
+    // /sleep and /laydown (EmoteSpecProc 1, stand state 3) are stand-state
+    // changes (standStateFor) whose SleepDown/Sleep/SleepUp the stand-state
+    // machine plays; /fart and /stink have no Emotes row and play nothing in
+    // the stock client.
     static const std::unordered_map<std::string, uint32_t> kAnimOverrides = {
-        {"sleep",   anim::EMOTE_SLEEP},     // 71 - stand-state emote
         {"laugh",   anim::EMOTE_LAUGH},     // 70 - backup
         {"flirt",   anim::EMOTE_SHY},       // 83 - DBC calls it SHY; it's the flirt animation
-        {"fart",    anim::EMOTE_TALK},       // 60 - generic gesture (WoW has no dedicated anim)
-        {"stink",   anim::EMOTE_TALK},       // 60 - generic gesture (WoW has no dedicated anim)
     };
     for (auto& [cmd, info] : emoteTable_) {
         if (info.animId == 0) {
@@ -294,10 +302,10 @@ void EmoteRegistry::loadFallbackEmotes() {
         {"flex",    {.animId = anim::EMOTE_FLEX,    .dbcId = 0, .loop = false, .textNoTarget = "You flex your muscles. Oooooh so strong!", .textTarget = "You flex at %s. Oooooh so strong!", .othersNoTarget = "%s flexes. Oooooh so strong!", .othersTarget = "%s flexes at %s. Oooooh so strong!", .command = "flex"}},
         {"shy",     {.animId = anim::EMOTE_SHY,     .dbcId = 0, .loop = false, .textNoTarget = "You smile shyly.", .textTarget = "You smile shyly at %s.", .othersNoTarget = "%s smiles shyly.", .othersTarget = "%s smiles shyly at %s.", .command = "shy"}},
         {"beg",     {.animId = anim::EMOTE_BEG,     .dbcId = 0, .loop = false, .textNoTarget = "You beg everyone around you. How pathetic.", .textTarget = "You beg %s. How pathetic.", .othersNoTarget = "%s begs everyone around. How pathetic.", .othersTarget = "%s begs %s. How pathetic.", .command = "beg"}},
-        {"eat",     {.animId = anim::EMOTE_EAT,     .dbcId = 0, .loop = true,  .textNoTarget = "You begin to eat.", .textTarget = "You begin to eat in front of %s.", .othersNoTarget = "%s begins to eat.", .othersTarget = "%s begins to eat in front of %s.", .command = "eat"}},
+        {"eat",     {.animId = anim::EMOTE_EAT,     .dbcId = 0, .loop = false, .textNoTarget = "You begin to eat.", .textTarget = "You begin to eat in front of %s.", .othersNoTarget = "%s begins to eat.", .othersTarget = "%s begins to eat in front of %s.", .command = "eat"}},
         {"talk",    {.animId = anim::EMOTE_TALK,    .dbcId = 0, .loop = false, .textNoTarget = "You talk.", .textTarget = "You talk to %s.", .othersNoTarget = "%s talks.", .othersTarget = "%s talks to %s.", .command = "talk"}},
         {"work",    {.animId = anim::EMOTE_WORK,    .dbcId = 0, .loop = true,  .textNoTarget = "You begin to work.", .textTarget = "You begin to work near %s.", .othersNoTarget = "%s begins to work.", .othersTarget = "%s begins to work near %s.", .command = "work"}},
-        {"train",   {.animId = anim::EMOTE_TRAIN,   .dbcId = 0, .loop = true,  .textNoTarget = "You let off a train whistle. Choo Choo!", .textTarget = "You let off a train whistle at %s. Choo Choo!", .othersNoTarget = "%s lets off a train whistle. Choo Choo!", .othersTarget = "%s lets off a train whistle at %s. Choo Choo!", .command = "train"}},
+        {"train",   {.animId = anim::EMOTE_TRAIN,   .dbcId = 0, .loop = false, .textNoTarget = "You let off a train whistle. Choo Choo!", .textTarget = "You let off a train whistle at %s. Choo Choo!", .othersNoTarget = "%s lets off a train whistle. Choo Choo!", .othersTarget = "%s lets off a train whistle at %s. Choo Choo!", .command = "train"}},
         {"dead",    {.animId = anim::EMOTE_DEAD,    .dbcId = 0, .loop = true,  .textNoTarget = "You play dead.", .textTarget = "You play dead in front of %s.", .othersNoTarget = "%s plays dead.", .othersTarget = "%s plays dead in front of %s.", .command = "dead"}},
     };
     buildDbcIdIndex();
@@ -319,6 +327,12 @@ std::optional<EmoteRegistry::EmoteResult> EmoteRegistry::findEmote(const std::st
     if (info.animId == 0) return std::nullopt;
     return EmoteResult{.animId = info.animId, .loop = info.loop};
 }
+std::optional<uint8_t> EmoteRegistry::standStateFor(const std::string& command) const {
+    auto it = emoteTable_.find(command);
+    if (it == emoteTable_.end() || it->second.specProc != 1) return std::nullopt;
+    return it->second.specParam;
+}
+
 uint32_t EmoteRegistry::animByEmotesId(uint32_t emoteId) const {
     auto it = animByEmotesId_.find(emoteId);
     return it != animByEmotesId_.end() ? it->second : 0;

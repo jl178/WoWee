@@ -68,6 +68,9 @@ private:
     /// (the fallback timer, or the same attacker swinging again).
     void flushPendingReaction(const PendingReaction& p);
     std::unordered_map<uint32_t, PendingReaction> pendingReactions_;
+    /// Other players' state loops (a stand state's loop, a state emote), by
+    /// guid, for a one-shot over them to return to.
+    std::unordered_map<uint64_t, uint32_t> playerStateEmotes_;
     /// $CAH comes 300-530 ms into the stock attack animations (HumanMale
     /// AttackUnarmed 300, Attack1H 400; Wolf 334). A swing whose events never
     /// fire reacts at about that point instead.

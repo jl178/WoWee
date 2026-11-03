@@ -28,6 +28,10 @@ std::array<uint8_t, ANIM_COUNT>& weaponFlagsTable() {
     static std::array<uint8_t, ANIM_COUNT> table{};
     return table;
 }
+std::array<uint8_t, ANIM_COUNT>& animFlagsTable() {
+    static std::array<uint8_t, ANIM_COUNT> table{};
+    return table;
+}
 std::array<uint32_t, ANIM_COUNT>& behaviorTable() {
     static std::array<uint32_t, ANIM_COUNT> table = [] {
         std::array<uint32_t, ANIM_COUNT> t{};
@@ -48,6 +52,16 @@ uint32_t dbcWeaponFlags(uint32_t id) {
 
 uint32_t dbcBehavior(uint32_t id) {
     return id < ANIM_COUNT ? behaviorTable()[id] : id;
+}
+
+uint32_t dbcAnimFlags(uint32_t id) {
+    return id < ANIM_COUNT ? animFlagsTable()[id] : 0u;
+}
+
+void setDbcFallbackRow(uint32_t id, uint32_t fallback, uint32_t flags) {
+    if (id >= ANIM_COUNT) return;
+    fallbackTable()[id] = (fallback < ANIM_COUNT && fallback != id) ? fallback : UINT32_MAX;
+    animFlagsTable()[id] = static_cast<uint8_t>(flags);
 }
 
 void setDbcWeaponRow(uint32_t id, uint32_t weaponFlags, uint32_t behavior) {
@@ -578,7 +592,7 @@ void validateAgainstDBC(const std::shared_ptr<wowee::pipeline::DBCFile>& dbc) {
     std::unordered_set<uint32_t> dbcIds;
     // ID, Name, WeaponFlags, BodyFlags, Flags, Fallback, BehaviorID[, Tier]:
     // the Fallback column is 5 in every release that ships the file.
-    constexpr uint32_t kWeaponFlagsField = 2, kFallbackField = 5, kBehaviorField = 6;
+    constexpr uint32_t kWeaponFlagsField = 2, kFlagsField = 4, kFallbackField = 5, kBehaviorField = 6;
     const bool haveFallback = dbc->getFieldCount() > kFallbackField + 1;
     for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
         uint32_t id = dbc->getUInt32(i, 0);
@@ -586,8 +600,7 @@ void validateAgainstDBC(const std::shared_ptr<wowee::pipeline::DBCFile>& dbc) {
         if (haveFallback)
             setDbcWeaponRow(id, dbc->getUInt32(i, kWeaponFlagsField), dbc->getUInt32(i, kBehaviorField));
         if (haveFallback && id < ANIM_COUNT) {
-            const uint32_t fb = dbc->getUInt32(i, kFallbackField);
-            fallbackTable()[id] = (fb < ANIM_COUNT && fb != id) ? fb : UINT32_MAX;
+            setDbcFallbackRow(id, dbc->getUInt32(i, kFallbackField), dbc->getUInt32(i, kFlagsField));
         }
     }
 

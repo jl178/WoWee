@@ -467,13 +467,21 @@ void AnimationCallbackHandler::setupCallbacks() {
         }
         emoteInstanceId = entitySpawner_.getPlayerInstanceId(guid);
         if (emoteInstanceId != 0) {
+            // Another player's state loop (a dance, a sit) is kept too, so a
+            // one-shot over it - the SitGroundDown on the way into the sit -
+            // returns to it rather than to Stand.
+            auto& playerStates = playerStateEmotes_;
             if (emoteAnim == 0) {
+                if (isState) playerStates.erase(guid);
                 cr->playAnimation(emoteInstanceId, rendering::anim::STAND, true);
             } else if (isState) {
                 // Looped, as the NPC branch above does.
+                playerStates[guid] = emoteAnim;
                 cr->playAnimation(emoteInstanceId, emoteAnim, true);
             } else {
-                cr->playAnimation(emoteInstanceId, emoteAnim, false);
+                const auto retained = playerStates.find(guid);
+                const uint32_t resume = retained != playerStates.end() ? retained->second : 0;
+                cr->playAnimation(emoteInstanceId, emoteAnim, false, resume);
             }
         }
     });

@@ -19,6 +19,7 @@
 
 #include <glm/glm.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -73,6 +74,30 @@ inline glm::vec4 depthRampRow(const glm::vec3& closeColor, const glm::vec3& farC
     if (ocean && row == 63) c = glm::vec4(glm::vec3(c) * 0.9f, c.a);
     return c;
 }
+
+/// The depth byte's divisor (0x79b870): LiquidType Int[0] 0 picks the river
+/// table 0xcdf7d0, 1 the ocean table 0xcdfbd0 (ocean, WMO water, WMO ocean).
+inline float depthDivisor(uint32_t dbcInt0) { return dbcInt0 == 0 ? 42.0f : 255.0f; }
+
+/// The ramp coordinate (attrib 7's v) of a vertex's depth byte. The river
+/// table is built by 0x79e3c0 as x = d / 9, x <= 14/3 ? x * 3/14 : 1, which
+/// is min(d / 42, 1); the ocean table is d / 255.
+inline float rampCoordinate(uint8_t depthByte, float divisor) {
+    return std::min(static_cast<float>(depthByte) / divisor, 1.0f);
+}
+
+/// Yards to texture repeats before the texture matrix: ADT liquid 0.06
+/// (0xa40410, a repeat every 16.67 yards), WMO MLIQ 0.24 (0xa3fab4, one a
+/// 25/6-yard cell). A vertex uv in the data (magma) is its u16 x 3/256.
+inline constexpr float kTerrainUVPerYard = 0.06f;
+inline constexpr float kWmoUVPerYard = 0.24f;
+inline constexpr float kVertexUVScale = 3.0f / 256.0f;
+
+/// The stage 1 rotation as the client builds it (0x8a5590): LiquidType
+/// Float[1] times 57.29578 (0x9ed910) handed to cos and sin as radians - the
+/// degrees-to-radians factor upside down. Only WMO Ocean sets Float[1] (180),
+/// which turns its texture about 145.14 degrees rather than 180.
+inline float textureRotationRadians(float dbcFloat1) { return dbcFloat1 * 57.29578f; }
 
 /// psLiquidWater's shimmer: (specular + 0.25) * texture alpha, added to rgb.
 inline glm::vec3 shimmer(const glm::vec3& specular, float textureAlpha) {

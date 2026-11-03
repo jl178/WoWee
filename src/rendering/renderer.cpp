@@ -1132,10 +1132,10 @@ void Renderer::unregisterPreview(CharacterPreview* preview) {
 }
 
 void Renderer::setWaterRefractionEnabled(bool /*enabled*/) {
-    // Always on. Kept as a call rather than deleted because saved settings and
-    // the CVar bridge still reach it, and a config written before this that says
-    // 0 should not be able to turn it off again.
-    if (waterRenderer) waterRenderer->setRefractionEnabled(true);
+    // Nothing: the stock water does not refract, and the scene copy this used
+    // to keep on is taken only for the shoreline foam now, which turns it on
+    // and off (WaterRenderer::setShorelineFoam). Kept as a call because saved
+    // settings and the CVar bridge still reach it.
 }
 void Renderer::setMsaaSamples(VkSampleCountFlagBits samples) {
     if (!vkCtx) return;
@@ -1463,9 +1463,12 @@ void Renderer::beginFrame() {
 
     // Clear values must match attachment count: 2 (no MSAA), 3 (MSAA), or 4 (MSAA+depth resolve)
     VkClearValue clearValues[4]{};
-    clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+    // Black, or under liquid the fog colour - the underwater light's, which is
+    // what the stock client clears to there (0x79a870: DayNight+0x8c).
+    const glm::vec3 clearRgb = cameraUnderwater_ ? glm::vec3(currentFrameData.fogColor) : glm::vec3(0.0f);
+    clearValues[0].color = {{clearRgb.r, clearRgb.g, clearRgb.b, 1.0f}};
     clearValues[1].depthStencil = {.depth = 1.0f, .stencil = 0};
-    clearValues[2].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+    clearValues[2].color = {{clearRgb.r, clearRgb.g, clearRgb.b, 1.0f}};
     clearValues[3].depthStencil = {.depth = 1.0f, .stencil = 0};
     bool msaaOn = (vkCtx->getMsaaSamples() > VK_SAMPLE_COUNT_1_BIT);
     if (msaaOn) {
@@ -2300,17 +2303,20 @@ void Renderer::update(float deltaTime) {
         if (waterRenderer && camera) {
             const glm::vec3 eye = camera->getPosition();
             const auto surface = waterRenderer->getNearestWaterHeightAt(eye.x, eye.y, eye.z, 200.0f);
-            isUnderwater = surface && eye.z < *surface;
+            // 0x7a0b00: in the liquid while the eye is under its surface plus
+            // 0.01 yards (0x9f1968); the eye's own depth is surface - z.
+            isUnderwater = surface && eye.z < *surface + 0.01f;
             if (isUnderwater) {
                 // Which liquid and how deep, for its own light (magma, slime)
                 // and its darkening with depth (ocean).
                 if (auto lt = waterRenderer->getWaterTypeAt(eye.x, eye.y)) cameraLiquid = *lt;
-                cameraLiquidDepth = *surface - eye.z;
+                cameraLiquidDepth = std::max(*surface - eye.z, 0.0f);
             }
         }
         lightingManager->setCameraLiquid(cameraLiquid, cameraLiquidDepth);
         // The sound goes under with the picture; see updateZoneAudio.
         cameraUnderwater_ = isUnderwater;
+        cameraLiquidType_ = isUnderwater ? cameraLiquid : 0;
         const uint32_t resolvedZoneId = getCurrentZoneId();
 
         // Light.dbc's death slot while the screen effect asks for it - the
@@ -2502,15 +2508,26 @@ void Renderer::update(float deltaTime) {
         lightning->update(deltaTime, *camera);
     }
 
-    // Update swim effects
+    // Update swim effects: the stock underwater motes for the liquid the
+    // camera is in (LiquidType Flags 0x8 and its particle columns), and the
+    // non-stock splashes only when that setting is on.
     if (swimEffects && camera && cameraController && waterRenderer) {
+        SwimEffects::MoteLiquid motes;
+        if (cameraUnderwater_ && cameraLiquidType_ != 0) {
+            const auto p = waterRenderer->particulatesFor(static_cast<uint16_t>(cameraLiquidType_));
+            motes = {.show = p.show, .liquidType = cameraLiquidType_, .particleScale = p.scale,
+                     .movement = p.movement, .texSlots = p.texSlots, .fogged = p.fogged};
+        }
+        swimEffects->setCameraLiquid(motes);
+        swimEffects->setSplashesEnabled(waterSplashes_);
         swimEffects->update(*camera, *cameraController, *waterRenderer, deltaTime);
     }
 
     // Surface disturbance the character leaves in the water. The droplet spray
     // is thrown by SwimEffects above; this is the froth on the surface itself,
     // which has to come from the water shader to move and light with the water.
-    if (waterRenderer && camera && cameraController) {
+    if (waterRenderer && !waterSplashes_) waterRenderer->clearWake();
+    if (waterRenderer && camera && cameraController && waterSplashes_) {
         glm::vec3 charPos = camera->getPosition();
         const glm::vec3* followTarget = cameraController->getFollowTarget();
         if (cameraController->isThirdPerson() && followTarget) {
@@ -3329,7 +3346,10 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
     const bool sealedIndoors = wmoRenderer && camera && !skipWMO &&
                                wmoRenderer->computeVisibility(*camera, groundUnderCamera);
     const bool skipTerrain = envSkipTerrain || ablated(AblationPass::Terrain) || sealedIndoors;
-    const bool skipSky = envSkipSky || ablated(AblationPass::Sky) || sealedIndoors;
+    // Under liquid the stock client draws no sky (0x79a870 calls the sky only
+    // while 0xcd8794, the camera's liquid, is 0) and clears to the fog colour.
+    const bool skipSky = envSkipSky || ablated(AblationPass::Sky) || sealedIndoors ||
+                         cameraUnderwater_;
     const bool skipGrass = ablated(AblationPass::Grass) || sealedIndoors;
     if (m2Renderer) {
         m2Renderer->setSkipGroundDetail(ablated(AblationPass::Clutter));
@@ -3625,7 +3645,6 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             if (mountDust && camera) mountDust->render(cmd, perFrameSet);
             if (footprintRenderer && camera) footprintRenderer->render(cmd, perFrameSet, *camera);
 
-            renderUnderwaterOverlay(cmd);
             renderPostSceneOverlays(cmd, gameHandler);
             vkEndCommandBuffer(cmd);
             return std::chrono::duration<double, std::milli>(
@@ -3825,10 +3844,11 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         if (vkCtx) vkCtx->gpuMark(currentCmd, "world total");
     }
 
-    // Underwater overlay and minimap - in the fallback path these run inline;
+    // Post-scene overlays and minimap - in the fallback path these run inline;
     // in the parallel path they were already recorded into SEC_POST above.
+    // (There is no underwater overlay: the stock client tints nothing under
+    // liquid - the fog and the clear colour do it; see docs/re/water.md.)
     if (!parallelRecordingEnabled_) {
-        renderUnderwaterOverlay(currentCmd);
         renderPostSceneOverlays(currentCmd, gameHandler);
     }
 
@@ -3958,112 +3978,6 @@ void Renderer::syncSwimEffectsTargetPass() {
     if (minimap) {
         minimap->setTargetPass(minimapDrawsWithWater_ ? pass : VK_NULL_HANDLE,
                                samples);
-    }
-}
-
-void Renderer::renderUnderwaterOverlay(VkCommandBuffer cmd) {
-    // One implementation, called from both recording paths.
-    //
-    // There were two. The parallel path had this one - a waterline that
-    // sweeps across the view as the eye crosses the surface - and the
-    // fallback path had an older one that waited until the eye was 1.5
-    // units under before tinting anything at all. Whichever path the
-    // client happened to be recording with decided which of the two the
-    // player got, and on the fallback path crossing the surface showed a
-    // bare line with no water either side of it.
-if (overlaySystem_ && waterRenderer && camera) {
-        glm::vec3 camPos = camera->getPosition();
-        // The default vertical reach of this query is 15 units, meant to
-        // stop water on a cliff above being mistaken for water the camera
-        // is in. For the underwater tint that cap is the wrong end of the
-        // problem: past 15 units down the query found nothing, the
-        // overlay stopped, and the scene snapped bright at a fixed depth.
-        // Deep ocean is far deeper than that, so reach much further here.
-        constexpr float kUnderwaterReach = 400.0f;
-        auto waterH = waterRenderer->getNearestWaterHeightAt(
-            camPos.x, camPos.y, camPos.z, kUnderwaterReach);
-        // How far the eye is under the surface. The tint used to wait
-        // until 1.5 units down and then apply to the whole screen at
-        // once, so crossing the surface was a step: no tint, no tint,
-        // fully tinted. Start it at the surface and let a waterline
-        // sweep up the view over the crossing instead.
-        // How wide the crossing really is: the half-height of the near plane in
-        // world units, because that is exactly the slab of world the near plane
-        // spans and therefore the only depth range over which part of it can be
-        // above the surface while the rest is under. It was a flat 0.55, which
-        // is a number rather than a measurement - too wide here, and wrong the
-        // moment the field of view or the near plane changes.
-        const float fovY = glm::radians(camera->getFovDegrees());
-        const float kCrossingBand =
-            std::max(0.05f, camera->getNearPlane() * std::tan(fovY * 0.5f));
-        const float eyeDepth = waterH ? (*waterH - camPos.z) : -1.0f;
-
-        // Says what it decided, so a screenshot of this can be read rather than
-        // guessed at. Throttled: it is one line every few seconds, and only
-        // while the eye is anywhere near the surface.
-        {
-            static double lastLog = 0.0;
-            if (waterH && std::abs(eyeDepth) < 3.0f && (globalTime - lastLog) > 2.0) {
-                lastLog = globalTime;
-                LOG_INFO("underwater: camZ=", camPos.z, " waterZ=", *waterH,
-                         " eyeDepth=", eyeDepth, " band=", kCrossingBand,
-                         " wmoWater=", waterRenderer->isWmoWaterAt(camPos.x, camPos.y) ? 1 : 0,
-                         " drawing=", (eyeDepth > 0.0f) ? 1 : 0);
-            }
-        }
-        // From a near plane's half-height above the surface, not from the
-        // surface itself.
-        //
-        // Above the water the near plane still cuts the surface, and the water
-        // in front of that cut is not drawn at all - which is the hard band of
-        // bare lake bed along the bottom of the view when standing in a lake
-        // looking across it. Those pixels are looking through water and should
-        // be shaded as such.
-        //
-        // This is only safe because the split is geometric now. It was tried
-        // once against the old horizon line and had to be pulled: that test
-        // could not tell a dry pixel from a wet one, so standing beside a lake
-        // tinted the lower half of the view. The per-pixel test can - a pixel
-        // whose ray enters the world above the surface comes out untouched -
-        // so the band above the surface costs nothing where there is no water.
-        if (waterH && eyeDepth > -kCrossingBand
-                   && !waterRenderer->isWmoWaterAt(camPos.x, camPos.y)) {
-            bool canal = false;
-            if (auto lt = waterRenderer->getWaterTypeAt(camPos.x, camPos.y))
-                canal = (*lt == 5 || *lt == 13 || *lt == 17);
-            // Until the eye passes the surface the view is darkened by
-            // looking through the water plane itself, which is strong -
-            // its alpha runs up towards 0.9 with depth. Once the eye is
-            // under, that plane is behind the camera and contributes
-            // nothing, so this overlay is all that is left. Starting it
-            // near zero made submerging brighten the scene sharply, which
-            // is backwards. Begin at a strength comparable to what the
-            // surface was contributing and deepen from there.
-            const float depth = std::max(eyeDepth, 0.0f);
-            constexpr float kSurfaceHandoff = 0.38f;  // matches the plane's own darkening
-            const float depthFog = 1.0f - std::exp(-depth * (canal ? 0.25f : 0.12f));
-            float fogStrength = kSurfaceHandoff + depthFog * (0.75f - kSurfaceHandoff);
-            fogStrength = glm::clamp(fogStrength, kSurfaceHandoff, 0.75f);
-            glm::vec4 tint = canal
-                ? glm::vec4(0.01f, 0.04f, 0.10f, fogStrength)
-                : glm::vec4(0.03f, 0.09f, 0.18f, fogStrength);
-
-            // The seam is worked out per pixel from the surface height, so
-            // there is no screen-space line to place here. Once the eye is
-            // well under, the near plane is entirely below the water and there
-            // is no seam left to draw - say so, and the whole view tints.
-            const bool crossing = eyeDepth < kCrossingBand;
-            overlaySystem_->renderWaterline(
-                tint,
-                glm::inverse(camera->getViewProjectionMatrix()),
-                *waterH,
-                // Softness and ripple in world units now: how thick the seam is
-                // in yards of water, which does not change with where the
-                // camera is looking.
-                0.030f,   // meniscus half-thickness
-                0.004f,   // ripple on the surface height
-                globalTime, crossing, cmd);
-        }
     }
 }
 
@@ -4200,6 +4114,8 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
     }
     // The LiquidType.dbc texture sequences the water is drawn with. Loads once.
     if (waterRenderer) waterRenderer->loadLiquidTextures(assetManager);
+    // Textures\WaterPoop02.blp, the stock underwater motes. Loads once.
+    if (swimEffects) swimEffects->loadMoteTexture(assetManager);
 
     // Create minimap if not already created
     if (!minimap) {
@@ -4852,6 +4768,10 @@ void Renderer::setSecondaryViewportScissor(VkCommandBuffer cmd) {
 }
 
 void Renderer::renderReflectionPass() {
+    // Not stock: psLiquidWater has no reflection term (docs/re/water.md), so
+    // the sky in the water is the "Water reflections" setting, off by default.
+    if (waterRenderer) waterRenderer->clearReflection();
+    if (!waterReflections_) return;
     if (!waterRenderer || !camera || !waterRenderer->hasReflectionPass() || !waterRenderer->hasSurfaces()) return;
     if (currentCmd == VK_NULL_HANDLE || !reflPerFrameUBOMapped) return;
 

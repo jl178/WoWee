@@ -675,14 +675,17 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
 
                         group.liquid.heights.clear();
                         group.liquid.flags.clear();
+                        group.liquid.vertexWords.clear();
 
                         // MLIQ vertex data: each vertex is 8 bytes -
                         // 4 bytes flow/unknown data + 4 bytes float height.
                         const size_t VERTEX_STRIDE = 8; // bytes per vertex
                         if (vertexCount > 0 && bytesRemaining >= vertexCount * VERTEX_STRIDE) {
                             group.liquid.heights.resize(vertexCount);
+                            group.liquid.vertexWords.resize(vertexCount);
                             for (size_t i = 0; i < vertexCount; i++) {
-                                parseOffset += 4; // skip flow/unknown data
+                                // depth/flow (water) or s,t (magma), then the height
+                                group.liquid.vertexWords[i] = read<uint32_t>(groupData, parseOffset);
                                 group.liquid.heights[i] = read<float>(groupData, parseOffset);
                             }
                         } else if (vertexCount > 0 && bytesRemaining >= vertexCount * sizeof(float)) {

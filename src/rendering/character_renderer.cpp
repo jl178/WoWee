@@ -22,6 +22,7 @@
 #include "rendering/m2_track_sampler.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "rendering/animation/sequence_variation.hpp"
+#include "rendering/animation/anim_selection.hpp"
 #include "core/thread_pool.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/bone_slots.hpp"
@@ -2163,100 +2164,122 @@ void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId,
         instance.isDead = false;  // Respawned
     }
 
-    // Find animation sequence index by ID
-    instance.currentAnimationId = animationId;
-    instance.currentSequenceIndex = -1;
-    instance.animationTime = 0.0f;
-    instance.animationLoop = loop;
+    // What was playing, for the phase carry and the cross-fade below.
+    const int oldSeq = instance.currentSequenceIndex;
+    const float oldTime = instance.animationTime;
+    const float oldSpeed = instance.animationFrozen ? 0.0f : instance.animationSpeed;
+    const bool oldLoop = instance.animationLoop;
+    const uint8_t oldMode = instance.playMode;
+    const bool oldValid = oldSeq >= 0 && oldSeq < static_cast<int>(model.sequences.size());
 
-    // A loop starts on a variation rolled by the sequences' frequency weights
-    // and rolls again at every lap (update()), as the stock client does; a
-    // one-shot plays its primary (variationIndex 0), whose length the swing
-    // and cast timers were measured against.
-    instance.variationLapsLeft = 0;
-    instance.animationSpeed = 1.0f;
-    if (loop) {
-        instance.currentSequenceIndex = pickLoopVariation(instanceId, model, animationId);
-        if (instance.currentSequenceIndex >= 0) {
-            instance.variationLapsLeft =
-                anim::pickSequenceExtraLaps(model.sequences[instance.currentSequenceIndex]);
-        }
-    } else {
-        int firstMatch = -1;
-        for (size_t i = 0; i < model.sequences.size(); i++) {
-            if (model.sequences[i].id == animationId) {
-                if (firstMatch < 0) firstMatch = static_cast<int>(i);
-                if (model.sequences[i].variationIndex == 0) {
-                    instance.currentSequenceIndex = static_cast<int>(i);
-                    break;
-                }
-            }
-        }
-        if (instance.currentSequenceIndex < 0 && firstMatch >= 0) {
-            instance.currentSequenceIndex = firstMatch;
-        }
-    }
-
-    // Not in this model: AnimationData.dbc's fallback chain, as the stock
-    // client walks it (ShieldBlock -> StandWound, Special2H -> Attack2H ->
-    // Attack1H -> AttackUnarmed). The first sequence was the only answer
-    // before, which is a Stand on most models and anything at all on some.
-    if (instance.currentSequenceIndex < 0) {
-        uint32_t fb = anim::dbcFallback(animationId);
-        for (int step = 0; step < 8 && fb != UINT32_MAX && fb != animationId; ++step) {
-            int match = -1;
-            for (size_t i = 0; i < model.sequences.size(); i++) {
-                if (model.sequences[i].id != fb) continue;
-                if (match < 0 || model.sequences[i].variationIndex == 0) match = static_cast<int>(i);
-                if (model.sequences[i].variationIndex == 0) break;
-            }
-            if (match >= 0) {
-                instance.currentSequenceIndex = match;
-                instance.currentAnimationId = fb;
-                break;
-            }
-            fb = anim::dbcFallback(fb);
-        }
-    }
-
-    if (instance.currentSequenceIndex < 0) {
-        // Fall back to first sequence
-        if (!model.sequences.empty()) {
-            instance.currentSequenceIndex = 0;
-            instance.currentAnimationId = model.sequences[0].id;
-        }
-
+    // The model's sequence for the request (CM2Model 0x826350): the id, else
+    // AnimationData's Fallback chain - with the play mode its Flags give
+    // (0x10 backwards, 0x20 held) - else Stand, Closed, the first sequence.
+    // The instance keeps reporting the id that was asked for, as the stock
+    // client does (bs+0x90): a fallback is how the model plays it.
+    auto has = [&](uint32_t id) {
+        for (const auto& q : model.sequences)
+            if (q.id == id) return true;
+        return false;
+    };
+    const anim::FallbackResult fr = anim::resolveFallback(
+        has, animationId, model.sequences.empty() ? 0u : model.sequences[0].id);
+    if (!fr.found && !model.sequences.empty()) {
         // Only log missing animation once per model (reduce spam)
         static std::unordered_map<uint32_t, std::unordered_set<uint32_t>> loggedMissingAnims;
-        uint32_t mId = instance.modelId;  // Use modelId as identifier
-        if (loggedMissingAnims[mId].insert(animationId).second) {
-            // First time seeing this missing animation for this model
-            LOG_WARNING("Animation ", animationId, " not found in model ", mId, ", using default");
+        if (loggedMissingAnims[instance.modelId].insert(animationId).second) {
+            LOG_WARNING("Animation ", animationId, " not found in model ", instance.modelId,
+                        ", playing ", fr.id);
         }
     }
+    instance.currentAnimationId = fr.found ? animationId : fr.id;
+    instance.playMode = static_cast<uint8_t>(fr.mode);
+    instance.animationTime = 0.0f;
+    instance.animationLoop = loop;
+    instance.animationSpeed = 1.0f;
+
+    // Every play rolls a variation by frequency, one-shots as well as loops
+    // (CGUnit_C::PlayAnimation 0x7385C0 passes variation -1; HumanMale's
+    // Attack1H has two swings, Attack2HL three). Stand and the Ready stances
+    // hold their first variation while the unit attacks or casts (0x737EF0).
+    instance.currentSequenceIndex = pickLoopVariation(instanceId, model, fr.id);
+    if (instance.currentSequenceIndex < 0 && !model.sequences.empty()) instance.currentSequenceIndex = 0;
     // An alias (flag 0x40) has no keyframes; it plays the sequence it names.
     instance.currentSequenceIndex = anim::resolveSequenceAlias(model.sequences, instance.currentSequenceIndex);
 
-    // Cross-fade out of whatever the bones were doing. The stock client fades
-    // over the incoming sequence's blendTime (150 ms on nearly every 3.3.5
-    // character and creature sequence), uncapped, and a sequence that says 0
-    // cuts (CM2Model 0x826c40 sets the fade's end to now). Needs a pose
-    // computed for this skeleton:
-    // a fresh instance has nothing to fade from.
-    //
-    // Nor does one the view cull has left unposed (poseStale): its localPose
-    // is from whenever it was last on screen. Nobody sees the switch, and a
-    // pose computed here only to fade from would undo the saving.
-    if (!instance.poseStale && instance.currentSequenceIndex >= 0 &&
-        instance.currentSequenceIndex < static_cast<int>(model.sequences.size()) &&
-        !model.bones.empty() && instance.localPose.size() == model.bones.size()) {
-        const uint32_t blendMs = model.sequences[instance.currentSequenceIndex].blendTime;
-        instance.blendFromPose = instance.localPose;
-        instance.blendElapsedMs = 0.0f;
-        instance.blendDurationMs = static_cast<float>(blendMs);
+    // A looping play rolls again at every lap (update()). A one-shot whose
+    // sequence stops at its end (flag 0x01) plays its replay range of laps
+    // first (0x826B00); any other one-shot ends after its first lap, where
+    // the stock client's end-of-lap callback re-picks.
+    instance.variationLapsLeft = 0;
+    const bool newValid = instance.currentSequenceIndex >= 0 &&
+                          instance.currentSequenceIndex < static_cast<int>(model.sequences.size());
+    if (newValid && !loop) {
+        const auto& q = model.sequences[instance.currentSequenceIndex];
+        if (q.flags & anim::kSeqFlagNonLooping)
+            instance.variationLapsLeft = anim::stockReplayLaps(q, anim::stockRand()) - 1;
+    }
+
+    // A moving animation that replaces another moving one starts at the same
+    // fraction of its cycle (0x7385C0), so the feet do not jump when a walk
+    // becomes a run or a run a sprint.
+    if (newValid && oldValid && loop && oldSeq != instance.currentSequenceIndex &&
+        instance.playMode == 0 && anim::isMovingAnim(fr.id)) {
+        const auto& o = model.sequences[oldSeq];
+        const auto& n = model.sequences[instance.currentSequenceIndex];
+        if (o.movingSpeed != 0.0f && n.movingSpeed != 0.0f) {
+            instance.animationTime = anim::carriedPhaseMs(oldTime, static_cast<float>(o.duration),
+                                                          static_cast<float>(n.duration));
+        }
+    }
+
+    // Cross-fade out of whatever the bones were doing, over the incoming
+    // sequence's blendTime (150 ms on nearly every 3.3.5 character and
+    // creature sequence, 500 for HumanMale's Stand), uncapped; 0 cuts. The
+    // outgoing sequence keeps playing while it fades. Needs a pose for this
+    // skeleton: a fresh instance has nothing to fade from, and nor does one
+    // the view cull has left unposed (poseStale) - nobody sees that switch.
+    if (!instance.poseStale && newValid && !model.bones.empty() &&
+        instance.localPose.size() == model.bones.size()) {
+        // The outgoing sequence is the one that was playing, in the state it
+        // had before this play reset the clock.
+        beginSequenceBlend(instance, model, instance.currentSequenceIndex,
+                           oldValid ? oldSeq : -1, oldTime, oldSpeed, oldLoop, oldMode);
     } else {
         instance.blendDurationMs = 0.0f;
+        instance.blendFromSeq = -1;
     }
+}
+
+void CharacterRenderer::beginSequenceBlend(CharacterInstance& inst, const pipeline::M2Model& model,
+                                           int newSeq, int fromSeq, float fromTime, float fromSpeed,
+                                           bool fromLoop, uint8_t fromMode) {
+    if (newSeq < 0 || newSeq >= static_cast<int>(model.sequences.size())) return;
+    const uint32_t blendMs = model.sequences[newSeq].blendTime;
+    // A fade still more than half on the outgoing side keeps its outgoing
+    // sequence and its clock; only the incoming one changes (0x826C40).
+    if (inst.blendDurationMs > 0.0f && inst.blendElapsedMs < inst.blendDurationMs) {
+        const float incoming = m2_track::sequenceBlendWeight(inst.blendElapsedMs / inst.blendDurationMs);
+        if (1.0f - incoming > 0.5f) return;
+    }
+    if (blendMs == 0) {
+        inst.blendDurationMs = 0.0f;
+        inst.blendFromSeq = -1;
+        return;
+    }
+    if (fromSeq >= 0 && fromSeq < static_cast<int>(model.sequences.size())) {
+        inst.blendFromSeq = fromSeq;
+        inst.blendFromTime = fromTime;
+        inst.blendFromSpeed = fromSpeed;
+        inst.blendFromLoop = fromLoop;
+        inst.blendFromMode = fromMode;
+    } else {
+        // Nothing playing that can be sampled: fade from the pose itself.
+        inst.blendFromSeq = -1;
+        inst.blendFromPose = inst.localPose;
+    }
+    inst.blendElapsedMs = 0.0f;
+    inst.blendDurationMs = static_cast<float>(blendMs);
 }
 
 void CharacterRenderer::playDeath(uint32_t instanceId, bool alreadyDead) {
@@ -2331,7 +2354,7 @@ int CharacterRenderer::pickLoopVariation(uint32_t instanceId, const pipeline::M2
                 return idx;
         }
     }
-    return anim::pickSequenceVariation(model.sequences, model.bones, animationId);
+    return anim::rollVariationStock(model.sequences, model.bones, animationId, anim::stockRand());
 }
 
 bool CharacterRenderer::currentAnimHasEvent(uint32_t instanceId, uint32_t eventTag) const {
@@ -2488,11 +2511,21 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
         }
 
         // Sequence cross-fade clock. Before the sequence clock below, which may
-        // end a one-shot and start a fresh fade from zero.
+        // end a one-shot and start a fresh fade from zero. The outgoing
+        // sequence runs on with it: looping, or held at its end.
         if (inst.blendDurationMs > 0.0f) {
             inst.blendElapsedMs += deltaTime * 1000.0f;
             if (inst.blendElapsedMs >= inst.blendDurationMs) {
                 inst.blendDurationMs = 0.0f;
+                inst.blendFromSeq = -1;
+            } else if (inst.blendFromSeq >= 0 && inst.cachedModel &&
+                       inst.blendFromSeq < static_cast<int>(inst.cachedModel->data.sequences.size())) {
+                const float fromDur =
+                    static_cast<float>(inst.cachedModel->data.sequences[inst.blendFromSeq].duration);
+                inst.blendFromTime += deltaTime * 1000.0f * inst.blendFromSpeed;
+                if (fromDur > 0.0f && inst.blendFromTime >= fromDur) {
+                    inst.blendFromTime = inst.blendFromLoop ? std::fmod(inst.blendFromTime, fromDur) : fromDur;
+                }
             }
         }
 
@@ -2519,7 +2552,10 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
                                          !soundEvents[seqIdx].empty();
             const bool haveFootfalls = seqIdx < static_cast<int>(footfalls.size()) &&
                                        !footfalls[seqIdx].empty();
-            if (animSoundEventCallback_ && !inst.isAttachedItem && (haveSoundEvents || haveFootfalls)) {
+            // Only a sequence played forward fires its events: a fallback
+            // played backwards or held (anim::PlayMode) is a pose, not a take.
+            if (animSoundEventCallback_ && !inst.isAttachedItem && inst.playMode == 0 &&
+                (haveSoundEvents || haveFootfalls)) {
                 const float dur = static_cast<float>(seq.duration);
                 const float now = inst.animationTime;
                 static constexpr uint32_t kFootfallTag = pipeline::m2EventTag("$FSD");
@@ -2562,30 +2598,27 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
                     while (inst.animationTime >= static_cast<float>(seq.duration)) {
                         inst.animationTime -= static_cast<float>(seq.duration);
                     }
-                    // Next lap: the laps the variation still owes, else a new
-                    // variation rolled by frequency (the Stand fidgets), faded
-                    // in over its blendTime like any other switch.
-                    if (inst.variationLapsLeft > 0) {
-                        --inst.variationLapsLeft;
-                    } else {
+                    // Next lap: a new variation rolled by frequency (the Stand
+                    // fidgets), faded in over its blendTime like any other
+                    // switch. Every lap of a looping sequence rolls (0x831FC0:
+                    // its end fires each lap); the replay range counts only
+                    // for a sequence that stops at its end (flag 0x01).
+                    {
                         const auto& seqs = inst.cachedModel->data.sequences;
                         const auto& bones = inst.cachedModel->data.bones;
-                        if (anim::hasSequenceVariations(seqs, inst.currentAnimationId)) {
-                            int next = pickLoopVariation(pair.first, inst.cachedModel->data,
-                                                         inst.currentAnimationId);
-                            if (next >= 0) {
-                                inst.variationLapsLeft = anim::pickSequenceExtraLaps(seqs[next]);
-                                next = anim::resolveSequenceAlias(seqs, next);
-                            }
+                        const uint32_t playingId = seq.id;
+                        if (anim::hasSequenceVariations(seqs, playingId)) {
+                            int next = pickLoopVariation(pair.first, inst.cachedModel->data, playingId);
+                            if (next >= 0) next = anim::resolveSequenceAlias(seqs, next);
                             if (next >= 0 && next < static_cast<int>(seqs.size()) &&
                                 next != inst.currentSequenceIndex) {
                                 // Out of view the fade is skipped, as in playAnimation.
                                 if (!inst.poseStale && !bones.empty() &&
                                     inst.localPose.size() == bones.size()) {
-                                    const uint32_t blendMs = seqs[next].blendTime;
-                                    inst.blendFromPose = inst.localPose;
-                                    inst.blendElapsedMs = 0.0f;
-                                    inst.blendDurationMs = static_cast<float>(blendMs);
+                                    beginSequenceBlend(inst, inst.cachedModel->data, next,
+                                                       inst.currentSequenceIndex, inst.animationTime,
+                                                       inst.animationFrozen ? 0.0f : inst.animationSpeed,
+                                                       true, inst.playMode);
                                 }
                                 inst.currentSequenceIndex = next;
                                 const float nextDur = static_cast<float>(seqs[next].duration);
@@ -2597,6 +2630,11 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
                             }
                         }
                     }
+                } else if (inst.variationLapsLeft > 0) {
+                    // A flag-0x01 one-shot with laps of its replay range to go.
+                    --inst.variationLapsLeft;
+                    while (inst.animationTime >= static_cast<float>(seq.duration))
+                        inst.animationTime -= static_cast<float>(seq.duration);
                 } else {
                     // One-shot animation finished: return to the caller-specified
                     // resume anim (NPC state emote) or Stand, unless dead
@@ -2881,15 +2919,23 @@ bool CharacterRenderer::playUpperBodyAnimation(uint32_t instanceId, uint32_t tor
     if (it == instances.end()) return false;
     auto& instance = it->second;
     const auto& model = models[instance.modelId].data;
+    // A variation rolled by frequency, as for any play (0x7385C0 passes -1
+    // to every track); the same one for every part playing that id.
+    uint32_t rolledId[3] = {0, 0, 0};
+    int rolledSeq[3] = {-1, -1, -1};
+    int rolledCount = 0;
     auto find = [&](uint32_t id) -> int {
         if (id == 0 || id == anim::STAND) return -1;
-        int first = -1;
-        for (size_t i = 0; i < model.sequences.size(); i++) {
-            if (model.sequences[i].id != id) continue;
-            if (model.sequences[i].variationIndex == 0) return static_cast<int>(i);
-            if (first < 0) first = static_cast<int>(i);
+        for (int k = 0; k < rolledCount; ++k)
+            if (rolledId[k] == id) return rolledSeq[k];
+        int idx = anim::rollVariationStock(model.sequences, model.bones, id, anim::stockRand());
+        idx = anim::resolveSequenceAlias(model.sequences, idx);
+        if (rolledCount < 3) {
+            rolledId[rolledCount] = id;
+            rolledSeq[rolledCount] = idx;
+            ++rolledCount;
         }
-        return first;
+        return idx;
     };
     const uint32_t anims[3] = {leftArmAnim, rightArmAnim, torsoAnim};
     bool any = false;
@@ -3081,9 +3127,24 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
 
     // Cross-fade weight of the new sequence: 0 at the switch, 1 when done,
     // eased as the stock client eases it (m2_track::sequenceBlendWeight).
+    // The outgoing side is the old sequence still playing on its own clock
+    // (blendFromSeq), or a snapshot of the pose where there was none.
+    const bool fromSequence = instance.blendFromSeq >= 0 &&
+                              instance.blendFromSeq < static_cast<int>(model.sequences.size());
     const bool blending = instance.blendDurationMs > 0.0f &&
                           instance.blendElapsedMs < instance.blendDurationMs &&
-                          instance.blendFromPose.size() == numBones;
+                          (fromSequence || instance.blendFromPose.size() == numBones);
+    const float fromSampleTime = fromSequence
+        ? anim::playModeSampleTime(static_cast<anim::PlayMode>(instance.blendFromMode), instance.blendFromTime,
+                                   static_cast<float>(model.sequences[instance.blendFromSeq].duration))
+        : 0.0f;
+    // A fallback played backwards or held samples its own time (anim::PlayMode).
+    const float bodySampleTime =
+        (instance.playMode != 0 && instance.currentSequenceIndex >= 0 &&
+         instance.currentSequenceIndex < static_cast<int>(model.sequences.size()))
+            ? anim::playModeSampleTime(static_cast<anim::PlayMode>(instance.playMode), instance.animationTime,
+                                       static_cast<float>(model.sequences[instance.currentSequenceIndex].duration))
+            : instance.animationTime;
     const float blendWeight = blending
         ? m2_track::sequenceBlendWeight(instance.blendElapsedMs / instance.blendDurationMs)
         : 1.0f;
@@ -3106,7 +3167,7 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
         const auto& bone = model.bones[i];
 
         int sequence = instance.currentSequenceIndex;
-        float time = instance.animationTime;
+        float time = bodySampleTime;
 
         // Local transform includes pivot bracket: T(pivot)*T*R*S*T(-pivot)
         // At rest this is identity, so no separate bind pose is needed
@@ -3115,7 +3176,9 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
         if (blending) {
             // Tracks on a global sequence run on their own clock whatever the
             // body plays, so they have nothing to fade from.
-            const auto& from = instance.blendFromPose[i];
+            const BoneLocalPose from = fromSequence
+                ? sampleBonePose(bone, fromSampleTime, instance.globalSequenceTime, instance.blendFromSeq, gsd)
+                : instance.blendFromPose[i];
             if (bone.translation.globalSequence < 0)
                 pose.translation = glm::mix(from.translation, pose.translation, blendWeight);
             if (bone.rotation.globalSequence < 0)
@@ -4908,6 +4971,18 @@ void CharacterRenderer::removeInstance(uint32_t instanceId) {
 
     instances.erase(it);
     ++instancesGeneration_;
+}
+
+bool CharacterRenderer::getPlayingSequence(uint32_t instanceId, pipeline::M2Sequence& out) const {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return false;
+    auto modelIt = models.find(it->second.modelId);
+    if (modelIt == models.end()) return false;
+    const auto& seqs = modelIt->second.data.sequences;
+    const int idx = it->second.currentSequenceIndex;
+    if (idx < 0 || idx >= static_cast<int>(seqs.size())) return false;
+    out = seqs[idx];
+    return true;
 }
 
 bool CharacterRenderer::getAnimationState(uint32_t instanceId, uint32_t& animationId,

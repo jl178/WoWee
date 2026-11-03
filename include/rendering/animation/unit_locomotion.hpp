@@ -39,9 +39,8 @@ struct UnitLocomotion {
     /// Radians the drawn body turned last frame (CCW positive): standing
     /// still, a step either way past 1e-5 is a turn in place (the shuffle).
     float lastBodyStep = 0.0f;
-    /// The animation whose MoveSpeed was last looked up, and that speed: a
-    /// moving unit's animation plays at its speed over it (0x7385C0).
-    uint32_t rateAnimId = 0;
+    /// The MoveSpeed of the sequence playing: a moving unit's animation plays
+    /// at its speed over it (0x7385C0).
     float rateMoveSpeed = 0.0f;
 };
 

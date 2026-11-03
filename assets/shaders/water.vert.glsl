@@ -31,15 +31,18 @@ layout(push_constant) uniform Push {
     float liquidTexValid;
     float shoreFoam;
     float depthRamp;
+    float texRotCos;
+    float texRotSin;
 } push;
 
 layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec2 aTexCoord;
+layout(location = 1) in vec2 aTexCoord;  // the liquid uv before its texture matrix
+layout(location = 2) in float aRampV;     // the depth ramp coordinate, per vertex
 
 layout(location = 0) out vec3 FragPos;
 layout(location = 1) out vec3 Normal;
 layout(location = 2) out vec2 TexCoord;
-layout(location = 3) out float WaveOffset;
+layout(location = 3) out float RampV;
 layout(location = 4) out vec2 ScreenUV;
 
 // The stock liquid is the flat sheet the ADT and WMO give it: vsLiquidWater
@@ -48,7 +51,7 @@ layout(location = 4) out vec2 ScreenUV;
 // surface slid the waterline up and down every character standing in it.)
 void main() {
     vec4 worldPos = push.model * vec4(aPos, 1.0);
-    WaveOffset = 0.0;
+    RampV = aRampV;
     Normal = vec3(0.0, 0.0, 1.0);
     FragPos = worldPos.xyz;
     TexCoord = aTexCoord;

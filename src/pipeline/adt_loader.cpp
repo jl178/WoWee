@@ -550,18 +550,34 @@ void ADTLoader::parseMCLQ(std::span<const uint8_t> data, int chunkIndex,
     float minHeight = readFloat(data, 0);
     float maxHeight = readFloat(data, 4);
 
-    // Determine liquid type from MCNK flags
-    // 0x04 = has liquid (river/lake), 0x08 = ocean, 0x10 = magma, 0x20 = slime
-    uint16_t liquidType = 0;  // water
-    if (mcnkFlags & 0x08) liquidType = 1;       // ocean
-    else if (mcnkFlags & 0x10) liquidType = 2;  // magma
-    else if (mcnkFlags & 0x20) liquidType = 3;  // slime
+    // The LiquidType the stock client gives an MCLQ (0x7c5690): MCNK flags
+    // 0x04 river, 0x08 ocean, 0x10 magma, 0x20 slime become LiquidType 1, 2,
+    // 3 and 4 (Water, Ocean, Magma, Slime). This was 0..3, which the renderer
+    // then looked up as LiquidType ids - an MCLQ ocean drew as river water.
+    // (On map 530 the client turns the magma into 15, Green Lava; the map is
+    // not known here.)
+    uint16_t liquidType = 1;  // water
+    if (mcnkFlags & 0x08) liquidType = 2;       // ocean
+    else if (mcnkFlags & 0x10) liquidType = 3;  // magma
+    else if (mcnkFlags & 0x20) liquidType = 4;  // slime
+    const bool magmaFormat = liquidType >= 3;
 
-    // Read 9x9 height values (skip depth/flow bytes, just read the float height)
+    // 9x9 vertices of 8 bytes: water is depth, flow0, flow1, filler, height;
+    // magma and slime are u16 s, u16 t, height (0x8a3220 reads them).
     const std::span<const uint8_t> vertData = data.subspan(8);
     std::vector<float> heights(81);
+    std::vector<uint8_t> depths;
+    std::vector<float> uvs;
+    if (magmaFormat) uvs.resize(81 * 2);
+    else depths.resize(81);
     for (int i = 0; i < 81; i++) {
         heights[i] = readFloat(vertData, i * 8 + 4);  // float at offset 4 within each 8-byte vertex
+        if (magmaFormat) {
+            uvs[i * 2] = static_cast<float>(readUInt16(vertData, i * 8)) * (3.0f / 256.0f);
+            uvs[i * 2 + 1] = static_cast<float>(readUInt16(vertData, i * 8 + 2)) * (3.0f / 256.0f);
+        } else {
+            depths[i] = vertData[i * 8];
+        }
     }
 
     // Read 8x8 tile flags
@@ -606,6 +622,8 @@ void ADTLoader::parseMCLQ(std::span<const uint8_t> data, int chunkIndex,
     layer.width = 8;   // 8 tiles = 9 vertices per axis
     layer.height = 8;
     layer.heights = std::move(heights);
+    layer.depths = std::move(depths);
+    layer.uvs = std::move(uvs);
     layer.mask.resize(8);  // 8 bytes = 64 bits for 8x8 tiles
     for (int row = 0; row < 8; row++) {
         uint8_t rowBits = 0;
@@ -733,8 +751,34 @@ void ADTLoader::parseMH2O(std::span<const uint8_t> data, ADTTerrain& terrain) {
             // Number of vertices is (width+1) * (height+1)
             size_t numVertices = (layer.width + 1) * (layer.height + 1);
 
-            // Check liquid object flags (LVF) to determine vertex format
-            bool hasHeightData = (liquidObject != 2);  // LVF_height_depth or LVF_height_texcoord
+            // The vertex format (LVF) in 3.3.5's u16[1] (0x8a3160): 0 height
+            // + depth, 1 height + uv, 2 depth only, 3 height + uv + depth.
+            // Heights are n floats, uvs n u16 pairs, depths n bytes, in that
+            // order.
+            const uint16_t lvf = liquidObject;
+            bool hasHeightData = (lvf != 2);
+            {
+                const size_t heightBytes = hasHeightData ? numVertices * 4 : 0;
+                const size_t uvBytes = (lvf == 1 || lvf == 3) ? numVertices * 4 : 0;
+                if (lvf == 0 || lvf == 2 || lvf == 3) {
+                    const size_t at = offsetVertexData + heightBytes + uvBytes;
+                    if (offsetVertexData > 0 && at + numVertices <= data.size()) {
+                        layer.depths.assign(data.begin() + static_cast<std::ptrdiff_t>(at),
+                                            data.begin() + static_cast<std::ptrdiff_t>(at + numVertices));
+                    } else {
+                        // No vertex data: the deep end (0x8a3160 returns 0xff).
+                        layer.depths.assign(numVertices, 0xFF);
+                    }
+                }
+                if (uvBytes > 0 && offsetVertexData > 0 &&
+                    offsetVertexData + heightBytes + uvBytes <= data.size()) {
+                    layer.uvs.resize(numVertices * 2);
+                    for (size_t i = 0; i < numVertices * 2; i++) {
+                        layer.uvs[i] = static_cast<float>(readUInt16(data, offsetVertexData + heightBytes + i * 2)) *
+                                       (3.0f / 256.0f);
+                    }
+                }
+            }
 
             if (hasHeightData && offsetVertexData > 0) {
                 size_t vertexOffset = offsetVertexData;

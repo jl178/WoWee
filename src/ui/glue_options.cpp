@@ -331,7 +331,7 @@ void GlueOptionsFrame::buildPages(SettingsPanel& sp) {
                             "parallaxquality", "upscaling", "fsrquality", "fsrsharpness",
                             "framegen", "lightshafts", "mistdensity", "fogstrength",
                             "fogskyblend", "lensflare", "sharpstars", "sunshafts",
-                            "foliagewind", "shorelinefoam", "wetground"}),
+                            "foliagewind", "shorelinefoam", "waterreflections", "watersplashes", "wetground"}),
                       0});
     pages_.push_back({"Sound & Voice",
                       glueString("SOUND_SUBTEXT",

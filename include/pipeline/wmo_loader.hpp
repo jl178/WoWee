@@ -131,6 +131,10 @@ struct WMOLiquid {
     uint32_t groupFlags = 0;
     std::vector<float> heights; // Height per vertex (xVerts * yVerts)
     std::vector<uint8_t> flags; // Flags per tile (xTiles * yTiles)
+    /// The first four bytes of each 8-byte MLIQ vertex: for water, byte 0 is
+    /// the depth the client turns into the ramp's row (0x7a7b00); for magma
+    /// and slime, two s16 s,t texture coordinates in 1/256ths.
+    std::vector<uint32_t> vertexWords;
 
     [[nodiscard]] bool hasLiquid() const { return xVerts > 0 && yVerts > 0; }
 };

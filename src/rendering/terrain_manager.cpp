@@ -1301,7 +1301,11 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                         // It used to be left out, when the sheet was drawn flat
                         // a yard under its corner and poked through floors.
                         if (!group.liquid.hasLiquid()) continue;
-                        waterRenderer->loadFromWMO(group.liquid, modelMatrix, wmoInstId);
+                        const auto& mats = wmoReady.model.materials;
+                        const uint32_t momtColor = group.liquid.materialId < mats.size()
+                                                       ? mats[group.liquid.materialId].color2
+                                                       : 0xFFFFFFFFu;
+                        waterRenderer->loadFromWMO(group.liquid, modelMatrix, wmoInstId, momtColor);
                         liquidGroupsLoaded++;
                     }
                     // More liquid groups remain on this WMO - yield

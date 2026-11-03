@@ -1469,6 +1469,21 @@ target_link_libraries(test_mount_rules PRIVATE catch2_main)
 add_test(NAME mount_rules COMMAND test_mount_rules)
 register_test_target(test_mount_rules)
 
+# ── test_anim_selection ──────────────────────────────────────
+# Stock animation selection (docs/re/animation.md): the AnimationData fallback
+# chain and its play modes, variation rolls, replay laps, phase carry and rate
+# of moving animations, the pace and stealth rules, stand-state transitions.
+wowee_add_test(test_anim_selection SOURCES
+    test_anim_selection.cpp
+    ${TEST_COMMON_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/rendering/animation/animation_ids.cpp
+    ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp
+    ${CMAKE_SOURCE_DIR}/src/rendering/animation/character_animator.cpp
+    ${CMAKE_SOURCE_DIR}/src/rendering/animation/locomotion_fsm.cpp
+    ${CMAKE_SOURCE_DIR}/src/rendering/animation/combat_fsm.cpp
+    ${CMAKE_SOURCE_DIR}/src/rendering/animation/activity_fsm.cpp
+    ${CMAKE_SOURCE_DIR}/src/rendering/animation/mount_fsm.cpp)
+
 # NPC animator tests removed - NpcAnimator replaced by generic CharacterAnimator
 
 # ── test_anim_capability ─────────────────────────────────────
@@ -3035,6 +3050,12 @@ wowee_add_test(test_stock_terrain SOURCES test_stock_terrain.cpp)
 # The stock client's water, sky, WMO light and weather/glow arithmetic
 # (stock_liquid, stock_sky, stock_wmo_light, stock_screen_fx). Header-only.
 wowee_add_test(test_stock_world_fx SOURCES test_stock_world_fx.cpp)
+
+# ── test_stock_water ─────────────────────────────────────────
+# The stock liquid vertex (depth ramp row, uv scales, the WMO Ocean
+# rotation) and the underwater particulates (stock_liquid,
+# stock_particulates). Header-only.
+wowee_add_test(test_stock_water SOURCES test_stock_water.cpp)
 
 # ── test_stock_wmo_render ────────────────────────────────────
 # The stock client's per-batch WMO state - blend factors, alpha reference,
