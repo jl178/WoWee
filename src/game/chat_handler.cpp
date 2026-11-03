@@ -1,5 +1,6 @@
 #include "ui/world_ui_rules.hpp"
 #include "game/chat_handler.hpp"
+#include "game/global_strings.hpp"
 
 #include <set>
 #include "addons/lua_api_registrations.hpp"
@@ -235,24 +236,34 @@ void ChatHandler::registerOpcodes(DispatchTable& table) {
             handleChannelNotify(packet);
     };
     table[Opcode::SMSG_CHAT_PLAYER_NOT_FOUND] = [this](network::Packet& packet) {
+        // ERR_CHAT_PLAYER_NOT_FOUND_S, a chat line (Wow.exe 0x6E2E90).
         std::string name = packet.readString();
-        if (!name.empty()) addSystemChatMessage("No player named '" + name + "' is currently playing.");
+        if (!name.empty())
+            owner_.displayGameMessage("ERR_CHAT_PLAYER_NOT_FOUND_S", "No player named '" + name + "' is currently playing.", {name});
     };
     table[Opcode::SMSG_CHAT_PLAYER_AMBIGUOUS] = [this](network::Packet& packet) {
         std::string name = packet.readString();
-        if (!name.empty()) addSystemChatMessage("Player name '" + name + "' is ambiguous.");
+        if (!name.empty())
+            owner_.displayGameMessage("ERR_CHAT_PLAYER_AMBIGUOUS_S", name + " is ambiguous.", {name});
     };
+    // These three as Wow.exe (0x6E2E90) words them, chat lines. Each raised
+    // its own sentence twice on the red error line.
     table[Opcode::SMSG_CHAT_WRONG_FACTION] = [this](network::Packet& /*packet*/) {
-        owner_.addUIError("You cannot send messages to members of that faction.");
-        owner_.raiseUiError("You cannot send messages to members of that faction.");
+        owner_.displayGameMessage("ERR_CHAT_WRONG_FACTION", "You cannot speak to members of the other faction.");
     };
-    table[Opcode::SMSG_CHAT_NOT_IN_PARTY] = [this](network::Packet& /*packet*/) {
-        owner_.addUIError("You are not in a party.");
-        owner_.raiseUiError("You are not in a party.");
+    // The chat type it was refused for: party (2, 51) or raid (3, 39, 40).
+    table[Opcode::SMSG_CHAT_NOT_IN_PARTY] = [this](network::Packet& packet) {
+        const uint32_t type = packet.hasRemaining(4) ? packet.readUInt32() : 0;
+        if (type == 2 || type == 0x33)
+            owner_.displayGameMessage("ERR_NOT_IN_GROUP", "You aren't in a party.");
+        else if (type == 3 || type == 0x27 || type == 0x28)
+            owner_.displayGameMessage("ERR_NOT_IN_RAID", "You are not in a raid group");
     };
-    table[Opcode::SMSG_CHAT_RESTRICTED] = [this](network::Packet& /*packet*/) {
-        owner_.addUIError("You cannot send chat messages in this area.");
-        owner_.raiseUiError("You cannot send chat messages in this area.");
+    table[Opcode::SMSG_CHAT_RESTRICTED] = [this](network::Packet& packet) {
+        const uint8_t why = packet.hasRemaining(1) ? packet.readUInt8() : 0;
+        static const char* const kKeys[] = {"ERR_CHAT_RESTRICTED", "ERR_CHAT_THROTTLED",
+                                            "ERR_USER_SQUELCHED", "ERR_YELL_RESTRICTED"};
+        if (why < 4) owner_.displayGameMessage(kKeys[why], "");
     };
 
     // ---- Channel list ----
@@ -260,9 +271,22 @@ void ChatHandler::registerOpcodes(DispatchTable& table) {
     // ---- Server / defense / area-trigger messages (moved from GameHandler) ----
     table[Opcode::SMSG_DEFENSE_MESSAGE] = [this](network::Packet& packet) {
         if (packet.hasRemaining(5)) {
+            // The text itself, as a line of the Local Defense channel - only
+            // where that channel is joined (Wow.exe 0x50C850).
             /*uint32_t zoneId =*/ packet.readUInt32();
             std::string defMsg = packet.readString();
-            if (!defMsg.empty()) addSystemChatMessage("[Defense] " + defMsg);
+            if (!defMsg.empty()) {
+                for (const auto& ch : joinedChannels_) {
+                    if (ch.rfind("LocalDefense", 0) != 0) continue;
+                    MessageChatData line;
+                    line.type = ChatType::CHANNEL;
+                    line.language = ChatLanguage::UNIVERSAL;
+                    line.channelName = ch;
+                    line.message = defMsg;
+                    line.noSender = true;
+                    addLocalChatMessage(line);
+                }
+            }
         }
     };
     // Server messages
@@ -285,19 +309,32 @@ void ChatHandler::registerOpcodes(DispatchTable& table) {
     };
     table[Opcode::SMSG_CHAT_SERVER_MESSAGE] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
-            /*uint32_t msgType =*/ packet.readUInt32();
-            std::string msg = packet.readString();
-            if (!msg.empty()) addSystemChatMessage("[Announcement] " + msg);
+            // The type's ServerMessages.dbc format with the text, a system line
+            // ("[%d]: %s" for a type the table lacks), Wow.exe 0x50C980.
+            const uint32_t msgType = packet.readUInt32();
+            const std::string text = packet.hasData() ? packet.readString() : std::string();
+            static const char* const kServerMessages[] = {
+                nullptr, "[SERVER] Shutdown in %s", "[SERVER] Restart in %s", "%s",
+                "[SERVER] Shutdown cancelled", "[SERVER] Restart cancelled",
+                "[SERVER] Battleground shutdown in %s", "[SERVER] Battleground restart in %s",
+                "[SERVER] Instance shutdown in %s", "[SERVER] Instance restart in %s",
+            };
+            std::string line;
+            if (msgType >= 1 && msgType <= 9) {
+                line = text.empty() ? std::string(kServerMessages[msgType])
+                                    : formatGlobalString(kServerMessages[msgType], {text});
+            } else {
+                line = "[" + std::to_string(msgType) + "]: " + text;
+            }
+            if (!line.empty()) addSystemChatMessage(line);
         }
     };
     table[Opcode::SMSG_AREA_TRIGGER_MESSAGE] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
+            // The yellow info text alone (Wow.exe 0x526530, UI_INFO_MESSAGE).
             /*uint32_t len =*/ packet.readUInt32();
             std::string msg = packet.readString();
-            if (!msg.empty()) {
-                owner_.addUIError(msg);
-                addSystemChatMessage(msg);
-            }
+            if (!msg.empty()) owner_.addUIInfoMessage(msg);
         }
     };
 
@@ -324,10 +361,16 @@ void ChatHandler::sendChatMessage(ChatType type, const std::string& message, con
     // takes - moving clears it too - but it is the one that matters, because
     // it is the one where the player is visibly present and being answered
     // for by a machine.
+    //
+    // Away and busy are chat types of their own, with the client saying the
+    // change (Wow.exe 0x50D170): handled before the empty-message refusal
+    // below, since an empty one is how either is cleared.
+    if (type == ChatType::AFK) { toggleAfk(message); return; }
     if (owner_.afkStatusRef() &&
         addons::storedCVarValue("autoClearAFK", "1") != "0") {
-        toggleAfk("");
+        clearAfk();
     }
+    if (type == ChatType::DND) { toggleDnd(message); return; }
 
     if (message.empty()) {
         LOG_WARNING("Cannot send empty chat message");
@@ -933,6 +976,15 @@ TextSubject ChatHandler::monsterLineSubject(const MessageChatData& data) {
 }
 
 void ChatHandler::flushChatAwaitingName(uint64_t guid) {
+    if (guid != 0 && !heldUserNotices_.empty()) {
+        std::vector<HeldUserNotice> retry;
+        for (auto it = heldUserNotices_.begin(); it != heldUserNotices_.end();) {
+            if (it->guid1 == guid || it->guid2 == guid) { retry.push_back(std::move(*it)); it = heldUserNotices_.erase(it); }
+            else ++it;
+        }
+        for (const auto& n : retry)
+            fireChannelUserNotice(n.notice.c_str(), n.channelName, n.guid1, n.name1, n.guid2);
+    }
     if (chatAwaitingName_.empty() || guid == 0) return;
     std::vector<MessageChatData> ready;
     for (auto it = chatAwaitingName_.begin(); it != chatAwaitingName_.end();) {
@@ -1120,6 +1172,34 @@ void ChatHandler::fireChannelNotice(const char* notice, const std::string& chann
     });
 }
 
+void ChatHandler::fireChannelUserNotice(const char* notice, const std::string& channelName,
+                                        uint64_t guid1, const std::string& name1In, uint64_t guid2) {
+    if (!notice || !owner_.addonEventCallbackRef()) return;
+    const std::string name1 = !name1In.empty() ? name1In : (guid1 ? knownPlayerName(guid1) : std::string());
+    const std::string name2 = guid2 ? knownPlayerName(guid2) : std::string();
+    if ((guid1 && name1.empty()) || (guid2 && name2.empty())) {
+        if (heldUserNotices_.size() < 32)
+            heldUserNotices_.push_back({notice, channelName, name1In, guid1, guid2});
+        if (guid1 && name1.empty()) owner_.queryPlayerName(guid1);
+        if (guid2 && name2.empty()) owner_.queryPlayerName(guid2);
+        return;
+    }
+    const int index = getChannelIndex(channelName);
+    uint32_t zoneChannelId = 0;
+    if (index > 0 && static_cast<size_t>(index) <= joinedChannelIds_.size())
+        zoneChannelId = joinedChannelIds_[static_cast<size_t>(index) - 1];
+    const size_t dash = channelName.find(" - ");
+    const std::string shortName = dash == std::string::npos ? channelName : channelName.substr(0, dash);
+    const std::string numbered = index > 0
+        ? std::to_string(index) + ". " + channelName : channelName;
+    // chatframe.lua formats CHAT_<notice>_NOTICE with arg8, arg4, arg2 and,
+    // for two players, arg5; INVITE with arg4 and arg2.
+    owner_.addonEventCallbackRef()("CHAT_MSG_CHANNEL_NOTICE_USER", {
+        notice, name1, "", numbered, name2, "", std::to_string(zoneChannelId),
+        std::to_string(index), shortName, "0", "0", ""
+    });
+}
+
 std::string ChatHandler::getChannelByIndex(int index) const {
     if (index < 1 || index > static_cast<int>(joinedChannels_.size())) return "";
     return joinedChannels_[index - 1];
@@ -1188,6 +1268,10 @@ void ChatHandler::handleChannelNotify(network::Packet& packet) {
             if (rememberJoinedChannel(data.channelName, 0)) {
                 LOG_INFO("Already in channel: ", data.channelName);
             }
+            // Wow.exe also prints CHAT_PLAYER_ALREADY_MEMBER_NOTICE here. Not
+            // done: this client re-joins its channels itself at world entry,
+            // where the stock client's join is answered once, and every
+            // re-join would print it.
             break;
         }
         case ChannelNotifyType::NOT_IN_AREA:
@@ -1219,11 +1303,14 @@ void ChatHandler::handleChannelNotify(network::Packet& packet) {
             // this client print a line at every teleport.
             LOG_DEBUG("Channel ", data.channelName, ": not in the LFG queue");
             break;
+        // The notices naming a player go out as CHANNEL_NOTICE_USER with the
+        // names, as Wow.exe sends them (0x50E120, chat type 0x16); the words
+        // are FrameXML's CHAT_<token>_NOTICE.
         case ChannelNotifyType::PLAYER_KICKED:
-            addSystemChatMessage("A player was kicked from '" + data.channelName + "'.");
+            fireChannelUserNotice("PLAYER_KICKED", data.channelName, data.senderGuid, "", data.targetGuid);
             break;
         case ChannelNotifyType::PASSWORD_CHANGED:
-            addSystemChatMessage("Password for '" + data.channelName + "' changed.");
+            fireChannelUserNotice("PASSWORD_CHANGED", data.channelName, data.senderGuid, "", 0);
             break;
         case ChannelNotifyType::OWNER_CHANGED:
             // The guid beside the name is the new owner's -
@@ -1236,55 +1323,65 @@ void ChatHandler::handleChannelNotify(network::Packet& packet) {
             } else {
                 ownedChannels_.erase(data.channelName);
             }
-            addSystemChatMessage("Owner of '" + data.channelName + "' changed.");
+            fireChannelUserNotice("OWNER_CHANGED", data.channelName, data.senderGuid, "", 0);
             break;
         case ChannelNotifyType::NOT_OWNER:
             fireChannelNotice("NOT_OWNER", data.channelName);   // CHAT_NOT_OWNER_NOTICE
             break;
         case ChannelNotifyType::INVALID_NAME:
-            fireChannelNotice("INVALID_NAME", data.channelName);   // CHAT_INVALID_NAME_NOTICE
+            fireChannelUserNotice("INVALID_NAME", data.channelName, 0, "", 0);
             break;
         case ChannelNotifyType::PLAYER_NOT_FOUND:
-            addSystemChatMessage("Player not found.");
+            fireChannelUserNotice("PLAYER_NOT_FOUND", data.channelName, 0, data.playerName, 0);
+            break;
+        case ChannelNotifyType::CHANNEL_OWNER:
+            fireChannelUserNotice("CHANNEL_OWNER", data.channelName, 0, data.playerName, 0);
             break;
         case ChannelNotifyType::ANNOUNCEMENTS_ON:
-            addSystemChatMessage("Channel '" + data.channelName + "': announcements enabled.");
+            fireChannelUserNotice("ANNOUNCEMENTS_ON", data.channelName, data.senderGuid, "", 0);
             break;
         case ChannelNotifyType::ANNOUNCEMENTS_OFF:
-            addSystemChatMessage("Channel '" + data.channelName + "': announcements disabled.");
+            fireChannelUserNotice("ANNOUNCEMENTS_OFF", data.channelName, data.senderGuid, "", 0);
             break;
         case ChannelNotifyType::MODERATION_ON:
-            addSystemChatMessage("Channel '" + data.channelName + "' is now moderated.");
+            fireChannelUserNotice("MODERATION_ON", data.channelName, data.senderGuid, "", 0);
             break;
         case ChannelNotifyType::MODERATION_OFF:
-            addSystemChatMessage("Channel '" + data.channelName + "' is no longer moderated.");
+            fireChannelUserNotice("MODERATION_OFF", data.channelName, data.senderGuid, "", 0);
             break;
         case ChannelNotifyType::PLAYER_BANNED:
-            addSystemChatMessage("A player was banned from '" + data.channelName + "'.");
+            fireChannelUserNotice("PLAYER_BANNED", data.channelName, data.senderGuid, "", data.targetGuid);
             break;
         case ChannelNotifyType::PLAYER_UNBANNED:
-            addSystemChatMessage("A player was unbanned from '" + data.channelName + "'.");
+            fireChannelUserNotice("PLAYER_UNBANNED", data.channelName, data.senderGuid, "", data.targetGuid);
             break;
         case ChannelNotifyType::PLAYER_NOT_BANNED:
-            addSystemChatMessage("That player is not banned from '" + data.channelName + "'.");
+            fireChannelUserNotice("PLAYER_NOT_BANNED", data.channelName, 0, data.playerName, 0);
             break;
-        case ChannelNotifyType::INVITE:
-            addSystemChatMessage("You have been invited to join channel '" + data.channelName + "'.");
+        case ChannelNotifyType::INVITE: {
+            // Nothing from someone ignored; otherwise the notice and the
+            // CHANNEL_INVITE_REQUEST popup, both naming the inviter.
+            if (owner_.ignoreListGuidsRef().count(data.senderGuid)) break;
+            fireChannelUserNotice("INVITE", data.channelName, data.senderGuid, "", 0);
+            const std::string inviter = knownPlayerName(data.senderGuid);
+            if (!inviter.empty() && owner_.addonEventCallbackRef())
+                owner_.addonEventCallbackRef()("CHANNEL_INVITE_REQUEST", {data.channelName, inviter});
             break;
+        }
         case ChannelNotifyType::INVITE_WRONG_FACTION:
-            fireChannelNotice("INVITE_WRONG_FACTION", data.channelName);
+            fireChannelUserNotice("INVITE_WRONG_FACTION", data.channelName, 0, "", 0);
             break;
         case ChannelNotifyType::WRONG_FACTION:
-            fireChannelNotice("WRONG_FACTION", data.channelName);
+            fireChannelUserNotice("WRONG_FACTION", data.channelName, 0, "", 0);
             break;
         case ChannelNotifyType::NOT_MODERATED:
-            fireChannelNotice("NOT_MODERATED", data.channelName);   // CHAT_NOT_MODERATED_NOTICE
+            fireChannelUserNotice("NOT_MODERATED", data.channelName, 0, "", 0);
             break;
         case ChannelNotifyType::PLAYER_INVITED:
-            addSystemChatMessage("Player invited to channel '" + data.channelName + "'.");
+            fireChannelUserNotice("PLAYER_INVITED", data.channelName, 0, data.playerName, 0);
             break;
         case ChannelNotifyType::PLAYER_INVITE_BANNED:
-            addSystemChatMessage("That player is banned from '" + data.channelName + "'.");
+            fireChannelUserNotice("PLAYER_INVITE_BANNED", data.channelName, 0, data.playerName, 0);
             break;
         default:
             LOG_DEBUG("Channel notify type ", static_cast<int>(data.notifyType),
@@ -1440,7 +1537,7 @@ void ChatHandler::fireChatEvent(const MessageChatData& msg) {
     std::string eventName = "CHAT_MSG_";
     eventName += getChatTypeString(msg.type);
     const Character* ac = owner_.getActiveCharacter();
-    std::string senderName = msg.senderName.empty()
+    std::string senderName = msg.senderName.empty() && !msg.noSender
         ? (ac ? ac->name : std::string{}) : msg.senderName;
     char guidBuf[32];
     snprintf(guidBuf, sizeof(guidBuf), "0x%016llX",
@@ -1505,52 +1602,68 @@ void ChatHandler::addSystemChatMessage(const std::string& message) {
     addLocalChatLine(ChatType::SYSTEM, message);
 }
 
-void ChatHandler::toggleAfk(const std::string& message) {
-    owner_.afkStatusRef() = !owner_.afkStatusRef();
-    owner_.afkMessageRef() = message;
+// /afk and /dnd as Wow.exe has them (0x50D170, 0x6DC640, 0x6D52D0): the
+// client says the change - MARKED_AFK_MESSAGE ("You are now Away: %s", with
+// DEFAULT_AFK_MESSAGE for no reason), CLEARED_AFK, MARKED_DND, CLEARED_DND,
+// plain chat lines - and sends the chat type with the reason, empty to
+// clear. Not a toggle: a reason while already away only changes it.
+void ChatHandler::sendAwayPacket(ChatType type, const std::string& message) {
+    if (!owner_.getSocket()) return;
+    auto packet = MessageChatPacket::build(type, ChatLanguage::UNIVERSAL, message, "");
+    owner_.getSocket()->send(packet);
+}
 
-    if (owner_.afkStatusRef()) {
-        if (message.empty()) {
-            addSystemChatMessage("You are now AFK.");
-        } else {
-            addSystemChatMessage("You are now AFK: " + message);
-        }
-        // If DND was active, turn it off
+void ChatHandler::clearAfk() {
+    if (!owner_.afkStatusRef()) return;
+    owner_.afkStatusRef() = false;
+    owner_.afkMessageRef().clear();
+    afkAutoRepliedSenders_.clear();
+    owner_.addGlobalStringChatLine("CLEARED_AFK", "You are no longer Away.");
+    sendAwayPacket(ChatType::AFK, "");
+}
+
+void ChatHandler::toggleAfk(const std::string& message) {
+    if (owner_.afkStatusRef() && message.empty()) {
+        clearAfk();
+        return;
+    }
+    std::string reason = message;
+    if (reason.empty()) {
+        reason = globalString(owner_.services().assetManager, "DEFAULT_AFK_MESSAGE");
+        if (reason.empty()) reason = "Away";
+    }
+    if (!owner_.afkStatusRef()) {
         if (owner_.dndStatusRef()) {
             owner_.dndStatusRef() = false;
             owner_.dndMessageRef().clear();
+            owner_.addGlobalStringChatLine("CLEARED_DND", "You are no longer marked Busy.");
         }
-    } else {
-        addSystemChatMessage("You are no longer AFK.");
-        owner_.afkMessageRef().clear();
-        afkAutoRepliedSenders_.clear();
+        owner_.addGlobalStringChatLine("MARKED_AFK_MESSAGE", "You are now Away: %s", {reason});
     }
-
-    LOG_INFO("AFK status: ", owner_.afkStatusRef(), ", message: ", message);
+    owner_.afkStatusRef() = true;
+    owner_.afkMessageRef() = reason;
+    sendAwayPacket(ChatType::AFK, reason);
+    LOG_INFO("AFK status: ", owner_.afkStatusRef(), ", message: ", reason);
 }
 
 void ChatHandler::toggleDnd(const std::string& message) {
-    owner_.dndStatusRef() = !owner_.dndStatusRef();
-    owner_.dndMessageRef() = message;
-
-    if (owner_.dndStatusRef()) {
-        if (message.empty()) {
-            addSystemChatMessage("You are now DND (Do Not Disturb).");
-        } else {
-            addSystemChatMessage("You are now DND: " + message);
-        }
-        // If AFK was active, turn it off
-        if (owner_.afkStatusRef()) {
-            owner_.afkStatusRef() = false;
-            owner_.afkMessageRef().clear();
-        }
-    } else {
-        addSystemChatMessage("You are no longer DND.");
+    std::string reason = message;
+    if (owner_.dndStatusRef() && reason.empty()) {
+        owner_.dndStatusRef() = false;
         owner_.dndMessageRef().clear();
         afkAutoRepliedSenders_.clear();
+        owner_.addGlobalStringChatLine("CLEARED_DND", "You are no longer marked Busy.");
+    } else {
+        if (reason.empty()) {
+            reason = globalString(owner_.services().assetManager, "DEFAULT_DND_MESSAGE");
+            if (reason.empty()) reason = "Busy";
+        }
+        owner_.dndStatusRef() = true;
+        owner_.dndMessageRef() = reason;
+        owner_.addGlobalStringChatLine("MARKED_DND", "You are now Busy: %s.", {reason});
     }
-
-    LOG_INFO("DND status: ", owner_.dndStatusRef(), ", message: ", message);
+    sendAwayPacket(ChatType::DND, owner_.dndStatusRef() ? reason : std::string());
+    LOG_INFO("DND status: ", owner_.dndStatusRef(), ", message: ", reason);
 }
 
 void ChatHandler::replyToLastWhisper(const std::string& message) {
@@ -1560,7 +1673,7 @@ void ChatHandler::replyToLastWhisper(const std::string& message) {
     }
 
     if (owner_.lastWhisperSenderRef().empty()) {
-        addSystemChatMessage("No one has whispered you yet.");
+        owner_.displayGameMessage("ERR_NO_REPLY_TARGET", "You have nobody to reply to yet.");
         return;
     }
 
@@ -1590,10 +1703,14 @@ void ChatHandler::handleChannelList(network::Packet& packet) {
     // channel name always begins with a printable character, so a control byte
     // here is the type and nothing else can be.
     if (!packet.hasRemaining(1)) return;
+    // The byte decides where the list goes (Wow.exe 0x505DC0): zero prints
+    // it in chat (CHAT_MSG_CHANNEL_LIST, 0x5029C0), anything else only
+    // updates the channel panel's roster. AzerothCore always writes 1.
+    uint8_t listType = 1;
     if (!packet.getData().empty() &&
         packet.getReadPos() < packet.getData().size() &&
         packet.getData()[packet.getReadPos()] < 0x20) {
-        packet.readUInt8();  // channel type
+        listType = packet.readUInt8();  // channel type
     }
     std::string chanName = packet.readString();
     if (!packet.hasRemaining(5)) return;
@@ -1608,7 +1725,8 @@ void ChatHandler::handleChannelList(network::Packet& packet) {
 
     std::vector<ChannelMember> roster;
     roster.reserve(memberCount);
-    addSystemChatMessage(chanName + " has " + std::to_string(memberCount) + " member(s):");
+    std::vector<std::string> listLines;
+    std::string listLine;
     for (uint32_t i = 0; i < memberCount; ++i) {
         if (!packet.hasRemaining(9)) break;
         ChannelMember m;
@@ -1626,14 +1744,31 @@ void ChatHandler::handleChannelList(network::Packet& packet) {
         if (m.name.empty()) m.name = owner_.lookupName(m.guid);
         if (m.name.empty()) m.name = "(unknown)";
 
-        std::string entry = "  " + m.name;
-        if (m.owner)     entry += " [Owner]";
-        if (m.moderator) entry += " [Moderator]";
-        if (m.muted)     entry += " [Muted]";
-        addSystemChatMessage(entry);
+        // Each name with its mark - "*" owner, "@" moderator, "#" neither
+        // and not voiced - joined by ", ", a new line past 255 characters.
+        const char* mark = m.owner ? "*" : m.moderator ? "@" : (memberFlags & 0x04) ? "" : "#";
+        std::string entry = std::string(listLine.empty() ? "" : ", ") + mark + m.name;
+        if (listLine.size() + entry.size() >= 0x100) {
+            listLines.push_back(listLine);
+            listLine = std::string(mark) + m.name;
+        } else {
+            listLine += entry;
+        }
         roster.push_back(std::move(m));
     }
 
+    if (!listLine.empty()) listLines.push_back(listLine);
+    if (listType == 0) {
+        for (const auto& line : listLines) {
+            MessageChatData msg;
+            msg.type = ChatType::CHANNEL_LIST;
+            msg.language = ChatLanguage::UNIVERSAL;
+            msg.channelName = chanName;
+            msg.message = line;
+            msg.noSender = true;
+            addLocalChatMessage(msg);
+        }
+    }
     channelRosters_[chanName] = std::move(roster);
     // Both, because the panel redraws its member list on the first and its
     // member count on the second, and it registers for each separately.
@@ -1799,17 +1934,12 @@ void ChatHandler::handleMotd(network::Packet& packet) {
         LOG_INFO("========================================");
         LOG_INFO("   MESSAGE OF THE DAY");
         LOG_INFO("========================================");
+        // Each line as a system line of its own, with no prefix and nothing
+        // after (Wow.exe 0x551660).
         for (const auto& line : data.lines) {
             LOG_INFO(line);
-            addSystemChatMessage(std::string("MOTD: ") + line);
+            addSystemChatMessage(line);
         }
-        // Add a visual separator after MOTD block so subsequent messages don't
-        // appear glued to the last MOTD line.
-        MessageChatData spacer;
-        spacer.type = ChatType::SYSTEM;
-        spacer.language = ChatLanguage::UNIVERSAL;
-        spacer.message = "";
-        addLocalChatMessage(spacer);
         LOG_INFO("========================================");
     }
 }

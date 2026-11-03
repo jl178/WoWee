@@ -21,12 +21,18 @@ constexpr uint64_t kMob = 0xF130000000000123ull;
 constexpr uint32_t kDispelMagic = 527;
 constexpr uint32_t kPowerWordFortitude = 1243;
 
-bool chatHas(Session& s, const std::string& text) {
-    const auto& history = s.handler().getChatHistory();
-    return std::any_of(history.begin(), history.end(), [&](const auto& m) {
-        return m.message.find(text) != std::string::npos;
-    });
+using wowee::game::CombatTextEntry;
+
+// The entry a log left for the floating text and the combat log; the stock
+// client writes none of these to chat.
+const CombatTextEntry* findText(Session& s, CombatTextEntry::Type type) {
+    const auto& texts = s.handler().getCombatText();
+    const auto it = std::find_if(texts.begin(), texts.end(),
+                                 [&](const auto& e) { return e.type == type; });
+    return it == texts.end() ? nullptr : &*it;
 }
+
+bool chatEmpty(Session& s) { return s.handler().getChatHistory().empty(); }
 
 // Spell::EffectDispel: victim, then caster. Classic has neither the dispel
 // spell nor the byte after each dispelled one.
@@ -71,20 +77,34 @@ TEST_CASE("a dispel log names its victim before its caster", "[replay][dispel]")
 
         {
             Session s(expansion);
+            // On the target, where the panel shows spell mechanics by default.
+            s.handler().setTargetGuidRaw(kPlayer);
             s.receive(dispelLog(classic, kPlayer, kMob));
-            CHECK(chatHas(s, "spell 1243 was dispelled."));
-            CHECK_FALSE(chatHas(s, "You dispel"));
+            const CombatTextEntry* e = findText(s, CombatTextEntry::DISPEL);
+            REQUIRE(e);
+            CHECK(e->spellId == kPowerWordFortitude);
+            CHECK(e->srcGuid == kMob);
+            CHECK(e->dstGuid == kPlayer);
+            CHECK_FALSE(e->isPlayerSource);
+            CHECK(chatEmpty(s));
         }
         {
             Session s(expansion);
+            s.handler().setTargetGuidRaw(kMob);
             s.receive(dispelLog(classic, kMob, kPlayer));
-            CHECK(chatHas(s, "You dispel spell 1243."));
+            const CombatTextEntry* e = findText(s, CombatTextEntry::DISPEL);
+            REQUIRE(e);
+            CHECK(e->spellId == kPowerWordFortitude);
+            CHECK(e->srcGuid == kPlayer);
+            CHECK(e->isPlayerSource);
+            CHECK(chatEmpty(s));
         }
     }
 }
 
 TEST_CASE("a spellsteal log has packed guids on TBC", "[replay][dispel]") {
     Session s("tbc");
+    s.handler().setTargetGuidRaw(kMob);
     Packet p(wireOpcode(Opcode::SMSG_SPELLSTEALLOG));
     p.writePackedGuid(kMob);
     p.writePackedGuid(kPlayer);
@@ -94,7 +114,12 @@ TEST_CASE("a spellsteal log has packed guids on TBC", "[replay][dispel]") {
     p.writeUInt32(kPowerWordFortitude);
     p.writeUInt8(0);
     s.receive(p);
-    CHECK(chatHas(s, "You stole spell 1243."));
+    const CombatTextEntry* e = findText(s, CombatTextEntry::STEAL);
+    REQUIRE(e);
+    CHECK(e->spellId == kPowerWordFortitude);
+    CHECK(e->srcGuid == kPlayer);
+    CHECK(e->dstGuid == kMob);
+    CHECK(chatEmpty(s));
 }
 
 TEST_CASE("an instakill log has whole guids", "[replay][instakill]") {
@@ -102,7 +127,12 @@ TEST_CASE("an instakill log has whole guids", "[replay][instakill]") {
         CAPTURE(expansion);
         Session s(expansion);
         s.receive(instaKillLog(std::string(expansion) == "classic", kMob, kPlayer));
-        CHECK(chatHas(s, "You were killed by an instant-kill effect."));
+        const CombatTextEntry* e = findText(s, CombatTextEntry::INSTAKILL);
+        REQUIRE(e);
+        CHECK(e->spellId == 5);
+        CHECK(e->dstGuid == kPlayer);
+        CHECK_FALSE(e->isPlayerSource);
+        CHECK(chatEmpty(s));
     }
 }
 
@@ -110,12 +140,11 @@ TEST_CASE("a failed dispel has whole guids, and classic has no dispel spell", "[
     SECTION("wotlk") {
         Session s;
         s.receive(dispelFailed(false, kPlayer, kMob));
-        CHECK(chatHas(s, "Dispel failed! (spell 527)"));
+        CHECK(chatEmpty(s));
     }
     SECTION("classic") {
         Session s("classic");
         s.receive(dispelFailed(true, kPlayer, kMob));
-        CHECK(chatHas(s, "Dispel failed!"));
-        CHECK_FALSE(chatHas(s, "(spell"));
+        CHECK(chatEmpty(s));
     }
 }

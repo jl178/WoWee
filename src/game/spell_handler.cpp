@@ -851,40 +851,6 @@ void SpellHandler::launchRangedWeaponProjectile(uint32_t spellId, uint64_t targe
 }
 
 
-static std::string displaySpellName(GameHandler& handler, uint32_t spellId) {
-    if (spellId == 0) return {};
-    const std::string& name = handler.getSpellName(spellId);
-    if (!name.empty()) return name;
-    return "spell " + std::to_string(spellId);
-}
-
-static std::string formatSpellNameList(GameHandler& handler,
-                                       const std::vector<uint32_t>& spellIds,
-                                       size_t maxShown = 3) {
-    if (spellIds.empty()) return {};
-
-    const size_t shownCount = std::min(spellIds.size(), maxShown);
-    std::ostringstream oss;
-    for (size_t i = 0; i < shownCount; ++i) {
-        if (i > 0) {
-            if (shownCount == 2) {
-                oss << " and ";
-            } else if (i == shownCount - 1) {
-                oss << ", and ";
-            } else {
-                oss << ", ";
-            }
-        }
-        oss << displaySpellName(handler, spellIds[i]);
-    }
-
-    if (spellIds.size() > shownCount) {
-        oss << ", and " << (spellIds.size() - shownCount) << " more";
-    }
-
-    return oss.str();
-}
-
 SpellHandler::SpellHandler(GameHandler& owner)
     : owner_(owner) {}
 
@@ -1311,10 +1277,8 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     // player chooses.
     constexpr uint32_t kSpellTargetFlagItem = 0x10;
     if ((getSpellTargetFlags(spellId) & kSpellTargetFlagItem) != 0) {
-        if (owner_.isAwaitingItemTarget()) {
-            owner_.addSystemChatMessage("Choose an item first.");
-            return;
-        }
+        // Already holding a targeting cursor: the cast waits on it, unsaid.
+        if (owner_.isAwaitingItemTarget()) return;
         owner_.beginSpellItemTargeting(spellId, getSpellName(spellId));
         return;
     }
@@ -1929,7 +1893,8 @@ void SpellHandler::confirmTalentWipe() {
     owner_.getSocket()->send(pkt);
 
     LOG_INFO("confirmTalentWipe: sent confirm for npc=0x", std::hex, talentWipeNpcGuid_, std::dec);
-    owner_.addSystemChatMessage("Talent reset confirmed. The server will update your talents.");
+    // No line: the stock client confirms in silence; the talents' update
+    // and the server's spell visual are the answer.
     talentWipeNpcGuid_ = 0;
     talentWipeCost_ = 0;
 }
@@ -1954,9 +1919,6 @@ void SpellHandler::confirmPetUnlearn() {
     network::Packet pkt(wireOpcode(Opcode::CMSG_PET_UNLEARN_TALENTS));
     owner_.getSocket()->send(pkt);
     LOG_INFO("confirmPetUnlearn: sent CMSG_PET_UNLEARN_TALENTS");
-    owner_.addSystemChatMessage(
-        "Pet talent reset requested. This server resets pet talents at the "
-        "next login rather than on request.");
     petUnlearnCost_ = 0;
 }
 
@@ -3533,16 +3495,33 @@ void SpellHandler::handleLearnedSpell(network::Packet& packet) {
         if (craftingWindowOpen_) owner_.addonEventCallbackRef()("TRADE_SKILL_UPDATE", {});
     }
 
+    // As Wow.exe says it (0x542030, from the SMSG_LEARNED_SPELL handler
+    // 0x6E7D60), by Spell.dbc Attributes: nothing for a hidden spell (0x80),
+    // ERR_LEARN_RECIPE_S for a trade skill recipe (0x20),
+    // ERR_LEARN_ABILITY_S (0x10) or ERR_LEARN_SPELL_S otherwise - the name
+    // with its rank, "Name (Rank 2)". Talents included: the stock client
+    // does not tell them apart here.
+    if (!alreadyKnown) announceLearnedSpell(spellId);
     if (isTalentSpell) return;
+}
 
-    if (!alreadyKnown) {
-        const std::string& name = owner_.getSpellName(spellId);
-        if (!name.empty()) {
-            owner_.addSystemChatMessage("You have learned a new spell: " + name + ".");
-        } else {
-            owner_.addSystemChatMessage("You have learned a new spell.");
-        }
+void SpellHandler::announceLearnedSpell(uint32_t spellId) {
+    const std::string& name = owner_.getSpellName(spellId);
+    if (name.empty()) return;
+    uint32_t attr = 0;
+    auto& cache = owner_.spellNameCacheRef();
+    if (auto it = cache.find(spellId); it != cache.end()) attr = it->second.attr;
+    if (attr & 0x80) return;
+    if (attr & 0x20) {
+        owner_.displayGameMessage("ERR_LEARN_RECIPE_S", "You have learned how to create a new item: " + name + ".", {name});
+        return;
     }
+    const std::string& rank = owner_.getSpellRank(spellId);
+    const std::string shown = rank.empty() ? name : name + " (" + rank + ")";
+    if (attr & 0x10)
+        owner_.displayGameMessage("ERR_LEARN_ABILITY_S", "You have learned a new ability: " + shown + ".", {shown});
+    else
+        owner_.displayGameMessage("ERR_LEARN_SPELL_S", "You have learned a new spell: " + shown + ".", {shown});
 }
 
 void SpellHandler::handleRemovedSpell(network::Packet& packet) {
@@ -3585,12 +3564,19 @@ void SpellHandler::handleRemovedSpell(network::Packet& packet) {
         if (isTalentRankSpell) break;
     }
 
+    // ERR_SPELL_UNLEARNED_S with the rank, for spells not hidden (Wow.exe
+    // 0x6E71D0 from the SMSG_REMOVED_SPELL handler). A talent rank's own
+    // bookkeeping is kept quiet here (unverified against Wow.exe).
     if (!isTalentRankSpell) {
         const std::string& name = owner_.getSpellName(spellId);
-        if (!name.empty())
-            owner_.addSystemChatMessage("You have unlearned: " + name + ".");
-        else
-            owner_.addSystemChatMessage("A spell has been removed.");
+        uint32_t attr = 0;
+        auto& cache = owner_.spellNameCacheRef();
+        if (auto it = cache.find(spellId); it != cache.end()) attr = it->second.attr;
+        if (!name.empty() && !(attr & 0x80)) {
+            const std::string& rank = owner_.getSpellRank(spellId);
+            const std::string shown = rank.empty() ? name : name + " (" + rank + ")";
+            owner_.displayGameMessage("ERR_SPELL_UNLEARNED_S", "You have unlearned " + shown + ".", {shown});
+        }
     } else {
         LOG_DEBUG("Suppressed talent-rank removal chat for spell ", spellId);
     }
@@ -3642,12 +3628,7 @@ void SpellHandler::handleSupercededSpell(network::Packet& packet) {
         if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("ACTIONBAR_SLOT_CHANGED", {"0"});
     }
 
-    if (!newSpellAlreadyAnnounced) {
-        const std::string& newName = owner_.getSpellName(newSpellId);
-        if (!newName.empty()) {
-            owner_.addSystemChatMessage("Upgraded to " + newName);
-        }
-    }
+    // No line: Wow.exe's handler (0x6E7E00) swaps the ranks in silence.
 
     // The spellbook lists the new rank in place of the old one, and redraws
     // only on SPELLS_CHANGED - so after a trainer rank-up it kept showing the
@@ -3690,9 +3671,8 @@ void SpellHandler::handleUnlearnSpells(network::Packet& packet) {
     }
     if (barChanged) owner_.saveCharacterConfig();
 
-    if (spellCount > 0) {
-        owner_.addSystemChatMessage("Unlearned " + std::to_string(spellCount) + " spells");
-    }
+    // Each spell's own ERR_SPELL_UNLEARNED_S is the stock wording; a count
+    // of them is this client's invention and is not said.
 }
 
 void SpellHandler::handleTalentsInfo(network::Packet& packet) {
@@ -3808,13 +3788,9 @@ void SpellHandler::handleTalentsInfo(network::Packet& packet) {
         }
     }
 
-    if (!talentsInitialized_) {
-        talentsInitialized_ = true;
-        if (unspentTalents > 0) {
-            owner_.addSystemChatMessage("You have " + std::to_string(unspentTalents)
-                + " unspent talent point" + (unspentTalents != 1 ? "s" : "") + ".");
-        }
-    }
+    // No reminder of unspent points: the stock client has none (the talent
+    // button's flash is FrameXML's).
+    if (!talentsInitialized_) talentsInitialized_ = true;
 }
 
 void SpellHandler::handleAchievementEarned(network::Packet& packet) {
@@ -5037,8 +5013,13 @@ void SpellHandler::extractSkillFields(const FlatFieldMap& fields) {
 
     for (const auto& [skillId, skill] : newSkills) {
         if (skill.value == 0) continue;
+        // ERR_SKILL_UP_SI ("Your skill in %s has increased to %d."), or
+        // ERR_SKILL_GAINED_S for a skill new to the field (Wow.exe 0x6DA4A0,
+        // on the skill field changing), chat lines.
         auto oldIt = owner_.playerSkillsRef().find(skillId);
-        if (oldIt != owner_.playerSkillsRef().end() && skill.value > oldIt->second.value) {
+        const bool gained = (oldIt == owner_.playerSkillsRef().end() || oldIt->second.value == 0) &&
+                            !owner_.playerSkillsRef().empty();
+        if (gained || (oldIt != owner_.playerSkillsRef().end() && skill.value > oldIt->second.value)) {
             auto catIt = owner_.skillLineCategoriesRef().find(skillId);
             if (catIt != owner_.skillLineCategoriesRef().end()) {
                 uint32_t category = catIt->second;
@@ -5047,9 +5028,14 @@ void SpellHandler::extractSkillFields(const FlatFieldMap& fields) {
                 }
             }
 
-            const std::string& name = owner_.getSkillName(skillId);
-            std::string skillName = name.empty() ? ("Skill #" + std::to_string(skillId)) : name;
-            owner_.addSystemChatMessage("Your skill in " + skillName + " has increased to " + std::to_string(skill.value) + ".");
+            const std::string& skillName = owner_.getSkillName(skillId);
+            if (skillName.empty()) continue;
+            if (gained)
+                owner_.displayGameMessage("ERR_SKILL_GAINED_S", "You have gained the " + skillName + " skill.", {skillName});
+            else
+                owner_.displayGameMessage("ERR_SKILL_UP_SI",
+                    "Your skill in " + skillName + " has increased to " + std::to_string(skill.value) + ".",
+                    {skillName, std::to_string(skill.value)});
         }
     }
 
@@ -5495,17 +5481,8 @@ void SpellHandler::handleDispelFailed(network::Packet& packet) {
         dispelSpellId = packet.readUInt32();
     }
     // Only show failure to the player who attempted the dispel
-    if (dispelCasterGuid == owner_.getPlayerGuid()) {
-        const auto& name = owner_.getSpellName(dispelSpellId);
-        char buf[128];
-        if (!name.empty())
-            std::snprintf(buf, sizeof(buf), "%s failed to dispel.", name.c_str());
-        else if (dispelSpellId != 0)
-            std::snprintf(buf, sizeof(buf), "Dispel failed! (spell %u)", dispelSpellId);
-        else
-            std::snprintf(buf, sizeof(buf), "Dispel failed!");
-        owner_.addSystemChatMessage(buf);
-    }
+    // A combat log entry in the stock client, never a chat line.
+    (void)dispelCasterGuid; (void)dispelSpellId;
 }
 
 void SpellHandler::handleTotemCreated(network::Packet& packet) {
@@ -5787,7 +5764,6 @@ void SpellHandler::handleSpellDispelLog(network::Packet& packet) {
             dispelledIds.push_back(dispelledId);
         }
     }
-    // Show system message if player was victim or caster
     if (victimGuid == owner_.getPlayerGuid() || casterGuid == owner_.getPlayerGuid()) {
         std::vector<uint32_t> loggedIds;
         if (isStolen) {
@@ -5800,31 +5776,7 @@ void SpellHandler::handleSpellDispelLog(network::Packet& packet) {
             loggedIds = dispelledIds;
         }
 
-        const std::string displaySpellNames = formatSpellNameList(owner_, loggedIds);
-        if (!displaySpellNames.empty()) {
-            char buf[256];
-            const char* passiveVerb = loggedIds.size() == 1 ? "was" : "were";
-            if (isStolen) {
-                if (victimGuid == owner_.getPlayerGuid() && casterGuid != owner_.getPlayerGuid())
-                    std::snprintf(buf, sizeof(buf), "%s %s stolen.",
-                                  displaySpellNames.c_str(), passiveVerb);
-                else if (casterGuid == owner_.getPlayerGuid())
-                    std::snprintf(buf, sizeof(buf), "You steal %s.", displaySpellNames.c_str());
-                else
-                    std::snprintf(buf, sizeof(buf), "%s %s stolen.",
-                                  displaySpellNames.c_str(), passiveVerb);
-            } else {
-                if (victimGuid == owner_.getPlayerGuid() && casterGuid != owner_.getPlayerGuid())
-                    std::snprintf(buf, sizeof(buf), "%s %s dispelled.",
-                                  displaySpellNames.c_str(), passiveVerb);
-                else if (casterGuid == owner_.getPlayerGuid())
-                    std::snprintf(buf, sizeof(buf), "You dispel %s.", displaySpellNames.c_str());
-                else
-                    std::snprintf(buf, sizeof(buf), "%s %s dispelled.",
-                                  displaySpellNames.c_str(), passiveVerb);
-            }
-            owner_.addSystemChatMessage(buf);
-        }
+        // The combat log alone in the stock client; no chat line.
         // Preserve stolen auras as spellsteal events so the log wording stays accurate.
         if (!loggedIds.empty()) {
             bool isPlayerCaster = (casterGuid == owner_.getPlayerGuid());
@@ -5871,16 +5823,7 @@ void SpellHandler::handleSpellStealLog(network::Packet& packet) {
                 loggedIds.push_back(stolenId);
         }
 
-        const std::string stealDisplayNames = formatSpellNameList(owner_, loggedIds);
-        if (!stealDisplayNames.empty()) {
-            char buf[256];
-            if (stealCaster == owner_.getPlayerGuid())
-                std::snprintf(buf, sizeof(buf), "You stole %s.", stealDisplayNames.c_str());
-            else
-                std::snprintf(buf, sizeof(buf), "%s %s stolen.", stealDisplayNames.c_str(),
-                              loggedIds.size() == 1 ? "was" : "were");
-            owner_.addSystemChatMessage(buf);
-        }
+        // The combat log alone in the stock client; no chat line.
         // Some servers emit both SPELLDISPELLOG(isStolen=1) and SPELLSTEALLOG
         // for the same aura. Keep the first event and suppress the duplicate.
         if (!loggedIds.empty()) {
@@ -5940,8 +5883,7 @@ void SpellHandler::handleSpellInstaKillLog(network::Packet& packet) {
         owner_.addCombatText(CombatTextEntry::INSTAKILL, 0, ikSpell, true, 0, ikCaster, ikVictim);
     } else if (ikVictim == owner_.getPlayerGuid()) {
         owner_.addCombatText(CombatTextEntry::INSTAKILL, 0, ikSpell, false, 0, ikCaster, ikVictim);
-        owner_.addUIError("You were killed by an instant-kill effect.");
-        owner_.addSystemChatMessage("You were killed by an instant-kill effect.");
+        // The combat log entry alone (Wow.exe 0x6CE260 -> 0x752210).
     }
     LOG_DEBUG("SMSG_SPELLINSTAKILLLOG: caster=0x", std::hex, ikCaster,
               " victim=0x", ikVictim, std::dec, " spell=", ikSpell);
@@ -6055,11 +5997,8 @@ void SpellHandler::parseEffectCreateItem(network::Packet& packet, uint32_t effec
         const ItemQueryResponseData* info = owner_.getItemInfo(itemEntry);
         std::string itemName = (info && !info->name.empty())
             ? info->name : ("item #" + std::to_string(itemEntry));
-        const auto& spellName = owner_.getSpellName(spellId);
-        std::string msg = spellName.empty()
-            ? ("You create: " + itemName + ".")
-            : ("You create " + itemName + " using " + spellName + ".");
-        owner_.addSystemChatMessage(msg);
+        // No chat line here: the item's arrival (SMSG_ITEM_PUSH_RESULT) is
+        // "You create: X." in the loot channel, and this is the combat log's.
         LOG_DEBUG("SMSG_SPELLLOGEXECUTE CREATE_ITEM: spell=", spellId,
                   " item=", itemEntry, " name=", itemName);
     }
@@ -6096,14 +6035,8 @@ void SpellHandler::parseEffectFeedPet(network::Packet& packet, uint32_t effectLo
         uint32_t feedItem = packet.readUInt32();
         if (!isPlayerCaster || feedItem == 0) continue;
 
-        owner_.ensureItemInfo(feedItem);
-        const ItemQueryResponseData* info = owner_.getItemInfo(feedItem);
-        std::string itemName = (info && !info->name.empty())
-            ? info->name : ("item #" + std::to_string(feedItem));
-        uint32_t feedQuality = info ? info->quality : 1u;
-        owner_.addSystemChatMessage("You feed your pet " +
-                                     buildItemLink(feedItem, feedQuality, itemName) + ".");
-        LOG_DEBUG("SMSG_SPELLLOGEXECUTE FEED_PET: item=", feedItem, " name=", itemName);
+        // The combat log's, not a chat line.
+        LOG_DEBUG("SMSG_SPELLLOGEXECUTE FEED_PET: item=", feedItem);
     }
 }
 
@@ -6237,18 +6170,8 @@ void SpellHandler::handleItemEnchantTimeUpdate(network::Packet& packet) {
         }
         if (!found) owner_.tempEnchantTimersRef().push_back({.slot = enchSlot, .expireMs = expireMs});
 
-        // Warn at important thresholds
-        if (durationSec <= 60 && durationSec > 55) {
-            const char* slotName = (enchSlot < 3) ? owner_.kTempEnchantSlotNames[enchSlot] : "weapon";
-            char buf[80];
-            std::snprintf(buf, sizeof(buf), "Weapon enchant (%s) expires in 1 minute!", slotName);
-            owner_.addSystemChatMessage(buf);
-        } else if (durationSec <= 300 && durationSec > 295) {
-            const char* slotName = (enchSlot < 3) ? owner_.kTempEnchantSlotNames[enchSlot] : "weapon";
-            char buf[80];
-            std::snprintf(buf, sizeof(buf), "Weapon enchant (%s) expires in 5 minutes.", slotName);
-            owner_.addSystemChatMessage(buf);
-        }
+        // No expiry warnings: the stock client has none; the buff frame's
+        // enchant timers show it.
     }
     LOG_DEBUG("SMSG_ITEM_ENCHANT_TIME_UPDATE: slot=", enchSlot, " dur=", durationSec, "s");
 }

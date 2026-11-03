@@ -208,15 +208,26 @@ struct Emitter {
         for (const XmlNode& s : scripts.children) {
             // <OnClick function="Foo"/> names an existing global; an inline body
             // is a function literal. Both end up as the same SetScript call.
-            // Present but empty is not a name. Emitted as one it produces
-            // SetScript("X", ) - a syntax error that loses the whole file, not
-            // just the handler.
             if (const std::string* fn = s.attr("function"); fn && !fn->empty()) {
                 line(var + ":SetScript(" + quote(s.name) + ", " + *fn + ")");
                 continue;
             }
             std::string body = s.text;
-            if (body.find_first_not_of(" \t\r\n") == std::string::npos) continue;
+            // Empty - function="" or no body - is how markup takes away a
+            // handler its template gave it, so it is a handler that does
+            // nothing, not no element: AuctionProgressBar inherits
+            // CastingBarFrameTemplate and declares <OnEvent>, <OnShow> and
+            // <OnUpdate> empty so the casting bar's never run on it;
+            // FauxScrollFrameTemplate empties ScrollFrame's
+            // OnScrollRangeChanged; the gossip and quest frames take the wheel
+            // with an empty OnMouseWheel. Skipped, the template's handlers
+            // stayed - the casting bar's OnUpdate raised every frame the
+            // multi-stack auction progress bar was up. (Emitting the empty
+            // name as a value was SetScript("X", ), a syntax error.)
+            if (body.find_first_not_of(" \t\r\n") == std::string::npos) {
+                line(var + ":SetScript(" + quote(s.name) + ", function() end)");
+                continue;
+            }
             // Each handler's arguments have names, and the body uses them
             // directly without declaring them: an OnUpdate says `elapsed`, an
             // OnClick says `button`. Passing them positionally as arg1..argN

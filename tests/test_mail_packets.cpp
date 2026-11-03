@@ -437,10 +437,9 @@ TEST_CASE("item query detects the BuyCount layout from more than one field",
 // breakdown behind - a sale arrived as a letter with the raw string in it.
 //
 // Now that GetInboxInvoiceInfo answers from this, the shapes below are a
-// contract rather than an internal detail. In particular the binding decides
-// which of two entirely different panels FrameXML draws - the buyer's or the
-// seller's - from whether a deposit and a cut are present, so the difference
-// between a three-field body and a five-field one is load-bearing.
+// contract rather than an internal detail. Which panel FrameXML draws - the
+// buyer's, the seller's or the pending sale's - comes from the subject's
+// response code, and the body is read with as many fields as that kind writes.
 
 TEST_CASE("A won auction's invoice carries the guid and the two prices",
           "[mail][auction][invoice]") {
@@ -475,13 +474,24 @@ TEST_CASE("The guid field is padded on the wire and read anyway",
     CHECK(invoice.ownerGuidLow == 0x1a2b);
 }
 
-TEST_CASE("Fields past the fifth are ignored rather than refused",
+TEST_CASE("A sale pending carries the money's delay and arrival time",
           "[mail][auction][invoice]") {
     AuctionMailInvoice invoice;
-    // Some cores append a money delay and an eta. Refusing the body for them
-    // would lose the figures that are there.
-    REQUIRE(parseAuctionMailBody("ff:9000:9000:250:450:3600:7", invoice));
+    // The seller_temp_invoice body (Wow.exe 0x56E9B0 reads seven fields).
+    REQUIRE(parseAuctionMailBody("ff:9000:9000:250:450:3600:839", invoice));
     CHECK(invoice.consignment == 450);
+    CHECK(invoice.moneyDelay == 3600);
+    CHECK(invoice.eta == 839);
+}
+
+TEST_CASE("Only won, sold and sale-pending letters are invoices",
+          "[mail][auction][invoice]") {
+    // Wow.exe 0x56F716: the subject's response code decides, so a cancelled
+    // or expired auction's letter is a plain letter with no text.
+    CHECK(auctionMailIsInvoice(1));
+    CHECK(auctionMailIsInvoice(2));
+    CHECK(auctionMailIsInvoice(6));
+    for (uint32_t r : {0u, 3u, 4u, 5u}) CHECK_FALSE(auctionMailIsInvoice(r));
 }
 
 TEST_CASE("A body that is not an invoice is refused", "[mail][auction][invoice]") {

@@ -1534,6 +1534,26 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
                 owner_.playerModelRebuildCallbackRef()();
         }
         else if (key == pfi.playerFlags) {
+          // PvP desired (0x200) changing is said by the client: ERR_PVP_TOGGLE_ON
+          // or _OFF on the info line, then PVP_TOGGLE_ON/OFF_VERBOSE in chat
+          // (Wow.exe 0x6E0FD0, on the field changing). Not on create.
+          {
+            constexpr uint32_t PLAYER_FLAGS_PVP_DESIRED = 0x00000200;
+            if (!isCreate && knownPlayerFlagsValid_ &&
+                ((knownPlayerFlags_ ^ val) & PLAYER_FLAGS_PVP_DESIRED)) {
+                if (val & PLAYER_FLAGS_PVP_DESIRED) {
+                    owner_.displayGameMessage("ERR_PVP_TOGGLE_ON", "PvP combat toggled on");
+                    owner_.addGlobalStringChatLine("PVP_TOGGLE_ON_VERBOSE",
+                        "You are now flagged for PvP combat and will remain so until toggled off.");
+                } else {
+                    owner_.displayGameMessage("ERR_PVP_TOGGLE_OFF", "PvP combat toggled off");
+                    owner_.addGlobalStringChatLine("PVP_TOGGLE_OFF_VERBOSE",
+                        "You will be unflagged for PvP combat after five minutes of non-PvP action in friendly territory.");
+                }
+            }
+            knownPlayerFlags_ = val;
+            knownPlayerFlagsValid_ = true;
+          }
           // Resting is read on create as well as on change, because a player
           // who logs in inside an inn is already resting and there is no later
           // transition to notice. The ghost handling below stays on updates
@@ -1924,16 +1944,11 @@ void EntityController::updateItemOnValuesUpdate(const UpdateBlock& block,
                         if (slotGuid == block.guid) { isEquipped = true; break; }
                     }
                     if (isEquipped) {
-                        std::string itemName;
-                        const auto* info = owner_.getItemInfo(it->second.entry);
-                        if (info) itemName = info->name;
-                        char buf[128];
-                        if (!itemName.empty())
-                            std::snprintf(buf, sizeof(buf), "%s is about to break!", itemName.c_str());
-                        else
-                            std::snprintf(buf, sizeof(buf), "An equipped item is about to break!");
-                        owner_.addUIError(buf);
-                        owner_.addSystemChatMessage(buf);
+                        // No words: the stock client's warning is the
+                        // durability figure turning yellow, which reads the
+                        // fields; the red line and the chat line were this
+                        // client's own.
+                        LOG_DEBUG("Equipped item ", it->second.entry, " is about to break");
                     }
                 }
             }
@@ -3077,6 +3092,7 @@ void EntityController::handleNameQueryResponse(network::Packet& packet) {
         // Chat lines held back for this name can go out now, with it on them.
         // After the cache above, which a held NPC line reads for its $-tokens.
         if (owner_.getChatHandler()) owner_.getChatHandler()->flushChatAwaitingName(data.guid);
+        owner_.flushMessagesAwaitingName(data.guid);
         // Update entity name
         auto entity = entityManager.getEntity(data.guid);
         if (entity && entity->getType() == ObjectType::PLAYER) {
@@ -3343,9 +3359,7 @@ void EntityController::showGameObjectPageText(uint64_t guid) {
         return;
     }
 
-    if (!info.name.empty()) {
-        owner_.addSystemChatMessage(info.name);
-    }
+    // An object with no page says nothing when clicked.
 }
 
 void EntityController::handlePageTextQueryResponse(network::Packet& packet) {

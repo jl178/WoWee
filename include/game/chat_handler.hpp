@@ -153,6 +153,18 @@ private:
     /// CHAT_MSG_CHANNEL_NOTICE with the real client's arguments, which is how
     /// FrameXML prints "Joined Channel: [1. General - Elwynn Forest]".
     void fireChannelNotice(const char* notice, const std::string& channelName);
+    void sendAwayPacket(ChatType type, const std::string& message);
+    void clearAfk();
+    /// CHAT_MSG_CHANNEL_NOTICE_USER: a notice naming one or two players -
+    /// arg2 the first (by guid or by name), arg5 the second - held until both
+    /// names are known, as Wow.exe's chat line waits on the name cache.
+    void fireChannelUserNotice(const char* notice, const std::string& channelName,
+                               uint64_t guid1, const std::string& name1, uint64_t guid2);
+    struct HeldUserNotice {
+        std::string notice, channelName, name1;
+        uint64_t guid1 = 0, guid2 = 0;
+    };
+    std::vector<HeldUserNotice> heldUserNotices_;
 
     void handleTextEmote(network::Packet& packet);
     void handleChannelNotify(network::Packet& packet);

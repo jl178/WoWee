@@ -292,7 +292,9 @@ second client ran out of GPU memory in the last run).
 
 ## 7. Auction house
 
-**Status: fixed from review; not exercised in game.**
+**Status: works in game** (two players: search, bid, buyout, single and
+4x5 multi-stack posts, cancel with and without a bid on it, the won, cancelled,
+sale-pending and sold letters, and a COD letter taken and paid).
 
 | Bug | Fixed |
 |---|---|
@@ -301,6 +303,10 @@ second client ran out of GPU memory in the last run).
 | Owner/bidder lists not refreshed after sell, cancel, bid | yes |
 | Auction error codes mapped wrongly | yes |
 | List results routed by shared state | yes |
+| Multi-stack progress bar raised every frame (the emitter skipped empty script elements, so `AuctionProgressBar` kept CastingBarFrameTemplate's OnUpdate) | yes: an empty `<OnX/>` or `function=""` is an empty handler |
+| Level column 0 for items with no requirement | yes: at least 1 (`0x59D5E0`) |
+| `canUse` always 1; `highBidder` false rather than nil, and not the bidder's name on the Auctions tab; owner "" rather than nil | yes (`0x59D5E0`); a name arriving redraws the list |
+| Auction letters: body text shown (the invoice's raw fields), every one an invoice | yes: no text for type 2 (`0x570BD0`); invoices only for won, sold, sale pending (`0x56F716`); `seller_temp_invoice` with delay and arrival time (`0x56E9B0`) |
 
 ## 8. Trade
 
@@ -333,7 +339,7 @@ gold work in game.**
 | Moving items inside the guild bank impossible | yes |
 | `GUILDBANK_ITEM_LOCK_CHANGED` never fired | yes |
 | Roster status a number 0 ("0" shown for online members) | yes |
-| `GuildRoster()` unthrottled | yes (10 s, no stock figure found) |
+| `GuildRoster()` unthrottled | yes: ten seconds (`Wow.exe` `0x5CA9B0`, 10000 ms), the wait cleared by guild command results 19 and 20 (`0x5CA0F0`) |
 | `GetGuildInfo(unit)` ignored the unit | yes |
 | `GetGuildRosterMOTD` stale after `GUILD_MOTD` | yes |
 | `GUILD_ROSTER_UPDATE` etc. | correct already |
@@ -356,7 +362,7 @@ initiator's guid) - no packet; everyone else gets
 | Bug | Fixed |
 |---|---|
 | `ConvertToRaid` a no-op | yes |
-| Raid roster left out the player (last index nil; Lua errors in the raid tab) | yes |
+| Raid roster left out the player (last index nil; Lua errors in the raid tab) | yes; rows in the server's order with the player appended last (`0x6D8870` -> `0x574F10`) |
 | `GetRaidRosterInfo` role "NONE" and class "Unknown" crashed `blizzard_raidui.lua` | yes |
 | `GetReadyCheckStatus` always nil | yes |
 | `READY_CHECK_CONFIRM` passed a guid string | yes |
@@ -469,20 +475,39 @@ player), logs and screenshots under `scratchpad/flows/logs` and
   CONFIRMED/OWNER in its invite list), opened (`CALENDAR_OPEN_EVENT "PLAYER"`)
   and removed (`CALENDAR_CLOSE_EVENT`), and the dungeon finder.
 
-## 18. Gaps
+- `ahA.lua`/`ahB.lua` (`scratchpad/flows2`): §7. "Auction created." per
+  post, `AUCTION_MULTISELL_START 4` and `UPDATE 1..4, 4`, "Bid accepted.",
+  "You won an auction for Linen Cloth", "A buyer has been found for your
+  auction of Linen Cloth.", "Auction cancelled."; the letters and a COD
+  letter paid with 777 copper. The server delays mail between accounts by an
+  hour, so those letters were made deliverable in the database for the test.
 
-- About three hundred `addSystemChatMessage` calls remain in the handlers
-  (115 in social_handler.cpp alone). Many are Wowee's own sentences; the ones on
-  the audited flows were converted, and `displayGameMessage` plus the GameError
-  table are there for the rest.
-- `CURRENCY_DISPLAY_UPDATE` fires on every bag update (more often than stock).
+## 18. Chat and error lines
+
+Every handler line now goes the stock way: a GameError key through
+`displayGameMessage` (table `0xAC8AF0`: chat, yellow info or red error), a
+GlobalString through `addGlobalStringChatLine`, an event FrameXML prints
+itself, or nothing where `Wow.exe` prints nothing. Lines naming a player wait
+for the name query (`displayGameMessageNaming`), as the stock name-cache
+callback does. What is left of `addSystemChatMessage` is Wowee's own commands
+(unstuck, `/time`, `/raidinfo`, auto-sell and auto-repair, video recording),
+the paths taken only when FrameXML does not own the chat frame, and the
+classic/TBC-only meeting-stone handlers.
+
+## 19. Gaps
+
+- Pet talents.
 - Seen while testing, outside these flows: a GM teleport into a building just
   after a resurrection fell through the floor before the WMO loaded; two test
   clients at once on this GPU ran out of device memory (`ImGui Vulkan error: -2`)
   and one crashed.
 - Explore-objective completion text not triggered in game.
-- Pet talents; `GetMacroSpell`/`GetMacroItem`; buyback price/timestamp fields;
-  `CHANNEL_NOTICE_USER` notices (kicks, bans, owner changes) still printed as
-  Wowee's own sentences; gossip option icons for spirit guide and innkeeper.
-- Choices made without stock evidence: guild roster throttle 10 s; raid order by
-  subgroup with the player first; calendar creator status CONFIRMED.
+- Twice while reading auction letters a screenshot showed only one of the
+  inbox and the open letter although both answered `IsShown()`; not
+  investigated (the renderer was being changed at the same time).
+- Calendar creator status CONFIRMED with rank OWNER is stock (`0x5F2A20`).
+- The Dungeon Finder speaks from its flags, not the update type (`0x55BDC0`):
+  joined/left lines on join and on types 7/15, `ERR_LFG_PROPOSAL_FAILED` when
+  a proposal is up and the queue comes back, `ERR_LFG_ROLE_CHECK_*` from the
+  role-check update, join results from `0xACDDA8`. AzerothCore's
+  `UPDATE_STATUS` restatement is not treated as a requeue.

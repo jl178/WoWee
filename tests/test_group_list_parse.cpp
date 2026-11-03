@@ -175,7 +175,7 @@ TEST_CASE("a solo group carries no loot block", "[group-list]") {
 // out and puts their subgroup and flags in the header; raidN,
 // GetRaidRosterInfo and GetNumRaidMembers all count from one list that puts
 // them back.
-TEST_CASE("the raid list puts the player back in their own subgroup", "[group-list]") {
+TEST_CASE("the raid list keeps the server's order and puts the player last", "[group-list]") {
     GroupListData pd;
     pd.groupType = 0x02;   // raid
     pd.subGroup = 1;
@@ -188,17 +188,20 @@ TEST_CASE("the raid list puts the player back in their own subgroup", "[group-li
 
     const auto raid = wowee::game::buildRaidSlots(pd, 0x1);
     REQUIRE(raid.size() == 4);
-    CHECK(raid[0].guid == 0xB);                 // group 1 first
-    CHECK(raid[1].guid == 0x1);                 // then the player, first in group 2
-    CHECK(raid[1].member == nullptr);
-    CHECK(raid[1].flags == 0x02);
-    CHECK(raid[2].guid == 0xA);
-    CHECK(raid[3].guid == 0xC);
-    CHECK_FALSE(raid[3].online);
+    // As Wow.exe's roster (0x6D8870 -> 0x574F10): the members in packet
+    // order, not by subgroup, then the player.
+    CHECK(raid[0].guid == 0xA);
+    CHECK(raid[1].guid == 0xB);
+    CHECK(raid[2].guid == 0xC);
+    CHECK_FALSE(raid[2].online);
+    CHECK(raid[3].guid == 0x1);
+    CHECK(raid[3].member == nullptr);
+    CHECK(raid[3].flags == 0x02);
+    CHECK(raid[3].subGroup == 1);
 
     CHECK(wowee::game::groupUnitToken(pd, 0x1, 0x1) == "player");
-    CHECK(wowee::game::groupUnitToken(pd, 0x1, 0xB) == "raid1");
-    CHECK(wowee::game::groupUnitToken(pd, 0x1, 0xC) == "raid4");
+    CHECK(wowee::game::groupUnitToken(pd, 0x1, 0xB) == "raid2");
+    CHECK(wowee::game::groupUnitToken(pd, 0x1, 0xC) == "raid3");
     CHECK(wowee::game::groupUnitToken(pd, 0x1, 0xD).empty());
 }
 

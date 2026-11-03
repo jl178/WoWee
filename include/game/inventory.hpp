@@ -229,6 +229,10 @@ struct BuybackItem {
     // Inventory slot sent in CMSG_BUYBACK_ITEM (74..85).  This is server
     // identity, not the item's current row in the buyback UI.
     uint32_t wireSlot = 0;
+    // What buying it back costs and when it was sold, from the player's
+    // PLAYER_FIELD_BUYBACK_PRICE_n / _TIMESTAMP_n; zero until they arrive.
+    uint32_t price = 0;
+    uint32_t timestamp = 0;
 };
 
 class Inventory {

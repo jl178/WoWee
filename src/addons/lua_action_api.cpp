@@ -6,6 +6,9 @@
 // For fireEvent: paging has to reach the frames as well as the addons.
 #include "addons/lua_engine.hpp"
 #include "game/inventory_slots.hpp"
+#include "game/game_utils.hpp"
+#include "ui/macro_text.hpp"
+#include "ui/chat/macro_evaluator.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "ui/keybinding_manager.hpp"
 #include "ui/settings_panel.hpp"
@@ -247,6 +250,123 @@ static uint32_t macroIdArg(game::GameHandler* gh, lua_State* L, int idx) {
             if (gh->getMacroName(id) == name) return id;
     }
     return 0;
+}
+
+/// What a macro stands for right now, as the stock client keeps it for
+/// GetMacroSpell, GetMacroItem and the button that holds it: the
+/// #showtooltip argument, or else the first /cast, /use, /castsequence or
+/// /castrandom line's - its conditionals evaluated, a castsequence or
+/// castrandom list reduced to its first entry, a leading "!" dropped.
+/// Empty when the macro names nothing that would happen now.
+static std::string macroActionArg(game::GameHandler* gh, uint32_t id) {
+    if (!gh || id == 0) return {};
+    const std::string body = gh->getMacroText(id);
+    auto trim = [](std::string s) {
+        const size_t a = s.find_first_not_of(" \t");
+        if (a == std::string::npos) return std::string();
+        const size_t b = s.find_last_not_of(" \t");
+        return s.substr(a, b - a + 1);
+    };
+    auto resolve = [&](std::string arg, bool list) -> std::string {
+        arg = trim(arg);
+        if (!arg.empty() && arg.front() == '[') {
+            uint64_t targetOverride = static_cast<uint64_t>(-1);
+            arg = trim(ui::evaluateMacroConditionals(arg, *gh, targetOverride));
+        } else if (const size_t semi = arg.find(';'); semi != std::string::npos) {
+            arg = trim(arg.substr(0, semi));
+        }
+        if (list) {
+            if (arg.rfind("reset=", 0) == 0) {
+                const size_t sp = arg.find(' ');
+                arg = sp == std::string::npos ? std::string() : trim(arg.substr(sp + 1));
+            }
+            arg = trim(arg.substr(0, arg.find(',')));
+        }
+        if (!arg.empty() && arg.front() == '!') arg.erase(arg.begin());
+        return arg;
+    };
+    const std::string shown = ui::macroShowtooltipArg(body);
+    if (!shown.empty() && shown != "__auto__") return resolve(shown, false);
+    for (const auto& line : ui::macroCommandLines(body)) {
+        const size_t sp = line.find(' ');
+        std::string cmd = line.substr(0, sp);
+        for (char& c : cmd) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const std::string rest = sp == std::string::npos ? std::string() : line.substr(sp + 1);
+        if (cmd == "/cast" || cmd == "/use" || cmd == "/spell") return resolve(rest, false);
+        if (cmd == "/castsequence" || cmd == "/castrandom" || cmd == "/userandom") return resolve(rest, true);
+    }
+    return {};
+}
+
+/// The known spell a name means, its highest rank; 0 for none.
+static uint32_t knownSpellByName(game::GameHandler* gh, std::string name) {
+    for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    uint32_t best = 0;
+    int bestRank = -1;
+    for (uint32_t sid : gh->getKnownSpells()) {
+        std::string known = gh->getSpellName(sid);
+        for (char& c : known) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (known != name) continue;
+        int rank = 0;
+        const std::string& rankText = gh->getSpellRank(sid);
+        if (rankText.rfind("Rank ", 0) == 0) {
+            try { rank = std::stoi(rankText.substr(5)); } catch (...) {}
+        }
+        if (rank > bestRank) { bestRank = rank; best = sid; }
+    }
+    return best;
+}
+
+// GetMacroSpell(index or name) -> name, rank of the spell the macro casts now
+static int lua_GetMacroSpell(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const uint32_t id = macroIdArg(gh, L, 1);
+    if (id == 0) return luaReturnNil(L);
+    const std::string arg = macroActionArg(gh, id);
+    const uint32_t spellId = arg.empty() ? 0 : knownSpellByName(gh, arg);
+    if (spellId == 0) return luaReturnNil(L);
+    lua_pushstring(L, gh->getSpellName(spellId).c_str());
+    lua_pushstring(L, gh->getSpellRank(spellId).c_str());
+    return 2;
+}
+
+// GetMacroItem(index or name) -> name, link of the item the macro uses now
+static int lua_GetMacroItem(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const uint32_t id = macroIdArg(gh, L, 1);
+    if (id == 0) return luaReturnNil(L);
+    const std::string arg = macroActionArg(gh, id);
+    if (arg.empty()) return luaReturnNil(L);
+    uint32_t itemId = 0;
+    if (const size_t at = arg.find("item:"); at != std::string::npos) {
+        try { itemId = static_cast<uint32_t>(std::stoul(arg.substr(at + 5))); } catch (...) {}
+    } else {
+        // An item by name, carried or worn - the spell of that name wins in
+        // GetMacroSpell, as /use and /cast share a namespace on the stock client.
+        std::string wanted = arg;
+        for (char& c : wanted) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        auto matches = [&](const game::ItemSlot& s) {
+            if (s.empty()) return false;
+            std::string n = s.item.name;
+            for (char& c : n) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return n == wanted;
+        };
+        const auto& inv = gh->getInventory();
+        for (int i = 0; i < game::Inventory::NUM_EQUIP_SLOTS && !itemId; ++i)
+            if (matches(inv.getEquipSlot(static_cast<game::EquipSlot>(i))))
+                itemId = inv.getEquipSlot(static_cast<game::EquipSlot>(i)).item.itemId;
+        for (int i = 0; i < inv.getBackpackSize() && !itemId; ++i)
+            if (matches(inv.getBackpackSlot(i))) itemId = inv.getBackpackSlot(i).item.itemId;
+        for (int b = 0; b < game::Inventory::NUM_BAG_SLOTS && !itemId; ++b)
+            for (int s = 0; s < inv.getBagSize(b) && !itemId; ++s)
+                if (matches(inv.getBagSlot(b, s))) itemId = inv.getBagSlot(b, s).item.itemId;
+    }
+    if (itemId == 0) return luaReturnNil(L);
+    const auto* info = gh->getItemInfo(itemId);
+    if (!info || info->name.empty()) return luaReturnNil(L);
+    lua_pushstring(L, info->name.c_str());
+    lua_pushstring(L, game::buildItemLink(itemId, info->quality, info->name).c_str());
+    return 2;
 }
 
 static int lua_HasAction(lua_State* L) {
@@ -2367,6 +2487,8 @@ void registerActionLuaAPI(lua_State* L) {
             lua_pushnil(L);
             return 4;
         }},
+                {"GetMacroSpell",       lua_GetMacroSpell},
+                {"GetMacroItem",        lua_GetMacroItem},
                 // GetMacroBody(index or name) → body, or nil
                 {"GetMacroBody",        [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
