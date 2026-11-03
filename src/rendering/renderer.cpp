@@ -2758,6 +2758,14 @@ void Renderer::clearSelectionCircle() {
     if (overlaySystem_) overlaySystem_->clearSelectionCircle();
 }
 
+void Renderer::setSpellTargetDecal(const glm::vec3& center, float halfWidth, bool acceptable) {
+    if (overlaySystem_) overlaySystem_->setSpellTargetDecal(center, halfWidth, acceptable);
+}
+
+void Renderer::clearSpellTargetDecal() {
+    if (overlaySystem_) overlaySystem_->clearSpellTargetDecal();
+}
+
 // ========================= PostProcessPipeline delegation stubs (§4.3) =========================
 
 PostProcessPipeline* Renderer::getPostProcessPipeline() const {

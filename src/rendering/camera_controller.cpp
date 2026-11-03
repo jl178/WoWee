@@ -3477,7 +3477,12 @@ void CameraController::update(float deltaTime) {
     // Retain short taps/wheel pulses for sitting; diving still needs held input.
     bool prevSitting = sitting;
     bool xDown = bindings.isCommandDown("SITORSTAND");
-    if (bindings.isCommandPressed("SITORSTAND") && !mounted_ && !swimming) {
+    // SitStandOrDescendStart (the stock SITORSTAND binding): swimming or in
+    // the air it is descend, never a sit. Toggling the sit there sat a ".gm
+    // fly" character down in mid-air, and the sit holds every movement key -
+    // so X, the descend key, stopped the flight instead of lowering it.
+    if (bindings.isCommandPressed("SITORSTAND") && !mounted_ && !swimming &&
+        !isFlightAirborne()) {
         sitting = !sitting;
     }
     if (mounted_) sitting = false;
@@ -3685,7 +3690,10 @@ void CameraController::update(float deltaTime) {
         // climb from the flag.
         const bool airborne = isFlightAirborne() || swimming;
         const bool nowAscending = airborne && spaceHeld;
-        const bool nowDescending = airborne && xDown && (mounted_ || swimming);
+        // Any flier, not only a mounted one: a ".gm fly" character on foot
+        // went down under X with no START_DESCEND sent, so the server kept it
+        // where it had been and the next packet's drop read as a teleport.
+        const bool nowDescending = airborne && xDown;
 
         if (airborne) {
             if (nowAscending && !wasAscending_) {

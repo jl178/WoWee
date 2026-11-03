@@ -422,3 +422,41 @@ Still different (not changed here; each needs in-game checking):
   screen units; Wowee's is a pixel sensitivity slider. Not reconciled.
 - Click-to-move, cameraDive / submerge pitch and the first-person fade were
   not traced.
+
+## 12. Flight allowed, teleports and the world port
+
+**CAN_FLY** (0x01000000) is an ability, FLYING (0x02000000) the state.
+SMSG_MOVE_SET_CAN_FLY / UNSET_CAN_FLY queue movement events 0x2F / 0x30
+(run by 0x6EF860): 0x2F sets CAN_FLY; 0x30 clears it and, when FLYING was
+set, first stops the flight (0x98C240: clears 0x02C000C0 - FLYING,
+ASCENDING, DESCENDING, the pitch keys - and starts a fall, 0x988370). Both
+then acknowledge with CMSG_MOVE_SET_CAN_FLY_ACK (0x345). `.gm fly on`
+(AzerothCore `Unit::SetCanFly`) is exactly this packet, the same one a
+flying mount's aura sends; nothing else distinguishes the two.
+
+**A teleport on the same map** (MSG_MOVE_TELEPORT, 0x72D2D0 for the active
+mover) reads the movement block and queues event 0x2C; its handler takes
+only flags2 0x2040 from the packet and relocates the mover (0x6ECF80,
+0x6EC400 for the transport). CMovement's flags (+0x44) are **kept** -
+CAN_FLY, water walk, feather fall and the rest survive a `.go` or a summon.
+The acknowledgement is MSG_MOVE_TELEPORT_ACK (0xC7) from the event.
+
+**A world port** (SMSG_NEW_WORLD to another map): the client loads the new
+map and only then (0x403B70, the load's completion) puts the pending spell
+down (0x809A60), resets the world, moves the camera to the destination and
+sends **MSG_MOVE_WORLDPORT_ACK (0xDC), empty**. No movement packet goes with
+it: the server (HandleMoveWorldportAck) places the player at the teleport
+destination itself, and the next movement packet the client sends carries
+the new position. AzerothCore also drops CAN_FLY across a map change unless
+a fly aura holds it, and says so with SMSG_MOVE_UNSET_CAN_FLY after the ack.
+
+**SitStandOrDescendStart / DescendStop** (the SITORSTAND binding, X):
+descend while swimming or flying, sit or stand otherwise.
+
+| # | Stock | Wowee before | Now |
+|---|---|---|---|
+| 23 | A teleport keeps CMovement's flags | MSG_MOVE_TELEPORT_ACK set them to 0: after `.gm fly on`, any `.go`/same-map `.tele` lost CAN_FLY and Space jumped | moving bits cleared; WALKING, LEVITATING, ROOT, CAN_FLY, WATER_WALK, FEATHER_FALL, HOVER kept |
+| 24 | An unmounted flier plays the swim set (SWIMMING or FLYING) | the on-foot animation had no flight: a `.gm fly` character hung in the fall pose | `fi.swimming` covers flight in the air |
+| 25 | X descends in the air: START_DESCEND (0x3A7), for any flier | X toggled a sit in mid-air, and the sit held every movement key; and START_DESCEND went out only for a mounted flier or a swimmer, so a `.gm fly` character sank on screen while the server kept it where it was | no sit while swimming or flying; START_DESCEND for any flier; `SitStandOrDescendStart` / `DescendStop` added to Lua |
+| 26 | UNSET_CAN_FLY in the air stops the flight (0x98C240) | only CAN_FLY cleared: FLYING stayed set for good, since the landing that clears it runs only while flight is allowed | FLYING, ASCENDING, DESCENDING and the pitch keys cleared with it, before the ack |
+| 27 | WORLDPORT_ACK alone, after the load; no movement until the player moves | ACK, then STOP and HEARTBEAT; the frame after, the per-frame sync copied the old map's render position and facing into movementInfo and a SET_FACING went out with them - the server moved the player to the old x, y, z on the new map (`.gps` after `.tele` to another continent) | ACK alone; movement held and renderer positions ignored from SMSG_NEW_WORLD until the world loader has placed the character (`MovementHandler::endWorldPortHold`, a minute at most) |

@@ -57,6 +57,37 @@ public:
     // --- Public API (delegated from GameHandler) ---
     void castSpell(uint32_t spellId, uint64_t targetGuid = 0);
 
+    // --- Spells cast at a point (spell targeting mode) ---
+    // Pressing a spell whose Spell.dbc Targets waits on a location (Blizzard,
+    // Flamestrike, Volley...) does not send it: the cursor carries it until
+    // the ground is clicked (Wow.exe 0x80CCE0 / 0x80C790, docs/re/
+    // spell-cast-pipeline.md section 15).
+    struct GroundTargeting {
+        uint32_t spellId = 0;
+        /// The circle's half-width (0x8019C0), before the out-of-range case.
+        float radius = 0.0f;
+        float minRange = 0.0f;
+        float maxRange = 0.0f;
+        /// Set when an item's use is what waits (a bomb): the cast then goes
+        /// out as CMSG_USE_ITEM for this bag slot.
+        uint64_t itemGuid = 0;
+        uint8_t itemBag = 0;
+        uint8_t itemSlot = 0;
+    };
+    [[nodiscard]] bool isGroundTargeting() const { return groundTargeting_.spellId != 0; }
+    [[nodiscard]] const GroundTargeting& groundTargeting() const { return groundTargeting_; }
+    /// Put the spell down without casting it (SpellStopTargeting, right
+    /// button, escape, another cast). True when one was waiting.
+    bool stopGroundTargeting();
+    /// An item whose use spell waits on a point: the use waits with it.
+    /// False (and nothing changed) for any other spell.
+    bool beginItemGroundTargeting(uint32_t spellId, uint8_t bag, uint8_t slot, uint64_t itemGuid);
+    /// The point was clicked: cast there. canonical is the point on the
+    /// ground in canonical coordinates; transportGuid the ship it lies on
+    /// (then canonicalLocal is in the ship's frame), else 0.
+    void castGroundTargetAt(const glm::vec3& canonical, uint64_t transportGuid,
+                            const glm::vec3& canonicalLocal);
+
     /// Whether the spell flies a missile to its target (its visual has one
     /// and the spell a speed). Its target flinches when the missile lands,
     /// not when the damage is announced (Wow.exe 0x702DB0).
@@ -524,6 +555,10 @@ private:
     // whenever anything else is cast.
     std::unordered_map<uint32_t, float> spellCooldownTotals_;
     uint8_t castCount_ = 0;
+    GroundTargeting groundTargeting_;
+    /// Whether the spell waits on a point, and if so the circle and range it
+    /// is aimed with. False for anything else.
+    bool groundTargetingFor(uint32_t spellId, GroundTargeting& out) const;
     bool casting_ = false;
     bool castIsChannel_ = false;
     uint32_t currentCastSpellId_ = 0;

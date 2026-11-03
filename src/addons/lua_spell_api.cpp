@@ -1344,17 +1344,28 @@ void registerSpellLuaAPI(lua_State* L) {
             return 1;
         }},
                 {"SpellStopTargeting", [](lua_State* L) -> int {
-            // No AoE reticle, but the item cursor a stone or an oil arms is a
-            // kind of targeting and escape has to put it down.
+            // The pending spell put down (0x809E30 -> 0x806200 with
+            // DONT_REPORT): a spell waiting for its point on the ground, or
+            // the item cursor a stone or an oil arms - the stock client keeps
+            // both in the one pending spell (0xD3F4E4). 1 when there was one,
+            // which is how ToggleGameMenu knows escape was spent on it.
             auto* gh = getGameHandler(L);
-            const bool wasTargeting = gh && gh->isAwaitingItemTarget();
-            if (wasTargeting) gh->cancelItemTargeting();
-            lua_pushboolean(L, wasTargeting);
+            bool wasTargeting = false;
+            if (gh && gh->getSpellHandler() && gh->getSpellHandler()->stopGroundTargeting())
+                wasTargeting = true;
+            if (gh && gh->isAwaitingItemTarget()) {
+                gh->cancelItemTargeting();
+                wasTargeting = true;
+            }
+            if (wasTargeting) lua_pushnumber(L, 1); else lua_pushnil(L);
             return 1;
         }},
                 {"SpellIsTargeting", [](lua_State* L) -> int {
+            // 0x7FDCD0: whether a spell is pending (0xD3F4E4 != 0).
             auto* gh = getGameHandler(L);
-            lua_pushboolean(L, gh && gh->isAwaitingItemTarget());
+            const bool targeting = gh && (gh->isAwaitingItemTarget() ||
+                (gh->getSpellHandler() && gh->getSpellHandler()->isGroundTargeting()));
+            if (targeting) lua_pushnumber(L, 1); else lua_pushnil(L);
             return 1;
         }},
                 {"IsSpellInRange",    lua_IsSpellInRange},

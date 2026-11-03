@@ -43,11 +43,21 @@ public:
     void setSelectionCircle(const glm::vec3& pos, float radius, const glm::vec3& color,
                             float alpha = 1.0f, float attackPulse = -1.0f);
     void clearSelectionCircle();
+    /// Draws the selection circle and the spell targeting circle, whichever
+    /// are set.
     void renderSelectionCircle(const glm::mat4& view, const glm::mat4& projection,
                                VkCommandBuffer cmd,
                                const HeightQuery2D& terrainHeight,
                                const HeightQuery3D& wmoHeight,
                                const HeightQuery3D& m2Height);
+
+    // Spell targeting circle - the stock one (WorldFrame 0x4F8A40, set each
+    // frame by 0x4F66C0): Interface\SpellShadow\Spell-Shadow-Acceptable.blp,
+    // or Spell-Shadow-Unacceptable.blp out of range, alpha blended in white
+    // through the same projector as the selection circle, over the box
+    // centre +/- halfWidth in x and y and +/- 2 in z, unrotated.
+    void setSpellTargetDecal(const glm::vec3& center, float halfWidth, bool acceptable);
+    void clearSpellTargetDecal();
 
     // Fullscreen color overlay (underwater tint, etc.)
     void renderOverlay(const glm::vec4& color, VkCommandBuffer cmd);
@@ -78,6 +88,38 @@ public:
     static constexpr uint32_t kSelFrameSlices = 3;
 
 private:
+    // A patch of floor samples a decal is draped over, and the floor heights
+    // found for it. The decal is draped over a world-aligned lattice so a
+    // lattice point keeps its world position while the decal moves, and only
+    // the new edge of the patch has to be raycast. Each point keeps every
+    // floor the three queries found, and the highest inside the box is picked
+    // per frame. The cache drops when the spacing changes, when the box moves
+    // far enough vertically for the WMO/M2 probes to answer differently, and
+    // periodically in case geometry streams in.
+    struct FloorSample {
+        std::optional<float> terrain;
+        std::optional<float> wmo;
+        std::optional<float> m2;
+    };
+    struct FloorLattice {
+        std::unordered_map<uint64_t, FloorSample> cache;
+        float spacing = 0.0f;
+        float probeZ = 0.0f;
+        int age = 0;
+        std::vector<float> verts;
+    };
+    /// Fill lattice.verts for a box centre +/- r in x, y and +/- zHalf in z.
+    void buildFloorLattice(FloorLattice& lattice, const glm::vec3& center, float r, float zHalf,
+                           const HeightQuery2D& terrainHeight, const HeightQuery3D& wmoHeight,
+                           const HeightQuery3D& m2Height);
+    void renderSelectionCircleOnly(const glm::mat4& view, const glm::mat4& projection,
+                                   VkCommandBuffer cmd, const HeightQuery2D& terrainHeight,
+                                   const HeightQuery3D& wmoHeight, const HeightQuery3D& m2Height);
+    void renderSpellTargetDecal(const glm::mat4& view, const glm::mat4& projection,
+                                VkCommandBuffer cmd, const HeightQuery2D& terrainHeight,
+                                const HeightQuery3D& wmoHeight, const HeightQuery3D& m2Height);
+    void initSpellTargetDecal();
+    void loadSpellTargetTextures();
     void initSelectionCircle();
     bool initSelectionDescriptors();
     void loadSelectionTexture();
@@ -109,23 +151,24 @@ private:
     float selPulseT_ = -1.0f;
     bool selCircleVisible_ = false;
 
-    // Floor lattice cache. The decal is draped over a world-aligned lattice so
-    // a lattice point keeps its world position while the target walks, and only
-    // the new edge of the patch has to be raycast. Each point keeps every
-    // floor the three queries found, and the one nearest the feet is picked
-    // per frame. The cache drops when the spacing changes, when the feet move
-    // far enough vertically for the WMO/M2 probes to answer differently, and
-    // periodically in case geometry streams in.
-    struct SelFloorSample {
-        std::optional<float> terrain;
-        std::optional<float> wmo;
-        std::optional<float> m2;
-    };
-    std::unordered_map<uint64_t, SelFloorSample> selFloorCache_;
-    float selFloorCacheSpacing_ = 0.0f;
-    float selFloorCacheProbeZ_ = 0.0f;
-    int selFloorCacheAge_ = 0;
-    std::vector<float> selLatticeVerts_;
+    FloorLattice selLattice_;
+
+    // Spell targeting circle resources. Shares the selection circle's shaders,
+    // set layout, pipeline layout and lattice indices; blended by alpha
+    // (0x4F8A40 sets blend mode 2), with its own textures and vertices.
+    VkPipeline spellDecalPipeline_ = VK_NULL_HANDLE;
+    VkDescriptorPool spellDecalPool_ = VK_NULL_HANDLE;
+    VkDescriptorSet spellDecalSet_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};  // acceptable, unacceptable
+    VkTexture spellDecalTexture_[2];
+    bool spellDecalTexturesTried_ = false;
+    ::VkBuffer spellDecalVertBuf_ = VK_NULL_HANDLE;
+    VmaAllocation spellDecalVertAlloc_ = VK_NULL_HANDLE;
+    void* spellDecalVertMapped_ = nullptr;
+    glm::vec3 spellDecalCenter_{0.0f};
+    float spellDecalHalfWidth_ = 1.0f;
+    bool spellDecalAcceptable_ = true;
+    bool spellDecalVisible_ = false;
+    FloorLattice spellDecalLattice_;
 
     // Fullscreen overlay resources
     VkPipeline overlayPipeline_ = VK_NULL_HANDLE;

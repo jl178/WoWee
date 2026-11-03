@@ -268,6 +268,9 @@ public:
     void setSelectionCircle(const glm::vec3& pos, float radius, const glm::vec3& color,
                             float alpha = 1.0f, float attackPulse = -1.0f);
     void clearSelectionCircle();
+    /// See OverlaySystem::setSpellTargetDecal.
+    void setSpellTargetDecal(const glm::vec3& center, float halfWidth, bool acceptable);
+    void clearSpellTargetDecal();
 
     // CPU timing stats (milliseconds, last frame).
     double getLastUpdateMs() const { return lastUpdateMs; }

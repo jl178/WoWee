@@ -435,3 +435,211 @@ Not changed:
   the weapons away too.
 - **Queued kits** (kit `Flags` 0x1) play at once.
 - **Upper-body casting while moving** belongs to the movement work.
+
+## 15. Spells cast at a point (spell targeting mode)
+
+Blizzard, Flamestrike, Rain of Fire, Volley, Hurricane, Death and Decay,
+Flare, Mass Dispel and the engineering bombs are aimed at a point on the
+ground. Consecration, Arcane Explosion and Goblin Sapper Charge are not:
+their Spell.dbc `Targets` is 0 and they go out at once. Freezing Trap is
+not either in 3.3.5a (Trap Launcher came later).
+
+### What the spell waits for (`0x80C790`)
+
+Pressing the spell (`Spell_C::CastSpell` `0x80CCE0`) builds the pending
+spell object and asks `0x80C790` what it still needs. The answer
+(`0xD3F4E0`) starts as Spell.dbc `Targets` (column 16) and is adjusted by
+the **first** effect's `EffectImplicitTargetA` (column 86) only:
+
+| ImplicitTargetA[0] | Effect on the mask |
+|---|---|
+| 1 UNIT_CASTER | clears 0x400 |
+| 5 UNIT_PET | clears 0x8000 |
+| 6, 53 | sets 0x80 |
+| 21, 45 | sets 0x100 |
+| 23 | sets 0x800 |
+| 25, 63-71, 74, 75 | sets 0x2 (UNIT) |
+| 26 | sets 0x4000 |
+| 35 | sets 0x8 |
+| 57, 61 | sets 0x4 |
+| 89 DEST_TRAJ | clears 0x40 when the spell's missile row has flag 1 (vehicle aim, section V8 of mounts-taxi-vehicles.md) |
+| 90 | sets 0x10000 |
+
+Nothing left: the cast goes out (`0x80AC90`). Otherwise the current target
+is offered to the unit flags (`0x80BC80`); what is still missing makes the
+spell the **pending spell** (`0xD3F4E4 = spell`, `0x80D37B`), with:
+
+- every other pending spell put down first (`0x809A60`, `0x80D3CE`) - a
+  second press restarts targeting rather than stacking;
+- `0x616270(2)` and the cursor **UnableCast** (`0x616800(0x1C)`, table
+  `0xAD2808`: 2 Cast, 0x1C UnableCast);
+- `CURRENT_SPELL_CAST_CHANGED` (`0x53B480` posts event 0xF3);
+- InputControl `+0x58 |= 0x10` (`0x5FA890` keeps the cursor shown);
+- for a spell that summons an object (effects 50, 76, 81, 104-107) a
+  preview model of the object's display is loaded (`0x67BD40` ->
+  `0x7FFE20`, `0xD3F570`).
+
+All Blizzard/Flamestrike-type spells have `Targets` 0x40
+(TARGET_FLAG_DEST_LOCATION) and an implicit target 16/28/31, so the mask
+stays 0x40 and they wait for a point.
+
+### The cursor over the world (`0x4FA040`, `0x4F66C0`)
+
+While the mouse is over WorldFrame, its update (`0x4FA040`) picks:
+
+- **no object at all** when the pending spell waits on a location only
+  (`0x7FD620` pending, `0x7FD750` mask & 0x60, and not `0x7FD650`
+  mask & 0x1878E): `0x715C40` clears the mouseover, so the circle goes on
+  the ground under a creature, not on it;
+- then `0x4F66C0` with the terrain point under the cursor
+  (`{transport guid, x, y, z}`; the guid only for an MO_TRANSPORT, high
+  `0x1FC`).
+
+`0x4F66C0` stores the point (`0xB74380`, converted out of the transport's
+frame when there is one) and runs the range check `0x803EE0`:
+
+- 3D distance squared from the caster (`0x4F61D0`) against the spell's
+  min/max range (`0x802C30` -> `0x801650`; the first SpellRange pair when
+  there is no unit);
+- `min^2 <= d^2 <= max^2`: **0**, in range;
+- `d^2 > 16 max^2` (`0x9E8CCC` = 16): **2**, too far to show;
+- otherwise **1**, out of range.
+
+| Result | Circle (`0xAC79A4`) | Half-width (`0xB74370`) | Cursor |
+|---|---|---|---|
+| 0 | 0, Spell-Shadow-Acceptable | min(spell radius, 20) (`0x9F281C`) | 2 **Cast** |
+| 1 | 1, Spell-Shadow-Unacceptable | 0 -> 1.3888889 (`0x9F98DC`) | 0x1C **UnableCast** |
+| 2 | 3, none | 0 | 0x1C **UnableCast** |
+
+**Spell radius** (`0x8019C0`): SpellRadius.dbc of `EffectRadiusIndex[0]`
+and `[1]` (columns 92, 93), each `Radius + RadiusPerLevel x caster level`
+(RadiusMax is not read), the larger of the two, then SPELLMOD_RADIUS
+(`0x7FD970` op 6: `(r + flat) x pct x 0.01`).
+
+### The circle (`0x4F8A40`)
+
+WorldFrame's constructor (`0x4FABD0`) loads the two textures the table
+`0xAC799C` names into `0xB74350/0xB74354`:
+
+- `Interface\SpellShadow\Spell-Shadow-Acceptable.blp` (256x256, a green
+  ring 0x18FA00 with a pale centre mark),
+- `Interface\SpellShadow\Spell-Shadow-Unacceptable.blp` (64x64, red).
+
+The world render (`0x4F8EA0`) draws it twice when `0xAC79A4 < 2`, once in
+the terrain pass (`0x4F8A40(0x200122)`) and once with the WMOs
+(`0x20000`). Each draw is the shadow-blob projector `0x7E4370` - the one
+the selection circle uses (`0x725980`) - over the box
+`centre +/- R` in x and y and `+/- 2` (`0xA4040C`) in z, with:
+
+- no texture matrix (third argument 0): the texture lies along the world's
+  axes, unlike the selection circle, which turns with the camera;
+- colour 0xFFFFFFFF;
+- render state 6 (blend) = 2, **alpha blending** (the selection circle is
+  additive), fog and lighting states off;
+- the second stage the "ShadowAdd" height ramp (`0x7E2C60`, `0xD38040`);
+- depth bias 0.4 (`0x9F98D8`).
+
+The `Projected_*` effects of `model2.wfx` are what the projector's
+redrawn terrain and WMO triangles render with.
+
+### Clicks and cancelling
+
+- **Left click on the ground** (WorldFrame `0x4F7880` -> `0x527830` ->
+  `0x527360`, button 1): `HandleTerrainClick` (`0x80C340`) first. With
+  0x20 still wanted it stores the point as the source (`+0x48` transport
+  guid, `+0x58..0x60` xyz), else with 0x40 as the destination (`+0x50`,
+  `+0x64..0x6C`), sets the flag in the targets (`+0x28`) and clears it from
+  the wanted mask; with nothing left the cast goes out (`0x80AC90`). The
+  click then does nothing else (no target, no click-to-move). **There is
+  no range check here**: an out-of-range point is sent and the server
+  answers SPELL_FAILED_OUT_OF_RANGE.
+- **Right button down in the world** (`0x51FB00`, button 4): the pending
+  spell is put down (`0x809A60` -> `0x806200(spell, 1, 1, 0x1B)`); the
+  press then goes on to its usual handling.
+- **Escape**: FrameXML's `ToggleGameMenu` calls `SpellStopTargeting()`.
+- **A new cast** (`0x80D3CE`), a world change (`0x403B70`), death...:
+  `0x809A60`.
+
+Putting it down uses SPELL_FAILED_DONT_REPORT (0x1B): no error text,
+`UNIT_SPELLCAST_FAILED_QUIET` (event 0x147, `0x7FECC0`), the pending spell
+cleared, `0x616270(1)`, the cursor back to the pointer.
+
+### Lua
+
+| Function | Address | Stock |
+|---|---|---|
+| `SpellIsTargeting()` | `0x7FDCD0` | 1 when a spell is pending (`0xD3F4E4`), else nil |
+| `SpellStopTargeting()` | `0x809E30` | puts the pending spell down (DONT_REPORT); 1 if there was one, else nil - `ToggleGameMenu` relies on it |
+| `SpellTargetUnit("unit")` | `0x80DC00` | offers the unit to the pending spell (`0x80BC80`); a pure location spell takes nothing from it |
+| `SpellCanTargetUnit("unit")` | `0x804190` | `0x803A50(guid, 1)` |
+| `SpellTargetItem(...)` | `0x8007E0` | only while 0x4010 (item) is wanted |
+| `CameraOrSelectOrMoveStart/Stop` | `0x5FC6C0` / `0x5FC730` | the left button through InputControl (`0x5FA170` / `0x5FA450`); the click itself is resolved on release by the WorldFrame pick above |
+
+### The packet (`0x80AC90`, `0x9AB8B0`)
+
+`CMSG_CAST_SPELL` (0x12E; 0x1F0 for a pet): `uint8 castCount` (spell
+`+0x24`), `uint32 spellId`, `uint8 castFlags` (0, or 2 with the
+trajectory block), then SpellCastTargets (`0x9AB8B0`):
+
+```
+uint32 targetMask
+if mask & 0x18A02   packed guid  unit / corpse / game object / minipet (+0x30)
+if mask & 0x1010    packed guid  item / trade item               (+0x38)
+if mask & 0x20      packed guid  source transport (+0x48), float x, y, z (+0x58)
+if mask & 0x40      packed guid  dest transport   (+0x50), float x, y, z (+0x64)
+if mask & 0x2000    string       (+0x90, 128 bytes)
+```
+
+A point on the ground is `0x40`, a zero byte (no transport) and the point
+in server coordinates. On a ship (MO_TRANSPORT) the guid is the ship's and
+the point is in its frame. After it: `UNIT_SPELLCAST_SENT` (event 0x143,
+"player", name, rank, target name), the pending spell cleared, the cursor
+back.
+
+### SMSG_CAST_FAILED arguments (`0x808200`)
+
+The error report fills the GlobalStrings format for the result from the
+ids the server appended (AzerothCore's `Spell::WriteCastResultInfo`):
+
+| Result | Appended | Filled with |
+|---|---|---|
+| 0x1D-0x1F EQUIPPED_ITEM_CLASS[_MAINHAND/_OFFHAND] | class, subclass mask | ItemSubClassMask.dbc name for exactly (class, mask) (`0xAD3F3C`), else the first ItemSubClass row of the class with its bit in the mask, DisplayName (`0x7FEA30`, +0x28) |
+| 0x36 NEED_EXOTIC_AMMO | value | ItemSubClass of class 6, `1 << value` |
+| 0x37 NEED_MORE_ITEMS | item, count | "%d %s" count, item name; an unknown item reports nothing |
+| 0x5E ONLY_SHAPESHIFT | - | the spell's own Stances, SpellShapeshiftForm names joined with ", " |
+| 0x64 REAGENTS, 0x83 TOTEMS | item | item name |
+| 0x65 REQUIRES_AREA | area | AreaTable AreaName (+0x2C) |
+| 0x66 REQUIRES_SPELL_FOCUS | focus | SpellFocusObject name (+4) |
+| 0x81 TOO_MANY_OF_ITEM | limit category | ItemLimitCategory quantity and name (its own error id) |
+| 0x82 TOTEM_CATEGORY | category | TotemCategory name (+4) |
+| 0x93 PREVENTED_BY_MECHANIC | mechanic | SpellMechanic name (+4) |
+| 0x96 MIN_SKILL | skill, rank | SkillLine name (+0xC), rank |
+| 0xAC CUSTOM_ERROR | id | `SPELL_FAILED_CUSTOM_ERROR_<id>` |
+| 0xB5 FISHING_TOO_LOW | skill | the number |
+| 4 ALREADY_AT_FULL_POWER | - | the unit's power token (MANA, RAGE, ... `0x7FE4B0`) |
+
+### Wowee against this
+
+| # | Stock | Wowee before | Now |
+|---|---|---|---|
+| G1 | A location spell waits for a point (`0x80C790`) | sent at once with an empty target (TARGET_FLAG_SELF): the server refused Blizzard and Flamestrike | `spell_targeting::needsGroundTarget` (Targets + ImplicitTargetA[0]); the spell waits (`SpellHandler::groundTargeting_`) |
+| G2 | The circle: Spell-Shadow-Acceptable/Unacceptable, alpha blend, +/- R x +/- 2, unrotated | none | `OverlaySystem::setSpellTargetDecal`: the selection circle's lattice projector with its own textures, alpha pipeline and +/- 2 yd height ramp |
+| G3 | Radius from SpellRadius (effects 0, 1, per level), capped at 20; 1.389 out of range; none past 4x range | - | `decalHalfWidth`, `destRangeState` |
+| G4 | Cursor Cast in range, UnableCast otherwise; no object hover | hover cursors | as stock while targeting |
+| G5 | Left click on the ground casts there; right button down cancels; SpellStopTargeting / Escape cancel; a new cast replaces it | - | as stock (`GameScreen::processTargetInput`) |
+| G6 | `CMSG_CAST_SPELL` 0x40 + packed transport guid + xyz | no builder | `CastSpellPacket::buildDestTarget` (TBC/Classic without the guid) |
+| G6b | An item whose spell waits on a point (Saronite Bomb, Iron Grenade: `Targets` 0x40) waits the same way and goes out as `CMSG_USE_ITEM` (bag, slot, castCount, spell, item guid, glyph 0, flags 0, the same target block) | used at once with an empty target | `SpellHandler::beginItemGroundTargeting`, `UseItemPacket::buildDestTarget` (WotLK) |
+| G7 | `SpellIsTargeting` / `SpellStopTargeting` answer for any pending spell | item cursor only, booleans | the location spell too; 1 / nil |
+| G8 | SMSG_CAST_FAILED arguments filled into the format | only focus and totem ids read, the rest shown as "Must have a %s equipped" | every argument the server sends is read and formatted as above (`stockCastFailureText`) |
+
+Not done:
+
+- **Ground under a ship**: the point always goes out in world coordinates
+  with no transport guid (the click does not know it hit the ship's hull).
+- **SPELLMOD_RADIUS** and range modifiers are not applied to the circle.
+- **The summon preview model** (`0xD3F570`) is not shown.
+- **Unit-flag pending spells** (a heal pressed with no target and auto
+  self-cast off, which stock also leaves on the cursor) still resolve at
+  press time; `SpellTargetUnit` stays a no-op.
+- A location spell pressed **while casting** is dropped or queued like any
+  other; stock may let the circle come up during a cast.

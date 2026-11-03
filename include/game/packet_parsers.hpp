@@ -91,6 +91,13 @@ public:
         return CastSpellPacket::buildGameObjectTarget(spellId, targetGuid, castCount);
     }
 
+    /** Build CMSG_CAST_SPELL at a point on the ground (server coordinates,
+     *  in the transport's frame when transportGuid is not 0). */
+    virtual network::Packet buildCastSpellAtDest(uint32_t spellId, uint8_t castCount,
+                                                 uint64_t transportGuid, float x, float y, float z) {
+        return CastSpellPacket::buildDestTarget(spellId, castCount, transportGuid, x, y, z);
+    }
+
     /** Build CMSG_CAST_SPELL with SpellCastTargets targeting an item - Disenchant,
      *  Prospecting, Milling and the enchant formulas. */
     virtual network::Packet buildCastSpellOnItem(uint32_t spellId, uint64_t itemGuid) {
@@ -392,6 +399,8 @@ public:
     // TBC 2.4.3 CMSG_CAST_SPELL has no castFlags byte (WotLK added it)
     network::Packet buildCastSpell(uint32_t spellId, uint64_t targetGuid, uint8_t castCount) override;
     network::Packet buildCastGameObjectSpell(uint32_t spellId, uint64_t targetGuid, uint8_t castCount) override;
+    network::Packet buildCastSpellAtDest(uint32_t spellId, uint8_t castCount, uint64_t transportGuid,
+                                         float x, float y, float z) override;
     // TBC 2.4.3 CMSG_USE_ITEM uses spellIndex + castCount + itemGuid + targets.
     network::Packet buildUseItem(uint8_t bagIndex, uint8_t slotIndex,
                                  uint64_t itemGuid, uint32_t spellId = 0,
@@ -485,6 +494,8 @@ public:
                                          uint64_t playerGuid = 0) override;
     network::Packet buildCastSpell(uint32_t spellId, uint64_t targetGuid, uint8_t castCount) override;
     network::Packet buildCastGameObjectSpell(uint32_t spellId, uint64_t targetGuid, uint8_t castCount) override;
+    network::Packet buildCastSpellAtDest(uint32_t spellId, uint8_t castCount, uint64_t transportGuid,
+                                         float x, float y, float z) override;
     network::Packet buildUseItem(uint8_t bagIndex, uint8_t slotIndex,
                                  uint64_t itemGuid, uint32_t spellId = 0,
                                  uint64_t targetGuid = 0, uint64_t itemTargetGuid = 0,

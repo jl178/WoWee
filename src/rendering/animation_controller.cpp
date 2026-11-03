@@ -916,7 +916,13 @@ void AnimationController::updateCharacterAnimation() {
     // to avoid playing a falling animation for the whole ride.
     fi.grounded = m2TransportRiding_ ? true : cameraController->isGrounded();
     fi.jumping = cameraController->isJumping();
-    fi.swimming = cameraController->isSwimming();
+    // In the air with flight allowed (".gm fly", a flight form without its
+    // model) the character plays the swim set, as a flying mount does: the
+    // stock idle 0x71E340 and move 0x724500 pick SwimIdle 41 / Swim 42 and
+    // the swim strafes and backstroke for SWIMMING or FLYING (0x2200000).
+    // Without it the on-foot path had no flight at all and a flying
+    // character hung in the jump's fall pose.
+    fi.swimming = cameraController->isSwimming() || cameraController->isFlightAirborne();
     fi.sitting = cameraController->isSitting();
     fi.ascending = cameraController->isAscending();
     fi.descending = cameraController->isDescending();

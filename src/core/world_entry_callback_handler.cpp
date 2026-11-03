@@ -197,6 +197,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
             worldEntryMovementGraceTimer_ = 2.0f;
             taxiLandingClampTimer_ = 0.0f;
             lastTaxiFlight_ = false;
+            gameHandler_.endWorldPortHold();
             renderer_.getTerrainManager()->processReadyTiles();
             precacheNearbyTiles(renderer_.getTerrainManager(), renderPos, 8);
             return;
@@ -227,6 +228,9 @@ void WorldEntryCallbackHandler::setupCallbacks() {
                     renderer_.getCameraController()->suspendGravityFor(10.0f);
                     renderer_.getCameraController()->setEntryFloorAnchor(renderPos.z, 10.0f);
                 }
+                // The character is already at the destination; the reload
+                // only brings the ground. See endWorldPortHold.
+                gameHandler_.endWorldPortHold();
                 if (worldLoader_) worldLoader_->setPendingEntry(mapId, x, y, z);
                 return;
             }
@@ -261,6 +265,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
             // so this only enqueues tiles that aren't yet in the pipeline.
             // This ensures background workers immediately start loading everything
             // visible from the new position (hearthstone may land far from old location).
+            gameHandler_.endWorldPortHold();
             precacheNearbyTiles(renderer_.getTerrainManager(), renderPos, 8);
             return;
         }

@@ -612,6 +612,21 @@ network::Packet TbcPacketParsers::buildCastSpell(uint32_t spellId, uint64_t targ
     return packet;
 }
 
+// TBC 2.4.3 SpellCastTargets has no transport guid before a location: the
+// mask and x, y, z.
+network::Packet TbcPacketParsers::buildCastSpellAtDest(uint32_t spellId, uint8_t castCount,
+                                                      uint64_t /*transportGuid*/,
+                                                      float x, float y, float z) {
+    network::Packet packet(wireOpcode(LogicalOpcode::CMSG_CAST_SPELL));
+    packet.writeUInt32(spellId);
+    packet.writeUInt8(castCount);
+    packet.writeUInt32(0x40); // TARGET_FLAG_DEST_LOCATION
+    packet.writeFloat(x);
+    packet.writeFloat(y);
+    packet.writeFloat(z);
+    return packet;
+}
+
 network::Packet TbcPacketParsers::buildCastGameObjectSpell(uint32_t spellId, uint64_t targetGuid, uint8_t castCount) {
     network::Packet packet(wireOpcode(LogicalOpcode::CMSG_CAST_SPELL));
     packet.writeUInt32(spellId);

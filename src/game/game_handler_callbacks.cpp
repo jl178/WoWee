@@ -1649,6 +1649,10 @@ void GameHandler::setPosition(float x, float y, float z) {
     if (movementHandler_) movementHandler_->setPosition(x, y, z);
 }
 
+void GameHandler::endWorldPortHold() {
+    if (movementHandler_) movementHandler_->endWorldPortHold();
+}
+
 void GameHandler::setOrientation(float orientation) {
     if (movementHandler_) movementHandler_->setOrientation(orientation);
 }

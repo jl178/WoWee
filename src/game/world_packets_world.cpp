@@ -558,6 +558,25 @@ void UseItemPacket::writeTargets(network::Packet& packet, uint64_t targetGuid,
     }
 }
 
+network::Packet UseItemPacket::buildDestTarget(uint8_t bagIndex, uint8_t slotIndex, uint64_t itemGuid,
+                                               uint32_t spellId, uint8_t castCount,
+                                               uint64_t transportGuid, float x, float y, float z) {
+    network::Packet packet(wireOpcode(Opcode::CMSG_USE_ITEM));
+    packet.writeUInt8(bagIndex);
+    packet.writeUInt8(slotIndex);
+    packet.writeUInt8(castCount);
+    packet.writeUInt32(spellId);
+    packet.writeUInt64(itemGuid);
+    packet.writeUInt32(0);  // glyph index
+    packet.writeUInt8(0);   // cast flags
+    packet.writeUInt32(0x40);  // TARGET_FLAG_DEST_LOCATION
+    packet.writePackedGuid(transportGuid);
+    packet.writeFloat(x);
+    packet.writeFloat(y);
+    packet.writeFloat(z);
+    return packet;
+}
+
 network::Packet OpenItemPacket::build(uint8_t bagIndex, uint8_t slotIndex) {
     network::Packet packet(wireOpcode(Opcode::CMSG_OPEN_ITEM));
     packet.writeUInt8(bagIndex);

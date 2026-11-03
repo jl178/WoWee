@@ -389,6 +389,19 @@ network::Packet ClassicPacketParsers::buildCastSpell(uint32_t spellId, uint64_t 
     return packet;
 }
 
+// Vanilla: the uint16 mask and x, y, z.
+network::Packet ClassicPacketParsers::buildCastSpellAtDest(uint32_t spellId, uint8_t /*castCount*/,
+                                                          uint64_t /*transportGuid*/,
+                                                          float x, float y, float z) {
+    network::Packet packet(wireOpcode(LogicalOpcode::CMSG_CAST_SPELL));
+    packet.writeUInt32(spellId);
+    packet.writeUInt16(0x40); // TARGET_FLAG_DEST_LOCATION
+    packet.writeFloat(x);
+    packet.writeFloat(y);
+    packet.writeFloat(z);
+    return packet;
+}
+
 network::Packet ClassicPacketParsers::buildCastGameObjectSpell(uint32_t spellId, uint64_t targetGuid, uint8_t /*castCount*/) {
     network::Packet packet(wireOpcode(LogicalOpcode::CMSG_CAST_SPELL));
     packet.writeUInt32(spellId);

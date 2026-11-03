@@ -1191,6 +1191,25 @@ network::Packet CastSpellPacket::buildItemTarget(uint32_t spellId, uint64_t item
     return packet;
 }
 
+network::Packet CastSpellPacket::buildDestTarget(uint32_t spellId, uint8_t castCount,
+                                                 uint64_t transportGuid, float x, float y, float z) {
+    network::Packet packet(wireOpcode(Opcode::CMSG_CAST_SPELL));
+    packet.writeUInt8(castCount);
+    packet.writeUInt32(spellId);
+    packet.writeUInt8(0x00); // castFlags: no trajectory block
+    // SpellCastTargets (0x9AB8B0): the mask, then for DEST_LOCATION the
+    // transport's packed guid - a single zero byte when the point is on the
+    // ground - and the point.
+    packet.writeUInt32(0x40); // TARGET_FLAG_DEST_LOCATION
+    packet.writePackedGuid(transportGuid);
+    packet.writeFloat(x);
+    packet.writeFloat(y);
+    packet.writeFloat(z);
+    LOG_DEBUG("Built CMSG_CAST_SPELL: spell=", spellId, " dest=(", x, ", ", y, ", ", z,
+              ") transport=0x", std::hex, transportGuid, std::dec);
+    return packet;
+}
+
 network::Packet CancelAuraPacket::build(uint32_t spellId) {
     network::Packet packet(wireOpcode(Opcode::CMSG_CANCEL_AURA));
     packet.writeUInt32(spellId);
