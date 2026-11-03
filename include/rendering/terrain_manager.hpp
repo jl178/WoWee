@@ -276,7 +276,7 @@ public:
      * Set map name
      * @param mapName Map name (e.g., "Azeroth", "Kalimdor")
      */
-    void setMapName(const std::string& mapName) { this->mapName = mapName; }
+    void setMapName(const std::string& mapName);
     [[nodiscard]] bool isCustomZone() const { return isCustomZone_; }
     void setCustomZone(bool custom) { isCustomZone_ = custom; }
 
@@ -518,6 +518,17 @@ private:
     void removeSoundEmitters(std::vector<uint32_t>& ids);
 
     std::string mapName = "Azeroth";
+    /// The map the per-map data below was read for (setMapName).
+    std::string mapWideDataFor_;
+    /// The map's WDT MPHD 0x4: its alpha maps are blended as weights (read
+    /// by the tile workers, written on the main thread by setMapName).
+    std::atomic<bool> mapBigAlpha_{false};
+    /// Read the map's WDT flags and hand its WDL to the horizon.
+    void loadMapWideData();
+    /// A tile's blend mode and `_s` tilesets (stock_terrain); worker thread.
+    void markTerrainMaterial(pipeline::TerrainMesh& mesh) const;
+    /// The tileset files a tile is drawn with, by MTEX index.
+    static std::vector<std::string> drawnTerrainTextures(const pipeline::TerrainMesh& mesh);
 
     // Loaded tiles (keyed by coordinate)
     std::unordered_map<TileCoord, std::unique_ptr<TerrainTile>, TileCoord::Hash> loadedTiles;

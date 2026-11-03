@@ -131,6 +131,20 @@ public:
     /// False when the model or the sequence has none.
     bool getCastReleaseEvent(uint32_t instanceId, uint32_t animationId, uint32_t& timeMs,
                              glm::vec3* worldPos = nullptr);
+    /// The ends of a held weapon's swing trail ($WTB, $WTT) where they are
+    /// now, for the unit's weapon attachment `index`. False when it has no
+    /// such weapon or the weapon's model has no trail points.
+    bool getWeaponTrailPoints(uint32_t instanceId, size_t index, glm::vec3& bottom, glm::vec3& top);
+    /// A loose copy of the weapon the unit holds at attachment 1 (main hand)
+    /// or 2 (off hand), standing in the world: a thrown weapon's missile.
+    /// 0 when the unit holds nothing there.
+    uint32_t createWeaponCopy(uint32_t instanceId, uint32_t handAttachment, const glm::vec3& position);
+    /// How many weapons the unit holds (weapon attachments).
+    size_t getWeaponAttachmentCount(uint32_t instanceId) const;
+    /// Hold the model's pose: its animation clock stops (a SpellVisualKit
+    /// CharProc 11, Ice Block's freeze, Wow.exe 0x6F80B0). atMs >= 0 puts
+    /// the current animation at that time first.
+    void setInstanceAnimationFrozen(uint32_t instanceId, bool frozen, float atMs = -1.0f);
     /// Length of an animation on this instance's model, in ms (0 if absent).
     [[nodiscard]] uint32_t getAnimationDurationMs(uint32_t instanceId, uint32_t animationId) const;
 
@@ -166,6 +180,9 @@ public:
     void moveInstanceTo(uint32_t instanceId, const glm::vec3& destination, float durationSeconds);
     void startFadeIn(uint32_t instanceId, float durationSeconds);
     void setInstanceOpacity(uint32_t instanceId, float opacity);
+    /// The model's colour (CM2Model +0x180): it scales the sun's diffuse light
+    /// on the model and leaves the ambient alone. White is none.
+    void setInstanceDiffuseTint(uint32_t instanceId, const glm::vec3& tint);
     /// The uniform scale an instance draws at (its display's size).
     void setInstanceScale(uint32_t instanceId, float scale);
     /// Seat a rider on a mount the stock way (0x73D5D0): the rider is a child
@@ -463,6 +480,7 @@ private:
         int upperSequenceIndex[3] = {-1, -1, -1};
         float upperTime = -1.0f;      // ms into the overlay; < 0 = none
         float animationSpeed = 1.0f;  // setAnimationSpeed; reset by playAnimation
+        bool animationFrozen = false;  // setInstanceAnimationFrozen
         float upperDurationMs = 0.0f;
         std::vector<int8_t> boneUpper;  // Per bone: 0 left arm, 1 right arm, 2 torso/head, -1 lower body
         float animationTime = 0.0f;
@@ -504,6 +522,7 @@ private:
 
         // Opacity (for fade-in)
         float opacity = 1.0f;
+        glm::vec3 diffuseTint{1.0f};  // see setInstanceDiffuseTint
         float fadeInTime = 0.0f;     // elapsed fade time (seconds)
         float fadeInDuration = 0.0f; // total fade duration (0 = no fade)
 

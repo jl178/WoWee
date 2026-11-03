@@ -589,6 +589,8 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.fogColor = glm::vec4(lp.fogColor, 1.0f);
         currentFrameData.fogParams.x = lp.fogStart;
         currentFrameData.fogParams.y = lp.fogEnd;
+        // The terrain highlight is the sun's colour (stock c27, channel 9).
+        if (terrainRenderer) terrainRenderer->setSunSpecular(lp.sunColor);
         // Under water the fog is Light.dbc's underwater set (LightingManager
         // switches to it with the camera below the surface), so no fixed blue
         // is mixed in here any more.
@@ -2009,7 +2011,7 @@ void Renderer::updateMinimapWmo(uint32_t instanceId, int32_t tightGroupIndex) {
             // WMO name the area: Ironforge's boxes reach up through the
             // mountain, and standing on top of it is Dun Morogh.
             if (view.currentGroup < view.groups.size() &&
-                (view.groups[view.currentGroup].flags & wmo_minimap::kGroupIndoor)) {
+                wmo_minimap::groupIsIndoorForMinimap(view.groups[view.currentGroup].flags)) {
                 const float x = characterPosition.x, y = characterPosition.y, z = characterPosition.z;
                 const auto floor = wmoRenderer->getFloorHeight(x, y, z + 2.0f, nullptr, z);
                 std::optional<float> ground;

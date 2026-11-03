@@ -357,6 +357,10 @@ struct M2Model {
         uint32_t timeMs = 0;
     };
     std::vector<EffectSound> effectSounds;
+    // A spell effect model's camera shakes: $SHK events, the data field a
+    // SpellEffectCameraShakes id (Wow.exe 0x704C30), at timeMs into the
+    // birth. Eight 3.3.5 models: the meteor, infernal and abyssal impacts.
+    std::vector<EffectSound> effectShakes;
 
     // Weapon hand-off ($SHL / $SHR) per sequence index, in ms: the frame of
     // Sheath (89) / HipSheath (90) where the hand reaches the sheath and the
@@ -376,6 +380,15 @@ struct M2Model {
         glm::vec3 position{0.0f};
     };
     std::vector<CastReleaseEvent> castReleaseEvents;
+
+    // A weapon's swing trail runs between two points: $WTB (bottom) and
+    // $WTT (top), each a bone and a point (Wow.exe 0x7E4F50). 1106 of the
+    // 1379 3.3.5 weapon models carry both. bone UINT32_MAX = none.
+    struct WeaponTrailPoint {
+        uint32_t bone = UINT32_MAX;
+        glm::vec3 position{0.0f};
+    };
+    WeaponTrailPoint weaponTrailBottom, weaponTrailTop;
 
     // Bone lookup table (vertex bone indices reference this to get global bone index)
     std::vector<uint16_t> boneLookupTable;

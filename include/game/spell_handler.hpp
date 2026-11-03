@@ -455,6 +455,14 @@ private:
     bool spellVisualPlaysSounds(uint32_t spellId, SpellSoundMoment moment);
     // The unit's auras' SpellVisual state kits, after its aura list changed.
     void syncAuraStateVisuals(uint64_t guid, const std::vector<AuraSlot>& auras);
+    // Give the spell visual system the ways to find units: their model, feet
+    // and channel target (once).
+    void ensureSpellVisualResolvers();
+    // Whom a unit channels at: UNIT_FIELD_CHANNEL_OBJECT, else whom it targets.
+    uint64_t resolveChannelTarget(uint64_t casterGuid);
+    // The radius of the area a spell lays (its largest effect radius,
+    // SpellRadius.dbc), 0 when it names none.
+    float resolveSpellAreaRadius(uint32_t spellId);
     // The area kits of a spell cast at a ground point (SPELL_GO dest).
     void triggerGroundAreaVisual(const SpellGoData& data, uint32_t visualId);
 

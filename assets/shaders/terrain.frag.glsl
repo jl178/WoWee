@@ -39,6 +39,13 @@ layout(set = 1, binding = 7) uniform TerrainParams {
     int hasLayer1;
     int hasLayer2;
     int hasLayer3;
+    // Each layer's MCLY flags (0x7 scroll direction, 0x38 its speed, 0x40
+    // scrolls, 0x80 unlit, 0x100 has an alpha map), and bit 16 when its
+    // texture is the `_s` tileset, whose alpha is the specular mask.
+    ivec4 layerFlags;
+    // x: the map has big alpha (MPHD 0x4), so the layers are weights rather
+    // than a chain of lerps. y: some layer is unlit. z: some layer scrolls.
+    ivec4 chunkMode;
 };
 
 // MCSH, the chunk's baked shadow, as light: 1 lit, 0 under the shadow the map
@@ -60,6 +67,7 @@ layout(location = 1) in vec3 Normal;
 layout(location = 2) in vec2 TexCoord;
 layout(location = 3) in vec2 LayerUV;
 layout(location = 4) in vec3 VertColor;   // MCCV, doubled: 1.0 is neutral
+layout(location = 5) in vec3 Specular;    // the stock per-vertex highlight
 
 layout(location = 0) out vec4 outColor;
 
@@ -117,41 +125,6 @@ vec3 localLightContribution(vec3 pos, vec3 normal, vec3 albedo) {
     return sum;
 }
 
-/// How much of the seam blur below is worth paying for at this distance.
-/// Set once in main() from the fragment's distance; see sampleAlpha.
-float gBlurDistFade = 1.0;
-
-float sampleAlpha(sampler2D tex, vec2 uv) {
-    // Smooth 9-tap box near chunk edges to hide alpha-map seams;
-    // blends gradually to avoid a visible ring at the transition.
-    // Wider feather (8 texels) makes per-chunk alpha differences
-    // bleed across the boundary so the chunk grid stops reading
-    // as a hard step.
-    vec2 edge = min(uv, 1.0 - uv);
-    float border = min(edge.x, edge.y);
-    float blurWeight = 1.0 - smoothstep(1.0 / 64.0, 8.0 / 64.0, border);
-    // The seam this hides is a chunk edge seen close up. Far enough away a
-    // whole chunk is a few pixels across and the blur is hiding something
-    // nobody can see - while still costing four taps per layer, on the band
-    // that is 44% of every chunk, on the pass that covers the screen. At a
-    // 2400-yard view distance that is most of the terrain drawn.
-    blurWeight *= gBlurDistFade;
-    float center = texture(tex, uv).r;
-    if (blurWeight < 0.001) return center;
-    // Four taps at half-texel offsets, not nine at whole ones. The sampler
-    // is linear, so each tap already averages a 2x2 block, and the four
-    // together cover the same 3x3 footprint as a tent rather than a box.
-    // The band this runs in is 44% of every chunk, on the pass that
-    // covers most of the screen, so the tap count is what this costs.
-    vec2 h = vec2(0.5 / 64.0);
-    float avg = texture(tex, uv + vec2(-h.x, -h.y)).r
-              + texture(tex, uv + vec2( h.x, -h.y)).r
-              + texture(tex, uv + vec2(-h.x,  h.y)).r
-              + texture(tex, uv + vec2( h.x,  h.y)).r;
-    avg *= 0.25;
-    return mix(center, avg, blurWeight);
-}
-
 // The air between the camera and this point, out of the fog volume: rgb is
 // the light it scatters toward the camera, a how much of the point shows
 // through it. See VolumetricFog.
@@ -179,36 +152,61 @@ vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
     return color;
 }
 
+// The stock layer scroll (MCLY 0x40), in repeats, as stock_terrain::animOffset:
+// eight directions stepped by the frame time and wrapped to 0 at 64 (only
+// upward), divided by the speed table (0x7831a0, 0x7d2d70, 0xaf14f8).
+vec2 layerScroll(int flags) {
+    if ((flags & 0x40) == 0) return vec2(0.0);
+    const vec2 kDir[8] = vec2[8](vec2(-1, 0), vec2(-1, 1), vec2(0, 1), vec2(1, 1),
+                                 vec2(1, 0), vec2(1, -1), vec2(0, -1), vec2(-1, -1));
+    const float kSpeed[8] = float[8](64.0, 48.0, 32.0, 16.0, 8.0, 4.0, 2.0, 1.0);
+    vec2 d = kDir[flags & 7];
+    float t = fogParams.z;
+    vec2 acc = vec2(d.x > 0.0 ? mod(t, 64.0) : d.x * t, d.y > 0.0 ? mod(t, 64.0) : d.y * t);
+    float k = (1.0 / 0.24) / kSpeed[(flags >> 3) & 7] * 0.125;
+    return -acc.yx * k;
+}
+
+// A layer's weight from its alpha map; 0 without one (MCLY 0x100 clear), as
+// the client reads its zero row for it (0x7b74a0).
+float layerAlpha(int has, int flags, sampler2D alphaTex) {
+    if (has == 0 || (flags & 0x100) == 0) return 0.0;
+    return texture(alphaTex, LayerUV).r;
+}
+
+// rgb the texture, a its specular mask (the `_s` alpha, else none).
+vec4 layerTexel(sampler2D tex, int flags) {
+    vec2 uv = TexCoord;
+    if (chunkMode.z != 0) uv += layerScroll(flags);
+    vec4 t = texture(tex, uv);
+    t.a = (flags & 0x10000) != 0 ? t.a : 0.0;
+    return t;
+}
+
 void main() {
     float fragDist = length(viewPos.xyz - FragPos);
-    gBlurDistFade = 1.0 - smoothstep(140.0, 260.0, fragDist);
 
-    vec4 baseColor = texture(uBaseTexture, TexCoord);
-
-    // WoW terrain: layers are blended sequentially, each on top of the previous result.
-    // Alpha=1 means the layer fully covers everything below; alpha=0 means invisible.
-    vec4 finalColor = baseColor;
-    if (hasLayer1 != 0) {
-        float a1 = sampleAlpha(uLayer1Alpha, LayerUV);
-        // Where the layer is not painted, mix() returns what it was given and
-        // the fetch that fed it was work for nothing. A layer covers part of a
-        // chunk, so whole regions of the screen take this branch together.
-        if (a1 > 0.002) finalColor = mix(finalColor, texture(uLayer1Texture, TexCoord), a1);
+    // The stock blend (shaders\pixel\arbfp1\terrain1.bls, picked by 0x79e5c0):
+    // without big alpha a chain of lerps, each layer over the result so far;
+    // with it (Northrend) independent weights, the base taking what is left.
+    // Both written as four weights, so a layer whose weight is nothing is
+    // never fetched.
+    float a1 = layerAlpha(hasLayer1, layerFlags.y, uLayer1Alpha);
+    float a2 = layerAlpha(hasLayer2, layerFlags.z, uLayer2Alpha);
+    float a3 = layerAlpha(hasLayer3, layerFlags.w, uLayer3Alpha);
+    vec4 w;
+    if (chunkMode.x != 0) {
+        w = vec4(1.0 - clamp(a1 + a2 + a3, 0.0, 1.0), a1, a2, a3);
+    } else {
+        w = vec4((1.0 - a1) * (1.0 - a2) * (1.0 - a3), a1 * (1.0 - a2) * (1.0 - a3),
+                 a2 * (1.0 - a3), a3);
     }
-    if (hasLayer2 != 0) {
-        float a2 = sampleAlpha(uLayer2Alpha, LayerUV);
-        // Where the layer is not painted, mix() returns what it was given and
-        // the fetch that fed it was work for nothing. A layer covers part of a
-        // chunk, so whole regions of the screen take this branch together.
-        if (a2 > 0.002) finalColor = mix(finalColor, texture(uLayer2Texture, TexCoord), a2);
-    }
-    if (hasLayer3 != 0) {
-        float a3 = sampleAlpha(uLayer3Alpha, LayerUV);
-        // Where the layer is not painted, mix() returns what it was given and
-        // the fetch that fed it was work for nothing. A layer covers part of a
-        // chunk, so whole regions of the screen take this branch together.
-        if (a3 > 0.002) finalColor = mix(finalColor, texture(uLayer3Texture, TexCoord), a3);
-    }
+    const float kSkip = 0.002;
+    vec4 t0 = w.x > kSkip ? layerTexel(uBaseTexture, layerFlags.x) : vec4(0.0);
+    vec4 t1 = w.y > kSkip ? layerTexel(uLayer1Texture, layerFlags.y) : vec4(0.0);
+    vec4 t2 = w.z > kSkip ? layerTexel(uLayer2Texture, layerFlags.z) : vec4(0.0);
+    vec4 t3 = w.w > kSkip ? layerTexel(uLayer3Texture, layerFlags.w) : vec4(0.0);
+    vec4 finalColor = t0 * w.x + t1 * w.y + t2 * w.z + t3 * w.w;
 
     vec3 norm = normalize(Normal);
 
@@ -257,8 +255,22 @@ void main() {
     shadow = min(shadow, texture(uBakedShadow, LayerUV).r);
 
     vec3 light = min(rtAmbient(rt, ambientColor.rgb) + diff * lightColor.rgb, vec3(1.0));
-    vec3 result = light * VertColor * finalColor.rgb;
+    vec3 lit = light * VertColor;
+    vec3 result = lit * finalColor.rgb;
+    if (chunkMode.y != 0) {
+        // MCLY 0x80, an unlit layer (lava): its texture as it is, where the
+        // others take primary * texture * 2 (terrain1.bls variants 16-31,
+        // c1 = 0 for the layer, 0x7d2d70). Blended by the same weights.
+        vec3 s0 = (layerFlags.x & 0x80) != 0 ? t0.rgb : t0.rgb * lit;
+        vec3 s1 = (layerFlags.y & 0x80) != 0 ? t1.rgb : t1.rgb * lit;
+        vec3 s2 = (layerFlags.z & 0x80) != 0 ? t2.rgb : t2.rgb * lit;
+        vec3 s3 = (layerFlags.w & 0x80) != 0 ? t3.rgb : t3.rgb * lit;
+        result = s0 * w.x + s1 * w.y + s2 * w.z + s3 * w.w;
+    }
     result *= kStockShadowFloor + (1.0 - kStockShadowFloor) * shadow;
+    // The highlight, masked by the blended `_s` alpha and the shadow, added
+    // after the floor and not doubled (terrain1.bls: spec * tex.a * lit).
+    result += Specular * finalColor.a * shadow;
 
     result += localLightContribution(FragPos, norm, finalColor.rgb);
     // The film over the ground is smoother than the ground: half the bump.

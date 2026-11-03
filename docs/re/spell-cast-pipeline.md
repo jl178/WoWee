@@ -258,7 +258,141 @@ Then:
   launched (`0x7022D0`): on a unit target as a state kit (type 2), at a
   point as type 7.
 
-## 7. Gaps in Wowee, and what changed
+## 8. Character procedures (SpellVisualKit CharProc)
+
+A kit has four `CharProc` slots (kit +0x44..+0x50) and four parameters per
+slot, `CharParamZero..Three` (kit +0x54, +0x64, +0x74, +0x84, one column per
+slot). `CGUnit_C` vtable +0xFC (`0x73B140`) runs them after the kit's
+animation, through `0x7265C0`, on the unit the kit plays on. -1 is an empty
+slot.
+
+| Proc | Kits | What it does (function) |
+|---|---|---|
+| 0, 12 | 5 class spells, 935 rows of chain effects | A chain effect (`0x7FC950` -> `0x7FC5F0`): ParamZero the SpellChainEffects row, ParamTwo != 0 it lasts as long as the kit, ParamThree != 0 every hop starts at the source. Section 9. |
+| 1 | 335 | The unit's model colour (`0x7178E0` drops the same spell's older one, `0x6F76C0` puts the new one at the head of the unit's list +0xAFC). ParamZero is 0xRRGGBB. |
+| 6 | 6 | A full-screen colour over the spell's cast time (`0x7FA450`). |
+| 8 | 130 | A swing trail on the weapons in hand (`0x715BA0` -> `0x7E4FF0`): colour ParamZero, alpha ParamThree, ParamTwo ms. Section 12. |
+| 9 | 55 | An area's falling shards. Read by `DynamicObject_C` (`0x704F60`), not by `0x7265C0`. Section 10. |
+| 11 | 90 | Hold the unit's pose (`0x6F80B0`): the animation clock of the unit model (+0xB4) and its mount (+0x98C) stops, at ParamZero seconds into the animation when that is set. Ice Block. |
+| 13 | 36 | A flash of the model colour (`0x7265C0` case 13 -> unit +0xB10..+0xB1C): ParamZero for ParamOne s, back to white over ParamTwo s (`0x71A9A0`, `0x6ACC50` lerps by 255 x the time left). |
+| 14 | 93 | Transparency, ParamZero (`0x71AB80`, `0x71ABE0`). Already in Wowee (`EntitySpawner::auraKitTransparency`). |
+| 15 | 7 | Scale the unit by ParamZero over ParamOne/Two/Three (`0x71A940`). |
+| 16 | 1 | A mount-like display from the spell's aura 78 (`0x6F9670`). |
+| 17 | 14 | A model by id ParamOne (`0x6F8650` -> `0x67CA30`). |
+| 2, 3, 5, 7, 10 | 51 | Not read by `0x7265C0`. |
+
+The model colour (`0x720DB0`, every frame) is the flash while one runs,
+else the newest CharProc 1 colour, else white. It goes to the model's
++0x180..+0x188, which `CM2Model` (`0x82E140`) multiplies into the sun's
+diffuse light only; the ambient (+0x18C) is added untinted. Frostbolt's
+chill is 0x3C3CFF, Immolate's 0xE75641, Frost Nova's 0x6666FF.
+
+## 9. Chain effects (SpellChainEffects)
+
+**Record.** 3.3.5a's file is 48 columns in 177 bytes: 39 four-byte
+columns, then Alpha, Red, Green, Blue and BlendMode as single bytes
+(+0x9C..+0xA0), then Combo (a string), RenderLayer, TextureLength and
+WavePhase. Read as 48 four-byte columns the tail is garbage. Combo is up to
+twelve four-byte groups, each another row id packed seven bits a byte so the
+string has no zero byte (`0x9A8CE0`); every row named draws its own bolts
+along the same hops (Drain Life 719 adds 720, 731-735).
+
+**Points and hops** (`0x7265C0` case 0, `0x7FC5F0`, `0x7FA4D0`):
+
+- The source is the unit the kit plays on. The targets are the unit's
+  channel object when the kit's spell is the unit's channel spell
+  (`UNIT_FIELD_CHANNEL_OBJECT`, +0x38 of the unit block), else the unit's
+  stored target list. `0x724F50` stores SPELL_GO's hit list backwards and
+  `0x7FA4D0` reads it backwards, so the hops run caster -> first hit ->
+  second hit. The unit itself is left out.
+- Hop i: from point i (point 0 with ParamThree), to point i+1, from
+  `SegDelay + i * DelayBetweenEffects` ms to that plus `SegDuration`. With
+  ParamTwo the hops never end; the object goes with the kit's effect.
+- Each frame (`0x7FAE90`): the source end is `0x7FAA40` for point 0 (the
+  visual's MissileAttachment, else the model's `$CSL` point, else 3/4 of the
+  unit's height) and `0x7FABF0` otherwise (the visual's
+  MissileDestinationAttachment plus MissileImpactOffset). An end that cannot
+  be placed hides the bolt (`0x9A9770`) but keeps it.
+
+**The bolt** (`CLightning`, Common\Lightning.cpp):
+
+- Joints (`0x9AB2E0`): `round(length / AvgSegLen) + 2`, or `JointCount`
+  with flag 0x1, plus one, 2..1000. Each is rolled (`0x9A90C0`) to an offset
+  of up to `NoiseScale * length + JointOffsetRadius` in the bolt's side/up
+  plane, a drift of up to `JointMoveSpeed`, and a timer. Flag 0x4: a joint
+  re-rolls when its timer runs out; else it drifts.
+- Laying (`0x9A9CA0`; flag 0x2 `0x9A9DC0`): each joint is put off the
+  straight line by its offset, eased by `JointSmoothness`. With flag 0x2
+  every `JointsPerMinorJoint * MinorJointsPerMajorJoint`th joint is a major
+  (offset x MajorJointScale off the whole line), every `JointsPerMinorJoint`th
+  a minor (x MinorJointScale, off the line between its majors), the rest off
+  the line between their minors.
+- Wave (`0x9A9B30`): `sin(WaveFreq * t * length + phase)`, the phase
+  falling at `WaveSpeed` a second, along a direction at `WaveAngle` round the
+  line (rolled between Min/MaxWaveAngle, turning at Min/MaxWaveSpin); flag
+  0x8 turns the wave round the line instead. Arc: ArcHeight at ArcAngle.
+  Both are scaled by `1 - 4 (t - 0.5)^2`, so the ends stay put.
+- Strip (`0x9AA210`): two vertices a joint, `Width` either side across
+  `segment x (mid - camera)`; a joint takes the mean of its two segments'.
+  Flag 0x80: one width direction for the whole bolt. Both ends come to a
+  point. u runs 0..1 along it, scaled to `length / TextureLength` with flag
+  0x100, shifted by a random offset and `TexCoordScale` turns a second
+  (`fmod`, `0x9AB3B0`); v is 0..1 across.
+- Flicker (flag 0x10): on for Min..MaxFlickerOn s, off for
+  Min..MaxFlickerOff, re-rolled as it comes back. Pulse (flag 0x20): only a
+  stretch PulseOnLength long, faded over PulseFadeLength at each end, shows,
+  PulsePos yards down the bolt, moving at PulseSpeed; flag 0x40 (or a
+  negative speed) loops it.
+- Colour: the row's ARGB bytes on every vertex, the pulse writing alpha;
+  blend `BlendMode` (EGxBlend: 2 alpha, 3 add). Drawn by RenderLayer 0..3.
+
+## 10. Area shards (SpellVisualKitAreaModel)
+
+A DynamicObject (`0x704F60`, at creation) looks at its spell's
+PersistentAreaKit: a CharProc 9 makes a "BlizzardObject" (`0x7FBD70`,
+`0x7FB5B0`) with the SpellVisualKitAreaModel row ParamZero (by place in
+the table; past the end it is Blizzard_Impact_Base), the object's radius,
+and ParamOne a second scaled by the spell detail slider
+(`(n * 1/9 * 0.9) + 0.1`, 1.0 at the top). The kit's SoundID loops at the
+object. Each frame (`0x7FC220`) the rate (the clock capped at 1/15 s)
+spawns shards: a uniform fraction of the radius along a uniform direction,
+dropped to the ground between 16.7 yd above and 33.3 below, shown 0..510 ms
+later, played once and removed. The object going stops the spawning; shards
+in the air finish. Blizzard 5 a second of Blizzard_Impact_Base, Rain of
+Fire 5 of RainOfFire_Impact_Base, Hurricane 0.7 of CallLightning_Impact,
+Volley 5 of ArcaneShot_Area, Death and Decay 5 of DeathAndDecay.
+
+## 11. Camera shakes
+
+- A kit's ShakeID (`0x73B140` -> `0x7FA620`) and a spell model's `$SHK`
+  event (`0x704C30`, data = the id) name a SpellEffectCameraShakes row, whose
+  three columns are CameraShakes rows. Each goes on the camera's list
+  (`0x606330`) with the place it went off.
+- Each frame (`0x606970`): `t = elapsed + Phase`; past `Duration` it goes.
+  Its size is `Amplitude / 36` yd, full within 9 yd of the player,
+  `0.7^((d - 9) / 9)` out to 80, nothing beyond (`0x6004B0`). Only the
+  strongest of each direction plays: `sin(2 pi Frequency t)` x size, times
+  `exp(-t Coefficient)` for ShakeType 1, along the player's facing
+  (Direction 0), across it (1) or up (2) (`0x5FE6C0`).
+
+## 12. Swing trails
+
+CharProc 8 calls `0x7E4FF0` on each weapon model in the hand. The weapon's
+`$WTB` and `$WTT` events (1106 of 1379 weapon models) are laid down every
+frame for ParamTwo ms (`0x7E4F50`). The trail (`0x7E4CE0`) keeps
+`alpha / step` edges, `step = frame ms / 300 x alpha` (about 300 ms of
+blade); from oldest to newest each edge is a step dimmer; past half the
+duration the alpha drops a step a frame; under two edges it is gone. An
+untextured, alpha-blended strip in the colour ParamZero.
+
+## 13. More kit models (SpellVisualKitModelAttach)
+
+`0x745230` walks the kit's attach rows (`0x7FA9F0`, `0x7FAA20`): each is an
+effect model at an M2 attachment id (-1: the kit's point, played as its
+world effect) with an offset and a yaw/pitch/roll. At a point only the -1
+rows have a place.
+
+## 14. Gaps in Wowee, and what changed
 
 | # | Stock | Wowee before | Now |
 |---|---|---|---|
@@ -275,12 +409,21 @@ Then:
 | 11 | Stopped kits fade over 0.15 s | 0.25 s | 0.15 s |
 | 12 | A kit's AnimID plays as given (UseStandingLoop, ReadyThrown, ChannelCastOmni...) | precast/channel animations kept only if ReadySpell*/ChannelCast* | any animation the model has, except wounds and deaths |
 | 13 | Weapons put away for spell-cast animations (`WeaponFlags` 0x4) | weapons stayed in hand | done by the melee work (`presentedSheath`, `0x738180`) |
+| 14 | Chain effects (CharProc 0/12, section 9) | none: Chain Lightning, Chain Heal, Drain Life, Mind Flay, Death Grip drew no beam | `LightningBolt` (stock CLightning) per hop, along SPELL_GO's hit list or the channel object, drawn as strips with the ribbons |
+| 15 | Model colour (CharProc 1, 13) | none | per-instance diffuse tint in `character.frag`, newest tint per unit, flashes over it |
+| 16 | Area shards (CharProc 9, section 10) | Blizzard, Rain of Fire, Hurricane, Volley, Death and Decay showed only their cast and impact kits | shards at the stock rate over the spell's radius, on the ground, for the area's life |
+| 17 | Kit ShakeID and model `$SHK` (section 11) | none (SMSG_CAMERA_SHAKE only, with a guessed size) | CameraShakes rows on the camera, stock attenuation and strongest-per-axis |
+| 18 | Swing trails (CharProc 8, section 12) | none | `$WTB/$WTT` edges on the weapons in hand, stock fade |
+| 19 | Held pose (CharProc 11) | none | the unit's animation clock stops for the kit's life |
+| 20 | SpellVisualKitModelAttach | not loaded | loaded; models at the attachment with offset and turn |
+| 21 | Weapon missiles (`MissileModel` -1/-2) | nothing flew | a copy of the hand's weapon spins to the target, impact on landing |
+| 22 | A triggered spell's SPELL_GO under another cast (Hellfire's and Blizzard's ticks) | ended the caster's cast state and its animation at the first tick | leaves the cast alone |
 
 Not changed:
 
-- **Weapon missiles** (`MissileModel` -1/-2/-3): the caster's weapon model as
-  the missile. Wowee flies nothing for these.
-- **SpellVisualKitModelAttach** (591 rows): not loaded.
+- **Ranged weapon missiles** (`MissileModel` -3, -4, -5): not flown.
+- **CharProc 6** (screen colour), **15** (scale), **16**, **17**: not done.
+- **Missile targeting kit** (SpellVisual 22, 17 visuals): not played.
 - **MissileFollowGround units**: Wowee reads hundredths of a yard and the
   approach as yards. The stock reads thousandths and the approach as a
   fraction of the path. The stock update loop that uses them was not read,

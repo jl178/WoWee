@@ -37,24 +37,25 @@ void main() {
         if (dist > 0.5) discard;
     }
 
+    // push.rotation is the player's facing (0 north, a quarter turn west) when
+    // the map turns with it - rotateMinimap - and 0 when it is north-up. A
+    // screen offset (right, down) is turned back by the facing to a world
+    // offset, then read from the composite, whose u runs south and v east.
+    // The inverse of ui::minimap_stock::mapOffset, which places the blips.
     float cs = cos(push.rotation);
     float sn = sin(push.rotation);
-    vec2 mapCenter = vec2(-center.x, center.y);
-    vec2 rotated = vec2(mapCenter.x * cs - mapCenter.y * sn, mapCenter.x * sn + mapCenter.y * cs);
-    vec2 mapUV = push.playerUV + vec2(rotated.y, -rotated.x) * push.zoomRadius * 2.0;
+    vec2 mapUV = push.playerUV +
+        vec2(-center.x * sn + center.y * cs, center.x * cs + center.y * sn) * push.zoomRadius * 2.0;
 
     vec4 mapColor = texture(uComposite, mapUV);
 
-    // No player arrow here. It used to be a yellow triangle and a white dot
-    // drawn into the map, under the textured MinimapArrow.blp the marker pass
-    // draws - two arrows at the centre. The stock client has the one, so the
-    // marker pass owns it; push.arrowRotation is left in the block unread.
-
-    // Dark border ring
-    float border = smoothstep(0.48, 0.5, dist);
-    if (push.squareShape == 0) {
-        mapColor.rgb *= 1.0 - border * 0.7;
-    }
+    // No player arrow here: the marker pass draws the stock MinimapArrow
+    // texture. push.arrowRotation is left
+    // in the block unread.
+    //
+    // No darkened rim either. Textures\MinimapMask, the stock mask, is a plain
+    // disc - 255 alpha to its last texel, nothing shaded - and the border art
+    // drawn over the map is what frames it.
 
     // Always opaque. The stock map is solid whatever the interface's opacity;
     // push.opacity is kept in the block (its layout is shared with the C++ side)

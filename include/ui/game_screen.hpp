@@ -202,6 +202,8 @@ private:
         float centerY = 0.0f;
         float mapRadius = 0.0f;
         float bearing = 0.0f;
+        /// The player's facing, 0 north, counter-clockwise (GetPlayerFacing).
+        float facing = 0.0f;
         glm::vec3 playerRender{0.0f};
         MinimapView view{};
 
@@ -233,11 +235,8 @@ private:
 
     void renderMinimapNpcDots(const MinimapFrame& frame, const EntityList& units,
                               const EntrySet& questEntries);
-    void renderMinimapFlightMasters(const MinimapFrame& frame, const EntityList& units);
     void renderMinimapRares(const MinimapFrame& frame, const EntityList& units,
                             game::GameHandler& gameHandler);
-    void renderMinimapPlayerDots(const MinimapFrame& frame, const EntityList& players,
-                                 game::GameHandler& gameHandler);
     void renderMinimapLootCorpses(const MinimapFrame& frame, const EntityList& units);
     void renderMinimapObjectDots(const MinimapFrame& frame, const EntityList& objects,
                                  const EntrySet& questGoEntries,
@@ -245,17 +244,25 @@ private:
     void renderMinimapChests(const MinimapFrame& frame, const EntityList& objects,
                              game::GameHandler& gameHandler);
 
-    void renderMinimapQuestGivers(const MinimapFrame& frame, const QuestStatusMap& statuses,
-                                  game::GameHandler& gameHandler);
     void renderMinimapQuestKills(const MinimapFrame& frame, const EntityList& units,
                                  const QuestStatusMap& statuses,
                                  game::GameHandler& gameHandler);
-    void renderMinimapGossipPois(const MinimapFrame& frame, game::GameHandler& gameHandler);
     void renderMinimapPings(const MinimapFrame& frame, game::GameHandler& gameHandler);
-    void renderMinimapPartyDots(const MinimapFrame& frame, game::GameHandler& gameHandler);
+    /// The stock blips: the group within reach, then whatever the client
+    /// classifies (minimap_stock.hpp), gathered as the client gathers them.
+    void renderMinimapBlips(const MinimapFrame& frame, game::GameHandler& gameHandler,
+                            const EntityList& units, const EntityList& players,
+                            const EntityList& objects);
+    /// The AreaPOI / gossip / corpse POIs: their icons, or with `arrows` the
+    /// three rim arrows for those beyond the map.
+    void renderMinimapPois(const MinimapFrame& frame, game::GameHandler& gameHandler,
+                           bool arrows);
+    /// Group members beyond 0.8 of the radius, as rim arrows.
+    void renderMinimapGroupArrows(const MinimapFrame& frame, game::GameHandler& gameHandler);
+    bool groupMemberPosition(game::GameHandler& gameHandler, const game::GroupMember& member,
+                             glm::vec3& render) const;
     void renderMinimapBattlegroundPositions(const MinimapFrame& frame,
                                             game::GameHandler& gameHandler);
-    void renderMinimapCorpseMarker(const MinimapFrame& frame, game::GameHandler& gameHandler);
     void renderMinimapPlayerArrow(const MinimapFrame& frame);
 
     /// The wheel and the ctrl+click, when this client owns the ring.

@@ -290,6 +290,69 @@ void CameraController::triggerShake(float magnitude, float frequency, float dura
     }
 }
 
+void CameraController::addStockShake(int type, int direction, float amplitude, float frequency,
+                                     float duration, float phase, float coefficient,
+                                     const glm::vec3& source) {
+    if (direction < 0 || direction > 2 || !(duration > 0.0f)) return;
+    // The amplitude is stored in 1/36 yard (0x606410 scales it by 0x0A3F854).
+    StockShake sh{.type = type, .direction = direction, .amplitude = amplitude / 36.0f,
+                  .frequency = frequency, .duration = duration, .phase = phase,
+                  .coefficient = coefficient, .source = source, .elapsed = 0.0f};
+    if (stockShakes_.size() >= 32) stockShakes_.erase(stockShakes_.begin());
+    stockShakes_.push_back(sh);
+}
+
+glm::vec3 CameraController::stockShakeOffset(float deltaTime) {
+    glm::vec3 total(0.0f);
+    if (stockShakes_.empty()) return total;
+    const glm::vec3 listener = followTarget ? *followTarget : (camera ? camera->getPosition() : glm::vec3(0.0f));
+    // The strongest live shake of each direction (0x606970).
+    float best[3] = {0.0f, 0.0f, 0.0f};
+    const StockShake* pick[3] = {nullptr, nullptr, nullptr};
+    float pickT[3] = {0.0f, 0.0f, 0.0f};
+    for (auto it = stockShakes_.begin(); it != stockShakes_.end();) {
+        it->elapsed += deltaTime;
+        const float t = it->elapsed + it->phase;
+        if (t >= it->duration) { it = stockShakes_.erase(it); continue; }
+        float mag = it->amplitude;
+        const float d2 = glm::dot(listener - it->source, listener - it->source);
+        bool reaches = d2 <= 80.0f * 80.0f;
+        if (reaches && d2 > 9.0f * 9.0f) mag *= std::pow(0.7f, (std::sqrt(d2) - 9.0f) / 9.0f);
+        if (reaches && mag > best[it->direction]) {
+            best[it->direction] = mag;
+            pick[it->direction] = &*it;
+            pickT[it->direction] = t;
+        }
+        ++it;
+    }
+    // 0x5FE6C0: sin(2 pi f t) times the amplitude, damped for type 1; along
+    // the facing, across it, or up.
+    const float face = glm::radians(facingYaw);
+    for (int dir = 0; dir < 3; ++dir) {
+        const StockShake* sh = pick[dir];
+        if (!sh) continue;
+        const float t = pickT[dir];
+        float v = std::sin(sh->frequency * t * core::coords::TWO_PI) * best[dir];
+        if (sh->type == 1) v *= std::exp(-t * sh->coefficient);
+        if (dir == 0) total += glm::vec3(std::cos(face), std::sin(face), 0.0f) * v;
+        else if (dir == 1) total += glm::vec3(-std::sin(face), std::cos(face), 0.0f) * v;
+        else total.z += v;
+    }
+    return total * shakeScale_;
+}
+
+void CameraController::debugSetView(float yawOffsetDeg, float pitchDeg, float distance) {
+    yaw = facingYaw + yawOffsetDeg;
+    pitch = glm::clamp(pitchDeg, MIN_PITCH, MAX_PITCH);
+    followYaw_.active = false;
+    followPitch_.active = false;
+    if (distance > 0.0f) {
+        userTargetDistance = distance;
+        currentDistance = distance;
+    }
+    if (camera) camera->setRotation(yaw, pitch);
+}
+
 glm::vec3 CameraController::sweepAgainstWalls(const glm::vec3& from, const glm::vec3& to,
                                               bool includeDoodads) {
     const glm::vec3 delta = to - from;
@@ -3687,6 +3750,10 @@ void CameraController::update(float deltaTime) {
         if (camera) {
             camera->setPosition(camera->getPosition() + offset);
         }
+    }
+    // The spells' and models' shakes (CameraShakes.dbc rows).
+    if (!stockShakes_.empty() && camera) {
+        camera->setPosition(camera->getPosition() + stockShakeOffset(deltaTime));
     }
 
     // Scaled by the same setting as the shake above, because it is the same

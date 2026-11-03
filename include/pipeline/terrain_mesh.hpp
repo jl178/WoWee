@@ -75,6 +75,13 @@ struct ChunkMesh {
 struct TerrainMesh {
     std::array<ChunkMesh, 256> chunks;  // 16x16 grid
     std::vector<std::string> textures;   // Texture filenames
+    /// Beside `textures`: the `_s` tileset the client draws instead when
+    /// specular is on (rgb the same, alpha the highlight mask), or empty
+    /// where there is none. Filled by TerrainManager.
+    std::vector<std::string> specularTextures;
+    /// The map's MPHD 0x4: eight-bit alpha maps, blended as weights rather
+    /// than a chain of lerps (docs/re/terrain.md). Filled by TerrainManager.
+    bool bigAlpha = false;
 
     int validChunkCount = 0;
 

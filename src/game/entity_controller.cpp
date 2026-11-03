@@ -545,6 +545,7 @@ void EntityController::syncPreWotlkAurasFromFields(const std::shared_ptr<Entity>
     // Here rather than at SetTracking, and that is what makes it complete
     // rather than half: both routes end in the aura arriving, whether the
     // spell was cast from the interface's dropdown or from a button.
+    owner_.noteTrackingAuras();
     pendingEvents_.emit("MINIMAP_UPDATE_TRACKING", {});
 }
 
@@ -1776,6 +1777,15 @@ void EntityController::dispatchEntitySpawn(uint64_t guid, ObjectType objectType,
         network::Packet qsPkt(wireOpcode(Opcode::CMSG_QUESTGIVER_STATUS_QUERY));
         qsPkt.writeUInt64(guid);
         owner_.getSocket()->send(qsPkt);
+    }
+    // And whether the player knows a flight master's node: the client asks
+    // for every flight master it meets (0x00729F40 -> 0x006D5130), and the
+    // answer is what puts the green ! of an undiscovered one on the minimap.
+    if (objectType == ObjectType::UNIT && (unit->getNpcFlags() & NPC_FLAG_FLIGHT_MASTER) &&
+        owner_.getSocket()) {
+        network::Packet txPkt(wireOpcode(Opcode::CMSG_TAXINODE_STATUS_QUERY));
+        txPkt.writeUInt64(guid);
+        owner_.getSocket()->send(txPkt);
     }
 }
 

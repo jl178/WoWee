@@ -41,6 +41,15 @@ inline constexpr float kPixelsPerYard = 2.0f;
 /// MOGP flag: the group is indoors, which is what puts the minimap into its
 /// WMO mode.
 inline constexpr uint32_t kGroupIndoor = 0x2000;
+/// MOGP flags: exterior (0x8), and exterior-lit (0x40). 0x007A1480 calls a
+/// group indoors only when it is not exterior; Stormwind's Trade District and
+/// Silvermoon's streets are hundreds of indoor groups lit as exterior, which
+/// the stock minimap shows as terrain - so exterior-lit counts as outside too.
+inline constexpr uint32_t kGroupExterior = 0x8;
+inline constexpr uint32_t kGroupExteriorLit = 0x40;
+inline bool groupIsIndoorForMinimap(uint32_t flags) {
+    return (flags & kGroupIndoor) != 0 && (flags & (kGroupExterior | kGroupExteriorLit)) == 0;
+}
 
 /// The tile key prefix for a root WMO path: lower case, backslashes, "World\"
 /// and ".wmo" taken off. "World\wmo\KhazModan\Cities\Ironforge\Ironforge.wmo"

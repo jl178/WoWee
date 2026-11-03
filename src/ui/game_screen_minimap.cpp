@@ -65,6 +65,7 @@
 
 #include <unordered_set>
 #include "core/local_time.hpp"
+#include "ui/minimap_stock.hpp"
 
 namespace {
     using namespace wowee::ui::colors;
@@ -208,17 +209,6 @@ namespace {
         drawRotated(dl, tex, cx, cy, size, size, dirX, dirY);
     }
 
-    /// Where a direction from the centre meets the rim - the circle, or the
-    /// box when the map is square.
-    ImVec2 minimapRimPoint(float cx, float cy, float radius, float nx, float ny, bool square) {
-        float r = radius;
-        if (square) {
-            const float m = std::max(std::fabs(nx), std::fabs(ny));
-            if (m > 1e-4f) r = radius / m;
-        }
-        return ImVec2(cx + nx * r, cy + ny * r);
-    }
-
     /// Lock.dbc id -> the LockType bits (1 << (type - 1)) that open it through
     /// a skill: 2 Herbalism, 3 Mining, 1 Lockpicking, 6/... treasure and so on.
     /// This is what PLAYER_TRACK_RESOURCES is matched against - Find Herbs sets
@@ -244,6 +234,70 @@ namespace {
         }
         auto it = masks.find(lockId);
         return it == masks.end() ? 0u : it->second;
+    }
+
+    namespace ms = wowee::ui::minimap_stock;
+
+    /// The game object data field holding the lock, by type, from the client's
+    /// type property table (0x00A36F34, property 4, read by 0x0070EF30).
+    int goLockField(uint32_t goType) {
+        switch (goType) {
+            case 0: case 1: return 1;     // door, button
+            case 2: case 3: case 6: case 10: case 12: case 13: case 24: case 26:
+                return 0;                 // questgiver, chest, trap, goober, ...
+            case 25: return 4;            // fishing hole
+            default: return -1;
+        }
+    }
+
+    uint64_t steadyMs() {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+
+    /// Alliance or Horde by race (UNIT_FIELD_BYTES_0's first byte), for the
+    /// other-player blip's colour (0x006D6E90 compares the two teams).
+    int raceTeam(uint8_t race) {
+        switch (race) {
+            case 1: case 3: case 4: case 7: case 11: return 0;
+            case 2: case 5: case 6: case 8: case 10: return 1;
+            default: return -1;
+        }
+    }
+    uint8_t entityRace(const wowee::game::Entity& e) {
+        return static_cast<uint8_t>(e.getField(wowee::game::fieldIndex(wowee::game::UF::UNIT_FIELD_BYTES_0)) & 0xFF);
+    }
+
+    /// The blips the stock minimap gathers (0x00581E80): rebuilt every frame
+    /// while the player moves and once a second otherwise, so a creature walks
+    /// across a still player's map in steps, as it does in the client.
+    struct StockBlip {
+        glm::vec3 render{0.0f};
+        int cell = ms::kNoBlip;
+        bool grey = false;       ///< in a building the player is not in
+        uint64_t guid = 0;
+    };
+    struct StockPartyBlip {
+        uint64_t guid = 0;
+        glm::vec3 render{0.0f};
+        int cell = 0;            ///< PartyRaidBlips cell, -1 for the plain blip
+        bool raidOther = false;
+    };
+    struct StockBlipState {
+        std::vector<StockBlip> blips;
+        std::vector<StockPartyBlip> party;
+        uint64_t lastMs = 0;
+        glm::vec3 lastPlayer{1e30f};
+        float lastRadius = -1.0f;
+        bool lastRotate = false;
+        uint32_t lastMap = 0xFFFFFFFFu;
+        /// guid -> (interior WMO instance, when it was looked up). An object's
+        /// building is asked at most once a second.
+        std::unordered_map<uint64_t, std::pair<uint32_t, uint64_t>> wmoOf;
+    };
+    StockBlipState& stockBlipState() {
+        static StockBlipState s;
+        return s;
     }
 
 }
@@ -312,7 +366,9 @@ bool GameScreen::MinimapFrame::project(const glm::vec3& worldRenderPos,
     const float dx = worldRenderPos.x - playerRender.x;
     const float dy = worldRenderPos.y - playerRender.y;
     const glm::vec2 off = renderDeltaToMinimapOffset(dx, dy, view);
-    if (std::sqrt(off.x * off.x + off.y * off.y) > mapRadius - 3.0f) return false;
+    // Nothing is drawn past 0.8 of the radius (0x00A11C4C): the stock map
+    // keeps its blips well inside the ring.
+    if (std::sqrt(off.x * off.x + off.y * off.y) > mapRadius * ms::kOnMapFraction) return false;
     sx = centerX + off.x;
     sy = centerY + off.y;
     return true;
@@ -799,9 +855,9 @@ void GameScreen::renderMinimapNpcDots(const MinimapFrame& frame, const EntityLis
                                       const EntrySet& minimapQuestEntries) {
     auto* gh = services_.gameHandler;
     if (!gh) return;
-    const MinimapTracking tracking = playerTracking(*gh);
-    const bool allDots = settingsPanel_.minimapNpcDots_;
-    if (!allDots && tracking.creatures == 0) return;
+    // Tracked creatures are the stock pass's (renderMinimapBlips); this is
+    // only this client's optional "every creature" overlay.
+    if (!settingsPanel_.minimapNpcDots_) return;
     VkDescriptorSet icons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
     if (!icons) return;
     const float size = kBlipSize * minimapArtScale(frame.mapRadius);
@@ -809,11 +865,7 @@ void GameScreen::renderMinimapNpcDots(const MinimapFrame& frame, const EntityLis
     for (const auto& entity : minimapUnits) {
         auto unit = std::static_pointer_cast<game::Unit>(entity);
         if (!unit || unit->getHealth() == 0) continue;
-        if (allDots && minimapQuestEntries.count(unit->getEntry()) != 0) continue;
-        if (!allDots &&
-            !creatureTypeTracked(tracking.creatures, gh->getCreatureType(unit->getEntry()))) {
-            continue;
-        }
+        if (minimapQuestEntries.count(unit->getEntry()) != 0) continue;
 
         float sx = 0.0f, sy = 0.0f;
         if (!frame.projectEntity(*entity, sx, sy)) continue;
@@ -826,47 +878,6 @@ void GameScreen::renderMinimapNpcDots(const MinimapFrame& frame, const EntityLis
     }
 }
 
-// A standard service marker, independent of the optional NPC dots - and read
-// from the live NPC flags, so an undiscovered flight master shows before the
-// taxi window has ever been opened.
-void GameScreen::renderMinimapFlightMasters(const MinimapFrame& frame, const EntityList& minimapUnits) {
-    // Flight masters are a standard minimap service marker, independent of
-    // the optional generic NPC-dot overlay. Use the live UNIT_NPC_FLAGS value
-    // so an undiscovered flight master is visible before the taxi window has
-    // ever been opened (and therefore before the known-node mask is available).
-    //
-    // Drawn with the stock Flight Master tracking icon - what a 3.3.5a client
-    // puts on the map for a tracked town service. Stock shows it only while
-    // "Flight Master" is the chosen tracking; this client has no town tracking
-    // entries in GetTrackingInfo yet, so it is shown always, as it was before.
-    VkDescriptorSet tex = minimapArt(kFlightMasterPath, services_.assetManager, services_.window);
-    if (!tex) return;
-    const float size = kBlipSize * minimapArtScale(frame.mapRadius);
-    {
-        for (const auto& entity : minimapUnits) {
-            auto unit = std::static_pointer_cast<game::Unit>(entity);
-            if (!unit || unit->getHealth() == 0 ||
-                (unit->getNpcFlags() & game::NPC_FLAG_FLIGHT_MASTER) == 0) {
-                continue;
-            }
-
-            float sx = 0.0f, sy = 0.0f;
-            if (!frame.projectEntity(*entity, sx, sy)) continue;
-
-            frame.drawList->AddImage(texId(tex), ImVec2(sx - size * 0.5f, sy - size * 0.5f),
-                                     ImVec2(sx + size * 0.5f, sy + size * 0.5f));
-
-            if (cursorNearBlip(sx, sy)) {
-                const std::string& name = unit->getName();
-                ImGui::SetTooltip("%s\nFlight Master",
-                                  name.empty() ? "Flight Master" : name.c_str());
-            }
-        }
-    }
-
-}
-
-// The same live creature-rank classification the world map uses.
 void GameScreen::renderMinimapRares(const MinimapFrame& frame, const EntityList& minimapUnits,
                                      game::GameHandler& gameHandler) {
     // Rare tracker: use the same live creature-rank classification as the world map.
@@ -897,47 +908,6 @@ void GameScreen::renderMinimapRares(const MinimapFrame& frame, const EntityList&
                 ImGui::SetTooltip("%s\n%s",
                                   name.empty() ? "Unknown creature" : name.c_str(),
                                   isElite ? "Rare Elite" : "Rare");
-            }
-        }
-    }
-
-}
-
-// Other players nearby. Party and raid members have their own class-coloured
-// blips, drawn elsewhere; everyone else shows while Track Humanoids is running
-// (players are humanoids to the tracking aura, as in the stock client), or
-// always with this client's optional creature dots on.
-void GameScreen::renderMinimapPlayerDots(const MinimapFrame& frame, const EntityList& minimapPlayers,
-                                          game::GameHandler& gameHandler) {
-    const bool show = settingsPanel_.minimapNpcDots_ ||
-        creatureTypeTracked(playerTracking(gameHandler).creatures, kCreatureTypeHumanoid);
-    VkDescriptorSet icons = show
-        ? minimapArt(kObjectIconsPath, services_.assetManager, services_.window) : VK_NULL_HANDLE;
-    if (icons) {
-        const float size = kBlipSize * minimapArtScale(frame.mapRadius);
-        const uint64_t selfGuid = gameHandler.getPlayerGuid();
-        const auto& partyData = gameHandler.getPartyData();
-        for (const auto& entity : minimapPlayers) {
-            const uint64_t guid = entity->getGuid();
-            if (entity->getGuid() == selfGuid) continue;  // skip self (already drawn as arrow)
-
-            // Skip party members (renderMinimapPartyDots draws their class blips)
-            bool isPartyMember = false;
-            for (const auto& m : partyData.members) {
-                if (m.guid == guid) { isPartyMember = true; break; }
-            }
-            if (isPartyMember) continue;
-
-            float sx = 0.0f, sy = 0.0f;
-            if (!frame.projectEntity(*entity, sx, sy)) continue;
-
-            auto player = std::static_pointer_cast<game::Unit>(entity);
-            const int cell = player ? reactionBlip(gameHandler, *player) : kIconFriendly;
-            drawAtlasCell(frame.drawList, icons, cell, kObjectIconCols, kObjectIconRows,
-                          sx, sy, size);
-            if (player && cursorNearBlip(sx, sy, kSmallBlipHoverRadius) &&
-                !player->getName().empty()) {
-                ImGui::SetTooltip("%s", player->getName().c_str());
             }
         }
     }
@@ -988,9 +958,11 @@ void GameScreen::renderMinimapLootCorpses(const MinimapFrame& frame, const Entit
 void GameScreen::renderMinimapObjectDots(const MinimapFrame& frame, const EntityList& minimapGameObjects,
                                           const EntrySet& minimapQuestGoEntries,
                                           game::GameHandler& gameHandler) {
+    // Tracked resources are the stock pass's (renderMinimapBlips); this is
+    // only this client's optional "every object" overlay.
     const MinimapTracking tracking = playerTracking(gameHandler);
     const bool allDots = settingsPanel_.minimapNpcDots_;
-    if (!allDots && tracking.resources == 0) return;
+    if (!allDots) return;
     VkDescriptorSet icons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
     if (!icons) return;
     const float size = kBlipSize * minimapArtScale(frame.mapRadius);
@@ -1056,70 +1028,6 @@ void GameScreen::renderMinimapChests(const MinimapFrame& frame, const EntityList
             if (cursorNearBlip(sx, sy, kSmallBlipHoverRadius)) {
                 const std::string& name = chest->getName().empty() ? info->name : chest->getName();
                 ImGui::SetTooltip("%s\nChest", name.empty() ? "Chest" : name.c_str());
-            }
-        }
-    }
-
-}
-
-// The ! and ? over a quest giver, from the status the server sends per NPC.
-void GameScreen::renderMinimapQuestGivers(const MinimapFrame& frame, const QuestStatusMap& statuses,
-                                         game::GameHandler& gameHandler) {
-    for (const auto& [guid, status] : statuses) {
-        // Status 9 is a turn-in the server deliberately keeps off the map,
-        // which is the only thing separating it from 10.
-        const auto mark = game::questGiverMarker(status);
-        // Said once per status value, because a mark that appears over an
-        // NPC's head and not on the minimap looks like a lost blip and is in
-        // fact this rule. Which of 9 and 10 a core sends for a completed
-        // quest differs between them, and only the log can say which arrives.
-        if (mark.symbol && !mark.onMinimap) {
-            static std::set<int> saidOffMap;
-            if (saidOffMap.insert(static_cast<int>(status)).second) {
-                LOG_INFO("Quest giver status ", static_cast<int>(status),
-                            " draws its ", mark.symbol,
-                            " over the NPC but not on the minimap - that is what"
-                            " the status means. Anything missing from the minimap"
-                            " with a mark over its head is arriving as this.");
-            }
-        }
-        if (!mark.symbol || !mark.onMinimap) continue;
-        // The grey marks - a low-level quest, a quest still in progress - are
-        // not on the stock minimap: low-level ones only appear under the "Low
-        // Level Quests" tracking, which this client does not offer, and an
-        // incomplete turn-in never does.
-        if (mark.dim) continue;
-
-        auto entity = gameHandler.getEntityManager().getEntity(guid);
-        if (!entity) continue;
-
-        float sx = 0.0f, sy = 0.0f;
-        if (!frame.projectEntity(*entity, sx, sy)) continue;
-
-        // The ObjectIcons quest marks: yellow ! and ?, blue for repeatable.
-        const bool available = mark.symbol[0] == '!';
-        const int cell = available
-            ? (mark.repeatable ? kIconRepeatableAvailable : kIconQuestAvailable)
-            : (mark.repeatable ? kIconRepeatableComplete : kIconQuestComplete);
-        drawAtlasCell(frame.drawList,
-                      minimapArt(kObjectIconsPath, services_.assetManager, services_.window),
-                      cell, kObjectIconCols, kObjectIconRows, sx, sy,
-                      kBlipSize * minimapArtScale(frame.mapRadius));
-
-        // Show NPC name and quest status on hover
-        {
-            if (cursorNearBlip(sx, sy)) {
-                std::string npcName;
-                if (entity->getType() == game::ObjectType::UNIT) {
-                    auto npcUnit = std::static_pointer_cast<game::Unit>(entity);
-                    npcName = npcUnit->getName();
-                }
-                if (!npcName.empty()) {
-                    const auto mark2 = game::questGiverMarker(status);
-                    const bool hasQuest = mark2.symbol && mark2.symbol[0] == '!';
-                    ImGui::SetTooltip("%s\n%s", npcName.c_str(),
-                                      hasQuest ? "Has a quest for you" : "Quest ready to turn in");
-                }
             }
         }
     }
@@ -1201,88 +1109,364 @@ void GameScreen::renderMinimapQuestKills(const MinimapFrame& frame, const Entity
 
 }
 
-// The points a gossip window has pointed at, and a tracked quest's POIs.
-//
-// A gossip point (SMSG_GOSSIP_POI) carries an icon number into POIIcons.blp,
-// laid out the way WorldMap_GetPOITextureCoords reads it: 14 to a row on an
-// 18-pixel pitch, 16 pixels of icon. A quest's objective (SMSG_QUEST_POI) is
-// an area, which 3.3 shades on the minimap as it does on the world map; its
-// end point is the ? once the quest is complete.
-void GameScreen::renderMinimapGossipPois(const MinimapFrame& frame, game::GameHandler& gameHandler) {
+// The stock blips (0x00581E80 gathering through 0x0057F7F0, drawn by
+// 0x0057FF70 and 0x00580380): the group in PartyRaidBlips, then every unit,
+// player and game object the client classifies - quest givers, an unknown
+// flight master, whatever the tracking names - in ObjectIcons, those in a
+// building the player is not in greyed after the rest.
+void GameScreen::renderMinimapBlips(const MinimapFrame& frame, game::GameHandler& gameHandler,
+                                    const EntityList& units, const EntityList& players,
+                                    const EntityList& objects) {
+    auto* renderer = services_.renderer;
+    auto* minimap = renderer ? renderer->getMinimap() : nullptr;
+    if (!minimap) return;
+    auto& st = stockBlipState();
+    const uint64_t now = steadyMs();
+    const float radius = frame.view.viewRadius;
+    const bool rotate = minimap->isRotateWithCamera();
+    const uint32_t mapId = gameHandler.getCurrentMapId();
+    const bool moved = glm::length(glm::vec2(frame.playerRender) - glm::vec2(st.lastPlayer)) > 1e-3f;
+    if (moved || radius != st.lastRadius || rotate != st.lastRotate || mapId != st.lastMap ||
+        now - st.lastMs >= ms::kBlipRefreshMs) {
+        st.lastMs = now;
+        st.lastPlayer = frame.playerRender;
+        st.lastRadius = radius;
+        st.lastRotate = rotate;
+        st.lastMap = mapId;
+        st.blips.clear();
+        st.party.clear();
+
+        const uint64_t selfGuid = gameHandler.getPlayerGuid();
+        const MinimapTracking tracking = playerTracking(gameHandler);
+        const int town = gameHandler.activeTownTracking();
+        const ms::TownTracking* townEntry =
+            town >= 0 ? &ms::kTownTracking[static_cast<size_t>(town)] : nullptr;
+        const bool trivial = townEntry && townEntry->type == 3;
+        const auto& statuses = gameHandler.getNpcQuestStatuses();
+        const auto& partyData = gameHandler.getPartyData();
+        const bool inRaid = game::groupIsRaid(partyData.groupType);
+
+        // The building each thing stands in (0x0077F160): an object in another
+        // one than the player's is left off, and outdoors one inside is grey.
+        auto* wmo = renderer->getWMORenderer();
+        auto wmoInstanceAt = [wmo](const glm::vec3& pos) -> uint32_t {
+            if (!wmo) return 0;
+            rendering::WMORenderer::AreaHit hit;
+            if (!wmo->insideWmoArea(pos.x, pos.y, pos.z + 1.0f, &hit) || !hit.interior) return 0;
+            return hit.instanceId;
+        };
+        const uint32_t playerWmo = wmoInstanceAt(frame.playerRender);
+        auto objectWmo = [&](uint64_t guid, const glm::vec3& pos) -> uint32_t {
+            auto it = st.wmoOf.find(guid);
+            if (it != st.wmoOf.end() && now - it->second.second < ms::kBlipRefreshMs) return it->second.first;
+            const uint32_t w = wmoInstanceAt(pos);
+            st.wmoOf[guid] = {w, now};
+            return w;
+        };
+        auto place = [&](uint64_t guid, const glm::vec3& render, int cell) {
+            if (cell == ms::kNoBlip || cell == ms::kOwnPet) return;
+            const uint32_t w = objectWmo(guid, render);
+            if (playerWmo != 0 && w != playerWmo) return;
+            st.blips.push_back({render, cell, playerWmo == 0 && w != 0, guid});
+        };
+        auto inRange = [&](const glm::vec3& render) {
+            return ms::onMap(render.x - frame.playerRender.x, render.y - frame.playerRender.y, radius);
+        };
+
+        auto classifyUnitEntity = [&](const std::shared_ptr<game::Entity>& entity) {
+            auto unit = std::static_pointer_cast<game::Unit>(entity);
+            if (!unit || unit->getGuid() == selfGuid) return;
+            const glm::vec3 render = core::coords::canonicalToRender(
+                glm::vec3(unit->getX(), unit->getY(), unit->getZ()));
+            if (!inRange(render)) return;
+            ms::UnitFacts f;
+            f.isPlayer = entity->getType() == game::ObjectType::PLAYER;
+            if (f.isPlayer) {
+                for (const auto& m : partyData.members) {
+                    if (m.guid == unit->getGuid()) { f.groupMember = true; break; }
+                }
+            }
+            const uint64_t charmedBy = [&] {
+                const auto& fields = unit->getFields();
+                auto lo = fields.find(game::fieldIndex(game::UF::UNIT_FIELD_CHARMEDBY));
+                if (lo == fields.end()) return uint64_t{0};
+                uint64_t g = lo->second;
+                auto hi = fields.find(static_cast<uint16_t>(game::fieldIndex(game::UF::UNIT_FIELD_CHARMEDBY) + 1));
+                if (hi != fields.end()) g |= static_cast<uint64_t>(hi->second) << 32;
+                return g;
+            }();
+            f.ownPet = (charmedBy != 0 ? charmedBy : game::unitSummonedByGuid(*unit)) == selfGuid;
+            const uint32_t entry = unit->getEntry();
+            constexpr uint32_t kTypeFlagGhostVisible = 0x80;
+            f.deadAndHidden = unit->getHealth() == 0 &&
+                (f.isPlayer || (gameHandler.getCreatureTypeFlags(entry) & kTypeFlagGhostVisible) == 0);
+            f.reaction = gameHandler.unitReactionToPlayer(*unit);
+            const uint32_t npcFlags = unit->getNpcFlags();
+            f.townTracked = !f.isPlayer && townEntry && townEntry->type == 1 &&
+                (npcFlags & townEntry->mask) != 0 && f.reaction >= 4;
+            if (auto it = statuses.find(unit->getGuid()); it != statuses.end()) {
+                f.questStatus = static_cast<uint32_t>(it->second);
+            }
+            if (npcFlags & game::NPC_FLAG_FLIGHT_MASTER) {
+                const auto known = gameHandler.taxiNodeKnown(unit->getGuid());
+                f.taxiUndiscovered = known.has_value() && !*known && f.reaction >= 3;
+            }
+            constexpr uint8_t kVisUntrackable = 0x04;
+            constexpr uint32_t kDynTrackUnit = 0x02;
+            const uint32_t creatureType = f.isPlayer ? kCreatureTypeHumanoid
+                                                     : gameHandler.getCreatureType(entry);
+            f.creatureTracked = (unit->getVisibilityFlags() & kVisUntrackable) == 0 &&
+                ((unit->getDynamicFlags() & kDynTrackUnit) != 0 ||
+                 creatureTypeTracked(tracking.creatures, creatureType));
+            f.attackable = unit->isHostile();
+            const int mine = raceTeam(gameHandler.getPlayerRace());
+            f.sameTeam = mine >= 0 && mine == raceTeam(entityRace(*unit));
+            place(unit->getGuid(), render, ms::classifyUnit(f, trivial));
+        };
+        for (const auto& e : units) classifyUnitEntity(e);
+        for (const auto& e : players) classifyUnitEntity(e);
+
+        for (const auto& entity : objects) {
+            auto go = std::static_pointer_cast<game::GameObject>(entity);
+            if (!go) continue;
+            const glm::vec3 render = core::coords::canonicalToRender(
+                glm::vec3(go->getX(), go->getY(), go->getZ()));
+            if (!inRange(render)) continue;
+            const auto* info = gameHandler.getCachedGameObjectInfo(go->getEntry());
+            if (!info || !info->isValid()) continue;
+            ms::GameObjectFacts f;
+            f.mailboxTracked = townEntry && townEntry->type == 2 && info->type == townEntry->mask;
+            if (auto it = statuses.find(go->getGuid()); it != statuses.end()) {
+                f.questStatus = static_cast<uint32_t>(it->second);
+            }
+            const int lockField = goLockField(info->type);
+            f.resourceTracked = tracking.resources != 0 && info->hasData && lockField >= 0 &&
+                (lockTrackMask(services_.assetManager, info->data[lockField]) & tracking.resources) != 0;
+            place(go->getGuid(), render, ms::classifyGameObject(f, trivial));
+        }
+
+        // The group within reach (0x007F4320 / 0x007F4390): the player's own
+        // party in the filled blips, the rest of a raid in the ringed ones.
+        for (const auto& member : partyData.members) {
+            if (!member.isOnline || member.guid == selfGuid) continue;
+            glm::vec3 render;
+            if (!groupMemberPosition(gameHandler, member, render) || !inRange(render)) continue;
+            StockPartyBlip pb;
+            pb.guid = member.guid;
+            pb.render = render;
+            pb.raidOther = inRaid && member.subGroup != partyData.subGroup;
+            uint8_t cid = entityClassId(gameHandler.getEntityManager().getEntity(member.guid).get());
+            if (cid == 0) cid = gameHandler.lookupPlayerClass(member.guid);
+            pb.cell = (cid >= 1 && cid <= 16) ? (cid - 1) + (pb.raidOther ? 16 : 0) : -1;
+            st.party.push_back(pb);
+        }
+    }
+
     const float scale = minimapArtScale(frame.mapRadius);
-    VkDescriptorSet poiIcons = minimapArt(kPoiIconsPath, services_.assetManager, services_.window);
-    VkDescriptorSet objIcons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
-
-    auto questComplete = [&gameHandler](uint32_t questId) {
-        for (const auto& q : gameHandler.getQuestLog()) {
-            if (q.questId == questId) return q.complete;
-        }
-        return false;
-    };
-
-    for (const auto& poi : gameHandler.getGossipPois()) {
-        // A gossip target always, a quest's points while it is tracked.
-        if (poi.questObjectiveIndex != -2 && !gameHandler.isQuestTracked(poi.data)) {
-            continue;
-        }
-
-        // An objective area: a translucent fill, its points pulled in to the
-        // rim where they fall outside it. Only while the quest is unfinished.
-        if (poi.questObjectiveIndex >= 0) {
-            if (poi.area.size() < 3 || questComplete(poi.data)) continue;
-            std::vector<ImVec2> pts;
-            pts.reserve(poi.area.size());
-            ImVec2 centroid(0.0f, 0.0f);
-            const float rim = frame.mapRadius - 1.0f;
-            for (const auto& [ax, ay] : poi.area) {
-                const glm::vec3 r = core::coords::canonicalToRender(glm::vec3(ax, ay, 0.0f));
-                glm::vec2 off = renderDeltaToMinimapOffset(r.x - frame.playerRender.x,
-                                                           r.y - frame.playerRender.y, frame.view);
-                const float len = std::sqrt(off.x * off.x + off.y * off.y);
-                if (len > rim && len > 0.0f) off *= rim / len;
-                pts.emplace_back(frame.centerX + off.x, frame.centerY + off.y);
-                centroid.x += pts.back().x;
-                centroid.y += pts.back().y;
-            }
-            centroid.x /= static_cast<float>(pts.size());
-            centroid.y /= static_cast<float>(pts.size());
-            // A fan from the centre: the server's outlines are hulls.
-            const ImU32 fill = IM_COL32(110, 170, 255, 60);
-            for (size_t i = 0; i < pts.size(); ++i) {
-                frame.drawList->AddTriangleFilled(centroid, pts[i], pts[(i + 1) % pts.size()], fill);
-            }
-            frame.drawList->AddPolyline(pts.data(), static_cast<int>(pts.size()),
-                                        IM_COL32(255, 220, 120, 110), ImDrawFlags_Closed, 1.0f);
-            continue;
-        }
-
+    const float size = ms::kBlipSize * scale;
+    VkDescriptorSet blips = minimapArt(kPartyRaidBlipsPath, services_.assetManager, services_.window);
+    VkDescriptorSet icons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
+    for (const auto& pb : st.party) {
         float sx = 0.0f, sy = 0.0f;
-        if (!frame.projectCanonical(poi.x, poi.y, sx, sy)) continue;
-
-        if (poi.questObjectiveIndex == -1) {
-            // The quest's end point: the stock turn-in ?, once there is
-            // something to turn in.
-            if (!questComplete(poi.data)) continue;
-            drawAtlasCell(frame.drawList, objIcons, kIconQuestComplete,
-                          kObjectIconCols, kObjectIconRows, sx, sy, kBlipSize * scale);
-        } else if (poiIcons) {
-            constexpr int kPoiCols = 14;
-            constexpr float kTex = 256.0f, kPitch = 18.0f, kIcon = 16.0f;
-            const float u0 = (static_cast<float>(poi.icon % kPoiCols) * kPitch + 1.0f) / kTex;
-            const float v0 = (static_cast<float>(poi.icon / kPoiCols) * kPitch + 1.0f) / kTex;
-            const float h = kPoiIconSize * scale * 0.5f;
-            frame.drawList->AddImage(texId(poiIcons), ImVec2(sx - h, sy - h), ImVec2(sx + h, sy + h),
-                                     ImVec2(u0, v0), ImVec2(u0 + kIcon / kTex, v0 + kIcon / kTex));
+        if (!frame.project(pb.render, sx, sy)) continue;
+        if (pb.cell >= 0 && blips) {
+            drawAtlasCell(frame.drawList, blips, pb.cell, kPartyBlipCols, kPartyBlipRows, sx, sy, size);
+        } else {
+            // Class not known yet: the plain ObjectIcons party / raid blip.
+            drawAtlasCell(frame.drawList, icons, pb.raidOther ? 1 : 0,
+                          kObjectIconCols, kObjectIconRows, sx, sy, size);
         }
+        if (cursorNearBlip(sx, sy, kSmallBlipHoverRadius)) {
+            for (const auto& m : gameHandler.getPartyData().members) {
+                if (m.guid == pb.guid && !m.name.empty()) ImGui::SetTooltip("%s", m.name.c_str());
+            }
+        }
+    }
+    if (!icons) return;
+    for (int greyPass = 0; greyPass < 2; ++greyPass) {
+        // 0x00580380: 0xB0B0B0 for what is in another building.
+        const ImU32 tint = greyPass ? IM_COL32(0xB0, 0xB0, 0xB0, 0xFF) : IM_COL32_WHITE;
+        for (const auto& b : st.blips) {
+            if (b.grey != (greyPass != 0)) continue;
+            float sx = 0.0f, sy = 0.0f;
+            if (!frame.project(b.render, sx, sy)) continue;
+            drawAtlasCell(frame.drawList, icons, b.cell, kObjectIconCols, kObjectIconRows,
+                          sx, sy, size, tint);
+            if (cursorNearBlip(sx, sy, kSmallBlipHoverRadius)) {
+                if (auto e = gameHandler.getEntityManager().getEntity(b.guid)) {
+                    std::string name;
+                    if (e->getType() == game::ObjectType::GAMEOBJECT) {
+                        auto go = std::static_pointer_cast<game::GameObject>(e);
+                        if (const auto* info = gameHandler.getCachedGameObjectInfo(go->getEntry())) name = info->name;
+                    } else {
+                        name = std::static_pointer_cast<game::Unit>(e)->getName();
+                    }
+                    if (!name.empty()) ImGui::SetTooltip("%s", name.c_str());
+                }
+            }
+        }
+    }
+}
 
-        if (!poi.name.empty() && cursorNearBlip(sx, sy)) {
-            ImGui::SetTooltip("%s", poi.name.c_str());
+// The POIs (0x007F6730, 0x007F44A0): AreaPOI rows of this map with flag 0x1,
+// the last gossip point (480 seconds), the corpse and the spirit healer. One
+// within 0.8 of the radius with flag 0x2 is its POIIcons icon; the three most
+// important of those further out, within 694 yards, are arrows on the rim -
+// Rotating-MinimapCorpseArrow for the corpse, Rotating-MinimapArrow for an
+// AreaPOI, Rotating-MinimapGuideArrow for the rest (0x0057D860).
+void GameScreen::renderMinimapPois(const MinimapFrame& frame, game::GameHandler& gameHandler,
+                                   bool arrows) {
+    struct Poi {
+        glm::vec3 render{0.0f};
+        uint32_t flags = 0;
+        int icon = 0;
+        int importance = 0;
+        int kind = 0;           // 0 AreaPOI, 1 gossip, 2 corpse, 3 spirit healer
+        std::string name;
+    };
+    std::vector<Poi> pois;
+
+    // AreaPOI.dbc, once: the rows the minimap ever looks at.
+    struct AreaPoiRow {
+        int id, importance, mapId, flags, worldState;
+        std::array<int, 9> icons;
+        float x, y;
+        std::string name;
+    };
+    static std::vector<AreaPoiRow> rows;
+    static bool loaded = false;
+    if (!loaded && services_.assetManager) {
+        loaded = true;
+        auto dbc = services_.assetManager->loadDBCOptional("AreaPOI.dbc");
+        if (dbc && dbc->isLoaded() && dbc->getFieldCount() >= 54) {
+            for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+                AreaPoiRow r{};
+                r.flags = static_cast<int>(dbc->getUInt32(i, 16));
+                if ((r.flags & ms::kPoiOnMinimap) == 0) continue;
+                r.id = static_cast<int>(dbc->getUInt32(i, 0));
+                r.importance = static_cast<int>(dbc->getUInt32(i, 1));
+                for (int k = 0; k < 9; ++k) r.icons[k] = static_cast<int>(dbc->getUInt32(i, 2 + k));
+                r.x = dbc->getFloat(i, 12);
+                r.y = dbc->getFloat(i, 13);
+                r.mapId = static_cast<int>(dbc->getUInt32(i, 15));
+                r.name = dbc->getString(i, 18);
+                r.worldState = static_cast<int>(dbc->getUInt32(i, 52));
+                rows.push_back(std::move(r));
+            }
+        }
+    }
+    const int mapId = static_cast<int>(gameHandler.getCurrentMapId());
+    for (const auto& r : rows) {
+        if (r.mapId != mapId || (r.x == 0.0f && r.y == 0.0f)) continue;
+        int icon = r.icons[0];
+        if (r.worldState != 0) {
+            const auto ws = gameHandler.getWorldState(static_cast<uint32_t>(r.worldState));
+            if (!ws || *ws == 0) continue;
+            const int idx = static_cast<int>(*ws) - 1;
+            icon = r.icons[(idx < 0 || idx > 8) ? 0 : idx];
+        }
+        pois.push_back({glm::vec3(r.x, r.y, 0.0f), static_cast<uint32_t>(r.flags), icon,
+                        r.importance, 0, r.name});
+    }
+    // Slot 1, the newest gossip point: for 480 seconds, or until the player
+    // has come within 10 yards of it (0x007F5BA0, dist^2 < 100).
+    {
+        static uint64_t reachedMs = 0;  // receivedMs of the point walked up to
+        const auto& gossip = gameHandler.getGossipPois();
+        for (auto it = gossip.rbegin(); it != gossip.rend(); ++it) {
+            if (it->questObjectiveIndex != -2) continue;
+            const glm::vec3 at = core::coords::canonicalToRender(glm::vec3(it->x, it->y, 0.0f));
+            const float dx = at.x - frame.playerRender.x, dy = at.y - frame.playerRender.y;
+            if (dx * dx + dy * dy < 100.0f) reachedMs = it->receivedMs;
+            if (steadyMs() - it->receivedMs < 480000 && reachedMs != it->receivedMs) {
+                pois.push_back({at, it->flags, static_cast<int>(it->icon),
+                                static_cast<int>(it->data), 1, it->name});
+            }
+            break;
+        }
+    }
+    // Slot 2, the corpse (0x007F4990): icon 8, importance -1, any distance.
+    float cx = 0.0f, cy = 0.0f;
+    if ((gameHandler.isPlayerDead() || gameHandler.isPlayerGhost()) &&
+        gameHandler.getCorpseCanonicalPos(cx, cy)) {
+        pois.push_back({core::coords::canonicalToRender(glm::vec3(cx, cy, 0.0f)),
+                        ms::kPoiIconOnMinimap, 8, -1, 2, "Corpse"});
+    }
+    // Slot 3, where releasing would put the player (0x007F4A00).
+    uint32_t releaseMap = 0;
+    glm::vec3 releaseCanon{0.0f};
+    if (gameHandler.isPlayerDead() && !gameHandler.isPlayerGhost() &&
+        gameHandler.getDeathReleaseLocation(releaseMap, releaseCanon) &&
+        static_cast<int>(releaseMap) == mapId) {
+        pois.push_back({core::coords::canonicalToRender(releaseCanon), ms::kPoiIconOnMinimap, 8,
+                        -1, 3, "Spirit Healer"});
+    }
+
+    const float radius = frame.view.viewRadius;
+    const float scale = minimapArtScale(frame.mapRadius);
+    if (!arrows) {
+        VkDescriptorSet poiIcons = minimapArt(kPoiIconsPath, services_.assetManager, services_.window);
+        if (!poiIcons) return;
+        for (const auto& p : pois) {
+            if ((p.flags & ms::kPoiIconOnMinimap) == 0) continue;
+            if (p.icon < 0 || p.icon >= ms::kPoiIconCount) continue;
+            float sx = 0.0f, sy = 0.0f;
+            if (!frame.project(p.render, sx, sy)) continue;
+            // 0x005832F0: one texel in from the cell's corner to the pitch's end.
+            constexpr float kTex = 256.0f;
+            const float u0 = (static_cast<float>(p.icon % ms::kPoiIconColumns) * ms::kPoiIconPitch + 1.0f) / kTex;
+            const float v0 = (static_cast<float>(p.icon / ms::kPoiIconColumns) * ms::kPoiIconPitch + 1.0f) / kTex;
+            const float u1 = u0 + (ms::kPoiIconPitch - 1.0f) / kTex;
+            const float v1 = v0 + (ms::kPoiIconPitch - 1.0f) / kTex;
+            const float h = ms::kBlipSize * scale * 0.5f;
+            frame.drawList->AddImage(texId(poiIcons), ImVec2(sx - h, sy - h), ImVec2(sx + h, sy + h),
+                                     ImVec2(u0, v0), ImVec2(u1, v1));
+            if (!p.name.empty() && cursorNearBlip(sx, sy)) ImGui::SetTooltip("%s", p.name.c_str());
+        }
+        return;
+    }
+
+    std::vector<ms::PoiArrowCandidate> candidates;
+    std::vector<size_t> candidateOf;
+    for (size_t i = 0; i < pois.size(); ++i) {
+        const float dN = pois[i].render.x - frame.playerRender.x;
+        const float dW = pois[i].render.y - frame.playerRender.y;
+        if (ms::onMap(dN, dW, radius)) continue;
+        candidates.push_back({pois[i].importance, std::sqrt(dN * dN + dW * dW), pois[i].kind == 2});
+        candidateOf.push_back(i);
+    }
+    int count = 0;
+    const auto picked = ms::pickPoiArrows(candidates, count);
+    const bool indoors = services_.renderer && services_.renderer->getMinimap() &&
+                         services_.renderer->getMinimap()->isIndoors();
+    for (int k = 0; k < count; ++k) {
+        if (picked[k] < 0) continue;
+        const Poi& p = pois[candidateOf[static_cast<size_t>(picked[k])]];
+        // Indoors only the client's own slots and AreaPOI flag 0x100 point out.
+        if (indoors && ((p.kind == 0 && (p.flags & 0x100) == 0) || p.kind == 3)) continue;
+        const char* path = p.kind == 2 ? kCorpseArrowPath
+                         : p.kind == 0 ? "Interface\\Minimap\\Rotating-MinimapArrow.blp"
+                                       : "Interface\\Minimap\\Rotating-MinimapGuideArrow.blp";
+        VkDescriptorSet tex = minimapArt(path, services_.assetManager, services_.window);
+        if (!tex) continue;
+        const float angle = ms::rimAngle(p.render.x - frame.playerRender.x, p.render.y - frame.playerRender.y);
+        const glm::vec2 off = ms::rimArrowOffset(angle, frame.bearing);
+        const float len = std::sqrt(off.x * off.x + off.y * off.y);
+        if (len < 1e-4f) continue;
+        const float sx = frame.centerX + off.x * scale;
+        const float sy = frame.centerY - off.y * scale;
+        drawRotated(frame.drawList, tex, sx, sy, ms::kRimArrowArt * scale, off.x / len, -off.y / len);
+        if (!p.name.empty() && cursorNearBlip(sx, sy, kArrowHoverRadius)) {
+            ImGui::SetTooltip("%s", p.name.c_str());
         }
     }
 }
 
 // What a party member pinged, for as long as the ping lasts.
 void GameScreen::renderMinimapPings(const MinimapFrame& frame, game::GameHandler& gameHandler) {
+    // FrameXML's MinimapPing frame shows the ping from MINIMAP_PING, as the
+    // stock client's does; these circles are for this client's own ring.
+    if (frameXmlOwns(UiElement::Minimap)) return;
     // Minimap pings from party members
     for (const auto& ping : gameHandler.getMinimapPings()) {
         float sx = 0.0f, sy = 0.0f;
@@ -1303,93 +1487,59 @@ void GameScreen::renderMinimapPings(const MinimapFrame& frame, game::GameHandler
 
 }
 
-// One blip per party and raid member, from PartyRaidBlips.blp in the member's
-// class colour: the filled blip for your own party (or subgroup), the ringed
-// one for the rest of the raid. A member beyond the edge of the map is the
-// rotating group arrow on the rim, pointing at them.
-//
-// The position is the live entity's while the member is in sight, and the
-// last SMSG_PARTY_MEMBER_STATS position otherwise - that one only moves every
-// few seconds, so it is the fallback rather than the source.
-void GameScreen::renderMinimapPartyDots(const MinimapFrame& frame, game::GameHandler& gameHandler) {
-    VkDescriptorSet blips = minimapArt(kPartyRaidBlipsPath, services_.assetManager, services_.window);
-    VkDescriptorSet objIcons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
+// The group on the rim (0x00580AE0 party, 0x00580EC0 raid): a member further
+// out than 0.8 of the radius is Rotating-MinimapGroupArrow, 56.32 units from
+// the centre and pointing at them. Members closer in are blips, gathered with
+// the rest (renderMinimapBlips); this runs every frame, as the client's does.
+void GameScreen::renderMinimapGroupArrows(const MinimapFrame& frame, game::GameHandler& gameHandler) {
     VkDescriptorSet groupArrow = minimapArt(kGroupArrowPath, services_.assetManager, services_.window);
-    auto* minimap = services_.renderer ? services_.renderer->getMinimap() : nullptr;
-    const bool square = minimap && minimap->isSquareShape();
+    if (!groupArrow) return;
     const float scale = minimapArtScale(frame.mapRadius);
-    const float blipSize = kBlipSize * scale;
-    const float arrowSize = kEdgeArrowSize * scale;
-
+    const float radius = frame.view.viewRadius;
     const auto& partyData = gameHandler.getPartyData();
-    const bool inRaid = partyData.groupType == 1;
     const uint64_t selfGuid = gameHandler.getPlayerGuid();
     for (const auto& member : partyData.members) {
         if (!member.isOnline || member.guid == selfGuid) continue;
-
-        auto mEnt = gameHandler.getEntityManager().getEntity(member.guid);
         glm::vec3 render;
-        if (mEnt) {
-            render = core::coords::canonicalToRender(
-                glm::vec3(mEnt->getX(), mEnt->getY(), mEnt->getZ()));
-        } else {
-            if (!member.hasPartyStats || (member.posX == 0 && member.posY == 0)) continue;
-            // posX/posY follow same server axis convention as minimap pings:
-            // server posX = east/west axis → canonical Y (west)
-            // server posY = north/south axis → canonical X (north)
-            render = core::coords::canonicalToRender(glm::vec3(
-                static_cast<float>(member.posY), static_cast<float>(member.posX), 0.0f));
-        }
-        const glm::vec2 off = renderDeltaToMinimapOffset(render.x - frame.playerRender.x,
-                                                         render.y - frame.playerRender.y,
-                                                         frame.view);
-        const float edge = frame.mapRadius - 3.0f;
-        const bool onMap = square
-            ? (std::fabs(off.x) <= edge && std::fabs(off.y) <= edge)
-            : (off.x * off.x + off.y * off.y <= edge * edge);
-
-        float sx = frame.centerX + off.x;
-        float sy = frame.centerY + off.y;
-        if (onMap) {
-            uint8_t cid = entityClassId(mEnt.get());
-            if (cid == 0) cid = gameHandler.lookupPlayerClass(member.guid);
-            const bool otherSubgroup = inRaid && member.subGroup != partyData.subGroup;
-            // A corpse or a ghost greyed, as the old pass did.
-            const bool deadOrGhost = (member.onlineStatus & 0x0030) != 0;
-            const ImU32 tint = deadOrGhost ? IM_COL32(140, 140, 140, 255) : IM_COL32_WHITE;
-            if (cid >= 1 && cid <= 16 && blips) {
-                const int cell = (cid - 1) + (otherSubgroup ? 16 : 0);
-                drawAtlasCell(frame.drawList, blips, cell, kPartyBlipCols, kPartyBlipRows,
-                              sx, sy, blipSize, tint);
-            } else {
-                // Class not known yet: the plain ObjectIcons party / raid blip.
-                drawAtlasCell(frame.drawList, objIcons, otherSubgroup ? 1 : 0,
-                              kObjectIconCols, kObjectIconRows, sx, sy, blipSize, tint);
-            }
-        } else {
-            const float len = std::sqrt(off.x * off.x + off.y * off.y);
-            if (len < 1e-3f) continue;
-            const float nx = off.x / len, ny = off.y / len;
-            const ImVec2 rim = minimapRimPoint(frame.centerX, frame.centerY,
-                                               frame.mapRadius, nx, ny, square);
-            sx = rim.x;
-            sy = rim.y;
-            drawRotated(frame.drawList, groupArrow, sx, sy, arrowSize, nx, ny);
-        }
-
-        if (!member.name.empty() && cursorNearBlip(sx, sy, kSmallBlipHoverRadius)) {
-            uint8_t pmk2 = gameHandler.getEntityRaidMark(member.guid);
-            if (const char* markName = game::raidMarkName(pmk2)) {
-                ImGui::SetTooltip("%s {%s}", member.name.c_str(), markName);
-            } else {
-                ImGui::SetTooltip("%s", member.name.c_str());
-            }
+        if (!groupMemberPosition(gameHandler, member, render)) continue;
+        const float dN = render.x - frame.playerRender.x;
+        const float dW = render.y - frame.playerRender.y;
+        if (ms::onMap(dN, dW, radius)) continue;
+        const float angle = ms::rimAngle(dN, dW);
+        const glm::vec2 off = ms::rimArrowOffset(angle, frame.bearing);
+        const float sx = frame.centerX + off.x * scale;
+        const float sy = frame.centerY - off.y * scale;
+        const float len = std::sqrt(off.x * off.x + off.y * off.y);
+        if (len < 1e-4f) continue;
+        drawRotated(frame.drawList, groupArrow, sx, sy, ms::kRimArrowArt * scale,
+                    off.x / len, -off.y / len);
+        if (!member.name.empty() && cursorNearBlip(sx, sy, kArrowHoverRadius)) {
+            ImGui::SetTooltip("%s", member.name.c_str());
         }
     }
 }
 
+/// Where a group member is, in render (world) space: the unit while it is in
+/// sight, otherwise the last SMSG_PARTY_MEMBER_STATS position (0x007F3F40),
+/// which the client uses only for a member online on the player's map.
+bool GameScreen::groupMemberPosition(game::GameHandler& gameHandler, const game::GroupMember& member,
+                                     glm::vec3& render) const {
+    if (auto e = gameHandler.getEntityManager().getEntity(member.guid)) {
+        render = core::coords::canonicalToRender(glm::vec3(e->getX(), e->getY(), e->getZ()));
+        return true;
+    }
+    if (!member.hasPartyStats || (member.posX == 0 && member.posY == 0)) return false;
+    if (member.onlineStatus & 0x20) return false;  // 0x005444F0 skips this flag
+    // The stats carry the position in wire order, x then y: world order.
+    render = glm::vec3(static_cast<float>(member.posX), static_cast<float>(member.posY), 0.0f);
+    return true;
+}
+
 // Flag carriers and the other positions a battleground reports.
 void GameScreen::renderMinimapBattlegroundPositions(const MinimapFrame& frame, game::GameHandler& gameHandler) {
+    // Not on the stock minimap - the flag carriers are the world map's and the
+    // battlefield minimap's - so part of this client's optional dots.
+    if (!settingsPanel_.minimapNpcDots_) return;
     // BG flag carrier / important player positions (MSG_BATTLEGROUND_PLAYER_POSITIONS)
     {
         const auto& bgPositions = gameHandler.getBgPlayerPositions();
@@ -1433,141 +1583,25 @@ void GameScreen::renderMinimapBattlegroundPositions(const MinimapFrame& frame, g
 
 }
 
-// Where the corpse is, while the player is a ghost.
-//
-// Unlike every marker above it, a corpse off the edge of the map is not
-// skipped - it becomes an arrow at the rim pointing at it, which is why this
-// one keeps the render position rather than only the projected point.
-void GameScreen::renderMinimapCorpseMarker(const MinimapFrame& frame, game::GameHandler& gameHandler) {
-    // Corpse direction indicator - shown when player is a ghost
-    if (gameHandler.isPlayerGhost()) {
-        float corpseCanX = 0.0f, corpseCanY = 0.0f;
-        if (gameHandler.getCorpseCanonicalPos(corpseCanX, corpseCanY)) {
-            // The render position is kept: unlike the loops above, a corpse off
-            // the edge is not skipped - it gets a direction arrow at the rim,
-            // and that needs the direction.
-            const glm::vec3 corpseRender =
-                core::coords::canonicalToRender(glm::vec3(corpseCanX, corpseCanY, 0.0f));
-            float csx = 0.0f, csy = 0.0f;
-            const bool onMap = frame.project(corpseRender, csx, csy);
-
-            const float scale = minimapArtScale(frame.mapRadius);
-            if (onMap) {
-                // The tombstone from POIIcons.blp, at the coordinates
-                // WorldMapCorpseTemplate gives it (worldmapframetemplates.xml).
-                if (VkDescriptorSet poi = minimapArt(kPoiIconsPath, services_.assetManager,
-                                                     services_.window)) {
-                    const float h = kPoiIconSize * scale * 0.5f;
-                    frame.drawList->AddImage(texId(poi), ImVec2(csx - h, csy - h),
-                                             ImVec2(csx + h, csy + h),
-                                             ImVec2(0.56640625f, 0.00390625f),
-                                             ImVec2(0.6328125f, 0.0703125f));
-                }
-                // Tooltip on hover
-                if (cursorNearBlip(csx, csy)) {
-                    float dist = gameHandler.getCorpseDistance();
-                    if (dist >= 0.0f)
-                        ImGui::SetTooltip("Your corpse (%.0f yd)", dist);
-                    else
-                        ImGui::SetTooltip("Your corpse");
-                }
-            } else {
-                // Corpse is outside minimap - draw an edge arrow pointing toward it
-                float dx = corpseRender.x - frame.playerRender.x;
-                float dy = corpseRender.y - frame.playerRender.y;
-                // Only the direction is wanted here, and the projection's
-                // scale is uniform and positive, so it falls out of the
-                // normalisation below.
-                const glm::vec2 dir = renderDeltaToMinimapOffset(dx, dy, frame.view);
-                float rx = dir.x;
-                float ry = dir.y;
-                float len = std::sqrt(rx * rx + ry * ry);
-                if (len > 0.001f) {
-                    float nx = rx / len;
-                    float ny = ry / len;
-                    // The stock corpse arrow, on the rim, turned toward it.
-                    auto* mm = services_.renderer ? services_.renderer->getMinimap() : nullptr;
-                    const ImVec2 rim = minimapRimPoint(frame.centerX, frame.centerY,
-                                                       frame.mapRadius, nx, ny,
-                                                       mm && mm->isSquareShape());
-                    const float ax = rim.x;
-                    const float ay = rim.y;
-                    drawRotated(frame.drawList,
-                                minimapArt(kCorpseArrowPath, services_.assetManager, services_.window),
-                                ax, ay, kEdgeArrowSize * scale, nx, ny);
-                    // Tooltip on hover
-                    if (cursorNearBlip(ax, ay, kArrowHoverRadius)) {
-                        float dist = gameHandler.getCorpseDistance();
-                        if (dist >= 0.0f)
-                            ImGui::SetTooltip("Your corpse (%.0f yd)", dist);
-                        else
-                            ImGui::SetTooltip("Your corpse");
-                    }
-                }
-            }
-        }
-    }
-
-}
-
-// The player, at the centre, pointing where the camera looks.
-//
-// On a rotating minimap the map itself turns so forward is screen-up; on a
-// fixed one the arrow turns instead.
+// The player arrow: Interface\Minimap\MinimapArrow, the texture Minimap.lua
+// sizes with SetPlayerTextureWidth/Height (40 x 40), turned to the player's
+// facing - or pointing up while the map itself turns (0x0057BCC0 hands the
+// texture a rotation of 0 when rotateMinimap is on).
 void GameScreen::renderMinimapPlayerArrow(const MinimapFrame& frame) {
     auto* renderer = services_.renderer;
     auto* minimap = renderer ? renderer->getMinimap() : nullptr;
     if (!minimap) return;
-    // Player position arrow at minimap center, pointing in camera facing direction.
-    // On a rotating minimap the map already turns so forward = screen-up; on a fixed
-    // minimap we rotate the arrow to match the player's compass heading.
-    {
-        // Compute screen-space facing direction for the arrow.
-        // frame.bearing = clockwise angle from screen-north (0 = facing north/up).
-        float arrowAngle = 0.0f; // 0 = pointing up (north)
-        if (!minimap->isRotateWithCamera()) {
-            // Fixed minimap: arrow must show actual facing relative to north.
-            // Match the mirrored minimap texture by flipping the arrow's
-            // visual north/south component.
-            arrowAngle = -glm::radians(renderer->getCharacterYaw());
-        }
-        // Screen direction the arrow tip points toward
-        float nx =  std::sin(arrowAngle); // screen +X = east
-        float ny = -std::cos(arrowAngle); // screen -Y = north
-
-        // The stock arrow, Interface\Minimap\MinimapArrow, at the size
-        // Minimap.lua sets with SetPlayerTextureWidth/Height (40x40), which
-        // the frame loop passes to the map.
-        if (VkDescriptorSet arrow = minimapArt(kPlayerArrowPath, services_.assetManager,
-                                               services_.window)) {
-            const float artScale = minimapArtScale(frame.mapRadius);
-            drawRotated(frame.drawList, arrow, frame.centerX, frame.centerY,
-                        minimap->playerArrowWidth() * artScale,
-                        minimap->playerArrowHeight() * artScale, nx, ny);
-            return;
-        }
-
-        // Only without the texture: a chevron-style arrow - tip, two base
-        // corners, and a notch at the back.
-        const float tipLen  = 8.0f;  // tip forward distance
-        const float baseW   = 5.0f;  // half-width at base
-        const float notchIn = 3.0f;  // how far back the center notch sits
-        // Perpendicular direction (rotated 90°)
-        float px =  ny; // perpendicular x
-        float py = -nx; // perpendicular y
-
-        ImVec2 tip  (frame.centerX + nx * tipLen,  frame.centerY + ny * tipLen);
-        ImVec2 baseL(frame.centerX - nx * baseW + px * baseW,  frame.centerY - ny * baseW + py * baseW);
-        ImVec2 baseR(frame.centerX - nx * baseW - px * baseW,  frame.centerY - ny * baseW - py * baseW);
-        ImVec2 notch(frame.centerX - nx * (baseW - notchIn),   frame.centerY - ny * (baseW - notchIn));
-
-        // Fill: bright white with slight gold tint, dark outline for readability
-        frame.drawList->AddTriangleFilled(tip, baseL, notch, IM_COL32(255, 248, 200, 245));
-        frame.drawList->AddTriangleFilled(tip, notch, baseR, IM_COL32(255, 248, 200, 245));
-        frame.drawList->AddTriangle(tip, baseL, notch, IM_COL32(60, 40, 0, 200), 1.2f);
-        frame.drawList->AddTriangle(tip, notch, baseR, IM_COL32(60, 40, 0, 200), 1.2f);
+    const float turn = minimap->isRotateWithCamera() ? 0.0f : frame.facing;
+    // Facing 0 is north (up), a quarter turn counter-clockwise west (left).
+    const float nx = -std::sin(turn);
+    const float ny = -std::cos(turn);
+    if (VkDescriptorSet arrow = minimapArt(kPlayerArrowPath, services_.assetManager,
+                                           services_.window)) {
+        const float artScale = minimapArtScale(frame.mapRadius);
+        drawRotated(frame.drawList, arrow, frame.centerX, frame.centerY,
+                    minimap->playerArrowWidth() * artScale,
+                    minimap->playerArrowHeight() * artScale, nx, ny);
     }
-
 }
 
 // The wheel and the ctrl+click, when this client owns the ring.
@@ -1855,18 +1889,14 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
         playerRender = renderer->getCharacterPosition();
     }
 
-    // Camera bearing for minimap rotation
-    float bearing = 0.0f;
-    float cosB = 1.0f;
-    float sinB = 0.0f;
-    if (minimap->isRotateWithCamera()) {
-        glm::vec3 fwd = camera->getForward();
-        // Render space: +X=West, +Y=North. Camera fwd=(cos(yaw),sin(yaw)).
-        // Clockwise bearing from North: atan2(fwd.y, -fwd.x).
-        bearing = std::atan2(fwd.y, -fwd.x);
-        cosB = std::cos(bearing);
-        sinB = std::sin(bearing);
-    }
+    // The player's facing in the client's terms (0 north, a quarter turn
+    // counter-clockwise west). With rotateMinimap the map turns by it, so the
+    // facing is up (0x0057C6A0 / 0x0057BCC0); the map is told every frame.
+    const float facing = core::coords::canonicalToServerYaw(gameHandler.getMovementInfo().orientation);
+    minimap->setBearing(facing);
+    const float bearing = minimap->bearing();
+    const float cosB = std::cos(bearing);
+    const float sinB = std::sin(bearing);
 
     // The same view the Lua binding uses, so a ctrl+click here and a
     // Minimap:PingLocation from the interface land on the same world point.
@@ -1914,7 +1944,7 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
     // Everything a marker needs to place itself, in one place - the categories
     // below take this rather than eight locals each.
     const MinimapFrame frame{.drawList = drawList, .centerX = centerX, .centerY = centerY, .mapRadius = mapRadius, .bearing = bearing,
-                             .playerRender = playerRender, .view = minimapView};
+                             .facing = facing, .playerRender = playerRender, .view = minimapView};
 
     // Build sets of entries that are incomplete objectives for tracked quests.
     // minimapQuestEntries: NPC creature entries (npcOrGoId > 0)
@@ -1923,23 +1953,22 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
     const auto& minimapQuestEntries = minimapQuestCreatureEntries_;
     const auto& minimapQuestGoEntries = minimapQuestGameObjectEntries_;
 
-    // Bottom to top, as the stock client stacks them: quest areas under
-    // everything, then tracked things, quest marks, the group, the player.
-    renderMinimapGossipPois(frame, gameHandler);
+    // Bottom to top, as the stock client draws them (0x00581E80): the POI
+    // icons with the map, the group's blips, everything else's, the rim
+    // arrows, the player. This client's optional overlays go under the stock
+    // blips, the pings over them.
+    renderMinimapPois(frame, gameHandler, /*arrows=*/false);
     renderMinimapNpcDots(frame, minimapUnits, minimapQuestEntries);
-    renderMinimapFlightMasters(frame, minimapUnits);
     renderMinimapRares(frame, minimapUnits, gameHandler);
-    renderMinimapPlayerDots(frame, minimapPlayers, gameHandler);
     renderMinimapLootCorpses(frame, minimapUnits);
     renderMinimapObjectDots(frame, minimapGameObjects, minimapQuestGoEntries, gameHandler);
     renderMinimapChests(frame, minimapGameObjects, gameHandler);
-
     renderMinimapQuestKills(frame, minimapUnits, statuses, gameHandler);
-    renderMinimapQuestGivers(frame, statuses, gameHandler);
-    renderMinimapPings(frame, gameHandler);
-    renderMinimapPartyDots(frame, gameHandler);
     renderMinimapBattlegroundPositions(frame, gameHandler);
-    renderMinimapCorpseMarker(frame, gameHandler);
+    renderMinimapBlips(frame, gameHandler, minimapUnits, minimapPlayers, minimapGameObjects);
+    renderMinimapPings(frame, gameHandler);
+    renderMinimapPois(frame, gameHandler, /*arrows=*/true);
+    renderMinimapGroupArrows(frame, gameHandler);
     renderMinimapPlayerArrow(frame);
     // Blocked by any window in front, and entirely when FrameXML draws the
     // minimap - then the ring is a widget with its own handlers, and running

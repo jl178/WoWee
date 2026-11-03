@@ -36,6 +36,7 @@
 #include "network/packet.hpp"
 #include "auth/crypto.hpp"
 #include "core/coordinates.hpp"
+#include "ui/minimap_stock.hpp"
 #include "core/application.hpp"
 #include "core/config_paths.hpp"
 #include "pipeline/asset_manager.hpp"
@@ -3569,6 +3570,95 @@ const std::vector<GameHandler::WhoEntry>& GameHandler::getWhoResults() const {
     if (socialHandler_) return socialHandler_->getWhoResults();
     static const std::vector<WhoEntry> empty;
     return empty;
+}
+
+// ---- Minimap pings ---------------------------------------------------------
+
+void GameHandler::notifyMinimapPing(uint64_t senderGuid, float serverX, float serverY) {
+    // 0x0057EB80: one ping at a time, the newest.
+    haveMinimapPing_ = true;
+    minimapPingServerX_ = serverX;
+    minimapPingServerY_ = serverY;
+
+    // "player" unless the sender is in the group, partyN before raidN, as the
+    // client names it. A sender it cannot place is still "player".
+    std::string unit = "player";
+    if (senderGuid != playerGuid) {
+        const auto& pd = getPartyData();
+        const bool raid = groupIsRaid(pd.groupType);
+        int partyIndex = 0;
+        bool found = false;
+        for (const auto& m : pd.members) {
+            if (m.guid == playerGuid) continue;
+            if (raid && m.subGroup != pd.subGroup) continue;
+            ++partyIndex;
+            if (m.guid == senderGuid) {
+                unit = "party" + std::to_string(partyIndex);
+                found = true;
+                break;
+            }
+        }
+        if (!found && raid) {
+            for (size_t i = 0; i < pd.members.size(); ++i) {
+                if (pd.members[i].guid == senderGuid) {
+                    unit = "raid" + std::to_string(i + 1);
+                    break;
+                }
+            }
+        }
+    }
+    float fx = 0.0f, fy = 0.0f;
+    if (!minimapPingPosition(fx, fy)) return;
+    char bx[32], by[32];
+    std::snprintf(bx, sizeof(bx), "%f", fx);
+    std::snprintf(by, sizeof(by), "%f", fy);
+    fireAddonEvent("MINIMAP_PING", {unit, bx, by});
+}
+
+void GameHandler::setActiveTownTracking(int index) {
+    if (index < 0 || index >= static_cast<int>(ui::minimap_stock::kTownTracking.size())) index = -1;
+    activeTownTracking_ = index;
+    fireAddonEvent("MINIMAP_UPDATE_TRACKING", {});
+}
+
+uint32_t GameHandler::activeTrackingSpell() const {
+    // Aura 44 tracks creatures, 45 resources: the only thing in the spell
+    // data that tells a tracking spell from any other aura.
+    for (const auto& aura : getPlayerAuras()) {
+        if (aura.isEmpty()) continue;
+        getSpellName(aura.spellId);  // what fills the cache entry
+        auto it = spellNameCache_.find(aura.spellId);
+        if (it == spellNameCache_.end()) continue;
+        for (uint32_t type : it->second.effectAuraIds) {
+            if (type == 44 || type == 45) return aura.spellId;
+        }
+    }
+    return 0;
+}
+
+void GameHandler::noteTrackingAuras() {
+    const uint32_t now = activeTrackingSpell();
+    if (now != 0 && now != lastTrackingAuraSpell_ && activeTownTracking_ >= 0) {
+        // The event goes out with the aura's own MINIMAP_UPDATE_TRACKING.
+        activeTownTracking_ = -1;
+    }
+    lastTrackingAuraSpell_ = now;
+}
+
+bool GameHandler::minimapPingPosition(float& fx, float& fy) const {
+    fx = 0.0f;
+    fy = 0.0f;
+    if (!haveMinimapPing_ || !minimapViewProvider_) return false;
+    float radius = 0.0f, bearing = 0.0f;
+    if (!minimapViewProvider_(radius, bearing) || radius <= 0.0f) return false;
+    const glm::vec3 self = core::coords::canonicalToServer(
+        glm::vec3(movementInfo.x, movementInfo.y, movementInfo.z));
+    const glm::vec2 off = ui::minimap_stock::mapOffset(minimapPingServerX_ - self.x,
+                                                       minimapPingServerY_ - self.y,
+                                                       radius, bearing);
+    fx = off.x;
+    fy = off.y;
+    return true;
 }
 
 bool GameHandler::isInGroup() const {

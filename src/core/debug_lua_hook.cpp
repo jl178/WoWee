@@ -18,13 +18,18 @@
 //   WoweeDebug_Mouse(frame, button, down [, fx, fy])
 //                                  a mouse button event at a point inside a
 //                                  frame, through the same queue
+//   WoweeDebug_Camera(yaw, pitch, dist)
+//                                  the camera at a yaw from the facing
 //   WoweeDebug_Quit()              close the client
 //
 // Events pushed this way reach only this client: SDL's queue is in-process.
 #include "core/debug_lua_hook.hpp"
 
 #include "addons/lua_engine.hpp"
+#include "core/application.hpp"
 #include "core/logger.hpp"
+#include "rendering/camera_controller.hpp"
+#include "rendering/renderer.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "ui/widget_tree.hpp"
 
@@ -133,6 +138,18 @@ int luaDebugMouse(lua_State* L) {
     return 1;
 }
 
+/// WoweeDebug_Camera(yawDeg, pitchDeg, distance) - the third-person camera at
+/// a yaw relative to the character's facing (0 behind, 90 to its side), a
+/// pitch and a distance, so a test can look at a spell from the side.
+int luaDebugCamera(lua_State* L) {
+    const float yaw = static_cast<float>(luaL_optnumber(L, 1, 0.0));
+    const float pitch = static_cast<float>(luaL_optnumber(L, 2, -20.0));
+    const float dist = static_cast<float>(luaL_optnumber(L, 3, 0.0));
+    auto* renderer = Application::getInstance().getRenderer();
+    if (auto* cc = renderer ? renderer->getCameraController() : nullptr) cc->debugSetView(yaw, pitch, dist);
+    return 0;
+}
+
 int luaDebugQuit(lua_State* L) {
     (void)L;
     SDL_Event ev{};
@@ -179,6 +196,7 @@ void debugLuaHookTick(addons::LuaEngine* engine, SDL_Window* window) {
     lua_register(L, "WoweeDebug_PushKey", luaDebugPushKey);
     lua_register(L, "WoweeDebug_Quit", luaDebugQuit);
     lua_register(L, "WoweeDebug_Mouse", luaDebugMouse);
+    lua_register(L, "WoweeDebug_Camera", luaDebugCamera);
     gEngine = engine;
 
     LOG_WARNING("[luatest] running ", path);

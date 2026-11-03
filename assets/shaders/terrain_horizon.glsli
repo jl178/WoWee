@@ -1,0 +1,52 @@
+// The stock horizon's fragment (TerrainHorizon, 0x795f80): drawn with fog
+// start 0 and end 1, so every pixel of it is the fog colour, only between the
+// far clip less 50 yards and four far clips (0x791170, horizonFarclipScale).
+// terrain_horizon.frag discards nearer than that; terrain_horizon_far.frag is
+// for tiles wholly past it, without the discard, so the depth test can turn
+// fragments away before they are shaded.
+
+layout(set = 0, binding = 0) uniform PerFrame {
+    mat4 view;
+    mat4 projection;
+    mat4 lightSpaceMatrix;
+    vec4 lightDir;
+    vec4 lightColor;
+    vec4 ambientColor;
+    vec4 viewPos;
+    vec4 fogColor;
+    vec4 fogParams;
+    vec4 shadowParams;
+    vec4 playerPos;
+    vec4 playerWake;
+    vec4 localLightPosRadius[64];
+    vec4 localLightColorIntensity[64];
+    ivec4 localLightMeta;
+    vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
+};
+
+layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
+
+// x: the near view depth (far clip - 50), y: the far one (4 far clips).
+layout(push_constant) uniform Push {
+    vec4 range;
+} push;
+
+layout(location = 0) in float vViewDepth;
+layout(location = 1) in vec3 vWorldPos;
+
+layout(location = 0) out vec4 outColor;
+
+vec4 horizonColor() {
+    vec3 color = fogColor.rgb;
+    // Wowee's air in front, as the terrain has it (terrain.frag applyFog), so
+    // the horizon meets the ground it continues.
+    if (volumetricParams.x > 0.5) {
+        vec4 clip = projection * view * vec4(vWorldPos, 1.0);
+        float depth = max(clip.w, 1e-4);
+        vec2 uv = clip.xy / depth * 0.5 + 0.5;
+        float slice = log(max(depth, volumetricParams.y) / volumetricParams.y) * volumetricParams.z;
+        vec4 air = textureLod(uFogVolume, vec3(uv, slice - 0.5 / volumetricParams.w), 0.0);
+        color = color * air.a + air.rgb;
+    }
+    return vec4(color, 1.0);
+}

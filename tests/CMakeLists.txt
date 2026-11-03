@@ -3026,6 +3026,11 @@ target_link_libraries(test_positional_sound PRIVATE ${CMAKE_DL_LIBS})
 # and weights, the fog curve, the terrain light. Header-only.
 wowee_add_test(test_stock_light_math SOURCES test_stock_light_math.cpp)
 
+# ── test_stock_terrain ───────────────────────────────────────
+# The stock client's terrain arithmetic: layer weights, scrolling layers, the
+# specular highlight, the WDL horizon (stock_terrain). Header-only.
+wowee_add_test(test_stock_terrain SOURCES test_stock_terrain.cpp)
+
 # ── test_stock_world_fx ──────────────────────────────────────
 # The stock client's water, sky, WMO light and weather/glow arithmetic
 # (stock_liquid, stock_sky, stock_wmo_light, stock_screen_fx). Header-only.
@@ -3047,3 +3052,10 @@ wowee_add_test(test_stock_wmo_portal SOURCES test_stock_wmo_portal.cpp)
 # rounding of Lua arguments, rectangle tests, .zmp cells, landmark icon slots,
 # texture sizes. Header-only.
 wowee_add_test(test_world_map_lua_arith SOURCES test_world_map_lua_arith.cpp)
+
+# ── test_spell_chain_effect ──────────────────────────────────
+# SpellChainEffects (Wow.exe 0x7FC5F0, 0x9AA210): the 177-byte record, the
+# combo id packing and the lightning bolt's strip, pulse and flicker.
+wowee_add_test(test_spell_chain_effect
+    SOURCES test_spell_chain_effect.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/spell_chain_effect.cpp)

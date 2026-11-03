@@ -588,6 +588,27 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
             }
         }
     }
+    // The strips built elsewhere: spell chain effects and swing trails.
+    for (const auto& strip : effectStrips_) {
+        const size_t n = strip.verts.size() / 9;
+        if (n < 4 || written + n > MAX_RIBBON_VERTS) continue;
+        VkTexture* tex = strip.texture ? strip.texture : whiteTexture_.get();
+        VkDescriptorSet texSet = effectTextureSet(tex);
+        if (!texSet) continue;
+        // EGxBlend: 3 Add, 6 ModAdd, 7 InvSrcAlphaAdd, 10 NoAlphaAdd add;
+        // the rest blend by alpha. The fog push takes the M2 blend that
+        // matches (3 additive, 2 alpha).
+        const bool additive = strip.gxBlend == 3 || strip.gxBlend == 6 || strip.gxBlend == 7 ||
+                              strip.gxBlend == 10;
+        std::memcpy(dst + written * 9, strip.verts.data(), n * 9 * sizeof(float));
+        draws.push_back({.texSet = texSet,
+                         .pipeline = additive ? ribbonAdditivePipeline_ : ribbonPipeline_,
+                         .firstVertex = static_cast<uint32_t>(written),
+                         .vertexCount = static_cast<uint32_t>(n),
+                         .blendMode = additive ? 3u : 2u,
+                         .unfogged = 0u});
+        written += n;
+    }
     if (draws.empty() || written == 0) return;
 
     VkExtent2D ext = vkCtx_->getSwapchainExtent();
@@ -950,6 +971,29 @@ void M2Renderer::renderSmokeParticles(VkCommandBuffer cmd, VkDescriptorSet perFr
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &smokeVB_, &offset);
     vkCmdDraw(cmd, static_cast<uint32_t>(count), 1, 0, 0);
+}
+
+
+VkDescriptorSet M2Renderer::effectTextureSet(VkTexture* tex) {
+    if (!tex || !tex->isValid()) tex = whiteTexture_.get();
+    if (!tex || !tex->isValid() || !particleTexLayout_ || !materialDescPool_) return VK_NULL_HANDLE;
+    if (auto it = effectTexSets_.find(tex); it != effectTexSets_.end()) return it->second;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = materialDescPool_;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &particleTexLayout_;
+    if (vkAllocateDescriptorSets(vkCtx_->getDevice(), &ai, &set) != VK_SUCCESS) return VK_NULL_HANDLE;
+    VkDescriptorImageInfo imgInfo = tex->descriptorInfo();
+    VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = set;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &imgInfo;
+    vkUpdateDescriptorSets(vkCtx_->getDevice(), 1, &write, 0, nullptr);
+    effectTexSets_[tex] = set;
+    return set;
 }
 
 } // namespace rendering

@@ -85,6 +85,8 @@ constexpr const char* kWorldMapUpdate = "WORLD_MAP_UPDATE";
 int roundNearest(float f) { return static_cast<int>(std::nearbyint(f)); }
 /// _ftol: truncation, for the places the client switched the FPU to it.
 int truncate(float f) { return static_cast<int>(f); }
+using detail::luaRound;
+using detail::luaTruncate;
 
 // ---------------------------------------------------------------------------
 // Client data
@@ -173,8 +175,33 @@ struct Continent {
 };
 
 struct Landmark {               // 0x14 bytes at 0x00BE8F1C
-    int poiId = 0;
-    float u = 0, v = 0;
+    int poiId = 0;              // +0x00 AreaPOI id (unset for the gossip point)
+    float u = 0, v = 0;         // +0x04, +0x08
+    bool gossip = false;        // +0x10: the gossip point at 0x00D394E8
+};
+
+/// The gossip point: SMSG_GOSSIP_POI (0x0058A870 -> 0x007F4870) writes slot 1
+/// of the client's three map points (0x00D39490, 0x58 bytes each, laid out as
+/// an AreaPOI row) and SetMap puts it on the map after the AreaPOI rows. Only
+/// the newest one is kept. It goes after 480 seconds, or when the player comes
+/// within 10 yards of it (the minimap's update, 0x007F5BA0); either way the
+/// map is set again. The record's name points at a 64-byte buffer, its
+/// description is null, its icon is the packet's icon, its map is the map the
+/// player was on when it came.
+struct GossipPoint {
+    bool active = false;
+    float x = 0, y = 0;         // client order (x north)
+    int mapId = 0;
+    int icon = 0;
+    uint32_t flags = 0;         // the packet's, +0x40
+    std::string name;
+    std::chrono::steady_clock::time_point expires{};
+    // The newest gossip entry of the handler's list last seen, to tell a new
+    // packet from one already taken.
+    size_t seenCount = 0;
+    float seenX = 0, seenY = 0;
+    uint32_t seenIcon = 0;
+    std::string seenName;
 };
 
 struct Data {
@@ -239,6 +266,7 @@ struct State {
 
 Data gData;
 State gState;
+GossipPoint gGossip;
 
 int fieldInt(const pipeline::DBCFile& dbc, uint32_t row, uint32_t field, int fallback = 0) {
     return field < dbc.getFieldCount() ? dbc.getInt32(row, field) : fallback;
@@ -592,6 +620,63 @@ uint64_t exploredHash(game::GameHandler* gh) {
     return h;
 }
 
+/// Takes a new SMSG_GOSSIP_POI into the gossip point and lets it go when it
+/// has run out or been reached. True when the map has to be set again.
+bool updateGossipPoint(game::GameHandler* gh) {
+    if (!gh) return false;
+    bool changed = false;
+    const game::GossipPoi* newest = nullptr;
+    size_t count = 0;
+    for (const auto& p : gh->getGossipPois()) {
+        if (p.questObjectiveIndex != -2) continue;   // a quest POI, not a gossip point
+        newest = &p;
+        ++count;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    // A packet came when the list grew, or kept its length (it is capped)
+    // with another entry at its end. A shorter list is entries taken away
+    // (a quest's markers on its removal), which the client never sees.
+    const bool differs = newest && (newest->x != gGossip.seenX || newest->y != gGossip.seenY ||
+                                    newest->icon != gGossip.seenIcon ||
+                                    newest->name != gGossip.seenName);
+    const bool arrived = newest && (count > gGossip.seenCount ||
+                                    (count == gGossip.seenCount && differs));
+    gGossip.seenCount = count;
+    if (newest) {
+        gGossip.seenX = newest->x;
+        gGossip.seenY = newest->y;
+        gGossip.seenIcon = newest->icon;
+        gGossip.seenName = newest->name;
+    }
+    if (arrived) {
+        // The list holds Wowee's canonical order (x west); the map wants the
+        // wire's (x north).
+        gGossip.active = true;
+        gGossip.x = newest->y;
+        gGossip.y = newest->x;
+        gGossip.mapId = static_cast<int>(gh->getCurrentMapId());
+        gGossip.icon = static_cast<int>(newest->icon);
+        gGossip.flags = newest->flags;
+        gGossip.name = newest->name.substr(0, 63);
+        gGossip.expires = now + std::chrono::seconds(detail::kGossipPoiSeconds);
+        changed = true;
+    }
+    if (gGossip.active) {
+        bool gone = now >= gGossip.expires;
+        float px = 0, py = 0, pz = 0;
+        if (!gone && playerPosition(gh, px, py, pz)) {
+            const float dx = px - gGossip.x;
+            const float dy = py - gGossip.y;
+            gone = dx * dx + dy * dy < detail::kGossipPoiReachedSq;
+        }
+        if (gone) {
+            gGossip.active = false;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 void fireWorldMapUpdate(lua_State* L) {
     lua_getfield(L, LUA_REGISTRYINDEX, "wowee_lua_engine");
     auto* engine = static_cast<LuaEngine*>(lua_touserdata(L, -1));
@@ -615,7 +700,8 @@ int currentWma() {
 /// The dungeon floor showing: 0x00542F60, and the "accf10 == -1" pattern.
 int currentDungeon() { return gState.area != -1 ? gState.dungeon : -1; }
 
-/// WorldMapTransforms (0x00543920): a region of one map drawn on another.
+/// WorldMapTransforms (0x00543920): a region of one map drawn on another. The
+/// region is closed on all four sides.
 bool transform(int mapId, float x, float y, int& outMap, float& outX, float& outY,
                int& outDungeon) {
     outMap = mapId;
@@ -624,7 +710,7 @@ bool transform(int mapId, float x, float y, int& outMap, float& outX, float& out
     outDungeon = 0;
     for (const auto& t : gData.transforms) {
         if (t.mapId != mapId) continue;
-        if (t.minX < x && x <= t.maxX && t.minY <= y && y < t.maxY) {
+        if (detail::closedRectContains(t.minY, t.minX, t.maxY, t.maxX, y, x)) {
             outMap = t.newMapId;
             outX = x + t.offsetX;
             outY = y + t.offsetY;
@@ -719,10 +805,7 @@ bool worldToMapImpl(int wmoGroupId, float px, float py, float pz, int mapId, flo
     const float hiX = dm ? dm->x1 : row->top;
     const float loX = dm ? dm->x0 : row->bottom;
     v = ((lx - loX) == 0.0f || (hiX - loX) == 0.0f) ? 0.0f : 1.0f - (lx - loX) / (hiX - loX);
-    if (!noClamp && (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f)) {
-        u = 0.0f;
-        v = 0.0f;
-    }
+    if (!noClamp) detail::clampToMap(u, v);
     return true;
 }
 
@@ -736,7 +819,15 @@ void poiPosition(const PoiRow& p, int wmoGroupId, float& u, float& v) {
     const bool c = s.zone >= 0 || s.area >= 0 || (p.flags & 8) != 0;
     if (!(a && b && c)) return;
     if ((p.flags & 0x400) != 0) {
-        const WorldMapAreaRow* row = gData.wmaRow(currentWma());
+        // 0x00543860: the zone of a continent showing - none on a continent
+        // map, the world view or an instance/dungeon view.
+        int zoneWma = -1;
+        if (s.continent >= 0 && s.continent < static_cast<int>(gData.continents.size())) {
+            const Continent& c = gData.continents[static_cast<size_t>(s.continent)];
+            if (s.zone >= 0 && s.zone < static_cast<int>(c.zones.size()))
+                zoneWma = c.zones[static_cast<size_t>(s.zone)];
+        }
+        const WorldMapAreaRow* row = gData.wmaRow(zoneWma);
         if (!row || row->areaId != p.areaId || row->mapId != p.mapId) return;
     }
     bool hidden = false;
@@ -797,7 +888,17 @@ void setMap(lua_State* L, int continent, int zone, int dungeon) {
             if (a->explorationLevel >= 0 && !explored(gh, a->areaBit)) continue;
         }
         if (p.worldStateId != 0 && worldStateValue(gh, p.worldStateId) == 0) continue;
-        s.landmarks.push_back({p.id, u, v});
+        s.landmarks.push_back({p.id, u, v, false});
+    }
+    // The gossip point, last, whatever the map's flags: placed straight
+    // through 0x00544140 and dropped only when off the map or hidden.
+    if (gGossip.active && (std::fabs(gGossip.x) >= kEpsilon || std::fabs(gGossip.y) >= kEpsilon)) {
+        float u = 0.0f, v = 0.0f;
+        bool hidden = false;
+        worldToMapImpl(wmo, gGossip.x, gGossip.y, 0.0f, gGossip.mapId, u, v, &hidden, false, 0);
+        if (!hidden && (std::fabs(u) >= kEpsilon || std::fabs(v) >= kEpsilon)) {
+            s.landmarks.push_back({0, u, v, true});
+        }
     }
 
     // Overlays: the explored-area art of the zone showing.
@@ -839,17 +940,17 @@ int zoneAtPoint(float x, float y) {
     float topX = 0, leftY = 0, bottomX = 0, rightY = 0;
     transform(row->mapId, row->top, row->left, m, topX, leftY, dn);
     transform(row->mapId, row->bottom, row->right, m, bottomX, rightY, dn);
+    // Clamped the client's way round: x tested against 1 first and kept
+    // when NaN, y tested "below 1" first and so made 1 when NaN.
     if (x >= 1.0f) x = 1.0f; else if (x < 0.0f) x = 0.0f;
-    if (y >= 1.0f) y = 1.0f; else if (y < 0.0f) y = 0.0f;
+    if (!(y < 1.0f)) y = 1.0f; else if (y < 0.0f) y = 0.0f;
     if ((leftY - rightY) == 0.0f || (topX - bottomX) == 0.0f) return 0;
     const float col = 0.5f - (rightY + (1.0f - x) * (leftY - rightY)) * kWorldToGrid;
     const float rowF = 0.5f - ((1.0f - y) * (topX - bottomX) + bottomX) * kWorldToGrid;
     if (col < 0.0f || col > 1.0f || rowF < 0.0f || rowF > 1.0f) return 0;
     const Continent& c = gData.continents[static_cast<size_t>(s.continent)];
     if (c.grid.empty()) return 0;
-    const int r = std::clamp(-roundNearest(rowF * -128.0f), 0, 127);
-    const int k = std::clamp(roundNearest(col * 128.0f), 0, 127);
-    return c.grid[static_cast<size_t>(k + r * 128)];
+    return c.grid[static_cast<size_t>(detail::zmpCell(rowF, col))];
 }
 
 /// What the cursor is over, for the highlight - 0x00544420.
@@ -858,8 +959,8 @@ int hoveredZone(float x, float y) {
     if (s.continent == -2) return 0;
     if (s.continent == -1) {
         for (const auto& c : gData.continents) {
-            if (c.worldMapId != 0 && c.rectLeft <= x && x < c.rectRight &&
-                c.rectTop < y && y <= c.rectBottom) {
+            if (c.worldMapId != 0 &&
+                detail::closedRectContains(c.rectLeft, c.rectTop, c.rectRight, c.rectBottom, x, y)) {
                 return c.wmaId;
             }
         }
@@ -907,8 +1008,10 @@ void setMapToCurrentZoneImpl(lua_State* L) {
         for (int orphan : gData.orphans) {
             const WorldMapAreaRow* row = gData.wmaRow(orphan);
             if (!row || row->mapId != mapId) continue;
+            // The floor under the player; failing that the transform's
+            // floor; failing that whatever the floor lookup said (-1).
             int floor = dungeonMapForPosition(mapId, wmo, pz);
-            if (floor < 1) floor = overrideDungeon != 0 ? overrideDungeon : -1;
+            if (floor < 1 && overrideDungeon != 0) floor = overrideDungeon;
             setMap(L, -2, row->id, floor);
             return;
         }
@@ -927,9 +1030,7 @@ void setMapToCurrentZoneImpl(lua_State* L) {
                 if (fr >= 0.0f && fr <= 1.0f && fc >= 0.0f && fc <= 1.0f) {
                     const Continent& c = gData.continents[static_cast<size_t>(ci)];
                     if (!c.grid.empty()) {
-                        const int r = std::clamp(-roundNearest(fr * -128.0f), 0, 127);
-                        const int k = std::clamp(roundNearest(fc * 128.0f), 0, 127);
-                        const int w = c.grid[static_cast<size_t>(k + r * 128)];
+                        const int w = c.grid[static_cast<size_t>(detail::zmpCell(fr, fc))];
                         const int zi = zoneIndexOn(c, w);
                         if (zi >= 0) {
                             setMap(L, ci, zi, -1);
@@ -941,7 +1042,9 @@ void setMapToCurrentZoneImpl(lua_State* L) {
             }
         }
         if (!placed) {
-            setMap(L, -1, -1, -1);   // "True Orphan"
+            // "True Orphan": 0x005477BD sets (-2, -1, -1) - no continent, no
+            // area - not the world view.
+            setMap(L, -2, -1, -1);
             return;
         }
     }
@@ -977,18 +1080,22 @@ bool ensureReady(lua_State* L) {
     game::GameHandler* gh = getGameHandler(L);
     if (!loadData(gh)) return false;
     if (!gState.initialised && gh && gh->getPlayerGuid() != 0) {
+        updateGossipPoint(gh);
         setMapToCurrentZoneImpl(L);
         return true;
     }
     // New ground or a landmark's world state: the overlays and landmarks
-    // change (0x007F5BA0 / 0x005285F0 -> 0x0050F490). Looked at four times a
+    // change (0x005470D0 / 0x005285F0 -> 0x0050F490), and so does the gossip
+    // point when it comes, runs out or is reached (0x007F4870, 0x007F5BA0).
+    // Looked at four times a
     // second rather than on every call - the map makes dozens a frame.
     using Clock = std::chrono::steady_clock;
     static Clock::time_point checkedAt{};
     const auto now = Clock::now();
     if (gState.initialised && gh && now - checkedAt > std::chrono::milliseconds(250)) {
         checkedAt = now;
-        if (exploredHash(gh) != gState.exploredHash) refresh(L);
+        const bool gossipChanged = updateGossipPoint(gh);
+        if (gossipChanged || exploredHash(gh) != gState.exploredHash) refresh(L);
     }
     return true;
 }
@@ -1032,7 +1139,7 @@ int lua_GetMapContinents(lua_State* L) {
 int lua_GetMapZones(lua_State* L) {
     WM_FALLBACK(L);
     if (!lua_isnumber(L, 1)) return luaL_error(L, "Usage: GetMapZones(continentIndex)");
-    const int idx = roundNearest(static_cast<float>(lua_tonumber(L, 1))) - 1;
+    const int idx = static_cast<int>(static_cast<unsigned>(luaRound(lua_tonumber(L, 1))) - 1u);
     if (idx < 0 || idx >= static_cast<int>(gData.continents.size())) return 0;
     const Continent& c = gData.continents[static_cast<size_t>(idx)];
     lua_checkstack(L, static_cast<int>(c.zones.size()) + 4);
@@ -1048,12 +1155,12 @@ int lua_GetMapZones(lua_State* L) {
 int lua_SetMapZoom(lua_State* L) {
     WM_FALLBACK(L);
     if (!lua_isnumber(L, 1)) return luaL_error(L, "Usage: SetMapZoom(continentIndex [,zoneIndex])");
-    const int c = truncate(static_cast<float>(lua_tonumber(L, 1))) - 1;
+    const int c = static_cast<int>(static_cast<unsigned>(luaTruncate(lua_tonumber(L, 1))) - 1u);
     if (c < -2 || c >= static_cast<int>(gData.continents.size())) {
         return luaL_error(L, "Usage: SetMapZoom(continentIndex [,zoneIndex]) .. requested continent out of bounds");
     }
     int z = -1;
-    if (lua_isnumber(L, 2)) z = truncate(static_cast<float>(lua_tonumber(L, 2))) - 1;
+    if (lua_isnumber(L, 2)) z = static_cast<int>(static_cast<unsigned>(luaTruncate(lua_tonumber(L, 2))) - 1u);
     setMap(L, c, z, -1);
     return 0;
 }
@@ -1113,7 +1220,7 @@ int lua_GetCurrentMapAreaID(lua_State* L) {
 int lua_SetMapByID(lua_State* L) {
     WM_FALLBACK(L);
     if (!lua_isnumber(L, 1)) return luaL_error(L, "Usage: SetMapByID(mapID)");
-    const int id = truncate(static_cast<float>(lua_tonumber(L, 1)));
+    const int id = luaTruncate(lua_tonumber(L, 1));
     const WorldMapAreaRow* row = gData.wmaRow(id);
     if (!row) return 0;
     for (size_t i = 0; i < gData.continents.size(); ++i) {
@@ -1175,22 +1282,7 @@ int mapTextureHeight() {
     return roundNearest((h * kMapPixelsX) / w);
 }
 
-/// The low byte rounded up to a power of two, as 0x00544CA0 does to its third value.
-unsigned lowBytePow2(unsigned v) {
-    unsigned low = v & 0xFFu;
-    const unsigned high = v - low;
-    if ((low & (low - 1)) != 0) {
-        int i = 8;
-        do {
-            --i;
-            if (low & (1u << i)) {
-                low = 1u << (i + 1);
-                break;
-            }
-        } while (i != 0);
-    }
-    return low + high;
-}
+using detail::lowBytePow2;
 
 /// GetMapInfo() - 0x00544CA0: mapFileName, textureHeight, and that height
 /// with its low byte rounded up to a power of two.
@@ -1215,7 +1307,7 @@ int lua_GetNumMapOverlays(lua_State* L) {
 int lua_GetMapOverlayInfo(lua_State* L) {
     WM_FALLBACK(L);
     if (!lua_isnumber(L, 1)) return luaL_error(L, "Usage: GetMapOverlayInfo(index)");
-    const int idx = roundNearest(static_cast<float>(lua_tonumber(L, 1))) - 1;
+    const int idx = static_cast<int>(static_cast<unsigned>(luaRound(lua_tonumber(L, 1))) - 1u);
     const OverlayRow* o = (idx >= 0 && idx < static_cast<int>(gState.overlays.size()))
         ? gData.overlay(gState.overlays[static_cast<size_t>(idx)]) : nullptr;
     if (!o) {
@@ -1251,9 +1343,22 @@ int lua_GetNumMapLandmarks(lua_State* L) {
 int lua_GetMapLandmarkInfo(lua_State* L) {
     WM_FALLBACK(L);
     if (!lua_isnumber(L, 1)) return luaL_error(L, "Usage: GetMapLandmarkInfo(index)");
-    const int idx = roundNearest(static_cast<float>(lua_tonumber(L, 1))) - 1;
+    const int idx = static_cast<int>(static_cast<unsigned>(luaRound(lua_tonumber(L, 1))) - 1u);
     const Landmark* lm = (idx >= 0 && idx < static_cast<int>(gState.landmarks.size()))
         ? &gState.landmarks[static_cast<size_t>(idx)] : nullptr;
+    if (lm && lm->gossip) {
+        // The gossip point's record: its name, a null description, its icon
+        // (slot 0 - it has no world state), no map link, and the packet's
+        // flags for showInBattleMap (0x200).
+        lua_pushstring(L, gGossip.name.c_str());
+        lua_pushnil(L);
+        lua_pushnumber(L, gGossip.icon);
+        lua_pushnumber(L, lm->u);
+        lua_pushnumber(L, lm->v);
+        lua_pushnil(L);
+        lua_pushboolean(L, (gGossip.flags & 0x200) != 0);
+        return 7;
+    }
     const PoiRow* p = lm ? gData.poi(lm->poiId) : nullptr;
     if (!p) {
         lua_pushnil(L);
@@ -1271,11 +1376,8 @@ int lua_GetMapLandmarkInfo(lua_State* L) {
     int texture = 0;
     const State& s = gState;
     if ((p->flags & 0x80) != 0 || (s.zone == -1 && s.continent != -2)) {
-        unsigned k = 0;
-        if (p->worldStateId != 0) {
-            k = static_cast<unsigned>(worldStateValue(gh, p->worldStateId) - 1);
-            if (k > 8) k = 0;
-        }
+        const unsigned k = detail::landmarkIconSlot(
+            p->worldStateId != 0, p->worldStateId != 0 ? worldStateValue(gh, p->worldStateId) : 0);
         texture = p->icons[k];
     }
     lua_pushnumber(L, texture);
@@ -1299,8 +1401,8 @@ int lua_ProcessMapClick(lua_State* L) {
     if (s.continent == -1) {
         for (size_t i = 0; i < gData.continents.size(); ++i) {
             const Continent& c = gData.continents[i];
-            if (c.worldMapId != 0 && c.rectLeft <= x && x < c.rectRight &&
-                c.rectTop < y && y <= c.rectBottom) {
+            if (c.worldMapId != 0 &&
+                detail::closedRectContains(c.rectLeft, c.rectTop, c.rectRight, c.rectBottom, x, y)) {
                 setMap(L, static_cast<int>(i), -1, -1);
                 return 0;
             }
@@ -1315,31 +1417,7 @@ int lua_ProcessMapClick(lua_State* L) {
     return 0;
 }
 
-/// Power-of-two texture arithmetic from 0x00545110, kept as the client has it.
-unsigned highlightTextureSize(unsigned size) {
-    unsigned low = size & 0xFFu;
-    unsigned result = size;
-    if (low != 0) {
-        result = low;
-        if ((low & (low - 1)) != 0) {
-            int i = 8;
-            do {
-                --i;
-                if (low & (1u << i)) {
-                    result = 1u << (i + 1);
-                    break;
-                }
-            } while (i != 0);
-        }
-        unsigned probe = result * 8;
-        while (probe < low) {
-            probe = result * 16;
-            result *= 2;
-        }
-        if (size > 0x100) result = result + 0x100 + (size & 0xFFFFFF00u);
-    }
-    return result;
-}
+using detail::highlightTextureSize;
 
 /// UpdateMapHighlight(x, y) - 0x00545110: name, fileName, texPercentageX,
 /// texPercentageY, textureX, textureY, scrollChildX, scrollChildY.
@@ -1366,7 +1444,7 @@ int lua_UpdateMapHighlight(lua_State* L) {
             const float top = static_cast<float>(o->hitTop) * kInvMapPixelsY;
             const float bottom = static_cast<float>(o->hitBottom) * kInvMapPixelsY;
             if ((right - left) == 0.0f || (bottom - top) == 0.0f) continue;
-            if (left < x && x <= right && top < y && y <= bottom) {
+            if (detail::closedRectContains(left, top, right, bottom, x, y)) {   // 0x00488D40
                 const AreaRow* a = gData.area(o->areaIds[0]);
                 if (a) return nameOnly(&a->name);
             }
@@ -1535,8 +1613,10 @@ int lua_GetPlayerMapPosition(lua_State* L) {
             px = sp.x; py = sp.y; pz = sp.z;
             have = true;
         } else if (const auto* m = findPartyMember(gh, guid)) {
-            // Out of range: SMSG_PARTY_MEMBER_STATS' area and int16 position.
-            if (m->isOnline != 0) {
+            // Out of range (0x005444F0): SMSG_PARTY_MEMBER_STATS' area and
+            // int16 position, unless the member's status has 0x20 set. The
+            // client does not look at "online" (0x01) here.
+            if ((m->onlineStatus & 0x20) == 0) {
                 const AreaRow* a = gData.area(m->zoneId);
                 if (a) {
                     mapId = a->mapId;
@@ -1563,11 +1643,14 @@ int lua_GetCorpseMapPosition(lua_State* L) {
     WM_FALLBACK(L);
     game::GameHandler* gh = getGameHandler(L);
     float u = 0.0f, v = 0.0f;
-    float cx = 0.0f, cy = 0.0f;
-    if (gh && gh->getCorpseCanonicalPos(cx, cy)) {
-        const glm::vec3 sp = core::coords::canonicalToServer(glm::vec3(cx, cy, 0.0f));
-        worldToMapImpl(playerWmoGroupId(L), sp.x, sp.y, 0.0f,
-                       static_cast<int>(gh->getCurrentMapId()), u, v, nullptr, false, 0);
+    // 0x00523E80: the corpse's own map and position (MSG_CORPSE_QUERY), not
+    // the map the player is on - a corpse on another continent still shows
+    // on that continent's map and on the world map.
+    if (gh && gh->corpsePositionValidRef()) {
+        const glm::vec3 sp = core::coords::canonicalToServer(
+            glm::vec3(gh->corpseYRef(), gh->corpseXRef(), gh->corpseZRef()));
+        worldToMapImpl(playerWmoGroupId(L), sp.x, sp.y, sp.z,
+                       static_cast<int>(gh->corpseMapIdRef()), u, v, nullptr, false, 0);
     }
     lua_pushnumber(L, u);
     lua_pushnumber(L, v);
@@ -1634,7 +1717,7 @@ int lua_GetCurrentMapDungeonLevel(lua_State* L) {
 int lua_SetDungeonMapLevel(lua_State* L) {
     WM_FALLBACK(L);
     if (!lua_isnumber(L, 1)) return luaL_error(L, "Usage: SetDungeonMapLevel(level)");
-    int level = truncate(static_cast<float>(lua_tonumber(L, 1)));
+    int level = luaTruncate(lua_tonumber(L, 1));
     State& s = gState;
     const WorldMapAreaRow* area = gData.wmaRow(s.area);
     if (area && area->defaultDungeonFloor == -1) {
@@ -1682,7 +1765,7 @@ int lua_DungeonUsesTerrainMap(lua_State* L) {
 int lua_ClickLandmark(lua_State* L) {
     WM_FALLBACK(L);
     if (!lua_isnumber(L, 1)) return luaL_error(L, "Usage: ClickLandmark(mapLinkID)");
-    const int link = roundNearest(static_cast<float>(lua_tonumber(L, 1)));
+    const int link = luaRound(lua_tonumber(L, 1));
     const DungeonMapRow* dm = gData.dungeonMap(link);
     if (!dm) return 0;
     for (int orphan : gData.orphans) {
