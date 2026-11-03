@@ -5,6 +5,7 @@
 #include "ui/game_screen.hpp"
 #include "ui/glue_ui.hpp"
 #include "ui/graphics_presets.hpp"
+#include "ui/enhancement_rows.hpp"
 #include "ui/settings_panel.hpp"
 #include "ui/settings_schema.hpp"
 #include "ui/ui_manager.hpp"
@@ -108,19 +109,17 @@ bool controlFor(const std::string& key, Control& c) {
 
 /// The settings a quality preset sets, so choosing one shows its values in
 /// the controls under it before anything is applied.
+/// The quality columns; every enhancement row is a preset key as well
+/// (kEnhancementRows), since a preset sets the whole Enhancements value.
 constexpr const char* kPresetKeys[] = {
-    "viewdistance", "shadows",      "shadowdistance", "antialiasing", "fxaa",
-    "normalmapping", "normalmapstrength", "parallax", "parallaxquality", "groundclutter",
-    "grassenabled", "grassdensity", "grassheight",    "grassdistance",
-    "foliagewind", "shadowstrength", "lightshafts", "fogstrength", "fogskyblend",
-    "lensflare", "sharpstars", "sunshafts", "shorelinefoam", "wetground",
+    "viewdistance", "shadowdistance", "antialiasing", "fxaa", "groundclutter",
 };
 
 bool isPresetKey(const std::string& key) {
     for (const char* k : kPresetKeys) {
         if (key == k) return true;
     }
-    return false;
+    return findEnhancementRow(key) != nullptr || key == "enhancementset";
 }
 
 /// A slider's value as its label shows it.
@@ -180,29 +179,15 @@ void GlueOptionsFrame::set(const std::string& key, const std::string& v) {
         const GraphicsPresetValues& p = kGraphicsPresets[index];
         const auto on = [](bool b) { return std::string(b ? "1" : "0"); };
         pending_["viewdistance"] = settingNumberText(p.viewDistance);
-        pending_["shadows"] = on(p.shadows);
         pending_["shadowdistance"] = settingNumberText(p.shadowDistance);
         pending_["antialiasing"] = settingNumberText(p.antiAliasing);
         pending_["fxaa"] = on(p.fxaa);
-        pending_["normalmapping"] = on(p.normalMapping);
-        pending_["normalmapstrength"] = settingNumberText(p.normalMapStrength);
-        pending_["parallax"] = on(p.parallax);
-        pending_["parallaxquality"] = settingNumberText(p.parallaxQuality);
         pending_["groundclutter"] = settingNumberText(p.groundClutter);
-        pending_["grassenabled"] = on(p.grass);
-        pending_["grassdensity"] = settingNumberText(p.grassDensity);
-        pending_["grassheight"] = settingNumberText(p.grassHeight);
-        pending_["grassdistance"] = settingNumberText(p.grassDistance);
-        pending_["foliagewind"] = settingNumberText(p.foliageWind);
-        pending_["shadowstrength"] = settingNumberText(p.shadowStrength);
-        pending_["lightshafts"] = settingNumberText(p.lightShafts);
-        pending_["fogstrength"] = settingNumberText(p.fogStrength);
-        pending_["fogskyblend"] = settingNumberText(p.fogSkyBlend);
-        pending_["lensflare"] = settingNumberText(p.lensFlare);
-        pending_["sharpstars"] = on(p.sharpStars);
-        pending_["sunshafts"] = on(p.sunShafts);
-        pending_["shorelinefoam"] = on(p.shorelineFoam);
-        pending_["wetground"] = on(p.wetGround);
+        // Every enhancement, off the one table.
+        for (const auto& row : kEnhancementRows) {
+            const float v = enhancementValue(p.enh, row);
+            pending_[row.key] = row.asBool ? on(v != 0.0f) : settingNumberText(v);
+        }
     } else if (isPresetKey(key)) {
         // Changed by hand, these are no longer the preset; Apply works out
         // whether they happen to be another one.
@@ -320,18 +305,14 @@ void GlueOptionsFrame::buildPages(SettingsPanel& sp) {
                       glueString("EFFECTS_SUBTEXT",
                                  "These controls allow you to modify specific detail levels for "
                                  "many game elements and effects."),
-                      keep({"graphicspreset", "viewdistance", "shadows", "shadowdistance",
-                            "shadowstrength", "groundclutter", "groundclutterdistance", "particledensity",
+                      keep({"graphicspreset", "viewdistance", "shadowdistance",
+                            "groundclutter", "groundclutterdistance", "particledensity",
                             "environmentdetail", "weatherdetail", "texturefiltering"}),
                       1});
     pages_.push_back({"Advanced",
-                      "Anti-aliasing, upscaling, surface detail, fog, light, the sky, wind, "
-                      "water and rain.",
-                      keep({"fxaa", "normalmapping", "normalmapstrength", "parallax",
-                            "parallaxquality", "upscaling", "fsrquality", "fsrsharpness",
-                            "framegen", "lightshafts", "mistdensity", "fogstrength",
-                            "fogskyblend", "lensflare", "sharpstars", "sunshafts",
-                            "foliagewind", "shorelinefoam", "waterreflections", "watersplashes", "wetground"}),
+                      "Anti-aliasing and upscaling. The enhancements over the original "
+                      "picture have pages of their own below.",
+                      keep({"fxaa", "upscaling", "fsrquality", "fsrsharpness", "framegen"}),
                       0});
     pages_.push_back({"Sound & Voice",
                       glueString("SOUND_SUBTEXT",

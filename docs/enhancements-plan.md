@@ -1,8 +1,24 @@
 # Phase 2 plan: enhancements over the stock 3.3.5a picture
 
-Status: plan only. Nothing here is built yet. Written 2026-11-03 against
-branch `audio-data-driven`, after stock passes 1-4 (see
-`docs/week-plan-2026-11.md` and `docs/re/*.md`).
+Status: written 2026-11-03 against branch `audio-data-driven`, after stock
+passes 1-4 (see `docs/week-plan-2026-11.md` and `docs/re/*.md`).
+
+Done (2026-11-03, framework step): section 3.1-3.3 and the U list.
+`rendering::Enhancements` (`include/rendering/enhancements.hpp`) and
+`kEnhancementRows` (`include/ui/enhancement_rows.hpp`) are the one table; the
+schema rows, saving, loading, the presets (Classic = `Enhancements{}`), the
+login options and the three pages "Enhancements", "Enhancements: Sky" and
+"Enhancements: Motion" (plus the Grass, Ray Tracing, HUD and Sound rows) are
+read off it, with an "Enhancement set" chooser (Custom / Original / Recommended)
+as the reset-to-stock control. `test_enhancements_stock` holds Classic to
+`Enhancements{}`. `WOWEE_FREEZE_CLOCK`, `WOWEE_ENHANCE_AB=<key>:<s>` and
+`WOWEE_ENHANCE=stock|recommended` exist. U1-U4, U6-U10, U12, U13 have rows
+(U5 is part of `locallights`); U11's shoulder curve is in
+`postprocess.frag.glsl`, which nothing loads, so there was nothing to switch;
+U14-U17 are unchanged. S1 (the stock blob) and S2-S4 are done; the water
+refraction switch is gone. The stock behaviour for off came from new RE:
+characters.md §1 "Point lights: full rule" and §6 "Unit blob shadow: full
+rule", world-lighting.md "Shadow map filter (PCF taps)" and "Drunk".
 
 ## 1. Goal and rules
 

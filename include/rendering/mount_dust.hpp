@@ -29,6 +29,8 @@ public:
     void spawnDust(const glm::vec3& position, const glm::vec3& velocity, bool isMoving);
 
     void update(float deltaTime);
+    /// Drop every particle in the air (the setting was turned off).
+    void clear() { particles.clear(); spawnAccum = 0.0f; }
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
 
 private:

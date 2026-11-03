@@ -3,6 +3,7 @@
 #include <set>
 #include "ui/game_screen.hpp"
 #include "ui/settings_schema.hpp"
+#include "ui/enhancement_rows.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "ui/ui_raid_icons.hpp"
 #include "ui/ui_colors.hpp"
@@ -2040,7 +2041,6 @@ void GameScreen::saveSettings() {
     out << "right_bar_offset_y=" << settingsPanel_.pendingRightBarOffsetY << "\n";
     out << "left_bar_offset_y=" << settingsPanel_.pendingLeftBarOffsetY << "\n";
     out << "damage_flash=" << (settingsPanel_.damageFlashEnabled_ ? 1 : 0) << "\n";
-    out << "low_health_vignette=" << (settingsPanel_.lowHealthVignetteEnabled_ ? 1 : 0) << "\n";
 
     // Audio
     out << "sound_muted=" << (settingsPanel_.soundMuted_ ? 1 : 0) << "\n";
@@ -2052,7 +2052,6 @@ void GameScreen::saveSettings() {
     out << "enable_ambience=" << (settingsPanel_.pendingEnableAmbience ? 1 : 0) << "\n";
     out << "error_speech=" << (settingsPanel_.pendingErrorSpeech ? 1 : 0) << "\n";
     out << "enable_sound_effects=" << (settingsPanel_.pendingEnableSoundEffects ? 1 : 0) << "\n";
-    out << "use_original_soundtrack=" << (settingsPanel_.pendingUseOriginalSoundtrack ? 1 : 0) << "\n";
     out << "master_volume=" << settingsPanel_.pendingMasterVolume << "\n";
     out << "effects_volume=" << settingsPanel_.pendingEffectsVolume << "\n";
     out << "music_volume=" << settingsPanel_.pendingMusicVolume << "\n";
@@ -2089,36 +2088,17 @@ void GameScreen::saveSettings() {
     out << "weather_detail=" << settingsPanel_.pendingWeatherDetail << "\n";
     out << "environment_detail=" << settingsPanel_.pendingEnvironmentDetail << "\n";
     out << "texture_filtering=" << settingsPanel_.pendingTextureFiltering << "\n";
-    out << "grass_enabled=" << (settingsPanel_.pendingGrassEnabled ? 1 : 0) << "\n";
-    out << "grass_density=" << settingsPanel_.pendingGrassDensity << "\n";
-    out << "grass_height=" << settingsPanel_.pendingGrassHeight << "\n";
-    out << "grass_distance=" << settingsPanel_.pendingGrassDistance << "\n";
-    out << "shadows=" << (settingsPanel_.pendingShadows ? 1 : 0) << "\n";
+    // Every enhancement, from the one table: its saved key and its value as
+    // the setting reads it (kEnhancementRows, ui/enhancement_rows.hpp).
+    for (const auto& row : kEnhancementRows) {
+        out << row.saveKey << "=" << settingsPanel_.settingValue(row.key) << "\n";
+    }
     out << "shadow_distance=" << settingsPanel_.pendingShadowDistance << "\n";
-    out << "shadow_strength=" << settingsPanel_.pendingShadowStrength << "\n";
-    out << "foliage_wind=" << settingsPanel_.pendingFoliageWind << "\n";
     out << "view_distance=" << settingsPanel_.pendingViewDistance << "\n";
-    out << "fog_sky_blend=" << settingsPanel_.pendingFogSkyBlend << "\n";
-    out << "fog_strength=" << settingsPanel_.pendingFogStrength << "\n";
-    out << "light_shafts=" << settingsPanel_.pendingVolumetricFog << "\n";
-    out << "ray_traced_lighting=" << settingsPanel_.pendingRtLighting << "\n";
-    out << "mist_density=" << settingsPanel_.pendingVolumetricDensity << "\n";
-    out << "sharp_stars=" << (settingsPanel_.pendingSharpStars ? 1 : 0) << "\n";
-    out << "sun_shafts=" << (settingsPanel_.pendingSunShafts ? 1 : 0) << "\n";
-    out << "shoreline_foam=" << (settingsPanel_.pendingShorelineFoam ? 1 : 0) << "\n";
-    out << "water_reflections=" << (settingsPanel_.pendingWaterReflections ? 1 : 0) << "\n";
-    out << "water_splashes=" << (settingsPanel_.pendingWaterSplashes ? 1 : 0) << "\n";
-    out << "wet_ground=" << (settingsPanel_.pendingWetGround ? 1 : 0) << "\n";
     out << "brightness=" << settingsPanel_.pendingBrightness << "\n";
-    out << "water_refraction=" << (settingsPanel_.pendingWaterRefraction ? 1 : 0) << "\n";
     out << "antialiasing=" << settingsPanel_.pendingAntiAliasing << "\n";
     out << "fxaa=" << (settingsPanel_.pendingFXAA ? 1 : 0) << "\n";
-    out << "normal_mapping=" << (settingsPanel_.pendingNormalMapping ? 1 : 0) << "\n";
-    out << "normal_map_strength=" << settingsPanel_.pendingNormalMapStrength << "\n";
-    out << "lens_flare=" << settingsPanel_.pendingLensFlare << "\n";
     out << "frame_cap=" << settingsPanel_.pendingFrameCap << "\n";
-    out << "pom=" << (settingsPanel_.pendingPOM ? 1 : 0) << "\n";
-    out << "pom_quality=" << settingsPanel_.pendingPOMQuality << "\n";
     out << "upscaling_mode=" << settingsPanel_.pendingUpscalingMode << "\n";
     out << "fsr=" << (settingsPanel_.pendingFSR ? 1 : 0) << "\n";
     out << "fsr_quality=" << settingsPanel_.pendingFSRQuality << "\n";
@@ -2202,6 +2182,15 @@ void GameScreen::loadSettings() {
         std::string val = line.substr(eq + 1);
 
         try {
+            // Every enhancement, by its saved key, held to its row's range
+            // (kEnhancementRows). The keys are the ones these settings were
+            // always saved under, so an older file reads the same.
+            if (const EnhancementRow* row = findEnhancementRowBySaveKey(key)) {
+                setEnhancementValue(settingsPanel_.enhancements, *row,
+                                    row->asBool ? (std::stoi(val) != 0 ? 1.0f : 0.0f)
+                                                : std::stof(val));
+                continue;
+            }
             // Interface
             if (key == "ui_opacity") {
                 int v = std::stoi(val);
@@ -2295,8 +2284,6 @@ void GameScreen::loadSettings() {
                 settingsPanel_.pendingLeftBarOffsetY = std::clamp(std::stof(val), -400.0f, 400.0f);
             } else if (key == "damage_flash") {
                 settingsPanel_.damageFlashEnabled_ = (std::stoi(val) != 0);
-            } else if (key == "low_health_vignette") {
-                settingsPanel_.lowHealthVignetteEnabled_ = (std::stoi(val) != 0);
             }
             // Audio
             else if (key == "sound_muted") {
@@ -2312,7 +2299,6 @@ void GameScreen::loadSettings() {
             else if (key == "enable_ambience") settingsPanel_.pendingEnableAmbience = (val != "0");
             else if (key == "error_speech") settingsPanel_.pendingErrorSpeech = (val != "0");
             else if (key == "enable_sound_effects") settingsPanel_.pendingEnableSoundEffects = (val != "0");
-            else if (key == "use_original_soundtrack") settingsPanel_.pendingUseOriginalSoundtrack = (std::stoi(val) != 0);
             else if (key == "master_volume") settingsPanel_.pendingMasterVolume = std::clamp(std::stoi(val), 0, 100);
             else if (key == "effects_volume") settingsPanel_.pendingEffectsVolume = std::clamp(std::stoi(val), 0, 100);
             else if (key == "music_volume") settingsPanel_.pendingMusicVolume = std::clamp(std::stoi(val), 0, 100);
@@ -2358,41 +2344,17 @@ void GameScreen::loadSettings() {
             else if (key == "weather_detail") settingsPanel_.pendingWeatherDetail = std::clamp(std::stoi(val), 0, 3);
             else if (key == "environment_detail") settingsPanel_.pendingEnvironmentDetail = std::clamp(std::stoi(val), 50, 150);
             else if (key == "texture_filtering") settingsPanel_.pendingTextureFiltering = std::clamp(std::stoi(val), 0, 4);
-            else if (key == "grass_enabled") settingsPanel_.pendingGrassEnabled = (std::stoi(val) != 0);
-            else if (key == "grass_density") settingsPanel_.pendingGrassDensity = std::clamp(std::stoi(val), 0, 300);
-            else if (key == "grass_height") settingsPanel_.pendingGrassHeight = std::clamp(std::stoi(val), 50, 300);
-            else if (key == "grass_distance") settingsPanel_.pendingGrassDistance = std::clamp(std::stoi(val), 30, 800);
-            else if (key == "shadows") settingsPanel_.pendingShadows = (std::stoi(val) != 0);
             else if (key == "shadow_distance") settingsPanel_.pendingShadowDistance = std::clamp(std::stof(val), 40.0f, 500.0f);
-            else if (key == "shadow_strength") settingsPanel_.pendingShadowStrength = std::clamp(std::stof(val), 0.5f, 1.5f);
-            else if (key == "foliage_wind") settingsPanel_.pendingFoliageWind = std::clamp(std::stof(val), 0.0f, 2.0f);
             else if (key == "view_distance") settingsPanel_.pendingViewDistance = std::clamp(std::stof(val), 400.0f, 2400.0f);
-            else if (key == "fog_sky_blend") settingsPanel_.pendingFogSkyBlend = std::clamp(std::stof(val), 0.0f, 1.0f);
-            else if (key == "fog_strength") settingsPanel_.pendingFogStrength = std::clamp(std::stof(val), 0.0f, 2.0f);
-            else if (key == "light_shafts") settingsPanel_.pendingVolumetricFog = std::clamp(std::stoi(val), 0, 3);
-            else if (key == "ray_traced_lighting") settingsPanel_.pendingRtLighting = std::clamp(std::stoi(val), 0, 3);
-            else if (key == "mist_density") settingsPanel_.pendingVolumetricDensity = std::clamp(std::stof(val), 0.0f, 3.0f);
-            else if (key == "sharp_stars") settingsPanel_.pendingSharpStars = (val == "1");
-            else if (key == "sun_shafts") settingsPanel_.pendingSunShafts = (val == "1");
-            else if (key == "shoreline_foam") settingsPanel_.pendingShorelineFoam = (val == "1");
-            else if (key == "water_reflections") settingsPanel_.pendingWaterReflections = (val == "1");
-            else if (key == "water_splashes") settingsPanel_.pendingWaterSplashes = (val == "1");
-            else if (key == "wet_ground") settingsPanel_.pendingWetGround = (val == "1");
             // No apply here either: brightness is on the graphics load list,
             // which is walked once the renderer exists. This branch ran from
             // the constructor, where services_.renderer is still null.
             else if (key == "brightness") settingsPanel_.pendingBrightness = std::clamp(std::stoi(val), 0, 100);
-            else if (key == "water_refraction") settingsPanel_.pendingWaterRefraction = (std::stoi(val) != 0);
             else if (key == "antialiasing") settingsPanel_.pendingAntiAliasing = std::clamp(std::stoi(val), 0, 3);
             else if (key == "fxaa") settingsPanel_.pendingFXAA = (std::stoi(val) != 0);
             else if (key == "check_for_updates") settingsPanel_.pendingCheckForUpdates = (std::stoi(val) != 0);
             else if (key == "content_packs") settingsPanel_.pendingContentPacks = (std::stoi(val) != 0);
-            else if (key == "normal_mapping") settingsPanel_.pendingNormalMapping = (std::stoi(val) != 0);
-            else if (key == "normal_map_strength") settingsPanel_.pendingNormalMapStrength = std::clamp(std::stof(val), 0.0f, 2.0f);
-            else if (key == "lens_flare") settingsPanel_.pendingLensFlare = std::clamp(std::stof(val), 0.0f, 2.0f);
             else if (key == "frame_cap") settingsPanel_.pendingFrameCap = std::clamp(std::stoi(val), 0, 6);
-            else if (key == "pom") settingsPanel_.pendingPOM = (std::stoi(val) != 0);
-            else if (key == "pom_quality") settingsPanel_.pendingPOMQuality = std::clamp(std::stoi(val), 0, 2);
             else if (key == "upscaling_mode") {
                 settingsPanel_.pendingUpscalingMode = std::clamp(std::stoi(val), 0, 2);
                 settingsPanel_.pendingFSR = (settingsPanel_.pendingUpscalingMode == 1);

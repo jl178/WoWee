@@ -88,14 +88,14 @@ void SettingsPanel::applyWindowUiScale() {
 namespace {
 
 
-/// The settings a preset has an opinion about, in the order it sets them.
+/// The quality settings a preset has an opinion about, in the order it sets
+/// them. The enhancements are the other half of every preset: it sets the
+/// whole of rendering::Enhancements (GraphicsPresetValues::enh), and every row
+/// of kEnhancementRows counts as one of its keys (isGraphicsPresetKey). Four
+/// of them were missing from the list this used to be, so Classic left water
+/// reflections, splashes, ray tracing and the mist density as they were.
 constexpr const char* kGraphicsPresetKeys[] = {
-    "viewdistance", "shadows", "shadowdistance", "antialiasing", "fxaa",
-    "normalmapping", "normalmapstrength", "parallax", "parallaxquality",
-    "groundclutter",
-    "grassenabled", "grassdensity", "grassheight", "grassdistance",
-    "foliagewind", "shadowstrength", "lightshafts", "fogstrength", "fogskyblend",
-    "lensflare", "sharpstars", "sunshafts", "shorelinefoam", "wetground",
+    "viewdistance", "shadowdistance", "antialiasing", "fxaa", "groundclutter",
 };
 
 // The fog is Light.dbc's own at the default view distance; see
@@ -115,15 +115,13 @@ static_assert(cameraDistanceFactor(50) - rendering::CameraController::kMaxDistan
               rendering::CameraController::kMaxDistanceFactorLimit - cameraDistanceFactor(50) < 0.001f,
               "the cameramaxdistance row's 50 yards is not the camera's own limit");
 
+// The enhancements are not listed: applyLoadedSettings hands the whole of
+// SettingsPanel::enhancements over at once (applyEnhancements).
 constexpr const char* kGraphicsApplyKeys[] = {
-    "viewdistance", "shadows", "shadowdistance", "antialiasing", "fxaa",
-    "normalmapping", "normalmapstrength", "parallax", "parallaxquality",
-    "groundclutter", "grassenabled", "grassdensity", "grassheight",
-    "grassdistance", "waterrefraction", "upscaling", "fsrquality",
+    "viewdistance", "shadowdistance", "antialiasing", "fxaa",
+    "groundclutter", "upscaling", "fsrquality",
     "fsrsharpness", "framegen", "brightness", "uiopacity", "minimapsquare",
     "minimapnpcdots", "minimapclock", "minimapcoords", "minimaprotate", "latencymeter",
-    "fogskyblend", "fogstrength", "sharpstars", "lensflare", "lightshafts", "mistdensity", "sunshafts",
-    "raytracedlighting", "shadowstrength", "foliagewind", "shorelinefoam", "waterreflections", "watersplashes", "wetground",
     // Moved off the game's own Effects panel, so this list is now what
     // applies them at startup; the cvar store used to do it.
     "groundclutterdistance", "particledensity", "weatherdetail",
@@ -146,7 +144,44 @@ bool isGraphicsPresetKey(const std::string& key) {
     for (const char* k : kGraphicsPresetKeys) {
         if (key == k) return true;
     }
-    return false;
+    return findEnhancementRow(key) != nullptr || key == "enhancementset";
+}
+
+/// Whether a row's control is live in `e`: its enabledWhen test holds. A
+/// dependent value (the bump strength with bumps off, grass height with no
+/// grass) says nothing about which set this is, so matching skips it.
+bool enhancementRowLive(const rendering::Enhancements& e, const EnhancementRow& r) {
+    const std::string test = r.enabledWhen;
+    if (test.empty()) return true;
+    std::string key = test;
+    bool negate = false;
+    float want = 0.0f;
+    bool compare = false;
+    if (const auto ne = test.find("!="); ne != std::string::npos) {
+        key = test.substr(0, ne);
+        want = static_cast<float>(std::atof(test.c_str() + ne + 2));
+        negate = compare = true;
+    } else if (const auto eq = test.find('='); eq != std::string::npos) {
+        key = test.substr(0, eq);
+        want = static_cast<float>(std::atof(test.c_str() + eq + 1));
+        compare = true;
+    }
+    const EnhancementRow* other = findEnhancementRow(key);
+    if (!other) return true;
+    const float v = enhancementValue(e, *other);
+    if (!compare) return v != 0.0f;
+    return negate ? (v != want) : (v == want);
+}
+
+/// The two sets match on every row that is live in the reference.
+bool enhancementsMatch(const rendering::Enhancements& have, const rendering::Enhancements& ref) {
+    for (const auto& r : kEnhancementRows) {
+        if (!enhancementRowLive(ref, r) && !enhancementRowLive(have, r)) continue;
+        const float x = enhancementValue(have, r), y = enhancementValue(ref, r);
+        const float slack = r.asFloat ? 0.03f : 0.0f;
+        if (std::abs(x - y) > slack) return false;
+    }
+    return true;
 }
 
 }  // namespace
@@ -155,6 +190,7 @@ void SettingsPanel::applyLoadedSettings() {
     // Everything the config file just filled in, handed to the thing it
     // affects. Same route the sliders and the presets take.
     for (const char* key : kGraphicsApplyKeys) applySettingSideEffects(key);
+    applyEnhancements();
     // And the preset marker worked out from what was loaded rather than taken
     // from the file. The file kept the last preset chosen even after a
     // setting under it was changed by hand, so it could say Ultra over
@@ -170,29 +206,13 @@ void SettingsPanel::applyGraphicsPreset(GraphicsPreset preset) {
     if (index >= 0 && index < static_cast<int>(std::size(kGraphicsPresets))) {
         const auto& p = kGraphicsPresets[index];
         pendingViewDistance      = p.viewDistance;
-        pendingShadows           = p.shadows;
         pendingShadowDistance    = p.shadowDistance;
         pendingAntiAliasing      = p.antiAliasing;
         pendingFXAA              = p.fxaa;
-        pendingNormalMapping     = p.normalMapping;
-        pendingNormalMapStrength = p.normalMapStrength;
-        pendingPOM               = p.parallax;
-        pendingPOMQuality        = p.parallaxQuality;
         pendingGroundClutterDensity = p.groundClutter;
-        pendingGrassEnabled      = p.grass;
-        pendingGrassDensity      = p.grassDensity;
-        pendingGrassHeight       = p.grassHeight;
-        pendingGrassDistance     = p.grassDistance;
-        pendingFoliageWind       = p.foliageWind;
-        pendingShadowStrength    = p.shadowStrength;
-        pendingVolumetricFog     = p.lightShafts;
-        pendingFogStrength       = p.fogStrength;
-        pendingFogSkyBlend       = p.fogSkyBlend;
-        pendingLensFlare         = p.lensFlare;
-        pendingSharpStars        = p.sharpStars;
-        pendingSunShafts         = p.sunShafts;
-        pendingShorelineFoam     = p.shorelineFoam;
-        pendingWetGround         = p.wetGround;
+        // The whole set, so no enhancement is left as it was: Classic is
+        // Enhancements{}, the stock client.
+        enhancements             = p.enh;
         // Each one goes to the thing it affects through the one function that
         // knows where that is, rather than through a second copy of the same
         // renderer calls written out here.
@@ -204,6 +224,10 @@ void SettingsPanel::applyGraphicsPreset(GraphicsPreset preset) {
         for (const char* key : kGraphicsPresetKeys) {
             applySettingSideEffects(key);
             addons::noteClientSettingChanged(key, settingValue(key));
+        }
+        applyEnhancements();
+        for (const auto& r : kEnhancementRows) {
+            addons::noteClientSettingChanged(r.key, settingValue(r.key));
         }
     }
 
@@ -223,30 +247,14 @@ void SettingsPanel::updateGraphicsPresetFromCurrentSettings() {
         const auto& p = kGraphicsPresets[i];
         const bool matches =
             std::abs(pendingViewDistance - p.viewDistance) <= 20.0f &&
-            pendingShadows == p.shadows &&
             // A preset with shadows off says nothing about how far they reach.
-            (!p.shadows || std::abs(pendingShadowDistance - p.shadowDistance) <= 20.0f) &&
+            (!p.enh.shadows || std::abs(pendingShadowDistance - p.shadowDistance) <= 20.0f) &&
             pendingAntiAliasing == p.antiAliasing &&
             pendingFXAA == p.fxaa &&
-            pendingNormalMapping == p.normalMapping &&
-            pendingPOM == p.parallax &&
             std::abs(pendingGroundClutterDensity - p.groundClutter) <= 10 &&
-            pendingGrassEnabled == p.grass &&
-            // As with shadows: a preset that grows no grass says nothing about
-            // how dense, how tall or how far it would have been.
-            (!p.grass || (std::abs(pendingGrassDensity - p.grassDensity) <= 5 &&
-                          std::abs(pendingGrassHeight - p.grassHeight) <= 5 &&
-                          std::abs(pendingGrassDistance - p.grassDistance) <= 10)) &&
-            std::abs(pendingFoliageWind - p.foliageWind) <= 0.03f &&
-            std::abs(pendingShadowStrength - p.shadowStrength) <= 0.03f &&
-            pendingVolumetricFog == p.lightShafts &&
-            std::abs(pendingFogStrength - p.fogStrength) <= 0.03f &&
-            std::abs(pendingFogSkyBlend - p.fogSkyBlend) <= 0.03f &&
-            std::abs(pendingLensFlare - p.lensFlare) <= 0.05f &&
-            pendingSharpStars == p.sharpStars &&
-            pendingSunShafts == p.sunShafts &&
-            pendingShorelineFoam == p.shorelineFoam &&
-            pendingWetGround == p.wetGround;
+            // Every enhancement row, read off the one table: the list of
+            // columns compared here had drifted from the list a preset set.
+            enhancementsMatch(enhancements, p.enh);
         if (matches) {
             pendingGraphicsPreset = static_cast<GraphicsPreset>(i + 1);
             // Both halves: saveSettings writes currentGraphicsPreset, and with
@@ -294,21 +302,10 @@ constexpr FieldBinding kFieldBindings[] = {
     // not in the schema - but they still have to be readable and writable,
     // because that is how those panels reach them.
     {.key = "viewdistance",   .asFloat = &SettingsPanel::pendingViewDistance},
-    {.key = "fogskyblend",    .asFloat = &SettingsPanel::pendingFogSkyBlend},
-    {.key = "fogstrength",    .asFloat = &SettingsPanel::pendingFogStrength},
-    {.key = "shadowstrength", .asFloat = &SettingsPanel::pendingShadowStrength},
-    {.key = "foliagewind",    .asFloat = &SettingsPanel::pendingFoliageWind},
-    {.key = "lightshafts",    .asInt   = &SettingsPanel::pendingVolumetricFog},
-    {.key = "raytracedlighting", .asInt = &SettingsPanel::pendingRtLighting},
-    {.key = "mistdensity",    .asFloat = &SettingsPanel::pendingVolumetricDensity},
     {.key = "mousespeed",     .asFloat = &SettingsPanel::pendingMouseSensitivity},
     {.key = "minimapclock",   .asBool  = &SettingsPanel::pendingShowMinimapClock},
     {.key = "friendlyplates", .asBool  = &SettingsPanel::showFriendlyNameplates_},
     {.key = "enemyplates",    .asBool  = &SettingsPanel::showEnemyNameplates_},
-    {.key = "grassenabled",   .asBool  = &SettingsPanel::pendingGrassEnabled},
-    {.key = "grassdensity",   .asInt   = &SettingsPanel::pendingGrassDensity},
-    {.key = "grassheight",    .asInt   = &SettingsPanel::pendingGrassHeight},
-    {.key = "grassdistance",  .asInt   = &SettingsPanel::pendingGrassDistance},
     // Not a fraction any more. These two crossed the bridge as 0-1.5 and 0-1
     // while their fields held 0-150 and 0-100, which was invisible while the
     // only control for them was drawn here from the field. They are schema
@@ -334,23 +331,10 @@ constexpr FieldBinding kFieldBindings[] = {
     {.key = "enablesoundeffects", .asBool = &SettingsPanel::pendingEnableSoundEffects},
 
     // --- Graphics ---
-    {.key = "shadows",           .asBool  = &SettingsPanel::pendingShadows},
     {.key = "shadowdistance",    .asFloat = &SettingsPanel::pendingShadowDistance},
-    {.key = "waterrefraction",   .asBool  = &SettingsPanel::pendingWaterRefraction},
     {.key = "antialiasing",      .asInt   = &SettingsPanel::pendingAntiAliasing},
     {.key = "fxaa",              .asBool  = &SettingsPanel::pendingFXAA},
-    {.key = "normalmapping",     .asBool  = &SettingsPanel::pendingNormalMapping},
-    {.key = "normalmapstrength", .asFloat = &SettingsPanel::pendingNormalMapStrength},
-    {.key = "lensflare",         .asFloat = &SettingsPanel::pendingLensFlare},
     {.key = "framecap",          .asInt   = &SettingsPanel::pendingFrameCap},
-    {.key = "parallax",          .asBool  = &SettingsPanel::pendingPOM},
-    {.key = "sharpstars",        .asBool  = &SettingsPanel::pendingSharpStars},
-    {.key = "sunshafts",         .asBool  = &SettingsPanel::pendingSunShafts},
-    {.key = "shorelinefoam",     .asBool  = &SettingsPanel::pendingShorelineFoam},
-    {.key = "waterreflections",  .asBool  = &SettingsPanel::pendingWaterReflections},
-    {.key = "watersplashes",     .asBool  = &SettingsPanel::pendingWaterSplashes},
-    {.key = "wetground",         .asBool  = &SettingsPanel::pendingWetGround},
-    {.key = "parallaxquality",   .asInt   = &SettingsPanel::pendingPOMQuality},
 
     // --- Upscaling ---
     {.key = "upscaling",     .asInt   = &SettingsPanel::pendingUpscalingMode},
@@ -419,7 +403,6 @@ constexpr FieldBinding kFieldBindings[] = {
     {.key = "raretracker",        .asBool  = &SettingsPanel::showRareTracker_},
     {.key = "chesttracker",       .asBool  = &SettingsPanel::showChestTracker_},
     {.key = "damageflash",        .asBool  = &SettingsPanel::damageFlashEnabled_},
-    {.key = "lowhealthvignette",  .asBool  = &SettingsPanel::lowHealthVignetteEnabled_},
 
     // --- Sound ---
     {.key = "musicvolume",     .asInt  = &SettingsPanel::pendingMusicVolume},
@@ -434,7 +417,6 @@ constexpr FieldBinding kFieldBindings[] = {
     {.key = "activityvolume",  .asInt  = &SettingsPanel::pendingActivityVolume},
     {.key = "npcvoicevolume",  .asInt  = &SettingsPanel::pendingNpcVoiceVolume},
     {.key = "characterspeech", .asBool = &SettingsPanel::pendingCharacterSpeech},
-    {.key = "woweemusic",      .asBool = &SettingsPanel::pendingUseOriginalSoundtrack},
 
     // --- Gameplay ---
     {.key = "autoloot",     .asBool = &SettingsPanel::pendingAutoLoot},
@@ -514,8 +496,6 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
     auto* camera = renderer ? renderer->getCamera() : nullptr;
     auto* cameraController = renderer ? renderer->getCameraController() : nullptr;
     auto* post = renderer ? renderer->getPostProcessPipeline() : nullptr;
-    auto* wmo = renderer ? renderer->getWMORenderer() : nullptr;
-    auto* chars = renderer ? renderer->getCharacterRenderer() : nullptr;
 
     // The switches the game's own Sound panel used to own. applySoundCVars
     // re-reads them from the cvar store, and is where the knowledge of what
@@ -536,14 +516,20 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
         }
         return;
     }
+    // Every enhancement goes the one way: the whole set to the renderer, which
+    // works out what changed (Renderer::setEnhancements). The soundtrack
+    // switch is the one with a listener outside it.
+    if (findEnhancementRow(key) != nullptr || key == "enhancementset") {
+        applyEnhancements();
+        if (services_.addonManager) {
+            services_.addonManager->fireEvent("WOWEE_SETTING_CHANGED", {key});
+        }
+        return;
+    }
     if (key == "viewdistance") {
         if (renderer) renderer->setViewDistance(pendingViewDistance);
-    } else if (key == "shadows") {
-        if (renderer) renderer->setShadowsEnabled(pendingShadows);
     } else if (key == "shadowdistance") {
         if (renderer) renderer->setShadowDistance(pendingShadowDistance);
-    } else if (key == "waterrefraction") {
-        if (renderer) renderer->setWaterRefractionEnabled(pendingWaterRefraction);
     } else if (key == "groundclutter") {
         if (renderer) {
             if (auto* tm = renderer->getTerrainManager()) {
@@ -588,10 +574,6 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
         }
     } else if (key == "framecap") {
         if (services_.window) services_.window->setFrameCap(frameCapFpsForChoice(pendingFrameCap));
-    } else if (key == "lensflare") {
-        if (renderer) {
-            if (auto* lf = renderer->getLensFlare()) lf->setIntensity(pendingLensFlare);
-        }
     } else if (key == "fov") {
         if (camera) camera->setFov(pendingFov);
     } else if (key == "camerashake") {
@@ -662,33 +644,6 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
         }
     } else if (key == "fxaa") {
         if (post) post->setFXAAEnabled(pendingFXAA);
-    } else if (key == "normalmapping") {
-        if (wmo) wmo->setNormalMappingEnabled(pendingNormalMapping);
-        if (chars) chars->setNormalMappingEnabled(pendingNormalMapping);
-        // The ground's relief too, which used to ignore this switch.
-        if (renderer) renderer->setTerrainRelief(pendingNormalMapping, pendingNormalMapStrength);
-    } else if (key == "normalmapstrength") {
-        if (wmo) wmo->setNormalMapStrength(pendingNormalMapStrength);
-        if (chars) chars->setNormalMapStrength(pendingNormalMapStrength);
-        if (renderer) renderer->setTerrainRelief(pendingNormalMapping, pendingNormalMapStrength);
-    } else if (key == "parallax") {
-        if (wmo) wmo->setPOMEnabled(pendingPOM);
-        if (chars) chars->setPOMEnabled(pendingPOM);
-    } else if (key == "sharpstars") {
-        if (renderer) renderer->setSharpStars(pendingSharpStars);
-    } else if (key == "sunshafts") {
-        if (renderer) renderer->setSunShaftsEnabled(pendingSunShafts);
-    } else if (key == "shorelinefoam") {
-        if (renderer) renderer->setShorelineFoam(pendingShorelineFoam);
-    } else if (key == "waterreflections") {
-        if (renderer) renderer->setWaterReflections(pendingWaterReflections);
-    } else if (key == "watersplashes") {
-        if (renderer) renderer->setWaterSplashes(pendingWaterSplashes);
-    } else if (key == "wetground") {
-        if (renderer) renderer->setWetGround(pendingWetGround);
-    } else if (key == "parallaxquality") {
-        if (wmo) wmo->setPOMQuality(pendingPOMQuality);
-        if (chars) chars->setPOMQuality(pendingPOMQuality);
     } else if (key == "upscaling") {
         // pendingFSR is the older flag for "FSR 1 is on" and is what the saved
         // settings still carry, so the mode and the flag are set together
@@ -710,28 +665,6 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
         if (post) post->setFSRQuality(fsrScaleForChoice(pendingFSRQuality));
     } else if (key == "fsrsharpness") {
         if (post) post->setFSRSharpness(pendingFSRSharpness);
-    } else if (key == "fogstrength") {
-        if (renderer) {
-            if (auto* lighting = renderer->getLightingManager()) {
-                lighting->setFogStrength(pendingFogStrength);
-            }
-        }
-    } else if (key == "shadowstrength") {
-        if (renderer) renderer->setShadowStrength(pendingShadowStrength);
-    } else if (key == "foliagewind") {
-        if (renderer) renderer->setFoliageWind(pendingFoliageWind);
-    } else if (key == "lightshafts") {
-        if (renderer) renderer->setVolumetricFogQuality(pendingVolumetricFog);
-    } else if (key == "raytracedlighting") {
-        if (renderer) renderer->setRtLightingMode(pendingRtLighting);
-    } else if (key == "mistdensity") {
-        if (renderer) renderer->setVolumetricFogDensity(pendingVolumetricDensity);
-    } else if (key == "fogskyblend") {
-        if (renderer) {
-            if (auto* lighting = renderer->getLightingManager()) {
-                lighting->setFogSkyBlend(pendingFogSkyBlend);
-            }
-        }
     } else if (key == "framegen") {
         if (post) post->setAmdFsr3FramegenEnabled(pendingAMDFramegen);
     } else if (key == "fsrjittersign") {
@@ -762,36 +695,6 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
         showMinimapCoordinates_ = pendingShowMinimapCoordinates;
     } else if (key == "latencymeter") {
         showLatencyMeter_ = pendingShowLatencyMeter;
-    } else if (key == "woweemusic") {
-        // Not a volume: it changes which tracks the zone rotation can pick, and
-        // switching it off has to stop whichever of ours is playing now - the
-        // rotation would otherwise honour it only at the next zone change.
-        //
-        // The interface's options panel has offered this since the schema grew
-        // and it did nothing but store the answer, because the only copy of
-        // this lived beside the checkbox in the settings window.
-        if (renderer) {
-            if (auto* zm = renderer->getZoneManager()) {
-                zm->setUseOriginalSoundtrack(pendingUseOriginalSoundtrack);
-                if (!pendingUseOriginalSoundtrack) {
-                    if (auto* ac = renderer->getAudioCoordinator()) {
-                        ac->onOriginalSoundtrackDisabled(zm);
-                    }
-                }
-            }
-        }
-    } else if (key == "grassenabled" || key == "grassdensity" || key == "grassheight" ||
-               key == "grassdistance") {
-        // Grass belonged in its own branch all along. These calls were sitting
-        // inside the soundtrack's, so changing the soundtrack applied the grass
-        // settings and changing a grass setting did nothing at all - the key
-        // matched no branch and fell out of the bottom.
-        if (renderer) {
-            renderer->setGrassEnabled(pendingGrassEnabled);
-            renderer->setGrassScales(static_cast<float>(pendingGrassDensity) / 100.0f,
-                                     static_cast<float>(pendingGrassHeight) / 100.0f);
-            renderer->setGrassDistance(static_cast<float>(pendingGrassDistance));
-        }
     } else if (key == "chatboxvisible") {
         // Applied by deactivating every box that is not being typed in - see
         // kChatBoxVisibilityLua, which is where the script lives so that
@@ -837,6 +740,16 @@ std::string SettingsPanel::settingValue(const std::string& key) const {
     // the others currently amount to.
     if (key == "graphicspreset") {
         return settingNumberText(static_cast<int>(pendingGraphicsPreset));
+    }
+    // Derived like the preset: which named set the enhancements are, if any.
+    if (key == "enhancementset") {
+        if (enhancementsMatch(enhancements, rendering::Enhancements{})) return "1";
+        if (enhancementsMatch(enhancements, recommendedEnhancements())) return "2";
+        return "0";
+    }
+    if (const EnhancementRow* r = findEnhancementRow(key)) {
+        if (r->asBool) return (enhancements.*(r->asBool)) ? "1" : "0";
+        return settingNumberText(enhancementValue(enhancements, *r));
     }
     if (const ChatFieldBinding* c = findChatFieldBinding(key)) {
         if (!chatSettings_) return {};
@@ -886,9 +799,31 @@ bool SettingsPanel::setSettingValue(const std::string& key, const std::string& v
     const bool on = settingIsOn(value);
 
     if (key == "graphicspreset") {
-        const int idx = std::clamp(static_cast<int>(v + 0.5), 0, 4);
+        // Every preset row, Classic included. This stopped at 4 (Ultra), so
+        // choosing Classic through the interface's options or WoweeSetSetting
+        // picked Ultra instead.
+        const int idx = std::clamp(static_cast<int>(v + 0.5), 0, kGraphicsPresetCount);
         pendingGraphicsPreset = static_cast<GraphicsPreset>(idx);
         applySettingSideEffects(key);
+        return true;
+    }
+    if (key == "enhancementset") {
+        const int idx = static_cast<int>(v + 0.5);
+        if (idx == 1) enhancements = rendering::Enhancements{};
+        else if (idx == 2) enhancements = recommendedEnhancements();
+        else return true;  // Custom is not a set of values
+        applySettingSideEffects(key);
+        for (const auto& r : kEnhancementRows) {
+            addons::noteClientSettingChanged(r.key, settingValue(r.key));
+        }
+        updateGraphicsPresetFromCurrentSettings();
+        return true;
+    }
+    if (const EnhancementRow* r = findEnhancementRow(key)) {
+        setEnhancementValue(enhancements, *r, r->asBool ? (on ? 1.0f : 0.0f) : static_cast<float>(v));
+        applySettingSideEffects(key);
+        addons::noteClientSettingChanged(key, settingValue(key));
+        updateGraphicsPresetFromCurrentSettings();
         return true;
     }
     if (const ChatFieldBinding* c = findChatFieldBinding(key)) {
@@ -920,6 +855,60 @@ bool SettingsPanel::setSettingValue(const std::string& key, const std::string& v
     // assigns the fields itself - so there is nothing for this to fight with.
     if (isGraphicsPresetKey(key)) updateGraphicsPresetFromCurrentSettings();
     return true;
+}
+
+void SettingsPanel::applyEnhancements() {
+    auto* renderer = services_.renderer;
+    if (!renderer) return;
+    renderer->setEnhancements(enhancements);
+    // The soundtrack switch changes which tracks the zone rotation can pick,
+    // and switching it off has to stop whichever of ours is playing now - the
+    // rotation would otherwise honour it only at the next zone change.
+    if (auto* zm = renderer->getZoneManager()) {
+        const bool was = zm->getUseOriginalSoundtrack();
+        zm->setUseOriginalSoundtrack(enhancements.woweeMusic);
+        if (was && !enhancements.woweeMusic) {
+            if (auto* ac = renderer->getAudioCoordinator()) ac->onOriginalSoundtrackDisabled(zm);
+        }
+    }
+}
+
+void SettingsPanel::updateEnhancementAB(float deltaTime) {
+    if (!enhanceEnvRead_) {
+        enhanceEnvRead_ = true;
+        if (const char* set = std::getenv("WOWEE_ENHANCE"); set && *set) {
+            const std::string which = set;
+            if (which == "stock" || which == "off") enhancements = rendering::Enhancements{};
+            else if (which == "recommended" || which == "on") enhancements = recommendedEnhancements();
+            LOG_INFO("WOWEE_ENHANCE=", which, ": enhancements ",
+                     enhancementsMatch(enhancements, rendering::Enhancements{}) ? "all off (stock)"
+                                                                               : "recommended");
+            applyEnhancements();
+            updateGraphicsPresetFromCurrentSettings();
+        }
+    }
+    static const char* ab = std::getenv("WOWEE_ENHANCE_AB");
+    if (!ab || !*ab) return;
+    const std::string spec = ab;
+    const auto colon = spec.find(':');
+    const std::string key = spec.substr(0, colon);
+    const float period = colon == std::string::npos ? 5.0f
+                       : std::max(0.5f, static_cast<float>(std::atof(spec.c_str() + colon + 1)));
+    const EnhancementRow* r = findEnhancementRow(key);
+    if (!r) {
+        if (enhanceAbPhase_ != -2) LOG_WARNING("WOWEE_ENHANCE_AB: no enhancement row called ", key);
+        enhanceAbPhase_ = -2;
+        return;
+    }
+    enhanceAbClock_ += std::max(deltaTime, 0.0f);
+    const int phase = static_cast<int>(enhanceAbClock_ / period) % 2;
+    if (phase == enhanceAbPhase_) return;
+    enhanceAbPhase_ = phase;
+    // Phase 0 the recommended value (on), phase 1 stock (off).
+    setEnhancementValue(enhancements, *r, phase == 0 ? r->recommendedValue : r->stockValue);
+    LOG_WARNING("ENHANCE_AB ", key, " ", phase == 0 ? "on" : "off", " (",
+                settingValue(key), ")");
+    applyEnhancements();
 }
 
 void SettingsPanel::applyAudioVolumes(audio::AudioCoordinator* ac) {

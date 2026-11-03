@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ui/buff_bar_layout.hpp"
+#include "ui/enhancement_rows.hpp"
 #include "ui/graphics_defaults.hpp"
 #include "ui/ui_services.hpp"
 #include <vulkan/vulkan.h>
@@ -48,27 +49,15 @@ public:
     int pendingResolutionWidth = 1920;
     int pendingResolutionHeight = 1080;
     bool displaySettingsLoaded_ = false;
-    bool pendingShadows = true;
     float pendingShadowDistance = 300.0f;
-    /// A multiplier on the shadow darkness Light.dbc asks for. See
-    /// Renderer::setShadowStrength.
-    float pendingShadowStrength = 1.0f;
-    /// How hard the wind moves foliage and cloth; 1 is the usual breeze. See
-    /// Renderer::setFoliageWind.
-    float pendingFoliageWind = 1.0f;
     float pendingViewDistance = kDefaultViewDistance;
-    /// How far the distance fog takes the sky's colour. See
-    /// LightingManager::setFogSkyBlend.
-    float pendingFogSkyBlend = 0.0f;
-    /// How much distance fog. See LightingManager::setFogStrength.
-    float pendingFogStrength = 1.0f;
-    /// Volumetric fog: 0 off, 1-3 the volume's size. See VolumetricFog.
-    int pendingVolumetricFog = 2;
-    /// Ray traced lighting: 0 off, 1 sun, 2 + occlusion, 3 + bounce. See RtLighting.
-    int pendingRtLighting = 0;
-    /// A multiplier on how thick that mist is. See Renderer::setVolumetricFogDensity.
-    float pendingVolumetricDensity = 1.0f;
-    bool pendingWaterRefraction = true;
+    /// Every enhancement over the stock picture (rendering::Enhancements):
+    /// shadows, point lights, the sky's extras, water, wind, grass, the low
+    /// health vignette and the Wowee soundtrack. The rows of kEnhancementRows
+    /// read and write it by key, save and load it, and the presets set it
+    /// whole; applyEnhancements hands it to the renderer. A fresh install
+    /// starts on the table's recommended values.
+    rendering::Enhancements enhancements = recommendedEnhancements();
     int pendingBrightness = 50; // 0-100, maps to 0.0-2.0 (50 = 1.0 default)
 
     // ---- Pending audio settings ----
@@ -180,8 +169,6 @@ public:
     bool pendingAutoFaceTarget = false;
     bool pendingIdleCameraOrbit = false;  // the stock client has no idle camera
 
-    // ---- Pending soundtrack ----
-    bool pendingUseOriginalSoundtrack = false;
 
     // ---- Pending buff bar layout ----
     // Multiplier for the buff/debuff bar icons, on top of the automatic
@@ -210,16 +197,6 @@ public:
     int pendingWeatherDetail = 3;             ///< 0 none, 3 full
     int pendingEnvironmentDetail = 100;       ///< percent
     int pendingTextureFiltering = 4;          ///< 0 off, then 2x 4x 8x 16x
-    // Grass, as percentages of the generator's own defaults. Separate from
-    // ground clutter: clutter is M2 doodads with per-instance cost, grass is
-    // one indirect draw, and a player who turns one down does not necessarily
-    // mean the other.
-    /// Off unless asked for: it is new, it costs generation time on the main
-    /// thread, and a player who has not gone looking for it should not pay.
-    bool pendingGrassEnabled = false;
-    int pendingGrassDensity = 100;   // 0-300
-    int pendingGrassHeight = 100;    // 50-300
-    int pendingGrassDistance = 150;  // 30-2000 yards; density thins past 45
     int pendingAntiAliasing = 1;  // 0=Off, 1=2x, 2=4x, 3=8x
     bool pendingFXAA = false;     // FXAA post-process (combinable with MSAA)
     /// Ask GitHub at startup whether there is a newer release. On by
@@ -229,18 +206,7 @@ public:
     /// Sync a server's content pack before login. On by default; the URL
     /// on the server entry is the opt-in, and without one nothing is fetched.
     bool pendingContentPacks = true;
-    bool pendingNormalMapping = true;   // on by default
-    float pendingNormalMapStrength = 0.8f;  // 0.0-2.0
-    float pendingLensFlare = 1.0f;          // 0.0-2.0, sun flare strength
     int pendingFrameCap = 0;                // index into the frame-limit choices
-    bool pendingPOM = true;             // on by default
-    bool pendingSharpStars = true;
-    bool pendingSunShafts = true;       // screen-space rays from the sun
-    bool pendingShorelineFoam = true;   // foam band at the water's edge
-    bool pendingWaterReflections = false; // sky in the water (not stock)
-    bool pendingWaterSplashes = false;    // spray, wakes, bubbles, midges (not stock)
-    bool pendingWetGround = true;       // darker, glossy ground while it rains
-    int pendingPOMQuality = 1;          // 0=Low(16), 1=Medium(32), 2=High(64)
     bool pendingFSR = false;
     int pendingUpscalingMode = 0;       // 0=Off, 1=FSR1, 2=FSR3
     int pendingFSRQuality = 3;          // 0=UltraQuality, 1=Quality, 2=Balanced, 3=Native(100%)
@@ -285,10 +251,7 @@ public:
     bool msaaSettingsApplied_ = false;   // True once saved MSAA setting applied to renderer
     bool fxaaSettingsApplied_ = false;   // True once saved FXAA setting applied to renderer
     bool lightingSettingsApplied_ = false; // True once saved shadows/brightness are applied
-    bool lensFlareApplied_ = false;        // True once the saved flare strength reached the sky
     bool frameCapApplied_ = false;         // True once the saved frame limit reached the window
-    bool waterRefractionApplied_ = false;
-    bool normalMapSettingsApplied_ = false;  // True once saved normal map/POM settings applied
     /// The doodad renderer and terrain manager last given the world-detail
     /// settings. Both are made when a world loads, after the settings were
     /// first applied, and made again after a logout - so a latch that fires
@@ -316,7 +279,6 @@ public:
     bool showMapWindow_ = false;    // The world map on a window of its own (Application::updateMapWindow)
     bool showChestTracker_ = false; // Mark nearby spawned non-gather chests on the minimap
     bool damageFlashEnabled_ = false;
-    bool lowHealthVignetteEnabled_ = true; // Persistent pulsing red vignette below 20% HP
 
     // ---- Public methods ----
 
@@ -342,6 +304,19 @@ public:
     /// save it, and change nothing on screen.
     void applySettingSideEffects(const std::string& key);
 
+    /// Hand the enhancements to what they control: the renderer takes the
+    /// whole value (Renderer::setEnhancements), the zone music the soundtrack
+    /// switch. Called for every enhancement row that changes, by a preset,
+    /// and on load.
+    void applyEnhancements();
+
+    /// WOWEE_ENHANCE_AB=<key>:<seconds> flips one enhancement row between its
+    /// stock and recommended values on that period, in place, for A/B shots
+    /// and WOWEE_FRAME_PROFILE cost measurements on the same view; and
+    /// WOWEE_ENHANCE=stock|recommended starts on that set whatever the config
+    /// file says. Call once a frame.
+    void updateEnhancementAB(float deltaTime);
+
     /// Apply the persisted global ImGui window scale without compounding ratios.
     void applyWindowUiScale();
 
@@ -359,6 +334,9 @@ private:
     UIServices services_;  // Injected service references
     ChatSettings* chatSettings_ = nullptr;      // Owned by ChatPanel, not by this
     float appliedWindowUiScale_ = 1.0f;
+    float enhanceAbClock_ = 0.0f;
+    int enhanceAbPhase_ = -1;
+    bool enhanceEnvRead_ = false;
 
     void applyGraphicsPreset(GraphicsPreset preset);
     void updateGraphicsPresetFromCurrentSettings();

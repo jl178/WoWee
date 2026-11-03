@@ -79,14 +79,14 @@ TEST_CASE("shoreline foam and wet ground are on from Medium up", "[wetground][se
     using wowee::ui::kClassicPresetIndex;
     using wowee::ui::kGraphicsPresets;
     // Low, Medium, High, Ultra, Classic.
-    CHECK_FALSE(kGraphicsPresets[0].shorelineFoam);
-    CHECK_FALSE(kGraphicsPresets[0].wetGround);
+    CHECK_FALSE(kGraphicsPresets[0].enh.shorelineFoam);
+    CHECK_FALSE(kGraphicsPresets[0].enh.wetGround);
     for (int i = 1; i < kClassicPresetIndex; ++i) {
         INFO("preset " << i);
-        CHECK(kGraphicsPresets[i].shorelineFoam);
-        CHECK(kGraphicsPresets[i].wetGround);
+        CHECK(kGraphicsPresets[i].enh.shorelineFoam);
+        CHECK(kGraphicsPresets[i].enh.wetGround);
     }
     // Classic is the stock picture: neither.
-    CHECK_FALSE(kGraphicsPresets[kClassicPresetIndex].shorelineFoam);
-    CHECK_FALSE(kGraphicsPresets[kClassicPresetIndex].wetGround);
+    CHECK_FALSE(kGraphicsPresets[kClassicPresetIndex].enh.shorelineFoam);
+    CHECK_FALSE(kGraphicsPresets[kClassicPresetIndex].enh.wetGround);
 }

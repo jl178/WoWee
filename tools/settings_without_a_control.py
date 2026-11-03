@@ -25,8 +25,6 @@ CVARS = ROOT / "src/addons/lua_system_api.cpp"
 
 # Reachable by nothing, on purpose. Each names the file that says why.
 KNOWN = {
-    "waterrefraction": "not a choice: the shoreline and underwater work assume it "
-                       "(settings_schema.cpp)",
     "dpsmeterleft": "set by dragging the damage meter (lua_engine.cpp)",
     "dpsmetertop": "set by dragging the damage meter (lua_engine.cpp)",
 }

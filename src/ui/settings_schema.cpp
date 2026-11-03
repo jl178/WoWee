@@ -1,6 +1,10 @@
 #include "ui/settings_schema.hpp"
 
+#include "ui/enhancement_rows.hpp"
 #include "ui/graphics_defaults.hpp"
+
+#include <string>
+#include <vector>
 
 namespace wowee {
 namespace ui {
@@ -37,27 +41,19 @@ constexpr SettingDesc kSchema[] = {
     // graphics_presets.hpp.
     {"graphicspreset", "Quality preset", SettingKind::Enum, 0, 5, 1, "Graphics", "Quality",
      "Sets every graphics option at once. Classic is the stock 3.3.5\n"
-     "picture: no wind, mist, flare, sun shafts, surface bumps, shore\n"
-     "foam or wet ground, and the zone's own fog. Change any option\n"
-     "and this reads Custom.",
+     "picture: every enhancement off - a round shadow under each\n"
+     "character, no wind, mist, flare, surface bumps, foam or point\n"
+     "lights on the ground. Change any option and this reads Custom.",
      "Custom|Low|Medium|High|Ultra|Classic", 0},
     // Shadows off used to lose the device, and the row was taken away; off
     // now only stops the scene sampling the map, with the shadow pass run as
     // it is when they are on. See Renderer::renderShadowPass.
-    {"shadows", "Shadows", SettingKind::Bool, 0, 0, 0, "Graphics", "Shadows",
-     "Cast shadows from the sun and moon.\n"
-     "Turning them off does not make the picture faster; a shorter\n"
-     "shadow distance does.", "", 1},
     {"shadowdistance", "Shadow distance", SettingKind::Float, 40, 500, 10, "Graphics", "Shadows",
-     // No longer conditional on a shadows toggle: there is not one, and the
-     // stored value it used to read may still say 0 from before it went, which
-     // would grey this out for good.
+     // The switch itself is an enhancement now (Sun shadows, on the
+     // Enhancements page): off is the stock blob under each unit.
      "How far away things still cast shadows, in yards. The shadow map\n"
      "covers this whole range, so a shorter distance also gives sharper\n"
-     "shadows close to you.", "", 300},
-    {"shadowstrength", "Shadow darkness", SettingKind::Float, 0.5f, 1.5f, 0.05f, "Graphics", "",
-     "How dark shadows are, against what the zone's light asks for.\n"
-     "1 is as the sky sets it: deeper at noon, faint under cloud.", "", 1.0f},
+     "shadows close to you.", "", 300, "shadows"},
     {"viewdistance", "View distance", SettingKind::Float, 400, 2400, 50, "Graphics", "View",
      "How far into the distance the world is drawn, in yards. The single\n"
      "largest cost in the picture: terrain, buildings and creatures are all\n"
@@ -75,29 +71,6 @@ constexpr SettingDesc kSchema[] = {
     // Each of the moved settings is bound to the cvar its old control wrote,
     // in kClientCVars, so an addon or a macro that writes the cvar still
     // reaches the same value this panel shows.
-    // No water refraction row on purpose. It is not a choice any more: the
-    // shoreline masks, the meniscus at the waterline and the underwater tint are
-    // all written against water that refracts, and the flat fallback left them
-    // reading against a surface that does not behave the way they assume. The
-    // shader keeps its own guard for a frame whose scene copy is not there yet,
-    // which is a different thing from a player turning the feature off.
-    {"fogstrength", "Fog thickness", SettingKind::Float, 0, 2, 0.05f, "Graphics", "Atmosphere",
-     "How heavy the distance fog is, against the zone's own design.\n"
-     "1 is as designed. Below 1 thins it and 0 removes it; above 1\n"
-     "brings it closer.", "", 1.0f},
-    {"fogskyblend", "Fog takes the sky's colour", SettingKind::Float, 0, 1, 0.05f, "Graphics", "",
-     "How much distant fog is tinted toward the sky behind it, so the\n"
-     "horizon does not stand out pale against a dark sky. 0 uses the\n"
-     "zone's fog colour alone, as the original client does; 1 matches\n"
-     "the sky.", "", 0.0f},
-    // The light shafts' own thickness. Their switch and its quality are on
-    // the Detail page; see there.
-    {"mistdensity", "Mist density", SettingKind::Float, 0, 3, 0.1f, "Graphics", "",
-     "How thick the lit mist is, when light shafts are on (Detail).\n"
-     "1 is a light haze; above it the air closes in. Rain, snow, dawn\n"
-     "and foggy zones thicken it further.",
-     "", 1.0f, "lightshafts!=0"},
-
     // Labelled for what it does, with the term of art in brackets: nobody
     // looks for "multisampling" when their edges are jagged.
     {"antialiasing", "Anti-aliasing (MSAA)", SettingKind::Enum, 0, 3, 1, "Graphics", "Anti-aliasing",
@@ -134,27 +107,6 @@ constexpr SettingDesc kSchema[] = {
      "How far out that clutter is drawn, in yards. Past this it simply\n"
      "is not there, so a short distance is a visible edge on open ground.", "", 140},
 
-    {"normalmapping", "Surface bumps (normal mapping)", SettingKind::Bool, 0, 0, 0, "Detail", "Surfaces",
-     "Light stone, wood and metal by their surface texture,\n"
-     "so they catch the light like the real material, not flat paint.", "", 1,
-     // Off applies at once. On needs the bump maps, which are made as each
-     // building's textures load and skipped while this is off - so turned on
-     // mid-session it reaches only what loads afterwards.
-     "", "", "", "",
-     "Turning this on reaches buildings loaded from now on;\nrestart to see it everywhere."},
-    {"normalmapstrength", "Bump strength", SettingKind::Float, 0, 2, 0.1f, "Detail", "",
-     "How pronounced those surface bumps look. 1 is as the textures\n"
-     "were made; higher exaggerates them.", "", 0.8f, "normalmapping"},
-    {"parallax", "Surface depth (parallax)", SettingKind::Bool, 0, 0, 0, "Detail", "",
-     "Gives bricks, cobbles and planks real depth when seen at an\n"
-     "angle, so mortar lines sink and stones stand out.", "", 1,
-     // The same maps as normal mapping carry the depth; see there.
-     "", "", "", "",
-     "Turning this on reaches buildings loaded from now on;\nrestart to see it everywhere."},
-    {"parallaxquality", "Surface depth quality", SettingKind::Enum, 0, 2, 1, "Detail", "",
-     "How finely each surface is traced for that depth: 16, 32 or 64\n"
-     "steps. Higher looks steadier up close and costs more on big walls.",
-     "Low|Medium|High", 1, "parallax"},
 
     {"particledensity", "Particle density", SettingKind::Int, 10, 100, 5, "Detail", "Effects",
      "How many particles a spell, fire or waterfall throws, as a\n"
@@ -176,37 +128,6 @@ constexpr SettingDesc kSchema[] = {
      // textures already loaded keep the ones they have.
      "", "", "", "",
      "Applies to textures loaded from now on;\nrestart to apply it to everything."},
-    // Its own switch rather than riding on fog thickness: the distance fog
-    // is the zone's haze and costs nothing, this is a compute pass every
-    // frame, and a player may want either without the other. Here, with the
-    // other settings that trade frames for detail, while how thick the mist
-    // is sits on the Graphics page beside the fog: both rows there put sharp
-    // stars past the bottom of its second column, and both here put the
-    // density slider thirty pixels past the bottom of this page's.
-    // Named for what it looks like, key included: "volumetric" in either put
-    // it first in a search for "volume", ahead of the master volume.
-    {"lightshafts", "Light shafts and mist", SettingKind::Enum, 0, 3, 1,
-     "Detail", "Atmosphere",
-     "Mist that light moves through: the sun casts shafts past trees\n"
-     "and buildings, and torches and lava glow in it. Higher settings\n"
-     "are sharper and cost more; Low suits weaker hardware.",
-     "Off|Low|Medium|High", 2},
-
-    // Off by default: the compute tracer is what most machines get, and it
-    // costs real frames. One row rather than three switches, because each
-    // term builds on the previous one's rays. A page of its own because
-    // Graphics and Detail are both full to the bottom of their columns.
-    {"raytracedlighting", "Ray traced lighting (highly experimental)", SettingKind::Enum, 0, 3, 1,
-     "Ray Tracing", "Highly experimental",
-     "HIGHLY EXPERIMENTAL: expect visual artefacts and a large\n"
-     "frame rate cost, especially without ray tracing hardware.\n"
-     "Traces rays against the world for the sun's shadows, the\n"
-     "darkening in corners and crevices, and light bounced off the\n"
-     "ground and walls. Uses the graphics card's ray tracing where it\n"
-     "has it and a slower compute path where it does not.\n"
-     "Characters still cast shadows from the shadow map.",
-     "Off|Sun shadows|Shadows and occlusion|Shadows, occlusion and bounce light", 0},
-
     // --------------------------------------------------------------- Upscaling
     {"upscaling", "Upscaling", SettingKind::Enum, 0, 2, 1, "Upscaling", "Mode",
      "Draw the world smaller, then scale it up to fill your screen,\n"
@@ -227,48 +148,6 @@ constexpr SettingDesc kSchema[] = {
     // this client's own compute shaders and runs either way, but frame
     // generation is the SDK's alone. With the backend off the control would
     // tick, save, and change nothing.
-    // Their own category, which the interface's options panel turns into its
-    // own page. They belong beside ground clutter under Graphics, but that
-    // page is full - two rows pushed lens flare and sharp stars off the bottom
-    // of its second column, which test_settings_panel_layout catches - and a
-    // setting a player cannot find is not a setting.
-    {"grassenabled", "Grass (experimental)", SettingKind::Bool, 0, 0, 0,
-     "Grass", "Ground cover (experimental)",
-     "Grow grass from the terrain's own ground-effect data, bending in\n"
-     "the wind and parting as you walk through it. Experimental: it\n"
-     "costs time on the main thread as you move and has known faults.", "", 0},
-    {"grassdensity", "Grass density", SettingKind::Float, 0, 300, 5, "Grass", "",
-     "How much grass grows, as a percentage of what the terrain asks\n"
-     "for. 100 is as designed.", "", 100, "grassenabled"},
-    {"grassheight", "Grass height", SettingKind::Float, 50, 300, 5, "Grass", "",
-     "How tall the blades grow, as a percentage. Taller grass shows\n"
-     "the wind crossing it more.", "", 100, "grassenabled"},
-    {"grassdistance", "Grass distance", SettingKind::Float, 30, 2000, 5, "Grass", "",
-     "How far out grass is drawn, in yards. Beyond 45 the field thins\n"
-     "with distance and each blade fades in as you ride toward it.\n"
-     "Farther costs more each time you move.", "", 150, "grassenabled"},
-    // The two switches after it are more of the enhancements over the stock
-    // picture, under the wind's heading because they are the weather's and
-    // the water's. A heading of their own would sit at the foot of the first
-    // column with the second switch alone at the top of the next.
-    {"foliagewind", "Foliage and cloth wind", SettingKind::Float, 0, 2, 0.05f, "Grass",
-     "Wind, water and rain",
-     "How hard the wind moves trees, grass, banners and awnings.\n"
-     "1 is the usual breeze; rain and storms stir it further and it\n"
-     "drops away indoors. 0 holds everything still.", "", 1.0f},
-    {"shorelinefoam", "Shoreline foam", SettingKind::Bool, 0, 0, 0, "Grass", "",
-     "A soft band of foam where water laps at the shore, rocks and\n"
-     "posts, drifting slowly. Cheap. Off is the original water's edge.", "", 1},
-    {"waterreflections", "Water reflections", SettingKind::Bool, 0, 0, 0, "Grass", "",
-     "The sky mirrored faintly in lakes, rivers and the sea. The\n"
-     "original water reflects nothing. Costs a second sky draw.", "", 0},
-    {"watersplashes", "Splashes, wakes and bubbles", SettingKind::Bool, 0, 0, 0, "Grass", "",
-     "Spray and froth where you swim or wade, bubbles under water and\n"
-     "midges over the reeds. The original water has none of these;\n"
-     "its own underwater motes stay either way.", "", 0},
-    {"wetground", "Wet ground in rain", SettingKind::Bool, 0, 0, 0, "Grass", "",
-     "Ground and outside walls darken and catch a faint sheen while\n"
-     "it rains, and dry off slowly after. Never indoors. Cheap.", "", 1},
 
 #if WOWEE_HAS_AMD_FSR3_FRAMEGEN
     {"framegen", "Frame generation", SettingKind::Bool, 0, 0, 0, "Upscaling", "",
@@ -310,21 +189,15 @@ constexpr SettingDesc kSchema[] = {
      "How bright the picture is. 50 leaves it as the zone was lit; below\n"
      "darkens and above lifts the shadows. The game's own panel called\n"
      "this gamma and reached the same value.", "", 50},
-    {"lensflare", "Lens flare", SettingKind::Float, 0, 2, 0.1f, "Display", "Sky",
-     "How strong the sun's flare is when it is in view. It warms to\n"
-     "amber near the horizon for the dawn and dusk look. 0 removes it.",
-     "", 1.0f},
-    {"sharpstars", "Sharp stars", SettingKind::Bool, 0, 0, 0, "Display", "",
-     "Draw the night sky's stars as crisp points. Off, they come from\n"
-     "the sky's own small star texture, which goes soft at high\n"
-     "resolutions.", "", 1},
-    {"sunshafts", "Sun shafts", SettingKind::Bool, 0, 0, 0, "Display", "",
-     "Rays of light streaming from the sun through gaps in trees and\n"
-     "between buildings when you look toward it. Cheap; drawn over\n"
-     "the finished picture.", "", 1},
     // Gamma, on the game's own panel, is this same value on another scale -
     // GetGamma answers it divided by 50 - and both end in SetGamma, so the
     // two cannot disagree whichever a player reaches for.
+
+    // The enhancements over the stock picture - shadows, point lights, the
+    // sky, water, wind, grass, ray tracing - are not written here. Each is a
+    // row of kEnhancementRows (ui/enhancement_rows.hpp), laid in after
+    // texture filtering by combinedSchema below, so the table is the one
+    // place one is described.
 
     // ------------------------------------------------------------------ Camera
     {"fov", "Field of view", SettingKind::Float, 45, 110, 1, "Camera", "View",
@@ -533,9 +406,6 @@ constexpr SettingDesc kSchema[] = {
     // edge is the full-screen status below, while on the hate list.
     {"damageflash", "Damage flash", SettingKind::Bool, 0, 0, 0, "HUD", "Screen effects",
      "Flash a red edge around the screen when you take a hit.", "", 0},
-    {"lowhealthvignette", "Low health warning", SettingKind::Bool, 0, 0, 0,
-     "HUD", "", "Pulse a red edge around the screen while your health is\n"
-     "below a fifth.", "", 1},
     {"screenedgeflash", "Low health edge flash", SettingKind::Bool, 0, 0, 0, "HUD", "",
      "The game's own red flash at the screen's edge while your health\n"
      "is low - beside the warning above, which is this client's.", "", 0,
@@ -812,8 +682,6 @@ constexpr SettingDesc kSchema[] = {
      "Off silences the score without disturbing the volume below.", "", 1},
     {"musicvolume", "Music volume", SettingKind::Int, 0, 100, 5, "Sound", "",
      "The zone's music. With the WoWee soundtrack on, that too.", "", 40},
-    {"woweemusic", "WoWee soundtrack", SettingKind::Bool, 0, 0, 0, "Sound", "",
-     "Play this client's own music in the rotation alongside the game's.", "", 1},
     {"loopmusic", "Play without gaps", SettingKind::Bool, 0, 0, 0, "Sound", "",
      "Start the next track straight away rather than leaving the long\n"
      "silence between them the original client had.", "", 0},
@@ -993,13 +861,55 @@ constexpr SettingDesc kSchema[] = {
 
 }  // namespace
 
+namespace {
+
+SettingDesc descFor(const EnhancementRow& r) {
+    SettingDesc d{r.key, r.label, r.kind, r.minValue, r.maxValue, r.step, r.category,
+                  r.section, r.tooltip, r.choices, r.recommendedValue};
+    d.enabledWhen = r.enabledWhen;
+    d.restartNote = r.restartNote;
+    return d;
+}
+
+/// The hand-written rows with the enhancement table's laid in among them.
+///
+/// The enhancement rows are generated, not written here: kEnhancementRows is
+/// the one place each is described (ui/enhancement_rows.hpp). Most go in one
+/// block of pages after the Detail page's last row; a row that belongs on an
+/// existing page names the row it follows. Built once, on first use.
+const std::vector<SettingDesc>& combinedSchema() {
+    static const std::vector<SettingDesc> rows = [] {
+        constexpr const char* kBlockAfter = "texturefiltering";
+        std::vector<SettingDesc> out;
+        out.reserve(sizeof(kSchema) / sizeof(kSchema[0]) + kEnhancementRowCount + 1);
+        for (const SettingDesc& d : kSchema) {
+            out.push_back(d);
+            const std::string key = d.key;
+            if (key == kBlockAfter) {
+                out.push_back(kEnhancementSetRow);
+                for (const auto& r : kEnhancementRows) {
+                    if (r.after[0] == '\0') out.push_back(descFor(r));
+                }
+            }
+            for (const auto& r : kEnhancementRows) {
+                if (key == r.after) out.push_back(descFor(r));
+            }
+        }
+        return out;
+    }();
+    return rows;
+}
+
+}  // namespace
+
 const SettingDesc* clientSettingsSchema(std::size_t& count) {
-    count = sizeof(kSchema) / sizeof(kSchema[0]);
-    return kSchema;
+    const auto& rows = combinedSchema();
+    count = rows.size();
+    return rows.data();
 }
 
 bool settingRange(const std::string& key, float& lo, float& hi) {
-    for (const auto& row : kSchema) {
+    for (const auto& row : combinedSchema()) {
         if (key == row.key) {
             lo = row.minValue;
             hi = row.maxValue;

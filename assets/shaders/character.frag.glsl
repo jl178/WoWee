@@ -100,7 +100,52 @@ float shadowIgn(vec2 p) {
     return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
 
+// The stock point lights (Wow.exe 12340, docs/re/characters.md section 1
+// "Point lights: full rule"): only M2 type-1 lights (the renderer gathers no
+// other kind with the Torch and lamp light setting off), the N nearest by 3D
+// distance with no range cut-off, each colour * max(N.L, 0) / (0.7 d +
+// 0.03 d^2). Stock picks the N per object (a model, a WMO group, a terrain
+// chunk); here per pixel, which is the same set away from the seams.
+vec3 stockPointLights(vec3 pos, vec3 normal, int maxLights) {
+    float bestD[4] = float[4](1e30, 1e30, 1e30, 1e30);
+    int bestI[4] = int[4](-1, -1, -1, -1);
+    for (int i = 0; i < min(localLightMeta.x, 64); ++i) {
+        vec3 d3 = localLightPosRadius[i].xyz - pos;
+        float dsq = dot(d3, d3);
+        for (int k = 0; k < 4; ++k) {
+            if (k >= maxLights) break;
+            if (dsq < bestD[k]) {
+                for (int m = 3; m > k; --m) { bestD[m] = bestD[m - 1]; bestI[m] = bestI[m - 1]; }
+                bestD[k] = dsq; bestI[k] = i;
+                break;
+            }
+        }
+    }
+    vec3 sum = vec3(0.0);
+    for (int k = 0; k < 4; ++k) {
+        if (k >= maxLights || bestI[k] < 0) break;
+        vec3 toLight = localLightPosRadius[bestI[k]].xyz - pos;
+        float dist = sqrt(bestD[k]);
+        float ndl = max(dot(normal, toLight / max(dist, 0.001)), 0.0);
+        sum += localLightColorIntensity[bestI[k]].rgb * localLightColorIntensity[bestI[k]].w * ndl /
+               max(0.7 * dist + 0.03 * dist * dist, 0.05);
+    }
+    return sum;
+}
+
 float sampleShadowPCF(sampler2DShadow smap, vec3 coords) {
+    // The stock filter (Wow.exe 0x8742e0, docs/re/world-lighting.md "Shadow
+    // map filter"): the centre and four fixed taps, k0 k2 k4 k6 in texels,
+    // equal weights. The rotated disk below is the Soft setting.
+    if ((localLightMeta.z & 8) == 0) {
+        float t = shadowTexel();
+        float s = texture(smap, coords)
+                + texture(smap, vec3(coords.xy + vec2( 0.8, -1.0) * t, coords.z))
+                + texture(smap, vec3(coords.xy + vec2( 0.2, -0.6) * t, coords.z))
+                + texture(smap, vec3(coords.xy + vec2(-0.6, -0.2) * t, coords.z))
+                + texture(smap, vec3(coords.xy + vec2(-1.0, -0.4) * t, coords.z));
+        return s * 0.2;
+    }
     // A Vogel (golden-angle) disk: r = sqrt((i + 0.5) / 9), i x 137.5 degrees.
     const vec2 kDisk[9] = vec2[9](
         vec2( 0.2357,  0.0000), vec2(-0.3010,  0.2758), vec2( 0.0461, -0.5250),
@@ -121,6 +166,8 @@ float sampleShadowPCF(sampler2DShadow smap, vec3 coords) {
 // colour * max(N.L, 0) / (0.7 d + 0.03 d^2)). Stock takes the four nearest
 // and has no range; the radius here only skips the far ones cheaply.
 vec3 unitPointLights(vec3 pos, vec3 normal) {
+    // Torch and lamp light off: stock, the four nearest M2 lights.
+    if ((localLightMeta.z & 4) == 0) return stockPointLights(pos, normal, 4);
     vec3 sum = vec3(0.0);
     for (int i = 0; i < min(localLightMeta.x, 64); ++i) {
         vec3 toLight = localLightPosRadius[i].xyz - pos;
@@ -351,7 +398,10 @@ void main() {
     // Transparent edge texels can carry black/garbage RGB even when alpha is
     // valid; pull color from a coarser mip and trust the source more as alpha
     // approaches opaque. This matches the generic M2 path.
-    if (alphaTest != 0 && texColor.a > 0.01 && texColor.a < 1.0) {
+    // Smooth leaf edges (enh_bits::kSmoothLeaves): the fringe repair and the
+    // coverage ramp below. Off is the stock alpha key at 224/255.
+    bool smoothLeaves = (localLightMeta.z & 16) != 0;
+    if (smoothLeaves && alphaTest != 0 && texColor.a > 0.01 && texColor.a < 1.0) {
         vec3 mipColor = textureLod(uTexture, finalUV, 4.0).rgb;
         float trust = smoothstep(0.0, 0.9, texColor.a);
         texColor.rgb = mix(mipColor, texColor.rgb, trust);
@@ -369,6 +419,9 @@ void main() {
         if (texColor.a < 0.5) {
             discard;
         }
+        texColor.a = 1.0;
+    } else if (alphaTest != 0 && !smoothLeaves) {
+        if (texColor.a < 224.0 / 255.0) discard;
         texColor.a = 1.0;
     } else if (alphaTest != 0) {
         // Screen-space sharpened alpha for alpha-to-coverage anti-aliasing.

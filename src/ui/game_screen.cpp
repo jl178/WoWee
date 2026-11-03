@@ -450,11 +450,11 @@ void GameScreen::render(game::GameHandler& gameHandler) {
             }
             if (!settingsPanel_.zoneSettingsApplied_) {
             if (auto* zm = renderer->getZoneManager()) {
-                zm->setUseOriginalSoundtrack(settingsPanel_.pendingUseOriginalSoundtrack);
+                zm->setUseOriginalSoundtrack(settingsPanel_.enhancements.woweeMusic);
                 // Setting the flag alone is not the whole apply: music that
                 // already started during the loading screen keeps playing
                 // through a disabled setting.
-                if (!settingsPanel_.pendingUseOriginalSoundtrack) {
+                if (!settingsPanel_.enhancements.woweeMusic) {
                     if (auto* ac = renderer->getAudioCoordinator()) {
                         ac->onOriginalSoundtrackDisabled(zm);
                     }
@@ -466,12 +466,6 @@ void GameScreen::render(game::GameHandler& gameHandler) {
             if (auto* tm = renderer->getTerrainManager()) {
                 tm->setGroundClutterDensityScale(
                     static_cast<float>(settingsPanel_.pendingGroundClutterDensity) / 100.0f);
-                renderer->setGrassEnabled(settingsPanel_.pendingGrassEnabled);
-                renderer->setGrassScales(
-                    static_cast<float>(settingsPanel_.pendingGrassDensity) / 100.0f,
-                    static_cast<float>(settingsPanel_.pendingGrassHeight) / 100.0f);
-                renderer->setGrassDistance(
-                    static_cast<float>(settingsPanel_.pendingGrassDistance));
                 settingsPanel_.terrainSettingsApplied_ = true;
             }
             }
@@ -488,9 +482,19 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     // Settings are loaded before renderer services are injected. Apply the
     // saved lighting state once the renderer exists so opening the settings
     // window cannot become the first operation that changes scene lighting.
+    // The enhancements, every frame: the renderer keeps what it was last given
+    // and re-applies it to each subsystem as that subsystem is made (the
+    // doodad, building and terrain renderers come and go with the world), so
+    // this is a comparison when nothing changed. The grass, the shadow switch,
+    // the flare, the bump maps and the soundtrack each had a latch of their
+    // own here before, and each latch was a chance to miss one.
+    if (services_.renderer) {
+        settingsPanel_.updateEnhancementAB(ImGui::GetIO().DeltaTime);
+        settingsPanel_.applyEnhancements();
+    }
+
     if (!settingsPanel_.lightingSettingsApplied_) {
         if (auto* renderer = services_.renderer) {
-            renderer->setShadowsEnabled(settingsPanel_.pendingShadows);
             renderer->setShadowDistance(settingsPanel_.pendingShadowDistance);
             renderer->setViewDistance(settingsPanel_.pendingViewDistance);
             // The latch waits for the pipeline, not just the renderer.
@@ -546,62 +550,11 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         }
     }
 
-    // Apply saved water refraction setting once when renderer is available
-    if (!settingsPanel_.waterRefractionApplied_) {
-        auto* renderer = services_.renderer;
-        if (renderer) {
-            renderer->setWaterRefractionEnabled(settingsPanel_.pendingWaterRefraction);
-            settingsPanel_.waterRefractionApplied_ = true;
-        }
-    }
-
     // The saved frame limit, once the window exists to take it.
     if (!settingsPanel_.frameCapApplied_) {
         if (services_.window) {
             services_.window->setFrameCap(frameCapFpsForChoice(settingsPanel_.pendingFrameCap));
             settingsPanel_.frameCapApplied_ = true;
-        }
-    }
-
-    // The saved sun flare strength, once the sky exists to take it.
-    //
-    // Its own latch, and it waits for the flare rather than the renderer: the
-    // sky is built later than the renderer is, and marking the work done while
-    // it was still absent is how brightness came to be read from the file and
-    // never handed to anything.
-    if (!settingsPanel_.lensFlareApplied_) {
-        if (auto* renderer = services_.renderer) {
-            if (auto* lf = renderer->getLensFlare()) {
-                lf->setIntensity(settingsPanel_.pendingLensFlare);
-                settingsPanel_.lensFlareApplied_ = true;
-            }
-        }
-    }
-
-    // Apply saved normal mapping / POM settings once when WMO renderer is available
-    if (!settingsPanel_.normalMapSettingsApplied_) {
-        auto* renderer = services_.renderer;
-        if (renderer) {
-            if (auto* wr = renderer->getWMORenderer()) {
-                wr->setNormalMappingEnabled(settingsPanel_.pendingNormalMapping);
-                wr->setNormalMapStrength(settingsPanel_.pendingNormalMapStrength);
-                wr->setPOMEnabled(settingsPanel_.pendingPOM);
-                wr->setPOMQuality(settingsPanel_.pendingPOMQuality);
-                if (auto* cr = renderer->getCharacterRenderer()) {
-                    cr->setNormalMappingEnabled(settingsPanel_.pendingNormalMapping);
-                    cr->setNormalMapStrength(settingsPanel_.pendingNormalMapStrength);
-                    cr->setPOMEnabled(settingsPanel_.pendingPOM);
-                    cr->setPOMQuality(settingsPanel_.pendingPOMQuality);
-                    // Both told before this is done with. The two renderers are
-                    // built one after the other in the same function today, so
-                    // the character one is never missing while the WMO one is
-                    // here - but marking it applied from inside the outer guard
-                    // meant that if it ever were, characters would keep the
-                    // defaults and nothing would try again. Re-telling the WMO
-                    // renderer on a later frame costs four setters.
-                    settingsPanel_.normalMapSettingsApplied_ = true;
-                }
-            }
         }
     }
 
@@ -1092,7 +1045,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         }
 
         // Only show when alive and below 20% HP; intensity increases as HP drops
-        if (settingsPanel_.lowHealthVignetteEnabled_ && !deadOrGhost &&
+        if (settingsPanel_.enhancements.lowHealthVignette && !deadOrGhost &&
             hpPct < 0.20f && hpPct > 0.0f) {
             // Base intensity from HP deficit (0 at 20%, 1 at 0%); pulse at ~1.5 Hz
             float danger = (0.20f - hpPct) / 0.20f;

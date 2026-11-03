@@ -2004,7 +2004,7 @@ void PostProcessPipeline::renderFXAAPass() {
         1.0f / static_cast<float>(ext.width),
         1.0f / static_cast<float>(ext.height),
         sharpness,
-        intoxication_,
+        drawnIntoxication(),
         ghost_,
         fxaa_.enabled ? 1.0f : 0.0f,
         0.0f,

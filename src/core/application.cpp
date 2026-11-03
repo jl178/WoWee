@@ -5158,6 +5158,7 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     });
     runInGameStage("updateUnitHighlights", [&] {
         updateUnitHighlights();
+        updateDrunkLevel();
     });
     // Sync server run speed to camera controller
     inGameStep = "post-update sync";
@@ -7074,6 +7075,22 @@ void Application::loadQuestMarkerModels() {
 // Stock lights up the mouseover and the current target (CGObject_C::
 // SetHighlight 0x743C70, gated on the unitHighlights cvar, default on): the
 // unit ambient added as emissive. The renderer does the adding.
+void Application::updateDrunkLevel() {
+    // The stock drunk level (0x4F7290): PLAYER_BYTES_3 byte 1, the server's
+    // 0-100, capped at 100. PLAYER_BYTES_3 follows PLAYER_BYTES_2 in every
+    // layout this client reads. PLAYER_FAKE_INEBRIATION is not read.
+    if (!renderer || !gameHandler) return;
+    float level = 0.0f;
+    const uint16_t b2 = game::fieldIndex(game::UF::PLAYER_BYTES_2);
+    if (b2 != 0xFFFF) {
+        if (auto player = gameHandler->getEntityManager().getEntity(gameHandler->getPlayerGuid())) {
+            const uint32_t bytes3 = player->getField(static_cast<uint16_t>(b2 + 1));
+            level = static_cast<float>(std::min<uint32_t>((bytes3 >> 8) & 0xFFu, 100u)) / 100.0f;
+        }
+    }
+    renderer->setDrunkLevel(level);
+}
+
 void Application::updateUnitHighlights() {
     if (!renderer || !gameHandler || !entitySpawner_) return;
     auto* cr = renderer->getCharacterRenderer();

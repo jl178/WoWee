@@ -16,6 +16,7 @@
 #include "rendering/animation/body_facing.hpp"
 #include "rendering/pass_ablation.hpp"
 #include "rendering/vk_frame_data.hpp"
+#include "rendering/enhancements.hpp"
 #include "rendering/vk_utils.hpp"
 #include "rendering/sky_system.hpp"
 #include "core/screen_recorder.hpp"
@@ -487,9 +488,28 @@ public:
     void setFSREnabled(bool enabled);
     void setFSR2Enabled(bool enabled);
 
-    void setWaterRefractionEnabled(bool enabled);
+    /// Every enhancement over the stock picture at once (rendering::Enhancements,
+    /// ui/enhancement_rows.hpp). Kept here and handed to each subsystem when it
+    /// changes and whenever a subsystem is new (the world's renderers are made
+    /// per world load), so a caller can set it every frame for the price of a
+    /// comparison. Enhancements{} is the stock client.
+    void setEnhancements(const Enhancements& e);
+    const Enhancements& getEnhancements() const { return enh_; }
+    /// The player's drunk level, PLAYER_BYTES_3 byte 1 capped at 100, / 100
+    /// (Wow.exe 0x4F7290). The stock drunk look and steer read it.
+    void setDrunkLevel(float level);
 
 private:
+    /// Push enh_ to every subsystem that exists, when it or they changed.
+    void applyEnhancementsToSubsystems();
+    /// The units that get the stock blob shadow this frame (shadows off).
+    void updateUnitBlobs();
+    /// WOWEE_FREEZE_CLOCK, read once.
+    void readFrozenClock();
+    Enhancements enh_{};
+    float drunkLevel_ = 0.0f;
+    bool enhDirty_ = true;
+    const void* enhTargets_[8] = {};
     void applyMsaaChange();
     bool updateSkyboxLayers();
     uint32_t loadSkyboxModel(const std::string& path);
@@ -599,6 +619,13 @@ private:
     void* perFrameUBOMapped[MAX_FRAMES] = {};
     GPUPerFrameData currentFrameData{};
     float globalTime = 0.0f;
+    /// WOWEE_FREEZE_CLOCK=<seconds>: the scene clock held at that value and
+    /// every animation, particle, sky and weather step given a zero delta, so
+    /// two screenshots of the same view can be compared pixel for pixel (the
+    /// enhancement stock test, docs/enhancements-plan.md 3.3). The camera and
+    /// streaming keep the real delta. Negative when not frozen.
+    float frozenClock_ = -1.0f;
+    bool frozenClockRead_ = false;
 
     // Per-frame reflection UBO (mirrors camera for planar reflections)
     VkBuffer reflPerFrameUBO = VK_NULL_HANDLE;

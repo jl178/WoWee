@@ -624,13 +624,20 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.localLightPosRadius[i] = glm::vec4(0.0f);
         currentFrameData.localLightColorIntensity[i] = glm::vec4(0.0f);
     }
-    uint32_t localLightCount = wmoRenderer
+    // With the point-light enhancement off, only the M2 lights are gathered -
+    // for the units, which stock lights by the four nearest of them
+    // (character.frag) - and the lava lights, which stock has nowhere, are not.
+    uint32_t localLightCount = (wmoRenderer && enh_.localLights)
         ? wmoRenderer->gatherLavaLights(camera->getPosition(),
               currentFrameData.localLightPosRadius,
               currentFrameData.localLightColorIntensity,
               MAX_LOCAL_LIGHTS)
         : 0;
-    if (m2Renderer && localLightCount < MAX_LOCAL_LIGHTS) {
+    if (m2Renderer && !enh_.localLights) {
+        localLightCount = m2Renderer->gatherStockPointLights(camera->getPosition(),
+            currentFrameData.localLightPosRadius, currentFrameData.localLightColorIntensity,
+            MAX_LOCAL_LIGHTS);
+    } else if (m2Renderer && localLightCount < MAX_LOCAL_LIGHTS) {
         localLightCount += m2Renderer->gatherLocalLights(camera->getPosition(),
             currentFrameData.localLightPosRadius + localLightCount,
             currentFrameData.localLightColorIntensity + localLightCount,
@@ -642,8 +649,10 @@ void Renderer::updatePerFrameUBO() {
     // because every .w of the float vectors already carries something.
     const float fogExponent =
         lightingManager ? lightingManager->getLightingParams().fogExponent : 1.0f;
+    // z: the enhancement switches the world shaders branch on (enh_bits).
     currentFrameData.localLightMeta = glm::ivec4(static_cast<int32_t>(localLightCount),
-                                                 std::bit_cast<int32_t>(fogExponent), 0, 0);
+                                                 std::bit_cast<int32_t>(fogExponent),
+                                                 static_cast<int32_t>(shaderBits(enh_)), 0);
 
     if (rtLighting_) {
         const RtLighting::ConsumerData rt = rtLighting_->consumerData();
@@ -1131,11 +1140,116 @@ void Renderer::unregisterPreview(CharacterPreview* preview) {
     }
 }
 
-void Renderer::setWaterRefractionEnabled(bool /*enabled*/) {
-    // Nothing: the stock water does not refract, and the scene copy this used
-    // to keep on is taken only for the shoreline foam now, which turns it on
-    // and off (WaterRenderer::setShorelineFoam). Kept as a call because saved
-    // settings and the CVar bridge still reach it.
+void Renderer::readFrozenClock() {
+    if (frozenClockRead_) return;
+    frozenClockRead_ = true;
+    if (const char* f = std::getenv("WOWEE_FREEZE_CLOCK"); f && *f) {
+        frozenClock_ = std::max(0.0f, static_cast<float>(std::atof(f)));
+        LOG_INFO("WOWEE_FREEZE_CLOCK: scene clock held at ", frozenClock_, " s");
+    }
+}
+
+void Renderer::updateUnitBlobs() {
+    // The stock blob under each unit, with the sun shadow map off (stock
+    // extShadowQuality 0). With it on, nothing is gathered or made.
+    if (!overlaySystem_) return;
+    {
+        std::vector<OverlaySystem::UnitBlob> blobs;
+        if (!enh_.shadows && characterRenderer && camera) {
+            overlaySystem_->prepareUnitBlobs();
+            std::vector<CharacterRenderer::BlobSource> src;
+            // Stock has no distance cut-off; past 150 yards a blob is a few
+            // pixels under the fog, and 128 is more units than a city holds
+            // on screen.
+            characterRenderer->collectUnitBlobs(camera->getPosition(), 150.0f, 128, src);
+            blobs.reserve(src.size());
+            for (const auto& b : src) {
+                blobs.push_back({.feet = b.feet, .forward = b.forward, .halfX = b.halfX,
+                                 .halfY = b.halfY, .halfZ = b.halfZ, .alpha = b.alpha});
+            }
+        }
+        overlaySystem_->setUnitBlobs(std::move(blobs));
+    }
+}
+
+void Renderer::setDrunkLevel(float level) {
+    drunkLevel_ = glm::clamp(level, 0.0f, 1.0f);
+    if (cameraController) cameraController->setDrunkLevel(drunkLevel_);
+}
+
+void Renderer::setEnhancements(const Enhancements& e) {
+    if (e == enh_) return;
+    enh_ = e;
+    enhDirty_ = true;
+}
+
+void Renderer::applyEnhancementsToSubsystems() {
+    // The subsystems come and go with the world, so the set is handed over
+    // again whenever one of them is new as well as when the set changed.
+    const void* targets[std::size(enhTargets_)] = {
+        m2Renderer.get(), wmoRenderer.get(), characterRenderer.get(),
+        terrainRenderer.get(), lensFlare.get(), lightingManager.get(),
+        postProcessPipeline_.get(), cameraController.get(),
+    };
+    bool changed = enhDirty_;
+    for (size_t i = 0; i < std::size(enhTargets_); ++i) {
+        if (targets[i] != enhTargets_[i]) { changed = true; enhTargets_[i] = targets[i]; }
+    }
+    if (!changed) return;
+    enhDirty_ = false;
+    const Enhancements& e = enh_;
+
+    // Light and shadow. Off is the stock blob under each unit
+    // (OverlaySystem::renderUnitBlobShadows) and the baked MCSH shadows.
+    setShadowsEnabled(e.shadows);
+    setShadowStrength(e.shadowStrength);
+    setTerrainRelief(e.normalMapping, e.normalMapStrength);
+    if (wmoRenderer) {
+        wmoRenderer->setNormalMappingEnabled(e.normalMapping);
+        wmoRenderer->setNormalMapStrength(e.normalMapStrength);
+        wmoRenderer->setPOMEnabled(e.parallax);
+        wmoRenderer->setPOMQuality(e.parallaxQuality);
+    }
+    if (characterRenderer) {
+        characterRenderer->setNormalMappingEnabled(e.normalMapping);
+        characterRenderer->setNormalMapStrength(e.normalMapStrength);
+        characterRenderer->setPOMEnabled(e.parallax);
+        characterRenderer->setPOMQuality(e.parallaxQuality);
+    }
+    if (terrainRenderer) terrainRenderer->setSpecularEnabled(e.terrainSpecular);
+    if (m2Renderer) {
+        m2Renderer->setLightFlicker(e.lightFlicker);
+        m2Renderer->setGlowSprites(e.glowSprites);
+        m2Renderer->setExtraSmoke(e.extraSmoke);
+    }
+
+    // Sky and air.
+    setVolumetricFogQuality(e.lightShafts);
+    setVolumetricFogDensity(e.mistDensity);
+    setSunShaftsEnabled(e.sunShafts);
+    if (lensFlare) lensFlare->setIntensity(e.lensFlare);
+    setSharpStars(e.sharpStars);
+    if (lightingManager) {
+        lightingManager->setFogStrength(e.fogStrength);
+        lightingManager->setFogSkyBlend(e.fogSkyBlend);
+    }
+
+    // Water, weather and motion. The water and swim switches are handed on
+    // each frame where those are used (update), as before.
+    setShorelineFoam(e.shorelineFoam);
+    setWetGround(e.wetGround);
+    setWaterSplashes(e.waterSplashes);
+    setWaterReflections(e.waterReflections);
+    setFoliageWind(e.foliageWind);
+    if (postProcessPipeline_) postProcessPipeline_->setDrunkWobble(e.drunkWobble);
+    if (cameraController) cameraController->setDrunkWobble(e.drunkWobble);
+
+    // Experimental.
+    setGrassEnabled(e.grass);
+    setGrassScales(static_cast<float>(e.grassDensity) / 100.0f,
+                   static_cast<float>(e.grassHeight) / 100.0f);
+    setGrassDistance(static_cast<float>(e.grassDistance));
+    setRtLightingMode(e.rtLighting);
 }
 void Renderer::setMsaaSamples(VkSampleCountFlagBits samples) {
     if (!vkCtx) return;
@@ -2170,6 +2284,13 @@ void Renderer::update(float deltaTime) {
         sectionStart = now;
     };
     globalTime += deltaTime;
+    readFrozenClock();
+    // The delta every animated thing below steps by. Zero with the clock
+    // frozen, so models, particles, sky and weather hold still while the
+    // camera and streaming (which take deltaTime) carry on.
+    const float fxDt = frozenClock_ >= 0.0f ? 0.0f : deltaTime;
+    if (frozenClock_ >= 0.0f) globalTime = frozenClock_;
+    applyEnhancementsToSubsystems();
     runDeferredWorldInitStep(deltaTime);
 
     // Ease toward it rather than taking it. The sample is a yes or a no, and
@@ -2477,10 +2598,10 @@ void Renderer::update(float deltaTime) {
 
     // Update sky system (skybox time, star twinkle, clouds, celestial moon phases)
     if (skySystem) {
-        skySystem->update(deltaTime);
+        skySystem->update(fxDt);
     }
     if (updateSkyboxLayers() && skyboxModelRenderer_ && camera) {
-        skyboxModelRenderer_->update(deltaTime, camera->getPosition(),
+        skyboxModelRenderer_->update(fxDt, camera->getPosition(),
             camera->getProjectionMatrix() * camera->getViewMatrix());
     }
 
@@ -2500,12 +2621,12 @@ void Renderer::update(float deltaTime) {
                 return ground;
             });
         }
-        weather->update(*camera, deltaTime);
+        weather->update(*camera, fxDt);
     }
 
     // Update lightning (storm / heavy rain)
     if (lightning && camera && lightning->isEnabled()) {
-        lightning->update(deltaTime, *camera);
+        lightning->update(fxDt, *camera);
     }
 
     // Update swim effects: the stock underwater motes for the liquid the
@@ -2520,7 +2641,8 @@ void Renderer::update(float deltaTime) {
         }
         swimEffects->setCameraLiquid(motes);
         swimEffects->setSplashesEnabled(waterSplashes_);
-        swimEffects->update(*camera, *cameraController, *waterRenderer, deltaTime);
+        swimEffects->setInsectsEnabled(enh_.waterInsects);
+        swimEffects->update(*camera, *cameraController, *waterRenderer, fxDt);
     }
 
     // Surface disturbance the character leaves in the water. The droplet spray
@@ -2559,13 +2681,16 @@ void Renderer::update(float deltaTime) {
 
         const float yawRad = glm::radians(cameraController->getYaw());
         const glm::vec2 travelDir(std::sin(yawRad), -std::cos(yawRad));
-        waterRenderer->updateWake(deltaTime, glm::vec2(charPos.x, charPos.y),
+        waterRenderer->updateWake(fxDt, glm::vec2(charPos.x, charPos.y),
                                   travelDir, intensity, wading);
     }
 
     // Update mount dust effects
-    if (mountDust) {
-        mountDust->update(deltaTime);
+    // Not stock: nothing is stepped or spawned with the setting off, and what
+    // was in the air is dropped.
+    if (mountDust && !enh_.mountDust) mountDust->clear();
+    if (mountDust && enh_.mountDust) {
+        mountDust->update(fxDt);
 
         // Spawn dust when mounted and moving on ground
         if ((animationController_ && animationController_->isMounted()) && camera && cameraController && !(animationController_ && animationController_->isTaxiFlight())) {
@@ -2588,11 +2713,11 @@ void Renderer::update(float deltaTime) {
     }
     // Update level-up effect
     if (levelUpEffect) {
-        levelUpEffect->update(deltaTime);
+        levelUpEffect->update(fxDt);
     }
     section("update/pre/sky+weather+water+fx");
     // Update transient spell visual instances (delegated to SpellVisualSystem §4.4)
-    if (spellVisualSystem_) spellVisualSystem_->update(deltaTime);
+    if (spellVisualSystem_) spellVisualSystem_->update(fxDt);
     section("update/pre/spell visuals");
 
 
@@ -2600,7 +2725,7 @@ void Renderer::update(float deltaTime) {
     std::future<void> m2AnimFuture;
     bool m2AnimLaunched = false;
     if (m2Renderer && camera) {
-        float m2DeltaTime = deltaTime;
+        float m2DeltaTime = fxDt;
         glm::vec3 m2CamPos = camera->getPosition();
         glm::mat4 m2ViewProj = camera->getProjectionMatrix() * camera->getViewMatrix();
         m2AnimFuture = core::ThreadPool::frameWorkers().submit(
@@ -2618,8 +2743,9 @@ void Renderer::update(float deltaTime) {
         characterRenderer->setAnimCullView(camera->getViewProjectionMatrix(),
                                            shadowsEnabled ? shadowRayDirection() : glm::vec3(0.0f));
         characterRenderer->setUnitAmbientArea(getCurrentAreaId());
-        characterRenderer->update(deltaTime, camera->getPosition());
+        characterRenderer->update(fxDt, camera->getPosition());
     }
+    updateUnitBlobs();
     section("update/characters");
 
     // Update AudioEngine (cleanup finished sounds, etc.)
@@ -2646,11 +2772,11 @@ void Renderer::update(float deltaTime) {
     // then stepped (stock steps every CM2Model's emitters alike).
     if (characterRenderer && m2Renderer && camera) {
         characterRenderer->poseModelEmitters();
-        m2Renderer->updatePosedEmitters(deltaTime);
+        m2Renderer->updatePosedEmitters(fxDt);
     }
     section("update/model emitters");
     // Footsteps: age visual prints, then let authored footfall events add new ones.
-    if (footprintRenderer) footprintRenderer->update(deltaTime);
+    if (footprintRenderer) footprintRenderer->update(fxDt);
     if (animationController_) animationController_->updateFootsteps(deltaTime);
 
     // Activity SFX + mount ambient sounds: delegated to AnimationController (§4.2)
@@ -3314,7 +3440,10 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
     if (postProcessPipeline_ && lightingManager) {
         postProcessPipeline_->setGlow(
             stock_screen_fx::glowAmount(lightingManager->getLightingParams().glow),
-            stock_screen_fx::glowBlend(cameraUnderwater_, 0.0f));
+            // The drunk level blends the glow in too: that is the whole of
+            // the stock drunk look (0x4F8770). Under the Drunken wobble
+            // enhancement Wowee's own blur stands in for it, as before.
+            stock_screen_fx::glowBlend(cameraUnderwater_, enh_.drunkWobble ? 0.0f : drunkLevel_));
     }
 
     uint32_t frameIdx = vkCtx->getCurrentFrame();

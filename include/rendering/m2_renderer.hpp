@@ -230,6 +230,17 @@ struct M2ModelGPU {
     bool isLanternLike = false;     // Model name matches lantern/lamp/light (precomputed)
     bool isKoboldFlame = false;     // Model name matches kobold+(candle/torch/mine) (precomputed)
     bool isLavaModel = false;       // Model name contains lava/molten/magma (UV scroll fallback)
+    /// The model's own point lights (M2Light type 1), what the stock client
+    /// lights nearby units, doodads, WMO groups and terrain with
+    /// (docs/re/characters.md section 1). Colour is diffuseColor x
+    /// diffuseIntensity at the first key; lights whose visibility starts off
+    /// are left out.
+    struct StockPointLight {
+        int16_t bone = -1;
+        glm::vec3 position{0.0f};
+        glm::vec3 color{0.0f};
+    };
+    std::vector<StockPointLight> stockPointLights;
     bool isSkyBird = false;         // Flying bird/bat doodad - hide until animation range
     bool isLightBeam = false;       // Lighthouse/light-ray beam - distant bones must keep updating
     bool isVolumetricBeam = false;  // Light drawn as geometry; softened at its silhouette
@@ -730,6 +741,20 @@ public:
                                glm::vec4* outPosRadius,
                                glm::vec4* outColorIntensity,
                                uint32_t maxLights) const;
+
+    /// The stock point lights (Torch and lamp light off): the M2 type-1
+    /// lights of the doodads around the camera, nearest first, with their
+    /// authored colour. Each slot's w radius is a nominal 20 yards for the
+    /// shaders that still cull by it (grass, fog); the stock shaders ignore it.
+    uint32_t gatherStockPointLights(const glm::vec3& cameraPos,
+                                    glm::vec4* outPosRadius,
+                                    glm::vec4* outColorIntensity,
+                                    uint32_t maxLights) const;
+
+    /// Enhancement switches (Renderer::setEnhancements). Off is stock.
+    void setLightFlicker(bool on) { lightFlicker_ = on; }
+    void setGlowSprites(bool on) { glowSpritesOn_ = on; }
+    void setExtraSmoke(bool on) { extraSmoke_ = on; }
 
     /** Set the HiZ system for occlusion culling (Phase 6.3). nullptr disables HiZ. */
     void setHiZSystem(HiZSystem* hiz) { hizSystem_ = hiz; }
@@ -1712,8 +1737,12 @@ private:
     std::vector<size_t> animatedInstanceIndices_;   // hasAnimation && !disableAnimation
     std::vector<size_t> boatInstanceIndices_;       // cachedIsBoat: the afloat check
     std::vector<size_t> lightInstanceIndices_;      // lanterns, torches, braziers, forges, lava: gatherLocalLights
+    bool lightFlicker_ = false;   // lamps gutter (enhancement)
+    bool glowSpritesOn_ = false;  // glow cards drawn as halos (enhancement)
+    bool extraSmoke_ = false;     // synthesised smoke over smoke models (enhancement)
     static bool modelGivesLight(const M2ModelGPU& m) {
-        return m.isLanternLike || m.isTorch || m.isBrazierOrFire || m.isForge || m.isLavaModel;
+        return m.isLanternLike || m.isTorch || m.isBrazierOrFire || m.isForge || m.isLavaModel ||
+               !m.stockPointLights.empty();
     }
     double sceneTimeMs_ = 0.0;                      // sum of update() deltas
     Frustum cachedFrustum_;                         // this frame's view, for the particle pass

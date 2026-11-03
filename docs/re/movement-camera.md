@@ -123,6 +123,30 @@ FULL_SPEED_PITCHING (0x10). Turning in place is the full rate. The mouse
 sets the facing directly, at any rate. The player's pitch is clamped to
 +-pi/2 (0x9F1FF4 / 0x9E8D88) or a vehicle seat's limits (0x5FB3A0).
 
+**Drunk drift** (0x6DEB30, run for the active player from the WorldFrame
+event-6 handler 0x4F8730, inferred every frame; drunk from 0x4F7290, see
+world-lighting.md §8 "Drunk"):
+
+```
+tau  = timeMs · (pi/180) · drunk                         // 0x9E2B40
+sway = drunk · 0.0130900 · (cos(0.154 tau) + cos(0.195 tau) + cos(0.093 tau)) · 0.333333
+                                                         // 0x6CF3D0; 0xA31F90..A0
+```
+- Only when drunk > 0, the player has control (0x5FA0D0) and moveflags &
+  0xF (forward/back/strafe). While a turn key (0x30) is held it also needs
+  0x5FA6B0 (mouse steering, input flags 0x2000001).
+- `facing = wrap(facing + sway)` (0x72EA50, a real facing change that is
+  sent to the server). It is **added every frame**, so the drift rate is
+  `sway · fps` (stock is frame-rate dependent: at drunk 1 and 60 fps up to
+  about 45°/s); sway itself swings with periods of about 1.8, 2.3 and 3.9 s
+  divided by drunk (three cosines beating), so the player weaves rather
+  than spins.
+- Swimming or flying (moveflags & 0x2200000, or flags2 & 0x20):
+  `pitch = clamp(pitch + 4 · sway, -pi/2, pi/2)` (0x9E8D2C, 0x6CF3A0, 0x72EAD0).
+- Click-to-move active (0x721F90): 0x7317A0 adds the sway to the CTM's
+  facing instead.
+- No random strafing, no speed change, no stumble animation.
+
 ## 6. Jumping and falling
 
 **Jump** (0x9883F0 -> 0x988370): refused while FLYING, FALLING or ROOT
@@ -367,6 +391,12 @@ cameraSurfaceFinalPitch 5, cameraSubmergeFinalPitch 5, cameraTerrainTilt 0,
 mouseInvertYaw/Pitch 0. Not traced: what cameraDive and the
 surface/submerge pitches do to the view at the water line, and the
 first-person model fade.
+
+**Drunk** (world-lighting.md §8): the camera's FOV offset `+0x138` eases
+toward `drunk · 89°` at cameraFoVSmoothSpeed (0.5 °/s; 0x604940, 0x6030E0,
+0x603D30); FOV = `clamp(0x40 + 0x138, 0, 179°)` (0x5FF500). A drunk target
+also skips the cameraDive surface/submerge pitch limits (0x6023D0,
+0x606F90). No other camera effect: no wobble, roll or shake.
 
 ## 11. Wowee against this
 

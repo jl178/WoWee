@@ -2145,21 +2145,24 @@ void AuthScreen::applyPresetToState(LoginGraphicsState& s, int preset) {
     const GraphicsPresetValues& p = kGraphicsPresets[index];
 
     s.viewDistance   = p.viewDistance;
-    s.shadows        = p.shadows;
+    s.shadows        = p.enh.shadows;
     s.shadowDistance = p.shadowDistance;
     s.antiAliasing   = p.antiAliasing;
     s.fxaa           = p.fxaa;
-    s.normalMapping  = p.normalMapping;
-    s.pom            = p.parallax;
-    s.pomQuality     = p.parallaxQuality;
+    s.normalMapping  = p.enh.normalMapping;
+    s.pom            = p.enh.parallax;
+    s.pomQuality     = p.enh.parallaxQuality;
     s.groundClutter  = p.groundClutter;
-    s.grass          = p.grass;
-    s.grassDensity   = p.grassDensity;
-    s.grassHeight    = p.grassHeight;
-    s.grassDistance  = p.grassDistance;
+    s.grass          = p.enh.grass;
+    s.grassDensity   = p.enh.grassDensity;
+    s.grassHeight    = p.enh.grassHeight;
+    s.grassDistance  = p.enh.grassDistance;
+    s.sharpStars     = p.enh.sharpStars;
+    s.fogStrength    = p.enh.fogStrength;
+    s.fogSkyBlend    = p.enh.fogSkyBlend;
 
     // Not in the table because the in-game preset has no opinion about them
-    // either: upscaling and water refraction are the player's, and brightness,
+    // either: upscaling is the player's, and brightness,
     // vsync and fullscreen are not quality settings. A preset that reset them
     // would undo a display choice every time one was picked.
 }
@@ -2212,12 +2215,11 @@ void AuthScreen::loadLoginGraphicsState() {
         else if (key == "pom")              loginGfx_.pom            = (val == "1");
         else if (key == "pom_quality")      loginGfx_.pomQuality     = clampI(std::stoi(val), 0, rendering::kPomQualityCount - 1);
         else if (key == "upscaling_mode")   loginGfx_.upscalingMode  = clampI(std::stoi(val), 0, 2);
-        else if (key == "water_refraction") loginGfx_.waterRefraction = (val == "1");
         else if (key == "ground_clutter_density") loginGfx_.groundClutter = clampI(std::stoi(val), 0, 150);
         else if (key == "grass_enabled")    loginGfx_.grass          = (val == "1");
         else if (key == "grass_density")    loginGfx_.grassDensity   = clampI(std::stoi(val), 0, 300);
         else if (key == "grass_height")     loginGfx_.grassHeight    = clampI(std::stoi(val), 50, 300);
-        else if (key == "grass_distance")   loginGfx_.grassDistance  = clampI(std::stoi(val), 30, 800);
+        else if (key == "grass_distance")   loginGfx_.grassDistance  = clampI(std::stoi(val), 30, 2000);
         else if (key == "brightness")       loginGfx_.brightness     = clampI(std::stoi(val), 0, 100);
         else if (key == "vsync")            loginGfx_.vsync          = (val == "1");
         else if (key == "fullscreen")       loginGfx_.fullscreen     = (val == "1");
@@ -2252,7 +2254,6 @@ void AuthScreen::saveLoginGraphicsState() {
     cfg["pom"]                   = loginGfx_.pom            ? "1" : "0";
     cfg["pom_quality"]           = std::to_string(loginGfx_.pomQuality);
     cfg["upscaling_mode"]        = std::to_string(loginGfx_.upscalingMode);
-    cfg["water_refraction"]      = loginGfx_.waterRefraction ? "1" : "0";
     cfg["ground_clutter_density"]= std::to_string(loginGfx_.groundClutter);
     cfg["grass_enabled"]         = loginGfx_.grass ? "1" : "0";
     cfg["grass_density"]         = std::to_string(loginGfx_.grassDensity);
@@ -2361,7 +2362,6 @@ void AuthScreen::renderLoginSettingsSheet(float screenW, float screenH) {
         toggle("gfx.fxaa", "FXAA", &loginGfx_.fxaa);
         toggle("gfx.normals", "Normal mapping", &loginGfx_.normalMapping);
         toggle("gfx.pom", "Parallax occlusion", &loginGfx_.pom);
-        toggle("gfx.water", "Water refraction", &loginGfx_.waterRefraction);
         toggle("gfx.vsync", "V-Sync", &loginGfx_.vsync);
         toggle("gfx.fullscreen", "Fullscreen", &loginGfx_.fullscreen);
     }

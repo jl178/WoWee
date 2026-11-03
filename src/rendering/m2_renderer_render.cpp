@@ -424,10 +424,16 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
     std::uniform_real_distribution<float> distLife(rendering::SMOKE_LIFETIME_MIN, rendering::SMOKE_LIFETIME_MAX);
     std::uniform_real_distribution<float> distDrift(-0.2f, 0.2f);
 
+    // Not stock: with the setting off nothing is spawned or stepped, and what
+    // was in the air is dropped (the models' own emitters draw instead).
+    if (!extraSmoke_) {
+        smokeParticles.clear();
+        smokeEmitAccum = 0.0f;
+    }
     smokeEmitAccum += deltaTime;
     constexpr float emitInterval = kSmokeEmitInterval;  // 48 particles per second per emitter
 
-    if (smokeEmitAccum >= emitInterval &&
+    if (extraSmoke_ && smokeEmitAccum >= emitInterval &&
         static_cast<int>(smokeParticles.size()) < MAX_SMOKE_PARTICLES) {
         for (size_t si : smokeInstanceIndices_) {
             if (si >= instances.size()) continue;
@@ -1326,7 +1332,9 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
 
             uint32_t flags = 0;
             if (inst.cachedIsValid)          flags |= 1u;
-            if (inst.cachedIsSmoke)           flags |= 2u;
+            // Smoke models are replaced by the synthesised puffs only with
+            // the Extra smoke setting on; off, they draw as stock does.
+            if (inst.cachedIsSmoke && extraSmoke_) flags |= 2u;
             if (inst.cachedIsInvisibleTrap)   flags |= 4u;
             // Bit 3: previouslyVisible - the shader runs the HiZ occlusion test
             // ONLY when this bit is set (an object with no depth in last frame's
@@ -1654,7 +1662,7 @@ bool M2Renderer::cullForRecording(const Camera& camera) {
                 distSq = glm::dot(toCam, toCam);
                 effectiveMaxDistSq = instanceMaxDistSq;
             } else {
-                if (!instance.cachedIsValid || instance.cachedIsSmoke || instance.cachedIsInvisibleTrap) continue;
+                if (!instance.cachedIsValid || (instance.cachedIsSmoke && extraSmoke_) || instance.cachedIsInvisibleTrap) continue;
                 glm::vec3 toCam = instance.position - camPos;
                 distSq = glm::dot(toCam, toCam);
                 if (distSq > maxPossibleDistSq) continue;
@@ -2219,7 +2227,9 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     glowCard.modelIsBrazierOrFire = model.isBrazierOrFire;
                     glowCard.modelIsSpellEffect = model.isSpellEffect;
                     glowCard.modelIsKoboldFlame = model.isKoboldFlame;
-                    const bool shouldUseGlowSprite = m2WantsGlowSprite(glowCard);
+                    // Glow cards become halos only with the Soft lamp halos
+                    // setting; off, the card is drawn as the model carries it.
+                    const bool shouldUseGlowSprite = glowSpritesOn_ && m2WantsGlowSprite(glowCard);
                     if (shouldUseGlowSprite) {
                         // Generate glow sprites for each instance in the group
                         for (size_t j = lodIdx; j < lodEnd; j++) {
@@ -2306,7 +2316,7 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                             // detuned sines keep any single lamp from looping
                             // visibly. Alpha and size move together, since a
                             // brighter flame also looks slightly larger.
-                            {
+                            if (lightFlicker_) {
                                 // Matches the phase used for this lamp's local
                                 // light, so the sprite and the pool of light it
                                 // casts breathe together.
@@ -2639,7 +2649,7 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             glowCard.modelIsBrazierOrFire = model.isBrazierOrFire;
             glowCard.modelIsSpellEffect = model.isSpellEffect;
             glowCard.modelIsKoboldFlame = model.isKoboldFlame;
-            if (m2WantsGlowSprite(glowCard) && m2GlowSpriteReplacesMesh(glowCard)) {
+            if (glowSpritesOn_ && m2WantsGlowSprite(glowCard) && m2GlowSpriteReplacesMesh(glowCard)) {
                 continue;
             }
 
@@ -2769,7 +2779,7 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // never be a valid seed. The classifier no longer calls
                 // HellfireSkyBox a brazier, and this makes sure the next model
                 // that gets miscalled one cannot strobe the sky either.
-                if (!skyMode_ && m2BlendIsAdditive(batch.blendMode) &&
+                if (lightFlicker_ && !skyMode_ && m2BlendIsAdditive(batch.blendMode) &&
                     (model.isBrazierOrFire || model.isTorch || model.isLanternLike)) {
                     const float flicker = lampFlicker(
                         instance.position, lampFlickerClockSeconds(),
@@ -3127,7 +3137,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
             if (shadowCandStamp_ == 0) ++shadowCandStamp_;  // 0 is "never moved"
             for (uint32_t i = 0; i < instances.size(); ++i) {
                 const auto& instance = instances[i];
-                if (!instance.cachedIsValid || instance.cachedIsSmoke ||
+                if (!instance.cachedIsValid || (instance.cachedIsSmoke && extraSmoke_) ||
                     instance.cachedIsInvisibleTrap || instance.cachedIsGroundDetail) continue;
                 const glm::vec3 d = instance.position - shadowCenter;
                 const float reach = shadowRadius + instance.cachedPaddedRadius + kCandidateMargin;
@@ -3183,7 +3193,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         };
         if (instance.id != candidateId) return;
         if (!fromMovers && instance.shadowMoverStamp == shadowCandStamp_) return;
-        if (!instance.cachedIsValid || instance.cachedIsSmoke ||
+        if (!instance.cachedIsValid || (instance.cachedIsSmoke && extraSmoke_) ||
             instance.cachedIsInvisibleTrap) return;
         // A squared distance against the shadow disc, read from the
         // instance's first cache line, settles the far ones before the model

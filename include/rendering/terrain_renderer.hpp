@@ -195,6 +195,9 @@ public:
     void setFrustumCulling(bool enabled) { frustumCullingEnabled = enabled; }
     void setFogEnabled(bool enabled) { fogEnabled = enabled; }
     [[nodiscard]] bool isFogEnabled() const { return fogEnabled; }
+    /// Terrain Highlights (stock CVar `specular`): the sun's glint on `_s`
+    /// tilesets. Off, the push constant's power is 0 and terrain.vert skips it.
+    void setSpecularEnabled(bool on) { specularEnabled_ = on; }
     void setViewDistance(float distance) { maxViewDistance_ = std::clamp(distance, 400.0f, 2400.0f); }
 
     /// The highlight's colour, the sun's (DayNight channel 9, the stock c27),
@@ -252,6 +255,7 @@ private:
     glm::vec3 sunSpecular_{0.0f};
     /// WOWEE_TERRAIN_AB_PERIOD's off phase: no highlight, no horizon.
     bool stockExtrasOff_ = false;
+    bool specularEnabled_ = false;  // the `specular` option; stock default off
     std::unique_ptr<TerrainHorizon> horizon_;
     void registerRtChunk(TerrainChunkGPU& gpuChunk, const pipeline::ChunkMesh& chunk);
     pipeline::AssetManager* assetManager = nullptr;

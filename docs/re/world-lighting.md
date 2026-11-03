@@ -344,6 +344,29 @@ out = primary * tex * (0.7 + 0.3 * lit) * 2 + spec * tex.a * lit
   - The alpha unpacker writes the base layer's weight as
     `255 − sum(others)` in one path (0x7b7c60, `param_6`).
 
+### Shadow map filter (PCF taps)
+- **Offsets** (0x8742e0): eight vec4s at `0xd431d0`, `(x, y, 0, 0) / size` in texels:
+  `k0 (0.8,-1.0)  k1 (-0.2,-0.8)  k2 (0.2,-0.6)  k3 (1.0,-0.4)`
+  `k4 (-0.6,-0.2)  k5 (0.6,0.2)  k6 (-1.0,-0.4)  k7 (-0.4,-0.6)`.
+  The same `1/size` is used for every map.
+- **Upload** (pixel-constant setter, vtable +0x118, type 4): terrain (0x874660) puts k0..k7 at
+  local[3..10]; M2/WMO/detail doodads (0x874760, 0x8744e0) put them at local[5..12].
+- **5-tap** (terrain2_pcf, terrain3_pcf, mapobj*, combiners_*, detaildoodad): the centre plus
+  k0, k2, k4, k6 (terrain c3/c5/c7/c9; M2/WMO c5/c7/c9/c11), equal weights ×0.2. WMO is 5-tap
+  too, not 4. The **9-tap** terrain3_pcf variant uses the centre plus all eight (c3..c10) ×1/9 on the
+  near map (texture[5]); the other cascades stay 5-tap.
+- **Edge fade:** `m = max(|s.x|,|s.y|)` (shadow NDC), `f = sat((0.99 - m) / 0.29)`,
+  `lit = 1 + f·(avg - 1)`: full shadow inside 0.70, none at 0.99. The cascaded variants
+  select the finest map whose `m < 1`; the outermost one fades over 0.90..0.99 (`-11.11m + 11`).
+- **Hardware PCF:** CVar `hwPCF` (default 1, needs caps+0xac; 0x78e070 sets `0xd43014`).
+  On: a D24 map (format 0xc) with linear filter (flags 0x81), `SHADOW2D` → each tap is a 2×2
+  bilinear compare; the `*_pcf` / `OPTION ARB_fragment_program_shadow` programs (0x79e4f0).
+  Off: an R32F map (0xb), point filter, `terrain2.bls` does `SGE depth >= ref` per tap.
+- **Map size** (0x875d30, `0xd43150`), `extShadowQuality` 0..5 (`0xd43154`, validated 0x8740d0):
+  0 none; 1 → 1024; 2 → 2048; 3 → 1024; 4, 5 → 2048. Levels ≥3 add three cascade maps of
+  half-extent 40 / 160 / 640 yd (`0xb1d520`), re-centred after moving 2 / 4 / 32 yd; below 5
+  they are double-buffered and redrawn over 9 / 9 / 25 frames in tiles (0x874890).
+
 ### Wowee before and after
 
 | Feature | Stock | Wowee before | Wowee after |
@@ -486,7 +509,8 @@ in the wotlk data. The pure maths is in `include/rendering/stock_wmo_light.hpp`.
   specular in 3.3.5a**, even with MapObjSpecular. `Env`: `+ tex.a * envTex`;
   `EnvMetal`: `+ tex.rgb * tex.a * envTex` (sphere map from `_Refl` vertex programs).
 - Shadow-map variants of the pixel programs multiply the whole colour by
-  `0.7 + 0.3 * lit` (4-tap PCF, faded at the map edge).
+  `0.7 + 0.3 * lit` (5-tap PCF, faded at the map edge; see "Shadow map filter
+  (PCF taps)" - an earlier reading here said 4).
 
 ### Vertex colours
 - Load `0x7d7c30`: MOCV is read when MOGP flag 0x4; unless **MOHD flag 0x8**, `0x7d7380`
@@ -768,6 +792,31 @@ RainDrop01.blp and RainDropSplash01.blp have RGB 123..164, which averages 128. U
   ```
   The death LightParams (4) has Glow 0.8.
 
+### Drunk
+**The value** (0x4F7290, `ecx = player+0x1008`, the player descriptor block):
+`drunk = min(max(PLAYER_BYTES_3 byte 1 (+0x1D), PLAYER_FAKE_INEBRIATION (+0x2B8)), 100) · 0.01`
+(0x9F1968). The byte is the server's 0..100 inebriation; the int is the fake
+one (UNIT_END + 0xAE). The client has **no tipsy/drunk/smashed thresholds and
+no easing of the value**; the one threshold is 0.5 for the bubbles below.
+Every caller of 0x4F7290 (all of them traced) does one of these:
+
+| Effect | Where | Rule |
+|---|---|---|
+| Full-screen glow | 0x4F8770 (every frame, active player) | `z = max(underwater ? 0x54 : 0, floor(drunk · 255))` (·255 0x9E30C0, +512 bit trick), as above. No easing. |
+| Field of view | 0x6DA6B0 (on a change of PLAYER_BYTES_3 byte 1, registered at 0x6E46F6), 0x6066E0 (camera target set) → 0x604940 | target FOV offset `camera+0x138 = drunk · 1.5533 rad` (89°, 0xA1EA20), eased by 0x6030E0/0x603D30 at **cameraFoVSmoothSpeed 0.5 °/s** (linear in time: duration = Δ / (0.5°)); set at once when the camera gets a new target. FOV = `clamp(base (+0x40) + offset, 0, 3.1241)` (getter 0x5FF500, CGCamera vtable 0xA1EA54 slot 0; inferred to be the projection FOV). Skipped when camera flags & 0x80008000. |
+| Steering drift | 0x6DEB30 (event-6 handler 0x4F8730, inferred per frame) | see movement-camera.md §5: facing += sway each frame while moving; pitch += 4·sway while swimming/flying |
+| Click-to-move | 0x7317A0 (from 0x6DEB30 when CTM is active) | the CTM's wanted facing gets the same sway |
+| Camera dive | 0x6023D0, 0x606F90 | when the camera's target is a drunk player, the cameraDive surface/submerge pitch limits (cameraSurfacePitch / cameraSubmergePitch) are not applied |
+| Breath effect | 0x732650, M2 event `$BTH` | a player with drunk ≥ 0.5 (0x9E2EC4) gets effect 7 "HARDCODED Inebriated Bubbles" (SpellVisualEffectName 1223, `Spells\Bubble_Drunk.mdx`) at attachment 17 (Breath) instead of the cold (3) / underwater (2) breath (0x6F9260, names at 0xADA764, attachments at 0xA32AF4) |
+| Slurred chat | 0x50D170 → 0x577F60 (own outgoing chat) | each word-initial `s` (not followed by space/s) becomes `sh` with probability drunk; an `s` at a word end gets an `h` with probability drunk; with probability `drunk · 0.25` the message gets the SLURRED_SPEECH suffix |
+| Hostile levels | 0x60F9E0 (UnitLevel), 0x621070 (tooltip), 0x98E8A0 | while the *viewing* player is drunk, a unit for which 0x729740 holds (inferred: hostile/attackable) shows `level − round(drunk · 5)` (0x9EBF34), at least 1 |
+
+**Not in stock:** no camera wobble, roll, shake or bob; no blur other than
+the glow's own; no Light.dbc "drunk" slot (the slot override 0xD38B58 is only
+set from ScreenEffect.dbc, and no ScreenEffect row is drunk); no sound of
+its own (the bubbles model is the only asset); no random strafing - the only
+movement effect is the deterministic facing/pitch drift.
+
 ### Gap table
 
 | Feature | Stock | Wowee before | Wowee after |
@@ -782,7 +831,7 @@ RainDrop01.blp and RainDropSplash01.blp have RGB 123..164, which averages 128. U
 | weatherDensity default | 2 (0.66) | Weather Detail 3 (1.0) | unchanged (setting is the user's) |
 | ffxGlow | on: Box4 → Gauss4 → lerp + blur²·Glow | none (shoulder tone map only in postprocess.frag, not in the FXAA path) | stock: blit 2x2 twice to a quarter-size mip, 16-tap product Gauss4 in fxaa.frag, `setGlow(LightParams.Glow, underwater 0x54/255)` |
 | Glow under water | z = 0.33 + wave UV | none | z = 0.33; **wave distortion not done** |
-| Drunk | glow blend z = drunk | Wowee's own wobble + 9-tap blur | unchanged (Wowee extra) |
+| Drunk | glow blend z = drunk; FOV widening, facing drift, bubbles, slurred chat (see "Drunk") | Wowee's own wobble + 9-tap blur | stock glow blend from PLAYER_BYTES_3 byte 1 (`Application::updateDrunkLevel`) and the stock facing drift (`CameraController`, 0x6DEB30); Wowee's wobble only under the "Drunken wobble" enhancement (off). FOV widening (inferred), bubbles and slurred chat not done |
 | Ghost | ffxDeath: blur, grey, tint (0x53,0x93,0xa8)·4g(1-g) | per-pixel desaturate ×(0.88,0.95,1.10) | stock ffxDeath formula with the glow blur |
 | Nether/special (ScreenEffect types 2/3) | colour wash per ScreenEffect.dbc | none | not done |
 
@@ -795,14 +844,14 @@ alone when it is idle.
 
 | Extra | Changes the classic look? | Where |
 |---|---|---|
-| Real-time shadow map on terrain, M2 and WMO | Stock has one too at its higher shadow levels. Its darkness is the stock 70% floor, scaled by the Shadow darkness setting. | `shadowParams.y` = 0.3 × setting |
+| Real-time shadow map on terrain, M2 and WMO | Stock has one too at its higher shadow levels. Its darkness is the stock 70% floor, scaled by the Shadow darkness setting. "Sun shadows" enhancement; off is the stock default (blob, characters.md L10). The "Shadow edges" row picks the stock 5 taps (0x8742e0 offsets) or Wowee's 9-tap disk; the stock edge fade (0.70..0.99) is not reproduced | `shadowParams.y` = 0.3 × setting |
 | Shoreline foam | yes; off on Low and Classic | water.frag (`shorelineFoam`) |
 | Wet ground in rain | yes; off on Low and Classic | `wet_surface.glsli` (`wetGround`) |
 | Sky reflection on water | yes. The stock default water has **no** reflection (psLiquidWater adds no environment term); kept because a sky-only look was asked for | water.frag |
 | Wake froth, horizon alpha fade (600–2400 yd) | slightly; the fade lies beyond the fog in practice | water.frag |
 | Volumetric fog / light shafts, sun shafts, lens flare, sharp stars, foliage and cloth wind | yes; all off on Classic, on from Low or Medium up | presets |
 | Normal maps and parallax (generated) | yes; off on Classic | presets |
-| Point lights from M2 and WMO (`localLight*`) | adds light near torches and the like; stock has a few local M2 lights only | terrain, M2, WMO shaders |
+| Point lights from M2 and WMO (`localLight*`) | adds light near torches and the like; stock has the 4 (terrain 3) nearest M2 lights only | terrain, M2, WMO shaders; "Torch and lamp light" enhancement, off = the stock rule (characters.md L3) |
 | RT ambient and shadow | off unless enabled | `rt_lighting.glsli` |
 | WMO lamp glass, clock fire and lava scroll | off; `WOWEE_WMO_EXTRAS=1` brings them back | wmo_renderer.cpp |
 | Fog strength and fog sky blend sliders | no at the defaults (1 and 0) | settings |
