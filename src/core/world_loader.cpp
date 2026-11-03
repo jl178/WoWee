@@ -916,6 +916,9 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
         renderer_->getCameraController()->reset();
     }
     renderer_->setCharacterYaw(spawnYawDeg);
+    // The character stands at the destination now, so what the renderer
+    // reports is the new map's: movement may be taken and sent again.
+    if (gameHandler_) gameHandler_->endWorldPortHold();
 
     // Every sub-renderer, and out of instance mode.
     renderer_->setActiveMapName(mapName);

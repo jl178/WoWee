@@ -2015,6 +2015,14 @@ void InventoryHandler::dispatchUseItem(uint8_t wowBag, uint8_t wowSlot, uint64_t
         owner_.getSpellHandler()->noteGroundCastSpell(useSpellId);
     }
 
+    // A bomb or a grenade: its spell waits on a point, so the use waits with
+    // it for the ground to be clicked, as a spell cast at a point does
+    // (docs/re/spell-cast-pipeline.md section 15).
+    if (useSpellId != 0 && unitTarget == 0 && owner_.getSpellHandler() &&
+        owner_.getSpellHandler()->beginItemGroundTargeting(useSpellId, wowBag, wowSlot, itemGuid)) {
+        return;
+    }
+
     if (useSpellId != 0 &&
         (owner_.getSpellTargetFlags(useSpellId) & kSpellTargetFlagItem) != 0) {
         pendingItemTarget_ = PendingItemTarget{.bag = wowBag, .slot = wowSlot, .itemGuid = itemGuid, .spellId = useSpellId,

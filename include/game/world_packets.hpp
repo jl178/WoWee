@@ -2255,6 +2255,12 @@ public:
     static network::Packet buildGameObjectTarget(uint32_t spellId, uint64_t targetGuid, uint8_t castCount);
     /// Cast at an item - Disenchant, Prospecting, Milling, enchant formulas.
     static network::Packet buildItemTarget(uint32_t spellId, uint64_t itemGuid, uint8_t castCount);
+    /// Cast at a point on the ground: TARGET_FLAG_DEST_LOCATION (0x40), then
+    /// the packed guid of the transport the point lies on (0 when none) and
+    /// x, y, z in server coordinates - in that transport's frame when it is
+    /// one (Wow.exe 0x9AB8B0, SpellCastTargets::Write).
+    static network::Packet buildDestTarget(uint32_t spellId, uint8_t castCount,
+                                           uint64_t transportGuid, float x, float y, float z);
 };
 
 /** CMSG_CANCEL_AURA packet builder */
@@ -2300,6 +2306,26 @@ inline void readCastResultArgs(network::Packet& packet, uint8_t result,
         case kCastResultTotemCategory:
             if (packet.hasRemaining(4)) arg1 = packet.readUInt32();
             if (packet.hasRemaining(4)) arg2 = packet.readUInt32();
+            break;
+        // The rest of what the server appends (AzerothCore's
+        // Spell::WriteCastResultInfo) and Spell_C's report (0x808200) reads:
+        // two ids for an equipped-item class and its subclass mask, the item
+        // and count for NEED_MORE_ITEMS, the skill and rank for MIN_SKILL,
+        // one id for the others.
+        case 0x1D: case 0x1E: case 0x1F:  // EQUIPPED_ITEM_CLASS[_MAINHAND|_OFFHAND]
+        case 0x37:                        // NEED_MORE_ITEMS
+        case 0x96:                        // MIN_SKILL
+            if (packet.hasRemaining(4)) arg1 = packet.readUInt32();
+            if (packet.hasRemaining(4)) arg2 = packet.readUInt32();
+            break;
+        case 0x36:  // NEED_EXOTIC_AMMO
+        case 0x64:  // REAGENTS
+        case 0x65:  // REQUIRES_AREA
+        case 0x81:  // TOO_MANY_OF_ITEM
+        case 0x93:  // PREVENTED_BY_MECHANIC
+        case 0xAC:  // CUSTOM_ERROR
+        case 0xB5:  // FISHING_TOO_LOW
+            if (packet.hasRemaining(4)) arg1 = packet.readUInt32();
             break;
         default:
             break;
@@ -2537,6 +2563,12 @@ public:
     /// The SpellCastTargets that end a use, with TBC and WotLK's 32-bit flags.
     static void writeTargets(network::Packet& packet, uint64_t targetGuid,
                              uint64_t itemTargetGuid, uint64_t gameObjectGuid);
+    /// An item used at a point on the ground (a bomb, a grenade): WotLK's
+    /// CMSG_USE_ITEM with TARGET_FLAG_DEST_LOCATION, the packed transport
+    /// guid (0: none) and the point in server coordinates (0x9AB8B0).
+    static network::Packet buildDestTarget(uint8_t bagIndex, uint8_t slotIndex, uint64_t itemGuid,
+                                           uint32_t spellId, uint8_t castCount,
+                                           uint64_t transportGuid, float x, float y, float z);
 };
 
 /** CMSG_OPEN_ITEM packet builder (for locked containers / lockboxes) */

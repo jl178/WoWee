@@ -1931,6 +1931,20 @@ static int lua_AscendStop(lua_State* L) {
     ui::KeybindingManager::getInstance().setVirtualCommand("JUMP", "lua", false);
     return 0;
 }
+// SitStandOrDescendStart / DescendStop: the stock SITORSTAND binding
+// (Bindings.xml), held the way JumpOrAscendStart holds JUMP. Sitting or
+// standing on the ground, descending while swimming or flying - which of the
+// two is the movement code's to decide, as it is for the key.
+static int lua_SitStandOrDescendStart(lua_State* L) {
+    (void)L;
+    ui::KeybindingManager::getInstance().setVirtualCommand("SITORSTAND", "lua", true);
+    return 0;
+}
+static int lua_DescendStop(lua_State* L) {
+    (void)L;
+    ui::KeybindingManager::getInstance().setVirtualCommand("SITORSTAND", "lua", false);
+    return 0;
+}
 // MoveForwardStart / MoveForwardStop and the rest of the stock movement
 // binding functions (Bindings.xml: MOVEFORWARD runs MoveForwardStart on the
 // press and MoveForwardStop on the release). Held as the binding's command,
@@ -2294,6 +2308,8 @@ void registerActionLuaAPI(lua_State* L) {
                 {"RunBinding",          lua_RunBinding},
                 {"JumpOrAscendStart",   lua_JumpOrAscendStart},
                 {"AscendStop",          lua_AscendStop},
+                {"SitStandOrDescendStart", lua_SitStandOrDescendStart},
+                {"DescendStop",         lua_DescendStop},
                 {"MoveForwardStart",    lua_MoveForwardStart},
                 {"MoveForwardStop",     lua_MoveForwardStop},
                 {"MoveBackwardStart",   lua_MoveBackwardStart},

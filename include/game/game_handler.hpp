@@ -280,6 +280,10 @@ public:
      * @param z Z coordinate
      */
     void setPosition(float x, float y, float z);
+    /// The character stands on the map SMSG_NEW_WORLD sent it to: movement
+    /// packets and renderer positions are taken again. See
+    /// MovementHandler::endWorldPortHold.
+    void endWorldPortHold();
 
     /**
      * Update player orientation

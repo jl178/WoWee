@@ -599,7 +599,11 @@ void MovementHandler::sendMovement(Opcode opcode) {
     // player then walks up to is out of the server's reach, and refuses in
     // silence. Once per stretch of it, not per packet.
     const char* heldReason = nullptr;
-    if (!taxiAllowed) {
+    if (isWorldPortHeld()) {
+        // Every opcode, stop and heartbeat included: the stock client sends
+        // nothing between SMSG_NEW_WORLD and the end of the load (0x403B70).
+        heldReason = "the new map is loading";
+    } else if (!taxiAllowed) {
         if (!serverMovementAllowed_) heldReason = "the server has not given control of the character";
         else if (movingOtherUnit()) heldReason = nullptr;
         else if (onTaxiFlight_) heldReason = "a taxi flight is in progress";
@@ -1263,7 +1267,24 @@ void MovementHandler::forceClearTaxiAndMovementState() {
 // setPosition / setOrientation
 // ============================================================
 
+void MovementHandler::endWorldPortHold() {
+    if (worldPortHold_) LOG_INFO("World port: the new map is placed, movement resumes");
+    worldPortHold_ = false;
+}
+
+bool MovementHandler::isWorldPortHeld() const {
+    if (!worldPortHold_) return false;
+    constexpr auto kWorldPortHoldLimit = std::chrono::seconds(60);
+    return std::chrono::steady_clock::now() - worldPortHoldSince_ < kWorldPortHoldLimit;
+}
+
 void MovementHandler::setPosition(float x, float y, float z) {
+    // The renderer's position is the old map's until the world loader has
+    // placed the character on the new one; taking it put the old coordinates
+    // in the next packet, and the server moved the player there on the new
+    // map (".gps" after ".tele" to another continent read the new map with
+    // the old x, y, z).
+    if (isWorldPortHeld()) return;
     movementInfo.x = x;
     movementInfo.y = y;
     movementInfo.z = z;
@@ -1282,6 +1303,7 @@ void MovementHandler::setPosition(float x, float y, float z) {
 }
 
 void MovementHandler::setOrientation(float orientation) {
+    if (isWorldPortHeld()) return;
     movementInfo.orientation = orientation;
 }
 
@@ -1488,6 +1510,17 @@ void MovementHandler::handleForceMoveFlagChange(network::Packet& packet, const c
         } else {
             info.flags &= ~flag;
         }
+    }
+    // Flight taken away in the air ends it there (movement event 0x30 ->
+    // 0x98C240 clears FLYING, ASCENDING, DESCENDING and the pitch keys before
+    // the ack). Left set, FLYING outlived CAN_FLY for good: the landing that
+    // clears it (setFlightAirborne) only runs while flight is allowed.
+    if (!set && flag == static_cast<uint32_t>(MovementFlags::CAN_FLY)) {
+        info.flags &= ~(static_cast<uint32_t>(MovementFlags::FLYING) |
+                        static_cast<uint32_t>(MovementFlags::ASCENDING) |
+                        static_cast<uint32_t>(MovementFlags::DESCENDING) |
+                        static_cast<uint32_t>(MovementFlags::PITCH_UP) |
+                        static_cast<uint32_t>(MovementFlags::PITCH_DOWN));
     }
 
     if (!owner_.getSocket()) return;
@@ -2469,7 +2502,24 @@ void MovementHandler::handleTeleportAck(network::Packet& packet) {
         movementInfo.y = canonical.y;
         movementInfo.z = canonical.z;
         movementInfo.orientation = core::coords::serverToCanonicalYaw(orientation);
-        movementInfo.flags = 0;
+        // What the player is doing ends here; what the player may do does not.
+        // The stock teleport (0x6ECF80, run from the 0x2C movement event)
+        // relocates the mover and leaves CMovement's flags (+0x44) as they
+        // were. Zeroing them all threw away CAN_FLY with the rest, so after a
+        // ".gm fly on" any teleport - ".go", ".tele" on the same map, a
+        // summon - left space jumping instead of climbing, and the character
+        // fell out of the sky. Water walking, feather fall, hover, levitate,
+        // root and walk mode went the same way, each without a word from the
+        // server to put it back.
+        constexpr uint32_t kKeptAcrossTeleport =
+            static_cast<uint32_t>(MovementFlags::WALKING) |
+            static_cast<uint32_t>(MovementFlags::LEVITATING) |
+            static_cast<uint32_t>(MovementFlags::ROOT) |
+            static_cast<uint32_t>(MovementFlags::CAN_FLY) |
+            static_cast<uint32_t>(MovementFlags::WATER_WALK) |
+            static_cast<uint32_t>(MovementFlags::FEATHER_FALL) |
+            static_cast<uint32_t>(MovementFlags::HOVER);
+        movementInfo.flags &= kKeptAcrossTeleport;
     }
 
     // Clear cast bar on teleport - SpellHandler owns the casting_ flag
@@ -2663,6 +2713,11 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
 
     owner_.currentMapIdRef() = mapId;
     owner_.inInstanceRef() = false;
+    // Held until the world loader has the character on the new map: see
+    // endWorldPortHold. Set before movementInfo takes the destination so
+    // nothing in between can put the old map's position back.
+    worldPortHold_ = true;
+    worldPortHoldSince_ = std::chrono::steady_clock::now();
     if (owner_.getSocket()) {
         owner_.getSocket()->tracePacketsFor(std::chrono::seconds(12), "new_world");
     }
@@ -2720,13 +2775,14 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
     owner_.resetCastState();
 
     if (owner_.getSocket()) {
+        // The acknowledgement alone, as the stock client sends it (0x403B70:
+        // an empty 0xDC once the map is loaded). The server places the player
+        // at the destination itself on receiving it, so there is no position
+        // to tell it - and a STOP or HEARTBEAT here is a movement packet the
+        // stock client never sends.
         network::Packet ack(wireOpcode(Opcode::MSG_MOVE_WORLDPORT_ACK));
         owner_.getSocket()->send(ack);
         LOG_INFO("Sent MSG_MOVE_WORLDPORT_ACK");
-
-        // Sync position immediately so the server doesn't keep stale coordinates.
-        sendMovement(Opcode::MSG_MOVE_STOP);
-        sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
     }
 
     owner_.timeSinceLastPingRef() = 0.0f;

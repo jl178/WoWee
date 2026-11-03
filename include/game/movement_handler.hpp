@@ -231,6 +231,13 @@ public:
         return true;
     }
     void setServerMovementAllowed(bool v) { serverMovementAllowed_ = v; }
+    /// A far teleport (SMSG_NEW_WORLD to another map) is loading. Until the
+    /// world loader has put the character at the destination, the position and
+    /// facing the renderer reports are the old map's, so they are not taken
+    /// and nothing is sent: the stock client sends MSG_MOVE_WORLDPORT_ACK only
+    /// once the new map is loaded and no movement before it (0x403B70).
+    void endWorldPortHold();
+    [[nodiscard]] bool isWorldPortHeld() const;
     uint32_t& monsterMovePacketsThisTickRef() { return monsterMovePacketsThisTick_; }
     uint32_t& monsterMovePacketsDroppedThisTickRef() { return monsterMovePacketsDroppedThisTick_; }
 
@@ -337,6 +344,10 @@ private:
     /// Why movement is being held back from the server, said once per stretch
     /// of it. See sendMovement.
     const char* movementHeldReason_ = nullptr;
+    /// Set by a far teleport, cleared by endWorldPortHold (or after a minute,
+    /// so a load that never finishes cannot hold movement for good).
+    bool worldPortHold_ = false;
+    std::chrono::steady_clock::time_point worldPortHoldSince_{};
     uint32_t lastFacingSendTimeMs_ = 0;
     float lastFacingSentOrientation_ = 0.0f;
     /// The facing the last movement packet of any kind carried, the reference

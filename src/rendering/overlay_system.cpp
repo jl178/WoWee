@@ -84,6 +84,13 @@ void OverlaySystem::cleanup() {
     selCircleTexture_.destroy(device, vkCtx_->getAllocator());
     destroy(device, selCirclePool_);  // frees selCircleSet_ with it
     selCircleSet_ = VK_NULL_HANDLE;
+    destroy(device, spellDecalPipeline_);
+    destroy(vkCtx_->getAllocator(), spellDecalVertBuf_, spellDecalVertAlloc_);
+    spellDecalVertMapped_ = nullptr;
+    for (auto& t : spellDecalTexture_) t.destroy(device, vkCtx_->getAllocator());
+    destroy(device, spellDecalPool_);  // frees spellDecalSet_ with it
+    spellDecalSet_[0] = spellDecalSet_[1] = VK_NULL_HANDLE;
+    spellDecalTexturesTried_ = false;
     destroy(device, selCircleSetLayout_);
     selCircleTextureTried_ = false;
     destroy(device, overlayPipeline_);
@@ -96,6 +103,7 @@ void OverlaySystem::recreatePipelines() {
     VkDevice device = vkCtx_->getDevice();
     // Destroy only pipelines (keep geometry buffers)
     destroy(device, selCirclePipeline_);
+    destroy(device, spellDecalPipeline_);
     destroy(device, overlayPipeline_);
     destroy(device, brightnessPipeline_);
 }
@@ -299,11 +307,76 @@ void OverlaySystem::initSelectionCircle() {
     }
 }
 
+void OverlaySystem::buildFloorLattice(FloorLattice& lattice, const glm::vec3& center, float r,
+                                      float zHalf, const HeightQuery2D& terrainHeight,
+                                      const HeightQuery3D& wmoHeight,
+                                      const HeightQuery3D& m2Height) {
+    // Lattice spacing: the box (2R) plus a cell of slack fits in the grid
+    // wherever the lattice happens to fall, never finer than kSelMinSpacing.
+    const float spacing = std::max(kSelMinSpacing,
+                                   2.0f * r / static_cast<float>(kSelGridCells - 2));
+    // WMO/M2 floors are found by a downward probe; start it at the top of the
+    // box so a step or a deck up to the box's top is still a floor.
+    const float probeZ = center.z + zHalf + 0.25f;
+    if (spacing != lattice.spacing || std::abs(probeZ - lattice.probeZ) > 0.35f ||
+        ++lattice.age > kSelCacheMaxAge || lattice.cache.size() > kSelCacheMaxEntries) {
+        lattice.cache.clear();
+        lattice.spacing = spacing;
+        lattice.probeZ = probeZ;
+        lattice.age = 0;
+    }
+
+    const auto originX = static_cast<int32_t>(std::floor((center.x - r) / spacing));
+    const auto originY = static_cast<int32_t>(std::floor((center.y - r) / spacing));
+    // Below the box: the shader's height ramp is zero there, so a lattice point
+    // with no floor inside the box draws nothing.
+    const float noFloorZ = center.z - 2.0f * zHalf - 1.0f;
+
+    lattice.verts.resize(static_cast<size_t>(kSelGridVerts) * kSelGridVerts * 3);
+    size_t out = 0;
+    for (int gy = 0; gy < kSelGridVerts; ++gy) {
+        for (int gx = 0; gx < kSelGridVerts; ++gx) {
+            const int32_t ix = originX + gx;
+            const int32_t iy = originY + gy;
+            const float wx = static_cast<float>(ix) * spacing;
+            const float wy = static_cast<float>(iy) * spacing;
+            auto [it, inserted] = lattice.cache.try_emplace(latticeKey(ix, iy));
+            if (inserted) {
+                FloorSample& fs = it->second;
+                if (terrainHeight) fs.terrain = terrainHeight(wx, wy);
+                if (wmoHeight) fs.wmo = wmoHeight(wx, wy, lattice.probeZ);
+                if (m2Height) fs.m2 = m2Height(wx, wy, lattice.probeZ);
+            }
+            // The highest floor inside the box: from above, as the stock
+            // projector sees it, the top surface is the one left showing.
+            float z = noFloorZ;
+            bool found = false;
+            for (const std::optional<float>& h : {it->second.terrain, it->second.wmo, it->second.m2}) {
+                if (!h || *h < center.z - zHalf || *h > center.z + zHalf) continue;
+                if (!found || *h > z) z = *h;
+                found = true;
+            }
+            lattice.verts[out++] = wx;
+            lattice.verts[out++] = wy;
+            lattice.verts[out++] = z;
+        }
+    }
+}
+
 void OverlaySystem::renderSelectionCircle(const glm::mat4& view, const glm::mat4& projection,
                                            VkCommandBuffer cmd,
                                            const HeightQuery2D& terrainHeight,
                                            const HeightQuery3D& wmoHeight,
                                            const HeightQuery3D& m2Height) {
+    renderSelectionCircleOnly(view, projection, cmd, terrainHeight, wmoHeight, m2Height);
+    renderSpellTargetDecal(view, projection, cmd, terrainHeight, wmoHeight, m2Height);
+}
+
+void OverlaySystem::renderSelectionCircleOnly(const glm::mat4& view, const glm::mat4& projection,
+                                              VkCommandBuffer cmd,
+                                              const HeightQuery2D& terrainHeight,
+                                              const HeightQuery3D& wmoHeight,
+                                              const HeightQuery3D& m2Height) {
     if (!selCircleVisible_) return;
     initSelectionCircle();
     if (selCirclePipeline_ == VK_NULL_HANDLE || cmd == VK_NULL_HANDLE ||
@@ -331,62 +404,12 @@ void OverlaySystem::renderSelectionCircle(const glm::mat4& view, const glm::mat4
     // its spacing (and the floor cache) holds still while the ring closes;
     // both decals are draped over the same floor samples.
     const float r = selPulseT_ >= 0.0f ? rPulseMax : rMain;
-
-    // Lattice spacing: the box (2R) plus a cell of slack fits in the grid
-    // wherever the lattice happens to fall, never finer than kSelMinSpacing.
-    const float spacing = std::max(kSelMinSpacing,
-                                   2.0f * r / static_cast<float>(kSelGridCells - 2));
-    // WMO/M2 floors are found by a downward probe; start it at the top of the
-    // box so a step or a deck up to R above the feet is still a floor.
-    const float probeZ = feet.z + r + 0.25f;
-    if (spacing != selFloorCacheSpacing_ || std::abs(probeZ - selFloorCacheProbeZ_) > 0.35f ||
-        ++selFloorCacheAge_ > kSelCacheMaxAge || selFloorCache_.size() > kSelCacheMaxEntries) {
-        selFloorCache_.clear();
-        selFloorCacheSpacing_ = spacing;
-        selFloorCacheProbeZ_ = probeZ;
-        selFloorCacheAge_ = 0;
-    }
-
-    const auto originX = static_cast<int32_t>(std::floor((feet.x - r) / spacing));
-    const auto originY = static_cast<int32_t>(std::floor((feet.y - r) / spacing));
-    // Below the box: the shader's height ramp is zero there, so a lattice point
-    // with no floor inside the box draws nothing.
-    const float noFloorZ = feet.z - 2.0f * r - 1.0f;
-
-    selLatticeVerts_.resize(static_cast<size_t>(kSelGridVerts) * kSelGridVerts * 3);
-    size_t out = 0;
-    for (int gy = 0; gy < kSelGridVerts; ++gy) {
-        for (int gx = 0; gx < kSelGridVerts; ++gx) {
-            const int32_t ix = originX + gx;
-            const int32_t iy = originY + gy;
-            const float wx = static_cast<float>(ix) * spacing;
-            const float wy = static_cast<float>(iy) * spacing;
-            auto [it, inserted] = selFloorCache_.try_emplace(latticeKey(ix, iy));
-            if (inserted) {
-                SelFloorSample& s = it->second;
-                if (terrainHeight) s.terrain = terrainHeight(wx, wy);
-                if (wmoHeight) s.wmo = wmoHeight(wx, wy, selFloorCacheProbeZ_);
-                if (m2Height) s.m2 = m2Height(wx, wy, selFloorCacheProbeZ_);
-            }
-            // The highest floor inside the box: from above, as the stock
-            // projector sees it, the top surface is the one left showing.
-            float z = noFloorZ;
-            bool found = false;
-            for (const std::optional<float>& h : {it->second.terrain, it->second.wmo, it->second.m2}) {
-                if (!h || *h < feet.z - r || *h > feet.z + r) continue;
-                if (!found || *h > z) z = *h;
-                found = true;
-            }
-            selLatticeVerts_[out++] = wx;
-            selLatticeVerts_[out++] = wy;
-            selLatticeVerts_[out++] = z;
-        }
-    }
+    buildFloorLattice(selLattice_, feet, r, r, terrainHeight, wmoHeight, m2Height);
 
     const uint32_t slice = vkCtx_->getCurrentFrame() % kSelFrameSlices;
-    const VkDeviceSize sliceBytes = sizeof(float) * selLatticeVerts_.size();
+    const VkDeviceSize sliceBytes = sizeof(float) * selLattice_.verts.size();
     std::memcpy(static_cast<uint8_t*>(selCircleVertMapped_) + slice * sliceBytes,
-                selLatticeVerts_.data(), sliceBytes);
+                selLattice_.verts.data(), sliceBytes);
     vmaFlushAllocation(vkCtx_->getAllocator(), selCircleVertAlloc_, slice * sliceBytes, sliceBytes);
 
     // The texture turns with the camera (0x744150): its bright lower lip is
@@ -420,6 +443,168 @@ void OverlaySystem::renderSelectionCircle(const glm::mat4& view, const glm::mat4
             0, sizeof(push), &push);
         vkCmdDrawIndexed(cmd, static_cast<uint32_t>(selCircleVertCount_), 1, 0, 0, 0);
     }
+}
+
+void OverlaySystem::setSpellTargetDecal(const glm::vec3& center, float halfWidth, bool acceptable) {
+    spellDecalCenter_ = center;
+    spellDecalHalfWidth_ = std::max(halfWidth, 0.05f);
+    spellDecalAcceptable_ = acceptable;
+    spellDecalVisible_ = true;
+    // Outside command recording, for the reason setSelectionCircle gives.
+    if (!spellDecalTexturesTried_) loadSpellTargetTextures();
+}
+
+void OverlaySystem::clearSpellTargetDecal() {
+    spellDecalVisible_ = false;
+}
+
+void OverlaySystem::loadSpellTargetTextures() {
+    spellDecalTexturesTried_ = true;
+    if (!vkCtx_ || !initSelectionDescriptors()) return;
+    VkDevice device = vkCtx_->getDevice();
+    if (spellDecalPool_ == VK_NULL_HANDLE) {
+        VkDescriptorPoolSize size{};
+        size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        size.descriptorCount = 2;
+        VkDescriptorPoolCreateInfo pool{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        pool.maxSets = 2;
+        pool.poolSizeCount = 1;
+        pool.pPoolSizes = &size;
+        if (vkCreateDescriptorPool(device, &pool, nullptr, &spellDecalPool_) != VK_SUCCESS) {
+            spellDecalPool_ = VK_NULL_HANDLE;
+            return;
+        }
+    }
+    // The pair 0xAC799C names, loaded by WorldFrame's constructor (0x4FABD0)
+    // into 0xB74350/0xB74354: index 0 in range, 1 out of it.
+    static const char* const kPaths[2] = {
+        "Interface\\SpellShadow\\Spell-Shadow-Acceptable.blp",
+        "Interface\\SpellShadow\\Spell-Shadow-Unacceptable.blp",
+    };
+    auto* assets = core::Application::getInstance().getAssetManager();
+    for (int i = 0; i < 2; ++i) {
+        bool uploaded = false;
+        if (assets) {
+            pipeline::BLPImage image = assets->loadTexture(kPaths[i]);
+            if (image.isValid() && !image.data.empty()) {
+                uploaded = spellDecalTexture_[i].upload(*vkCtx_, image.data.data(),
+                                                        static_cast<uint32_t>(image.width),
+                                                        static_cast<uint32_t>(image.height),
+                                                        VK_FORMAT_R8G8B8A8_UNORM, true);
+            }
+        }
+        if (!uploaded) {
+            LOG_WARNING("OverlaySystem: ", kPaths[i], " unavailable - no spell targeting circle");
+            continue;
+        }
+        spellDecalTexture_[i].createSampler(device, VK_FILTER_LINEAR, VK_FILTER_LINEAR,
+                                            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+        if (!spellDecalTexture_[i].isValid()) continue;
+        VkDescriptorSetAllocateInfo alloc{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        alloc.descriptorPool = spellDecalPool_;
+        alloc.descriptorSetCount = 1;
+        alloc.pSetLayouts = &selCircleSetLayout_;
+        if (vkAllocateDescriptorSets(device, &alloc, &spellDecalSet_[i]) != VK_SUCCESS) {
+            spellDecalSet_[i] = VK_NULL_HANDLE;
+            continue;
+        }
+        VkDescriptorImageInfo imageInfo = spellDecalTexture_[i].descriptorInfo();
+        VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = spellDecalSet_[i];
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &imageInfo;
+        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    }
+}
+
+void OverlaySystem::initSpellTargetDecal() {
+    if (spellDecalPipeline_ != VK_NULL_HANDLE) return;
+    // The selection circle's layout, indices and shaders.
+    initSelectionCircle();
+    if (!vkCtx_ || selCirclePipelineLayout_ == VK_NULL_HANDLE) return;
+    VkDevice device = vkCtx_->getDevice();
+
+    if (spellDecalVertBuf_ == VK_NULL_HANDLE) {
+        const VkDeviceSize sliceBytes = sizeof(float) * 3 * kSelGridVerts * kSelGridVerts;
+        AllocatedBuffer vbuf = createBuffer(vkCtx_->getAllocator(), sliceBytes * kSelFrameSlices,
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        spellDecalVertBuf_ = vbuf.buffer;
+        spellDecalVertAlloc_ = vbuf.allocation;
+        spellDecalVertMapped_ = vbuf.info.pMappedData;
+    }
+
+    VkShaderModule vertShader, fragShader;
+    if (!vertShader.loadFromFile(device, "assets/shaders/selection_circle.vert.spv")) return;
+    if (!fragShader.loadFromFile(device, "assets/shaders/selection_circle.frag.spv")) {
+        vertShader.destroy();
+        return;
+    }
+    VkVertexInputBindingDescription vertBind{.binding = 0, .stride = 12, .inputRate = VK_VERTEX_INPUT_RATE_VERTEX};
+    VkVertexInputAttributeDescription vertAttr{.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0};
+    // As the selection circle's, but blended by alpha: 0x4F8A40 sets render
+    // state 6 (the blend mode) to 2, GxBlend_Alpha, with the 0.4 depth bias.
+    spellDecalPipeline_ = PipelineBuilder()
+        .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
+                    fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+        .setVertexInput({vertBind}, {vertAttr})
+        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+        .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
+        .setDepthBias(-1.0f, -1.0f)
+        .setColorBlendAttachment(PipelineBuilder::blendAlpha())
+        .setMultisample(vkCtx_->getMsaaSamples())
+        .setLayout(selCirclePipelineLayout_)
+        .setRenderPass(vkCtx_->getImGuiRenderPass())
+        .setDynamicStates(viewportAndScissorDynamic())
+        .build(device, vkCtx_->getPipelineCache());
+    vertShader.destroy();
+    fragShader.destroy();
+    if (!spellDecalPipeline_) LOG_ERROR("OverlaySystem: failed to build spell targeting pipeline");
+}
+
+void OverlaySystem::renderSpellTargetDecal(const glm::mat4& view, const glm::mat4& projection,
+                                           VkCommandBuffer cmd,
+                                           const HeightQuery2D& terrainHeight,
+                                           const HeightQuery3D& wmoHeight,
+                                           const HeightQuery3D& m2Height) {
+    if (!spellDecalVisible_) return;
+    initSpellTargetDecal();
+    const VkDescriptorSet set = spellDecalSet_[spellDecalAcceptable_ ? 0 : 1];
+    if (spellDecalPipeline_ == VK_NULL_HANDLE || cmd == VK_NULL_HANDLE ||
+        spellDecalVertMapped_ == nullptr || set == VK_NULL_HANDLE || selCircleIdxBuf_ == VK_NULL_HANDLE) {
+        return;
+    }
+    const float r = spellDecalHalfWidth_;
+    constexpr float kHalfHeight = 2.0f;  // 0xA4040C
+    buildFloorLattice(spellDecalLattice_, spellDecalCenter_, r, kHalfHeight,
+                      terrainHeight, wmoHeight, m2Height);
+
+    const uint32_t slice = vkCtx_->getCurrentFrame() % kSelFrameSlices;
+    const VkDeviceSize sliceBytes = sizeof(float) * spellDecalLattice_.verts.size();
+    std::memcpy(static_cast<uint8_t*>(spellDecalVertMapped_) + slice * sliceBytes,
+                spellDecalLattice_.verts.data(), sliceBytes);
+    vmaFlushAllocation(vkCtx_->getAllocator(), spellDecalVertAlloc_, slice * sliceBytes, sliceBytes);
+
+    SelCirclePush push{};
+    push.viewProj = projection * view;
+    push.color = glm::vec4(1.0f);  // 0xFFFFFFFF
+    push.center = glm::vec4(spellDecalCenter_, r);
+    // No texture matrix (0x7E4370's third argument is 0): the texture lies
+    // along the world's axes whatever the camera does.
+    push.facing = glm::vec4(0.0f, 1.0f, kSelSurfaceLift, kHalfHeight);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, spellDecalPipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, selCirclePipelineLayout_,
+                            0, 1, &set, 0, nullptr);
+    const VkDeviceSize offset = slice * sliceBytes;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &spellDecalVertBuf_, &offset);
+    vkCmdBindIndexBuffer(cmd, selCircleIdxBuf_, 0, VK_INDEX_TYPE_UINT16);
+    vkCmdPushConstants(cmd, selCirclePipelineLayout_,
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        0, sizeof(push), &push);
+    vkCmdDrawIndexed(cmd, static_cast<uint32_t>(selCircleVertCount_), 1, 0, 0, 0);
 }
 
 void OverlaySystem::initOverlayPipeline() {

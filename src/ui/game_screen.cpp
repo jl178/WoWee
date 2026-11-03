@@ -13,6 +13,7 @@
 #include "ui/display_modes.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "ui/scene_pick.hpp"
+#include "game/spell_targeting.hpp"
 #include "ui/ui_colors.hpp"
 #include "ui/ui_helpers.hpp"
 #include "ui/ui_texture_load.hpp"
@@ -1668,10 +1669,87 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
         }
     }
 
+    // A spell waiting for a point on the ground (Blizzard, Flamestrike...).
+    //
+    // While the mouse is over the world (WorldFrame's update, 0x4F66C0): the
+    // point under it, ignoring units and objects (0x4FA040 picks no object
+    // while a spell waits on a location only); the circle there, sized by the
+    // spell's radius in range, the small red one out of it, none beyond four
+    // times the range (0x803EE0); the Cast cursor in range, UnableCast
+    // otherwise. A left click on the ground casts there (0x527360 ->
+    // HandleTerrainClick 0x80C340), the right button going down in the world
+    // puts the spell away (0x51FB00 -> 0x809A60), as does SpellStopTargeting.
+    auto* groundSpell = gameHandler.getSpellHandler();
+    const bool groundTargeting = groundSpell && groundSpell->isGroundTargeting();
+    if (groundTargeting && !io.WantCaptureMouse && !frameXmlOwnsMouse()) {
+        auto* renderer = services_.renderer;
+        auto* camera = renderer ? renderer->getCamera() : nullptr;
+        auto* window = services_.window;
+        if (camera && window) {
+            namespace st = game::spell_targeting;
+            const auto& gt = groundSpell->groundTargeting();
+            // The point the cursor picture is drawn at (drawCursorTexture).
+            const glm::vec2 mousePos(io.MousePos.x, io.MousePos.y);
+            const rendering::Ray ray = camera->screenToWorldRay(
+                mousePos.x, mousePos.y, static_cast<float>(window->getWidth()),
+                static_cast<float>(window->getHeight()));
+            const float reach = std::max(120.0f, gt.maxRange * 4.0f + 40.0f);
+            const auto hit = ui::pickGround(ray, reach);
+            st::RangeState state = st::RangeState::Hidden;
+            if (hit) {
+                const glm::vec3 point = core::coords::renderToCanonical(*hit);
+                const auto& me = gameHandler.getMovementInfo();
+                const glm::vec3 d = point - glm::vec3(me.x, me.y, me.z);
+                state = st::destRangeState(glm::dot(d, d), gt.minRange, gt.maxRange);
+            }
+            if (state == st::RangeState::Hidden) {
+                renderer->clearSpellTargetDecal();
+            } else {
+                const bool inRange = state == st::RangeState::InRange;
+                const float halfWidth = inRange && gt.radius > 0.0f ? gt.radius
+                                                                    : st::kDecalDefaultHalfWidth;
+                renderer->setSpellTargetDecal(*hit, halfWidth, inRange);
+            }
+            const char* cursorName = state == st::RangeState::InRange ? "Cast" : "UnableCast";
+            if (VkDescriptorSet tex = cursorTexture(services_.assetManager, services_.window,
+                                                    game::interaction::cursorPath(cursorName).c_str())) {
+                drawCursorTexture(tex);
+            }
+
+            // A left click (not a drag that turned the camera) on the ground
+            // casts there and does nothing else: 0x527360 offers the terrain
+            // click to HandleTerrainClick first, and the click ends there
+            // when it took it. Ground the ray misses keeps the spell waiting.
+            // Read from the same events as the cursor's position, so the
+            // point clicked is the point the circle showed.
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+                !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+                const ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0.0f);
+                const float threshold = clickDragThreshold();
+                if (drag.x * drag.x + drag.y * drag.y < threshold * threshold && hit) {
+                    const glm::vec3 point = core::coords::renderToCanonical(*hit);
+                    groundSpell->castGroundTargetAt(point, 0, point);
+                    renderer->clearSpellTargetDecal();
+                    leftClickWasPress_ = false;
+                    core::Application::getInstance().setPressedGameObject(0);
+                    return;
+                }
+            }
+            // The right button going down in the world puts the spell away
+            // (WorldFrame 0x51FB00, button 4 -> 0x809A60); the press then
+            // goes on to do what it would have done anyway.
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && groundSpell->stopGroundTargeting()) {
+                renderer->clearSpellTargetDecal();
+            }
+        }
+    } else if (!groundTargeting && services_.renderer) {
+        services_.renderer->clearSpellTargetDecal();
+    }
+
     // Cursor affordance: show hand cursor over interactable entities.
     // Not while the cursor is over a frame FrameXML owns: ImGui has never heard
     // of those, so its own answer is no wherever they are.
-    if (!io.WantCaptureMouse && !frameXmlOwnsMouse()) {
+    if (!groundTargeting && !io.WantCaptureMouse && !frameXmlOwnsMouse()) {
         auto* renderer = services_.renderer;
         auto* camera = renderer ? renderer->getCamera() : nullptr;
         auto* window = services_.window;
@@ -1754,6 +1832,12 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 float screenH = static_cast<float>(window->getHeight());
 
                 rendering::Ray ray = camera->screenToWorldRay(leftClickPressPos_.x, leftClickPressPos_.y, screenW, screenH);
+
+                // A spell waiting for its point took (or kept) the click
+                // above; nothing is selected by it.
+                if (auto* sh = gameHandler.getSpellHandler(); sh && sh->isGroundTargeting()) {
+                    return;
+                }
 
                 // Use the same authoritative position and forgiving click volume
                 // as right-click for a hooked bobber. Its tiny, partly submerged

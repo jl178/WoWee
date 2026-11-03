@@ -6,6 +6,7 @@
 #include "game/current_action.hpp"
 #include "game/gather_spells.hpp"
 #include "game/spell_classification.hpp"
+#include "game/spell_targeting.hpp"
 #include "game/pet_action.hpp"
 #include "game/game_handler.hpp"
 #include "game/game_utils.hpp"
@@ -101,9 +102,158 @@ bool isBandageSpell(const GameHandler& owner, uint32_t spellId) {
     return false;
 }
 
+/// A stock format string filled the way the client's own sprintf (0x76F070)
+/// does it for these: each %s or %d in turn takes the next argument, %% is a
+/// percent sign. False when the string asks for more than there is.
+bool fillCastResultFormat(const std::string& fmt, const std::vector<std::string>& args,
+                          std::string& out) {
+    out.clear();
+    size_t next = 0;
+    for (size_t i = 0; i < fmt.size(); ++i) {
+        if (fmt[i] != '%' || i + 1 >= fmt.size()) { out += fmt[i]; continue; }
+        const char c = fmt[i + 1];
+        if (c == '%') { out += '%'; ++i; continue; }
+        if (c == 's' || c == 'd' || c == 'u' || c == 'i') {
+            if (next >= args.size()) return false;
+            out += args[next++];
+            ++i;
+            continue;
+        }
+        out += fmt[i];
+    }
+    return true;
+}
+
+/// A name from a DBC row's string column, empty when there is none.
+std::string dbcName(pipeline::AssetManager* am, const char* file, uint32_t id, uint32_t column) {
+    if (!am || !am->isInitialized() || id == 0) return {};
+    auto dbc = am->loadDBC(file);
+    if (!dbc || !dbc->isLoaded() || dbc->getFieldCount() <= column) return {};
+    const int32_t row = dbc->findRecordById(id);
+    if (row < 0) return {};
+    return dbc->getString(static_cast<uint32_t>(row), column);
+}
+
+/// What an equipped-item requirement is called (0x808200 cases 0x1D-0x1F):
+/// ItemSubClassMask.dbc's name for exactly this class and mask, else the
+/// display name of the first ItemSubClass.dbc row of the class whose
+/// subclass bit is in the mask (0x7FEA30).
+std::string equippedItemRequirementName(pipeline::AssetManager* am, uint32_t itemClass,
+                                        uint32_t subClassMask) {
+    if (!am || !am->isInitialized()) return {};
+    if (auto masks = am->loadDBC("ItemSubClassMask.dbc");
+        masks && masks->isLoaded() && masks->getFieldCount() >= 3) {
+        for (uint32_t r = 0; r < masks->getRecordCount(); ++r) {
+            if (masks->getUInt32(r, 0) == itemClass && masks->getUInt32(r, 1) == subClassMask) {
+                std::string n = masks->getString(r, 2);
+                if (!n.empty()) return n;
+            }
+        }
+    }
+    if (auto subs = am->loadDBC("ItemSubClass.dbc");
+        subs && subs->isLoaded() && subs->getFieldCount() > 10) {
+        for (uint32_t r = 0; r < subs->getRecordCount(); ++r) {
+            const uint32_t sub = subs->getUInt32(r, 1);
+            if (subs->getUInt32(r, 0) == itemClass && sub < 32 && (subClassMask & (1u << sub))) {
+                return subs->getString(r, 10);
+            }
+        }
+    }
+    return {};
+}
+
+/// The stock text of a cast failure that carries arguments, filled in as
+/// Spell_C's error report does it (0x808200): GlobalStrings' format for the
+/// result, its %s and %d from the ids SMSG_CAST_FAILED appended (or, for
+/// ONLY_SHAPESHIFT, from the spell's own Stances). Empty when the result has
+/// no arguments or a name cannot be found - the caller's fallbacks then speak.
+std::string stockCastFailureText(const GameHandler& owner, uint32_t spellId, uint8_t result,
+                                 uint32_t arg1, uint32_t arg2) {
+    auto* am = owner.services().assetManager;
+    const char* key = spellCastResultName(result);
+    if (!key || !*key) return {};
+    const std::string fmt = globalString(am, key);
+    if (fmt.find('%') == std::string::npos) return {};
+
+    auto itemName = [&](uint32_t itemId) -> std::string {
+        if (itemId == 0) return {};
+        const auto* info = owner.getItemInfo(itemId);
+        return info && info->valid ? info->name : std::string{};
+    };
+    std::vector<std::string> args;
+    switch (result) {
+        case 0x1D: case 0x1E: case 0x1F:  // EQUIPPED_ITEM_CLASS[_MAINHAND|_OFFHAND]
+            args.push_back(equippedItemRequirementName(am, arg1, arg2));
+            break;
+        case 0x36:  // NEED_EXOTIC_AMMO: ItemSubClass of class 6 by 1 << arg (0x808200)
+            args.push_back(equippedItemRequirementName(am, 6, 1u << (arg1 & 31)));
+            break;
+        case 0x37:  // NEED_MORE_ITEMS: count, then the item
+            if (itemName(arg1).empty()) return {};
+            args.push_back(std::to_string(arg2));
+            args.push_back(itemName(arg1));
+            break;
+        case 0x5E: {  // ONLY_SHAPESHIFT: the spell's own Stances, ", " between
+            std::string forms;
+            if (am && am->isInitialized()) {
+                auto spells = am->loadDBC("Spell.dbc");
+                if (spells && spells->isLoaded() && spells->getFieldCount() == 234) {
+                    const int32_t row = spells->findRecordById(spellId);
+                    const uint32_t stances = row >= 0 ? spells->getUInt32(static_cast<uint32_t>(row), 12) : 0;
+                    for (uint32_t form = 1; form <= 32; ++form) {
+                        if (!(stances & (1u << (form - 1)))) continue;
+                        const std::string n = dbcName(am, "SpellShapeshiftForm.dbc", form, 2);
+                        if (n.empty()) continue;
+                        if (!forms.empty()) forms += ", ";
+                        forms += n;
+                    }
+                }
+            }
+            args.push_back(forms);
+            break;
+        }
+        case 0x64: case 0x83:  // REAGENTS, TOTEMS: the item
+            args.push_back(itemName(arg1));
+            break;
+        case 0x65:  // REQUIRES_AREA: AreaTable AreaName (+0x2C)
+            args.push_back(dbcName(am, "AreaTable.dbc", arg1, 11));
+            break;
+        case 0x66:  // REQUIRES_SPELL_FOCUS: SpellFocusObject Name (+4)
+            args.push_back(owner.getSpellFocusName(arg1));
+            break;
+        case 0x82:  // TOTEM_CATEGORY: TotemCategory Name (+4)
+            args.push_back(owner.getTotemCategoryName(arg1));
+            break;
+        case 0x93:  // PREVENTED_BY_MECHANIC: SpellMechanic StateName (+4)
+            args.push_back(dbcName(am, "SpellMechanic.dbc", arg1, 1));
+            break;
+        case 0x96:  // MIN_SKILL: SkillLine DisplayName (+0xC), then the rank
+            args.push_back(owner.getSkillLineName(arg1));
+            args.push_back(std::to_string(arg2));
+            break;
+        case 0xB5:  // FISHING_TOO_LOW: the skill needed
+            args.push_back(std::to_string(arg1));
+            break;
+        default:
+            return {};
+    }
+    for (const auto& a : args) {
+        if (a.empty()) return {};
+    }
+    std::string out;
+    return fillCastResultFormat(fmt, args, out) ? out : std::string{};
+}
+
 std::string castFailureMessage(const GameHandler& owner, uint32_t spellId,
                                uint8_t result, int powerType, uint32_t miscArg = 0,
                                uint32_t miscArg2 = 0) {
+    // The stock text with its arguments filled in, where the result has any:
+    // "Must have a %s equipped" was shown as it stands, %s and all.
+    if (std::string stock = stockCastFailureText(owner, spellId, result, miscArg, miscArg2);
+        !stock.empty()) {
+        return stock;
+    }
+
     if (spellclass::isFishingCast(spellId)) {
         if (result == 11 || result == 60 || result == 178)
             return "Face open water and try casting again.";
@@ -1117,6 +1267,30 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
         return;
     }
 
+    // A spell waiting for a point is put down by any cast that gets this far,
+    // the same spell again included (0x80CCE0 calls 0x809A60 before it goes
+    // on): pressing Blizzard twice leaves one circle, not two.
+    stopGroundTargeting();
+
+    // A spell aimed at a point on the ground does not go out yet. The cursor
+    // takes it, a circle shows where it would land, and the cast is sent when
+    // the ground is clicked (0x80C790 leaves the location flags waiting;
+    // 0x80CCE0 then makes it the pending spell, 0xD3F4E4).
+    {
+        GroundTargeting gt;
+        if (groundTargetingFor(spellId, gt)) {
+            if (owner_.isAwaitingItemTarget()) owner_.cancelItemTargeting();
+            groundTargeting_ = gt;
+            LOG_INFO("Spell targeting: spell ", spellId, " waits for a point (radius ", gt.radius,
+                     ", range ", gt.minRange, "-", gt.maxRange, ")");
+            if (owner_.addonEventCallbackRef()) {
+                owner_.addonEventCallbackRef()("CURRENT_SPELL_CAST_CHANGED", {});
+                owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_STATE", {});
+            }
+            return;
+        }
+    }
+
     // Remembered so that, if this cast turns out to be what mounted the player,
     // the mount aura can be identified exactly rather than guessed at.
     if (!owner_.isMounted()) lastGroundCastSpellId_ = spellId;
@@ -1385,6 +1559,149 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     const bool nextSwing = spellInfo != owner_.spellNameCacheRef().end() &&
                            isOnNextSwingSpell(spellInfo->second.attr);
     if (!nextSwing && !isGCDActive()) {
+        gcdTotal_ = 1.5f;
+        gcdStartedAt_ = std::chrono::steady_clock::now();
+        optimisticGcdSpellId_ = spellId;
+        optimisticGcdCastCount_ = castCount_;
+        if (owner_.addonEventCallbackRef()) {
+            owner_.addonEventCallbackRef()("SPELL_UPDATE_COOLDOWN", {});
+            owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_COOLDOWN", {});
+        }
+    }
+}
+
+bool SpellHandler::groundTargetingFor(uint32_t spellId, GroundTargeting& out) const {
+    if (spellId == 0) return false;
+    loadSpellNameCache();
+    const auto it = owner_.spellNameCacheRef().find(spellId);
+    if (it == owner_.spellNameCacheRef().end()) return false;
+    if (!spell_targeting::needsGroundTarget(it->second.targetFlags, it->second.implicitTargetA))
+        return false;
+
+    out = GroundTargeting{};
+    out.spellId = spellId;
+    out.maxRange = std::max(0.0f, it->second.maxRange);
+    // The circle and the range, from the rows the stock client reads: Spell.dbc
+    // EffectRadiusIndex of effects 0 and 1 (92, 93) against SpellRadius.dbc
+    // (Radius, RadiusPerLevel) times the caster's level (0x8019C0), and
+    // RangeIndex (46) against SpellRange.dbc's first min/max pair (1, 3).
+    auto* am = owner_.services().assetManager;
+    if (am && am->isInitialized()) {
+        auto spells = am->loadDBC("Spell.dbc");
+        if (spells && spells->isLoaded() && spells->getFieldCount() == 234) {
+            const int32_t row = spells->findRecordById(spellId);
+            if (row >= 0) {
+                const auto r = static_cast<uint32_t>(row);
+                float rad[2] = {0.0f, 0.0f}, perLevel[2] = {0.0f, 0.0f};
+                if (auto radii = am->loadDBC("SpellRadius.dbc");
+                    radii && radii->isLoaded() && radii->getFieldCount() >= 3) {
+                    for (uint32_t k = 0; k < 2; ++k) {
+                        const uint32_t idx = spells->getUInt32(r, 92 + k);
+                        const int32_t rr = idx ? radii->findRecordById(idx) : -1;
+                        if (rr < 0) continue;
+                        rad[k] = radii->getFloat(static_cast<uint32_t>(rr), 1);
+                        perLevel[k] = radii->getFloat(static_cast<uint32_t>(rr), 2);
+                    }
+                }
+                out.radius = spell_targeting::decalHalfWidth(rad[0], perLevel[0], rad[1],
+                                                             perLevel[1], owner_.getPlayerLevel());
+                if (auto ranges = am->loadDBC("SpellRange.dbc");
+                    ranges && ranges->isLoaded() && ranges->getFieldCount() >= 4) {
+                    const int32_t rr = ranges->findRecordById(spells->getUInt32(r, 46));
+                    if (rr >= 0) {
+                        out.minRange = ranges->getFloat(static_cast<uint32_t>(rr), 1);
+                        out.maxRange = ranges->getFloat(static_cast<uint32_t>(rr), 3);
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool SpellHandler::stopGroundTargeting() {
+    if (groundTargeting_.spellId == 0) return false;
+    const uint32_t spellId = groundTargeting_.spellId;
+    groundTargeting_ = GroundTargeting{};
+    LOG_INFO("Spell targeting: spell ", spellId, " put down");
+    // 0x806200 with SPELL_FAILED_DONT_REPORT: the quiet failure and the
+    // cursor back to the pointer (0x7FECC0).
+    if (owner_.addonEventCallbackRef()) {
+        owner_.addonEventCallbackRef()("UNIT_SPELLCAST_FAILED_QUIET", {"player", std::to_string(spellId)});
+        owner_.addonEventCallbackRef()("CURRENT_SPELL_CAST_CHANGED", {});
+        owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_STATE", {});
+    }
+    return true;
+}
+
+bool SpellHandler::beginItemGroundTargeting(uint32_t spellId, uint8_t bag, uint8_t slot,
+                                            uint64_t itemGuid) {
+    // CMSG_USE_ITEM's dest block is WotLK's (the transport guid before the
+    // point); the older layouts are not built.
+    if (isPreWotlk()) return false;
+    GroundTargeting gt;
+    if (!groundTargetingFor(spellId, gt)) return false;
+    stopGroundTargeting();
+    if (owner_.isAwaitingItemTarget()) owner_.cancelItemTargeting();
+    gt.itemGuid = itemGuid;
+    gt.itemBag = bag;
+    gt.itemSlot = slot;
+    groundTargeting_ = gt;
+    LOG_INFO("Spell targeting: item 0x", std::hex, itemGuid, std::dec, " (spell ", spellId,
+             ") waits for a point");
+    if (owner_.addonEventCallbackRef()) {
+        owner_.addonEventCallbackRef()("CURRENT_SPELL_CAST_CHANGED", {});
+        owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_STATE", {});
+    }
+    return true;
+}
+
+void SpellHandler::castGroundTargetAt(const glm::vec3& canonical, uint64_t transportGuid,
+                                      const glm::vec3& canonicalLocal) {
+    const uint32_t spellId = groundTargeting_.spellId;
+    if (spellId == 0) return;
+    if (groundTargeting_.itemGuid != 0) {
+        const GroundTargeting gt = groundTargeting_;
+        groundTargeting_ = GroundTargeting{};
+        if (!owner_.getSocket() || owner_.getState() != WorldState::IN_WORLD) return;
+        const glm::vec3 server =
+            core::coords::canonicalToServer(transportGuid ? canonicalLocal : canonical);
+        if (++castCount_ == 0) ++castCount_;
+        owner_.getSocket()->send(UseItemPacket::buildDestTarget(
+            gt.itemBag, gt.itemSlot, gt.itemGuid, spellId, castCount_, transportGuid,
+            server.x, server.y, server.z));
+        LOG_INFO("Using item 0x", std::hex, gt.itemGuid, std::dec, " (spell ", spellId, ") at (",
+                 server.x, ", ", server.y, ", ", server.z, ")");
+        if (owner_.addonEventCallbackRef()) {
+            owner_.addonEventCallbackRef()("CURRENT_SPELL_CAST_CHANGED", {});
+            owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_STATE", {});
+        }
+        return;
+    }
+    // HandleTerrainClick (0x80C340) stores the point and the cast goes out
+    // (0x80AC90) whatever the range: the circle's colour is all the client
+    // says about it, and an out-of-range point is the server's to refuse.
+    groundTargeting_ = GroundTargeting{};
+    if (!owner_.getSocket() || owner_.getState() != WorldState::IN_WORLD) return;
+
+    if (++castCount_ == 0) ++castCount_;
+    const glm::vec3 server = core::coords::canonicalToServer(transportGuid ? canonicalLocal : canonical);
+    auto packet = owner_.getPacketParsers()
+        ? owner_.getPacketParsers()->buildCastSpellAtDest(spellId, castCount_, transportGuid,
+                                                          server.x, server.y, server.z)
+        : CastSpellPacket::buildDestTarget(spellId, castCount_, transportGuid,
+                                           server.x, server.y, server.z);
+    owner_.getSocket()->send(packet);
+    LOG_INFO("Casting spell: ", spellId, " at (", server.x, ", ", server.y, ", ", server.z, ")",
+             transportGuid ? " on a transport" : "");
+
+    if (owner_.addonEventCallbackRef()) {
+        owner_.addonEventCallbackRef()("UNIT_SPELLCAST_SENT", {"player", "", std::to_string(spellId)});
+        owner_.addonEventCallbackRef()("CURRENT_SPELL_CAST_CHANGED", {});
+        owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_STATE", {});
+    }
+    owner_.loadSpellNameCache();
+    if (!isGCDActive()) {
         gcdTotal_ = 1.5f;
         gcdStartedAt_ = std::chrono::steady_clock::now();
         optimisticGcdSpellId_ = spellId;
@@ -2384,6 +2701,12 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
     if (data.result == kCastResultTotems) {
         if (data.miscArg != 0) owner_.ensureItemInfo(data.miscArg);
         if (data.miscArg2 != 0) owner_.ensureItemInfo(data.miscArg2);
+    }
+    // A missing reagent or item count names the item too.
+    constexpr uint8_t kCastResultReagents = 0x64, kCastResultNeedMoreItems = 0x37;
+    if ((data.result == kCastResultReagents || data.result == kCastResultNeedMoreItems) &&
+        data.miscArg != 0) {
+        owner_.ensureItemInfo(data.miscArg);
     }
     std::string errMsg = castFailureMessage(owner_, data.spellId, data.result, powerType,
                                             data.miscArg, data.miscArg2);

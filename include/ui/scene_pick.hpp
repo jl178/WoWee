@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 
 #include <cmath>
 
@@ -142,6 +143,13 @@ struct ScenePick {
 using ScenePickHit = std::function<void(uint64_t guid,
                                         const std::shared_ptr<game::Entity>& entity,
                                         float hitT, float centerT)>;
+
+/// Where the ray first meets the world itself - terrain, WMO, M2 collision -
+/// ignoring every unit and object, within reach. The spell targeting cursor's
+/// pick: while a spell waits for a point the stock WorldFrame does not pick
+/// objects at all (0x4FA040 -> 0x715C40), so the circle goes onto the ground
+/// under a creature rather than stopping at it. Render coordinates.
+std::optional<glm::vec3> pickGround(const rendering::Ray& ray, float reach);
 
 ScenePick pickScene(game::GameHandler& gameHandler,
                     const rendering::Ray& ray,

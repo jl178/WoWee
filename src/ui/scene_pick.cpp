@@ -129,6 +129,20 @@ float terrainHitT(const rendering::TerrainManager* terrain, const rendering::Ray
 
 } // namespace
 
+std::optional<glm::vec3> pickGround(const rendering::Ray& ray, float reach) {
+    auto* renderer = core::Application::getInstance().getRenderer();
+    if (!renderer) return std::nullopt;
+    float t = terrainHitT(renderer->getTerrainManager(), ray, reach);
+    if (auto* wmo = renderer->getWMORenderer()) {
+        t = std::min(t, wmo->raycastVisibleSolid(ray.origin, ray.direction, reach, nullptr));
+    }
+    if (auto* m2 = renderer->getM2Renderer()) {
+        t = std::min(t, m2->raycastCollisionMeshes(ray.origin, ray.direction, t, nullptr));
+    }
+    if (!(t < reach)) return std::nullopt;
+    return ray.origin + ray.direction * t;
+}
+
 ScenePick pickScene(game::GameHandler& gameHandler,
                     const rendering::Ray& ray,
                     const ScenePickParams& params,

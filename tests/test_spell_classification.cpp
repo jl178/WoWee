@@ -2,6 +2,7 @@
 
 #include "game/spell_classification.hpp"
 #include "game/spell_defines.hpp"
+#include "game/spell_targeting.hpp"
 
 #include <string>
 #include <unordered_map>
@@ -388,4 +389,58 @@ TEST_CASE("a percent cost is a share of the pool, rounded down", "[spellclass][c
     CHECK(percentPowerCost(160, 5) == 8);
     CHECK(percentPowerCost(159, 5) == 7);
     CHECK(percentPowerCost(0, 9) == 0);
+}
+
+// ── Spells cast at a point (game/spell_targeting.hpp) ─────────────────────
+// Spell.dbc rows as 3.3.5a ships them: Targets, EffectImplicitTargetA[0].
+TEST_CASE("Ground-targeted spells wait for a point, others do not (0x80C790)",
+          "[spell_targeting]") {
+    namespace st = wowee::game::spell_targeting;
+    // Blizzard 42940 (0x40, 28), Flamestrike 42926 (0x40, 16), Volley 58434
+    // (0x40, 28), Mass Dispel 32375 (0x40, 31), Heavy Dynamite 4062 (0x40, 16).
+    CHECK(st::needsGroundTarget(0x40, 28));
+    CHECK(st::needsGroundTarget(0x40, 16));
+    CHECK(st::needsGroundTarget(0x40, 31));
+    // Consecration 26573 (0, 18), Arcane Explosion 1449 (0, 22), Blink 1953
+    // (0, 1), Multi-Shot 2643 (0, 6), Goblin Sapper Charge 13241 (0, 22).
+    CHECK_FALSE(st::needsGroundTarget(0, 18));
+    CHECK_FALSE(st::needsGroundTarget(0, 22));
+    CHECK_FALSE(st::needsGroundTarget(0, 1));
+    CHECK_FALSE(st::needsGroundTarget(0, 6));
+    // The implicit target adds unit flags, never a location.
+    CHECK(st::pendingTargetMask(0, 6) == 0x80u);
+    CHECK(st::pendingTargetMask(0, 21) == 0x100u);
+    CHECK(st::pendingTargetMask(0, 25) == 0x2u);
+    CHECK(st::pendingTargetMask(0x400, 1) == 0u);
+}
+
+TEST_CASE("The targeting circle's size (0x8019C0, 0x4F66C0)", "[spell_targeting]") {
+    namespace st = wowee::game::spell_targeting;
+    // Blizzard: SpellRadius 8 yd, no per-level growth.
+    CHECK(st::decalHalfWidth(8.0f, 0.0f, 0.0f, 0.0f, 80) == Catch::Approx(8.0f));
+    // The larger of the first two effects (Mass Dispel 15 / 10).
+    CHECK(st::decalHalfWidth(15.0f, 0.0f, 10.0f, 0.0f, 80) == Catch::Approx(15.0f));
+    CHECK(st::decalHalfWidth(10.0f, 0.0f, 15.0f, 0.0f, 80) == Catch::Approx(15.0f));
+    // Radius per level times the caster's level.
+    CHECK(st::decalHalfWidth(2.0f, 0.1f, 0.0f, 0.0f, 50) == Catch::Approx(7.0f));
+    // Never wider than 20 yards.
+    CHECK(st::decalHalfWidth(30.0f, 0.0f, 0.0f, 0.0f, 80) == Catch::Approx(20.0f));
+    // No radius: 0, which the circle draws at 1.3888 (0x9F98DC).
+    CHECK(st::decalHalfWidth(0.0f, 0.0f, 0.0f, 0.0f, 80) == Catch::Approx(0.0f));
+    CHECK(st::kDecalDefaultHalfWidth == Catch::Approx(1.3888888f));
+    CHECK(st::kDecalHalfHeight == Catch::Approx(2.0f));
+}
+
+TEST_CASE("The point against the spell's range (0x803EE0)", "[spell_targeting]") {
+    namespace st = wowee::game::spell_targeting;
+    using RS = st::RangeState;
+    // 0-30 yd (Blizzard): green to 30, red to 120, nothing past it.
+    CHECK(st::destRangeState(0.0f, 0.0f, 30.0f) == RS::InRange);
+    CHECK(st::destRangeState(30.0f * 30.0f, 0.0f, 30.0f) == RS::InRange);
+    CHECK(st::destRangeState(30.1f * 30.1f, 0.0f, 30.0f) == RS::OutOfRange);
+    CHECK(st::destRangeState(120.0f * 120.0f, 0.0f, 30.0f) == RS::OutOfRange);
+    CHECK(st::destRangeState(120.1f * 120.1f, 0.0f, 30.0f) == RS::Hidden);
+    // Inside a minimum range is out of range, not hidden.
+    CHECK(st::destRangeState(4.0f * 4.0f, 5.0f, 35.0f) == RS::OutOfRange);
+    CHECK(st::destRangeState(5.0f * 5.0f, 5.0f, 35.0f) == RS::InRange);
 }
