@@ -219,6 +219,18 @@ struct ItemSlot {
     [[nodiscard]] bool empty() const { return item.itemId == 0; }
 };
 
+/// One row of the vendor buyback list. Shared by InventoryHandler and
+/// GameHandler (each aliases it) - they used to declare two identical structs
+/// and convert the list between them with a reinterpret_cast.
+struct BuybackItem {
+    uint64_t itemGuid = 0;
+    ItemDef item;
+    uint32_t count = 1;
+    // Inventory slot sent in CMSG_BUYBACK_ITEM (74..85).  This is server
+    // identity, not the item's current row in the buyback UI.
+    uint32_t wireSlot = 0;
+};
+
 class Inventory {
 public:
     static constexpr int BACKPACK_SLOTS = 16;

@@ -30,6 +30,7 @@
 #include "game/bg_score_defs.hpp"
 #include "game/calendar_month.hpp"
 #include "game/calendar_data.hpp"
+#include "pipeline/asset_manager.hpp"
 #include "game/pet_action.hpp"
 #include "network/world_socket.hpp"
 #include "audio/activity_sound_manager.hpp"
@@ -134,15 +135,52 @@ static std::vector<wowee::game::CalendarDayEntry> calendarDayRows(lua_State* L) 
                                               day, info.year);
 }
 
-/// The event being built up before it is sent.
+/// The event being built up before it is sent, or the open one being edited.
 ///
 /// State, because the interface builds one over several calls and commits it
 /// with another: CalendarNewEvent starts it, CalendarEventSetTitle and the
-/// rest fill it in, CalendarAddEvent sends it. Nothing is carried between
-/// those calls except this.
-static wowee::game::CalendarEventDraft& calendarDraft() {
-    static wowee::game::CalendarEventDraft draft;
-    return draft;
+/// rest fill it in, CalendarAddEvent or CalendarUpdateEvent sends it. Kept on
+/// the game handler beside the current event, which seeds it when an event is
+/// opened - a draft held here alone kept whatever the last new event left in
+/// it, and CalendarUpdateEvent sent that over the event being edited.
+static wowee::game::CalendarEventDraft& calendarDraft(lua_State* L) {
+    if (auto* gh = getGameHandler(L)) return gh->calendarDraft();
+    static wowee::game::CalendarEventDraft orphan;
+    return orphan;
+}
+
+/// The event the calendar has selected - CalendarGetEventIndex's answer and
+/// the row CalendarGetHolidayInfo(CalendarGetEventIndex()) reads back.
+///
+/// Held as an absolute month rather than the offset it was chosen with, since
+/// the offset is relative to the month being viewed and that moves; the
+/// answer is re-expressed against the viewed month each time it is asked. A
+/// player event is followed by id, so a row added above it on the same day
+/// does not move the selection onto a neighbour.
+struct CalendarSelection {
+    int month = 0;
+    int year = 0;
+    int day = 0;
+    int index = 0;
+    uint64_t eventId = 0;
+};
+
+static CalendarSelection& calendarSelection() {
+    static CalendarSelection sel;
+    return sel;
+}
+
+/// The event CalendarContextEventCopy took, and the time of day a paste
+/// keeps - the paste names only a day.
+struct CalendarClipboard {
+    uint64_t eventId = 0;
+    int hour = 0;
+    int minute = 0;
+};
+
+static CalendarClipboard& calendarClipboard() {
+    static CalendarClipboard clip;
+    return clip;
 }
 
 /// The row a right-click menu is about: which month, which day, which entry.
@@ -170,25 +208,68 @@ static std::vector<wowee::game::CalendarDayEntry> calendarRowsFor(
                                               day, info.year);
 }
 
-/// Which of the six kinds of row this event is, as the string the interface
-/// compares against. Guild events carry a flag; everything else the player can
-/// see on their own calendar is theirs.
-static const char* calendarTypeName(const wowee::game::CalendarEvent& ev) {
-    // CALENDAR_EVENTTYPE_* from the server: 4 is the guild announcement, and
-    // the guild flag distinguishes an event from an announcement.
-    constexpr uint32_t kGuildEventFlag = 0x0400;
-    if (ev.type == 4) return "GUILD_ANNOUNCEMENT";
-    if (ev.flags & kGuildEventFlag) return "GUILD_EVENT";
-    return "PLAYER";
+/// The player event the right-click menu's row names, or nullptr for a
+/// holiday, a lockout or no row.
+static const wowee::game::CalendarEvent* calendarContextEvent(wowee::game::GameHandler& gh) {
+    const auto& row = calendarContextRow();
+    const auto rows = calendarRowsFor(gh, row.monthOffset, row.day);
+    if (row.index < 1 || static_cast<size_t>(row.index) > rows.size()) return nullptr;
+    const auto& entry = rows[static_cast<size_t>(row.index) - 1];
+    if (entry.kind != wowee::game::CalendarEntryKind::Event) return nullptr;
+    return &gh.getCalendarData().events[entry.index];
 }
 
-/// "CREATOR" when this is the player's own event, otherwise nothing. The
-/// interface shows the edit controls on the first of those.
-static const char* calendarModStatus(lua_State* L,
+/// Which of the kinds of row this event is, as the string the interface
+/// compares against - decided by the flags (CalendarEvent::
+/// IsGuildAnnouncement tests 0x40, IsGuildEvent 0x400). The type field is the
+/// event type (raid ... other), and type 4 is "Other", not an announcement.
+static const char* calendarTypeName(const wowee::game::CalendarEvent& ev) {
+    return wowee::game::calendarTypeForFlags(ev.flags);
+}
+
+/// "CREATOR", "MODERATOR" or "" - the strings Blizzard_Calendar tests
+/// (`modStatus == "CREATOR"`, `== "MODERATOR"`), from the rank on the
+/// player's own invite, or from being the event's creator when the invite has
+/// not arrived.
+static const char* calendarModStatus(wowee::game::GameHandler& gh,
                                      const wowee::game::CalendarEvent& ev) {
-    auto* gh = getGameHandler(L);
-    return (gh && ev.creatorGuid != 0 && ev.creatorGuid == gh->getPlayerGuid())
-               ? "CREATOR" : "";
+    if (const auto* inv = gh.findCalendarInvite(ev.eventId)) {
+        if (inv->rank == wowee::game::kCalendarRankOwner) return "CREATOR";
+        if (inv->rank == wowee::game::kCalendarRankModerator) return "MODERATOR";
+    }
+    return (ev.creatorGuid != 0 && ev.creatorGuid == gh.getPlayerGuid()) ? "CREATOR" : "";
+}
+
+/// The player's own status on an event, as the wire numbers it. A guild
+/// event the player has no invite to is one they have not signed up for -
+/// every guild member sees it (CalendarMgr::GetPlayerEvents) and none is
+/// invited to it.
+static uint8_t calendarMyStatus(wowee::game::GameHandler& gh, uint64_t eventId,
+                                uint32_t flags) {
+    if (const auto* inv = gh.findCalendarInvite(eventId)) return inv->status;
+    return (flags & wowee::game::kCalendarFlagGuildEvent)
+               ? wowee::game::kCalendarStatusNotSignedUp
+               : wowee::game::kCalendarStatusInvited;
+}
+
+/// CALENDAR_INVITETYPE_NORMAL (1) or _SIGNUP (2). A guild event is a sign-up
+/// for everyone but its creator: the server refuses invites to guild members
+/// (CALENDAR_ERROR_NO_GUILD_INVITES) and takes CMSG_CALENDAR_EVENT_SIGNUP
+/// from them instead.
+static int calendarInviteType(wowee::game::GameHandler& gh, uint64_t creatorGuid,
+                              uint32_t flags) {
+    if (!(flags & wowee::game::kCalendarFlagGuildEvent)) return 1;
+    return (creatorGuid != 0 && creatorGuid == gh.getPlayerGuid()) ? 1 : 2;
+}
+
+/// Take the player off an event: CMSG_CALENDAR_EVENT_REMOVE_INVITE with
+/// their own invite. The server answers with the removal notices that take
+/// the event off the list (CalendarMgr::RemoveInvite); an RSVP of REMOVED
+/// would only have set a status the interface has no row for.
+static void calendarRemoveOwnInvite(wowee::game::GameHandler& gh, uint64_t eventId) {
+    const auto* inv = gh.findCalendarInvite(eventId);
+    if (!inv) return;
+    gh.removeCalendarInvite(gh.getPlayerGuid(), inv->inviteId, inv->inviteId, eventId);
 }
 
 /// Answer the invitation on the menu's row, if that row has one.
@@ -199,31 +280,92 @@ static const char* calendarModStatus(lua_State* L,
 /// sending a request the server would refuse.
 static int calendarRespondToContextInvite(lua_State* L, uint32_t status) {
     auto* gh = getGameHandler(L);
-    const auto& row = calendarContextRow();
-    if (!gh || row.day < 1) return 0;
-    const auto rows = calendarRowsFor(*gh, row.monthOffset, row.day);
-    if (row.index < 1 || static_cast<size_t>(row.index) > rows.size()) return 0;
-    const auto& entry = rows[static_cast<size_t>(row.index) - 1];
-    if (entry.kind != wowee::game::CalendarEntryKind::Event) return 0;
-    const auto& cal = gh->getCalendarData();
-    const uint64_t eventId = cal.events[entry.index].eventId;
-    for (const auto& invite : cal.invites) {
-        if (invite.eventId != eventId) continue;
-        gh->respondToCalendarInvite(eventId, invite.inviteId, status);
+    if (!gh) return 0;
+    const auto* ev = calendarContextEvent(*gh);
+    if (!ev) return 0;
+    if (status == wowee::game::kCalendarStatusRemoved) {
+        calendarRemoveOwnInvite(*gh, ev->eventId);
         return 0;
+    }
+    if (const auto* inv = gh->findCalendarInvite(ev->eventId)) {
+        gh->respondToCalendarInvite(ev->eventId, inv->inviteId, status);
     }
     return 0;
 }
 
-/// The player's own answer to an event, from the invite list that came with
-/// it. Zero is CALENDAR_INVITESTATUS_INVITED, which is what an event carries
-/// while it is unanswered.
-static double calendarInviteStatusFor(const wowee::game::CalendarData& cal,
-                                      uint64_t eventId) {
-    for (const auto& invite : cal.invites) {
-        if (invite.eventId == eventId) return static_cast<double>(invite.status);
+/// The player's own answer to an event as the interface numbers it
+/// (CALENDAR_INVITESTATUS_* are the wire's plus one).
+static double calendarInviteStatusFor(wowee::game::GameHandler& gh, uint64_t eventId,
+                                      uint32_t flags) {
+    return static_cast<double>(calendarMyStatus(gh, eventId, flags)) + 1;
+}
+
+/// The dungeons and raids an event of this interface type can be set to, in
+/// the order CalendarEventGetTextures lists them - a texture index is a
+/// position in this list, and the wire's dungeonId is the LFGDungeons.dbc id
+/// at that position. Grouped by expansion, because the picker inserts an
+/// expansion header wherever the level changes from one entry to the next.
+static std::vector<const wowee::game::LfgDungeon*> calendarTextureList(
+        wowee::game::GameHandler& gh, int uiEventType) {
+    std::vector<const wowee::game::LfgDungeon*> out;
+    // CALENDAR_EVENTTYPE_RAID 1 and _DUNGEON 2; the others have no textures.
+    const uint32_t wantType = uiEventType == 1 ? 2u : uiEventType == 2 ? 1u : 0u;
+    if (wantType == 0) return out;
+    for (const auto& d : gh.getLfgDungeons()) {
+        if (d.isHoliday || d.texture.empty()) continue;
+        const bool match = (d.typeId == wantType) ||
+                           (wantType == 1 && d.typeId == 5);  // heroic dungeons
+        if (match) out.push_back(&d);
     }
-    return 0;
+    std::stable_sort(out.begin(), out.end(),
+                     [](const wowee::game::LfgDungeon* a, const wowee::game::LfgDungeon* b) {
+                         if (a->expansion != b->expansion) return a->expansion < b->expansion;
+                         if (a->name != b->name) return a->name < b->name;
+                         return a->difficulty < b->difficulty;
+                     });
+    return out;
+}
+
+/// The texture suffix for an event's dungeon - the TextureFilename that
+/// Blizzard_Calendar appends to "Interface\\LFGFrame\\LFGIcon-".
+static std::string calendarEventTexture(wowee::game::GameHandler& gh, int32_t dungeonId) {
+    if (dungeonId <= 0) return "";
+    for (const auto& d : gh.getLfgDungeons()) {
+        if (static_cast<int32_t>(d.id) == dungeonId) return d.texture;
+    }
+    return "";
+}
+
+/// A holiday's name and description, from Holidays.dbc's HolidayNameID and
+/// HolidayDescriptionID (fields 49 and 50 of 55) into HolidayNames.dbc and
+/// HolidayDescriptions.dbc. The packet carries only the id and the texture.
+static std::pair<std::string, std::string> calendarHolidayText(
+        wowee::game::GameHandler& gh, uint32_t holidayId) {
+    static std::unordered_map<uint32_t, std::pair<std::string, std::string>> cache;
+    if (auto it = cache.find(holidayId); it != cache.end()) return it->second;
+    auto* am = gh.services().assetManager;
+    if (!am || !am->isInitialized()) return {};
+    std::pair<std::string, std::string> text;
+    auto holidays = am->loadDBC("Holidays.dbc");
+    if (holidays && holidays->isLoaded() && holidays->getFieldCount() >= 52) {
+        const int32_t row = holidays->findRecordById(holidayId);
+        if (row >= 0) {
+            const uint32_t nameId = holidays->getUInt32(static_cast<uint32_t>(row), 49);
+            const uint32_t descId = holidays->getUInt32(static_cast<uint32_t>(row), 50);
+            auto names = am->loadDBC("HolidayNames.dbc");
+            if (names && names->isLoaded()) {
+                const int32_t n = names->findRecordById(nameId);
+                if (n >= 0) text.first = names->getString(static_cast<uint32_t>(n), 1);
+            }
+            auto descs = am->loadDBC("HolidayDescriptions.dbc");
+            if (descs && descs->isLoaded()) {
+                const int32_t d = descs->findRecordById(descId);
+                if (d >= 0) text.second = descs->getString(static_cast<uint32_t>(d), 1);
+            }
+        }
+    }
+    cache.emplace(holidayId, text);
+    return text;
 }
 
 static int lua_CombatLog_Object_IsA(lua_State* L) {
@@ -4069,12 +4211,22 @@ static int lua_GetLFGProposal(lua_State* L) {
         if (d.id == dungeonId) { dungeon = &d; break; }
     }
 
-    // The role the player queued as. The dialog names it and picks its icon
-    // from it, and these are the tokens GetTexCoordsForRole indexes by.
-    const uint8_t roles = gh->getLfgOfferedRoles();
+    // The role the proposal assigned the player (SMSG_LFG_PROPOSAL_UPDATE
+    // carries it per member), falling back to what they queued as. The dialog
+    // names it and picks its icon from it, and these are the tokens
+    // GetTexCoordsForRole indexes by. Whether the player has already answered
+    // is the same row's flag: LFDDungeonReadyPopup_Update swaps the
+    // accept/decline buttons for the status list once it is set.
+    const game::LfgProposalMember* selfRow = nullptr;
+    for (const auto& pm : gh->getLfgProposalMembers()) {
+        if (pm.isSelf) { selfRow = &pm; break; }
+    }
+    const uint32_t roles = (selfRow && (selfRow->role & 0x0E)) ? selfRow->role
+                                                               : gh->getLfgOfferedRoles();
     const char* role = (roles & 0x02) ? "TANK"
                      : (roles & 0x04) ? "HEALER"
                                       : "DAMAGER";
+    const bool hasResponded = selfRow && selfRow->answered;
 
     lua_pushboolean(L, 1);                                       // 1: proposalExists
     lua_pushnumber(L, dungeon ? dungeon->typeId : 1);            // 2: typeID
@@ -4087,7 +4239,7 @@ static int lua_GetLFGProposal(lua_State* L) {
     // path is built from.
     lua_pushstring(L, dungeon ? dungeon->texture.c_str() : "");  // 5: texture
     lua_pushstring(L, role);                                     // 6: role
-    lua_pushboolean(L, 0);                                       // 7: hasResponded
+    lua_pushboolean(L, hasResponded ? 1 : 0);                    // 7: hasResponded
     // Encounter progress is not parsed out of the proposal, and zero is the
     // honest answer - it reads as "nothing cleared yet", which is what a fresh
     // pop is, and keeps the dialog off its in-progress layout.
@@ -4157,9 +4309,16 @@ static int lua_IsPartyLFG(lua_State* L) {
     bool viaFinder = false;
     if (gh) {
         const auto st = gh->getLfgState();
+        // The group itself says so: SMSG_GROUP_LIST's type carries the
+        // dungeon finder's bits (0x04, 0x08 - GROUPTYPE_LFG_RESTRICTED and
+        // GROUPTYPE_LFG) for a finder group. The queue state alone went to
+        // nothing once the server took the player out of the queue on
+        // entering, and FrameXML's GetLFGMode (uiparent.lua) asks this for
+        // "lfgparty".
         viaFinder = (st == game::LfgState::InDungeon ||
                      st == game::LfgState::FinishedDungeon ||
-                     st == game::LfgState::Boot);
+                     st == game::LfgState::Boot) ||
+                    (gh->isInGroup() && (gh->getPartyData().groupType & 0x0C) != 0);
     }
     lua_pushboolean(L, viaFinder ? 1 : 0);
     return 1;
@@ -4546,7 +4705,10 @@ static int lua_GetNumBattlefields(lua_State* L) {
 // not tell inside from outside and offered the wrong direction.
 static int lua_IsInLFGDungeon(lua_State* L) {
     auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->getLfgState() == game::LfgState::InDungeon ? 1 : 0);
+    // In a finder group and inside an instance, or the queue state saying so.
+    const bool finderGroup = gh && gh->isInGroup() && (gh->getPartyData().groupType & 0x0C) != 0;
+    lua_pushboolean(L, gh && (gh->getLfgState() == game::LfgState::InDungeon ||
+                              (finderGroup && gh->isInInstance())) ? 1 : 0);
     return 1;
 }
 
@@ -6625,7 +6787,13 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"HasDebugZoneMap",          lua_ReturnFalse},
                 {"CanQueueForWintergrasp",   lua_ReturnFalse},
                 {"CancelSkillUps",           lua_ReturnNothing},
-                {"ConvertToRaid",            lua_ReturnNothing},
+                // RaidFrameConvertToRaidButton's OnClick. SocialHandler has
+                // sent CMSG_GROUP_RAID_CONVERT for /raid conversion all along;
+                // the button was bound to nothing.
+                {"ConvertToRaid", [](lua_State* L) -> int {
+            if (auto* gh = getGameHandler(L)) gh->convertToRaid();
+            return 0;
+        }},
                 {"FillLocalizedClassList",   lua_ReturnNothing},
                 // Sends the request rather than doing nothing. The reply is
                 // parsed, fires GUILD_EVENT_LOG_UPDATE and friendsframe
@@ -7786,7 +7954,9 @@ void registerSystemLuaAPI(lua_State* L) {
                 lua_pushstring(L, "RAID_LOCKOUT");
                 lua_pushstring(L, "");             // sequenceType
                 lua_pushnumber(L, 0);              // eventType
-                lua_pushnumber(L, 0);              // texture
+                // A string, as every texture answer is: Blizzard_Calendar
+                // tests `textureName ~= ""` and concatenates it.
+                lua_pushstring(L, "");             // texture
                 lua_pushstring(L, "");             // modStatus
                 lua_pushnumber(L, 1);              // inviteStatus
                 lua_pushstring(L, "");             // invitedBy
@@ -7799,15 +7969,24 @@ void registerSystemLuaAPI(lua_State* L) {
             }
             if (row.kind == wowee::game::CalendarEntryKind::Holiday) {
                 const auto& holiday = cal.holidays[row.index];
-                lua_pushstring(L, holiday.textureFilename.c_str());
+                // The name from HolidayNames.dbc; the texture name was shown
+                // as the title for want of it.
+                std::string name = calendarHolidayText(*gh, holiday.id).first;
+                if (name.empty()) name = holiday.textureFilename;
+                lua_pushstring(L, name.c_str());
                 lua_pushnumber(L, 0);              // hour
                 lua_pushnumber(L, 0);              // minute
                 lua_pushstring(L, "HOLIDAY");
-                // The one distinction the interface acts on: a holiday's name
-                // is drawn on its first day and its later days are skipped.
-                lua_pushstring(L, row.ongoing ? "ONGOING" : "START");
+                // "START", "ONGOING", "END" or "" for a one-day holiday: the
+                // keys of CALENDAR_CALENDARTYPE_NAMEFORMAT.HOLIDAY and of the
+                // Start/Ongoing/End texture suffixes.
+                lua_pushstring(L, wowee::game::calendarHolidaySequenceType(row));
                 lua_pushnumber(L, 0);              // eventType
-                lua_pushnumber(L, static_cast<double>(holiday.id));  // texture
+                // The texture *name* - "Calendar_Brewfest" - which the
+                // calendar puts after "Interface\\Calendar\\Holidays\\" and
+                // before the sequence suffix. The holiday id was here, and
+                // drew a path that does not exist.
+                lua_pushstring(L, holiday.textureFilename.c_str());
                 lua_pushstring(L, "");             // modStatus
                 lua_pushnumber(L, 0);              // inviteStatus
                 lua_pushstring(L, "");             // invitedBy
@@ -7826,12 +8005,19 @@ void registerSystemLuaAPI(lua_State* L) {
             lua_pushstring(L, calendarTypeName(ev));
             lua_pushstring(L, "");                 // sequenceType: single day
             lua_pushnumber(L, static_cast<double>(ev.type) + 1);
-            lua_pushnumber(L, 0);                  // texture
-            lua_pushstring(L, calendarModStatus(L, ev));
-            lua_pushnumber(L, calendarInviteStatusFor(cal, ev.eventId) + 1);
-            lua_pushstring(L, "");                 // invitedBy
+            lua_pushstring(L, calendarEventTexture(*gh, ev.dungeonId).c_str());
+            lua_pushstring(L, calendarModStatus(*gh, ev));
+            lua_pushnumber(L, calendarInviteStatusFor(*gh, ev.eventId, ev.flags));
+            // Who invited the player, which the day tooltip compares with
+            // UnitIsUnit("player", invitedBy) to say "This is your event".
+            // The calendar sends the creator for that.
+            {
+                const auto* inv = gh->findCalendarInvite(ev.eventId);
+                const uint64_t by = (inv && inv->creatorGuid) ? inv->creatorGuid : ev.creatorGuid;
+                lua_pushstring(L, by ? gh->lookupName(by).c_str() : "");
+            }
             lua_pushnumber(L, 0);                  // difficulty
-            lua_pushnumber(L, 1);                  // inviteType: NORMAL
+            lua_pushnumber(L, calendarInviteType(*gh, ev.creatorGuid, ev.flags));
             lua_pushnil(L);                        // sequenceIndex
             lua_pushnil(L);                        // numSequenceDays
             lua_pushstring(L, "");                 // difficultyName
@@ -7849,8 +8035,9 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
             const auto& holiday = gh->getCalendarData().holidays[row.index];
-            lua_pushstring(L, holiday.textureFilename.c_str());
-            lua_pushstring(L, "");
+            const auto text = calendarHolidayText(*gh, holiday.id);
+            lua_pushstring(L, (text.first.empty() ? holiday.textureFilename : text.first).c_str());
+            lua_pushstring(L, text.second.c_str());
             lua_pushstring(L, holiday.textureFilename.c_str());
             return 3;
         }},
@@ -7883,12 +8070,23 @@ void registerSystemLuaAPI(lua_State* L) {
             if (auto* gh = getGameHandler(L)) gh->requestCalendar();
             return 0;
         }},
-                // Whether a request is in flight. Nothing here queues one, so
-                // the answer is no - and false rather than nothing, because
-                // the interface disables buttons on it and nil would read the
-                // same as false only by accident.
+                // Whether an RSVP or sign-up is waiting on the server - set as
+                // one is sent, cleared by SMSG_CALENDAR_CLEAR_PENDING_ACTION or
+                // an error, each announced as CALENDAR_ACTION_PENDING. A
+                // boolean always: the interface disables buttons on it.
                 {"CalendarIsActionPending", [](lua_State* L) -> int {
-            lua_pushboolean(L, 0);
+            auto* gh = getGameHandler(L);
+            lua_pushboolean(L, (gh && gh->isCalendarActionPending()) ? 1 : 0);
+            return 1;
+        }},
+                // Whether the create button may send - in the world, with a
+                // draft open and a title on it (the server refuses a title
+                // over 31 bytes or none: CALENDAR_ERROR_NEEDS_TITLE).
+                {"CalendarCanAddEvent", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            const bool can = gh && gh->isInWorld() && gh->isCalendarEventNew() &&
+                             !gh->calendarDraft().title.empty();
+            lua_pushboolean(L, can ? 1 : 0);
             return 1;
         }},
                 // minLevel, maxLevel, rank - the default filter a guild event
@@ -7908,30 +8106,58 @@ void registerSystemLuaAPI(lua_State* L) {
             lua_pushboolean(L, (gh && !gh->getGuildName().empty()) ? 1 : 0);
             return 1;
         }},
-                // Arena team events need a team. No arena team is tracked, so
-                // the honest answer is no and the option stays out of the
-                // create menu rather than leading to a request that fails.
+                // Whether the player is on an arena team - the teams
+                // SMSG_ARENA_TEAM_STATS has listed. The mass-invite frame
+                // closes itself when this and CanEditGuildEvent are both false.
                 {"IsInArenaTeam", [](lua_State* L) -> int {
-            lua_pushboolean(L, 0);
+            auto* gh = getGameHandler(L);
+            lua_pushboolean(L, (gh && !gh->getArenaTeamStats().empty()) ? 1 : 0);
             return 1;
         }},
                 // ---- Opening one event ----
                 //
-                // The interface names a row, this turns it into an event id
-                // and asks the server; the answer arrives as
-                // CALENDAR_UPDATE_EVENT and CalendarGetEventInfo reads it.
+                // The interface names a row and this makes it the selected
+                // one. A player event is asked of the server, whose answer
+                // opens it (CALENDAR_OPEN_EVENT from SMSG_CALENDAR_SEND_EVENT);
+                // a holiday or a raid lockout is already all here, so this
+                // fires CALENDAR_OPEN_EVENT for it itself - nothing else would,
+                // and CalendarFrame_OnEvent is the only thing that shows the
+                // holiday and raid view frames.
                 {"CalendarOpenEvent", [](lua_State* L) -> int {
             const auto rows = calendarDayRows(L);
+            const int monthOffset = static_cast<int>(luaL_optnumber(L, 1, 0));
+            const int day = static_cast<int>(luaL_optnumber(L, 2, 0));
             const int index = static_cast<int>(luaL_optnumber(L, 3, 0));
             auto* gh = getGameHandler(L);
             if (!gh || index < 1 || static_cast<size_t>(index) > rows.size()) return 0;
             const auto& row = rows[static_cast<size_t>(index) - 1];
-            if (row.kind != wowee::game::CalendarEntryKind::Event) return 0;
-            gh->requestCalendarEvent(gh->getCalendarData().events[row.index].eventId);
+            const auto viewed = calendarViewedMonth();
+            const auto info = wowee::game::calendarMonthAt(viewed.first, viewed.second,
+                                                           monthOffset);
+            auto& sel = calendarSelection();
+            sel = {info.month, info.year, day, index, 0};
+            if (row.kind == wowee::game::CalendarEntryKind::Event) {
+                sel.eventId = gh->getCalendarData().events[row.index].eventId;
+                gh->requestCalendarEvent(sel.eventId);
+                return 0;
+            }
+            gh->closeCalendarEvent();
+            gh->fireAddonEvent("CALENDAR_OPEN_EVENT",
+                {row.kind == wowee::game::CalendarEntryKind::Holiday ? "HOLIDAY"
+                                                                     : "RAID_LOCKOUT"});
             return 0;
         }},
+                // Nothing open and nothing selected. CALENDAR_CLOSE_EVENT is
+                // what the view and edit frames close on, so a close that
+                // did not say so left them showing an event that was gone.
                 {"CalendarCloseEvent", [](lua_State* L) -> int {
-            (void)L;
+            calendarSelection() = {};
+            auto* gh = getGameHandler(L);
+            if (!gh) return 0;
+            const bool wasOpen = gh->isCalendarEventNew() ||
+                                 gh->getCalendarEventDetail().eventId != 0;
+            gh->closeCalendarEvent();
+            if (wasOpen) gh->fireAddonEvent("CALENDAR_CLOSE_EVENT", {});
             return 0;
         }},
                 // Twenty-five values, in the order the view frame unpacks
@@ -7949,7 +8175,20 @@ void registerSystemLuaAPI(lua_State* L) {
             lua_pushnumber(L, ev.type + 1);          // wire counts from zero
             lua_pushnumber(L, ev.repeatOption + 1);  // and so does this
             lua_pushnumber(L, ev.maxInvites);
-            lua_pushnumber(L, ev.dungeonId);        // textureIndex
+            // textureIndex: the dungeon's place in CalendarEventGetTextures'
+            // list for this type, 0 for none - not the dungeon id, which the
+            // edit form would have looked up as an index.
+            {
+                const auto list = calendarTextureList(*gh, ev.type + 1);
+                int textureIndex = 0;
+                for (size_t i = 0; i < list.size(); ++i) {
+                    if (static_cast<int32_t>(list[i]->id) == ev.dungeonId) {
+                        textureIndex = static_cast<int>(i) + 1;
+                        break;
+                    }
+                }
+                lua_pushnumber(L, textureIndex);
+            }
             lua_pushnumber(L, ev.eventTime.weekday + 1);
             lua_pushnumber(L, ev.eventTime.month);
             lua_pushnumber(L, ev.eventTime.day);
@@ -7966,16 +8205,24 @@ void registerSystemLuaAPI(lua_State* L) {
             lua_pushnumber(L, ev.eventTime.fullYear());
             lua_pushnumber(L, ev.eventTime.hour);
             lua_pushnumber(L, ev.eventTime.minute);
-            constexpr uint32_t kFlagInvitesLocked = 0x1000;
-            lua_pushboolean(L, (ev.flags & kFlagInvitesLocked) ? 1 : 0);
-            lua_pushboolean(L, 0);              // autoApprove
-            lua_pushboolean(L, 0);              // pendingInvite
-            lua_pushnumber(L, calendarInviteStatusFor(gh->getCalendarData(),
-                                                      ev.eventId) + 1);
-            // CALENDAR_INVITETYPE_NORMAL, which is 1 - the interface's range
-            // starts there, so zero is not "normal" but out of range.
-            lua_pushnumber(L, 1);
-            lua_pushstring(L, (ev.flags & 0x0400u) ? "GUILD_EVENT" : "PLAYER");
+            // CALENDAR_FLAG_INVITES_LOCKED is 0x010 (CalendarMgr.h); 0x1000
+            // was tested here, which no event carries.
+            lua_pushboolean(L, (ev.flags & wowee::game::kCalendarFlagInvitesLocked) ? 1 : 0);
+            lua_pushboolean(L, 0);              // autoApprove: no flag for it on the wire
+            // The player's own status, from their row on the open event when
+            // they have one - it is the one SMSG_CALENDAR_EVENT_STATUS keeps
+            // current - and the calendar's invite list otherwise.
+            uint8_t myStatus = calendarMyStatus(*gh, ev.eventId, ev.flags);
+            for (const auto& inv : ev.invitees) {
+                if (inv.guid == gh->getPlayerGuid()) { myStatus = inv.status; break; }
+            }
+            // pendingInvite: unanswered, which flashes the RSVP buttons.
+            lua_pushboolean(L, myStatus == wowee::game::kCalendarStatusInvited ? 1 : 0);
+            lua_pushnumber(L, static_cast<double>(myStatus) + 1);
+            // CALENDAR_INVITETYPE_NORMAL (1) or _SIGNUP (2); a sign-up event
+            // draws Sign Up / Remove rather than Accept / Decline.
+            lua_pushnumber(L, calendarInviteType(*gh, ev.creatorGuid, ev.flags));
+            lua_pushstring(L, wowee::game::calendarTypeForFlags(ev.flags));
             return 25;
         }},
                 // CalendarCanSendInvite() - may this player invite to the event
@@ -8017,8 +8264,13 @@ void registerSystemLuaAPI(lua_State* L) {
                 gh->getCalendarEventDetail().invitees.size()) : 0);
             return 1;
         }},
-                // name, level, className, classFilename, inviteStatus - the
-                // five the invite list reads.
+                // name, level, className, classFilename, inviteStatus,
+                // modStatus, inviteIsMine - the seven the invite lists unpack
+                // (CalendarViewEventInviteListScrollFrame_Update and its
+                // create-frame twin). modStatus is the string the list tests
+                // for its leader and assistant icons, not the rank number,
+                // and the class is what colours the name and fills the class
+                // column and the class counts.
                 {"CalendarEventGetInvite", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
@@ -8026,14 +8278,236 @@ void registerSystemLuaAPI(lua_State* L) {
             const auto& list = gh->getCalendarEventDetail().invitees;
             if (index < 1 || static_cast<size_t>(index) > list.size()) return 0;
             const auto& inv = list[static_cast<size_t>(index) - 1];
+            const bool mine = inv.guid == gh->getPlayerGuid();
+            unsigned classId = mine ? gh->getPlayerClass() : gh->lookupPlayerClass(inv.guid);
+            if (classId == 0) classId = gh->lookupPlayerClass(inv.guid);
+            unsigned level = inv.level;
+            if (level == 0 && mine) level = gh->getPlayerLevel();
             lua_pushstring(L, gh->lookupName(inv.guid).c_str());
-            lua_pushnumber(L, inv.level);
-            lua_pushstring(L, "");              // className
-            lua_pushstring(L, "");              // classFilename
+            lua_pushnumber(L, level);
+            lua_pushstring(L, classId < 12 ? kLuaClasses[classId] : "");
+            luaPushClassToken(L, classId);
             lua_pushnumber(L, inv.status + 1);   // wire counts from zero
-            lua_pushnumber(L, inv.rank);
-            lua_pushboolean(L, inv.isGuildMember ? 1 : 0);
+            lua_pushstring(L, inv.rank == wowee::game::kCalendarRankOwner     ? "CREATOR"
+                            : inv.rank == wowee::game::kCalendarRankModerator ? "MODERATOR"
+                                                                              : "");
+            lua_pushboolean(L, mine ? 1 : 0);
             return 7;
+        }},
+                // When an invitee answered: weekday, month, day, year, hour,
+                // minute. Weekday 0 when they have not - the tooltip tests
+                // `weekday ~= 0` - and the server's "never" is 1 January 2000
+                // (CalendarMgr's 946684800).
+                {"CalendarEventGetInviteResponseTime", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
+            const auto* list = gh ? &gh->getCalendarEventDetail().invitees : nullptr;
+            if (!list || index < 1 || static_cast<size_t>(index) > list->size()) {
+                for (int i = 0; i < 6; ++i) lua_pushnumber(L, 0);
+                return 6;
+            }
+            const auto& t = (*list)[static_cast<size_t>(index) - 1].statusTime;
+            const bool never = t.yearSince2000 == 0 && t.month == 1 && t.day == 1;
+            lua_pushnumber(L, never ? 0 : t.weekday + 1);
+            lua_pushnumber(L, never ? 0 : t.month);
+            lua_pushnumber(L, never ? 0 : t.day);
+            lua_pushnumber(L, never ? 0 : t.fullYear());
+            lua_pushnumber(L, never ? 0 : t.hour);
+            lua_pushnumber(L, never ? 0 : t.minute);
+            return 6;
+        }},
+                // Selection and sorting of the current event's invite list.
+                // The selection is a number always - the list compares it
+                // `<= 0` before anything else.
+                {"CalendarEventSelectInvite", [](lua_State* L) -> int {
+            if (auto* gh = getGameHandler(L)) {
+                gh->selectCalendarInvite(static_cast<int>(luaL_optnumber(L, 1, 0)));
+            }
+            return 0;
+        }},
+                {"CalendarEventGetSelectedInvite", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            lua_pushnumber(L, gh ? gh->calendarSelectedInvite() : 0);
+            return 1;
+        }},
+                {"CalendarEventSortInvites", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            if (!gh) return 0;
+            gh->sortCalendarInvites(luaL_optstring(L, 1, "name"), lua_toboolean(L, 2) != 0);
+            return 0;
+        }},
+                // criterion, reverse. The sort buttons compare the first with
+                // their own criterion, so nil before any sort draws no arrow.
+                {"CalendarEventGetInviteSortCriterion", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            if (!gh || gh->calendarInviteSortCriterion().empty()) {
+                lua_pushnil(L);
+                lua_pushboolean(L, 0);
+                return 2;
+            }
+            lua_pushstring(L, gh->calendarInviteSortCriterion().c_str());
+            lua_pushboolean(L, gh->calendarInviteSortReverse() ? 1 : 0);
+            return 2;
+        }},
+                // Whether the player may edit the current event: a new one
+                // always, an open one if they made it or moderate it. The
+                // calendar asks on every event and switches between its view
+                // and edit frames on the answer, so a missing binding put the
+                // edit controls on every event or on none.
+                {"CalendarEventCanEdit", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            if (!gh) { lua_pushboolean(L, 0); return 1; }
+            if (gh->isCalendarEventNew()) { lua_pushboolean(L, 1); return 1; }
+            const auto& ev = gh->getCalendarEventDetail();
+            const uint64_t me = gh->getPlayerGuid();
+            bool can = ev.eventId != 0 && me != 0 && ev.creatorGuid == me;
+            for (const auto& inv : ev.invitees) {
+                if (!can && inv.guid == me) can = inv.rank >= wowee::game::kCalendarRankModerator;
+            }
+            lua_pushboolean(L, can ? 1 : 0);
+            return 1;
+        }},
+                // "PLAYER", "GUILD_EVENT" or "GUILD_ANNOUNCEMENT" for the
+                // current event, new or open - the create form hides its invite
+                // list for an announcement on this.
+                {"CalendarEventGetCalendarType", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            if (!gh || (!gh->isCalendarEventNew() &&
+                        gh->getCalendarEventDetail().eventId == 0)) {
+                lua_pushnil(L);
+                return 1;
+            }
+            lua_pushstring(L, wowee::game::calendarTypeForFlags(
+                gh->getCalendarEventDetail().flags));
+            return 1;
+        }},
+                // Whether the player's invite to the open event is unanswered.
+                {"CalendarEventHasPendingInvite", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            bool pending = false;
+            if (gh && !gh->isCalendarEventNew()) {
+                const auto& ev = gh->getCalendarEventDetail();
+                for (const auto& inv : ev.invitees) {
+                    if (inv.guid == gh->getPlayerGuid()) {
+                        pending = inv.status == wowee::game::kCalendarStatusInvited;
+                    }
+                }
+            }
+            lua_pushboolean(L, pending ? 1 : 0);
+            return 1;
+        }},
+                // The view frame's RSVP buttons: CMSG_CALENDAR_EVENT_RSVP with
+                // the player's own invite to the open event, and the status
+                // the button names (CalendarInviteStatus: ACCEPTED 1,
+                // DECLINED 2, TENTATIVE 8). A sign-up event's buttons go
+                // through CalendarEventSignUp instead; its Tentative button
+                // calls CalendarEventTentative too, which there is a tentative
+                // sign-up when the player has no invite yet.
+                {"CalendarEventAvailable", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            if (!gh) return 0;
+            const auto& ev = gh->getCalendarEventDetail();
+            if (const auto* inv = gh->findCalendarInvite(ev.eventId)) {
+                gh->respondToCalendarInvite(ev.eventId, inv->inviteId,
+                                            wowee::game::kCalendarStatusAccepted);
+            }
+            return 0;
+        }},
+                {"CalendarEventDecline", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            if (!gh) return 0;
+            const auto& ev = gh->getCalendarEventDetail();
+            if (const auto* inv = gh->findCalendarInvite(ev.eventId)) {
+                gh->respondToCalendarInvite(ev.eventId, inv->inviteId,
+                                            wowee::game::kCalendarStatusDeclined);
+            }
+            return 0;
+        }},
+                {"CalendarEventTentative", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            if (!gh) return 0;
+            const auto& ev = gh->getCalendarEventDetail();
+            if (ev.eventId == 0) return 0;
+            if (const auto* inv = gh->findCalendarInvite(ev.eventId)) {
+                gh->respondToCalendarInvite(ev.eventId, inv->inviteId,
+                                            wowee::game::kCalendarStatusTentative);
+            } else if (ev.flags & wowee::game::kCalendarFlagGuildEvent) {
+                gh->signUpForCalendarEvent(ev.eventId, true);
+            }
+            return 0;
+        }},
+                // Signing up to the open guild event: CMSG_CALENDAR_EVENT_SIGNUP
+                // (uint64 eventId, bool tentative); the server makes the invite.
+                {"CalendarEventSignUp", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            if (!gh) return 0;
+            const auto& ev = gh->getCalendarEventDetail();
+            if (ev.eventId != 0) gh->signUpForCalendarEvent(ev.eventId, false);
+            return 0;
+        }},
+                // Take an invitee off the current event. On a new event the row
+                // only leaves the draft - nothing has been sent for it; on an
+                // open one it is CMSG_CALENDAR_EVENT_REMOVE_INVITE, and the
+                // server's removal notice takes the row away.
+                {"CalendarEventRemoveInvite", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
+            if (!gh) return 0;
+            const auto& ev = gh->getCalendarEventDetail();
+            if (index < 1 || static_cast<size_t>(index) > ev.invitees.size()) return 0;
+            const auto& inv = ev.invitees[static_cast<size_t>(index) - 1];
+            if (gh->isCalendarEventNew()) {
+                if (inv.rank == wowee::game::kCalendarRankOwner) return 0;
+                gh->removeCalendarDraftInvite(static_cast<size_t>(index) - 1);
+                return 0;
+            }
+            uint64_t ownerInviteId = 0;
+            if (const auto* mine = gh->findCalendarInvite(ev.eventId)) ownerInviteId = mine->inviteId;
+            gh->removeCalendarInvite(inv.guid, inv.inviteId, ownerInviteId, ev.eventId);
+            return 0;
+        }},
+                // The create form's two check boxes. Locked is
+                // CALENDAR_FLAG_INVITES_LOCKED in the flags the event is sent
+                // with; auto-approve has no flag the server knows, so it is
+                // accepted and kept nowhere.
+                {"CalendarEventSetLocked", [](lua_State* L) -> int {
+            calendarDraft(L).flags |= wowee::game::kCalendarFlagInvitesLocked;
+            return 0;
+        }},
+                {"CalendarEventClearLocked", [](lua_State* L) -> int {
+            calendarDraft(L).flags &= ~wowee::game::kCalendarFlagInvitesLocked;
+            return 0;
+        }},
+                {"CalendarEventSetAutoApprove", lua_ReturnNothing},
+                {"CalendarEventClearAutoApprove", lua_ReturnNothing},
+                // The dungeons or raids an event type can name, four values
+                // each - title, texture, expansionLevel, difficultyName - which
+                // _CalendarFrame_CacheEventTextures_Internal reads in fours.
+                // Nothing for the types that have no textures.
+                {"CalendarEventGetTextures", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            const int uiType = static_cast<int>(luaL_optnumber(L, 1, 0));
+            if (!gh) return 0;
+            const auto list = calendarTextureList(*gh, uiType);
+            if (!lua_checkstack(L, static_cast<int>(list.size()) * 4 + 4)) return 0;
+            for (const auto* d : list) {
+                lua_pushstring(L, d->name.c_str());
+                lua_pushstring(L, d->texture.c_str());
+                lua_pushnumber(L, d->expansion);
+                // RAID_DIFFICULTY1.. for a raid ("10 Player", "25 Player"),
+                // and for a dungeon nothing on normal and "Heroic" on heroic -
+                // GetDungeonNameWithDifficulty appends it in brackets.
+                std::string key;
+                if (uiType == 1) key = "RAID_DIFFICULTY" + std::to_string(d->difficulty + 1);
+                else if (d->difficulty > 0) key = "PLAYER_DIFFICULTY2";
+                if (key.empty()) {
+                    lua_pushstring(L, "");
+                } else {
+                    lua_getglobal(L, key.c_str());
+                    if (!lua_isstring(L, -1)) { lua_pop(L, 1); lua_pushstring(L, ""); }
+                }
+            }
+            return static_cast<int>(list.size()) * 4;
         }},
                 // ---- Creating an event ----
                 //
@@ -8042,15 +8516,24 @@ void registerSystemLuaAPI(lua_State* L) {
                 // none of them talks to the server on its own, which is what
                 // lets the create form be filled in in any order and cancelled
                 // without trace.
+                //
+                // Each of the four starts a new current event: the open one is
+                // put down (its detail would otherwise answer
+                // CalendarEventGetInvite with someone else's list), and the
+                // draft's own list starts with the player as owner. The flags
+                // are what make it what it is - CalendarMgr.h's
+                // CALENDAR_FLAG_GUILD_EVENT 0x400 and _WITHOUT_INVITES 0x40.
                 {"CalendarNewEvent", [](lua_State* L) -> int {
-            (void)L;
-            calendarDraft() = wowee::game::CalendarEventDraft{};
+            auto* gh = getGameHandler(L);
+            if (!gh) return 0;
+            calendarSelection() = {};
+            gh->beginNewCalendarEvent(0);
             // Today, so an event committed without touching the date lands
             // somewhere real rather than on 1 January 2000.
             const auto viewed = calendarViewedMonth();
             const std::time_t now = std::time(nullptr);
             const std::tm t = core::localTime(now);
-            auto& d = calendarDraft();
+            auto& d = calendarDraft(L);
             d.eventTime.month = viewed.first;
             d.eventTime.yearSince2000 = viewed.second - 2000;
             d.eventTime.day = t.tm_mday;
@@ -8058,11 +8541,46 @@ void registerSystemLuaAPI(lua_State* L) {
             return 0;
         }},
                 {"CalendarNewGuildEvent", [](lua_State* L) -> int {
-            (void)L;
-            calendarDraft() = wowee::game::CalendarEventDraft{};
-            // CALENDAR_FLAG_GUILD_EVENT, which is what the server reads to
-            // decide the event belongs to the guild rather than the player.
-            calendarDraft().flags |= 0x0400u;
+            auto* gh = getGameHandler(L);
+            if (!gh) return 0;
+            calendarSelection() = {};
+            gh->beginNewCalendarEvent(wowee::game::kCalendarFlagGuildEvent);
+            return 0;
+        }},
+                // An announcement: no invite list at all, and every guild
+                // member sees it (CalendarHandler.cpp:291).
+                {"CalendarNewGuildAnnouncement", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            if (!gh) return 0;
+            calendarSelection() = {};
+            gh->beginNewCalendarEvent(wowee::game::kCalendarFlagAnnouncement);
+            return 0;
+        }},
+                // An arena team event is an ordinary player event whose list
+                // is the team (CalendarMassInviteArenaTeam fills it), so it
+                // starts like one. The team index is the GetArenaTeam index.
+                {"CalendarNewArenaTeamEvent", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            if (!gh) return 0;
+            calendarSelection() = {};
+            gh->beginNewCalendarEvent(0);
+            const int team = static_cast<int>(luaL_optnumber(L, 1, 0));
+            const auto& teams = gh->getArenaTeamStats();
+            if (team >= 1 && static_cast<size_t>(team) <= teams.size()) {
+                gh->massInviteArenaTeamToCalendarEvent(teams[static_cast<size_t>(team) - 1].teamId);
+            }
+            return 0;
+        }},
+                // CMSG_CALENDAR_ARENA_TEAM with that team's id; the members
+                // come back as SMSG_CALENDAR_ARENA_TEAM and join the list.
+                {"CalendarMassInviteArenaTeam", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            if (!gh) return 0;
+            const int team = static_cast<int>(luaL_optnumber(L, 1, 0));
+            const auto& teams = gh->getArenaTeamStats();
+            if (team >= 1 && static_cast<size_t>(team) <= teams.size()) {
+                gh->massInviteArenaTeamToCalendarEvent(teams[static_cast<size_t>(team) - 1].teamId);
+            }
             return 0;
         }},
                 {"CalendarEventSetTitle", [](lua_State* L) -> int {
@@ -8071,13 +8589,13 @@ void registerSystemLuaAPI(lua_State* L) {
             // silently create nothing at all.
             std::string title(luaL_optstring(L, 1, ""));
             if (title.size() > 31) title.resize(31);
-            calendarDraft().title = std::move(title);
+            calendarDraft(L).title = std::move(title);
             return 0;
         }},
                 {"CalendarEventSetDescription", [](lua_State* L) -> int {
             std::string desc(luaL_optstring(L, 1, ""));
             if (desc.size() > 255) desc.resize(255);
-            calendarDraft().description = std::move(desc);
+            calendarDraft(L).description = std::move(desc);
             return 0;
         }},
                 // Interface types count from one and the wire counts from
@@ -8088,12 +8606,16 @@ void registerSystemLuaAPI(lua_State* L) {
                 // dungeon, with nothing to see but the wrong icon.
                 {"CalendarEventSetType", [](lua_State* L) -> int {
             const int uiType = static_cast<int>(luaL_optnumber(L, 1, 1));
-            calendarDraft().type =
-                static_cast<uint8_t>(uiType > 0 ? uiType - 1 : 0);
+            auto& d = calendarDraft(L);
+            const auto type = static_cast<uint8_t>(uiType > 0 ? uiType - 1 : 0);
+            // A dungeon belongs to the type it was picked for; the texture
+            // picker sets the type and then the texture, in that order.
+            if (type != d.type) d.dungeonId = -1;
+            d.type = type;
             return 0;
         }},
                 {"CalendarEventSetDate", [](lua_State* L) -> int {
-            auto& d = calendarDraft();
+            auto& d = calendarDraft(L);
             d.eventTime.month = static_cast<int>(luaL_optnumber(L, 1, d.eventTime.month));
             d.eventTime.day   = static_cast<int>(luaL_optnumber(L, 2, d.eventTime.day));
             const int year    = static_cast<int>(luaL_optnumber(L, 3, d.eventTime.fullYear()));
@@ -8105,7 +8627,7 @@ void registerSystemLuaAPI(lua_State* L) {
             return 0;
         }},
                 {"CalendarEventSetTime", [](lua_State* L) -> int {
-            auto& d = calendarDraft();
+            auto& d = calendarDraft(L);
             d.eventTime.hour   = static_cast<int>(luaL_optnumber(L, 1, d.eventTime.hour));
             d.eventTime.minute = static_cast<int>(luaL_optnumber(L, 2, d.eventTime.minute));
             return 0;
@@ -8116,13 +8638,22 @@ void registerSystemLuaAPI(lua_State* L) {
                 // been sent as "Weekly".
                 {"CalendarEventSetRepeatOption", [](lua_State* L) -> int {
             const int uiOption = static_cast<int>(luaL_optnumber(L, 1, 1));
-            calendarDraft().repeatOption =
+            calendarDraft(L).repeatOption =
                 static_cast<uint8_t>(uiOption > 0 ? uiOption - 1 : 0);
             return 0;
         }},
+                // A position in CalendarEventGetTextures' list for the draft's
+                // type, which goes on the wire as that row's LFGDungeons id.
                 {"CalendarEventSetTextureID", [](lua_State* L) -> int {
-            calendarDraft().dungeonId =
-                static_cast<int32_t>(luaL_optnumber(L, 1, -1));
+            auto& d = calendarDraft(L);
+            const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
+            d.dungeonId = -1;
+            if (auto* gh = getGameHandler(L); gh && index > 0) {
+                const auto list = calendarTextureList(*gh, d.type + 1);
+                if (static_cast<size_t>(index) <= list.size()) {
+                    d.dungeonId = static_cast<int32_t>(list[static_cast<size_t>(index) - 1]->id);
+                }
+            }
             return 0;
         }},
                 // Editing the open event, and deleting it.
@@ -8134,18 +8665,29 @@ void registerSystemLuaAPI(lua_State* L) {
                 // both do nothing rather than inventing an id.
                 {"CalendarUpdateEvent", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (!gh) return 0;
+            if (!gh || gh->isCalendarEventNew()) return 0;
             const auto& open = gh->getCalendarEventDetail();
             if (open.eventId == 0) return 0;
-            gh->updateCalendarEvent(open.eventId, 0, calendarDraft());
+            uint64_t inviteId = 0;
+            if (const auto* mine = gh->findCalendarInvite(open.eventId)) inviteId = mine->inviteId;
+            gh->updateCalendarEvent(open.eventId, inviteId, calendarDraft(L));
             return 0;
         }},
+                // The view frame's Remove button: the creator deletes the
+                // event; anyone else takes themselves off it, which is what the
+                // button says for them (CALENDAR_TOOLTIP_REMOVEBUTTON) - the
+                // server's CMSG_CALENDAR_REMOVE_EVENT checks no ownership, so
+                // sending it for an invitee would delete the event for all.
                 {"CalendarRemoveEvent", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (!gh) return 0;
+            if (!gh || gh->isCalendarEventNew()) return 0;
             const auto& open = gh->getCalendarEventDetail();
             if (open.eventId == 0) return 0;
-            gh->removeCalendarEvent(open.eventId, 0);
+            if (open.creatorGuid == gh->getPlayerGuid()) {
+                gh->removeCalendarEvent(open.eventId, 0);
+            } else {
+                calendarRemoveOwnInvite(*gh, open.eventId);
+            }
             return 0;
         }},
                 // Whether the edit form has anything to commit. The interface
@@ -8155,13 +8697,18 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushboolean(L, 0); return 1; }
             const auto& open = gh->getCalendarEventDetail();
-            const auto& d = calendarDraft();
+            const auto& d = calendarDraft(L);
+            // Every field the edit form can change, the lock box and the
+            // dungeon included - leaving those out greyed the save button on
+            // an edit that only locked the event.
             const bool changed =
-                open.eventId != 0 &&
+                open.eventId != 0 && !gh->isCalendarEventNew() &&
                 (d.title != open.title || d.description != open.description ||
-                 d.type != open.type ||
+                 d.type != open.type || d.repeatOption != open.repeatOption ||
+                 d.dungeonId != open.dungeonId || d.flags != open.flags ||
                  d.eventTime.day != open.eventTime.day ||
                  d.eventTime.month != open.eventTime.month ||
+                 d.eventTime.yearSince2000 != open.eventTime.yearSince2000 ||
                  d.eventTime.hour != open.eventTime.hour ||
                  d.eventTime.minute != open.eventTime.minute);
             lua_pushboolean(L, changed ? 1 : 0);
@@ -8220,10 +8767,11 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             if (!gh || !name || !*name) return 0;
             const auto& open = gh->getCalendarEventDetail();
-            const bool preInvite = (open.eventId == 0);
-            const uint32_t flags = preInvite ? calendarDraft().flags : open.flags;
-            gh->inviteToCalendarEvent(open.eventId, 0, name, preInvite,
-                                      (flags & 0x0400u) != 0);
+            const bool preInvite = gh->isCalendarEventNew();
+            if (!preInvite && open.eventId == 0) return 0;
+            const uint32_t flags = preInvite ? calendarDraft(L).flags : open.flags;
+            gh->inviteToCalendarEvent(preInvite ? 0 : open.eventId, 0, name, preInvite,
+                                      (flags & wowee::game::kCalendarFlagGuildEvent) != 0);
             return 0;
         }},
                 // The three bounds go on the wire: this has its own opcode
@@ -8239,10 +8787,12 @@ void registerSystemLuaAPI(lua_State* L) {
             return 0;
         }},
                 // And the commit.
+                // The draft goes with the new event's invite list; the server
+                // answers SMSG_CALENDAR_SEND_EVENT(ADD), which puts it on the
+                // calendar and closes the create frame (CALENDAR_NEW_EVENT).
                 {"CalendarAddEvent", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) {
-                gh->createCalendarEvent(calendarDraft());
-            }
+            auto* gh = getGameHandler(L);
+            if (gh && gh->isCalendarEventNew()) gh->createCalendarEvent(calendarDraft(L));
             return 0;
         }},
                 // ---- The right-click menu on a day's event ----
@@ -8306,35 +8856,104 @@ void registerSystemLuaAPI(lua_State* L) {
                 return 1;
             }
             const auto& ev = gh->getCalendarData().events[row.index];
-            lua_pushboolean(L, ev.creatorGuid != 0 &&
-                                   ev.creatorGuid == gh->getPlayerGuid() ? 1 : 0);
+            // The creator, or a moderator - the same "CREATOR"/"MODERATOR"
+            // that colours the row.
+            const std::string mod = calendarModStatus(*gh, ev);
+            lua_pushboolean(L, !mod.empty() ? 1 : 0);
             return 1;
         }},
-                // Reporting an event is a GM feature this client has no
-                // packet for. False rather than nothing: the menu tests it to
-                // decide whether to draw the entry, and a stand-in would draw
-                // one that does nothing when clicked.
+                // Whether the menu may offer to report the row: someone
+                // else's player event the player was invited to. Reporting is
+                // CMSG_CALENDAR_COMPLAIN, which the server logs as spam.
                 {"CalendarContextEventCanComplain", [](lua_State* L) -> int {
-            lua_pushboolean(L, 0);
+            auto* gh = getGameHandler(L);
+            const auto rows = calendarDayRows(L);
+            const int index = static_cast<int>(luaL_optnumber(L, 3, 0));
+            bool can = false;
+            if (gh && index >= 1 && static_cast<size_t>(index) <= rows.size()) {
+                const auto& row = rows[static_cast<size_t>(index) - 1];
+                if (row.kind == wowee::game::CalendarEntryKind::Event) {
+                    const auto& ev = gh->getCalendarData().events[row.index];
+                    can = ev.creatorGuid != gh->getPlayerGuid() &&
+                          !(ev.flags & (wowee::game::kCalendarFlagGuildEvent |
+                                        wowee::game::kCalendarFlagAnnouncement)) &&
+                          gh->findCalendarInvite(ev.eventId) != nullptr;
+                }
+            }
+            lua_pushboolean(L, can ? 1 : 0);
             return 1;
+        }},
+                {"CalendarContextEventComplain", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            if (!gh) return 0;
+            if (const auto* ev = calendarContextEvent(*gh)) {
+                gh->complainCalendarEvent(ev->eventId, ev->creatorGuid);
+            }
+            return 0;
         }},
                 // Delete the row the menu is about.
                 {"CalendarContextEventRemove", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
-            const auto& row = calendarContextRow();
-            const auto rows = calendarRowsFor(*gh, row.monthOffset, row.day);
-            if (row.index < 1 || static_cast<size_t>(row.index) > rows.size()) return 0;
-            const auto& entry = rows[static_cast<size_t>(row.index) - 1];
-            if (entry.kind != wowee::game::CalendarEntryKind::Event) return 0;
-            gh->removeCalendarEvent(
-                gh->getCalendarData().events[entry.index].eventId, 0);
+            if (const auto* ev = calendarContextEvent(*gh)) {
+                uint64_t inviteId = 0;
+                if (const auto* mine = gh->findCalendarInvite(ev->eventId)) inviteId = mine->inviteId;
+                gh->removeCalendarEvent(ev->eventId, inviteId);
+            }
             return 0;
         }},
-                // Signing up to a guild event, which is an RSVP with the
-                // signed-up status rather than a separate request.
+                // Signing up to a guild event from the menu: its own request,
+                // CMSG_CALENDAR_EVENT_SIGNUP (CalendarHandler.cpp:613). A
+                // guild member has no invite to RSVP with until signing up
+                // makes one, so the RSVP this used to send had nothing to
+                // carry and was never sent.
                 {"CalendarContextEventSignUp", [](lua_State* L) -> int {
-            return calendarRespondToContextInvite(L, 6);   // SIGNED_UP
+            auto* gh = getGameHandler(L);
+            if (!gh) return 0;
+            if (const auto* ev = calendarContextEvent(*gh)) {
+                gh->signUpForCalendarEvent(ev->eventId, false);
+            }
+            return 0;
+        }},
+                // Copy and paste. The copy remembers the event; the paste
+                // sends CMSG_CALENDAR_COPY_EVENT with the target day at the
+                // event's own hour and minute, and the server answers with the
+                // new event (SMSG_CALENDAR_SEND_EVENT, sendType COPY). Kept
+                // here, as the stock client keeps its clipboard, for the
+                // session.
+                {"CalendarContextEventCopy", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            if (!gh) return 0;
+            if (const auto* ev = calendarContextEvent(*gh)) {
+                calendarClipboard() = {ev->eventId, ev->eventTime.hour, ev->eventTime.minute};
+            }
+            return 0;
+        }},
+                {"CalendarContextEventClipboard", [](lua_State* L) -> int {
+            lua_pushboolean(L, calendarClipboard().eventId != 0 ? 1 : 0);
+            return 1;
+        }},
+                {"CalendarContextEventPaste", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            const auto& clip = calendarClipboard();
+            if (!gh || clip.eventId == 0) return 0;
+            const int monthOffset = static_cast<int>(luaL_optnumber(L, 1, 0));
+            const int day = static_cast<int>(luaL_optnumber(L, 2, 0));
+            const auto viewed = calendarViewedMonth();
+            const auto info = wowee::game::calendarMonthAt(viewed.first, viewed.second,
+                                                           monthOffset);
+            if (day < 1 || day > info.numDays) return 0;
+            wowee::game::WowDate when;
+            when.month = info.month;
+            when.day = day;
+            when.yearSince2000 = info.year - 2000;
+            when.weekday = wowee::game::weekdayOf(info.month, day, info.year) - 1;
+            when.hour = clip.hour;
+            when.minute = clip.minute;
+            uint64_t inviteId = 0;
+            if (const auto* mine = gh->findCalendarInvite(clip.eventId)) inviteId = mine->inviteId;
+            gh->copyCalendarEvent(clip.eventId, inviteId, wowee::game::packWowPackedTime(when));
+            return 0;
         }},
                 // Which of the six kinds the menu's row is, so the menu can
                 // offer the right verbs. Read from the same day list the row
@@ -8354,24 +8973,54 @@ void registerSystemLuaAPI(lua_State* L) {
             const auto& entry = rows[static_cast<size_t>(row.index) - 1];
             if (entry.kind == wowee::game::CalendarEntryKind::Holiday) {
                 lua_pushstring(L, "HOLIDAY");
+            } else if (entry.kind == wowee::game::CalendarEntryKind::RaidLockout) {
+                // entry.index is into the lockouts here, not the events.
+                lua_pushstring(L, "RAID_LOCKOUT");
             } else {
                 lua_pushstring(L, calendarTypeName(
                     gh->getCalendarData().events[entry.index]));
             }
             return 1;
         }},
-                // Which event is selected, as monthOffset, day, index.
+                // Which event is selected, as monthOffset, day, index -
+                // whatever CalendarOpenEvent last opened, re-expressed against
+                // the month being viewed. The holiday and raid view frames
+                // read their row through it (CalendarGetHolidayInfo(
+                // CalendarGetEventIndex())), and the grid highlights it.
                 //
-                // Nothing is selected until an event view exists to select
-                // into, so all three are nil - but three nils rather than no
-                // values at all. The interface unpacks it as a group, and a
-                // binding that answers short is the shape framexml_short_returns
-                // is pinned at zero to catch: it reads as correct here only
-                // because Lua happens to fill the rest with nil.
+                // Three nils when nothing is selected, rather than no values:
+                // the interface unpacks it as a group.
                 {"CalendarGetEventIndex", [](lua_State* L) -> int {
-            lua_pushnil(L);
-            lua_pushnil(L);
-            lua_pushnil(L);
+            auto& sel = calendarSelection();
+            auto* gh = getGameHandler(L);
+            if (!gh || sel.day < 1) {
+                lua_pushnil(L); lua_pushnil(L); lua_pushnil(L);
+                return 3;
+            }
+            const auto viewed = calendarViewedMonth();
+            const int monthOffset = (sel.year * 12 + sel.month) -
+                                    (viewed.second * 12 + viewed.first);
+            int index = sel.index;
+            if (sel.eventId != 0) {
+                // Followed by id: rows added to the day move it.
+                index = 0;
+                const auto rows = wowee::game::calendarEntriesForDay(
+                    gh->getCalendarData(), sel.month, sel.day, sel.year);
+                for (size_t i = 0; i < rows.size(); ++i) {
+                    if (rows[i].kind == wowee::game::CalendarEntryKind::Event &&
+                        gh->getCalendarData().events[rows[i].index].eventId == sel.eventId) {
+                        index = static_cast<int>(i) + 1;
+                        break;
+                    }
+                }
+                if (index == 0) {
+                    lua_pushnil(L); lua_pushnil(L); lua_pushnil(L);
+                    return 3;
+                }
+            }
+            lua_pushnumber(L, monthOffset);
+            lua_pushnumber(L, sel.day);
+            lua_pushnumber(L, index);
             return 3;
         }},
                 // The first unanswered invite on a day, or zero.

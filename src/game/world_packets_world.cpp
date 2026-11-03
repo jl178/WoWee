@@ -608,13 +608,38 @@ network::Packet SwapItemPacket::build(uint8_t dstBag, uint8_t dstSlot, uint8_t s
 }
 
 network::Packet SplitItemPacket::build(uint8_t srcBag, uint8_t srcSlot,
-                                       uint8_t dstBag, uint8_t dstSlot, uint8_t count) {
+                                       uint8_t dstBag, uint8_t dstSlot, uint32_t count) {
+    return build(srcBag, srcSlot, dstBag, dstSlot, count, isPreWotlk());
+}
+
+network::Packet SplitItemPacket::build(uint8_t srcBag, uint8_t srcSlot,
+                                       uint8_t dstBag, uint8_t dstSlot, uint32_t count,
+                                       bool narrowCount) {
     network::Packet packet(wireOpcode(Opcode::CMSG_SPLIT_ITEM));
     packet.writeUInt8(srcBag);
     packet.writeUInt8(srcSlot);
     packet.writeUInt8(dstBag);
     packet.writeUInt8(dstSlot);
-    packet.writeUInt8(count);
+    // 3.3.5 widened the count to 32 bits (AzerothCore SplitItem::Read:
+    // `_worldPacket >> Count` into a uint32). Classic and TBC servers still
+    // read one byte, so the narrow form stays for them. Writing one byte to a
+    // WotLK server left the read three bytes short and the split was dropped.
+    if (narrowCount) {
+        packet.writeUInt8(static_cast<uint8_t>(std::min<uint32_t>(count, 0xFF)));
+    } else {
+        packet.writeUInt32(count);
+    }
+    return packet;
+}
+
+network::Packet AutoStoreBagItemPacket::build(uint8_t srcBag, uint8_t srcSlot, uint8_t dstBag) {
+    // AzerothCore AutoStoreBagItem::Read: SourceBag, SourceSlot,
+    // DestinationBag - three uint8s. The handler stores with NULL_SLOT, so
+    // the server merges into partial stacks and reports a full bag itself.
+    network::Packet packet(wireOpcode(Opcode::CMSG_AUTOSTORE_BAG_ITEM));
+    packet.writeUInt8(srcBag);
+    packet.writeUInt8(srcSlot);
+    packet.writeUInt8(dstBag);
     return packet;
 }
 
@@ -1695,6 +1720,18 @@ network::Packet LearnTalentPacket::build(uint32_t talentId, uint32_t requestedRa
     // learning a talent looked like: a confirmation, the staged point handed
     // straight back, and nothing learned.
     packet.writeUInt32(requestedRank > 0 ? requestedRank - 1 : 0);
+    return packet;
+}
+
+network::Packet LearnPreviewTalentsPacket::build(
+        const std::vector<std::pair<uint32_t, uint32_t>>& talents) {
+    network::Packet packet(wireOpcode(Opcode::CMSG_LEARN_PREVIEW_TALENTS));
+    packet.writeUInt32(static_cast<uint32_t>(talents.size()));
+    for (const auto& [talentId, rank] : talents) {
+        packet.writeUInt32(talentId);
+        // From zero on the wire, as in LearnTalentPacket above.
+        packet.writeUInt32(rank > 0 ? rank - 1 : 0);
+    }
     return packet;
 }
 

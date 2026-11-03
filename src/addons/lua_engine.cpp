@@ -2395,11 +2395,17 @@ int lua_Tooltip_SetTalent(lua_State* L) {
     const int tabIndex    = static_cast<int>(luaL_optnumber(L, 2, 0));
     const int talentIndex = static_cast<int>(luaL_optnumber(L, 3, 0));
     if (!w || !gh) { lua_pushboolean(L, 0); return 1; }
-
-    const auto* talent = wowee::addons::talentAt(gh, tabIndex, talentIndex);
+    // (tab, index, inspect, pet, talentGroup, preview) - blizzard_talentui.lua
+    // 461/468, inspecttalentframe.lua 16/23. The tree and ranks the frame is
+    // drawing: an inspect tooltip used the viewer's class and ranks, and the
+    // inactive spec's tab described the active spec's rank.
+    if (lua_toboolean(L, 5)) { lua_pushboolean(L, 0); return 1; }  // pet trees are not modelled
+    const auto src = wowee::addons::talentSource(gh, lua_toboolean(L, 4) != 0,
+                                                 static_cast<int>(luaL_optnumber(L, 6, 0)));
+    const auto* talent = wowee::addons::talentAt(gh, tabIndex, talentIndex, src.classId);
     if (!talent) { lua_pushboolean(L, 0); return 1; }
 
-    const uint8_t rank = gh->getTalentRank(talent->talentId);
+    const uint8_t rank = static_cast<uint8_t>(src.rank(talent->talentId));
     // Rank 1's spell names the talent whatever the player has in it, and is the
     // only entry guaranteed to be filled.
     const uint32_t titleSpell = talent->rankSpells[0];
@@ -3040,7 +3046,9 @@ int lua_Tooltip_AppendItemEnchants(lua_State* L) {
         s && !s->empty()) {
         appendRandomSuffix(w, gh, s->item);
     }
-    appendEnchantLines(w, gh, gh->getBagItemGuid(bag, slot - 1));
+    // Through the container resolver: getBagItemGuid counts worn bags from
+    // zero, so handing it the interface's bag id read the next bag over.
+    appendEnchantLines(w, gh, wowee::addons::containerSlotGuid(gh, bag, slot));
     return 0;
 }
 
@@ -3068,6 +3076,78 @@ int lua_Tooltip_AppendEquippedEnchants(lua_State* L) {
     }
     appendEnchantLines(w, gh, gh->getEquipSlotGuid(slot - 1));
     return 0;
+}
+
+/// _WoweePrependLine(self, text, r, g, b) - put a line above everything the
+/// tooltip already holds. The item builder titles the tooltip with the item
+/// name (SetText clears), so a header that stock draws above the name - the
+/// comparison tooltip's CURRENTLY_EQUIPPED - can only go on afterwards.
+int lua_Tooltip_PrependLine(lua_State* L) {
+    auto* w = widgetOf(L, 1);
+    if (!w) return 0;
+    wowee::ui::Widget::TooltipLine line;
+    line.left = luaL_optstring(L, 2, "");
+    line.lc[0] = static_cast<float>(luaL_optnumber(L, 3, 1.0));
+    line.lc[1] = static_cast<float>(luaL_optnumber(L, 4, 1.0));
+    line.lc[2] = static_cast<float>(luaL_optnumber(L, 5, 1.0));
+    line.lc[3] = 1.0f;
+    line.rc[0] = line.rc[1] = line.rc[2] = line.rc[3] = 1.0f;
+    w->tooltipLines.insert(w->tooltipLines.begin(), std::move(line));
+    return 0;
+}
+
+/// One item the player holds, as a tooltip: the template's text plus what
+/// lives on the instance - random suffix, durability, enchants.
+///
+/// SetInventoryItem and SetBagItem each built this, and differently: the bag
+/// one had no durability and no enchants, so the same sword read two ways
+/// depending on whether it was worn or carried.
+///
+/// Through the fuller builder, with the slot's own copy of the item as the
+/// floor: the slot knows the name and quality even for an entry no
+/// GetItemInfo has arrived for, and answering nothing there would be worse
+/// than answering briefly.
+static void fillItemInstanceTooltip(lua_State* L, wowee::ui::Widget* w,
+                                    game::GameHandler* gh, const game::ItemSlot& s,
+                                    uint64_t guid) {
+    if (!fillItemTooltipById(L, gh, s.item.itemId)) {
+        fillItemTooltip(w, s.item, gh);
+        noteTooltipItem(L, s.item.itemId);
+        fireTooltipSetItem(L);
+    } else {
+        // Only on the by-id path. fillItemTooltip builds from the instance and
+        // has named the suffix itself.
+        appendRandomSuffix(w, gh, s.item);
+    }
+    appendDurabilityLine(w, s.item);
+    if (guid != 0) appendEnchantLines(w, gh, guid);
+    // The sell price, only while a merchant is open and only for an item the
+    // player holds - 3.3.5 shows it nowhere else. The client does not write
+    // the line itself: it fires the tooltip's OnTooltipAddMoney(cost), and
+    // GameTooltip_OnTooltipAddMoney (gametooltip.lua) draws "Sell Price:" with
+    // SetTooltipMoney's coin frame. The price is for the whole stack.
+    if (gh->isVendorWindowOpen()) {
+        const auto* info = gh->getItemInfo(s.item.itemId);
+        const uint32_t each = (info && info->sellPrice) ? info->sellPrice : s.item.sellPrice;
+        const uint32_t count = s.item.stackCount > 0 ? s.item.stackCount : 1;
+        if (each > 0 && lua_istable(L, 1)) {
+            callScriptOnTable(L, 1, "OnTooltipAddMoney",
+                              static_cast<double>(each) * static_cast<double>(count));
+        }
+    }
+}
+
+/// The two values both item setters return after their first: hasCooldown
+/// (the item's use spell is cooling down) and repairCost (copper to restore
+/// its durability at a vendor, 0 when undamaged). Pushes both; returns 2.
+static int pushItemInstanceResults(lua_State* L, game::GameHandler* gh,
+                                   const game::ItemSlot& s, uint64_t guid) {
+    double start = 0.0, duration = 0.0;
+    const bool hasCooldown =
+        wowee::addons::itemUseCooldown(gh, s.item.itemId, start, duration);
+    if (hasCooldown) lua_pushboolean(L, 1); else lua_pushnil(L);
+    lua_pushnumber(L, guid ? static_cast<double>(gh->estimateItemRepairCost(guid)) : 0.0);
+    return 2;
 }
 
 /// SetInventoryItem(unit, slot) - the gear on the paperdoll.
@@ -3104,34 +3184,21 @@ int lua_Tooltip_SetInventoryItem(lua_State* L) {
     // GameTooltip:SetText(self.tooltipText) when this answers false, which is
     // the "Bank Bag" line, not the bag's own tooltip.
     const game::ItemSlot* sp = wowee::addons::inventorySlotItem(gh->getInventory(), slot);
-    if (!sp) { lua_pushboolean(L, 0); return 1; }
-    const auto& s = *sp;
-    if (s.empty()) { lua_pushboolean(L, 0); return 1; }
-    // Through the fuller builder, with the slot's own copy of the item as the
-    // floor: the slot knows the name and quality even for an entry no
-    // GetItemInfo has arrived for, and answering nothing there would be worse
-    // than answering briefly.
-    if (!fillItemTooltipById(L, gh, s.item.itemId)) {
-        fillItemTooltip(w, s.item, gh);
-        noteTooltipItem(L, s.item.itemId);
-        fireTooltipSetItem(L);
-    } else {
-        // Only on the by-id path. fillItemTooltip builds from the instance and
-        // has named the suffix itself.
-        appendRandomSuffix(w, gh, s.item);
-    }
-    // Durability lives on the instance, same as the suffix above - the
-    // paperdoll's own icon tint already reads it correctly, but the tooltip
-    // never carried it, so hovering an equipped item said nothing a bag
-    // item's own ImGui tooltip already says.
-    appendDurabilityLine(w, s.item);
-    // Equipment only: the guid list behind it is one per equipped slot, and a
-    // bank slot's id would read off the end of it.
-    if (slot <= static_cast<int>(game::EquipSlot::NUM_SLOTS)) {
-        appendEnchantLines(w, gh, gh->getEquipSlotGuid(slot - 1));
-    }
+    if (!sp || sp->empty()) { lua_pushboolean(L, 0); return 1; }
+    // Equipment keeps its guid in the per-slot list; the bank's squares, its
+    // bag row and the keyring carry it on the slot.
+    const int backpackIndex = game::slots::toWireSlot(slot) - game::slots::kBackpackFirst;
+    const uint64_t guid = (slot <= static_cast<int>(game::EquipSlot::NUM_SLOTS))
+        ? gh->getEquipSlotGuid(slot - 1)
+        : (backpackIndex >= 0 && backpackIndex < game::slots::kBackpackCount)
+              ? gh->getBackpackItemGuid(backpackIndex)
+              : sp->item.guid;
+    fillItemInstanceTooltip(L, w, gh, *sp, guid);
+    // hasItem, hasCooldown, repairCost - PaperDollItemSlotButton_OnEnter reads
+    // all three (paperdollframe.lua: `local hasItem, hasCooldown, repairCost =
+    // GameTooltip:SetInventoryItem(...)`) and shows REPAIR_COST in repair mode.
     lua_pushboolean(L, 1);
-    return 1;
+    return 1 + pushItemInstanceResults(L, gh, *sp, guid);
 }
 
 /// The three socketing-panel tooltips.
@@ -3215,10 +3282,12 @@ int lua_Tooltip_SetBagItem(lua_State* L) {
     const int bag = static_cast<int>(luaL_optnumber(L, 2, 0));
     const int slot = static_cast<int>(luaL_optnumber(L, 3, 0));
     if (!w || !gh || slot < 1) { lua_pushboolean(L, 0); return 1; }
-    const auto& inv = gh->getInventory();
-    const auto& s = (bag == 0) ? inv.getBackpackSlot(slot - 1)
-                               : inv.getBagSlot(bag - 1, slot - 1);
-    if (s.empty()) {
+    // Every container the interface numbers - the bank (-1), its bags (5-11)
+    // and the keyring (-2) as well as the backpack and worn bags. This read
+    // 0-4 only, and any other bag id was taken as a worn bag index.
+    const game::ItemSlot* sp =
+        wowee::addons::containerItemSlot(gh->getInventory(), bag, slot);
+    if (!sp || sp->empty()) {
         // An empty slot has nothing to describe, and what was there a moment
         // ago is not it. Answering false and leaving the lines alone meant a
         // caller that shows the tooltip anyway - which is what a bag window
@@ -3226,20 +3295,14 @@ int lua_Tooltip_SetBagItem(lua_State* L) {
         // tooltip over an empty square.
         w->tooltipLines.clear();
         w->shown = false;
-        lua_pushboolean(L, 0);
-        return 1;
+        return 0;
     }
-    // Through the fuller builder, with the slot's own copy of the item as the
-    // floor: the slot knows the name and quality even for an entry no
-    // GetItemInfo has arrived for, and answering nothing there would be worse
-    // than answering briefly.
-    if (!fillItemTooltipById(L, gh, s.item.itemId)) {
-        fillItemTooltip(w, s.item, gh);
-        noteTooltipItem(L, s.item.itemId);
-        fireTooltipSetItem(L);
-    }
-    lua_pushboolean(L, 1);
-    return 1;
+    const uint64_t guid = wowee::addons::containerSlotGuid(gh, bag, slot);
+    fillItemInstanceTooltip(L, w, gh, *sp, guid);
+    // hasCooldown, repairCost - not "had an item". ContainerFrameItemButton_OnEnter
+    // (containerframe.lua) reads `local hasCooldown, repairCost =
+    // GameTooltip:SetBagItem(...)` and adds REPAIR_COST in repair mode.
+    return pushItemInstanceResults(L, gh, *sp, guid);
 }
 
 /// SetGuildBankItem(tab, slot) - hovering a slot in the guild bank.
@@ -3256,17 +3319,11 @@ int lua_Tooltip_SetGuildBankItem(lua_State* L) {
     if (!w || !gh || slot < 1) { lua_pushboolean(L, 0); return 1; }
 
     const auto& data = gh->getGuildBankData();
-    // The open tab is the one kept current; any other answers from whatever
-    // the last full update left behind, which is what the panel draws too.
-    const std::vector<game::GuildBankItemSlot>* items = nullptr;
-    if (tab - 1 == data.tabId) {
-        items = &data.tabItems;
-    } else if (tab >= 1 && tab <= static_cast<int>(data.tabs.size())) {
-        items = &data.tabs[tab - 1].items;
-    }
-    if (!items) { lua_pushboolean(L, 0); return 1; }
+    // Each tab's own contents, merged from every list of it - which is what
+    // the panel draws too.
+    if (tab < 1 || tab > static_cast<int>(data.tabs.size())) { lua_pushboolean(L, 0); return 1; }
 
-    for (const auto& it : *items) {
+    for (const auto& it : data.tabs[tab - 1].items) {
         if (it.slotId + 1 != slot) continue;
         lua_pushboolean(L, fillItemTooltipById(L, gh, it.itemEntry) ? 1 : 0);
         return 1;
@@ -3993,6 +4050,34 @@ int lua_FontString_SetText(lua_State* L) {
 }
 int lua_FontString_GetText(lua_State* L) {
     const auto* w = widgetOf(L, 1);
+    // A tooltip's GameTooltipTextLeft<n> / TextRight<n>. The lines live in the
+    // tooltip's own list here and those FontStrings stay empty, so reading a
+    // tooltip the stock way - _G[tip:GetName().."TextLeft"..i]:GetText(),
+    // which FrameXML and nearly every addon that scans tooltips does - read
+    // nothing at all. Answer with the line the name stands for.
+    if (w && w->text.empty() && !w->name.empty()) {
+        auto* tree = wowee::addons::getWidgetTree(L);
+        const wowee::ui::Widget* owner = tree ? tree->get(w->parent) : nullptr;
+        if (owner && owner->isTooltip && !owner->name.empty() &&
+            w->name.compare(0, owner->name.size(), owner->name) == 0) {
+            const std::string rest = w->name.substr(owner->name.size());
+            const bool left = rest.compare(0, 8, "TextLeft") == 0;
+            const bool right = rest.compare(0, 9, "TextRight") == 0;
+            const std::string digits = rest.substr(left ? 8 : (right ? 9 : rest.size()));
+            if ((left || right) && !digits.empty() &&
+                digits.find_first_not_of("0123456789") == std::string::npos) {
+                const size_t n = static_cast<size_t>(std::strtoul(digits.c_str(), nullptr, 10));
+                if (n >= 1 && n <= owner->tooltipLines.size()) {
+                    const auto& line = owner->tooltipLines[n - 1];
+                    const std::string& t = left ? line.left : line.right;
+                    if (t.empty()) lua_pushnil(L); else lua_pushstring(L, t.c_str());
+                    return 1;
+                }
+                lua_pushnil(L);
+                return 1;
+            }
+        }
+    }
     lua_pushstring(L, w ? w->text.c_str() : "");
     return 1;
 }
@@ -6366,6 +6451,7 @@ void LuaEngine::registerCoreAPI() {
         {"SetAuctionItem",  lua_Tooltip_SetAuctionItem},
         {"_WoweeAppendItemEnchants", lua_Tooltip_AppendItemEnchants},
         {"_WoweeAppendEquippedEnchants", lua_Tooltip_AppendEquippedEnchants},
+        {"_WoweePrependLine", lua_Tooltip_PrependLine},
         {"SetTradeSkillItem", lua_Tooltip_SetTradeSkillItem},
         {"SetUnit",         lua_Tooltip_SetUnit},
         {"IsUnit",          lua_Tooltip_IsUnit},
@@ -8266,6 +8352,13 @@ void LuaEngine::registerCoreAPI() {
         "    if self._WoweeAppendEquippedEnchants then\n"
         "        self:_WoweeAppendEquippedEnchants(slot)\n"
         "    end\n"
+        // The header the stock compare tooltip opens with, above the item's
+        // name: CURRENTLY_EQUIPPED, in grey. Without it the two tooltips side
+        // by side read as two items for sale rather than "this is what you
+        // wear".
+        "    if self._WoweePrependLine then\n"
+        "        self:_WoweePrependLine(CURRENTLY_EQUIPPED or 'Currently Equipped', 0.5, 0.5, 0.5)\n"
+        "    end\n"
         "    self:Show()\n"
         "    return true\n"
         "end\n"
@@ -8734,14 +8827,11 @@ void LuaEngine::registerCoreAPI() {
         "        if data.description then self:AddLine('\"'..data.description..'\"', 1, 0.82, 0, 1) end\n"
         "        if data.startsQuest then self:AddLine('This Item Begins a Quest', 1, 0.82, 0) end\n"
         "    end\n"
-        "    -- Sell price from GetItemInfo\n"
-        // Through the one money formatter, which writes the coin's picture
-        // rather than a letter. This split the copper up itself and appended
-        // 'g', 's' and 'c' - a third copy of the same arithmetic, and the only
-        // one left still writing letters.
-        "    if sellPrice and sellPrice > 0 then\n"
-        "        self:AddLine('Sell Price: '..GetCoinTextureString(sellPrice), 1, 1, 1)\n"
-        "    end\n"
+        // No sell price here. Every item tooltip carried a 'Sell Price:' line -
+        // links, loot, quest rewards, the vendor's own list - where 3.3.5 shows
+        // one only for the player's own items while a merchant is open, and
+        // through OnTooltipAddMoney rather than as a line of text. That is
+        // fillItemInstanceTooltip's in C, for the stack actually held.
         "    self.__itemId = itemId\n"
         "    return true\n"
         "end\n"
@@ -8755,16 +8845,10 @@ void LuaEngine::registerCoreAPI() {
         // Two implementations of one method, and the weaker one was winning by
         // load order alone. Found by tools/api_shadowing_check.py, which calls
         // this shape a fault and was right.
-        "function __WoweeFrameMT:SetBagItem(bag, slot)\n"
-        "    self:ClearLines()\n"
-        "    local tex, count, locked, quality, readable, lootable, link = GetContainerItemInfo(bag, slot)\n"
-        "    if not link then return end\n"
-        "    local id = link:match('item:(%d+)')\n"
-        "    if not id then return end\n"
-        "    _WoweePopulateItemTooltip(self, tonumber(id))\n"
-        "    self:_WoweeAppendItemEnchants(bag, slot)\n"
-        "    if count and count > 1 then self:AddLine('Count: '..count, 0.5, 0.5, 0.5) end\n"
-        "end\n"
+        // No SetBagItem here either, for the same reason: this one shadowed
+        // the C binding, returned nothing where containerframe.lua reads
+        // hasCooldown and repairCost, left durability off, and added a
+        // "Count: N" line the stock tooltip does not have.
         // The spellbook's tooltip. SpellButton_OnEnter calls this and nothing
         // answered it, so hovering any spell in the book showed nothing -
         // silently, because an unknown method gets a no-op rather than an
@@ -9272,11 +9356,9 @@ void LuaEngine::registerCoreAPI() {
         // is later. GetPetActionInfo, GetNumShapeshiftForms and the rest had
         // working implementations that never ran once.
         //
-        // Binding functions
-        "function GetCurrentBindingSet() return 1 end\n"
-        // Macro functions
-        "function GetMacroBody(id) return nil end\n"
-        "function GetMacroIndexByName(name) return 0 end\n"
+        // GetCurrentBindingSet is a real binding now (lua_action_api.cpp);
+        // a stub here would replace it.
+        // GetMacroBody and GetMacroIndexByName are real bindings now.
         // Stance bar
         // Pet action bar
         "NUM_PET_ACTION_SLOTS = 10\n"
@@ -10600,7 +10682,24 @@ bool LuaEngine::runBindingScript(const std::string& command, bool down, int scri
     if (scriptRef != LUA_NOREF) lua_rawgeti(L_, LUA_REGISTRYINDEX, scriptRef);
     else if (lua_istable(L_, -1)) lua_getfield(L_, -1, command.c_str());
     else { lua_pop(L_, 1); return false; }
-    if (!lua_isfunction(L_, -1)) { lua_pop(L_, 2); return false; }
+    if (!lua_isfunction(L_, -1)) {
+        lua_pop(L_, 2);
+        // Not a bindings.xml command: the stock "SPELL x" / "MACRO x" /
+        // "ITEM x" / "CLICK frame:button" forms SetBindingSpell and its
+        // siblings write (lua_action_api.cpp __WoweeRunPrefixedBinding).
+        lua_getglobal(L_, "__WoweeRunPrefixedBinding");
+        if (!lua_isfunction(L_, -1)) { lua_pop(L_, 1); return false; }
+        lua_pushstring(L_, command.c_str());
+        lua_pushstring(L_, down ? "down" : "up");
+        if (lua_pcall(L_, 2, 1, 0) != 0) {
+            LOG_WARNING("Binding ", command, " failed: ", luaL_optstring(L_, -1, "?"));
+            lua_pop(L_, 1);
+            return false;
+        }
+        const bool ran = lua_toboolean(L_, -1) != 0;
+        lua_pop(L_, 1);
+        return ran;
+    }
     lua_pushstring(L_, down ? "down" : "up");
     if (lua_pcall(L_, 1, 0, 0) != 0) {
         LOG_WARNING("Binding ", command, " failed: ",

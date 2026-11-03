@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -117,6 +118,71 @@ struct GroupListData {
     [[nodiscard]] bool isValid() const { return true; }
     [[nodiscard]] bool isEmpty() const { return memberCount == 0; }
 };
+
+/// One row of the raid as the interface indexes it (raidN, GetRaidRosterInfo).
+struct RaidSlot {
+    uint64_t guid = 0;
+    uint8_t subGroup = 0;    // 0-based, as on the wire
+    uint8_t flags = 0;       // MEMBER_FLAG_ASSISTANT 0x01, MAINTANK 0x02, MAINASSIST 0x04
+    bool online = false;
+    const GroupMember* member = nullptr;   // null for the player
+};
+
+/// The raid, the player included, in one order for every raid index.
+///
+/// SMSG_GROUP_LIST leaves the recipient out (Group::SendUpdateToPlayer skips
+/// `slot->guid`) and writes the player's own subgroup and flags in its header.
+/// GetNumRaidMembers counted the player while GetRaidRosterInfo and raidN
+/// indexed the list without them, so the last member of every raid was
+/// unreachable and the player was never in their own raid frames. Ordered by
+/// subgroup, the player first in theirs, the rest as the server sent them.
+/// Empty when the group is not a raid.
+inline std::vector<RaidSlot> buildRaidSlots(const GroupListData& pd, uint64_t playerGuid) {
+    std::vector<RaidSlot> out;
+    if (!groupIsRaid(pd.groupType)) return out;
+    out.reserve(pd.members.size() + 1);
+    RaidSlot self;
+    self.guid = playerGuid;
+    self.subGroup = pd.subGroup;
+    self.flags = pd.flags;
+    self.online = true;
+    out.push_back(self);
+    for (const auto& m : pd.members) {
+        if (m.guid == playerGuid) continue;
+        RaidSlot s;
+        s.guid = m.guid;
+        s.subGroup = m.subGroup;
+        s.flags = m.flags;
+        s.online = m.isOnline != 0;
+        s.member = &m;
+        out.push_back(s);
+    }
+    std::stable_sort(out.begin(), out.end(), [](const RaidSlot& a, const RaidSlot& b) {
+        return a.subGroup < b.subGroup;
+    });
+    return out;
+}
+
+/// The unit token a group member answers to: "player", "raidN" in a raid,
+/// "partyN" in a party (the player's own subgroup's order, as the party
+/// branch of resolveUnitGuid counts it), or "" for someone not in the group.
+inline std::string groupUnitToken(const GroupListData& pd, uint64_t playerGuid, uint64_t guid) {
+    if (guid == 0) return {};
+    if (guid == playerGuid) return "player";
+    if (groupIsRaid(pd.groupType)) {
+        const auto raid = buildRaidSlots(pd, playerGuid);
+        for (size_t i = 0; i < raid.size(); ++i)
+            if (raid[i].guid == guid) return "raid" + std::to_string(i + 1);
+        return {};
+    }
+    int n = 0;
+    for (const auto& m : pd.members) {
+        if (m.guid == playerGuid) continue;
+        ++n;
+        if (m.guid == guid) return n <= 4 ? "party" + std::to_string(n) : std::string();
+    }
+    return {};
+}
 
 /**
  * Party command types

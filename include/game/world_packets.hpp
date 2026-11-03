@@ -1419,6 +1419,9 @@ public:
 struct GuildRosterMember {
     uint64_t guid = 0;
     bool online = false;
+    /// The member's status byte as sent: GUILDMEMBER_STATUS_ONLINE 0x01,
+    /// AFK 0x02, DND 0x04 (AzerothCore Guild.h). `online` is the first bit.
+    uint8_t statusFlags = 0;
     std::string name;
     uint32_t rankIndex = 0;
     uint8_t level = 0;
@@ -2600,7 +2603,20 @@ public:
 class SplitItemPacket {
 public:
     static network::Packet build(uint8_t srcBag, uint8_t srcSlot,
-                                 uint8_t dstBag, uint8_t dstSlot, uint8_t count);
+                                 uint8_t dstBag, uint8_t dstSlot, uint32_t count);
+    /// The same with the count width named: one byte before WotLK, four
+    /// from 3.x on. build() picks it from the active expansion.
+    static network::Packet build(uint8_t srcBag, uint8_t srcSlot,
+                                 uint8_t dstBag, uint8_t dstSlot, uint32_t count,
+                                 bool narrowCount);
+};
+
+/** CMSG_AUTOSTORE_BAG_ITEM packet builder - move an item into a container
+ *  and let the server choose the slot (merging into stacks first). Same three
+ *  bytes in every expansion. */
+class AutoStoreBagItemPacket {
+public:
+    static network::Packet build(uint8_t srcBag, uint8_t srcSlot, uint8_t dstBag);
 };
 
 /** CMSG_SWAP_INV_ITEM packet builder */
@@ -2984,6 +3000,16 @@ public:
     static network::Packet build(uint32_t talentId, uint32_t requestedRank);
 };
 
+/** CMSG_LEARN_PREVIEW_TALENTS: what the talent frame's Learn button sends -
+ *  uint32 count, then (uint32 talentId, uint32 rank) per talent, rank counted
+ *  from zero like CMSG_LEARN_TALENT's (AzerothCore
+ *  WorldSession::HandleLearnPreviewTalents). `talents` carries ranks from
+ *  one, as the rest of the client counts them; the builder converts. */
+class LearnPreviewTalentsPacket {
+public:
+    static network::Packet build(const std::vector<std::pair<uint32_t, uint32_t>>& talents);
+};
+
 /** One queue slot's worth of SMSG_BATTLEFIELD_STATUS. */
 struct BattlefieldStatusData {
     uint32_t queueSlot = 0;
@@ -3165,6 +3191,29 @@ struct MailMessage {
     std::vector<MailAttachment> attachments;
 };
 
+// MailCheckMask, the `flags` word of each SMSG_MAIL_LIST_RESULT entry
+// (AzerothCore Mails/Mail.h).
+constexpr uint32_t MAIL_CHECK_MASK_READ        = 0x01;
+constexpr uint32_t MAIL_CHECK_MASK_RETURNED    = 0x02;  // returned once; cannot go back again
+constexpr uint32_t MAIL_CHECK_MASK_COPIED      = 0x04;  // its text was taken as an item
+constexpr uint32_t MAIL_CHECK_MASK_COD_PAYMENT = 0x08;  // the payment for a COD letter
+constexpr uint32_t MAIL_STATIONERY_GM          = 61;    // MailStationery, Mail.h
+
+/// Whether the inbox offers Return rather than Delete for this letter.
+///
+/// InboxItemCanDelete answers the negation, and mailframe.lua uses it to
+/// label the open letter's button (DELETE or MAIL_RETURN) and the expiry
+/// tooltip (TIME_UNTIL_DELETED or TIME_UNTIL_RETURNED). Only a player's letter
+/// (MAIL_NORMAL, Mail::IsSentByPlayer) that still carries something - items,
+/// coin or a COD charge - goes back; a letter that was itself returned
+/// (Mail::IsReturnedMail) or is a COD payment does not, and anything from the
+/// auction house, a creature or an object can only be deleted.
+inline bool mailIsReturnable(const MailMessage& mail) {
+    if (mail.messageType != 0) return false;
+    if (mail.flags & (MAIL_CHECK_MASK_RETURNED | MAIL_CHECK_MASK_COD_PAYMENT)) return false;
+    return !mail.attachments.empty() || mail.money > 0 || mail.cod > 0;
+}
+
 struct AuctionMailSubject {
     uint32_t itemEntry = 0;
     uint32_t response = 0;
@@ -3191,6 +3240,22 @@ bool parseAuctionMailBody(const std::string& body, AuctionMailInvoice& result);
 class GetMailListPacket {
 public:
     static network::Packet build(uint64_t mailboxGuid);
+};
+
+/** MSG_QUERY_NEXT_MAIL_TIME: the empty request, and the server's answer. */
+struct NextMailTimeData {
+    float nextTime = 0.0f;                 // 0 with unread mail, -DAY without
+    uint32_t count = 0;                    // senders listed (AzerothCore caps it at 2)
+    std::vector<MailMessage> senders;      // messageType/senderGuid/senderEntry/stationeryId
+};
+class QueryNextMailTimePacket {
+public:
+    static network::Packet build();
+    /// The WotLK/TBC reply: float, uint32 count, then per sender uint64
+    /// player guid, uint32 entry, uint32 messageType, uint32 stationery and a
+    /// float delay (AzerothCore MailHandler.cpp HandleQueryNextMailTime).
+    /// withSenders false reads only the two leading fields.
+    static bool parse(network::Packet& packet, NextMailTimeData& data, bool withSenders);
 };
 
 /** CMSG_SEND_MAIL packet builder */
@@ -3223,7 +3288,7 @@ public:
 /** CMSG_MAIL_RETURN_TO_SENDER packet builder */
 class MailReturnToSenderPacket {
 public:
-    static network::Packet build(uint64_t mailboxGuid, uint32_t mailId);
+    static network::Packet build(uint64_t mailboxGuid, uint32_t mailId, uint64_t senderGuid);
 };
 
 /** CMSG_MAIL_MARK_AS_READ packet builder */
@@ -3275,15 +3340,26 @@ struct GuildBankItemSlot {
 struct GuildBankTab {
     std::string tabName;
     std::string tabIcon;
+    /// What the tab holds, occupied slots only: replaced by a full list of the
+    /// tab, merged slot by slot from a partial one.
     std::vector<GuildBankItemSlot> items;
+    /// Stacks the player may still withdraw from this tab today, from the
+    /// last list of it (-1 unlimited, the guild master).
+    int32_t withdrawalsRemaining = 0;
 };
 
 struct GuildBankData {
     uint64_t money = 0;
-    uint8_t tabId = 0;
-    int32_t withdrawAmount = -1;  // -1 = unlimited
-    std::vector<GuildBankTab> tabs;  // Only populated on fullUpdate
-    std::vector<GuildBankItemSlot> tabItems;  // Current tab items
+    uint8_t tabId = 0;  // the tab the last list described
+    /// The last list's header: stacks remaining for `tabId` (-1 unlimited).
+    int32_t withdrawalsRemaining = 0;
+    /// Gold the player may still withdraw today, from
+    /// MSG_GUILD_BANK_MONEY_WITHDRAWN (-1 unlimited, the guild master).
+    int32_t moneyWithdrawRemaining = 0;
+    std::vector<GuildBankTab> tabs;  // names from tab 0's full list; items per tab
+    /// The slots the last list carried, empties included - not the tab's
+    /// contents, which are `tabs[tabId].items`.
+    std::vector<GuildBankItemSlot> tabItems;
     /// Whether the list just parsed carried the tab names, which is what the
     /// panel's GUILDBANK_UPDATE_TABS means. A slots-only update leaves `tabs`
     /// as it found them, so their contents cannot answer this.
@@ -3329,6 +3405,10 @@ public:
     // Inventory to bank
     static network::Packet buildInventoryToBank(uint64_t guid, uint8_t tabId, uint8_t bankSlot,
                                                  uint8_t srcBag, uint8_t srcSlot, uint32_t splitCount = 0);
+    // Bank slot to bank slot (any two tabs); splitCount 0 moves the whole stack
+    static network::Packet buildBankToBank(uint64_t guid, uint8_t dstTab, uint8_t dstSlot,
+                                           uint32_t dstItemEntry, uint8_t srcTab, uint8_t srcSlot,
+                                           uint32_t srcItemEntry, uint32_t splitCount = 0);
 };
 
 /** SMSG_GUILD_BANK_LIST parser */
@@ -3447,7 +3527,58 @@ public:
                                   uint32_t stackCount, uint32_t bid,
                                   uint32_t buyout, uint32_t duration,
                                   bool preWotlk = false);
+    /// WotLK: one auction made of several (item guid, count) pieces. The
+    /// server sums the counts into a single stack (AuctionHouseHandler.cpp
+    /// HandleAuctionSellItem: itemsCount pairs, finalCount, CloneItem).
+    static network::Packet build(uint64_t auctioneerGuid,
+                                  const std::vector<std::pair<uint64_t, uint32_t>>& pieces,
+                                  uint32_t bid, uint32_t buyout, uint32_t duration);
 };
+
+/// The GlobalStrings key for an SMSG_AUCTION_COMMAND_RESULT. AuctionAction is
+/// 0 sell, 1 cancel, 2 bid; AuctionError is AzerothCore's AuctionHouseMgr.h
+/// enum (1 INVENTORY, 2 DATABASE_ERROR, 3 NOT_ENOUGHT_MONEY, 4 ITEM_NOT_FOUND,
+/// 5 HIGHER_BID, 7 BID_INCREMENT, 10 BID_OWN, 13 RESTRICTED_ACCOUNT). An OK
+/// names what happened (ERR_AUCTION_STARTED / _REMOVED / _BID_PLACED). Code 1
+/// is an inventory refusal whose own text comes from the InventoryResult when
+/// the server sends one; the key here is the fallback.
+inline const char* auctionCommandResultKey(uint32_t action, uint32_t error) {
+    if (error == 0) {
+        switch (action) {
+            case 0: return "ERR_AUCTION_STARTED";
+            case 1: return "ERR_AUCTION_REMOVED";
+            case 2: return "ERR_AUCTION_BID_PLACED";
+            default: return nullptr;
+        }
+    }
+    switch (error) {
+        case 3:  return "ERR_NOT_ENOUGH_MONEY";
+        case 4:  return "ERR_ITEM_NOT_FOUND";
+        case 5:  return "ERR_AUCTION_HIGHER_BID";
+        case 7:  return "ERR_AUCTION_BID_INCREMENT";
+        case 10: return "ERR_AUCTION_BID_OWN";
+        case 13: return "ERR_RESTRICTED_ACCOUNT";
+        default: return "ERR_AUCTION_DATABASE_ERROR";   // 1, 2 and anything unknown
+    }
+}
+
+/// One bag stack of the item being auctioned: its guid and how many it holds.
+struct AuctionSellSource {
+    uint64_t guid = 0;
+    uint32_t count = 0;
+};
+
+/// Split what the player holds into `numStacks` auctions of `stackSize` each,
+/// every auction a list of (guid, count) pieces for CMSG_AUCTION_SELL_ITEM.
+///
+/// Planned up front from one look at the bags, taking from the sources in
+/// order, so no piece asks for more of an item than is left in it once the
+/// earlier auctions have taken their share - the server only checks
+/// `item->GetCount() < count` per auction. A guid appears once per auction
+/// (the server refuses duplicates). Stops at the last full stack it can make.
+std::vector<std::vector<std::pair<uint64_t, uint32_t>>>
+planAuctionStacks(const std::vector<AuctionSellSource>& sources,
+                  uint32_t stackSize, uint32_t numStacks);
 
 /** CMSG_AUCTION_PLACE_BID packet builder */
 class AuctionPlaceBidPacket {

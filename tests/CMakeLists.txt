@@ -3095,3 +3095,12 @@ wowee_add_test(test_world_map_lua_arith SOURCES test_world_map_lua_arith.cpp)
 wowee_add_test(test_spell_chain_effect
     SOURCES test_spell_chain_effect.cpp
             ${CMAKE_SOURCE_DIR}/src/rendering/spell_chain_effect.cpp)
+
+# CMSG_SPLIT_ITEM (uint32 count from WotLK) and CMSG_AUTOSTORE_BAG_ITEM.
+wowee_add_packet_test(test_item_move_packets)
+
+# Macro slot renumbering, inactive talent group points, glyph socket diff.
+wowee_add_test(test_talent_macro_logic SOURCES test_talent_macro_logic.cpp)
+
+# GameError message kinds (Wow.exe 0xAC8AF0) and GlobalStrings formatting.
+wowee_add_test(test_game_messages SOURCES test_game_messages.cpp)

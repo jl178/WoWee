@@ -343,6 +343,34 @@ inline uint64_t getEntityTargetGuid(game::GameHandler* gh, uint64_t guid) {
     return targetGuid;
 }
 
+using game::RaidSlot;
+
+/// The raid, the player included, in the one order every raid index uses
+/// (game::buildRaidSlots). Empty when the group is not a raid.
+inline std::vector<RaidSlot> raidRoster(game::GameHandler* gh) {
+    if (!gh || !gh->isInGroup()) return {};
+    return game::buildRaidSlots(gh->getPartyData(), gh->getPlayerGuid());
+}
+
+/// The name at a 1-based raid index, or "" past the end.
+inline std::string raidSlotName(game::GameHandler* gh, int index) {
+    const auto raid = raidRoster(gh);
+    if (index < 1 || index > static_cast<int>(raid.size())) return {};
+    const RaidSlot& s = raid[static_cast<size_t>(index) - 1];
+    if (s.member) return s.member->name;
+    const auto* ch = gh->getActiveCharacter();
+    return ch ? ch->name : std::string();
+}
+
+/// The 1-based raid index of a guid, or 0 when they are not in the raid.
+inline int raidIndexOf(game::GameHandler* gh, uint64_t guid) {
+    if (guid == 0) return 0;
+    const auto raid = raidRoster(gh);
+    for (size_t i = 0; i < raid.size(); ++i)
+        if (raid[i].guid == guid) return static_cast<int>(i) + 1;
+    return 0;
+}
+
 // Resolve WoW unit IDs to GUID
 inline uint64_t resolveUnitGuid(game::GameHandler* gh, const std::string& uid) {
     if (uid == "player")      return gh->getPlayerGuid();
@@ -363,6 +391,11 @@ inline uint64_t resolveUnitGuid(game::GameHandler* gh, const std::string& uid) {
     // giver it came from, the gossip its own npc, and a vendor or a banker
     // theirs. The target is the last resort, and is usually the same NPC.
     if (uid == "npc" || uid == "questnpc") {
+        // During a trade "npc" is the trade partner: TradeFrame_Update names
+        // and draws the recipient from UnitName("NPC") and
+        // SetPortraitTexture(..., "NPC") (tradeframe.lua).
+        if (uid == "npc" && gh->isTradeOpen() && gh->getTradePeerGuid() != 0)
+            return gh->getTradePeerGuid();
         if (uid == "questnpc" && gh->getQuestDetails().npcGuid != 0)
             return gh->getQuestDetails().npcGuid;
         if (gh->getCurrentGossip().npcGuid != 0) return gh->getCurrentGossip().npcGuid;
@@ -406,10 +439,33 @@ inline uint64_t resolveUnitGuid(game::GameHandler* gh, const std::string& uid) {
         int idx = 0;
         try { idx = std::stoi(uid.substr(4)); } catch (...) { return 0; }
         if (idx < 1 || idx > 40) return 0;
-        const auto& pd = gh->getPartyData();
-        if (idx <= static_cast<int>(pd.members.size()))
-            return pd.members[idx - 1].guid;
+        // The same list GetRaidRosterInfo and GetNumRaidMembers count.
+        const auto raid = raidRoster(gh);
+        if (idx <= static_cast<int>(raid.size()))
+            return raid[static_cast<size_t>(idx) - 1].guid;
         return 0;
+    }
+    // The name of the player or of someone in their group stands for that
+    // unit, as it does in the stock client. ShowReadyCheck(initiator) tests
+    // UnitIsUnit("player", initiator) with the initiator's *name* to keep the
+    // prompt off the screen of whoever started the check, and SetPortraitTexture
+    // takes the same name; neither resolved, so the initiator was asked to
+    // answer their own check. Case-insensitive: callers lowercase the token.
+    if (!uid.empty() && gh) {
+        auto sameName = [&uid](const std::string& name) {
+            if (name.size() != uid.size()) return false;
+            for (size_t i = 0; i < name.size(); ++i) {
+                if (std::tolower(static_cast<unsigned char>(name[i])) !=
+                    std::tolower(static_cast<unsigned char>(uid[i]))) return false;
+            }
+            return true;
+        };
+        if (const auto* ch = gh->getActiveCharacter(); ch && sameName(ch->name))
+            return gh->getPlayerGuid();
+        if (gh->isInGroup()) {
+            for (const auto& m : gh->getPartyData().members)
+                if (sameName(m.name)) return m.guid;
+        }
     }
     return 0;
 }
@@ -461,12 +517,17 @@ struct QuestSpecialItem {
     uint32_t count = 0;
 };
 
+const game::GameHandler::QuestLogEntry* questAtLogRow(game::GameHandler* gh, int index);
+
 inline QuestSpecialItem questSpecialItemAt(game::GameHandler* gh, int questIndex) {
     QuestSpecialItem found;
     if (!gh || questIndex < 1) return found;
-    const auto& ql = gh->getQuestLog();
-    if (questIndex > static_cast<int>(ql.size())) return found;
-    const uint32_t itemId = ql[questIndex - 1].sourceItemId;
+    // A quest log index is a display row (zone headers count). Subscripting
+    // the raw log with it gave the item of the quest a row or more below - the
+    // tracker showed one quest's item beside another.
+    const auto* quest = questAtLogRow(gh, questIndex);
+    if (!quest) return found;
+    const uint32_t itemId = quest->sourceItemId;
     if (itemId == 0) return found;
 
     const auto& inv = gh->getInventory();
@@ -733,6 +794,16 @@ inline const game::ItemSlot* inventorySlotItem(const game::Inventory& inv, int s
     if (wire >= bank.bagFirst && wire < bank.bagFirst + bank.bagCount) {
         return &inv.getBankBagItem(wire - bank.bagFirst);
     }
+    // The backpack's own squares (inventory slots 24-39) and the keyring
+    // (KEYRING_SLOT_START up - KeyRingButtonIDToInvSlotID's ids, which
+    // containerframe.lua hands to GameTooltip:SetInventoryItem for a key).
+    if (wire >= game::slots::kBackpackFirst &&
+        wire <  game::slots::kBackpackFirst + inv.getBackpackSize()) {
+        return &inv.getBackpackSlot(wire - game::slots::kBackpackFirst);
+    }
+    if (wire >= bank.keyringFirst && wire < bank.keyringFirst + inv.getKeyringSize()) {
+        return &inv.getKeyringSlot(wire - bank.keyringFirst);
+    }
     return nullptr;
 }
 
@@ -860,6 +931,39 @@ inline uint64_t containerSlotGuid(game::GameHandler* gh, int bag, int slot) {
     return 0;
 }
 
+/// Whether the player could use an item - the isUsable GetMerchantItemInfo
+/// and GetBuybackItemInfo return, which merchantframe.lua turns into the red
+/// tint on the slot (SetItemButtonTextureVertexColor 0.9, 0, 0).
+///
+/// The checks the server makes on equip/use and the stock client mirrors on
+/// the list: class and race masks, required level, required skill and rank,
+/// and the weapon/armour proficiency SMSG_SET_PROFICIENCY reported. Anything
+/// not known yet - no item info, no proficiency mask - counts as usable, so a
+/// slot is only ever tinted for a reason.
+inline bool playerCanUseItem(game::GameHandler* gh, uint32_t itemId) {
+    if (!gh || itemId == 0) return true;
+    const auto* info = gh->getItemInfo(itemId);
+    if (!info || !info->valid) return true;
+    const uint32_t cls = gh->getPlayerClass();
+    const uint32_t race = gh->getPlayerRace();
+    if (info->allowableClass != 0 && cls >= 1 && cls <= 32 &&
+        !(info->allowableClass & (1u << (cls - 1)))) return false;
+    if (info->allowableRace != 0 && race >= 1 && race <= 32 &&
+        !(info->allowableRace & (1u << (race - 1)))) return false;
+    if (info->requiredLevel > gh->getPlayerLevel()) return false;
+    if (info->requiredSkill != 0) {
+        const auto& skills = gh->getPlayerSkills();
+        auto it = skills.find(info->requiredSkill);
+        if (it == skills.end() || it->second.value < info->requiredSkillRank) return false;
+    }
+    // ITEM_CLASS_WEAPON / ITEM_CLASS_ARMOR against the proficiency masks.
+    if (info->itemClass == 2 && gh->getWeaponProficiency() != 0 &&
+        info->subClass < 32 && !gh->canUseWeaponSubclass(info->subClass)) return false;
+    if (info->itemClass == 4 && gh->getArmorProficiency() != 0 &&
+        info->subClass < 32 && !gh->canUseArmorSubclass(info->subClass)) return false;
+    return true;
+}
+
 /// An item's cooldown, which is its on-use spell's.
 ///
 /// The client tracks cooldowns per spell, and an item on cooldown is one whose
@@ -912,6 +1016,31 @@ inline const game::GroupMember* findPartyMember(game::GameHandler* gh, uint64_t 
 /// player's own class, or the inspected player's when their tree is being drawn.
 const game::TalentEntry* talentAt(game::GameHandler* gh, int tabIndex, int talentIndex,
                                   uint8_t classIdOverride = 0);
+
+/// Whose talents a talent binding answers about, and which of their groups.
+///
+/// The stock bindings all take (…, inspect, pet, talentGroup) - see
+/// talentframebase.lua TalentFrame_Update and blizzard_talentui.lua - and the
+/// tree drawn is the one those name: the inspected player's class and ranks,
+/// or the viewer's own ranks in the group asked for (the inactive spec's tab
+/// shows that spec, not the active one). One resolver so the tab totals, the
+/// buttons, the prerequisite arrows, the link and the tooltip cannot disagree.
+struct TalentSource {
+    uint8_t classId = 0;
+    const std::unordered_map<uint32_t, uint8_t>* ranks = nullptr;
+    bool inspect = false;
+    /// Staged preview points belong to the viewer's active group only; the
+    /// talent frame stages nowhere else (blizzard_talentui.lua: Learn and
+    /// preview only when activeSpec == selectedSpec).
+    bool previewable = false;
+    int rank(uint32_t talentId) const {
+        if (!ranks) return 0;
+        auto it = ranks->find(talentId);
+        return it != ranks->end() ? it->second : 0;
+    }
+};
+/// `talentGroup` is FrameXML's 1-based group, or 0/out of range for the active one.
+TalentSource talentSource(game::GameHandler* gh, bool inspect, int talentGroup);
 
 /// The item id the cursor is carrying, or zero for anything else.
 ///
@@ -966,6 +1095,17 @@ void pickupMerchantItem(lua_State* L, int index);
 /// anywhere through the interface.
 void pickupSplitFromContainer(lua_State* L, game::GameHandler* gh,
                               int bag, int slot, int count);
+
+/// Put the held item down in a container, in wire bag/slot space, and clear
+/// the cursor. dstSlot 0xFF leaves the slot to the server (NULL_SLOT): a
+/// whole item then goes as CMSG_AUTOSTORE_BAG_ITEM, so it merges into
+/// partial stacks and a full bag is the server's equip error. A split held
+/// on the cursor (SplitContainerItem) moves only its count, as
+/// CMSG_SPLIT_ITEM - every drop path goes through here so none of them can
+/// send the whole stack instead. False when the cursor holds nothing the
+/// wire can name as a source.
+bool dropHeldItemInto(lua_State* L, game::GameHandler* gh,
+                      uint8_t dstBag, uint8_t dstSlot);
 
 /// Buy whatever vendor entry the cursor is holding and put the cursor down.
 /// False when it is holding something else, so a caller can fall through to

@@ -143,3 +143,17 @@ TEST_CASE("The no-source marker is not a container number", "[cursor][slots]") {
         REQUIRE(kCursorNoSource != bag);
     }
 }
+
+// The inventory ids the interface's bag functions hand back. 3.3.5's
+// KEYRING_SLOT_START is 86, so KeyRingButtonIDToInvSlotID(1) is 87, and the
+// bank bags (containers 5-11) sit at 68-74 - what ContainerIDToInventoryID
+// and BankButtonIDToInvSlotID(id, 1) both answer.
+TEST_CASE("Keyring and bank bag inventory ids", "[bank][slots]") {
+    const BankLayout wotlk = bankLayoutFor(false);
+    REQUIRE(toInventorySlot(wotlk.keyringFirst) == 87);
+    REQUIRE(toInventorySlot(wotlk.bagFirst) == 68);
+    REQUIRE(toInventorySlot(wotlk.bagFirst + wotlk.bagCount - 1) == 74);
+    // The backpack's squares as inventory ids, 24-39.
+    REQUIRE(toInventorySlot(backpackWireSlot(0)) == 24);
+    REQUIRE(toInventorySlot(backpackWireSlot(kBackpackCount - 1)) == 39);
+}

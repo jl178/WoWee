@@ -1635,6 +1635,15 @@ void CombatHandler::setTarget(uint64_t guid) {
 void CombatHandler::clearTarget() {
     if (owner_.getTargetGuid() != 0) {
         LOG_INFO("Target cleared");
+        // The server keeps its own copy of the selection - it is what other
+        // players see as this player's target (UNIT_FIELD_TARGET) and what GM
+        // commands act on - so a cleared target is said, as setTarget says a
+        // new one (CMSG_SET_SELECTION, guid 0). Without it the server went on
+        // believing the last target was selected.
+        if (owner_.isInWorld() && owner_.getSocket()) {
+            auto packet = SetSelectionPacket::build(0);
+            owner_.getSocket()->send(packet);
+        }
         // Zero the GUID before firing the event so callbacks/addons that query
         // the current target see null (consistent with setTarget which updates
         // targetGuid before the event).

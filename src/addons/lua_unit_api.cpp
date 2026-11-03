@@ -808,6 +808,54 @@ static int lua_UnitSex(lua_State* L) {
 
 // --- Player/Game API ---
 
+/// The character sheet's breakdowns - the buff parts of a stat, an armour or
+/// resistance value, attack power's modifiers and multiplier, and the weapon
+/// damage and speed the server has already worked out - are all unit fields
+/// the server sends to the unit's owner (UpdateFields.h, PRIVATE|OWNER).
+///
+/// Each sits at a fixed distance from a field the layout table names, the
+/// same in every expansion's unit block: POSSTAT0 and NEGSTAT0 follow the
+/// five STATs, the two RESISTANCEBUFFMODS arrays follow the seven
+/// RESISTANCES, ATTACK_POWER_MODS and _MULTIPLIER follow ATTACK_POWER (and
+/// the ranged pair RANGED_ATTACK_POWER), the off-hand damage follows the main
+/// hand's, RANGEDATTACKTIME follows the two BASEATTACKTIMEs and
+/// MAXRANGEDDAMAGE follows MINRANGEDDAMAGE.
+struct UnitStatFields {
+    const game::Entity* entity = nullptr;
+    bool has(game::UF base, int offset) const {
+        const uint16_t idx = game::fieldIndex(base);
+        return entity && idx != 0xFFFF && entity->hasField(static_cast<uint16_t>(idx + offset));
+    }
+    uint32_t raw(game::UF base, int offset) const {
+        const uint16_t idx = game::fieldIndex(base);
+        if (!entity || idx == 0xFFFF) return 0;
+        return entity->getField(static_cast<uint16_t>(idx + offset));
+    }
+    /// The buff parts are floats on the server, sent as uint32(value) - so a
+    /// negative one arrives as a two's-complement int (Unit.cpp,
+    /// BuildValuesUpdate).
+    int32_t asInt(game::UF base, int offset) const {
+        return static_cast<int32_t>(raw(base, offset));
+    }
+    float asFloat(game::UF base, int offset) const {
+        const uint32_t bits = raw(base, offset);
+        float f = 0.0f;
+        std::memcpy(&f, &bits, sizeof f);
+        return f;
+    }
+};
+
+/// The player's or the pet's unit, by the lowered unit id the sheet passes.
+static UnitStatFields unitStatFields(game::GameHandler* gh, const std::string& who) {
+    UnitStatFields f;
+    if (!gh) return f;
+    const uint64_t guid = (who == "player") ? gh->getPlayerGuid()
+                        : (who == "pet")    ? gh->getPetGuid() : 0;
+    if (guid == 0) return f;
+    if (auto e = gh->getEntityManager().getEntity(guid)) f.entity = e.get();
+    return f;
+}
+
 static int lua_UnitStat(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 0); return 4; }
@@ -823,11 +871,21 @@ static int lua_UnitStat(lua_State* L) {
         val = gh->getPlayerStat(statIdx);
     }
     if (val < 0) val = 0;
-    // We only have the effective value from the server; report base=effective, no buffs
-    lua_pushnumber(L, val); // base (approximate - server only sends effective)
-    lua_pushnumber(L, val); // effective
-    lua_pushnumber(L, 0);   // positive buff
-    lua_pushnumber(L, 0);   // negative buff
+    // stat, effectiveStat, posBuff, negBuff. The first two are both the
+    // total: PaperDollFrame_SetStat prints effectiveStat and works the base
+    // out itself as `stat - posBuff - negBuff`. The buffs are UNIT_FIELD_
+    // POSSTAT0+i and NEGSTAT0+i (Unit::UpdateStatBuffMod); with them at zero
+    // the sheet never coloured a buffed stat or explained it.
+    int32_t posBuff = 0, negBuff = 0;
+    if (statIdx >= 0 && statIdx < 5) {
+        const auto f = unitStatFields(gh, who);
+        posBuff = f.asInt(game::UF::UNIT_FIELD_STAT0, 5 + statIdx);
+        negBuff = f.asInt(game::UF::UNIT_FIELD_STAT0, 10 + statIdx);
+    }
+    lua_pushnumber(L, val);
+    lua_pushnumber(L, val);
+    lua_pushnumber(L, posBuff);
+    lua_pushnumber(L, negBuff);
     return 4;
 }
 
@@ -871,10 +929,15 @@ static int lua_GetRangedCritChance(lua_State* L) {
     return 1;
 }
 
-// GetSpellCritChance(school) → percent  (1=Holy,2=Fire,3=Nature,4=Frost,5=Shadow,6=Arcane)
+// GetSpellCritChance(school) → percent. The interface's schools count from
+// one - 1 physical, 2 holy ... 7 arcane: PaperDollFrame_SetRating's
+// CR_CRIT_SPELL branch starts at `holySchool = 2` and runs to
+// MAX_SPELL_SCHOOLS (7) - while the PLAYER_SPELL_CRIT_PERCENTAGE1 fields are
+// the wire's SpellSchools, physical at 0. Passed through unshifted, every
+// school read its neighbour and arcane read past the end.
 static int lua_GetSpellCritChance(lua_State* L) {
     auto* gh = getGameHandler(L);
-    int school = static_cast<int>(luaL_checknumber(L, 1));
+    int school = static_cast<int>(luaL_checknumber(L, 1)) - 1;
     float v = gh ? gh->getSpellCritPct(school) : 0.0f;
     lua_pushnumber(L, v >= 0 ? v : 0.0);
     return 1;
@@ -893,11 +956,17 @@ static int lua_GetCombatRating(lua_State* L) {
     return 1;
 }
 
-// GetSpellBonusDamage(school) → value  (1-6 magic schools)
+// GetSpellBonusDamage(school) → that school's bonus, schools numbered from
+// one as GetSpellCritChance's are (2 holy ... 7 arcane). The character pane
+// asks for each school and shows the smallest with a per-school tooltip
+// (PaperDollFrame_SetSpellBonusDamage), so one figure for all of them hid
+// every school-specific bonus. Without a school, the largest.
 static int lua_GetSpellBonusDamage(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnZero(L); }
-    int32_t sp = gh->getSpellPower();
+    int32_t sp = lua_isnumber(L, 1)
+        ? gh->getSpellDamageBonus(static_cast<int>(lua_tonumber(L, 1)) - 1)
+        : gh->getSpellPower();
     lua_pushnumber(L, sp >= 0 ? sp : 0);
     return 1;
 }
@@ -1497,11 +1566,33 @@ static int lua_GetTimeToWellRested(lua_State* L) {
 // The server sends most of what these want; where it does not, the honest
 // answer is a zero of the right shape rather than nothing.
 
-/// UnitAttackPower(unit) → base, positive buff, negative buff.
+/// base, positive buff, negative buff for one of the two attack powers.
 ///
-/// The server sends one effective number, not the three parts, so it is
-/// reported as all base and no buffs. The sheet adds them together, which
-/// gives the right total either way.
+/// UNIT_FIELD_ATTACK_POWER is the base alone; the modifier and the
+/// multiplier are the next two fields, and the total is
+/// (base + mods) * (1 + multiplier) - Unit::GetTotalAttackPowerValue, from
+/// what StatSystem.cpp's UpdateAttackPowerAndDamage stores. The sheet prints
+/// base + posBuff + negBuff, so the difference is the buff: reading the base
+/// alone left out every attack-power buff and talent multiplier.
+static int pushAttackPowerParts(lua_State* L, game::GameHandler* gh,
+                                game::UF baseField, int32_t fallbackBase) {
+    const auto f = unitStatFields(gh, "player");
+    int32_t base = fallbackBase > 0 ? fallbackBase : 0;
+    double bonus = 0.0;
+    if (f.has(baseField, 0)) {
+        base = f.asInt(baseField, 0);
+        const int32_t mods = f.asInt(baseField, 1);
+        const float mult = f.asFloat(baseField, 2);
+        const double total = (static_cast<double>(base) + mods) * (1.0 + mult);
+        bonus = total - base;
+    }
+    lua_pushnumber(L, base);
+    lua_pushnumber(L, bonus > 0 ? std::floor(bonus) : 0);
+    lua_pushnumber(L, bonus < 0 ? std::ceil(bonus) : 0);
+    return 3;
+}
+
+/// UnitAttackPower(unit) → base, positive buff, negative buff.
 static int lua_UnitAttackPower(lua_State* L) {
     auto* gh = getGameHandler(L);
     // Whose. PaperDollFrame_SetAttackPower is shared and the pet tab calls it
@@ -1516,18 +1607,12 @@ static int lua_UnitAttackPower(lua_State* L) {
         return 3;
     }
     const int32_t ap = gh ? gh->getMeleeAttackPower() : -1;
-    lua_pushnumber(L, ap > 0 ? ap : 0);
-    lua_pushnumber(L, 0);
-    lua_pushnumber(L, 0);
-    return 3;
+    return pushAttackPowerParts(L, gh, game::UF::UNIT_FIELD_ATTACK_POWER, ap);
 }
 static int lua_UnitRangedAttackPower(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int32_t ap = gh ? gh->getRangedAttackPower() : -1;
-    lua_pushnumber(L, ap > 0 ? ap : 0);
-    lua_pushnumber(L, 0);
-    lua_pushnumber(L, 0);
-    return 3;
+    return pushAttackPowerParts(L, gh, game::UF::UNIT_FIELD_RANGED_ATTACK_POWER, ap);
 }
 
 /// UnitDefense(unit) → base, modifier. Base defense skill is five per level -
@@ -1573,9 +1658,19 @@ static int lua_UnitAttackSpeed(lua_State* L) {
         const auto& inv = gh->getInventory();
         const auto& mh = inv.getEquipSlot(game::EquipSlot::MAIN_HAND);
         if (!mh.empty() && mh.item.delayMs > 0) mainSpeed = mh.item.delayMs / 1000.0;
+        // A weapon in the off hand, not a shield or a held-in-off-hand item:
+        // only a second weapon has a swing (paperdoll's `if ( offhandSpeed )`
+        // prints a dual-wield line).
         const auto& oh = inv.getEquipSlot(game::EquipSlot::OFF_HAND);
-        hasOffHand = !oh.empty();
+        hasOffHand = !oh.empty() && oh.item.damageMax > 0.0f;
         if (hasOffHand) offSpeed = oh.item.delayMs > 0 ? oh.item.delayMs / 1000.0 : 2.0;
+        // The swing times the server has set, haste included -
+        // UNIT_FIELD_BASEATTACKTIME main and off hand, in milliseconds.
+        const auto f = unitStatFields(gh, "player");
+        const uint32_t mainMs = f.raw(game::UF::UNIT_FIELD_BASEATTACKTIME, 0);
+        const uint32_t offMs = f.raw(game::UF::UNIT_FIELD_BASEATTACKTIME, 1);
+        if (mainMs > 0) mainSpeed = mainMs / 1000.0;
+        if (hasOffHand && offMs > 0) offSpeed = offMs / 1000.0;
     }
     lua_pushnumber(L, mainSpeed);
     if (hasOffHand) lua_pushnumber(L, offSpeed);
@@ -1628,10 +1723,25 @@ static int lua_UnitDamage(lua_State* L) {
         }
     }
     const double apSwing = (ap > 0) ? (ap / 14.0) * speed : 0.0;
-    lua_pushnumber(L, baseMin + apSwing);
-    lua_pushnumber(L, baseMax + apSwing);
-    lua_pushnumber(L, offMin > 0.0 ? offMin + apSwing / 2.0 : 0.0);
-    lua_pushnumber(L, offMax > 0.0 ? offMax + apSwing / 2.0 : 0.0);
+    double outMin = baseMin + apSwing, outMax = baseMax + apSwing;
+    double outOffMin = offMin > 0.0 ? offMin + apSwing / 2.0 : 0.0;
+    double outOffMax = offMax > 0.0 ? offMax + apSwing / 2.0 : 0.0;
+    // The server's own figures when it has sent them: UNIT_FIELD_MINDAMAGE,
+    // MAXDAMAGE, MINOFFHANDDAMAGE, MAXOFFHANDDAMAGE are the finished damage
+    // range, attack power, talents and the dual-wield penalty already in
+    // (Player::CalculateMinMaxDamage). The estimate above is the fallback.
+    const auto f = unitStatFields(gh, "player");
+    if (f.has(game::UF::UNIT_FIELD_MINDAMAGE, 1)) {
+        const float lo = f.asFloat(game::UF::UNIT_FIELD_MINDAMAGE, 0);
+        const float hi = f.asFloat(game::UF::UNIT_FIELD_MINDAMAGE, 1);
+        if (hi > 0.0f) { outMin = lo; outMax = hi; }
+        outOffMin = f.asFloat(game::UF::UNIT_FIELD_MINDAMAGE, 2);
+        outOffMax = f.asFloat(game::UF::UNIT_FIELD_MINDAMAGE, 3);
+    }
+    lua_pushnumber(L, outMin);
+    lua_pushnumber(L, outMax);
+    lua_pushnumber(L, outOffMin);
+    lua_pushnumber(L, outOffMax);
     lua_pushnumber(L, 0);
     lua_pushnumber(L, 0);
     lua_pushnumber(L, 1.0);
@@ -1639,13 +1749,28 @@ static int lua_UnitDamage(lua_State* L) {
 }
 
 /// UnitRangedDamage(unit) → speed, min, max, positive, negative, percent.
+///
+/// UNIT_FIELD_RANGEDATTACKTIME and MINRANGEDDAMAGE/MAXRANGEDDAMAGE, which the
+/// server keeps for the equipped ranged weapon. This answered a 2.8-second
+/// swing of attack power alone, whatever bow or wand was in the slot.
 static int lua_UnitRangedDamage(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int32_t ap = gh ? gh->getRangedAttackPower() : -1;
-    const double swing = (ap > 0) ? (ap / 14.0) * 2.8 : 0.0;
-    lua_pushnumber(L, 2.8);
-    lua_pushnumber(L, swing);
-    lua_pushnumber(L, swing);
+    double speed = 2.8;
+    double swing = (ap > 0) ? (ap / 14.0) * 2.8 : 0.0;
+    double lo = swing, hi = swing;
+    const auto f = unitStatFields(gh, "player");
+    const uint32_t ms = f.raw(game::UF::UNIT_FIELD_BASEATTACKTIME, 2);
+    if (f.has(game::UF::UNIT_FIELD_MINRANGEDDAMAGE, 1)) {
+        lo = f.asFloat(game::UF::UNIT_FIELD_MINRANGEDDAMAGE, 0);
+        hi = f.asFloat(game::UF::UNIT_FIELD_MINRANGEDDAMAGE, 1);
+        // Nothing in the ranged slot: the server zeroes both, and the sheet
+        // shows a zero speed as no ranged attack.
+        speed = (hi > 0.0 && ms > 0) ? ms / 1000.0 : 0.0;
+    }
+    lua_pushnumber(L, speed);
+    lua_pushnumber(L, lo);
+    lua_pushnumber(L, hi);
     lua_pushnumber(L, 0);
     lua_pushnumber(L, 0);
     lua_pushnumber(L, 1.0);
@@ -2080,9 +2205,8 @@ static int lua_StopAttack(lua_State* L) {
 static int lua_GetNumRaidMembers(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh || !gh->isInGroup()) { return luaReturnZero(L); }
-    const auto& pd = gh->getPartyData();
-    if (!game::groupIsRaid(pd.groupType)) { return luaReturnZero(L); }
-    lua_pushnumber(L, static_cast<int>(pd.members.size()) + 1);
+    // The same list raidN and GetRaidRosterInfo index, so the three agree.
+    lua_pushnumber(L, static_cast<int>(raidRoster(gh).size()));
     return 1;
 }
 
@@ -2150,18 +2274,12 @@ static int lua_UnitInRaid(lua_State* L) {
     if (!gh) { return luaReturnFalse(L); }
     std::string uidStr(uid);
     toLowerInPlace(uidStr);
-    const auto& pd = gh->getPartyData();
-    if (!game::groupIsRaid(pd.groupType)) { return luaReturnFalse(L); }
-    if (uidStr == "player") {
-        lua_pushboolean(L, 1);
-        return 1;
-    }
-    uint64_t guid = resolveUnitGuid(gh, uidStr);
-    bool found = false;
-    for (const auto& m : pd.members) {
-        if (m.guid == guid) { found = true; break; }
-    }
-    lua_pushboolean(L, found);
+    // The unit's raid index counted from zero, or nil - not a boolean.
+    // TargetFrameDropDown_Initialize does `id = UnitInRaid("target")` and then
+    // GetRaidRosterInfo(id + 1); a true there is arithmetic on a boolean.
+    const int index = raidIndexOf(gh, resolveUnitGuid(gh, uidStr));
+    if (index == 0) { return luaReturnNil(L); }
+    lua_pushnumber(L, index - 1);
     return 1;
 }
 
@@ -2170,28 +2288,76 @@ static int lua_GetRaidRosterInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
     int index = static_cast<int>(luaL_checknumber(L, 1));
     if (!gh || index < 1) { return luaReturnNil(L); }
+    // The raid with the player in it, the list raidN and GetNumRaidMembers
+    // use. Indexing the server's list - which leaves the player out - lost
+    // the last member and never showed the player.
+    const auto raid = raidRoster(gh);
+    if (index > static_cast<int>(raid.size())) { return luaReturnNil(L); }
+    const RaidSlot& s = raid[static_cast<size_t>(index) - 1];
+    const game::GroupMember* m = s.member;
     const auto& pd = gh->getPartyData();
-    if (index > static_cast<int>(pd.members.size())) { return luaReturnNil(L); }
-    const auto& m = pd.members[index - 1];
-    lua_pushstring(L, m.name.c_str());       // name
-    lua_pushnumber(L, m.guid == pd.leaderGuid ? 2 : (m.flags & 0x01 ? 1 : 0)); // rank (0=member, 1=assist, 2=leader)
-    lua_pushnumber(L, m.subGroup + 1);       // subgroup (1-indexed)
-    lua_pushnumber(L, m.level);              // level
-    // Class: resolve from entity if available
-    std::string className = "Unknown";
-    auto entity = gh->getEntityManager().getEntity(m.guid);
-    if (entity) {
-        uint32_t bytes0 = entity->getField(game::fieldIndex(game::UF::UNIT_FIELD_BYTES_0));
-        uint8_t classId = static_cast<uint8_t>((bytes0 >> 8) & 0xFF);
-        if (classId > 0 && classId < 12) className = kLuaClasses[classId];
+    const bool self = (m == nullptr);
+
+    std::string name = self ? gh->lookupName(s.guid) : m->name;
+    if (self && name.empty()) {
+        if (const auto* ch = gh->getActiveCharacter()) name = ch->name;
     }
-    lua_pushstring(L, className.c_str());    // class (localized)
-    lua_pushstring(L, className.c_str());    // fileName
-    lua_pushstring(L, "");                   // zone
-    lua_pushboolean(L, m.isOnline);          // online
-    lua_pushboolean(L, m.curHealth == 0);    // isDead
-    lua_pushstring(L, "NONE");               // role
-    lua_pushboolean(L, pd.looterGuid == m.guid ? 1 : 0); // isML
+    lua_pushstring(L, name.c_str());                         // 1: name
+    lua_pushnumber(L, s.guid == pd.leaderGuid ? 2 : ((s.flags & 0x01) ? 1 : 0)); // 2: rank
+    lua_pushnumber(L, s.subGroup + 1);                       // 3: subgroup (1-indexed)
+
+    // Level and zone from the party stats once they have come; the player's
+    // own from the player.
+    auto entity = gh->getEntityManager().getEntity(s.guid);
+    uint32_t level = self ? gh->getPlayerLevel() : (m->level ? m->level : 0u);
+    if (level == 0 && entity) level = entity->getField(game::fieldIndex(game::UF::UNIT_FIELD_LEVEL));
+    lua_pushnumber(L, level);                                // 4: level
+
+    // Class from the unit when it is in range, else the name query's cache,
+    // else nil. blizzard_raidui files the row under RAID_SUBGROUP_LISTS
+    // [fileName] when there is one, and "Unknown" is a key that table does
+    // not have - tinsert into nil raised and took the raid tab down.
+    uint8_t classId = self ? gh->getPlayerClass() : 0;
+    if (classId == 0 && entity) {
+        const uint32_t bytes0 = entity->getField(game::fieldIndex(game::UF::UNIT_FIELD_BYTES_0));
+        classId = static_cast<uint8_t>((bytes0 >> 8) & 0xFF);
+    }
+    if (classId == 0) classId = gh->lookupPlayerClass(s.guid);
+    if (classId > 0 && classId < 12) {
+        lua_pushstring(L, kLuaClasses[classId]);             // 5: class (localized)
+        luaPushClassToken(L, classId);                       // 6: fileName
+    } else {
+        lua_pushnil(L);
+        lua_pushnil(L);
+    }
+
+    // From C++ for the player too: calling GetRealZoneText here would pop a
+    // result off the stack between the return values already pushed, which
+    // slides the return window (tools/lua_return_window_check.py).
+    std::string zone;
+    if (self) {
+        zone = gh->getWhoAreaName(gh->getWorldStateZoneId());
+    } else if (m->hasPartyStats && m->zoneId != 0) {
+        zone = gh->getWhoAreaName(m->zoneId);
+    }
+    if (zone.empty()) lua_pushnil(L); else lua_pushstring(L, zone.c_str()); // 7: zone
+    lua_pushboolean(L, s.online ? 1 : 0);                    // 8: online
+    bool dead = false;
+    if (self) {
+        if (entity) dead = entity->getField(game::fieldIndex(game::UF::UNIT_FIELD_HEALTH)) == 0;
+    } else {
+        dead = m->hasPartyStats && m->curHealth == 0 && s.online;
+    }
+    lua_pushboolean(L, dead ? 1 : 0);                        // 9: isDead
+    // 10: role - "MAINTANK" or "MAINASSIST" from the member flags
+    // (MEMBER_FLAG_MAINTANK 0x02, MAINASSIST 0x04), else nil. The raid UI
+    // does tinsert(RAID_SUBGROUP_LISTS[role], i) whenever role is set, and
+    // has lists for those two only - "NONE" indexed nothing and raised.
+    if (s.flags & 0x02)      lua_pushstring(L, "MAINTANK");
+    else if (s.flags & 0x04) lua_pushstring(L, "MAINASSIST");
+    else                     lua_pushnil(L);
+    // 11: isML - the master looter, when master loot is the method.
+    lua_pushboolean(L, (pd.lootMethod == 2 && pd.looterGuid == s.guid) ? 1 : 0);
     return 11;
 }
 
@@ -2209,9 +2375,18 @@ static int lua_GetThreatStatusColor(lua_State* L) {
 }
 
 // GetReadyCheckStatus(unit) → status string
+//
+// "waiting", "ready" or "notready" while a check is under way, nil otherwise.
+// PlayerFrame_UpdateReadyCheck and PartyMemberFrame_UpdateReadyCheck draw the
+// check icons from nothing else, so a stub nil meant no icon on any frame.
 static int lua_GetReadyCheckStatus(lua_State* L) {
-    (void)L;
-    lua_pushnil(L); // No ready check in progress
+    auto* gh = getGameHandler(L);
+    if (!gh) return luaReturnNil(L);
+    std::string unit = luaL_optstring(L, 1, "player");
+    toLowerInPlace(unit);
+    const char* status = gh->readyCheckStatusFor(resolveUnitGuid(gh, unit));
+    if (!status) return luaReturnNil(L);
+    lua_pushstring(L, status);
     return 1;
 }
 
@@ -2590,11 +2765,18 @@ void registerUnitLuaAPI(lua_State* L) {
                       : (who == "player") ? gh->getArmorRating() : 0;
             }
             if (armor < 0) armor = 0;
-            lua_pushnumber(L, armor); // base
-            lua_pushnumber(L, armor); // effective
-            lua_pushnumber(L, armor); // armor (again for compat)
-            lua_pushnumber(L, 0);     // posBuff
-            lua_pushnumber(L, 0);     // negBuff
+            // base, effectiveArmor, armor, posBuff, negBuff. The sheet prints
+            // base + posBuff + negBuff (PaperDollFormatStat), so the base is
+            // what is left of the total once the buffs - UNIT_FIELD_
+            // RESISTANCEBUFFMODSPOSITIVE/NEGATIVE, school 0 - are taken off.
+            const auto f = unitStatFields(gh, who);
+            const int32_t pos = f.asInt(game::UF::UNIT_FIELD_RESISTANCES, 7);
+            const int32_t neg = f.asInt(game::UF::UNIT_FIELD_RESISTANCES, 14);
+            lua_pushnumber(L, armor - pos - neg); // base
+            lua_pushnumber(L, armor);             // effective
+            lua_pushnumber(L, armor);             // armor
+            lua_pushnumber(L, pos);
+            lua_pushnumber(L, neg);
             return 5;
         }},
                 {"UnitResistance", [](lua_State* L) -> int {
@@ -2613,10 +2795,20 @@ void registerUnitLuaAPI(lua_State* L) {
                 }
             }
             if (val < 0) val = 0;
-            lua_pushnumber(L, val); // base
-            lua_pushnumber(L, val); // effective
-            lua_pushnumber(L, 0);   // posBuff
-            lua_pushnumber(L, 0);   // negBuff
+            // base, resistance, positive, negative: the buff parts from the
+            // two RESISTANCEBUFFMODS arrays (Unit::UpdateResistanceBuffModsMod)
+            // and the base what remains. The resistance frame colours the
+            // value and builds its "( base +pos -neg )" tooltip from them.
+            int32_t pos = 0, neg = 0;
+            if (school >= 0 && school <= 6) {
+                const auto f = unitStatFields(gh, who);
+                pos = f.asInt(game::UF::UNIT_FIELD_RESISTANCES, 7 + school);
+                neg = f.asInt(game::UF::UNIT_FIELD_RESISTANCES, 14 + school);
+            }
+            lua_pushnumber(L, val - pos - neg); // base
+            lua_pushnumber(L, val);             // effective
+            lua_pushnumber(L, pos);
+            lua_pushnumber(L, neg);
             return 4;
         }},
                 {"UnitStat",      lua_UnitStat},

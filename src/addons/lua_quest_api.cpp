@@ -12,12 +12,14 @@
 #include "addons/world_map_api.hpp"
 #include "ui/chat/chat_utils.hpp"
 #include "core/logger.hpp"
+#include "pipeline/asset_manager.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <vector>
 
 namespace wowee::addons {
@@ -150,6 +152,28 @@ int questLogRowForQuest(game::GameHandler* gh, uint32_t questId) {
     return 0;
 }
 
+/// QuestInfo.dbc's name for a quest type id (column 1), or "" for none.
+static std::string questTypeName(game::GameHandler* gh, uint32_t type) {
+    if (!gh || type == 0) return {};
+    static std::unordered_map<uint32_t, std::string> names;
+    static bool loaded = false;
+    if (!loaded) {
+        auto* am = gh->services().assetManager;
+        if (!am || !am->isInitialized()) return {};
+        loaded = true;
+        if (auto dbc = am->loadDBC("QuestInfo.dbc"); dbc && dbc->isLoaded() && dbc->getFieldCount() >= 2) {
+            for (uint32_t i = 0; i < dbc->getRecordCount(); ++i)
+                names[dbc->getUInt32(i, 0)] = dbc->getString(i, 1);
+        }
+    }
+    auto it = names.find(type);
+    return it == names.end() ? std::string() : it->second;
+}
+
+// The game layer's quest events count rows the way this file does.
+static const bool kQuestRowResolverInstalled =
+    (game::questLogRowResolver() = &questLogRowForQuest, true);
+
 void openInterfaceQuestLog(game::GameHandler& gh, uint32_t questId) {
     const int row = questLogRowForQuest(&gh, questId);
     if (row > 0) {
@@ -210,10 +234,11 @@ static int lua_GetNumQuestLogEntries(lua_State* L) {
 static int lua_GetQuestLogTimeLeft(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) return luaReturnNil(L);
-    const int sel = gh->getSelectedQuestLogIndex();
-    const auto& ql = gh->getQuestLog();
-    if (sel < 1 || sel > static_cast<int>(ql.size())) return luaReturnNil(L);
-    const uint32_t questId = ql[static_cast<size_t>(sel) - 1].questId;
+    // The selection is a display row (zone headers count), so it resolves
+    // through the row list like every other quest log index.
+    const auto* sel = questAtLogRow(gh, gh->getSelectedQuestLogIndex());
+    if (!sel) return luaReturnNil(L);
+    const uint32_t questId = sel->questId;
     for (const auto& t : gh->getQuestTimers()) {
         if (t.first == questId) { lua_pushnumber(L, t.second); return 1; }
     }
@@ -277,10 +302,8 @@ static int lua_GetQuestRewardTitle(lua_State* L) {
     if (gh->isQuestOfferRewardOpen()) {
         titleId = gh->getQuestOfferReward().rewardTitleId;
     } else {
-        const int index = gh->getSelectedQuestLogIndex();
-        const auto& log = gh->getQuestLog();
-        if (index >= 1 && index <= static_cast<int>(log.size()))
-            titleId = log[static_cast<size_t>(index - 1)].rewardTitleId;
+        if (const auto* q = questAtLogRow(gh, gh->getSelectedQuestLogIndex()))
+            titleId = q->rewardTitleId;
     }
     if (titleId == 0) { return luaReturnNil(L); }
     const std::string name = gh->getFormattedTitleById(titleId);
@@ -295,15 +318,14 @@ static int lua_ProcessQuestLogRewardFactions(lua_State* L) { (void)L; return 0; 
 // selection because selectedQuest is defined further down.
 /// The quest log entry the player has selected, or null when nothing is.
 ///
-/// The log index is 1-based, as the interface counts it. This was defined
-/// twice in this file under two names, identically - one for the reward
-/// panels and one for everything else - which is one function.
+/// The log index is 1-based and counts display rows, zone headers included -
+/// it is what SelectQuestLogEntry was handed. This used to subscript the raw
+/// log with it, which has no header rows, so every reader here (share, XP,
+/// honor, reputation, title) answered for the quest one or more rows further
+/// down than the one selected; row 1 is always a header.
 static const game::QuestHandler::QuestLogEntry* selectedQuest(game::GameHandler* gh) {
     if (!gh) return nullptr;
-    const int index = gh->getSelectedQuestLogIndex();
-    const auto& log = gh->getQuestLog();
-    if (index < 1 || index > static_cast<int>(log.size())) return nullptr;
-    return &log[static_cast<size_t>(index - 1)];
+    return questAtLogRow(gh, gh->getSelectedQuestLogIndex());
 }
 // The reputation reward slots for whichever panel is open - the offer's own
 // when it is up, the selected log quest's otherwise (same reason as the title:
@@ -370,11 +392,11 @@ static int lua_GetQuestWatchIndex(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int idx = static_cast<int>(luaL_optnumber(L, 1, 0));
     if (!gh || idx < 1) return luaReturnNil(L);
-    const auto& ql = gh->getQuestLog();
-    if (idx > static_cast<int>(ql.size())) return luaReturnNil(L);
-    const uint32_t wanted = ql[static_cast<size_t>(idx) - 1].questId;
+    const auto* at = questAtLogRow(gh, idx);   // a display row, like every log index
+    if (!at) return luaReturnNil(L);
+    const uint32_t wanted = at->questId;
     int position = 0;
-    for (const auto& q : ql) {
+    for (const auto& q : gh->getQuestLog()) {
         if (!gh->isQuestTracked(q.questId)) continue;
         ++position;
         if (q.questId == wanted) { lua_pushnumber(L, position); return 1; }
@@ -393,12 +415,21 @@ static int lua_SortQuestWatches(lua_State* L) { lua_pushboolean(L, 0); return 1;
 // reorder, so dragging a tracker entry leaves it where the log puts it.
 static int lua_ShiftQuestWatches(lua_State* L) { (void)L; return 0; }
 
-// GetQuestSortIndex(questLogIndex) → the header the quest sits under.
-//
-// Nil: this quest log has no headers - GetQuestLogTitle answers false for
-// isHeader on every row - so there is no header index to give and nothing for
-// the caller to expand.
-static int lua_GetQuestSortIndex(lua_State* L) { (void)L; return luaReturnNil(L); }
+// GetQuestSortIndex(questLogIndex) → the row of the header the quest sits
+// under. WatchFrame expands it (ExpandQuestHeader(GetQuestSortIndex(i))) before
+// opening the log at a tracked quest; nil there became ExpandQuestHeader(0),
+// which opens every header.
+static int lua_GetQuestSortIndex(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const int idx = static_cast<int>(luaL_optnumber(L, 1, 0));
+    if (!gh || idx < 1) return luaReturnNil(L);
+    const auto rows = questRows(gh);
+    if (idx > static_cast<int>(rows.size())) return luaReturnNil(L);
+    for (int i = idx; i >= 1; --i) {
+        if (rows[static_cast<size_t>(i - 1)].isHeader) { lua_pushnumber(L, i); return 1; }
+    }
+    return luaReturnNil(L);
+}
 
 // ---- Quest log special items ----
 //
@@ -564,8 +595,13 @@ static int lua_GetQuestLogTitle(lua_State* L) {
     // The level is tracked - the query response carries it - and was being
     // answered as a flat zero beside a comment saying it was not.
     lua_pushnumber(L, q.level);          // 2: level
-    lua_pushnil(L);                      // 3: questTag ("Elite", "PvP", …)
-    lua_pushnumber(L, 0);                // 4: suggestedGroup
+    // 3: questTag - the QuestInfo.dbc name of the quest's type ("Group",
+    // "PvP", "Dungeon", "Raid", "Heroic"...), nil for a plain quest.
+    {
+        const std::string tag = questTypeName(gh, q.questType);
+        if (tag.empty()) lua_pushnil(L); else lua_pushstring(L, tag.c_str());
+    }
+    lua_pushnumber(L, q.suggestedPlayers); // 4: suggestedGroup
     lua_pushboolean(L, 0);               // 5: isHeader
     lua_pushboolean(L, 0);               // 6: isCollapsed
     // A number, not a boolean: 1 for complete, -1 for failed, nil otherwise.
@@ -579,7 +615,8 @@ static int lua_GetQuestLogTitle(lua_State* L) {
     if (q.failed)        lua_pushnumber(L, -1);
     else if (q.complete) lua_pushnumber(L, 1);
     else                 lua_pushnil(L);                        // 7: isComplete
-    lua_pushboolean(L, 0);               // 8: isDaily
+    // 8: isDaily - QUEST_FLAGS_DAILY (0x1000), 1 or nil.
+    if (q.questFlags & 0x1000u) lua_pushnumber(L, 1); else lua_pushnil(L);
     lua_pushnumber(L, q.questId);        // 9: questID
     // Not the id again: this is the developer switch that asks for the id to
     // be *shown*, and the quest log writes "26102 - Wolves Across the Border"
@@ -671,7 +708,11 @@ static int lua_GetQuestLogSelection(lua_State* L) {
 // never offering it at all. The button is disabled without this, and sharing
 // works, so silence would be the more misleading answer of the two.
 static int lua_GetQuestLogPushable(lua_State* L) {
-    lua_pushboolean(L, selectedQuest(getGameHandler(L)) != nullptr ? 1 : 0);
+    // WatchFrame's menu asks about a tracked quest by its row
+    // (GetQuestLogPushable(GetQuestIndexForWatch(i))); the log asks bare.
+    auto* gh = getGameHandler(L);
+    const auto* q = gh ? questAtLogRow(gh, questLogIndexOrSelected(L, 1)) : nullptr;
+    lua_pushboolean(L, q != nullptr ? 1 : 0);
     return 1;
 }
 
@@ -711,7 +752,8 @@ static int lua_GetQuestLogRewardArenaPoints(lua_State* L) {
 // QuestLogPushQuest() - offer the selected quest to the party.
 static int lua_QuestLogPushQuest(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (const auto* quest = selectedQuest(gh)) {
+    // Optional row, as WatchFrame's "Share" passes one.
+    if (const auto* quest = gh ? questAtLogRow(gh, questLogIndexOrSelected(L, 1)) : nullptr) {
         gh->shareQuestWithParty(quest->questId);
     }
     return 0;
@@ -2146,17 +2188,27 @@ static std::vector<const game::GameHandler::TalentTabEntry*> classTalentTabs(
     return tabs;
 }
 
-/// The rank a talent is at, for whoever is being asked about.
-static int talentRankFor(game::GameHandler* gh, bool inspect, uint32_t talentId) {
-    if (!gh) return 0;
+// Declared in lua_api_helpers.hpp; see TalentSource.
+TalentSource talentSource(game::GameHandler* gh, bool inspect, int talentGroup) {
+    static const std::unordered_map<uint32_t, uint8_t> kNoTalents;
+    TalentSource src;
+    src.ranks = &kNoTalents;
+    if (!gh) return src;
+    src.classId = talentClassId(gh, inspect);
     if (inspect) {
-        if (const auto* r = gh->getInspectResult()) {
-            auto it = r->talentRanks.find(talentId);
-            return (it != r->talentRanks.end()) ? it->second : 0;
-        }
-        return 0;
+        src.inspect = true;
+        // Only the inspected player's active group arrives with the inspect
+        // result, so that is what any group of theirs reads as.
+        if (const auto* r = gh->getInspectResult()) src.ranks = &r->talentRanks;
+        return src;
     }
-    return gh->getTalentRank(talentId);
+    const uint8_t active = gh->getActiveTalentSpec();
+    uint8_t group = active;
+    if (talentGroup >= 1 && talentGroup <= gh->getNumTalentGroups())
+        group = static_cast<uint8_t>(talentGroup - 1);
+    src.ranks = &gh->getLearnedTalents(group);
+    src.previewable = (group == active);
+    return src;
 }
 
 /// The fourth argument asks for the *pet's* tree.
@@ -2201,20 +2253,18 @@ static int lua_GetTalentTabInfo(lua_State* L) {
     }
     if (wantsPetTalents(L, 3)) return luaReturnNil(L);
     const bool inspect = lua_toboolean(L, 2) != 0;
-    uint8_t classId = talentClassId(gh, inspect);
-    const auto classTabs = classTalentTabs(gh, classId);
+    // Argument 4 is the talent group (TalentFrame.talentGroup): the inactive
+    // spec's tab totals its own points, not the active spec's.
+    const TalentSource src =
+        talentSource(gh, inspect, static_cast<int>(luaL_optnumber(L, 4, 0)));
+    const auto classTabs = classTalentTabs(gh, src.classId);
     if (tabIndex > static_cast<int>(classTabs.size())) {
         return luaReturnNil(L);
     }
     const auto* tab = classTabs[tabIndex - 1];
     // Count points spent in this tab
     int pointsSpent = 0;
-    static const std::unordered_map<uint32_t, uint8_t> kNoTalents;
-    const auto* inspectResult = inspect ? gh->getInspectResult() : nullptr;
-    const auto& learned = inspect
-        ? (inspectResult ? inspectResult->talentRanks : kNoTalents)
-        : gh->getLearnedTalents();
-    for (const auto& [talentId, rank] : learned) {
+    for (const auto& [talentId, rank] : *src.ranks) {
         const auto* entry = gh->getTalentEntry(talentId);
         if (entry && entry->tabId == tab->tabId) pointsSpent += rank;
     }
@@ -2226,7 +2276,7 @@ static int lua_GetTalentTabInfo(lua_State* L) {
     // Staged points are the viewer part-way through spending their own; they
     // have no meaning on someone else's tree.
     int previewSpent = 0;
-    if (!inspect) {
+    if (src.previewable) {
         for (const auto& [talentId, staged] : previewPoints()) {
             const auto* entry = gh->getTalentEntry(talentId);
             if (entry && entry->tabId == tab->tabId) previewSpent += staged;
@@ -2319,15 +2369,17 @@ const game::TalentEntry* talentAt(game::GameHandler* gh,
 /// points staged in the preview but not yet learned.
 static bool talentPrereqsMet(game::GameHandler* gh,
                              const game::GameHandler::TalentEntry* talent,
-                             bool withPreview) {
+                             bool withPreview, const TalentSource& src) {
     if (!gh || !talent) return false;
     for (int p = 0; p < 3; ++p) {
         const uint32_t prereqId = talent->prereqTalent[p];
         if (prereqId == 0) continue;
         // Counted from zero in the DBC, so the rank asked for is one more.
         const int needed = static_cast<int>(talent->prereqRank[p]) + 1;
-        int have = gh->getTalentRank(prereqId);
-        if (withPreview) {
+        // The ranks of the tree being drawn - the inspected player's, or the
+        // group asked for - not the viewer's active spec.
+        int have = src.rank(prereqId);
+        if (withPreview && src.previewable) {
             const auto staged = previewPoints().find(prereqId);
             if (staged != previewPoints().end()) have += staged->second;
         }
@@ -2346,7 +2398,10 @@ static int lua_GetTalentInfo(lua_State* L) {
         for (int i = 0; i < 10; i++) lua_pushnil(L);
         return 10;
     }
-    const auto* talent = talentAt(gh, tabIndex, talentIndex, talentClassId(gh, inspect));
+    // Argument 5 is the talent group, as GetTalentTabInfo's 4 is.
+    const TalentSource src =
+        talentSource(gh, inspect, static_cast<int>(luaL_optnumber(L, 5, 0)));
+    const auto* talent = talentAt(gh, tabIndex, talentIndex, src.classId);
     // Ten values, not eight. The frame reads previewRank into the rank it
     // displays and then compares it against maxRank - as nil that is an error
     // rather than a blank, and it happens the moment points are staged, which
@@ -2355,9 +2410,9 @@ static int lua_GetTalentInfo(lua_State* L) {
         for (int i = 0; i < 10; i++) lua_pushnil(L);
         return 10;
     }
-    const int rank = talentRankFor(gh, inspect, talent->talentId);
+    const int rank = src.rank(talent->talentId);
     const auto staged = previewPoints().find(talent->talentId);
-    const int previewRank = inspect
+    const int previewRank = !src.previewable
         ? rank
         : rank + (staged == previewPoints().end() ? 0 : staged->second);
 
@@ -2377,9 +2432,9 @@ static int lua_GetTalentInfo(lua_State* L) {
     lua_pushboolean(L, 0);                     // 7: isExceptional
     // Was hardcoded true, which drew every talent as learnable however deep in
     // a chain it sat.
-    lua_pushboolean(L, talentPrereqsMet(gh, talent, /*withPreview=*/false) ? 1 : 0);
+    lua_pushboolean(L, talentPrereqsMet(gh, talent, /*withPreview=*/false, src) ? 1 : 0);
     lua_pushnumber(L, previewRank);            // 9: previewRank
-    lua_pushboolean(L, talentPrereqsMet(gh, talent, /*withPreview=*/true) ? 1 : 0);
+    lua_pushboolean(L, talentPrereqsMet(gh, talent, /*withPreview=*/true, src) ? 1 : 0);
     return 10;
 }
 
@@ -2692,11 +2747,11 @@ static int& trainerSelection() {
 }
 /// The three type filters, seeded rather than empty.
 ///
-/// A trainer is walked up to to see what can be learned now, and the list that
-/// answers that is the available one: a hundred-row tradeskill trainer opened
-/// on everything is mostly rows the player cannot act on. So available shows
-/// and the two that cannot be acted on do not - which is the panel's filter
-/// doing what it is for, not a fourth control.
+/// Seeded with the stock defaults, which blizzard_trainerui.lua states as
+/// TRAINER_FILTER_AVAILABLE = 1, TRAINER_FILTER_UNAVAILABLE = 1,
+/// TRAINER_FILTER_USED = 0: what can be learned now and what cannot yet both
+/// show (the red rows are how a player sees what the next levels bring), and
+/// only what is already known is hidden. Unavailable used to start off.
 ///
 /// Seeded rather than left unset because three readers consult this map and all
 /// three have to agree what an absent entry means: the list, the dropdown's
@@ -2709,7 +2764,7 @@ static int& trainerSelection() {
 static std::unordered_map<std::string, bool>& trainerFilters() {
     static std::unordered_map<std::string, bool> filters{
         {"available", true},
-        {"unavailable", false},
+        {"unavailable", true},
         {"used", false},
     };
     return filters;
@@ -2742,8 +2797,33 @@ static std::string foldedForSearch(std::string v) {
 /// learning something fires TRAINER_UPDATE without a fresh one arriving.
 static const char* trainerServiceCategory(game::GameHandler* gh,
                                           const game::TrainerSpell& sp) {
-    if (gh && gh->getSpellHandler() && gh->getSpellHandler()->hasKnownSpell(sp.spellId))
+    const auto* spells = gh ? gh->getSpellHandler() : nullptr;
+    if (spells && spells->hasKnownSpell(sp.spellId))
         return "used";
+    // The same snapshot problem the other way: a next rank arrives
+    // unavailable because its ReqAbility (the chain nodes) is not known yet,
+    // and learning the rank before it does not resend the list. Re-checked
+    // here with the server's own tests (Trainer::GetDefaultSpellState: each
+    // ReqAbility known, level, skill rank) - but only for a row that names a
+    // ReqAbility, since a row unavailable for its class or race carries
+    // nothing this side could re-check.
+    if (sp.state == 1 && spells) {
+        const uint32_t req[3] = {sp.chainNode1, sp.chainNode2, sp.chainNode3};
+        bool namesAbility = false, abilitiesKnown = true;
+        for (uint32_t r : req) {
+            if (r == 0) continue;
+            namesAbility = true;
+            if (!spells->hasKnownSpell(r)) abilitiesKnown = false;
+        }
+        bool skillOk = sp.reqSkill == 0;
+        if (!skillOk) {
+            const auto& skills = gh->getPlayerSkills();
+            auto it = skills.find(sp.reqSkill);
+            skillOk = it != skills.end() && it->second.value >= sp.reqSkillValue;
+        }
+        if (namesAbility && abilitiesKnown && skillOk && gh->getPlayerLevel() >= sp.reqLevel)
+            return "available";
+    }
     return sp.state == 0 ? "available" : sp.state == 2 ? "used" : "unavailable";
 }
 
@@ -2965,7 +3045,12 @@ static int lua_GetTalentPrereqs(lua_State* L) {
     const int talentIndex = static_cast<int>(luaL_checknumber(L, 2));
     if (wantsPetTalents(L, 4)) return 0;
     settlePreview(gh);
-    const auto* talent = talentAt(gh, tabIndex, talentIndex);
+    // (tab, index, inspect, pet, talentGroup) - talentframebase.lua:195. The
+    // inspected player's class and ranks, or the group asked for: the
+    // viewer's class put the arrows of the wrong tree on an inspect tab.
+    const TalentSource src = talentSource(gh, lua_toboolean(L, 3) != 0,
+                                          static_cast<int>(luaL_optnumber(L, 5, 0)));
+    const auto* talent = talentAt(gh, tabIndex, talentIndex, src.classId);
     if (!talent) return 0;
 
     int pushed = 0;
@@ -2978,9 +3063,10 @@ static int lua_GetTalentPrereqs(lua_State* L) {
         // The DBC counts ranks from zero, so the rank a prerequisite asks for
         // is one more than the number stored beside it.
         const int needed = static_cast<int>(talent->prereqRank[p]) + 1;
-        const int have = gh->getTalentRank(prereqId);
+        const int have = src.rank(prereqId);
         const auto staged = previewPoints().find(prereqId);
-        const int previewHave = have + (staged == previewPoints().end() ? 0 : staged->second);
+        const int previewHave = have + (!src.previewable || staged == previewPoints().end()
+                                            ? 0 : staged->second);
 
         lua_pushnumber(L, prereq->row + 1);
         lua_pushnumber(L, prereq->column + 1);
@@ -3107,12 +3193,18 @@ static int lua_LearnPreviewTalents(lua_State* L) {
     }
 
     const std::vector<PreviewSend> ordered = inUnlockOrder(std::move(sends));
+    // One CMSG_LEARN_PREVIEW_TALENTS, as the stock Learn button sends: each
+    // talent once at its final rank, in unlock order. AzerothCore's
+    // HandleLearnPreviewTalents runs Player::LearnTalent on each pair in turn,
+    // which charges (rank - current + 1) points, so a final rank is a whole
+    // multi-rank step - and answers with one SMSG_TALENTS_INFO rather than one
+    // per rank requested.
+    std::vector<std::pair<uint32_t, uint32_t>> request;
+    request.reserve(ordered.size());
+    for (const PreviewSend& s : ordered)
+        request.emplace_back(s.talent->talentId, static_cast<uint32_t>(s.toRank));
+    gh->learnPreviewTalents(request);
     for (const PreviewSend& s : ordered) {
-        // One request per rank: the server counts them, and asking for the
-        // final rank in one call is not how the protocol reads it.
-        for (int r = s.fromRank; r <= s.toRank; ++r) {
-            gh->learnTalent(s.talent->talentId, static_cast<uint32_t>(r));
-        }
         // Held as staged until the server teaches them - see CommittedPreview.
         auto& pending = committed.talents[s.talent->talentId];
         pending.targetRank = s.toRank;
@@ -3138,7 +3230,15 @@ static int lua_LearnTalent(lua_State* L) {
 // GetUnspentTalentPoints(inspect, pet, group) → points
 static int lua_GetUnspentTalentPoints(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (!gh) { lua_pushnumber(L, 0); return 1; }
+    if (!gh || wantsPetTalents(L, 2)) { lua_pushnumber(L, 0); return 1; }
+    // inspect: the target's unspent count, which arrives with their talents
+    // (talentframebase.lua:525 asks with TalentFrame.inspect). The viewer's
+    // own was answered before.
+    if (lua_toboolean(L, 1)) {
+        const auto* r = gh->getInspectResult();
+        lua_pushnumber(L, r ? static_cast<double>(r->unspentTalents) : 0.0);
+        return 1;
+    }
     const int group = static_cast<int>(luaL_optnumber(L, 3, 0));
     const uint8_t spec = (group >= 1 && group <= 2) ? static_cast<uint8_t>(group - 1)
                                                    : gh->getActiveTalentSpec();
@@ -3202,20 +3302,27 @@ static int lua_SetActiveTalentGroup(lua_State* L) {
     return 0;
 }
 
-// GetTalentLink(tabIndex, talentIndex, inspect, group) → hyperlink
+// GetTalentLink(tabIndex, talentIndex, inspect, pet, talentGroup) → hyperlink
+// (blizzard_talentui.lua:438, inspecttalentframe.lua:6)
 static int lua_GetTalentLink(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const uint32_t id = resolveTalentId(gh, static_cast<int>(luaL_optnumber(L, 1, 0)),
-                                            static_cast<int>(luaL_optnumber(L, 2, 0)));
-    if (!gh || id == 0) { lua_pushnil(L); return 1; }
-    uint32_t rank1 = 0;
-    for (const auto& [talentId, entry] : gh->getAllTalents()) {
-        if (talentId == id) { rank1 = entry.rankSpells[0]; break; }
-    }
-    std::string name = gh->getSpellName(rank1);
+    if (wantsPetTalents(L, 4)) { lua_pushnil(L); return 1; }
+    // The tree and ranks the frame is drawing: an inspected player's link is
+    // their talent at their rank, and the inactive spec's is that spec's.
+    const TalentSource src = talentSource(gh, lua_toboolean(L, 3) != 0,
+                                          static_cast<int>(luaL_optnumber(L, 5, 0)));
+    const auto* talent = talentAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)),
+                                  static_cast<int>(luaL_optnumber(L, 2, 0)), src.classId);
+    if (!gh || !talent) { lua_pushnil(L); return 1; }
+    const uint32_t id = talent->talentId;
+    std::string name = gh->getSpellName(talent->rankSpells[0]);
     if (name.empty()) name = "Talent";
+    // The link's rank is counted from zero, -1 for none (the stock
+    // |Htalent:id:rank| form, which AzerothCore's Hyperlinks.cpp checks the
+    // same way). This sent the 1-based count, so a link always read one
+    // rank higher than what was learned.
     const std::string link = "|cff4e96f7|Htalent:" + std::to_string(id) + ":" +
-                             std::to_string(gh->getTalentRank(id)) + "|h[" + name +
+                             std::to_string(src.rank(id) - 1) + "|h[" + name +
                              "]|h|r";
     lua_pushstring(L, link.c_str());
     return 1;
@@ -3349,7 +3456,8 @@ static int lua_GetSuggestedGroupNum(lua_State* L) {
 }
 
 static int lua_GetQuestLogGroupNum(lua_State* L) {
-    lua_pushnumber(L, 0);
+    const auto* q = selectedLogEntry(getGameHandler(L));
+    lua_pushnumber(L, q ? q->suggestedPlayers : 0);
     return 1;
 }
 
@@ -4105,11 +4213,9 @@ void registerQuestLuaAPI(lua_State* L) {
                 lua_pushnumber(L, countRewards(v));
                 return 1;
             }
-            int idx = gh->getSelectedQuestLogIndex();
-            if (idx < 1) { return luaReturnZero(L); }
-            const auto& ql = gh->getQuestLog();
-            if (idx > static_cast<int>(ql.size())) { return luaReturnZero(L); }
-            lua_pushnumber(L, countRewards(&ql[idx-1].rewardItems));
+            const auto* q = questAtLogRow(gh, gh->getSelectedQuestLogIndex());
+            if (!q) { return luaReturnZero(L); }
+            lua_pushnumber(L, countRewards(&q->rewardItems));
             return 1;
         }},
                 {"GetNumQuestChoices", [](lua_State* L) -> int {
@@ -4119,11 +4225,9 @@ void registerQuestLuaAPI(lua_State* L) {
                 lua_pushnumber(L, countRewards(v));
                 return 1;
             }
-            int idx = gh->getSelectedQuestLogIndex();
-            if (idx < 1) { return luaReturnZero(L); }
-            const auto& ql = gh->getQuestLog();
-            if (idx > static_cast<int>(ql.size())) { return luaReturnZero(L); }
-            lua_pushnumber(L, countRewards(&ql[idx-1].rewardChoiceItems));
+            const auto* q = questAtLogRow(gh, gh->getSelectedQuestLogIndex());
+            if (!q) { return luaReturnZero(L); }
+            lua_pushnumber(L, countRewards(&q->rewardChoiceItems));
             return 1;
         }},
                 {"GetSuggestedGroupNum", lua_GetSuggestedGroupNum},
@@ -4256,9 +4360,19 @@ void registerQuestLuaAPI(lua_State* L) {
             const auto& glyphs = (spec >= 1 && spec <= 2)
                 ? gh->getGlyphs(static_cast<uint8_t>(spec - 1)) : gh->getGlyphs();
             uint16_t glyphId = glyphs[index - 1];
-            // Glyph type: slots 1,2,3 = major (1), slots 4,5,6 = minor (2)
-            int glyphType = (index <= 3) ? 1 : 2;
-            lua_pushboolean(L, 1);              // enabled
+            // The socket's type is its GlyphSlot.dbc row's TypeFlags (0 major,
+            // 1 minor), the row being the slot id the server put in
+            // PLAYER_FIELD_GLYPH_SLOTS_1. Stock 3.3.5a is major, minor, minor,
+            // major, minor, major - which is why the frame's socket art is
+            // laid out that way - not the three-and-three assumed here.
+            // FrameXML's numbering: GLYPHTYPE_MAJOR 1, GLYPHTYPE_MINOR 2.
+            const int32_t typeFlags = gh->glyphSocketTypeFlags(index);
+            const int glyphType = typeFlags < 0 ? ((index == 1 || index == 4 || index == 6) ? 1 : 2)
+                                                : (typeFlags == 1 ? 2 : 1);
+            // Locked until the level unlocks it: PLAYER_GLYPHS_ENABLED, set by
+            // AzerothCore's Player::InitGlyphsForLevel. glyphui draws the lock
+            // art for enabled = false (blizzard_glyphui.lua 79-89).
+            lua_pushboolean(L, gh->glyphSocketEnabled(index) ? 1 : 0);  // enabled
             lua_pushnumber(L, glyphType);       // glyphType (1=major, 2=minor)
             if (glyphId != 0) {
                 // The *spell*, not the properties id the server sent. Every
@@ -5054,7 +5168,10 @@ void registerQuestLuaAPI(lua_State* L) {
                 ? gh->getGlyphs(static_cast<uint8_t>(spec - 1)) : gh->getGlyphs();
             const uint16_t glyphId = glyphs[index - 1];
             if (glyphId == 0) { lua_pushnil(L); return 1; }
-            std::string name = gh->getSpellName(glyphId);
+            // The name is the glyph's spell's: glyphId is a GlyphProperties
+            // id, which as a spell id named some unrelated spell.
+            gh->ensureGlyphPropertiesLoaded();
+            std::string name = gh->getSpellName(gh->getGlyphSpellId(glyphId));
             if (name.empty()) name = "Glyph";
             const std::string link = "|cff66bbff|Hglyph:" + std::to_string(index) +
                                      ":" + std::to_string(glyphId) + "|h[" + name +
@@ -5062,14 +5179,28 @@ void registerQuestLuaAPI(lua_State* L) {
             lua_pushstring(L, link.c_str());
             return 1;
         }},
-                // GlyphMatchesSocket(socket) → whether what is on the cursor
-                // fits. Still false, and now for a narrower reason: the cursor
-                // does carry the item, but nothing here reads a glyph's own
-                // socket type - major glyphs go in three sockets and minor ones
-                // in the other three, and lighting all six would offer a drop
-                // the server then refuses.
+                // GlyphMatchesSocket(socket) → whether the glyph being placed
+                // - one used and waiting (USE_GLYPH), or one on the cursor -
+                // fits that socket: its GlyphProperties TypeFlags equal the
+                // socket's GlyphSlot TypeFlags, the test AzerothCore's
+                // Spell::EffectApplyGlyph makes before applying it. Also false
+                // for a locked socket, which the server refuses outright.
                 {"GlyphMatchesSocket", [](lua_State* L) -> int {
-            lua_pushboolean(L, 0);
+            auto* gh = getGameHandler(L);
+            const int socket = static_cast<int>(luaL_optnumber(L, 1, 0));
+            bool match = false;
+            if (gh && socket >= 1 && socket <= game::GameHandler::MAX_GLYPH_SLOTS &&
+                gh->glyphSocketEnabled(socket)) {
+                uint32_t itemId = gh->getPendingGlyphItemId();
+                if (itemId == 0) itemId = cursorItemId();
+                const uint32_t props = itemId ? gh->glyphPropertiesForItem(itemId) : 0;
+                if (props != 0) {
+                    gh->ensureGlyphPropertiesLoaded();
+                    const int32_t glyphType = gh->getGlyphTypeFlags(props);
+                    match = glyphType >= 0 && glyphType == gh->glyphSocketTypeFlags(socket);
+                }
+            }
+            lua_pushboolean(L, match ? 1 : 0);
             return 1;
         }},
                 
@@ -5134,12 +5265,21 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"GetNumCompletedAchievements", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); return 2; }
-            // The name cache is one entry per achievement in the DBC, which is
-            // the only count of "all of them" this client has. Asking for it
-            // is what loads it.
-            gh->ensureAchievementNamesLoaded();
-            const size_t total = gh->achievementNameCacheRef().size();
-            const size_t earned = gh->getEarnedAchievements().size();
+            // What the achievement tab lists: every category under
+            // Achievements, for this character's side - not statistics, which
+            // nothing completes, and not the other faction's twins. The whole
+            // DBC (1817 rows, a third of them statistics or the other side's)
+            // made the summary bar read a fraction of what it should.
+            gh->ensureAchievementCategoriesLoaded();
+            const auto& earnedSet = gh->getEarnedAchievements();
+            size_t total = 0, earned = 0;
+            for (uint32_t cat : gh->getAchievementCategoryOrder()) {
+                for (uint32_t a : gh->getCategoryAchievements(cat)) {
+                    ++total;
+                    if (earnedSet.count(a)) ++earned;
+                }
+            }
+            if (total == 0) earned = earnedSet.size();
             // Never fewer total than earned: if the DBC did not load, saying
             // "3 of 0" is worse than saying the total is what we have seen.
             lua_pushnumber(L, static_cast<lua_Number>(total ? total : earned));
@@ -5404,11 +5544,28 @@ void registerQuestLuaAPI(lua_State* L) {
             gh->ensureAchievementCriteriaLoaded();
             const auto& list = gh->getAchievementCriteria(id);
             if (list.empty()) { lua_pushstring(L, "--"); return 1; }
+            // A statistic can count over several criteria - one per
+            // battleground, one per dungeon boss - and its flags say how they
+            // combine (DBCEnums.h): ACHIEVEMENT_FLAG_SUMM 0x08 adds them,
+            // _MAX_USED 0x10 takes the largest. Otherwise it is the one that
+            // has a value. Reading criterion one alone showed "--" for every
+            // statistic whose first criterion had not moved.
             const auto& progress = gh->getCriteriaProgress();
-            const auto pit = progress.find(list[0].id);
-            if (pit == progress.end()) { lua_pushstring(L, "--"); return 1; }
-            lua_pushstring(L, std::to_string(
-                static_cast<uint64_t>(pit->second)).c_str());
+            const uint32_t flags = gh->getAchievementFlags(id);
+            bool any = false;
+            uint64_t sum = 0, best = 0, first = 0;
+            for (const auto& c : list) {
+                const auto pit = progress.find(c.id);
+                if (pit == progress.end()) continue;
+                const auto v = static_cast<uint64_t>(pit->second);
+                if (!any) first = v;
+                any = true;
+                sum += v;
+                best = std::max(best, v);
+            }
+            if (!any) { lua_pushstring(L, "--"); return 1; }
+            const uint64_t value = (flags & 0x08u) ? sum : (flags & 0x10u) ? best : first;
+            lua_pushstring(L, std::to_string(value).c_str());
             return 1;
         }},
                 // The comparison tab, which used to say the server is never
@@ -5554,7 +5711,9 @@ void registerQuestLuaAPI(lua_State* L) {
             lua_pushstring(L, desc.c_str());       // 8: description
             lua_pushnumber(L, gh->getAchievementFlags(id)); // 9: flags
             lua_pushstring(L, achievementIconPath(gh, id).c_str()); // 10: icon
-            lua_pushstring(L, "");                 // 11: rewardText
+            // 11: rewardText - Achievement.dbc's Reward column, which the
+            // panel prints under the achievement ("Reward: Black War Bear").
+            lua_pushstring(L, gh->getAchievementRewardText(id).c_str());
             lua_pushboolean(L, 0);                 // 12: isGuildAchievement
             return 12;
         }},

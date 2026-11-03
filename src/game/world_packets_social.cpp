@@ -1052,7 +1052,10 @@ bool parseGuildRosterBody(network::Packet& packet, GuildRosterData& data,
         }
         auto& m = data.members[i];
         m.guid = packet.readUInt64();
-        m.online = (packet.readUInt8() != 0);
+        // A set of flags, not a boolean: online 0x01, AFK 0x02, DND 0x04
+        // (GUILDMEMBER_STATUS_*; GuildRosterMemberData writes Member::GetFlags).
+        m.statusFlags = packet.readUInt8();
+        m.online = (m.statusFlags & 0x01) != 0;
 
         // Validate before reading name string
         if (!packet.hasData()) {
@@ -1091,8 +1094,9 @@ bool parseGuildRosterBody(network::Packet& packet, GuildRosterData& data,
             }
         }
 
-        // Online status affects next fields
-        if (!m.online) {
+        // The last-online float follows a zero status byte
+        // (GuildRosterMemberData: `if (!Status)`).
+        if (m.statusFlags == 0) {
             if (!packet.hasRemaining(4)) {
                 m.lastOnline = 0.0f;
             } else {

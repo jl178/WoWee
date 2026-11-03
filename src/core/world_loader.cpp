@@ -1243,10 +1243,13 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
         addonManager_->fireEvent("UPDATE_CHAT_WINDOWS");
         addonManager_->fireEvent("PLAYER_LOGIN");
         addonManager_->fireEvent("PLAYER_ENTERING_WORLD");
-    } else if (addonManager_ && app_.addonsLoaded_) {
-        // Subsequent world entries (e.g. teleport, instance entry)
-        addonManager_->fireEvent("PLAYER_ENTERING_WORLD");
     }
+    // Not for later world entries: SMSG_NEW_WORLD's handler
+    // (MovementHandler, after MSG_MOVE_WORLDPORT_ACK) already raises
+    // PLAYER_ENTERING_WORLD for every transfer, and firing it here as well
+    // gave every teleport and instance entry two of them - FrameXML's
+    // entering-world handlers (party frames, the minimap, the watch frame)
+    // each ran twice.
 }
 
 void WorldLoader::startWorldPreload(uint32_t mapId, const std::string& mapName,

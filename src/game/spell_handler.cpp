@@ -1,4 +1,5 @@
 #include "game/spell_handler.hpp"
+#include "game/talent_points.hpp"
 #include "game/combat_text_filter.hpp"
 #include "game/global_strings.hpp"
 #include "addons/lua_api_registrations.hpp"
@@ -1839,6 +1840,26 @@ void SpellHandler::learnTalent(uint32_t talentId, uint32_t requestedRank) {
     owner_.getSocket()->send(packet);
 }
 
+void SpellHandler::learnPreviewTalents(const std::vector<std::pair<uint32_t, uint32_t>>& talents) {
+    if (talents.empty()) return;
+    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
+    // One CMSG_LEARN_PREVIEW_TALENTS with every staged talent at its final
+    // rank, which is what the stock Learn button sends; the server learns
+    // them in the order given and answers once with SMSG_TALENTS_INFO.
+    // Where the opcode is not mapped (before WotLK) a CMSG_LEARN_TALENT per
+    // rank is the only way to ask.
+    const auto* table = getActiveOpcodeTable();
+    if (table && table->hasOpcode(Opcode::CMSG_LEARN_PREVIEW_TALENTS)) {
+        LOG_INFO("Learning ", talents.size(), " previewed talents");
+        owner_.getSocket()->send(LearnPreviewTalentsPacket::build(talents));
+        return;
+    }
+    for (const auto& [talentId, toRank] : talents) {
+        const uint32_t have = getTalentRank(talentId);
+        for (uint32_t r = have + 1; r <= toRank; ++r) learnTalent(talentId, r);
+    }
+}
+
 void SpellHandler::openCraftingWindow(uint32_t skillLine) {
     craftingWindowOpen_ = true;
     craftingSkillLine_ = skillLine;
@@ -3627,6 +3648,27 @@ void SpellHandler::handleSupercededSpell(network::Packet& packet) {
             owner_.addSystemChatMessage("Upgraded to " + newName);
         }
     }
+
+    // The spellbook lists the new rank in place of the old one, and redraws
+    // only on SPELLS_CHANGED - so after a trainer rank-up it kept showing the
+    // old rank. LEARNED_SPELL_IN_TAB flashes the tab, as handleLearnedSpell
+    // does for a new spell; a rank that SMSG_LEARNED_SPELL already announced
+    // is not flashed twice.
+    spellBookTabsDirty_ = true;
+    if (owner_.addonEventCallbackRef()) {
+        if (!newSpellAlreadyAnnounced) {
+            int tabIndex = 0;
+            const auto& tabs = getSpellBookTabs();
+            for (size_t t = 0; t < tabs.size() && tabIndex == 0; ++t) {
+                for (uint32_t id : tabs[t].spellIds) {
+                    if (id == newSpellId) { tabIndex = static_cast<int>(t) + 1; break; }
+                }
+            }
+            if (tabIndex > 0)
+                owner_.addonEventCallbackRef()("LEARNED_SPELL_IN_TAB", {std::to_string(tabIndex)});
+        }
+        owner_.addonEventCallbackRef()("SPELLS_CHANGED", {});
+    }
 }
 
 void SpellHandler::handleUnlearnSpells(network::Packet& packet) {
@@ -3681,6 +3723,13 @@ void SpellHandler::handleTalentsInfo(network::Packet& packet) {
     const bool talentGroupChanged =
         talentsInitialized_ && previousTalentGroup != activeTalentGroup;
 
+    // The active group's sockets before this packet, to tell the glyph frame
+    // which socket changed (below). Only meaningful when the same group comes
+    // back: a spec swap replaces all six and the frame redraws whole on
+    // ACTIVE_TALENT_GROUP_CHANGED.
+    const auto glyphsBefore = learnedGlyphs_[activeTalentGroup];
+    const bool diffGlyphs = talentsInitialized_ && !talentGroupChanged;
+
     activeTalentSpec_ = activeTalentGroup;
     // The server's own count: 1 until dual spec is bought. GetNumTalentGroups
     // answers from this, and the talent frame draws a spec tab per group.
@@ -3713,6 +3762,18 @@ void SpellHandler::handleTalentsInfo(network::Packet& packet) {
 
     unspentTalentPoints_[activeTalentGroup] =
         static_cast<uint8_t>(unspentTalents > 255 ? 255 : unspentTalents);
+    // The packet's unspent count is the active group's only, so the other
+    // group's was whatever it was the last time that group was active - or 0
+    // before then - and its tab showed a stale count. Both groups share one
+    // point total; see otherGroupUnspent.
+    if (talentGroupCount_ >= 2) {
+        const uint8_t other = activeTalentGroup ^ 1u;
+        const uint32_t unspentOther = otherGroupUnspent(
+            talentPointsSpent(learnedTalents_[activeTalentGroup]), unspentTalents,
+            talentPointsSpent(learnedTalents_[other]));
+        unspentTalentPoints_[other] =
+            static_cast<uint8_t>(unspentOther > 255 ? 255 : unspentOther);
+    }
 
     LOG_INFO("handleTalentsInfo: unspent=", unspentTalents,
              " groups=", (int)talentGroupCount, " active=", (int)activeTalentGroup,
@@ -3731,6 +3792,20 @@ void SpellHandler::handleTalentsInfo(network::Packet& packet) {
                  std::to_string(previousTalentGroup + 1)});
         }
         owner_.addonEventCallbackRef()("PLAYER_TALENT_UPDATE", {});
+        // The glyph frame redraws a socket, pulses and plays the create or
+        // destroy sound on these, with the 1-based socket as the argument
+        // (blizzard_glyphui.lua GlyphFrame_OnEvent). The server announces a
+        // placed or removed glyph only through this packet, so the diff is
+        // the event.
+        if (diffGlyphs) {
+            for (const auto& [change, socket] :
+                 glyphChanges(glyphsBefore, learnedGlyphs_[activeTalentGroup])) {
+                const char* ev = change == GlyphChange::Added   ? "GLYPH_ADDED"
+                               : change == GlyphChange::Removed ? "GLYPH_REMOVED"
+                                                                : "GLYPH_UPDATED";
+                owner_.addonEventCallbackRef()(ev, {std::to_string(socket)});
+            }
+        }
     }
 
     if (!talentsInitialized_) {
@@ -3773,13 +3848,12 @@ void SpellHandler::handleAchievementEarned(network::Packet& packet) {
         }
     }
     if (isSelf) {
-        char buf[256];
-        if (!achName.empty()) {
-            std::snprintf(buf, sizeof(buf), "Achievement earned: %s", achName.c_str());
-        } else {
-            std::snprintf(buf, sizeof(buf), "Achievement earned! (ID %u)", achievementId);
-        }
-        owner_.addSystemChatMessage(buf);
+        // No chat line of our own either: the server's CHAT_MSG_ACHIEVEMENT
+        // goes to every player in say range, the earner among them
+        // (AchievementMgr::SendAchievementEarned's PlayerDistWorker), so a
+        // local line printed the player's own achievement twice. A realm
+        // first gets SMSG_SERVER_FIRST_ACHIEVEMENT instead, which has its own
+        // line; the toast is the badge ACHIEVEMENT_EARNED raises below.
 
         owner_.earnedAchievementsRef().insert(achievementId);
         owner_.achievementDatesRef()[achievementId] = earnDate;
@@ -3882,6 +3956,7 @@ void SpellHandler::handlePetSpells(network::Packet& packet) {
         uint8_t spellCount = packet.readUInt8();
         owner_.petSpellListRef().clear();
         owner_.petAutocastSpellsRef().clear();
+        owner_.petAutocastableSpellsRef().clear();
         for (uint8_t i = 0; i < spellCount; ++i) {
             // One uint32, not six bytes: MAKE_UNIT_ACTION_BUTTON puts the spell
             // in the low twenty-four bits and the state in the top byte, the
@@ -3899,6 +3974,11 @@ void SpellHandler::handlePetSpells(network::Packet& packet) {
             // bit. The old test was & 0x0001, which is ACT_PASSIVE's bit.
             if (state & 0x40) {
                 owner_.petAutocastSpellsRef().insert(spellId);
+            }
+            // 0x80 is set on both ACT_ENABLED and ACT_DISABLED, the two
+            // states only an autocastable spell is given.
+            if (state & 0x80) {
+                owner_.petAutocastableSpellsRef().insert(spellId);
             }
         }
     } while (false);
@@ -4312,6 +4392,15 @@ void SpellHandler::loadSpellNameCache() const {
     const auto timing = pipeline::detectSpellTimingFields(dbc.get(), spellL);
     const uint32_t recoveryField = timing.recoveryTime;
     const uint32_t categoryRecoveryField = timing.categoryRecoveryTime;
+    // StartRecoveryCategory: 133 is the global cooldown's category, 0 a spell
+    // the GCD does not touch (Auto Shot, Attack). Column 205 of the 234-field
+    // WotLK record - checked on the 3.3.5a file: Fireball 133 and Judgement
+    // of Light 133 with StartRecoveryTime 1500 beside it, Auto Shot and
+    // Attack 0. Other shapes are not mapped and keep the unknown marker.
+    uint32_t startRecoveryCategoryField =
+        spellL ? spellL->field("StartRecoveryCategory") : 0xFFFFFFFF;
+    if (startRecoveryCategoryField == 0xFFFFFFFF && fieldCount == 234)
+        startRecoveryCategoryField = 205;
 
     uint32_t count = dbc->getRecordCount();
     for (uint32_t i = 0; i < count; ++i) {
@@ -4394,6 +4483,8 @@ void SpellHandler::loadSpellNameCache() const {
                 entry.recoveryMs = dbc->getUInt32(i, recoveryField);
             if (categoryRecoveryField != 0xFFFFFFFF && categoryRecoveryField < fieldCount)
                 entry.categoryRecoveryMs = dbc->getUInt32(i, categoryRecoveryField);
+            if (startRecoveryCategoryField < fieldCount)
+                entry.startRecoveryCategory = dbc->getUInt32(i, startRecoveryCategoryField);
             if (hasEffectFields) {
                 entry.createdItemId = pipeline::spellCreatedItem(*dbc, i, effectFields, itemTypeFields);
             }

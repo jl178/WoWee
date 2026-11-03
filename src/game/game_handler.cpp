@@ -2,6 +2,7 @@
 #include "game/unit_motion_glue.hpp"
 #include "game/reputation_standing.hpp"
 #include "game/spell_classification.hpp"
+#include "game/macro_slots.hpp"
 
 #include <set>
 
@@ -1264,11 +1265,101 @@ std::vector<uint32_t> GameHandler::getMacroIds() const {
 }
 
 void GameHandler::setMacroText(uint32_t macroId, const std::string& text) {
-    if (text.empty())
-        macros_.erase(macroId);
-    else
-        macros_[macroId] = text;
+    // An empty body does not delete: the stock macro frame creates a macro
+    // with a nil body and fills it in later (blizzard_macroui.lua
+    // MacroPopupOkayButton_OnClick, then MacroFrame_SaveMacro), so erasing on
+    // empty made every new macro vanish the moment it was created.
+    macros_[macroId] = text;
     saveCharacterConfig();
+}
+
+void GameHandler::deleteMacro(uint32_t macroId) {
+    if (!macros_.count(macroId)) return;
+    const uint32_t last = isCharacterMacroId(macroId) ? kCharacterMacroLast
+                        : isAccountMacroId(macroId)   ? kAccountMacroLast
+                                                      : macroId;
+    // Shift the rest of the half down one, as the stock client does, so the
+    // ids stay dense - the macro frame lists 1..GetNumMacros() by position.
+    for (uint32_t id = macroId; id <= last; ++id) {
+        macros_.erase(id);
+        macroNames_.erase(id);
+        macroIcons_.erase(id);
+        const uint32_t next = id + 1;
+        if (next > last || !macros_.count(next)) continue;
+        macros_[id] = std::move(macros_[next]);
+        if (auto it = macroNames_.find(next); it != macroNames_.end()) macroNames_[id] = it->second;
+        if (auto it = macroIcons_.find(next); it != macroIcons_.end()) macroIcons_[id] = it->second;
+    }
+    saveCharacterConfig();
+    // Action buttons hold a macro by index, so they shift with it: one on
+    // the deleted macro is emptied and one on a later macro in the same half
+    // follows it down. Left alone they ran whichever macro slid into the
+    // number. setActionBarSlot saves, tells the server and fires
+    // ACTIONBAR_SLOT_CHANGED for each.
+    for (int slot = 0; slot < ACTION_BAR_SLOTS; ++slot) {
+        if (actionBar[slot].type != ActionBarSlot::MACRO) continue;
+        const uint32_t newId = macroIdAfterDelete(actionBar[slot].id, macroId);
+        if (newId == actionBar[slot].id) continue;
+        if (newId == 0) setActionBarSlot(slot, ActionBarSlot::EMPTY, 0);
+        else setActionBarSlot(slot, ActionBarSlot::MACRO, newId);
+    }
+}
+
+bool GameHandler::loadAccountMacros() {
+    // Account macros are shared by every character on the account - stock
+    // keeps them in WTF/Account/<name>/macros-cache.txt beside the
+    // per-character macros-cache.txt. Here: one file per account in the same
+    // directory as the character configs.
+    std::string account;
+    for (char c : accountName) account += std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
+    if (account.empty()) return false;
+    for (uint32_t id = kAccountMacroFirst; id <= kAccountMacroLast; ++id) {
+        macros_.erase(id); macroNames_.erase(id); macroIcons_.erase(id);
+    }
+    accountMacrosLoaded_ = true;
+    std::ifstream in(getCharacterConfigDir() + "/account_" + account + "_macros.cfg");
+    if (!in.is_open()) {
+        // No account file yet: leave the slot unloaded so the character
+        // file's ids 1-36 (where they were kept before) are adopted, and the
+        // next save writes them here.
+        return false;
+    }
+    std::string line;
+    while (std::getline(in, line)) {
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos || line.rfind("macro_", 0) != 0) continue;
+        const std::string key = line.substr(0, eq);
+        const std::string val = line.substr(eq + 1);
+        const size_t under = key.find('_', 6);
+        if (under == std::string::npos) continue;
+        uint32_t id = 0;
+        try { id = static_cast<uint32_t>(std::stoul(key.substr(6, under - 6))); } catch (...) { continue; }
+        if (!isAccountMacroId(id)) continue;
+        const std::string field = key.substr(under + 1);
+        if (field == "text") macros_[id] = unescapeMacroBody(val);
+        else if (field == "name" && !val.empty()) macroNames_[id] = val;
+        else if (field == "icon" && !val.empty()) macroIcons_[id] = val;
+    }
+    return true;
+}
+
+void GameHandler::saveAccountMacros() {
+    if (!accountMacrosLoaded_) return;
+    std::string account;
+    for (char c : accountName) account += std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
+    if (account.empty()) return;
+    std::error_code ec;
+    std::filesystem::create_directories(getCharacterConfigDir(), ec);
+    std::ofstream out(getCharacterConfigDir() + "/account_" + account + "_macros.cfg");
+    if (!out.is_open()) return;
+    for (const auto& [id, text] : macros_) {
+        if (!isAccountMacroId(id)) continue;
+        out << "macro_" << id << "_text=" << escapeMacroBody(text) << "\n";
+        auto n = macroNames_.find(id);
+        if (n != macroNames_.end() && !n->second.empty()) out << "macro_" << id << "_name=" << n->second << "\n";
+        auto i = macroIcons_.find(id);
+        if (i != macroIcons_.end() && !i->second.empty()) out << "macro_" << id << "_icon=" << i->second << "\n";
+    }
 }
 
 void GameHandler::saveCharacterConfig() {
@@ -1297,26 +1388,24 @@ void GameHandler::saveCharacterConfig() {
         out << "action_bar_" << i << "_id=" << actionBar[i].id << "\n";
     }
 
-    // Save client-side macro text (escape newlines as \n literal)
+    // Save client-side macro text (escape newlines as \n literal). Every
+    // macro is written, empty body included, because the key is what makes
+    // it exist. Account macros (1-36) go to the account file instead, once
+    // that file is in use.
+    auto inThisFile = [this](uint32_t id) {
+        return !(accountMacrosLoaded_ && isAccountMacroId(id));
+    };
     for (const auto& [id, text] : macros_) {
-        if (!text.empty()) {
-            std::string escaped;
-            escaped.reserve(text.size());
-            for (char c : text) {
-                if (c == '\n') { escaped += "\\n"; }
-                else if (c == '\r') { /* skip CR */ }
-                else if (c == '\\') { escaped += "\\\\"; }
-                else { escaped += c; }
-            }
-            out << "macro_" << id << "_text=" << escaped << "\n";
-        }
+        if (inThisFile(id))
+            out << "macro_" << id << "_text=" << escapeMacroBody(text) << "\n";
     }
     for (const auto& [id, name] : macroNames_) {
-        if (!name.empty()) out << "macro_" << id << "_name=" << name << "\n";
+        if (!name.empty() && inThisFile(id)) out << "macro_" << id << "_name=" << name << "\n";
     }
     for (const auto& [id, icon] : macroIcons_) {
-        if (!icon.empty()) out << "macro_" << id << "_icon=" << icon << "\n";
+        if (!icon.empty() && inThisFile(id)) out << "macro_" << id << "_icon=" << icon << "\n";
     }
+    saveAccountMacros();
 
     // The quest log itself is not saved: the server sends it on every login,
     // so a stored copy could only ever be staler than what arrives. What is
@@ -1362,6 +1451,17 @@ void GameHandler::loadCharacterConfig() {
     // These selections are per-character. Clear the previous character's
     // values even when the new character has no saved config yet.
     trackedQuestIds_.clear();
+    // Macros too: the previous character's own macros stayed in the map and
+    // showed up on the next character's tab. Account macros come from the
+    // account file; with none written yet the character file's 1-36 are
+    // adopted below (where they used to be kept) and move there on save.
+    for (auto it = macros_.begin(); it != macros_.end();) {
+        if (isAccountMacroId(it->first)) { ++it; continue; }
+        macroNames_.erase(it->first);
+        macroIcons_.erase(it->first);
+        it = macros_.erase(it);
+    }
+    const bool accountMacrosFromFile = loadAccountMacros();
 
     std::string path = getCharacterConfigDir() + "/" + ch->name + ".cfg";
     std::ifstream in(path);
@@ -1394,20 +1494,11 @@ void GameHandler::loadCharacterConfig() {
             if (secondUnder == std::string::npos) continue;
             uint32_t macroId = 0;
             try { macroId = static_cast<uint32_t>(std::stoul(key.substr(firstUnder, secondUnder - firstUnder))); } catch (...) { continue; }
-            if (key.substr(secondUnder + 1) == "text" && !val.empty()) {
-                // Unescape \n and \\ sequences
-                std::string unescaped;
-                unescaped.reserve(val.size());
-                for (size_t i = 0; i < val.size(); ++i) {
-                    if (val[i] == '\\' && i + 1 < val.size()) {
-                        if (val[i+1] == 'n')  { unescaped += '\n'; ++i; }
-                        else if (val[i+1] == '\\') { unescaped += '\\'; ++i; }
-                        else { unescaped += val[i]; }
-                    } else {
-                        unescaped += val[i];
-                    }
-                }
-                macros_[macroId] = std::move(unescaped);
+            // The account file is authoritative for 1-36 once it exists.
+            if (accountMacrosFromFile && isAccountMacroId(macroId)) continue;
+            if (key.substr(secondUnder + 1) == "text") {
+                // An empty body is still a macro.
+                macros_[macroId] = unescapeMacroBody(val);
             } else if (key.substr(secondUnder + 1) == "name" && !val.empty()) {
                 macroNames_[macroId] = val;
             } else if (key.substr(secondUnder + 1) == "icon" && !val.empty()) {
@@ -2018,7 +2109,7 @@ void GameHandler::buyBankSlot() {
 }
 
 uint32_t GameHandler::getBankBagSlotPrice(int slotIndex) const {
-    return InventoryHandler::getBankBagSlotPrice(slotIndex);
+    return inventoryHandler_ ? inventoryHandler_->getBankBagSlotPrice(slotIndex) : 0;
 }
 
 void GameHandler::depositItem(uint8_t srcBag, uint8_t srcSlot) {
@@ -2067,6 +2158,19 @@ void GameHandler::guildBankDepositItem(uint8_t tabId, uint8_t bankSlot, uint8_t 
     if (inventoryHandler_) inventoryHandler_->guildBankDepositItem(tabId, bankSlot, srcBag, srcSlot);
 }
 
+void GameHandler::guildBankMoveItem(uint8_t srcTab, uint8_t srcSlot, uint8_t dstTab,
+                                    uint8_t dstSlot, uint32_t splitCount) {
+    if (inventoryHandler_) inventoryHandler_->guildBankMoveItem(srcTab, srcSlot, dstTab, dstSlot, splitCount);
+}
+
+void GameHandler::setGuildBankLockedSlot(uint8_t tab, uint8_t slot) {
+    if (inventoryHandler_) inventoryHandler_->setGuildBankLockedSlot(tab, slot);
+}
+
+bool GameHandler::isGuildBankSlotLocked(uint8_t tab, uint8_t slot) const {
+    return inventoryHandler_ && inventoryHandler_->isGuildBankSlotLocked(tab, slot);
+}
+
 void GameHandler::queryGuildBankText(uint8_t tabId) {
     if (inventoryHandler_) inventoryHandler_->queryGuildBankText(tabId);
 }
@@ -2112,6 +2216,15 @@ void GameHandler::auctionSellItem(int backpackIndex, uint32_t bid,
 void GameHandler::auctionSellItemByGuid(uint64_t itemGuid, uint32_t stackCount, uint32_t bid,
                                         uint32_t buyout, uint32_t duration) {
     if (inventoryHandler_) inventoryHandler_->auctionSellItemByGuid(itemGuid, stackCount, bid, buyout, duration);
+}
+
+void GameHandler::auctionPostStacks(uint64_t firstGuid, uint32_t itemId, uint32_t stackSize,
+                                    uint32_t numStacks, uint32_t bid, uint32_t buyout,
+                                    uint32_t duration) {
+    if (inventoryHandler_) {
+        inventoryHandler_->auctionPostStacks(firstGuid, itemId, stackSize, numStacks,
+                                             bid, buyout, duration);
+    }
 }
 
 void GameHandler::auctionPlaceBid(uint32_t auctionId, uint32_t amount) {
@@ -2202,16 +2315,28 @@ void GameHandler::cancelTrade() {
     if (inventoryHandler_) inventoryHandler_->cancelTrade();
 }
 
-void GameHandler::setTradeItem(uint8_t tradeSlot, uint8_t bag, uint8_t bagSlot) {
-    if (inventoryHandler_) inventoryHandler_->setTradeItem(tradeSlot, bag, bagSlot);
+bool GameHandler::setTradeItem(uint8_t tradeSlot, uint8_t bag, uint8_t bagSlot) {
+    return inventoryHandler_ && inventoryHandler_->setTradeItem(tradeSlot, bag, bagSlot);
 }
 
-void GameHandler::clearTradeItem(uint8_t tradeSlot) {
-    if (inventoryHandler_) inventoryHandler_->clearTradeItem(tradeSlot);
+bool GameHandler::clearTradeItem(uint8_t tradeSlot) {
+    return inventoryHandler_ && inventoryHandler_->clearTradeItem(tradeSlot);
 }
 
-void GameHandler::setTradeGold(uint64_t copper) {
-    if (inventoryHandler_) inventoryHandler_->setTradeGold(copper);
+bool GameHandler::setTradeGold(uint64_t copper) {
+    return inventoryHandler_ && inventoryHandler_->setTradeGold(copper);
+}
+
+uint64_t GameHandler::getTradePeerGuid() const {
+    return inventoryHandler_ ? inventoryHandler_->getTradePeerGuid() : 0;
+}
+
+uint32_t GameHandler::getMyTradeSpell() const {
+    return inventoryHandler_ ? inventoryHandler_->getMyTradeSpell() : 0;
+}
+
+uint32_t GameHandler::getPeerTradeSpell() const {
+    return inventoryHandler_ ? inventoryHandler_->getPeerTradeSpell() : 0;
 }
 
 void GameHandler::resetTradeState() {
@@ -2471,6 +2596,13 @@ void GameHandler::loadAchievementNameCache() {
             uint32_t flags = dbc->getUInt32(i, 41);
             if (flags != 0) achievementFlagsCache_[id] = flags;
         }
+        // Field 43 is the Reward string, first of its seventeen locales -
+        // read off the file: 614 "For The Alliance!" carries "Reward: Black
+        // War Bear" and 1563 "Hail to the Chef" "Title Reward: Chef".
+        if (fieldCount > 43) {
+            std::string reward = dbc->getString(i, 43);
+            if (!reward.empty()) achievementRewardCache_[id] = std::move(reward);
+        }
     }
     LOG_INFO("Achievement: loaded ", achievementNameCache_.size(), " names from Achievement.dbc");
 }
@@ -2585,14 +2717,77 @@ void GameHandler::ensureGlyphPropertiesLoaded() {
     if (!am || !am->isInitialized()) return;
     glyphPropertiesLoaded_ = true;
 
+    // GlyphSlot.dbc: Id, TypeFlags, Order (AzerothCore GlyphSlotEntry). Read
+    // first, so a missing GlyphProperties does not skip it. The 3.3.5a file
+    // has slots 21-26 at Order 1-6 with TypeFlags 0,1,1,0,1,0.
+    if (auto slots = am->loadDBC("GlyphSlot.dbc");
+        slots && slots->isLoaded() && slots->getFieldCount() >= 3) {
+        for (uint32_t i = 0; i < slots->getRecordCount(); ++i) {
+            const uint32_t id = slots->getUInt32(i, 0);
+            glyphSlotTypeFlags_[id] = slots->getUInt32(i, 1);
+            if (const uint32_t order = slots->getUInt32(i, 2)) glyphSlotByOrder_[order] = id;
+        }
+    }
+
     auto dbc = am->loadDBC("GlyphProperties.dbc");
     if (!dbc || !dbc->isLoaded() || dbc->getFieldCount() < 2) return;
+    // Id, SpellId, TypeFlags, SpellIconId (AzerothCore GlyphPropertiesEntry).
+    const bool haveType = dbc->getFieldCount() >= 3;
     for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
         const uint32_t id = dbc->getUInt32(i, 0);
         const uint32_t spellId = dbc->getUInt32(i, 1);
         if (id != 0 && spellId != 0) glyphSpellCache_[id] = spellId;
+        if (id != 0 && haveType) glyphTypeFlagsCache_[id] = dbc->getUInt32(i, 2);
     }
     LOG_INFO("Glyphs: ", glyphSpellCache_.size(), " properties mapped to spells");
+}
+
+int32_t GameHandler::glyphSocketTypeFlags(int socket) {
+    if (socket < 1 || socket > MAX_GLYPH_SLOTS) return -1;
+    ensureGlyphPropertiesLoaded();
+    bool known = false;
+    const uint16_t idx = fieldIndex(UF::PLAYER_FIELD_GLYPH_SLOTS_1);
+    uint32_t slotId = 0;
+    if (idx != 0xFFFF && playerGuid != 0) {
+        if (auto entity = getEntityManager().getEntity(playerGuid)) {
+            const uint16_t f = static_cast<uint16_t>(idx + socket - 1);
+            if (entity->hasField(f)) { slotId = entity->getField(f); known = true; }
+        }
+    }
+    // Not published (or not yet arrived): the slot the server would have
+    // put there, by Order.
+    if (!known || slotId == 0) {
+        auto o = glyphSlotByOrder_.find(static_cast<uint32_t>(socket));
+        if (o != glyphSlotByOrder_.end()) slotId = o->second;
+    }
+    auto it = glyphSlotTypeFlags_.find(slotId);
+    return it != glyphSlotTypeFlags_.end() ? static_cast<int32_t>(it->second) : -1;
+}
+
+bool GameHandler::glyphSocketEnabled(int socket) const {
+    if (socket < 1 || socket > MAX_GLYPH_SLOTS) return false;
+    bool known = false;
+    const uint32_t mask = playerFieldValue(UF::PLAYER_GLYPHS_ENABLED, &known);
+    if (!known || fieldIndex(UF::PLAYER_GLYPHS_ENABLED) == 0xFFFF) return true;
+    return (mask & (1u << (socket - 1))) != 0;
+}
+
+uint32_t GameHandler::glyphPropertiesForItem(uint32_t itemId) {
+    const auto* info = getItemInfo(itemId);
+    if (!info || !info->valid) return 0;
+    loadSpellNameCache();
+    for (const auto& sp : info->spells) {
+        if (sp.spellId == 0) continue;
+        auto it = spellNameCache_.find(sp.spellId);
+        if (it == spellNameCache_.end()) continue;
+        for (int e = 0; e < 3; ++e) {
+            // SPELL_EFFECT_APPLY_GLYPH; AzerothCore Spell::EffectApplyGlyph
+            // reads the GlyphProperties id from EffectMiscValue.
+            if (it->second.effectIds[e] == 74 && it->second.effectMiscValues[e] > 0)
+                return static_cast<uint32_t>(it->second.effectMiscValues[e]);
+        }
+    }
+    return 0;
 }
 
 void GameHandler::ensureAchievementCategoriesLoaded() {
@@ -2621,7 +2816,11 @@ void GameHandler::ensureAchievementCategoriesLoaded() {
         if (id == 0 || achievementNameCache_.find(id) == achievementNameCache_.end()) continue;
         const uint32_t category = dbc->getUInt32(i, 38);
         achievementCategoryCache_[id] = category;
-        categoryAchievements_[category].push_back(id);
+        // Field 1 is Faction: -1 for both sides, 0 Horde-only, 1
+        // Alliance-only (the server's AchievementEntry::requiredFaction).
+        const auto faction = static_cast<int32_t>(dbc->getUInt32(i, 1));
+        if (faction != 1) categoryAchievements_[0][category].push_back(id);
+        if (faction != 0) categoryAchievements_[1][category].push_back(id);
         if (haveFlags && (getAchievementFlags(id) & 0x1u) != 0)
             statisticCategories.insert(category);
         // Field 3 is Supercedes: the achievement this one follows on from.
@@ -3544,14 +3743,186 @@ void GameHandler::requestCalendarEvent(uint64_t eventId) {
 }
 
 void GameHandler::createCalendarEvent(const CalendarEventDraft& draft) {
-    if (socialHandler_) socialHandler_->createCalendarEvent(draft);
+    if (!socialHandler_) return;
+    // The invite list is the draft's own: the player as owner, then everyone
+    // the server has answered a pre-invite for. The server invites nobody it
+    // is not sent here (CalendarHandler.cpp:298), the creator included.
+    std::vector<CalendarAddEventInvite> invites;
+    if (calendarEventIsNew_) {
+        for (const auto& inv : calendarEventDetail_.invitees) {
+            invites.push_back({inv.guid, inv.status, inv.rank});
+        }
+    }
+    socialHandler_->createCalendarEvent(draft, invites);
 }
 
 void GameHandler::respondToCalendarInvite(uint64_t eventId, uint64_t inviteId,
                                           uint32_t status) {
     if (socialHandler_) {
         socialHandler_->respondToCalendarInvite(eventId, inviteId, status);
+        // Answered by SMSG_CALENDAR_CLEAR_PENDING_ACTION or an error
+        // (CalendarHandler.cpp:642).
+        setCalendarActionPending(true);
     }
+}
+
+void GameHandler::signUpForCalendarEvent(uint64_t eventId, bool tentative) {
+    if (socialHandler_) {
+        socialHandler_->signUpForCalendarEvent(eventId, tentative);
+        setCalendarActionPending(true);
+    }
+}
+
+void GameHandler::removeCalendarInvite(uint64_t inviteeGuid, uint64_t inviteId,
+                                       uint64_t ownerInviteId, uint64_t eventId) {
+    if (socialHandler_) {
+        socialHandler_->removeCalendarInvite(inviteeGuid, inviteId, ownerInviteId, eventId);
+    }
+}
+
+void GameHandler::copyCalendarEvent(uint64_t eventId, uint64_t inviteId,
+                                    uint32_t packedTime) {
+    if (socialHandler_) socialHandler_->copyCalendarEvent(eventId, inviteId, packedTime);
+}
+
+void GameHandler::complainCalendarEvent(uint64_t eventId, uint64_t creatorGuid) {
+    if (socialHandler_) socialHandler_->complainCalendarEvent(eventId, creatorGuid);
+}
+
+void GameHandler::massInviteArenaTeamToCalendarEvent(uint32_t teamId) {
+    if (socialHandler_) socialHandler_->massInviteArenaTeamToCalendarEvent(teamId);
+}
+
+void GameHandler::beginNewCalendarEvent(uint32_t flags) {
+    calendarEventDetail_ = CalendarEventDetail{};
+    calendarEventDetail_.creatorGuid = playerGuid;
+    calendarEventDetail_.flags = flags;
+    calendarEventIsNew_ = true;
+    calendarSelectedInvite_ = 0;
+    calendarDraft_ = CalendarEventDraft{};
+    calendarDraft_.flags = flags;
+    // The creator heads the list as its owner, confirmed - the row the server
+    // is sent for them, since it adds no one itself. An announcement has no
+    // list: the server never reads one for it (CalendarHandler.cpp:291).
+    if (!(flags & kCalendarFlagAnnouncement)) {
+        CalendarEventInvitee me;
+        me.guid = playerGuid;
+        me.level = static_cast<uint8_t>(std::min<uint32_t>(getPlayerLevel(), 255));
+        me.status = kCalendarStatusConfirmed;
+        me.rank = kCalendarRankOwner;
+        calendarEventDetail_.invitees.push_back(me);
+    }
+}
+
+void GameHandler::closeCalendarEvent() {
+    calendarEventDetail_ = CalendarEventDetail{};
+    calendarEventIsNew_ = false;
+    calendarSelectedInvite_ = 0;
+}
+
+uint32_t GameHandler::countCurrencyTokens(uint32_t itemId) const {
+    if (itemId == 0) return 0;
+    // PLAYER_FIELD_CURRENCYTOKEN_SLOT_1 is inventory slot 118 in the same run
+    // of guid pairs as the equipment (PLAYER_FIELD_INV_SLOT_HEAD + 118 * 2,
+    // UpdateFields.h UNIT_END + 0x019C). Only guids that name an item the
+    // player owns count, so a layout without token slots finds nothing.
+    const uint16_t head = fieldIndex(UF::PLAYER_FIELD_INV_SLOT_HEAD);
+    if (head == 0xFFFF) return 0;
+    auto player = entityController_->getEntityManager().getEntity(playerGuid);
+    if (!player) return 0;
+    constexpr int kFirstTokenSlot = 118, kTokenSlots = 32;
+    uint32_t total = 0;
+    for (int i = 0; i < kTokenSlots; ++i) {
+        const auto field = static_cast<uint16_t>(head + (kFirstTokenSlot + i) * 2);
+        const uint64_t guid = static_cast<uint64_t>(player->getField(field)) |
+                              (static_cast<uint64_t>(player->getField(field + 1)) << 32);
+        if (guid == 0) continue;
+        auto it = onlineItems_.find(guid);
+        if (it == onlineItems_.end() || it->second.entry != itemId) continue;
+        total += it->second.stackCount > 0 ? it->second.stackCount : 1;
+    }
+    return total;
+}
+
+void GameHandler::removeCalendarDraftInvite(size_t index) {
+    auto& list = calendarEventDetail_.invitees;
+    if (!calendarEventIsNew_ || index >= list.size()) return;
+    list.erase(list.begin() + static_cast<std::ptrdiff_t>(index));
+    calendarSelectedInvite_ = 0;
+    fireAddonEvent("CALENDAR_UPDATE_INVITE_LIST", {});
+}
+
+void GameHandler::seedCalendarDraftFromDetail() {
+    const auto& ev = calendarEventDetail_;
+    calendarDraft_.title = ev.title;
+    calendarDraft_.description = ev.description;
+    calendarDraft_.type = ev.type;
+    calendarDraft_.repeatOption = ev.repeatOption;
+    calendarDraft_.maxInvites = ev.maxInvites;
+    calendarDraft_.dungeonId = ev.dungeonId;
+    calendarDraft_.eventTime = ev.eventTime;
+    calendarDraft_.flags = ev.flags;
+}
+
+void GameHandler::setCalendarActionPending(bool pending) {
+    if (calendarActionPending_ == pending) return;
+    calendarActionPending_ = pending;
+    fireAddonEvent("CALENDAR_ACTION_PENDING",
+                   {pending ? std::string("1") : std::string(kEventNil)});
+}
+
+const CalendarInvite* GameHandler::findCalendarInvite(uint64_t eventId) const {
+    for (const auto& inv : calendarData_.invites) {
+        if (inv.eventId == eventId) return &inv;
+    }
+    return nullptr;
+}
+
+void GameHandler::upsertCalendarEvent(const CalendarEvent& ev) {
+    for (auto& existing : calendarData_.events) {
+        if (existing.eventId == ev.eventId) {
+            existing = ev;
+            return;
+        }
+    }
+    calendarData_.events.push_back(ev);
+}
+
+void GameHandler::recountCalendarPending() {
+    // Only once the calendar has arrived: before then the list is empty and
+    // the count SMSG_CALENDAR_SEND_NUM_PENDING gave is the only one there is.
+    if (calendarData_.serverTimeUnix == 0) return;
+    uint32_t pending = 0;
+    for (const auto& inv : calendarData_.invites) {
+        if (calendarStatusIsPending(inv.status)) ++pending;
+    }
+    if (pending == calendarPendingInvites_) return;
+    calendarPendingInvites_ = pending;
+    fireAddonEvent("CALENDAR_UPDATE_PENDING_INVITES", {});
+}
+
+void GameHandler::sortCalendarInvites(const std::string& criterion, bool reverse) {
+    calendarInviteSort_ = criterion;
+    calendarInviteSortReverse_ = reverse;
+    auto& list = calendarEventDetail_.invitees;
+    auto key = [this, &criterion](const CalendarEventInvitee& inv) -> std::string {
+        if (criterion == "class") {
+            return std::to_string(lookupPlayerClass(inv.guid)) + '\x01' + lookupName(inv.guid);
+        }
+        if (criterion == "status") {
+            char buf[4];
+            std::snprintf(buf, sizeof(buf), "%02u", static_cast<unsigned>(inv.status));
+            return std::string(buf) + '\x01' + lookupName(inv.guid);
+        }
+        return lookupName(inv.guid);
+    };
+    std::stable_sort(list.begin(), list.end(),
+                     [&](const CalendarEventInvitee& a, const CalendarEventInvitee& b) {
+                         const std::string ka = key(a), kb = key(b);
+                         return reverse ? kb < ka : ka < kb;
+                     });
+    calendarSelectedInvite_ = 0;
+    fireAddonEvent("CALENDAR_UPDATE_INVITE_LIST", {});
 }
 
 // ============================================================
@@ -3928,6 +4299,10 @@ bool GameHandler::hasPendingReadyCheck() const {
 
 void GameHandler::dismissReadyCheck() {
     if (socialHandler_) socialHandler_->dismissReadyCheck();
+}
+
+const char* GameHandler::readyCheckStatusFor(uint64_t guid) const {
+    return socialHandler_ ? socialHandler_->readyCheckStatusFor(guid) : nullptr;
 }
 
 const std::string& GameHandler::getReadyCheckInitiator() const {
@@ -4513,6 +4888,22 @@ const std::vector<GameHandler::QuestLogEntry>& GameHandler::getQuestLog() const 
 void GameHandler::reconcileQuestItemObjectives(
     const std::unordered_map<uint32_t, uint32_t>& carriedCounts) {
     if (questHandler_) questHandler_->reconcileItemObjectivesFromInventory(carriedCounts);
+}
+
+void GameHandler::reconcileQuestItemObjectivesFromBags() {
+    std::unordered_map<uint32_t, uint32_t> carried;
+    const auto& inv = getInventory();
+    for (int i = 0; i < inv.getBackpackSize(); i++) {
+        const auto& slot = inv.getBackpackSlot(i);
+        if (!slot.empty()) carried[slot.item.itemId] += std::max<uint32_t>(1, slot.item.stackCount);
+    }
+    for (int bag = 0; bag < 4; bag++) {
+        for (int s = 0; s < inv.getBagSize(bag); s++) {
+            const auto& slot = inv.getBagSlot(bag, s);
+            if (!slot.empty()) carried[slot.item.itemId] += std::max<uint32_t>(1, slot.item.stackCount);
+        }
+    }
+    reconcileQuestItemObjectives(carried);
 }
 const std::string& GameHandler::getQuestSortName(uint32_t sortId) const {
     static const std::string empty;

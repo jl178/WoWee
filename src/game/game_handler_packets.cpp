@@ -3,6 +3,7 @@
 #include "game/game_handler.hpp"
 #include "game/achievement_criteria.hpp"
 #include "game/packed_time.hpp"
+#include "game/global_strings.hpp"
 #include "game/protocol_constants.hpp"
 #include "game/game_utils.hpp"
 #include "game/chat_handler.hpp"
@@ -1328,19 +1329,49 @@ void GameHandler::registerCoreOpcodes() {
         } else {
             serverBarSlots = 144;
         }
+        // WotLK mode byte (AzerothCore Player::SendActionButtons):
+        //   0/1  the button list follows, all 144, 0 for an empty button
+        //   2    no list - clear every button. Sent on a dual-spec swap
+        //        before the new spec's list (ActivateSpec: mode 2, then 1).
+        // Ignoring it left the old spec's buttons wherever the new spec had
+        // none, and the new spec's zeros were skipped rather than applied.
+        uint8_t mode = 1;
         if (hasModeByteExp) {
             if (rem < 1) return;
-            /*uint8_t mode =*/ packet.readUInt8();
+            mode = packet.readUInt8();
             rem--;
         }
+        if (mode == 2) {
+            for (auto& slot : actionBar) slot = ActionBarSlot{};
+            actionBarClearedByServer_ = true;
+            fireAddonEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
+            packet.skipAll();
+            return;
+        }
+        std::array<uint32_t, ACTION_BAR_SLOTS> packedSlots{};
+        bool anyButton = false;
         for (int i = 0; i < serverBarSlots; ++i) {
             if (rem < 4) return;
             uint32_t packed = packet.readUInt32();
             rem -= 4;
             if (i >= ACTION_BAR_SLOTS) continue;
+            packedSlots[i] = packed;
+            if (packed != 0) anyButton = true;
+        }
+        // A list with no buttons at all, not following a mode-2 clear, is
+        // the one case left alone: it is the login list of a server that
+        // keeps no buttons for this character, and the bar loaded from the
+        // character config (or the Attack/Hearthstone defaults) is all
+        // there is. Any other list is the server's whole bar, zeros included.
+        const bool keepLocalBar = !anyButton && !actionBarClearedByServer_;
+        actionBarClearedByServer_ = false;
+        // Only the slots the server's format has: a Classic or TBC list is
+        // shorter than this bar, and the pages past it are client-side.
+        const int listed = std::min(serverBarSlots, static_cast<int>(ACTION_BAR_SLOTS));
+        for (int i = 0; i < listed && !keepLocalBar; ++i) {
+            const uint32_t packed = packedSlots[i];
             if (packed == 0) {
-                // Empty slot - only clear if not already set to Attack/Hearthstone defaults
-                // so we don't wipe hardcoded fallbacks when the server sends zeros.
+                actionBar[i] = ActionBarSlot{};
                 continue;
             }
             uint8_t type = 0;
@@ -2860,7 +2891,15 @@ void GameHandler::registerRemainingOpcodes() {
         }
         packet.skipAll();
     };
-    // One event in full, in answer to opening it.
+    // One event in full: the answer to opening it (sendType GET), or the
+    // server telling its creator that an add or a copy went through
+    // (CalendarMgr::AddEvent sends CALENDAR_SENDTYPE_ADD / _COPY).
+    //
+    // Three different things to the interface. Blizzard_Calendar opens its
+    // view or edit frame on CALENDAR_OPEN_EVENT(calendarType) - nothing else
+    // opens it (CalendarFrame_OnEvent) - and closes the create frame on
+    // CALENDAR_NEW_EVENT(isCopy=false). An add or a copy is not an opened
+    // event, so it goes onto the list and leaves the current event alone.
     dispatchTable_[Opcode::SMSG_CALENDAR_SEND_EVENT] = [this](network::Packet& packet) {
         CalendarEventDetail parsed;
         if (!parseCalendarSendEvent(packet, parsed)) {
@@ -2869,11 +2908,47 @@ void GameHandler::registerRemainingOpcodes() {
             packet.skipAll();
             return;
         }
-        calendarEventDetail_ = std::move(parsed);
-        LOG_INFO("SMSG_CALENDAR_SEND_EVENT: '", calendarEventDetail_.title,
-                 "' with ", calendarEventDetail_.invitees.size(), " invitee(s)");
-        if (addonEventCallback_) addonEventCallback_("CALENDAR_UPDATE_EVENT", {});
         packet.skipAll();
+        LOG_INFO("SMSG_CALENDAR_SEND_EVENT(", static_cast<int>(parsed.sendType), "): '",
+                 parsed.title, "' with ", parsed.invitees.size(), " invitee(s)");
+        // Names and classes for the invite list; the rows carry only guids.
+        for (const auto& inv : parsed.invitees) {
+            if (inv.guid != 0 && lookupName(inv.guid).empty()) queryPlayerName(inv.guid);
+        }
+
+        if (parsed.sendType != 0) {
+            CalendarEvent ev;
+            ev.eventId = parsed.eventId;
+            ev.title = parsed.title;
+            ev.type = parsed.type;
+            ev.eventTimePacked = parsed.eventTimePacked;
+            ev.eventTime = parsed.eventTime;
+            ev.flags = parsed.flags;
+            ev.dungeonId = parsed.dungeonId;
+            ev.creatorGuid = parsed.creatorGuid;
+            upsertCalendarEvent(ev);
+            const bool isCopy = parsed.sendType == 2;
+            if (!isCopy && calendarEventIsNew_) closeCalendarEvent();
+            fireAddonEvent("CALENDAR_NEW_EVENT",
+                           {isCopy ? std::string("1") : std::string(kEventNil)});
+            fireAddonEvent("CALENDAR_UPDATE_EVENT_LIST", {});
+            return;
+        }
+
+        const bool reopened = !calendarEventIsNew_ &&
+                              calendarEventDetail_.eventId == parsed.eventId;
+        calendarEventDetail_ = std::move(parsed);
+        calendarEventIsNew_ = false;
+        if (!reopened) calendarSelectedInvite_ = 0;
+        // The edit form commits the draft, so the draft is the event as the
+        // server has it - not whatever the last event or new one left there.
+        seedCalendarDraftFromDetail();
+        if (reopened) {
+            fireAddonEvent("CALENDAR_UPDATE_EVENT", {});
+        } else {
+            fireAddonEvent("CALENDAR_OPEN_EVENT",
+                           {calendarTypeForFlags(calendarEventDetail_.flags)});
+        }
     };
 
     // The whole calendar, in answer to a request for it.
@@ -2925,126 +3000,385 @@ void GameHandler::registerRemainingOpcodes() {
             LOG_DEBUG("SMSG_CALENDAR_SEND_NUM_PENDING: ", numPending, " pending invites");
         }
     };
-    // uint32 command + uint8 result + cstring info
-    // result 0 = success; non-zero = error code
-    // command values: 0=add,1=get,2=guild_filter,3=arena_team,4=update,5=remove,
-    //                 6=copy,7=invite,8=rsvp,9=remove_invite,10=status,11=moderator_status
+    // A calendar request refused. CalendarMgr::SendCalendarCommandResult
+    // writes uint32 0, uint8 0, a string (the player named by the three
+    // errors that name one, empty otherwise) and then the CalendarError - the
+    // code is last, not in the byte that was read as it, which is always 0.
+    //
+    // Shown the way Blizzard_Calendar shows it: CALENDAR_UPDATE_ERROR(text)
+    // puts up its CALENDAR_ERROR popup, and the text is the GlobalStrings.lua
+    // string for the code, filled in with the name or the limit.
     dispatchTable_[Opcode::SMSG_CALENDAR_COMMAND_RESULT] = [this](network::Packet& packet) {
-        // uint32 command + uint8 result + cstring info
-        // result 0 = success; non-zero = error code
-        // command values: 0=add,1=get,2=guild_filter,3=arena_team,4=update,5=remove,
-        //                 6=copy,7=invite,8=rsvp,9=remove_invite,10=status,11=moderator_status
-        if (!packet.hasRemaining(5)) {
-            packet.skipAll(); return;
-        }
-        /*uint32_t command =*/ packet.readUInt32();
-        uint8_t result    = packet.readUInt8();
-        std::string info  = (packet.hasData()) ? packet.readString() : "";
-        if (result != 0) {
-            // Map common calendar error codes to friendly strings
-            static const char* kCalendarErrors[] = {
-                "",
-                "Calendar: Internal error.",           // 1 = CALENDAR_ERROR_INTERNAL
-                "Calendar: Guild event limit reached.",// 2
-                "Calendar: Event limit reached.",      // 3
-                "Calendar: You cannot invite that player.", // 4
-                "Calendar: No invites remaining.",     // 5
-                "Calendar: Invalid date.",             // 6
-                "Calendar: Cannot invite yourself.",   // 7
-                "Calendar: Cannot modify this event.", // 8
-                "Calendar: Not invited.",              // 9
-                "Calendar: Already invited.",          // 10
-                "Calendar: Player not found.",         // 11
-                "Calendar: Not enough focus.",         // 12
-                "Calendar: Event locked.",             // 13
-                "Calendar: Event deleted.",            // 14
-                "Calendar: Not a moderator.",          // 15
-            };
-            const char* errMsg = (result < 16) ? kCalendarErrors[result]
-                                               : "Calendar: Command failed.";
-            if (errMsg && errMsg[0] != '\0') addSystemChatMessage(errMsg);
-            else if (!info.empty()) addSystemChatMessage("Calendar: " + info);
-        }
+        CalendarCommandResult result;
+        const bool ok = parseCalendarCommandResult(packet, result);
         packet.skipAll();
+        if (!ok) return;
+        setCalendarActionPending(false);
+        if (result.error == 0) return;
+        const char* key = calendarErrorStringName(result.error);
+        std::string text = key[0] ? globalString(services_.assetManager, key) : std::string();
+        if (text.empty()) text = globalString(services_.assetManager, "CALENDAR_ERROR_INTERNAL");
+        // One conversion each: %s is the name, %d the limit the server
+        // enforces (CalendarLimits in CalendarMgr.h).
+        if (auto at = text.find("%s"); at != std::string::npos) {
+            text.replace(at, 2, result.param);
+        } else if (auto atD = text.find("%d"); atD != std::string::npos) {
+            const char* limit = result.error == 2 ? "30" : "100";
+            text.replace(atD, 2, limit);
+        }
+        LOG_INFO("SMSG_CALENDAR_COMMAND_RESULT: error ", result.error, " '", text, "'");
+        fireAddonEvent("CALENDAR_UPDATE_ERROR", {text});
     };
-    // Rich notification: eventId(8) + title(cstring) + eventTime(8) + flags(4) +
-    //                   eventType(1) + dungeonId(4) + inviteId(8) + status(1) + rank(1) +
-    //                   isGuildEvent(1) + inviterGuid(8)
+    // An event and this player's invite to it (CalendarMgr::
+    // SendCalendarEventInviteAlert): sent to every invitee as they are added,
+    // the creator included, and to the whole guild for a guild announcement.
+    //
+    // The event goes onto the list and the invite beside it, so the day it is
+    // on shows it without a fresh SMSG_CALENDAR_SEND_CALENDAR. The pending
+    // count only moves for a status that still wants an answer - the
+    // creator's own confirmed row is not one, and an announcement's
+    // NOT_SIGNED_UP is never stored by the server, so it never counts there
+    // either (CalendarMgr::AddInvite, GetPlayerNumPending).
     dispatchTable_[Opcode::SMSG_CALENDAR_EVENT_INVITE_ALERT] = [this](network::Packet& packet) {
-        // eventId(8) + title(cstring) + eventTime(4, packed) + flags(4) +
-        // eventType(4) + dungeonId(4, signed) + inviteId(8) + status(1) +
-        // rank(1) + creatorGuid(packed) + senderGuid(packed).
-        //
-        // Only the id and the title are read; the rest is skipped. The widths
-        // written here before were a different shape - an eight-byte time, a
-        // one-byte type, an isGuildEvent that is not sent, and two full guids
-        // where the wire has packed ones - which would misread everything past
-        // the title for whoever went to use it.
-        if (!packet.hasRemaining(9)) {
-            packet.skipAll(); return;
-        }
-        /*uint64_t eventId =*/ packet.readUInt64();
-        std::string title = (packet.hasData()) ? packet.readString() : "";
-        packet.skipAll(); // consume remaining fields
-        if (!title.empty()) {
-            addSystemChatMessage("Calendar invite: " + title);
-        } else {
-            addSystemChatMessage("You have a new calendar invite.");
-        }
-        if (calendarPendingInvites_ < 255) ++calendarPendingInvites_;
-        // Same indicator, and this is the path that matters most: an invite
-        // arriving mid-session is exactly when the button has to light up.
-        if (addonEventCallback_)
-            addonEventCallback_("CALENDAR_UPDATE_PENDING_INVITES", {});
-        LOG_INFO("SMSG_CALENDAR_EVENT_INVITE_ALERT: title='", title, "'");
-    };
-    // Sent when an event invite's RSVP status changes for the local player
-    // Format: inviteId(8) + eventId(8) + eventType(1) + flags(4) +
-    //         inviteTime(8) + status(1) + rank(1) + isGuildEvent(1) + title(cstring)
-    dispatchTable_[Opcode::SMSG_CALENDAR_EVENT_STATUS] = [this](network::Packet& packet) {
-        // Sent when an event invite's RSVP status changes for the local player
-        // Format: inviteId(8) + eventId(8) + eventType(1) + flags(4) +
-        //         inviteTime(8) + status(1) + rank(1) + isGuildEvent(1) + title(cstring)
-        if (!packet.hasRemaining(31)) {
-            packet.skipAll(); return;
-        }
-        /*uint64_t inviteId =*/ packet.readUInt64();
-        /*uint64_t eventId  =*/ packet.readUInt64();
-        /*uint8_t  evType   =*/ packet.readUInt8();
-        /*uint32_t flags    =*/ packet.readUInt32();
-        /*uint64_t invTime  =*/ packet.readUInt64();
-        uint8_t status     = packet.readUInt8();
-        /*uint8_t rank      =*/ packet.readUInt8();
-        /*uint8_t isGuild   =*/ packet.readUInt8();
-        std::string evTitle = (packet.hasData()) ? packet.readString() : "";
-        // status: 0=Invited,1=Accepted,2=Declined,3=Confirmed,4=Out,5=Standby,6=SignedUp,7=Not Signed Up,8=Tentative
-        static const char* kRsvpStatus[] = {
-            "invited", "accepted", "declined", "confirmed",
-            "out", "on standby", "signed up", "not signed up", "tentative"
-        };
-        const char* statusStr = (status < 9) ? kRsvpStatus[status] : "unknown";
-        if (!evTitle.empty()) {
-            char buf[256];
-            std::snprintf(buf, sizeof(buf), "Calendar event '%s': your RSVP is %s.",
-                          evTitle.c_str(), statusStr);
-            addSystemChatMessage(buf);
-        }
-        // The chat line is the whole of it, deliberately. framexml_event_gap
-        // pairs this message with CALENDAR_UPDATE_EVENT on the words they
-        // share, but an RSVP changing is CALENDAR_UPDATE_INVITE_LIST in
-        // retail - and both are read by a calendar that would re-read nothing,
-        // since no event list is kept here for either to draw from.
+        CalendarInviteAlert alert;
+        const bool ok = parseCalendarInviteAlert(packet, alert);
         packet.skipAll();
+        if (!ok) {
+            LOG_WARNING("SMSG_CALENDAR_EVENT_INVITE_ALERT: could not be read whole");
+            return;
+        }
+        upsertCalendarEvent(alert.event);
+        const bool announcement = (alert.event.flags & kCalendarFlagAnnouncement) != 0;
+        bool newPending = false;
+        if (!announcement) {
+            CalendarInvite* mine = nullptr;
+            for (auto& inv : calendarData_.invites) {
+                if (inv.eventId == alert.event.eventId) { mine = &inv; break; }
+            }
+            if (!mine) {
+                calendarData_.invites.push_back({});
+                mine = &calendarData_.invites.back();
+                newPending = calendarStatusIsPending(alert.status);
+            }
+            mine->eventId = alert.event.eventId;
+            mine->inviteId = alert.inviteId;
+            mine->status = alert.status;
+            mine->rank = alert.rank;
+            mine->isGuildEvent = (alert.event.flags & kCalendarFlagGuildEvent) != 0;
+            mine->creatorGuid = alert.event.creatorGuid;
+            if (newPending && calendarData_.serverTimeUnix == 0) {
+                // No list to recount from yet: the server's count plus this.
+                ++calendarPendingInvites_;
+                fireAddonEvent("CALENDAR_UPDATE_PENDING_INVITES", {});
+            }
+        }
+        recountCalendarPending();
+        if (newPending && alert.senderGuid != getPlayerGuid()) {
+            addSystemChatMessage("Calendar invite: " + alert.event.title);
+        }
+        fireAddonEvent("CALENDAR_UPDATE_EVENT_LIST", {});
+        LOG_INFO("SMSG_CALENDAR_EVENT_INVITE_ALERT: '", alert.event.title,
+                 "' status ", static_cast<int>(alert.status));
     };
-    // uint64 inviteId + uint64 eventId + uint32 mapId + uint32 difficulty + uint64 resetTime
-    dispatchTable_[Opcode::SMSG_CALENDAR_RAID_LOCKOUT_ADDED] = [this](network::Packet& packet) {
-        // uint64 inviteId + uint64 eventId + uint32 mapId + uint32 difficulty + uint64 resetTime
-        if (packet.hasRemaining(28)) {
-            /*uint64_t inviteId =*/ packet.readUInt64();
-            /*uint64_t eventId  =*/ packet.readUInt64();
+    // Someone's answer to an event changed - an RSVP, or the owner setting a
+    // status (CalendarMgr::SendCalendarEventStatus, to everyone the event
+    // concerns): packedGuid invitee, eventId, event time, flags, status,
+    // rank, status time. The old reading here had an invite id first and a
+    // title last, neither of which is sent.
+    //
+    // The invitee's row on the open event moves (CALENDAR_UPDATE_INVITE_LIST,
+    // which is how Blizzard_Calendar redraws the RSVP buttons too), and the
+    // player's own invite on the list when it is theirs
+    // (CALENDAR_UPDATE_EVENT_LIST, the colour of the event on its day).
+    dispatchTable_[Opcode::SMSG_CALENDAR_EVENT_STATUS] = [this](network::Packet& packet) {
+        CalendarEventStatusNotice st;
+        const bool ok = parseCalendarEventStatus(packet, st);
+        packet.skipAll();
+        if (!ok) {
+            LOG_WARNING("SMSG_CALENDAR_EVENT_STATUS: could not be read whole");
+            return;
+        }
+        if (st.inviteeGuid == getPlayerGuid()) {
+            for (auto& inv : calendarData_.invites) {
+                if (inv.eventId != st.eventId) continue;
+                inv.status = st.status;
+                inv.rank = st.rank;
+            }
+            recountCalendarPending();
+            fireAddonEvent("CALENDAR_UPDATE_EVENT_LIST", {});
+        }
+        if (!calendarEventIsNew_ && calendarEventDetail_.eventId == st.eventId) {
+            for (auto& inv : calendarEventDetail_.invitees) {
+                if (inv.guid != st.inviteeGuid) continue;
+                inv.status = st.status;
+                inv.rank = st.rank;
+                inv.statusTime = unpackWowPackedTime(st.statusTimePacked);
+            }
+            fireAddonEvent("CALENDAR_UPDATE_INVITE_LIST", {});
+        }
+    };
+    // One row joining an invite list (CalendarMgr::SendCalendarEventInvite).
+    //
+    // With event id 0 it answers a pre-invite: the name typed into a new
+    // event's form, looked up by the server and handed back as a row for the
+    // draft, which is how the draft's list grows - and what the creation
+    // packet's invite list is then built from. Otherwise it is a row on a
+    // real event: added to that event if it is the open one, and to the
+    // player's own invites when the row is theirs, which is the only notice a
+    // guild event sign-up gets (no invite alert goes to a guild member who
+    // signs up - CalendarMgr::AddInvite).
+    dispatchTable_[Opcode::SMSG_CALENDAR_EVENT_INVITE] = [this](network::Packet& packet) {
+        CalendarEventInviteNotice n;
+        const bool ok = parseCalendarEventInvite(packet, n);
+        packet.skipAll();
+        if (!ok) {
+            LOG_WARNING("SMSG_CALENDAR_EVENT_INVITE: could not be read whole");
+            return;
+        }
+        if (lookupName(n.inviteeGuid).empty()) queryPlayerName(n.inviteeGuid);
+        const bool forDraft = (n.eventId == 0 && calendarEventIsNew_);
+        const bool forOpen = (n.eventId != 0 && !calendarEventIsNew_ &&
+                              calendarEventDetail_.eventId == n.eventId);
+        if (forDraft || forOpen) {
+            CalendarEventInvitee* row = nullptr;
+            for (auto& inv : calendarEventDetail_.invitees) {
+                if (inv.guid == n.inviteeGuid) { row = &inv; break; }
+            }
+            if (!row) {
+                calendarEventDetail_.invitees.push_back({});
+                row = &calendarEventDetail_.invitees.back();
+                row->guid = n.inviteeGuid;
+            }
+            row->inviteId = n.inviteId;
+            row->level = n.level;
+            row->status = n.status;
+            if (n.hasStatusTime) row->statusTime = unpackWowPackedTime(n.statusTimePacked);
+            fireAddonEvent("CALENDAR_UPDATE_INVITE_LIST", {});
+        }
+        if (n.eventId != 0 && n.inviteeGuid == getPlayerGuid()) {
+            CalendarInvite* mine = nullptr;
+            for (auto& inv : calendarData_.invites) {
+                if (inv.eventId == n.eventId) { mine = &inv; break; }
+            }
+            if (!mine) {
+                calendarData_.invites.push_back({});
+                mine = &calendarData_.invites.back();
+                mine->eventId = n.eventId;
+                for (const auto& ev : calendarData_.events) {
+                    if (ev.eventId != n.eventId) continue;
+                    mine->isGuildEvent = (ev.flags & kCalendarFlagGuildEvent) != 0;
+                    mine->creatorGuid = ev.creatorGuid;
+                }
+            }
+            mine->inviteId = n.inviteId;
+            mine->status = n.status;
+            recountCalendarPending();
+            fireAddonEvent("CALENDAR_UPDATE_EVENT_LIST", {});
+        }
+    };
+    // The answer to a mass invite, guild or arena team: the members to add
+    // (Guild::MassInviteToEvent, ArenaTeam::MassInviteToEvent). The server
+    // invites no one itself. For a new event they join its draft list as
+    // invited, which is what the creation packet then sends; for an open one
+    // each is invited by name, the only way an existing event takes invites.
+    auto massInviteAnswer = [this](network::Packet& packet) {
+        std::vector<uint64_t> guids;
+        const bool ok = parseCalendarMassInviteList(packet, guids);
+        packet.skipAll();
+        if (!ok) return;
+        if (calendarEventIsNew_) {
+            for (uint64_t guid : guids) {
+                bool present = false;
+                for (const auto& inv : calendarEventDetail_.invitees) {
+                    if (inv.guid == guid) { present = true; break; }
+                }
+                if (present) continue;
+                CalendarEventInvitee inv;
+                inv.guid = guid;
+                inv.status = kCalendarStatusInvited;
+                calendarEventDetail_.invitees.push_back(inv);
+                if (lookupName(guid).empty()) queryPlayerName(guid);
+            }
+            fireAddonEvent("CALENDAR_UPDATE_INVITE_LIST", {});
+        } else if (calendarEventDetail_.eventId != 0) {
+            const bool guildEvent = (calendarEventDetail_.flags & kCalendarFlagGuildEvent) != 0;
+            for (uint64_t guid : guids) {
+                const std::string& name = lookupName(guid);
+                if (name.empty()) continue;
+                inviteToCalendarEvent(calendarEventDetail_.eventId, 0, name, false, guildEvent);
+            }
+        }
+    };
+    dispatchTable_[Opcode::SMSG_CALENDAR_FILTER_GUILD] = massInviteAnswer;
+    dispatchTable_[Opcode::SMSG_CALENDAR_ARENA_TEAM] = massInviteAnswer;
+    // An event was deleted (CalendarMgr::SendCalendarEventRemovedAlert, to
+    // everyone it concerned). Off the list, its invite with it, and closed if
+    // it is the one open - the view frame closes on CALENDAR_CLOSE_EVENT.
+    dispatchTable_[Opcode::SMSG_CALENDAR_EVENT_REMOVED_ALERT] = [this](network::Packet& packet) {
+        uint64_t eventId = 0;
+        const bool ok = parseCalendarEventRemovedAlert(packet, eventId);
+        packet.skipAll();
+        if (!ok) return;
+        auto& events = calendarData_.events;
+        events.erase(std::remove_if(events.begin(), events.end(),
+                                    [eventId](const CalendarEvent& e) { return e.eventId == eventId; }),
+                     events.end());
+        auto& invites = calendarData_.invites;
+        invites.erase(std::remove_if(invites.begin(), invites.end(),
+                                     [eventId](const CalendarInvite& i) { return i.eventId == eventId; }),
+                      invites.end());
+        recountCalendarPending();
+        if (!calendarEventIsNew_ && calendarEventDetail_.eventId == eventId) {
+            closeCalendarEvent();
+            fireAddonEvent("CALENDAR_CLOSE_EVENT", {});
+        }
+        fireAddonEvent("CALENDAR_UPDATE_EVENT_LIST", {});
+    };
+    // Someone was taken off an invite list (CalendarMgr::
+    // SendCalendarEventInviteRemove, to everyone the event concerns).
+    // Their row leaves the open event; if it was the player, their invite
+    // leaves the list - and the event too, unless it is a guild event, which
+    // a guild member sees whether invited or not.
+    auto dropOwnInvite = [this](uint64_t eventId, uint32_t flags) {
+        auto& invites = calendarData_.invites;
+        invites.erase(std::remove_if(invites.begin(), invites.end(),
+                                     [eventId](const CalendarInvite& i) { return i.eventId == eventId; }),
+                      invites.end());
+        if (!(flags & (kCalendarFlagGuildEvent | kCalendarFlagAnnouncement))) {
+            auto& events = calendarData_.events;
+            events.erase(std::remove_if(events.begin(), events.end(),
+                                        [eventId](const CalendarEvent& e) { return e.eventId == eventId; }),
+                         events.end());
+            if (!calendarEventIsNew_ && calendarEventDetail_.eventId == eventId) {
+                closeCalendarEvent();
+                fireAddonEvent("CALENDAR_CLOSE_EVENT", {});
+            }
+        }
+        recountCalendarPending();
+        fireAddonEvent("CALENDAR_UPDATE_EVENT_LIST", {});
+    };
+    dispatchTable_[Opcode::SMSG_CALENDAR_EVENT_INVITE_REMOVED] =
+        [this, dropOwnInvite](network::Packet& packet) {
+        CalendarInviteRemovedNotice n;
+        const bool ok = parseCalendarInviteRemoved(packet, n);
+        packet.skipAll();
+        if (!ok) return;
+        if (!calendarEventIsNew_ && calendarEventDetail_.eventId == n.eventId) {
+            auto& list = calendarEventDetail_.invitees;
+            list.erase(std::remove_if(list.begin(), list.end(),
+                                      [&n](const CalendarEventInvitee& i) { return i.guid == n.inviteeGuid; }),
+                       list.end());
+            calendarSelectedInvite_ = 0;
+            fireAddonEvent("CALENDAR_UPDATE_INVITE_LIST", {});
+        }
+        if (n.inviteeGuid == getPlayerGuid()) dropOwnInvite(n.eventId, n.flags);
+    };
+    // The same, to the one removed (SendCalendarEventInviteRemoveAlert).
+    dispatchTable_[Opcode::SMSG_CALENDAR_EVENT_INVITE_REMOVED_ALERT] =
+        [dropOwnInvite](network::Packet& packet) {
+        CalendarInviteRemovedAlert n;
+        const bool ok = parseCalendarInviteRemovedAlert(packet, n);
+        packet.skipAll();
+        if (ok) dropOwnInvite(n.eventId, n.flags);
+    };
+    // An invitee made or unmade moderator (SendCalendarEventModeratorStatusAlert).
+    dispatchTable_[Opcode::SMSG_CALENDAR_EVENT_MODERATOR_STATUS_ALERT] =
+        [this](network::Packet& packet) {
+        CalendarModeratorNotice n;
+        const bool ok = parseCalendarModeratorStatus(packet, n);
+        packet.skipAll();
+        if (!ok) return;
+        if (n.inviteeGuid == getPlayerGuid()) {
+            for (auto& inv : calendarData_.invites) {
+                if (inv.eventId == n.eventId) inv.rank = n.rank;
+            }
+            fireAddonEvent("CALENDAR_UPDATE_EVENT_LIST", {});
+        }
+        if (!calendarEventIsNew_ && calendarEventDetail_.eventId == n.eventId) {
+            for (auto& inv : calendarEventDetail_.invitees) {
+                if (inv.guid == n.inviteeGuid) inv.rank = n.rank;
+            }
+            fireAddonEvent("CALENDAR_UPDATE_INVITE_LIST", {});
+        }
+    };
+    // An event was edited (CalendarMgr::SendCalendarEventUpdateAlert). The
+    // list's copy and the open one both take the new fields; the open one
+    // re-seeds the edit form's draft so a later save does not write the old
+    // values back over the edit.
+    dispatchTable_[Opcode::SMSG_CALENDAR_EVENT_UPDATED_ALERT] = [this](network::Packet& packet) {
+        CalendarEventUpdatedAlert u;
+        const bool ok = parseCalendarEventUpdatedAlert(packet, u);
+        packet.skipAll();
+        if (!ok) return;
+        for (auto& ev : calendarData_.events) {
+            if (ev.eventId != u.eventId) continue;
+            ev.title = u.title;
+            ev.type = u.type;
+            ev.flags = u.flags;
+            ev.dungeonId = u.dungeonId;
+            ev.eventTimePacked = u.eventTimePacked;
+            ev.eventTime = unpackWowPackedTime(u.eventTimePacked);
+        }
+        if (!calendarEventIsNew_ && calendarEventDetail_.eventId == u.eventId) {
+            auto& d = calendarEventDetail_;
+            d.title = u.title;
+            d.description = u.description;
+            d.type = u.type;
+            d.flags = u.flags;
+            d.dungeonId = u.dungeonId;
+            d.eventTimePacked = u.eventTimePacked;
+            d.eventTime = unpackWowPackedTime(u.eventTimePacked);
+            d.repeatOption = u.repeatOption;
+            d.maxInvites = u.maxInvites;
+            seedCalendarDraftFromDetail();
+            fireAddonEvent("CALENDAR_UPDATE_EVENT", {});
+        }
+        fireAddonEvent("CALENDAR_UPDATE_EVENT_LIST", {});
+    };
+    // The answer to an RSVP or a sign-up has landed (CalendarHandler.cpp:642).
+    dispatchTable_[Opcode::SMSG_CALENDAR_CLEAR_PENDING_ACTION] = [this](network::Packet& packet) {
+        packet.skipAll();
+        setCalendarActionPending(false);
+    };
+    // A raid save, as WorldSession::SendCalendarRaidLockout writes it
+    // (CalendarHandler.cpp:819): for ADDED a packed time first, then uint32
+    // mapId, difficulty, seconds left, and the instance guid in full. The old
+    // reading had an invite id and an event id in front - sixteen bytes that
+    // are not sent - so the map and difficulty came from the guid.
+    //
+    // The calendar's own lockout list takes it too, so the day it expires
+    // shows it without a fresh SMSG_CALENDAR_SEND_CALENDAR. The list's
+    // seconds count from the server time that calendar carried, so a lockout
+    // arriving later is moved onto that clock.
+    auto applyLockout = [this](uint32_t mapId, uint32_t difficulty,
+                               uint32_t secondsLeft, uint64_t instanceGuid, bool add) {
+        auto& locks = calendarData_.lockouts;
+        locks.erase(std::remove_if(locks.begin(), locks.end(),
+                                   [&](const CalendarRaidLockout& l) {
+                                       return l.mapId == mapId && l.difficulty == difficulty;
+                                   }),
+                    locks.end());
+        if (add && calendarData_.serverTimeUnix != 0) {
+            const auto now = static_cast<int64_t>(std::time(nullptr));
+            const int64_t since = std::max<int64_t>(0, now - calendarData_.serverTimeUnix);
+            CalendarRaidLockout l;
+            l.mapId = mapId;
+            l.difficulty = difficulty;
+            l.secondsRemaining = static_cast<uint32_t>(secondsLeft + since);
+            l.instanceGuid = instanceGuid;
+            locks.push_back(l);
+        }
+        fireAddonEvent("CALENDAR_UPDATE_EVENT_LIST", {});
+    };
+    dispatchTable_[Opcode::SMSG_CALENDAR_RAID_LOCKOUT_ADDED] =
+        [this, applyLockout](network::Packet& packet) {
+        if (packet.hasRemaining(4 + 4 + 4 + 4 + 8)) {
+            /*uint32_t packedNow =*/ packet.readUInt32();
             uint32_t mapId     = packet.readUInt32();
             uint32_t difficulty = packet.readUInt32();
-            /*uint64_t resetTime =*/ packet.readUInt64();
+            const uint32_t secondsLeft = packet.readUInt32();
+            const uint64_t instanceGuid = packet.readUInt64();
+            applyLockout(mapId, difficulty, secondsLeft, instanceGuid, true);
             std::string mapLabel = getMapName(mapId);
             if (mapLabel.empty()) mapLabel = "map #" + std::to_string(mapId);
             const char* diffStr = instanceDifficultyName(difficulty);
@@ -3056,14 +3390,13 @@ void GameHandler::registerRemainingOpcodes() {
         }
         packet.skipAll();
     };
-    // uint64 inviteId + uint64 eventId + uint32 mapId + uint32 difficulty
-    dispatchTable_[Opcode::SMSG_CALENDAR_RAID_LOCKOUT_REMOVED] = [this](network::Packet& packet) {
-        // uint64 inviteId + uint64 eventId + uint32 mapId + uint32 difficulty
-        if (packet.hasRemaining(20)) {
-            /*uint64_t inviteId =*/ packet.readUInt64();
-            /*uint64_t eventId  =*/ packet.readUInt64();
+    // The same without the leading time: mapId, difficulty, seconds, guid.
+    dispatchTable_[Opcode::SMSG_CALENDAR_RAID_LOCKOUT_REMOVED] =
+        [this, applyLockout](network::Packet& packet) {
+        if (packet.hasRemaining(4 + 4)) {
             uint32_t mapId     = packet.readUInt32();
             uint32_t difficulty = packet.readUInt32();
+            applyLockout(mapId, difficulty, 0, 0, false);
             std::string mapLabel = getMapName(mapId);
             if (mapLabel.empty()) mapLabel = "map #" + std::to_string(mapId);
             const char* diffStr = instanceDifficultyName(difficulty);
@@ -3278,18 +3611,11 @@ void GameHandler::registerRemainingOpcodes() {
         Opcode::SMSG_AFK_MONITOR_INFO_RESPONSE,
         Opcode::SMSG_AUCTION_LIST_PENDING_SALES,
         Opcode::SMSG_AVAILABLE_VOICE_CHANNEL,
-        Opcode::SMSG_CALENDAR_ARENA_TEAM,
-        Opcode::SMSG_CALENDAR_CLEAR_PENDING_ACTION,
-        Opcode::SMSG_CALENDAR_EVENT_INVITE,
+        // The other calendar notices are handled with the rest of the
+        // calendar above; these three AzerothCore never sends.
         Opcode::SMSG_CALENDAR_EVENT_INVITE_NOTES,
         Opcode::SMSG_CALENDAR_EVENT_INVITE_NOTES_ALERT,
-        Opcode::SMSG_CALENDAR_EVENT_INVITE_REMOVED,
-        Opcode::SMSG_CALENDAR_EVENT_INVITE_REMOVED_ALERT,
         Opcode::SMSG_CALENDAR_EVENT_INVITE_STATUS_ALERT,
-        Opcode::SMSG_CALENDAR_EVENT_MODERATOR_STATUS_ALERT,
-        Opcode::SMSG_CALENDAR_EVENT_REMOVED_ALERT,
-        Opcode::SMSG_CALENDAR_EVENT_UPDATED_ALERT,
-        Opcode::SMSG_CALENDAR_FILTER_GUILD,
         Opcode::SMSG_CHEAT_DUMP_ITEMS_DEBUG_ONLY_RESPONSE,
         Opcode::SMSG_CHEAT_DUMP_ITEMS_DEBUG_ONLY_RESPONSE_WRITE_FILE,
         Opcode::SMSG_CHEAT_PLAYER_LOOKUP,

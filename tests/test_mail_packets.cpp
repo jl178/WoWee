@@ -497,3 +497,133 @@ TEST_CASE("A body that is not an invoice is refused", "[mail][auction][invoice]"
     // Decimal fields are decimal: hex only applies to the guid.
     CHECK_FALSE(parseAuctionMailBody("1a2b:5000:1f", invoice));
 }
+
+TEST_CASE("Return to sender closes with the sender guid AzerothCore skips", "[mail]") {
+    // HandleMailReturnToSender: mailbox, mail id, read_skip<uint64>. Without
+    // the trailing guid the read runs short and the packet is dropped.
+    auto built = MailReturnToSenderPacket::build(0x1020304050607080ull, 77, 0x0000000000000042ull);
+    wowee::network::Packet packet(built.getOpcode(), built.getData());
+    CHECK(packet.readUInt64() == 0x1020304050607080ull);
+    CHECK(packet.readUInt32() == 77);
+    CHECK(packet.readUInt64() == 0x42);
+    CHECK(packet.getRemainingSize() == 0);
+}
+
+TEST_CASE("Only a player's parcel that was not already returned goes back", "[mail]") {
+    MailMessage mail;
+    mail.messageType = 0;
+    // A bare letter is deleted, not returned.
+    CHECK_FALSE(mailIsReturnable(mail));
+    mail.money = 100;
+    CHECK(mailIsReturnable(mail));
+    mail.money = 0;
+    mail.attachments.push_back(MailAttachment{});
+    CHECK(mailIsReturnable(mail));
+    // Returned once (MAIL_CHECK_MASK_RETURNED) - not again.
+    mail.flags = MAIL_CHECK_MASK_RETURNED;
+    CHECK_FALSE(mailIsReturnable(mail));
+    // A COD payment is not returnable either.
+    mail.flags = MAIL_CHECK_MASK_COD_PAYMENT;
+    CHECK_FALSE(mailIsReturnable(mail));
+    // Read or copied does not matter.
+    mail.flags = MAIL_CHECK_MASK_READ | MAIL_CHECK_MASK_COPIED;
+    CHECK(mailIsReturnable(mail));
+    // Auction house, creature and object mail is only ever deleted.
+    for (uint8_t type : {2, 3, 4, 5}) {
+        mail.messageType = type;
+        CHECK_FALSE(mailIsReturnable(mail));
+    }
+}
+
+TEST_CASE("Next mail time reply lists the unread senders", "[mail]") {
+    wowee::network::Packet packet;
+    packet.writeFloat(0.0f);
+    packet.writeUInt32(2);
+    packet.writeUInt64(0x99);   // a player
+    packet.writeUInt32(0);
+    packet.writeUInt32(0);      // MAIL_NORMAL
+    packet.writeUInt32(41);
+    packet.writeFloat(0.0f);
+    packet.writeUInt64(0);      // the auction house
+    packet.writeUInt32(7);
+    packet.writeUInt32(2);      // MAIL_AUCTION
+    packet.writeUInt32(62);
+    packet.writeFloat(0.0f);
+    wowee::network::Packet in(0, packet.getData());
+
+    NextMailTimeData data;
+    REQUIRE(QueryNextMailTimePacket::parse(in, data, true));
+    CHECK(data.nextTime == 0.0f);
+    CHECK(data.count == 2);
+    REQUIRE(data.senders.size() == 2);
+    CHECK(data.senders[0].senderGuid == 0x99);
+    CHECK(data.senders[0].messageType == 0);
+    CHECK(data.senders[1].senderEntry == 7);
+    CHECK(data.senders[1].messageType == 2);
+    CHECK(in.getRemainingSize() == 0);
+
+    // No mail: -DAY and nobody.
+    wowee::network::Packet none;
+    none.writeFloat(-86400.0f);
+    none.writeUInt32(0);
+    wowee::network::Packet in2(0, none.getData());
+    REQUIRE(QueryNextMailTimePacket::parse(in2, data, true));
+    CHECK(data.nextTime < 0.0f);
+    CHECK(data.senders.empty());
+}
+
+TEST_CASE("Auctions draw their stacks across every bag stack of the item", "[auction]") {
+    // A clicked stack of 3, then 10 and 4 elsewhere.
+    const std::vector<AuctionSellSource> bags = {{0xA, 3}, {0xB, 10}, {0xC, 4}};
+
+    // One stack of 5 is bigger than the clicked one: it takes 3 + 2.
+    auto one = planAuctionStacks(bags, 5, 1);
+    REQUIRE(one.size() == 1);
+    REQUIRE(one[0].size() == 2);
+    CHECK(one[0][0] == std::make_pair<uint64_t, uint32_t>(0xA, 3));
+    CHECK(one[0][1] == std::make_pair<uint64_t, uint32_t>(0xB, 2));
+
+    // Three stacks of 5: 3+2, then 5 of B, then 3 of B and 2 of C. No piece
+    // asks for more than the server will have left after the earlier ones.
+    auto three = planAuctionStacks(bags, 5, 3);
+    REQUIRE(three.size() == 3);
+    CHECK(three[1].size() == 1);
+    CHECK(three[1][0] == std::make_pair<uint64_t, uint32_t>(0xB, 5));
+    REQUIRE(three[2].size() == 2);
+    CHECK(three[2][0] == std::make_pair<uint64_t, uint32_t>(0xB, 3));
+    CHECK(three[2][1] == std::make_pair<uint64_t, uint32_t>(0xC, 2));
+
+    // Only full stacks: 17 items make three stacks of 5, not four.
+    CHECK(planAuctionStacks(bags, 5, 4).size() == 3);
+    CHECK(planAuctionStacks(bags, 0, 1).empty());
+    CHECK(planAuctionStacks({}, 1, 1).empty());
+}
+
+TEST_CASE("A WotLK auction is written as its (guid, count) pieces", "[auction]") {
+    auto built = AuctionSellItemPacket::build(0x55, {{0xA, 3}, {0xB, 2}}, 100, 200, 720);
+    wowee::network::Packet p(built.getOpcode(), built.getData());
+    CHECK(p.readUInt64() == 0x55);
+    CHECK(p.readUInt32() == 2);
+    CHECK(p.readUInt64() == 0xA);
+    CHECK(p.readUInt32() == 3);
+    CHECK(p.readUInt64() == 0xB);
+    CHECK(p.readUInt32() == 2);
+    CHECK(p.readUInt32() == 100);
+    CHECK(p.readUInt32() == 200);
+    CHECK(p.readUInt32() == 720);
+    CHECK(p.getRemainingSize() == 0);
+}
+
+TEST_CASE("Auction command results name the stock GlobalStrings", "[auction]") {
+    // AzerothCore AuctionHouseMgr.h AuctionError / AuctionAction.
+    CHECK(std::string(auctionCommandResultKey(0, 0)) == "ERR_AUCTION_STARTED");
+    CHECK(std::string(auctionCommandResultKey(1, 0)) == "ERR_AUCTION_REMOVED");
+    CHECK(std::string(auctionCommandResultKey(2, 0)) == "ERR_AUCTION_BID_PLACED");
+    CHECK(std::string(auctionCommandResultKey(0, 2)) == "ERR_AUCTION_DATABASE_ERROR");
+    CHECK(std::string(auctionCommandResultKey(0, 3)) == "ERR_NOT_ENOUGH_MONEY");
+    CHECK(std::string(auctionCommandResultKey(0, 4)) == "ERR_ITEM_NOT_FOUND");
+    CHECK(std::string(auctionCommandResultKey(2, 5)) == "ERR_AUCTION_HIGHER_BID");
+    CHECK(std::string(auctionCommandResultKey(2, 7)) == "ERR_AUCTION_BID_INCREMENT");
+    CHECK(std::string(auctionCommandResultKey(2, 10)) == "ERR_AUCTION_BID_OWN");
+    CHECK(std::string(auctionCommandResultKey(0, 13)) == "ERR_RESTRICTED_ACCOUNT");
+}

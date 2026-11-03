@@ -106,7 +106,12 @@ std::string scriptParameters(const std::string& script) {
     if (script == "OnVerticalScroll" ||
         script == "OnHorizontalScroll") return "self, offset";
     if (script == "OnScrollRangeChanged") return "self, xrange, yrange";
-    if (script == "OnCursorChanged")   return "self, x, y, width, height";
+    // x, y, w, h: the mail body and the guild info box write
+    // ScrollingEdit_OnCursorChanged(self, x, y-10, w, h) inline, so with the
+    // last two named width and height, w and h were nil globals, cursorHeight
+    // stayed nil and ScrollingEdit_OnUpdate raised on every keystroke and on
+    // the SetText("") after each mail sent (uipaneltemplates.lua:380).
+    if (script == "OnCursorChanged")   return "self, x, y, w, h";
     if (script == "OnColorSelect")     return "self, r, g, b";
     if (script == "OnMinMaxChanged")   return "self, min, max";
     if (script == "OnTooltipAddMoney") return "self, cost, maxcost";

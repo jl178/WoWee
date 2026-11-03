@@ -1,6 +1,8 @@
 #include "game/group_defines.hpp"
 #include "core/local_time.hpp"
 #include "game/item_text.hpp"
+#include "game/global_strings.hpp"
+#include "game/combat_log_event.hpp"
 #include "game/social_handler.hpp"
 #include "game/spell_handler.hpp"
 #include "addons/lua_api_registrations.hpp"
@@ -565,18 +567,30 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_GROUP_DECLINE] = [this](network::Packet& packet) { handleGroupDecline(packet); };
     table[Opcode::SMSG_GROUP_LIST] = [this](network::Packet& packet) { handleGroupList(packet); };
     table[Opcode::SMSG_GROUP_DESTROYED] = [this](network::Packet& /*packet*/) {
-        partyData.members.clear();
-        partyData.memberCount = 0;
-        partyData.leaderGuid = 0;
-        owner_.addUIError("Your party has been disbanded.");
-        owner_.addSystemChatMessage("Your party has been disbanded.");
+        const bool wasRaid = !partyData.isEmpty() && groupIsRaid(partyData.groupType);
+        // All of it, the group type included: a raid's type left behind kept
+        // groupIsRaid answering yes for a group that no longer exists.
+        partyData = GroupListData{};
+        // ERR_GROUP_DISBANDED, once, as the system line it is.
+        owner_.displayGameMessage("ERR_GROUP_DISBANDED", "Your group has been disbanded.");
+        groupDestroyedAnnounced_ = true;
         if (owner_.addonEventCallbackRef()) {
             owner_.addonEventCallbackRef()("GROUP_ROSTER_UPDATE", {});
             owner_.addonEventCallbackRef()("PARTY_MEMBERS_CHANGED", {});
+            if (wasRaid) owner_.addonEventCallbackRef()("RAID_ROSTER_UPDATE", {});
         }
     };
+    // The invite this player was holding was withdrawn. AzerothCore declares
+    // the opcode and never sends it; a core that does means the invite is
+    // gone. uiparent.lua hides the PARTY_INVITE popup on PARTY_INVITE_CANCEL;
+    // without it the popup stayed up offering to accept an invite the server
+    // had already forgotten.
     table[Opcode::SMSG_GROUP_CANCEL] = [this](network::Packet& /*packet*/) {
+        pendingGroupInvite = false;
+        pendingInviterName.clear();
         owner_.addSystemChatMessage("Group invite cancelled.");
+        if (owner_.addonEventCallbackRef())
+            owner_.addonEventCallbackRef()("PARTY_INVITE_CANCEL", {});
     };
     table[Opcode::SMSG_GROUP_UNINVITE] = [this](network::Packet& packet) { handleGroupUninvite(packet); };
     table[Opcode::SMSG_PARTY_COMMAND_RESULT] = [this](network::Packet& packet) { handlePartyCommandResult(packet); };
@@ -586,26 +600,54 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
     // ---- Ready check ----
     table[Opcode::MSG_RAID_READY_CHECK] = [this](network::Packet& packet) {
         pendingReadyCheck_ = true;
+        readyCheckActive_ = true;
         readyCheckReadyCount_ = 0;
         readyCheckNotReadyCount_ = 0;
         readyCheckInitiator_.clear();
         readyCheckResults_.clear();
+        uint64_t initiatorGuid = 0;
         if (packet.hasRemaining(8)) {
-            uint64_t initiatorGuid = packet.readUInt64();
+            initiatorGuid = packet.readUInt64();
             auto entity = owner_.getEntityManager().getEntity(initiatorGuid);
             if (auto* unit = dynamic_cast<Unit*>(entity.get()))
                 readyCheckInitiator_ = unit->getName();
+            if (readyCheckInitiator_.empty()) {
+                for (const auto& member : partyData.members) {
+                    if (member.guid == initiatorGuid) { readyCheckInitiator_ = member.name; break; }
+                }
+            }
         }
         if (readyCheckInitiator_.empty() && partyData.leaderGuid != 0) {
             for (const auto& member : partyData.members) {
                 if (member.guid == partyData.leaderGuid) { readyCheckInitiator_ = member.name; break; }
             }
         }
-        owner_.addSystemChatMessage(readyCheckInitiator_.empty()
-            ? "Ready check initiated!"
-            : readyCheckInitiator_ + " initiated a ready check!");
+        // HandleRaidReadyCheckOpcode broadcasts the check to the whole group,
+        // whoever started it included. The one who started it is not asked:
+        // ShowReadyCheck hides the listener when UnitIsUnit("player",
+        // initiator), and they count as ready - nothing else could answer for
+        // them, and the check would otherwise wait on them and mark them AFK.
+        //
+        // Stock (Wow.exe 0x574d50, 0x5747d0, 0x574180): the check runs thirty
+        // seconds from this packet. The initiator sends no answer - their own
+        // client counts them ready (GetReadyCheckStatus answers "ready" for
+        // the initiator's guid) and plays READY_CHECK_START; everyone else
+        // gets ERR_RAID_LEADER_READY_CHECK_START_S in the info frame. Then
+        // READY_CHECK(initiator, secondsLeft).
+        const bool selfStarted = initiatorGuid != 0 && initiatorGuid == owner_.getPlayerGuid();
+        readyCheckInitiatorGuid_ = initiatorGuid;
+        readyCheckSecondsLeft_ = 30.0f;
+        if (selfStarted) {
+            pendingReadyCheck_ = false;
+            ReadyCheckResult self{ .name = std::string(), .ready = true };
+            self.guid = initiatorGuid;
+            readyCheckResults_.push_back(std::move(self));
+        } else if (!readyCheckInitiator_.empty()) {
+            owner_.displayGameMessage("ERR_RAID_LEADER_READY_CHECK_START_S",
+                readyCheckInitiator_ + " has initiated a ready check.", {readyCheckInitiator_});
+        }
         if (owner_.addonEventCallbackRef())
-            owner_.addonEventCallbackRef()("READY_CHECK", {readyCheckInitiator_});
+            owner_.addonEventCallbackRef()("READY_CHECK", {readyCheckInitiator_, "30"});
     };
     table[Opcode::MSG_RAID_READY_CHECK_CONFIRM] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(9)) { packet.skipAll(); return; }
@@ -622,28 +664,33 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
             if (ent && (ent->getType() == ObjectType::UNIT || ent->getType() == ObjectType::PLAYER))
                 rname = std::static_pointer_cast<game::Unit>(ent)->getName();
         }
-        if (!rname.empty()) {
+        {
             bool found = false;
             for (auto& r : readyCheckResults_) {
-                if (r.name == rname) { r.ready = (isReady != 0); found = true; break; }
+                if (r.guid == respGuid) { r.ready = (isReady != 0); found = true; break; }
             }
-            if (!found) readyCheckResults_.push_back({ .name = rname, .ready = isReady != 0 });
-            char rbuf[128];
-            std::snprintf(rbuf, sizeof(rbuf), "%s is %s.", rname.c_str(), isReady ? "Ready" : "Not Ready");
-            owner_.addSystemChatMessage(rbuf);
+            if (!found) {
+                ReadyCheckResult r{ .name = rname, .ready = isReady != 0 };
+                r.guid = respGuid;
+                readyCheckResults_.push_back(std::move(r));
+            }
         }
+        // READY_CHECK_CONFIRM(unit, ready): the responder's unit token and 1
+        // for ready, nothing for not - ReadyCheck_Confirm tests `ready == 1`.
+        // It was a guid string, which no frame could match to a unit.
         if (owner_.addonEventCallbackRef()) {
-            char guidBuf[32];
-            snprintf(guidBuf, sizeof(guidBuf), "0x%016llX", (unsigned long long)respGuid);
-            owner_.addonEventCallbackRef()("READY_CHECK_CONFIRM", {guidBuf, isReady ? "1" : "0"});
+            const std::string unit = groupUnitToken(partyData, owner_.getPlayerGuid(), respGuid);
+            if (!unit.empty()) {
+                if (isReady) owner_.addonEventCallbackRef()("READY_CHECK_CONFIRM", {unit, "1"});
+                else         owner_.addonEventCallbackRef()("READY_CHECK_CONFIRM", {unit});
+            }
         }
     };
     table[Opcode::MSG_RAID_READY_CHECK_FINISHED] = [this](network::Packet& /*packet*/) {
-        char fbuf[128];
-        std::snprintf(fbuf, sizeof(fbuf), "Ready check complete: %u ready, %u not ready.",
-                     readyCheckReadyCount_, readyCheckNotReadyCount_);
-        owner_.addSystemChatMessage(fbuf);
         pendingReadyCheck_ = false;
+        readyCheckSecondsLeft_ = 0.0f;
+        readyCheckInitiatorGuid_ = 0;
+        readyCheckActive_ = false;
         readyCheckReadyCount_ = 0;
         readyCheckNotReadyCount_ = 0;
         readyCheckResults_.clear();
@@ -691,10 +738,22 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
         };
         std::string killerName = nameFor(killerGuid);
         std::string victimName = nameFor(victimGuid);
-        if (!killerName.empty() && !victimName.empty()) {
-            char buf[256];
-            std::snprintf(buf, sizeof(buf), "%s killed %s.", killerName.c_str(), victimName.c_str());
-            owner_.addSystemChatMessage(buf);
+        // A combat log event, PARTY_KILL, with the killer as source and the
+        // victim as destination - the combat log window and addons read it
+        // there. It was printed as a system chat line ("X killed Y."), which
+        // the stock client never shows.
+        if (owner_.addonEventCallbackRef() && !isClassicLikeExpansion()) {
+            using namespace combat_log;
+            const uint64_t me = owner_.getPlayerGuid(), pet = owner_.getPetGuid();
+            const std::vector<std::string> args = {
+                std::to_string(static_cast<int64_t>(std::time(nullptr))), "PARTY_KILL",
+                guidText(killerGuid), textOrNil(killerName),
+                std::to_string(unitFlags(killerGuid, me, pet)),
+                guidText(victimGuid), textOrNil(victimName),
+                std::to_string(unitFlags(victimGuid, me, pet)),
+            };
+            owner_.addonEventCallbackRef()("COMBAT_LOG_EVENT_UNFILTERED", args);
+            owner_.addonEventCallbackRef()("COMBAT_LOG_EVENT", args);
         }
     };
 
@@ -1134,6 +1193,7 @@ void SocialHandler::inspectUnit(uint64_t guid) {
     }
     auto packet = InspectPacket::build(guid);
     owner_.getSocket()->send(packet);
+    userInspectGuid_ = guid;
     if (isActiveExpansion("wotlk")) {
         auto achPkt = QueryInspectAchievementsPacket::build(guid);
         owner_.getSocket()->send(achPkt);
@@ -1378,6 +1438,17 @@ void SocialHandler::handleInspectResults(network::Packet& packet) {
             if (!packet.hasRemaining(4)) break;
             packet.readUInt32();
         }
+    }
+
+    // This client also inspects nearby players on its own, for their gear's
+    // look (GameHandler's auto-inspect queue). The stock client inspects only
+    // when the interface asks (NotifyInspect / InspectUnit), so only that
+    // answer is the inspect frame's: an automatic one keeps its gear in the
+    // cache and stops here. It used to replace the inspected player's data and
+    // fire INSPECT_TALENT_READY every couple of seconds in a crowd.
+    if (guid != userInspectGuid_) {
+        if (sawGear) owner_.cacheInspectedPlayerEquipment(guid, itemEntries);
+        return;
     }
 
     // A different player means the honour figures in hand are somebody else's.
@@ -1636,7 +1707,6 @@ void SocialHandler::setGuildMotd(const std::string& motd) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     auto packet = GuildMotdPacket::build(motd);
     owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage("Guild MOTD updated.");
 }
 
 void SocialHandler::promoteGuildMember(const std::string& playerName) {
@@ -1667,7 +1737,7 @@ void SocialHandler::inviteToGuild(const std::string& playerName) {
     if (playerName.empty()) { owner_.raiseUiError("You must specify a player name."); return; }
     auto packet = GuildInvitePacket::build(playerName);
     owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage("Inviting " + playerName + " to guild...");
+    // The server answers with SMSG_GUILD_COMMAND_RESULT (ERR_GUILD_INVITE_S).
 }
 
 void SocialHandler::kickGuildMember(const std::string& playerName) {
@@ -1798,16 +1868,55 @@ void SocialHandler::offerPetition(uint64_t petitionGuid, uint64_t targetGuid) {
 void SocialHandler::initiateReadyCheck() {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     if (!isInGroup()) { owner_.raiseUiError("You must be in a group to initiate a ready check."); return; }
+    // ERR_READY_CHECK_IN_PROGRESS while one runs (Wow.exe 0x5732b0).
+    if (readyCheckActive_ && readyCheckSecondsLeft_ > 0.0f) {
+        owner_.displayGameMessage("ERR_READY_CHECK_IN_PROGRESS",
+                                  "A ready check is already in progress.");
+        return;
+    }
     auto packet = ReadyCheckPacket::build();
     owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage("Ready check initiated.");
 }
 
 void SocialHandler::respondToReadyCheck(bool ready) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     auto packet = ReadyCheckConfirmPacket::build(ready);
     owner_.getSocket()->send(packet);
-    owner_.addSystemChatMessage(ready ? "You are ready." : "You are not ready.");
+    // Group::BroadcastReadyCheck sends answers to the leader and assistants
+    // only, so a plain member never hears their own back. The player frame's
+    // check icon reads GetReadyCheckStatus("player") on READY_CHECK_CONFIRM.
+    if (readyCheckActive_) {
+        const uint64_t self = owner_.getPlayerGuid();
+        bool found = false;
+        for (auto& r : readyCheckResults_) {
+            if (r.guid == self) { r.ready = ready; found = true; break; }
+        }
+        if (!found) {
+            ReadyCheckResult r{ .name = std::string(), .ready = ready };
+            r.guid = self;
+            readyCheckResults_.push_back(std::move(r));
+        }
+        if (owner_.addonEventCallbackRef()) {
+            if (ready) owner_.addonEventCallbackRef()("READY_CHECK_CONFIRM", {"player", "1"});
+            else       owner_.addonEventCallbackRef()("READY_CHECK_CONFIRM", {"player"});
+        }
+    }
+}
+
+const char* SocialHandler::readyCheckStatusFor(uint64_t guid) const {
+    if (!readyCheckActive_ || guid == 0) return nullptr;
+    for (const auto& r : readyCheckResults_)
+        if (r.guid == guid) return r.ready ? "ready" : "notready";
+    // Waiting only for someone in the group. Answers reach the leader and
+    // assistants alone (Group::BroadcastReadyCheck), so anyone else can only
+    // ever know their own.
+    const uint64_t self = owner_.getPlayerGuid();
+    if (guid == self) return "waiting";
+    const bool seesAnswers = partyData.leaderGuid == self || (partyData.flags & 0x01) != 0;
+    if (!seesAnswers) return nullptr;
+    for (const auto& m : partyData.members)
+        if (m.guid == guid) return "waiting";
+    return nullptr;
 }
 
 // ============================================================
@@ -2271,8 +2380,8 @@ void SocialHandler::handleGroupInvite(network::Packet& packet) {
 
     pendingGroupInvite = true;
     pendingInviterName = data.inviterName;
-    owner_.addSystemChatMessage(data.inviterName + " has invited you to a group.");
-    owner_.addUIError(data.inviterName + " has invited you to join a group.");
+    // No line of its own: the PARTY_INVITE popup is what the stock client
+    // shows for an invite.
     // The invite sound belongs to the popup: uiparent.lua answers this event
     // with StaticPopup_Show("PARTY_INVITE"), whose entry carries
     // sound = "igPlayerInvite". Playing the quest-accept sound here as well
@@ -2292,12 +2401,32 @@ void SocialHandler::handleGroupList(network::Packet& packet) {
     const bool hasRoles = isActiveExpansion("wotlk");
     const bool hasBattleGroupFlag = isActiveExpansion("tbc");
     const uint8_t prevLootMethod = partyData.lootMethod;
+    const uint64_t prevLooter = partyData.looterGuid;
+    const uint8_t prevThreshold = partyData.lootThreshold;
     const bool wasInGroup = !partyData.isEmpty();
+    const bool wasRaid = wasInGroup && groupIsRaid(partyData.groupType);
     std::vector<uint64_t> prevMembers;
     prevMembers.reserve(partyData.members.size());
     for (const auto& m : partyData.members) prevMembers.push_back(m.guid);
+    // The roster names the members; their health, level, zone and so on come
+    // from SMSG_PARTY_MEMBER_STATS, which the server sends when they change
+    // and not again with every roster. Kept across the reset below, or each
+    // roster - a subgroup move, a loot change - blanked every member's stats
+    // until their next stat packet.
+    std::vector<GroupMember> prevStats = std::move(partyData.members);
     partyData = GroupListData{};
     if (!GroupListParser::parse(packet, partyData, hasRoles, hasBattleGroupFlag)) return;
+    for (auto& m : partyData.members) {
+        for (const auto& old : prevStats) {
+            if (old.guid != m.guid || !old.hasPartyStats) continue;
+            m.curHealth = old.curHealth;   m.maxHealth = old.maxHealth;
+            m.powerType = old.powerType;   m.curPower = old.curPower;
+            m.maxPower = old.maxPower;     m.level = old.level;
+            m.zoneId = old.zoneId;         m.posX = old.posX;   m.posY = old.posY;
+            m.hasPartyStats = true;
+            break;
+        }
+    }
 
     // igPlayerInviteAccept, which Wow.exe's roster handler (0x6d8870) plays
     // when someone in the player's own subgroup arrives: anyone at all when
@@ -2329,27 +2458,41 @@ void SocialHandler::handleGroupList(network::Packet& packet) {
 
     const bool nowInGroup = !partyData.isEmpty();
     if (!nowInGroup && wasInGroup) {
-        owner_.addSystemChatMessage("You are no longer in a group.");
+        // ERR_LEFT_GROUP_YOU, unless the group was disbanded under us and
+        // ERR_GROUP_DISBANDED already said so.
+        if (!groupDestroyedAnnounced_)
+            owner_.displayGameMessage("ERR_LEFT_GROUP_YOU", "You leave the group.");
         LOG_INFO("Left group");
     } else if (nowInGroup && !wasInGroup) {
-        std::string members;
-        for (const auto& m : partyData.members) {
-            if (!members.empty()) members += ", ";
-            members += m.name.empty() ? "?" : m.name;
-        }
-        owner_.addSystemChatMessage("You joined a group with: " + members);
-        LOG_INFO("Joined group with ", partyData.memberCount, " members: ", members);
+        // No "joined a group with" line: that is this client's invention.
+        LOG_INFO("Joined group with ", partyData.memberCount, " members");
     }
-    // Loot method change notification
+    if (nowInGroup) groupDestroyedAnnounced_ = false;
+    // Loot method change: ERR_SET_LOOT_* ("Looting changed to Group Loot.").
     if (wasInGroup && nowInGroup && partyData.lootMethod != prevLootMethod) {
+        static const char* const kKeys[] = {"ERR_SET_LOOT_FREEFORALL", "ERR_SET_LOOT_ROUNDROBIN",
+                                            "ERR_SET_LOOT_MASTER", "ERR_SET_LOOT_GROUP",
+                                            "ERR_SET_LOOT_NBG"};
         const char* methodName = lootMethodName(partyData.lootMethod);
-        owner_.addSystemChatMessage(std::string("Loot method changed to ") + methodName + ".");
-        // Already noticed, and only ever said in chat. The party frames read
-        // the method to decide whether to offer the master-looter menu, and
-        // they reread it on this - so the change was announced to the player
-        // and not to the interface standing next to them.
+        if (partyData.lootMethod < 5)
+            owner_.displayGameMessage(kKeys[partyData.lootMethod],
+                                      std::string("Looting changed to ") + methodName + ".");
+    }
+    // The party frames read the method, the master looter and the threshold
+    // (GetLootMethod, GetLootThreshold) to draw the master-looter icon and
+    // the loot menu, and reread them on this. A new master looter under the
+    // same method, or a new threshold, is as much a change as a new method.
+    if (wasInGroup && nowInGroup &&
+        (partyData.lootMethod != prevLootMethod || partyData.looterGuid != prevLooter ||
+         partyData.lootThreshold != prevThreshold)) {
         if (owner_.addonEventCallbackRef())
             owner_.addonEventCallbackRef()("PARTY_LOOT_METHOD_CHANGED", {});
+    }
+    const bool nowRaid = nowInGroup && groupIsRaid(partyData.groupType);
+    if (wasInGroup && !wasRaid && nowRaid && owner_.addonEventCallbackRef()) {
+        // Not listened for by the stock FrameXML, which redraws on the
+        // RAID_ROSTER_UPDATE below; fired for addons that watch for it.
+        owner_.addonEventCallbackRef()("PARTY_CONVERTED_TO_RAID", {});
     }
     if (owner_.addonEventCallbackRef()) {
         owner_.addonEventCallbackRef()("GROUP_ROSTER_UPDATE", {});
@@ -2359,7 +2502,11 @@ void SocialHandler::handleGroupList(network::Packet& packet) {
         // on this event and nothing else, so the roles were parsed, readable,
         // and never shown.
         owner_.addonEventCallbackRef()("PLAYER_ROLES_ASSIGNED", {});
-        if (groupIsRaid(partyData.groupType))
+        // Leaving a raid is a raid roster change too: RaidFrame_OnEvent
+        // rebuilds (and empties) the raid tab and its pullouts on this, and
+        // the player frame drops its "Group N" badge - fired only while the
+        // roster was still a raid, both stayed up after the raid was gone.
+        if (nowRaid || wasRaid)
             owner_.addonEventCallbackRef()("RAID_ROSTER_UPDATE", {});
     }
 }
@@ -2664,7 +2811,6 @@ void SocialHandler::handleGuildQueryResponse(network::Packet& packet) {
         guildRankNames_.clear();
         for (const auto& rankName : data.rankNames) guildRankNames_.push_back(rankName);
         if (wasUnknown && !guildName_.empty()) {
-            owner_.addSystemChatMessage("Guild: <" + guildName_ + ">");
             if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("PLAYER_GUILD_UPDATE", {});
         }
     }
@@ -2678,6 +2824,7 @@ bool SocialHandler::guildMemberOnlineTransition(const std::string& name, bool no
         if (m.name == name) {
             if (m.online == nowOnline) return false;
             m.online = nowOnline;
+            m.statusFlags = nowOnline ? 0x01 : 0x00;   // AFK/DND come with the next roster
             return true;
         }
     }
@@ -2833,7 +2980,11 @@ void SocialHandler::handleGuildEvent(network::Packet& packet) {
     if (owner_.addonEventCallbackRef()) {
         switch (data.eventType) {
             case GuildEvent::MOTD:
-                owner_.addonEventCallbackRef()("GUILD_MOTD", {data.numStrings >= 1 ? data.strings[0] : ""});
+                // GetGuildRosterMOTD answers from the roster, and the event
+                // is the only word of a new MOTD until the next roster: the
+                // GUILD_MOTD handler's own GetGuildRosterMOTD() read the old one.
+                guildRoster_.motd = data.numStrings >= 1 ? data.strings[0] : "";
+                owner_.addonEventCallbackRef()("GUILD_MOTD", {guildRoster_.motd});
                 break;
             case GuildEvent::SIGNED_ON: case GuildEvent::SIGNED_OFF:
             case GuildEvent::PROMOTION: case GuildEvent::DEMOTION:
@@ -2918,7 +3069,9 @@ void SocialHandler::handleGuildCommandResult(network::Packet& packet) {
                 membershipChanged = true;
                 break;
             case 1:
-                if (!data.name.empty()) owner_.addSystemChatMessage("You have invited " + data.name + " to the guild.");
+                if (!data.name.empty())
+                    owner_.displayGameMessage("ERR_GUILD_INVITE_S",
+                        "You have invited " + data.name + " to join your guild.", {data.name});
                 break;
             case 2:
                 owner_.addSystemChatMessage("You have left the guild.");
@@ -3786,15 +3939,24 @@ void SocialHandler::handleLfgJoinResult(network::Packet& packet) {
     const uint32_t result = packet.readUInt32();
     const uint32_t state  = packet.readUInt32();
     if (result == 0) {
+        // Nothing said here: SMSG_LFG_UPDATE_PLAYER's JOIN_QUEUE follows and
+        // carries ERR_LFG_JOINED_QUEUE ("Joined (no client msg)", LFGMgr.h).
         lfgState_ = static_cast<LfgState>(state);
-        std::string dName = owner_.getLfgDungeonName(lfgDungeonId_);
-        if (!dName.empty()) owner_.addSystemChatMessage("Dungeon Finder: Joined the queue for " + dName + ".");
-        else owner_.addSystemChatMessage("Dungeon Finder: Joined the queue.");
     } else {
+        // The ERR_LFG_* GameError for the result, a chat line. AzerothCore's
+        // LfgJoinResult comments are those GlobalStrings texts.
+        static const char* const kKeys[] = {
+            nullptr, "ERR_LFG_ROLE_CHECK_FAILED", "ERR_LFG_GROUP_FULL", nullptr,
+            "ERR_LFG_NO_LFG_OBJECT", "ERR_LFG_NO_SLOTS_PLAYER", "ERR_LFG_NO_SLOTS_PARTY",
+            "ERR_LFG_MISMATCHED_SLOTS", "ERR_LFG_PARTY_PLAYERS_FROM_DIFFERENT_REALMS",
+            "ERR_LFG_MEMBERS_NOT_PRESENT", "ERR_LFG_GET_INFO_TIMEOUT", "ERR_LFG_INVALID_SLOT",
+            "ERR_LFG_DESERTER_PLAYER", "ERR_LFG_DESERTER_PARTY", "ERR_LFG_RANDOM_COOLDOWN_PLAYER",
+            "ERR_LFG_RANDOM_COOLDOWN_PARTY", "ERR_LFG_TOO_MANY_MEMBERS", "ERR_LFG_CANT_USE_DUNGEONS",
+        };
+        const char* key = result < sizeof(kKeys) / sizeof(kKeys[0]) ? kKeys[result] : nullptr;
         const char* msg = lfgJoinResultString(result);
-        std::string errMsg = std::string("Dungeon Finder: ") + (msg ? msg : "Join failed.");
-        owner_.addUIError(errMsg);
-        owner_.addSystemChatMessage(errMsg);
+        owner_.displayGameMessage(key ? key : "ERR_LFG_NO_LFG_OBJECT",
+                                  msg ? msg : "Internal LFG Error.");
     }
     // The queue state moved, either into a queue or back out of the attempt,
     // and LFG_UPDATE is how the panel is told to re-read it - the same event
@@ -3978,26 +4140,16 @@ void SocialHandler::handleLfgProposalUpdate(network::Packet& packet) {
     lfgDungeonId_ = dungeonId; lfgProposalId_ = proposalId;
     switch (proposalState) {
         case kProposalInitiating: {
+            // The proposal dialog is what the stock client shows; no line.
             lfgState_ = LfgState::Proposal;
-            std::string dName = owner_.getLfgDungeonName(dungeonId);
-            owner_.addSystemChatMessage(dName.empty()
-                ? "Dungeon Finder: A group has been found. Accept or decline."
-                : "Dungeon Finder: A group has been found for " + dName +
-                  ". Accept or decline.");
             break;
         }
         case kProposalFailed:
+            // ERR_LFG_PROPOSAL_FAILED arrives with the PROPOSAL_FAILED update.
             lfgState_ = LfgState::Queued; lfgProposalId_ = 0;
-            owner_.addUIError("Dungeon Finder: Group proposal failed.");
-            owner_.addSystemChatMessage("Dungeon Finder: Group proposal failed.");
             break;
         case kProposalSuccess: {
             lfgState_ = LfgState::InDungeon; lfgProposalId_ = 0;
-            std::string dName = owner_.getLfgDungeonName(dungeonId);
-            owner_.addSystemChatMessage(dName.empty()
-                ? "Dungeon Finder: Group found! Entering dungeon..."
-                : "Dungeon Finder: Group found for " + dName +
-                  "! Entering dungeon...");
             break;
         }
         default: break;
@@ -4070,6 +4222,12 @@ void SocialHandler::handleLfgRoleCheckUpdate(network::Packet& packet) {
     if (roleCheckState == 1) lfgState_ = LfgState::Queued;
     else if (roleCheckState == 3) { lfgState_ = LfgState::None; owner_.addUIError("Dungeon Finder: Role check failed - missing required role."); owner_.addSystemChatMessage("Dungeon Finder: Role check failed - missing required role."); }
     else if (roleCheckState == 2) { lfgState_ = LfgState::RoleCheck; owner_.addSystemChatMessage("Dungeon Finder: Performing role check..."); }
+    // LFG_ROLECHECK_WRONG_ROLES (4), ABORTED (5) and NO_ROLE (6) end the
+    // check without a queue, the same as MISSING_ROLE (3): LFGMgr::
+    // UpdateRoleCheck sends the join result and removes the group's state.
+    // Left at RoleCheck, the finder believed a check was still running and
+    // the queue buttons stayed in their "checking roles" state.
+    else if (roleCheckState >= 4 && roleCheckState <= 6) lfgState_ = LfgState::None;
     // Wow.exe's Dungeon Finder handler (0x55bdc0) plays LFG_DungeonReady
     // (17318) as a role check begins - the initiating flag, with
     // ERR_LFG_ROLE_CHECK_INITIATED - and LFG_Denied (17341) when one ends
@@ -4140,17 +4298,19 @@ enum : uint8_t {
 /// Said only when the state actually moves, because the server restates the
 /// same state on a schedule and every line here would otherwise arrive again
 /// with it.
+/// The GameError key the stock client prints for an update (the ERR_LFG_*
+/// rows of the GameError table, all chat lines), or nullptr for the updates
+/// that print nothing. The pairing is by meaning - each GlobalStrings text
+/// matches AzerothCore's comment for its update type - and was not read out of
+/// Wow.exe's own LFG handler.
 const char* lfgUpdateMessage(uint8_t updateType) {
     switch (updateType) {
-        case kLfgJoinQueue:        return "Dungeon Finder: You have joined the queue.";
-        case kLfgAddedToQueue:     return "Dungeon Finder: Added to the queue.";
-        case kLfgRemovedFromQueue: return "Dungeon Finder: Removed from the queue.";
-        case kLfgRoleCheckFailed:  return "Dungeon Finder: The role check failed.";
-        case kLfgRoleCheckAborted: return "Dungeon Finder: The role check was cancelled.";
-        case kLfgProposalFailed:   return "Dungeon Finder: The group did not form - back in the queue.";
-        case kLfgProposalDeclined: return "Dungeon Finder: Someone declined - back in the queue.";
-        case kLfgGroupFound:       return "Dungeon Finder: A group has been found!";
-        case kLfgGroupDisband:     return "Dungeon Finder: Your group disbanded.";
+        // Joining and leaving are said where 0x55bdc0 says them, with their
+        // sounds (playLfgUpdateSound), not by update type.
+        case kLfgRoleCheckFailed:  return "ERR_LFG_ROLE_CHECK_FAILED";
+        case kLfgRoleCheckAborted: return "ERR_LFG_ROLE_CHECK_ABORTED";
+        case kLfgProposalFailed:   return "ERR_LFG_PROPOSAL_FAILED";
+        case kLfgProposalDeclined: return "ERR_LFG_PROPOSAL_DECLINED_SELF";
         default:                   return nullptr;
     }
 }
@@ -4238,11 +4398,15 @@ void SocialHandler::playLfgUpdateSound(LfgFlagsSeen& last, uint8_t updateType, b
     const bool leftType = updateType == kLfgRemovedFromQueue || updateType == kLfgGroupMemberOffline;
     if (joined && !before.joined && joinCounts) {
         owner_.playUiSoundEntry(kSoundPvpEnterQueue);
+        owner_.displayGameMessage("ERR_LFG_JOINED_QUEUE", "You are now queued in the Dungeon Finder.");
         return;
     }
     const bool lostJoin = !joined && before.joined;
     const bool lostQueue = !queued && before.queued;
-    if ((lostJoin || lostQueue) && leftType) owner_.playUiSoundEntry(kSoundLfgDenied);
+    if ((lostJoin || lostQueue) && leftType && lfgState_ != LfgState::InDungeon) {
+        owner_.playUiSoundEntry(kSoundLfgDenied);
+        owner_.displayGameMessage("ERR_LFG_LEFT_QUEUE", "You are no longer queued in the Dungeon Finder.");
+    }
 }
 
 /// The dungeons the update is about. The first is the one the queue window
@@ -4277,12 +4441,24 @@ void SocialHandler::applyLfgUpdate(uint8_t updateType, bool extraInfo,
             case kLfgLeaderUnk1:
             case kLfgGroupMemberOffline:
                 break;
+            case kLfgRemovedFromQueue:
+                // AzerothCore takes a matched player out of the queue as the
+                // group forms; the proposal's success already put us in the
+                // dungeon, and GetLFGMode must go on saying "lfgparty".
+                if (previous != LfgState::InDungeon) lfgState_ = LfgState::None;
+                break;
             default:
                 lfgState_ = LfgState::None;
                 break;
         }
     } else if (queued) {
-        lfgState_ = LfgState::Queued;
+        // A proposal is still a queue on the wire: AzerothCore restates the
+        // queue (UPDATE_STATUS, queued set) while the proposal is up, and
+        // taking that as "just queued" dropped the open proposal - GetLFGMode
+        // went back to "queued" and GetLFGProposal to nil, so the dialog had
+        // nothing to accept and the proposal timed out. The proposal ends on
+        // its own update (failed or succeeded).
+        if (!(previous == LfgState::Proposal && lfgProposalId_ != 0)) lfgState_ = LfgState::Queued;
     } else if (inDungeon) {
         lfgState_ = LfgState::InDungeon;
     }
@@ -4291,7 +4467,7 @@ void SocialHandler::applyLfgUpdate(uint8_t updateType, bool extraInfo,
         // Only on a move. UPDATE_STATUS says nothing of its own and the rest
         // repeat: the server restates the queue every few seconds, and each
         // restatement used to arrive as a line of chat.
-        if (lfgState_ != previous) owner_.addSystemChatMessage(message);
+        if (lfgState_ != previous) owner_.displayGameMessage(message, "");
     } else if (updateType != kLfgUpdateStatus && updateType != kLfgDefault) {
         // An update type this client has no name for. Said once so it can be
         // added, rather than silently deciding the queue is over.
@@ -4468,11 +4644,21 @@ void SocialHandler::lfgSetRoles(uint8_t roles) {
     if (owner_.addonEventCallbackRef()) {
         owner_.addonEventCallbackRef()("LFG_ROLE_UPDATE", {});
     }
+    // Kept, not sent. CMSG_LFG_SET_ROLES is the answer to a role check
+    // (HandleLfgSetRolesOpcode -> LFGMgr::UpdateRoleCheck); the role-check
+    // popup ticks its boxes through SetLFGRoles and then answers with
+    // CompleteLFGRoleCheck, and a join carries its roles in CMSG_LFG_JOIN.
+    // Sending on every tick answered a check with half-chosen roles.
+}
+
+void SocialHandler::lfgCompleteRoleCheck(bool accept) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     const uint32_t wire = wireOpcode(Opcode::CMSG_LFG_SET_ROLES);
-    if (wire == 0xFFFF) return;
+    if (wire == 0xFFFF) return;   // no dungeon finder before Wrath
     network::Packet pkt(static_cast<uint16_t>(wire));
-    pkt.writeUInt8(roles);
+    // Declining is answering with no role, which UpdateRoleCheck turns into
+    // LFG_ROLECHECK_NO_ROLE for the whole group.
+    pkt.writeUInt8(accept ? lfgOfferedRoles_ : 0);
     owner_.getSocket()->send(pkt);
 }
 
@@ -4485,12 +4671,16 @@ void SocialHandler::lfgAcceptProposal(uint32_t proposalId, bool accept) {
     owner_.getSocket()->send(pkt);
 }
 
-void SocialHandler::lfgTeleport(bool toLfgDungeon) {
+void SocialHandler::lfgTeleport(bool out) {
     if (!owner_.getSocket()) return;
     const uint16_t wire = wireOpcode(Opcode::CMSG_LFG_TELEPORT);
     if (wire == 0xFFFF) return;   // no dungeon finder before Wrath
     network::Packet pkt(wire);
-    pkt.writeUInt8(toLfgDungeon ? 0 : 1);
+    // HandleLfgTeleportOpcode reads `bool out` and passes it to
+    // LFGMgr::TeleportPlayer(player, out); minimap.lua's TeleportOut calls
+    // LFGTeleport(true) and TeleportIn LFGTeleport(false). Written as given -
+    // it was inverted, so "Teleport Out" sent the player in, and the reverse.
+    pkt.writeUInt8(out ? 1 : 0);
     owner_.getSocket()->send(pkt);
 }
 
@@ -4788,6 +4978,38 @@ void SocialHandler::handlePvpLogData(network::Packet& packet) {
 }
 
 void SocialHandler::updateLogoutCountdown(float deltaTime) {
+    // The ready check's thirty seconds. On the initiator's client their end
+    // closes the check (Wow.exe 0x573390): "The following players are Away:
+    // ..." (RAID_MEMBERS_AFK) naming whoever did not answer, or "Everyone is
+    // Ready" (READY_CHECK_ALL_READY), then MSG_RAID_READY_CHECK_FINISHED to
+    // the server, which broadcasts it to the group.
+    if (readyCheckSecondsLeft_ > 0.0f) {
+        readyCheckSecondsLeft_ -= deltaTime;
+        if (readyCheckSecondsLeft_ <= 0.0f && readyCheckActive_ &&
+            readyCheckInitiatorGuid_ != 0 && readyCheckInitiatorGuid_ == owner_.getPlayerGuid()) {
+            std::string away;
+            for (const auto& m : partyData.members) {
+                if (m.guid == owner_.getPlayerGuid()) continue;
+                bool answered = false;
+                for (const auto& r : readyCheckResults_)
+                    if (r.guid == m.guid) { answered = true; break; }
+                if (answered) continue;
+                if (!away.empty()) away += ", ";
+                away += m.name;
+            }
+            // RAID_MEMBERS_AFK / READY_CHECK_ALL_READY are plain GlobalStrings,
+            // not GameErrors: 0x573390 prints them to the chat frame.
+            const std::string fmt = globalString(owner_.services().assetManager,
+                                                 away.empty() ? "READY_CHECK_ALL_READY" : "RAID_MEMBERS_AFK");
+            owner_.addSystemChatMessage(!fmt.empty() ? formatGlobalString(fmt, {away})
+                                        : away.empty() ? std::string("Everyone is Ready")
+                                                       : "The following players are Away: " + away);
+            if (owner_.getSocket()) {
+                network::Packet fin(wireOpcode(Opcode::MSG_RAID_READY_CHECK_FINISHED));
+                owner_.getSocket()->send(fin);
+            }
+        }
+    }
     // A queue request the server let pass without a word. A realm that keeps
     // a battleground back - ChromieCraft opens the random one at level sixty,
     // and only through a command of its own - drops the join unanswered, and
@@ -4945,7 +5167,9 @@ void SocialHandler::handleSetFactionStanding(network::Packet& packet) {
             char buf[256];
             std::snprintf(buf, sizeof(buf), "Reputation with %s %s by %d.",
                           name.c_str(), delta > 0 ? "increased" : "decreased", std::abs(delta));
-            owner_.addSystemChatMessage(buf);
+            // Only CHAT_MSG_COMBAT_FACTION_CHANGE below (FACTION_STANDING_
+            // INCREASED/DECREASED): a system line beside it printed every
+            // reputation change twice.
             owner_.watchedFactionIdRef() = factionId;
             // These events fire unconditionally on any rep change (not gated by callback).
             owner_.fireAddonEvent("UPDATE_FACTION", {});
@@ -5264,28 +5488,73 @@ void SocialHandler::requestCalendarEvent(uint64_t eventId) {
     LOG_INFO("requestCalendarEvent: ", eventId);
 }
 
-void SocialHandler::createCalendarEvent(const CalendarEventDraft& draft) {
+void SocialHandler::createCalendarEvent(const CalendarEventDraft& draft,
+                                        const std::vector<CalendarAddEventInvite>& invites) {
     if (!owner_.isInWorld()) return;
-    // title, description, type, repeatable, maxInvites, dungeonId, then two
-    // packed times and the flags - CalendarHandler.cpp:228.
-    //
-    // The second time is unused by the server (it is stored and never read),
-    // but it is read off the wire, so leaving it out shifts the flags into it
-    // and the flags off the end.
+    // The header, then the invite list - see writeCalendarAddEvent. Without
+    // the list the server's read of its count throws and nothing is created.
     network::Packet pkt(wireOpcode(Opcode::CMSG_CALENDAR_ADD_EVENT));
-    pkt.writeString(draft.title);
-    pkt.writeString(draft.description);
-    pkt.writeUInt8(draft.type);
-    pkt.writeUInt8(draft.repeatOption);
-    pkt.writeUInt32(draft.maxInvites);
-    pkt.writeUInt32(static_cast<uint32_t>(draft.dungeonId));
-    pkt.writeUInt32(packWowPackedTime(draft.eventTime));
-    pkt.writeUInt32(packWowPackedTime(draft.eventTime));
-    pkt.writeUInt32(draft.flags);
+    writeCalendarAddEvent(pkt, draft, invites);
     owner_.getSocket()->send(pkt);
     LOG_INFO("createCalendarEvent: '", draft.title, "' type ", draft.type,
              " on ", draft.eventTime.day, "/", draft.eventTime.month, "/",
-             draft.eventTime.fullYear());
+             draft.eventTime.fullYear(), " with ", invites.size(), " invite(s)");
+}
+
+void SocialHandler::signUpForCalendarEvent(uint64_t eventId, bool tentative) {
+    if (!owner_.isInWorld()) return;
+    // uint64 eventId, bool tentative (CalendarHandler.cpp:613): the server
+    // makes the invite itself, SIGNED_UP or TENTATIVE.
+    network::Packet pkt(wireOpcode(Opcode::CMSG_CALENDAR_EVENT_SIGNUP));
+    pkt.writeUInt64(eventId);
+    pkt.writeUInt8(tentative ? 1 : 0);
+    owner_.getSocket()->send(pkt);
+    LOG_INFO("signUpForCalendarEvent: ", eventId, tentative ? " (tentative)" : "");
+}
+
+void SocialHandler::removeCalendarInvite(uint64_t inviteeGuid, uint64_t inviteId,
+                                         uint64_t ownerInviteId, uint64_t eventId) {
+    if (!owner_.isInWorld()) return;
+    // packedGuid invitee, inviteId, ownerInviteId, eventId - in that order,
+    // which is not the order the status packet uses (CalendarHandler.cpp:673).
+    network::Packet pkt(wireOpcode(Opcode::CMSG_CALENDAR_EVENT_REMOVE_INVITE));
+    pkt.writePackedGuid(inviteeGuid);
+    pkt.writeUInt64(inviteId);
+    pkt.writeUInt64(ownerInviteId);
+    pkt.writeUInt64(eventId);
+    owner_.getSocket()->send(pkt);
+    LOG_INFO("removeCalendarInvite: invite ", inviteId, " from event ", eventId);
+}
+
+void SocialHandler::copyCalendarEvent(uint64_t eventId, uint64_t inviteId,
+                                      uint32_t packedTime) {
+    if (!owner_.isInWorld()) return;
+    // uint64 eventId, uint64 inviteId, packed time (CalendarHandler.cpp:448).
+    network::Packet pkt(wireOpcode(Opcode::CMSG_CALENDAR_COPY_EVENT));
+    pkt.writeUInt64(eventId);
+    pkt.writeUInt64(inviteId);
+    pkt.writeUInt32(packedTime);
+    owner_.getSocket()->send(pkt);
+    LOG_INFO("copyCalendarEvent: ", eventId);
+}
+
+void SocialHandler::complainCalendarEvent(uint64_t eventId, uint64_t creatorGuid) {
+    if (!owner_.isInWorld()) return;
+    // uint64 eventId, then the guid in full (CalendarPackets.cpp,
+    // CalendarComplain::Read).
+    network::Packet pkt(wireOpcode(Opcode::CMSG_CALENDAR_COMPLAIN));
+    pkt.writeUInt64(eventId);
+    pkt.writeUInt64(creatorGuid);
+    owner_.getSocket()->send(pkt);
+}
+
+void SocialHandler::massInviteArenaTeamToCalendarEvent(uint32_t teamId) {
+    if (!owner_.isInWorld()) return;
+    // uint32 arena team id (CalendarPackets.cpp, ArenaTeam::Read); the answer
+    // is SMSG_CALENDAR_ARENA_TEAM, the members to add.
+    network::Packet pkt(wireOpcode(Opcode::CMSG_CALENDAR_ARENA_TEAM));
+    pkt.writeUInt32(teamId);
+    owner_.getSocket()->send(pkt);
 }
 
 void SocialHandler::respondToCalendarInvite(uint64_t eventId, uint64_t inviteId,

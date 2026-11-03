@@ -51,8 +51,15 @@ static int lua_GetTabardCreationCost(lua_State* L) {
     return 1;
 }
 
+/// Postage: 30 copper a letter, 30 an item once anything is attached.
+/// AzerothCore charges `items_count ? 30 * items_count : 30` and its comment
+/// says the price is hardcoded in the client (MailHandler.cpp HandleSendMail),
+/// so a constant 30 showed one item's postage for a letter carrying twelve and
+/// SendMailFrame_Update let the player press Send with too little money.
 static int lua_GetSendMailPrice(lua_State* L) {
-    lua_pushnumber(L, 30.0);
+    auto* gh = getGameHandler(L);
+    const int items = gh ? gh->getMailAttachmentCount() : 0;
+    lua_pushnumber(L, items > 0 ? 30.0 * items : 30.0);
     return 1;
 }
 
@@ -151,19 +158,18 @@ static int lua_GetInventoryAlertStatus(lua_State* L) {
 // that lead here are registered in its OnShow and a suppressed frame never
 // runs one, but that is the case this branch exists to make work.
 //
-// The prices are the game's own fixed schedule for the seven buyable slots,
-// not a guess and not something the server quotes: ten silver, then a gold,
-// then ten, twenty-five, fifty, a hundred and two hundred and fifty. Past the
-// last one there is nothing left to sell, and zero is what the real client
-// answers there.
+// The prices are BankBagSlotPrices.dbc, the row the server's BuyBankSlot
+// charges, not something the server quotes. A schedule written out here was
+// not the file's (3.3.5's is 10s, 1g, 10g, then 25g for each of the last
+// four) and disagreed with the one inventory_handler kept for its own window.
+// Past the last slot there is nothing left to sell, and zero is what the real
+// client answers there.
 static int lua_GetBankSlotCost(lua_State* L) {
-    static constexpr uint32_t kSlotPrices[] = {
-        1'000, 10'000, 100'000, 250'000, 500'000, 1'000'000, 2'500'000,
-    };
-    constexpr int kNumBuyable = static_cast<int>(std::size(kSlotPrices));
+    auto* gh = getGameHandler(L);
     const int owned = static_cast<int>(luaL_optnumber(L, 1, 0));
-    const bool haveAll = owned < 0 || owned >= kNumBuyable;
-    lua_pushnumber(L, haveAll ? 0.0 : static_cast<double>(kSlotPrices[owned]));
+    const bool haveAll = owned < 0 || owned >= game::slots::bankBagCount();
+    lua_pushnumber(L, (haveAll || !gh) ? 0.0
+                                       : static_cast<double>(gh->getBankBagSlotPrice(owned)));
     return 1;
 }
 
@@ -215,20 +221,43 @@ static int lua_GetContainerItemCooldown(lua_State* L) {
 }
 
 /// GetContainerItemQuestInfo(bag, slot) → isQuestItem, questId, isActive.
-/// The border a quest item draws in the bags comes from this; false is the
-/// answer for an ordinary item and is what nearly every slot holds.
+/// The quest border and "!" an item draws in the bags come from this
+/// (containerframe.lua ContainerFrame_Update). Wow.exe 0x5d9400: isQuestItem
+/// is the item's bonding == 4 (quest item), questId its StartQuest (nil when
+/// none), isActive whether that quest is already in the log (0x5e11d0).
 static int lua_GetContainerItemQuestInfo(lua_State* L) {
-    lua_pushboolean(L, 0);
-    lua_pushnil(L);
-    lua_pushboolean(L, 0);
+    auto* gh = getGameHandler(L);
+    const int bag = static_cast<int>(luaL_optnumber(L, 1, -1));
+    const int slot = static_cast<int>(luaL_optnumber(L, 2, 0));
+    const game::ItemSlot* s = (gh && slot >= 1) ? containerItemSlot(gh->getInventory(), bag, slot)
+                                                : nullptr;
+    const auto* info = (s && !s->empty()) ? gh->getItemInfo(s->item.itemId) : nullptr;
+    if (!info) {
+        lua_pushnil(L); lua_pushnil(L); lua_pushnil(L);
+        return 3;
+    }
+    lua_pushboolean(L, info->bindType == 4 ? 1 : 0);
+    if (info->startQuestId != 0) {
+        lua_pushnumber(L, info->startQuestId);
+        bool inLog = false;
+        for (const auto& q : gh->getQuestLog()) inLog = inLog || q.questId == info->startQuestId;
+        lua_pushboolean(L, inLog ? 1 : 0);
+    } else {
+        lua_pushnil(L);
+        lua_pushnil(L);
+    }
     return 3;
 }
 
 /// KeyRingButtonIDToInvSlotID(id) → the inventory slot a keyring button maps
-/// to. The keyring holds nothing here, and the identity is the least
-/// surprising mapping for code that indexes with the result.
+/// to: KEYRING_SLOT_START plus the button, counted from one - 87 upward in
+/// 3.3.5. containerframe.lua hands the result straight to
+/// GameTooltip:SetInventoryItem and PickupInventoryItem for a keyring square,
+/// so the identity it used to return named equipment slots 1-32 instead.
 static int lua_KeyRingButtonIDToInvSlotID(lua_State* L) {
-    lua_pushnumber(L, luaL_optnumber(L, 1, 0));
+    const int id = static_cast<int>(luaL_optnumber(L, 1, 0));
+    if (id < 1) return luaReturnNil(L);
+    lua_pushnumber(L, game::slots::toInventorySlot(game::slots::keyringWireSlot(id - 1)));
     return 1;
 }
 
@@ -300,7 +329,8 @@ static int lua_GetBuybackItemInfo(lua_State* L) {
     lua_pushnumber(L, static_cast<double>(bi.item.sellPrice) * bi.count);
     lua_pushnumber(L, bi.count);
     lua_pushnumber(L, 1);
-    lua_pushboolean(L, 1);
+    // isUsable, the same test the merchant tab's slots make.
+    lua_pushboolean(L, playerCanUseItem(gh, bi.item.itemId) ? 1 : 0);
     return 6;
 }
 
@@ -324,13 +354,19 @@ static int lua_BuybackItem(lua_State* L) {
     return 0;
 }
 
-/// GetRepairAllCost() → cost, whether it can be afforded. Both are wanted
-/// together: the button greys itself out on the second.
+/// GetRepairAllCost() → cost, canRepair. Both are wanted together: the
+/// buttons grey themselves out on the second.
+///
+/// canRepair is "there is something to repair", not "it can be afforded".
+/// merchantframe.xml enables the guild bank repair button on it too, which
+/// guild money pays for - so tying it to the player's own purse greyed that
+/// button for a broke player, and money >= 0 lit both buttons with nothing
+/// damaged. Affordability is checked when the repair is asked for.
 static int lua_GetRepairAllCost(lua_State* L) {
     auto* gh = getGameHandler(L);
     const uint32_t cost = gh ? gh->estimateRepairAllCost() : 0;
     lua_pushnumber(L, cost);
-    lua_pushboolean(L, gh && gh->getMoneyCopper() >= cost);
+    lua_pushboolean(L, cost > 0);
     return 2;
 }
 
@@ -339,16 +375,27 @@ static int lua_CloseMerchant(lua_State* L) {
     return 0;
 }
 
-/// GetMerchantItemMaxStack(index) → the largest stack that can be bought at
-/// once. The item's own stack limit, which is what it means.
+/// GetMerchantItemMaxStack(index) → how many can be bought at once, counted
+/// in the vendor's own lots.
+///
+/// A vendor sells some things in lots - water by five, arrows by two hundred
+/// (the list's stack count, the template's BuyCount) - and the count
+/// BuyMerchantItem sends is a number of lots: AzerothCore stores
+/// BuyCount * count (Player::BuyItemFromVendorSlot). The split frame
+/// merchantframe.lua opens on this is in the same unit as the per-lot price it
+/// divides the purse by, so the item's own stack limit offered as many lots as
+/// a stack holds items - a hundred water for a stack of twenty.
 static int lua_GetMerchantItemMaxStack(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int index = static_cast<int>(luaL_checknumber(L, 1));
     if (!gh || index < 1) { lua_pushnumber(L, 1); return 1; }
     const auto& items = gh->getVendorItems().items;
     if (index > static_cast<int>(items.size())) { lua_pushnumber(L, 1); return 1; }
-    const auto* info = gh->getItemInfo(items[index - 1].itemId);
-    lua_pushnumber(L, (info && info->maxStack > 0) ? info->maxStack : 1);
+    const auto& vi = items[index - 1];
+    const auto* info = gh->getItemInfo(vi.itemId);
+    const uint32_t maxStack = (info && info->maxStack > 0) ? info->maxStack : 1;
+    const uint32_t lot = vi.stackCount > 0 ? vi.stackCount : 1;
+    lua_pushnumber(L, std::max<uint32_t>(1, maxStack / lot));
     return 1;
 }
 
@@ -448,16 +495,21 @@ static int lua_GetMerchantItemInfo(lua_State* L) {
     const auto* info = gh->getItemInfo(vi.itemId);
     std::string name = info ? info->name : ("Item #" + std::to_string(vi.itemId));
     lua_pushstring(L, name.c_str());                    // name
-    // texture
+    // texture - from the item when it is cached, else from the display id the
+    // vendor list itself carries, so an item not yet queried still has its
+    // icon rather than a blank square until the query answers.
     std::string iconPath;
-    if (info && info->displayInfoId != 0)
-        iconPath = gh->getItemIconPath(info->displayInfoId);
+    const uint32_t displayId = (info && info->displayInfoId != 0) ? info->displayInfoId
+                                                                  : vi.displayInfoId;
+    if (displayId != 0) iconPath = gh->getItemIconPath(displayId);
     if (!iconPath.empty()) lua_pushstring(L, iconPath.c_str());
     else lua_pushnil(L);
     lua_pushnumber(L, vi.buyPrice);                     // price (copper)
     lua_pushnumber(L, vi.stackCount > 0 ? vi.stackCount : 1); // stackCount
     lua_pushnumber(L, vi.maxCount == -1 ? -1 : vi.maxCount);  // numAvailable (-1=unlimited)
-    lua_pushboolean(L, 1);                              // isUsable
+    // isUsable: merchantframe.lua tints the slot red on false. A flat true
+    // left plate on a mage's vendor looking buyable for use.
+    lua_pushboolean(L, playerCanUseItem(gh, vi.itemId) ? 1 : 0);
     // The extended cost - tokens, honour, arena points - which merchantframe
     // reads as `if ( extendedCost and (price <= 0) )` to decide whether to
     // show a token price instead of a coin one. It was not returned at all, so
@@ -738,8 +790,8 @@ static int lua_AddTradeMoney(lua_State* L) {
     auto* gh = getGameHandler(L);
     const uint64_t held = cursorMoney();
     if (!gh || held == 0) return 0;
-    gh->setTradeGold(gh->getMyTradeGold() + held);
-    setCursorMoney(L, 0);
+    // The cursor keeps the money if no trade took it.
+    if (gh->setTradeGold(gh->getMyTradeGold() + held)) setCursorMoney(L, 0);
     return 0;
 }
 
@@ -753,8 +805,7 @@ static int lua_PickupTradeMoney(lua_State* L) {
     if (offered == 0) return 0;
     uint64_t take = static_cast<uint64_t>(luaL_optnumber(L, 1, 0));
     if (take == 0 || take > offered) take = offered;
-    gh->setTradeGold(offered - take);
-    setCursorMoney(L, take);
+    if (gh->setTradeGold(offered - take)) setCursorMoney(L, take);
     return 0;
 }
 
@@ -856,16 +907,10 @@ namespace {
 const game::GuildBankItemSlot* guildBankItemAt(game::GameHandler* gh, int tab, int slot) {
     if (!gh) return nullptr;
     const auto& data = gh->getGuildBankData();
-
-    const std::vector<game::GuildBankItemSlot>* items = nullptr;
-    if (tab - 1 == data.tabId) {
-        items = &data.tabItems;
-    } else if (tab >= 1 && tab <= static_cast<int>(data.tabs.size())) {
-        items = &data.tabs[tab - 1].items;
-    }
-    if (!items) return nullptr;
-
-    for (const auto& entry : *items) {
+    // Each tab keeps its own contents, merged from every list of it - the
+    // last list's slots are only the ones that changed.
+    if (tab < 1 || tab > static_cast<int>(data.tabs.size())) return nullptr;
+    for (const auto& entry : data.tabs[tab - 1].items) {
         if (entry.slotId + 1 == slot) return &entry;
     }
     return nullptr;
@@ -878,6 +923,9 @@ struct CurrencyRow {
     uint32_t    currencyId = 0;
     uint32_t    count = 0;
     std::string icon;
+    /// GetCurrencyListInfo's extraCurrencyType: 1 arena points, 2 honor
+    /// points (blizzard_tokenui.lua draws their own icons for those two).
+    int         extraType = 0;
 };
 
 uint32_t countItemInBags(game::GameHandler* gh, uint32_t itemId) {
@@ -891,14 +939,37 @@ std::vector<CurrencyRow> buildCurrencyList(lua_State* L) {
     std::vector<CurrencyRow> rows;
     auto* gh = getGameHandler(L);
     if (!gh) return rows;
+    // CurrencyTypes.dbc's arena and honor rows name the two pseudo-items the
+    // points are shown as; their amounts are player fields, not items.
+    constexpr uint32_t kArenaPointsItem = 43307, kHonorPointsItem = 43308;
     for (const auto& c : gh->getCurrencyTypes()) {
-        const uint32_t count = countItemInBags(gh, c.itemId);
-        if (count == 0) continue;
         CurrencyRow r;
+        uint32_t count = 0;
+        if (c.itemId == kArenaPointsItem) {
+            count = gh->getArenaPoints();
+            r.extraType = 1;
+        } else if (c.itemId == kHonorPointsItem) {
+            count = gh->getHonorPoints();
+            r.extraType = 2;
+        } else {
+            // Emblems, badges and marks live in the currency-token slots
+            // (inventory slots 118-149) once looted, not in a bag - counting
+            // the bags alone listed none of them.
+            count = countItemInBags(gh, c.itemId) + gh->countCurrencyTokens(c.itemId);
+            if (count == 0) continue;
+        }
         r.currencyId = c.id;
         r.itemId     = c.itemId;
         r.count      = count;
-        if (const auto* info = gh->getItemInfo(c.itemId)) r.name = info->name;
+        if (r.extraType != 0) {
+            // The interface's own names for them: ARENA_POINTS, HONOR_POINTS.
+            lua_getglobal(L, r.extraType == 1 ? "ARENA_POINTS" : "HONOR_POINTS");
+            if (lua_isstring(L, -1)) r.name = lua_tostring(L, -1);
+            lua_pop(L, 1);
+        }
+        if (r.name.empty()) {
+            if (const auto* info = gh->getItemInfo(c.itemId)) r.name = info->name;
+        }
         if (r.name.empty()) r.name = "Item #" + std::to_string(c.itemId);
         rows.push_back(std::move(r));
     }
@@ -1104,9 +1175,15 @@ static int lua_DeleteInboxItem(lua_State* L) {
     return 0;
 }
 
-// InboxItemCanDelete(index) - nothing here refuses a deletion
+// InboxItemCanDelete(index) - false when the letter goes back instead.
+//
+// It answered true for everything, so mailframe.lua (InboxFrame_Update,
+// OpenMail_Update, OpenMail_Delete) never offered Return: a player's parcel
+// could only be deleted, items and all. See game::mailIsReturnable.
 static int lua_InboxItemCanDelete(lua_State* L) {
-    lua_pushboolean(L, 1);
+    auto* gh = getGameHandler(L);
+    const auto* mail = mailAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+    lua_pushboolean(L, (mail && game::mailIsReturnable(*mail)) ? 0 : 1);
     return 1;
 }
 
@@ -1482,8 +1559,15 @@ static int lua_SaveEquipmentSet(lua_State* L) {
     // Overwriting one keeps its guid, which is how the server knows it is the
     // same set rather than a new one with the same name.
     const auto* existing = equipmentSetByName(gh, name);
+    // The slots the player marked "ignore" (EquipmentManagerIgnoreSlotForSave,
+    // inventory slot ids 1-19) go to the server as part of the set; they were
+    // collected here and never sent, so every slot was saved.
+    uint32_t ignoreMask = 0;
+    for (int slot : pendingIgnoredSlots()) {
+        if (slot >= 1 && slot <= kEquipSlots) ignoreMask |= 1u << (slot - 1);
+    }
     gh->saveEquipmentSet(name, iconName, existing ? existing->setGuid : 0,
-                         existing ? existing->setId : 0xFFFFFFFFu);
+                         existing ? existing->setId : 0xFFFFFFFFu, ignoreMask);
     return 0;
 }
 
@@ -1499,10 +1583,9 @@ static int lua_UseEquipmentSet(lua_State* L) {
     auto* gh = getGameHandler(L);
     const auto* set = equipmentSetByName(gh, luaL_optstring(L, 1, ""));
     if (!gh || !set) { lua_pushboolean(L, 0); return 1; }
+    // EQUIPMENT_SWAP_PENDING now and EQUIPMENT_SWAP_FINISHED when the server's
+    // SMSG_EQUIPMENT_SET_USE_RESULT says how it went - both from the handler.
     gh->useEquipmentSet(set->setId);
-    // The manager waits on this before refreshing and clearing the slots it was
-    // told to ignore.
-    gh->fireAddonEvent("EQUIPMENT_SWAP_FINISHED", {"1", set->name});
     lua_pushboolean(L, 1);
     return 1;
 }
@@ -2251,8 +2334,22 @@ static int lua_GetLatestThreeSenders(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { lua_pushnil(L); lua_pushnil(L); lua_pushnil(L); return 3; }
 
-    const auto& inbox = gh->getMailInbox();
+    // The server's answer to MSG_QUERY_NEXT_MAIL_TIME first: that is what the
+    // stock client reads, and the only source away from a mailbox, where
+    // the inbox below is empty. The inbox is the fallback for a reply that
+    // listed nobody.
     int pushed = 0;
+    for (const auto& name : gh->getNextMailSenderNames()) {
+        if (pushed >= 3) break;
+        if (name.empty()) continue;
+        lua_pushstring(L, name.c_str());
+        ++pushed;
+    }
+    if (pushed > 0) {
+        for (; pushed < 3; ++pushed) lua_pushnil(L);
+        return 3;
+    }
+    const auto& inbox = gh->getMailInbox();
     for (auto it = inbox.rbegin(); it != inbox.rend() && pushed < 3; ++it) {
         if (it->read || it->senderName.empty()) continue;
         lua_pushstring(L, it->senderName.c_str());
@@ -2800,7 +2897,16 @@ static int lua_GetInventoryItemTexture(lua_State* L) {
 /// call answered nil, which asked for the tooltip of no slot at all.
 static int lua_ContainerIDToInventoryID(lua_State* L) {
     const int bag = static_cast<int>(luaL_checknumber(L, 1));
-    lua_pushnumber(L, bag + 19);
+    // The bank bags (containers 5-11) sit in the bank's bag row, inventory
+    // slots 68-74 - the same slot BankButtonIDToInvSlotID(bag, 1) names. bag+19
+    // put them at 24-30, which are backpack squares.
+    if (isBankBagContainer(bag)) {
+        lua_pushnumber(L, game::slots::toInventorySlot(
+            game::slots::bankBagWireSlot(bag - kFirstBankBagContainer)));
+        return 1;
+    }
+    if (bag < 1 || bag > game::slots::kWornBagCount) return luaReturnNil(L);
+    lua_pushnumber(L, game::slots::toInventorySlot(game::slots::wornBagContainer(bag - 1)));
     return 1;
 }
 
@@ -2968,27 +3074,19 @@ static int lua_PutItemInBag(lua_State* L) {
     // item into the worn-bag equipment slot, the same move PickupBagFromSlot's
     // own drop makes, with 0xFF for the equipment container.
     if (size == 0) {
-        gh->swapContainerItems(srcBag, srcSlot, 0xFF,
-                               static_cast<uint8_t>(game::slots::toWireSlot(inventoryId)));
-        clearCursor(L);
+        dropHeldItemInto(L, gh, 0xFF,
+                         static_cast<uint8_t>(game::slots::toWireSlot(inventoryId)));
         lua_pushboolean(L, 1);
         return 1;
     }
-    for (int i = 0; i < size; ++i) {
-        const auto& target = isWorn ? inv.getBagSlot(bagIndex, i)
-                                    : inv.getBankBagSlot(bagIndex, i);
-        if (!target.empty()) continue;
-        const int container = isWorn ? game::slots::wornBagContainer(bagIndex)
-                                     : game::slots::bankBagContainer(bagIndex);
-        gh->swapContainerItems(srcBag, srcSlot,
-                               static_cast<uint8_t>(container),
-                               static_cast<uint8_t>(i));
-        clearCursor(L);
-        lua_pushboolean(L, 1);
-        return 1;
-    }
-    // Held, but nowhere to put it - still "had an item", so the button does not
-    // fall through to opening the bag.
+    // Into the bag, slot left to the server (CMSG_AUTOSTORE_BAG_ITEM, or the
+    // split's own message when part of a stack is held). Choosing the first
+    // empty square here skipped partial stacks of the same item, and a full
+    // bag kept the item on the cursor with no "bag is full" - the server's
+    // CanStoreItem does both, and its equip error is the stock message.
+    const int container = isWorn ? game::slots::wornBagContainer(bagIndex)
+                                 : game::slots::bankBagContainer(bagIndex);
+    dropHeldItemInto(L, gh, static_cast<uint8_t>(container), 0xFF);
     lua_pushboolean(L, 1);
     return 1;
 }
@@ -3001,12 +3099,10 @@ static int lua_PutItemInBackpack(lua_State* L) {
         lua_pushboolean(L, 0);
         return 1;
     }
-    const int free = gh->getInventory().findFreeBackpackSlot();
-    if (free >= 0) {
-        gh->swapContainerItems(srcBag, srcSlot, 0xFF,
-                               static_cast<uint8_t>(game::slots::backpackWireSlot(free)));
-        clearCursor(L);
-    }
+    // Container 0xFF with no slot is the backpack to the server
+    // (CanStoreItem's INVENTORY_SLOT_BAG_0 branch), stacks merged first. The
+    // same shared drop as PutItemInBag, so a held split moves only its count.
+    dropHeldItemInto(L, gh, 0xFF, 0xFF);
     lua_pushboolean(L, 1);
     return 1;
 }
@@ -3413,22 +3509,30 @@ static int lua_GetLootMethod(lua_State* L) {
     if (pd.lootMethod != kMasterLoot || pd.looterGuid == 0) {
         lua_pushnil(L);
         lua_pushnil(L);
-    } else if (pd.looterGuid == gh->getPlayerGuid()) {
-        lua_pushnumber(L, 0);
-        lua_pushnil(L);
     } else {
+        // partyMaster in the partyN numbering - the player's own subgroup in
+        // a raid, as the party frames count it - so nil for a master looter
+        // in another group; raidMaster in the raidN numbering, the player
+        // included, nil outside a raid. The position in the server's member
+        // list was neither: it counted other subgroups into the party index.
         int partyIndex = -1;
-        for (size_t i = 0; i < pd.members.size(); ++i) {
-            if (pd.members[i].guid == pd.looterGuid) {
-                partyIndex = static_cast<int>(i) + 1;
-                break;
+        if (pd.looterGuid == gh->getPlayerGuid()) {
+            partyIndex = 0;
+        } else {
+            const bool raid = game::groupIsRaid(pd.groupType);
+            int n = 0;
+            for (const auto& m : pd.members) {
+                if (m.guid == gh->getPlayerGuid()) continue;
+                if (raid && m.subGroup != pd.subGroup) continue;
+                ++n;
+                if (m.guid == pd.looterGuid) { partyIndex = n <= 4 ? n : -1; break; }
             }
         }
-        if (partyIndex > 0) lua_pushnumber(L, partyIndex);
-        else                lua_pushnil(L);
-        // The raid index is a different numbering and this client does not
-        // keep one, so it says so rather than reusing the party position.
-        lua_pushnil(L);
+        if (partyIndex >= 0) lua_pushnumber(L, partyIndex);
+        else                 lua_pushnil(L);
+        const int raidIndex = raidIndexOf(gh, pd.looterGuid);
+        if (raidIndex > 0) lua_pushnumber(L, raidIndex);
+        else               lua_pushnil(L);
     }
     return 3;
 }
@@ -3643,7 +3747,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             lua_pushboolean(L, 0);               // 4: isUnused
             lua_pushboolean(L, 0);               // 5: isWatched
             lua_pushnumber(L, r.count);          // 6: count
-            lua_pushnumber(L, 0);                // 7: extraCurrencyType
+            lua_pushnumber(L, r.extraType);      // 7: extraCurrencyType
             // A nil texture is an empty slot to the interface, and
             // TokenFrame_Update draws the row's icon from this - so every
             // currency was listed with a blank square beside its name. The
@@ -3916,7 +4020,12 @@ void registerInventoryLuaAPI(lua_State* L) {
         }},
                 {"CancelTrade", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh && gh->isTradeOpen()) gh->cancelTrade();
+            // Also the "No" on a trade request: StaticPopupDialogs["TRADE"]
+            // calls CancelTrade() from OnCancel (staticpopup.lua), and the
+            // server needs CMSG_CANCEL_TRADE to drop the request. Only an
+            // open window counted, so declining did nothing and the asker
+            // waited on an answer that was never sent.
+            if (gh && (gh->isTradeOpen() || gh->hasPendingTradeRequest())) gh->cancelTrade();
             return 0;
         }},
                 {"InitiateTrade", [](lua_State* L) -> int {
@@ -3941,16 +4050,18 @@ void registerInventoryLuaAPI(lua_State* L) {
         }},
                 {"GetGuildBankWithdrawMoney", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            // -1 is the server saying "no limit", and the panel reads that as
-            // a number to compare against - a large one keeps the comparison
-            // true without pretending to a figure.
-            const int32_t w = gh ? gh->getGuildBankData().withdrawAmount : 0;
-            lua_pushnumber(L, w < 0 ? 100000000.0 : static_cast<double>(w));
+            // Gold left of today's allowance, from MSG_GUILD_BANK_MONEY_WITHDRAWN
+            // - not the bank list's header, which counts item stacks. -1 is
+            // the guild master's "no limit" and is answered as -1:
+            // GuildBankFrame_UpdateWithdrawMoney tests `withdrawLimit >= 0`
+            // and shows its Unlimited label for anything below.
+            const int32_t w = gh ? gh->getGuildBankData().moneyWithdrawRemaining : 0;
+            lua_pushnumber(L, static_cast<double>(w));
             return 1;
         }},
                 {"CanWithdrawGuildBankMoney", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const int32_t w = gh ? gh->getGuildBankData().withdrawAmount : 0;
+            const int32_t w = gh ? gh->getGuildBankData().moneyWithdrawRemaining : 0;
             lua_pushboolean(L, (w != 0) ? 1 : 0);
             return 1;
         }},
@@ -4015,12 +4126,42 @@ void registerInventoryLuaAPI(lua_State* L) {
                 return 6;
             }
             const auto& t = (*tabs)[tab - 1];
+            // What the player's own rank may do here, from the roster's rank
+            // table: bank tab rights (view 0x01, deposit 0x02) and stacks per
+            // day. AzerothCore gives the guild master's rank full rights and
+            // 0xFFFFFFFF slots (GuildBankRightsAndSlots::SetGuildMasterValues),
+            // which reads as -1 - the panel's UNLIMITED. The remaining count
+            // is what the last list of this tab said
+            // (_GetMemberRemainingSlots), the same -1 for the guild master.
+            // Before the roster has named the player's rank, the tab was sent,
+            // so it is viewable; nothing else is claimed.
+            bool viewable = true, canDeposit = false;
+            int32_t perDay = 0;
+            const auto& roster = gh->getGuildRoster();
+            for (const auto& m : roster.members) {
+                if (m.guid != gh->getPlayerGuid()) continue;
+                // The guild master's rank: full rights and no limit, whatever
+                // the roster's rank table held when it was sent - a tab bought
+                // after it reads 0 there until the next roster
+                // (GuildBankRightsAndSlots::SetGuildMasterValues).
+                if (m.rankIndex == 0) {
+                    viewable = canDeposit = true;
+                    perDay = -1;
+                } else if (m.rankIndex < roster.ranks.size() && tab <= 6) {
+                    const auto& rank = roster.ranks[m.rankIndex];
+                    const uint32_t rights = rank.bankTabRights[static_cast<size_t>(tab) - 1];
+                    viewable   = (rights & 0x01u) != 0;
+                    canDeposit = (rights & 0x02u) != 0;
+                    perDay = static_cast<int32_t>(rank.bankTabSlotsPerDay[static_cast<size_t>(tab) - 1]);
+                }
+                break;
+            }
             lua_pushstring(L, t.tabName.c_str());
             lua_pushstring(L, t.tabIcon.c_str());
-            lua_pushboolean(L, 1);   // viewable: it was sent, so it is
-            lua_pushboolean(L, 1);   // canDeposit
-            lua_pushnumber(L, 0);
-            lua_pushnumber(L, 0);
+            lua_pushboolean(L, viewable ? 1 : 0);
+            lua_pushboolean(L, canDeposit ? 1 : 0);
+            lua_pushnumber(L, perDay);
+            lua_pushnumber(L, t.withdrawalsRemaining);
             return 6;
         }},
                 // GetGuildBankItemInfo(tab, slot) → texture, count, locked
@@ -4039,7 +4180,9 @@ void registerInventoryLuaAPI(lua_State* L) {
             lua_pushstring(L, icon.empty()
                 ? "Interface\\Icons\\INV_Misc_QuestionMark" : icon.c_str());
             lua_pushnumber(L, it.stackCount);
-            lua_pushboolean(L, 0);   // locked
+            // Held by a pickup until the server answers the move.
+            lua_pushboolean(L, gh->isGuildBankSlotLocked(static_cast<uint8_t>(tab - 1),
+                                                         static_cast<uint8_t>(slot - 1)) ? 1 : 0);
             return 3;
         }},
                 // GetGuildBankItemLink(tab, slot) → hyperlink
@@ -4441,13 +4584,18 @@ void registerInventoryLuaAPI(lua_State* L) {
             uint64_t guid = 0;
             const auto* item = auctionSellItemSlot(gh, &guid);
             if (!item || guid == 0) return 0;
-            // The fourth argument is the size of one stack; the fifth is how
-            // many such stacks to post, which this sends one of - the request
-            // builder writes a single item and posting several would be a
-            // several-item list.
+            // The fourth argument is the size of one stack, the fifth how many
+            // such stacks to post (AuctionsCreateAuctionButton_OnClick, from
+            // the two entry boxes). Each auction may draw on every stack of
+            // the item in the bags, and they go one after another as the
+            // server accepts each - see InventoryHandler::auctionPostStacks.
+            // AUCTION_MULTISELL_START fires from in there, while the slot
+            // still holds the item, because the progress frame reads its
+            // icon from GetAuctionSellItemInfo.
             const uint32_t stack = static_cast<uint32_t>(
                 luaL_optnumber(L, 4, item->item.stackCount ? item->item.stackCount : 1));
-            gh->auctionSellItemByGuid(guid, stack, bid, buy, dur);
+            const uint32_t numStacks = static_cast<uint32_t>(luaL_optnumber(L, 5, 1));
+            gh->auctionPostStacks(guid, item->item.itemId, stack, numStacks, bid, buy, dur);
             auctionSellSlot() = AuctionSellSlot{};
             fireAuctionSellUpdate(gh);
             return 0;
@@ -4501,7 +4649,27 @@ void registerInventoryLuaAPI(lua_State* L) {
             // stackCount) and the number of stacks at totalCount / stackSize.
             auto* gh = getGameHandler(L);
             const auto* held = auctionSellItemSlot(gh);
-            if (!held) { auctionSellSlot() = AuctionSellSlot{}; return luaReturnNil(L); }
+            // An empty slot still answers all nine, numbers as zero. The
+            // slot is emptied with NEW_AUCTION_UPDATE too, and
+            // AuctionSellItemButton_OnEvent then reads ITEM_QUALITY_COLORS
+            // [quality].r and compares totalCount and stackCount unguarded
+            // (blizzard_auctionui.lua 1459-1503) - a lone nil raised there,
+            // every time the item was taken back out or an auction posted.
+            // Only the name stays nil: `if ( not GetAuctionSellItemInfo() )`
+            // is how ValidateAuction tells an empty slot.
+            if (!held) {
+                auctionSellSlot() = AuctionSellSlot{};
+                lua_pushnil(L);        // name
+                lua_pushnil(L);        // texture
+                lua_pushnumber(L, 0);  // count
+                lua_pushnumber(L, 0);  // quality
+                lua_pushnil(L);        // canUse
+                lua_pushnumber(L, 0);  // price
+                lua_pushnumber(L, 0);  // pricePerUnit
+                lua_pushnumber(L, 0);  // stackCount
+                lua_pushnumber(L, 0);  // totalCount
+                return 9;
+            }
             const auto& s = *held;
             const auto* info = gh->getItemInfo(s.item.itemId);
             const uint32_t inStack = s.item.stackCount ? s.item.stackCount : 1;
@@ -4867,7 +5035,19 @@ void registerInventoryLuaAPI(lua_State* L) {
             const auto& inbox = gh->getMailInbox();
             if (index > static_cast<int>(inbox.size())) { return luaReturnNil(L); }
             const auto& mail = inbox[index - 1];
-            lua_pushstring(L, "Interface\\Icons\\INV_Letter_15"); // packageIcon
+            // packageIcon is the first attachment's icon, nil for a bare
+            // letter: InboxFrame_Update draws it `if ( packageIcon ) and ( not
+            // isGM )` and falls back to the stationery otherwise. The same
+            // letter icon for both made every parcel look like a note.
+            const game::ItemQueryResponseData* firstInfo =
+                mail.attachments.empty() ? nullptr : gh->getItemInfo(mail.attachments[0].itemId);
+            if (firstInfo && firstInfo->displayInfoId) {
+                lua_pushstring(L, gh->getItemIconPath(firstInfo->displayInfoId).c_str());
+            } else if (!mail.attachments.empty()) {
+                lua_pushstring(L, "Interface\\Icons\\INV_Misc_QuestionMark");
+            } else {
+                lua_pushnil(L);
+            }
             lua_pushstring(L, "Interface\\Icons\\INV_Letter_15"); // stationeryIcon
             // Through getMailSenderName, which is what turns a player's guid
             // into a name once the query comes back, and names the auction
@@ -4890,10 +5070,17 @@ void registerInventoryLuaAPI(lua_State* L) {
             if (mail.attachments.empty()) lua_pushnil(L);
             else lua_pushnumber(L, static_cast<lua_Number>(mail.attachments.size()));
             lua_pushboolean(L, mail.read ? 1 : 0);               // wasRead
-            lua_pushboolean(L, 0);                                // wasReturned
-            lua_pushboolean(L, !mail.body.empty() ? 1 : 0);      // textCreated
+            // wasReturned and textCreated are the RETURNED and COPIED bits of
+            // the mail's check mask (Mail.h MAIL_CHECK_MASK_*). textCreated
+            // was "has a body", and OpenMail_Hide deletes a letter on close
+            // when `money == 0 and not itemCount and textCreated` - so every
+            // plain letter was destroyed the moment it was read. The stock
+            // client only does that once the text has been taken as an item.
+            lua_pushboolean(L, (mail.flags & game::MAIL_CHECK_MASK_RETURNED) ? 1 : 0);  // wasReturned
+            lua_pushboolean(L, (mail.flags & game::MAIL_CHECK_MASK_COPIED) ? 1 : 0);    // textCreated
             lua_pushboolean(L, mail.messageType == 0 ? 1 : 0);   // canReply (player mail only)
-            lua_pushboolean(L, 0);                                // isGM
+            // GM letters are the GM stationery (Mail::IsSentByGM).
+            lua_pushboolean(L, mail.stationeryId == game::MAIL_STATIONERY_GM ? 1 : 0);  // isGM
             // How many of the first attachment there are, which is what the
             // inbox button prints in its corner.
             lua_pushnumber(L, mail.attachments.empty()
@@ -4931,7 +5118,14 @@ void registerInventoryLuaAPI(lua_State* L) {
             if (!mail->read && mail->messageId != 0) gh->mailMarkAsRead(mail->messageId);
             lua_pushstring(L, mail->body.c_str());
             lua_pushstring(L, game::stationeryTexture(mail->stationeryId, mail->messageType));
-            lua_pushboolean(L, (mail->money > 0 || !mail->attachments.empty()) ? 1 : 0);
+            // isTakeable: whether the letter's text can be taken as an item
+            // (the OpenMailLetterButton, TakeInboxTextItem). mailframe.lua
+            // shows that button `if ( isTakeable and not textCreated )`; it
+            // is not about coin or attachments, which have their own
+            // buttons. A letter with no text has nothing to copy, and one
+            // already copied (MAIL_CHECK_MASK_COPIED) cannot be copied again.
+            lua_pushboolean(L, (!mail->body.empty() &&
+                                !(mail->flags & game::MAIL_CHECK_MASK_COPIED)) ? 1 : 0);
             // Whether this is an auction house invoice, which was answered no
             // for every letter. OpenMail_Update asks here first and only calls
             // GetInboxInvoiceInfo `if ( isInvoice )`, so saying no kept the

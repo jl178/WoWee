@@ -43,7 +43,16 @@ void QuestHandler::reconcileItemObjectivesFromInventory(
     // firing it once with nothing named watched nothing at all.
     std::vector<uint32_t> movedQuests;
     for (auto& quest : questLog_) {
-        if (quest.complete) continue;
+        // Complete quests are counted too: the log and tracker draw their
+        // objective lines from these counts ("Tough Wolf Meat: 8/8"), and
+        // skipping them left a finished quest reading 0/8. Only the progress
+        // message is for quests still short.
+        // Seen only once its item objectives are known: a quest restored at
+        // login is reconciled before its query answers, and marking it then
+        // made the first real count look like a gain and print at login.
+        const bool firstLook = !quest.itemCountsSeen;
+        for (const auto& obj : quest.itemObjectives)
+            if (obj.itemId != 0 && obj.required != 0) quest.itemCountsSeen = true;
         for (const auto& obj : quest.itemObjectives) {
             if (obj.itemId == 0 || obj.required == 0) continue;
             // Keep the derived required-count map in sync so the
@@ -57,6 +66,7 @@ void QuestHandler::reconcileItemObjectivesFromInventory(
             if (tracked == newCount) continue;
 
             const bool wasComplete = tracked >= obj.required;
+            const bool gained = newCount > tracked;
             tracked = newCount;
             changedAny = true;
             if (std::find(movedQuests.begin(), movedQuests.end(), quest.questId)
@@ -75,6 +85,16 @@ void QuestHandler::reconcileItemObjectivesFromInventory(
                 // the objective properly.
                 owner_.queryItemInfo(obj.itemId, 0);
             }
+            // "Tough Wolf Meat: 3/8" (ERR_QUEST_ADD_ITEM_SII) in the info
+            // frame. The server sends SMSG_QUESTUPDATE_ADD_ITEM empty in 3.3.5;
+            // the client counts its bags and prints this itself (Wow.exe
+            // 0x6d7c30), only while the count was still short of the
+            // requirement, capped at it - so an item gained past the goal says
+            // nothing. Not on the first count of a quest's items (login, a new
+            // quest accepted with the items already carried).
+            if (!firstLook && !wasComplete && gained)
+                owner_.addUIInfoMessage(itemLabel + ": " + std::to_string(newCount) + "/" +
+                                        std::to_string(obj.required));
         }
     }
 
@@ -126,6 +146,15 @@ void QuestHandler::requeryNearbyQuestGiverStatus() {
 }
 
 void QuestHandler::tickQuestGiverStatusRequery(float deltaTime) {
+    // A greeting whose text never came: show the window without it.
+    if (gossipShowWaitSec_ > 0.0f) {
+        gossipShowWaitSec_ -= deltaTime;
+        if (gossipShowWaitSec_ <= 0.0f) {
+            gossipShowWaitSec_ = 0.0f;
+            if (gossipWindowOpen_ && owner_.addonEventCallbackRef())
+                owner_.addonEventCallbackRef()("GOSSIP_SHOW", {});
+        }
+    }
     if (questGiverRequeryCooldown_ <= 0.0f) return;
     questGiverRequeryCooldown_ -= deltaTime;
     if (questGiverRequeryCooldown_ > 0.0f) return;
@@ -455,6 +484,11 @@ struct QuestQueryObjectives {
     struct Item { uint32_t itemId; uint32_t required; };
     std::array<Kill, 4> kills{};
     std::array<Item, 6> items{};
+    /// WotLK only: the fourth string (AreaDescription) and the four
+    /// ObjectiveText strings after the objective block (QuestDef.cpp
+    /// Quest::BuildQueryData).
+    std::string areaDescription;
+    std::array<std::string, 4> objectiveTexts{};
     bool valid = false;
 };
 
@@ -484,8 +518,11 @@ static QuestQueryObjectives tryParseQuestObjectivesAt(const std::vector<uint8_t>
     size_t pos = startPos;
 
     for (int si = 0; si < nStrings; ++si) {
+        const size_t begin = pos;
         while (pos < data.size() && data[pos] != 0) ++pos;
         if (pos >= data.size()) return out;
+        if (wotlkLayout && si == 3)
+            out.areaDescription.assign(reinterpret_cast<const char*>(&data[begin]), pos - begin);
         ++pos;
     }
 
@@ -507,6 +544,13 @@ static QuestQueryObjectives tryParseQuestObjectivesAt(const std::vector<uint8_t>
             if (!plausibleQuestObjective(static_cast<int32_t>(out.items[i].itemId),
                                          out.items[i].required))
                 return {};
+        }
+        for (int i = 0; i < 4 && pos < data.size(); ++i) {
+            const size_t begin = pos;
+            while (pos < data.size() && data[pos] != 0) ++pos;
+            if (pos >= data.size()) break;
+            out.objectiveTexts[i].assign(reinterpret_cast<const char*>(&data[begin]), pos - begin);
+            ++pos;
         }
     } else {
         // Classic/TBC: four interleaved {npc/go, count, requiredItem, count} records.
@@ -630,6 +674,37 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
     // ---- SMSG_QUEST_CONFIRM_ACCEPT ----
     table[Opcode::SMSG_QUEST_CONFIRM_ACCEPT] = [this](network::Packet& packet) { handleQuestConfirmAccept(packet); };
 
+    // ---- MSG_QUEST_PUSH_RESULT ----
+    // What happened to a quest this player shared, per party member: guid,
+    // then AzerothCore's QuestShareMessages (QuestDef.h). Each is one of the
+    // ERR_QUEST_PUSH_* GlobalStrings, shown in the info frame. Unhandled
+    // before, so the sharer heard nothing back.
+    table[Opcode::MSG_QUEST_PUSH_RESULT] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(9)) return;
+        const uint64_t guid = packet.readUInt64();
+        const uint8_t msg = packet.readUInt8();
+        const std::string who = owner_.lookupName(guid);
+        // QuestShareMessages order; each a system line (GameError kind 0).
+        static const char* const kKeys[] = {
+            "ERR_QUEST_PUSH_SUCCESS_S", "ERR_QUEST_PUSH_INVALID_S", "ERR_QUEST_PUSH_ACCEPTED_S",
+            "ERR_QUEST_PUSH_DECLINED_S", "ERR_QUEST_PUSH_BUSY_S", "ERR_QUEST_PUSH_LOG_FULL_S",
+            "ERR_QUEST_PUSH_ONQUEST_S", "ERR_QUEST_PUSH_ALREADY_DONE_S",
+            "ERR_QUEST_PUSH_NOT_DAILY_S", "ERR_QUEST_PUSH_TIMER_EXPIRED_S",
+            "ERR_QUEST_PUSH_NOT_IN_PARTY_S",
+        };
+        static const char* const kFormats[] = {
+            "Sharing quest with %s...", "%s is not eligible for that quest",
+            "%s has accepted your quest", "%s has declined your quest", "%s is busy",
+            "%s's quest log is full", "%s is already on that quest",
+            "%s has completed that quest", "That quest cannot be shared today",
+            "Quest sharing timer has expired", "You are not in a party",
+        };
+        if (msg >= sizeof(kKeys) / sizeof(kKeys[0])) return;
+        std::string text = kFormats[msg];
+        if (const size_t at = text.find("%s"); at != std::string::npos) text.replace(at, 2, who);
+        owner_.displayGameMessage(kKeys[msg], text, {who});
+    };
+
     // ---- SMSG_QUEST_POI_QUERY_RESPONSE ----
     table[Opcode::SMSG_QUEST_POI_QUERY_RESPONSE] = [this](network::Packet& packet) { handleQuestPoiQueryResponse(packet); };
 
@@ -663,9 +738,12 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
             std::string questTitle;
             for (const auto& q : questLog_)
                 if (q.questId == questId && !q.title.empty()) { questTitle = q.title; break; }
-            owner_.addSystemChatMessage(questTitle.empty() ? std::string("Quest failed!")
-                                                           : ('"' + questTitle + "\" failed!"));
-            playQuestFailedSound(owner_);  // ERR_QUEST_FAILED_S (Wow.exe 0x6d8030)
+            // ERR_QUEST_FAILED_S, "%s failed." (Wow.exe 0x6d8030 case 0x196):
+            // a system line - its GameError kind is 0 - with its own sound.
+            if (!questTitle.empty())
+                owner_.displayGameMessage("ERR_QUEST_FAILED_S", questTitle + " failed.", {questTitle});
+            else
+                playQuestFailedSound(owner_);
             // Same omission as the complete handler had: a line of chat is not
             // a redraw, and a failed quest goes on looking fine in the log.
             announceQuestLogChanged(questId);
@@ -679,9 +757,12 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
             std::string questTitle;
             for (const auto& q : questLog_)
                 if (q.questId == questId && !q.title.empty()) { questTitle = q.title; break; }
-            owner_.addSystemChatMessage(questTitle.empty() ? std::string("Quest timed out!")
-                                                           : ('"' + questTitle + "\" has timed out."));
-            playQuestFailedSound(owner_);  // the same ERR_QUEST_FAILED_S path
+            // Case 0x197: the timer quest is failed locally, then the same
+            // ERR_QUEST_FAILED_S line.
+            if (!questTitle.empty())
+                owner_.displayGameMessage("ERR_QUEST_FAILED_S", questTitle + " failed.", {questTitle});
+            else
+                playQuestFailedSound(owner_);
             announceQuestLogChanged(questId);
         }
     };
@@ -851,10 +932,19 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
                     } else if (const auto* go = owner_.getCachedGameObjectInfo(entry)) {
                         creatureName = go->name;
                     }
-                    // ERR_QUEST_ADD_KILL_SII and ERR_QUEST_ADD_FOUND_SII, in the
-                    // middle of the screen where the game shows them.
-                    owner_.addUIInfoMessage(
-                        questObjectiveLine(creatureName, isObject, count, reqCount));
+                    // Wow.exe 0x6d8030: the objective's own ObjectiveText when
+                    // it has one ("%s: %d/%d", ERR_QUEST_ADD_FOUND_SII), else
+                    // the creature ("%s slain: %d/%d") or object name.
+                    std::string objectiveText;
+                    for (size_t oi = 0; oi < quest.killObjectives.size(); ++oi) {
+                        const auto& ko = quest.killObjectives[oi];
+                        const uint32_t koEntry = static_cast<uint32_t>(
+                            ko.npcOrGoId > 0 ? ko.npcOrGoId : -ko.npcOrGoId);
+                        if (koEntry == entry) { objectiveText = quest.objectiveTexts[oi]; break; }
+                    }
+                    owner_.addUIInfoMessage(objectiveText.empty()
+                        ? questObjectiveLine(creatureName, isObject, count, reqCount)
+                        : questObjectiveLine(objectiveText, true, count, reqCount));
 
                     if (owner_.addonEventCallbackRef()) {
                         // The log INDEX, not the quest id. QuestLog_OnEvent
@@ -1006,7 +1096,15 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
             for (auto& quest : questLog_) {
                 if (quest.questId == questId) {
                     quest.complete = true;
-                    owner_.addSystemChatMessage("Quest Complete: " + quest.title);
+                    // Wow.exe 0x6d8030 case 0x198: "<AreaDescription> (Complete)"
+                    // (ERR_QUEST_OBJECTIVE_COMPLETE_S) in the info frame, or
+                    // "Objective Complete." (ERR_QUEST_UNKNOWN_COMPLETE) for a
+                    // quest without one. Not a chat line.
+                    if (quest.areaDescription.empty())
+                        owner_.displayGameMessage("ERR_QUEST_UNKNOWN_COMPLETE", "Objective Complete.");
+                    else
+                        owner_.displayGameMessage("ERR_QUEST_OBJECTIVE_COMPLETE_S",
+                            quest.areaDescription + " (Complete)", {quest.areaDescription});
                     LOG_INFO("Marked quest ", questId, " as complete");
                     announceQuestLogChanged(questId);
                     break;
@@ -1152,11 +1250,21 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
                     " kills=", objKills, " items=", objItems);
         const QuestQueryRewardsData rwds = QuestQueryRewardsParser::parse(packet.getData(), questLogStride);
 
+        bool reconcileAfterQuery = false;
         for (auto& q : questLog_) {
             if (q.questId != questId) continue;
 
             if (questLevel != 0) q.level = questLevel;
             if (zoneOrSort != 0) q.zoneOrSort = zoneOrSort;
+            // WotLK header: id, method, level, minLevel, zoneOrSort, type,
+            // suggestedPlayers ... sourceItem (19), flags (20)
+            // (Quest::InitializeQueryData).
+            if (questLogStride >= 5 && packet.getData().size() >= 84) {
+                q.questType        = readU32At(packet.getData(), 20);
+                q.suggestedPlayers = readU32At(packet.getData(), 24);
+                q.questFlags       = readU32At(packet.getData(), 80);
+                if (q.suggestedPlayers > 40) q.suggestedPlayers = 0;   // sanity: wrong layout
+            }
 
             const int existingScore = scoreQuestTitle(q.title);
             const bool parsedStrong = isStrongQuestTitle(parsed.title);
@@ -1173,6 +1281,10 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
             if (shouldReplaceTitle && !parsed.title.empty()) {
                 q.title = parsed.title;
             }
+            if (q.announceAcceptOnQuery && !isPlaceholderQuestTitle(q.title) && !q.title.empty()) {
+                q.announceAcceptOnQuery = false;
+                owner_.displayGameMessage("ERR_QUEST_ACCEPTED_S", "Quest accepted: " + q.title, {q.title});
+            }
             if (!parsed.objectives.empty() &&
                 (q.objectives.empty() || q.objectives.size() < 16)) {
                 q.objectives = parsed.objectives;
@@ -1182,6 +1294,10 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
 
             // Store structured kill/item objectives for later kill-count restoration.
             if (objs.valid) {
+                q.areaDescription = normalizeQuestText(objs.areaDescription, true);
+                reconcileAfterQuery = true;
+                for (int i = 0; i < 4; ++i)
+                    q.objectiveTexts[i] = normalizeQuestText(objs.objectiveTexts[i], true);
                 std::unordered_set<uint32_t> validKillKeys;
                 std::unordered_set<uint32_t> validItemKeys;
                 for (int i = 0; i < 4; ++i) {
@@ -1268,6 +1384,9 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
             owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
             break;
         }
+        // The item objectives are known now: count what the bags already hold,
+        // so the first item looted afterwards is a gain against that.
+        if (reconcileAfterQuery) owner_.reconcileQuestItemObjectivesFromBags();
 
         pendingQuestQueryIds_.erase(questId);
     };
@@ -1339,6 +1458,14 @@ void QuestHandler::selectGossipOption(uint32_t optionId, const std::string& code
     auto packet = GossipSelectOptionPacket::build(currentGossip_.npcGuid,
                                                   currentGossip_.menuId, optionId, code);
     owner_.getSocket()->send(packet);
+
+    // The stock client sends the select and nothing else: the server opens
+    // the vendor, bank, auction house or stable from its own gossip handler
+    // (AzerothCore Player::OnGossipSelect -> SendListInventory, SendShowBank,
+    // SendAuctionHello, SendStablePet). The activations below were sent as
+    // well, so each of those windows was opened twice - two MERCHANT_SHOWs,
+    // two list requests. Kept only for this client's own gossip window.
+    if (ui::frameXmlOwns(ui::UiElement::Gossip)) return;
 
     for (const auto& opt : currentGossip_.options) {
         if (opt.id != optionId) continue;
@@ -1460,7 +1587,10 @@ void QuestHandler::selectGossipQuest(uint32_t questId) {
     if (shouldStartProgressFlow) {
         pendingTurnInQuestId_ = questId;
         pendingTurnInNpcGuid_ = currentGossip_.npcGuid;
-        pendingTurnInRewardRequest_ = activeQuest ? activeQuest->complete : false;
+        // No auto-advance past the progress panel: stock shows QUEST_PROGRESS
+        // and waits for its Continue (CompleteQuest), even for a finished
+        // quest. Skipping it hid the progress text and required items.
+        pendingTurnInRewardRequest_ = false;
         auto packet = QuestgiverCompleteQuestPacket::build(currentGossip_.npcGuid, questId);
         owner_.getSocket()->send(packet);
     } else {
@@ -1554,12 +1684,10 @@ void QuestHandler::acceptQuest() {
     // Immediately add to local quest log using available details
     addQuestToLocalLogIfMissing(questId, currentQuestDetails_.title, currentQuestDetails_.objectives);
 
-    // Auto-track newly accepted quests so their objectives appear in the
-    // on-screen tracker right away (matches retail behavior). Only the
-    // player-driven accept path lands here - quests loaded on login/resync go
-    // through addQuestToLocalLogIfMissing without tracking, so the tracker's
-    // "show all when nothing tracked" fallback still applies to those.
-    owner_.setQuestTracked(questId, true);
+    // No tracking here. Stock tracks a new quest from the interface:
+    // QuestLog_OnEvent answers QUEST_ACCEPTED with AddQuestWatch only when
+    // AUTO_QUEST_WATCH is "1" and fewer than MAX_WATCHABLE_QUESTS are watched
+    // (questlogframe.lua). Tracking from here ignored that option and the cap.
 
     // No sound here: QUESTADDED plays when the quest reaches the server's
     // quest log (applyQuestStateFromFields), not on the click, which the
@@ -1628,12 +1756,17 @@ void QuestHandler::completeQuest() {
     if (!questRequestItemsOpen_ || owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     pendingTurnInQuestId_ = currentQuestRequestItems_.questId;
     pendingTurnInNpcGuid_ = currentQuestRequestItems_.npcGuid;
-    pendingTurnInRewardRequest_ = currentQuestRequestItems_.isCompletable();
+    pendingTurnInRewardRequest_ = false;
 
     LOG_DEBUG("completeQuest: questId=", currentQuestRequestItems_.questId,
               " completable=", currentQuestRequestItems_.isCompletable());
 
-    auto packet = QuestgiverCompleteQuestPacket::build(
+    // Stock CompleteQuest (0x58d610 -> 0x58cf40 -> 0x6d4dd0) sends
+    // CMSG_QUESTGIVER_REQUEST_REWARD (0x18C, npc guid + quest id) - once, and
+    // only while the progress panel is up. This sent COMPLETE_QUEST again,
+    // which made the server answer with the progress panel a second time and
+    // relied on an automatic REQUEST_REWARD after it.
+    auto packet = QuestgiverRequestRewardPacket::build(
         currentQuestRequestItems_.npcGuid, currentQuestRequestItems_.questId);
     owner_.getSocket()->send(packet);
     questRequestItemsOpen_ = false;
@@ -1748,20 +1881,14 @@ void QuestHandler::shareQuestWithParty(uint32_t questId) {
         return;
     }
     if (!owner_.isInGroup()) {
-        owner_.raiseUiError("You must be in a group to share a quest.");
+        owner_.raiseUiError("You are not in a party");   // ERR_QUEST_PUSH_NOT_IN_PARTY_S
         return;
     }
     network::Packet pkt(wireOpcode(Opcode::CMSG_PUSHQUESTTOPARTY));
     pkt.writeUInt32(questId);
     owner_.getSocket()->send(pkt);
-    // Local feedback: find quest title
-    for (const auto& q : questLog_) {
-        if (q.questId == questId && !q.title.empty()) {
-            owner_.addSystemChatMessage("Sharing quest: " + q.title);
-            return;
-        }
-    }
-    owner_.addSystemChatMessage("Quest shared.");
+    // No local line: the server answers per member with MSG_QUEST_PUSH_RESULT
+    // ("Sharing quest with %s...", accepted, declined...).
 }
 
 void QuestHandler::acceptSharedQuest() {
@@ -1770,9 +1897,7 @@ void QuestHandler::acceptSharedQuest() {
     network::Packet pkt(wireOpcode(Opcode::CMSG_QUEST_CONFIRM_ACCEPT));
     pkt.writeUInt32(sharedQuestId_);
     owner_.getSocket()->send(pkt);
-    // Auto-track the accepted shared quest, same as a normal accept.
-    owner_.setQuestTracked(sharedQuestId_, true);
-    owner_.addSystemChatMessage("Accepted: " + sharedQuestTitle_);
+    // Tracked, if at all, by the interface on QUEST_ACCEPTED, as any accept.
 }
 
 void QuestHandler::declineSharedQuest() {
@@ -1940,8 +2065,11 @@ void QuestHandler::addQuestToLocalLogIfMissing(uint32_t questId, const std::stri
                                 : normalizeQuestText(title, true);
     entry.objectives = normalizeQuestText(objectives, false);
     questLog_.push_back(std::move(entry));
+    // QUEST_ACCEPTED is not raised here. This runs on the accept click (before
+    // the server agrees) and for every quest restored at login, and the event
+    // means "a quest log slot took a new quest" - applyQuestStateFromFields
+    // raises it then, with the quest's log row.
     if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("QUEST_ACCEPTED", {std::to_string(questId)});
         owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
         owner_.addonEventCallbackRef()("UNIT_QUEST_LOG_CHANGED", {"player"});
     }
@@ -2080,9 +2208,16 @@ void QuestHandler::applyQuestStateFromFields(const FlatFieldMap& fields) {
                 ? (questSlotState(qStride, sIt->second) & 0x3u) : 0u;
         }
 
-        // Add quest to local log only if we have a pending accept for it
-        if (!hasQuestInLog(questId) && pendingQuestAcceptTimeouts_.count(questId) != 0) {
-            addQuestToLocalLogIfMissing(questId, "Quest #" + std::to_string(questId), "");
+        // A quest the slots hold is in the log, however it got there: an
+        // accept, a shared quest, an escort's party accept, a script or an
+        // area trigger. This used to add one only behind a pending accept,
+        // so every other way in left the quest invisible until relog.
+        if (!hasQuestInLog(questId) &&
+            (questSlotStatesSeeded_ || pendingQuestAcceptTimeouts_.count(questId) != 0)) {
+            const bool offered = currentQuestDetails_.questId == questId;
+            addQuestToLocalLogIfMissing(questId,
+                offered ? currentQuestDetails_.title : "Quest #" + std::to_string(questId),
+                offered ? currentQuestDetails_.objectives : "");
             requestQuestQuery(questId, false);
             // Re-query quest giver status for the NPC that gave us this quest
             auto pendingIt = pendingQuestAcceptNpcGuids_.find(questId);
@@ -2162,10 +2297,45 @@ void QuestHandler::applyQuestStateFromFields(const FlatFieldMap& fields) {
     if (questSlotStatesSeeded_) {
         for (const auto& [questId, state] : slotStates) {
             (void)state;
-            if (questSlotStatesSeen_.count(questId) == 0) {
-                owner_.playUiMessageSound("ERR_QUEST_ACCEPTED_S");
+            if (questSlotStatesSeen_.count(questId) != 0) continue;
+            // ERR_QUEST_ACCEPTED_S ("Quest accepted: %s", a system line with
+            // the QUESTADDED sound) before QUEST_ACCEPTED, as 0x6df2b0 does.
+            // A quest whose title has not arrived says it when the query does.
+            for (auto& q : questLog_) {
+                if (q.questId != questId) continue;
+                if (isPlaceholderQuestTitle(q.title) || q.title.empty()) q.announceAcceptOnQuery = true;
+                else owner_.displayGameMessage("ERR_QUEST_ACCEPTED_S", "Quest accepted: " + q.title, {q.title});
                 break;
             }
+            // QUEST_ACCEPTED(questLogIndex): the stock QuestLog_OnEvent hands
+            // arg1 to AddQuestWatch, a log row, not a quest id.
+            if (owner_.addonEventCallbackRef()) {
+                owner_.addonEventCallbackRef()("QUEST_ACCEPTED",
+                    {std::to_string(questLogIndexOf(questId))});
+            }
+        }
+
+        // And the other way: a quest the slots held and no longer hold has
+        // left the log - abandoned, turned in, failed out, or removed by the
+        // server (a GM's .quest remove, a script). The client's log is the
+        // slots; keeping an entry the server dropped showed a quest, with its
+        // old progress, that the server no longer knew.
+        bool removed = false;
+        for (const auto& [questId, state] : questSlotStatesSeen_) {
+            (void)state;
+            if (slotStates.count(questId) != 0) continue;
+            if (pendingQuestAcceptTimeouts_.count(questId) != 0) continue;
+            auto it = std::find_if(questLog_.begin(), questLog_.end(),
+                [&](const QuestLogEntry& q) { return q.questId == questId; });
+            if (it == questLog_.end()) continue;
+            questLog_.erase(it);
+            owner_.setQuestTracked(questId, false);
+            removed = true;
+            LOG_INFO("Quest ", questId, " left the server's quest log slots - removed");
+        }
+        if (removed && owner_.addonEventCallbackRef()) {
+            owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
+            owner_.addonEventCallbackRef()("UNIT_QUEST_LOG_CHANGED", {"player"});
         }
     }
     questSlotStatesSeen_ = std::move(slotStates);
@@ -2273,6 +2443,7 @@ void QuestHandler::handleGossipMessage(network::Packet& packet) {
     // Moving it earlier is enough on any NPC talked to twice, where the text
     // is already cached and the query is not sent at all. The first visit
     // still needs the arrival to say so, which handleNpcTextUpdate now does.
+    gossipShowWaitSec_ = 0.0f;
     if (currentGossip_.titleTextId > 0 && !npcTextCache_.count(currentGossip_.titleTextId)) {
         uint32_t wireOp = wireOpcode(Opcode::CMSG_NPC_TEXT_QUERY);
         if (wireOp != 0xFFFF && owner_.getSocket()) {
@@ -2280,10 +2451,18 @@ void QuestHandler::handleGossipMessage(network::Packet& packet) {
             qPkt.writeUInt32(currentGossip_.titleTextId);
             qPkt.writeUInt64(currentGossip_.npcGuid);
             owner_.getSocket()->send(qPkt);
+            // GOSSIP_SHOW waits for the text (handleNpcTextUpdate). It used
+            // to fire now and again when the text landed, and GossipFrame
+            // answers every GOSSIP_SHOW of a one-option NPC with
+            // SelectGossipOption(1) (gossipframe.lua GossipFrame_OnEvent) -
+            // so each first visit to a vendor, banker or flight master sent
+            // the option twice and opened its window twice.
+            gossipShowWaitSec_ = 1.0f;
         }
     }
 
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("GOSSIP_SHOW", {});
+    if (gossipShowWaitSec_ <= 0.0f && owner_.addonEventCallbackRef())
+        owner_.addonEventCallbackRef()("GOSSIP_SHOW", {});
     owner_.closeVendor(); // Close vendor if gossip opens
 
     // Classify gossip quests and update quest log + overhead NPC markers.
@@ -2380,7 +2559,10 @@ void QuestHandler::classifyGossipQuests(bool updateQuestLog) {
         if (updateQuestLog) {
             for (auto& entry : questLog_) {
                 if (entry.questId == q.questId) {
-                    entry.complete = completable;
+                    // Not entry.complete: the icon cannot say it. AzerothCore
+                    // sends 4 for a quest in progress and a finished one alike,
+                    // so this flipped finished quests back to incomplete every
+                    // time their NPC was spoken to. The slot fields own it.
                     entry.title = normalizeQuestText(q.title, true);
                     if (q.questLevel > 0 && entry.level <= 0) entry.level = q.questLevel;
                     break;
@@ -2487,8 +2669,10 @@ void QuestHandler::handleNpcTextUpdate(network::Packet& packet) {
     // first is the only one where the text arrives after the window did.
     // GOSSIP_SHOW is the event the interface redraws the greeting on, and
     // firing it again is what a second look at an open window means.
-    if (gossipWindowOpen_ && currentGossip_.titleTextId == textId &&
-        npcTextCache_.count(textId) && owner_.addonEventCallbackRef()) {
+    // Once: only while the window's GOSSIP_SHOW is still being held for it.
+    if (gossipShowWaitSec_ > 0.0f && gossipWindowOpen_ &&
+        currentGossip_.titleTextId == textId && owner_.addonEventCallbackRef()) {
+        gossipShowWaitSec_ = 0.0f;
         owner_.addonEventCallbackRef()("GOSSIP_SHOW", {});
     }
 }
@@ -2689,33 +2873,16 @@ void QuestHandler::handleQuestRequestItems(network::Packet& packet) {
         owner_.queryItemInfo(item.itemId, 0);
     }
 
-    // Server-authoritative turn-in requirements
+    // The turn-in's required items, for the item counters. Nothing else in
+    // the log entry changes: the progress panel draws this packet's own text
+    // (GetProgressText, GetQuestItemInfo("required")), and the log keeps the
+    // quest's objectives - this used to overwrite them with a made-up
+    // "Required items: - X x10" block and set completion from the panel,
+    // which the quest slot fields own.
     for (auto& q : questLog_) {
         if (q.questId != data.questId) continue;
-        q.complete = data.isCompletable();
         q.requiredItemCounts.clear();
-
-        std::ostringstream oss;
-        if (!data.completionText.empty()) {
-            oss << data.completionText;
-            if (!data.requiredItems.empty() || data.requiredMoney > 0) oss << "\n\n";
-        }
-        if (!data.requiredItems.empty()) {
-            oss << "Required items:";
-            for (const auto& item : data.requiredItems) {
-                std::string itemLabel = "Item " + std::to_string(item.itemId);
-                if (const auto* info = owner_.getItemInfo(item.itemId)) {
-                    if (!info->name.empty()) itemLabel = info->name;
-                }
-                q.requiredItemCounts[item.itemId] = item.count;
-                oss << "\n- " << itemLabel << " x" << item.count;
-            }
-        }
-        if (data.requiredMoney > 0) {
-            if (!data.requiredItems.empty()) oss << "\n";
-            oss << "\nRequired money: " << formatCopperAmount(data.requiredMoney);
-        }
-        q.objectives = oss.str();
+        for (const auto& item : data.requiredItems) q.requiredItemCounts[item.itemId] = item.count;
         break;
     }
 }
@@ -2776,8 +2943,8 @@ void QuestHandler::handleQuestConfirmAccept(network::Packet& packet) {
     }
 
     pendingSharedQuest_ = true;
-    owner_.addSystemChatMessage(sharedQuestSharerName_ + " has shared the quest \"" +
-                                sharedQuestTitle_ + "\" with you.");
+    // No chat line: this is the escort/party-accept prompt ("%s is starting
+    // %s"), and the popup below is all stock shows for it.
     // Who and what, in that order: uiparent.lua hands both straight to
     // StaticPopup_Show, whose text is "%s is starting %s". It picks between
     // two popups on whether the log is full, and answers the yes with
