@@ -205,6 +205,9 @@ public:
     /// previous mark). Empty until a frame has come round and been read back.
     [[nodiscard]] const std::vector<std::pair<const char*, double>>&
         gpuTimings() const { return gpuTimings_; }
+    /// The marks averaged over every frame read back since the last call, in
+    /// first-seen order, and the number of frames; then starts again.
+    uint32_t takeGpuAverages(std::vector<std::pair<const char*, double>>& out);
 
         /// Average milliseconds beginFrame spent waiting since the last call: on
         /// the frame fence, then on the swapchain acquire. Resets the counters.
@@ -411,6 +414,10 @@ private:
     /// slot that has never run is not read back as garbage.
     bool gpuMarksPending_[MAX_FRAMES_IN_FLIGHT]{};
     std::vector<std::pair<const char*, double>> gpuTimings_;
+    /// The same marks summed over every frame read since takeGpuAverages, so
+    /// a measurement window gets an average rather than one frame's sample.
+    std::vector<std::pair<const char*, double>> gpuTimingSums_;
+    uint32_t gpuTimingFrames_ = 0;
     float timestampPeriodNs_ = 0.0f;
     bool gpuTimingSupported_ = false;
     void createGpuQueryPools();

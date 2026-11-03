@@ -2,6 +2,7 @@
 #include "game/stock_movement.hpp"
 #include "core/frame_pacer.hpp"
 #include "core/env_flag.hpp"
+#include "core/profile_tag.hpp"
 #include "core/character_paths.hpp"
 #include "ui/settings_schema.hpp"
 #include "pipeline/m2_asset_loader.hpp"
@@ -6522,11 +6523,80 @@ void Application::checkFrameSpike(std::int64_t frameNs, float stepSeconds) {
     suppressedSpikes_ = 0;
 }
 
+void Application::resetStageWindow(std::chrono::steady_clock::time_point now) {
+    for (auto& [name, stat] : stageStats_) {
+        (void)name;
+        stat.totalMs = 0.0;
+        stat.worstMs = 0.0f;
+        stat.frames = 0;
+    }
+    stageStatFrames_ = 0;
+    stageStatsSince_ = now;
+    if (renderer && renderer->getVkContext()) {
+        double f = 0.0, a = 0.0;
+        renderer->getVkContext()->takeBeginFrameWaits(f, a);
+        std::vector<std::pair<const char*, double>> discard;
+        renderer->getVkContext()->takeGpuAverages(discard);
+    }
+}
+
+void Application::reportTaggedStageTimes(std::chrono::steady_clock::time_point now) {
+    using namespace std::chrono;
+    const auto& tag = core::profileTag();
+    const bool changed = tag.generation != seenProfileTagGen_;
+    if (!changed) {
+        // Settle first: the flip itself makes pipelines and images, and the
+        // frames that do are not the steady cost of either state.
+        if (profileTagSettling_ && now - profileTagSince_ >= milliseconds(1500)) {
+            profileTagSettling_ = false;
+            resetStageWindow(now);
+        }
+        return;
+    }
+    if (!profileTagSettling_ && stageStatFrames_ > 0) {
+        const float windowMs = duration<float, std::milli>(now - stageStatsSince_).count();
+        const float frameMs = windowMs / static_cast<float>(stageStatFrames_);
+        double fenceMs = 0.0, acquireMs = 0.0;
+        std::vector<std::pair<const char*, double>> gpu;
+        uint32_t gpuFrames = 0;
+        if (renderer && renderer->getVkContext()) {
+            renderer->getVkContext()->takeBeginFrameWaits(fenceMs, acquireMs);
+            gpuFrames = renderer->getVkContext()->takeGpuAverages(gpu);
+        }
+        double gpuTotal = 0.0;
+        for (const auto& [n, ms] : gpu) { (void)n; gpuTotal += ms; }
+        std::ostringstream line;
+        line.setf(std::ios::fixed);
+        line.precision(3);
+        line << "PROFILE_AB [" << seenProfileTag_ << "] frames=" << stageStatFrames_
+             << " window_s=" << windowMs / 1000.0f << " frame_ms=" << frameMs
+             << " fence_ms=" << fenceMs << " acquire_ms=" << acquireMs
+             << " cpu_ms=" << (frameMs - fenceMs - acquireMs)
+             << " gpu_ms=" << gpuTotal << " gpu_frames=" << gpuFrames << " | gpu:";
+        for (const auto& [n, ms] : gpu) line << " " << n << "=" << ms << ";";
+        line << " | cpu:";
+        for (const auto& [name, stat] : stageStats_) {
+            if (stat.frames == 0) continue;
+            line << " " << name << "=" << stat.totalMs / stageStatFrames_ << ";";
+        }
+        LOG_WARNING(line.str());
+    }
+    seenProfileTagGen_ = tag.generation;
+    seenProfileTag_ = tag.label;
+    profileTagSettling_ = true;
+    profileTagSince_ = now;
+    resetStageWindow(now);
+}
+
 void Application::reportStageTimes() {
     using namespace std::chrono;
     const auto now = steady_clock::now();
     if (stageStatsSince_.time_since_epoch().count() == 0) {
         stageStatsSince_ = now;
+        return;
+    }
+    if (frameProfileEnabled_ && core::profileTag().generation != 0) {
+        reportTaggedStageTimes(now);
         return;
     }
     const float windowMs = duration<float, std::milli>(now - stageStatsSince_).count();

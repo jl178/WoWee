@@ -2,6 +2,7 @@
 
 #include <vulkan/vulkan.h>
 #include <glm/glm.hpp>
+#include "rendering/light_tiles.hpp"
 #include <atomic>
 #include <chrono>
 
@@ -50,6 +51,14 @@ struct GPUPerFrameData {
     glm::mat4 rtViewProj;
     glm::vec4 rtCameraPos;
     glm::vec4 rtParams;
+    // The local lights culled to the screen (local_light_tiles.glsli):
+    // x, y the grid, z 1 when the masks hold for this pass's camera and
+    // target - 0 in the reflection pass, the character preview and with the
+    // point lights off, and then a pixel walks every light as before.
+    // localLightTileScale.xy is tiles per pixel of the pass's target.
+    glm::ivec4 localLightTileInfo;
+    glm::vec4 localLightTileScale;
+    glm::uvec4 localLightTiles[LIGHT_TILE_WORDS];
 };
 
 // Push constants for the model matrix (most common case)

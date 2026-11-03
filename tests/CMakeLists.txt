@@ -1516,6 +1516,12 @@ register_test_target(test_anim_capability)
 wowee_add_test(test_indoor_shadows
     SOURCES test_indoor_shadows.cpp)
 
+# ── test_light_tiles ─────────────────────────────────────────
+# The local lights culled to a screen grid leave out of a tile only lights no
+# pixel in it can be within (rendering/light_tiles.hpp).
+wowee_add_test(test_light_tiles
+    SOURCES test_light_tiles.cpp)
+
 # ── test_zone_ambience ─────────────────────────────────────────
 wowee_add_test(test_zone_ambience
     SOURCES test_zone_ambience.cpp

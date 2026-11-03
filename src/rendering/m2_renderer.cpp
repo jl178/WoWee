@@ -198,7 +198,11 @@ uint32_t M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
         // position animates with the flame, which would re-roll the phase every frame.
         glm::vec3 phaseSeed{0.0f};
     };
-    std::vector<Candidate> candidates;
+    // Kept between frames: called once a frame on the main thread, and a
+    // city gathers a few hundred candidates, so a fresh vector was an
+    // allocation and its growth every frame.
+    static thread_local std::vector<Candidate> candidates;
+    candidates.clear();
 
     // Only the instances whose model gives light, kept in a list of their
     // own; this walked every instance in the world each frame.

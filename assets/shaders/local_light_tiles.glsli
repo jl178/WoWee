@@ -1,0 +1,23 @@
+// The local lights that can reach this pixel, as a 64-bit mask (lo, hi).
+//
+// Renderer::buildLocalLightTiles projects each light's sphere to the screen
+// and marks the tiles of a 32x18 grid it covers, with a tile to spare all
+// round. A light left out of a tile is one whose sphere no pixel in the tile
+// can be inside, which the loops over the lights would have skipped on their
+// radius test anyway - so walking the mask in ascending order adds up the same
+// terms in the same order as walking every light. Where the masks do not hold
+// (localLightTileInfo.z == 0: the reflection pass, the character preview, the
+// stock lights) the mask is every gathered light. Needs the PerFrame block,
+// with the three tile members after rtParams, declared above it.
+uvec2 localLightTileMask() {
+    int count = clamp(localLightMeta.x, 0, 64);
+    uvec2 all = uvec2(count >= 32 ? 0xFFFFFFFFu : ((1u << uint(count)) - 1u),
+                      count >= 64 ? 0xFFFFFFFFu
+                                  : (count > 32 ? ((1u << uint(count - 32)) - 1u) : 0u));
+    if (localLightTileInfo.z == 0) return all;
+    ivec2 t = clamp(ivec2(gl_FragCoord.xy * localLightTileScale.xy), ivec2(0),
+                    localLightTileInfo.xy - 1);
+    int idx = t.y * localLightTileInfo.x + t.x;
+    uvec4 w = localLightTiles[idx >> 1];
+    return ((idx & 1) == 0 ? w.xy : w.zw) & all;
+}

@@ -653,6 +653,7 @@ void Renderer::updatePerFrameUBO() {
     currentFrameData.localLightMeta = glm::ivec4(static_cast<int32_t>(localLightCount),
                                                  std::bit_cast<int32_t>(fogExponent),
                                                  static_cast<int32_t>(shaderBits(enh_)), 0);
+    buildLocalLightTiles(localLightCount);
 
     if (rtLighting_) {
         const RtLighting::ConsumerData rt = rtLighting_->consumerData();
@@ -872,9 +873,8 @@ bool Renderer::initialize(core::Window* win) {
     if (!swimEffects->initialize(vkCtx, perFrameSetLayout))
         LOG_WARNING("Swim effect initialization failed (non-fatal)");
 
-    mountDust = std::make_unique<MountDust>();
-    if (!mountDust->initialize(vkCtx, perFrameSetLayout))
-        LOG_WARNING("Mount dust effect initialization failed (non-fatal)");
+    // Mount dust is an enhancement: made the first time it is switched on
+    // (update), so a stock session never creates its pipeline or buffer.
 
 
     levelUpEffect = std::make_unique<LevelUpEffect>();
@@ -1137,6 +1137,70 @@ void Renderer::unregisterPreview(CharacterPreview* preview) {
     auto it = std::find(activePreviews_.begin(), activePreviews_.end(), preview);
     if (it != activePreviews_.end()) {
         activePreviews_.erase(it);
+    }
+}
+
+void Renderer::buildLocalLightTiles(uint32_t count) {
+    // Which of the gathered lights can reach each tile of the screen; see
+    // rendering/light_tiles.hpp. Only for the enhanced lights: the stock rule
+    // (the four nearest, no range) has to see them all.
+    auto& fd = currentFrameData;
+    fd.localLightTileInfo = glm::ivec4(0);
+    // WOWEE_LIGHT_TILES=0 walks every light per pixel, as before the grid -
+    // for comparing pictures and timings against it.
+    static const bool tilesOn = core::envFlagEnabled("WOWEE_LIGHT_TILES", true);
+    if (!tilesOn || !enh_.localLights || count == 0 || !camera) return;
+    const VkExtent2D ext = sceneRenderExtent();
+    if (ext.width == 0 || ext.height == 0) return;
+    cullLightsToTiles(fd.projection * fd.view, fd.localLightPosRadius, count, fd.localLightTiles);
+    fd.localLightTileInfo = glm::ivec4(static_cast<int>(LIGHT_TILES_X), static_cast<int>(LIGHT_TILES_Y), 1, 0);
+    fd.localLightTileScale = glm::vec4(static_cast<float>(LIGHT_TILES_X) / static_cast<float>(ext.width),
+                                       static_cast<float>(LIGHT_TILES_Y) / static_cast<float>(ext.height),
+                                       0.0f, 0.0f);
+}
+
+void Renderer::updateMountDust(float fxDt) {
+    // Not stock: nothing is stepped or spawned with the setting off, and what
+    // was in the air is dropped.
+    // Made on first use and released a few frames after it goes off, once
+    // no frame in flight can still be drawing from its buffer.
+    if (!enh_.mountDust) {
+        if (mountDust) {
+            mountDust->clear();
+            if (++mountDustIdleFrames_ > MAX_FRAMES + 1) mountDust.reset();
+        }
+    } else {
+        mountDustIdleFrames_ = 0;
+        if (!mountDust && !mountDustFailed_) {
+            mountDust = std::make_unique<MountDust>();
+            if (!mountDust->initialize(vkCtx, perFrameSetLayout)) {
+                LOG_WARNING("Mount dust effect initialization failed (non-fatal)");
+                mountDust.reset();
+                mountDustFailed_ = true;
+            }
+        }
+    }
+    if (mountDust && enh_.mountDust) {
+        mountDust->update(fxDt);
+
+        // Spawn dust when mounted and moving on ground
+        if ((animationController_ && animationController_->isMounted()) && camera && cameraController && !(animationController_ && animationController_->isTaxiFlight())) {
+            bool isMoving = cameraController->isMoving();
+            bool onGround = cameraController->isGrounded();
+
+            if (isMoving && onGround) {
+                // Calculate velocity from camera direction and speed
+                glm::vec3 forward = camera->getForward();
+                float speed = cameraController->getMovementSpeed();
+                glm::vec3 velocity = forward * speed;
+                velocity.z = 0.0f;  // Ignore vertical component
+
+                // Spawn dust at mount's feet (slightly below character position)
+                float mho = animationController_ ? animationController_->getMountHeightOffset() : 0.0f;
+                glm::vec3 dustPos = characterPosition - glm::vec3(0.0f, 0.0f, mho * 0.8f);
+                mountDust->spawnDust(dustPos, velocity, isMoving);
+            }
+        }
     }
 }
 
@@ -2685,32 +2749,7 @@ void Renderer::update(float deltaTime) {
                                   travelDir, intensity, wading);
     }
 
-    // Update mount dust effects
-    // Not stock: nothing is stepped or spawned with the setting off, and what
-    // was in the air is dropped.
-    if (mountDust && !enh_.mountDust) mountDust->clear();
-    if (mountDust && enh_.mountDust) {
-        mountDust->update(fxDt);
-
-        // Spawn dust when mounted and moving on ground
-        if ((animationController_ && animationController_->isMounted()) && camera && cameraController && !(animationController_ && animationController_->isTaxiFlight())) {
-            bool isMoving = cameraController->isMoving();
-            bool onGround = cameraController->isGrounded();
-
-            if (isMoving && onGround) {
-                // Calculate velocity from camera direction and speed
-                glm::vec3 forward = camera->getForward();
-                float speed = cameraController->getMovementSpeed();
-                glm::vec3 velocity = forward * speed;
-                velocity.z = 0.0f;  // Ignore vertical component
-
-                // Spawn dust at mount's feet (slightly below character position)
-                float mho = animationController_ ? animationController_->getMountHeightOffset() : 0.0f;
-                glm::vec3 dustPos = characterPosition - glm::vec3(0.0f, 0.0f, mho * 0.8f);
-                mountDust->spawnDust(dustPos, velocity, isMoving);
-            }
-        }
-    }
+    updateMountDust(fxDt);
     // Update level-up effect
     if (levelUpEffect) {
         levelUpEffect->update(fxDt);
@@ -4942,6 +4981,7 @@ void Renderer::renderReflectionPass() {
     // The fog volume is the camera's; its sets here bind the neutral one.
     reflData.volumetricParams = glm::vec4(0.0f);
     reflData.rtParams = glm::vec4(0.0f);
+    reflData.localLightTileInfo = glm::ivec4(0);  // another camera: every light per pixel
     std::memcpy(reflPerFrameUBOMapped, &reflData, sizeof(GPUPerFrameData));
 
     // Begin reflection render pass (clears to black; scene rendered if pipeline-compatible)
@@ -4981,21 +5021,42 @@ void Renderer::renderShadowPass() {
     if (passAblation_ && passAblation_->skip(AblationPass::Shadows)) return;
     if (shadowDepthImage[0] == VK_NULL_HANDLE) return;
     if (currentCmd == VK_NULL_HANDLE) return;
-    // Shadows off runs this pass exactly as on, casters included: the off
-    // switch is shadowParams.x, which stops the scene sampling the map.
+    // Shadows off (the stock default) draws no caster. Nothing samples the map
+    // then - every world shader and the fog's inject test shadowParams.x
+    // first - but each frame slot's map is still bound in the per-frame set,
+    // so it is cleared and left in the layout the set declares once, the
+    // first frame it is off, and after that this pass records nothing.
     //
-    // Off used to skip the casters and leave an empty, cleared map, and the
-    // GPU faulted within a second of it - with GPU-assisted validation silent,
-    // so inside a shader - and the control was taken away. Drawing the
-    // casters regardless puts the pass back on the one path known to hold,
-    // and costs what shadows on costs; a shorter shadow distance is what
-    // saves the time.
+    // Skipping the casters once faulted the GPU within a second, and the
+    // casters were drawn with shadows off from then on, at the full cost of
+    // shadows on. What that version left out is not on record; what the
+    // readers need is what this keeps: each slot's map cleared and moved to
+    // SHADER_READ_ONLY before any frame binds it (the barriers below run for
+    // a slot the first time it goes off, and the pass is never disabled
+    // whole - see the render graph), and nothing sampling it while
+    // shadowParams.x is 0. Checked on an RTX 4060 with the device-fault
+    // diagnostics on: shadows flipped every 1.5 s for 90 s in Stormwind, then
+    // held off for two minutes there and in Elwynn, no device loss.
+    // WOWEE_SHADOW_CASTERS_WHEN_OFF=1 draws the casters with shadows off, as
+    // this pass used to - for measuring what skipping them saves.
+    static const bool castersWhenOff = core::envFlagEnabled("WOWEE_SHADOW_CASTERS_WHEN_OFF", false);
+    if (!shadowsEnabled && !castersWhenOff) {
+        const uint32_t slot = vkCtx->getCurrentFrame();
+        if (shadowDepthLayout_[slot] == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
+            shadowClearedWhileOff_[slot]) {
+            return;
+        }
+        shadowClearedWhileOff_[slot] = true;
+    } else {
+        shadowClearedWhileOff_[0] = shadowClearedWhileOff_[1] = false;
+    }
 
     // Shadows render every frame - throttling causes visible flicker on player/NPCs
 
     // lightSpaceMatrix was already computed at frame start (before updatePerFrameUBO).
-    // Zero matrix means character position isn't set yet - skip shadow pass entirely.
-    if (lightSpaceMatrix == glm::mat4(0.0f)) return;
+    // Zero matrix means character position isn't set yet - skip the casters
+    // (but not the clear and the transition, below).
+    const bool drawCasters = (shadowsEnabled || castersWhenOff) && lightSpaceMatrix != glm::mat4(0.0f);
     uint32_t frame = vkCtx->getCurrentFrame();
 
     // Barrier 1: transition this frame's shadow map into writable depth layout.
@@ -5079,17 +5140,26 @@ void Renderer::renderShadowPass() {
 
     // Phase 7/8: render shadow casters
     const float shadowCullRadius = shadowDistance_ * 1.35f;
-    {
-    if (terrainRenderer) {
+    // WOWEE_SHADOW_CASTERS=terrain,wmo,m2,characters draws only the named
+    // casters - for finding which of them the pass's time goes to.
+    static const std::string casterFilter = [] {
+        const char* v = std::getenv("WOWEE_SHADOW_CASTERS");
+        return std::string(v ? v : "");
+    }();
+    const auto casts = [](const char* what) {
+        return casterFilter.empty() || casterFilter.find(what) != std::string::npos;
+    };
+    if (drawCasters) {
+    if (terrainRenderer && casts("terrain")) {
         { const auto shadowT0 = std::chrono::steady_clock::now(); terrainRenderer->renderShadow(currentCmd, lightSpaceMatrix, shadowCenter, shadowCullRadius); if (stageSink_) stageSink_("shadow/terrain", std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - shadowT0).count()); }
     }
-    if (wmoRenderer) {
+    if (wmoRenderer && casts("wmo")) {
         { const auto shadowT0 = std::chrono::steady_clock::now(); wmoRenderer->renderShadow(currentCmd, lightSpaceMatrix, shadowCenter, shadowCullRadius); if (stageSink_) stageSink_("shadow/wmo", std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - shadowT0).count()); }
     }
-    if (m2Renderer) {
+    if (m2Renderer && casts("m2")) {
         { const auto shadowT0 = std::chrono::steady_clock::now(); m2Renderer->renderShadow(currentCmd, lightSpaceMatrix, globalTime, shadowCenter, shadowCullRadius); if (stageSink_) stageSink_("shadow/m2", std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - shadowT0).count()); }
     }
-    if (characterRenderer) {
+    if (characterRenderer && casts("characters")) {
         { const auto shadowT0 = std::chrono::steady_clock::now(); characterRenderer->renderShadow(currentCmd, lightSpaceMatrix, shadowCenter, shadowCullRadius); if (stageSink_) stageSink_("shadow/characters", std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - shadowT0).count()); }
     }
     }

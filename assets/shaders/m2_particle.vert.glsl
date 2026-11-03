@@ -36,7 +36,7 @@ layout(location = 2) out float vFogVisibility;
 // the light it scatters toward the camera, a how much of the point shows
 // through it. See VolumetricFog.
 vec4 fogVolumeAt(vec3 worldPos) {
-    vec4 clip = projection * view * vec4(worldPos, 1.0);
+    vec4 clip = projection * (view * vec4(worldPos, 1.0));
     float depth = max(clip.w, 1e-4);
     vec2 uv = clip.xy / depth * 0.5 + 0.5;
     float slice = log(max(depth, volumetricParams.y) / volumetricParams.y) * volumetricParams.z;
