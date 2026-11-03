@@ -255,7 +255,9 @@ TEST_CASE("PetCanBeAbandoned is true for a tamed pet only", "[replay]") {
         s.spawnPlayer({{UF::UNIT_FIELD_LEVEL, 10}});
         s.receive(UpdateObject().create(
             kPet, wowee::game::ObjectType::UNIT,
-            {{UF::UNIT_FIELD_HEALTH, 100}, {UF::UNIT_FIELD_BYTES_2, tamed ? 0x03u << 16 : 0u}}));
+            {{UF::UNIT_FIELD_HEALTH, 100}, {UF::UNIT_FIELD_BYTES_2, tamed ? 0x03u << 16 : 0u},
+             // The player made it (0x5D3780 checks CREATEDBY too).
+             {UF::UNIT_FIELD_CREATEDBY_LO, static_cast<uint32_t>(Session::kPlayerGuid)}}));
         s.receive(petSpells(kPet));
         REQUIRE(s.handler().getPetGuid() == kPet);
 
@@ -522,7 +524,8 @@ TEST_CASE("PetCanBeRenamed follows the pet's rename flag", "[replay]") {
     Session s;
     s.spawnPlayer({{UF::UNIT_FIELD_LEVEL, 10}});
     s.receive(UpdateObject().create(kPet, wowee::game::ObjectType::UNIT,
-                                    {{UF::UNIT_FIELD_HEALTH, 100}, {UF::UNIT_FIELD_BYTES_2, 0x03u << 16}}));
+                                    {{UF::UNIT_FIELD_HEALTH, 100}, {UF::UNIT_FIELD_BYTES_2, 0x03u << 16},
+                                     {UF::UNIT_FIELD_CREATEDBY_LO, static_cast<uint32_t>(Session::kPlayerGuid)}}));
     s.receive(petSpells(kPet));
     CHECK(petCanBeRenamed(s));
 

@@ -69,7 +69,13 @@ void playCoinSound(lua_State* L) {
 // window puts one there on every left-click - PickupMerchantItem - and buying
 // is what happens when it is dropped into a bag, so without it a left-click at
 // a vendor did nothing at all and only right-click bought.
-enum class CursorType { NONE, SPELL, ITEM, MACRO, MERCHANT, MONEY, GUILDBANK };
+enum class CursorType { NONE, SPELL, ITEM, MACRO, MERCHANT, MONEY, GUILDBANK,
+                        /// A pet bar action (0x520A80, cursor kind 4): s_cursorId is
+                        /// the packed slot value.
+                        PETACTION,
+                        /// A stable slot being dragged (0x520C60, kind 10):
+                        /// s_cursorSlot is the slot, 0 for the pet that is out.
+                        STABLEPET };
 static CursorType s_cursorType = CursorType::NONE;
 static uint32_t   s_cursorId   = 0;    // spellId, itemId, or action slot
 static int        s_cursorSlot = 0;    // source slot for placement
@@ -83,6 +89,8 @@ static uint64_t   s_cursorMoney = 0;   // copper, when the cursor carries money
 /// has to wait on the cursor until the drop says where it is going.
 static uint32_t   s_cursorSplit = 0;
 static void setCursorType(lua_State* L, CursorType type);
+/// The pet bar's half of the cursor, defined with clearCursorItem below.
+static void pickUpPetAction(lua_State* L, game::GameHandler* gh, uint32_t packed);
 /// Where the cursor's item came from, in wire bag/slot space. Declared here
 /// because the guild bank pickup above needs it and it is defined further down
 /// with the other cursor helpers.
@@ -147,7 +155,7 @@ bool cursorItemCameFromInventory() {
 /// the first shift-click on a pet ability takes the bar down. Clicking a pet
 /// ability to use it goes through a different path and works; only rearranging
 /// the bar is lost.
-static int lua_PickupPetAction(lua_State* L) { (void)L; return 0; }
+static int lua_PickupPetAction(lua_State* L);
 
 /// Change what the cursor is holding, and say so.
 ///
@@ -178,6 +186,7 @@ static void setCursorType(lua_State* L, CursorType type) {
     // Money onto the cursor and money off it both clink, as the stock
     // client's money pickups and its ClearCursor do.
     if (s_cursorType == CursorType::MONEY || type == CursorType::MONEY) playCoinSound(L);
+    const CursorType previousType = s_cursorType;
     s_cursorType = type;
     lua_getfield(L, LUA_REGISTRYINDEX, "wowee_lua_engine");
     auto* engine = static_cast<LuaEngine*>(lua_touserdata(L, -1));
@@ -192,10 +201,23 @@ static void setCursorType(lua_State* L, CursorType type) {
     //
     // Fired on the change rather than on every set: this function is called
     // with the same type repeatedly and the grid would flicker.
+    //
+    // A pet action shows the pet bar's grid instead, and putting it down hides
+    // that one (0x520A80 -> PET_BAR_SHOWGRID; ClearCursor 0x519280 ->
+    // PET_BAR_HIDEGRID for cursor kind 4, ACTIONBAR_HIDEGRID for the rest). A
+    // stable pet shows neither.
+    const CursorType was = previousType;
     if (nowCarrying && !wasCarrying) {
-        engine->fireEvent("ACTIONBAR_SHOWGRID", {});
+        if (type == CursorType::PETACTION) engine->fireEvent("PET_BAR_SHOWGRID", {});
+        else if (type != CursorType::STABLEPET) engine->fireEvent("ACTIONBAR_SHOWGRID", {});
     } else if (wasCarrying && !nowCarrying) {
-        engine->fireEvent("ACTIONBAR_HIDEGRID", {});
+        if (was == CursorType::PETACTION) engine->fireEvent("PET_BAR_HIDEGRID", {});
+        else if (was != CursorType::STABLEPET) engine->fireEvent("ACTIONBAR_HIDEGRID", {});
+    } else if (wasCarrying && nowCarrying && was != type) {
+        // Swapping one kind for another on the cursor: the grid that was up
+        // comes down and the other goes up.
+        if (was == CursorType::PETACTION) engine->fireEvent("PET_BAR_HIDEGRID", {});
+        if (type == CursorType::PETACTION) engine->fireEvent("PET_BAR_SHOWGRID", {});
     }
 }
 
@@ -890,6 +912,14 @@ static int lua_PickupSpell(lua_State* L) {
     // spells sat at that index.
     const uint32_t picked = spellIdForCall(L, gh);
     if (picked == 0) return 0;
+    // A pet spell out of the pet's book is a pet action, for the pet bar
+    // (0x520A80 from the book's pickup), packed with its autocast state.
+    if (const char* book = lua_tostring(L, 2); book && std::string(book) == "pet") {
+        uint32_t state = 0x01;
+        if (gh->isPetSpellAutocastable(picked)) state = gh->isPetSpellAutocast(picked) ? 0xC1 : 0x81;
+        pickUpPetAction(L, gh, (state << 24) | (picked & 0x00FFFFFFu));
+        return 0;
+    }
     setCursorType(L, CursorType::SPELL);
     s_cursorId = picked;
     // On the pointer as well as in the state, the way every other pickup here
@@ -1121,6 +1151,85 @@ static void clearCursorItem(lua_State* L) {
 }
 
 void clearCursor(lua_State* L) { clearCursorItem(L); }
+
+int cursorStableSlot() {
+    return s_cursorType == CursorType::STABLEPET ? s_cursorSlot : -1;
+}
+
+void pickUpStablePet(lua_State* L, int slot, const std::string& icon) {
+    clearCursorItem(L);
+    setCursorType(L, CursorType::STABLEPET);
+    s_cursorSlot = slot;
+    s_cursorId = 0;
+    wowee::ui::frameXmlSetCursorItem(icon);
+}
+
+// ── The pet bar's cursor (PetInfo.cpp 0x5D65C0 / 0x5D64D0 / 0x520A80) ───────
+
+/// The icon a pet action is drawn with on the cursor: a spell's own icon, or
+/// the texture global a command or stance names ("PET_%s_TEXTURE").
+static std::string petActionIcon(lua_State* L, game::GameHandler* gh, uint32_t packed) {
+    const uint8_t kind = game::pet::slotKind(packed);
+    const uint32_t id = packed & 0x00FFFFFFu;
+    const char* word = kind == 6 ? game::pet::reactionWord(id)
+                     : kind == 7 ? game::pet::commandWord(id) : nullptr;
+    if (word) {
+        const std::string global = std::string("PET_") + word + "_TEXTURE";
+        lua_getglobal(L, global.c_str());
+        std::string path = lua_isstring(L, -1) ? lua_tostring(L, -1) : "";
+        lua_pop(L, 1);
+        return path;
+    }
+    return gh ? gh->getSpellIconPath(id) : std::string();
+}
+
+/// Put a pet action on the cursor (0x520A80): it shows the pet bar's grid.
+static void pickUpPetAction(lua_State* L, game::GameHandler* gh, uint32_t packed) {
+    if (packed == 0 || game::pet::isEmptySlot(packed)) return;
+    const std::string icon = petActionIcon(L, gh, packed);
+    if (icon.empty()) return;
+    clearCursorItem(L);
+    setCursorType(L, CursorType::PETACTION);
+    s_cursorId = packed;
+    s_cursorSlot = 0;
+    wowee::ui::frameXmlSetCursorItem(icon);
+}
+
+/// Drop the cursor's pet action on a pet bar slot (0x5D64D0 -> 0x5D6020).
+/// True when the cursor held one, whatever became of it.
+static bool dropPetActionOn(lua_State* L, game::GameHandler* gh, int slot0) {
+    if (s_cursorType != CursorType::PETACTION) return false;
+    const uint32_t action = s_cursorId;
+    clearCursorItem(L);
+    if (!gh) return true;
+    // A passive spell does not go on the bar (Attributes 0x40).
+    if (game::pet::slotKind(action) == 1) {
+        auto& cache = gh->spellNameCacheRef();
+        auto it = cache.find(action & 0x00FFFFFFu);
+        if (it != cache.end() && (it->second.attr & 0x40u)) return true;
+    }
+    uint32_t displaced = 0;
+    if (gh->petDropAction(slot0, action, displaced) && displaced != 0)
+        pickUpPetAction(L, gh, displaced);
+    return true;
+}
+
+static int lua_PickupPetAction(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const int index = static_cast<int>(luaL_checknumber(L, 1));
+    if (index < 1 || index > game::GameHandler::PET_ACTION_BAR_SLOTS) {
+        return luaL_error(L, "Invalid slot in PickupPetAction");
+    }
+    if (!gh || !gh->hasPet() || !gh->petCanTakeOrders(false)) return 0;
+    if (dropPetActionOn(L, gh, index - 1)) return 0;
+    const uint32_t packed = gh->getPetActionSlot(index - 1);
+    pickUpPetAction(L, gh, packed);
+    // A spell comes off the bar; a command or stance is only copied (kind 1
+    // alone, 0x5D65C0 -> 0x5D64A0).
+    if (s_cursorType == CursorType::PETACTION && game::pet::slotKind(packed) == 1)
+        gh->petClearSlotSpell(index - 1);
+    return 0;
+}
 
 bool dropHeldItemInto(lua_State* L, game::GameHandler* gh,
                       uint8_t dstBag, uint8_t dstSlot) {
@@ -2782,10 +2891,18 @@ void registerActionLuaAPI(lua_State* L) {
                 // second to decide whether to draw the happiness icon, and one
                 // return left it nil.
                 {"HasPetUI", [](lua_State* L) -> int {
+            // (0x5D3960) A pet unit that is not a player and carries a pet
+            // number answers true, and then whether it is a hunter's pet -
+            // PetFrame_SetHappiness draws the happiness face on that, and the
+            // stable refuses a warlock's demon on it. Anything else is nil, nil.
             auto* gh = getGameHandler(L);
-            const bool has = gh && gh->hasPet();
-            lua_pushboolean(L, has ? 1 : 0);
-            lua_pushboolean(L, 0);   // hunter pet: not distinguished yet
+            auto pet = gh && gh->hasPet() ? gh->getEntityManager().getEntity(gh->getPetGuid()) : nullptr;
+            const uint16_t petNumber = game::fieldIndex(game::UF::UNIT_FIELD_PETNUMBER);
+            const bool has = pet && pet->getType() != game::ObjectType::PLAYER &&
+                             (petNumber == 0xFFFF || pet->getField(petNumber) != 0);
+            if (!has) { lua_pushnil(L); lua_pushnil(L); return 2; }
+            lua_pushboolean(L, 1);
+            if (gh->isHunterPet()) lua_pushboolean(L, 1); else lua_pushnil(L);
             return 2;
         }},
                 // Happiness, for a hunter's pet only. Nil is the honest answer
@@ -2839,24 +2956,32 @@ void registerActionLuaAPI(lua_State* L) {
                 // that range, and the damage each is worth - three quarters,
                 // normal, a quarter more - is the game's, not a guess.
                 {"GetPetHappiness", [](lua_State* L) -> int {
+            // (0x5D3B00) A hunter's pet only: the face (1-3) and the damage
+            // it is worth in percent, from PetPersonality.dbc row 1 - the
+            // thresholds are 333000 and 666000 of the 1050000 maximum, not
+            // thirds of it. Anyone else's pet answers nil and 100.
+            auto* gh = getGameHandler(L);
             auto* pet = resolveUnit(L, "pet");
-            if (!pet) { lua_pushnil(L); return 1; }
-            const uint32_t maxHappiness = pet->getMaxPowerByType(4);
-            if (maxHappiness == 0) { lua_pushnil(L); return 1; }
-
-            const uint32_t happiness = pet->getPowerByType(4);
-            const int level = (happiness * 3 >= maxHappiness * 2) ? 3
-                            : (happiness * 3 >= maxHappiness)     ? 2
-                                                                  : 1;
-            static const int kDamagePercent[4] = {0, 75, 100, 125};
-            lua_pushnumber(L, level);
-            lua_pushnumber(L, kDamagePercent[level]);
+            if (!gh || !pet || !gh->isHunterPet()) {
+                lua_pushnil(L);
+                lua_pushnumber(L, 100);
+                return 2;
+            }
+            const auto& row = gh->petDbc().happiness();
+            const int index = game::pet::happinessIndex(pet->getPowerByType(4), row);
+            lua_pushnumber(L, index + 1);
+            lua_pushnumber(L, std::round(row.damage[index] * 100.0f));
             return 2;
         }},
                 // Only referenced from commented-out code in 3.3.5, but a
                 // temporary pet's timer is nil when there is no timer.
                 {"GetPetTimeRemaining", [](lua_State* L) -> int {
-            lua_pushnil(L);
+            // Milliseconds left on a temporary pet, from SMSG_PET_SPELLS'
+            // duration (0x5D3180); nil for a permanent one.
+            auto* gh = getGameHandler(L);
+            const double left = gh ? gh->getPetTimeRemaining() : -1.0;
+            if (left < 0.0) { lua_pushnil(L); return 1; }
+            lua_pushnumber(L, left);
             return 1;
         }},
                 // GetPetActionSlotUsable(index) → whether the pet can use it
@@ -2878,14 +3003,36 @@ void registerActionLuaAPI(lua_State* L) {
             return 0;
         }},
                 {"GetPetActionSlotUsable", [](lua_State* L) -> int {
+            // (0x5D5400 -> 0x5D3FD0) A command or stance is usable while the
+            // pet takes orders; a spell also while the pet is not stunned,
+            // confused or fleeing (unless the spell allows it) and can pay
+            // for it. An empty slot counts as usable - there is nothing to
+            // grey.
             auto* gh = getGameHandler(L);
-            const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
-            if (!gh || index < 1 || index > game::GameHandler::PET_ACTION_BAR_SLOTS) {
-                lua_pushboolean(L, 0);
-                return 1;
+            const int index = static_cast<int>(luaL_checknumber(L, 1));
+            bool usable = false;
+            if (gh && index >= 1 && index <= game::GameHandler::PET_ACTION_BAR_SLOTS) {
+                const uint32_t packed = gh->getPetActionSlot(index - 1);
+                const uint8_t kind = game::pet::slotKind(packed);
+                if (packed == 0) {
+                    usable = true;
+                } else if (!game::pet::isSpellKind(kind)) {
+                    usable = gh->petCanTakeOrders(false);
+                } else if (gh->petCanTakeOrders(true)) {
+                    usable = true;
+                    auto pet = gh->getEntityManager().getEntity(gh->getPetGuid());
+                    auto unit = std::dynamic_pointer_cast<game::Unit>(pet);
+                    if (unit) {
+                        constexpr uint32_t kStunned = 0x00040000, kConfused = 0x00400000,
+                                           kFleeing = 0x00800000;
+                        const uint32_t flags = unit->getUnitFlags();
+                        if (flags & (kStunned | kConfused | kFleeing)) usable = false;
+                        // What the spell costs against what the pet has.
+                        if (!gh->petCanPayFor(packed & 0x00FFFFFFu)) usable = false;
+                    }
+                }
             }
-            const uint32_t spellId = gh->getPetActionSlot(index - 1) & 0x00FFFFFF;
-            lua_pushboolean(L, spellId != 0 ? 1 : 0);
+            if (usable) lua_pushboolean(L, 1); else lua_pushnil(L);
             return 1;
         }},
                 // GetPetActionInfo(index) →
@@ -2905,87 +3052,79 @@ void registerActionLuaAPI(lua_State* L) {
                 // Answering a flat false meant even a correct path would have
                 // been used the wrong way round.
                 {"GetPetActionInfo", [](lua_State* L) -> int {
+            // GetPetActionInfo(index) → name, subtext, texture, isToken,
+            // isActive, autoCastAllowed, autoCastEnabled (0x5D4EC0).
+            //
+            //  - a spell: its name and rank, its icon, then nil, nil, and the
+            //    slot's own two autocast bits (0x80 allowed, 0x40 on) as true
+            //    or nil;
+            //  - a stance: "PET_MODE_<word>", nil, "PET_<word>_TEXTURE", true,
+            //    true when it is the pet's stance;
+            //  - a command: "PET_ACTION_<word>" (WAIT, FOLLOW, ATTACK,
+            //    DISMISS), nil, "PET_<word>_TEXTURE", true, true when it is
+            //    the pet's command - Attack while the pet is attacking.
+            // The names and textures of the last two are global names, which
+            // PetActionBar_Update looks up itself.
             auto* gh = getGameHandler(L);
-            int index = static_cast<int>(luaL_checknumber(L, 1));
-            if (!gh || index < 1 || index > game::GameHandler::PET_ACTION_BAR_SLOTS) {
-                return luaReturnNil(L);
-            }
-            const uint32_t packed = gh->getPetActionSlot(index - 1);
-            if (packed == 0) { return luaReturnNil(L); }
-
-            const uint32_t action = game::pet::petActionId(packed);
-            const auto type = game::pet::petActionType(packed);
-
-            const char* tokenName = nullptr;
-            const char* tokenTexture = nullptr;
-            bool active = false;
-
-            if (type == game::pet::ActionType::Command) {
-                switch (action) {
-                    case game::pet::kStay:
-                        tokenName = "PET_ACTION_WAIT";    tokenTexture = "PET_WAIT_TEXTURE";   break;
-                    case game::pet::kFollow:
-                        tokenName = "PET_ACTION_FOLLOW";  tokenTexture = "PET_FOLLOW_TEXTURE"; break;
-                    case game::pet::kAttack:
-                        tokenName = "PET_ACTION_ATTACK";  tokenTexture = "PET_ATTACK_TEXTURE"; break;
-                    case game::pet::kAbandon:
-                        tokenName = "PET_DISMISS";        tokenTexture = "PET_DISMISS_TEXTURE"; break;
-                    default: break;
-                }
-            } else if (type == game::pet::ActionType::Reaction) {
-                switch (action) {
-                    case game::pet::kPassive:
-                        tokenName = "PET_MODE_PASSIVE";    tokenTexture = "PET_PASSIVE_TEXTURE";    break;
-                    case game::pet::kDefensive:
-                        tokenName = "PET_MODE_DEFENSIVE";  tokenTexture = "PET_DEFENSIVE_TEXTURE";  break;
-                    case game::pet::kAggressive:
-                        tokenName = "PET_MODE_AGGRESSIVE"; tokenTexture = "PET_AGGRESSIVE_TEXTURE"; break;
-                    default: break;
-                }
-                // The stance the pet is in is the one drawn as chosen.
-                active = (action == gh->getPetReact());
-            }
-
-            if (tokenName) {
-                lua_pushstring(L, tokenName);       // 1: name - a global's name
-                lua_pushstring(L, "");              // 2: subtext
-                lua_pushstring(L, tokenTexture);    // 3: texture - likewise
-                lua_pushboolean(L, 1);              // 4: isToken
-                lua_pushboolean(L, active ? 1 : 0); // 5: isActive
-                // A command or a stance has nothing to cast automatically, and
-                // saying otherwise puts the autocast ring on all six of them.
-                lua_pushboolean(L, 0);              // 6: autoCastAllowed
-                lua_pushboolean(L, 0);              // 7: autoCastEnabled
+            const int index = static_cast<int>(luaL_checknumber(L, 1));
+            const uint32_t packed = (gh && gh->hasPet() && index >= 1 &&
+                                     index <= game::GameHandler::PET_ACTION_BAR_SLOTS)
+                                        ? gh->getPetActionSlot(index - 1) : 0;
+            if (packed == 0) {
+                for (int i = 0; i < 7; ++i) lua_pushnil(L);
                 return 7;
             }
-
-            const uint32_t spellId = action;
-            if (spellId == 0) { return luaReturnNil(L); }
-            const std::string& name = gh->getSpellName(spellId);
-            const std::string iconPath = gh->getSpellIconPath(spellId);
-            lua_pushstring(L, name.empty() ? "Unknown" : name.c_str());
-            lua_pushstring(L, "");
-            lua_pushstring(L, iconPath.empty() ? "Interface\\Icons\\INV_Misc_QuestionMark"
-                                               : iconPath.c_str());
-            lua_pushboolean(L, 0);                                      // isToken
-            // A pet spell is never "active" - that is the checked ring, which
-            // belongs to the stance. Reading the autocast bits as active put
-            // it on every spell the pet knows.
-            lua_pushboolean(L, 0);                                      // isActive
-            lua_pushboolean(L, 1);                                      // autoCastAllowed
-            lua_pushboolean(L, gh->isPetSpellAutocast(spellId) ? 1 : 0);
+            const uint8_t kind = game::pet::slotKind(packed);
+            const uint32_t id = packed & 0x00FFFFFFu;
+            if (kind == 6 || kind == 7) {
+                const char* word = kind == 6 ? game::pet::reactionWord(id) : game::pet::commandWord(id);
+                if (!word) { for (int i = 0; i < 7; ++i) lua_pushnil(L); return 7; }
+                const std::string name = std::string(kind == 6 ? "PET_MODE_" : "PET_ACTION_") + word;
+                const std::string tex = std::string("PET_") + word + "_TEXTURE";
+                lua_pushstring(L, name.c_str());
+                lua_pushnil(L);
+                lua_pushstring(L, tex.c_str());
+                lua_pushboolean(L, 1);
+                if (game::pet::builtinActive(packed, gh->getPetReact(), gh->getPetCommand(),
+                                             gh->isPetAttackActive()))
+                    lua_pushboolean(L, 1);
+                else
+                    lua_pushnil(L);
+                lua_pushnil(L);
+                lua_pushnil(L);
+                return 7;
+            }
+            if (!game::pet::isSpellKind(kind) || id == 0) {
+                for (int i = 0; i < 7; ++i) lua_pushnil(L);
+                return 7;
+            }
+            const std::string& name = gh->getSpellName(id);
+            const std::string& rank = gh->getSpellRank(id);
+            const std::string icon = gh->getSpellIconPath(id);
+            if (name.empty()) lua_pushnil(L); else lua_pushstring(L, name.c_str());
+            if (name.empty()) lua_pushnil(L); else lua_pushstring(L, rank.c_str());
+            if (icon.empty()) lua_pushnil(L); else lua_pushstring(L, icon.c_str());
+            lua_pushnil(L);                                              // isToken
+            lua_pushnil(L);                                              // isActive
+            if (game::pet::slotAutocastAllowed(packed)) lua_pushboolean(L, 1); else lua_pushnil(L);
+            if (game::pet::slotAutocastAllowed(packed) && game::pet::slotAutocastOn(packed))
+                lua_pushboolean(L, 1);
+            else
+                lua_pushnil(L);
             return 7;
         }},
                 // IsPetAttackAction(index) - which slot is the attack command,
                 // so the bar can flash it while the pet is on a target.
                 {"IsPetAttackAction", [](lua_State* L) -> int {
+            // Which slot is the attack command (0x5D5A10 -> 0x5D41B0), so the
+            // bar can flash it while the pet is on a target.
             auto* gh = getGameHandler(L);
-            const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
+            const int index = static_cast<int>(luaL_checknumber(L, 1));
             bool isAttack = false;
-            if (gh && index >= 1 && index <= game::GameHandler::PET_ACTION_BAR_SLOTS) {
+            if (gh && gh->hasPet() && index >= 1 && index <= game::GameHandler::PET_ACTION_BAR_SLOTS) {
                 const uint32_t packed = gh->getPetActionSlot(index - 1);
-                isAttack = game::pet::petActionType(packed) == game::pet::ActionType::Command &&
-                           game::pet::petActionId(packed) == game::pet::kAttack;
+                isAttack = (packed & 0x3F000000u) == 0x07000000u &&
+                           (packed & 0x00FFFFFFu) == game::pet::kAttack;
             }
             lua_pushboolean(L, isAttack ? 1 : 0);
             return 1;
@@ -3011,8 +3150,9 @@ void registerActionLuaAPI(lua_State* L) {
                 return 3;
             }
             const uint32_t packed = gh->getPetActionSlot(index - 1);
-            // A command or a stance has no cooldown of its own.
-            const bool isSpell = game::pet::isPetSpellAction(packed);
+            // A command or a stance has no cooldown of its own (0x5D5280:
+            // spell kinds 1 and 8..17 only).
+            const bool isSpell = game::pet::isSpellKind(game::pet::slotKind(packed));
             const uint32_t petSpell = isSpell ? game::pet::petActionId(packed) : 0;
             const float remaining = isSpell ? gh->getSpellCooldown(petSpell) : 0.0f;
             if (remaining <= 0.01f) {
@@ -3026,71 +3166,81 @@ void registerActionLuaAPI(lua_State* L) {
             return 3;
         }},
                 {"PetAttack", [](lua_State* L) -> int {
+            // PetAttack([unit]) (0x5D55B0): the unit named, else the target.
+            // Nothing is sent for one the pet cannot attack.
             auto* gh = getGameHandler(L);
-            if (gh && gh->hasPet() && gh->hasTarget())
-                gh->sendPetAction(
-                    game::pet::packPetAction(game::pet::ActionType::Command, game::pet::kAttack),
-                    gh->getTargetGuid());
+            if (!gh || !gh->hasPet()) return 0;
+            uint64_t target = 0;
+            if (const char* uid = luaL_optstring(L, 1, nullptr); uid && *uid) {
+                std::string u(uid);
+                toLowerInPlace(u);
+                target = resolveUnitGuid(gh, u);
+            } else if (gh->hasTarget()) {
+                target = gh->getTargetGuid();
+            }
+            gh->petCommand(game::pet::kAttack, target);
             return 0;
         }},
                 {"PetFollow", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (gh && gh->hasPet())
-                gh->sendPetAction(
-                    game::pet::packPetAction(game::pet::ActionType::Command, game::pet::kFollow), 0);
+            if (auto* gh = getGameHandler(L)) gh->petCommand(game::pet::kFollow, 0);
             return 0;
         }},
                 {"PetWait", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (gh && gh->hasPet())
-                gh->sendPetAction(
-                    game::pet::packPetAction(game::pet::ActionType::Command, game::pet::kStay), 0);
+            if (auto* gh = getGameHandler(L)) gh->petCommand(game::pet::kStay, 0);
             return 0;
         }},
                 {"PetPassiveMode", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (gh && gh->hasPet())
-                gh->sendPetAction(
-                    game::pet::packPetAction(game::pet::ActionType::Reaction, game::pet::kPassive), 0);
+            if (auto* gh = getGameHandler(L)) gh->petSetReact(game::pet::kPassive);
             return 0;
         }},
                 {"CastPetAction", [](lua_State* L) -> int {
+            // CastPetAction(index[, unit]) (0x5D67B0 -> 0x5D4210). Holding a
+            // pet action, the click is a drop on the slot instead.
             auto* gh = getGameHandler(L);
-            int index = static_cast<int>(luaL_checknumber(L, 1));
-            if (!gh || !gh->hasPet() || index < 1 || index > game::GameHandler::PET_ACTION_BAR_SLOTS) return 0;
-            uint32_t packed = gh->getPetActionSlot(index - 1);
-            uint32_t spellId = packed & 0x00FFFFFF;
-            if (spellId != 0) {
-                // CastPetAction(action, unit) - the unit is what a click-cast
-                // binding on a unit frame passes, and dropping it sent the pet
-                // at whatever was targeted instead of what was clicked. The
-                // same fault CastSpellByID had, two files over.
-                uint64_t target = 0;
-                if (const char* uid = luaL_optstring(L, 2, nullptr)) {
-                    std::string u(uid);
-                    toLowerInPlace(u);
-                    target = resolveUnitGuid(gh, u);
-                }
-                if (target == 0)
-                    target = gh->hasTarget() ? gh->getTargetGuid() : gh->getPetGuid();
-                gh->sendPetAction(packed, target);
+            const int index = static_cast<int>(luaL_checknumber(L, 1));
+            if (index < 1 || index > game::GameHandler::PET_ACTION_BAR_SLOTS + 1)
+                return luaL_error(L, "Invalid slot in CastPetAction");
+            if (!gh || !gh->hasPet() || index > game::GameHandler::PET_ACTION_BAR_SLOTS) return 0;
+            if (dropPetActionOn(L, gh, index - 1)) return 0;
+            const uint32_t packed = gh->getPetActionSlot(index - 1);
+            const uint8_t kind = game::pet::slotKind(packed);
+            const uint32_t id = packed & 0x00FFFFFFu;
+            // The unit a click-cast binding passes, else the target, else none.
+            uint64_t target = 0;
+            if (const char* uid = luaL_optstring(L, 2, nullptr); uid && *uid) {
+                std::string u(uid);
+                toLowerInPlace(u);
+                target = resolveUnitGuid(gh, u);
+            } else if (gh->hasTarget()) {
+                target = gh->getTargetGuid();
+            }
+            if (kind == 6) {
+                gh->petSetReact(id);
+            } else if (kind == 7) {
+                if (id == game::pet::kAbandon) gh->petDismiss();
+                else gh->petCommand(id, target);
+            } else if (game::pet::isSpellKind(kind) && id != 0) {
+                if (gh->petCanTakeOrders(true)) gh->sendPetAction(packed, target);
             }
             return 0;
         }},
                 {"TogglePetAutocast", [](lua_State* L) -> int {
+            // (0x5D66F0) A right click: a drop while holding a pet action,
+            // otherwise the slot's autocast flips and is sent back with
+            // CMSG_PET_SET_ACTION (0x5D5D20).
             auto* gh = getGameHandler(L);
-            int index = static_cast<int>(luaL_checknumber(L, 1));
-            if (!gh || !gh->hasPet() || index < 1 || index > game::GameHandler::PET_ACTION_BAR_SLOTS) return 0;
-            uint32_t packed = gh->getPetActionSlot(index - 1);
-            uint32_t spellId = packed & 0x00FFFFFF;
-            if (spellId != 0) gh->togglePetSpellAutocast(spellId);
+            const int index = static_cast<int>(luaL_checknumber(L, 1));
+            if (index < 1 || index > game::GameHandler::PET_ACTION_BAR_SLOTS + 1)
+                return luaL_error(L, "Invalid slot in TogglePetAutocast");
+            if (!gh || index > game::GameHandler::PET_ACTION_BAR_SLOTS) return 0;
+            if (dropPetActionOn(L, gh, index - 1)) return 0;
+            gh->petToggleAutocastSlot(index - 1);
             return 0;
         }},
                 {"PetDismiss", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (gh && gh->hasPet())
-                gh->sendPetAction(
-                    game::pet::packPetAction(game::pet::ActionType::Command, game::pet::kAbandon), 0);
+            // COMMAND_DISMISS (0x5D46F0), and PET_DISMISS_START for the cast
+            // bar's countdown.
+            if (auto* gh = getGameHandler(L)) gh->petDismiss();
             return 0;
         }},
                 // The other end of the ABANDON_PET dialog, which the pet's
@@ -3106,7 +3256,13 @@ void registerActionLuaAPI(lua_State* L) {
         }},
                 // CONFIRM_BUY_STABLE_SLOT's accept, from the stable panel.
                 {"BuyStableSlot", [](lua_State* L) -> int {
-            if (auto* gh = getGameHandler(L)) gh->buyStableSlot();
+            // CONFIRM_BUY_STABLE_SLOT's accept (0x5A1BD0): only at a stable
+            // master, below four slots, and with the price in hand.
+            auto* gh = getGameHandler(L);
+            if (!gh || !gh->isStableWindowOpen() || gh->getStableSlots() >= 4) return 0;
+            const uint32_t price = gh->petDbc().stableSlotPrice(gh->getStableSlots() + 1u);
+            if (price == 0 || gh->getMoneyCopper() < price) return 0;
+            gh->buyStableSlot();
             return 0;
         }},
                 // VOTE_BOOT_PLAYER's two buttons. The dialog is shown from
@@ -3143,25 +3299,35 @@ void registerActionLuaAPI(lua_State* L) {
             return 0;
         }},
                 {"IsPetAttackActive", [](lua_State* L) -> int {
+            // (0x5D3160) The pet's own attack state, not its command: set by
+            // PetAttack and the pet's in-combat flag, cleared by PetStopAttack.
             auto* gh = getGameHandler(L);
-            lua_pushboolean(L, gh && gh->getPetCommand() == 2 ? 1 : 0); // 2=attack
+            lua_pushboolean(L, gh && gh->isPetAttackActive() ? 1 : 0);
+            return 1;
+        }},
+                // PetStopAttack() (0x5D5640 -> 0x5D4650): CMSG_PET_STOP_ATTACK
+                // while the pet is attacking. Missing, /petstopattack and the
+                // binding raised on a nil global.
+                {"PetStopAttack", [](lua_State* L) -> int {
+            if (auto* gh = getGameHandler(L)) gh->petStopAttack();
+            return 0;
+        }},
+                // GetPetActionsUsable() (0x5D53C0): whether the pet takes
+                // orders at all - the possess bar greys on it.
+                {"GetPetActionsUsable", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            if (gh && gh->petCanTakeOrders(false)) lua_pushboolean(L, 1); else lua_pushnil(L);
             return 1;
         }},
                 {"PetDefensiveMode", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (gh && gh->hasPet())
-                gh->sendPetAction(
-                    game::pet::packPetAction(game::pet::ActionType::Reaction, game::pet::kDefensive), 0);
+            if (auto* gh = getGameHandler(L)) gh->petSetReact(game::pet::kDefensive);
             return 0;
         }},
                 // The third stance, which was a no-op in another file entirely
                 // - so a hunter could set a pet passive or defensive and not
                 // aggressive, and the button for it did nothing.
                 {"PetAggressiveMode", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (gh && gh->hasPet())
-                gh->sendPetAction(
-                    game::pet::packPetAction(game::pet::ActionType::Reaction, game::pet::kAggressive), 0);
+            if (auto* gh = getGameHandler(L)) gh->petSetReact(game::pet::kAggressive);
             return 0;
         }},
     };

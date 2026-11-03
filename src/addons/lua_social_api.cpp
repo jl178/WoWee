@@ -3152,8 +3152,19 @@ void registerSocialLuaAPI(lua_State* L) {
                 // and this answered no regardless, so the unit menu never
                 // offered it.
                 {"PetCanBeRenamed", [](lua_State* L) -> int {
+            // (0x5D38C0) The player's own pet (CREATEDBY) with
+            // UNIT_CAN_BE_RENAMED in its UNIT_FIELD_BYTES_2.
             auto* gh = getGameHandler(L);
-            lua_pushboolean(L, gh && gh->isPetRenameable() ? 1 : 0);
+            bool can = gh && gh->isPetRenameable();
+            if (can) {
+                auto pet = gh->getEntityManager().getEntity(gh->getPetGuid());
+                const uint16_t cb = game::fieldIndex(game::UF::UNIT_FIELD_CREATEDBY_LO);
+                if (pet && cb != 0xFFFF) {
+                    const uint64_t creator = (static_cast<uint64_t>(pet->getField(cb + 1)) << 32) | pet->getField(cb);
+                    can = creator == gh->getPlayerGuid();
+                }
+            }
+            if (can) lua_pushboolean(L, 1); else lua_pushnil(L);
             return 1;
         }},
                 // The other end: PETRENAMECONFIRM's accept calls this, so the
@@ -3161,9 +3172,34 @@ void registerSocialLuaAPI(lua_State* L) {
                 // and then raised on an unbound global. The packet has existed
                 // the whole time.
                 {"PetRename", [](lua_State* L) -> int {
+            // PetRename(name[, declined...]) (0x5D5670): ERR_NO_PET without a
+            // pet, ERR_NOTYOURPET for one the player did not create,
+            // ERR_PET_NOT_RENAMEABLE without the flag, ERR_NAME_NO_NAME for an
+            // empty name; otherwise CMSG_PET_RENAME with no declined forms
+            // (this locale declines nothing). The server checks the name and
+            // answers SMSG_PET_NAME_INVALID.
             auto* gh = getGameHandler(L);
+            if (!gh) return 0;
             const char* name = luaL_optstring(L, 1, "");
-            if (gh && name && *name) gh->renamePet(name);
+            auto pet = gh->hasPet() ? gh->getEntityManager().getEntity(gh->getPetGuid()) : nullptr;
+            if (!pet) { gh->displayGameMessage("ERR_NO_PET", "You do not have a pet."); return 0; }
+            const uint16_t cb = game::fieldIndex(game::UF::UNIT_FIELD_CREATEDBY_LO);
+            if (cb != 0xFFFF) {
+                const uint64_t creator = (static_cast<uint64_t>(pet->getField(cb + 1)) << 32) | pet->getField(cb);
+                if (creator != gh->getPlayerGuid()) {
+                    gh->displayGameMessage("ERR_NOTYOURPET", "That's not your pet.");
+                    return 0;
+                }
+            }
+            if (!gh->isPetRenameable()) {
+                gh->displayGameMessage("ERR_PET_NOT_RENAMEABLE", "Your pet cannot be renamed.");
+                return 0;
+            }
+            if (!name || !*name) {
+                gh->displayGameMessage("ERR_NAME_NO_NAME", "Enter a name.");
+                return 0;
+            }
+            gh->renamePet(name);
             return 0;
         }},
                 {"CanGrantLevel",             [](lua_State* L) -> int { lua_pushboolean(L, 0); return 1; }},

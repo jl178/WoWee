@@ -29,6 +29,12 @@ struct TalentEntry {
     uint32_t prereqTalent[3] = {};
     uint8_t prereqRank[3] = {};
     uint8_t maxRank = 0;
+    /// Talent.dbc Flags: 1 draws the talent as exceptional (GetTalentInfo's
+    /// seventh return, 0x5C7800).
+    uint32_t flags = 0;
+    /// Pet talents only: which families may take it, by CreatureFamily
+    /// CategoryEnumID bit; zero for every family (0x5C5A20).
+    uint32_t categoryMask[2] = {};
 };
 
 struct TalentTabEntry {
@@ -40,6 +46,9 @@ struct TalentTabEntry {
     // SpellIcon.dbc row for the tree's own icon - what GetTalentTabInfo hands
     // back as its texture and what the spec tab shows for a talented spec.
     uint32_t spellIconId = 0;
+    /// The pet talent types (1 << CreatureFamily.PetTalentType) this tree is
+    /// for; zero on a class tree.
+    uint32_t petTalentMask = 0;
 };
 
 // ---- Spell / cast state ----

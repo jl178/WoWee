@@ -38,6 +38,7 @@
 #include "game/spell_description_eval.hpp"
 #include "game/weather_state.hpp"
 #include "game/vehicle_data.hpp"
+#include "game/pet_info.hpp"
 #include <map>
 #include <optional>
 #include <algorithm>
@@ -1145,8 +1146,11 @@ public:
         return petActionSlots_[idx];
     }
     // Pet command/react state from SMSG_PET_MODE or SMSG_PET_SPELLS
-    uint8_t getPetCommand() const { return petCommand_; }   // 0=stay,1=follow,2=attack,3=dismiss
-    uint8_t getPetReact()   const { return petReact_; }     // 0=passive,1=defensive,2=aggressive
+    uint8_t getPetCommand() const { return pet::modeCommand(petMode_); }  // 0=stay,1=follow,2=attack,3=dismiss
+    /// The stance; 0 while the mode's 0x8000000 bit is set (0x5A7980).
+    uint8_t getPetReact() const {
+        return (petMode_ & 0x8000000u) ? 0 : pet::modeReact(petMode_);   // 0=passive,1=defensive,2=aggressive
+    }
     // A pet's own stats and resistances, off the pet unit's fields. Armor is
     // resistance index 0, as it is for the player.
     const std::array<int32_t, 5>& getPetStats() const { return petStats_; }
@@ -1186,6 +1190,80 @@ public:
     void sendPetAction(uint32_t action, uint64_t targetGuid = 0);
     // Toggle autocast for a pet spell via CMSG_PET_SPELL_AUTOCAST
     void togglePetSpellAutocast(uint32_t spellId);
+
+    // ---- The pet bar as the stock client keeps it (PetInfo.cpp; docs/re/pets.md) ----
+    /// The pet's mode word (0xC234C8): react in the low byte, command above.
+    uint32_t& petModeRef() { return petMode_; }
+    /// IsPetAttackActive (0xC234DC): set by a PetAttack the client sends and
+    /// by the pet's UNIT_FLAG_PET_IN_COMBAT, cleared by PetStopAttack and the
+    /// flag going off. PET_ATTACK_START / PET_ATTACK_STOP fire on the flag.
+    bool isPetAttackActive() const { return petAttacking_; }
+    void setPetAttacking(bool on, bool fromFlag);
+    /// Seconds left on a temporary pet, from SMSG_PET_SPELLS' duration; -1
+    /// for a permanent one (GetPetTimeRemaining answers nil then).
+    double getPetTimeRemaining() const;
+    void setPetDuration(uint32_t ms);
+    /// SMSG_PET_SPELLS' family, the one pet talents are read for.
+    uint16_t getPetFamily() const { return petFamily_; }
+    uint16_t& petFamilyRef() { return petFamily_; }
+    /// A hunter's pet (0x71B630): the unit has a pet number and was created by
+    /// a hunter. HasPetUI's second return, and the gate on happiness,
+    /// experience, diet, icon and talent tree.
+    bool isHunterPet() const;
+    /// Whether the pet unit takes orders at all (0x5D3E80): the player is not
+    /// charmed, controls nothing else, and the pet is the player's; for a
+    /// command (forSpell false) the pet must also be alive.
+    bool petCanTakeOrders(bool forSpell) const;
+    /// Whether the pet has the power a spell costs (its flat cost plus its
+    /// percent of the pet's own base mana or pool).
+    bool petCanPayFor(uint32_t spellId) const;
+    /// PetWait / PetFollow / PetAttack and the three stances (0x5D4210): the
+    /// client sets the new state at once and redraws the bar
+    /// (PET_BAR_UPDATE), then sends CMSG_PET_ACTION.
+    void petCommand(uint32_t command, uint64_t target);
+    void petSetReact(uint32_t react);
+    /// PetStopAttack (0x5D4650): CMSG_PET_STOP_ATTACK, only while attacking.
+    void petStopAttack();
+    /// PetDismiss (0x5D46F0): COMMAND_DISMISS (abandon id 3) and
+    /// PET_DISMISS_START.
+    void petDismiss();
+    /// TogglePetAutocast(slot) (0x5D5D20): flips the slot's autocast bit,
+    /// sends the slot back with CMSG_PET_SET_ACTION, and redraws.
+    void petToggleAutocastSlot(int slot);
+    /// Drop an action on a pet bar slot (0x5D6020), sending CMSG_PET_SET_ACTION
+    /// for each slot it changes. Returns false when refused; `toCursor` is
+    /// what the cursor picks up after.
+    bool petDropAction(int slot, uint32_t action, uint32_t& toCursor);
+    /// Take a spell off the bar after it is picked up (0x5D64A0): the slot
+    /// keeps its type byte and loses the spell.
+    void petClearSlotSpell(int slot);
+    /// CreatureFamily, ItemPetFood and PetPersonality.
+    const PetDbc& petDbc();
+    /// The family of the player's own pet unit (its creature template's), 0
+    /// when unknown.
+    uint32_t petCreatureFamily() const;
+
+    // ---- Pet talents (SMSG_TALENTS_INFO type 1) ----
+    const std::unordered_map<uint32_t, uint8_t>& getPetTalents() const { return petTalents_; }
+    std::unordered_map<uint32_t, uint8_t>& petTalentsRef() { return petTalents_; }
+    uint32_t getPetUnspentTalents() const { return petUnspentTalents_; }
+    uint32_t& petUnspentTalentsRef() { return petUnspentTalents_; }
+    /// Bumped on every pet talent packet, so a preview Learn knows its answer
+    /// has come back.
+    uint32_t getPetTalentGeneration() const { return petTalentGeneration_; }
+    uint32_t& petTalentGenerationRef() { return petTalentGeneration_; }
+    /// CMSG_PET_LEARN_TALENT: the rank counted from zero, as LearnTalent's
+    /// player form.
+    void learnPetTalent(uint32_t talentId, uint32_t rank0);
+    /// CMSG_LEARN_PREVIEW_TALENTS_PET: (talent, rank from zero) pairs.
+    void learnPreviewPetTalents(const std::vector<std::pair<uint32_t, uint32_t>>& talents);
+
+    // ---- Pet sounds (SMSG_PET_ACTION_SOUND / SMSG_PET_DISMISS_SOUND) ----
+    using PetSoundCallback = std::function<void(uint64_t unitGuid, uint32_t modelOrDisplay,
+                                                int kind, float x, float y, float z)>;
+    /// kind 1 order, 2 attack (on the unit, by its display), 3 dismiss (at a
+    /// position, by CreatureModelData id).
+    void setPetSoundCallback(PetSoundCallback cb) { petSoundCallback_ = std::move(cb); }
     const std::unordered_set<uint32_t>& getKnownSpells() const {
         static const std::unordered_set<uint32_t> empty;
         return spellHandler_ ? spellHandler_->getKnownSpells() : empty;
@@ -1217,9 +1295,14 @@ public:
     uint64_t getStableMasterGuid() const { return stableMasterGuid_; }
     uint8_t  getStableSlots() const { return stableNumSlots_; }
     const std::vector<StabledPet>& getStabledPets() const { return stabledPets_; }
+    /// Bumped by every MSG_LIST_STABLED_PETS; the stable's selection is reset
+    /// by each (0x5A11A0).
+    uint32_t getStableListGeneration() const { return stableListGeneration_; }
+    uint32_t& stableListGenerationRef() { return stableListGeneration_; }
     void requestStabledPetList();          // CMSG MSG_LIST_STABLED_PETS
     void stablePet(uint8_t slot);          // CMSG_STABLE_PET (store active pet in slot)
     void unstablePet(uint32_t petNumber);  // CMSG_UNSTABLE_PET (retrieve to active)
+    void swapStablePet(uint32_t petNumber);  // CMSG_STABLE_SWAP_PET (stabled <-> the pet that is out)
     void buyStableSlot();                  // CMSG_BUY_STABLE_SLOT (next slot from the open stable master)
     void abandonPet();                     // CMSG_PET_ABANDON (give a hunter pet up for good)
     /// Forget a primary profession. The server refuses anything that is not
@@ -4168,9 +4251,7 @@ public:
     // ── Pet & Stable ─────────────────────────────────────────────────
     auto& petActionSlotsRef() { return petActionSlots_; }
     auto& petAutocastSpellsRef() { return petAutocastSpells_; }
-    auto& petCommandRef() { return petCommand_; }
     auto& petGuidRef() { return petGuid_; }
-    auto& petReactRef() { return petReact_; }
     auto& petSpellListRef() { return petSpellList_; }
     auto& stabledPetsRef() { return stabledPets_; }
     auto& stableMasterGuidRef() { return stableMasterGuid_; }
@@ -4945,8 +5026,15 @@ private:
     std::unordered_map<uint64_t, std::vector<AuraSlot>> unitAurasCache_; // per-unit aura cache
     uint64_t petGuid_ = 0;
     uint32_t petActionSlots_[10] = {};   // SMSG_PET_SPELLS action bar (10 slots)
-    uint8_t  petCommand_ = 1;            // 0=stay,1=follow,2=attack,3=dismiss
-    uint8_t  petReact_   = 1;            // 0=passive,1=defensive,2=aggressive
+    uint32_t petMode_ = 0x0101;          // react | command << 8 (0xC234C8)
+    bool     petAttacking_ = false;      // 0xC234DC
+    int64_t  petExpireMs_ = 0;           // steady-clock ms; 0 = permanent
+    uint16_t petFamily_ = 0;
+    std::unordered_map<uint32_t, uint8_t> petTalents_;   // talent -> rank from one
+    uint32_t petUnspentTalents_ = 0;
+    uint32_t petTalentGeneration_ = 0;
+    std::unique_ptr<PetDbc> petDbc_;
+    PetSoundCallback petSoundCallback_;
     bool     petRenameablePending_ = false;  // set by SMSG_PET_RENAMEABLE, consumed by UI
     std::vector<uint32_t> petSpellList_; // known pet spells
     std::unordered_set<uint32_t> petAutocastSpells_;  // spells with autocast on
@@ -4964,6 +5052,7 @@ private:
     uint64_t stableMasterGuid_ = 0;
     uint8_t  stableNumSlots_   = 0;
     std::vector<StabledPet> stabledPets_;
+    uint32_t stableListGeneration_ = 0;
     void handleListStabledPets(network::Packet& packet);
 
     // ---- Battleground queue state ----

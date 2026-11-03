@@ -2218,8 +2218,23 @@ void SpellHandler::loadTalentDbc() {
         const uint32_t tRow = talL ? (*talL)["Row"] : 2;
         const uint32_t tCol = talL ? (*talL)["Column"] : 3;
         const uint32_t tRank0 = talL ? (*talL)["RankSpell0"] : 4;
-        const uint32_t tPrereq0 = talL ? (*talL)["PrereqTalent0"] : 9;
-        const uint32_t tPrereqR0 = talL ? (*talL)["PrereqRank0"] : 12;
+        // 3.3.5's Talent.dbc has nine rank columns (4-12), so the
+        // prerequisites start at 13 and their ranks at 16. The layout said 9
+        // and 12 - two rank columns that are always zero - so no talent had a
+        // prerequisite: every tree drew without its arrows and let a deep
+        // talent be staged before the one it needs.
+        uint32_t tPrereq0 = talL ? (*talL)["PrereqTalent0"] : 13;
+        uint32_t tPrereqR0 = talL ? (*talL)["PrereqRank0"] : 16;
+        uint32_t tFlags = talL ? talL->tryField("Flags") : 0xFFFFFFFFu;
+        uint32_t tCategory0 = talL ? talL->tryField("CategoryMask0") : 0xFFFFFFFFu;
+        // A 3.3.5 file (23 columns) settles it whatever an older layout in the
+        // data directory says - layouts copied there do not refresh.
+        if (talentDbc->getFieldCount() == 23) {
+            tPrereq0 = 13;
+            tPrereqR0 = 16;
+            tFlags = 19;
+            tCategory0 = 21;
+        }
 
         uint32_t count = talentDbc->getRecordCount();
         for (uint32_t i = 0; i < count; ++i) {
@@ -2238,6 +2253,13 @@ void SpellHandler::loadTalentDbc() {
             for (int p = 0; p < 3; ++p) {
                 entry.prereqTalent[p] = talentDbc->getUInt32(i, tPrereq0 + p);
                 entry.prereqRank[p] = static_cast<uint8_t>(talentDbc->getUInt32(i, tPrereqR0 + p));
+            }
+
+            if (tFlags != 0xFFFFFFFFu && tFlags < talentDbc->getFieldCount())
+                entry.flags = talentDbc->getUInt32(i, tFlags);
+            if (tCategory0 != 0xFFFFFFFFu && tCategory0 + 1 < talentDbc->getFieldCount()) {
+                entry.categoryMask[0] = talentDbc->getUInt32(i, tCategory0);
+                entry.categoryMask[1] = talentDbc->getUInt32(i, tCategory0 + 1);
             }
 
             entry.maxRank = 0;
@@ -2275,6 +2297,14 @@ void SpellHandler::loadTalentDbc() {
             ttIconField = 0xFFFFFFFFu;
         }
 
+        // The pet trees' column, beside ClassMask (RaceMask, ClassMask,
+        // PetTalentMask). A class tree has zero there.
+        uint32_t ttPetMaskField = ttL ? ttL->tryField("PetTalentMask") : 0xFFFFFFFFu;
+        if (ttPetMaskField == 0xFFFFFFFFu && ttClassField != 0xFFFFFFFFu && tabDbc->getFieldCount() == 24)
+            ttPetMaskField = ttClassField + 1;
+        if (ttPetMaskField != 0xFFFFFFFFu && ttPetMaskField >= tabDbc->getFieldCount())
+            ttPetMaskField = 0xFFFFFFFFu;
+
         uint32_t count = tabDbc->getRecordCount();
         for (uint32_t i = 0; i < count; ++i) {
             TalentTabEntry entry;
@@ -2286,6 +2316,7 @@ void SpellHandler::loadTalentDbc() {
             entry.orderIndex = static_cast<uint8_t>(tabDbc->getUInt32(i, ttOrderField));
             entry.backgroundFile = tabDbc->getString(i, ttBgField);
             if (ttIconField != 0xFFFFFFFFu) entry.spellIconId = tabDbc->getUInt32(i, ttIconField);
+            if (ttPetMaskField != 0xFFFFFFFFu) entry.petTalentMask = tabDbc->getUInt32(i, ttPetMaskField);
 
             talentTabCache_[entry.tabId] = entry;
 
@@ -3679,6 +3710,27 @@ void SpellHandler::handleTalentsInfo(network::Packet& packet) {
     if (!packet.hasRemaining(1)) return;
     uint8_t talentType = packet.readUInt8();
     if (talentType != 0) {
+        // The pet's (0x6CD770 -> 0x5C9F10): unspent(4), count(1), then
+        // (talent(4), rank from zero(1)) per talent learned; the tree is
+        // recounted and PET_TALENT_UPDATE fires. AzerothCore sends it on
+        // summon and after every learn.
+        auto& ranks = owner_.petTalentsRef();
+        ranks.clear();
+        owner_.petUnspentTalentsRef() = 0;
+        if (packet.hasRemaining(5)) {
+            owner_.petUnspentTalentsRef() = packet.readUInt32();
+            const uint8_t count = packet.readUInt8();
+            for (uint8_t i = 0; i < count && packet.hasRemaining(5); ++i) {
+                const uint32_t talentId = packet.readUInt32();
+                const uint8_t rank0 = packet.readUInt8();
+                ranks[talentId] = static_cast<uint8_t>(rank0 + 1u);
+            }
+        }
+        ++owner_.petTalentGenerationRef();
+        loadTalentDbc();
+        LOG_INFO("handleTalentsInfo (pet): unspent=", owner_.petUnspentTalentsRef(),
+                 " learned=", ranks.size());
+        owner_.fireAddonEvent("PET_TALENT_UPDATE", {});
         return;
     }
     if (!packet.hasRemaining(6)) {
@@ -3865,109 +3917,134 @@ void SpellHandler::handleAchievementEarned(network::Packet& packet) {
 // ============================================================
 
 void SpellHandler::handlePetSpells(network::Packet& packet) {
-    const size_t remaining = packet.getRemainingSize();
-    if (remaining < 8) {
-        owner_.petGuidRef() = 0;
-        owner_.petSpellListRef().clear();
-        owner_.petAutocastSpellsRef().clear();
-        memset(owner_.petActionSlotsRef(), 0, sizeof(owner_.petActionSlotsRef()));
-        LOG_INFO("SMSG_PET_SPELLS: pet cleared");
-        owner_.fireAddonEvent("UNIT_PET", {"player"});
-        // The pet frame and the pet action bar both rebuild from this one;
-        // UNIT_PET alone tells them the pet changed but not that its interface
-        // should be redrawn.
-        owner_.fireAddonEvent("PET_UI_UPDATE", {});
-        return;
+    // Wow.exe 0x5D6B90 (PetInfo): the bar is cleared, then
+    //   guid(8); if zero, the pet is gone and that is all
+    //   family(2) duration(4) mode(4: react, command, flags)
+    //   ten bar slots(4 each), a spell count(1) and the pet's spellbook,
+    //   a cooldown count(1) and per cooldown spell(4) category(2)
+    //   cooldown(4) categoryCooldown(4)
+    // and 0x5D6900 takes the pet: UNIT_PET("player") when the guid changed,
+    // PET_UI_CLOSE when that new pet is a hunter's, the talent tree for the
+    // family, PET_BAR_UPDATE always (0x5D4AD0), RAISED_AS_GHOUL when the
+    // player is dead and a pet has appeared.
+    const uint64_t previousPet = owner_.petGuidRef();
+    memset(owner_.petActionSlotsRef(), 0, sizeof(owner_.petActionSlotsRef()));
+
+    uint64_t guid = packet.hasRemaining(8) ? packet.readUInt64() : 0;
+    uint16_t family = 0;
+    uint32_t durationMs = 0;
+    if (guid != 0) {
+        do {
+            // The family field is what a WotLK server sends for pet talents.
+            // Before that the packet is the same one without it.
+            if (!isPreWotlk()) {
+                if (!packet.hasRemaining(2)) break;
+                family = packet.readUInt16();
+            }
+            if (!packet.hasRemaining(4)) break;
+            durationMs = packet.readUInt32();
+            if (!packet.hasRemaining(4)) break;
+            owner_.petModeRef() = packet.readUInt32();
+
+            if (!packet.hasRemaining(GameHandler::PET_ACTION_BAR_SLOTS * 4u)) break;
+            for (int i = 0; i < GameHandler::PET_ACTION_BAR_SLOTS; ++i) {
+                owner_.petActionSlotsRef()[i] = packet.readUInt32();
+            }
+
+            owner_.petSpellListRef().clear();
+            owner_.petAutocastSpellsRef().clear();
+            owner_.petAutocastableSpellsRef().clear();
+            if (!packet.hasRemaining(1)) break;
+            const uint8_t spellCount = packet.readUInt8();
+            for (uint8_t i = 0; i < spellCount; ++i) {
+                // One uint32 per spell, packed as the bar slots are: the spell
+                // in the low 24 bits and ACT_PASSIVE / DISABLED / ENABLED in
+                // the top byte (0x80 autocastable, 0x40 on).
+                if (!packet.hasRemaining(4)) break;
+                const uint32_t packed = packet.readUInt32();
+                const uint32_t spellId = packed & 0x00FFFFFFu;
+                if (spellId == 0) continue;
+                owner_.petSpellListRef().push_back(spellId);
+                if (packed & pet::kSlotAutocastOn) owner_.petAutocastSpellsRef().insert(spellId);
+                if (packed & pet::kSlotAutocastAllowed) owner_.petAutocastableSpellsRef().insert(spellId);
+            }
+            // The pet's cooldowns, which this client never read: a pet
+            // summoned with an ability still cooling drew it ready. The
+            // category cooldown's top bit marks an infinite one.
+            if (!packet.hasRemaining(1)) break;
+            const uint8_t cdCount = packet.readUInt8();
+            for (uint8_t i = 0; i < cdCount; ++i) {
+                if (!packet.hasRemaining(14)) break;
+                const uint32_t spellId = packet.readUInt32();
+                packet.readUInt16();  // category
+                const uint32_t cd = packet.readUInt32();
+                const uint32_t catCd = packet.readUInt32() & 0x7FFFFFFFu;
+                const uint32_t ms = std::max(cd, catCd);
+                if (spellId != 0 && ms > 0) {
+                    const float seconds = ms / 1000.0f;
+                    spellCooldowns_[spellId] = seconds;
+                    spellCooldownTotals_[spellId] = seconds;
+                }
+            }
+        } while (false);
     }
 
-    owner_.petGuidRef() = packet.readUInt64();
-    // Ask what it is called. Nothing else does, and the name a player gave a
-    // pet comes back in answer to this and nothing else.
-    if (owner_.petGuidRef() != 0) requestPetName(owner_.petGuidRef());
-    if (owner_.petGuidRef() == 0) {
-        owner_.petSpellListRef().clear();
-        owner_.petAutocastSpellsRef().clear();
-        memset(owner_.petActionSlotsRef(), 0, sizeof(owner_.petActionSlotsRef()));
-        LOG_INFO("SMSG_PET_SPELLS: pet cleared (guid=0)");
-        owner_.fireAddonEvent("UNIT_PET", {"player"});
-        // The pet frame and the pet action bar both rebuild from this one;
-        // UNIT_PET alone tells them the pet changed but not that its interface
-        // should be redrawn.
-        owner_.fireAddonEvent("PET_UI_UPDATE", {});
-        return;
+    // The autocast sets mirror the bar's bits for spells that are on it, so
+    // the spellbook and the bar agree whichever the server sent last.
+    for (int i = 0; i < GameHandler::PET_ACTION_BAR_SLOTS; ++i) {
+        const uint32_t v = owner_.petActionSlotsRef()[i];
+        if (!pet::isSpellKind(pet::slotKind(v)) || (v & 0x00FFFFFFu) == 0) continue;
+        if (pet::slotAutocastAllowed(v)) owner_.petAutocastableSpellsRef().insert(v & 0x00FFFFFFu);
+        if (pet::slotAutocastOn(v)) owner_.petAutocastSpellsRef().insert(v & 0x00FFFFFFu);
     }
 
-    // Verified against AzerothCore's Player::PetSpellInitialize, which writes
-    //   guid(8) family(2) duration(4) react(1) command(1) flags(2)
-    // and then one uint32 per action-bar slot, a uint8 spell count, and one
-    // packed uint32 per spell.
-    //
-    // This read the duration as a uint16 and never read the flags, so the
-    // action bar started four bytes early: every slot held the one before it,
-    // the first held the react and command bytes, and the last was lost. The
-    // react and command themselves came out of the duration's upper half -
-    // zero for a permanent pet, which is why they looked plausible.
-    //
-    // The family field is what a WotLK server sends for pet talents. Before
-    // that the packet is the same one without it.
-    do {
-        if (!isPreWotlk()) {
-            if (!packet.hasRemaining(2)) break;
-            packet.readUInt16();  // creature family
-        }
-        if (!packet.hasRemaining(4)) break;
-        packet.readUInt32();      // duration in ms; zero for a permanent pet
-
-        if (!packet.hasRemaining(4)) break;
-        owner_.petReactRef()   = packet.readUInt8();
-        owner_.petCommandRef() = packet.readUInt8();
-        packet.readUInt16();      // flags, unused by the server too
-
-        if (!packet.hasRemaining(GameHandler::PET_ACTION_BAR_SLOTS * 4u)) break;
-        for (int i = 0; i < GameHandler::PET_ACTION_BAR_SLOTS; ++i) {
-            owner_.petActionSlotsRef()[i] = packet.readUInt32();
-        }
-
-        if (!packet.hasRemaining(1)) break;
-        uint8_t spellCount = packet.readUInt8();
+    const bool changed = guid != previousPet;
+    owner_.petGuidRef() = guid;
+    owner_.setPetDuration(guid ? durationMs : 0);
+    if (guid == 0) {
         owner_.petSpellListRef().clear();
         owner_.petAutocastSpellsRef().clear();
         owner_.petAutocastableSpellsRef().clear();
-        for (uint8_t i = 0; i < spellCount; ++i) {
-            // One uint32, not six bytes: MAKE_UNIT_ACTION_BUTTON puts the spell
-            // in the low twenty-four bits and the state in the top byte, the
-            // same packing the action-bar slots above use and that
-            // GetPetActionInfo already masks for. Read as four plus two, the
-            // spell id carried the state and the autocast flag was two bytes of
-            // the next spell - and every spell after the first was misaligned.
-            if (!packet.hasRemaining(4)) break;
-            const uint32_t packed  = packet.readUInt32();
-            const uint32_t spellId = packed & 0x00FFFFFFu;
-            const uint8_t  state   = static_cast<uint8_t>(packed >> 24);
-            if (spellId == 0) continue;
-            owner_.petSpellListRef().push_back(spellId);
-            // ACT_ENABLED is 0xC1 and ACT_DISABLED 0x81 - 0x40 is the autocast
-            // bit. The old test was & 0x0001, which is ACT_PASSIVE's bit.
-            if (state & 0x40) {
-                owner_.petAutocastSpellsRef().insert(spellId);
-            }
-            // 0x80 is set on both ACT_ENABLED and ACT_DISABLED, the two
-            // states only an autocastable spell is given.
-            if (state & 0x80) {
-                owner_.petAutocastableSpellsRef().insert(spellId);
+    }
+    if (changed) {
+        // A new pet starts in its own combat state (0x71AFB0).
+        bool inCombat = false;
+        if (guid != 0) {
+            if (auto e = owner_.getEntityManager().getEntity(guid)) {
+                if (auto u = std::dynamic_pointer_cast<Unit>(e)) inCombat = (u->getUnitFlags() & 0x800u) != 0;
             }
         }
-    } while (false);
+        owner_.setPetAttacking(inCombat, false);
+    }
+    // The talent tree goes with the family (0x5C9DF0); a new family is a new
+    // tree, and no pet is none.
+    if (guid == 0 || family != owner_.petFamilyRef()) {
+        if (guid == 0 || owner_.petFamilyRef() != 0) {
+            owner_.petTalentsRef().clear();
+            owner_.petUnspentTalentsRef() = 0;
+        }
+        owner_.petFamilyRef() = guid ? family : 0;
+    }
 
-    LOG_INFO("SMSG_PET_SPELLS: petGuid=0x", std::hex, owner_.petGuidRef(), std::dec,
-             " react=", static_cast<int>(owner_.petReactRef()), " command=", static_cast<int>(owner_.petCommandRef()),
+    LOG_INFO("SMSG_PET_SPELLS: petGuid=0x", std::hex, guid, std::dec,
+             " family=", family, " duration=", durationMs,
+             " react=", static_cast<int>(owner_.getPetReact()),
+             " command=", static_cast<int>(owner_.getPetCommand()),
              " spells=", owner_.petSpellListRef().size());
-    owner_.fireAddonEvent("UNIT_PET", {"player"});
-        // The pet frame and the pet action bar both rebuild from this one;
-        // UNIT_PET alone tells them the pet changed but not that its interface
-        // should be redrawn.
+
+    if (guid != 0) requestPetName(guid);
+    if (changed) {
+        owner_.fireAddonEvent("UNIT_PET", {"player"});
+        if (guid != 0 && owner_.isHunterPet()) owner_.fireAddonEvent("PET_UI_CLOSE", {});
+        // The pet frame and the paperdoll's pet tab rebuild from this one.
+        // The stock client raises it when the pet unit's number field changes
+        // (0x72CFF0), which arrives with the pet; raised here as well for the
+        // pet that was already in view when its bar arrived.
         owner_.fireAddonEvent("PET_UI_UPDATE", {});
+    }
     owner_.fireAddonEvent("PET_BAR_UPDATE", {});
+    owner_.fireAddonEvent("PET_BAR_UPDATE_COOLDOWN", {});
+    if (changed && guid != 0 && owner_.isPlayerDead()) owner_.fireAddonEvent("RAISED_AS_GHOUL", {});
 }
 
 void SpellHandler::sendPetAction(uint32_t action, uint64_t targetGuid) {
@@ -3989,6 +4066,8 @@ void SpellHandler::dismissPet() {
 
 void SpellHandler::togglePetSpellAutocast(uint32_t spellId) {
     if (owner_.petGuidRef() == 0 || spellId == 0 || owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
+    // Only a spell that can autocast at all (0x5D5E10 tests the slot's sign bit).
+    if (!owner_.isPetSpellAutocastable(spellId)) return;
     bool currentlyOn = owner_.petAutocastSpellsRef().count(spellId) != 0;
     uint8_t newState = currentlyOn ? 0 : 1;
     network::Packet pkt(wireOpcode(Opcode::CMSG_PET_SPELL_AUTOCAST));
@@ -4000,12 +4079,20 @@ void SpellHandler::togglePetSpellAutocast(uint32_t spellId) {
         owner_.petAutocastSpellsRef().insert(spellId);
     else
         owner_.petAutocastSpellsRef().erase(spellId);
+    // The bar's copy of the spell takes the same bit (0x5D5E10), and the bar
+    // redraws: from the spellbook the shine moved there and not on the bar.
+    for (auto& slot : owner_.petActionSlotsRef()) {
+        if ((slot & 0x00FFFFFFu) != spellId || !pet::isSpellKind(pet::slotKind(slot))) continue;
+        if (newState) slot |= pet::kSlotAutocastOn;
+        else slot &= ~pet::kSlotAutocastOn;
+    }
+    owner_.fireAddonEvent("PET_BAR_UPDATE", {});
     LOG_DEBUG("togglePetSpellAutocast: spellId=", spellId, " autocast=", static_cast<int>(newState));
 }
 
 void SpellHandler::renamePet(const std::string& newName) {
     if (owner_.petGuidRef() == 0 || owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    if (newName.empty() || newName.size() > 12) return;
+    if (newName.empty()) return;  // the server judges the rest (SMSG_PET_NAME_INVALID)
     auto packet = PetRenamePacket::build(owner_.petGuidRef(), newName, 0);
     owner_.getSocket()->send(packet);
     LOG_INFO("Sent CMSG_PET_RENAME: petGuid=0x", std::hex, owner_.petGuidRef(), std::dec, " name='", newName, "'");
@@ -4043,11 +4130,14 @@ void SpellHandler::handleListStabledPets(network::Packet& packet) {
         // after the first was read at the wrong offset - with the last dropped
         // for want of five bytes that were never there.
         if (!packet.hasRemaining(1)) break;
-        pet.isActive  = (packet.readUInt8() == 1);
+        // The client files a pet without the 0x02 bit as the one that is out
+        // (0x5A11A0), whatever else the byte holds.
+        pet.isActive  = (packet.readUInt8() & 0x02) == 0;
         owner_.stabledPetsRef().push_back(std::move(pet));
     }
 
     owner_.stableWindowOpenRef() = true;
+    ++owner_.stableListGenerationRef();
     LOG_INFO("MSG_LIST_STABLED_PETS: stableMasterGuid=0x", std::hex, owner_.stableMasterGuidRef(), std::dec,
              " petCount=", static_cast<int>(petCount), " numSlots=", static_cast<int>(owner_.stableNumSlotsRef()));
     for (const auto& p : owner_.stabledPetsRef()) {
@@ -4057,9 +4147,11 @@ void SpellHandler::handleListStabledPets(network::Packet& packet) {
     // This packet both opens the stable window and is the only thing that
     // refreshes it, so it carries both events. Neither was fired, which is why
     // the original interface's stable could not appear.
+    // PET_STABLE_SHOW alone (0x5A11A0): PetStable_OnEvent answers it with
+    // PetStable_Update, so the refresh after a stable, unstable or slot
+    // purchase redraws through it too.
     if (owner_.addonEventCallbackRef()) {
         owner_.addonEventCallbackRef()("PET_STABLE_SHOW", {});
-        owner_.addonEventCallbackRef()("PET_STABLE_UPDATE", {});
     }
 }
 
@@ -6315,10 +6407,6 @@ void SpellHandler::requestStabledPetList() {
 
 void SpellHandler::stablePet(uint8_t slot) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket() || owner_.stableMasterGuidRef() == 0) return;
-    if (owner_.petGuidRef() == 0) {
-        owner_.raiseUiError("You do not have an active pet to stable.");
-        return;
-    }
     auto pkt = StablePetPacket::build(owner_.stableMasterGuidRef(), slot);
     owner_.getSocket()->send(pkt);
     LOG_INFO("Sent CMSG_STABLE_PET: slot=", static_cast<int>(slot));
@@ -6348,6 +6436,22 @@ void SpellHandler::abandonPet() {
     pkt.writeUInt64(owner_.petGuidRef());
     owner_.getSocket()->send(pkt);
     LOG_INFO("Sent CMSG_PET_ABANDON for pet=0x", std::hex, owner_.petGuidRef(), std::dec);
+    // At a stable the list is asked for again, so the pet leaves the current
+    // slot (0x5D4900).
+    if (owner_.stableMasterGuidRef() != 0 && owner_.isStableWindowOpen()) requestStabledPetList();
+}
+
+// A stabled pet swapped with the one that is out (CMSG_STABLE_SWAP_PET: the
+// stable master, the stabled pet's number), from a drag between the current
+// slot and an occupied stable slot (0x5A1CA0).
+void SpellHandler::swapStablePet(uint32_t petNumber) {
+    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket() ||
+        owner_.stableMasterGuidRef() == 0 || petNumber == 0) return;
+    network::Packet pkt(wireOpcode(Opcode::CMSG_STABLE_SWAP_PET));
+    pkt.writeUInt64(owner_.stableMasterGuidRef());
+    pkt.writeUInt32(petNumber);
+    owner_.getSocket()->send(pkt);
+    LOG_INFO("Sent CMSG_STABLE_SWAP_PET: petNumber=", petNumber);
 }
 
 void SpellHandler::unstablePet(uint32_t petNumber) {

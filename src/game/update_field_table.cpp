@@ -83,6 +83,9 @@ static const UFNameEntry kUFNames[] = {
     {.name = "UNIT_FIELD_SUMMONEDBY_HI", .field = UF::UNIT_FIELD_SUMMONEDBY_HI},
     {.name = "UNIT_FIELD_CHANNEL_OBJECT_LO", .field = UF::UNIT_FIELD_CHANNEL_OBJECT_LO},
     {.name = "UNIT_FIELD_CHANNEL_OBJECT_HI", .field = UF::UNIT_FIELD_CHANNEL_OBJECT_HI},
+    {.name = "UNIT_FIELD_CREATEDBY_LO", .field = UF::UNIT_FIELD_CREATEDBY_LO},
+    {.name = "UNIT_FIELD_PETNUMBER", .field = UF::UNIT_FIELD_PETNUMBER},
+    {.name = "UNIT_FIELD_PET_NAME_TIMESTAMP", .field = UF::UNIT_FIELD_PET_NAME_TIMESTAMP},
     {.name = "GAMEOBJECT_DISPLAYID", .field = UF::GAMEOBJECT_DISPLAYID},
     {.name = "GAMEOBJECT_FIELD_CREATED_BY_LO", .field = UF::GAMEOBJECT_FIELD_CREATED_BY_LO},
     {.name = "GAMEOBJECT_FIELD_CREATED_BY_HI", .field = UF::GAMEOBJECT_FIELD_CREATED_BY_HI},
@@ -152,6 +155,20 @@ bool UpdateFieldTable::loadFromJson(const std::string& path) {
         LOG_WARNING("UpdateFieldTable: no fields loaded from ", path);
         return false;
     }
+
+    // The pet fields sit beside fields every layout already names, in every
+    // build's UpdateFields: CREATEDBY follows SUMMONEDBY, and PETNUMBER and
+    // PET_NAME_TIMESTAMP come just before PETEXPERIENCE. A data directory
+    // extracted before they were added still finds them.
+    auto derive = [this](UF field, UF from, int offset) {
+        const auto key = static_cast<uint16_t>(field);
+        auto base = fieldMap_.find(static_cast<uint16_t>(from));
+        if (fieldMap_.count(key) || base == fieldMap_.end()) return;
+        fieldMap_[key] = static_cast<uint16_t>(base->second + offset);
+    };
+    derive(UF::UNIT_FIELD_CREATEDBY_LO, UF::UNIT_FIELD_SUMMONEDBY_HI, 1);
+    derive(UF::UNIT_FIELD_PETNUMBER, UF::UNIT_FIELD_PETEXPERIENCE, -2);
+    derive(UF::UNIT_FIELD_PET_NAME_TIMESTAMP, UF::UNIT_FIELD_PETEXPERIENCE, -1);
 
     LOG_INFO("UpdateFieldTable: loaded ", loaded, " fields from ", path);
     return true;

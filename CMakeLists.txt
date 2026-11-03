@@ -687,6 +687,7 @@ set(WOWEE_SOURCES
     src/game/movement_handler.cpp
     src/game/combat_handler.cpp
     src/game/spell_handler.cpp
+    src/game/game_handler_pets.cpp
     src/game/global_strings.cpp
     src/game/spell_description_eval.cpp
     src/game/inventory_handler.cpp

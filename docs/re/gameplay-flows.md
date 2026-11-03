@@ -413,7 +413,7 @@ class). Auto-inspects no longer reach the frame (§0.2).
 | `SMSG_SUPERCEDED_SPELL` did not refresh the spellbook | yes |
 | `GetSpellAutocast`, `IsSelectedSpell`, GCD on every spell | yes |
 | `LearnPreviewTalents` sent one packet per rank | yes (`CMSG_LEARN_PREVIEW_TALENTS`) |
-| Pet talents | no (feature gap) |
+| Pet talents | yes (docs/re/pets.md §5) |
 
 ## 14. Macros and key bindings
 
@@ -496,7 +496,6 @@ classic/TBC-only meeting-stone handlers.
 
 ## 19. Gaps
 
-- Pet talents.
 - Seen while testing, outside these flows: a GM teleport into a building just
   after a resurrection fell through the floor before the WMO loaded; two test
   clients at once on this GPU ran out of device memory (`ImGui Vulkan error: -2`)

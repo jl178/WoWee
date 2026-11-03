@@ -1033,6 +1033,11 @@ struct TalentSource {
 };
 /// `talentGroup` is FrameXML's 1-based group, or 0/out of range for the active one.
 TalentSource talentSource(game::GameHandler* gh, bool inspect, int talentGroup);
+/// The pet's tree (lua_quest_api.cpp): the talent at a tab and index, whether
+/// the pet's family is offered it, and the pet's rank in it from one.
+const game::TalentEntry* petTalentAt(game::GameHandler* gh, int tabIndex, int talentIndex);
+bool petTalentShown(game::GameHandler* gh, const game::TalentEntry* talent);
+int petTalentRank(game::GameHandler* gh, uint32_t talentId);
 
 /// The item id the cursor is carrying, or zero for anything else.
 ///
@@ -1063,6 +1068,12 @@ int cursorEquipSlot();
 /// redraws unlocked. What ClearCursor does; for C++ drop paths outside
 /// lua_action_api.cpp that used to clear only cursorItemSlot().
 void clearCursor(lua_State* L);
+
+/// The stable slot the cursor is dragging (PickupStablePet, 0x5A0FE0), 0 for
+/// the pet that is out, or -1 when it carries no stable pet.
+int cursorStableSlot();
+/// Put a stable slot on the cursor (0x520C60), with the pet's icon.
+void pickUpStablePet(lua_State* L, int slot, const std::string& icon);
 
 /// Whether the cursor is carrying an item that came out of the player's own
 /// inventory - a bag slot or a worn slot - rather than off an action bar.
