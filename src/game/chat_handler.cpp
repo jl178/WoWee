@@ -1191,29 +1191,33 @@ void ChatHandler::handleChannelNotify(network::Packet& packet) {
             break;
         }
         case ChannelNotifyType::NOT_IN_AREA:
-            addSystemChatMessage("You must be in the area to join '" + data.channelName + "'.");
-            LOG_DEBUG("Cannot join channel ", data.channelName, " (not in area)");
+            fireChannelNotice("NOT_IN_AREA", data.channelName);   // CHAT_NOT_IN_AREA_NOTICE
             break;
         case ChannelNotifyType::WRONG_PASSWORD:
-            addSystemChatMessage("Wrong password for channel '" + data.channelName + "'.");
+            fireChannelNotice("WRONG_PASSWORD", data.channelName);   // CHAT_WRONG_PASSWORD_NOTICE
             break;
         case ChannelNotifyType::NOT_MEMBER:
-            addSystemChatMessage("You are not in channel '" + data.channelName + "'.");
+            fireChannelNotice("NOT_MEMBER", data.channelName);   // CHAT_NOT_MEMBER_NOTICE
             break;
         case ChannelNotifyType::NOT_MODERATOR:
-            addSystemChatMessage("You are not a moderator of '" + data.channelName + "'.");
+            fireChannelNotice("NOT_MODERATOR", data.channelName);   // CHAT_NOT_MODERATOR_NOTICE
             break;
         case ChannelNotifyType::MUTED:
-            addSystemChatMessage("You are muted in channel '" + data.channelName + "'.");
+            fireChannelNotice("MUTED", data.channelName);   // CHAT_MUTED_NOTICE
             break;
         case ChannelNotifyType::BANNED:
-            addSystemChatMessage("You are banned from channel '" + data.channelName + "'.");
+            fireChannelNotice("BANNED", data.channelName);   // CHAT_BANNED_NOTICE
             break;
         case ChannelNotifyType::THROTTLED:
-            addSystemChatMessage("Channel '" + data.channelName + "' is throttled. Please wait.");
+            fireChannelNotice("THROTTLED", data.channelName);   // CHAT_THROTTLED_NOTICE
             break;
         case ChannelNotifyType::NOT_IN_LFG:
-            addSystemChatMessage("You must be in a LFG queue to join '" + data.channelName + "'.");
+            // 3.3.5 has no CHAT_NOT_IN_LFG_NOTICE string, so the stock client
+            // shows nothing for it. AzerothCore sends it on every zone change
+            // (Player::UpdateLocalChannels joins the constant LFG channel and
+            // Channel::JoinChannel refuses a player not queued), which made
+            // this client print a line at every teleport.
+            LOG_DEBUG("Channel ", data.channelName, ": not in the LFG queue");
             break;
         case ChannelNotifyType::PLAYER_KICKED:
             addSystemChatMessage("A player was kicked from '" + data.channelName + "'.");
@@ -1235,10 +1239,10 @@ void ChatHandler::handleChannelNotify(network::Packet& packet) {
             addSystemChatMessage("Owner of '" + data.channelName + "' changed.");
             break;
         case ChannelNotifyType::NOT_OWNER:
-            addSystemChatMessage("You are not the owner of '" + data.channelName + "'.");
+            fireChannelNotice("NOT_OWNER", data.channelName);   // CHAT_NOT_OWNER_NOTICE
             break;
         case ChannelNotifyType::INVALID_NAME:
-            addSystemChatMessage("Invalid channel name '" + data.channelName + "'.");
+            fireChannelNotice("INVALID_NAME", data.channelName);   // CHAT_INVALID_NAME_NOTICE
             break;
         case ChannelNotifyType::PLAYER_NOT_FOUND:
             addSystemChatMessage("Player not found.");
@@ -1268,11 +1272,13 @@ void ChatHandler::handleChannelNotify(network::Packet& packet) {
             addSystemChatMessage("You have been invited to join channel '" + data.channelName + "'.");
             break;
         case ChannelNotifyType::INVITE_WRONG_FACTION:
+            fireChannelNotice("INVITE_WRONG_FACTION", data.channelName);
+            break;
         case ChannelNotifyType::WRONG_FACTION:
-            addSystemChatMessage("Wrong faction for channel '" + data.channelName + "'.");
+            fireChannelNotice("WRONG_FACTION", data.channelName);
             break;
         case ChannelNotifyType::NOT_MODERATED:
-            addSystemChatMessage("Channel '" + data.channelName + "' is not moderated.");
+            fireChannelNotice("NOT_MODERATED", data.channelName);   // CHAT_NOT_MODERATED_NOTICE
             break;
         case ChannelNotifyType::PLAYER_INVITED:
             addSystemChatMessage("Player invited to channel '" + data.channelName + "'.");
@@ -1382,7 +1388,13 @@ void ChatHandler::joinZoneChannels(uint32_t zoneId) {
         // recruitment channel both carry the city flag, so the more specific
         // flags decide first.
         bool wanted;
-        if (ch.flags & kLfg)            wanted = chatAutoJoin.lfg;
+        // The LookingForGroup channel takes only players in the dungeon
+        // finder's queue (AzerothCore Channel.RestrictedLfg, the stock
+        // "You must be in a LFG queue to join 'LookingForGroup'." refusal), so
+        // asking on every zone change when not queued printed that refusal on
+        // every teleport and zone line.
+        if (ch.flags & kLfg)            wanted = chatAutoJoin.lfg &&
+                                                 owner_.getLfgState() != LfgState::None;
         else if (ch.flags & kGuildReq)  wanted = guildRecruitment;
         else if (ch.flags & kTrade)     wanted = chatAutoJoin.trade;
         else if (ch.flags & kDefense)   wanted = chatAutoJoin.localDefense;  // Local and World

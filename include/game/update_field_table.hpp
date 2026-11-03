@@ -112,6 +112,13 @@ enum class UF : uint16_t {
     PLAYER_FIELD_HONOR_CURRENCY,     // Accumulated honor points (uint32)
     PLAYER_FIELD_ARENA_CURRENCY,     // Accumulated arena points (uint32)
 
+    // Glyph sockets (WotLK only). GLYPH_SLOTS_1 is six GlyphSlot.dbc ids, one
+    // per socket in Order; GLYPHS_ENABLED is a bitmask, bit i = socket i+1
+    // unlocked (AzerothCore Player::InitGlyphsForLevel). Indices from
+    // AzerothCore's UpdateFields.h: UNIT_END + 0x048C and + 0x0498.
+    PLAYER_FIELD_GLYPH_SLOTS_1,
+    PLAYER_GLYPHS_ENABLED,
+
     // The player's active non-combat companion, as a 64-bit guid (low word at
     // this index, high word at the next). WotLK only - no earlier expansion
     // published it, and none has CMSG_DISMISS_CRITTER to act on it either.

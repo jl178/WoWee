@@ -5,6 +5,7 @@
 #include "game/gather_spells.hpp"
 #include "game/interaction_rules.hpp"
 #include "game/global_strings.hpp"
+#include "game/game_error_table.hpp"
 #include "game/quest_giver_status.hpp"
 #include "game/packed_time.hpp"
 #include "game/inventory_slots.hpp"
@@ -1084,6 +1085,10 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
         // daily quests reset, which is the only place that figure comes from.
         // Silently - the announcement belongs to /time.
         queryServerTime(false);
+        // Whether mail is waiting and from whom. The handler for the reply
+        // existed and nothing asked, so the minimap envelope only lit when
+        // mail arrived mid-session, never for mail sent while offline.
+        if (inventoryHandler_) inventoryHandler_->queryNextMailTime();
     }
 
     // Fire PLAYER_ENTERING_WORLD - THE most important event for addon initialization.
@@ -1321,8 +1326,11 @@ void GameHandler::useEquipmentSet(uint32_t setId) {
 }
 
 void GameHandler::saveEquipmentSet(const std::string& name, const std::string& iconName,
-                                    uint64_t existingGuid, uint32_t setIndex) {
-    if (inventoryHandler_) inventoryHandler_->saveEquipmentSet(name, iconName, existingGuid, setIndex);
+                                    uint64_t existingGuid, uint32_t setIndex,
+                                    uint32_t ignoreMask) {
+    if (inventoryHandler_) {
+        inventoryHandler_->saveEquipmentSet(name, iconName, existingGuid, setIndex, ignoreMask);
+    }
 }
 
 void GameHandler::deleteEquipmentSet(uint64_t setGuid) {
@@ -1397,10 +1405,8 @@ void GameHandler::setVendorCanRepair(bool v) {
     else currentVendorItems.canRepair = v;
 }
 const std::deque<GameHandler::BuybackItem>& GameHandler::getBuybackItems() const {
-    if (inventoryHandler_) {
-        // Layout-identical structs (InventoryHandler::BuybackItem == GameHandler::BuybackItem)
-        return reinterpret_cast<const std::deque<BuybackItem>&>(inventoryHandler_->getBuybackItems());
-    }
+    // One struct now (game::BuybackItem), so no cast between two look-alikes.
+    if (inventoryHandler_) return inventoryHandler_->getBuybackItems();
     return buybackItems_;
 }
 uint64_t GameHandler::getVendorGuid() const {
@@ -1489,6 +1495,14 @@ void GameHandler::setMailComposeShowing(bool showing) {
 }
 bool GameHandler::hasNewMail() const {
     return inventoryHandler_ ? inventoryHandler_->hasNewMail() : hasNewMail_;
+}
+std::vector<std::string> GameHandler::getNextMailSenderNames() const {
+    std::vector<std::string> names;
+    if (!inventoryHandler_) return names;
+    for (const auto& sender : inventoryHandler_->getNextMailSenders()) {
+        names.push_back(getMailSenderName(sender));
+    }
+    return names;
 }
 const std::array<GameHandler::MailAttachSlot, 12>& GameHandler::getMailAttachments() const {
     if (inventoryHandler_) {
@@ -2635,12 +2649,16 @@ void GameHandler::lfgSetRoles(uint8_t roles) {
     if (socialHandler_) socialHandler_->lfgSetRoles(roles);
 }
 
+void GameHandler::lfgCompleteRoleCheck(bool accept) {
+    if (socialHandler_) socialHandler_->lfgCompleteRoleCheck(accept);
+}
+
 void GameHandler::lfgAcceptProposal(uint32_t proposalId, bool accept) {
     if (socialHandler_) socialHandler_->lfgAcceptProposal(proposalId, accept);
 }
 
-void GameHandler::lfgTeleport(bool toLfgDungeon) {
-    if (socialHandler_) socialHandler_->lfgTeleport(toLfgDungeon);
+void GameHandler::lfgTeleport(bool out) {
+    if (socialHandler_) socialHandler_->lfgTeleport(out);
 }
 
 void GameHandler::lfgSetBootVote(bool vote) {
@@ -2824,6 +2842,10 @@ float GameHandler::getSpellCooldownTotal(uint32_t spellId) const {
 
 void GameHandler::learnTalent(uint32_t talentId, uint32_t requestedRank) {
     if (spellHandler_) spellHandler_->learnTalent(talentId, requestedRank);
+}
+
+void GameHandler::learnPreviewTalents(const std::vector<std::pair<uint32_t, uint32_t>>& talents) {
+    if (spellHandler_) spellHandler_->learnPreviewTalents(talents);
 }
 
 void GameHandler::switchTalentSpec(uint8_t newSpec) {
@@ -3205,8 +3227,21 @@ void GameHandler::lootMasterGive(uint8_t lootSlot, uint64_t targetGuid) {
 void GameHandler::raiseGameError(const char* errorName, const char* fallback) {
     // CGGameUI::DisplayError (0x5216F0) shows the GameError's GlobalStrings
     // text; the English is the fallback when the interface files are absent.
-    std::string text = globalString(services_.assetManager, errorName);
-    addUIError(text.empty() ? std::string(fallback) : text);
+    displayGameMessage(errorName, fallback);
+}
+
+void GameHandler::displayGameMessage(const char* key, const std::string& fallback,
+                                     const std::vector<std::string>& args) {
+    const std::string format = globalString(services_.assetManager, key);
+    const std::string text = format.empty() ? fallback : formatGlobalString(format, args);
+    if (text.empty()) return;
+    switch (gameMessageKind(key)) {
+        case GameMessageKind::System:  addSystemChatMessage(text); break;
+        case GameMessageKind::Info:    addUIInfoMessage(text); break;
+        case GameMessageKind::Error:   addUIError(text); break;
+        case GameMessageKind::Console: LOG_INFO("[console] ", text); break;
+    }
+    playUiMessageSound(key);
 }
 
 // A right-click on a friendly NPC, as CGUnit_C::OnRightClick (0x731260) and
@@ -4005,6 +4040,11 @@ uint32_t GameHandler::estimateRepairAllCost() const {
     return 0;
 }
 
+uint32_t GameHandler::estimateItemRepairCost(uint64_t itemGuid) const {
+    if (inventoryHandler_) return inventoryHandler_->estimateItemRepairCost(itemGuid);
+    return 0;
+}
+
 void GameHandler::sellItem(uint64_t vendorGuid, uint64_t itemGuid, uint32_t count) {
     if (inventoryHandler_) inventoryHandler_->sellItem(vendorGuid, itemGuid, count);
 }
@@ -4068,12 +4108,15 @@ void GameHandler::destroyItem(uint8_t bag, uint8_t slot, uint8_t count) {
     if (inventoryHandler_) inventoryHandler_->destroyItem(bag, slot, count);
 }
 
-void GameHandler::splitItem(uint8_t srcBag, uint8_t srcSlot, uint8_t count) {
+void GameHandler::splitItem(uint8_t srcBag, uint8_t srcSlot, uint32_t count) {
     if (inventoryHandler_) inventoryHandler_->splitItem(srcBag, srcSlot, count);
 }
 void GameHandler::splitItemTo(uint8_t srcBag, uint8_t srcSlot,
-                              uint8_t dstBag, uint8_t dstSlot, uint8_t count) {
+                              uint8_t dstBag, uint8_t dstSlot, uint32_t count) {
     if (inventoryHandler_) inventoryHandler_->splitItemTo(srcBag, srcSlot, dstBag, dstSlot, count);
+}
+void GameHandler::autostoreBagItem(uint8_t srcBag, uint8_t srcSlot, uint8_t dstBag) {
+    if (inventoryHandler_) inventoryHandler_->autostoreBagItem(srcBag, srcSlot, dstBag);
 }
 
 void GameHandler::useItemBySlot(int backpackIndex, bool confirmed, uint64_t unitTarget) {
@@ -4086,6 +4129,14 @@ void GameHandler::useKeyringItem(int index, bool confirmed) {
 
 void GameHandler::placeGlyphFromBag(uint8_t wireBag, uint8_t wireSlot, uint32_t socketIndex) {
     if (inventoryHandler_) inventoryHandler_->placeGlyphFromBag(wireBag, wireSlot, socketIndex);
+}
+
+bool GameHandler::placePendingGlyph(uint32_t socketIndex) {
+    return inventoryHandler_ && inventoryHandler_->placePendingGlyph(socketIndex);
+}
+
+uint32_t GameHandler::getPendingGlyphItemId() const {
+    return inventoryHandler_ ? inventoryHandler_->getPendingGlyphItemId() : 0;
 }
 
 void GameHandler::useItemInBag(int bagIndex, int slotIndex, bool confirmed,

@@ -20,6 +20,19 @@ namespace game {
 class GameHandler;
 enum class QuestGiverStatus : uint8_t;
 
+class GameHandler;
+/// How the interface counts a quest's place in the log: its display row, with
+/// zone headers counted (lua_quest_api.cpp questRows). The game layer has no
+/// view of the headers, so the interface layer installs this; QUEST_ACCEPTED
+/// and QUEST_WATCH_UPDATE carry that row, because the stock handlers hand it
+/// straight to AddQuestWatch and GetNumQuestLeaderBoards (questlogframe.lua
+/// QuestLog_OnEvent).
+using QuestLogRowResolver = int (*)(GameHandler*, uint32_t questId);
+inline QuestLogRowResolver& questLogRowResolver() {
+    static QuestLogRowResolver resolver = nullptr;
+    return resolver;
+}
+
 class QuestHandler {
 public:
     using PacketHandler = std::function<void(network::Packet&)>;
@@ -140,6 +153,28 @@ public:
             uint32_t required = 0;
         };
         std::array<KillObjective, 4> killObjectives{};
+        /// The query response's ObjectiveText[4], one per kill objective. A
+        /// non-empty one replaces "<creature> slain" in the objective's line
+        /// and in its progress message (Wow.exe 0x6d8030 prints it with
+        /// ERR_QUEST_ADD_FOUND_SII) - kill-credit and spell-credit quests
+        /// name what to do rather than the invisible credit creature.
+        std::array<std::string, 4> objectiveTexts{};
+        /// AreaDescription: the text SMSG_QUESTUPDATE_COMPLETE prints as
+        /// "<text> (Complete)" (ERR_QUEST_OBJECTIVE_COMPLETE_S), e.g. "Scout
+        /// through the Fargodeep Mine".
+        std::string areaDescription;
+        /// From the query response (WotLK): QuestInfo.dbc type (Group, PvP,
+        /// Raid, Dungeon...), SuggestedPlayers and the quest flags (0x1000 is
+        /// daily). GetQuestLogTitle's questTag, suggestedGroup and isDaily.
+        uint32_t questType = 0;
+        uint32_t suggestedPlayers = 0;
+        uint32_t questFlags = 0;
+        /// Accepted before its title was known: ERR_QUEST_ACCEPTED_S waits
+        /// for the query response.
+        bool announceAcceptOnQuery = false;
+        /// Item counts have been read from the bags at least once, so a change
+        /// is a change and not the first look (no message at login).
+        bool itemCountsSeen = false;
         struct ItemObjective {
             uint32_t itemId = 0;
             uint32_t required = 0;
@@ -164,6 +199,9 @@ public:
     /// log API takes it, and QUEST_WATCH_UPDATE carries it - and it is not the
     /// quest id, which is what was being sent in its place.
     [[nodiscard]] int questLogIndexOf(uint32_t questId) const {
+        // A display row once the interface has said how it counts them; a
+        // quest under a collapsed header has no row and answers zero.
+        if (auto resolve = questLogRowResolver()) return resolve(&owner_, questId);
         for (size_t i = 0; i < questLog_.size(); ++i) {
             if (questLog_[i].questId == questId) return static_cast<int>(i) + 1;
         }
@@ -284,6 +322,9 @@ private:
     // concern, so a second of latency is imperceptible next to the packet cost.
     static constexpr float kQuestGiverRequeryIntervalSec = 1.0f;
     float questGiverRequeryCooldown_ = 0.0f;
+    /// GOSSIP_SHOW held back until the greeting's npc text answers (or a
+    /// second passes), so it is raised once per gossip packet.
+    float gossipShowWaitSec_ = 0.0f;
     bool questGiverRequeryPending_ = false;
 
     // --- Packet handlers ---

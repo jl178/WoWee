@@ -485,6 +485,10 @@ public:
     uint64_t getMoneyCopper() const { return playerMoneyCopper_; }
 
     // PvP currency (TBC/WotLK only)
+    /// How many of a currency item the player holds in the currency-token
+    /// slots (inventory slots 118-149, Player.h CURRENCYTOKEN_SLOT_START) -
+    /// where the server puts emblems, badges and marks, outside every bag.
+    uint32_t countCurrencyTokens(uint32_t itemId) const;
     uint32_t getHonorPoints() const { return playerHonorPoints_; }
     uint32_t getArenaPoints() const { return playerArenaPoints_; }
 
@@ -541,6 +545,11 @@ public:
             if (playerSpellDmgBonus_[i] > sp) sp = playerSpellDmgBonus_[i];
         }
         return sp;
+    }
+    /// One school's damage bonus, by the wire's SpellSchools index
+    /// (0 physical, 1 holy ... 6 arcane). -1 until received.
+    int32_t getSpellDamageBonus(int school) const {
+        return (school >= 0 && school <= 6) ? playerSpellDmgBonus_[school] : -1;
     }
     int32_t getHealingPower() const { return playerHealBonus_; }
 
@@ -791,10 +800,50 @@ public:
     void requestCalendar(); ///< Send CMSG_CALENDAR_GET_CALENDAR to the server
     /// The calendar the server last sent, empty until it has answered one.
     const CalendarData& getCalendarData() const { return calendarData_; }
-    /// The event the server last sent in full, empty until one is opened.
+    /// The calendar's current event: the one opened (the server's last
+    /// SMSG_CALENDAR_SEND_EVENT for it, kept current by the alerts after it),
+    /// or a new one being drafted, whose invite list grows from pre-invite
+    /// answers. Empty when neither. Every CalendarEvent* call that takes no
+    /// event index reads this, which is what WoW's "current event" is.
     const CalendarEventDetail& getCalendarEventDetail() const {
         return calendarEventDetail_;
     }
+    /// True between CalendarNewEvent and the event being created or closed.
+    bool isCalendarEventNew() const { return calendarEventIsNew_; }
+    /// Start drafting a new event with these flags. The draft's invite list
+    /// starts with the player as its owner, as the stock client's does; an
+    /// announcement has no list at all.
+    void beginNewCalendarEvent(uint32_t flags);
+    /// Nothing open any more (CalendarCloseEvent).
+    void closeCalendarEvent();
+    /// Drop a row from the new event's invite list - nothing has been sent
+    /// for it, so there is nothing to tell the server.
+    void removeCalendarDraftInvite(size_t index);
+    /// The fields the edit form writes, kept beside the current event they
+    /// belong to: seeded from it when it is opened and when an alert updates
+    /// it, so a save sends what the form shows rather than a stale draft.
+    CalendarEventDraft& calendarDraft() { return calendarDraft_; }
+    /// The invite list of the current event, re-ordered by the interface's
+    /// sort buttons. Criterion "name", "class", "status" or "party".
+    void sortCalendarInvites(const std::string& criterion, bool reverse);
+    const std::string& calendarInviteSortCriterion() const { return calendarInviteSort_; }
+    bool calendarInviteSortReverse() const { return calendarInviteSortReverse_; }
+    /// The invite the interface last clicked, 1-based; 0 for none.
+    int calendarSelectedInvite() const { return calendarSelectedInvite_; }
+    void selectCalendarInvite(int index) { calendarSelectedInvite_ = index; }
+    /// Whether a request is waiting on the server's answer: set when one is
+    /// sent, cleared by SMSG_CALENDAR_CLEAR_PENDING_ACTION or an error.
+    bool isCalendarActionPending() const { return calendarActionPending_; }
+    void setCalendarActionPending(bool pending);
+    /// The player's own invite to an event, if the calendar carries one.
+    const CalendarInvite* findCalendarInvite(uint64_t eventId) const;
+    /// Sign up, take an invitee off, copy, report, and invite an arena team.
+    void signUpForCalendarEvent(uint64_t eventId, bool tentative);
+    void removeCalendarInvite(uint64_t inviteeGuid, uint64_t inviteId,
+                              uint64_t ownerInviteId, uint64_t eventId);
+    void copyCalendarEvent(uint64_t eventId, uint64_t inviteId, uint32_t packedTime);
+    void complainCalendarEvent(uint64_t eventId, uint64_t creatorGuid);
+    void massInviteArenaTeamToCalendarEvent(uint32_t teamId);
     /// Invite someone to an event, or to one not yet created.
     void inviteToCalendarEvent(uint64_t eventId, uint64_t inviteId,
                                const std::string& name, bool isPreInvite,
@@ -813,7 +862,8 @@ public:
                                         uint32_t minRank);
     /// Ask the server for one event's detail: CMSG_CALENDAR_GET_EVENT.
     void requestCalendarEvent(uint64_t eventId);
-    /// Send a staged event to the server.
+    /// Send the staged event, with the current event's invite list, to the
+    /// server.
     void createCalendarEvent(const CalendarEventDraft& draft);
     /// Answer an invitation. Status is a CalendarInviteStatus.
     void respondToCalendarInvite(uint64_t eventId, uint64_t inviteId,
@@ -934,6 +984,8 @@ public:
     void dismissReadyCheck();
     const std::string& getReadyCheckInitiator() const;
     const std::vector<ReadyCheckResult>& getReadyCheckResults() const;
+    /// "waiting" / "ready" / "notready" for a unit during a check, else null.
+    const char* readyCheckStatusFor(uint64_t guid) const;
 
     // Duel
     void forfeitDuel();
@@ -1122,6 +1174,14 @@ public:
     bool isPetSpellAutocast(uint32_t spellId) const {
         return petAutocastSpells_.count(spellId) != 0;
     }
+    /// Whether the pet spell can autocast at all: SMSG_PET_SPELLS sends it as
+    /// ACT_DISABLED (0x81) or ACT_ENABLED (0xC1), the 0x80 bit, where a
+    /// spell that cannot is ACT_PASSIVE (AzerothCore Pet::addSpell, ACT_DECIDE
+    /// from SpellInfo::IsAutocastable).
+    bool isPetSpellAutocastable(uint32_t spellId) const {
+        return petAutocastableSpells_.count(spellId) != 0;
+    }
+    std::unordered_set<uint32_t>& petAutocastableSpellsRef() { return petAutocastableSpells_; }
     // Send CMSG_PET_ACTION to issue a pet command
     void sendPetAction(uint32_t action, uint64_t targetGuid = 0);
     // Toggle autocast for a pet spell via CMSG_PET_SPELL_AUTOCAST
@@ -1298,6 +1358,7 @@ public:
         return spellHandler_ ? spellHandler_->getTalentRank(talentId) : 0;
     }
     void learnTalent(uint32_t talentId, uint32_t requestedRank);
+    void learnPreviewTalents(const std::vector<std::pair<uint32_t, uint32_t>>& talents);
     void switchTalentSpec(uint8_t newSpec);
 
     // Talent DBC access
@@ -1329,7 +1390,16 @@ public:
 
     // Client-side macro text storage (server sends only macro index; text is stored locally)
     const std::string& getMacroText(uint32_t macroId) const;
+    /// Creates the macro if it does not exist. An empty body is a macro with
+    /// no commands yet - the stock macro frame creates every macro that way
+    /// (CreateMacro(name, icon, nil, perChar)) and writes the body later - so
+    /// existence is the map key, never whether the text is empty.
     void setMacroText(uint32_t macroId, const std::string& text);
+    bool hasMacro(uint32_t macroId) const { return macros_.count(macroId) != 0; }
+    /// DeleteMacro: removes the macro, shifts the later ones in the same half
+    /// (1-36 account, 37-54 character) down one, and renumbers or clears the
+    /// action-bar MACRO slots that pointed into that half to match.
+    void deleteMacro(uint32_t macroId);
     /// A macro's name and icon, which the text alone never carried. Stored
     /// beside it under their own keys, so a config written before this still
     /// loads - the name simply comes back empty and is shown as "Macro".
@@ -2056,9 +2126,15 @@ public:
     void declineTradeRequest();  // respond with CMSG_CANCEL_TRADE
     void acceptTrade();          // lock in offer: CMSG_ACCEPT_TRADE
     void cancelTrade();          // CMSG_CANCEL_TRADE
-    void setTradeItem(uint8_t tradeSlot, uint8_t bag, uint8_t bagSlot);
-    void clearTradeItem(uint8_t tradeSlot);
-    void setTradeGold(uint64_t copper);
+    /// False when nothing was sent (no trade window open).
+    bool setTradeItem(uint8_t tradeSlot, uint8_t bag, uint8_t bagSlot);
+    bool clearTradeItem(uint8_t tradeSlot);
+    bool setTradeGold(uint64_t copper);
+    /// Who the trade is with: the requester, or the player we asked.
+    uint64_t getTradePeerGuid() const;
+    /// The enchanting spell on each side of the trade (see InventoryHandler).
+    uint32_t getMyTradeSpell() const;
+    uint32_t getPeerTradeSpell() const;
 
     // ---- Duel ----
     bool hasPendingDuelRequest() const;
@@ -2102,9 +2178,11 @@ public:
     void requestLfgPlayerLockInfo();
     void requestLfgPartyLockInfo();
     void lfgSetRoles(uint8_t roles);
+    void lfgCompleteRoleCheck(bool accept);
     void lfgAcceptProposal(uint32_t proposalId, bool accept);
     void lfgSetBootVote(bool vote);
-    void lfgTeleport(bool toLfgDungeon = true);
+    /// CMSG_LFG_TELEPORT: `out` true leaves the dungeon, false goes back in.
+    void lfgTeleport(bool out = false);
     LfgState getLfgState() const;
     /// What the last finished dungeon-finder run paid out.
     const LfgCompletionReward& getLfgCompletionReward() const;
@@ -2249,7 +2327,8 @@ public:
     bool supportsEquipmentSets() const;
     void useEquipmentSet(uint32_t setId);
     void saveEquipmentSet(const std::string& name, const std::string& iconName = "INV_Misc_QuestionMark",
-                          uint64_t existingGuid = 0, uint32_t setIndex = 0xFFFFFFFF);
+                          uint64_t existingGuid = 0, uint32_t setIndex = 0xFFFFFFFF,
+                          uint32_t ignoreMask = 0);
     void deleteEquipmentSet(uint64_t setGuid);
 
     // NPC Gossip
@@ -2313,6 +2392,10 @@ public:
     // Reconcile collect-item quest objectives against current bag contents.
     // Forwards to QuestHandler; called by InventoryHandler after each rebuild.
     void reconcileQuestItemObjectives(const std::unordered_map<uint32_t, uint32_t>& carriedCounts);
+    /// The same, counting the backpack and worn bags now - for when a quest's
+    /// item objectives become known (its query answers) rather than the bags
+    /// changing.
+    void reconcileQuestItemObjectivesFromBags();
     // QuestSort.dbc name for negative ZoneOrSort values (class/profession/seasonal)
     const std::string& getQuestSortName(uint32_t sortId) const;
     int getSelectedQuestLogIndex() const;
@@ -2927,6 +3010,24 @@ public:
         auto it = glyphSpellCache_.find(glyphPropertiesId);
         return it != glyphSpellCache_.end() ? it->second : 0u;
     }
+    /// GlyphProperties.dbc TypeFlags (0 major, 1 minor), -1 when unknown.
+    int32_t getGlyphTypeFlags(uint32_t glyphPropertiesId) const {
+        auto it = glyphTypeFlagsCache_.find(glyphPropertiesId);
+        return it != glyphTypeFlagsCache_.end() ? static_cast<int32_t>(it->second) : -1;
+    }
+    /// A socket's GlyphSlot.dbc TypeFlags, `socket` 1-based. The socket's
+    /// slot id is PLAYER_FIELD_GLYPH_SLOTS_1 + socket-1 - the server fills it
+    /// from GlyphSlot.dbc by Order (Player::InitGlyphsForLevel) - so the
+    /// stock layout is major, minor, minor, major, minor, major, not the
+    /// three-and-three this client assumed. -1 when unknown.
+    int32_t glyphSocketTypeFlags(int socket);
+    /// Whether the socket is unlocked: PLAYER_GLYPHS_ENABLED bit socket-1.
+    /// True when the field is not published, which is what was answered
+    /// before it was read.
+    bool glyphSocketEnabled(int socket) const;
+    /// The GlyphProperties id an item places (its spell's APPLY_GLYPH effect,
+    /// 74, carries it as EffectMiscValue), or 0 when the item is no glyph.
+    uint32_t glyphPropertiesForItem(uint32_t itemId);
     void ensureAchievementCriteriaLoaded();
     /// Category ids in the order the panel shows them. The two tabs are
     /// disjoint sets, not one list filtered at the call site: GetCategoryList
@@ -2939,10 +3040,12 @@ public:
         auto it = achievementCategoryInfo_.find(categoryId);
         return it != achievementCategoryInfo_.end() ? &it->second : nullptr;
     }
+    /// The category's achievements this character's side can earn.
     const std::vector<uint32_t>& getCategoryAchievements(uint32_t categoryId) const {
-        auto it = categoryAchievements_.find(categoryId);
+        const auto& side = categoryAchievements_[isPlayerAlliance() ? 1 : 0];
+        auto it = side.find(categoryId);
         static const std::vector<uint32_t> kEmpty;
-        return it != categoryAchievements_.end() ? it->second : kEmpty;
+        return it != side.end() ? it->second : kEmpty;
     }
     uint32_t getAchievementCategory(uint32_t achievementId) const {
         auto it = achievementCategoryCache_.find(achievementId);
@@ -2991,6 +3094,14 @@ public:
     const std::string& getAchievementDescription(uint32_t id) const {
         auto it = achievementDescCache_.find(id);
         if (it != achievementDescCache_.end()) return it->second;
+        static const std::string kEmpty;
+        return kEmpty;
+    }
+    /// The reward line - "Reward: Black War Bear", "Title Reward: Chef" -
+    /// from Achievement.dbc's Reward column; empty for most achievements.
+    const std::string& getAchievementRewardText(uint32_t id) const {
+        auto it = achievementRewardCache_.find(id);
+        if (it != achievementRewardCache_.end()) return it->second;
         static const std::string kEmpty;
         return kEmpty;
     }
@@ -3068,6 +3179,13 @@ public:
     void addUIInfoMessage(const std::string& msg) {
         fireAddonEvent("UI_INFO_MESSAGE", {msg});
     }
+    /// A GameError message as CGGameUI::DisplayError (Wow.exe 0x5216F0)
+    /// shows it: the GlobalStrings text for the key, filled with args, sent
+    /// where the GameError table says - a system chat line, the yellow info
+    /// text or the red error text (game_error_table.hpp) - with the message's
+    /// sound. The fallback is used when the interface files are not there.
+    void displayGameMessage(const char* key, const std::string& fallback,
+                            const std::vector<std::string>& args = {});
     void fireAddonEvent(const std::string& event, const std::vector<std::string>& args = {}) {
         if (addonEventCallback_) addonEventCallback_(event, args);
     }
@@ -3332,16 +3450,14 @@ public:
     void sellItem(uint64_t vendorGuid, uint64_t itemGuid, uint32_t count);
     void sellItemBySlot(int backpackIndex);
     void sellItemInBag(int bagIndex, int slotIndex);
-    struct BuybackItem {
-        uint64_t itemGuid = 0;
-        ItemDef item;
-        uint32_t count = 1;
-        uint32_t wireSlot = 0;
-    };
+    using BuybackItem = game::BuybackItem;
     void buyBackItem(uint32_t buybackSlot);
     void repairItem(uint64_t vendorGuid, uint64_t itemGuid);
     void repairAll(uint64_t vendorGuid, bool useGuildBank = false);
     uint32_t estimateRepairAllCost() const;
+    /// One item's repair price, from DurabilityCosts/DurabilityQuality - the
+    /// repairCost GameTooltip:SetBagItem/SetInventoryItem answer.
+    uint32_t estimateItemRepairCost(uint64_t itemGuid) const;
     const std::deque<BuybackItem>& getBuybackItems() const;
     /// Equip a held item into a named equipment slot. See InventoryHandler.
     void equipItemToSlot(uint64_t itemGuid, uint8_t equipSlot);
@@ -3386,9 +3502,10 @@ public:
     void readItemBySlot(int backpackIndex);
     void readItemInBag(int bagIndex, int slotIndex);
     void destroyItem(uint8_t bag, uint8_t slot, uint8_t count = 1);
-    void splitItem(uint8_t srcBag, uint8_t srcSlot, uint8_t count);
+    void splitItem(uint8_t srcBag, uint8_t srcSlot, uint32_t count);
     void splitItemTo(uint8_t srcBag, uint8_t srcSlot,
-                     uint8_t dstBag, uint8_t dstSlot, uint8_t count);
+                     uint8_t dstBag, uint8_t dstSlot, uint32_t count);
+    void autostoreBagItem(uint8_t srcBag, uint8_t srcSlot, uint8_t dstBag);
     void swapContainerItems(uint8_t srcBag, uint8_t srcSlot, uint8_t dstBag,
                             uint8_t dstSlot, bool applyLocally = true);
     /// Tell every frame that draws from a bag to read it again.
@@ -3433,6 +3550,10 @@ public:
     void useItemById(uint32_t itemId, uint64_t unitTarget = 0);
     /// Put a glyph from a bag slot into a socket, counted from zero.
     void placeGlyphFromBag(uint8_t wireBag, uint8_t wireSlot, uint32_t socketIndex);
+    /// A glyph item used and waiting for a socket (USE_GLYPH); see
+    /// InventoryHandler::placePendingGlyph.
+    bool placePendingGlyph(uint32_t socketIndex);
+    uint32_t getPendingGlyphItemId() const;
     uint32_t getItemIdForSpell(uint32_t spellId) const;
     bool isVendorWindowOpen() const;
     const ListInventoryData& getVendorItems() const;
@@ -3462,6 +3583,8 @@ public:
     /// Whether the compose frame is showing, without clearing the draft.
     void setMailComposeShowing(bool showing);
     bool hasNewMail() const;
+    /// Names of the unread-mail senders from MSG_QUERY_NEXT_MAIL_TIME.
+    std::vector<std::string> getNextMailSenderNames() const;
     void openMailbox(uint64_t guid);
     void closeMailbox();
     void sendMail(const std::string& recipient, const std::string& subject,
@@ -3516,6 +3639,13 @@ public:
     void guildBankWithdrawItem(uint8_t tabId, uint8_t bankSlot, uint8_t destBag,
                                uint8_t destSlot, uint32_t splitCount = 0);
     void guildBankDepositItem(uint8_t tabId, uint8_t bankSlot, uint8_t srcBag, uint8_t srcSlot);
+    /// Move (or split) a stack from one guild bank slot to another.
+    void guildBankMoveItem(uint8_t srcTab, uint8_t srcSlot, uint8_t dstTab, uint8_t dstSlot,
+                           uint32_t splitCount = 0);
+    /// The slot a guild bank pickup holds, greyed until the move it starts
+    /// is answered. tab 0xFF clears it.
+    void setGuildBankLockedSlot(uint8_t tab, uint8_t slot);
+    bool isGuildBankSlotLocked(uint8_t tab, uint8_t slot) const;
     /// Rename a guild bank tab and pick its icon.
     void setGuildBankTabInfo(uint8_t tabId, const std::string& name, const std::string& icon);
     /// Ask for a tab's info text, and read back what arrived.
@@ -3541,6 +3671,10 @@ public:
                          uint32_t buyout, uint32_t duration);
     void auctionSellItemByGuid(uint64_t itemGuid, uint32_t stackCount, uint32_t bid,
                                uint32_t buyout, uint32_t duration);
+    /// StartAuction's numStacks auctions of stackSize, drawn across the bags.
+    void auctionPostStacks(uint64_t firstGuid, uint32_t itemId, uint32_t stackSize,
+                           uint32_t numStacks, uint32_t bid, uint32_t buyout,
+                           uint32_t duration);
     void auctionPlaceBid(uint32_t auctionId, uint32_t amount);
     void auctionBuyout(uint32_t auctionId, uint32_t buyoutPrice);
     void auctionCancelItem(uint32_t auctionId);
@@ -4234,6 +4368,9 @@ public:
         float missileSpeed = 0.0f;
         uint32_t recoveryMs = 0;
         uint32_t categoryRecoveryMs = 0;
+        /// Spell.dbc StartRecoveryCategory: 133 = on the global cooldown.
+        /// 0xFFFFFFFF when the file's layout does not say.
+        uint32_t startRecoveryCategory = 0xFFFFFFFFu;
         uint32_t createdItemId = 0;
         SpellReagent reagents[8] = {};
         uint32_t trivialSkillHigh = 0;
@@ -4632,6 +4769,11 @@ private:
         /// deferred path can fire ITEM_PUSH with the same arguments the
         /// immediate one does.
         int bagButtonId = 0;
+        /// SMSG_ITEM_PUSH_RESULT's received/created/displayInChat words, which
+        /// pick the line (LOOT_ITEM_SELF, _PUSHED_SELF, _CREATED_SELF) or none.
+        uint32_t received = 1;
+        uint32_t created = 0;
+        uint32_t displayInChat = 1;
     };
     std::vector<PendingItemPushNotif> pendingItemPushNotifs_;
     std::array<uint64_t, 23> equipSlotGuids_{};
@@ -4751,9 +4893,18 @@ private:
     float craftCastGoGraceSec_ = 0.0f;
 
     std::array<ActionBarSlot, ACTION_BAR_SLOTS> actionBar{};
+    // Set by an SMSG_ACTION_BUTTONS mode 2 (the spec-swap clear): the next
+    // button list is the new spec's, applied even if it is entirely empty.
+    bool actionBarClearedByServer_ = false;
     std::unordered_map<uint32_t, std::string> macros_;  // client-side macro text (persisted in char config)
     std::unordered_map<uint32_t, std::string> macroNames_;
     std::unordered_map<uint32_t, std::string> macroIcons_;
+    // Account macros (ids 1-36) live in an account-wide file beside the
+    // character files; only written once that file has been read this
+    // session, so a save before login cannot blank another account's set.
+    bool accountMacrosLoaded_ = false;
+    bool loadAccountMacros();  // false when there is no account file yet
+    void saveAccountMacros();
     std::vector<AuraSlot> playerAuras;
     std::vector<AuraSlot> targetAuras;
     std::unordered_map<uint64_t, std::vector<AuraSlot>> unitAurasCache_; // per-unit aura cache
@@ -4764,6 +4915,7 @@ private:
     bool     petRenameablePending_ = false;  // set by SMSG_PET_RENAMEABLE, consumed by UI
     std::vector<uint32_t> petSpellList_; // known pet spells
     std::unordered_set<uint32_t> petAutocastSpells_;  // spells with autocast on
+    std::unordered_set<uint32_t> petAutocastableSpells_;  // spells that can autocast
     std::array<int32_t, 5> petStats_{};
     int32_t petAttackPower_ = 0;
     float petMinDamage_ = 0.0f;
@@ -5120,6 +5272,7 @@ private:
     /// opinion about it, so it is saved with the rest of the character config.
     std::unordered_set<uint32_t> collapsedFactionIds_;
     std::unordered_map<uint32_t, std::string> achievementDescCache_;
+    std::unordered_map<uint32_t, std::string> achievementRewardCache_;
     std::unordered_map<uint32_t, uint32_t>    achievementPointsCache_;
     std::unordered_map<uint32_t, uint32_t>    achievementIconCache_;  // achievementId → SpellIcon.dbc ID
     std::unordered_map<uint32_t, uint32_t>    achievementFlagsCache_; // achievementId → Achievement.dbc Flags
@@ -5132,8 +5285,12 @@ private:
     bool battlemasterListLoaded_ = false;
     std::unordered_map<uint32_t, uint32_t>    achievementCategoryCache_;  // achievementId → Achievement_Category.dbc ID
     // Achievement ids per category, in the DBC's own order - the panel lists a
-    // category by index, so the order has to be stable across calls.
-    std::unordered_map<uint32_t, std::vector<uint32_t>> categoryAchievements_;
+    // category by index, so the order has to be stable across calls. One list
+    // per side, [0] Horde and [1] Alliance: Achievement.dbc's Faction column
+    // (field 1: -1 both, 0 Horde, 1 Alliance) keeps "For The Horde!" off an
+    // Alliance character's panel, and holding both keeps a relog onto the
+    // other side right without reloading the file.
+    std::unordered_map<uint32_t, std::vector<uint32_t>> categoryAchievements_[2];
     std::unordered_map<uint32_t, AchievementCategoryInfo> achievementCategoryInfo_;
     std::vector<uint32_t> achievementCategoryOrder_;
     std::vector<uint32_t> statisticCategoryOrder_;
@@ -5142,6 +5299,9 @@ private:
     bool achievementCategoriesLoaded_ = false;
     bool glyphPropertiesLoaded_ = false;
     std::unordered_map<uint32_t, uint32_t> glyphSpellCache_;
+    std::unordered_map<uint32_t, uint32_t> glyphTypeFlagsCache_;   // GlyphProperties id -> TypeFlags
+    std::unordered_map<uint32_t, uint32_t> glyphSlotTypeFlags_;    // GlyphSlot id -> TypeFlags
+    std::unordered_map<uint32_t, uint32_t> glyphSlotByOrder_;      // GlyphSlot Order -> id
     std::unordered_map<uint32_t, std::vector<AchievementCriterion>> achievementCriteria_;
     std::unordered_map<uint32_t, AchievementCriterionIndex> achievementCriterionById_;
     bool achievementCriteriaLoaded_ = false;
@@ -5481,8 +5641,21 @@ private:
     uint32_t    calendarPendingInvites_ = 0; ///< Unacknowledged calendar invites (SMSG_CALENDAR_SEND_NUM_PENDING)
     /// The whole calendar, as of the server's last answer to a request for it.
     CalendarData calendarData_;
-    /// One event in full, as of the last one opened.
+    /// One event in full, as of the last one opened - or the new one being
+    /// drafted, when calendarEventIsNew_.
     CalendarEventDetail calendarEventDetail_;
+    bool calendarEventIsNew_ = false;
+    CalendarEventDraft calendarDraft_;
+    std::string calendarInviteSort_;
+    bool calendarInviteSortReverse_ = false;
+    int calendarSelectedInvite_ = 0;
+    bool calendarActionPending_ = false;
+    /// Put an event on the calendar's list, or refresh the one already there.
+    void upsertCalendarEvent(const CalendarEvent& ev);
+    /// Recount the pending invites from the list and announce a change.
+    void recountCalendarPending();
+    /// The edit form's fields, from the current event.
+    void seedCalendarDraftFromDetail();
 
     // ---- Spell modifiers (SMSG_SET_FLAT_SPELL_MODIFIER / SMSG_SET_PCT_SPELL_MODIFIER) ----
     // Keyed by (SpellModOp, groupIndex); cleared on logout/character change.

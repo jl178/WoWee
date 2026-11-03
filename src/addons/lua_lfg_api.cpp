@@ -108,8 +108,10 @@ int luaReturnNothing(lua_State* L) { (void)L; return 0; }
 /// dialog names the role it found you a group for, and a static in this file
 /// was not somewhere GetLFGProposal could reach.
 uint8_t offeredRoles(game::GameHandler* gh) {
-    const uint8_t roles = gh ? gh->getLfgOfferedRoles() : 0;
-    return roles ? roles : 0x01;   // "player" is always set
+    // As set. 0x01 is PLAYER_ROLE_LEADER (AzerothCore LFG.h), not a bit every
+    // set carries - defaulting to it told GetLFGRoles the player had ticked
+    // "leader" when nothing was ticked at all.
+    return gh ? gh->getLfgOfferedRoles() : 0;
 }
 
 /// Build the ordered id list one side of the panel shows: a header, then the
@@ -297,21 +299,27 @@ void registerLfgLuaAPI(lua_State* L) {
 
     // ---- Roles ----
 
-    // GetLFGRoles() → leader, tank, healer, damage. The client keeps the three
-    // role flags; nobody here is a leader of an LFG group that does not exist.
+    // GetLFGRoles() → leader, tank, healer, damage, from the role bits
+    // AzerothCore's LFG.h names: PLAYER_ROLE_LEADER 0x01, TANK 0x02,
+    // HEALER 0x04, DAMAGE 0x08. The role-check popup reads the leader flag
+    // back (`local oldLeader = GetLFGRoles()`) to keep it while it sets the
+    // other three.
     {"GetLFGRoles", [](lua_State* L) -> int {
         const uint8_t roles = offeredRoles(getGameHandler(L));
-        lua_pushboolean(L, 0);
+        lua_pushboolean(L, (roles & 0x01) ? 1 : 0);   // leader
         lua_pushboolean(L, (roles & 0x02) ? 1 : 0);   // tank
         lua_pushboolean(L, (roles & 0x04) ? 1 : 0);   // healer
         lua_pushboolean(L, (roles & 0x08) ? 1 : 0);   // damage
         return 4;
     }},
+    // SetLFGRoles(leader, tank, healer, damage) - kept on the handler; the
+    // join and the role-check answer carry them to the server. 0x01 is the
+    // leader role, not a "player" bit every set carries.
     {"SetLFGRoles", [](lua_State* L) -> int {
         auto* gh = getGameHandler(L);
         if (!gh) return 0;
-        // arg 1 is leader, which the server does not take here.
-        uint8_t roles = 0x01;                                   // always "player"
+        uint8_t roles = 0;
+        if (lua_toboolean(L, 1)) roles |= 0x01;
         if (lua_toboolean(L, 2)) roles |= 0x02;
         if (lua_toboolean(L, 3)) roles |= 0x04;
         if (lua_toboolean(L, 4)) roles |= 0x08;
@@ -333,10 +341,19 @@ void registerLfgLuaAPI(lua_State* L) {
         lua_pushboolean(L, 1);
         return 3;
     }},
-    // The role check a party leader starts. Answering it is CMSG_LFG_SET_ROLES,
-    // which SetLFGRoles above already sends, so this is the confirmation and
-    // has nothing left to send.
-    {"CompleteLFGRoleCheck",  luaReturnNothing},
+    // CompleteLFGRoleCheck(accept) - answer the role check a party leader
+    // started: CMSG_LFG_SET_ROLES with the roles SetLFGRoles kept, or none
+    // to decline. LFDRoleCheckPopupAccept_OnClick hides the popup only
+    // `if ( CompleteLFGRoleCheck(true) )`, so the accept answers true - this
+    // answered nothing and the popup stayed up over a check it had answered.
+    {"CompleteLFGRoleCheck", [](lua_State* L) -> int {
+        auto* gh = getGameHandler(L);
+        if (!gh) return luaReturnNil(L);
+        const bool accept = lua_toboolean(L, 1) != 0;
+        gh->lfgCompleteRoleCheck(accept);
+        lua_pushboolean(L, 1);
+        return 1;
+    }},
     // GetLFGRoleUpdateSlot(index) → dungeonType, dungeonID
     //
     // The dungeons a role check is being run for. The popup names the one when

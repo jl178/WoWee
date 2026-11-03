@@ -428,3 +428,257 @@ TEST_CASE("A raid lockout lands on the day it expires", "[calendar]") {
     CHECK(calendarEntriesForDay(cal, tmv.tm_mon + 1, tmv.tm_mday,
                                 tmv.tm_year + 1900).empty());
 }
+
+// ---- Creating an event, and the notices that follow ----
+//
+// Laid out against AzerothCore's reader (WorldSession::HandleCalendarAddEvent,
+// CalendarHandler.cpp:228) and writers (CalendarMgr.cpp). Every one of these
+// packets was read or written a different shape before.
+
+TEST_CASE("An add-event packet carries its invite list", "[calendar]") {
+    CalendarEventDraft draft;
+    draft.title = "Raid";
+    draft.description = "";
+    draft.type = 0;
+    draft.maxInvites = 100;
+    draft.dungeonId = -1;
+    draft.eventTime.month = 3;
+    draft.eventTime.day = 4;
+    draft.eventTime.yearSince2000 = 27;
+    draft.flags = kCalendarFlagGuildEvent;
+
+    Packet p(0x0436);
+    writeCalendarAddEvent(p, draft, {{0x42ull, kCalendarStatusConfirmed, kCalendarRankOwner},
+                                     {0x070000000000BEEFull, kCalendarStatusInvited, kCalendarRankPlayer}});
+    Packet r(0x0436, p.getData());
+    CHECK(r.readString() == "Raid");
+    CHECK(r.readString().empty());
+    CHECK(r.readUInt8() == 0);
+    CHECK(r.readUInt8() == 0);
+    CHECK(r.readUInt32() == 100);
+    CHECK(r.readUInt32() == 0xFFFFFFFFu);
+    const uint32_t packed = packWowPackedTime(draft.eventTime);
+    CHECK(r.readUInt32() == packed);
+    CHECK(r.readUInt32() == packed);
+    CHECK(r.readUInt32() == kCalendarFlagGuildEvent);
+    // The list the server reads unless the event is an announcement.
+    REQUIRE(r.readUInt32() == 2);
+    CHECK(r.readPackedGuid() == 0x42ull);
+    CHECK(r.readUInt8() == kCalendarStatusConfirmed);
+    CHECK(r.readUInt8() == kCalendarRankOwner);
+    CHECK(r.readPackedGuid() == 0x070000000000BEEFull);
+    CHECK(r.readUInt8() == kCalendarStatusInvited);
+    CHECK(r.readUInt8() == kCalendarRankPlayer);
+    CHECK(r.getRemainingSize() == 0);
+}
+
+TEST_CASE("An announcement is sent without an invite list", "[calendar]") {
+    CalendarEventDraft draft;
+    draft.flags = kCalendarFlagAnnouncement;
+    Packet p(0x0436);
+    writeCalendarAddEvent(p, draft, {{0x42ull, kCalendarStatusConfirmed, kCalendarRankOwner}});
+    // title, description (one byte each), type and repeat, then maxInvites,
+    // dungeonId, the two times and the flags - and no count after them.
+    CHECK(p.getData().size() == 1 + 1 + 1 + 1 + 4 * 5);
+}
+
+TEST_CASE("A pre-invite answer reads with and without its status time", "[calendar]") {
+    Packet p(0x043E);
+    p.writePackedGuid(0x070000000000BEEFull);
+    p.writeUInt64(0);           // no event yet: a pre-invite
+    p.writeUInt64(7);
+    p.writeUInt8(80);
+    p.writeUInt8(kCalendarStatusInvited);
+    p.writeUInt8(0);            // 2000-01-01, so no time follows
+    p.writeUInt8(1);            // an invite, not a sign-up
+    CalendarEventInviteNotice n;
+    REQUIRE(parseCalendarEventInvite(p, n));
+    CHECK(p.getRemainingSize() == 0);
+    CHECK(n.inviteeGuid == 0x070000000000BEEFull);
+    CHECK(n.eventId == 0);
+    CHECK(n.inviteId == 7);
+    CHECK(n.level == 80);
+    CHECK_FALSE(n.hasStatusTime);
+    CHECK(n.isInvite);
+
+    Packet t(0x043E);
+    t.writePackedGuid(0x42ull);
+    t.writeUInt64(9);
+    t.writeUInt64(8);
+    t.writeUInt8(70);
+    t.writeUInt8(kCalendarStatusSignedUp);
+    t.writeUInt8(1);
+    t.writeUInt32(0x09E1C000u);
+    t.writeUInt8(0);            // a sign-up
+    REQUIRE(parseCalendarEventInvite(t, n));
+    CHECK(t.getRemainingSize() == 0);
+    CHECK(n.hasStatusTime);
+    CHECK(n.statusTimePacked == 0x09E1C000u);
+    CHECK_FALSE(n.isInvite);
+}
+
+TEST_CASE("An invite alert reads the whole event", "[calendar]") {
+    Packet p(0x0440);
+    p.writeUInt64(1234);
+    p.writeString("Naxx");
+    p.writeUInt32(0x09E1C000u);
+    p.writeUInt32(kCalendarFlagGuildEvent);
+    p.writeUInt32(0);           // raid
+    p.writeUInt32(static_cast<uint32_t>(-1));
+    p.writeUInt64(55);
+    p.writeUInt8(kCalendarStatusInvited);
+    p.writeUInt8(kCalendarRankPlayer);
+    p.writePackedGuid(0x070000000000ABCDull);
+    p.writePackedGuid(0x42ull);
+    CalendarInviteAlert a;
+    REQUIRE(parseCalendarInviteAlert(p, a));
+    CHECK(p.getRemainingSize() == 0);
+    CHECK(a.event.eventId == 1234);
+    CHECK(a.event.title == "Naxx");
+    CHECK(a.event.flags == kCalendarFlagGuildEvent);
+    CHECK(a.event.dungeonId == -1);
+    CHECK(a.inviteId == 55);
+    CHECK(a.event.creatorGuid == 0x070000000000ABCDull);
+    CHECK(a.senderGuid == 0x42ull);
+}
+
+TEST_CASE("An event status notice reads guid first and no title", "[calendar]") {
+    Packet p(0x043C);
+    p.writePackedGuid(0x42ull);
+    p.writeUInt64(1234);
+    p.writeUInt32(0x09E1C000u);
+    p.writeUInt32(0);
+    p.writeUInt8(kCalendarStatusTentative);
+    p.writeUInt8(kCalendarRankModerator);
+    p.writeUInt32(0x09E1C001u);
+    CalendarEventStatusNotice s;
+    REQUIRE(parseCalendarEventStatus(p, s));
+    CHECK(p.getRemainingSize() == 0);
+    CHECK(s.inviteeGuid == 0x42ull);
+    CHECK(s.eventId == 1234);
+    CHECK(s.status == kCalendarStatusTentative);
+    CHECK(s.rank == kCalendarRankModerator);
+    CHECK(s.statusTimePacked == 0x09E1C001u);
+}
+
+TEST_CASE("A command result's error is the last field", "[calendar]") {
+    Packet p(0x043D);
+    p.writeUInt32(0);
+    p.writeUInt8(0);
+    p.writeString("Bob");
+    p.writeUInt32(10);          // CALENDAR_ERROR_ALREADY_INVITED_TO_EVENT_S
+    CalendarCommandResult r;
+    REQUIRE(parseCalendarCommandResult(p, r));
+    CHECK(r.param == "Bob");
+    CHECK(r.error == 10);
+    CHECK(std::string(calendarErrorStringName(r.error)) ==
+          "CALENDAR_ERROR_ALREADY_INVITED_TO_EVENT_S");
+    CHECK(std::string(calendarErrorStringName(21)) == "CALENDAR_ERROR_EVENT_LOCKED");
+    CHECK(std::string(calendarErrorStringName(0)).empty());
+
+    // The ordinary shape: no name, which is a single zero byte.
+    Packet q(0x043D);
+    q.writeUInt32(0);
+    q.writeUInt8(0);
+    q.writeUInt8(0);
+    q.writeUInt32(6);
+    REQUIRE(parseCalendarCommandResult(q, r));
+    CHECK(r.param.empty());
+    CHECK(r.error == 6);
+}
+
+TEST_CASE("The smaller calendar notices read whole", "[calendar]") {
+    Packet removed(0x0447);
+    removed.writeUInt8(1);
+    removed.writeUInt64(77);
+    removed.writeUInt32(0x09E1C000u);
+    uint64_t id = 0;
+    REQUIRE(parseCalendarEventRemovedAlert(removed, id));
+    CHECK(id == 77);
+
+    Packet inviteRemoved(0x043F);
+    inviteRemoved.writePackedGuid(0x42ull);
+    inviteRemoved.writeUInt64(77);
+    inviteRemoved.writeUInt32(kCalendarFlagGuildEvent);
+    inviteRemoved.writeUInt8(1);
+    CalendarInviteRemovedNotice ir;
+    REQUIRE(parseCalendarInviteRemoved(inviteRemoved, ir));
+    CHECK(ir.inviteeGuid == 0x42ull);
+    CHECK(ir.eventId == 77);
+    CHECK(ir.flags == kCalendarFlagGuildEvent);
+
+    Packet alert(0x0445);
+    alert.writeUInt64(77);
+    alert.writeUInt32(0x09E1C000u);
+    alert.writeUInt32(0);
+    alert.writeUInt8(kCalendarStatusRemoved);
+    CalendarInviteRemovedAlert ira;
+    REQUIRE(parseCalendarInviteRemovedAlert(alert, ira));
+    CHECK(ira.eventId == 77);
+    CHECK(ira.status == kCalendarStatusRemoved);
+
+    Packet mod(0x0449);
+    mod.writePackedGuid(0x42ull);
+    mod.writeUInt64(77);
+    mod.writeUInt8(kCalendarRankModerator);
+    mod.writeUInt8(1);
+    CalendarModeratorNotice m;
+    REQUIRE(parseCalendarModeratorStatus(mod, m));
+    CHECK(m.rank == kCalendarRankModerator);
+
+    Packet upd(0x0448);
+    upd.writeUInt8(1);
+    upd.writeUInt64(77);
+    upd.writeUInt32(1);
+    upd.writeUInt32(kCalendarFlagInvitesLocked);
+    upd.writeUInt32(0x09E1C000u);
+    upd.writeUInt8(3);
+    upd.writeUInt32(static_cast<uint32_t>(-1));
+    upd.writeString("New title");
+    upd.writeString("New text");
+    upd.writeUInt8(0);
+    upd.writeUInt32(100);
+    upd.writeUInt32(0);
+    CalendarEventUpdatedAlert u;
+    REQUIRE(parseCalendarEventUpdatedAlert(upd, u));
+    CHECK(upd.getRemainingSize() == 0);
+    CHECK(u.eventId == 77);
+    CHECK(u.flags == kCalendarFlagInvitesLocked);
+    CHECK(u.type == 3);
+    CHECK(u.title == "New title");
+    CHECK(u.description == "New text");
+
+    Packet mass(0x0438);
+    mass.writeUInt32(2);
+    mass.writePackedGuid(0x42ull);
+    mass.writeUInt8(0);
+    mass.writePackedGuid(0x070000000000BEEFull);
+    mass.writeUInt8(0);
+    std::vector<uint64_t> guids;
+    REQUIRE(parseCalendarMassInviteList(mass, guids));
+    REQUIRE(guids.size() == 2);
+    CHECK(guids[1] == 0x070000000000BEEFull);
+}
+
+TEST_CASE("Calendar type and holiday sequence come from the flags and the run", "[calendar]") {
+    // The flags decide the kind; type 4 is the "Other" event type and was
+    // read as an announcement.
+    CHECK(std::string(calendarTypeForFlags(0)) == "PLAYER");
+    CHECK(std::string(calendarTypeForFlags(kCalendarFlagGuildEvent)) == "GUILD_EVENT");
+    CHECK(std::string(calendarTypeForFlags(kCalendarFlagAnnouncement)) == "GUILD_ANNOUNCEMENT");
+
+    CalendarDayEntry e;
+    e.kind = CalendarEntryKind::Holiday;
+    e.sequenceIndex = 1; e.numSequenceDays = 1;
+    CHECK(std::string(calendarHolidaySequenceType(e)).empty());
+    e.numSequenceDays = 3;
+    CHECK(std::string(calendarHolidaySequenceType(e)) == "START");
+    e.sequenceIndex = 2;
+    CHECK(std::string(calendarHolidaySequenceType(e)) == "ONGOING");
+    e.sequenceIndex = 3;
+    CHECK(std::string(calendarHolidaySequenceType(e)) == "END");
+
+    CHECK(calendarStatusIsPending(kCalendarStatusInvited));
+    CHECK(calendarStatusIsPending(kCalendarStatusNotSignedUp));
+    CHECK_FALSE(calendarStatusIsPending(kCalendarStatusConfirmed));
+}

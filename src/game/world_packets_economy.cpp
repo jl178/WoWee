@@ -186,6 +186,30 @@ network::Packet GetMailListPacket::build(uint64_t mailboxGuid) {
     return packet;
 }
 
+network::Packet QueryNextMailTimePacket::build() {
+    return network::Packet(wireOpcode(Opcode::MSG_QUERY_NEXT_MAIL_TIME));
+}
+
+bool QueryNextMailTimePacket::parse(network::Packet& packet, NextMailTimeData& data,
+                                    bool withSenders) {
+    if (!packet.hasRemaining(8)) return false;
+    data.nextTime = packet.readFloat();
+    data.count = packet.readUInt32();
+    data.senders.clear();
+    if (!withSenders) return true;
+    constexpr size_t kSenderBytes = 8 + 4 + 4 + 4 + 4;
+    for (uint32_t i = 0; i < data.count && packet.hasRemaining(kSenderBytes); ++i) {
+        MailMessage sender;
+        sender.senderGuid = packet.readUInt64();
+        sender.senderEntry = packet.readUInt32();
+        sender.messageType = static_cast<uint8_t>(packet.readUInt32());
+        sender.stationeryId = packet.readUInt32();
+        packet.readFloat();  // seconds until delivery
+        data.senders.push_back(std::move(sender));
+    }
+    return true;
+}
+
 network::Packet SendMailPacket::build(uint64_t mailboxGuid, const std::string& recipient,
                                       const std::string& subject, const std::string& body,
                                       uint64_t money, uint64_t cod,
@@ -238,10 +262,16 @@ network::Packet MailDeletePacket::build(uint64_t mailboxGuid, uint32_t mailId, u
     return packet;
 }
 
-network::Packet MailReturnToSenderPacket::build(uint64_t mailboxGuid, uint32_t mailId) {
+network::Packet MailReturnToSenderPacket::build(uint64_t mailboxGuid, uint32_t mailId,
+                                                uint64_t senderGuid) {
     network::Packet packet(wireOpcode(Opcode::CMSG_MAIL_RETURN_TO_SENDER));
     packet.writeUInt64(mailboxGuid);
     packet.writeUInt32(mailId);
+    // The original sender's guid closes the packet. AzerothCore reads it with
+    // read_skip<uint64> (MailHandler.cpp HandleMailReturnToSender) and does
+    // not use it, but a packet without it is short and the read throws, so
+    // every return was dropped before the server looked at the mail.
+    packet.writeUInt64(senderGuid);
     return packet;
 }
 
@@ -489,25 +519,49 @@ network::Packet GuildBankSwapItemsPacket::buildInventoryToBank(
     return p;
 }
 
+// The BankOnly branch of AzerothCore's GuildBankSwapItems::Read: destination
+// tab, slot and item, then the source's, then autoStore and the count to move.
+// HandleGuildBankSwapItems hands it to Guild::SwapItems(src..., dst...,
+// BankItemCount), where a count of zero takes the whole stack.
+network::Packet GuildBankSwapItemsPacket::buildBankToBank(
+    uint64_t guid, uint8_t dstTab, uint8_t dstSlot, uint32_t dstItemEntry,
+    uint8_t srcTab, uint8_t srcSlot, uint32_t srcItemEntry, uint32_t splitCount)
+{
+    network::Packet p(wireOpcode(Opcode::CMSG_GUILD_BANK_SWAP_ITEMS));
+    p.writeUInt64(guid);
+    p.writeUInt8(1);            // bankToBank
+    p.writeUInt8(dstTab);
+    p.writeUInt8(dstSlot);
+    p.writeUInt32(dstItemEntry);
+    p.writeUInt8(srcTab);
+    p.writeUInt8(srcSlot);
+    p.writeUInt32(srcItemEntry);
+    p.writeUInt8(0);            // autoStore
+    p.writeUInt32(splitCount);  // BankItemCount
+    return p;
+}
+
 bool GuildBankListParser::parse(network::Packet& packet, GuildBankData& data) {
     if (!packet.hasRemaining(14)) return false;
 
     data.money = packet.readUInt64();
     data.tabId = packet.readUInt8();
-    data.withdrawAmount = static_cast<int32_t>(packet.readUInt32());
-    uint8_t fullUpdate = packet.readUInt8();
-    data.tabsIncluded = (fullUpdate != 0);
+    // The stacks this member may still take out of *this* tab today - not
+    // gold. AzerothCore fills it from _GetMemberRemainingSlots(member, tabId)
+    // (Guild.cpp _SendBankList), -1 for the guild master. The gold allowance
+    // is a packet of its own, MSG_GUILD_BANK_MONEY_WITHDRAWN.
+    data.withdrawalsRemaining = static_cast<int32_t>(packet.readUInt32());
+    const bool fullUpdate = packet.readUInt8() != 0;
 
-    // The flag alone decides it. GuildBankQueryResults::Write - which does gate
-    // the tab list on `!Tab && FullUpdate` - is Cataclysm's packet; 3.3.5 and
-    // 2.4.3 send it from Guild::SendBankList under `withTabInfo` and nothing
-    // else, whichever tab the list describes.
-    //
-    // The extra test cost the tabs on any server that answers a tab query with
-    // the names attached: the block is on the wire, this skipped it, and every
-    // field after it was then read one block early - the item count out of the
-    // tab count, the items out of the names.
-    if (fullUpdate) {
+    // The tab names ride only on the full list of tab zero.
+    // GuildBankQueryResults::Write writes them under `!Tab && FullUpdate`, and
+    // _SendBankList fills them under `sendAllSlots && !tabId` - the same test
+    // TrinityCore's 3.3.5 SendBankList and cMaNGOS's DisplayGuildBankTabsInfo
+    // (always tab 0) make. Clicking tab 2 asks for a full list of tab 2, and
+    // reading names out of that took its item count for a tab count and its
+    // items for names.
+    data.tabsIncluded = fullUpdate && data.tabId == 0;
+    if (data.tabsIncluded) {
         if (!packet.hasRemaining(1)) {
             LOG_WARNING("GuildBankListParser: truncated before tabCount");
             data.tabs.clear();
@@ -594,6 +648,23 @@ bool GuildBankListParser::parse(network::Packet& packet, GuildBankData& data) {
             }
         }
         data.tabItems.push_back(slot);
+    }
+
+    // Into the tab's own contents. A full list is the whole tab - occupied
+    // slots only, _SendBankList's fillItems skips the empty ones - so it
+    // replaces what was held. Anything else is the slots a move touched,
+    // empties included, broadcast to every member with the vault open
+    // (_SendBankContentUpdate); it changes those slots and no others.
+    if (data.tabId < data.tabs.size()) {
+        GuildBankTab& tab = data.tabs[data.tabId];
+        tab.withdrawalsRemaining = data.withdrawalsRemaining;
+        if (fullUpdate) tab.items.clear();
+        for (const GuildBankItemSlot& slot : data.tabItems) {
+            tab.items.erase(std::remove_if(tab.items.begin(), tab.items.end(),
+                [&](const GuildBankItemSlot& held) { return held.slotId == slot.slotId; }),
+                tab.items.end());
+            if (slot.itemEntry != 0) tab.items.push_back(slot);
+        }
     }
     return true;
 }
@@ -686,6 +757,55 @@ network::Packet AuctionSellItemPacket::build(
     p.writeUInt32(buyout);
     p.writeUInt32(duration);
     return p;
+}
+
+network::Packet AuctionSellItemPacket::build(
+    uint64_t auctioneerGuid,
+    const std::vector<std::pair<uint64_t, uint32_t>>& pieces,
+    uint32_t bid, uint32_t buyout, uint32_t duration)
+{
+    network::Packet p(wireOpcode(Opcode::CMSG_AUCTION_SELL_ITEM));
+    p.writeUInt64(auctioneerGuid);
+    p.writeUInt32(static_cast<uint32_t>(pieces.size()));
+    for (const auto& [guid, count] : pieces) {
+        p.writeUInt64(guid);
+        p.writeUInt32(count);
+    }
+    p.writeUInt32(bid);
+    p.writeUInt32(buyout);
+    p.writeUInt32(duration);
+    return p;
+}
+
+std::vector<std::vector<std::pair<uint64_t, uint32_t>>>
+planAuctionStacks(const std::vector<AuctionSellSource>& sources,
+                  uint32_t stackSize, uint32_t numStacks) {
+    std::vector<std::vector<std::pair<uint64_t, uint32_t>>> plan;
+    if (stackSize == 0 || numStacks == 0) return plan;
+    std::vector<AuctionSellSource> left;
+    for (const auto& s : sources) {
+        if (s.guid == 0 || s.count == 0) continue;
+        bool seen = false;
+        for (const auto& l : left) seen = seen || l.guid == s.guid;
+        if (!seen) left.push_back(s);
+    }
+    size_t next = 0;
+    for (uint32_t n = 0; n < numStacks; ++n) {
+        std::vector<std::pair<uint64_t, uint32_t>> auction;
+        uint32_t need = stackSize;
+        size_t i = next;
+        while (need > 0 && i < left.size()) {
+            const uint32_t take = std::min(need, left[i].count);
+            auction.emplace_back(left[i].guid, take);
+            left[i].count -= take;
+            need -= take;
+            if (left[i].count == 0) ++i;
+        }
+        if (need > 0) break;   // not enough left for another full stack
+        next = i;
+        plan.push_back(std::move(auction));
+    }
+    return plan;
 }
 
 network::Packet AuctionPlaceBidPacket::build(uint64_t auctioneerGuid, uint32_t auctionId, uint32_t amount) {

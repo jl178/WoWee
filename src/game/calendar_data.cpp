@@ -297,5 +297,219 @@ bool parseCalendarSendEvent(network::Packet& packet, CalendarEventDetail& out) {
     return true;
 }
 
+const char* calendarHolidaySequenceType(const CalendarDayEntry& entry) {
+    if (entry.numSequenceDays <= 1) return "";
+    if (entry.sequenceIndex <= 1) return "START";
+    if (entry.sequenceIndex >= entry.numSequenceDays) return "END";
+    return "ONGOING";
+}
+
+void writeCalendarAddEvent(network::Packet& pkt, const CalendarEventDraft& draft,
+                           const std::vector<CalendarAddEventInvite>& invites) {
+    pkt.writeString(draft.title);
+    pkt.writeString(draft.description);
+    pkt.writeUInt8(draft.type);
+    pkt.writeUInt8(draft.repeatOption);
+    pkt.writeUInt32(draft.maxInvites);
+    pkt.writeUInt32(static_cast<uint32_t>(draft.dungeonId));
+    // The second time is stored and never read by the server, but it is read
+    // off the wire, so leaving it out shifts the flags into it.
+    pkt.writeUInt32(packWowPackedTime(draft.eventTime));
+    pkt.writeUInt32(packWowPackedTime(draft.eventTime));
+    pkt.writeUInt32(draft.flags);
+    // An announcement has no list: the server branches on the flag before it
+    // reads one, and anything written would be left unread.
+    if (draft.flags & kCalendarFlagAnnouncement) return;
+    constexpr size_t kMaxInvites = 100;  // CALENDAR_MAX_INVITES
+    const size_t count = std::min(invites.size(), kMaxInvites);
+    pkt.writeUInt32(static_cast<uint32_t>(count));
+    for (size_t i = 0; i < count; ++i) {
+        pkt.writePackedGuid(invites[i].guid);
+        pkt.writeUInt8(invites[i].status);
+        pkt.writeUInt8(invites[i].rank);
+    }
+}
+
+bool parseCalendarEventInvite(network::Packet& packet, CalendarEventInviteNotice& out) {
+    out = CalendarEventInviteNotice{};
+    if (!packet.hasFullPackedGuid()) return false;
+    out.inviteeGuid = packet.readPackedGuid();
+    if (!packet.hasRemaining(8 + 8 + 1 + 1 + 1)) return false;
+    out.eventId = packet.readUInt64();
+    out.inviteId = packet.readUInt64();
+    out.level = packet.readUInt8();
+    out.status = packet.readUInt8();
+    // The time is only there when the server has one: it leaves it out for
+    // the 2000-01-01 it uses as "never answered".
+    out.hasStatusTime = packet.readUInt8() != 0;
+    if (out.hasStatusTime) {
+        if (!packet.hasRemaining(4)) return false;
+        out.statusTimePacked = packet.readUInt32();
+    }
+    if (!packet.hasRemaining(1)) return false;
+    out.isInvite = packet.readUInt8() != 0;
+    return true;
+}
+
+bool parseCalendarInviteAlert(network::Packet& packet, CalendarInviteAlert& out) {
+    out = CalendarInviteAlert{};
+    if (!packet.hasRemaining(8 + 1)) return false;
+    out.event.eventId = packet.readUInt64();
+    if (!readTerminatedString(packet, out.event.title)) return false;
+    if (!packet.hasRemaining(4 + 4 + 4 + 4 + 8 + 1 + 1)) return false;
+    out.event.eventTimePacked = packet.readUInt32();
+    out.event.eventTime = unpackWowPackedTime(out.event.eventTimePacked);
+    out.event.flags = packet.readUInt32();
+    out.event.type = packet.readUInt32();
+    out.event.dungeonId = static_cast<int32_t>(packet.readUInt32());
+    out.inviteId = packet.readUInt64();
+    out.status = packet.readUInt8();
+    out.rank = packet.readUInt8();
+    if (!packet.hasFullPackedGuid()) return false;
+    out.event.creatorGuid = packet.readPackedGuid();
+    if (!packet.hasFullPackedGuid()) return false;
+    out.senderGuid = packet.readPackedGuid();
+    return true;
+}
+
+bool parseCalendarEventStatus(network::Packet& packet, CalendarEventStatusNotice& out) {
+    out = CalendarEventStatusNotice{};
+    if (!packet.hasFullPackedGuid()) return false;
+    out.inviteeGuid = packet.readPackedGuid();
+    if (!packet.hasRemaining(8 + 4 + 4 + 1 + 1 + 4)) return false;
+    out.eventId = packet.readUInt64();
+    out.eventTimePacked = packet.readUInt32();
+    out.flags = packet.readUInt32();
+    out.status = packet.readUInt8();
+    out.rank = packet.readUInt8();
+    out.statusTimePacked = packet.readUInt32();
+    return true;
+}
+
+bool parseCalendarCommandResult(network::Packet& packet, CalendarCommandResult& out) {
+    out = CalendarCommandResult{};
+    if (!packet.hasRemaining(4 + 1)) return false;
+    packet.readUInt32();  // always 0
+    packet.readUInt8();   // always 0
+    if (!readTerminatedString(packet, out.param)) return false;
+    if (!packet.hasRemaining(4)) return false;
+    out.error = packet.readUInt32();
+    return true;
+}
+
+const char* calendarErrorStringName(uint32_t error) {
+    // CalendarError (CalendarMgr.h) to the GlobalStrings.lua key the stock
+    // client shows for it. Four have no CALENDAR_ERROR_ string of their own
+    // and borrow the general ERR_ one that says the same thing.
+    switch (error) {
+        case 1:  return "CALENDAR_ERROR_GUILD_EVENTS_EXCEEDED";
+        case 2:  return "CALENDAR_ERROR_EVENTS_EXCEEDED";
+        case 3:  return "CALENDAR_ERROR_SELF_INVITES_EXCEEDED";
+        case 4:  return "CALENDAR_ERROR_OTHER_INVITES_EXCEEDED";
+        case 5:  return "CALENDAR_ERROR_PERMISSIONS";
+        case 6:  return "CALENDAR_ERROR_EVENT_INVALID";
+        case 7:  return "CALENDAR_ERROR_NOT_INVITED";
+        case 8:  return "CALENDAR_ERROR_INTERNAL";
+        case 9:  return "ERR_GUILD_PLAYER_NOT_IN_GUILD";
+        case 10: return "CALENDAR_ERROR_ALREADY_INVITED_TO_EVENT_S";
+        case 11: return "ERR_BAD_PLAYER_NAME_S";
+        case 12: return "CALENDAR_ERROR_NOT_ALLIED";
+        case 13: return "CALENDAR_ERROR_IGNORED";
+        case 14: return "CALENDAR_ERROR_INVITES_EXCEEDED";
+        case 16: return "CALENDAR_ERROR_INVALID_DATE";
+        case 17: return "CALENDAR_ERROR_INVALID_TIME";
+        case 19: return "CALENDAR_ERROR_NEEDS_TITLE";
+        case 20: return "CALENDAR_ERROR_EVENT_PASSED";
+        case 21: return "CALENDAR_ERROR_EVENT_LOCKED";
+        case 22: return "CALENDAR_ERROR_DELETE_CREATOR_FAILED";
+        case 24: return "ERR_SYSTEM_DISABLED";
+        case 25: return "ERR_RESTRICTED_ACCOUNT";
+        case 26: return "CALENDAR_ERROR_ARENA_EVENTS_EXCEEDED";
+        case 27: return "CALENDAR_ERROR_RESTRICTED_LEVEL";
+        case 28: return "ERR_USER_SQUELCHED";
+        case 29: return "CALENDAR_ERROR_NO_INVITE";
+        case 36: return "CALENDAR_ERROR_EVENT_WRONG_SERVER";
+        case 37: return "CALENDAR_ERROR_INVITE_WRONG_SERVER";
+        case 38: return "CALENDAR_ERROR_NO_GUILD_INVITES";
+        case 39: return "CALENDAR_ERROR_INVALID_SIGNUP";
+        case 40: return "CALENDAR_ERROR_NO_MODERATOR";
+        default: return "";
+    }
+}
+
+bool parseCalendarEventUpdatedAlert(network::Packet& packet, CalendarEventUpdatedAlert& out) {
+    out = CalendarEventUpdatedAlert{};
+    if (!packet.hasRemaining(1 + 8 + 4 + 4 + 4 + 1 + 4)) return false;
+    packet.readUInt8();
+    out.eventId = packet.readUInt64();
+    out.oldEventTimePacked = packet.readUInt32();
+    out.flags = packet.readUInt32();
+    out.eventTimePacked = packet.readUInt32();
+    out.type = packet.readUInt8();
+    out.dungeonId = static_cast<int32_t>(packet.readUInt32());
+    if (!readTerminatedString(packet, out.title)) return false;
+    if (!readTerminatedString(packet, out.description)) return false;
+    if (!packet.hasRemaining(1 + 4 + 4)) return false;
+    out.repeatOption = packet.readUInt8();
+    out.maxInvites = packet.readUInt32();
+    packet.readUInt32();
+    return true;
+}
+
+bool parseCalendarEventRemovedAlert(network::Packet& packet, uint64_t& eventId) {
+    if (!packet.hasRemaining(1 + 8 + 4)) return false;
+    packet.readUInt8();
+    eventId = packet.readUInt64();
+    packet.readUInt32();
+    return true;
+}
+
+bool parseCalendarInviteRemoved(network::Packet& packet, CalendarInviteRemovedNotice& out) {
+    out = CalendarInviteRemovedNotice{};
+    if (!packet.hasFullPackedGuid()) return false;
+    out.inviteeGuid = packet.readPackedGuid();
+    if (!packet.hasRemaining(8 + 4 + 1)) return false;
+    out.eventId = packet.readUInt64();
+    out.flags = packet.readUInt32();
+    packet.readUInt8();
+    return true;
+}
+
+bool parseCalendarInviteRemovedAlert(network::Packet& packet, CalendarInviteRemovedAlert& out) {
+    out = CalendarInviteRemovedAlert{};
+    if (!packet.hasRemaining(8 + 4 + 4 + 1)) return false;
+    out.eventId = packet.readUInt64();
+    packet.readUInt32();
+    out.flags = packet.readUInt32();
+    out.status = packet.readUInt8();
+    return true;
+}
+
+bool parseCalendarModeratorStatus(network::Packet& packet, CalendarModeratorNotice& out) {
+    out = CalendarModeratorNotice{};
+    if (!packet.hasFullPackedGuid()) return false;
+    out.inviteeGuid = packet.readPackedGuid();
+    if (!packet.hasRemaining(8 + 1 + 1)) return false;
+    out.eventId = packet.readUInt64();
+    out.rank = packet.readUInt8();
+    packet.readUInt8();
+    return true;
+}
+
+bool parseCalendarMassInviteList(network::Packet& packet, std::vector<uint64_t>& out) {
+    out.clear();
+    if (!packet.hasRemaining(4)) return false;
+    const uint32_t count = packet.readUInt32();
+    if (!countFits(packet, count, 1 + 1)) return false;
+    out.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!packet.hasFullPackedGuid()) return false;
+        out.push_back(packet.readPackedGuid());
+        if (!packet.hasRemaining(1)) return false;
+        packet.readUInt8();
+    }
+    return true;
+}
+
 }  // namespace game
 }  // namespace wowee

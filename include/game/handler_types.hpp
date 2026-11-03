@@ -298,6 +298,7 @@ struct LfgRoleCheckDungeon {
 struct ReadyCheckResult {
     std::string name;
     bool ready = false;
+    uint64_t guid = 0;   // who answered; GetReadyCheckStatus is asked by unit
 };
 
 // ---- Chat ----

@@ -80,14 +80,22 @@ public:
     const std::array<TradeSlot, TRADE_SLOT_COUNT>& getPeerTradeSlots() const { return peerTradeSlots_; }
     uint64_t getMyTradeGold() const { return myTradeGold_; }
     uint64_t getPeerTradeGold() const { return peerTradeGold_; }
+    /// The enchanting spell each side has cast on the other's "will not be
+    /// traded" slot, from the spell field of SMSG_TRADE_STATUS_EXTENDED
+    /// (AzerothCore SendUpdateTrade: view_trade->GetSpell()). Ours lands on
+    /// the partner's item, theirs on ours.
+    uint32_t getMyTradeSpell() const { return myTradeSpell_; }
+    uint32_t getPeerTradeSpell() const { return peerTradeSpell_; }
     void acceptTradeRequest();
     void declineTradeRequest();
     void acceptTrade();
     void unacceptTrade();
     void cancelTrade();
-    void setTradeItem(uint8_t tradeSlot, uint8_t srcBag, uint8_t srcSlot);
-    void clearTradeItem(uint8_t tradeSlot);
-    void setTradeGold(uint64_t amount);
+    /// False when nothing was sent (no trade window open), so a caller can
+    /// leave the cursor holding what it held.
+    bool setTradeItem(uint8_t tradeSlot, uint8_t srcBag, uint8_t srcSlot);
+    bool clearTradeItem(uint8_t tradeSlot);
+    bool setTradeGold(uint64_t amount);
 
     // ---- Loot ----
     void lootTarget(uint64_t targetGuid);
@@ -154,19 +162,15 @@ public:
     }
     bool supportsEquipmentSets() const;
     void useEquipmentSet(uint32_t setId);
+    /// ignoreMask: bit n set leaves equipment slot n out of the set - sent as
+    /// the raw guid 1 the server keeps as its IgnoreMask.
     void saveEquipmentSet(const std::string& name, const std::string& iconName = "INV_Misc_QuestionMark",
-                          uint64_t existingGuid = 0, uint32_t setIndex = 0xFFFFFFFF);
+                          uint64_t existingGuid = 0, uint32_t setIndex = 0xFFFFFFFF,
+                          uint32_t ignoreMask = 0);
     void deleteEquipmentSet(uint64_t setGuid);
 
     // ---- Vendor ----
-    struct BuybackItem {
-        uint64_t itemGuid = 0;
-        ItemDef item;
-        uint32_t count = 1;
-        // Inventory slot sent in CMSG_BUYBACK_ITEM (74..85).  This is server
-        // identity, not the item's current row in the buyback UI.
-        uint32_t wireSlot = 0;
-    };
+    using BuybackItem = game::BuybackItem;
     void openVendor(uint64_t npcGuid);
     void closeVendor();
     // Drop the session-persistent buyback mirror (fresh character world entry).
@@ -277,7 +281,7 @@ public:
     void readItemBySlot(int backpackIndex);
     void readItemInBag(int bagIndex, int slotIndex);
     void destroyItem(uint8_t bag, uint8_t slot, uint8_t count = 1);
-    void splitItem(uint8_t srcBag, uint8_t srcSlot, uint8_t count);
+    void splitItem(uint8_t srcBag, uint8_t srcSlot, uint32_t count);
     /// Split `count` off a stack into a named slot.
     ///
     /// The interface's SplitContainerItem does not choose a destination: it puts
@@ -285,7 +289,10 @@ public:
     /// is right only for this client's own bag window, which has no cursor to
     /// put it on.
     void splitItemTo(uint8_t srcBag, uint8_t srcSlot,
-                     uint8_t dstBag, uint8_t dstSlot, uint8_t count);
+                     uint8_t dstBag, uint8_t dstSlot, uint32_t count);
+    /// Move an item into a container and let the server pick the slot
+    /// (CMSG_AUTOSTORE_BAG_ITEM) - what PutItemInBag/PutItemInBackpack send.
+    void autostoreBagItem(uint8_t srcBag, uint8_t srcSlot, uint8_t dstBag);
     /// applyLocally=false sends the move without touching the model, for a
     /// caller that has already put the items where this would move them -
     /// see GameHandler::sortBags.
@@ -338,6 +345,11 @@ public:
     void openMailCompose() { showMailCompose_ = true; clearMailAttachments(); }
     void closeMailCompose() { showMailCompose_ = false; clearMailAttachments(); }
     bool hasNewMail() const { return hasNewMail_; }
+    /// MSG_QUERY_NEXT_MAIL_TIME: asked at world entry and when mail arrives.
+    void queryNextMailTime();
+    /// Unread-mail senders from the last MSG_QUERY_NEXT_MAIL_TIME reply,
+    /// as MailMessage stubs so GameHandler::getMailSenderName resolves them.
+    const std::vector<MailMessage>& getNextMailSenders() const { return nextMailSenders_; }
     void openMailbox(uint64_t guid);
     void closeMailbox();
     /// What the server's mail refusal means, in words.
@@ -414,9 +426,10 @@ public:
     void openBank(uint64_t guid);
     void closeBank();
     void buyBankSlot();
-    // Cost in copper to purchase the bank bag slot at the given 0-based index
-    // (BankBagSlotPrices.dbc; identical values across Classic/TBC/WotLK). 0 = free/invalid.
-    static uint32_t getBankBagSlotPrice(int slotIndex);
+    // Cost in copper to purchase the bank bag slot at the given 0-based index,
+    // read from BankBagSlotPrices.dbc (row id = slot number, the row the
+    // server's BuyBankSlot charges). 0 = past the last slot or no data.
+    uint32_t getBankBagSlotPrice(int slotIndex) const;
     void depositItem(uint8_t srcBag, uint8_t srcSlot);
     void withdrawItem(uint8_t srcBag, uint8_t srcSlot);
     bool isBankOpen() const { return bankOpen_; }
@@ -440,6 +453,13 @@ public:
     /// carries, and the server applies the item's spell to that socket. The
     /// wire's bag and slot are the same ones a plain use writes.
     void placeGlyphFromBag(uint8_t wireBag, uint8_t wireSlot, uint32_t socketIndex);
+    /// The stock way in: using a glyph item does not cast - it fires
+    /// USE_GLYPH (uiparent.lua opens the glyph frame on it) and waits for a
+    /// socket to be clicked, which calls PlaceGlyphInSocket. The use is parked
+    /// here until then; sending it at once applied the glyph to socket 0.
+    bool placePendingGlyph(uint32_t socketIndex);
+    uint32_t getPendingGlyphItemId() const { return pendingGlyph_ ? pendingGlyph_->itemId : 0; }
+    void cancelPendingGlyph() { pendingGlyph_.reset(); }
 
     /// Ask for a tab's info text, and read back what arrived.
     ///
@@ -460,6 +480,17 @@ public:
     void setGuildBankTabInfo(uint8_t tabId, const std::string& name,
                              const std::string& icon);
     void guildBankDepositItem(uint8_t tabId, uint8_t bankSlot, uint8_t srcBag, uint8_t srcSlot);
+    /// Bank to bank: CMSG_GUILD_BANK_SWAP_ITEMS with BankOnly set.
+    void guildBankMoveItem(uint8_t srcTab, uint8_t srcSlot, uint8_t dstTab, uint8_t dstSlot,
+                           uint32_t splitCount);
+    /// Ask how much gold the player may still withdraw today
+    /// (MSG_GUILD_BANK_MONEY_WITHDRAWN; the server answers with the same opcode).
+    void queryGuildBankMoneyWithdrawn();
+    /// One slot greyed by a pickup (GUILDBANK_ITEM_LOCK_CHANGED). tab 0xFF clears.
+    void setGuildBankLockedSlot(uint8_t tab, uint8_t slot);
+    bool isGuildBankSlotLocked(uint8_t tab, uint8_t slot) const {
+        return guildBankLockedTab_ != 0xFF && tab == guildBankLockedTab_ && slot == guildBankLockedSlot_;
+    }
     // Deposit an inventory item into the first free slot of the viewed tab.
     void guildBankDepositFromInventory(uint8_t srcBag, uint8_t srcSlot);
     bool isGuildBankOpen() const { return guildBankOpen_; }
@@ -482,6 +513,14 @@ public:
                        const std::vector<AuctionSortKey>& sort = {});
     void auctionSellItem(int backpackIndex, uint32_t bid,
                          uint32_t buyout, uint32_t duration);
+    /// StartAuction(minBid, buyout, duration, stackSize, numStacks): post
+    /// numStacks auctions of stackSize each, gathered across the bags starting
+    /// with firstGuid, one at a time - the next goes when the server answers
+    /// the last with OK. With more than one, the AUCTION_MULTISELL_* events
+    /// drive the sell tab's progress bar (blizzard_auctionui.lua 1126-1160).
+    void auctionPostStacks(uint64_t firstGuid, uint32_t itemId, uint32_t stackSize,
+                           uint32_t numStacks, uint32_t bid, uint32_t buyout,
+                           uint32_t duration);
     // Post an auction for an item identified by its server GUID, so items in any
     // container (backpack or equipped bags) can be listed, not just the backpack.
     void auctionSellItemByGuid(uint64_t itemGuid, uint32_t stackCount, uint32_t bid,
@@ -575,6 +614,7 @@ private:
     void handleTrainerList(network::Packet& packet);
     void handleItemTextQueryResponse(network::Packet& packet);
     void handleTradeStatus(network::Packet& packet);
+    void handleTradeStatusCode(uint32_t status, network::Packet& packet);
     void handleTradeStatusExtended(network::Packet& packet);
     void handleLootRoll(network::Packet& packet);
     void handleLootRollWon(network::Packet& packet);
@@ -638,6 +678,8 @@ private:
     mutable std::optional<PendingItemTarget> pendingItemTarget_;
     /// The same, for an item waiting on a unit rather than on another item.
     mutable std::optional<PendingItemTarget> pendingUnitTarget_;
+    /// A glyph item used and waiting for its socket (placePendingGlyph).
+    std::optional<PendingItemTarget> pendingGlyph_;
 
     // Per-equip-slot (permanentEnchant << 32 | temporaryEnchant), so an enchant
     // change marks equipment dirty even though the displayInfoId is unchanged.
@@ -663,6 +705,8 @@ private:
     std::array<TradeSlot, TRADE_SLOT_COUNT> peerTradeSlots_{};
     uint64_t myTradeGold_   = 0;
     uint64_t peerTradeGold_ = 0;
+    uint32_t myTradeSpell_   = 0;
+    uint32_t peerTradeSpell_ = 0;
 
     // ---- Loot state ----
     bool lootWindowOpen_ = false;
@@ -751,6 +795,7 @@ private:
     int selectedMailIndex_ = -1;
     bool showMailCompose_ = false;
     bool hasNewMail_ = false;
+    std::vector<MailMessage> nextMailSenders_;
     std::array<MailAttachSlot, MAIL_MAX_ATTACHMENTS> mailAttachments_{};
 
     // ---- Bank state ----
@@ -768,6 +813,8 @@ private:
     // ---- Guild Bank state ----
     bool guildBankOpen_ = false;
     uint64_t guildBankerGuid_ = 0;
+    uint8_t guildBankLockedTab_ = 0xFF;
+    uint8_t guildBankLockedSlot_ = 0;
     std::array<std::string, 6> guildBankTabText_{};
     GuildBankData guildBankData_;
     uint8_t guildBankActiveTab_ = 0;
@@ -797,7 +844,18 @@ private:
     AuctionSearchParams lastAuctionSearch_;
     bool hasAuctionSearch_ = false;  // true after any search (including empty-name browse-all)
     enum class AuctionResultTarget { BROWSE, OWNER, BIDDER };
-    AuctionResultTarget pendingAuctionTarget_ = AuctionResultTarget::BROWSE;
+    void storeAuctionListResult(network::Packet& packet, AuctionResultTarget target);
+    /// The auctions StartAuction still has to send, and how far along it is.
+    struct AuctionMultisell {
+        std::vector<std::vector<std::pair<uint64_t, uint32_t>>> pending;
+        uint32_t total = 0;
+        uint32_t done = 0;
+        uint32_t bid = 0, buyout = 0, duration = 0;
+        bool announce = false;   // numStacks > 1: fire AUCTION_MULTISELL_*
+        bool active() const { return total > 0; }
+    };
+    AuctionMultisell auctionMultisell_;
+    void sendNextAuctionPost();
 
     // ---- Trainer state ----
     bool trainerWindowOpen_ = false;
@@ -816,6 +874,12 @@ private:
     std::vector<EquipmentSet> equipmentSets_;
     std::string pendingSaveSetName_;
     std::string pendingSaveSetIcon_;
+    /// The slots the save being answered marked ignored, for the set the
+    /// SMSG_EQUIPMENT_SET_SAVED reply creates.
+    uint32_t pendingSaveIgnoreMask_ = 0;
+    /// The set a CMSG_EQUIPMENT_SET_USE was sent for, named again by
+    /// EQUIPMENT_SWAP_FINISHED when SMSG_EQUIPMENT_SET_USE_RESULT answers it.
+    std::string pendingUseSetName_;
     std::vector<EquipmentSetInfo> equipmentSetInfo_;
 
     // ---- Repair cost DBC cache ----
@@ -825,6 +889,12 @@ private:
     // DurabilityQuality.dbc: [id] -> quality_mod float
     mutable std::unordered_map<uint32_t, float> durabilityQuality_;
     void loadRepairDbc() const;
+    /// The items Repair All covers, as the server counts them.
+    std::vector<uint64_t> repairAllItemGuids() const;
+    // BankBagSlotPrices.dbc, by row id; read on first use.
+    mutable std::unordered_map<uint32_t, uint32_t> bankBagSlotPrices_;
+    mutable bool bankBagSlotPricesLoaded_ = false;
+public:
     uint32_t estimateItemRepairCost(uint64_t itemGuid) const;
 };
 

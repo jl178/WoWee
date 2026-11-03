@@ -226,5 +226,192 @@ std::vector<CalendarDayEntry> calendarEntriesForDay(const CalendarData& data,
                                                     int month, int day,
                                                     int year);
 
+/// The holiday's place in its run, as the string CalendarGetDayEvent answers.
+///
+/// Blizzard_Calendar formats a holiday name through
+/// CALENDAR_CALENDARTYPE_NAMEFORMAT.HOLIDAY[sequenceType], which has entries
+/// for "START" ("%s Begins"), "END" ("%s Ends") and "" ("%s") and none for
+/// "ONGOING" - the middle days are skipped before it is read. So a one-day
+/// holiday is "", and only a run of two days or more has a start and an end.
+const char* calendarHolidaySequenceType(const CalendarDayEntry& entry);
+
+// ---- Flags, statuses and ranks, as CalendarMgr.h numbers them ----
+
+/// CALENDAR_FLAG_INVITES_LOCKED. The view frame greys every RSVP on it.
+inline constexpr uint32_t kCalendarFlagInvitesLocked = 0x010;
+/// CALENDAR_FLAG_WITHOUT_INVITES - what makes an event a guild announcement
+/// (CalendarEvent::IsGuildAnnouncement tests exactly this bit).
+inline constexpr uint32_t kCalendarFlagAnnouncement = 0x040;
+/// CALENDAR_FLAG_GUILD_EVENT.
+inline constexpr uint32_t kCalendarFlagGuildEvent = 0x400;
+
+/// CalendarInviteStatus (CalendarMgr.h). The interface's
+/// CALENDAR_INVITESTATUS_* are these plus one.
+enum CalendarInviteStatusValue : uint8_t {
+    kCalendarStatusInvited = 0,
+    kCalendarStatusAccepted = 1,
+    kCalendarStatusDeclined = 2,
+    kCalendarStatusConfirmed = 3,
+    kCalendarStatusOut = 4,
+    kCalendarStatusStandby = 5,
+    kCalendarStatusSignedUp = 6,
+    kCalendarStatusNotSignedUp = 7,
+    kCalendarStatusTentative = 8,
+    kCalendarStatusRemoved = 9,
+};
+
+/// CalendarModerationRank.
+enum CalendarRankValue : uint8_t {
+    kCalendarRankPlayer = 0,
+    kCalendarRankModerator = 1,
+    kCalendarRankOwner = 2,
+};
+
+/// Whether an invite in this status still wants an answer - the statuses
+/// CalendarMgr::GetPlayerNumPending counts, so a count kept here agrees with
+/// the one SMSG_CALENDAR_SEND_NUM_PENDING answers.
+constexpr bool calendarStatusIsPending(uint8_t status) {
+    return status == kCalendarStatusInvited || status == kCalendarStatusTentative ||
+           status == kCalendarStatusNotSignedUp;
+}
+
+/// "GUILD_ANNOUNCEMENT", "GUILD_EVENT" or "PLAYER" - the calendarType the
+/// interface compares against, which is decided by the flags alone.
+constexpr const char* calendarTypeForFlags(uint32_t flags) {
+    return (flags & kCalendarFlagAnnouncement) ? "GUILD_ANNOUNCEMENT"
+         : (flags & kCalendarFlagGuildEvent)   ? "GUILD_EVENT"
+                                               : "PLAYER";
+}
+
+// ---- Writing ----
+
+/// One row of the invite list CMSG_CALENDAR_ADD_EVENT carries.
+struct CalendarAddEventInvite {
+    uint64_t guid = 0;
+    uint8_t status = kCalendarStatusInvited;
+    uint8_t rank = kCalendarRankPlayer;
+};
+
+/**
+ * The body of CMSG_CALENDAR_ADD_EVENT.
+ *
+ * WorldSession::HandleCalendarAddEvent (CalendarHandler.cpp:228) reads the
+ * header and then, unless the flags make it a guild announcement, a uint32
+ * count and that many {packedGuid, uint8 status, uint8 rank}. Those rows are
+ * the whole invite list - the server adds nobody on its own, not even the
+ * creator - and it reads the count without a length check, so a packet that
+ * stops after the flags throws on the server and no event is made at all.
+ * At most CALENDAR_MAX_INVITES (100) rows are written: the server reads no
+ * more than that and would leave the rest in the buffer.
+ */
+void writeCalendarAddEvent(network::Packet& packet, const CalendarEventDraft& draft,
+                           const std::vector<CalendarAddEventInvite>& invites);
+
+// ---- The server's notices, each read whole or not at all ----
+
+/// SMSG_CALENDAR_EVENT_INVITE - one row joining an invite list
+/// (CalendarMgr::SendCalendarEventInvite). With eventId 0 it is the answer to
+/// a pre-invite: the server looked the name up and hands the row back for the
+/// event still being drafted.
+struct CalendarEventInviteNotice {
+    uint64_t inviteeGuid = 0;
+    uint64_t eventId = 0;
+    uint64_t inviteId = 0;
+    uint8_t level = 0;
+    uint8_t status = 0;
+    bool hasStatusTime = false;
+    uint32_t statusTimePacked = 0;
+    /// False only for a sign-up, where the invitee invited themselves.
+    bool isInvite = true;
+};
+bool parseCalendarEventInvite(network::Packet& packet, CalendarEventInviteNotice& out);
+
+/// SMSG_CALENDAR_EVENT_INVITE_ALERT - an event and this player's invite to it
+/// (CalendarMgr::SendCalendarEventInviteAlert).
+struct CalendarInviteAlert {
+    CalendarEvent event;
+    uint64_t inviteId = 0;
+    uint8_t status = 0;
+    uint8_t rank = 0;
+    uint64_t senderGuid = 0;
+};
+bool parseCalendarInviteAlert(network::Packet& packet, CalendarInviteAlert& out);
+
+/// SMSG_CALENDAR_EVENT_STATUS - someone's answer changed
+/// (CalendarMgr::SendCalendarEventStatus).
+struct CalendarEventStatusNotice {
+    uint64_t inviteeGuid = 0;
+    uint64_t eventId = 0;
+    uint32_t eventTimePacked = 0;
+    uint32_t flags = 0;
+    uint8_t status = 0;
+    uint8_t rank = 0;
+    uint32_t statusTimePacked = 0;
+};
+bool parseCalendarEventStatus(network::Packet& packet, CalendarEventStatusNotice& out);
+
+/// SMSG_CALENDAR_COMMAND_RESULT (CalendarMgr::SendCalendarCommandResult):
+/// uint32 0, uint8 0, a string that is the player's name for the three
+/// errors that name one and empty otherwise, then the CalendarError.
+struct CalendarCommandResult {
+    std::string param;
+    uint32_t error = 0;
+};
+bool parseCalendarCommandResult(network::Packet& packet, CalendarCommandResult& out);
+
+/// The GlobalStrings.lua name for a CalendarError, empty for CALENDAR_OK and
+/// for codes the interface has no string for.
+const char* calendarErrorStringName(uint32_t error);
+
+/// SMSG_CALENDAR_EVENT_UPDATED_ALERT (CalendarMgr::SendCalendarEventUpdateAlert).
+struct CalendarEventUpdatedAlert {
+    uint64_t eventId = 0;
+    uint32_t oldEventTimePacked = 0;
+    uint32_t flags = 0;
+    uint32_t eventTimePacked = 0;
+    uint8_t type = 0;
+    int32_t dungeonId = -1;
+    std::string title;
+    std::string description;
+    uint8_t repeatOption = 0;
+    uint32_t maxInvites = 0;
+};
+bool parseCalendarEventUpdatedAlert(network::Packet& packet, CalendarEventUpdatedAlert& out);
+
+/// SMSG_CALENDAR_EVENT_REMOVED_ALERT: uint8, uint64 eventId, packed time.
+bool parseCalendarEventRemovedAlert(network::Packet& packet, uint64_t& eventId);
+
+/// SMSG_CALENDAR_EVENT_INVITE_REMOVED: packedGuid invitee, uint64 eventId,
+/// uint32 flags, uint8.
+struct CalendarInviteRemovedNotice {
+    uint64_t inviteeGuid = 0;
+    uint64_t eventId = 0;
+    uint32_t flags = 0;
+};
+bool parseCalendarInviteRemoved(network::Packet& packet, CalendarInviteRemovedNotice& out);
+
+/// SMSG_CALENDAR_EVENT_INVITE_REMOVED_ALERT, to the one removed: uint64
+/// eventId, packed time, uint32 flags, uint8 status.
+struct CalendarInviteRemovedAlert {
+    uint64_t eventId = 0;
+    uint32_t flags = 0;
+    uint8_t status = 0;
+};
+bool parseCalendarInviteRemovedAlert(network::Packet& packet, CalendarInviteRemovedAlert& out);
+
+/// SMSG_CALENDAR_EVENT_MODERATOR_STATUS_ALERT: packedGuid invitee, uint64
+/// eventId, uint8 rank, uint8.
+struct CalendarModeratorNotice {
+    uint64_t inviteeGuid = 0;
+    uint64_t eventId = 0;
+    uint8_t rank = 0;
+};
+bool parseCalendarModeratorStatus(network::Packet& packet, CalendarModeratorNotice& out);
+
+/// SMSG_CALENDAR_FILTER_GUILD and SMSG_CALENDAR_ARENA_TEAM, the answers to a
+/// mass invite: a uint32 count and that many {packedGuid, uint8}
+/// (Guild::MassInviteToEvent, ArenaTeam::MassInviteToEvent).
+bool parseCalendarMassInviteList(network::Packet& packet, std::vector<uint64_t>& out);
+
 }  // namespace game
 }  // namespace wowee

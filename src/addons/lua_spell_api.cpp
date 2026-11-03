@@ -797,20 +797,60 @@ static int lua_IsPassiveSpell(lua_State* L) {
     return 1;
 }
 
-/// IsSelectedSpell(slot, bookType) → whether the book is highlighting it.
-/// Nothing selects a spell here; the highlight follows the cursor.
+/// IsSelectedSpell(slot, bookType) → whether the book draws it checked.
+///
+/// spellbookframe.lua re-asks on CURRENT_SPELL_CAST_CHANGED,
+/// UPDATE_SHAPESHIFT_FORM and TRADE_SKILL_SHOW/CLOSE (SpellButton_OnShow),
+/// which names what "selected" covers: the spell being cast or channelled
+/// (or auto-repeating, or queued for the next swing), the stance or form
+/// the player is in, and the profession whose window is open. It answered
+/// false for all of them, so no spell button ever lit.
 static int lua_IsSelectedSpell(lua_State* L) {
-    lua_pushboolean(L, 0);
+    auto* gh = getGameHandler(L);
+    const uint32_t id = gh ? spellIdForCall(L, gh) : 0;
+    bool selected = false;
+    if (id != 0) {
+        selected = id == gh->getActiveActionSpellId() ||
+                   id == gh->getCurrentCastSpellId() ||
+                   id == gh->getAutoRepeatSpellId();
+        if (!selected) {
+            // A stance, form or presence: its own aura is the
+            // SHAPESHIFT (36) aura the player carries while in it.
+            gh->loadSpellNameCache();
+            const auto& cache = gh->spellNameCacheRef();
+            auto it = cache.find(id);
+            if (it != cache.end()) {
+                for (uint32_t aura : it->second.effectAuraIds) {
+                    if (aura == 36 && gh->playerCarriesAura(id)) { selected = true; break; }
+                }
+            }
+        }
+        if (!selected && gh->isCraftingWindowOpen()) {
+            auto* sh = gh->getSpellHandler();
+            const uint32_t line = sh ? sh->tradeskillOpenerSkillLine(id) : 0;
+            selected = line != 0 && line == gh->getCraftingSkillLine();
+        }
+    }
+    lua_pushboolean(L, selected ? 1 : 0);
     return 1;
 }
 
 /// GetSpellAutocast(slot, bookType) → autocastable, currently autocasting.
-/// Pet spells only, and pet action bars are not modelled: false says the
-/// little rotating border is not drawn, which is right for every spell a
-/// player has.
+/// Pet spells only - the player's book has no autocast, and answers nil,nil.
+/// For the pet book both come from SMSG_PET_SPELLS' per-spell state byte
+/// (0x80 autocastable, 0x40 on), which spellbookframe.lua turns into the
+/// AutoCastable border and the rotating AutoCast shine.
 static int lua_GetSpellAutocast(lua_State* L) {
-    lua_pushboolean(L, 0);
-    lua_pushboolean(L, 0);
+    auto* gh = getGameHandler(L);
+    const char* book = lua_tostring(L, 2);
+    if (!gh || !book || std::string(book) != "pet") {
+        lua_pushnil(L);
+        lua_pushnil(L);
+        return 2;
+    }
+    const uint32_t id = spellIdForCall(L, gh);
+    lua_pushboolean(L, id && gh->isPetSpellAutocastable(id) ? 1 : 0);
+    lua_pushboolean(L, id && gh->isPetSpellAutocast(id) ? 1 : 0);
     return 2;
 }
 /// GetKnownSlotFromHighestRankSlot(slot) → the slot actually known. The book
@@ -921,9 +961,30 @@ static int lua_GetSpellCooldown(lua_State* L) {
     const uint32_t spellId = spellIdForCall(L, gh);
     float cd = gh->getSpellCooldown(spellId);
     // Also check GCD - if spell has no individual cooldown but GCD is active,
-    // return the GCD timing (this is how WoW handles it)
+    // return the GCD timing (this is how WoW handles it). Only for a spell
+    // the GCD actually holds: Spell.dbc StartRecoveryCategory 133. A passive,
+    // or Auto Shot / Attack (category 0), swirled with every cast. An unknown
+    // category (a layout that does not map the column) keeps the old answer.
     float gcdRem = gh->getGCDRemaining();
     float gcdTotal = gh->getGCDTotal();
+    if (spellId != 0) {
+        gh->loadSpellNameCache();
+        const auto& cache = gh->spellNameCacheRef();
+        auto it = cache.find(spellId);
+        const bool passive = gh->isSpellPassive(spellId);
+        const uint32_t cat = it != cache.end() ? it->second.startRecoveryCategory : 0xFFFFFFFFu;
+        if (passive || (cat != 0xFFFFFFFFu && cat != 133)) gcdRem = 0.0f;
+        // SPELL_ATTR0_COOLDOWN_ON_EVENT (0x02000000): unusable while its
+        // effect is up and the cooldown starts when it ends (Stealth, Prowl).
+        // Stock answers enable 0 meanwhile, which greys the button.
+        if (it != cache.end() && (it->second.attr & 0x02000000u) &&
+            gh->playerCarriesAura(spellId)) {
+            lua_pushnumber(L, 0);
+            lua_pushnumber(L, 0);
+            lua_pushnumber(L, 0);
+            return 3;
+        }
+    }
 
     // WoW returns (start, duration, enabled) where remaining = start + duration - GetTime()
     double nowSec = luaGetTimeNow();

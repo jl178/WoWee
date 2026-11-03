@@ -3,6 +3,7 @@
 #include "game/interaction_rules.hpp"
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <iterator>
 #include <vector>
 #include "addons/lua_api_helpers.hpp"
@@ -474,14 +475,35 @@ static int lua_IsInGuild(lua_State* L) {
 // GetGuildInfo("player") → guildName, guildRankName, guildRankIndex
 static int lua_GetGuildInfoFunc(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (!gh || !gh->isInGuild()) { return luaReturnNil(L); }
-    lua_pushstring(L, gh->getGuildName().c_str());
-    // Get rank name for the player
+    if (!gh) { return luaReturnNil(L); }
+    // The unit asked about, not always the player: unitpopup, the inspect
+    // frame and nameplate addons pass "target", "mouseover", raidN. Another
+    // player is answered from their PLAYER_GUILDID and the guild name cache,
+    // and only once the name is known - nil is "no guild", which is what an
+    // unanswered query should look like rather than the player's own guild.
+    std::string unit = luaL_optstring(L, 1, "player");
+    toLowerInPlace(unit);
+    const uint64_t guid = resolveUnitGuid(gh, unit);
+    if (guid == 0) { return luaReturnNil(L); }
+    const bool self = guid == gh->getPlayerGuid();
+    if (self) {
+        if (!gh->isInGuild()) { return luaReturnNil(L); }
+        lua_pushstring(L, gh->getGuildName().c_str());
+    } else {
+        const uint32_t guildId = gh->getEntityGuildId(guid);
+        if (guildId == 0) { return luaReturnNil(L); }
+        const std::string& name = gh->lookupGuildName(guildId);
+        if (name.empty()) { return luaReturnNil(L); }
+        lua_pushstring(L, name.c_str());
+    }
+    // The rank, from the roster - which holds the player and, for a member of
+    // the player's own guild, them too. Anyone else's rank names are not
+    // known here; the guild alone is answered with an empty rank.
     const auto& roster = gh->getGuildRoster();
     std::string rankName;
     uint32_t rankIndex = 0;
     for (const auto& m : roster.members) {
-        if (m.guid == gh->getPlayerGuid()) {
+        if (m.guid == guid) {
             rankIndex = m.rankIndex;
             const auto& rankNames = gh->getGuildRankNames();
             if (rankIndex < rankNames.size()) rankName = rankNames[rankIndex];
@@ -502,11 +524,14 @@ static int lua_GetNumGuildMembers(lua_State* L) {
     // the whole roster while indexing a filtered view walked off the end of it.
     // The second is how many of the guild are online, filtered or not, which is
     // what the "N of M online" line means.
+    // GetNumGuildMembers(true) counts everyone whatever the offline filter
+    // says - addons ask that way for the size of the guild, not the list.
+    const bool includeOffline = lua_toboolean(L, 1) != 0;
     const auto view = guildRosterView(gh);
     int online = 0;
     for (const auto& m : gh->getGuildRoster().members)
         if (m.online) online++;
-    lua_pushnumber(L, view.size());
+    lua_pushnumber(L, includeOffline ? gh->getGuildRoster().members.size() : view.size());
     lua_pushnumber(L, online);
     return 2;
 }
@@ -520,6 +545,20 @@ static int lua_GetGuildRosterInfo(lua_State* L) {
     if (index > static_cast<int>(view.size())) { return luaReturnNil(L); }
     const auto& m = *view[static_cast<size_t>(index) - 1];
 
+    // Read before anything is pushed: a getglobal and pop between the return
+    // values would slide the return window (lua_return_window_check.py).
+    std::string status;
+    {
+        const char* statusGlobal = !m.online ? nullptr
+                                 : (m.statusFlags & 0x02) ? "CHAT_FLAG_AFK"
+                                 : (m.statusFlags & 0x04) ? "CHAT_FLAG_DND" : nullptr;
+        if (statusGlobal) {
+            lua_getglobal(L, statusGlobal);
+            status = lua_isstring(L, -1) ? lua_tostring(L, -1)
+                                         : ((m.statusFlags & 0x02) ? "<Away>" : "<Busy>");
+            lua_pop(L, 1);
+        }
+    }
     lua_pushstring(L, m.name.c_str());                      // 1: name
     const auto& rankNames = gh->getGuildRankNames();
     lua_pushstring(L, m.rankIndex < rankNames.size()
@@ -533,7 +572,12 @@ static int lua_GetGuildRosterInfo(lua_State* L) {
     lua_pushstring(L, m.publicNote.c_str());                 // 7: note
     lua_pushstring(L, m.officerNote.c_str());                // 8: officerNote
     lua_pushboolean(L, m.online);                            // 9: online
-    lua_pushnumber(L, 0);                                    // 10: status (0=online, 1=AFK, 2=DND)
+    // 10: status - a string. GuildStatus_Update tests `status == ""` for
+    // the plain "Online" label and prints anything else in its place; a 0
+    // never equals "", so every online member read "0". From the roster's
+    // status byte: AFK 0x02, DND 0x04 (GUILDMEMBER_STATUS_*), worded by the
+    // interface's own CHAT_FLAG_AFK / CHAT_FLAG_DND ("<Away>" / "<Busy>").
+    lua_pushstring(L, status.c_str());                       // 10: status
     // The uppercase token, not the id. This position is classFileName and it
     // is a key, not a number:
     //
@@ -864,12 +908,27 @@ namespace {
 /// Daily quests take a different icon in the list. Protocol-defined, WotLK.
 constexpr uint32_t kQuestFlagsDaily = 0x1000;
 
-bool gossipQuestIsAvailable(uint32_t icon)   { return icon == 2 || icon == 7 || icon == 8; }
-bool gossipQuestIsCompletable(uint32_t icon) { return icon == 5 || icon == 6 || icon == 10; }
-bool gossipQuestIsIncomplete(uint32_t icon)  { return icon == 3 || icon == 4; }
 /// Taken already, finished or not - which is one list in the gossip window.
-bool gossipQuestIsActive(uint32_t icon) {
-    return gossipQuestIsIncomplete(icon) || gossipQuestIsCompletable(icon);
+///
+/// Wow.exe splits the list on the icon alone: 3 or 4 is active, anything else
+/// is available (0x58a6c0 / 0x58a750 count and index the active ones by
+/// `icon == 3 || icon == 4`, 0x58a5d0 / 0x58a660 the available ones by the
+/// negation). AzerothCore sends 4 for every quest in progress or finished, 2
+/// for one on offer and 0 for an auto-complete one (Player::PrepareQuestMenu),
+/// so the old 2/7/8 test left icon-0 quests in neither list. Whether an active
+/// quest is finished is not in the icon at all - see gossipQuestIsComplete.
+bool gossipQuestIsActive(uint32_t icon)    { return icon == 3 || icon == 4; }
+bool gossipQuestIsAvailable(uint32_t icon) { return !gossipQuestIsActive(icon); }
+
+/// GetGossipActiveQuests' isComplete: read from the quest log, not the gossip
+/// packet. 0x58b490 looks the quest up in the log (0x5deeb0) and answers its
+/// completion (0x5e0ea0 / 0x5e10b0).
+bool gossipQuestIsComplete(game::GameHandler* gh, uint32_t questId) {
+    if (!gh) return false;
+    for (const auto& q : gh->getQuestLog()) {
+        if (q.questId == questId) return q.complete;
+    }
+    return false;
 }
 
 /// The i-th quest of one kind, or null past the end. One walk shared by
@@ -2050,6 +2109,10 @@ void registerSocialLuaAPI(lua_State* L) {
             toLowerInPlace(uid);
             const uint64_t guid = resolveUnitGuid(gh, uid);
             if (guid == 0) return luaReturnFalse(L);
+            if (guid == gh->getPlayerGuid()) {   // the player's flags are the header's
+                lua_pushboolean(L, (gh->isInGroup() && (gh->getPartyData().flags & 0x01)) ? 1 : 0);
+                return 1;
+            }
             for (const auto& mem : gh->getPartyData().members) {
                 if (mem.guid == guid) { lua_pushboolean(L, (mem.flags & 0x01) ? 1 : 0); return 1; }
             }
@@ -2107,6 +2170,12 @@ void registerSocialLuaAPI(lua_State* L) {
             toLowerInPlace(uid);
             const uint64_t guid = resolveUnitGuid(gh, uid);
             if (guid == 0) return luaReturnFalse(L);
+            // The player's own flags ride in the group list's header, not in
+            // the member list the server leaves them out of.
+            if (guid == gh->getPlayerGuid()) {
+                lua_pushboolean(L, (gh->isInGroup() && (gh->getPartyData().flags & bit)) ? 1 : 0);
+                return 1;
+            }
             for (const auto& mem : gh->getPartyData().members) {
                 if (mem.guid == guid) { lua_pushboolean(L, (mem.flags & bit) ? 1 : 0); return 1; }
             }
@@ -2155,10 +2224,11 @@ void registerSocialLuaAPI(lua_State* L) {
             const int idx   = static_cast<int>(luaL_optnumber(L, 1, 0));
             const int group = static_cast<int>(luaL_optnumber(L, 2, 0));
             if (!gh || idx < 1) return 0;
-            const auto& members = gh->getPartyData().members;
-            if (idx > static_cast<int>(members.size())) return 0;
-            gh->setRaidSubgroup(members[static_cast<size_t>(idx) - 1].name,
-                                static_cast<uint8_t>(group));
+            // A raid index - the raidN / GetRaidRosterInfo numbering, which
+            // has the player in it - not a position in the server's list.
+            const std::string name = raidSlotName(gh, idx);
+            if (name.empty()) return 0;
+            gh->setRaidSubgroup(name, static_cast<uint8_t>(group));
             return 0;
         }},
                 {"SwapRaidSubgroup", [](lua_State* L) -> int {
@@ -2166,11 +2236,10 @@ void registerSocialLuaAPI(lua_State* L) {
             const int a = static_cast<int>(luaL_optnumber(L, 1, 0));
             const int b = static_cast<int>(luaL_optnumber(L, 2, 0));
             if (!gh || a < 1 || b < 1) return 0;
-            const auto& members = gh->getPartyData().members;
-            const int n = static_cast<int>(members.size());
-            if (a > n || b > n) return 0;
-            gh->swapRaidSubgroup(members[static_cast<size_t>(a) - 1].name,
-                                 members[static_cast<size_t>(b) - 1].name);
+            const std::string nameA = raidSlotName(gh, a);
+            const std::string nameB = raidSlotName(gh, b);
+            if (nameA.empty() || nameB.empty()) return 0;
+            gh->swapRaidSubgroup(nameA, nameB);
             return 0;
         }},
                 // Which row the raid roster has highlighted. Purely local -
@@ -2212,9 +2281,24 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"IsInGuild",               lua_IsInGuild},
                 {"GetGuildInfo",            lua_GetGuildInfoFunc},
                 {"GetNumGuildMembers",      lua_GetNumGuildMembers},
+                // At most one request per ten seconds from the interface, as
+                // the stock client throttles it. FriendsFrame_OnEvent answers
+                // GUILD_ROSTER_UPDATE(arg1) with another GuildRoster(), and
+                // every frame, addon and OnShow that wants fresh names asks
+                // too; unthrottled, each roster could ask for the next. The
+                // first call is always sent. Requests the client makes itself
+                // after a guild change do not come through here.
                 {"GuildRoster", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) gh->requestGuildRoster();
+            if (!gh) return 0;
+            using Clock = std::chrono::steady_clock;
+            static Clock::time_point lastSent{};
+            static bool sentOnce = false;
+            const auto now = Clock::now();
+            if (sentOnce && now - lastSent < std::chrono::seconds(10)) return 0;
+            sentOnce = true;
+            lastSent = now;
+            gh->requestGuildRoster();
             return 0;
         }},
                 // SortGuildRoster(field) - one of name, zone, level, class,
@@ -2528,9 +2612,10 @@ void registerSocialLuaAPI(lua_State* L) {
                 if (!gossipQuestIsAvailable(q.questIcon)) continue;
                 lua_pushstring(L, q.title.c_str());
                 lua_pushnumber(L, q.questLevel);
-                // Trivial greys the title out. Nothing here knows a quest's
-                // green range, and guessing it would grey quests that are not.
-                lua_pushboolean(L, 0);
+                // isTrivial: 0x58b3a0 asks 0x58aba0 with the quest's level,
+                // the same green-range rule IsActiveQuestTrivial uses.
+                lua_pushboolean(L, questIsTrivial(static_cast<int>(gh->getPlayerLevel()),
+                                                  q.questLevel) ? 1 : 0);
                 lua_pushboolean(L, (q.questFlags & kQuestFlagsDaily) ? 1 : 0);
                 lua_pushboolean(L, q.isRepeatable ? 1 : 0);
                 n += 5;
@@ -2552,8 +2637,9 @@ void registerSocialLuaAPI(lua_State* L) {
                 if (!gossipQuestIsActive(q.questIcon)) continue;
                 lua_pushstring(L, q.title.c_str());
                 lua_pushnumber(L, q.questLevel);
-                lua_pushboolean(L, 0);
-                lua_pushboolean(L, gossipQuestIsCompletable(q.questIcon) ? 1 : 0);
+                lua_pushboolean(L, questIsTrivial(static_cast<int>(gh->getPlayerLevel()),
+                                                  q.questLevel) ? 1 : 0);
+                lua_pushboolean(L, gossipQuestIsComplete(gh, q.questId) ? 1 : 0);
                 n += 4;
             }
             return n;
@@ -2584,8 +2670,14 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"GetAvailableTitle", [](lua_State* L) -> int {
             return pushGossipQuestTitle(L, /*available=*/true);
         }},
+                // title, isComplete - QuestFrameGreetingPanel_OnShow reads
+                // both to pick the active quest's icon (questframe.lua).
                 {"GetActiveTitle", [](lua_State* L) -> int {
-            return pushGossipQuestTitle(L, /*available=*/false);
+            const int index = static_cast<int>(luaL_checknumber(L, 1));
+            const auto* q = gossipQuestAt(L, /*available=*/false, index);
+            lua_pushstring(L, q ? q->title.c_str() : "");
+            lua_pushboolean(L, (q && gossipQuestIsComplete(getGameHandler(L), q->questId)) ? 1 : 0);
+            return 2;
         }},
                 {"SelectAvailableQuest", [](lua_State* L) -> int {
             return selectGossipQuestAt(L, /*available=*/true);
@@ -2923,7 +3015,7 @@ void registerSocialLuaAPI(lua_State* L) {
             if (!gh) { return luaReturnZero(L); }
             int count = 0;
             for (const auto& q : gh->getCurrentGossip().quests)
-                if (q.questIcon != 4) ++count; // 4 = active/in-progress
+                if (gossipQuestIsAvailable(q.questIcon)) ++count;
             lua_pushnumber(L, count);
             return 1;
         }},
@@ -2932,7 +3024,7 @@ void registerSocialLuaAPI(lua_State* L) {
             if (!gh) { return luaReturnZero(L); }
             int count = 0;
             for (const auto& q : gh->getCurrentGossip().quests)
-                if (q.questIcon == 4) ++count;
+                if (gossipQuestIsActive(q.questIcon)) ++count;
             lua_pushnumber(L, count);
             return 1;
         }},

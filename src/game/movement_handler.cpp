@@ -2947,6 +2947,11 @@ void MovementHandler::handleShowTaxiNodes(network::Packet& packet) {
     // CMSG_CANCEL_MOUNT_AURA): TakeTaxiNode refuses a mounted player.
     if (owner_.isMounted() && !onTaxiFlight_) dismount();
 
+    // The map already open for this flight master: Wow.exe 0x5932e0 returns
+    // at once when the npc guid is the one it built the map for, so a second
+    // SHOWTAXINODES raises no second TAXIMAP_OPENED (FrameXML would redraw
+    // and replay the open sound each time).
+    const bool alreadyOpen = taxiWindowOpen_ && taxiNpcGuid_ == data.npcGuid;
     currentTaxiData_ = data;
     taxiNpcGuid_ = data.npcGuid;
     taxiWindowOpen_ = true;
@@ -2961,7 +2966,8 @@ void MovementHandler::handleShowTaxiNodes(network::Packet& packet) {
     // The flight map opens on this and closes on its pair. Neither was fired,
     // so the original interface's map could not appear however complete the
     // functions behind it were.
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("TAXIMAP_OPENED", {});
+    if (!alreadyOpen && owner_.addonEventCallbackRef())
+        owner_.addonEventCallbackRef()("TAXIMAP_OPENED", {});
 }
 
 // The flight itself is the server's. AzerothCore's FlightPathMovementGenerator

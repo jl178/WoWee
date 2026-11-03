@@ -40,8 +40,14 @@ std::vector<QuestObjective> questObjectives(GameHandler& gh,
         if (auto it = q.killCounts.find(key); it != q.killCounts.end()) current = it->second.first;
         const bool isObject = kill.npcOrGoId < 0;
         QuestObjective line;
-        line.text = questObjectiveLine(targetName(gh, kill.npcOrGoId), isObject, current,
-                                       kill.required);
+        // The quest's own ObjectiveText for this slot wins over the target's
+        // name, as in the progress message (Wow.exe 0x6d8030).
+        const size_t slot = static_cast<size_t>(&kill - q.killObjectives.data());
+        const std::string& objText = slot < q.objectiveTexts.size() ? q.objectiveTexts[slot]
+                                                                     : std::string();
+        line.text = objText.empty()
+            ? questObjectiveLine(targetName(gh, kill.npcOrGoId), isObject, current, kill.required)
+            : questObjectiveLine(objText, true, current, kill.required);
         line.type = isObject ? "object" : "monster";
         line.finished = current >= kill.required;
         out.push_back(std::move(line));

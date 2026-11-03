@@ -60,3 +60,16 @@ TEST_CASE("CMSG_LEARN_TALENT counts ranks from zero on the wire", "[talent][pack
         CHECK(wowee::test::readU32(p.getData(), 4) == 0u);
     }
 }
+
+// CMSG_LEARN_PREVIEW_TALENTS: uint32 count, then (talentId, rank) pairs with the
+// rank from zero, as AzerothCore's HandleLearnPreviewTalents reads them.
+TEST_CASE("CMSG_LEARN_PREVIEW_TALENTS carries every staged talent once", "[talent][packet]") {
+    auto p = LearnPreviewTalentsPacket::build({{1578, 5}, {2000, 1}});
+    const auto& b = p.getData();
+    REQUIRE(b.size() == 4u + 2u * 8u);
+    CHECK(wowee::test::readU32(b, 0) == 2u);
+    CHECK(wowee::test::readU32(b, 4) == 1578u);
+    CHECK(wowee::test::readU32(b, 8) == 4u);    // fifth rank -> 4
+    CHECK(wowee::test::readU32(b, 12) == 2000u);
+    CHECK(wowee::test::readU32(b, 16) == 0u);   // first rank -> 0
+}

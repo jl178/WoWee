@@ -257,13 +257,6 @@ EXPECTED_UNFIRED = {
     "OnChar": "declared by no frame in the interface",
     "OnMinMaxChanged": "declared by no frame in the interface",
     "OnMovieShowSubtitle": "declared by no frame in the interface",
-    # GameTooltip declares it to put the sell price on with coin icons, through
-    # SetTooltipMoney. This client's own item builder already writes a
-    # "Sell Price:" line of its own - lua_engine.cpp, in the bootstrap Lua -
-    # so firing this would put the price on twice. Correctly unfired while that
-    # remains true; if the builder ever stops writing it, fire this instead
-    # rather than adding a second line of text.
-    "OnTooltipAddMoney": "the item builder writes the sell price itself",
 }
 
 

@@ -286,6 +286,10 @@ public:
     void dismissReadyCheck() { pendingReadyCheck_ = false; }
     [[nodiscard]] const std::string& getReadyCheckInitiator() const { return readyCheckInitiator_; }
     [[nodiscard]] const std::vector<ReadyCheckResult>& getReadyCheckResults() const { return readyCheckResults_; }
+    /// A unit's part in the check under way: nullptr when there is none (or
+    /// they are not in the group), else "waiting", "ready" or "notready" -
+    /// GetReadyCheckStatus's three answers.
+    [[nodiscard]] const char* readyCheckStatusFor(uint64_t guid) const;
 
     // Duel
     void acceptDuel();
@@ -407,12 +411,25 @@ public:
                                         uint32_t minRank);
     /// Ask for one event's detail: CMSG_CALENDAR_GET_EVENT.
     void requestCalendarEvent(uint64_t eventId);
-    /// Create an event: CMSG_CALENDAR_ADD_EVENT.
-    void createCalendarEvent(const CalendarEventDraft& draft);
+    /// Create an event: CMSG_CALENDAR_ADD_EVENT, with its invite list.
+    void createCalendarEvent(const CalendarEventDraft& draft,
+                             const std::vector<CalendarAddEventInvite>& invites);
     /// Answer an invitation: CMSG_CALENDAR_EVENT_RSVP with a
     /// CalendarInviteStatus (1 accepted, 2 declined, 8 tentative, 9 removed).
     void respondToCalendarInvite(uint64_t eventId, uint64_t inviteId,
                                  uint32_t status);
+    /// Sign up to a guild event: CMSG_CALENDAR_EVENT_SIGNUP.
+    void signUpForCalendarEvent(uint64_t eventId, bool tentative);
+    /// Take someone off an invite list: CMSG_CALENDAR_EVENT_REMOVE_INVITE.
+    void removeCalendarInvite(uint64_t inviteeGuid, uint64_t inviteId,
+                              uint64_t ownerInviteId, uint64_t eventId);
+    /// Copy an event to another date: CMSG_CALENDAR_COPY_EVENT.
+    void copyCalendarEvent(uint64_t eventId, uint64_t inviteId,
+                           uint32_t packedTime);
+    /// Report an event: CMSG_CALENDAR_COMPLAIN.
+    void complainCalendarEvent(uint64_t eventId, uint64_t creatorGuid);
+    /// Invite an arena team: CMSG_CALENDAR_ARENA_TEAM.
+    void massInviteArenaTeamToCalendarEvent(uint32_t teamId);
 
     // ---- Methods moved from GameHandler ----
     void sendSetDifficulty(uint32_t difficulty, bool raid = false);
@@ -476,9 +493,12 @@ public:
     void lfgJoin(const std::vector<uint32_t>& dungeonIds, uint8_t roles);
     void lfgLeave();
     void lfgSetRoles(uint8_t roles);
+    /// Answer the role check under way with the roles set (or none).
+    void lfgCompleteRoleCheck(bool accept);
     void lfgAcceptProposal(uint32_t proposalId, bool accept);
     void lfgSetBootVote(bool vote);
-    void lfgTeleport(bool toLfgDungeon = true);
+    /// CMSG_LFG_TELEPORT: `out` true leaves the dungeon, false goes back in.
+    void lfgTeleport(bool out = false);
     [[nodiscard]] LfgState getLfgState()           const { return lfgState_; }
     /// What the last finished dungeon paid out, for GetLFGCompletionReward.
     [[nodiscard]] const LfgCompletionReward& getLfgCompletionReward() const { return lfgCompletionReward_; }
@@ -661,10 +681,20 @@ private:
     std::string pendingInviterName;
 
     // Ready check
-    bool        pendingReadyCheck_       = false;
+    bool        pendingReadyCheck_       = false;   // the prompt is up for this player
+    bool        readyCheckActive_        = false;   // a check is under way, prompt or not
     uint32_t    readyCheckReadyCount_    = 0;
     uint32_t    readyCheckNotReadyCount_ = 0;
     std::string readyCheckInitiator_;
+    uint64_t    readyCheckInitiatorGuid_ = 0;
+    /// SMSG_GROUP_DESTROYED said ERR_GROUP_DISBANDED; the empty group list
+    /// after it should not add ERR_LEFT_GROUP_YOU.
+    bool        groupDestroyedAnnounced_ = false;
+    /// The player the interface asked to inspect; auto-inspects are others.
+    uint64_t    userInspectGuid_ = 0;
+    /// Seconds left on the check (Wow.exe 0x574d50: now + 30000 ms). The
+    /// initiator's client closes it when this runs out (0x573390).
+    float       readyCheckSecondsLeft_   = 0.0f;
     std::vector<ReadyCheckResult> readyCheckResults_;
 
     // Instance

@@ -170,3 +170,45 @@ TEST_CASE("a solo group carries no loot block", "[group-list]") {
     CHECK(data.memberCount == 0);
     CHECK(data.leaderGuid == 0x1001);
 }
+
+// The raid as the interface indexes it. SMSG_GROUP_LIST leaves the recipient
+// out and puts their subgroup and flags in the header; raidN,
+// GetRaidRosterInfo and GetNumRaidMembers all count from one list that puts
+// them back.
+TEST_CASE("the raid list puts the player back in their own subgroup", "[group-list]") {
+    GroupListData pd;
+    pd.groupType = 0x02;   // raid
+    pd.subGroup = 1;
+    pd.flags = 0x02;       // the player is main tank
+    pd.memberCount = 3;
+    wowee::game::GroupMember a; a.guid = 0xA; a.subGroup = 1; a.isOnline = 1;
+    wowee::game::GroupMember b; b.guid = 0xB; b.subGroup = 0; b.isOnline = 1;
+    wowee::game::GroupMember c; c.guid = 0xC; c.subGroup = 2; c.flags = 0x04;
+    pd.members = {a, b, c};
+
+    const auto raid = wowee::game::buildRaidSlots(pd, 0x1);
+    REQUIRE(raid.size() == 4);
+    CHECK(raid[0].guid == 0xB);                 // group 1 first
+    CHECK(raid[1].guid == 0x1);                 // then the player, first in group 2
+    CHECK(raid[1].member == nullptr);
+    CHECK(raid[1].flags == 0x02);
+    CHECK(raid[2].guid == 0xA);
+    CHECK(raid[3].guid == 0xC);
+    CHECK_FALSE(raid[3].online);
+
+    CHECK(wowee::game::groupUnitToken(pd, 0x1, 0x1) == "player");
+    CHECK(wowee::game::groupUnitToken(pd, 0x1, 0xB) == "raid1");
+    CHECK(wowee::game::groupUnitToken(pd, 0x1, 0xC) == "raid4");
+    CHECK(wowee::game::groupUnitToken(pd, 0x1, 0xD).empty());
+}
+
+TEST_CASE("a party has no raid list and counts party tokens from one", "[group-list]") {
+    GroupListData pd;
+    pd.groupType = 0x00;
+    pd.memberCount = 2;
+    wowee::game::GroupMember a; a.guid = 0xA;
+    wowee::game::GroupMember b; b.guid = 0xB;
+    pd.members = {a, b};
+    CHECK(wowee::game::buildRaidSlots(pd, 0x1).empty());
+    CHECK(wowee::game::groupUnitToken(pd, 0x1, 0xB) == "party2");
+}
