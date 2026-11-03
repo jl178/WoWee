@@ -300,7 +300,6 @@ private:
     /// The underwater tint and its waterline. One implementation, called
     /// from both the parallel and the fallback recording paths, which had
     /// carried different ones.
-    void renderUnderwaterOverlay(VkCommandBuffer cmd);
     void renderPostSceneOverlays(VkCommandBuffer cmd, game::GameHandler* gameHandler);
     void renderMinimapOverlay(VkCommandBuffer cmd, game::GameHandler* gameHandler);
 
@@ -467,6 +466,8 @@ public:
     /// over the scene under it. Handed to the water every frame, since the
     /// water renderer is built with the world, after settings are applied.
     void setShorelineFoam(bool enabled) { shorelineFoam_ = enabled; }
+    void setWaterReflections(bool enabled) { waterReflections_ = enabled; }
+    void setWaterSplashes(bool enabled) { waterSplashes_ = enabled; }
     /// Darker, slightly glossy outdoor ground and walls while it rains, eased
     /// in and out (WetGround). Off snaps the ground dry at once.
     void setWetGround(bool enabled) { wetGroundEnabled_ = enabled; }
@@ -516,6 +517,9 @@ private:
     float clothWindStrength_ = 1.0f;      // setting x weather, eased: cloth breathes indoors too
     float shadowStrengthSetting_ = 1.0f;  // the "Shadow darkness" setting
     bool shorelineFoam_ = true;           // the "Shoreline foam" setting
+    bool waterReflections_ = false;       // "Water reflections": the sky in the water, not stock
+    bool waterSplashes_ = false;          // "Splashes, wakes and bubbles": not stock
+    uint32_t cameraLiquidType_ = 0;       // LiquidType the camera is in, 0 when not
     bool wetGroundEnabled_ = true;        // the "Wet ground in rain" setting
     float wetness_ = 0.0f;                // 0 dry .. 1 soaked, eased (WetGround); rtParams.w
     float terrainRelief_ = 1.0f;          // see setTerrainRelief

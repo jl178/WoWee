@@ -259,6 +259,13 @@ constexpr SettingDesc kSchema[] = {
     {"shorelinefoam", "Shoreline foam", SettingKind::Bool, 0, 0, 0, "Grass", "",
      "A soft band of foam where water laps at the shore, rocks and\n"
      "posts, drifting slowly. Cheap. Off is the original water's edge.", "", 1},
+    {"waterreflections", "Water reflections", SettingKind::Bool, 0, 0, 0, "Grass", "",
+     "The sky mirrored faintly in lakes, rivers and the sea. The\n"
+     "original water reflects nothing. Costs a second sky draw.", "", 0},
+    {"watersplashes", "Splashes, wakes and bubbles", SettingKind::Bool, 0, 0, 0, "Grass", "",
+     "Spray and froth where you swim or wade, bubbles under water and\n"
+     "midges over the reeds. The original water has none of these;\n"
+     "its own underwater motes stay either way.", "", 0},
     {"wetground", "Wet ground in rain", SettingKind::Bool, 0, 0, 0, "Grass", "",
      "Ground and outside walls darken and catch a faint sheen while\n"
      "it rains, and dry off slowly after. Never indoors. Cheap.", "", 1},

@@ -100,6 +100,10 @@ public:
     // persistent work/state loop instead of idling.
     void playAnimation(uint32_t instanceId, uint32_t animationId, bool loop = true,
                        uint32_t oneShotReturnAnim = 0);
+    /// The sequence the instance is playing now: the variation rolled, the
+    /// fallback the model plays for the requested id (getAnimationState
+    /// reports the requested id, as the stock client does). False if none.
+    bool getPlayingSequence(uint32_t instanceId, pipeline::M2Sequence& out) const;
     /// The unit is dead. Locks the instance in its death pose: every
     /// playAnimation but Death/Dead is ignored until clearDeath. A unit that
     /// dies in view (alreadyDead false) plays Death once and holds its last
@@ -503,6 +507,19 @@ private:
         std::vector<BoneLocalPose> blendFromPose;
         float blendElapsedMs = 0.0f;
         float blendDurationMs = 0.0f;  // 0 = not blending
+        // The outgoing sequence keeps playing on its own clock while it fades
+        // (CM2Model's secondary state, bs+0x64, 0x826C40): its index (-1 =
+        // fade from the blendFromPose snapshot instead), time, speed, whether
+        // it loops, and its play mode.
+        int blendFromSeq = -1;
+        float blendFromTime = 0.0f;
+        float blendFromSpeed = 1.0f;
+        bool blendFromLoop = true;
+        uint8_t blendFromMode = 0;
+        // How the current sequence plays (anim::PlayMode): a fallback reached
+        // through an AnimationData row with Flags 0x10 plays backwards, 0x20
+        // holds a frame. animationTime stays the time since the start.
+        uint8_t playMode = 0;
 
         // Geoset visibility - which submesh IDs to render
         // Empty = render all (for non-character models)
@@ -855,6 +872,12 @@ private:
     /// The variation of `animationId` to start: its first while
     /// firstVariationPredicate_ holds the instance there, else rolled.
     int pickLoopVariation(uint32_t instanceId, const pipeline::M2Model& model, uint32_t animationId) const;
+    /// Start the cross-fade into sequence `newSeq` (0x826C40): the playing
+    /// sequence becomes the outgoing one, unless a fade still more than half
+    /// on the old side is running, which is kept as it is. blendTime 0 cuts.
+    static void beginSequenceBlend(CharacterInstance& inst, const pipeline::M2Model& model, int newSeq,
+                                   int fromSeq, float fromTime, float fromSpeed, bool fromLoop,
+                                   uint8_t fromMode);
     // setAnimCullView: the frame's view-projection and shadow ray direction.
     bool animCullValid_ = false;
     glm::mat4 animCullViewProj_{1.0f};

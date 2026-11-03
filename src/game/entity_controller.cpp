@@ -1135,12 +1135,20 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             // an NPC's own emote state back when it stands.
             const uint8_t newStandState = static_cast<uint8_t>(val & 0xFF);
             if (newStandState != unit->getStandState()) {
+                const uint8_t oldStandState = unit->getStandState();
                 unit->setStandState(newStandState);
                 if (block.guid != owner_.getPlayerGuid() && newStandState != 7 &&
                     owner_.emoteAnimCallbackRef()) {
                     owner_.emoteAnimCallbackRef()(
                         block.guid, rendering::anim::standStateLoopAnim(newStandState),
                         /*isState=*/true);
+                    // The way down or up first (0x71E1F0): SitGroundDown into
+                    // the sit, SleepUp out of the sleep, and so on, the loop
+                    // above coming back when it ends.
+                    if (const uint32_t trans =
+                            rendering::anim::standStateTransitionAnim(oldStandState, newStandState)) {
+                        owner_.emoteAnimCallbackRef()(block.guid, trans, /*isState=*/false);
+                    }
                 }
             }
             const uint8_t oldVisibilityFlags = unit->getVisibilityFlags();

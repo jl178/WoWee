@@ -104,7 +104,15 @@ void ActivityFSM::setStandState(uint8_t standState) {
         sitDownAnimSeen_ = false;
         sitDownFrames_ = 0;
         state_ = State::SIT_DOWN;
-    } else if (standState >= STAND_STATE_SIT_CHAIR && standState <= STAND_STATE_SIT_HIGH) {
+    } else if (standState == STAND_STATE_SIT_CHAIR) {
+        // UNIT_STAND_STATE_SIT_CHAIR has no animation in the stock chooser
+        // (0x71E1F0 passes it over): the character stands.
+        sitDownAnim_ = 0;
+        sitLoopAnim_ = 0;
+        sitUpAnim_   = 0;
+        if (state_ == State::SIT_DOWN || state_ == State::SITTING || state_ == State::SIT_UP)
+            state_ = State::NONE;
+    } else if (standState > STAND_STATE_SIT_CHAIR && standState <= STAND_STATE_SIT_HIGH) {
         // Chair variants - no transition animation, go directly to loop
         sitDownAnim_ = 0;
         sitUpAnim_   = 0;

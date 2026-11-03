@@ -6,6 +6,7 @@
 #include "rendering/animation/emote_registry.hpp"
 #include "rendering/animation/anim_capability_probe.hpp"
 #include "rendering/animation/mount_fsm.hpp"
+#include "rendering/animation/anim_selection.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/camera.hpp"
@@ -88,6 +89,11 @@ void AnimationController::playEmote(const std::string& emoteName) {
                     (loop ? " (looping)" : " (one shot)"),
                     " model has it: ", (has ? "yes" : "NO"));
     }
+
+    // On the move a one-shot emote plays on the upper body over the run (an
+    // emote is an upper-body animation, 0x71D800, and 0x723E30 splits it off
+    // a moving unit's legs): a wave while running. Standing, it takes the body.
+    if (!loop && playSwingOnUpperBody(animId)) return;
 
     // Forward to CharacterAnimator (ActivityFSM handles emote state)
     characterAnimator_.playEmote(animId, loop);
@@ -635,8 +641,6 @@ void AnimationController::setMounted(uint32_t mountInstId, uint32_t mountDisplay
     mountHeightOffset_ = heightOffset;
     mountPitch_ = 0.0f;
     mountRoll_ = 0.0f;
-    mountRateAnimId_ = UINT32_MAX;
-    mountRateMoveSpeed_ = 0.0f;
     lastMountAnimRequest_ = UINT32_MAX;
 
     if (cameraController) {
@@ -841,19 +845,14 @@ void AnimationController::updateMountedAnimation(float deltaTime) {
         float t = 0.0f, d = 0.0f;
         const bool ground = !in.swimming && !in.flying && !taxiFlight_;
         if (characterRenderer->getAnimationState(mountInstanceId_, cur, t, d)) {
-            if (cur != mountRateAnimId_) {
-                mountRateAnimId_ = cur;
-                mountRateMoveSpeed_ = 0.0f;
-                std::vector<pipeline::M2Sequence> seqs;
-                if (characterRenderer->getAnimationSequences(mountInstanceId_, seqs)) {
-                    for (const auto& q : seqs) {
-                        if (q.id == cur) { mountRateMoveSpeed_ = q.movingSpeed; break; }
-                    }
-                }
-            }
+            // The sequence actually playing: the rolled variation, or the
+            // fallback a mount without the requested id plays.
+            pipeline::M2Sequence playing{};
+            const float moveSpeed =
+                characterRenderer->getPlayingSequence(mountInstanceId_, playing) ? playing.movingSpeed : 0.0f;
             float rate = 1.0f;
-            if (ground && in.moving && in.speed > 0.0f && mountRateMoveSpeed_ != 0.0f)
-                rate = in.speed / std::abs(mountRateMoveSpeed_);
+            if (ground && in.moving && in.speed > 0.0f && moveSpeed != 0.0f)
+                rate = in.speed / std::abs(moveSpeed);
             characterRenderer->setAnimationSpeed(mountInstanceId_, rate);
         }
     }
@@ -928,6 +927,9 @@ void AnimationController::updateCharacterAnimation() {
     fi.descending = cameraController->isDescending();
     fi.jumpKeyPressed = cameraController->isJumpKeyPressed();
     fi.characterYaw = renderer_->getCharacterYaw();
+    // The pace comes from the speed the movement flags select (0x717050).
+    fi.speed = fi.moving ? cameraController->currentMoveSpeed() : 0.0f;
+    fi.walkSpeed = cameraController->currentWalkSpeed();
     // Turning in place, as CGUnit_C's update does it (0x0073E2C0): only with
     // none of the flags 0x2E0100F (moving, falling, swimming, ascending,
     // descending, flying); then the turn keys (0x10/0x20) or the drawn body
@@ -1011,6 +1013,24 @@ void AnimationController::updateCharacterAnimation() {
         lastPlayerAnimRequest_ = animId;
         lastPlayerAnimLoopRequest_ = loop;
     }
+
+    // A moving animation plays at the speed over its sequence's MoveSpeed
+    // (0x7385C0), the local character's as everyone else's: a walk at 2.5,
+    // a backpedal at 4.5, a run slowed or hastened, a swim stroke.
+    syncLocalMoveRate(fi.moving, fi.speed);
+}
+
+void AnimationController::syncLocalMoveRate(bool moving, float speed) {
+    auto* cr = renderer_->getCharacterRenderer();
+    const uint32_t inst = renderer_->getCharacterInstanceId();
+    if (!cr || inst == 0) return;
+    uint32_t cur = 0;
+    float t = 0.0f, d = 0.0f;
+    if (!cr->getAnimationState(inst, cur, t, d) || !anim::isMovingAnim(cur)) return;
+    pipeline::M2Sequence playing{};
+    if (!cr->getPlayingSequence(inst, playing)) return;
+    const float rate = moving ? anim::moveSpeedRate(speed, playing.movingSpeed) : 1.0f;
+    cr->setAnimationSpeed(inst, rate);
 }
 
 // ── Footstep update (delegated to FootstepDriver) ───────────────────────────

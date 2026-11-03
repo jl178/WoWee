@@ -31,12 +31,13 @@ namespace wowee {
 namespace rendering {
 
 // Matches set 1 binding 0 in water.frag.glsl
+// Per surface (set 1), matching WaterMaterial in water.frag.glsl.
 struct WaterMaterialUBO {
-    glm::vec4 waterColor;
-    float waterAlpha;
-    float shimmerStrength;
-    float alphaScale;
-    float bodyFloor;   // least the water's own colour shows, however shallow
+    glm::vec4 vertexColor;   // attrib4: white, or an interior WMO group's MOMT colour
+    float interior;          // 1: the fixed interior light and the WMO ramp's white columns
+    float pad0 = 0.0f;
+    float pad1 = 0.0f;
+    float pad2 = 0.0f;
 };
 
 // Push constants matching water.vert.glsl
@@ -56,8 +57,10 @@ struct WaterPushConstants {
     float liquidTexValid = 0.0f; // 1 when set 3 holds a frame of this liquid's texture
     float shoreFoam = 0.0f;      // 1 draws the shoreline foam band, 0 the stock water
     float depthRamp = 0.0f;      // LiquidInfo::depthRamp: 0 river, 1 ocean, 2 WMO water
+    float texRotCos = 1.0f;      // the stage 1 rotation (LiquidInfo::texRotCos/Sin)
+    float texRotSin = 0.0f;
 };
-static_assert(sizeof(WaterPushConstants) == 112, "the two shader declarations of this range are laid out for 112 bytes");
+static_assert(sizeof(WaterPushConstants) == 120, "the two shader declarations of this range are laid out for 120 bytes");
 
 
 
@@ -198,11 +201,12 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
     vertBinding.stride = 8 * sizeof(float);
     vertBinding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    // Water vertex shader only takes aPos(vec3) at loc 0 and aTexCoord(vec2) at loc 1
-    // (normal is computed in shader from wave derivatives)
+    // aPos at 0, the liquid uv at 1, and the stock ramp coordinate (carried in
+    // the normal slot - the stock normal is always up) at 2.
     std::vector<VkVertexInputAttributeDescription> vertAttribs = {
         { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0 },                     // aPos
-        { .location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 6 * sizeof(float) },        // aTexCoord (skip normal)
+        { .location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 6 * sizeof(float) },        // aTexCoord
+        { .location = 2, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 3 * sizeof(float) },           // ramp coordinate
     };
 
     VkRenderPass mainPass = vkCtx->getImGuiRenderPass();
@@ -267,6 +271,7 @@ void WaterRenderer::recreatePipelines() {
     std::vector<VkVertexInputAttributeDescription> vertAttribs = {
         { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0 },
         { .location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 6 * sizeof(float) },
+        { .location = 2, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 3 * sizeof(float) },        // ramp coordinate
     };
 
     VkRenderPass mainPass = vkCtx->getImGuiRenderPass();
@@ -569,6 +574,10 @@ void WaterRenderer::loadLiquidTextures(pipeline::AssetManager* assetManager) {
             else if (ramp.find("ocean") != std::string::npos) info.depthRamp = 1;
             else if (ramp.empty() && info.basicType == 1) info.depthRamp = 1;
         }
+        info.flags = dbc->getUInt32(row, 2);
+        info.particleScale = dbc->getFloat(row, 11);
+        info.particleMovement = static_cast<int>(dbc->getUInt32(row, 12));
+        info.particleTexSlots = static_cast<int>(dbc->getUInt32(row, 13));
         if (dbc->getFieldCount() >= 43) {
             const bool magmaMaterial = dbc->getUInt32(row, 14) == 2 || info.basicType >= 2;
             info.framePeriodMs = stock_liquid::framePeriodMs(dbc->getUInt32(row, 42), magmaMaterial);
@@ -577,9 +586,15 @@ void WaterRenderer::loadLiquidTextures(pipeline::AssetManager* assetManager) {
             if (magmaMaterial) {
                 info.scrollU = f0;
                 info.scrollV = f1;
-            } else if (f0 > 0.0f) {
-                info.texScale = f0;
+            } else {
+                if (f0 > 0.0f) info.texScale = f0;
+                const float angle = stock_liquid::textureRotationRadians(f1);
+                info.texRotCos = std::cos(angle);
+                info.texRotSin = std::sin(angle);
+                const float f2 = dbc->getFloat(row, 25);
+                if (f2 > 0.0f) info.rampScale = f2;
             }
+            info.depthDivisor = stock_liquid::depthDivisor(dbc->getUInt32(row, 41));
         }
         liquidInfoById_[static_cast<uint16_t>(id)] = info;
     }
@@ -839,44 +854,9 @@ void WaterRenderer::createSceneHistoryResources(VkExtent2D extent, VkFormat colo
 }
 
 void WaterRenderer::updateMaterialUBO(WaterSurface& surface) {
-    glm::vec4 color = getLiquidColor(surface.liquidType);
-    float alpha = getLiquidAlpha(surface.liquidType);
-
-    // WMO liquid material override
-    if (surface.wmoId != 0) {
-        const uint8_t basicType = (surface.liquidType == 0) ? 0 : ((surface.liquidType - 1) % 4);
-        if (basicType == 2) {
-            // Magma - bright orange-red, opaque
-            color = glm::vec4(1.0f, 0.35f, 0.05f, 1.0f);
-            alpha = 0.95f;
-        } else if (basicType == 3) {
-            // Slime - green, semi-opaque
-            color = glm::vec4(0.2f, 0.6f, 0.1f, 1.0f);
-            alpha = 0.85f;
-        }
-    }
-
-    bool canalProfile = (surface.wmoId != 0) || (surface.liquidType == 5);
-    float shimmerStrength = canalProfile ? 0.95f : 0.50f;
-    // A canal is a couple of yards deep, and the water's colour is weighted by
-    // depth - so it came out as clear glass over the stone bed. Its own colour
-    // is given a floor, a little deeper than a lake's, and it is no longer
-    // thinned below open water.
-    // The stock path takes its alpha from LightParams' shallow/deep alphas
-    // unscaled, canals included.
-    float alphaScale = 1.00f;
-    float bodyFloor = 0.0f;
-    if (canalProfile && (surface.liquidType == 0 || (surface.liquidType - 1) % 4 < 2)) {
-        color = glm::vec4(0.08f, 0.30f, 0.40f, 1.0f);
-        bodyFloor = 0.45f;
-    }
-
     WaterMaterialUBO mat{};
-    mat.waterColor = color;
-    mat.waterAlpha = alpha;
-    mat.shimmerStrength = shimmerStrength;
-    mat.alphaScale = alphaScale;
-    mat.bodyFloor = bodyFloor;
+    mat.vertexColor = surface.vertexColor;
+    mat.interior = surface.interior ? 1.0f : 0.0f;
 
     // Create UBO
     VkBufferCreateInfo bufCI{};
@@ -1048,6 +1028,8 @@ void WaterRenderer::loadFromTerrain(const pipeline::ADTTerrain& terrain, bool ap
                 surface.mask = layer.mask;
                 surface.tileX = tileX;
                 surface.tileY = tileY;
+                if (layer.depths.size() == numVertices) surface.depths = layer.depths;
+                if (layer.uvs.size() == numVertices * 2) surface.uvs = layer.uvs;
 
                 createWaterMesh(surface);
                 if (surface.indexCount > 0 && vkCtx) {
@@ -1086,6 +1068,16 @@ void WaterRenderer::loadFromTerrain(const pipeline::ADTTerrain& terrain, bool ap
         const int gridW = MERGED_W + 1;  // 129
         const int gridH = MERGED_W + 1;
         surface.heights.resize(gridW * gridH, groupHeight);
+        // Depth bytes and uvs on the same grid, filled where a layer has
+        // them; a vertex no layer covers is the deep end.
+        bool groupHasDepths = false;
+        bool groupHasUVs = false;
+        for (const auto& info : chunkLayers) {
+            groupHasDepths = groupHasDepths || !info.layer->depths.empty();
+            groupHasUVs = groupHasUVs || !info.layer->uvs.empty();
+        }
+        if (groupHasDepths) surface.depths.assign(static_cast<size_t>(gridW) * gridH, 0xFF);
+        if (groupHasUVs) surface.uvs.assign(static_cast<size_t>(gridW) * gridH * 2, 0.0f);
 
         // Initialize mask (128×128 sub-tiles)
         // Mask uses LSB bit order: tileIndex = row * 128 + col
@@ -1144,6 +1136,14 @@ void WaterRenderer::loadFromTerrain(const pipeline::ADTTerrain& terrain, bool ap
                     }
 
                     surface.heights[mgy * gridW + mgx] = h;
+                    const size_t layerIdx = static_cast<size_t>(ly) * layerGridW + lx;
+                    if (!surface.depths.empty() && layer.depths.size() == numVertices) {
+                        surface.depths[mgy * gridW + mgx] = layer.depths[layerIdx];
+                    }
+                    if (!surface.uvs.empty() && layer.uvs.size() == numVertices * 2) {
+                        surface.uvs[(mgy * gridW + mgx) * 2] = layer.uvs[layerIdx * 2];
+                        surface.uvs[(mgy * gridW + mgx) * 2 + 1] = layer.uvs[layerIdx * 2 + 1];
+                    }
                     if (h < surface.minHeight) surface.minHeight = h;
                     if (h > surface.maxHeight) surface.maxHeight = h;
                 }
@@ -1209,9 +1209,8 @@ void WaterRenderer::removeTile(int tileX, int tileY) {
     }
 }
 
-void WaterRenderer::loadFromWMO([[maybe_unused]] const pipeline::WMOLiquid& liquid,
-                                 [[maybe_unused]] const glm::mat4& modelMatrix,
-                                 [[maybe_unused]] uint32_t wmoId) {
+void WaterRenderer::loadFromWMO(const pipeline::WMOLiquid& liquid, const glm::mat4& modelMatrix,
+                                 uint32_t wmoId, uint32_t momtColor) {
     if (!liquid.hasLiquid() || liquid.xTiles == 0 || liquid.yTiles == 0) return;
     if (liquid.xVerts < 2 || liquid.yVerts < 2) return;
     if (liquid.xTiles != liquid.xVerts - 1 || liquid.yTiles != liquid.yVerts - 1) return;
@@ -1279,6 +1278,43 @@ void WaterRenderer::loadFromWMO([[maybe_unused]] const pipeline::WMOLiquid& liqu
     }
 
     if (surface.origin.z > 2000.0f || surface.origin.z < -500.0f) return;
+
+    // The stock vertex (0x7a7b00): water carries its depth byte (byte 0) and
+    // a uv of (vertex - MLIQ corner) x 0.24 a yard, one repeat a cell - so
+    // the cell grid itself; magma and slime carry s,t in 1/256ths.
+    {
+        const LiquidInfo info = resolveLiquid(surface.liquidType);
+        const bool magmaFormat = info.basicType >= 2;
+        const bool haveWords = liquid.vertexWords.size() >= static_cast<size_t>(vertexCount);
+        surface.uvs.resize(static_cast<size_t>(vertexCount) * 2);
+        if (!magmaFormat) surface.depths.assign(static_cast<size_t>(vertexCount), 0xFF);
+        for (int y = 0; y < gridHeight; ++y) {
+            for (int x = 0; x < gridWidth; ++x) {
+                const size_t i = static_cast<size_t>(y) * gridWidth + x;
+                const uint32_t w = haveWords ? liquid.vertexWords[i] : 0u;
+                if (magmaFormat) {
+                    surface.uvs[i * 2] = static_cast<float>(static_cast<int16_t>(w & 0xFFFFu)) / 256.0f;
+                    surface.uvs[i * 2 + 1] = static_cast<float>(static_cast<int16_t>(w >> 16)) / 256.0f;
+                } else {
+                    surface.uvs[i * 2] = static_cast<float>(x);
+                    surface.uvs[i * 2 + 1] = static_cast<float>(y);
+                    if (haveWords) surface.depths[i] = static_cast<uint8_t>(w & 0xFFu);
+                }
+            }
+        }
+        // A group that is not exterior (MOGP & 0x48 == 0) - unless the type
+        // has flag 0x200, as WMO Ocean does - is lit by the fixed interior
+        // light (every colour 1) and coloured by its MOMT colour; outside,
+        // the vertex colour is white (0x7a7b00, 0x7d4f40).
+        surface.interior = (liquid.groupFlags & 0x48u) == 0 && (info.flags & 0x200u) == 0;
+        if (surface.interior) {
+            // MOMT colours are BGRA bytes: 0xAARRGGBB.
+            surface.vertexColor = glm::vec4(static_cast<float>((momtColor >> 16) & 0xFFu),
+                                            static_cast<float>((momtColor >> 8) & 0xFFu),
+                                            static_cast<float>(momtColor & 0xFFu),
+                                            static_cast<float>((momtColor >> 24) & 0xFFu)) / 255.0f;
+        }
+    }
 
     // Build tile mask from MLIQ flags
     size_t tileCount = static_cast<size_t>(surface.width) * static_cast<size_t>(surface.height);
@@ -1482,6 +1518,8 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         uint8_t depthRamp = liquid.depthRamp;
         if (surface.wmoId != 0 && basicType == 0) depthRamp = 2;
         push.depthRamp = static_cast<float>(depthRamp);
+        push.texRotCos = liquid.texRotCos;
+        push.texRotSin = liquid.texRotSin;
 
         vkCmdPushConstants(cmd, pipelineLayout,
                             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -1655,6 +1693,7 @@ void WaterRenderer::createWaterMesh(WaterSurface& surface) {
 
     std::vector<float> vertices;
     std::vector<uint32_t> indices;
+    const LiquidInfo liquid = resolveLiquid(surface.liquidType);
 
     for (int y = 0; y < gridHeight; y++) {
         for (int x = 0; x < gridWidth; x++) {
@@ -1671,13 +1710,27 @@ void WaterRenderer::createWaterMesh(WaterSurface& surface) {
             vertices.push_back(pos.x);
             vertices.push_back(pos.y);
             vertices.push_back(pos.z);
-            // normal (3 floats) - up
-            vertices.push_back(0.0f);
+            // The normal slot carries the stock vertex's ramp coordinate
+            // (attrib 7's v, through the stage 0 matrix): its depth byte
+            // over 42 or 255 by LiquidType Int[0], clamped at 1 per vertex as
+            // the client's tables do, times Float[2]. 255, the deep end, when
+            // the data has none. The normal itself is up (0x7ce390), so the
+            // shader does not read one.
+            const size_t vi = static_cast<size_t>(index);
+            const uint8_t depthByte = vi < surface.depths.size() ? surface.depths[vi] : uint8_t{0xFF};
+            vertices.push_back(stock_liquid::rampCoordinate(depthByte, liquid.depthDivisor) * liquid.rampScale);
             vertices.push_back(0.0f);
             vertices.push_back(1.0f);
-            // texcoord (2 floats)
-            vertices.push_back(static_cast<float>(x) / std::max(1, gridWidth - 1));
-            vertices.push_back(static_cast<float>(y) / std::max(1, gridHeight - 1));
+            // The liquid texture's uv before its texture matrix (attrib 6):
+            // the data's own (magma, WMO cells), else world x,y x 0.06 - one
+            // repeat every 16.67 yards (0x7ce390, 0xa40410).
+            if (vi * 2 + 1 < surface.uvs.size()) {
+                vertices.push_back(surface.uvs[vi * 2]);
+                vertices.push_back(surface.uvs[vi * 2 + 1]);
+            } else {
+                vertices.push_back(pos.x * 0.06f);
+                vertices.push_back(pos.y * 0.06f);
+            }
         }
     }
 
@@ -1857,38 +1910,6 @@ std::optional<uint16_t> WaterRenderer::getWaterTypeAt(float glX, float glY) cons
     }
 
     return bestType;
-}
-
-bool WaterRenderer::isWmoWaterAt(float glX, float glY) const {
-    for (const auto& surface : surfaces) {
-        if (surface.wmoId == 0) continue;
-        if (surfaceGridPosition(surface.origin, surface.stepX, surface.stepY,
-                                surface.width, surface.height, glX, glY)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-glm::vec4 WaterRenderer::getLiquidColor(uint16_t liquidType) const {
-    uint8_t basicType = (liquidType == 0) ? 0 : ((liquidType - 1) % 4);
-    switch (basicType) {
-        case 0:  return glm::vec4(0.10f, 0.28f, 0.55f, 1.0f); // inland: richer blue
-        case 1:  return glm::vec4(0.04f, 0.16f, 0.38f, 1.0f); // ocean: deep blue
-        case 2:  return glm::vec4(0.9f, 0.3f, 0.05f, 1.0f);   // magma
-        case 3:  return glm::vec4(0.2f, 0.6f, 0.1f, 1.0f);    // slime
-        default: return glm::vec4(0.10f, 0.28f, 0.55f, 1.0f);
-    }
-}
-
-float WaterRenderer::getLiquidAlpha(uint16_t liquidType) const {
-    uint8_t basicType = (liquidType == 0) ? 0 : ((liquidType - 1) % 4);
-    switch (basicType) {
-        case 1:  return 0.72f;  // ocean
-        case 2:  return 0.75f;  // magma
-        case 3:  return 0.65f;  // slime
-        default: return 0.48f;  // inland water
-    }
 }
 
 // ==============================================================
@@ -2171,6 +2192,12 @@ void WaterRenderer::endReflectionPass(VkCommandBuffer cmd) {
     }
 }
 
+void WaterRenderer::clearWake() {
+    wakePoints_.clear();
+    hasWakeEmitPos_ = false;
+    frameUBO_.wakeBounds = glm::vec4(0.0f);
+}
+
 void WaterRenderer::updateReflectionUBO(const glm::mat4& reflViewProj) {
     frameUBO_.reflViewProj = reflViewProj;
     uploadFrameUBO();
@@ -2440,6 +2467,7 @@ bool WaterRenderer::createWater1xPass(VkFormat colorFormat, VkFormat depthFormat
     std::vector<VkVertexInputAttributeDescription> vertAttribs = {
         { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0 },
         { .location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 6 * sizeof(float) },
+        { .location = 2, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 3 * sizeof(float) },        // ramp coordinate
     };
 
     water1xPipeline = PipelineBuilder()

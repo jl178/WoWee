@@ -8,6 +8,8 @@
 #include "ui/inventory_screen.hpp"
 #include "ui/spellbook_screen.hpp"
 #include "ui/ui_colors.hpp"
+#include "core/appearance_composer.hpp"
+#include "rendering/animation/emote_registry.hpp"
 #include "rendering/vk_context.hpp"
 #include "core/application.hpp"
 #include "addons/addon_manager.hpp"
@@ -296,8 +298,15 @@ void ChatPanel::sendChatMessage(game::GameHandler& gameHandler) {
 
             std::string emoteText = rendering::AnimationController::getEmoteText(cmdLower, targetNamePtr);
             if (!emoteText.empty()) {
-                auto* renderer = services_.renderer;
-                if (renderer) {
+                // The stock emote (0x6DD9E0): weapons put away, then a stand
+                // state change (/sleep, /laydown: EmoteSpecProc 1) or the
+                // emote's animation.
+                if (services_.appearanceComposer)
+                    services_.appearanceComposer->requestWeaponsSheathed(true, "emote");
+                auto& emotes = rendering::EmoteRegistry::instance();
+                if (auto standState = emotes.standStateFor(cmdLower)) {
+                    gameHandler.setStandState(*standState);
+                } else if (auto* renderer = services_.renderer) {
                     if (auto* ac = renderer->getAnimationController()) ac->playEmote(cmdLower);
                 }
 

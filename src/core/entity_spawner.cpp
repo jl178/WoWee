@@ -872,15 +872,16 @@ uint32_t EntitySpawner::unitIdleAnim(uint64_t guid, uint32_t instanceId) {
 
 uint32_t EntitySpawner::unitMoveAnim(uint64_t guid, uint32_t instanceId, uint32_t moveAnim) {
     using namespace rendering::anim;
-    if (moveAnim != WALK && moveAnim != RUN) return moveAnim;
+    // Stock 0x717050: a stealthed unit moving forward or sideways plays
+    // StealthWalk (119) whatever its pace - Walk, Run or Sprint - and a
+    // model without it falls back (AnimationData) to Walk. No StealthRun.
+    if (moveAnim != WALK && moveAnim != RUN && moveAnim != SPRINT) return moveAnim;
     auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
     if (!cr || !gameHandler_ || instanceId == 0) return moveAnim;
     auto entity = gameHandler_->getEntityManager().getEntity(guid);
     if (!entity || !entity->isUnit()) return moveAnim;
     if (!std::static_pointer_cast<game::Unit>(entity)->hasCreepVisibility()) return moveAnim;
-    if (moveAnim == RUN && cr->hasAnimation(instanceId, STEALTH_RUN)) return STEALTH_RUN;
-    if (cr->hasAnimation(instanceId, STEALTH_WALK)) return STEALTH_WALK;
-    return moveAnim;
+    return STEALTH_WALK;
 }
 
 void EntitySpawner::playSheathSound(const ItemDbcRow& item, bool drawing, const glm::vec3& renderPos) {

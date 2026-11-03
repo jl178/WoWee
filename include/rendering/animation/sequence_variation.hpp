@@ -100,15 +100,6 @@ inline int pickSequenceVariation(const std::vector<pipeline::M2Sequence>& seqs,
     return primary;
 }
 
-/// Extra laps the variation plays after this one, from its replay range
-/// (the range counts laps in all; 0-0 is one lap).
-inline uint32_t pickSequenceExtraLaps(const pipeline::M2Sequence& s) {
-    if (s.replayMax == 0 || s.replayMax < s.replayMin) return 0;
-    std::uniform_int_distribution<uint32_t> dist(s.replayMin, s.replayMax);
-    const uint32_t laps = dist(sequenceVariationRng());
-    return laps > 0 ? laps - 1 : 0;
-}
-
 /// The sequence a model plays when it is created, as the stock client picks
 /// it (CM2Model setup on load, 0x834540): Stand (id 0) if the model has it,
 /// else the id of its first sequence, with the variation rolled by frequency

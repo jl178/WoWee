@@ -123,7 +123,7 @@ constexpr const char* kGraphicsApplyKeys[] = {
     "fsrsharpness", "framegen", "brightness", "uiopacity", "minimapsquare",
     "minimapnpcdots", "minimapclock", "minimapcoords", "minimaprotate", "latencymeter",
     "fogskyblend", "fogstrength", "sharpstars", "lensflare", "lightshafts", "mistdensity", "sunshafts",
-    "raytracedlighting", "shadowstrength", "foliagewind", "shorelinefoam", "wetground",
+    "raytracedlighting", "shadowstrength", "foliagewind", "shorelinefoam", "waterreflections", "watersplashes", "wetground",
     // Moved off the game's own Effects panel, so this list is now what
     // applies them at startup; the cvar store used to do it.
     "groundclutterdistance", "particledensity", "weatherdetail",
@@ -347,6 +347,8 @@ constexpr FieldBinding kFieldBindings[] = {
     {.key = "sharpstars",        .asBool  = &SettingsPanel::pendingSharpStars},
     {.key = "sunshafts",         .asBool  = &SettingsPanel::pendingSunShafts},
     {.key = "shorelinefoam",     .asBool  = &SettingsPanel::pendingShorelineFoam},
+    {.key = "waterreflections",  .asBool  = &SettingsPanel::pendingWaterReflections},
+    {.key = "watersplashes",     .asBool  = &SettingsPanel::pendingWaterSplashes},
     {.key = "wetground",         .asBool  = &SettingsPanel::pendingWetGround},
     {.key = "parallaxquality",   .asInt   = &SettingsPanel::pendingPOMQuality},
 
@@ -678,6 +680,10 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
         if (renderer) renderer->setSunShaftsEnabled(pendingSunShafts);
     } else if (key == "shorelinefoam") {
         if (renderer) renderer->setShorelineFoam(pendingShorelineFoam);
+    } else if (key == "waterreflections") {
+        if (renderer) renderer->setWaterReflections(pendingWaterReflections);
+    } else if (key == "watersplashes") {
+        if (renderer) renderer->setWaterSplashes(pendingWaterSplashes);
     } else if (key == "wetground") {
         if (renderer) renderer->setWetGround(pendingWetGround);
     } else if (key == "parallaxquality") {

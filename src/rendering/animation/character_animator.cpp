@@ -3,6 +3,7 @@
 // All animations are now generic (character-based, not player-specific).
 #include "rendering/animation/character_animator.hpp"
 #include "rendering/animation/animation_ids.hpp"
+#include "rendering/animation/mount_rules.hpp"
 #include "game/inventory.hpp"
 
 namespace wowee {
@@ -184,6 +185,14 @@ AnimOutput CharacterAnimator::resolveAnimation() {
     locoIn.moving = fi.moving;
     locoIn.movingForward = fi.movingForward;
     locoIn.sprinting = fi.sprinting;
+    locoIn.sprintAura = sprintAura_;
+    if (fi.speed >= 0.0f) {
+        // The pace is the speed's (0x717050): a Sprint aura, Aspect of the
+        // Cheetah or a slow all reach the animation only through it.
+        const anim::MountPace pace = anim::mountGroundPace(fi.speed, fi.walkSpeed);
+        locoIn.sprinting = pace != anim::MountPace::Walk;
+        locoIn.sprintAura = pace == anim::MountPace::Sprint;
+    }
     locoIn.movingBackward = fi.movingBackward;
     locoIn.strafeLeft = fi.strafeLeft;
     locoIn.strafeRight = fi.strafeRight;
@@ -191,7 +200,6 @@ AnimOutput CharacterAnimator::resolveAnimation() {
     locoIn.jumping = fi.jumping;
     locoIn.swimming = fi.swimming;
     locoIn.sitting = fi.sitting;
-    locoIn.sprintAura = sprintAura_;
     locoIn.turnLeft = fi.turnLeft;
     locoIn.turnRight = fi.turnRight;
     locoIn.deltaTime = lastDt_;
@@ -213,18 +221,23 @@ AnimOutput CharacterAnimator::resolveAnimation() {
 AnimOutput CharacterAnimator::applyOverlays(AnimOutput base) const {
     if (!stealthed_) return base;
 
-    // Stealth substitution based on locomotion state
+    // Stealth substitution based on locomotion state. Stock 0x717050 asks
+    // for StealthWalk (119) at any pace once backpedalling (Walkbackwards)
+    // has been ruled out; there is no stealthed run. The idle (0x71E340) is
+    // StealthStand (120), out of water.
     auto locoState = locomotion_.getState();
     if (locoState == LocomotionFSM::State::IDLE) {
         // A turn-in-place shuffle keeps its feet; only the stand crouches.
         const bool shuffling = base.animId != 0 &&
             (base.animId == caps_.resolvedShuffleLeft || base.animId == caps_.resolvedShuffleRight);
-        if (caps_.resolvedStealthIdle && !shuffling) base.animId = caps_.resolvedStealthIdle;
-    } else if (locoState == LocomotionFSM::State::WALK) {
-        if (caps_.resolvedStealthWalk) base.animId = caps_.resolvedStealthWalk;
-    } else if (locoState == LocomotionFSM::State::RUN) {
-        if (caps_.resolvedStealthRun) base.animId = caps_.resolvedStealthRun;
-        else if (caps_.resolvedStealthWalk) base.animId = caps_.resolvedStealthWalk;
+        if (caps_.resolvedStealthIdle && !shuffling && base.animId == anim::STAND)
+            base.animId = caps_.resolvedStealthIdle;
+    } else if (locoState == LocomotionFSM::State::WALK || locoState == LocomotionFSM::State::RUN) {
+        const bool pace = base.animId == caps_.resolvedWalk || base.animId == caps_.resolvedRun ||
+                          base.animId == caps_.resolvedSprint || base.animId == anim::WALK ||
+                          base.animId == anim::RUN || base.animId == anim::SPRINT;
+        if (caps_.resolvedStealthWalk && pace && !frameInput_.movingBackward)
+            base.animId = caps_.resolvedStealthWalk;
     }
 
     return base;

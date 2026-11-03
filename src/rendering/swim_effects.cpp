@@ -9,6 +9,7 @@
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/vk_utils.hpp"
 #include "core/logger.hpp"
+#include "pipeline/asset_manager.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <random>
 #include <cmath>
@@ -98,6 +99,32 @@ void SwimEffects::buildInsectPipeline(
         .setLayout(insectPipelineLayout)
         .setRenderPass(targetPass_)
         .setDynamicStates(dynamicStates)
+        .build(device, vkCtx->getPipelineCache());
+}
+
+/// The stock underwater motes (0x79ca70): textured quads, alpha blended
+/// (blend 2, alpha ref 1), depth tested and not written, no culling.
+void SwimEffects::buildMotePipeline(VkDevice device) {
+    if (motePipelineLayout == VK_NULL_HANDLE) return;
+    auto shaders = loadShaderPair(device, "assets/shaders/water_mote.vert.spv",
+                                  "assets/shaders/water_mote.frag.spv", "water_mote");
+    if (!shaders) return;
+    VkVertexInputBindingDescription binding = tightVertexBinding(5 * sizeof(float));
+    std::vector<VkVertexInputAttributeDescription> attrs = {
+        {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0},
+        {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 3 * sizeof(float)},
+    };
+    motePipeline = PipelineBuilder()
+        .setShaders(shaders.vertStage, shaders.fragStage)
+        .setVertexInput({binding}, attrs)
+        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+        .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
+        .setColorBlendAttachment(PipelineBuilder::blendAlpha())
+        .setMultisample(targetSamples_)
+        .setLayout(motePipelineLayout)
+        .setRenderPass(targetPass_)
+        .setDynamicStates(viewportAndScissorDynamic())
         .build(device, vkCtx->getPipelineCache());
 }
 
@@ -227,6 +254,27 @@ bool SwimEffects::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
         }
     }
 
+    // ---- Stock underwater particulates ----
+    // Non-fatal: without them the water is only missing its motes.
+    if (createSamplerSets(device, 1, moteSetLayout_, motePool_, moteSet_.data())) {
+        VkPushConstantRange pushRange{};
+        pushRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        pushRange.size = sizeof(float);
+        motePipelineLayout = createPipelineLayout(device, {perFrameLayout, moteSetLayout_}, {pushRange});
+        buildMotePipeline(device);
+        AllocatedBuffer buf = createBuffer(vkCtx->getAllocator(),
+            static_cast<VkDeviceSize>(stock_particulates::kMaxDrawn) * 6 * 5 * sizeof(float),
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        moteDynamicVB = buf.buffer;
+        moteDynamicVBAlloc = buf.allocation;
+        moteDynamicVBAllocInfo = buf.info;
+    }
+    if (motePipeline == VK_NULL_HANDLE || moteDynamicVB == VK_NULL_HANDLE) {
+        LOG_WARNING("Swim effects: no underwater particulates (pipeline or buffer failed)");
+    }
+    motes_.resize(stock_particulates::kMoteCount);
+    moteVertexData.reserve(static_cast<size_t>(stock_particulates::kMaxDrawn) * 30);
+
     ripples.reserve(MAX_RIPPLE_PARTICLES);
     bubbles.reserve(MAX_BUBBLE_PARTICLES);
     insects.reserve(MAX_INSECT_PARTICLES);
@@ -254,6 +302,16 @@ void SwimEffects::shutdown() {
         destroy(device, insectPipeline);
         destroy(device, insectPipelineLayout);
         destroy(allocator, insectDynamicVB, insectDynamicVBAlloc);
+
+        destroy(device, motePipeline);
+        destroy(device, motePipelineLayout);
+        destroy(allocator, moteDynamicVB, moteDynamicVBAlloc);
+        moteTexture_.destroy(device, allocator);
+        destroy(device, motePool_);
+        destroy(device, moteSetLayout_);
+        moteSet_.fill(VK_NULL_HANDLE);
+        moteTextureReady_ = false;
+        moteTextureAttempted_ = false;
     }
 
     vkCtx = nullptr;
@@ -277,6 +335,8 @@ void SwimEffects::recreatePipelines() {
     destroy(device, ripplePipeline);
     destroy(device, bubblePipeline);
     destroy(device, insectPipeline);
+    destroy(device, motePipeline);
+    buildMotePipeline(device);
 
     // Shared vertex input: pos(vec3) + size(float) + alpha(float) = 5 floats
     VkVertexInputBindingDescription binding = tightVertexBinding(5 * sizeof(float));
@@ -414,9 +474,126 @@ void SwimEffects::spawnInsect(const glm::vec3& vegPos) {
     insects.push_back(p);
 }
 
+void SwimEffects::setSplashesEnabled(bool enabled) {
+    if (splashesEnabled_ == enabled) return;
+    splashesEnabled_ = enabled;
+    if (!enabled) clearSplashes();
+}
+
+void SwimEffects::clearSplashes() {
+    ripples.clear();
+    bubbles.clear();
+    insects.clear();
+    rippleVertexData.clear();
+    bubbleVertexData.clear();
+    insectVertexData.clear();
+    wadeSpawnAccum = rippleSpawnAccum = bubbleSpawnAccum = insectSpawnAccum = 0.0f;
+}
+
+void SwimEffects::loadMoteTexture(pipeline::AssetManager* assetManager) {
+    if (moteTextureAttempted_ || !assetManager || !vkCtx || moteSet_[0] == VK_NULL_HANDLE) return;
+    moteTextureAttempted_ = true;
+    // The one texture the stock object is made with (0x780f50); the
+    // LiquidType rows pick cells of it, never a texture of their own.
+    static const char* kMotePath = "Textures\\WaterPoop02.blp";
+    VkDevice device = vkCtx->getDevice();
+    pipeline::BLPImage image = assetManager->loadTexture(kMotePath);
+    if (!image.isValid() ||
+        !moteTexture_.upload(*vkCtx, image.data.data(), image.width, image.height,
+                             VK_FORMAT_R8G8B8A8_UNORM, true)) {
+        LOG_WARNING("Swim effects: failed to load ", kMotePath);
+        return;
+    }
+    moteTexture_.createSampler(device, VK_FILTER_LINEAR, VK_FILTER_LINEAR,
+                               VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    if (!moteTexture_.isValid()) return;
+    VkDescriptorImageInfo imageInfo = moteTexture_.descriptorInfo();
+    VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = moteSet_[0];
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    moteTextureReady_ = true;
+}
+
+// The stock particulates, one frame (0x790920 picks the liquid, 0x79b8e0
+// makes a set, 0x79bf40 moves it, 0x79ca70 draws it); stock_particulates.hpp
+// has the numbers.
+void SwimEffects::updateMotes(const Camera& camera, float deltaTime) {
+    namespace sp = stock_particulates;
+    moteVertexData.clear();
+    const MoteLiquid& liquid = moteLiquid_;
+    if (!liquid.show || !moteTextureReady_ ||
+        motePipeline == VK_NULL_HANDLE || motes_.empty()) {
+        motesValid_ = false;
+        return;
+    }
+    const glm::vec3 cam = camera.getPosition();
+    const glm::vec3 move = cam - moteLastCamera_;
+    moteLastCamera_ = cam;
+    // A new liquid, a return to one, or a jump past the box: a new set.
+    if (!motesValid_ || moteLiquidShown_ != liquid.liquidType ||
+        glm::length(move) > sp::kRegenerateDistance) {
+        for (auto& m : motes_) {
+            m.offset = glm::vec3((moteRand() * 2.0f - 1.0f) * sp::kHalfBox,
+                                 (moteRand() * 2.0f - 1.0f) * sp::kHalfBox,
+                                 (moteRand() * 2.0f - 1.0f) * sp::kHalfBox);
+            m.size = sp::moteSize(moteRand(), liquid.particleScale);
+        }
+        moteCurrent_ = sp::makeCurrent(moteRand(), moteRand(), moteRand(), moteRand());
+        motesValid_ = true;
+        moteLiquidShown_ = liquid.liquidType;
+    } else {
+        if (liquid.movement == 0) {
+            moteCurrent_.phase += deltaTime;
+            if (sp::currentSpent(moteCurrent_)) {
+                moteCurrent_ = sp::makeCurrent(moteRand(), moteRand(), moteRand(), moteRand());
+            }
+        }
+        const glm::vec3 push = sp::drift(liquid.movement, moteCurrent_, deltaTime);
+        for (auto& m : motes_) m.offset = sp::step(m.offset, move, push);
+    }
+
+    // Camera-facing quads: the view's own x and y axes, as the stock client
+    // builds them in view space.
+    const glm::mat4& view = camera.getViewMatrix();
+    const glm::vec3 right(view[0][0], view[1][0], view[2][0]);
+    const glm::vec3 up(view[0][1], view[1][1], view[2][1]);
+    int drawn = 0;
+    for (size_t i = 0; i < motes_.size() && drawn < sp::kMaxDrawn; ++i) {
+        const auto& m = motes_[i];
+        const glm::vec3 world = cam + m.offset;
+        const glm::vec4 v = view * glm::vec4(world, 1.0f);
+        if (!sp::inViewCone(v.x, v.y, -v.z)) continue;
+        ++drawn;
+        const glm::vec2 uv0 = sp::cellOrigin(sp::atlasCell(liquid.texSlots, static_cast<int>(i)));
+        const glm::vec2 uv1 = uv0 + glm::vec2(sp::kCellSize);
+        const float h = 0.5f * m.size;
+        // Corners as table 0xadf808 lists them, each with its atlas corner.
+        const glm::vec3 c0 = world - right * h + up * h;  // u0 v0
+        const glm::vec3 c1 = world - right * h - up * h;  // u0 v1
+        const glm::vec3 c2 = world + right * h + up * h;  // u1 v0
+        const glm::vec3 c3 = world + right * h - up * h;  // u1 v1
+        const auto put = [this](const glm::vec3& p, float u, float vv) {
+            moteVertexData.insert(moteVertexData.end(), {p.x, p.y, p.z, u, vv});
+        };
+        put(c0, uv0.x, uv0.y); put(c1, uv0.x, uv1.y); put(c2, uv1.x, uv0.y);
+        put(c2, uv1.x, uv0.y); put(c1, uv0.x, uv1.y); put(c3, uv1.x, uv1.y);
+    }
+}
+
 void SwimEffects::update(const Camera& camera, const CameraController& cc,
                          const WaterRenderer& water, float deltaTime) {
     glm::vec3 camPos = camera.getPosition();
+
+    updateMotes(camera, deltaTime);
+    // Everything below is Wowee's own spray, rings, bubbles and midges.
+    if (!splashesEnabled_) {
+        clearSplashes();
+        return;
+    }
 
     // Use character position for ripples in third-person mode
     glm::vec3 charPos = camPos;
@@ -657,9 +834,24 @@ void SwimEffects::update(const Camera& camera, const CameraController& cc,
 }
 
 void SwimEffects::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
-    if (rippleVertexData.empty() && bubbleVertexData.empty() && insectVertexData.empty()) return;
+    if (rippleVertexData.empty() && bubbleVertexData.empty() && insectVertexData.empty() &&
+        moteVertexData.empty()) return;
 
     VkDeviceSize offset = 0;
+
+    // --- The stock underwater particulates ---
+    if (!moteVertexData.empty() && motePipeline != VK_NULL_HANDLE && moteDynamicVBAllocInfo.pMappedData) {
+        std::memcpy(moteDynamicVBAllocInfo.pMappedData, moteVertexData.data(),
+                    moteVertexData.size() * sizeof(float));
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, motePipeline);
+        const VkDescriptorSet sets[2] = {perFrameSet, moteSet_[0]};
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, motePipelineLayout,
+                                0, 2, sets, 0, nullptr);
+        const float fogged = moteLiquid_.fogged ? 1.0f : 0.0f;
+        vkCmdPushConstants(cmd, motePipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(float), &fogged);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &moteDynamicVB, &offset);
+        vkCmdDraw(cmd, static_cast<uint32_t>(moteVertexData.size() / 5), 1, 0, 0);
+    }
 
     // --- Render ripples (splash droplets above water surface) ---
     if (!rippleVertexData.empty() && ripplePipeline != VK_NULL_HANDLE) {

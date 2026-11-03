@@ -17,6 +17,7 @@
 #include "core/world_entry_callback_handler.hpp"
 #include "core/ui_screen_callback_handler.hpp"
 #include "game/spell_classification.hpp"
+#include "rendering/animation/emote_registry.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "rendering/animation/weapon_anim_select.hpp"
 #include "rendering/animation/anim_capability_probe.hpp"
@@ -780,16 +781,11 @@ void syncLocomotionRate(rendering::CharacterRenderer* cr, rendering::anim::UnitL
     uint32_t cur = 0;
     float t = 0.0f, d = 0.0f;
     if (!cr->getAnimationState(instanceId, cur, t, d)) return;
-    if (cur != loco.rateAnimId) {
-        loco.rateAnimId = cur;
-        loco.rateMoveSpeed = 0.0f;
-        std::vector<pipeline::M2Sequence> seqs;
-        if (cr->getAnimationSequences(instanceId, seqs)) {
-            for (const auto& q : seqs) {
-                if (q.id == cur) { loco.rateMoveSpeed = q.movingSpeed; break; }
-            }
-        }
-    }
+    // The MoveSpeed of the sequence actually playing - the variation, or the
+    // fallback a model without the requested id plays (StealthWalk -> Walk).
+    (void)cur; (void)t; (void)d;
+    pipeline::M2Sequence playing{};
+    loco.rateMoveSpeed = cr->getPlayingSequence(instanceId, playing) ? playing.movingSpeed : 0.0f;
     if (loco.rateMoveSpeed == 0.0f) return;
     cr->setAnimationSpeed(instanceId,
                           game::motion::locomotionPlaybackRate(s.speed, loco.rateMoveSpeed));
@@ -1300,9 +1296,19 @@ bool Application::initialize() {
             if (!uim || !gh) return false;
             return uim->getGameScreen().getChatPanel().runRegistryCommand(*gh, alias, args);
         };
-        luaSvc.playEmoteAnimation = [rend = renderer.get()](const std::string& name) {
-            if (!rend) return;
-            if (auto* ac = rend->getAnimationController()) ac->playEmote(name);
+        luaSvc.playEmoteAnimation = [this](const std::string& name) {
+            // The stock emote (0x6DD9E0): weapons put away, then a stand state
+            // change (/sit, /sleep, /kneel, /stand: EmoteSpecProc 1) or the
+            // emote's animation.
+            if (appearanceComposer_) appearanceComposer_->requestWeaponsSheathed(true, "emote");
+            auto& emotes = rendering::EmoteRegistry::instance();
+            emotes.loadFromDbc();
+            if (auto standState = emotes.standStateFor(name)) {
+                if (gameHandler) gameHandler->setStandState(*standState);
+                return;
+            }
+            if (!renderer) return;
+            if (auto* ac = renderer->getAnimationController()) ac->playEmote(name);
         };
         luaSvc.getGamma = [uim = uiManager.get()]() -> float {
             return uim ? uim->getGameScreen().getGamma() : 1.0f;
@@ -4521,15 +4527,20 @@ void Application::syncCreatureRenderInstances(float deltaTime) {
             }
             // Weapons follow the sheath state (drawn, put away, ranged out).
             entitySpawner_->syncUnitSheath(guid, instanceId);
-            // Facing. A creature in combat that stands still turns to its target,
-            // as the stock client does on its own - AzerothCore sends nothing when
-            // a mob switches who it hits. The drawn body then turns toward it
-            // (stepBodyFacing below), server facings included.
+            // Facing. A creature that stands still turns to its target, as the
+            // stock client does on its own (0x735F60) - AzerothCore sends
+            // nothing when a mob switches who it hits. Not only in combat: any
+            // unit standing (stand state 0), alive, not stunned (0x40000) or
+            // possessed (0x01000000), and not held at an emote state. The
+            // drawn body then turns toward it (stepBodyFacing below), server
+            // facings included.
             float wantYaw = entity->getOrientation();
             if (entity->isUnit() && !entity->isActivelyMoving()) {
                 auto u = std::static_pointer_cast<game::Unit>(entity);
                 const uint64_t tgt = game::unitTargetGuid(*entity);
-                if (tgt != 0 && u->getHealth() > 0 && (u->getUnitFlags() & game::UNIT_FLAG_IN_COMBAT)) {
+                constexpr uint32_t kNoTurnFlags = 0x00040000u | 0x01000000u;
+                if (tgt != 0 && u->getHealth() > 0 && u->getStandState() == 0 &&
+                    (u->getUnitFlags() & kNoTurnFlags) == 0 && u->getNpcEmoteState() == 0) {
                     glm::vec3 tp(0.0f);
                     bool haveTp = false;
                     if (tgt == gameHandler->getPlayerGuid() && havePlayerPos) {

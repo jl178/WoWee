@@ -20,6 +20,10 @@
 //                                  frame, through the same queue
 //   WoweeDebug_Camera(yaw, pitch, dist)
 //                                  the camera at a yaw from the facing
+//   WoweeDebug_TimeOfDay(hours)    hold the world clock at an hour (0..24),
+//                                  or a negative hour for the game's clock
+//   WoweeDebug_UseObject(name)     right-click the nearest game object of
+//                                  that name (a mailbox, a guild vault)
 //   WoweeDebug_Quit()              close the client
 //
 // Events pushed this way reach only this client: SDL's queue is in-process.
@@ -28,7 +32,10 @@
 #include "addons/lua_engine.hpp"
 #include "core/application.hpp"
 #include "core/logger.hpp"
+#include "game/entity.hpp"
+#include "game/game_handler.hpp"
 #include "rendering/camera_controller.hpp"
+#include "rendering/lighting_manager.hpp"
 #include "rendering/renderer.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "ui/widget_tree.hpp"
@@ -42,6 +49,7 @@ extern "C" {
 }
 
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -150,6 +158,41 @@ int luaDebugCamera(lua_State* L) {
     return 0;
 }
 
+/// WoweeDebug_TimeOfDay(hours) - the light and sky held at an hour, so a test
+/// can shoot the same place at noon and at dusk. A negative hour gives the
+/// clock back to the game.
+int luaDebugTimeOfDay(lua_State* L) {
+    const double hours = luaL_optnumber(L, 1, -1.0);
+    auto* renderer = Application::getInstance().getRenderer();
+    if (auto* lm = renderer ? renderer->getLightingManager() : nullptr) {
+        if (hours < 0.0) lm->useRealTime(true);
+        else lm->setTimeOfDay(static_cast<float>(std::fmod(hours, 24.0) / 24.0));
+    }
+    return 0;
+}
+
+/// WoweeDebug_UseObject(name) - the nearest game object called that, used as
+/// a right-click would use it. Answers whether one was found. Mailboxes and
+/// guild vaults have no unit to InteractUnit, and a test needs to open them.
+int luaDebugUseObject(lua_State* L) {
+    const std::string want = luaL_checkstring(L, 1);
+    auto* gh = Application::getInstance().getGameHandler();
+    if (!gh) { lua_pushboolean(L, 0); return 1; }
+    const auto& mi = gh->getMovementInfo();
+    uint64_t best = 0;
+    float bestD = 1e30f;
+    for (const auto& [g, e] : gh->getEntityManager().getEntities()) {
+        if (!e || e->getType() != game::ObjectType::GAMEOBJECT) continue;
+        if (std::static_pointer_cast<game::GameObject>(e)->getName() != want) continue;
+        const float dx = e->getX() - mi.x, dy = e->getY() - mi.y, dz = e->getZ() - mi.z;
+        const float d = dx * dx + dy * dy + dz * dz;
+        if (d < bestD) { bestD = d; best = g; }
+    }
+    if (best) gh->interactWithGameObject(best);
+    lua_pushboolean(L, best != 0);
+    return 1;
+}
+
 int luaDebugQuit(lua_State* L) {
     (void)L;
     SDL_Event ev{};
@@ -197,6 +240,8 @@ void debugLuaHookTick(addons::LuaEngine* engine, SDL_Window* window) {
     lua_register(L, "WoweeDebug_Quit", luaDebugQuit);
     lua_register(L, "WoweeDebug_Mouse", luaDebugMouse);
     lua_register(L, "WoweeDebug_Camera", luaDebugCamera);
+    lua_register(L, "WoweeDebug_TimeOfDay", luaDebugTimeOfDay);
+    lua_register(L, "WoweeDebug_UseObject", luaDebugUseObject);
     gEngine = engine;
 
     LOG_WARNING("[luatest] running ", path);

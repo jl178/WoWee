@@ -21,6 +21,10 @@ struct EmoteInfo {
     uint32_t animId = 0;
     uint32_t dbcId = 0;
     bool loop = false;
+    /// Emotes.dbc EmoteSpecProc (0 one-shot, 1 stand state, 2 state loop)
+    /// and its parameter (the stand state for 1).
+    uint8_t specProc = 0;
+    uint8_t specParam = 0;
     std::string textNoTarget;
     std::string textTarget;
     std::string othersNoTarget;
@@ -43,6 +47,11 @@ public:
     /// Look up an emote by chat command (e.g. "dance", "wave").
     [[nodiscard]] std::optional<EmoteResult> findEmote(const std::string& command) const;
 
+
+    /// The stand state an emote command sets (Emotes.dbc EmoteSpecProc 1:
+    /// /sit 1, /sleep and /laydown 3, /kneel 8, /stand 0), as the stock
+    /// client sends CMSG_STANDSTATECHANGE for it (0x6DD9E0 -> 0x6DCB40).
+    [[nodiscard]] std::optional<uint8_t> standStateFor(const std::string& command) const;
 
     /// Get the animation ID for an Emotes.dbc emote ID, as used by SMSG_EMOTE
     /// and UNIT_NPC_EMOTESTATE.

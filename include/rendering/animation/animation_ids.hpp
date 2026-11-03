@@ -578,6 +578,13 @@ uint32_t dbcWeaponFlags(uint32_t id);
 uint32_t dbcBehavior(uint32_t id);
 /// Set one row of the two above; validateAgainstDBC fills them, tests too.
 void setDbcWeaponRow(uint32_t id, uint32_t weaponFlags, uint32_t behavior);
+/// AnimationData.dbc's Flags column. The stock client reads two bits, both
+/// while walking the Fallback chain (CM2Model 0x826350): 0x10 plays the
+/// fallback backwards (SitGroundUp -> SitGroundDown reversed), 0x20 holds it
+/// (SitGround -> SitGroundDown's last frame). See anim_selection.hpp.
+uint32_t dbcAnimFlags(uint32_t id);
+/// Set a row's Fallback and Flags (validateAgainstDBC fills them; tests too).
+void setDbcFallbackRow(uint32_t id, uint32_t fallback, uint32_t flags);
 
 /// The loop a unit holds for a server stand state (UnitStandStateType, byte 0
 /// of UNIT_FIELD_BYTES_1). Zero for standing, and for dead, which the death
@@ -585,12 +592,29 @@ void setDbcWeaponRow(uint32_t id, uint32_t weaponFlags, uint32_t behavior);
 constexpr uint32_t standStateLoopAnim(uint8_t standState) {
     switch (standState) {
         case 1: return SITTING;          // UNIT_STAND_STATE_SIT
-        case 2: return SIT_CHAIR_MED;    // UNIT_STAND_STATE_SIT_CHAIR
+        // UNIT_STAND_STATE_SIT_CHAIR (2) has no animation of its own: the
+        // stock chooser (0x71E1F0) passes it over and the unit stands.
         case 3: return SLEEP;            // UNIT_STAND_STATE_SLEEP
         case 4: return SIT_CHAIR_LOW;    // UNIT_STAND_STATE_SIT_LOW_CHAIR
         case 5: return SIT_CHAIR_MED;    // UNIT_STAND_STATE_SIT_MEDIUM_CHAIR
         case 6: return SIT_CHAIR_HIGH;   // UNIT_STAND_STATE_SIT_HIGH_CHAIR
         case 8: return KNEEL_LOOP;       // UNIT_STAND_STATE_KNEEL
+        default: return 0;
+    }
+}
+
+/// The one-shot a unit plays on its way into or out of a stand state, as the
+/// stock chooser picks it (0x71E1F0, prev = the stand state before): down to
+/// the ground SitGroundDown, to sleep SleepDown, to kneel KneelStart, all from
+/// standing; up again SitGroundUp, SleepUp, KneelEnd. The animation-end
+/// handler (0x73B510) then plays the loop. Zero: straight to the loop.
+constexpr uint32_t standStateTransitionAnim(uint8_t prev, uint8_t cur) {
+    switch (cur) {
+        case 0:
+            return prev == 1 ? SIT_GROUND_UP : prev == 3 ? SLEEP_UP : prev == 8 ? KNEEL_END : 0;
+        case 1: return prev == 0 ? SIT_GROUND_DOWN : 0;
+        case 3: return prev == 0 ? SLEEP_DOWN : 0;
+        case 8: return prev == 0 ? KNEEL_START : 0;
         default: return 0;
     }
 }

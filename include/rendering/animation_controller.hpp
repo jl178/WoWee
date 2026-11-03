@@ -225,6 +225,8 @@ public:
     [[nodiscard]] bool isTaxiFlight() const { return taxiFlight_; }
 
 private:
+    /// The local character's moving animation at speed / MoveSpeed (0x7385C0).
+    void syncLocalMoveRate(bool moving, float speed);
     Renderer* renderer_ = nullptr;
 
     // ── CharacterAnimator: owns the complete character animation FSM ─────
@@ -273,8 +275,6 @@ private:
     uint32_t mountDisplayId_ = 0;
     uint32_t riderAnim_ = 91;      // anim::MOUNT
     uint32_t lastMountAnimRequest_ = UINT32_MAX;
-    uint32_t mountRateAnimId_ = UINT32_MAX;
-    float mountRateMoveSpeed_ = 0.0f;
     bool mountJumpSounded_ = false;
     bool mountWasAirborne_ = false;
     bool taxiFlight_ = false;

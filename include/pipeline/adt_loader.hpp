@@ -167,6 +167,14 @@ struct ADTTerrain {
         uint8_t height;           // Height in vertices (1-9)
         std::vector<float> heights;  // Height values (width * height)
         std::vector<uint8_t> mask;   // Render mask (which tiles to render)
+        /// Per vertex, the depth byte the stock client turns into the depth
+        /// ramp's row (MH2O vertex formats 0, 2, 3; MCLQ water byte 0).
+        /// Empty when the format has none (magma); 255 where the data
+        /// is missing, as 0x8a3160 reads it. See docs/re/water.md.
+        std::vector<uint8_t> depths;
+        /// Per vertex, the texture uv of formats 1 and 3 (magma, slime): the
+        /// u16 pair x 3/256 (0x7ce390), two floats a vertex. Empty otherwise.
+        std::vector<float> uvs;
     };
 
     struct ChunkWater {

@@ -571,6 +571,10 @@ RT ambient/shadow, volumetric fog, cloth sway of banner geometry (motion, not li
 
 ## 7. Water and other liquids
 
+The vertex data, texture matrices, draw state, underwater rules and
+particulates are in [water.md](water.md), which also holds the current gap
+table; this section keeps the shader maths it builds on.
+
 Stock 3.3.5a (12340). Addresses are in Wow.exe. The stock shaders are the ARB text in
 `Data/expansions/wotlk/shaders/{vertex/arbvp1,pixel/arbfp1}/*liquid*.bls`.
 
@@ -667,7 +671,8 @@ material 3: shaderPath ? CMaterialProcWater (vs/psLiquidProcWater%s, 0x8a3e00) :
   - LiquidType.LightID overrides the light (magma and slime).
   - The darkening by depth comes from MaxDarkenDepth and the three intensities. Only Ocean has them: 30, 0.5, 0.5, 0.25.
   - In fog mode 1, the fog exponent ×2.
-- There is no screen overlay in the liquid code.
+- There is no screen overlay in the liquid code, and the sky is not drawn
+  under liquid; the frame clears to the fog colour (water.md §6).
 
 ### Ripples and waves
 
@@ -685,12 +690,12 @@ material 3: shaderPath ? CMaterialProcWater (vs/psLiquidProcWater%s, 0x8a3e00) :
 | WMO water colour | River far colour; alpha shallow → deep | River close → far | River far + alpha ramp (depthRamp = 2) |
 | Ramp choice | By the LiquidType texture name | By basic type | By field 16 (river/ocean/WMO) |
 | Sun glint | None: specular is local lights only; constant 0.25 × tex.a shimmer | GGX glint × shimmerStrength, also raised alpha | Stock 0.25 × tex.a; GGX removed; alpha is the ramp's |
-| Texture scale and rotation | Scale Float[0] (0.25 WMO Ocean), rotation Float[1] | 1 repeat / 16.7 yd | Scale applied; rotation not applied |
+| Texture scale and rotation | Scale Float[0] (0.25 WMO Ocean), rotation Float[1] | 1 repeat / 16.7 yd | Scale and rotation (with the stock slip) applied; see water.md |
 | Magma/slime | Unlit tex, period 1250 ms, scroll Float[0..1]/s | Unlit tex, 30 fps, no scroll | 1250 ms, scroll |
-| Reflection | **None** in the default path (cube maps only in unused material 3) | Sky-only reflection, fresnel ≤ 0.35 | Kept (requested "sky-only" look); flagged as not stock |
-| Shoreline foam, wake froth | None | Option / always | Kept, documented as non-stock extras |
-| Horizon alpha fade (600–2400 yd) | None (fog only) | Present | Kept; non-stock, but beyond the fog in practice |
-| Depth source | Per-vertex depth (attrib 7) from the liquid data into the 64-row ramp | Scene depth buffer, ramp over 6 yd (river) / 15 yd (ocean) | Unchanged: the per-vertex depth mapping was not resolved |
+| Reflection | **None** in the default path (cube maps only in unused material 3) | Sky-only reflection, fresnel ≤ 0.35 | The "Water reflections" setting, off by default (water.md) |
+| Shoreline foam, wake froth | None | Option / always | Foam a setting; wake froth under "Splashes, wakes and bubbles", off by default (water.md) |
+| Horizon alpha fade (600–2400 yd) | None (fog only) | Present | Removed (water.md) |
+| Depth source | Per-vertex depth (attrib 7) from the liquid data into the 64-row ramp | Scene depth buffer, ramp over 6 yd (river) / 15 yd (ocean) | Stock: depth byte / 42 or / 255 per vertex (water.md §2) |
 
 
 ## 8. Weather, full-screen glow and the ghost world

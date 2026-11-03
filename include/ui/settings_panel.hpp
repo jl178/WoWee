@@ -237,6 +237,8 @@ public:
     bool pendingSharpStars = true;
     bool pendingSunShafts = true;       // screen-space rays from the sun
     bool pendingShorelineFoam = true;   // foam band at the water's edge
+    bool pendingWaterReflections = false; // sky in the water (not stock)
+    bool pendingWaterSplashes = false;    // spray, wakes, bubbles, midges (not stock)
     bool pendingWetGround = true;       // darker, glossy ground while it rains
     int pendingPOMQuality = 1;          // 0=Low(16), 1=Medium(32), 2=High(64)
     bool pendingFSR = false;

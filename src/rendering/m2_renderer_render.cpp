@@ -4,6 +4,7 @@
 #include "rendering/m2_sway.hpp"
 #include "rendering/m2_blend_mode.hpp"
 #include "rendering/m2_glow_card.hpp"
+#include "rendering/animation/anim_selection.hpp"
 #include "rendering/animation/sequence_variation.hpp"
 #include "core/thread_pool.hpp"
 #include "rendering/m2_model_classifier.hpp"
@@ -665,22 +666,19 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
                 while (instance.animTime >= duration) {
                     instance.animTime -= duration;
                 }
-                // The next lap, as the stock client does it: the laps the
-                // variation still owes (its replay range), else a variation
-                // of the same animation rolled by the sequences' frequency
-                // weights. Not inside a state loop (Opened, Destroyed).
+                // The next lap, as the stock client does it (0x831FC0): a
+                // variation of the same animation rolled by the sequences'
+                // frequency weights at every lap of a looping sequence - the
+                // replay range only counts for one that stops at its end.
+                // Not inside a state loop (Opened, Destroyed).
                 if (instance.thenLoopSequence < 0 &&
                     instance.currentSequenceIndex >= 0 &&
                     instance.currentSequenceIndex < static_cast<int>(model.sequences.size())) {
                     const uint32_t animId = model.sequences[instance.currentSequenceIndex].id;
-                    if (instance.variationLapsLeft > 0) {
-                        --instance.variationLapsLeft;
-                    } else if (anim::hasSequenceVariations(model.sequences, animId)) {
-                        int next = anim::pickSequenceVariation(model.sequences, model.bones, animId);
-                        if (next >= 0) {
-                            instance.variationLapsLeft = anim::pickSequenceExtraLaps(model.sequences[next]);
-                            next = anim::resolveSequenceAlias(model.sequences, next);
-                        }
+                    if (anim::hasSequenceVariations(model.sequences, animId)) {
+                        int next = anim::rollVariationStock(model.sequences, model.bones, animId,
+                                                            anim::stockRand());
+                        if (next >= 0) next = anim::resolveSequenceAlias(model.sequences, next);
                         if (next >= 0 && next < static_cast<int>(model.sequences.size()) &&
                             next != instance.currentSequenceIndex) {
                             beginM2SequenceBlend(model, instance, next);

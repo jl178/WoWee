@@ -35,18 +35,23 @@ layout(push_constant) uniform Push {
     float liquidTexValid; // 1 when set 3 holds this liquid's texture frame
     float shoreFoam;      // 1 draws the shoreline foam band (not stock), 0 off
     float depthRamp;      // 0 river, 1 ocean, 2 WMO water (proceduralWmoWaterTex)
+    float texRotCos;      // the stage 1 texture matrix's rotation (WMO Ocean's
+    float texRotSin;      // stock 145.14 degrees; identity elsewhere)
 } push;
 
+// Per surface: the stock vertex colour (attrib 4) - white, or for a WMO group
+// that is not exterior its liquid's MOMT colour - and whether that group's
+// fixed interior light (every colour 1) lights it.
 layout(set = 1, binding = 0) uniform WaterMaterial {
-    vec4 waterColor;       // unused by the stock path: colours come from Light.dbc
-    float waterAlpha;      // unused by the stock path: alpha comes from LightParams
-    float shimmerStrength; // unused: the stock surface has no sun glint
-    float alphaScale;
-    float bodyFloor;       // unused by the stock path
+    vec4 vertexColor;
+    float interior;
+    float pad0;
+    float pad1;
+    float pad2;
 };
 
 // SceneColor is still bound but no longer read: the stock water does not
-// refract. Only the depth copy is used, for the water's depth.
+// refract. Only the depth copy is read, by the shoreline foam (a setting).
 layout(set = 2, binding = 0) uniform sampler2D SceneColor;
 layout(set = 2, binding = 1) uniform sampler2D SceneDepth;
 layout(set = 2, binding = 2) uniform sampler2D ReflectionColor;
@@ -71,11 +76,6 @@ layout(set = 2, binding = 3) uniform WaterFrameData {
 // the rest), picked by the renderer from the clock.
 layout(set = 3, binding = 0) uniform sampler2D LiquidTexture;
 
-// Yards per repeat of the liquid texture: half an ADT chunk, four liquid cells.
-const float LIQUID_TEX_REPEAT = 33.333333 / 2.0;
-// Yards of depth over which the colour and alpha run from close to far.
-const float RIVER_RAMP_DEPTH = 6.0;
-const float OCEAN_RAMP_DEPTH = 15.0;
 // The shoreline foam: yards of depth the band reaches out to at most, how
 // opaque it gets on the ocean (rivers and lakes take 70% of that), and how
 // pale it is against the light falling on it.
@@ -86,7 +86,7 @@ const float SHORE_FOAM_ALBEDO = 0.72;
 layout(location = 0) in vec3 FragPos;
 layout(location = 1) in vec3 Normal;
 layout(location = 2) in vec2 TexCoord;
-layout(location = 3) in float WaveOffset;
+layout(location = 3) in float RampV;   // the depth ramp coordinate (stock attrib 7)
 layout(location = 4) in vec2 ScreenUV;
 
 layout(location = 0) out vec4 outColor;
@@ -157,51 +157,6 @@ float noiseValue(vec2 p) {
     float c = hash21(i + vec2(0.0, 1.0));
     float d = hash21(i + vec2(1.0, 1.0));
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
-
-float fbmNoise(vec2 p, float time) {
-    float v = 0.0;
-    v += noiseValue(p * 3.0 + time * 0.3) * 0.5;
-    v += noiseValue(p * 6.0 - time * 0.5) * 0.25;
-    v += noiseValue(p * 12.0 + time * 0.7) * 0.125;
-    return v;
-}
-
-// ============================================================
-// Gradient (Perlin) noise + rotated fractal - for the magma/slime flow
-// ============================================================
-// Value noise (noiseValue above) samples a scalar per lattice point and
-// interpolates it, so its features sit square on the integer grid and read as
-// axis-aligned blocks up close - which is what made the slime motion look like
-// tiles. Gradient noise instead interpolates a random gradient that is zero at
-// each lattice point, so neighbouring cells blend through zero without the flat
-// plateaus, and rotating every octave keeps the separate lattices from ever
-// lining up. The result is a fractal flow rather than a grid of squares.
-vec2 gradHash(vec2 p) {
-    p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
-    return -1.0 + 2.0 * fract(sin(p) * 43758.5453123);
-}
-
-float gradNoise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    vec2 u = f * f * (3.0 - 2.0 * f);
-    float a = dot(gradHash(i + vec2(0.0, 0.0)), f - vec2(0.0, 0.0));
-    float b = dot(gradHash(i + vec2(1.0, 0.0)), f - vec2(1.0, 0.0));
-    float c = dot(gradHash(i + vec2(0.0, 1.0)), f - vec2(0.0, 1.0));
-    float d = dot(gradHash(i + vec2(1.0, 1.0)), f - vec2(1.0, 1.0));
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y) * 0.5 + 0.5;
-}
-
-// Same octave structure and value range as fbmNoise, but on gradient noise and
-// with a small rotation between octaves so no two lattices align.
-float fbmGrad(vec2 p, float time) {
-    const mat2 R = mat2(0.80, -0.60, 0.60, 0.80);   // ~37° per octave
-    float v = 0.0;
-    v += gradNoise(p * 3.0 + time * 0.3) * 0.5;   p = R * p;
-    v += gradNoise(p * 6.0 - time * 0.5) * 0.25;  p = R * p;
-    v += gradNoise(p * 12.0 + time * 0.7) * 0.125;
-    return v;
 }
 
 // Voronoi-like cellular noise for foam particles
@@ -285,93 +240,70 @@ void main() {
     float time = fogParams.z;
     float basicType = push.liquidBasicType;
     float dist = length(viewPos.xyz - FragPos);
-
-    // The LiquidType texture, one frame of its animated sequence, chosen on
-    // the CPU and bound as set 3. Tiled in world space so neighbouring chunks
-    // and WMO liquids line up.
     bool hasLiquidTex = push.liquidTexValid > 0.5;
-    // The stock texture matrix: scaled by LiquidType Float[0] on the water
-    // material, scrolled by Float[0..1] a second on magma and slime (0x8a34b0).
-    vec2 liquidUV = FragPos.xy / LIQUID_TEX_REPEAT;
-    if (basicType > 1.5) liquidUV += vec2(push.texOffsetU, push.texOffsetV);
-    else liquidUV *= push.texScale;
+
+    // The liquid texture through its stock texture matrix. TexCoord is the
+    // vertex's uv: world x,y x 0.06 on ADT liquid, the 25/6-yard cell grid on
+    // WMO liquid, the data's own uv on magma and slime. Water scales and
+    // rotates it by LiquidType Float[0] and Float[1] (0x8a5590); magma and
+    // slime scroll it by Float[0..1] repeats a second (0x8a6090).
+    vec2 liquidUV;
+    if (basicType > 1.5) {
+        liquidUV = TexCoord + vec2(push.texOffsetU, push.texOffsetV);
+    } else {
+        liquidUV = vec2(TexCoord.x * push.texRotCos - TexCoord.y * push.texRotSin,
+                        TexCoord.x * push.texRotSin + TexCoord.y * push.texRotCos) * push.texScale;
+    }
     vec4 texel = texture(LiquidTexture, liquidUV);
 
     // ============================================================
-    // Magma / Slime - the texture sequence itself, opaque and unlit
+    // Magma / slime: psLiquidMagma, vertex colour x texture, opaque, unlit
     // ============================================================
     if (basicType > 1.5) {
-        vec3 color;
-        if (hasLiquidTex) {
-            color = texel.rgb;
-        } else {
-            // No texture to draw: a flowing procedural stand-in.
-            vec2 flowUV = FragPos.xy;
-            bool isMagma = basicType < 2.5;
-            float n1 = fbmGrad(flowUV * 0.06 + vec2(time * 0.02, time * 0.03), time * 0.4);
-            float n2 = fbmGrad(flowUV * 0.10 + vec2(-time * 0.015, time * 0.025), time * 0.3);
-            float n3 = gradNoise(flowUV * 0.25 + vec2(time * 0.04, -time * 0.02));
-            float flow = n1 * 0.45 + n2 * 0.35 + n3 * 0.20;
-            vec3 crustColor = isMagma ? vec3(0.15, 0.04, 0.01) : vec3(0.05, 0.15, 0.02);
-            vec3 hotColor   = isMagma ? vec3(1.0, 0.45, 0.05) : vec3(0.3, 0.8, 0.15);
-            vec3 coreColor  = isMagma ? vec3(1.0, 0.85, 0.3)  : vec3(0.5, 1.0, 0.3);
-            float crustMask = smoothstep(0.25, 0.50, flow);
-            float coreMask  = smoothstep(0.60, 0.80, flow);
-            color = mix(mix(crustColor, hotColor, crustMask), coreColor, coreMask);
-        }
+        vec3 color = hasLiquidTex ? vertexColor.rgb * texel.rgb
+                                  : vertexColor.rgb * (basicType < 2.5 ? vec3(0.9, 0.35, 0.05)
+                                                                       : vec3(0.25, 0.6, 0.1));
         color = applyFog(color, FragPos, dist);
         outColor = vec4(color, 1.0);
         return;
     }
 
-    vec2 screenUV = gl_FragCoord.xy / max(push.screenSize, vec2(1.0));
     vec3 viewDir = normalize(viewPos.xyz - FragPos);
     vec3 ldir = normalize(-lightDir.xyz);
 
     // ============================================================
-    // Depth below the surface
-    // ============================================================
-    // Only ever sampled straight down the pixel. There is no refraction: the
-    // 3.3.5 water does not bend what lies under or behind it, and the offset
-    // lookup into the scene copy is what smeared characters standing in front
-    // of the water across its surface.
-    float near = push.depthRange.x;
-    float far = push.depthRange.y;
-    float waterLinDepth = linearizeDepth(gl_FragCoord.z, near, far);
-    float depthBelow = waterDepthBelow(screenUV, waterLinDepth, near, far, abs(viewDir.z));
-
-    // ============================================================
     // Stock colour and alpha (psLiquidWater, 0x8a5590)
     // ============================================================
-    //   rgb = clamp(ambient + diffuse * N.L) * ramp.rgb + tex.rgb
-    //         + (specular + 0.25) * tex.a
-    //   a   = ramp.a
-    // ramp is the client's 8x64 depth texture: Light.dbc's close colour and
+    //   primary = clamp(ambient + diffuse * N.L) * vertexColour
+    //   rgb = primary * ramp.rgb + tex.rgb + (specular + 0.25) * tex.a
+    //   a   = primary.a * ramp.a
+    // ramp is the client's 8x64 depth texture, read at the vertex's depth
+    // byte over 42 (river) or 255 (ocean, WMO): Light.dbc's close colour and
     // LightParams' shallow alpha at row 0 stepping toward the far colour and
     // deep alpha, 1/64 per row (0x8a2bf0); the ocean's last row a tenth
-    // darker. WMO water's ramp is the river far colour throughout, only the
-    // alpha running shallow to deep (0x8a2ac0).
+    // darker. WMO water's ramp is the river far colour outside and white
+    // inside, only the alpha running shallow to deep (0x8a2ac0).
     bool isOcean = push.depthRamp > 0.5 && push.depthRamp < 1.5;
     bool isWmoWater = push.depthRamp > 1.5;
+    bool isInterior = interior > 0.5;
     vec4 closeCol = isOcean ? oceanClose : riverClose;   // a = shallow alpha
     vec4 farCol   = isOcean ? oceanFar   : riverFar;     // a = deep alpha
-    // Yards over which the ramp runs from the shallow end to the deep end.
-    float rampDepth = isOcean ? OCEAN_RAMP_DEPTH : RIVER_RAMP_DEPTH;
-    // Unknown depth is open water, the deep end.
-    float depth01 = depthBelow < 0.0 ? 1.0 : clamp(depthBelow / rampDepth, 0.0, 1.0);
+    float depth01 = clamp(RampV, 0.0, 1.0);
     // Where a bilinear lookup of the 64-row texture lands: row 0 in the
     // shallowest half row, row 63 (63/64 of the way) in the deepest.
     float rampT = clamp(depth01 * 64.0 - 0.5, 0.0, 63.0) / 64.0;
     vec4 rampCol = mix(closeCol, farCol, rampT);
-    if (isWmoWater) rampCol.rgb = riverFar.rgb;
+    if (isWmoWater) rampCol.rgb = isInterior ? vec3(1.0) : riverFar.rgb;
     if (isOcean) rampCol.rgb *= mix(1.0, 0.9, clamp(depth01 * 64.0 - 62.5, 0.0, 1.0));
 
     // The surface's light: the vertex colour register clamps the sum to 0..1
-    // before it multiplies the ramp. The normal is straight up.
-    vec3 surfaceLight = clamp(ambientColor.rgb + lightColor.rgb * max(ldir.z, 0.0),
-                              vec3(0.0), vec3(1.0));
-    vec3 color = rampCol.rgb * surfaceLight;
-    float alpha = rampCol.a;
+    // before it multiplies the ramp. The normal is straight up. A WMO group
+    // that is not exterior has a fixed light of 1 (0x7d4f40).
+    vec3 surfaceLight = isInterior ? vec3(1.0)
+                                   : clamp(ambientColor.rgb + lightColor.rgb * max(ldir.z, 0.0),
+                                           vec3(0.0), vec3(1.0));
+    vec3 color = rampCol.rgb * surfaceLight * vertexColor.rgb;
+    float alpha = rampCol.a * vertexColor.a;
     if (hasLiquidTex) {
         // The texture adds its ripples, and its alpha the shimmer: the
         // specular colour is the local lights' alone (0x834f60), so under the
@@ -380,22 +312,21 @@ void main() {
     }
 
     // ============================================================
-    // Sky reflection - only where the reflection pass drew one
+    // Sky reflection - the "Water reflections" setting (not stock)
     // ============================================================
-    // NOT in the stock default path: psLiquidWater has no reflection term
-    // (its second texture is the depth ramp). Kept as the classic-look sky
-    // tint it was asked to be; the reflection target holds the sky alone,
-    // and when the pass does not run it is black and nothing is mixed in.
-    vec3 norm = vec3(0.0, 0.0, 1.0);
-    float detailFade = 1.0 - smoothstep(250.0, 1400.0, dist);
-    if (detailFade > 0.0) {
-        norm = normalize(mix(norm, dualScrollWaveNormal(FragPos.xy, time), 0.45 * detailFade));
-    }
-    float NdotV = max(dot(norm, viewDir), 0.001);
-    const vec3 F0 = vec3(0.02);
-    float fresnel = F0.x + (1.0 - F0.x) * pow(1.0 - NdotV, 5.0);
+    // psLiquidWater has no reflection term; nothing in the stock client
+    // mirrors the sky or the world (docs/re/water.md). The renderer zeroes
+    // the matrix whenever the pass did not run, so this is skipped then.
     vec4 reflClip = reflViewProj * vec4(FragPos, 1.0);
     if (reflClip.w > 0.1) {
+        vec3 norm = vec3(0.0, 0.0, 1.0);
+        float detailFade = 1.0 - smoothstep(250.0, 1400.0, dist);
+        if (detailFade > 0.0) {
+            norm = normalize(mix(norm, dualScrollWaveNormal(FragPos.xy, time), 0.45 * detailFade));
+        }
+        float NdotV = max(dot(norm, viewDir), 0.001);
+        const float F0 = 0.02;
+        float fresnel = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
         vec2 reflUV = reflClip.xy / reflClip.w * 0.5 + 0.5;
         reflUV.y = 1.0 - reflUV.y;
         reflUV += norm.xy * 0.015;
@@ -407,40 +338,46 @@ void main() {
     }
 
     // ============================================================
-    // Shoreline foam - not stock, the "Shoreline foam" setting
+    // Shoreline foam - the "Shoreline foam" setting (not stock)
     // ============================================================
-    // A thin band where the water runs out over the bed: the same depth below
-    // the surface that drives the colour ramp, so it follows every beach,
-    // bank, rock and pier post without any authored data. The band's reach
+    // A thin band where the water runs out over the bed, from the scene's
+    // depth below the surface (the copy is only taken while this is on), so
+    // it follows every beach, bank, rock and pier post. The band's reach
     // breathes slowly, out of step along the shore, and a scrolled noise
     // breaks it into patches. Lit by the sky's ambient and sun as a flat
-    // pale surface would be, and fogged with the water below, so it stays a
-    // pale edge at dusk and a dim one at night rather than a white line.
-    // Two value-noise lookups for the pixels in the band, nothing elsewhere.
-    float shoreFoam = 0.0;
-    if (push.shoreFoam > 0.5 && depthBelow >= 0.0) {
-        float near01 = 1.0 - smoothstep(40.0, 150.0, dist);
-        float phase = noiseValue(FragPos.xy * 0.07) * 6.28318;
-        float reach = SHORE_FOAM_DEPTH * (0.75 + 0.25 * sin(time * 0.8 + phase));
-        float band = 1.0 - smoothstep(0.0, reach, depthBelow);
-        band *= band * near01;
-        if (band > 0.002) {
-            vec2 drift = vec2(time * 0.09, -time * 0.06);
-            float n = noiseValue(FragPos.xy * 0.9 + drift) * 0.6
-                    + noiseValue(FragPos.xy * 2.3 - drift * 1.7) * 0.4;
-            // Solid right at the waterline, broken up a little way out.
-            float cover = mix(smoothstep(0.30, 0.70, n), 1.0, band * 0.5);
-            shoreFoam = band * cover * (isOcean ? SHORE_FOAM_OPACITY : SHORE_FOAM_OPACITY * 0.7);
-            vec3 foamLight = ambientColor.rgb + lightColor.rgb * max(ldir.z, 0.0);
-            vec3 foamColor = min(SHORE_FOAM_ALBEDO * foamLight, vec3(1.0));
-            color = mix(color, foamColor, shoreFoam);
-            alpha = max(alpha, shoreFoam);
+    // pale surface would be, so it stays a pale edge at dusk and a dim one at
+    // night rather than a white line.
+    if (push.shoreFoam > 0.5) {
+        vec2 screenUV = gl_FragCoord.xy / max(push.screenSize, vec2(1.0));
+        float near = push.depthRange.x;
+        float far = push.depthRange.y;
+        float waterLinDepth = linearizeDepth(gl_FragCoord.z, near, far);
+        float depthBelow = waterDepthBelow(screenUV, waterLinDepth, near, far, abs(viewDir.z));
+        if (depthBelow >= 0.0) {
+            float near01 = 1.0 - smoothstep(40.0, 150.0, dist);
+            float phase = noiseValue(FragPos.xy * 0.07) * 6.28318;
+            float reach = SHORE_FOAM_DEPTH * (0.75 + 0.25 * sin(time * 0.8 + phase));
+            float band = 1.0 - smoothstep(0.0, reach, depthBelow);
+            band *= band * near01;
+            if (band > 0.002) {
+                vec2 drift = vec2(time * 0.09, -time * 0.06);
+                float n = noiseValue(FragPos.xy * 0.9 + drift) * 0.6
+                        + noiseValue(FragPos.xy * 2.3 - drift * 1.7) * 0.4;
+                // Solid right at the waterline, broken up a little way out.
+                float cover = mix(smoothstep(0.30, 0.70, n), 1.0, band * 0.5);
+                float shoreFoam = band * cover * (isOcean ? SHORE_FOAM_OPACITY : SHORE_FOAM_OPACITY * 0.7);
+                vec3 foamLight = ambientColor.rgb + lightColor.rgb * max(ldir.z, 0.0);
+                vec3 foamColor = min(SHORE_FOAM_ALBEDO * foamLight, vec3(1.0));
+                color = mix(color, foamColor, shoreFoam);
+                alpha = max(alpha, shoreFoam);
+            }
         }
     }
 
     // ============================================================
-    // Wake froth - water churned up by something moving through it
+    // Wake froth - the "Splashes, wakes and bubbles" setting (not stock)
     // ============================================================
+    // No points are uploaded while it is off.
     float wakeFoam = 0.0;
     if (wakeBounds.w > 0.5) {
         vec2 toWake = FragPos.xy - wakeBounds.xy;
@@ -472,11 +409,10 @@ void main() {
     }
     alpha = max(alpha, wakeFoam * 0.55);
 
-    alpha *= alphaScale;
     alpha = clamp(alpha, 0.0, 1.0);
-    // Dissolve the sheet before the water geometry runs out, so the ocean fades
-    // into the horizon haze instead of ending on a hard line.
-    alpha *= smoothstep(2400.0, 600.0, dist);
+    // The stock alpha test passes alpha >= 1/255 (state 7 at 0x8a5590).
+    if (alpha < 1.0 / 255.0) discard;
+    // No fade toward the horizon: the stock water simply goes into the fog.
 
     color = applyFog(color, FragPos, dist);
     outColor = vec4(color, alpha);

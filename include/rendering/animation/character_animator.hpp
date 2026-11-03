@@ -106,6 +106,12 @@ public:
         // Turning in place: see LocomotionFSM::Input::turnLeft/turnRight.
         bool turnLeft = false;
         bool turnRight = false;
+        // The speed the movement flags select (0x987570) and the unit's walk
+        // speed: the pace of a moving unit comes from them (0x717050, above
+        // 11 Sprint, above twice the walk speed Run, else Walk). A negative
+        // speed means unknown, and `sprinting` decides as before.
+        float speed = -1.0f;
+        float walkSpeed = 2.5f;
         float characterYaw = 0.0f;
         // Melee/ranged timers
         float meleeSwingTimer = 0.0f;
