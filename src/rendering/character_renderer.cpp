@@ -1974,6 +1974,7 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
     }
 
     models[id] = std::move(gpuModel);
+    if (springLevel_ > 0) analyzeSpringChains(models[id]);
 
     core::Logger::getInstance().debug("Loaded M2 model ", id, " (", model.vertices.size(),
                        " verts, ", model.bones.size(), " bones, ", model.sequences.size(),
@@ -2256,7 +2257,17 @@ void CharacterRenderer::beginSequenceBlend(CharacterInstance& inst, const pipeli
                                            int newSeq, int fromSeq, float fromTime, float fromSpeed,
                                            bool fromLoop, uint8_t fromMode) {
     if (newSeq < 0 || newSeq >= static_cast<int>(model.sequences.size())) return;
-    const uint32_t blendMs = model.sequences[newSeq].blendTime;
+    uint32_t blendMs = model.sequences[newSeq].blendTime;
+    // E10: another unit's switch between two locomotion sequences fades over
+    // at least 150 ms, where the sequence would cut or nearly cut.
+    if (remoteSmoothing_ && blendMs < remote_smoothing::kLocomotionBlendFloorMs &&
+        fromSeq >= 0 && fromSeq < static_cast<int>(model.sequences.size()) && isRemoteUnit(inst)) {
+        const uint32_t fromId = model.sequences[fromSeq].id;
+        const uint32_t toId = model.sequences[newSeq].id;
+        blendMs = remote_smoothing::blendMs(
+            blendMs, true, remote_smoothing::smoothableLocomotion(fromId, anim::isMovingAnim(fromId)),
+            remote_smoothing::smoothableLocomotion(toId, anim::isMovingAnim(toId)));
+    }
     // A fade still more than half on the outgoing side keeps its outgoing
     // sequence and its clock; only the incoming one changes (0x826C40).
     if (inst.blendDurationMs > 0.0f && inst.blendElapsedMs < inst.blendDurationMs) {
@@ -2406,6 +2417,8 @@ void CharacterRenderer::setAnimCullView(const glm::mat4& viewProjection,
 
 void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
     lastCameraPos_ = cameraPos;
+    // The springs' clock (E7): each pose steps by the time since its last.
+    if (springLevel_ > 0) springClock_ += std::max(deltaTime, 0.0f);
     // Stock eases the unit ambient multiplier as cur += (target - cur) * dt,
     // snapping within 0.01 (0x783429..0x7834DF).
     {
@@ -2465,6 +2478,18 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
                 inst.isMoving = false;
             } else {
                 inst.position = glm::mix(inst.moveStart, inst.moveEnd, t);
+            }
+        }
+
+        // E10: another unit's position steps and facing snaps become offsets
+        // that decay (remote_smoothing.hpp); getModelMatrix draws them.
+        if (remoteSmoothing_) {
+            if (isRemoteUnit(inst) && !inst.hasOverrideModelMatrix && inst.mountedOn == 0) {
+                remote_smoothing::step(inst.smooth, inst.position, inst.rotation.z, deltaTime);
+                inst.smoothActive = true;
+            } else if (inst.smoothActive) {
+                inst.smooth = remote_smoothing::State{};
+                inst.smoothActive = false;
             }
         }
 
@@ -3151,6 +3176,11 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
         : 1.0f;
     instance.localPose.resize(numBones);
 
+    // E7: the spring chains, stepped for this pose. Off (springLevel_ 0) this
+    // is one compare and the loop below never looks at a spring slot.
+    const bool springs = springLevel_ > 0 && stepSprings(instance);
+    const M2ModelGPU& gm = *instance.cachedModel;
+
     // Key hints, six per bone: the body's three tracks, then the upper-body
     // overlay's, which plays another sequence and would only push the body's
     // hints off their keys. Each thread owns the instances it poses, so the
@@ -3220,6 +3250,37 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
                                 * glm::rotate(glm::mat4(1.0f), twistYaw, glm::vec3(0.0f, 0.0f, 1.0f))
                                 * glm::translate(glm::mat4(1.0f), -bone.pivot);
             localTransform = extraYaw * localTransform;
+        }
+
+        // E7: the spring's swing on top of the sampled pose, about the bone's
+        // pivot, its model-space axis taken into the parent's frame. A fan's
+        // bones share a parent, so each also takes the swings of the fan
+        // bones nearer the body, about their pivots, as a chain would pass on.
+        if (springs && i < gm.springSlot.size() && gm.springSlot[i] >= 0) {
+            namespace sm = secondary_motion;
+            const int slot = gm.springSlot[i];
+            const sm::Chain& chain = gm.springChains[gm.springSlotChain[slot]];
+            const glm::mat3 toParent = (bone.parentBone >= 0 && static_cast<size_t>(bone.parentBone) < numBones)
+                ? glm::inverse(glm::mat3(instance.boneMatrices[bone.parentBone]))
+                : glm::mat3(1.0f);
+            auto swingAbout = [&](int s, const glm::vec3& centre) -> std::optional<glm::mat4> {
+                const glm::vec3 rv = sm::rotationVector(chain, instance.springBones[s], instance.springWeight);
+                if (glm::dot(rv, rv) < 1e-12f) return std::nullopt;
+                return glm::translate(glm::mat4(1.0f), centre) *
+                       glm::mat4_cast(sm::rotationInFrame(rv, toParent)) *
+                       glm::translate(glm::mat4(1.0f), -centre);
+            };
+            if (!chain.fan) {
+                if (auto m = swingAbout(slot, bone.pivot + pose.translation)) localTransform = *m * localTransform;
+            } else {
+                const int first = slot - gm.springSlotIndex[slot];
+                glm::mat4 acc(1.0f);
+                bool any = false;
+                for (int k = first; k <= slot; ++k) {
+                    if (auto m = swingAbout(k, model.bones[chain.bones[k - first]].pivot)) { acc = acc * *m; any = true; }
+                }
+                if (any) localTransform = acc * localTransform;
+            }
         }
 
         // Compose with parent
@@ -4685,7 +4746,9 @@ glm::mat4 CharacterRenderer::getModelMatrix(const CharacterInstance& instance) c
     glm::mat4 model = glm::mat4(1.0f);
 
     // Apply transformations: T * R * S
-    model = glm::translate(model, instance.position);
+    // E10: another unit drawn a decaying step behind where it was put.
+    const bool smoothed = instance.smoothActive;
+    model = glm::translate(model, smoothed ? instance.position + instance.smooth.offset : instance.position);
 
     // A corpse tilted onto the slope it lies on (updateCorpseSettle), about
     // its position on the ground. Never set with the row off.
@@ -4695,7 +4758,8 @@ glm::mat4 CharacterRenderer::getModelMatrix(const CharacterInstance& instance) c
 
     // Apply rotation (euler angles, Z-up)
     // Convention: yaw around Z, pitch around X, roll around Y.
-    model = glm::rotate(model, instance.rotation.z, glm::vec3(0.0f, 0.0f, 1.0f));  // Yaw
+    model = glm::rotate(model, smoothed ? instance.rotation.z + instance.smooth.yawOffset : instance.rotation.z,
+                        glm::vec3(0.0f, 0.0f, 1.0f));  // Yaw
     model = glm::rotate(model, instance.rotation.x, glm::vec3(1.0f, 0.0f, 0.0f));  // Pitch
     model = glm::rotate(model, instance.rotation.y, glm::vec3(0.0f, 1.0f, 0.0f));  // Roll
 
@@ -4767,6 +4831,193 @@ void CharacterRenderer::updateCorpseSettle(float deltaTime, const FloorHeightFn*
         active = true;
     }
     corpseSettleActive_ = active;
+}
+
+void CharacterRenderer::setMotionEnhancements(int secondaryMotion, const glm::vec3& windWorld,
+                                              bool remoteSmoothing, uint32_t localA, uint32_t localB,
+                                              uint32_t localC) {
+    localInstances_[0] = localA;
+    localInstances_[1] = localB;
+    localInstances_[2] = localC;
+    springWind_ = windWorld;
+    const int level = std::clamp(secondaryMotion, 0, 2);
+    if (level != springLevel_) {
+        springLevel_ = level;
+        if (level > 0) {
+            for (auto& [id, m] : models) {
+                (void)id;
+                if (!m.springAnalyzed) analyzeSpringChains(m);
+            }
+        }
+        // Every chain starts again from rest: off leaves nothing behind, and a
+        // kind turned off or on does not carry an old swing.
+        for (auto& [id, inst] : instances) {
+            (void)id;
+            inst.springBones.clear();
+            inst.springChainStates.clear();
+            inst.springStamp = -1.0f;
+            inst.springWeight = 0.0f;
+        }
+    }
+    if (remoteSmoothing != remoteSmoothing_) {
+        remoteSmoothing_ = remoteSmoothing;
+        if (!remoteSmoothing) {
+            for (auto& [id, inst] : instances) {
+                (void)id;
+                inst.smooth = remote_smoothing::State{};
+                inst.smoothActive = false;
+            }
+        }
+    }
+}
+
+bool CharacterRenderer::isRemoteUnit(const CharacterInstance& inst) const {
+    if (inst.isAttachedItem || inst.isEffectModel || inst.isSceneModel) return false;
+    for (uint32_t local : localInstances_) {
+        if (local != 0 && inst.id == local) return false;
+    }
+    return true;
+}
+
+void CharacterRenderer::analyzeSpringChains(M2ModelGPU& gm) {
+    namespace sm = secondary_motion;
+    gm.springAnalyzed = true;
+    gm.springChains.clear();
+    gm.springSlot.clear();
+    gm.springSlotChain.clear();
+    gm.springSlotIndex.clear();
+    const auto& data = gm.data;
+    const size_t n = data.bones.size();
+    if (n < 2 || data.vertices.empty()) return;
+    // Each bone's vertex weight, by the kind of geoset the vertex is drawn in
+    // (a vertex shared by two sections counts in both, as it is drawn in both).
+    std::vector<sm::BoneInfo> info(n);
+    for (size_t i = 0; i < n; ++i) {
+        info[i].keyBoneId = data.bones[i].keyBoneId;
+        info[i].parent = data.bones[i].parentBone;
+        info[i].pivot = data.bones[i].pivot;
+    }
+    const bool character = gm.hasCompositeSlots;
+    std::vector<uint8_t> seen(data.vertices.size(), 0);
+    std::unordered_set<uint64_t> sectionsDone;
+    for (const auto& batch : data.batches) {
+        // Several batches (texture layers) draw one section: count it once.
+        const uint64_t sectionKey = (static_cast<uint64_t>(batch.indexStart) << 32) | batch.indexCount;
+        if (!sectionsDone.insert(sectionKey).second) continue;
+        const sm::GeosetClass cls = sm::classifyGeoset(batch.submeshId, character);
+        const uint32_t end = std::min<uint32_t>(batch.indexStart + batch.indexCount,
+                                                static_cast<uint32_t>(data.indices.size()));
+        std::fill(seen.begin(), seen.end(), 0);
+        for (uint32_t k = batch.indexStart; k < end; ++k) {
+            const uint16_t vi = data.indices[k];
+            if (vi >= data.vertices.size() || seen[vi]) continue;
+            seen[vi] = 1;
+            const auto& v = data.vertices[vi];
+            for (int j = 0; j < 4; ++j) {
+                const float w = v.boneWeights[j];
+                const uint8_t b = v.boneIndices[j];
+                if (w <= 0.0f || b >= n) continue;
+                auto& bi = info[b];
+                bi.total += w;
+                if (cls == sm::GeosetClass::Body) bi.body += w;
+                else if (cls == sm::GeosetClass::Hair) bi.hair += w;
+                else if (cls == sm::GeosetClass::Cloth) bi.cloth += w;
+            }
+        }
+    }
+    gm.springChains = sm::findChains(info, character);
+    if (gm.springChains.empty()) return;
+    gm.springSlot.assign(n, -1);
+    for (size_t c = 0; c < gm.springChains.size(); ++c) {
+        const auto& chain = gm.springChains[c];
+        for (size_t k = 0; k < chain.bones.size(); ++k) {
+            gm.springSlot[chain.bones[k]] = static_cast<int16_t>(gm.springSlotChain.size());
+            gm.springSlotChain.push_back(static_cast<uint8_t>(c));
+            gm.springSlotIndex.push_back(static_cast<uint8_t>(k));
+        }
+    }
+    static const bool logChains = core::envFlagEnabled("WOWEE_SPRING_LOG", false);
+    if (logChains) {
+        for (const auto& chain : gm.springChains) {
+            std::string bonesText;
+            for (uint16_t b : chain.bones) bonesText += std::to_string(b) + " ";
+            LOG_INFO("Spring chain on ", data.name, ": ",
+                     chain.kind == sm::ChainKind::Cloth ? "cloth" : chain.kind == sm::ChainKind::Hair ? "hair" : "tail",
+                     chain.fan ? " (fan)" : "", " bones ", bonesText, "length ", chain.length);
+        }
+    }
+}
+
+bool CharacterRenderer::stepSprings(CharacterInstance& inst) {
+    namespace sm = secondary_motion;
+    const M2ModelGPU* gm = inst.cachedModel;
+    if (!gm || gm->springChains.empty() || inst.isAttachedItem || inst.isEffectModel || inst.isSceneModel)
+        return false;
+    const float weight = sm::distanceWeight(glm::distance(inst.position, lastCameraPos_));
+    const float dt = inst.springStamp < 0.0f ? -1.0f : springClock_ - inst.springStamp;
+    inst.springStamp = springClock_;
+    if (weight <= 0.0f) {
+        // Out of range: rest, and start over when it comes back.
+        if (!inst.springChainStates.empty()) {
+            inst.springChainStates.clear();
+            inst.springBones.clear();
+        }
+        inst.springWeight = 0.0f;
+        return false;
+    }
+    const size_t slots = gm->springSlotChain.size();
+    if (inst.springBones.size() != slots) inst.springBones.assign(slots, sm::BoneState{});
+    if (inst.springChainStates.size() != gm->springChains.size())
+        inst.springChainStates.assign(gm->springChains.size(), sm::ChainState{});
+
+    const glm::mat4 world = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix : getModelMatrix(inst);
+    const glm::mat3 lin(world);
+    const float scale = std::max(glm::length(lin[0]), 1e-4f);
+    const glm::mat3 toModel = glm::transpose(lin / scale);
+    const glm::vec2 windDir = glm::dot(glm::vec2(springWind_), glm::vec2(springWind_)) > 1e-8f
+        ? glm::normalize(glm::vec2(springWind_)) : glm::vec2(0.8f, 0.6f);
+    const glm::vec3 wind = springWind_ *
+        sm::gust(glm::vec2(inst.position), windDir, springClock_, static_cast<float>(inst.id % 97u) * 0.37f);
+
+    bool any = false;
+    size_t first = 0;
+    for (size_t c = 0; c < gm->springChains.size(); ++c) {
+        const sm::Chain& chain = gm->springChains[c];
+        sm::BoneState* bones = inst.springBones.data() + first;
+        first += chain.bones.size();
+        sm::ChainState& cs = inst.springChainStates[c];
+        if (!sm::kindEnabled(chain.kind, springLevel_)) {
+            if (cs.primed) sm::resetChain(cs, bones, chain.bones.size(), glm::vec3(0.0f));
+            cs.primed = false;
+            continue;
+        }
+        sm::Input in;
+        in.probeWorld = glm::vec3(world * glm::vec4(chain.probe, 1.0f));
+        in.worldToModel = toModel;
+        in.windWorld = wind;
+        in.dt = dt < 0.0f ? sm::kResetDt * 2.0f : dt;
+        in.freqScale = sm::lengthFrequencyScale(chain.length * scale);
+        sm::stepChain(chain, sm::paramsFor(chain.kind), cs, bones, in);
+        any = true;
+    }
+    inst.springWeight = weight;
+    // WOWEE_SPRING_LOG=1: the player's chains' swing a few times a second.
+    static const bool logSwing = core::envFlagEnabled("WOWEE_SPRING_LOG", false);
+    if (logSwing && inst.id == localInstances_[0] && std::fmod(springClock_, 0.25f) < dt) {
+        std::string text;
+        size_t at = 0;
+        for (size_t c = 0; c < gm->springChains.size(); ++c) {
+            float out = 0.0f, side = 0.0f;
+            for (size_t k = 0; k < gm->springChains[c].bones.size(); ++k, ++at) {
+                out += inst.springBones[at].swing.x;
+                side += inst.springBones[at].swing.y;
+            }
+            text += " chain" + std::to_string(c) + " out=" + std::to_string(glm::degrees(out)) +
+                    " side=" + std::to_string(glm::degrees(side));
+        }
+        LOG_INFO("Spring swing t=", springClock_, text);
+    }
+    return any;
 }
 
 void CharacterRenderer::setInstancePosition(uint32_t instanceId, const glm::vec3& position) {
