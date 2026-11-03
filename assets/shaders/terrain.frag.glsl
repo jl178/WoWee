@@ -20,9 +20,13 @@ layout(set = 0, binding = 0) uniform PerFrame {
     mat4 rtViewProj;
     vec4 rtCameraPos;
     vec4 rtParams;
+    ivec4 localLightTileInfo;  // local_light_tiles.glsli
+    vec4 localLightTileScale;
+    uvec4 localLightTiles[288];
 };
 
 #include "rt_lighting.glsli"
+#include "local_light_tiles.glsli"
 #include "wet_surface.glsli"
 #include "stock_fog.glsli"
 
@@ -154,7 +158,14 @@ vec3 localLightContribution(vec3 pos, vec3 normal, vec3 albedo) {
     // Torch and lamp light off: the stock rule, the 3 nearest M2 lights.
     if ((localLightMeta.z & 4) == 0) return albedo * stockPointLights(pos, normal, 3);
     vec3 sum = vec3(0.0);
-    for (int i = 0; i < min(localLightMeta.x, 64); ++i) {
+    // Only the lights that can reach this pixel's tile, in the same order
+    // (local_light_tiles.glsli).
+    uvec2 lightMask = localLightTileMask();
+    for (int word = 0; word < 2; ++word) {
+    uint bits = word == 0 ? lightMask.x : lightMask.y;
+    while (bits != 0u) {
+        int i = findLSB(bits) + 32 * word;
+        bits &= bits - 1u;
         vec3 toLight = localLightPosRadius[i].xyz - pos;
         float radius = localLightPosRadius[i].w;
         // Rejected on the squared distance, before the square root and the
@@ -169,6 +180,7 @@ vec3 localLightContribution(vec3 pos, vec3 normal, vec3 albedo) {
         sum += albedo * localLightColorIntensity[i].rgb *
                (localLightColorIntensity[i].w * attenuation * wrappedDiffuse);
     }
+    }
     return sum;
 }
 
@@ -176,7 +188,7 @@ vec3 localLightContribution(vec3 pos, vec3 normal, vec3 albedo) {
 // the light it scatters toward the camera, a how much of the point shows
 // through it. See VolumetricFog.
 vec4 fogVolumeAt(vec3 worldPos) {
-    vec4 clip = projection * view * vec4(worldPos, 1.0);
+    vec4 clip = projection * (view * vec4(worldPos, 1.0));
     float depth = max(clip.w, 1e-4);
     vec2 uv = clip.xy / depth * 0.5 + 0.5;
     float slice = log(max(depth, volumetricParams.y) / volumetricParams.y) * volumetricParams.z;

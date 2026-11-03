@@ -350,6 +350,9 @@ private:
     std::unique_ptr<SkySystem> skySystem;  // Coordinator for sky rendering
     std::unique_ptr<SwimEffects> swimEffects;
     std::unique_ptr<MountDust> mountDust;
+    /// Frames since mount dust went off; it is released past the frames in flight.
+    uint32_t mountDustIdleFrames_ = 0;
+    bool mountDustFailed_ = false;
     std::unique_ptr<LevelUpEffect> levelUpEffect;
     std::unique_ptr<LootSparkles> lootSparkles_;
     std::unique_ptr<CharacterRenderer> characterRenderer;
@@ -414,6 +417,9 @@ private:
     VkRenderPass shadowRenderPass = VK_NULL_HANDLE;
     VkFramebuffer shadowFramebuffer[2] = {};
     VkImageLayout shadowDepthLayout_[2] = {};
+    /// With shadows off, whether this slot's map has been cleared and left
+    /// readable since they went off (renderShadowPass then records nothing).
+    bool shadowClearedWhileOff_[2] = {};
     glm::mat4 lightSpaceMatrix = glm::mat4(1.0f);
     glm::vec3 shadowCenter = glm::vec3(0.0f);
     bool shadowCenterInitialized = false;
@@ -506,6 +512,12 @@ private:
     void updateUnitBlobs();
     /// WOWEE_FREEZE_CLOCK, read once.
     void readFrozenClock();
+    /// The "Dust under mounts" enhancement: made on first use, stepped,
+    /// spawned under a running mount, released a few frames after it goes off.
+    void updateMountDust(float fxDt);
+    /// The local lights culled to a screen grid for this frame's camera
+    /// (GPUPerFrameData::localLightTiles). Only with the point lights on.
+    void buildLocalLightTiles(uint32_t count);
     Enhancements enh_{};
     float drunkLevel_ = 0.0f;
     bool enhDirty_ = true;

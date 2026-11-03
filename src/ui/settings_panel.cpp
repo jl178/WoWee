@@ -8,6 +8,7 @@
 #include "ui/graphics_choices.hpp"
 #include "ui/graphics_presets.hpp"
 #include "ui/settings_panel.hpp"
+#include "core/profile_tag.hpp"
 #include "addons/addon_manager.hpp"
 #include "ui/settings_schema.hpp"
 #include "addons/lua_api_registrations.hpp"
@@ -819,6 +820,20 @@ bool SettingsPanel::setSettingValue(const std::string& key, const std::string& v
         updateGraphicsPresetFromCurrentSettings();
         return true;
     }
+    if (key == "enhanceab") {
+        // A test's A/B control (updateEnhancementAB), not a saved setting.
+        if (!enhanceAbSpec_.empty()) {
+            enhancements = enhanceAbBase_;
+            applyEnhancements();
+        }
+        enhanceAbSpecRead_ = true;
+        enhanceAbSpec_ = (value == "0" || value == "off") ? std::string() : value;
+        enhanceAbBase_ = enhancements;
+        enhanceAbClock_ = 0.0f;
+        enhanceAbPhase_ = -1;
+        if (enhanceAbSpec_.empty()) core::setProfileTag("idle");
+        return true;
+    }
     if (const EnhancementRow* r = findEnhancementRow(key)) {
         setEnhancementValue(enhancements, *r, r->asBool ? (on ? 1.0f : 0.0f) : static_cast<float>(v));
         applySettingSideEffects(key);
@@ -887,15 +902,28 @@ void SettingsPanel::updateEnhancementAB(float deltaTime) {
             updateGraphicsPresetFromCurrentSettings();
         }
     }
-    static const char* ab = std::getenv("WOWEE_ENHANCE_AB");
-    if (!ab || !*ab) return;
-    const std::string spec = ab;
+    if (!enhanceAbSpecRead_) {
+        enhanceAbSpecRead_ = true;
+        if (const char* ab = std::getenv("WOWEE_ENHANCE_AB"); ab && *ab) {
+            enhanceAbSpec_ = ab;
+            enhanceAbBase_ = enhancements;
+        }
+    }
+    if (enhanceAbSpec_.empty()) return;
+    const std::string& spec = enhanceAbSpec_;
     const auto colon = spec.find(':');
     const std::string key = spec.substr(0, colon);
     const float period = colon == std::string::npos ? 5.0f
                        : std::max(0.5f, static_cast<float>(std::atof(spec.c_str() + colon + 1)));
-    const EnhancementRow* r = findEnhancementRow(key);
-    if (!r) {
+    const auto colon2 = colon == std::string::npos ? std::string::npos : spec.find(':', colon + 1);
+    const std::string label = colon2 == std::string::npos ? std::string() : spec.substr(colon2 + 1);
+    // "all" flips the whole set between Recommended and stock; "all+shadows"
+    // the same with the sun's shadow map in the "on" state, the recommended
+    // set as it was before its cost took the shadows out.
+    const bool allPlusShadows = key == "all+shadows";
+    const bool all = key == "all" || allPlusShadows;
+    const EnhancementRow* r = all ? nullptr : findEnhancementRow(key);
+    if (!all && !r) {
         if (enhanceAbPhase_ != -2) LOG_WARNING("WOWEE_ENHANCE_AB: no enhancement row called ", key);
         enhanceAbPhase_ = -2;
         return;
@@ -905,9 +933,16 @@ void SettingsPanel::updateEnhancementAB(float deltaTime) {
     if (phase == enhanceAbPhase_) return;
     enhanceAbPhase_ = phase;
     // Phase 0 the recommended value (on), phase 1 stock (off).
-    setEnhancementValue(enhancements, *r, phase == 0 ? r->recommendedValue : r->stockValue);
-    LOG_WARNING("ENHANCE_AB ", key, " ", phase == 0 ? "on" : "off", " (",
-                settingValue(key), ")");
+    if (all) {
+        enhancements = phase == 0 ? recommendedEnhancements() : rendering::Enhancements{};
+        if (phase == 0 && allPlusShadows) enhancements.shadows = true;
+    } else {
+        setEnhancementValue(enhancements, *r, phase == 0 ? r->recommendedValue : r->stockValue);
+    }
+    LOG_WARNING("ENHANCE_AB ", key, " ", phase == 0 ? "on" : "off",
+                all ? std::string() : " (" + settingValue(key) + ")");
+    core::setProfileTag((label.empty() ? std::string() : label + " ") + key +
+                        (phase == 0 ? " on" : " off"));
     applyEnhancements();
 }
 

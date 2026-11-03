@@ -163,6 +163,17 @@ private:
 
     bool splashesEnabled_ = false;
     bool insectsEnabled_ = false;
+    /// The enhancement parts' pipelines and buffers, made on first use and
+    /// released after a few frames off (update).
+    bool ensureSplashResources();
+    bool ensureInsectResources();
+    void releaseSplashResources();
+    void releaseInsectResources();
+    VkDescriptorSetLayout perFrameLayout_ = VK_NULL_HANDLE;
+    uint32_t splashIdleFrames_ = 0;
+    uint32_t insectIdleFrames_ = 0;
+    bool splashResourcesFailed_ = false;
+    bool insectResourcesFailed_ = false;
     MoteLiquid moteLiquid_{};
     uint32_t moteLiquidShown_ = 0;           // the liquid the set was made for
     std::vector<stock_particulates::Mote> motes_;

@@ -1630,6 +1630,25 @@ void VkContext::readGpuTimings(uint32_t slot) {
         if (ms > 1000.0) continue;
         gpuTimings_.emplace_back(gpuMarkLabels_[slot][i], ms);
     }
+    for (const auto& [label, ms] : gpuTimings_) {
+        auto it = std::find_if(gpuTimingSums_.begin(), gpuTimingSums_.end(), [&](const auto& e) {
+            return e.first == label || std::strcmp(e.first, label) == 0;
+        });
+        if (it == gpuTimingSums_.end()) gpuTimingSums_.emplace_back(label, ms);
+        else it->second += ms;
+    }
+    ++gpuTimingFrames_;
+}
+
+uint32_t VkContext::takeGpuAverages(std::vector<std::pair<const char*, double>>& out) {
+    out.clear();
+    const uint32_t frames = gpuTimingFrames_;
+    if (frames > 0) {
+        for (const auto& [label, sum] : gpuTimingSums_) out.emplace_back(label, sum / frames);
+    }
+    gpuTimingSums_.clear();
+    gpuTimingFrames_ = 0;
+    return frames;
 }
 
 bool VkContext::createSyncObjects() {

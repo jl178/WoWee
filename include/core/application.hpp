@@ -225,6 +225,15 @@ private:
     /// average and worst case per stage and prints the breakdown periodically.
     void noteStageTime(const char* stage, float milliseconds);
     void reportStageTimes();
+    /// reportStageTimes while a profile tag is set (core/profile_tag.hpp): one
+    /// line per tagged state, measured from a settling moment after the tag
+    /// changed to the next change.
+    void reportTaggedStageTimes(std::chrono::steady_clock::time_point now);
+    void resetStageWindow(std::chrono::steady_clock::time_point now);
+    uint32_t seenProfileTagGen_ = 0;
+    std::string seenProfileTag_;
+    bool profileTagSettling_ = true;
+    std::chrono::steady_clock::time_point profileTagSince_{};
     /// Called once a frame with the frame that just finished: when it took
     /// more than twice the running average, logs which stages were over their
     /// own average in it (at most once a second, with a count of the rest).

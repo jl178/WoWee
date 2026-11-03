@@ -76,6 +76,11 @@ struct GraphicsPresetValues {
 /// every row; their sliders stay at the values the presets always gave them.
 constexpr rendering::Enhancements presetEnhancements(int level /* 0 Low .. 3 Ultra */) {
     rendering::Enhancements e = recommendedEnhancements();
+    // The sun's shadow map is on every step of the ladder: picking a preset
+    // is asking for its quality columns, shadow distance included. The
+    // recommended set (a fresh install) leaves it off for its cost; see the
+    // shadows row in kEnhancementRows.
+    e.shadows = true;
     e.grassDensity = 70;
     e.grassHeight = 50;
     e.grassDistance = 215;

@@ -73,7 +73,13 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                 "everyone in the world. Off is the original game's default: a\n"
                 "soft round shadow under each character and the ground's own\n"
                 "painted shadows.",
-     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "shadows",
+     // Off in the recommended set by its cost, not its look: at the Ultra
+     // shadow distance on an Iris Xe the map costs 2.8-4.3 ms of GPU and
+     // 0.7-2.2 ms of main-thread recording (most of it the M2 and unit
+     // casters) over the stock blob - alone more than the whole set's budget
+     // of 3 ms GPU and 0.5 ms CPU (docs/enhancements-plan.md, "Cost"). The
+     // quality presets keep it (presetEnhancements).
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "shadows",
      .controls = "the shadow map's casters and sampling; off draws the stock unit blob",
      .asBool = &Enhancements::shadows},
     {.key = "shadowstrength", .label = "Shadow darkness", .kind = SettingKind::Float,

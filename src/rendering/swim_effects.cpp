@@ -141,118 +141,12 @@ bool SwimEffects::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
         targetSamples_ = vkCtx->getMsaaSamples();
     }
 
-    // ---- Vertex input: pos(vec3) + size(float) + alpha(float) = 5 floats, stride = 20 bytes ----
-    VkVertexInputBindingDescription binding = tightVertexBinding(5 * sizeof(float));
-    std::vector<VkVertexInputAttributeDescription> attrs = positionPlusTwoFloatsAttrs();
-
-
-    // ---- Ripple pipeline ----
-    {
-        auto shaders = loadShaderPair(device, "assets/shaders/swim_ripple.vert.spv", "assets/shaders/swim_ripple.frag.spv", "swim_ripple");
-        if (!shaders) return false;
-        const auto& vertStage = shaders.vertStage;
-        const auto& fragStage = shaders.fragStage;
-
-        ripplePipelineLayout = createPipelineLayout(device, {perFrameLayout}, {});
-        if (ripplePipelineLayout == VK_NULL_HANDLE) {
-            LOG_ERROR("Failed to create ripple pipeline layout");
-            return false;
-        }
-
-        buildRipplePipeline(device, vertStage, fragStage, binding, attrs);
-
-
-        if (ripplePipeline == VK_NULL_HANDLE) {
-            LOG_ERROR("Failed to create ripple pipeline");
-            return false;
-        }
-    }
-
-    // ---- Bubble pipeline ----
-    {
-        auto shaders = loadShaderPair(device, "assets/shaders/swim_bubble.vert.spv", "assets/shaders/swim_bubble.frag.spv", "swim_bubble");
-        if (!shaders) return false;
-        const auto& vertStage = shaders.vertStage;
-        const auto& fragStage = shaders.fragStage;
-
-        bubblePipelineLayout = createPipelineLayout(device, {perFrameLayout}, {});
-        if (bubblePipelineLayout == VK_NULL_HANDLE) {
-            LOG_ERROR("Failed to create bubble pipeline layout");
-            return false;
-        }
-
-        buildBubblePipeline(device, vertStage, fragStage, binding, attrs);
-
-
-        if (bubblePipeline == VK_NULL_HANDLE) {
-            LOG_ERROR("Failed to create bubble pipeline");
-            return false;
-        }
-    }
-
-    // ---- Insect pipeline (dark point sprites) ----
-    {
-        auto shaders = loadShaderPair(device, "assets/shaders/swim_ripple.vert.spv", "assets/shaders/swim_insect.frag.spv", "swim_ripple");
-        if (!shaders) return false;
-        const auto& vertStage = shaders.vertStage;
-        const auto& fragStage = shaders.fragStage;
-
-        insectPipelineLayout = createPipelineLayout(device, {perFrameLayout}, {});
-        if (insectPipelineLayout == VK_NULL_HANDLE) {
-            LOG_ERROR("Failed to create insect pipeline layout");
-            return false;
-        }
-
-        // Depth test disabled - insects are screen-space sprites that must always
-        // render above the water surface regardless of scene geometry.
-        buildInsectPipeline(device, vertStage, fragStage, binding, attrs);
-
-
-        if (insectPipeline == VK_NULL_HANDLE) {
-            LOG_ERROR("Failed to create insect pipeline");
-            return false;
-        }
-    }
-
-    // ---- Create dynamic mapped vertex buffers ----
-    rippleDynamicVBSize = MAX_RIPPLE_PARTICLES * 5 * sizeof(float);
-    {
-        AllocatedBuffer buf = createBuffer(vkCtx->getAllocator(), rippleDynamicVBSize,
-            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        rippleDynamicVB = buf.buffer;
-        rippleDynamicVBAlloc = buf.allocation;
-        rippleDynamicVBAllocInfo = buf.info;
-        if (rippleDynamicVB == VK_NULL_HANDLE) {
-            LOG_ERROR("Failed to create ripple dynamic vertex buffer");
-            return false;
-        }
-    }
-
-    bubbleDynamicVBSize = MAX_BUBBLE_PARTICLES * 5 * sizeof(float);
-    {
-        AllocatedBuffer buf = createBuffer(vkCtx->getAllocator(), bubbleDynamicVBSize,
-            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        bubbleDynamicVB = buf.buffer;
-        bubbleDynamicVBAlloc = buf.allocation;
-        bubbleDynamicVBAllocInfo = buf.info;
-        if (bubbleDynamicVB == VK_NULL_HANDLE) {
-            LOG_ERROR("Failed to create bubble dynamic vertex buffer");
-            return false;
-        }
-    }
-
-    insectDynamicVBSize = MAX_INSECT_PARTICLES * 5 * sizeof(float);
-    {
-        AllocatedBuffer buf = createBuffer(vkCtx->getAllocator(), insectDynamicVBSize,
-            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        insectDynamicVB = buf.buffer;
-        insectDynamicVBAlloc = buf.allocation;
-        insectDynamicVBAllocInfo = buf.info;
-        if (insectDynamicVB == VK_NULL_HANDLE) {
-            LOG_ERROR("Failed to create insect dynamic vertex buffer");
-            return false;
-        }
-    }
+    perFrameLayout_ = perFrameLayout;
+    // The spray, rings, bubbles and midges are enhancements ("Splashes and
+    // wakes", "Insects over water"): their pipelines and buffers are made the
+    // first time one is switched on (ensureSplashResources,
+    // ensureInsectResources) and released when it has been off for longer
+    // than a frame can be in flight, so a stock session makes none of them.
 
     // ---- Stock underwater particulates ----
     // Non-fatal: without them the water is only missing its motes.
@@ -275,15 +169,179 @@ bool SwimEffects::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
     motes_.resize(stock_particulates::kMoteCount);
     moteVertexData.reserve(static_cast<size_t>(stock_particulates::kMaxDrawn) * 30);
 
-    ripples.reserve(MAX_RIPPLE_PARTICLES);
-    bubbles.reserve(MAX_BUBBLE_PARTICLES);
-    insects.reserve(MAX_INSECT_PARTICLES);
-    rippleVertexData.reserve(MAX_RIPPLE_PARTICLES * 5);
-    bubbleVertexData.reserve(MAX_BUBBLE_PARTICLES * 5);
-    insectVertexData.reserve(MAX_INSECT_PARTICLES * 5);
 
     LOG_INFO("Swim effects initialized");
     return true;
+}
+
+bool SwimEffects::ensureSplashResources() {
+    if (rippleDynamicVB != VK_NULL_HANDLE && bubbleDynamicVB != VK_NULL_HANDLE) return true;
+    if (!vkCtx || splashResourcesFailed_) return false;
+    VkDevice device = vkCtx->getDevice();
+    const auto fail = [&] { releaseSplashResources(); splashResourcesFailed_ = true; return false; };
+    // ---- Vertex input: pos(vec3) + size(float) + alpha(float) = 5 floats, stride = 20 bytes ----
+    VkVertexInputBindingDescription binding = tightVertexBinding(5 * sizeof(float));
+    std::vector<VkVertexInputAttributeDescription> attrs = positionPlusTwoFloatsAttrs();
+
+
+    // ---- Ripple pipeline ----
+    {
+        auto shaders = loadShaderPair(device, "assets/shaders/swim_ripple.vert.spv", "assets/shaders/swim_ripple.frag.spv", "swim_ripple");
+        if (!shaders) return fail();
+        const auto& vertStage = shaders.vertStage;
+        const auto& fragStage = shaders.fragStage;
+
+        ripplePipelineLayout = createPipelineLayout(device, {perFrameLayout_}, {});
+        if (ripplePipelineLayout == VK_NULL_HANDLE) {
+            LOG_ERROR("Failed to create ripple pipeline layout");
+            return fail();
+        }
+
+        buildRipplePipeline(device, vertStage, fragStage, binding, attrs);
+
+
+        if (ripplePipeline == VK_NULL_HANDLE) {
+            LOG_ERROR("Failed to create ripple pipeline");
+            return fail();
+        }
+    }
+
+    // ---- Bubble pipeline ----
+    {
+        auto shaders = loadShaderPair(device, "assets/shaders/swim_bubble.vert.spv", "assets/shaders/swim_bubble.frag.spv", "swim_bubble");
+        if (!shaders) return fail();
+        const auto& vertStage = shaders.vertStage;
+        const auto& fragStage = shaders.fragStage;
+
+        bubblePipelineLayout = createPipelineLayout(device, {perFrameLayout_}, {});
+        if (bubblePipelineLayout == VK_NULL_HANDLE) {
+            LOG_ERROR("Failed to create bubble pipeline layout");
+            return fail();
+        }
+
+        buildBubblePipeline(device, vertStage, fragStage, binding, attrs);
+
+
+        if (bubblePipeline == VK_NULL_HANDLE) {
+            LOG_ERROR("Failed to create bubble pipeline");
+            return fail();
+        }
+    }
+
+    // ---- Create dynamic mapped vertex buffers ----
+    rippleDynamicVBSize = MAX_RIPPLE_PARTICLES * 5 * sizeof(float);
+    {
+        AllocatedBuffer buf = createBuffer(vkCtx->getAllocator(), rippleDynamicVBSize,
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        rippleDynamicVB = buf.buffer;
+        rippleDynamicVBAlloc = buf.allocation;
+        rippleDynamicVBAllocInfo = buf.info;
+        if (rippleDynamicVB == VK_NULL_HANDLE) {
+            LOG_ERROR("Failed to create ripple dynamic vertex buffer");
+            return fail();
+        }
+    }
+
+    bubbleDynamicVBSize = MAX_BUBBLE_PARTICLES * 5 * sizeof(float);
+    {
+        AllocatedBuffer buf = createBuffer(vkCtx->getAllocator(), bubbleDynamicVBSize,
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        bubbleDynamicVB = buf.buffer;
+        bubbleDynamicVBAlloc = buf.allocation;
+        bubbleDynamicVBAllocInfo = buf.info;
+        if (bubbleDynamicVB == VK_NULL_HANDLE) {
+            LOG_ERROR("Failed to create bubble dynamic vertex buffer");
+            return fail();
+        }
+    }
+
+    ripples.reserve(MAX_RIPPLE_PARTICLES);
+    bubbles.reserve(MAX_BUBBLE_PARTICLES);
+    rippleVertexData.reserve(MAX_RIPPLE_PARTICLES * 5);
+    bubbleVertexData.reserve(MAX_BUBBLE_PARTICLES * 5);
+    return true;
+}
+
+bool SwimEffects::ensureInsectResources() {
+    if (insectDynamicVB != VK_NULL_HANDLE) return true;
+    if (!vkCtx || insectResourcesFailed_) return false;
+    VkDevice device = vkCtx->getDevice();
+    const auto fail = [&] { releaseInsectResources(); insectResourcesFailed_ = true; return false; };
+    // ---- Vertex input: pos(vec3) + size(float) + alpha(float) = 5 floats, stride = 20 bytes ----
+    VkVertexInputBindingDescription binding = tightVertexBinding(5 * sizeof(float));
+    std::vector<VkVertexInputAttributeDescription> attrs = positionPlusTwoFloatsAttrs();
+
+
+    // ---- Insect pipeline (dark point sprites) ----
+    {
+        auto shaders = loadShaderPair(device, "assets/shaders/swim_ripple.vert.spv", "assets/shaders/swim_insect.frag.spv", "swim_ripple");
+        if (!shaders) return fail();
+        const auto& vertStage = shaders.vertStage;
+        const auto& fragStage = shaders.fragStage;
+
+        insectPipelineLayout = createPipelineLayout(device, {perFrameLayout_}, {});
+        if (insectPipelineLayout == VK_NULL_HANDLE) {
+            LOG_ERROR("Failed to create insect pipeline layout");
+            return fail();
+        }
+
+        // Depth test disabled - insects are screen-space sprites that must always
+        // render above the water surface regardless of scene geometry.
+        buildInsectPipeline(device, vertStage, fragStage, binding, attrs);
+
+
+        if (insectPipeline == VK_NULL_HANDLE) {
+            LOG_ERROR("Failed to create insect pipeline");
+            return fail();
+        }
+    }
+
+    insectDynamicVBSize = MAX_INSECT_PARTICLES * 5 * sizeof(float);
+    {
+        AllocatedBuffer buf = createBuffer(vkCtx->getAllocator(), insectDynamicVBSize,
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        insectDynamicVB = buf.buffer;
+        insectDynamicVBAlloc = buf.allocation;
+        insectDynamicVBAllocInfo = buf.info;
+        if (insectDynamicVB == VK_NULL_HANDLE) {
+            LOG_ERROR("Failed to create insect dynamic vertex buffer");
+            return fail();
+        }
+    }
+
+    insects.reserve(MAX_INSECT_PARTICLES);
+    insectVertexData.reserve(MAX_INSECT_PARTICLES * 5);
+    return true;
+}
+
+void SwimEffects::releaseSplashResources() {
+    if (!vkCtx) return;
+    VkDevice device = vkCtx->getDevice();
+    VmaAllocator allocator = vkCtx->getAllocator();
+    destroy(device, ripplePipeline);
+    destroy(device, ripplePipelineLayout);
+    destroy(allocator, rippleDynamicVB, rippleDynamicVBAlloc);
+    destroy(device, bubblePipeline);
+    destroy(device, bubblePipelineLayout);
+    destroy(allocator, bubbleDynamicVB, bubbleDynamicVBAlloc);
+    rippleDynamicVBAllocInfo = {};
+    bubbleDynamicVBAllocInfo = {};
+    std::vector<Particle>().swap(ripples);
+    std::vector<Particle>().swap(bubbles);
+    std::vector<float>().swap(rippleVertexData);
+    std::vector<float>().swap(bubbleVertexData);
+}
+
+void SwimEffects::releaseInsectResources() {
+    if (!vkCtx) return;
+    VkDevice device = vkCtx->getDevice();
+    VmaAllocator allocator = vkCtx->getAllocator();
+    destroy(device, insectPipeline);
+    destroy(device, insectPipelineLayout);
+    destroy(allocator, insectDynamicVB, insectDynamicVBAlloc);
+    insectDynamicVBAllocInfo = {};
+    std::vector<InsectParticle>().swap(insects);
+    std::vector<float>().swap(insectVertexData);
 }
 
 void SwimEffects::shutdown() {
@@ -344,7 +402,7 @@ void SwimEffects::recreatePipelines() {
 
 
     // ---- Rebuild ripple pipeline ----
-    {
+    if (ripplePipelineLayout != VK_NULL_HANDLE) {
         VkShaderModule vertModule;
         (void)vertModule.loadFromFile(device, "assets/shaders/swim_ripple.vert.spv");
         VkShaderModule fragModule;
@@ -358,7 +416,7 @@ void SwimEffects::recreatePipelines() {
     }
 
     // ---- Rebuild bubble pipeline ----
-    {
+    if (bubblePipelineLayout != VK_NULL_HANDLE) {
         VkShaderModule vertModule;
         (void)vertModule.loadFromFile(device, "assets/shaders/swim_bubble.vert.spv");
         VkShaderModule fragModule;
@@ -372,7 +430,7 @@ void SwimEffects::recreatePipelines() {
     }
 
     // ---- Rebuild insect pipeline ----
-    {
+    if (insectPipelineLayout != VK_NULL_HANDLE) {
         VkShaderModule vertModule;
         (void)vertModule.loadFromFile(device, "assets/shaders/swim_ripple.vert.spv");
         VkShaderModule fragModule;
@@ -598,10 +656,19 @@ void SwimEffects::update(const Camera& camera, const CameraController& cc,
     // Everything below is Wowee's own spray, rings, bubbles and midges.
     // Two settings: "Splashes and wakes" (spray, rings, bubbles) and
     // "Insects over water" (midges). With both off nothing is stepped.
+    // What is off for longer than a frame can be in flight gives its
+    // pipelines and buffers back; what is on makes them if it has none.
+    constexpr uint32_t kReleaseAfterFrames = 4;
+    splashIdleFrames_ = splashesEnabled_ ? 0 : splashIdleFrames_ + 1;
+    insectIdleFrames_ = insectsEnabled_ ? 0 : insectIdleFrames_ + 1;
+    if (splashIdleFrames_ > kReleaseAfterFrames && rippleDynamicVB != VK_NULL_HANDLE) releaseSplashResources();
+    if (insectIdleFrames_ > kReleaseAfterFrames && insectDynamicVB != VK_NULL_HANDLE) releaseInsectResources();
     if (!splashesEnabled_ && !insectsEnabled_) {
         clearSplashes();
         return;
     }
+    if (splashesEnabled_ && !ensureSplashResources()) splashesEnabled_ = false;
+    if (insectsEnabled_ && !ensureInsectResources()) insectsEnabled_ = false;
     if (!insectsEnabled_) insects.clear();
 
     // Use character position for ripples in third-person mode

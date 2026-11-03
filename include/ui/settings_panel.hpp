@@ -310,9 +310,13 @@ public:
     /// and on load.
     void applyEnhancements();
 
-    /// WOWEE_ENHANCE_AB=<key>:<seconds> flips one enhancement row between its
-    /// stock and recommended values on that period, in place, for A/B shots
-    /// and WOWEE_FRAME_PROFILE cost measurements on the same view; and
+    /// WOWEE_ENHANCE_AB=<key>:<seconds>[:<label>] flips one enhancement row
+    /// between its stock and recommended values on that period, in place, for
+    /// A/B shots and WOWEE_FRAME_PROFILE cost measurements on the same view
+    /// (each state is reported as one PROFILE_AB line, core/profile_tag.hpp);
+    /// "all" flips the whole set, "all+shadows" the set with the shadow map
+    /// on. A script sets the same with the "enhanceab" setting ("off" stops
+    /// it and puts the set back). And
     /// WOWEE_ENHANCE=stock|recommended starts on that set whatever the config
     /// file says. Call once a frame.
     void updateEnhancementAB(float deltaTime);
@@ -336,6 +340,15 @@ private:
     float appliedWindowUiScale_ = 1.0f;
     float enhanceAbClock_ = 0.0f;
     int enhanceAbPhase_ = -1;
+    /// "<key>:<seconds>[:<label>]", from WOWEE_ENHANCE_AB or the "enhanceab"
+    /// setting (a test script moving between places and rows); "" is off. The
+    /// key "all" flips the whole set between stock and recommended.
+    std::string enhanceAbSpec_;
+    bool enhanceAbSpecRead_ = false;
+    /// The set before the current A/B started, put back when the next one
+    /// starts or the A/B stops, so one row's off phase does not leak into the
+    /// next row's measurement.
+    rendering::Enhancements enhanceAbBase_{};
     bool enhanceEnvRead_ = false;
 
     void applyGraphicsPreset(GraphicsPreset preset);

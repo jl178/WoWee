@@ -59,7 +59,7 @@ The reasons follow the table.
 
 | # | Feature | Where | Toggle key | Default now | Classic | Recommend |
 |---|---|---|---|---|---|---|
-| 1 | Shadow map from the sun on terrain, M2, WMO and units | `renderShadowPass`, `sampleShadowPCF` in terrain/m2/wmo/character .frag | `shadows`, `shadowdistance` | on, 300 yd | on, 350 | on (see 2.3 S1: off must become the stock blob) |
+| 1 | Shadow map from the sun on terrain, M2, WMO and units | `renderShadowPass`, `sampleShadowPCF` in terrain/m2/wmo/character .frag | `shadows`, `shadowdistance` | on, 300 yd | on, 350 | off by cost (3.5); the quality presets keep it |
 | 2 | Shadow darkness multiplier | `shadowParams.y` | `shadowstrength` | 1.0 | 1.0 | 1.0 (stock) |
 | 3 | Foliage and cloth wind (trees, banners, awnings, WMO banners), weather-driven, indoor cut | `m2.vert`, `m2_shadow.vert`, `wmo.vert`, `Renderer` wind block | `foliagewind` | 1.0 | 0 | 1.0 |
 | 4 | Volumetric mist and light shafts | `volumetric_fog.cpp`, `volumetric_fog_*.comp` | `lightshafts`, `mistdensity` | Medium | Off | Off; Low or Medium only on High/Ultra |
@@ -232,6 +232,70 @@ marked "on" in sections 2 and 4) must cost at most **3 ms GPU and 0.5 ms
 main-thread CPU** together in Stormwind Trade District and in Nagrand,
 measured with the A/B switch. Each enhancement states its own budget; one
 that runs over is not committed as a default.
+
+### 3.5 Measured cost (2026-11-03)
+
+Measured as 3.4 says: the Iris Xe, a 1251x986 window, the Ultra quality
+columns (2400 view distance, 500 yd shadows, 4x MSAA) with the enhancement
+set on top, noon, the camera fixed. Each row flipped in place on a 5 s
+period (`WOWEE_ENHANCE_AB`, `docs/performance.md` "Measuring an
+enhancement's cost"), adjacent on/off windows compared. Places: Elwynn
+(Goldshire, -9465 47), Stormwind (Trade District, -8829 640), Dalaran
+(5804 624). GPU is the summed pass timestamps, CPU the main-thread stages
+the renderer owns. Single-row differences under about 1 ms GPU and
+0.25 ms CPU are inside the scatter between windows (rows that cannot cost
+anything, such as wet ground in dry weather, read up to +1.8 ms) and are
+given as "~0".
+
+The recommended set against stock, the same run for each pair:
+
+| | Elwynn GPU / CPU | Stormwind GPU / CPU | Dalaran GPU / CPU |
+|---|---|---|---|
+| Before (old set with shadows, old code paths) | +9.4 / +0.3 | +22.1 / +0.3 (frame 44.8 vs 32.3 ms) | +19 / ~0 (CPU-bound at 50 ms) |
+| After, the same set (shadows on) | +2.9 / +0.7 | +6.5 / +1.3 | +6.5 / +1.5 |
+| After, the recommended set (shadows off) | +1.3 / ~0 | +1.4 / ~0 | ~0 / ~0 |
+
+"Before" re-enables the two old paths in the new build
+(`WOWEE_LIGHT_TILES=0`, `WOWEE_SHADOW_CASTERS_WHEN_OFF=1`). Stock itself is
+cheaper than it was: with shadows off the casters are no longer drawn, which
+was 0.8 / 1.0 / 2.2 ms of CPU and 2.7 / 3.3 / 5.2 ms of GPU in the three
+places.
+
+Per row, after the changes below (GPU / CPU ms):
+
+| Row | Elwynn | Stormwind | Dalaran | Before |
+|---|---|---|---|---|
+| Sun shadows | 2.8 / 0.7 | 4.3 / 1.0 | 4.0 / 1.5 | casters drawn when off too |
+| Torch and lamp light | 1.9 / ~0 | ~0 / ~0 | ~0 / ~0 | 3.3, 21.1, 22.4 GPU |
+| Light shafts and mist (Medium) | 0.9 (inject) / ~0 | 1.4 / ~0 | 1.7 / 0.4 | same |
+| Surface depth (parallax) | 1.4 / 0.2 | ~1-3 / ~0 | 2.6 / 0.2 | same |
+| Surface bumps | 1.1 / ~0 | ~0 / ~0 | ~0 / ~0 | same |
+| Shadow edges (Soft) | ~0 | 1.2 / ~0 | ~0 | only with shadows |
+| Every other row | ~0 | ~0 | ~0 | lens flare drew at zero intensity; mount dust, splashes and midges allocated at start |
+
+What changed:
+
+- **Torch and lamp light** was the whole of the gap: every world pixel
+  walked all 48-64 gathered lights. The lights are now culled to a 32x18
+  screen grid on the CPU each frame (`rendering/light_tiles.hpp`,
+  `local_light_tiles.glsli`); a pixel walks its tile's mask, in the same
+  order, and the grid only leaves out lights no pixel in the tile can be
+  inside - the shaders' own radius test would have skipped them - so the
+  sum is the same term for term (`test_light_tiles`). It is now cheaper
+  than the stock rule, which still sorts every gathered light per pixel.
+- **Shadows off** draws nothing: each frame slot's map is cleared and left
+  readable once, then the pass records nothing.
+- Lens flare at 0 draws nothing; mount dust, splashes and midges make
+  their pipelines and buffers on first use and release them a few frames
+  after they go off; the light gather keeps its candidate list between
+  frames; the fog volume lookups multiply the position by the view then the
+  projection rather than forming the product per pixel.
+- **Sun shadows: recommended off.** At the Ultra shadow distance the map
+  costs 2.8-4.3 ms of GPU and 0.7-1.5 ms of main-thread recording (the M2
+  and unit casters), each over the whole set's budget on its own. The
+  quality presets keep it on (`presetEnhancements`); Recommended is the
+  stock blob. Bringing it back into the set needs the casters recorded off
+  the main thread (or instanced units) and a static-caster cache.
 
 ## 4. Proposed enhancements
 

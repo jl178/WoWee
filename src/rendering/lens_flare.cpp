@@ -229,7 +229,9 @@ float LensFlare::calculateSunVisibility(const Camera& camera, const glm::vec3& s
 void LensFlare::render(VkCommandBuffer cmd, const Camera& camera, const glm::vec3& sunPosition,
                        float timeOfDay, float fogDensity, float cloudDensity,
                        float weatherIntensity, float sunOcclusion) {
-    if (!enabled || pipeline == VK_NULL_HANDLE) {
+    // Off (the Lens flare row at 0, the stock picture) draws nothing at all,
+    // rather than every element at zero brightness.
+    if (!enabled || pipeline == VK_NULL_HANDLE || intensityMultiplier <= 0.0f) {
         return;
     }
 
