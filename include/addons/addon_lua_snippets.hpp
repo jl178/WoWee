@@ -132,6 +132,10 @@ local kCategoryHost = {
     ["Graphics"]     = "video",
     ["Detail"]       = "video",
     ["Grass"]        = "video",
+    -- The enhancement pages (ui/enhancement_rows.hpp, kEnhPage*).
+    ["Enhancements"]         = "video",
+    ["Enhancements: Sky"]    = "video",
+    ["Enhancements: Motion"] = "video",
     ["Ray Tracing"]  = "video",
     ["Upscaling"]    = "video",
     ["Display"]      = "video",

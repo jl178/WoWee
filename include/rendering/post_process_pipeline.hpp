@@ -145,6 +145,11 @@ public:
     [[nodiscard]] float getBrightness() const { return brightness_; }
     void setIntoxication(float amount) { intoxication_ = glm::clamp(amount, 0.0f, 1.0f); }
     [[nodiscard]] float getIntoxication() const { return intoxication_; }
+    /// The Drunken wobble enhancement: Wowee's wavy, blurred view. Off, the
+    /// intoxication above is held but not drawn; the stock drunk look is the
+    /// glow blend (setGlow, stock_screen_fx::glowBlend).
+    void setDrunkWobble(bool on) { drunkWobble_ = on; }
+    [[nodiscard]] float drawnIntoxication() const { return drunkWobble_ ? intoxication_ : 0.0f; }
     /// The ghost world: 1 desaturates the scene toward a cold grey-blue, as
     /// the stock client does while the player is a spirit (Light.dbc's death
     /// slot does the lighting half). Runs in the FXAA pass, which it keeps
@@ -186,6 +191,7 @@ private:
     // Brightness
     float brightness_ = 1.0f;
     float intoxication_ = 0.0f;
+    bool drunkWobble_ = false;
     float ghost_ = 0.0f;
     bool ghostPassFailed_ = false;
 
@@ -199,7 +205,7 @@ private:
     }
 
     [[nodiscard]] bool needsFXAAPass() const {
-        return fxaa_.enabled || intoxication_ > 0.001f || ghost_ > 0.001f || glowWanted();
+        return fxaa_.enabled || drawnIntoxication() > 0.001f || ghost_ > 0.001f || glowWanted();
     }
 
     // FSR 1.0 upscaling state

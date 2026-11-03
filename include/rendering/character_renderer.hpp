@@ -384,6 +384,20 @@ public:
     [[nodiscard]] size_t getInstanceCount() const { return instances.size(); }
 
     // Normal mapping / POM settings
+    /// What the stock unit blob shadow needs of each unit drawn here
+    /// (docs/re/characters.md section 6): the origin, the facing, the box
+    /// half-extents scaled and clamped to 5 yards, and the model alpha.
+    struct BlobSource {
+        glm::vec3 feet{0.0f};
+        glm::vec2 forward{1.0f, 0.0f};
+        float halfX = 0.5f, halfY = 0.5f, halfZ = 1.0f, alpha = 1.0f;
+    };
+    /// Every unit model within maxDist of the camera, nearest first, at most
+    /// maxCount. Riders, attached items, effect and scene models are left
+    /// out: a mounted unit's blob is its mount's.
+    void collectUnitBlobs(const glm::vec3& cameraPos, float maxDist, size_t maxCount,
+                          std::vector<BlobSource>& out) const;
+
     void setNormalMappingEnabled(bool enabled) { normalMappingEnabled_ = enabled; }
     void setNormalMapStrength(float strength) { normalMapStrength_ = strength; }
     void setPOMEnabled(bool enabled) { pomEnabled_ = enabled; }

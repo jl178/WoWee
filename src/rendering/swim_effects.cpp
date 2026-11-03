@@ -411,6 +411,7 @@ void SwimEffects::spawnRipple(const glm::vec3& pos, const glm::vec3& moveDir, fl
 }
 
 void SwimEffects::spawnFootSplash(const glm::vec3& footPos, float waterH) {
+    if (!splashesEnabled_) return;  // not stock; see setSplashesEnabled
     // Small burst of splash droplets at foot position (for wading)
     constexpr int splashCount = 5;
     for (int i = 0; i < splashCount; ++i) {
@@ -478,6 +479,11 @@ void SwimEffects::setSplashesEnabled(bool enabled) {
     if (splashesEnabled_ == enabled) return;
     splashesEnabled_ = enabled;
     if (!enabled) clearSplashes();
+}
+
+void SwimEffects::setInsectsEnabled(bool enabled) {
+    insectsEnabled_ = enabled;
+    if (!enabled) insects.clear();
 }
 
 void SwimEffects::clearSplashes() {
@@ -590,10 +596,13 @@ void SwimEffects::update(const Camera& camera, const CameraController& cc,
 
     updateMotes(camera, deltaTime);
     // Everything below is Wowee's own spray, rings, bubbles and midges.
-    if (!splashesEnabled_) {
+    // Two settings: "Splashes and wakes" (spray, rings, bubbles) and
+    // "Insects over water" (midges). With both off nothing is stepped.
+    if (!splashesEnabled_ && !insectsEnabled_) {
         clearSplashes();
         return;
     }
+    if (!insectsEnabled_) insects.clear();
 
     // Use character position for ripples in third-person mode
     glm::vec3 charPos = camPos;
@@ -610,7 +619,7 @@ void SwimEffects::update(const Camera& camera, const CameraController& cc,
     bool moving = cc.isMoving();
 
     // --- Ripple/splash spawning ---
-    if (swimming && charWaterH) {
+    if (splashesEnabled_ && swimming && charWaterH) {
         float wh = *charWaterH;
         float spawnRate = moving ? 40.0f : 8.0f;
         rippleSpawnAccum += spawnRate * deltaTime;
@@ -639,7 +648,7 @@ void SwimEffects::update(const Camera& camera, const CameraController& cc,
     // Rate rises with depth, since deeper water is displaced harder, and dies
     // off as the surface approaches the character's waist, by which point
     // swimming takes over.
-    if (!swimming && moving && charWaterH) {
+    if (splashesEnabled_ && !swimming && moving && charWaterH) {
         const float depth = *charWaterH - charPos.z;
         constexpr float kWadeMinDepth = 0.03f;
         constexpr float kWadeMaxDepth = 1.60f;
@@ -686,7 +695,7 @@ void SwimEffects::update(const Camera& camera, const CameraController& cc,
     // --- Bubble spawning ---
     // Require swimming state to prevent spurious bubbles on login/teleport
     // when camera may briefly appear below a water surface before grounding.
-    bool underwater = swimming && camWaterH && camPos.z < *camWaterH;
+    bool underwater = splashesEnabled_ && swimming && camWaterH && camPos.z < *camWaterH;
     if (underwater) {
         float bubbleRate = 20.0f;
         bubbleSpawnAccum += bubbleRate * deltaTime;
@@ -700,7 +709,7 @@ void SwimEffects::update(const Camera& camera, const CameraController& cc,
     }
 
     // --- Insect spawning near water vegetation ---
-    if (m2Renderer) {
+    if (insectsEnabled_ && m2Renderer) {
         auto vegPositions = m2Renderer->getWaterVegetationPositions(camPos, 60.0f);
         if (!vegPositions.empty()) {
             // Spawn rate: ~4/sec per nearby vegetation cluster (capped by MAX_INSECT_PARTICLES)

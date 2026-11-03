@@ -1489,8 +1489,12 @@ void TerrainRenderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
 
     TerrainPush push{};
     push.model = glm::mat4(1.0f);
-    static const bool kSpecularOn = core::envFlagEnabled("WOWEE_TERRAIN_SPECULAR", true);
-    push.specular = glm::vec4(sunSpecular_, kSpecularOn && !stockExtrasOff_ ? stock_terrain::kSpecularPower : 0.0f);
+    // The stock Terrain Highlights option (CVar `specular`, default 0): the
+    // Ground highlights enhancement row. WOWEE_TERRAIN_SPECULAR=0 still
+    // forces it off for an A/B.
+    static const bool kSpecularAllowed = core::envFlagEnabled("WOWEE_TERRAIN_SPECULAR", true);
+    push.specular = glm::vec4(sunSpecular_, kSpecularAllowed && specularEnabled_ && !stockExtrasOff_
+                                                ? stock_terrain::kSpecularPower : 0.0f);
     vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
                         0, sizeof(TerrainPush), &push);
 

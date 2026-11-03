@@ -3443,12 +3443,28 @@ void CameraController::update(float deltaTime) {
     // forward goes where the screen points.
     bool cameraDrivesFacing = rightMouseDown || mouseAutorun || steering_ ||
                               (swimming && hasMoveInput);
+    // The stock drunk steer (Wow.exe 0x6DEB30, docs/re/movement-camera.md
+    // section 5): while moving, the facing is pushed every frame by
+    // drunk * 0.01309 rad * the mean of three slow cosines of
+    // t_ms * (pi/180) * drunk. A real facing change, so it is sent with the
+    // movement; with a turn key held it applies only while mouse-steering.
+    // Wowee's own weave (below) replaces it under the Drunken wobble setting.
+    if (!drunkWobble_ && drunkLevel_ > 0.0f && hasMoveInput && !externalFollow_) {
+        const float tau = intoxicationTime_ * 1000.0f * (3.14159265f / 180.0f) * drunkLevel_;
+        const float sway = drunkLevel_ * 0.01309f *
+            (std::cos(0.154f * tau) + std::cos(0.195f * tau) + std::cos(0.093f * tau)) / 3.0f;
+        if (cameraDrivesFacing) {
+            yaw += glm::degrees(sway);
+        } else if (!nowTurnLeft && !nowTurnRight) {
+            facingYaw += glm::degrees(sway);
+        }
+    }
     // During taxi flights, orientation is controlled by the flight path, not player input
     if (cameraDrivesFacing && !externalFollow_) {
         facingYaw = yaw;
     }
     float moveYaw = cameraDrivesFacing ? yaw : facingYaw;
-    if (intoxication_ > 0.34f) {
+    if (drunkWobble_ && intoxication_ > 0.34f) {
         // Drunk and smashed characters weave while trying to walk. Keep facing
         // authoritative; only the travel direction stumbles side to side.
         moveYaw += std::sin(intoxicationTime_ * 2.1f) * 11.0f * intoxication_;
@@ -3770,7 +3786,7 @@ void CameraController::update(float deltaTime) {
     // The stumble in the travel direction is deliberately not scaled with it.
     // That one is what being drunk does to the character rather than to the
     // picture, and turning it off would be an advantage rather than a comfort.
-    if (intoxication_ > 0.0f && camera) {
+    if (drunkWobble_ && intoxication_ > 0.0f && camera) {
         const float swayYaw = std::sin(intoxicationTime_ * 1.35f) * 2.5f * intoxication_ * shakeScale_;
         const float swayPitch = std::sin(intoxicationTime_ * 1.8f + 0.7f) * 1.6f * intoxication_ * shakeScale_;
         camera->setRotation(yaw + swayYaw,

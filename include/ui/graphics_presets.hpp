@@ -9,9 +9,11 @@
 /// FXAA on at the login screen; Medium differed in clutter and multisampling;
 /// Low still turned shadows off there after the client stopped honouring that.
 ///
-/// It carries no includes, so the login screen, the settings panel and a test
-/// can all read the same rows.
+/// It carries no renderer includes, so the login screen, the settings panel and
+/// a test can all read the same rows.
 
+#include "rendering/enhancements.hpp"
+#include "ui/enhancement_rows.hpp"
 #include "ui/graphics_defaults.hpp"
 
 namespace wowee {
@@ -47,81 +49,69 @@ namespace ui {
 /// afterwards without writing the numbers out a second time.
 struct GraphicsPresetValues {
     float viewDistance;
-    bool  shadows;
     float shadowDistance;
     int   antiAliasing;      ///< index into the four the panel offers
     bool  fxaa;
-    bool  normalMapping;
-    float normalMapStrength;
-    bool  parallax;
-    int   parallaxQuality;
     int   groundClutter;     ///< percent
-    /// Ground cover from the terrain's own ground-effect data. Stated on every
-    /// row rather than only the one that wants it: a preset that leaves a field
-    /// alone is what left FXAA running after a drop from Ultra to Low.
-    bool  grass;
-    int   grassDensity;      ///< percent of what the terrain asks for
-    int   grassHeight;       ///< percent
-    int   grassDistance;     ///< yards
-    // The enhancements over the stock picture, stated on every row for the
-    // same reason as the grass: picking Ultra after Classic has to bring them
-    // back, and a row that left them alone would not.
-    float foliageWind;       ///< foliagewind: 1 the usual breeze, 0 still
-    float shadowStrength;    ///< shadowstrength: 1 is Light.dbc's own darkness
-    int   lightShafts;       ///< lightshafts: index of Off, Low, Medium, High
-    float fogStrength;       ///< fogstrength: 1 is Light.dbc's fog exactly
-    float fogSkyBlend;       ///< fogskyblend: 0 is the zone's own fog colour
-    float lensFlare;         ///< lensflare: 0 is none
-    bool  sharpStars;        ///< off is the sky model's own star texture
-    bool  sunShafts;
-    bool  shorelineFoam;     ///< shorelinefoam: off is the stock water edge
-    bool  wetGround;         ///< wetground: off is the stock dry ground in rain
+    /// Every enhancement over the stock picture, stated on every row: picking
+    /// Ultra after Classic has to bring them back, and a row that left any of
+    /// them alone would not. Classic's is Enhancements{}, the stock client, by
+    /// construction (test_enhancements_stock). The others start from the
+    /// table's recommended values (kEnhancementRows) and differ only where a
+    /// preset trades a feature for frames.
+    rendering::Enhancements enh;
 };
 
-// Normal mapping and parallax are on from Medium up, by choice: Jered
-// prefers the lit relief on the ground and walls. The 3.3.5 art ships no
-// such maps (they are generated from the colour texture), so this is a
-// deliberate departure; characters never use them (character_renderer),
-// because generated maps embossed the composited skins.
-// Note the shadows column: every preset leaves them on. Turning them off
-// saves no time - the shadow pass runs either way - so Low leans on its short
-// shadow distance instead, which is where the cost actually is.
-// And the FXAA column: off on every row. Ultra used to turn it on over 8x
-// MSAA, where there is nothing left for it to find and its sub-pixel filter
-// only softened the resolve. It stays in the panel for anyone who wants it,
-// which mostly means anyone running without MSAA.
-// And the grass column: off on every row. The GPU grass blades are not in the
-// stock client - its ground cover is the detail doodads the terrain's
-// GroundEffectTexture rows place, which the clutter column already draws - and
-// on Ultra they were a second field of a hundred thousand blades over the
-// first, rebuilt every ten to fifteen seconds of travel with a hitch of 30 ms
-// and up each time (the frame profile's beginFrame/grass+misc). It stays in
-// the panel for anyone who wants it.
-// The enhancement columns on Low to Ultra are each setting's own default, bar
-// Low's lighter mist and its plain shorelines and dry rain: those two cost a
-// little on every water and ground pixel, which is what Low is for saving.
-// The fog columns are the stock fog on every row (strength 1, no sky blend):
-// with the stock curve (LightingManager, stock_light_math.hpp) the fog is
-// Light.dbc's own, ending by the view distance, and thinning or recolouring
-// it changes the picture rather than adding to it. The sliders remain.
-// Classic sets every one of them to the stock picture: still trees and cloth,
-// Light.dbc's shadow darkness, fog and fog colour exactly, no mist, flare or
-// sun shafts, the sky's own stars, no shoreline foam or wet ground, and no
-// normal maps or parallax (the ground's relief follows normal mapping, so it
-// is flat too). Shadows stay on, as on every row; the rest of its quality columns are
-// High's, at the default view distance, where the fog is Light.dbc's own
-// (LightingManager::kFogReferenceViewDistance).
+/// A preset's enhancements: the recommended set, with what the lower presets
+/// give up for speed.
+///
+/// Normal mapping and parallax are on from Medium up, by choice: Jered
+/// prefers the lit relief on the ground and walls (docs/enhancements-plan.md
+/// section 6 leaves the question open). The 3.3.5 art ships no such maps -
+/// they are generated from the colour texture - so this is a deliberate
+/// departure; characters never use them, because generated maps embossed the
+/// composited skins. Low drops them, its mist to the light volume, and the
+/// shoreline foam and wet ground that cost a little on every water and ground
+/// pixel. The grass columns are the generator's own experiment and off on
+/// every row; their sliders stay at the values the presets always gave them.
+constexpr rendering::Enhancements presetEnhancements(int level /* 0 Low .. 3 Ultra */) {
+    rendering::Enhancements e = recommendedEnhancements();
+    e.grassDensity = 70;
+    e.grassHeight = 50;
+    e.grassDistance = 215;
+    constexpr float kBump[] = {0.6f, 0.6f, 0.8f, 1.2f};
+    e.normalMapStrength = kBump[level];
+    e.parallaxQuality = level <= 1 ? 0 : level - 1;
+    if (level == 0) {
+        e.normalMapping = false;
+        e.parallax = false;
+        e.lightShafts = 1;
+        e.shorelineFoam = false;
+        e.wetGround = false;
+    }
+    return e;
+}
+
+// The quality columns. Shadows are on from Low up (an enhancement row, so
+// Classic has the stock blob instead); Low leans on its short shadow distance,
+// which is where the cost is. FXAA is off on every row: Ultra used to turn it
+// on over 8x MSAA, where there is nothing left for it to find and its sub-pixel
+// filter only softened the resolve.
+// Classic is the stock picture: every enhancement off (the unit blob rather
+// than the shadow map, still trees and cloth, Light.dbc's fog and shadow
+// darkness exactly, no mist, flare, sun shafts, foam, wet ground, generated
+// relief, point lights on the ground, glow halos or flicker), with High's
+// quality columns at the default view distance, where the fog is Light.dbc's
+// own (LightingManager::kFogReferenceViewDistance). Its view distance stays at
+// that default rather than the stock clamp of 791.7 yards below map 530 - a
+// question left open for Jered (enhancements-plan.md section 6), since the fog
+// reference is tied to it.
 constexpr GraphicsPresetValues kGraphicsPresets[] = {
-    /* Low    */ { .viewDistance = 600.0f, .shadows = true,  .shadowDistance = 100.0f, .antiAliasing = 0, .fxaa = false, .normalMapping = false, .normalMapStrength = 0.6f, .parallax = false, .parallaxQuality = 0,  .groundClutter = 25,  .grass = false, .grassDensity = 70, .grassHeight = 50, .grassDistance = 215,
-                   .foliageWind = 1.0f, .shadowStrength = 1.0f, .lightShafts = 1, .fogStrength = 1.0f, .fogSkyBlend = 0.0f, .lensFlare = 1.0f, .sharpStars = true, .sunShafts = true, .shorelineFoam = false, .wetGround = false},
-    /* Medium */ {.viewDistance = 1000.0f, .shadows = true,  .shadowDistance = 200.0f, .antiAliasing = 1, .fxaa = false, .normalMapping = true, .normalMapStrength = 0.6f, .parallax = true, .parallaxQuality = 0,  .groundClutter = 60,  .grass = false, .grassDensity = 70, .grassHeight = 50, .grassDistance = 215,
-                   .foliageWind = 1.0f, .shadowStrength = 1.0f, .lightShafts = 2, .fogStrength = 1.0f, .fogSkyBlend = 0.0f, .lensFlare = 1.0f, .sharpStars = true, .sunShafts = true, .shorelineFoam = true, .wetGround = true},
-    /* High   */ {.viewDistance = 1600.0f, .shadows = true,  .shadowDistance = 350.0f, .antiAliasing = 2, .fxaa = false, .normalMapping = true, .normalMapStrength = 0.8f, .parallax = true, .parallaxQuality = 1, .groundClutter = 100, .grass = false, .grassDensity = 70, .grassHeight = 50, .grassDistance = 215,
-                   .foliageWind = 1.0f, .shadowStrength = 1.0f, .lightShafts = 2, .fogStrength = 1.0f, .fogSkyBlend = 0.0f, .lensFlare = 1.0f, .sharpStars = true, .sunShafts = true, .shorelineFoam = true, .wetGround = true},
-    /* Ultra  */ {.viewDistance = 2400.0f, .shadows = true,  .shadowDistance = 500.0f, .antiAliasing = 3, .fxaa = false, .normalMapping = true, .normalMapStrength = 1.2f, .parallax = true, .parallaxQuality = 2, .groundClutter = 150, .grass = false, .grassDensity = 70, .grassHeight = 50, .grassDistance = 215,
-                   .foliageWind = 1.0f, .shadowStrength = 1.0f, .lightShafts = 2, .fogStrength = 1.0f, .fogSkyBlend = 0.0f, .lensFlare = 1.0f, .sharpStars = true, .sunShafts = true, .shorelineFoam = true, .wetGround = true},
-    /* Classic */ {.viewDistance = kDefaultViewDistance, .shadows = true, .shadowDistance = 350.0f, .antiAliasing = 2, .fxaa = false, .normalMapping = false, .normalMapStrength = 0.8f, .parallax = false, .parallaxQuality = 1, .groundClutter = 100, .grass = false, .grassDensity = 70, .grassHeight = 50, .grassDistance = 215,
-                   .foliageWind = 0.0f, .shadowStrength = 1.0f, .lightShafts = 0, .fogStrength = 1.0f, .fogSkyBlend = 0.0f, .lensFlare = 0.0f, .sharpStars = false, .sunShafts = false, .shorelineFoam = false, .wetGround = false},
+    /* Low    */ {.viewDistance = 600.0f,  .shadowDistance = 100.0f, .antiAliasing = 0, .fxaa = false, .groundClutter = 25,  .enh = presetEnhancements(0)},
+    /* Medium */ {.viewDistance = 1000.0f, .shadowDistance = 200.0f, .antiAliasing = 1, .fxaa = false, .groundClutter = 60,  .enh = presetEnhancements(1)},
+    /* High   */ {.viewDistance = 1600.0f, .shadowDistance = 350.0f, .antiAliasing = 2, .fxaa = false, .groundClutter = 100, .enh = presetEnhancements(2)},
+    /* Ultra  */ {.viewDistance = 2400.0f, .shadowDistance = 500.0f, .antiAliasing = 3, .fxaa = false, .groundClutter = 150, .enh = presetEnhancements(3)},
+    /* Classic */ {.viewDistance = kDefaultViewDistance, .shadowDistance = 350.0f, .antiAliasing = 2, .fxaa = false, .groundClutter = 100, .enh = rendering::Enhancements{}},
 };
 
 /// The number of presets, not counting Custom - which is not a set of values

@@ -13,6 +13,9 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 shadowParams;
     vec4 playerPos;   // xyz = player world position, w = horizontal speed
     vec4 playerWake;  // xyz = trailing player position (springback reference), w = wind strength
+    vec4 localLightPosRadius[64];
+    vec4 localLightColorIntensity[64];
+    ivec4 localLightMeta;  // z: the enhancement switches (rendering::enh_bits)
 };
 
 // Per-draw push constants (batch-level data only)
@@ -254,7 +257,9 @@ void main() {
     // about where it was placed. Two rates each, so it never settles into a
     // metronome, and the phase comes from where it is moored so a row of
     // boats along a canal does not bob in step.
-    if ((instanceData[instIdx].flags & 1) != 0) {
+    // Boats move on the water (an enhancement, enh_bits::kBoatBob): stock
+    // boats sit still.
+    if ((instanceData[instIdx].flags & 1) != 0 && (localLightMeta.z & 2) != 0) {
         vec3 origin = model[3].xyz;
         float t = fogParams.z;
         float ph = dot(origin.xy, vec2(0.37, 0.23));
@@ -274,7 +279,9 @@ void main() {
     // between them is on the plant's own height rather than on which of the two
     // sway modes it happens to use. A shoulder-high bush and a waist-high one
     // should not behave differently because a bounding box crossed a threshold.
-    if (push.isFoliage > 0 && push.isFoliage != 3 && push.isFoliage != 4 &&
+    // Plants part as you pass (enh_bits::kFoliagePush); stock has no brush.
+    if ((localLightMeta.z & 1) != 0 &&
+        push.isFoliage > 0 && push.isFoliage != 3 && push.isFoliage != 4 &&
         push.isFoliage != 5 && push.plantHeight > 0.0) {
         vec3 base = model[3].xyz;                      // instance origin, on the ground
         float zScale = length(model[2].xyz);

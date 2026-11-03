@@ -5759,3 +5759,52 @@ void CharacterRenderer::recreatePipelines() {
 
 } // namespace rendering
 } // namespace wowee
+
+namespace wowee {
+namespace rendering {
+
+void CharacterRenderer::collectUnitBlobs(const glm::vec3& cameraPos, float maxDist, size_t maxCount,
+                                         std::vector<BlobSource>& out) const {
+    out.clear();
+    std::vector<std::pair<float, BlobSource>> found;
+    const float maxSq = maxDist * maxDist;
+    for (const auto& [id, inst] : instances) {
+        if (!inst.visible || inst.isAttachedItem || inst.isEffectModel || inst.isSceneModel ||
+            inst.hasOverrideModelMatrix || inst.mountedOn != 0) {
+            continue;
+        }
+        const M2ModelGPU* model = inst.cachedModel;
+        if (!model) {
+            auto it = models.find(inst.modelId);
+            if (it == models.end()) continue;
+            model = &it->second;
+        }
+        const glm::vec3 d = inst.position - cameraPos;
+        const float distSq = glm::dot(d, d);
+        if (distSq > maxSq) continue;
+        // The box half-extents about the origin, scaled, each corner held to
+        // +/- 5 yards (0x7E4480). The visual bind-pose box stands in for
+        // CreatureModelData's GeoBox.
+        const glm::vec3 lo = model->visualBoundMin, hi = model->visualBoundMax;
+        if (!(hi.x > lo.x) || !(hi.y > lo.y) || !(hi.z > lo.z)) continue;
+        const float s = inst.scale > 0.0f ? inst.scale : 1.0f;
+        const auto clamp5 = [](float v) { return std::clamp(v, -5.0f, 5.0f); };
+        BlobSource b;
+        b.feet = inst.position;
+        b.forward = glm::vec2(std::cos(inst.rotation.z), std::sin(inst.rotation.z));
+        b.halfX = std::min((hi.x - lo.x) * 0.5f * s, 5.0f);
+        b.halfY = std::min((hi.y - lo.y) * 0.5f * s, 5.0f);
+        b.halfZ = (clamp5(hi.z * s) - clamp5(lo.z * s)) * 0.5f;
+        b.alpha = std::clamp(inst.opacity, 0.0f, 1.0f);
+        if (b.halfX <= 0.01f || b.halfY <= 0.01f || b.halfZ <= 0.01f) continue;
+        found.emplace_back(distSq, b);
+    }
+    std::sort(found.begin(), found.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    if (found.size() > maxCount) found.resize(maxCount);
+    out.reserve(found.size());
+    for (auto& f : found) out.push_back(f.second);
+}
+
+}  // namespace rendering
+}  // namespace wowee

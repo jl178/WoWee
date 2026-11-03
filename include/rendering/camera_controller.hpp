@@ -305,6 +305,13 @@ public:
     void setHoverActive(bool active) { hoverActive_ = active; }
     void setMounted(bool m) { mounted_ = m; }
     void setIntoxication(float amount) { intoxication_ = std::clamp(amount, 0.0f, 1.0f); }
+    /// The stock drunk level, PLAYER_BYTES_3 byte 1 / 100 (0x4F7290): what the
+    /// stock steer reads. setIntoxication is Wowee's own, from the server's
+    /// threshold message, and drives the Drunken wobble enhancement.
+    void setDrunkLevel(float level) { drunkLevel_ = std::clamp(level, 0.0f, 1.0f); }
+    /// The Drunken wobble enhancement: Wowee's camera sway and travel weave
+    /// in place of the stock facing steer.
+    void setDrunkWobble(bool on) { drunkWobble_ = on; }
     void setMountHeightOffset(float offset) { mountHeightOffset_ = offset; }
     void setExternalFollow(bool enabled) { externalFollow_ = enabled; }
     void setExternalMoving(bool moving) { externalMoving_ = moving; }
@@ -1073,6 +1080,8 @@ private:
     // Server-authored drunkenness (0 sober, 1 smashed).
     float intoxication_ = 0.0f;
     float intoxicationTime_ = 0.0f;
+    float drunkLevel_ = 0.0f;
+    bool drunkWobble_ = false;
 };
 
 } // namespace rendering

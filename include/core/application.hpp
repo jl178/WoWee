@@ -470,6 +470,8 @@ private:
     /// never lays down (updateLootSparkles).
     std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> corpseDeathSeenAt_;
     void updateUnitHighlights();   // Mouseover and target emissive (stock 0x743C70)
+    /// The player's drunk level off PLAYER_BYTES_3, for the stock drunk look.
+    void updateDrunkLevel();
 };
 
 } // namespace core

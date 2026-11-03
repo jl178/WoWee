@@ -65,6 +65,10 @@ public:
     /// (its ripple decals are off by default, docs/re/water.md), so they are
     /// off unless asked for. The stock motes below do not depend on it.
     void setSplashesEnabled(bool enabled);
+    /// The "Insects over water" setting: midges over reeds and still water.
+    /// Split from the splashes (docs/enhancements-plan.md 2.1 #13): they add
+    /// creatures the zone data does not place. Off by default.
+    void setInsectsEnabled(bool enabled);
 
     /// The stock underwater particulates (stock_particulates.hpp): which
     /// liquid the camera is in this frame and what its LiquidType row says.
@@ -158,6 +162,7 @@ private:
     void clearSplashes();
 
     bool splashesEnabled_ = false;
+    bool insectsEnabled_ = false;
     MoteLiquid moteLiquid_{};
     uint32_t moteLiquidShown_ = 0;           // the liquid the set was made for
     std::vector<stock_particulates::Mote> motes_;

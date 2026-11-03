@@ -88,7 +88,52 @@ float shadowIgn(vec2 p) {
     return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
 
+// The stock point lights (Wow.exe 12340, docs/re/characters.md section 1
+// "Point lights: full rule"): only M2 type-1 lights (the renderer gathers no
+// other kind with the Torch and lamp light setting off), the N nearest by 3D
+// distance with no range cut-off, each colour * max(N.L, 0) / (0.7 d +
+// 0.03 d^2). Stock picks the N per object (a model, a WMO group, a terrain
+// chunk); here per pixel, which is the same set away from the seams.
+vec3 stockPointLights(vec3 pos, vec3 normal, int maxLights) {
+    float bestD[4] = float[4](1e30, 1e30, 1e30, 1e30);
+    int bestI[4] = int[4](-1, -1, -1, -1);
+    for (int i = 0; i < min(localLightMeta.x, 64); ++i) {
+        vec3 d3 = localLightPosRadius[i].xyz - pos;
+        float dsq = dot(d3, d3);
+        for (int k = 0; k < 4; ++k) {
+            if (k >= maxLights) break;
+            if (dsq < bestD[k]) {
+                for (int m = 3; m > k; --m) { bestD[m] = bestD[m - 1]; bestI[m] = bestI[m - 1]; }
+                bestD[k] = dsq; bestI[k] = i;
+                break;
+            }
+        }
+    }
+    vec3 sum = vec3(0.0);
+    for (int k = 0; k < 4; ++k) {
+        if (k >= maxLights || bestI[k] < 0) break;
+        vec3 toLight = localLightPosRadius[bestI[k]].xyz - pos;
+        float dist = sqrt(bestD[k]);
+        float ndl = max(dot(normal, toLight / max(dist, 0.001)), 0.0);
+        sum += localLightColorIntensity[bestI[k]].rgb * localLightColorIntensity[bestI[k]].w * ndl /
+               max(0.7 * dist + 0.03 * dist * dist, 0.05);
+    }
+    return sum;
+}
+
 float sampleShadowPCF(sampler2DShadow smap, vec3 coords) {
+    // The stock filter (Wow.exe 0x8742e0, docs/re/world-lighting.md "Shadow
+    // map filter"): the centre and four fixed taps, k0 k2 k4 k6 in texels,
+    // equal weights. The rotated disk below is the Soft setting.
+    if ((localLightMeta.z & 8) == 0) {
+        float t = shadowTexel();
+        float s = texture(smap, coords)
+                + texture(smap, vec3(coords.xy + vec2( 0.8, -1.0) * t, coords.z))
+                + texture(smap, vec3(coords.xy + vec2( 0.2, -0.6) * t, coords.z))
+                + texture(smap, vec3(coords.xy + vec2(-0.6, -0.2) * t, coords.z))
+                + texture(smap, vec3(coords.xy + vec2(-1.0, -0.4) * t, coords.z));
+        return s * 0.2;
+    }
     // A Vogel (golden-angle) disk: r = sqrt((i + 0.5) / 9), i x 137.5 degrees.
     const vec2 kDisk[9] = vec2[9](
         vec2( 0.2357,  0.0000), vec2(-0.3010,  0.2758), vec2( 0.0461, -0.5250),
@@ -105,6 +150,8 @@ float sampleShadowPCF(sampler2DShadow smap, vec3 coords) {
 }
 
 vec3 localLightContribution(vec3 pos, vec3 normal, vec3 albedo) {
+    // Torch and lamp light off: the stock rule, the 4 nearest M2 lights.
+    if ((localLightMeta.z & 4) == 0) return albedo * stockPointLights(pos, normal, 4);
     vec3 sum = vec3(0.0);
     for (int i = 0; i < min(localLightMeta.x, 64); ++i) {
         vec3 toLight = localLightPosRadius[i].xyz - pos;
@@ -250,7 +297,15 @@ void main() {
     // sheet. That is what took the contrast and the colour out of a lit
     // canopy and left it looking milky. A quarter alpha is where the fringe
     // stops and the leaf starts.
-    if (alphaTest != 0 && texColor.a > 0.01 && texColor.a < 0.25) {
+    // Smooth leaf edges (enh_bits::kSmoothLeaves) is everything from here to
+    // the sharpened alpha: the fringe repair, the mip boost and the coverage
+    // ramp. Off is the stock alpha key: reference 224/255 (0x81FE90).
+    bool smoothLeaves = (localLightMeta.z & 16) != 0;
+    if (alphaTest != 0 && !smoothLeaves) {
+        if (texColor.a < 224.0 / 255.0) discard;
+        texColor.a = 1.0;
+    }
+    if (smoothLeaves && alphaTest != 0 && texColor.a > 0.01 && texColor.a < 0.25) {
         vec3 mipColor = textureLod(uTexture, TexCoord, 4.0).rgb;
         float trust = smoothstep(0.0, 0.25, texColor.a);
         texColor.rgb = mix(mipColor, texColor.rgb, trust);
@@ -267,14 +322,14 @@ void main() {
     // Mip-alpha preservation: alpha mips average downward, thinning distant
     // canopies to skeletons. Boost alpha with mip level so perceived leaf
     // density stays constant with distance.
-    if (isFoliage && hasTexture != 0) {
+    if (smoothLeaves && isFoliage && hasTexture != 0) {
         // Gentler than it was: at 0.18 a mip-4 canopy came back with every
         // leaf texel above 0.23 alpha opaque, which is a solid green mass
         // rather than a thinned one. Coverage carries the rest now.
         float mip = textureQueryLod(uTexture, TexCoord).x;
         texColor.a *= 1.0 + clamp(mip, 0.0, 4.0) * 0.11;
     }
-    if (alphaTest != 0) {
+    if (smoothLeaves && alphaTest != 0) {
         // Screen-space sharpened alpha: rescale so the cutoff maps to the
         // texel boundary. With MSAA + alpha-to-coverage on the cutout
         // pipeline this dithers the edge band across samples, smoothing

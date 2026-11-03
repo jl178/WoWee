@@ -96,6 +96,14 @@ void OverlaySystem::cleanup() {
     destroy(device, overlayPipeline_);
     destroy(device, brightnessPipeline_);
     destroy(device, overlayPipelineLayout_);
+    destroy(device, blobPipeline_);
+    destroy(device, blobPipelineLayout_);
+    destroy(vkCtx_->getAllocator(), blobVertBuf_, blobVertAlloc_);
+    blobVertMapped_ = nullptr;
+    blobTexture_.destroy(device, vkCtx_->getAllocator());
+    destroy(device, blobPool_);
+    blobSet_ = VK_NULL_HANDLE;
+    blobTextureTried_ = false;
 }
 
 void OverlaySystem::recreatePipelines() {
@@ -106,6 +114,7 @@ void OverlaySystem::recreatePipelines() {
     destroy(device, spellDecalPipeline_);
     destroy(device, overlayPipeline_);
     destroy(device, brightnessPipeline_);
+    destroy(device, blobPipeline_);
 }
 
 void OverlaySystem::setSelectionCircle(const glm::vec3& pos, float radius, const glm::vec3& color,
@@ -363,11 +372,248 @@ void OverlaySystem::buildFloorLattice(FloorLattice& lattice, const glm::vec3& ce
     }
 }
 
+namespace {
+
+struct BlobPush {
+    glm::mat4 viewProj;
+    glm::vec4 feet;    // xyz the model origin, w = h
+    glm::vec4 axes;    // xy the facing, z half-width along it, w across it
+    glm::vec4 extra;   // x model alpha, y surface lift
+};
+static_assert(sizeof(BlobPush) == 112, "must match unit_blob.*.glsl");
+
+constexpr float kBlobSpacing = 0.5f;   // yards between floor samples, at least
+constexpr int kBlobMaxCells = 18;      // per side, per blob
+constexpr int kBlobCacheMaxAge = 240;  // frames before the floor is asked again
+constexpr size_t kBlobCacheMaxEntries = 16384;
+
+uint64_t blobKey(int32_t ix, int32_t iy, int32_t probe, int32_t spacingCm) {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(ix) & 0xFFFFFu) << 44) |
+           (static_cast<uint64_t>(static_cast<uint32_t>(iy) & 0xFFFFFu) << 24) |
+           (static_cast<uint64_t>(static_cast<uint32_t>(probe) & 0xFFFu) << 12) |
+           static_cast<uint64_t>(static_cast<uint32_t>(spacingCm) & 0xFFFu);
+}
+
+}  // namespace
+
+void OverlaySystem::prepareUnitBlobs() {
+    if (!vkCtx_) return;
+    VkDevice device = vkCtx_->getDevice();
+    if (!blobTextureTried_) {
+        blobTextureTried_ = true;
+        // 32x32, grey 160/255 inside six texels of the centre, rising to white
+        // at twelve (docs/re/characters.md section 6). Only its colour is read.
+        bool uploaded = false;
+        if (auto* assets = core::Application::getInstance().getAssetManager()) {
+            pipeline::BLPImage image = assets->loadTexture("Textures\\ShadowBlob.blp");
+            if (image.isValid() && !image.data.empty()) {
+                uploaded = blobTexture_.upload(*vkCtx_, image.data.data(),
+                                               static_cast<uint32_t>(image.width),
+                                               static_cast<uint32_t>(image.height),
+                                               VK_FORMAT_R8G8B8A8_UNORM, true);
+            }
+        }
+        if (!uploaded) {
+            LOG_WARNING("OverlaySystem: Textures\\ShadowBlob.blp unavailable, using a generated blob");
+            constexpr int N = 32;
+            std::vector<uint8_t> px(N * N * 4, 255);
+            for (int y = 0; y < N; ++y) {
+                for (int x = 0; x < N; ++x) {
+                    const float r = std::hypot(x + 0.5f - 16.0f, y + 0.5f - 16.0f);
+                    const float g = std::clamp(160.0f + (r - 6.0f) * 15.9f, 160.0f, 255.0f);
+                    for (int c = 0; c < 3; ++c) px[(y * N + x) * 4 + c] = static_cast<uint8_t>(g);
+                }
+            }
+            uploaded = blobTexture_.upload(*vkCtx_, px.data(), N, N, VK_FORMAT_R8G8B8A8_UNORM, true);
+        }
+        if (uploaded) {
+            blobTexture_.createSampler(device, VK_FILTER_LINEAR, VK_FILTER_LINEAR,
+                                       VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+        }
+    }
+    if (!blobTexture_.isValid() || !initSelectionDescriptors()) return;
+    if (blobSet_ == VK_NULL_HANDLE) {
+        VkDescriptorPoolSize size{};
+        size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        size.descriptorCount = 1;
+        VkDescriptorPoolCreateInfo pool{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        pool.maxSets = 1;
+        pool.poolSizeCount = 1;
+        pool.pPoolSizes = &size;
+        if (vkCreateDescriptorPool(device, &pool, nullptr, &blobPool_) != VK_SUCCESS) {
+            blobPool_ = VK_NULL_HANDLE;
+            return;
+        }
+        VkDescriptorSetAllocateInfo alloc{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        alloc.descriptorPool = blobPool_;
+        alloc.descriptorSetCount = 1;
+        alloc.pSetLayouts = &selCircleSetLayout_;
+        if (vkAllocateDescriptorSets(device, &alloc, &blobSet_) != VK_SUCCESS) {
+            blobSet_ = VK_NULL_HANDLE;
+            return;
+        }
+        VkDescriptorImageInfo imageInfo = blobTexture_.descriptorInfo();
+        VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = blobSet_;
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &imageInfo;
+        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    }
+    if (blobVertBuf_ == VK_NULL_HANDLE) {
+        const VkDeviceSize sliceBytes = sizeof(float) * 3 * kBlobMaxVerts;
+        AllocatedBuffer vbuf = createBuffer(vkCtx_->getAllocator(), sliceBytes * kSelFrameSlices,
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        blobVertBuf_ = vbuf.buffer;
+        blobVertAlloc_ = vbuf.allocation;
+        blobVertMapped_ = vbuf.info.pMappedData;
+    }
+    if (blobPipelineLayout_ == VK_NULL_HANDLE) {
+        VkPushConstantRange pc{};
+        pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pc.size = sizeof(BlobPush);
+        blobPipelineLayout_ = createPipelineLayout(device, {selCircleSetLayout_}, {pc});
+    }
+    if (blobPipeline_ == VK_NULL_HANDLE && blobPipelineLayout_ != VK_NULL_HANDLE) {
+        VkShaderModule vs, fs;
+        if (!vs.loadFromFile(device, "assets/shaders/unit_blob.vert.spv")) return;
+        if (!fs.loadFromFile(device, "assets/shaders/unit_blob.frag.spv")) { vs.destroy(); return; }
+        VkVertexInputBindingDescription bind{.binding = 0, .stride = 12, .inputRate = VK_VERTEX_INPUT_RATE_VERTEX};
+        VkVertexInputAttributeDescription attr{.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0};
+        // GxBlend_Mod (dst *= src), the framebuffer's alpha left alone; depth
+        // tested and not written, biased toward the camera like the stock
+        // projector's re-drawn floor.
+        VkPipelineColorBlendAttachmentState mod{};
+        mod.blendEnable = VK_TRUE;
+        mod.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
+        mod.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+        mod.colorBlendOp = VK_BLEND_OP_ADD;
+        mod.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        mod.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        mod.alphaBlendOp = VK_BLEND_OP_ADD;
+        mod.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        blobPipeline_ = PipelineBuilder()
+            .setShaders(vs.stageInfo(VK_SHADER_STAGE_VERTEX_BIT), fs.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+            .setVertexInput({bind}, {attr})
+            .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+            .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+            .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
+            .setDepthBias(-1.0f, -1.0f)
+            .setColorBlendAttachment(mod)
+            .setMultisample(vkCtx_->getMsaaSamples())
+            .setLayout(blobPipelineLayout_)
+            .setRenderPass(vkCtx_->getImGuiRenderPass())
+            .setDynamicStates(viewportAndScissorDynamic())
+            .build(device, vkCtx_->getPipelineCache());
+        vs.destroy();
+        fs.destroy();
+        if (!blobPipeline_) LOG_ERROR("OverlaySystem: failed to build the unit blob pipeline");
+    }
+}
+
+void OverlaySystem::renderUnitBlobs(const glm::mat4& viewProj, VkCommandBuffer cmd,
+                                    const HeightQuery2D& terrainHeight,
+                                    const HeightQuery3D& wmoHeight) {
+    if (unitBlobs_.empty() || cmd == VK_NULL_HANDLE) return;
+    if (blobPipeline_ == VK_NULL_HANDLE || blobSet_ == VK_NULL_HANDLE || !blobVertMapped_) return;
+
+    if (++blobFloorAge_ > kBlobCacheMaxAge || blobFloorCache_.size() > kBlobCacheMaxEntries) {
+        blobFloorCache_.clear();
+        blobFloorAge_ = 0;
+    }
+    // Each blob is draped over a world-aligned lattice of floor samples
+    // (terrain and WMO floors: the stock receivers; doodads are not), as the
+    // selection circle is. Vulkan cannot re-draw the world's own triangles.
+    struct Range { uint32_t first, count; size_t blob; };
+    std::vector<Range> ranges;
+    blobVerts_.clear();
+    for (size_t bi = 0; bi < unitBlobs_.size(); ++bi) {
+        const UnitBlob& b = unitBlobs_[bi];
+        if (b.alpha <= 0.0f) continue;
+        const float r = std::sqrt(b.halfX * b.halfX + b.halfY * b.halfY);
+        const float spacing = std::max(kBlobSpacing, 2.0f * r / static_cast<float>(kBlobMaxCells - 1));
+        const int cells = std::clamp(static_cast<int>(std::ceil(2.0f * r / spacing)) + 1, 2, kBlobMaxCells);
+        const uint32_t need = static_cast<uint32_t>(cells * cells * 6);
+        if (blobVerts_.size() / 3 + need > kBlobMaxVerts) break;
+        const float zMin = b.feet.z - 1.6667f * b.halfZ;
+        const float zMax = b.feet.z + b.halfZ;
+        const float probeZ = zMax + 0.25f;
+        const auto probeBucket = static_cast<int32_t>(std::floor(probeZ / 2.0f));
+        const float probeAt = (static_cast<float>(probeBucket) + 1.0f) * 2.0f;
+        const auto spacingCm = static_cast<int32_t>(std::lround(spacing * 100.0f));
+        const auto ox = static_cast<int32_t>(std::floor((b.feet.x - r) / spacing));
+        const auto oy = static_cast<int32_t>(std::floor((b.feet.y - r) / spacing));
+        const float noFloor = zMin - 1.0f;
+        std::vector<float> zs(static_cast<size_t>((cells + 1) * (cells + 1)));
+        for (int gy = 0; gy <= cells; ++gy) {
+            for (int gx = 0; gx <= cells; ++gx) {
+                const int32_t ix = ox + gx, iy = oy + gy;
+                const float wx = static_cast<float>(ix) * spacing;
+                const float wy = static_cast<float>(iy) * spacing;
+                auto [it, inserted] = blobFloorCache_.try_emplace(blobKey(ix, iy, probeBucket, spacingCm));
+                if (inserted) {
+                    if (terrainHeight) it->second.terrain = terrainHeight(wx, wy);
+                    if (wmoHeight) it->second.wmo = wmoHeight(wx, wy, probeAt);
+                }
+                float z = noFloor;
+                bool found = false;
+                for (const std::optional<float>& h : {it->second.terrain, it->second.wmo}) {
+                    if (!h || *h < zMin || *h > zMax) continue;
+                    if (!found || *h > z) z = *h;
+                    found = true;
+                }
+                zs[static_cast<size_t>(gy * (cells + 1) + gx)] = z;
+            }
+        }
+        const uint32_t first = static_cast<uint32_t>(blobVerts_.size() / 3);
+        const auto vtx = [&](int gx, int gy) {
+            blobVerts_.push_back(static_cast<float>(ox + gx) * spacing);
+            blobVerts_.push_back(static_cast<float>(oy + gy) * spacing);
+            blobVerts_.push_back(zs[static_cast<size_t>(gy * (cells + 1) + gx)]);
+        };
+        for (int gy = 0; gy < cells; ++gy) {
+            for (int gx = 0; gx < cells; ++gx) {
+                vtx(gx, gy); vtx(gx + 1, gy); vtx(gx + 1, gy + 1);
+                vtx(gx, gy); vtx(gx + 1, gy + 1); vtx(gx, gy + 1);
+            }
+        }
+        ranges.push_back({first, need, bi});
+    }
+    if (ranges.empty()) return;
+
+    const uint32_t slice = vkCtx_->getCurrentFrame() % kSelFrameSlices;
+    const VkDeviceSize sliceBytes = sizeof(float) * 3 * kBlobMaxVerts;
+    const VkDeviceSize bytes = sizeof(float) * blobVerts_.size();
+    std::memcpy(static_cast<uint8_t*>(blobVertMapped_) + slice * sliceBytes, blobVerts_.data(), bytes);
+    vmaFlushAllocation(vkCtx_->getAllocator(), blobVertAlloc_, slice * sliceBytes, bytes);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blobPipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blobPipelineLayout_,
+                            0, 1, &blobSet_, 0, nullptr);
+    const VkDeviceSize offset = slice * sliceBytes;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &blobVertBuf_, &offset);
+    for (const Range& rg : ranges) {
+        const UnitBlob& b = unitBlobs_[rg.blob];
+        BlobPush push{};
+        push.viewProj = viewProj;
+        push.feet = glm::vec4(b.feet, b.halfZ);
+        push.axes = glm::vec4(b.forward, b.halfX, b.halfY);
+        push.extra = glm::vec4(std::clamp(b.alpha, 0.0f, 1.0f), kSelSurfaceLift, 0.0f, 0.0f);
+        vkCmdPushConstants(cmd, blobPipelineLayout_,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+        vkCmdDraw(cmd, rg.count, 1, rg.first, 0);
+    }
+}
+
 void OverlaySystem::renderSelectionCircle(const glm::mat4& view, const glm::mat4& projection,
                                            VkCommandBuffer cmd,
                                            const HeightQuery2D& terrainHeight,
                                            const HeightQuery3D& wmoHeight,
                                            const HeightQuery3D& m2Height) {
+    // The blobs first: stock draws them with the world, before any model.
+    renderUnitBlobs(projection * view, cmd, terrainHeight, wmoHeight);
     renderSelectionCircleOnly(view, projection, cmd, terrainHeight, wmoHeight, m2Height);
     renderSpellTargetDecal(view, projection, cmd, terrainHeight, wmoHeight, m2Height);
 }

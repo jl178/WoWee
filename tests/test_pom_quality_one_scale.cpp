@@ -34,12 +34,13 @@ std::string readSource(const std::string& relative) {
     return ss.str();
 }
 
-/// The parallaxquality row of the settings schema, as written.
+/// The parallaxquality row, as written: an enhancement row now
+/// (ui/enhancement_rows.hpp), from which the schema row is generated.
 std::string schemaRow() {
-    const std::string src = readSource("src/ui/settings_schema.cpp");
-    const size_t at = src.find("{\"parallaxquality\"");
+    const std::string src = readSource("include/ui/enhancement_rows.hpp");
+    const size_t at = src.find("{.key = \"parallaxquality\"");
     REQUIRE(at != std::string::npos);
-    const size_t end = src.find("\"parallax\"}", at);
+    const size_t end = src.find("Enhancements::parallaxQuality}", at);
     REQUIRE(end != std::string::npos);
     return src.substr(at, end - at);
 }
@@ -76,7 +77,7 @@ TEST_CASE("the settings schema offers exactly the levels the scale has", "[setti
     CHECK(row.find("\"" + expected + "\"") != std::string::npos);
 
     // The row's max is an index into the scale, not a count.
-    const std::string bounds = "SettingKind::Enum, 0, " + std::to_string(kPomQualityCount - 1);
+    const std::string bounds = ".maxValue = " + std::to_string(kPomQualityCount - 1) + ",";
     CHECK(row.find(bounds) != std::string::npos);
 }
 

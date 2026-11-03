@@ -378,7 +378,7 @@ back to 0x11.
 | 20 | Flag 0x01 sequences | play `loops` laps, then hold the last frame | loop, unless the caller asked to hold | open for doodads. Spell kits hold one-shots through `holdInstanceAnimationAtEnd`, which matches for one lap |
 | 21 | Variation on a looping sequence | re-rolled every lap (CM2Model handler; replay ignored) | honours the replay range on laps | open (CGUnit's callback not traced) |
 | 22 | Blend table | 3 = One+One, 4 = SrcAlpha+One, 5 Mod, 6 Mod2x | every mode ≥ 3 additive (SrcAlpha, One); no Mod or Mod2x pipelines; spell effects force blend 0/1/4/5 to additive | **Fixed:** one pipeline per mode in M2Renderer and CharacterRenderer; Mod/Mod2x unlit at emissive 1/0.5 and fogged to white/grey, additive to black; spell effects draw their own blend (a forge's keyed flame card stays additive); Mod/Mod2x never colour keyed; alpha reference 1/255 above blend 1 |
-| 23 | Alpha-key reference | `alpha × 224/255` | shader cutoff 0.4/0.5, sharpened with alpha-to-coverage | open (a deliberate foliage choice) |
+| 23 | Alpha-key reference | `alpha × 224/255` | shader cutoff 0.4/0.5, sharpened with alpha-to-coverage | **Fixed** as the "Smooth leaf edges" enhancement: off, M2 and character alpha keys discard below 224/255 with no fringe repair or mip boost (the model-alpha factor is not applied); on, the old ramp |
 | 24 | Render flags 0x04/0x08/0x10 | cull, depth test, depth write | every M2 pipeline is cull-none; depth write by pass | open |
 | 25 | Transparent order | distance, then priorityPlane, then layer | per instance, back to front | open |
 | 26 | Animation when culled | stops beyond 10 yd; time stays absolute | bones skipped off-screen and past LOD 3 (150 yd); clocks absolute | close enough; the LOD-3 bone skip is not stock |

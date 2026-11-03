@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "test_support.hpp"
+#include "ui/enhancement_rows.hpp"
 #include "ui/settings_schema.hpp"
 
 using namespace wowee::ui;
@@ -271,6 +272,9 @@ TEST_CASE("the source rows parse the way the compiled ones read", "[settings][sc
     const auto rows = sourceRows();
     std::size_t count = 0;
     clientSettingsSchema(count);
+    // The enhancement rows and their set chooser are laid in from
+    // kEnhancementRows (ui/enhancement_rows.hpp), not written in this file.
+    count -= wowee::ui::kEnhancementRowCount + 1;
     INFO("parsed " << rows.size() << " rows from the source against " << count
                    << " compiled - a debug build has one more than a release one");
     CHECK(rows.size() >= count);
@@ -341,7 +345,8 @@ TEST_CASE("every panel the client offers still has settings on it", "[settings][
     for (const char* category : {"Graphics", "Detail", "Grass", "Ray Tracing", "Upscaling", "Display",
                                  "Camera", "Interface", "Minimap", "Action Bars", "HUD",
                                  "Combat", "Names", "Nameplates", "Combat Text", "Unit Frames",
-                                 "Sound", "Sound Effects", "Chat", "Gameplay"}) {
+                                 "Sound", "Sound Effects", "Chat", "Gameplay",
+                                 "Enhancements", "Enhancements: Sky", "Enhancements: Motion"}) {
         INFO("no setting names the category " << category
              << " any more, so that panel is empty or gone");
         CHECK(present.count(category) == 1);
@@ -361,6 +366,8 @@ TEST_CASE("every panel the client offers still has settings on it", "[settings][
     // last four were being laid out past the bottom of the second one.
     // Twenty with Ray Tracing, for the same reason as Grass: Graphics and
     // Detail both fill their columns.
-    INFO("the schema names " << present.size() << " categories where twenty are expected");
-    CHECK(present.size() == 20);
+    // Twenty-three with the three enhancement pages (ui/enhancement_rows.hpp),
+    // which need about seventeen hundred units of column between them.
+    INFO("the schema names " << present.size() << " categories where twenty-three are expected");
+    CHECK(present.size() == 23);
 }

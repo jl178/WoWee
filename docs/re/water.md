@@ -224,8 +224,11 @@ console command `waterRipples 1` (0x77f690) sets - there is no CVar and the
 default is 0.** A default 3.3.5a client draws none. `RainDropSplash01.blp` is
 the weather's.
 
-There are no breath bubbles in the client code either: "Breath Underwater"
-and "Inebriated Bubbles" are SoundEntries names.
+Breath bubbles are not the water's: "Breath Underwater" (type 2), cold
+breath (3) and "HARDCODED Inebriated Bubbles" (7) are SpellVisualEffectName
+rows the client spawns on a model's `$BTH` event (0x732650 -> 0x6F9260;
+world-lighting.md "Drunk"). An earlier reading here called them SoundEntries.
+Not drawn by Wowee.
 
 ### Magma and slime
 

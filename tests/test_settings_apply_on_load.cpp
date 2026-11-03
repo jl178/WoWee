@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "ui/graphics_defaults.hpp"
+#include "ui/enhancement_rows.hpp"
 #include "ui/graphics_presets.hpp"
 #include "ui/settings_schema.hpp"
 
@@ -96,7 +97,9 @@ TEST_CASE("every setting a preset sets is also applied on load", "[settings]") {
     const std::string panel = wowee::test::slurp("src/ui/settings_panel.cpp");
     const auto presetKeys = namesIn(panel, "PresetKeys");
     const auto applyKeys = namesIn(panel, "ApplyKeys");
-    REQUIRE(presetKeys.size() >= 10);
+    // The quality columns only: the enhancements a preset sets are the whole
+    // of rendering::Enhancements, applied on load by applyEnhancements.
+    REQUIRE(presetKeys.size() >= 5);
     REQUIRE(applyKeys.size() >= presetKeys.size());
 
     for (const std::string& key : presetKeys) {
@@ -109,11 +112,20 @@ TEST_CASE("the settings the user reported are on the applied list",
           "[settings]") {
     const auto applyKeys =
         namesIn(wowee::test::slurp("src/ui/settings_panel.cpp"), "ApplyKeys");
-    for (const char* key : {"viewdistance", "groundclutter", "shadows",
-                            "shadowdistance", "waterrefraction", "brightness"}) {
+    for (const char* key : {"viewdistance", "groundclutter",
+                            "shadowdistance", "brightness"}) {
         INFO(key);
         CHECK(applyKeys.count(key) == 1);
     }
+    // Shadows are an enhancement row now, applied on load with the rest of
+    // the set (applyLoadedSettings -> applyEnhancements). The water
+    // refraction switch did nothing and is gone.
+    CHECK(wowee::ui::findEnhancementRow("shadows") != nullptr);
+    const std::string panel = wowee::test::slurp("src/ui/settings_panel.cpp");
+    const size_t load = panel.find("void SettingsPanel::applyLoadedSettings");
+    REQUIRE(load != std::string::npos);
+    CHECK(panel.find("applyEnhancements();", load) < panel.find("\n}\n", load));
+    CHECK(applyKeys.count("waterrefraction") == 0);
 }
 
 TEST_CASE("the graphics defaults have one home", "[settings]") {
@@ -219,6 +231,9 @@ TEST_CASE("every setting reaches its target at startup", "[settings]") {
         // decides whether the box is on screen at login. The side effect is
         // for the tick mid-session, when nothing is about to ask.
         {"chatboxvisible", "the interface reads it through GetCVar(\"chatStyle\")"},
+        // Not a value: it sets the enhancement rows, which are applied on load
+        // together (applyLoadedSettings -> applyEnhancements).
+        {"enhancementset", "it sets the enhancement rows, applied on load by applyEnhancements"},
     };
 
     for (const std::string& key : sideEffects) {
@@ -294,12 +309,12 @@ TEST_CASE("the presets are written once", "[settings]") {
     }
 }
 
-TEST_CASE("no preset asks for shadows to be off", "[settings]") {
-    // setShadowsEnabled holds them on, so a preset that asks is a preset that
-    // writes shadows=0 to the config and has nothing act on it.
+TEST_CASE("only Classic asks for shadows to be off", "[settings]") {
+    // Off is the stock blob under each unit (extShadowQuality 0), which is
+    // what Classic is. Every step of the ladder keeps the shadow map.
     for (int i = 0; i < wowee::ui::kGraphicsPresetCount; ++i) {
-        INFO("preset index " << i << " turns shadows off");
-        CHECK(wowee::ui::kGraphicsPresets[i].shadows);
+        INFO("preset index " << i);
+        CHECK(wowee::ui::kGraphicsPresets[i].enh.shadows == (i != wowee::ui::kClassicPresetIndex));
     }
 }
 
@@ -315,7 +330,7 @@ TEST_CASE("the presets climb", "[settings]") {
         CHECK(hi.viewDistance >= lo.viewDistance);
         CHECK(hi.shadowDistance >= lo.shadowDistance);
         CHECK(hi.antiAliasing >= lo.antiAliasing);
-        CHECK(hi.parallaxQuality >= lo.parallaxQuality);
+        CHECK(hi.enh.parallaxQuality >= lo.enh.parallaxQuality);
         CHECK(hi.groundClutter >= lo.groundClutter);
     }
 }
@@ -366,6 +381,17 @@ TEST_CASE("the two loaders clamp the same keys the same way", "[settings]") {
 
     int shared = 0;
     for (const auto& [key, range] : loginRanges) {
+        // The game's loader clamps every enhancement to its row's range
+        // (setEnhancementValue), so those are compared against the row.
+        if (const auto* row = wowee::ui::findEnhancementRowBySaveKey(key)) {
+            ++shared;
+            INFO("the login screen clamps " << key << " to " << range.first << ".."
+                 << range.second << " and its enhancement row says "
+                 << row->minValue << ".." << row->maxValue);
+            CHECK(static_cast<float>(range.first) == row->minValue);
+            CHECK(static_cast<float>(range.second) == row->maxValue);
+            continue;
+        }
         auto other = gameRanges.find(key);
         if (other == gameRanges.end()) continue;
         ++shared;
@@ -553,6 +579,10 @@ TEST_CASE("every setting in the schema can be set", "[settings]") {
     // Handled by a branch of its own, because choosing a preset sets the other
     // settings rather than a field.
     reachable.insert("graphicspreset");
+    // The enhancement rows, set through kEnhancementRows into
+    // SettingsPanel::enhancements, and the set chooser over them.
+    for (const auto& row : wowee::ui::kEnhancementRows) reachable.insert(row.key);
+    reachable.insert("enhancementset");
     REQUIRE(reachable.size() >= 70);
 
     std::size_t count = 0;

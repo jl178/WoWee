@@ -1,0 +1,140 @@
+#pragma once
+
+/// Every way this client's picture, sound or timing departs from the stock
+/// 3.3.5a client (build 12340), as one value.
+///
+/// A default-constructed Enhancements is the stock client: every switch off,
+/// every multiplier at the value that leaves the stock result alone. That is
+/// what the Classic preset is (kGraphicsPresets), and test_enhancements_stock
+/// holds the two together. What each member does and costs, its label, its
+/// stock and recommended values and the key it is saved under are in one table,
+/// kEnhancementRows (ui/enhancement_rows.hpp), from which the settings rows,
+/// the options pages, the saved file and the presets are all read.
+///
+/// The rule for every member (docs/enhancements-plan.md section 1): with it at
+/// its stock value the client draws, sounds and times exactly as stock, and the
+/// feature costs nothing - no pass runs, no resource is made, no per-frame work
+/// happens for it. The Renderer is handed the whole value at once
+/// (Renderer::setEnhancements) and passes each part to what it controls.
+///
+/// No includes: the presets table, the settings panel, the renderer and a test
+/// all read it.
+
+#include <cstdint>
+
+namespace wowee {
+namespace rendering {
+
+struct Enhancements {
+    // ---- Light and shadow ------------------------------------------------
+    /// The sun's shadow map on terrain, buildings, doodads and units. Off is
+    /// the stock default (extShadowQuality 0): the baked terrain shadows and
+    /// the round ShadowBlob.blp under each unit (characters.md section 6).
+    bool  shadows = false;
+    /// A multiplier on Light.dbc's shadow darkness. 1 is stock.
+    float shadowStrength = 1.0f;
+    /// The shadow map's edge filter: 0 the stock 5-tap PCF, 1 Wowee's 9-tap
+    /// rotated disk.
+    int   shadowFilter = 0;
+    /// Point lights from torches, braziers, lamps and lava on the ground,
+    /// buildings and units (up to 64 around the camera). Off is stock: no point
+    /// light on terrain or WMOs, and each unit and doodad lit by the four
+    /// nearest M2 lights (characters.md section 1).
+    bool  localLights = false;
+    /// Those lights, and the lamp halos, gutter like flame. Needs localLights
+    /// or glowSprites to show.
+    bool  lightFlicker = false;
+    /// The sun's highlight on `_s` tilesets (stock CVar `specular`, default 0).
+    bool  terrainSpecular = false;
+    /// Generated normal maps on buildings and the ground.
+    bool  normalMapping = false;
+    float normalMapStrength = 0.8f;
+    /// Generated parallax depth from the same maps.
+    bool  parallax = false;
+    int   parallaxQuality = 1;
+
+    // ---- Sky and air -------------------------------------------------------
+    /// Volumetric mist and light shafts: 0 off, 1-3 the volume's size.
+    int   lightShafts = 0;
+    float mistDensity = 1.0f;
+    bool  sunShafts = false;
+    float lensFlare = 0.0f;
+    bool  sharpStars = false;
+    /// Fog thickness and fog sky blend. 1 and 0 are Light.dbc's own fog.
+    float fogStrength = 1.0f;
+    float fogSkyBlend = 0.0f;
+
+    // ---- Water and weather -------------------------------------------------
+    bool  shorelineFoam = false;
+    bool  wetGround = false;
+    /// Spray, wake froth and bubbles where the player swims or wades.
+    bool  waterSplashes = false;
+    /// Midges over reeds and still water.
+    bool  waterInsects = false;
+    /// The sky mirrored in water. Stock water reflects nothing.
+    bool  waterReflections = false;
+
+    // ---- Motion ------------------------------------------------------------
+    /// How hard the wind moves trees and cloth. 0 is stock: nothing sways.
+    float foliageWind = 0.0f;
+    /// Grass, ferns and bushes part around the player and spring back.
+    bool  foliagePush = false;
+    /// Moored boats rise, fall and rock with the water.
+    bool  boatBob = false;
+    /// Dust thrown up at a running mount's feet.
+    bool  mountDust = false;
+    /// Extra smoke puffs over models named for smoke.
+    bool  extraSmoke = false;
+    /// Wowee's own drunk view: a wavy, blurred picture and a swaying camera.
+    /// Off is the stock effect, the full-screen glow blended by the drunk level.
+    bool  drunkWobble = false;
+
+    // ---- Edges -------------------------------------------------------------
+    /// Leaf and grass cutouts smoothed by alpha-to-coverage under MSAA. Off is
+    /// the stock alpha test at 224/255.
+    bool  smoothLeaves = false;
+    /// Lamp and torch glow cards replaced by soft billboard halos. Off draws
+    /// the cards the models carry, as stock does.
+    bool  glowSprites = false;
+
+    // ---- Experimental ------------------------------------------------------
+    bool  grass = false;
+    int   grassDensity = 100;
+    int   grassHeight = 100;
+    int   grassDistance = 150;
+    /// Ray traced lighting: 0 off, 1 sun, 2 + occlusion, 3 + bounce.
+    int   rtLighting = 0;
+
+    // ---- Interface and sound ----------------------------------------------
+    /// The pulsing red vignette under 20% health. Stock has only its
+    /// screenEdgeFlash.
+    bool  lowHealthVignette = false;
+    /// Wowee's own soundtrack in the zone music rotation.
+    bool  woweeMusic = false;
+
+    bool operator==(const Enhancements&) const = default;
+};
+
+/// The bits of Enhancements the world shaders read, packed into
+/// GPUPerFrameData::localLightMeta.z. Only switches a shader branches on are
+/// here; the rest are applied on the CPU.
+namespace enh_bits {
+inline constexpr uint32_t kFoliagePush    = 1u << 0;  ///< m2.vert player brush
+inline constexpr uint32_t kBoatBob        = 1u << 1;  ///< m2.vert boat motion
+inline constexpr uint32_t kLocalLights    = 1u << 2;  ///< point lights on terrain/WMO; all lights on units
+inline constexpr uint32_t kSoftShadows    = 1u << 3;  ///< 9-tap disk instead of the stock 5-tap PCF
+inline constexpr uint32_t kSmoothLeaves   = 1u << 4;  ///< alpha-to-coverage ramp instead of the 224/255 key
+}  // namespace enh_bits
+
+inline uint32_t shaderBits(const Enhancements& e) {
+    uint32_t b = 0;
+    if (e.foliagePush) b |= enh_bits::kFoliagePush;
+    if (e.boatBob) b |= enh_bits::kBoatBob;
+    if (e.localLights) b |= enh_bits::kLocalLights;
+    if (e.shadowFilter != 0) b |= enh_bits::kSoftShadows;
+    if (e.smoothLeaves) b |= enh_bits::kSmoothLeaves;
+    return b;
+}
+
+}  // namespace rendering
+}  // namespace wowee

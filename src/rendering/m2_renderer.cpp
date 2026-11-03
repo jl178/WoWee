@@ -144,6 +144,45 @@ M2Renderer::~M2Renderer() {
     shutdown();
 }
 
+uint32_t M2Renderer::gatherStockPointLights(const glm::vec3& cameraPos,
+                                            glm::vec4* outPosRadius,
+                                            glm::vec4* outColorIntensity,
+                                            uint32_t maxLights) const {
+    if (!outPosRadius || !outColorIntensity || maxLights == 0) return 0;
+    struct Candidate { float distSq; glm::vec4 posRadius; glm::vec4 color; };
+    std::vector<Candidate> candidates;
+    // Stock looks 10-30 yards around each lit object (a 2x2 block of its
+    // 20-yard light grid); 200 around the camera covers everything on screen
+    // that is close enough to a light to be lit by it.
+    constexpr float kReach = 200.0f;
+    for (size_t li : lightInstanceIndices_) {
+        if (li >= instances.size()) continue;
+        const auto& instance = instances[li];
+        const M2ModelGPU* model = instance.cachedModel;
+        if (!model || model->stockPointLights.empty()) continue;
+        const glm::vec3 toCam = instance.position - cameraPos;
+        if (glm::dot(toCam, toCam) > kReach * kReach) continue;
+        for (const auto& light : model->stockPointLights) {
+            glm::mat4 bone(1.0f);
+            if (light.bone >= 0 && static_cast<size_t>(light.bone) < instance.boneMatrices.size()) {
+                bone = instance.boneMatrices[static_cast<size_t>(light.bone)];
+            }
+            const glm::vec3 world = glm::vec3(instance.modelMatrix * bone * glm::vec4(light.position, 1.0f));
+            const glm::vec3 d = world - cameraPos;
+            candidates.push_back({glm::dot(d, d), glm::vec4(world, 20.0f), glm::vec4(light.color, 1.0f)});
+        }
+    }
+    const uint32_t count = std::min<uint32_t>(maxLights, static_cast<uint32_t>(candidates.size()));
+    if (count == 0) return 0;
+    std::partial_sort(candidates.begin(), candidates.begin() + count, candidates.end(),
+        [](const Candidate& a, const Candidate& b) { return a.distSq < b.distSq; });
+    for (uint32_t i = 0; i < count; ++i) {
+        outPosRadius[i] = candidates[i].posRadius;
+        outColorIntensity[i] = candidates[i].color;
+    }
+    return count;
+}
+
 uint32_t M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
                                        glm::vec4* outPosRadius,
                                        glm::vec4* outColorIntensity,
@@ -295,7 +334,7 @@ uint32_t M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
     for (uint32_t i = 0; i < count; ++i) {
         outPosRadius[i] = candidates[i].posRadius;
         outColorIntensity[i] = candidates[i].colorIntensity;
-        if (candidates[i].flame) {
+        if (candidates[i].flame && lightFlicker_) {
             outColorIntensity[i].w *= lampFlicker(candidates[i].phaseSeed,
                                                   flickerSeconds, 0.82f, 0.12f, 0.06f);
         }
@@ -2019,6 +2058,26 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     gpuModel.isSmoke                     = cls.isSmoke;
     gpuModel.isSpellEffect               = cls.isSpellEffect;
     gpuModel.isLavaModel                 = cls.isLavaModel;
+    gpuModel.stockPointLights.clear();
+    for (const auto& light : model.lights) {
+        if (light.type != 1) continue;
+        const auto firstFloat = [](const pipeline::M2AnimationTrack& t, float fallback) {
+            for (const auto& sq : t.sequences)
+                if (!sq.floatValues.empty()) return sq.floatValues.front();
+            return fallback;
+        };
+        const auto firstVec3 = [](const pipeline::M2AnimationTrack& t, const glm::vec3& fallback) {
+            for (const auto& sq : t.sequences)
+                if (!sq.vec3Values.empty()) return sq.vec3Values.front();
+            return fallback;
+        };
+        if (firstFloat(light.visibility, 1.0f) < 0.5f) continue;
+        const glm::vec3 color = firstVec3(light.diffuseColor, glm::vec3(1.0f)) *
+                                firstFloat(light.diffuseIntensity, 0.0f);
+        if (color.r + color.g + color.b <= 1e-4f) continue;
+        gpuModel.stockPointLights.push_back({.bone = light.bone, .position = light.position,
+                                             .color = color});
+    }
     gpuModel.isInstancePortal            = cls.isInstancePortal;
     gpuModel.isWaterVegetation           = cls.isWaterVegetation;
     gpuModel.isElvenLike                 = cls.isElvenLike;

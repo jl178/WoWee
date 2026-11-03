@@ -435,6 +435,21 @@ target_link_libraries(test_settings_schema_consistency PRIVATE catch2_main)
 add_test(NAME settings_schema_consistency COMMAND test_settings_schema_consistency)
 register_test_target(test_settings_schema_consistency)
 
+# ── test_enhancements_stock ──────────────────────────────────
+# Off is stock: Enhancements{} is the Classic preset, every row of the
+# enhancement table says so, and no member is left without a row
+# (docs/enhancements-plan.md section 3.3).
+add_executable(test_enhancements_stock
+    test_enhancements_stock.cpp
+    ${CMAKE_SOURCE_DIR}/src/ui/settings_schema.cpp
+    ${TEST_COMMON_SOURCES}
+)
+target_include_directories(test_enhancements_stock PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_enhancements_stock SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_enhancements_stock PRIVATE catch2_main)
+add_test(NAME enhancements_stock COMMAND test_enhancements_stock)
+register_test_target(test_enhancements_stock)
+
 # ── test_settings_panel_layout ───────────────────────────────
 # The options panels are generated from the schema by Lua, and nothing else
 # checks the arithmetic between them. A control laid out past the bottom of a

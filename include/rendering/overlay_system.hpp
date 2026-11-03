@@ -59,6 +59,27 @@ public:
     void setSpellTargetDecal(const glm::vec3& center, float halfWidth, bool acceptable);
     void clearSpellTargetDecal();
 
+    /// One unit's stock blob shadow (docs/re/characters.md section 6, "Unit
+    /// blob shadow: full rule"): Textures\ShadowBlob.blp under the model,
+    /// a rectangle +/- halfX along its facing and +/- halfY across it,
+    /// multiplied into the floor (GxBlend Mod) through the ShadowMod height
+    /// ramp over feet.z - 1.6667 h .. feet.z + h, faded by model alpha.
+    struct UnitBlob {
+        glm::vec3 feet{0.0f};   ///< the model's origin
+        glm::vec2 forward{1.0f, 0.0f};  ///< unit facing direction in xy
+        float halfX = 0.5f;     ///< along the facing, yards, <= 5
+        float halfY = 0.5f;     ///< across it
+        float halfZ = 1.0f;     ///< h: half the scaled box height
+        float alpha = 1.0f;     ///< model alpha
+    };
+    /// The units that get a blob this frame (empty with the sun shadows
+    /// enhancement on, which is the stock extShadowQuality >= 1 case).
+    void setUnitBlobs(std::vector<UnitBlob> blobs) { unitBlobs_ = std::move(blobs); }
+    /// Load the texture and build the pipeline. Outside command recording
+    /// (a one-off upload submits to the queue); called from the update while
+    /// blobs are wanted, and a no-op once done.
+    void prepareUnitBlobs();
+
     // Fullscreen color overlay (underwater tint, etc.)
     void renderOverlay(const glm::vec4& color, VkCommandBuffer cmd);
 
@@ -124,6 +145,8 @@ private:
     bool initSelectionDescriptors();
     void loadSelectionTexture();
     void initOverlayPipeline();
+    void renderUnitBlobs(const glm::mat4& viewProj, VkCommandBuffer cmd,
+                         const HeightQuery2D& terrainHeight, const HeightQuery3D& wmoHeight);
     void initBrightnessPipeline();
 
     VkContext* vkCtx_ = nullptr;
@@ -169,6 +192,24 @@ private:
     bool spellDecalAcceptable_ = true;
     bool spellDecalVisible_ = false;
     FloorLattice spellDecalLattice_;
+
+    // Unit blob shadows. Made on first use, so the shadow-map path never
+    // allocates them.
+    std::vector<UnitBlob> unitBlobs_;
+    VkPipeline blobPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout blobPipelineLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool blobPool_ = VK_NULL_HANDLE;
+    VkDescriptorSet blobSet_ = VK_NULL_HANDLE;
+    VkTexture blobTexture_;
+    bool blobTextureTried_ = false;
+    ::VkBuffer blobVertBuf_ = VK_NULL_HANDLE;
+    VmaAllocation blobVertAlloc_ = VK_NULL_HANDLE;
+    void* blobVertMapped_ = nullptr;
+    /// Floor heights per lattice point (terrain, WMO), shared by every blob.
+    std::unordered_map<uint64_t, FloorSample> blobFloorCache_;
+    int blobFloorAge_ = 0;
+    std::vector<float> blobVerts_;
+    static constexpr uint32_t kBlobMaxVerts = 49152;  // per frame slice
 
     // Fullscreen overlay resources
     VkPipeline overlayPipeline_ = VK_NULL_HANDLE;
