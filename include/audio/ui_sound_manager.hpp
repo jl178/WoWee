@@ -26,6 +26,7 @@ public:
     // Initialization
     bool initialize(pipeline::AssetManager* assets);
     void shutdown();
+    [[nodiscard]] bool isInitialized() const { return initialized_; }
 
     /// The client's sound tables, once they are read. Every named sound below
     /// resolves through SoundEntries.dbc first; the files loaded at start-up

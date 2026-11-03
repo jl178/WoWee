@@ -1,4 +1,5 @@
 #include "ui/glue_ui.hpp"
+#include "ui/glue_audio.hpp"
 
 #include "ui/paper_ui.hpp"
 #include "ui/interface_fonts.hpp"
@@ -503,8 +504,11 @@ bool dialog(PaperUI& ui, const char* id, const std::string& message, const char*
     // GlueDialogButtonTemplate, sixteen units off the bottom.
     const float bw = 165.0f * u, bh = 40.0f * u;
     const ImVec2 ba((a.x + b.x - bw) * 0.5f, b.y - 16.0f * u - bh);
-    return button(ui, fg, id, ba, ImVec2(ba.x + bw, ba.y + bh), buttonLabel, ButtonStyle::Red, true,
-                  kFontNormal);
+    // GlueDialog_OnClick: every button of a glue dialog says gsTitleOptionOK.
+    const bool clicked = button(ui, fg, id, ba, ImVec2(ba.x + bw, ba.y + bh), buttonLabel,
+                                ButtonStyle::Red, true, kFontNormal);
+    if (clicked) glue_audio::play("gsTitleOptionOK");
+    return clicked;
 }
 
 // ---------------------------------------------------------------------------

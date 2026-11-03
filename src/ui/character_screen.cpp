@@ -2,6 +2,8 @@
 #include "game/equipment_hash.hpp"
 #include "ui/ui_colors.hpp"
 #include "ui/glue_ui.hpp"
+#include "ui/glue_audio.hpp"
+#include "game/glue_rules.hpp"
 #include "rendering/character_preview.hpp"
 #include "rendering/renderer.hpp"
 #include "pipeline/asset_manager.hpp"
@@ -134,6 +136,9 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
                                selectedCharacterIndex < static_cast<int>(characters.size());
 
     const auto enterWorld = [&](const game::Character& character) {
+        // CharacterSelect_EnterWorld.
+        glue_audio::play("gsCharacterSelectionEnterWorld");
+        glue_audio::stopAmbience(game::glue::kAmbienceFadeOutSeconds);
         characterSelected = true;
         saveLastCharacter(character.guid);
         setStatus("Entering world with " + character.name + "...");
@@ -154,6 +159,15 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
                 }
             }
             if (!found) LOG_WARNING("WOWEE_AUTO_CHARACTER: no character named ", wanted);
+        }
+    }
+
+    // WOWEE_GLUE_OPEN=create: straight on to character creation once the list
+    // is in, for checking that screen without a hand on the mouse.
+    if (!autoOpenTried_ && !characterSelected && state == game::WorldState::CHAR_LIST_RECEIVED) {
+        autoOpenTried_ = true;
+        if (const char* env = std::getenv("WOWEE_GLUE_OPEN"); env && std::string(env) == "create") {
+            if (onCreateCharacter) onCreateCharacter();
         }
     }
 
@@ -211,6 +225,9 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
             const auto rotateButton = [&](const char* id, ImVec2 a, bool flip, bool& held) {
                 const ImVec2 b(a.x + bs, a.y + bs);
                 const auto st = ui_.press(id, a, b);
+                // Registered for LeftButtonDown and LeftButtonUp, each of
+                // which plays igInventoryRotateCharacter.
+                if (st.held != held) glue_audio::play("igInventoryRotateCharacter");
                 held = st.held;
                 const char* tex = st.held
                     ? "Interface\\Glues\\CharacterCreate\\UI-RotationRight-Big-Down"
@@ -256,6 +273,7 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
         const ImVec2 b(a.x + 150.0f * u, screen.y - 25.0f * u);
         if (glue::button(ui_, dl, "cs.addons", a, b, "AddOns", glue::ButtonStyle::Red, true,
                          glue::kFontSmall)) {
+            glue_audio::play("gsTitleOptions");
             openAddons();
         }
     }
@@ -266,12 +284,14 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
         const ImVec2 ba(bb.x - 100.0f * u, bb.y - 35.0f * u);
         if (glue::button(ui_, dl, "cs.back", ba, bb, "Back", glue::ButtonStyle::Red, true,
                          glue::kFontSmall)) {
+            glue_audio::play("gsCharacterSelectionExit");  // CharacterSelect_Exit
             if (onBack) onBack();
         }
         const ImVec2 db(ba.x, bb.y);
         const ImVec2 da(db.x - 165.0f * u, ba.y);
         if (glue::button(ui_, dl, "cs.delete", da, db, "Delete Character",
                          glue::ButtonStyle::Red, haveSelection, glue::kFontSmall)) {
+            glue_audio::play("gsCharacterSelectionDelCharacter");  // CharacterSelect_Delete
             deleteConfirmStage = 1;
             deleteConfirm_.clear();
             ui_.focus("cs.deleteconfirm");
@@ -315,6 +335,7 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
             enterWorld(characters[static_cast<size_t>(selectedCharacterIndex)]);
         }
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            glue_audio::play("gsCharacterSelectionExit");
             if (onBack) onBack();
         }
     }
@@ -399,17 +420,32 @@ void CharacterScreen::drawScene(const game::Character& character, float screenW,
         const uint8_t hairStyle = (character.appearanceBytes >> 16) & 0xFF;
         const uint8_t hairColor = (character.appearanceBytes >> 24) & 0xFF;
         preview_->setGlueSceneOverride(sceneOverrideFor(character));
+        // 0x4e3cd0 turns the character to facing 0 on its mark each time one
+        // is selected; a change of appearance or gear keeps the turn.
+        if (previewGuid_ != character.guid) preview_->setSceneFacing(game::glue::kSelectFacingDegrees);
+        preview_->setGhost((character.flags & game::glue::kCharacterFlagGhost) != 0);
         if (preview_->loadCharacter(character.race, character.gender, skin, face, hairStyle,
                                     hairColor, character.facialFeatures,
                                     character.useFemaleModel)) {
             preview_->applyEquipment(character.equipment);
         }
+        // A hunter's or warlock's pet stands on the scene's second mark.
+        if (character.hasPet()) {
+            preview_->setScenePet(character.pet.displayModel, character.pet.level, character.pet.family);
+        } else {
+            preview_->clearScenePet();
+        }
+
         previewGuid_ = character.guid;
         previewAppearanceBytes_ = character.appearanceBytes;
         previewFacialFeatures_ = character.facialFeatures;
         previewUseFemaleModel_ = character.useFemaleModel;
         previewEquipHash_ = equipHash;
     }
+
+    // SetBackgroundModel and CharacterSelect_OnShow: PlayGlueAmbience(
+    // GlueAmbienceTracks[scene], 4.0) - kept while it is the one playing.
+    glue_audio::playSceneAmbience(preview_->sceneName());
 
     preview_->update(ImGui::GetIO().DeltaTime);
     preview_->render();
@@ -464,6 +500,7 @@ void CharacterScreen::renderCharacterList(game::GameHandler& gameHandler, float 
         const ImVec2 b(cx + 67.5f * u, top + 33.0f * u);
         if (glue::button(ui_, dl, "cs.realm", a, b, "Change Realm", glue::ButtonStyle::Red, true,
                          glue::kFontSmall)) {
+            glue_audio::play("gsCharacterSelectionDelCharacter");  // CharacterSelect_ChangeRealm
             if (onBack) onBack();
         }
     }
@@ -540,6 +577,7 @@ void CharacterScreen::renderCharacterList(game::GameHandler& gameHandler, float 
         const ImVec2 b(cx + 100.0f * u, fb.y - 15.0f * u);
         if (glue::button(ui_, dl, "cs.create", a, b, "Create New Character",
                          glue::ButtonStyle::Red, true, glue::kFontSmall)) {
+            glue_audio::play("gsCharacterSelectionCreateNew");
             if (onCreateCharacter) onCreateCharacter();
         }
     }

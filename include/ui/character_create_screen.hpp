@@ -2,12 +2,14 @@
 
 #include "game/character.hpp"
 #include "game/world_packets.hpp"
+#include "game/glue_rules.hpp"
 #include "ui/paper_ui.hpp"
 #include "ui/text_edit.hpp"
 #include <imgui.h>
 #include <string>
 #include <functional>
 #include <vector>
+#include <map>
 #include <memory>
 #include <cstdint>
 
@@ -45,8 +47,25 @@ private:
     void drawScene(float screenW, float screenH);
     /// RandomizeCharCustomization: every appearance choice at random.
     void randomizeAppearance();
-    /// GetRandomName: a NameGen.dbc name for this race and sex.
-    std::string randomName() const;
+    /// GetRandomName: a name grown from this race and sex's NameGen.dbc
+    /// names, three letters at a time (game::glue::NameChain).
+    std::string randomName();
+    game::glue::NameChain nameChain_;
+    int nameChainKey_ = -1;  ///< race * 4 + sex the chain was built for
+    /// ResetCharCustomize, as CharacterCreate_OnShow calls it: a random sex,
+    /// race and class (0x4dff10, 0x4e0f50), and a random look once the
+    /// appearance tables are read.
+    void randomizeStart();
+    bool randomizeLookPending_ = false;
+    /// The look each race and sex was left with (0x4e20b0 keeps one per race
+    /// and sex): going back to a race restores it, a race not yet visited
+    /// gets a random one.
+    struct Look {
+        int skin = 0, face = 0, hairStyle = 0, hairColor = 0, facialHair = 0;
+    };
+    std::map<int, Look> savedLooks_;
+    /// Called when race or sex has just changed from (oldRace, oldGender).
+    void switchLook(int oldRace, int oldGender);
 
     bool sceneShown_ = false;
     int prevSceneDK_ = -1;         ///< whether the loaded scene is Acherus; -1 unknown

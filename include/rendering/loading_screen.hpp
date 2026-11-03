@@ -1,5 +1,7 @@
 #pragma once
 
+#include "game/glue_rules.hpp"
+
 #include <vulkan/vulkan.h>
 #include <cstdint>
 #include <string>
@@ -33,7 +35,8 @@ public:
     /// The fullscreen window both draws open, and its background blit.
     void beginBackdrop(const char* windowName, float screenW, float screenH);
 
-    void setProgress(float progress) { loadProgress = progress; }
+    /// The bar never moves back (Wow.exe 0x40af40 ignores a smaller report).
+    void setProgress(float progress) { loadProgress = game::glue::advanceLoadingProgress(loadProgress, progress); }
     void setStatus(const std::string& status) { statusText = status; }
     void setZoneName(const std::string& name) { zoneName = name; }
 
@@ -62,8 +65,6 @@ private:
     bool wideImage = false;
     VkDescriptorSet barBorder = VK_NULL_HANDLE;
     VkDescriptorSet barFill = VK_NULL_HANDLE;
-    VkDescriptorSet barGlow = VK_NULL_HANDLE;
-    VkDescriptorSet barGlass = VK_NULL_HANDLE;
 
     VkContext* vkCtx = nullptr;
     SDL_Window* sdlWindow = nullptr;

@@ -1,6 +1,7 @@
 #include "ui/character_create_screen.hpp"
 #include "core/logger.hpp"
 #include "ui/glue_ui.hpp"
+#include "ui/glue_audio.hpp"
 #include "rendering/character_preview.hpp"
 #include "rendering/renderer.hpp"
 #include "core/application.hpp"
@@ -36,6 +37,10 @@ static constexpr game::Class kAllClasses[] = {
     game::Class::SHAMAN, game::Class::MAGE, game::Class::WARLOCK,
     game::Class::DRUID,
 };
+
+namespace {
+std::mt19937& rng();
+} // namespace
 
 namespace {
 
@@ -195,6 +200,38 @@ void CharacterCreateScreen::initializePreview(pipeline::AssetManager* am) {
     if (preview_) preview_->resetView();
     // Force model reload
     prevRaceIndex_ = -1;
+    randomizeStart();
+}
+
+void CharacterCreateScreen::randomizeStart() {
+    savedLooks_.clear();
+    if (availableRaces_.empty()) return;
+    auto& g = rng();
+    genderIndex = std::uniform_int_distribution<int>(0, 1)(g);
+    raceIndex = std::uniform_int_distribution<int>(0, static_cast<int>(availableRaces_.size()) - 1)(g);
+    updateAvailableClasses();
+    classIndex = availableClasses.empty()
+        ? 0 : std::uniform_int_distribution<int>(0, static_cast<int>(availableClasses.size()) - 1)(g);
+    randomizeLookPending_ = true;
+    // CharacterCreate_OnShow: SetCharacterCreateFacing(-15).
+    if (preview_) preview_->setSceneFacing(game::glue::kCreateFacingDegrees);
+}
+
+void CharacterCreateScreen::switchLook(int oldRace, int oldGender) {
+    savedLooks_[oldRace * 4 + oldGender] = Look{skin, face, hairStyle, hairColor, facialHair};
+    const auto it = savedLooks_.find(raceIndex * 4 + genderIndex);
+    if (it != savedLooks_.end()) {
+        skin = it->second.skin;
+        face = it->second.face;
+        hairStyle = it->second.hairStyle;
+        hairColor = it->second.hairColor;
+        facialHair = it->second.facialHair;
+        updateAppearanceRanges();
+    } else {
+        // FUN_004e13a0(..., 1): a race first seen is dressed at random.
+        skin = face = hairStyle = hairColor = facialHair = 0;
+        randomizeLookPending_ = true;
+    }
 }
 
 void CharacterCreateScreen::update(float deltaTime) {
@@ -614,6 +651,7 @@ void CharacterCreateScreen::drawScene(float screenW, float screenH) {
         }
         preview_ = std::move(preview);
         preview_->setSceneCameraFraming(true);
+        preview_->setSceneFacing(game::glue::kCreateFacingDegrees);
         if (auto* renderer = core::Application::getInstance().getRenderer())
             renderer->registerPreview(preview_.get());
         prevRaceIndex_ = -1;
@@ -630,6 +668,8 @@ void CharacterCreateScreen::drawScene(float screenW, float screenH) {
     }
 
     updatePreviewIfNeeded();
+    // SetBackgroundModel: the scene's ambience, kept while it plays.
+    glue_audio::playSceneAmbience(preview_->sceneName());
     preview_->render();
     preview_->requestComposite();
     if (VkDescriptorSet tex = preview_->getTextureId()) {
@@ -650,27 +690,35 @@ void CharacterCreateScreen::randomizeAppearance() {
     hairColor = randomUpTo(maxHairColor);
 }
 
-std::string CharacterCreateScreen::randomName() const {
+std::string CharacterCreateScreen::randomName() {
     if (!assetManager_ || availableRaces_.empty()) return {};
-    auto dbc = assetManager_->loadDBC("NameGen.dbc");
-    if (!dbc) return {};
-    // NameGen.dbc: ID, Name, RaceID, Sex.
     const uint32_t race = static_cast<uint32_t>(availableRaces_[static_cast<size_t>(raceIndex)]);
     const uint32_t sex = genderIndex == 0 ? 0u : 1u;
-    std::vector<uint32_t> rows;
-    for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
-        if (dbc->getUInt32(r, 2) == race && dbc->getUInt32(r, 3) == sex) rows.push_back(r);
+    // The chain is rebuilt when race or sex changes (0x4e6790).
+    const int key = static_cast<int>(race) * 4 + static_cast<int>(sex);
+    if (key != nameChainKey_) {
+        nameChainKey_ = key;
+        std::vector<std::string> names;
+        if (auto dbc = assetManager_->loadDBC("NameGen.dbc")) {
+            // NameGen.dbc: ID, Name, RaceID, Sex.
+            for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+                if (dbc->getUInt32(r, 2) == race && dbc->getUInt32(r, 3) == sex)
+                    names.push_back(dbc->getString(r, 1));
+            }
+        }
+        nameChain_.build(names);
     }
-    if (rows.empty()) return {};
-    const uint32_t row =
-        rows[std::uniform_int_distribution<size_t>(0, rows.size() - 1)(rng())];
-    return dbc->getString(row, 1);
+    return nameChain_.generate(rng(), game::glue::plausibleCharacterName);
 }
 
 void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
     // Resolve valid DBC option IDs before loading the preview. Doing this after
     // loadCharacter left race/style changes using the previous option mapping.
     updateAppearanceRanges();
+    if (randomizeLookPending_) {
+        randomizeLookPending_ = false;
+        randomizeAppearance();
+    }
 
     const ImVec2 screen = ImGui::GetIO().DisplaySize;
     const float scale = std::clamp(std::min(screen.x / 1280.0f, screen.y / 760.0f), 0.62f, 2.6f);
@@ -713,18 +761,36 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
     ImVec2 tipAt(0, 0);
 
     const auto pickRace = [&](int i) {
+        glue_audio::play("gsCharacterCreationClass");  // CharacterRace_OnClick
         if (raceIndex == i) return;
+        const int oldRace = raceIndex;
         raceIndex = i;
         classIndex = 0;
-        skin = face = hairStyle = hairColor = facialHair = 0;
         updateAvailableClasses();
         // The class stays chosen when the new race can be it, as it does in
-        // the stock screen.
+        // the stock screen; otherwise one it can be, at random (0x4e0f50).
+        bool kept = false;
         if (haveClass) {
             const auto it = std::find(availableClasses.begin(), availableClasses.end(), cls);
-            if (it != availableClasses.end())
+            if (it != availableClasses.end()) {
                 classIndex = static_cast<int>(it - availableClasses.begin());
+                kept = true;
+            }
         }
+        if (!kept && !availableClasses.empty()) {
+            classIndex = std::uniform_int_distribution<int>(
+                0, static_cast<int>(availableClasses.size()) - 1)(rng());
+        }
+        switchLook(oldRace, genderIndex);
+        // SetCharacterCreateFacing(-15) on every race click.
+        if (preview_) preview_->setSceneFacing(game::glue::kCreateFacingDegrees);
+    };
+    const auto pickGender = [&](int g) {
+        glue_audio::play("gsCharacterCreationClass");
+        if (genderIndex == g) return;
+        const int oldGender = genderIndex;
+        genderIndex = g;
+        switchLook(raceIndex, oldGender);
     };
 
     // CharacterCreateIconButtonTemplate: the shadow, the icon, its bevel, the
@@ -834,11 +900,11 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
         const auto male = iconButton("cc.male", fcx - 20.0f * u, fy + 392.0f * u, genderFile,
                                      {0.0f, 0.5f, 0.0f, 1.0f}, genderIndex == 0, true, false);
         if (male.hovered) tip = maleLabel;
-        if (male.clicked) genderIndex = 0;
+        if (male.clicked) pickGender(0);
         const auto fem = iconButton("cc.female", fcx + 20.0f * u, fy + 392.0f * u, genderFile,
                                     {0.5f, 1.0f, 0.0f, 1.0f}, genderIndex == 1, true, false);
         if (fem.hovered) tip = femaleLabel;
-        if (fem.clicked) genderIndex = 1;
+        if (fem.clicked) pickGender(1);
     }
 
     // CharacterCreateClassName, then CharacterCreateClassButton1..10 in two
@@ -869,6 +935,8 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
                               : glue::str((std::string(classFile(c)) + "_DISABLED").c_str(),
                                           game::getClassName(c));
             }
+            // CharacterClass_OnClick plays its sound for any click.
+            if (st.clicked) glue_audio::play("gsCharacterCreationClass");
             if (st.clicked && enabled) classIndex = index;
         }
     }
@@ -888,6 +956,7 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
         if (glue::button(ui_, dl, "cc.randomize", ImVec2(fcx - rw * 0.5f, rTop),
                          ImVec2(fcx + rw * 0.5f, rBottom), label.c_str(), buttonStyle, true,
                          glue::kFontSmall)) {
+            glue_audio::play("gsCharacterCreationLook");  // CharacterCreate_Randomize
             randomizeAppearance();
         }
 
@@ -935,6 +1004,7 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
                 "Interface\\Glues\\Common\\Glue-RightArrow-Button-Up",
                 "Interface\\Glues\\Common\\Glue-RightArrow-Button-Down",
                 "Interface\\Glues\\Common\\Glue-RightArrow-Button-Highlight");
+            if (left.clicked || right.clicked) glue_audio::play("gsCharacterCreationLook");
             if (count > 1 && (left.clicked || right.clicked)) {
                 *values[k] = (*values[k] + (left.clicked ? count - 1 : 1)) % count;
                 // Skin and hair style choose the faces and hair colours on
@@ -1095,6 +1165,7 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
         if (glue::button(ui_, dl, "cc.accept", ImVec2(okCX - 80.0f * u, okTop),
                          ImVec2(okCX + 80.0f * u, okTop + 35.0f * u), accept.c_str(), buttonStyle,
                          !waiting, glue::kFontNormal)) {
+            glue_audio::play("gsCharacterCreationCreateChar");  // CharacterCreate_Okay
             submit();
         }
         const float backTop = okTop + 35.0f * u - 3.0f * u;
@@ -1103,6 +1174,7 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
         if (glue::button(ui_, dl, "cc.back", ImVec2(backCX - 60.0f * u, backTop),
                          ImVec2(backCX + 60.0f * u, backTop + 30.0f * u), back.c_str(),
                          buttonStyle, true, glue::kFontSmall)) {
+            glue_audio::play("gsCharacterCreationCancel");  // CharacterCreate_Back
             if (onCancel) onCancel();
         }
     }
@@ -1138,6 +1210,7 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
         if (glue::button(ui_, dl, "cc.randomname", ImVec2(cx - rw * 0.5f, b.y - 7.0f * u),
                          ImVec2(cx + rw * 0.5f, b.y + 23.0f * u), label.c_str(), buttonStyle, true,
                          glue::kFontSmall)) {
+            glue_audio::play("gsCharacterCreationLook");
             const std::string picked = randomName();
             if (!picked.empty()) name_.setText(picked);
         }
@@ -1152,6 +1225,7 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
             const ImVec2 b(a.x + bs, a.y + bs);
             const auto st = ui_.press(id, ImVec2(a.x + 13.0f * u, a.y + 10.0f * u),
                                       ImVec2(b.x - 13.0f * u, b.y - 13.0f * u));
+            if (st.held != held) glue_audio::play("igInventoryRotateCharacter");
             held = st.held;
             const char* tex = st.held ? "Interface\\Glues\\CharacterCreate\\UI-RotationRight-Big-Down"
                                       : "Interface\\Glues\\CharacterCreate\\UI-RotationRight-Big-Up";
@@ -1188,8 +1262,10 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
     if (!modalUp) {
         if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
             ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
+            glue_audio::play("gsCharacterCreationCreateChar");
             submit();
         } else if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            glue_audio::play("gsCharacterCreationCancel");
             if (onCancel) onCancel();
         }
     }

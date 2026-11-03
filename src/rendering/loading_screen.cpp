@@ -98,15 +98,28 @@ bool LoadingScreen::loadStockImage() {
     // picture, so a map without a LoadingScreens row still gets the stock bar.
     barBorder = loadingBlpTexture(assetManager, vkCtx, "Interface\\Glues\\LoadingBar\\Loading-BarBorder.blp");
     barFill = loadingBlpTexture(assetManager, vkCtx, "Interface\\Glues\\LoadingBar\\Loading-BarFill.blp");
-    barGlow = loadingBlpTexture(assetManager, vkCtx, "Interface\\Glues\\LoadingBar\\Loading-BarGlow.blp", true);
-    barGlass = loadingBlpTexture(assetManager, vkCtx, "Interface\\Glues\\LoadingBar\\Loading-BarGlass.blp");
+    // The stock bar is these two and nothing else (0x9e2dfc); the glow and
+    // glass art in the same folder is not drawn by the loading screen.
 
-    if (mapId == 0xFFFFFFFFu) return false;
+    // 0x409ed0: with no art of the map's own, "Interface\Glues\loading".
+    const auto genericArt = [&]() {
+        int w = 0, h = 0;
+        VkDescriptorSet ds = loadingBlpTexture(assetManager, vkCtx, "Interface\\Glues\\loading.blp", false, &w, &h);
+        if (!ds) return false;
+        bgDescriptorSet = ds;
+        imageWidth = w;
+        imageHeight = h;
+        stockImage = true;
+        wideImage = false;
+        LOG_INFO("Loading screen: map ", mapId, " -> Interface\\Glues\\loading");
+        return true;
+    };
+    if (mapId == 0xFFFFFFFFu) return genericArt();
     auto mapDbc = assetManager->loadDBC("Map.dbc");
     auto screens = assetManager->loadDBC("LoadingScreens.dbc");
-    if (!mapDbc || !mapDbc->isLoaded() || !screens || !screens->isLoaded()) return false;
+    if (!mapDbc || !mapDbc->isLoaded() || !screens || !screens->isLoaded()) return genericArt();
     const int32_t mapRow = mapDbc->findRecordById(mapId);
-    if (mapRow < 0) return false;
+    if (mapRow < 0) return genericArt();
 
     // Map.LoadingScreenID: field 57 in 3.3.5a's 66-field Map.dbc. Other
     // builds put it elsewhere, so it is found there by the two rows whose
@@ -128,15 +141,15 @@ bool LoadingScreen::loadStockImage() {
             }
         }
     }
-    if (screenField == 0) return false;
+    if (screenField == 0) return genericArt();
     const uint32_t screenId = mapDbc->getUInt32(static_cast<uint32_t>(mapRow), screenField);
-    if (screenId == 0) return false;
+    if (screenId == 0) return genericArt();
     const int32_t screenRow = screens->findRecordById(screenId);
-    if (screenRow < 0) return false;
+    if (screenRow < 0) return genericArt();
 
     // LoadingScreens: ID, Name, FileName, HasWideScreen.
     std::string file = screens->getString(static_cast<uint32_t>(screenRow), 2);
-    if (file.empty()) return false;
+    if (file.empty()) return genericArt();
     const bool hasWide = screens->getFieldCount() > 3 &&
                          screens->getUInt32(static_cast<uint32_t>(screenRow), 3) != 0;
 
@@ -148,8 +161,9 @@ bool LoadingScreen::loadStockImage() {
 
     VkDescriptorSet ds = VK_NULL_HANDLE;
     int w = 0, h = 0;
-    // The client swaps in the *Wide art on a window wider than 4:3.
-    if (hasWide && aspect > 1.5f) {
+    // The client swaps in the *Wide art on a window wider than 4:3 (by more
+    // than 0.001, 0x409ed0), inserting "Wide" before the extension.
+    if (hasWide && game::glue::useWideLoadingArt(aspect)) {
         std::string wide = file;
         std::string lower = wide;
         for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -162,7 +176,7 @@ bool LoadingScreen::loadStockImage() {
     if (!ds) ds = loadingBlpTexture(assetManager, vkCtx, file, false, &w, &h);
     if (!ds) {
         LOG_WARNING("Loading screen: no art at ", file, " for map ", mapId);
-        return false;
+        return genericArt();
     }
     bgDescriptorSet = ds;
     imageWidth = w;
@@ -178,72 +192,35 @@ void LoadingScreen::drawContents(ImDrawList* dl, float screenW, float screenH) {
     if (!dl || screenW < 1.0f || screenH < 1.0f) return;
     dl->AddRectFilled(ImVec2(0, 0), ImVec2(screenW, screenH), IM_COL32(0, 0, 0, 255));
 
+    // 0x40a270: the art keeps its own aspect (4:3, or 1.6 for the wide
+    // art), fitted inside the window with black round it, and the bar is
+    // laid out in the art's rectangle, not the window's.
+    game::glue::Rect image{0.0f, 0.0f, screenW, screenH};
+    if (stockImage) image = game::glue::loadingImageRect(screenW, screenH, wideImage);
     if (bgDescriptorSet) {
-        if (stockImage && !wideImage) {
-            // The square texture holds a 4:3 picture. A wider window
-            // letterboxes it at the sides rather than stretching it.
-            const float w = std::min(screenW, screenH * 4.0f / 3.0f);
-            const float x0 = (screenW - w) * 0.5f;
-            dl->AddImage(reinterpret_cast<ImTextureID>(bgDescriptorSet), ImVec2(x0, 0),
-                         ImVec2(x0 + w, screenH));
-        } else {
-            dl->AddImage(reinterpret_cast<ImTextureID>(bgDescriptorSet), ImVec2(0, 0),
-                         ImVec2(screenW, screenH));
-        }
+        dl->AddImage(reinterpret_cast<ImTextureID>(bgDescriptorSet), ImVec2(image.x0, image.y0),
+                     ImVec2(image.x1, image.y1));
     }
 
     const float progress = std::clamp(loadProgress, 0.0f, 1.0f);
-    // The bar in 768-tall interface units: the 512x64 border at its own
-    // size, centred, near the bottom of the screen.
-    const float u = screenH / 768.0f;
-    const float bw = 512.0f * u;
-    const float bh = 64.0f * u;
-    const float bx = (screenW - bw) * 0.5f;
-    const float by = screenH - 96.0f * u;
-    // The opening in the border art, in its texels: x 35..477, y 21..43.
-    const float ix0 = bx + 35.0f * u;
-    const float ix1 = bx + 477.0f * u;
-    const float iy0 = by + 21.0f * u;
-    const float iy1 = by + 43.0f * u;
-
+    const game::glue::LoadingBar bar = game::glue::loadingBarRects(image, progress);
     if (!barBorder) {
         // No glue art at all: a plain bar where the stock one sits.
-        dl->AddRectFilled(ImVec2(ix0, iy0), ImVec2(ix1, iy1), IM_COL32(0, 0, 0, 200));
-        if (progress > 0.001f)
-            dl->AddRectFilled(ImVec2(ix0, iy0), ImVec2(ix0 + (ix1 - ix0) * progress, iy1),
+        dl->AddRectFilled(ImVec2(bar.border.x0, bar.border.y0), ImVec2(bar.border.x1, bar.border.y1),
+                          IM_COL32(0, 0, 0, 200));
+        if (bar.fill.width() > 0.5f)
+            dl->AddRectFilled(ImVec2(bar.fill.x0, bar.fill.y0), ImVec2(bar.fill.x1, bar.fill.y1),
                               IM_COL32(60, 110, 200, 255));
-        dl->AddRect(ImVec2(ix0 - 1, iy0 - 1), ImVec2(ix1 + 1, iy1 + 1),
-                    IM_COL32(120, 120, 120, 255));
         return;
     }
-
-    dl->AddRectFilled(ImVec2(ix0, iy0), ImVec2(ix1, iy1), IM_COL32(0, 0, 0, 255));
-    const float fillX = ix0 + (ix1 - ix0) * progress;
-    if (progress > 0.001f) {
-        if (barFill) {
-            dl->AddImage(reinterpret_cast<ImTextureID>(barFill), ImVec2(ix0, iy0),
-                         ImVec2(fillX, iy1));
-        }
-        if (barGlow) {
-            // The glow's head sits at texel 470 of 512 and its middle on row
-            // 63 of 128; drawn at half size with the head on the fill's edge,
-            // its tail trailing back over what has loaded.
-            const float gw = 256.0f * u;
-            const float gh = 64.0f * u;
-            const float gx = fillX - 235.0f * u;
-            const float gy = (iy0 + iy1) * 0.5f - 31.5f * u;
-            dl->PushClipRect(ImVec2(ix0, gy), ImVec2(fillX + 12.0f * u, gy + gh), true);
-            dl->AddImage(reinterpret_cast<ImTextureID>(barGlow), ImVec2(gx, gy),
-                         ImVec2(gx + gw, gy + gh));
-            dl->PopClipRect();
-        }
+    // The fill first, the whole texture squeezed over what has loaded (its
+    // texture coordinates are fixed at 0..1, 0xab6400), then the border.
+    if (barFill && bar.fill.width() > 0.5f) {
+        dl->AddImage(reinterpret_cast<ImTextureID>(barFill), ImVec2(bar.fill.x0, bar.fill.y0),
+                     ImVec2(bar.fill.x1, bar.fill.y1));
     }
-    dl->AddImage(reinterpret_cast<ImTextureID>(barBorder), ImVec2(bx, by), ImVec2(bx + bw, by + bh));
-    if (barGlass) {
-        dl->AddImage(reinterpret_cast<ImTextureID>(barGlass), ImVec2(bx, by),
-                     ImVec2(bx + bw, by + bh), ImVec2(0, 0), ImVec2(1, 1),
-                     IM_COL32(255, 255, 255, 160));
-    }
+    dl->AddImage(reinterpret_cast<ImTextureID>(barBorder), ImVec2(bar.border.x0, bar.border.y0),
+                 ImVec2(bar.border.x1, bar.border.y1));
 }
 
 void LoadingScreen::shutdown() {
