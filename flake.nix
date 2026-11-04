@@ -31,6 +31,12 @@
             stormlib
           ];
 
+          # tools/clang_warning_check.py (the clang_warning_check ctest) parses
+          # the sources with clang, which the Windows/macOS/Android builds use
+          # and which warns where GCC cannot. A path, not a package: clang in
+          # `packages` would set CC/CXX and switch this build off GCC.
+          WOWEE_CLANGXX = "${pkgs.clang}/bin/clang++";
+
           # Vulkan on NixOS: the loader finds ICDs through the system driver path.
           VK_ICD_FILENAMES = "";
           shellHook = ''

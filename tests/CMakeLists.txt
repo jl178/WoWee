@@ -622,6 +622,22 @@ if(Python3_Interpreter_FOUND)
                      ${CMAKE_BINARY_DIR})
 endif()
 
+# ── clang_warning_check ─────────────────────────────────────────
+# The native build is GCC; Windows, macOS and Android are clang with -Werror,
+# and clang warns where GCC has no flag at all (-Wunused-lambda-capture). Eleven
+# [this] captures that GCC accepted stopped the Windows build, as did locals
+# named far (an empty macro under <windows.h>). Parses every project
+# translation unit with clang -fsyntax-only, caching the clean ones by
+# content, so after the first run (minutes) it only parses what changed.
+# Skipped when no clang++ is found ($WOWEE_CLANGXX, set by the nix devShell).
+if(Python3_Interpreter_FOUND)
+    add_test(NAME clang_warning_check
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_SOURCE_DIR}/tools/clang_warning_check.py
+                     ${CMAKE_BINARY_DIR})
+    set_tests_properties(clang_warning_check PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
 # ── upscale_mip_colour ──────────────────────────────────────────
 # Pillow's resize weights colour by alpha, so an RGBA resize returns black
 # wherever a sheet is transparent. That silently emptied every mip level below
