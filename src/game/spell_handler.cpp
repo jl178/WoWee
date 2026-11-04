@@ -616,6 +616,21 @@ uint32_t SpellHandler::resolveSpellVisualId(uint32_t spellId) {
     return (it != owner_.spellNameCacheRef().end()) ? it->second.spellVisualId : 0;
 }
 
+uint32_t SpellHandler::resolveCastVisualId(uint32_t spellId, uint64_t casterGuid) {
+    const uint32_t own = resolveSpellVisualId(spellId);
+    owner_.loadSpellNameCache();
+    auto it = owner_.spellNameCacheRef().find(spellId);
+    if (it == owner_.spellNameCacheRef().end() ||
+        !rendering::missilerules::usesRangedItemVisual(it->second.attr))
+        return own;
+    auto* renderer = owner_.services().renderer;
+    auto* svs = renderer ? renderer->getSpellVisualSystem() : nullptr;
+    if (!svs) return own;
+    // Wow.exe 0x720F80: the ranged weapon's ItemDisplayInfo.SpellVisualID
+    // fills what the spell's own visual leaves empty.
+    return svs->rangedItemVisual(own, svs->unitItemDisplay(casterGuid, 2));
+}
+
 float SpellHandler::resolveSpellMissileSpeed(uint32_t spellId) {
     owner_.loadSpellNameCache();
     auto it = owner_.spellNameCacheRef().find(spellId);
@@ -625,18 +640,26 @@ float SpellHandler::resolveSpellMissileSpeed(uint32_t spellId) {
 bool SpellHandler::spellFliesMissile(uint32_t spellId) {
     auto* renderer = owner_.services().renderer;
     auto* svs = renderer ? renderer->getSpellVisualSystem() : nullptr;
-    const uint32_t visualId = resolveSpellVisualId(spellId);
-    if (!svs || visualId == 0 || !svs->hasSpellMissile(visualId)) return false;
     const float speed = resolveSpellMissileSpeed(spellId);
-    return std::isfinite(speed) && speed >= 1.0f && speed <= 200.0f;
+    if (!svs || !std::isfinite(speed) || speed < 1.0f || speed > 200.0f) return false;
+    // A shot with the ranged slot (Auto Shot, Shoot, Throw) flies its ammo
+    // or the weapon's bolt even with no visual of its own (0x7FFFB0).
+    owner_.loadSpellNameCache();
+    if (auto it = owner_.spellNameCacheRef().find(spellId);
+        it != owner_.spellNameCacheRef().end() &&
+        rendering::missilerules::usesRangedItemVisual(it->second.attr))
+        return true;
+    const uint32_t visualId = resolveSpellVisualId(spellId);
+    return visualId != 0 && svs->hasSpellMissile(visualId);
 }
 
 bool SpellHandler::launchSpellMissile(uint32_t spellId, uint32_t visualId, uint64_t casterGuid,
-                                      uint64_t targetGuid, bool impactAtEnd, bool castReleased) {
+                                      uint64_t targetGuid, bool impactAtEnd, bool castReleased,
+                                      uint32_t ammoDisplayId, uint32_t ammoInventoryType) {
     if (targetGuid == 0 || targetGuid == casterGuid) return false;
     auto* renderer = owner_.services().renderer;
     auto* svs = renderer ? renderer->getSpellVisualSystem() : nullptr;
-    if (!svs || !svs->hasSpellMissile(visualId)) return false;
+    if (!svs || !svs->hasSpellMissile(visualId, ammoDisplayId)) return false;
     // A speed outside this is not a missile speed: Fireball flies at 24, the
     // fastest bolts at about 60. Anything else is a field read from the wrong
     // column, and a missile crawling for seconds is worse than none.
@@ -690,7 +713,8 @@ bool SpellHandler::launchSpellMissile(uint32_t spellId, uint32_t visualId, uint6
     // attachments SpellVisual.dbc names and homes on the target as it moves.
     return svs->playSpellMissile(visualId, start, end, speed, impactAtEnd, casterInstance,
                                  owner_.resolveUnitRenderInstance(targetGuid),
-                                 /*groundTarget=*/false, delay, releaseAnim, targetGuid);
+                                 /*groundTarget=*/false, delay, releaseAnim, targetGuid,
+                                 casterGuid, ammoDisplayId, ammoInventoryType);
 }
 
 bool SpellHandler::resolveUnitPosition(uint64_t guid, glm::vec3& outPos) {
@@ -722,7 +746,7 @@ void SpellHandler::triggerCastVisual(uint32_t spellId, uint64_t casterGuid, uint
     if (!renderer) return;
     auto* svs = renderer->getSpellVisualSystem();
     if (!svs) return;
-    uint32_t visualId = resolveSpellVisualId(spellId);
+    uint32_t visualId = resolveCastVisualId(spellId, casterGuid);
     if (visualId == 0) return;
     glm::vec3 casterPos;
     if (!resolveUnitPosition(casterGuid, casterPos)) return;
@@ -742,12 +766,13 @@ void SpellHandler::cancelCastVisual(uint64_t casterGuid) {
         }
 }
 
-void SpellHandler::triggerImpactVisual(uint32_t spellId, uint64_t targetGuid, bool targetIsCaster) {
+void SpellHandler::triggerImpactVisual(uint32_t spellId, uint64_t targetGuid, bool targetIsCaster,
+                                       uint32_t visualOverride) {
     auto* renderer = owner_.services().renderer;
     if (!renderer) return;
     auto* svs = renderer->getSpellVisualSystem();
     if (!svs) return;
-    uint32_t visualId = resolveSpellVisualId(spellId);
+    uint32_t visualId = visualOverride ? visualOverride : resolveSpellVisualId(spellId);
     if (visualId == 0) return;
     glm::vec3 targetPos;
     if (!resolveUnitPosition(targetGuid, targetPos)) return;
@@ -755,68 +780,6 @@ void SpellHandler::triggerImpactVisual(uint32_t spellId, uint64_t targetGuid, bo
     svs->playSpellVisual(visualId, targetPos, /*useImpactKit=*/true,
                          owner_.resolveUnitRenderInstance(targetGuid), targetIsCaster, targetGuid);
 }
-
-void SpellHandler::launchRangedWeaponProjectile(uint32_t spellId, uint64_t targetGuid) {
-    if (targetGuid == 0) targetGuid = owner_.getTargetGuid();
-    auto* renderer = owner_.services().renderer;
-    auto* assets = owner_.services().assetManager;
-    if (!renderer || !assets || targetGuid == 0) return;
-    auto* visuals = renderer->getSpellVisualSystem();
-    auto* characters = renderer->getCharacterRenderer();
-    if (!visuals || !characters) return;
-
-    glm::vec3 start = renderer->getCharacterPosition() + glm::vec3(0.0f, 0.0f, 1.0f);
-    glm::mat4 handTransform(1.0f);
-    if (characters->getAttachmentTransform(renderer->getCharacterInstanceId(), 1, handTransform))
-        start = glm::vec3(handTransform[3]);
-
-    glm::vec3 end;
-    if (!resolveUnitPosition(targetGuid, end)) return;
-    end.z += 1.0f;
-
-    const auto& ranged = owner_.getInventory().getEquipSlot(EquipSlot::RANGED);
-    std::string modelPath;
-    std::string texturePath;
-    bool spin = false;
-
-    if (spellId == 2764 || (!ranged.empty() && ranged.item.inventoryType == InvType::THROWN)) {
-        spin = true;
-        if (!ranged.empty() && ranged.item.displayInfoId != 0) {
-            auto displayDbc = assets->loadDBC("ItemDisplayInfo.dbc");
-            if (displayDbc && displayDbc->isLoaded()) {
-                const int32_t row = displayDbc->findRecordById(ranged.item.displayInfoId);
-                if (row >= 0) {
-                    const auto* layout = pipeline::getActiveDBCLayout()
-                        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-                    std::string model = displayDbc->getString(
-                        static_cast<uint32_t>(row), layout ? (*layout)["LeftModel"] : 1);
-                    std::string texture = displayDbc->getString(
-                        static_cast<uint32_t>(row), layout ? (*layout)["LeftModelTexture"] : 3);
-                    if (!model.empty()) {
-                        const size_t dot = model.rfind('.');
-                        if (dot != std::string::npos) model = model.substr(0, dot);
-                        modelPath = "Item\\ObjectComponents\\Weapon\\" + model + ".m2";
-                    }
-                    if (!texture.empty())
-                        texturePath = "Item\\ObjectComponents\\Weapon\\" + texture + ".blp";
-                }
-            }
-        }
-        if (modelPath.empty())
-            modelPath = "Item\\ObjectComponents\\Weapon\\Thrown_1H_Dagger_A_01.m2";
-    } else if (spellId == 75 || (!ranged.empty() &&
-               (ranged.item.inventoryType == InvType::RANGED_BOW ||
-                ranged.item.subclassName == "Bow" || ranged.item.subclassName == "Crossbow"))) {
-        modelPath = "Item\\ObjectComponents\\Ammo\\ArrowFlight_01.m2";
-    } else {
-        modelPath = "Item\\ObjectComponents\\Ammo\\BulletFlight_01.m2";
-    }
-
-    const float distance = glm::length(end - start);
-    const float duration = std::clamp(distance / 35.0f, 0.12f, 0.8f);
-    visuals->playPhysicalProjectile(modelPath, texturePath, start, end, duration, spin);
-}
-
 
 SpellHandler::SpellHandler(GameHandler& owner)
     : owner_(owner) {}
@@ -3222,7 +3185,9 @@ void SpellHandler::handleSpellStart(network::Packet& packet) {
 
     // The precast kit's build-up on the caster (any caster) until SPELL_GO,
     // a failure or the timeout. Skip profession spells.
-    if (!owner_.isProfessionSpell(data.spellId) && !rangedWeaponAttack && !precastPredicted) {
+    // Ranged attacks too: their build-up is the ranged weapon's precast kit
+    // (a wand's HoldThrown, a bow's LoadBow - Wow.exe 0x7FA2E0 through 0x720F80).
+    if (!owner_.isProfessionSpell(data.spellId) && !precastPredicted) {
         triggerCastVisual(data.spellId, data.casterUnit, data.castTime);
     }
 }
@@ -3311,12 +3276,8 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
         if (spellclass::isRangedWeaponAutoAttack(sid)) {
             if (owner_.meleeSwingCallbackRef()) owner_.meleeSwingCallbackRef()(sid, 0);
             owner_.suppressNextMeleeSwingAnim();
-            uint64_t projectileTarget = data.targetGuid;
-            if (projectileTarget == 0 && !data.hitTargets.empty())
-                projectileTarget = data.hitTargets.front();
-            if (projectileTarget == 0 && !data.missTargets.empty())
-                projectileTarget = data.missTargets.front().targetGuid;
-            launchRangedWeaponProjectile(sid, projectileTarget);
+            // The shot itself flies with the other missiles below: the
+            // ammo SPELL_GO names, or the wand's bolt (0x7FFFB0).
         }
 
         // Instant abilities → their kit's animation (or the next swing). The
@@ -3540,8 +3501,10 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
 
     // Trigger spell visual effects: cast kit at caster + impact kit at each hit target.
     // Skip profession spells and melee (schoolMask == 1) abilities.
-    if (!owner_.isProfessionSpell(data.spellId) && !rangedWeaponAttack) {
-        uint32_t visualId = resolveSpellVisualId(data.spellId);
+    // Ranged attacks too: Auto Shot, Shoot and Throw play the ranged
+    // weapon's visual and fly its ammo (Wow.exe 0x720F80, 0x7FFFB0).
+    if (!owner_.isProfessionSpell(data.spellId)) {
+        uint32_t visualId = resolveCastVisualId(data.spellId, data.casterUnit);
         if (visualId != 0) {
             // The cast kit on the caster, timed casts and instants alike
             glm::vec3 casterPos;
@@ -3571,14 +3534,16 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
             for (const auto& tgt : data.hitTargets) {
                 if (tgt == 0) continue;
                 if (atPoint || !launchSpellMissile(data.spellId, visualId, data.casterUnit, tgt,
-                                                   /*impactAtEnd=*/true, castReleased)) {
-                    triggerImpactVisual(data.spellId, tgt, tgt == data.casterUnit);
+                                                   /*impactAtEnd=*/true, castReleased,
+                                                   data.ammoDisplayId, data.ammoInventoryType)) {
+                    triggerImpactVisual(data.spellId, tgt, tgt == data.casterUnit, visualId);
                 }
             }
             if (!atPoint) {
                 for (const auto& miss : data.missTargets) {
                     launchSpellMissile(data.spellId, visualId, data.casterUnit, miss.targetGuid,
-                                       /*impactAtEnd=*/false, castReleased);
+                                       /*impactAtEnd=*/false, castReleased,
+                                       data.ammoDisplayId, data.ammoInventoryType);
                 }
             }
             // Cast at a point on the ground: the area kits stand there.

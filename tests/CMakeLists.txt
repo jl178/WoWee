@@ -3202,6 +3202,15 @@ wowee_add_test(test_spell_chain_effect
     SOURCES test_spell_chain_effect.cpp
             ${CMAKE_SOURCE_DIR}/src/rendering/spell_chain_effect.cpp)
 
+# Ranged and item missiles (Wow.exe 0x720F80, 0x7FFFB0, 0x732FF0, 0x732100,
+# 0x4EAB50): the ranged weapon's visual, the missile kind and the item paths.
+wowee_add_test(test_spell_missile_rules
+    SOURCES test_spell_missile_rules.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/spell_missile_rules.cpp)
+
+# SMSG_SPELL_GO's fields after the targets: the ammo a shot flies (0x80E1B0).
+wowee_add_packet_test(test_spell_go_ammo_packet)
+
 # CMSG_SPLIT_ITEM (uint32 count from WotLK) and CMSG_AUTOSTORE_BAG_ITEM.
 wowee_add_packet_test(test_item_move_packets)
 

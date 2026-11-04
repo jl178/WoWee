@@ -1140,6 +1140,7 @@ bool Application::initialize() {
             renderer.get(), assetManager.get(), gameHandler.get(), &gameServices_);
         entitySpawner_->initialize();
 
+
         appearanceComposer_ = std::make_unique<AppearanceComposer>(
             renderer.get(), assetManager.get(), gameHandler.get(),
             entitySpawner_.get());
@@ -5114,6 +5115,33 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     updateCheckpoint = "in_game: spawn/equipment queues";
     runInGameStage("spawn/equipment queues", [&] {
         if (entitySpawner_) entitySpawner_->update();
+        // A caster's weapons, for the missiles that are its main hand, off
+        // hand or ranged item and for the ranged weapon's own spell visual
+        // (CGUnit_C vtable +0x134 / +300): the local character from its
+        // inventory, other players from their visible items, creatures from
+        // UNIT_VIRTUAL_ITEM_SLOT_ID.
+        if (auto* svs = renderer ? renderer->getSpellVisualSystem() : nullptr;
+            svs && !svs->hasUnitItemResolver()) {
+            svs->setUnitItemResolver([this](uint64_t guid, uint32_t slot, uint32_t& displayId,
+                                            uint32_t& inventoryType) {
+                displayId = inventoryType = 0;
+                if (slot > 2 || !gameHandler || !entitySpawner_) return false;
+                if (guid == gameHandler->getPlayerGuid()) {
+                    static constexpr game::EquipSlot kSlots[3] = {
+                        game::EquipSlot::MAIN_HAND, game::EquipSlot::OFF_HAND, game::EquipSlot::RANGED};
+                    const auto& it = gameHandler->getInventory().getEquipSlot(kSlots[slot]);
+                    if (it.empty()) return false;
+                    displayId = it.item.displayInfoId;
+                    inventoryType = it.item.inventoryType;
+                } else {
+                    const auto items = entitySpawner_->unitWeaponItems(guid);
+                    displayId = items[slot].displayId;
+                    inventoryType = items[slot].inventoryType;
+                }
+                return displayId != 0;
+            });
+        }
+
         if (auto* cr = renderer ? renderer->getCharacterRenderer() : nullptr) {
             const auto t0 = std::chrono::steady_clock::now();
             cr->processPendingNormalMaps(4);

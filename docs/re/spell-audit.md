@@ -115,14 +115,44 @@ the weapons were never equipped ("Must have a %s equipped"). The swing
 trail, Heroic Throw's weapon missile and Thunder Clap's camera shake are
 therefore implemented from the stock code but not seen in game.
 
+## Ranged, item and beam pass (spellfx harness)
+
+A second pass on what the first left open, on the lab character Wptestb
+(human; priest, warrior), harness `spellfx/run/*.body` with
+`burst(tag, n, dt)` series of shots and a camera that keeps caster and
+dummy in frame. Before = the build without this work, after = with it.
+
+| What | Stock (Wow.exe) | Before | After |
+|---|---|---|---|
+| Wand Shoot (5019), five schools (fire 5069, shadow 5071, nature 5244, arcane 4547, holy 22254) | the wand's ItemDisplayInfo.SpellVisualID (225, 226, 2797, 2799, 228) merged into the spell's empty visual (`0x720F80`): HoldThrown precast, AttackThrown cast with the school's sound, the school's bolt | a grey bullet streak (the old `launchRangedWeaponProjectile` guess) for the local player only | FireBolt / Shadowbolt / LightningBolt / Arcane_Missile / Holy_Missile flying from the hand, the precast sparks; every caster |
+| Shoot with a bow (3018), arrows as ammo | bow visual 5 + SPELL_GO's ammo 5996: `ArrowFlight_01` (`0x4EAB50`) | nothing (3018 was not on the guessed list) | the arrow flies (log: `missile ... model=item 0`); too fast at 5 yd for the 0.8 s screenshot cadence |
+| Throw (2764), thrown axe 5856 | visual 2027 + the axe as ammo (type 25) | a copy of the hand's weapon, local player only | the axe's own display model on the missile path |
+| Heroic Throw (57755, -1) | the main hand's display (`0x732400`), motion 38 | a copy of the weapon on a straight line with a fixed spin | the display model with motion 38 (spin + parabola), release wait and speed rule |
+| Mind Flay (48156) beam | rows 750 + 747, 748, 746, 751 as read; the bolt ends at the destination attachment or, when the model has none, 3/4 of the unit's height (`0x7FABF0`) | ended at the dummy's feet (missile fallback 15 -> 19), fogged | ends at 3/4 of the dummy's height, unfogged, by RenderLayer; colour, alpha, width read as stock (see below) |
+| Weapon enchant procs | the proc's SPELL_GO plays its kits like any triggered spell: Fiery Weapon 13897's impact (kit 728, Fire_ImpactDD_Chest) on the target; Crusader 20007 and Mongoose 28093 (visual 4345, kit 146 BlessingofStrength_Base) and Berserking 59620 (kits 81, 12178, state tint) on the wielder | played | unchanged: a real Fiery Weapon enchant (803 on the item, auto-attack at the dummy) put kit 728 on the dummy at each of its procs (`procs_07`); Crusader and Berserking by `.cast` |
+
+Mind Flay's rows were checked against the stock bolt (`0x9A9900` copies the
+row's bytes +0x9C..+0x9F into the bolt as A, R, G, B; `0x9AA210` offsets each
+side of the strip by `Width`; the vertex colour is that ARGB with the pulse
+writing alpha). Wowee reads all three the same way. The beam is thin and
+dark by its data: 750 is ManaBeam at alpha 51 added, the three spiral rows
+are a 0.2-yard dark purple (55, 0, 53) alpha-blended, 751 a white pulse 8
+yards long. What was wrong was where the beam ended (the ground under a
+model without a Breath attachment) and the fog.
+
 ## Gaps
 
-- Not confirmed in game: Mind Flay's beam, swing trails, the weapon
-  missile, camera shakes, the Hellfire channel-pose fix (machine overloaded
-  for the last runs; the harness is in place).
+- Not confirmed in game: swing trails, camera shakes, the Hellfire
+  channel-pose fix; the bow and thrown missiles were seen only in the log
+  (they cross 5 yards in under 0.15 s).
+- Wowee does not send CMSG_SET_AMMO: ammo cannot be put in the ammo slot
+  from the client (the harness sets `characters.ammoId`).
+- The stock lightning's GxRs_MatEmissive is set to the row's colour per bolt
+  (`0x9AA210`); whether lighting is on for it was not settled, so a lit bolt
+  could be up to the sun's diffuse brighter than Wowee's.
 - Ground-targeted spells cannot be cast by a player: Wowee has no
   targeting circle and sends no destination. The audit used `.cast dest`.
 - "Must have a %s equipped": the UI error is not formatted with the item
   class.
-- Ranged weapon missiles (-3 and items), CharProc 6/15/16/17 and the missile
-  targeting kit (see `spell-cast-pipeline.md` section 14).
+- CharProc 6/15/16/17 are read but not run (`spell-cast-pipeline.md`
+  section 8a); an item missile's ItemVisual glow is not applied.

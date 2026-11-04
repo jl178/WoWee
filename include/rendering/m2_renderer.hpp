@@ -878,6 +878,7 @@ public:
     struct EffectStrip {
         VkTexture* texture = nullptr;  // null: white
         uint8_t gxBlend = 2;
+        bool unfogged = false;  // the chain effects draw with fog off (0x9AB070)
         std::vector<float> verts;
     };
     /// The strips to draw from now on, until the next call replaces them.

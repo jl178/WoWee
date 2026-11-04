@@ -11,6 +11,7 @@
 #include <glm/glm.hpp>
 
 #include "rendering/spell_chain_effect.hpp"
+#include "rendering/spell_missile_rules.hpp"
 
 struct lua_State;
 
@@ -83,10 +84,33 @@ public:
     enum class KitSoundMoment { PRECAST, CAST, IMPACT, ANY };
     bool visualHasKitSound(uint32_t visualId, KitSoundMoment moment);
 
-    // Whether this visual flies a missile: SpellVisual.HasMissile set and a
-    // MissileModel to fly. (Divine Spirit's row names a model with
-    // HasMissile 0; the stock client shows nothing.)
-    bool hasSpellMissile(uint32_t visualId);
+    // Whether this visual flies a missile (Wow.exe 0x7FFFB0): SpellVisual
+    // .HasMissile set and a MissileModel to fly, or ammo named by the
+    // SPELL_GO (a bow's visual flies nothing itself; the arrow is the ammo).
+    // (Divine Spirit's row names a model with HasMissile 0; the stock client
+    // shows nothing.)
+    bool hasSpellMissile(uint32_t visualId, uint32_t ammoDisplayId = 0);
+
+    // The visual a spell plays from this caster (CGUnit_C vtable +0xBC,
+    // Wow.exe 0x720F80): a spell that uses the ranged slot (Attributes 0x2)
+    // fills every kit and missile column its own visual leaves empty from
+    // the ranged weapon's ItemDisplayInfo.SpellVisualID - Auto Shot, Shoot
+    // and Throw have no visual of their own, and a wand's is its school bolt
+    // (fire, shadow, frost...), a gun's its report, a bow's its draw.
+    // spellVisualId 0 is a spell with none; rangedDisplayId the caster's
+    // ranged item's display. Returns the visual to use: spellVisualId when the
+    // weapon adds nothing, else a made-up id for the merged row.
+    uint32_t rangedItemVisual(uint32_t spellVisualId, uint32_t rangedDisplayId);
+
+    // A unit's item in slot 0 (main hand), 1 (off hand) or 2 (ranged): its
+    // ItemDisplayInfo id and InventoryType (CGUnit_C vtable +0x134 / +300).
+    // For the missiles that are the caster's weapons (MissileModel -1..-3).
+    using UnitItemResolver = std::function<bool(uint64_t guid, uint32_t slot, uint32_t& displayId,
+                                                uint32_t& inventoryType)>;
+    void setUnitItemResolver(UnitItemResolver r) { unitItemOf_ = std::move(r); }
+    [[nodiscard]] bool hasUnitItemResolver() const { return static_cast<bool>(unitItemOf_); }
+    // The display of a unit's item in a slot, 0 when none (or no resolver).
+    uint32_t unitItemDisplay(uint64_t guid, uint32_t slot);
 
     // Fly the visual's missile model from the caster to the target at speed
     // yards a second (Spell.dbc Speed). It leaves from the caster attachment
@@ -109,11 +133,21 @@ public:
     // it go (Wow.exe 0x734390). It then leaves from that event's point and
     // flies faster to land when it would have (0x7022D0: at most twice the
     // speed). targetGuid is for the impact callback.
+    //
+    // The model is the visual's MissileModel (scaled by its
+    // SpellVisualEffectName.Scale), or an item (Wow.exe 0x732FF0): -1/-2/-3
+    // the caster's (casterGuid) main hand, off hand or ranged item, -4/-5
+    // the ammo SPELL_GO names (ammoDisplayId, ammoInventoryType), and with
+    // no model at all the ammo's flight model - the arrow or bullet of a
+    // bow or gun, a thrown weapon. They all fly the same way: the motion
+    // script spins a thrown axe, the parabola lobs it.
     bool playSpellMissile(uint32_t visualId, const glm::vec3& start, const glm::vec3& end,
                           float speed, bool impactAtEnd,
                           uint32_t casterInstanceId = 0, uint32_t targetInstanceId = 0,
                           bool groundTarget = false, float launchDelay = 0.0f,
-                          uint32_t releaseAnim = 0, uint64_t targetGuid = 0);
+                          uint32_t releaseAnim = 0, uint64_t targetGuid = 0,
+                          uint64_t casterGuid = 0, uint32_t ammoDisplayId = 0,
+                          uint32_t ammoInventoryType = 0);
 
     // Called as a missile carrying its impact lands on a unit (targetGuid as
     // given to playSpellMissile): the stock client makes a living target
@@ -169,15 +203,6 @@ public:
     };
     KitAnimations getKitAnimations(uint32_t visualId);
 
-    // Launch a physical weapon projectile (arrow, bullet, or thrown item)
-    // without invoking the spell visual pipeline.
-    void playPhysicalProjectile(const std::string& modelPath,
-                                const std::string& texturePath,
-                                const glm::vec3& start,
-                                const glm::vec3& end,
-                                float duration,
-                                bool spin);
-
     // Advance lifetime timers and remove expired instances.
     void update(float deltaTime);
 
@@ -226,6 +251,8 @@ private:
         // The kit's character procedures (tints, chain effects, area shards)
         // live as long as this does; 0 = none.
         uint32_t procToken = 0;
+        // A missile targeting kit: ends as its missile lands (0x6FF410).
+        uint32_t missileTag = 0;
         // A SpellVisualKitModelAttach model: the M2 attachment it rides
         // (-1: by its kit slot) and its offset and turn from there.
         int32_t rawAttachment = -1;
@@ -289,9 +316,12 @@ private:
         int32_t missileAttachment = -1;
         int32_t missileDestination = 34;
         std::string missilePath;
-        // MissileModel -1/-2: the caster's main or off hand weapon flies
-        // (Wow.exe 0x732FF0 -> 0x732400): Heroic Throw, Shattering Throw.
-        int32_t weaponMissile = 0;
+        float missileScale = 1.0f;           // its SpellVisualEffectName.Scale
+        // MissileModel as the row has it: below 0 an item flies (Wow.exe
+        // 0x732FF0): -1/-2/-3 the caster's main hand, off hand, ranged item
+        // (Heroic Throw, Shattering Throw), -4/-5 the ammo.
+        int32_t missileModelRaw = 0;
+        uint32_t missileTargetingKit = 0;    // plays from launch to landing
         bool hasMissile = false;             // HasMissile
         uint32_t missileSound = 0;           // SoundEntries.dbc
         int32_t pathType = 0;                // MissilePathType: 2 = lobbed
@@ -312,23 +342,6 @@ private:
         float transUp = 0.0f, transRight = 0.0f, transFront = 0.0f;
         float modelPitch = 0.0f, modelYaw = 0.0f, modelRoll = 0.0f;
         float scale = 1.0f, speedScalar = 1.0f, speedAbs = 0.0f;
-    };
-
-    struct PhysicalProjectile {
-        uint32_t instanceId = 0;
-        glm::vec3 start{0.0f};
-        glm::vec3 end{0.0f};
-        glm::vec3 rotation{0.0f};
-        float elapsed = 0.0f;
-        float duration = 0.0f;
-        bool spin = false;
-        // A spell's weapon missile (MissileModel -1/-2): it homes on the
-        // target's destination attachment and plays the impact as it lands.
-        uint32_t impactVisual = 0;
-        uint32_t targetInstanceId = 0;
-        uint64_t targetGuid = 0;
-        int32_t destAttachment = 34;
-        glm::vec3 endFeet{0.0f};
     };
 
     struct SpellMissile {
@@ -355,6 +368,11 @@ private:
         bool soundLoops = false;
         bool impactAtEnd = false;
         bool groundTarget = false;
+        // An item model (a weapon, an arrow): a CharacterRenderer instance,
+        // which dresses it in the item's texture; else an M2Renderer one.
+        bool itemModel = false;
+        float baseScale = 1.0f;     // SpellVisualEffectName.Scale
+        uint32_t targetingTag = 0;  // its missile targeting kit, ended on landing
     };
 
     // A missile waiting for its caster's hand to let it go.
@@ -368,6 +386,8 @@ private:
         uint32_t releaseAnim = 0;
         uint64_t targetGuid = 0;
         float delay = 0.0f, waited = 0.0f;
+        uint64_t casterGuid = 0;
+        uint32_t ammoDisplayId = 0, ammoInventoryType = 0;
     };
 
     // A kit to spawn: where, on whom, for how long, and what it belongs to.
@@ -393,6 +413,7 @@ private:
         bool channelKit = false;  // a channel kit: its chain runs to the channel target
         // Ground areas: the spell's radius, for the falling shards.
         float areaRadius = 0.0f;
+        uint32_t missileTag = 0;  // a missile targeting kit (see SpellVisualInstance)
     };
 
     // An aura state visual a unit should have, and the instance it is on.
@@ -432,7 +453,14 @@ private:
                              glm::mat4& out) const;
     // Launch one missile now (p.waited: how long it was held for its release).
     bool launchSpellMissile(const PendingMissile& p);
-    bool launchWeaponMissile(const PendingMissile& p);
+    // The item model a missile is (MissileModel -1..-5, or ammo): a
+    // CharacterRenderer model id dressed in the item's texture, 0 when the
+    // display gives none (the stock flies an ErrorCube).
+    uint32_t itemMissileModel(const VisualRow& v, const PendingMissile& p);
+    uint32_t loadItemMissileModel(const missilerules::ItemMissilePaths& paths);
+    // A missile that landed or was dropped: its model goes, its targeting
+    // kit ends.
+    void endMissile(const SpellMissile& m, bool retireModel);
     void placeSpellMissile(const SpellMissile& missile, const glm::vec3& dir,
                            const MotionOut* motion = nullptr);
     // Start ending one visual: Decay or stop emitting, fade the mesh, keep it
@@ -474,11 +502,19 @@ private:
     void startChainEffect(uint32_t rowId, const KitProc& proc, const KitSpawn& spawn,
                           uint32_t token, uint32_t castAnim);
     // A strip to draw this frame: the texture by path, the stock blend.
-    struct StripOut { std::string texture; uint8_t gxBlend = 2; std::vector<ChainStripVertex> verts; };
+    // layer: the stock draws bolts by RenderLayer, 0 to 3 (0x9AB070); unfogged:
+    // the bolts draw with fog off (0x9AB070 sets GxRs_Fog 0).
+    struct StripOut {
+        std::string texture; uint8_t gxBlend = 2; int32_t layer = 0; bool unfogged = false;
+        std::vector<ChainStripVertex> verts;
+    };
     void updateChainEffects(float deltaTime, std::vector<StripOut>& strips);
     void submitStrips(std::vector<StripOut>& strips);
     bool chainSourcePoint(const ChainEffect& c, uint64_t guid, glm::vec3& out);
     bool chainTargetPoint(const ChainEffect& c, uint64_t guid, glm::vec3& out);
+    // 3/4 of a unit's height above its feet (Wow.exe 0x717AD0 x 0.75): where
+    // a bolt ends on a unit without the attachment it asks for.
+    glm::vec3 unitThreeQuarterPoint(uint32_t inst, const glm::vec3& feet) const;
     void loadChainEffects();
     // A tint on a unit's model (CharProc 1): the newest one shows.
     struct UnitTint { uint32_t instanceId = 0; uint32_t token = 0; uint32_t key = 0; glm::vec3 color{1.0f}; };
@@ -544,7 +580,6 @@ private:
     pipeline::AssetManager* cachedAssetManager_ = nullptr;
 
     std::vector<SpellVisualInstance> activeSpellVisuals_;
-    std::vector<PhysicalProjectile> physicalProjectiles_;
     std::vector<SpellMissile> spellMissiles_;
     std::vector<PendingMissile> pendingMissiles_;
     MissileImpactCallback missileImpactCallback_;
@@ -558,7 +593,20 @@ private:
     std::unordered_map<uint32_t, std::vector<EffectSound>> modelEffectShakes_;
     uint32_t nextSpellVisualModelId_ = 999000; // Reserved range 999000-999799
     uint32_t nextProjectileModelId_ = 998000;  // Reserved range 998000-998999
-    std::unordered_map<std::string, uint32_t> projectileModelIds_;
+    std::unordered_map<std::string, uint32_t> projectileModelIds_;  // item missile models
+    // SpellVisualEffectName: id -> model path and Scale (column 4).
+    std::unordered_map<uint32_t, std::string> effectPaths_;
+    std::unordered_map<uint32_t, float> effectScales_;
+    // The raw 3.3.5a SpellVisual rows (32 columns), for the ranged merge, and
+    // the merged rows made so far: (spell visual << 32 | item visual) -> id.
+    std::unordered_map<uint32_t, missilerules::VisualColumns> rawVisuals_;
+    std::unordered_map<uint64_t, uint32_t> mergedVisuals_;
+    std::unordered_map<uint32_t, uint32_t> itemDisplayVisuals_;  // display -> SpellVisualID
+    uint32_t nextMergedVisualId_ = 0x40000000u;
+    VisualRow visualRowFromColumns(const missilerules::VisualColumns& c) const;
+    bool itemDisplayNames(uint32_t displayId, missilerules::ItemDisplayNames& out);
+    UnitItemResolver unitItemOf_;
+    uint32_t nextMissileTag_ = 1;
     std::unordered_map<uint32_t, MotionRow> motions_;  // SpellMissileMotion.dbc id → script
     lua_State* motionLua_ = nullptr;
     bool motionLuaFailed_ = false;

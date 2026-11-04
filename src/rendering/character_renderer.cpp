@@ -713,13 +713,14 @@ void CharacterRenderer::clear() {
     compositeCache_.clear();
     failedTextureCache_.clear();
 
-    // Recreate default textures (needed by loadModel/loadTexture fallbacks)
-    whiteTexture_.reset();
-    transparentTexture_.reset();
-    unboundTexture_.reset();
-    defaultTexture_.reset();
-    flatNormalTexture_.reset();
-    createFallbackTextures(device);
+    // The fallback textures (white, transparent, unbound, default, flat
+    // normal) are kept. They are 1x1 constants made at initialize, and the
+    // unit shadow's fallback set (shadowParams_.set, set 0 binding 0) was
+    // written with the white one's view then and never again: recreating them
+    // here on every map change left that set naming a destroyed view, which
+    // every unit's shadow draw bound after the teleport - the validation
+    // layer's "combined image sampler descriptor [Set 0, Binding 0] is using
+    // imageView 0x0" (enhancements-plan.md 3.12).
 
     models.clear();
     instances.clear();
@@ -3056,28 +3057,6 @@ bool CharacterRenderer::getCastReleaseEvent(uint32_t instanceId, uint32_t animat
         return true;
     }
     return false;
-}
-
-uint32_t CharacterRenderer::createWeaponCopy(uint32_t instanceId, uint32_t handAttachment,
-                                             const glm::vec3& position) {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) return 0;
-    uint32_t modelId = 0;
-    for (const auto& wa : it->second.weaponAttachments)
-        if (wa.attachmentId == handAttachment) { modelId = wa.weaponModelId; break; }
-    if (modelId == 0) return 0;
-    // The textures live on the model (attachWeapon), so a new instance of it
-    // is dressed the same.
-    const uint32_t copy = createInstance(modelId, position);
-    if (auto cIt = instances.find(copy); cIt != instances.end() && cIt->second.cachedModel) {
-        const auto& seqs = cIt->second.cachedModel->data.sequences;
-        if (!seqs.empty()) {
-            cIt->second.currentSequenceIndex =
-                anim::defaultSequenceIndex(seqs, cIt->second.cachedModel->data.bones);
-            cIt->second.currentAnimationId = seqs[cIt->second.currentSequenceIndex].id;
-        }
-    }
-    return copy;
 }
 
 size_t CharacterRenderer::getWeaponAttachmentCount(uint32_t instanceId) const {
