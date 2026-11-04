@@ -9,6 +9,8 @@
 #include "game/packed_time.hpp"
 #include "game/quest_progress.hpp"
 #include "game/quest_objectives.hpp"
+#include "game/spell_handler.hpp"
+#include "game/stock_trade_skill.hpp"
 #include "addons/world_map_api.hpp"
 #include "ui/chat/chat_utils.hpp"
 #include "core/logger.hpp"
@@ -17,6 +19,8 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
+#include <cstdio>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -2769,309 +2773,74 @@ static int lua_GetTalentInfo(lua_State* L) {
     return 10;
 }
 
-/// The trainer panel's own selection and filters. The client has no opinion
-/// about either - they are what the player last clicked - so they live here
-/// rather than being invented on every read.
-static int& tradeSkillSelection() {
-    static int selected = 0;
-    return selected;
-}
+// ---- Trade skill window ------------------------------------------------
+//
+// Every function reads the model SpellHandler keeps (stock_trade_skill.hpp),
+// which follows Wow.exe's TradeSkillFrame.cpp: one list of rows - headers and
+// recipes, shown ones first - indexed 1-based by every call, and a selection
+// that is the recipe rather than its row.
 
-/// The trade skill list's two filters, and the view every binding reads.
-///
-/// The panel's search box and its "Have Materials" checkbox were no-ops, so
-/// typing in one or ticking the other changed nothing. Filtering has to happen
-/// in one place: the panel asks GetNumTradeSkills for a count and then indexes
-/// everything else by position in that same list, so a count filtered anywhere
-/// but here would have the rows describing different recipes than the ones
-/// counted.
-static std::string& tradeSkillNameFilter() {
-    static std::string filter;
-    return filter;
-}
-static bool& tradeSkillOnlyMakeable() {
-    static bool only = false;
-    return only;
-}
-
-/// The recipes the panel should show, in its order.
-///
-/// Returned by value, as getCraftingRecipes already was at every one of these
-/// call sites - the copy is the list, not an extra one.
-/// The item a recipe makes, or null while its details are still being asked
-/// for. The spell cache carries createdItemId; the item query fills the rest.
-static const game::ItemQueryResponseData* craftedItem(game::GameHandler* gh,
-                                                      uint32_t spellId) {
-    if (!gh || spellId == 0) return nullptr;
-    auto it = gh->spellNameCacheRef().find(spellId);
-    if (it == gh->spellNameCacheRef().end()) return nullptr;
-    const uint32_t made = it->second.createdItemId;
-    if (made == 0) return nullptr;
-    gh->ensureItemInfo(made);
-    const auto* info = gh->getItemInfo(made);
-    return (info && info->valid) ? info : nullptr;
-}
-
-/// Which entry of each dropdown is picked. Both are single-select - the click
-/// handler calls Set…Filter(id - 1, 1, 1) and nothing ever unchecks - so this
-/// is an index rather than a set, and zero is the "all" row the list opens
-/// with.
-static int& tradeSkillSubClassPick() { static int pick = 0; return pick; }
-static int& tradeSkillInvSlotPick()  { static int pick = 0; return pick; }
-
-/// The item level range typed into the search box. The box does double duty:
-/// a number, a range "20-30" or an approximate "~25" filters by the level of
-/// what a recipe makes, and anything else filters by name - the panel decides
-/// which and calls one of the two, clearing the other. Both zero means no
-/// range, which is how it clears this one.
-static std::pair<int, int>& tradeSkillLevelRange() {
-    static std::pair<int, int> range{0, 0};
-    return range;
-}
-
-/// The two dropdown lists, built from every known recipe rather than from the
-/// filtered ones - a list that shrank as it was filtered would renumber itself
-/// under the selection, and the selection is an index into it.
-static std::vector<std::string> tradeSkillSubClasses(game::GameHandler* gh) {
-    std::vector<std::string> out;
-    if (!gh) return out;
-    for (const auto& r : gh->getCraftingRecipes()) {
-        const auto* info = craftedItem(gh, r.spellId);
-        if (!info || info->subclassName.empty()) continue;
-        if (std::find(out.begin(), out.end(), info->subclassName) == out.end())
-            out.push_back(info->subclassName);
-    }
-    std::sort(out.begin(), out.end());
-    return out;
-}
-
-/// The equipment slots the recipes make something for, by the same labels the
-/// auction house filters by - one table for both rather than a second list of
-/// slot names that could drift from it.
-static std::vector<std::string> tradeSkillInvSlots(game::GameHandler* gh) {
-    std::vector<std::string> out;
-    if (!gh) return out;
-    for (const auto& r : gh->getCraftingRecipes()) {
-        const auto* info = craftedItem(gh, r.spellId);
-        if (!info || info->inventoryType == 0) continue;
-        for (int i = 1; i < game::kNumAuctionSlots; ++i) {
-            if (game::kAuctionSlots[i].invType != info->inventoryType) continue;
-            const std::string label = game::kAuctionSlots[i].label;
-            if (std::find(out.begin(), out.end(), label) == out.end())
-                out.push_back(label);
-            break;
-        }
-    }
-    std::sort(out.begin(), out.end());
-    return out;
-}
-
-static std::vector<game::GameHandler::CraftRecipe> visibleCraftingRecipes(
-        game::GameHandler* gh) {
-    std::vector<game::GameHandler::CraftRecipe> out;
-    if (!gh) return out;
-    std::string needle = tradeSkillNameFilter();
-    toLowerInPlace(needle);
-    const auto subs  = (tradeSkillSubClassPick() > 0) ? tradeSkillSubClasses(gh)
-                                                      : std::vector<std::string>{};
-    const auto slots = (tradeSkillInvSlotPick() > 0)  ? tradeSkillInvSlots(gh)
-                                                      : std::vector<std::string>{};
-    const auto level = tradeSkillLevelRange();
-    for (const auto& r : gh->getCraftingRecipes()) {
-        if (tradeSkillOnlyMakeable() && r.canMake <= 0) continue;
-        if (!needle.empty()) {
-            std::string name = r.name;
-            toLowerInPlace(name);
-            if (name.find(needle) == std::string::npos) continue;
-        }
-        if (level.second > 0) {
-            const auto* made = craftedItem(gh, r.spellId);
-            // Shown while unknown, for the same reason as the two filters
-            // below: the details arrive on demand.
-            if (made && (static_cast<int>(made->itemLevel) < level.first ||
-                         static_cast<int>(made->itemLevel) > level.second)) {
-                continue;
-            }
-        }
-        // A recipe whose item has not arrived yet is shown rather than hidden.
-        // The details are asked for on demand, so filtering on what is not back
-        // would empty the list and refill it as the replies landed.
-        if (!subs.empty() || !slots.empty()) {
-            const auto* info = craftedItem(gh, r.spellId);
-            if (info) {
-                const int si = tradeSkillSubClassPick();
-                if (si > 0 && si <= static_cast<int>(subs.size()) &&
-                    info->subclassName != subs[static_cast<size_t>(si) - 1]) {
-                    continue;
-                }
-                const int vi = tradeSkillInvSlotPick();
-                if (vi > 0 && vi <= static_cast<int>(slots.size())) {
-                    std::string label;
-                    for (int i = 1; i < game::kNumAuctionSlots; ++i) {
-                        if (game::kAuctionSlots[i].invType == info->inventoryType) {
-                            label = game::kAuctionSlots[i].label;
-                            break;
-                        }
-                    }
-                    if (label != slots[static_cast<size_t>(vi) - 1]) continue;
-                }
-            }
-        }
-        out.push_back(r);
-    }
-    return out;
-}
-
-/// One drawn line of the crafting list: a subclass heading, or a recipe.
-///
-/// Blizzard's own name for the verb says what the headings are -
-/// CollapseTradeSkillSubClass - and the subclass is the crafted item's, which
-/// is the same source the subclass filter dropdown beside the list is built
-/// from. One rule for both, so the headings and the filter cannot disagree.
-///
-/// A recipe whose item has not arrived yet has no subclass to file it under.
-/// Those go last, under no heading, rather than being hidden: the details are
-/// asked for on demand, and hiding them would empty the list and refill it as
-/// the replies landed. They move under their heading once the reply arrives,
-/// which is the same churn the dropdown already has.
-struct TradeSkillRow {
-    game::GameHandler::CraftRecipe recipe;
-    std::string subclass;
-    bool isHeader = false;
-};
-
-/// Headings the player has closed, by subclass name. Not saved: the crafting
-/// window is opened against one profession at a time and the original client
-/// does not carry the state between openings either.
-static std::set<std::string>& collapsedTradeSkillSubClasses() {
-    static std::set<std::string> closed;
-    return closed;
-}
-
-/// Bumped whenever the list is allowed to change shape. See tradeSkillRows.
-static uint64_t& tradeSkillRowsGeneration() {
-    static uint64_t gen = 1;
-    return gen;
-}
-
-static std::vector<TradeSkillRow> buildTradeSkillRows(game::GameHandler* gh) {
-    std::vector<TradeSkillRow> rows;
-    if (!gh) return rows;
-    std::map<std::string, std::vector<game::GameHandler::CraftRecipe>> grouped;
-    std::vector<game::GameHandler::CraftRecipe> ungrouped;
-    for (const auto& r : visibleCraftingRecipes(gh)) {
-        const auto* info = craftedItem(gh, r.spellId);
-        if (info && !info->subclassName.empty()) grouped[info->subclassName].push_back(r);
-        else                                     ungrouped.push_back(r);
-    }
-    for (const auto& [subclass, recipes] : grouped) {
-        TradeSkillRow header;
-        header.subclass = subclass;
-        header.isHeader = true;
-        header.recipe.name = subclass;
-        rows.push_back(std::move(header));
-        // A closed heading takes its recipes out of the list rather than
-        // hiding them in place: GetNumTradeSkills is what the scroll frame
-        // counts and every other binding indexes into.
-        if (collapsedTradeSkillSubClasses().count(subclass)) continue;
-        for (const auto& r : recipes) rows.push_back({r, subclass, false});
-    }
-    for (const auto& r : ungrouped) rows.push_back({r, {}, false});
-    return rows;
-}
-
-/// The drawn rows, held still between the events that may change them.
-///
-/// Every trade skill binding indexes into this list, and the frame reads it
-/// many times to draw one selection - GetNumTradeSkills for the count,
-/// GetTradeSkillInfo for the row, GetTradeSkillReagentInfo for each reagent.
-/// Rebuilding it per call let it change shape *between* those reads, because
-/// its shape depends on data that arrives while they run: the headings come
-/// from the subclass of the item each recipe makes, craftedItem() asks for that
-/// item the first time it is missed, and the answer lands some frames later.
-/// So the list starts flat, and grows a heading - and one row - for each reply.
-///
-/// The frame has no way to survive that. An index means a different recipe on
-/// either side of a reply, so the selection's own row read back as a heading:
-/// `creatable` was cleared, both Create buttons stayed disabled, the detail
-/// pane described one recipe while the highlight sat on another, and a recipe
-/// row was drawn with a heading's expand box beside it.
-///
-/// So the list is built once and held until something the player did is meant
-/// to change it - a filter, a heading opened or closed - or the game says the
-/// trade skill data itself moved. Late item info then lands at the next
-/// TRADE_SKILL_UPDATE rather than in the middle of a redraw.
-/// The cached row list, by reference.
-///
-/// This returned by value, and every caller does
-///
-///     const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
-///
-/// which takes a pointer into the temporary the call just made and reads it on
-/// the next line, after the temporary is gone. Reported as crafting doing
-/// nothing: DoTradeSkill said `row 4 '' spell=0` and then
-/// `row 1 '' spell=2661056113` for the same window - an empty name and a spell
-/// id out of freed memory, which is what a press of Create was sending.
-///
-/// Safe as a reference because the list is deliberately held still between
-/// TRADE_SKILL_UPDATE and TRADE_SKILL_SHOW - see fireEvent, which invalidates
-/// it only there, precisely because the frame reads it many times to draw one
-/// selection. Nothing can rebuild it underneath a caller mid-read.
-static const std::vector<TradeSkillRow>& tradeSkillRows(game::GameHandler* gh) {
-    static std::vector<TradeSkillRow> cached;
-    static uint64_t cachedGen = 0;
-    static const game::GameHandler* cachedFor = nullptr;
-    if (cachedGen == tradeSkillRowsGeneration() && cachedFor == gh) return cached;
-    cached = buildTradeSkillRows(gh);
-    cachedGen = tradeSkillRowsGeneration();
-    cachedFor = gh;
-    return cached;
-}
-
-void invalidateTradeSkillRows() { ++tradeSkillRowsGeneration(); }
-
-/// The recipe at a drawn-row index, or null for a heading or no such row.
-/// Every binding taking a trade skill index goes through this, because an
-/// index that lands on a heading must not be treated as the recipe that used
-/// to sit at that offset - DoTradeSkill would craft it.
-/// Refuses a temporary outright, because the pointer it answers with would
-/// outlive it. That is the fault above, and a compiler error is a better guard
-/// than remembering.
-static const game::GameHandler::CraftRecipe* tradeSkillRecipeAt(
-        std::vector<TradeSkillRow>&&, int) = delete;
-
-static const game::GameHandler::CraftRecipe* tradeSkillRecipeAt(
-        const std::vector<TradeSkillRow>& rows, int index) {
-    if (index < 1 || index > static_cast<int>(rows.size())) return nullptr;
-    const auto& row = rows[static_cast<size_t>(index) - 1];
-    return row.isHeader ? nullptr : &row.recipe;
-}
-
-/// The same translation, for the one binding that lives in another file: the
-/// tooltip is a widget method and sits on the widget metatable in lua_engine.
-const game::GameHandler::CraftRecipe* recipeAtTradeSkillRow(game::GameHandler* gh,
-                                                            int index) {
-    if (!gh) return nullptr;
-    return tradeSkillRecipeAt(tradeSkillRows(gh), index);
-}
-
-/// Open or close the heading at a drawn-row index. A click on a recipe row is
-/// ignored rather than refused: the panel calls these from the row template
-/// whatever the row turns out to be.
-static int tradeSkillHeaderSetCollapsed(lua_State* L, bool collapsed) {
+static game::SpellHandler* tradeSkillHandler(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh || index < 1) return 0;
-    const auto rows = tradeSkillRows(gh);
-    if (index > static_cast<int>(rows.size())) return 0;
-    const auto& row = rows[static_cast<size_t>(index) - 1];
-    if (!row.isHeader) return 0;
-    if (collapsed) collapsedTradeSkillSubClasses().insert(row.subclass);
-    else           collapsedTradeSkillSubClasses().erase(row.subclass);
-    ++tradeSkillRowsGeneration();
+    return gh ? gh->getSpellHandler() : nullptr;
+}
+
+/// The index argument the stock functions demand ("Usage: ...(index)").
+static int tradeSkillIndexArg(lua_State* L, int arg, const char* usage) {
+    if (!lua_isnumber(L, arg)) return luaL_error(L, "%s", usage);
+    return static_cast<int>(lua_tonumber(L, arg));
+}
+
+/// The recipe at a row, and its Spell.dbc entry, or nulls for a header or an
+/// index past the end.
+struct TradeSkillPick {
+    const game::stock_trade_skill::Recipe* recipe = nullptr;
+    const game::GameHandler::SpellNameEntry* spell = nullptr;
+    const game::SpellHandler::TradeSpellColumns* columns = nullptr;
+};
+static TradeSkillPick tradeSkillPick(game::GameHandler* gh, int index) {
+    TradeSkillPick p;
+    auto* sh = gh ? gh->getSpellHandler() : nullptr;
+    if (!sh) return p;
+    p.recipe = sh->tradeSkill().recipeAt(index);
+    if (!p.recipe) return p;
+    gh->loadSpellNameCache();
+    auto it = gh->spellNameCacheRef().find(static_cast<uint32_t>(p.recipe->spellId));
+    if (it != gh->spellNameCacheRef().end()) p.spell = &it->second;
+    p.columns = sh->tradeSpellColumns(static_cast<uint32_t>(p.recipe->spellId));
+    return p;
+}
+
+/// The item a recipe makes (effect 0's item), 0 for an enchant.
+static uint32_t tradeSkillMadeItem(const TradeSkillPick& p) {
+    if (!p.recipe || !p.recipe->createsItem) return 0;
+    if (p.columns) return p.columns->itemType[0];
+    return p.spell ? p.spell->createdItemId : 0;
+}
+
+uint32_t spellAtTradeSkillRow(game::GameHandler* gh, int index) {
+    auto p = tradeSkillPick(gh, index);
+    return p.recipe ? static_cast<uint32_t>(p.recipe->spellId) : 0;
+}
+
+uint32_t itemMadeAtTradeSkillRow(game::GameHandler* gh, int index) {
+    return tradeSkillMadeItem(tradeSkillPick(gh, index));
+}
+
+uint32_t reagentAtTradeSkillRow(game::GameHandler* gh, int index, int reagent) {
+    auto p = tradeSkillPick(gh, index);
+    if (!p.spell) return 0;
+    int seen = 0;
+    for (const auto& r : p.spell->reagents) {
+        if (r.itemId == 0) continue;
+        if (++seen == reagent) return r.itemId;
+    }
     return 0;
 }
 
+/// The trainer panel's own selection and filters. The client has no opinion
+/// about either - they are what the player last clicked - so they live here
+/// rather than being invented on every read.
 static int& trainerSelection() {
     static int selected = 0;
     return selected;
@@ -4783,211 +4552,163 @@ void registerQuestLuaAPI(lua_State* L) {
         }},
                 // ---- Trade skills ---------------------------------------
                 //
-                // The recipe list comes from GameHandler so this panel and the
-                // client's own crafting window agree on every number.
+                // Wow.exe 0x5DA120..0x5DE620 (the table at 0xAD0E80); see
+                // docs/re/professions.md for each.
                 {"GetNumTradeSkills", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? static_cast<double>(
-                tradeSkillRows(gh).size()) : 0.0);
+            auto* sh = tradeSkillHandler(L);
+            lua_pushnumber(L, sh ? static_cast<double>(sh->tradeSkill().numVisible()) : 0.0);
             return 1;
         }},
-                // GetTradeSkillInfo(i) → name, type, numAvailable, isExpanded,
-                //                        altVerb, numSkillUps
+                // name, type, numAvailable, isExpanded, altVerb (0x5DB2A0).
                 {"GetTradeSkillInfo", [](lua_State* L) -> int {
+            const int i = tradeSkillIndexArg(L, 1, "Usage: GetTradeSkillInfo(index)");
             auto* gh = getGameHandler(L);
-            const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            if (!gh) return luaReturnNil(L);
-            const auto rows = tradeSkillRows(gh);
-            // The scroll frame asks past the end on every redraw - it walks a
-            // fixed number of buttons and hides the ones that answer nil - so
-            // this is routine and says nothing about anything being wrong.
-            if (i < 1 || i > static_cast<int>(rows.size())) return luaReturnNil(L);
-            const auto& row = rows[static_cast<size_t>(i) - 1];
-            if (row.isHeader) {
-                // "header" is what the panel branches on; the count and the
-                // verb belong to a recipe and a heading has neither.
-                lua_pushstring(L, row.subclass.c_str());
+            auto* sh = tradeSkillHandler(L);
+            const auto* row = sh ? sh->tradeSkill().rowAt(i) : nullptr;
+            if (!row) {
+                lua_pushnil(L); lua_pushnil(L); lua_pushnumber(L, 0); lua_pushnil(L); lua_pushnil(L);
+                return 5;
+            }
+            const auto& m = sh->tradeSkill();
+            if (row->isHeader()) {
+                std::string name;
+                if (row->itemClass == -1 && row->itemSubClass == -1) {
+                    // The line's alternate verb names the recipes that make
+                    // nothing ("Enchant").
+                    if (const auto* info = sh->tradeSkillLineInfo(m.skillLine)) name = info->alternateVerb;
+                } else {
+                    name = m.headerName(row->itemClass, row->itemSubClass);
+                }
+                lua_pushstring(L, name.c_str());
                 lua_pushstring(L, "header");
                 lua_pushnumber(L, 0);
-                lua_pushboolean(L,
-                    collapsedTradeSkillSubClasses().count(row.subclass) ? 0 : 1);
-                lua_pushnil(L);         // altVerb
-                lua_pushnumber(L, 0);   // numSkillUps
-                return 6;
+                if (m.rowExpanded(static_cast<size_t>(i - 1))) lua_pushnumber(L, 1); else lua_pushnil(L);
+                lua_pushnil(L);
+                return 5;
             }
-            const auto& r = row.recipe;
-            static const char* kBands[4] = {"optimal", "medium", "easy", "trivial"};
-            lua_pushstring(L, r.name.c_str());
-            lua_pushstring(L, kBands[r.difficulty < 0 || r.difficulty > 3
-                                         ? 0 : r.difficulty]);
-            lua_pushnumber(L, r.canMake);
-            lua_pushboolean(L, 1);      // a recipe row is never folded
-            lua_pushnil(L);             // altVerb
-            lua_pushnumber(L, 1);       // numSkillUps
-            return 6;
+            auto p = tradeSkillPick(gh, i);
+            lua_pushstring(L, p.recipe ? p.recipe->name.c_str() : "");
+            lua_pushstring(L, game::stock_trade_skill::difficultyName(row->difficulty));
+            lua_pushnumber(L, row->numAvailable);
+            lua_pushnil(L);
+            // altVerb: the line's, for a recipe whose first effect makes no
+            // item - "Enchant" - else nil, which reads as "Create".
+            const uint32_t effect0 = p.columns ? p.columns->effect[0] : (p.spell ? p.spell->effectIds[0] : 0);
+            const auto* info = sh->tradeSkillLineInfo(m.skillLine);
+            if (!game::stock_trade_skill::isCreateItemEffect(effect0) && info)
+                lua_pushstring(L, info->alternateVerb.c_str());
+            else
+                lua_pushnil(L);
+            return 5;
         }},
                 {"GetTradeSkillIcon", [](lua_State* L) -> int {
+            const int i = tradeSkillIndexArg(L, 1, "Usage: GetTradeSkillIcon(index)");
             auto* gh = getGameHandler(L);
-            const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            if (!gh) return luaReturnNil(L);
-            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
-            if (!rec) return luaReturnNil(L);
-            // What the recipe makes, which is what this returns in WoW. A
-            // recipe spell carries its profession's icon rather than its
-            // product's - every tailoring spell in the shipped Spell.dbc is
-            // Ability_Ensnare - so the pane showed the same picture beside
-            // every recipe. The spell's icon is the fallback for a recipe
-            // whose item has not been answered for yet.
+            auto p = tradeSkillPick(gh, i);
+            if (!p.recipe) return luaReturnNil(L);
             std::string icon;
-            if (const auto* made = craftedItem(gh, rec->spellId)) {
-                if (made->displayInfoId) icon = gh->getItemIconPath(made->displayInfoId);
+            if (const uint32_t made = tradeSkillMadeItem(p)) {
+                gh->ensureItemInfo(made);
+                if (const auto* info = gh->getItemInfo(made); info && info->valid && info->displayInfoId)
+                    icon = gh->getItemIconPath(info->displayInfoId);
+            } else {
+                icon = gh->getSpellIconPath(static_cast<uint32_t>(p.recipe->spellId));
             }
-            if (icon.empty()) icon = gh->getSpellIconPath(rec->spellId);
-            lua_pushstring(L, icon.empty()
-                ? "Interface\\Icons\\INV_Misc_QuestionMark" : icon.c_str());
+            if (icon.empty()) return luaReturnNil(L);
+            lua_pushstring(L, icon.c_str());
             return 1;
         }},
                 {"GetTradeSkillDescription", [](lua_State* L) -> int {
+            const int i = tradeSkillIndexArg(L, 1, "Usage: GetTradeSkillDescription(index)");
             auto* gh = getGameHandler(L);
-            const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            if (!gh) return luaReturnNil(L);
-            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
-            if (!rec) return luaReturnNil(L);
-            const uint32_t id = rec->spellId;
-            lua_pushstring(L, gh->formatSpellDescription(
-                id, gh->getSpellDescription(id)).c_str());
+            auto p = tradeSkillPick(gh, i);
+            if (!p.spell || p.spell->description.empty()) return luaReturnNil(L);
+            const uint32_t id = static_cast<uint32_t>(p.recipe->spellId);
+            lua_pushstring(L, gh->formatSpellDescription(id, p.spell->description).c_str());
             return 1;
         }},
                 {"GetTradeSkillNumReagents", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
+            const int i = tradeSkillIndexArg(L, 1, "Usage: GetTradeSkillNumReagents(index)");
+            auto p = tradeSkillPick(getGameHandler(L), i);
             int n = 0;
-            if (gh) {
-                const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
-                if (rec) {
-                    auto it = gh->spellNameCacheRef().find(rec->spellId);
-                    if (it != gh->spellNameCacheRef().end()) {
-                        for (const auto& r : it->second.reagents) {
-                            if (r.itemId != 0) ++n;
-                        }
-                    }
-                }
-            }
+            if (p.spell)
+                for (const auto& r : p.spell->reagents) if (r.itemId != 0) ++n;
             lua_pushnumber(L, n);
             return 1;
         }},
-                // GetTradeSkillReagentInfo(i, n) → name, texture, needed, have
+                // name, texture, needed, have (0x5DE400); the name and the
+                // texture are nil until the item's reply.
                 {"GetTradeSkillReagentInfo", [](lua_State* L) -> int {
+            if (!lua_isnumber(L, 1) || !lua_isnumber(L, 2))
+                return luaL_error(L, "Usage: GetTradeSkillReagentInfo(index, reagentIndex)");
             auto* gh = getGameHandler(L);
-            const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            const int n = static_cast<int>(luaL_optnumber(L, 2, 1));
-            if (!gh) return luaReturnNil(L);
-            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
-            if (!rec) return luaReturnNil(L);
-            auto it = gh->spellNameCacheRef().find(rec->spellId);
-            if (it == gh->spellNameCacheRef().end()) return luaReturnNil(L);
-            int seen = 0;
-            for (const auto& r : it->second.reagents) {
-                if (r.itemId == 0) continue;
-                if (++seen != n) continue;
-                gh->ensureItemInfo(r.itemId);
-                const auto* info = gh->getItemInfo(r.itemId);
-                lua_pushstring(L, info ? info->name.c_str() : "Reagent");
-                const std::string ricon =
-                    info ? gh->getItemIconPath(info->displayInfoId) : std::string();
-                lua_pushstring(L, ricon.empty()
-                    ? "Interface\\Icons\\INV_Misc_QuestionMark" : ricon.c_str());
-                lua_pushnumber(L, r.count);
-                lua_pushnumber(L, gh->countItemInBags(r.itemId));
-                return 4;
-            }
-            return luaReturnNil(L);
-        }},
-                {"GetTradeSkillNumMade", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            int lo = 1, hi = 1;
-            if (gh) {
-                const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
-                if (rec) {
-                    auto it = gh->spellNameCacheRef().find(rec->spellId);
-                    if (it != gh->spellNameCacheRef().end()) {
-                        // The count is not in what this client parses; one is
-                        // right for the great majority of recipes and wrong
-                        // only in the amount, never in the item.
-                        (void)it;
+            auto p = tradeSkillPick(gh, static_cast<int>(lua_tonumber(L, 1)));
+            const int n = static_cast<int>(lua_tonumber(L, 2));
+            if (p.spell) {
+                int seen = 0;
+                for (const auto& r : p.spell->reagents) {
+                    if (r.itemId == 0 || ++seen != n) continue;
+                    gh->ensureItemInfo(r.itemId);
+                    const auto* info = gh->getItemInfo(r.itemId);
+                    if (info && info->valid) {
+                        lua_pushstring(L, info->name.c_str());
+                        const std::string icon = gh->getItemIconPath(info->displayInfoId);
+                        if (icon.empty()) lua_pushnil(L); else lua_pushstring(L, icon.c_str());
+                    } else {
+                        lua_pushnil(L);
+                        lua_pushnil(L);
                     }
+                    lua_pushnumber(L, r.count);
+                    lua_pushnumber(L, gh->countItemInBags(r.itemId));
+                    return 4;
                 }
+            }
+            lua_pushnil(L); lua_pushnil(L); lua_pushnil(L); lua_pushnil(L);
+            return 4;
+        }},
+                // 0x5DB6E0: the made count's range from effect 0's points.
+                {"GetTradeSkillNumMade", [](lua_State* L) -> int {
+            const int i = tradeSkillIndexArg(L, 1, "Usage: GetTradeSkillNumMade(index)");
+            auto p = tradeSkillPick(getGameHandler(L), i);
+            int lo = 1, hi = 1;
+            if (p.columns) {
+                lo = p.columns->basePoints[0] + (p.columns->dieSides[0] != 0 ? 1 : 0);
+                hi = p.columns->basePoints[0] + p.columns->dieSides[0];
+                if (lo < 1) lo = 1;
+                if (hi < 1) hi = 1;
             }
             lua_pushnumber(L, lo);
             lua_pushnumber(L, hi);
             return 2;
         }},
-                // GetTradeSkillLine() → name, rank, maxRank
+                // name, rank, maxRank (0x5DB810); "UNKNOWN", 0, 0 when closed.
                 {"GetTradeSkillLine", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (!gh) {
-                // The same three values, not one nil. TradeSkillFrame_Update
-                // reads the rank straight into `if ( rank < 75 )`, so a nil
-                // there raises and takes the rest of the update with it -
-                // including the re-selection that is the only thing which
-                // re-enables the Create buttons after the Disable at the top.
-                lua_pushstring(L, "Trade Skill");
-                lua_pushnumber(L, 0);
-                lua_pushnumber(L, 0);
-                return 3;
-            }
-            const uint32_t line = gh->getCraftingSkillLine();
-            std::string name = gh->getSkillLineName(line);
-            if (name.empty()) name = "Trade Skill";
-            uint32_t rank = 0, maxRank = 0;
-            auto it = gh->getPlayerSkills().find(line);
-            if (it != gh->getPlayerSkills().end()) {
-                rank    = it->second.effectiveValue();
-                maxRank = it->second.maxValue;
-            }
+            std::string name = "UNKNOWN";
+            int rank = 0, maxRank = 0;
+            if (auto* sh = tradeSkillHandler(L)) sh->tradeSkillLine(name, rank, maxRank);
             lua_pushstring(L, name.c_str());
             lua_pushnumber(L, rank);
             lua_pushnumber(L, maxRank);
             return 3;
         }},
-                // DoTradeSkill(index, repeat) - make `repeat` of a recipe.
-                //
-                // Both of the trade skill frame's buttons pass a count: Create
-                // sends what the box holds and Create All sends numAvailable.
-                // Casting once regardless made "Create All" produce a single
-                // item, with no error to say why. The craft queue this needs
-                // already existed and the client's own crafting window has been
-                // using it - one press per craft is not the same as a queue,
-                // because each craft has to wait for the last to finish.
+                // DoTradeSkill(index [, repeat]) (0x5DAC00): never more than
+                // the bags make; a run of this recipe already going takes the
+                // new count without a second cast.
                 {"DoTradeSkill", [](lua_State* L) -> int {
+            const int i = tradeSkillIndexArg(L, 1, "Usage: DoTradeSkill(index [, repeat])");
             auto* gh = getGameHandler(L);
-            const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            int count = static_cast<int>(luaL_optnumber(L, 2, 1));
-            if (!gh) return 0;
-            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
-            // Says what a press of Create resolved to, once per press. A craft
-            // that does nothing is indistinguishable from a button that was
-            // never wired: the row may be a heading, the index may be off the
-            // end, or the cast may go out and be refused with nothing shown.
-            // This names which, and it is the only place that knows the index
-            // and the spell at the same time.
-            // At warning, like the profession chain it sits next to. This was
-            // written to answer "a craft that does nothing is indistinguishable
-            // from a button that was never wired" and then said it at debug,
-            // which the log a bug report arrives with does not carry - so a
-            // report of crafting not working came back with nothing about the
-            // press at all. The same mistake the Escape chain made.
-            if (!rec) {
-                LOG_WARNING("DoTradeSkill: no recipe at row ", i,
-                            " of ", tradeSkillRows(gh).size(),
-                            " - the row is a heading or the index is past the end");
+            auto* sh = gh ? gh->getSpellHandler() : nullptr;
+            int count = 1;
+            if (lua_isnumber(L, 2)) count = static_cast<int>(std::lround(lua_tonumber(L, 2)));
+            const auto* row = sh ? sh->tradeSkill().rowAt(i) : nullptr;
+            // A header or no row: the stock client casts nothing. Said, so a
+            // Create that does nothing can be told from one never pressed.
+            if (!row || row->isHeader()) {
+                LOG_WARNING("DoTradeSkill: no recipe at row ", i);
                 return 0;
             }
-            if (count < 1) count = 1;
-            LOG_WARNING("DoTradeSkill: row ", i, " '", rec->name,
-                        "' spell=", rec->spellId, " count=", count);
-            gh->startCraftQueue(rec->spellId, count);
+            count = game::stock_trade_skill::Model::clampCount(count, row->numAvailable);
+            gh->startCraftQueue(static_cast<uint32_t>(row->spellId), count);
             return 0;
         }},
                 {"CloseTradeSkill", [](lua_State* L) -> int {
@@ -4995,234 +4716,288 @@ void registerQuestLuaAPI(lua_State* L) {
             return 0;
         }},
                 {"SelectTradeSkill", [](lua_State* L) -> int {
-            tradeSkillSelection() = static_cast<int>(luaL_optnumber(L, 1, 0));
+            const int i = tradeSkillIndexArg(L, 1, "Usage: SelectTradeSkill(index)");
+            if (auto* sh = tradeSkillHandler(L)) sh->tradeSkillMutable().select(i);
             return 0;
         }},
                 {"GetTradeSkillSelectionIndex", [](lua_State* L) -> int {
-            lua_pushnumber(L, tradeSkillSelection());
+            auto* sh = tradeSkillHandler(L);
+            lua_pushnumber(L, sh ? sh->tradeSkill().selectionIndex() : 0);
             return 1;
         }},
                 {"GetFirstTradeSkill", [](lua_State* L) -> int {
-            // The first row that is a recipe rather than a heading, which is
-            // what the panel selects when it opens. One now that the list has
-            // headings: row one is "Armor" or "Weapon", not something to make.
-            auto* gh = getGameHandler(L);
-            const auto rows = gh ? tradeSkillRows(gh) : std::vector<TradeSkillRow>{};
-            for (size_t n = 0; n < rows.size(); ++n) {
-                if (!rows[n].isHeader) { lua_pushnumber(L, static_cast<double>(n + 1)); return 1; }
-            }
-            lua_pushnumber(L, 1);
+            auto* sh = tradeSkillHandler(L);
+            lua_pushnumber(L, sh ? sh->tradeSkill().firstRecipe() : 0);
             return 1;
         }},
-                // GetTradeSkillCooldown(index) → seconds left, or nil.
-                //
-                // A recipe's cooldown is its spell's - transmutes and the salt
-                // shaker are the ones that have any - and this client has been
-                // tracking those all along. nil still means "not on cooldown",
-                // which is the branch that leaves the line blank.
+                // Seconds left on the recipe's cooldown, nil when none (0x5DA9A0).
                 {"GetTradeSkillCooldown", [](lua_State* L) -> int {
+            const int i = tradeSkillIndexArg(L, 1, "Usage: GetTradeSkillCooldown(index)");
             auto* gh = getGameHandler(L);
-            const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            if (!gh || i < 1) return luaReturnNil(L);
-            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
-            if (!rec) return luaReturnNil(L);
-            const float left = gh->getSpellCooldown(rec->spellId);
+            auto p = tradeSkillPick(gh, i);
+            if (!p.recipe) return luaReturnNil(L);
+            const float left = gh->getSpellCooldown(static_cast<uint32_t>(p.recipe->spellId));
             if (left <= 0.0f) return luaReturnNil(L);
             lua_pushnumber(L, left);
             return 1;
         }},
+                // Pairs of name and "there" (0x5DE620): the spell focus (always
+                // shown as there), the tools carried, the tool categories.
                 {"GetTradeSkillTools", [](lua_State* L) -> int {
-            // NOTHING, not a nil. The tool requirement is not in what this
-            // client parses, and claiming a tool is missing would grey out
-            // recipes that work - but answering one nil is not the same as
-            // answering none, and the difference is the whole bug.
-            //
-            // The only caller is
-            //   local spellFocus = BuildColoredListString(GetTradeSkillTools(id));
-            // and BuildColoredListString gives up only on an empty argument
-            // list: `if ( select("#", ...) == 0 ) then return nil end`. One nil
-            // is a list of one, so it walked past that, took `text` as nil, and
-            // raised concatenating it.
-            //
-            // That line sits in TradeSkillFrame_SetSelection ABOVE
-            // `if ( creatable ) then TradeSkillCreateButton:Enable()`, so the
-            // raise took the selection down before either Create button was
-            // enabled again - they are disabled at the top of every trade skill
-            // update and re-enabled only there. Both stayed greyed with the
-            // reagents in the bag and the recipe drawn, because everything the
-            // panel had already filled in happened before the raise.
-            (void)L;
-            return 0;
+            const int i = tradeSkillIndexArg(L, 1, "Usage: GetTradeSkillTools(index)");
+            auto* gh = getGameHandler(L);
+            auto* sh = tradeSkillHandler(L);
+            auto p = tradeSkillPick(gh, i);
+            if (!sh || !p.recipe) return 0;
+            const auto tools = sh->tradeSkillTools(static_cast<uint32_t>(p.recipe->spellId));
+            for (const auto& [name, have] : tools) {
+                lua_pushstring(L, name.c_str());
+                if (have) lua_pushnumber(L, 1); else lua_pushnil(L);
+            }
+            return static_cast<int>(tools.size() * 2);
         }},
-                // Links, which need an item this client does not resolve for a
-                // recipe, and the play-time limits that only Chinese realms set.
-                // The two links a trade skill row can be shift-clicked for:
-                // what the recipe makes, and what it takes. Both item ids were
-                // already here - createdItemId off the spell and the reagent
-                // list GetTradeSkillReagentInfo walks - so the panel could name
-                // and count them while answering nil to anyone asking for a
-                // link to the same thing.
+                // The item a recipe makes, or an enchant link for one that
+                // makes nothing (0x5DBA70).
                 {"GetTradeSkillItemLink", [](lua_State* L) -> int {
+            const int i = tradeSkillIndexArg(L, 1, "Usage: GetTradeSkillItemLink(index)");
             auto* gh = getGameHandler(L);
-            const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            if (!gh || i < 1) return luaReturnNil(L);
-            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
-            if (!rec) return luaReturnNil(L);
-            auto it = gh->spellNameCacheRef().find(rec->spellId);
-            if (it == gh->spellNameCacheRef().end()) return luaReturnNil(L);
-            const uint32_t made = it->second.createdItemId;
-            if (made == 0) return luaReturnNil(L);
-            gh->ensureItemInfo(made);
-            const auto* info = gh->getItemInfo(made);
-            if (!info || !info->valid) return luaReturnNil(L);
-            lua_pushstring(L, game::buildItemLink(made, info->quality, info->name).c_str());
-            return 1;
-        }},
-                // A recipe link is an |Htrade: hyperlink carrying the whole
-                // skill list, which this client has no reader for - a link it
-                // cannot resolve on the way back in would be worse than none.
-                {"GetTradeSkillRecipeLink",   [](lua_State* L) -> int { return luaReturnNil(L); }},
-                {"GetTradeSkillReagentItemLink", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            const int n = static_cast<int>(luaL_optnumber(L, 2, 1));
-            if (!gh || i < 1 || n < 1) return luaReturnNil(L);
-            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
-            if (!rec) return luaReturnNil(L);
-            auto it = gh->spellNameCacheRef().find(rec->spellId);
-            if (it == gh->spellNameCacheRef().end()) return luaReturnNil(L);
-            int seen = 0;
-            for (const auto& r : it->second.reagents) {
-                if (r.itemId == 0) continue;
-                if (++seen != n) continue;
-                gh->ensureItemInfo(r.itemId);
-                const auto* info = gh->getItemInfo(r.itemId);
-                if (!info || !info->valid) return luaReturnNil(L);
-                lua_pushstring(L,
-                    game::buildItemLink(r.itemId, info->quality, info->name).c_str());
+            auto p = tradeSkillPick(gh, i);
+            if (!p.recipe || !p.spell) return 0;
+            if (const uint32_t made = tradeSkillMadeItem(p)) {
+                gh->ensureItemInfo(made);
+                const auto* info = gh->getItemInfo(made);
+                if (!info || !info->valid) return 0;
+                lua_pushstring(L, game::buildItemLink(made, info->quality, info->name).c_str());
                 return 1;
             }
-            return luaReturnNil(L);
+            char buf[512];
+            std::snprintf(buf, sizeof(buf), "|cffffd000|Henchant:%d|h[%s]|h|r", p.recipe->spellId,
+                          p.spell->name.c_str());
+            lua_pushstring(L, buf);
+            return 1;
         }},
-                {"GetTradeSkillListLink",     [](lua_State* L) -> int { return luaReturnNil(L); }},
-                {"IsTradeSkillLinked",        [](lua_State* L) -> int { lua_pushboolean(L, 0); return 1; }},
+                // "|Henchant:id|h[Line: Recipe]|h" for a trade spell (0x5DB920).
+                {"GetTradeSkillRecipeLink", [](lua_State* L) -> int {
+            const int i = tradeSkillIndexArg(L, 1, "Usage: GetTradeSkillRecipeLink(index)");
+            auto* gh = getGameHandler(L);
+            auto* sh = tradeSkillHandler(L);
+            auto p = tradeSkillPick(gh, i);
+            if (!sh || !p.recipe || !p.spell ||
+                !(p.spell->attr & game::stock_trade_skill::kAttrTradeSpell))
+                return 0;
+            gh->loadSkillLineAbilityDbc();
+            const auto& lines = gh->spellToSkillLineRef();
+            auto lit = lines.find(static_cast<uint32_t>(p.recipe->spellId));
+            const auto* info = lit != lines.end() ? sh->tradeSkillLineInfo(lit->second) : nullptr;
+            char buf[512];
+            if (info)
+                std::snprintf(buf, sizeof(buf), "|cffffd000|Henchant:%d|h[%s: %s]|h|r", p.recipe->spellId,
+                              info->name.c_str(), p.spell->name.c_str());
+            else
+                std::snprintf(buf, sizeof(buf), "|cffffd000|Henchant:%d|h[%s]|h|r", p.recipe->spellId,
+                              p.spell->name.c_str());
+            lua_pushstring(L, buf);
+            return 1;
+        }},
+                {"GetTradeSkillReagentItemLink", [](lua_State* L) -> int {
+            if (!lua_isnumber(L, 1) || !lua_isnumber(L, 2))
+                return luaL_error(L, "Usage: GetTradeReagentSkillItemLink(index, reagentIndex)");
+            auto* gh = getGameHandler(L);
+            const uint32_t item = reagentAtTradeSkillRow(gh, static_cast<int>(lua_tonumber(L, 1)),
+                                                         static_cast<int>(lua_tonumber(L, 2)));
+            if (!item) return luaReturnNil(L);
+            gh->ensureItemInfo(item);
+            const auto* info = gh->getItemInfo(item);
+            if (!info || !info->valid) return luaReturnNil(L);
+            lua_pushstring(L, game::buildItemLink(item, info->quality, info->name).c_str());
+            return 1;
+        }},
+                // The player's own list as a "trade:" link (0x5DB060).
+                {"GetTradeSkillListLink", [](lua_State* L) -> int {
+            auto* sh = tradeSkillHandler(L);
+            const std::string link = sh ? sh->tradeSkillListLink() : std::string{};
+            if (link.empty()) return luaReturnNil(L);
+            lua_pushstring(L, link.c_str());
+            return 1;
+        }},
+                // 1 and the owner's name for a linked list, else nil, nil.
+                {"IsTradeSkillLinked", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            auto* sh = tradeSkillHandler(L);
+            if (!gh || !sh || !sh->tradeSkill().linked) { lua_pushnil(L); lua_pushnil(L); return 2; }
+            lua_pushnumber(L, 1);
+            const std::string name = gh->getCachedPlayerName(sh->tradeSkill().linkedGuid);
+            if (name.empty()) lua_pushnil(L); else lua_pushstring(L, name.c_str());
+            return 2;
+        }},
                 {"NoPlayTime",                [](lua_State* L) -> int { lua_pushboolean(L, 0); return 1; }},
                 {"PartialPlayTime",           [](lua_State* L) -> int { lua_pushboolean(L, 0); return 1; }},
                 {"GetBillingTimeRested",      [](lua_State* L) -> int { lua_pushnumber(L, 0); return 1; }},
-                // Filters and sub-classes: panel state, kept so it reads back.
-                // The trade skill window's two filter dropdowns. Both answered
-                // nothing and both are spread straight into a vararg call -
-                // TradeSkillFilterFrame_LoadSubClasses(GetTradeSkillSubClasses())
-                // - so each dropdown built its "All" row and stopped, and
-                // picking anything was impossible rather than merely inert.
-                //
-                // Single-select, not a set of ticks: the click handler calls
-                // Set…Filter(id - 1, 1, 1) and nothing ever unticks, so the
-                // state is one index and zero is the "All" row.
+                // The two dropdowns (0x5DAA70 / 0x5DBF10): the headers' names
+                // in their order, and the slot names of what is listed.
                 {"GetTradeSkillSubClasses", [](lua_State* L) -> int {
-            const auto subs = tradeSkillSubClasses(getGameHandler(L));
-            for (const auto& s : subs) lua_pushstring(L, s.c_str());
-            return static_cast<int>(subs.size());
+            auto* sh = tradeSkillHandler(L);
+            if (!sh) return 0;
+            const auto& m = sh->tradeSkill();
+            int n = 0;
+            for (const auto& h : m.headers()) {
+                std::string name;
+                if (h.itemClass == -1 && h.itemSubClass == -1) {
+                    if (const auto* info = sh->tradeSkillLineInfo(m.skillLine)) name = info->alternateVerb;
+                } else {
+                    name = m.headerName(h.itemClass, h.itemSubClass);
+                }
+                lua_pushstring(L, name.c_str());
+                ++n;
+            }
+            return n;
         }},
                 {"GetTradeSkillInvSlots", [](lua_State* L) -> int {
-            const auto slots = tradeSkillInvSlots(getGameHandler(L));
-            for (const auto& s : slots) lua_pushstring(L, s.c_str());
-            return static_cast<int>(slots.size());
+            auto* sh = tradeSkillHandler(L);
+            if (!sh) return 0;
+            const uint32_t bits = sh->tradeSkill().listedSlotBits();
+            int n = 0;
+            for (int b = 0; b < game::stock_trade_skill::kNumSlotBits; ++b) {
+                if (!(bits & (1u << b))) continue;
+                const char* key = game::stock_trade_skill::slotBitKey(b);
+                lua_getglobal(L, key);
+                if (!lua_isstring(L, -1)) { lua_pop(L, 1); lua_pushstring(L, key); }
+                ++n;
+            }
+            return n;
         }},
                 {"GetTradeSkillSubClassFilter", [](lua_State* L) -> int {
-            const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            lua_pushboolean(L, i == tradeSkillSubClassPick() ? 1 : 0);
+            const int i = tradeSkillIndexArg(L, 1, "Usage: GetTradeSkillSubClassFilter(index)");
+            auto* sh = tradeSkillHandler(L);
+            if (!sh) return luaReturnNil(L);
+            if (i - 1 >= static_cast<int>(sh->tradeSkill().headers().size()))
+                return luaL_error(L, "Bad sub class in GetTradeSkillSubClassFilter");
+            if (sh->tradeSkill().subClassFilterOn(i)) lua_pushnumber(L, 1); else lua_pushnil(L);
             return 1;
         }},
                 {"GetTradeSkillInvSlotFilter", [](lua_State* L) -> int {
-            const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            lua_pushboolean(L, i == tradeSkillInvSlotPick() ? 1 : 0);
+            const int i = tradeSkillIndexArg(L, 1, "Usage: GetTradeSkillInvSlotFilter(index)");
+            auto* sh = tradeSkillHandler(L);
+            if (!sh) return luaReturnNil(L);
+            if (sh->tradeSkill().invSlotFilterOn(i)) lua_pushnumber(L, 1); else lua_pushnil(L);
             return 1;
         }},
                 {"SetTradeSkillSubClassFilter", [](lua_State* L) -> int {
-            tradeSkillSubClassPick() = static_cast<int>(luaL_optnumber(L, 1, 0));
-            ++tradeSkillRowsGeneration();
+            if (!lua_isnumber(L, 1))
+                return luaL_error(L, "Usage: SetTradeSkillSubClassFilter(index [, on\\off, exclusive])");
+            auto* gh = getGameHandler(L);
+            auto* sh = tradeSkillHandler(L);
+            if (!gh || !sh) return 0;
+            const int i = static_cast<int>(lua_tonumber(L, 1));
+            auto& m = sh->tradeSkillMutable();
+            if (i - 1 >= 0) {
+                if (i - 1 >= static_cast<int>(m.headers().size()))
+                    return luaL_error(L, "Bad sub class in SetTradeSkillSubClassFilter");
+                if (!lua_isnumber(L, 2))
+                    return luaL_error(L, "Missing on//off parameter in SetTradeSkillSubClassFilter");
+            }
+            const bool on = lua_tonumber(L, 2) != 0;
+            const bool exclusive = lua_isnumber(L, 3) && lua_tonumber(L, 3) != 0;
+            m.setSubClassFilter(i, on, exclusive);
+            gh->fireAddonEvent("TRADE_SKILL_UPDATE", {});
             return 0;
         }},
                 {"SetTradeSkillInvSlotFilter", [](lua_State* L) -> int {
-            tradeSkillInvSlotPick() = static_cast<int>(luaL_optnumber(L, 1, 0));
-            ++tradeSkillRowsGeneration();
-            return 0;
-        }},
-                // The search box above the recipe list. It matched nothing
-                // because nothing read it; the panel calls TradeSkillFrame_Update
-                // straight after, so the list redraws against the new view.
-                {"SetTradeSkillItemNameFilter", [](lua_State* L) -> int {
-            tradeSkillNameFilter() = luaL_optstring(L, 1, "");
-            ++tradeSkillRowsGeneration();
-            return 0;
-        }},
-                // A number in the search box filters by the level of what the
-                // recipe makes rather than by its name - "25", "20-30" and
-                // "~25" all reach here, and the panel clears the name filter
-                // when they do. Both zero clears this one, which is what it
-                // sends when the text is not a number.
-                //
-                // The arguments arrive as the strings strmatch produced;
-                // luaL_optnumber reads those.
-                {"SetTradeSkillItemLevelFilter", [](lua_State* L) -> int {
-            const int lo = static_cast<int>(luaL_optnumber(L, 1, 0));
-            const int hi = static_cast<int>(luaL_optnumber(L, 2, 0));
-            tradeSkillLevelRange() = {lo, hi};
-            ++tradeSkillRowsGeneration();
-            return 0;
-        }},
-                // The "Have Materials" checkbox, which had nothing behind it.
-                // canMake is the count this client already works out for the
-                // reagent lines, so the filter is the same number read twice.
-                {"TradeSkillOnlyShowMakeable",  [](lua_State* L) -> int {
-            const bool only = lua_toboolean(L, 1) != 0;
-            // Only on a change, because TradeSkillFrame_Show calls this with
-            // the box's current state on the way up - after it has restored the
-            // selection and before its own redraw. Raising the event there
-            // would reselect the first recipe every time the window opened and
-            // throw that restored selection away.
-            if (only == tradeSkillOnlyMakeable()) return 0;
-            tradeSkillOnlyMakeable() = only;
-            ++tradeSkillRowsGeneration();
-
-            // The panel is told, because the checkbox does not tell it.
-            //
-            // Both filter dropdowns call TradeSkillFrame_Update themselves
-            // after setting their filter; this box's OnClick is one line - this
-            // call - and then nothing. So the rows were rebuilt behind a window
-            // still drawing the old ones and the tick did nothing visible until
-            // something else redrew the list.
-            //
-            // TRADE_SKILL_FILTER_UPDATE rather than TRADE_SKILL_UPDATE:
-            // TradeSkillFrame_OnLoad registers both and TradeSkillFrame_OnEvent
-            // handles them together, except that a filter update reselects the
-            // first recipe rather than keeping the selected index - which is
-            // what a list that has just changed length needs, since the index
-            // no longer names the row it did.
-            if (auto* gh = getGameHandler(L)) {
-                gh->fireAddonEvent("TRADE_SKILL_FILTER_UPDATE", {});
-            }
-            return 0;
-        }},
-                {"CollapseTradeSkillSubClass",  [](lua_State* L) -> int {
-            return tradeSkillHeaderSetCollapsed(L, true);
-        }},
-                {"ExpandTradeSkillSubClass",    [](lua_State* L) -> int {
-            return tradeSkillHeaderSetCollapsed(L, false);
-        }},
-                // GetTradeskillRepeatCount() → how many are still to be made.
-                //
-                // This is not only a readout: the trade skill frame does
-                // TradeSkillInputBox:SetNumber(GetTradeskillRepeatCount()) every
-                // time a recipe is selected and again on UPDATE_TRADESKILL_RECAST,
-                // so answering zero pinned the quantity box at zero and Create
-                // asked for none however many the player typed. One when no
-                // queue is running, which is what a fresh selection should show.
-                {"GetTradeskillRepeatCount", [](lua_State* L) -> int {
+            if (!lua_isnumber(L, 1))
+                return luaL_error(L, "Usage: SetTradeSkillInvSlotFilter(index [, on\\off, exclusive])");
             auto* gh = getGameHandler(L);
-            const int left = gh ? gh->getCraftQueueRemaining() : 0;
-            lua_pushnumber(L, left > 1 ? left : 1);
+            auto* sh = tradeSkillHandler(L);
+            if (!gh || !sh) return 0;
+            const int i = static_cast<int>(lua_tonumber(L, 1));
+            auto& m = sh->tradeSkillMutable();
+            if (i - 1 >= 0) {
+                if (m.listedSlotBit(i - 1) < 0)
+                    return luaL_error(L, "Bad inv slot in SetTradeSkillInvSlotFilter");
+                if (!lua_isnumber(L, 2))
+                    return luaL_error(L, "Missing on//off parameter in SetTradeSkillInvSlotFilter");
+            }
+            const bool on = lua_tonumber(L, 2) != 0;
+            const bool exclusive = lua_isnumber(L, 3) && lua_tonumber(L, 3) != 0;
+            m.setInvSlotFilter(i, on, exclusive);
+            gh->fireAddonEvent("TRADE_SKILL_UPDATE", {});
+            return 0;
+        }},
+                // The search box: a name (TRADE_SKILL_FILTER_UPDATE on a
+                // change, 0x5DCF60) or a level range (TRADE_SKILL_UPDATE).
+                {"SetTradeSkillItemNameFilter", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            auto* sh = tradeSkillHandler(L);
+            if (!gh || !sh) return 0;
+            const char* text = lua_isstring(L, 1) ? lua_tostring(L, 1) : "";
+            if (sh->tradeSkillMutable().setNameFilter(text ? text : ""))
+                gh->fireAddonEvent("TRADE_SKILL_FILTER_UPDATE", {});
+            return 0;
+        }},
+                {"GetTradeSkillItemNameFilter", [](lua_State* L) -> int {
+            auto* sh = tradeSkillHandler(L);
+            if (!sh || sh->tradeSkill().nameFilter.empty()) return luaReturnNil(L);
+            lua_pushstring(L, sh->tradeSkill().nameFilter.c_str());
+            return 1;
+        }},
+                {"SetTradeSkillItemLevelFilter", [](lua_State* L) -> int {
+            if (!lua_isnumber(L, 1) || !lua_isnumber(L, 2))
+                return luaL_error(L, "Usage: SetTradeSkillItemLevelFilter(minLevel, maxLevel)");
+            auto* gh = getGameHandler(L);
+            auto* sh = tradeSkillHandler(L);
+            if (!gh || !sh) return 0;
+            if (sh->tradeSkillMutable().setLevelFilter(static_cast<int>(lua_tonumber(L, 1)),
+                                                       static_cast<int>(lua_tonumber(L, 2))))
+                gh->fireAddonEvent("TRADE_SKILL_UPDATE", {});
+            return 0;
+        }},
+                {"GetTradeSkillItemLevelFilter", [](lua_State* L) -> int {
+            auto* sh = tradeSkillHandler(L);
+            lua_pushnumber(L, sh ? sh->tradeSkill().minLevel : 0);
+            lua_pushnumber(L, sh ? sh->tradeSkill().maxLevel : 0);
+            return 2;
+        }},
+                // "Have Materials" and "Skill Ups": TRADE_SKILL_UPDATE on a
+                // change (0x5DD3E0 / 0x5DD420).
+                {"TradeSkillOnlyShowMakeable", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            auto* sh = tradeSkillHandler(L);
+            if (gh && sh && sh->tradeSkillMutable().setOnlyMakeable(lua_toboolean(L, 1) != 0))
+                gh->fireAddonEvent("TRADE_SKILL_UPDATE", {});
+            return 0;
+        }},
+                {"TradeSkillOnlyShowSkillUps", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            auto* sh = tradeSkillHandler(L);
+            if (gh && sh && sh->tradeSkillMutable().setOnlySkillUps(lua_toboolean(L, 1) != 0))
+                gh->fireAddonEvent("TRADE_SKILL_UPDATE", {});
+            return 0;
+        }},
+                // By row, 0 for every header (0x5DD460 / 0x5DD500).
+                {"CollapseTradeSkillSubClass", [](lua_State* L) -> int {
+            const int i = tradeSkillIndexArg(L, 1, "Usage: CollapseTradeSkillSubClass(index)");
+            auto* gh = getGameHandler(L);
+            auto* sh = tradeSkillHandler(L);
+            if (!gh || !sh) return 0;
+            if (!sh->tradeSkillMutable().setExpanded(i, false))
+                return luaL_error(L, "Bad sub class in CollapseTradeSkillSubClass");
+            gh->fireAddonEvent("TRADE_SKILL_UPDATE", {});
+            return 0;
+        }},
+                {"ExpandTradeSkillSubClass", [](lua_State* L) -> int {
+            const int i = tradeSkillIndexArg(L, 1, "Usage: ExpandTradeSkillSubClass(index)");
+            auto* gh = getGameHandler(L);
+            auto* sh = tradeSkillHandler(L);
+            if (!gh || !sh) return 0;
+            if (!sh->tradeSkillMutable().setExpanded(i, true))
+                return luaL_error(L, "Bad skill line in ExpandTradeSkillSubClass");
+            gh->fireAddonEvent("TRADE_SKILL_UPDATE", {});
+            return 0;
+        }},
+                // What is left of the selected recipe's run, 1 when it is not
+                // running (0x5DA270).
+                {"GetTradeskillRepeatCount", [](lua_State* L) -> int {
+            auto* sh = tradeSkillHandler(L);
+            lua_pushnumber(L, sh ? sh->tradeSkill().repeatCount() : 1);
             return 1;
         }},
                 {"StopTradeSkillRepeat", [](lua_State* L) -> int {

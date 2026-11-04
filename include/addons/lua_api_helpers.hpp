@@ -1160,27 +1160,12 @@ bool boughtHeldMerchantItem(lua_State* L);
 /// quest than the one asked about.
 const game::GameHandler::QuestLogEntry* questAtLogRow(game::GameHandler* gh, int index);
 
-/// The recipe a drawn trade skill row stands for, or null for a heading, an
-/// index past the end, or no open profession.
-///
-/// A trade skill index is a DISPLAY index, for the same reason a quest log
-/// index is: the list is grouped under subclass headings, the headings are
-/// rows too, and the filters - Have Materials, subclass, slot, the search box
-/// - decide which recipes are in it at all. So index N is not the Nth entry of
-/// getCraftingRecipes(), and subscripting that list answers about a different
-/// recipe. The tooltip did exactly that: hovering "Enchant Bracer - Lesser
-/// Spirit" described "Enchant Bracer - Minor Deflection", three rows further
-/// down, because that is what index 4 is in a list with no heading in it.
-const game::GameHandler::CraftRecipe* recipeAtTradeSkillRow(game::GameHandler* gh,
-                                                            int index);
-
-/// Let the trade skill row list be rebuilt on the next read.
-///
-/// The list is held still between redraws: the frame reads it many times to
-/// draw one selection, and its shape depends on item data that arrives while
-/// those reads run, so rebuilding per call changed what an index meant halfway
-/// through. Called when the game says the trade skill data moved.
-void invalidateTradeSkillRows();
+/// What a trade skill row stands for, by the 1-based index every trade skill
+/// function takes: the recipe's spell, the item it makes (0 for an enchant),
+/// a reagent's item. 0 for a header or no such row.
+uint32_t spellAtTradeSkillRow(game::GameHandler* gh, int index);
+uint32_t itemMadeAtTradeSkillRow(game::GameHandler* gh, int index);
+uint32_t reagentAtTradeSkillRow(game::GameHandler* gh, int index, int reagent);
 
 /// The combat log's stored history, which Blizzard_CombatLog walks to refill
 /// its window when it is opened or refiltered. Each entry is the argument list

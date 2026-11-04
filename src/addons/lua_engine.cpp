@@ -1,4 +1,6 @@
 #include "addons/lua_engine.hpp"
+#include "game/spell_handler.hpp"
+#include "game/stock_trade_skill.hpp"
 #include "ui/link_hit.hpp"
 #include "ui/text_markup.hpp"
 #include "ui/plural_escape.hpp"
@@ -2203,6 +2205,18 @@ int lua_Tooltip_SetHyperlink(lua_State* L) {
     const size_t colon = link.find(':');
     if (colon == std::string::npos) { lua_pushboolean(L, 0); return 1; }
     const std::string kind = link.substr(0, colon);
+    // A trade link is no tooltip: it opens that player's recipe list in the
+    // trade skill window (0x62DAE0 -> 0x5DE300), and the name is asked for so
+    // IsTradeSkillLinked can say whose it is.
+    if (kind == "trade") {
+        game::stock_trade_skill::TradeLink tl;
+        if (game::stock_trade_skill::parseTradeLink(link, tl)) {
+            if (gh->getCachedPlayerName(tl.guid).empty()) gh->queryPlayerName(tl.guid);
+            if (auto* sh = gh->getSpellHandler()) sh->openLinkedTradeSkill(link);
+        }
+        lua_pushboolean(L, 0);
+        return 1;
+    }
     uint32_t id = 0;
     for (size_t i = colon + 1; i < link.size() && link[i] >= '0' && link[i] <= '9'; ++i)
         id = id * 10 + static_cast<uint32_t>(link[i] - '0');
@@ -2461,49 +2475,30 @@ int lua_Tooltip_SetTalent(lua_State* L) {
     return 1;
 }
 
-/// SetTradeSkillItem(index) - what a recipe in the open profession makes.
-///
-/// This client knows a recipe by its crafting spell rather than by the item it
-/// produces, so what is shown is that spell: its name and its description,
-/// which is the line that says what gets made. Not the crafted item's own
-/// tooltip, which is what the real client shows - but the useful half of it,
-/// and it is what this client actually knows.
+/// SetTradeSkillItem(index [, reagent]) - the stock client shows the item a
+/// recipe makes (or, with a reagent index, that reagent) with its whole item
+/// tooltip, and the spell's tooltip for a recipe that makes nothing - an
+/// enchant.
 int lua_Tooltip_SetTradeSkillItem(lua_State* L) {
     auto* w = widgetOf(L, 1);
     auto* gh = wowee::addons::getGameHandler(L);
     const int index = static_cast<int>(luaL_optnumber(L, 2, 0));
     if (!w || !gh || index < 1) { lua_pushboolean(L, 0); return 1; }
-
-    // A drawn-row index, not an index into the recipe list. The panel groups
-    // recipes under subclass headings and filters them, so the two lists have
-    // neither the same length nor the same order: subscripting the recipes
-    // described whatever happened to sit at that offset - "Enchant Bracer -
-    // Lesser Spirit" was shown as "Enchant Bracer - Minor Deflection".
-    const auto* recipe = wowee::addons::recipeAtTradeSkillRow(gh, index);
-    if (!recipe) { lua_pushboolean(L, 0); return 1; }
-    const uint32_t spellId = recipe->spellId;
+    const uint32_t spellId = wowee::addons::spellAtTradeSkillRow(gh, index);
     if (spellId == 0) { lua_pushboolean(L, 0); return 1; }
-
-    w->isTooltip = true;
-    w->tooltipLines.clear();
-    wowee::ui::Widget::TooltipLine title;
-    title.left = recipe->name;
-    title.lc[0] = 1.0f; title.lc[1] = 0.82f; title.lc[2] = 0.0f; title.lc[3] = 1.0f;
-    title.rc[0] = title.rc[1] = title.rc[2] = title.rc[3] = 1.0f;
-    w->tooltipLines.push_back(std::move(title));
-
-    const std::string body =
-        gh->formatSpellDescription(spellId, gh->getSpellDescription(spellId));
-    if (!body.empty()) {
-        wowee::ui::Widget::TooltipLine desc;
-        desc.left = body;
-        desc.lc[0] = desc.lc[1] = desc.lc[2] = 1.0f; desc.lc[3] = 1.0f;
-        desc.rc[0] = desc.rc[1] = desc.rc[2] = desc.rc[3] = 1.0f;
-        desc.wrap = true;  // prose; see fillSpellTooltip
-        w->tooltipLines.push_back(std::move(desc));
+    uint32_t item = 0;
+    if (lua_isnumber(L, 3))
+        item = wowee::addons::reagentAtTradeSkillRow(gh, index, static_cast<int>(lua_tonumber(L, 3)));
+    else
+        item = wowee::addons::itemMadeAtTradeSkillRow(gh, index);
+    bool filled = false;
+    if (item != 0) {
+        filled = fillItemTooltipById(L, gh, item);
+        gh->ensureItemInfo(item);
+    } else if (!lua_isnumber(L, 3)) {
+        filled = fillSpellTooltip(w, gh, spellId);
     }
-    w->shown = true;
-    lua_pushboolean(L, 1);
+    lua_pushboolean(L, filled ? 1 : 0);
     return 1;
 }
 
@@ -9666,16 +9661,6 @@ void LuaEngine::fireEvent(const std::string& eventName,
     if (eventName == game::classic_combat::kLineEvent) {
         fireClassicCombatLine(args);
         return;
-    }
-
-    // The trade skill list may change shape now, and only now. It is held still
-    // between these events because the frame reads it many times to draw one
-    // selection and its shape depends on item data that arrives while those
-    // reads run - see tradeSkillRows in lua_quest_api.cpp. Released here so a
-    // late reply lands at a redraw rather than between two lookups of the same
-    // index.
-    if (eventName == "TRADE_SKILL_UPDATE" || eventName == "TRADE_SKILL_SHOW") {
-        invalidateTradeSkillRows();
     }
 
     // An event handler may cause another event, which is ordinary and has to
