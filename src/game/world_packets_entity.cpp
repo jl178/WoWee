@@ -660,7 +660,7 @@ bool ItemQueryResponseParser::parse(network::Packet& packet, ItemQueryResponseDa
         // BagFamily(10) - kept rather than skipped. GetItemFamily answers from
         // it, and an addon asking what a bag holds gets nil without it.
         data.bagFamily = packet.readUInt32();
-        packet.readUInt32();  // TotemCategory(11)
+        data.totemCategory = packet.readUInt32();  // TotemCategory(11)
         // The three sockets, colour and content together, one socket at a
         // time - `for (s) { << Socket[s].Color; << Socket[s].Content; }`.
         // Read as three colours followed by three contents this took the

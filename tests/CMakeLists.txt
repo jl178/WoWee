@@ -201,6 +201,13 @@ wowee_add_test(test_stock_cast_timing
 wowee_add_test(test_stock_cast_events
     SOURCES test_stock_cast_events.cpp)
 
+# ── test_stock_trade_skill ──────────────────────────────────
+# The trade skill window as the stock client keeps it: difficulty bands,
+# headers by item subclass, filters, folding, the selection, DoTradeSkill's
+# run and the trade link's bits. Header-only.
+wowee_add_test(test_stock_trade_skill
+    SOURCES test_stock_trade_skill.cpp)
+
 # ── test_stock_duel ─────────────────────────────────────────
 # Duels: the reaction and CanAttack rule from the duel fields, and the chat
 # countdown. Header-only.

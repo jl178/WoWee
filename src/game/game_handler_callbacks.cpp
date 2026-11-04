@@ -79,19 +79,6 @@ namespace game {
 
 namespace {
 
-std::string lowerCopy(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value;
-}
-
-bool containsAnyTerm(const std::string& haystack, const char* const* terms, size_t count) {
-    for (size_t i = 0; i < count; ++i) {
-        if (haystack.find(terms[i]) != std::string::npos) return true;
-    }
-    return false;
-}
-
 // GAMEOBJECT_TYPE_FISHINGHOLE. A fishing school is not a container: retail
 // gives it no interact cursor at all, and the only way to take from it is to
 // fish in it. Clicking one here sent CMSG_GAMEOBJ_USE and, while its metadata
@@ -135,6 +122,15 @@ struct LockOpenPlan {
     LockOpenMethod method = LockOpenMethod::UseDirect;
     uint32_t spellId = 0;
     uint32_t keyItemId = 0;  // required key item (LOCK_KEY_ITEM), 0 if none
+    // 0x70F160's answer when nothing opens it: some slot needs something
+    // (`locked`), and the refusal 0x7116C0 shows is chosen by the FIRST slot -
+    // its type, its LockType (index) and its required points - and by whether
+    // any known OPEN_LOCK spell matched a slot's LockType at all.
+    bool locked = false;
+    uint32_t firstType = 0;
+    uint32_t firstIndex = 0;
+    int32_t firstRequired = 0;
+    bool spellKnown = false;
 };
 
 // Decide how to open a game object from its Lock.dbc row. Only a known player
@@ -143,7 +139,7 @@ struct LockOpenPlan {
 LockOpenPlan planGameObjectOpen(pipeline::AssetManager* assets,
                                 const GameObjectQueryResponseData* info,
                                 const std::unordered_set<uint32_t>& knownSpells,
-                                uint32_t playerLevel, uint32_t goLevel) {
+                                const std::function<int(uint32_t)>& spellSkill, uint32_t goLevel) {
     LockOpenPlan plan;
     const uint32_t lockId = gameObjectLockId(info);
     if (!assets || lockId == 0) return plan;
@@ -161,32 +157,32 @@ LockOpenPlan planGameObjectOpen(pipeline::AssetManager* assets,
         ? pipeline::getActiveDBCLayout()->getLayout("Spell") : nullptr;
     const uint32_t effect0Field = spellL ? spellL->field("Effect0") : 0xFFFFFFFF;
     const uint32_t misc0Field   = spellL ? spellL->field("EffectMiscValue0") : 0xFFFFFFFF;
-    // The 3.3.5a client (CGGameObject_C::IsLocked) only takes a spell whose
-    // minimum points reach the lock's Skill, or 5 x the object's level when the
-    // lock has none. The player's skill never enters it: Pick Lock's points grow
-    // 5 per level and stand in for it. Only the WotLK layout maps these columns.
-    // Before 3.1 Lockpicking was a trained skill the server added to the
-    // points, so the check would turn away picks those servers accept.
+    // The 3.3.5a client (CGGameObject_C::IsLocked, 0x70F160) only takes a
+    // spell whose minimum points reach the lock's Skill, or 5 x the object's
+    // level when the lock has none. The points are basePoints + 1 +
+    // perLevel x "level", and that level is the caster's skill in the spell's
+    // own line divided by five (0x7FF070 -> the player's vfunc 0x6DC330: the
+    // whole skill - value, temporary and permanent bonus - capped at
+    // MaxLevel x 5), less SpellLevel. Herb Gathering and Mining have -1 and
+    // 5 per level, so the points are the skill rounded down to a five; Pick
+    // Lock's line is Lockpicking, which the server keeps at level x 5.
     const uint32_t base0Field     = spellL ? spellL->field("EffectBasePoints0") : 0xFFFFFFFF;
     const uint32_t perLevel0Field = spellL ? spellL->field("EffectRealPointsPerLevel0") : 0xFFFFFFFF;
     const uint32_t maxLevelField  = spellL ? spellL->field("MaxLevel") : 0xFFFFFFFF;
-    const uint32_t baseLevelField = spellL ? spellL->field("BaseLevel") : 0xFFFFFFFF;
     const uint32_t spellLevelField = spellL ? spellL->field("SpellLevel") : 0xFFFFFFFF;
     const bool checkPoints =
         base0Field != 0xFFFFFFFF && perLevel0Field != 0xFFFFFFFF &&
-        maxLevelField != 0xFFFFFFFF && baseLevelField != 0xFFFFFFFF &&
-        spellLevelField != 0xFFFFFFFF &&
+        maxLevelField != 0xFFFFFFFF && spellLevelField != 0xFFFFFFFF && spellSkill && spellDbc &&
         base0Field + 3 <= spellDbc->getFieldCount() &&
         perLevel0Field + 3 <= spellDbc->getFieldCount();
-    // basePoints + 1 + perLevel x (caster level, clamped to the spell's level
-    // range, minus SpellLevel); Spell_C_GetMinMaxPoints without modifiers.
     const auto minPoints = [&](uint32_t spellRow, uint32_t effect) {
-        int32_t level = static_cast<int32_t>(playerLevel);
+        int32_t skill = spellSkill(spellDbc->getUInt32(spellRow, 0));
         const int32_t maxLevel = spellDbc->getInt32(spellRow, maxLevelField);
-        const int32_t baseLevel = spellDbc->getInt32(spellRow, baseLevelField);
-        if (maxLevel > 0 && level > maxLevel) level = maxLevel;
-        else if (level < baseLevel) level = baseLevel;
-        level -= spellDbc->getInt32(spellRow, spellLevelField);
+        if (maxLevel > 0 && maxLevel * 5 <= skill) skill = maxLevel * 5;
+        int32_t level = skill / 5;
+        const int32_t spellLevel = spellDbc->getInt32(spellRow, spellLevelField);
+        if (spellLevel > 0) level -= spellLevel;
+        if (level < 0) level = 0;
         return spellDbc->getInt32(spellRow, base0Field + effect) + 1 +
                static_cast<int32_t>(spellDbc->getFloat(spellRow, perLevel0Field + effect) *
                                     static_cast<float>(level));
@@ -202,6 +198,12 @@ LockOpenPlan planGameObjectOpen(pipeline::AssetManager* assets,
     for (uint32_t row = 0; row < lockDbc->getRecordCount(); ++row) {
         if (lockDbc->getUInt32(row, 0) != lockId) continue;
 
+        plan.firstType = lockDbc->getUInt32(row, 1);
+        plan.firstIndex = lockDbc->getUInt32(row, 9);
+        {
+            const uint32_t s0 = lockDbc->getUInt32(row, 17);
+            plan.firstRequired = static_cast<int32_t>(s0 ? s0 : 5 * goLevel);
+        }
         for (uint32_t slot = 0; slot < 8; ++slot) {
             // Lock.dbc: Type[8] at cols 1-8, Index[8] at cols 9-16.
             constexpr uint32_t kLockKeyItem = 1;   // requires a key item
@@ -213,6 +215,7 @@ LockOpenPlan planGameObjectOpen(pipeline::AssetManager* assets,
             const uint32_t lockSkill = lockDbc->getUInt32(row, 17 + slot);
             const int32_t requiredPoints = static_cast<int32_t>(lockSkill ? lockSkill : 5 * goLevel);
 
+            if (keyType != 0) plan.locked = true;
             if (keyType == kLockKeyItem) {
                 plan.keyItemId = keyIndex; // remember the key so we can locate it
                 continue;
@@ -228,6 +231,7 @@ LockOpenPlan planGameObjectOpen(pipeline::AssetManager* assets,
                     constexpr uint32_t kSpellEffectOpenLock = 33;
                     if (spellDbc->getUInt32(spellRow, effect0Field + effect) == kSpellEffectOpenLock &&
                         spellDbc->getUInt32(spellRow, misc0Field + effect) == keyIndex) {
+                        plan.spellKnown = true;
                         if (checkPoints && minPoints(spellRow, effect) < requiredPoints) {
                             LOG_INFO("GO open-lock spell ", spellId, " too weak: points ",
                                      minPoints(spellRow, effect), " < ", requiredPoints,
@@ -236,6 +240,7 @@ LockOpenPlan planGameObjectOpen(pipeline::AssetManager* assets,
                         }
                         plan.method = LockOpenMethod::CastSpell;
                         plan.spellId = spellId;
+                        plan.locked = false;
                         return plan;
                     }
                 }
@@ -303,39 +308,21 @@ std::optional<bool> withinGameObjectReach(pipeline::AssetManager* assets,
     return true;
 }
 
-uint32_t gatherSpellForGameObject(const GameObjectQueryResponseData* info, const std::string& name) {
-    if (info && info->type != 3) return 0; // GAMEOBJECT_TYPE_CHEST
-
-    const std::string lower = lowerCopy(name);
-    static constexpr const char* kMiningTerms[] = {
-        "vein", "deposit", "mineral"
-    };
-    static constexpr const char* kHerbTerms[] = {
-        "peacebloom", "silverleaf", "earthroot", "mageroyal", "briarthorn",
-        "stranglekelp", "bruiseweed", "steelbloom", "grave moss", "kingsblood",
-        "liferoot", "fadeleaf", "goldthorn", "khadgar", "wintersbite",
-        "firebloom", "purple lotus", "arthas", "sungrass", "blindweed",
-        "ghost mushroom", "gromsblood", "dreamfoil", "silversage",
-        "plaguebloom", "icecap", "black lotus", "felweed", "dreaming glory",
-        "terocone", "ragveil", "ancient lichen", "netherbloom",
-        "nightmare vine", "mana thistle"
-    };
-
-    if (containsAnyTerm(lower, kMiningTerms, sizeof(kMiningTerms) / sizeof(kMiningTerms[0]))) return kMiningBaseSpellId;
-    if (containsAnyTerm(lower, kHerbTerms, sizeof(kHerbTerms) / sizeof(kHerbTerms[0]))) return kHerbBaseSpellId;
-    return 0;
-}
-
-uint32_t knownGatherRank(const SpellHandler* spellHandler, uint32_t baseSpellId) {
-    if (!spellHandler) return 0;
-
-    size_t count = 0;
-    const uint32_t* ranks = gatherRanksForBase(baseSpellId, count);
-    if (!ranks) return 0;
-
-    for (size_t i = count; i > 0; --i) {
-        const uint32_t spellId = ranks[i - 1];
-        if (spellHandler->hasKnownSpell(spellId)) return spellId;
+// Whether a chest is a herb or a mineral node: the LockType of its lock's
+// first skill slot, Herbalism (2) or Mining (3) - what its cursor and its
+// opening spell come from too (0x70F9B0). 0 for anything else.
+uint32_t gatherLockType(pipeline::AssetManager* assets, const GameObjectQueryResponseData* info) {
+    if (!info || info->type != 3 || !assets) return 0;
+    const uint32_t lockId = gameObjectLockId(info);
+    if (lockId == 0) return 0;
+    auto lock = assets->loadDBC("Lock.dbc");
+    if (!lock || !lock->isLoaded() || lock->getFieldCount() < 17) return 0;
+    const int32_t row = lock->findRecordById(lockId);
+    if (row < 0) return 0;
+    for (uint32_t slot = 0; slot < 8; ++slot) {
+        if (lock->getUInt32(static_cast<uint32_t>(row), 1 + slot) != 2) continue;
+        const uint32_t type = lock->getUInt32(static_cast<uint32_t>(row), 9 + slot);
+        if (type == 2 || type == 3) return type;
     }
     return 0;
 }
@@ -3136,30 +3123,49 @@ void GameHandler::rightClickCorpse(uint64_t guid, bool autoLootModifier) {
     }
 
     if (unit->getUnitFlags() & interaction::kUnitFlagSkinnable) {
-        // The skill the corpse is gathered with, by its creature type flags
-        // (0x715E50): herbs, ore (mining or engineering), else hide.
+        // 0x731260 / 0x53BCE0: the spell for the corpse is the player's
+        // SKINNING (95) spell whose misc value is the corpse's kind - 0 skin,
+        // 1 herbs (type flag 0x100), 2 ore (0x200), 3 machine parts (0x8000):
+        // Skinning, the creature Herb Gathering (32605), the creature Mining
+        // (32606), Engineering (49383). 0x542030 files each as it is learned.
+        // None known: nothing at all.
         uint32_t typeFlags = 0;
         const auto& cache = getCreatureInfoCache();
         if (auto it = cache.find(unit->getEntry()); it != cache.end()) typeFlags = it->second.typeFlags;
-        const uint32_t* ranks = kSkinningRanks;
-        size_t count = sizeof(kSkinningRanks) / sizeof(kSkinningRanks[0]);
-        const char* skillName = "Skinning";
-        if (typeFlags & 0x100) {
-            ranks = kHerbRanks; count = kHerbRankCount; skillName = "Herbalism";
-        } else if (typeFlags & (0x200 | 0x8000)) {
-            ranks = kMiningRanks; count = kMiningRankCount; skillName = "Mining";
-        }
+        const int32_t kind = (typeFlags & 0x100) ? 1 : (typeFlags & 0x200) ? 2 : (typeFlags & 0x8000) ? 3 : 0;
+        loadSpellNameCache();
         uint32_t spellId = 0;
-        const auto& known = getKnownSpells();
-        for (size_t i = count; i > 0 && spellId == 0; --i) {
-            if (known.count(ranks[i - 1])) spellId = ranks[i - 1];
+        for (uint32_t known : getKnownSpells()) {
+            auto se = spellNameCache_.find(known);
+            if (se == spellNameCache_.end()) continue;
+            if (se->second.effectIds[0] != 95 || se->second.effectMiscValues[0] != kind) continue;
+            if (known > spellId) spellId = known;
         }
-        if (spellId == 0) {
-            addUIError(std::string("Requires ") + skillName);
-            return;
+        if (spellId == 0) return;
+        // The points of its SKINNING effect against the corpse's level: base
+        // points + 1 + 5 per five points of the spell's skill (0x7FF770 with
+        // the level 0x6DC330 gives; every SKINNING spell has 5 per level), and
+        // the required value 1 under level 11, 10 x (level - 10) under 20,
+        // 5 x level from there. Short: ERR_USE_LOCKED_WITH_SPELL_KNOWN_SI.
+        {
+            const auto& se = spellNameCache_.at(spellId);
+            int skill = 0;
+            loadSkillLineAbilityDbc();
+            if (auto line = spellToSkillLine_.find(spellId); line != spellToSkillLine_.end())
+                if (auto sk = getPlayerSkills().find(line->second); sk != getPlayerSkills().end())
+                    skill = static_cast<int>(sk->second.effectiveValue());
+            const int points = se.effectBasePoints[0] + 1 + 5 * (skill / 5);
+            const int level = static_cast<int>(unit->getLevel());
+            const int required = level < 11 ? 1 : level < 20 ? 10 * (level - 10) : 5 * level;
+            if (points < required) {
+                const std::string req = std::to_string(required);
+                displayGameMessage("ERR_USE_LOCKED_WITH_SPELL_KNOWN_SI",
+                                   "Requires " + se.name + " " + req, {se.name, req});
+                return;
+            }
         }
-        // The cast's own range and skill checks decide the rest; the stock
-        // client casts it from wherever the player stands (0x6D6F40).
+        // The cast's own range check decides the rest; the stock client casts
+        // it from wherever the player stands (0x6D6F40).
         if (inventoryHandler_) inventoryHandler_->latchAutoLoot(autoLoot);
         castSpell(spellId, guid);
     }
@@ -3232,7 +3238,7 @@ bool GameHandler::isGatherGameObject(uint64_t guid) const {
 
     auto go = std::static_pointer_cast<GameObject>(entity);
     const GameObjectQueryResponseData* goInfo = getCachedGameObjectInfo(go->getEntry());
-    return gatherSpellForGameObject(goInfo, go->getName()) != 0;
+    return gatherLockType(services_.assetManager, goInfo) != 0;
 }
 
 void GameHandler::despawnCreatureLocally(uint64_t guid) {
@@ -3668,7 +3674,21 @@ void GameHandler::interactWithGameObject(uint64_t guid) {
     // Do not overlap an actual spell cast. Reeling an owned fishing bobber is
     // the deliberate exception: the fishing spell remains channelled while the
     // bobber is in the water, and using the hooked bobber is what ends it.
-    const bool reelingHookedFishingBobber = guid == hookedFishingBobberGuid_;
+    // The stock rule (0x712030): the player's own bobber - a FISHINGNODE
+    // they created - is usable for as long as it floats, bitten or not, with
+    // a 100-yard reach. Too early, the server answers SMSG_FISH_NOT_HOOKED.
+    bool ownFishingBobber = guid == hookedFishingBobberGuid_;
+    if (!ownFishingBobber && entityController_) {
+        if (auto e = entityController_->getEntityManager().getEntity(guid);
+            e && e->getType() == ObjectType::GAMEOBJECT) {
+            auto go = std::static_pointer_cast<GameObject>(e);
+            const uint64_t createdBy = static_cast<uint64_t>(go->getField(6)) |
+                                       (static_cast<uint64_t>(go->getField(7)) << 32);
+            const auto* info = getCachedGameObjectInfo(go->getEntry());
+            ownFishingBobber = createdBy == playerGuid && info && info->type == 17;
+        }
+    }
+    const bool reelingHookedFishingBobber = ownFishingBobber;
     if (!reelingHookedFishingBobber && spellHandler_ && spellHandler_->isCasting() &&
         spellHandler_->getCurrentCastSpellId() != 0) {
         LOG_DEBUG("[GO-DIAG] BLOCKED: already casting spellId=", spellHandler_->getCurrentCastSpellId());
@@ -3814,12 +3834,17 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
         // Only the owned bobber whose bite we observed gets the extended range.
         // Anything else is measured against its display box when there is one,
         // and against a 10-yard sphere when there is not.
-        const std::optional<bool> inReach = guid == hookedFishingBobberGuid_
-            ? std::nullopt
+        // The player's own bobber (FISHINGNODE they created): 100 yards
+        // (0x712700), bitten or not.
+        const bool ownBobber = guid == hookedFishingBobberGuid_ ||
+            (goInfo && goInfo->type == 17 &&
+             (static_cast<uint64_t>(entity->getField(6)) |
+              (static_cast<uint64_t>(entity->getField(7)) << 32)) == playerGuid);
+        const std::optional<bool> inReach = ownBobber
+            ? std::optional<bool>(dist3d <= 100.0f)
             : withinGameObjectReach(services_.assetManager, goInfo, *entity,
                                     glm::vec3(movementInfo.x, movementInfo.y, movementInfo.z));
-        const float maxInteractDistance = (guid == hookedFishingBobberGuid_)
-            ? 30.0f : interaction::gameObjectUseRange(goType) + 5.0f;
+        const float maxInteractDistance = interaction::gameObjectUseRange(goType) + 5.0f;
         if (inReach ? !*inReach : dist3d > maxInteractDistance) {
             raiseGameError("ERR_USE_TOO_FAR", "You are too far away.");
             return;
@@ -3879,32 +3904,6 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
         }
     };
 
-    const uint32_t gatherBaseSpellId = gatherSpellForGameObject(goInfo, goName);
-    if (gatherBaseSpellId != 0) {
-        const uint32_t gatherSpellId = knownGatherRank(spellHandler_.get(), gatherBaseSpellId);
-        if (gatherSpellId == 0) {
-            // ERR_USE_LOCKED_WITH_SPELL_S naming the lock's skill, the red
-            // error (Wow.exe 0x7116C0, lock type 2 with the skill unknown).
-            {
-                const std::string skill = gatherBaseSpellId == kMiningBaseSpellId ? "Mining" : "Herbalism";
-                displayGameMessage("ERR_USE_LOCKED_WITH_SPELL_S", "Requires " + skill, {skill});
-            }
-            LOG_INFO("GO gather skipped: no known rank for base spell=", gatherBaseSpellId,
-                     " guid=0x", std::hex, guid, std::dec, " name='", goName, "'");
-            return;
-        }
-        auto castPacket = getPacketParsers()
-            ? getPacketParsers()->buildCastGameObjectSpell(gatherSpellId, guid, 0)
-            : CastSpellPacket::buildGameObjectTarget(gatherSpellId, guid, 0);
-        socket->send(castPacket);
-        lastInteractedGoGuid_ = guid;
-        scheduleGameObjectLootOpen(guid, 0.50f, 8);
-        sendReportUse();
-        LOG_INFO("GO gather cast: spell=", gatherSpellId, " guid=0x",
-                 std::hex, guid, std::dec, " name='", goName, "'");
-        return;
-    }
-
     if (gameObjectLockId(goInfo) != 0) {
         // A locked object is opened by casting an OPEN_LOCK spell at it (a known
         // Pick Lock, or the generic Opening), on every expansion; the server then
@@ -3913,9 +3912,18 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
         const uint16_t goLevelField = fieldIndex(UF::GAMEOBJECT_LEVEL);
         const uint32_t goLevel = (entity && goLevelField != 0xFFFF)
             ? entity->getField(goLevelField) : 0;
+        // The skill a spell's points come from (0x6DC330): its line's whole
+        // value, temporary and permanent bonus included.
+        const auto spellSkill = [this](uint32_t spellId) -> int {
+            loadSkillLineAbilityDbc();
+            auto line = spellToSkillLine_.find(spellId);
+            if (line == spellToSkillLine_.end()) return 0;
+            auto sk = getPlayerSkills().find(line->second);
+            return sk == getPlayerSkills().end() ? 0 : static_cast<int>(sk->second.effectiveValue());
+        };
         const LockOpenPlan plan = planGameObjectOpen(
             services_.assetManager, goInfo, spellHandler_->getKnownSpells(),
-            getPlayerLevel(), goLevel);
+            spellSkill, goLevel);
         if (plan.method == LockOpenMethod::CastSpell) {
             auto castPacket = getPacketParsers()->buildCastGameObjectSpell(
                 plan.spellId, guid, 0);
@@ -3976,6 +3984,39 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
                          " spell=", keyUseSpell, " keySlot(bag=", (int)keyBag,
                          " slot=", (int)keySlot, ") guid=0x", std::hex, guid, std::dec,
                          " entry=", goEntry, " name='", goName, "'");
+                return;
+            }
+        }
+        // 0x7116C0 when nothing opens it: the refusal named by the lock's first
+        // slot, and nothing sent - a herb is not "used" by someone who cannot
+        // gather it.
+        if (plan.locked && !(plan.keyItemId != 0 && getInventory().countItem(plan.keyItemId) > 0)) {
+            std::string lockName;
+            if (auto* am = services_.assetManager; am && plan.firstType == 2) {
+                if (auto lt = am->loadDBC("LockType.dbc"); lt && lt->isLoaded()) {
+                    const int32_t r = lt->findRecordById(plan.firstIndex);
+                    if (r >= 0) lockName = lt->getString(static_cast<uint32_t>(r), 1);
+                }
+            }
+            if (lockName.empty()) lockName = "UNKNOWN";
+            if (plan.firstType == 1) {
+                ensureItemInfo(plan.firstIndex);
+                const auto* key = getItemInfo(plan.firstIndex);
+                const std::string keyName = key && key->valid ? key->name : std::string{};
+                displayGameMessage("ERR_USE_LOCKED_WITH_ITEM_S", "Requires " + keyName, {keyName});
+            } else if (plan.firstType == 2 && plan.spellKnown) {
+                const std::string req = std::to_string(plan.firstRequired);
+                displayGameMessage("ERR_USE_LOCKED_WITH_SPELL_KNOWN_SI",
+                                   "Requires " + lockName + " " + req, {lockName, req});
+            } else if (plan.firstType == 2) {
+                displayGameMessage("ERR_USE_LOCKED_WITH_SPELL_S", "Requires " + lockName, {lockName});
+            } else if (plan.firstType != 3) {
+                displayGameMessage("ERR_USE_CANT_OPEN", "Can't open that.", {});
+            }
+            if (plan.firstType != 3) {
+                LOG_INFO("GO locked: lockId=", gameObjectLockId(goInfo), " type=", plan.firstType,
+                         " index=", plan.firstIndex, " required=", plan.firstRequired,
+                         " spellKnown=", plan.spellKnown, " name='", goName, "'");
                 return;
             }
         }

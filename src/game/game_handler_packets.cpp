@@ -1214,13 +1214,12 @@ void GameHandler::registerCoreOpcodes() {
             }
         }
         // The payload is a custom animation index, which the game plays as
-        // Custom0 + n (AnimationData 153-156). It was passed as a raw M2
-        // animation id, so index 0 asked for Stand and 1-3 for Death/Spell/
-        // Stop. An out-of-range index (the bobber's anim progress, 100, from
-        // other players' fishing) is taken as Custom0, which is that splash.
-        if (!ownedFishingBite && gameObjectCustomAnimCallback_) {
+        // Custom0 + n (AnimationData 153-156) - only for n < 4 (0x70BE90);
+        // anything else plays nothing. AzerothCore's bobber bite sends its
+        // anim progress, 0, so another player's bobber splashes as Custom0.
+        if (!ownedFishingBite && gameObjectCustomAnimCallback_ && animId < 4) {
             constexpr uint32_t kAnimCustom0 = 153;   // rendering::anim::CUSTOM_0
-            gameObjectCustomAnimCallback_(guid, kAnimCustom0 + (animId < 4 ? animId : 0));
+            gameObjectCustomAnimCallback_(guid, kAnimCustom0 + animId);
         }
     };
 
@@ -1293,18 +1292,17 @@ void GameHandler::registerCoreOpcodes() {
     dispatchTable_[Opcode::SMSG_ALL_ACHIEVEMENT_DATA] = [this](network::Packet& packet) {
         handleAllAchievementData(packet);
     };
-    // Both are errors rather than remarks, and the real client shows them on
-    // the error line rather than in the chat log - ERR_FISH_NOT_HOOKED and
-    // ERR_FISH_ESCAPED are globalstrings. raiseUiError puts them there, fires
-    // UI_ERROR_MESSAGE so the interface's own error frame draws them, and
-    // keeps the chat line this client has always written.
+    // 0x6E2E90 cases 0x1C8 / 0x1C9: DisplayError 0x151 ERR_FISH_NOT_HOOKED
+    // ("No fish are hooked.") and 0x152 ERR_FISH_ESCAPED ("Your fish got
+    // away!") - both kind 1 in the GameError table, the yellow info line,
+    // not the red error and not chat.
     dispatchTable_[Opcode::SMSG_FISH_NOT_HOOKED] = [this](network::Packet& /*packet*/) {
         hookedFishingBobberGuid_ = 0;
-        raiseUiError("Your fish got away.");
+        displayGameMessage("ERR_FISH_NOT_HOOKED", "No fish are hooked.", {});
     };
     dispatchTable_[Opcode::SMSG_FISH_ESCAPED] = [this](network::Packet& /*packet*/) {
         hookedFishingBobberGuid_ = 0;
-        raiseUiError("Your fish escaped!");
+        displayGameMessage("ERR_FISH_ESCAPED", "Your fish got away!", {});
     };
 
     // ---- Auto-repeat / auras / dispel / totem ----

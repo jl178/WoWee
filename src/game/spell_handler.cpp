@@ -36,6 +36,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 #include <sstream>
 
 namespace wowee {
@@ -1061,11 +1062,9 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     // window client-side instead of being sent as casts - matching the real
     // client, where these spells just open the tradeskill UI.
     if (uint32_t craftSkillLine = tradeskillOpenerSkillLine(spellId)) {
-        // At warning, with the three refusals above it, so one press says which
-        // of the four things happened.
-        LOG_WARNING("Profession: spell ", spellId, " (", owner_.getSpellName(spellId),
-                    ") opens the trade skill window for skill line ", craftSkillLine);
-        openCraftingWindow(craftSkillLine);
+        LOG_INFO("Profession: spell ", spellId, " (", owner_.getSpellName(spellId),
+                 ") opens the trade skill window for skill line ", craftSkillLine);
+        openCraftingWindow(spellId, craftSkillLine);
         return;
     }
 
@@ -1422,6 +1421,9 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     owner_.getSocket()->send(packet);
     pendingCasts_.add({castCount_, spellId});
     LOG_INFO("Casting spell: ", spellId, " on 0x", std::hex, target, std::dec);
+    // 0x80AC90 -> 0x805330 -> 0x5DA0F0: a DoTradeSkill run asked for this
+    // spell starts counting now.
+    tradeSkill_.onCastStart(static_cast<int32_t>(spellId));
 
     // Auto Shot and the wand's Shoot keep going once started, and the action
     // button flashes for as long as they do. Only once the cast is sent: a
@@ -1601,6 +1603,8 @@ bool SpellHandler::showCastFailure(uint32_t spellId, uint8_t result, uint32_t mi
     // last refusal shows nothing, from the client's own checks and the
     // server's alike. That is the whole of the stock client's answer to a
     // mashed key - the text and its voice then come once per burst.
+    // 0x808229 -> 0x5DA020, before the throttle: a refused craft ends its run.
+    if (tradeSkill_.onCastFailed(static_cast<int32_t>(spellId))) fireTradeSkillRecast();
     if (!castErrorThrottle_.shouldShow(spellId, result, steadyNowMs())) return false;
     // Totem failures name tool item ids; request their info so a retry of the
     // craft can show the tool's name even if it wasn't cached yet.
@@ -1884,8 +1888,6 @@ void SpellHandler::clearPlayerCastState() {
     castIsChannel_ = false;
     currentCastSpellId_ = 0;
     castTimeRemaining_ = 0.0f;
-    craftQueueSpellId_ = 0;
-    craftQueueRemaining_ = 0;
     queuedSpellId_ = 0;
     queuedSpellTarget_ = 0;
     // The build-up in the player's hands (only theirs: other casters keep
@@ -1963,6 +1965,9 @@ void SpellHandler::cancelPendingCast(stock_cast::CastRef cast, uint8_t result) {
         auto packet = CancelCastPacket::build(cast.spellId, cast.castCount);
         owner_.getSocket()->send(packet);
     }
+    // 0x806200 -> 0x5D9FF0: a cancelled cast (a move, SpellStopCasting)
+    // ends a DoTradeSkill run.
+    if (tradeSkill_.stopRepeat()) fireTradeSkillRecast();
     endPlayerCast(cast, result);
 }
 
@@ -2037,18 +2042,24 @@ void SpellHandler::startCraftQueue(uint32_t spellId, int count) {
         owner_.addUIError("You can't do that while flying.");
         return;
     }
-    craftQueueSpellId_ = spellId;
-    craftQueueRemaining_ = count;
-    // castSpell has several silent refusals - already casting, a cast-time
-    // spell while moving, a mount - and each of them leaves the queue set with
-    // nothing sent, which reads as the Create button doing nothing.
-    LOG_WARNING("Craft: queued spell ", spellId, " x", count, ", casting now");
-    castSpell(spellId, 0);
+    // 0x5DAC00: a run already going for this recipe takes the new count and
+    // no second cast; anything else is cast and waits for its start. The
+    // request goes in first so a refusal of the cast (showCastFailure ->
+    // 0x5DA020) takes it out again, as the stock client never records it.
+    const int32_t spell = static_cast<int32_t>(spellId);
+    const bool running = tradeSkill_.repeatSpell == spell;
+    tradeSkill_.requestRepeat(spell, count);
+    LOG_INFO("Craft: spell ", spellId, " x", count, running ? " (running)" : ", casting now");
+    if (!running) castSpell(spellId, 0);
+    fireTradeSkillRecast();
 }
 
 void SpellHandler::cancelCraftQueue() {
-    craftQueueSpellId_ = 0;
-    craftQueueRemaining_ = 0;
+    if (tradeSkill_.stopRepeat()) fireTradeSkillRecast();
+}
+
+void SpellHandler::fireTradeSkillRecast() {
+    owner_.fireAddonEvent("UPDATE_TRADESKILL_RECAST", {});
 }
 
 void SpellHandler::cancelAura(uint32_t spellId) {
@@ -2265,16 +2276,58 @@ void SpellHandler::learnPreviewTalents(const std::vector<std::pair<uint32_t, uin
     }
 }
 
-void SpellHandler::openCraftingWindow(uint32_t skillLine) {
-    craftingWindowOpen_ = true;
-    craftingSkillLine_ = skillLine;
-    owner_.fireAddonEvent("TRADE_SKILL_SHOW", {});
+void SpellHandler::openCraftingWindow(uint32_t openerSpell, uint32_t skillLine) {
+    // 0x5DE120 with no link: any run stops; the same line, already open and
+    // not someone else's, closes instead (pressing the profession again).
+    if (tradeSkill_.stopRepeat()) fireTradeSkillRecast();
+    if (!tradeSkill_.linked && tradeSkill_.skillLine == skillLine && skillLine != 0) {
+        closeCraftingWindow();
+        return;
+    }
+    tradeSkill_.linked = false;
+    tradeSkill_.linkedGuid = 0;
+    tradeSkill_.linkData.clear();
+    tradeSkill_.beginOpen(openerSpell, skillLine);
+    rebuildTradeSkill();
+    tradeSkill_.finishOpen();
+    // TRADE_SKILL_SHOW only with something in the list (0x5DE2D8 tests the
+    // row count); the window state is open either way.
+    if (!tradeSkill_.rows().empty()) owner_.fireAddonEvent("TRADE_SKILL_SHOW", {});
+}
+
+bool SpellHandler::openLinkedTradeSkill(const std::string& link) {
+    stock_trade_skill::TradeLink tl;
+    if (!stock_trade_skill::parseTradeLink(link, tl)) return false;
+    owner_.loadSpellNameCache();
+    owner_.loadSkillLineAbilityDbc();
+    auto slIt = owner_.spellToSkillLineRef().find(tl.spellId);
+    if (slIt == owner_.spellToSkillLineRef().end()) return false;
+    const uint32_t line = slIt->second;
+    // The link must carry one bit per ability row of the line (0x5DE120).
+    const auto* abilities = tradeSkillAbilityRows(line);
+    if (!abilities || stock_trade_skill::tradeLinkDataLength(abilities->size()) != tl.data.size())
+        return false;
+    if (tradeSkill_.stopRepeat()) fireTradeSkillRecast();
+    tradeSkill_.linked = true;
+    tradeSkill_.linkedGuid = tl.guid;
+    tradeSkill_.linkRank = tl.rank;
+    tradeSkill_.linkMaxRank = tl.maxRank;
+    tradeSkill_.linkData = tl.data;
+    tradeSkill_.beginOpen(tl.spellId, line);
+    rebuildTradeSkill();
+    tradeSkill_.finishOpen();
+    if (!tradeSkill_.rows().empty()) owner_.fireAddonEvent("TRADE_SKILL_SHOW", {});
+    return true;
 }
 
 void SpellHandler::closeCraftingWindow() {
-    if (!craftingWindowOpen_) return;
-    craftingWindowOpen_ = false;
-    owner_.fireAddonEvent("TRADE_SKILL_CLOSE", {});
+    // CloseTradeSkill (0x5DA8B0): no test of whether it was open - the stock
+    // panel calls this from its OnHide and the event goes out regardless.
+    const bool wasOpen = tradeSkill_.isOpen();
+    tradeSkill_.close();
+    tradeSkill_.linked = false;
+    if (tradeSkill_.stopRepeat()) fireTradeSkillRecast();
+    if (wasOpen) owner_.fireAddonEvent("TRADE_SKILL_CLOSE", {});
 }
 
 void SpellHandler::switchTalentSpec(uint8_t newSpec) {
@@ -3067,9 +3120,9 @@ void SpellHandler::handleInitialSpells(network::Packet& packet) {
 
     if (owner_.addonEventCallbackRef()) {
         owner_.addonEventCallbackRef()("SPELLS_CHANGED", {});
-        // A crafting window's recipes are the spells that just changed, and
-        // it refreshes on its own event rather than on that one.
-        if (craftingWindowOpen_) owner_.addonEventCallbackRef()("TRADE_SKILL_UPDATE", {});
+        // A crafting window's recipes are the spells that just changed
+        // (0x6E7B00 rebuilds the line's list on every trade spell learned).
+        rebuildTradeSkill();
     }
 }
 
@@ -3178,8 +3231,6 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
     if (!casting_) {
         owner_.lastInteractedGoGuidRef() = 0;
         owner_.pendingGameObjectInteractGuidRef() = 0;
-        craftQueueSpellId_ = 0;
-        craftQueueRemaining_ = 0;
         queuedSpellId_ = 0;
         queuedSpellTarget_ = 0;
     }
@@ -3527,21 +3578,14 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
         // with 187: the event, then STOP when the bar showed this cast).
         stopBarAfterSucceeded = wasInTimedCast && !rangedWeaponAttack && !triggeredMidCast;
 
-        // Craft queue: re-cast if more crafts remaining
-        if (craftQueueRemaining_ > 0 && craftQueueSpellId_ == data.spellId) {
-            --craftQueueRemaining_;
-            if (craftQueueRemaining_ > 0) {
-                LOG_INFO("Craft queue: re-casting spell=", craftQueueSpellId_,
-                         " remaining=", craftQueueRemaining_);
-                castSpell(craftQueueSpellId_, 0);
-            } else {
-                craftQueueSpellId_ = 0;
-            }
-            // The count changed, and the trade skill frame only reads it when
-            // told to: UPDATE_TRADESKILL_RECAST is what makes its quantity box
-            // count down instead of sitting at the number first asked for.
-            if (owner_.addonEventCallbackRef())
-                owner_.addonEventCallbackRef()("UPDATE_TRADESKILL_RECAST", {});
+        // DoTradeSkill's run (0x5DA070 from the go, 0x80F61F): one less, and
+        // the next cast at once; the last one ends it without the event.
+        const auto craftGo = tradeSkill_.onCastGo(static_cast<int32_t>(data.spellId));
+        if (craftGo == stock_trade_skill::Model::GoResult::Cleared) fireTradeSkillRecast();
+        if (craftGo == stock_trade_skill::Model::GoResult::CastAgain) {
+            LOG_INFO("Craft: next of spell ", data.spellId, ", ", tradeSkill_.repeatLeft, " left");
+            castSpell(data.spellId, 0);
+            fireTradeSkillRecast();
         }
         // Spell queue: fire the next queued spell
         else if (queuedSpellId_ != 0) {
@@ -4010,10 +4054,9 @@ void SpellHandler::handleLearnedSpell(network::Packet& packet) {
         // spell can add to it. petpaperdollframe refreshes on this and on
         // nothing else, which is why the tab stayed as it was first drawn.
         owner_.addonEventCallbackRef()("COMPANION_LEARNED", {});
-        // A crafting window's recipes are the spells that just changed, and
-        // it refreshes on its own event rather than on that one.
-        if (craftingWindowOpen_) owner_.addonEventCallbackRef()("TRADE_SKILL_UPDATE", {});
     }
+    // 0x6E7B00: a trade spell joins its line's list, rebuilt at once.
+    rebuildTradeSkill();
 
     // As Wow.exe says it (0x542030, from the SMSG_LEARNED_SPELL handler
     // 0x6E7D60), by Spell.dbc Attributes: nothing for a hidden spell (0x80),
@@ -4063,10 +4106,9 @@ void SpellHandler::handleRemovedSpell(network::Packet& packet) {
         // spell can take one off it, and the pet tab refreshes on this and on
         // nothing else.
         owner_.addonEventCallbackRef()("COMPANION_UNLEARNED", {});
-        // A crafting window's recipes are the spells that just changed, and
-        // it refreshes on its own event rather than on that one.
-        if (craftingWindowOpen_) owner_.addonEventCallbackRef()("TRADE_SKILL_UPDATE", {});
     }
+    // 0x6E71D0: the unlearned trade spell leaves its list, rebuilt at once.
+    rebuildTradeSkill();
 
     // Learning a new talent rank legitimately removes/replaces its internal
     // talent spell. That is rank bookkeeping, not the player unlearning the
@@ -4668,8 +4710,6 @@ void SpellHandler::resetCastState() {
     castTimeRemaining_ = 0.0f;
     castTimeTotal_ = 0.0f;  // Must match castTimeRemaining_ to keep getCastProgress() == 0
     nextSwingSpellId_ = 0;
-    craftQueueSpellId_ = 0;
-    craftQueueRemaining_ = 0;
     queuedSpellId_ = 0;
     queuedSpellTarget_ = 0;
     owner_.pendingGameObjectInteractGuidRef() = 0;
@@ -4682,6 +4722,9 @@ void SpellHandler::resetCastState() {
 }
 
 void SpellHandler::resetAllState() {
+    // Leaving the world closes the trade skill window (0x528F00 -> 0x5DA5A0).
+    closeCraftingWindow();
+    tradeSkill_ = stock_trade_skill::Model{};
     pendingCasts_.clear();
     autoRepeatSpellId_ = 0;
     knownSpells_.clear();
@@ -5208,94 +5251,23 @@ uint32_t SpellHandler::tradeskillOpenerSkillLine(uint32_t spellId) {
     owner_.loadSpellNameCache();
     owner_.loadSkillLineDbc();
     owner_.loadSkillLineAbilityDbc();
-
-    // SkillLine.dbc categories that hold crafting recipes
-    static constexpr uint32_t CAT_SECONDARY  = 9;   // Cooking, First Aid, Fishing
-    static constexpr uint32_t CAT_PROFESSION = 11;  // Alchemy, Blacksmithing, ...
-    // What "this spell opens the trade skill window" is actually written as.
+    // 0x80CCE0: a spell whose first effect is TRADE_SKILL (47) opens the
+    // window for the line its SkillLineAbility row names (0x5DA5F0), and is
+    // not sent to the server. Nothing else does - Fishing's first effect is
+    // 50 and it is cast. The window opens with no recipes too; it is
+    // TRADE_SKILL_SHOW that needs one.
     static constexpr uint32_t SPELL_EFFECT_TRADE_SKILL = 47;
-
-    // Silent until now, and this chain has four ways to answer no that look
-    // identical from outside the client: the profession spell is cast, nothing
-    // opens, nothing is said. It was reported that way for First Aid. The one
-    // line it did have was at info, and the log a bug report arrives with is
-    // warnings only - so the report came back with no line about it at all.
-    //
-    // Only for a spell that reached a profession skill line, which is a
-    // handful of casts rather than every one.
-    auto slIt = owner_.spellToSkillLineRef().find(spellId);
-    if (slIt == owner_.spellToSkillLineRef().end()) return 0;
-    const uint32_t skillLine = slIt->second;
-
-    auto catIt = owner_.skillLineCategoriesRef().find(skillLine);
-    if (catIt == owner_.skillLineCategoriesRef().end()) {
-        LOG_WARNING("Profession: spell ", spellId, " (", owner_.getSpellName(spellId),
-                    ") is in skill line ", skillLine,
-                    ", which SkillLine.dbc has no category for - not opening a window");
-        return 0;
-    }
-    if (catIt->second != CAT_SECONDARY && catIt->second != CAT_PROFESSION) return 0;
-
-    // Spell.dbc says which spells open this window: effect 47, on eighty-one of
-    // them, and on nothing else. That is the answer rather than a sign of it.
-    //
-    // The heuristic below it - the opener is named after its skill line - was
-    // what decided this before, and it is right for Cooking and wrong for
-    // everything whose window is not named after its skill: Smelting opens
-    // Mining, and Weaponsmith, Gnomish Engineer, Shadoweave Tailoring and the
-    // rest of the specialisations open their parent's. Smelting was carried by
-    // a hardcoded 2656 and the others were simply missing.
-    //
-    // The name test is kept as the second answer rather than replaced by the
-    // first. A private server's Spell.dbc is edited, and a profession whose
-    // opener has lost its effect there would otherwise stop opening - where
-    // before this change it worked, because its name still matched.
-    bool opensWindow = false;
     auto cacheIt = owner_.spellNameCacheRef().find(spellId);
-    if (cacheIt != owner_.spellNameCacheRef().end()) {
-        for (uint32_t effect : cacheIt->second.effectIds) {
-            if (effect == SPELL_EFFECT_TRADE_SKILL) { opensWindow = true; break; }
-        }
-    }
-    if (!opensWindow) {
-        const std::string& spellName = owner_.getSpellName(spellId);
-        auto nameIt = owner_.skillLineNamesRef().find(skillLine);
-        opensWindow = !spellName.empty() &&
-                      nameIt != owner_.skillLineNamesRef().end() &&
-                      spellName == nameIt->second;
-    }
-    if (!opensWindow) {
+    if (cacheIt == owner_.spellNameCacheRef().end() ||
+        cacheIt->second.effectIds[0] != SPELL_EFFECT_TRADE_SKILL)
+        return 0;
+    auto slIt = owner_.spellToSkillLineRef().find(spellId);
+    if (slIt == owner_.spellToSkillLineRef().end()) {
         LOG_WARNING("Profession: spell ", spellId, " (", owner_.getSpellName(spellId),
-                    ") is in skill line ", skillLine,
-                    " but has no trade-skill effect and is not named after the line - "
-                    "casting it normally");
+                    ") opens a trade skill but no SkillLineAbility row names its line");
         return 0;
     }
-
-    // Only open a window that will actually list something: require at least
-    // one known recipe (creates an item or consumes reagents) in this line.
-    // This keeps Fishing falling through to a normal bobber cast.
-    for (uint32_t known : knownSpells_) {
-        if (known == spellId) continue;
-        auto kslIt = owner_.spellToSkillLineRef().find(known);
-        if (kslIt == owner_.spellToSkillLineRef().end() || kslIt->second != skillLine) continue;
-        auto cacheIt = owner_.spellNameCacheRef().find(known);
-        if (cacheIt == owner_.spellNameCacheRef().end()) continue;
-        const auto& entry = cacheIt->second;
-        bool hasReagents = false;
-        for (const auto& reagent : entry.reagents) {
-            if (reagent.itemId != 0) { hasReagents = true; break; }
-        }
-        if (entry.createdItemId != 0 || hasReagents) return skillLine;
-    }
-    // An opener with nothing behind it. Fishing reaches here every cast and is
-    // meant to; a profession reaching it means the recipes are missing, which
-    // is not the same fault and cannot be told apart from outside.
-    LOG_WARNING("Profession: spell ", spellId, " (", owner_.getSpellName(spellId),
-                ") opens skill line ", skillLine,
-                " but no known spell in that line creates an item or takes "
-                "reagents - not opening an empty window");
-    return 0;
+    return slIt->second;
 }
 
 // Trainer spell categorisation lives in InventoryHandler::categorizeTrainerSpells,
@@ -5664,8 +5636,11 @@ void SpellHandler::extractSkillFields(const FlatFieldMap& fields) {
         }
     }
     owner_.playerSkillsRef() = std::move(newSkills);
-    if (skillsChanged)
+    if (skillsChanged) {
         owner_.fireAddonEvent("SKILL_LINES_CHANGED", {});
+        // 0x6DA4A0: a rank moving recolours the open list.
+        rebuildTradeSkill();
+    }
 }
 
 void SpellHandler::extractExploredZoneFields(const FlatFieldMap& fields) {
@@ -5720,7 +5695,6 @@ void SpellHandler::handleCastResult(network::Packet& packet) {
             casting_ = false; castIsChannel_ = false; currentCastSpellId_ = 0; castTimeRemaining_ = 0.0f;
             owner_.lastInteractedGoGuidRef() = 0;
             owner_.pendingGameObjectInteractGuidRef() = 0;
-            craftQueueSpellId_ = 0; craftQueueRemaining_ = 0;
             queuedSpellId_ = 0; queuedSpellTarget_ = 0;
             int playerPowerType = -1;
             if (auto pe = owner_.getEntityManager().getEntity(owner_.getPlayerGuid())) {
@@ -6958,6 +6932,373 @@ void SpellHandler::unstablePet(uint32_t petNumber) {
     auto pkt = UnstablePetPacket::build(owner_.stableMasterGuidRef(), petNumber);
     owner_.getSocket()->send(pkt);
     LOG_INFO("Sent CMSG_UNSTABLE_PET: petNumber=", petNumber);
+}
+
+// ============================================================
+// Trade skill window (Wow.exe TradeSkillFrame.cpp; stock_trade_skill.hpp)
+// ============================================================
+
+const SpellHandler::TradeSpellColumns* SpellHandler::tradeSpellColumns(uint32_t spellId) {
+    if (!tradeSpellColumnsLoaded_) {
+        auto* am = owner_.services().assetManager;
+        if (!am || !am->isInitialized()) return nullptr;
+        tradeSpellColumnsLoaded_ = true;
+        auto dbc = am->loadDBC("Spell.dbc");
+        // The 3.3.5a record (234 columns): RequiresSpellFocus 18, Totem 50-51,
+        // EquippedItemClass 68, its SubClassMask 69 and InventoryTypeMask 70,
+        // Effect 71-73, EffectDieSides 74-76, EffectBasePoints 80-82,
+        // EffectItemType 107-109, TotemCategory 222-223, AreaGroupId 224.
+        if (!dbc || !dbc->isLoaded() || dbc->getFieldCount() != 234) return nullptr;
+        for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+            const uint32_t attr = dbc->getUInt32(r, 4);
+            const uint32_t e0 = dbc->getUInt32(r, 71);
+            // Only what a trade skill list can hold or open: recipes and openers.
+            if (!(attr & stock_trade_skill::kAttrTradeSpell) && e0 != 47) continue;
+            TradeSpellColumns c;
+            c.attributes = attr;
+            for (int e = 0; e < 3; ++e) {
+                c.effect[e] = dbc->getUInt32(r, 71 + e);
+                c.dieSides[e] = static_cast<int32_t>(dbc->getUInt32(r, 74 + e));
+                c.basePoints[e] = static_cast<int32_t>(dbc->getUInt32(r, 80 + e));
+                c.itemType[e] = dbc->getUInt32(r, 107 + e);
+            }
+            c.equippedItemClass = static_cast<int32_t>(dbc->getUInt32(r, 68));
+            c.equippedItemSubClassMask = dbc->getUInt32(r, 69);
+            c.equippedItemInvTypeMask = dbc->getUInt32(r, 70);
+            c.requiresSpellFocus = dbc->getUInt32(r, 18);
+            c.totem[0] = dbc->getUInt32(r, 50);
+            c.totem[1] = dbc->getUInt32(r, 51);
+            c.totemCategory[0] = dbc->getUInt32(r, 222);
+            c.totemCategory[1] = dbc->getUInt32(r, 223);
+            c.areaGroup = dbc->getUInt32(r, 224);
+            tradeSpellColumns_[dbc->getUInt32(r, 0)] = c;
+        }
+    }
+    auto it = tradeSpellColumns_.find(spellId);
+    return it != tradeSpellColumns_.end() ? &it->second : nullptr;
+}
+
+const SpellHandler::TradeSkillLineInfo* SpellHandler::tradeSkillLineInfo(uint32_t skillLine) {
+    if (!tradeSkillLinesLoaded_) {
+        auto* am = owner_.services().assetManager;
+        if (!am || !am->isInitialized()) return nullptr;
+        tradeSkillLinesLoaded_ = true;
+        auto dbc = am->loadDBC("SkillLine.dbc");
+        // 3.3.5a: DisplayName 3, AlternateVerb 38, CanLink 55 (in memory
+        // +0xC, +0x18, +0x1C).
+        if (dbc && dbc->isLoaded() && dbc->getFieldCount() >= 56) {
+            for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+                TradeSkillLineInfo info;
+                info.name = dbc->getString(r, 3);
+                info.alternateVerb = dbc->getString(r, 38);
+                info.canLink = dbc->getUInt32(r, 55) != 0;
+                tradeSkillLines_[dbc->getUInt32(r, 0)] = std::move(info);
+            }
+        }
+    }
+    auto it = tradeSkillLines_.find(skillLine);
+    return it != tradeSkillLines_.end() ? &it->second : nullptr;
+}
+
+std::string SpellHandler::itemSubClassHeaderName(int itemClass, int itemSubClass) {
+    if (!itemSubClassNamesLoaded_) {
+        auto* am = owner_.services().assetManager;
+        if (!am || !am->isInitialized()) return {};
+        itemSubClassNamesLoaded_ = true;
+        auto dbc = am->loadDBC("ItemSubClass.dbc");
+        // ClassID 0, SubClassID 1, DisplayName 10, VerboseName 27.
+        if (dbc && dbc->isLoaded() && dbc->getFieldCount() >= 28) {
+            for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+                std::string name = dbc->getString(r, 27);
+                if (name.empty()) name = dbc->getString(r, 10);
+                itemSubClassNames_[{static_cast<int>(dbc->getUInt32(r, 0)),
+                                    static_cast<int>(dbc->getUInt32(r, 1))}] = std::move(name);
+            }
+        }
+    }
+    auto it = itemSubClassNames_.find({itemClass, itemSubClass});
+    return it != itemSubClassNames_.end() ? it->second : std::string{};
+}
+
+const std::vector<SpellHandler::TradeAbilityRow>* SpellHandler::tradeSkillAbilityRows(uint32_t skillLine) {
+    if (!tradeAbilityRunsLoaded_) {
+        auto* am = owner_.services().assetManager;
+        if (!am || !am->isInitialized()) return nullptr;
+        tradeAbilityRunsLoaded_ = true;
+        auto dbc = am->loadDBC("SkillLineAbility.dbc");
+        if (dbc && dbc->isLoaded() && dbc->getFieldCount() >= 12) {
+            // 0x812030: consecutive rows of one linkable line are one run; a
+            // line's first run is the one its links index (0x8104A0).
+            uint32_t runLine = 0;
+            bool runOpen = false;
+            for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+                const uint32_t line = dbc->getUInt32(r, 1);
+                if (!runOpen || line != runLine) {
+                    runLine = line;
+                    const auto* info = tradeSkillLineInfo(line);
+                    runOpen = info && info->canLink && !tradeAbilityRuns_.count(line);
+                    if (!runOpen) continue;
+                    tradeAbilityRuns_[line];
+                }
+                TradeAbilityRow row;
+                row.spellId = dbc->getUInt32(r, 2);
+                row.raceMask = dbc->getUInt32(r, 3);
+                row.classMask = dbc->getUInt32(r, 4);
+                row.trivialHigh = static_cast<int>(dbc->getUInt32(r, 10));
+                row.trivialLow = static_cast<int>(dbc->getUInt32(r, 11));
+                tradeAbilityRuns_[line].push_back(row);
+            }
+        }
+    }
+    auto it = tradeAbilityRuns_.find(skillLine);
+    return it != tradeAbilityRuns_.end() ? &it->second : nullptr;
+}
+
+int SpellHandler::tradeSkillRank() const {
+    if (tradeSkill_.linked) return tradeSkill_.linkRank;
+    const auto& skills = owner_.getPlayerSkills();
+    auto it = skills.find(tradeSkill_.skillLine);
+    return it != skills.end() ? static_cast<int>(it->second.value) : 0;
+}
+
+void SpellHandler::tradeSkillLine(std::string& name, int& rank, int& maxRank) const {
+    auto* self = const_cast<SpellHandler*>(this);
+    const auto* info = tradeSkill_.skillLine ? self->tradeSkillLineInfo(tradeSkill_.skillLine) : nullptr;
+    if (!info) { name = "UNKNOWN"; rank = 0; maxRank = 0; return; }
+    name = info->name;
+    if (tradeSkill_.linked) {
+        rank = tradeSkill_.linkRank;
+        maxRank = tradeSkill_.linkMaxRank;
+        return;
+    }
+    // 0x51A250 / 0x594710: value and max, each with the permanent bonus (the
+    // field's high half) when the value is set.
+    const auto& skills = owner_.getPlayerSkills();
+    auto it = skills.find(tradeSkill_.skillLine);
+    rank = maxRank = 0;
+    if (it == skills.end()) return;
+    rank = it->second.value ? it->second.value + it->second.bonusPerm : 0;
+    maxRank = it->second.maxValue ? it->second.maxValue + it->second.bonusPerm : 0;
+}
+
+namespace {
+bool abilityAppliesTo(uint32_t raceMask, uint32_t classMask, uint8_t race, uint8_t cls) {
+    if (raceMask && race && !(raceMask & (1u << (race - 1)))) return false;
+    if (classMask && cls && !(classMask & (1u << (cls - 1)))) return false;
+    return true;
+}
+std::string lowerText(const std::string& s) { return stock_trade_skill::lowered(s); }
+}  // namespace
+
+std::vector<stock_trade_skill::Recipe> SpellHandler::collectTradeSkillRecipes() {
+    std::vector<stock_trade_skill::Recipe> out;
+    const uint32_t line = tradeSkill_.skillLine;
+    if (line == 0) return out;
+    owner_.loadSpellNameCache();
+    owner_.loadSkillLineAbilityDbc();
+    const auto& cache = owner_.spellNameCacheRef();
+
+    // The spells: the player's own trade spells of the line (kept per line by
+    // the learn handler 0x6E7B00), or the link's bits over the line's run.
+    struct Pick { uint32_t spellId; int high; int low; };
+    std::vector<Pick> picks;
+    if (tradeSkill_.linked) {
+        const auto* rows = tradeSkillAbilityRows(line);
+        if (!rows) return out;
+        const auto bits = stock_trade_skill::decodeTradeLinkBits(tradeSkill_.linkData, rows->size());
+        for (size_t i = 0; i < rows->size(); ++i)
+            if (bits[i]) picks.push_back({(*rows)[i].spellId, (*rows)[i].trivialHigh, (*rows)[i].trivialLow});
+    } else {
+        for (uint32_t spellId : knownSpells_) {
+            auto slIt = owner_.spellToSkillLineRef().find(spellId);
+            if (slIt == owner_.spellToSkillLineRef().end() || slIt->second != line) continue;
+            auto c = cache.find(spellId);
+            if (c == cache.end()) continue;
+            picks.push_back({spellId, static_cast<int>(c->second.trivialSkillHigh),
+                             static_cast<int>(c->second.trivialSkillLow)});
+        }
+    }
+
+    for (const auto& pick : picks) {
+        auto c = cache.find(pick.spellId);
+        if (c == cache.end()) continue;
+        const auto& se = c->second;
+        if (!(se.attr & stock_trade_skill::kAttrTradeSpell)) continue;
+        const TradeSpellColumns* col = tradeSpellColumns(pick.spellId);
+        stock_trade_skill::Recipe r;
+        r.spellId = static_cast<int32_t>(pick.spellId);
+        r.name = se.name;
+        r.trivialHigh = pick.high;
+        r.trivialLow = pick.low;
+        r.searchText.push_back(lowerText(se.name));
+        const uint32_t effect0 = col ? col->effect[0] : se.effectIds[0];
+        const uint32_t made = col ? col->itemType[0] : se.createdItemId;
+        r.createsItem = stock_trade_skill::isCreateItemEffect(effect0) && made != 0;
+        if (r.createsItem) {
+            owner_.ensureItemInfo(made);
+            const auto* info = owner_.getItemInfo(made);
+            r.itemKnown = info && info->valid;
+            if (r.itemKnown) {
+                r.itemClass = static_cast<int>(info->itemClass);
+                r.itemSubClass = static_cast<int>(info->subClass);
+                r.itemLevel = static_cast<int>(info->itemLevel);
+                r.requiredLevel = static_cast<int>(info->requiredLevel);
+                r.slotBits = stock_trade_skill::slotBitsForCreatedItem(info->inventoryType);
+                r.searchText.push_back(lowerText(info->name));
+                if (!info->description.empty()) r.searchText.push_back(lowerText(info->description));
+            }
+        } else if (col) {
+            r.slotBits = stock_trade_skill::slotBitsForEnchant(
+                col->equippedItemClass, col->equippedItemSubClassMask, col->equippedItemInvTypeMask);
+        }
+        // 0x5DD5A0: how many the bags make, -1 when nothing is used up.
+        int avail = -1;
+        for (const auto& rg : se.reagents) {
+            if (rg.itemId == 0 || rg.count == 0) continue;
+            const int n = static_cast<int>(owner_.countItemInBags(rg.itemId) / rg.count);
+            if (avail == -1 || n <= avail) avail = n;
+            owner_.ensureItemInfo(rg.itemId);
+            if (const auto* ri = owner_.getItemInfo(rg.itemId); ri && ri->valid)
+                r.searchText.push_back(lowerText(ri->name));
+        }
+        r.numAvailable = avail;
+        if (col) {
+            for (uint32_t t : col->totem) {
+                if (!t) continue;
+                if (const auto* ti = owner_.getItemInfo(t); ti && ti->valid)
+                    r.searchText.push_back(lowerText(ti->name));
+            }
+            for (uint32_t tc : col->totemCategory)
+                if (tc) r.searchText.push_back(lowerText(getTotemCategoryName(tc)));
+            if (col->requiresSpellFocus)
+                r.searchText.push_back(lowerText(getSpellFocusName(col->requiresSpellFocus)));
+        }
+        if (!se.description.empty())
+            r.searchText.push_back(lowerText(owner_.formatSpellDescription(pick.spellId, se.description)));
+        out.push_back(std::move(r));
+    }
+    return out;
+}
+
+void SpellHandler::rebuildTradeSkill() {
+    if (!tradeSkill_.isOpen()) return;
+    auto recipes = collectTradeSkillRecipes();
+    // The header names, for their order and the subclass dropdown: the item
+    // subclass's, or the line's alternate verb for recipes that make nothing.
+    tradeSkill_.headerNames.clear();
+    std::set<std::pair<int, int>> keys;
+    for (const auto& r : recipes) keys.insert({r.createsItem ? r.itemClass : -1, r.createsItem ? r.itemSubClass : -1});
+    for (const auto& k : keys) {
+        std::string name;
+        if (k.first == -1 && k.second == -1) {
+            if (const auto* info = tradeSkillLineInfo(tradeSkill_.skillLine)) name = info->alternateVerb;
+        } else {
+            name = itemSubClassHeaderName(k.first, k.second);
+        }
+        tradeSkill_.headerNames.push_back({k, name});
+    }
+    if (tradeSkill_.rebuild(std::move(recipes), tradeSkillRank()))
+        owner_.fireAddonEvent("TRADE_SKILL_UPDATE", {});
+}
+
+std::string SpellHandler::tradeSkillListLink() const {
+    auto* self = const_cast<SpellHandler*>(this);
+    if (!tradeSkill_.isOpen() || tradeSkill_.linked || tradeSkill_.openerSpell == 0) return {};
+    const auto* col = self->tradeSpellColumns(tradeSkill_.openerSpell);
+    if (!col || col->effect[0] != 47) return {};
+    const auto* info = self->tradeSkillLineInfo(tradeSkill_.skillLine);
+    if (!info || !info->canLink) return {};
+    const auto* rows = self->tradeSkillAbilityRows(tradeSkill_.skillLine);
+    if (!rows) return {};
+    const uint8_t race = owner_.getPlayerRace();
+    const uint8_t cls = owner_.getPlayerClass();
+    std::vector<bool> bits;
+    bits.reserve(rows->size());
+    for (const auto& row : *rows)
+        bits.push_back(hasKnownSpell(row.spellId) && abilityAppliesTo(row.raceMask, row.classMask, race, cls));
+    std::string name; int rank = 0, maxRank = 0;
+    tradeSkillLine(name, rank, maxRank);
+    char head[160];
+    std::snprintf(head, sizeof(head), "|cffffd000|Htrade:%u:%d:%d:%llX:", tradeSkill_.openerSpell, rank,
+                  maxRank, static_cast<unsigned long long>(owner_.getPlayerGuid()));
+    return std::string(head) + stock_trade_skill::encodeTradeLinkBits(bits) + "|h[" +
+           owner_.getSpellName(tradeSkill_.openerSpell) + "]|h|r";
+}
+
+bool SpellHandler::playerHasTotemCategory(uint32_t required) {
+    if (required == 0) return true;
+    // TotemCategory.dbc: CategoryType 18, CategoryMask 19. A tool serves a
+    // requirement of the same type whose mask bits it has all of (a Gnomish
+    // Army Knife is every one of its tools) - 0x7548F0, and AzerothCore's
+    // IsTotemCategoryCompatiableWith on the other side.
+    struct Cat { uint32_t type = 0, mask = 0; };
+    static std::unordered_map<uint32_t, Cat> cats;
+    static bool loaded = false;
+    if (!loaded) {
+        auto* am = owner_.services().assetManager;
+        if (!am || !am->isInitialized()) return false;
+        loaded = true;
+        auto dbc = am->loadDBC("TotemCategory.dbc");
+        if (dbc && dbc->isLoaded() && dbc->getFieldCount() >= 20)
+            for (uint32_t r = 0; r < dbc->getRecordCount(); ++r)
+                cats[dbc->getUInt32(r, 0)] = {dbc->getUInt32(r, 18), dbc->getUInt32(r, 19)};
+    }
+    auto req = cats.find(required);
+    if (req == cats.end()) return false;
+    auto serves = [&](uint32_t itemId) {
+        if (!itemId) return false;
+        const auto* info = owner_.getItemInfo(itemId);
+        if (!info || !info->valid || !info->totemCategory) return false;
+        auto have = cats.find(info->totemCategory);
+        return have != cats.end() && have->second.type == req->second.type &&
+               (have->second.mask & req->second.mask) == req->second.mask;
+    };
+    const auto& inv = owner_.getInventory();
+    for (int i = 0; i < inv.getBackpackSize(); ++i)
+        if (!inv.getBackpackSlot(i).empty() && serves(inv.getBackpackSlot(i).item.itemId)) return true;
+    for (int b = 0; b < Inventory::NUM_BAG_SLOTS; ++b)
+        for (int i = 0; i < inv.getBagSize(b); ++i)
+            if (!inv.getBagSlot(b, i).empty() && serves(inv.getBagSlot(b, i).item.itemId)) return true;
+    for (int sl = 0; sl < Inventory::NUM_EQUIP_SLOTS; ++sl) {
+        const auto& slot = inv.getEquipSlot(static_cast<EquipSlot>(sl));
+        if (!slot.empty() && serves(slot.item.itemId)) return true;
+    }
+    return false;
+}
+
+std::vector<std::pair<std::string, bool>> SpellHandler::tradeSkillTools(uint32_t spellId) {
+    std::vector<std::pair<std::string, bool>> out;
+    const auto* col = tradeSpellColumns(spellId);
+    if (!col) return out;
+    // 0x5DE620: the spell focus (always shown as present), the area, then the
+    // tools by whether the player carries one, then the tool categories.
+    if (col->requiresSpellFocus) {
+        const std::string& n = getSpellFocusName(col->requiresSpellFocus);
+        if (!n.empty()) out.push_back({n, true});
+    }
+    const auto& inv = owner_.getInventory();
+    auto carried = [&](uint32_t itemId) {
+        if (owner_.countItemInBags(itemId) > 0) return true;
+        for (int s = 0; s < Inventory::NUM_EQUIP_SLOTS; ++s) {
+            const auto& slot = inv.getEquipSlot(static_cast<EquipSlot>(s));
+            if (!slot.empty() && slot.item.itemId == itemId) return true;
+        }
+        return false;
+    };
+    for (uint32_t t : col->totem) {
+        if (!t) continue;
+        owner_.ensureItemInfo(t);
+        const auto* ti = owner_.getItemInfo(t);
+        if (!ti || !ti->valid) continue;
+        out.push_back({ti->name, carried(t)});
+    }
+    for (uint32_t tc : col->totemCategory) {
+        if (!tc) continue;
+        const std::string& n = getTotemCategoryName(tc);
+        if (n.empty()) continue;
+        out.push_back({n, playerHasTotemCategory(tc)});
+    }
+    return out;
 }
 
 } // namespace game

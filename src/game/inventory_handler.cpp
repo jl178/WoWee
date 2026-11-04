@@ -2844,9 +2844,10 @@ void InventoryHandler::fireBagUpdates() {
     // both stood still while the reagents were spent - craft after craft against
     // numbers that never moved, until the window was closed and reopened.
     //
-    // It also releases the row list, whose canMake comes from the same bag
-    // counts and is otherwise held between redraws.
-    if (owner_.isCraftingWindowOpen()) fire("TRADE_SKILL_UPDATE", {});
+    // The list is made again from the bags (0x707720 / 0x5D9790 rebuild it on
+    // an item count or a slot changing), which fires the event.
+    if (owner_.isCraftingWindowOpen())
+        if (auto* sh = owner_.getSpellHandler()) sh->rebuildTradeSkill();
     // The first few only: enough to tell "the event never goes out" from "it
     // goes out and the interface ignores it", without a line every time the
     // inventory is rebuilt.
@@ -5331,6 +5332,10 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
             owner_.addonEventCallbackRef()("GET_ITEM_INFO_RECEIVED",
                                            {std::to_string(data.entry)});
         }
+        // An open trade skill list waits for every item its recipes make
+        // (0x5D9F80: the last reply rebuilds it).
+        if (auto* sh = owner_.getSpellHandler(); sh && sh->tradeSkill().pending())
+            sh->rebuildTradeSkill();
 
         // The loot window's row for this item, which was drawn before the
         // item was known.

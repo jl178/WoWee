@@ -1997,6 +1997,9 @@ struct ItemQueryResponseData {
     /// the same four post-description words as pageTextId and thrown away
     /// until 2026-08-06, so every letter and book opened on parchment.
     uint32_t pageMaterial = 0;
+    /// TotemCategory.dbc id of the tool this item is (a Blacksmith Hammer, a
+    /// Mining Pick): what a recipe's tool requirement is matched against.
+    uint32_t totemCategory = 0;
     // Generic stat pairs for non-primary stats (hit, crit, haste, AP, SP, etc.)
     struct ExtraStat { uint32_t statType = 0; int32_t statValue = 0; };
     std::vector<ExtraStat> extraStats;

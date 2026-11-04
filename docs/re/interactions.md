@@ -385,11 +385,8 @@ Still different:
   (0x7171C0) and it should then turn; Wowee keeps it working and only turns
   NPCs with no emote state.
 - **`autoInteract`** (click-to-move to the target) is not implemented.
-- **Skinning skill check** before the cast (`ERR_USE_LOCKED_WITH_SPELL_KNOWN_SI`
-  with the required value) is left to the server; engineering-loot creatures
-  use Mining.
-- **Gathering** still picks Herb Gathering / Mining by the node's name
-  (`gatherSpellForGameObject`) before the lock path; stock reads only the lock.
+- (Skinning's skill check and the creature gathering spells, and gathering
+  by the lock rather than the node's name, are now stock: professions.md §7-8.)
 - **Game object loot** is still auto-stored without auto-loot
   (`autoStoreGameObjectLoot`, a workaround for quest containers), and Wowee
   still sends delayed `CMSG_LOOT` probes after a USE; stock sends only the

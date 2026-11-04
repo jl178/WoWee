@@ -24,6 +24,8 @@
 //                                  or a negative hour for the game's clock
 //   WoweeDebug_UseObject(name)     right-click the nearest game object of
 //                                  that name (a mailbox, a guild vault)
+//   WoweeDebug_RightClickCorpse()  right-click the targeted corpse (loot,
+//                                  or skin / gather it)
 //   WoweeDebug_ProfileTag(label)   under WOWEE_FRAME_PROFILE, close the
 //                                  current profile window and open one
 //                                  named label (one PROFILE_AB line each,
@@ -233,6 +235,16 @@ int luaDebugUseObject(lua_State* L) {
     return 1;
 }
 
+/// WoweeDebug_RightClickCorpse() - the targeted dead unit, right-clicked
+/// (0x731260's loot / skin branches). Answers whether there was a target.
+int luaDebugRightClickCorpse(lua_State* L) {
+    auto* gh = Application::getInstance().getGameHandler();
+    const uint64_t guid = gh ? gh->getTargetGuid() : 0;
+    if (guid) gh->rightClickCorpse(guid, false);
+    lua_pushboolean(L, guid != 0);
+    return 1;
+}
+
 int luaDebugProfileTag(lua_State* L) {
     setProfileTag(luaL_checkstring(L, 1));
     return 0;
@@ -289,6 +301,7 @@ void debugLuaHookTick(addons::LuaEngine* engine, SDL_Window* window) {
     lua_register(L, "WoweeDebug_Camera", luaDebugCamera);
     lua_register(L, "WoweeDebug_TimeOfDay", luaDebugTimeOfDay);
     lua_register(L, "WoweeDebug_UseObject", luaDebugUseObject);
+    lua_register(L, "WoweeDebug_RightClickCorpse", luaDebugRightClickCorpse);
     gEngine = engine;
 
     LOG_WARNING("[luatest] running ", path);

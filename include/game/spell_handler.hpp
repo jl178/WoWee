@@ -2,6 +2,7 @@
 
 #include "game/stock_cast_timing.hpp"
 #include "game/stock_cast_events.hpp"
+#include "game/stock_trade_skill.hpp"
 
 #include "game/world_packets.hpp"
 #include "game/opcode_table.hpp"
@@ -172,22 +173,71 @@ public:
         return casting_ ? castTimeTotal_ : restorationTimeTotal_;
     }
 
-    // Repeat-craft queue
+    // Repeat-craft queue: DoTradeSkill's run (0x5DAC00), kept in the trade
+    // skill model as the stock client keeps it - asked for, then running from
+    // the cast's start, one less at each cast's go.
     void startCraftQueue(uint32_t spellId, int count);
     void cancelCraftQueue();
-    [[nodiscard]] int getCraftQueueRemaining() const { return craftQueueRemaining_; }
-    [[nodiscard]] uint32_t getCraftQueueSpellId() const { return craftQueueSpellId_; }
+    [[nodiscard]] int getCraftQueueRemaining() const {
+        return tradeSkill_.repeatSpell ? tradeSkill_.repeatLeft
+             : tradeSkill_.pendingSpell ? tradeSkill_.pendingCount : 0;
+    }
+    [[nodiscard]] uint32_t getCraftQueueSpellId() const {
+        return static_cast<uint32_t>(tradeSkill_.repeatSpell ? tradeSkill_.repeatSpell
+                                                             : tradeSkill_.pendingSpell);
+    }
 
-    // Crafting window (client-side; opened by casting a profession spell
-    // like Cooking or First Aid - see tradeskillOpenerSkillLine)
-    [[nodiscard]] bool isCraftingWindowOpen() const { return craftingWindowOpen_; }
-    [[nodiscard]] uint32_t getCraftingSkillLine() const { return craftingSkillLine_; }
-    /// Opening and closing a profession announce themselves, because the
-    /// interface's trade skill panel is driven entirely by these two events -
-    /// it hides on TRADE_SKILL_CLOSE and fills itself on TRADE_SKILL_SHOW.
-    /// Without them the panel could be complete and still never appear.
-    void openCraftingWindow(uint32_t skillLine);
+    // The trade skill window (Wow.exe TradeSkillFrame.cpp; see
+    // stock_trade_skill.hpp). Opened by casting a spell whose first effect is
+    // TRADE_SKILL (47), which sends nothing to the server, or by a "trade:"
+    // link, which shows another player's list.
+    [[nodiscard]] bool isCraftingWindowOpen() const { return tradeSkill_.isOpen(); }
+    [[nodiscard]] uint32_t getCraftingSkillLine() const { return tradeSkill_.skillLine; }
+    [[nodiscard]] const stock_trade_skill::Model& tradeSkill() const { return tradeSkill_; }
+    [[nodiscard]] stock_trade_skill::Model& tradeSkillMutable() { return tradeSkill_; }
+    /// 0x5DE120 for the player's own list: toggles closed when this line is
+    /// already open, else (re)builds it and fires TRADE_SKILL_SHOW when it
+    /// has rows.
+    void openCraftingWindow(uint32_t openerSpell, uint32_t skillLine);
+    /// The same for a "trade:" link (0x5DE300): someone else's recipes from
+    /// the link's bits, at the link's rank. False when the link does not fit.
+    bool openLinkedTradeSkill(const std::string& link);
+    /// CloseTradeSkill (0x5DA8B0): stops a repeat and fires TRADE_SKILL_CLOSE.
     void closeCraftingWindow();
+    /// 0x5DD5A0: the list made again (learned/unlearned recipe, a skill rank,
+    /// the bags, an item reply it waited for). TRADE_SKILL_UPDATE when the
+    /// list is complete.
+    void rebuildTradeSkill();
+    /// The rank the list is coloured by: the player's base skill, or a link's.
+    [[nodiscard]] int tradeSkillRank() const;
+    /// GetTradeSkillLine's three values (0x5DB810): with the permanent bonus
+    /// for the player's own line.
+    void tradeSkillLine(std::string& name, int& rank, int& maxRank) const;
+    /// GetTradeSkillListLink (0x5DB060): the player's own list as a trade
+    /// link, empty when the line cannot be linked.
+    std::string tradeSkillListLink() const;
+    /// What a recipe needs that is not a reagent, for GetTradeSkillTools
+    /// (0x5DE620): name and whether it is there, in the stock order.
+    std::vector<std::pair<std::string, bool>> tradeSkillTools(uint32_t spellId);
+    /// Spell.dbc columns the trade skill window reads that the spell cache
+    /// does not keep (WotLK layout).
+    struct TradeSpellColumns {
+        uint32_t effect[3] = {0, 0, 0};
+        uint32_t itemType[3] = {0, 0, 0};
+        int32_t basePoints[3] = {0, 0, 0};
+        int32_t dieSides[3] = {0, 0, 0};
+        int32_t equippedItemClass = -1;
+        uint32_t equippedItemSubClassMask = 0;
+        uint32_t equippedItemInvTypeMask = 0;
+        uint32_t requiresSpellFocus = 0;
+        uint32_t totem[2] = {0, 0};
+        uint32_t totemCategory[2] = {0, 0};
+        uint32_t areaGroup = 0;
+        uint32_t attributes = 0;
+    };
+    const TradeSpellColumns* tradeSpellColumns(uint32_t spellId);
+    /// Whether the player carries a tool of this TotemCategory (0x7548F0).
+    bool playerHasTotemCategory(uint32_t totemCategoryId);
     // Returns the skill line id if spellId is a tradeskill-window opener
     // (e.g. Cooking → 185) with at least one known recipe, else 0.
     uint32_t tradeskillOpenerSkillLine(uint32_t spellId);
@@ -683,13 +733,39 @@ private:
     float restorationTimeTotal_ = 0.0f;
     float restorationSoundTimer_ = 0.0f; // 0 until the aura's one fallback consume sound is due
 
-    // Repeat-craft queue
-    uint32_t craftQueueSpellId_ = 0;
-    int craftQueueRemaining_ = 0;
-
-    // Crafting window
-    bool craftingWindowOpen_ = false;
-    uint32_t craftingSkillLine_ = 0;
+    // The trade skill window and its repeat (stock_trade_skill.hpp).
+    stock_trade_skill::Model tradeSkill_;
+    std::vector<stock_trade_skill::Recipe> collectTradeSkillRecipes();
+    void fireTradeSkillRecast();
+    std::unordered_map<uint32_t, TradeSpellColumns> tradeSpellColumns_;
+    bool tradeSpellColumnsLoaded_ = false;
+    /// SkillLineAbility.dbc rows a trade link's bits are read against: the
+    /// first unbroken run of a linkable line's rows in file order (0x812030,
+    /// 0x8104A0).
+    struct TradeAbilityRow {
+        uint32_t spellId = 0;
+        uint32_t raceMask = 0;
+        uint32_t classMask = 0;
+        int trivialHigh = 0;
+        int trivialLow = 0;
+    };
+    std::unordered_map<uint32_t, std::vector<TradeAbilityRow>> tradeAbilityRuns_;
+    bool tradeAbilityRunsLoaded_ = false;
+    const std::vector<TradeAbilityRow>* tradeSkillAbilityRows(uint32_t skillLine);
+    struct TradeSkillLineInfo {
+        std::string name;
+        std::string alternateVerb;
+        bool canLink = false;
+    };
+    std::unordered_map<uint32_t, TradeSkillLineInfo> tradeSkillLines_;
+    bool tradeSkillLinesLoaded_ = false;
+public:
+    const TradeSkillLineInfo* tradeSkillLineInfo(uint32_t skillLine);
+    /// ItemSubClass.dbc VerboseName, else DisplayName (0x5DA6B0's header name).
+    std::string itemSubClassHeaderName(int itemClass, int itemSubClass);
+private:
+    std::map<std::pair<int, int>, std::string> itemSubClassNames_;
+    bool itemSubClassNamesLoaded_ = false;
 
     // SpellFocusObject.dbc names, loaded lazily
     std::unordered_map<uint32_t, std::string> spellFocusNames_;
