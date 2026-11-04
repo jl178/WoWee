@@ -1138,6 +1138,7 @@ void CombatHandler::updateAutoAttack(float deltaTime) {
 // ============================================================
 
 void CombatHandler::resetAllCombatState() {
+    targetNearestCycle_.reset();
     hostileAttackers_.clear();
     combatText_.clear();
     autoAttacking_ = false;
@@ -1652,8 +1653,9 @@ void CombatHandler::clearTarget() {
     } else {
         owner_.setTargetGuidRaw(0);
     }
-    owner_.tabCycleIndexRef() = -1;
-    owner_.tabCycleStaleRef() = true;
+    // ClearTarget sets 0xBD08CC to 0: the next TargetNearest builds its list
+    // afresh (0x525FC0).
+    targetNearestCycle_.reset();
 }
 
 std::shared_ptr<Entity> CombatHandler::getTarget() const {
@@ -1708,52 +1710,105 @@ void CombatHandler::targetLastTarget() {
     owner_.lastTargetGuidRef() = temp;
 }
 
-void CombatHandler::cycleTarget(bool reverse, const char* noneMessage,
-                                const std::function<bool(uint64_t, Entity&)>& wanted) {
-    constexpr float kRangeSq = 40.0f * 40.0f;
+tab_target::UnitFacts CombatHandler::targetNearestFacts(uint64_t guid, const Unit& unit) const {
+    namespace tt = tab_target;
+    tt::UnitFacts f;
+    f.isPlayer = unit.getType() == ObjectType::PLAYER;
+    f.health = unit.getHealth();
+    f.dynFlagDead = (unit.getDynamicFlags() & UNIT_DYNFLAG_DEAD) != 0;
+    f.standState = unit.getStandState();
+    const uint32_t playerFlags = f.isPlayer
+        ? unit.getField(fieldIndex(UF::PLAYER_FLAGS)) : 0u;
+    constexpr uint32_t kPlayerFlagGhost = 0x10;
+    f.dead = unit.getHealth() < 1 || (playerFlags & kPlayerFlagGhost) != 0;
 
-    float px = 0.0f, py = 0.0f, pz = 0.0f;
-    if (auto self = owner_.getEntityManager().getEntity(owner_.getPlayerGuid())) {
-        px = self->getX(); py = self->getY(); pz = self->getZ();
-    }
-
-    struct Cand { uint64_t guid; float distSq; };
-    std::vector<Cand> cands;
-    for (const auto& [guid, entity] : owner_.getEntityManager().getEntities()) {
-        if (!entity || guid == owner_.getPlayerGuid()) continue;
-        const float dx = entity->getX() - px;
-        const float dy = entity->getY() - py;
-        const float dz = entity->getZ() - pz;
-        const float distSq = dx * dx + dy * dy + dz * dz;
-        if (distSq > kRangeSq) continue;
-        if (!wanted(guid, *entity)) continue;
-        cands.push_back({.guid = guid, .distSq = distSq});
-    }
-    std::sort(cands.begin(), cands.end(),
-              [](const Cand& a, const Cand& b) { return a.distSq < b.distSq; });
-
-    // Nobody in range is silent, as the stock targeting keys are.
-    if (cands.empty()) {
-        (void)noneMessage;
-        return;
-    }
-
-    std::vector<uint64_t> order;
-    order.reserve(cands.size());
-    for (const auto& c : cands) order.push_back(c.guid);
-
-    // Not on the list: start at the near end, or the far one going backwards.
-    auto it = std::find(order.begin(), order.end(), owner_.getTargetGuid());
-    if (it == order.end()) {
-        setTarget(reverse ? order.back() : order.front());
-        return;
-    }
-    if (reverse) {
-        setTarget(it == order.begin() ? order.back() : *(it - 1));
+    // CanAttack (0x729740), from the player's side: the unit's flags first,
+    // then the reaction - for a creature anything not friendly (neutral
+    // wildlife included), for a player also the PvP flags of both.
+    const bool flagsAllow = (unit.getUnitFlags() & tt::kUnattackableFlags) == 0;
+    const bool friendly = !unit.isHostile() && owner_.isFriendlyFaction(unit.getFactionTemplate());
+    if (!flagsAllow || (playerFlags & kPlayerFlagGhost)) {
+        f.canAttack = false;
+    } else if (isAggressiveTowardPlayer(guid)) {
+        f.canAttack = true;
+    } else if (f.isPlayer) {
+        uint8_t mine = 0;
+        if (auto self = owner_.getEntityManager().getEntity(owner_.getPlayerGuid()))
+            mine = static_cast<uint8_t>(self->getField(fieldIndex(UF::UNIT_FIELD_BYTES_2)) >> 8);
+        const uint8_t theirs =
+            static_cast<uint8_t>(unit.getField(fieldIndex(UF::UNIT_FIELD_BYTES_2)) >> 8);
+        f.canAttack = !friendly && tt::playersMayFight(mine, theirs);
     } else {
-        auto next = it + 1;
-        setTarget(next == order.end() ? order.front() : *next);
+        f.canAttack = !friendly;
     }
+    // CanAssist (0x7293D0): selectable and friendly by reaction.
+    f.canAssist = (unit.getUnitFlags() & UNIT_FLAG_NOT_SELECTABLE) == 0 &&
+                  !unit.isHostile() && owner_.unitReactionToPlayer(unit) >= 5;
+
+    // party1..4 are the player's own subgroup in a raid (0x52C680); the raid
+    // is everyone (0x5726F0).
+    const auto& pd = owner_.getPartyData();
+    for (const auto& m : pd.members) {
+        if (m.guid != guid) continue;
+        f.raidMember = true;
+        f.partyMember = !groupIsRaid(pd.groupType) || m.subGroup == pd.subGroup;
+    }
+    return f;
+}
+
+void CombatHandler::targetNearest(TargetNearestMode mode, bool reverse) {
+    namespace tt = tab_target;
+    if (!owner_.isInWorld()) return;
+    const uint64_t self = owner_.getPlayerGuid();
+    const auto& mi = owner_.getMovementInfo();
+    const glm::vec3 me(mi.x, mi.y, mi.z);
+    const float facing = mi.orientation;
+
+    auto gather = [&]() {
+        std::vector<tt::Candidate> out;
+        for (const auto& [guid, entity] : owner_.getEntityManager().getEntities()) {
+            if (!entity || guid == self) continue;
+            const auto t = entity->getType();
+            if (t != ObjectType::UNIT && t != ObjectType::PLAYER) continue;
+            auto* unit = dynamic_cast<Unit*>(entity.get());
+            if (!unit) continue;
+            if (!tt::passesMode(mode, targetNearestFacts(guid, *unit))) continue;
+            const float dx = entity->getX() - me.x;
+            const float dy = entity->getY() - me.y;
+            const float dz = entity->getZ() - me.z;
+            const float distSq = dx * dx + dy * dy + dz * dz;
+            const bool inFront = tt::inFrontCone(facing, std::atan2(-dy, dx));
+            if (!tt::withinReach(distSq, inFront)) continue;
+            const uint32_t creatureType = t == ObjectType::PLAYER
+                ? 7u  // a player's race is humanoid (ChrRaces), unless a form says otherwise
+                : owner_.getCreatureType(unit->getEntry());
+            if (tt::creatureTypeIgnoredByTab(creatureType)) continue;
+            if (unitInViewProvider_ && !unitInViewProvider_(guid)) continue;
+            out.push_back({.guid = guid, .distSq = distSq, .inFront = inFront});
+        }
+        return out;
+    };
+    auto stillWanted = [&](uint64_t guid) {
+        auto entity = owner_.getEntityManager().getEntity(guid);
+        auto* unit = dynamic_cast<Unit*>(entity.get());
+        return unit && tt::passesMode(mode, targetNearestFacts(guid, *unit));
+    };
+    const auto nowMs = static_cast<uint32_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    const uint64_t pick = targetNearestCycle_.press(mode, reverse, nowMs, owner_.getTargetGuid(),
+                                                    gather, stillWanted);
+    if (core::Logger::getInstance().shouldLog(core::LogLevel::DEBUG)) {
+        std::string listed;
+        for (const auto& c : targetNearestCycle_.list()) {
+            listed += " " + std::to_string(c.guid & 0xFFFFFF) + (c.inFront ? "f" : "b") + "@" +
+                      std::to_string(static_cast<int>(std::sqrt(c.distSq)));
+        }
+        LOG_DEBUG("TargetNearest mode ", static_cast<int>(mode), reverse ? " reverse" : "",
+                  ": [", listed, " ] cursor ", targetNearestCycle_.index(), " -> ",
+                  pick & 0xFFFFFF);
+    }
+    if (pick != 0) setTarget(pick);
 }
 
 bool CombatHandler::isGroupMemberGuid(uint64_t guid) const {
@@ -1763,61 +1818,19 @@ bool CombatHandler::isGroupMemberGuid(uint64_t guid) const {
     return false;
 }
 
-void CombatHandler::targetEnemy(bool reverse) {
-    // Corpses are never candidates - that is what mouse looting is for.
-    cycleTarget(reverse, "No enemies in range.", [this](uint64_t guid, Entity& e) {
-        const auto t = e.getType();
-        if (t != ObjectType::UNIT && t != ObjectType::PLAYER) return false;
-        auto* unit = dynamic_cast<Unit*>(&e);
-        if (!unit || unit->getHealth() == 0) return false;
-        return isEnemyTarget(guid, *unit);
-    });
-}
-
-bool CombatHandler::isEnemyTarget(uint64_t guid, const Unit& unit) const {
-    return isTabTargetable(unit.isHostile(),
-                           owner_.isFriendlyFaction(unit.getFactionTemplate()),
-                           isAggressiveTowardPlayer(guid),
-                           owner_.getCreatureType(unit.getEntry()),
-                           unit.getUnitFlags());
-}
-
-void CombatHandler::targetFriend(bool reverse) {
-    // Dead friends stay targetable - you need to select them to resurrect them.
-    cycleTarget(reverse, "No friendly targets in range.", [](uint64_t, Entity& e) {
-        return e.getType() == ObjectType::PLAYER;
-    });
-}
-
+void CombatHandler::targetEnemy(bool reverse) { targetNearest(TargetNearestMode::Enemy, reverse); }
+void CombatHandler::targetFriend(bool reverse) { targetNearest(TargetNearestMode::Friend, reverse); }
 void CombatHandler::targetNearestEnemyPlayer(bool reverse) {
-    cycleTarget(reverse, "No enemy players in range.", [this](uint64_t guid, Entity& e) {
-        if (e.getType() != ObjectType::PLAYER) return false;
-        auto* unit = dynamic_cast<Unit*>(&e);
-        if (!unit || unit->getHealth() == 0) return false;
-        return unit->isHostile() || isAggressiveTowardPlayer(guid);
-    });
+    targetNearest(TargetNearestMode::EnemyPlayer, reverse);
 }
-
 void CombatHandler::targetNearestFriendPlayer(bool reverse) {
-    cycleTarget(reverse, "No friendly players in range.", [](uint64_t, Entity& e) {
-        if (e.getType() != ObjectType::PLAYER) return false;
-        auto* unit = dynamic_cast<Unit*>(&e);
-        return unit && !unit->isHostile();
-    });
+    targetNearest(TargetNearestMode::FriendPlayer, reverse);
 }
-
 void CombatHandler::targetNearestPartyMember(bool reverse) {
-    cycleTarget(reverse, "No party members in range.", [this](uint64_t guid, Entity&) {
-        return isGroupMemberGuid(guid);
-    });
+    targetNearest(TargetNearestMode::Party, reverse);
 }
-
 void CombatHandler::targetNearestRaidMember(bool reverse) {
-    // The same roster: a raid is what the group list calls itself when it has
-    // grown past five, and the members arrive in the same list either way.
-    cycleTarget(reverse, "No raid members in range.", [this](uint64_t guid, Entity&) {
-        return isGroupMemberGuid(guid);
-    });
+    targetNearest(TargetNearestMode::Raid, reverse);
 }
 
 void CombatHandler::targetLastEnemy() {
@@ -1830,162 +1843,47 @@ void CombatHandler::targetLastFriend() {
     setTarget(lastFriendTargetGuid_);
 }
 
-void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
-    // Maximum tab-target range in yards (matches the WoW client).
-    constexpr float kTabRange   = 40.0f;
-    constexpr float kTabRangeSq = kTabRange * kTabRange;
-    // A pause this long between tab presses restarts the cycle from the
-    // nearest enemy instead of continuing a stale rotation.
-    constexpr uint64_t kCycleResetMs = 4000;
-
-    const bool playerInCombat = owner_.isInCombat();
-
-    // Helper: returns true if the entity is an enemy that can be tab-targeted.
-    // Corpses are never tab targets while fighting; out of combat they only
-    // qualify when they still hold loot.
-    auto isValidTabTarget = [&](const std::shared_ptr<Entity>& e) -> bool {
-        if (!e) return false;
-        const uint64_t guid = e->getGuid();
-        auto* unit = dynamic_cast<Unit*>(e.get());
-        if (!unit) return false;
-        if (unit->getHealth() == 0) {
-            if (playerInCombat) return false;
-            auto lootIt = owner_.localLootStateRef().find(guid);
-            return lootIt != owner_.localLootStateRef().end() &&
-                   !lootIt->second.data.items.empty();
-        }
-        return isEnemyTarget(guid, *unit);
-    };
-
-    // Restart the cycle after a pause - the player has moved on; the next tab
-    // should grab the nearest enemy, not resume an old rotation.
-    const uint64_t nowMs = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count());
-    if (nowMs - lastTabTargetMs_ > kCycleResetMs)
-        owner_.tabCycleStaleRef() = true;
-    lastTabTargetMs_ = nowMs;
-
-    // Rebuild cycle list if stale (entity added/removed since last tab press).
-    if (owner_.tabCycleStaleRef()) {
-        owner_.tabCycleListRef().clear();
-        owner_.tabCycleIndexRef() = -1;
-
-        struct EntityDist { uint64_t guid; float distSq; bool dead; };
-        std::vector<EntityDist> sortable;
-        const auto& entities = owner_.getEntityManager().getEntities();
-        sortable.reserve(entities.size());
-
-        for (const auto& [guid, entity] : entities) {
-            auto t = entity->getType();
-            if (t != ObjectType::UNIT && t != ObjectType::PLAYER) continue;
-            if (guid == owner_.getPlayerGuid()) continue;
-            if (!isValidTabTarget(entity)) continue;
-            float dx = entity->getX() - playerX;
-            float dy = entity->getY() - playerY;
-            float dz = entity->getZ() - playerZ;
-            // Sort by squared distance - monotonic with distance, skips sqrt per entity.
-            float distSq = dx*dx + dy*dy + dz*dz;
-            if (distSq > kTabRangeSq) continue;
-            auto* unit = static_cast<Unit*>(entity.get());
-            sortable.push_back({.guid = guid, .distSq = distSq, .dead = unit->getHealth() == 0});
-        }
-
-        // Live enemies cycle first (nearest to farthest); lootable corpses last.
-        std::sort(sortable.begin(), sortable.end(),
-                  [](const EntityDist& a, const EntityDist& b) {
-                      if (a.dead != b.dead) return b.dead;
-                      return a.distSq < b.distSq;
-                  });
-
-        owner_.tabCycleListRef().reserve(sortable.size());
-        for (const auto& ed : sortable) {
-            owner_.tabCycleListRef().push_back(ed.guid);
-        }
-        owner_.tabCycleStaleRef() = false;
-    }
-
-    if (owner_.tabCycleListRef().empty()) {
-        clearTarget();
-        return;
-    }
-
-    // If the current target was picked by other means (click, assist), resume
-    // the cycle from its position so tab advances to the NEXT enemy instead of
-    // jumping back to wherever the old rotation left off.
-    {
-        const uint64_t curTarget = owner_.getTargetGuid();
-        if (curTarget != 0) {
-            const auto& list = owner_.tabCycleListRef();
-            for (size_t i = 0; i < list.size(); ++i) {
-                if (list[i] == curTarget) {
-                    owner_.tabCycleIndexRef() = static_cast<int>(i);
-                    break;
-                }
-            }
-        }
-    }
-
-    // Advance through the cycle, skipping any entry that has since died or
-    // turned friendly (e.g. NPC killed between two tab presses).
-    int tries = static_cast<int>(owner_.tabCycleListRef().size());
-    while (tries-- > 0) {
-        owner_.tabCycleIndexRef() = (owner_.tabCycleIndexRef() + 1) % static_cast<int>(owner_.tabCycleListRef().size());
-        uint64_t guid = owner_.tabCycleListRef()[owner_.tabCycleIndexRef()];
-        auto entity = owner_.getEntityManager().getEntity(guid);
-        if (isValidTabTarget(entity)) {
-            setTarget(guid);
-            return;
-        }
-    }
-
-    // All cached entries are stale - clear target and force a fresh rebuild next time.
-    owner_.tabCycleStaleRef() = true;
-    clearTarget();
+void CombatHandler::tabTarget(float /*playerX*/, float /*playerY*/, float /*playerZ*/) {
+    // The TARGETNEARESTENEMY binding: TargetNearestEnemy() (Bindings.xml).
+    targetNearest(TargetNearestMode::Enemy, false);
 }
 
 void CombatHandler::assistTarget() {
-    if (owner_.getState() != WorldState::IN_WORLD) {
-        LOG_WARNING("Cannot assist: not in world");
+    assistUnit(owner_.getTargetGuid(), false);
+}
+
+void CombatHandler::assistUnit(uint64_t unitGuid, bool namedOtherUnit) {
+    // AssistUnit (Wow.exe 0x525EB0).
+    if (!owner_.isInWorld()) return;
+    auto unit = unitGuid != 0 ? owner_.getEntityManager().getEntity(unitGuid) : nullptr;
+    if (!unit) {
+        // A unit asked for by a name other than "target" is unknown; no
+        // target at all is the other message.
+        if (namedOtherUnit)
+            owner_.displayGameMessage("ERR_UNIT_NOT_FOUND", "Unknown unit.");
+        else
+            owner_.displayGameMessage("ERR_GENERIC_NO_TARGET", "You have no target.");
         return;
     }
-
-    if (owner_.getTargetGuid() == 0) {
-        owner_.raiseUiError("You must target someone to assist.");
-        return;
-    }
-
-    auto target = getTarget();
-    if (!target) {
-        owner_.raiseUiError("Invalid target.");
-        return;
-    }
-
-    // Get target name
-    std::string targetName = "Target";
-    if (target->getType() == ObjectType::PLAYER) {
-        auto player = std::static_pointer_cast<Player>(target);
-        if (!player->getName().empty()) {
-            targetName = player->getName();
+    // Their UNIT_FIELD_TARGET; nothing selected is silent.
+    const uint64_t theirTarget = unitTargetGuid(unit);
+    if (theirTarget == 0) return;
+    // Selected when this client knows the unit (0x5259E0: the object, or a
+    // party or raid member's guid).
+    const bool known = owner_.getEntityManager().getEntity(theirTarget) != nullptr ||
+                       isGroupMemberGuid(theirTarget);
+    if (known) setTarget(theirTarget);
+    // assistAttack (0xBD0918): attack it too, through 0x6E4950 -> StartAttack,
+    // which stops a running attack instead when it may not be attacked.
+    if (addons::storedCVarValue("assistAttack", "0") != "0") {
+        auto their = owner_.getEntityManager().getEntity(theirTarget);
+        auto* theirUnit = dynamic_cast<Unit*>(their.get());
+        if (theirUnit && targetNearestFacts(theirTarget, *theirUnit).canAttack) {
+            startAutoAttack(theirTarget);
+        } else if (autoAttacking_) {
+            stopAutoAttack();
         }
-    } else if (target->getType() == ObjectType::UNIT) {
-        auto unit = std::static_pointer_cast<Unit>(target);
-        targetName = unit->getName();
     }
-
-    // Who they have selected, read the one way it is read. See targetGuidOfUnit.
-    const uint64_t assistTargetGuid = unitTargetGuid(target);
-
-    // A target with no target of its own is silent (Wow.exe AssistUnit
-    // 0x525EB0).
-    if (assistTargetGuid == 0) {
-        LOG_INFO("Assist: ", targetName, " has no target");
-        return;
-    }
-
-    // Set our target to their target
-    setTarget(assistTargetGuid);
-    LOG_INFO("Assisting ", targetName, ", now targeting GUID: 0x", std::hex, assistTargetGuid, std::dec);
 }
 
 // ============================================================

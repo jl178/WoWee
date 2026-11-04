@@ -97,4 +97,62 @@ inline bool isWorldClick(double heldMs, bool moved) {
     return heldMs < 200.0;
 }
 
+/// The movement flags that count as moving for a cast (0x739650 reads the
+/// caster's CMovement +0x44 against 0xC0100F): forward, backward, both
+/// strafes, falling, ascending, descending. Turning and pitching do not.
+inline constexpr uint32_t kCastMovingFlags = 0x00C0100Fu;
+
+/// The Spell.dbc words the moving checks read.
+struct MovingCastSpell {
+    uint32_t attributesEx = 0;          // column 5: 0x4 | 0x40 channelled
+    uint32_t attributesEx2 = 0;         // column 6: 0x20 auto-repeat
+    uint32_t targets = 0;               // column 16: 0x20 | 0x40 a location
+    uint32_t interruptFlags = 0;        // column 31: 0x1 movement
+    uint32_t auraInterruptFlags = 0;    // column 32: 0x8 move, 0x10 turning
+    uint32_t channelInterruptFlags = 0; // column 33: 0x8 movement, 0x10 turning
+    int32_t castTimeMs = 0;             // after the casting-time spell mods
+};
+
+/// Whether the client refuses a cast for moving, with SPELL_FAILED_MOVING
+/// (51, "Can't do that while moving", through 0x808200's throttle), before
+/// anything is sent. 0x739650, after the cooldown check:
+///
+///   - a channelled spell whose ChannelInterruptFlags have movement or
+///     turning, unless it is aimed at a location;
+///   - a spell whose InterruptFlags have movement, unless it is aimed at a
+///     location or auto-repeats, when its cast time (0x7FF180, with the spell
+///     mods) is above zero or its aura breaks on moving or turning.
+///
+/// Instant spells, Auto Shot and Shoot, and Blizzard or Flamestrike at the
+/// press (they wait for the ground click) are not refused here.
+inline bool refusedWhileMoving(uint32_t moveFlags, const MovingCastSpell& s) {
+    if ((moveFlags & kCastMovingFlags) == 0) return false;
+    if ((s.targets & 0x60u) != 0) return false;
+    if ((s.attributesEx & 0x44u) != 0 && (s.channelInterruptFlags & 0x18u) != 0) return true;
+    if ((s.interruptFlags & 0x1u) == 0) return false;
+    if ((s.attributesEx2 & 0x20u) != 0) return false;
+    return s.castTimeMs > 0 || (s.auraInterruptFlags & 0x18u) != 0;
+}
+
+/// A spell mod applied as 0x7FDB50 applies it (sums from 0x7FD970): the flat
+/// amount added, then the percent, (base + flat) * (100 + pct) / 100 with the
+/// factor held at zero or more.
+inline int32_t applySpellModStock(int32_t base, int32_t flat, int32_t pct) {
+    int64_t factor = 100 + static_cast<int64_t>(pct);
+    if (factor < 0) factor = 0;
+    return static_cast<int32_t>((static_cast<int64_t>(base) + flat) * factor / 100);
+}
+
+/// Starting to move cancels the player's casts (CGInputControl 0x5FAA40, run
+/// by MoveForwardStart, MoveBackwardStart, the strafes, JumpOrAscendStart,
+/// autorun and two-button running, before the movement packet): every cast
+/// still in flight whose InterruptFlags have movement is cancelled
+/// (0x806620 -> 0x806200: CMSG_CANCEL_CAST, UNIT_SPELLCAST_INTERRUPTED);
+/// a channel whose ChannelInterruptFlags have movement is asked to stop
+/// (0x8008D0: CMSG_CANCEL_CHANNELLING) and ends when the server says so.
+inline bool castCancelledByMoveStart(uint32_t interruptFlags) { return (interruptFlags & 0x1u) != 0; }
+inline bool channelCancelledByMoveStart(uint32_t channelInterruptFlags) {
+    return (channelInterruptFlags & 0x8u) != 0;
+}
+
 } // namespace wowee::game::stock_cast

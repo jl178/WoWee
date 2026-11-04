@@ -125,6 +125,28 @@ A world click is decided on the button's **release**: not a click once held
 released within 200 ms. Then left -> 0x5274F0 -> `CGGameUI::Target` (0x524BF0:
 `CMSG_SET_SELECTION` and `PLAYER_TARGET_CHANGED` at once), right -> 0x5277B0.
 
+### Tab and the other targeting keys
+
+TARGETNEARESTENEMY and its siblings are plain Bindings.xml scripts
+(`TargetNearestEnemy()`), not `runOnUp`: they run from the key-down event
+and 0x524FC0 selects at once (`CMSG_SET_SELECTION`, `PLAYER_TARGET_CHANGED`),
+before the frame's world update. Which unit is picked is in
+`combat-targeting-movement.md` section 1.
+
+### Moving and casting
+
+The client refuses a cast-time spell while moving itself (0x739650,
+`SPELL_FAILED_MOVING`, nothing sent), and starting to move cancels a cast
+from the key event before the movement packet (0x5FAA40: `CMSG_CANCEL_CAST`,
+then `MSG_MOVE_START_*`). Rules in `combat-targeting-movement.md` section 3.
+`CMSG_CANCEL_CAST` is a byte of cast count and the spell id (0x806200).
+
+### Facing with a start
+
+`MoveForwardStart` sends `MSG_MOVE_START_FORWARD` with the current facing;
+a `MSG_MOVE_SET_FACING` follows only when the facing then moves by 0.1 rad
+(0x71AE80). Starting to move does not turn the character.
+
 ### SpellStopCasting (0x809EA0)
 
 Returns 1 or nil. In order: with a current cast or channel (0x7FFDE0,
@@ -242,12 +264,75 @@ Same script, same server, after the change:
 | Press during the GCD | "Spell is not ready yet." 3.5 ms after the pump, nothing sent; the second press 0.3 s later said nothing (throttle) |
 | Press during a cast (on GCD, then off GCD) | both sent; two "Another action is in progress" when the server answered; Holy Light went on to `UNIT_SPELLCAST_SUCCEEDED` |
 | `SpellStopCasting()` | cancelled the cast, returned 1 |
-| Tab target | unchanged, 7.2 ms after the pump in this run (frame-rate dependent) |
+| Tab target | unchanged by this pass (7.2 ms after the pump); see section 5 |
 
 The time a press now waits is the time it is held: a release is acted on at
 the top of the next frame, as stock acts on it from the event.
 
-## 5. Gaps
+## 5. Second pass: targeting, clicks, moving casts, facing
+
+Changes:
+
+- **Tab runs from the key event**: TARGETNEARESTENEMY is an interface-first
+  binding (`LuaEngine::interfaceRunsFirst`), so its Bindings.xml script runs
+  in the pump; GameScreen's poll is left for a pad button or no interface.
+- **One TargetNearest** (`CombatHandler::targetNearest`, rules in
+  `game/tab_target.hpp`) behind TargetNearest, ...Enemy, ...EnemyPlayer,
+  ...Friend, ...FriendPlayer, ...PartyMember, ...RaidMember and the Tab
+  poll, with 0x524FC0's candidates, order and list. The on-screen test is
+  the unit's model sphere against the camera frustum
+  (`CombatHandler::setUnitInViewProvider`, set in Application).
+- **World clicks at the top of the frame**: `GameScreen::
+  processWorldClicksAtInput` runs the left/right click handling after the
+  pump and before the world update; the draw only covers a frame that
+  skipped it. Scripted clicks (`WoweeDebug_Mouse`) now reach Input too
+  (`Input::setVirtualMousePosition`).
+- **Moving and casting by 0x739650/0x5FAA40** (`stock_cast::
+  refusedWhileMoving`, `SpellHandler::refusedForMoving`,
+  `interruptForMoveStart`), with the casting-time spell mods per
+  SpellFamilyFlags bit (`castTimeAfterMods`; SMSG_SET_*_SPELL_MODIFIER bits
+  6-95 were being dropped). The refusal is checked before the dismount.
+- **CMSG_CANCEL_CAST** carried a 4-byte count: AzerothCore read the spell id
+  one byte late and its InterruptNonMeleeSpells, which matches the id, left
+  the cast running - `SpellStopCasting` and the move cancel stopped the bar
+  here while the server finished the spell. Now a byte, as stock.
+- **The facing SET_FACING after a start**: the login camera pan
+  (`CameraController::startIntroPan`) turned the controller's facing with
+  the camera while the drawn character kept the server's; the first step
+  snapped the character 140 degrees and sent `MSG_MOVE_SET_FACING` (in the
+  earlier runs, 8-16 ms after `START_FORWARD`, facing 2.41 -> -0.03). The pan
+  now ends behind the character and leaves the facing alone; the idle
+  orbit likewise.
+
+Measured (same lab server, ~60 fps, scripted keys; "into frame" is from the
+top of the frame that took the event):
+
+| Step | Before | After |
+|---|---|---|
+| Tab -> `CMSG_SET_SELECTION` | 7.2-21.8 ms after the pump (14.4 ms into the frame, inside the UI draw) | 0.09-0.6 ms into the frame, 0 frames (in the pump; the larger figure with the candidate debug walk on) |
+| Left click on empty ground -> `CMSG_SET_SELECTION 0` | in the UI draw, 5-20 ms into the frame | 0.54-0.61 ms into the frame, 0 frames |
+| Holy Light pressed while running | refused by Wowee's own rule (horizontal flags, any cast time), after the dismount | refused at the release, "Can't do that while moving", nothing sent; again 0.4 s later says nothing (throttle) |
+| Seal (instant) while running | sent | sent, 0.13 ms into the frame |
+| Holy Light while jumping | sent (falling was not "moving") | refused (FALLING is in 0xC0100F) |
+| Holy Light while turning in place | sent | sent, and the cast completes |
+| MoveForwardStart during Holy Light | cancel, packet unread by the server; the server interrupted on movement | `CMSG_CANCEL_CAST` then `MSG_MOVE_START_FORWARD` in the same ms, `UNIT_SPELLCAST_INTERRUPTED`; server `SMSG_SPELL_FAILURE` 250 ms later |
+| SpellStopCasting during Holy Light | bar stopped here; server cast unaffected | server answers `SMSG_CAST_FAILED`/`SMSG_SPELL_FAILURE` 190 ms later, no `SMSG_SPELL_GO` |
+| First MoveForwardStart after login | START_FORWARD facing 2.41, SET_FACING -0.03 16 ms later | START_FORWARD facing 0.045, no SET_FACING |
+
+Tab order checked live: with the player facing a cluster, the list was the
+units in the cone nearest first (10, 10, 10, 10, 10, 11, 17, 21 yd); with the
+camera swung round (`WoweeDebug_Camera(180)`) the same units were off screen
+and Tab selected nothing and left the target alone; a pause of 3.5 s went
+back to the nearest; `TargetNearestEnemy(1)` stepped back one.
+
+Tests: `tests/test_tab_target.cpp` (cone, reach, creature types, modes,
+PvP, order, stepping, wrapping and its 1 s rebuild, the 3 s expiry, a
+fresh list re-selecting the target, a clicked target, dead entries,
+another mode), `tests/test_stock_cast_timing.cpp` (moving refusal, spell
+mods, move-start cancels), `tests/test_input_integration.cpp` (Tab runs
+from the key event).
+
+## 6. Gaps
 
 - **Pad buttons** bound to the action bar still cast on the press, from
   GameScreen's poll in the UI draw.
@@ -259,13 +344,6 @@ the top of the next frame, as stock acts on it from the event.
   Haste is read only on the 3.3.5a field layout.
 - **Category cooldowns** are not part of the client-side check; only the
   spell's own cooldown and the GCD are. The server still refuses those.
-- **Tab target and world clicks** are still handled by GameScreen during the
-  UI draw, after the world draw: the packet goes out in the same frame but
-  5-20 ms after the pump, where stock sends it from the event. The frame the
-  target frame updates in is the same.
-- **Moving and casting**: Wowee still refuses a cast-time spell while moving
-  locally ("Can't do that while moving"); where stock checks that was not
-  traced.
 - The melee range pre-check (8 yd "Out of range.") and Charge's checks are
   Wowee's own and were left.
 - `SpellStopCasting`'s first branch (0x800BA0, `+0x1858 & 4` -> 0x6E1660) is
@@ -275,5 +353,24 @@ the top of the next frame, as stock acts on it from the event.
   is not touched, where stock fires it with the new cast's id.
 - Stock was not measured live (no instrumented stock client); its timing is
   from the code paths above.
-- `MSG_MOVE_SET_FACING` 8 ms after `MSG_MOVE_START_FORWARD` on a scripted
-  `MoveForwardStart` was seen in both runs and not chased.
+- Second pass (section 5):
+- **Pad buttons** for Tab still go through GameScreen's poll in the UI draw.
+- **Once per macro**: stock lets one TargetNearest* run per macro
+  (0xBEAF44 bit 0x20); Wowee lets every call in a macro run.
+- **CanAttack/CanAssist** are approximations from the faction reaction,
+  the unit flags and, for players, the PvP byte; duels are not known
+  (no duel arbiter), and the vehicle as reference (0x6DD060) and the
+  commentator rule are not done.
+- **The on-screen test** uses the camera at the time of the press and the
+  character renderer's bounds; a unit with no character instance (not yet
+  drawn) is never a candidate, as an undrawn model is not in stock.
+- **The server's interrupt after a local one** is shown again: Wowee's
+  `SMSG_SPELL_FAILURE` handler prints "Interrupted" and "Holy Light:
+  Interrupted" with a chat line, and fires a second INTERRUPTED/STOP with
+  no spell. Not changed here.
+- **An auto-repeat shot in flight** is not cancelled by a move start
+  (Wowee's auto-repeat is not a cast in its cast state).
+- **SitStandOrDescendStart** cancels only through START_DESCEND; a stand-up
+  move key while sitting is not a start in Wowee's opcode list.
+- **Turning while channelling** (ChannelInterruptFlags 0x10) is left to the
+  server, as stock leaves it.

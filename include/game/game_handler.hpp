@@ -4268,9 +4268,6 @@ public:
     auto& pendingGameObjectInteractGuidRef() { return pendingGameObjectInteractGuid_; }
 
     // ── Tab Cycling ──────────────────────────────────────────────────
-    auto& tabCycleIndexRef() { return tabCycleIndex; }
-    auto& tabCycleListRef() { return tabCycleList; }
-    auto& tabCycleStaleRef() { return tabCycleStale; }
 
     // ── UI & Event Callbacks ─────────────────────────────────────────
     auto& achievementEarnedCallbackRef() { return achievementEarnedCallback_; }
@@ -4442,6 +4439,18 @@ public:
         uint32_t schoolMask = 0; uint8_t dispelType = 0; uint32_t attrEx = 0;
         /// Spell.dbc Attributes, the base word. Bit 6 (0x40) is passive.
         uint32_t attr = 0;
+        /// AttributesEx2/Ex3, InterruptFlags, AuraInterruptFlags,
+        /// ChannelInterruptFlags (columns 6, 7, 31-33 of the 3.3.5a record):
+        /// what the moving checks read (stock_cast::refusedWhileMoving).
+        uint32_t attrEx2 = 0;
+        uint32_t attrEx3 = 0;
+        uint32_t interruptFlags = 0;
+        uint32_t auraInterruptFlags = 0;
+        uint32_t channelInterruptFlags = 0;
+        /// SpellFamilyName and the 96-bit SpellFamilyFlags (208, 209-211):
+        /// which talent and aura spell mods apply to it (0x7FD970).
+        uint32_t spellFamilyName = 0;
+        uint32_t spellFamilyFlags[3] = {0, 0, 0};
         // Spell.dbc Targets bitmask (SpellCastTargetFlags) - 0x10 = TARGET_FLAG_ITEM
         uint32_t targetFlags = 0;
         // Spell.dbc RangeIndex resolved against SpellRange.dbc. A max range of 0
@@ -4797,9 +4806,6 @@ private:
     uint64_t focusGuid = 0;              // Focus target
     uint64_t lastTargetGuid = 0;         // Previous target
     uint64_t mouseoverGuid_ = 0;         // Set each frame by nameplate renderer
-    std::vector<uint64_t> tabCycleList;
-    int tabCycleIndex = -1;
-    bool tabCycleStale = true;
 
     // Heartbeat
     uint32_t pingSequence = 0;               // Ping sequence number (increments)

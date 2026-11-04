@@ -2883,7 +2883,6 @@ void EntityController::handleMovementUpdate(const UpdateBlock& block) {
 }
 
 void EntityController::finalizeUpdateObjectBatch(bool newItemCreated) {
-    owner_.tabCycleStaleRef() = true;
     // Entity count logging disabled
 
     // Deferred rebuild: if new item objects were created in this packet, rebuild
@@ -3036,7 +3035,6 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
     // Clean up cached auras
     if (owner_.getSpellHandler()) owner_.getSpellHandler()->removeUnitAuraCache(data.guid);
 
-    owner_.tabCycleStaleRef() = true;
 }
 
 // Name Queries

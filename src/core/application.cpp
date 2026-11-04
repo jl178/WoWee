@@ -41,6 +41,7 @@
 #include "rendering/vk_context.hpp"
 #include "audio/npc_voice_manager.hpp"
 #include "rendering/camera.hpp"
+#include "rendering/frustum.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/terrain_renderer.hpp"
 #include "rendering/terrain_manager.hpp"
@@ -2711,6 +2712,15 @@ void Application::run() {
                 ui::noteInterfaceConsumedKey(static_cast<ImGuiKey>(key));
         ui::KeybindingManager::getInstance().updateInput();
 
+        // World clicks from this frame's input, before the world is updated
+        // or drawn: a click selects and sends CMSG_SET_SELECTION here, at the
+        // top of the frame, as stock does from the event (docs/re/
+        // input-timing.md). GameScreen's draw only covers a frame that skipped
+        // this.
+        if (state == AppState::IN_GAME && uiManager && gameHandler) {
+            uiManager->getGameScreen().processWorldClicksAtInput(*gameHandler);
+        }
+
         // Update application state
         try {
             FrameMark;
@@ -3115,6 +3125,25 @@ void Application::setState(AppState newState) {
                 // The minimap's radius and turn, for MINIMAP_PING and
                 // Minimap:GetPingPosition, which carry a ping as a fraction
                 // of the map rather than as a place.
+                // TargetNearest's on-screen test (Wow.exe 0x524440 -> 0x77F0B0):
+                // a unit is a candidate only while its model's bounding sphere
+                // is inside the view of the frame last drawn. A unit with no
+                // model drawn is not one.
+                if (auto* combat = gameHandler->getCombatHandler()) {
+                    combat->setUnitInViewProvider([this](uint64_t guid) {
+                        if (!renderer || !renderer->getCamera() || !gameHandler) return true;
+                        auto* characters = renderer->getCharacterRenderer();
+                        const uint32_t instance = gameHandler->resolveUnitRenderInstance(guid);
+                        glm::vec3 center(0.0f);
+                        float radius = 0.0f;
+                        if (!characters || instance == 0 ||
+                            !characters->getInstanceBounds(instance, center, radius))
+                            return false;
+                        rendering::Frustum view;
+                        view.extractFromMatrix(renderer->getCamera()->getViewProjectionMatrix());
+                        return view.intersectsSphere(center, radius);
+                    });
+                }
                 gameHandler->setMinimapViewProvider([this](float& radius, float& bearing) {
                     auto* map = renderer ? renderer->getMinimap() : nullptr;
                     if (!map) return false;

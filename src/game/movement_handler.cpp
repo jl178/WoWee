@@ -1,4 +1,5 @@
 #include "game/movement_handler.hpp"
+#include "core/input_trace.hpp"
 #include "game/taxi_rules.hpp"
 #include "game/global_strings.hpp"
 #include "game/stock_movement.hpp"
@@ -644,18 +645,23 @@ void MovementHandler::sendMovement(Opcode opcode) {
                                static_cast<uint32_t>(MovementFlags::STRAFE_RIGHT);
     const bool wasMoving = (movementInfo.flags & kMoveMask) != 0;
 
-    // Cancel any timed non-channel cast, plus food/water restoration, the moment
-    // the player starts moving. Other channels retain their normal behavior.
-    if (!movingOtherUnit() && owner_.isCasting() && (!owner_.isChanneling() || owner_.isRestoring())) {
-        const bool isPositionalMove =
+    // Starting to move: CGInputControl 0x5FAA40, before the movement packet.
+    // Casts whose InterruptFlags have movement are cancelled, a channel whose
+    // ChannelInterruptFlags have it is asked to stop (SpellHandler::
+    // interruptForMoveStart). Run by MoveForward/Backward/Strafe starts,
+    // JumpOrAscendStart and SitStandOrDescendStart, autorun and two-button
+    // running - here, the start opcodes they send. Turning is not one.
+    if (!movingOtherUnit() && (owner_.isCasting() || owner_.isChanneling())) {
+        const bool isMoveStart =
             opcode == Opcode::MSG_MOVE_START_FORWARD  ||
             opcode == Opcode::MSG_MOVE_START_BACKWARD ||
             opcode == Opcode::MSG_MOVE_START_STRAFE_LEFT  ||
             opcode == Opcode::MSG_MOVE_START_STRAFE_RIGHT ||
-            opcode == Opcode::MSG_MOVE_JUMP;
-        if (isPositionalMove) {
-            LOG_INFO("Movement: opcode ", static_cast<int>(opcode), " interrupts the cast");
-            owner_.cancelCast();
+            opcode == Opcode::MSG_MOVE_JUMP ||
+            opcode == Opcode::MSG_MOVE_START_ASCEND ||
+            opcode == Opcode::MSG_MOVE_START_DESCEND;
+        if (isMoveStart && owner_.getSpellHandler()) {
+            owner_.getSpellHandler()->interruptForMoveStart();
         }
     }
 
@@ -1001,6 +1007,13 @@ void MovementHandler::sendMovement(Opcode opcode) {
         ? owner_.getPacketParsers()->buildMovementPacket(opcode, wireInfo, activeMoverGuid())
         : MovementPacket::build(opcode, wireInfo, activeMoverGuid());
     owner_.getSocket()->send(packet);
+    // The facing each movement packet carried, under WOWEE_INPUT_TRACE: a
+    // SET_FACING that follows a start says by how much the facing moved.
+    if (core::input_trace::enabled()) {
+        LOG_WARNING("[input] move 0x", std::hex, static_cast<uint32_t>(wireOpcode(opcode)),
+                    std::dec, " facing ", movementInfo.orientation, " flags 0x", std::hex,
+                    movementInfo.flags, std::dec);
+    }
     lastSentPos_ = glm::vec3(movementInfo.x, movementInfo.y, movementInfo.z);
     hasSentMovement_ = true;
     // Every movement packet restarts the heartbeat's 500 ms (0x71F0C0 ->
@@ -2696,7 +2709,6 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
         owner_.corpseGuidRef()             = 0;
         owner_.clearHostileAttackers();
         owner_.stopAutoAttack();
-        owner_.tabCycleStaleRef() = true;
         owner_.resetCastState();
 
         const bool deeprunTram = owner_.getCurrentMapId() == 369;

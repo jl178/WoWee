@@ -203,8 +203,14 @@ void CameraController::startIntroPan(float durationSec, float orbitDegrees) {
     introTimer = 0.0f;
     idleTimer_ = 0.0f;
     introDuration = std::max(0.5f, durationSec);
-    introStartYaw = yaw;
-    introEndYaw = yaw - orbitDegrees;
+    // The pan swings the camera round to where it stands now - behind the
+    // character - and leaves the character's facing alone. It used to end
+    // the pan's length away and turn the facing with it, while the drawn
+    // character kept the server's facing: the first step then snapped the
+    // character 140 degrees and sent a MSG_MOVE_SET_FACING right after
+    // MSG_MOVE_START_FORWARD, which the stock client (no login pan) never does.
+    introStartYaw = yaw + orbitDegrees;
+    introEndYaw = yaw;
     introOrbitDegrees = orbitDegrees;
     introStartPitch = pitch;
     introEndPitch = pitch;
@@ -3199,7 +3205,6 @@ void CameraController::update(float deltaTime) {
                 float degreesPerSec = introOrbitDegrees / introDuration;
                 yaw -= degreesPerSec * deltaTime;
                 camera->setRotation(yaw, pitch);
-                facingYaw = yaw;
             } else {
                 float t = (introDuration > 0.0f) ? std::min(introTimer / introDuration, 1.0f) : 1.0f;
                 yaw = introStartYaw + (introEndYaw - introStartYaw) * t;
@@ -3207,7 +3212,6 @@ void CameraController::update(float deltaTime) {
                 currentDistance = introStartDistance + (introEndDistance - introStartDistance) * t;
                 userTargetDistance = introEndDistance;
                 camera->setRotation(yaw, pitch);
-                facingYaw = yaw;
                 if (t >= 1.0f) {
                     introActive = false;
                 }

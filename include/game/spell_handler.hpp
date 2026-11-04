@@ -114,6 +114,8 @@ public:
     /// Record a spell cast by using an item - pre-WotLK mounts are items, and
     /// their on-use spell never passes through castSpell().
     void noteGroundCastSpell(uint32_t spellId) { lastGroundCastSpellId_ = spellId; }
+    /// What starting to move does to the player's cast (0x5FAA40).
+    void interruptForMoveStart();
     void cancelCast();
     void cancelAura(uint32_t spellId);
 
@@ -586,6 +588,10 @@ private:
     stock_cast::CastErrorThrottle castErrorThrottle_;
     void startPredictedGcd(uint32_t spellId);
     void refuseCastLocally(uint32_t spellId, uint8_t result);
+    /// The cast time after the player's SPELLMOD_CASTING_TIME mods (0x7FDB50).
+    int32_t castTimeAfterMods(uint32_t spellId, int32_t baseMs);
+    /// 0x739650's moving checks for the player's current movement flags.
+    bool refusedForMoving(uint32_t spellId);
     /// Text and voice for a refused cast, through the throttle. False when
     /// the throttle held it back.
     bool showCastFailure(uint32_t spellId, uint8_t result, uint32_t miscArg, uint32_t miscArg2,
