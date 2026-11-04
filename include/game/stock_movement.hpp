@@ -364,4 +364,81 @@ inline bool surfaceHopDue(bool ascending, float depthOverFeet, float collisionHe
     return ascending && depthOverFeet - swimFloatDepth(collisionHeight) < kSurfaceHopWindow;
 }
 
+// ---- keys pressed in the air (0x988A20, 0x988B00, 0x98C8D0, 0x98BF80) -----
+//
+// While FALLING with a direction, a direction key changes nothing about the
+// fall: it leaves a PENDING flag, which the landing applies (0x6EB3B0). The
+// packet (START_FORWARD and the rest) is sent at once all the same, carrying
+// the pending flag. A fall with no direction at all takes the first one at
+// once (the standing-jump drift). The flags are MovementFlags as on the wire.
+inline constexpr uint32_t kPendingStop = 0x4000;
+inline constexpr uint32_t kPendingStrafeStop = 0x8000;
+inline constexpr uint32_t kPendingForward = 0x10000;
+inline constexpr uint32_t kPendingBackward = 0x20000;
+inline constexpr uint32_t kPendingStrafeLeft = 0x40000;
+inline constexpr uint32_t kPendingStrafeRight = 0x80000;
+inline constexpr uint32_t kPendingMask = 0x1FC000;  // 0x6EB3B0 clears these
+
+/// START_FORWARD / START_BACKWARD (0x988A20 with force 0).
+inline uint32_t startForwardBackward(uint32_t flags, bool forward) {
+    flags &= ~(kPendingStop | kPendingForward | kPendingBackward);
+    if ((flags & kFalling) && (flags & 0xF)) {
+        if (forward && !(flags & kForward)) flags |= kPendingForward;
+        if (!forward && !(flags & kBackward)) flags |= kPendingBackward;
+        return flags;
+    }
+    return forward ? ((flags & ~kBackward) | kForward) : ((flags & ~kForward) | kBackward);
+}
+
+/// START_STRAFE_LEFT / RIGHT (0x988B00); nothing under flags2 NO_STRAFE.
+inline uint32_t startStrafe(uint32_t flags, bool left, uint32_t flags2 = 0) {
+    flags &= ~(kPendingStrafeStop | kPendingStrafeLeft | kPendingStrafeRight);
+    if (flags2 & kFlag2NoStrafe) return flags;
+    if ((flags & kFalling) && (flags & 0xF)) {
+        if (left && !(flags & kStrafeLeft)) flags |= kPendingStrafeLeft;
+        if (!left && !(flags & kStrafeRight)) flags |= kPendingStrafeRight;
+        return flags;
+    }
+    return left ? ((flags & ~kStrafeRight) | kStrafeLeft) : ((flags & ~kStrafeLeft) | kStrafeRight);
+}
+
+/// MSG_MOVE_STOP (0x98C8D0): not moving forward or back, only a pending
+/// start is dropped; falling, the stop waits for the landing.
+inline uint32_t stopForwardBackward(uint32_t flags) {
+    if (!(flags & (kForward | kBackward))) return flags & ~(kPendingForward | kPendingBackward);
+    if (flags & kFalling) return (flags & ~(kPendingForward | kPendingBackward)) | kPendingStop;
+    return flags & ~(kForward | kBackward | kPendingStop);
+}
+
+/// MSG_MOVE_STOP_STRAFE (0x98BF80), the same for the strafe pair.
+inline uint32_t stopStrafe(uint32_t flags) {
+    if (!(flags & (kStrafeLeft | kStrafeRight)))
+        return flags & ~(kPendingStrafeLeft | kPendingStrafeRight);
+    if (flags & kFalling)
+        return (flags & ~(kPendingStrafeLeft | kPendingStrafeRight)) | kPendingStrafeStop;
+    return flags & ~(kStrafeLeft | kStrafeRight | kPendingStrafeStop);
+}
+
+/// The landing (0x988490 clears FALLING, then 0x6EB3B0): the pending stops,
+/// then the pending starts, then every pending flag cleared.
+inline uint32_t landWithPendingKeys(uint32_t flags, uint32_t flags2 = 0) {
+    const uint32_t pending = flags;
+    flags &= ~kFalling;
+    if (pending & kPendingStop) flags &= ~(kForward | kBackward);
+    if (pending & kPendingStrafeStop) flags &= ~(kStrafeLeft | kStrafeRight);
+    if (pending & (kPendingForward | kPendingBackward))
+        flags = startForwardBackward(flags, (pending & kPendingForward) != 0);
+    if (pending & (kPendingStrafeLeft | kPendingStrafeRight))
+        flags = startStrafe(flags, (pending & kPendingStrafeLeft) != 0, flags2);
+    return flags & ~kPendingMask;
+}
+
+/// Whether a landing sends MSG_MOVE_FALL_LAND (0x73D4A0): the fall height
+/// (0x986FB0: the fall's start z less the landing z, plus v^2 / 2g of an
+/// upward start speed - a jump's rise) above 1/36 yd. `apexZ` is that start
+/// z plus the rise.
+inline bool fallLandDue(float apexZ, float landZ) {
+    return apexZ - landZ > kFallLandMinHeight;
+}
+
 }  // namespace wowee::game::stock_movement

@@ -640,8 +640,9 @@ private:
     /// fed this frame's dry-ground footfalls, stepped, released a few frames
     /// after it goes off.
     void updateFootfallDust(float fxDt);
-    /// The "Corpses settle to the slope" enhancement
-    /// (CharacterRenderer::updateCorpseSettle).
+    /// The "Corpses settle to the slope" and "Feet on the ground" enhancements
+    /// (CharacterRenderer::updateCorpseSettle, updateFootPlacement), which
+    /// read the same floors.
     void updateCorpseSettle(float fxDt);
     /// The local lights culled to a screen grid for this frame's camera
     /// (GPUPerFrameData::localLightTiles). Only with the point lights on.

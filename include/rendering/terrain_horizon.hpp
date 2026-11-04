@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rendering/horizon_detail.hpp"
 #include "rendering/stock_terrain.hpp"
 #include "rendering/vk_utils.hpp"
 
@@ -25,8 +26,14 @@ class Camera;
 /// discard on the view depth; the result is the same silhouette wherever no
 /// nearer ground was drawn. docs/re/terrain.md section 8.
 ///
+/// The WDL's low-detail WMOs (setFarMesh) are drawn in the same pass by the
+/// same rule. With setLit (E11, horizon_detail.hpp) both are shaded by the sun
+/// under the fog colour, through pipelines and a normal buffer made on first
+/// use; off, those are never made and the pass is the stock one.
+///
 /// Owned by TerrainRenderer and recorded on its worker, after the chunks.
-/// setTiles is main-thread only; cull and record only read.
+/// setTiles, setFarMesh and setLit are main-thread only; cull and record only
+/// read.
 class TerrainHorizon {
 public:
     bool initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout);
@@ -36,6 +43,11 @@ public:
 
     /// The map's tiles, replacing the last map's; empty clears the horizon.
     void setTiles(const std::vector<stock_terrain::WdlTile>& tiles);
+    /// The WDL's low-detail buildings, replacing the last map's.
+    void setFarMesh(horizon_detail::FarMesh mesh);
+    /// E11 on or off: on makes the lit pipelines and the normals (main
+    /// thread, at once); off releases them once no frame can use them.
+    void setLit(bool lit);
 
     /// The tiles in reach of a far clip and in the view.
     void cull(const Camera& camera, float farClip);
@@ -43,8 +55,13 @@ public:
 
 private:
     bool buildPipeline();
-    VkPipeline buildOne(const char* fragPath);
+    VkPipeline buildOne(const char* vertPath, const char* fragPath, bool lit);
     void releaseBuffers();
+    void releaseFarBuffers();
+    /// The lit pipelines and the normals, made if missing. False if they
+    /// cannot be. Main thread.
+    bool ensureLit();
+    void releaseLit();
 
     struct Tile {
         glm::vec3 center{0.0f};
@@ -68,6 +85,25 @@ private:
     std::vector<uint32_t> visibleFar_;  // wholly past it
     std::vector<uint8_t> coarse_;       // per tile: draw the coarse level
     glm::vec2 depthRange_{0.0f};
+    float farClip_ = 0.0f;
+
+    // E11: the shaded horizon. The tiles' heights are kept so their normals
+    // can be made when it is first turned on.
+    bool lit_ = false;
+    bool litFailed_ = false;
+    bool drawLit_ = false;                     // this frame's cull chose it
+    std::vector<stock_terrain::WdlTile> source_;
+    VkPipeline litPipeline_ = VK_NULL_HANDLE;
+    VkPipeline litFarPipeline_ = VK_NULL_HANDLE;
+    AllocatedBuffer normals_{};
+
+    // The WDL's low-detail WMOs: positions and indices always (stock draws
+    // them), normals uploaded with the lit pipelines.
+    horizon_detail::FarMesh far_;
+    AllocatedBuffer farPositions_{};
+    AllocatedBuffer farNormals_{};
+    AllocatedBuffer farIndices_{};
+    std::vector<uint32_t> farVisible_;
 };
 
 }  // namespace rendering

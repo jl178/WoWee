@@ -216,6 +216,10 @@ public:
     void setSunSpecular(const glm::vec3& colour) { sunSpecular_ = colour; }
     /// The map's WDL, for the distant mountains (TerrainHorizon). Main thread.
     void setHorizonTiles(const std::vector<stock_terrain::WdlTile>& tiles);
+    /// The WDL's low-detail buildings, drawn with the horizon. Main thread.
+    void setHorizonWmos(horizon_detail::FarMesh mesh);
+    /// "Lit far horizon" (E11): shade the horizon with the sun under the fog.
+    void setHorizonLit(bool lit);
 
     void setShadowMap(VkDescriptorImageInfo /*depthInfo*/, const glm::mat4& /*lightSpaceMat*/) {}
     void clearShadowMap() {}

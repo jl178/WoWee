@@ -2153,7 +2153,8 @@ void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId,
     // A dead unit stays down. Idle, Ready, swings, flinches, emote clears,
     // cast ends and dismounts all reach here from their own paths while the
     // unit lies dead; one gate here instead of a Death check in each of them.
-    if (instance.deathLocked && animationId != anim::DEATH && animationId != anim::DEAD) {
+    if (instance.deathLocked && animationId != anim::DEATH && animationId != anim::DEAD &&
+        animationId != anim::DECAY) {
         return;
     }
     auto& model = models[instance.modelId].data;
@@ -2299,7 +2300,8 @@ void CharacterRenderer::playDeath(uint32_t instanceId, bool alreadyDead) {
     if (it == instances.end()) return;
     auto& inst = it->second;
     const bool wasDown = inst.deathLocked &&
-        (inst.currentAnimationId == anim::DEATH || inst.currentAnimationId == anim::DEAD);
+        (inst.currentAnimationId == anim::DEATH || inst.currentAnimationId == anim::DEAD ||
+         inst.currentAnimationId == anim::DECAY);
     inst.deathLocked = true;
     inst.isDead = true;
     // Already lying there: a second report of the same death (health and the
@@ -2307,7 +2309,18 @@ void CharacterRenderer::playDeath(uint32_t instanceId, bool alreadyDead) {
     // not stand it up to fall again.
     if (wasDown) return;
 
-    if (hasAnimation(instanceId, anim::DEATH)) {
+    if (alreadyDead && hasAnimation(instanceId, anim::DEATH) && hasAnimation(instanceId, anim::DECAY)) {
+        // A corpse with Decay coming into view: already decayed, Decay's
+        // last frame (see the death hold in update).
+        playAnimation(instanceId, anim::DECAY, /*loop=*/false);
+        const auto mIt = models.find(inst.modelId);
+        if (mIt != models.end() && inst.currentSequenceIndex >= 0 &&
+            inst.currentSequenceIndex < static_cast<int>(mIt->second.data.sequences.size())) {
+            inst.animationTime = static_cast<float>(
+                mIt->second.data.sequences[inst.currentSequenceIndex].duration);
+        }
+        inst.blendDurationMs = 0.0f;
+    } else if (hasAnimation(instanceId, anim::DEATH)) {
         playAnimation(instanceId, anim::DEATH, /*loop=*/false);
         if (alreadyDead) {
             // A corpse coming into view is already down: the last frame of
@@ -2668,8 +2681,15 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
                         const uint32_t resumeAnim =
                             inst.oneShotReturnAnim != 0 ? inst.oneShotReturnAnim : anim::STAND;
                         playAnimation(pair.first, resumeAnim, true);
+                    } else if (inst.deathLocked && inst.currentAnimationId == anim::DEATH &&
+                               hasAnimation(pair.first, anim::DECAY)) {
+                        // Down: a corpse model with Decay plays it once and
+                        // holds its last frame (Wow.exe 0x744870, the Death
+                        // animation's end callback; the sand vortex and the
+                        // vapor are the creatures that have one).
+                        playAnimation(pair.first, anim::DECAY, /*loop=*/false);
                     } else {
-                        // Stay on last frame of death
+                        // Stay on last frame of death (or of Decay)
                         inst.animationTime = static_cast<float>(seq.duration);
                     }
                 }
@@ -3311,6 +3331,15 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
             }
         }
     }
+    // E9: the feet put on the floor under them (foot_ik.hpp), with the
+    // targets updateFootPlacement left; the ends as the animation had them
+    // are kept for its next floor reads. Off, or a model without two legs,
+    // this is one compare.
+    if (footIkOn_ && gm.footRig.valid) {
+        foot_ik::apply(instance.boneMatrices, gm.footRig, instance.footIk.targets, instance.footIk.ends);
+        instance.footIk.endsValid = true;
+    }
+
     // Once per call, not once per last bone. The bump used to sit inside the
     // loop under `i == numBones - 1`, which this loop does reach - but a
     // counter that only advances on a condition inside the block it guards is
@@ -4561,6 +4590,7 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
 
         if (!inst.boneSet[frameIndex]) return;
         ++drawn;
+        inst.sunShadowStamp = sunShadowStamp_;
         if (casterSpheres) casterSpheres->emplace_back(maskCentre, maskRadius);
 
         // Params at set 1 and bones at set 2, together, per instance.
@@ -4904,6 +4934,108 @@ void CharacterRenderer::updateCorpseSettle(float deltaTime, const FloorHeightFn*
         active = true;
     }
     corpseSettleActive_ = active;
+}
+
+void CharacterRenderer::updateFootPlacement(float deltaTime, const FloorHeightFn* floor,
+                                            const glm::vec3& cameraPos) {
+    footIkOn_ = floor != nullptr;
+    if (!floor && !footIkActive_) return;
+    namespace fk = foot_ik;
+    bool active = false;
+    for (auto& [id, inst] : instances) {
+        (void)id;
+        fk::State& f = inst.footIk;
+        if (!floor) {
+            f = fk::State{};
+            continue;
+        }
+        const bool unit = inst.cachedModel && !inst.isAttachedItem && !inst.isEffectModel &&
+                          !inst.isSceneModel && !inst.hasOverrideModelMatrix && inst.mountedOn == 0;
+        if (!unit) {
+            if (f.targets.weight > 0.0f || f.havePosition) f = fk::State{};
+            continue;
+        }
+        // The legs, found once per model (the rule in foot_ik::findLegs).
+        if (!inst.cachedModel->footRigAnalyzed) {
+            auto mit = models.find(inst.modelId);
+            if (mit == models.end()) continue;
+            M2ModelGPU& gm = mit->second;
+            gm.footRigAnalyzed = true;
+            const auto& data = gm.data;
+            std::vector<fk::BoneInfo> info(data.bones.size());
+            for (size_t i = 0; i < data.bones.size(); ++i) {
+                info[i].parent = data.bones[i].parentBone;
+                info[i].keyBoneId = data.bones[i].keyBoneId;
+                info[i].pivot = data.bones[i].pivot;
+            }
+            for (const auto& v : data.vertices) {
+                for (int j = 0; j < 4; ++j) {
+                    if (v.boneWeights[j] > 0.0f && v.boneIndices[j] < info.size()) {
+                        info[v.boneIndices[j]].weight += v.boneWeights[j];
+                    }
+                }
+            }
+            gm.footRig = fk::findLegs(info);
+        }
+        const fk::Rig& rig = inst.cachedModel->footRig;
+        if (!rig.valid) continue;
+
+        // The unit's speed over the ground, eased; a jump of more than a few
+        // yards in a frame is a teleport, not speed.
+        if (f.havePosition && deltaTime > 0.0f) {
+            float v = glm::length(glm::vec2(inst.position - f.lastPosition)) / deltaTime;
+            if (v > 60.0f) v = 0.0f;
+            f.speed = fk::ease(f.speed, v, deltaTime, fk::kSpeedSeconds);
+        }
+        f.lastPosition = inst.position;
+        f.havePosition = true;
+
+        const bool inRange = glm::distance(inst.position, cameraPos) < fk::kMaxDistance;
+        const bool stands = inst.visible && !inst.isDead && !inst.deathLocked &&
+                            fk::standsOnFeet(inst.currentAnimationId);
+        const float want = (inRange && stands) ? fk::speedWeight(f.speed) : 0.0f;
+        f.targets.weight = fk::ease(f.targets.weight, want, deltaTime, fk::kWeightSeconds);
+        if (want <= 0.0f && f.targets.weight < 0.01f) {
+            // Faded out: back to the stock pose, and nothing read until it
+            // comes back.
+            f.targets = fk::Targets{};
+            f.read = false;
+            continue;
+        }
+        active = true;
+        if (!f.endsValid) continue;
+
+        // The floor under the unit, ahead of it and under each foot, read
+        // again only once the unit or that foot has moved.
+        const float scale = std::max(inst.scale, 1e-3f);
+        const float legWorld = rig.legLength * scale;
+        const glm::mat4 model = getModelMatrix(inst);
+        const glm::vec3 p = inst.position;
+        const float yaw = inst.rotation.z;
+        const glm::vec2 fwd(std::cos(yaw), std::sin(yaw));
+        const glm::vec2 left(-fwd.y, fwd.x);
+        const float frontDist = std::max(0.3f, 0.5f * legWorld);
+        if (!f.read || glm::distance(glm::vec2(p), f.unitReadAt) > fk::kResampleDistance) {
+            f.unitFloor = (*floor)(p.x, p.y, p.z);
+            const glm::vec2 a = glm::vec2(p) + fwd * frontDist;
+            f.frontFloor = (*floor)(a.x, a.y, p.z);
+            f.unitReadAt = glm::vec2(p);
+        }
+        glm::vec2 footXY[2];
+        for (int l = 0; l < 2; ++l) {
+            footXY[l] = glm::vec2(model * glm::vec4(f.ends[l], 1.0f));
+            if (!f.read || glm::distance(footXY[l], f.footReadAt[l]) > fk::kResampleDistance) {
+                f.footFloor[l] = (*floor)(footXY[l].x, footXY[l].y, p.z);
+                f.footReadAt[l] = footXY[l];
+            }
+        }
+        f.read = true;
+        const float leftSpan = glm::dot(footXY[0] - footXY[1], left);
+        const fk::Targets aim = fk::aim(f.unitFloor, f.footFloor[0], f.footFloor[1], f.frontFloor,
+                                        frontDist, leftSpan, legWorld, scale);
+        fk::stepTargets(f.targets, aim, deltaTime);
+    }
+    footIkActive_ = active;
 }
 
 void CharacterRenderer::setMotionEnhancements(int secondaryMotion, const glm::vec3& windWorld,
@@ -6160,7 +6292,7 @@ namespace wowee {
 namespace rendering {
 
 void CharacterRenderer::collectUnitBlobs(const glm::vec3& cameraPos, float maxDist, size_t maxCount,
-                                         std::vector<BlobSource>& out) const {
+                                         std::vector<BlobSource>& out, bool skipSunShadowCasters) const {
     out.clear();
     std::vector<std::pair<float, BlobSource>> found;
     const float maxSq = maxDist * maxDist;
@@ -6169,6 +6301,7 @@ void CharacterRenderer::collectUnitBlobs(const glm::vec3& cameraPos, float maxDi
             inst.hasOverrideModelMatrix || inst.mountedOn != 0) {
             continue;
         }
+        if (skipSunShadowCasters && inst.sunShadowStamp == sunShadowStamp_) continue;
         const M2ModelGPU* model = inst.cachedModel;
         if (!model) {
             auto it = models.find(inst.modelId);

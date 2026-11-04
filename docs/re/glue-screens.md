@@ -227,6 +227,7 @@ MainMenu_Northrend 2.094 / 2778.
 | Create start | Human male warrior, look 0 | random sex/race/class/look; looks kept per race and sex |
 | Random name | a whole NameGen row | the 3-letter chain |
 | Loading art | wide above 1.5, wide art stretched to the window | wide above 4/3 + 0.001, both fitted at their own aspect, `Interface\Glues\loading` fallback |
+| Saved volumes | applied when the game screen first drew: the glue music, ambience and sounds played at the audio defaults (music at 30%); stock has its Sound_* CVars from Config.wtf before the first frame | applied at startup, right after the audio managers are made (`Application::initialize`, `SettingsPanel::applyAudioVolumes`); the game screen still re-applies them with the saved mute |
 | Loading bar | 512x64 border at fixed screen units, glow and glass, any fill order | border/fill from the layout table in the art's rectangle, border and fill only, never moves back |
 
 ### Not done
@@ -236,11 +237,18 @@ MainMenu_Northrend 2.094 / 2778.
 - **Ghost extras**: the `Ghost_state` effect model on the Base attachment, the
   ghost light set and the ghost full-screen effect.
 - **Pillarboxing** above 16:9: Wowee fills the window instead (the glue UI is
-  laid out across the whole window too).
+  laid out across the whole window too). Checked 2026-11-04 against
+  GlueParent_OnLoad (GlueParent.lua): it runs once at load - `width / height
+  > 16 / 9` anchors GlueParent `barWidth = (width - height x 16/9) / 2` in
+  from each side, and everything outside it stays black. Not done: every glue
+  screen (`auth_screen`, `realm_screen`, `character_screen`,
+  `character_create_screen`, `glue_options`, `glue_ui`'s dialogs) places its
+  art and hit boxes from `ImGui::GetIO().DisplaySize`; boxing the scene alone
+  would leave the character list and buttons over the black bars, so it
+  needs a glue frame rectangle threaded through those layouts and their
+  mouse tests.
 - **Loading screen** taxi variant and the exact A/B progress split (Wowee
   reports one figure from its own load steps; it is now monotonic).
-- **Glue volume sliders** are applied when the game screen first draws, so the
-  glue screens play at the audio defaults.
 
 ### Checking it
 

@@ -2166,6 +2166,12 @@ void GameHandler::updateDeathState() {
             // are FrameXML's, which closes them on PLAYER_DEAD.
             if (targetGuid != 0) clearTarget();
             if (isLootWindowOpen()) closeLoot();
+            // And a death on a flight (UNIT_FIELD_FLAGS 0x100000) releases
+            // at once (RepopMe, 0x6d2950).
+            if (stock_death::releasesAtDeath(playerFieldValue(UF::UNIT_FIELD_FLAGS))) {
+                LOG_INFO("Death: released at once (UNIT_FIELD_FLAGS 0x100000, on a flight)");
+                releaseSpirit();
+            }
         }
     } else {
         releaseTimerLatched_ = false;

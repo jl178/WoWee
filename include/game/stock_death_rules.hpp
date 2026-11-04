@@ -46,6 +46,15 @@ inline constexpr int32_t kReleaseTimerMs = 360000;
 }
 
 // ---- The screen effect (0x4f88b0) ----
+/// 0x6dc0f0: a player who dies with UNIT_FIELD_FLAGS 0x100000 - the flag
+/// UnitOnTaxi reads (0x60F350), UNIT_FLAG_TAXI_FLIGHT - releases at once
+/// (RepopMe, 0x6d2950). A feign death (UNIT_DYNFLAG_DEAD on a live player)
+/// does none of 0x6dc0f0.
+inline constexpr uint32_t kUnitFlagReleaseAtDeath = 0x100000;
+[[nodiscard]] inline bool releasesAtDeath(uint32_t unitFlags) {
+    return (unitFlags & kUnitFlagReleaseAtDeath) != 0;
+}
+
 inline constexpr uint32_t kAuraScreenEffect = 260;  // SPELL_AURA_SCREEN_EFFECT
 inline constexpr uint32_t kScreenEffectGhost = 1;   // "Ghost Screen Effect"
 inline constexpr uint32_t kScreenEffectInvisGlow = 81;  // "Invis Screen Effect"

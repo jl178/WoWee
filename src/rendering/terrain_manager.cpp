@@ -29,6 +29,7 @@
 #include "pipeline/terrain_mesh.hpp"
 #include "pipeline/wdt_loader.hpp"
 #include "rendering/stock_terrain.hpp"
+#include "rendering/horizon_detail.hpp"
 #include "core/env_flag.hpp"
 #include "core/hitch_legacy.hpp"
 #include "core/logger.hpp"
@@ -217,8 +218,65 @@ void TerrainManager::loadMapWideData() {
     const std::vector<uint8_t> wdlData = assetManager->readFile(base + ".wdl");
     if (!wdlData.empty()) wdl = stock_terrain::parseWdl(wdlData);
     terrainRenderer->setHorizonTiles(wdl);
+    // And the low-detail buildings it places (MWMO/MODF; Northrend's
+    // cathedral, Valgarde and the oil platform), drawn with them.
+    terrainRenderer->setHorizonWmos(wdlData.empty() ? horizon_detail::FarMesh{} : loadHorizonWmos(wdlData));
     LOG_INFO("Terrain map data for ", mapName, ": MPHD 0x", std::hex, mphd, std::dec,
              ", ", wdl.size(), " WDL tiles");
+}
+
+horizon_detail::FarMesh TerrainManager::loadHorizonWmos(const std::vector<uint8_t>& wdlData) const {
+    namespace hd = horizon_detail;
+    hd::FarMesh mesh;
+    for (const hd::WdlWmo& w : hd::parseWdlWmos(wdlData)) {
+        const std::vector<uint8_t> root = assetManager->readFile(w.path);
+        if (root.empty()) continue;
+        pipeline::WMOModel model = pipeline::WMOLoader::load(root);
+        for (uint32_t gi = 0; gi < model.nGroups; ++gi) {
+            for (const std::string& groupPath : pipeline::wmoGroupCandidates(w.path, gi)) {
+                const std::vector<uint8_t> groupData = assetManager->readFile(groupPath);
+                if (groupData.empty()) continue;
+                pipeline::WMOLoader::loadGroup(groupData, model, gi);
+                break;
+            }
+        }
+        const glm::mat4 m = placementModelMatrix(
+            core::coords::adtToWorld(w.position[0], w.position[1], w.position[2]),
+            placementEuler(w.rotation), w.scale);
+        const glm::mat3 nm(m);
+        hd::FarMesh::Object obj;
+        obj.firstIndex = static_cast<uint32_t>(mesh.indices.size());
+        glm::vec3 lo(std::numeric_limits<float>::max()), hi(-std::numeric_limits<float>::max());
+        for (const auto& g : model.groups) {
+            const auto base = static_cast<uint32_t>(mesh.positions.size());
+            for (const auto& v : g.vertices) {
+                const glm::vec3 p(m * glm::vec4(v.position, 1.0f));
+                mesh.positions.push_back(p);
+                const glm::vec3 n = nm * v.normal;
+                mesh.normals.push_back(hd::packNormal(glm::dot(n, n) > 1e-12f ? glm::normalize(n)
+                                                                              : glm::vec3(0, 0, 1)));
+                lo = glm::min(lo, p);
+                hi = glm::max(hi, p);
+            }
+            // The drawn triangles: the render batches' ranges.
+            for (const auto& b : g.batches) {
+                const size_t end = std::min<size_t>(static_cast<size_t>(b.startIndex) + b.indexCount,
+                                                    g.indices.size());
+                for (size_t k = b.startIndex; k < end; ++k) {
+                    if (g.indices[k] < g.vertices.size()) mesh.indices.push_back(base + g.indices[k]);
+                    else mesh.indices.push_back(base);
+                }
+            }
+        }
+        obj.indexCount = static_cast<uint32_t>(mesh.indices.size()) - obj.firstIndex;
+        if (obj.indexCount == 0) continue;
+        obj.center = (lo + hi) * 0.5f;
+        obj.radius = glm::length(hi - lo) * 0.5f;
+        mesh.objects.push_back(obj);
+        LOG_INFO("Horizon WMO ", w.path, ": ", obj.indexCount / 3, " triangles at (", obj.center.x, ", ",
+                 obj.center.y, ", ", obj.center.z, ")");
+    }
+    return mesh;
 }
 
 void TerrainManager::markTerrainMaterial(pipeline::TerrainMesh& mesh) const {

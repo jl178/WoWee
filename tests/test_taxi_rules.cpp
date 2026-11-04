@@ -20,7 +20,9 @@ TEST_CASE("Taxi route: the shortest flight, not the fewest hops (0x592BB0)", "[t
     auto all = [](uint32_t) { return true; };
     const auto route = taxi::shortestRoute(edges, 1, 4, all);
     REQUIRE(route == std::vector<uint32_t>{1, 2, 3, 4});
-    CHECK(taxi::routePrice(edges, route) == 300u);
+    // The fare is still the direct TaxiPath's when there is one (0x591350).
+    CHECK(taxi::routePrice(edges, route) == 500u);
+    CHECK(taxi::routePrice(edges, {1, 2, 3}) == 200u);
 
     // Through known nodes only: without 3 the long edge is the route.
     auto no3 = [](uint32_t n) { return n != 3; };
@@ -28,6 +30,41 @@ TEST_CASE("Taxi route: the shortest flight, not the fewest hops (0x592BB0)", "[t
     // Nothing to go to.
     CHECK(taxi::shortestRoute(edges, 1, 9, all).empty());
     CHECK(taxi::shortestRoute(edges, 1, 1, all).empty());
+}
+
+TEST_CASE("Taxi fares by reputation tier (0x591350, 0x5926C0, 0x7279A0)", "[taxi]") {
+    // Neutral or worse, or a faction without a standing: full fare.
+    CHECK(taxi::reputationTier(4, true) == 0);
+    CHECK(taxi::reputationTier(2, true) == 0);
+    CHECK(taxi::reputationTier(8, false) == 0);
+    // Friendly .. Exalted: tiers 1 .. 4.
+    CHECK(taxi::reputationTier(5, true) == 1);
+    CHECK(taxi::reputationTier(6, true) == 2);
+    CHECK(taxi::reputationTier(7, true) == 3);
+    CHECK(taxi::reputationTier(8, true) == 4);
+
+    CHECK(taxi::tierFare(1000, 0, false) == 1000u);
+    CHECK(taxi::tierFare(1000, 1, false) == 950u);
+    CHECK(taxi::tierFare(1000, 4, false) == 800u);
+    // Rounded to the nearest, ties to even: 0.95 x 50 = 47.5 -> 48 (the
+    // float product is a hair under or over; either way not truncated).
+    CHECK(taxi::tierFare(30, 1, false) == 28u);   // 28.5 -> 28 (even)
+    CHECK(taxi::tierFare(7, 4, true) == 6u);      // 5.6 -> 6
+
+    // A destination with its own TaxiPath costs that path's fare, discounted,
+    // whatever the flown route (1 -> 4 is direct at 500 here).
+    std::vector<taxi::Edge> edges = {
+        {1, 4, 500, 900.0f},
+        {1, 2, 105, 100.0f}, {2, 3, 105, 100.0f}, {3, 4, 105, 100.0f},
+    };
+    CHECK(taxi::routePrice(edges, {1, 2, 3, 4}, 0) == 500u);
+    CHECK(taxi::routePrice(edges, {1, 2, 3, 4}, 2) == 450u);
+    // Several hops: each hop discounted and rounded on its own:
+    // 105 x 0.85 = 89.25 -> 89, three times.
+    CHECK(taxi::routePrice(edges, {1, 2, 3}, 0) == 210u);
+    std::vector<taxi::Edge> chain = {{1, 2, 105, 1.0f}, {2, 3, 105, 1.0f}, {3, 4, 105, 1.0f}};
+    CHECK(taxi::routePrice(chain, {1, 2, 3, 4}, 3) == 267u);
+    CHECK(taxi::routePrice(chain, {1, 2, 3, 4}, 0) == 315u);
 }
 
 TEST_CASE("Taxi reply errors name the stock strings (0x6CEE90)", "[taxi]") {

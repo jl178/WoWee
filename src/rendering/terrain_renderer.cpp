@@ -453,6 +453,14 @@ void TerrainRenderer::setHorizonTiles(const std::vector<stock_terrain::WdlTile>&
     if (horizon_) horizon_->setTiles(tiles);
 }
 
+void TerrainRenderer::setHorizonWmos(horizon_detail::FarMesh mesh) {
+    if (horizon_) horizon_->setFarMesh(std::move(mesh));
+}
+
+void TerrainRenderer::setHorizonLit(bool lit) {
+    if (horizon_) horizon_->setLit(lit);
+}
+
 void TerrainRenderer::shutdown() {
     LOG_INFO("Shutting down terrain renderer");
 

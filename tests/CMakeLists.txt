@@ -1578,6 +1578,14 @@ wowee_add_test(test_phase2_enhancements
 wowee_add_test(test_secondary_motion
     SOURCES test_secondary_motion.cpp)
 
+# ── test_phase2_motion ──────────────────────────────────────
+# Feet on the ground (E9): the leg rule, the two-bone IK's limits and that
+# zero targets leave the pose bit for bit; rain and snow in the wind (E19);
+# the smooth zoom's ease (E20); the lit horizon's haze, normals and the WDL's
+# low-detail WMOs (E11).
+wowee_add_test(test_phase2_motion
+    SOURCES test_phase2_motion.cpp)
+
 # ── test_zone_ambience ─────────────────────────────────────────
 wowee_add_test(test_zone_ambience
     SOURCES test_zone_ambience.cpp

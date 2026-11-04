@@ -987,6 +987,11 @@ bool Application::initialize() {
     // nothing has been drawn, so entering fullscreen here costs no visible
     // change of mode.
     uiManager->getGameScreen().applySavedDisplayMode(window.get());
+    // And the saved volumes: the glue screens play their music, ambience and
+    // sounds from the first frame, and the stock client has its Sound_* CVars
+    // from Config.wtf before it draws one. The game screen's latch applies
+    // them again (and restores a saved mute) when it first draws.
+    uiManager->getGameScreen().getSettingsPanel().applyAudioVolumes(audioCoordinator_.get());
 
     // Create subsystems
     authHandler = std::make_unique<auth::AuthHandler>();
