@@ -1647,6 +1647,13 @@ wowee_add_test(test_secondary_motion
 wowee_add_test(test_phase2_motion
     SOURCES test_phase2_motion.cpp)
 
+# ── test_phase2_surfaces ────────────────────────────────────
+# Unstretched cliffs (E16): flat ground read top-down only; sunlight under
+# water (E15): by day, shallow and near only; soft highlights (E18): stock
+# below the knee, a smooth shoulder that never clips.
+wowee_add_test(test_phase2_surfaces
+    SOURCES test_phase2_surfaces.cpp)
+
 # ── test_zone_ambience ─────────────────────────────────────────
 wowee_add_test(test_zone_ambience
     SOURCES test_zone_ambience.cpp

@@ -551,6 +551,8 @@ function(compile_shaders TARGET_NAME)
         "m2_particle.vert.glsl|m2_particle_soft.vert.spv|-DSOFT_PARTICLES"
         "m2_particle.frag.glsl|m2_particle_soft.frag.spv|-DSOFT_PARTICLES"
         "terrain.frag.glsl|terrain_fade.frag.spv|-DSTREAM_FADE"
+        "terrain.frag.glsl|terrain_cliff.frag.spv|-DCLIFF_PROJECTION"
+        "terrain.frag.glsl|terrain_cliff_fade.frag.spv|-DCLIFF_PROJECTION -DSTREAM_FADE"
         "terrain_horizon.vert.glsl|terrain_horizon_lit.vert.spv|-DHORIZON_LIT"
         "terrain_horizon.frag.glsl|terrain_horizon_lit.frag.spv|-DHORIZON_LIT"
         "terrain_horizon_far.frag.glsl|terrain_horizon_far_lit.frag.spv|-DHORIZON_LIT"

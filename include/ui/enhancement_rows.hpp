@@ -159,6 +159,20 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .choices = "Low|Medium|High", .stockValue = 1, .recommendedValue = 1, .saveKey = "pom_quality",
      .controls = "parallax step count", .enabledWhen = "parallax",
      .asInt = &Enhancements::parallaxQuality},
+    {.key = "cliffprojection", .label = "Unstretched cliffs", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPage, .section = "",
+     .tooltip = "Steep slopes and cliffs show their rock and earth textures at\n"
+                "their painted size instead of pulled into long streaks down\n"
+                "the slope. Gentler ground is drawn exactly as the original.",
+     // E16, measured in docs/enhancements-plan.md (3.13). Off in the
+     // recommended set: 0.1-0.2 ms on flat land and coasts, but 0.35-0.75 in
+     // views full of hills and mountains (Goldshire's road, the Storm Peaks),
+     // over the half millisecond each new row was allowed.
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "cliff_projection",
+     .controls = "the terrain_cliff.frag pipelines (built on first use): on pixels "
+                 "steeper than 45 degrees, in the chunks that have such slopes, each layer is also read from the "
+                 "side and blended by the slope; off binds the stock terrain.frag",
+     .asBool = &Enhancements::cliffProjection},
 
     // ------------------------------------------------------------ Sky and air
     {.key = "lightshafts", .label = "Light shafts and mist", .kind = SettingKind::Enum,
@@ -213,6 +227,18 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "fog_sky_blend",
      .controls = "LightingManager fog colour blend",
      .asFloat = &Enhancements::fogSkyBlend},
+    {.key = "highlightrolloff", .label = "Soft highlights", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageSky, .section = "",
+     .tooltip = "Where the game's own glow pushes sunlit snow, pale stone or a\n"
+                "bright spell past white, ease it into white instead of\n"
+                "clipping it flat, so its shape stays. Darker colours are\n"
+                "untouched, and zones without glow look exactly the same.",
+     // E18, measured in docs/enhancements-plan.md (3.13).
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "highlight_rolloff",
+     .controls = "the shoulder at the end of the glow composite (fxaa.frag, "
+                 "highlight_rolloff.hpp): a push constant; off and in a zone with "
+                 "no glow the composite is the stock one",
+     .asBool = &Enhancements::highlightRollOff},
 
     // --------------------------------------------------------------- Distance
     {.key = "streamfadein", .label = "Fade in new scenery", .kind = SettingKind::Bool,
@@ -236,6 +262,21 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .controls = "TerrainHorizon's lit pipelines and the WDL normals they read (made "
                  "on first use); off draws the stock fog-coloured pass",
      .asBool = &Enhancements::horizonDetail},
+    // On the Sky page, under a heading of its own: the Motion page's two
+    // columns are full (test_settings_panel_layout).
+    {.key = "caustics", .label = "Sunlight under water", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageSky, .section = "Under water",
+     .tooltip = "Faint ripples of sunlight play over the ground, rocks and\n"
+                "wrecks under shallow water, fading as the water deepens, in\n"
+                "shade and after dark. The original lights nothing below the\n"
+                "surface.",
+     // E15, measured in docs/enhancements-plan.md (3.13).
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "caustics",
+     .controls = "WaterRenderer's caustics pipelines (built on first use) and one "
+                 "extra draw of each water and ocean surface in view after it, "
+                 "reading the scene's depth copy; none at night; off draws nothing "
+                 "and takes no depth copy for it",
+     .asBool = &Enhancements::caustics},
 
     // ------------------------------------------------------ Water and weather
     {.key = "shorelinefoam", .label = "Shoreline foam", .kind = SettingKind::Bool,

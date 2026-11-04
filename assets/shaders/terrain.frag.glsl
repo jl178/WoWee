@@ -201,10 +201,67 @@ float layerAlpha(int has, int flags, sampler2D alphaTex) {
     return texture(alphaTex, LayerUV).r;
 }
 
+#ifdef CLIFF_PROJECTION
+// Unstretched cliffs (E16, terrain_cliff.frag; not stock). The stock mapping
+// is straight down (TexCoord: world -y, -x at eight repeats a chunk), so on a
+// slope the texture is pulled out along the fall line - twice its length at
+// 60 degrees, five times at 78. Where the ground is steep each layer is also
+// read projected from the side, along world x and along world y at the same
+// scale, and the three blended by the slope: the side projections take over
+// between 45 and 62 degrees, split between themselves by which way the face
+// looks. Ground flatter than 45 degrees (normal z at or above kCliffFlat)
+// takes the stock read and nothing else, so it is the stock pixel.
+const float kCliffFlat = 0.707;   // cos 45 degrees
+const float kCliffSteep = 0.47;   // cos 62 degrees
+const float kCliffSkip = 0.12;   // a read weighted under this is folded into the others
+const float kCliffTexScale = 8.0 / 33.333333;
+// x, y: the two side projections' weights; z: the top-down read's.
+vec3 gCliffW = vec3(0.0, 0.0, 1.0);
+vec2 gCliffUvX, gCliffUvY;
+vec2 gCliffDxX, gCliffDyX, gCliffDxY, gCliffDyY, gCliffDxT, gCliffDyT;
+
+void cliffSetup(vec3 n) {
+    // Derivatives in uniform control flow, for the reads in the branches.
+    // All three mappings are linear in the world position, so two
+    // derivatives of it give all six.
+    gCliffUvX = vec2(-FragPos.y, -FragPos.z) * kCliffTexScale;
+    gCliffUvY = vec2(-FragPos.x, -FragPos.z) * kCliffTexScale;
+    vec3 dPx = dFdx(FragPos) * kCliffTexScale;
+    vec3 dPy = dFdy(FragPos) * kCliffTexScale;
+    gCliffDxX = -dPx.yz; gCliffDyX = -dPy.yz;
+    gCliffDxY = -dPx.xz; gCliffDyY = -dPy.xz;
+    gCliffDxT = -dPx.yx; gCliffDyT = -dPy.yx;   // TexCoord is (-y, -x) * scale
+    float steep = 1.0 - smoothstep(kCliffSteep, kCliffFlat, abs(n.z));
+    if (steep <= 0.0) return;
+    vec2 side = pow(abs(n.xy), vec2(8.0));
+    side /= max(side.x + side.y, 1e-6);
+    gCliffW = vec3(side * steep, 1.0 - steep);
+    // At most two reads a layer where one would do: a small weight goes to
+    // the largest of the others (the sum stays 1).
+    if (gCliffW.x < kCliffSkip) { gCliffW.y += gCliffW.x; gCliffW.x = 0.0; }
+    if (gCliffW.y < kCliffSkip) { gCliffW.x += gCliffW.y; gCliffW.y = 0.0; }
+    if (gCliffW.z < kCliffSkip) {
+        if (gCliffW.x >= gCliffW.y) gCliffW.x += gCliffW.z; else gCliffW.y += gCliffW.z;
+        gCliffW.z = 0.0;
+    }
+}
+#endif
+
 // rgb the texture, a its specular mask (the `_s` alpha, else none).
 vec4 layerTexel(sampler2D tex, int flags) {
     vec2 uv = TexCoord;
     if (chunkMode.z != 0) uv += layerScroll(flags);
+#ifdef CLIFF_PROJECTION
+    if (gCliffW.z < 1.0) {
+        vec2 scroll = uv - TexCoord;
+        vec4 c = vec4(0.0);
+        if (gCliffW.z > 0.0) c += gCliffW.z * textureGrad(tex, uv, gCliffDxT, gCliffDyT);
+        if (gCliffW.x > 0.0) c += gCliffW.x * textureGrad(tex, gCliffUvX + scroll, gCliffDxX, gCliffDyX);
+        if (gCliffW.y > 0.0) c += gCliffW.y * textureGrad(tex, gCliffUvY + scroll, gCliffDxY, gCliffDyY);
+        c.a = (flags & 0x10000) != 0 ? c.a : 0.0;
+        return c;
+    }
+#endif
     vec4 t = texture(tex, uv);
     t.a = (flags & 0x10000) != 0 ? t.a : 0.0;
     return t;
@@ -212,6 +269,9 @@ vec4 layerTexel(sampler2D tex, int flags) {
 
 void main() {
     float fragDist = length(viewPos.xyz - FragPos);
+#ifdef CLIFF_PROJECTION
+    cliffSetup(normalize(Normal));
+#endif
 
     // The stock blend (shaders\pixel\arbfp1\terrain1.bls, picked by 0x79e5c0):
     // without big alpha a chain of lerps, each layer over the result so far;

@@ -178,6 +178,10 @@ public:
     }
     /// The ffxGlow switch (stock default on).
     void setGlowEnabled(bool enabled) { glowEnabled_ = enabled; }
+    /// Soft highlights (E18): the glow composite's channels past 1 eased onto
+    /// a shoulder above 0.8 instead of clipped (highlight_rolloff.hpp). Off,
+    /// and with no glow drawing, the composite is stock.
+    void setHighlightRollOff(bool on) { highlightRollOff_ = on; }
     [[nodiscard]] bool isGlowEnabled() const { return glowEnabled_; }
 
 private:
@@ -200,6 +204,7 @@ private:
     // The glow (see setGlow). Wanted whatever this frame's amount is, so a
     // zone with no glow does not tear the pass down and stall the device.
     bool glowEnabled_ = true;
+    bool highlightRollOff_ = false;
     float glowAmount_ = 0.0f;
     float glowBlend_ = 0.0f;
     [[nodiscard]] bool glowWanted() const {

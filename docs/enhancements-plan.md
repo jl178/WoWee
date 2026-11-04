@@ -50,6 +50,15 @@ gap closed). Each is a row, stock off; recommended values and costs in 3.10,
 status under each entry. `test_phase2_motion` holds the IK's rule and
 limits, the zoom's ease, the wind's push and the horizon's haze.
 
+Done (2026-11-04): E16 unstretched cliffs (`cliffprojection`), E15
+sunlight under water (`caustics`) and E18 soft highlights
+(`highlightrolloff`), each a row, stock off. Recommended: E15 and E18 on,
+E16 off for its cost in hilly views. Costs in 3.13, status under each entry;
+`test_phase2_surfaces` holds the rules. On the way: the scene's depth copy
+for the shoreline foam is taken from the off-screen scene's own depth (it
+read a stale image with MSAA and post-processing on), and an A/B of a row
+recommended off flips it to its fullest "on".
+
 ## 1. Goal and rules
 
 The client now draws close to stock 3.3.5a (build 12340). Phase 2 adds
@@ -806,6 +815,64 @@ thread share 0.29 -> 0.13 ms, the units' 0.29 ms now on the worker, the
 main thread waiting 0.02-0.06 ms for it. Under the layer the secondaries
 raise nothing.
 
+### 3.13 Measured cost of E15, E16 and E18 (2026-11-04)
+
+Measured as 3.5 (Iris Xe, a 1251x986 window - a run the compositor narrowed
+is marked, Ultra quality columns, noon, the camera set again before every
+row), each row flipped in place on a 4 s period over the recommended set,
+six to eight cycles a row, paired adjacent windows (scratch `enh6/`:
+`chain.sh`, `mrun.sh`, `ab_body.lua`, `pp.py`), with
+`WOWEE_SINGLE_THREAD_RECORD=1` so the terrain and water passes are timed
+apart. Places: Goldshire's road view, the Trade District, Thousand Needles
+from the canyon floor below the needles (-4969 -1726), the Storm Peaks at
+Brunnhildar (7056 -1698, snow and steep slopes on every side) and the
+Echo Isles strand (-1042 -5347, shallow sea at noon). Every row of a place
+was measured in one sitting; the regime is given, as performance.md warns:
+another agent's client or compile was on the machine for parts of the
+afternoon, and the iGPU then ran at 1.05-1.35 GHz instead of 1.5. GPU ms,
+paired median, the pass that moves beside it:
+
+| Row | Goldshire | Trade District | Thousand Needles | Storm Peaks | Echo Isles |
+|---|---|---|---|---|---|
+| `cliffprojection` (final: steep chunks only, 45 degrees) | +0.35 ±0.04 terrain +0.37 (1.46 GHz); +0.69 terrain (1.09 GHz, compile) | +0.12 ±0.05 (1.19 GHz); +0.14 terrain +0.21 (1.36 GHz) | +0.09 to +0.10 (1.5 GHz) | +0.62 terrain +0.54 (1.34 GHz); +0.75 terrain +0.48 (1.15 GHz, compile) | +0.12 ±0.04 (1.45 GHz) |
+| `cliffprojection`, first version (every chunk) | +0.86 ±0.03 | +0.27 ±0.03 | +0.69 ±0.14 (1.08 GHz) | +0.72 ±0.07 | +0.18 ±0.06 |
+| `caustics` | ~0 (no water in view; pairs -1.6 to +0.2 - scatter) | +0.03 to +0.41, water pass +0.36 where the canals show | ~0 | ~0 | water pass +0.32 to +0.43; row +0.04 to +0.28 |
+| `highlightrolloff` | ~0 (pairs -0.9 to +1.0, ±0.6) | ~0 (±0.35) | ~0 (±0.3) | ~0 | ~0 (±0.4) |
+| Whole recommended set vs stock (E15, E16 and E18 all in it for these runs) | +2.65 ±0.55 (1.38 GHz) | +0.87 ±0.45 (1.48 GHz) | +1.21 ±0.24 (1.5 GHz) | +3.46 ±0.32 (1.5 GHz) | +2.48 ±0.40 (1.48 GHz) |
+
+What each costs and why:
+
+- **Soft highlights** is two push constants and, on pixels above 0.8, an
+  exponential per channel in the pass the glow already runs: nothing
+  measurable anywhere (every pair inside its scatter).
+- **Sunlight under water** is one more draw of each water surface within
+  80 yards, after the water, which reads the depth copy and discards
+  whatever is too deep, too far or in shade before the pattern: the water
+  pass's timestamp moves by 0.3-0.43 ms where shallow water fills much of
+  the view (the Echo Isles strand at a downward camera), nothing where
+  there is none. It takes the depth copy the shoreline foam already takes
+  (0.08-0.1 ms, "water refraction copy", in the set either way). Within the
+  0.5 ms; recommended on.
+- **Unstretched cliffs** at first drew every chunk with the cliff build:
+  +0.27 ms in the flat Trade District and +0.86 in Goldshire, the shader's
+  extra work on every pixel. Now only chunks with a slope over 45 degrees
+  in them take it (flat land costs nothing - those chunks are the stock
+  pipeline), a steep pixel reads each layer once or twice (weights under
+  0.12 folded away) and the derivatives come from the world position's two:
+  +0.1 on flat land and coasts, +0.35 in Goldshire, +0.5-0.75 in the Storm
+  Peaks - over 0.5 where it is wanted most. Recommended off; on for anyone
+  who wants it at that price. Drawing the steep chunks in a pass of their
+  own (two pipeline binds a part) was tried and dropped: the change of
+  order moved the terrain pass by -1.6 to +1.3 ms with the view.
+- The whole set's figures are the set as 3.12 left it plus these rows;
+  they move with the view and the clock as 3.12 describes and are not
+  these rows' (their sum is at most 0.5 here).
+
+Shots (scratch `enh6/`): `z_needles1.png` and `z_cliff2.png` (a Thousand
+Needles cliff face, cliffs on and off), `z6c.png` (the Echo Isles shallows,
+sunlight under water on and off), `z_e18.png` (sunlit sandstone in Thousand
+Needles, soft highlights on and off).
+
 ## 4. Proposed enhancements
 
 Ranked by feel gained over cost and risk. "Cost" is implementation effort
@@ -831,9 +898,9 @@ the classic look or the stock behaviour.
 | 15 | E19 | Weather follows the wind | low | S | low | on |
 | 16 | E20 | Smooth zoom and collision ease | low | S | low | on (zoom only) |
 | 17 | E13 | Ambient occlusion (ambient term only) | medium | M | high | off |
-| 18 | E15 | Caustics in shallow water | low | M | high | off |
-| 19 | E16 | Cliff texture stretch fix | medium | M | high | off |
-| 20 | E18 | Highlight roll-off (HDR scene, faithful tone map) | low | M | high | off |
+| 18 | E15 | Caustics in shallow water | low | M | high | on (3.13) |
+| 19 | E16 | Cliff texture stretch fix | medium | M | high | off by cost (3.13) |
+| 20 | E18 | Highlight roll-off (on the glow composite) | low | S | low | on (3.13) |
 | 21 | E17 | Upscaled texture pack | varies | M | high | off |
 | 22 | E22 | Ambient life from stock assets | low | M | high | off |
 
@@ -1415,31 +1482,82 @@ stock, the budget, and how to verify.
 
 ### E15. Caustics in shallow water
 
-- **Looks like.** Faint moving light patterns on the ground under shallow,
-  sunlit water.
-- **Engine.** Terrain .frag where the pixel is below a known water surface
-  (the per-vertex water height already loaded), add an animated pattern
-  scaled by sun light, depth (fades out by 3 yd) and LiquidType (water and
-  ocean only).
-- **Off = stock.** No pattern.
-- **Budget.** Under 0.2 ms.
-- **Risk.** High for taste: caustics read as a newer client. Default off.
-- **Verify.** Stranglethorn coast, Nagrand ponds at noon.
+Done (2026-11-04): the row `caustics`, "Sunlight under water"; costs in 3.13.
+
+- **Looks like.** A faint net of bright lines drifting over the sand, rock
+  and anything else in the shallows, as the sun focused by the surface
+  would lay it: strongest a hand-span to a yard down, gone by four yards,
+  fading out past 45-80 yards from the camera, in the sun's shadow (with
+  the shadow map on) and at dusk; nothing at night, on magma or slime, or
+  on water inside a building. It is light, not paint: what shows through
+  the surface is multiplied by at most 1.3 where a line crosses it, tinted
+  by Light.dbc's sun colour, so dark rock takes a dim net and pale sand a
+  brighter one.
+- **Engine.** `WaterRenderer` draws each water and ocean surface in view
+  and within 80 yards a second time, after the water, with
+  `water_caustics.frag` and the blend dst * (1 + src). The pixel behind
+  the surface comes from the scene's depth copy (the shoreline foam's); its
+  height below the surface is the depth; the pattern (two layers of moving
+  cell edges, no texture) is read where the sun's ray through that point
+  enters the water. The strength follows the sun's height on the stock
+  clock (`water_caustics::dayStrength`). The rules are in
+  `rendering/water_caustics.hpp`, tested in `test_phase2_surfaces`.
+- **Why after the water, not under it.** Drawn before the water - lighting
+  the bed alone, which was the plan - it was invisible: the stock water's
+  alpha leaves a tenth or two of the bed showing even a hand-span down
+  (Echo Isles at noon read the same on and off). After the water it
+  brightens what the player sees through the surface, by the same rule.
+- **A stock-path fix on the way.** With MSAA and an off-screen scene (any
+  frame the glow, FXAA or an upscaler post-processes - the default) the
+  water draws inside the scene pass, and the depth copy was taken at the
+  end of the frame from the swapchain path's depth, which such a scene
+  never writes: the shoreline foam (and so the caustics) read a stale
+  image. The copy is now taken from the scene's own depth as its pass
+  closes (`setSceneClosedHook`). Nothing changes with foam and caustics
+  off: no copy is taken then.
+- **Off = stock.** No pipeline (made on first use, released when the row
+  goes off), no draw, and no depth copy for it.
+- **Budget.** 0.5 ms.
+- **Verify.** `WOWEE_CAUSTICS_DEBUG=1` draws the pass's coverage in place of
+  the net (red where it draws, green where the depth copy has something in
+  front of the surface, blue the depth behind it). Echo Isles at noon.
+- **Default.** Recommended on (3.13).
 
 ### E16. Cliff texture stretch fix
 
-- **Looks like.** Steep cliffs no longer show the ground texture stretched
-  into vertical streaks.
-- **Engine.** `terrain.frag`: on pixels where `normal.z < 0.5`, sample each
-  layer with two planar projections (x-z and y-z) and blend by the normal,
-  instead of the stock top-down coordinates. Same layers, same alpha maps.
-- **Off = stock.** Stock coordinates (8 repeats per chunk).
-- **Budget.** Two extra fetches per layer on steep pixels only; 0.3-0.6 ms
-  in mountain zones.
-- **Risk.** High: the stretched streaks are part of how some zones read
-  (Thousand Needles, Grizzly Hills cliffs). Default off; only on above a
-  steepness threshold.
-- **Verify.** Thousand Needles, Storm Peaks, Alterac. A/B shots.
+Done (2026-11-04): the row `cliffprojection`, "Unstretched cliffs"; costs in
+3.13.
+
+- **Looks like.** Steep slopes show their rock and earth at the painted
+  size instead of pulled into streaks down the fall line; the same layers,
+  the same alpha maps, MCCV and baked shadows. Ground flatter than 45
+  degrees is untouched. Between 45 and 62 degrees the side reads fade in;
+  past about 58 the stock top-down read is gone.
+- **Engine.** `terrain_cliff.frag.spv` and `terrain_cliff_fade.frag.spv`,
+  builds of `terrain.frag` with `CLIFF_PROJECTION`: on a steep pixel each
+  layer is also read projected along world x and along world y (same 8
+  repeats a chunk, `textureGrad` with derivatives taken in uniform flow)
+  and the reads blended by the slope, the two side reads split by the
+  eighth power of the normal's x and y, and any read weighted under 0.12
+  folded into the others, so a steep pixel reads a layer once or twice
+  (`rendering/cliff_projection.hpp`, tested in `test_phase2_surfaces`).
+  Scrolling layers scroll on the sides too. `TerrainRenderer` binds these
+  pipelines only for chunks with a vertex steeper than 45 degrees
+  (`TerrainChunkGPU::steep`; a pixel's normal is never steeper than its
+  vertices'), the stock ones for every other chunk; they are made when the
+  row first goes on and released when it goes off.
+- **Off = stock.** The stock `terrain.frag` pipelines; the cliff build is
+  never bound. With it on, a flat chunk is drawn by the stock pipeline and a
+  pixel under 45 degrees in a steep one takes the stock read: the
+  frozen-clock shots at Thousand Needles, row on and off, differ only on
+  the steep faces (0 of 120,000 pixels on the canyon floor).
+- **Budget.** 0.5 ms in mountain zones.
+- **Default.** Recommended off, for cost (3.13): 0.1-0.2 ms on flat land
+  and coasts, 0.35-0.75 in views full of slopes, over the 0.5 each of these
+  rows was allowed. By taste it would be on: it reads as the same art, only
+  not smeared - the streaks it removes are the texture's own grain
+  stretched, not something the zones were painted with. The quality
+  presets take the recommended value.
 
 ### E17. Upscaled texture pack
 
@@ -1457,19 +1575,40 @@ stock, the budget, and how to verify.
 
 ### E18. Highlight roll-off
 
-- **Looks like.** Bright skies and sunlit snow keep a little detail instead
-  of clipping flat white. Nothing below about 0.8 changes, so the zone
-  palette is the same.
-- **Engine.** Render the scene into a 16-bit float target, then one tone
-  curve: identity up to 0.8, soft shoulder above, applied once in the final
-  post pass on every path. Replaces U11, which runs only on the FSR 1 path
-  today. No per-zone grading, no LUTs, no bloom beyond the stock ffxGlow.
-- **Off = stock.** 8-bit scene target, no curve.
-- **Budget.** Bandwidth of the wider target: 0.3-0.5 ms on Iris Xe.
-- **Risk.** High if the curve drifts into contrast or saturation changes.
-  Default off. A test checks the curve is identity below 0.8.
-- **Verify.** Winterspring noon, Nagrand sky, Shattrath sunlit stone: A/B,
-  plus a histogram of the frame below 0.8 (must match).
+Done (2026-11-04): the row `highlightrolloff`, "Soft highlights"; costs in
+3.13.
+
+- **Looks like.** Where the stock full-screen glow pushes a bright surface
+  past white - sunlit sandstone in Thousand Needles, snow, pale stone, the
+  core of a bright spell - the colour eases into white instead of clipping
+  flat, so the shape and some of the hue stay. Every channel at or below
+  0.8 is the stock value bit for bit; in a zone or hour whose Light.dbc
+  glow is 0 nothing changes at all.
+- **Where stock clips.** The scene is drawn into an 8-bit target, so every
+  surface reaches the last pass at or below 1; the clip comes from the
+  stock glow (ffxGlow: scene + blur^2 x LightParams.Glow), which can carry
+  a channel to 1 + glow. That is where the curve sits: at the end of the
+  glow composite (`fxaa.frag`, `stockScreenEffect`).
+- **Engine.** Per channel above the knee 0.8, [0.8, 1 + glow] is mapped
+  onto [0.8, 1] by an exponential shoulder with slope 1 at the knee
+  (`rendering/highlight_rolloff.hpp`, which also solves its rate; tested in
+  `test_phase2_surfaces`): no channel
+  clips, the curve bends only as far as this zone's glow needs. Two push
+  constants that were padding. No colour grading, no LUT, no change below
+  0.8, no float scene target.
+- **Not the plan's design.** The plan proposed a 16-bit float scene target
+  and a curve after it. That changes the format of the scene pass, which
+  every world pipeline is built against (all recreated, like an MSAA
+  change), and costs 0.3-0.5 ms of bandwidth on the Iris Xe; and since the
+  surfaces stay within 1 in the stock lighting, the glow is what clips.
+  Gap: a surface whose own shader passes 1 (MCCV brighter than neutral, a
+  stack of additive particles) still clips at the 8-bit write; covering
+  that needs the float target.
+- **Off = stock.** White 0 in the push constant and the curve is skipped
+  (one uniform branch): the frozen-clock shot with the row off matches the
+  build before it in every world pixel (Thousand Needles; only the
+  interface's clock text differs).
+- **Default.** Recommended on (3.13).
 
 ### E19. Weather follows the wind
 

@@ -18,6 +18,7 @@
 #include "pipeline/custom_zone_discovery.hpp"
 #include "rendering/performance_hud.hpp"
 #include "rendering/water_renderer.hpp"
+#include "rendering/water_caustics.hpp"
 #include "rendering/skybox.hpp"
 #include "rendering/celestial.hpp"
 #include "rendering/starfield.hpp"
@@ -894,6 +895,23 @@ void Renderer::updatePerFrameUBO() {
     // The water renderer is built with the world, after the settings are
     // applied, so it is told every frame rather than once.
     if (waterRenderer) waterRenderer->setShorelineFoam(shorelineFoam_);
+    // Sunlight under water (E15): by day only, from the sun's height on the
+    // stock clock (the light's own direction stays up all night).
+    if (waterRenderer) {
+        waterRenderer->setCausticsEnabled(enh_.caustics);
+        float caustics = 0.0f;
+        if (enh_.caustics && lightingManager) {
+            caustics = water_caustics::dayStrength(lightingManager->getLightingParams().sunDir.z);
+            static const bool kCausticsDebug = core::envFlagEnabled("WOWEE_CAUSTICS_DEBUG", false);
+            if (kCausticsDebug) {
+                static int n = 0;
+                if (n++ % 300 == 0) LOG_INFO("caustics debug: sunDir.z ", lightingManager->getLightingParams().sunDir.z,
+                                             " strength ", caustics, " tod ", lightingManager->getTimeOfDay());
+                caustics = 2.0f;
+            }
+        }
+        waterRenderer->setCaustics(caustics);
+    }
 
     // Water ripple gate: swimming and actually moving.
     if (cameraController) {
@@ -1068,6 +1086,21 @@ bool Renderer::initialize(core::Window* win) {
     // it early, so the pass records here instead, as the upscaler takes over.
     postProcessPipeline_->setSceneClosedHook([this](VkCommandBuffer cmd) {
         markWorldPassClosed();
+        // The water drew inside this off-screen scene (MSAA, no late
+        // particle pass): its depth copy for the next frame comes from this
+        // scene's own depth, here where it is finished. endFrame's copy is of
+        // the swapchain path's depth, which an off-screen scene never wrote -
+        // the shoreline foam and the caustics read a stale image from it.
+        if (postProcessPipeline_ && !waterDrawsInContinuePass() && waterRenderer &&
+            waterRenderer->isRefractionEnabled() && waterRenderer->hasSurfaces() &&
+            postProcessPipeline_->getSceneDepthImage() != VK_NULL_HANDLE) {
+            waterRenderer->captureSceneHistory(cmd, VK_NULL_HANDLE,
+                                               postProcessPipeline_->getSceneDepthImage(),
+                                               postProcessPipeline_->getSceneRenderExtent(),
+                                               postProcessPipeline_->sceneDepthIsMsaa(),
+                                               vkCtx->getCurrentFrame());
+            vkCtx->gpuMark(cmd, "water refraction copy");
+        }
         recordSoftParticlePass(cmd);
         if (rtRecordedThisFrame_ || !postProcessPipeline_) return;
         recordRtLighting(postProcessPipeline_->getSceneDepthImage(),
@@ -1555,6 +1588,8 @@ void Renderer::applyEnhancementsToSubsystems() {
         characterRenderer->setPOMQuality(e.parallaxQuality);
     }
     if (terrainRenderer) terrainRenderer->setSpecularEnabled(e.terrainSpecular);
+    // Unstretched cliffs (E16): the terrain's side-projection pipelines.
+    if (terrainRenderer) terrainRenderer->setCliffProjection(e.cliffProjection);
     if (m2Renderer) {
         m2Renderer->setLightFlicker(e.lightFlicker);
         m2Renderer->setGlowSprites(e.glowSprites);
@@ -1573,6 +1608,8 @@ void Renderer::applyEnhancementsToSubsystems() {
     setSunShaftsEnabled(e.sunShafts);
     if (lensFlare) lensFlare->setIntensity(e.lensFlare);
     setSharpStars(e.sharpStars);
+    // Soft highlights (E18): the shoulder on the glow composite.
+    if (postProcessPipeline_) postProcessPipeline_->setHighlightRollOff(e.highlightRollOff);
     if (lightingManager) {
         lightingManager->setFogStrength(e.fogStrength);
         lightingManager->setFogSkyBlend(e.fogSkyBlend);
@@ -2021,7 +2058,9 @@ void Renderer::endFrame() {
     // renderWorld already took the copy at the one point in the frame where the
     // scene is finished but the water is not yet over it; copying again here
     // would replace that with an image containing the water.
+    // An off-screen scene took its copy as it closed (setSceneClosedHook).
     if (!waterDrawsInContinuePass()
+        && !(postProcessPipeline_ && postProcessPipeline_->getSceneFramebuffer() != VK_NULL_HANDLE)
         && waterRenderer && waterRenderer->isRefractionEnabled() && waterRenderer->hasSurfaces()
         && currentImageIndex < vkCtx->getSwapchainImages().size()) {
         waterRenderer->captureSceneHistory(

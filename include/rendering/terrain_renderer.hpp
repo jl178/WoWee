@@ -91,6 +91,12 @@ struct TerrainChunkGPU {
     /// "Fade in new scenery": the stream-fade clock when the chunk was
     /// uploaded, or negative - always, with the row off.
     float streamFadeStart = -1.0f;
+    /// "Unstretched cliffs": some vertex normal is steeper than
+    /// cliff_projection::kFlatNormalZ. Only such a chunk is drawn with the
+    /// cliff pipelines - a pixel's normal, normalised from its vertices',
+    /// is never steeper than the steepest of them, so every other chunk
+    /// would take the stock read anyway and is drawn by the stock pipeline.
+    bool steep = false;
 
     [[nodiscard]] bool isValid() const { return vertexBuffer != VK_NULL_HANDLE && indexBuffer != VK_NULL_HANDLE; }
 };
@@ -220,6 +226,11 @@ public:
     void setHorizonWmos(horizon_detail::FarMesh mesh);
     /// "Lit far horizon" (E11): shade the horizon with the sun under the fog.
     void setHorizonLit(bool lit);
+    /// "Unstretched cliffs" (E16): draw the ground with terrain_cliff.frag,
+    /// which reads steep pixels' layers from the side as well. Its pipelines
+    /// are made when the row first goes on and let go when it goes off; off,
+    /// the stock pipelines draw everything. Main thread.
+    void setCliffProjection(bool on);
 
     void setShadowMap(VkDescriptorImageInfo /*depthInfo*/, const glm::mat4& /*lightSpaceMat*/) {}
     void clearShadowMap() {}
@@ -284,6 +295,14 @@ private:
     bool streamFadeOn_ = false;
     float streamFadeClock_ = 0.0f;
     bool buildFadePipeline();
+    // Unstretched cliffs (setCliffProjection): the fill pipeline and its fade
+    // twin with terrain_cliff.frag / terrain_cliff_fade.frag.
+    VkPipeline cliffPipeline_ = VK_NULL_HANDLE;
+    VkPipeline cliffFadePipeline_ = VK_NULL_HANDLE;
+    bool cliffOn_ = false;
+    void buildCliffPipelines();
+    /// The fill pipeline's state with another build of the fragment shader.
+    VkPipeline buildFillVariant(const char* fragPath);
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout materialSetLayout = VK_NULL_HANDLE;
 
