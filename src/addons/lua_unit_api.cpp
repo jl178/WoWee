@@ -243,11 +243,18 @@ static int lua_UnitClass(lua_State* L) {
     const char* uid = luaL_optstring(L, 1, "player");
     auto* gh = getGameHandler(L);
     auto* unit = resolveUnit(L, uid);
-    if (unit && gh) {
+    std::string uidStr(uid);
+    toLowerInPlace(uidStr);
+    // The player's class is known from the character list whether or not
+    // the player's own unit is in the entity list: during a map change it is
+    // not, and the character sheet, which updates on events while it is open,
+    // asked here, got nothing and stopped at strupper(nil)
+    // (PaperDollFrame.lua:269, PaperDollFrame_SetStat). WoW answers for the
+    // player at all times.
+    const bool selfKnown = gh && uidStr == "player" && gh->getPlayerClass() != 0;
+    if ((unit || selfKnown) && gh) {
 
         uint8_t classId = 0;
-        std::string uidStr(uid);
-        toLowerInPlace(uidStr);
         if (uidStr == "player") {
             classId = gh->getPlayerClass();
         } else {
@@ -2208,6 +2215,23 @@ static int lua_StartAttack(lua_State* L) {
     return 0;
 }
 
+// AttackTarget() - the ATTACKTARGET binding's body and a common macro line.
+// It toggles: auto attack on the current target, or off when it is already
+// swinging at that target (stock 3.3.5a). Missing, the binding raised a Lua
+// error and the macro did nothing.
+static int lua_AttackTarget(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    if (!gh) return 0;
+    const uint64_t target = gh->getTargetGuid();
+    if (target == 0) return 0;
+    if (gh->isAutoAttacking() && gh->getAutoAttackTargetGuid() == target) {
+        gh->stopAutoAttack();
+    } else {
+        gh->startAutoAttack(target);
+    }
+    return 0;
+}
+
 static int lua_StopAttack(lua_State* L) {
     if (auto* gh = getGameHandler(L)) gh->stopAutoAttack();
     return 0;
@@ -2915,6 +2939,7 @@ void registerUnitLuaAPI(lua_State* L) {
                 {"RetrieveCorpse",      lua_RetrieveCorpse},
                 {"Dismount",            lua_Dismount},
                 {"StartAttack",         lua_StartAttack},
+                {"AttackTarget",        lua_AttackTarget},
                 {"StopAttack",          lua_StopAttack},
                 {"UnitInParty",         lua_UnitInParty},
                 {"UnitInRaid",          lua_UnitInRaid},

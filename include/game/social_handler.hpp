@@ -140,6 +140,10 @@ public:
     // entirely, from /logout and /camp, which drop back to character select.
     void requestLogout(bool exitAfterLogout = false);
     void cancelLogout();
+    /// The server called a logout off: no longer pending.
+    void clearPendingLogout() { loggingOut_ = false; exitAfterLogout_ = false; logoutCountdown_ = 0.0f; }
+    /// ForceLogout (0x6B21F0 -> 0x6B1930 forced): CMSG_PLAYER_LOGOUT, nothing pending.
+    void forceLogout();
     [[nodiscard]] bool  isLoggingOut()        const { return loggingOut_; }
     [[nodiscard]] float getLogoutCountdown()  const { return logoutCountdown_; }
     [[nodiscard]] bool  isLogoutToExit()      const { return exitAfterLogout_; }

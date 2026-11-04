@@ -1093,9 +1093,10 @@ static void pushCvarDefault(lua_State* L, const std::string& n) {
     // registers it "1").
     else if (n == "nameplateallowoverlap") lua_pushstring(L, "1");
     // Spam filtering is on (the checkbox in front of it reads "Disable Spam
-    // Filter"), and mature language filtering is off, as they ship.
+    // Filter"), and so is mature language filtering: 0x51D9B0 registers
+    // both with "1" (0x51E118), and chat_handler reads them that way.
     else if (n == "spamfilter") lua_pushstring(L, "1");
-    else if (n == "profanityfilter") lua_pushstring(L, "0");
+    else if (n == "profanityfilter") lua_pushstring(L, "1");
     // Off, as it ships: a zone track stops at its end and the next one starts
     // when the zone asks for it.
     else if (n == "sound_zonemusicnodelay") lua_pushstring(L, "0");
@@ -4717,14 +4718,21 @@ static int lua_Quit(lua_State* L) {
 /// for one to answer and not the other, even though Blizzard has that call
 /// commented out with a note saying forced logout is unfinished.
 static int lua_ForceQuit(lua_State* L) {
-    // The same thing Quit does, and deliberately the same code: asking again
-    // is what the popup's button amounts to once the server owns the timer.
+    // Wow.exe 0x510A00: the program closes, now, with no request to the
+    // server - the connection dropping is the server's notice. Asking for a
+    // logout instead started a second twenty-second wait behind the QUIT
+    // popup's "Exit Now".
+    if (auto* svc = getLuaServices(L); svc && svc->quitApplication) {
+        svc->quitApplication();
+        return 0;
+    }
     return lua_Quit(L);
 }
 
 static int lua_ForceLogout(lua_State* L) {
+    // Wow.exe 0x5109F0 -> 0x6B21F0: the forced request, CMSG_PLAYER_LOGOUT.
     auto* gh = getGameHandler(L);
-    if (gh) gh->requestLogout(/*exitAfterLogout=*/false);
+    if (gh) gh->forceLogout();
     return 0;
 }
 

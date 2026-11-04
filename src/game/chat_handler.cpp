@@ -1,7 +1,9 @@
 #include "ui/world_ui_rules.hpp"
 #include "game/chat_handler.hpp"
+#include "game/chat_social_rules.hpp"
 #include "game/global_strings.hpp"
 
+#include <random>
 #include <set>
 #include "addons/lua_api_registrations.hpp"
 #include "game/chat_filters.hpp"
@@ -471,6 +473,22 @@ void ChatHandler::sendChatMessage(ChatType type, const std::string& message, con
         message, targetName, focusName,
         globalString(owner_.services().assetManager, "TARGET_TOKEN_NOT_FOUND"),
         globalString(owner_.services().assetManager, "FOCUS_TOKEN_NOT_FOUND"));
+    // Drunk (0x577F60): "s" slurred to "sh" and the odd "...hic!", from the
+    // drunk factor, before the line break cut.
+    if (const float drunk = owner_.playerDrunkFactor(); drunk > 0.0f) {
+        static std::mt19937 rng{std::random_device{}()};
+        std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+        std::string hic = globalString(owner_.services().assetManager, "SLURRED_SPEECH");
+        if (hic.empty()) hic = "%s ...hic!";
+        text = chat_rules::slurSpeech(
+            text, drunk, [&] { return unit(rng); },
+            [&](const std::string& word) {
+                bool changed = false;
+                filterProfanity(word, /*force=*/true, &changed);
+                return changed;
+            },
+            hic);
+    }
     chat_rules::cutAtLineBreak(text);
     if (!chat_rules::checkOutgoingEscapes(text)) {
         LOG_WARNING("Chat: not sent - an invalid escape code");
@@ -725,13 +743,25 @@ void ChatHandler::ensureLanguageWords() {
 }
 
 uint32_t ChatHandler::languageComprehension(uint32_t language) const {
-    // 0x6E0640: the skill of the language's skill line, base plus bonus. No
-    // skill, no understanding.
+    // 0x6E0640: a language the player has (its skill line, base plus bonus)
+    // is understood as far as that goes. One the player lacks is understood
+    // completely under an aura 244 (COMPREHEND_LANGUAGE) naming it - looked
+    // for only while UNIT_FIELD_FLAGS_2 carries 0x8, which the server sets
+    // with the aura.
     const uint32_t line = chat_rules::languageSkillLine(language);
-    if (line == 0) return 0;
-    const auto& skills = owner_.getPlayerSkills();
-    auto it = skills.find(line);
-    return it == skills.end() ? 0u : it->second.effectiveValue();
+    bool knows = false;
+    uint32_t skill = 0;
+    if (line != 0) {
+        const auto& skills = owner_.getPlayerSkills();
+        if (auto it = skills.find(line); it != skills.end()) {
+            knows = true;
+            skill = it->second.effectiveValue();
+        }
+    }
+    if (knows) return skill;
+    const bool flag = owner_.playerComprehendsLanguages();
+    return chat_rules::languageComprehensionFor(
+        false, 0, flag, flag && owner_.playerHasAuraOfType(244, static_cast<int32_t>(language)));
 }
 
 bool ChatHandler::isSpamLine(const std::string& text) {
@@ -763,6 +793,46 @@ bool ChatHandler::isSpamLine(const std::string& text) {
     if (spamVerdicts_.size() > 2048) spamVerdicts_.clear();
     spamVerdicts_.emplace(text, spam);
     return spam;
+}
+
+void ChatHandler::ensureProfanityPatterns() {
+    if (profanityLoaded_) return;
+    auto* am = owner_.services().assetManager;
+    if (!am || !am->isInitialized()) return;
+    profanityLoaded_ = true;
+    // ID, pattern, language group (0x7E2250): enUS reads group 0, and the
+    // rows of group -1 count for every group.
+    if (auto dbc = am->loadDBC("ChatProfanity.dbc"); dbc && dbc->isLoaded() && dbc->getFieldCount() >= 3) {
+        size_t bad = 0;
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            const uint32_t group = dbc->getUInt32(i, 2);
+            if (group != 0 && group != 0xFFFFFFFFu) continue;
+            const std::string pattern = dbc->getString(i, 1);
+            if (pattern.empty()) continue;
+            if (!profanity_.add(pattern)) ++bad;
+        }
+        LOG_INFO("ChatProfanity.dbc: ", profanity_.size(), " patterns for enUS",
+                 bad ? " (" + std::to_string(bad) + " that do not compile)" : std::string());
+    }
+}
+
+std::string ChatHandler::filterProfanity(const std::string& text, bool force, bool* changed) {
+    if (changed) *changed = false;
+    if (text.empty()) return text;
+    if (!force && addons::storedCVarValue("profanityFilter", "1") == "0") return text;
+    ensureProfanityPatterns();
+    if (profanity_.empty()) return text;
+    // The client remembers its answer per text (0x617C50).
+    if (auto it = profanityVerdicts_.find(text); it != profanityVerdicts_.end()) {
+        if (changed) *changed = it->second != text;
+        return it->second;
+    }
+    bool did = false;
+    std::string out = profanity_.apply(text, &did);
+    if (profanityVerdicts_.size() > 2048) profanityVerdicts_.clear();
+    profanityVerdicts_.emplace(text, out);
+    if (changed) *changed = did;
+    return out;
 }
 
 void ChatHandler::playTalkAnimation(const MessageChatData& data) {
@@ -800,6 +870,10 @@ void ChatHandler::playTalkAnimation(const MessageChatData& data) {
 // check, $-tokens, the talking animation, the language, the spam filter, the
 // line id, and CHAT_MSG_<type> with the client's arguments (0x4FDBC0).
 void ChatHandler::finishChatLine(MessageChatData data) {
+    if (data.textEmoteId != 0) {
+        finishTextEmote(data);
+        return;
+    }
     const auto type = static_cast<uint8_t>(data.type);
 
     // Addon traffic is language -1 and nothing else: CHAT_MSG_ADDON with the
@@ -900,6 +974,12 @@ void ChatHandler::finishChatLine(MessageChatData data) {
         return;
     }
 
+    // The mature language filter (0x509DD0, cvar profanityFilter) over the
+    // kinds players type (0x9FA510), and over the channel's name.
+    if (chat_rules::profanityFilteredType(static_cast<uint8_t>(data.type)))
+        data.message = filterProfanity(data.message);
+    if (!data.channelName.empty()) data.channelName = filterProfanity(data.channelName);
+
     // Wowee's own chat panel reads the history, and prints a monster's line
     // as it is: its "%s" is filled here. The interface gets the text as sent
     // and fills it itself (CHAT_MONSTER_*_GET .. arg1 formatted with arg2).
@@ -925,13 +1005,14 @@ void ChatHandler::finishChatLine(MessageChatData data) {
     fireChatLineEvent(data, chatFlag);
 }
 
-void ChatHandler::fireChatLineEvent(const MessageChatData& data, const char* chatFlag) {
+void ChatHandler::fireChatLineEvent(const MessageChatData& data, const char* chatFlag, bool takesLineId) {
     // Every line through the chat frame takes the next id (0x509DD0), and
     // FrameXML builds it into the player link on the name, so a right-click
     // on that name hands it back: CanComplainChat and the report menu ask by
-    // it.
-    const uint32_t lineId = nextChatLineId_++;
-    if (data.senderGuid != 0) {
+    // it. A text emote's line (0x503660) does not go through there: its id is
+    // 0.
+    const uint32_t lineId = takesLineId ? nextChatLineId_++ : 0;
+    if (takesLineId && data.senderGuid != 0) {
         chatLineSenders_.emplace_back(lineId, data.senderGuid);
         constexpr size_t kRememberedLines = 512;
         while (chatLineSenders_.size() > kRememberedLines) chatLineSenders_.pop_front();
@@ -1057,67 +1138,62 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
         LOG_WARNING("Failed to parse SMSG_TEXT_EMOTE");
         return;
     }
-    // The voice line plays for every sender, the player included.
-    if (owner_.textEmoteSoundCallbackRef()) owner_.textEmoteSoundCallbackRef()(data.senderGuid, data.textEmoteId);
+    // Wow.exe 0x504070: nothing at all from someone ignored - no line, no
+    // voice. Otherwise the line waits its turn in the chat queue like any
+    // other (0x503660 queues it while anything is queued or while the
+    // sender's name is unknown), so it can no longer be lost: an unknown
+    // sender used to drop it outright.
+    if (data.senderGuid != 0 && owner_.ignoreListGuidsRef().count(data.senderGuid)) return;
+    MessageChatData line;
+    line.type = ChatType::TEXT_EMOTE;
+    line.language = ChatLanguage::UNIVERSAL;
+    line.senderGuid = data.senderGuid;
+    line.receiverName = data.targetName;
+    line.textEmoteId = data.textEmoteId;
+    line.emoteNum = data.emoteNum;
+    queueChatLine(std::move(line));
+}
 
-    // The player's own name, for the echo and for "Name laughs at you."
+void ChatHandler::finishTextEmote(const MessageChatData& data) {
+    auto& emotes = rendering::EmoteRegistry::instance();
+    emotes.loadFromDbc();
+
     std::string playerName;
     if (const Character* active = owner_.getActiveCharacter()) playerName = active->name;
     if (playerName.empty()) playerName = owner_.lookupName(owner_.getPlayerGuid());
 
-    const bool fromPlayer = data.senderGuid == owner_.getPlayerGuid() && data.senderGuid != 0;
-    const std::string* targetPtr = data.targetName.empty() ? nullptr : &data.targetName;
-    auto& emotes = rendering::EmoteRegistry::instance();
-    emotes.loadFromDbc();
+    // 0x503660's slot: the sender is the reader (by guid), the target is the
+    // reader (by name, any case, and only when someone else sent it), no
+    // target, and the sender's gender from the name cache.
+    const bool senderIsMe = data.senderGuid != 0 && data.senderGuid == owner_.getPlayerGuid();
+    const bool targetIsMe = !senderIsMe && !playerName.empty() &&
+                            chat_rules::equalsNoCase(data.receiverName, playerName);
+    const bool noTarget = data.receiverName.empty();
+    const bool female = owner_.lookupPlayerGender(data.senderGuid) == 1;
+    const std::string senderName = data.senderName.empty() && senderIsMe ? playerName : data.senderName;
 
-    // SMSG_TEXT_EMOTE is the narrated chat line. The server sends the actual
-    // visual separately in SMSG_EMOTE; replaying an animation here restarts
-    // one-shots and replaces correctly resolved STATE_* loops such as /dance.
-    std::string senderName;
-    std::string emoteText;
-    if (fromPlayer) {
-        // The player's own echo is the only place "You laugh." comes from.
-        // This used to be skipped as a duplicate of a local line, but DoEmote
-        // - the route FrameXML's chat takes for every /emote - adds none, so
-        // the player's own emotes never appeared in chat at all. The real
-        // client prints it from this echo too, which is also why a dead
-        // player's /laugh (which the server refuses) prints nothing.
-        senderName = playerName;
-        emoteText = emotes.selfTextByDbcId(data.textEmoteId, targetPtr);
-    } else {
-        senderName = knownPlayerName(data.senderGuid);
-        if (senderName.empty()) {
-            owner_.queryPlayerName(data.senderGuid);
-            LOG_DEBUG("Deferred chat text for unresolved SMSG_TEXT_EMOTE sender=0x",
-                      std::hex, data.senderGuid, std::dec,
-                      " emoteId=", data.textEmoteId);
-            return;
-        }
-        // Aimed at the player: "Name laughs at you.", as the target reads it.
-        if (targetPtr && !playerName.empty() && data.targetName == playerName) {
-            emoteText = emotes.atYouTextByDbcId(data.textEmoteId, senderName, playerName);
-        } else {
-            emoteText = emotes.textByDbcId(data.textEmoteId, senderName, targetPtr);
-        }
+    std::string text;
+    if (const auto* info = emotes.infoByDbcId(data.textEmoteId)) {
+        const int slot = chat_rules::textEmoteSlot(info->texts, female, senderIsMe, targetIsMe, noTarget);
+        if (slot >= 0)
+            text = chat_rules::formatTextEmote(info->texts[static_cast<size_t>(slot)], senderIsMe,
+                                               targetIsMe, senderName, data.receiverName);
     }
-    if (emoteText.empty()) {
-        emoteText = data.targetName.empty()
-            ? senderName + " performs an emote."
-            : senderName + " performs an emote at " + data.targetName + ".";
+    if (!text.empty()) {
+        MessageChatData shown = data;
+        shown.message = text;
+        shown.senderName = senderName;
+        // The event's receiver is empty (0x503660 passes "").
+        shown.receiverName.clear();
+        shown.uid = ++chatUidCounter_;
+        chatHistory_.push_back(shown);
+        if (chatHistory_.size() > maxChatHistory_) chatHistory_.pop_front();
+        logChatMessage(shown, "server");
+        fireChatLineEvent(shown, chat_rules::chatFlagName(shown.chatTag), /*lineId=*/false);
     }
-
-    MessageChatData chatMsg;
-    chatMsg.type = ChatType::TEXT_EMOTE;
-    // Universal, so the chat frame puts no "[Common] " header in front of it
-    // for a Horde reader: a text emote is narration, not speech.
-    chatMsg.language = ChatLanguage::UNIVERSAL;
-    chatMsg.senderGuid = data.senderGuid;
-    chatMsg.senderName = senderName;
-    chatMsg.message = emoteText;
-
-    addLocalChatMessage(chatMsg);
-
-    LOG_INFO("TEXT_EMOTE from ", senderName, " (emoteId=", data.textEmoteId, ")");
+    // The voice line, for a sender in the world - with or without wording.
+    if (owner_.textEmoteSoundCallbackRef())
+        owner_.textEmoteSoundCallbackRef()(data.senderGuid, data.textEmoteId);
 }
 
 void ChatHandler::joinChannel(const std::string& channelName, const std::string& password,
@@ -1164,8 +1240,10 @@ const char* ChatHandler::rememberJoinedChannel(const std::string& name, uint32_t
     for (size_t i = 0; i < joinedChannels_.size(); ++i) {
         if (joinedChannels_[i] != name) continue;
         if (channelId != 0) joinedChannelIds_[i] = channelId;
-        // Rejoined after the server suspended it: a join worth announcing.
-        return suspendedChannels_.erase(name) ? "YOU_JOINED" : nullptr;
+        // Rejoined after the server suspended it: YOU_JOINED. A join the
+        // client already has, not suspended, is YOU_CHANGED (0x50E120 asks
+        // only whether the channel exists and is not suspended).
+        return suspendedChannels_.erase(name) ? "YOU_JOINED" : "YOU_CHANGED";
     }
     // A zone channel under its new zone's name takes the old one's number,
     // as the real client does: "Changed Channel: [1. General - Westfall]".
@@ -1503,47 +1581,56 @@ void ChatHandler::joinZoneChannels(uint32_t zoneId) {
                  {25, 0x20032, "GuildRecruitment - %s"}, {26, 0x40039, "LookingForGroup"}};
     }
 
-    // AzerothCore's flag names (CHANNEL_DBC_FLAG_*).
-    constexpr uint32_t kGlobal = 0x4, kTrade = 0x8, kCityOnly = 0x10,
-                       kDefense = 0x10000, kGuildReq = 0x20000, kLfg = 0x40000;
+    // Wow.exe at world entry (0x508090 -> 0x507A80): every row in the joined
+    // mask, which a new character starts as the rows with flag 0x1 (0x501F00:
+    // General, Trade, LocalDefense, LookingForGroup - not WorldDefense, not
+    // GuildRecruitment). This client keeps no mask between sessions; its
+    // switches stand in for it, row by row. GuildRecruitment is 0x507D30's:
+    // joined while its setting is on and the player has no guild.
+    constexpr uint32_t kTrade = 0x8, kDefense = 0x10000, kLfg = 0x40000;
     const std::string zoneName = owner_.getWhoAreaName(zoneId);
-    const bool guildRecruitment =
-        addons::storedCVarValue("guildRecruitmentChannel", "0") != "0";
-
-    for (const auto& ch : table) {
-        // Which of the client's switches covers this row. Trade and the
-        // recruitment channel both carry the city flag, so the more specific
-        // flags decide first.
-        bool wanted;
-        // The LookingForGroup channel takes only players in the dungeon
-        // finder's queue (AzerothCore Channel.RestrictedLfg, the stock
-        // "You must be in a LFG queue to join 'LookingForGroup'." refusal), so
-        // asking on every zone change when not queued printed that refusal on
-        // every teleport and zone line.
-        if (ch.flags & kLfg)            wanted = chatAutoJoin.lfg &&
-                                                 owner_.getLfgState() != LfgState::None;
-        else if (ch.flags & kGuildReq)  wanted = guildRecruitment;
-        else if (ch.flags & kTrade)     wanted = chatAutoJoin.trade;
-        else if (ch.flags & kDefense)   wanted = chatAutoJoin.localDefense;  // Local and World
-        else if (ch.id == 1)            wanted = chatAutoJoin.general;
-        else                            wanted = false;
-        if (!wanted) continue;
-
-        // The name the server keys the channel on, built the way
-        // Player::UpdateLocalChannels builds it, so this client lands in the
-        // same "General - Elwynn Forest" as everyone else rather than a
-        // custom channel called "General".
-        std::string name = ch.pattern;
-        if (!(ch.flags & kGlobal)) {
-            const std::string ext = (ch.flags & kCityOnly) ? std::string("City") : zoneName;
-            if (const size_t pos = name.find("%s"); pos != std::string::npos) {
-                if (ext.empty()) continue;  // zone name unknown: wrong name is worse than none
-                name.replace(pos, 2, ext);
+    const auto* zoneInfo = owner_.areaPvpInfo(zoneId);
+    const uint32_t zoneFlags = zoneInfo ? zoneInfo->flags : 0;
+    // The AreaTable row with flag 0x200 (0x50EDD0): "City".
+    static std::string cityName;
+    if (cityName.empty()) {
+        if (auto* am = owner_.services().assetManager; am && am->isInitialized()) {
+            if (auto dbc = am->loadDBC("AreaTable.dbc"); dbc && dbc->isLoaded() && dbc->getFieldCount() > 11) {
+                for (uint32_t i = dbc->getRecordCount(); i-- > 0;)
+                    if (dbc->getUInt32(i, 4) & 0x200) { cityName = dbc->getString(i, 11); break; }
             }
         }
-        // Not ours to filter by zone: the server checks the city and guild
-        // rules (CanJoinConstantChannelInZone) and ignores a join that fails
-        // them, silently, which is what Trade outside a city should do.
+        if (cityName.empty()) cityName = "City";
+    }
+    const bool guildRecruitment =
+        addons::storedCVarValue("guildRecruitmentChannel", "0") != "0" && !owner_.isInGuild();
+
+    for (const auto& ch : table) {
+        bool wanted;
+        if (ch.flags & chat_rules::kChannelGuildRecruitment) {
+            wanted = guildRecruitment;
+        } else if (!(ch.flags & chat_rules::kChannelJoinedByDefault)) {
+            wanted = false;
+        } else if (ch.flags & kLfg) {
+            // Asked for whether or not the player is queued, as the client
+            // asks: the server's refusal (NOT_IN_LFG) has no words in 3.3.5.
+            wanted = chatAutoJoin.lfg;
+        } else if (ch.flags & kTrade) {
+            wanted = chatAutoJoin.trade;
+        } else if (ch.flags & kDefense) {
+            wanted = chatAutoJoin.localDefense;
+        } else {
+            wanted = chatAutoJoin.general;
+        }
+        if (!wanted) continue;
+
+        // "General - Elwynn Forest"; Trade and GuildRecruitment take "City"
+        // in a capital (AreaTable flag 0x100) and the zone's name anywhere
+        // else, where the server turns them down without a word
+        // (CanJoinConstantChannelInZone). No zone name, no join.
+        const std::string name =
+            chat_rules::zoneChannelName(ch.pattern, ch.flags, zoneName, zoneFlags, cityName);
+        if (name.empty()) continue;
         joinChannel(name, "", ch.id);
     }
 

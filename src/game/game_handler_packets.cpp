@@ -3552,8 +3552,14 @@ void GameHandler::registerRemainingOpcodes() {
     // the interface hides its countdown on it. The client already cancels
     // optimistically in cancelLogout(), so the ack changes no state here - it
     // is the only thing that tells the interface the countdown is over.
+    // 0x6B0900: LOGOUT_CANCEL only while a logout is still pending - the
+    // client's own CancelLogout clears that before it sends, so its ack is
+    // silent and only a cancel the server makes on its own hides the popup.
     dispatchTable_[Opcode::SMSG_LOGOUT_CANCEL_ACK] = [this](network::Packet& packet) {
-        if (addonEventCallback_) addonEventCallback_("LOGOUT_CANCEL", {});
+        if (isLoggingOut()) {
+            if (socialHandler_) socialHandler_->clearPendingLogout();
+            if (addonEventCallback_) addonEventCallback_("LOGOUT_CANCEL", {});
+        }
         packet.skipAll();
     };
     // Someone has taken the player's insignia, so the corpse is gone and any

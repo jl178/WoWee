@@ -1,5 +1,7 @@
 // lua_social_api.cpp - Chat, guild, friends, ignore, gossip, party management, and emotes Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
+#include "game/chat_social_rules.hpp"
+#include <cstring>
 #include "game/interaction_rules.hpp"
 #include "game/guild_roster_throttle.hpp"
 #include <algorithm>
@@ -13,6 +15,7 @@
 #include "game/reputation_standing.hpp"
 #include "game/stationery.hpp"
 #include "rendering/animation_controller.hpp"
+#include "rendering/animation/emote_registry.hpp"
 
 namespace wowee::addons {
 
@@ -2424,18 +2427,50 @@ void registerSocialLuaAPI(lua_State* L) {
             //
             // The current target when none is named, which is what the emote
             // buttons and a bare "/dance" mean.
+            //
+            // 0x500980: nothing, or text starting with '%' (an unexpanded
+            // %t), is the current target; anything else must name a player -
+            // by unit token or by name - or the emote goes at nobody.
             const char* aimedAt = luaL_optstring(L, 2, "");
-            uint64_t target = (aimedAt && *aimedAt) ? resolveUnitOrName(gh, aimedAt) : 0;
-            if (target == 0 && (!aimedAt || !*aimedAt)) {
+            uint64_t target = 0;
+            if (!aimedAt || !*aimedAt || *aimedAt == '%') {
                 target = gh->hasTarget() ? gh->getTargetGuid() : 0;
+            } else {
+                std::string lower(aimedAt);
+                toLowerInPlace(lower);
+                target = resolveUnitGuid(gh, lower);
+                if (target == 0) {
+                    for (const auto& [g, e] : gh->getEntityManager().getEntities()) {
+                        if (!e || e->getType() != game::ObjectType::PLAYER) continue;
+                        std::string n = std::static_pointer_cast<game::Unit>(e)->getName();
+                        if (n.empty()) n = gh->lookupName(g);
+                        toLowerInPlace(n);
+                        if (!n.empty() && n == lower) { target = g; break; }
+                    }
+                }
+                if (target != 0) {
+                    auto e = gh->getEntityManager().getEntity(target);
+                    if (!e || e->getType() != game::ObjectType::PLAYER) target = 0;
+                }
             }
-            gh->sendTextEmote(emoteId, target);
-            // And the animation, which this did not do. Telling the server is
-            // the half that is seen by everyone else; playing it is the half
-            // seen by the player, and standing still while the room is told you
-            // danced is what an emote that "does nothing" looks like.
-            if (auto* svc = getLuaServices(L); svc && svc->playEmoteAnimation) {
-                svc->playEmoteAnimation(name);
+            // 0x6DD9E0: aimed at yourself is aimed at nobody.
+            if (target == gh->getPlayerGuid()) target = 0;
+            // What the emote's EmoteFlags allow in the player's state: a
+            // refusal is silent in the stock client, moving has its error.
+            const auto* info = rendering::EmoteRegistry::instance().infoFor(name);
+            const auto gate = info ? game::chat_rules::emoteGate(info->emoteFlags, gh->getStandState(),
+                                                                 gh->getMovementInfo().flags)
+                                   : game::chat_rules::EmoteGate::Allowed;
+            if (gate == game::chat_rules::EmoteGate::Moving)
+                gh->displayGameMessage("ERR_NOEMOTEWHILERUNNING", "You can't do that while moving!");
+            if (gate == game::chat_rules::EmoteGate::Allowed) {
+                gh->sendTextEmote(emoteId, target);
+                // And the animation. Telling the server is the half that is
+                // seen by everyone else; playing it is the half seen by the
+                // player.
+                if (auto* svc = getLuaServices(L); svc && svc->playEmoteAnimation) {
+                    svc->playEmoteAnimation(name);
+                }
             }
             return 0;
         }},
@@ -2490,9 +2525,13 @@ void registerSocialLuaAPI(lua_State* L) {
             // GetWhoInfo(index) → name, guild, level, race, class, zone, classFileName
             auto* gh = getGameHandler(L);
             int index = static_cast<int>(luaL_checknumber(L, 1));
-            if (!gh || index < 1) { return luaReturnNil(L); }
-            const auto view = whoResultsView(gh);
-            if (index > static_cast<int>(view.size())) { return luaReturnNil(L); }
+            // Past the list: nil, nil, 0 and four nils (0x6B4A80).
+            const auto view = gh ? whoResultsView(gh) : std::vector<const game::WhoEntry*>{};
+            if (index < 1 || index > static_cast<int>(view.size())) {
+                lua_pushnil(L); lua_pushnil(L); lua_pushnumber(L, 0);
+                lua_pushnil(L); lua_pushnil(L); lua_pushnil(L); lua_pushnil(L);
+                return 7;
+            }
             const auto& w = *view[static_cast<size_t>(index) - 1];
 
 
@@ -2503,7 +2542,14 @@ void registerSocialLuaAPI(lua_State* L) {
             lua_pushnumber(L, w.level);
             lua_pushstring(L, raceName);
             lua_pushstring(L, className);
-            lua_pushstring(L, ""); // zone name (would need area lookup)
+            // The zone's AreaTable name, UNKNOWN when there is no row. It
+            // was always empty, so the panel's zone column and the Who
+            // tooltip said nothing.
+            {
+                std::string zone = gh->getWhoAreaName(w.zoneId);
+                if (zone.empty()) zone = "Unknown";
+                lua_pushstring(L, zone.c_str());
+            }
             // The who list reads this exactly as the guild roster does, so it
             // gets the same answer from the same place. It used to keep a
             // private copy of the token table with a fallback of "WARRIOR",
@@ -2986,9 +3032,17 @@ void registerSocialLuaAPI(lua_State* L) {
             if (gh) gh->closeGossip();
             return 0;
         }},
+                // InviteUnit(name), 0x51A6E0: a name, not a unit token - the
+                // slash command and the menus pass UnitName themselves. More
+                // than 48 bytes is a Lua error; the rest is 0x6D4300's.
                 {"InviteUnit", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) gh->inviteToGroup(luaL_checkstring(L, 1));
+            if (!gh) return 0;
+            // No name at all is nothing (0x51A6E0 reads it and stops).
+            if (const char* name = lua_tostring(L, 1)) {
+                if (std::strlen(name) > 48) return luaL_error(L, "Name too long");
+                gh->inviteToGroup(name);
+            }
             return 0;
         }},
                 {"UninviteUnit", [](lua_State* L) -> int {
@@ -3001,34 +3055,47 @@ void registerSocialLuaAPI(lua_State* L) {
             if (gh) gh->leaveGroup();
             return 0;
         }},
-                // FollowUnit(unit) - and this one matters more than it looks.
+                // FollowUnit(unit), 0x5224C0. FrameXML owns /follow, /f and
+                // /fol and hands over the text after the command.
                 //
-                // FrameXML owns every follow command: SLASH_FOLLOW1 through 7
-                // are /f, /follow and /fol, and the client's chat tries
-                // SlashCmdList before its own registry and returns as soon as a
-                // handler is found - so all three landed on this no-op and the
-                // client's working /follow never ran. Following was simply
-                // broken from chat.
-                //
-                // followTarget aims at whatever is targeted, so the cases that
-                // mean that are answered and the rest still are not: a named
-                // party member who is not the target needs a guid the movement
-                // handler has no way to take yet.
+                // The text is a unit token or a name - a player's first, then
+                // any unit's - and the follow is 0x72B4A0's, which says why it
+                // will not go. Nothing found is ERR_UNIT_NOT_FOUND for a name,
+                // ERR_GENERIC_NO_TARGET for nothing or "target". This followed
+                // only the current target, so "/follow Bob" with someone else
+                // selected followed them.
                 {"FollowUnit", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
-            std::string who(luaL_optstring(L, 1, ""));
-            toLowerInPlace(who);
-            const bool meansTarget =
-                who.empty() || who == "target" ||
-                // A typed name that happens to be the target, which is what
-                // "/follow Bob" is when Bob is already selected.
-                [&] {
-                    std::string n = gh->lookupName(gh->getTargetGuid());
-                    toLowerInPlace(n);
-                    return !n.empty() && n == who;
-                }();
-            if (meansTarget && gh->getTargetGuid() != 0) gh->followTarget();
+            const std::string who(luaL_optstring(L, 1, ""));
+            // No text is the target (0x60ABF0 reads "" as the target).
+            uint64_t guid = who.empty() ? gh->getTargetGuid() : 0;
+            if (!who.empty()) {
+                std::string lower = who;
+                toLowerInPlace(lower);
+                guid = resolveUnitGuid(gh, lower);
+                if (guid == 0) {
+                    // A player of that name before any other unit.
+                    for (const auto& [g, e] : gh->getEntityManager().getEntities()) {
+                        if (!e || e->getType() != game::ObjectType::PLAYER) continue;
+                        std::string n = std::static_pointer_cast<game::Unit>(e)->getName();
+                        if (n.empty()) n = gh->lookupName(g);
+                        toLowerInPlace(n);
+                        if (!n.empty() && n == lower) { guid = g; break; }
+                    }
+                }
+                if (guid == 0) guid = resolveUnitOrName(gh, who);
+            }
+            if (guid == 0) {
+                std::string lower = who;
+                toLowerInPlace(lower);
+                if (!who.empty() && lower != "target")
+                    gh->displayGameMessage("ERR_UNIT_NOT_FOUND", "Unknown unit.");
+                else
+                    gh->displayGameMessage("ERR_GENERIC_NO_TARGET", "You have no target.");
+                return 0;
+            }
+            gh->followUnit(guid);
             return 0;
         }},
                 // Inspect and duel, both of which unitpopup.lua calls straight
@@ -3742,11 +3809,20 @@ void registerSocialLuaAPI(lua_State* L) {
             if (const uint64_t guid = resolveUnitGuid(gh, uid)) gh->proposeDuel(guid);
             return 0;
         }},
+                // RandomRoll("min", "max") as 0x516610 takes it: both required,
+                // each read as text to a number; 0-0, a negative low end, a low
+                // end above the high one or a high end over a million send
+                // nothing. In range, the two go out as given - no swapping, no
+                // cap of this client's own (the server has its own limit).
                 {"RandomRoll", [](lua_State* L) -> int {
+            if (lua_isnoneornil(L, 1) || lua_isnoneornil(L, 2))
+                return luaL_error(L, "Usage: RandomRoll(\"max\") or RandomRoll(\"min\", \"max\")");
             auto* gh = getGameHandler(L);
-            int mn = static_cast<int>(luaL_optnumber(L, 1, 1));
-            int mx = static_cast<int>(luaL_optnumber(L, 2, 100));
-            if (gh) gh->randomRoll(mn, mx);
+            const char* a = lua_tostring(L, 1);
+            const char* b = lua_tostring(L, 2);
+            const auto range = game::chat_rules::randomRollRange(a ? std::atoi(a) : 0, b ? std::atoi(b) : 0);
+            if (gh && range) gh->randomRoll(static_cast<uint32_t>(range->first),
+                                            static_cast<uint32_t>(range->second));
             return 0;
         }},
                 {"JoinChannelByName", [](lua_State* L) -> int {

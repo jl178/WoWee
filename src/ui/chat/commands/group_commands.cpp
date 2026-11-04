@@ -3,6 +3,7 @@
 //                 /clearmainassist, /raidinfo, /raidconvert, /lootmethod,
 //                 /lootthreshold, /mark, /roll
 // Moved from ChatPanel::sendChatMessage() if/else chain (Phase 3).
+#include "game/chat_social_rules.hpp"
 #include "game/group_defines.hpp"
 #include "ui/chat/chat_utils.hpp"
 #include "ui/chat/i_chat_command.hpp"
@@ -404,7 +405,10 @@ public:
                 try { maxRoll = std::stoul(ctx.args); } catch (...) {}
             }
         }
-        ctx.gameHandler.randomRoll(minRoll, maxRoll);
+        // The range RandomRoll accepts (0x516610); outside it nothing is sent.
+        const auto range = game::chat_rules::randomRollRange(static_cast<int32_t>(minRoll),
+                                                             static_cast<int32_t>(maxRoll));
+        if (range) ctx.gameHandler.randomRoll(minRoll, maxRoll);
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"roll", "random", "rnd"}; }

@@ -480,7 +480,8 @@ network::Packet WhoPacket::build(uint32_t minLevel, uint32_t maxLevel,
                                  const std::string& playerName,
                                  const std::string& guildName,
                                  uint32_t raceMask, uint32_t classMask,
-                                 uint32_t zones) {
+                                 const std::vector<uint32_t>& zones,
+                                 const std::vector<std::string>& strings) {
     network::Packet packet(wireOpcode(Opcode::CMSG_WHO));
     packet.writeUInt32(minLevel);
     packet.writeUInt32(maxLevel);
@@ -488,11 +489,12 @@ network::Packet WhoPacket::build(uint32_t minLevel, uint32_t maxLevel,
     packet.writeString(guildName);
     packet.writeUInt32(raceMask);
     packet.writeUInt32(classMask);
-    packet.writeUInt32(zones);    // Number of zone IDs (0 = no zone filter)
-    // Zone ID array would go here if zones > 0
-    packet.writeUInt32(0);        // stringCount (number of search strings)
-    // String array would go here if stringCount > 0
-    LOG_DEBUG("Built CMSG_WHO: player=", playerName);
+    packet.writeUInt32(static_cast<uint32_t>(zones.size()));
+    for (uint32_t z : zones) packet.writeUInt32(z);
+    packet.writeUInt32(static_cast<uint32_t>(strings.size()));
+    for (const auto& str : strings) packet.writeString(str);
+    LOG_DEBUG("Built CMSG_WHO: name=", playerName, " zones=", zones.size(),
+              " strings=", strings.size());
     return packet;
 }
 

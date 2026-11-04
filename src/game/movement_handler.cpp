@@ -3806,49 +3806,64 @@ void MovementHandler::updateAttachedTransportChildren(float /*deltaTime*/) {
 // ============================================================
 
 void MovementHandler::followTarget() {
+    if (owner_.getTargetGuid() == 0) {
+        owner_.displayGameMessage("ERR_GENERIC_NO_TARGET", "You have no target.");
+        return;
+    }
+    followUnit(owner_.getTargetGuid());
+}
+
+void MovementHandler::followUnit(uint64_t guid) {
     if (owner_.getState() != WorldState::IN_WORLD) {
         LOG_WARNING("Cannot follow: not in world");
         return;
     }
+    // Wow.exe 0x72B4A0 with action 3: not yourself, and a unit in the world.
+    if (guid == 0 || guid == owner_.getPlayerGuid()) return;
+    auto target = owner_.getEntityManager().getEntity(guid);
+    auto unit = target ? std::dynamic_pointer_cast<Unit>(target) : nullptr;
+    if (!unit) return;
 
-    if (owner_.getTargetGuid() == 0) {
-        owner_.raiseUiError("You must target someone to follow.");
+    // 0x729BD0: only a player, not charmed, of the follower's own side.
+    const uint64_t charmedBy = [&]() -> uint64_t {
+        const uint16_t idx = fieldIndex(UF::UNIT_FIELD_CHARMEDBY);
+        if (idx == 0xFFFF) return 0;
+        return static_cast<uint64_t>(unit->getField(idx)) |
+               (static_cast<uint64_t>(unit->getField(static_cast<uint16_t>(idx + 1))) << 32);
+    }();
+    const bool validTarget = target->getType() == ObjectType::PLAYER && charmedBy == 0 &&
+                             !owner_.isHostileFactionPublic(unit->getFactionTemplate());
+    if (!validTarget) {
+        owner_.displayGameMessage("ERR_INVALID_FOLLOW_TARGET", "You can't follow that unit.");
+        return;
+    }
+    // The follower: alive, not stunned (UNIT_FLAG_STUNNED 0x40000), not
+    // channelling.
+    if (owner_.isPlayerDead() || owner_.isPlayerGhost()) {
+        owner_.displayGameMessage("ERR_PLAYER_DEAD", "You can't do that when you're dead.");
+        return;
+    }
+    if (auto me = owner_.getEntityManager().getEntity(owner_.getPlayerGuid())) {
+        if (auto meUnit = std::dynamic_pointer_cast<Unit>(me); meUnit && (meUnit->getUnitFlags() & 0x40000u)) {
+            owner_.displayGameMessage("ERR_GENERIC_STUNNED", "You are stunned");
+            return;
+        }
+    }
+    if (owner_.isChanneling()) {
+        owner_.displayGameMessage("ERR_TOOBUSYTOFOLLOW", "You're too busy to follow anything!");
         return;
     }
 
-    auto target = owner_.getTarget();
-    if (!target) {
-        owner_.raiseUiError("Invalid target.");
-        return;
-    }
-
-    // Set follow target
-    owner_.followTargetGuidRef() = owner_.getTargetGuid();
-
-    // Initialize render-space position from entity's canonical coords
-    owner_.followRenderPosRef() = core::coords::canonicalToRender(glm::vec3(target->getX(), target->getY(), target->getZ()));
-
-    // Tell camera controller to start auto-following
+    owner_.followTargetGuidRef() = guid;
+    owner_.followRenderPosRef() = core::coords::canonicalToRender(
+        glm::vec3(target->getX(), target->getY(), target->getZ()));
     if (owner_.autoFollowCallbackRef()) {
         owner_.autoFollowCallbackRef()(&owner_.followRenderPosRef());
     }
-
-    // Get target name
-    std::string targetName = "Target";
-    if (target->getType() == ObjectType::PLAYER) {
-        auto player = std::static_pointer_cast<Player>(target);
-        if (!player->getName().empty()) {
-            targetName = player->getName();
-        }
-    } else if (target->getType() == ObjectType::UNIT) {
-        auto unit = std::static_pointer_cast<Unit>(target);
-        targetName = unit->getName();
-    }
-
+    std::string targetName = std::static_pointer_cast<Player>(target)->getName();
+    if (targetName.empty()) targetName = owner_.lookupName(guid);
     // AUTOFOLLOW_BEGIN alone, whose status frame says it (Wow.exe 0x72B4A0).
-    LOG_INFO("Following target: ", targetName, " (GUID: 0x", std::hex, owner_.getTargetGuid(), std::dec, ")");
-    // The name goes with it: the status text is formatted from this argument,
-    // and without one it formats a nil.
+    LOG_INFO("Following ", targetName, " (GUID: 0x", std::hex, guid, std::dec, ")");
     owner_.fireAddonEvent("AUTOFOLLOW_BEGIN", {targetName});
 }
 

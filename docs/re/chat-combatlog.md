@@ -218,18 +218,224 @@ The default chat window gets the rows with flag 0x1 (0x501F00).
   order), CHAT_MSG_ADDON's distribution words, SendChatMessage's checks and
   throttles, GetQuestGreenRange's table.
 
-### 6. Gaps
+### 6. Commands, emotes, filters, zone channels (second pass)
 
-- Profanity filter; drunk slurring; comprehend-language auras; the tag-0x08
-  whisper refusal; CJK word splitting in the scrambler.
+Read with Ghidra the same way; the pure rules are in
+`include/game/chat_social_rules.hpp` (`chat_rules::`), pinned in
+`tests/test_chat_rules.cpp`. Lua function table: `0xAD94A8` (who),
+`0xAC7A58..` (chat), `0xAC8248..` (game UI).
+
+**/who.** FrameXML's `/who` calls `SendWho(msg)` (an empty one first sets the
+panel's default and shows it). `SendWho` (0x6B6B50 -> 0x6B5630) parses the
+filter: at most 127 bytes and a space appended; split on white space outside
+double quotes (the quotes go; an unclosed quote loses the last word). Per word:
+`WHO_TAG_NAME` "n-" name (47 bytes), "g-" guild, "z-" zones (each top-level
+AreaTable row, ParentAreaID 0, whose name contains the rest - case-insensitive,
+0x76F7E0 - at most ten; none found sends zone 0), "r-" / "c-" masks of every
+ChrRaces / ChrClasses row whose name contains the rest (the mask starts at 0 on
+the first such word), a word starting with a digit is a level ("10" 10-10,
+"10-" 10-100, "10-20"), "-20" sets the top only; anything else is a free string,
+and the fourth string ends the parse. `CMSG_WHO`: `min, max, name, guild,
+raceMask (-1), classMask (-1), zoneCount, zones..., stringCount, strings...`.
+Wowee sent the whole text as the name ("/who 70 orc" asked for a player named
+"70 orc").
+`SMSG_WHO` (0x6B8720): `count, online`, rows `name, guild, level, class, race,
+gender u8, zone`; fifty kept. With `SetWhoToUI` off and count <= 3 (the
+threshold's cvar slot 0xC7BFE8 is never written: 3) each row is printed
+(0x6B5030) as `WHO_LIST_FORMAT` / `WHO_LIST_GUILD_FORMAT`, SYSTEM type, then
+`WHO_NUM_RESULTS`; otherwise only `WHO_LIST_UPDATE`. In a battleground the
+client adds the cross-realm players it can see as "Name-Realm" (0x6B8290) -
+not relevant to a single-realm server. `GetWhoInfo` (0x6B4A80): name, guild,
+level, race and class by gender (0x715970: the gendered name, else the other,
+else the plain one - all empty in enUS), the zone's AreaTable name ("Unknown"
+when none), class file; past the list `nil, nil, 0, nil x4`. Wowee returned ""
+for the zone.
+
+**/played** (0x515880): `CMSG_PLAYED_TIME` with 1; `SMSG_PLAYED_TIME`
+(0x401390) stores the total and, when the byte is set, writes the times to the
+console and fires `TIME_PLAYED_MSG(total, level)`; the chat lines are
+FrameXML's. **/time** is FrameXML alone (`ChatFrame_DisplayGameTime`).
+
+**/logout, /camp, /quit.** `Logout()` and `Quit()` are 0x6B1930 with the quit
+flag 0 / 1: unless a logout is pending, `CMSG_LOGOUT_REQUEST`, marking it
+pending. `SMSG_LOGOUT_RESPONSE` (vtable +0x60, 0x6B08B0): result non-zero ->
+`ERR_LOGOUT_FAILED` and not pending; accepted with a countdown ->
+`PLAYER_CAMPING` (or `PLAYER_QUITING`), instant -> nothing (COMPLETE follows).
+The 20 s and "instant in an inn or city" are the server's (AzerothCore:
+resting and not in combat, or on a taxi, is instant; it roots, stuns and sits
+the player for the countdown). `SMSG_LOGOUT_COMPLETE` (0x6B2180) leaves the
+world, and exits for a quit. `CancelLogout()` (0x51AC90 -> 0x6B18C0) sends
+`CMSG_LOGOUT_CANCEL` always and clears pending, so its
+`SMSG_LOGOUT_CANCEL_ACK` (0x6B0900) fires `LOGOUT_CANCEL` only if the logout
+was still pending - i.e. one the server called off. No client code cancels a
+logout on movement (the player is rooted); the popup's Cancel is the way.
+`ForceQuit` (0x510A00) closes the program at once; `ForceLogout` sends
+`CMSG_PLAYER_LOGOUT` (0x6B1930 forced). Separately the world tick (0x52AF40)
+sits and marks AFK after 5 idle minutes and logs out after 30
+(`IDLE_MESSAGE`) - not mirrored.
+
+**/random** (0x516610): both arguments required (Lua error "Usage:
+RandomRoll(\"max\") or RandomRoll(\"min\", \"max\")"), read as text; 0-0, a
+negative low end, low > high or high > 1,000,000 send nothing; otherwise
+`MSG_RANDOM_ROLL min, max` as given. The answer (0x6E2E90 case 0x1FB: `min,
+max, roll, guid`) is `RANDOM_ROLL_RESULT` (name, roll, min, max) as a SYSTEM
+line once the name is known, nothing from someone ignored.
+
+**Text emotes.** `DoEmote(token [,target])` (0x500980): EmotesText rows
+searched by name; the target is the current target when the text is empty or
+starts with '%', else a *player* found by unit token or name (anything else:
+none). 0x6DD9E0: Emotes.dbc's EmoteFlags against the player (0x4F5410:
+0x400 never, 0x1 only standing, 0x80 not swimming, 0x8000 not flying/mounted,
+not asleep or dead unless 0x200, 0x4000 moving -> `ERR_NOEMOTEWHILERUNNING`);
+yourself as target is none; a SpecProc 1 emote sets the stand state, else the
+animation plays at once; `CMSG_TEXT_EMOTE id, soundIndex, guid` - the index is
+a random file of the race/gender's EmotesTextSound entry, or -1 (0x4CEB70).
+`SMSG_TEXT_EMOTE` (0x504070): `guid, id, soundIndex, len, target name`;
+ignored -> dropped; otherwise queued like any line until the name is known
+(0x503660). The wording: the sixteen EmotesTextData slots by bits 1 target is
+the reader (name, any case; only for someone else's emote), 2 sender is the
+reader, 4 no target, 8 female sender (from the name cache); tried as is, then
+without 8, then with 1 cleared and 4 set (with and without 8); none - no line.
+`%s` is the target for the sender's own line, the sender for one at the
+reader, both otherwise. `CHAT_MSG_TEXT_EMOTE` with arg5 "" and **line id 0**,
+arg12 the guid; then the voice (0x747000, `Sound_EnableEmoteSounds`).
+Wowee printed "performs an emote" for a row with no text, dropped the line for
+an unknown sender, ignored the female forms and did not check the ignore list.
+
+**/follow** (0x5224C0): the text (empty = target, 0x60ABF0) as a player, then
+any unit; not found -> `ERR_UNIT_NOT_FOUND`, or `ERR_GENERIC_NO_TARGET` for
+nothing / "target". 0x72B4A0 action 3: not yourself; 0x729BD0 - a player, not
+charmed, same faction group, not hostile -> else `ERR_INVALID_FOLLOW_TARGET`;
+dead `ERR_PLAYER_DEAD`, stunned `ERR_GENERIC_STUNNED`, channelling
+`ERR_TOOBUSYTOFOLLOW`; then `AUTOFOLLOW_BEGIN(name)`. Wowee followed only the
+target and anything.
+
+**/invite** (0x51A6E0): `InviteUnit(name)` takes a name, not a unit token; over
+48 bytes is the Lua error "Name too long"; 0x6D4300: your own name ->
+`ERR_INVITE_SELF`, else `CMSG_GROUP_INVITE name, 0`. **/inspect** is
+FrameXML's `InspectUnit` (UIParent.lua) over `NotifyInspect`.
+
+**Drunk speech** is client-side (0x577F60, from SendChatMessage after the `%t`
+tokens, before the line-break cut) when PLAYER_BYTES_3 byte 1 (drunk) or
+PLAYER_FAKE_INEBRIATION (0x142) is non-zero; factor = max of the two, at most
+100, x 0.01 (0x4F7290). An 's' starting a word and followed by anything but a
+space or s becomes "sh" with chance factor - unless "sh"+rest-of-word is caught
+by the profanity filter (forced on); an 's' before a space likewise; `|c` runs
+are copied to their `|r`. Then with chance factor/4 the line becomes
+`SLURRED_SPEECH` ("%s ...hic!").
+
+**Language comprehension** (0x6E0640): a language whose spell the reader knows
+(table 0xBE8DE0 by language) is its skill; one not known is 300 under an aura
+244 naming it, looked for only while UNIT_FIELD_FLAGS_2 has 0x8; else 0. In
+3.3.5's Spell.dbc aura 244 exists for languages 36, 9, 37, 38 only (e.g.
+44311 "Test Comprehend Language", Titan) - Gift of the Naaru or Babel are not
+it.
+
+**Mature language filter** (cvar `profanityFilter`, "1" as registered at
+0x51E118): ChatProfanity.dbc (5222 rows; field 2 the language group; enUS is
+group 0, -1 counts for all: 305 rows), compiled caseless by PCRE through its
+POSIX wrapper (0x7E2250 -> 0x83DF20, options 0x2801). PCRE has no `\<`/`\>`:
+they match the characters, so most English rows only ever match text in angle
+brackets; "shit", "fuck", "bia?ts?ch", "whore"... do the work. Applied
+(0x509A50; inline in 0x509DD0) to incoming lines of the 0x9FA510 types and to
+the channel's "N. Name": per pattern, while it matches at an offset not inside
+a `|c` run (0x4FCF40), the matched bytes become `!@#$%^&*` in turn - the
+position in that string persists across replacements - and the search resumes
+after them; results cached per text (0x617C50). Outgoing text is not filtered.
+SendChatMessage does **not** validate links beyond the escape rule (re-read:
+0x50D170's only loop is the `|`-escape scan).
+
+**Zone channels.** At world entry (0x508090, once) the client joins each
+ChatChannels row whose bit is in its joined mask - initially the rows with
+flag 0x1 (0x501F00): General, Trade, LocalDefense, LookingForGroup (not
+WorldDefense, not GuildRecruitment); the mask is saved per character. The name
+(0x507A80): the row's pattern with the zone's name, or for a row with flag
+0x20 (Trade, GuildRecruitment) in a zone with AreaTable flag 0x100 the name of
+the AreaTable row with flag 0x200, "City"; no zone name - no join.
+`CMSG_JOIN_CHANNEL id, 0, 0, name, password`. GuildRecruitment (0x507D30):
+joined while its setting is on and PLAYER_GUILDID is 0, left on joining a guild.
+Zone changes after that are the server's (AzerothCore
+`Player::UpdateLocalChannels`): YOU_JOINED for the new zone's General, which the
+client matches by channel id to the old one -> "YOU_CHANGED" (0x50E120: any
+existing, not suspended channel with that id - or that name for id 0); leaving
+a city sends YOU_LEFT with the constant byte, which the client shows as
+"SUSPENDED" unless the player asked to leave.
+
+**Cross-realm names**: only the battleground /who rows above; nothing in chat on
+a single-realm server.
+
+**Wowee changes (second pass)**: SendWho's filter parser and the CMSG_WHO
+lists; GetWhoInfo's zone and past-the-end values; fifty who rows, the chat
+threshold on the packet's count; RandomRoll's range (no swap, no 10000 cap);
+PLAYER_LOGOUT no longer fired by an accepted logout request;
+ERR_LOGOUT_FAILED; CancelLogout always sent, LOGOUT_CANCEL only for a server
+cancel; ForceQuit closes, ForceLogout sends CMSG_PLAYER_LOGOUT; text emotes
+through the chat queue with the sixteen slots, gender and ignore list, line id
+0, no invented text; DoEmote's target rules and EmoteFlags refusals;
+FollowUnit by name or token with 0x72B4A0's checks; InviteUnit's length and
+self checks; drunk slurring; aura-244 comprehension; the profanity filter;
+login channel joins by flag 0x1, "City" by AreaTable flags, GuildRecruitment
+only without a guild, LFG asked for regardless of the queue; YOU_CHANGED for a
+join of a channel already held. Also: `resolveUnitOrName` cast items and
+corpses to units (a /follow at an unknown name crashed with bad_alloc).
+
+**Checked in game** (AzerothCore lab; Wptestb, human paladin on WPTEST2, and a
+throwaway troll warrior "Wphorde" put on WPTEST with the GM `.pdump copy` of a
+bot and removed afterwards):
+- `/who n-Wptestb`: one row, printed as `|Hplayer:Wptestb|h[Wptestb]|h: Level
+  10 Human Paladin - Elwynn Forest` and `1 |4player:players; total`;
+  `z-Elwynn 1-80` (22-30 rows) and `r-orc c-hunter` went to WHO_LIST_UPDATE
+  only, GetWhoInfo giving the zone; past the end `nil nil 0 nil...`.
+- `/played` -> TIME_PLAYED_MSG; `RandomRoll("1","100")` -> "Wptestb rolls 10
+  (1-100)"; 5-3 and 0-0 sent nothing; no arguments raised the usage error.
+- DoEmote WAVE with no target, at oneself, ANGRY at an unknown name: "You
+  wave." / "You wave." / "You raise your fist in anger." with arg11 0.
+- FollowUnit "" with no target -> "You have no target."; an unknown name ->
+  "Unknown unit." (this crashed before: bad_alloc in resolveUnitOrName);
+  following the Horde character -> "You can't follow that unit.".
+- InviteUnit("wptestb") -> "You can't invite yourself to a group."; 49 bytes ->
+  Lua error "Name too long".
+- "oh shit, that bitch of a boss" came back as "oh !@#$, that %^&*! of a boss".
+- `.modify drunk 100`, then "this is so sweet, sis says yes" went out as "thish
+  ish sho shweet, shish shaysh yesh", one of three with " ...hic!" (the GM
+  command typed while drunk was slurred too, as stock would).
+- Logout in Northshire was instant (resting): no PLAYER_CAMPING, LOGOUT_COMPLETE.
+- Cross-faction: the troll's "hello there alliance friend, lol" read for the
+  human as "kazum no'ku ragath'a raznos kek" [Orcish], the yell "kil mog ro'th";
+  the human's "hello there horde friend, lol" read for the troll as "majis ergin
+  majis waldir bur" [Common]; text emotes cross: "Wptestb waves at you." /
+  "Wphorde raises his fist in anger at you.".
+- Comprehension: under `.aura 44311` (aura 244, language 9) the server sends
+  the holder's speech in Titan; the holder reads its own Titan line plainly,
+  the other character, without the aura, as "lok rethul gular karaman no".
+- Zone change by `.appear`: "YOU_CHANGED" for 1. General - Elwynn Forest and 2.
+  LocalDefense; the server also joins WorldDefense on its own.
+- A dead character's `.` command typed into SAY is refused with "You can't chat
+  when you're dead!" (stock's dead check runs before the server sees it).
+
+### 7. Gaps
+
+- The tag-0x08 whisper refusal; CJK word splitting in the scrambler.
 - The achievement link's date is the local date and the criteria are zero.
 - The dead check uses Wowee's dead/ghost state for the player vfunc +0x128,
   not read further.
 - The talking animation is not played on the player's own model or on a
   mounted unit (0x73AD70's movement-state and descriptor checks were not read
   to the end).
-- Zone channel auto-join was not re-read beyond 0x507A80 and the flag-0x1 rows
-  of 0x501F00; Wowee's join logic is unchanged.
+- The joined-channel mask is not saved per character; Wowee's own switches
+  stand in for it.
+- `CMSG_TEXT_EMOTE`'s sound index is sent as 0 and the receiver plays its own
+  pick (0x4CEB70 / 0x747000 not mirrored); the DANCE dance-studio path of
+  DoEmote; EmoteFlags 0x8000's mount half; the vfunc +0x138 check in 0x6DD9E0.
+- /camp's 20 s countdown was not seen in game (the test character logs out
+  instantly where it stands).
+- Follow's faction test uses Wowee's hostility map, not FactionTemplate's
+  group (0x729BD0) and 0x729740 was not read.
+- The idle sit / AFK / 30-minute logout of 0x52AF40.
+- The filter's regexes run on std::regex (ECMAScript) after turning `\<` `\>`
+  into literal brackets; PCRE-only syntax in a row would be skipped.
+- WHO rows' race and class words are Wowee's English tables, not ChrRaces'
+  gendered names (identical in enUS).
 ## Combat log
 
 Read from `Wow.exe` (UnitCombatLog_C.cpp, 0x74D000-0x757000, and the packet
