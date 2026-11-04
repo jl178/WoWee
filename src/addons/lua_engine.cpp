@@ -6223,6 +6223,7 @@ void LuaEngine::registerCoreAPI() {
     registerActionLuaAPI(L_);
     registerLfgLuaAPI(L_);
     registerSocketLuaAPI(L_);
+    registerBattlefieldLuaAPI(L_);
     // The world map, with the system set's old map functions as its fallback
     // for client data it cannot read (worldmap::fallback), and its QuestPOI set.
     worldmap::registerWorldMapLuaAPI(L_);

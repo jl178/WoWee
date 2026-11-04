@@ -1223,17 +1223,49 @@ void CombatHandler::handleUpdateComboPoints(network::Packet& packet) {
     else              owner_.fireAddonEvent("UNIT_COMBO_POINTS", {"player"});
 }
 
+// SMSG_PVP_CREDIT (Wow.exe 0x526530 case 0x28C -> 0x50B6D0): honor, the
+// victim, its rank. No victim is an award (COMBATLOG_HONORAWARD); a victim
+// the client can see and at least one point is an honorable kill,
+// COMBATLOG_HONORGAIN with the rank's PVP_RANK_<rank>_<faction> name, or
+// COMBATLOG_HONORGAIN_NO_RANK for a negative rank. Otherwise nothing. Then
+// COMBAT_TEXT_UPDATE("HONOR_GAINED").
 void CombatHandler::handlePvpCredit(network::Packet& packet) {
-    if (packet.hasRemaining(16)) {
-        uint32_t honor      = packet.readUInt32();
-        uint64_t victimGuid = packet.readUInt64();
-        uint32_t rank       = packet.readUInt32();
-        LOG_INFO("SMSG_PVP_CREDIT: honor=", honor, " victim=0x", std::hex, victimGuid, std::dec, " rank=", rank);
-        std::string msg = "You gain " + std::to_string(honor) + " honor points.";
-        owner_.addLocalChatLine(ChatType::COMBAT_HONOR_GAIN, msg);
-        if (honor > 0) addCombatText(CombatTextEntry::HONOR_GAIN, static_cast<int32_t>(honor), 0, true);
-        if (honor > 0)
-            owner_.fireCombatTextUpdate(owner_.getPlayerGuid(), {"HONOR_GAINED", std::to_string(honor)});
+    if (!packet.hasRemaining(16)) return;
+    const uint32_t honor = packet.readUInt32();
+    const uint64_t victimGuid = packet.readUInt64();
+    const int32_t rank = static_cast<int32_t>(packet.readUInt32());
+    LOG_INFO("SMSG_PVP_CREDIT: honor=", honor, " victim=0x", std::hex, victimGuid, std::dec, " rank=", rank);
+    auto* am = owner_.services().assetManager;
+    auto text = [am](const char* key, const char* fallback) {
+        std::string f = globalString(am, key);
+        return f.empty() ? std::string(fallback) : f;
+    };
+    std::string line;
+    if (victimGuid == 0) {
+        line = formatGlobalString(text("COMBATLOG_HONORAWARD", "You have been awarded %d honor points."),
+                                  {std::to_string(honor)});
+    } else {
+        const auto victim = owner_.getEntityManager().getEntity(victimGuid);
+        if (!victim || honor < 1) return;
+        const std::string name = owner_.lookupName(victimGuid);
+        if (rank >= 0) {
+            // The rank's name for the victim's side: 0 Horde, 1 Alliance.
+            const int race = owner_.lookupPlayerRace(victimGuid);
+            const bool alliance = race == 1 || race == 3 || race == 4 || race == 7 || race == 11;
+            const std::string rankKey = "PVP_RANK_" + std::to_string(rank) + "_" + (alliance ? "1" : "0");
+            line = formatGlobalString(
+                text("COMBATLOG_HONORGAIN", "%s dies, honorable kill Rank: %s (%d Honor Points)"),
+                {name, globalString(am, rankKey), std::to_string(honor)});
+        } else {
+            line = formatGlobalString(
+                text("COMBATLOG_HONORGAIN_NO_RANK", "%s dies, honorable kill (%d Honor Points)"),
+                {name, std::to_string(honor)});
+        }
+    }
+    owner_.addLocalChatLine(ChatType::COMBAT_HONOR_GAIN, line);
+    if (honor > 0) {
+        addCombatText(CombatTextEntry::HONOR_GAIN, static_cast<int32_t>(honor), 0, true);
+        owner_.fireCombatTextUpdate(owner_.getPlayerGuid(), {"HONOR_GAINED", std::to_string(honor)});
     }
 }
 

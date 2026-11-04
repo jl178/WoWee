@@ -1513,13 +1513,29 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
             // Honor and arena points clink only when they rise (0x6da3c0 and
             // 0x6da430 compare the new value with the old).
             if (!isCreate && val > owner_.playerHonorPointsRef()) playCoinSound();
+            const bool changed = val != owner_.playerHonorPointsRef();
             owner_.playerHonorPointsRef() = val;
             LOG_DEBUG("Honor points ", isCreate ? "from update fields: " : "updated: ", val);
+            // HONOR_CURRENCY_UPDATE then CURRENCY_DISPLAY_UPDATE (the field
+            // callbacks at 0x6E5611..0x6E5761).
+            if (!isCreate && changed) {
+                pendingEvents_.emit("HONOR_CURRENCY_UPDATE", {});
+                pendingEvents_.emit("CURRENCY_DISPLAY_UPDATE", {});
+            }
         }
         else if (pfi.arena != 0xFFFF && key == pfi.arena) {
             if (!isCreate && val > owner_.playerArenaPointsRef()) playCoinSound();
+            if (!isCreate && val != owner_.playerArenaPointsRef()) {
+                pendingEvents_.emit("HONOR_CURRENCY_UPDATE", {});
+                pendingEvents_.emit("CURRENCY_DISPLAY_UPDATE", {});
+            }
             owner_.playerArenaPointsRef() = val;
             LOG_DEBUG("Arena points ", isCreate ? "from update fields: " : "updated: ", val);
+        }
+        else if (pfi.honor == 0x4FD && !isCreate && (key == 0x4C9 || key == 0x4CA || key == 0x4CC)) {
+            // PLAYER_FIELD_KILLS, TODAY_CONTRIBUTION, LIFETIME_HONORABLE_KILLS
+            // (3.3.5 indices): PLAYER_PVP_KILLS_CHANGED("player").
+            pendingEvents_.emit("PLAYER_PVP_KILLS_CHANGED", {"player"});
         }
         else if (pfi.armor != 0xFFFF && key == pfi.armor) {
             const int32_t armorVal = static_cast<int32_t>(val);

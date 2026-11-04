@@ -46,6 +46,8 @@ public:
     [[nodiscard]] std::string getChannelByIndex(int index) const;
     [[nodiscard]] int getChannelIndex(const std::string& channelName) const;
     [[nodiscard]] const std::vector<std::string>& getJoinedChannels() const { return joinedChannels_; }
+    /// A defense channel line (zone under attack, defense message).
+    void postDefenseLine(uint32_t areaId, const std::string& text);
     /// Whether the player owns this channel - the one who created it, or who
     /// it passed to. SMSG_CHANNEL_NOTIFY says so with OWNER_CHANGED, which
     /// carries the new owner's guid: AzerothCore's Channel::MakeOwnerChanged

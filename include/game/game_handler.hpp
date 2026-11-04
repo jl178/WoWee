@@ -12,6 +12,7 @@
 #include "game/spell_defines.hpp"
 #include "game/group_defines.hpp"
 #include "game/handler_types.hpp"
+#include "game/battlefield_rules.hpp"
 #include "game/combat_handler.hpp"
 #include "game/spell_handler.hpp"
 #include "game/quest_handler.hpp"
@@ -355,7 +356,16 @@ public:
     bool resurrectHasSickness() const { return resurrectHasSickness_; }
     bool resurrectHasTimer() const { return resurrectHasTimer_; }
     /// Seconds until the next one, and the healer it belongs to.
-    float getAreaSpiritHealerTime() const { return areaSpiritHealerSeconds_; }
+    /// GetAreaSpiritHealerTime(): whole seconds to the next resurrection
+    /// wave (0x516B90), 0 with none known.
+    int getAreaSpiritHealerTime() const;
+    /// CancelAreaSpiritHeal(): the "Waiting to Resurrect" aura (2584) removed
+    /// (0x522FA0 -> 0x51F710).
+    void cancelAreaSpiritHeal() { cancelAura(2584); }
+    /// The ghost's nearest spirit guide (0x524010, every frame): one within
+    /// 20 yards is taken and asked for its time; walking past 22 yards lets it
+    /// go and leaves the queue.
+    void updateAreaSpiritHealer();
     uint64_t getAreaSpiritHealerGuid() const { return areaSpiritHealerGuid_; }
     /// Announce a rune's type and readiness to the interface.
     void fireRuneUpdate(uint32_t index);
@@ -675,13 +685,7 @@ public:
     // Random roll
     void randomRoll(uint32_t minRoll = 1, uint32_t maxRoll = 100);
 
-    // Battleground queue slot (aliased from handler_types.hpp)
-    using BgQueueSlot = game::BgQueueSlot;
-
-    // Available BG list (aliased from handler_types.hpp)
-    using AvailableBgInfo = game::AvailableBgInfo;
-
-    // Battleground
+    // Battleground (CGBattlefieldInfo; SocialHandler keeps the state)
     bool hasPendingBgInvite() const override;
     void acceptBattlefield(uint32_t queueSlot = 0xFFFFFFFF) override;
     void declineBattlefield(uint32_t queueSlot = 0xFFFFFFFF) override;
@@ -690,15 +694,23 @@ public:
     void reportPvpAfk(uint64_t playerGuid);
     void joinBattlefield(uint64_t battlemasterGuid, uint32_t bgTypeId,
                          uint32_t instanceId, bool asGroup);
-    const std::array<BgQueueSlot, 3>& getBgQueues() const override;
-    const std::vector<AvailableBgInfo>& getAvailableBgs() const override;
-
-    // BG scoreboard (aliased from handler_types.hpp)
-    using BgPlayerScore = game::BgPlayerScore;
-    using ArenaTeamScore = game::ArenaTeamScore;
-    using BgScoreboardData = game::BgScoreboardData;
     void requestPvpLog();
-    const BgScoreboardData* getBgScoreboard() const override;
+    /// The battleground state the PvP bindings read; null before login.
+    SocialHandler* battlefield() { return socialHandler_.get(); }
+    const SocialHandler* battlefield() const { return socialHandler_.get(); }
+    /// Map.dbc InstanceType: 0 world, 1 party, 2 raid, 3 battleground, 4 arena.
+    uint32_t getMapInstanceType(uint32_t mapId) const;
+    /// The battleground client's part of arriving in a world (0x528010).
+    void battlefieldWorldEntered();
+    /// A MapDifficulty.dbc row: the player cap and the GlobalStrings key of
+    /// the difficulty's name ("RAID_DIFFICULTY_10PLAYER"; empty for most
+    /// dungeons). `found` false when the map has no row for it.
+    struct MapDifficultyInfo { bool found = false; uint32_t maxPlayers = 0; std::string difficultyKey; };
+    MapDifficultyInfo getMapDifficulty(uint32_t mapId, uint32_t difficulty) const;
+    /// Map.dbc Flags (field 3).
+    uint32_t getMapFlags(uint32_t mapId) const;
+    /// WorldStateUI.dbc, in file order.
+    const std::vector<bf::WorldStateUiRow>& worldStateUiRows() const;
 
     // BG flag carrier positions (aliased from handler_types.hpp)
     using BgPlayerPosition = game::BgPlayerPosition;
@@ -788,6 +800,16 @@ public:
     float getGmTicketWaitHours() const { return gmTicketWaitHours_; }
 
     // Battlefield Manager (Wintergrasp)
+    /// The world PvP (Wintergrasp) queue GetWorldPVPQueueStatus reads
+    /// (0xBEA4A8..0xBEA4B4): battle, zone, status 0 none 1 queued 2 confirm
+    /// 3 active, and the server time an invitation lapses.
+    struct WorldPvpQueue { uint32_t battleId = 0, zoneId = 0, status = 0, acceptBy = 0; };
+    const WorldPvpQueue& getWorldPvpQueue() const { return worldPvpQueue_; }
+    /// 0x549500: refused while another battle's queue is in use.
+    void setWorldPvpQueue(uint32_t battleId, uint32_t zoneId, uint32_t status, uint32_t acceptBy) {
+        if (status != 0 && worldPvpQueue_.status != 0 && worldPvpQueue_.battleId != battleId) return;
+        worldPvpQueue_ = {battleId, zoneId, status, acceptBy};
+    }
     bool hasBfMgrInvite()  const { return bfMgrInvitePending_; }
     bool isInBfMgrZone()   const { return bfMgrActive_; }
     uint32_t getBfMgrZoneId() const { return bfMgrZoneId_; }
@@ -2247,7 +2269,7 @@ public:
     const std::vector<InstanceLockout>& getInstanceLockouts() const;
 
     // Boss encounter unit tracking (SMSG_UPDATE_INSTANCE_ENCOUNTER_UNIT)
-    static constexpr uint32_t kMaxEncounterSlots = 5;
+    static constexpr uint32_t kMaxEncounterSlots = 16;
     // Returns boss unit guid for the given encounter slot (0 if none).
     // The slots live on SocialHandler, which is what the packet writes to; the
     // array that used to sit here was never written and answered zero for
@@ -2547,6 +2569,10 @@ public:
     }
     uint32_t getWorldStateMapId() const { return worldStateMapId_; }
     uint32_t getWorldStateZoneId() const { return worldStateZoneId_; }
+    uint32_t getWorldStateAreaId() const { return worldStateAreaId_; }
+    /// The server's clock in seconds, from SMSG_WORLD_STATE_UI_TIMER_UPDATE
+    /// (0x5486E0 keeps the offset to the local clock; 0x548700 adds it).
+    int64_t getWorldStateServerTime() const;
     uint64_t getActiveCritterGuid() const { return activeCritterGuid_; }
     uint32_t getActiveCritterSpellId() const { return activeCritterSpellId_; }
     void setActiveCritter(uint64_t guid, uint32_t spellId) {
@@ -3054,6 +3080,11 @@ public:
         /// 3 = battleground, 4 = arena. The two share this table and the
         /// battleground list must not offer arenas.
         uint32_t    instanceType = 0;
+        /// Field 10: whether a group may queue together (CanJoinBattlefieldAsGroup).
+        uint32_t    groupsAllowed = 0;
+        /// Field 29: the world state that says the battleground is the
+        /// week's holiday (GetBattlegroundInfo's isHoliday).
+        uint32_t    holidayWorldState = 0;
         /// How many maps the row names. Every real battleground names one; the
         /// two rows that stand for a pool of them - Random Battleground, All
         /// Arenas - name several, which is how a random entry is told apart
@@ -3065,8 +3096,9 @@ public:
     };
     const BattlemasterEntry* getBattlemasterInfo(uint32_t bgTypeId);
 
-    /// Every battleground in BattlemasterList.dbc, arenas excluded, ordered by
-    /// id so an index into it means the same thing from one call to the next.
+    /// Every battleground in BattlemasterList.dbc, arenas excluded, in the
+    /// order GetBattlegroundInfo numbers them (0x54E720 -> 0x54A650): the
+    /// random battleground first, then by minimum level, then by id.
     const std::vector<BattlemasterEntry>& getBattlegroundTypes();
 
     /// Whether a map id belongs to a battleground, from the same table.
@@ -3078,10 +3110,6 @@ public:
     void requestContactList();
     /// Give or take raid assistant, by guid.
     void setGroupAssistant(uint64_t guid, bool apply);
-    /// Whether a map id belongs to an arena. Same table, the other instance
-    /// type - the rows are loaded either way and only the battleground ones
-    /// are kept in the queue list.
-    bool isArenaMap(uint32_t mapId);
 
     // ---- Currencies (CurrencyTypes.dbc) ----
     // In 3.3.5a a currency is a row pointing at an item, and the amount held is
@@ -4857,6 +4885,8 @@ private:
     // ---- World state and faction initialization snapshots ----
     uint32_t worldStateMapId_ = 0;
     uint32_t worldStateZoneId_ = 0;
+    uint32_t worldStateAreaId_ = 0;
+    int64_t worldStateClockOffset_ = 0;
     uint32_t lastAnnouncedZoneId_ = 0;  ///< see announceZoneChange
     // The active non-combat companion and the spell that called it. Re-casting
     // that spell dismisses rather than re-summons, which is how a companion is
@@ -5088,11 +5118,6 @@ private:
     std::vector<StabledPet> stabledPets_;
     uint32_t stableListGeneration_ = 0;
     void handleListStabledPets(network::Packet& packet);
-
-    // ---- Battleground queue state ----
-    std::array<BgQueueSlot, 3> bgQueues_{};
-
-    // ---- Available battleground list (SMSG_BATTLEFIELD_LIST) ----
 
     // Instance difficulty
     bool inInstance_ = false;
@@ -5498,6 +5523,11 @@ private:
     // Map metadata cache (lazy-loaded from Map.dbc).
     mutable std::unordered_map<uint32_t, std::string> mapNameCache_;
     mutable std::unordered_map<uint32_t, uint32_t> mapInstanceTypeCache_;
+    mutable std::vector<bf::WorldStateUiRow> worldStateUiRows_;
+    mutable std::unordered_map<uint64_t, MapDifficultyInfo> mapDifficultyCache_;
+    mutable bool mapDifficultyLoaded_ = false;
+    mutable std::unordered_map<uint32_t, uint32_t> mapFlagsCache_;
+    mutable bool worldStateUiLoaded_ = false;
     mutable bool mapNameCacheLoaded_ = false;
     // (mapId, difficulty) -> encounter count, and the same map with no
     // difficulty-specific rows under a difficulty of 0xFFFFFFFF.
@@ -5768,6 +5798,7 @@ private:
     /// handler in the battlefield group opens `local battleID = ...` and passes
     /// it back when the player answers, so the two must not be confused.
     uint32_t    bfMgrBattleId_      = 0;
+    WorldPvpQueue worldPvpQueue_;
     /// What the resurrect offer said about itself: whether accepting brings
     /// resurrection sickness, and whether a reclaim delay applies. Both decide
     /// which of the three dialogs the interface raises.
@@ -5793,7 +5824,8 @@ private:
     /// through. Called from the dispatch for every packet that opens an NPC's
     /// window.
     void noteNpcAnswered() { pendingNpcHello_.guid = 0; }
-    float       areaSpiritHealerSeconds_ = 0.0f;
+    int64_t     areaSpiritHealerExpiresMs_ = 0;
+    void setAreaSpiritHealer(uint64_t guid);
 
     // ---- WotLK Calendar: pending invite counter ----
     uint32_t    calendarPendingInvites_ = 0; ///< Unacknowledged calendar invites (SMSG_CALENDAR_SEND_NUM_PENDING)

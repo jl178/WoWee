@@ -4,6 +4,7 @@
 #include "game/opcode_table.hpp"
 #include "game/group_defines.hpp"
 #include "game/handler_types.hpp"
+#include "game/battlefield_rules.hpp"
 #include "game/calendar_data.hpp"
 #include "game/stock_duel.hpp"
 #include "network/packet.hpp"
@@ -36,16 +37,6 @@ public:
     using InspectResult = game::InspectResult;
 
     using WhoEntry = game::WhoEntry;
-
-    using BgQueueSlot = game::BgQueueSlot;
-
-    using AvailableBgInfo = game::AvailableBgInfo;
-
-    using BgPlayerScore = game::BgPlayerScore;
-
-    using ArenaTeamScore = game::ArenaTeamScore;
-
-    using BgScoreboardData = game::BgScoreboardData;
 
     using BgPlayerPosition = game::BgPlayerPosition;
 
@@ -115,23 +106,33 @@ public:
     // Random roll
     void randomRoll(uint32_t minRoll = 1, uint32_t maxRoll = 100);
 
-    // Battleground
+    // Battleground (Wow.exe CGBattlefieldInfo, docs/re/pvp-instances.md)
     [[nodiscard]] bool hasPendingBgInvite() const;
     void acceptBattlefield(uint32_t queueSlot = 0xFFFFFFFF);
     void declineBattlefield(uint32_t queueSlot = 0xFFFFFFFF);
+    /// AcceptBattlefieldPort(index, accept); index counts from zero here.
+    bool acceptBattlefieldPort(uint32_t index, bool accept);
     void leaveBattlefield();
+    void closeBattlefield();
     /// Ask the server which instances of one battleground are running.
     void requestBattlefieldList(uint32_t bgTypeId);
     /// Report a player in this battleground as not participating.
     void reportPvpAfk(uint64_t playerGuid);
     void joinBattlefield(uint64_t battlemasterGuid, uint32_t bgTypeId,
                          uint32_t instanceId, bool asGroup);
-    [[nodiscard]] const std::array<BgQueueSlot, 3>& getBgQueues() const { return bgQueues_; }
-    [[nodiscard]] const std::vector<AvailableBgInfo>& getAvailableBgs() const { return availableBgs_; }
+    /// JoinBattlefield(index, asGroup, isRated), index from one.
+    void joinBattlefieldIndex(int index, bool asGroup, bool rated);
+    [[nodiscard]] const bf::Queues& getBattlefieldQueues() const { return bgQueues_; }
+    [[nodiscard]] const bf::ListPacket& getBattlefieldList() const { return bgList_; }
+    [[nodiscard]] uint64_t getBattlemasterGuid() const { return battlemasterGuid_; }
     void requestPvpLog();
-    [[nodiscard]] const BgScoreboardData* getBgScoreboard() const {
-        return bgScoreboard_.players.empty() ? nullptr : &bgScoreboard_;
-    }
+    [[nodiscard]] const bf::Scoreboard& getScoreboard() const { return bgScoreboard_; }
+    /// WorldStateUI row indexes of the scoreboard's own columns.
+    [[nodiscard]] const std::vector<size_t>& getScoreColumns() const { return bgScoreColumns_; }
+    void setScoreFaction(int faction);
+    void sortScores(const std::string& column);
+    /// The world was (re)entered: scoreboard and list emptied, statuses asked for.
+    void onWorldEntered();
     [[nodiscard]] const std::vector<BgPlayerPosition>& getBgPlayerPositions() const { return bgPlayerPositions_; }
 
     // Logout. exitAfterLogout distinguishes /quit and /exit, which leave the game
@@ -370,6 +371,13 @@ public:
 
     // Instance difficulty
     [[nodiscard]] uint32_t getInstanceDifficulty() const { return instanceDifficulty_; }
+    [[nodiscard]] uint32_t getInstanceDynamicHeroic() const { return instanceDynamicHeroic_; }
+    [[nodiscard]] uint32_t effectiveDungeonDifficulty() const;
+    [[nodiscard]] uint32_t effectiveRaidDifficulty() const;
+    [[nodiscard]] uint32_t personalDungeonDifficulty() const { return dungeonDifficultySetting_; }
+    [[nodiscard]] uint32_t personalRaidDifficulty() const { return raidDifficultySetting_; }
+    /// Set{Dungeon,Raid}Difficulty(n), n from one.
+    void setDifficultyFromUi(uint32_t n, bool raid);
     [[nodiscard]] bool isInstanceHeroic() const { return instanceIsHeroic_; }
     [[nodiscard]] bool isInInstance() const { return inInstance_; }
 
@@ -454,9 +462,7 @@ public:
     void setRaidTargetGuid(uint8_t icon, uint64_t guid) {
         if (icon < kRaidMarkCount) raidTargetGuids_[icon] = guid;
     }
-    void setEncounterUnitGuid(uint32_t slot, uint64_t guid) {
-        if (slot < kMaxEncounterSlots) encounterUnitGuids_[slot] = guid;
-    }
+    bf::EncounterUnits& encounterUnits() { return encounterUnits_; }
 
     // The bind-or-leave question the server asks on entering an instance that
     // is already under way. It carries a countdown, and the answer is the
@@ -473,9 +479,9 @@ public:
     void respondInstanceLock(bool accept);
 
     // Encounter unit tracking
-    static constexpr uint32_t kMaxEncounterSlots = 5;
+    static constexpr uint32_t kMaxEncounterSlots = 16;
     [[nodiscard]] uint64_t getEncounterUnitGuid(uint32_t slot) const {
-        return (slot < kMaxEncounterSlots) ? encounterUnitGuids_[slot] : 0;
+        return encounterUnits_.guidAt(slot);
     }
 
     // Raid target markers (0-7: Star, Circle, Diamond, Triangle, Moon, Square, Cross, Skull)
@@ -707,9 +713,17 @@ private:
     /// Six item tabs and the money log after them.
     std::array<std::vector<GuildBankLogEntry>, 7> guildBankLogs_;
     uint32_t instanceDifficulty_ = 0;
-    // The dungeon difficulty setting as MSG_SET_DUNGEON_DIFFICULTY last
-    // stated it; zero, as Wow.exe starts it, before the first.
+    // The settings, personal and group copies (zero, as Wow.exe starts them),
+    // and the instance's dynamic heroic flag.
     uint32_t dungeonDifficultySetting_ = 0;
+    uint32_t dungeonDifficultyGroup_ = 0;
+    uint32_t raidDifficultySetting_ = 0;
+    uint32_t raidDifficultyGroup_ = 0;
+    uint32_t instanceDynamicHeroic_ = 0;
+    void applyDungeonDifficulty(uint32_t diff, bool personal, bool group);
+    void applyRaidDifficulty(uint32_t diff, bool personal, bool group);
+    void sayDungeonDifficulty();
+    void sayRaidDifficulty();
     // A proposal that failed through someone outside the player's group,
     // whose ERR_LFG_PROPOSAL_FAILED the re-queue update has yet to say.
     bool lfgProposalFailedUnsaid_ = false;
@@ -720,17 +734,27 @@ private:
     std::array<uint64_t, kRaidMarkCount> raidTargetGuids_ = {};
 
     // Encounter units
-    std::array<uint64_t, kMaxEncounterSlots> encounterUnitGuids_ = {};
+    bf::EncounterUnits encounterUnits_;
     InstanceLockPrompt instanceLock_;
+    void setInstanceLock(uint32_t timerMs, uint32_t completedMask, bool previouslySaved);
 
     // Arena
     std::vector<ArenaTeamStats>  arenaTeamStats_;
     std::vector<ArenaTeamRoster> arenaTeamRosters_;
 
     // Battleground
-    std::array<BgQueueSlot, 3> bgQueues_{};
-    std::vector<AvailableBgInfo> availableBgs_;
-    BgScoreboardData bgScoreboard_;
+    bf::Queues bgQueues_;
+    bf::ListPacket bgList_;
+    bool bgListReceived_ = false;
+    uint64_t battlemasterGuid_ = 0;
+    bf::Scoreboard bgScoreboard_;
+    std::vector<size_t> bgScoreColumns_;
+    bool bgScoreNamesPending_ = false;
+    int64_t nextPvpLogRequestMs_ = 0;
+    float bgScoreNameWaitSec_ = 0.0f;
+    float bgScoreNameCheckSec_ = 0.0f;
+    void resortScoreboard();
+    bool fillScoreNames();
     std::vector<BgPlayerPosition> bgPlayerPositions_;
     std::chrono::steady_clock::time_point lastBgPositionRequest_{};
     std::chrono::steady_clock::time_point lastContactListRequest_{};

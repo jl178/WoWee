@@ -2335,14 +2335,15 @@ void registerSocialLuaAPI(lua_State* L) {
             if (auto* gh = getGameHandler(L)) gh->queueAreaSpiritHeal();
             return 0;
         }},
-                // There is no opcode for leaving the queue - AzerothCore drops
-                // a player from it when they leave the battleground and at no
-                // other time - so this accepts the click and does nothing,
-                // which is the honest answer rather than a raise.
-                {"CancelAreaSpiritHeal", [](lua_State* L) -> int { (void)L; return 0; }},
+                // Leaving the queue is removing its aura, Waiting to
+                // Resurrect (2584), as Wow.exe does (0x522FA0 -> 0x51F710).
+                {"CancelAreaSpiritHeal", [](lua_State* L) -> int {
+            if (auto* gh = getGameHandler(L)) gh->cancelAreaSpiritHeal();
+            return 0;
+        }},
                 {"GetAreaSpiritHealerTime", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getAreaSpiritHealerTime() : 0.0f);
+            lua_pushnumber(L, gh ? gh->getAreaSpiritHealerTime() : 0);
             return 1;
         }},
                 {"GetGuildRosterInfo",      lua_GetGuildRosterInfo},
@@ -3263,25 +3264,6 @@ void registerSocialLuaAPI(lua_State* L) {
             lua_pushboolean(L, optOutOfLoot() ? 1 : 0);
             return 1;
         }},
-                // Both send a real opcode now; sendSetDifficulty used to write
-                // CMSG_CHANGEPLAYER_DIFFICULTY, which the server reads off the
-                // wire and throws away.
-                // The menu row, which counts from one, less one for the wire,
-                // which counts from zero. Sent as it came, picking Normal set
-                // Heroic, and picking Heroic sent 2 - which the server tests
-                // against MAX_DUNGEON_DIFFICULTY and drops, so it did nothing.
-                {"SetDungeonDifficulty", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const int row = static_cast<int>(luaL_optnumber(L, 1, 1));
-            if (gh && row >= 1) gh->sendSetDifficulty(static_cast<uint32_t>(row - 1), /*raid=*/false);
-            return 0;
-        }},
-                {"SetRaidDifficulty", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const int row = static_cast<int>(luaL_optnumber(L, 1, 1));
-            if (gh && row >= 1) gh->sendSetDifficulty(static_cast<uint32_t>(row - 1), /*raid=*/true);
-            return 0;
-        }},
                                 {"ChannelBan", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const char* ch = luaL_optstring(L, 1, "");
@@ -3476,10 +3458,6 @@ void registerSocialLuaAPI(lua_State* L) {
                 {"BNGetNumConversationMembers", [](lua_State* L) -> int { lua_pushnumber(L, 0); return 1; }},
                 {"BNGetConversationMemberInfo", [](lua_State* L) -> int { (void)L; return 0; }},
                 {"BNRequestFOFInfo",            [](lua_State* L) -> int { (void)L; return 0; }},
-                // The battleground queue timer, read in a loop from the
-                // minimap's battlefield icon while it is shown.
-                {"GetBattlefieldPortExpiration", [](lua_State* L) -> int {
-            lua_pushnumber(L, 0); return 1; }},
                 // The innkeeper's prompt: CONFIRM_BINDER's accept sends the
                 // reply, and its OnUpdate hides the popup when the player walks
                 // away. Distance to the innkeeper is not tracked, and staying

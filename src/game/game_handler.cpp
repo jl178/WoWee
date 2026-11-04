@@ -919,6 +919,7 @@ void GameHandler::update(float deltaTime) {
         tickMinimapPings(deltaTime);
         tickMirrorTimers(deltaTime);
 
+        updateAreaSpiritHealer();
         // Tick logout countdown
         if (socialHandler_) socialHandler_->updateLogoutCountdown(deltaTime);
         if (socialHandler_) socialHandler_->updateDuelCountdown(deltaTime);
@@ -2629,6 +2630,8 @@ const GameHandler::BattlemasterEntry* GameHandler::getBattlemasterInfo(uint32_t 
                 // is the instance type - verified against the file rather than
                 // taken from a layout table, which does not carry this row.
                 e.instanceType = dbc->getUInt32(i, 9);
+                e.groupsAllowed = dbc->getUInt32(i, 10);
+                e.holidayWorldState = dbc->getUInt32(i, 29);
                 for (uint32_t f = 1; f <= 8; ++f) {
                     const uint32_t mapId = dbc->getUInt32(i, f);
                     if (mapId == 0xFFFFFFFFu) continue;
@@ -2638,10 +2641,15 @@ const GameHandler::BattlemasterEntry* GameHandler::getBattlemasterInfo(uint32_t 
                 if (e.instanceType == 3 && !e.name.empty()) battlegroundTypes_.push_back(e);
                 battlemasterList_[id] = std::move(e);
             }
-            // Ordered by id, so an index handed to the interface still means
-            // the same battleground the next time it asks.
+            // Stock order (0x54A650, sorted once at start-up, before any
+            // holiday world state is known): the random battleground first,
+            // then by minimum level, then by id.
             std::sort(battlegroundTypes_.begin(), battlegroundTypes_.end(),
                       [](const BattlemasterEntry& a, const BattlemasterEntry& b) {
+                          const bool ra = a.id == bf::kRandomBattleground;
+                          const bool rb = b.id == bf::kRandomBattleground;
+                          if (ra != rb) return ra;
+                          if (a.minLevel != b.minLevel) return a.minLevel < b.minLevel;
                           return a.id < b.id;
                       });
             LOG_INFO("Battleground: ", battlemasterList_.size(), " from BattlemasterList.dbc");
@@ -2663,17 +2671,6 @@ bool GameHandler::isBattlegroundMap(uint32_t mapId) {
     return false;
 }
 
-bool GameHandler::isArenaMap(uint32_t mapId) {
-    getBattlemasterInfo(0);   // latch the load, as isBattlegroundMap does
-    for (const auto& [id, e] : battlemasterList_) {
-        (void)id;
-        if (e.instanceType != 4) continue;   // 4 = arena
-        for (uint32_t m : e.mapIds) {
-            if (m == mapId) return true;
-        }
-    }
-    return false;
-}
 
 const std::vector<GameHandler::BattlemasterEntry>& GameHandler::getBattlegroundTypes() {
     // Through the same accessor, because that is where the load is latched.
@@ -3332,12 +3329,18 @@ void GameHandler::loadMapNameCache() const {
     auto dbc = am->loadDBC("Map.dbc");
     if (!dbc || !dbc->isLoaded()) return;
 
-    // Map.dbc layout: 0=ID, 1=InternalName, 2=InstanceType, 3=Flags,
-    // 4=MapName_enUS (display name), fields 5+ = other locales
+    // Map.dbc 3.3.5: 0 ID, 1 Directory, 2 InstanceType, 3 Flags, 4 PVP,
+    // 5 MapName (17 locales), ... 65 MaxPlayers - 66 fields. Earlier files
+    // have no Flags and the name at 4. Field 4 read here as the name in 3.3.5
+    // is the PVP flag: zero for most maps (so the internal directory name was
+    // shown - "Ulduar80", "Azeroth"), and 1 for the battlegrounds, which read
+    // the string at offset 1 of the block.
+    const uint32_t nameField = dbc->getFieldCount() >= 66 ? 5u : 4u;
     for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
         uint32_t id = dbc->getUInt32(i, 0);
         mapInstanceTypeCache_[id] = dbc->getUInt32(i, 2);
-        std::string name = dbc->getString(i, 4);
+        if (nameField == 5) mapFlagsCache_[id] = dbc->getUInt32(i, 3);
+        std::string name = dbc->getString(i, nameField);
         if (name.empty()) name = dbc->getString(i, 1); // internal name fallback
         if (!name.empty() && !mapNameCache_.count(id)) {
             mapNameCache_[id] = std::move(name);
@@ -4095,22 +4098,6 @@ void GameHandler::setWhoToUI(bool toUI) {
     if (socialHandler_) socialHandler_->setWhoToUI(toUI);
 }
 
-const std::array<GameHandler::BgQueueSlot, 3>& GameHandler::getBgQueues() const {
-    if (socialHandler_) return socialHandler_->getBgQueues();
-    static const std::array<BgQueueSlot, 3> empty{};
-    return empty;
-}
-
-const std::vector<GameHandler::AvailableBgInfo>& GameHandler::getAvailableBgs() const {
-    if (socialHandler_) return socialHandler_->getAvailableBgs();
-    static const std::vector<AvailableBgInfo> empty;
-    return empty;
-}
-
-const GameHandler::BgScoreboardData* GameHandler::getBgScoreboard() const {
-    return socialHandler_ ? socialHandler_->getBgScoreboard() : nullptr;
-}
-
 const std::vector<GameHandler::BgPlayerPosition>& GameHandler::getBgPlayerPositions() const {
     if (socialHandler_) return socialHandler_->getBgPlayerPositions();
     static const std::vector<BgPlayerPosition> empty;
@@ -4369,6 +4356,72 @@ uint32_t GameHandler::getInstanceDifficulty() const {
 
 bool GameHandler::isInstanceHeroic() const {
     return socialHandler_ ? socialHandler_->isInstanceHeroic() : false;
+}
+
+uint32_t GameHandler::getMapFlags(uint32_t mapId) const {
+    loadMapNameCache();
+    auto it = mapFlagsCache_.find(mapId);
+    return it != mapFlagsCache_.end() ? it->second : 0;
+}
+
+GameHandler::MapDifficultyInfo GameHandler::getMapDifficulty(uint32_t mapId, uint32_t difficulty) const {
+    if (!mapDifficultyLoaded_) {
+        auto* am = services_.assetManager;
+        if (!am || !am->isInitialized()) return {};
+        mapDifficultyLoaded_ = true;
+        auto dbc = am->loadDBC("MapDifficulty.dbc");
+        // 0 ID, 1 MapID, 2 Difficulty, 3 AreaTriggerText (17), 20 ResetTime,
+        // 21 MaxPlayers, 22 Difficultystring.
+        if (dbc && dbc->isLoaded() && dbc->getFieldCount() >= 23) {
+            for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+                MapDifficultyInfo m{true, dbc->getUInt32(i, 21), dbc->getString(i, 22)};
+                mapDifficultyCache_[(uint64_t(dbc->getUInt32(i, 1)) << 32) | dbc->getUInt32(i, 2)] = std::move(m);
+            }
+        }
+    }
+    auto it = mapDifficultyCache_.find((uint64_t(mapId) << 32) | difficulty);
+    return it != mapDifficultyCache_.end() ? it->second : MapDifficultyInfo{};
+}
+
+int64_t GameHandler::getWorldStateServerTime() const {
+    return static_cast<int64_t>(std::time(nullptr)) + worldStateClockOffset_;
+}
+
+uint32_t GameHandler::getMapInstanceType(uint32_t mapId) const {
+    loadMapNameCache();
+    auto it = mapInstanceTypeCache_.find(mapId);
+    return it != mapInstanceTypeCache_.end() ? it->second : 0;
+}
+
+const std::vector<bf::WorldStateUiRow>& GameHandler::worldStateUiRows() const {
+    if (worldStateUiLoaded_) return worldStateUiRows_;
+    auto* am = services_.assetManager;
+    if (!am || !am->isInitialized()) return worldStateUiRows_;
+    worldStateUiLoaded_ = true;
+    auto dbc = am->loadDBC("WorldStateUI.dbc");
+    // 3.3.5: 0 ID, 1 MapID, 2 AreaID, 3 PhaseShift, 4 Icon, 5 String (17),
+    // 22 Tooltip (17), 39 StateVariable, 40 Type, 41 DynamicIcon,
+    // 42 DynamicTooltip (17), 59 ExtendedUI, 60-62 ExtendedUIStateVariable.
+    if (!dbc || !dbc->isLoaded() || dbc->getFieldCount() < 63) return worldStateUiRows_;
+    for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+        bf::WorldStateUiRow r;
+        r.id = dbc->getUInt32(i, 0);
+        r.mapId = static_cast<int32_t>(dbc->getUInt32(i, 1));
+        r.areaId = dbc->getUInt32(i, 2);
+        r.phaseMask = dbc->getUInt32(i, 3);
+        r.icon = dbc->getString(i, 4);
+        r.text = dbc->getString(i, 5);
+        r.tooltip = dbc->getString(i, 22);
+        r.stateVariable = dbc->getUInt32(i, 39);
+        r.type = dbc->getUInt32(i, 40);
+        r.dynamicIcon = dbc->getString(i, 41);
+        r.dynamicTooltip = dbc->getString(i, 42);
+        r.extendedUI = dbc->getString(i, 59);
+        for (uint32_t k = 0; k < 3; ++k) r.extendedUIStateVariable[k] = dbc->getUInt32(i, 60 + k);
+        worldStateUiRows_.push_back(std::move(r));
+    }
+    LOG_INFO("WorldStateUI.dbc: ", worldStateUiRows_.size(), " rows");
+    return worldStateUiRows_;
 }
 
 bool GameHandler::isInInstance() const {

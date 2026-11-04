@@ -33,6 +33,7 @@
 #include "game/game_utils.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -739,7 +740,8 @@ void registerLfgLuaAPI(lua_State* L) {
         for (uint32_t bit = completedMask; bit; bit &= bit - 1) ++complete;
         const uint32_t total = gh->getDungeonEncounterCount(gh->getCurrentMapId(),
                                                             gh->getInstanceDifficulty());
-        lua_pushnumber(L, secondsLeft);
+        // Whole seconds (0x516340: ms / 1000).
+        lua_pushnumber(L, std::floor(secondsLeft));
         lua_pushboolean(L, previouslySaved ? 1 : 0);
         lua_pushinteger(L, static_cast<lua_Integer>(total));
         lua_pushinteger(L, static_cast<lua_Integer>(complete));

@@ -269,25 +269,19 @@ void ChatHandler::registerOpcodes(DispatchTable& table) {
     // ---- Channel list ----
 
     // ---- Server / defense / area-trigger messages (moved from GameHandler) ----
+    // Wow.exe 0x50C850: zone id, a uint32 length and that many bytes (not a
+    // C string), posted like SMSG_ZONE_UNDER_ATTACK's line (postDefenseLine).
     table[Opcode::SMSG_DEFENSE_MESSAGE] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(5)) {
-            // The text itself, as a line of the Local Defense channel - only
-            // where that channel is joined (Wow.exe 0x50C850).
-            /*uint32_t zoneId =*/ packet.readUInt32();
-            std::string defMsg = packet.readString();
-            if (!defMsg.empty()) {
-                for (const auto& ch : joinedChannels_) {
-                    if (ch.rfind("LocalDefense", 0) != 0) continue;
-                    MessageChatData line;
-                    line.type = ChatType::CHANNEL;
-                    line.language = ChatLanguage::UNIVERSAL;
-                    line.channelName = ch;
-                    line.message = defMsg;
-                    line.noSender = true;
-                    addLocalChatMessage(line);
-                }
-            }
+        if (!packet.hasRemaining(8)) { packet.skipAll(); return; }
+        const uint32_t zoneId = packet.readUInt32();
+        const uint32_t len = packet.readUInt32();
+        std::string text;
+        for (uint32_t i = 0; i < len && packet.hasRemaining(1); ++i) {
+            const char c = static_cast<char>(packet.readUInt8());
+            if (c) text.push_back(c);
         }
+        packet.skipAll();
+        if (!text.empty()) postDefenseLine(zoneId, text);
     };
     // Server messages
     table[Opcode::SMSG_SERVER_MESSAGE] = [this](network::Packet& packet) {
@@ -1941,6 +1935,28 @@ void ChatHandler::handleMotd(network::Packet& packet) {
             addSystemChatMessage(line);
         }
         LOG_INFO("========================================");
+    }
+}
+
+// A defense line (Wow.exe 0x50C3C0, 0x50C850): a channel line on each joined
+// defense channel - WorldDefense always, LocalDefense only for the zone the
+// player is in.
+void ChatHandler::postDefenseLine(uint32_t areaId, const std::string& text) {
+    for (size_t i = 0; i < joinedChannels_.size(); ++i) {
+        const uint32_t id = i < joinedChannelIds_.size() ? joinedChannelIds_[i] : 0;
+        const bool world = id == 23 || joinedChannels_[i].rfind("WorldDefense", 0) == 0;
+        const bool local = id == 22 || joinedChannels_[i].rfind("LocalDefense", 0) == 0;
+        if (!world && !local) continue;
+        if (local && !world && areaId != owner_.getWorldStateZoneId() &&
+            areaId != owner_.getWorldStateAreaId())
+            continue;
+        MessageChatData line;
+        line.type = ChatType::CHANNEL;
+        line.language = ChatLanguage::UNIVERSAL;
+        line.channelName = joinedChannels_[i];
+        line.message = text;
+        line.noSender = true;
+        addLocalChatMessage(line);
     }
 }
 

@@ -24,20 +24,13 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <set>
 #include <vector>
 
-namespace {
-const std::pair<uint32_t, const char*> kBgNames[] = {
-    {1,"Alterac Valley"},{2,"Warsong Gulch"},{3,"Arathi Basin"},
-    {4,"Nagrand Arena"},{5,"Blade's Edge Arena"},{6,"All Arenas"},
-    {7,"Eye of the Storm"},{8,"Ruins of Lordaeron"},{9,"Strand of the Ancients"},
-    {10,"Dalaran Sewers"},{11,"Ring of Valor"},{30,"Isle of Conquest"},{32,"Random Battleground"},
-};
-}  // namespace
 
 namespace wowee {
 namespace game {
@@ -827,9 +820,9 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
             return;
         }
         if (result > 0) {
+            // The BattlemasterList row's name (0x54B1C0).
             std::string bgName;
-            for (const auto& kv : kBgNames)
-                if (kv.first == static_cast<uint32_t>(result)) { bgName = kv.second; break; }
+            if (const auto* row = owner_.getBattlemasterInfo(static_cast<uint32_t>(result))) bgName = row->name;
             if (!bgName.empty()) {
                 owner_.displayGameMessage("ERR_GROUP_JOIN_BATTLEGROUND_S",
                                           "Your group has joined the queue for " + bgName, {bgName});
@@ -866,6 +859,15 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
     };
     table[Opcode::MSG_SET_DUNGEON_DIFFICULTY] = [this](network::Packet& packet) {
         handleInstanceDifficulty(packet, true);
+    };
+    // 0x526530 case 0x4EB -> 0x5255A0. There was no handler, so a raid
+    // difficulty change was never stored or said.
+    table[Opcode::MSG_SET_RAID_DIFFICULTY] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(4)) return;
+        const uint32_t diff = packet.readUInt32();
+        const uint32_t personal = packet.hasRemaining(4) ? packet.readUInt32() : 1;
+        const uint32_t group = packet.hasRemaining(4) ? packet.readUInt32() : 0;
+        applyRaidDifficulty(diff, personal != 0, group != 0);
     };
 
     // ---- Guild / RAF / PvP AFK (moved from GameHandler) ----
@@ -922,9 +924,14 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
     };
     // INSTANCE_SAVED, a plain chat line, for a zero (Wow.exe 0x52BB10).
     table[Opcode::SMSG_INSTANCE_SAVE_CREATED] = [this](network::Packet& packet) {
+        // 0x52BB10: a zero is the save itself - INSTANCE_SAVED, and the bind
+        // prompt is over (0x513B20(0,0,0): INSTANCE_LOCK_STOP), so a save the
+        // server makes on its own, a boss kill, takes the dialog down.
         const uint32_t debug = packet.hasRemaining(4) ? packet.readUInt32() : 0;
-        if (debug == 0)
+        if (debug == 0) {
             owner_.addGlobalStringChatLine("INSTANCE_SAVED", "You are now saved to this instance");
+            setInstanceLock(0, 0, false);
+        }
     };
     // AzerothCore's RaidInstanceMessage types, as Wow.exe (0x50CA80) says
     // them: 1-3 the lock warnings in hours or minutes, 4 the welcome (an
@@ -1014,16 +1021,10 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
         const uint32_t completedMask = packet.readUInt32();
         const uint8_t previouslySaved = packet.readUInt8();
 
-        instanceLock_.active = true;
-        instanceLock_.secondsLeft = static_cast<float>(timerMs) / 1000.0f;
-        instanceLock_.previouslySaved = (previouslySaved != 0);
-        instanceLock_.completedEncounterMask = completedMask;
-
         LOG_INFO("SMSG_INSTANCE_LOCK_WARNING_QUERY: ", timerMs / 1000,
                  "s to decide, completed mask 0x", std::hex, completedMask, std::dec,
                  previouslySaved ? ", previously saved" : "");
-
-        owner_.fireAddonEvent("INSTANCE_LOCK_START", {});
+        setInstanceLock(timerMs, completedMask, previouslySaved != 0);
     };
 
     // ---- LFG ----
@@ -3916,124 +3917,157 @@ void SocialHandler::handleLogoutComplete(network::Packet& /*packet*/) {
 // ============================================================
 
 void SocialHandler::handleBattlefieldStatus(network::Packet& packet) {
-    BattlefieldStatusData status;
-    if (!BattlefieldStatusPacket::parse(packet, status, isClassicLikeExpansion(),
-                                        !isPreWotlk())) {
-        return;
-    }
-    const uint32_t queueSlot = status.queueSlot;
-    bgJoinPendingType_ = 0;  // answered
-    const uint8_t arenaType = status.arenaType;
-    const uint32_t bgTypeId = status.bgTypeId;
-    const uint32_t statusId = status.statusId;
-
-    std::string bgName = "Battleground";
-    for (const auto& kv : kBgNames) { if (kv.first == bgTypeId) { bgName = kv.second; break; } }
-    if (bgName == "Battleground") bgName = "Battleground #" + std::to_string(bgTypeId);
-    if (arenaType > 0) {
-        bgName = std::to_string(arenaType) + "v" + std::to_string(arenaType) + " Arena";
-        for (const auto& kv : kBgNames) { if (kv.first == bgTypeId) { bgName += " (" + std::string(kv.second) + ")"; break; } }
-    }
-
-    // An invitation with no timeout in it still has to count down from
-    // something, and eighty seconds is what the server gives one.
-    const uint32_t inviteTimeout =
-        status.inviteTimeoutMs ? status.inviteTimeoutMs / 1000 : 80;
-    const uint32_t avgWaitSec = status.avgWaitMs / 1000;
-    const uint32_t timeInQueueSec = status.timeInQueueMs / 1000;
-
-    // Server pushes SMSG_BATTLEFIELD_STATUS periodically (~30s ticks while queued)
-    // and also for each queue slot at zone change / login. Only emit a chat line
-    // when the slot's statusId actually transitions; otherwise the same "Queued
-    // for X." or "Entered X." spams chat every tick.
-    bool statusChanged = false;
-    if (queueSlot < bgQueues_.size()) {
-        uint32_t prevStatus = bgQueues_[queueSlot].statusId;
-        bool wasInvite = (prevStatus == 2);
-        statusChanged = (prevStatus != statusId) || (bgQueues_[queueSlot].bgTypeId != bgTypeId);
-        bgQueues_[queueSlot].queueSlot = queueSlot;
-        bgQueues_[queueSlot].bgTypeId = bgTypeId;
-        bgQueues_[queueSlot].arenaType = arenaType;
-        bgQueues_[queueSlot].statusId = statusId;
-        bgQueues_[queueSlot].bgName = bgName;
-        bgQueues_[queueSlot].minLevel = status.minLevel;
-        bgQueues_[queueSlot].maxLevel = status.maxLevel;
-        bgQueues_[queueSlot].instanceId = status.instanceId;
-        bgQueues_[queueSlot].isRated = status.isRated;
-        if (statusId == 1) {
-            bgQueues_[queueSlot].avgWaitTimeSec = avgWaitSec;
-            bgQueues_[queueSlot].timeInQueueSec = timeInQueueSec;
-            bgQueues_[queueSlot].queueTimeReceivedAt = std::chrono::steady_clock::now();
-        }
-        if (statusId == 2 && !wasInvite) { bgQueues_[queueSlot].inviteTimeout = inviteTimeout; bgQueues_[queueSlot].inviteReceivedTime = std::chrono::steady_clock::now(); }
+    // Wow.exe 0x54AE40 (CGBattlefieldInfo). Two queue slots; a status for any
+    // other slot is dropped. Eight zero bytes after the slot are STATUS_NONE
+    // and empty the slot - which AzerothCore sends on leaving a queue, on
+    // declining an invitation and on leaving the battleground.
+    bf::StatusPacket s;
+    if (isActiveExpansion("wotlk")) {
+        if (!bf::parseStatus(packet, s)) return;
     } else {
-        statusChanged = true;
+        BattlefieldStatusData old;
+        if (!BattlefieldStatusPacket::parse(packet, old, isClassicLikeExpansion(), false)) return;
+        s.queueSlot = old.queueSlot;
+        s.bgTypeId = old.bgTypeId;
+        s.teamSize = old.arenaType;
+        s.header = old.statusId ? (uint64_t(old.arenaType) | (uint64_t(old.bgTypeId) << 16)) : 0;
+        s.minLevel = old.minLevel; s.maxLevel = old.maxLevel;
+        s.instanceId = old.instanceId; s.rated = old.isRated; s.status = old.statusId;
+        s.avgWaitMs = old.avgWaitMs; s.timeInQueueMs = old.timeInQueueMs;
+        s.mapId = old.mapId; s.inviteTimeoutMs = old.inviteTimeoutMs;
     }
-
-    if (statusChanged) {
-        LOG_WARNING("Battleground queue ", queueSlot + 1, ": status ", statusId,
-                    " for type ", bgTypeId, " (", bgName, "), average wait ",
-                    avgWaitSec, " s, waited ", timeInQueueSec, " s");
-        // No line of the client's own: Wow.exe (0x54AE40) stores the queue
-        // and fires UPDATE_BATTLEFIELD_STATUS, and the interface does the
-        // telling (the minimap eye, the "enter battle" popup).
+    bgJoinPendingType_ = 0;  // answered
+    const bf::StatusEffect fx = bgQueues_.apply(s, bf::clockMs(),
+        [this](uint32_t mapId) { return owner_.getMapInstanceType(mapId); });
+    if (fx.slot < 0) return;
+    LOG_INFO("Battleground queue ", fx.slot + 1, ": status ", s.status, " type ", s.bgTypeId,
+             " map ", s.mapId, s.header == 0 ? " (cleared)" : "");
+    if (fx.enteredActive) {
+        // Entering a battleground's status: the scoreboard's own columns are
+        // the map's WorldStateUI rows of type 2, its filter both factions
+        // (0x54AE40 -> 0x54AA30).
+        bgScoreColumns_.clear();
+        for (size_t i : bf::scoreColumns(owner_.worldStateUiRows(), s.mapId))
+            bgScoreColumns_.push_back(i);
+        bgScoreboard_.factionFilter = -1;
+        resortScoreboard();
     }
-    // The argument is which queue changed, counted from one, not what it
-    // changed to. battlefieldframe.lua takes it as the index and raises the
-    // "enter battleground" prompt only for the queue it names - handed the
-    // status, an invitation (2) to the first queue named the second, and the
-    // prompt never came up however long the player had waited for it.
-    if (owner_.addonEventCallbackRef())
-        owner_.addonEventCallbackRef()("UPDATE_BATTLEFIELD_STATUS", {std::to_string(queueSlot + 1)});
+    // The argument is the queue, counted from one; the interface does the
+    // telling (the minimap eye, the "enter battle" popup).
+    owner_.fireAddonEvent("UPDATE_BATTLEFIELD_STATUS", {std::to_string(fx.slot + 1)});
 }
 
 void SocialHandler::handleBattlefieldList(network::Packet& packet) {
-    if (!packet.hasRemaining(5)) return;
-    AvailableBgInfo info;
-    info.bgTypeId = packet.readUInt32();
-    info.isRegistered = packet.readUInt8() != 0;
-    const bool isWotlk = isActiveExpansion("wotlk");
-    const bool isTbc = isActiveExpansion("tbc");
-    if (isTbc || isWotlk) { if (!packet.hasRemaining(1)) return; info.isHoliday = packet.readUInt8() != 0; }
-    if (isWotlk) { if (!packet.hasRemaining(8)) return; info.minLevel = packet.readUInt32(); info.maxLevel = packet.readUInt32(); }
-    if (!packet.hasRemaining(4)) return;
-    uint32_t count = std::min(packet.readUInt32(), 256u);
-    info.instanceIds.reserve(count);
-    for (uint32_t i = 0; i < count; ++i) {
-        if (!packet.hasRemaining(4)) break;
-        info.instanceIds.push_back(packet.readUInt32());
+    // 0x54E390: the battlemaster's list, or the PvP frame's answer.
+    bf::ListPacket list;
+    if (isActiveExpansion("wotlk")) {
+        if (!bf::parseList(packet, list)) return;
+    } else {
+        // Pre-WotLK: no guid or rewards; the list arrives for the frame only.
+        if (!packet.hasRemaining(5)) return;
+        list.bgTypeId = packet.readUInt32();
+        packet.readUInt8();
+        if (isActiveExpansion("tbc") && packet.hasRemaining(1)) packet.readUInt8();
+        if (packet.hasRemaining(4)) {
+            const uint32_t n = std::min(packet.readUInt32(), 256u);
+            for (uint32_t i = 0; i < n && packet.hasRemaining(4); ++i)
+                list.instanceIds.push_back(packet.readUInt32());
+        }
+        list.battlemaster = owner_.isGossipWindowOpen() ? owner_.getCurrentGossip().npcGuid : 0;
     }
-    bool updated = false;
-    for (auto& existing : availableBgs_) { if (existing.bgTypeId == info.bgTypeId) { existing = std::move(info); updated = true; break; } }
-    if (!updated) availableBgs_.push_back(std::move(info));
+    bgList_ = list;
+    bgListReceived_ = true;
+    const std::string event = bf::listEvent(list);
+    if (event == "NPC_PVPQUEUE_ANYWHERE" || event == "BATTLEFIELDS_SHOW") {
+        battlemasterGuid_ = list.battlemaster;
+    } else if (event == "BATTLEFIELDS_CLOSED") {
+        battlemasterGuid_ = 0;
+    }
+    owner_.fireAddonEvent(event, {});
 }
 
 bool SocialHandler::hasPendingBgInvite() const {
-    for (const auto& slot : bgQueues_) { if (slot.statusId == 2) return true; }
-    return false;
+    return bgQueues_.hasInvite();
+}
+
+// AcceptBattlefieldPort(index, accept) (0x54DA10): CMSG_BATTLEFIELD_PORT with
+// the slot's eight header bytes as the status brought them, and the answer.
+bool SocialHandler::acceptBattlefieldPort(uint32_t index, bool accept) {
+    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return false;
+    const bf::QueueSlot* q = bgQueues_.slot(index);
+    if (!q || q->header == 0) return false;
+    network::Packet pkt(wireOpcode(Opcode::CMSG_BATTLEFIELD_PORT));
+    if (isActiveExpansion("wotlk")) {
+        pkt.writeUInt64(q->header);
+    } else {
+        if (!isClassicLikeExpansion()) { pkt.writeUInt8(q->teamSize); pkt.writeUInt8(0); }
+        pkt.writeUInt32(q->bgTypeId);
+        pkt.writeUInt16(0);
+    }
+    pkt.writeUInt8(accept ? 1 : 0);
+    owner_.getSocket()->send(pkt);
+    // Declining the battleground the battlemaster's frame shows closes it.
+    if (!accept && bgListReceived_ && q->bgTypeId == bgList_.bgTypeId)
+        owner_.fireAddonEvent("BATTLEFIELDS_CLOSED", {});
+    return true;
 }
 
 void SocialHandler::acceptBattlefield(uint32_t queueSlot) {
-    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    const BgQueueSlot* slot = nullptr;
-    if (queueSlot == 0xFFFFFFFF) { for (const auto& s : bgQueues_) { if (s.statusId == 2) { slot = &s; break; } } }
-    else if (queueSlot < bgQueues_.size() && bgQueues_[queueSlot].statusId == 2) slot = &bgQueues_[queueSlot];
-    if (!slot) return;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_BATTLEFIELD_PORT));
-    pkt.writeUInt8(slot->arenaType); pkt.writeUInt8(0x00); pkt.writeUInt32(slot->bgTypeId);
-    pkt.writeUInt16(0x0000); pkt.writeUInt8(1);
-    owner_.getSocket()->send(pkt);
-    uint32_t clearSlot = slot->queueSlot;
-    if (clearSlot < bgQueues_.size()) bgQueues_[clearSlot].statusId = 3;
+    if (queueSlot == 0xFFFFFFFF) {
+        for (uint32_t i = 0; i < bf::kQueueSlots; ++i)
+            if (bgQueues_.slot(i)->status == 2) { queueSlot = i; break; }
+    }
+    if (queueSlot < bf::kQueueSlots) acceptBattlefieldPort(queueSlot, true);
 }
 
-// Leave the battleground the player is standing in, which is a different thing
-// from declining an invitation to one - that is CMSG_BATTLEFIELD_PORT with a
-// refusal, this is the player walking out of a match already joined.
-// CMSG_BATTLEMASTER_JOIN: which battlemaster is being spoken to, which
-// battleground, which instance of it, and whether the whole group is coming.
-// An instance of zero means "first available", which is what the top row of
-// the battlefield list is.
+void SocialHandler::declineBattlefield(uint32_t queueSlot) {
+    if (queueSlot == 0xFFFFFFFF) {
+        for (uint32_t i = 0; i < bf::kQueueSlots; ++i)
+            if (bgQueues_.slot(i)->status == 2) { queueSlot = i; break; }
+    }
+    if (queueSlot < bf::kQueueSlots) acceptBattlefieldPort(queueSlot, false);
+}
+
+// JoinBattlefield(index, asGroup, isRated) (0x54CC70). The battleground is the
+// one the last SMSG_BATTLEFIELD_LIST named; an arena row joins through
+// CMSG_BATTLEMASTER_JOIN_ARENA with the index as the team size slot.
+void SocialHandler::joinBattlefieldIndex(int index, bool asGroup, bool rated) {
+    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
+    const uint32_t type = bgList_.bgTypeId;
+    const auto* row = owner_.getBattlemasterInfo(type);
+    const bool arena = row && row->instanceType == 4;
+    if (asGroup && row) {
+        const auto& pd = owner_.getPartyData();
+        const uint32_t members = pd.isEmpty() ? 0 : pd.memberCount;
+        if (row->maxGroupSize < members) {
+            owner_.displayGameMessage("ERR_GROUP_JOIN_BATTLEGROUND_TOO_MANY",
+                                      "Your group is too large for this battleground.  Please regroup to join.");
+            return;
+        }
+    }
+    if (!arena && owner_.getMapInstanceType(owner_.getCurrentMapId()) == 3) {
+        owner_.displayGameMessage("ERR_BATTLEGROUND_NOT_IN_BATTLEGROUND", "You can't do that in a battleground.");
+        return;
+    }
+    if (arena) {
+        network::Packet packet(wireOpcode(Opcode::CMSG_BATTLEMASTER_JOIN_ARENA));
+        packet.writeUInt64(battlemasterGuid_);
+        packet.writeUInt8(static_cast<uint8_t>(index - 1));
+        packet.writeUInt8(asGroup ? 1 : 0);
+        packet.writeUInt8(rated ? 1 : 0);
+        owner_.getSocket()->send(packet);
+    } else {
+        const uint32_t i = static_cast<uint32_t>(index - 1);
+        const uint32_t instanceId = (index >= 1 && i < bgList_.instanceIds.size() && battlemasterGuid_ != 0)
+                                        ? bgList_.instanceIds[i] : 0;
+        joinBattlefield(battlemasterGuid_, type, instanceId, asGroup);
+    }
+    LOG_INFO("JoinBattlefield: type ", type, " index ", index, arena ? " (arena)" : "",
+             " battlemaster 0x", std::hex, battlemasterGuid_, std::dec);
+}
+
+// CMSG_BATTLEMASTER_JOIN: the battlemaster, the battleground, which instance
+// of it (zero: the first available) and whether the group comes too.
 void SocialHandler::joinBattlefield(uint64_t battlemasterGuid, uint32_t bgTypeId,
                                     uint32_t instanceId, bool asGroup) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
@@ -4047,26 +4081,23 @@ void SocialHandler::joinBattlefield(uint64_t battlemasterGuid, uint32_t bgTypeId
     bgJoinWaitSec_ = 5.0f;
 }
 
-// CMSG_BATTLEFIELD_LIST: ask which instances of one battleground are running.
-// The reply is SMSG_BATTLEFIELD_LIST, which this client already handles - it
-// just had no way to ask, because nothing reached the frame that asks.
+// CMSG_BATTLEFIELD_LIST as the PvP frame sends it (0x54E5B0, from
+// RequestBattlegroundInstanceInfo): the type, "from anywhere" (1), and the
+// experience-off flag below the level cap. The type becomes the selection
+// JoinBattlefield queues for.
 void SocialHandler::requestBattlefieldList(uint32_t bgTypeId) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     network::Packet packet(wireOpcode(Opcode::CMSG_BATTLEFIELD_LIST));
     packet.writeUInt32(bgTypeId);
-    // WotLK added two bytes: where the request came from, and whether the
-    // player wants experience from it. Classic and TBC read the type id alone,
-    // and trailing bytes there would be read as the next packet.
     if (!isPreWotlk()) {
-        packet.writeUInt8(0);  // fromWhere: 0 = the battlemaster list frame
-        packet.writeUInt8(1);  // canGainXP
+        packet.writeUInt8(1);  // from anywhere: the PvP frame
+        packet.writeUInt8(0);  // experience gain is on
     }
     owner_.getSocket()->send(packet);
+    bgList_.bgTypeId = bgTypeId;
 }
 
-// CMSG_REPORT_PVP_AFK: this player is not participating. The reply,
-// SMSG_REPORT_PVP_AFK_RESULT, was already handled - the request was the half
-// that had no way to be sent.
+// CMSG_REPORT_PVP_AFK: this player is not participating.
 void SocialHandler::reportPvpAfk(uint64_t playerGuid) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     if (playerGuid == 0) return;
@@ -4075,38 +4106,107 @@ void SocialHandler::reportPvpAfk(uint64_t playerGuid) {
     owner_.getSocket()->send(pkt);
 }
 
+// LeaveBattlefield() (0x54C250): CMSG_LEAVE_BATTLEFIELD carrying the active
+// slot's eight header bytes (zero without one). AzerothCore reads all eight
+// before acting, so the empty packet this used to send was dropped and the
+// "Leave Battleground" button did nothing.
 void SocialHandler::leaveBattlefield() {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     network::Packet pkt(wireOpcode(Opcode::CMSG_LEAVE_BATTLEFIELD));
+    if (!isClassicLikeExpansion()) {
+        const int a = bgQueues_.active().slot;
+        const bf::QueueSlot* q = a >= 0 ? bgQueues_.slot(static_cast<uint32_t>(a)) : nullptr;
+        pkt.writeUInt64(q ? q->header : 0);
+    }
     owner_.getSocket()->send(pkt);
 }
 
-void SocialHandler::declineBattlefield(uint32_t queueSlot) {
-    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    const BgQueueSlot* slot = nullptr;
-    if (queueSlot == 0xFFFFFFFF) { for (const auto& s : bgQueues_) { if (s.statusId == 2) { slot = &s; break; } } }
-    // A named queue is left whether it has popped or is still waiting: the
-    // server takes the same refusal for both.
-    else if (queueSlot < bgQueues_.size() &&
-             (bgQueues_[queueSlot].statusId == 1 || bgQueues_[queueSlot].statusId == 2))
-        slot = &bgQueues_[queueSlot];
-    if (!slot) return;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_BATTLEFIELD_PORT));
-    pkt.writeUInt8(slot->arenaType); pkt.writeUInt8(0x00); pkt.writeUInt32(slot->bgTypeId);
-    pkt.writeUInt16(0x0000); pkt.writeUInt8(0);
-    owner_.getSocket()->send(pkt);
-    uint32_t clearSlot = slot->queueSlot;
-    if (clearSlot < bgQueues_.size()) bgQueues_[clearSlot] = BgQueueSlot{};
-    // The minimap icon and the panel read the queues on this event; without
-    // it they kept showing the queue until the server's next word.
-    if (owner_.addonEventCallbackRef())
-        owner_.addonEventCallbackRef()("UPDATE_BATTLEFIELD_STATUS", {std::to_string(clearSlot + 1)});
+// CloseBattlefield() (0x549B40): BATTLEFIELDS_CLOSED, and the battlemaster let go.
+void SocialHandler::closeBattlefield() {
+    owner_.fireAddonEvent("BATTLEFIELDS_CLOSED", {});
+    battlemasterGuid_ = 0;
 }
 
+// RequestBattlefieldScoreData() (0x54DCA0 -> 0x54CE30). WorldStateScoreFrame
+// calls it from OnUpdate, every frame, so the client throttles it: once per
+// five seconds, and after the first not at all once the battle has ended or
+// in an arena.
 void SocialHandler::requestPvpLog() {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
+    const int64_t now = bf::clockMs();
+    if (nextPvpLogRequestMs_ != 0) {
+        if (bgScoreboard_.log.ended || bgQueues_.active().instanceType == 4) return;
+        if (now < nextPvpLogRequestMs_) return;
+    }
     network::Packet pkt(wireOpcode(Opcode::MSG_PVP_LOG_DATA));
     owner_.getSocket()->send(pkt);
+    nextPvpLogRequestMs_ = now + 5000;
+}
+
+// The world was (re)entered (0x528010 -> 0x54CA50): the scoreboard and the
+// battlemaster's list are emptied, and the server is asked for every queue's
+// status again (CMSG_BATTLEFIELD_STATUS).
+void SocialHandler::onWorldEntered() {
+    bgScoreboard_ = bf::Scoreboard{};
+    nextPvpLogRequestMs_ = 0;
+    bgScoreNamesPending_ = false;
+    bgScoreColumns_.clear();
+    bgList_ = bf::ListPacket{};
+    bgListReceived_ = false;
+    battlemasterGuid_ = 0;
+    bgQueues_.reset();
+    if (owner_.getState() == WorldState::IN_WORLD && owner_.getSocket() && !isPreWotlk()) {
+        network::Packet pkt(wireOpcode(Opcode::CMSG_BATTLEFIELD_STATUS));
+        owner_.getSocket()->send(pkt);
+    }
+}
+
+void SocialHandler::setScoreFaction(int faction) {
+    if (faction != -1 && (faction < 0 || faction > 1)) return;
+    bgScoreboard_.factionFilter = faction;
+    resortScoreboard();
+}
+
+void SocialHandler::sortScores(const std::string& column) {
+    if (bgScoreNamesPending_) return;
+    bgScoreboard_.sort.select(column);
+    resortScoreboard();
+}
+
+// 0x54AA30: once every row's name is known, the faction of each battleground
+// row from its race, the rows the filter passes counted, the sort, and
+// UPDATE_BATTLEFIELD_SCORE.
+void SocialHandler::resortScoreboard() {
+    if (bgScoreNamesPending_ || !bgScoreboard_.hasData) return;
+    const bool arena = bgQueues_.active().instanceType == 4 || bgScoreboard_.log.isArena;
+    for (auto& r : bgScoreboard_.log.rows) {
+        if (!arena) r.faction = bf::factionOfRace(r.raceId);
+    }
+    bgScoreboard_.resort(bgScoreColumns_.size());
+    owner_.fireAddonEvent("UPDATE_BATTLEFIELD_SCORE", {});
+}
+
+// The names, races and classes a scoreboard row needs, from the name cache.
+// True when every row has them.
+bool SocialHandler::fillScoreNames() {
+    bool all = true;
+    const uint64_t me = owner_.getPlayerGuid();
+    for (auto& r : bgScoreboard_.log.rows) {
+        if (r.guid == me) {
+            r.name = owner_.lookupName(me);
+            r.raceId = owner_.getPlayerRace();
+            r.classId = owner_.getPlayerClass();
+        } else {
+            r.name = owner_.lookupName(r.guid);
+            r.raceId = owner_.lookupPlayerRace(r.guid);
+            r.classId = owner_.lookupPlayerClass(r.guid);
+        }
+        if (r.name.empty() || r.raceId == 0) {
+            all = false;
+            owner_.queryPlayerName(r.guid);
+        }
+    }
+    return all;
 }
 
 // ============================================================
@@ -4121,51 +4221,124 @@ void SocialHandler::handleRaidInstanceInfo(network::Packet& packet) {
     uint32_t count = packet.readUInt32();
     instanceLockouts_.clear();
     instanceLockouts_.reserve(count);
-    const size_t kEntrySize = useTbcFormat ? 13 : 18;
+    // WotLK (Wow.exe 0x501030, AzerothCore Player::SendRaidInfo): map,
+    // difficulty, the instance's uint64 id, locked, extended, then the
+    // seconds to the reset - the id used to be read as the reset time.
+    const size_t kEntrySize = useTbcFormat ? 13 : 22;
+    const uint64_t now = static_cast<uint64_t>(std::time(nullptr));
     for (uint32_t i = 0; i < count; ++i) {
         if (packet.getRemainingSize() < kEntrySize) break;
         InstanceLockout lo;
         lo.mapId = packet.readUInt32(); lo.difficulty = packet.readUInt32();
-        if (useTbcFormat) { lo.resetTime = packet.readUInt32(); lo.locked = packet.readUInt8() != 0; lo.extended = false; }
-        else { lo.resetTime = packet.readUInt64(); lo.locked = packet.readUInt8() != 0; lo.extended = packet.readUInt8() != 0; }
+        if (useTbcFormat) {
+            lo.resetSeconds = packet.readUInt32(); lo.locked = packet.readUInt8() != 0; lo.extended = false;
+        } else {
+            lo.instanceId = packet.readUInt64();
+            lo.locked = packet.readUInt8() != 0;
+            lo.extended = packet.readUInt8() != 0;
+            lo.resetSeconds = packet.readUInt32();
+        }
+        lo.resetTime = now + lo.resetSeconds;
         instanceLockouts_.push_back(lo);
     }
+    owner_.fireAddonEvent("UPDATE_INSTANCE_INFO", {});
+}
+
+// The difficulty state as Wow.exe keeps it: the instance's own (0xBD0894)
+// and its dynamic heroic flag (0xBD1980) from SMSG_INSTANCE_DIFFICULTY, and a
+// personal and a group copy of each setting (0xBD0898/0xBD1978 dungeon,
+// 0xBD089C/0xBD197C raid). The dungeon setting in force is the group copy in
+// a party, the raid one the group copy in a raid (0x515790, 0x515810).
+uint32_t SocialHandler::effectiveDungeonDifficulty() const {
+    const auto& pd = owner_.getPartyData();
+    const bool party = !pd.isEmpty() && pd.groupType == 0;
+    return party ? dungeonDifficultyGroup_ : dungeonDifficultySetting_;
+}
+
+uint32_t SocialHandler::effectiveRaidDifficulty() const {
+    const auto& pd = owner_.getPartyData();
+    const bool raid = !pd.isEmpty() && pd.groupType != 0;
+    return raid ? raidDifficultyGroup_ : raidDifficultySetting_;
+}
+
+void SocialHandler::sayDungeonDifficulty() {
+    // ERR_DUNGEON_DIFFICULTY_CHANGED_S with DUNGEON_DIFFICULTY<n+1> (0x524720).
+    const uint32_t d = effectiveDungeonDifficulty();
+    const std::string nameKey = "DUNGEON_DIFFICULTY" + std::to_string(d + 1);
+    std::string label = globalString(owner_.services().assetManager, nameKey);
+    if (label.empty()) label = d == 1 ? "5 Player (Heroic)" : "5 Player";
+    owner_.displayGameMessage("ERR_DUNGEON_DIFFICULTY_CHANGED_S",
+                              "Dungeon Difficulty set to " + label + ".", {label});
+}
+
+void SocialHandler::sayRaidDifficulty() {
+    // 0x524780: inside a raid map the MapDifficulty row's own name, otherwise
+    // RAID_DIFFICULTY<n+1>. (The dynamic-difficulty raids' two lines, Map
+    // flag 0x100, are not modelled.)
+    const uint32_t d = effectiveRaidDifficulty();
+    std::string label;
+    const uint32_t map = owner_.getCurrentMapId();
+    if (owner_.getMapInstanceType(map) == 2) {
+        const auto md = owner_.getMapDifficulty(map, instanceDifficulty_);
+        if (!md.difficultyKey.empty())
+            label = globalString(owner_.services().assetManager, md.difficultyKey);
+    }
+    if (label.empty())
+        label = globalString(owner_.services().assetManager, "RAID_DIFFICULTY" + std::to_string(d + 1));
+    if (label.empty()) label = "Raid";
+    owner_.displayGameMessage("ERR_RAID_DIFFICULTY_CHANGED_S",
+                              "Raid Difficulty set to " + label + ".", {label});
+}
+
+void SocialHandler::applyDungeonDifficulty(uint32_t diff, bool personal, bool group) {
+    const uint32_t before = effectiveDungeonDifficulty();
+    if (personal) dungeonDifficultySetting_ = diff;
+    if (group) dungeonDifficultyGroup_ = diff;
+    if (effectiveDungeonDifficulty() != before) sayDungeonDifficulty();
+}
+
+void SocialHandler::applyRaidDifficulty(uint32_t diff, bool personal, bool group) {
+    const uint32_t before = effectiveRaidDifficulty();
+    if (personal) raidDifficultySetting_ = diff;
+    if (group) raidDifficultyGroup_ = diff;
+    if (effectiveRaidDifficulty() != before) sayRaidDifficulty();
 }
 
 void SocialHandler::handleInstanceDifficulty(network::Packet& packet, bool dungeonSetting) {
-    auto rem = [&]() { return packet.getRemainingSize(); };
-    if (rem() < 4) return;
-    uint32_t prevDifficulty = instanceDifficulty_;
-    instanceDifficulty_ = packet.readUInt32();
-    // ERR_DUNGEON_DIFFICULTY_CHANGED_S with DUNGEON_DIFFICULTY<n+1>, a chat
-    // line, when the setting moves (Wow.exe 0x525530 -> 0x524720). Only for
-    // MSG_SET_DUNGEON_DIFFICULTY: SMSG_INSTANCE_DIFFICULTY is stored in
-    // silence.
-    if (dungeonSetting && instanceDifficulty_ != dungeonDifficultySetting_) {
-        dungeonDifficultySetting_ = instanceDifficulty_;
-        const std::string nameKey = "DUNGEON_DIFFICULTY" + std::to_string(instanceDifficulty_ + 1);
-        std::string label = globalString(owner_.services().assetManager, nameKey);
-        if (label.empty()) label = instanceDifficulty_ == 1 ? "5 Player (Heroic)" : "5 Player";
-        owner_.displayGameMessage("ERR_DUNGEON_DIFFICULTY_CHANGED_S",
-                                  "Dungeon Difficulty set to " + label + ".", {label});
+    if (!packet.hasRemaining(4)) return;
+    const uint32_t first = packet.readUInt32();
+    if (dungeonSetting) {
+        // MSG_SET_DUNGEON_DIFFICULTY (0x525530): difficulty, "personal" (the
+        // server always 1), whether it is the group's.
+        const uint32_t personal = packet.hasRemaining(4) ? packet.readUInt32() : 1;
+        const uint32_t group = packet.hasRemaining(4) ? packet.readUInt32() : 0;
+        applyDungeonDifficulty(first, personal != 0, group != 0);
+        return;
     }
-    if (rem() >= 4) {
-        uint32_t secondField = packet.readUInt32();
-        if (rem() >= 4) instanceIsHeroic_ = (instanceDifficulty_ == 1);
-        else instanceIsHeroic_ = (secondField != 0);
-    } else {
-        instanceIsHeroic_ = (instanceDifficulty_ == 1);
+    // SMSG_INSTANCE_DIFFICULTY (0x526530 case 0x33B): the instance's
+    // difficulty and its dynamic heroic flag, stored in silence. It comes at
+    // every login, in the open world too, so it says nothing about being in
+    // an instance.
+    instanceDifficulty_ = first;
+    instanceDynamicHeroic_ = packet.hasRemaining(4) ? packet.readUInt32() : 0;
+    instanceIsHeroic_ = instanceDifficulty_ == 1;
+}
+
+// Set{Dungeon,Raid}Difficulty(n) (0x526050, 0x5261A0): 1-2 for a dungeon,
+// 1-4 for a raid; a group member who does not lead is refused with
+// ERR_NOT_LEADER and nothing is sent. Otherwise both copies change at once,
+// the line is said, and the request goes out - the server's echo then
+// changes nothing and says nothing.
+void SocialHandler::setDifficultyFromUi(uint32_t n, bool raid) {
+    if (n < 1 || n > (raid ? 4u : 2u)) return;
+    const auto& pd = owner_.getPartyData();
+    if (!pd.isEmpty() && pd.leaderGuid != owner_.getPlayerGuid()) {
+        owner_.displayGameMessage("ERR_NOT_LEADER", "You are not the party leader.");
+        return;
     }
-    inInstance_ = true;
-    if (instanceDifficulty_ != prevDifficulty) {
-        // The minimap hangs a difficulty banner off its own corner and rereads
-        // GetInstanceInfo on this, which answers from the value just stored,
-        // so the banner was the one thing not told the difficulty had changed.
-        if (owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("PLAYER_DIFFICULTY_CHANGED", {});
-            owner_.addonEventCallbackRef()("UPDATE_INSTANCE_INFO", {});
-        }
-    }
+    if (raid) applyRaidDifficulty(n - 1, true, true);
+    else applyDungeonDifficulty(n - 1, true, true);
+    sendSetDifficulty(n - 1, raid);
 }
 
 // ============================================================
@@ -5175,6 +5348,9 @@ void SocialHandler::handleArenaTeamEvent(network::Packet& packet) {
         case 8: owner_.displayGameMessage("ERR_ARENA_TEAM_DISBANDED_S", at(0) + " has disbanded " + at(1) + ".", p); break;
         default: owner_.displayGameMessage("ERR_GUILD_INTERNAL", "Internal guild error."); break;
     }
+    // 0x6CC980 -> 0x5A28E0: the rosters are stale; ARENA_TEAM_ROSTER_UPDATE
+    // with "1" tells the PvP frame to ask again.
+    owner_.fireAddonEvent("ARENA_TEAM_ROSTER_UPDATE", {"1"});
 }
 
 void SocialHandler::handleArenaTeamStats(network::Packet& packet) {
@@ -5184,10 +5360,13 @@ void SocialHandler::handleArenaTeamStats(network::Packet& packet) {
     stats.weekGames = packet.readUInt32(); stats.weekWins = packet.readUInt32();
     stats.seasonGames = packet.readUInt32(); stats.seasonWins = packet.readUInt32();
     stats.rank = packet.readUInt32();
+    bool replaced = false;
     for (auto& s : arenaTeamStats_) {
-        if (s.teamId == stats.teamId) { stats.teamName = std::move(s.teamName); stats.teamType = s.teamType; s = std::move(stats); return; }
+        if (s.teamId == stats.teamId) { stats.teamName = std::move(s.teamName); stats.teamType = s.teamType; s = std::move(stats); replaced = true; break; }
     }
-    arenaTeamStats_.push_back(std::move(stats));
+    if (!replaced) arenaTeamStats_.push_back(std::move(stats));
+    // Wow.exe 0x5A2D50: ARENA_TEAM_UPDATE, no arguments.
+    owner_.fireAddonEvent("ARENA_TEAM_UPDATE", {});
 }
 
 void SocialHandler::requestArenaTeamRoster(uint32_t teamId) {
@@ -5213,93 +5392,17 @@ void SocialHandler::handleArenaError(network::Packet& packet) {
 }
 
 void SocialHandler::handlePvpLogData(network::Packet& packet) {
-    auto remaining = [&]() { return packet.getRemainingSize(); };
-    if (remaining() < 1) return;
-    // The layout is settled and the dump that asked about it is gone.
-    //
-    // The question it existed to answer - whether there is a team byte after
-    // the guid - is answered by the source rather than by a byte count, and the
-    // answer is "in an arena, yes; in a battleground, no". They are two
-    // different rows written by two different overrides, and the type byte at
-    // the top of this packet says which one follows.
-    bgScoreboard_ = BgScoreboardData{};
-    bgScoreboard_.isArena = (packet.readUInt8() != 0);
-    if (bgScoreboard_.isArena) {
-        for (auto& arenaTeam : bgScoreboard_.arenaTeams) {
-            if (remaining() < 20) { packet.skipAll(); return; }
-            arenaTeam.ratingChange = packet.readUInt32();
-            arenaTeam.newRating = packet.readUInt32();
-            packet.readUInt32(); packet.readUInt32(); packet.readUInt32();
-            arenaTeam.teamName = remaining() > 0 ? packet.readString() : "";
-        }
-    }
-    // Ended, and the winner, BEFORE the player count. This was read after the
-    // players, where there is nothing left to read it from.
-    if (remaining() < 1) return;
-    bgScoreboard_.hasWinner = (packet.readUInt8() != 0);
-    if (bgScoreboard_.hasWinner) {
-        if (remaining() < 1) return;
-        bgScoreboard_.winner = packet.readUInt8();
-    }
-
-    if (remaining() < 4) return;
-    uint32_t playerCount = packet.readUInt32();
-    bgScoreboard_.players.reserve(playerCount);
-    for (uint32_t i = 0; i < playerCount && remaining() >= 12; ++i) {
-        BgPlayerScore ps;
-        ps.guid = packet.readUInt64();
-        // Two different rows, and the type byte at the top says which.
-        //
-        // BattlegroundScore::AppendToPacket - killing blows, honourable kills,
-        // deaths, bonus honour, damage, healing. No team.
-        // ArenaScore::AppendToPacket - killing blows, a team BYTE, damage,
-        // healing. No honourable kills, deaths or honour at all.
-        //
-        // This read one row that was neither: a team byte from the arena
-        // shape followed by the battleground's four counters, then a stat block
-        // with null-terminated names that no core writes. Everything after the
-        // guid was off by a byte, and damage and healing were skipped entirely
-        // - which is why GetBattlefieldScore answered zero for both.
-        ps.killingBlows = packet.readUInt32();
-        if (bgScoreboard_.isArena) {
-            if (remaining() < 1) { bgScoreboard_.players.push_back(std::move(ps)); break; }
-            ps.team = packet.readUInt8();
-            ps.hasTeam = true;
-        } else {
-            if (remaining() < 12) { bgScoreboard_.players.push_back(std::move(ps)); break; }
-            ps.honorableKills = packet.readUInt32();
-            ps.deaths         = packet.readUInt32();
-            ps.bonusHonor     = packet.readUInt32();
-            // No team on the wire for a battleground. The byte that used to
-            // fill this was the low byte of the killing blows, so the faction
-            // tabs were already filtering on nothing; leaving it unset is the
-            // same amount of information, honestly labelled.
-        }
-        if (remaining() < 8) { bgScoreboard_.players.push_back(std::move(ps)); break; }
-        ps.damageDone  = packet.readUInt32();
-        ps.healingDone = packet.readUInt32();
-
-        { auto ent = owner_.getEntityManager().getEntity(ps.guid);
-          if (ent && (ent->getType() == game::ObjectType::PLAYER || ent->getType() == game::ObjectType::UNIT))
-              { auto u = std::static_pointer_cast<game::Unit>(ent); if (!u->getName().empty()) ps.name = u->getName(); } }
-
-        // BuildObjectivesBlock: a count and that many bare values. The names
-        // this used to read are not on the wire - BattlegroundWS writes
-        // uint32(2) and two numbers - so every value past the first came from
-        // the wrong offset.
-        if (remaining() >= 4) {
-            uint32_t statCount = packet.readUInt32();
-            for (uint32_t st = 0; st < statCount && remaining() >= 4; ++st) {
-                ps.bgStats.emplace_back(std::string(), packet.readUInt32());
-            }
-        }
-        bgScoreboard_.players.push_back(std::move(ps));
-    }
-    // The scoreboard is drawn from this and asked for it by name -
-    // RequestBattlefieldScoreData sends the query, UPDATE_BATTLEFIELD_SCORE is
-    // the answer arriving. Every row, every column and the winner were parsed
-    // and stored, and the frame that displays them was never told.
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("UPDATE_BATTLEFIELD_SCORE", {});
+    // 0x54D280: the rows replace the old ones, and the scoreboard waits for
+    // every row's name before it is sorted and UPDATE_BATTLEFIELD_SCORE fires.
+    bf::PvpLogPacket log;
+    if (!bf::parsePvpLog(packet, log)) { packet.skipAll(); return; }
+    const int filter = bgScoreboard_.factionFilter;
+    bgScoreboard_.log = std::move(log);
+    bgScoreboard_.hasData = true;
+    bgScoreboard_.factionFilter = filter;
+    bgScoreNamesPending_ = false;
+    if (fillScoreNames()) resortScoreboard();
+    else bgScoreNamesPending_ = true;
 }
 
 void SocialHandler::sayDuelCountdown(const std::vector<int>& counts) {
@@ -5316,6 +5419,22 @@ void SocialHandler::updateDuelCountdown(float deltaTime) {
 }
 
 void SocialHandler::updateLogoutCountdown(float deltaTime) {
+    // A scoreboard waiting for its names (0x54CA30 counts the answers down).
+    // The name cache can know a name without the race the faction comes
+    // from, so after three seconds the rows are shown as they stand.
+    if (bgScoreNamesPending_) {
+        bgScoreNameWaitSec_ += deltaTime;
+        bgScoreNameCheckSec_ -= deltaTime;
+        if (bgScoreNameCheckSec_ <= 0.0f) {
+            bgScoreNameCheckSec_ = 0.25f;
+            if (fillScoreNames() || bgScoreNameWaitSec_ >= 3.0f) {
+                bgScoreNamesPending_ = false;
+                resortScoreboard();
+            }
+        }
+    } else {
+        bgScoreNameWaitSec_ = 0.0f;
+    }
     // The ready check's thirty seconds. On the initiator's client their end
     // closes the check (Wow.exe 0x573390): "The following players are Away:
     // ..." (RAID_MEMBERS_AFK) naming whoever did not answer, or "Everyone is
@@ -5355,8 +5474,7 @@ void SocialHandler::updateLogoutCountdown(float deltaTime) {
         bgJoinWaitSec_ -= deltaTime;
         if (bgJoinWaitSec_ <= 0.0f) {
             std::string name = "that battleground";
-            for (const auto& kv : kBgNames)
-                if (kv.first == bgJoinPendingType_) { name = kv.second; break; }
+            if (const auto* row = owner_.getBattlemasterInfo(bgJoinPendingType_)) name = row->name;
             // Logged, not said: the stock client has no such message and
             // waits in silence.
             LOG_WARNING("Battleground join unanswered: type ", bgJoinPendingType_, " (", name, ")");
@@ -5369,34 +5487,46 @@ void SocialHandler::updateLogoutCountdown(float deltaTime) {
     }
     // The bind prompt expires on its own; the server stops asking and the
     // pending bind lapses, so the dialog has to stop offering an answer.
+    // The countdown alone; running out raises nothing (the dialog reads
+    // zero and the server acts).
     if (instanceLock_.active) {
         instanceLock_.secondsLeft -= deltaTime;
         if (instanceLock_.secondsLeft <= 0.0f) {
             instanceLock_.secondsLeft = 0.0f;
             instanceLock_.active = false;
-            owner_.fireAddonEvent("INSTANCE_LOCK_STOP", {});
         }
     }
 }
 
+// RespondInstanceLock(accept) (0x613ED0): CMSG_INSTANCE_LOCK_RESPONSE with
+// the answer, always; the prompt ends when the server saves the player
+// (SMSG_INSTANCE_SAVE_CREATED) or moves them out.
 void SocialHandler::respondInstanceLock(bool accept) {
-    // Accepting saves the player to the instance; declining sends them to the
-    // graveyard. The server acts on whichever arrives and clears the pending
-    // bind, so sending twice is worse than not sending at all.
-    if (!instanceLock_.active || !owner_.getSocket()) return;
-    instanceLock_.active = false;
-
+    if (!owner_.getSocket()) return;
     network::Packet resp(wireOpcode(Opcode::CMSG_INSTANCE_LOCK_RESPONSE));
     resp.writeUInt8(accept ? 1 : 0);
     owner_.getSocket()->send(resp);
-
     LOG_INFO("CMSG_INSTANCE_LOCK_RESPONSE: ", accept ? "accepted" : "declined");
-    owner_.fireAddonEvent("INSTANCE_LOCK_STOP", {});
+}
+
+// 0x513B20: a positive time starts the prompt (INSTANCE_LOCK_START), zero
+// ends it (INSTANCE_LOCK_STOP).
+void SocialHandler::setInstanceLock(uint32_t timerMs, uint32_t completedMask, bool previouslySaved) {
+    if (timerMs > 0) {
+        instanceLock_.active = true;
+        instanceLock_.secondsLeft = static_cast<float>(timerMs) / 1000.0f;
+        instanceLock_.previouslySaved = previouslySaved;
+        instanceLock_.completedEncounterMask = completedMask;
+        owner_.fireAddonEvent("INSTANCE_LOCK_START", {});
+    } else {
+        instanceLock_ = InstanceLockPrompt{};
+        owner_.fireAddonEvent("INSTANCE_LOCK_STOP", {});
+    }
 }
 
 void SocialHandler::resetTransferState() {
     instanceLock_ = InstanceLockPrompt{};
-    encounterUnitGuids_.fill(0);
+    encounterUnits_.clear();
     raidTargetGuids_.fill(0);
 }
 

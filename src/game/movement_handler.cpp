@@ -2817,6 +2817,7 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
         owner_.addonEventCallbackRef()("PLAYER_ENTERING_WORLD", {"0"});
         owner_.addonEventCallbackRef()("ZONE_CHANGED_NEW_AREA", {});
     }
+    owner_.battlefieldWorldEntered();
 }
 
 // ============================================================
