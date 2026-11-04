@@ -230,6 +230,12 @@ struct M2ModelGPU {
     bool isFoliageLike = false;     // Model name matches foliage/tree/bush/grass etc (precomputed)
     bool isElvenLike = false;       // Model name matches elf/elven/quel (precomputed)
     bool isLanternLike = false;     // Model name matches lantern/lamp/light (precomputed)
+    /// The batches that throw a local light (glowCardLike and lanternGlowHint),
+    /// in batch order, and whether the name says chandelier: set once the
+    /// batches are built, so the per-frame light gather walks these and
+    /// nothing else (M2Renderer::gatherLocalLights).
+    std::vector<uint32_t> localLightBatches;
+    bool isChandelier = false;
     bool isKoboldFlame = false;     // Model name matches kobold+(candle/torch/mine) (precomputed)
     bool isLavaModel = false;       // Model name contains lava/molten/magma (UV scroll fallback)
     /// The model's own point lights (M2Light type 1), what the stock client

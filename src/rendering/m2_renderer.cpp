@@ -205,8 +205,25 @@ uint32_t M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
     candidates.clear();
 
     // Only the instances whose model gives light, kept in a list of their
-    // own; this walked every instance in the world each frame.
-    for (size_t li : lightInstanceIndices_) {
+    // own; this walked every instance in the world each frame. Most of what
+    // is left is waiting on memory - each instance, then its model, is a
+    // cache miss (a city lists a few thousand) - so both are fetched ahead,
+    // the instance sixteen entries before it is reached and its model eight.
+    const size_t lightCount = lightInstanceIndices_.size();
+    for (size_t k = 0; k < lightCount; ++k) {
+        if (k + 16 < lightCount && lightInstanceIndices_[k + 16] < instances.size()) {
+            const auto& ahead = instances[lightInstanceIndices_[k + 16]];
+            __builtin_prefetch(&ahead.cachedModel);
+            __builtin_prefetch(&ahead.cachedCullCenter);
+        }
+        if (k + 8 < lightCount && lightInstanceIndices_[k + 8] < instances.size()) {
+            if (const M2ModelGPU* m = instances[lightInstanceIndices_[k + 8]].cachedModel) {
+                __builtin_prefetch(&m->isTorch);
+                __builtin_prefetch(&m->isLanternLike);
+                __builtin_prefetch(&m->stockPointLights);
+            }
+        }
+        const size_t li = lightInstanceIndices_[k];
         if (li >= instances.size()) continue;
         const auto& instance = instances[li];
         const M2ModelGPU* model = instance.cachedModel;
@@ -236,8 +253,8 @@ uint32_t M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
         }
 
         bool hasBatchLight = false;
-        for (const auto& batch : model->batches) {
-            if (!batch.glowCardLike || !batch.lanternGlowHint) continue;
+        for (uint32_t bi : model->localLightBatches) {
+            const auto& batch = model->batches[bi];
 
             glm::vec3 worldPos;
             if (model->isGroundFire &&
@@ -297,9 +314,7 @@ uint32_t M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
                 const glm::vec3 delta = worldPos - cameraPos;
                 const float distSq = glm::dot(delta, delta);
                 if (distSq <= 300.0f * 300.0f) {
-                    const bool chandelier =
-                        model->name.find("Chandelier") != std::string::npos ||
-                        model->name.find("chandelier") != std::string::npos;
+                    const bool chandelier = model->isChandelier;
                     // A hearth or campfire throws light much further than a
                     // candle, and burns oranger than a lamp wick.
                     float radius    = chandelier ? 10.0f : 5.0f;
@@ -3104,6 +3119,14 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     for (const auto& b : gpuModel.batches) {
         if (b.submeshLevel < 8) gpuModel.availableLODs |= (1u << b.submeshLevel);
     }
+
+    gpuModel.localLightBatches.clear();
+    for (uint32_t b = 0; b < gpuModel.batches.size(); ++b) {
+        if (gpuModel.batches[b].glowCardLike && gpuModel.batches[b].lanternGlowHint)
+            gpuModel.localLightBatches.push_back(b);
+    }
+    gpuModel.isChandelier = gpuModel.name.find("Chandelier") != std::string::npos ||
+                            gpuModel.name.find("chandelier") != std::string::npos;
 
     registerRtModel(gpuModel, model);
     models[modelId] = std::move(gpuModel);

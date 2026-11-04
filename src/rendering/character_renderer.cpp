@@ -35,6 +35,7 @@
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/frustum.hpp"
+#include "rendering/shadow_cache.hpp"
 #include "rendering/anim_cull.hpp"
 #include "rendering/shadow_draw_list.hpp"
 #include "rendering/m2_model_classifier.hpp"
@@ -4402,7 +4403,8 @@ bool CharacterRenderer::uploadBones(CharacterInstance& inst, uint32_t frameIndex
 
 void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
                                      const glm::vec3& shadowCenter, float shadowRadius,
-                                     std::vector<glm::vec4>* casterSpheres) {
+                                     std::vector<glm::vec4>* casterSpheres,
+                                     const ShadowReceiverView* seen) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
     if (instances.empty() || models.empty()) return;
     if (boneDescPool_ == VK_NULL_HANDLE || boneSetLayout_ == VK_NULL_HANDLE) return;
@@ -4458,7 +4460,7 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
     // Which set is bound at 0 right now, so a run of opaque batches does not
     // rebind the same fallback for each one.
     VkDescriptorSet currentTexSet = VK_NULL_HANDLE;
-    uint64_t walked = 0, inRange = 0, lightCulled = 0, drawn = 0, boneCopies = 0, boneReuses = 0;
+    uint64_t walked = 0, inRange = 0, lightCulled = 0, viewCulled = 0, drawn = 0, boneCopies = 0, boneReuses = 0;
     const auto castShadow = [&](CharacterInstance& inst) {
         ++walked;
         if (!inst.visible) return;
@@ -4521,6 +4523,17 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
                 ++lightCulled;
                 return;
             }
+        }
+        // A unit whose shadow cannot reach anything the camera sees (behind
+        // it, mostly) is left out: no bones copied, no draws, no mask cells.
+        // It counts as cast, so the blob does not stand in for it either -
+        // the blob lies at its feet, inside the same capsule. A yard more for
+        // the filter's reach and the receivers' offsets.
+        if (seen && !inst.isSceneModel && maskRadius < 1e3f &&
+            !shadowCasterSeen(*seen, maskCentre, maskRadius + 1.0f)) {
+            ++viewCulled;
+            inst.sunShadowStamp = sunShadowStamp_;
+            return;
         }
 
         // Ensure bone SSBO is allocated and upload bone matrices
@@ -4712,13 +4725,15 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
         p.walked += walked;
         p.inRange += inRange;
         p.lightCulled += lightCulled;
+        p.viewCulled += viewCulled;
         p.drawn += drawn;
         p.boneCopies += boneCopies;
         p.boneReuses += boneReuses;
         if (++p.frames >= 600) {
             LOG_WARNING("  character shadow: ", p.walked / p.frames, " walked, ",
                         p.inRange / p.frames, " in range, ", p.lightCulled / p.frames,
-                        " outside the light's box, ", p.drawn / p.frames, " drawn per frame; bones copied ",
+                        " outside the light's box, ", p.viewCulled / p.frames,
+                        " cast out of view, ", p.drawn / p.frames, " drawn per frame; bones copied ",
                         p.boneCopies / p.frames, ", already in place ", p.boneReuses / p.frames);
             p = ShadowProfile{};
         }
@@ -6292,7 +6307,8 @@ namespace wowee {
 namespace rendering {
 
 void CharacterRenderer::collectUnitBlobs(const glm::vec3& cameraPos, float maxDist, size_t maxCount,
-                                         std::vector<BlobSource>& out, bool skipSunShadowCasters) const {
+                                         std::vector<BlobSource>& out, bool skipSunShadowCasters,
+                                         const Frustum* view) const {
     out.clear();
     std::vector<std::pair<float, BlobSource>> found;
     const float maxSq = maxDist * maxDist;
@@ -6326,6 +6342,15 @@ void CharacterRenderer::collectUnitBlobs(const glm::vec3& cameraPos, float maxDi
         b.halfZ = (clamp5(hi.z * s) - clamp5(lo.z * s)) * 0.5f;
         b.alpha = std::clamp(inst.opacity, 0.0f, 1.0f);
         if (b.halfX <= 0.01f || b.halfY <= 0.01f || b.halfZ <= 0.01f) continue;
+        // The blob is draped over the floor within its box round the feet
+        // (OverlaySystem::renderUnitBlobs): a lattice r across and from
+        // 1.67 halfZ below the feet to halfZ above. A sphere round the feet
+        // holds all of it, with a yard over for the lattice's rounding.
+        if (view) {
+            const float r = std::sqrt(b.halfX * b.halfX + b.halfY * b.halfY);
+            const float down = 1.6667f * b.halfZ;
+            if (!view->intersectsSphere(b.feet, std::sqrt(r * r + down * down) + 1.0f)) continue;
+        }
         found.emplace_back(distSq, b);
     }
     std::sort(found.begin(), found.end(),

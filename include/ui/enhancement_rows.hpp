@@ -144,8 +144,12 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPage, .section = "",
      .tooltip = "Gives bricks, cobbles and planks real depth when seen at an\n"
                 "angle, so mortar lines sink and stones stand out.",
-     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "pom",
-     .controls = "the parallax march in wmo .frag",
+     // Off in the recommended set (enhancements-plan.md 3.11): about a
+     // millisecond of the scene pass in the Trade District and Goldshire even
+     // eased out past 25-45 yards, the same at every step count, for relief a
+     // few centimetres deep - the whole set's 3 ms budget had no room for it.
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "pom",
+     .controls = "the parallax march in wmo.frag and character.frag, eased out between 25 and 45 yards",
      .restartNote = "Turning this on reaches buildings loaded from now on;\nrestart to see it everywhere.",
      .asBool = &Enhancements::parallax},
     {.key = "parallaxquality", .label = "Surface depth quality", .kind = SettingKind::Enum,
@@ -425,7 +429,12 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .tooltip = "Fire, smoke, spell clouds and spray fade out where they meet\n"
                 "the ground or a wall, instead of cutting a hard line through\n"
                 "it. Off is the original edge.",
-     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "soft_particles",
+     // Off in the recommended set (enhancements-plan.md 3.11): its late pass
+     // is a few hundred draws recorded on the main thread after the scene,
+     // 0.15-0.25 ms of main-thread time, which with the shadows' unit map and
+     // the light gather put the set over its 0.5 ms; nothing else in the set
+     // buys as little for its time.
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "soft_particles",
      .controls = "the late particle pass (SoftParticlePass: a single-sample pass "
                  "after the scene that reads its depth) and the soft particle "
                  "pipelines; off draws every particle in the scene pass as stock",

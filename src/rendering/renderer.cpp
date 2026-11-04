@@ -11,6 +11,7 @@
 #include "rendering/sky_params_from_lighting.hpp"
 #include "core/coordinates.hpp"
 #include "rendering/camera.hpp"
+#include "rendering/frustum.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/terrain_renderer.hpp"
 #include "rendering/terrain_manager.hpp"
@@ -1479,9 +1480,13 @@ void Renderer::updateUnitBlobs() {
             std::vector<CharacterRenderer::BlobSource> src;
             // Stock has no distance cut-off; past 150 yards a blob is a few
             // pixels under the fog, and 128 is more units than a city holds
-            // on screen.
+            // on screen. Only the blobs in view are taken: one outside it
+            // draws nothing, and its floor samples were most of this pass's
+            // main-thread time.
+            Frustum view;
+            view.extractFromMatrix(camera->getViewProjectionMatrix());
             characterRenderer->collectUnitBlobs(camera->getPosition(), 150.0f, 128, src,
-                                                /*skipSunShadowCasters=*/shadowsEnabled);
+                                                /*skipSunShadowCasters=*/shadowsEnabled, &view);
             blobs.reserve(src.size());
             for (const auto& b : src) {
                 blobs.push_back({.feet = b.feet, .forward = b.forward, .halfX = b.halfX,
@@ -5861,8 +5866,31 @@ void Renderer::renderShadowPass() {
         nearCasterSpheres_.clear();
         beginShadowTarget(shadowNearImage[frame], shadowNearView[frame], shadowNearFramebuffer[frame],
                           SHADOW_NEAR_SIZE, shadowNearLayout_[frame], true);
+        // Where the camera can see the units' shadows: a unit whose shadow
+        // falls wholly outside the view is not drawn (shadowCasterSeen).
+        // Receivers are taken to lie no more than 40 yards below the lowest
+        // of the camera, the player and the unit, and no further along the
+        // ray than the map's depth. Not with the water's reflection on, which
+        // sees what the camera does not.
+        static const bool viewCull = core::envFlagEnabled("WOWEE_UNIT_SHADOW_VIEW_CULL", true);
+        ShadowReceiverView seen;
+        const bool useSeen = viewCull && camera && !enh_.waterReflections;
+        if (useSeen) {
+            Frustum f;
+            f.extractFromMatrix(camera->getViewProjectionMatrix());
+            for (int i = 0; i < 6; ++i) {
+                const Plane& pl = f.getPlane(static_cast<Frustum::Side>(i));
+                seen.planes[i] = glm::vec4(pl.normal, pl.distance);
+            }
+            seen.sunRay = shadowRayDirection();
+            seen.floorZ = std::min(camera->getPosition().z, characterPosition.z) - 40.0f;
+            seen.maxReach = 2.0f * std::max(2.0f * np.halfExtent, 300.0f);
+        }
         if (characterRenderer && casts("characters")) {
-            timed("shadow/characters", [&] { characterRenderer->renderShadow(currentCmd, np.matrix, np.center, nearCull, &nearCasterSpheres_); });
+            timed("shadow/characters", [&] {
+                characterRenderer->renderShadow(currentCmd, np.matrix, np.center, nearCull, &nearCasterSpheres_,
+                                                useSeen ? &seen : nullptr);
+            });
         }
         nearSphereSplit_[0] = static_cast<uint32_t>(nearCasterSpheres_.size());
         if (m2Renderer && casts("m2")) {

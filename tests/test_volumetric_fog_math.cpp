@@ -11,6 +11,7 @@
 #include "rendering/volumetric_fog_math.hpp"
 
 #include <glm/glm.hpp>
+#include <vector>
 #include <glm/gtc/matrix_transform.hpp>
 
 using wowee::rendering::froxelCornerRays;
@@ -78,4 +79,31 @@ TEST_CASE("the corner rays are one yard deep and span the screen the right way u
     CHECK(rays[1].z > 0.0f);
     CHECK(rays[2].z < 0.0f);
     CHECK(rays[3].z < 0.0f);
+}
+
+TEST_CASE("Fog inject groups cover every cell once, one slice parity a group", "[volumetric_fog]") {
+    using wowee::rendering::fogInjectCell;
+    // Low, Medium and High (volumetric_fog.cpp sizeForQuality).
+    const glm::uvec3 sizes[] = {{96, 54, 64}, {128, 72, 48}, {240, 135, 96}};
+    for (const glm::uvec3& size : sizes) {
+        REQUIRE(size.z % 8u == 0u);
+        const glm::uvec3 groups((size.x + 3u) / 4u, (size.y + 3u) / 4u, (size.z + 3u) / 4u);
+        std::vector<int> hits(static_cast<size_t>(size.x) * size.y * size.z, 0);
+        for (uint32_t gz = 0; gz < groups.z; ++gz)
+            for (uint32_t gy = 0; gy < groups.y; ++gy)
+                for (uint32_t gx = 0; gx < groups.x; ++gx) {
+                    int parity = -1;
+                    for (uint32_t lz = 0; lz < 4; ++lz)
+                        for (uint32_t ly = 0; ly < 4; ++ly)
+                            for (uint32_t lx = 0; lx < 4; ++lx) {
+                                const glm::uvec3 c = fogInjectCell({gx, gy, gz}, {lx, ly, lz});
+                                REQUIRE(c.z < size.z);
+                                if (parity < 0) parity = static_cast<int>(c.z & 1u);
+                                REQUIRE(static_cast<int>(c.z & 1u) == parity);
+                                if (c.x >= size.x || c.y >= size.y) continue;
+                                ++hits[(static_cast<size_t>(c.z) * size.y + c.y) * size.x + c.x];
+                            }
+                }
+        for (int h : hits) REQUIRE(h == 1);
+    }
 }

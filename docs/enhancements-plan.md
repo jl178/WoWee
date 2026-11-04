@@ -97,7 +97,7 @@ The reasons follow the table.
 | 6 | Lens flare | `lens_flare.cpp` | `lensflare` | 1.0 | 0 | 0 |
 | 7 | Sharp point stars | `starfield.cpp` | `sharpstars` | on | off | off (taste; see note) |
 | 8 | Generated normal maps | `normal_map.cpp`, wmo/m2/terrain .frag | `normalmapping`, `normalmapstrength` | on, 0.8 | off | on, per Jered's stated preference (note) |
-| 9 | Generated parallax | same | `parallax`, `parallaxquality` | on, Medium | off | follows 8 |
+| 9 | Generated parallax | same | `parallax`, `parallaxquality` | on, Medium | off | off since 3.11 (about 1 ms of the set's 3); was "follows 8" |
 | 10 | Shoreline foam | `water.frag` (`shorelineFoam`), depth copy | `shorelinefoam` | on | off | on |
 | 11 | Wet ground in rain | `wet_surface.glsli` | `wetground` | on | off | on |
 | 12 | Sky reflection on water | `water.frag`, reflection pass | `waterreflections` | off | **not set** | off (open decision for Jered) |
@@ -510,6 +510,171 @@ map with shadows on (`Renderer::updateUnitBlobs`), which moves the set's
 CPU; the set wants measuring again once that lands, before anything else
 is added.
 
+### 3.11 The set brought back toward budget (2026-11-04)
+
+Measured as 3.5 (Iris Xe, a 1251x986 window - a window the compositor
+narrowed is dropped, Ultra quality columns, noon, the camera and clock set
+again before every row), each row flipped in place on a 4 s period, three
+cycles a row and eight for the whole set (scratch `budget/rows_final.lua`),
+at Stormwind's Trade District, Goldshire and Dalaran, each place run with
+the build before this work and then the one after, back to back. The night
+was not quiet: other agents built and ran clients throughout (load 4-20).
+Windows within 10 s of a compiler or another client running are dropped
+(`budget/pool.py`), and a run that shared the GPU for more than a minute
+was run again. A compile on the CPU moved a GPU window from 15 to 60-90 ms,
+which is why. GPU is the summed pass timestamps; CPU is the renderer's
+main-thread stages and, beside it, the frame's own CPU time (`cpu_med`, the
+frame less its waits); ms, paired median ± standard error.
+
+Goldshire's camera does not land the same way every run, even set again
+before each row: some runs look west down the road into the low part of
+the sun through the trees, some at the inn. The two are different
+measurements - stock draws the road view in 11-12 ms of GPU, the inn in
+about 8 - and the screenshot each run takes says which; every Goldshire
+pair below is the road view unless marked. Earlier sittings' Goldshire
+figures (3.5-3.10) are a mix of the two.
+
+Whole recommended set against stock:
+
+| | Stormwind GPU / CPU (cpu_med) | Goldshire road GPU / CPU (cpu_med) | Dalaran GPU / CPU (cpu_med) |
+|---|---|---|---|
+| Before (7da25aa) | +4.13 ±0.10 / +0.62 (+0.54) | +7.16 ±0.38 / +0.62 (+0.50) | +2.46 ±0.35 / +1.30 (+1.06) |
+| After the changes below, same set | +2.94 ±0.14 / +0.66 (+0.48 to +0.63) | +6.45 ±0.31 / +0.50 (+0.32) | +2.56 ±0.14 / +0.86 (+0.87) |
+| After, the new recommended set (soft particles and parallax off) | +1.34 ±0.14 / +0.48 (+0.49) | +6.73 ±0.32 / +0.34 (+0.21) | +1.37 ±0.46 / +0.55 (+0.57) |
+| Same sitting, the build before (old set), for comparison | +5.07 ±0.26 / +0.87 (+0.99) | +8.03 ±0.39 / +0.71 (+0.55) | +2.00 ±0.33 / +0.98 (+0.79) |
+
+The last two rows are the whole set alone, fifteen 4 s cycles each, the two
+builds run one after the other in each place (`budget/rows_v.lua`); the
+Goldshire pair both landed on the road view. One earlier pair landed the
+build before on the inn view (+3.64 / +0.61) - the view, not the build,
+is most of Goldshire's figure.
+
+Per row (GPU / CPU stages, ms; "-" not measured after a window was dropped).
+Single rows read within about ±0.6 ms of GPU and ±0.15 ms of CPU of nothing
+in Stormwind and Dalaran - rows that cannot cost anything (low health
+warning in full health, wet ground in dry weather) read that much - and
+within ±1.5 in Goldshire, whose road view swings by 3 ms on a ~16 s cycle of
+its own; only the whole-set rows and the rows marked are outside that:
+
+| Row | Stormwind before | after | Goldshire road before | after | Dalaran before | after |
+|---|---|---|---|---|---|---|
+| `shadows` | +1.77 / +0.07 | +0.90 / +0.07 | +1.71 / +0.21 | +1.14 / +0.18 | +1.76 / +0.47 | +1.10 / -0.03 |
+| `shadowfilter` | +0.25 / -0.08 | +0.67 / +0.00 | +0.26 / -0.10 | -1.62 / -0.06 | -2.02 / -0.00 | +0.75 / +0.10 |
+| `locallights` | -0.67 / -0.04 | -1.15 / +0.18 | +1.95 / +0.18 | +1.24 / -0.02 | -3.30 / +0.31 | -3.61 / +0.01 |
+| `lightflicker` | +1.14 / +0.04 | +0.41 / -0.00 | -1.98 / -0.26 | +0.31 / +0.00 | +7.96 / +2.38 | +0.90 / +0.10 |
+| `normalmapping` | +0.88 / -0.03 | +0.82 / +0.24 | -0.30 / +0.33 | -0.14 / +0.03 | +0.07 / -0.26 | +1.00 / -0.03 |
+| `parallax` | +1.81 / -0.32 | +1.10 / +0.07 | +1.52 / -0.22 | -0.05 / -0.04 | +0.33 / +0.00 | +1.38 / -0.06 |
+| `lightshafts` | +1.20 / +0.25 | +1.24 / +0.13 | +2.26 / +0.12 | -0.32 / +0.02 | +0.33 / +0.12 | +1.96 / +0.06 |
+| `sunshafts` | -0.05 / +0.19 | +0.40 / +0.16 | +0.70 / -0.02 | -1.21 / -0.24 | -2.97 / +0.32 | +0.79 / +0.13 |
+| `lensflare` | -0.50 / -0.07 | -0.40 / -0.04 | +0.31 / +0.21 | -1.46 / -0.19 | +0.24 / -0.01 | +0.32 / +0.11 |
+| `sharpstars` | +0.34 / +0.13 | -0.63 / +0.08 | -0.49 / +0.01 | -0.82 / +0.30 | -0.82 / +0.58 | +0.44 / +0.19 |
+| `streamfadein` | -0.08 / -0.10 | -0.42 / +0.15 | -2.03 / +0.02 | -1.59 / +0.26 | +1.34 / +0.29 | +0.44 / -0.24 |
+| `horizondetail` | +0.15 / -0.14 | -0.52 / +0.13 | -0.33 / +0.06 | -1.17 / -0.08 | +3.16 / +0.21 | -0.01 / +0.23 |
+| `shorelinefoam` | +0.71 / -0.12 | +0.57 / +0.19 | +1.07 / -0.01 | -1.07 / +0.06 | +1.68 / -0.43 | +0.45 / -0.47 |
+| `wetground` | +0.31 / +0.05 | +0.39 / +0.07 | +1.32 / +0.21 | -1.31 / +0.00 | +3.08 / +0.17 | - |
+| `watersplashes` | -0.61 / -0.04 | +0.27 / +0.23 | +0.91 / +0.12 | -1.33 / +0.18 | -4.42 / +0.29 | - |
+| `rainripples` | -0.85 / +0.10 | +0.37 / +0.06 | +0.13 / -0.25 | -1.13 / +0.05 | -3.37 / +0.19 | - |
+| `weatherwind` | -0.65 / +0.15 | +0.20 / -0.04 | -1.10 / -0.24 | -1.07 / +0.03 | +0.55 / +0.04 | - |
+| `foliagewind` | -0.05 / -0.07 | +0.25 / +0.10 | -1.93 / -0.14 | -0.49 / -0.05 | -3.97 / -0.52 | - |
+| `foliagepush` | -0.40 / +0.11 | +0.40 / +0.09 | -0.11 / -0.00 | -0.79 / +0.13 | -2.24 / +0.14 | - |
+| `boatbob` | +0.79 / -0.14 | +0.26 / +0.19 | +0.27 / -0.23 | -1.15 / +0.33 | -2.93 / -0.02 | - |
+| `mountdust` | +0.74 / +0.02 | +0.38 / -0.12 | +0.82 / -0.16 | - | +0.89 / +0.14 | - |
+| `corpsesettle` | +0.25 / -0.07 | +0.28 / +0.06 | +0.85 / +0.22 | - | +1.89 / +0.38 | - |
+| `secondarymotion` | -0.07 / -0.14 | +0.50 / +0.32 | +0.65 / -0.08 | - | -0.64 / +3.03 | - |
+| `remotesmoothing` | -0.11 / +0.09 | +0.35 / +0.09 | -1.00 / +0.20 | - | -2.68 / -0.13 | - |
+| `footplacement` | -0.43 / +0.18 | +0.42 / +0.06 | -1.78 / +0.08 | - | -1.72 / +0.07 | - |
+| `smoothzoom` | +0.02 / -0.02 | +0.47 / +0.27 | -0.64 / -0.27 | - | +1.91 / -0.22 | - |
+| `smoothleaves` | +0.05 / +0.12 | +0.33 / +0.31 | +0.98 / +0.27 | +0.41 / -0.04 | +5.87 / +0.40 | - |
+| `softparticles` | +0.52 / +0.18 | +0.35 / +0.27 | +1.76 / +0.13 | +0.47 / +0.04 | +9.11 / +1.61 | - |
+| `lowhealthvignette` | +0.75 / +0.05 | +0.47 / +0.21 | +1.12 / -0.12 | - | +9.41 / +0.64 | - |
+
+Dalaran's "before" single rows are mostly scatter: its scene pass sat at
+70-120 ms for stretches of that run in both states alike (as in 3.10); its
+"after" rows past `sunshafts` fell in windows dropped for a compile. The rows
+that stand out of the scatter where the view is steady: the sun shadows
+(Stormwind +1.8 -> +0.9, Dalaran +1.8 -> +1.1), parallax (Stormwind +1.8 ->
++1.1), the light shafts (+1.2, of which the inject 0.7 -> 0.3), the local
+lights in Goldshire's road view (+1.2 to +2.0) and soft particles' CPU
+(+0.15 to +0.27).
+
+What changed (each keeps the picture, except the last two):
+
+- **The mist's inject pass** (`volumetric_fog_inject.comp.glsl`): a 4x4x4
+  group now takes four slices of one parity out of eight (`fogInjectCell`
+  in `volumetric_fog_math.hpp`, tested in `test_volumetric_fog_math`), so
+  on a half-rate frame the carried slices are whole groups and return
+  before the light gather, and the gather builds a 64-bit mask with shared
+  atomics instead of one lane listing the lights while 63 wait. A cell walks
+  the same lights in the same order as before, so it adds the same terms.
+  The dispatch is unchanged. Inject 0.57-0.69 ms -> 0.27-0.34 in all three
+  places.
+- **The unit map draws only units whose shadow can be seen**
+  (`shadowCasterSeen`, `shadow_cache.hpp`, `test_shadow_cache`). A unit's
+  shadow lies in the capsule its bounds sweep down the sun's rays; one
+  whose capsule is wholly behind a plane of the camera's frustum shades
+  nothing on screen and is left out, counting as cast so the blob does not
+  stand in for it. Receivers are taken to lie no more than 40 yards below
+  the lowest of camera, player and unit; not with water reflections on;
+  `WOWEE_UNIT_SHADOW_VIEW_CULL=0` draws them all. In the Trade District 19-31
+  of the 64 nearest are left out: `shadow/characters` 0.27-0.29 ->
+  0.19-0.21 ms, 0.33 -> 0.24 in Dalaran.
+- **The light gather** (`M2Renderer::gatherLocalLights`) walks each model's
+  light batches from a list made at load (`localLightBatches`) and tests
+  the chandelier name once at load, and fetches each light instance and its
+  model a few entries ahead: the walk over a few thousand of them was
+  waiting on memory (perf: two loads, the instance's model pointer and the
+  model's flags, took most of it). Same lights, same order.
+  `record+ubo` 0.17 -> 0.12 in Stormwind, 0.31 -> 0.20 in Dalaran.
+- **Unit blobs** are taken only for units whose blob is in view, before the
+  128 nearest are chosen: the floor samples of blobs behind the camera were
+  most of the blob pass (`renderSelectionCircle` was 11% of Dalaran's main
+  thread). This is cheaper in stock as well, so it barely moves the set's
+  difference.
+- **The soft particles' late pass** sets its texture and constants only
+  when a run changes them. Recording the pass on a worker was tried and
+  given up: the job can start only once the M2 worker has written the
+  particle records, and the main thread then waits on it at the late pass.
+- **Parallax eases out between 25 and 45 yards** (wmo.frag, character.frag):
+  its shift is under a pixel or two there. Its cost did not depend on the
+  step count (Low and Medium the same, +1.97 against +1.98 in Stormwind,
+  15 pairs each); the trace on every far wall was the cost. Stormwind
+  +1.8-2.3 -> +1.1.
+- **Recommended defaults: soft particles and parallax off.** With the above
+  the set was inside 3 ms of GPU in Stormwind (+2.94) but not inside 0.5 ms
+  of CPU (+0.66, cpu_med +0.48-0.63), and Dalaran's CPU was +0.86. The soft
+  particles' late pass is 0.15-0.25 ms of main-thread time for edges where
+  smoke meets a wall; parallax about a millisecond of scene pass in
+  Stormwind and Goldshire for relief a few centimetres deep, and 2.1 #9 had
+  it only following the normal maps. Both rows stay, off; the quality
+  presets keep their own values.
+
+Still over, and what it would take:
+
+- **Goldshire's road view is over on GPU** (+6.7 ms, against 3; the inn
+  view was +3.6 before this work and was not caught again after). Per row it
+  shows the local lights (+1.2 ±0.3, the tile walk over a forest's overdraw
+  of leaves at noon), the sun shadows (+1.1 ±0.4), soft particles (+0.5),
+  smooth leaf edges (+0.4) and the mist's inject (+0.3), about 3.5 ms
+  together; the rest of the whole-set difference shows in no single row.
+  The likeliest reading is the iGPU running slower under the whole set's
+  load than under any one row's (it shares its power with the CPU), which
+  per-row A/B cannot see; logging `gt_act_freq_mhz` beside each window
+  would say. Fitting 3 ms in this view would take the local lights or the
+  sun shadows out of the set; that is Jered's call (section 6).
+- **Dalaran is just over on CPU** (+0.55, frame CPU +0.57; +0.86 before
+  the default change): the unit map's recording (0.32), the light gather
+  (0.20) and the motion rows on the main thread (`renderer->update`,
+  `update/characters`, footfalls: 0.25 together). Next: record the unit map's character draws on a worker with
+  the scene's secondaries (the render graph would have to open the shadow
+  pass after the join), and keep the gather's light positions between
+  frames for fixtures whose bones do not move.
+- Not done from the list in the brief: the world map's redraw cadence (a
+  redraw every ~20 s standing in a city, three frames each - not where the
+  time is), the unit map's size (its sampling is in marked cells only), and
+  sharing the blob floor cache with the corpse and foot reads (in the set the
+  blobs are for units past the unit map's reach and the feet within 30
+  yards, so they never ask for the same floor).
+
 ## 4. Proposed enhancements
 
 Ranked by feel gained over cost and risk. "Cost" is implementation effort
@@ -519,7 +684,7 @@ the classic look or the stock behaviour.
 | Rank | Id | Name | Feel | Cost | Risk | Default |
 |---|---|---|---|---|---|---|
 | 1 | E1 | Stock blob, then shadow-map units (S1) | high | M | low | map on |
-| 2 | E4 | Soft particles | high | S | low | on |
+| 2 | E4 | Soft particles | high | S | low | off since 3.11 (main-thread CPU) |
 | 3 | E2 | Streaming fade-in | high | S | low | on |
 | 4 | E3 | Shadow quality: cascades and soft edges | high | M | low | on |
 | 5 | E5 | Rain ripples on water and puddles | medium | S | low | on |
@@ -678,7 +843,8 @@ stock, the budget, and how to verify.
   Peninsula smoke columns: A/B shots. Mod2x particles must still fold to
   grey, not to black, at the fade.
 - **Status (2026-11-03): done, row `softparticles` "Soft particles",
-  recommended on.** Built differently from the plan: no depth copy. With
+  recommended on; off in the recommended set since 3.11 (its late pass is
+  0.15-0.25 ms of main-thread time, over the set's CPU budget).** Built differently from the plan: no depth copy. With
   the row on, the scene pass draws only the particles that write depth
   (blend 0 and 1) and uploads the glow halos without drawing them; the
   blended runs and the halos are drawn in a *late particle pass*
@@ -1334,7 +1500,16 @@ The rest (E6, E9, E11-E22) waits for after Friday. Each new item goes into
 ## 6. For Jered to decide
 
 - Generated normal maps and parallax on by default (2.1 #8, #9): keep, or
-  default off for the painted look?
+  default off for the painted look? (Parallax and soft particles are off in
+  the recommended set since 3.11, for the budget; either can come back at
+  about 1 ms of GPU and 0.2 ms of CPU respectively.)
+- The set is inside its budget in the Trade District (+1.3 ms / +0.5 ms,
+  3.11) but still over in two places: Goldshire's road view on GPU (+6.7 ms;
+  the local lights and the sun shadows are the rows that show, about 1.2 ms
+  each) and, just, Dalaran on CPU (+0.55: the unit map's recording, the
+  light gather). Raise the budget for those places, take the local
+  lights or the sun shadows out of the recommended set, or wait for the
+  recording work listed there?
 - Volumetric mist, sun shafts, lens flare and sharp stars off on a fresh
   install, on from High: agree?
 - Water sky reflection (stock has none): stays off by default.

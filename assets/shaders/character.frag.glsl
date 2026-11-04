@@ -355,11 +355,13 @@ void main() {
         TBN = mat3(T, B, vertexNormal);
     }
 
-    if (usePOM) {
+    // Eased out between 25 and 45 yards, as on buildings (wmo.frag).
+    float pomFade = 1.0 - smoothstep(25.0, 45.0, length(viewPos.xyz - FragPos));
+    if (usePOM && pomFade > 0.0) {
         mat3 TBN_inv = transpose(TBN);
         vec3 viewDirWorld = normalize(viewPos.xyz - FragPos);
         vec3 viewDirTS = TBN_inv * viewDirWorld;
-        finalUV = parallaxOcclusionMap(TexCoord, viewDirTS, lodFactor, pomScale);
+        finalUV = parallaxOcclusionMap(TexCoord, viewDirTS, lodFactor, pomScale * pomFade);
     }
 
     vec4 texColor = textureGrad(uTexture, finalUV, uvDx, uvDy);

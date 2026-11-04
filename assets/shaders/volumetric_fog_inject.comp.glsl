@@ -9,7 +9,20 @@
 // so a shadow edge between two cells resolves over a few frames instead of
 // stepping from one cell to the next.
 
+// A group is 4x4 cells across and four slices deep - every other slice of
+// eight (groupCell): the slices carried from last frame (vol.dims.w) are
+// then whole groups, which return before the light gather. The volume's
+// depth is a multiple of eight at every quality (volumetric_fog.cpp).
 layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+// The cell an invocation lights (fogInjectCell in volumetric_fog_math.hpp
+// mirrors this, tested). Group z = 2b + p takes slices 8b + p,
+// 8b + p + 2, 8b + p + 4 and 8b + p + 6: every slice once, and the four in a
+// group of one parity.
+ivec3 groupCell(uvec3 group, uvec3 local) {
+    uint z = 8u * (group.z >> 1) + (group.z & 1u) + 2u * local.z;
+    return ivec3(group.xy * 4u + local.xy, z);
+}
 
 layout(set = 0, binding = 0) uniform PerFrame {
     mat4 view;
@@ -115,26 +128,26 @@ float sunVisibility(vec3 p) {
 }
 
 // The local lights that reach any cell of this workgroup, in their original
-// order. A group is a 4x4x4 block of cells, a small chunk of the frustum, and
-// a torch's reach is a dozen yards: of the sixty-odd lights a city gathers, a
-// block sees a handful. Testing every light against every cell was most of
-// the pass. A light is dropped only where it is certain to miss every point
-// in the block, and the cells walk what is left in the same order, so the sum
-// each cell adds up is the one it added before, term for term.
-shared uint sLightCount;
-shared uint sLightHit[64];
-shared uint sLightList[64];
+// order. A group is a block of 4x4 cells over seven slices, a small chunk of
+// the frustum, and a torch's reach is a dozen yards: of the sixty-odd lights a
+// city gathers, a block sees a handful. Testing every light against every
+// cell was most of the pass. A light is dropped only where it is certain to
+// miss every point in the block, and the cells walk what is left in the same
+// order - the set bits of a 64-bit mask, lowest first - so the sum each cell
+// adds up is the one it added before, term for term.
+shared uint sLightMask[2];
 
 void gatherGroupLights() {
     uint lane = gl_LocalInvocationIndex;   // 64 invocations, one light each
     uint count = uint(clamp(localLightMeta.x, 0, 64));
+    if (lane < 2u) sLightMask[lane] = 0u;
 
     // The block's sample points lie inside the cells it covers, whose corners
     // span these uv and depth ranges. Rays one yard deep through a rectangle
     // of uv lie on one plane, so the block is a frustum slab: the convex hull
     // of its eight corners, which a sphere around those corners contains.
-    vec3 lo = vec3(gl_WorkGroupID * gl_WorkGroupSize);
-    vec3 hi = lo + vec3(gl_WorkGroupSize);
+    vec3 lo = vec3(groupCell(gl_WorkGroupID, uvec3(0u)));
+    vec3 hi = vec3(groupCell(gl_WorkGroupID, uvec3(3u))) + 1.0;
     vec2 uv0 = lo.xy / vec2(vol.dims.xy);
     vec2 uv1 = hi.xy / vec2(vol.dims.xy);
     float d0 = sliceDepth(lo.z);
@@ -149,23 +162,15 @@ void gatherGroupLights() {
     centre *= 0.125;
     float reach = 0.0;
     for (int i = 0; i < 8; ++i) reach = max(reach, distance(corners[i], centre));
+    barrier();
 
-    uint hit = 0u;
     if (lane < count) {
         float radius = localLightPosRadius[lane].w;
         // A margin for the rounding in placing the corners and the cells,
         // which only ever lets an extra light through.
         float limit = radius + reach + 0.05 + 0.001 * (radius + reach);
-        if (radius > 0.0 && distance(localLightPosRadius[lane].xyz, centre) < limit) hit = 1u;
-    }
-    sLightHit[lane] = hit;
-    barrier();
-    if (lane == 0u) {
-        uint n = 0u;
-        for (uint i = 0u; i < count; ++i) {
-            if (sLightHit[i] != 0u) sLightList[n++] = i;
-        }
-        sLightCount = n;
+        if (radius > 0.0 && distance(localLightPosRadius[lane].xyz, centre) < limit)
+            atomicOr(sLightMask[lane >> 5], 1u << (lane & 31u));
     }
     barrier();
 }
@@ -177,17 +182,22 @@ float phaseHG(float cosTheta, float g) {
 }
 
 void main() {
-    // Every invocation takes part, those past the edge of the volume too:
-    // the gather has barriers in it.
-    gatherGroupLights();
-
-    ivec3 cell = ivec3(gl_GlobalInvocationID);
-    if (any(greaterThanEqual(cell, vol.dims.xyz))) return;
+    ivec3 cell = groupCell(gl_WorkGroupID, gl_LocalInvocationID);
 
     // Half the slices this frame (vol.dims.w): the others keep last frame's
     // air where it was, reprojected to this frame's cell, as the blend below
     // would have kept most of it. A cell new to the view is lit regardless.
-    if (vol.dims.w != 0 && ((cell.z + vol.dims.w) & 1) != 0) {
+    // A group's slices are of one parity, so the whole group takes this
+    // branch or none of it, and only the groups that light anything gather.
+    bool carried = vol.dims.w != 0 && ((cell.z + vol.dims.w) & 1) != 0;
+    if (!carried) {
+        // Every invocation of the group takes part, those past the edge of
+        // the volume too: the gather has barriers in it.
+        gatherGroupLights();
+    }
+    if (any(greaterThanEqual(cell, vol.dims.xyz))) return;
+
+    if (carried) {
         vec3 centre = vec3(cell) + 0.5;
         float cdepth = sliceDepth(centre.z);
         vec3 cp = vol.rayOrigin.xyz + rayAt(centre.xy / vec2(vol.dims.xy)) * cdepth;
@@ -235,16 +245,27 @@ void main() {
 
     // Torches, braziers and lava: the same set, falloff and intensity the
     // surfaces are lit by, so the halo is where the pool of light is.
+    // A carried cell lit afresh (new to the view) had no gather: it walks
+    // every light, which the radius test below cuts to the same terms.
     vec3 local = vec3(0.0);
-    for (uint l = 0u; l < sLightCount; ++l) {
-        uint i = sLightList[l];
-        vec3 toLight = localLightPosRadius[i].xyz - p;
-        float radius = localLightPosRadius[i].w;
-        float distSq = dot(toLight, toLight);
-        if (radius <= 0.0 || distSq >= radius * radius) continue;
-        float attenuation = 1.0 - sqrt(distSq) / radius;
-        local += localLightColorIntensity[i].rgb *
-                 (localLightColorIntensity[i].w * attenuation * attenuation);
+    uint count = uint(clamp(localLightMeta.x, 0, 64));
+    uvec2 lightMask = carried
+        ? uvec2(count >= 32u ? 0xFFFFFFFFu : ((1u << count) - 1u),
+                count >= 64u ? 0xFFFFFFFFu : (count > 32u ? ((1u << (count - 32u)) - 1u) : 0u))
+        : uvec2(sLightMask[0], sLightMask[1]);
+    for (uint word = 0u; word < 2u; ++word) {
+        uint bits = lightMask[word];
+        while (bits != 0u) {
+            uint i = word * 32u + uint(findLSB(bits));
+            bits &= bits - 1u;
+            vec3 toLight = localLightPosRadius[i].xyz - p;
+            float radius = localLightPosRadius[i].w;
+            float distSq = dot(toLight, toLight);
+            if (radius <= 0.0 || distSq >= radius * radius) continue;
+            float attenuation = 1.0 - sqrt(distSq) / radius;
+            local += localLightColorIntensity[i].rgb *
+                     (localLightColorIntensity[i].w * attenuation * attenuation);
+        }
     }
     light += local * vol.lighting.y;
 

@@ -248,5 +248,40 @@ struct NearShadowMask {
     }
 };
 
+/// Where the camera can see a shadow (the unit map's casters, E3). A unit's
+/// shadow lies under its own outline downstream along the sun's rays: inside
+/// the capsule swept by its bounding sphere from where it stands along the
+/// ray, as far down as anything that could receive it. A unit whose capsule is
+/// outside the camera's view shades no pixel the frame shows, so the unit map
+/// need not draw it (nor the blob stand in for it).
+struct ShadowReceiverView {
+    glm::vec4 planes[6]{};      ///< the camera's frustum, xyz normal (inward), w distance
+    glm::vec3 sunRay{0.0f, 0.0f, -1.0f};  ///< the light's travel, pointing down
+    float floorZ = -1e9f;       ///< no receiver is taken to lie below this
+    float maxReach = 600.0f;    ///< nor further along the ray than this (the map's depth)
+};
+
+/// How far down the ray from `centre` a receiver can lie: to `floorZ`, along a
+/// ray at least ~6 degrees off the horizontal (a lower sun is taken at that),
+/// and never past `maxReach`.
+inline float shadowReachAlongRay(const glm::vec3& centre, float radius, const glm::vec3& sunRay,
+                                 float floorZ, float maxReach) {
+    const float down = std::max(-sunRay.z, 0.1f);
+    const float drop = std::max(centre.z + radius - floorZ, 0.0f);
+    return std::min(drop / down, maxReach);
+}
+
+/// Whether the shadow of a caster bounded by (centre, radius) can land in the
+/// view: false only when the swept capsule is wholly behind one frustum plane.
+inline bool shadowCasterSeen(const ShadowReceiverView& v, const glm::vec3& centre, float radius) {
+    const float reach = shadowReachAlongRay(centre, radius, v.sunRay, v.floorZ, v.maxReach);
+    const glm::vec3 end = centre + v.sunRay * reach;
+    for (const glm::vec4& p : v.planes) {
+        const glm::vec3 n(p);
+        if (glm::dot(n, centre) + p.w < -radius && glm::dot(n, end) + p.w < -radius) return false;
+    }
+    return true;
+}
+
 }  // namespace rendering
 }  // namespace wowee

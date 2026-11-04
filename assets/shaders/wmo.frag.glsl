@@ -155,6 +155,10 @@ float computeLodFactor() {
     return smoothstep(0.0001, 0.005, texelDensity);
 }
 
+// Where the parallax trace runs in full, and where it has eased to nothing.
+const float kPomFullYards = 25.0;
+const float kPomNoneYards = 45.0;
+
 // Parallax Occlusion Mapping with angle-adaptive sampling
 vec2 parallaxOcclusionMap(vec2 uv, vec3 viewDirTS, float lodFactor, float depthScale) {
     float VdotN = abs(viewDirTS.z);  // 1=head-on, 0=grazing
@@ -277,11 +281,16 @@ void main() {
     float pomScaleHere = min(pomScale, 0.05 / max(yardsPerRepeat, 1e-3));
     float bumpScaleHere = mix(1.0, 0.35, smoothstep(8.0, 32.0, yardsPerRepeat));
 
-    if (enablePOM != 0 && heightMapVariance > 0.001 && lodFactor < 0.99) {
+    // The relief is a few centimetres deep: past 25 yards its shift is a
+    // pixel or two, and past 45 none, so the trace eases out over that span
+    // rather than running on every far wall - which is where most of its
+    // cost on screen was (enhancements-plan.md 3.11).
+    float pomFade = 1.0 - smoothstep(kPomFullYards, kPomNoneYards, length(viewPos.xyz - FragPos));
+    if (enablePOM != 0 && heightMapVariance > 0.001 && lodFactor < 0.99 && pomFade > 0.0) {
         mat3 TBN_inv = transpose(TBN);
         vec3 viewDirWorld = normalize(viewPos.xyz - FragPos);
         vec3 viewDirTS = TBN_inv * viewDirWorld;
-        finalUV = parallaxOcclusionMap(TexCoord, viewDirTS, lodFactor, pomScaleHere);
+        finalUV = parallaxOcclusionMap(TexCoord, viewDirTS, lodFactor, pomScaleHere * pomFade);
     }
 
     vec4 texColor = hasTexture != 0 ? textureGrad(uTexture, finalUV, uvDx, uvDy) : vec4(1.0);
