@@ -519,6 +519,19 @@ Linux x86-64/ARM64, Windows x86-64/ARM64, macOS ARM64/x86-64 and Android arm64
 releases. Security checks include CodeQL, Semgrep, AddressSanitizer, and
 UndefinedBehaviorSanitizer.
 
+The Windows, macOS and Android builds are clang with `-Werror`; a native Linux
+build is usually GCC, which has no equivalent for some clang warnings
+(`-Wunused-lambda-capture` among them), and `<windows.h>` makes `near` and `far`
+empty macros. The `clang_warning_check` ctest parses every project source with
+`clang++ -fsyntax-only` and its real flags (plus `-Dnear= -Dfar=` for the
+client) so a GCC tree catches both. It finds clang through `$WOWEE_CLANGXX` (set by the
+nix devShell) or `PATH`, skips without one, and caches clean files by content,
+so only the first run takes minutes:
+
+```bash
+python3 tools/clang_warning_check.py build-nix   # or: ctest -R clang_warning_check
+```
+
 The codebase is split into focused rendering, networking, gameplay, asset, UI,
 audio, and editor modules. Start with the [architecture guide](docs/architecture.md)
 before making broad changes.
