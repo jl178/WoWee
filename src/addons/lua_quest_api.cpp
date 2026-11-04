@@ -4839,6 +4839,8 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* sh = tradeSkillHandler(L);
             if (!sh) return 0;
             const auto& m = sh->tradeSkill();
+            if (!lua_checkstack(L, static_cast<int>(m.headers().size())))
+                return luaL_error(L, "GetTradeSkillSubClasses: too many sub classes");
             int n = 0;
             for (const auto& h : m.headers()) {
                 std::string name;
@@ -4856,6 +4858,8 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* sh = tradeSkillHandler(L);
             if (!sh) return 0;
             const uint32_t bits = sh->tradeSkill().listedSlotBits();
+            if (!lua_checkstack(L, game::stock_trade_skill::kNumSlotBits + 1))
+                return luaL_error(L, "GetTradeSkillInvSlots: no stack room");
             int n = 0;
             for (int b = 0; b < game::stock_trade_skill::kNumSlotBits; ++b) {
                 if (!(bits & (1u << b))) continue;

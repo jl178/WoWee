@@ -230,9 +230,8 @@ void GameHandler::registerCoreOpcodes() {
         }
     };
 
-    // SMSG_PET_NAME_QUERY_RESPONSE is handled in SpellHandler now, which is
-    // where the request that provokes it is sent. It was skipped because
-    // nothing asked, and nothing asked because it was skipped.
+    // SMSG_PET_NAME_QUERY_RESPONSE is EntityController's (the pet name cache,
+    // for every pet in view, not only the player's).
 
     // -----------------------------------------------------------------------
     // Entity delta updates: health / power / world state / combo / timers / PvP

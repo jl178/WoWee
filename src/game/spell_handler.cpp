@@ -223,14 +223,11 @@ std::string castFailureMessage(const GameHandler& owner, uint32_t spellId,
         return stock;
     }
 
-    if (spellclass::isFishingCast(spellId)) {
-        if (result == 11 || result == 60 || result == 178)
-            return "Face open water and try casting again.";
-        if (result == 58)
-            return "You can't fish in this area.";
-        if (result == 156)
-            return "The water there is too shallow.";
-    }
+    // Fishing refusals are the game's own SPELL_FAILED_* lines, as 0x808200
+    // shows them (NOT_HERE "You can't use that here.", TOO_SHALLOW "Water too
+    // shallow", NOT_FISHABLE ...). Wowee's own wording here put the same
+    // "Face open water" on NOT_HERE and BAD_IMPLICIT_TARGETS, so the two
+    // answers AzerothCore gives one cast onto land read as one line twice.
 
     // Bandages use a hidden target aura to enforce the Recently Bandaged
     // lockout. Exposing the protocol label ("Target aurastate") gives the
@@ -365,8 +362,8 @@ std::optional<audio::PlayerErrorSpeech> errorSpeechForCastResult(
         uint32_t spellId, uint8_t result, int powerType) {
     using audio::PlayerErrorSpeech;
     // Fishing has no unit target: the server validates a randomly sampled water
-    // point in front of the caster. The generic "no target" voice line is both
-    // misleading and contradicted by the on-screen fishing-specific guidance.
+    // point in front of the caster. The generic "no target" voice line would
+    // only mislead about that.
     if (spellclass::isFishingCast(spellId) && (result == 11 || result == 60 || result == 156 || result == 178))
         return std::nullopt;
     switch (result) {
@@ -816,50 +813,19 @@ std::vector<std::string> SpellHandler::spellcastArgs(const std::string& unitId,
 }
 
 void SpellHandler::requestPetName(uint64_t petGuid) {
-    if (petGuid == 0 || !owner_.getSocket()) return;
-    if (owner_.getState() != WorldState::IN_WORLD) return;
-    const uint32_t key = nextPetNameQueryKey_++;
-    pendingPetNameQueries_[key] = petGuid;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_PET_NAME_QUERY));
-    pkt.writeUInt32(key);
-    pkt.writeUInt64(petGuid);
-    owner_.getSocket()->send(pkt);
+    // The pet name cache keyed by the pet number, as every other pet's name
+    // is (EntityController::queryPetName, 0x72A000).
+    if (petGuid == 0) return;
+    auto entity = owner_.getEntityManager().getEntity(petGuid);
+    auto* unit = entity ? dynamic_cast<Unit*>(entity.get()) : nullptr;
+    const uint16_t idx = fieldIndex(UF::UNIT_FIELD_PETNUMBER);
+    const uint32_t petNumber = (unit && idx != 0xFFFF) ? unit->getField(idx) : 0u;
+    owner_.queryPetName(petGuid, petNumber);
 }
 
 void SpellHandler::registerOpcodes(DispatchTable& table) {
-    // The reply, which was read to the end and thrown away - a skip handler
-    // for a message nothing had asked for, since nothing sent the request.
-    //
-    // Shape from AzerothCore's SendPetNameQuery: the key back, the name, and
-    // the timestamp the name was set. A pet it could not find answers a zero
-    // byte where the name would be, which is the empty string and means "keep
-    // what you have" rather than "the pet has no name".
-    table[Opcode::SMSG_PET_NAME_QUERY_RESPONSE] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(4)) { packet.skipAll(); return; }
-        const uint32_t key = packet.readUInt32();
-        const std::string name = packet.readString();
-        packet.skipAll();
-
-        auto it = pendingPetNameQueries_.find(key);
-        if (it == pendingPetNameQueries_.end()) return;
-        const uint64_t guid = it->second;
-        pendingPetNameQueries_.erase(it);
-        if (name.empty()) return;
-
-        auto entity = owner_.getEntityManager().getEntity(guid);
-        if (!entity) return;
-        auto unit = std::dynamic_pointer_cast<Unit>(entity);
-        if (!unit) return;
-        unit->setName(name);
-        LOG_INFO("Pet name: 0x", std::hex, guid, std::dec, " is '", name, "'");
-        // Both, because the two frames listen for different ones: the pet
-        // frame redraws its name from UNIT_NAME_UPDATE, and the pet bar and
-        // anything else keyed on the pet rebuild from PET_UI_UPDATE.
-        if (guid == owner_.petGuidRef()) {
-            owner_.fireAddonEvent("UNIT_NAME_UPDATE", {"pet"});
-            owner_.fireAddonEvent("PET_UI_UPDATE", {});
-        }
-    };
+    // SMSG_PET_NAME_QUERY_RESPONSE is EntityController's: every pet's name
+    // goes through the pet name cache there.
 
     table[Opcode::SMSG_INITIAL_SPELLS] = [this](network::Packet& packet) { handleInitialSpells(packet); };
     table[Opcode::SMSG_CAST_FAILED] = [this](network::Packet& packet) { handleCastFailed(packet); };
@@ -1597,15 +1563,19 @@ int SpellHandler::playerPowerType() const {
     return -1;
 }
 
+int SpellHandler::throttleCastCount(uint8_t wireCount) const {
+    return isClassicLikeExpansion() ? -1 : static_cast<int>(wireCount);
+}
+
 bool SpellHandler::showCastFailure(uint32_t spellId, uint8_t result, uint32_t miscArg,
-                                   uint32_t miscArg2, bool fromServer) {
+                                   uint32_t miscArg2, bool fromServer, int castCount) {
     // 0x808200: the same spell refused for the same reason within 3 s of its
     // last refusal shows nothing, from the client's own checks and the
     // server's alike. That is the whole of the stock client's answer to a
     // mashed key - the text and its voice then come once per burst.
     // 0x808229 -> 0x5DA020, before the throttle: a refused craft ends its run.
     if (tradeSkill_.onCastFailed(static_cast<int32_t>(spellId))) fireTradeSkillRecast();
-    if (!castErrorThrottle_.shouldShow(spellId, result, steadyNowMs())) return false;
+    if (!castErrorThrottle_.shouldShow(spellId, result, steadyNowMs(), castCount)) return false;
     // Totem failures name tool item ids; request their info so a retry of the
     // craft can show the tool's name even if it wasn't cached yet.
     if (result == kCastResultTotems) {
@@ -3175,7 +3145,8 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
         // 0x808200: the fizzle, the text, then 0x7FECC0 for that press - its
         // event with its own count; the running cast's bar is not its.
         if (stock_cast::castFailurePlaysFizzle(data.result)) playFizzle(data.spellId);
-        showCastFailure(data.spellId, data.result, data.miscArg, data.miscArg2, true);
+        showCastFailure(data.spellId, data.result, data.miscArg, data.miscArg2, true,
+                        throttleCastCount(data.castCount));
         endPlayerCast(refused, data.result);
         return;
     }
@@ -3195,10 +3166,12 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
             owner_.despawnGameObjectLocally(gatherGoGuid);
         }
         // Rephrased, and routine for a gatherer: the text without the voice.
-        if (castErrorThrottle_.shouldShow(data.spellId, data.result, steadyNowMs()))
+        if (castErrorThrottle_.shouldShow(data.spellId, data.result, steadyNowMs(),
+                                          throttleCastCount(data.castCount)))
             owner_.addUIError(errMsg);
     } else {
-        showCastFailure(data.spellId, data.result, data.miscArg, data.miscArg2, true);
+        showCastFailure(data.spellId, data.result, data.miscArg, data.miscArg2, true,
+                        throttleCastCount(data.castCount));
     }
     // A channel refused as its press is answered is no bar cast of 0x7FECC0's.
     if (casting_ && castIsChannel_ && data.spellId == currentCastSpellId_) clearPlayerCastState();
@@ -5720,7 +5693,10 @@ void SpellHandler::handleCastResult(network::Packet& packet) {
                     owner_.despawnGameObjectLocally(gatherGoGuid);
                 }
             }
-            owner_.addUIError(errMsg);
+            // Through 0x808200's throttle like every other cast failure: this
+            // path printed every answer, so a mashed key said it each time.
+            if (castErrorThrottle_.shouldShow(castResultSpellId, castResult, steadyNowMs()))
+                owner_.addUIError(errMsg);
             if (owner_.spellCastFailedCallbackRef()) owner_.spellCastFailedCallbackRef()(castResultSpellId);
                 const uint8_t resultCount = serverCastCount(0, castResultSpellId);
                 owner_.fireAddonEvent("UNIT_SPELLCAST_FAILED", spellcastArgs("player", castResultSpellId, resultCount));

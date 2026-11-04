@@ -3226,3 +3226,10 @@ wowee_add_test(test_talent_macro_logic SOURCES test_talent_macro_logic.cpp)
 
 # GameError message kinds (Wow.exe 0xAC8AF0) and GlobalStrings formatting.
 wowee_add_test(test_game_messages SOURCES test_game_messages.cpp)
+
+# ── test_name_pipeline ──────────────────────────────────────
+# Where a unit's name comes from (creature record, pet name, player name), when
+# an unanswered query is asked again, and the on-disk creature and game object
+# caches (docs/re/names-and-caches.md). Header-only.
+wowee_add_test(test_name_pipeline
+    SOURCES test_name_pipeline.cpp)

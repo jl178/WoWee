@@ -40,13 +40,37 @@ inline uint32_t predictedGcdMs(uint32_t startRecoveryCategory, uint32_t startRec
 /// same reason within 3 s of its previous refusal says nothing - no text, no
 /// voice. Each refusal restarts the 3 s, so a held or mashed key reports once
 /// per burst. Shared by the client's own refusals and SMSG_CAST_FAILED.
+///
+/// One text per refused press, too. AzerothCore answers some refusals twice
+/// for the same press - fishing onto land is SPELL_FAILED_NOT_HERE from the
+/// destination pick and then SPELL_FAILED_BAD_IMPLICIT_TARGETS from the
+/// channel's empty target list (Spell::SelectSpellTargets), both with the
+/// press's cast count - which 0x808200 alone would print as two lines because
+/// the results differ. A refusal of a press that has already been refused
+/// (same spell, same cast count, within the 3 s) is the server repeating
+/// itself: it shows nothing and leaves the 3 s state as the first left it.
+/// Pass castCount -1 where there is none (the client's own refusals, which
+/// send nothing, and the older clients' messages).
 struct CastErrorThrottle {
     uint32_t lastSpell = 0;
     uint32_t lastResult = 0xFFFFFFFFu;
     int64_t lastMs = 0;
     bool any = false;
+    // The last press the server refused: spell, cast count, when.
+    uint32_t pressSpell = 0;
+    int pressCount = -1;
+    int64_t pressMs = 0;
 
-    bool shouldShow(uint32_t spellId, uint32_t result, int64_t nowMs) {
+    bool shouldShow(uint32_t spellId, uint32_t result, int64_t nowMs, int castCount = -1) {
+        if (castCount >= 0) {
+            if (pressCount >= 0 && spellId == pressSpell && castCount == pressCount &&
+                nowMs - pressMs < 3000) {
+                return false;
+            }
+            pressSpell = spellId;
+            pressCount = castCount;
+            pressMs = nowMs;
+        }
         const bool repeat = any && spellId == lastSpell && result == lastResult &&
                             nowMs - lastMs < 3000;
         lastSpell = spellId;

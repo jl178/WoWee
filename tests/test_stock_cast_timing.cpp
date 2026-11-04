@@ -50,6 +50,36 @@ TEST_CASE("a cast error repeats only after 3 s of quiet") {
     CHECK(t.shouldShow(21084, 105, 7600));
 }
 
+TEST_CASE("a press the server refuses twice says it once") {
+    sc::CastErrorThrottle t;
+    // Fishing onto land: NOT_HERE (60) then BAD_IMPLICIT_TARGETS (11) for the
+    // same press, count 7.
+    CHECK(t.shouldShow(7620, 60, 1000, 7));
+    CHECK_FALSE(t.shouldShow(7620, 11, 1001, 7));
+    // The next press (count 8) a second later: the 3 s rule holds its 60,
+    // and its own 11 is the same press again.
+    CHECK_FALSE(t.shouldShow(7620, 60, 2000, 8));
+    CHECK_FALSE(t.shouldShow(7620, 11, 2001, 8));
+    // After 3 s of quiet the next press is reported again.
+    CHECK(t.shouldShow(7620, 60, 5100, 9));
+    CHECK_FALSE(t.shouldShow(7620, 11, 5101, 9));
+    // Another spell's press is its own, whatever the count.
+    CHECK(t.shouldShow(635, 60, 5200, 9));
+    // A count reused long after (it wraps at 256) is a new press.
+    CHECK(t.shouldShow(7620, 156, 9000, 9));
+}
+
+TEST_CASE("refusals without a count keep the plain 3 s rule") {
+    sc::CastErrorThrottle t;
+    CHECK(t.shouldShow(635, 67, 1000));
+    CHECK(t.shouldShow(635, 105, 1001));
+    CHECK_FALSE(t.shouldShow(635, 105, 1002));
+    // A client refusal between two server ones does not mark a press.
+    CHECK(t.shouldShow(635, 60, 1100, 3));
+    CHECK(t.shouldShow(635, 67, 1200));
+    CHECK_FALSE(t.shouldShow(635, 12, 1300, 3));
+}
+
 TEST_CASE("not ready reads as the cooldown line, not 'Not yet recovered'") {
     CHECK(std::string(sc::notReadyErrorName(67, 0, 0x50000)) == "ERR_SPELL_COOLDOWN");
     CHECK(std::string(sc::notReadyErrorName(67, 0, 0x10)) == "ERR_ABILITY_COOLDOWN");

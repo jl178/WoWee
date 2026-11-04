@@ -1,4 +1,5 @@
 #include "game/entity_controller.hpp"
+#include "game/name_pipeline.hpp"
 #include "game/unit_motion_glue.hpp"
 #include "core/env_flag.hpp"
 #include "game/game_handler.hpp"
@@ -19,6 +20,8 @@
 #include "rendering/animation/animation_ids.hpp"
 #include <algorithm>
 #include <bit>
+#include <filesystem>
+#include <fstream>
 #include <set>
 #include <cstring>
 #include <zlib.h>
@@ -93,6 +96,9 @@ void EntityController::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_GAMEOBJECT_QUERY_RESPONSE] = [this](network::Packet& packet) {
         handleGameObjectQueryResponse(packet);
     };
+    table[Opcode::SMSG_PET_NAME_QUERY_RESPONSE] = [this](network::Packet& packet) {
+        handlePetNameQueryResponse(packet);
+    };
     table[Opcode::SMSG_GAMEOBJECT_PAGETEXT] = [this](network::Packet& packet) {
         handleGameObjectPageText(packet);
     };
@@ -102,6 +108,9 @@ void EntityController::registerOpcodes(DispatchTable& table) {
 }
 
 void EntityController::clearAll() {
+    // What was learnt this session is kept for the next (stock writes its WDB
+    // files on the way out).
+    savePersistentCaches();
     pendingUpdateObjectWork_.clear();
     playerNameCache.clear();
     playerClassRaceCache_.clear();
@@ -110,6 +119,11 @@ void EntityController::clearAll() {
     pendingCreatureQueries.clear();
     gameObjectInfoCache_.clear();
     pendingGameObjectQueries_.clear();
+    petNameCache_.clear();
+    pendingPetNameQueries_.clear();
+    creatureFromDisk_.clear();
+    gameObjectFromDisk_.clear();
+    creatureNotFound_.clear();
     transportGuids_.clear();
     serverUpdatedTransportGuids_.clear();
     entityManager.clear();
@@ -2191,15 +2205,13 @@ void EntityController::flushPendingEvents() {
 
 void EntityController::onCreateUnit(const UpdateBlock& block, std::shared_ptr<Entity>& entity) {
     // Name query for creatures
+    // (0x72D940): the creature record for the entry, or for a pet its pet
+    // name - from the caches when they have it, asked for when not.
     auto it = block.fields.find(fieldIndex(UF::OBJECT_FIELD_ENTRY));
     if (it != block.fields.end() && it->second != 0) {
         auto unit = std::static_pointer_cast<Unit>(entity);
         unit->setEntry(it->second);
-        std::string cached = getCachedCreatureName(it->second);
-        if (!cached.empty()) {
-            unit->setName(cached);
-        }
-        queryCreatureInfo(it->second, block.guid);
+        resolveUnitName(block.guid, *unit);
     }
 
     // Unit fields
@@ -2574,6 +2586,33 @@ void EntityController::onValuesUpdateUnit(const UpdateBlock& block, std::shared_
     UnitFieldIndices ufi = UnitFieldIndices::resolve();
     UnitFieldUpdateResult result = applyUnitFieldsOnUpdate(block, entity, unit, ufi);
     handleDisplayIdChange(block, entity, unit, result);
+
+    // A new entry is a new creature record (0x72CEB0, the OBJECT_FIELD_ENTRY
+    // change handler 0x741D00 registers): its name, UNIT_NAME_UPDATE and
+    // UNIT_CLASSIFICATION_CHANGED. A pet number or name stamp changing names
+    // the unit from the pet name cache instead. Neither was read after the
+    // create, so a creature the server turned into another kept the first
+    // one's name, and an entry first seen here was never asked about.
+    {
+        const auto entryIt = block.fields.find(fieldIndex(UF::OBJECT_FIELD_ENTRY));
+        const bool entryChanged = entryIt != block.fields.end() && entryIt->second != 0 &&
+                                  entryIt->second != unit->getEntry();
+        const uint16_t petNumberIdx = fieldIndex(UF::UNIT_FIELD_PETNUMBER);
+        const uint16_t stampIdx = fieldIndex(UF::UNIT_FIELD_PET_NAME_TIMESTAMP);
+        const bool petChanged =
+            (petNumberIdx != 0xFFFF && block.fields.find(petNumberIdx) != block.fields.end()) ||
+            (stampIdx != 0xFFFF && block.fields.find(stampIdx) != block.fields.end());
+        if (entryChanged || petChanged) {
+            if (entryChanged) unit->setEntry(entryIt->second);
+            const std::string before = unit->getName();
+            resolveUnitName(block.guid, *unit);
+            if (unit->getName() != before) fireNameUpdate(block.guid, true);
+            if (entryChanged) {
+                for (const auto& token : owner_.unitTokensForGuid(block.guid))
+                    pendingEvents_.emit("UNIT_CLASSIFICATION_CHANGED", {token});
+            }
+        }
+    }
 
     // A corpse that has been looted empty has nothing left to offer, so drop it.
     // Skinnable corpses stay until they have been skinned. Done here rather than
@@ -3102,6 +3141,23 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
 // Name Queries
 // ============================================================
 
+namespace {
+int64_t steadyNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+}  // namespace
+
+// Queries go out whenever the world socket is up (stock asks from the
+// object's create on, whatever the login state). Wowee asked only once in the
+// world, so everything created between CMSG_PLAYER_LOGIN and
+// SMSG_LOGIN_VERIFY_WORLD was never asked about and stayed "Unknown".
+bool EntityController::canSendQueries() const {
+    if (!owner_.getSocket()) return false;
+    const auto s = owner_.getState();
+    return s == WorldState::IN_WORLD || s == WorldState::ENTERING_WORLD;
+}
+
 void EntityController::queryPlayerName(uint64_t guid) {
     // If already cached, apply the name to the entity (handles entity recreation after
     // moving out/in range - the entity object is new but the cached name is valid).
@@ -3116,35 +3172,254 @@ void EntityController::queryPlayerName(uint64_t guid) {
         }
         return;
     }
-    if (pendingNameQueries.count(guid)) return;
-    if (!owner_.isInWorld()) {
+    const int64_t now = steadyNowMs();
+    if (auto it = pendingNameQueries.find(guid); it != pendingNameQueries.end()) {
+        if (!name_pipeline::queryDueForResend(it->second, now)) return;
+        LOG_WARNING("queryPlayerName: no answer for 0x", std::hex, guid, std::dec,
+                    " in ", (now - it->second), " ms, asking again");
+    }
+    if (!canSendQueries()) {
         LOG_INFO("queryPlayerName: skipped guid=0x", std::hex, guid, std::dec,
-                 " owner_.getState()=", worldStateName(owner_.getState()), " owner_.getSocket()=", (owner_.getSocket() ? "yes" : "no"));
+                 " state=", worldStateName(owner_.getState()), " socket=", (owner_.getSocket() ? "yes" : "no"));
         return;
     }
 
     LOG_INFO("queryPlayerName: sending CMSG_NAME_QUERY for guid=0x", std::hex, guid, std::dec);
-    pendingNameQueries.insert(guid);
+    pendingNameQueries[guid] = now;
     auto packet = NameQueryPacket::build(guid);
     owner_.getSocket()->send(packet);
 }
 
 void EntityController::queryCreatureInfo(uint32_t entry, uint64_t guid) {
-    if (creatureInfoCache.count(entry) || pendingCreatureQueries.count(entry)) return;
-    if (!owner_.isInWorld()) return;
+    if (entry == 0) return;
+    const bool fromDisk = creatureFromDisk_.count(entry) != 0;
+    if (creatureInfoCache.count(entry) && !fromDisk) return;
+    const int64_t now = steadyNowMs();
+    if (auto it = pendingCreatureQueries.find(entry); it != pendingCreatureQueries.end()) {
+        if (!name_pipeline::queryDueForResend(it->second, now)) return;
+        LOG_WARNING("queryCreatureInfo: no answer for entry ", entry, " in ",
+                    (now - it->second), " ms, asking again");
+    }
+    if (!canSendQueries()) return;
 
-    pendingCreatureQueries.insert(entry);
+    // A record from disk is used as it stands and asked for once more, so a
+    // template the server has changed since is corrected this session.
+    creatureFromDisk_.erase(entry);
+    pendingCreatureQueries[entry] = now;
     auto packet = CreatureQueryPacket::build(entry, guid);
     owner_.getSocket()->send(packet);
 }
 
 void EntityController::queryGameObjectInfo(uint32_t entry, uint64_t guid) {
-    if (gameObjectInfoCache_.count(entry) || pendingGameObjectQueries_.count(entry)) return;
-    if (!owner_.isInWorld()) return;
+    if (entry == 0) return;
+    const bool fromDisk = gameObjectFromDisk_.count(entry) != 0;
+    if (gameObjectInfoCache_.count(entry) && !fromDisk) return;
+    const int64_t now = steadyNowMs();
+    if (auto it = pendingGameObjectQueries_.find(entry); it != pendingGameObjectQueries_.end()) {
+        if (!name_pipeline::queryDueForResend(it->second, now)) return;
+        LOG_WARNING("queryGameObjectInfo: no answer for entry ", entry, " in ",
+                    (now - it->second), " ms, asking again");
+    }
+    if (!canSendQueries()) return;
 
-    pendingGameObjectQueries_.insert(entry);
+    gameObjectFromDisk_.erase(entry);
+    pendingGameObjectQueries_[entry] = now;
     auto packet = GameObjectQueryPacket::build(entry, guid);
     owner_.getSocket()->send(packet);
+}
+
+uint32_t EntityController::unitPetNumber(const Unit& unit) const {
+    const uint16_t idx = fieldIndex(UF::UNIT_FIELD_PETNUMBER);
+    return idx != 0xFFFF ? unit.getField(idx) : 0u;
+}
+
+uint32_t EntityController::unitPetNameStamp(const Unit& unit) const {
+    const uint16_t idx = fieldIndex(UF::UNIT_FIELD_PET_NAME_TIMESTAMP);
+    return idx != 0xFFFF ? unit.getField(idx) : 0u;
+}
+
+void EntityController::resolveUnitName(uint64_t guid, Unit& unit) {
+    if (unit.getType() == ObjectType::PLAYER) return;
+    const uint32_t petNumber = unitPetNumber(unit);
+    switch (name_pipeline::nameSourceFor(false, petNumber)) {
+        case name_pipeline::NameSource::Pet:
+            queryPetName(guid, petNumber);
+            return;
+        case name_pipeline::NameSource::Creature: {
+            const uint32_t entry = unit.getEntry();
+            if (entry == 0) return;
+            const std::string cached = getCachedCreatureName(entry);
+            if (!cached.empty()) unit.setName(cached);
+            queryCreatureInfo(entry, guid);
+            return;
+        }
+        case name_pipeline::NameSource::Player:
+            return;
+    }
+}
+
+void EntityController::queryPetName(uint64_t guid, uint32_t petNumber) {
+    if (petNumber == 0) return;
+    auto entity = entityManager.getEntity(guid);
+    auto* unit = entity ? dynamic_cast<Unit*>(entity.get()) : nullptr;
+    const uint32_t stamp = unit ? unitPetNameStamp(*unit) : 0u;
+    if (auto it = petNameCache_.find(petNumber); it != petNameCache_.end() &&
+        name_pipeline::petNameCurrent({it->second.name, it->second.timestamp}, stamp)) {
+        if (unit && unit->getName() != it->second.name) unit->setName(it->second.name);
+        return;
+    }
+    const int64_t now = steadyNowMs();
+    if (auto it = pendingPetNameQueries_.find(petNumber); it != pendingPetNameQueries_.end() &&
+        !name_pipeline::queryDueForResend(it->second.sentMs, now)) {
+        return;
+    }
+    if (!canSendQueries()) return;
+    pendingPetNameQueries_[petNumber] = PendingPetName{.guid = guid, .sentMs = now};
+    network::Packet pkt(wireOpcode(Opcode::CMSG_PET_NAME_QUERY));
+    pkt.writeUInt32(petNumber);
+    pkt.writeUInt64(guid);
+    owner_.getSocket()->send(pkt);
+}
+
+// SMSG_PET_NAME_QUERY_RESPONSE: the pet number back, the name, the stamp the
+// name was set at (and declined names on a Russian realm). AzerothCore answers
+// a pet it cannot find with an empty name and stamp 0: the template's name is
+// all there is then.
+void EntityController::handlePetNameQueryResponse(network::Packet& packet) {
+    if (!packet.hasRemaining(4)) { packet.skipAll(); return; }
+    const uint32_t petNumber = packet.readUInt32();
+    const std::string name = packet.readString();
+    const uint32_t stamp = packet.hasRemaining(4) ? packet.readUInt32() : 0u;
+    packet.skipAll();
+
+    pendingPetNameQueries_.erase(petNumber);
+    if (!name.empty()) petNameCache_[petNumber] = PetNameRecord{.name = name, .timestamp = stamp};
+
+    for (auto& [guid, entity] : entityManager.getEntities()) {
+        if (!entity || entity->getType() != ObjectType::UNIT) continue;
+        auto* unit = static_cast<Unit*>(entity.get());
+        if (unitPetNumber(*unit) != petNumber) continue;
+        std::string shown = name;
+        if (shown.empty()) shown = getCachedCreatureName(unit->getEntry());
+        if (shown.empty()) continue;
+        unit->setName(shown);
+        LOG_INFO("Pet name: 0x", std::hex, guid, std::dec, " is '", shown, "'");
+        fireNameUpdate(guid);
+        // The pet bar and anything else keyed on the player's own pet rebuild
+        // from PET_UI_UPDATE as well.
+        if (guid == owner_.petGuidRef()) owner_.fireAddonEvent("PET_UI_UPDATE", {});
+    }
+}
+
+void EntityController::fireNameUpdate(uint64_t guid, bool deferred) {
+    for (const auto& token : owner_.unitTokensForGuid(guid)) {
+        if (deferred) pendingEvents_.emit("UNIT_NAME_UPDATE", {token});
+        else owner_.fireAddonEvent("UNIT_NAME_UPDATE", {token});
+    }
+}
+
+void EntityController::resyncNames() {
+    const int64_t now = steadyNowMs();
+    if (now - lastNameResyncMs_ < 2000) return;
+    lastNameResyncMs_ = now;
+    if (persistDirty_ && now - lastPersistSaveMs_ >= 60000) savePersistentCaches();
+    if (!canSendQueries()) return;
+    const uint64_t self = owner_.getPlayerGuid();
+    for (const auto& [guid, entity] : entityManager.getEntities()) {
+        if (!entity) continue;
+        switch (entity->getType()) {
+            case ObjectType::PLAYER: {
+                if (guid == self) break;
+                auto* player = static_cast<Player*>(entity.get());
+                if (player->getName().empty()) queryPlayerName(guid);
+                break;
+            }
+            case ObjectType::UNIT: {
+                auto* unit = static_cast<Unit*>(entity.get());
+                const uint32_t petNumber = unitPetNumber(*unit);
+                if (petNumber != 0) {
+                    queryPetName(guid, petNumber);
+                } else if (unit->getEntry() != 0 && !creatureInfoCache.count(unit->getEntry()) &&
+                           !creatureNotFound_.count(unit->getEntry())) {
+                    queryCreatureInfo(unit->getEntry(), guid);
+                }
+                break;
+            }
+            case ObjectType::GAMEOBJECT: {
+                auto* go = static_cast<GameObject*>(entity.get());
+                if (go->getEntry() != 0 && !gameObjectInfoCache_.count(go->getEntry()))
+                    queryGameObjectInfo(go->getEntry(), guid);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+}
+
+void EntityController::loadPersistentCaches() {
+    if (persistKey_.empty()) return;
+    const auto dir = name_pipeline::userDataDir() / "cache" / persistKey_;
+    size_t creatures = 0, objects = 0;
+    {
+        std::ifstream in(dir / "creaturecache.tsv");
+        std::unordered_map<uint32_t, CreatureQueryResponseData> loaded;
+        if (in && name_pipeline::readCreatureCache(in, persistBuild_, loaded)) {
+            for (auto& [entry, d] : loaded) {
+                if (creatureInfoCache.count(entry)) continue;
+                creatureInfoCache[entry] = std::move(d);
+                creatureFromDisk_.insert(entry);
+                ++creatures;
+            }
+        }
+    }
+    {
+        std::ifstream in(dir / "gameobjectcache.tsv");
+        std::unordered_map<uint32_t, GameObjectQueryResponseData> loaded;
+        if (in && name_pipeline::readGameObjectCache(in, persistBuild_, loaded)) {
+            for (auto& [entry, d] : loaded) {
+                if (gameObjectInfoCache_.count(entry)) continue;
+                gameObjectInfoCache_[entry] = std::move(d);
+                gameObjectFromDisk_.insert(entry);
+                ++objects;
+            }
+        }
+    }
+    LOG_INFO("Name caches from ", dir.string(), ": ", creatures, " creatures, ", objects,
+             " game objects");
+}
+
+void EntityController::savePersistentCaches() {
+    lastPersistSaveMs_ = steadyNowMs();
+    if (persistKey_.empty() || !persistDirty_) return;
+    const auto dir = name_pipeline::userDataDir() / "cache" / persistKey_;
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec) {
+        LOG_WARNING("Name caches: cannot create ", dir.string(), ": ", ec.message());
+        return;
+    }
+    auto writeFile = [&](const char* name, auto&& write) {
+        const auto path = dir / name;
+        const auto tmp = dir / (std::string(name) + ".tmp");
+        {
+            std::ofstream out(tmp, std::ios::trunc);
+            if (!out) return false;
+            write(out);
+            if (!out) return false;
+        }
+        std::filesystem::rename(tmp, path, ec);
+        return !ec;
+    };
+    const bool ok1 = writeFile("creaturecache.tsv", [&](std::ostream& os) {
+        name_pipeline::writeCreatureCache(os, persistBuild_, creatureInfoCache);
+    });
+    const bool ok2 = writeFile("gameobjectcache.tsv", [&](std::ostream& os) {
+        name_pipeline::writeGameObjectCache(os, persistBuild_, gameObjectInfoCache_);
+    });
+    if (ok1 && ok2) persistDirty_ = false;
+    LOG_INFO("Name caches saved to ", dir.string(), ": ", creatureInfoCache.size(),
+             " creatures, ", gameObjectInfoCache_.size(), " game objects", (ok1 && ok2) ? "" : " (failed)");
 }
 
 std::string EntityController::getCachedPlayerName(uint64_t guid) const {
@@ -3220,15 +3495,11 @@ void EntityController::handleNameQueryResponse(network::Packet& packet) {
             owner_.ignoreCacheRef()[data.name] = data.guid;
         }
 
-        // Fire UNIT_NAME_UPDATE so nameplate/unit frame addons know the name is available
-        if (owner_.addonEventCallbackRef()) {
-            std::string unitId;
-            if (data.guid == owner_.getTargetGuid()) unitId = "target";
-            else if (data.guid == owner_.focusGuidRef()) unitId = "focus";
-            else if (data.guid == owner_.getPlayerGuid()) unitId = "player";
-            if (!unitId.empty())
-                owner_.fireAddonEvent("UNIT_NAME_UPDATE", {unitId});
-        }
+        // UNIT_NAME_UPDATE for every token naming the player (0x728CA0 ->
+        // 0x512B00): party and raid frames, arena frames and mouseover as
+        // well as target and focus. Only those three ever heard it, so a party
+        // member whose name came in after the roster kept "Unknown".
+        fireNameUpdate(data.guid);
     }
 }
 
@@ -3256,15 +3527,29 @@ void EntityController::handleCreatureQueryResponse(network::Packet& packet) {
     if (!owner_.getPacketParsers()->parseCreatureQueryResponse(packet, data)) return;
 
     pendingCreatureQueries.erase(data.entry);
+    creatureFromDisk_.erase(data.entry);
 
-    if (data.isValid()) {
+    if (!data.isValid()) {
+        // Not found (the entry with its high bit set): stock drops the record
+        // and its waiters (0x67B840), and a later sight asks again. Not asked
+        // again by the resync: the server has said it has no such creature.
+        creatureNotFound_.insert(data.entry);
+        return;
+    }
+    {
+        persistDirty_ = true;
         creatureInfoCache[data.entry] = data;
-        // Update all unit entities with this entry
+        // Update all unit entities with this entry (0x72CDE0 for each waiter):
+        // the name, UNIT_NAME_UPDATE then UNIT_CLASSIFICATION_CHANGED for
+        // every token naming the unit. A pet is named by its pet name
+        // instead and is left alone.
         for (auto& [guid, entity] : entityManager.getEntities()) {
             if (entity->getType() == ObjectType::UNIT) {
                 auto unit = std::static_pointer_cast<Unit>(entity);
-                if (unit->getEntry() == data.entry) {
+                if (unit->getEntry() == data.entry && unitPetNumber(*unit) == 0) {
+                    const bool renamed = unit->getName() != data.name;
                     unit->setName(data.name);
+                    if (renamed) fireNameUpdate(guid);
                     // The rank came with this response, and UnitClassification
                     // reads it from the cache just filled. A unit targeted
                     // before its query came back answered "normal" until now -
@@ -3275,9 +3560,9 @@ void EntityController::handleCreatureQueryResponse(network::Packet& packet) {
                     // compares the argument against its own unit and ignores
                     // anything else, and most of a zone is neither targeted nor
                     // focused.
-                    const std::string unitId = owner_.guidToUnitId(guid);
-                    if (!unitId.empty() && owner_.addonEventCallbackRef()) {
-                        owner_.addonEventCallbackRef()("UNIT_CLASSIFICATION_CHANGED", {unitId});
+                    if (owner_.addonEventCallbackRef()) {
+                        for (const auto& unitId : owner_.unitTokensForGuid(guid))
+                            owner_.addonEventCallbackRef()("UNIT_CLASSIFICATION_CHANGED", {unitId});
                     }
                 }
             }
@@ -3325,8 +3610,10 @@ void EntityController::handleGameObjectQueryResponse(network::Packet& packet) {
     if (!ok) return;
 
     pendingGameObjectQueries_.erase(data.entry);
+    gameObjectFromDisk_.erase(data.entry);
 
     if (data.isValid()) {
+        persistDirty_ = true;
         gameObjectInfoCache_[data.entry] = data;
         // Update all gameobject entities with this entry
         for (auto& [guid, entity] : entityManager.getEntities()) {

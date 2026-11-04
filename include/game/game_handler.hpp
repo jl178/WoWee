@@ -1085,6 +1085,9 @@ public:
     /// frame to find.
     uint32_t getCreatureDisplayIdForEntry(uint32_t entry);
     void queryGameObjectInfo(uint32_t entry, uint64_t guid);
+    /// A pet's name by its pet number (CMSG_PET_NAME_QUERY), from the cache
+    /// when it still matches the pet's name stamp.
+    void queryPetName(uint64_t guid, uint32_t petNumber);
     const GameObjectQueryResponseData* getCachedGameObjectInfo(uint32_t entry) const override {
         return entityController_->getCachedGameObjectInfo(entry);
     }

@@ -342,8 +342,9 @@ copy, `WOWEE_DEBUG_LUA` scripts in scratchpad `prof-tb/`, rows restored after):
 - Cooking, Spice Bread: GetTradeSkillTools "Cooking Fire", 1; Create away
   from a fire: "Requires Cooking Fire"; beside a temporary campfire: crafted,
   skill 2, [4] -> [3].
-- Fishing at Crystal Lake: casts that miss water get "Face open water..." /
-  "The water there is too shallow."; the bobber clicked 3 s in (before this
+- Fishing at Crystal Lake: casts that miss water got "Face open water..." /
+  "The water there is too shallow." (Wowee's wording, since replaced by the
+  stock SPELL_FAILED_* lines); the bobber clicked 3 s in (before this
   change the click was dropped as "already casting"): **"No fish are hooked."**
   as an info line; clicked after the bite (anim progress 0 from AzerothCore,
   the splash and sound): the loot; left alone: **"Your fish got away!"** info.
@@ -367,7 +368,9 @@ copy, `WOWEE_DEBUG_LUA` scripts in scratchpad `prof-tb/`, rows restored after):
 - The TRADE_SKILL_SHOW with headers depends on the made items' cache; while
   waiting the list shows nothing (stock shows nothing too, but keeps the old
   count).
-- "Face open water" showed twice per refused fishing cast (the local refusal
-  and the server's) - cast-failure plumbing, not changed here.
+- "Face open water" showed twice per refused fishing cast: AzerothCore sends
+  two SMSG_CAST_FAILED for the one press (NOT_HERE, then
+  BAD_IMPLICIT_TARGETS). Fixed since: one text per refused press, and the
+  stock SPELL_FAILED_* lines (input-timing.md, "One press, two refusals").
 - TargetNearestEnemy in the harness picked an unnamed unit ("Unknown") near
-  Goldshire - not investigated.
+  Goldshire: see names-and-caches.md for the name pipeline's fixes.
