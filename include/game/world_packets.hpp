@@ -2403,9 +2403,25 @@ struct SpellGoData {
     bool hasDest = false;
     uint64_t destTransportGuid = 0;  ///< non-zero: dest is relative to this transport
     float destX = 0.0f, destY = 0.0f, destZ = 0.0f;
+    /// CAST_FLAG_PROJECTILE (0x20): the ammo the shot flies, as the server
+    /// sends it after the targets (Wow.exe 0x80E1B0 reads it into the
+    /// missile, 0x7FFFB0 -> 0x732FF0): the ItemDisplayInfo of the arrow,
+    /// bullet or thrown weapon and its InventoryType (24 ammo, 25 thrown,
+    /// 26 the wand itself). 0 when the flag is clear.
+    uint32_t ammoDisplayId = 0;
+    uint32_t ammoInventoryType = 0;
 
     [[nodiscard]] bool isValid() const { return spellId != 0; }
 };
+
+/// The fields SMSG_SPELL_GO (3.3.5a) carries after the target block, in the
+/// stock order (Wow.exe 0x80E1B0): castFlags 0x800 power left (uint32),
+/// 0x200000 rune states (two bytes, then one byte for every rune the cast
+/// used: set before and clear after), 0x20000 the missile's elevation
+/// (float) and delay (uint32), 0x20 the ammo (display id, inventory type),
+/// 0x80000 two uint32s. Reads what is there; false when the packet ends
+/// inside a field the flags announce.
+bool readSpellGoTail(network::Packet& packet, uint32_t castFlags, SpellGoData& data);
 
 class SpellGoParser {
 public:

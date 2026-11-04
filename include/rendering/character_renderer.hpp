@@ -146,10 +146,6 @@ public:
     /// now, for the unit's weapon attachment `index`. False when it has no
     /// such weapon or the weapon's model has no trail points.
     bool getWeaponTrailPoints(uint32_t instanceId, size_t index, glm::vec3& bottom, glm::vec3& top);
-    /// A loose copy of the weapon the unit holds at attachment 1 (main hand)
-    /// or 2 (off hand), standing in the world: a thrown weapon's missile.
-    /// 0 when the unit holds nothing there.
-    uint32_t createWeaponCopy(uint32_t instanceId, uint32_t handAttachment, const glm::vec3& position);
     /// How many weapons the unit holds (weapon attachments).
     size_t getWeaponAttachmentCount(uint32_t instanceId) const;
     /// Hold the model's pose: its animation clock stops (a SpellVisualKit

@@ -201,8 +201,45 @@ bool SpellGoParser::parse(network::Packet& packet, SpellGoData& data) {
         }
     }
 
+    // The fields after the targets: the ammo a shot flies among them.
+    if (packet.hasData() && !readSpellGoTail(packet, data.castFlags, data))
+        LOG_DEBUG("Spell go: short tail, spell=", data.spellId, " castFlags=0x", std::hex,
+                  data.castFlags, std::dec);
+
     LOG_DEBUG("Spell go: spell=", data.spellId, " hits=", static_cast<int>(data.hitCount),
              " misses=", static_cast<int>(data.missCount));
+    return true;
+}
+
+bool readSpellGoTail(network::Packet& packet, uint32_t castFlags, SpellGoData& data) {
+    constexpr uint32_t kPowerLeft = 0x800, kRuneList = 0x200000, kAdjustMissile = 0x20000,
+                       kProjectile = 0x20;
+    if (castFlags & kPowerLeft) {
+        if (!packet.hasRemaining(4)) return false;
+        packet.readUInt32();
+    }
+    if (castFlags & kRuneList) {
+        if (!packet.hasRemaining(2)) return false;
+        const uint8_t before = packet.readUInt8();
+        const uint8_t after = packet.readUInt8();
+        for (int i = 0; i < 6; ++i) {
+            const uint8_t bit = static_cast<uint8_t>(1u << i);
+            if ((before & bit) && !(after & bit)) {
+                if (!packet.hasRemaining(1)) return false;
+                packet.readUInt8();
+            }
+        }
+    }
+    if (castFlags & kAdjustMissile) {
+        if (!packet.hasRemaining(8)) return false;
+        packet.readFloat();
+        packet.readUInt32();
+    }
+    if (castFlags & kProjectile) {
+        if (!packet.hasRemaining(8)) return false;
+        data.ammoDisplayId = packet.readUInt32();
+        data.ammoInventoryType = packet.readUInt32();
+    }
     return true;
 }
 

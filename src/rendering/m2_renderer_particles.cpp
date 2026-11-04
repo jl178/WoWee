@@ -606,7 +606,7 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
                          .firstVertex = static_cast<uint32_t>(written),
                          .vertexCount = static_cast<uint32_t>(n),
                          .blendMode = additive ? 3u : 2u,
-                         .unfogged = 0u});
+                         .unfogged = strip.unfogged ? 1u : 0u});
         written += n;
     }
     if (draws.empty() || written == 0) return;

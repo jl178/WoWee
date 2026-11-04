@@ -14,8 +14,8 @@ The second half lists where Wowee differed, and what was changed.
 - **visual**: the SpellVisual row for a spell. `0x7FA290` picks it: Spell
   field 131 (`SpellVisual[0]`), or field 132 when the second is set and
   `0x7F3A60()` < 2. `CGUnit_C` vtable +0xBC (`0x720F80`) merges in the
-  visual of the unit's shapeshift form for any kit the spell's own visual
-  leaves empty.
+  visual of the unit's ranged weapon for a spell that uses the ranged slot
+  (section 6, "Ranged attacks").
 - **kit**: a SpellVisualKit row. Its table is at `0xAD4A5C` (ids
   `0xAD4A4C`..`0xAD4A48`).
 - **play a kit**: `CGUnit_C::PlaySpellVisualKit` (`0x745230`). It takes a
@@ -223,7 +223,11 @@ Then:
 
 - **Model**: `MissileModel` (`0x732FF0`). -1, -2, -3 are the caster's main
   hand, off hand and ranged weapon models (`0x732400`); -4/-5 an item
-  (`0x732100`); a missing model is `Spells\ErrorCube.mdx`.
+  (`0x732100`); a missing model is `Spells\ErrorCube.mdx`. Details in
+  "Item missiles" below. An effect model is made at its
+  SpellVisualEffectName `Scale` (column 4, record +0x10, kept in the missile
+  at +0xF4): 30% of the missile rows are not 1 (a boss's Frostbolt 2.5 or 5,
+  `missile_thorns` 2, a small Fireball 0.5).
 - **Attachments**: `MissileAttachment` and `MissileDestinationAttachment`
   are indices into a table at `0xADAA20` unless SpellVisual `Flags` 0x200
   makes them raw attachment ids:
@@ -255,8 +259,90 @@ Then:
   height `x * 0.001` (at least 0.25), drop speed `x * 0.001` (at least
   0.01), approach `x * 0.001` clamped to 0..1.
 - **Missile targeting kit** (SpellVisual 22) plays as the missile is
-  launched (`0x7022D0`): on a unit target as a state kit (type 2), at a
-  point as type 7.
+  launched (`0x7022D0`): on the target unit as a state kit (type 2), and
+  when the missile has no unit target, on the caster at the point as type 7
+  (only the base and world effects show). The missile keeps the unit's guid
+  (+0x170) and launch time (+0x178); landing on a unit (`0x702DB0`), at a
+  point (`0x700E20`) or being destroyed (`0x703730`) calls `0x6FF410`,
+  which stops that kit on that unit (`0x744BD0` type 7 matches by the kit,
+  the spell and the stamp, whatever type it was played as). 17 visuals, all
+  creature spells: a hunter's-mark marker under the target of the Argent
+  and Scarlet cannons and the practice arrows, Malleable Goo's puddle.
+
+### Ranged attacks (`0x720F80`)
+
+Auto Shot (75), Shoot (5019 wands, 3018 bows and guns) and Throw (2764)
+have SpellVisual 0. Their presentation is the ranged weapon's:
+ItemDisplayInfo `SpellVisualID` (column 11, record +0x2C) names a
+SpellVisual row for every ranged weapon and wand. `0x720F80` (the unit's
+vtable +0xBC, used everywhere a kit or missile is looked up: `0x7FA2E0`,
+`0x80E1B0`, `0x744BD0`) builds the visual a cast plays:
+
+- The spell's own row (or zeros when it has none).
+- If the spell's `Attributes` has 0x2 (uses the ranged slot), the unit's
+  ranged item display (vtable +0x134 with slot 2) and its SpellVisualID.
+- Each of these columns the spell leaves 0 is taken from the weapon's row:
+  Precast, Cast, Impact, CasterImpact, TargetImpact, MissileAttachment,
+  MissileDestination, the four MissileFollowGround columns, MissileMotion,
+  MissileSound, AnimEventSound. HasMissile and MissileModel go together,
+  and only when the weapon's row has HasMissile.
+- Nothing else: Flags, the channel, state and area kits are the spell's.
+
+The weapon rows by kind (ItemDisplayInfo counts over Item.dbc):
+
+| SpellVisualID | Weapons | Precast / Cast | Missile |
+|---|---|---|---|
+| 5 | bows, crossbows | LoadBow / AttackBow, sound 1146; impact CombatWound | none (the arrow is the ammo), MissileSound 4222 |
+| 224 | guns | HoldRifle / AttackRifle, sound 1148 | none (the bullet) |
+| 225, 226, 229, 2797, 2798, 2799, 228 | wands: fire, shadow, frost, nature (lightning), nature (goo), arcane, holy | HoldThrown / AttackThrown with the school's sound (5415, 5419, 5417, 5435, 5434, 5414) | FireBolt_Missile_Low, Shadowbolt_Missile, Frostbolt, LightningBolt_Missile, GooBolt_Missile_Low, Arcane_Missile_Lvl1, Holy_Missile_Low |
+| 2026, 2027, 98, 4081 | thrown daggers, axes, torches, spears | ReadyThrown / AttackThrown, sound 7140, a swing trail (CharProc 8) | none (the weapon is the ammo), MissileSound 3318 |
+
+So a wand's bolt is the wand's, not the school of the damage; a hunter's
+Arcane Shot keeps its own missile and impact and takes the bow's draw and
+release.
+
+### The ammo (`0x80E1B0`, `0x7FFFB0`)
+
+SMSG_SPELL_GO carries, after the targets and in this order: castFlags
+0x800 the caster's power (uint32); 0x200000 the runes (two bytes, before
+and after, then one byte for each rune set before and clear after);
+0x20000 the missile's elevation (float) and delay (uint32); 0x20 the
+**ammo**: an ItemDisplayInfo id and an InventoryType; 0x80000 two uint32s.
+AzerothCore fills the ammo from the ranged weapon: a thrown weapon names
+itself (InventoryType 25), a bow or gun its equipped ammo (24), a wand its
+own type (26) and no display; creatures 5996 (arrow) or 5998 (bullet) by
+their virtual ranged item.
+
+`0x7FFFB0` flies a missile to each target when the visual has HasMissile
+**or** the ammo display is set. A bow's visual has none; the arrow flies
+because SPELL_GO named it.
+
+### Item missiles (`0x732FF0`, `0x732400`, `0x732100`, `0x4EAB50`)
+
+- MissileModel -1, -2, -3: `0x732400(slot)` asks the caster for the item in
+  slot 0, 1, 2 (vtable +300: its InventoryType at +4; +0x134: its display)
+  and builds it with `0x732100`.
+- -4 and -5: `0x732100` with the ammo display and type from SPELL_GO.
+- 0 with an ammo display: `0x4EAB50` builds the ammo's flight model.
+- Anything else above 0: the SpellVisualEffectName model.
+- `0x732100(display, type)`: folder by InventoryType - 1 Head, 3 Shoulder,
+  14 Shield, 24 Ammo, 27 Quiver, anything else Weapon - then
+  `ModelName[0]`, or `ModelName[1]` when the first is empty, with
+  `ModelTexture` of the same index as replaceable texture 2 (item skin). A
+  head item's file name gets the wearer's race and sex
+  (`%s%s_%s%s.mdx`). The display's `ItemVisual` (column 23) goes on the
+  model (`0x4EA8F0`): an enchanted weapon flies with its glow.
+- `0x4EAB50(display, type)`: only type 24 (Ammo folder) or 25 (Weapon
+  folder), only `ModelName[1]` and `ModelTexture[1]`, both required. Arrows
+  (5996: `ArrowFlight_01`, `Arrow_A_01Brown`) and bullets (5998:
+  `BulletFlight_01`) name only the second; thrown weapons both. The five
+  thrown displays with only a first model fail here and the stock flies its
+  ErrorCube.
+- All of them fly as any missile: MissileMotion's script (Heroic Throw's
+  "Forward Spin + Parabola" turns the weapon end over end; the thrown
+  weapons' visuals name no motion, so a thrown axe flies as its model
+  animates), InFlight (144) if the model has it, the release wait and the
+  speed rule above.
 
 ## 8. Character procedures (SpellVisualKit CharProc)
 
@@ -270,15 +356,15 @@ slot.
 |---|---|---|
 | 0, 12 | 5 class spells, 935 rows of chain effects | A chain effect (`0x7FC950` -> `0x7FC5F0`): ParamZero the SpellChainEffects row, ParamTwo != 0 it lasts as long as the kit, ParamThree != 0 every hop starts at the source. Section 9. |
 | 1 | 335 | The unit's model colour (`0x7178E0` drops the same spell's older one, `0x6F76C0` puts the new one at the head of the unit's list +0xAFC). ParamZero is 0xRRGGBB. |
-| 6 | 6 | A full-screen colour over the spell's cast time (`0x7FA450`). |
+| 6 | 6 | A full-screen colour (`0x7FA450`, section 8a). |
 | 8 | 130 | A swing trail on the weapons in hand (`0x715BA0` -> `0x7E4FF0`): colour ParamZero, alpha ParamThree, ParamTwo ms. Section 12. |
 | 9 | 55 | An area's falling shards. Read by `DynamicObject_C` (`0x704F60`), not by `0x7265C0`. Section 10. |
 | 11 | 90 | Hold the unit's pose (`0x6F80B0`): the animation clock of the unit model (+0xB4) and its mount (+0x98C) stops, at ParamZero seconds into the animation when that is set. Ice Block. |
 | 13 | 36 | A flash of the model colour (`0x7265C0` case 13 -> unit +0xB10..+0xB1C): ParamZero for ParamOne s, back to white over ParamTwo s (`0x71A9A0`, `0x6ACC50` lerps by 255 x the time left). |
 | 14 | 93 | Transparency, ParamZero (`0x71AB80`, `0x71ABE0`). Already in Wowee (`EntitySpawner::auraKitTransparency`). |
-| 15 | 7 | Scale the unit by ParamZero over ParamOne/Two/Three (`0x71A940`). |
-| 16 | 1 | A mount-like display from the spell's aura 78 (`0x6F9670`). |
-| 17 | 14 | A model by id ParamOne (`0x6F8650` -> `0x67CA30`). |
+| 15 | 7 | A timed fade of the unit's alpha, not a scale (`0x71A940`, section 8a). |
+| 16 | 1 | The mount's creature model from the spell's SPELL_AURA_MOUNTED (78) effect (`0x6F9670`, section 8a). |
+| 17 | 14 | An item shown in its equipment slot on the unit, ParamOne the item id (`0x6F8650` -> `0x6F8600` -> `0x6F82D0`, section 8a). |
 | 2, 3, 5, 7, 10 | 51 | Not read by `0x7265C0`. |
 
 The model colour (`0x720DB0`, every frame) is the flash while one runs,
@@ -286,6 +372,47 @@ else the newest CharProc 1 colour, else white. It goes to the model's
 +0x180..+0x188, which `CM2Model` (`0x82E140`) multiplies into the sun's
 diffuse light only; the ambient (+0x18C) is added untinted. Frostbolt's
 chill is 0x3C3CFF, Immolate's 0xE75641, Frost Nova's 0x6666FF.
+
+### 8a. CharProc 6, 15, 16, 17
+
+None of the 28 kits with these is a player spell: they are boss and quest
+spells, holiday costumes and test rows. Wowee does not run them (see the
+gaps); this is what the stock code does.
+
+- **6, screen colour** (`0x7265C0` case 6 -> `0x7FA450`): ParamZero is
+  0xRRGGBB (alpha forced to 0xFF), ParamOne a fraction. With the spell's
+  cast time T (`0x7FF180`) and the kit's start t0 it sets one global fade:
+  up from 0 to full by t0 + T x ParamOne, held to t0 + T, down to 0 by
+  t0 + T + 100 ms. Each frame `0x7F9E10` works out the fraction and
+  `0x7EE300` stores the colour and alpha (0xD38B50) for the world's
+  full-screen pass. It is global: any unit's kit tints the screen. Users:
+  Finger of Death 0xA81317 (impact), Brain Damage (state), Denouement Wisp,
+  Darkness of a Thousand Souls, Force Prison 0x33F1.
+- **15, alpha fade** (`0x71A940(alpha, mode, 500, hold, back)`): the
+  arguments are ftol(baseAlpha x ParamZero), ParamOne, 500, ParamThree and
+  ParamTwo, where baseAlpha is vtable +0xE8 (`0x715B50`: the display's
+  model alpha / 255, else 1). It stores the byte, ParamOne (< 12, else
+  nothing happens), now, 500 + ParamThree and ParamTwo at unit
+  +0xB20..+0xB30 and fades the model's alpha to the byte over 500 ms
+  (`0x744030`: target byte x 255, over the ms given). `0x73DAB0` (the unit's
+  frame update) fades it back to baseAlpha over ParamTwo ms once
+  500 + ParamThree ms have passed. The ftol makes the target 0 or 1, so the
+  unit fades out (ParamZero below about 0.5) or stays: Teleport Visual
+  (Evil) and the Cannon Port teleports vanish and come back, Coalesce and
+  Materialize do nothing visible. The earlier "scale" reading was wrong.
+- **16, mount model** (`0x6F9670`): for each of the spell's effects that is
+  APPLY_AURA (6) with aura 78 (MOUNTED), the creature entry in its
+  MiscValue is looked up in the creature cache (`0x67B6A0`) and its model
+  made as an effect on the unit (`0x6F83D0`, CreatureDisplayInfo ->
+  CreatureModelData). One kit, the precast of "Mount (Test Anim)" (39949).
+- **17, item in a slot** (`0x6F8650`): ParamOne is an item id. The item
+  cache (`0x67CA30`) gives its display (+0x14) and InventoryType (+0x18,
+  turned into an equipment slot by `0x4E7A30`); `0x6F82D0` then shows that
+  display in that slot on the unit's character model (`0x4EE460`,
+  `0x4F2640`) for the kit's life - only on character models, or the head
+  slot on anything. ParamZero is not read. Jack-o'-Lanterned! (the pumpkin
+  head 33292), the Winter Veil hats, Mohawked!, the Gnomeregan, Orgrimmar
+  and Darkspear Overcloaks, Cultist Hood, Mind Control Helm, Lovely Rose.
 
 ## 9. Chain effects (SpellChainEffects)
 
@@ -311,8 +438,16 @@ along the same hops (Drain Life 719 adds 720, 731-735).
 - Each frame (`0x7FAE90`): the source end is `0x7FAA40` for point 0 (the
   visual's MissileAttachment, else the model's `$CSL` point, else 3/4 of the
   unit's height) and `0x7FABF0` otherwise (the visual's
-  MissileDestinationAttachment plus MissileImpactOffset). An end that cannot
-  be placed hides the bolt (`0x9A9770`) but keeps it.
+  MissileDestinationAttachment plus MissileImpactOffset). Unlike a missile,
+  `0x7FABF0` has no 15/19 fallback: a model without that attachment gets
+  its position plus 0.75 x its height (`0x717AD0`: the model box's height
+  times the unit's scale) - Mind Flay names the Breath, which a training
+  dummy lacks. An end that cannot be placed hides the bolt (`0x9A9770`) but
+  keeps it.
+- Drawing (`0x9AB070`): fog off (GxRs_Fog 0), culling off, the bolts by
+  RenderLayer 0 to 3; per bolt (`0x9AA210`) the blend is the row's, depth
+  write only for blend 2 (alpha), GxRs_MatEmissive the row's RGB, the vertex
+  colours the row's ARGB with the pulse in alpha.
 
 **The bolt** (`CLightning`, Common\Lightning.cpp):
 
@@ -418,12 +553,21 @@ rows have a place.
 | 20 | SpellVisualKitModelAttach | not loaded | loaded; models at the attachment with offset and turn |
 | 21 | Weapon missiles (`MissileModel` -1/-2) | nothing flew | a copy of the hand's weapon spins to the target, impact on landing |
 | 22 | A triggered spell's SPELL_GO under another cast (Hellfire's and Blizzard's ticks) | ended the caster's cast state and its animation at the first tick | leaves the cast alone |
+| 23 | Ranged attacks play the ranged weapon's SpellVisual (`0x720F80`): a wand's school bolt and sound, a bow's draw, a gun's report | Auto Shot, Shoot and Throw had no visual; the local player alone got a guessed arrow or bullet (`launchRangedWeaponProjectile`), a wand fired a bullet, nobody else's shots flew | the merge, for every caster (`SpellVisualSystem::rangedItemVisual`, `missilerules::mergeRangedItemVisual`) |
+| 24 | SPELL_GO's ammo (castFlags 0x20) names the arrow, bullet or thrown weapon; it flies when the visual has no missile (`0x7FFFB0`, `0x4EAB50`) | not parsed | parsed (`readSpellGoTail`), flown as its item model |
+| 25 | Item missiles (-1..-5) are the item's model by display (`0x732100`), flown as any missile: motion script, release wait, speed rule | -1/-2 a copy of the hand's weapon on a straight line with a made-up spin; -3/-4/-5 nothing | `itemMissileModel`: the display's model and texture through the stock folder rules, a character-renderer instance on the spell missile path |
+| 26 | The missile model is made at SpellVisualEffectName.Scale | always 1 | `VisualRow::missileScale` |
+| 27 | The missile targeting kit plays from launch to landing (`0x7022D0`, `0x6FF410`) | not played | on the target (state, Hold) or at the point (birth replayed), retired as its missile lands |
+| 28 | Chain effects draw with fog off and by RenderLayer 0..3 (`0x9AB070`) | fogged like a ribbon, in creation order | unfogged, sorted by layer |
 
 Not changed:
 
-- **Ranged weapon missiles** (`MissileModel` -3, -4, -5): not flown.
-- **CharProc 6** (screen colour), **15** (scale), **16**, **17**: not done.
-- **Missile targeting kit** (SpellVisual 22, 17 visuals): not played.
+- **CharProc 6** (screen colour), **15** (alpha fade), **16** (mount
+  model), **17** (item in a slot): read (section 8a), not run. All 28 kits
+  are creature, holiday and test spells.
+- **An item missile's ItemVisual** (`0x4EA8F0`: an enchanted thrown weapon's
+  glow) and a head item's race/sex file name are not applied; where the
+  stock flies its ErrorCube (no model) nothing flies.
 - **MissileFollowGround units**: Wowee reads hundredths of a yard and the
   approach as yards. The stock reads thousandths and the approach as a
   fraction of the path. The stock update loop that uses them was not read,
