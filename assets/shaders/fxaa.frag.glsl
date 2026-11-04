@@ -29,8 +29,8 @@ layout(push_constant) uniform PC {
     float intoxication;
     float ghost;
     float antialias;
-    float pad0;
-    float pad1;
+    float rollWhite;    // Soft highlights (highlight_rolloff.hpp): the input that
+    float rollRate;     // maps to 1 and the shoulder's rate; white 0 = off
     float glowAmount;   // LightParams.Glow: the blur, squared, added at this strength
     float glowBlend;    // how far the picture is swapped for its blur (water, drink)
     float glowSource;   // 1 when uGlow holds this frame's boxed-down scene
@@ -82,7 +82,7 @@ vec3 stockBlur(vec2 uv) {
 // (ffxdeath.bls) in its place: the scene plus the same glow, drained to grey
 // by (0.299, 0.587, 0.144) - the shader's own 0.144 - and the cold tint
 // (0x53, 0x93, 0xa8) laid on the mid-greys, 4 * grey * (1 - grey).
-vec3 stockScreenEffect(vec3 c, vec2 uv) {
+vec3 stockScreenEffectComposite(vec3 c, vec2 uv) {
     float g = clamp(pc.ghost, 0.0, 1.0);
     bool glow = pc.glowAmount > 0.0 || pc.glowBlend > 0.0;
     if (g <= 0.0 && !glow) return c;
@@ -94,6 +94,24 @@ vec3 stockScreenEffect(vec3 c, vec2 uv) {
     float t = clamp(4.0 * grey * (1.0 - grey), 0.0, 1.0);
     vec3 dead = vec3(grey) + vec3(83.0, 147.0, 168.0) / 255.0 * t;
     return mix(alive, dead, g);
+}
+
+// Soft highlights (not stock; highlight_rolloff.hpp has the derivation): the
+// glow above can carry a channel past 1, where the stock write clips it flat.
+// Each channel above the knee is eased onto [knee, 1] instead; a channel at
+// or below it is returned as it came. Only pushed while the row is on and the
+// glow is drawing.
+vec3 highlightRollOff(vec3 x) {
+    const float knee = 0.8;
+    vec3 t = clamp((x - knee) / (pc.rollWhite - knee), 0.0, 1.0);
+    vec3 s = pc.rollRate > 1e-4 ? (1.0 - exp(-pc.rollRate * t)) / (1.0 - exp(-pc.rollRate)) : t;
+    return mix(x, knee + (1.0 - knee) * s, greaterThan(x, vec3(knee)));
+}
+
+vec3 stockScreenEffect(vec3 c, vec2 uv) {
+    vec3 r = stockScreenEffectComposite(c, uv);
+    if (pc.rollWhite > 0.0) r = highlightRollOff(r);
+    return r;
 }
 
 void main() {

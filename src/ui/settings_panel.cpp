@@ -937,7 +937,12 @@ void SettingsPanel::updateEnhancementAB(float deltaTime) {
         enhancements = phase == 0 ? recommendedEnhancements() : rendering::Enhancements{};
         if (phase == 0 && allPlusShadows) enhancements.shadows = true;
     } else {
-        setEnhancementValue(enhancements, *r, phase == 0 ? r->recommendedValue : r->stockValue);
+        // A row recommended off is measured at its fullest "on" (a switch on,
+        // a choice at its last entry), or the flip would change nothing.
+        const float onValue = r->recommendedValue != r->stockValue ? r->recommendedValue
+                            : r->kind == SettingKind::Bool          ? 1.0f
+                                                                    : r->maxValue;
+        setEnhancementValue(enhancements, *r, phase == 0 ? onValue : r->stockValue);
     }
     LOG_WARNING("ENHANCE_AB ", key, " ", phase == 0 ? "on" : "off",
                 all ? std::string() : " (" + settingValue(key) + ")");

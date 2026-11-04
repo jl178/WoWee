@@ -197,7 +197,16 @@ public:
     /// taken only while it is on.
     void setShorelineFoam(bool enabled) {
         shorelineFoam_ = enabled;
-        setRefractionEnabled(enabled);
+        setRefractionEnabled(shorelineFoam_ || causticsStrength_ > 0.0f);
+    }
+    /// Sunlight under water (E15, water_caustics.hpp): the row, which keeps
+    /// the caustics pipelines (made on first use, let go when it goes off),
+    /// and each frame its strength by the sun's height, 0 at night. While the
+    /// strength is above 0 the scene's depth copy is taken for it as well.
+    void setCausticsEnabled(bool on);
+    void setCaustics(float strength) {
+        causticsStrength_ = causticsEnabled_ ? strength : 0.0f;
+        setRefractionEnabled(shorelineFoam_ || causticsStrength_ > 0.0f);
     }
     /// Rain ripples (water.frag, push.rainRipple): how hard it is raining for
     /// the rings, 0..1. 0 - the "Rain ripples" setting off, or dry - draws
@@ -384,6 +393,17 @@ private:
     VkRenderPass water1xKeepDepthRenderPass_ = VK_NULL_HANDLE;
     VkPipeline water1xPipeline = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> water1xFramebuffers;
+
+    // Sunlight under water (water_caustics.frag): the same surfaces again,
+    // before the water, in the scene pass and in the 1x pass. Made on first
+    // use, gone while the row is off.
+    VkPipeline causticsPipeline_ = VK_NULL_HANDLE;
+    VkPipeline caustics1xPipeline_ = VK_NULL_HANDLE;
+    bool causticsEnabled_ = false;
+    bool causticsBuildFailed_ = false;
+    float causticsStrength_ = 0.0f;
+    VkPipeline buildCausticsPipeline(VkRenderPass pass, VkSampleCountFlagBits samples);
+    void destroyCausticsPipelines(bool deferred);
 
     std::vector<WaterSurface> surfaces;
     bool renderingEnabled = true;

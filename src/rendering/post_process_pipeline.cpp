@@ -2,6 +2,7 @@
 // Extracted from Renderer to isolate post-processing concerns.
 
 #include "rendering/post_process_pipeline.hpp"
+#include "rendering/highlight_rolloff.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/vk_pipeline.hpp"
@@ -2007,6 +2008,9 @@ void PostProcessPipeline::renderFXAAPass() {
     // anti-alias at all: the pass also runs for the ghost world and for
     // intoxication with FXAA switched off, and then only colours the scene.
     const float sharpness = 0.0f;
+    // Soft highlights: the shoulder for this glow's reach, or white 0 (off).
+    const highlight_rolloff::Curve roll =
+        highlight_rolloff::curveForGlow(highlightRollOff_, glowWanted() ? glowAmount_ : 0.0f);
     float pc[12] = {
         1.0f / static_cast<float>(ext.width),
         1.0f / static_cast<float>(ext.height),
@@ -2014,8 +2018,8 @@ void PostProcessPipeline::renderFXAAPass() {
         drawnIntoxication(),
         ghost_,
         fxaa_.enabled ? 1.0f : 0.0f,
-        0.0f,
-        0.0f,
+        roll.white,
+        roll.c,
         // The stock glow: strength, how far the picture is swapped for its
         // blur, and whether there is a blur to read this frame.
         glowWanted() ? glowAmount_ : 0.0f,

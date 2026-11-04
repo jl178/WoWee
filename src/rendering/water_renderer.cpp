@@ -2,6 +2,7 @@
 #include "rendering/water_surface_grid.hpp"
 #include "rendering/water_mask.hpp"
 #include "rendering/water_renderer.hpp"
+#include "rendering/water_caustics.hpp"
 #include "pipeline/stock_wmo_liquid.hpp"
 #include "rendering/water_mask.hpp"
 #include "rendering/vk_context.hpp"
@@ -63,8 +64,12 @@ struct WaterPushConstants {
     // for the rings, 0..1; 0 with the setting off or in dry weather, and
     // water.frag then skips them. Only water.frag declares it.
     float rainRipple = 0.0f;
+    // Sunlight under water (not stock, the "Sunlight under water" setting):
+    // its strength by the sun's height; only water_caustics.frag reads it.
+    float caustics = 0.0f;
 };
-static_assert(sizeof(WaterPushConstants) == 124, "water.frag's declaration of this range is laid out for 124 bytes");
+static_assert(sizeof(WaterPushConstants) == 128,
+              "water.frag and water_caustics.frag lay this range out for 128 bytes, the most every device takes");
 
 
 
@@ -253,6 +258,9 @@ void WaterRenderer::recreatePipelines() {
 
     // Destroy old pipeline (keep layout)
     destroy(device, waterPipeline);
+    // Rebuilt against the new sample count the next time they draw.
+    destroyCausticsPipelines(false);
+    causticsBuildFailed_ = false;
 
     // Load shaders
     VkShaderModule vertShader, fragShader;
@@ -299,6 +307,86 @@ void WaterRenderer::recreatePipelines() {
 
     if (!waterPipeline) {
         LOG_ERROR("WaterRenderer::recreatePipelines: failed to create pipeline");
+    }
+}
+
+// Sunlight under water: water.vert with water_caustics.frag, the water's
+// layout and vertex format, depth tested and not written, blended
+// dst * (1 + src) in colour and the destination's alpha kept.
+VkPipeline WaterRenderer::buildCausticsPipeline(VkRenderPass pass, VkSampleCountFlagBits samples) {
+    if (!vkCtx || !pipelineLayout || pass == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+    VkDevice device = vkCtx->getDevice();
+    VkShaderModule vertShader, fragShader;
+    if (!vertShader.loadFromFile(device, "assets/shaders/water.vert.spv") ||
+        !fragShader.loadFromFile(device, "assets/shaders/water_caustics.frag.spv")) {
+        LOG_WARNING("WaterRenderer: water_caustics.frag.spv missing - no sunlight under water");
+        vertShader.destroy();
+        fragShader.destroy();
+        return VK_NULL_HANDLE;
+    }
+    VkVertexInputBindingDescription vertBinding{};
+    vertBinding.binding = 0;
+    vertBinding.stride = 8 * sizeof(float);
+    vertBinding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    std::vector<VkVertexInputAttributeDescription> vertAttribs = {
+        { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0 },
+        { .location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 6 * sizeof(float) },
+        { .location = 2, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 3 * sizeof(float) },
+    };
+    VkPipelineColorBlendAttachmentState blend{};
+    blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    blend.blendEnable = VK_TRUE;
+    blend.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
+    blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+    blend.colorBlendOp = VK_BLEND_OP_ADD;
+    blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blend.alphaBlendOp = VK_BLEND_OP_ADD;
+    VkPipeline p = PipelineBuilder()
+        .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
+                    fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+        .setVertexInput({ vertBinding }, vertAttribs)
+        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+        .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
+        .setColorBlendAttachment(blend)
+        .setMultisample(samples)
+        .setLayout(pipelineLayout)
+        .setRenderPass(pass)
+        .setDynamicStates(viewportAndScissorDynamic())
+        .build(device, vkCtx->getPipelineCache());
+    vertShader.destroy();
+    fragShader.destroy();
+    if (!p) LOG_WARNING("WaterRenderer: failed to create the caustics pipeline");
+    return p;
+}
+
+void WaterRenderer::destroyCausticsPipelines(bool deferred) {
+    if (!vkCtx) return;
+    VkDevice device = vkCtx->getDevice();
+    for (VkPipeline* pp : {&causticsPipeline_, &caustics1xPipeline_}) {
+        VkPipeline p = *pp;
+        *pp = VK_NULL_HANDLE;
+        if (!p) continue;
+        if (deferred) {
+            vkCtx->deferAfterAllFrameFences([device, p]() { vkDestroyPipeline(device, p, nullptr); });
+        } else {
+            vkDestroyPipeline(device, p, nullptr);
+        }
+    }
+}
+
+void WaterRenderer::setCausticsEnabled(bool on) {
+    if (on == causticsEnabled_) return;
+    causticsEnabled_ = on;
+    causticsBuildFailed_ = false;
+    if (!on) {
+        // Off: nothing drawn from the next frame, and the pipelines go once
+        // no frame in flight can still be using them.
+        causticsStrength_ = 0.0f;
+        setRefractionEnabled(shorelineFoam_);
+        destroyCausticsPipelines(true);
     }
 }
 
@@ -1441,6 +1529,27 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     Frustum frustum;
     frustum.extractFromMatrix(camera.getViewProjectionMatrix());
 
+    // Frustum cull: the AABB from the surface's origin and step vectors.
+    auto surfaceInView = [&frustum](const WaterSurface& surface) {
+        const glm::vec3 extentX = surface.stepX * static_cast<float>(surface.width);
+        const glm::vec3 extentY = surface.stepY * static_cast<float>(surface.height);
+        const glm::vec3 c0 = surface.origin;
+        const glm::vec3 c1 = surface.origin + extentX;
+        const glm::vec3 c2 = surface.origin + extentY;
+        const glm::vec3 c3 = surface.origin + extentX + extentY;
+        const glm::vec3 aabbMin(
+            std::min({c0.x, c1.x, c2.x, c3.x}),
+            std::min({c0.y, c1.y, c2.y, c3.y}),
+            surface.minHeight
+        );
+        const glm::vec3 aabbMax(
+            std::max({c0.x, c1.x, c2.x, c3.x}),
+            std::max({c0.y, c1.y, c2.y, c3.y}),
+            surface.maxHeight
+        );
+        return frustum.intersectsAABB(aabbMin, aabbMax);
+    };
+
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
@@ -1451,27 +1560,7 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     for (const auto& surface : surfaces) {
         if (surface.vertexBuffer == VK_NULL_HANDLE || surface.indexCount == 0) continue;
         if (!surface.materialSet) continue;
-
-        // Frustum cull: compute AABB from surface origin + step vectors
-        {
-            const glm::vec3 extentX = surface.stepX * static_cast<float>(surface.width);
-            const glm::vec3 extentY = surface.stepY * static_cast<float>(surface.height);
-            const glm::vec3 c0 = surface.origin;
-            const glm::vec3 c1 = surface.origin + extentX;
-            const glm::vec3 c2 = surface.origin + extentY;
-            const glm::vec3 c3 = surface.origin + extentX + extentY;
-            const glm::vec3 aabbMin(
-                std::min({c0.x, c1.x, c2.x, c3.x}),
-                std::min({c0.y, c1.y, c2.y, c3.y}),
-                surface.minHeight
-            );
-            const glm::vec3 aabbMax(
-                std::max({c0.x, c1.x, c2.x, c3.x}),
-                std::max({c0.y, c1.y, c2.y, c3.y}),
-                surface.maxHeight
-            );
-            if (!frustum.intersectsAABB(aabbMin, aabbMax)) continue;
-        }
+        if (!surfaceInView(surface)) continue;
 
         // Basic type and texture sequence from LiquidType.dbc, not from the
         // ID's position in the table: Naxxramas slime is ID 21 and a magma.
@@ -1541,6 +1630,55 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
         vkCmdDrawIndexed(cmd, static_cast<uint32_t>(surface.indexCount), 1, 0, 0, 0);
     }
+
+    // Sunlight under water (not stock): every water and ocean surface in view
+    // once more, after the water, with the caustics blend - it brightens the
+    // shallows as seen through the surface where the net of light crosses the
+    // bed. (Drawn under the water instead it was all but hidden: the stock
+    // water's alpha leaves a tenth or two of the bed showing.) Needs the
+    // scene's depth copy (sceneHistoryReady) and the sun up (strength > 0).
+    if (causticsStrength_ > 0.0f && sceneHistoryReady && causticsEnabled_ && !causticsBuildFailed_) {
+        VkPipeline& cp = use1x ? caustics1xPipeline_ : causticsPipeline_;
+        if (!cp) {
+            cp = use1x ? buildCausticsPipeline(water1xRenderPass, VK_SAMPLE_COUNT_1_BIT)
+                       : buildCausticsPipeline(vkCtx->getImGuiRenderPass(), vkCtx->getMsaaSamples());
+            if (!cp) causticsBuildFailed_ = true;
+        }
+        if (cp) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, cp);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
+                                     0, 1, &perFrameSet, 0, nullptr);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
+                                     2, 1, &activeSceneSet, 0, nullptr);
+            WaterPushConstants push{};
+            push.model = glm::mat4(1.0f);
+            push.screenSize = glm::vec2(static_cast<float>(renderExtent_.width),
+                                        static_cast<float>(renderExtent_.height));
+            push.depthRange = glm::vec2(camera.getNearPlane(), camera.getFarPlane());
+            push.sceneValid = 1.0f;
+            push.caustics = causticsStrength_;
+            vkCmdPushConstants(cmd, pipelineLayout,
+                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                0, sizeof(WaterPushConstants), &push);
+            const glm::vec3 eye = camera.getPosition();
+            for (const auto& surface : surfaces) {
+                if (surface.vertexBuffer == VK_NULL_HANDLE || surface.indexCount == 0) continue;
+                const LiquidInfo liquid = resolveLiquid(surface.liquidType);
+                if (!water_caustics::liquidTakesCaustics(liquid.basicType, surface.interior)) continue;
+                if (!surfaceInView(surface)) continue;
+                // Nothing is drawn past the net's fade-out distance: a surface
+                // wholly beyond it (most of an ocean) is not drawn again at all.
+                if (water_caustics::beyondReach(surface.origin, surface.stepX * static_cast<float>(surface.width),
+                                                surface.stepY * static_cast<float>(surface.height),
+                                                surface.minHeight, surface.maxHeight, eye)) continue;
+                VkDeviceSize offset = 0;
+                vkCmdBindVertexBuffers(cmd, 0, 1, &surface.vertexBuffer, &offset);
+                vkCmdBindIndexBuffer(cmd, surface.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(cmd, static_cast<uint32_t>(surface.indexCount), 1, 0, 0, 0);
+            }
+        }
+    }
+
 }
 
 void WaterRenderer::captureSceneHistory(VkCommandBuffer cmd,
@@ -2509,6 +2647,9 @@ void WaterRenderer::destroyWater1xResources() {
     }
     water1xFramebuffers.clear();
     destroy(device, water1xPipeline);
+    // The 1x caustics pipeline names the pass going away; both are made
+    // again on demand.
+    destroyCausticsPipelines(false);
     if (water1xRenderPass) { vkDestroyRenderPass(device, water1xRenderPass, nullptr); water1xRenderPass = VK_NULL_HANDLE; }
     if (water1xKeepDepthRenderPass_) {
         vkDestroyRenderPass(device, water1xKeepDepthRenderPass_, nullptr);

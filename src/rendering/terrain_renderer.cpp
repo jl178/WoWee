@@ -1,6 +1,7 @@
 #include "rendering/terrain_vertex.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/terrain_renderer.hpp"
+#include "rendering/cliff_projection.hpp"
 #include "core/hitch_legacy.hpp"
 #include "rendering/stream_fade.hpp"
 #include "rendering/terrain_mega_slots.hpp"
@@ -378,6 +379,8 @@ void TerrainRenderer::recreatePipelines() {
     destroy(device, wireframePipeline);
     const bool hadFade = fadePipeline_ != VK_NULL_HANDLE;
     destroy(device, fadePipeline_);
+    destroy(device, cliffPipeline_);
+    destroy(device, cliffFadePipeline_);
 
     // Load shaders
     VkShaderModule vertShader, fragShader;
@@ -396,23 +399,24 @@ void TerrainRenderer::recreatePipelines() {
     vertShader.destroy();
     fragShader.destroy();
     if (hadFade) (void)buildFadePipeline();
+    if (cliffOn_) buildCliffPipelines();
     if (horizon_) horizon_->recreatePipeline();
 }
 
-bool TerrainRenderer::buildFadePipeline() {
-    if (!vkCtx || !pipelineLayout || fadePipeline_) return fadePipeline_ != VK_NULL_HANDLE;
+VkPipeline TerrainRenderer::buildFillVariant(const char* fragPath) {
+    if (!vkCtx || !pipelineLayout) return VK_NULL_HANDLE;
     VkDevice device = vkCtx->getDevice();
     VkShaderModule vertShader, fragShader;
     if (!vertShader.loadFromFile(device, "assets/shaders/terrain.vert.spv") ||
-        !fragShader.loadFromFile(device, "assets/shaders/terrain_fade.frag.spv")) {
-        LOG_WARNING("TerrainRenderer: terrain_fade.frag.spv missing - terrain pops in as stock");
+        !fragShader.loadFromFile(device, fragPath)) {
+        LOG_WARNING("TerrainRenderer: ", fragPath, " missing - drawn by the stock pipeline");
         vertShader.destroy();
         fragShader.destroy();
-        return false;
+        return VK_NULL_HANDLE;
     }
-    // The fill pipeline's state exactly, with the fade build of the fragment
+    // The fill pipeline's state exactly, with another build of the fragment
     // shader (buildMainPassPipelines).
-    fadePipeline_ = PipelineBuilder()
+    VkPipeline p = PipelineBuilder()
         .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
                     fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
         .setVertexInput({ perVertexBinding(sizeof(pipeline::TerrainVertex)) },
@@ -428,7 +432,41 @@ bool TerrainRenderer::buildFadePipeline() {
         .build(device, vkCtx->getPipelineCache());
     vertShader.destroy();
     fragShader.destroy();
+    return p;
+}
+
+bool TerrainRenderer::buildFadePipeline() {
+    if (!vkCtx || !pipelineLayout) return false;
+    if (!fadePipeline_) fadePipeline_ = buildFillVariant("assets/shaders/terrain_fade.frag.spv");
+    if (cliffOn_ && !cliffFadePipeline_) {
+        cliffFadePipeline_ = buildFillVariant("assets/shaders/terrain_cliff_fade.frag.spv");
+    }
     return fadePipeline_ != VK_NULL_HANDLE;
+}
+
+void TerrainRenderer::buildCliffPipelines() {
+    if (!cliffPipeline_) cliffPipeline_ = buildFillVariant("assets/shaders/terrain_cliff.frag.spv");
+    if (streamFadeOn_ && !cliffFadePipeline_) {
+        cliffFadePipeline_ = buildFillVariant("assets/shaders/terrain_cliff_fade.frag.spv");
+    }
+}
+
+void TerrainRenderer::setCliffProjection(bool on) {
+    if (on == cliffOn_) return;
+    cliffOn_ = on;
+    if (on) {
+        buildCliffPipelines();
+        return;
+    }
+    // Off: the stock pipelines from the next frame, and these go once no
+    // frame in flight can still be drawing with them.
+    if (!vkCtx) return;
+    VkDevice device = vkCtx->getDevice();
+    for (VkPipeline* pp : {&cliffPipeline_, &cliffFadePipeline_}) {
+        VkPipeline p = *pp;
+        *pp = VK_NULL_HANDLE;
+        if (p) vkCtx->deferAfterAllFrameFences([device, p]() { vkDestroyPipeline(device, p, nullptr); });
+    }
 }
 
 void TerrainRenderer::setStreamFadeIn(bool on) {
@@ -441,11 +479,13 @@ void TerrainRenderer::setStreamFadeIn(bool on) {
     // Off: nothing stays stamped, and the pipeline goes once no frame in
     // flight can still be drawing with it.
     for (auto& c : chunks) c.streamFadeStart = -1.0f;
-    if (fadePipeline_ && vkCtx) {
+    if (vkCtx) {
         VkDevice device = vkCtx->getDevice();
-        VkPipeline p = fadePipeline_;
-        fadePipeline_ = VK_NULL_HANDLE;
-        vkCtx->deferAfterAllFrameFences([device, p]() { vkDestroyPipeline(device, p, nullptr); });
+        for (VkPipeline* pp : {&fadePipeline_, &cliffFadePipeline_}) {
+            VkPipeline p = *pp;
+            *pp = VK_NULL_HANDLE;
+            if (p) vkCtx->deferAfterAllFrameFences([device, p]() { vkDestroyPipeline(device, p, nullptr); });
+        }
     }
 }
 
@@ -496,6 +536,8 @@ void TerrainRenderer::shutdown() {
     destroy(device, pipeline);
     destroy(device, wireframePipeline);
     destroy(device, fadePipeline_);
+    destroy(device, cliffPipeline_);
+    destroy(device, cliffFadePipeline_);
     destroy(device, pipelineLayout);
     destroy(device, materialDescPool);
     destroy(device, materialSetLayout);
@@ -1602,7 +1644,13 @@ void TerrainRenderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     const size_t begin = total * part / parts;
     const size_t end = total * (part + 1) / parts;
 
-    VkPipeline activePipeline = (wireframe && wireframePipeline) ? wireframePipeline : pipeline;
+    // Unstretched cliffs (E16) on: its build of the fill pipeline for every
+    // chunk, the fade twin for those dissolving in.
+    // Only for the chunks with a steep slope in them (TerrainChunkGPU::steep);
+    // the rest take the stock pipelines, which is what they would draw.
+    const bool cliff = cliffOn_ && cliffPipeline_ != VK_NULL_HANDLE && !(wireframe && wireframePipeline);
+    VkPipeline fillPipeline = pipeline;
+    VkPipeline activePipeline = (wireframe && wireframePipeline) ? wireframePipeline : fillPipeline;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
@@ -1634,16 +1682,26 @@ void TerrainRenderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     // pipeline and its hidden fraction; the rest with the stock one. Neither
     // the wireframe view nor the row off ever binds it.
     const bool fadeChunks = streamFadeOn_ && fadePipeline_ != VK_NULL_HANDLE &&
-                            activePipeline == pipeline;
+                            activePipeline == fillPipeline;
     VkPipeline boundPipeline = activePipeline;
 
+    // In the usual order, switching pipeline where a steep chunk follows a
+    // flat one: drawing the steep ones in a pass of their own was tried and
+    // moved the terrain pass by -1.6 to +1.3 ms with the view (the change of
+    // order changes what the depth test rejects), more than the switches.
     for (size_t vi = begin; vi < end; ++vi) {
         const auto& chunk = chunks[visibleChunks_[vi]];
 
-        if (fadeChunks) {
-            const float hide = chunk.streamFadeStart >= 0.0f
+        if (fadeChunks || cliff) {
+            const float hide = fadeChunks && chunk.streamFadeStart >= 0.0f
                 ? stream_fade::hidden(chunk.streamFadeStart, streamFadeClock_) : 0.0f;
-            VkPipeline want = hide > 0.0f ? fadePipeline_ : activePipeline;
+            const bool steep = cliff && chunk.steep;
+            VkPipeline want = activePipeline;
+            if (hide > 0.0f) {
+                want = steep && cliffFadePipeline_ ? cliffFadePipeline_ : fadePipeline_;
+            } else if (steep) {
+                want = cliffPipeline_;
+            }
             if (want != boundPipeline) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want);
                 boundPipeline = want;
@@ -2119,6 +2177,19 @@ void TerrainRenderer::calculateBoundingSphere(TerrainChunkGPU& gpuChunk,
     }
 
     gpuChunk.boundingSphereCenter = (min + max) * 0.5f;
+
+    // Steep enough anywhere for the cliff pipelines to draw anything but the
+    // stock read (cliff_projection.hpp); a hair of margin for the shader's
+    // own normalising.
+    gpuChunk.steep = false;
+    for (const auto& vertex : meshChunk.vertices) {
+        const glm::vec3 n(vertex.normal[0], vertex.normal[1], vertex.normal[2]);
+        const float len = glm::length(n);
+        if (len > 1e-4f && std::fabs(n.z) / len < cliff_projection::kFlatNormalZ + 0.01f) {
+            gpuChunk.steep = true;
+            break;
+        }
+    }
 
     float maxDistSq = 0.0f;
     for (const auto& vertex : meshChunk.vertices) {

@@ -52,6 +52,12 @@ struct Enhancements {
     /// Generated parallax depth from the same maps.
     bool  parallax = false;
     int   parallaxQuality = 1;
+    /// Steep slopes take their layer textures from the side as well as from
+    /// above, so a cliff shows the rock painted rather than the same texture
+    /// pulled into streaks down the slope (terrain_cliff.frag, E16). Ground
+    /// flatter than 45 degrees is drawn as stock either way. Off is the
+    /// stock top-down mapping everywhere.
+    bool  cliffProjection = false;
 
     // ---- Sky and air -------------------------------------------------------
     /// Volumetric mist and light shafts: 0 off, 1-3 the volume's size.
@@ -63,6 +69,11 @@ struct Enhancements {
     /// Fog thickness and fog sky blend. 1 and 0 are Light.dbc's own fog.
     float fogStrength = 1.0f;
     float fogSkyBlend = 0.0f;
+    /// The stock full-screen glow can push a bright surface past white, where
+    /// stock clips it flat; this rolls those channels off on a soft shoulder
+    /// above 0.8 instead, scaled to the glow's own reach (highlight_rolloff.hpp,
+    /// E18). Nothing below 0.8 changes, and with no glow nothing changes.
+    bool  highlightRollOff = false;
 
     // ---- Water and weather -------------------------------------------------
     bool  shorelineFoam = false;
@@ -80,6 +91,10 @@ struct Enhancements {
     /// direction, its eased strength and its rolling gusts (Weather::setWind).
     /// Stock rain and snow fall on their own fixed drift.
     bool  weatherWind = false;
+    /// Soft moving light from the sun on the ground and anything else under
+    /// shallow water, fading out with depth and at night (water_caustics.frag,
+    /// E15). Stock water lights nothing beneath it.
+    bool  caustics = false;
 
     // ---- Motion ------------------------------------------------------------
     /// How hard the wind moves trees and cloth. 0 is stock: nothing sways.
