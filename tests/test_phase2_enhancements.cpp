@@ -151,7 +151,15 @@ TEST_CASE("rain ripples: eased in and out, and dry lands on zero", "[enhancement
 // ---------------------------------------------------------------- rows
 TEST_CASE("the phase 2 rows are off in Classic and on in the recommended set", "[enhancements]") {
     using namespace wowee::ui;
-    for (const char* key : {"softparticles", "streamfadein", "rainripples", "corpsesettle", "mountdust"}) {
+    // Soft particles are off in the recommended set too, for the set's CPU
+    // budget (enhancements-plan.md 3.11); still off in Classic.
+    {
+        const EnhancementRow* r = findEnhancementRow("softparticles");
+        REQUIRE(r != nullptr);
+        CHECK(r->stockValue == 0.0f);
+        CHECK(r->recommendedValue == 0.0f);
+    }
+    for (const char* key : {"streamfadein", "rainripples", "corpsesettle", "mountdust"}) {
         INFO(key);
         const EnhancementRow* r = findEnhancementRow(key);
         REQUIRE(r != nullptr);

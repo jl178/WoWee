@@ -93,15 +93,26 @@ Two cautions from doing this on the Iris Xe:
   be told apart.
 - Another client on the same GPU, or a build on the CPU (the iGPU shares
   the power budget and the memory bus), moves a window by a millisecond or
-  two. Check `uptime` and other clients before trusting a small difference.
+  two - and a `-j4` compile can take a 15 ms frame to 60-90 ms. Check
+  `uptime` and other clients before trusting a small difference; the
+  2026-11-04 runs (enhancements-plan.md 3.11) logged both every 10 s and
+  dropped the windows within 10 s of either.
+- Pair many short windows rather than few long ones. Goldshire's road view
+  swings by 3 ms on a ~16 s cycle of its own, so three 4 s cycles read
+  rows that cannot cost anything at +-1.5 ms; only the whole set's flip
+  stands clear of that there.
+- Set the camera again right before the first window: a teleport still
+  loading when the script's first camera call lands resets the camera, and
+  the view - not the build - then moves the numbers.
 
 `WOWEE_LIGHT_TILES=0` turns the local-light grid off (every pixel walks
 every light, as before it), and `WOWEE_SHADOW_CASTERS=terrain,wmo,m2,characters`
 draws only the named shadow casters. `WOWEE_SHADOW_SPLIT=0` draws the sun's
 shadow as one map with every caster every frame, as before the split below;
-`WOWEE_UNIT_SHADOW_CAP=<n>` changes how many units the unit map takes (128,
-0 for all); `WOWEE_FOG_HALF_RATE=0` lights every cell of the mist every
-frame.
+`WOWEE_UNIT_SHADOW_CAP=<n>` changes how many units the unit map takes (64,
+0 for all); `WOWEE_UNIT_SHADOW_VIEW_CULL=0` draws into it the units whose
+shadow cannot be seen as well; `WOWEE_FOG_HALF_RATE=0` lights every cell of
+the mist every frame.
 
 ## The sun's shadow in two maps
 
@@ -123,10 +134,15 @@ Ultra distance on the Iris Xe, for a picture in which almost nothing moves.
   once. Its texels are snapped to the light's grid, so a redraw lands static
   shadows on the same texels and nothing shimmers; a part a frame keeps a
   redraw to about a third of what the one map cost every frame.
-- **The unit map** (units, the 128 nearest; doodads and transports that
-  moved lately) is drawn every frame into a per-slot image half the world
-  map's side, over a fifth of the shadow distance either way (32-90 yd),
-  centred on the player and snapped to its own grid. A 64x64 mask of the
+- **The unit map** (units, the 64 nearest whose shadow can be seen;
+  doodads and transports that moved lately) is drawn every frame into a
+  per-slot image half the world map's side, over a fifth of the shadow
+  distance either way (32-90 yd), centred on the player and snapped to its
+  own grid. A unit's shadow lies in the capsule its bounds sweep down the
+  sun's rays to 40 yards below the lowest of camera, player and unit; one
+  whose capsule is wholly behind a plane of the camera's frustum is not
+  drawn and gets no blob either (`shadowCasterSeen`; not with water
+  reflections on). In the Trade District that is 19-31 of the 64. A 64x64 mask of the
   cells a caster's footprint can reach rides in the per-frame block, and a
   pixel reads the unit map (five taps) only in a marked cell and only if
   the world map has not already shaded it wholly, taking the darker of the
@@ -139,6 +155,32 @@ Ultra distance on the Iris Xe, for a picture in which almost nothing moves.
 - Every 30 s the log says how often the world map was drawn again and why,
   and how many casters the unit map took and how many mask cells they marked
   (`Shadow world map redraws: ...`).
+
+## The enhancement set's budget (2026-11-04)
+
+enhancements-plan.md 3.11 has the tables. In short, what moved the set's
+cost and how:
+
+- The mist's inject (`volumetric_fog_inject.comp.glsl`): a group takes four
+  slices of one parity out of eight (`fogInjectCell`), so on the half-rate
+  frames a carried group returns before gathering lights, and the gather
+  is a 64-bit mask built with shared atomics. Same terms per cell. Inject
+  0.57-0.69 -> 0.27-0.34 ms.
+- The unit map leaves out units whose shadow cannot be seen (above).
+- The light gather walks a per-model list of light batches and fetches
+  instances and models ahead; it was waiting on memory. 0.17 -> 0.12 ms
+  (Stormwind), 0.31 -> 0.20 (Dalaran).
+- Unit blobs are collected in view only (cheaper in stock as well).
+- Parallax eases out between 25 and 45 yards; its cost never depended on
+  the step count.
+- Soft particles and parallax are off in the recommended set.
+
+The set against stock, after: Stormwind +1.34 ms GPU / +0.48 ms CPU
+(inside 3 / 0.5), Dalaran +1.37 / +0.55, Goldshire's road view +6.73 /
++0.34. Still over: Goldshire's road view on GPU (the whole set costs about
+twice what its rows add up to; the iGPU's clock under load is the suspect,
+not yet measured) and, just, Dalaran on CPU (the unit map's recording on
+the main thread, the light gather, the motion rows).
 
 ## Where the time went (Northshire, 2000 playerbots, Ultra preset)
 

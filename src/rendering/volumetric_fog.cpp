@@ -34,7 +34,9 @@ constexpr uint32_t kIntegrateGroup = 8;  // 8x8x1, volumetric_fog_integrate.comp
 
 /// The three volume sizes. Depth matters most - it is what resolves a shaft
 /// from the air either side of it - so the smallest keeps every slice and
-/// gives up screen tiles instead.
+/// gives up screen tiles instead. The depth is a multiple of eight: an inject
+/// group takes four slices of one parity out of eight (groupCell in
+/// volumetric_fog_inject.comp.glsl).
 glm::uvec3 sizeForQuality(VolumetricFog::Quality q) {
     switch (q) {
         case VolumetricFog::Quality::Low:    return {96, 54, 64};
@@ -449,8 +451,9 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
     p.jitter = glm::vec4(halton(seq, 2), halton(seq, 3), halton(seq, 5), history ? 0.9f : 0.0f);
     // Half the slices are lit afresh each frame, alternating; the other half
     // carry last frame's air, reprojected, which the history blend would
-    // have kept nine tenths of anyway. Whole slices, so a SIMD lane group -
-    // a 4x4 slab of one slice - takes one branch. Not without a history to
+    // have kept nine tenths of anyway. Whole slices, and an inject group's
+    // four slices are of one parity, so a carried group returns before it
+    // gathers lights and only the lit half pays for that. Not without a history to
     // carry (the first frame, after a teleport), nor with
     // WOWEE_FOG_HALF_RATE=0.
     static const bool halfRate = [] {

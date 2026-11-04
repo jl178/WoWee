@@ -33,4 +33,15 @@ inline std::array<glm::vec3, 4> froxelCornerRays(const glm::mat4& view, const gl
     return rays;
 }
 
+/// The cell an inject invocation lights: groupCell in
+/// volumetric_fog_inject.comp.glsl, which this mirrors. A 4x4x4 group takes
+/// four slices of one parity out of eight - group z = 2b + p takes slices
+/// 8b + p, 8b + p + 2, 8b + p + 4 and 8b + p + 6 - so on a half-rate frame
+/// the carried slices are whole groups, which skip the light gather. The
+/// volume's depth is a multiple of eight; the dispatch is depth / 4 groups.
+inline glm::uvec3 fogInjectCell(const glm::uvec3& group, const glm::uvec3& local) {
+    return {group.x * 4u + local.x, group.y * 4u + local.y,
+            8u * (group.z >> 1) + (group.z & 1u) + 2u * local.z};
+}
+
 }  // namespace wowee::rendering

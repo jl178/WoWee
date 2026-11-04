@@ -30,6 +30,9 @@ namespace wowee {
 namespace pipeline { class AssetManager; }
 namespace rendering {
 
+struct ShadowReceiverView;  // shadow_cache.hpp
+class Frustum;
+
 // Forward declarations
 class Camera;
 class VkContext;
@@ -178,10 +181,13 @@ public:
                                 wowee::rendering::VkShaderModule& charFrag);
     [[nodiscard]] bool initializeShadow(VkRenderPass shadowRenderPass);
     /// `casterSpheres`, when given, gets each drawn unit's bounding sphere
-    /// (centre, radius), for the unit shadow map's mask.
+    /// (centre, radius), for the unit shadow map's mask. `seen`, when given,
+    /// leaves out the units whose shadow cannot land in the camera's view
+    /// (shadowCasterSeen); they count as cast, so they get no blob either.
     void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
                       const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f,
-                      std::vector<glm::vec4>* casterSpheres = nullptr);
+                      std::vector<glm::vec4>* casterSpheres = nullptr,
+                      const ShadowReceiverView* seen = nullptr);
 
     void setInstancePosition(uint32_t instanceId, const glm::vec3& position);
     void setInstanceRotation(uint32_t instanceId, const glm::vec3& rotation);
@@ -429,9 +435,12 @@ public:
     /// maxCount. Riders, attached items, effect and scene models are left
     /// out: a mounted unit's blob is its mount's. skipSunShadowCasters leaves
     /// out the units drawn into a sun shadow map in the last shadow pass
-    /// (with shadows on, only the rest take the blob).
+    /// (with shadows on, only the rest take the blob). `view`, when given,
+    /// leaves out the units whose blob lies wholly outside it - it would draw
+    /// nothing - before the nearest maxCount are taken.
     void collectUnitBlobs(const glm::vec3& cameraPos, float maxDist, size_t maxCount,
-                          std::vector<BlobSource>& out, bool skipSunShadowCasters = false) const;
+                          std::vector<BlobSource>& out, bool skipSunShadowCasters = false,
+                          const Frustum* view = nullptr) const;
     /// Starts a shadow pass's record of which units cast a sun shadow.
     void beginSunShadowFrame() { ++sunShadowStamp_; }
 
@@ -931,7 +940,7 @@ private:
     /// range, dropped by the light-space cull, drawn, bone copies made and
     /// skipped, frames.
     struct ShadowProfile {
-        uint64_t walked = 0, inRange = 0, lightCulled = 0, drawn = 0;
+        uint64_t walked = 0, inRange = 0, lightCulled = 0, viewCulled = 0, drawn = 0;
         uint64_t boneCopies = 0, boneReuses = 0, frames = 0;
     } shadowProf_;
 

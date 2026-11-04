@@ -1138,7 +1138,18 @@ void M2Renderer::renderSoftParticles(VkCommandBuffer cmd, VkDescriptorSet perFra
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 3, 1, &depthSet, 0, nullptr);
     VkDeviceSize vbOffset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &particleRecordBuf_[frame], &vbOffset);
+    // This pass is recorded on the main thread (the scene pass's particles
+    // are on the M2 worker), so what a run sets is set only when it differs
+    // from the run before: the texture, the tile and blend constants. The
+    // draws and their order are the same. (Recording it on a worker instead
+    // was tried: the job could start only once the M2 worker had written the
+    // records, and the main thread then waited on it - no time came back,
+    // enhancements-plan.md 3.11.)
     VkPipeline current = VK_NULL_HANDLE;
+    VkDescriptorSet currentTex = VK_NULL_HANDLE;
+    struct Push { float tileX, tileY; uint32_t blend, pad; };
+    Push currentPc{};
+    bool havePc = false;
     for (auto& run : particleRuns_) {
         if (run.count == 0 || !run.group) continue;
         ParticleGroup& group = *run.group;
@@ -1150,12 +1161,19 @@ void M2Renderer::renderSoftParticles(VkCommandBuffer cmd, VkDescriptorSet perFra
         }
         const VkDescriptorSet texSet = particleTexSet(group);
         if (texSet == VK_NULL_HANDLE) continue;
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 1, 1, &texSet, 0, nullptr);
-        struct { float tileX, tileY; uint32_t blend, pad; } pc = {
-            .tileX = static_cast<float>(group.tilesX), .tileY = static_cast<float>(group.tilesY),
-            .blend = blendType, .pad = 0};
-        vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
-                           sizeof(pc), &pc);
+        if (texSet != currentTex) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 1, 1, &texSet, 0, nullptr);
+            currentTex = texSet;
+        }
+        const Push pc = {.tileX = static_cast<float>(group.tilesX), .tileY = static_cast<float>(group.tilesY),
+                         .blend = blendType, .pad = 0};
+        if (!havePc || pc.tileX != currentPc.tileX || pc.tileY != currentPc.tileY ||
+            pc.blend != currentPc.blend) {
+            vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                               sizeof(pc), &pc);
+            currentPc = pc;
+            havePc = true;
+        }
         vkCmdDraw(cmd, 4, run.count, 0, run.first);
     }
 }

@@ -159,3 +159,75 @@ TEST_CASE("Movers stay movers for a while after they stop", "[shadow_cache]") {
     // Across the counter's wrap.
     REQUIRE(shadowRecentlyMoved(5u, 0xFFFFFFF0u));
 }
+
+namespace {
+
+// The camera's frustum as Frustum::extractFromMatrix makes it (Vulkan depth
+// 0..1), inward normals, normalised.
+ShadowReceiverView viewFor(const glm::mat4& vp, const glm::vec3& sunRay, float floorZ) {
+    ShadowReceiverView v;
+    const auto row = [&](int r) { return glm::vec4(vp[0][r], vp[1][r], vp[2][r], vp[3][r]); };
+    const glm::vec4 p[6] = {row(3) + row(0), row(3) - row(0), row(3) + row(1),
+                            row(3) - row(1), row(2), row(3) - row(2)};
+    for (int i = 0; i < 6; ++i) v.planes[i] = p[i] / glm::length(glm::vec3(p[i]));
+    v.sunRay = sunRay;
+    v.floorZ = floorZ;
+    return v;
+}
+
+bool inClip(const glm::mat4& vp, const glm::vec3& q) {
+    const glm::vec4 c = vp * glm::vec4(q, 1.0f);
+    return c.w > 0.0f && std::abs(c.x) <= c.w && std::abs(c.y) <= c.w && c.z >= 0.0f && c.z <= c.w;
+}
+
+}  // namespace
+
+TEST_CASE("Unit shadow view cull: a culled caster's shadow is never in view", "[shadow_cache]") {
+    const glm::vec3 eye(10.0f, -20.0f, 12.0f);
+    glm::mat4 proj = glm::perspective(glm::radians(60.0f), 1.27f, 0.5f, 2000.0f);
+    proj[1][1] *= -1.0f;
+    std::mt19937 rng(1234);
+    std::uniform_real_distribution<float> u(-1.0f, 1.0f);
+    int culled = 0, kept = 0;
+    for (int view = 0; view < 40; ++view) {
+        const glm::vec3 look = glm::normalize(glm::vec3(u(rng), u(rng), -0.2f + 0.2f * u(rng)));
+        const glm::mat4 vp = proj * glm::lookAt(eye, eye + look, glm::vec3(0, 0, 1));
+        const glm::vec3 sun = glm::normalize(glm::vec3(u(rng), u(rng), -0.15f - 0.85f * std::abs(u(rng))));
+        const float floorZ = eye.z - 40.0f;
+        const ShadowReceiverView v = viewFor(vp, sun, floorZ);
+        for (int i = 0; i < 200; ++i) {
+            const glm::vec3 c = eye + glm::vec3(70.0f * u(rng), 70.0f * u(rng), 5.0f * u(rng));
+            const float r = 1.0f + 2.0f * std::abs(u(rng));
+            if (shadowCasterSeen(v, c, r)) { ++kept; continue; }
+            ++culled;
+            // Points the caster can shade: its sphere carried down the ray to
+            // the floor. None of them may be in view.
+            const float reach = shadowReachAlongRay(c, r, sun, floorZ, v.maxReach);
+            for (int s = 0; s <= 64; ++s) {
+                const glm::vec3 along = c + sun * (reach * static_cast<float>(s) / 64.0f);
+                for (int k = 0; k < 12; ++k) {
+                    const glm::vec3 off = glm::normalize(glm::vec3(u(rng), u(rng), u(rng))) * r * std::abs(u(rng));
+                    REQUIRE_FALSE(inClip(vp, along + off));
+                }
+            }
+        }
+    }
+    // It does cull: units behind the camera under a high sun.
+    REQUIRE(culled > 1000);
+    REQUIRE(kept > 1000);
+}
+
+TEST_CASE("Unit shadow view cull: a shadow thrown into view is kept", "[shadow_cache]") {
+    // The camera looks north; a unit five yards behind it, the sun low in
+    // the south: its shadow runs forward under the camera into the view.
+    const glm::vec3 eye(0.0f, 0.0f, 10.0f);
+    glm::mat4 proj = glm::perspective(glm::radians(60.0f), 1.27f, 0.5f, 2000.0f);
+    proj[1][1] *= -1.0f;
+    const glm::mat4 vp = proj * glm::lookAt(eye, eye + glm::vec3(0, 1, -0.3f), glm::vec3(0, 0, 1));
+    const glm::vec3 lowSouthSun = glm::normalize(glm::vec3(0.0f, 1.0f, -0.3f));
+    const ShadowReceiverView v = viewFor(vp, lowSouthSun, eye.z - 40.0f);
+    REQUIRE(shadowCasterSeen(v, glm::vec3(0.0f, -5.0f, 1.0f), 1.5f));
+    // The same unit under a sun in the north: its shadow falls behind it.
+    const glm::vec3 lowNorthSun = glm::normalize(glm::vec3(0.0f, -1.0f, -0.3f));
+    REQUIRE_FALSE(shadowCasterSeen(viewFor(vp, lowNorthSun, eye.z - 40.0f), glm::vec3(0.0f, -5.0f, 1.0f), 1.5f));
+}
