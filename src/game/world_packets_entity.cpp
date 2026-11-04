@@ -2,6 +2,7 @@
 #include "game/protocol_constants.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/spline_packet.hpp"
+#include "game/game_utils.hpp"
 #include "game/opcodes.hpp"
 #include "game/character.hpp"
 #include "auth/crypto.hpp"
@@ -33,7 +34,13 @@ network::Packet AttackStopPacket::build() {
 
 network::Packet CancelCastPacket::build(uint32_t spellId) {
     network::Packet packet(wireOpcode(Opcode::CMSG_CANCEL_CAST));
-    packet.writeUInt32(0); // cast count/sequence
+    // 3.3.5a: a byte of cast count, then the spell (Wow.exe 0x806200 writes
+    // +0x24 then +0x20; AzerothCore skips the byte and reads the spell). A
+    // whole word of count put the spell one byte late, so the server read
+    // another spell id and its InterruptNonMeleeSpells, which interrupts only
+    // a cast of that id, left the cast running. The older clients send the
+    // spell alone.
+    if (!isPreWotlk()) packet.writeUInt8(0);
     packet.writeUInt32(spellId);
     LOG_DEBUG("Built CMSG_CANCEL_CAST for spell: ", spellId);
     return packet;

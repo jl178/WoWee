@@ -188,8 +188,9 @@ wowee_add_test(test_stock_movement
 
 # ── test_stock_cast_timing ──────────────────────────────────
 # The press-to-cast rules of the stock client: the predicted global cooldown,
-# the once-per-burst cast error, the "not ready" line and the world click.
-# Header-only.
+# the once-per-burst cast error, the "not ready" line, the world click, and
+# casting while moving (the refusal, the casting-time mods, the move-start
+# cancels). Header-only.
 wowee_add_test(test_stock_cast_timing
     SOURCES test_stock_cast_timing.cpp)
 
@@ -2718,9 +2719,8 @@ target_compile_features(test_binding_commands PRIVATE cxx_std_20)
 target_link_libraries(test_binding_commands PRIVATE imgui SDL3::SDL3)
 
 # ── test_tab_target ──────────────────────────────────────────
-# Which units Tab and TargetNearestEnemy may pick: hostile and neutral alike,
-# but not friendly units, critters, or units the server marks unselectable,
-# unattackable or immune to players.
+# TargetNearestEnemy and its siblings as Wow.exe picks: the candidate filter
+# (mode, reach, cone, creature type), the order and the cycling between presses.
 wowee_add_test(test_tab_target
     SOURCES test_tab_target.cpp)
 

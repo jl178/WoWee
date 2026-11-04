@@ -34,6 +34,12 @@ public:
     /// mouse. The pointer itself is the real one - it is warped, so everything
     /// that asks where it is gets the truth - and only the button is faked.
     void setVirtualMouseButton(int button, bool held);
+    /// Where the pointer is said to be, for a scripted click (WoweeDebug_Mouse)
+    /// that cannot move the real one. Held until replaced.
+    void setVirtualMousePosition(glm::vec2 position) {
+        virtualMousePosition = position;
+        hasVirtualMousePosition = true;
+    }
     [[nodiscard]] bool isKeyJustPressed(SDL_Scancode key) const;
 
     // Mouse
@@ -64,6 +70,8 @@ private:
     std::array<bool, NUM_MOUSE_BUTTONS> previousMouseState = {};
 
     glm::vec2 mousePosition = glm::vec2(0.0f);
+    glm::vec2 virtualMousePosition = glm::vec2(0.0f);
+    bool hasVirtualMousePosition = false;
     glm::vec2 previousMousePosition = glm::vec2(0.0f);
     glm::vec2 mouseDelta = glm::vec2(0.0f);
     bool mouseLocked = false;

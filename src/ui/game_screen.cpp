@@ -1727,6 +1727,23 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
         }
     }
 
+    // The world clicks are decided from the input event at the top of the
+    // frame (Application calls processWorldClicks before the world update),
+    // as stock decides them in CGInputControl (0x5FA450 -> 0x5F9600) from the
+    // event; this is the fallback for a frame that did not.
+    if (!worldClicksDone_) processWorldClicks(gameHandler);
+    worldClicksDone_ = false;
+}
+
+void GameScreen::processWorldClicksAtInput(game::GameHandler& gameHandler) {
+    processWorldClicks(gameHandler);
+    worldClicksDone_ = true;
+}
+
+void GameScreen::processWorldClicks(game::GameHandler& gameHandler) {
+    auto& io = ImGui::GetIO();
+    auto& input = core::Input::getInstance();
+
     // Left-click targeting: only on mouse-up if the mouse didn't drag (camera rotate)
     // Record press position on mouse-down
     if (!io.WantCaptureMouse && !frameXmlOwnsMouse() &&

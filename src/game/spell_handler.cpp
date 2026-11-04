@@ -53,6 +53,7 @@ static float mergeCooldownSeconds(float current, float incoming) {
 
 namespace {
 constexpr uint8_t kSpellFailedNotReady = 67;
+constexpr uint8_t kSpellFailedMoving = 51;
 constexpr uint8_t kSpellFailedAlreadyOpen = 8;
 constexpr uint8_t kSpellFailedChestInUse = 25;
 constexpr uint8_t kSpellFailedTryAgain = 132;
@@ -1115,6 +1116,15 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
         return;
     }
 
+    // Moving: refused here with SPELL_FAILED_MOVING, nothing sent, by
+    // 0x739650's rules (it checks after the cooldown, as here) - and before
+    // the dismount below: a cast-time spell pressed on a running mount leaves
+    // the player mounted, as stock does (stock_cast::refusedWhileMoving).
+    if (spellId != 0 && spellId != SPELL_ID_ATTACK && refusedForMoving(spellId)) {
+        refuseCastLocally(spellId, kSpellFailedMoving);
+        return;
+    }
+
     // Casting any spell while mounted → dismount first, then cast (retail
     // behavior: the mount is a cancellable aura that a cast removes). Exception:
     // while actively flying (airborne on a flying mount) retail blocks the cast
@@ -1178,48 +1188,6 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
                      "ms remaining)");
             return;
         }
-    }
-
-    // A spell with a cast time cannot be started while moving, and the answer
-    // is to refuse it - not to stop the player.
-    //
-    // This used to clear the movement flags and send MSG_MOVE_STOP so the
-    // server would accept the cast, on the reading that a server rejecting a
-    // cast-time spell while moving was an obstacle. It is the rule: Spell::
-    // CheckCast answers SPELL_FAILED_MOVING for a cast-time spell from a moving
-    // player, and a mount aura carries AURA_INTERRUPT_FLAG_NOT_SEATED so it is
-    // refused as well. Stopping the player first meant a mount key pressed at a
-    // run halted them and mounted them, which no real client does - reported
-    // from play as being able to mount while running.
-    //
-    // Instant spells are unaffected, which is what keeps casting on the move
-    // working for everything that should.
-    // Named rather than 0x0F, which is the same four bits and says nothing
-    // about which.
-    constexpr uint32_t kHorizontalMove =
-        static_cast<uint32_t>(MovementFlags::FORWARD) |
-        static_cast<uint32_t>(MovementFlags::BACKWARD) |
-        static_cast<uint32_t>(MovementFlags::STRAFE_LEFT) |
-        static_cast<uint32_t>(MovementFlags::STRAFE_RIGHT);
-    const uint32_t moveFlags = owner_.movementInfoRef().flags;
-    const bool isMoving = (moveFlags & kHorizontalMove) != 0;
-    if (isMoving && owner_.getSpellData(spellId).castTimeMs > 0) {
-        // Logged with the flags that decided it.
-        //
-        // The server answers SPELL_FAILED_MOVING in the same words, so a player
-        // who is standing still and told they are moving cannot tell which of
-        // the two said it. This line names the refusal as ours and prints the
-        // bits behind it: a flag still set with no key held is a stop that was
-        // never sent, and the log says which direction it was.
-        LOG_WARNING("Cast refused as moving: spell ", spellId,
-                    " castTime ", owner_.getSpellData(spellId).castTimeMs, "ms",
-                    " flags=0x", std::hex, moveFlags, std::dec,
-                    (moveFlags & static_cast<uint32_t>(MovementFlags::FORWARD)      ? " FORWARD" : ""),
-                    (moveFlags & static_cast<uint32_t>(MovementFlags::BACKWARD)     ? " BACKWARD" : ""),
-                    (moveFlags & static_cast<uint32_t>(MovementFlags::STRAFE_LEFT)  ? " STRAFE_LEFT" : ""),
-                    (moveFlags & static_cast<uint32_t>(MovementFlags::STRAFE_RIGHT) ? " STRAFE_RIGHT" : ""));
-        owner_.raiseUiError("Can't do that while moving");
-        return;
     }
 
     // A spell waiting for a point is put down by any cast that gets this far,
@@ -1603,6 +1571,55 @@ void SpellHandler::refuseCastLocally(uint32_t spellId, uint8_t result) {
     showCastFailure(spellId, result, 0, 0, false);
 }
 
+int32_t SpellHandler::castTimeAfterMods(uint32_t spellId, int32_t baseMs) {
+    owner_.loadSpellNameCache();
+    // 0x7FD970 / 0x7FDB50 for SPELLMOD_CASTING_TIME (10): the mods of every
+    // SpellFamilyFlags bit the spell has, when its family is the player's
+    // class's and SPELL_ATTR3 0x20000000 (no spell mods) is clear.
+    auto it = owner_.spellNameCacheRef().find(spellId);
+    if (it == owner_.spellNameCacheRef().end()) return baseMs;
+    const auto& e = it->second;
+    // ChrClasses SpellClassSet, by class id.
+    static constexpr uint32_t kFamilyByClass[12] = {0, 4, 10, 9, 8, 6, 15, 11, 3, 5, 0, 7};
+    const uint8_t cls = owner_.getPlayerClass();
+    const uint32_t family = cls < 12 ? kFamilyByClass[cls] : 0;
+    if (e.spellFamilyName == 0 || e.spellFamilyName != family || (e.attrEx3 & 0x20000000u))
+        return baseMs;
+    int32_t flat = 0, pct = 0;
+    const auto& flats = owner_.spellFlatModsRef();
+    const auto& pcts = owner_.spellPctModsRef();
+    for (uint8_t bit = 0; bit < 96; ++bit) {
+        if (((e.spellFamilyFlags[bit >> 5] >> (bit & 31)) & 1u) == 0) continue;
+        const GameHandler::SpellModKey key{.op = GameHandler::SpellModOp::CastingTime, .group = bit};
+        if (auto f = flats.find(key); f != flats.end()) flat += f->second;
+        if (auto p = pcts.find(key); p != pcts.end()) pct += p->second;
+    }
+    if (flat == 0 && pct == 0) return baseMs;
+    return stock_cast::applySpellModStock(baseMs, flat, pct);
+}
+
+bool SpellHandler::refusedForMoving(uint32_t spellId) {
+    owner_.loadSpellNameCache();
+    auto it = owner_.spellNameCacheRef().find(spellId);
+    if (it == owner_.spellNameCacheRef().end()) return false;
+    const auto& e = it->second;
+    stock_cast::MovingCastSpell spell;
+    spell.attributesEx = e.attrEx;
+    spell.attributesEx2 = e.attrEx2;
+    spell.targets = e.targetFlags;
+    spell.interruptFlags = e.interruptFlags;
+    spell.auraInterruptFlags = e.auraInterruptFlags;
+    spell.channelInterruptFlags = e.channelInterruptFlags;
+    spell.castTimeMs = castTimeAfterMods(
+        spellId, static_cast<int32_t>(owner_.getSpellData(spellId).castTimeMs));
+    const uint32_t moveFlags = owner_.movementInfoRef().flags;
+    if (!stock_cast::refusedWhileMoving(moveFlags, spell)) return false;
+    LOG_INFO("Cast refused as moving: spell ", spellId, " castTime ", spell.castTimeMs,
+             "ms flags=0x", std::hex, moveFlags, " interrupt=0x", spell.interruptFlags,
+             " channelInterrupt=0x", spell.channelInterruptFlags, std::dec);
+    return true;
+}
+
 int64_t SpellHandler::steadyNowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -1835,6 +1852,45 @@ void SpellHandler::cancelCast() {
         owner_.addonEventCallbackRef()("UNIT_SPELLCAST_STOP", {"player"});
     // Remove the player's build-up (only theirs: other casters keep going)
     cancelCastVisual(owner_.getPlayerGuid());
+}
+
+void SpellHandler::interruptForMoveStart() {
+    // CGInputControl 0x5FAA40, run by every start of movement before its
+    // packet (stock_cast::castCancelledByMoveStart).
+    if (restorationActive_) {
+        // Food and drink: the aura breaks when the player stands up, which is
+        // the server's to do; this client also ends its seated presentation.
+        cancelCast();
+        return;
+    }
+    if (!casting_) return;
+    // A gathering or opening timer is this client's own; moving ends it.
+    if (owner_.pendingGameObjectInteractGuidRef() != 0) {
+        cancelCast();
+        return;
+    }
+    owner_.loadSpellNameCache();
+    const uint32_t spellId = currentCastSpellId_;
+    const auto it = owner_.spellNameCacheRef().find(spellId);
+    if (it == owner_.spellNameCacheRef().end()) return;
+    if (castIsChannel_) {
+        // 0x8008D0: CMSG_CANCEL_CHANNELLING with the spell; the channel ends
+        // when the server says it has.
+        if (!stock_cast::channelCancelledByMoveStart(it->second.channelInterruptFlags)) return;
+        if (owner_.getState() == WorldState::IN_WORLD && owner_.getSocket()) {
+            network::Packet packet(wireOpcode(Opcode::CMSG_CANCEL_CHANNELLING));
+            packet.writeUInt32(spellId);
+            owner_.getSocket()->send(packet);
+        }
+        LOG_INFO("Movement: asks the server to stop the channel of spell ", spellId);
+        return;
+    }
+    if (!stock_cast::castCancelledByMoveStart(it->second.interruptFlags)) return;
+    LOG_INFO("Movement: interrupts the cast of spell ", spellId);
+    // 0x806200 -> 0x7FECC0 with SPELL_FAILED_INTERRUPTED: CMSG_CANCEL_CAST,
+    // UNIT_SPELLCAST_INTERRUPTED, then the stop.
+    owner_.fireAddonEvent("UNIT_SPELLCAST_INTERRUPTED", spellcastArgs("player", spellId));
+    cancelCast();
 }
 
 void SpellHandler::startCraftQueue(uint32_t spellId, int count) {
@@ -4606,6 +4662,18 @@ void SpellHandler::loadSpellNameCache() const {
         ? spellL->field("DmgClass") : (wotlkSpellShape ? 213u : 0xFFFFFFFFu);
     const uint32_t categoryField = spellL && spellL->field("Category") != 0xFFFFFFFF
         ? spellL->field("Category") : (wotlkSpellShape ? 1u : 0xFFFFFFFFu);
+    // The moving checks' words and the spell-mod family (see SpellNameEntry).
+    auto wotlkColumn = [&](const char* name, uint32_t wotlk) {
+        if (spellL && spellL->field(name) != 0xFFFFFFFF) return spellL->field(name);
+        return wotlkSpellShape ? wotlk : 0xFFFFFFFFu;
+    };
+    const uint32_t attrEx2Field = wotlkColumn("AttributesEx2", 6);
+    const uint32_t attrEx3Field = wotlkColumn("AttributesEx3", 7);
+    const uint32_t interruptFlagsField = wotlkColumn("InterruptFlags", 31);
+    const uint32_t auraInterruptFlagsField = wotlkColumn("AuraInterruptFlags", 32);
+    const uint32_t channelInterruptFlagsField = wotlkColumn("ChannelInterruptFlags", 33);
+    const uint32_t spellFamilyNameField = wotlkColumn("SpellFamilyName", 208);
+    const uint32_t spellFamilyFlagsField = wotlkColumn("SpellFamilyFlags", 209);
 
     uint32_t count = dbc->getRecordCount();
     for (uint32_t i = 0; i < count; ++i) {
@@ -4694,6 +4762,19 @@ void SpellHandler::loadSpellNameCache() const {
                 entry.startRecoveryMs = dbc->getUInt32(i, startRecoveryTimeField);
             if (dmgClassField < fieldCount) entry.dmgClass = dbc->getUInt32(i, dmgClassField);
             if (categoryField < fieldCount) entry.category = dbc->getUInt32(i, categoryField);
+            if (attrEx2Field < fieldCount) entry.attrEx2 = dbc->getUInt32(i, attrEx2Field);
+            if (attrEx3Field < fieldCount) entry.attrEx3 = dbc->getUInt32(i, attrEx3Field);
+            if (interruptFlagsField < fieldCount)
+                entry.interruptFlags = dbc->getUInt32(i, interruptFlagsField);
+            if (auraInterruptFlagsField < fieldCount)
+                entry.auraInterruptFlags = dbc->getUInt32(i, auraInterruptFlagsField);
+            if (channelInterruptFlagsField < fieldCount)
+                entry.channelInterruptFlags = dbc->getUInt32(i, channelInterruptFlagsField);
+            if (spellFamilyNameField < fieldCount)
+                entry.spellFamilyName = dbc->getUInt32(i, spellFamilyNameField);
+            if (spellFamilyFlagsField + 2 < fieldCount)
+                for (uint32_t w = 0; w < 3; ++w)
+                    entry.spellFamilyFlags[w] = dbc->getUInt32(i, spellFamilyFlagsField + w);
             if (hasEffectFields) {
                 entry.createdItemId = pipeline::spellCreatedItem(*dbc, i, effectFields, itemTypeFields);
             }
@@ -5463,7 +5544,10 @@ void SpellHandler::handleSpellModifier(network::Packet& packet, bool isFlat) {
         uint8_t groupIndex = packet.readUInt8();
         uint8_t modOpRaw   = packet.readUInt8();
         int32_t value      = static_cast<int32_t>(packet.readUInt32());
-        if (groupIndex > 5 || modOpRaw >= GameHandler::SPELL_MOD_OP_COUNT) continue;
+        // The group is a bit of SpellFamilyFlags, 0-95, and the value the
+        // total for that bit (AzerothCore Player::AddSpellMod). Only 0-5 was
+        // kept, which dropped most talents and every proc.
+        if (groupIndex >= 96 || modOpRaw >= GameHandler::SPELL_MOD_OP_COUNT) continue;
         GameHandler::SpellModKey key{ .op = static_cast<GameHandler::SpellModOp>(modOpRaw), .group = groupIndex };
         modMap[key] = value;
     }

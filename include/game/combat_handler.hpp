@@ -3,6 +3,7 @@
 #include "game/world_packets.hpp"
 #include "game/opcode_table.hpp"
 #include "game/spell_defines.hpp"
+#include "game/tab_target.hpp"
 #include "network/packet.hpp"
 #include <chrono>
 #include <deque>
@@ -125,7 +126,20 @@ public:
     void targetLastEnemy();
     void targetLastFriend();
     void tabTarget(float playerX, float playerY, float playerZ);
+
+    /// TargetNearest and its six siblings (0x524FC0): one list of candidates
+    /// kept between presses, see tab_target.hpp. Selects and sends at once.
+    void targetNearest(TargetNearestMode mode, bool reverse);
+    /// Whether a unit's model was inside the camera's view on the last frame
+    /// drawn (the stock test reads the map entity's culling flag, 0x77F0B0).
+    /// Without one every unit counts as seen.
+    void setUnitInViewProvider(std::function<bool(uint64_t)> provider) {
+        unitInViewProvider_ = std::move(provider);
+    }
     void assistTarget();
+    /// AssistUnit(unit): select what that unit has selected (0x525EB0).
+    /// `namedOtherUnit` is a unit asked for by a name other than "target".
+    void assistUnit(uint64_t unitGuid, bool namedOtherUnit);
 
     // --- PvP ---
     void togglePvp();
@@ -151,29 +165,20 @@ public:
     void removeCombatTextForGuid(uint64_t guid);
 
 private:
-    // Last tab-target press (steady-clock ms); a pause restarts the cycle
-    // from the nearest enemy instead of resuming a stale rotation.
-    uint64_t lastTabTargetMs_ = 0;
-
     // One remembered target of each kind, for targetLastEnemy/Friend. Written
     // by setTarget as the old target is let go, so they are the target before
     // this one rather than this one.
     uint64_t lastEnemyTargetGuid_ = 0;
     uint64_t lastFriendTargetGuid_ = 0;
 
-    /// The walk both cycles do: everything alive within range that `wanted`
-    /// accepts, nearest first, then step to the next one past the current
-    /// target. Written out twice with two predicates before this, and the two
-    /// had already drifted - one skipped the dead and the other did not, which
-    /// is right both times and was not written down anywhere.
-    void cycleTarget(bool reverse, const char* noneMessage,
-                     const std::function<bool(uint64_t, Entity&)>& wanted);
+    /// TargetNearest*'s list and cursor (0x524FC0), kept between presses.
+    tab_target::Cycle targetNearestCycle_;
+    std::function<bool(uint64_t)> unitInViewProvider_;
 
-    /// Whether a guid is in the player's group.
     [[nodiscard]] bool isGroupMemberGuid(uint64_t guid) const;
 
-    /// Whether Tab and TargetNearestEnemy may pick a living unit.
-    [[nodiscard]] bool isEnemyTarget(uint64_t guid, const Unit& unit) const;
+    /// What 0x518E40 asks of a unit, answered from what this client knows.
+    [[nodiscard]] tab_target::UnitFacts targetNearestFacts(uint64_t guid, const Unit& unit) const;
 
     // --- Packet handlers ---
     void handleAttackStart(network::Packet& packet);

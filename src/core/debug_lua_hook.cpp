@@ -165,6 +165,11 @@ int luaDebugMouse(lua_State* L) {
     ev.button.y = y;
     ev.button.windowID = gWindowId;
     SDL_PushEvent(&ev);
+    // The world clicks read the button and the pointer through Input, which
+    // asks SDL's own state - a pushed event never reaches it. Held there too,
+    // as PushKey holds its key.
+    core::Input::getInstance().setVirtualMousePosition(glm::vec2(x, y));
+    core::Input::getInstance().setVirtualMouseButton(ev.button.button, down);
     lua_pushboolean(L, 1);
     return 1;
 }

@@ -10700,7 +10700,11 @@ bool LuaEngine::dispatchBindingInput(const std::string& key, bool shift, bool ct
 }
 
 bool LuaEngine::interfaceRunsFirst(const std::string& command) {
-    return isActionButtonBinding(command) || command.rfind("SHAPESHIFTBUTTON", 0) == 0;
+    // TARGETNEARESTENEMY too: its script, TargetNearestEnemy(), selects and
+    // sends CMSG_SET_SELECTION from the key event, as stock does, where
+    // GameScreen's poll did it in the UI draw after the world was drawn.
+    return isActionButtonBinding(command) || command.rfind("SHAPESHIFTBUTTON", 0) == 0 ||
+           command == "TARGETNEARESTENEMY";
 }
 
 bool LuaEngine::isActionButtonBinding(const std::string& command) {

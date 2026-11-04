@@ -1101,17 +1101,17 @@ static int lua_ClearFocus(lua_State* L) {
     return 0;
 }
 
-// AssistUnit(unitId) - target whatever the given unit is targeting
+// AssistUnit(unitId) - target whatever the given unit is targeting, with the
+// stock errors and assistAttack (0x525EB0, CombatHandler::assistUnit).
 static int lua_AssistUnit(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (!gh) return 0;
-    const char* uid = luaL_optstring(L, 1, "target");
+    if (!gh || !gh->getCombatHandler()) return 0;
+    const char* uid = luaL_optstring(L, 1, "");
     std::string uidStr(uid);
     toLowerInPlace(uidStr);
-    uint64_t guid = resolveUnitGuid(gh, uidStr);
-    if (guid == 0) return 0;
-    uint64_t theirTarget = getEntityTargetGuid(gh, guid);
-    if (theirTarget != 0) gh->setTarget(theirTarget);
+    const bool namedOther = !uidStr.empty() && uidStr != "target";
+    const uint64_t guid = resolveUnitOrName(gh, uidStr.empty() ? std::string("target") : uidStr);
+    gh->getCombatHandler()->assistUnit(guid, namedOther);
     return 0;
 }
 
@@ -1130,6 +1130,14 @@ static int lua_TargetLastTarget(lua_State* L) {
 // key of every such pair did what the first did.
 static bool wantsReverse(lua_State* L) {
     return lua_toboolean(L, 1) != 0;
+}
+
+// TargetNearest([reverse]) - any unit, by the same rule (mode 0, 0x525A90).
+static int lua_TargetNearest(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    if (gh && gh->getCombatHandler())
+        gh->getCombatHandler()->targetNearest(game::TargetNearestMode::Any, wantsReverse(L));
+    return 0;
 }
 
 static int lua_TargetNearestEnemy(lua_State* L) {
@@ -1503,6 +1511,7 @@ void registerSpellLuaAPI(lua_State* L) {
                 {"ClearFocus",        lua_ClearFocus},
                 {"AssistUnit",        lua_AssistUnit},
                 {"TargetLastTarget",  lua_TargetLastTarget},
+                {"TargetNearest",       lua_TargetNearest},
                 {"TargetNearestEnemy",  lua_TargetNearestEnemy},
                 {"TargetNearestFriend", lua_TargetNearestFriend},
                 {"GetRaidTargetIndex",  lua_GetRaidTargetIndex},

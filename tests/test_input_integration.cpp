@@ -170,6 +170,20 @@ TEST_CASE_METHOD(Integration, "Action bar keys run their Bindings.xml scripts: p
     truth("#calls == 2 and calls[2] == 'up'");
 }
 
+TEST_CASE_METHOD(Integration, "Tab runs TargetNearestEnemy from the key event", "[input][lua][timing]") {
+    // Stock selects and sends CMSG_SET_SELECTION from the binding's script,
+    // run from the key event; the client's own poll ran in the UI draw.
+    CHECK(addons::LuaEngine::interfaceRunsFirst("TARGETNEARESTENEMY"));
+    CHECK_FALSE(addons::LuaEngine::interfaceRunsFirst("JUMP"));
+    REQUIRE(manager.setBinding("TAB", "TARGETNEARESTENEMY"));
+    run(R"lua(
+        calls = {}
+        __WoweeBindingScripts.TARGETNEARESTENEMY = function(state) table.insert(calls, state or 'down') end
+    )lua");
+    REQUIRE(lua.dispatchBindingInput("TAB", false, false, false, true));
+    truth("#calls == 1");
+}
+
 TEST_CASE_METHOD(Integration, "Keyboard frames use layout keys while binding capture uses physical keys", "[input][lua][O7]") {
     run(R"lua(
         dialog = CreateFrame('Frame', 'LayoutDialog', UIParent)

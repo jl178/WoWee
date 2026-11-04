@@ -69,3 +69,67 @@ TEST_CASE("a world click is a quick release") {
     CHECK(sc::isWorldClick(150.0, true));
     CHECK_FALSE(sc::isWorldClick(250.0, true));
 }
+
+namespace {
+// Spell.dbc rows of 3.3.5a (columns 5, 6, 16, 31, 32, 33) with their cast time.
+sc::MovingCastSpell spellRow(uint32_t ex, uint32_t ex2, uint32_t targets, uint32_t interrupt,
+                             uint32_t aura, uint32_t channel, int32_t castMs) {
+    return {.attributesEx = ex, .attributesEx2 = ex2, .targets = targets,
+            .interruptFlags = interrupt, .auraInterruptFlags = aura,
+            .channelInterruptFlags = channel, .castTimeMs = castMs};
+}
+constexpr uint32_t kForward = 0x1, kStrafe = 0x4, kTurnLeft = 0x10, kFalling = 0x1000;
+} // namespace
+
+TEST_CASE("moving refuses a cast-time spell with the movement interrupt flag", "[moving]") {
+    const auto holyLight = spellRow(0, 0, 0, 0xF, 0, 0, 2500);
+    CHECK(sc::refusedWhileMoving(kForward, holyLight));
+    CHECK(sc::refusedWhileMoving(kStrafe, holyLight));
+    CHECK(sc::refusedWhileMoving(kFalling, holyLight));
+    CHECK(sc::refusedWhileMoving(0x400000, holyLight));  // ascending
+    // Turning in place is not moving.
+    CHECK_FALSE(sc::refusedWhileMoving(kTurnLeft, holyLight));
+    CHECK_FALSE(sc::refusedWhileMoving(0, holyLight));
+}
+
+TEST_CASE("instant, auto-repeat and ground spells are not refused for moving", "[moving]") {
+    // Seal of Righteousness: instant; also a cast time a spell mod brought
+    // to nothing (Presence of Mind).
+    CHECK_FALSE(sc::refusedWhileMoving(kForward, spellRow(0, 0, 0, 0xF, 0, 0, 0)));
+    // Shoot: auto-repeat (AttributesEx2 0x20), a cast time all the same.
+    CHECK_FALSE(sc::refusedWhileMoving(kForward, spellRow(0, 0x20, 0, 0xF, 0, 0x2AC0C, 500)));
+    // Blizzard: aimed at a location (Targets 0x40), checked when it lands.
+    CHECK_FALSE(sc::refusedWhileMoving(kForward, spellRow(0x1000008C, 0x400000, 0x40, 0xF, 0, 0x7C2C, 0)));
+    // A cast time but no movement interrupt flag (Blink's 0x8 is not it).
+    CHECK_FALSE(sc::refusedWhileMoving(kForward, spellRow(0, 0, 0, 0x8, 0, 0, 1500)));
+}
+
+TEST_CASE("a channel that movement breaks is refused while moving", "[moving]") {
+    // Arcane Missiles: AttributesEx 0x4 channelled, ChannelInterruptFlags 0x7C0C.
+    CHECK(sc::refusedWhileMoving(kForward, spellRow(0x14004484, 0, 0, 0xF, 0, 0x7C0C, 0)));
+    // First Aid's bandage: no InterruptFlags, refused by the channel's 0x8.
+    CHECK(sc::refusedWhileMoving(kForward, spellRow(0x4044, 0, 0, 0, 0x2, 0x3C0E, 0)));
+    // A channel movement does not break.
+    CHECK_FALSE(sc::refusedWhileMoving(kForward, spellRow(0x4, 0, 0, 0, 0, 0x4, 0)));
+}
+
+TEST_CASE("an instant whose aura breaks on moving is refused while moving", "[moving]") {
+    CHECK(sc::refusedWhileMoving(kForward, spellRow(0, 0, 0, 0x1, 0x8, 0, 0)));
+    // Food's aura breaks on standing, not moving: the server answers that one.
+    CHECK_FALSE(sc::refusedWhileMoving(kForward, spellRow(0, 0, 0, 0x1, 0x40080, 0, 0)));
+}
+
+TEST_CASE("spell mods as 0x7FDB50 applies them", "[moving]") {
+    CHECK(sc::applySpellModStock(2500, 0, 0) == 2500);
+    CHECK(sc::applySpellModStock(2500, -500, 0) == 2000);
+    CHECK(sc::applySpellModStock(2500, 0, -100) == 0);   // Presence of Mind
+    CHECK(sc::applySpellModStock(2500, 0, -150) == 0);   // held at zero
+    CHECK(sc::applySpellModStock(3000, -500, -20) == 2000);
+}
+
+TEST_CASE("what starting to move cancels", "[moving]") {
+    CHECK(sc::castCancelledByMoveStart(0xF));
+    CHECK_FALSE(sc::castCancelledByMoveStart(0x8));
+    CHECK(sc::channelCancelledByMoveStart(0x7C0C));
+    CHECK_FALSE(sc::channelCancelledByMoveStart(0x4));
+}

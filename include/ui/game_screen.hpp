@@ -38,6 +38,9 @@ namespace ui {
  */
 class GameScreen {
 public:
+    /// The world clicks of this frame, decided from the input before the
+    /// world is updated or drawn (stock acts on them from the event).
+    void processWorldClicksAtInput(game::GameHandler& gameHandler);
     /// Put the inspect window up, whichever interface draws it.
     ///
     /// Seven places used to set a flag behind this client's own window and its
@@ -179,6 +182,9 @@ private:
      * Process targeting input (Tab, Escape, click)
      */
     void processTargetInput(game::GameHandler& gameHandler);
+    /// Left and right clicks on units, objects and the ground.
+    void processWorldClicks(game::GameHandler& gameHandler);
+    bool worldClicksDone_ = false;
 
     /**
      * Rebuild character geosets from current equipment state

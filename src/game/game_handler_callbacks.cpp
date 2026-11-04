@@ -791,7 +791,6 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     targetGuid = 0;
     focusGuid = 0;
     lastTargetGuid = 0;
-    tabCycleStale = true;
     entityController_->clearAll();
 
     // Build CMSG_PLAYER_LOGIN packet
@@ -3217,7 +3216,6 @@ void GameHandler::despawnCreatureLocally(uint64_t guid) {
 
     if (combatHandler_ && guid == combatHandler_->getAutoAttackTargetGuid()) stopAutoAttack();
     if (getTargetGuid() == guid) setTargetGuidRaw(0);
-    tabCycleStale = true;
 
     LOG_INFO("Locally despawned looted corpse: 0x", std::hex, guid, std::dec);
 }
@@ -3236,7 +3234,6 @@ void GameHandler::despawnGameObjectLocally(uint64_t guid) {
     if (lastInteractedGoGuid_ == guid) lastInteractedGoGuid_ = 0;
     if (pendingGameObjectInteractGuid_ == guid) pendingGameObjectInteractGuid_ = 0;
     if (getTargetGuid() == guid) setTargetGuidRaw(0);
-    tabCycleStale = true;
 
     LOG_INFO("Locally despawned game object: 0x", std::hex, guid, std::dec);
 }

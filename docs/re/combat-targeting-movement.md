@@ -46,6 +46,106 @@ CVar pointers registered at 0x51DBxx: 0xBD0918 `assistAttack` (used by
 0xBD091C `autoRangedCombat` (0x6E4950 swaps melee for Auto Shot), 0xBD0920
 `autoSelfCast`, 0xBD0924 `stopAutoAttackOnTargetChange`.
 
+### TargetNearest: Tab and its siblings (0x524FC0)
+
+The Lua functions (table at 0xAC82C0) all end in 0x524FC0(reverse, mode):
+
+| Function | Address | Mode |
+|---|---|---|
+| `TargetNearest` | 0x525A90 | 0 any unit |
+| `TargetNearestEnemy` | 0x525AD0 | 1 |
+| `TargetNearestEnemyPlayer` | 0x525B10 | 2 |
+| `TargetNearestFriend` | 0x525B50 | 3 |
+| `TargetNearestFriendPlayer` | 0x525B90 | 4 |
+| `TargetNearestPartyMember` | 0x525BD0 | 5 |
+| `TargetNearestRaidMember` | 0x525C00 | 6 |
+
+The argument is "reverse" (`lua_toboolean`). Bindings.xml binds
+TARGETNEARESTENEMY (Tab) to `TargetNearestEnemy()` and TARGETPREVIOUSENEMY to
+`TargetNearestEnemy(1)`, the same for the friend and player pairs; there is
+no party or raid binding (TARGETPARTYMEMBERn is `TargetUnit("partyN")`).
+None is `runOnUp`: the script runs from the key-down event. Modes 1-4 and
+0 (not 5/6) run once per macro: inside a macro (0xBEAF4C, set by the macro
+runner 0x564DB0) the second call finds bit 0x20 of 0xBEAF44 cleared by the
+first and does nothing. Called from tainted code it is blocked (0xD4139C ->
+0x513530, ADDON_ACTION_BLOCKED).
+
+**Candidates** (0x524440, run on every unit of the object manager; the
+reference is the player, or the vehicle it drives, 0x6DD060):
+
+1. not the reference, and the mode's test (0x518E40, EAX = mode):
+   - 1 enemy: `CanAttack` (0x729740) and not dead (vtable +0x128: health
+     below 1, a player also with `PLAYER_FLAGS_GHOST`), not
+     `UNIT_DYNFLAG_DEAD` (feigning death too), stand state not 7 (dead);
+   - 2: a player, then as 1;
+   - 3 friend: `CanAssist` (0x7293D0) and health at least 1;
+   - 4: a player, then as 3;
+   - 5 party: the player or one of party1-4 (0x52C680, guids at 0xBD1948);
+   - 6 raid: party, or a raid member (0x512A00 -> 0x5726F0);
+   - 0: anything.
+   Dead party and raid members count.
+2. Distance squared, 3D, from the reference: **at most 1681 (41 yards) when
+   the unit is within 30 degrees (0xA02D20 = pi/6) either side of the
+   reference's facing, at most 100 (10 yards) anywhere else** (0x9FE7F8,
+   0x9FE7FC). The angle is `fmod(atan2(to unit) - facing + 4pi, 2pi)`
+   (0xA02D24 = 4pi, 0x9F1FE8 = 2pi); in the cone when below pi/6 or above
+   2pi - pi/6.
+3. Its creature type (0x71F300: the shapeshift form's, else the creature's,
+   else the race's) is not one CreatureType.dbc flags 1: Critter (8),
+   Non-combat Pet (12), Gas Cloud (13). Totems (11) are candidates.
+4. **On screen**: its map entity (+0xB8) has +0x25 == 0 (0x77F0B0). The
+   entity walk 0x799980 sets +0x25 to 1 each frame and clears it when the
+   entity's bounding sphere passes the view frustum test (0x791120 ->
+   0x983D20); so a unit is a candidate only if its model was inside the
+   camera's frustum on the last frame drawn. Horizon occlusion (0x78FC40)
+   does not set it. **There is no line of sight test.**
+5. A player who is a commentator (`PLAYER_FLAGS` 0x80000 with 0x400000 or
+   in an arena map, 0x6DE980) is not.
+
+Each candidate is {guid, distance squared, in the cone}.
+
+**Order** (`qsort` with 0x5131D0): those in the cone first, then nearest
+first.
+
+**Cycling** (state: list 0xBD0C04/count 0xBD0C00, cursor 0xBD08C8, built
+at 0xBD08CC, last press 0xBD08D0, mode 0xBD08D4):
+
+- The list is built again when it is empty, never built, the mode changed,
+  or **3000 ms after the last press**. A fresh list's cursor is 0: the
+  nearest unit in the cone is selected, reverse or not, **even if it is
+  the current target already** (a Tab after a pause can leave the target
+  where it is).
+- Otherwise, if the current target is the list's current entry, the cursor
+  steps: forward +1; past the end it goes back to 0, and if the list is
+  **1000 ms old** it is built again first. Reverse steps back, wrapping to
+  the end. If the target is something else (a click, an assist), the cursor
+  stays and that entry is selected again.
+- From the cursor, the first entry whose unit still exists and still passes
+  the mode's test is selected (`CGGameUI::Target` 0x524BF0:
+  `CMSG_SET_SELECTION` and `PLAYER_TARGET_CHANGED` at once); distance,
+  cone and screen are not asked again. Wrapping in this walk also rebuilds a
+  list a second old. No entry left: the list is emptied and the target is
+  left alone. **Nothing is printed** when there is nothing to select.
+- `ClearTarget` (0x525FC0) and `TargetLastTarget` with no last target
+  (0x525D70) zero 0xBD08CC: the next press builds afresh. Units appearing or
+  leaving do not.
+
+### Assist, focus, last target
+
+- `AssistUnit(unit)` (0x525EB0): the unit is resolved by token or name. Not
+  found: `ERR_UNIT_NOT_FOUND` "Unknown unit." when a name other than
+  "target" was given, else `ERR_GENERIC_NO_TARGET` "You have no target.".
+  Found: its `UNIT_FIELD_TARGET`; 0 is silent. Otherwise it is selected
+  (0x5259E0: when the object exists or is a party/raid member's guid), and
+  with `assistAttack` (0xBD0918) on, 0x6E4950 asks to attack it
+  (StartAttack, which stops a running attack instead when it may not be
+  attacked).
+- `FocusUnit(unit)` (0x522480): resolves the unit and sets the focus
+  (0x51FF20); `ClearFocus` 0x5225E0.
+- `TargetLastTarget` (0x525D70) selects the previous target (0xBD07B8);
+  `TargetLastEnemy` (0x525DF0) the last enemy (0xBD07C0) when it exists or
+  is known; `TargetLastFriend` 0x525E50.
+
 ### StartAttack (0x6E2610)
 
 1. Gives up unless in world, local player, not pacified
@@ -349,12 +449,48 @@ the upper-body part.
 
 ### Casts and movement
 
-Jumping and starting to move interrupt a cast with a movement interrupt flag;
-the client cancels it locally and the server interrupts it too. (The
-`Spell_C` code that does it was not traced here; Wowee cancels any timed
-non-channelled cast on START_FORWARD/BACKWARD/STRAFE and on JUMP in
-`MovementHandler`, and a scripted `JumpOrAscendStart` reaches that path since
-the binding fix. The logic was read and is consistent.)
+**Pressing a spell while moving** (0x739650, after the cooldown check, before
+anything is sent or the mount is touched) fails with `SPELL_FAILED_MOVING`
+(51) through 0x808200 (shown as ERR_SPELL_FAILED_S "Can't do that while
+moving", once per burst) when the caster's movement flags (CMovement +0x44)
+have any of **0xC0100F** - forward, backward, strafe, falling, ascending,
+descending; turning and pitching are not moving - and:
+
+- the spell is channelled (AttributesEx & 0x44) and its
+  ChannelInterruptFlags have movement or turning (& 0x18), and is not aimed
+  at a location (Targets & 0x60); or
+- its InterruptFlags have movement (& 0x1), it is not aimed at a location,
+  not auto-repeat (AttributesEx2 & 0x20: Auto Shot and Shoot are never
+  refused), and either its cast time after the spell mods (0x7FF180, with
+  0x7FDB50 for SPELLMOD_CASTING_TIME) is above zero or its
+  AuraInterruptFlags have moving or turning (& 0x18).
+
+So instants are cast on the move, Presence of Mind's Pyroblast too (its
+-100% casting-time mod makes 0), and Blizzard or Flamestrike are not
+refused at the press (they wait for the ground click). Spell mods apply
+when the spell's SpellFamilyName is the player class's (0xD397B4) and
+AttributesEx3 0x20000000 is clear: for each of the 96 SpellFamilyFlags bits
+the spell has, the flat and percent mods of that bit are summed (0x7FD970),
+then `(base + flat) * (100 + pct) / 100`, the factor held at zero.
+
+**Starting to move** (CGInputControl 0x5FAA40, called by MoveForwardStart
+0x5FC200, MoveBackwardStart, StrafeLeft/RightStart, JumpOrAscendStart
+0x5FBF80, SitStandOrDescendStart, ToggleAutoRun, TurnOrActionStart and
+CameraOrSelectOrMoveStart with both buttons down, MoveAndSteerStart - not
+TurnLeft/RightStart) runs before the movement packet is sent:
+
+- every cast still in flight (the list at 0xAF5254, the ground-targeting one
+  excepted) whose InterruptFlags have movement is cancelled (0x806620 ->
+  0x806200): `CMSG_CANCEL_CAST` (0x12F: a byte of cast count, then the
+  spell id) and `UNIT_SPELLCAST_INTERRUPTED` with SPELL_FAILED_INTERRUPTED,
+  then the stop;
+- the channel (`UNIT_CHANNEL_SPELL`) whose ChannelInterruptFlags have
+  movement (& 0x8) is asked to stop: `CMSG_CANCEL_CHANNELLING` (0x13B, the
+  spell id, 0x8008D0). The channel itself ends when the server says so.
+
+0x5FAA40 does not touch the auto-repeat itself (0xD397D0); only a shot
+still in flight whose InterruptFlags have movement (Auto Shot's are 0x21)
+is cancelled with the rest.
 
 ## 4. Other units
 
@@ -425,6 +561,14 @@ strafing (body turn), turning in place (Shuffle, after the Ready stance),
 jumping and swimming while attacking (upper-body swings) were already as the
 stock client has them.
 
+Third pass (targeting and casting on the move, `input-timing.md` section 5):
+
+| # | Gap | Fix |
+|---|---|---|
+| 21 | Two Tab implementations: 40 yards all round, nearest first, a list rebuilt on every spawn and after 4 s, corpses with loot at the end, a cleared target when nothing qualified; the Lua TargetNearest* never kept a list and Friend took players only | One `CombatHandler::targetNearest` with 0x524FC0's rules (`tab_target.hpp`): 41 yd in a 30 degree cone, 10 yd elsewhere, on screen, CreatureType flags, cone first then distance, the 3 s / 1 s list, nothing changed when nothing qualifies; `TargetNearest` (mode 0) added |
+| 22 | `AssistUnit` said nothing for an unknown unit and ignored `assistAttack` | Stock errors and the attack (`CombatHandler::assistUnit`) |
+| 23 | Wowee refused any cast-time spell on horizontal movement, after dismounting | 0x739650's rule and place; move starts cancel by InterruptFlags/ChannelInterruptFlags (0x5FAA40) |
+
 Still different:
 
 - **A blow whose events never come** still plays its reaction (450 ms
@@ -446,5 +590,7 @@ Still different:
   nothing while an attack runs; on AzerothCore the swing therefore stays on
   the old target, as it does in Wowee. Wowee does re-send `CMSG_ATTACKSWING`
   on a right-click of another unit, which does switch.
+- Tab/TargetNearest: see `input-timing.md` section 6 for what is
+  approximated (CanAttack/CanAssist, duels, vehicles, once per macro).
 - Wowee keeps the attack request through an `SMSG_ATTACKSTOP` on foot and
   asks again; the stock client's attack target is simply cleared.

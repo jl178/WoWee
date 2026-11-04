@@ -26,7 +26,7 @@ void Input::update() {
     float mouseX = 0.0f;
     float mouseY = 0.0f;
     const SDL_MouseButtonFlags mouseState = SDL_GetMouseState(&mouseX, &mouseY);
-    mousePosition = glm::vec2(mouseX, mouseY);
+    mousePosition = hasVirtualMousePosition ? virtualMousePosition : glm::vec2(mouseX, mouseY);
 
     // SDL_BUTTON_MASK(x) is defined as (1 << (x-1)), so button indices are 1-based.
     // SDL_BUTTON_MASK(0) is undefined behavior (negative shift). Start at 1.
