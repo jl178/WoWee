@@ -699,7 +699,10 @@ static int lua_UseAction(lua_State* L) {
     // this was a warning on every one of them.
     LOG_DEBUG("UseAction: slot ", slot + 1, " type=", static_cast<int>(action.type),
               " id=", action.id, " ready=", action.isReady() ? 1 : 0);
-    if (action.type == game::ActionBarSlot::SPELL && action.isReady()) {
+    // A spell still cooling down is not dropped here: castSpell refuses it
+    // with "Spell is not ready yet.", as the stock UseAction (0x5ABBC0 ->
+    // 0x80DA80) leaves the refusal to the cast checks.
+    if (action.type == game::ActionBarSlot::SPELL) {
         // A unit that resolves wins; anything else falls back to the target,
         // which is what an ordinary click has always done. An unresolvable
         // unit is not treated as "cast on nobody" - a raid frame naming a
@@ -722,8 +725,13 @@ static int lua_UseAction(lua_State* L) {
         }
     } else if (action.type == game::ActionBarSlot::ITEM && action.id != 0) {
         gh->useItemById(action.id);
+    } else if (action.type == game::ActionBarSlot::MACRO) {
+        // A macro on the bar runs its body (0x5ABBC0 -> 0x5D4210), through the
+        // same slash dispatch RunMacro uses.
+        auto* svc = getLuaServices(L);
+        const std::string& body = gh->getMacroText(action.id);
+        if (svc && svc->runMacroText && !body.empty()) svc->runMacroText(body);
     }
-    // Macro execution requires GameScreen context; not available from pure Lua API
     return 0;
 }
 

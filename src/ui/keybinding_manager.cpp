@@ -648,6 +648,11 @@ bool clientActsOnBinding(const std::string& command) {
         "WOWEERESETCAMERA",
     };
     for (const char* name : native) if (command == name) return true;
+    // The action and stance bars' keys. A keyboard or mouse press of them
+    // runs the interface's Bindings.xml script first (LuaEngine::
+    // dispatchBindingInput, interfaceRunsFirst) and only falls back to
+    // GameScreen's poll when no script took it; a pad button keeps this
+    // client's own path, with its shoulder-button page fallback.
     for (const auto& [prefix, count] : {std::pair{"ACTIONBUTTON", 12},
              {"SHAPESHIFTBUTTON", 8}, {"MULTIACTIONBAR1BUTTON", 12}})
         for (int i = 1; i <= count; ++i)

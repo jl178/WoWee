@@ -227,6 +227,11 @@ public:
     /// its button on the release.
     bool dispatchBindingKey(int sdlKeycode, bool shift, bool ctrl, bool alt,
                             bool down);
+    /// An action bar key (ACTIONBUTTONn, BONUSACTIONBUTTONn, MULTIACTIONBARnBUTTONn).
+    static bool isActionButtonBinding(const std::string& command);
+    /// A command the client acts on itself whose Bindings.xml script a key or
+    /// mouse button still runs first: the action and stance bars.
+    static bool interfaceRunsFirst(const std::string& command);
     bool dispatchBindingInput(const std::string& key, bool shift, bool ctrl, bool alt, bool down);
 
     /// The command this key holds, or empty. Whether the client would run it is

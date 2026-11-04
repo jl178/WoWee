@@ -28,6 +28,7 @@
 #include "addons/lua_api_registrations.hpp"
 #include "addons/world_map_api.hpp"
 #include "addons/toc_parser.hpp"
+#include "core/input_trace.hpp"
 #include "core/window.hpp"
 #include "game/classic_combat_chat.hpp"
 #include <imgui.h>
@@ -9690,6 +9691,11 @@ void LuaEngine::fireEvent(const std::string& eventName,
                            const std::vector<std::string>& args) {
     if (!L_) return;
 
+    if (core::input_trace::enabled() && core::input_trace::tracedEvent(eventName)) {
+        std::string line = "event " + eventName;
+        for (const auto& a : args) line += " " + a;
+        core::input_trace::note(line);
+    }
     if (eventName == "COMBAT_LOG_EVENT_UNFILTERED") recordCombatLogEvent(args);
     if (eventName == game::classic_combat::kLineEvent) {
         fireClassicCombatLine(args);
@@ -10655,7 +10661,26 @@ bool LuaEngine::dispatchBindingInput(const std::string& key, bool shift, bool ct
     if (heldBindings_.count(key)) return true;
     if (editBoxHasFocus() || ImGui::GetIO().WantTextInput) return false;
     const std::string command = bindingCommandForKey(ui::KeybindingManager::modifiedKey(key, shift, ctrl, alt));
-    if (command.empty() || clientActsOnBinding(command)) return false;
+    // The action and stance bars' keys are the client's own (a pad's
+    // shoulder fallback relies on that) but a key or mouse button runs their
+    // Bindings.xml script here, in the pump, as the stock client runs a
+    // binding from the key event: ActionButtonDown pushes the button on the
+    // press and ActionButtonUp casts on the release (runOnUp) - 3.3.5a's
+    // timing. Without a script GameScreen's poll still casts them.
+    if (command.empty() || (clientActsOnBinding(command) && !interfaceRunsFirst(command)))
+        return false;
+    // An action button bound to run on the key's release - the stock timing,
+    // press shows the button pushed, release casts - can be made to act on
+    // the press instead with ActionButtonUseKeyDown, the CVar a later client
+    // added for exactly this (off, as 3.3.5a behaves). Down and up run back
+    // to back and the release does nothing more.
+    if (bindingRunsOnUp(command) && isActionButtonBinding(command) &&
+        storedCVarValue("ActionButtonUseKeyDown", "0") != "0") {
+        if (!runBindingScript(command, true)) return false;
+        (void)runBindingScript(command, false);
+        heldBindings_[key] = {command, LUA_NOREF};
+        return true;
+    }
     int releaseScript = LUA_NOREF;
     if (bindingRunsOnUp(command)) {
         lua_getglobal(L_, "__WoweeBindingScripts");
@@ -10672,6 +10697,16 @@ bool LuaEngine::dispatchBindingInput(const std::string& key, bool shift, bool ct
     }
     heldBindings_[key] = {command, releaseScript};
     return true;
+}
+
+bool LuaEngine::interfaceRunsFirst(const std::string& command) {
+    return isActionButtonBinding(command) || command.rfind("SHAPESHIFTBUTTON", 0) == 0;
+}
+
+bool LuaEngine::isActionButtonBinding(const std::string& command) {
+    for (const char* prefix : {"ACTIONBUTTON", "BONUSACTIONBUTTON", "MULTIACTIONBAR"})
+        if (command.rfind(prefix, 0) == 0) return true;
+    return false;
 }
 
 bool LuaEngine::bindingRunsOnUp(const std::string& command) {

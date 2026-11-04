@@ -186,6 +186,13 @@ wowee_add_test(test_hill_climbing
 wowee_add_test(test_stock_movement
     SOURCES test_stock_movement.cpp)
 
+# ── test_stock_cast_timing ──────────────────────────────────
+# The press-to-cast rules of the stock client: the predicted global cooldown,
+# the once-per-burst cast error, the "not ready" line and the world click.
+# Header-only.
+wowee_add_test(test_stock_cast_timing
+    SOURCES test_stock_cast_timing.cpp)
+
 # ── test_stock_death_rules ──────────────────────────────────
 # Dying, the ghost world, the corpse and loot rolls as the stock client does
 # them: the release timer, the screen effect, the corpse range, the resurrect

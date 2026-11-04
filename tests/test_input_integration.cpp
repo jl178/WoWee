@@ -150,6 +150,26 @@ TEST_CASE_METHOD(Integration, "Real Lua binding scripts latch their command and 
     CHECK_FALSE(lua.dispatchBindingInput("BUTTON3", false, false, false, false));
 }
 
+TEST_CASE_METHOD(Integration, "Action bar keys run their Bindings.xml scripts: pushed on press, cast on release", "[input][lua][timing]") {
+    // 3.3.5a's ACTIONBUTTONn is runOnUp: ActionButtonDown pushes the button,
+    // ActionButtonUp casts. They run in the pump like any interface binding,
+    // not from the client's late-frame poll (docs/re/input-timing.md).
+    CHECK(addons::LuaEngine::interfaceRunsFirst("ACTIONBUTTON1"));
+    CHECK(addons::LuaEngine::interfaceRunsFirst("MULTIACTIONBAR1BUTTON12"));
+    CHECK(addons::LuaEngine::interfaceRunsFirst("SHAPESHIFTBUTTON1"));
+    CHECK_FALSE(addons::LuaEngine::interfaceRunsFirst("MOVEFORWARD"));
+    REQUIRE(manager.setBinding("1", "ACTIONBUTTON1"));
+    run(R"lua(
+        calls = {}
+        __WoweeBindingScripts.ACTIONBUTTON1 = function(state) table.insert(calls, state) end
+        __WoweeBindingRunOnUp.ACTIONBUTTON1 = true
+    )lua");
+    REQUIRE(lua.dispatchBindingInput("1", false, false, false, true));
+    truth("#calls == 1 and calls[1] == 'down'");
+    REQUIRE(lua.dispatchBindingInput("1", false, false, false, false));
+    truth("#calls == 2 and calls[2] == 'up'");
+}
+
 TEST_CASE_METHOD(Integration, "Keyboard frames use layout keys while binding capture uses physical keys", "[input][lua][O7]") {
     run(R"lua(
         dialog = CreateFrame('Frame', 'LayoutDialog', UIParent)

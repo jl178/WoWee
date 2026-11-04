@@ -137,14 +137,16 @@ TEST_CASE("a refused Auto Shot press stops the repeat it started", "[replay]") {
     CHECK(s.handler().getAutoRepeatSpellId() == 0);
 }
 
-TEST_CASE("a refused second Auto Shot press leaves the first one repeating", "[replay]") {
+// Auto Shot is a toggle in 3.3.5a: UseAction on the repeating spell sends
+// CMSG_CANCEL_AUTO_REPEAT_SPELL instead of casting it again (0x80DA80 ->
+// 0x807560(1)). docs/re/input-timing.md.
+TEST_CASE("a second Auto Shot press turns the repeat off", "[replay]") {
     Session s;
     huntMob(s);
     s.handler().castSpell(kAutoShot, kMob);
+    REQUIRE(s.handler().getAutoRepeatSpellId() == kAutoShot);
     s.handler().castSpell(kAutoShot, kMob);
-
-    s.receive(castFailed(lastCastCount(s), kAutoShot, kNotReady));
-    CHECK(s.handler().getAutoRepeatSpellId() == kAutoShot);
+    CHECK(s.handler().getAutoRepeatSpellId() == 0);
 }
 
 // Unit::InterruptSpell sends it for whoever stopped shooting.

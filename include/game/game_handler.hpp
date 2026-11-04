@@ -4477,6 +4477,14 @@ public:
         /// Spell.dbc StartRecoveryCategory: 133 = on the global cooldown.
         /// 0xFFFFFFFF when the file's layout does not say.
         uint32_t startRecoveryCategory = 0xFFFFFFFFu;
+        /// Spell.dbc StartRecoveryTime: the global cooldown's length in ms
+        /// (1500, 1000 for energy users, 0 off the GCD).
+        uint32_t startRecoveryMs = 0;
+        /// Spell.dbc DmgClass (0 none, 1 magic, 2 melee, 3 ranged) and
+        /// Category: what decides whether haste shortens the GCD (0x805D70)
+        /// and which "not ready" line a refusal shows (0x807F10).
+        uint32_t dmgClass = 0;
+        uint32_t category = 0;
         uint32_t createdItemId = 0;
         SpellReagent reagents[8] = {};
         uint32_t trivialSkillHigh = 0;

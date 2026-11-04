@@ -1,6 +1,7 @@
 #include "core/application.hpp"
 #include "game/stock_movement.hpp"
 #include "core/frame_pacer.hpp"
+#include "core/input_trace.hpp"
 #include "core/env_flag.hpp"
 #include "core/profile_tag.hpp"
 #include "core/character_paths.hpp"
@@ -2081,6 +2082,7 @@ void Application::run() {
     SDL_Keymod queuedModifiers = SDL_GetModState();
     while (running && !window->shouldClose()) {
         const auto frameStart = std::chrono::steady_clock::now();
+        input_trace::beginFrame();
         beatWatchdog();
         // What a burst of warnings left in the buffer. A warning no longer
         // writes itself to disk one line at a time - see Logger::flushIfStale -
@@ -2194,6 +2196,24 @@ void Application::run() {
 
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
+            // WOWEE_INPUT_TRACE: when each press and click is taken out of
+            // the queue, against when the window system stamped it.
+            if (input_trace::enabled() &&
+                (((event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) &&
+                  !event.key.repeat) ||
+                 event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                 event.type == SDL_EVENT_MOUSE_BUTTON_UP)) {
+                const bool key = event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP;
+                const bool down = event.type == SDL_EVENT_KEY_DOWN ||
+                                  event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+                const std::string name = key
+                    ? std::string("key ") + SDL_GetScancodeName(event.key.scancode)
+                    : "mouse " + ui::KeybindingManager::mouseButtonNameFromSDL(event.button.button);
+                const uint64_t stamp = key ? event.key.timestamp : event.button.timestamp;
+                const uint64_t nowNs = SDL_GetTicksNS();
+                const double ageMs = stamp && stamp <= nowNs ? (nowNs - stamp) / 1.0e6 : 0.0;
+                input_trace::noteInput(name + (down ? " down" : " up"), ageMs);
+            }
             // Sound in Background. Off in the real client and off here: losing
             // focus silences the client rather than playing on behind whatever
             // the player switched to. Read at the moment focus changes, so

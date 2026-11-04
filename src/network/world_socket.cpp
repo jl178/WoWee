@@ -1,5 +1,6 @@
 #include "network/world_socket.hpp"
 #include "core/env_flag.hpp"
+#include "core/input_trace.hpp"
 #include "network/packet.hpp"
 #include "network/net_platform.hpp"
 #include "game/opcode_table.hpp"
@@ -349,6 +350,10 @@ void WorldSocket::send(const Packet& packet) {
                  " data=[", core::toHexString(data.data(), data.size(), true), "]");
     }
 
+    if (core::input_trace::enabled()) {
+        if (const char* name = core::input_trace::tracedOpcodeName(opcode, true))
+            core::input_trace::note(std::string("TX ") + name);
+    }
     const auto traceNow = std::chrono::steady_clock::now();
     recordRecentPacket(true, opcode, payloadLen);
     if (packetTraceUntil_ > traceNow) {
@@ -809,6 +814,10 @@ void WorldSocket::dispatchQueuedPackets() {
     }
 
     while (!localPackets.empty()) {
+        if (core::input_trace::enabled()) {
+            if (const char* name = core::input_trace::tracedOpcodeName(localPackets.front().getOpcode(), false))
+                core::input_trace::note(std::string("RX ") + name);
+        }
         packetCallback(localPackets.front());
         localPackets.pop_front();
     }
