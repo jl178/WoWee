@@ -368,25 +368,13 @@ static std::pair<std::string, std::string> calendarHolidayText(
 }
 
 static int lua_CombatLog_Object_IsA(lua_State* L) {
-    const auto flags = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
-    const auto mask  = static_cast<uint32_t>(luaL_optnumber(L, 2, 0));
-
-    static constexpr uint32_t kCategories[] = {
-        0x0000000Fu,  // affiliation: mine / party / raid / outsider
-        0x000000F0u,  // reaction: friendly / neutral / hostile
-        0x00000300u,  // control: player / npc
-        0x0000FC00u,  // type: player / npc / pet / guardian / object
-    };
-    for (const uint32_t cat : kCategories) {
-        const uint32_t wanted = mask & cat;
-        if (wanted == 0) continue;            // unconstrained
-        if ((flags & wanted) == 0) { lua_pushboolean(L, 0); return 1; }
-    }
-    // The special bits are non-exclusive, so every one asked for must be present.
-    const uint32_t special = mask & 0xFFFF0000u;
-    if (special != 0 && (flags & special) != special) { lua_pushboolean(L, 0); return 1; }
-
-    lua_pushboolean(L, 1);
+    // 0x74D600: one special bit in common is enough; otherwise affiliation,
+    // reaction, control and type must each have one. An empty category in the
+    // mask is not "any" - nothing matches it.
+    const auto flags = static_cast<uint32_t>(static_cast<int64_t>(std::llround(luaL_optnumber(L, 1, 0))));
+    const auto mask  = static_cast<uint32_t>(static_cast<int64_t>(std::llround(luaL_optnumber(L, 2, 0))));
+    if (!game::stock_combat_log::objectIsA(flags, mask)) return luaReturnNil(L);
+    lua_pushnumber(L, 1);
     return 1;
 }
 
@@ -4471,37 +4459,94 @@ static int lua_CreateMiniWorldMapArrowFrame(lua_State* L) { (void)L; return 0; }
 static int lua_PositionMiniWorldMapArrowFrame(lua_State* L) { (void)L; return 0; }
 static int lua_ShowMiniWorldMapArrowFrame(lua_State* L) { (void)L; return 0; }
 
-// ---- The stored combat log (Blizzard_CombatLog's refilter) ----
+// ---- The stored combat log (UnitCombatLog_C.cpp, 0x74D5B0-0x751120) ----
 //
-// The history is the argument list of every COMBAT_LOG_EVENT_UNFILTERED the
-// client fired, kept by LuaEngine::fireEvent; see recordCombatLogEvent.
+// The history is combatLogHistory() (game/stock_combat_log.hpp), filled by
+// LuaEngine::fireEvent. Every walk takes an optional ignoreFilter; without it
+// only the entries CombatLogAddFilter's filters let through are counted.
 //
-// CombatLogGetCurrentEntry answers nil rather than zero when there is no entry,
-// and that distinction matters. Blizzard_CombatLog_RefilterUpdate loops
-// `while (valid and total < COMBATLOG_LIMIT_PER_FRAME)`, and a zero is true in
-// Lua - it would add a line per iteration from an entry that does not exist,
-// stop only on the per-frame cap, and be re-armed by the OnUpdate that
-// scheduled it, every frame, for as long as the log was open.
+// CombatLogGetCurrentEntry answers nothing at all when there is no entry, and
+// the walks answer nil once they run off the end - Blizzard_CombatLog's
+// refilter loops `while (valid ...)`, so a zero would never end it.
 static int lua_CombatLogGetNumEntries(lua_State* L) {
-    lua_pushnumber(L, combatLogEntryCount());
+    // 0x74FA70
+    lua_pushnumber(L, combatLogHistory().numEntries(lua_toboolean(L, 1) != 0));
     return 1;
 }
 static int lua_CombatLogGetCurrentEntry(lua_State* L) {
-    const int pushed = pushCombatLogCurrent(L);
-    return pushed > 0 ? pushed : luaReturnNil(L);
+    // 0x74F2B0 -> 0x74E290
+    return pushCombatLogCurrent(L);
 }
 static int lua_CombatLogAdvanceEntry(lua_State* L) {
-    const int count = static_cast<int>(luaL_optnumber(L, 1, 1));
-    if (!combatLogAdvanceCursor(count)) return luaReturnNil(L);
-    lua_pushboolean(L, 1);
+    // 0x74FC20
+    if (!lua_isnumber(L, 1))
+        return luaL_error(L, "Usage: CombatLogAdvanceEntry(count [,ignoreFilter])");
+    const int count = static_cast<int>(lua_tonumber(L, 1));
+    if (!combatLogHistory().advance(count, lua_toboolean(L, 2) != 0)) return luaReturnNil(L);
+    lua_pushnumber(L, 1);
     return 1;
 }
 static int lua_CombatLogSetCurrentEntry(lua_State* L) {
-    combatLogSetCursor(static_cast<int>(luaL_optnumber(L, 1, 0)));
+    // 0x74FAE0
+    if (!lua_isnumber(L, 1))
+        return luaL_error(L, "Usage: CombatLogSetCurrentEntry(index [,ignoreFilter])");
+    const int index = static_cast<int>(lua_tonumber(L, 1));
+    if (!combatLogHistory().setCurrent(index, lua_toboolean(L, 2) != 0)) return luaReturnNil(L);
+    lua_pushnumber(L, 1);
+    return 1;
+}
+static int lua_CombatLogClearEntries(lua_State* L) {
+    // 0x751120
+    (void)L;
+    combatLogHistory().clear();
     return 0;
 }
-static int lua_CombatLogAddFilter(lua_State* L) { (void)L; return 0; }
-static int lua_CombatLogResetFilter(lua_State* L) { (void)L; return 0; }
+static int lua_CombatLogSetRetentionTime(lua_State* L) {
+    // 0x74D5B0: sets the combatLogRetentionTime CVar.
+    if (!lua_isnumber(L, 1)) return luaL_error(L, "Usage: CombatLogSetRetentionTime(seconds)");
+    combatLogHistory().setRetentionSeconds(static_cast<int>(lua_tonumber(L, 1)));
+    return 0;
+}
+static int lua_CombatLogGetRetentionTime(lua_State* L) {
+    // 0x74D9E0
+    lua_pushnumber(L, combatLogHistory().retentionSeconds());
+    return 1;
+}
+// CombatLogAddFilter(events, sourceFlagsOrGUID, destFlagsOrGUID, spellIdOrName)
+// (0x74FF70). A numeric mask with an empty category and no special bit is
+// refused with the client's error text.
+static int lua_CombatLogAddFilter(lua_State* L) {
+    namespace scl = game::stock_combat_log;
+    scl::Filter f;
+    scl::setFilterEvents(f, lua_isstring(L, 1) ? lua_tostring(L, 1) : nullptr);
+    auto unitArg = [&](int idx, uint64_t& guid, uint32_t& mask, const char* which) -> bool {
+        if (lua_type(L, idx) == LUA_TNUMBER) {
+            mask = static_cast<uint32_t>(static_cast<int64_t>(std::llround(lua_tonumber(L, idx))));
+            if (!scl::maskComplete(mask)) {
+                luaL_error(L, "CombatLogAddFilter(): incomplete filter for %s", which);
+                return false;
+            }
+        } else if (lua_type(L, idx) == LUA_TSTRING) {
+            guid = scl::parseGuid(lua_tostring(L, idx));
+            mask = 0;
+        } else {
+            mask = 0xFFFFFFFFu;
+        }
+        return true;
+    };
+    if (!unitArg(2, f.srcGuid, f.srcMask, "srcMask")) return 0;
+    if (!unitArg(3, f.dstGuid, f.dstMask, "dstMask")) return 0;
+    if (lua_type(L, 4) == LUA_TNUMBER) f.spellId = static_cast<uint32_t>(lua_tonumber(L, 4));
+    else if (lua_type(L, 4) == LUA_TSTRING) f.spellName = lua_tostring(L, 4);
+    combatLogHistory().addFilter(std::move(f));
+    return 0;
+}
+static int lua_CombatLogResetFilter(lua_State* L) {
+    // 0x74FA60 -> 0x74F640
+    (void)L;
+    combatLogHistory().resetFilters();
+    return 0;
+}
 
 // CombatTextSetActiveUnit(unit) - which unit the floating combat text follows.
 // It tells the client where to aim the events it already sends; the events do
@@ -5369,6 +5414,9 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"CombatLogSetCurrentEntry",       lua_CombatLogSetCurrentEntry},
                 {"CombatLogAddFilter",             lua_CombatLogAddFilter},
                 {"CombatLogResetFilter",           lua_CombatLogResetFilter},
+                {"CombatLogClearEntries",          lua_CombatLogClearEntries},
+                {"CombatLogSetRetentionTime",      lua_CombatLogSetRetentionTime},
+                {"CombatLogGetRetentionTime",      lua_CombatLogGetRetentionTime},
                 {"GetLFGCompletionReward",     lua_GetLFGCompletionReward},
                 {"GetLFGCompletionRewardItem", lua_GetLFGCompletionRewardItem},
                 {"RunMacroText",             lua_RunMacroText},

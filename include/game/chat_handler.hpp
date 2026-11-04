@@ -3,6 +3,8 @@
 #include <deque>
 
 #include "game/chat_filters.hpp"
+#include "game/chat_rules.hpp"
+#include <regex>
 
 #include "game/world_packets.hpp"
 #include "game/opcode_table.hpp"
@@ -34,6 +36,13 @@ public:
 
     // --- Public API (delegated from GameHandler) ---
     void sendChatMessage(ChatType type, const std::string& message, const std::string& target = "");
+    /// language -1: the race's own (ChrRaces BaseLanguage).
+    void sendChatMessage(ChatType type, const std::string& message, const std::string& target,
+                         int32_t language);
+    /// SendChatMessage's checks (Wow.exe 0x50D170); returns a Lua error's text.
+    std::string sendChatFromInterface(const std::string& text, const char* typeWord,
+                                      const char* languageWord, const char* target);
+    [[nodiscard]] uint32_t defaultLanguage() const;
     void sendAddonMessage(ChatType type, const std::string& message, const std::string& target = "");
     void sendTextEmote(uint32_t textEmoteId, uint64_t targetGuid = 0);
     /// channelId: ChatChannels.dbc row for a built-in zone channel, 0 otherwise.
@@ -115,7 +124,7 @@ public:
 
 private:
     /// A chat line waiting for a name: its sender's, or that of the player an
-    /// NPC's line is written for. See deliverChatMessage.
+    /// NPC's line is written for. See queueChatLine.
     struct ChatAwaitingName {
         MessageChatData data;
         uint64_t guid = 0;
@@ -126,11 +135,28 @@ private:
     /// short enough that a line does not feel withheld.
     static constexpr double kNameWaitSeconds = 1.0;
     // --- Packet handlers ---
-    void handleMessageChat(network::Packet& packet);
-    /// Deliver a parsed chat line: resolve its sender, filter it, store it and
-    /// tell the interface. Split from handleMessageChat so a line held back
-    /// for its sender's name can be run through it again once the name lands.
-    void deliverChatMessage(MessageChatData data, bool alreadyWaited);
+    void handleMessageChat(network::Packet& packet, bool gmMessage);
+    /// 0x50BE70's checks: recent whisperers, the ignore list.
+    bool acceptIncomingChat(const MessageChatData& data);
+    /// Fill the sender's and receiver's names from what the client holds.
+    void resolveChatNames(MessageChatData& data) const;
+    /// The player or pet guid whose name a line still lacks, or 0.
+    [[nodiscard]] uint64_t missingChatName(const MessageChatData& data) const;
+    /// Hold a line until its names are known, keeping the server's order.
+    void queueChatLine(MessageChatData data);
+    void pumpChatQueue();
+    /// The rest of 0x509DD0 and the CHAT_MSG_ event (0x4FDBC0).
+    void finishChatLine(MessageChatData data);
+    void fireChatLineEvent(const MessageChatData& data, const char* chatFlag);
+    void ensureLanguageWords();
+    [[nodiscard]] uint32_t languageComprehension(uint32_t language) const;
+    bool isSpamLine(const std::string& text);
+    void playTalkAnimation(const MessageChatData& data);
+    /// Send what the client's chat throttles held back, once they allow it.
+    void flushHeldSends();
+    [[nodiscard]] bool isRecentWhisperer(const std::string& name) const;
+    void sendChatPacket(ChatType type, uint32_t language, const std::string& message,
+                        const std::string& target);
     /// A player's name from whatever already holds it - the name cache, the
     /// player nearby, the party, the guild roster. Empty when none does.
     [[nodiscard]] std::string knownPlayerName(uint64_t guid) const;
@@ -182,10 +208,20 @@ private:
 
     // --- State ---
     std::deque<MessageChatData> chatHistory_;
-    /// What has just been said, for the spam filter. Short on purpose: this
-    /// is looking for a line pasted again a moment later, not keeping a record
-    /// of the conversation. See repeatsRecentLine in chat_filters.hpp.
-    std::deque<RecentChatLine> recentChatLines_;
+    /// Who whispered last (0x4FB710), the client's send throttles
+    /// (0x50D170) and the lines they are holding.
+    chat_rules::RecentWhisperers recentWhisperers_;
+    chat_rules::ChatSendThrottle sendThrottle_;
+    struct HeldSend { ChatType type; uint32_t language; std::string target, message; };
+    std::deque<HeldSend> heldSends_;
+    /// LanguageWords.dbc, for the scrambler.
+    chat_rules::LanguageWords languageWords_;
+    bool languageWordsLoaded_ = false;
+    /// SpamMessages.dbc, and the verdict per text.
+    std::vector<std::regex> spamPatterns_;
+    bool spamPatternsLoaded_ = false;
+    std::unordered_map<std::string, bool> spamVerdicts_;
+    std::vector<std::string> laughWords_;
     size_t maxChatHistory_ = 100;
     uint64_t chatUidCounter_ = 0;  // monotonic uid for MessageChatData::uid
     std::vector<std::string> joinedChannels_;
@@ -219,10 +255,6 @@ private:
     bool chatLogInitialized_ = false;
     std::string chatLogPath_;
     std::ofstream chatLogStream_;
-
-    // Track senders we've already auto-replied to (AFK/DND) this session
-    // to prevent infinite reply loops. Cleared when AFK/DND is toggled off.
-    std::unordered_set<std::string> afkAutoRepliedSenders_;
 };
 
 } // namespace game

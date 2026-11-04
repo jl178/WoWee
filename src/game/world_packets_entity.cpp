@@ -964,10 +964,11 @@ bool SpellDamageLogParser::parse(network::Packet& packet, SpellDamageLogData& da
         return false;
     }
 
-    (void)packet.readUInt8(); // periodicLog (not displayed)
+    data.periodicLog = packet.readUInt8() != 0;
     packet.readUInt8(); // unused
-    packet.readUInt32(); // blocked
+    data.blocked = packet.readUInt32();
     uint32_t flags = packet.readUInt32();  // flags IS used - bit 0x02 = crit
+    data.hitFlags = flags;
     data.isCrit = (flags & 0x02) != 0;
 
     LOG_DEBUG("Spell damage: spellId=", data.spellId, " dmg=", data.damage,

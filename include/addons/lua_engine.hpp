@@ -60,6 +60,9 @@ public:
     // Fire a WoW event to all registered Lua handlers.
     void fireEvent(const std::string& eventName,
                    const std::vector<std::string>& args = {});
+    /// fireEvent's delivery to handlers and frames, without the combat log's
+    /// history and filtered copy (which fireEvent adds first).
+    void dispatchEvent(const std::string& eventName, const std::vector<std::string>& args);
 
     // Try to dispatch a slash command via SlashCmdList. Returns true if handled.
     bool dispatchSlashCommand(const std::string& command, const std::string& args);

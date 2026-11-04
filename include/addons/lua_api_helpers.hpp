@@ -3,6 +3,8 @@
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #pragma once
 
+#include "game/stock_combat_log.hpp"
+
 #include <string>
 #include <chrono>
 #include <cstring>
@@ -1167,20 +1169,12 @@ uint32_t spellAtTradeSkillRow(game::GameHandler* gh, int index);
 uint32_t itemMadeAtTradeSkillRow(game::GameHandler* gh, int index);
 uint32_t reagentAtTradeSkillRow(game::GameHandler* gh, int index, int reagent);
 
-/// The combat log's stored history, which Blizzard_CombatLog walks to refill
-/// its window when it is opened or refiltered. Each entry is the argument list
-/// of one COMBAT_LOG_EVENT_UNFILTERED, kept as it was fired so the log can hand
-/// it back to the same parser that read it live.
-///
-/// Entries are numbered by age: 0 is the newest, and the walk Blizzard does
-/// goes toward the oldest. The history is bounded; the oldest go first.
-void recordCombatLogEvent(const std::vector<std::string>& args);
-int combatLogEntryCount();
-/// Point at an entry by age, clamped to the history. 0 is the newest.
-void combatLogSetCursor(int age);
-/// Move the cursor by a count, negative toward older entries. False when that
-/// runs off the end of the history, where the cursor stays on the last entry.
-bool combatLogAdvanceCursor(int count);
+/// The combat log's history (game/stock_combat_log.hpp's History): every
+/// COMBAT_LOG_EVENT_UNFILTERED as it was fired, kept for
+/// combatLogRetentionTime seconds, with the filters CombatLogAddFilter set and
+/// the cursor CombatLogGetCurrentEntry reads. LuaEngine::fireEvent records into
+/// it and fires COMBAT_LOG_EVENT for what the filters let through.
+game::stock_combat_log::History& combatLogHistory();
 /// Push the arguments of the entry the cursor is on. Returns how many were
 /// pushed, zero when there is no entry.
 int pushCombatLogCurrent(lua_State* L);

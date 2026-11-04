@@ -4680,12 +4680,11 @@ const std::vector<GameHandler::ReputationEntry>& GameHandler::getReputationList(
 }
 
 const std::string& GameHandler::getLanguageName(uint32_t languageId) const {
-    static const std::string kUniversal = "Universal";
     static const std::string kNone;
-    // Zero is not in the file: it is the "everyone understands this" language,
-    // and it is also the name the interface tests for before deciding whether
-    // to print a language header at all.
-    if (languageId == 0) return kUniversal;
+    // Zero is not in the file, and the client looks it up like any other id
+    // (0x4FDBC0): CHAT_MSG_*'s arg3 is empty for it, which FrameXML reads as
+    // "no language header".
+    if (languageId == 0) return kNone;
     if (!languageNamesLoaded_) {
         auto* am = services().assetManager;
         if (am && am->isInitialized()) {

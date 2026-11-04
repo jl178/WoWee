@@ -543,6 +543,7 @@ private:
     void handleExtraAuraInfo(network::Packet& packet, bool isInit);
     void handleSpellDispelLog(network::Packet& packet);
     void handleSpellStealLog(network::Packet& packet);
+    void handleSpellBreakLog(network::Packet& packet);
     void handleSpellChanceProcLog(network::Packet& packet);
     void handleSpellInstaKillLog(network::Packet& packet);
     void handleSpellLogExecute(network::Packet& packet);

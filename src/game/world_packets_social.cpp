@@ -72,115 +72,89 @@ bool decodeAddonChatPayload(const MessageChatData& data,
 }
 
 bool MessageChatParser::parse(network::Packet& packet, MessageChatData& data) {
-    // SMSG_MESSAGECHAT format (WoW 3.3.5a):
-    // uint8 type
-    // uint32 language
-    // uint64 senderGuid
-    // uint32 unknown (always 0)
-    // [type-specific data]
-    // uint32 messageLength
-    // string message
-    // uint8 chatTag
+    return parse(packet, data, false);
+}
 
+bool MessageChatParser::parse(network::Packet& packet, MessageChatData& data, bool gmMessage) {
+    // SMSG_MESSAGECHAT / SMSG_GM_MESSAGECHAT as Wow.exe reads them (0x50BE70)
+    // and AzerothCore writes them (ChatHandler::BuildChatPacket):
+    //   uint8 type, int32 language, uint64 sender, uint32 flags,
+    //   [type-specific], uint32 length, text, uint8 chat tag,
+    //   [uint32 achievement for the two achievement types].
     if (packet.getSize() < 15) {
         LOG_ERROR("SMSG_MESSAGECHAT packet too small: ", packet.getSize(), " bytes");
         return false;
     }
-
-    // Read chat type
-    uint8_t typeVal = packet.readUInt8();
-    data.type = static_cast<ChatType>(typeVal);
-
-    // Read language
-    uint32_t langVal = packet.readUInt32();
-    data.language = static_cast<ChatLanguage>(langVal);
-
-    // Read sender GUID
+    data.type = static_cast<ChatType>(packet.readUInt8());
+    data.language = static_cast<ChatLanguage>(packet.readUInt32());
     data.senderGuid = packet.readUInt64();
+    packet.readUInt32();  // flags, unused by the client
 
-    // Read unknown field
-    packet.readUInt32();
+    // A length-prefixed name (the length counts the terminator).
+    auto readSizedName = [&packet](std::string& out) -> bool {
+        if (!packet.hasRemaining(4)) return false;
+        const uint32_t len = packet.readUInt32();
+        if (len > packet.getRemainingSize()) return false;
+        out.clear();
+        for (uint32_t i = 0; i < len; ++i) {
+            const char c = static_cast<char>(packet.readUInt8());
+            if (c != '\0') out.push_back(c);
+        }
+        return true;
+    };
+    // The client's test for "a unit whose name the packet carries": not a
+    // player (high nibble clear and non-zero) and not a pet (0xF040xxxx).
+    auto isPlayerGuid = [](uint64_t g) {
+        const uint32_t hi = static_cast<uint32_t>(g >> 32);
+        return (hi & 0xF0000000u) == 0 && (static_cast<uint32_t>(g) != 0 || (hi & 0xF07FFFFFu) != 0);
+    };
+    auto isPetGuid = [](uint64_t g) {
+        return (static_cast<uint32_t>(g >> 32) & 0xF0F00000u) == 0xF0400000u;
+    };
 
-    // Type-specific data
-    // WoW 3.3.5 SMSG_MESSAGECHAT format: after senderGuid+unk, most types
-    // have a receiverGuid (uint64). Some types have extra fields before it.
-    switch (data.type) {
-        case ChatType::MONSTER_SAY:
-        case ChatType::MONSTER_YELL:
-        case ChatType::MONSTER_EMOTE:
-        case ChatType::MONSTER_WHISPER:
-        case ChatType::MONSTER_PARTY:
-        case ChatType::RAID_BOSS_EMOTE:
-        case ChatType::RAID_BOSS_WHISPER: {
-            // Length-prefixed, bounds-checked against the packet, terminator stripped.
-            packet.readSizedString(data.senderName);
-            // Read receiver GUID (NamedGuid: guid + optional name for non-player targets)
+    switch (static_cast<uint8_t>(data.type)) {
+        // Monster and boss lines, and the Battle.net type that shares their
+        // layout: the speaker's name, then the receiver with a name of its
+        // own when it is neither a player nor a pet.
+        case 0x0C: case 0x0D: case 0x0E: case 0x0F: case 0x10:
+        case 0x29: case 0x2A: case 0x2F: {
+            if (!readSizedName(data.senderName)) return false;
+            if (!packet.hasRemaining(8)) return false;
             data.receiverGuid = packet.readUInt64();
-            if (data.receiverGuid != 0) {
-                // WoW GUID type encoding: bits 48-63 identify entity type.
-                // Players have highGuid=0x0000. Pets use 0xF040 (active pet) or
-                // 0xF014 (creature treated as pet). Mask 0xF0FF isolates the type
-                // nibbles while ignoring the server-specific middle bits.
-                constexpr uint16_t kGuidTypeMask   = 0xF0FF;
-                constexpr uint16_t kGuidTypePet     = 0xF040;
-                constexpr uint16_t kGuidTypeVehicle = 0xF014;
-                uint16_t highGuid = static_cast<uint16_t>(data.receiverGuid >> 48);
-                bool isPlayer = (highGuid == 0x0000);
-                bool isPet = ((highGuid & kGuidTypeMask) == kGuidTypePet) ||
-                             ((highGuid & kGuidTypeMask) == kGuidTypeVehicle);
-                if (!isPlayer && !isPet) {
-                    // The receiver's name, which an NPC's $n is filled from.
-                    // Bounds-checked: a length past the end walked the read
-                    // position off the buffer, and the message length below
-                    // then read a clamped zero, passed its own bounds test on
-                    // the strength of it, and delivered an empty monster line
-                    // that no server ever sent. A name this long is a lie
-                    // about the packet, so refuse the packet.
-                    const uint32_t recvNameLen = packet.readUInt32();
-                    if (recvNameLen > packet.getRemainingSize()) return false;
-                    data.receiverName.clear();
-                    for (uint32_t i = 0; i < recvNameLen; ++i) {
-                        const char c = static_cast<char>(packet.readUInt8());
-                        if (c != '\0') data.receiverName.push_back(c);
-                    }
-                }
+            if (data.receiverGuid != 0 && !isPlayerGuid(data.receiverGuid) &&
+                !isPetGuid(data.receiverGuid)) {
+                if (!readSizedName(data.receiverName)) return false;
             }
             break;
         }
-
-        case ChatType::CHANNEL: {
-            // Read channel name, then receiver GUID
-            data.channelName = packet.readString();
+        // A whisper the server names the sender of; the client then treats it
+        // as an ordinary whisper (0x50BE70 sets the type to 7).
+        case 0x08: {
+            if (!readSizedName(data.senderName)) return false;
+            if (!packet.hasRemaining(8)) return false;
             data.receiverGuid = packet.readUInt64();
+            data.type = ChatType::WHISPER;
             break;
         }
-
-        case ChatType::ACHIEVEMENT:
-        case ChatType::GUILD_ACHIEVEMENT: {
-            // Read target GUID
+        // Battleground system lines: a guid, and its name when it is not a
+        // player. The type stays: FrameXML prints CHAT_MSG_BG_SYSTEM_*.
+        case 0x24: case 0x25: case 0x26: {
+            if (!packet.hasRemaining(8)) return false;
             data.receiverGuid = packet.readUInt64();
+            if (data.receiverGuid != 0 && !isPlayerGuid(data.receiverGuid)) {
+                if (!readSizedName(data.receiverName)) return false;
+            }
             break;
         }
-
-        case ChatType::WHISPER:
-        case ChatType::WHISPER_INFORM: {
-            // TBC and WotLK both place the receiver GUID directly before
-            // messageLen. Names are resolved separately from player GUIDs.
+        case 0x30: case 0x31:
+            if (!packet.hasRemaining(8)) return false;
             data.receiverGuid = packet.readUInt64();
             break;
-        }
-
-        case ChatType::BG_SYSTEM_NEUTRAL:
-        case ChatType::BG_SYSTEM_ALLIANCE:
-        case ChatType::BG_SYSTEM_HORDE:
-            // BG/Arena system messages - no sender GUID or name field, just message.
-            // Reclassify as SYSTEM for consistent display.
-            data.type = ChatType::SYSTEM;
-            break;
-
         default:
-            // SAY, GUILD, PARTY, YELL, WHISPER, WHISPER_INFORM, RAID, etc.
-            // All have receiverGuid (typically senderGuid repeated)
+            // A GM's line names its sender here, before the channel.
+            if (gmMessage && !readSizedName(data.senderName)) return false;
+            if (data.type == ChatType::CHANNEL) data.channelName = packet.readString();
+            if (!packet.hasRemaining(8)) return false;
             data.receiverGuid = packet.readUInt64();
             break;
     }
@@ -202,10 +176,10 @@ bool MessageChatParser::parse(network::Packet& packet, MessageChatData& data) {
         for (uint32_t i = 0; i < messageLen; ++i) {
             data.message[i] = static_cast<char>(packet.readUInt8());
         }
-        // Strip trailing null terminator (servers include it in messageLen)
-        if (!data.message.empty() && data.message.back() == '\0') {
-            data.message.pop_back();
-        }
+        // A C string to the client: it ends at the first terminator (the
+        // length counts the one the server writes).
+        if (const size_t nul = data.message.find('\0'); nul != std::string::npos)
+            data.message.resize(nul);
     }
 
     // Read chat tag

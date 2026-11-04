@@ -5,6 +5,7 @@
 #include <set>
 #include "addons/lua_api_registrations.hpp"
 #include "game/chat_filters.hpp"
+#include "game/chat_rules.hpp"
 #include "game/text_tokens.hpp"
 #include "game/game_handler.hpp"
 #include "game/game_utils.hpp"
@@ -28,6 +29,7 @@
 #include <iomanip>
 #include <sstream>
 #include <ctime>
+#include <regex>
 #include "core/local_time.hpp"
 
 namespace wowee {
@@ -181,34 +183,12 @@ void ChatHandler::logChatMessage(const MessageChatData& msg, const char* source)
 
 void ChatHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_MESSAGECHAT] = [this](network::Packet& packet) {
-        if (owner_.getState() == WorldState::IN_WORLD) handleMessageChat(packet);
+        if (owner_.getState() == WorldState::IN_WORLD) handleMessageChat(packet, false);
     };
+    // The same handler with the GM flag (0x50BE70's second argument): the
+    // ordinary types carry the GM's name before the rest.
     table[Opcode::SMSG_GM_MESSAGECHAT] = [this](network::Packet& packet) {
-        if (owner_.getState() != WorldState::IN_WORLD) return;
-        // SMSG_GM_MESSAGECHAT has the same header as SMSG_MESSAGECHAT
-        // (type[1]+lang[4]+senderGuid[8]+unk[4] = 17 bytes) followed by an
-        // extra gmNameLen[4]+gmName[N] before the type-specific body.
-        // Strip the GM name field to produce standard SMSG_MESSAGECHAT format.
-        if (!packet.hasRemaining(21)) return; // 17 header + 4 gmNameLen min
-        uint8_t  type       = packet.readUInt8();
-        uint32_t lang       = packet.readUInt32();
-        uint64_t senderGuid = packet.readUInt64();
-        uint32_t unk        = packet.readUInt32();
-        uint32_t gmNameLen  = packet.readUInt32();
-        if (!packet.hasRemaining(gmNameLen)) return;
-        packet.setReadPos(packet.getReadPos() + gmNameLen); // skip gmName
-
-        // Rebuild as regular SMSG_MESSAGECHAT (header + remaining body)
-        network::Packet regular(0);
-        regular.writeUInt8(type);
-        regular.writeUInt32(lang);
-        regular.writeUInt64(senderGuid);
-        regular.writeUInt32(unk);
-        const auto& raw = packet.getData();
-        size_t pos = packet.getReadPos();
-        if (pos < raw.size())
-            regular.writeBytes(raw.data() + pos, raw.size() - pos);
-        handleMessageChat(regular);
+        if (owner_.getState() == WorldState::IN_WORLD) handleMessageChat(packet, true);
     };
     table[Opcode::SMSG_TEXT_EMOTE] = [this](network::Packet& packet) {
         if (owner_.getState() == WorldState::IN_WORLD) handleTextEmote(packet);
@@ -341,47 +321,223 @@ void ChatHandler::registerOpcodes(DispatchTable& table) {
 }
 
 void ChatHandler::sendChatMessage(ChatType type, const std::string& message, const std::string& target) {
+    sendChatMessage(type, message, target, -1);
+}
+
+namespace {
+bool sameTextIgnoringCase(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i])))
+            return false;
+    return true;
+}
+
+uint32_t chatNowMs() {
+    // Never zero: zero is the empty slot of a throttle ring.
+    return static_cast<uint32_t>(core::appTimeSeconds() * 1000.0) | 1u;
+}
+}  // namespace
+
+uint32_t ChatHandler::defaultLanguage() const {
+    // ChrRaces.dbc BaseLanguage (0x6D5E70): Common for the Alliance races,
+    // Orcish for the Horde's.
+    const uint8_t race = owner_.getPlayerRace();
+    const bool horde = race == 2 || race == 5 || race == 6 || race == 8 || race == 10;
+    return horde ? 1u : 7u;
+}
+
+// SendChatMessage(text [,type] [,language] [,target]) as 0x50D170 checks it.
+// The return is a Lua error's text; empty when the call simply ends.
+std::string ChatHandler::sendChatFromInterface(const std::string& text, const char* typeWord,
+                                               const char* languageWord, const char* target) {
+    if (owner_.getState() != WorldState::IN_WORLD) return {};
+    uint8_t type = 0x01;
+    if (typeWord) {
+        type = chat_rules::chatTypeFromWord(typeWord);
+        if (type == 0) return "SendChatMessage(): Unknown chat type";
+    }
+    if (text.empty() && type != 0x17 && type != 0x18) return {};
+    if (!chat_rules::isUtf8Text(text)) return "SendChatMessage(): Chat message must be UTF-8 text";
+    int32_t language = -1;
+    if (languageWord) {
+        uint32_t id = 0;
+        bool found = false;
+        for (uint32_t i = 1; i < 64 && !found; ++i) {
+            const std::string& name = owner_.getLanguageName(i);
+            if (!name.empty() && sameTextIgnoringCase(name, languageWord)) { id = i; found = true; }
+        }
+        if (!found) return "SendChatMessage(): Unknown language";
+        if (languageComprehension(id) == 0) {
+            owner_.displayGameMessage("ERR_CANT_SPEAK_LANGAGE", "You cannot speak that language.");
+            return {};
+        }
+        language = static_cast<int32_t>(id);
+    }
+    std::string tgt = target ? target : "";
+    const auto& party = owner_.getPartyData();
+    const uint64_t me = owner_.getPlayerGuid();
+    const bool inRaid = owner_.isInGroup() && party.groupType == 1;
+    const bool leader = owner_.isInGroup() && party.leaderGuid == me;
+    switch (type) {
+        case 0x07:
+            if (tgt.empty()) return "SendChatMessage(): Whisper message missing target player!";
+            break;
+        case 0x02:
+            if (!owner_.isInGroup()) {
+                owner_.displayGameMessage("ERR_NOT_IN_GROUP", "You aren't in a party.");
+                return {};
+            }
+            if (leader) type = 0x33;   // PARTY_LEADER
+            break;
+        case 0x28:
+            if (!inRaid) {
+                if (!owner_.isInGroup()) {
+                    owner_.displayGameMessage("ERR_NOT_IN_GROUP", "You aren't in a party.");
+                    return {};
+                }
+            } else {
+                bool assistant = leader;
+                for (const auto& m : party.members)
+                    if (m.guid == me && (m.flags & 0x01)) assistant = true;
+                if (!assistant) {
+                    owner_.displayGameMessage("ERR_NOT_LEADER", "You are not the party leader.");
+                    return {};
+                }
+            }
+            break;
+        case 0x03: case 0x2C:
+            if (!inRaid) {
+                if (type == 0x03) owner_.displayGameMessage("ERR_NOT_IN_RAID", "You are not in a raid group");
+                else owner_.displayGameMessage("ERR_NOT_IN_BATTLEGROUND", "You aren't in a Battleground.");
+                return {};
+            }
+            if (leader) type = (type == 0x03) ? 0x27 : 0x2D;   // RAID_LEADER, BATTLEGROUND_LEADER
+            break;
+        case 0x11: {
+            if (tgt.empty()) return "SendChatMessage(): Channel send missing channel number";
+            const int number = std::atoi(tgt.c_str());
+            const std::string name = getChannelByIndex(number);
+            // A number with no channel, or one the server has suspended, ends
+            // the call without a word.
+            if (name.empty() || suspendedChannels_.count(name)) return {};
+            tgt = name;
+            break;
+        }
+        default: break;
+    }
+    // Dead or a ghost: only the group, guild, whisper and channel kinds go out.
+    const bool talksWhileDead = type == 0x07 || type == 0x02 || type == 0x33 || type == 0x03 ||
+                                type == 0x27 || type == 0x28 || type == 0x04 || type == 0x05 ||
+                                type == 0x11 || type == 0x18 || type == 0x17 || type == 0x2C ||
+                                type == 0x2D;
+    if (!talksWhileDead && (owner_.isPlayerDead() || owner_.isPlayerGhost())) {
+        owner_.displayGameMessage("ERR_CHAT_WHILE_DEAD", "You can't chat when you're dead!");
+        return {};
+    }
+    std::string message = text;
+    // The escape check is the last word before the packet; done here so its
+    // error reaches Lua.
+    {
+        std::string probe = chat_rules::expandChatTokens(message, "", "");
+        chat_rules::cutAtLineBreak(probe);
+        if (!chat_rules::checkOutgoingEscapes(probe))
+            return "SendChatMessage(): Invalid escape code in chat message";
+    }
+    sendChatMessage(static_cast<ChatType>(type), message, tgt, language);
+    return {};
+}
+
+void ChatHandler::sendChatMessage(ChatType type, const std::string& message, const std::string& target,
+                                  int32_t language) {
     if (owner_.getState() != WorldState::IN_WORLD) {
         LOG_WARNING("Cannot send chat in state: ", static_cast<int>(owner_.getState()));
         return;
     }
-
-    // Auto Clear AFK, which the panel offers and nothing read: the flag was
-    // only ever cleared by typing /afk a second time, so a player who came
-    // back and started talking stayed away as far as everyone else could see,
-    // still auto-replying to whispers.
-    //
-    // Sending a message is the signal used here. It is not the only one WoW
-    // takes - moving clears it too - but it is the one that matters, because
-    // it is the one where the player is visibly present and being answered
-    // for by a machine.
-    //
     // Away and busy are chat types of their own, with the client saying the
-    // change (Wow.exe 0x50D170): handled before the empty-message refusal
-    // below, since an empty one is how either is cleared.
+    // change (Wow.exe 0x50D170, 0x6DC640, 0x6D52D0). Any other line clears
+    // away when autoClearAFK is on.
     if (type == ChatType::AFK) { toggleAfk(message); return; }
-    if (owner_.afkStatusRef() &&
-        addons::storedCVarValue("autoClearAFK", "1") != "0") {
-        clearAfk();
-    }
+    if (owner_.afkStatusRef() && addons::storedCVarValue("autoClearAFK", "1") != "0") clearAfk();
     if (type == ChatType::DND) { toggleDnd(message); return; }
+    if (message.empty()) return;
 
-    if (message.empty()) {
-        LOG_WARNING("Cannot send empty chat message");
+    // %t / %n / %f, 255 bytes (0x577D00); the first line break ends the line
+    // (0x7E1640); the escape codes are checked (a colour with no |r is cut).
+    std::string targetName, focusName;
+    if (const uint64_t t = owner_.getTargetGuid()) targetName = owner_.lookupName(t);
+    if (const uint64_t f = owner_.getFocusGuid()) focusName = owner_.lookupName(f);
+    std::string text = chat_rules::expandChatTokens(
+        message, targetName, focusName,
+        globalString(owner_.services().assetManager, "TARGET_TOKEN_NOT_FOUND"),
+        globalString(owner_.services().assetManager, "FOCUS_TOKEN_NOT_FOUND"));
+    chat_rules::cutAtLineBreak(text);
+    if (!chat_rules::checkOutgoingEscapes(text)) {
+        LOG_WARNING("Chat: not sent - an invalid escape code");
         return;
     }
+    if (text.empty()) return;
 
+    const uint32_t lang = language >= 0 ? static_cast<uint32_t>(language) : defaultLanguage();
+
+    // The client's throttles: whispers to people who have not whispered
+    // lately, and each channel - ten in ten seconds, the rest held.
+    if (type == ChatType::WHISPER || type == ChatType::CHANNEL) {
+        flushHeldSends();
+        const uint32_t now = chatNowMs();
+        if (type == ChatType::WHISPER) {
+            if (!isRecentWhisperer(target)) {
+                if (!heldSends_.empty() || sendThrottle_.whisperHeld(now)) {
+                    heldSends_.push_back({type, lang, target, text});
+                    return;
+                }
+                sendThrottle_.recordWhisper(now);
+            }
+        } else {
+            if (!heldSends_.empty() || sendThrottle_.channelHeld(target, now)) {
+                heldSends_.push_back({type, lang, target, text});
+                return;
+            }
+            sendThrottle_.recordChannel(target, now);
+        }
+    }
+    sendChatPacket(type, lang, text, target);
+}
+
+bool ChatHandler::isRecentWhisperer(const std::string& name) const {
+    for (const uint64_t guid : recentWhisperers_.guids()) {
+        if (guid == 0) continue;
+        const std::string known = knownPlayerName(guid);
+        if (!known.empty() && sameTextIgnoringCase(known, name)) return true;
+    }
+    return false;
+}
+
+void ChatHandler::flushHeldSends() {
+    // 0x5098B0: each held line in order, the ones the throttle now allows.
+    if (heldSends_.empty() || owner_.getState() != WorldState::IN_WORLD) return;
+    const uint32_t now = chatNowMs();
+    for (auto it = heldSends_.begin(); it != heldSends_.end();) {
+        bool go = false;
+        if (it->type == ChatType::WHISPER) {
+            if (isRecentWhisperer(it->target)) go = true;
+            else if (!sendThrottle_.whisperHeld(now)) { sendThrottle_.recordWhisper(now); go = true; }
+        } else if (!sendThrottle_.channelHeld(it->target, now)) {
+            sendThrottle_.recordChannel(it->target, now);
+            go = true;
+        }
+        if (!go) { ++it; continue; }
+        sendChatPacket(it->type, it->language, it->message, it->target);
+        it = heldSends_.erase(it);
+    }
+}
+
+void ChatHandler::sendChatPacket(ChatType type, uint32_t language, const std::string& message,
+                                 const std::string& target) {
+    if (!owner_.getSocket()) return;
     LOG_INFO("OUTGOING CHAT: type=", static_cast<int>(type),
              " (", getChatTypeString(type), ") target='", target, "' msg='", message.substr(0, 60), "'");
-
-    // Use the player's faction language. AzerothCore rejects wrong language.
-    // Alliance races: Human(1), Dwarf(3), NightElf(4), Gnome(7), Draenei(11) → COMMON (7)
-    // Horde races: Orc(2), Undead(5), Tauren(6), Troll(8), BloodElf(10) → ORCISH (1)
-    uint8_t race = owner_.getPlayerRace();
-    bool isHorde = (race == 2 || race == 5 || race == 6 || race == 8 || race == 10);
-    ChatLanguage language = isHorde ? ChatLanguage::ORCISH : ChatLanguage::COMMON;
-
-    auto packet = MessageChatPacket::build(type, language, message, target);
+    auto packet = MessageChatPacket::build(type, static_cast<ChatLanguage>(language), message, target);
     if (chatPacketDiagEnabled()) {
         const auto& raw = packet.getData();
         LOG_WARNING("CHAT PACKET DIAG TX CMSG_MESSAGECHAT type=", getChatTypeString(type),
@@ -389,12 +545,8 @@ void ChatHandler::sendChatMessage(ChatType type, const std::string& message, con
                     raw.empty() ? std::string{} : core::toHexString(raw.data(), raw.size(), true), "]");
     }
     owner_.getSocket()->send(packet);
-
-    // No local echo. The stock client shows its own line - and raises its
-    // own bubble - only when the server sends the message back, so a line the
-    // server refuses (muted, a GM command, a language not known, a channel not
-    // joined) never appears, and every line carries what the server made of
-    // it. The local copy here had shown ".tele ..." as speech over the head.
+    // No local echo: the stock client shows its own line only when the server
+    // sends it back.
 }
 
 void ChatHandler::showChatBubble(uint64_t senderGuid, ChatType type, const std::string& message) {
@@ -428,7 +580,7 @@ void ChatHandler::sendAddonMessage(ChatType type, const std::string& message, co
     owner_.getSocket()->send(packet);
 }
 
-void ChatHandler::handleMessageChat(network::Packet& packet) {
+void ChatHandler::handleMessageChat(network::Packet& packet, bool gmMessage) {
     LOG_DEBUG("Handling SMSG_MESSAGECHAT");
     if (chatPacketDiagEnabled()) {
         const auto& raw = packet.getData();
@@ -437,7 +589,9 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
     }
 
     MessageChatData data;
-    if (!owner_.getPacketParsers()->parseMessageChat(packet, data)) {
+    const bool parsed = gmMessage ? MessageChatParser::parse(packet, data, true)
+                                  : owner_.getPacketParsers()->parseMessageChat(packet, data);
+    if (!parsed) {
         const auto& raw = packet.getData();
         LOG_WARNING("Failed to parse SMSG_MESSAGECHAT, size=", packet.getSize(),
                     " data=[", raw.empty() ? std::string{} : core::toHexString(raw.data(), raw.size(), true), "]");
@@ -453,472 +607,378 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
              " (", getChatTypeString(data.type), ") sender=0x", std::hex, data.senderGuid, std::dec,
              " '", data.senderName, "' msg='", data.message.substr(0, 60), "'");
 
-    // A whisper to yourself still names you as the one to reply to.
-    if (data.senderGuid == owner_.getPlayerGuid() && data.senderGuid != 0 &&
-        data.type == ChatType::WHISPER && !data.senderName.empty()) {
-        owner_.lastWhisperSenderRef() = data.senderName;
-    }
-
-    deliverChatMessage(std::move(data), /*alreadyWaited=*/false);
+    if (!acceptIncomingChat(data)) return;
+    queueChatLine(std::move(data));
 }
 
-void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
-    // Resolve sender name from entity/cache if not already set by parser
-    if (data.senderName.empty() && data.senderGuid != 0) {
-        auto nameIt = owner_.getPlayerNameCache().find(data.senderGuid);
-        if (nameIt != owner_.getPlayerNameCache().end()) {
-            data.senderName = nameIt->second;
-        } else {
-            auto entity = owner_.getEntityManager().getEntity(data.senderGuid);
-            if (entity) {
-                if (entity->getType() == ObjectType::PLAYER) {
-                    auto player = std::dynamic_pointer_cast<Player>(entity);
-                    if (player && !player->getName().empty()) {
-                        data.senderName = player->getName();
-                    }
-                } else if (entity->getType() == ObjectType::UNIT) {
-                    auto unit = std::dynamic_pointer_cast<Unit>(entity);
-                    if (unit && !unit->getName().empty()) {
-                        data.senderName = unit->getName();
-                    }
-                }
-            }
-        }
+// What Wow.exe's SMSG_MESSAGECHAT handler (0x50BE70) decides before a line
+// reaches the chat frame: who whispered last, and the ignore list.
+bool ChatHandler::acceptIncomingChat(const MessageChatData& data) {
+    const auto type = static_cast<uint8_t>(data.type);
+    auto ignored = [this](uint64_t guid) {
+        return guid != 0 && owner_.ignoreListGuidsRef().count(guid) != 0;
+    };
+    // Monster and boss lines: dropped when the player they name is ignored.
+    if (isMonsterChatType(data.type) || type == 0x2F) return !ignored(data.receiverGuid);
+    // Battleground system and achievement lines are not checked.
+    if ((type >= 0x24 && type <= 0x26) || type == 0x30 || type == 0x31) return true;
 
-        if (data.senderName.empty()) {
-            const auto& partyData = owner_.getPartyData();
-            for (const auto& member : partyData.members) {
-                if (member.guid == data.senderGuid && !member.name.empty()) {
-                    data.senderName = member.name;
-                    break;
-                }
-            }
-        }
-
-        // The guild roster, which was not among the places looked and is the
-        // one that holds the names this most often needs.
-        //
-        // Every other source here is someone nearby or in the party. A
-        // guildmate is characteristically neither: they are in another zone,
-        // which is the whole point of guild chat. So a guild line from anyone
-        // not recently met arrived with no name at all - "[Guild] : message" -
-        // and a guild achievement, which is announced by whoever earned it
-        // wherever they are, read "[] has earned the achievement".
-        //
-        // The roster is already held and already carries the name beside the
-        // guid; nothing had asked it. It is only populated once the roster has
-        // been requested, so this is a source rather than a guarantee, and the
-        // query below still runs when it misses.
-        if (data.senderName.empty()) {
-            for (const auto& member : owner_.getGuildRoster().members) {
-                if (member.guid == data.senderGuid && !member.name.empty()) {
-                    data.senderName = member.name;
-                    break;
-                }
-            }
-        }
-
-        if (data.senderName.empty()) {
-            owner_.queryPlayerName(data.senderGuid);
-            // Hold the line rather than showing it with nobody's name on it.
-            //
-            // SMSG_MESSAGECHAT carries a guid and no name for a player line,
-            // and every source above is somebody nearby, in the party or in
-            // the guild. A whisper is characteristically from none of those -
-            // that is what makes it a whisper - so it missed all of them, went
-            // out with an empty name, and the interface printed it with no
-            // sender. The backfill that follows a name query reaches this
-            // client's own history and not what the interface has already
-            // drawn, so the name has to be there the first time.
-            if (!alreadyWaited) {
-                const uint64_t waitingOn = data.senderGuid;
-                chatAwaitingName_.push_back({std::move(data), waitingOn,
-                                             core::appTimeSeconds() + kNameWaitSeconds});
-                return;
-            }
+    if (data.type == ChatType::WHISPER) {
+        recentWhisperers_.note(data.senderGuid);
+        // A whisper to yourself still names you as the one to reply to.
+        if (data.senderGuid == owner_.getPlayerGuid() && data.senderGuid != 0 &&
+            !data.senderName.empty()) {
+            owner_.lastWhisperSenderRef() = data.senderName;
         }
     }
+    // Someone ignored: nothing they say, unless they are a GM. A whisper
+    // tells the server so (CMSG_CHAT_IGNORED, guid and a zero byte), which
+    // answers them with "X is ignoring you". Only the lines about the player
+    // themselves - the whisper they sent, the IGNORED and RESTRICTED notices -
+    // still show.
+    if (ignored(data.senderGuid) && !(data.chatTag & 0x04)) {
+        if (data.type == ChatType::WHISPER && data.language != ChatLanguage::ADDON &&
+            owner_.getSocket()) {
+            network::Packet reply(wireOpcode(Opcode::CMSG_CHAT_IGNORED));
+            reply.writeUInt64(data.senderGuid);
+            reply.writeUInt8(0);
+            owner_.getSocket()->send(reply);
+        }
+        if (data.type != ChatType::WHISPER_INFORM && data.type != ChatType::IGNORED &&
+            data.type != ChatType::RESTRICTED) {
+            return false;
+        }
+    }
+    return true;
+}
 
-    // And the player an NPC's line is written for, when that is someone else.
-    //
-    // "$N has defeated the hero of the Warmaul" is a yell the whole area hears,
-    // and $N is whoever earned it: the packet names them as the receiver. This
-    // wrote the logged-in character's name into every such line, so each
-    // bystander read that they had done it themselves. A player receiver comes
-    // as a guid alone, so a name nothing holds yet is asked for and the line
-    // waits for it, as a player's own line does.
-    if (isMonsterChatType(data.type) && data.message.find('$') != std::string::npos &&
-        isPlayerGuid(data.receiverGuid) && data.receiverGuid != owner_.getPlayerGuid() &&
-        knownPlayerName(data.receiverGuid).empty()) {
-        owner_.queryPlayerName(data.receiverGuid);
-        if (!alreadyWaited) {
-            const uint64_t waitingOn = data.receiverGuid;
-            chatAwaitingName_.push_back({std::move(data), waitingOn,
-                                         core::appTimeSeconds() + kNameWaitSeconds});
+namespace {
+bool isPlayerOrPetGuid(uint64_t guid) {
+    return chat_rules::isPlayerGuid(guid) || chat_rules::isPetGuid(guid);
+}
+}  // namespace
+
+void ChatHandler::resolveChatNames(MessageChatData& data) const {
+    if (data.senderName.empty() && isPlayerOrPetGuid(data.senderGuid))
+        data.senderName = knownPlayerName(data.senderGuid);
+    if (data.receiverName.empty() && isPlayerOrPetGuid(data.receiverGuid))
+        data.receiverName = knownPlayerName(data.receiverGuid);
+}
+
+uint64_t ChatHandler::missingChatName(const MessageChatData& data) const {
+    if (data.senderName.empty() && isPlayerOrPetGuid(data.senderGuid)) return data.senderGuid;
+    if (data.receiverName.empty() && isPlayerOrPetGuid(data.receiverGuid)) return data.receiverGuid;
+    return 0;
+}
+
+// The chat frame's order is the server's (0x509DD0 -> 0x502D00): a line
+// whose sender's or receiver's name is not yet known waits for the name
+// query, and while anything waits every later line queues behind it, so a
+// reply never prints above the line it answers.
+void ChatHandler::queueChatLine(MessageChatData data) {
+    resolveChatNames(data);
+    const uint64_t missing = missingChatName(data);
+    if (missing != 0) owner_.queryPlayerName(missing);
+    if (chatAwaitingName_.empty() && missing == 0) {
+        finishChatLine(std::move(data));
+        return;
+    }
+    chatAwaitingName_.push_back({std::move(data), missing,
+                                 core::appTimeSeconds() + kNameWaitSeconds});
+    pumpChatQueue();
+}
+
+void ChatHandler::pumpChatQueue() {
+    const double now = core::appTimeSeconds();
+    while (!chatAwaitingName_.empty()) {
+        ChatAwaitingName& head = chatAwaitingName_.front();
+        resolveChatNames(head.data);
+        const uint64_t missing = missingChatName(head.data);
+        if (missing != 0 && now < head.deadline) {
+            if (missing != head.guid) {
+                head.guid = missing;
+                owner_.queryPlayerName(missing);
+            }
             return;
         }
+        if (missing != 0) {
+            LOG_WARNING("Chat: no name for ", formatChatLogGuid(missing),
+                        " within ", kNameWaitSeconds, "s - showing the line without one");
+        }
+        MessageChatData ready = std::move(head.data);
+        chatAwaitingName_.pop_front();
+        finishChatLine(std::move(ready));
     }
+}
 
-    if (data.message.empty()) {
+void ChatHandler::ensureLanguageWords() {
+    if (languageWordsLoaded_) return;
+    auto* am = owner_.services().assetManager;
+    if (!am || !am->isInitialized()) return;
+    languageWordsLoaded_ = true;
+    // ID, language, word (0x50EDD0 keys the words by language and length).
+    if (auto dbc = am->loadDBC("LanguageWords.dbc"); dbc && dbc->isLoaded()) {
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i)
+            languageWords_.add(dbc->getUInt32(i, 1), dbc->getString(i, 2));
+    }
+    if (languageWords_.empty()) LOG_WARNING("LanguageWords.dbc: no words - other languages print as they arrive");
+}
+
+uint32_t ChatHandler::languageComprehension(uint32_t language) const {
+    // 0x6E0640: the skill of the language's skill line, base plus bonus. No
+    // skill, no understanding.
+    const uint32_t line = chat_rules::languageSkillLine(language);
+    if (line == 0) return 0;
+    const auto& skills = owner_.getPlayerSkills();
+    auto it = skills.find(line);
+    return it == skills.end() ? 0u : it->second.effectiveValue();
+}
+
+bool ChatHandler::isSpamLine(const std::string& text) {
+    // SpamMessages.dbc's patterns (0x509BD0), remembered per text as the
+    // client does, since the same line comes round again.
+    if (!spamPatternsLoaded_) {
+        auto* am = owner_.services().assetManager;
+        if (!am || !am->isInitialized()) return false;
+        spamPatternsLoaded_ = true;
+        if (auto dbc = am->loadDBC("SpamMessages.dbc"); dbc && dbc->isLoaded()) {
+            for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+                const std::string pattern = dbc->getString(i, 1);
+                if (pattern.empty()) continue;
+                try {
+                    spamPatterns_.emplace_back(pattern, std::regex::ECMAScript | std::regex::icase |
+                                                            std::regex::optimize);
+                } catch (const std::regex_error&) {
+                    LOG_DEBUG("SpamMessages.dbc: pattern ", i, " is not one std::regex reads");
+                }
+            }
+        }
+    }
+    if (spamPatterns_.empty() || text.empty()) return false;
+    if (auto it = spamVerdicts_.find(text); it != spamVerdicts_.end()) return it->second;
+    bool spam = false;
+    for (const auto& re : spamPatterns_) {
+        if (std::regex_search(text, re)) { spam = true; break; }
+    }
+    if (spamVerdicts_.size() > 2048) spamVerdicts_.clear();
+    spamVerdicts_.emplace(text, spam);
+    return spam;
+}
+
+void ChatHandler::playTalkAnimation(const MessageChatData& data) {
+    // 0x509DD0 -> 0x73AD70: a say, yell or party line from a unit in the
+    // world moves its speaker - Emotes.dbc's talk, question, exclamation,
+    // shout or laugh row (the first row with flag 0x8, 0x10, 0x20, 0x40 or
+    // 0x100: emotes 1, 6, 5, 22, 11). Not for a unit feigning death.
+    if (!owner_.emoteAnimCallbackRef() || data.senderGuid == 0) return;
+    auto entity = owner_.getEntityManager().getEntity(data.senderGuid);
+    auto unit = entity ? std::dynamic_pointer_cast<Unit>(entity) : nullptr;
+    if (!unit) return;
+    if (unit->getUnitFlags() & 0x20000000u) return;
+    // Not reproduced for the player's own model, whose animation is driven by
+    // its own controller, nor for a mounted unit, whose rider pose a one-shot
+    // would replace (0x73AD70's own movement and descriptor checks).
+    if (data.senderGuid == owner_.getPlayerGuid() || unit->getMountDisplayId() != 0) return;
+    if (laughWords_.empty()) {
+        for (int i = 1; i < 32; ++i) {
+            std::string w = globalString(owner_.services().assetManager,
+                                         "LAUGH_WORD" + std::to_string(i));
+            if (w.empty()) break;
+            laughWords_.push_back(std::move(w));
+        }
+        if (laughWords_.empty()) laughWords_.push_back("");  // asked once
+    }
+    const int kind = chat_rules::talkAnimationKind(static_cast<uint8_t>(data.type), data.message,
+                                                   laughWords_);
+    static constexpr uint32_t kEmoteForKind[5] = {1, 6, 5, 22, 11};
+    if (kind < 0 || kind > 4) return;
+    const uint32_t anim = rendering::AnimationController::getEmoteAnimByEmotesId(kEmoteForKind[kind]);
+    if (anim != 0) owner_.emoteAnimCallbackRef()(data.senderGuid, anim, false);
+}
+
+// The rest of 0x509DD0, once the names are in: addon traffic, the UTF-8
+// check, $-tokens, the talking animation, the language, the spam filter, the
+// line id, and CHAT_MSG_<type> with the client's arguments (0x4FDBC0).
+void ChatHandler::finishChatLine(MessageChatData data) {
+    const auto type = static_cast<uint8_t>(data.type);
+
+    // Addon traffic is language -1 and nothing else: CHAT_MSG_ADDON with the
+    // text split at its first tab and the client's word for the distribution.
+    if (data.language == ChatLanguage::ADDON) {
+        if (owner_.addonEventCallbackRef()) {
+            auto [prefix, body] = chat_rules::splitAddonMessage(data.message);
+            owner_.addonEventCallbackRef()(
+                "CHAT_MSG_ADDON", {prefix, body, chat_rules::addonDistribution(type), data.senderName});
+        }
+        return;
+    }
+    if (!chat_rules::isUtf8Text(data.message)) {
+        LOG_DEBUG("Chat: dropped a line that is not UTF-8 text");
         return;
     }
 
-    if (data.type == ChatType::ACHIEVEMENT ||
-        data.type == ChatType::GUILD_ACHIEVEMENT) {
-        auto replaceAll = [](std::string& text, const std::string& marker,
-                             const std::string& replacement) {
-            size_t pos = 0;
-            while ((pos = text.find(marker, pos)) != std::string::npos) {
-                text.replace(pos, marker.size(), replacement);
-                pos += replacement.size();
-            }
-        };
-
+    if (data.type == ChatType::ACHIEVEMENT || data.type == ChatType::GUILD_ACHIEVEMENT) {
         if (data.achievementId != 0) {
             owner_.ensureAchievementNamesLoaded();
             std::string achievementName = owner_.getAchievementName(data.achievementId);
-            if (achievementName.empty()) {
+            if (achievementName.empty())
                 achievementName = "Achievement #" + std::to_string(data.achievementId);
+            // 0x61BFF0: the receiver (the one who earned it) as the guid,
+            // completed, today's date, no criteria.
+            const std::time_t now = std::time(nullptr);
+            const std::tm tmNow = core::localTime(now);
+            char buf[512];
+            std::snprintf(buf, sizeof(buf),
+                          "|cffffff00|Hachievement:%u:%016llX:%d:%d:%d:%d:%u:%u:%u:%u|h[%s]|h|r",
+                          data.achievementId,
+                          static_cast<unsigned long long>(data.receiverGuid ? data.receiverGuid : data.senderGuid),
+                          1, tmNow.tm_mon + 1, tmNow.tm_mday, tmNow.tm_year - 100, 0u, 0u, 0u, 0u,
+                          achievementName.c_str());
+            const std::string link = buf;
+            for (size_t pos = data.message.find("$a"); pos != std::string::npos;
+                 pos = data.message.find("$a", pos)) {
+                data.message.replace(pos, 2, link);
+                pos += link.size();
             }
-            std::ostringstream link;
-            link << "|cffffff00|Hachievement:" << data.achievementId
-                 << ":0:0:0:0:0:0:0:0:0|h[" << achievementName << "]|h|r";
-            replaceAll(data.message, "$a", link.str());
+        }
+    }
+    // The $-tokens of the lines the quest-text parser runs over (0x579590).
+    // A player typing "$N" in say means the two characters.
+    if (chat_rules::resolvesTextTokens(type)) {
+        data.message = resolveTextTokens(data.message, monsterLineSubject(data));
+    }
+
+    playTalkAnimation(data);
+
+    if (chat_rules::languageIgnored(type)) data.language = ChatLanguage::UNIVERSAL;
+
+    // An empty say or yell is the stock emote "says something unintelligible."
+    // (CHAT_YELL_UNKNOWN has a _FEMALE form); an empty emote "makes some
+    // strange gestures."
+    if (data.message.empty()) {
+        const char* key = chat_rules::unknownSpeechKey(type);
+        if (key) {
+            std::string text;
+            if (data.type == ChatType::YELL && owner_.lookupPlayerGender(data.senderGuid) == 1)
+                text = globalString(owner_.services().assetManager, std::string(key) + "_FEMALE");
+            if (text.empty()) text = globalString(owner_.services().assetManager, key);
+            data.message = text;
+            data.type = ChatType::EMOTE;
         }
     }
 
-    // Addon messages use the same chat types as player messages, but belong to
-    // CHAT_MSG_ADDON and must never be inserted into visible chat history.
-    std::string addonPrefix;
-    std::string addonPayload;
-    if (decodeAddonChatPayload(data, addonPrefix, addonPayload)) {
-        if (owner_.addonEventCallbackRef() && !addonPrefix.empty()) {
-            owner_.addonEventCallbackRef()(
-                "CHAT_MSG_ADDON",
-                {addonPrefix, addonPayload, getChatTypeString(data.type), data.senderName});
+    // Quest links coloured for the reader's level.
+    if (data.message.find("|Hquest:") != std::string::npos)
+        data.message = chat_rules::recolorQuestLinks(data.message,
+                                                     static_cast<int>(owner_.getPlayerLevel()));
+
+    // A language the reader does not know is scrambled with its own words. A
+    // GM reads everything and sees no language.
+    const bool readerIsGm = owner_.isPlayerGmFlagged();
+    if (readerIsGm) {
+        data.language = ChatLanguage::UNIVERSAL;
+    } else if (data.language != ChatLanguage::UNIVERSAL) {
+        const auto lang = static_cast<uint32_t>(data.language);
+        const uint32_t comprehension = languageComprehension(lang);
+        if (comprehension < chat_rules::kFullComprehension) {
+            ensureLanguageWords();
+            data.message = chat_rules::garbleText(data.message, lang, comprehension, languageWords_);
+        }
+    }
+
+    // The spam filter (cvar spamFilter, on as it ships): not for a GM's or a
+    // developer's line, not for a GM reader, not for system lines.
+    const char* chatFlag = chat_rules::chatFlagName(data.chatTag);
+    if (data.type != ChatType::FILTERED && data.type != ChatType::SYSTEM &&
+        std::strcmp(chatFlag, "GM") != 0 && std::strcmp(chatFlag, "DEV") != 0 && !readerIsGm &&
+        addons::storedCVarValue("spamFilter", "1") != "0" && isSpamLine(data.message)) {
+        if (data.type == ChatType::WHISPER && data.senderGuid != 0 && owner_.getSocket()) {
+            network::Packet report(wireOpcode(Opcode::CMSG_CHAT_FILTERED));
+            report.writeUInt64(data.senderGuid);
+            owner_.getSocket()->send(report);
         }
         return;
     }
 
-    // Server monster messages use %s as a placeholder for the creature's name.
-    if (!data.senderName.empty() && (
-            data.type == ChatType::MONSTER_SAY || data.type == ChatType::MONSTER_YELL ||
-            data.type == ChatType::MONSTER_EMOTE || data.type == ChatType::MONSTER_WHISPER ||
-            data.type == ChatType::MONSTER_PARTY ||
-            data.type == ChatType::RAID_BOSS_EMOTE || data.type == ChatType::RAID_BOSS_WHISPER)) {
-        size_t pos = data.message.find("%s");
-        while (pos != std::string::npos) {
-            data.message.replace(pos, 2, data.senderName);
-            pos = data.message.find("%s", pos + data.senderName.size());
+    // Wowee's own chat panel reads the history, and prints a monster's line
+    // as it is: its "%s" is filled here. The interface gets the text as sent
+    // and fills it itself (CHAT_MONSTER_*_GET .. arg1 formatted with arg2).
+    MessageChatData shown = data;
+    if (!shown.senderName.empty() &&
+        (isMonsterChatType(shown.type) || shown.type == ChatType::RAID_BOSS_EMOTE)) {
+        for (size_t pos = shown.message.find("%s"); pos != std::string::npos;
+             pos = shown.message.find("%s", pos + shown.senderName.size())) {
+            shown.message.replace(pos, 2, shown.senderName);
         }
     }
+    shown.uid = ++chatUidCounter_;
+    chatHistory_.push_back(shown);
+    if (chatHistory_.size() > maxChatHistory_) chatHistory_.pop_front();
+    logChatMessage(shown, "server");
 
-    // Filter BG/Arena queue announcer spam (server-side modules on
-    // ChromieCraft/AzerothCore). Common formats:
-    //   |cffff0000[BG Queue Announcer]:|r ...
-    //   |cffff0000[Arena Queue Announcer]:|r ...
-    //   |cFFFFA500<player> joined : |cFF00FFFF2x2|r
-    //   |cFFFFA500<player> exited |cFF00FFFF3x3|r
-    // The third/fourth forms drop the "Queue Announcer" prefix entirely, so
-    // we also detect the announcer-shaped pattern: a colored message that
-    // names an arena/BG bracket suffix like "2x2|r" / "3v3|r".
-    {
-        const auto& msg = data.message;
-        auto containsCI = [&](const char* needle) {
-            const size_t nlen = std::strlen(needle);
-            if (msg.size() < nlen) return false;
-            const size_t last = msg.size() - nlen;
-            for (size_t i = 0; i <= last; ++i) {
-                bool match = true;
-                for (size_t j = 0; j < nlen; ++j) {
-                    unsigned char a = static_cast<unsigned char>(msg[i + j]);
-                    unsigned char b = static_cast<unsigned char>(needle[j]);
-                    if (std::tolower(a) != std::tolower(b)) { match = false; break; }
-                }
-                if (match) return true;
-            }
-            return false;
-        };
-        if (containsCI("queue announcer") || containsCI("queue status")) {
-            return;
-        }
-        // Pattern-based catch for prefix-less variants. Require the message to
-        // contain a color code (server-formatted) AND an arena/BG bracket token
-        // immediately followed by |r AND a verb word ("joined", "exited",
-        // "left", "entered"). Plain player chat won't hit all three.
-        const bool hasColor = msg.find("|c") != std::string::npos;
-        if (hasColor) {
-            static const char* kBracketTokens[] = {
-                "2x2|r", "3x3|r", "5x5|r",
-                "2v2|r", "3v3|r", "5v5|r",
-                "2X2|r", "3X3|r", "5X5|r",
-                "2V2|r", "3V3|r", "5V5|r",
-            };
-            bool hasBracket = false;
-            for (const char* t : kBracketTokens) {
-                if (msg.find(t) != std::string::npos) { hasBracket = true; break; }
-            }
-            if (hasBracket && (containsCI("joined") || containsCI("exited") ||
-                               containsCI(" left ") || containsCI("entered") ||
-                               containsCI("queue"))) {
-                return;
-            }
-        }
-    }
-
-    // Filter officer chat if player doesn't have officer chat permission.
-    // Some servers send officer chat to all guild members regardless of rank.
-    // WoW guild right bit 0x40 = GR_RIGHT_OFFCHATSPEAK, 0x80 = GR_RIGHT_OFFCHATLISTEN
-    if (data.type == ChatType::OFFICER) {
-        // Through the shared lookup, which answers zero rights when the roster
-        // has not arrived - the same "say nothing about it" this had before,
-        // since the test below only hides chat when a rank is known and lacks
-        // the bit.
-        const uint32_t idx = owner_.getPlayerGuildRankIndex();
-        if (idx != 0xFFFFFFFFu && idx < owner_.getGuildRoster().ranks.size()) {
-            if (!(owner_.getPlayerGuildRankRights() & 0x80)) { // GR_RIGHT_OFFCHATLISTEN
-                return; // Don't show officer chat to non-officers
-            }
-        }
-    }
-
-    // Filter addon-to-addon whispers (GearScore, DBM, oRA, etc.) from player chat.
-    // These are invisible in the real WoW client.
-    if (data.type == ChatType::WHISPER || data.type == ChatType::WHISPER_INFORM) {
-        const auto& msg = data.message;
-        if (msg.size() >= 3 && (
-            msg.rfind("GS_", 0) == 0 ||          // GearScore
-            msg.rfind("DVNE", 0) == 0 ||          // DBM (DeadlyBossMods)
-            msg.rfind("oRA", 0) == 0 ||            // oRA raid addon
-            msg.rfind("BWVQ", 0) == 0 ||           // BigWigs
-            msg.rfind("AVR", 0) == 0 ||            // AVR (Augmented Virtual Reality)
-            msg.rfind('\t', 0) == 0 ||             // Tab-prefixed addon messages
-            (msg.size() > 4 && static_cast<unsigned char>(msg[0]) > 127))) {  // Binary data
-            return; // Silently discard addon whisper
-        }
-    }
-
-    // Fill in the $-tokens before anything sees the line.
-    //
-    // A monster's say, yell, emote or whisper arrives with the player left as a
-    // blank - "$N, you have done well" - and the client is what writes the name
-    // in. Nothing did, so every scripted NPC in the game addressed the player as
-    // "$N", and a $gsir:madam; came out with the whole switch printed.
-    //
-    // Only what an NPC or a boss said. A player typing "$N" into say has typed
-    // those two characters and means them: the real client does not resolve
-    // tokens in player chat, and resolving them here would let one player make
-    // another's client print that player's own name.
-    //
-    // For whoever the line is written for, which is not always the reader:
-    // see monsterLineSubject.
-    if (isMonsterChatType(data.type)) {
-        data.message = resolveTextTokens(data.message, monsterLineSubject(data));
-    }
-
-    // Add to chat history
-    data.uid = ++chatUidCounter_;
-    chatHistory_.push_back(data);
-    if (chatHistory_.size() > maxChatHistory_) {
-        chatHistory_.erase(chatHistory_.begin());
-    }
-    logChatMessage(data, "server");
-    // No fireChatEvent here. This function announces the message itself,
-    // further down and with the fuller argument list - the channel number and
-    // short name, the line id, the sender's guid. Calling fireChatEvent as
-    // well fired CHAT_MSG_* twice for every line the server sent, and the
-    // interface drew both: every whisper, say, guild and channel message
-    // appeared in the window doubled.
-    //
-    // The note that stood here said the event was fired only on the local
-    // path, which was true when it was written and stopped being true when
-    // this function grew its own. fireChatEvent stays for
-    // addLocalChatMessage's callers, which have no richer arguments to give.
-
-    // Track whisper sender for /r command
     if (data.type == ChatType::WHISPER) {
-        // Always store GUID so getLastWhisperSender() can resolve the name
-        // from the player name cache even if name wasn't available yet
-        if (data.senderGuid != 0)
-            owner_.lastWhisperSenderGuidRef() = data.senderGuid;
-        if (!data.senderName.empty())
-            owner_.lastWhisperSenderRef() = data.senderName;
-
-        if (!data.senderName.empty()) {
-            // Only auto-reply once per sender per AFK/DND session to prevent loops
-            if (owner_.afkStatusRef() && afkAutoRepliedSenders_.insert(data.senderName).second) {
-                std::string reply = owner_.afkMessageRef().empty() ? "Away from Keyboard" : owner_.afkMessageRef();
-                sendChatMessage(ChatType::WHISPER, "<AFK> " + reply, data.senderName);
-            } else if (owner_.dndStatusRef() && afkAutoRepliedSenders_.insert(data.senderName).second) {
-                std::string reply = owner_.dndMessageRef().empty() ? "Do Not Disturb" : owner_.dndMessageRef();
-                sendChatMessage(ChatType::WHISPER, "<DND> " + reply, data.senderName);
-            }
-        }
+        if (data.senderGuid != 0) owner_.lastWhisperSenderGuidRef() = data.senderGuid;
+        if (!data.senderName.empty()) owner_.lastWhisperSenderRef() = data.senderName;
     }
 
-    // The Social panel's two filters, before anything shows this line: the
-    // bubble below, the CHAT_MSG_ event, and the log all take the text from
-    // here, so filtering at one point covers all three.
-    //
-    // Only what a player typed. A quest giver, a boss emote or a system notice
-    // is not somebody spamming, and masking words in them would edit the
-    // game's own writing.
-    const bool fromAPlayer =
-        data.type == ChatType::SAY || data.type == ChatType::YELL ||
-        data.type == ChatType::PARTY || data.type == ChatType::RAID ||
-        data.type == ChatType::GUILD || data.type == ChatType::OFFICER ||
-        data.type == ChatType::WHISPER || data.type == ChatType::EMOTE ||
-        data.type == ChatType::CHANNEL;
-
-    if (fromAPlayer) {
-        // Disable Spam Filter, so the CVar being on means filtering happens.
-        if (addons::storedCVarValue("spamFilter", "1") != "0") {
-            const double now = std::chrono::duration<double>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-            if (repeatsRecentLine(recentChatLines_, data.senderGuid, data.message, now)) {
-                return;
-            }
-            recentChatLines_.push_back({.senderGuid = data.senderGuid, .text = data.message, .at = now});
-            // A short memory is the point: this is looking for a line pasted
-            // again a moment later, not keeping a record of the conversation.
-            while (recentChatLines_.size() > 64) recentChatLines_.pop_front();
-        }
-    }
-
-    // Chat bubble for say/yell (and party, when asked for) over the speaker.
     showChatBubble(data.senderGuid, data.type, data.message);
+    fireChatLineEvent(data, chatFlag);
+}
 
-    // Log the message
-    std::string senderInfo;
-    if (!data.senderName.empty()) {
-        senderInfo = data.senderName;
-    } else if (data.senderGuid != 0) {
-        senderInfo = "Unknown-" + std::to_string(data.senderGuid);
-    } else {
-        senderInfo = "System";
+void ChatHandler::fireChatLineEvent(const MessageChatData& data, const char* chatFlag) {
+    // Every line through the chat frame takes the next id (0x509DD0), and
+    // FrameXML builds it into the player link on the name, so a right-click
+    // on that name hands it back: CanComplainChat and the report menu ask by
+    // it.
+    const uint32_t lineId = nextChatLineId_++;
+    if (data.senderGuid != 0) {
+        chatLineSenders_.emplace_back(lineId, data.senderGuid);
+        constexpr size_t kRememberedLines = 512;
+        while (chatLineSenders_.size() > kRememberedLines) chatLineSenders_.pop_front();
     }
-
-    std::string channelInfo;
-    if (!data.channelName.empty()) {
-        channelInfo = "[" + data.channelName + "] ";
-    }
-
-    LOG_DEBUG("[", getChatTypeString(data.type), "] ", channelInfo, senderInfo, ": ", data.message);
-
-    // Fire CHAT_MSG_* addon events
-    if (owner_.addonEventCallbackRef()) {
-        std::string eventName = "CHAT_MSG_";
-        eventName += getChatTypeString(data.type);
-        // The language's *name*, not its id. ChatFrame_MessageEventHandler
-        // does
-        //
-        //     if strlen(arg3) > 0 and arg3 ~= "Universal"
-        //                          and arg3 ~= self.defaultLanguage then
-        //         languageHeader = "["..arg3.."] "
-        //
-        // and GetDefaultLanguage answers "Common" or "Orcish". A number never
-        // matches either, so every line in the player's own language was
-        // printed with its id in front of it - guild chat in Common came out
-        // as "[7] Name: hello". Universal is the id the file does not carry
-        // and the word the test above looks for.
-        const std::string lang = owner_.getLanguageName(static_cast<uint32_t>(data.language));
-        char guidBuf[32];
-        snprintf(guidBuf, sizeof(guidBuf), "0x%016llX", (unsigned long long)data.senderGuid);
-        // arg8 is the channel's number and arg9 its name without the zone
-        // after it, and both were sent empty. That is the whole of whether a
-        // channel line is shown: the handler builds "CHANNEL"..arg8 and looks
-        // it up in ChatTypeInfo, so a zero made every channel message
-        // CHANNEL0, which no table has, and the message was dropped before it
-        // reached the window. arg9 is what the frame matches against the
-        // channels it carries when the zone id does not settle it.
-        // A line id of its own, remembered against the sender. FrameXML builds
-        // this into the player link on the name - "|Hplayer:Name:lineId:..." -
-        // so a right-click on that name hands it back and the client is
-        // expected to know which message it was. Zero for every line is one id
-        // shared by all of them, which is what made Report Spam unofferable:
-        // CanComplainChat is asked about the id before the entry is shown.
-        const uint32_t lineId = nextChatLineId_++;
-        if (data.senderGuid != 0) {
-            chatLineSenders_.emplace_back(lineId, data.senderGuid);
-            // Recent lines only. A session's chat has no end, and a message old
-            // enough to have fallen out of this is old enough not to be
-            // reportable.
-            constexpr size_t kRememberedLines = 512;
-            while (chatLineSenders_.size() > kRememberedLines)
-                chatLineSenders_.pop_front();
+    if (!owner_.addonEventCallbackRef()) return;
+    std::string eventName = "CHAT_MSG_";
+    eventName += getChatTypeString(data.type);
+    // 0x4FDBC0's thirteen: text, sender, language name (Languages.dbc, empty
+    // for 0), the channel as "N. Name", the receiver's name, the flag word,
+    // the zone channel's ChatChannels id, the channel's number, its name
+    // without the zone, the channel's instance (0), the line id, the
+    // sender's guid - for a player only, empty for anything else - and the
+    // conversation id (0).
+    const int channelNumber = getChannelIndex(data.channelName);
+    const size_t dash = data.channelName.find(" - ");
+    const std::string shortChannel = channelNumber > 0
+        ? (dash == std::string::npos ? data.channelName : data.channelName.substr(0, dash))
+        : std::string();
+    const std::string numberedChannel = channelNumber > 0
+        ? std::to_string(channelNumber) + ". " + data.channelName : data.channelName;
+    const uint32_t zoneChannelId =
+        (channelNumber > 0 && static_cast<size_t>(channelNumber) <= joinedChannelIds_.size())
+            ? joinedChannelIds_[static_cast<size_t>(channelNumber) - 1] : 0;
+    std::string guidText;
+    if (chat_rules::isPlayerGuid(data.senderGuid)) guidText = formatChatLogGuid(data.senderGuid);
+    {
+        static std::set<std::string> saidFor;
+        if (saidFor.size() < 32 && saidFor.insert(eventName).second) {
+            LOG_INFO("Chat: fired ", eventName, " to the interface from '",
+                     data.senderName, "' - said once per event name");
         }
-        const int channelNumber = getChannelIndex(data.channelName);
-        const size_t dash = data.channelName.find(" - ");
-        const std::string shortChannel = (dash == std::string::npos)
-            ? data.channelName : data.channelName.substr(0, dash);
-        // arg4 is the channel *with its number*, "1. General - Elwynn Forest",
-        // as the real client sends it. FrameXML cuts the zone off and prints
-        // "[1. General]", and before that only accepts the line if arg4 is
-        // longer than the name the window lists - which a bare "mychannel"
-        // against "mychannel" never is, so every custom channel was dropped.
-        const std::string numberedChannel = (channelNumber > 0)
-            ? std::to_string(channelNumber) + ". " + data.channelName : data.channelName;
-        // arg7, the zone channel's ChatChannels.dbc id, 0 for a custom one.
-        const uint32_t zoneChannelId =
-            (channelNumber > 0 && static_cast<size_t>(channelNumber) <= joinedChannelIds_.size())
-                ? joinedChannelIds_[static_cast<size_t>(channelNumber) - 1] : 0;
-        // arg5 is the *target*, not the sender. It was the sender's own name,
-        // which is only read by CHANNEL_NOTICE_USER - and read as "there are
-        // two names in this notice", so every kick and ban was formatted as
-        // though someone had done it to someone else. receiverName is what the
-        // packet carries for it, empty on an ordinary message.
-        //
-        // arg6 is the flag beside the name: FrameXML looks up CHAT_FLAG_<arg6>
-        // and prints <Away>, <Busy> or <GM>. The tag is on the packet and was
-        // being dropped, so nothing ever showed as away or as a game master.
-        // AzerothCore's values are a bitmask - AFK 0x01, DND 0x02, GM 0x04,
-        // COM 0x08, DEV 0x10 - and the interface takes one word, so the most
-        // significant is the one to name.
-        const char* chatFlag = (data.chatTag & 0x04) ? "GM"
-                             : (data.chatTag & 0x10) ? "DEV"
-                             : (data.chatTag & 0x02) ? "DND"
-                             : (data.chatTag & 0x01) ? "AFK"
-                                                     : "";
-        // Says a line reached the interface at all. A blank chat window is
-        // either nothing arriving or something arriving and not being drawn,
-        // and those have opposite causes with the same appearance.
-        //
-        // Once per event name, not once every two seconds: what is being
-        // asked is whether a SAY, a YELL, a WHISPER reaches the interface,
-        // and the second SAY answers nothing the first did. Rate limiting it
-        // wrote one of these every two seconds for as long as anyone in the
-        // zone was talking.
-        {
-            static std::set<std::string> saidFor;
-            if (saidFor.size() < 32 && saidFor.insert(eventName).second) {
-                LOG_WARNING("Chat: fired ", eventName, " to the interface from '",
-                            data.senderName, "' - said once per event name");
-            }
-        }
-        // arg2 is the name the interface prints, and for an outgoing whisper
-        // that is the person written to rather than the one writing:
-        // CHAT_WHISPER_INFORM_GET is "To %s: " and takes the same argument
-        // CHAT_WHISPER_GET does. Passing the sender there addressed every
-        // whisper the player sent to the player themselves.
-        const std::string& shownName =
-            (data.type == ChatType::WHISPER_INFORM && !data.receiverName.empty())
-                ? data.receiverName
-                : data.senderName;
-        owner_.addonEventCallbackRef()(eventName, {
-            data.message,
-            shownName,
-            lang,
-            numberedChannel,
-            data.receiverName,
-            chatFlag,
-            std::to_string(zoneChannelId),
-            std::to_string(channelNumber),
-            shortChannel,
-            "0",
-            std::to_string(lineId),
-            guidBuf
-        });
     }
+    owner_.addonEventCallbackRef()(eventName, {
+        data.message,
+        data.senderName,
+        owner_.getLanguageName(static_cast<uint32_t>(data.language)),
+        numberedChannel,
+        data.receiverName,
+        chatFlag ? chatFlag : "",
+        std::to_string(zoneChannelId),
+        std::to_string(channelNumber),
+        shortChannel,
+        "0",
+        std::to_string(lineId),
+        guidText,
+        "0",
+    });
 }
 
 void ChatHandler::sendTextEmote(uint32_t textEmoteId, uint64_t targetGuid) {
@@ -979,39 +1039,15 @@ void ChatHandler::flushChatAwaitingName(uint64_t guid) {
         for (const auto& n : retry)
             fireChannelUserNotice(n.notice.c_str(), n.channelName, n.guid1, n.name1, n.guid2);
     }
-    if (chatAwaitingName_.empty() || guid == 0) return;
-    std::vector<MessageChatData> ready;
-    for (auto it = chatAwaitingName_.begin(); it != chatAwaitingName_.end();) {
-        if (it->guid == guid) {
-            ready.push_back(std::move(it->data));
-            it = chatAwaitingName_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    // Delivered outside the walk: each one runs the whole chat path, which can
-    // hold another line of its own.
-    for (auto& data : ready) deliverChatMessage(std::move(data), /*alreadyWaited=*/true);
+    pumpChatQueue();
 }
 
 void ChatHandler::expireChatAwaitingName() {
     // Riding on this per-tick call rather than adding another: the zone
     // channels wait for the zone to be known, and this is chat's tick.
     servicePendingAutoJoin();
-    if (chatAwaitingName_.empty()) return;
-    const double now = core::appTimeSeconds();
-    std::vector<MessageChatData> ready;
-    for (auto it = chatAwaitingName_.begin(); it != chatAwaitingName_.end();) {
-        if (now >= it->deadline) {
-            LOG_WARNING("Chat: no name for ", formatChatLogGuid(it->guid),
-                        " within ", kNameWaitSeconds, "s - showing the line without one");
-            ready.push_back(std::move(it->data));
-            it = chatAwaitingName_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    for (auto& data : ready) deliverChatMessage(std::move(data), /*alreadyWaited=*/true);
+    pumpChatQueue();
+    flushHeldSends();
 }
 
 void ChatHandler::handleTextEmote(network::Packet& packet) {
@@ -1162,7 +1198,7 @@ void ChatHandler::fireChannelNotice(const char* notice, const std::string& chann
         ? std::to_string(index) + ". " + channelName : channelName;
     owner_.addonEventCallbackRef()("CHAT_MSG_CHANNEL_NOTICE", {
         notice, "", "", numbered, "", "", std::to_string(zoneChannelId),
-        std::to_string(index), shortName, "0", "0", ""
+        std::to_string(index), shortName, "0", std::to_string(nextChatLineId_++), "", "0"
     });
 }
 
@@ -1190,7 +1226,7 @@ void ChatHandler::fireChannelUserNotice(const char* notice, const std::string& c
     // for two players, arg5; INVITE with arg4 and arg2.
     owner_.addonEventCallbackRef()("CHAT_MSG_CHANNEL_NOTICE_USER", {
         notice, name1, "", numbered, name2, "", std::to_string(zoneChannelId),
-        std::to_string(index), shortName, "0", "0", ""
+        std::to_string(index), shortName, "0", std::to_string(nextChatLineId_++), "", "0"
     });
 }
 
@@ -1527,60 +1563,15 @@ void ChatHandler::addLocalChatMessage(const MessageChatData& msg) {
 }
 
 void ChatHandler::fireChatEvent(const MessageChatData& msg) {
-    if (!owner_.addonEventCallbackRef()) return;
-    std::string eventName = "CHAT_MSG_";
-    eventName += getChatTypeString(msg.type);
-    const Character* ac = owner_.getActiveCharacter();
-    std::string senderName = msg.senderName.empty() && !msg.noSender
-        ? (ac ? ac->name : std::string{}) : msg.senderName;
-    char guidBuf[32];
-    snprintf(guidBuf, sizeof(guidBuf), "0x%016llX",
-             (unsigned long long)(msg.senderGuid != 0 ? msg.senderGuid : owner_.getPlayerGuid()));
-    // The name, for the reason handleMessageChat gives: a number here is
-    // printed as a language header in front of every line.
-    {
-        // Once per event name, for the reason the remote path above gives.
-        static std::set<std::string> saidForLocal;
-        if (saidForLocal.size() < 32 && saidForLocal.insert(eventName).second) {
-            LOG_WARNING("Chat: fired ", eventName, " to the interface (local)"
-                        " - said once per event name");
-        }
+    // A line the client makes itself takes the same path to the interface as
+    // the server's, with the same thirteen arguments (0x4FDBC0). A player-kind
+    // line with no name is the player's own.
+    MessageChatData line = msg;
+    if (line.senderName.empty() && !line.noSender && line.type != ChatType::SYSTEM) {
+        if (const Character* ac = owner_.getActiveCharacter()) line.senderName = ac->name;
+        if (line.senderGuid == 0) line.senderGuid = owner_.getPlayerGuid();
     }
-    // The channel's index, which the chat frame builds "CHANNEL"..arg8 out of
-    // and looks up in ChatTypeInfo - a zero there is CHANNEL0, which no table
-    // has, and the line is dropped before it reaches the window. This is the
-    // one thing the callback that used to announce these as well did better,
-    // and it is here now so nothing was lost when that went.
-    const int channelIndex = getChannelIndex(msg.channelName);
-    // arg2 is the name the interface prints, and for a whisper the player
-    // sent that is who it went to, not who wrote it: CHAT_WHISPER_INFORM_GET
-    // is "To %s: " and reads the same argument CHAT_WHISPER_GET does. The
-    // other announce path already does this; this one did not, and this is
-    // the path an outgoing whisper actually takes - the server's echo is
-    // dropped in favour of the local row made on send - so every whisper the
-    // player sent came back addressed to the player.
-    const std::string& shownName =
-        (msg.type == ChatType::WHISPER_INFORM && !msg.receiverName.empty())
-            ? msg.receiverName
-            : senderName;
-    // The same channel arguments the server path sends: arg4 numbered, arg9
-    // without the zone. arg9 was the full "General - Elwynn Forest", which
-    // matches nothing in the chat window's list ("General"), and arg4 had no
-    // number, so the player's own /1 lines were filtered out of the window.
-    const size_t dash = msg.channelName.find(" - ");
-    const std::string shortChannel = (dash == std::string::npos)
-        ? msg.channelName : msg.channelName.substr(0, dash);
-    const std::string numberedChannel = (channelIndex > 0)
-        ? std::to_string(channelIndex) + ". " + msg.channelName : msg.channelName;
-    const uint32_t zoneChannelId =
-        (channelIndex > 0 && static_cast<size_t>(channelIndex) <= joinedChannelIds_.size())
-            ? joinedChannelIds_[static_cast<size_t>(channelIndex) - 1] : 0;
-    owner_.addonEventCallbackRef()(eventName, {
-        msg.message, shownName,
-        owner_.getLanguageName(static_cast<uint32_t>(msg.language)),
-        numberedChannel, msg.receiverName, "", std::to_string(zoneChannelId),
-        std::to_string(channelIndex), shortChannel, "0", "0", guidBuf
-    });
+    fireChatLineEvent(line, chat_rules::chatFlagName(line.chatTag));
 }
 
 void ChatHandler::addLocalChatLine(ChatType type, const std::string& message) {
@@ -1611,7 +1602,6 @@ void ChatHandler::clearAfk() {
     if (!owner_.afkStatusRef()) return;
     owner_.afkStatusRef() = false;
     owner_.afkMessageRef().clear();
-    afkAutoRepliedSenders_.clear();
     owner_.addGlobalStringChatLine("CLEARED_AFK", "You are no longer Away.");
     sendAwayPacket(ChatType::AFK, "");
 }
@@ -1645,7 +1635,6 @@ void ChatHandler::toggleDnd(const std::string& message) {
     if (owner_.dndStatusRef() && reason.empty()) {
         owner_.dndStatusRef() = false;
         owner_.dndMessageRef().clear();
-        afkAutoRepliedSenders_.clear();
         owner_.addGlobalStringChatLine("CLEARED_DND", "You are no longer marked Busy.");
     } else {
         if (reason.empty()) {

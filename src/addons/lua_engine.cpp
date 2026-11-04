@@ -9525,6 +9525,12 @@ void pushEventArg(lua_State* L, const std::string& arg) {
     // spelling as a string, and Lua treats every string and every number as
     // true, so without this an event could not carry one.
     if (arg == wowee::game::kEventNil) { lua_pushnil(L); return; }
+    // A number that does not look like a short integer (the combat log's
+    // timestamp, seconds with milliseconds): marked by the one who made it.
+    if (!arg.empty() && arg[0] == game::stock_combat_log::kNumberMark) {
+        lua_pushnumber(L, std::strtod(arg.c_str() + 1, nullptr));
+        return;
+    }
     if (!arg.empty() && arg.size() < 12) {
         size_t at = (arg[0] == '-') ? 1 : 0;
         if (at < arg.size()) {
@@ -9557,49 +9563,23 @@ void pushEventArg(lua_State* L, const std::string& arg) {
 }  // namespace
 
 namespace {
-/// The history behind CombatLogGetCurrentEntry. Main thread only: events are
-/// fired and the log is read from the same one.
-constexpr size_t kCombatLogHistory = 1000;
-std::deque<std::vector<std::string>>& combatLogHistory() {
-    static std::deque<std::vector<std::string>> history;
-    return history;
+/// Main thread only: events are fired and the log is read from the same one.
+int64_t combatLogNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
 }
-int gCombatLogCursor = 0;   // age: 0 is the newest
 } // namespace
 
-void recordCombatLogEvent(const std::vector<std::string>& args) {
-    auto& history = combatLogHistory();
-    history.push_back(args);
-    if (history.size() > kCombatLogHistory) history.pop_front();
-}
-
-int combatLogEntryCount() { return static_cast<int>(combatLogHistory().size()); }
-
-void combatLogSetCursor(int age) {
-    const int last = std::max(combatLogEntryCount() - 1, 0);
-    gCombatLogCursor = std::clamp(age, 0, last);
-}
-
-bool combatLogAdvanceCursor(int count) {
-    const int size = combatLogEntryCount();
-    if (size == 0) return false;
-    // Blizzard's own walk advances by -1 to go toward the older entries.
-    const int target = gCombatLogCursor - count;
-    if (target < 0 || target >= size) {
-        gCombatLogCursor = std::clamp(target, 0, size - 1);
-        return false;
-    }
-    gCombatLogCursor = target;
-    return true;
+game::stock_combat_log::History& combatLogHistory() {
+    static game::stock_combat_log::History history;
+    return history;
 }
 
 int pushCombatLogCurrent(lua_State* L) {
-    const auto& history = combatLogHistory();
-    const int size = static_cast<int>(history.size());
-    if (gCombatLogCursor < 0 || gCombatLogCursor >= size) return 0;
-    const auto& args = history[static_cast<size_t>(size - 1 - gCombatLogCursor)];
-    for (const auto& arg : args) pushEventArg(L, arg);
-    return static_cast<int>(args.size());
+    const auto* e = combatLogHistory().current();
+    if (!e) return 0;
+    for (const auto& arg : e->args) pushEventArg(L, arg);
+    return static_cast<int>(e->args.size());
 }
 
 void LuaEngine::fireClassicCombatLine(const std::vector<std::string>& args) {
@@ -9657,11 +9637,27 @@ void LuaEngine::fireEvent(const std::string& eventName,
         for (const auto& a : args) line += " " + a;
         core::input_trace::note(line);
     }
-    if (eventName == "COMBAT_LOG_EVENT_UNFILTERED") recordCombatLogEvent(args);
+    // 0x74F910: the entry joins the history, COMBAT_LOG_EVENT goes first and
+    // only when CombatLogAddFilter's filters let it through, then
+    // COMBAT_LOG_EVENT_UNFILTERED always. The handlers fire only the latter.
+    if (eventName == "COMBAT_LOG_EVENT_UNFILTERED") {
+        auto& history = combatLogHistory();
+        history.add(args, combatLogNowMs());
+        const auto key = game::stock_combat_log::keyFromArgs(args);
+        if (history.passes(key)) dispatchEvent("COMBAT_LOG_EVENT", args);
+        dispatchEvent(eventName, args);
+        return;
+    }
     if (eventName == game::classic_combat::kLineEvent) {
         fireClassicCombatLine(args);
         return;
     }
+    dispatchEvent(eventName, args);
+}
+
+void LuaEngine::dispatchEvent(const std::string& eventName,
+                              const std::vector<std::string>& args) {
+    if (!L_) return;
 
     // An event handler may cause another event, which is ordinary and has to
     // keep working - but a cycle between two of them recurses through both this

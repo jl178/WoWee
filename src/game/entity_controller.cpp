@@ -1061,6 +1061,10 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             unit->setHealth(val);
             result.healthChanged = true;
             if (val == 0) {
+                // 0x7489C0 -> 0x7561E0: a unit going to zero health is a
+                // combat log death (UNIT_DIED and its two variants).
+                if (oldHealth > 0 && owner_.getCombatHandler())
+                    owner_.getCombatHandler()->logUnitDeath(block.guid);
                 if (owner_.getCombatHandler() && block.guid == owner_.getCombatHandler()->getAutoAttackTargetGuid()) {
                     owner_.stopAutoAttack();
                 }
