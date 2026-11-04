@@ -131,6 +131,11 @@ public:
     void record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet perFrameSet,
                 const FrameInputs& in);
 
+    /// The shadow map this slot's inject reads: the renderer's front world
+    /// map (rendering/shadow_cache.hpp), which changes when a redraw ends.
+    /// Called when the slot's fence has been waited on and before record.
+    void setShadowView(uint32_t frame, VkImageView view);
+
     /// Forget the previous frames, after a teleport or a loading screen:
     /// reprojecting air from somewhere else would smear it across the view.
     void resetHistory() { historyValid_ = false; }

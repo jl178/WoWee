@@ -1,4 +1,5 @@
 #include "ui/widget_tree.hpp"
+#include "core/hitch_legacy.hpp"
 
 #include <chrono>
 
@@ -6,10 +7,60 @@
 #include <array>
 #include <climits>
 #include <cmath>
+#include <cstdlib>
+#include <functional>
+#include <string>
+#include <unordered_map>
 #include <ranges>
 
 namespace wowee {
 namespace ui {
+
+namespace {
+
+// WOWEE_LAYOUT_DIRTY_PROFILE=1: which setter, on which frame, moved the layout
+// generation - the reason the full pass cannot be skipped on a frame where
+// nothing visibly changed. Reported with the layout timings every ten seconds.
+bool layoutDirtyProfile() {
+    static const bool on = [] {
+        const char* v = std::getenv("WOWEE_LAYOUT_DIRTY_PROFILE");
+        return v && *v && *v != '0';
+    }();
+    return on;
+}
+std::unordered_map<std::string, uint64_t>& layoutDirtyCounts() {
+    static std::unordered_map<std::string, uint64_t> counts;
+    return counts;
+}
+
+}  // namespace
+
+void WidgetTree::noteLayoutDirtyReason(const char* why, uint32_t id) const {
+    if (!layoutDirtyProfile()) return;
+    // The widget's own name, else the nearest named ancestor's.
+    std::string who = "?";
+    for (uint32_t cur = id, hops = 0; cur != 0 && hops < 64; ++hops) {
+        const Widget* w = get(cur);
+        if (!w) break;
+        if (!w->name.empty()) { who = (cur == id ? "" : "child of ") + w->name; break; }
+        cur = w->parent;
+    }
+    ++layoutDirtyCounts()[std::string(why) + " " + who];
+}
+
+std::string WidgetTree::takeLayoutDirtyReport(size_t top) {
+    auto& counts = layoutDirtyCounts();
+    std::vector<std::pair<uint64_t, std::string>> byCount;
+    byCount.reserve(counts.size());
+    for (const auto& [k, n] : counts) byCount.emplace_back(n, k);
+    std::sort(byCount.begin(), byCount.end(), std::greater<>());
+    std::string out;
+    for (size_t i = 0; i < byCount.size() && i < top; ++i) {
+        out += (i ? ", " : "") + byCount[i].second + " x" + std::to_string(byCount[i].first);
+    }
+    counts.clear();
+    return out;
+}
 
 namespace {
 
@@ -176,6 +227,7 @@ void WidgetTree::reset() {
 }
 
 uint32_t WidgetTree::create(WidgetKind kind, uint32_t parent, const std::string& name) {
+    noteLayoutDirtyReason("create under", parent);
     markLayoutDirty();
     const uint32_t id = static_cast<uint32_t>(widgets_.size());
     widgets_.emplace_back();
@@ -213,6 +265,7 @@ uint32_t WidgetTree::create(WidgetKind kind, uint32_t parent, const std::string&
 }
 
 void WidgetTree::setParent(uint32_t id, uint32_t newParent) {
+    noteLayoutDirtyReason("setParent", id);
     markLayoutDirty();
     Widget* w = get(id);
     if (!w || id == rootId_) return;
@@ -390,11 +443,13 @@ const Widget* WidgetTree::get(uint32_t id) const {
 }
 
 void WidgetTree::clearPoints(uint32_t id) {
+    noteLayoutDirtyReason("clearPoints", id);
     markLayoutDirty();
     if (Widget* w = get(id)) w->anchors.clear();
 }
 
 void WidgetTree::setWidth(uint32_t id, float width) {
+    noteLayoutDirtyReason("setWidth", id);
     markLayoutDirty();
     Widget* w = get(id);
     if (!w || !std::isfinite(width)) return;
@@ -448,6 +503,7 @@ void WidgetTree::setWidth(uint32_t id, float width) {
 }
 
 void WidgetTree::setHeight(uint32_t id, float height) {
+    noteLayoutDirtyReason("setHeight", id);
     markLayoutDirty();
     Widget* w = get(id);
     if (!w || !std::isfinite(height)) return;
@@ -481,6 +537,7 @@ void WidgetTree::setHeight(uint32_t id, float height) {
 }
 
 void WidgetTree::pinToCurrentPosition(uint32_t id) {
+    noteLayoutDirtyReason("pinToCurrentPosition", id);
     markLayoutDirty();
     Widget* w = get(id);
     if (!w) return;
@@ -549,6 +606,7 @@ void clampInside(const Widget& screen, float rectW, float rectH,
 // screen as it is resized, which is the usual way this is done wrongly.
 void WidgetTree::resizeBy(uint32_t id, const std::string& point,
                           float dx, float dy) {
+    noteLayoutDirtyReason("resizeBy", id);
     markLayoutDirty();
     Widget* w = get(id);
     if (!w) return;
@@ -595,6 +653,7 @@ void WidgetTree::resizeBy(uint32_t id, const std::string& point,
 }
 
 void WidgetTree::nudge(uint32_t id, float dx, float dy) {
+    noteLayoutDirtyReason("nudge", id);
     markLayoutDirty();
     Widget* w = get(id);
     if (!w) return;
@@ -698,6 +757,22 @@ void WidgetTree::lower(uint32_t id) {
 }
 
 void WidgetTree::addPoint(uint32_t id, const Anchor& anchor) {
+    // The same point set again with the same values changes nothing, and is
+    // not a reason to throw away every rect resolved since the last pass.
+    // FrameXML does it every frame - UIParent_ManageFramePositions sets
+    // BuffFrame's TOPRIGHT on each OnUpdate, about a thousand times in ten
+    // seconds in Dalaran - so the generation moved every frame and every
+    // GetWidth or GetLeft a script asked afterwards solved its widget again.
+    if (const Widget* cur = get(id); cur && !cur->userMoved && !core::hitchLegacy()) {
+        for (const Anchor& existing : cur->anchors) {
+            if (existing.point == anchor.point && existing.relativeTo == anchor.relativeTo &&
+                existing.relativePoint == anchor.relativePoint && existing.x == anchor.x &&
+                existing.y == anchor.y) {
+                return;
+            }
+        }
+    }
+    noteLayoutDirtyReason("addPoint", id);
     markLayoutDirty();
     Widget* w = get(id);
     if (!w) return;
@@ -735,6 +810,7 @@ void WidgetTree::addPoint(uint32_t id, const Anchor& anchor) {
 }
 
 void WidgetTree::setAllPoints(uint32_t id, uint32_t relativeTo) {
+    noteLayoutDirtyReason("setAllPoints", id);
     markLayoutDirty();
     Widget* w = get(id);
     if (!w) return;

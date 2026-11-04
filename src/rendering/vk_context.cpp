@@ -3,6 +3,7 @@
 #include <thread>
 #include <mutex>
 #include "rendering/vk_context.hpp"
+#include "core/hitch_legacy.hpp"
 
 #include <fstream>
 #include "rendering/vk_utils.hpp"
@@ -24,6 +25,17 @@
 
 namespace wowee {
 namespace rendering {
+
+namespace {
+bool asyncUploadBatchesOnTransferQueue() {
+    // WOWEE_VK_ASYNC_UPLOAD_QUEUE=1 - see endUploadBatch.
+    static const bool onTransfer = [] {
+        const char* v = std::getenv("WOWEE_VK_ASYNC_UPLOAD_QUEUE");
+        return v && *v && *v != '0';
+    }();
+    return onTransfer;
+}
+}  // namespace
 
 VkContext* VkContext::sInstance_ = nullptr;
 
@@ -3061,18 +3073,32 @@ VkCommandBuffer VkContext::beginFrame(uint32_t& imageIndex) {
         gpuMark(frame.commandBuffer, "frame start");
     }
 
-    // If async upload batches are still in flight (submitted to the transfer queue),
-    // wait for their fences and insert a memory barrier so the graphics queue sees
-    // the completed layout transitions and transfer writes.
+    // Async upload batches still in flight: make their writes visible to
+    // this frame.
+    //
+    // On the graphics queue - where they go unless WOWEE_VK_ASYNC_UPLOAD_QUEUE
+    // sends them to the transfer queue - they were submitted ahead of this
+    // frame's command buffer, so submission order already puts them first and
+    // the barrier below is all the frame needs. Waiting on their fences here,
+    // as this did, waited for the GPU to finish everything queued before them
+    // too - the whole previous frame - so every frame that uploaded anything (a
+    // terrain tile, a unit's skin, an interface texture) ran with the CPU and
+    // the GPU in lock step: 20-35 ms frames in Dalaran, counted as CPU time
+    // because it was neither the frame fence nor the acquire. Only batches on
+    // the other queue, which submission order does not cover, are waited for.
     if (!inFlightBatches_.empty()) {
-        waitAllUploads();
+        if ((hasDedicatedTransfer_ && asyncUploadBatchesOnTransferQueue()) || core::hitchLegacy()) {
+            waitAllUploads();
+        }
 
         VkMemoryBarrier2 memBarrier{};
         memBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
         memBarrier.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        memBarrier.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        // Every reader: textures in any shader, and the vertex and index
+        // buffers a model upload copies as well.
+        memBarrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
         memBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        memBarrier.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
         VkDependencyInfo memDep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         memDep.memoryBarrierCount = 1;
         memDep.pMemoryBarriers = &memBarrier;
@@ -3381,6 +3407,7 @@ void VkContext::markHostCopyFormatUnusable(VkFormat format) {
     }
 }
 
+
 void VkContext::beginUploadBatch() {
     // WOWEE_VK_NO_UPLOAD_BATCH=1 turns batching off entirely: every
     // immediateSubmit then submits and waits on its own, as it did before the
@@ -3497,11 +3524,8 @@ void VkContext::endUploadBatch() {
     //
     // WOWEE_VK_ASYNC_UPLOAD_QUEUE=1 restores the old behaviour, for confirming
     // that is what this was rather than taking it on argument.
-    static const bool asyncUploadQueue = [] {
-        const char* v = std::getenv("WOWEE_VK_ASYNC_UPLOAD_QUEUE");
-        return v && *v && *v != '0';
-    }();
-    VkQueue targetQueue = (hasDedicatedTransfer_ && asyncUploadQueue) ? transferQueue_ : graphicsQueue;
+    VkQueue targetQueue = (hasDedicatedTransfer_ && asyncUploadBatchesOnTransferQueue())
+                              ? transferQueue_ : graphicsQueue;
     ++submitCount_;
     noteDeviceLost("async upload batch submit", vkQueueSubmit(targetQueue, 1, &submitInfo, fence));
 

@@ -3054,21 +3054,39 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
     return true;
 }
 
+void M2Renderer::beginShadowFrame() {
+    if (!vkCtx_) return;
+    // Reset this frame slot's texture descriptor pool (safe: fence was waited on in beginFrame)
+    const uint32_t frameIdx = vkCtx_->getCurrentFrame();
+    if (frameIdx < kShadowTexPoolFrames && shadowTexPool_[frameIdx]) {
+        vkResetDescriptorPool(vkCtx_->getDevice(), shadowTexPool_[frameIdx], 0);
+    }
+    // The pool reset invalidated every set the cache names. Once a frame and
+    // not per renderShadow: the world map's doodad part and the unit map can
+    // both draw in one frame, and resetting between them freed the sets the
+    // first had already recorded.
+    shadowTexSetCache_.clear();
+    ++shadowFrameSerial_;
+    if (shadowFrameSerial_ == 0) ++shadowFrameSerial_;  // 0 is "never moved"
+}
+
 void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, float globalTime,
-                              const glm::vec3& shadowCenter, float shadowRadius) {
+                              const glm::vec3& shadowCenter, float shadowRadius,
+                              ShadowCasterSet casterSet, std::vector<glm::vec4>* moverSpheres) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
     if (instances.empty() || models.empty()) return;
 
-    // Reset this frame slot's texture descriptor pool (safe: fence was waited on in beginFrame)
     const uint32_t frameIdx = vkCtx_->getCurrentFrame();
     VkDescriptorPool curShadowTexPool = shadowTexPool_[frameIdx];
-    if (curShadowTexPool) {
-        vkResetDescriptorPool(vkCtx_->getDevice(), curShadowTexPool, 0);
-    }
-    // Cache: texture imageView -> allocated descriptor set (avoids duplicates within frame)
-    // Reuse persistent map - pool reset already invalidated the sets.
-    shadowTexSetCache_.clear();
+    // Cache: texture imageView -> allocated descriptor set (avoids duplicates
+    // within frame); emptied by beginShadowFrame.
     auto& texSetCache = shadowTexSetCache_;
+    // The kept world map draws the static casters, the unit map the movers;
+    // the one-map pass both. The candidate list and the static list belong
+    // to the static side: they are keyed on the world map's centre, radius
+    // and matrix, which the unit map's would otherwise overwrite each frame.
+    const bool wantStatic = casterSet != ShadowCasterSet::Moving;
+    const bool wantMovers = casterSet != ShadowCasterSet::Static;
 
     auto getTexDescSet = [&](VkTexture* tex) -> VkDescriptorSet {
         VkImageView iv = tex->getImageView();
@@ -3145,12 +3163,26 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     // Only a wholesale reorder (casterLayoutGen_), a new radius, the drift and
     // a two-second backstop rebuild it. It was rebuilt ~8 times a second -
     // every clutter removal and spell visual - at a walk of 85k instances each.
-    {
+    if (wantStatic) {
         constexpr float kCandidateMargin = 48.0f;
         constexpr float kRebuildDrift = 0.9f * kCandidateMargin;
         const auto now = std::chrono::steady_clock::now();
         const glm::vec3 drift = shadowCenter - shadowCandCenter_;
-        const bool rebuild =
+        // For the kept world map, also whenever something placed since the
+        // last build is waiting as a mover: that map is drawn only now and
+        // then, and only from the static list.
+        bool newcomers = false;
+        if (casterSet == ShadowCasterSet::Static) {
+            for (uint32_t moverId : shadowMovers_) {
+                const auto it = instanceIndexById.find(moverId);
+                if (it == instanceIndexById.end() || it->second >= instances.size()) continue;
+                if (!shadowRecentlyMoved(shadowFrameSerial_, instances[it->second].shadowMovedFrame)) {
+                    newcomers = true;
+                    break;
+                }
+            }
+        }
+        const bool rebuild = newcomers ||
             shadowCandLayoutGen_ != casterLayoutGen_ ||
             std::abs(shadowCandRadius_ - shadowRadius) > 0.01f ||
             glm::dot(drift, drift) > kRebuildDrift * kRebuildDrift ||
@@ -3161,9 +3193,18 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
             ++shadowCandStamp_;
             if (shadowCandStamp_ == 0) ++shadowCandStamp_;  // 0 is "never moved"
             for (uint32_t i = 0; i < instances.size(); ++i) {
-                const auto& instance = instances[i];
+                auto& instance = instances[i];
                 if (!instance.cachedIsValid || (instance.cachedIsSmoke && extraSmoke_) ||
                     instance.cachedIsInvisibleTrap || instance.cachedIsGroundDetail) continue;
+                // Something that moved lately stays a mover through the
+                // build, asked every frame wherever it is, rather than folded
+                // into the static list - which the kept world map is drawn
+                // from, and would then hold where it stood at this moment.
+                if (shadowRecentlyMoved(shadowFrameSerial_, instance.shadowMovedFrame)) {
+                    instance.shadowMoverStamp = shadowCandStamp_;
+                    shadowMovers_.push_back(instance.id);
+                    continue;
+                }
                 const glm::vec3 d = instance.position - shadowCenter;
                 const float reach = shadowRadius + instance.cachedPaddedRadius + kCandidateMargin;
                 if (glm::dot(d, d) > reach * reach) continue;
@@ -3185,7 +3226,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     // a candidate that has since moved is skipped in the list below so it is
     // asked once, here.
     shadowMoverPairs_.clear();
-    for (uint32_t moverId : shadowMovers_) {
+    if (wantMovers) for (uint32_t moverId : shadowMovers_) {
         const auto it = instanceIndexById.find(moverId);
         if (it == instanceIndexById.end() || it->second >= instances.size()) continue;
         shadowMoverPairs_.emplace_back(static_cast<uint32_t>(it->second), moverId);
@@ -3302,7 +3343,10 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         return !(v && v[0] == '0');
     }();
     bool staticKept = false;
-    if (!shadowCacheOn) {
+    if (!wantStatic) {
+        // The unit map: the static list is the world map's, left as it is.
+        staticKept = true;
+    } else if (!shadowCacheOn) {
         // Culled every frame, as before the list was kept.
     } else if (shadowStaticBuiltGen_ != shadowStaticGen_) {
         ++updateProf_.shadowMissGen;
@@ -3341,7 +3385,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         }
     }
     if (staticKept) {
-        ++updateProf_.shadowStaticReuses;
+        if (wantStatic) ++updateProf_.shadowStaticReuses;
     } else {
         for (auto& bucket : shadowStaticCasters_) bucket.clear();
         shadowStaticProbes_.clear();
@@ -3399,7 +3443,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     // instance's matrix is unchanged (each write to one makes it a mover)
     // and nothing else writes that part of the buffer.
     glm::mat4* casterMatrices = static_cast<glm::mat4*>(casterMapped_[frameIdx]);
-    if (casterMatrices && casterSlotEpoch_[frameIdx] != shadowStaticEpoch_) {
+    if (wantStatic && casterMatrices && casterSlotEpoch_[frameIdx] != shadowStaticEpoch_) {
         for (int b = 0; b < 2; ++b) {
             const auto& casters = shadowStaticCasters_[b];
             for (const auto& group : shadowStaticGroups_[b]) {
@@ -3504,7 +3548,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
 
         // The static casters, whose matrices are already in place.
         const int b = foliagePass ? 1 : 0;
-        if (casterMatrices) {
+        if (wantStatic && casterMatrices) {
             const auto& staticCasters = shadowStaticCasters_[b];
             for (const auto& group : shadowStaticGroups_[b]) {
                 const auto& firstInstance = instances[staticCasters[group.begin].second];
@@ -3528,7 +3572,9 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
             if (!casterMatrices || castersWritten + groupSize > MAX_SHADOW_CASTERS) { g = groupEnd; continue; }
             const uint32_t casterBase = castersWritten;
             for (std::size_t k = g; k < groupEnd; ++k) {
-                casterMatrices[castersWritten++] = instances[casters[k].second].modelMatrix;
+                const M2Instance& mover = instances[casters[k].second];
+                casterMatrices[castersWritten++] = mover.modelMatrix;
+                if (moverSpheres) moverSpheres->emplace_back(mover.position, mover.cachedPaddedRadius);
             }
             drawGroup(*firstInstance.cachedModel, casterBase, groupSize);
             g = groupEnd;
@@ -3547,7 +3593,9 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     // most once a second, and only when the count actually swings, so an
     // ordinary walk through a forest stays quiet.
     updateProf_.shadowCasters += castersDrawn[0] + castersDrawn[1];
-    {
+    // The unit map's movers are a different count; the world map's alone
+    // says whether a tree's shadow comes and goes.
+    if (wantStatic) {
         const uint32_t foliageNow = castersDrawn[1];
         const uint32_t foliageWas = lastFoliageCasters_;
         lastFoliageCasters_ = foliageNow;

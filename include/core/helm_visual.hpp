@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace wowee {
 namespace pipeline { class AssetManager; }
@@ -39,6 +40,12 @@ constexpr uint32_t kAttachShoulderLeft = 6;
 /// was loaded from (the character preview caches ids by path; the world
 /// renderers ignore it and take the next free id).
 using ModelIdAllocator = std::function<uint32_t(const std::string& m2Path)>;
+/// The same, given the texture the piece is drawn with as well. A renderer
+/// model carries its texture, so an id shared by every unit wearing a piece -
+/// which saves uploading the model again for each of them - has to be one per
+/// mesh and texture pair.
+using ItemModelIdAllocator =
+    std::function<uint32_t(const std::string& m2Path, const std::string& texturePath)>;
 
 /// Detach both shoulder points, then hang the ItemDisplayInfo LeftModel on 6
 /// and the RightModel on 5. Id 0 only detaches. A side with no model stays
@@ -52,6 +59,11 @@ void attachShoulders(rendering::CharacterRenderer& renderer,
                      uint32_t instanceId,
                      uint32_t itemDisplayInfoId,
                      const ModelIdAllocator& allocModelId);
+void attachShoulders(rendering::CharacterRenderer& renderer,
+                     pipeline::AssetManager& assets,
+                     uint32_t instanceId,
+                     uint32_t itemDisplayInfoId,
+                     const ItemModelIdAllocator& allocModelId);
 
 /// Detach the helm point, then attach the helm for an ItemDisplayInfo id,
 /// trying the per-race model first. Id 0 only detaches. Does not touch hair
@@ -63,6 +75,23 @@ bool attachHelm(rendering::CharacterRenderer& renderer,
                 uint8_t raceId,
                 uint8_t genderId,
                 const ModelIdAllocator& allocModelId);
+bool attachHelm(rendering::CharacterRenderer& renderer,
+                pipeline::AssetManager& assets,
+                uint32_t instanceId,
+                uint32_t itemDisplayInfoId,
+                uint8_t raceId,
+                uint8_t genderId,
+                const ItemModelIdAllocator& allocModelId);
+
+/// Every file attachHelm and attachShoulders would read for these displays -
+/// the models and their textures - so a worker can parse the models into the
+/// shared cache (pipeline::prefetchM2WithSkin) and decode the textures ahead
+/// of the main thread asking. Appends to the two lists.
+void collectHelmAndShoulderFiles(pipeline::AssetManager& assets,
+                                 uint32_t helmDisplayId, uint8_t raceId, uint8_t genderId,
+                                 uint32_t shoulderDisplayId,
+                                 std::vector<std::string>& modelPaths,
+                                 std::vector<std::string>& texturePaths);
 
 /// The suffix a per-race, per-gender model carries - "_HuM" and the like.
 ///

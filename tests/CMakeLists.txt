@@ -1528,6 +1528,19 @@ wowee_add_test(test_indoor_shadows
 wowee_add_test(test_light_tiles
     SOURCES test_light_tiles.cpp)
 
+# ── test_shadow_cache ────────────────────────────────────────
+# The sun's shadow in two maps: when the kept world map is drawn again, that
+# it covers the shadow distance between redraws, that its texels hold still,
+# and the unit map's mask (rendering/shadow_cache.hpp).
+wowee_add_test(test_shadow_cache
+    SOURCES test_shadow_cache.cpp)
+
+# ── test_frame_work_budget ───────────────────────────────────
+# The spawn queues' per-frame share of main-thread work: the first item
+# always runs, later ones while time is left (core/frame_work_budget.hpp).
+wowee_add_test(test_frame_work_budget
+    SOURCES test_frame_work_budget.cpp)
+
 # ── test_image_create_policy ─────────────────────────────────
 # The terrain's R8 alpha and shadow maps skip the driver's compression on Intel, so every
 # submit stops walking them (rendering/image_create_policy.hpp).
@@ -1541,6 +1554,13 @@ wowee_add_test(test_image_create_policy
 # E21).
 wowee_add_test(test_phase2_enhancements
     SOURCES test_phase2_enhancements.cpp)
+
+# ── test_secondary_motion ─────────────────────────────────────
+# Capes, tails and hair (E7): which bones the spring chains take, and the
+# solver's stability and limits at any frame rate; smoother other units
+# (E10): the step, decay, snap and blend floor rules.
+wowee_add_test(test_secondary_motion
+    SOURCES test_secondary_motion.cpp)
 
 # ── test_zone_ambience ─────────────────────────────────────────
 wowee_add_test(test_zone_ambience
@@ -3130,10 +3150,3 @@ wowee_add_test(test_talent_macro_logic SOURCES test_talent_macro_logic.cpp)
 
 # GameError message kinds (Wow.exe 0xAC8AF0) and GlobalStrings formatting.
 wowee_add_test(test_game_messages SOURCES test_game_messages.cpp)
-
-# ── test_secondary_motion ─────────────────────────────────────
-# Capes, tails and hair (E7): which bones the spring chains take, and the
-# solver's stability and limits at any frame rate; smoother other units
-# (E10): the step, decay, snap and blend floor rules.
-wowee_add_test(test_secondary_motion
-    SOURCES test_secondary_motion.cpp)

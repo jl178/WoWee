@@ -73,13 +73,16 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                 "everyone in the world. Off is the original game's default: a\n"
                 "soft round shadow under each character and the ground's own\n"
                 "painted shadows.",
-     // Off in the recommended set by its cost, not its look: at the Ultra
-     // shadow distance on an Iris Xe the map costs 2.8-4.3 ms of GPU and
-     // 0.7-2.2 ms of main-thread recording (most of it the M2 and unit
-     // casters) over the stock blob - alone more than the whole set's budget
-     // of 3 ms GPU and 0.5 ms CPU (docs/enhancements-plan.md, "Cost"). The
-     // quality presets keep it (presetEnhancements).
-     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "shadows",
+     // On in the recommended set again since the map was split in two
+     // (rendering/shadow_cache.hpp): the world's casters are drawn into a
+     // kept map only when the player has walked a few dozen yards, the sun
+     // has turned or the world has changed, and only units and what moves
+     // are drawn every frame, into a small map read near them. It was off
+     // for its cost - 2.8-4.3 ms of GPU and 0.7-1.5 ms of main-thread
+     // recording at the Ultra distance on the Iris Xe, alone over the whole
+     // set's budget of 3 ms and 0.5 ms (docs/enhancements-plan.md, 3.5 and
+     // 3.9 for what it costs now).
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "shadows",
      .controls = "the shadow map's casters and sampling; off draws the stock unit blob",
      .asBool = &Enhancements::shadows},
     {.key = "shadowstrength", .label = "Shadow darkness", .kind = SettingKind::Float,
@@ -92,10 +95,10 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
     {.key = "shadowfilter", .label = "Shadow edges", .kind = SettingKind::Enum,
      .minValue = 0, .maxValue = 1, .step = 1, .category = kEnhPage, .section = "",
      .tooltip = "How shadow edges are smoothed. Original is the game's own\n"
-                "five-sample filter; Soft takes nine samples on a turning disc.",
+                "five-sample filter; Soft takes five on a turning disc.",
      .choices = "Original|Soft", .stockValue = 0, .recommendedValue = 1,
      .saveKey = "shadow_filter",
-     .controls = "sampleShadowPCF: 9-tap Vogel disk vs the stock 5-tap PCF",
+     .controls = "shadowFilter (shadow_filter.glsli): 5-tap rotated Vogel disk vs the stock 5-tap PCF",
      .enabledWhen = "shadows", .asInt = &Enhancements::shadowFilter},
     {.key = "locallights", .label = "Torch and lamp light", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPage, .section = "",

@@ -141,11 +141,56 @@ bool helmHidesHair(pipeline::AssetManager& assets,
     return false;
 }
 
+namespace {
+
+struct ShoulderSide {
+    const char* modelColumn;
+    const char* textureColumn;
+    uint32_t defaultModelField;
+    uint32_t defaultTextureField;
+    uint32_t attachmentId;
+};
+constexpr const char* kShoulderDir = "Item\\ObjectComponents\\Shoulder\\";
+constexpr ShoulderSide kShoulderSides[] = {
+    {"LeftModel",  "LeftModelTexture",  1u, 3u, kAttachShoulderLeft},
+    {"RightModel", "RightModelTexture", 2u, 4u, kAttachShoulderRight},
+};
+
+/// The model and texture of each side of a shoulder display that has one.
+struct ShoulderPiece { uint32_t attachmentId; std::string modelPath; std::string texturePath; };
+std::vector<ShoulderPiece> shoulderPieces(pipeline::DBCFile& dbc, uint32_t row) {
+    const auto* layout = pipeline::getActiveDBCLayout()
+        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
+    std::vector<ShoulderPiece> out;
+    for (const auto& side : kShoulderSides) {
+        const uint32_t modelField = layout ? (*layout)[side.modelColumn] : side.defaultModelField;
+        const uint32_t textureField = layout ? (*layout)[side.textureColumn] : side.defaultTextureField;
+        const std::string modelName = stripExtension(dbc.getString(row, modelField));
+        if (modelName.empty()) continue;
+        const std::string textureName = dbc.getString(row, textureField);
+        out.push_back({side.attachmentId, std::string(kShoulderDir) + modelName + ".m2",
+                       textureName.empty() ? std::string{}
+                                           : std::string(kShoulderDir) + textureName + ".blp"});
+    }
+    return out;
+}
+
+} // namespace
+
 void attachShoulders(rendering::CharacterRenderer& renderer,
                      pipeline::AssetManager& assets,
                      uint32_t instanceId,
                      uint32_t itemDisplayInfoId,
                      const ModelIdAllocator& allocModelId) {
+    attachShoulders(renderer, assets, instanceId, itemDisplayInfoId,
+                    [&](const std::string& m2Path, const std::string&) { return allocModelId(m2Path); });
+}
+
+void attachShoulders(rendering::CharacterRenderer& renderer,
+                     pipeline::AssetManager& assets,
+                     uint32_t instanceId,
+                     uint32_t itemDisplayInfoId,
+                     const ItemModelIdAllocator& allocModelId) {
     renderer.detachWeapon(instanceId, kAttachShoulderRight);
     renderer.detachWeapon(instanceId, kAttachShoulderLeft);
     if (itemDisplayInfoId == 0) return;
@@ -155,37 +200,16 @@ void attachShoulders(rendering::CharacterRenderer& renderer,
     const int32_t row = dbc->findRecordById(itemDisplayInfoId);
     if (row < 0) return;
     const auto r = static_cast<uint32_t>(row);
-    const auto* layout = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
 
-    // The DBC names already carry the side: LShoulder_Plate_B_01.mdx.
-    static constexpr const char* kShoulderDir = "Item\\ObjectComponents\\Shoulder\\";
-    struct Side {
-        const char* modelColumn;
-        const char* textureColumn;
-        uint32_t defaultModelField;
-        uint32_t defaultTextureField;
-        uint32_t attachmentId;
-    };
-    static constexpr Side kSides[] = {
-        {"LeftModel",  "LeftModelTexture",  1u, 3u, kAttachShoulderLeft},
-        {"RightModel", "RightModelTexture", 2u, 4u, kAttachShoulderRight},
-    };
-    for (const auto& side : kSides) {
-        const uint32_t modelField = layout ? (*layout)[side.modelColumn] : side.defaultModelField;
-        const uint32_t textureField = layout ? (*layout)[side.textureColumn] : side.defaultTextureField;
-        const std::string modelName = stripExtension(dbc->getString(r, modelField));
-        if (modelName.empty()) continue;
-
-        pipeline::M2Model model;
-        const std::string modelPath = std::string(kShoulderDir) + modelName + ".m2";
-        if (!pipeline::loadM2WithSkin(assets, modelPath, model)) continue;
-        const std::string textureName = dbc->getString(r, textureField);
-        const std::string texturePath = textureName.empty()
-            ? std::string{} : std::string(kShoulderDir) + textureName + ".blp";
-        if (renderer.attachWeapon(instanceId, side.attachmentId, model, allocModelId(modelPath),
-                                  texturePath)) {
-            renderer.setAttachmentParticleColor(instanceId, side.attachmentId,
+    for (const auto& piece : shoulderPieces(*dbc, r)) {
+        // Parsed once and shared (m2_asset_loader.hpp); this read and parsed
+        // the file again for every unit wearing it.
+        const auto model = pipeline::loadM2WithSkinShared(assets, piece.modelPath);
+        if (!model) continue;
+        if (renderer.attachWeapon(instanceId, piece.attachmentId, *model,
+                                  allocModelId(piece.modelPath, piece.texturePath),
+                                  piece.texturePath)) {
+            renderer.setAttachmentParticleColor(instanceId, piece.attachmentId,
                                                 pipeline::readItemDisplayParticleColor(*dbc, r));
         }
     }
@@ -198,6 +222,17 @@ bool attachHelm(rendering::CharacterRenderer& renderer,
                 uint8_t raceId,
                 uint8_t genderId,
                 const ModelIdAllocator& allocModelId) {
+    return attachHelm(renderer, assets, instanceId, itemDisplayInfoId, raceId, genderId,
+                      [&](const std::string& m2Path, const std::string&) { return allocModelId(m2Path); });
+}
+
+bool attachHelm(rendering::CharacterRenderer& renderer,
+                pipeline::AssetManager& assets,
+                uint32_t instanceId,
+                uint32_t itemDisplayInfoId,
+                uint8_t raceId,
+                uint8_t genderId,
+                const ItemModelIdAllocator& allocModelId) {
     // Only the helm point - detaching 0 as well would drop the shield.
     renderer.detachWeapon(instanceId, kAttachHelm);
     if (itemDisplayInfoId == 0) return false;
@@ -205,21 +240,45 @@ bool attachHelm(rendering::CharacterRenderer& renderer,
     const HelmVisual helm = resolveHelmVisual(assets, itemDisplayInfoId, raceId, genderId);
     if (!helm.valid()) return false;
 
-    pipeline::M2Model model;
     std::string modelPath = helm.racialModelPath;
-    if (!modelPath.empty() && !pipeline::loadM2WithSkin(assets, modelPath, model)) {
-        model = {};
-    }
-    if (!model.isValid()) {
+    std::shared_ptr<const pipeline::M2Model> model;
+    if (!modelPath.empty()) model = pipeline::loadM2WithSkinShared(assets, modelPath);
+    if (!model) {
         modelPath = helm.baseModelPath;
-        if (!pipeline::loadM2WithSkin(assets, modelPath, model)) return false;
+        model = pipeline::loadM2WithSkinShared(assets, modelPath);
+        if (!model) return false;
     }
-    if (!renderer.attachWeapon(instanceId, kAttachHelm, model, allocModelId(modelPath),
-                               helm.texturePath)) {
+    if (!renderer.attachWeapon(instanceId, kAttachHelm, *model,
+                               allocModelId(modelPath, helm.texturePath), helm.texturePath)) {
         return false;
     }
     renderer.setAttachmentParticleColor(instanceId, kAttachHelm, helm.particleColorId);
     return true;
+}
+
+void collectHelmAndShoulderFiles(pipeline::AssetManager& assets,
+                                 uint32_t helmDisplayId, uint8_t raceId, uint8_t genderId,
+                                 uint32_t shoulderDisplayId,
+                                 std::vector<std::string>& modelPaths,
+                                 std::vector<std::string>& texturePaths) {
+    if (helmDisplayId != 0) {
+        const HelmVisual helm = resolveHelmVisual(assets, helmDisplayId, raceId, genderId);
+        if (helm.valid()) {
+            if (!helm.racialModelPath.empty()) modelPaths.push_back(helm.racialModelPath);
+            modelPaths.push_back(helm.baseModelPath);
+            if (!helm.texturePath.empty()) texturePaths.push_back(helm.texturePath);
+        }
+    }
+    if (shoulderDisplayId != 0) {
+        auto dbc = assets.loadDBC("ItemDisplayInfo.dbc");
+        const int32_t row = dbc ? dbc->findRecordById(shoulderDisplayId) : -1;
+        if (row >= 0) {
+            for (const auto& piece : shoulderPieces(*dbc, static_cast<uint32_t>(row))) {
+                modelPaths.push_back(piece.modelPath);
+                if (!piece.texturePath.empty()) texturePaths.push_back(piece.texturePath);
+            }
+        }
+    }
 }
 
 } // namespace core

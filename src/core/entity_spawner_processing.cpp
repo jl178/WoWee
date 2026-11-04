@@ -1,4 +1,7 @@
 #include "core/entity_spawner.hpp"
+#include "core/frame_work_budget.hpp"
+#include "core/hitch_legacy.hpp"
+#include "core/helm_visual.hpp"
 
 #include <set>
 #include "rendering/m2_model_classifier.hpp"
@@ -38,6 +41,39 @@
 
 namespace wowee {
 namespace core {
+
+namespace {
+
+/// Main-thread milliseconds a frame spends finishing prepared player spawns
+/// (upload, composite, instance) beyond the first.
+constexpr float kPlayerFinishBudgetMs = 3.0f;
+/// The same for prepared equipment changes.
+constexpr float kEquipmentFinishBudgetMs = 3.0f;
+
+/// The key CharacterRenderer looks a predecoded texture up by.
+std::string predecodeKey(std::string key) {
+    std::replace(key.begin(), key.end(), '/', '\\');
+    std::transform(key.begin(), key.end(), key.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return key;
+}
+
+/// Read and decode each file once, on the calling (worker) thread.
+/// keepCompressed as the renderer that will take them asks: the character
+/// renderer decodes to RGBA8, the M2 renderer keeps the blocks.
+void decodeTexturesInto(pipeline::AssetManager& am, const std::vector<std::string>& paths,
+                        std::unordered_map<std::string, pipeline::BLPImage>& out,
+                        bool keepCompressed = false) {
+    for (const auto& path : paths) {
+        if (path.empty()) continue;
+        std::string key = predecodeKey(path);
+        if (out.count(key)) continue;
+        auto blp = am.loadTexture(key, keepCompressed);
+        if (blp.isValid()) out.emplace(std::move(key), std::move(blp));
+    }
+}
+
+}  // namespace
 
 void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
     // Check completed async model loads and finalize on main thread (GPU upload + instance creation).
@@ -398,6 +434,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
 
             // Collect display skin texture paths for background pre-decode
             std::vector<std::string> displaySkinPaths;
+            std::vector<std::string> itemModelPaths;
             {
                 auto itDD = displayDataMap_.find(s.displayId);
                 if (itDD != displayDataMap_.end()) {
@@ -466,6 +503,12 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                                 }
                                 for (const auto& uw : sections.underwear) displaySkinPaths.push_back(uw);
                             }
+                            // The helm and shoulders spawnOnlineCreature
+                            // attaches: their models parsed into the shared
+                            // cache by the worker, their textures decoded.
+                            core::collectHelmAndShoulderFiles(*am, he.equipDisplayId[0], he.raceId, he.sexId,
+                                                              he.equipDisplayId[1], itemModelPaths,
+                                                              displaySkinPaths);
                             // Equipment region textures
                             auto idiDbc = am->loadDBC("ItemDisplayInfo.dbc");
                             if (idiDbc) {
@@ -503,7 +546,8 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
 
             AsyncCreatureLoad load;
             load.future = std::async(std::launch::async,
-                [am, m2Path, modelId, s, skinPaths = std::move(displaySkinPaths)]() -> PreparedCreatureModel {
+                [am, m2Path, modelId, s, skinPaths = std::move(displaySkinPaths),
+                 itemModels = std::move(itemModelPaths)]() mutable -> PreparedCreatureModel {
                     PreparedCreatureModel result;
                     result.guid = s.guid;
                     result.displayId = s.displayId;
@@ -573,6 +617,16 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                         auto blp = am->loadTexture(texKey);
                         if (blp.isValid()) {
                             result.predecodedTextures[texKey] = std::move(blp);
+                        }
+                    }
+
+                    // Helm and shoulder pieces into the shared parse cache,
+                    // and the textures they carry onto the list below.
+                    for (const auto& im : itemModels) {
+                        if (auto piece = pipeline::loadM2WithSkinShared(*am, im)) {
+                            for (const auto& tex : piece->textures) {
+                                if (!tex.filename.empty()) skinPaths.push_back(tex.filename);
+                            }
                         }
                     }
 
@@ -670,29 +724,133 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
 }
 
 void EntitySpawner::processPlayerSpawnQueue() {
-    if (pendingPlayerSpawns_.empty()) return;
     if (!assetManager_ || !assetManager_->isInitialized()) return;
+    if (core::hitchLegacy()) {
+        // As it was: three a frame, read, parsed and decoded right here.
+        int processed = 0;
+        while (!pendingPlayerSpawns_.empty() && processed < MAX_SPAWNS_PER_FRAME) {
+            PendingPlayerSpawn s = pendingPlayerSpawns_.front();
+            pendingPlayerSpawns_.pop_front();
+            pendingPlayerSpawnGuids_.erase(s.guid);
+            ++processed;
+            if (playerInstances_.count(s.guid)) continue;
+            spawnOnlinePlayer(s.guid, s.raceId, s.genderId, s.appearanceBytes, s.facialFeatures,
+                              s.x, s.y, s.z, s.orientation);
+            auto pit = pendingOnlinePlayerEquipment_.find(s.guid);
+            if (pit != pendingOnlinePlayerEquipment_.end()) {
+                deferredEquipmentQueue_.emplace_back(s.guid, pit->second);
+                pendingOnlinePlayerEquipment_.erase(pit);
+            }
+        }
+        return;
+    }
+    auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
 
-    int processed = 0;
-    while (!pendingPlayerSpawns_.empty() && processed < MAX_SPAWNS_PER_FRAME) {
-        PendingPlayerSpawn s = pendingPlayerSpawns_.front();
-        pendingPlayerSpawns_.erase(pendingPlayerSpawns_.begin());
+    // 1. Finish prepared spawns, oldest first, while this frame's share lasts.
+    //    In order, so the job that parsed a race's model is finished before a
+    //    later one of the same race needs it; at least one a frame.
+    const FrameWorkBudget budget(kPlayerFinishBudgetMs);
+    int finished = 0;
+    while (!asyncPlayerLoads_.empty() && charRenderer) {
+        if (!budget.allowNext(finished)) break;
+        auto& front = asyncPlayerLoads_.front();
+        if (front.valid() &&
+            front.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+            break;
+        }
+        if (!spawnAllowed(kQPlayers, finished)) break;
+        PreparedPlayerSpawn p = front.valid() ? front.get() : PreparedPlayerSpawn{};
+        asyncPlayerLoads_.pop_front();
+        const auto& s = p.spawn;
+        if (p.modelKey != 0) {
+            playerModelLoadsInFlight_.erase(p.modelKey);
+            if (p.model) playerParsedModels_[p.modelKey] = p.model;
+        }
         pendingPlayerSpawnGuids_.erase(s.guid);
-
-        // Skip if already spawned (could have been spawned by a previous update this frame)
-        if (playerInstances_.count(s.guid)) {
-            processed++;
+        if (s.guid == 0 || playerInstances_.count(s.guid)) continue;
+        // Gone while its files were loading: the despawn found nothing to
+        // remove, so building it now would leave a figure nobody is playing.
+        if (gameHandler_ && !gameHandler_->getEntityManager().getEntity(s.guid)) {
+            pendingOnlinePlayerEquipment_.erase(s.guid);
             continue;
         }
-
-        spawnOnlinePlayer(s.guid, s.raceId, s.genderId, s.appearanceBytes, s.facialFeatures, s.x, s.y, s.z, s.orientation);
+        charRenderer->setPredecodedBLPCache(&p.predecodedTextures);
+        spawnOnlinePlayer(s.guid, s.raceId, s.genderId, s.appearanceBytes, s.facialFeatures,
+                          s.x, s.y, s.z, s.orientation, &p.look);
+        charRenderer->setPredecodedBLPCache(nullptr);
         // Apply any equipment updates that arrived before the player was spawned.
         auto pit = pendingOnlinePlayerEquipment_.find(s.guid);
         if (pit != pendingOnlinePlayerEquipment_.end()) {
             deferredEquipmentQueue_.emplace_back(s.guid, pit->second);
             pendingOnlinePlayerEquipment_.erase(pit);
         }
-        processed++;
+        ++finished;
+    }
+
+    // 2. Hand the next queued players to workers: the race's model (once per
+    //    race and gender) and every texture the spawn will composite or bind,
+    //    read and decoded off the main thread. Only the CharSections lookup
+    //    that names them runs here.
+    while (!pendingPlayerSpawns_.empty() && asyncPlayerLoads_.size() < MAX_ASYNC_PLAYER_LOADS) {
+        PendingPlayerSpawn s = pendingPlayerSpawns_.front();
+        pendingPlayerSpawns_.pop_front();
+        if (playerInstances_.count(s.guid)) {
+            pendingPlayerSpawnGuids_.erase(s.guid);
+            continue;
+        }
+
+        PreparedPlayerSpawn job;
+        job.spawn = s;
+        job.look = resolvePlayerLook(s.raceId, s.genderId, s.appearanceBytes, s.facialFeatures);
+
+        // The model, when nobody has it: not uploaded, not kept parsed, and
+        // no job already parsing it.
+        const uint32_t key = (static_cast<uint32_t>(s.raceId) << 8) | static_cast<uint32_t>(s.genderId & 0xFF);
+        std::string m2Path;
+        {
+            auto itCache = playerModelCache_.find(key);
+            const bool resident = itCache != playerModelCache_.end() && charRenderer &&
+                                  charRenderer->getModelData(itCache->second);
+            if (!resident && !playerParsedModels_.count(key) && !playerModelLoadsInFlight_.count(key)) {
+                m2Path = game::getPlayerModelPath(static_cast<game::Race>(s.raceId),
+                                                  s.genderId == 1 ? game::Gender::FEMALE
+                                                                  : game::Gender::MALE);
+                if (!m2Path.empty()) {
+                    job.modelKey = key;
+                    playerModelLoadsInFlight_.insert(key);
+                }
+            }
+        }
+
+        std::vector<std::string> texturePaths;
+        {
+            const PlayerLook& l = job.look;
+            for (const std::string* path : {&l.bodySkinPath, &l.faceLowerPath, &l.faceUpperPath,
+                                            &l.facialLowerPath, &l.facialUpperPath,
+                                            &l.hairTexturePath, &l.skinExtraPath}) {
+                if (!path->empty()) texturePaths.push_back(*path);
+            }
+            for (const auto& up : l.underwearPaths) texturePaths.push_back(up);
+            if (l.skinExtraPath.empty() && l.underwearPaths.empty() && !l.pelvisPath.empty())
+                texturePaths.push_back(l.pelvisPath);
+        }
+
+        auto* am = assetManager_;
+        asyncPlayerLoads_.push_back(std::async(std::launch::async,
+            [am, job = std::move(job), m2Path, paths = std::move(texturePaths)]() mutable {
+                if (!m2Path.empty()) {
+                    job.model = parsePlayerModel(*am, m2Path);
+                    if (job.model) {
+                        // The model's own textures (the ones not replaced
+                        // per player), which loadModel binds.
+                        for (const auto& tex : job.model->textures) {
+                            if (!tex.filename.empty()) paths.push_back(tex.filename);
+                        }
+                    }
+                }
+                decodeTexturesInto(*am, paths, job.predecodedTextures);
+                return std::move(job);
+            }));
     }
 }
 
@@ -738,23 +896,78 @@ std::vector<std::string> EntitySpawner::resolveEquipmentTexturePaths(uint64_t gu
     return paths;
 }
 
-void EntitySpawner::processAsyncEquipmentResults() {
-    for (auto it = asyncEquipmentLoads_.begin(); it != asyncEquipmentLoads_.end(); ) {
-        if (!it->future.valid() ||
-            it->future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
-            ++it;
-            continue;
-        }
-        auto result = it->future.get();
-        it = asyncEquipmentLoads_.erase(it);
+void EntitySpawner::collectEquipmentExtras(uint64_t guid,
+                                           const std::array<uint32_t, 19>& displayInfoIds,
+                                           const std::array<uint8_t, 19>& inventoryTypes,
+                                           std::vector<std::string>& modelPaths,
+                                           std::vector<std::string>& texturePaths) {
+    auto it = onlinePlayerAppearance_.find(guid);
+    if (it == onlinePlayerAppearance_.end() || !assetManager_) return;
+    const OnlinePlayerAppearanceState& st = it->second;
+    auto displayInfoDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
+    if (!displayInfoDbc) return;
 
-        auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    // Helm and shoulders, by the helpers that attach them.
+    core::collectHelmAndShoulderFiles(*assetManager_, displayInfoIds[0], st.raceId, st.genderId,
+                                      displayInfoIds[2], modelPaths, texturePaths);
+
+    // The cloak's texture: the candidates that exist, as the attach tries them.
+    bool cloak = false;
+    for (uint8_t inv : inventoryTypes) cloak = cloak || inv == 16;
+    if (cloak && displayInfoIds[14] != 0) {
+        for (const auto& c : capeCandidatesFor(*displayInfoDbc, displayInfoIds[14], st.genderId)) {
+            if (assetManager_->fileExists(c)) texturePaths.push_back(c);
+        }
+    }
+
+    // Weapons and shields (slots 15-17), by attachUnitWeapons' paths.
+    for (int slot = 15; slot <= 17; ++slot) {
+        const uint32_t did = displayInfoIds[slot];
+        if (did == 0) continue;
+        const int32_t rec = displayInfoDbc->findRecordById(did);
+        if (rec < 0) continue;
+        const auto art = pipeline::readItemDisplayArt(*displayInfoDbc, static_cast<uint32_t>(rec));
+        if (art.modelFile.empty()) continue;
+        for (const char* dir : {"Item\\ObjectComponents\\Weapon\\", "Item\\ObjectComponents\\Shield\\"}) {
+            const std::string m2 = dir + art.modelFile;
+            if (assetManager_->fileExists(m2)) { modelPaths.push_back(m2); break; }
+        }
+        if (!art.textureName.empty()) {
+            for (const char* dir : {"Item\\ObjectComponents\\Weapon\\", "Item\\ObjectComponents\\Shield\\"}) {
+                const std::string tex = dir + art.textureName + ".blp";
+                if (assetManager_->fileExists(tex)) { texturePaths.push_back(tex); break; }
+            }
+        }
+    }
+}
+
+void EntitySpawner::processAsyncEquipmentResults() {
+    auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    // In the order they were asked for: two changes for one player must land
+    // in that order, and taking whichever finished first could put the older
+    // gear back on. Under a time budget, at least one a frame - each is the
+    // composite, the attachments and their uploads, and a dozen arriving in
+    // one frame was the 20-40 ms spike of a crowd coming into view.
+    const FrameWorkBudget budget(core::hitchLegacy() ? 1.0e6f : kEquipmentFinishBudgetMs);
+    int applied = 0;
+    while (!asyncEquipmentLoads_.empty()) {
+        if (!budget.allowNext(applied)) break;
+        auto& front = asyncEquipmentLoads_.front();
+        if (front.future.valid() &&
+            front.future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+            break;
+        }
+        if (!spawnAllowed(kQEquipment, applied)) break;
+        if (!front.future.valid()) { asyncEquipmentLoads_.erase(asyncEquipmentLoads_.begin()); continue; }
+        auto result = front.future.get();
+        asyncEquipmentLoads_.erase(asyncEquipmentLoads_.begin());
         if (!charRenderer) continue;
 
         // Set pre-decoded cache so compositeWithRegions skips synchronous BLP decode
         charRenderer->setPredecodedBLPCache(&result.predecodedTextures);
         setOnlinePlayerEquipment(result.guid, result.displayInfoIds, result.inventoryTypes);
         charRenderer->setPredecodedBLPCache(nullptr);
+        ++applied;
     }
 }
 
@@ -762,51 +975,60 @@ void EntitySpawner::processDeferredEquipmentQueue() {
     // First, finalize any completed async pre-decodes
     processAsyncEquipmentResults();
 
-    if (deferredEquipmentQueue_.empty()) return;
-    // Limit in-flight async equipment loads
-    if (asyncEquipmentLoads_.size() >= 2) return;
+    // Hand the queued changes to workers, a few in flight. Resolving the
+    // paths is table lookups; the reading, parsing and decoding is theirs.
+    const size_t kMaxEquipmentLoadsInFlight = core::hitchLegacy() ? 2 : 4;
+    int launched = 0;
+    while (!deferredEquipmentQueue_.empty() && asyncEquipmentLoads_.size() < kMaxEquipmentLoadsInFlight &&
+           !(core::hitchLegacy() && launched > 0)) {
+        ++launched;
+        auto [guid, equipData] = deferredEquipmentQueue_.front();
+        deferredEquipmentQueue_.erase(deferredEquipmentQueue_.begin());
 
-    auto [guid, equipData] = deferredEquipmentQueue_.front();
-    deferredEquipmentQueue_.erase(deferredEquipmentQueue_.begin());
+        // Resolve all texture paths that compositeWithRegions will need
+        auto texturePaths = resolveEquipmentTexturePaths(guid, equipData.first, equipData.second);
+        std::vector<std::string> modelPaths;
+        if (!core::hitchLegacy()) {
+            collectEquipmentExtras(guid, equipData.first, equipData.second, modelPaths, texturePaths);
+        }
 
-    // Resolve all texture paths that compositeWithRegions will need
-    auto texturePaths = resolveEquipmentTexturePaths(guid, equipData.first, equipData.second);
+        if (texturePaths.empty() && modelPaths.empty()) {
+            // Nothing to read: the player is not spawned (setOnlinePlayerEquipment
+            // keeps it for the spawn) or wears nothing with art.
+            LOG_DEBUG("Equipment fast path for guid=0x", std::hex, guid, std::dec,
+                      " (no textures to pre-decode)");
+            setOnlinePlayerEquipment(guid, equipData.first, equipData.second);
+            continue;
+        }
+        LOG_DEBUG("Equipment async pre-decode for guid=0x", std::hex, guid, std::dec,
+                    " textures=", texturePaths.size(), " models=", modelPaths.size());
 
-    if (texturePaths.empty()) {
-        // No textures to pre-decode - just apply directly (fast path)
-        LOG_WARNING("Equipment fast path for guid=0x", std::hex, guid, std::dec,
-                    " (no textures to pre-decode)");
-        setOnlinePlayerEquipment(guid, equipData.first, equipData.second);
-        return;
-    }
-    LOG_DEBUG("Equipment async pre-decode for guid=0x", std::hex, guid, std::dec,
-                " textures=", texturePaths.size());
-
-    // Launch background BLP pre-decode
-    auto* am = assetManager_;
-    auto displayInfoIds = equipData.first;
-    auto inventoryTypes = equipData.second;
-    AsyncEquipmentLoad load;
-    load.future = std::async(std::launch::async,
-        [am, guid, displayInfoIds, inventoryTypes, paths = std::move(texturePaths)]() -> PreparedEquipmentUpdate {
-            PreparedEquipmentUpdate result;
-            result.guid = guid;
-            result.displayInfoIds = displayInfoIds;
-            result.inventoryTypes = inventoryTypes;
-            for (const auto& path : paths) {
-                std::string key = path;
-                std::replace(key.begin(), key.end(), '/', '\\');
-                std::transform(key.begin(), key.end(), key.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                if (result.predecodedTextures.count(key)) continue;
-                auto blp = am->loadTexture(key);
-                if (blp.isValid()) {
-                    result.predecodedTextures[key] = std::move(blp);
+        // Launch background read, parse and decode
+        auto* am = assetManager_;
+        auto displayInfoIds = equipData.first;
+        auto inventoryTypes = equipData.second;
+        AsyncEquipmentLoad load;
+        load.future = std::async(std::launch::async,
+            [am, guid, displayInfoIds, inventoryTypes, paths = std::move(texturePaths),
+             models = std::move(modelPaths)]() mutable -> PreparedEquipmentUpdate {
+                PreparedEquipmentUpdate result;
+                result.guid = guid;
+                result.displayInfoIds = displayInfoIds;
+                result.inventoryTypes = inventoryTypes;
+                // Item models into the shared parse cache, and the textures
+                // they carry themselves on the decode list.
+                for (const auto& m2 : models) {
+                    if (auto model = pipeline::loadM2WithSkinShared(*am, m2)) {
+                        for (const auto& tex : model->textures) {
+                            if (!tex.filename.empty()) paths.push_back(tex.filename);
+                        }
+                    }
                 }
-            }
-            return result;
-        });
-    asyncEquipmentLoads_.push_back(std::move(load));
+                decodeTexturesInto(*am, paths, result.predecodedTextures);
+                return result;
+            });
+        asyncEquipmentLoads_.push_back(std::move(load));
+    }
 }
 
 void EntitySpawner::processAsyncGameObjectResults() {
@@ -923,13 +1145,122 @@ void EntitySpawner::processPendingWmoUploads() {
     pendingWmoUploads_.erase(pendingWmoUploads_.begin());
 }
 
+std::string EntitySpawner::gameObjectModelPathFor(uint64_t guid, uint32_t entry, uint32_t displayId) {
+    if (!gameObjectLookupsBuilt_) return {};
+    std::string modelPath;
+    if (gameHandler_ && gameHandler_->isTransportGuid(guid)) modelPath = transportModelPath(entry, displayId);
+    if (modelPath.empty()) modelPath = getGameObjectModelPathForDisplayId(displayId);
+    return modelPath;
+}
+
+namespace {
+bool pathIsWmo(const std::string& path) {
+    if (path.size() < 4) return false;
+    std::string ext = path.substr(path.size() - 4);
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return ext == ".wmo";
+}
+}  // namespace
+
+void EntitySpawner::collectGameObjectM2Results() {
+    for (auto it = asyncGameObjectM2Loads_.begin(); it != asyncGameObjectM2Loads_.end();) {
+        if (it->valid() && it->wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+            ++it;
+            continue;
+        }
+        if (it->valid()) {
+            auto prepared = std::make_shared<PreparedGameObjectM2>(it->get());
+            asyncGameObjectM2Displays_.erase(prepared->displayId);
+            if (!prepared->model) {
+                // The same warning and the same verdict the synchronous path
+                // gave a model that cannot be read or parsed.
+                LOG_WARNING(prepared->failure, prepared->modelPath);
+                gameObjectDisplayIdFailedCache_.insert(prepared->displayId);
+            } else {
+                preparedGameObjectM2s_[prepared->displayId] = std::move(prepared);
+            }
+        }
+        it = asyncGameObjectM2Loads_.erase(it);
+    }
+}
+
+void EntitySpawner::launchGameObjectM2Loads() {
+    // The M2 objects near the front of the queue whose model nobody has yet:
+    // read, parse and decode them on workers, a few at a time, so the queue
+    // below only has to upload them when their turn comes.
+    constexpr size_t kMaxGameObjectM2Loads = 3;
+    constexpr int kLookAhead = 16;
+    auto* m2Renderer = renderer_ ? renderer_->getM2Renderer() : nullptr;
+    if (!m2Renderer || !assetManager_ || core::hitchLegacy()) return;
+    int looked = 0;
+    for (const auto& q : pendingGameObjectSpawns_) {
+        if (asyncGameObjectM2Loads_.size() >= kMaxGameObjectM2Loads || ++looked > kLookAhead) break;
+        if (gameObjectDisplayIdFailedCache_.count(q.displayId) ||
+            asyncGameObjectM2Displays_.count(q.displayId) ||
+            preparedGameObjectM2s_.count(q.displayId)) {
+            continue;
+        }
+        if (auto c = gameObjectDisplayIdModelCache_.find(q.displayId);
+            c != gameObjectDisplayIdModelCache_.end() && m2Renderer->hasModel(c->second)) {
+            continue;
+        }
+        std::string modelPath = gameObjectModelPathFor(q.guid, q.entry, q.displayId);
+        if (modelPath.empty() || pathIsWmo(modelPath)) continue;
+        // Already spawned objects only move; they load nothing.
+        if (gameObjectInstances_.count(q.guid)) continue;
+
+        auto* am = assetManager_;
+        const uint32_t displayId = q.displayId;
+        asyncGameObjectM2Displays_.insert(displayId);
+        asyncGameObjectM2Loads_.push_back(std::async(std::launch::async,
+            [am, displayId, modelPath]() -> PreparedGameObjectM2 {
+                PreparedGameObjectM2 out;
+                out.displayId = displayId;
+                out.modelPath = modelPath;
+                auto m2Data = am->readFile(modelPath);
+                if (m2Data.empty()) {
+                    out.failure = "Failed to read gameobject M2: ";
+                    return out;
+                }
+                auto model = std::make_shared<pipeline::M2Model>(pipeline::M2Loader::load(m2Data));
+                // Collision classification needs the asset path (see the
+                // synchronous path in spawnOnlineGameObject).
+                model->name = modelPath;
+                if (model->vertices.empty()) {
+                    out.failure = "Failed to parse gameobject M2: ";
+                    return out;
+                }
+                std::string skinPath = pipeline::skinPathForM2(modelPath);
+                auto skinData = am->readFile(skinPath);
+                if (!skinData.empty() && model->version >= 264) {
+                    pipeline::M2Loader::loadSkin(skinData, *model);
+                } else if (skinData.empty() && model->version >= 264) {
+                    LOG_WARNING("GO skin file MISSING for WotLK M2 (no indices/batches): ", skinPath);
+                }
+                std::vector<std::string> textures;
+                for (const auto& tex : model->textures) {
+                    if (!tex.filename.empty()) textures.push_back(tex.filename);
+                }
+                decodeTexturesInto(*am, textures, out.predecodedTextures, /*keepCompressed=*/true);
+                out.model = std::move(model);
+                return out;
+            }));
+    }
+}
+
 void EntitySpawner::processGameObjectSpawnQueue() {
     // Finalize any completed async WMO loads first
     processAsyncGameObjectResults();
     // Then advance one in-progress upload, which may finish a spawn.
     processPendingWmoUploads();
+    collectGameObjectM2Results();
 
-    if (pendingGameObjectSpawns_.empty()) return;
+    if (pendingGameObjectSpawns_.empty()) {
+        preparedGameObjectM2s_.clear();
+        return;
+    }
+    launchGameObjectM2Loads();
 
     static int goQueueLogCounter = 0;
     if (++goQueueLogCounter % 60 == 1) {
@@ -1051,8 +1382,20 @@ void EntitySpawner::processGameObjectSpawnQueue() {
             break;  // retry next frame, keeping queue order
         }
 
+        // An M2 whose model a worker is still reading waits for it, in
+        // queue order, rather than reading it here.
+        const PreparedGameObjectM2* prepared = nullptr;
+        if (!isWmo && !modelPath.empty() && !gameObjectInstances_.count(s.guid)) {
+            if (auto p = preparedGameObjectM2s_.find(s.displayId); p != preparedGameObjectM2s_.end()) {
+                prepared = p->second.get();
+            } else if (asyncGameObjectM2Displays_.count(s.displayId)) {
+                break;
+            }
+        }
+
         // Cached WMO or M2 - spawn synchronously (cheap)
-        spawnOnlineGameObject(s.guid, s.entry, s.displayId, s.x, s.y, s.z, s.orientation, s.scale);
+        spawnOnlineGameObject(s.guid, s.entry, s.displayId, s.x, s.y, s.z, s.orientation, s.scale, prepared);
+        if (prepared) preparedGameObjectM2s_.erase(s.displayId);
         pendingGameObjectSpawns_.erase(pendingGameObjectSpawns_.begin());
     }
 }

@@ -35,6 +35,7 @@
 
 #include "addons/lua_engine.hpp"
 #include "core/application.hpp"
+#include "core/input.hpp"
 #include "core/logger.hpp"
 #include "core/profile_tag.hpp"
 #include "game/entity.hpp"
@@ -43,6 +44,7 @@
 #include "rendering/lighting_manager.hpp"
 #include "rendering/renderer.hpp"
 #include "ui/framexml_takeover.hpp"
+#include "ui/keybinding_manager.hpp"
 #include "ui/widget_tree.hpp"
 
 #include <SDL3/SDL.h>
@@ -97,6 +99,17 @@ int luaDebugPushKey(lua_State* L) {
         LOG_WARNING("[luatest] WoweeDebug_PushKey: no key called ", name);
         return 0;
     }
+    // The bindings ignore the keyboard while the window does not have the
+    // desktop's focus (KeybindingManager::processInputEvent), and a client a
+    // script drives in the background usually does not - so its held keys
+    // were dropped and nothing walked. Tell the bindings alone that the
+    // window has it - not the event queue, where the same event would also
+    // un-suspend the sound of a client playing in the background.
+    SDL_Event focus{};
+    focus.type = SDL_EVENT_WINDOW_FOCUS_GAINED;
+    focus.window.windowID = gWindowId;
+    ui::KeybindingManager::getInstance().processInputEvent(focus);
+
     SDL_Event ev{};
     ev.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
     ev.key.scancode = sc;
@@ -106,6 +119,11 @@ int luaDebugPushKey(lua_State* L) {
     ev.key.mod = SDL_KMOD_NONE;
     ev.key.windowID = gWindowId;
     SDL_PushEvent(&ev);
+    // Held as well. Movement reads the keyboard state (Input::update), which
+    // SDL fills from the device and not from pushed events, so a pushed W
+    // reached the bindings and never moved the character: the "walk" windows
+    // of a tour stood still.
+    core::Input::getInstance().setVirtualKey(sc, down);
     return 0;
 }
 

@@ -4372,7 +4372,8 @@ bool CharacterRenderer::uploadBones(CharacterInstance& inst, uint32_t frameIndex
 }
 
 void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
-                                     const glm::vec3& shadowCenter, float shadowRadius) {
+                                     const glm::vec3& shadowCenter, float shadowRadius,
+                                     std::vector<glm::vec4>* casterSpheres) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
     if (instances.empty() || models.empty()) return;
     if (boneDescPool_ == VK_NULL_HANDLE || boneSetLayout_ == VK_NULL_HANDLE) return;
@@ -4455,12 +4456,38 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
         // the bind-pose bounds - at whatever scale the matrix carries.
         // Scene backdrops (origin far from their geometry) and models with
         // no bounds are never culled here.
+        // A unit with no bound radius in its header still has a box, mostly;
+        // with neither it is taken to be about a person's size.
+        float maskRadius = 3.0f;
+        glm::vec3 maskCentre = glm::vec3(modelMat * glm::vec4(0.0f, 0.0f, 1.0f, 1.0f));
+        if (casterSpheres && (!cullOn || inst.isSceneModel || gpuModel.data.boundRadius <= 0.01f)) {
+            const glm::vec3 lo = gpuModel.data.boundMin, hi = gpuModel.data.boundMax;
+            if (inst.isSceneModel) {
+                maskRadius = 1e4f;  // a backdrop: every cell
+            } else if (glm::all(glm::lessThan(lo, hi))) {
+                const float s = std::max({glm::length(glm::vec3(modelMat[0])),
+                                          glm::length(glm::vec3(modelMat[1])),
+                                          glm::length(glm::vec3(modelMat[2]))});
+                maskCentre = glm::vec3(modelMat * glm::vec4((lo + hi) * 0.5f, 1.0f));
+                maskRadius = std::max(1.0f, 0.5f * glm::length(hi - lo) * s * 1.25f);
+            }
+        }
         if (cullOn && !inst.isSceneModel && gpuModel.data.boundRadius > 0.01f) {
             const float matScale = std::max({glm::length(glm::vec3(modelMat[0])),
                                              glm::length(glm::vec3(modelMat[1])),
                                              glm::length(glm::vec3(modelMat[2]))});
             const float bodyR = gpuModel.data.boundRadius * matScale;
             const float reach = std::max(4.0f, bodyR) + 2.0f * bodyR;
+            // The unit map's mask wants the outline, not the cull's slack: in
+            // an orthographic light what a body shades lies under its own
+            // bounds - the box's sphere, round the box's centre, with a
+            // quarter more for a swing past the bind pose.
+            const glm::vec3 lo = gpuModel.data.boundMin, hi = gpuModel.data.boundMax;
+            maskRadius = std::max(1.0f, bodyR * 1.25f);
+            if (glm::all(glm::lessThan(lo, hi))) {
+                maskCentre = glm::vec3(modelMat * glm::vec4((lo + hi) * 0.5f, 1.0f));
+                maskRadius = std::min(maskRadius, std::max(1.0f, 0.5f * glm::length(hi - lo) * matScale * 1.25f));
+            }
             if (sphereOutsideOrthoClip(lightSpaceMatrix, glm::vec3(modelMat[3]), reach)) {
                 ++lightCulled;
                 return;
@@ -4534,6 +4561,7 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
 
         if (!inst.boneSet[frameIndex]) return;
         ++drawn;
+        if (casterSpheres) casterSpheres->emplace_back(maskCentre, maskRadius);
 
         // Params at set 1 and bones at set 2, together, per instance.
         //
@@ -4558,7 +4586,8 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
         vkCmdBindVertexBuffers(cmd, 0, 1, &gpuModel.vertexBuffer, &offset);
         vkCmdBindIndexBuffer(cmd, gpuModel.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
-        const auto drawBatch = [&](const pipeline::M2Batch& batch, bool alphaKeyed) {
+        const auto drawBatch = [&](const pipeline::M2Batch& batch, bool alphaKeyed,
+                                   uint32_t indexStart, uint32_t indexCount) {
             // An alpha-keyed batch casts the shape of its texture; everything
             // else keeps the white fallback and casts solid. Only the set at
             // binding 0 changes, so the bones stay bound from above.
@@ -4575,14 +4604,14 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
                 currentTexSet = texSet;
             }
 
-            vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
+            vkCmdDrawIndexed(cmd, indexCount, 1, indexStart, 0, 0);
         };
 
         const auto& batches = gpuModel.data.batches;
         if (!listOn) {
             for (const auto& batch : batches) {
                 const int kind = shadowBatchKind(inst, gpuModel, batch);
-                if (kind >= 0) drawBatch(batch, kind == 1);
+                if (kind >= 0) drawBatch(batch, kind == 1, batch.indexStart, batch.indexCount);
             }
             return;
         }
@@ -4590,15 +4619,59 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
             inst.shadowBatches.clear();
             for (uint32_t b = 0; b < batches.size(); ++b) {
                 const int kind = shadowBatchKind(inst, gpuModel, batches[b]);
-                if (kind >= 0) inst.shadowBatches.push_back({.batch = b, .alphaKeyed = kind == 1});
+                if (kind < 0) continue;
+                const auto& batch = batches[b];
+                auto& list = inst.shadowBatches;
+                if (kind == 0 && !list.empty() && !list.back().alphaKeyed) {
+                    auto& last = list.back();
+                    // A second texture layer over the same triangles casts
+                    // nothing the first did not.
+                    if (batch.indexStart >= last.indexStart &&
+                        batch.indexStart + batch.indexCount <= last.indexStart + last.indexCount) continue;
+                    if (last.indexStart + last.indexCount == batch.indexStart) {
+                        last.indexCount += batch.indexCount;  // runs on from the last solid one
+                        continue;
+                    }
+                }
+                list.push_back({.batch = b, .alphaKeyed = kind == 1,
+                                .indexStart = batch.indexStart, .indexCount = batch.indexCount});
             }
             inst.shadowBatchesValid = true;
         }
         for (const auto& ref : inst.shadowBatches) {
-            if (ref.batch < batches.size()) drawBatch(batches[ref.batch], ref.alphaKeyed);
+            if (ref.batch < batches.size()) drawBatch(batches[ref.batch], ref.alphaKeyed, ref.indexStart, ref.indexCount);
         }
     };
-    if (listOn) {
+    // The unit map (casterSpheres given) draws at most the nearest
+    // kUnitShadowCap units to its centre, the player: a city crowd put five
+    // hundred into it, a millisecond of main-thread recording, for shadows a
+    // few pixels across at the back of the crowd; 128 were still 0.4 ms.
+    // WOWEE_UNIT_SHADOW_CAP=<n> changes it, 0 lifts it.
+    static const size_t kUnitShadowCap = [] {
+        const char* v = std::getenv("WOWEE_UNIT_SHADOW_CAP");
+        return v && *v ? static_cast<size_t>(std::max(0, std::atoi(v))) : size_t{64};
+    }();
+    if (casterSpheres && kUnitShadowCap > 0) {
+        shadowNearest_.clear();
+        const auto consider = [&](CharacterInstance& inst) {
+            if (!inst.visible) return;
+            const glm::vec3 d = inst.position - shadowCenter;
+            const float distSq = glm::dot(d, d);
+            if (distSq <= shadowRadiusSq) shadowNearest_.emplace_back(distSq, &inst);
+        };
+        if (listOn) {
+            for (CharacterInstance* inst : shadowInstances_) consider(*inst);
+        } else {
+            for (auto& pair : instances) consider(pair.second);
+        }
+        if (shadowNearest_.size() > kUnitShadowCap) {
+            std::nth_element(shadowNearest_.begin(), shadowNearest_.begin() + static_cast<std::ptrdiff_t>(kUnitShadowCap),
+                             shadowNearest_.end(),
+                             [](const auto& a, const auto& b) { return a.first < b.first; });
+            shadowNearest_.resize(kUnitShadowCap);
+        }
+        for (const auto& [distSq, inst] : shadowNearest_) castShadow(*inst);
+    } else if (listOn) {
         for (CharacterInstance* inst : shadowInstances_) castShadow(*inst);
     } else {
         for (auto& pair : instances) castShadow(pair.second);

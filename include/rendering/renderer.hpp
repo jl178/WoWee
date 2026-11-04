@@ -16,6 +16,7 @@
 #include "rendering/animation/body_facing.hpp"
 #include "rendering/pass_ablation.hpp"
 #include "rendering/vk_frame_data.hpp"
+#include "rendering/shadow_cache.hpp"
 #include "rendering/enhancements.hpp"
 #include "rendering/vk_utils.hpp"
 #include "rendering/sky_system.hpp"
@@ -493,6 +494,56 @@ private:
     /// With shadows off, whether this slot's map has been cleared and left
     /// readable since they went off (renderShadowPass then records nothing).
     bool shadowClearedWhileOff_[2] = {};
+
+    // The sun's shadow in two maps (rendering/shadow_cache.hpp). The two
+    // images above are the world map's: shadowDepthImage[shadowFront_] is the
+    // one the frame reads, the other the one a redraw goes into. They are no
+    // longer one per frame slot; binding 1 of each slot's set is pointed at
+    // the front one when that slot next begins (bindWorldShadowMap).
+    uint32_t shadowFront_ = 0;
+    /// What binding 1 of each slot's per-frame and reflection set holds.
+    VkImageView shadowBoundView_[2] = {};
+    /// What the front map was drawn for, and its matrix.
+    WorldShadowCacheKey shadowFrontKey_;
+    glm::mat4 shadowFrontMatrix_{0.0f};
+    glm::vec3 shadowFrontCenter_{0.0f};
+    /// A redraw of the world map in progress: a part a frame into `target`,
+    /// or all of it at once (`now`). Its key and projection are taken when it
+    /// starts and kept to the end, so its parts line up.
+    struct WorldShadowRedrawState {
+        bool active = false;
+        bool now = false;
+        uint8_t nextPart = 0;
+        uint32_t target = 1;
+        WorldShadowCacheKey key;
+        ShadowProjection proj;
+    } shadowRedraw_;
+    /// This frame's parts (bit per WorldShadowPart), and whether the redraw
+    /// ends with them; decided in planShadowFrame, drawn in renderShadowPass.
+    uint8_t shadowPartsThisFrame_ = 0;
+    bool shadowRedrawEndsThisFrame_ = false;
+    /// Redraws started, by reason: drawn at once, drift, sun, world change.
+    uint32_t shadowRedrawCounts_[4] = {};
+    /// The unit map, per frame slot, a quarter of the world map's area.
+    uint32_t SHADOW_NEAR_SIZE = 2048;
+    VkImage shadowNearImage[2] = {};
+    VmaAllocation shadowNearAlloc[2] = {};
+    VkImageView shadowNearView[2] = {};
+    VkFramebuffer shadowNearFramebuffer[2] = {};
+    VkImageLayout shadowNearLayout_[2] = {};
+    bool shadowNearClearedWhileOff_[2] = {};
+    /// The shadow render pass with LOAD rather than CLEAR, for the second and
+    /// third parts of a spread redraw (the dynamic-rendering path sets the
+    /// load op per begin instead).
+    VkRenderPass shadowRenderPassLoad = VK_NULL_HANDLE;
+    bool nearShadowOn_ = false;
+    ShadowProjection nearShadowProj_;
+    NearShadowMask nearShadowMask_;
+    std::vector<glm::vec4> nearCasterSpheres_;
+    uint32_t nearSphereSplit_[2] = {};  ///< where the units' and doodads' spheres end
+    /// WOWEE_SHADOW_SPLIT=0: one map, every caster, every frame, as before
+    /// the split - for measuring what it saves.
+    bool shadowSplit_ = true;
     glm::mat4 lightSpaceMatrix = glm::mat4(1.0f);
     glm::vec3 shadowCenter = glm::vec3(0.0f);
     bool shadowCenterInitialized = false;
@@ -605,7 +656,23 @@ private:
     VkSampleCountFlagBits pendingMsaaSamples_ = VK_SAMPLE_COUNT_1_BIT;
     bool msaaChangePending_ = false;
     void renderShadowPass();
-    glm::mat4 computeLightSpaceMatrix();
+    /// Decides this frame's shadow work (rendering/shadow_cache.hpp): whether
+    /// the world map is redrawn and which part, the unit map's projection,
+    /// and the matrix the frame's block carries. After the slot's fence.
+    void planShadowFrame();
+    /// Points this slot's binding 1 (per-frame, reflection and fog sets) at
+    /// the front world map, if it is not already.
+    void bindWorldShadowMap(uint32_t slot);
+    /// What the world map is drawn from, folded into one number: terrain
+    /// chunks, buildings, the doodads' content generation.
+    [[nodiscard]] uint64_t shadowContentKey() const;
+    /// Clears a shadow image and leaves it readable, if it is not yet, for
+    /// a frame that draws no casters into it.
+    void clearShadowImageOnce(VkImage image, VkImageView view, VkFramebuffer fb, uint32_t size,
+                              VkImageLayout& layout, bool& cleared);
+    void beginShadowTarget(VkImage image, VkImageView view, VkFramebuffer fb, uint32_t size,
+                           VkImageLayout& layout, bool clear);
+    void endShadowTarget(VkImage image, VkImageLayout& layout);
     /// The way shadow rays travel (unit, Z clamped downward), as the shadow
     /// projection uses it. Also tells character animation culling which way
     /// an off-screen unit's shadow can reach into view.

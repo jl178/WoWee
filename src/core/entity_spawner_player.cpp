@@ -1,4 +1,5 @@
 #include "core/entity_spawner.hpp"
+#include "core/hitch_legacy.hpp"
 #include "core/helm_visual.hpp"
 #include "core/character_geosets.hpp"
 #include "core/geoset_rules.hpp"
@@ -80,133 +81,50 @@ uint16_t selectHairScalpGeoset(const std::unordered_map<uint32_t, uint16_t>& hai
 }
 } // namespace
 
-void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
-                                    uint8_t raceId,
-                                    uint8_t genderId,
-                                    uint32_t appearanceBytes,
-                                    uint8_t facialFeatures,
-                                    float x, float y, float z, float orientation) {
-    if (!renderer_ || !renderer_->getCharacterRenderer() || !assetManager_ || !assetManager_->isInitialized()) return;
-    if (playerInstances_.count(guid)) return;
-
-    // Skip local player - already spawned as the main character
-    if (gameHandler_) {
-        uint64_t localGuid = gameHandler_->getPlayerGuid();
-        uint64_t activeGuid = gameHandler_->getActiveCharacterGuid();
-        if ((localGuid != 0 && guid == localGuid) ||
-            (activeGuid != 0 && guid == activeGuid) ||
-            (spawnedPlayerGuid_ != 0 && guid == spawnedPlayerGuid_)) {
-            return;
-        }
-    }
-    auto* charRenderer = renderer_->getCharacterRenderer();
-
-    // Base geometry model: cache by (race, gender)
-    uint32_t cacheKey = (static_cast<uint32_t>(raceId) << 8) | static_cast<uint32_t>(genderId & 0xFF);
-    uint32_t modelId = 0;
-    auto itCache = playerModelCache_.find(cacheKey);
-    if (itCache != playerModelCache_.end()) {
-        modelId = itCache->second;
-        if (!charRenderer->getModelData(modelId)) {
-            LOG_WARNING("spawnOnlinePlayer: cached player model missing after world reload, reloading modelId=",
-                        modelId, " race=", static_cast<int>(raceId),
-                        " gender=", static_cast<int>(genderId));
-            playerTextureSlotsByModelId_.erase(modelId);
-            playerModelCache_.erase(itCache);
-            modelId = 0;
-        }
-    }
-    if (modelId == 0) {
-        game::Race race = static_cast<game::Race>(raceId);
-        game::Gender gender = (genderId == 1) ? game::Gender::FEMALE : game::Gender::MALE;
-        std::string m2Path = game::getPlayerModelPath(race, gender);
-        if (m2Path.empty()) {
-            LOG_WARNING("spawnOnlinePlayer: unknown race/gender for guid 0x", std::hex, guid, std::dec,
-                        " race=", static_cast<int>(raceId), " gender=", static_cast<int>(genderId));
-            return;
-        }
-
-        auto m2Data = assetManager_->readFile(m2Path);
-        if (m2Data.empty()) {
-            LOG_WARNING("spawnOnlinePlayer: failed to read M2: ", m2Path);
-            return;
-        }
-
-        pipeline::M2Model model = pipeline::M2Loader::load(m2Data);
-        if (model.vertices.empty()) {
-            LOG_WARNING("spawnOnlinePlayer: failed to parse M2: ", m2Path);
-            return;
-        }
-
-        // Skin file (only for WotLK M2s - vanilla has embedded skin)
-        std::string skinPath = pipeline::skinPathForM2(m2Path);
-        auto skinData = assetManager_->readFile(skinPath);
-        if (!skinData.empty() && model.version >= 264) {
-            pipeline::M2Loader::loadSkin(skinData, model);
-        }
-
-        // After skin loading, full model must be valid (vertices + indices)
-        if (!model.isValid()) {
-            LOG_WARNING("spawnOnlinePlayer: failed to load skin for M2: ", m2Path);
-            return;
-        }
-
-        // Only the three animations a standing player needs, plus the vocal
-        // emotes: their keyframes and $CSD voice timestamps are in the .anim
-        // files. Loading every external sequence of a character model stalls
-        // the frame; this runs once per race and gender (playerModelCache_).
-        pipeline::loadExternalAnimations(
-            *assetManager_, m2Path, m2Data, model,
-            {rendering::anim::STAND, rendering::anim::WALK, rendering::anim::RUN,
-             rendering::anim::EMOTE_LAUGH, rendering::anim::EMOTE_KISS,
-             rendering::anim::EMOTE_CRY, rendering::anim::EMOTE_CHICKEN,
-             rendering::anim::EMOTE_APPLAUD});
-
-        modelId = nextPlayerModelId_++;
-        if (!charRenderer->loadModel(model, modelId)) {
-            LOG_WARNING("spawnOnlinePlayer: failed to load model to GPU: ", m2Path);
-            return;
-        }
-
-        playerModelCache_[cacheKey] = modelId;
+std::shared_ptr<pipeline::M2Model> EntitySpawner::parsePlayerModel(pipeline::AssetManager& assets,
+                                                                   const std::string& m2Path) {
+    auto m2Data = assets.readFile(m2Path);
+    if (m2Data.empty()) {
+        LOG_WARNING("spawnOnlinePlayer: failed to read M2: ", m2Path);
+        return nullptr;
     }
 
-    // Determine texture slots once per model
-    {
-        auto [slotIt, inserted] = playerTextureSlotsByModelId_.try_emplace(modelId);
-        if (inserted) {
-            PlayerTextureSlots slots;
-            if (const auto* md = charRenderer->getModelData(modelId)) {
-                for (size_t ti = 0; ti < md->textures.size(); ti++) {
-                    uint32_t t = md->textures[ti].type;
-                    if (t == 1 && slots.skin < 0) slots.skin = static_cast<int>(ti);
-                    else if (t == 6 && slots.hair < 0) slots.hair = static_cast<int>(ti);
-                    else if (t == 8 && slots.skinExtra < 0) slots.skinExtra = static_cast<int>(ti);
-                }
-            }
-            slotIt->second = slots;
-        }
+    auto model = std::make_shared<pipeline::M2Model>(pipeline::M2Loader::load(m2Data));
+    if (model->vertices.empty()) {
+        LOG_WARNING("spawnOnlinePlayer: failed to parse M2: ", m2Path);
+        return nullptr;
     }
 
-    // Create instance at server position
-    glm::vec3 renderPos = core::coords::canonicalToRender(glm::vec3(x, y, z));
-    float renderYaw = orientation + glm::radians(90.0f);
-    // Drawn at the race display's size times OBJECT_FIELD_SCALE_X (0x71C0E0).
-    float unitScale = playerRaceDisplayScale(raceId, genderId);
-    if (gameHandler_) {
-        if (auto e = gameHandler_->getEntityManager().getEntity(guid)) {
-            const uint16_t scaleIdx = game::fieldIndex(game::UF::OBJECT_FIELD_SCALE_X);
-            if (scaleIdx != 0xFFFF) {
-                const uint32_t raw = e->getField(scaleIdx);
-                float s = 0.0f;
-                std::memcpy(&s, &raw, sizeof(s));
-                if (raw != 0 && s > 0.01f && s < 100.0f) unitScale *= s;
-            }
-        }
+    // Skin file (only for WotLK M2s - vanilla has embedded skin)
+    std::string skinPath = pipeline::skinPathForM2(m2Path);
+    auto skinData = assets.readFile(skinPath);
+    if (!skinData.empty() && model->version >= 264) {
+        pipeline::M2Loader::loadSkin(skinData, *model);
     }
-    uint32_t instanceId = charRenderer->createInstance(modelId, renderPos, glm::vec3(0.0f, 0.0f, renderYaw), unitScale);
-    if (instanceId == 0) return;
 
+    // After skin loading, full model must be valid (vertices + indices)
+    if (!model->isValid()) {
+        LOG_WARNING("spawnOnlinePlayer: failed to load skin for M2: ", m2Path);
+        return nullptr;
+    }
+
+    // Only the three animations a standing player needs, plus the vocal
+    // emotes: their keyframes and $CSD voice timestamps are in the .anim
+    // files. Loading every external sequence of a character model stalls
+    // the frame; this runs once per race and gender (playerParsedModels_).
+    pipeline::loadExternalAnimations(
+        assets, m2Path, m2Data, *model,
+        {rendering::anim::STAND, rendering::anim::WALK, rendering::anim::RUN,
+         rendering::anim::EMOTE_LAUGH, rendering::anim::EMOTE_KISS,
+         rendering::anim::EMOTE_CRY, rendering::anim::EMOTE_CHICKEN,
+         rendering::anim::EMOTE_APPLAUD});
+    return model;
+}
+
+EntitySpawner::PlayerLook EntitySpawner::resolvePlayerLook(uint8_t raceId, uint8_t genderId,
+                                                           uint32_t appearanceBytes,
+                                                           uint8_t facialFeatures) {
+    PlayerLook out;
     // The character's textures, through the one reader in
     // pipeline/char_sections.hpp - the same scan the local player, the NPCs and
     // the portrait use. This path used to carry a fourth copy of it, and the
@@ -214,14 +132,18 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     // an HD model draws its ears and eyelashes from. Every other player in the
     // world had skin-coloured eyelashes for exactly that reason.
     const std::string defaultSkin = defaultBodySkinPath(raceId, genderId);
-    const std::string pelvisPath = defaultPelvisPath(raceId, genderId);
+    out.pelvisPath = defaultPelvisPath(raceId, genderId);
     const AppearanceBytes look = unpackAppearanceBytes(appearanceBytes);
-    const uint8_t hairStyleId = look.hairStyleId;
 
-    std::string bodySkinPath = defaultSkin;
-    std::string skinExtraPath, hairTexturePath, faceLowerPath, faceUpperPath;
-    std::string facialLowerPath, facialUpperPath;
-    std::vector<std::string> underwearPaths;
+    std::string& bodySkinPath = out.bodySkinPath;
+    bodySkinPath = defaultSkin;
+    std::string& skinExtraPath = out.skinExtraPath;
+    std::string& hairTexturePath = out.hairTexturePath;
+    std::string& faceLowerPath = out.faceLowerPath;
+    std::string& faceUpperPath = out.faceUpperPath;
+    std::string& facialLowerPath = out.facialLowerPath;
+    std::string& facialUpperPath = out.facialUpperPath;
+    std::vector<std::string>& underwearPaths = out.underwearPaths;
 
     if (auto charSectionsDbc = assetManager_->loadDBC("CharSections.dbc");
         charSectionsDbc && charSectionsDbc->isLoaded()) {
@@ -275,6 +197,132 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
                                           : " - this player will render with no face");
         }
     }
+
+    return out;
+}
+
+void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
+                                    uint8_t raceId,
+                                    uint8_t genderId,
+                                    uint32_t appearanceBytes,
+                                    uint8_t facialFeatures,
+                                    float x, float y, float z, float orientation,
+                                    const PlayerLook* lookIn) {
+    if (!renderer_ || !renderer_->getCharacterRenderer() || !assetManager_ || !assetManager_->isInitialized()) return;
+    if (playerInstances_.count(guid)) return;
+
+    // Skip local player - already spawned as the main character
+    if (gameHandler_) {
+        uint64_t localGuid = gameHandler_->getPlayerGuid();
+        uint64_t activeGuid = gameHandler_->getActiveCharacterGuid();
+        if ((localGuid != 0 && guid == localGuid) ||
+            (activeGuid != 0 && guid == activeGuid) ||
+            (spawnedPlayerGuid_ != 0 && guid == spawnedPlayerGuid_)) {
+            return;
+        }
+    }
+    auto* charRenderer = renderer_->getCharacterRenderer();
+
+    // Base geometry model: cache by (race, gender)
+    uint32_t cacheKey = (static_cast<uint32_t>(raceId) << 8) | static_cast<uint32_t>(genderId & 0xFF);
+    uint32_t modelId = 0;
+    auto itCache = playerModelCache_.find(cacheKey);
+    if (itCache != playerModelCache_.end()) {
+        modelId = itCache->second;
+        if (!charRenderer->getModelData(modelId)) {
+            LOG_WARNING("spawnOnlinePlayer: cached player model missing after world reload, reloading modelId=",
+                        modelId, " race=", static_cast<int>(raceId),
+                        " gender=", static_cast<int>(genderId));
+            playerTextureSlotsByModelId_.erase(modelId);
+            playerModelCache_.erase(itCache);
+            modelId = 0;
+        }
+    }
+    if (modelId == 0) {
+        game::Race race = static_cast<game::Race>(raceId);
+        game::Gender gender = (genderId == 1) ? game::Gender::FEMALE : game::Gender::MALE;
+        std::string m2Path = game::getPlayerModelPath(race, gender);
+        if (m2Path.empty()) {
+            LOG_WARNING("spawnOnlinePlayer: unknown race/gender for guid 0x", std::hex, guid, std::dec,
+                        " race=", static_cast<int>(raceId), " gender=", static_cast<int>(genderId));
+            return;
+        }
+
+        // Parsed by the spawn's worker (processPlayerSpawnQueue), or kept from
+        // the last time this race was in view: the model is unloaded with the
+        // last player of the race, and parsing it again was the frame's
+        // longest stall when one came back.
+        std::shared_ptr<pipeline::M2Model> parsed;
+        if (auto pit = playerParsedModels_.find(cacheKey);
+            pit != playerParsedModels_.end() && !core::hitchLegacy()) {
+            parsed = pit->second;
+        } else {
+            parsed = parsePlayerModel(*assetManager_, m2Path);
+            if (!parsed) return;
+            playerParsedModels_[cacheKey] = parsed;
+        }
+
+        modelId = nextPlayerModelId_++;
+        if (!charRenderer->loadModel(*parsed, modelId)) {
+            LOG_WARNING("spawnOnlinePlayer: failed to load model to GPU: ", m2Path);
+            return;
+        }
+
+        playerModelCache_[cacheKey] = modelId;
+    }
+
+    // Determine texture slots once per model
+    {
+        auto [slotIt, inserted] = playerTextureSlotsByModelId_.try_emplace(modelId);
+        if (inserted) {
+            PlayerTextureSlots slots;
+            if (const auto* md = charRenderer->getModelData(modelId)) {
+                for (size_t ti = 0; ti < md->textures.size(); ti++) {
+                    uint32_t t = md->textures[ti].type;
+                    if (t == 1 && slots.skin < 0) slots.skin = static_cast<int>(ti);
+                    else if (t == 6 && slots.hair < 0) slots.hair = static_cast<int>(ti);
+                    else if (t == 8 && slots.skinExtra < 0) slots.skinExtra = static_cast<int>(ti);
+                }
+            }
+            slotIt->second = slots;
+        }
+    }
+
+    // Create instance at server position
+    glm::vec3 renderPos = core::coords::canonicalToRender(glm::vec3(x, y, z));
+    float renderYaw = orientation + glm::radians(90.0f);
+    // Drawn at the race display's size times OBJECT_FIELD_SCALE_X (0x71C0E0).
+    float unitScale = playerRaceDisplayScale(raceId, genderId);
+    if (gameHandler_) {
+        if (auto e = gameHandler_->getEntityManager().getEntity(guid)) {
+            const uint16_t scaleIdx = game::fieldIndex(game::UF::OBJECT_FIELD_SCALE_X);
+            if (scaleIdx != 0xFFFF) {
+                const uint32_t raw = e->getField(scaleIdx);
+                float s = 0.0f;
+                std::memcpy(&s, &raw, sizeof(s));
+                if (raw != 0 && s > 0.01f && s < 100.0f) unitScale *= s;
+            }
+        }
+    }
+    uint32_t instanceId = charRenderer->createInstance(modelId, renderPos, glm::vec3(0.0f, 0.0f, renderYaw), unitScale);
+    if (instanceId == 0) return;
+
+    // The character's textures (resolvePlayerLook), already resolved when a
+    // worker prepared this spawn.
+    const AppearanceBytes look = unpackAppearanceBytes(appearanceBytes);
+    const uint8_t hairStyleId = look.hairStyleId;
+    const PlayerLook resolvedHere =
+        lookIn ? PlayerLook{} : resolvePlayerLook(raceId, genderId, appearanceBytes, facialFeatures);
+    const PlayerLook& pl = lookIn ? *lookIn : resolvedHere;
+    const std::string& bodySkinPath = pl.bodySkinPath;
+    const std::string& skinExtraPath = pl.skinExtraPath;
+    const std::string& hairTexturePath = pl.hairTexturePath;
+    const std::string& faceLowerPath = pl.faceLowerPath;
+    const std::string& faceUpperPath = pl.faceUpperPath;
+    const std::string& facialLowerPath = pl.facialLowerPath;
+    const std::string& facialUpperPath = pl.facialUpperPath;
+    const std::string& pelvisPath = pl.pelvisPath;
+    const std::vector<std::string>& underwearPaths = pl.underwearPaths;
 
     // Composite base skin + face + underwear overlays
     rendering::VkTexture* compositeTex = nullptr;
@@ -376,6 +424,44 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     onlinePlayerAppearance_[guid] = std::move(st);
 }
 
+std::vector<std::string> EntitySpawner::capeCandidatesFor(const pipeline::DBCFile& displayInfoDbc,
+                                                          uint32_t capeDid, uint8_t genderId) {
+    std::vector<std::string> capeCandidates;
+    const int32_t capeRecIdx = displayInfoDbc.findRecordById(capeDid);
+    if (capeRecIdx < 0) return capeCandidates;
+    const auto* idiL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
+    const uint32_t leftTexField = idiL ? (*idiL)["LeftModelTexture"] : 3u;
+    // RightModelTexture is the field right after LeftModelTexture.
+    // Some cloaks (e.g. Jaina's Radiance) carry their texture only in
+    // the right field; the character-preview screen checks both, so
+    // match it here - otherwise the world model shows the cape mesh
+    // untextured even though the paperdoll preview looks correct.
+    const uint32_t rightTexField = leftTexField + 1;
+    std::string leftName = displayInfoDbc.getString(static_cast<uint32_t>(capeRecIdx), leftTexField);
+    std::string rightName = displayInfoDbc.getString(static_cast<uint32_t>(capeRecIdx), rightTexField);
+
+    std::vector<std::string> capeNames;
+    auto addCapeName = [&](const std::string& n) {
+        if (!n.empty() && std::find(capeNames.begin(), capeNames.end(), n) == capeNames.end())
+            capeNames.push_back(n);
+    };
+    if (genderId == 1) { addCapeName(rightName); addCapeName(leftName); }
+    else               { addCapeName(leftName);  addCapeName(rightName); }
+
+    // Where a cape's art might be, in the order to try it -
+    // pipeline/item_textures.hpp. Written out here, in the NPC
+    // path and in the portrait, identically, which is the only
+    // reason the three agreed.
+    for (const auto& capeName : capeNames) {
+        for (auto& c : pipeline::capeTextureCandidates(capeName, genderId == 1)) {
+            if (std::find(capeCandidates.begin(), capeCandidates.end(), c) == capeCandidates.end()) {
+                capeCandidates.push_back(std::move(c));
+            }
+        }
+    }
+    return capeCandidates;
+}
+
 void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
                                           const std::array<uint32_t, 19>& displayInfoIds,
                                           const std::array<uint8_t, 19>& inventoryTypes) {
@@ -416,7 +502,6 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
 
     auto displayInfoDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
     if (!displayInfoDbc) return;
-    const auto* idiL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
 
     auto hasInvType = [&](std::initializer_list<uint8_t> types) -> bool {
         for (int s = 0; s < 19; s++) {
@@ -462,40 +547,15 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     // --- Helmet model attachment ---
     // HEAD slot is index 0 in the 19-element equipment array.
     // Helmet M2s are race/gender-specific (e.g. Helm_Plate_B_01_HuM.m2 for Human Male).
-    if (displayInfoIds[0] != 0) {
-        // Only the helm point - detaching 0 as well would drop the shield.
-        charRenderer->detachWeapon(st.instanceId, kAttachHelm);
-
-        const core::HelmVisual helm = core::resolveHelmVisual(
-            *assetManager_, displayInfoIds[0], st.raceId, st.genderId);
-        if (helm.valid()) {
-            pipeline::M2Model helmModel;
-            std::string helmPath;
-            if (!helm.racialModelPath.empty()) {
-                helmPath = helm.racialModelPath;
-                if (!loadWeaponM2(helmPath, helmModel)) helmModel = {};
-            }
-            if (!helmModel.isValid()) {
-                helmPath = helm.baseModelPath;
-                loadWeaponM2(helmPath, helmModel);
-            }
-
-            if (helmModel.isValid()) {
-                const uint32_t helmModelId = nextWeaponModelId_++;
-                // Attachment point 0 (head bone), fallback to 11 (explicit head).
-                const bool attached = charRenderer->attachWeapon(
-                    st.instanceId, kAttachHelm, helmModel, helmModelId, helm.texturePath);
-                if (attached) {
-                    charRenderer->setAttachmentParticleColor(st.instanceId, kAttachHelm,
-                                                             helm.particleColorId);
-                    LOG_DEBUG("Attached player helmet: ", helmPath, " tex: ", helm.texturePath);
-                }
-            }
-        }
-    } else {
-        // No helmet equipped - detach any existing helmet model
-        charRenderer->detachWeapon(st.instanceId, kAttachHelm);
-    }
+    const core::ItemModelIdAllocator itemModelId =
+        [this](const std::string& m2Path, const std::string& texturePath) {
+            return itemModelIdFor(m2Path, texturePath);
+        };
+    // The shared helper (core/helm_visual.hpp), as the NPCs use: the per-race
+    // cut first, then the base model, and no helm detaches it. This was a copy
+    // of it that read and parsed the model again for every player.
+    core::attachHelm(*charRenderer, *assetManager_, st.instanceId, displayInfoIds[0],
+                     st.raceId, st.genderId, itemModelId);
 
     // --- Shoulder model attachment ---
     // SHOULDERS slot is index 2 in the 19-element equipment array. The shared
@@ -503,7 +563,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     // (ShoulderRight); this used to have them the other way round, which
     // crossed both pads in toward the neck.
     core::attachShoulders(*charRenderer, *assetManager_, st.instanceId, displayInfoIds[2],
-                          [this](const std::string&) { return nextWeaponModelId_++; });
+                          itemModelId);
 
     // --- Cape texture (group 15 / texture type 2) ---
     // The geoset above enables the cape mesh, but without a texture it renders blank.
@@ -511,44 +571,10 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
         // Back/cloak is WoW equipment slot 14 (BACK) in the 19-element array.
         uint32_t capeDid = displayInfoIds[14];
         if (capeDid != 0) {
-            int32_t capeRecIdx = displayInfoDbc->findRecordById(capeDid);
-            if (capeRecIdx >= 0) {
-                const uint32_t leftTexField = idiL ? (*idiL)["LeftModelTexture"] : 3u;
-                // RightModelTexture is the field right after LeftModelTexture.
-                // Some cloaks (e.g. Jaina's Radiance) carry their texture only in
-                // the right field; the character-preview screen checks both, so
-                // match it here - otherwise the world model shows the cape mesh
-                // untextured even though the paperdoll preview looks correct.
-                const uint32_t rightTexField = leftTexField + 1;
-                std::string leftName = displayInfoDbc->getString(
-                    static_cast<uint32_t>(capeRecIdx), leftTexField);
-                std::string rightName = displayInfoDbc->getString(
-                    static_cast<uint32_t>(capeRecIdx), rightTexField);
-
-                std::vector<std::string> capeNames;
-                auto addCapeName = [&](const std::string& n) {
-                    if (!n.empty() &&
-                        std::find(capeNames.begin(), capeNames.end(), n) == capeNames.end())
-                        capeNames.push_back(n);
-                };
-                if (st.genderId == 1) { addCapeName(rightName); addCapeName(leftName); }
-                else                  { addCapeName(leftName);  addCapeName(rightName); }
-
-                if (!capeNames.empty()) {
-                    // Where a cape's art might be, in the order to try it -
-                    // pipeline/item_textures.hpp. Written out here, in the NPC
-                    // path and in the portrait, identically, which is the only
-                    // reason the three agreed.
-                    std::vector<std::string> capeCandidates;
-                    for (const auto& capeName : capeNames) {
-                        for (auto& c : pipeline::capeTextureCandidates(capeName, st.genderId == 1)) {
-                            if (std::find(capeCandidates.begin(), capeCandidates.end(), c) ==
-                                capeCandidates.end()) {
-                                capeCandidates.push_back(std::move(c));
-                            }
-                        }
-                    }
-
+            {
+                const std::vector<std::string> capeCandidates =
+                    capeCandidatesFor(*displayInfoDbc, capeDid, st.genderId);
+                if (!capeCandidates.empty()) {
                     const rendering::VkTexture* whiteTex = charRenderer->loadTexture("");
                     rendering::VkTexture* capeTexture = nullptr;
                     for (const auto& candidate : capeCandidates) {
@@ -724,7 +750,8 @@ std::string EntitySpawner::transportModelPath(uint32_t entry, uint32_t displayId
     return "";
 }
 
-void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_t displayId, float x, float y, float z, float orientation, float scale) {
+void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_t displayId, float x, float y, float z, float orientation, float scale,
+                                          const PreparedGameObjectM2* preparedM2) {
     if (!renderer_ || !assetManager_) return;
 
     if (!gameObjectLookupsBuilt_) {
@@ -982,6 +1009,25 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
                 gameObjectDisplayIdModelCache_.erase(itCache);
                 itCache = gameObjectDisplayIdModelCache_.end();
             }
+        }
+        if (itCache == gameObjectDisplayIdModelCache_.end() && preparedM2 && preparedM2->model &&
+            preparedM2->modelPath == modelPath) {
+            // Read, parsed and decoded by a worker (launchGameObjectM2Loads):
+            // only the upload is left.
+            modelId = nextGameObjectModelId_++;
+            m2Renderer->setPredecodedBLPCache(
+                const_cast<std::unordered_map<std::string, pipeline::BLPImage>*>(
+                    &preparedM2->predecodedTextures));
+            const bool loaded = m2Renderer->loadModel(*preparedM2->model, modelId);
+            m2Renderer->setPredecodedBLPCache(nullptr);
+            if (!loaded) {
+                LOG_WARNING("Failed to load gameobject model: ", modelPath);
+                gameObjectDisplayIdFailedCache_.insert(displayId);
+                return;
+            }
+            m2Renderer->setModelPinned(modelId, true);
+            gameObjectDisplayIdModelCache_[displayId] = modelId;
+            itCache = gameObjectDisplayIdModelCache_.find(displayId);
         }
         if (itCache == gameObjectDisplayIdModelCache_.end()) {
             modelId = nextGameObjectModelId_++;

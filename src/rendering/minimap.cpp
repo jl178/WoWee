@@ -10,6 +10,8 @@
 #include "pipeline/blp_loader.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
+#include "core/thread_pool.hpp"
+#include "core/hitch_legacy.hpp"
 #include <imgui.h>
 #include <backends/imgui_impl_vulkan.h>
 #include <glm/gtc/constants.hpp>
@@ -305,6 +307,15 @@ void Minimap::shutdown() {
     }
     tileTextureCache.clear();
     tileInsertionOrder.clear();
+    // Decodes still running hold the asset manager; let them finish first.
+    for (auto& [hash, fut] : pendingTileDecodes_) {
+        if (fut && fut->valid()) fut->wait();
+    }
+    pendingTileDecodes_.clear();
+    for (auto& fut : retiredTileDecodes_) {
+        if (fut && fut->valid()) fut->wait();
+    }
+    retiredTileDecodes_.clear();
 
     if (noDataTexture) { noDataTexture->destroy(device, alloc); noDataTexture.reset(); }
     if (compositeTarget) { compositeTarget->destroy(device, alloc); compositeTarget.reset(); }
@@ -340,6 +351,7 @@ void Minimap::setMapName(const std::string& name) {
         hasCachedFrame = false;
         lastCenterTileX = -1;
         lastCenterTileY = -1;
+        prefetchedAroundX_ = prefetchedAroundY_ = -1000;
     }
 }
 
@@ -412,22 +424,104 @@ VkTexture* Minimap::getOrLoadTileTexture(int tileX, int tileY) {
     return tex ? tex : noDataTexture.get();
 }
 
+void Minimap::prefetchTilesAround(int centerTileX, int centerTileY) {
+    // The 5x5 around the player less nothing: the 3x3 the composite draws now
+    // and the ring it draws after the next tile crossing. Decoding a tile was
+    // the main thread's job in the frame it was first drawn - nine at once
+    // after a teleport, three every time a walk or a flight crossed a tile.
+    if (centerTileX == prefetchedAroundX_ && centerTileY == prefetchedAroundY_) return;
+    if (core::hitchLegacy()) return;
+    prefetchedAroundX_ = centerTileX;
+    prefetchedAroundY_ = centerTileY;
+    if (!assetManager || !trsParsed) return;
+    std::unordered_set<std::string> wanted;
+    for (int dr = -2; dr <= 2; ++dr) {
+        for (int dc = -2; dc <= 2; ++dc) {
+            const std::string key = mapName + "\\map" + std::to_string(centerTileX + dr) + "_" +
+                                    std::to_string(centerTileY + dc);
+            auto trsIt = trsLookup.find(key);
+            if (trsIt != trsLookup.end()) wanted.insert(trsIt->second);
+        }
+    }
+    // Decodes for tiles the player has moved away from are let go, and
+    // forgotten once they finish.
+    retiredTileDecodes_.erase(
+        std::remove_if(retiredTileDecodes_.begin(), retiredTileDecodes_.end(),
+                       [](const auto& f) {
+                           return !f || !f->valid() ||
+                                  f->wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+                       }),
+        retiredTileDecodes_.end());
+    for (auto it = pendingTileDecodes_.begin(); it != pendingTileDecodes_.end();) {
+        if (wanted.count(it->first)) { ++it; continue; }
+        retiredTileDecodes_.push_back(std::move(it->second));
+        it = pendingTileDecodes_.erase(it);
+    }
+    for (const std::string& hash : wanted) {
+        {
+            if (tileTextureCache.count(hash) || pendingTileDecodes_.count(hash)) continue;
+            auto* am = assetManager;
+            std::string blpPath = "Textures\\Minimap\\" + hash + ".blp";
+            pendingTileDecodes_[hash] = std::make_shared<std::future<pipeline::BLPImage>>(
+                core::ThreadPool::ioWorkers().submit([am, blpPath]() { return am->loadTexture(blpPath); }));
+        }
+    }
+}
+
+void Minimap::barrierForUploadedTiles(VkCommandBuffer cmd) {
+    // The tiles above were uploaded in a batch (no wait), which is submitted
+    // ahead of this frame on the same queue; this makes its writes visible to
+    // the composite's sampling. Outside the composite's render pass.
+    if (tilesUploadedSinceBarrier_ == 0) return;
+    tilesUploadedSinceBarrier_ = 0;
+    VkMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+    VkDependencyInfo dep{};
+    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep.memoryBarrierCount = 1;
+    dep.pMemoryBarriers = &barrier;
+    cmdPipelineBarrier2(cmd, dep);
+}
+
 VkTexture* Minimap::loadTextureByHash(const std::string& hash) {
     auto cacheIt = tileTextureCache.find(hash);
     if (cacheIt != tileTextureCache.end())
         return cacheIt->second.get();
 
-    // Load from MPQ
+    // From the prefetch when it has one (waiting for it if it is still
+    // running - the same wait the read below would be), else from the MPQ.
+    pipeline::BLPImage blpImage;
+    if (auto pend = pendingTileDecodes_.find(hash); pend != pendingTileDecodes_.end()) {
+        auto fut = std::move(pend->second);
+        pendingTileDecodes_.erase(pend);
+        if (fut && fut->valid()) blpImage = fut->get();
+    }
     std::string blpPath = "Textures\\Minimap\\" + hash + ".blp";
-    auto blpImage = assetManager->loadTexture(blpPath);
+    if (!blpImage.isValid()) blpImage = assetManager->loadTexture(blpPath);
     if (!blpImage.isValid()) {
         tileTextureCache[hash] = nullptr;  // Mark as failed
         return nullptr;
     }
 
+    // In an upload batch: a texture uploaded outside one submits and then
+    // waits on a fence, and this runs while the frame's commands are being
+    // recorded - so each new tile waited for the GPU to finish everything
+    // queued before it, the whole previous frame. Nine of them after a
+    // teleport was a 160 ms frame. The composite records the barrier
+    // (barrierForUploadedTiles) before it samples them.
+    const bool batched = !core::hitchLegacy();
+    if (batched) vkCtx->beginUploadBatch();
     auto tex = std::make_unique<VkTexture>();
     tex->upload(*vkCtx, blpImage.data.data(), blpImage.width, blpImage.height,
                 VK_FORMAT_R8G8B8A8_UNORM, false);
+    if (batched) {
+        vkCtx->endUploadBatch();
+        ++tilesUploadedSinceBarrier_;
+    }
     tex->createSampler(vkCtx->getDevice(), VK_FILTER_LINEAR, VK_FILTER_LINEAR,
                        VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 1.0f);
 
@@ -521,8 +615,12 @@ void Minimap::compositePass(VkCommandBuffer cmd, const glm::vec3& centerWorldPos
 
     uint32_t frameIdx = vkCtx->getCurrentFrame();
 
+    // The ring first, so the nine drawn now decode side by side on the
+    // workers rather than one after another below.
+    prefetchTilesAround(curTileX, curTileY);
     // Update tile descriptor sets
     updateTileDescriptors(frameIdx, curTileX, curTileY);
+    barrierForUploadedTiles(cmd);
 
     // Begin off-screen render pass
     VkClearColorValue clearColor = {{ 0.05f, 0.08f, 0.12f, 1.0f }};
@@ -693,6 +791,7 @@ void Minimap::compositeWmoPass(VkCommandBuffer cmd, const glm::vec3& centerWorld
                                writes.data(), 0, nullptr);
     }
 
+    barrierForUploadedTiles(cmd);
     VkClearColorValue clearColor = {{ 0.0f, 0.0f, 0.0f, 1.0f }};
     compositeTarget->beginPass(cmd, clearColor);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, wmoTilePipeline);

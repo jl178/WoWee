@@ -1,0 +1,113 @@
+// The sun's shadow (rendering/shadow_cache.hpp): the world map at set 0
+// binding 1 (terrain, buildings and doodads, drawn once and kept) and the unit
+// map at binding 5 (units and whatever moves near the player, every frame).
+// The unit map is read only in the cells its mask marks, so most ground pays
+// for one map's filter, as it did when there was one map.
+//
+// Include after the PerFrame block, which must end with
+//     mat4 nearLightSpaceMatrix;
+//     vec4 nearShadowParams;  // x on, y one texel (uv), z 1 / depth range (yd), w yards per texel
+//     uvec4 nearShadowMask[32];
+// and declare lightSpaceMatrix, shadowParams and localLightMeta. The terrain,
+// WMO, M2 and character fragment shaders share it, so the four filter alike.
+
+layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
+layout(set = 0, binding = 5) uniform sampler2DShadow uNearShadowMap;
+
+// One texel of the world map, handed in by the renderer. The map is 512,
+// 1024, 2048 or 4096 a side by the quality setting; this used to be a
+// constant for 4096, so at 512 the filter taps all landed inside one texel
+// and the bias shrank eightfold. The fallback covers a per-frame block that
+// never filled the slot in, such as the character preview's.
+float shadowTexel() {
+    return shadowParams.z > 0.0 ? shadowParams.z : 1.0 / 4096.0;
+}
+
+// The Soft filter's taps lie on a disk turned per pixel by interleaved
+// gradient noise: a grid's penumbra is a staircase of the map's own texels,
+// and a rotated disk trades that for a fine grain the eye reads as a soft
+// edge.
+float shadowIgn(vec2 p) {
+    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+}
+
+float shadowFilter(sampler2DShadow smap, vec3 coords, float t, bool stockOnly) {
+    // The stock filter (Wow.exe 0x8742e0, docs/re/world-lighting.md "Shadow
+    // map filter"): the centre and four fixed taps, k0 k2 k4 k6 in texels,
+    // equal weights. The rotated disk below is the Soft setting.
+    if (stockOnly || (localLightMeta.z & 8) == 0) {
+        float s = texture(smap, coords)
+                + texture(smap, vec3(coords.xy + vec2( 0.8, -1.0) * t, coords.z))
+                + texture(smap, vec3(coords.xy + vec2( 0.2, -0.6) * t, coords.z))
+                + texture(smap, vec3(coords.xy + vec2(-0.6, -0.2) * t, coords.z))
+                + texture(smap, vec3(coords.xy + vec2(-1.0, -0.4) * t, coords.z));
+        return s * 0.2;
+    }
+    // A Vogel (golden-angle) disk of five taps, r = sqrt((i + 0.5) / 5),
+    // i x 137.5 degrees, 1.5 texels across, turned per pixel by interleaved
+    // gradient noise: as many taps as the stock filter, and a soft edge
+    // where its fixed pattern leaves a stepped one. It was nine taps; each
+    // is a bilinear compare of four texels already, and the four more were
+    // up to a millisecond of the scene pass on the Iris Xe
+    // (enhancements-plan.md 3.9) for a slightly finer grain.
+    const vec2 kDisk[5] = vec2[5](
+        vec2( 0.3162,  0.0000), vec2(-0.4038,  0.3700), vec2( 0.0616, -0.7044),
+        vec2( 0.5093,  0.6638), vec2(-0.9343, -0.1647));
+    float a = 6.2831853 * shadowIgn(gl_FragCoord.xy);
+    float c = cos(a), s = sin(a);
+    mat2 rot = mat2(c, s, -s, c) * (1.5 * t);
+    float shadow = 0.0;
+    for (int i = 0; i < 5; ++i) {
+        shadow += texture(smap, vec3(coords.xy + rot * kDisk[i], coords.z));
+    }
+    return shadow / 5.0;
+}
+
+bool nearShadowCell(vec2 uv) {
+    uvec2 cell = min(uvec2(uv * 64.0), uvec2(63u));
+    uint bit = cell.y * 64u + cell.x;
+    uint word = bit >> 5;
+    // The word picked with selects, not v[word & 3]: a vector indexed by a
+    // varying value is spilled to scratch memory on some drivers.
+    uvec4 v = nearShadowMask[word >> 2];
+    uint c = word & 3u;
+    uint w = c == 0u ? v.x : (c == 1u ? v.y : (c == 2u ? v.z : v.w));
+    return ((w >> (bit & 31u)) & 1u) != 0u;
+}
+
+// How much of the sun reaches `pos` (1 lit, 0 shaded) on a surface facing
+// `norm`, `ldir` toward the sun. The caller checks shadowParams.x first.
+float sunShadow(vec3 pos, vec3 norm, vec3 ldir) {
+    float facing = 1.0 - abs(dot(norm, ldir));
+    float shadow = 1.0;
+
+    float t = shadowTexel();
+    vec3 biasedPos = pos + norm * (t * 2.0 * facing);
+    vec4 lsPos = lightSpaceMatrix * vec4(biasedPos, 1.0);
+    vec3 proj = lsPos.xyz / lsPos.w;
+    proj.xy = proj.xy * 0.5 + 0.5;
+    if (proj.x >= 0.0 && proj.x <= 1.0 && proj.y >= 0.0 && proj.y <= 1.0 && proj.z >= 0.0 && proj.z <= 1.0) {
+        float bias = max(0.0005 * facing, 0.00005);
+        shadow = shadowFilter(uShadowMap, vec3(proj.xy, proj.z - bias), t, false);
+    }
+
+    // Already wholly in the world's shadow, a unit's can add nothing.
+    if (nearShadowParams.x > 0.5 && shadow > 0.0) {
+        // Offset along the normal by a texel at grazing angles and biased by
+        // one to three texels of depth: the unit map's texels are a few
+        // inches, its depth range a few hundred yards.
+        vec3 nearPos = pos + norm * (nearShadowParams.w * facing);
+        vec4 ns = nearLightSpaceMatrix * vec4(nearPos, 1.0);
+        vec3 np = ns.xyz / ns.w;
+        vec2 nuv = np.xy * 0.5 + 0.5;
+        if (nuv.x >= 0.0 && nuv.x < 1.0 && nuv.y >= 0.0 && nuv.y < 1.0 && np.z >= 0.0 && np.z <= 1.0 &&
+            nearShadowCell(nuv)) {
+            float nbias = nearShadowParams.w * nearShadowParams.z * (1.0 + 2.0 * facing);
+            // Five taps whatever the setting: the unit map's texels are a
+            // fifth of the world map's, so they are soft enough, and this is
+            // the second filter these pixels pay for.
+            shadow = min(shadow, shadowFilter(uNearShadowMap, vec3(nuv, np.z - nbias), nearShadowParams.y, true));
+        }
+    }
+    return shadow;
+}

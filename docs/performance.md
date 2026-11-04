@@ -97,7 +97,48 @@ Two cautions from doing this on the Iris Xe:
 
 `WOWEE_LIGHT_TILES=0` turns the local-light grid off (every pixel walks
 every light, as before it), and `WOWEE_SHADOW_CASTERS=terrain,wmo,m2,characters`
-draws only the named shadow casters.
+draws only the named shadow casters. `WOWEE_SHADOW_SPLIT=0` draws the sun's
+shadow as one map with every caster every frame, as before the split below;
+`WOWEE_UNIT_SHADOW_CAP=<n>` changes how many units the unit map takes (128,
+0 for all); `WOWEE_FOG_HALF_RATE=0` lights every cell of the mist every
+frame.
+
+## The sun's shadow in two maps
+
+`rendering/shadow_cache.hpp`, `Renderer::planShadowFrame` and
+`renderShadowPass`, `shadow_filter.glsli`. One map used to hold terrain,
+buildings, doodads and units out to the shadow distance and was drawn again
+every frame: 2.8-4.3 ms of GPU and 0.7-1.5 ms of main-thread recording at the
+Ultra distance on the Iris Xe, for a picture in which almost nothing moves.
+
+- **The world map** (terrain, buildings that are not transports, doodads
+  that have not moved for 600 shadow frames) is drawn into one of two images
+  and kept. It is centred where the player was and reaches 1.05 of the shadow
+  distance and 8 yards more, so it is drawn again only when the player has
+  walked 5% of the distance from that centre, the sun has turned a quarter of
+  a degree, or the world has changed (terrain chunks, buildings or the
+  doodads' content count moved; at most every 2 s) - and a redraw goes into
+  the other image a part a frame (terrain, buildings, doodads), the two
+  swapping when it is done. A teleport or a new distance draws it whole at
+  once. Its texels are snapped to the light's grid, so a redraw lands static
+  shadows on the same texels and nothing shimmers; a part a frame keeps a
+  redraw to about a third of what the one map cost every frame.
+- **The unit map** (units, the 128 nearest; doodads and transports that
+  moved lately) is drawn every frame into a per-slot image half the world
+  map's side, over a fifth of the shadow distance either way (32-90 yd),
+  centred on the player and snapped to its own grid. A 64x64 mask of the
+  cells a caster's footprint can reach rides in the per-frame block, and a
+  pixel reads the unit map (five taps) only in a marked cell and only if
+  the world map has not already shaded it wholly, taking the darker of the
+  two.
+- Cost (enhancements-plan.md 3.9): the shadow pass is 0.05-0.1 ms of GPU
+  and 0.2-0.4 ms of main-thread recording standing still (was 1.5-3.7 and
+  0.6-2.7), the second filter 0.2-0.3 ms of the scene pass.
+- Swaying trees hold still in the kept map (their shadows do not sway); the
+  bias is far larger than the sway, so the canopies do not crawl.
+- Every 30 s the log says how often the world map was drawn again and why,
+  and how many casters the unit map took and how many mask cells they marked
+  (`Shadow world map redraws: ...`).
 
 ## Where the time went (Northshire, 2000 playerbots, Ultra preset)
 
@@ -126,8 +167,9 @@ In the same scene, at about 35 fps:
 | renderer->update (M2 bones on workers, characters) | 3.9 |
 | record+ubo (light gathering walks instances) | 1.8 |
 
-The shadow pass records one draw per batch per caster on the main
-thread; instancing the casters per model would remove most of it. The
+The shadow pass recorded one draw per batch per caster on the main
+thread; the M2 casters have since been instanced per model and the split
+above draws them only on a redraw of the world map. The
 FrameXML sizing and visibility passes visit all 28k widgets each frame;
 dirty lists would cut them to the handful that changed.
 
@@ -236,3 +278,84 @@ build differ by a level on half the screen.
 
 The spikes left in Dalaran are the spawn queue (a player's model, equipment
 and textures loaded in one frame, 20-37 ms) and the GPU (beginFrame's fence).
+
+## Hitches (Iris Xe, 2026-11-03)
+
+The medians above were fine; the frames that felt bad were the long ones. The
+profile now reports p99 and max beside the median and p95
+(`frame_med/p95/p99/max`, `cpu_*`, and `hitch25` / `hitch33`, the frames whose
+CPU time passed 25 / 33 ms), and under `WOWEE_FRAME_PROFILE` every frame whose
+CPU time passes `WOWEE_HITCH_MS` (25) logs one `HITCH cpu X wall Y [window]:`
+line naming the stages that took it, longest first. The spawn queues report
+as `spawn/<queue>` stages, the terrain finalize prints its phases every ten
+seconds, and `renderer->update`'s untimed tail is now `update/footfall+sfx`,
+`update/zone audio` and `update/model cleanup`. `WOWEE_LAYOUT_DIRTY_PROFILE=1`
+names which FrameXML setter, on which frame, moved the layout generation.
+
+`WOWEE_HITCH_LEGACY=1` puts back every loading path below as it was, so a
+before and an after come from one build at the same load. The test hook's
+`WoweeDebug_PushKey` now also holds the key and tells the bindings the window
+has focus: a client a script drives in the background used to ignore pushed
+keys, so the "walk" windows of the earlier tours stood still.
+
+### What made them
+
+| Hitch | Cause | Fix |
+|---|---|---|
+| 15-55 ms, any frame that uploaded anything | beginFrame waited on every async upload batch's fence (`waitAllUploads`). The batches go to the graphics queue, behind the previous frame, so the wait drained the GPU: the CPU and GPU ran in lock step on every frame a texture, tile or skin went up. Counted as CPU (it was neither the frame fence nor the acquire) | Batches on the graphics queue are ordered by submission; only a barrier is recorded (now to all stages, vertex and index reads included). The wait stays for `WOWEE_VK_ASYNC_UPLOAD_QUEUE=1` (`vk_context.cpp`) |
+| 40-60 ms, a player coming into view | `spawnOnlinePlayer` read and parsed the race's model (again whenever the last of a race had left) and decoded every skin, face, hair and underwear texture on the main thread, three players a frame, each upload a separate submit-and-wait | A worker reads, parses and decodes; the main thread finishes them in order under a 3 ms budget. The parsed race models are kept. The look (CharSections) is resolved on the main thread as before. A player still appears whole, with the same base composite, a few frames later (`processPlayerSpawnQueue`) |
+| 20-40 ms, a player's gear | The prefetch decoded only the composite's region textures; the helm, shoulders and weapons were read and parsed (`loadM2WithSkin`) and their textures and the cloak's decoded on the main thread, and every ready result was applied in the same frame, in any order | The worker also parses the item models into a shared cache and decodes their textures and the cloak candidates; results apply in the order asked for (an older change can no longer land on a newer one), under a budget |
+| 30-55 ms, NPCs (guards in Dalaran) | Each guard's helm and shoulders, and every unit's weapons on every draw and sheathe, read and parsed the item model again and uploaded it under a fresh model id; the NPC prefetch dropped its decoded textures before the per-instance hair and head detail asked for them | `pipeline::loadM2WithSkinShared` keeps parsed models (LRU, 512); item pieces share one renderer model per mesh and texture (`itemModelIdFor`); the creature worker parses the helm and shoulder models; the decoded textures are kept until the instance overrides have used them |
+| a game object's M2 (mailbox, brazier) | read, parsed and decoded in the frame it spawned | the same worker pattern the WMO objects use, in queue order (`launchGameObjectM2Loads`) |
+| a crowd arriving | each queue had its own budget and always took one item, so their sum could land in one frame | `SharedFrameBudget`: 6 ms for the frame's spawn work, a queue refused three frames running gets one item anyway (`core/frame_work_budget.hpp`, `test_frame_work_budget`) |
+| 40-160 ms, crossing a map tile | the minimap decoded its tiles on the main thread and uploaded each with a submit-and-wait while the frame was being recorded | the 5x5 around the player is decoded on workers ahead of need; uploads go in a batch with a barrier before the composite samples them |
+| 35-70 ms, a terrain step | with the terrain texture cache at its budget, every alpha map asked for room, and every ask walked all ~22k chunks and ~100k textures and sorted them | eviction frees a sixteenth of the budget at a time, and a pass that found nothing is not repeated until a chunk unloads; a TERRAIN step uploads 4 chunks, not 16, so the 8 ms budget can stop between them |
+| 10-30 ms every 5 s | `M2Renderer::cleanupUnusedModels` drained the device (`vkDeviceWaitIdle`) before freeing a model | the frees wait for the frames in flight instead (not with ray tracing on) |
+| zone line | a zone's music was read out of the archive on the main thread | read on a worker, as file tracks already were; it fades in when it lands |
+
+FrameXML: the layout generation moved on every frame because
+`UIParent_ManageFramePositions` sets BuffFrame's point each OnUpdate (about
+a thousand times in ten seconds); setting a point to the value it already has
+no longer invalidates every rect resolved since the pass. The full layout
+pass still runs every frame - visibility, text and scale changes are written
+straight into the widgets without moving the generation, so a pass skipped
+on an unchanged generation would miss them. OnUpdate handlers themselves are
+0.15 ms a frame in Dalaran; the rest of the interface's ~2 ms is the layout
+walk, the draw and the size/scroll checks over every frame.
+
+### Before and after
+
+CPU ms per frame, median / p95 / p99 / max, and frames over 25 ms, one 30-45 s
+window each, legacy (`WOWEE_HITCH_LEGACY=1`) and new back to back on one
+build, load average 5-7, the other client (shadow work) on the same GPU.
+
+| Window | Legacy (run 1 / run 2) | New (run 1 / run 2) |
+|---|---|---|
+| Dalaran arrival | 12.7 / 17.6 / 41.5 / 111.9, 51 over 25 ms; 16.2 / 42.1 / 56.9 / 71.9, 328 | 12.6 / 16.5 / 21.1 / 43.8, 2; 12.8 / 15.5 / 19.6 / 27.6, 1 |
+| Dalaran walk | 12.1 / 22.3 / 47.7 / 453.1, 82; 15.0 / 24.2 / 36.1 / 60.3, 82 | 13.1 / 18.8 / 24.0 / 49.4, 11; 13.3 / 18.0 / 23.2 / 57.9, 9 |
+| Elwynn arrival | 7.6 / 9.6 / 12.3 / 153.1, 10; 9.7 / 11.2 / 12.9 / 26.9, 1 | 8.5 / 10.1 / 11.1 / 13.7, 0; 8.4 / 10.0 / 11.2 / 15.2, 0 |
+| Elwynn flight | 8.6 / 10.3 / 14.9 / 22.1, 0; 9.9 / 11.6 / 15.2 / 24.5, 0 | 9.2 / 11.2 / 12.7 / 21.3, 0; 8.5 / 10.1 / 11.2 / 14.7, 0 |
+| Stormwind arrival | 8.6 / 10.2 / 11.7 / 15.9, 0; 9.7 / 11.3 / 12.9 / 15.6, 0 | 10.2 / 11.8 / 13.0 / 19.9, 0; 8.5 / 10.0 / 11.1 / 18.8, 0 |
+| Orgrimmar arrival | 9.2 / 10.9 / 12.0 / 16.3, 0; 10.3 / 28.9 / 33.9 / 58.5, 394 (load 15-23) | 10.5 / 11.9 / 13.6 / 16.2, 0; 9.4 / 11.2 / 14.7 / 21.0, 0 |
+| Orgrimmar walk | 8.0 / 10.0 / 11.2 / 15.1, 0; 23.7 / 35.6 / 41.9 / 65.5, 382 (load 15-23) | 9.2 / 11.8 / 13.1 / 18.0, 0; 7.8 / 10.8 / 11.8 / 14.9, 0 |
+
+The windows the teleport lands in (loading screen to the first window) went
+from 34-112 ms worst frames to 50-69 ms; the terrain finalize still overruns
+its 8 ms there now and then (a TERRAIN step of 60 ms after a teleport, a WMO
+group upload of 10-25 ms). One run in another had the tile finalize spill
+into Orgrimmar's arrival window (p95 16.9): with the steps smaller it keeps
+to its budget, so a city's tiles can take a few seconds longer to finish
+after the loading screen, at 8 ms a frame rather than 20-80.
+
+### What is left
+
+- `endFrame` 12-30 ms of CPU on some Dalaran frames: the queue submit itself,
+  in the Intel driver; and the spawn batch's own submit once at 32 ms. Both
+  builds show it.
+- The minimap's indoor (WMO) composite still decodes its tiles when a building
+  is entered (one 42 ms frame in Dalaran); only the outdoor ring is prefetched.
+- A player's skin composite and an equipment change still blend on the main
+  thread (4-8 ms each, one or two a frame under the budget); the blend lives
+  in `CharacterRenderer` and would move with a worker-side composite.
+- Item visual effect models (weapon glows) load on first use; music aside,
+  sound files are read on first play (small).

@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <initializer_list>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,27 @@ struct M2Model;
  * which is what everything downstream identifies it by.
  */
 bool loadM2WithSkin(AssetManager& assets, const std::string& m2Path, M2Model& outModel);
+
+/**
+ * The parsed models loadM2WithSkin keeps.
+ *
+ * Every weapon, helm and shoulder piece went through loadM2WithSkin each time
+ * it was attached - every spawn of a guard wearing it, every time a player in
+ * view drew or sheathed a sword - and each time the file was read, inflated
+ * and parsed again on the main thread. The parse is now kept, by path, and a
+ * later call copies it out. Thread-safe: a worker can warm it
+ * (prefetchM2WithSkin) for the main thread to find.
+ *
+ * Bounded (least recently used goes first); a model that did not load is not
+ * kept, so a missing file is asked about again as before.
+ */
+std::shared_ptr<const M2Model> loadM2WithSkinShared(AssetManager& assets, const std::string& m2Path);
+/** Parse into the cache without copying out - for worker threads. */
+void prefetchM2WithSkin(AssetManager& assets, const std::string& m2Path);
+/** Drop every kept model (the asset tree changed). */
+void clearM2ModelCache();
+/** Models kept, and the cap. */
+size_t m2ModelCacheSize();
 
 /**
  * The external .anim file for one sequence: the model path without its

@@ -2525,7 +2525,8 @@ bool WMORenderer::initializeShadow(VkRenderPass shadowRenderPass) {
 }
 
 void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
-                               const glm::vec3& shadowCenter, float shadowRadius) {
+                               const glm::vec3& shadowCenter, float shadowRadius,
+                               ShadowCasterSet casters, std::vector<glm::vec4>* moverSpheres) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
     if (instances.empty() || loadedModels.empty()) return;
 
@@ -2550,6 +2551,10 @@ void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceM
     lightFrustum.extractFromMatrix(lightSpaceMatrix);
 
     for (const auto& instance : instances) {
+        // A transport moves: it belongs to the unit map, drawn every frame,
+        // not the kept world map (rendering/shadow_cache.hpp).
+        if (casters == ShadowCasterSet::Static && instance.isTransport) continue;
+        if (casters == ShadowCasterSet::Moving && !instance.isTransport) continue;
         // Distance cull using world bounding box - WMO origins can be far from
         // their geometry, so point-based culling misses large buildings.
         glm::vec3 closest = glm::clamp(shadowCenter, instance.worldBoundsMin, instance.worldBoundsMax);
@@ -2568,6 +2573,10 @@ void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceM
             continue;
         }
 
+        if (moverSpheres) {
+            moverSpheres->emplace_back((instance.worldBoundsMin + instance.worldBoundsMax) * 0.5f,
+                                       0.5f * glm::length(instance.worldBoundsMax - instance.worldBoundsMin));
+        }
         // A building does not sway, so the sway slot stays zero.
         ShadowPush push{.lightSpaceModel = lightSpaceMatrix * instance.modelMatrix};
         vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
@@ -3560,10 +3569,9 @@ static bool trianglesAlongRay(const Group& group, const glm::vec3& localOrigin,
     }
     const glm::vec3 enter = localOrigin + localDir * tEnter;
     const glm::vec3 exit = localOrigin + localDir * tExit;
-    group.getTrianglesInRange(std::min(enter.x, exit.x) - 1.0f,
-                              std::min(enter.y, exit.y) - 1.0f,
-                              std::max(enter.x, exit.x) + 1.0f,
-                              std::max(enter.y, exit.y) + 1.0f, out);
+    // The cells along the segment, a yard either side: what the rectangle it
+    // spans held near the ray, without the rest of the rectangle.
+    group.getTrianglesAlongSegment(glm::vec2(enter), glm::vec2(exit), 1.0f, out);
     return true;
 }
 
@@ -3790,6 +3798,43 @@ void WMORenderer::GroupResources::gatherCellTriangles(
             }
         }
     }
+}
+
+void WMORenderer::GroupResources::getTrianglesAlongSegment(
+        const glm::vec2& a, const glm::vec2& b, float margin,
+        std::vector<uint32_t>& out) const {
+    out.clear();
+    if (gridCellsX == 0 || gridCellsY == 0 || cellTriangles.empty()) return;
+    const float extentX = boundingBoxMax.x - boundingBoxMin.x;
+    const float extentY = boundingBoxMax.y - boundingBoxMin.y;
+    const glm::vec2 origin(gridOrigin.x, gridOrigin.y);
+    const auto range = cellRangeCovering(
+        gridCellsX, gridCellsY, extentX, extentY, origin,
+        std::min(a.x, b.x) - margin, std::min(a.y, b.y) - margin,
+        std::max(a.x, b.x) + margin, std::max(a.y, b.y) + margin);
+    if (!range) return;
+    // A rectangle of one row or one column is already the band.
+    if (range->minX == range->maxX || range->minY == range->maxY || triVisited.empty()) {
+        gatherCellTriangles(cellTriangles, std::min(a.x, b.x) - margin, std::min(a.y, b.y) - margin,
+                            std::max(a.x, b.x) + margin, std::max(a.y, b.y) + margin, out);
+        return;
+    }
+    thread_local std::vector<ColumnSpan> spans;
+    segmentBandColumns(gridCellsX, gridCellsY, extentX, extentY, origin, a, b, margin, *range, spans);
+    out.reserve(range->count() * 2);
+    for (int cy = range->minY; cy <= range->maxY; ++cy) {
+        const ColumnSpan& span = spans[static_cast<size_t>(cy - range->minY)];
+        for (int cx = span.minX; cx <= span.maxX; ++cx) {
+            for (uint32_t tri : cellTriangles[cy * gridCellsX + cx]) {
+                const uint32_t index = tri / 3;
+                if (!triVisited[index]) {
+                    triVisited[index] = 1;
+                    out.push_back(tri);
+                }
+            }
+        }
+    }
+    for (uint32_t tri : out) triVisited[tri / 3] = 0;
 }
 
 void WMORenderer::GroupResources::getTrianglesInRange(

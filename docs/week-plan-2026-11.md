@@ -73,6 +73,8 @@ before starting it.
 - Water sky reflection: stock has none. Ours still does.
 - wowpack: open upstream PRs to Kelsidavis/wowee for the sync feature, or delete the `wowpack-sync` branch? (Rule so far: no PRs outside jl178.)
 - wowpack: Jered to test `patch-Z.MPQ` with stock Wow.exe on Windows.
+- Enhancement defaults (docs/enhancements-plan.md section 6): generated normal maps on or off? Mist, sun shafts, lens flare, sharp stars off on fresh install? Low-health vignette and Wowee soundtrack off by default? Classic view distance 1900 or the stock clamp 791.7?
+- wowpack: deploy the IP and City Siege packs (wowpack branches)? Changes live spell data (mana costs) and needs the SQL; also fixes IP spells 11202/25347 that never reached the server.
 - Nov 2 ~09:05: started M2 multitexture/blend agent and mounts/taxi/vehicles agent.
 - Nov 02 08:08: 3 agents running (sound, M2 materials, mounts/taxi). Nothing new to commit.
 - Nov 02 08:31: sound agent done (SoundEntriesAdvanced ducking/blend/time, own-character 2D x0.65, FSD footsteps, channels slider). Commit held until the mount agent finishes: they share npc_interaction_callback_handler.cpp and sweep_guard is red from in-progress mount work.
@@ -102,3 +104,44 @@ before starting it.
 - Nov 02 21:08: terrain and Tol Barad deploy agents running; spell+maps held.
 - Nov 02 21:25: Tol Barad 0.1.2 live on the lab; minimap, world map, arrow, delta sync (18 of 28 files) verified in Wowee. wowpack fixes e4724b0 (pack dir swap broke nginx), 07eed3e (server-setup doc).
 - Nov 02 22:15: Tol Barad 0.2.0 live (sea ring, minimap water fitted to stock, 29 objects, 3 NPCs, 5 quests, loading screen). wowpack 78b87ec. Lab extractors need relinking (Nix glibc GC'd). New Wowee bug: GM fly mode does not hold the character in the air.
+- Nov 02 22:18: stock pass 4 committed (465596a: spell procedures, maps, terrain + WDL horizon, Intel page-table fix). Build, ctest all pass, smoke login clean. Started ground-target/fly/teleport agent and water agent.
+- Nov 02 23:08: ground-target/fly/teleport and water agents running.
+- Nov 02 23:50: ground targeting, cast-failed text, GM fly, worldport position fix committed. Water agent running.
+- Nov 03 00:08: water and animation agents running.
+- Nov 03 00:35: animation agent done (fallback chain, variation re-roll per lap, blends, stand states, emote rules, stealth/sprint pace); held until water agent finishes (shared files). Started lab extractor relink agent and the phase-2 enhancement plan agent.
+- Nov 03 00:44: enhancement plan committed (docs/enhancements-plan.md). It found stock gaps: Classic preset misses 4 keys, ShadowBlob.blp unit shadow not drawn, ~12 always-on non-stock features without toggles. Next agent after water lands: the toggle framework + those gaps.
+- Nov 03 01:08: water agent running (long); started gameplay-flows audit agent (quests, vendors, mail, AH, guild, party, LFG, trade, talents...). Animation work held for the water commit.
+- Nov 03 02:08: water done; water+animation full build and ctest green; waiting for the animation agent's sweep fix report before committing both. Gameplay-flows agent running.
+- Nov 03 02:09: water + animation committed. Gameplay-flows agent running. Next: toggle framework + stock gaps from the enhancement plan.
+- Nov 03 03:08: gameplay-flows and toggle-framework agents running.
+- Nov 03 04:08: gameplay-flows (~3h) and toggle-framework agents still running.
+- Nov 03 04:45: enhancement framework committed. Stormwind fps: recommended 13-20 vs all-off 36-40 (loaded box) - recommended set is far over its 3 ms budget; next agent profiles it.
+- Nov 03 05:08: gameplay-flows (3.7 h) and enhancement-perf agents running.
+- Nov 03 06:08: gameplay-flows and enhancement-perf agents running.
+- Nov 03 07:08: gameplay-flows (5.8 h, large scope) and enhancement-perf agents running.
+- Nov 03 07:25: gameplay flows committed. Perf agent running. Decisions logged by that agent: guild roster refresh 10 s throttle, raid roster order, calendar creator CONFIRMED, LFG error pairing (unverified guesses).
+- Nov 03 08:08: enhancement-perf and flows follow-up agents running.
+- Nov 03 08:42: enhancement perf committed: recommended set +1.3 ms GPU (was +9 to +22), local-light tiling, shadows-off free, sun shadows off in recommended. game_replay + sweep_guard red from 9cb0fd9; flows follow-up agent asked to fix.
+- Nov 03 09:08: flows follow-up and enhancements E4/E2/E5 agents running.
+- Nov 03 09:59: gameplay follow-up committed (300 chat sites to stock, AH tested, game_replay + sweep_guard green per agent). Enhancements E4/E2/E5 agent running.
+- Nov 03 10:08: enhancements E4/E2/E5 and pets agents running.
+- Nov 03 10:33: E4 soft particles, E2 fade-in, E5 rain ripples committed. Known: with soft particles on, blended particles draw over water even when below it. Pets agent running.
+- Nov 03 11:08: pets and enhancements E8/E21 agents running.
+- Nov 03 11:56: pets committed (+ talent prerequisite column bug for every class). Agent changed test char race for hunter runs; restored (race 1, class 8, money 9). Enhancements E8/E21 agent running.
+- Nov 03 12:08: enhancements E8/E21 and glue-screens agents running.
+- Nov 03 12:50: glue screens committed. GlueXML migration judged a large separate project (not started). Enhancements E8/E21 agent running.
+- Nov 03 12:59: E8 corpse settle, E21 footfall dust, E2 gaps, E4 water order committed. CPU-frame agent running.
+- Nov 03 13:08: CPU-frame and E7/E10 agents running. TODO tonight: clean build of HEAD in a separate worktree to prove commits build on their own; Windows package rebuild.
+- Nov 03 14:08: CPU-frame and E7/E10 agents running.
+- Nov 03 14:24: E7 capes/tails/hair and E10 remote smoothing committed. Light-shafts fog read +1.2..7.3 ms on a loaded machine; re-measure quietly. CPU-frame agent running.
+- Nov 03 15:08: CPU-frame and shadows/fog-budget agents running.
+- Nov 03 16:08: CPU-frame and shadows/fog-budget agents running.
+- Nov 03 16:50: CPU-frame fix committed (Intel submit walking 100k CCS images): Stormwind 22.4->8.9 ms, Orgrimmar 32.3->8.4. WMO ray-band part held with the shadow agent's wmo_renderer edits.
+- Nov 03 17:08: shadows/fog-budget and hitch agents running.
+- Nov 03 18:08: shadows/fog-budget and hitch agents running.
+- Nov 03 19:08: shadows/fog-budget (~4 h) and hitch agents running.
+- Nov 03 19:19: hitch agent done (Dalaran arrival frames >25 ms: 51-328 -> 1-2; upload fence wait removed, player/gear/NPC loads on workers, shared 6 ms budget, minimap/terrain eviction fixes). Held: shares renderer.cpp, m2_renderer_instance, CMake with the shadow agent; commit both after one full build.
+- Nov 03 19:26: wowpack tests for 4 packages + CI e2e build and cross-build matrix (CI green, 2d6196b). Fixed a pack write that could leave a half-written served pack. Shadow agent still running.
+- Nov 03 19:51: wowpack ported mod-individual-progression and mod-city-siege on 'wowpack' branches (pushed, not deployed). Found IP spells 11202/25347 never reached the server (core placeholders win). wowpack: MPQ v1 reader, DBC lookup cache, import command, signedness fix. Gaps: build options, field-level merges.
+- Nov 03 20:08: shadows split committed pending full build (running). wowpack gaps agent running.
+- Nov 03 20:12: wowpack b1cf862: field-level DBC merges, build options (IP mana costs, login/loading screens), id_ranges for any table, warning for rows shadowed by core *_dbc. Default build byte-identical, CI green.

@@ -4,6 +4,7 @@
 #include "audio/audio_engine.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "core/thread_pool.hpp"
+#include "core/hitch_legacy.hpp"
 #include "core/logger.hpp"
 #include <algorithm>
 #include <filesystem>
@@ -34,6 +35,10 @@ float MusicManager::effectiveMusicVolume() const {
 
 void MusicManager::shutdown() {
     cancelPendingFileLoad();
+    for (auto& f : retiredArchiveReads_) {
+        if (f.valid()) f.wait();
+    }
+    retiredArchiveReads_.clear();
     AudioEngine::instance().stopMusic();
     playing = false;
     fadingIn = false;
@@ -74,9 +79,32 @@ void MusicManager::playMusic(const std::string& mpqPath, bool loop, float fadeIn
 
     // Read music file from cache or MPQ
     auto cacheIt = musicDataCache_.find(mpqPath);
-    if (cacheIt == musicDataCache_.end()) {
+    if (cacheIt == musicDataCache_.end() && core::hitchLegacy()) {
         preloadMusic(mpqPath);
         cacheIt = musicDataCache_.find(mpqPath);
+    }
+    if (cacheIt == musicDataCache_.end()) {
+        // On a worker, as playFilePath reads a file: a zone's track is a few
+        // megabytes inflated out of the archive, and reading it here was the
+        // frame's stall on every zone line crossed. pollPendingFileLoad caches
+        // it and comes back here when it lands; the track fades in then, as a
+        // file track always has.
+        if (pendingFileLoad_ && pendingFileLoad_->fromArchive && pendingFileLoad_->path == mpqPath) {
+            pendingFileLoad_->loop = loop;
+            pendingFileLoad_->fadeInMs = fadeInMs;
+            return;
+        }
+        auto* am = assetManager;
+        pendingFileLoad_ = PendingFileLoad{
+            core::ThreadPool::ioWorkers().submit([am, mpqPath]()
+                    -> std::shared_ptr<const std::vector<uint8_t>> {
+                auto data = am->readFile(mpqPath);
+                if (data.empty()) return nullptr;
+                return std::make_shared<const std::vector<uint8_t>>(std::move(data));
+            }),
+            mpqPath, loop, fadeInMs, /*fromArchive=*/true
+        };
+        return;
     }
     if (cacheIt == musicDataCache_.end() || !cacheIt->second || cacheIt->second->empty()) {
         LOG_WARNING("Music: Could not read: ", mpqPath);
@@ -148,6 +176,16 @@ void MusicManager::playFilePath(const std::string& filePath, bool loop, float fa
 void MusicManager::cancelPendingFileLoad() {
     // Futures returned by ThreadPool own only a shared packaged task state; unlike
     // std::async futures, destroying one never joins the worker.
+    retiredArchiveReads_.erase(
+        std::remove_if(retiredArchiveReads_.begin(), retiredArchiveReads_.end(),
+                       [](const auto& f) {
+                           return !f.valid() ||
+                                  f.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+                       }),
+        retiredArchiveReads_.end());
+    if (pendingFileLoad_ && pendingFileLoad_->fromArchive && pendingFileLoad_->future.valid()) {
+        retiredArchiveReads_.push_back(std::move(pendingFileLoad_->future));
+    }
     pendingFileLoad_.reset();
 }
 
@@ -161,7 +199,18 @@ void MusicManager::pollPendingFileLoad() {
     const std::string filePath = pending.path;
     const bool loop = pending.loop;
     const float fadeInMs = pending.fadeInMs;
+    const bool fromArchive = pending.fromArchive;
     pendingFileLoad_.reset();
+
+    if (fromArchive) {
+        if (!data || data->empty()) {
+            LOG_WARNING("Music: Could not read: ", filePath);
+            return;
+        }
+        musicDataCache_[filePath] = std::move(data);
+        playMusic(filePath, loop, fadeInMs);
+        return;
+    }
 
     if (!data || data->empty()) {
         LOG_ERROR("Music: Could not read file: ", filePath);
