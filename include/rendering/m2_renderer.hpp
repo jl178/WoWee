@@ -4,6 +4,7 @@
 #include "rendering/frustum.hpp"
 #include "rendering/spatial_grid.hpp"
 #include "rendering/shadow_params.hpp"
+#include "rendering/shadow_cache.hpp"
 
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/blp_loader.hpp"
@@ -493,6 +494,10 @@ struct alignas(64) M2Instance {
     /// The static shadow list build that holds this instance as a caster;
     /// see M2Renderer::shadowStaticMark_.
     uint32_t shadowStaticMark = 0;
+    /// The shadow frame it last moved in (0 never): while it is recent the
+    /// instance stays a mover through list builds, so the kept world shadow
+    /// map never holds a door or a lift where it was a moment ago.
+    uint32_t shadowMovedFrame = 0;
     /// No new particles or ribbon edges; the live ones run out their lives.
     /// A spell effect at the end of its life is kept this way until they do.
     bool emissionStopped = false;
@@ -817,8 +822,23 @@ public:
     /**
      * Render depth-only pass for shadow casting
      */
+    ///
+    /// `casters` picks the static candidates (the kept world map), the movers
+    /// (the unit map, every frame) or both. `moverSpheres`, when given, gets
+    /// each drawn mover's bounding sphere (centre, radius) for the unit
+    /// map's mask. Call beginShadowFrame first, once a frame.
     void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, float globalTime = 0.0f,
-                      const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f);
+                      const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f,
+                      ShadowCasterSet casters = ShadowCasterSet::All,
+                      std::vector<glm::vec4>* moverSpheres = nullptr);
+    /// Hands back this frame slot's shadow texture sets: once a frame, before
+    /// the first renderShadow, which may run twice (world map part, unit map).
+    void beginShadowFrame();
+    /// Bumped by whatever changes what the static shadow casters are - an
+    /// instance placed, removed, turned mover, castsShadow, a model - and not
+    /// by the shadow pass's own list builds: the kept world map is drawn
+    /// again when it moves (rendering/shadow_cache.hpp).
+    [[nodiscard]] uint32_t shadowContentGeneration() const { return shadowContentGen_; }
 
     /// The shared wind: `foliage` is setting x weather, eased, zero indoors;
     /// `cloth` the same without the indoor cut. The main pass reads them from
@@ -1605,7 +1625,11 @@ private:
     void bumpShadowStatic(ShadowGenSource source) {
         ++shadowStaticGen_;
         ++updateProf_.shadowGenBumps[source];
+        if (source != kShadowGenRebuild) ++shadowContentGen_;
     }
+    uint32_t shadowContentGen_ = 0;
+    /// Counts beginShadowFrame calls from 1; M2Instance::shadowMovedFrame.
+    uint32_t shadowFrameSerial_ = 1;
     /// Numbers the static list builds; a caster on the current list carries
     /// it in M2Instance::shadowStaticMark, so a first move of anything else
     /// leaves the list alone.
@@ -1638,9 +1662,10 @@ private:
     void noteShadowCandidate(size_t idx);
     /// An instance moved: track it as a mover until the next build.
     void noteShadowMover(M2Instance& inst) {
-        if (inst.shadowMoverStamp == shadowCandStamp_) return;
         // Missiles and kits move every frame and never cast; see renderShadow.
         if (inst.cachedModel && inst.cachedModel->isSpellEffect) return;
+        inst.shadowMovedFrame = shadowFrameSerial_;
+        if (inst.shadowMoverStamp == shadowCandStamp_) return;
         inst.shadowMoverStamp = shadowCandStamp_;
         shadowMovers_.push_back(inst.id);
         // Only a caster on the static list changes it by leaving; any other

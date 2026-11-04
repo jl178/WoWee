@@ -30,6 +30,7 @@
 #include "pipeline/wdt_loader.hpp"
 #include "rendering/stock_terrain.hpp"
 #include "core/env_flag.hpp"
+#include "core/hitch_legacy.hpp"
 #include "core/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -54,6 +55,7 @@
 #include <mach/thread_policy.h>
 #include <pthread.h>
 #include <array>
+#include <sstream>
 #include <cstring>
 
 #endif
@@ -1045,6 +1047,22 @@ void TerrainManager::logMissingAdtOnce(const std::string& adtPath) {
     }
 }
 
+namespace {
+/// A finalize sub-step that took longer than a frame should spend on it,
+/// named - once per sub-step, and again only when it gets worse.
+void noteSlowFinalizeStep(const char* what, std::chrono::steady_clock::time_point since,
+                          int x, int y, size_t count) {
+    const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - since).count();
+    if (ms < 6.0f) return;
+    static std::unordered_map<std::string, float> worst;
+    float& w = worst[what];
+    if (ms <= w) return;
+    w = ms;
+    LOG_WARNING("Terrain finalize: ", what, " took ", ms, "ms for ", count, " item(s), tile=[", x, ",", y,
+                "] - said again only if it gets worse");
+}
+}  // namespace
+
 bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
     auto& pending = ft.pending;
     int x = pending->coord.x;
@@ -1068,14 +1086,19 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
         if (!ft.terrainPreloaded) {
             LOG_DEBUG("Finalizing tile [", x, ",", y, "] (incremental)");
             if (!pending->preloadedTextures.empty()) {
+                const auto t0 = std::chrono::steady_clock::now();
                 terrainRenderer->uploadPreloadedTextures(pending->preloadedTextures);
+                noteSlowFinalizeStep("TERRAIN texture preload", t0, x, y, pending->preloadedTextures.size());
             }
             ft.terrainPreloaded = true;
             // Yield after preload to give time budget a chance to interrupt
             return false;
         }
 
-        // Upload terrain chunks incrementally (16 per call to spread across frames)
+        // Upload terrain chunks incrementally, four per call. The frame's
+        // finalize budget is checked between calls, so a call is the unit it
+        // can stop at: at sixteen a call one step measured 30-68 ms of
+        // descriptor, UBO and alpha-map creation against an 8 ms budget.
         if (!ft.terrainMeshDone) {
             if (pending->mesh.validChunkCount == 0) {
                 LOG_ERROR("Failed to upload terrain to GPU for tile [", x, ",", y, "]");
@@ -1087,9 +1110,13 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 ft.phase = FinalizationPhase::DONE;
                 return true;
             }
+            const auto t0 = std::chrono::steady_clock::now();
+            const int chunkBefore = ft.terrainChunkNext;
             bool allDone = terrainRenderer->loadTerrainIncremental(
                 pending->mesh, pending->terrain.textures, x, y,
-                ft.terrainChunkNext, 16);
+                ft.terrainChunkNext, core::hitchLegacy() ? 16 : 4);
+            noteSlowFinalizeStep("TERRAIN chunks", t0, x, y,
+                                 static_cast<size_t>(std::max(0, ft.terrainChunkNext - chunkBefore)));
             if (!allDone) {
                 return false; // More chunks remain - yield to time budget
             }
@@ -1098,9 +1125,11 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
 
         // Load water after all terrain chunks are uploaded
         if (waterRenderer) {
+            const auto t0 = std::chrono::steady_clock::now();
             size_t beforeSurfaces = waterRenderer->getSurfaceCount();
             waterRenderer->loadFromTerrain(pending->terrain, true, x, y);
             size_t afterSurfaces = waterRenderer->getSurfaceCount();
+            noteSlowFinalizeStep("TERRAIN water", t0, x, y, afterSurfaces - beforeSurfaces);
             if (afterSurfaces > beforeSurfaces) {
                 LOG_INFO("Water: tile [", x, ",", y, "] added ", afterSurfaces - beforeSurfaces,
                          " surfaces (total: ", afterSurfaces, ")");
@@ -1606,6 +1635,35 @@ void TerrainManager::processReadyTiles() {
         bool done = advanceFinalization(ft);
         const float stepMs = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - stepStart).count();
+        // WOWEE_FRAME_PROFILE: every phase's steps, time and longest step,
+        // every ten seconds - which phase a walk's finalize time goes to.
+        {
+            static const bool profile = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
+            if (profile) {
+                struct PhaseStat { int steps = 0; double ms = 0.0; float worst = 0.0f; };
+                static std::array<PhaseStat, 9> stats{};
+                static auto reportAt = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                auto& st = stats[std::min<size_t>(static_cast<size_t>(phaseBefore), stats.size() - 1)];
+                ++st.steps;
+                st.ms += stepMs;
+                st.worst = std::max(st.worst, stepMs);
+                if (std::chrono::steady_clock::now() >= reportAt) {
+                    reportAt = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                    std::ostringstream line;
+                    line.setf(std::ios::fixed);
+                    line.precision(1);
+                    line << "  terrain finalize over 10s:";
+                    for (size_t i = 0; i < stats.size(); ++i) {
+                        if (stats[i].steps == 0) continue;
+                        line << " " << phaseName(static_cast<FinalizationPhase>(i)) << " "
+                             << stats[i].steps << " steps " << stats[i].ms << "ms (worst "
+                             << stats[i].worst << ")";
+                    }
+                    LOG_WARNING(line.str());
+                    stats = {};
+                }
+            }
+        }
         // Reported the first time a phase overruns, and after that only when
         // it overruns worse than it ever has. Every tile streamed in runs
         // every phase, so a phase that is over budget is over budget for as

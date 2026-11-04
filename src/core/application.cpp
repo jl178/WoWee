@@ -2010,6 +2010,9 @@ void Application::run() {
         if (renderer) {
             renderer->setStageSink([this](const char* stage, float ms) { noteStageTime(stage, ms); });
         }
+        if (entitySpawner_) {
+            entitySpawner_->setStageSink([this](const char* stage, float ms) { noteStageTime(stage, ms); });
+        }
     }
 
     // Integer nanoseconds off a monotonic clock, and the finest sleep the
@@ -3316,6 +3319,7 @@ void Application::reloadExpansionData() {
         // A content pack may have replaced textures or models since the
         // login screen first drew with them.
         assetManager->clearCache();
+        pipeline::clearM2ModelCache();
     }
 
     // Reset map name cache so it reloads from new expansion's Map.dbc
@@ -5056,7 +5060,12 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     runInGameStage("spawn/equipment queues", [&] {
         if (entitySpawner_) entitySpawner_->update();
         if (auto* cr = renderer ? renderer->getCharacterRenderer() : nullptr) {
+            const auto t0 = std::chrono::steady_clock::now();
             cr->processPendingNormalMaps(4);
+            if (frameProfileEnabled_) {
+                noteStageTime("spawn/normal maps", std::chrono::duration<float, std::milli>(
+                                                       std::chrono::steady_clock::now() - t0).count());
+            }
         }
     });
     // Self-heal missing creature visuals: if a nearby UNIT exists in
@@ -6449,7 +6458,32 @@ void Application::render() {
             double waits = frameCapWaitMs_;
             if (renderer && renderer->getVkContext()) waits += renderer->getVkContext()->takeLastBeginFrameWaitMs();
             frameWallSamples_.push_back(static_cast<float>(wall));
-            frameCpuSamples_.push_back(static_cast<float>(std::max(0.0, wall - waits)));
+            const double cpu = std::max(0.0, wall - waits);
+            frameCpuSamples_.push_back(static_cast<float>(cpu));
+            // Every frame whose CPU time passed WOWEE_HITCH_MS (25 by
+            // default), with the stages that took it, longest first -
+            // unthrottled, so a run's hitches can be listed and counted. CPU
+            // time, so a frame that only waited on the GPU or the swapchain
+            // is not one. The spike line (checkFrameSpike) compares against a
+            // running average instead and says at most one a second.
+            static const double hitchMs = core::envIntClamped("WOWEE_HITCH_MS", 25, 5, 1000);
+            if (cpu >= hitchMs && state == AppState::IN_GAME) {
+                std::vector<std::pair<float, const std::string*>> top;
+                for (const auto& [name, stat] : stageStats_) {
+                    if (stat.frameMs >= 0.5f) top.emplace_back(stat.frameMs, &name);
+                }
+                std::sort(top.begin(), top.end(),
+                          [](const auto& x, const auto& y) { return x.first > y.first; });
+                std::ostringstream line;
+                line.setf(std::ios::fixed);
+                line.precision(1);
+                line << "HITCH cpu " << cpu << "ms wall " << wall << "ms ["
+                     << core::profileTag().label << "]:";
+                for (size_t i = 0; i < std::min<size_t>(top.size(), 12); ++i) {
+                    line << (i ? ", " : " ") << *top[i].second << " " << top[i].first;
+                }
+                LOG_WARNING(line.str());
+            }
         }
         lastFrameEnd_ = now;
     }
@@ -6540,7 +6574,10 @@ void Application::checkFrameSpike(std::int64_t frameNs, float stepSeconds) {
 }
 
 std::string Application::medianP95(std::vector<float> samples) {
-    if (samples.empty()) return "- -";
+    // "median p95 p99 max". The tail is what a player feels: a 9 ms median
+    // with a 37 ms spike every few seconds reads as a stutter, and the median
+    // and p95 of a 30 s window cannot see it.
+    if (samples.empty()) return "- - - -";
     std::sort(samples.begin(), samples.end());
     const auto at = [&](double q) {
         const size_t i = std::min(samples.size() - 1, static_cast<size_t>(q * static_cast<double>(samples.size() - 1) + 0.5));
@@ -6549,7 +6586,7 @@ std::string Application::medianP95(std::vector<float> samples) {
     std::ostringstream out;
     out.setf(std::ios::fixed);
     out.precision(2);
-    out << at(0.5) << " " << at(0.95);
+    out << at(0.5) << " " << at(0.95) << " " << at(0.99) << " " << samples.back();
     return out.str();
 }
 
@@ -6607,9 +6644,15 @@ void Application::reportTaggedStageTimes(std::chrono::steady_clock::time_point n
              << " gpu_ms=" << gpuTotal << " gpu_frames=" << gpuFrames;
         {
             std::istringstream fw(medianP95(frameWallSamples_)), fc(medianP95(frameCpuSamples_));
-            std::string a, b, c, d;
-            fw >> a >> b; fc >> c >> d;
-            line << " frame_med=" << a << " frame_p95=" << b << " cpu_med=" << c << " cpu_p95=" << d;
+            std::string a, b, a99, amax, c, d, c99, cmax;
+            fw >> a >> b >> a99 >> amax; fc >> c >> d >> c99 >> cmax;
+            line << " frame_med=" << a << " frame_p95=" << b << " frame_p99=" << a99
+                 << " frame_max=" << amax << " cpu_med=" << c << " cpu_p95=" << d
+                 << " cpu_p99=" << c99 << " cpu_max=" << cmax;
+            // Hitches: frames whose CPU time alone passed 25 / 33 ms.
+            int h25 = 0, h33 = 0;
+            for (float ms : frameCpuSamples_) { h25 += ms >= 25.0f; h33 += ms >= 33.0f; }
+            line << " hitch25=" << h25 << " hitch33=" << h33;
         }
         line << " | gpu:";
         for (const auto& [n, ms] : gpu) line << " " << n << "=" << ms << ";";
@@ -6649,7 +6692,7 @@ void Application::reportStageTimes() {
              << "s: " << stageStatFrames_ << " frames, " << fps << " fps, "
              << windowMs / static_cast<float>(stageStatFrames_) << "ms each";
         if (!frameCpuSamples_.empty()) {
-            head << "; median/p95 frame " << medianP95(frameWallSamples_)
+            head << "; median/p95/p99/max frame " << medianP95(frameWallSamples_)
                  << " ms, cpu " << medianP95(frameCpuSamples_) << " ms";
         }
         if (loud) LOG_WARNING(head.str()); else LOG_INFO(head.str());

@@ -3,6 +3,7 @@
 #include <vulkan/vulkan.h>
 #include <glm/glm.hpp>
 #include "rendering/light_tiles.hpp"
+#include "rendering/shadow_cache.hpp"
 #include <atomic>
 #include <chrono>
 
@@ -59,6 +60,15 @@ struct GPUPerFrameData {
     glm::ivec4 localLightTileInfo;
     glm::vec4 localLightTileScale;
     glm::uvec4 localLightTiles[LIGHT_TILE_WORDS];
+    // The unit map at set 0 binding 5 (rendering/shadow_cache.hpp,
+    // shadow_filter.glsli): its projection; params x = on (0/1), y = one
+    // texel in uv, z = 1 / its depth range in yards, w = yards per texel; and
+    // the 64x64 mask of the cells a caster's footprint can reach. Read by the
+    // terrain, WMO, M2 and character fragment shaders only, which declare the
+    // block this far; everything else declares less of it.
+    glm::mat4 nearLightSpaceMatrix{0.0f};
+    glm::vec4 nearShadowParams{0.0f};
+    glm::uvec4 nearShadowMask[kNearShadowMaskWords / 4] = {};
 };
 
 // Push constants for the model matrix (most common case)

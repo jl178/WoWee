@@ -38,7 +38,11 @@ constexpr uint32_t kIntegrateGroup = 8;  // 8x8x1, volumetric_fog_integrate.comp
 glm::uvec3 sizeForQuality(VolumetricFog::Quality q) {
     switch (q) {
         case VolumetricFog::Quality::Low:    return {96, 54, 64};
-        case VolumetricFog::Quality::Medium: return {160, 90, 64};
+        // Medium was 160x90x64 (0.92M cells); this is 2.1 times fewer, which
+        // on the Iris Xe took the inject and integrate from 1-8.4 ms, by how
+        // busy the machine was, to a fraction of that (enhancements-plan.md
+        // 3.9). A shaft is still a few cells wide at the distances it shows.
+        case VolumetricFog::Quality::Medium: return {128, 72, 48};
         case VolumetricFog::Quality::High:   return {240, 135, 96};
         case VolumetricFog::Quality::Off:    break;
     }
@@ -312,6 +316,22 @@ void VolumetricFog::destroyVolumes() {
     volumesReady_ = false;
 }
 
+void VolumetricFog::setShadowView(uint32_t frame, VkImageView view) {
+    if (frame >= MAX_FRAMES || shadowViews_[frame] == view) return;
+    shadowViews_[frame] = view;
+    if (!ctx_ || computeSets_[frame] == VK_NULL_HANDLE || !volumesReady_) return;
+    VkDescriptorImageInfo shadow{.sampler = depthSampler_, .imageView = view,
+                                 .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet w{};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = computeSets_[frame];
+    w.dstBinding = 1;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &shadow;
+    vkUpdateDescriptorSets(ctx_->getDevice(), 1, &w, 0, nullptr);
+}
+
 void VolumetricFog::writeComputeSets() {
     for (uint32_t f = 0; f < MAX_FRAMES; f++) {
         const uint32_t other = (f + 1) % MAX_FRAMES;
@@ -427,7 +447,17 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
     p.drift = glm::vec4(t * 0.9f, t * 0.45f, t * 0.12f, glm::clamp(in.noiseAmount, 0.0f, 1.0f));
     const uint32_t seq = (frameCounter_ % 16) + 1;
     p.jitter = glm::vec4(halton(seq, 2), halton(seq, 3), halton(seq, 5), history ? 0.9f : 0.0f);
-    p.dims = glm::ivec4(size_, 0);
+    // Half the slices are lit afresh each frame, alternating; the other half
+    // carry last frame's air, reprojected, which the history blend would
+    // have kept nine tenths of anyway. Whole slices, so a SIMD lane group -
+    // a 4x4 slab of one slice - takes one branch. Not without a history to
+    // carry (the first frame, after a teleport), nor with
+    // WOWEE_FOG_HALF_RATE=0.
+    static const bool halfRate = [] {
+        const char* v = std::getenv("WOWEE_FOG_HALF_RATE");
+        return !(v && v[0] == '0');
+    }();
+    p.dims = glm::ivec4(size_, (halfRate && history) ? 1 + static_cast<int>(frameCounter_ & 1u) : 0);
     std::memcpy(paramsMapped_[frame], &p, sizeof(p));
 
     // Everything that last touched these volumes: last frame's inject and

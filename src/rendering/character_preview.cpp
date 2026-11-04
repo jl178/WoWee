@@ -431,7 +431,7 @@ void CharacterPreview::createFBO() {
         sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         sizes[0].descriptorCount = MAX_FRAMES;
         sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        sizes[1].descriptorCount = MAX_FRAMES * 4;
+        sizes[1].descriptorCount = MAX_FRAMES * 5;
 
         VkDescriptorPoolCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         ci.maxSets = MAX_FRAMES;
@@ -528,7 +528,18 @@ void CharacterPreview::createFBO() {
             writes[b].pImageInfo = &rtImg;
         }
 
+        // Binding 5 is the world's unit shadow map; the same dummy, with the
+        // block's unit-map switch (nearShadowParams.x) left at zero.
+        VkWriteDescriptorSet nearWrite{};
+        nearWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        nearWrite.dstSet = previewPerFrameSet_[i];
+        nearWrite.dstBinding = 5;
+        nearWrite.descriptorCount = 1;
+        nearWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        nearWrite.pImageInfo = &shadowImg;
+
         vkUpdateDescriptorSets(device, 5, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 1, &nearWrite, 0, nullptr);
     }
 
     // 5. Register the color attachment as an ImGui texture

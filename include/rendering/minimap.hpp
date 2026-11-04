@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rendering/wmo_minimap.hpp"
+#include "pipeline/blp_loader.hpp"
 
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
@@ -12,6 +13,7 @@
 #include <unordered_set>
 #include <deque>
 #include <vector>
+#include <future>
 #include <algorithm>
 
 namespace wowee {
@@ -207,6 +209,18 @@ private:
     // terrain's nine, so one composite does not evict its own tiles.
     static constexpr size_t MAX_TILE_CACHE = 256;
     std::unordered_map<std::string, std::unique_ptr<VkTexture>> tileTextureCache;
+    /// Tiles a worker is decoding ahead of need: the ring around the 3x3 the
+    /// composite draws, started when the player's tile changes, so crossing
+    /// into the next tile finds them decoded (see prefetchTilesAround).
+    std::unordered_map<std::string, std::shared_ptr<std::future<pipeline::BLPImage>>> pendingTileDecodes_;
+    /// Decodes for tiles the player moved away from, kept until they finish
+    /// so shutdown can wait for them (they hold the asset manager).
+    std::vector<std::shared_ptr<std::future<pipeline::BLPImage>>> retiredTileDecodes_;
+    void prefetchTilesAround(int centerTileX, int centerTileY);
+    int prefetchedAroundX_ = -1000, prefetchedAroundY_ = -1000;
+    /// Tiles uploaded since the composite last recorded a barrier for them.
+    int tilesUploadedSinceBarrier_ = 0;
+    void barrierForUploadedTiles(VkCommandBuffer cmd);
     std::deque<std::string> tileInsertionOrder;  // hashes of successfully loaded tiles, oldest first
     std::unique_ptr<VkTexture> noDataTexture;
 

@@ -1,7 +1,11 @@
 #include "pipeline/m2_asset_loader.hpp"
+#include "core/hitch_legacy.hpp"
 
 #include <algorithm>
 #include <cstdio>
+#include <list>
+#include <mutex>
+#include <unordered_map>
 
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/m2_loader.hpp"
@@ -9,7 +13,9 @@
 namespace wowee {
 namespace pipeline {
 
-bool loadM2WithSkin(AssetManager& assets, const std::string& m2Path, M2Model& outModel) {
+namespace {
+
+bool parseM2WithSkin(AssetManager& assets, const std::string& m2Path, M2Model& outModel) {
     auto m2Data = assets.readFile(m2Path);
     if (m2Data.empty()) return false;
 
@@ -23,6 +29,104 @@ bool loadM2WithSkin(AssetManager& assets, const std::string& m2Path, M2Model& ou
         if (!skinData.empty()) M2Loader::loadSkin(skinData, outModel);
     }
     return outModel.isValid();
+}
+
+// Item models are small (a few hundred KB parsed at most) and a city holds a
+// few hundred distinct ones; 512 covers a battleground's worth of gear.
+constexpr size_t kM2CacheCap = 512;
+
+struct M2Cache {
+    std::mutex mutex;
+    struct Entry {
+        std::shared_ptr<const M2Model> model;
+        std::list<std::string>::iterator lru;
+    };
+    std::unordered_map<std::string, Entry> byKey;
+    std::list<std::string> lru;  // front = most recent
+};
+
+M2Cache& m2Cache() {
+    static M2Cache cache;
+    return cache;
+}
+
+std::string cacheKeyFor(const AssetManager& assets, const std::string& m2Path) {
+    std::string key = m2Path;
+    std::replace(key.begin(), key.end(), '/', '\\');
+    std::transform(key.begin(), key.end(), key.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    char tag[32];
+    std::snprintf(tag, sizeof(tag), "%p|", static_cast<const void*>(&assets));
+    return tag + key;
+}
+
+}  // namespace
+
+std::shared_ptr<const M2Model> loadM2WithSkinShared(AssetManager& assets, const std::string& m2Path) {
+    if (m2Path.empty()) return nullptr;
+    if (core::hitchLegacy()) {
+        auto model = std::make_shared<M2Model>();
+        if (!parseM2WithSkin(assets, m2Path, *model)) return nullptr;
+        return model;
+    }
+    const std::string key = cacheKeyFor(assets, m2Path);
+    auto& cache = m2Cache();
+    {
+        std::lock_guard<std::mutex> lock(cache.mutex);
+        auto it = cache.byKey.find(key);
+        if (it != cache.byKey.end()) {
+            cache.lru.splice(cache.lru.begin(), cache.lru, it->second.lru);
+            return it->second.model;
+        }
+    }
+    // Parsed outside the lock: two threads asking for the same new model both
+    // parse it, which is wasted work but not wrong, and nobody waits on a parse
+    // they did not ask for.
+    auto model = std::make_shared<M2Model>();
+    if (!parseM2WithSkin(assets, m2Path, *model)) return nullptr;
+    std::shared_ptr<const M2Model> shared = std::move(model);
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    auto it = cache.byKey.find(key);
+    if (it != cache.byKey.end()) {
+        cache.lru.splice(cache.lru.begin(), cache.lru, it->second.lru);
+        return it->second.model;
+    }
+    cache.lru.push_front(key);
+    cache.byKey.emplace(key, M2Cache::Entry{shared, cache.lru.begin()});
+    while (cache.byKey.size() > kM2CacheCap) {
+        cache.byKey.erase(cache.lru.back());
+        cache.lru.pop_back();
+    }
+    return shared;
+}
+
+void prefetchM2WithSkin(AssetManager& assets, const std::string& m2Path) {
+    (void)loadM2WithSkinShared(assets, m2Path);
+}
+
+void clearM2ModelCache() {
+    auto& cache = m2Cache();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    cache.byKey.clear();
+    cache.lru.clear();
+}
+
+size_t m2ModelCacheSize() {
+    auto& cache = m2Cache();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    return cache.byKey.size();
+}
+
+bool loadM2WithSkin(AssetManager& assets, const std::string& m2Path, M2Model& outModel) {
+    auto shared = loadM2WithSkinShared(assets, m2Path);
+    if (!shared) {
+        // As before: the caller's model is whatever a failed load left. The
+        // callers test the return and reset it themselves.
+        outModel = M2Model{};
+        return false;
+    }
+    outModel = *shared;
+    return true;
 }
 
 std::string animPathForM2(const std::string& m2Path, uint32_t animId, uint32_t variationIndex) {

@@ -1,3 +1,4 @@
+#include "core/hitch_legacy.hpp"
 #include <glm/gtc/packing.hpp>
 #include <cstdlib>
 #include "rendering/m2_renderer.hpp"
@@ -494,6 +495,9 @@ void M2Renderer::noteShadowCandidate(size_t idx) {
     M2Instance& added = instances[idx];
     added.shadowMoverStamp = shadowCandStamp_;
     shadowMovers_.push_back(added.id);
+    // Not on the static list yet: the kept world map has to be drawn again
+    // to hold it (Renderer::planShadowFrame).
+    ++shadowContentGen_;
 }
 
 void M2Renderer::patchShadowStaticRemoval(size_t idx, size_t lastIdx) {
@@ -644,6 +648,9 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
 void M2Renderer::clear() {
     if (vkCtx_) {
         vkDeviceWaitIdle(vkCtx_->getDevice());
+        // Frees cleanupUnusedModels deferred, before the pool below is reset
+        // under the descriptor sets they release.
+        vkCtx_->flushDeferredCleanup();
         for (auto& [id, model] : models) {
             destroyModelGPU(model);
         }
@@ -935,10 +942,22 @@ void M2Renderer::setModelPinned(uint32_t modelId, bool pinned) {
 }
 
 void M2Renderer::cleanupUnusedModels() {
-    // Build set of model IDs that are still referenced by instances
-    std::unordered_set<uint32_t> usedModelIds;
+    // The models no instance uses: start from every model (a few thousand)
+    // and strike off each instance's (a lookup apiece). Building the used set
+    // instead inserted once per instance - tens of thousands of node
+    // allocations every five seconds, 12-30 ms in Dalaran.
+    std::unordered_set<uint32_t> unusedModelIds;
+    unusedModelIds.reserve(models.size());
+    for (const auto& [id, model] : models) {
+        (void)model;
+        unusedModelIds.insert(id);
+    }
+    uint32_t lastStruck = 0;
     for (const auto& instance : instances) {
-        usedModelIds.insert(instance.modelId);
+        if (unusedModelIds.empty()) break;
+        if (instance.modelId == lastStruck) continue;
+        lastStruck = instance.modelId;
+        unusedModelIds.erase(instance.modelId);
     }
 
     const auto now = std::chrono::steady_clock::now();
@@ -950,7 +969,7 @@ void M2Renderer::cleanupUnusedModels() {
     // instance-free between despawn and respawn cycles.
     std::vector<uint32_t> toRemove;
     for (const auto& [id, model] : models) {
-        if (usedModelIds.find(id) != usedModelIds.end() ||
+        if (unusedModelIds.find(id) == unusedModelIds.end() ||
             pinnedModelIds_.find(id) != pinnedModelIds_.end()) {
             // Model still in use or pinned - clear any pending unused timestamp
             modelUnusedSince_.erase(id);
@@ -974,7 +993,14 @@ void M2Renderer::cleanupUnusedModels() {
     // the GPU reads freed memory, which can cause VK_ERROR_DEVICE_LOST.
     // Suspected (not yet confirmed) contributor to multi-second freezes seen
     // right after taxi landings - timed here so the next repro pins it down.
-    if (!toRemove.empty() && vkCtx_) {
+    //
+    // The frees wait for the frames in flight instead
+    // (deferAfterAllFrameFences), as the WMO renderer's do: draining the device
+    // every five seconds that a model went unused was a 20-30 ms frame on a
+    // walk through a city. The ray traced scene's mesh is let go now - RtScene
+    // defers its own GPU frees past the frames that may still trace it.
+    const bool deferFrees = vkCtx_ && !core::hitchLegacy();
+    if (!toRemove.empty() && vkCtx_ && !deferFrees) {
         const auto waitStart = std::chrono::steady_clock::now();
         vkDeviceWaitIdle(vkCtx_->getDevice());
         const float waitMs = std::chrono::duration<float, std::milli>(
@@ -984,7 +1010,13 @@ void M2Renderer::cleanupUnusedModels() {
     for (uint32_t id : toRemove) {
         auto it = models.find(id);
         if (it != models.end()) {
-            destroyModelGPU(it->second);
+            if (deferFrees) {
+                releaseRtModel(it->second);
+                auto dying = std::make_shared<M2ModelGPU>(std::move(it->second));
+                vkCtx_->deferAfterAllFrameFences([this, dying]() { destroyModelGPU(*dying); });
+            } else {
+                destroyModelGPU(it->second);
+            }
             models.erase(it);
             bumpShadowStatic(kShadowGenModel);
             // Record the eviction so owners caching "uploaded" model IDs can

@@ -4,6 +4,7 @@
 #include "rendering/vk_shader.hpp"
 #include "rendering/spatial_grid.hpp"
 #include "rendering/shadow_params.hpp"
+#include "rendering/shadow_cache.hpp"
 #include "rendering/wmo_minimap.hpp"
 #include "rendering/stock_wmo_portal.hpp"
 
@@ -274,8 +275,13 @@ public:
     /**
      * Render depth-only for shadow casting
      */
+    /// `casters`: Static leaves transports out (the kept world map), Moving
+    /// draws only them (the unit map), each one's bounding sphere then added
+    /// to `moverSpheres` when given (rendering/shadow_cache.hpp).
     void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
-                      const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f);
+                      const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f,
+                      ShadowCasterSet casters = ShadowCasterSet::All,
+                      std::vector<glm::vec4>* moverSpheres = nullptr);
 
     /**
      * Get number of loaded models
@@ -774,6 +780,13 @@ private:
 
         void getTrianglesInRange(float minX, float minY, float maxX, float maxY,
                                  std::vector<uint32_t>& out) const;
+
+        /// The triangles within `margin` of the local-space segment a-b in
+        /// XY: the cells along it rather than the rectangle it spans
+        /// (segmentBandColumns), deduplicated, in the rectangle's row-major
+        /// order. For rays that cross a group at a slant.
+        void getTrianglesAlongSegment(const glm::vec2& a, const glm::vec2& b, float margin,
+                                      std::vector<uint32_t>& out) const;
 
         // Get pre-classified floor/wall triangles in range
         void getFloorTrianglesInRange(float minX, float minY, float maxX, float maxY,

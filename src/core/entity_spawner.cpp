@@ -1,5 +1,7 @@
 #include "core/env_flag.hpp"
 #include "core/entity_spawner.hpp"
+#include "core/hitch_legacy.hpp"
+#include "pipeline/m2_asset_loader.hpp"
 #include "rendering/m2_model_classifier.hpp"
 #include "core/appearance_composer.hpp"
 #include "pipeline/char_sections.hpp"
@@ -98,18 +100,73 @@ void EntitySpawner::update() {
                         playerInstances_.size(), " spawned");
         }
     }
-    processPlayerSpawnQueue();
-    processCreatureSpawnQueue();
-    processAsyncNpcCompositeResults();
-    processDeferredEquipmentQueue();
-    processGameObjectSpawnQueue();
-    processPendingTransportRegistrations();
-    processPendingTransportDoodads();
-    processPendingMount();
-    processPendingRemotePlayerMounts();
+    // One upload batch for every queue below. Outside a batch each texture,
+    // vertex buffer and composite went through immediateSubmit, which submits
+    // and then waits on a fence: a player's skin, hair, head detail and gear
+    // were a dozen GPU round trips back to back on the main thread, and on
+    // the Intel driver every submit also walks the device's image list. In a
+    // batch they are recorded into one command buffer and submitted once at
+    // the end without waiting (VkContext::endUploadBatch); the frame's own
+    // submit follows it on the same queue, so nothing is sampled before it is
+    // written. The NPC composite loop's own batch nests inside this one.
+    rendering::VkContext* batchCtx = (renderer_ && !core::hitchLegacy()) ? renderer_->getVkContext() : nullptr;
+    if (batchCtx) batchCtx->beginUploadBatch();
+    struct BatchEnd {
+        rendering::VkContext* ctx;
+        void end() { if (ctx) ctx->endUploadBatch(); ctx = nullptr; }
+        ~BatchEnd() { end(); }
+    } batchEnd{batchCtx};
+
+    const auto timed = [this](const char* stage, auto&& fn) {
+        if (!stageSink_) { fn(); return; }
+        const auto t0 = std::chrono::steady_clock::now();
+        fn();
+        stageSink_(stage, std::chrono::duration<float, std::milli>(
+                              std::chrono::steady_clock::now() - t0).count());
+    };
+    // One budget for the queues below (SharedFrameBudget): each used to have
+    // its own and always take an item, so a crowd with everything in flight
+    // added all of them to one frame.
+    spawnPacer_.beginFrame();
+    timed("spawn/players", [&] { processPlayerSpawnQueue(); });
+    timed("spawn/creatures", [&] {
+        if ((!pendingCreatureSpawns_.empty() || !asyncCreatureLoads_.empty()) &&
+            spawnAllowed(kQCreatures, 0)) {
+            processCreatureSpawnQueue();
+        }
+    });
+    timed("spawn/npc composites", [&] {
+        if (!asyncNpcCompositeLoads_.empty() && spawnAllowed(kQNpcComposites, 0)) {
+            processAsyncNpcCompositeResults();
+        }
+    });
+    timed("spawn/equipment", [&] { processDeferredEquipmentQueue(); });
+    timed("spawn/gameobjects", [&] {
+        if ((!pendingGameObjectSpawns_.empty() || !asyncGameObjectLoads_.empty() ||
+             !pendingWmoUploads_.empty() || !asyncGameObjectM2Loads_.empty()) &&
+            spawnAllowed(kQGameObjects, 0)) {
+            processGameObjectSpawnQueue();
+        }
+    });
+    timed("spawn/transports", [&] {
+        processPendingTransportRegistrations();
+        processPendingTransportDoodads();
+    });
+    timed("spawn/mounts", [&] {
+        processPendingMount();
+        processPendingRemotePlayerMounts();
+    });
     // After the creature queue, which is what builds a morph's model.
-    processPendingPlayerMorphs();
-    syncUnitPresentation();
+    timed("spawn/morphs", [&] { processPendingPlayerMorphs(); });
+    timed("spawn/presentation", [&] { syncUnitPresentation(); });
+    // The one submit for everything the queues above uploaded.
+    timed("spawn/upload submit", [&] { batchEnd.end(); });
+    spawnPacer_.endFrame();
+}
+
+bool EntitySpawner::spawnAllowed(int q, int doneSoFar) {
+    if (core::hitchLegacy()) return true;
+    return spawnPacer_.allow(q, doneSoFar);
 }
 
 bool EntitySpawner::isStealthAuraSpell(uint32_t spellId) {
@@ -405,7 +462,8 @@ bool EntitySpawner::hasWorkPending() const {
     return !pendingCreatureSpawns_.empty() || !asyncCreatureLoads_.empty() ||
            !asyncNpcCompositeLoads_.empty() || !pendingPlayerSpawns_.empty() ||
            !asyncEquipmentLoads_.empty() || !deferredEquipmentQueue_.empty() ||
-           !pendingGameObjectSpawns_.empty() || !asyncGameObjectLoads_.empty();
+           !pendingGameObjectSpawns_.empty() || !asyncGameObjectLoads_.empty() ||
+           !asyncPlayerLoads_.empty() || !asyncGameObjectM2Loads_.empty();
 }
 
 void EntitySpawner::clearMountState() {
@@ -535,6 +593,12 @@ void EntitySpawner::clearAllQueues() {
     asyncEquipmentLoads_.clear();
     asyncNpcCompositeLoads_.clear();
     asyncGameObjectLoads_.clear();
+    // Waits for each job still running (a std::async future's destructor
+    // does), as the lists above do.
+    asyncPlayerLoads_.clear();
+    playerModelLoadsInFlight_.clear();
+    asyncGameObjectM2Loads_.clear();
+    asyncGameObjectM2Displays_.clear();
 }
 
 void EntitySpawner::despawnAllCreatures() {
@@ -649,8 +713,9 @@ bool EntitySpawner::tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t inst
 
         // Main-hand NPC weapon path: only use actual weapon models.
         std::string m2Path = "Item\\ObjectComponents\\Weapon\\" + modelFile;
-        pipeline::M2Model weaponModel;
-        if (!loadWeaponM2(m2Path, weaponModel)) return false;
+        // Parsed once for every NPC carrying it (m2_asset_loader.hpp).
+        const auto weaponModel = pipeline::loadM2WithSkinShared(*assetManager_, m2Path);
+        if (!weaponModel) return false;
 
         std::string texturePath;
         if (!textureName.empty()) {
@@ -658,8 +723,8 @@ bool EntitySpawner::tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t inst
             if (!assetManager_->fileExists(texturePath)) texturePath.clear();
         }
 
-        uint32_t weaponModelId = nextWeaponModelId_++;
-        if (!charRenderer->attachWeapon(instanceId, attachmentId, weaponModel, weaponModelId, texturePath))
+        const uint32_t weaponModelId = itemModelIdFor(m2Path, texturePath);
+        if (!charRenderer->attachWeapon(instanceId, attachmentId, *weaponModel, weaponModelId, texturePath))
             return false;
         charRenderer->setAttachmentParticleColor(instanceId, attachmentId, art.particleColorId);
         return true;
@@ -1064,11 +1129,16 @@ bool EntitySpawner::attachUnitWeapons(uint64_t guid, uint32_t instanceId,
         if (recIdx < 0) return false;
         const auto art = pipeline::readItemDisplayArt(*displayInfoDbc, static_cast<uint32_t>(recIdx));
         if (art.modelFile.empty()) return false;
-        pipeline::M2Model model;
-        if (!loadWeaponM2("Item\\ObjectComponents\\Weapon\\" + art.modelFile, model) &&
-            !loadWeaponM2("Item\\ObjectComponents\\Shield\\" + art.modelFile, model)) {
-            return false;
+        // Parsed once and shared (m2_asset_loader.hpp): every draw and sheathe
+        // of every unit in view came through here, and each one read and
+        // parsed the weapon's file again on the main thread.
+        std::string modelPath = "Item\\ObjectComponents\\Weapon\\" + art.modelFile;
+        auto model = pipeline::loadM2WithSkinShared(*assetManager_, modelPath);
+        if (!model) {
+            modelPath = "Item\\ObjectComponents\\Shield\\" + art.modelFile;
+            model = pipeline::loadM2WithSkinShared(*assetManager_, modelPath);
         }
+        if (!model) return false;
         std::string texturePath;
         if (!art.textureName.empty()) {
             texturePath = "Item\\ObjectComponents\\Weapon\\" + art.textureName + ".blp";
@@ -1077,7 +1147,8 @@ bool EntitySpawner::attachUnitWeapons(uint64_t guid, uint32_t instanceId,
                 if (!assetManager_->fileExists(texturePath)) texturePath.clear();
             }
         }
-        if (!charRenderer->attachWeapon(instanceId, attachmentId, model, nextWeaponModelId_++,
+        if (!charRenderer->attachWeapon(instanceId, attachmentId, *model,
+                                        itemModelIdFor(modelPath, texturePath),
                                         texturePath, localTransform)) {
             return false;
         }
@@ -1665,6 +1736,14 @@ EntitySpawner::getOrLoadAttachmentModel(const std::vector<std::string>& candidat
         idIt = attachmentModelIds_.emplace(key, nextCreatureModelId_++).first;
     }
     return CachedAttachmentModel{.modelId = idIt->second, .model = std::move(model)};
+}
+
+uint32_t EntitySpawner::itemModelIdFor(const std::string& m2Path, const std::string& texturePath) {
+    if (core::hitchLegacy()) return nextWeaponModelId_++;
+    const std::string key = m2Path + '|' + texturePath;
+    auto it = attachmentModelIds_.find(key);
+    if (it == attachmentModelIds_.end()) it = attachmentModelIds_.emplace(key, nextCreatureModelId_++).first;
+    return it->second;
 }
 
 std::string EntitySpawner::getHumanoidBakePath(uint32_t displayId) const {
@@ -2621,9 +2700,10 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
         bindCreatureSkins(modelId, displayId, m2Path, dispData);
     }
 
-    // Clear pre-decoded cache after applying all display textures
+    // Clear pre-decoded cache after applying all display textures. What is
+    // left in it is for the instance overrides and the helm and shoulders,
+    // which spawnOnlineCreature applies next and then lets it go.
     charRenderer->setPredecodedBLPCache(nullptr);
-    displayIdPredecodedTextures_.erase(displayId);
     {
         auto texEnd = std::chrono::steady_clock::now();
         float texMs = std::chrono::duration<float, std::milli>(texEnd - texStart).count();
@@ -2849,6 +2929,14 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
     // Per-instance hair, skin and head-detail overrides. These run for every
     // NPC, cached model or not, so two NPCs sharing a model still get their own
     // colouring.
+    // With what the model's worker decoded still to hand: the hair, head
+    // detail and skin these bind, and the helm's and shoulders' textures,
+    // were decoded here on the main thread for the first NPC of a display,
+    // because the cache was dropped before they asked.
+    auto preDecoded = displayIdPredecodedTextures_.find(displayId);
+    if (preDecoded != displayIdPredecodedTextures_.end()) {
+        charRenderer->setPredecodedBLPCache(&preDecoded->second);
+    }
     applyHumanoidInstanceOverrides(instanceId, modelId, displayId);
     // Helm and shoulder models for humanoid NPCs. The bake paints the armour
     // onto the skin but cannot carry the M2 pieces, so a guard stood there
@@ -2859,12 +2947,19 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
         if (auto xIt = humanoidExtraMap_.find(dIt->second.extraDisplayId);
             xIt != humanoidExtraMap_.end()) {
             const auto& extra = xIt->second;
-            const auto allocModelId = [this](const std::string&) { return nextWeaponModelId_++; };
+            const core::ItemModelIdAllocator allocModelId =
+                [this](const std::string& m2Path, const std::string& texturePath) {
+                    return itemModelIdFor(m2Path, texturePath);
+                };
             core::attachHelm(*charRenderer, *assetManager_, instanceId, extra.equipDisplayId[0],
                              extra.raceId, extra.sexId, allocModelId);
             core::attachShoulders(*charRenderer, *assetManager_, instanceId,
                                   extra.equipDisplayId[1], allocModelId);
         }
+    }
+    if (preDecoded != displayIdPredecodedTextures_.end()) {
+        charRenderer->setPredecodedBLPCache(nullptr);
+        displayIdPredecodedTextures_.erase(preDecoded);
     }
     // A humanoid NPC geoset mask used to be built here, behind
     // `static constexpr bool kEnableNpcSafeGeosetMask = false`. Same story as

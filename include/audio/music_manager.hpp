@@ -62,8 +62,13 @@ private:
         std::string path;
         bool loop = true;
         float fadeInMs = 0.0f;
+        /// An archive path (playMusic) rather than a file (playFilePath).
+        bool fromArchive = false;
     };
     std::optional<PendingFileLoad> pendingFileLoad_;
+    /// Archive reads a newer request replaced: they hold the asset manager,
+    /// so shutdown waits for them.
+    std::vector<std::future<std::shared_ptr<const std::vector<uint8_t>>>> retiredArchiveReads_;
     void cancelPendingFileLoad();
     void pollPendingFileLoad();
 

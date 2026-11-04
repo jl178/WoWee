@@ -176,8 +176,11 @@ public:
                                 wowee::rendering::VkShaderModule& charVert,
                                 wowee::rendering::VkShaderModule& charFrag);
     [[nodiscard]] bool initializeShadow(VkRenderPass shadowRenderPass);
+    /// `casterSpheres`, when given, gets each drawn unit's bounding sphere
+    /// (centre, radius), for the unit shadow map's mask.
     void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
-                      const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f);
+                      const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f,
+                      std::vector<glm::vec4>* casterSpheres = nullptr);
 
     void setInstancePosition(uint32_t instanceId, const glm::vec3& position);
     void setInstanceRotation(uint32_t instanceId, const glm::vec3& rotation);
@@ -675,13 +678,19 @@ private:
         /// applied (opaque and alpha-keyed only, geosets), worked out once
         /// rather than with a hash lookup per batch per frame. Cleared by
         /// setActiveGeosets, the one input that changes after creation.
+        /// Solid batches whose index ranges follow one another are one
+        /// draw: they cast alike, with the same fallback set bound.
         struct ShadowBatchRef {
             uint32_t batch = 0;
             bool alphaKeyed = false;  // blend mode 1: casts its texture's shape
+            uint32_t indexStart = 0;
+            uint32_t indexCount = 0;
         };
         std::vector<ShadowBatchRef> shadowBatches;
         bool shadowBatchesValid = false;
     };
+    /// The unit shadow map's nearest units this frame (renderShadow).
+    std::vector<std::pair<float, CharacterInstance*>> shadowNearest_;
 
     /// Copy the instance's bones into this frame slot's bone buffer, unless
     /// the slot already holds this pose. The shadow pass and the main pass

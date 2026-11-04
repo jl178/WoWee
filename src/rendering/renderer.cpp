@@ -1,6 +1,8 @@
 #include "rendering/renderer.hpp"
 #include "rendering/sun_direction.hpp"
 
+#include <cstddef>
+#include <cstring>
 #include <bit>
 #include <fstream>
 #include <iterator>
@@ -169,6 +171,24 @@ bool Renderer::createPerFrameResources() {
         }
     }
 
+    // --- The unit map (rendering/shadow_cache.hpp): one per frame slot, drawn
+    //     every frame, half the world map's side ---
+    SHADOW_NEAR_SIZE = std::max(512u, SHADOW_MAP_SIZE / 2);
+    imgCI.extent = {.width = SHADOW_NEAR_SIZE, .height = SHADOW_NEAR_SIZE, .depth = 1};
+    for (uint32_t i = 0; i < MAX_FRAMES; i++) {
+        if (vmaCreateImage(vkCtx->getAllocator(), &imgCI, &imgAllocCI,
+                &shadowNearImage[i], &shadowNearAlloc[i], nullptr) != VK_SUCCESS) {
+            LOG_ERROR("Failed to create unit shadow image [", i, "]");
+            return false;
+        }
+        shadowNearLayout_[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+        viewCI.image = shadowNearImage[i];
+        if (vkCreateImageView(device, &viewCI, nullptr, &shadowNearView[i]) != VK_SUCCESS) {
+            LOG_ERROR("Failed to create unit shadow image view [", i, "]");
+            return false;
+        }
+    }
+
     // --- Create shadow sampler (shared - read-only, no per-frame needed) ---
     VkSamplerCreateInfo sampCI{};
     sampCI.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -226,6 +246,14 @@ bool Renderer::createPerFrameResources() {
         LOG_ERROR("Failed to create shadow render pass");
         return false;
     }
+    // The same pass keeping what is there: the second and third parts of a
+    // world map redraw go on top of the first. Compatible with the one
+    // above, so the casters' pipelines and the framebuffers serve both.
+    depthAtt.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    if (vkCreateRenderPass(device, &rpCI, nullptr, &shadowRenderPassLoad) != VK_SUCCESS) {
+        LOG_ERROR("Failed to create shadow render pass (load)");
+        return false;
+    }
 
     // --- Create per-frame shadow framebuffers ---
     VkFramebufferCreateInfo fbCI{};
@@ -239,6 +267,15 @@ bool Renderer::createPerFrameResources() {
         fbCI.pAttachments = &shadowDepthView[i];
         if (vkCreateFramebuffer(device, &fbCI, nullptr, &shadowFramebuffer[i]) != VK_SUCCESS) {
             LOG_ERROR("Failed to create shadow framebuffer [", i, "]");
+            return false;
+        }
+    }
+    fbCI.width = SHADOW_NEAR_SIZE;
+    fbCI.height = SHADOW_NEAR_SIZE;
+    for (uint32_t i = 0; i < MAX_FRAMES; i++) {
+        fbCI.pAttachments = &shadowNearView[i];
+        if (vkCreateFramebuffer(device, &fbCI, nullptr, &shadowNearFramebuffer[i]) != VK_SUCCESS) {
+            LOG_ERROR("Failed to create unit shadow framebuffer [", i, "]");
             return false;
         }
     }
@@ -270,7 +307,7 @@ bool Renderer::createPerFrameResources() {
 
     // --- Create descriptor set layout for set 0 (per-frame UBO + shadow sampler + fog volume
     //     + ray traced lighting) ---
-    VkDescriptorSetLayoutBinding bindings[5]{};
+    VkDescriptorSetLayoutBinding bindings[6]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -308,9 +345,16 @@ bool Renderer::createPerFrameResources() {
         bindings[b].pImmutableSamplers = &rtSampler;
     }
 
+    // The unit shadow map (shadow_filter.glsli), compared like binding 1.
+    bindings[5].binding = 5;
+    bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[5].descriptorCount = 1;
+    bindings[5].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[5].pImmutableSamplers = &shadowSampler;
+
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 5;
+    layoutInfo.bindingCount = 6;
     layoutInfo.pBindings = bindings;
 
     if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &perFrameSetLayout) != VK_SUCCESS) {
@@ -323,7 +367,7 @@ bool Renderer::createPerFrameResources() {
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = MAX_FRAMES * 2; // normal frames + reflection frames
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = MAX_FRAMES * 2 * 4;  // shadow, fog, two RT results, per set
+    poolSizes[1].descriptorCount = MAX_FRAMES * 2 * 5;  // two shadow maps, fog, two RT results, per set
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -376,8 +420,14 @@ bool Renderer::createPerFrameResources() {
 
         VkDescriptorImageInfo shadowImgInfo{};
         // sampler is ignored: binding 1 declares it immutable in the layout.
-        shadowImgInfo.imageView = shadowDepthView[i];
+        // The front world map, which is image 0 until a redraw swaps them
+        // (bindWorldShadowMap).
+        shadowImgInfo.imageView = shadowDepthView[shadowFront_];
         shadowImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        shadowBoundView_[i] = shadowDepthView[shadowFront_];
+        VkDescriptorImageInfo nearImgInfo{};
+        nearImgInfo.imageView = shadowNearView[i];
+        nearImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         // Neutral until the fog is switched on; writeFogVolumeBindings swaps
         // in this slot's own volume then.
@@ -392,7 +442,13 @@ bool Renderer::createPerFrameResources() {
         rtImgInfo[1].imageView = rtLighting_->giViewForSlot(i);
         rtImgInfo[0].imageLayout = rtImgInfo[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-        VkWriteDescriptorSet writes[5]{};
+        VkWriteDescriptorSet writes[6]{};
+        writes[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[5].dstSet = perFrameDescSets[i];
+        writes[5].dstBinding = 5;
+        writes[5].descriptorCount = 1;
+        writes[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[5].pImageInfo = &nearImgInfo;
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[0].dstSet = perFrameDescSets[i];
         writes[0].dstBinding = 0;
@@ -420,7 +476,7 @@ bool Renderer::createPerFrameResources() {
             writes[3 + b].pImageInfo = &rtImgInfo[b];
         }
 
-        vkUpdateDescriptorSets(device, 5, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
     }
 
     // --- Create reflection per-frame UBO and descriptor set ---
@@ -465,8 +521,11 @@ bool Renderer::createPerFrameResources() {
 
             VkDescriptorImageInfo shadowImgInfo{};
             // sampler is ignored: binding 1 declares it immutable in the layout.
-            shadowImgInfo.imageView = shadowDepthView[i];
+            shadowImgInfo.imageView = shadowDepthView[shadowFront_];
             shadowImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            VkDescriptorImageInfo nearImgInfo{};
+            nearImgInfo.imageView = shadowNearView[i];
+            nearImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
             // Always neutral: the volume is built for the camera, and the
             // mirrored one would read it at the wrong place. The reflection's
@@ -481,7 +540,13 @@ bool Renderer::createPerFrameResources() {
             rtImgInfo.imageView = rtLighting_->neutralView();
             rtImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-            VkWriteDescriptorSet writes[5]{};
+            VkWriteDescriptorSet writes[6]{};
+            writes[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[5].dstSet = reflPerFrameDescSet[i];
+            writes[5].dstBinding = 5;
+            writes[5].descriptorCount = 1;
+            writes[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[5].pImageInfo = &nearImgInfo;
             writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[0].dstSet = reflPerFrameDescSet[i];
             writes[0].dstBinding = 0;
@@ -509,13 +574,14 @@ bool Renderer::createPerFrameResources() {
                 writes[b].pImageInfo = &rtImgInfo;
             }
 
-            vkUpdateDescriptorSets(device, 5, writes, 0, nullptr);
+            vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
         }
     }
 
     // The compute side. Not fatal: without it the fog simply stays off, and
     // applyPendingQuality says so when it is asked for.
-    if (!volumetricFog_->createPipelines(perFrameSetLayout, shadowDepthView)) {
+    const VkImageView fogShadowViews[MAX_FRAMES] = {shadowDepthView[shadowFront_], shadowDepthView[shadowFront_]};
+    if (!volumetricFog_->createPipelines(perFrameSetLayout, fogShadowViews)) {
         LOG_WARNING("Volumetric fog pipelines failed to build - volumetric fog unavailable");
     }
 
@@ -561,7 +627,18 @@ void Renderer::destroyPerFrameResources() {
         if (shadowDepthImage[i]) { vmaDestroyImage(vkCtx->getAllocator(), shadowDepthImage[i], shadowDepthAlloc[i]); shadowDepthImage[i] = VK_NULL_HANDLE; shadowDepthAlloc[i] = VK_NULL_HANDLE; }
         shadowDepthLayout_[i] = VK_IMAGE_LAYOUT_UNDEFINED;
     }
+    for (uint32_t i = 0; i < MAX_FRAMES; i++) {
+        if (shadowNearFramebuffer[i]) { vkDestroyFramebuffer(device, shadowNearFramebuffer[i], nullptr); shadowNearFramebuffer[i] = VK_NULL_HANDLE; }
+        if (shadowNearView[i]) { vkDestroyImageView(device, shadowNearView[i], nullptr); shadowNearView[i] = VK_NULL_HANDLE; }
+        if (shadowNearImage[i]) { vmaDestroyImage(vkCtx->getAllocator(), shadowNearImage[i], shadowNearAlloc[i]); shadowNearImage[i] = VK_NULL_HANDLE; shadowNearAlloc[i] = VK_NULL_HANDLE; }
+        shadowNearLayout_[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+        shadowBoundView_[i] = VK_NULL_HANDLE;
+    }
+    shadowFront_ = 0;
+    shadowFrontKey_ = {};
+    shadowRedraw_ = {};
     if (shadowRenderPass) { vkDestroyRenderPass(device, shadowRenderPass, nullptr); shadowRenderPass = VK_NULL_HANDLE; }
+    if (shadowRenderPassLoad) { vkDestroyRenderPass(device, shadowRenderPassLoad, nullptr); shadowRenderPassLoad = VK_NULL_HANDLE; }
     shadowSampler = VK_NULL_HANDLE; // Owned by VkContext sampler cache
 }
 
@@ -603,6 +680,17 @@ void Renderer::updatePerFrameUBO() {
     }
 
     currentFrameData.lightSpaceMatrix = lightSpaceMatrix;
+    // The unit map's projection; its mask is filled in by the shadow pass,
+    // which is where the casters are found (renderShadowPass).
+    if (nearShadowOn_ && shadowsEnabled) {
+        currentFrameData.nearLightSpaceMatrix = nearShadowProj_.matrix;
+        currentFrameData.nearShadowParams = glm::vec4(
+            1.0f, 1.0f / static_cast<float>(SHADOW_NEAR_SIZE),
+            nearShadowProj_.depthRange > 0.0f ? 1.0f / nearShadowProj_.depthRange : 0.0f,
+            nearShadowProj_.texelWorld);
+    } else {
+        currentFrameData.nearShadowParams = glm::vec4(0.0f);
+    }
     // y is how dark the shadow is, and the sky decides it: Light.dbc's shadow
     // band through LightingManager, times the player's Shadow darkness. It
     // was named a bias and derived from the shadow distance - 0.8 at 300
@@ -1753,7 +1841,7 @@ void Renderer::beginFrame() {
     if (postProcessPipeline_ && camera) postProcessPipeline_->applyJitter(camera.get());
 
     // Compute fresh shadow matrix BEFORE UBO update so shaders get current-frame data.
-    lightSpaceMatrix = computeLightSpaceMatrix();
+    planShadowFrame();
 
     // Update per-frame UBO with current camera/lighting state
     updatePerFrameUBO();
@@ -3011,6 +3099,7 @@ void Renderer::update(float deltaTime) {
 
     // Activity SFX + mount ambient sounds: delegated to AnimationController (§4.2)
     if (animationController_) animationController_->updateSfxState(deltaTime);
+    section("update/footfall+sfx");
 
     // Ambient environmental sounds + zone/music transitions (delegated to AudioCoordinator)
     if (audioCoordinator_) {
@@ -3058,6 +3147,7 @@ void Renderer::update(float deltaTime) {
         }
         audioCoordinator_->updateZoneAudio(zctx);
     }
+    section("update/zone audio");
 
     // Update performance HUD
     if (performanceHUD) {
@@ -3076,6 +3166,7 @@ void Renderer::update(float deltaTime) {
         }
         modelCleanupTimer = 0.0f;
     }
+    section("update/model cleanup");
 
     auto updateEnd = std::chrono::steady_clock::now();
     lastUpdateMs = std::chrono::duration<double, std::milli>(updateEnd - updateStart).count();
@@ -5082,63 +5173,163 @@ glm::vec3 Renderer::shadowRayDirection() const {
     return sunDir;
 }
 
-glm::mat4 Renderer::computeLightSpaceMatrix() {
-    const float kShadowHalfExtent = shadowDistance_;
-    const float kShadowLightDistance = shadowDistance_ * 3.0f;
-    constexpr float kShadowNearPlane = 1.0f;
-    const float kShadowFarPlane = shadowDistance_ * 6.5f;
+uint64_t Renderer::shadowContentKey() const {
+    // Not a hash of the world, only of what tells it has changed: a tile's
+    // chunks streaming in or out, a building placed or removed, a doodad
+    // placed, removed, turned mover or given a model (M2Renderer's own count).
+    uint64_t key = 0;
+    if (terrainRenderer) key ^= static_cast<uint64_t>(terrainRenderer->getChunkCount());
+    if (wmoRenderer) key ^= static_cast<uint64_t>(wmoRenderer->getInstanceCount()) << 20;
+    if (m2Renderer) key ^= static_cast<uint64_t>(m2Renderer->shadowContentGeneration()) << 40;
+    return key;
+}
 
-    const glm::vec3 sunDir = shadowRayDirection();
+void Renderer::planShadowFrame() {
+    shadowPartsThisFrame_ = 0;
+    shadowRedrawEndsThisFrame_ = false;
+    nearShadowOn_ = false;
+    static const bool castersWhenOff = core::envFlagEnabled("WOWEE_SHADOW_CASTERS_WHEN_OFF", false);
+    // WOWEE_SHADOW_SPLIT=0 draws one map with every caster every frame, as
+    // before the split; the frame then reads the image it has just drawn.
+    static const bool split = core::envFlagEnabled("WOWEE_SHADOW_SPLIT", true);
+    shadowSplit_ = split;
+    const uint32_t slot = vkCtx ? vkCtx->getCurrentFrame() : 0;
+    if (!shadowsEnabled && !castersWhenOff) {
+        // Off: nothing is drawn, and the kept map is not trusted again - the
+        // world has gone on changing without it.
+        shadowFrontKey_.valid = false;
+        shadowRedraw_.active = false;
+        if (shadowDepthImage[0] != VK_NULL_HANDLE) bindWorldShadowMap(slot);
+        return;
+    }
 
-    // LightingManager already smooths the directional light every frame. Keep
-    // that continuous direction for the shadow projection as well. Quantizing
-    // it into 0.5-degree steps made the entire 600-yard shadow footprint rotate
-    // in a single frame, producing a wide light-switch flicker whenever the
-    // threshold was crossed. Translation remains stabilized by texel snapping.
-
-    // Shadow center follows the player directly; texel snapping below prevents
-    // camera translation from shimmering the projection.
-    glm::vec3 desiredCenter = characterPosition;
+    // Zero matrix means character position isn't set yet - skip the casters
+    // (but not the clear and the transition; see renderShadowPass).
+    const glm::vec3 player = characterPosition;
     if (!shadowCenterInitialized) {
-        if (glm::dot(desiredCenter, desiredCenter) < 1.0f) {
-            return glm::mat4(0.0f);
+        if (glm::dot(player, player) < 1.0f) {
+            lightSpaceMatrix = glm::mat4(0.0f);
+            if (shadowDepthImage[0] != VK_NULL_HANDLE) bindWorldShadowMap(slot);
+            return;
         }
         shadowCenterInitialized = true;
     }
-    shadowCenter = desiredCenter;
-    glm::vec3 center = shadowCenter;
+    // LightingManager already smooths the directional light every frame, and
+    // the projection follows it. Quantizing it into 0.5-degree steps once made
+    // the entire 600-yard footprint rotate in a single frame - a wide
+    // light-switch flicker. The kept map follows it in steps of a quarter of
+    // a degree, a texel or two at the far end of a tall shadow.
+    const glm::vec3 sunDir = shadowRayDirection();
+    const double now = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const WorldShadowCachePolicy policy{};
 
-    // Snap shadow frustum to texel grid so the projection is perfectly stable
-    // while moving. We compute the light's right/up axes from the sun direction
-    // (these are constant per frame regardless of center) and snap center along
-    // them before building the view matrix.
-    float halfExtent = kShadowHalfExtent;
-    float texelWorld = (2.0f * halfExtent) / static_cast<float>(SHADOW_MAP_SIZE);
+    const auto start = [&](bool all, uint64_t content, float extentScale, float extentPad, uint32_t reason) {
+        shadowRedraw_.active = true;
+        shadowRedraw_.now = all;
+        shadowRedraw_.nextPart = 0;
+        shadowRedraw_.target = shadowDepthImage[1] != VK_NULL_HANDLE ? 1u - shadowFront_ : shadowFront_;
+        shadowRedraw_.key = WorldShadowCacheKey{.valid = true, .center = player, .sunDir = sunDir,
+                                                .shadowDistance = shadowDistance_, .content = content,
+                                                .drawnAt = now};
+        shadowRedraw_.proj = worldShadowProjection(player, sunDir, shadowDistance_, SHADOW_MAP_SIZE,
+                                                   extentScale, extentPad);
+        if (reason < 4) ++shadowRedrawCounts_[reason];
+    };
 
-    // Stable light-space axes (independent of center position)
-    glm::vec3 up(0.0f, 0.0f, 1.0f);
-    if (std::abs(glm::dot(sunDir, up)) > 0.99f) {
-        up = glm::vec3(0.0f, 1.0f, 0.0f);
+    if (!split) {
+        start(true, 0, 1.0f, 0.0f, 0);
+    } else {
+        const uint64_t content = shadowContentKey();
+        const WorldShadowRedraw need = worldShadowRedrawNeeded(
+            shadowFrontKey_, player, sunDir, shadowDistance_, content, now, policy);
+        // A redraw under way goes on to its end, unless the map it replaces
+        // is no use at all any more (a teleport, the distance changed).
+        if (need == WorldShadowRedraw::Now) {
+            start(true, content, policy.extentScale, policy.extentPad, 0);
+        } else if (need == WorldShadowRedraw::Spread && !shadowRedraw_.active) {
+            const float drift = glm::length(player - shadowFrontKey_.center);
+            const uint32_t reason = drift > policy.driftFraction * shadowDistance_ ? 1u
+                : (glm::dot(shadowFrontKey_.sunDir, sunDir) <
+                   std::cos(glm::radians(policy.maxAngleDegrees)) ? 2u : 3u);
+            start(false, content, policy.extentScale, policy.extentPad, reason);
+        }
+
+        // The unit map, centred on the player every frame.
+        nearShadowProj_ = nearShadowProjection(player, sunDir, nearShadowHalfExtent(shadowDistance_),
+                                               SHADOW_NEAR_SIZE);
+        nearShadowOn_ = shadowNearImage[0] != VK_NULL_HANDLE;
     }
-    glm::vec3 lightRight = glm::normalize(glm::cross(sunDir, up));
-    glm::vec3 lightUp = glm::normalize(glm::cross(lightRight, sunDir));
 
-    // Snap center along light's right and up axes to align with texel grid.
-    // This eliminates sub-texel shifts that cause shadow shimmer.
-    float dotR = glm::dot(center, lightRight);
-    float dotU = glm::dot(center, lightUp);
-    dotR = std::floor(dotR / texelWorld) * texelWorld;
-    dotU = std::floor(dotU / texelWorld) * texelWorld;
-    float dotD = glm::dot(center, sunDir);  // depth axis unchanged
-    center = lightRight * dotR + lightUp * dotU + sunDir * dotD;
-    shadowCenter = center;
+    if (shadowRedraw_.active) {
+        if (shadowRedraw_.now) {
+            shadowPartsThisFrame_ = (1u << kWorldShadowPartCount) - 1u;
+            shadowRedrawEndsThisFrame_ = true;
+        } else {
+            shadowPartsThisFrame_ = static_cast<uint8_t>(1u << shadowRedraw_.nextPart);
+            shadowRedrawEndsThisFrame_ = shadowRedraw_.nextPart + 1u >= kWorldShadowPartCount;
+        }
+    }
+    if (shadowRedrawEndsThisFrame_) {
+        // This frame's shadow pass finishes the map before anything reads
+        // it, so this frame reads it already.
+        shadowFront_ = shadowRedraw_.target;
+        shadowFrontKey_ = shadowRedraw_.key;
+        shadowFrontMatrix_ = shadowRedraw_.proj.matrix;
+        shadowFrontCenter_ = shadowRedraw_.proj.center;
+    }
+    lightSpaceMatrix = shadowFrontKey_.valid || !split ? shadowFrontMatrix_ : glm::mat4(0.0f);
+    shadowCenter = shadowFrontCenter_;
+    bindWorldShadowMap(slot);
 
-    glm::mat4 lightView = glm::lookAt(center - sunDir * kShadowLightDistance, center, up);
-    glm::mat4 lightProj = glm::ortho(-halfExtent, halfExtent, -halfExtent, halfExtent,
-                                     kShadowNearPlane, kShadowFarPlane);
-    lightProj[1][1] *= -1.0f; // Vulkan Y-flip for shadow pass
+    // Said every half minute at info: how often the kept map is drawn again,
+    // and why. A count climbing while standing still is a world change
+    // asking for it, which the content key says.
+    static double lastLog = 0.0;
+    if (split && now - lastLog > 30.0) {
+        lastLog = now;
+        LOG_INFO("Shadow world map redraws: at once ", shadowRedrawCounts_[0], ", walked ",
+                 shadowRedrawCounts_[1], ", sun ", shadowRedrawCounts_[2], ", world changed ",
+                 shadowRedrawCounts_[3], "; unit map ", SHADOW_NEAR_SIZE, " over +-",
+                 nearShadowProj_.halfExtent, " yd, ", nearCasterSpheres_.size(),
+                 " casters last frame (units ", nearSphereSplit_[0], ", doodads ",
+                 nearSphereSplit_[1] - nearSphereSplit_[0], ", mean radius ", [this] {
+                     float sum = 0.0f;
+                     for (const auto& sp : nearCasterSpheres_) sum += sp.w;
+                     return nearCasterSpheres_.empty() ? 0.0f : sum / static_cast<float>(nearCasterSpheres_.size());
+                 }(), ") in ", [this] {
+                     int n = 0;
+                     for (uint32_t w : nearShadowMask_.words) n += std::popcount(w);
+                     return n;
+                 }(), " of 4096 cells");
+    }
+}
 
-    return lightProj * lightView;
+void Renderer::bindWorldShadowMap(uint32_t slot) {
+    if (slot >= MAX_FRAMES || !vkCtx) return;
+    const VkImageView view = shadowDepthView[shadowFront_];
+    if (view == VK_NULL_HANDLE || shadowBoundView_[slot] == view) return;
+    // This slot's fence has been waited on, so no frame in flight holds its
+    // sets: the per-frame one, the reflection one and the fog's.
+    VkDescriptorImageInfo info{};
+    info.imageView = view;
+    info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet writes[2]{};
+    const VkDescriptorSet sets[2] = {perFrameDescSets[slot], reflPerFrameDescSet[slot]};
+    uint32_t n = 0;
+    for (VkDescriptorSet set : sets) {
+        if (set == VK_NULL_HANDLE) continue;
+        writes[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[n].dstSet = set;
+        writes[n].dstBinding = 1;
+        writes[n].descriptorCount = 1;
+        writes[n].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[n].pImageInfo = &info;
+        ++n;
+    }
+    if (n) vkUpdateDescriptorSets(vkCtx->getDevice(), n, writes, 0, nullptr);
+    if (volumetricFog_) volumetricFog_->setShadowView(slot, view);
+    shadowBoundView_[slot] = view;
 }
 
 void Renderer::setupWater1xPass() {
@@ -5410,91 +5601,43 @@ void Renderer::renderReflectionPass() {
     vkCtx->gpuMark(currentCmd, "water reflection");
 }
 
-void Renderer::renderShadowPass() {
-    ZoneScopedN("Renderer::renderShadowPass");
-    static const bool skipShadows = (std::getenv("WOWEE_SKIP_SHADOWS") != nullptr);
-    if (skipShadows) return;
-    if (passAblation_ && passAblation_->skip(AblationPass::Shadows)) return;
-    if (shadowDepthImage[0] == VK_NULL_HANDLE) return;
-    if (currentCmd == VK_NULL_HANDLE) return;
-    // Shadows off (the stock default) draws no caster. Nothing samples the map
-    // then - every world shader and the fog's inject test shadowParams.x
-    // first - but each frame slot's map is still bound in the per-frame set,
-    // so it is cleared and left in the layout the set declares once, the
-    // first frame it is off, and after that this pass records nothing.
-    //
-    // Skipping the casters once faulted the GPU within a second, and the
-    // casters were drawn with shadows off from then on, at the full cost of
-    // shadows on. What that version left out is not on record; what the
-    // readers need is what this keeps: each slot's map cleared and moved to
-    // SHADER_READ_ONLY before any frame binds it (the barriers below run for
-    // a slot the first time it goes off, and the pass is never disabled
-    // whole - see the render graph), and nothing sampling it while
-    // shadowParams.x is 0. Checked on an RTX 4060 with the device-fault
-    // diagnostics on: shadows flipped every 1.5 s for 90 s in Stormwind, then
-    // held off for two minutes there and in Elwynn, no device loss.
-    // WOWEE_SHADOW_CASTERS_WHEN_OFF=1 draws the casters with shadows off, as
-    // this pass used to - for measuring what skipping them saves.
-    static const bool castersWhenOff = core::envFlagEnabled("WOWEE_SHADOW_CASTERS_WHEN_OFF", false);
-    if (!shadowsEnabled && !castersWhenOff) {
-        const uint32_t slot = vkCtx->getCurrentFrame();
-        if (shadowDepthLayout_[slot] == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
-            shadowClearedWhileOff_[slot]) {
-            return;
-        }
-        shadowClearedWhileOff_[slot] = true;
-    } else {
-        shadowClearedWhileOff_[0] = shadowClearedWhileOff_[1] = false;
-    }
-
-    // Shadows render every frame - throttling causes visible flicker on player/NPCs
-
-    // lightSpaceMatrix was already computed at frame start (before updatePerFrameUBO).
-    // Zero matrix means character position isn't set yet - skip the casters
-    // (but not the clear and the transition, below).
-    const bool drawCasters = (shadowsEnabled || castersWhenOff) && lightSpaceMatrix != glm::mat4(0.0f);
-    uint32_t frame = vkCtx->getCurrentFrame();
-
-    // Barrier 1: transition this frame's shadow map into writable depth layout.
+void Renderer::beginShadowTarget(VkImage image, VkImageView view, VkFramebuffer fb, uint32_t size,
+                                 VkImageLayout& layout, bool clear) {
+    // Into writable depth. From SHADER_READ_ONLY the barrier waits on the
+    // fragment shaders and the fog's compute pass that read the map.
     VkImageMemoryBarrier2 b1{};
     b1.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-    b1.dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    b1.oldLayout = shadowDepthLayout_[frame];
+    b1.dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    // A part drawn on top of the last one keeps its contents: a layout of
+    // UNDEFINED would let the driver drop them.
+    b1.oldLayout = clear ? (layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ? layout : VK_IMAGE_LAYOUT_UNDEFINED)
+                         : layout;
     b1.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     b1.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b1.srcAccessMask = (shadowDepthLayout_[frame] == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-        ? VK_ACCESS_SHADER_READ_BIT
-        : 0;
+    const bool wasRead = layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    b1.srcAccessMask = wasRead ? VK_ACCESS_SHADER_READ_BIT : 0;
     b1.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
                        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    b1.image = shadowDepthImage[frame];
+    b1.srcStageMask = wasRead ? (VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT)
+                              : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    b1.image = image;
     b1.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
-    // The fog's compute pass reads the map as well as the fragment shaders.
-    VkPipelineStageFlags srcStage = (shadowDepthLayout_[frame] == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-        ? (VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT)
-        : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-    b1.srcStageMask = srcStage;
     VkDependencyInfo b1Dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    b1Dep.dependencyFlags = 0;
     b1Dep.imageMemoryBarrierCount = 1;
     b1Dep.pImageMemoryBarriers = &b1;
     cmdPipelineBarrier2(currentCmd, b1Dep);
+    layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-    // Begin the shadow pass, one way or the other.
-    //
     // The first pass converted to dynamic rendering, and the one with least
     // to lose by it: one attachment, no colour, no resolve, a single
     // begin/end, and pipelines nothing else shares. Its render pass declared
     // an EXTERNAL->0 dependency covering the same fragment-read to
-    // depth-write hazard that barrier 1 above already covers explicitly, so
-    // nothing is lost by dropping the implicit half - the layout it wants is
-    // the layout b1 leaves it in.
+    // depth-write hazard that the barrier above covers explicitly.
     const bool dynamicRendering = vkCtx->useDynamicRendering();
     // Said once, at warning level, because a bug report arrives with a
     // warnings-only log and "are the shadows drawn the new way" is the first
-    // question this change makes anyone ask. A line here answers it without
-    // a second run.
+    // question this change makes anyone ask.
     static bool saidWhichPath = false;
     if (!saidWhichPath) {
         saidWhichPath = true;
@@ -5504,69 +5647,42 @@ void Renderer::renderShadowPass() {
     if (dynamicRendering) {
         VkRenderingAttachmentInfo depthAttach{};
         depthAttach.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        depthAttach.imageView = shadowDepthView[frame];
+        depthAttach.imageView = view;
         depthAttach.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depthAttach.loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
         depthAttach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         depthAttach.clearValue.depthStencil = {.depth = 1.0f, .stencil = 0};
-
         VkRenderingInfo renderInfo{};
         renderInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-        renderInfo.renderArea = {.offset = {.x = 0, .y = 0}, .extent = {.width = SHADOW_MAP_SIZE, .height = SHADOW_MAP_SIZE}};
+        renderInfo.renderArea = {.offset = {.x = 0, .y = 0}, .extent = {.width = size, .height = size}};
         renderInfo.layerCount = 1;
         renderInfo.pDepthAttachment = &depthAttach;
         vkCmdBeginRendering(currentCmd, &renderInfo);
     } else {
         VkRenderPassBeginInfo rpInfo{};
         rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        rpInfo.renderPass = shadowRenderPass;
-        rpInfo.framebuffer = shadowFramebuffer[frame];
-        rpInfo.renderArea = {.offset = {.x = 0, .y = 0}, .extent = {.width = SHADOW_MAP_SIZE, .height = SHADOW_MAP_SIZE}};
-        VkClearValue clear{};
-        clear.depthStencil = {.depth = 1.0f, .stencil = 0};
-        rpInfo.clearValueCount = 1;
-        rpInfo.pClearValues = &clear;
+        rpInfo.renderPass = clear ? shadowRenderPass : shadowRenderPassLoad;
+        rpInfo.framebuffer = fb;
+        rpInfo.renderArea = {.offset = {.x = 0, .y = 0}, .extent = {.width = size, .height = size}};
+        VkClearValue clearValue{};
+        clearValue.depthStencil = {.depth = 1.0f, .stencil = 0};
+        rpInfo.clearValueCount = clear ? 1 : 0;
+        rpInfo.pClearValues = clear ? &clearValue : nullptr;
         vkCmdBeginRenderPass(currentCmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
     }
-
-    VkViewport vp{.x = 0, .y = 0, .width = static_cast<float>(SHADOW_MAP_SIZE), .height = static_cast<float>(SHADOW_MAP_SIZE), .minDepth = 0.0f, .maxDepth = 1.0f};
+    VkViewport vp{.x = 0, .y = 0, .width = static_cast<float>(size), .height = static_cast<float>(size), .minDepth = 0.0f, .maxDepth = 1.0f};
     vkCmdSetViewport(currentCmd, 0, 1, &vp);
-    VkRect2D sc{.offset = {.x = 0, .y = 0}, .extent = {.width = SHADOW_MAP_SIZE, .height = SHADOW_MAP_SIZE}};
+    VkRect2D sc{.offset = {.x = 0, .y = 0}, .extent = {.width = size, .height = size}};
     vkCmdSetScissor(currentCmd, 0, 1, &sc);
+}
 
-    // Phase 7/8: render shadow casters
-    const float shadowCullRadius = shadowDistance_ * 1.35f;
-    // WOWEE_SHADOW_CASTERS=terrain,wmo,m2,characters draws only the named
-    // casters - for finding which of them the pass's time goes to.
-    static const std::string casterFilter = [] {
-        const char* v = std::getenv("WOWEE_SHADOW_CASTERS");
-        return std::string(v ? v : "");
-    }();
-    const auto casts = [](const char* what) {
-        return casterFilter.empty() || casterFilter.find(what) != std::string::npos;
-    };
-    if (drawCasters) {
-    if (terrainRenderer && casts("terrain")) {
-        { const auto shadowT0 = std::chrono::steady_clock::now(); terrainRenderer->renderShadow(currentCmd, lightSpaceMatrix, shadowCenter, shadowCullRadius); if (stageSink_) stageSink_("shadow/terrain", std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - shadowT0).count()); }
-    }
-    if (wmoRenderer && casts("wmo")) {
-        { const auto shadowT0 = std::chrono::steady_clock::now(); wmoRenderer->renderShadow(currentCmd, lightSpaceMatrix, shadowCenter, shadowCullRadius); if (stageSink_) stageSink_("shadow/wmo", std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - shadowT0).count()); }
-    }
-    if (m2Renderer && casts("m2")) {
-        { const auto shadowT0 = std::chrono::steady_clock::now(); m2Renderer->renderShadow(currentCmd, lightSpaceMatrix, globalTime, shadowCenter, shadowCullRadius); if (stageSink_) stageSink_("shadow/m2", std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - shadowT0).count()); }
-    }
-    if (characterRenderer && casts("characters")) {
-        { const auto shadowT0 = std::chrono::steady_clock::now(); characterRenderer->renderShadow(currentCmd, lightSpaceMatrix, shadowCenter, shadowCullRadius); if (stageSink_) stageSink_("shadow/characters", std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - shadowT0).count()); }
-    }
-    }
-
-    if (dynamicRendering) {
+void Renderer::endShadowTarget(VkImage image, VkImageLayout& layout) {
+    if (vkCtx->useDynamicRendering()) {
         vkCmdEndRendering(currentCmd);
     } else {
         vkCmdEndRenderPass(currentCmd);
     }
-
-    // Barrier 2: DEPTH_STENCIL_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL
+    // DEPTH_STENCIL_ATTACHMENT_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL
     VkImageMemoryBarrier2 b2{};
     b2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     b2.srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
@@ -5578,15 +5694,182 @@ void Renderer::renderShadowPass() {
     b2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b2.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    b2.image = shadowDepthImage[frame];
+    b2.image = image;
     b2.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
     VkDependencyInfo b2Dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    b2Dep.dependencyFlags = 0;
     b2Dep.imageMemoryBarrierCount = 1;
     b2Dep.pImageMemoryBarriers = &b2;
     cmdPipelineBarrier2(currentCmd, b2Dep);
-    shadowDepthLayout_[frame] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    if (vkCtx) vkCtx->gpuMark(currentCmd, "shadows");
+    layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+}
+
+void Renderer::clearShadowImageOnce(VkImage image, VkImageView view, VkFramebuffer fb, uint32_t size,
+                                    VkImageLayout& layout, bool& cleared) {
+    if (image == VK_NULL_HANDLE) return;
+    if (cleared && layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return;
+    beginShadowTarget(image, view, fb, size, layout, true);
+    endShadowTarget(image, layout);
+    cleared = true;
+}
+
+void Renderer::renderShadowPass() {
+    ZoneScopedN("Renderer::renderShadowPass");
+    static const bool skipShadows = (std::getenv("WOWEE_SKIP_SHADOWS") != nullptr);
+    if (skipShadows) return;
+    if (passAblation_ && passAblation_->skip(AblationPass::Shadows)) return;
+    if (shadowDepthImage[0] == VK_NULL_HANDLE) return;
+    if (currentCmd == VK_NULL_HANDLE) return;
+    // Shadows off (the stock default) draws no caster. Nothing samples the
+    // maps then - every world shader and the fog's inject test shadowParams.x
+    // first - but they are still bound in the per-frame sets, so each is
+    // cleared and left in the layout the sets declare once, the first frame
+    // it is off, and after that this pass records nothing.
+    //
+    // Skipping the casters once faulted the GPU within a second, and the
+    // casters were drawn with shadows off from then on, at the full cost of
+    // shadows on. What that version left out is not on record; what the
+    // readers need is what this keeps: each map cleared and moved to
+    // SHADER_READ_ONLY before any frame binds it, the pass never disabled
+    // whole (see the render graph), and nothing sampling it while
+    // shadowParams.x is 0. Checked on an RTX 4060 with the device-fault
+    // diagnostics on: shadows flipped every 1.5 s for 90 s in Stormwind, then
+    // held off for two minutes there and in Elwynn, no device loss.
+    // WOWEE_SHADOW_CASTERS_WHEN_OFF=1 draws the casters with shadows off, as
+    // this pass used to - for measuring what skipping them saves.
+    static const bool castersWhenOff = core::envFlagEnabled("WOWEE_SHADOW_CASTERS_WHEN_OFF", false);
+    const bool on = shadowsEnabled || castersWhenOff;
+    if (!on) {
+        for (uint32_t i = 0; i < MAX_FRAMES; ++i) {
+            clearShadowImageOnce(shadowDepthImage[i], shadowDepthView[i], shadowFramebuffer[i],
+                                 SHADOW_MAP_SIZE, shadowDepthLayout_[i], shadowClearedWhileOff_[i]);
+            clearShadowImageOnce(shadowNearImage[i], shadowNearView[i], shadowNearFramebuffer[i],
+                                 SHADOW_NEAR_SIZE, shadowNearLayout_[i], shadowNearClearedWhileOff_[i]);
+        }
+        return;
+    }
+    for (uint32_t i = 0; i < MAX_FRAMES; ++i) {
+        shadowClearedWhileOff_[i] = false;
+        shadowNearClearedWhileOff_[i] = false;
+    }
+
+    // Zero matrix means character position isn't set yet - no casters, and
+    // the maps only cleared and left readable.
+    const bool drawCasters = lightSpaceMatrix != glm::mat4(0.0f) || shadowPartsThisFrame_ != 0;
+    if (!drawCasters) {
+        bool cleared = false;
+        for (uint32_t i = 0; i < MAX_FRAMES; ++i) {
+            if (shadowDepthLayout_[i] != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+                clearShadowImageOnce(shadowDepthImage[i], shadowDepthView[i], shadowFramebuffer[i],
+                                     SHADOW_MAP_SIZE, shadowDepthLayout_[i], cleared);
+            cleared = false;
+            if (shadowNearLayout_[i] != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+                clearShadowImageOnce(shadowNearImage[i], shadowNearView[i], shadowNearFramebuffer[i],
+                                     SHADOW_NEAR_SIZE, shadowNearLayout_[i], cleared);
+            cleared = false;
+        }
+        return;
+    }
+
+    // WOWEE_SHADOW_CASTERS=terrain,wmo,m2,characters draws only the named
+    // casters - for finding which of them the pass's time goes to.
+    static const std::string casterFilter = [] {
+        const char* v = std::getenv("WOWEE_SHADOW_CASTERS");
+        return std::string(v ? v : "");
+    }();
+    const auto casts = [](const char* what) {
+        return casterFilter.empty() || casterFilter.find(what) != std::string::npos;
+    };
+    const auto timed = [this](const char* stage, auto&& fn) {
+        const auto t0 = std::chrono::steady_clock::now();
+        fn();
+        if (stageSink_) stageSink_(stage, std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    };
+    if (m2Renderer) m2Renderer->beginShadowFrame();
+    const uint32_t frame = vkCtx->getCurrentFrame();
+
+    // The world map: this frame's part of a redraw, or nothing. With the
+    // split off this is every caster, every frame, into the image the frame
+    // then reads.
+    if (shadowPartsThisFrame_ != 0) {
+        const uint32_t target = shadowRedraw_.target;
+        const ShadowProjection& proj = shadowRedraw_.proj;
+        const bool first = (shadowPartsThisFrame_ & (1u << kWorldShadowTerrain)) != 0;
+        const ShadowCasterSet set = shadowSplit_ ? ShadowCasterSet::Static : ShadowCasterSet::All;
+        // The light-space box decides who casts; the sphere only narrows the
+        // walk (see M2Renderer::renderShadow).
+        const float cullRadius = proj.halfExtent * 1.35f;
+        beginShadowTarget(shadowDepthImage[target], shadowDepthView[target], shadowFramebuffer[target],
+                          SHADOW_MAP_SIZE, shadowDepthLayout_[target], first);
+        if ((shadowPartsThisFrame_ & (1u << kWorldShadowTerrain)) && terrainRenderer && casts("terrain")) {
+            timed("shadow/terrain", [&] { terrainRenderer->renderShadow(currentCmd, proj.matrix, proj.center, cullRadius); });
+        }
+        if ((shadowPartsThisFrame_ & (1u << kWorldShadowBuildings)) && wmoRenderer && casts("wmo")) {
+            timed("shadow/wmo", [&] { wmoRenderer->renderShadow(currentCmd, proj.matrix, proj.center, cullRadius, set); });
+        }
+        if ((shadowPartsThisFrame_ & (1u << kWorldShadowDoodads)) && m2Renderer && casts("m2")) {
+            timed("shadow/m2", [&] { m2Renderer->renderShadow(currentCmd, proj.matrix, globalTime, proj.center, cullRadius, set); });
+        }
+        if (!shadowSplit_ && characterRenderer && casts("characters")) {
+            timed("shadow/characters", [&] { characterRenderer->renderShadow(currentCmd, proj.matrix, proj.center, cullRadius); });
+        }
+        endShadowTarget(shadowDepthImage[target], shadowDepthLayout_[target]);
+        if (shadowRedrawEndsThisFrame_) shadowRedraw_.active = false;
+        else ++shadowRedraw_.nextPart;
+        if (shadowSplit_) vkCtx->gpuMark(currentCmd, "shadow world map");
+    }
+    // The front map has been drawn (planShadowFrame starts a redraw at once
+    // when there is none); the other image is cleared once so that neither
+    // is ever bound undefined.
+    {
+        bool cleared = false;
+        const uint32_t other = 1u - shadowFront_;
+        if (shadowDepthLayout_[other] != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+            clearShadowImageOnce(shadowDepthImage[other], shadowDepthView[other], shadowFramebuffer[other],
+                                 SHADOW_MAP_SIZE, shadowDepthLayout_[other], cleared);
+    }
+
+    // The unit map: this slot's, every frame, cleared and drawn with what
+    // moves, and the mask of where a pixel should read it.
+    nearShadowMask_.clear();
+    if (nearShadowOn_ && shadowNearImage[frame] != VK_NULL_HANDLE) {
+        const ShadowProjection& np = nearShadowProj_;
+        // A sphere a little wider than the box; the box test in each
+        // renderer does the rest. A unit further out whose shadow would
+        // reach in under a low sun is left to the world map's absence of it,
+        // as the one-map pass left anything past its own radius.
+        const float nearCull = np.halfExtent * 1.5f;
+        nearCasterSpheres_.clear();
+        beginShadowTarget(shadowNearImage[frame], shadowNearView[frame], shadowNearFramebuffer[frame],
+                          SHADOW_NEAR_SIZE, shadowNearLayout_[frame], true);
+        if (characterRenderer && casts("characters")) {
+            timed("shadow/characters", [&] { characterRenderer->renderShadow(currentCmd, np.matrix, np.center, nearCull, &nearCasterSpheres_); });
+        }
+        nearSphereSplit_[0] = static_cast<uint32_t>(nearCasterSpheres_.size());
+        if (m2Renderer && casts("m2")) {
+            timed("shadow/m2 movers", [&] { m2Renderer->renderShadow(currentCmd, np.matrix, globalTime, np.center, nearCull, ShadowCasterSet::Moving, &nearCasterSpheres_); });
+        }
+        nearSphereSplit_[1] = static_cast<uint32_t>(nearCasterSpheres_.size());
+        if (wmoRenderer && casts("wmo")) {
+            timed("shadow/wmo movers", [&] { wmoRenderer->renderShadow(currentCmd, np.matrix, np.center, nearCull, ShadowCasterSet::Moving, &nearCasterSpheres_); });
+        }
+        endShadowTarget(shadowNearImage[frame], shadowNearLayout_[frame]);
+        for (const glm::vec4& sphere : nearCasterSpheres_)
+            nearShadowMask_.addCaster(np, SHADOW_NEAR_SIZE, glm::vec3(sphere), sphere.w);
+    } else {
+        bool cleared = false;
+        if (shadowNearLayout_[frame] != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+            clearShadowImageOnce(shadowNearImage[frame], shadowNearView[frame], shadowNearFramebuffer[frame],
+                                 SHADOW_NEAR_SIZE, shadowNearLayout_[frame], cleared);
+    }
+    // The mask goes into this frame's block, which is mapped and read when
+    // the frame executes: written now, after updatePerFrameUBO copied the
+    // rest, it is still in time.
+    std::memcpy(currentFrameData.nearShadowMask, nearShadowMask_.words, sizeof(nearShadowMask_.words));
+    if (perFrameUBOMapped[frame]) {
+        std::memcpy(static_cast<char*>(perFrameUBOMapped[frame]) + offsetof(GPUPerFrameData, nearShadowMask),
+                    nearShadowMask_.words, sizeof(nearShadowMask_.words));
+    }
+    vkCtx->gpuMark(currentCmd, "shadows");
 }
 
 VkImageView Renderer::getNeutralRtLightingView() const {
@@ -5724,7 +6007,7 @@ void Renderer::renderVolumetricFog() {
     // validation layer reports for any dispatch that binds it. Skipping leaves
     // this slot's volume as it was - clear air, until the first real frame -
     // and the shaders read that.
-    if (shadowDepthLayout_[frame] != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return;
+    if (shadowDepthLayout_[shadowFront_] != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return;
     const float dt = std::max(lastDeltaTime_, 0.0f);
 
     // The ground the mist lies on: the terrain under the player, or the

@@ -23,6 +23,9 @@ layout(set = 0, binding = 0) uniform PerFrame {
     ivec4 localLightTileInfo;  // local_light_tiles.glsli
     vec4 localLightTileScale;
     uvec4 localLightTiles[288];
+    mat4 nearLightSpaceMatrix;  // shadow_filter.glsli
+    vec4 nearShadowParams;
+    uvec4 nearShadowMask[32];
 };
 
 #include "rt_lighting.glsli"
@@ -74,7 +77,7 @@ layout(set = 1, binding = 8) uniform sampler2D uBakedShadow;
 // lit colour - ambient included - not only the sun's share.
 const float kStockShadowFloor = 0.7;
 
-layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
+#include "shadow_filter.glsli"
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
 layout(location = 0) in vec3 FragPos;
@@ -85,24 +88,6 @@ layout(location = 4) in vec3 VertColor;   // MCCV, doubled: 1.0 is neutral
 layout(location = 5) in vec3 Specular;    // the stock per-vertex highlight
 
 layout(location = 0) out vec4 outColor;
-
-// One texel of the shadow map, handed in by the renderer. The map is 512,
-// 1024, 2048 or 4096 a side by the quality setting; this used to be a
-// constant for 4096, so at 512 the filter taps all landed inside one texel
-// and the bias shrank eightfold. The fallback covers a per-frame block that
-// never filled the slot in, such as the character preview's.
-float shadowTexel() {
-    return shadowParams.z > 0.0 ? shadowParams.z : 1.0 / 4096.0;
-}
-
-// Nine taps on a disk 1.5 texels across, turned per pixel by interleaved
-// gradient noise. The 3x3 box this replaces had the same nine taps on a grid,
-// and a grid's penumbra is a staircase of the map's own texels; a rotated
-// disk trades that for a fine grain the eye reads as a soft edge. Repeated in
-// terrain, m2, wmo and character .frag - keep the four the same.
-float shadowIgn(vec2 p) {
-    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
-}
 
 // The stock point lights (Wow.exe 12340, docs/re/characters.md section 1
 // "Point lights: full rule"): only M2 type-1 lights (the renderer gathers no
@@ -135,34 +120,6 @@ vec3 stockPointLights(vec3 pos, vec3 normal, int maxLights) {
                max(0.7 * dist + 0.03 * dist * dist, 0.05);
     }
     return sum;
-}
-
-float sampleShadowPCF(sampler2DShadow smap, vec3 coords) {
-    // The stock filter (Wow.exe 0x8742e0, docs/re/world-lighting.md "Shadow
-    // map filter"): the centre and four fixed taps, k0 k2 k4 k6 in texels,
-    // equal weights. The rotated disk below is the Soft setting.
-    if ((localLightMeta.z & 8) == 0) {
-        float t = shadowTexel();
-        float s = texture(smap, coords)
-                + texture(smap, vec3(coords.xy + vec2( 0.8, -1.0) * t, coords.z))
-                + texture(smap, vec3(coords.xy + vec2( 0.2, -0.6) * t, coords.z))
-                + texture(smap, vec3(coords.xy + vec2(-0.6, -0.2) * t, coords.z))
-                + texture(smap, vec3(coords.xy + vec2(-1.0, -0.4) * t, coords.z));
-        return s * 0.2;
-    }
-    // A Vogel (golden-angle) disk: r = sqrt((i + 0.5) / 9), i x 137.5 degrees.
-    const vec2 kDisk[9] = vec2[9](
-        vec2( 0.2357,  0.0000), vec2(-0.3010,  0.2758), vec2( 0.0461, -0.5250),
-        vec2( 0.3794,  0.4949), vec2(-0.6963, -0.1232), vec2( 0.6596, -0.4196),
-        vec2(-0.2206,  0.8207), vec2(-0.4207, -0.8101), vec2( 0.9129,  0.3334));
-    float a = 6.2831853 * shadowIgn(gl_FragCoord.xy);
-    float c = cos(a), s = sin(a);
-    mat2 rot = mat2(c, s, -s, c) * (1.5 * shadowTexel());
-    float shadow = 0.0;
-    for (int i = 0; i < 9; ++i) {
-        shadow += texture(smap, vec3(coords.xy + rot * kDisk[i], coords.z));
-    }
-    return shadow / 9.0;
 }
 
 vec3 localLightContribution(vec3 pos, vec3 normal, vec3 albedo) {
@@ -302,19 +259,10 @@ void main() {
 
     float shadow = 1.0;
     if (shadowParams.x > 0.5) {
-        vec3 ldir = lightDir2;
-        float normalOffset = shadowTexel() * 2.0 * (1.0 - abs(dot(norm, ldir)));
-        vec3 biasedPos = FragPos + norm * normalOffset;
-        vec4 lsPos = lightSpaceMatrix * vec4(biasedPos, 1.0);
-        vec3 proj = lsPos.xyz / lsPos.w;
-        proj.xy = proj.xy * 0.5 + 0.5;
-        if (proj.x >= 0.0 && proj.x <= 1.0 && proj.y >= 0.0 && proj.y <= 1.0 && proj.z >= 0.0 && proj.z <= 1.0) {
-            float bias = max(0.0005 * (1.0 - abs(dot(norm, ldir))), 0.00005);
-            shadow = sampleShadowPCF(uShadowMap, vec3(proj.xy, proj.z - bias));
-            // shadowParams.y is the player's shadow strength over the stock
-            // 0.3; 1 at the default leaves the map's 0..1 as it is.
-            shadow = mix(1.0, shadow, clamp(shadowParams.y / (1.0 - kStockShadowFloor), 0.0, 1.0));
-        }
+        shadow = sunShadow(FragPos, norm, lightDir2);
+        // shadowParams.y is the player's shadow strength over the stock
+        // 0.3; 1 at the default leaves the map's 0..1 as it is.
+        shadow = mix(1.0, shadow, clamp(shadowParams.y / (1.0 - kStockShadowFloor), 0.0, 1.0));
     }
 
     RtLight rt = rtLightAt(FragPos);

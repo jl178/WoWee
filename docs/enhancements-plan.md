@@ -317,7 +317,8 @@ What changed:
   and unit casters), each over the whole set's budget on its own. The
   quality presets keep it on (`presetEnhancements`); Recommended is the
   stock blob. Bringing it back into the set needs the casters recorded off
-  the main thread (or instanced units) and a static-caster cache.
+  the main thread (or instanced units) and a static-caster cache. (The
+  cache it was, 3.9: recommended on again.)
 
 ### 3.6 Measured cost of E4, E2, E5 (2026-11-03)
 
@@ -401,6 +402,64 @@ these runs, but its excess is the light shafts' fog (inject and integrate,
 +1.2 to +7.3 ms here against 0.95 in 3.7) and the scene pass, under the
 load and at the odd window size, not these rows; it wants measuring again
 on a quiet machine before anything else is added to the set.
+
+### 3.9 Measured cost of the shadow split and the cheaper mist (2026-11-03)
+
+E3 as built (the kept world map and the per-frame unit map,
+`performance.md` "The sun's shadow in two maps") and the light shafts made
+smaller: Medium is 128x72x48 cells rather than 160x90x64, and each frame
+lights only every other slice, the rest carried from the last frame
+reprojected (`WOWEE_FOG_HALF_RATE=0` lights them all). Measured as 3.5 (Iris
+Xe, Ultra quality columns, noon, camera fixed, 5 s windows, adjacent
+windows paired, `perf/parse2.py` less the idle windows): the sun shadows
+row is flipped in place over the Recommended set; "Whole set" is
+Recommended (now with shadows) against stock. The new build was measured
+both ways in one sitting, its one-map path (`WOWEE_SHADOW_SPLIT=0`, the old
+casters and the old map, with the new mist) right after the split, on a
+quiet machine (load 4-5, no other client, 1251x986 throughout for the
+one-map run; the split run had a second client for its first minutes and
+the compositor halved the window for some windows, marked). The old build
+(before this work) is given from the same session where it ran at the same
+size. GPU / CPU (renderer stages) ms, paired median:
+
+| Row | Elwynn | Stormwind | Dalaran |
+|---|---|---|---|
+| Sun shadows, one map, every frame | +1.71 / +0.45 | +3.07 / +0.97 | +2.78 / +1.50 |
+| Sun shadows, split | +1.03 / +0.22 (half width) | +1.98 / +0.24; +1.20 / +0.24 with the last change* | +0.61 / ~0 |
+| Light shafts (Medium), old build | +0.7 to +2.1 (inject 0.9-4.9) | +9.7 to +14.2 (inject 5.9-13.8, integrate to 2.5) | +4.1 to +5.1 (inject 3.8-5.4) |
+| Light shafts (Medium), now | ~0 to +0.98 (inject 0.62-0.64) | +1.36 to +1.40 (inject 0.71-0.81) | +1.50 to +2.44 (inject 0.67-0.91) |
+| Whole set, old build with shadows (all+shadows) | +7.9 / +1.84 | +9.6 / +1.57 (half width) | +28.5 / +2.62 (half width; inject 23.8) |
+| Whole set, one-map shadows, new mist | +7.3 / +1.40 | +7.2 / +1.84 | +5.5 / +2.86 |
+| Whole set, split | +2.1 to +2.8 / +0.37 to +0.45 (half width) | +4.96 / +0.79; +2.96 ±0.10 / +0.50 with the last change* | +1.3 to +1.6 / +0.20 to +0.28 (half width) |
+
+\* The last change skips the unit map where the world map has already put
+a pixel wholly in shade (most of a city street at noon); measured again in
+Stormwind only, 15 pairs, load 5-8, full width throughout.
+
+What the split moved: the shadow pass's GPU time fell from 1.5-3.7 ms to
+0.05-0.1 (only units are drawn each frame), its main-thread recording from
+0.6-2.7 ms to 0.2-0.4 (the 64 nearest units; the M2 and terrain casters are
+recorded only on a redraw, a third of them a frame). The second filter
+round units costs 0.2-1.2 ms of the scene pass in its place (the scene
+pass's share of the row, against the one map's), most in Stormwind, where
+units stand thick on lit ground near the camera. Walking (Goldshire, up and
+down the road) redraws the world map every few seconds and costs +1.05 /
++0.18 (half width) against +3.42 / +1.41 for the one map every frame.
+The mist no longer varies with the machine's load as it did (inject 0.6-0.8
+ms in every window, against 0.9-23.8 before): the old Medium volume's
+inject was memory-bound enough that a busy CPU sharing the bus put
+anything from one to twenty milliseconds on it.
+
+The whole set with shadows is inside the 3 ms GPU / 0.5 ms CPU budget in
+all three places: Elwynn and Dalaran at half width, Stormwind's Trade
+District at full width at the limit (+2.96 / +0.50), where it was +5.0 /
++0.8 before the skip above. Sun shadows are recommended on, Soft edges at
+five taps. Gaps: Elwynn and Dalaran were not measured again at full width
+after the last change; the unit map's second filter costs the scene pass
++0.3 in Stormwind after the skip (the one map's scene share +0.82 against
++1.14); units past the 64
+nearest or the unit map's reach have no shadow at all; a city with many
+lights still lights the mist per light per cell.
 
 ## 4. Proposed enhancements
 
@@ -522,6 +581,32 @@ stock, the budget, and how to verify.
 - **Verify.** Elwynn tree line at noon and at dusk, Stormwind gate: A/B
   shots; shadow acne and peter-panning checks at the cascade seam. Profile
   `shadow/*` lines.
+- **Status (2026-11-03): done as two maps, not distance cascades; sun
+  shadows recommended on again.** What cost the time was not the map's
+  resolution but drawing every caster into it every frame, so the split is
+  by what moves rather than by distance (`rendering/shadow_cache.hpp`,
+  `performance.md` "The sun's shadow in two maps"):
+  - the *world map* (terrain, buildings, doodads that stand still) is kept
+    and drawn again only when the player has walked 5% of the shadow
+    distance, the sun has turned a quarter of a degree or the world has
+    changed (at most every 2 s), a part a frame into a second image that
+    then swaps in; its texels are snapped, so static shadows never crawl;
+  - the *unit map* (the 64 nearest units, and doodads and transports that
+    moved lately) is drawn every frame at half the world map's side over a
+    fifth of the shadow distance (32-90 yd), so a unit's shadow is two to
+    three times sharper than before; a 64x64 mask of the cells a caster can
+    shade keeps the second lookup to the ground round units.
+  The four world fragment shaders share `shadow_filter.glsli` (the "repeated
+  in four shaders" note is gone). Soft is now five taps on the turning disk,
+  as many as the stock filter; the unit map always takes the stock five.
+  Off is unchanged: shadows off records nothing and draws the stock blob,
+  Original is the stock 5-tap kernel. Not done: contact-hardening (blocker
+  search) and distance cascades for the world map - with it kept, a finer
+  near cascade would be the next step for sharper static shadows near the
+  player, at the cost of drawing what is near every frame again. Units
+  beyond the unit map's reach, or past the 64 nearest in a crowd, cast no
+  map shadow (and get no blob). Swaying trees cast still shadows. Cost:
+  3.9.
 
 ### E4. Soft particles
 
@@ -1089,7 +1174,9 @@ stock, the budget, and how to verify.
 4. E8 (corpse settle) and E21 (dust), both small and using existing events.
    Done 2026-11-03 (3.7), with the E4 draw-order fix and E2's clutter and
    game objects.
-5. E3 (shadow quality), with the instanced shadow casters.
+5. E3 (shadow quality), with the instanced shadow casters. Done
+   2026-11-03 (3.9) as a kept world map and a per-frame unit map; sun
+   shadows are back in the recommended set.
 6. If time is left: E7 capes only, then E10. Done 2026-11-03 (3.8): E7
    with tails and hair as well, and E10.
 

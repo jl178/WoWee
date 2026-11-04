@@ -38,7 +38,7 @@ layout(set = 1, binding = 0) uniform VolumeParams {
     vec4 lighting;       // x = sun scatter, y = local light scatter, z = ambient scatter
     vec4 drift;          // xyz = how far the mist has blown, w = noise amount
     vec4 jitter;         // xyz = sample point inside the cell, w = history weight
-    ivec4 dims;
+    ivec4 dims;          // xyz = size, w = 0 every cell lit, 1 or 2 only odd or even slices
 } vol;
 
 layout(set = 1, binding = 1) uniform sampler2D uShadowDepth;
@@ -183,6 +183,25 @@ void main() {
 
     ivec3 cell = ivec3(gl_GlobalInvocationID);
     if (any(greaterThanEqual(cell, vol.dims.xyz))) return;
+
+    // Half the slices this frame (vol.dims.w): the others keep last frame's
+    // air where it was, reprojected to this frame's cell, as the blend below
+    // would have kept most of it. A cell new to the view is lit regardless.
+    if (vol.dims.w != 0 && ((cell.z + vol.dims.w) & 1) != 0) {
+        vec3 centre = vec3(cell) + 0.5;
+        float cdepth = sliceDepth(centre.z);
+        vec3 cp = vol.rayOrigin.xyz + rayAt(centre.xy / vec2(vol.dims.xy)) * cdepth;
+        vec4 prevClip = vol.prevViewProj * vec4(cp, 1.0);
+        if (prevClip.w > 1e-3) {
+            vec3 prev = vec3(prevClip.xy / prevClip.w * 0.5 + 0.5,
+                             log(max(prevClip.w, volumetricParams.y) / volumetricParams.y) *
+                                 volumetricParams.z);
+            if (all(greaterThanEqual(prev, vec3(0.0))) && all(lessThanEqual(prev, vec3(1.0)))) {
+                imageStore(uCellsOut, cell, textureLod(uHistory, prev, 0.0));
+                return;
+            }
+        }
+    }
 
     vec3 at = vec3(cell) + vol.jitter.xyz;
     vec2 uv = at.xy / vec2(vol.dims.xy);

@@ -1,6 +1,7 @@
 #include "rendering/terrain_vertex.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/terrain_renderer.hpp"
+#include "core/hitch_legacy.hpp"
 #include "rendering/stream_fade.hpp"
 #include "rendering/terrain_mega_slots.hpp"
 #include "rendering/rt_scene.hpp"
@@ -592,6 +593,15 @@ bool TerrainRenderer::loadTerrainIncremental(const pipeline::TerrainMesh& mesh,
 
     vkCtx->beginUploadBatch();
 
+    // Where a slow call's time went, said when it gets worse (see
+    // TerrainManager's "Terrain finalize" lines).
+    using Clock = std::chrono::steady_clock;
+    double msUpload = 0.0, msTextures = 0.0, msRest = 0.0;
+    const auto callStart = Clock::now();
+    const auto since = [](Clock::time_point t) {
+        return std::chrono::duration<double, std::milli>(Clock::now() - t).count();
+    };
+
     int uploaded = 0;
     while (chunkIndex < 256 && uploaded < maxChunksPerCall) {
         int cy = chunkIndex / 16;
@@ -601,12 +611,17 @@ bool TerrainRenderer::loadTerrainIncremental(const pipeline::TerrainMesh& mesh,
         const auto& chunk = mesh.getChunk(cx, cy);
         if (!chunk.isValid()) continue;
 
+        auto t0 = Clock::now();
         TerrainChunkGPU gpuChunk = uploadChunk(chunk, tileX, tileY);
+        msUpload += since(t0);
         if (!gpuChunk.isValid()) continue;
 
         calculateBoundingSphere(gpuChunk, chunk);
 
+        t0 = Clock::now();
         bindChunkTextures(gpuChunk, chunk, mesh, texturePaths, tileX, tileY, cx, cy);
+        msTextures += since(t0);
+        t0 = Clock::now();
 
         gpuChunk.tileX = tileX;
         gpuChunk.tileY = tileY;
@@ -648,9 +663,19 @@ bool TerrainRenderer::loadTerrainIncremental(const pipeline::TerrainMesh& mesh,
         chunks.push_back(std::move(gpuChunk));
         ++chunksGeneration_;
         uploaded++;
+        msRest += since(t0);
     }
 
     vkCtx->endUploadBatch();
+    if (const double total = since(callStart); total > 6.0) {
+        static double worst = 0.0;
+        if (total > worst) {
+            worst = total;
+            LOG_WARNING("Terrain chunks [", tileX, ",", tileY, "] ", uploaded, " in ", total,
+                        "ms: buffers ", msUpload, ", textures ", msTextures,
+                        ", UBO+descriptors+rt ", msRest, " - said again only if it gets worse");
+        }
+    }
 
     return chunkIndex >= 256;
 }
@@ -1061,9 +1086,23 @@ void TerrainRenderer::updateMegaSlotPlacement(const glm::vec3& cameraPos, const 
     }
 }
 
+namespace {
+/// Chunks removed so far (unloads, clears): what can make a texture
+/// evictable again (see evictTexturesFor).
+uint64_t& chunkRemovals() {
+    static uint64_t n = 0;
+    return n;
+}
+}  // namespace
+
 bool TerrainRenderer::evictTexturesFor(size_t needBytes) {
     if (textureCacheBytes_ + needBytes <= textureCacheBudgetBytes_) return true;
     if (!vkCtx) return false;
+    // A pass that found nothing to give back finds nothing again until a
+    // chunk has gone: only an unload frees a texture from every live chunk.
+    static uint64_t fruitlessAtRemovals = ~uint64_t{0};
+    if (fruitlessAtRemovals == chunkRemovals() && !core::hitchLegacy()) return false;
+    fruitlessAtRemovals = ~uint64_t{0};
 
     // What the live chunks are holding. These are raw pointers into the cache
     // and each chunk's material descriptor set names the image directly, so
@@ -1087,10 +1126,20 @@ bool TerrainRenderer::evictTexturesFor(size_t needBytes) {
     std::sort(candidates.begin(), candidates.end(),
               [](const auto& a, const auto& b) { return a.first < b.first; });
 
+    // Down to a sixteenth under the budget, not just under it. Every pass
+    // above walks every live chunk and every cached texture (~100k of each in
+    // a city) and sorts them, and createAlphaTexture asks for room once per
+    // alpha map: freeing only the bytes asked for meant a full cache paid that
+    // pass for every alpha map of every chunk streamed in - 35-70 ms for one
+    // step of sixteen chunks. With the slack it is paid once per few thousand.
+    // Only textures no live chunk holds are given back, oldest first, as before.
+    const size_t slack = core::hitchLegacy() ? 0 : textureCacheBudgetBytes_ / 16;
+    const size_t target = textureCacheBudgetBytes_ > slack + needBytes
+                              ? textureCacheBudgetBytes_ - slack - needBytes : 0;
     std::vector<VkTexture*> retired;
     size_t freedBytes = 0;
     for (const auto& [lastUse, key] : candidates) {
-        if (textureCacheBytes_ + needBytes <= textureCacheBudgetBytes_) break;
+        if (textureCacheBytes_ <= target) break;
         auto it = textureCache.find(key);
         if (it == textureCache.end()) continue;
         textureCacheBytes_ -= it->second.approxBytes;
@@ -1099,6 +1148,7 @@ bool TerrainRenderer::evictTexturesFor(size_t needBytes) {
         textureCache.erase(it);
     }
 
+    if (retired.empty()) fruitlessAtRemovals = chunkRemovals();
     if (!retired.empty()) {
         VkDevice device = vkCtx->getDevice();
         VmaAllocator allocator = vkCtx->getAllocator();
@@ -1886,6 +1936,7 @@ void TerrainRenderer::removeTile(int tileX, int tileY) {
         if (it->tileX == tileX && it->tileY == tileY) {
             destroyChunkGPU(*it);
             it = chunks.erase(it);
+            ++chunkRemovals();
             ++chunksGeneration_;
             removed++;
         } else {
@@ -1907,6 +1958,7 @@ void TerrainRenderer::clear() {
         destroyChunkGPU(chunk);
     }
     chunks.clear();
+    ++chunkRemovals();
     ++chunksGeneration_;
     ++chunksRemovedGeneration_;
     while (!megaTileSlots_.empty()) releaseMegaTileSlot(megaTileSlots_.begin()->first);

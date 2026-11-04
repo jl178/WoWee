@@ -1,6 +1,7 @@
 #pragma once
 
 #include "game/character.hpp"
+#include "core/frame_work_budget.hpp"
 #include "game/game_services.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "rendering/animation/weapon_type.hpp"
@@ -16,6 +17,7 @@
 #include <array>
 #include <chrono>
 #include <optional>
+#include <functional>
 #include <future>
 #include <mutex>
 #include <glm/glm.hpp>
@@ -24,7 +26,7 @@ namespace wowee {
 
 // Forward declarations
 namespace rendering { class Renderer; }
-namespace pipeline { class AssetManager; struct M2Model; struct WMOModel; }
+namespace pipeline { class AssetManager; class DBCFile; struct M2Model; struct WMOModel; }
 namespace audio { enum class VoiceType; }
 namespace game { class GameHandler; class Unit; }
 
@@ -46,6 +48,8 @@ public:
     // Lifecycle
     void initialize();   // Build DBC lookups
     void update();       // Process all spawn/despawn queues (called from Application::update)
+    /// WOWEE_FRAME_PROFILE: each queue's time in update(), as "spawn/<queue>".
+    void setStageSink(std::function<void(const char*, float)> sink) { stageSink_ = std::move(sink); }
     void shutdown();     // Clear all instances and queues
 
     // Queue-based spawn API (called from GameHandler callbacks)
@@ -632,6 +636,13 @@ public:
     /// drawn at 1.0.
     float playerRaceDisplayScale(uint8_t raceId, uint8_t genderId);
 private:
+    std::function<void(const char*, float)> stageSink_;
+    /// The frame's spawn work under one budget (core/frame_work_budget.hpp).
+    core::SharedFrameBudget spawnPacer_{6.0f, 3};
+    enum SpawnQueue : int { kQPlayers = 0, kQCreatures, kQNpcComposites, kQEquipment, kQGameObjects };
+    /// Whether queue q may take another item this frame (always, under
+    /// WOWEE_HITCH_LEGACY).
+    bool spawnAllowed(int q, int doneSoFar);
 
     // --- Creature async loads ---
     struct PreparedCreatureModel {
@@ -674,6 +685,11 @@ private:
     /// at most once. Returns modelId == 0 when no candidate yields a valid model.
     CachedAttachmentModel getOrLoadAttachmentModel(
         const std::vector<std::string>& candidatePaths, const std::string& texturePath);
+    /// The renderer model id for an item piece (weapon, shield, helm,
+    /// shoulder) drawn with a texture: one per pair, shared by every unit
+    /// wearing it, so the model is uploaded once while any of them is in view
+    /// rather than again for each attach (and each sheath change).
+    uint32_t itemModelIdFor(const std::string& m2Path, const std::string& texturePath);
 
     std::unordered_map<uint32_t, uint32_t> displayIdModelCache_;
     std::unordered_set<uint32_t> displayIdTexturesApplied_;
@@ -770,6 +786,18 @@ private:
     };
     std::vector<AsyncEquipmentLoad> asyncEquipmentLoads_;
     void processAsyncEquipmentResults();
+    /// Where a cloak's texture may be, in the order setOnlinePlayerEquipment
+    /// tries them.
+    static std::vector<std::string> capeCandidatesFor(const pipeline::DBCFile& displayInfoDbc,
+                                                      uint32_t capeDid, uint8_t genderId);
+    /// Everything setOnlinePlayerEquipment will read for this gear beyond
+    /// the composite's region textures: the helm, shoulder and weapon models
+    /// and their textures, and the cloak's - so the worker that decodes the
+    /// composite's layers can parse and decode these as well.
+    void collectEquipmentExtras(uint64_t guid, const std::array<uint32_t, 19>& displayInfoIds,
+                                const std::array<uint8_t, 19>& inventoryTypes,
+                                std::vector<std::string>& modelPaths,
+                                std::vector<std::string>& texturePaths);
     std::vector<std::string> resolveEquipmentTexturePaths(uint64_t guid,
         const std::array<uint32_t, 19>& displayInfoIds,
         const std::array<uint8_t, 19>& inventoryTypes) const;
@@ -793,6 +821,39 @@ private:
     std::deque<PendingPlayerSpawn> pendingPlayerSpawns_;
     std::unordered_set<uint64_t> pendingPlayerSpawnGuids_;
     void processPlayerSpawnQueue();
+
+    /// The texture files a player's base look is built from, resolved from
+    /// CharSections on the main thread so a worker can decode them.
+    struct PlayerLook {
+        std::string bodySkinPath, skinExtraPath, hairTexturePath, pelvisPath;
+        std::string faceLowerPath, faceUpperPath, facialLowerPath, facialUpperPath;
+        std::vector<std::string> underwearPaths;  // scalps first, then underwear
+    };
+    PlayerLook resolvePlayerLook(uint8_t raceId, uint8_t genderId,
+                                 uint32_t appearanceBytes, uint8_t facialFeatures);
+    /// Read and parse a player race's model with the few external animations
+    /// a player in view needs. Thread-safe; null when it cannot be loaded.
+    static std::shared_ptr<pipeline::M2Model> parsePlayerModel(pipeline::AssetManager& assets,
+                                                               const std::string& m2Path);
+    /// A player spawn whose model and textures a worker has read and decoded.
+    /// The main thread then only uploads and builds the instance; it used to
+    /// read, parse and decode all of it in the frame the player appeared -
+    /// 20-40 ms each in Dalaran, three a frame.
+    struct PreparedPlayerSpawn {
+        PendingPlayerSpawn spawn{};
+        PlayerLook look;
+        uint32_t modelKey = 0;
+        std::shared_ptr<pipeline::M2Model> model;  // set when this job parsed the race's model
+        std::unordered_map<std::string, pipeline::BLPImage> predecodedTextures;
+    };
+    std::deque<std::future<PreparedPlayerSpawn>> asyncPlayerLoads_;
+    /// Race/gender models a job is parsing, so two players of one race
+    /// arriving together parse it once; and the parsed models, kept so a
+    /// model unloaded when the last of a race left view is uploaded again
+    /// without parsing it again.
+    std::unordered_set<uint32_t> playerModelLoadsInFlight_;
+    std::unordered_map<uint32_t, std::shared_ptr<pipeline::M2Model>> playerParsedModels_;
+    static constexpr size_t MAX_ASYNC_PLAYER_LOADS = 6;
 
     // --- GameObject instances ---
     struct GameObjectInstanceInfo {
@@ -872,6 +933,23 @@ private:
     void finishWmoSpawn(const PreparedGameObjectWMO& result, uint32_t modelId);
     std::vector<AsyncGameObjectLoad> asyncGameObjectLoads_;
     void processAsyncGameObjectResults();
+    /// A game object's M2 (a mailbox, a chair, a brazier), read, parsed and
+    /// its textures decoded on a worker - the WMO objects above already were;
+    /// these were read and parsed on the main thread in the frame they spawned.
+    struct PreparedGameObjectM2 {
+        uint32_t displayId = 0;
+        std::string modelPath;
+        std::shared_ptr<pipeline::M2Model> model;  // null: could not be read or parsed
+        std::string failure;                       // the warning the sync path logged
+        std::unordered_map<std::string, pipeline::BLPImage> predecodedTextures;
+    };
+    std::vector<std::future<PreparedGameObjectM2>> asyncGameObjectM2Loads_;
+    std::unordered_set<uint32_t> asyncGameObjectM2Displays_;
+    std::unordered_map<uint32_t, std::shared_ptr<PreparedGameObjectM2>> preparedGameObjectM2s_;
+    /// The model a queued game object draws, as spawnOnlineGameObject picks it.
+    std::string gameObjectModelPathFor(uint64_t guid, uint32_t entry, uint32_t displayId);
+    void launchGameObjectM2Loads();
+    void collectGameObjectM2Results();
     struct PendingTransportDoodadBatch {
         uint64_t guid = 0;
         uint32_t modelId = 0;
@@ -942,12 +1020,14 @@ private:
                              float x, float y, float z, float orientation, float scale = 1.0f);
     void spawnOnlinePlayer(uint64_t guid, uint8_t raceId, uint8_t genderId,
                            uint32_t appearanceBytes, uint8_t facialFeatures,
-                           float x, float y, float z, float orientation);
+                           float x, float y, float z, float orientation,
+                           const PlayerLook* look = nullptr);
     void setOnlinePlayerEquipment(uint64_t guid,
                                   const std::array<uint32_t, 19>& displayInfoIds,
                                   const std::array<uint8_t, 19>& inventoryTypes);
     void spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_t displayId,
-                               float x, float y, float z, float orientation, float scale = 1.0f);
+                               float x, float y, float z, float orientation, float scale = 1.0f,
+                               const PreparedGameObjectM2* preparedM2 = nullptr);
 };
 
 } // namespace core

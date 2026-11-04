@@ -1739,6 +1739,9 @@ void WidgetRenderer::layout(WidgetTree& tree, float screenW, float screenH) {
                         tree.totalPasses(),
                         " passes had nothing to lay out; ", tree.lastVisibleCount(),
                         " of ", tree.size(), " widgets were visible");
+            if (const std::string dirty = tree.takeLayoutDirtyReport(12); !dirty.empty()) {
+                LOG_WARNING("    layout dirtied by: ", dirty);
+            }
             tree.resetPassCounts();
             times = PassTimes{};
             times.reportedAt = now;
@@ -2639,6 +2642,7 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
             // the new height was recorded and never placed, the rect stayed a
             // frame behind the text, and the tooltip flicked between the size
             // it had and the size it wanted.
+            tree.noteLayoutDirtyReason("tooltip size", static_cast<uint32_t>(id));
             tree.markLayoutDirty();
             const float wantW = w->width, wantH = w->height;
             tree.resolveWidget(static_cast<uint32_t>(id));

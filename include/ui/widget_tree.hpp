@@ -905,6 +905,10 @@ public:
 
     /// Something moved, resized or changed parent - every rect is stale.
     void markLayoutDirty() { ++layoutGeneration_; }
+    /// WOWEE_LAYOUT_DIRTY_PROFILE: count why the generation moved (which
+    /// setter, which frame), and take the counts as one line, most first.
+    void noteLayoutDirtyReason(const char* why, uint32_t id) const;
+    static std::string takeLayoutDirtyReport(size_t top);
 
     /// Pixels per interface unit, from the last layout.
     /// How many pixels one interface unit is worth, after the player's own
