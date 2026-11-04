@@ -4,6 +4,7 @@
 #include "game/opcode_table.hpp"
 #include "game/group_defines.hpp"
 #include "game/handler_types.hpp"
+#include "game/arena_rules.hpp"
 #include "game/battlefield_rules.hpp"
 #include "game/calendar_data.hpp"
 #include "game/stock_duel.hpp"
@@ -538,6 +539,28 @@ public:
     // Arena
     [[nodiscard]] const std::vector<ArenaTeamStats>& getArenaTeamStats() const { return arenaTeamStats_; }
     void requestArenaTeamRoster(uint32_t teamId);
+    /// One slot of PLAYER_FIELD_ARENA_TEAM_INFO (0 2v2, 1 3v3, 2 5v5).
+    [[nodiscard]] arena::TeamInfo arenaTeamInfo(size_t slot) const;
+    /// The team query cache (0x680170): the record, or null after asking the
+    /// server once with CMSG_ARENA_TEAM_QUERY.
+    const arena::TeamQuery* arenaTeamQuery(uint32_t teamId);
+    [[nodiscard]] const ArenaTeamStats* arenaTeamStatsFor(uint32_t teamId) const;
+    /// PLAYER_FIELD_ARENA_TEAM_INFO changed (0x5A3700); the event only for a
+    /// change after the create block.
+    void onArenaTeamInfoChanged(bool fireEvent);
+    /// ArenaTeamRoster(slot) (0x5A3600): CMSG_ARENA_TEAM_ROSTER for the slot's
+    /// team, at most once in ten seconds.
+    void requestArenaTeamRosterSlot(size_t slot);
+    // Arena opponents (BattlefieldInfo.cpp)
+    [[nodiscard]] uint64_t arenaOpponent(size_t index) const { return arenaOpponents_.player(index); }
+    [[nodiscard]] uint64_t arenaOpponentPet(size_t index) const;
+    [[nodiscard]] uint32_t arenaOpponentCount() const { return arenaOpponents_.count(); }
+    /// A unit or player object was created (0x6E8280, 0x7402B0): arena
+    /// opponents, and party members coming into view.
+    void onObjectAppeared(uint64_t guid);
+    /// An object is about to go: out of range (true) or destroyed.
+    void onObjectLeaving(uint64_t guid, bool outOfRange);
+    std::vector<ArenaTeamRoster>& mutableArenaTeamRosters() { return arenaTeamRosters_; }
     [[nodiscard]] const ArenaTeamRoster* getArenaTeamRoster(uint32_t teamId) const {
         for (const auto& r : arenaTeamRosters_)
             if (r.teamId == teamId) return &r;
@@ -741,6 +764,17 @@ private:
     // Arena
     std::vector<ArenaTeamStats>  arenaTeamStats_;
     std::vector<ArenaTeamRoster> arenaTeamRosters_;
+    std::unordered_map<uint32_t, arena::TeamQuery> arenaTeamCache_;
+    std::unordered_set<uint32_t> arenaTeamQueriesPending_;
+    std::array<uint32_t, arena::kTeamSlots> arenaTeamSlotIds_{};
+    std::array<int64_t, arena::kTeamSlots> arenaRosterNextMs_{};
+    arena::Opponents arenaOpponents_;
+    bool honorDataRequested_ = false;
+    void fireArenaOpponentEvents(const std::vector<arena::OpponentEvent>& events);
+    void handleArenaUnitDestroyed(network::Packet& packet);
+    void handleInspectArenaTeams(network::Packet& packet);
+    /// The party member stat request (CMSG_REQUEST_PARTY_MEMBER_STATS).
+    void requestPartyMemberStats(uint64_t guid);
 
     // Battleground
     bf::Queues bgQueues_;

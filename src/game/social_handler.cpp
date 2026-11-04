@@ -508,6 +508,8 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
             owner_.addonEventCallbackRef()("INSPECT_HONOR_UPDATE", {});
     };
     table[Opcode::SMSG_INSPECT_RESULTS_UPDATE] = [this](network::Packet& packet) { handleInspectResults(packet); };
+    table[Opcode::MSG_INSPECT_ARENA_TEAMS] = [this](network::Packet& packet) { handleInspectArenaTeams(packet); };
+    table[Opcode::SMSG_ARENA_UNIT_DESTROYED] = [this](network::Packet& packet) { handleArenaUnitDestroyed(packet); };
 
     // ---- Group ----
     table[Opcode::SMSG_GROUP_INVITE] = [this](network::Packet& packet) { handleGroupInvite(packet); };
@@ -1198,11 +1200,37 @@ void SocialHandler::inspectTarget() { inspectUnit(owner_.getTargetGuid()); }
 void SocialHandler::requestInspectHonorData(uint64_t guid) {
     if (guid == 0) return;
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    const uint32_t wire = wireOpcode(Opcode::MSG_INSPECT_HONOR_STATS);
-    if (wire == 0xFFFF) return;
-    network::Packet pkt(static_cast<uint16_t>(wire));
-    pkt.writeUInt64(guid);
-    owner_.getSocket()->send(pkt);
+    // RequestInspectHonorData (0x5EAC90 -> 0x5E9140): MSG_INSPECT_HONOR_STATS
+    // and MSG_INSPECT_ARENA_TEAMS for the inspected player, once, and not
+    // when the honour figures are already in.
+    if (guid == inspectResult_.guid && (inspectResult_.hasHonorData || honorDataRequested_)) return;
+    for (Opcode op : {Opcode::MSG_INSPECT_HONOR_STATS, Opcode::MSG_INSPECT_ARENA_TEAMS}) {
+        const uint32_t wire = wireOpcode(op);
+        if (wire == 0xFFFF) continue;
+        network::Packet pkt(static_cast<uint16_t>(wire));
+        pkt.writeUInt64(guid);
+        owner_.getSocket()->send(pkt);
+    }
+    if (guid == inspectResult_.guid) honorDataRequested_ = true;
+}
+
+// MSG_INSPECT_ARENA_TEAMS (0x5E7B00): one reply a team, for the inspected
+// player only, stored by its slot; INSPECT_HONOR_UPDATE.
+void SocialHandler::handleInspectArenaTeams(network::Packet& packet) {
+    uint64_t guid = 0;
+    arena::InspectTeam t;
+    const bool ok = arena::parseInspectTeam(packet, guid, t);
+    packet.skipAll();
+    if (!ok || guid == 0 || guid != inspectResult_.guid || t.slot >= inspectResult_.arenaTeams.size())
+        return;
+    auto& slot = inspectResult_.arenaTeams[t.slot];
+    slot.teamId = t.teamId;
+    slot.rating = t.rating;
+    slot.seasonGames = t.seasonGames;
+    slot.seasonWins = t.seasonWins;
+    slot.playerSeasonGames = t.playerSeasonGames;
+    slot.personalRating = t.personalRating;
+    owner_.fireAddonEvent("INSPECT_HONOR_UPDATE", {});
 }
 
 void SocialHandler::inspectUnit(uint64_t guid) {
@@ -1486,6 +1514,8 @@ void SocialHandler::handleInspectResults(network::Packet& packet) {
         inspectResult_.honorYesterdayContribution = 0;
         inspectResult_.honorLifetimeKills = 0;
         inspectResult_.honorRank = 0;
+        inspectResult_.arenaTeams = {};
+        honorDataRequested_ = false;
     }
     inspectResult_.guid              = guid;
     inspectResult_.playerName        = playerName;
@@ -2482,15 +2512,27 @@ void SocialHandler::handleGroupList(network::Packet& packet) {
     partyData = GroupListData{};
     if (!GroupListParser::parse(packet, partyData, hasRoles, hasBattleGroupFlag)) return;
     for (auto& m : partyData.members) {
+        bool known = false;
         for (const auto& old : prevStats) {
-            if (old.guid != m.guid || !old.hasPartyStats) continue;
+            if (old.guid != m.guid) continue;
             m.curHealth = old.curHealth;   m.maxHealth = old.maxHealth;
             m.powerType = old.powerType;   m.curPower = old.curPower;
             m.maxPower = old.maxPower;     m.level = old.level;
             m.zoneId = old.zoneId;         m.posX = old.posX;   m.posY = old.posY;
-            m.hasPartyStats = true;
+            m.hasPartyStats = old.hasPartyStats;
+            known = true;
             break;
         }
+        if (known || m.guid == 0 || m.guid == owner_.getPlayerGuid()) continue;
+        // A member new to the roster (0x52D410, 0x574F10): health and power
+        // start at 1 of 1, so the frame shows a full bar rather than a dead
+        // one, and a member out of view is asked for with
+        // CMSG_REQUEST_PARTY_MEMBER_STATS. AzerothCore sends a member's stats
+        // to the others only when they change, so without the request a bot
+        // standing still stayed at nothing - "Dead" on the party frame.
+        m.curHealth = 1; m.maxHealth = 1;
+        m.curPower = 1;  m.maxPower = 1;
+        if (!owner_.getEntityManager().hasEntity(m.guid)) requestPartyMemberStats(m.guid);
     }
 
     // igPlayerInviteAccept, which Wow.exe's roster handler (0x6d8870) plays
@@ -2727,7 +2769,12 @@ void SocialHandler::handlePartyMemberStats(network::Packet& packet, bool isFull)
     auto remaining = [&]() { return packet.getRemainingSize(); };
     const bool isWotLK = isActiveExpansion("wotlk");
 
-    if (isFull) { if (remaining() < 1) return; packet.readUInt8(); }
+    // SMSG_PARTY_MEMBER_STATS_FULL opens with a byte that marks an arena
+    // opponent's stats (0x6CF9B0): the guid takes an opponent slot (0x54D100)
+    // and a pet named in the packet takes the pet slot with it (0x54D1C0).
+    // AzerothCore always writes zero.
+    bool arenaOpponent = false;
+    if (isFull) { if (remaining() < 1) return; arenaOpponent = packet.readUInt8() != 0; }
 
     const bool pmsTbc = isActiveExpansion("tbc");
     if (remaining() < (pmsTbc ? 8u : 1u)) return;
@@ -2736,11 +2783,42 @@ void SocialHandler::handlePartyMemberStats(network::Packet& packet, bool isFull)
     if (remaining() < 4) return;
     uint32_t updateFlags = packet.readUInt32();
 
+    if (arenaOpponent) {
+        auto present = [this](uint64_t g) { return owner_.getEntityManager().hasEntity(g); };
+        fireArenaOpponentEvents(arenaOpponents_.playerSeen(memberGuid, present));
+    }
+
     game::GroupMember* member = nullptr;
     for (auto& m : partyData.members) {
         if (m.guid == memberGuid) { member = &m; break; }
     }
-    if (!member) { packet.skipAll(); return; }
+    if (!member) {
+        // Only the pet guid is wanted from an opponent's stats.
+        if (arenaOpponent && (updateFlags & 0x0400)) {
+            uint64_t petGuid = 0;
+            const uint32_t before = updateFlags & 0x03FF;
+            const bool wotlk = isActiveExpansion("wotlk");
+            if (before & 0x0001) packet.readUInt16();
+            if (before & 0x0002) wotlk ? (void)packet.readUInt32() : (void)packet.readUInt16();
+            if (before & 0x0004) wotlk ? (void)packet.readUInt32() : (void)packet.readUInt16();
+            if (before & 0x0008) packet.readUInt8();
+            for (uint32_t bit : {0x0010u, 0x0020u, 0x0040u, 0x0080u})
+                if (before & bit) packet.readUInt16();
+            if (before & 0x0100) { packet.readUInt16(); packet.readUInt16(); }
+            if (before & 0x0200) {
+                const uint64_t mask = packet.hasRemaining(8) ? packet.readUInt64() : 0;
+                for (int i = 0; i < 64; ++i)
+                    if (mask & (uint64_t(1) << i)) {
+                        if (wotlk) { packet.readUInt32(); packet.readUInt8(); } else { packet.readUInt16(); }
+                    }
+            }
+            if (packet.hasRemaining(8)) petGuid = packet.readUInt64();
+            auto present = [this](uint64_t g) { return owner_.getEntityManager().hasEntity(g); };
+            if (petGuid != 0) fireArenaOpponentEvents(arenaOpponents_.petSeen(petGuid, memberGuid, present));
+        }
+        packet.skipAll();
+        return;
+    }
 
     // Track the online transition so it can be announced once the packet is
     // fully read. isOnline is what the Lua bindings read; onlineStatus is what
@@ -2827,27 +2905,35 @@ void SocialHandler::handlePartyMemberStats(network::Packet& packet, bool isFull)
     member->hasPartyStats = true;
 
     if (owner_.addonEventCallbackRef()) {
-        std::string unitId;
-        if (groupIsRaid(partyData.groupType)) {
-            for (size_t i = 0; i < partyData.members.size(); ++i) {
-                if (partyData.members[i].guid == memberGuid) { unitId = "raid" + std::to_string(i + 1); break; }
-            }
-        } else {
+        // Every token that names the member (0x6CF740 -> 0x60BF10): in a raid
+        // both "raidN", in the raid list's order, and "partyN" for the
+        // player's own subgroup. Only "raidN" was fired, and at the member's
+        // place in the packet rather than in the raid list, so the party
+        // frames of a battleground raid never heard of a change.
+        std::vector<std::string> unitIds;
+        const uint64_t me = owner_.getPlayerGuid();
+        const bool raid = groupIsRaid(partyData.groupType);
+        if (raid) {
+            const std::string r = groupUnitToken(partyData, me, memberGuid);
+            if (!r.empty()) unitIds.push_back(r);
+        }
+        {
             int found = 0;
             for (const auto& m : partyData.members) {
-                if (m.guid == owner_.getPlayerGuid()) continue;
+                if (m.guid == me) continue;
+                if (raid && m.subGroup != partyData.subGroup) continue;
                 ++found;
-                if (m.guid == memberGuid) { unitId = "party" + std::to_string(found); break; }
+                if (m.guid == memberGuid) {
+                    if (found <= 4) unitIds.push_back("party" + std::to_string(found));
+                    break;
+                }
             }
         }
-        if (!unitId.empty()) {
+        for (const auto& unitId : unitIds) {
             if (updateFlags & (0x0002 | 0x0004)) owner_.addonEventCallbackRef()("UNIT_HEALTH", {unitId});
             if (updateFlags & (0x0010 | 0x0020)) owner_.addonEventCallbackRef()("UNIT_POWER", {unitId});
-            if (updateFlags & 0x0200) {
-                owner_.addonEventCallbackRef()("UNIT_AURA", {unitId});
-                // The 1.12 name, which carries no unit.
-                if (unitId == "player") owner_.addonEventCallbackRef()("PLAYER_AURAS_CHANGED", {});
-            }
+            if (updateFlags & 0x0040) owner_.addonEventCallbackRef()("UNIT_LEVEL", {unitId});
+            if (updateFlags & 0x0200) owner_.addonEventCallbackRef()("UNIT_AURA", {unitId});
         }
         // Fired without arguments, as the retail client does - the interface
         // re-reads the whole roster rather than acting on one member. Not
@@ -3951,6 +4037,16 @@ void SocialHandler::handleBattlefieldStatus(network::Packet& packet) {
             bgScoreColumns_.push_back(i);
         bgScoreboard_.factionFilter = -1;
         resortScoreboard();
+        // Opponents already in view when the arena's status arrives. Stock
+        // judges each player as its object is created; a status that comes
+        // after the objects would otherwise leave them unjudged.
+        if (bgQueues_.active().instanceType == 4) {
+            std::vector<uint64_t> inView;
+            for (const auto& [guid, e] : owner_.getEntityManager().getEntities())
+                if (e && e->getType() == ObjectType::PLAYER && arenaOpponents_.slotOf(guid) < 0)
+                    inView.push_back(guid);
+            for (uint64_t g : inView) onObjectAppeared(g);
+        }
     }
     // The argument is the queue, counted from one; the interface does the
     // telling (the minimap eye, the "enter battle" popup).
@@ -4147,6 +4243,10 @@ void SocialHandler::requestPvpLog() {
 // battlemaster's list are emptied, and the server is asked for every queue's
 // status again (CMSG_BATTLEFIELD_STATUS).
 void SocialHandler::onWorldEntered() {
+    // The arena's opponents go with it: "cleared" for all ten (0x54CA50).
+    fireArenaOpponentEvents(arenaOpponents_.clear());
+    // And the arena teams' rosters are asked for again (0x528010 -> 0x5A3DC0).
+    onArenaTeamInfoChanged(false);
     bgScoreboard_ = bf::Scoreboard{};
     nextPvpLogRequestMs_ = 0;
     bgScoreNamesPending_ = false;
@@ -5233,23 +5333,18 @@ void SocialHandler::handleArenaTeamCommandResult(network::Packet& packet) {
 }
 
 void SocialHandler::handleArenaTeamQueryResponse(network::Packet& packet) {
-    if (!packet.hasRemaining(4)) return;
-    uint32_t teamId = packet.readUInt32();
-    std::string teamName = packet.readString();
-    uint32_t teamType = 0;
-    if (packet.hasRemaining(4)) teamType = packet.readUInt32();
-    bool known = false;
-    for (auto& s : arenaTeamStats_) { if (s.teamId == teamId) { s.teamName = teamName; s.teamType = teamType; known = true; break; } }
-    if (!known) {
-        ArenaTeamStats stub; stub.teamId = teamId; stub.teamName = teamName; stub.teamType = teamType;
-        arenaTeamStats_.push_back(std::move(stub));
+    // The team cache's answer (0x635480): the name, size and tabard, kept by
+    // team id. The cache's callback (0x5A28C0) fires ARENA_TEAM_UPDATE, which
+    // is what the PvP frame redraws its team tabs on.
+    arena::TeamQuery q;
+    if (!arena::parseTeamQuery(packet, q)) return;
+    packet.skipAll();
+    arenaTeamQueriesPending_.erase(q.teamId);
+    for (auto& st : arenaTeamStats_) {
+        if (st.teamId == q.teamId) { st.teamName = q.name; st.teamType = q.type; }
     }
-    // A team's name arriving is what the PvP panel redraws on. Without this the
-    // arena tabs kept whatever they were built with, so a team queried after
-    // the panel opened stayed nameless until it was closed and opened again.
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("ARENA_TEAM_UPDATE", {});
-    }
+    arenaTeamCache_[q.teamId] = std::move(q);
+    owner_.fireAddonEvent("ARENA_TEAM_UPDATE", {});
 }
 
 void SocialHandler::handleArenaTeamRoster(network::Packet& packet) {
@@ -5373,6 +5468,187 @@ void SocialHandler::requestArenaTeamRoster(uint32_t teamId) {
     if (!owner_.getSocket()) return;
     network::Packet pkt(wireOpcode(Opcode::CMSG_ARENA_TEAM_ROSTER));
     pkt.writeUInt32(teamId);
+    owner_.getSocket()->send(pkt);
+}
+
+// ---- Arena teams as the player's fields name them ----
+
+arena::TeamInfo SocialHandler::arenaTeamInfo(size_t slot) const {
+    if (slot >= arena::kTeamSlots) return {};
+    const uint16_t base = fieldIndex(UF::PLAYER_FIELD_ARENA_TEAM_INFO_1_1);
+    if (base == 0xFFFF) return {};
+    auto me = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
+    if (!me) return {};
+    std::array<uint32_t, arena::kTeamInfoFields> f{};
+    for (size_t i = 0; i < f.size(); ++i)
+        f[i] = me->getField(static_cast<uint16_t>(base + slot * arena::kTeamInfoFields + i));
+    return arena::teamInfoFromFields(f);
+}
+
+const arena::TeamQuery* SocialHandler::arenaTeamQuery(uint32_t teamId) {
+    if (teamId == 0) return nullptr;
+    if (auto it = arenaTeamCache_.find(teamId); it != arenaTeamCache_.end()) return &it->second;
+    // A miss asks once (the cache's own request, CMSG_ARENA_TEAM_QUERY);
+    // AzerothCore answers with the record and then the team's stats.
+    if (arenaTeamQueriesPending_.insert(teamId).second &&
+        owner_.getState() == WorldState::IN_WORLD && owner_.getSocket()) {
+        network::Packet pkt(wireOpcode(Opcode::CMSG_ARENA_TEAM_QUERY));
+        pkt.writeUInt32(teamId);
+        owner_.getSocket()->send(pkt);
+    }
+    return nullptr;
+}
+
+const ArenaTeamStats* SocialHandler::arenaTeamStatsFor(uint32_t teamId) const {
+    if (teamId == 0) return nullptr;
+    for (const auto& st : arenaTeamStats_)
+        if (st.teamId == teamId) return &st;
+    return nullptr;
+}
+
+// 0x5A3700: a slot that lost its team drops the team's record, and every
+// slot with a team asks for its roster. The field callback (0x6CDDA0) then
+// fires ARENA_TEAM_UPDATE; entering the world (0x5A3DC0) does not.
+void SocialHandler::onArenaTeamInfoChanged(bool fireEvent) {
+    for (size_t slot = 0; slot < arena::kTeamSlots; ++slot) {
+        const uint32_t id = arenaTeamInfo(slot).teamId;
+        if (arenaTeamSlotIds_[slot] != 0 && id == 0) {
+            arenaTeamCache_.erase(arenaTeamSlotIds_[slot]);
+            arenaTeamQueriesPending_.erase(arenaTeamSlotIds_[slot]);
+        }
+        arenaTeamSlotIds_[slot] = id;
+        if (id != 0) requestArenaTeamRosterSlot(slot);
+    }
+    if (fireEvent) owner_.fireAddonEvent("ARENA_TEAM_UPDATE", {});
+}
+
+void SocialHandler::requestArenaTeamRosterSlot(size_t slot) {
+    if (slot >= arena::kTeamSlots) return;
+    const uint32_t id = arenaTeamInfo(slot).teamId;
+    if (id == 0) return;
+    const int64_t now = bf::clockMs();
+    if (arenaRosterNextMs_[slot] != 0 && now < arenaRosterNextMs_[slot]) return;
+    arenaRosterNextMs_[slot] = now + 10000;
+    requestArenaTeamRoster(id);
+}
+
+// ---- Arena opponents (BattlefieldInfo.cpp) ----
+
+namespace {
+
+uint64_t guidField(const Entity& e, uint16_t lo) {
+    if (lo == 0xFFFF) return 0;
+    return uint64_t(e.getField(lo)) | (uint64_t(e.getField(static_cast<uint16_t>(lo + 1))) << 32);
+}
+
+// The pet a visible opponent has out: CHARM, else SUMMON two fields on
+// (0x60A2F0, 0x54ABF0).
+uint64_t charmOrSummon(EntityManager& em, uint64_t guid) {
+    auto e = em.getEntity(guid);
+    if (!e) return 0;
+    const uint16_t charm = fieldIndex(UF::UNIT_FIELD_CHARM);
+    if (charm == 0xFFFF) return 0;
+    const uint64_t c = guidField(*e, charm);
+    return c != 0 ? c : guidField(*e, static_cast<uint16_t>(charm + 2));
+}
+
+}  // namespace
+
+uint64_t SocialHandler::arenaOpponentPet(size_t index) const {
+    auto present = [this](uint64_t g) { return owner_.getEntityManager().hasEntity(g); };
+    auto petOf = [this](uint64_t g) { return charmOrSummon(owner_.getEntityManager(), g); };
+    return arenaOpponents_.pet(index, present, petOf);
+}
+
+void SocialHandler::fireArenaOpponentEvents(const std::vector<arena::OpponentEvent>& events) {
+    for (const auto& e : events) owner_.fireAddonEvent("ARENA_OPPONENT_UPDATE", {e.unit, e.what});
+}
+
+void SocialHandler::onObjectAppeared(uint64_t guid) {
+    auto entity = owner_.getEntityManager().getEntity(guid);
+    if (!entity || guid == owner_.getPlayerGuid()) return;
+    auto present = [this](uint64_t g) { return owner_.getEntityManager().hasEntity(g); };
+
+    // A party member coming into view (0x52C760 with 1): PARTY_MEMBER_ENABLE.
+    if (entity->getType() == ObjectType::PLAYER && !partyData.isEmpty()) {
+        for (const auto& m : partyData.members) {
+            if (m.guid != guid) continue;
+            if (!groupIsRaid(partyData.groupType) || m.subGroup == partyData.subGroup)
+                owner_.fireAddonEvent("PARTY_MEMBER_ENABLE", {});
+            break;
+        }
+    }
+
+    if (bgQueues_.active().instanceType != 4) return;
+    if (entity->getType() == ObjectType::PLAYER) {
+        // 0x6E8280: a player whose arena faction (PLAYER_BYTES_3 byte 3) is
+        // not the player's own is an opponent.
+        const uint16_t b2 = fieldIndex(UF::PLAYER_BYTES_2);
+        if (b2 == 0xFFFF) return;
+        const uint8_t faction = static_cast<uint8_t>(entity->getField(static_cast<uint16_t>(b2 + 1)) >> 24);
+        if (faction != (bgQueues_.active().arenaFaction ? 1 : 0))
+            fireArenaOpponentEvents(arenaOpponents_.playerSeen(guid, present));
+    } else if (entity->getType() == ObjectType::UNIT) {
+        // 0x7402B0: a unit with a pet number that is hostile to the player is
+        // an opponent's pet; its owner is CHARMEDBY, else CREATEDBY.
+        const uint16_t petNumber = fieldIndex(UF::UNIT_FIELD_PETNUMBER);
+        if (petNumber == 0xFFFF || entity->getField(petNumber) == 0) return;
+        auto* unit = static_cast<Unit*>(entity.get());
+        if (!(unit->isHostile() || owner_.unitReactionToPlayer(*unit) <= 2)) return;
+        uint64_t ownerGuid = guidField(*entity, fieldIndex(UF::UNIT_FIELD_CHARMEDBY));
+        if (ownerGuid == 0) ownerGuid = guidField(*entity, fieldIndex(UF::UNIT_FIELD_CREATEDBY_LO));
+        fireArenaOpponentEvents(arenaOpponents_.petSeen(guid, ownerGuid, present));
+    }
+}
+
+void SocialHandler::onObjectLeaving(uint64_t guid, bool outOfRange) {
+    auto entity = owner_.getEntityManager().getEntity(guid);
+    if (!entity || guid == owner_.getPlayerGuid()) return;
+
+    // A party member leaving view (0x52C760 with 0, 0x573070): what the
+    // object knew becomes the member's stats until the server's answer to
+    // CMSG_REQUEST_PARTY_MEMBER_STATS replaces it.
+    if (entity->getType() == ObjectType::PLAYER && !partyData.isEmpty()) {
+        for (auto& m : partyData.members) {
+            if (m.guid != guid) continue;
+            auto* unit = static_cast<Unit*>(entity.get());
+            m.curHealth = unit->getHealth();
+            m.maxHealth = unit->getMaxHealth();
+            m.powerType = unit->getPowerType();
+            m.curPower = static_cast<uint16_t>(std::min<uint32_t>(unit->getPower(), 0xFFFF));
+            m.maxPower = static_cast<uint16_t>(std::min<uint32_t>(unit->getMaxPower(), 0xFFFF));
+            if (unit->getLevel() != 0) m.level = static_cast<uint16_t>(unit->getLevel());
+            requestPartyMemberStats(guid);
+            if (!groupIsRaid(partyData.groupType) || m.subGroup == partyData.subGroup)
+                owner_.fireAddonEvent("PARTY_MEMBER_DISABLE", {});
+            break;
+        }
+    }
+
+    // Out of range in an arena: "unseen" (0x4D7230 -> 0x54ABF0). A destroy
+    // says nothing here; SMSG_ARENA_UNIT_DESTROYED, sent before it, does.
+    if (outOfRange && bgQueues_.active().instanceType == 4) {
+        auto petOf = [this](uint64_t g) { return charmOrSummon(owner_.getEntityManager(), g); };
+        // Asked while the leaving object is still here, as stock asks.
+        auto here = [this](uint64_t g) { return owner_.getEntityManager().hasEntity(g); };
+        fireArenaOpponentEvents(arenaOpponents_.unseen(guid, here, petOf));
+    }
+}
+
+// SMSG_ARENA_UNIT_DESTROYED (0x54B5E0): the guid, and in an arena "destroyed".
+void SocialHandler::handleArenaUnitDestroyed(network::Packet& packet) {
+    if (!packet.hasRemaining(8)) { packet.skipAll(); return; }
+    const uint64_t guid = packet.readUInt64();
+    if (bgQueues_.active().instanceType != 4) return;
+    auto here = [this](uint64_t g) { return owner_.getEntityManager().hasEntity(g); };
+    auto petOf = [this](uint64_t g) { return charmOrSummon(owner_.getEntityManager(), g); };
+    fireArenaOpponentEvents(arenaOpponents_.destroyed(guid, here, petOf));
+}
+
+void SocialHandler::requestPartyMemberStats(uint64_t guid) {
+    if (guid == 0 || owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
+    network::Packet pkt(wireOpcode(Opcode::CMSG_REQUEST_PARTY_MEMBER_STATS));
+    pkt.writeUInt64(guid);
     owner_.getSocket()->send(pkt);
 }
 

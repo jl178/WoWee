@@ -455,4 +455,43 @@ bool EncounterUnits::updatePriority(uint64_t guid, uint8_t priority) {
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// GetZonePVPInfo (0x51BA50)
+// ---------------------------------------------------------------------------
+
+ZonePvp zonePvpInfo(const AreaPvp* area, const AreaPvp* zone, bool pvpRealm, bool hasPlayer,
+                    uint32_t friendGroups, uint32_t enemyGroups,
+                    const std::function<std::string(uint32_t zoneMask)>& factionName) {
+    ZonePvp out;
+    uint32_t flags = 0;
+    if (area && area->flags != 0xFFFFFFFFu) {
+        flags = area->flags;
+        out.fromArea = true;
+    } else {
+        flags = zone ? zone->flags : 0;
+    }
+    const char* early = nullptr;
+    if (flags & 0x800) early = "sanctuary";
+    else if (flags & 0x80) early = "arena";
+    else if (flags & 0x1000000) early = "combat";
+    if (early) {
+        out.type = early;
+        out.count = 2;
+        return out;
+    }
+    out.fromArea = false;
+    if (!zone || !hasPlayer || (!pvpRealm && (zone->flags & 0x10) == 0)) return out;
+    if ((flags & 0x40000) == 0 && (friendGroups & zone->factionMask) == 0 &&
+        (enemyGroups & zone->factionMask) != 0) {
+        out.type = "hostile";
+    } else if ((flags & 0x40000) == 0 && (friendGroups & zone->factionMask) != 0) {
+        out.type = "friendly";
+    } else {
+        out.type = "contested";
+    }
+    out.faction = factionName ? factionName(zone->factionMask) : std::string();
+    out.count = 3;
+    return out;
+}
+
 }  // namespace wowee::game::bf

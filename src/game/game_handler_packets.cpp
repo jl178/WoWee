@@ -1731,40 +1731,6 @@ void GameHandler::registerRemainingOpcodes() {
         addonEventCallback_("COMBAT_LOG_EVENT_UNFILTERED", args);
         addonEventCallback_("COMBAT_LOG_EVENT", args);
     };
-    // WotLK: uint64 playerGuid + uint8 teamCount + per-team fields
-    dispatchTable_[Opcode::MSG_INSPECT_ARENA_TEAMS] = [this](network::Packet& packet) {
-        // WotLK: uint64 playerGuid + uint8 teamCount + per-team fields
-        if (!packet.hasRemaining(9)) {
-            packet.skipAll();
-            return;
-        }
-        uint64_t inspGuid  = packet.readUInt64();
-        uint8_t  teamCount = packet.readUInt8();
-        if (teamCount > 3) teamCount = 3; // 2v2, 3v3, 5v5
-        if (socialHandler_) {
-            auto& ir = socialHandler_->mutableInspectResult();
-            if (inspGuid == ir.guid || ir.guid == 0) {
-                ir.guid = inspGuid;
-                ir.arenaTeams.clear();
-                for (uint8_t t = 0; t < teamCount; ++t) {
-                    if (!packet.hasRemaining(21)) break;
-                    SocialHandler::InspectArenaTeam team;
-                    team.teamId         = packet.readUInt32();
-                    team.type           = packet.readUInt8();
-                    team.weekGames      = packet.readUInt32();
-                    team.weekWins       = packet.readUInt32();
-                    team.seasonGames    = packet.readUInt32();
-                    team.seasonWins     = packet.readUInt32();
-                    team.name           = packet.readString();
-                    if (!packet.hasRemaining(4)) break;
-                    team.personalRating = packet.readUInt32();
-                    ir.arenaTeams.push_back(std::move(team));
-                }
-            }
-        }
-        LOG_DEBUG("MSG_INSPECT_ARENA_TEAMS: guid=0x", std::hex, inspGuid, std::dec,
-                  " teams=", static_cast<int>(teamCount));
-    };
     // auctionId(u32) + action(u32) + error(u32) + itemEntry(u32) + randomPropertyId(u32) + ...
     // action: 0=sold/won, 1=expired, 2=bid placed on your auction
     // auctionHouseId(u32) + auctionId(u32) + bidderGuid(u64) + bidAmount(u32) + outbidAmount(u32) + itemEntry(u32) + randomPropertyId(u32)
@@ -3644,13 +3610,6 @@ void GameHandler::registerRemainingOpcodes() {
     registerSkipHandler(Opcode::SMSG_LOOT_LIST);
     // Same format as LOCKOUT_ADDED; consume
     registerSkipHandler(Opcode::SMSG_CALENDAR_RAID_LOCKOUT_UPDATED);
-    // Sent one line before SMSG_DESTROY_OBJECT and carrying the same guid, and
-    // only inside an arena - Object::DestroyForPlayer writes both. The unit is
-    // removed by the second one whatever happens here, so this is a decision
-    // rather than a gap: the real client uses it to tell an arena opponent who
-    // died from one who merely went out of range, and nothing here draws that
-    // distinction.
-    registerSkipHandler(Opcode::SMSG_ARENA_UNIT_DESTROYED);
     // Consume - remaining server notifications not yet parsed
     for (auto op : {
         Opcode::SMSG_AFK_MONITOR_INFO_RESPONSE,

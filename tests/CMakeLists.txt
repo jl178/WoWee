@@ -899,6 +899,15 @@ wowee_add_test(test_battlefield_rules
             ${CMAKE_SOURCE_DIR}/src/game/battlefield_rules.cpp
             ${CMAKE_SOURCE_DIR}/src/network/packet.cpp)
 
+# ── test_arena_rules ─────────────────────────────────────────
+# Stock arena opponents, arena team records and GetZonePVPInfo
+# (docs/re/pvp-instances.md §3).
+wowee_add_test(test_arena_rules
+    SOURCES test_arena_rules.cpp
+            ${CMAKE_SOURCE_DIR}/src/game/arena_rules.cpp
+            ${CMAKE_SOURCE_DIR}/src/game/battlefield_rules.cpp
+            ${CMAKE_SOURCE_DIR}/src/network/packet.cpp)
+
 # ── test_glue_rules ──────────────────────────────────────────
 # Stock glue screen rules (docs/re/glue-screens.md).
 wowee_add_test(test_glue_rules

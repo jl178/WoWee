@@ -722,6 +722,7 @@ set(WOWEE_SOURCES
     src/game/unit_motion.cpp
     src/game/taxi_rules.cpp
     src/game/battlefield_rules.cpp
+    src/game/arena_rules.cpp
     src/game/glue_rules.cpp
     src/game/vehicle_data.cpp
     src/game/game_handler_vehicles.cpp

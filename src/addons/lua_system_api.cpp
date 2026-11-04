@@ -633,7 +633,7 @@ static int lua_GetPlayerMapPosition(lua_State* L) {
         // about, and they have no entity here.
         if (auto e = gh->getEntityManager().getEntity(guid)) {
             wx = e->getX(); wy = e->getY(); wz = e->getZ();
-        } else if (const auto* m = findPartyMember(gh, guid)) {
+        } else if (const auto* m = findPartyMember(gh, guid); m && m->hasPartyStats) {
             // The group list carries a coarse position - SMSG_PARTY_MEMBER_STATS
             // truncates it to a pair of int16 yards - which is ample for a dot
             // on a zone map and is the only position there is for someone out
@@ -4242,69 +4242,17 @@ static int lua_GetTrackedAchievements(lua_State* L) {
     return static_cast<int>(tracked.size());
 }
 
-// The PvP flag's countdown. The client knows whether the flag is set but not
-// how long it has left, so the timer is reported as not running and the player
-// frame hides the text rather than showing a number it cannot compute.
-static int lua_IsPVPTimerRunning(lua_State* L) { lua_pushboolean(L, 0); return 1; }
-
-// Never reached while the above answers false, but playerframe reads it on the
-// line after and a missing global there would raise before the branch is taken.
-static int lua_GetPVPTimer(lua_State* L) { lua_pushnumber(L, 0); return 1; }
 
 
 // GetPVPRankProgress() → how far through the current rank, 0..1.
 // Fed straight to HonorFrameProgressBar:SetValue, which needs a number.
 static int lua_GetPVPRankProgress(lua_State* L) { lua_pushnumber(L, 0); return 1; }
 
-// ---- Arena team roster ----
-//
-// Which team an index names comes from the same list GetArenaTeam reads.
-// ArenaTeamRoster(index) - ask the server for the roster.
-static int lua_ArenaTeamRoster(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    const uint32_t teamId = arenaTeamIdAtIndex(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
-    if (gh && teamId) gh->requestArenaTeamRoster(teamId);
-    return 0;
-}
-
-// GetArenaTeamRosterInfo(teamIndex, memberIndex) →
-//   name, rank, level, class, online, played, win, seasonPlayed, seasonWin, rating
-//
-// The six counts are numbers rather than nil: the panel subtracts them the line
-// after - `loss = played - win` - so a nil raises there. Class stays nil, which
-// the panel does test before using, and rank and level are zero because the
-// roster carries neither.
-static int lua_GetArenaTeamRosterInfo(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    const uint32_t teamId = arenaTeamIdAtIndex(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
-    const int member = static_cast<int>(luaL_optnumber(L, 2, 0));
-    if (!gh || teamId == 0 || member < 1) return luaReturnNil(L);
-    const auto* roster = gh->getArenaTeamRoster(teamId);
-    if (!roster || member > static_cast<int>(roster->members.size())) return luaReturnNil(L);
-    const auto& m = roster->members[static_cast<size_t>(member) - 1];
-
-    lua_pushstring(L, m.name.c_str());       // 1: name
-    lua_pushnumber(L, 0);                    // 2: rank
-    lua_pushnumber(L, 0);                    // 3: level
-    lua_pushnil(L);                          // 4: class
-    lua_pushboolean(L, m.online ? 1 : 0);    // 5: online
-    lua_pushnumber(L, m.weekGames);          // 6: played
-    lua_pushnumber(L, m.weekWins);           // 7: win
-    lua_pushnumber(L, m.seasonGames);        // 8: seasonPlayed
-    lua_pushnumber(L, m.seasonWins);         // 9: seasonWin
-    lua_pushnumber(L, m.personalRating);     // 10: rating
-    return 10;
-}
-
 // Which roster row is selected, and closing the roster. Both are the panel's
 // own state - nothing is sent for either.
 static int lua_GetArenaTeamRosterSelection(lua_State* L) { lua_pushnumber(L, 0); return 1; }
 static int lua_SetArenaTeamRosterSelection(lua_State* L) { (void)L; return 0; }
 static int lua_CloseArenaTeamRoster(lua_State* L) { (void)L; return 0; }
-
-// Team captaincy is not reported by anything this client parses, so no team
-// reads as the player's to run.
-static int lua_IsArenaTeamCaptain(lua_State* L) { lua_pushboolean(L, 0); return 1; }
 
 
 // The vehicle controls (InputControl, stock 0xAD19F0..; docs/re/
@@ -4464,43 +4412,6 @@ static int lua_EjectPassengerFromSeat(lua_State* L) {
 // and holds keys, so the button that opens it is offered.
 static int lua_HasKey(lua_State* L) { lua_pushboolean(L, 1); return 1; }
 
-// GetArenaTeam(index) →
-//   teamName, teamSize, teamRating, teamPlayed, teamWins, seasonTeamPlayed,
-//   seasonTeamWins, playerPlayed, seasonPlayerPlayed, teamRank, playerRating,
-//   backgroundR, backgroundG, backgroundB, emblem, emblemR, emblemG, emblemB,
-//   border, borderR, borderG, borderB
-//
-// Twenty-two, because PVPTeam_Update unpacks every one of them on a single line
-// and then feeds the colour components straight to SetVertexColor. Answering
-// just the name - which is all the promote and kick confirmations need - left
-// twenty-one nils behind it and took the team list down.
-//
-// The tabard is not tracked: SMSG_ARENA_TEAM_QUERY_RESPONSE carries the emblem
-// style and colours and nothing here reads them. Those eight answer zero rather
-// than nil, so the tabard draws black instead of raising mid-arithmetic.
-static int lua_GetArenaTeam(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    const int idx = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh || idx < 1) return luaReturnNil(L);
-    const auto& teams = gh->getArenaTeamStats();
-    if (idx > static_cast<int>(teams.size())) return luaReturnNil(L);
-    const auto& t = teams[static_cast<size_t>(idx) - 1];
-
-    lua_pushstring(L, t.teamName.c_str());  // 1: teamName
-    lua_pushnumber(L, t.teamType);          // 2: teamSize (2, 3 or 5)
-    lua_pushnumber(L, t.rating);            // 3: teamRating
-    lua_pushnumber(L, t.weekGames);         // 4: teamPlayed
-    lua_pushnumber(L, t.weekWins);          // 5: teamWins
-    lua_pushnumber(L, t.seasonGames);       // 6: seasonTeamPlayed
-    lua_pushnumber(L, t.seasonWins);        // 7: seasonTeamWins
-    // Per-player totals come with the roster, not the team summary.
-    lua_pushnumber(L, 0);                   // 8: playerPlayed
-    lua_pushnumber(L, 0);                   // 9: seasonPlayerPlayed
-    lua_pushnumber(L, t.rank);              // 10: teamRank
-    lua_pushnumber(L, 0);                   // 11: playerRating
-    for (int i = 0; i < 11; ++i) lua_pushnumber(L, 0);  // 12-22: tabard
-    return 22;
-}
 
 
 
@@ -5391,23 +5302,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"RefreshLFGList",           lua_RefreshLFGList},
                 {"GetTrackedAchievements",   lua_GetTrackedAchievements},
                 {"RequestRaidInfo",          lua_RequestRaidInfo},
-                {"IsPVPTimerRunning",        lua_IsPVPTimerRunning},
-                {"GetPVPTimer",              lua_GetPVPTimer},
                 {"GetPVPRankProgress",       lua_GetPVPRankProgress},
-                {"ArenaTeamRoster",              lua_ArenaTeamRoster},
-                {"GetArenaTeamRosterInfo",       lua_GetArenaTeamRosterInfo},
-                // How many rows that reader has. Unbound, so opening a team's
-                // details called a nil global and raised before the first row
-                // was read - the reader beside it worked the whole time.
-                {"GetNumArenaTeamMembers", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const uint32_t teamId =
-                arenaTeamIdAtIndex(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
-            const auto* roster = (gh && teamId) ? gh->getArenaTeamRoster(teamId) : nullptr;
-            lua_pushnumber(L, roster
-                ? static_cast<lua_Number>(roster->members.size()) : 0);
-            return 1;
-        }},
                 // SortArenaTeamRoster(column) - the details frame's column
                 // headers. Unbound, every one of them raised on click.
                 {"SortArenaTeamRoster", [](lua_State* L) -> int {
@@ -5419,7 +5314,6 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"GetArenaTeamRosterSelection",  lua_GetArenaTeamRosterSelection},
                 {"SetArenaTeamRosterSelection",  lua_SetArenaTeamRosterSelection},
                 {"CloseArenaTeamRoster",         lua_CloseArenaTeamRoster},
-                {"IsArenaTeamCaptain",           lua_IsArenaTeamCaptain},
                 {"CanExitVehicle",               lua_CanExitVehicle},
                 {"IsVehicleAimAngleAdjustable",  lua_IsVehicleAimAngleAdjustable},
                 {"IsVehicleAimPowerAdjustable",  lua_IsVehicleAimPowerAdjustable},
@@ -5436,7 +5330,6 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"CanEjectPassengerFromSeat",    lua_CanEjectPassengerFromSeat},
                 {"EjectPassengerFromSeat",       lua_EjectPassengerFromSeat},
                 {"HasKey",                       lua_HasKey},
-                {"GetArenaTeam",             lua_GetArenaTeam},
                 // Sorting the battleground list. This client sorts its own, so
                 // there is nothing to do - but the name has to exist, because
                 // PVPBattlegroundFrame_OnShow calls it and a nil global raises
@@ -5627,7 +5520,6 @@ void registerSystemLuaAPI(lua_State* L) {
             lua_pushnumber(L, 0);
             return 1;
         }},
-                {"GetNumArenaOpponents",     lua_ReturnZero},
                 {"GetCurrentMultisampleFormat", lua_GetCurrentMultisampleFormat},
                 // These hand back a list, not a value: the caller walks it with
                 // select("#", ...) and reads it in groups. One number makes the
@@ -6015,29 +5907,6 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"GetMuteStatus",            lua_ReturnFalse},
                 {"GetActiveVoiceChannel",    lua_ReturnNil},
                 {"GetVoiceCurrentSessionID", lua_ReturnNil},
-                // GetZonePVPInfo() → pvpType, isSubZonePvP, factionName
-                //
-                // minimap.lua unpacks three and answered nil for all of them,
-                // so the zone name on the minimap was always the default
-                // colour and its tooltip never said whose territory it was.
-                // Middle value stays nil: it is for a sub-zone that differs
-                // from its parent, which this reads at zone granularity.
-                {"GetZonePVPInfo", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (!gh) { lua_pushnil(L); return 1; }
-            // The same zone the name comes from (GetZoneText: the terrain
-            // under the player), not the server's last report, which lags a
-            // teleport: Stormwind read as the previous zone's territory.
-            uint32_t zoneId = 0;
-            if (auto* svc = getLuaServices(L); svc && svc->getLiveZoneId) zoneId = svc->getLiveZoneId();
-            if (zoneId == 0) zoneId = gh->getWorldStateZoneId();
-            const auto [type, faction] = gh->getZonePvpInfo(zoneId);
-            if (type.empty()) { lua_pushnil(L); return 1; }
-            lua_pushstring(L, type.c_str());
-            lua_pushnil(L);
-            if (faction.empty()) lua_pushnil(L); else lua_pushstring(L, faction.c_str());
-            return 3;
-        }},
                 {"GetMouseButtonClicked",    lua_ReturnNil},
                 {"GetChatWindowSavedPosition",   lua_GetChatWindowSavedPosition},
                 {"GetChatWindowSavedDimensions", lua_GetChatWindowSavedDimensions},
@@ -7157,32 +7026,6 @@ void registerSystemLuaAPI(lua_State* L) {
             lua_pushnumber(L, ir ? ir->activeTalentGroup : 0);
             return 1;
         }},
-                // GetInspectArenaTeamData(index) →
-                //   name, size, rating, weekPlayed, weekWins, seasonPlayed,
-                //   seasonWins, playerRating
-                //
-                // Real: the inspect reply carries these and this client already
-                // parses them into InspectResult.
-                {"GetInspectArenaTeamData", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const auto* ir = gh ? gh->getInspectResult() : nullptr;
-            const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
-            if (!ir || index < 1 ||
-                index > static_cast<int>(ir->arenaTeams.size())) {
-                return 0;   // nothing, which is how WoW says "no team here"
-            }
-            const auto& t = ir->arenaTeams[index - 1];
-            // The type is the team size: 2, 3 or 5.
-            lua_pushstring(L, t.name.c_str());
-            lua_pushnumber(L, t.type);
-            lua_pushnumber(L, t.personalRating);
-            lua_pushnumber(L, t.weekGames);
-            lua_pushnumber(L, t.weekWins);
-            lua_pushnumber(L, t.seasonGames);
-            lua_pushnumber(L, t.seasonWins);
-            lua_pushnumber(L, t.personalRating);
-            return 8;
-        }},
                 // CanInspect(unit [, showError]) - a player other than a
                 // corpse, which is as much as this client can judge; the server
                 // refuses the rest and the reply simply does not arrive.
@@ -7544,14 +7387,6 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"CanEditGuildEvent", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             lua_pushboolean(L, (gh && !gh->getGuildName().empty()) ? 1 : 0);
-            return 1;
-        }},
-                // Whether the player is on an arena team - the teams
-                // SMSG_ARENA_TEAM_STATS has listed. The mass-invite frame
-                // closes itself when this and CanEditGuildEvent are both false.
-                {"IsInArenaTeam", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            lua_pushboolean(L, (gh && !gh->getArenaTeamStats().empty()) ? 1 : 0);
             return 1;
         }},
                 // ---- Opening one event ----
@@ -8004,11 +7839,8 @@ void registerSystemLuaAPI(lua_State* L) {
             if (!gh) return 0;
             calendarSelection() = {};
             gh->beginNewCalendarEvent(0);
-            const int team = static_cast<int>(luaL_optnumber(L, 1, 0));
-            const auto& teams = gh->getArenaTeamStats();
-            if (team >= 1 && static_cast<size_t>(team) <= teams.size()) {
-                gh->massInviteArenaTeamToCalendarEvent(teams[static_cast<size_t>(team) - 1].teamId);
-            }
+            const uint32_t id = arenaTeamIdAtIndex(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+            if (id) gh->massInviteArenaTeamToCalendarEvent(id);
             return 0;
         }},
                 // CMSG_CALENDAR_ARENA_TEAM with that team's id; the members
@@ -8016,11 +7848,8 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"CalendarMassInviteArenaTeam", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
-            const int team = static_cast<int>(luaL_optnumber(L, 1, 0));
-            const auto& teams = gh->getArenaTeamStats();
-            if (team >= 1 && static_cast<size_t>(team) <= teams.size()) {
-                gh->massInviteArenaTeamToCalendarEvent(teams[static_cast<size_t>(team) - 1].teamId);
-            }
+            const uint32_t id = arenaTeamIdAtIndex(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+            if (id) gh->massInviteArenaTeamToCalendarEvent(id);
             return 0;
         }},
                 {"CalendarEventSetTitle", [](lua_State* L) -> int {

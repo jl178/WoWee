@@ -4059,6 +4059,14 @@ std::vector<std::string> GameHandler::unitTokensForGuid(uint64_t guid) const {
         if (++n > 4) break;
         if (m.guid == guid) out.push_back("party" + std::to_string(n));
     }
+    if (raid) {
+        const std::string r = groupUnitToken(pd, playerGuid, guid);
+        if (r.rfind("raid", 0) == 0) out.push_back(r);
+    }
+    for (size_t i = 0; i < 5; ++i) {
+        if (arenaOpponentGuid(i, false) == guid) out.push_back("arena" + std::to_string(i + 1));
+        else if (arenaOpponentGuid(i, true) == guid) out.push_back("arenapet" + std::to_string(i + 1));
+    }
     if (guid == targetGuid) out.emplace_back("target");
     if (guid == focusGuid) out.emplace_back("focus");
     if (guid == mouseoverGuid_) out.emplace_back("mouseover");

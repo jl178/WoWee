@@ -8,6 +8,7 @@
 #include <iterator>
 #include <vector>
 #include "addons/lua_api_helpers.hpp"
+#include "game/social_handler.hpp"
 #include "game/reputation_standing.hpp"
 #include "game/stationery.hpp"
 #include "rendering/animation_controller.hpp"
@@ -459,11 +460,12 @@ std::vector<const game::WhoEntry*> whoResultsView(game::GameHandler* gh) {
 
 // Declared in lua_api_helpers.hpp: the system API asks the same question and
 // had its own copy under another name.
+// The team in a slot of PLAYER_FIELD_ARENA_TEAM_INFO (1 2v2, 2 3v3, 3 5v5),
+// as GetArenaTeam counts (0x5A3860) - not the order stats packets arrived in.
 uint32_t arenaTeamIdAtIndex(game::GameHandler* gh, int index) {
-    if (!gh || index < 1) return 0;
-    const auto& teams = gh->getArenaTeamStats();
-    if (index > static_cast<int>(teams.size())) return 0;
-    return teams[static_cast<size_t>(index) - 1].teamId;
+    const auto* soc = gh ? gh->battlefield() : nullptr;
+    if (!soc || index < 1 || index > static_cast<int>(game::arena::kTeamSlots)) return 0;
+    return soc->arenaTeamInfo(static_cast<size_t>(index) - 1).teamId;
 }
 
 // IsInGuild() → boolean
