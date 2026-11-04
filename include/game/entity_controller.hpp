@@ -35,6 +35,25 @@ public:
     void queryPlayerName(uint64_t guid);
     void queryCreatureInfo(uint32_t entry, uint64_t guid);
     void queryGameObjectInfo(uint32_t entry, uint64_t guid);
+    /// A pet's name (UNIT_FIELD_PETNUMBER set): from the pet name cache when
+    /// its stamp still matches, else asked for (CMSG_PET_NAME_QUERY with the
+    /// pet number, as 0x72A000 asks).
+    void queryPetName(uint64_t guid, uint32_t petNumber);
+    void handlePetNameQueryResponse(network::Packet& packet);
+    /// Re-asks whatever a unit, player or object in view is still missing a
+    /// name for, and saves the caches now and then. Called from the update
+    /// loop.
+    void resyncNames();
+    /// UNIT_NAME_UPDATE for every token naming the unit (0x512B00 ->
+    /// 0x60BF10(0x90)).
+    void fireNameUpdate(uint64_t guid, bool deferred = false);
+    /// The realm whose creature and game object caches are kept on disk.
+    void setPersistentCacheKey(const std::string& key, uint32_t build) {
+        persistKey_ = key;
+        persistBuild_ = build;
+    }
+    void loadPersistentCaches();
+    void savePersistentCaches();
     [[nodiscard]] std::string getCachedPlayerName(uint64_t guid) const;
     [[nodiscard]] std::string getCachedCreatureName(uint32_t entry) const;
     void invalidatePlayerName(uint64_t guid) { playerNameCache.erase(guid); }
@@ -121,9 +140,32 @@ private:
     // Class/race cache from SMSG_NAME_QUERY_RESPONSE (guid → {classId, raceId})
     struct PlayerClassRace { uint8_t classId = 0; uint8_t raceId = 0; uint8_t gender = 0xFF; };
     std::unordered_map<uint64_t, PlayerClassRace> playerClassRaceCache_;
-    std::unordered_set<uint64_t> pendingNameQueries;
+    // Pending queries, with when each was sent (steady ms): one unanswered
+    // for name_pipeline::kQueryResendMs is asked again.
+    std::unordered_map<uint64_t, int64_t> pendingNameQueries;
     std::unordered_map<uint32_t, CreatureQueryResponseData> creatureInfoCache;
-    std::unordered_set<uint32_t> pendingCreatureQueries;
+    std::unordered_map<uint32_t, int64_t> pendingCreatureQueries;
+    /// Pet name cache (0x67EA30's), by pet number.
+    struct PetNameRecord { std::string name; uint32_t timestamp = 0; };
+    std::unordered_map<uint32_t, PetNameRecord> petNameCache_;
+    struct PendingPetName { uint64_t guid = 0; int64_t sentMs = 0; };
+    std::unordered_map<uint32_t, PendingPetName> pendingPetNameQueries_;
+    /// Records read from disk and not yet confirmed by the server this
+    /// session: used at once, asked for again the first time they are needed.
+    std::unordered_set<uint32_t> creatureFromDisk_;
+    std::unordered_set<uint32_t> gameObjectFromDisk_;
+    std::unordered_set<uint32_t> creatureNotFound_;
+    std::string persistKey_;
+    uint32_t persistBuild_ = 0;
+    bool persistDirty_ = false;
+    int64_t lastPersistSaveMs_ = 0;
+    int64_t lastNameResyncMs_ = 0;
+    [[nodiscard]] bool canSendQueries() const;
+    /// The name a unit (not a player) shows, from whichever cache 0x72A000
+    /// reads for it, asking for it when missing.
+    void resolveUnitName(uint64_t guid, Unit& unit);
+    [[nodiscard]] uint32_t unitPetNumber(const Unit& unit) const;
+    [[nodiscard]] uint32_t unitPetNameStamp(const Unit& unit) const;
     std::unordered_map<uint32_t, GameObjectQueryResponseData> gameObjectInfoCache_;
     /// Objects clicked to be read before their metadata arrived.
     ///
@@ -133,7 +175,7 @@ private:
     /// is a sign that does nothing the first time it is clicked and works the
     /// second.
     std::unordered_set<uint64_t> pendingPageTextGuids_;
-    std::unordered_set<uint32_t> pendingGameObjectQueries_;
+    std::unordered_map<uint32_t, int64_t> pendingGameObjectQueries_;
 
     // --- Update Object work queue ---
     struct PendingUpdateObjectWork {

@@ -88,6 +88,52 @@ What is shown (0x807F10 -> 0x5216F0, the game error table at 0xAC8AF0):
 `SPELL_FAILED_NOT_READY`'s own string "Not yet recovered" is never what the
 client prints for it.
 
+Two more things in 0x808200 bear on repeated text:
+
+- A spell waiting for its target click (`0xD397CC`, set by 0x7FE140, which
+  also resets `0xD397C8` to 0xBB through 0x7FE190) keeps its own last result
+  (`0xD397C8`): the same result again for that spell says nothing, however
+  long apart.
+- **Different results are different failures.** The 3 s rule compares the
+  result as well as the spell, and the UIErrorsFrame does not merge lines
+  either (`MessageFrame:AddMessage` 0x9747C0 -> CSimpleMessageFrame vtable
+  +0xE4 = 0x9686C0 appends every message). So whatever the server sends twice
+  with two results, stock prints twice.
+
+### One press, two refusals (AzerothCore)
+
+AzerothCore answers some refused presses with **two `SMSG_CAST_FAILED`
+carrying the same cast count**. Fishing onto land: `Spell::SelectSpellTargets`
+picks the bobber point (TARGET_DEST_CASTER_FISHING), finds no liquid and sends
+`SPELL_FAILED_NOT_HERE` (60) and finishes - then the same loop's channel check
+finds no target and sends `SPELL_FAILED_BAD_IMPLICIT_TARGETS` (11). Any
+channel whose target selection fails the same way does it. Seen in game:
+
+```
+Casting spell: 7620 on 0x0
+Cast failed: spell=7620 result=60     <- SMSG_CAST_FAILED, count 1
+Cast failed: spell=7620 result=11     <- SMSG_CAST_FAILED, count 1, same ms
+```
+
+Stock would print "You can't use that here." and "No target". Wowee printed
+**"Face open water and try casting again." twice**: its own fishing wording
+mapped 11, 60 and 178 to that one line, and the throttle let both through
+because the results differ. It was not a client check and a server answer, nor
+two handlers (`handleCastFailed` is the only one for 0x130 on WotLK).
+
+The rule now (`stock_cast::CastErrorThrottle`, a cast count passed by
+`handleCastFailed`): **a refusal of a press already refused - same spell, same
+cast count, within 3 s - shows nothing and leaves the 3 s state alone**. The
+first refusal of the press is the one shown, through 0x808200's rule. Not in
+stock (whose servers did not answer twice); it is what makes one failure one
+line. The client's own refusals and the older clients' messages carry no
+count and keep the plain rule. The fishing wording is gone: the results show
+the game's own SPELL_FAILED_* lines ("You can't use that here.", "Water too
+shallow", "Your cast didn't land in fishable water", "Requires Fishing %d"),
+as 0x808200 shows them.
+
+UNIT_SPELLCAST_FAILED still fires for each message, as stock's 0x7FECC0 does.
+
 ### The send (0x80AC90)
 
 In this order, all before any reply:
@@ -224,6 +270,12 @@ seen to lag.
   last says nothing. The "routine rejection" rule that silenced the voice of
   every cooldown/range/power refusal is gone; the throttle does that job the
   stock way.
+- **One text per refused press**: a second `SMSG_CAST_FAILED` for a press
+  already refused (same spell and cast count within 3 s, as AzerothCore sends
+  for fishing onto land) says nothing; the fishing rewording ("Face open
+  water...") is gone for the stock SPELL_FAILED_* lines; pre-WotLK
+  `SMSG_CAST_RESULT` goes through the same throttle (it printed every
+  answer).
 - **No spell queue by default.** A press during a cast is sent; the refusal of
   that press (a different cast count) no longer tears down the running cast,
   its bar, its build-up or its GCD (`handleCastFailed`). `SpellQueueWindow`
@@ -247,8 +299,8 @@ seen to lag.
   (`include/core/input_trace.hpp`; hooks in the pump, `WorldSocket::send`,
   packet dispatch and `LuaEngine::fireEvent`).
 
-Tests: `tests/test_stock_cast_timing.cpp` (GCD, haste, throttle, not-ready
-line, click rule) and a case in `tests/test_input_integration.cpp` (action
+Tests: `tests/test_stock_cast_timing.cpp` (GCD, haste, throttle, one text
+per refused press, not-ready line, click rule) and a case in `tests/test_input_integration.cpp` (action
 keys are interface bindings: down then up).
 
 ## 4. Wowee after

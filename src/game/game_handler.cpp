@@ -1,4 +1,5 @@
 #include "game/game_handler.hpp"
+#include "game/name_pipeline.hpp"
 #include "game/unit_motion_glue.hpp"
 #include "game/reputation_standing.hpp"
 #include "game/spell_classification.hpp"
@@ -148,6 +149,10 @@ bool GameHandler::connect(const std::string& host,
     this->accountName = accountName;
     this->build = build;
     this->realmId_ = realmId;
+    // This realm's creature and game object records, kept between sessions
+    // (stock's WDB files; name_pipeline.hpp).
+    if (entityController_)
+        entityController_->setPersistentCacheKey(name_pipeline::realmCacheKey(host, port, realmId), build);
 
     // The session key is the shared secret the world handshake proves knowledge
     // of and the header cipher is keyed from: anyone holding these 40 bytes can
@@ -665,24 +670,10 @@ void GameHandler::updateTimers(float deltaTime) {
         }
     }
 
-    // Periodically re-query names for players whose initial CMSG_NAME_QUERY was
-    // lost (server didn't respond) or whose entity was recreated while the query
-    // was still pending. Runs every 5 seconds to keep overhead minimal.
-    if (isInWorld()) {
-        static float nameResyncTimer = 0.0f;
-        nameResyncTimer += deltaTime;
-        if (nameResyncTimer >= 5.0f) {
-            nameResyncTimer = 0.0f;
-            for (const auto& [guid, entity] : entityController_->getEntityManager().getEntities()) {
-                if (!entity || entity->getType() != ObjectType::PLAYER) continue;
-                if (guid == playerGuid) continue;
-                auto player = std::static_pointer_cast<Player>(entity);
-                if (!player->getName().empty()) continue;
-                // Player entity exists with empty name and no pending query - resend.
-                entityController_->queryPlayerName(guid);
-            }
-        }
-    }
+    // Whatever in view still has no name - a player, a creature, a pet, a
+    // game object - is asked about again: never asked (created before the
+    // world was entered), or asked and not answered in 10 s. Every 2 s.
+    entityController_->resyncNames();
 
     // The fallback for a server that sends no SMSG_LOOT_MONEY_NOTIFY lives
     // with the state it reads - this ticked a copy of its own that nothing

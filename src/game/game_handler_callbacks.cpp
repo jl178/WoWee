@@ -779,6 +779,9 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     focusGuid = 0;
     lastTargetGuid = 0;
     entityController_->clearAll();
+    // The realm's records from earlier sessions: names in view are known
+    // before any answer comes back.
+    entityController_->loadPersistentCaches();
 
     // Build CMSG_PLAYER_LOGIN packet
     auto packet = PlayerLoginPacket::build(characterGuid);
@@ -2349,6 +2352,10 @@ uint32_t GameHandler::getCreatureDisplayIdForEntry(uint32_t entry) {
 
 void GameHandler::queryGameObjectInfo(uint32_t entry, uint64_t guid) {
     if (entityController_) entityController_->queryGameObjectInfo(entry, guid);
+}
+
+void GameHandler::queryPetName(uint64_t guid, uint32_t petNumber) {
+    if (entityController_) entityController_->queryPetName(guid, petNumber);
 }
 
 std::string GameHandler::getCachedPlayerName(uint64_t guid) const {

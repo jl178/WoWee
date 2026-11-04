@@ -506,8 +506,6 @@ public:
 
 private:
     void announceLearnedSpell(uint32_t spellId);
-    std::unordered_map<uint32_t, uint64_t> pendingPetNameQueries_;
-    uint32_t nextPetNameQueryKey_ = 1;
 
     // --- Packet handlers ---
     void handleInitialSpells(network::Packet& packet);
@@ -687,9 +685,14 @@ private:
     /// 0x739650's moving checks for the player's current movement flags.
     bool refusedForMoving(uint32_t spellId);
     /// Text and voice for a refused cast, through the throttle. False when
-    /// the throttle held it back.
+    /// the throttle held it back. castCount is the server's count for the
+    /// refused press (-1 for the client's own refusals and for messages that
+    /// carry none): a press already refused says nothing more.
     bool showCastFailure(uint32_t spellId, uint8_t result, uint32_t miscArg, uint32_t miscArg2,
-                         bool fromServer);
+                         bool fromServer, int castCount = -1);
+    /// The refused press's count for the throttle: the wire's, where the
+    /// message has one.
+    [[nodiscard]] int throttleCastCount(uint8_t wireCount) const;
     [[nodiscard]] int playerPowerType() const;
     static int64_t steadyNowMs();
     uint32_t autoRepeatSpellId_ = 0;

@@ -54,10 +54,18 @@ static int lua_UnitName(lua_State* L) {
                 lua_pushstring(L, own.empty() ? "Unknown" : own.c_str());
             }
         } else {
-            lua_pushstring(L, "Unknown");
+            // A token naming nobody - no target, an empty party slot - is
+            // nil, nil (0x60E740), not UNKNOWNOBJECT: "Unknown" is the answer
+            // for a unit that exists and whose name has not arrived.
+            lua_pushnil(L);
+            lua_pushnil(L);
+            return 2;
         }
     }
-    return 1;
+    // The realm, nil for one's own (0x60E740 pushes the record's +0x34, empty
+    // on a single realm).
+    lua_pushnil(L);
+    return 2;
 }
 
 
