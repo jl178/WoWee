@@ -140,7 +140,7 @@ bool Renderer::createPerFrameResources() {
     VkImageCreateInfo imgCI{};
     imgCI.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imgCI.imageType = VK_IMAGE_TYPE_2D;
-    imgCI.format = VK_FORMAT_D32_SFLOAT;
+    imgCI.format = shadowDepthFormat();
     imgCI.extent = {.width = SHADOW_MAP_SIZE, .height = SHADOW_MAP_SIZE, .depth = 1};
     imgCI.mipLevels = 1;
     imgCI.arrayLayers = 1;
@@ -162,7 +162,7 @@ bool Renderer::createPerFrameResources() {
     VkImageViewCreateInfo viewCI{};
     viewCI.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewCI.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewCI.format = VK_FORMAT_D32_SFLOAT;
+    viewCI.format = shadowDepthFormat();
     viewCI.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
     for (uint32_t i = 0; i < MAX_FRAMES; i++) {
         viewCI.image = shadowDepthImage[i];
@@ -210,7 +210,7 @@ bool Renderer::createPerFrameResources() {
 
     // --- Create shadow render pass (depth-only) ---
     VkAttachmentDescription depthAtt{};
-    depthAtt.format = VK_FORMAT_D32_SFLOAT;
+    depthAtt.format = shadowDepthFormat();
     depthAtt.samples = VK_SAMPLE_COUNT_1_BIT;
     depthAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     depthAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -1286,7 +1286,16 @@ void Renderer::buildLocalLightTiles(uint32_t count) {
     if (!tilesOn || !enh_.localLights || count == 0 || !camera) return;
     const VkExtent2D ext = sceneRenderExtent();
     if (ext.width == 0 || ext.height == 0) return;
-    cullLightsToTiles(fd.projection * fd.view, fd.localLightPosRadius, count, fd.localLightTiles);
+    // WOWEE_LIGHT_TILE_MARGIN_TILE=1 grows each light by a whole tile and
+    // bounds it by its box, as before enhancements-plan.md 3.12.
+    static const bool oldMargin = core::envFlagEnabled("WOWEE_LIGHT_TILE_MARGIN_TILE", false);
+    if (oldMargin) {
+        cullLightsToTiles(fd.projection * fd.view, fd.localLightPosRadius, count, fd.localLightTiles);
+    } else {
+        cullLightsToTiles(fd.view, fd.projection, fd.localLightPosRadius, count, fd.localLightTiles,
+                          lightTileMarginPixels(2.0f, static_cast<float>(ext.width),
+                                                static_cast<float>(ext.height)));
+    }
     fd.localLightTileInfo = glm::ivec4(static_cast<int>(LIGHT_TILES_X), static_cast<int>(LIGHT_TILES_Y), 1, 0);
     fd.localLightTileScale = glm::vec4(static_cast<float>(LIGHT_TILES_X) / static_cast<float>(ext.width),
                                        static_cast<float>(LIGHT_TILES_Y) / static_cast<float>(ext.height),
@@ -1861,6 +1870,9 @@ void Renderer::beginFrame() {
 
     // Compute fresh shadow matrix BEFORE UBO update so shaders get current-frame data.
     planShadowFrame();
+    // The unit map's units record on a worker from here to the shadow pass,
+    // beside the per-frame block, the culls and the composites.
+    startUnitShadowRecording();
 
     // Update per-frame UBO with current camera/lighting state
     updatePerFrameUBO();
@@ -1897,6 +1909,13 @@ void Renderer::beginFrame() {
     buildFrameGraph(nullptr);
     if (renderGraph_) {
         renderGraph_->execute(currentCmd);
+    }
+    // The shadow pass joins the units' job; one it did not reach (a graph
+    // that left the pass out) is waited for here, and its buffer unused,
+    // before the frame's recording moves on.
+    if (unitShadowJobActive_) {
+        unitShadowFuture_.wait();
+        unitShadowJobActive_ = false;
     }
     section("beginFrame/graph (shadows, hiz, fog)");
 
@@ -5478,6 +5497,20 @@ bool Renderer::createSecondaryCommandResources() {
         }
     }
 
+    // The unit map's units: one pool of their own, as the job runs while no
+    // other recording does but on whichever worker takes it; the movers'
+    // secondary is the main thread's.
+    if (vkCreateCommandPool(device, &poolCI, nullptr, &unitShadowCmdPool_) != VK_SUCCESS) {
+        LOG_ERROR("Failed to create the unit shadow command pool");
+        return false;
+    }
+    for (uint32_t f = 0; f < MAX_FRAMES; ++f) {
+        allocInfo.commandPool = unitShadowCmdPool_;
+        if (vkAllocateCommandBuffers(device, &allocInfo, &unitShadowCharCmd_[f]) != VK_SUCCESS) return false;
+        allocInfo.commandPool = mainSecondaryCmdPool_;
+        if (vkAllocateCommandBuffers(device, &allocInfo, &unitShadowMoverCmd_[f]) != VK_SUCCESS) return false;
+    }
+
     parallelRecordingEnabled_ = true;
     LOG_INFO("Multithreaded rendering: ", NUM_WORKERS, " worker threads, ",
              NUM_SECONDARIES, " secondary buffers [ENABLED]");
@@ -5499,6 +5532,16 @@ void Renderer::destroySecondaryCommandResources() {
     if (mainSecondaryCmdPool_) {
         vkDestroyCommandPool(device, mainSecondaryCmdPool_, nullptr);
         mainSecondaryCmdPool_ = VK_NULL_HANDLE;
+    }
+    if (unitShadowFuture_.valid()) unitShadowFuture_.wait();
+    unitShadowJobActive_ = false;
+    if (unitShadowCmdPool_) {
+        vkDestroyCommandPool(device, unitShadowCmdPool_, nullptr);
+        unitShadowCmdPool_ = VK_NULL_HANDLE;
+    }
+    for (uint32_t f = 0; f < MAX_FRAMES; ++f) {
+        unitShadowCharCmd_[f] = VK_NULL_HANDLE;
+        unitShadowMoverCmd_[f] = VK_NULL_HANDLE;
     }
 
     for (auto& arr : secondaryCmds_)
@@ -5624,7 +5667,7 @@ void Renderer::renderReflectionPass() {
 }
 
 void Renderer::beginShadowTarget(VkImage image, VkImageView view, VkFramebuffer fb, uint32_t size,
-                                 VkImageLayout& layout, bool clear) {
+                                 VkImageLayout& layout, bool clear, bool secondaryContents) {
     // Into writable depth. From SHADER_READ_ONLY the barrier waits on the
     // fragment shaders and the fog's compute pass that read the map.
     VkImageMemoryBarrier2 b1{};
@@ -5679,6 +5722,7 @@ void Renderer::beginShadowTarget(VkImage image, VkImageView view, VkFramebuffer 
         renderInfo.renderArea = {.offset = {.x = 0, .y = 0}, .extent = {.width = size, .height = size}};
         renderInfo.layerCount = 1;
         renderInfo.pDepthAttachment = &depthAttach;
+        if (secondaryContents) renderInfo.flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT;
         vkCmdBeginRendering(currentCmd, &renderInfo);
     } else {
         VkRenderPassBeginInfo rpInfo{};
@@ -5690,8 +5734,13 @@ void Renderer::beginShadowTarget(VkImage image, VkImageView view, VkFramebuffer 
         clearValue.depthStencil = {.depth = 1.0f, .stencil = 0};
         rpInfo.clearValueCount = clear ? 1 : 0;
         rpInfo.pClearValues = clear ? &clearValue : nullptr;
-        vkCmdBeginRenderPass(currentCmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBeginRenderPass(currentCmd, &rpInfo, secondaryContents
+                                 ? VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS
+                                 : VK_SUBPASS_CONTENTS_INLINE);
     }
+    // Inside a pass of secondaries only vkCmdExecuteCommands may be
+    // recorded; each secondary sets its own viewport and scissor.
+    if (secondaryContents) return;
     VkViewport vp{.x = 0, .y = 0, .width = static_cast<float>(size), .height = static_cast<float>(size), .minDepth = 0.0f, .maxDepth = 1.0f};
     vkCmdSetViewport(currentCmd, 0, 1, &vp);
     VkRect2D sc{.offset = {.x = 0, .y = 0}, .extent = {.width = size, .height = size}};
@@ -5734,13 +5783,124 @@ void Renderer::clearShadowImageOnce(VkImage image, VkImageView view, VkFramebuff
     cleared = true;
 }
 
+namespace {
+bool shadowsSkippedByEnv() {
+    static const bool skip = std::getenv("WOWEE_SKIP_SHADOWS") != nullptr;
+    return skip;
+}
+// WOWEE_SHADOW_CASTERS_WHEN_OFF=1 draws the casters with shadows off, as the
+// pass once did - for measuring what skipping them saves.
+bool shadowCastersWhenOff() {
+    static const bool on = core::envFlagEnabled("WOWEE_SHADOW_CASTERS_WHEN_OFF", false);
+    return on;
+}
+// WOWEE_SHADOW_CASTERS=terrain,wmo,m2,characters draws only the named
+// casters - for finding which of them the pass's time goes to.
+bool shadowCasterAllowed(const char* what) {
+    static const std::string filter = [] {
+        const char* v = std::getenv("WOWEE_SHADOW_CASTERS");
+        return std::string(v ? v : "");
+    }();
+    return filter.empty() || filter.find(what) != std::string::npos;
+}
+}  // namespace
+
+bool Renderer::unitMapDrawsThisFrame() const {
+    if (shadowsSkippedByEnv()) return false;
+    if (passAblation_ && passAblation_->skip(AblationPass::Shadows)) return false;
+    if (!vkCtx || shadowDepthImage[0] == VK_NULL_HANDLE || currentCmd == VK_NULL_HANDLE) return false;
+    if (!shadowsEnabled && !shadowCastersWhenOff()) return false;
+    if (lightSpaceMatrix == glm::mat4(0.0f) && shadowPartsThisFrame_ == 0) return false;
+    return nearShadowOn_ && shadowNearImage[vkCtx->getCurrentFrame()] != VK_NULL_HANDLE;
+}
+
+bool Renderer::unitShadowReceiverView(ShadowReceiverView& seen) const {
+    // Where the camera can see the units' shadows: a unit whose shadow
+    // falls wholly outside the view is not drawn (shadowCasterSeen).
+    // Receivers are taken to lie no more than 40 yards below the lowest
+    // of the camera, the player and the unit, and no further along the
+    // ray than the map's depth. Not with the water's reflection on, which
+    // sees what the camera does not.
+    static const bool viewCull = core::envFlagEnabled("WOWEE_UNIT_SHADOW_VIEW_CULL", true);
+    if (!viewCull || !camera || enh_.waterReflections) return false;
+    Frustum f;
+    f.extractFromMatrix(camera->getViewProjectionMatrix());
+    for (int i = 0; i < 6; ++i) {
+        const Plane& pl = f.getPlane(static_cast<Frustum::Side>(i));
+        seen.planes[i] = glm::vec4(pl.normal, pl.distance);
+    }
+    seen.sunRay = shadowRayDirection();
+    seen.floorZ = std::min(camera->getPosition().z, characterPosition.z) - 40.0f;
+    seen.maxReach = 2.0f * std::max(2.0f * nearShadowProj_.halfExtent, 300.0f);
+    return true;
+}
+
+bool Renderer::beginUnitShadowSecondary(VkCommandBuffer cmd, uint32_t frame) {
+    VkCommandBufferInheritanceRenderingInfo rendering{};
+    rendering.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO;
+    rendering.depthAttachmentFormat = shadowDepthFormat();
+    rendering.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkCommandBufferInheritanceInfo inherit{};
+    inherit.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
+    if (vkCtx->useDynamicRendering()) {
+        inherit.pNext = &rendering;
+    } else {
+        // The clearing pass and the loading one are compatible; the unit map
+        // is begun with the clearing one.
+        inherit.renderPass = shadowRenderPass;
+        inherit.subpass = 0;
+        inherit.framebuffer = shadowNearFramebuffer[frame];
+    }
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT | VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
+    begin.pInheritanceInfo = &inherit;
+    if (vkBeginCommandBuffer(cmd, &begin) != VK_SUCCESS) return false;
+    const float size = static_cast<float>(SHADOW_NEAR_SIZE);
+    VkViewport vp{.x = 0, .y = 0, .width = size, .height = size, .minDepth = 0.0f, .maxDepth = 1.0f};
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    VkRect2D sc{.offset = {.x = 0, .y = 0}, .extent = {.width = SHADOW_NEAR_SIZE, .height = SHADOW_NEAR_SIZE}};
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+    return true;
+}
+
+void Renderer::startUnitShadowRecording() {
+    unitShadowJobActive_ = false;
+    // WOWEE_UNIT_SHADOW_WORKER=0 records the units inline in the shadow pass.
+    static const bool onWorker = core::envFlagEnabled("WOWEE_UNIT_SHADOW_WORKER", true);
+    if (!onWorker || !parallelRecordingEnabled_ || !unitShadowCmdPool_ || !characterRenderer) return;
+    if (!shadowSplit_ || !shadowCasterAllowed("characters") || !unitMapDrawsThisFrame()) return;
+    const uint32_t frame = vkCtx->getCurrentFrame();
+    VkCommandBuffer cmd = unitShadowCharCmd_[frame];
+    if (cmd == VK_NULL_HANDLE) return;
+
+    // What the job reads of the renderer is taken now; nothing on the main
+    // thread touches the character renderer again before the shadow pass
+    // joins it (the per-frame block, the M2 and grass culls and the
+    // composites ahead of the pass do not).
+    characterRenderer->beginSunShadowFrame();
+    unitShadowUseSeen_ = unitShadowReceiverView(unitShadowSeen_);
+    const ShadowProjection np = nearShadowProj_;
+    const float nearCull = np.halfExtent * 1.5f;
+    unitShadowCharSpheres_.clear();
+    unitShadowFuture_ = core::ThreadPool::frameWorkers().submit([this, cmd, frame, np, nearCull]() -> double {
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!beginUnitShadowSecondary(cmd, frame)) return -1.0;
+        characterRenderer->renderShadow(cmd, np.matrix, np.center, nearCull, &unitShadowCharSpheres_,
+                                        unitShadowUseSeen_ ? &unitShadowSeen_ : nullptr);
+        if (vkEndCommandBuffer(cmd) != VK_SUCCESS) return -1.0;
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    });
+    unitShadowJobActive_ = true;
+}
+
 void Renderer::renderShadowPass() {
     ZoneScopedN("Renderer::renderShadowPass");
     // A new record of the units with a sun shadow; those left out of it take
-    // the blob (updateUnitBlobs), so it starts before any early return.
-    if (characterRenderer) characterRenderer->beginSunShadowFrame();
-    static const bool skipShadows = (std::getenv("WOWEE_SKIP_SHADOWS") != nullptr);
-    if (skipShadows) return;
+    // the blob (updateUnitBlobs), so it starts before any early return. A
+    // units' job started it already.
+    if (characterRenderer && !unitShadowJobActive_) characterRenderer->beginSunShadowFrame();
+    if (shadowsSkippedByEnv()) return;
     if (passAblation_ && passAblation_->skip(AblationPass::Shadows)) return;
     if (shadowDepthImage[0] == VK_NULL_HANDLE) return;
     if (currentCmd == VK_NULL_HANDLE) return;
@@ -5759,10 +5919,7 @@ void Renderer::renderShadowPass() {
     // shadowParams.x is 0. Checked on an RTX 4060 with the device-fault
     // diagnostics on: shadows flipped every 1.5 s for 90 s in Stormwind, then
     // held off for two minutes there and in Elwynn, no device loss.
-    // WOWEE_SHADOW_CASTERS_WHEN_OFF=1 draws the casters with shadows off, as
-    // this pass used to - for measuring what skipping them saves.
-    static const bool castersWhenOff = core::envFlagEnabled("WOWEE_SHADOW_CASTERS_WHEN_OFF", false);
-    const bool on = shadowsEnabled || castersWhenOff;
+    const bool on = shadowsEnabled || shadowCastersWhenOff();
     if (!on) {
         for (uint32_t i = 0; i < MAX_FRAMES; ++i) {
             clearShadowImageOnce(shadowDepthImage[i], shadowDepthView[i], shadowFramebuffer[i],
@@ -5795,15 +5952,7 @@ void Renderer::renderShadowPass() {
         return;
     }
 
-    // WOWEE_SHADOW_CASTERS=terrain,wmo,m2,characters draws only the named
-    // casters - for finding which of them the pass's time goes to.
-    static const std::string casterFilter = [] {
-        const char* v = std::getenv("WOWEE_SHADOW_CASTERS");
-        return std::string(v ? v : "");
-    }();
-    const auto casts = [](const char* what) {
-        return casterFilter.empty() || casterFilter.find(what) != std::string::npos;
-    };
+    const auto casts = [](const char* what) { return shadowCasterAllowed(what); };
     const auto timed = [this](const char* stage, auto&& fn) {
         const auto t0 = std::chrono::steady_clock::now();
         fn();
@@ -5864,45 +6013,68 @@ void Renderer::renderShadowPass() {
         // as the one-map pass left anything past its own radius.
         const float nearCull = np.halfExtent * 1.5f;
         nearCasterSpheres_.clear();
-        beginShadowTarget(shadowNearImage[frame], shadowNearView[frame], shadowNearFramebuffer[frame],
-                          SHADOW_NEAR_SIZE, shadowNearLayout_[frame], true);
-        // Where the camera can see the units' shadows: a unit whose shadow
-        // falls wholly outside the view is not drawn (shadowCasterSeen).
-        // Receivers are taken to lie no more than 40 yards below the lowest
-        // of the camera, the player and the unit, and no further along the
-        // ray than the map's depth. Not with the water's reflection on, which
-        // sees what the camera does not.
-        static const bool viewCull = core::envFlagEnabled("WOWEE_UNIT_SHADOW_VIEW_CULL", true);
-        ShadowReceiverView seen;
-        const bool useSeen = viewCull && camera && !enh_.waterReflections;
-        if (useSeen) {
-            Frustum f;
-            f.extractFromMatrix(camera->getViewProjectionMatrix());
-            for (int i = 0; i < 6; ++i) {
-                const Plane& pl = f.getPlane(static_cast<Frustum::Side>(i));
-                seen.planes[i] = glm::vec4(pl.normal, pl.distance);
+        // The units recorded on a worker (startUnitShadowRecording): the
+        // doodads and buildings that moved go into a secondary of their own
+        // here, the job is joined, and the pass executes the two.
+        if (unitShadowJobActive_) {
+            VkCommandBuffer movers = unitShadowMoverCmd_[frame];
+            unitShadowMoverSpheres_.clear();
+            uint32_t m2Movers = 0;
+            const bool moversOk = movers != VK_NULL_HANDLE && beginUnitShadowSecondary(movers, frame);
+            if (moversOk) {
+                if (m2Renderer && casts("m2")) {
+                    timed("shadow/m2 movers", [&] { m2Renderer->renderShadow(movers, np.matrix, globalTime, np.center, nearCull, ShadowCasterSet::Moving, &unitShadowMoverSpheres_); });
+                }
+                m2Movers = static_cast<uint32_t>(unitShadowMoverSpheres_.size());
+                if (wmoRenderer && casts("wmo")) {
+                    timed("shadow/wmo movers", [&] { wmoRenderer->renderShadow(movers, np.matrix, np.center, nearCull, ShadowCasterSet::Moving, &unitShadowMoverSpheres_); });
+                }
+                vkEndCommandBuffer(movers);
             }
-            seen.sunRay = shadowRayDirection();
-            seen.floorZ = std::min(camera->getPosition().z, characterPosition.z) - 40.0f;
-            seen.maxReach = 2.0f * std::max(2.0f * np.halfExtent, 300.0f);
+            double workerMs = -1.0;
+            timed("shadow/characters wait", [&] { workerMs = unitShadowFuture_.get(); });
+            unitShadowJobActive_ = false;
+            if (stageSink_ && workerMs >= 0.0) stageSink_("shadow/characters (worker)", static_cast<float>(workerMs));
+
+            VkCommandBuffer secondaries[2];
+            uint32_t count = 0;
+            if (workerMs >= 0.0) secondaries[count++] = unitShadowCharCmd_[frame];
+            if (moversOk) secondaries[count++] = movers;
+            beginShadowTarget(shadowNearImage[frame], shadowNearView[frame], shadowNearFramebuffer[frame],
+                              SHADOW_NEAR_SIZE, shadowNearLayout_[frame], true, true);
+            if (count > 0) vkCmdExecuteCommands(currentCmd, count, secondaries);
+            endShadowTarget(shadowNearImage[frame], shadowNearLayout_[frame]);
+
+            if (workerMs >= 0.0) nearCasterSpheres_ = unitShadowCharSpheres_;
+            nearSphereSplit_[0] = static_cast<uint32_t>(nearCasterSpheres_.size());
+            nearSphereSplit_[1] = nearSphereSplit_[0] + m2Movers;
+            nearCasterSpheres_.insert(nearCasterSpheres_.end(), unitShadowMoverSpheres_.begin(),
+                                      unitShadowMoverSpheres_.end());
+            for (const glm::vec4& sphere : nearCasterSpheres_)
+                nearShadowMask_.addCaster(np, SHADOW_NEAR_SIZE, glm::vec3(sphere), sphere.w);
+        } else {
+            beginShadowTarget(shadowNearImage[frame], shadowNearView[frame], shadowNearFramebuffer[frame],
+                              SHADOW_NEAR_SIZE, shadowNearLayout_[frame], true);
+            ShadowReceiverView seen;
+            const bool useSeen = unitShadowReceiverView(seen);
+            if (characterRenderer && casts("characters")) {
+                timed("shadow/characters", [&] {
+                    characterRenderer->renderShadow(currentCmd, np.matrix, np.center, nearCull, &nearCasterSpheres_,
+                                                    useSeen ? &seen : nullptr);
+                });
+            }
+            nearSphereSplit_[0] = static_cast<uint32_t>(nearCasterSpheres_.size());
+            if (m2Renderer && casts("m2")) {
+                timed("shadow/m2 movers", [&] { m2Renderer->renderShadow(currentCmd, np.matrix, globalTime, np.center, nearCull, ShadowCasterSet::Moving, &nearCasterSpheres_); });
+            }
+            nearSphereSplit_[1] = static_cast<uint32_t>(nearCasterSpheres_.size());
+            if (wmoRenderer && casts("wmo")) {
+                timed("shadow/wmo movers", [&] { wmoRenderer->renderShadow(currentCmd, np.matrix, np.center, nearCull, ShadowCasterSet::Moving, &nearCasterSpheres_); });
+            }
+            endShadowTarget(shadowNearImage[frame], shadowNearLayout_[frame]);
+            for (const glm::vec4& sphere : nearCasterSpheres_)
+                nearShadowMask_.addCaster(np, SHADOW_NEAR_SIZE, glm::vec3(sphere), sphere.w);
         }
-        if (characterRenderer && casts("characters")) {
-            timed("shadow/characters", [&] {
-                characterRenderer->renderShadow(currentCmd, np.matrix, np.center, nearCull, &nearCasterSpheres_,
-                                                useSeen ? &seen : nullptr);
-            });
-        }
-        nearSphereSplit_[0] = static_cast<uint32_t>(nearCasterSpheres_.size());
-        if (m2Renderer && casts("m2")) {
-            timed("shadow/m2 movers", [&] { m2Renderer->renderShadow(currentCmd, np.matrix, globalTime, np.center, nearCull, ShadowCasterSet::Moving, &nearCasterSpheres_); });
-        }
-        nearSphereSplit_[1] = static_cast<uint32_t>(nearCasterSpheres_.size());
-        if (wmoRenderer && casts("wmo")) {
-            timed("shadow/wmo movers", [&] { wmoRenderer->renderShadow(currentCmd, np.matrix, np.center, nearCull, ShadowCasterSet::Moving, &nearCasterSpheres_); });
-        }
-        endShadowTarget(shadowNearImage[frame], shadowNearLayout_[frame]);
-        for (const glm::vec4& sphere : nearCasterSpheres_)
-            nearShadowMask_.addCaster(np, SHADOW_NEAR_SIZE, glm::vec3(sphere), sphere.w);
     } else {
         bool cleared = false;
         if (shadowNearLayout_[frame] != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)

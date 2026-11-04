@@ -659,7 +659,8 @@ Still over, and what it would take:
   The likeliest reading is the iGPU running slower under the whole set's
   load than under any one row's (it shares its power with the CPU), which
   per-row A/B cannot see; logging `gt_act_freq_mhz` beside each window
-  would say. Fitting 3 ms in this view would take the local lights or the
+  would say. (3.12 logged it: the clock is the same in both states; the
+  memory's regime is what moves the figure.) Fitting 3 ms in this view would take the local lights or the
   sun shadows out of the set; that is Jered's call (section 6).
 - **Dalaran is just over on CPU** (+0.55, frame CPU +0.57; +0.86 before
   the default change): the unit map's recording (0.32), the light gather
@@ -674,6 +675,136 @@ Still over, and what it would take:
   sharing the blob floor cache with the corpse and foot reads (in the set the
   blobs are for units past the unit map's reach and the feet within 30
   yards, so they never ask for the same floor).
+
+### 3.12 Goldshire's GPU, a null shadow view, Dalaran's CPU (2026-11-04)
+
+Iris Xe, 1251x986, Ultra columns, noon, the recommended set flipped against
+stock on a 4 s period (`WOWEE_ENHANCE_AB`), camera set again before every
+row and a screenshot taken there (scratch `gpu/`: `run.sh`, `chain.sh`,
+`pp.py`, `freqab.py`). Every run also logged the iGPU's clock and throttle
+reasons every 100 ms (`gt_act_freq_mhz`, `gt/gt0/throttle_reason_*`), and
+per-pass figures come from runs with `WOWEE_SINGLE_THREAD_RECORD=1`, which
+times terrain, WMO, characters and M2 apart. Goldshire is the road view
+(west down the road into the sun, the inn on the right) in every run here;
+the row screenshots say so.
+
+**The clock.** The iGPU does not clock down under the set. Quiet, both
+states run at 1500 MHz (e2: on 1500, off 1489; Stormwind and Dalaran 1500
+and 1447-1492 in both). Under a compile or a busy server the package hits
+its power limit (`throttle_reason_pl1` set 90-100% of the time) and the
+iGPU runs at 1050-1250 MHz - in both states alike (e1: on 1230, off 1188;
+L_2's later rows 1076-1098 both ways). Every millisecond then reads 25-40%
+longer, the set's difference with it; that, and other clients on the GPU,
+is part of why earlier sittings' Goldshire figures (3.5-3.11) moved so much.
+
+**The memory.** Even at a full 1500 MHz the same road view has two
+regimes. With another agent's client running beside it (L_1, L_2, Gno, Gdd)
+stock drew in 6.2-7.1 ms and the set added +3.3 to +3.5; with no other
+client (L_3, Gw1, Gyes, G16) stock took 11.6-12.1 ms and the set +5.6 to
++6.3. The set's share is the same in both (+0.48 to +0.55 of stock): it is
+not the set that saturates anything, the whole frame runs at a different
+speed. A busy CPU core at nice 19 (`yes`, cache-resident) did not bring the
+fast regime back (Gyes: stock 11.7, set +5.63); the run with a memory
+streamer beside it also had another client up, so it settles nothing. The
+likeliest reading is the memory or ring clock (Intel's SAGV and the ring
+follow load and display demand; neither is readable without root here, and
+`perf_event_paranoid=2` keeps the IMC counters closed). A player runs one
+client, so the slow regime is the one to budget for.
+
+**Where it goes.** Split by pass, the set's difference is spread over the
+world in proportion to it, not in one pass: terrain +1.2 to +2.2, M2 +1.3
+to +2.3, WMO +0.1 to +0.7, characters +0.2 to +0.4, the mist's inject +0.3
+and the water copy below. Leave-one-out rows at full clock (paired, ms):
+
+| Row | fast regime | slow regime |
+|---|---|---|
+| `shadows` | +1.48 ±0.52 (L_1) | +1.70 ±0.40 (G16, with 16-bit maps) |
+| `locallights` | +0.83 ±0.35 (L_1) | +3.29 ±0.31 (GLnew; +4.14 ±0.33 with the old tile cull) |
+| `smoothleaves` | +0.67 ±0.47 (L_1) | +1.40 ±0.45 (Q, a compile on the CPU) |
+| `shadowfilter` | +0.96 ±1.03 (L_2) | +0.85 ±0.41 (G16) |
+| `foliagewind` | +0.82 ±0.49 (L_2) | - |
+| `horizondetail`, `normalmapping`, `streamfadein` | - | +0.8 to +1.2 ±0.4-0.5 (L_3; rows that should cost little - the noise floor there) |
+
+What changed (no row's picture changes):
+
+- **The water's scene copy no longer copies the colour.** The shoreline foam
+  reads only the depth copy; nothing samples the colour history since the
+  water stopped refracting (water.frag), yet every frame copied the whole
+  colour image into it (`WaterRenderer::captureSceneHistory`). "water
+  refraction copy" 0.26-0.27 ms -> 0.07-0.17.
+- **Local lights are culled to tiles by the sphere's tangent planes and two
+  pixels of margin** (`light_tiles.hpp`, `cullLightsToTiles(view, proj, ...)`;
+  `test_light_tiles` checks every point of every sphere, offset by a pixel,
+  with and without a jittered projection). It was the box's eight corners
+  and a whole tile all round, so a torch a tile across marked 3 x 3 or
+  more and every pixel there walked it. Same lights per pixel that can
+  reach it, same sum. Same rows, same structure, two runs apart:
+  `locallights` +4.14 ±0.33 -> +3.29 ±0.31, the whole set +3.80 -> +3.26.
+  `WOWEE_LIGHT_TILE_MARGIN_TILE=1` puts the old cull back.
+- **16-bit shadow maps were tried** (`WOWEE_SHADOW_D16=1`, left as an
+  experiment switch): the whole set +5.98 ±0.33 against +6.33 ±0.38 with
+  32-bit, `shadows` +1.70 ±0.40 - no gain to speak of, so the bytes behind
+  the filter taps are not the cost. Not taken.
+
+The whole set against stock after this (ms; GPU at 1500 MHz unless marked;
+CPU is the renderer's stages and, beside it, `cpu_med`):
+
+| | GPU | CPU (cpu_med) | run |
+|---|---|---|---|
+| Stormwind, Trade District | +1.02 ±0.12 | +0.23 ±0.03 (+0.22 ±0.15) | Sw1 |
+| Dalaran | -0.16 ±0.33 (1447-1492 MHz) | +0.37 ±0.05 (+0.33 ±0.10) | Dw1 |
+| Goldshire road, slow regime | +6.33 ±0.38 | +0.22 ±0.04 (+0.19 ±0.08) | Gw1 |
+| Goldshire road, fast regime | +3.36 ±0.16 | - | Gno |
+| 3.11 (before), for comparison | Stormwind +1.34, Dalaran +1.37, Goldshire road +6.73 | +0.48, +0.55, +0.34 | |
+
+Goldshire's road view is still over 3 ms for a player alone on the
+machine. What would fit it, from the rows above: the
+local lights are the row that grows with the slow regime (+3.3 there, +0.8
+in the fast one) - the per-pixel walk over Goldshire's 48 lights, on every
+layer of leaves the canopy draws. Taking `locallights` out of the
+recommended set (the stock rule, the four nearest M2 lights, takes over -
+stock, not a loss against it) brings the road view to about +3.0 in the slow
+regime and +2.5 in the fast; the sun shadows alone (-1.5 to -1.7) would not
+be enough. That is Jered's call (section 6); the default is unchanged.
+
+**The null shadow view (validation).** Reproduced on the first try: a
+teleport tour under the Khronos layer (`WOWEE_VULKAN_VALIDATION=1`,
+`VK_LAYER_PATH` at the layer's `explicit_layer.d`; scratch `gpu/tele.sh`)
+reported, after the first map change, "vkCmdDrawIndexed(): the combined
+image sampler descriptor [Set 0, Binding 0] is using imageView 0x0" ten
+times in a frame. The suspected path was not it: with the M2 shadow pass
+guarded it came back, and every report followed a `CharacterRenderer::clear`
+(each map change). `clear()` destroyed and recreated the renderer's fallback
+textures, but the unit shadow's fallback set (`shadowParams_.set`, the set
+at 0 for every opaque batch of every unit) had been written at initialize
+with the old white texture's view and was never written again - so after
+the first map change every unit's shadow draw bound a set naming a
+destroyed view. The fallback textures are now kept across `clear()` (they
+are 1x1 constants). Under the layer, nine map changes after the fix: no
+such report. Two more found on the way: the WMO shadow pass pushed its
+constants for the vertex stage only into a range declared for both
+(VUID-vkCmdPushConstants-offset-01796, every building's shadow) - fixed;
+and the M2 texture loader ignored a failed upload and cached a texture
+without a view, which the M2 shadow pass would then have written into a
+live descriptor - the loader now treats it as a failed load, and the M2
+shadow pass skips a foliage batch whose texture cannot be sampled, as the
+character pass already did. Still reported, not this work's: a scene depth
+image submitted in UNDEFINED at the first world frame, after an MSAA change
+and in one load hitch, and the pipelines' unused vertex attributes.
+
+**Dalaran's CPU: the unit map's units on a worker.** Right after
+`planShadowFrame` a frame worker records the unit map's character draws into
+a secondary command buffer that continues the map's pass, while the main
+thread does the per-frame block (the light gather), the M2 and grass culls
+and the composites ahead of the shadow pass; the pass then records the moved
+doodads and buildings into a second secondary, joins the job and executes
+both (`Renderer::startUnitShadowRecording`; `WOWEE_UNIT_SHADOW_WORKER=0` for
+the old path). Nothing on the main thread touches the character renderer in
+between. Dalaran, same binary, same sitting: worker off +0.50 ±0.07
+(cpu_med +0.52 ±0.10), on +0.37 ±0.05 (+0.33 ±0.10); the shadow pass's main
+thread share 0.29 -> 0.13 ms, the units' 0.29 ms now on the worker, the
+main thread waiting 0.02-0.06 ms for it. Under the layer the secondaries
+raise nothing.
 
 ## 4. Proposed enhancements
 
@@ -1503,13 +1634,14 @@ The rest (E6, E9, E11-E22) waits for after Friday. Each new item goes into
   default off for the painted look? (Parallax and soft particles are off in
   the recommended set since 3.11, for the budget; either can come back at
   about 1 ms of GPU and 0.2 ms of CPU respectively.)
-- The set is inside its budget in the Trade District (+1.3 ms / +0.5 ms,
-  3.11) but still over in two places: Goldshire's road view on GPU (+6.7 ms;
-  the local lights and the sun shadows are the rows that show, about 1.2 ms
-  each) and, just, Dalaran on CPU (+0.55: the unit map's recording, the
-  light gather). Raise the budget for those places, take the local
-  lights or the sun shadows out of the recommended set, or wait for the
-  recording work listed there?
+- The set is inside its budget in the Trade District (+1.0 ms GPU / +0.2
+  CPU) and now Dalaran (+0.4 CPU, the unit map recorded on a worker; 3.12),
+  but Goldshire's road view is still over on GPU for a player alone on the
+  machine: +6.3 ms (+3.3 when the memory runs fast, 3.12). Taking the local
+  lights out of the recommended set (+3.3 of it there; the stock four
+  nearest lights take over) would bring it to about +3.0; the sun shadows
+  (-1.6) would not be enough on their own. Take the local lights out, or
+  raise the budget for forest views?
 - Volumetric mist, sun shafts, lens flare and sharp stars off on a fresh
   install, on from High: agree?
 - Water sky reflection (stock has none): stays off by default.

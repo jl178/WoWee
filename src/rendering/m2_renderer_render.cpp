@@ -3088,7 +3088,11 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     const bool wantStatic = casterSet != ShadowCasterSet::Moving;
     const bool wantMovers = casterSet != ShadowCasterSet::Static;
 
+    // Only called with a sampleable texture (the foliage loop below skips a
+    // batch whose texture is not); the check here keeps a null view out of a
+    // live descriptor, and out of the cache's key, whatever a caller does.
     auto getTexDescSet = [&](VkTexture* tex) -> VkDescriptorSet {
+        if (!tex || !tex->isValid()) return shadowParams_.set;
         VkImageView iv = tex->getImageView();
         auto cacheIt = texSetCache.find(iv);
         if (cacheIt != texSetCache.end()) return cacheIt->second;
@@ -3517,12 +3521,25 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                 // same batch for want of a material set. The result is a black
                 // rectangle on the ground under a tree that looks fine, coming
                 // and going as the texture cache lets the sheet back in.
-                if (foliagePass && !batch.texture) {
+                // No texture, or one that cannot be sampled (an upload that
+                // failed, see loadTexture): skipped, as the main pass leaves
+                // the batch out, rather than casting a solid quad or binding
+                // a set whose image view is null.
+                if (foliagePass && (!batch.texture || !batch.texture->isValid())) {
                     if (!warnedShadowNoTexture_) {
                         warnedShadowNoTexture_ = true;
+                        // Whether the cache still owns it tells a failed
+                        // upload (cached, no view) from a texture freed under
+                        // the model (not cached).
+                        bool cached = false;
+                        for (const auto& [key, entry] : textureCache) {
+                            if (entry.texture.get() == batch.texture) { cached = true; break; }
+                        }
                         LOG_WARNING("Shadow pass: a foliage batch of ", model.name,
-                                    " has no texture; skipping it rather than casting a "
-                                    "solid quad. The texture cache is the usual reason.");
+                                    !batch.texture ? " has no texture"
+                                    : cached ? " has a cached texture that cannot be sampled (no image view)"
+                                             : " points at a texture the cache no longer holds",
+                                    "; skipping it rather than casting a solid quad.");
                     }
                     continue;
                 }

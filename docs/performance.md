@@ -112,7 +112,29 @@ shadow as one map with every caster every frame, as before the split below;
 `WOWEE_UNIT_SHADOW_CAP=<n>` changes how many units the unit map takes (64,
 0 for all); `WOWEE_UNIT_SHADOW_VIEW_CULL=0` draws into it the units whose
 shadow cannot be seen as well; `WOWEE_FOG_HALF_RATE=0` lights every cell of
-the mist every frame.
+the mist every frame. `WOWEE_UNIT_SHADOW_WORKER=0` records the unit map's
+units on the main thread again (below); `WOWEE_LIGHT_TILE_MARGIN_TILE=1`
+culls the local lights to tiles by their box and a tile of margin, as before
+enhancements-plan.md 3.12; `WOWEE_SHADOW_D16=1` makes both shadow maps
+16-bit depth (an experiment: half the bytes behind every filter tap).
+
+`WOWEE_SINGLE_THREAD_RECORD=1` splits the scene pass on Linux: each world
+pass gets its own timestamp (`terrain`, `wmo`, `characters`, `m2`, `water`),
+which is what says where a whole-set difference goes. It costs main-thread
+time, so CPU figures are taken without it.
+
+What the iGPU's clock and memory are doing decides a GPU figure as much as
+the frame does (enhancements-plan.md 3.12). Log `gt_act_freq_mhz` and
+`throttle_reason_pl1` (`/sys/class/drm/card1/` and `.../gt/gt0/`) beside
+every window: with a compile or a busy server on the CPU the package hits
+its power limit and the iGPU runs at 1.05-1.25 GHz instead of 1.5, both
+states alike, and every millisecond reads 25-40% longer. Even at a full
+1.5 GHz the same view drew stock in 6.2 ms in one run and 11.7 in another,
+and the set's difference scaled with it (+3.3 and +5.7): the iGPU's memory
+traffic goes through the CPU's ring, whose clock follows the cores, so a
+mostly idle CPU (a GPU-bound frame waiting on its fence) slows it. Compare
+on/off pairs only at the same clock and in the same run, and say which
+regime a figure was taken in.
 
 ## The sun's shadow in two maps
 
@@ -147,6 +169,17 @@ Ultra distance on the Iris Xe, for a picture in which almost nothing moves.
   pixel reads the unit map (five taps) only in a marked cell and only if
   the world map has not already shaded it wholly, taking the darker of the
   two.
+- **The unit map's units are recorded on a frame worker**
+  (`Renderer::startUnitShadowRecording`): right after `planShadowFrame` a
+  job records the character draws into a secondary command buffer that
+  continues the unit map's pass, while the main thread fills the per-frame
+  block (the light gather), records the M2 and grass culls and the
+  composites; the shadow pass records the moved doodads and buildings into
+  a second secondary, joins the job and executes the two. Nothing on the
+  main thread touches the character renderer in between. The profile shows
+  `shadow/characters (worker)` (its own time) and `shadow/characters wait`
+  (what the main thread still waits); `WOWEE_UNIT_SHADOW_WORKER=0` records
+  them inline as before.
 - Cost (enhancements-plan.md 3.9): the shadow pass is 0.05-0.1 ms of GPU
   and 0.2-0.4 ms of main-thread recording standing still (was 1.5-3.7 and
   0.6-2.7), the second filter 0.2-0.3 ms of the scene pass.
@@ -175,12 +208,18 @@ cost and how:
   the step count.
 - Soft particles and parallax are off in the recommended set.
 
-The set against stock, after: Stormwind +1.34 ms GPU / +0.48 ms CPU
-(inside 3 / 0.5), Dalaran +1.37 / +0.55, Goldshire's road view +6.73 /
-+0.34. Still over: Goldshire's road view on GPU (the whole set costs about
-twice what its rows add up to; the iGPU's clock under load is the suspect,
-not yet measured) and, just, Dalaran on CPU (the unit map's recording on
-the main thread, the light gather, the motion rows).
+The set against stock, after 3.11: Stormwind +1.34 ms GPU / +0.48 ms CPU,
+Dalaran +1.37 / +0.55, Goldshire's road view +6.73 / +0.34.
+
+After 3.12 (the water copy takes depth only, the light tiles bound each
+light by its sphere with two pixels of margin, the unit map's units record
+on a worker): Stormwind +1.02 / +0.23, Dalaran -0.16 / +0.37, Goldshire's
+road view +6.33 / +0.22 with the machine otherwise idle and +3.36 when the
+memory runs fast. The iGPU's clock is not what Goldshire was missing: it
+stays at 1.5 GHz in both states unless the CPU side pushes the package to its
+power limit, and then it drops in both; what changes the figure at a full
+clock is the regime the memory runs in (Measuring, above). Still over:
+Goldshire's road view, by about the local lights' share (+3.3).
 
 ## Where the time went (Northshire, 2000 playerbots, Ultra preset)
 
