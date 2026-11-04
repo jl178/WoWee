@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <optional>
@@ -33,6 +34,13 @@ struct EmoteInfo {
     /// carries it in the slot after the bystanders' targeted form.
     std::string othersAtYou;
     std::string command;
+    /// EmotesText's sixteen EmotesTextData texts in file order, the slots
+    /// 0x503660 picks between (chat_rules::textEmoteSlot): bit 1 the target
+    /// is the reader, 2 the sender is, 4 no target, 8 a female sender.
+    std::array<std::string, 16> texts{};
+    /// Emotes.dbc EmoteFlags of the emote it plays: what DoEmote refuses
+    /// (0x4F5410) - 0x4000 while moving, 0x1 unless standing, and so on.
+    uint32_t emoteFlags = 0;
 };
 
 class EmoteRegistry {
@@ -78,6 +86,16 @@ public:
     /// for the echo of the player's own SMSG_TEXT_EMOTE. Empty if unknown.
     std::string selfTextByDbcId(uint32_t dbcId,
                                 const std::string* targetName = nullptr) const;
+
+    /// Everything known about an EmotesText row, or nullptr.
+    [[nodiscard]] const EmoteInfo* infoByDbcId(uint32_t dbcId) const {
+        auto it = emoteByDbcId_.find(dbcId);
+        return it == emoteByDbcId_.end() ? nullptr : it->second;
+    }
+    [[nodiscard]] const EmoteInfo* infoFor(const std::string& command) const {
+        auto it = emoteTable_.find(command);
+        return it == emoteTable_.end() ? nullptr : &it->second;
+    }
 
     /// The target's wording by DBC ID - "Name laughs at you." Falls back to
     /// the bystanders' targeted form when the file has none.

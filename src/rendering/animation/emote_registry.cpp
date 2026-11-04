@@ -151,6 +151,7 @@ void EmoteRegistry::loadFromDbc() {
 
     std::unordered_map<uint32_t, uint32_t> emoteIdToAnim;
     std::unordered_map<uint32_t, std::pair<uint8_t, uint8_t>> emoteSpec;  // proc, param
+    std::unordered_map<uint32_t, uint32_t> emoteFlagsById;  // Emotes.dbc EmoteFlags
     animByEmotesId_.clear();
     stateEmoteIds_.clear();
     if (auto emotesDbc = assetManager->loadDBC("Emotes.dbc"); emotesDbc && emotesDbc->isLoaded()) {
@@ -171,6 +172,8 @@ void EmoteRegistry::loadFromDbc() {
             const uint32_t param = specField + 1 < emotesDbc->getFieldCount()
                 ? emotesDbc->getUInt32(r, specField + 1) : 0;
             emoteSpec[emoteId] = {static_cast<uint8_t>(spec), static_cast<uint8_t>(param)};
+            // EmoteFlags sits just before EmoteSpecProc.
+            if (specField >= 1) emoteFlagsById[emoteId] = emotesDbc->getUInt32(r, specField - 1);
             if (animId != 0) {
                 emoteIdToAnim[emoteId] = animId;
                 animByEmotesId_[emoteId] = animId;
@@ -209,6 +212,14 @@ void EmoteRegistry::loadFromDbc() {
         uint32_t othersAtYouTextId = atYouField < emotesTextDbc->getFieldCount()
             ? emotesTextDbc->getUInt32(r, atYouField) : 0;
 
+        // All sixteen slots, from the first (OthersTargetTextID) on.
+        std::array<std::string, 16> texts{};
+        const uint32_t firstText = etL ? (*etL)["OthersTargetTextID"] : 3;
+        for (uint32_t k = 0; k < 16 && firstText + k < emotesTextDbc->getFieldCount(); ++k) {
+            if (auto it = textData.find(emotesTextDbc->getUInt32(r, firstText + k)); it != textData.end())
+                texts[k] = it->second;
+        }
+
         std::string textTarget, textNoTarget, oTarget, oNoTarget, oAtYou;
         if (auto it = textData.find(othersAtYouTextId); it != textData.end()) oAtYou = it->second;
         if (auto it = textData.find(senderTargetTextId); it != textData.end()) textTarget = it->second;
@@ -236,6 +247,9 @@ void EmoteRegistry::loadFromDbc() {
             info.othersTarget = oTarget;
             info.othersAtYou = oAtYou;
             info.command = cmd;
+            info.texts = texts;
+            if (auto fl = emoteFlagsById.find(emoteRef); fl != emoteFlagsById.end())
+                info.emoteFlags = fl->second;
             emoteTable_.emplace(cmd, std::move(info));
         }
     }

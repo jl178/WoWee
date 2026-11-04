@@ -205,3 +205,210 @@ TEST_CASE("Which types the client treats specially", "[chat]") {
     CHECK(languageSkillLine(7) == 98);
     CHECK(languageSkillLine(1) == 109);
 }
+
+// ---------------------------------------------------------------------------
+// include/game/chat_social_rules.hpp: /who, text emotes, drunk speech, the
+// mature language filter, /random, comprehension and zone channel names.
+#include "game/chat_social_rules.hpp"
+
+namespace {
+std::vector<WhoNamedRow> whoZones() {
+    return {{12, "Elwynn Forest"}, {1519, "Stormwind City"}, {40, "Westfall"}, {14, "Durotar"}};
+}
+std::vector<WhoNamedRow> whoRaces() {
+    return {{1, "Human"}, {2, "Orc"}, {3, "Dwarf"}, {4, "Night Elf"}, {10, "Blood Elf"}};
+}
+std::vector<WhoNamedRow> whoClasses() {
+    return {{1, "Warrior"}, {2, "Paladin"}, {5, "Priest"}, {8, "Mage"}};
+}
+WhoFilter who(const char* text) { return parseWhoFilter(text, whoZones(), whoRaces(), whoClasses()); }
+}  // namespace
+
+TEST_CASE("SendWho: an empty filter asks for everyone", "[chat][who]") {
+    const WhoFilter f = who("");
+    CHECK(f.minLevel == 0);
+    CHECK(f.maxLevel == 100);
+    CHECK(f.raceMask == 0xFFFFFFFFu);
+    CHECK(f.classMask == 0xFFFFFFFFu);
+    CHECK(f.zones.empty());
+    CHECK(f.strings.empty());
+}
+
+TEST_CASE("SendWho: levels", "[chat][who]") {
+    CHECK(who("70").minLevel == 70);
+    CHECK(who("70").maxLevel == 70);
+    CHECK(who("10-20").minLevel == 10);
+    CHECK(who("10-20").maxLevel == 20);
+    CHECK(who("10-").maxLevel == 100);
+    CHECK(who("-20").minLevel == 0);
+    CHECK(who("-20").maxLevel == 20);
+    // "-" alone is a word like any other.
+    CHECK(who("-").strings == std::vector<std::string>{"-"});
+}
+
+TEST_CASE("SendWho: tags, any case, and the free words", "[chat][who]") {
+    const WhoFilter f = who("N-Bob g-\"The Guild\" 60 orc");
+    CHECK(f.name == "Bob");
+    CHECK(f.guild == "The Guild");
+    CHECK(f.minLevel == 60);
+    CHECK(f.strings == std::vector<std::string>{"orc"});
+    // r- and c- are masks of every row whose name holds the text.
+    CHECK(who("r-elf").raceMask == ((1u << 4) | (1u << 10)));
+    CHECK(who("r-orc r-human").raceMask == ((1u << 2) | (1u << 1)));
+    CHECK(who("c-pri").classMask == (1u << 5));
+    CHECK(who("r-gnome").raceMask == 0);
+    // z- is up to ten top-level zones whose name holds it; none is zone 0.
+    CHECK(who("z-storm").zones == std::vector<uint32_t>{1519});
+    CHECK(who("z-o").zones == std::vector<uint32_t>{12, 1519, 14});
+    CHECK(who("z-nowhere").zones == std::vector<uint32_t>{0});
+}
+
+TEST_CASE("SendWho: four free words, then the parse stops", "[chat][who]") {
+    const WhoFilter f = who("a b c d e 60");
+    CHECK(f.strings == std::vector<std::string>{"a", "b", "c", "d"});
+    CHECK(f.minLevel == 0);
+    // Quoted white space stays in the word; an unclosed quote loses it.
+    CHECK(who("\"Stormwind City\"").strings == std::vector<std::string>{"Stormwind City"});
+    CHECK(who("\"open").strings.empty());
+}
+
+TEST_CASE("SMSG_WHO goes to chat for three rows or fewer", "[chat][who]") {
+    CHECK(whoResultsToChat(false, 0));
+    CHECK(whoResultsToChat(false, 3));
+    CHECK_FALSE(whoResultsToChat(false, 4));
+    CHECK_FALSE(whoResultsToChat(true, 1));
+}
+
+namespace {
+// EmotesText 3.3.5a: WAVE, and ANGRY with its female forms.
+std::array<std::string, 16> waveTexts() {
+    return {"%s waves at %s.", "%s waves at you.", "You wave at %s.", "", "%s waves.", "",
+            "You wave.", "", "", "", "", "", "", "", "", ""};
+}
+std::array<std::string, 16> angryTexts() {
+    return {"%s raises his fist in anger at %s.", "%s raises his fist in anger at you.",
+            "You raise your fist in anger at %s.", "", "%s raises his fist in anger.", "",
+            "You raise your fist in anger.", "", "%s raises her fist in anger at %s.",
+            "%s raises her fist in anger at you.", "", "", "%s raises her fist in anger.", "", "",
+            ""};
+}
+std::string emoteLine(const std::array<std::string, 16>& t, bool female, bool me, bool atMe,
+                      const std::string& sender, const std::string& target) {
+    const int slot = textEmoteSlot(t, female, me, atMe, target.empty());
+    if (slot < 0) return "<none>";
+    return formatTextEmote(t[static_cast<size_t>(slot)], me, atMe, sender, target);
+}
+}  // namespace
+
+TEST_CASE("Text emotes: the slot for each reader", "[chat][emote]") {
+    const auto w = waveTexts();
+    CHECK(emoteLine(w, false, true, false, "Me", "Bob") == "You wave at Bob.");
+    CHECK(emoteLine(w, false, true, false, "Me", "") == "You wave.");
+    CHECK(emoteLine(w, false, false, true, "Bob", "Me") == "Bob waves at you.");
+    CHECK(emoteLine(w, false, false, false, "Bob", "Ann") == "Bob waves at Ann.");
+    CHECK(emoteLine(w, false, false, false, "Bob", "") == "Bob waves.");
+    // No female forms: the male ones.
+    CHECK(emoteLine(w, true, false, false, "Ann", "") == "Ann waves.");
+}
+
+TEST_CASE("Text emotes: the female forms, and the fall back to no target", "[chat][emote]") {
+    const auto a = angryTexts();
+    CHECK(emoteLine(a, true, false, false, "Ann", "Bob") == "Ann raises her fist in anger at Bob.");
+    CHECK(emoteLine(a, true, false, true, "Ann", "Me") == "Ann raises her fist in anger at you.");
+    CHECK(emoteLine(a, true, false, false, "Ann", "") == "Ann raises her fist in anger.");
+    CHECK(emoteLine(a, false, false, false, "Bob", "Ann") == "Bob raises his fist in anger at Ann.");
+    // The sender's own female slot is empty: the male one.
+    CHECK(emoteLine(a, true, true, false, "Me", "Bob") == "You raise your fist in anger at Bob.");
+    // Only an "at you" form missing: the line without a target.
+    std::array<std::string, 16> t{};
+    t[4] = "%s nods.";
+    CHECK(emoteLine(t, false, false, true, "Bob", "Me") == "Bob nods.");
+    // Nothing at all: no line.
+    CHECK(emoteLine(std::array<std::string, 16>{}, false, false, false, "Bob", "") == "<none>");
+}
+
+TEST_CASE("DoEmote's refusals from EmoteFlags", "[chat][emote]") {
+    CHECK(emoteGate(0x0, 0, 0) == EmoteGate::Allowed);
+    CHECK(emoteGate(0x4000, 0, 0x1) == EmoteGate::Moving);        // forward
+    CHECK(emoteGate(0x4000, 0, 0x0) == EmoteGate::Allowed);
+    CHECK(emoteGate(0x1, 1, 0) == EmoteGate::Refused);            // stand only, sitting
+    CHECK(emoteGate(0x0, 3, 0) == EmoteGate::Refused);            // asleep
+    CHECK(emoteGate(0x200, 3, 0) == EmoteGate::Allowed);
+    CHECK(emoteGate(0x400, 0, 0) == EmoteGate::Refused);
+    CHECK(emoteGate(0x80, 0, 0x200000) == EmoteGate::Refused);    // swimming
+}
+
+TEST_CASE("Drunk speech: s at a word's ends, colours left alone", "[chat][drunk]") {
+    auto always = [] { return 0.0f; };   // every draw passes
+    auto never = [] { return 0.99f; };
+    auto clean = [](const std::string&) { return false; };
+    // Factor 1: every candidate s slurs, and the hic always comes.
+    CHECK(slurSpeech("sit his seat", 0.5f, never, clean) == "sit his seat");
+    CHECK(slurSpeech("sit his seat", 0.5f, always, clean) == "shit hish sheat ...hic!");
+    // A word starting "ss" is not touched at its start, though its last s
+    // (before a space) is; a lone s at the very end is a word start.
+    CHECK(slurSpeech("ss s", 0.5f, always, clean) == "ssh sh ...hic!");
+    // The filter vetoes the start: "shit" from "sit".
+    auto profane = [](const std::string& w) { return w == "shit"; };
+    CHECK(slurSpeech("sit sat", 0.5f, always, profane) == "sit shat ...hic!");
+    // A colour run is copied through to its |r.
+    CHECK(slurSpeech("|cff00ff00sss is|r so", 0.5f, always, clean) ==
+          "|cff00ff00sss is|r sho ...hic!");
+    CHECK(drunkFactor(0, 0) == 0.0f);
+    CHECK(drunkFactor(50, 10) == Catch::Approx(0.5f));
+    CHECK(drunkFactor(10, 200) == Catch::Approx(1.0f));
+}
+
+TEST_CASE("The mature language filter", "[chat][profanity]") {
+    ProfanityFilter f;
+    REQUIRE(f.add("shit"));
+    REQUIRE(f.add("bia?ts?ch"));
+    REQUIRE(f.add("\\<anal\\>"));   // PCRE: \< is a literal <
+    CHECK(f.apply("oh SHIT no") == "oh !@#$ no");
+    // The mask's position carries on from one match to the next.
+    CHECK(f.apply("shit") == "%^&*");
+    CHECK(f.apply("analysis") == "analysis");
+    CHECK(f.apply("<anal>") == "!@#$%^");
+    // Not inside a colour run.
+    CHECK(f.apply("|cffffffffshit|r") == "|cffffffffshit|r");
+    CHECK(ProfanityFilter::toEcmaScript("\\<a\\.b\\>") == "<a\\.b>");
+    CHECK(profanityFilteredType(0x01));
+    CHECK(profanityFilteredType(0x11));
+    CHECK_FALSE(profanityFilteredType(0x00));
+    CHECK_FALSE(profanityFilteredType(0x0C));
+}
+
+TEST_CASE("RandomRoll's range", "[chat][roll]") {
+    CHECK(randomRollRange(1, 100) == std::make_pair(1, 100));
+    CHECK(randomRollRange(0, 5) == std::make_pair(0, 5));
+    CHECK_FALSE(randomRollRange(0, 0));
+    CHECK_FALSE(randomRollRange(-1, 5));
+    CHECK_FALSE(randomRollRange(10, 5));
+    CHECK(randomRollRange(1, 1000000));
+    CHECK_FALSE(randomRollRange(1, 1000001));
+}
+
+TEST_CASE("Language comprehension: the skill, or the aura for a language not had", "[chat][language]") {
+    CHECK(languageComprehensionFor(true, 300, false, false) == 300);
+    CHECK(languageComprehensionFor(true, 75, true, true) == 75);
+    CHECK(languageComprehensionFor(false, 0, true, true) == 300);
+    CHECK(languageComprehensionFor(false, 0, false, true) == 0);
+    CHECK(languageComprehensionFor(false, 0, true, false) == 0);
+}
+
+TEST_CASE("Zone channel names", "[chat][channels]") {
+    // General: the zone. Trade (0x3B) and GuildRecruitment (0x20032): "City"
+    // in a capital (0x100), the zone elsewhere.
+    CHECK(zoneChannelName("General - %s", 0x80003, "Elwynn Forest", 0x40, "City") ==
+          "General - Elwynn Forest");
+    CHECK(zoneChannelName("Trade - %s", 0x3B, "Stormwind City", 0x200138, "City") == "Trade - City");
+    CHECK(zoneChannelName("Trade - %s", 0x3B, "Shattrath City", 0x4D28, "City") == "Trade - City");
+    CHECK(zoneChannelName("Trade - %s", 0x3B, "Elwynn Forest", 0x40, "City") ==
+          "Trade - Elwynn Forest");
+    CHECK(zoneChannelName("General - %s", 0x80003, "Stormwind City", 0x200138, "City") ==
+          "General - Stormwind City");
+    CHECK(zoneChannelName("LookingForGroup", 0x40039, "Durotar", 0x40, "City") == "LookingForGroup");
+    CHECK(zoneChannelName("General - %s", 0x80003, "", 0, "City").empty());
+    CHECK((0x80003u & kChannelJoinedByDefault) != 0);
+    CHECK((0x10004u & kChannelJoinedByDefault) == 0);   // WorldDefense
+}

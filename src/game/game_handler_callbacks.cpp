@@ -1,3 +1,4 @@
+#include "game/chat_social_rules.hpp"
 #include "game/game_handler.hpp"
 #include "game/reputation_standing.hpp"
 #include "addons/lua_api_registrations.hpp"
@@ -1889,6 +1890,10 @@ void GameHandler::requestLogout(bool exitAfterLogout) {
     if (socialHandler_) socialHandler_->requestLogout(exitAfterLogout);
 }
 
+void GameHandler::forceLogout() {
+    if (socialHandler_) socialHandler_->forceLogout();
+}
+
 void GameHandler::cancelLogout() {
     if (socialHandler_) socialHandler_->cancelLogout();
 }
@@ -1911,6 +1916,10 @@ void GameHandler::toggleCloak() {
 
 void GameHandler::followTarget() {
     if (movementHandler_) movementHandler_->followTarget();
+}
+
+void GameHandler::followUnit(uint64_t guid) {
+    if (movementHandler_) movementHandler_->followUnit(guid);
 }
 
 void GameHandler::cancelFollow() {
@@ -2114,6 +2123,39 @@ int GameHandler::getReleaseTimeRemaining() const {
 
 bool GameHandler::isPlayerGmFlagged() const {
     return (playerFieldValue(UF::PLAYER_FLAGS) & 0x8u) != 0;
+}
+
+bool GameHandler::playerComprehendsLanguages() const {
+    return (playerFieldValue(UF::UNIT_FIELD_FLAGS_2) & 0x8u) != 0;
+}
+
+bool GameHandler::playerHasAuraOfType(uint32_t auraType, int32_t misc) const {
+    loadSpellNameCache();
+    for (const auto& aura : getPlayerAuras()) {
+        if (aura.isEmpty()) continue;
+        auto it = spellNameCache_.find(aura.spellId);
+        if (it == spellNameCache_.end()) continue;
+        for (int e = 0; e < 3; ++e)
+            if (it->second.effectAuraIds[e] == auraType && it->second.effectMiscValues[e] == misc)
+                return true;
+    }
+    return false;
+}
+
+float GameHandler::playerDrunkFactor() const {
+    // PLAYER_BYTES_3 follows PLAYER_BYTES_2 in every layout; its second byte
+    // is the drunk value. PLAYER_FAKE_INEBRIATION follows PLAYER_CHOSEN_TITLE
+    // in WotLK's (0x142); the other expansions have none.
+    if (playerGuid == 0) return 0.0f;
+    auto entity = getEntityManager().getEntity(playerGuid);
+    if (!entity) return 0.0f;
+    uint32_t drunk = 0, fake = 0;
+    const uint16_t bytes2 = fieldIndex(UF::PLAYER_BYTES_2);
+    if (bytes2 != 0xFFFF) drunk = (entity->getField(static_cast<uint16_t>(bytes2 + 1)) >> 8) & 0xFFu;
+    const uint16_t title = fieldIndex(UF::PLAYER_CHOSEN_TITLE);
+    if (title != 0xFFFF && isActiveExpansion("wotlk"))
+        fake = entity->getField(static_cast<uint16_t>(title + 1));
+    return chat_rules::drunkFactor(drunk, fake);
 }
 
 bool GameHandler::isPlayerOutOfBounds() const {

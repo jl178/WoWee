@@ -5,6 +5,8 @@
 #include "game/combat_log_event.hpp"
 #include "game/stock_combat_log.hpp"
 #include "game/social_handler.hpp"
+#include "game/chat_social_rules.hpp"
+#include "pipeline/asset_manager.hpp"
 #include "game/guild_roster_throttle.hpp"
 #include "game/spell_handler.hpp"
 #include "addons/lua_api_registrations.hpp"
@@ -1589,12 +1591,55 @@ void SocialHandler::requestPlayedTime() {
     LOG_INFO("Requested played time");
 }
 
-void SocialHandler::queryWho(const std::string& playerName) {
+void SocialHandler::queryWho(const std::string& filterText) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    // Every level: the server drops anyone above the maximum asked for.
-    auto packet = WhoPacket::build(0, 100, playerName);
+    // SendWho's filter as Wow.exe reads it (0x6B5630): n- name, g- guild,
+    // z- zones, r- races, c- classes, levels, and up to four free words that
+    // the server matches against name, guild, race, class and zone. The whole
+    // text used to go out as the name, so "/who 70 orc" asked for a player
+    // called "70 orc" and found nobody.
+    struct WhoRows {
+        bool loaded = false;
+        std::vector<chat_rules::WhoNamedRow> zones, races, classes;
+    };
+    static WhoRows rows;
+    auto* am = owner_.services().assetManager;
+    if (!rows.loaded && am && am->isInitialized()) {
+        rows.loaded = true;
+        // AreaTable's top-level rows (ParentAreaID 0) in file order; the
+        // names are field 11, ChrRaces' field 14, ChrClasses' field 4 (enUS).
+        if (auto dbc = am->loadDBC("AreaTable.dbc"); dbc && dbc->isLoaded() && dbc->getFieldCount() > 11) {
+            for (uint32_t i = 0; i < dbc->getRecordCount(); ++i)
+                if (dbc->getUInt32(i, 2) == 0)
+                    rows.zones.push_back(chat_rules::WhoNamedRow{dbc->getUInt32(i, 0), dbc->getString(i, 11)});
+        }
+        if (auto dbc = am->loadDBC("ChrRaces.dbc"); dbc && dbc->isLoaded() && dbc->getFieldCount() > 14) {
+            for (uint32_t i = 0; i < dbc->getRecordCount(); ++i)
+                rows.races.push_back(chat_rules::WhoNamedRow{dbc->getUInt32(i, 0), dbc->getString(i, 14)});
+        }
+        if (auto dbc = am->loadDBC("ChrClasses.dbc"); dbc && dbc->isLoaded() && dbc->getFieldCount() > 4) {
+            for (uint32_t i = 0; i < dbc->getRecordCount(); ++i)
+                rows.classes.push_back(chat_rules::WhoNamedRow{dbc->getUInt32(i, 0), dbc->getString(i, 4)});
+        }
+    }
+    chat_rules::WhoTags tags;
+    auto tag = [&](const char* key, std::string& into) {
+        std::string v = globalString(am, key);
+        if (!v.empty()) into = std::move(v);
+    };
+    tag("WHO_TAG_NAME", tags.name);
+    tag("WHO_TAG_GUILD", tags.guild);
+    tag("WHO_TAG_ZONE", tags.zone);
+    tag("WHO_TAG_RACE", tags.race);
+    tag("WHO_TAG_CLASS", tags.cls);
+    const chat_rules::WhoFilter f =
+        chat_rules::parseWhoFilter(filterText, rows.zones, rows.races, rows.classes, tags);
+    auto packet = WhoPacket::build(f.minLevel, f.maxLevel, f.name, f.guild, f.raceMask,
+                                   f.classMask, f.zones, f.strings);
     owner_.getSocket()->send(packet);
-    LOG_INFO("Sent WHO query", playerName.empty() ? "" : " for: " + playerName);
+    LOG_INFO("Sent WHO query '", filterText, "': levels ", f.minLevel, "-", f.maxLevel,
+             " name='", f.name, "' guild='", f.guild, "' zones=", f.zones.size(),
+             " strings=", f.strings.size());
 }
 
 void SocialHandler::addFriend(const std::string& playerName, const std::string& note) {
@@ -1672,8 +1717,7 @@ void SocialHandler::removeIgnore(const std::string& playerName) {
 
 void SocialHandler::randomRoll(uint32_t minRoll, uint32_t maxRoll) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    if (minRoll > maxRoll) std::swap(minRoll, maxRoll);
-    if (maxRoll > 10000) maxRoll = 10000;
+    // The range is the caller's to check (RandomRoll, 0x516610).
     auto packet = RandomRollPacket::build(minRoll, maxRoll);
     owner_.getSocket()->send(packet);
     LOG_INFO("Rolled ", minRoll, "-", maxRoll);
@@ -1718,15 +1762,27 @@ void SocialHandler::requestLogout(bool exitAfterLogout) {
 
 void SocialHandler::cancelLogout() {
     if (!owner_.getSocket()) return;
-    // CMSG_LOGOUT_CANCEL and nothing said (Wow.exe 0x6B18C0); the server's
-    // SMSG_LOGOUT_CANCEL_ACK closes the countdown popup.
-    if (!loggingOut_) return;
+    // CMSG_LOGOUT_CANCEL and nothing said (Wow.exe 0x6B18C0), sent whether or
+    // not a logout is pending; the pending mark is cleared on the way, so the
+    // server's SMSG_LOGOUT_CANCEL_ACK that answers it fires nothing
+    // (0x6B0900 fires LOGOUT_CANCEL only for a logout still pending - one
+    // the server called off itself).
+    if (owner_.getState() != WorldState::IN_WORLD) return;
     auto packet = LogoutCancelPacket::build();
     owner_.getSocket()->send(packet);
     loggingOut_ = false;
     exitAfterLogout_ = false;
     logoutCountdown_ = 0.0f;
     LOG_INFO("Cancelled logout");
+}
+
+void SocialHandler::forceLogout() {
+    // The forced form of the request (0x6B1930 with its second argument set):
+    // CMSG_PLAYER_LOGOUT, no pending mark, no countdown of the client's own.
+    // The server honours it only for an account allowed to leave at once.
+    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
+    network::Packet packet(wireOpcode(Opcode::CMSG_PLAYER_LOGOUT));
+    owner_.getSocket()->send(packet);
 }
 
 // ============================================================
@@ -2117,7 +2173,16 @@ void SocialHandler::handleDuelWinner(network::Packet& packet) {
 
 void SocialHandler::inviteToGroup(const std::string& playerName) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    LOG_WARNING(">>> Sending CMSG_GROUP_INVITE to '", playerName, "'");
+    // 0x6D4300: the player's own name (any case) is ERR_INVITE_SELF and goes
+    // no further; anything else goes to the server as typed.
+    std::string me;
+    if (const Character* active = owner_.getActiveCharacter()) me = active->name;
+    if (me.empty()) me = owner_.lookupName(owner_.getPlayerGuid());
+    if (!me.empty() && chat_rules::equalsNoCase(playerName, me)) {
+        owner_.displayGameMessage("ERR_INVITE_SELF", "You can't invite yourself to a group.");
+        return;
+    }
+    LOG_INFO("Sending CMSG_GROUP_INVITE to '", playerName, "'");
     auto packet = GroupInvitePacket::build(playerName);
     owner_.getSocket()->send(packet);
 }
@@ -3682,13 +3747,16 @@ void SocialHandler::handleWho(network::Packet& packet) {
         uint32_t level   = packet.readUInt32();
         uint32_t classId = packet.readUInt32();
         uint32_t raceId  = packet.readUInt32();
-        if (hasGender && packet.hasRemaining(1)) packet.readUInt8();
+        uint8_t gender = 0;
+        if (hasGender && packet.hasRemaining(1)) gender = packet.readUInt8();
         uint32_t zoneId = 0;
         if (packet.hasRemaining(4)) zoneId = packet.readUInt32();
+        // Fifty rows are kept (0x6B8720); the rest are read past.
+        if (whoResults_.size() >= 50) continue;
         WhoEntry entry;
         entry.name = playerName; entry.guildName = guildName;
         entry.level = level; entry.classId = classId;
-        entry.raceId = raceId; entry.zoneId = zoneId;
+        entry.raceId = raceId; entry.zoneId = zoneId; entry.gender = gender;
         whoResults_.push_back(std::move(entry));
     }
     // To the chat when nobody is showing a panel, which is what a stock client
@@ -3705,8 +3773,8 @@ void SocialHandler::handleWho(network::Packet& packet) {
     // and no more than three rows, WHO_LIST_FORMAT or, with a guild,
     // WHO_LIST_GUILD_FORMAT per row, then WHO_NUM_RESULTS - plain chat lines.
     // Otherwise the rows go to the panel alone, through WHO_LIST_UPDATE.
-    constexpr size_t kWhoChatRows = 3;
-    const bool toChat = !whoToUI_ && whoResults_.size() <= kWhoChatRows;
+    // The packet's count decides, not the rows kept.
+    const bool toChat = chat_rules::whoResultsToChat(whoToUI_, displayCount);
     if (toChat) {
         for (const auto& e : whoResults_) {
             const std::string level = std::to_string(e.level);
@@ -3959,8 +4027,13 @@ void SocialHandler::handleLogoutResponse(network::Packet& packet) {
     if (data.result == 0) {
         // No line: the countdown popup is the stock client's only word.
         logoutCountdown_ = data.instant ? 0.0f : 20.0f;
+        // Accepted (0x6B08B0): PLAYER_CAMPING, or PLAYER_QUITING for a quit,
+        // when there is a countdown; nothing when it is instant - the
+        // server's SMSG_LOGOUT_COMPLETE follows at once. PLAYER_LOGOUT is not
+        // fired here: FrameXML reads it as the character leaving the world
+        // and saves its variables on it, twenty seconds early and for a
+        // logout that may yet be cancelled.
         if (owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("PLAYER_LOGOUT", {});
             // The timer the server just imposed, announced so the interface can
             // show it. UIParent answers PLAYER_CAMPING with the CAMP popup and
             // PLAYER_QUITING with QUIT, both of which count down and offer to
@@ -3990,7 +4063,8 @@ void SocialHandler::handleLogoutResponse(network::Packet& packet) {
             LOG_WARNING("Logout refused, but Exit Game was asked for - closing anyway");
             if (owner_.logoutCompleteCallbackRef()) owner_.logoutCompleteCallbackRef()(true);
         } else {
-            owner_.raiseUiError("Cannot logout right now.");
+            // ERR_LOGOUT_FAILED, "You can't logout now." (0x6B08B0).
+            owner_.displayGameMessage("ERR_LOGOUT_FAILED", "You can't logout now.");
         }
     }
 }

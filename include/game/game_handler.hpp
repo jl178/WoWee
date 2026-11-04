@@ -733,6 +733,7 @@ public:
     /// the two agree, and keeps them agreeing.
     void faceCanonicalYaw(float canonicalYaw);
     void cancelLogout();
+    void forceLogout();
 
     // Instance difficulty
     void sendSetDifficulty(uint32_t difficulty, bool raid = false);
@@ -757,6 +758,7 @@ public:
 
     // Follow/Assist
     void followTarget();
+    void followUnit(uint64_t guid);
     void cancelFollow();   // Stop following current target
     void assistTarget();
 
@@ -2149,6 +2151,14 @@ public:
     bool isPlayerOutOfBounds() const;
     /// PLAYER_FLAGS 0x8, a game master: chat reads every language (0x509DD0).
     bool isPlayerGmFlagged() const;
+    /// UNIT_FIELD_FLAGS_2 0x8 (UNIT_FLAG2_COMPREHEND_LANG) on the player.
+    bool playerComprehendsLanguages() const;
+    /// Whether one of the player's auras applies `auraType` with EffectMiscValue
+    /// `misc` (Spell.dbc), as 0x6E0640 scans them for aura 244.
+    bool playerHasAuraOfType(uint32_t auraType, int32_t misc) const;
+    /// SendChatMessage's drunk factor (0x4F7290): PLAYER_BYTES_3's drunk byte
+    /// or PLAYER_FAKE_INEBRIATION, the larger, at most 100, over 100.
+    float playerDrunkFactor() const;
     /// The ScreenEffect.dbc row the world is drawn and heard with (0x4f88b0):
     /// an aura's SCREEN_EFFECT, else the ghost's row 1, else none (id 0).
     const stock_death::ScreenEffectRow& getScreenEffect() const { return screenEffectRow_; }

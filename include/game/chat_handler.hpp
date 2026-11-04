@@ -4,6 +4,7 @@
 
 #include "game/chat_filters.hpp"
 #include "game/chat_rules.hpp"
+#include "game/chat_social_rules.hpp"
 #include <regex>
 
 #include "game/world_packets.hpp"
@@ -147,7 +148,10 @@ private:
     void pumpChatQueue();
     /// The rest of 0x509DD0 and the CHAT_MSG_ event (0x4FDBC0).
     void finishChatLine(MessageChatData data);
-    void fireChatLineEvent(const MessageChatData& data, const char* chatFlag);
+    /// 0x503660: a text emote's wording, once its sender's name is known.
+    void finishTextEmote(const MessageChatData& data);
+    /// `lineId` false: arg11 is 0 and no id is taken (0x503660's lines).
+    void fireChatLineEvent(const MessageChatData& data, const char* chatFlag, bool lineId = true);
     void ensureLanguageWords();
     [[nodiscard]] uint32_t languageComprehension(uint32_t language) const;
     bool isSpamLine(const std::string& text);
@@ -221,6 +225,15 @@ private:
     std::vector<std::regex> spamPatterns_;
     bool spamPatternsLoaded_ = false;
     std::unordered_map<std::string, bool> spamVerdicts_;
+    /// ChatProfanity.dbc's patterns for enUS (group 0 and -1), the mature
+    /// language filter (0x509A50), and the filtered text per text.
+    chat_rules::ProfanityFilter profanity_;
+    bool profanityLoaded_ = false;
+    std::unordered_map<std::string, std::string> profanityVerdicts_;
+    void ensureProfanityPatterns();
+    /// The filter as the chat frame runs it (cvar profanityFilter, on as it
+    /// ships). `force` checks even with the cvar off, as the drunk slur does.
+    std::string filterProfanity(const std::string& text, bool force = false, bool* changed = nullptr);
     std::vector<std::string> laughWords_;
     size_t maxChatHistory_ = 100;
     uint64_t chatUidCounter_ = 0;  // monotonic uid for MessageChatData::uid

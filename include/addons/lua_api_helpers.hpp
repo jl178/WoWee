@@ -493,7 +493,11 @@ inline uint64_t resolveUnitOrName(game::GameHandler* gh, const std::string& text
     // Units only - a name aimed at a doodad is not what anyone meant, and
     // getName lives on the concrete types rather than on Entity.
     for (const auto& [guid, entity] : gh->getEntityManager().getEntities()) {
-        if (!entity || entity->getType() == game::ObjectType::GAMEOBJECT) continue;
+        // Units and players only: an item, a corpse or a dynamic object is
+        // not a Unit, and reading a name through that cast read garbage -
+        // a /follow at a name nobody had ended in std::bad_alloc.
+        if (!entity || (entity->getType() != game::ObjectType::UNIT &&
+                        entity->getType() != game::ObjectType::PLAYER)) continue;
         auto unit = std::static_pointer_cast<game::Unit>(entity);
         std::string name = unit->getName();
         if (name.empty()) continue;

@@ -802,6 +802,11 @@ struct MessageChatData {
     // A local line with no speaker (a Local Defense notice): the event's
     // name is left empty rather than filled with the player's own.
     bool noSender = false;
+    // SMSG_TEXT_EMOTE waiting in the chat queue for its sender's name: the
+    // EmotesText row and the sound index. The target's name rides in
+    // receiverName. Zero for every other line.
+    uint32_t textEmoteId = 0;
+    uint32_t emoteNum = 0;
     std::chrono::system_clock::time_point timestamp = std::chrono::system_clock::now();
     // Monotonic id assigned by ChatHandler when the message enters history.
     // Stable cache key for the chat UI's formatted/parsed line cache.
@@ -1004,7 +1009,8 @@ public:
     static bool parse(network::Packet& packet, PlayedTimeData& data);
 };
 
-/** CMSG_WHO packet builder */
+/** CMSG_WHO packet builder: levels, name, guild, race and class masks, then
+ *  the zone ids and the free strings, each list after its count (0x6B5630). */
 class WhoPacket {
 public:
     static network::Packet build(uint32_t minLevel = 0, uint32_t maxLevel = 100,
@@ -1012,7 +1018,8 @@ public:
                                  const std::string& guildName = "",
                                  uint32_t raceMask = 0xFFFFFFFF,
                                  uint32_t classMask = 0xFFFFFFFF,
-                                 uint32_t zones = 0);
+                                 const std::vector<uint32_t>& zones = {},
+                                 const std::vector<std::string>& strings = {});
 };
 
 // ============================================================
