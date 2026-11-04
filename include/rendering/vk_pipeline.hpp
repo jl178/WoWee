@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vulkan/vulkan.h>
+#include <cstdlib>
 #include <vector>
 #include <string>
 
@@ -216,10 +217,20 @@ inline VkVertexInputBindingDescription perVertexBinding(uint32_t stride,
     return description;
 }
 
-/// The format the shadow map is created with, and so the only one a pipeline
-/// recording into it under dynamic rendering can name. Renderer's attachment
-/// description says the same thing; they have to agree.
-inline constexpr VkFormat kShadowDepthFormat = VK_FORMAT_D32_SFLOAT;
+/// The format the shadow maps are created with, and so the only one a
+/// pipeline recording into them under dynamic rendering can name. Renderer's
+/// images, views and attachment description use the same; they have to agree.
+///
+/// WOWEE_SHADOW_D16=1 makes them 16-bit: half the bytes behind every filter
+/// tap, for measuring how much of the shadows' cost on an iGPU is the
+/// memory they read (enhancements-plan.md 3.12).
+inline VkFormat shadowDepthFormat() {
+    static const VkFormat format = [] {
+        const char* v = std::getenv("WOWEE_SHADOW_D16");
+        return (v && *v && *v != '0') ? VK_FORMAT_D16_UNORM : VK_FORMAT_D32_SFLOAT;
+    }();
+    return format;
+}
 
 /// The depth-only pipeline every renderer draws its shadow pass with.
 ///
@@ -253,7 +264,7 @@ inline VkPipeline buildShadowPipeline(
     // because a null one already means "shadows are not available" to the
     // five places in Renderer that gate on it.
     if (dynamicRendering) {
-        builder.setRenderingFormats({}, kShadowDepthFormat);
+        builder.setRenderingFormats({}, shadowDepthFormat());
     } else {
         builder.setRenderPass(renderPass);
     }

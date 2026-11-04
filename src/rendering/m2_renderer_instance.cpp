@@ -1220,9 +1220,20 @@ VkTexture* M2Renderer::loadTexture(const std::string& path, uint32_t texFlags) {
     // what an opaque batch has to know before anything keys on it.
     const bool alphaIsSilhouette = blp.alphaIsSilhouette();
 
-    // Create Vulkan texture
+    // Create Vulkan texture.
+    //
+    // The upload's answer is checked. It was dropped, so a texture whose image,
+    // memory or view could not be made (device memory short while a teleport
+    // streams an area in, or a format the device refuses) would be cached and
+    // handed out like any other: an image without a view. The main pass checks
+    // isValid() when it builds a batch's set and falls back to white; the
+    // shadow pass did not, and would write the null view into a live set-0
+    // descriptor - a lost device on NVIDIA (#123). Treated as a failed load
+    // instead: white now, asked again after the retry delay. (Suspected for
+    // the validation layer's null shadow view after teleports, but that one
+    // was the character renderer's: enhancements-plan.md 3.12.)
     auto tex = std::make_unique<VkTexture>();
-    tex->uploadBLP(*vkCtx_, blp);
+    const bool uploaded = tex->uploadBLP(*vkCtx_, blp);
 
     // M2Texture flags: bit 0 = WrapS (1=repeat, 0=clamp), bit 1 = WrapT
     VkSamplerAddressMode wrapS = (texFlags & 0x1) ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -1244,8 +1255,19 @@ VkTexture* M2Renderer::loadTexture(const std::string& path, uint32_t texFlags) {
         const char* set = std::getenv("WOWEE_SKY_MIP_BIAS");
         return set ? std::strtof(set, nullptr) : 0.0f;
     }();
-    tex->createSampler(vkCtx_->getDevice(), VK_FILTER_LINEAR, wrapS, wrapT,
-                       16.0f, skyMode_ ? skyMipBias : 0.0f);
+    if (uploaded) {
+        tex->createSampler(vkCtx_->getDevice(), VK_FILTER_LINEAR, wrapS, wrapT,
+                           16.0f, skyMode_ ? skyMipBias : 0.0f);
+    }
+    if (!uploaded || !tex->isValid()) {
+        failedTextureCache_.insert(key);
+        failedTextureRetryAt_[key] = lookupSerial + kFailedTextureRetryLookups;
+        if (loggedTextureLoadFails_.insert(key).second) {
+            LOG_WARNING("M2: texture upload failed (", blp.width, "x", blp.height,
+                        "), using white until it is asked for again: ", path);
+        }
+        return whiteTexture_.get();
+    }
 
     VkTexture* texPtr = tex.get();
 

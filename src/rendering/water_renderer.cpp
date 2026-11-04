@@ -1544,7 +1544,7 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 }
 
 void WaterRenderer::captureSceneHistory(VkCommandBuffer cmd,
-                                        VkImage srcColorImage,
+                                        VkImage /*srcColorImage: not copied, see below*/,
                                         VkImage srcDepthImage,
                                         VkExtent2D srcExtent,
                                         bool srcDepthIsMsaa,
@@ -1598,48 +1598,12 @@ void WaterRenderer::captureSceneHistory(VkCommandBuffer cmd,
         cmdPipelineBarrier2(cmd, dep);
     };
 
-    // Color source: final render pass layout is PRESENT_SRC.
-    // srcAccessMask must be COLOR_ATTACHMENT_WRITE (not 0) so that GPU cache flushes
-    // happen before the transfer read.  Using srcAccessMask=0 with BOTTOM_OF_PIPE
-    // causes VK_ERROR_DEVICE_LOST on strict drivers (AMD/Mali) because color writes
-    // are not made visible to the transfer unit before the copy begins.
-    barrier2(srcColorImage, VK_IMAGE_ASPECT_COLOR_BIT,
-             VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-    barrier2(sh.colorImage, VK_IMAGE_ASPECT_COLOR_BIT,
-             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-             VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-
-    if (needsScaling) {
-        VkImageBlit colorBlit{};
-        colorBlit.srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1};
-        colorBlit.dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1};
-        colorBlit.srcOffsets[1] = {.x = static_cast<int32_t>(srcExtent.width),
-                                   .y = static_cast<int32_t>(srcExtent.height), .z = 1};
-        colorBlit.dstOffsets[1] = {.x = static_cast<int32_t>(sceneHistoryExtent.width),
-                                   .y = static_cast<int32_t>(sceneHistoryExtent.height), .z = 1};
-        vkCmdBlitImage(cmd, srcColorImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                       sh.colorImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                       1, &colorBlit, VK_FILTER_LINEAR);
-    } else {
-        VkImageCopy colorCopy{};
-        colorCopy.srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1};
-        colorCopy.dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1};
-        colorCopy.extent = {.width = copyExtent.width, .height = copyExtent.height, .depth = 1};
-        vkCmdCopyImage(cmd, srcColorImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                       sh.colorImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &colorCopy);
-    }
-
-    barrier2(sh.colorImage, VK_IMAGE_ASPECT_COLOR_BIT,
-             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-             VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-    barrier2(srcColorImage, VK_IMAGE_ASPECT_COLOR_BIT,
-             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-             VK_ACCESS_TRANSFER_READ_BIT, 0,
-             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    // No colour. The water stopped refracting (water.frag: SceneColor is
+    // bound but not read - stock water has none), and the reflection binding
+    // only names this image as a fallback view while reflections are off, so
+    // nothing samples the colour history. Copying the whole frame into it was
+    // most of the 0.27 ms "water refraction copy" the shoreline foam cost on
+    // the Iris Xe (enhancements-plan.md 3.12); the foam reads the depth.
 
     // Depth source: only copy when source is single-sampled.
     if (!srcDepthIsMsaa && srcDepthImage != VK_NULL_HANDLE) {

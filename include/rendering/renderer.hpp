@@ -541,6 +541,21 @@ private:
     NearShadowMask nearShadowMask_;
     std::vector<glm::vec4> nearCasterSpheres_;
     uint32_t nearSphereSplit_[2] = {};  ///< where the units' and doodads' spheres end
+    /// The unit map's units, recorded on a frame worker into a secondary
+    /// command buffer (startUnitShadowRecording) while the main thread fills
+    /// the per-frame block and records the culls; renderShadowPass waits for
+    /// it and executes it beside the movers' secondary. Without parallel
+    /// recording, or with WOWEE_UNIT_SHADOW_WORKER=0, the units are recorded
+    /// inline in the shadow pass as before.
+    VkCommandPool unitShadowCmdPool_ = VK_NULL_HANDLE;
+    VkCommandBuffer unitShadowCharCmd_[2] = {};
+    VkCommandBuffer unitShadowMoverCmd_[2] = {};
+    std::future<double> unitShadowFuture_;
+    bool unitShadowJobActive_ = false;
+    std::vector<glm::vec4> unitShadowCharSpheres_;   ///< the worker's, joined in renderShadowPass
+    std::vector<glm::vec4> unitShadowMoverSpheres_;  ///< doodads then buildings
+    ShadowReceiverView unitShadowSeen_{};
+    bool unitShadowUseSeen_ = false;
     /// WOWEE_SHADOW_SPLIT=0: one map, every caster, every frame, as before
     /// the split - for measuring what it saves.
     bool shadowSplit_ = true;
@@ -657,6 +672,19 @@ private:
     VkSampleCountFlagBits pendingMsaaSamples_ = VK_SAMPLE_COUNT_1_BIT;
     bool msaaChangePending_ = false;
     void renderShadowPass();
+    /// Whether renderShadowPass draws the unit map this frame, and with it
+    /// the units' casters - the one test both it and the worker start use.
+    [[nodiscard]] bool unitMapDrawsThisFrame() const;
+    /// Where the camera can see the units' shadows (shadowCasterSeen), for
+    /// the unit map; false when every unit is to be drawn.
+    bool unitShadowReceiverView(ShadowReceiverView& seen) const;
+    /// Starts recording the unit map's units on a frame worker, right after
+    /// planShadowFrame. renderShadowPass joins it.
+    void startUnitShadowRecording();
+    /// Begins a secondary command buffer that continues the unit map's
+    /// render pass (or dynamic rendering) of this frame slot, with its own
+    /// viewport and scissor - a secondary inherits neither.
+    bool beginUnitShadowSecondary(VkCommandBuffer cmd, uint32_t frame);
     /// Decides this frame's shadow work (rendering/shadow_cache.hpp): whether
     /// the world map is redrawn and which part, the unit map's projection,
     /// and the matrix the frame's block carries. After the slot's fence.
@@ -672,7 +700,7 @@ private:
     void clearShadowImageOnce(VkImage image, VkImageView view, VkFramebuffer fb, uint32_t size,
                               VkImageLayout& layout, bool& cleared);
     void beginShadowTarget(VkImage image, VkImageView view, VkFramebuffer fb, uint32_t size,
-                           VkImageLayout& layout, bool clear);
+                           VkImageLayout& layout, bool clear, bool secondaryContents = false);
     void endShadowTarget(VkImage image, VkImageLayout& layout);
     /// The way shadow rays travel (unit, Z clamped downward), as the shadow
     /// projection uses it. Also tells character animation culling which way
