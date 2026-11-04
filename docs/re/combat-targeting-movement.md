@@ -176,6 +176,66 @@ player was attacking or had asked to, cancels auto-repeat, clears the
 click-to-move attack. The attack target itself is cleared by the server's
 `SMSG_ATTACKSTOP`.
 
+### Duels (DuelInfo.cpp, handlers registered by 0x5CFDD0)
+
+The client keeps no duel state of its own beyond the flag's guid
+(0xC22B58), the challenger (0xC22B60) and the countdown. Whether two players
+may fight is read off two public player fields every time it is asked:
+`PLAYER_DUEL_ARBITER` (UNIT_END + 0, the flag game object's guid, set on both
+by the server's duel spell) and `PLAYER_DUEL_TEAM` (UNIT_END + 8, 1 and 2,
+set by AzerothCore when the countdown ends and cleared with the arbiter when
+the duel is over).
+
+- **UnitReaction (0x7251C0)** between two units both flagged
+  `UNIT_FLAG_PVP_ATTACKABLE` (0x8): each is taken to its player (0x718B70:
+  the unit, else its `UNIT_FIELD_CHARMEDBY`, else its `UNIT_FIELD_CREATEDBY`,
+  a player at the first or second step). When both players have a non-zero
+  `PLAYER_DUEL_TEAM` and the same `PLAYER_DUEL_ARBITER`, the answer is
+  **1 (hostile) for different teams, 4 (neutral) for the same team** - before
+  the party, FFA and faction rules. So the opponent's nameplate, target frame
+  and selection colour turn hostile only once the countdown is over.
+- **CanAttack (0x729740)**, both player-controlled: the reaction test first
+  (0x514050: 4 or better refuses), then the duel test - same arbiter, both
+  teams set - answers **yes** whatever the PvP flags; only then the PvP and
+  FFA bits. So TargetNearestEnemy, right-click attack and `UnitCanAttack`
+  take the opponent (and its pet) for the duel and not before or after.
+
+Messages (0x5CFCD0 .. 0x5CFB20; events 0x171-0x174 in the table at
+0xC24EB0):
+
+| Opcode | What the client does |
+|---|---|
+| `SMSG_DUEL_REQUESTED` 0x167 (flag, challenger) | the flag is kept. The challenger is the player: `ERR_DUEL_REQUESTED` ("You have requested a duel.", 0x5216F0(0x148)) and `CMSG_DUEL_ACCEPTED` for it (0x5CFBD0). A challenger on the ignore list (0x6B52E0): `CMSG_DUEL_CANCELLED` and the flag is dropped. Otherwise `DUEL_REQUESTED` with the unit's name (0x72A000) - only when the challenger is an object the client has; the challenger is kept either way |
+| `SMSG_DUEL_OUTOFBOUNDS` 0x168 | `DUEL_OUTOFBOUNDS` and nothing else: UIParent shows the `DUEL_OUTOFBOUNDS` popup (`DUEL_OUTOFBOUNDS_TIMER`, 10 s timeout) |
+| `SMSG_DUEL_INBOUNDS` 0x169 | `DUEL_INBOUNDS` (the popup is hidden) |
+| `SMSG_DUEL_COUNTDOWN` 0x2B7 (ms) | count = ms / 1000; 0x5CF870 prints `DUEL_COUNTDOWN` ("Duel starting: %d") as a system chat line (0x509DD0), then again every 1000 ms (a 0x403370 timer, "ProcessCountdown") with one less, until the count reaches 0: "Duel starting: 3", "2", "1". No banner, no sound |
+| `SMSG_DUEL_COMPLETE` 0x16A (started) | with a flag known: `ERR_DUEL_CANCELLED` (0x149, the info text) when the duel never started, the flag cleared, `DUEL_FINISHED`; the countdown timer is unregistered and the challenger cleared whatever |
+| `SMSG_DUEL_WINNER` 0x16B (type, names) | `DUEL_WINNER_KNOCKOUT` or `DUEL_WINNER_RETREAT` as a system chat line |
+
+The flag itself is an ordinary game object (type 16, DUEL_ARBITER, not
+interactable) the server spawns between the two.
+
+Wowee (`stock_duel.hpp`; `GameHandler::duelFieldsOf`, `duelReactionToPlayer`,
+`unitHostileToPlayer`, `refreshDuelHostility`; `SocialHandler`'s duel
+handlers) measured on the lab server with two clients, paladin Wptestb
+challenging mage Wptester in Elwynn:
+
+| Moment | Wptestb's view of Wptester |
+|---|---|
+| Before (no duel fields) | `UnitCanAttack` false, `UnitIsEnemy` false, `UnitReaction` 5, `UnitCanAssist` true; Tab selected nothing |
+| Challenged and counting down (arbiter set, teams 0) | the same; "You have requested a duel." for the challenger, `DUEL_REQUESTED "Wptestb"` for the other, "Duel starting: 3", "2", "1" as system lines on both, 999-1000 ms apart |
+| Duel on (teams 1 and 2) | `UnitCanAttack` true, `UnitIsEnemy` true, `UnitReaction` 1, `UnitCanAssist` false; Tab selected Wptester |
+| Over (Grovel, `DUEL_FINISHED`, "Wptester has defeated Wptestb in a duel") | back to reaction 5, not attackable |
+
+Wptester's Counterspell on Wptestb's Holy Light and Fire Blast on its
+Hearthstone (InterruptFlags 0x10) gave the sequences of the table in section
+3 on both clients. The name above the opponent was still the unflagged
+player's blue in that run: 0x521BF0 answers red when each may attack the
+other (0x729740 both ways), which Wowee's colour rule asked only through the
+PvP flag; it now asks the duel too (`stockUnitColor`), not yet seen live.
+Not run live: the out-of-bounds popup, a forfeit, the right-click attack -
+the second account was taken by another agent's long test chain.
+
 ### Server messages (handler 0x756800, registered by 0x756BD0)
 
 | Opcode | What the client does |
@@ -492,6 +552,69 @@ TurnLeft/RightStart) runs before the movement packet is sent:
 still in flight whose InterruptFlags have movement (Auto Shot's are 0x21)
 is cancelled with the rest.
 
+### Casts ending: events and messages (0x7FECC0)
+
+The client keeps a record of every cast of the player's in flight (the list
+at 0xAF5254: 0x805010 adds one at the send 0x80AC90, 0x805180 finds one by
+count, spell and caster, 0x805100 frees it). An answer that finds none -
+because the client already ended that cast, or it is another unit's -
+works on a fresh copy (the player's) or a stack record (anyone else's) and
+does the same. An Auto Shot or Shoot press is answered by `SMSG_SPELL_START`
+but never by a `SMSG_SPELL_GO` (each shot is the server's own cast, count 0),
+so its record stays as long as the repeat does.
+
+Every way a cast ends goes through **0x7FECC0(unit, spell, result)** with a
+record (count, spell):
+
+1. When the record is the unit's own cast (`+0xA5C` count, `+0xA60` spell):
+   0x7FEC00 puts the cast and its pose away (0x72E430 zeroes both).
+2. The event, for every token naming the unit (0x60BF60 -> 0x60BB70:
+   player, vehicle, pet, partyN, partypetN, raidN, raidpetN, arenaN,
+   arenapetN, bossN, target, focus, mouseover), with (unit, name, rank,
+   **the record's count**) - the cast id is that count:
+   - result 187 (the client's "it went off"): `UNIT_SPELLCAST_SUCCEEDED`;
+   - DONT_REPORT 27, SPELL_IN_PROGRESS 105, CHARMED 24: `UNIT_SPELLCAST_FAILED_QUIET`;
+   - INTERRUPTED 40, INTERRUPTED_COMBAT 41: `UNIT_SPELLCAST_INTERRUPTED`;
+   - anything else: `UNIT_SPELLCAST_FAILED`.
+3. When the record's count is the unit's count as it was on entry and its
+   spell is the one the bar shows (`+0xA6C`, set by `SMSG_SPELL_START`):
+   0x726200 clears the bar and `UNIT_SPELLCAST_STOP` follows.
+
+So a cast the client ended itself and the server then reports again fires
+its event again and never a second STOP.
+
+Who calls it:
+
+| Path | Record | Result | Also |
+|---|---|---|---|
+| Move start (0x5FAA40 -> 0x806620 -> 0x806200(rec, 0, 1, 40)) | every record whose InterruptFlags & 1, but the spell waiting for its ground point | INTERRUPTED | `CMSG_CANCEL_CAST` (the record's count, the spell) only when the spell has a cast time after mods (caster vtable +0x148 > 0) or waits for the next swing (Attributes & 0x404). Auto Shot (cast time -1000000), an instant, a wand's Shoot: no packet |
+| SpellStopCasting (0x809EA0 -> 0x809A80 -> 0x806200(rec, 1, 1, 27)) | the current cast's (`+0xA5C`, `+0xA60`) | DONT_REPORT | the same packet rule; then 0x5D9FF0 |
+| `SMSG_CAST_FAILED` (0x809AF0 -> 0x808200, the caster only) | by count | the packet's | first the school's fizzle (Resistances.dbc FizzleSoundID by the first SchoolMask bit, 0x4CFF30; not for DONT_REPORT), then the text through the 3 s throttle (`ERR_SPELL_FAILED_S`, "Interrupted"), a combat log `SPELL_CAST_FAILED` (0x751AD0), then 0x7FECC0 |
+| `SMSG_SPELL_FAILURE` (0x809C70) | by count | the packet's | the fizzle at the caster; the player's auto-repeat off for NEED_AMMO 52-54 (0x807560); 0x72ED80 ends the unit's cast if it is this one; then 0x7FECC0. **No text, no chat line** |
+| `SMSG_SPELL_FAILED_OTHER` (0x806AD0) | by count | the packet's | only 0x7FECC0 |
+| `SMSG_SPELL_GO` (0x80E1B0) | by count | 187 | |
+
+AzerothCore's `Spell::cancel` for a cast still being prepared sends
+`SMSG_CAST_FAILED` (INTERRUPTED, the caster only), then `SMSG_SPELL_FAILURE`
+and `SMSG_SPELL_FAILED_OTHER` to everyone in range, the caster included. The
+sequences that make, for Holy Light (holy: fizzle 1428):
+
+| Case | At the key | `SMSG_CAST_FAILED` | `SMSG_SPELL_FAILURE` | `SMSG_SPELL_FAILED_OTHER` |
+|---|---|---|---|---|
+| Own cast, moving | `CMSG_CANCEL_CAST`, INTERRUPTED, STOP | fizzle, "Interrupted", INTERRUPTED | fizzle, INTERRUPTED | INTERRUPTED |
+| Own cast, `/stopcasting` | `CMSG_CANCEL_CAST`, FAILED_QUIET, STOP | fizzle, "Interrupted", INTERRUPTED | fizzle, INTERRUPTED | INTERRUPTED |
+| Own cast, kicked / damage cancel (Hearthstone, InterruptFlags 0x10) | - | fizzle, "Interrupted", INTERRUPTED, STOP | fizzle, INTERRUPTED | INTERRUPTED |
+| Another unit's | - | (not sent) | fizzle, INTERRUPTED, STOP | INTERRUPTED |
+| A press refused during a cast ("Another action is in progress") | - | fizzle, the text, FAILED_QUIET with the press's count; the running cast and its bar go on | | |
+
+The cast bar (CastingBarFrame.lua) acts on the first INTERRUPTED whose cast
+id is its own and ignores the rest (`fadeOut`).
+
+**Food and drink** are auras with AuraInterruptFlags NOT_SEATED (0x40000):
+0x5FAA40 sends nothing for them. The movement packet is the whole message:
+AzerothCore's movement handler stands a sitting player up and the aura goes
+with the stand.
+
 ## 4. Other units
 
 All of the above is `CGUnit_C`, shared by every unit. For a unit this client
@@ -569,6 +692,18 @@ Third pass (targeting and casting on the move, `input-timing.md` section 5):
 | 22 | `AssistUnit` said nothing for an unknown unit and ignored `assistAttack` | Stock errors and the attack (`CombatHandler::assistUnit`) |
 | 23 | Wowee refused any cast-time spell on horizontal movement, after dismounting | 0x739650's rule and place; move starts cancel by InterruptFlags/ChannelInterruptFlags (0x5FAA40) |
 
+Fourth pass (casts ending, duels, macros; `input-timing.md` section 6):
+
+| # | Gap | Fix |
+|---|---|---|
+| 24 | The server's report of an interrupt the client had already shown: "Interrupted" a second time, "Holy Light: Interrupted" with a system chat line, and a second INTERRUPTED/STOP with no spell | 0x7FECC0 for every end (`stock_cast_events.hpp`): `SMSG_SPELL_FAILURE` and `SMSG_SPELL_FAILED_OTHER` say nothing and fire the event with the packet's spell and count; the text is `SMSG_CAST_FAILED`'s, once through the throttle; STOP only for the bar's cast |
+| 25 | `SpellStopCasting`, `/stopcasting` and Escape cleared the cast with no event | DONT_REPORT: `UNIT_SPELLCAST_FAILED_QUIET` and STOP, then the server's reports |
+| 26 | Duels unknown: the opponent was never attackable for Tab, right-click or `UnitCanAttack`, never hostile | `PLAYER_DUEL_ARBITER`/`PLAYER_DUEL_TEAM` read (`stock_duel.hpp`): reaction 1 for the other side, CanAttack yes before the PvP rule, for the duellists and what they control; hostility refreshed when the fields change; right-click on an attackable player attacks |
+| 27 | `SMSG_DUEL_OUTOFBOUNDS` printed "You are out of the duel area!" twice (error text and raised error); the countdown was a "3, 2, 1, Fight!" banner of Wowee's; `DUEL_REQUESTED` fired with a hex guid for an unknown challenger; `SMSG_DUEL_COMPLETE` fired `DUEL_FINISHED` with no duel | The events alone for out of / in bounds; "Duel starting: N" system chat lines a second apart, stopped by `SMSG_DUEL_COMPLETE`; `DUEL_REQUESTED` only for a challenger the client has; `DUEL_FINISHED` and `ERR_DUEL_CANCELLED` only with a flag known |
+| 28 | An Auto Shot or Shoot press in flight was untouched by a move start | Its record is cancelled with INTERRUPTED and no packet (cast time 0, not next-swing); the repeat goes on |
+| 29 | Food and drink: `CMSG_CANCEL_AURA` and `CMSG_STANDSTATECHANGE` on a move start | Nothing sent; the movement packet ends them on the server |
+| 30 | Every TargetNearest* in a macro ran | Once per macro (0xBEAF44 bit 0x20), modes 0-4 |
+
 Still different:
 
 - **A blow whose events never come** still plays its reaction (450 ms
@@ -590,7 +725,7 @@ Still different:
   nothing while an attack runs; on AzerothCore the swing therefore stays on
   the old target, as it does in Wowee. Wowee does re-send `CMSG_ATTACKSWING`
   on a right-click of another unit, which does switch.
-- Tab/TargetNearest: see `input-timing.md` section 6 for what is
+- Tab/TargetNearest: see `input-timing.md` section 7 for what is
   approximated (CanAttack/CanAssist, duels, vehicles, once per macro).
 - Wowee keeps the attack request through an `SMSG_ATTACKSTOP` on foot and
   asks again; the stock client's attack target is simply cleared.

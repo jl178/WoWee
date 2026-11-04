@@ -1,6 +1,7 @@
 #pragma once
 
 #include "game/stock_cast_timing.hpp"
+#include "game/stock_cast_events.hpp"
 
 #include "game/world_packets.hpp"
 #include "game/opcode_table.hpp"
@@ -116,7 +117,19 @@ public:
     void noteGroundCastSpell(uint32_t spellId) { lastGroundCastSpellId_ = spellId; }
     /// What starting to move does to the player's cast (0x5FAA40).
     void interruptForMoveStart();
+    /// Whether a move start has anything to do here: a cast in flight, a
+    /// channel, or the seated food and drink presentation.
+    [[nodiscard]] bool moveStartHasWork() const {
+        return casting_ || restorationActive_ || pendingCasts_.size() != 0;
+    }
     void cancelCast();
+    /// SpellStopCasting (0x809EA0): the current cast is put away (0x809A80 ->
+    /// 0x806200 with SPELL_FAILED_DONT_REPORT), else a channel is asked to
+    /// stop, else the auto-repeat is turned off. True when something stopped.
+    bool spellStopCasting();
+    /// The cast count of the cast the bar shows - the cast id
+    /// UnitCastingInfo and the UNIT_SPELLCAST_* events carry.
+    [[nodiscard]] uint8_t getCurrentCastCount() const { return currentCastCount_; }
     void cancelAura(uint32_t spellId);
 
     // Known spells
@@ -420,8 +433,11 @@ public:
     /// unit, spell name, rank, cast id, spell id - in that order, which is what
     /// FrameXML unpacks. These were being fired as just the unit and the spell
     /// id, so the id sat where the name belongs and the cast id was absent.
+    /// The cast id is the cast's count (0x60BF60 formats "%s%s%s%d" with the
+    /// record's +0x24), so a report about one press is not read as one about
+    /// another press of the same spell.
     [[nodiscard]] std::vector<std::string> spellcastArgs(const std::string& unitId,
-                                           uint32_t spellId) const;
+                                           uint32_t spellId, uint8_t castCount) const;
 
     void abandonPet();
 
@@ -600,6 +616,29 @@ private:
     static int64_t steadyNowMs();
     uint32_t autoRepeatSpellId_ = 0;
     uint8_t autoRepeatCastCount_ = 0;
+    /// The player's casts in flight (0xAF5254), from the send to the answer.
+    stock_cast::PendingCasts pendingCasts_;
+    /// The player's own cast as 0x7FECC0 compares it: the bar's cast.
+    [[nodiscard]] stock_cast::UnitCast playerUnitCast() const;
+    /// The count a server message names, or on the older clients (no count
+    /// on the wire) the count of the record of that spell, if any.
+    [[nodiscard]] uint8_t serverCastCount(uint8_t wireCount, uint32_t spellId) const;
+    /// 0x806200: cancel one of the player's casts in flight - CMSG_CANCEL_CAST
+    /// when it has a cast time, then the end of the cast with `result`.
+    void cancelPendingCast(stock_cast::CastRef cast, uint8_t result);
+    /// 0x7FECC0 for the player: end `cast` with `result` - the bar's cast
+    /// state when it is that one, the event, the STOP - and forget its record.
+    void endPlayerCast(stock_cast::CastRef cast, uint8_t result);
+    /// The state the player's current cast leaves behind when it ends.
+    void clearPlayerCastState();
+    /// 0x7FECC0 for another unit, against its tracked cast.
+    void endUnitCast(uint64_t guid, stock_cast::CastRef cast, uint8_t result);
+    /// UNIT_SPELLCAST_<event> (and STOP) for every token naming the unit
+    /// (0x60BF60 -> 0x60BB70).
+    void fireCastEnd(uint64_t guid, const stock_cast::CastEndSteps& steps, stock_cast::CastRef cast);
+    /// Resistances.dbc FizzleSoundID for the spell's school (0x4CFF30), at
+    /// the player.
+    void playFizzle(uint32_t spellId);
     // An on-next-swing ability between its SMSG_SPELL_START and the swing.
     uint32_t nextSwingSpellId_ = 0;
     uint8_t nextSwingCastCount_ = 0;

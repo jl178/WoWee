@@ -99,8 +99,8 @@ inline constexpr uint8_t kPvpFlagSanctuary = 0x08;
 
 /// CanAttack (0x729740) between two players that are not friendly to each
 /// other: either flagged for PvP, or both free-for-all, and neither in a
-/// sanctuary. (A duel between the two answers yes before this; Wowee does
-/// not track the arbiter, see the doc's gaps.)
+/// sanctuary. (A duel between the two answers yes before this:
+/// stock_duel::duelAllowsAttack, asked by CombatHandler::targetNearestFacts.)
 [[nodiscard]] constexpr bool playersMayFight(uint8_t mine, uint8_t theirs) {
     if (theirs & kPvpFlagPvp) {
         return !(mine & kPvpFlagSanctuary) && !(theirs & kPvpFlagSanctuary);
@@ -144,6 +144,42 @@ struct UnitFacts {
         break;
     }
     return true;
+}
+
+/// The once-per-macro switches (0xBEAF44) and whether a macro runs
+/// (0xBEAF4C). The macro runner (0x564DB0, behind every macro action,
+/// RunMacro and RunMacroText) sets every bit when it starts the outermost
+/// macro; TargetNearest, ...Enemy, ...EnemyPlayer, ...Friend, ...FriendPlayer
+/// (and TargetDirectionEnemy/Friend) run only while bit 0x20 is set and clear
+/// it, so a macro selects once however many of them it holds. Outside a
+/// macro they always run. ...PartyMember and ...RaidMember do not ask.
+class MacroOnce {
+public:
+    static constexpr uint32_t kTargetNearestBit = 0x20;
+
+    void beginMacro() {
+        if (depth_ == 0) bits_ = 0xFFFFFFFFu;
+        ++depth_;
+    }
+    void endMacro() {
+        if (depth_ > 0) --depth_;
+    }
+    [[nodiscard]] bool inMacro() const { return depth_ > 0; }
+    /// Whether the call may run; running clears the bit (0x525AD0).
+    bool take(uint32_t bit) {
+        const bool allowed = depth_ == 0 || (bits_ & bit) != 0;
+        if (allowed) bits_ &= ~bit;
+        return allowed;
+    }
+
+private:
+    uint32_t bits_ = 0;
+    int depth_ = 0;
+};
+
+/// Whether 0x524FC0's caller is held to one per macro: modes 0-4.
+[[nodiscard]] constexpr bool onceEachMacro(TargetNearestMode mode) {
+    return static_cast<uint8_t>(mode) <= static_cast<uint8_t>(TargetNearestMode::FriendPlayer);
 }
 
 struct Candidate {

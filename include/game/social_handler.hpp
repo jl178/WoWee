@@ -5,6 +5,7 @@
 #include "game/group_defines.hpp"
 #include "game/handler_types.hpp"
 #include "game/calendar_data.hpp"
+#include "game/stock_duel.hpp"
 #include "network/packet.hpp"
 #include <array>
 #include <chrono>
@@ -445,6 +446,8 @@ public:
 
     // Utility methods for delegation from GameHandler
     void updateLogoutCountdown(float deltaTime);
+    /// The duel's "Duel starting: N" lines, one a second (0x5CF870).
+    void updateDuelCountdown(float deltaTime);
     void resetTransferState();
     GroupListData& mutablePartyData() { return partyData; }
     InspectResult& mutableInspectResult() { return inspectResult_; }
@@ -647,6 +650,9 @@ private:
 
     // Duel
     bool pendingDuelRequest_    = false;
+    stock_duel::Countdown duelCountdown_;
+    float duelCountdownCarryMs_ = 0.0f;
+    void sayDuelCountdown(const std::vector<int>& counts);
     uint64_t duelChallengerGuid_= 0;
     uint64_t duelArbiterGuid_   = 0;   // the duel flag; both answers name it
 

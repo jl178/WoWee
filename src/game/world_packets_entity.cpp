@@ -32,7 +32,7 @@ network::Packet AttackStopPacket::build() {
     return packet;
 }
 
-network::Packet CancelCastPacket::build(uint32_t spellId) {
+network::Packet CancelCastPacket::build(uint32_t spellId, uint8_t castCount) {
     network::Packet packet(wireOpcode(Opcode::CMSG_CANCEL_CAST));
     // 3.3.5a: a byte of cast count, then the spell (Wow.exe 0x806200 writes
     // +0x24 then +0x20; AzerothCore skips the byte and reads the spell). A
@@ -40,7 +40,7 @@ network::Packet CancelCastPacket::build(uint32_t spellId) {
     // another spell id and its InterruptNonMeleeSpells, which interrupts only
     // a cast of that id, left the cast running. The older clients send the
     // spell alone.
-    if (!isPreWotlk()) packet.writeUInt8(0);
+    if (!isPreWotlk()) packet.writeUInt8(castCount);
     packet.writeUInt32(spellId);
     LOG_DEBUG("Built CMSG_CANCEL_CAST for spell: ", spellId);
     return packet;

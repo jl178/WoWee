@@ -1753,7 +1753,9 @@ public:
 /** CMSG_CANCEL_CAST packet builder */
 class CancelCastPacket {
 public:
-    static network::Packet build(uint32_t spellId);
+    /// `castCount`: the count of the cast being cancelled (0x806200 writes
+    /// the record's +0x24); AzerothCore skips it.
+    static network::Packet build(uint32_t spellId, uint8_t castCount = 0);
 };
 
 // ============================================================

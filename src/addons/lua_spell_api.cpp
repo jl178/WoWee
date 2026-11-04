@@ -501,6 +501,7 @@ static int lua_UnitCastInfo(lua_State* L, bool wantChannel) {
     bool isCasting = false;
     bool isChannel = false;
     uint32_t spellId = 0;
+    uint8_t castCount = 0;
     float timeTotal = 0.0f;
     float timeRemaining = 0.0f;
     bool interruptible = true;
@@ -509,6 +510,7 @@ static int lua_UnitCastInfo(lua_State* L, bool wantChannel) {
         isCasting = gh->isCasting();
         isChannel = gh->isChanneling();
         spellId = gh->getCurrentCastSpellId();
+        if (gh->getSpellHandler()) castCount = gh->getSpellHandler()->getCurrentCastCount();
         timeTotal = gh->getCastTimeTotal();
         timeRemaining = gh->getCastTimeRemaining();
         // Player interruptibility: always true for own casts (server controls actual interrupt)
@@ -521,6 +523,7 @@ static int lua_UnitCastInfo(lua_State* L, bool wantChannel) {
         isCasting = state->casting;
         isChannel = state->isChannel;
         spellId = state->spellId;
+        castCount = state->castCount;
         timeTotal = state->timeTotal;
         timeRemaining = state->timeRemaining;
         interruptible = state->interruptible;
@@ -569,7 +572,8 @@ static int lua_UnitCastInfo(lua_State* L, bool wantChannel) {
     lua_pushnumber(L, endTimeMs);                                // endTime (ms)
     lua_pushboolean(L, gh->isProfessionSpell(spellId) ? 1 : 0); // isTradeSkill
     if (!wantChannel) {
-        lua_pushnumber(L, spellId);                              // castID (UnitCastingInfo only)
+        // The cast's count, which the UNIT_SPELLCAST_* events carry too.
+        lua_pushnumber(L, castCount);                            // castID (UnitCastingInfo only)
     }
     lua_pushboolean(L, interruptible ? 0 : 1);                  // notInterruptible
     return wantChannel ? 8 : 9;
@@ -1418,15 +1422,8 @@ void registerSpellLuaAPI(lua_State* L) {
             // 0x809EA0: the cast or channel stops; with none, a repeating
             // Auto Shot or Shoot does. 1 when something stopped, else nil.
             auto* gh = getGameHandler(L);
-            bool stopped = false;
-            if (gh && gh->isCasting()) {
-                gh->cancelCast();
-                stopped = true;
-            } else if (gh && gh->getSpellHandler() &&
-                       gh->getSpellHandler()->getAutoRepeatSpellId() != 0) {
-                gh->getSpellHandler()->cancelAutoRepeat();
-                stopped = true;
-            }
+            const bool stopped = gh && gh->getSpellHandler() &&
+                                 gh->getSpellHandler()->spellStopCasting();
             if (stopped) lua_pushnumber(L, 1); else lua_pushnil(L);
             return 1;
         }},

@@ -332,7 +332,81 @@ another mode), `tests/test_stock_cast_timing.cpp` (moving refusal, spell
 mods, move-start cancels), `tests/test_input_integration.cpp` (Tab runs
 from the key event).
 
-## 6. Gaps
+## 6. Third pass: how a cast ends, duels, macros, the pad
+
+Read in `Wow.exe` this pass (details in `combat-targeting-movement.md`
+section 1 "Duels" and section 3 "Casts ending"):
+
+- Every end of a cast goes through 0x7FECC0 with a record of the player's
+  casts in flight (0xAF5254): the event by result (SUCCEEDED / FAILED_QUIET /
+  INTERRUPTED / FAILED) with **the record's count as the cast id**, for every
+  token naming the unit, and `UNIT_SPELLCAST_STOP` only when the bar showed
+  that cast. The client's own cancel (move start: INTERRUPTED; SpellStopCasting:
+  FAILED_QUIET) ends the cast and its bar; the server's three reports that
+  follow (`SMSG_CAST_FAILED`, `SMSG_SPELL_FAILURE`, `SMSG_SPELL_FAILED_OTHER`)
+  each fire INTERRUPTED again, without a STOP.
+- Text: only `SMSG_CAST_FAILED` (0x808200) shows anything - "Interrupted",
+  through the 3 s throttle - and only to the caster. `SMSG_SPELL_FAILURE` and
+  `SMSG_SPELL_FAILED_OTHER` show nothing and write no chat line.
+- The school's fizzle (Resistances.dbc FizzleSoundID) plays on
+  `SMSG_CAST_FAILED` (not for DONT_REPORT) and on `SMSG_SPELL_FAILURE`.
+- 0x806200's `CMSG_CANCEL_CAST` goes out only for a spell with a cast time or
+  a next-swing one; an Auto Shot or Shoot press in flight is dropped with its
+  INTERRUPTED and no packet; the repeat goes on.
+- Food and drink: 0x5FAA40 sends nothing; the movement packet stands the
+  player up on the server and the aura goes.
+- TargetNearest, ...Enemy, ...EnemyPlayer, ...Friend, ...FriendPlayer run
+  once per macro (0x564DB0 sets 0xBEAF44 to all ones for the outermost
+  macro; 0x525AD0 and its siblings run only with bit 0x20 and clear it).
+  RunMacroText and RunMacro use the same runner.
+
+Changes:
+
+- `stock_cast::PendingCasts` (game/stock_cast_events.hpp): the record of
+  every press from the send to its `SMSG_SPELL_GO` or failure, in
+  `SpellHandler::pendingCasts_`. `castEndSteps` is 0x7FECC0;
+  `SpellHandler::endPlayerCast` / `endUnitCast` / `fireCastEnd` apply it.
+- Move start (`interruptForMoveStart`): every record whose InterruptFlags
+  have movement is cancelled (`cancelPendingCast`: the packet by
+  `cancelSendsPacket`, then INTERRUPTED and the STOP for the bar's cast).
+  The movement handler asks `moveStartHasWork()`, so a pending Auto Shot
+  press counts without a cast bar.
+- `SpellStopCasting`, `/stopcasting` and Escape (`spellStopCasting`,
+  `cancelCast`): the current cast with DONT_REPORT - FAILED_QUIET and STOP.
+- `handleCastFailed`: fizzle, text through the throttle, then the event for
+  the refused cast (its count; a press refused during a cast gets its own
+  event and leaves the running bar); STOP only for the bar's cast.
+- `handleSpellFailure` / `handleSpellFailedOther`: no text, no chat line;
+  the fizzle (the player's), NEED_AMMO stops the auto-repeat, the event with
+  the packet's spell and count for every token, the unit's cast ended only
+  when it is that cast.
+- The cast id of every `UNIT_SPELLCAST_*` event and of `UnitCastingInfo` is
+  now the cast count (`spellcastArgs(unit, spell, count)`); START and
+  SUCCEEDED fire for every token naming the caster; the bar's STOP after a
+  cast goes off follows SUCCEEDED, and only for the bar's cast.
+- Food and drink on a move start: no `CMSG_CANCEL_AURA` and no
+  `CMSG_STANDSTATECHANGE`; only this client's seated presentation ends.
+- Once per macro: `tab_target::MacroOnce` in `CombatHandler`, begun and ended
+  by `ChatPanel::executeMacroText` (macro actions, RunMacro, RunMacroText).
+- Pad Tab: `GameScreen::processTargetKeysAtInput`, called by Application
+  after the input pump with the world clicks; the draw's poll only covers a
+  frame that skipped it. `WoweeDebug_PadCommand(cmd, down)` drives a virtual
+  (keyless) command from a test script.
+
+Measured (lab server, paladin Wptestb, Holy Light, `WOWEE_INPUT_TRACE=1`):
+
+| Step | Before | After |
+|---|---|---|
+| MoveForwardStart during Holy Light | `CMSG_CANCEL_CAST`, INTERRUPTED, STOP with no spell; on the server's answer "Interrupted" twice (CAST_FAILED and SPELL_FAILURE), "Holy Light: Interrupted" with a chat line, INTERRUPTED/STOP with no spell | `CMSG_CANCEL_CAST` 0.72 ms into the frame, INTERRUPTED + STOP (count 1) in the same ms, `MSG_MOVE_START_FORWARD` 0.19 ms later; 487 ms later `SMSG_CAST_FAILED` and `SMSG_SPELL_FAILURE` in one frame: the fizzle twice, "Interrupted" once, INTERRUPTED three times (CAST_FAILED, FAILURE, FAILED_OTHER), no STOP, no chat line |
+| `/stopcasting` (RunMacroText) during Holy Light | cast state cleared, no event | `CMSG_CANCEL_CAST`, FAILED_QUIET + STOP in the same ms; the server's answer 27 ms later: "Interrupted" once, INTERRUPTED three times |
+| Escape during Holy Light | as `/stopcasting` before | as `/stopcasting` after (13.5 ms after the key, from the draw's Escape chain) |
+| Pad Tab (`TARGETNEARESTENEMY` with no key behind it) | `CMSG_SET_SELECTION` in the UI draw | 0.11 ms into the frame, from the input step |
+| Keyboard Tab | 0.09-0.6 ms into the frame | 0.12 ms into the frame (unchanged path) |
+| MoveForwardStart with Auto Shot on (paladin given a bow, kobold target) | nothing | the press's record (count 1) dropped: `UNIT_SPELLCAST_INTERRUPTED` Auto Shot in the same ms as `MSG_MOVE_START_FORWARD`, no `CMSG_CANCEL_CAST`, the repeat still on; a second start does nothing; turning it off later: `CMSG_CANCEL_AUTO_REPEAT_SPELL`, the server's `SMSG_CAST_FAILED`/`SMSG_SPELL_FAILURE` for count 1: "Interrupted" and INTERRUPTED |
+| MoveForwardStart while eating (Tough Hunk of Bread, seated) | `CMSG_CANCEL_AURA` and `CMSG_STANDSTATECHANGE` before the start | `MSG_MOVE_START_FORWARD` alone; 348 ms later the server's aura removal and stand state 0 |
+| Two TargetNearestEnemy in one macro, target cleared between | both select | the first selects, the second does nothing; the same from plain Lua selects twice; `/targetenemy` lines likewise |
+
+## 7. Gaps
 
 - **Pad buttons** bound to the action bar still cast on the press, from
   GameScreen's poll in the UI draw.
@@ -347,29 +421,26 @@ from the key event).
 - The melee range pre-check (8 yd "Out of range.") and Charge's checks are
   Wowee's own and were left.
 - `SpellStopCasting`'s first branch (0x800BA0, `+0x1858 & 4` -> 0x6E1660) is
-  not reproduced.
-- `UNIT_SPELLCAST_*` castID is still the spell id, not a per-cast counter;
-  a refused press during a cast fires no `UNIT_SPELLCAST_FAILED`, so the bar
-  is not touched, where stock fires it with the new cast's id.
+  not reproduced, nor 0x5D9FF0 after its cancel.
+- **Refusals made by the client** (cooldown, moving) fire no
+  `UNIT_SPELLCAST_FAILED`; stock's 0x808200 ends them through 0x7FECC0 too.
+  The record such a refusal carries was not traced.
+- **The combat log** `SPELL_CAST_FAILED` entry (0x751AD0) is not written.
+- **The fizzle** plays only for the player's own failures; another unit's
+  `SMSG_SPELL_FAILURE` plays none (stock plays it at that unit).
+- **Event tokens**: player, pet, party1-4, target, focus, mouseover; the
+  vehicle, partypet, raid, arena and boss tokens of 0x60BB70 are not given.
+- **The older clients** (classic, TBC) carry no count in these messages; the
+  record of that spell stands in for it.
 - Stock was not measured live (no instrumented stock client); its timing is
   from the code paths above.
-- Second pass (section 5):
-- **Pad buttons** for Tab still go through GameScreen's poll in the UI draw.
-- **Once per macro**: stock lets one TargetNearest* run per macro
-  (0xBEAF44 bit 0x20); Wowee lets every call in a macro run.
-- **CanAttack/CanAssist** are approximations from the faction reaction,
-  the unit flags and, for players, the PvP byte; duels are not known
-  (no duel arbiter), and the vehicle as reference (0x6DD060) and the
-  commentator rule are not done.
+- **CanAttack/CanAssist** are still approximations from the faction reaction,
+  the unit flags and, for players, the PvP byte - now with the duel rule in
+  front; the vehicle as reference (0x6DD060) and the commentator rule are
+  not done.
 - **The on-screen test** uses the camera at the time of the press and the
   character renderer's bounds; a unit with no character instance (not yet
   drawn) is never a candidate, as an undrawn model is not in stock.
-- **The server's interrupt after a local one** is shown again: Wowee's
-  `SMSG_SPELL_FAILURE` handler prints "Interrupted" and "Holy Light:
-  Interrupted" with a chat line, and fires a second INTERRUPTED/STOP with
-  no spell. Not changed here.
-- **An auto-repeat shot in flight** is not cancelled by a move start
-  (Wowee's auto-repeat is not a cast in its cast state).
 - **SitStandOrDescendStart** cancels only through START_DESCEND; a stand-up
   move key while sitting is not a start in Wowee's opcode list.
 - **Turning while channelling** (ChannelInterruptFlags 0x10) is left to the

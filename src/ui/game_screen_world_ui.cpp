@@ -254,7 +254,11 @@ glm::vec3 stockUnitColor(game::GameHandler& gameHandler, const game::Unit& unit,
     const bool selfSanctuary = self && (pvpByte(*self) & kSanctuaryFlag) != 0;
     const bool flagged = (targetPvp & kPvpFlag) != 0 && (targetPvp & kSanctuaryFlag) == 0 &&
                          !selfSanctuary;
-    if (hostile && flagged) return glm::vec3(1.0f, 0.0f, 0.0f);
+    // Each may attack the other (0x729740 both ways): red. Flagged for PvP,
+    // or a duel opponent and what it controls (stock_duel.hpp), whatever the
+    // PvP flags.
+    if (hostile && (flagged || gameHandler.duelReactionToPlayer(unit).has_value()))
+        return glm::vec3(1.0f, 0.0f, 0.0f);
     if (isPlayerType) {
         // Your own party: blue, or green while flagged (0x52d310).
         const auto& party = gameHandler.getPartyData();

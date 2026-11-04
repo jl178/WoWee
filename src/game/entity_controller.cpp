@@ -48,6 +48,20 @@ float slowUpdateObjectBlockLogThresholdMs() {
 EntityController::EntityController(GameHandler& owner)
     : owner_(owner) { initTypeHandlers(); }
 
+namespace {
+/// Whether an update carries PLAYER_DUEL_ARBITER or PLAYER_DUEL_TEAM.
+bool blockTouchesDuelFields(const UpdateBlock& block) {
+    const uint16_t arbiter = fieldIndex(UF::PLAYER_DUEL_ARBITER);
+    const uint16_t team = fieldIndex(UF::PLAYER_DUEL_TEAM);
+    if (arbiter == 0xFFFF) return false;
+    for (const auto& [key, val] : block.fields) {
+        (void)val;
+        if (key == arbiter || key == arbiter + 1 || key == team) return true;
+    }
+    return false;
+}
+} // namespace
+
 void EntityController::registerOpcodes(DispatchTable& table) {
     // World object updates - accept during ENTERING_WORLD too so that entity
     // packets arriving before SMSG_LOGIN_VERIFY_WORLD are parsed and queued
@@ -1260,7 +1274,7 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
         }
         else if (key == ufi.faction) {
             unit->setFactionTemplate(val);
-            unit->setHostile(owner_.isHostileFaction(val));
+            unit->setHostile(owner_.unitHostileToPlayer(*unit));
         } else if (key == ufi.boundingRadius) {
             unit->setBoundingRadius(bitsToFloat(val));
         } else if (key == ufi.combatReach) {
@@ -2159,7 +2173,7 @@ void EntityController::onCreateUnit(const UpdateBlock& block, std::shared_ptr<En
     bool unitInitiallyDead = applyUnitFieldsOnCreate(block, unit, ufi);
 
     // Hostility
-    unit->setHostile(owner_.isHostileFaction(unit->getFactionTemplate()));
+    unit->setHostile(owner_.unitHostileToPlayer(*unit));
 
     // Spawn dispatch
     if (unit->getDisplayId() == 0) {
@@ -2238,7 +2252,7 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
     }
 
     // Hostility
-    unit->setHostile(owner_.isHostileFaction(unit->getFactionTemplate()));
+    unit->setHostile(owner_.unitHostileToPlayer(*unit));
 
     // Spawn dispatch
     if (unit->getDisplayId() != 0) {
@@ -2790,6 +2804,9 @@ void EntityController::handleCreateObject(const UpdateBlock& block, bool& newIte
     auto* handler = getTypeHandler(block.objectType);
     if (handler) handler->onCreate(block, entity, newItemCreated);
 
+    if (block.objectType == ObjectType::PLAYER && blockTouchesDuelFields(block))
+        owner_.refreshDuelHostility();
+
     flushPendingEvents();
 }
 
@@ -2826,6 +2843,11 @@ void EntityController::handleValuesUpdate(const UpdateBlock& block) {
     // Dispatch to type-specific handler
     auto* handler = getTypeHandler(entity->getType());
     if (handler) handler->onValuesUpdate(block, entity);
+
+    // A duel begun or over, on anyone: the reaction of every duellist and
+    // what they control changes with it (0x7251C0 reads these fields).
+    if (entity->getType() == ObjectType::PLAYER && blockTouchesDuelFields(block))
+        owner_.refreshDuelHostility();
 
     flushPendingEvents();
     LOG_DEBUG("Updated entity fields: 0x", std::hex, block.guid, std::dec);

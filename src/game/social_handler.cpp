@@ -655,26 +655,21 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_DUEL_REQUESTED] = [this](network::Packet& packet) { handleDuelRequested(packet); };
     table[Opcode::SMSG_DUEL_COMPLETE] = [this](network::Packet& packet) { handleDuelComplete(packet); };
     table[Opcode::SMSG_DUEL_WINNER] = [this](network::Packet& packet) { handleDuelWinner(packet); };
+    // 0x5CF910 / 0x5CF930: the events alone. UIParent shows and hides the
+    // DUEL_OUTOFBOUNDS popup, whose ten-second timer is the forfeit warning;
+    // the client itself says nothing.
     table[Opcode::SMSG_DUEL_OUTOFBOUNDS] = [this](network::Packet& /*packet*/) {
-        owner_.addUIError("You are out of the duel area!");
-        owner_.raiseUiError("You are out of the duel area!");
-        // The interface runs the ten-second countdown to a forfeit off this
-        // pair; the message alone says it once and never counts.
         if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("DUEL_OUTOFBOUNDS", {});
     };
     table[Opcode::SMSG_DUEL_INBOUNDS] = [this](network::Packet& /*packet*/) {
-        // Stops that countdown. Handled as a no-op before, so a duellist who
-        // stepped back inside kept a timer that was no longer true.
         if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("DUEL_INBOUNDS", {});
     };
+    // 0x5CFA50: the whole seconds, counted down in chat by 0x5CF870
+    // ("Duel starting: 3", "2", "1", a second apart). No banner of its own.
     table[Opcode::SMSG_DUEL_COUNTDOWN] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(4)) {
-            uint32_t ms = packet.readUInt32();
-            if (ms == 0 || ms > 30000) ms = 3000;
-            if (owner_.addonEventCallbackRef()) {
-                owner_.addonEventCallbackRef()("WOWEE_DUEL_COUNTDOWN", {std::to_string(ms)});
-            }
-        }
+        if (!packet.hasRemaining(4)) return;
+        duelCountdownCarryMs_ = 0.0f;
+        sayDuelCountdown(duelCountdown_.start(packet.readUInt32()));
     };
     table[Opcode::SMSG_PARTYKILLLOG] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(16)) return;
@@ -2029,20 +2024,18 @@ void SocialHandler::handleDuelRequested(network::Packet& packet) {
         duelArbiterGuid_ = 0;
         return;
     }
+    // 0x5CFCD0 asks DUEL_REQUESTED with the challenger's unit name, and only
+    // when the challenger is an object it has; the request stands either way.
     duelChallengerName_.clear();
+    pendingDuelRequest_ = true;
     auto entity = owner_.getEntityManager().getEntity(duelChallengerGuid_);
-    if (auto* unit = dynamic_cast<Unit*>(entity.get()))
-        duelChallengerName_ = unit->getName();
+    auto* challenger = dynamic_cast<Unit*>(entity.get());
+    if (!challenger) return;
+    duelChallengerName_ = challenger->getName();
     if (duelChallengerName_.empty()) {
         auto nit = owner_.getPlayerNameCache().find(duelChallengerGuid_);
         if (nit != owner_.getPlayerNameCache().end()) duelChallengerName_ = nit->second;
     }
-    if (duelChallengerName_.empty()) {
-        char tmp[32];
-        std::snprintf(tmp, sizeof(tmp), "0x%llX", static_cast<unsigned long long>(duelChallengerGuid_));
-        duelChallengerName_ = tmp;
-    }
-    pendingDuelRequest_ = true;
     // The popup is the whole announcement; no chat line.
     // No sound of ours: DUEL_REQUESTED raises StaticPopupDialogs.DUEL_REQUESTED,
     // whose sound = "igPlayerInvite" plays as it shows. The target-select click
@@ -2054,8 +2047,14 @@ void SocialHandler::handleDuelComplete(network::Packet& packet) {
     if (!packet.hasRemaining(1)) return;
     uint8_t started = packet.readUInt8();
     pendingDuelRequest_ = false;
-    // ERR_DUEL_CANCELLED, the yellow info text, for a duel that never began
-    // (Wow.exe 0x5CFA90).
+    // Wow.exe 0x5CFA90: with a flag known, ERR_DUEL_CANCELLED (the yellow
+    // info text) for a duel that never began and DUEL_FINISHED; the
+    // countdown stops whatever.
+    const bool hadArbiter = duelArbiterGuid_ != 0;
+    duelArbiterGuid_ = 0;
+    duelChallengerGuid_ = 0;
+    duelCountdown_.stop();
+    if (!hadArbiter) return;
     if (!started) owner_.displayGameMessage("ERR_DUEL_CANCELLED", "Duel cancelled.");
     if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("DUEL_FINISHED", {});
 }
@@ -5301,6 +5300,19 @@ void SocialHandler::handlePvpLogData(network::Packet& packet) {
     // the answer arriving. Every row, every column and the winner were parsed
     // and stored, and the frame that displays them was never told.
     if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("UPDATE_BATTLEFIELD_SCORE", {});
+}
+
+void SocialHandler::sayDuelCountdown(const std::vector<int>& counts) {
+    for (const int n : counts)
+        owner_.addGlobalStringChatLine("DUEL_COUNTDOWN", "Duel starting: %d", {std::to_string(n)});
+}
+
+void SocialHandler::updateDuelCountdown(float deltaTime) {
+    if (!duelCountdown_.running()) return;
+    duelCountdownCarryMs_ += deltaTime * 1000.0f;
+    const auto whole = static_cast<uint32_t>(duelCountdownCarryMs_);
+    duelCountdownCarryMs_ -= static_cast<float>(whole);
+    sayDuelCountdown(duelCountdown_.tick(whole));
 }
 
 void SocialHandler::updateLogoutCountdown(float deltaTime) {

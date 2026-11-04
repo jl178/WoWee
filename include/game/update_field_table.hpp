@@ -150,6 +150,12 @@ enum class UF : uint16_t {
     UNIT_FIELD_PETNUMBER,
     UNIT_FIELD_PET_NAME_TIMESTAMP,
 
+    /// A player's duel: the flag's guid (two fields, low half first) and the
+    /// side, 1 or 2, once the countdown is over (game/stock_duel.hpp). Two
+    /// before PLAYER_FLAGS and six after it in every build's layout.
+    PLAYER_DUEL_ARBITER,
+    PLAYER_DUEL_TEAM,
+
     // GameObject fields
     GAMEOBJECT_DISPLAYID,
     /// Who made the object (two fields, low half first), its GO_FLAG_* bits

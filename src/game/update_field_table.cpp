@@ -86,6 +86,8 @@ static const UFNameEntry kUFNames[] = {
     {.name = "UNIT_FIELD_CREATEDBY_LO", .field = UF::UNIT_FIELD_CREATEDBY_LO},
     {.name = "UNIT_FIELD_PETNUMBER", .field = UF::UNIT_FIELD_PETNUMBER},
     {.name = "UNIT_FIELD_PET_NAME_TIMESTAMP", .field = UF::UNIT_FIELD_PET_NAME_TIMESTAMP},
+    {.name = "PLAYER_DUEL_ARBITER", .field = UF::PLAYER_DUEL_ARBITER},
+    {.name = "PLAYER_DUEL_TEAM", .field = UF::PLAYER_DUEL_TEAM},
     {.name = "GAMEOBJECT_DISPLAYID", .field = UF::GAMEOBJECT_DISPLAYID},
     {.name = "GAMEOBJECT_FIELD_CREATED_BY_LO", .field = UF::GAMEOBJECT_FIELD_CREATED_BY_LO},
     {.name = "GAMEOBJECT_FIELD_CREATED_BY_HI", .field = UF::GAMEOBJECT_FIELD_CREATED_BY_HI},
@@ -169,6 +171,10 @@ bool UpdateFieldTable::loadFromJson(const std::string& path) {
     derive(UF::UNIT_FIELD_CREATEDBY_LO, UF::UNIT_FIELD_SUMMONEDBY_HI, 1);
     derive(UF::UNIT_FIELD_PETNUMBER, UF::UNIT_FIELD_PETEXPERIENCE, -2);
     derive(UF::UNIT_FIELD_PET_NAME_TIMESTAMP, UF::UNIT_FIELD_PETEXPERIENCE, -1);
+    // PLAYER_DUEL_ARBITER is UNIT_END + 0, PLAYER_FLAGS + 2 and PLAYER_DUEL_TEAM
+    // + 8 in the 1.12, 2.4.3 and 3.3.5a layouts alike.
+    derive(UF::PLAYER_DUEL_ARBITER, UF::PLAYER_FLAGS, -2);
+    derive(UF::PLAYER_DUEL_TEAM, UF::PLAYER_FLAGS, 6);
 
     LOG_INFO("UpdateFieldTable: loaded ", loaded, " fields from ", path);
     return true;

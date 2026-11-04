@@ -130,6 +130,9 @@ public:
     /// TargetNearest and its six siblings (0x524FC0): one list of candidates
     /// kept between presses, see tab_target.hpp. Selects and sends at once.
     void targetNearest(TargetNearestMode mode, bool reverse);
+    /// CanAttack (0x729740/0x729A70) from the player's side, as TargetNearest
+    /// and a right-click ask it.
+    [[nodiscard]] bool canAttackUnit(uint64_t guid) const;
     /// Whether a unit's model was inside the camera's view on the last frame
     /// drawn (the stock test reads the map entity's culling flag, 0x77F0B0).
     /// Without one every unit counts as seen.
@@ -173,6 +176,11 @@ private:
 
     /// TargetNearest*'s list and cursor (0x524FC0), kept between presses.
     tab_target::Cycle targetNearestCycle_;
+public:
+    /// The macro runner's switches (0xBEAF44/0xBEAF4C).
+    tab_target::MacroOnce& macroOnce() { return macroOnce_; }
+private:
+    tab_target::MacroOnce macroOnce_;
     std::function<bool(uint64_t)> unitInViewProvider_;
 
     [[nodiscard]] bool isGroupMemberGuid(uint64_t guid) const;

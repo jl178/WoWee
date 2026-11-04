@@ -2719,6 +2719,7 @@ void Application::run() {
         // this.
         if (state == AppState::IN_GAME && uiManager && gameHandler) {
             uiManager->getGameScreen().processWorldClicksAtInput(*gameHandler);
+            uiManager->getGameScreen().processTargetKeysAtInput(*gameHandler);
         }
 
         // Update application state

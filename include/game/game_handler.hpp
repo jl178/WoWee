@@ -19,6 +19,7 @@
 #include "game/entity_controller.hpp"
 #include "game/game_services.hpp"
 #include "game/stock_death_rules.hpp"
+#include "game/stock_duel.hpp"
 #include "network/packet.hpp"
 #include "core/logger.hpp"
 #include <glm/glm.hpp>
@@ -1096,6 +1097,8 @@ public:
     }
 
     void startAutoAttack(uint64_t targetGuid);
+    /// CanAttack from the player's side (CombatHandler::canAttackUnit).
+    [[nodiscard]] bool canAttackUnit(uint64_t guid) const;
     void stopAutoAttack();
     bool isAutoAttacking() const;
     bool hasAutoAttackIntent() const;
@@ -1883,6 +1886,19 @@ public:
     /// any standing, but at Unfriendly they will not talk to one either, and
     /// the server refuses the conversation on exactly this number.
     [[nodiscard]] int unitReactionToPlayer(const Unit& unit) const;
+    /// The duel fields of the player controlling `unit` - the unit itself,
+    /// else its charmer, else its creator (0x718B70) - when that is a player
+    /// this client has.
+    [[nodiscard]] std::optional<stock_duel::DuelFields> duelFieldsOf(const Unit& unit) const;
+    /// 0x7251C0's duel answer between the local player and `unit`: 1 for a
+    /// duel opponent or what it controls, 4 for the same side; nothing when
+    /// no duel joins them.
+    [[nodiscard]] std::optional<int> duelReactionToPlayer(const Unit& unit) const;
+    /// What the unit's cached hostility should be: the duel's answer first,
+    /// then the faction's.
+    [[nodiscard]] bool unitHostileToPlayer(const Unit& unit) const;
+    /// A duel field changed on someone: every unit's hostility again.
+    void refreshDuelHostility();
 
     // Creature move callback (online mode - triggered by SMSG_MONSTER_MOVE)
     // Parameters: guid, x, y, z (canonical), duration_ms (0 = instant)
@@ -4359,6 +4375,10 @@ public:
                                 bool offsetNeedsTransportResolution = false);
     void clearTransportAttachment(uint64_t childGuid);
     std::string guidToUnitId(uint64_t guid) const;
+    /// Every token that names the unit, in 0x60BB70's order: player, pet,
+    /// party1-4, target, focus, mouseover. The UNIT_SPELLCAST_* events of a
+    /// cast ending are fired once for each.
+    std::vector<std::string> unitTokensForGuid(uint64_t guid) const;
     Unit* getUnitByGuid(uint64_t guid);
     uint64_t resolveOnlineItemGuid(uint32_t itemId) const;
     void rebuildOnlineInventory();
