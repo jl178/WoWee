@@ -1430,8 +1430,10 @@ void Renderer::installCharacterAnimEventCallback() {
 
 void Renderer::updateCorpseSettle(float fxDt) {
     if (!characterRenderer) return;
-    if (!enh_.corpseSettle) {
-        characterRenderer->updateCorpseSettle(fxDt, nullptr);  // free once nothing is tilted
+    if (!enh_.corpseSettle && !enh_.footPlacement) {
+        // Free once nothing is tilted or corrected.
+        characterRenderer->updateCorpseSettle(fxDt, nullptr);
+        characterRenderer->updateFootPlacement(fxDt, nullptr, glm::vec3(0.0f));
         return;
     }
     // The floor under a point as the selection circle reads it: the highest
@@ -1448,7 +1450,10 @@ void Renderer::updateCorpseSettle(float fxDt) {
         if (m2Renderer) consider(m2Renderer->getFloorHeight(x, y, from));
         return best;
     };
-    characterRenderer->updateCorpseSettle(fxDt, &floor);
+    characterRenderer->updateCorpseSettle(fxDt, enh_.corpseSettle ? &floor : nullptr);
+    // E9 reads the same floors under the feet of standing and walking units.
+    characterRenderer->updateFootPlacement(fxDt, enh_.footPlacement ? &floor : nullptr,
+                                           camera ? camera->getPosition() : glm::vec3(0.0f));
 }
 
 void Renderer::readFrozenClock() {
@@ -1461,18 +1466,22 @@ void Renderer::readFrozenClock() {
 }
 
 void Renderer::updateUnitBlobs() {
-    // The stock blob under each unit, with the sun shadow map off (stock
-    // extShadowQuality 0). With it on, nothing is gathered or made.
+    // The stock blob under each unit (stock extShadowQuality 0). With the sun
+    // shadow map on, the units the last shadow pass drew into a sun map have
+    // their shadow there; every other unit - past the unit map's 64 nearest,
+    // outside its range, or with the unit map off - keeps the blob, so no
+    // unit is left without a shadow (docs/re/characters.md L10).
     if (!overlaySystem_) return;
     {
         std::vector<OverlaySystem::UnitBlob> blobs;
-        if (!enh_.shadows && characterRenderer && camera) {
+        if (characterRenderer && camera) {
             overlaySystem_->prepareUnitBlobs();
             std::vector<CharacterRenderer::BlobSource> src;
             // Stock has no distance cut-off; past 150 yards a blob is a few
             // pixels under the fog, and 128 is more units than a city holds
             // on screen.
-            characterRenderer->collectUnitBlobs(camera->getPosition(), 150.0f, 128, src);
+            characterRenderer->collectUnitBlobs(camera->getPosition(), 150.0f, 128, src,
+                                                /*skipSunShadowCasters=*/shadowsEnabled);
             blobs.reserve(src.size());
             for (const auto& b : src) {
                 blobs.push_back({.feet = b.feet, .forward = b.forward, .halfX = b.halfX,
@@ -1564,6 +1573,11 @@ void Renderer::applyEnhancementsToSubsystems() {
     setFoliageWind(e.foliageWind);
     if (postProcessPipeline_) postProcessPipeline_->setDrunkWobble(e.drunkWobble);
     if (cameraController) cameraController->setDrunkWobble(e.drunkWobble);
+    if (cameraController) cameraController->setSmoothZoom(e.smoothZoom);
+    // Feet on the ground (E9) and the rain in the wind (E19) are read from
+    // enh_ each frame (updateCorpseSettle, the weather update); the lit
+    // horizon (E11) goes to the terrain's horizon.
+    if (terrainRenderer) terrainRenderer->setHorizonLit(e.horizonDetail);
 
     // Experimental.
     setGrassEnabled(e.grass);
@@ -2948,6 +2962,9 @@ void Renderer::update(float deltaTime) {
                 return ground;
             });
         }
+        // E19: the rain and snow take the cloth's wind (the foliage's,
+        // without the indoor cut: the weather is off indoors anyway).
+        weather->setWind(enh_.weatherWind ? clothWindStrength_ : 0.0f, globalTime);
         weather->update(*camera, fxDt);
     }
 
@@ -5714,6 +5731,9 @@ void Renderer::clearShadowImageOnce(VkImage image, VkImageView view, VkFramebuff
 
 void Renderer::renderShadowPass() {
     ZoneScopedN("Renderer::renderShadowPass");
+    // A new record of the units with a sun shadow; those left out of it take
+    // the blob (updateUnitBlobs), so it starts before any early return.
+    if (characterRenderer) characterRenderer->beginSunShadowFrame();
     static const bool skipShadows = (std::getenv("WOWEE_SKIP_SHADOWS") != nullptr);
     if (skipShadows) return;
     if (passAblation_ && passAblation_->skip(AblationPass::Shadows)) return;

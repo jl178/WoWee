@@ -104,3 +104,11 @@ TEST_CASE("a loot roll's choice, roll and win say what the stock client says") {
 TEST_CASE("four loot windows at most") {
     CHECK(sd::kMaxShownLootRolls == 4);
 }
+
+TEST_CASE("a death on a flight releases at once (0x6dc0f0)") {
+    using namespace wowee::game::stock_death;
+    CHECK(releasesAtDeath(0x100000));
+    CHECK(releasesAtDeath(0x100000 | 0x8));
+    CHECK_FALSE(releasesAtDeath(0x8));
+    CHECK_FALSE(releasesAtDeath(0));
+}

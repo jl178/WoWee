@@ -312,6 +312,8 @@ public:
     /// The Drunken wobble enhancement: Wowee's camera sway and travel weave
     /// in place of the stock facing steer.
     void setDrunkWobble(bool on) { drunkWobble_ = on; }
+    /// E20: the wheel's zoom eased rather than at the stock constant speed.
+    void setSmoothZoom(bool on) { smoothZoom_ = on; if (!on) zoomVelocity_ = 0.0f; }
     void setMountHeightOffset(float offset) { mountHeightOffset_ = offset; }
     void setExternalFollow(bool enabled) { externalFollow_ = enabled; }
     void setExternalMoving(bool moving) { externalMoving_ = moving; }
@@ -547,8 +549,11 @@ private:
     /// One wheel notch: Bindings.xml CAMERAZOOMIN/OUT run CameraZoomIn(1.0) /
     /// CameraZoomOut(1.0) (FUN_006017e0 / FUN_00601840).
     static constexpr float kZoomStepYards = 1.0f;
-    /// Moves currentDistance toward userTargetDistance at kZoomMoveSpeed.
+    /// Moves currentDistance toward userTargetDistance at kZoomMoveSpeed, or
+    /// eased (camera_zoom.hpp) with smoothZoom_ (E20).
     void stepZoomTowardTarget(float deltaTime);
+    bool smoothZoom_ = false;
+    float zoomVelocity_ = 0.0f;  // the eased zoom's speed, yd/s
 
     // ---- Stock collision pull-in (FUN_00606f90 @ 0x60789x / FUN_00605d60) ----
     /// The distance the camera is allowed out to after a collision: the stock
@@ -900,14 +905,14 @@ private:
     /// SET_RUN_MODE, events 0x12 / 0x11 in 0x6EF860).
     bool wasWalkMode_ = false;
     bool wasFalling = false;
-    /// How long the player has been off the ground and moving downward.
-    ///
-    /// A landing is only worth telling the server about if there was a fall.
-    /// Riding over uneven ground breaks contact for a frame at a time, and each
-    /// of those used to send MSG_MOVE_FALL_LAND - which every other client in
-    /// range plays as a landing, so a mounted player crossing a field looked to
-    /// everyone else like one landing over and over.
-    float airborneSeconds_ = 0.0f;
+    /// The fall in progress: its apex z (start z plus a jump's rise, see
+    /// stock_movement::fallLandDue), and whether it began with a JUMP sent
+    /// (the server holds FALLING for it, and keys pressed meanwhile go out
+    /// as they happen).
+    bool jumpedThisFrame_ = false;  // the physics took off this frame
+    bool fallTracking_ = false;
+    bool fallJumped_ = false;
+    float fallApexZ_ = 0.0f;
     bool wasAscending_ = false;   // Space held while flyingActive_
     bool wasDescending_ = false;  // X held while flyingActive_
     /// True while the tile under a position has not finished streaming, which

@@ -6,6 +6,7 @@
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/blp_loader.hpp"
+#include "rendering/horizon_detail.hpp"
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -525,6 +526,8 @@ private:
     std::atomic<bool> mapBigAlpha_{false};
     /// Read the map's WDT flags and hand its WDL to the horizon.
     void loadMapWideData();
+    /// The WDL's low-detail WMOs as one world-space mesh (horizon_detail.hpp).
+    horizon_detail::FarMesh loadHorizonWmos(const std::vector<uint8_t>& wdlData) const;
     /// A tile's blend mode and `_s` tilesets (stock_terrain); worker thread.
     void markTerrainMaterial(pipeline::TerrainMesh& mesh) const;
     /// The tileset files a tile is drawn with, by MTEX index.

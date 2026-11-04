@@ -42,6 +42,14 @@ on), both stock off; one spring chain system for all of E7, its bones chosen
 from each model by a documented rule. Costs in 3.8, status under each entry;
 `test_secondary_motion` holds the solver and the rules.
 
+Done (2026-11-03, after Friday's list): E9 feet on the ground
+(`footplacement`), E19 rain and snow in the wind (`weatherwind`), E20 smooth
+zoom (`smoothzoom`) and E11 the lit far horizon (`horizondetail`), with the
+WDL's low-detail WMOs now drawn in the horizon pass in both modes (a stock
+gap closed). Each is a row, stock off; recommended values and costs in 3.10,
+status under each entry. `test_phase2_motion` holds the IK's rule and
+limits, the zoom's ease, the wind's push and the horizon's haze.
+
 ## 1. Goal and rules
 
 The client now draws close to stock 3.3.5a (build 12340). Phase 2 adds
@@ -461,6 +469,47 @@ after the last change; the unit map's second filter costs the scene pass
 nearest or the unit map's reach have no shadow at all; a city with many
 lights still lights the mist per light per cell.
 
+### 3.10 Measured cost of E9, E11, E19 and E20 (2026-11-03)
+
+As 3.5 (Iris Xe, 1251x986, Ultra quality columns, Recommended set, noon,
+camera fixed, 5 s windows, adjacent windows paired, `perf/parse2.py`, only
+full-width windows), two runs at load 4-8 with no other client: Goldshire,
+the Trade District, Dalaran, a Dragonblight ridge looking over the far
+horizon (4800, -733, facing Icecrown and the WDL cathedral) and Goldshire
+under server rain for the weather row. Dalaran's windows went from about
+25 ms to 70-120 ms partway through both runs in both states alike (the GPU
+scene pass, not anything flipped); its pairs are given but are scatter.
+GPU / CPU (renderer stages) ms, paired median (± the GPU pairs' standard
+error):
+
+| Row | Elwynn | Stormwind | Northrend (ridge; Dalaran) | Rain |
+|---|---|---|---|---|
+| Feet on the ground | -0.11 ±0.07 / +0.08 | -0.56 ±0.37 / +0.05; -1.12 ±0.38 / -0.20 | -0.36 ±4.6 / -0.66; Dalaran +0.39 ±0.67 / +0.04 | - |
+| Lit far horizon | -0.07 ±0.12 / +0.02 | +0.49 ±0.48 / -0.02; +0.04 ±0.28 / +0.08 | -0.11 ±1.38 / -0.12; Dalaran +1.75 ±8.1 (scatter) | - |
+| Rain and snow in the wind | ~0 (dry: nothing added) | - | - | +1.15 ±1.11 / +0.06 |
+| Smooth zoom | +2.09 ±1.40 / -0.17 (three pairs; the camera did not move: scatter) | - | - | - |
+| Whole recommended set vs stock | +5.15 / +0.63 | +4.04 / +0.88; +3.92 / +0.85 | +2.79 / +0.20; Dalaran +1.16 / +1.43 | +5.12 / +0.60 |
+
+The four rows cost nothing measurable: every pair is inside its scatter,
+and the CPU they add is at most a few hundredths. Feet on the ground reads
+the floor only for units within 30 yd whose feet have moved 0.12 yd since the
+last read, and solves two legs per such unit on the animation workers; the
+lit horizon is the same draws with one more 4-byte stream and a dozen ALU
+operations a pixel, on a pass that covers the strip past the far clip; the
+wind is a sine and two multiply-adds per drop while it rains; the zoom a
+few operations a frame. All four stay recommended on.
+
+The whole set is over the 3 ms / 0.5 ms of 3.4 in these runs (Stormwind
++3.9 to +4.0 / +0.85, against +2.96 / +0.50 in 3.9), but the excess is not
+these rows (their sum is about zero): it is the scene pass and the shadow
+stages (`shadow_pass`, `shadow/characters`, `beginFrame/graph`) and the
+mist's inject, i.e. the sun shadows and light shafts measured again in a
+different sitting. The working tree also carries another change in
+progress that draws the stock blob for the units outside the sun shadow
+map with shadows on (`Renderer::updateUnitBlobs`), which moves the set's
+CPU; the set wants measuring again once that lands, before anything else
+is added.
+
 ## 4. Proposed enhancements
 
 Ranked by feel gained over cost and risk. "Cost" is implementation effort
@@ -484,7 +533,7 @@ the classic look or the stock behaviour.
 | 13 | E21 | Dust and snow kicked up | medium | S | low | on |
 | 14 | E14 | Contact shadows | medium | S | low | on |
 | 15 | E19 | Weather follows the wind | low | S | low | on |
-| 16 | E20 | Smooth zoom and collision ease | low | S | low | off |
+| 16 | E20 | Smooth zoom and collision ease | low | S | low | on (zoom only) |
 | 17 | E13 | Ambient occlusion (ambient term only) | medium | M | high | off |
 | 18 | E15 | Caustics in shallow water | low | M | high | off |
 | 19 | E16 | Cliff texture stretch fix | medium | M | high | off |
@@ -883,6 +932,43 @@ stock, the budget, and how to verify.
 - **Verify.** Stand on the Stormwind cathedral steps, Thunder Bluff ramps,
   Nagrand hills; each race. Check the feet still meet flat ground exactly
   as before on flat ground (no change there).
+- **Status (2026-11-03): done, row `footplacement` "Feet on the ground",
+  recommended on, stock off.** `rendering/foot_ik.hpp` (pure, in
+  `test_phase2_motion`), `CharacterRenderer::updateFootPlacement` (main
+  thread, after the M2 update has joined, beside the corpse settle and with
+  its floor reads: the highest terrain, WMO or doodad floor up to 1.5 yd
+  above) and `foot_ik::apply` at the end of `calculateBoneMatrices` on the
+  animation workers. The legs are found per model by a rule, not a list: the
+  children of the Waist key bone to either side that reach the body's lowest
+  point, walked down by the child reaching lowest to within a fifth of the
+  Waist's height of the floor; exactly two, mirrored, of like length, each
+  with a knee (all twenty player models pass: plantigrade, and the Draenei
+  and Tauren hooves, whose hock turns with the shin as one piece;
+  quadrupeds, odd rigs and anything without a Waist have no rig and are left
+  alone). Each frame, for a unit within 30 yd, drawn, standing on its feet
+  (`standsOnFeet`: not dead, jumping, falling, swimming, sitting, kneeling,
+  mounted, flying - a rider is never a candidate) and not on a seat, the
+  floor is read under the unit, 0.5 leg ahead of it and under each ankle as
+  the last pose put it - again only once that point has moved 0.12 yd, so a
+  still unit reads nothing. Each foot's target is its floor less the
+  unit's, held to +0.30 / -0.22 of the leg (a floor more than 0.75 leg away
+  is a ledge or a wall and ignored); the body drops by the lower foot's
+  need, at most 0.22 leg; the feet tilt with the slope (from the front read
+  and the two feet), at most 20 degrees and not at all on steps (over 40
+  degrees between reads). The two-bone solve keeps each bone's length and
+  the knee's bend side (forward if the leg is straight), never reaches past
+  0.999 of the leg, and turns the foot back to the animation's turn plus the
+  slope. Everything eases (0.07 s the heights, 0.15 s the weight) and the
+  weight is 1 to 3 yd/s, 0 from 5.5 (walk 2.5, run 7). Zero targets skip the
+  solve: flat ground is the stock pose bit for bit (tested). Off: no read,
+  no solve, `footIkOn_` one compare per pose. Seen: on the Dalaran curb
+  step the front foot stands on the step with its knee bent where off it
+  sank into the stone; on the Elwynn road bank (-9098, -185) the uphill foot
+  no longer sinks. Cost: 3.10. Gaps: the floor is read at the ankle, not
+  under the toe, so a foot half over a step's nose stands on whichever side
+  its ankle is; units seen through the remote smoothing's offset read the
+  floor where they are drawn; no per-race tuning (one set of limits in leg
+  lengths).
 
 ### E10. Animation smoothing for other units
 
@@ -950,6 +1036,36 @@ stock, the budget, and how to verify.
   minimap colour desaturated toward the fog and the fog curve stock.
 - **Verify.** Nagrand, Storm Peaks, Barrens at dusk and noon: A/B shots
   from the same spot (`.go` then fixed yaw).
+- **Status (2026-11-03): done, row `horizondetail` "Lit far horizon",
+  recommended on, stock off.** `rendering/horizon_detail.hpp` (pure, in
+  `test_phase2_motion`), `TerrainHorizon` and the `HORIZON_LIT` builds of
+  `terrain_horizon.vert/.frag/_far.frag` (`terrain_horizon.glsli`). Lit is
+  not coloured: each pixel stays the fog colour, scaled per channel by the
+  light its face takes (ambient + sun x N.L, terrain.frag's own terms) over
+  what level ground takes, so level ground is the fog colour exactly and a
+  sunlit slope a little lighter, a shaded one a little darker; at most 35%
+  either way, none at the near limit (the far clip less 50, where the real
+  ground is already wholly fog: no seam), coming in over the first 6% of
+  the span, thinning as (1 - t)^1.5 to four far clips, and none in a zone
+  whose fog ends short of 35% of the far clip (full above 85%). Normals per
+  WDL vertex are built from the heights (4 bytes each) when the row is
+  first on and released when it goes off, with the two lit pipelines; off
+  draws the stock pipelines and binds nothing more (the push constant's z,
+  the far clip, is unread there). The minimap colours the plan named are
+  not used: the palette stays the fog's. **The WDL's low-detail WMOs**
+  (MWMO/MWID/MODF; in 3.3.5 only Northrend has any: New Hearthglen's
+  cathedral twice, Valgarde's Icecrown low model, the oil platform) are
+  loaded with the map (`TerrainManager::loadHorizonWmos`, the ADT MODF
+  placement transform, the render batches' triangles) and drawn in the
+  horizon pass by the tiles' reach and near-limit rule, flat fog colour off
+  - as stock draws them (terrain.md section 8) - and shaded on. Seen: from
+  the Dragonblight ridge (4800, -733), off, Icecrown, the far cathedral and
+  the mountains are one cut-out; on, the ridges and faces show under the
+  same haze. Cost: 3.10. Gaps: no occluder test (as before); the WMOs'
+  doodads and their MOCV are not drawn (stock draws the low model only,
+  colour unknown under the fog anyway); the shading takes the sun's
+  direction but no shadow (a face turned away is darker, a valley in a
+  ridge's shadow is not).
 
 ### E12. Indoor light for units and doodads
 
@@ -1069,6 +1185,22 @@ stock, the budget, and how to verify.
 - **Budget.** CPU, the weather particle update: under 0.05 ms.
 - **Verify.** Stormy Grizzly Hills, Dun Morogh snow, with foliage wind 1
   and 2.
+- **Status (2026-11-03): done, row `weatherwind` "Rain and snow in the
+  wind", recommended on, stock off.** `rendering/weather_wind.hpp` (pure, in
+  `test_phase2_motion`) and `Weather::setWind`: each drop and flake moves
+  with its stock velocity plus the foliage wind at its place - m2.vert's
+  direction and gust band (0.55 + 0.45 sin(p.dir * 0.11 - 0.7 t), on the
+  scene clock, so a gust passes through the rain and the canopy together),
+  9 yd/s at the band's peak times the cloth wind's eased strength (the
+  setting times the weather's stir: rain 1.3, storm up to 1.8) - and rain
+  streaks are drawn along that velocity. Snow takes 35% of it and an eddy
+  of 0.6 yd/s per unit of strength about it. The splash landing estimate
+  carries the wind too. Foliage wind at 0 is no wind: the row then changes
+  nothing. Off: nothing is added (`windStrength_` 0 skips every block).
+  Seen: four frames over 0.2 s of Dun Morogh snow, off, fall in vertical
+  dotted trails; on, they slant downwind. Cost: 3.10. Gaps: the rain's
+  slant did not show in stills here (the Mod2x streaks are faint against
+  Elwynn's canopy); no wind indoors is moot (the weather is off there).
 
 ### E20. Smooth zoom and collision ease
 
@@ -1084,6 +1216,22 @@ stock, the budget, and how to verify.
   Keep the ease short and never let the eased camera go past the hit.
   Default off: it changes how the game handles, not how it looks.
 - **Verify.** Zoom in a corridor in Karazhan and under trees.
+- **Status (2026-11-03): done for the zoom, row `smoothzoom` "Smooth camera
+  zoom", recommended on (the plan said off), stock off.**
+  `rendering/camera_zoom.hpp` (pure, in `test_phase2_motion`) and
+  `CameraController::stepZoomTowardTarget`: the distance follows the
+  wheel's request as a critically damped spring (time constant 0.06 s, the
+  exact solution over each frame, so the path is the same at 30 and 240
+  fps), capped at 60 yd/s, never passing the request, settling onto it; a
+  notch turned while it moves carries the speed on. A one-yard notch is 90%
+  there in about 0.23 s against the stock 0.12 s. The collision pull-in is
+  untouched - a wall still snaps the camera in at once and it eases back out
+  as stock - which is why it can be on by default: the plan's concern was
+  the eased pull-in letting the camera see through walls, and that half is
+  not done. Off: the stock 8.33 yd/s step. Cost: none to measure (a few
+  operations a frame). Gaps: the collision ease is left as stock (by
+  choice); the barber chair and the login intro set the distance directly
+  and leave any speed to the next notch.
 
 ### E21. Dust and snow kicked up
 

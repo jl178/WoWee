@@ -287,3 +287,57 @@ TEST_CASE("holding ascend at the surface jumps out of the water") {
     // line: it rises 2.14 yd from 1.52 under.
     CHECK(sm::jumpApexHeight(sm::kWaterJumpVelocity) - sm::swimFloatDepth(h) > 0.6f);
 }
+
+TEST_CASE("keys pressed in the air wait for the landing (0x988A20, 0x6EB3B0)") {
+    const uint32_t runJump = sm::kForward | sm::kFalling;
+    // Back pressed mid-jump: a pending flag, the path unchanged.
+    uint32_t f = sm::startForwardBackward(runJump, /*forward=*/false);
+    CHECK((f & sm::kForward) != 0);
+    CHECK((f & sm::kBackward) == 0);
+    CHECK((f & sm::kPendingBackward) != 0);
+    // Landing: the back key takes over.
+    f = sm::landWithPendingKeys(f);
+    CHECK(f == sm::kBackward);
+
+    // Forward released mid-jump: the stop waits (PENDING_STOP), applied on landing.
+    f = sm::stopForwardBackward(runJump);
+    CHECK((f & sm::kForward) != 0);
+    CHECK((f & sm::kPendingStop) != 0);
+    CHECK(sm::landWithPendingKeys(f) == 0u);
+
+    // Released and pressed again in the air: nothing left to do on landing.
+    f = sm::startForwardBackward(sm::stopForwardBackward(runJump), true);
+    CHECK((f & sm::kPendingMask) == 0);
+    CHECK(sm::landWithPendingKeys(f) == sm::kForward);
+
+    // A strafe pressed and let go in the air leaves nothing behind.
+    f = sm::stopStrafe(sm::startStrafe(runJump, true));
+    CHECK((f & sm::kPendingMask) == 0);
+    // A strafe held through the landing is applied there.
+    f = sm::startStrafe(runJump, false);
+    CHECK((f & sm::kStrafeRight) == 0);
+    CHECK(sm::landWithPendingKeys(f) == (sm::kForward | sm::kStrafeRight));
+    // NO_STRAFE refuses it outright.
+    CHECK(sm::startStrafe(sm::kFalling, true, sm::kFlag2NoStrafe) == sm::kFalling);
+}
+
+TEST_CASE("a standing jump takes the first key at once") {
+    // FALLING with no direction: the key sets the direction, not a pending flag.
+    const uint32_t f = sm::startForwardBackward(sm::kFalling, true);
+    CHECK(f == (sm::kFalling | sm::kForward));
+    CHECK(sm::startStrafe(sm::kFalling, true) == (sm::kFalling | sm::kStrafeLeft));
+    // On the ground the keys act at once.
+    CHECK(sm::startForwardBackward(sm::kBackward, true) == sm::kForward);
+    CHECK(sm::stopForwardBackward(sm::kForward | sm::kStrafeLeft) == sm::kStrafeLeft);
+    CHECK(sm::stopStrafe(sm::kStrafeLeft) == 0u);
+}
+
+TEST_CASE("FALL_LAND goes out for any fall over 1/36 yd (0x73D4A0)") {
+    // Every jump: its rise alone is 1.64 yd.
+    CHECK(sm::fallLandDue(10.0f + sm::jumpApexHeight(), 10.0f));
+    // A 3 cm drop is a fall; a 2 cm one is not.
+    CHECK(sm::fallLandDue(10.03f, 10.0f));
+    CHECK_FALSE(sm::fallLandDue(10.02f, 10.0f));
+    // Landing higher than the start (a jump onto a ledge) still counts its rise.
+    CHECK(sm::fallLandDue(10.0f + sm::jumpApexHeight(), 11.0f));
+}

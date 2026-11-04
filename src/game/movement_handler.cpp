@@ -27,6 +27,8 @@
 namespace wowee {
 namespace game {
 
+namespace sm = stock_movement;
+
 namespace {
 
 struct KnownAreaTriggerDestination {
@@ -659,25 +661,26 @@ void MovementHandler::sendMovement(Opcode opcode) {
 
     // Update movement flags based on opcode
     switch (opcode) {
+        // The direction keys by the stock rules (0x988A20, 0x988B00,
+        // 0x98C8D0, 0x98BF80): on the ground at once; in a fall that has a
+        // direction, a PENDING flag the landing applies.
         case Opcode::MSG_MOVE_START_FORWARD:
-            movementInfo.flags |= static_cast<uint32_t>(MovementFlags::FORWARD);
+            movementInfo.flags = sm::startForwardBackward(movementInfo.flags, true);
             break;
         case Opcode::MSG_MOVE_START_BACKWARD:
-            movementInfo.flags |= static_cast<uint32_t>(MovementFlags::BACKWARD);
+            movementInfo.flags = sm::startForwardBackward(movementInfo.flags, false);
             break;
         case Opcode::MSG_MOVE_STOP:
-            movementInfo.flags &= ~(static_cast<uint32_t>(MovementFlags::FORWARD) |
-                                    static_cast<uint32_t>(MovementFlags::BACKWARD));
+            movementInfo.flags = sm::stopForwardBackward(movementInfo.flags);
             break;
         case Opcode::MSG_MOVE_START_STRAFE_LEFT:
-            movementInfo.flags |= static_cast<uint32_t>(MovementFlags::STRAFE_LEFT);
+            movementInfo.flags = sm::startStrafe(movementInfo.flags, true);
             break;
         case Opcode::MSG_MOVE_START_STRAFE_RIGHT:
-            movementInfo.flags |= static_cast<uint32_t>(MovementFlags::STRAFE_RIGHT);
+            movementInfo.flags = sm::startStrafe(movementInfo.flags, false);
             break;
         case Opcode::MSG_MOVE_STOP_STRAFE:
-            movementInfo.flags &= ~(static_cast<uint32_t>(MovementFlags::STRAFE_LEFT) |
-                                    static_cast<uint32_t>(MovementFlags::STRAFE_RIGHT));
+            movementInfo.flags = sm::stopStrafe(movementInfo.flags);
             break;
         case Opcode::MSG_MOVE_JUMP:
             movementInfo.flags |= static_cast<uint32_t>(MovementFlags::FALLING);
@@ -693,7 +696,6 @@ void MovementHandler::sendMovement(Opcode opcode) {
                 // the movement direction (backward, strafe and diagonal
                 // included; the facing for a standing jump), +0x8C the speed
                 // GetSpeed picked (0 standing, walk or run-back included).
-                namespace sm = stock_movement;
                 const bool fromWater =
                     (movementInfo.flags & static_cast<uint32_t>(MovementFlags::SWIMMING)) != 0;
                 movementInfo.jumpVelocity = -(fromWater ? sm::kWaterJumpVelocity : sm::kJumpVelocity);
@@ -739,7 +741,9 @@ void MovementHandler::sendMovement(Opcode opcode) {
                                     static_cast<uint32_t>(MovementFlags::TURN_RIGHT));
             break;
         case Opcode::MSG_MOVE_FALL_LAND:
-            movementInfo.flags &= ~static_cast<uint32_t>(MovementFlags::FALLING);
+            // FALLING goes, and the keys pressed in the air take effect
+            // (0x988490 -> 0x6EB3B0); the packet carries the result.
+            movementInfo.flags = sm::landWithPendingKeys(movementInfo.flags);
             isFalling_ = false;
             fallStartMs_ = 0;
             movementInfo.fallTime = 0;
@@ -779,7 +783,9 @@ void MovementHandler::sendMovement(Opcode opcode) {
             // Entering water ends a fall, and nothing else would: FALL_LAND is
             // sent on touching ground and a swimmer never touches it, so a
             // jump into a lake left FALLING set with fallTime still climbing.
-            movementInfo.flags &= ~static_cast<uint32_t>(MovementFlags::FALLING);
+            // The keys pressed on the way down take effect as on a landing.
+            if (movementInfo.flags & static_cast<uint32_t>(MovementFlags::FALLING))
+                movementInfo.flags = sm::landWithPendingKeys(movementInfo.flags);
             isFalling_ = false;
             fallStartMs_ = 0;
             movementInfo.fallTime = 0;
@@ -945,7 +951,7 @@ void MovementHandler::sendMovement(Opcode opcode) {
     }
 
     LOG_DEBUG("Sending movement packet: opcode=0x", std::hex,
-              wireOpcode(opcode), std::dec,
+              wireOpcode(opcode), " flags=0x", movementInfo.flags, std::dec,
               (includeTransportInWire ? " ONTRANSPORT" : ""));
 
     // Block heartbeats from a near-origin position on Eastern Kingdoms (map 0).
@@ -3176,15 +3182,25 @@ void MovementHandler::buildTaxiCostMap() {
 
     // The route to each known node is the shortest flight (0x592BB0 /
     // 0x5926C0: total TaxiPathNode distance, through known nodes only), not
-    // the fewest hops; its price the sum of its TaxiPaths'.
+    // the fewest hops; its price the direct TaxiPath's when there is one, else
+    // the sum of its TaxiPaths' (taxi::routePrice).
     auto known = [this](uint32_t node) { return currentTaxiData_.isNodeKnown(node); };
+    // The fares by the flight master's regard for the player (0x591350):
+    // Friendly to Exalted take 5% to 20% off.
+    int tier = 0;
+    if (auto npc = std::dynamic_pointer_cast<Unit>(owner_.getEntityManager().getEntity(taxiNpcGuid_))) {
+        tier = taxi::reputationTier(owner_.unitReactionToPlayer(*npc),
+                                    // A faction with a standing (Faction.dbc ReputationListID,
+                                    // 0x718B30), once the standings are in.
+                                    owner_.factionAtWarLive(npc->getFactionTemplate()) >= 0);
+    }
     taxiCostMap_[startNode] = 0;
     for (const auto& [nodeId, node] : taxiNodes_) {
         (void)node;
         if (nodeId == startNode || !known(nodeId)) continue;
         const std::vector<uint32_t> route = taxi::shortestRoute(taxiRouteEdges_, startNode, nodeId, known);
         if (route.size() < 2) continue;
-        taxiCostMap_[nodeId] = taxi::routePrice(taxiRouteEdges_, route);
+        taxiCostMap_[nodeId] = taxi::routePrice(taxiRouteEdges_, route, tier);
         for (size_t i = 1; i < route.size(); ++i) taxiPrevMap_[route[i]] = route[i - 1];
     }
 }

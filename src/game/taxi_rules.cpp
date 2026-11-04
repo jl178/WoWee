@@ -53,19 +53,33 @@ std::vector<uint32_t> shortestRoute(const std::vector<Edge>& edges, uint32_t sta
     return route;
 }
 
-uint32_t routePrice(const std::vector<Edge>& edges, const std::vector<uint32_t>& route,
-                    float multiHopFactor) {
-    uint64_t total = 0;
-    for (size_t i = 0; i + 1 < route.size(); ++i) {
-        for (const auto& e : edges) {
-            if (e.from == route[i] && e.to == route[i + 1]) {
-                total += e.price;
-                break;
-            }
-        }
+uint32_t tierFare(uint32_t price, int tier, bool perHop) {
+    tier = std::clamp(tier, 0, 4);
+    float fare = 0.0f;
+    if (perHop) {
+        float factor = 1.0f;
+        for (int i = 0; i < tier; ++i) factor -= 0.05f;  // 0x9F1958
+        fare = factor * static_cast<float>(price);
+    } else {
+        static constexpr float kDiscount[5] = {0.0f, 0.05f, 0.10f, 0.15f, 0.20f};
+        fare = static_cast<float>((1.0L - static_cast<long double>(kDiscount[tier])) *
+                                  static_cast<long double>(price));
     }
-    if (route.size() > 2 && multiHopFactor != 1.0f)
-        total = static_cast<uint64_t>(std::ceil(static_cast<double>(total) * multiHopFactor));
+    const float r = std::nearbyint(fare);  // round to nearest, ties to even
+    return r <= 0.0f ? 0u : static_cast<uint32_t>(std::min<double>(r, std::numeric_limits<uint32_t>::max()));
+}
+
+uint32_t routePrice(const std::vector<Edge>& edges, const std::vector<uint32_t>& route, int tier) {
+    if (route.size() < 2) return 0;
+    const auto edge = [&](uint32_t from, uint32_t to) -> const Edge* {
+        for (const auto& e : edges)
+            if (e.from == from && e.to == to) return &e;
+        return nullptr;
+    };
+    if (const Edge* direct = edge(route.front(), route.back())) return tierFare(direct->price, tier, false);
+    uint64_t total = 0;
+    for (size_t i = 0; i + 1 < route.size(); ++i)
+        if (const Edge* e = edge(route[i], route[i + 1])) total += tierFare(e->price, tier, true);
     return static_cast<uint32_t>(std::min<uint64_t>(total, std::numeric_limits<uint32_t>::max()));
 }
 

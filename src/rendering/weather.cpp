@@ -1,4 +1,5 @@
 #include "rendering/weather.hpp"
+#include "rendering/weather_wind.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_shader.hpp"
@@ -291,7 +292,13 @@ void Weather::spawnParticle(Particle& p, const glm::vec3& cameraPos, bool anywhe
     // Where it will come down: below the spot it reaches the camera's height,
     // carried that far by the wind.
     const float fallTime = std::max(0.0f, (p.position.z - cameraPos.z) / -p.velocity.z);
-    const glm::vec3 landing = p.position + glm::vec3(p.velocity.x, p.velocity.y, 0.0f) * fallTime;
+    glm::vec3 landing = p.position + glm::vec3(p.velocity.x, p.velocity.y, 0.0f) * fallTime;
+    if (windStrength_ > 0.0f) {
+        // E19: and by the foliage's wind, as it blows where the drop starts.
+        const glm::vec2 w = weather_wind::push(windStrength_, glm::vec2(p.position), windClock_,
+                                               particlesType_ == Type::SNOW, p.phase);
+        landing += glm::vec3(w, 0.0f) * fallTime;
+    }
     const float fallback = cameraPos.z - vol.below;
     p.groundZ = resolveGround(landing, cameraPos);
     p.lands = p.groundZ != fallback && particlesType_ != Type::SNOW;
@@ -364,6 +371,11 @@ void Weather::update(const Camera& camera, float deltaTime) {
             v.x *= gust;
             v.y *= gust;
         }
+        if (windStrength_ > 0.0f) {
+            // E19: carried by the trees' wind and its gust band as well.
+            v += glm::vec3(weather_wind::push(windStrength_, glm::vec2(p.position), windClock_,
+                                              particlesType_ == Type::SNOW, p.phase), 0.0f);
+        }
         p.position += v * deltaTime;
 
         // Keep the column around the camera: what drifts out of the box on
@@ -434,7 +446,13 @@ void Weather::buildVertices(const Camera& camera) {
                      {0.0f, 0.0f}, {1.0f, 1.0f}, alpha);
             } else {
                 // Along the way it falls, turned about that line to face the eye.
-                const glm::vec3 axis = glm::normalize(p.velocity);
+                glm::vec3 fall = p.velocity;
+                if (windStrength_ > 0.0f) {
+                    // E19: the streak slants along the way the wind carries it.
+                    fall += glm::vec3(weather_wind::push(windStrength_, glm::vec2(p.position),
+                                                         windClock_, false, p.phase), 0.0f);
+                }
+                const glm::vec3 axis = glm::normalize(fall);
                 glm::vec3 side = glm::cross(axis, toCam);
                 const float sideLen = glm::length(side);
                 if (sideLen < 1e-4f) continue;

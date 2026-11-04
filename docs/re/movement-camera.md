@@ -424,6 +424,9 @@ also skips the cameraDive surface/submerge pitch limits (0x6023D0,
 | 20 | Float with the feet 0.75 h under (8.1) | fixed 1.45 | `swimFloatDepth()`; in game a human treads at z -1.524 in sea-level water |
 | 21 | Bottom holds the feet; walking out has no lift | swim floor at bottom + 0.5; +1.5 yd/s boost on leaving the water | bottom at the feet; no boost |
 | 22 | Ascend held within 1/3 yd of the float line jumps out at 9.0967 (8.1), JUMP sent from the water, no STOP_SWIM | clamped at the surface | the hop, its JUMP, flags cleared by the jump; in game held space hops once a second to feet z +0.616 (rise 2.14) |
+| 28 | A key pressed or released in the air sends its packet at once (0x6EF860 sends whatever 0x988A20 / 0x988B00 / 0x98C8D0 / 0x98BF80 did); falling with a direction it only sets PENDING_FORWARD / BACKWARD / STRAFE_LEFT / RIGHT (0x10000..0x80000) or PENDING_STOP / STRAFE_STOP (0x4000 / 0x8000), a pending start cancelled by its stop; the landing (0x6EB3B0) applies them and clears 0x1FC000 | the keys latched at take-off and sent at the landing | for a jump (JUMP sent, the server holds FALLING): sent as pressed; `stock_movement::startForwardBackward / startStrafe / stopForwardBackward / stopStrafe / landWithPendingKeys` keep the server's copy of the flags, FALL_LAND (and START_SWIM) applying the pending ones. In game (debug log of the packets, Goldshire): run, jump, W released in the air: JUMP 0x1001, STOP 0x5001, FALL_LAND 0x0; standing jump, W in the air: JUMP 0x1000, START_FORWARD 0x1001, FALL_LAND 0x1; strafe pressed and released in the air: 0x41001 then 0x1001 |
+| 29 | FALL_LAND for a fall height over 1/36 yd (0x73D4A0: 0x986FB0 = start z - z + v^2/2g of an upward start) | after 0.15 s in the air | the height: z + v^2/2g on the first airborne frame (`fallApexZ_`) less the landing z, `stock_movement::fallLandDue`; a reported jump always lands with FALL_LAND. 18 s of running and turning round Goldshire on foot and 24 s mounted across the Elwynn slopes there (the case the 0.15 s was for) sent no FALL_LAND |
+| 30 | Every jump sends MSG_MOVE_JUMP (event 0xA, 0x6EF860) as it leaves the ground | none went out for a jump from the ground: the send tested `grounded` after the physics had already cleared it for the take-off, so the server saw only the FALL_LAND (found in game 2026-11-04, debug log of the movement packets) | sent when the physics takes off (`jumpedThisFrame_`) |
 
 Still different (not changed here; each needs in-game checking):
 
@@ -441,15 +444,28 @@ Still different (not changed here; each needs in-game checking):
   ledge only by the hop. Wowee keeps an exit to walking when a ledge within
   the step lies under or ahead of a swimmer at the surface and the water over
   it is shallower than the stock exit depth, because its wall tests leave
-  such a ledge to the floor pass, which a swimmer does not run.
+  such a ledge to the floor pass, which a swimmer does not run. Removing the
+  exit alone would let a swimmer drift into the ledge rather than stop at
+  it: the stock behaviour needs `sweepAgainstWalls` to treat a ledge side as
+  a wall while swimming (step 0, as 0x760B40's swim trace has none), which
+  changes collision for every swimmer and was not done here.
 - **Steep ground.** Stock is FALLING on it and the air step slides the box
   down; Wowee slides terrain only, with its own acceleration.
-- **Air keys**: stock sends START_FORWARD etc. in the air (with the pending
-  flag) and applies them on landing; Wowee sends them on landing.
-- **FALL_LAND** after any fall over 1/36 yd; Wowee needs 0.15 s airborne
-  (kept to avoid landings from ground-contact flicker at speed).
-- **Mouse-look scale**: the stock formula (section 4) is in normalised
-  screen units; Wowee's is a pixel sensitivity slider. Not reconciled.
+- **Air keys after a walk off an edge**: stock sends HEARTBEAT with FALLING
+  there (event 9), so its keys go out pending too. Wowee does not report
+  such a fall as one (no FALLING goes out), so their keys stay latched and
+  are sent at the landing (#28 covers jumps only).
+- **FALL_LAND after a jump that lands within 1/36 yd of its apex** (onto a
+  ledge): stock sends none; Wowee sends it, as it is what clears FALLING in
+  its copy of the flags.
+- **Mouse-look scale**: 0x6020B0 takes the event's deltas through 0x47C020,
+  which divides them by the DDC width and height (0xAC0CB4 = 0.6 x aspect,
+  0.8 at 4:3, written by 0x47BF90; 0xAC0CB8 = 0.6), then yaw `dx x 0.00125
+  (0xA1E904) x cameraYawMoveSpeed x pi/180`, pitch `dy x 0.0016667
+  (0xA1E900) x cameraPitchMoveSpeed x pi/180`. What units the event's
+  deltas (+0x24 / +0x28) are in - raw counts, scaled by mouseSpeed or not -
+  was not traced, so Wowee's pixel sensitivity slider is still not
+  reconciled with it.
 - Click-to-move, cameraDive / submerge pitch and the first-person fade were
   not traced.
 

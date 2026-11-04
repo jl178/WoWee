@@ -221,6 +221,17 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "and the dither in terrain_fade.frag, wmo.frag and m2.frag; off "
                  "stamps nothing and the terrain never binds its fade pipeline",
      .asBool = &Enhancements::streamFadeIn},
+    {.key = "horizondetail", .label = "Lit far horizon", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageSky, .section = "",
+     .tooltip = "The distant mountains past the view distance, and the far\n"
+                "landmarks drawn with them, catch the sun under the haze, so\n"
+                "their ridges and faces show. Off is the original: one flat\n"
+                "fog-coloured silhouette.",
+     // Measured in docs/enhancements-plan.md (E11).
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "horizon_detail",
+     .controls = "TerrainHorizon's lit pipelines and the WDL normals they read (made "
+                 "on first use); off draws the stock fog-coloured pass",
+     .asBool = &Enhancements::horizonDetail},
 
     // ------------------------------------------------------ Water and weather
     {.key = "shorelinefoam", .label = "Shoreline foam", .kind = SettingKind::Bool,
@@ -271,6 +282,16 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .controls = "the rain strength (rtParams.z, the water push) and the ring "
                  "block in water.frag and wet_surface.glsli; zero while dry",
      .asBool = &Enhancements::rainRipples},
+    {.key = "weatherwind", .label = "Rain and snow in the wind", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWater, .section = "",
+     .tooltip = "Rain slants and snow drifts with the same wind that moves the\n"
+                "trees, harder in a storm and in the gusts that roll across the\n"
+                "land. Off is the original's fixed drift. Needs foliage wind.",
+     // Measured in docs/enhancements-plan.md (E19).
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "weather_wind",
+     .controls = "Weather::setWind: the wind added to each drop and flake as it "
+                 "moves; off adds nothing",
+     .asBool = &Enhancements::weatherWind},
 
     // ----------------------------------------------------------------- Motion
     {.key = "foliagewind", .label = "Foliage and cloth wind", .kind = SettingKind::Float,
@@ -345,6 +366,27 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "getModelMatrix, and the locomotion blend floor in beginSequenceBlend; "
                  "off draws every unit where it is set and every blend as authored",
      .asBool = &Enhancements::remoteSmoothing},
+    {.key = "footplacement", .label = "Feet on the ground", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWater, .section = "",
+     .tooltip = "Characters standing or walking on a slope or a stair plant\n"
+                "their feet on it: the uphill knee bends and the body lowers a\n"
+                "little. It fades out at a run, mounted, swimming or flying.\n"
+                "Off is the original: legs posed as if the ground were flat.",
+     // Measured in docs/enhancements-plan.md (E9).
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "foot_placement",
+     .controls = "CharacterRenderer::updateFootPlacement (the floor reads under the "
+                 "feet of units within 30 yd) and the leg solve in "
+                 "calculateBoneMatrices; off reads nothing and poses every bone stock",
+     .asBool = &Enhancements::footPlacement},
+    {.key = "smoothzoom", .label = "Smooth camera zoom", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWater, .section = "",
+     .tooltip = "The mouse wheel's zoom glides to its new distance and settles,\n"
+                "instead of moving at one steady speed and stopping dead. Walls\n"
+                "still pull the camera in at once.",
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "smooth_zoom",
+     .controls = "the eased zoom step in CameraController (camera_zoom.hpp); off is "
+                 "the stock 8.33 yd/s travel",
+     .asBool = &Enhancements::smoothZoom},
     {.key = "extrasmoke", .label = "Extra chimney smoke", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWater, .section = "",
      .tooltip = "Additional smoke puffs over chimneys and smoke stacks, on top\n"

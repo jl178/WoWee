@@ -256,7 +256,7 @@ out = primary · c · (0.7 + 0.3·shadow) · 2 + secondary · c.a · shadow
 | Specular | `_s` tilesets, pow(N·H, 20) × sun colour × alpha × shadow, per vertex | none | **stock**, per vertex (`terrain.vert`), `WOWEE_TERRAIN_SPECULAR=0` turns it off |
 | MCCV | MPHD 0x2 maps only | when the chunk has it | unchanged (only Northrend has it) |
 | Holes | 2x2-quad bits | the same | unchanged |
-| WDL horizon | fog-coloured, far clip − 50 to 4 far clips | none: sky past the far clip | **stock** (`TerrainHorizon`); tiles past 2 far clips drawn at a coarse level (128 triangles, Wowee's), `WOWEE_TERRAIN_HORIZON=0` turns it off |
+| WDL horizon | fog-coloured, far clip − 50 to 4 far clips | none: sky past the far clip | **stock** (`TerrainHorizon`), with the WDL's low-detail WMOs; tiles past 2 far clips drawn at a coarse level (128 triangles, Wowee's), `WOWEE_TERRAIN_HORIZON=0` turns it off; the "Lit far horizon" enhancement (E11) shades it under the fog colour |
 | Alpha resolution option | 32 or 64 (`shadowLevel`) | 64 | unchanged (= the Ultra preset) |
 | Cube-map layers | Crystalsong | drawn as a flat 2D texture | gap |
 | Streaming | chunk square ≈ 1.25 far clips, nearest first | tile circle ⌈far/533⌉+1, nearest first, unload at +3 | unchanged |
@@ -267,7 +267,11 @@ out = primary · c · (0.7 + 0.3·shadow) · 2 + secondary · c.a · shadow
 - **Cube-map layers** (MCLY 0x400 with MTXF bit 0, Crystalsong's 968
   layers): drawn as an ordinary 2D layer, not as the reflection cube.
 - **Low-detail WMOs from the WDL** (MWMO/MODF: New Hearthglen's cathedral,
-  Valgarde, the oil platform in Northrend) are not drawn on the horizon.
+  Valgarde, the oil platform in Northrend): drawn since 2026-11-03 in the
+  horizon pass, fog-coloured, by the tiles' reach and near limit
+  (`TerrainManager::loadHorizonWmos`, `TerrainHorizon::setFarMesh`); their
+  doodads are not, and whether stock culls them by anything else is not
+  known.
 - **The horizon's occluder test** (0x7cce00) is not done; tiles are only
   frustum and range culled.
 - **Per-vertex vs per-pixel**: Wowee lights per pixel (as before); the

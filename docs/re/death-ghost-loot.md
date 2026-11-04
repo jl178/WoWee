@@ -43,6 +43,8 @@ UNIT_DYNAMIC_FLAGS has 0x20 (UNIT_DYNFLAG_DEAD, which a feign death sets).
 - releases an open loot (0x523640(1, 0, 0), CMSG_LOOT_RELEASE);
 - calls 0x809ac0;
 - releases at once (RepopMe, 0x6d2950) when UNIT_FIELD_FLAGS has 0x100000.
+  That is UNIT_FLAG_TAXI_FLIGHT, the bit UnitOnTaxi reads (0x60F350): a
+  death on a flight releases at once.
 
 For another unit it prints error 0x55 with the unit's name instead.
 
@@ -211,7 +213,12 @@ follows the answer.
   unless something still holds it (+0xbc). There is **no fade-out** of a
   despawning corpse.
 - A corpse model with Decay (159) plays it (0x744870). Without it, the model
-  is paused at its sequence's last frame.
+  is paused at its sequence's last frame. 0x744870 is the Death animation's
+  end callback: with Decay in the model (0x825EE0(0x9F)) it plays Decay once
+  (0x832AB0(-1, 0x9F, ...)) with 0x743580 as its own end callback, which
+  then does what the no-Decay branch does at once (0x6F87C0). In the 3.3.5a
+  data only two creature models have a Decay sequence: `sandvortex.m2` and
+  `vapor.m2` (the other 238 models with one are spell effects).
 
 ## 5. Looting
 
@@ -283,10 +290,11 @@ interactions.md §5. Added here:
 | L1 | Loot money line | CHAT_MSG_MONEY "You loot 1 Silver, 5 Copper" / "Your share of the loot is ..." | system "Looted: 1s 5c" | **Fixed** |
 | L2 | Roll start | silent; four windows at most, the rest wait | "Loot roll started for ..." in chat; every roll raised a window | **Fixed** |
 | L3 | Roll, win, all-passed lines | the GlobalStrings above, CHAT_MSG_LOOT, showLootSpam | "Name rolled Need - 0", "X won Y (Need - 54)", "Everyone passed on Y." as system lines | **Fixed** |
-| T1 | Ghost tint | kit 989 CharProc 1 colour 0x8CB9FD | none | open (characters.md T3) |
-| T2 | Corpse decay anim (159) | on corpse models that have it | not played | open |
-| T3 | The ghost's spectral gryphon (mount display 26691 the realm sets) | drawn as a mount | mount loaded, the ghost drawn standing | open, not investigated |
-| T4 | Auto-release on UNIT_FIELD_FLAGS 0x100000 | RepopMe at death | none | open (no 3.3.5a server path seen to set it) |
+| T1 | Ghost tint | kit 989 CharProc 1 colour 0x8CB9FD | none | **Done** by the spell audit: the Ghost aura's (8326) StateKit 989 reaches `SpellVisualSystem::applyKitProcs`, whose CharProc 1 sets the model colour (`setInstanceDiffuseTint`). Checked in game 2026-11-04: on release, "tint on instance 1 (0.549, 0.725, 0.992)" = 0x8CB9FD, with Ghost_state.m2 attached. Left: the 1000 ms fade into it; mounted, stock puts the tint and alpha on the mount (characters.md §7), Wowee keeps them on the rider |
+| T2 | Corpse decay anim (159) | on corpse models that have it, after Death | not played | **Fixed** (2026-11-04): `CharacterRenderer` plays Decay once when Death ends and holds its last frame; a corpse with Decay coming into view starts at Decay's end |
+| T3 | The ghost's spectral gryphon (mount display 26691: AzerothCore's spell_area gives aura 55164 to a ghost in Storm Peaks, Icecrown, Wyrmrest and Wintergrasp) | drawn as a mount | mount loaded, the ghost drawn standing | checked in game 2026-11-04 (released in Storm Peaks and Icecrown, and logged in as a mounted ghost): `Gryphon_Ghost_Mount.m2` loads, the ghost rider is on its attachment 0 and plays Mount (91), not death-locked, and the mount runs its locomotion (Sprint at 14 yd/s). Not reproduced; nothing changed. The release's health 0 -> 1 clears the death lock (`NPCRespawnCallback` for the player) before the mount field is applied |
+| T4 | Auto-release on UNIT_FIELD_FLAGS 0x100000 | RepopMe at death; the bit is UNIT_FLAG_TAXI_FLIGHT, so a death on a flight | none | **Fixed** (2026-11-04): `stock_death::releasesAtDeath`, in `GameHandler::updateDeathState` with the rest of 0x6dc0f0 |
+| D5 | Feign death | 0x729220 skips 0x6dc0f0 while UNIT_DYNAMIC_FLAGS has 0x20 on a live player: no release timer, target kept, no PLAYER_DEAD | (already) `EntityController::isFeigningDeath` keeps `playerFeigningDeath_` apart from a death, so `updateDeathState` and PLAYER_DEAD never see it | checked 2026-11-04, unchanged |
 
 ## 7. In game
 

@@ -76,6 +76,10 @@ struct Enhancements {
     /// Rings on lakes, rivers and puddled ground while it rains. Stock rain
     /// leaves the water as it was.
     bool  rainRipples = false;
+    /// Rain and snow slant and drift with the wind that moves the trees - its
+    /// direction, its eased strength and its rolling gusts (Weather::setWind).
+    /// Stock rain and snow fall on their own fixed drift.
+    bool  weatherWind = false;
 
     // ---- Motion ------------------------------------------------------------
     /// How hard the wind moves trees and cloth. 0 is stock: nothing sways.
@@ -102,6 +106,13 @@ struct Enhancements {
     /// (remote_smoothing.hpp). Stock puts them where each packet says and cuts
     /// where a sequence's blend time is 0.
     bool  remoteSmoothing = false;
+    /// Standing and walking units plant their feet on slopes and steps: the
+    /// knees bend, the body lowers a little, the feet tilt (foot_ik.hpp).
+    /// Stock poses the legs on a flat plane through the unit's position.
+    bool  footPlacement = false;
+    /// The mouse wheel's zoom eases to its new distance instead of travelling
+    /// at the stock constant 8.33 yd/s (camera_zoom.hpp).
+    bool  smoothZoom = false;
     /// Extra smoke puffs over models named for smoke.
     bool  extraSmoke = false;
     /// Wowee's own drunk view: a wavy, blurred picture and a swaying camera.
@@ -124,6 +135,10 @@ struct Enhancements {
     /// Terrain, buildings and doodads that finish streaming in dissolve in
     /// over a moment instead of appearing in one frame, as stock does.
     bool  streamFadeIn = false;
+    /// The far horizon (the WDL's mountains and its low-detail buildings) takes
+    /// the sun's light under the haze instead of being one flat fog colour
+    /// (TerrainHorizon). Stock draws it in the fog colour alone.
+    bool  horizonDetail = false;
 
     // ---- Experimental ------------------------------------------------------
     bool  grass = false;

@@ -5,6 +5,7 @@
 
 #include "pipeline/m2_loader.hpp"
 #include "rendering/m2_effect_select.hpp"
+#include "rendering/foot_ik.hpp"
 #include "rendering/remote_smoothing.hpp"
 #include "rendering/secondary_motion.hpp"
 #include "pipeline/blp_loader.hpp"
@@ -194,6 +195,12 @@ public:
     /// stock at once and, with nothing tilted, costs nothing. Main thread,
     /// after M2Renderer's update has joined (the floor queries walk its index).
     void updateCorpseSettle(float deltaTime, const FloorHeightFn* floor);
+    /// "Foot placement on slopes" (foot_ik.hpp, E9): standing and walking
+    /// units within reach of the camera plant their feet on the floor under
+    /// them, read with `floor`; the next poses apply it. Null `floor` (the row
+    /// off) clears every unit's correction, after which nothing is read or
+    /// applied. Main thread, after M2Renderer's update has joined.
+    void updateFootPlacement(float deltaTime, const FloorHeightFn* floor, const glm::vec3& cameraPos);
     /// The motion enhancements, before each update() (docs/enhancements-plan.md
     /// E7 and E10). `secondaryMotion`: 0 off, 1 capes and robes, 2 also tails
     /// and hair (secondary_motion.hpp); `windWorld` the air's velocity in yd/s
@@ -420,9 +427,13 @@ public:
     };
     /// Every unit model within maxDist of the camera, nearest first, at most
     /// maxCount. Riders, attached items, effect and scene models are left
-    /// out: a mounted unit's blob is its mount's.
+    /// out: a mounted unit's blob is its mount's. skipSunShadowCasters leaves
+    /// out the units drawn into a sun shadow map in the last shadow pass
+    /// (with shadows on, only the rest take the blob).
     void collectUnitBlobs(const glm::vec3& cameraPos, float maxDist, size_t maxCount,
-                          std::vector<BlobSource>& out) const;
+                          std::vector<BlobSource>& out, bool skipSunShadowCasters = false) const;
+    /// Starts a shadow pass's record of which units cast a sun shadow.
+    void beginSunShadowFrame() { ++sunShadowStamp_; }
 
     void setNormalMappingEnabled(bool enabled) { normalMappingEnabled_ = enabled; }
     void setNormalMapStrength(float strength) { normalMapStrength_ = strength; }
@@ -504,6 +515,10 @@ private:
         std::vector<int16_t> springSlot;
         std::vector<uint8_t> springSlotChain;
         std::vector<uint8_t> springSlotIndex;
+        /// Foot placement (foot_ik.hpp): the two legs, found once the row is
+        /// first on for a unit of this model.
+        bool footRigAnalyzed = false;
+        foot_ik::Rig footRig;
     };
 
     // One bone's local animated pose, before the pivot bracket.
@@ -522,6 +537,8 @@ private:
         glm::vec3 rotation;
         float scale;
         bool visible = true;  // For first-person camera hiding
+        // The sun-shadow frame (sunShadowStamp_) this unit last cast in.
+        uint32_t sunShadowStamp = 0;
         float torsoYawOverrideRad = 0.0f;  // SpineLow (key bone 4) look twist
         float headYawOverrideRad = 0.0f;   // Head (key bone 6) look twist
 
@@ -652,6 +669,9 @@ private:
         // row is on and this is another unit, else the matrix is stock.
         remote_smoothing::State smooth;
         bool smoothActive = false;
+        // Foot placement (E9): the targets the pose applies and the floor
+        // reads behind them. Weight 0 - always, with the row off - is stock.
+        foot_ik::State footIk;
 
         // Bone update throttling for characters outside normal gameplay range.
         uint32_t boneUpdateCounter = 0;
@@ -691,6 +711,7 @@ private:
     };
     /// The unit shadow map's nearest units this frame (renderShadow).
     std::vector<std::pair<float, CharacterInstance*>> shadowNearest_;
+    uint32_t sunShadowStamp_ = 1;  // beginSunShadowFrame; instances start at 0
 
     /// Copy the instance's bones into this frame slot's bone buffer, unless
     /// the slot already holds this pose. The shadow pass and the main pass
@@ -889,6 +910,8 @@ private:
     std::unordered_map<uint32_t, M2ModelGPU> models;
     std::unordered_map<uint32_t, CharacterInstance> instances;
     bool corpseSettleActive_ = false;  // some body is tilted or measured
+    bool footIkOn_ = false;            // updateFootPlacement had a floor last
+    bool footIkActive_ = false;        // some unit has a correction
     // Motion enhancements (setMotionEnhancements).
     int springLevel_ = 0;
     glm::vec3 springWind_{0.0f};

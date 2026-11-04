@@ -115,6 +115,14 @@ public:
     void setGroundQuery(GroundQuery query) { groundQuery_ = std::move(query); }
     [[nodiscard]] bool hasGroundQuery() const { return static_cast<bool>(groundQuery_); }
 
+    /// E19, "Rain and snow in the wind" (weather_wind.hpp): the foliage's
+    /// eased wind strength (0: the stock fall, nothing added) and the scene
+    /// clock its gust band runs on. Call before update().
+    void setWind(float strength, float clock) {
+        windStrength_ = strength;
+        windClock_ = clock;
+    }
+
     void setEnabled(bool enabled) { this->enabled = enabled; }
     [[nodiscard]] bool isEnabled() const { return enabled; }
 
@@ -211,6 +219,8 @@ private:
     float intensity = 0.5f;
     float densityScale_ = 1.0f;
     float time_ = 0.0f;
+    float windStrength_ = 0.0f;  ///< setWind; 0 is stock
+    float windClock_ = 0.0f;
 
     static constexpr int MAX_PARTICLES = 3000;
     static constexpr int MAX_SPLASHES = 400;

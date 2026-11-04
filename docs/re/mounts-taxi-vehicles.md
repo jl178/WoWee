@@ -153,8 +153,21 @@ is no timer-driven mount sound.
   cancelled (0x726CE0).
 - **Route** (0x592BB0 / 0x5926C0): over known nodes, the **shortest total
   flight distance** - the 3D lengths of each TaxiPath's TaxiPathNode points
-  (0x592580) - not the fewest hops. Prices are kept in five reputation tiers
-  (1.0, 0.95, 0.90, 0.85, 0.80 x price; TaxiNodeCost 0x591350).
+  (0x592580) - not the fewest hops.
+- **Price** (TaxiNodeCost 0x5915E0 -> 0x591350). The tier is the flight
+  master's reaction to the player (0x7251C0, 0 hated .. 7 exalted), and only
+  for a faction with a reputation (0x718B30: Faction ReputationListID >= 0;
+  otherwise neutral): Friendly 1, Honored 2, Revered 3, Exalted 4, anything
+  lower 0.
+  - A destination with a TaxiPath of its own from the current node costs
+    `round((1 - d) x TaxiPath.Cost)`, d = 0.05 / 0.10 / 0.15 / 0.20 by tier
+    (0x7279A0: 0x9F1958, 0xA349F0, 0x9F23D4, 0x9E8D84), whatever route the
+    map draws.
+  - Otherwise the route's own sums: 0x5926C0 keeps five running totals per
+    node (+0x10..+0x20), each hop adding `round(f x cost)` with f = 1.0f less
+    0.05f per tier, and 0x591350 answers the tier's total (+0x10 below
+    Friendly, else +0x10 + 4 x tier). Each hop is rounded on its own.
+  Rounding is the x87 default, to nearest with ties to even.
 - **TakeTaxiNode** (0x5914B0): mounted -> ERR_TAXIPLAYERALREADYMOUNTED;
   same node -> ERR_TAXISAMENODE; a direct TaxiPath -> **CMSG_ACTIVATETAXI**
   (npc, from, to; 0x6D63A0); else money check (ERR_TAXINOTENOUGHMONEY) and
@@ -403,7 +416,7 @@ Mages (32341, guid 0xF130007E55...) on every blink.
 | M4 | Playback rate | speed / MoveSpeed | rate 1 | **Fixed** on the ground for the local mount; remote mounts through driveUnitLocomotion |
 | M5 | Local rider seat | attachment 0, full transform, own size | seat attachment probe {0,5,6,7,8}, +0.08 offset, smoothing, 35% tilt | **Fixed**: the remote riders' rule (setInstanceMountedOn) |
 | M6 | Rider pose from the mount aura kit | carpets 120, choppers 484 | always 91 | **Fixed** (characters.md S4) |
-| M7 | Mount sounds | $FSD/$WNG of the mount model with the mount display's CreatureSoundData; jump/land kinds 11/12 | hand-made family banks, synthetic gait beats, timed wing loops; mount events silent | **Fixed**: mount events sound by the mount display; the hand banks are no longer started; jump/land from the mount's CSD; $WGG not yet (CreatureSounds has no glide column) |
+| M7 | Mount sounds | $FSD/$WNG of the mount model with the mount display's CreatureSoundData; jump/land kinds 11/12; the local mount's are the player's own, 2D at 0.65 | hand-made family banks, synthetic gait beats, timed wing loops; mount events silent | **Fixed**: mount events sound by the mount display; the hand banks are no longer started; jump/land from the mount's CSD; the local mount's $FSD/$WNG and its jump/land take the own-unit rule (`NPCInteractionCallbackHandler::handleUnitAnimEvent` `ownMount`, `MountSoundManager`; done with the sound audit, re-checked 2026-11-04); $WGG not yet (CreatureSounds has no glide column) |
 | M9 | Rider skeleton | the rider animates (Mount, casts) like any unit | CharacterRenderer skipped animating every instance with an override matrix - meant for weapons - so a seated rider (local or remote) kept the pose it had when it mounted, standing on the saddle | **Fixed**: seated instances animate |
 | M8 | Mount .anim files | all | Stand/Walk/Run only (the rest would not animate if external) | **Fixed**: the locomotion set |
 | T1 | The flight | the server's Catmull-Rom spline, run by the unit code | TaxiPathNode flown client-side at 32 with its own pacing, server spline cancelled every frame, snaps and deferred dismounts | **Fixed**: the player's entity runs the server spline; movementInfo follows it |
@@ -411,7 +424,7 @@ Mages (32341, guid 0xF130007E55...) on every blink.
 | T3 | Taxi mount | the mount field | guessed display from TaxiNodes and fallbacks, applied on the reply | **Fixed**: the field (reconciled on a taxi too) |
 | T4 | Route | shortest flight distance | fewest hops (BFS) | **Fixed** (`taxi::shortestRoute`) |
 | T5 | Errors and map | specific ERR_TAXI*; <2 nodes ERR_TAXINOPATHS; dismount on map open | "Cannot take that flight path."; "Requesting flight" and "Discovered flight path" chat lines | **Fixed** |
-| T6 | Prices | reputation tiers | plain sums | open (tier 1.0 used) |
+| T6 | Prices | reputation tiers: the direct TaxiPath's fare discounted, else per-hop discounted sums (section 3) | plain sums, the route's even when a direct path existed | **Fixed** (2026-11-04): `taxi::reputationTier`, `tierFare`, `routePrice` (test_taxi_rules); the tier from `unitReactionToPlayer` of the flight master, only for a faction with a standing. In game (Wptestb, Friendly with Stormwind, Dungar Longdrink): Sentinel Hill 110 -> 104, Lakeshire 210 -> 200, Ironforge 50 -> 48, Darkshire 330 -> 314, Booty Bay 630 -> 598 - 5% off, ties to even |
 | V1 | 0x4A7 | that unit is a vehicle | "the player is in a vehicle" (a nearby mammoth put the player "in a vehicle") | **Fixed** |
 | V2 | Vehicle id, seat byte | read | dropped | **Fixed** (UpdateBlock::vehicleId / transportSeat) |
 | V3 | Passengers | seated by VehicleSeat | left where they were, run animations | **Fixed**: seat attachment (remapped), offset, own size, yaw, passenger point; ride anims; vehicle ride loop; flag 0x200 hides |
@@ -429,8 +442,19 @@ Mages (32341, guid 0xF130007E55...) on every blink.
 
 ## 6. Open
 
-- FIXED_POSITION facing limits (Vehicle.flags 0x200000, 0x6EAA50) are not
-  applied: a turret turns freely under the controls.
+- FIXED_POSITION facing limits (Vehicle.flags 0x200000) are not applied: a
+  turret turns freely under the controls. The rule, read 2026-11-04: 0x6EAA50
+  answers the limits `base - FacingLimitRight .. base + FacingLimitLeft`,
+  base = Vehicle_C +0x50 (the create block's UPDATEFLAG_VEHICLE float, which
+  Wowee reads and drops in `world_packets.cpp`). SetFacing (0x6EE3A0) and
+  the event 0x35 facing (0x6EF3D0) wrap the facing by 2 pi into the range
+  (0x6E9290, the nearer limit when outside) and clamp it; a turn key
+  (0x6F0F70) does not start a turn but sends the facing to that side's
+  limit, the turn stopping there (0x6EF6A0 schedules the stop from the
+  angle and the turn rate); 0x71C1E0 clamps the steering mouse. Not done:
+  it needs the aim kept per unit (GameHandler), limits in the camera
+  controller's facing and key turning, and a FIXED_POSITION vehicle to test
+  on.
 - Mouselook does not drive the aim (0x5FA9B0: -camera pitch +
   Vehicle.MouseLookOffsetPitch); the aim keys, the pitch buttons and the
   slider do.
@@ -450,10 +474,9 @@ Mages (32341, guid 0xF130007E55...) on every blink.
   server spline moves meanwhile.
 - The roll sign of a taxi's bank is taken as into the turn; the decompile
   (0x98CA00, 0x4C5820) was not followed to the quaternion's axis.
-- Price tiers by reputation (T6); the hard-coded faction gate on taxi nodes.
+- The hard-coded faction gate on taxi nodes.
 - Mount wing glide `$WGG` (needs CreatureSoundData's glide column in
-  audio::CreatureSounds); the local mount's own sounds are 3D at the unit,
-  not 2D at 0.65 (sound-engine.md).
+  audio::CreatureSounds).
 - The rider's upper-body split while mounted (casts on the rider) follows
   the existing ActivityFSM; not re-checked against 0x7385C0's mounted branch.
 - The camera height on a taxi (0x604E00 uses Fly's bounds) is not applied.

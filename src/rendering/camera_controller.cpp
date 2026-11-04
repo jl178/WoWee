@@ -1,4 +1,5 @@
 #include "rendering/camera_controller.hpp"
+#include "rendering/camera_zoom.hpp"
 
 #include "core/env_flag.hpp"
 #include "rendering/swim_wall.hpp"
@@ -911,6 +912,7 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
             grounded = false;
             jumpBufferTimer = 0.0f;
             coyoteTimer = 0.0f;
+            jumpedThisFrame_ = true;
         }
 
         jumpBufferTimer -= f.physicsDeltaTime;
@@ -2949,6 +2951,7 @@ void CameraController::updateFreeFlyCamera(float /*deltaTime*/, FrameInput& f) {
             grounded = false;
             jumpBufferTimer = 0.0f;
             coyoteTimer = 0.0f;
+            jumpedThisFrame_ = true;
         }
 
         jumpBufferTimer -= f.physicsDeltaTime;
@@ -3038,6 +3041,7 @@ void CameraController::updateFreeFlyCamera(float /*deltaTime*/, FrameInput& f) {
 }
 
 void CameraController::update(float deltaTime) {
+    jumpedThisFrame_ = false;
     if (!enabled || !camera) {
         return;
     }
@@ -3306,6 +3310,11 @@ void CameraController::update(float deltaTime) {
     // speed, and keeps that one. airSpeed_ below says which case this is.
     bool airLatchedNow = false;   // the latch was (re)taken this frame
     bool airDriftStart = false;   // ...from a standing fall, at walk speed
+    // The keys as pressed, before the latch: a jump's key changes are sent
+    // as they happen and wait in the server's flags as PENDING ones
+    // (0x988A20, see the edge detection below).
+    const bool rawForward = nowForward, rawBackward = nowBackward;
+    const bool rawStrafeLeft = nowStrafeLeft, rawStrafeRight = nowStrafeRight;
     if (!grounded && !swimming && !isFlightAirborne()) {
         const bool anyKeyDir = nowForward || nowBackward || nowStrafeLeft || nowStrafeRight;
         const bool latchedNoDir = airMoveLatched_ && !airForward_ && !airBackward_ &&
@@ -3608,29 +3617,43 @@ void CameraController::update(float deltaTime) {
     movement = f.movement;
 
     // --- Edge-detection: send movement opcodes on state transitions ---
+    //
+    // During a jump the keys as pressed: the stock client sends START_FORWARD
+    // and the rest the moment a key goes down in the air (0x6EF860 sends
+    // whatever 0x988A20 decided); the server's copy of the flags takes a
+    // PENDING flag (stock_movement::startForwardBackward) and the landing
+    // applies it (landWithPendingKeys, with FALL_LAND). Nothing is sent at
+    // the landing for a key already reported. Other falls - off an edge -
+    // are not reported as falls (no FALLING goes out for them), so their keys
+    // stay latched and are sent on landing, as before.
+    const bool keysAsPressed = fallJumped_;
+    const bool edgeForward = keysAsPressed ? rawForward : nowForward;
+    const bool edgeBackward = keysAsPressed ? rawBackward : nowBackward;
+    const bool edgeStrafeLeft = keysAsPressed ? rawStrafeLeft : nowStrafeLeft;
+    const bool edgeStrafeRight = keysAsPressed ? rawStrafeRight : nowStrafeRight;
     if (movementCallback) {
         // Forward/backward
-        if (nowForward && !wasMovingForward) {
+        if (edgeForward && !wasMovingForward) {
             movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_START_FORWARD));
         }
-        if (nowBackward && !wasMovingBackward) {
+        if (edgeBackward && !wasMovingBackward) {
             movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_START_BACKWARD));
         }
-        if ((!nowForward && wasMovingForward) || (!nowBackward && wasMovingBackward)) {
-            if (!nowForward && !nowBackward) {
+        if ((!edgeForward && wasMovingForward) || (!edgeBackward && wasMovingBackward)) {
+            if (!edgeForward && !edgeBackward) {
                 movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_STOP));
             }
         }
 
         // Strafing
-        if (nowStrafeLeft && !wasStrafingLeft) {
+        if (edgeStrafeLeft && !wasStrafingLeft) {
             movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_START_STRAFE_LEFT));
         }
-        if (nowStrafeRight && !wasStrafingRight) {
+        if (edgeStrafeRight && !wasStrafingRight) {
             movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_START_STRAFE_RIGHT));
         }
-        if ((!nowStrafeLeft && wasStrafingLeft) || (!nowStrafeRight && wasStrafingRight)) {
-            if (!nowStrafeLeft && !nowStrafeRight) {
+        if ((!edgeStrafeLeft && wasStrafingLeft) || (!edgeStrafeRight && wasStrafingRight)) {
+            if (!edgeStrafeLeft && !edgeStrafeRight) {
                 movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_STOP_STRAFE));
             }
         }
@@ -3651,9 +3674,14 @@ void CameraController::update(float deltaTime) {
         // Jump. Not in flight, where space climbs - and where grounded is held
         // true only to keep the fall-damage checks quiet, so every press sent
         // the server a jump from mid-air.
-        if (nowJump && !wasJumping && grounded && !isFlightAirborne() && !onSteepSlope_ &&
-            !movementRooted_ && !noJump_) {
+        //
+        // Sent when the physics above took off this frame. It was decided from
+        // the key's edge and `grounded` here, after the physics had already
+        // cleared `grounded` for the jump, so no JUMP went out at all: the
+        // server and everyone else saw a jump only as a FALL_LAND.
+        if (jumpedThisFrame_ && !isFlightAirborne()) {
             movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_JUMP));
+            fallJumped_ = true;
         }
         // A swimmer's hop at the surface is a jump from the water (0x730D10 ->
         // 0x72EB80 -> event 0xA): sent while SWIMMING is still set, so it
@@ -3661,6 +3689,7 @@ void CameraController::update(float deltaTime) {
         // ASCENDING itself (0x988370) - no STOP_SWIM or STOP_ASCEND follows.
         if (surfaceHopThisFrame_) {
             movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_JUMP));
+            fallJumped_ = true;
         }
 
         // Walk/run mode. The stock toggle sends SET_WALK_MODE / SET_RUN_MODE
@@ -3673,19 +3702,17 @@ void CameraController::update(float deltaTime) {
             wasWalkMode_ = walking;
         }
 
-        // Fall landing, for a fall that actually happened.
-        //
-        // A bump at riding speed breaks ground contact for a frame, and the
-        // frame after it this read as a landing: the packet went out, and
-        // every client in range played the landing animation on the mount.
-        // Crossing open ground did that several times a second, which is what
-        // other players see as a mount behaving erratically.
-        //
-        // Long enough to be a fall rather than a step. Well under the shortest
-        // real drop - a jump is airborne for about a second - so nothing a
-        // player would call a fall is lost.
-        constexpr float kFallReportSeconds = 0.15f;
-        if (wasFalling && grounded && airborneSeconds_ >= kFallReportSeconds) {
+        // Fall landing, for a fall that actually happened: the stock rule
+        // (0x73D4A0) is a fall height - start z less the landing z, plus a
+        // jump's rise (0x986FB0) - over 1/36 yd. A bump at riding speed that
+        // breaks ground contact for a frame drops a few millimetres and sends
+        // nothing, so a mount crossing a field is not seen by everyone else
+        // as one landing after another. A reported jump always lands with
+        // FALL_LAND here, even onto a ledge near its apex: it is what clears
+        // FALLING and applies the keys pressed in the air in this client's
+        // copy of the flags.
+        if (wasFalling && grounded && followTarget &&
+            (fallJumped_ || sm::fallLandDue(fallApexZ_, followTarget->z))) {
             movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_FALL_LAND));
         }
     }
@@ -3739,10 +3766,10 @@ void CameraController::update(float deltaTime) {
 
     // Update previous-frame state
     wasSwimming = swimming;
-    wasMovingForward = nowForward;
-    wasMovingBackward = nowBackward;
-    wasStrafingLeft = nowStrafeLeft;
-    wasStrafingRight = nowStrafeRight;
+    wasMovingForward = edgeForward;
+    wasMovingBackward = edgeBackward;
+    wasStrafingLeft = edgeStrafeLeft;
+    wasStrafingRight = edgeStrafeRight;
     moveForwardActive = nowForward;
     moveBackwardActive = nowBackward;
     strafeLeftActive = nowStrafeLeft;
@@ -3753,9 +3780,19 @@ void CameraController::update(float deltaTime) {
     wasTurningRight = nowTurnRight;
     wasJumping = nowJump;
     wasFalling = !grounded && verticalVelocity <= 0.0f;
-    // Counted while airborne and zeroed the moment the ground is back, so the
-    // landing test above reads the length of the fall that just ended.
-    airborneSeconds_ = grounded ? 0.0f : (airborneSeconds_ + deltaTime);
+    // The fall's height (0x986FB0): where it began plus the rise still to
+    // come, z + v^2 / 2g on its first airborne frame - the apex of a jump,
+    // the edge's z for a walk off it.
+    if (!grounded && !swimming && !isFlightAirborne() && followTarget) {
+        if (!fallTracking_) {
+            fallTracking_ = true;
+            const float up = std::max(verticalVelocity, 0.0f);
+            fallApexZ_ = followTarget->z + up * up / (2.0f * sm::kGravity);
+        }
+    } else {
+        fallTracking_ = false;
+        fallJumped_ = false;
+    }
 
     // R key is now handled above with chat safeguard (WantTextInput check)
 
@@ -3929,6 +3966,8 @@ void CameraController::reset() {
     wasMovingBackward = false;
     wasStrafingLeft = false;
     wasStrafingRight = false;
+    fallTracking_ = false;
+    fallJumped_ = false;
     wasTurningLeft = false;
     wasTurningRight = false;
     wasJumping = false;
@@ -4216,6 +4255,11 @@ void CameraController::processMouseWheel(float delta) {
 }
 
 void CameraController::stepZoomTowardTarget(float deltaTime) {
+    // E20: eased instead (camera_zoom.hpp). Off, this is the stock step below.
+    if (smoothZoom_) {
+        camera_zoom::step(currentDistance, zoomVelocity_, userTargetDistance, deltaTime);
+        return;
+    }
     // Linear, not eased: FUN_006000e0 moves the zoom distance (+0x1e8) by
     // elapsed_ms * cameraDistanceMoveSpeed * 0.001 each frame until the
     // requested travel time is used up, and the camera distance (+0x118)
@@ -4432,6 +4476,7 @@ void CameraController::applyKnockBack(float vcos, float vsin, float hspeed, floa
     // (nowJump && grounded) does not fire during a server-driven knockback.
     if (movementCallback) {
         movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_JUMP));
+        fallJumped_ = true;
     }
 }
 
