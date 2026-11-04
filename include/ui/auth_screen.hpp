@@ -195,6 +195,10 @@ private:
     /// in on the first frame, once.
     /// For profiling and test runs nobody is sitting at.
     bool autoLoginTried_ = false;
+public:
+    /// WOWEE_AUTO_RELOG (a test hook): let WOWEE_AUTO_LOGIN log in again.
+    void rearmAutoLogin() { autoLoginTried_ = false; }
+private:
 
     static std::string makeServerKey(const std::string& host, int port);
     /// How one reads in the server list: its name if this client knows one,

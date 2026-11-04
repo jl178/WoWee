@@ -2126,6 +2126,15 @@ wowee_test_link_glm(test_gamepad)
 add_test(NAME gamepad COMMAND test_gamepad)
 register_test_target(test_gamepad)
 
+# ── test_loading_event_pump ──────────────────────────────────
+# Header-only helper over SDL's event queue: the events subsystem, no window.
+add_executable(test_loading_event_pump test_loading_event_pump.cpp ${TEST_COMMON_SOURCES})
+target_include_directories(test_loading_event_pump PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_loading_event_pump SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_loading_event_pump PRIVATE catch2_main SDL3::SDL3)
+add_test(NAME loading_event_pump COMMAND test_loading_event_pump)
+register_test_target(test_loading_event_pump)
+
 # ── test_camera_pivot ────────────────────────────────────────
 # Header-only: the pivot arithmetic is a static member, so this needs SDL3's
 # headers (camera_controller.hpp includes them) but none of its symbols.

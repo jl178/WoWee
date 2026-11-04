@@ -387,6 +387,13 @@ private:
         uint64_t lastUse = 0;
     };
     std::unordered_map<std::string, TextureCacheEntry> textureCache;
+    /// The cache key of each per-chunk alpha (and baked shadow) map, by the
+    /// texture: createAlphaTexture makes one per chunk layer that only that
+    /// chunk ever uses, and destroyChunkGPU gives it back with the chunk.
+    std::unordered_map<const VkTexture*, std::string> alphaTextureKeys_;
+    /// Releases the chunk's own alpha maps from the cache, deferred past the
+    /// frames that may still sample them.
+    void releaseChunkAlphaTextures(TerrainChunkGPU& chunk);
     size_t textureCacheBytes_ = 0;
     uint64_t textureCacheCounter_ = 0;
     size_t textureCacheBudgetBytes_ = 4096ull * 1024 * 1024;

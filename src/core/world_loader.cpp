@@ -9,6 +9,8 @@
 #include "core/entity_spawner.hpp"
 #include "core/appearance_composer.hpp"
 #include "core/window.hpp"
+#include "core/window_events_for_main_loop.hpp"
+#include "core/debug_lua_hook.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
@@ -618,7 +620,9 @@ void WorldLoader::loadMapGeometry(uint32_t mapId, const std::string& mapName,
                 // as a hung main loop.
                 app_.beatWatchdog();
                 SDL_Event event;
+                WindowEventsForMainLoop keepForMainLoop;
                 while (SDL_PollEvent(&event)) {
+                    keepForMainLoop.note(event);
                     if (event.type == SDL_EVENT_QUIT) {
                         window_->setShouldClose(true);
                         loadingScreen->shutdown();
@@ -735,7 +739,9 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
 
     auto showProgress = [&](const char* msg, float progress) {
         SDL_Event event;
+        WindowEventsForMainLoop keepForMainLoop;
         while (SDL_PollEvent(&event)) {
+            keepForMainLoop.note(event);
             if (event.type == SDL_EVENT_QUIT) {
                 window_->setShouldClose(true);
                 loadingScreen.shutdown();
@@ -1042,7 +1048,9 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
 
         while (true) {
             SDL_Event event;
+            WindowEventsForMainLoop keepForMainLoop;
             while (SDL_PollEvent(&event)) {
+                keepForMainLoop.note(event);
                 if (event.type == SDL_EVENT_QUIT) {
                     window_->setShouldClose(true);
                     if (loadingScreenOk) loadingScreen.shutdown();
@@ -1234,6 +1242,7 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
         }
         addonManager_->loadAllAddons();
         app_.addonsLoaded_ = true;
+        debugLuaHookNoteInterfaceLoaded();
         addonManager_->fireEvent("VARIABLES_LOADED");
         // After VARIABLES_LOADED, which is when the chat window
         // settings are available to be read. Every chat frame

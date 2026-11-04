@@ -136,6 +136,12 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
                                selectedCharacterIndex < static_cast<int>(characters.size());
 
     const auto enterWorld = [&](const game::Character& character) {
+        // Only on this session's list. After a logout the previous list is
+        // still here while the next login runs, and the handler refuses a
+        // selection before SMSG_CHAR_ENUM ("Cannot select character in state")
+        // - which left this screen saying "Entering world" for ever, with the
+        // press spent.
+        if (state != game::WorldState::CHAR_LIST_RECEIVED) return;
         // CharacterSelect_EnterWorld.
         glue_audio::play("gsCharacterSelectionEnterWorld");
         glue_audio::stopAmbience(game::glue::kAmbienceFadeOutSeconds);
@@ -145,7 +151,8 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
         gameHandler.selectCharacter(character.guid);
         if (onCharacterSelected) onCharacterSelected(character.guid);
     };
-    if (!autoEnterTried_ && !characterSelected && !characters.empty()) {
+    if (!autoEnterTried_ && !characterSelected && !characters.empty() &&
+        state == game::WorldState::CHAR_LIST_RECEIVED) {
         autoEnterTried_ = true;
         if (const char* env = std::getenv("WOWEE_AUTO_CHARACTER"); env && *env) {
             const std::string wanted(env);

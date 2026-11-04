@@ -1106,12 +1106,12 @@ InterfaceOptions_AddCategory(root)
 if VideoOptionsFrame then
     addHostHeading(VideoOptionsFrame,
         "This client's own graphics settings, under the headings below. "
-        .. "The game's own Resolution and Effects panels are above.")
+        .. "The game's own Resolution panel is above.")
 end
 if AudioOptionsFrame then
     addHostHeading(AudioOptionsFrame,
-        "This client's own sound settings. The game's Sound panel above "
-        .. "carries the master, music, ambience and effects volumes.")
+        "This client's own sound settings, under the headings below. "
+        .. "The master, music, ambience and effects volumes are on the Sound page.")
 end
 
 -- Backwards, because a nested category is inserted directly after its parent:

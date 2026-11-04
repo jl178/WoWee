@@ -9,6 +9,10 @@
 //
 //   WOWEE_DEBUG_LUA=/path/to/test.lua       the file to run
 //   WOWEE_DEBUG_LUA_DELAY=12                seconds after world entry (default 10)
+//   WOWEE_AUTO_RELOG=N                      after a logout, log in and enter the
+//                                           world again (up to N times) and run
+//                                           the script again, with the global
+//                                           WoweeDebug_Pass = 2, 3, ...
 //
 // The script gets five extra globals, and only while the variable is set:
 //   WoweeDebug_Log(...)            a line in the log, prefixed [luatest]
@@ -101,6 +105,16 @@ int luaDebugScreenshot(lua_State* L) {
 int luaDebugPadCommand(lua_State* L) {
     const char* command = luaL_checkstring(L, 1);
     const bool down = lua_isnoneornil(L, 2) ? true : lua_toboolean(L, 2) != 0;
+    // Held commands count only while the bindings think the window has the
+    // keyboard (KeybindingManager::isCommandDown), and a client a script
+    // drives in the background loses it whenever another window opens beside
+    // it. Said again on each press, as WoweeDebug_PushKey does.
+    if (down) {
+        SDL_Event focus{};
+        focus.type = SDL_EVENT_WINDOW_FOCUS_GAINED;
+        focus.window.windowID = gWindowId;
+        ui::KeybindingManager::getInstance().processInputEvent(focus);
+    }
     ui::KeybindingManager::getInstance().setVirtualCommand(command, "lua", down);
     return 0;
 }
@@ -260,16 +274,33 @@ int luaDebugQuit(lua_State* L) {
 
 }  // namespace
 
+namespace {
+int gInterfaceLoads = 0;
+bool relogRequested() {
+    const char* v = std::getenv("WOWEE_AUTO_RELOG");
+    return v && *v && std::atoi(v) > 0;
+}
+}  // namespace
+
+void debugLuaHookNoteInterfaceLoaded() { ++gInterfaceLoads; }
+
 void debugLuaHookTick(addons::LuaEngine* engine, SDL_Window* window) {
     if (window) gWindowId = SDL_GetWindowID(window);
     static const char* path = std::getenv("WOWEE_DEBUG_LUA");
     if (!path || !*path || !engine || !engine->getState()) return;
     static bool done = false;
-    if (done || !ui::frameXmlWorldEntered()) return;
-
+    static int pass = 0;
     using Clock = std::chrono::steady_clock;
     static Clock::time_point entered{};
     static bool sawEntry = false;
+    // Under WOWEE_AUTO_RELOG the client logs back in after a logout and
+    // loads a new interface; the script runs again there, as pass 2, 3, ...
+    if (done && pass > 0 && relogRequested() && gInterfaceLoads > pass) {
+        done = false;
+        sawEntry = false;
+    }
+    if (done || !ui::frameXmlWorldEntered()) return;
+
     if (!sawEntry) {
         sawEntry = true;
         entered = Clock::now();
@@ -303,8 +334,13 @@ void debugLuaHookTick(addons::LuaEngine* engine, SDL_Window* window) {
     lua_register(L, "WoweeDebug_UseObject", luaDebugUseObject);
     lua_register(L, "WoweeDebug_RightClickCorpse", luaDebugRightClickCorpse);
     gEngine = engine;
+    ++pass;
+    if (relogRequested()) {
+        lua_pushinteger(L, pass);
+        lua_setglobal(L, "WoweeDebug_Pass");
+    }
 
-    LOG_WARNING("[luatest] running ", path);
+    LOG_WARNING("[luatest] running ", path, " (pass ", pass, ")");
     if (!engine->executeString(ss.str())) {
         LOG_WARNING("[luatest] the script failed to run");
     }
