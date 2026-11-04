@@ -50,7 +50,12 @@ public:
     // ---- Item text (books / readable items) ----
     bool isItemTextOpen() const { return itemTextOpen_; }
     const std::string& getItemText() const { return itemText_; }
+    /// The letter being read, for ItemTextGetCreator. Zero for a book.
+    uint64_t getItemTextGuid() const { return itemTextGuid_; }
     void closeItemText();
+    /// Read a letter copied out of the mail (ITEM_FIELD_FLAGS 0x200) through
+    /// CMSG_ITEM_TEXT_QUERY. False when the item is not one.
+    bool readItemText(uint64_t itemGuid, const ItemQueryResponseData* info);
     void queryItemText(uint64_t itemGuid);
 
     // ---- Trade ----
@@ -207,11 +212,41 @@ public:
     /// raised while the first is up.
     struct PendingEquip {
         bool    active  = false;
-        bool    fromBag = false;
-        int     bag     = 0;
-        int     slot    = 0;
-        uint8_t wireSlot = 0;   ///< what the event carried, for the reply
+        /// Where the item is, in wire numbering (0xFF and an inventory slot,
+        /// or a worn bag's slot and the index in it).
+        uint8_t srcBag  = 0;
+        uint8_t srcSlot = 0;
+        /// A drag onto a named slot (EQUIP_BIND_CONFIRM) rather than a
+        /// right-click (AUTOEQUIP_BIND_CONFIRM): the move to send is the swap.
+        bool    swap    = false;
+        uint8_t dstBag  = 0;
+        uint8_t dstSlot = 0;
     };
+
+    /// Put a carried item on wherever it goes - CMSG_AUTOEQUIP_ITEM from
+    /// (wireBag, wireSlot), or CMSG_SET_AMMO for a projectile, which is never
+    /// moved into a slot at all (Wow.exe 0x6DFC40, AutoEquipCursorItem's
+    /// body). Asks AUTOEQUIP_BIND_CONFIRM first for an unbound bind-on-equip
+    /// item unless `confirmed`.
+    void autoEquipFromWire(uint8_t wireBag, uint8_t wireSlot, bool confirmed = false);
+    /// Move an item between two wire positions, asking EQUIP_BIND_CONFIRM
+    /// first when the move puts an unbound bind-on-equip item into an
+    /// equipment slot (Wow.exe 0x6DF890). True when it was held back for
+    /// the answer rather than sent.
+    bool swapWithBindCheck(uint8_t srcBag, uint8_t srcSlot, uint8_t dstBag, uint8_t dstSlot);
+    /// CMSG_SET_AMMO: load this ammunition, or none (0). The server answers by
+    /// writing PLAYER_AMMO_ID (AzerothCore WorldSession::HandleSetAmmoOpcode).
+    void setAmmo(uint32_t itemId);
+    /// The loaded ammunition's item entry, from PLAYER_AMMO_ID, or 0.
+    uint32_t getAmmoItemId() const;
+    /// Whether an item is ammunition - item class 6, Projectile, which is the
+    /// test Wow.exe makes (0x707220 reads Item.dbc's class) before sending
+    /// CMSG_SET_AMMO instead of an equip.
+    bool isProjectileItem(uint32_t itemId) const;
+    /// The item at a wire position and its guid, from any container this
+    /// client models (backpack, worn bags, equipment, bank, bank bags,
+    /// keyring). False when there is nothing there.
+    bool itemAtWire(uint8_t wireBag, uint8_t wireSlot, ItemDef& out, uint64_t& guid) const;
     // ---- Looting, and the prompt before something binds ----
     //
     // Same shape as the equip prompt above and for the same reason: neither
@@ -692,6 +727,7 @@ private:
     // ---- Item text state ----
     bool        itemTextOpen_   = false;
     std::string itemText_;
+    uint64_t    itemTextGuid_ = 0;
 
     // ---- Trade state ----
     TradeStatus tradeStatus_  = TradeStatus::None;
@@ -792,8 +828,13 @@ private:
         bool              active = false;
         uint64_t          targetItemGuid = 0;
         PendingItemTarget request;
+        /// What answering the prompt confirms: 1 the bind/refund/tradeable
+        /// question, 2 the replace question too.
+        int               nextStage = 2;
     };
     PendingEnchant pendingEnchant_;
+    /// The stage replaceEnchant hands completeItemUseOnItem. Zero otherwise.
+    int confirmStage_ = 0;
     bool pendingLootActive_ = false;
     uint8_t pendingLootSlot_ = 0;
     bool mailboxOpen_ = false;

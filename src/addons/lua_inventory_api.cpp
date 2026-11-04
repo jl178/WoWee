@@ -207,16 +207,17 @@ static int lua_GetContainerItemCooldown(lua_State* L) {
     const int bag = static_cast<int>(luaL_optnumber(L, 1, -1));
     const int slot = static_cast<int>(luaL_optnumber(L, 2, 0));
     double start = 0.0, duration = 0.0;
+    bool enabled = true;
     if (gh && slot >= 1) {
         const auto& inv = gh->getInventory();
         // Through the shared resolver, so the bank and the keyring answer too:
         // BankFrame_UpdateCooldown asks this for every one of its slots.
         const game::ItemSlot* s = containerItemSlot(inv, bag, slot);
-        if (s && !s->empty()) itemUseCooldown(gh, s->item.itemId, start, duration);
+        if (s && !s->empty()) itemUseCooldown(gh, s->item.itemId, start, duration, &enabled);
     }
     lua_pushnumber(L, start);
     lua_pushnumber(L, duration);
-    lua_pushnumber(L, 1);
+    lua_pushnumber(L, enabled ? 1 : 0);
     return 3;
 }
 
@@ -1840,6 +1841,140 @@ static int lua_IsEquippedItem(lua_State* L) {
     return 1;
 }
 
+static uint32_t inspectedItemEntry(game::GameHandler* gh, const std::string& uid, int slotId);
+static void foldSelfUnit(game::GameHandler* gh, std::string& uid);
+
+/// The item an item-API argument names: an id, a link, or the name of
+/// something carried (Wow.exe 0x709DE0 resolves a name from the cache).
+static uint32_t itemArg(game::GameHandler* gh, lua_State* L, int arg) {
+    const uint32_t byId = itemIdFromArg(L, arg);
+    return byId != 0 ? byId : carriedItemMatching(gh, L, arg);
+}
+
+/// The first use-spell of an item (trigger 0 on use, 5 learn), or zero.
+static uint32_t itemUseSpell(const game::ItemQueryResponseData* info) {
+    if (!info || !info->valid) return 0;
+    for (const auto& sp : info->spells)
+        if (sp.spellId != 0 && (sp.spellTrigger == 0 || sp.spellTrigger == 5)) return sp.spellId;
+    return 0;
+}
+
+// GetItemCooldown(item) -> start, duration, enable (Wow.exe 0x510FC0). The
+// same cooldown the bag square draws, asked by item rather than by slot -
+// shared categories included (a mana potion after a healing one).
+static int lua_GetItemCooldown(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    double start = 0.0, duration = 0.0;
+    bool enabled = true;
+    if (const uint32_t id = gh ? itemArg(gh, L, 1) : 0)
+        itemUseCooldown(gh, id, start, duration, &enabled);
+    lua_pushnumber(L, start);
+    lua_pushnumber(L, duration);
+    lua_pushnumber(L, enabled ? 1 : 0);
+    return 3;
+}
+
+// IsUsableItem(item) -> usable, noMana (Wow.exe 0x51C450): something is
+// carried, and the class, race, level, skill and proficiency allow it. The
+// mana half needs the spell's power cost against the player's power, which
+// this does not model; it answers nil there.
+static int lua_IsUsableItem(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const uint32_t id = gh ? itemArg(gh, L, 1) : 0;
+    bool carried = false;
+    if (id != 0) {
+        const auto& inv = gh->getInventory();
+        carried = inv.countItem(id) > 0;
+        for (int i = 0; i < kEquipSlots && !carried; ++i) {
+            const auto& sl = inv.getEquipSlot(static_cast<game::EquipSlot>(i));
+            carried = !sl.empty() && sl.item.itemId == id;
+        }
+        for (int i = 0; i < inv.getKeyringSize() && !carried; ++i)
+            carried = !inv.getKeyringSlot(i).empty() && inv.getKeyringSlot(i).item.itemId == id;
+    }
+    if (!carried || !playerCanUseItem(gh, id)) {
+        lua_pushnil(L);
+        lua_pushnil(L);
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    lua_pushnil(L);
+    return 2;
+}
+
+// IsConsumableItem(item) (Wow.exe 0x5173E0): ammunition and thrown weapons,
+// and anything whose use-spell spends a charge (negative charges on the
+// template: the item goes when they are used up).
+static int lua_IsConsumableItem(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const uint32_t id = gh ? itemArg(gh, L, 1) : 0;
+    const auto* info = id ? gh->getItemInfo(id) : nullptr;
+    bool consumable = false;
+    if (info && info->valid) {
+        consumable = info->inventoryType == game::InvType::AMMO ||
+                     info->inventoryType == game::InvType::THROWN;
+        for (const auto& sp : info->spells)
+            if (sp.spellId != 0 && sp.spellTrigger == 0 && sp.charges < 0) consumable = true;
+    }
+    lua_pushboolean(L, consumable ? 1 : 0);
+    return 1;
+}
+
+// IsCurrentItem(item) (Wow.exe 0x5110D0): its spell is the one being cast, or
+// the one waiting on a target the item's use armed.
+static int lua_IsCurrentItem(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const uint32_t id = gh ? itemArg(gh, L, 1) : 0;
+    const uint32_t spell = id ? itemUseSpell(gh->getItemInfo(id)) : 0;
+    const bool current = id != 0 &&
+        ((spell != 0 && gh->getCurrentCastSpellId() == spell) ||
+         gh->getPendingItemTargetSourceItemId() == id ||
+         gh->getPendingUnitTargetSourceItemId() == id);
+    lua_pushboolean(L, current ? 1 : 0);
+    return 1;
+}
+
+// ItemHasRange(item) / IsItemInRange(item, unit): the range of the item's
+// use-spell, as IsSpellInRange answers it - 1, 0, or nil where there is none.
+static int lua_ItemHasRange(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const uint32_t id = gh ? itemArg(gh, L, 1) : 0;
+    const uint32_t spell = id ? itemUseSpell(gh->getItemInfo(id)) : 0;
+    lua_pushboolean(L, spell != 0 && gh->getSpellData(spell).maxRange > 0.0f ? 1 : 0);
+    return 1;
+}
+
+static int lua_IsItemInRange(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const uint32_t id = gh ? itemArg(gh, L, 1) : 0;
+    const uint32_t spell = id ? itemUseSpell(gh->getItemInfo(id)) : 0;
+    std::string unit = luaL_optstring(L, 2, "target");
+    toLowerInPlace(unit);
+    return pushSpellRangeAnswer(L, gh, spell, gh ? resolveUnitGuid(gh, unit) : 0);
+}
+
+// GetInventoryItemQuality(unit, slot) (Wow.exe 0x5EA040): the worn item's
+// quality, -1 for something with no inventory type, nil for an empty slot.
+static int lua_GetInventoryItemQuality(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    std::string unit = luaL_optstring(L, 1, "player");
+    toLowerInPlace(unit);
+    if (!gh || !lua_isnumber(L, 2)) return luaReturnNil(L);
+    const int slotId = static_cast<int>(lua_tonumber(L, 2));
+    foldSelfUnit(gh, unit);
+    uint32_t id = 0;
+    if (unit == "player") {
+        const game::ItemSlot* sp = inventorySlotItem(gh->getInventory(), slotId);
+        if (sp && !sp->empty()) id = sp->item.itemId;
+    } else {
+        id = inspectedItemEntry(gh, unit, slotId);
+    }
+    const auto* info = id ? gh->getItemInfo(id) : nullptr;
+    if (!info || !info->valid) return luaReturnNil(L);
+    lua_pushnumber(L, info->inventoryType == 0 ? -1 : static_cast<int>(info->quality));
+    return 1;
+}
+
 // UseInventoryItem(slot) - use what is equipped in a slot
 //
 // How a trinket is clicked on the character sheet. The slot numbers are the
@@ -1852,8 +1987,12 @@ static int lua_UseInventoryItem(lua_State* L) {
     // A weapon that is worn is as good a target as one in a bag, and the
     // paperdoll's right-click arrives here.
     if (completedItemTarget(L, gh->getEquipSlotGuid(slotId - 1))) return 0;
+    // The worn item itself (Wow.exe 0x5EA630 -> 0x5E8A60 uses the slot). By
+    // entry, a copy of the same trinket in a bag was found first and used in
+    // its place - a CMSG_USE_ITEM for a trinket that is not worn, which the
+    // server refuses.
     const auto& slot = *inventorySlotItem(gh->getInventory(), slotId);
-    if (!slot.empty()) gh->useItemById(slot.item.itemId, usedOnUnit(L, 2));
+    if (!slot.empty()) gh->useEquippedItem(slotId - 1, false, usedOnUnit(L, 2));
     return 0;
 }
 
@@ -1863,6 +2002,11 @@ static int lua_CloseBankFrame(lua_State* L) {
     if (gh) gh->closeBank();
     return 0;
 }
+
+/// Put a bag item in the auction house's sell box, as a right-click there does
+/// (Wow.exe UseContainerItem 0x5D8650 -> 0x59A280, then NEW_AUCTION_UPDATE).
+/// Defined beside the sell box's state, further down.
+static void putInAuctionSellSlot(game::GameHandler* gh, uint8_t wireBag, uint8_t wireSlot);
 
 // UseContainerItem(bag, slot) - use/equip an item from a bag
 static int lua_UseContainerItem(lua_State* L) {
@@ -1891,7 +2035,13 @@ static int lua_UseContainerItem(lua_State* L) {
     // server silently ignores.
     constexpr uint32_t kItemFlagOpenable = 0x00000004u;
     const auto* info = gh->getItemInfo(itemSlot->item.itemId);
-    const bool readable = info && info->valid && info->pageTextId != 0;
+    // A page id on the template, or ITEM_FIELD_FLAGS 0x200: a letter copied
+    // out of the mail carries its text on the item itself (Wow.exe 0x708C20
+    // tests both before reading, and 0x58A1A0 reads the second through the
+    // item text cache, CMSG_ITEM_TEXT_QUERY).
+    constexpr uint32_t kItemFieldFlagReadable = 0x200u;
+    const bool readable = (info && info->valid && info->pageTextId != 0) ||
+        (gh->getItemFieldFlags(containerSlotGuid(gh, bag, slot)) & kItemFieldFlagReadable) != 0;
     const bool openable = info && info->valid &&
                           ((info->itemFlags & kItemFlagOpenable) != 0 ||
                            info->itemClass == 1);
@@ -1951,6 +2101,26 @@ static int lua_UseContainerItem(lua_State* L) {
 
     if (gh->isGuildBankOpen()) {
         gh->guildBankDepositFromInventory(wireBag, static_cast<uint8_t>(wireSlot));
+        return 0;
+    }
+
+    // The auction house: the item goes in the sell box (0x5D8650 checks the
+    // auction frame after mail and before the guild bank and trade).
+    if (gh->isAuctionHouseOpen()) {
+        putInAuctionSellSlot(gh, wireBag, static_cast<uint8_t>(wireSlot));
+        return 0;
+    }
+
+    // An open trade: the item goes into the first empty slot of the six that
+    // trade (0x5D8650 -> 0x5A56B0 -> 0x5A50C0). This had been left out on the
+    // belief that a right-click never offered an item; the stock client does.
+    if (gh->isTradeOpen()) {
+        const auto& mine = gh->getMyTradeSlots();
+        for (int i = 0; i < game::GameHandler::TRADE_SLOT_COUNT - 1; ++i) {
+            if (mine[static_cast<size_t>(i)].occupied) continue;
+            gh->setTradeItem(static_cast<uint8_t>(i), wireBag, static_cast<uint8_t>(wireSlot));
+            break;
+        }
         return 0;
     }
 
@@ -2543,6 +2713,17 @@ static int lua_GetContainerItemLink(lua_State* L) {
 }
 
 // GetContainerNumFreeSlots(container) → numFreeSlots, bagType
+/// The bag item a container number is: a worn bag (1-4) or a bank bag (5+).
+/// Null for the backpack, the bank's own slots and the keyring.
+static const game::ItemSlot* containerBagItem(const game::Inventory& inv, int container) {
+    if (container >= 1 && container <= game::Inventory::NUM_BAG_SLOTS)
+        return &inv.getEquipSlot(static_cast<game::EquipSlot>(
+            static_cast<int>(game::EquipSlot::BAG1) + container - 1));
+    if (isBankBagContainer(container))
+        return &inv.getBankBagItem(container - kFirstBankBagContainer);
+    return nullptr;
+}
+
 static int lua_GetContainerNumFreeSlots(lua_State* L) {
     auto* gh = getGameHandler(L);
     int container = static_cast<int>(luaL_checknumber(L, 1));
@@ -2559,7 +2740,16 @@ static int lua_GetContainerNumFreeSlots(lua_State* L) {
     }
 
     lua_pushnumber(L, freeSlots);
-    lua_pushnumber(L, 0);  // bagType (0 = normal)
+    // bagType: the bag's BagFamily - 1 arrows (a quiver), 2 bullets (an ammo
+    // pouch), 8 leatherworking and so on; 0 for an ordinary bag. The bag
+    // bar's free-slot count adds only family 0 (MainMenuBarBackpackButton_
+    // UpdateFreeSlots), so a quiver's empty slots were counted as room.
+    uint32_t family = 0;
+    if (const game::ItemSlot* bagItem = containerBagItem(inv, container);
+        bagItem && !bagItem->empty()) {
+        if (const auto* info = gh->getItemInfo(bagItem->item.itemId)) family = info->bagFamily;
+    }
+    lua_pushnumber(L, family);
     return 2;
 }
 
@@ -2665,6 +2855,11 @@ static AuctionSellSlot& auctionSellSlot() { static AuctionSellSlot s; return s; 
 /// nil as zero.
 static void fireAuctionSellUpdate(game::GameHandler* gh) {
     if (gh) gh->fireAddonEvent("NEW_AUCTION_UPDATE", {});
+}
+
+static void putInAuctionSellSlot(game::GameHandler* gh, uint8_t wireBag, uint8_t wireSlot) {
+    auctionSellSlot() = AuctionSellSlot{.held = true, .bag = wireBag, .slot = wireSlot};
+    fireAuctionSellUpdate(gh);
 }
 
 /// The item a wire (container, slot) pair names, and its guid. Null when the
@@ -2919,11 +3114,17 @@ static int lua_GetBagName(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int bag = static_cast<int>(luaL_optnumber(L, 1, 0));
     if (bag == 0) { lua_pushstring(L, "Backpack"); return 1; }
-    if (!gh || bag < 1 || bag > 4) { return luaReturnNil(L); }
-    // An empty bag slot has no size, which is how the interface knows not to
+    if (!gh) { return luaReturnNil(L); }
+    // The bag's own name - "Light Quiver", "Small Brown Pouch" - as the stock
+    // client answers and the bag frame's title shows; it said "Bag" for every
+    // one. Nil for an empty bag slot, which is how the interface knows not to
     // draw a bag there at all.
-    if (gh->getInventory().getBagSize(bag - 1) == 0) { return luaReturnNil(L); }
-    lua_pushstring(L, "Bag");
+    const game::ItemSlot* bagItem = containerBagItem(gh->getInventory(), bag);
+    if (!bagItem || bagItem->empty()) { return luaReturnNil(L); }
+    const auto* info = gh->getItemInfo(bagItem->item.itemId);
+    const std::string name = info && !info->name.empty() ? info->name : bagItem->item.name;
+    if (name.empty()) { return luaReturnNil(L); }
+    lua_pushstring(L, name.c_str());
     return 1;
 }
 
@@ -3917,8 +4118,34 @@ void registerInventoryLuaAPI(lua_State* L) {
             if (auto* gh = getGameHandler(L)) gh->confirmBindOnUse();
             return 0;
         }},
+                // EndRefund(kind) / EndBoundTradeable(kind): the Okay on "this
+                // will make the item non-refundable / no longer tradeable"
+                // (Wow.exe 0x523370, 0x5233D0). Kind 1 / "itemenchant" is an
+                // enchant waiting on that answer, which goes on to the same
+                // place the bind and replace answers do. Missing, so the popup
+                // raised on its own Okay.
+                {"EndRefund", [](lua_State* L) -> int {
+            if (static_cast<int>(luaL_optnumber(L, 1, 0)) == 1)
+                if (auto* gh = getGameHandler(L)) gh->replaceEnchant();
+            return 0;
+        }},
+                {"EndBoundTradeable", [](lua_State* L) -> int {
+            const char* kind = luaL_optstring(L, 1, "");
+            if (std::string_view(kind) == "itemenchant")
+                if (auto* gh = getGameHandler(L)) gh->replaceEnchant();
+            return 0;
+        }},
+                // TRADE_REPLACE_ENCHANT's Okay: enchanting the item in the
+                // trade window's "will not be traded" slot over an existing
+                // enchant. That trade-slot enchant is not modelled here, so
+                // nothing raises the popup; defined so its button cannot raise.
+                {"ReplaceTradeEnchant", [](lua_State* L) -> int { (void)L; return 0; }},
                 {"EquipPendingItem", [](lua_State* L) -> int {
             if (auto* gh = getGameHandler(L)) gh->equipPendingItem();
+            // A drag held for EQUIP_BIND_CONFIRM kept its item on the cursor;
+            // the move is sent now, so it is put down (Wow.exe 0x6DF890 ends
+            // the confirmed swap with ClearCursor).
+            if (cursorItemId() != 0) clearCursor(L);
             return 0;
         }},
                 {"CancelPendingEquip", [](lua_State* L) -> int {
@@ -3953,6 +4180,13 @@ void registerInventoryLuaAPI(lua_State* L) {
                 {"EquipItemByName",     lua_EquipItemByName},
                 {"IsEquippableItem",    lua_IsEquippableItem},
                 {"IsEquippedItem",      lua_IsEquippedItem},
+                {"GetItemCooldown",     lua_GetItemCooldown},
+                {"IsUsableItem",        lua_IsUsableItem},
+                {"IsConsumableItem",    lua_IsConsumableItem},
+                {"IsCurrentItem",       lua_IsCurrentItem},
+                {"ItemHasRange",        lua_ItemHasRange},
+                {"IsItemInRange",       lua_IsItemInRange},
+                {"GetInventoryItemQuality", lua_GetInventoryItemQuality},
                 {"GetInventoryItemsForSlot", lua_GetInventoryItemsForSlot},
                 {"GetNumEquipmentSets", lua_GetNumEquipmentSets},
                 {"GetEquipmentSetInfo", lua_GetEquipmentSetInfo},

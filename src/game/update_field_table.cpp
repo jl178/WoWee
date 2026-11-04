@@ -119,6 +119,7 @@ static const UFNameEntry kUFNames[] = {
     {.name = "PLAYER_FIELD_ARENA_TEAM_INFO_1_1", .field = UF::PLAYER_FIELD_ARENA_TEAM_INFO_1_1},
     {.name = "PLAYER_FIELD_GLYPH_SLOTS_1", .field = UF::PLAYER_FIELD_GLYPH_SLOTS_1},
     {.name = "PLAYER_GLYPHS_ENABLED", .field = UF::PLAYER_GLYPHS_ENABLED},
+    {.name = "PLAYER_AMMO_ID", .field = UF::PLAYER_AMMO_ID},
     {.name = "CONTAINER_FIELD_NUM_SLOTS", .field = UF::CONTAINER_FIELD_NUM_SLOTS},
     {.name = "CONTAINER_FIELD_SLOT_1", .field = UF::CONTAINER_FIELD_SLOT_1},
     {.name = "CORPSE_FIELD_DISPLAY_ID", .field = UF::CORPSE_FIELD_DISPLAY_ID},

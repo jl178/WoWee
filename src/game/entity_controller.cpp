@@ -753,7 +753,8 @@ EntityController::PlayerFieldIndices EntityController::PlayerFieldIndices::resol
         .manaRegenCasting = fieldIndex(UF::UNIT_FIELD_POWER_REGEN_INTERRUPTED_FLAT_MODIFIER),
         .baseAttackTime = fieldIndex(UF::UNIT_FIELD_BASEATTACKTIME),
         .minDamage = fieldIndex(UF::UNIT_FIELD_MINDAMAGE),
-        .minRangedDamage = fieldIndex(UF::UNIT_FIELD_MINRANGEDDAMAGE)
+        .minRangedDamage = fieldIndex(UF::UNIT_FIELD_MINRANGEDDAMAGE),
+        .ammoId = fieldIndex(UF::PLAYER_AMMO_ID)
     };
 }
 
@@ -1575,6 +1576,16 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
                 if (owner_.playerModelRebuildCallbackRef())
                     owner_.playerModelRebuildCallbackRef()();
             }
+        }
+        else if (pfi.ammoId != 0xFFFF && key == pfi.ammoId) {
+            // The ammo slot is drawn from this field and nothing else, and the
+            // paperdoll redraws it on UNIT_INVENTORY_CHANGED for the player
+            // (PaperDollItemSlotButton_OnEvent).
+            if (!isCreate) {
+                owner_.rebuildOnlineInventory();
+                pendingEvents_.emit("UNIT_INVENTORY_CHANGED", {"player"});
+            }
+            LOG_INFO("PLAYER_AMMO_ID ", isCreate ? "from create: " : "updated: ", val);
         }
         else if (pfi.chosenTitle != 0xFFFF && key == pfi.chosenTitle) {
             owner_.chosenTitleBitRef() = static_cast<int32_t>(val);

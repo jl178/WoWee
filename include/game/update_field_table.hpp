@@ -124,6 +124,13 @@ enum class UF : uint16_t {
     PLAYER_FIELD_GLYPH_SLOTS_1,
     PLAYER_GLYPHS_ENABLED,
 
+    // The ammunition loaded for the ranged weapon: an item entry, not a guid.
+    // Ammo is never moved into an equipment slot; CMSG_SET_AMMO names the
+    // entry and the server writes it here (AzerothCore Player::SetAmmo).
+    // Wow.exe reads it at player descriptor +0x1068 (0x5E8300), UNIT_END +
+    // 0x041A in AzerothCore's UpdateFields.h.
+    PLAYER_AMMO_ID,
+
     // The player's active non-combat companion, as a 64-bit guid (low word at
     // this index, high word at the next). WotLK only - no earlier expansion
     // published it, and none has CMSG_DISMISS_CRITTER to act on it either.

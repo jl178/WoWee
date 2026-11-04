@@ -1979,6 +1979,14 @@ struct ItemQueryResponseData {
     struct ItemSpell {
         uint32_t spellId = 0;
         uint32_t spellTrigger = 0; // 0=Use, 1=Equip, 2=ChanceOnHit, 5=Learn
+        /// The template's own cooldowns for this spell. -1 means "the
+        /// spell's", which is what AzerothCore's AddSpellAndCategoryCooldowns
+        /// falls back to when both are negative; a potion's two minutes live
+        /// here and not in Spell.dbc (which says ten seconds for 439).
+        int32_t charges = 0;
+        int32_t cooldownMs = -1;
+        uint32_t category = 0;
+        int32_t categoryCooldownMs = -1;
     };
     std::array<ItemSpell, 5> spells{};
     uint32_t bindType = 0;      // 0=none, 1=BoP, 2=BoE, 3=BoU, 4=BoQ

@@ -272,6 +272,15 @@ public:
     [[nodiscard]] const ItemSlot& getEquipSlot(EquipSlot slot) const;
     bool setEquipSlot(EquipSlot slot, const ItemDef& item);
 
+    // The ammo slot. Not a place an item is ever moved to - ammunition stays in
+    // the bags and PLAYER_AMMO_ID names which of it is loaded - but the
+    // interface draws it as inventory slot 0 (INVSLOT_AMMO), so the model
+    // keeps a picture of it: the loaded entry, with the count carried in the
+    // bags as its stack (GetInventoryItemCount(0) is that total, Wow.exe
+    // 0x5E9E40). Empty when nothing is loaded.
+    [[nodiscard]] const ItemSlot& getAmmoSlot() const { return ammo_; }
+    void setAmmoSlot(const ItemDef& item) { ammo_.item = item; }
+
     // Keyring
     [[nodiscard]] const ItemSlot& getKeyringSlot(int index) const;
     bool setKeyringSlot(int index, const ItemDef& item);
@@ -382,6 +391,7 @@ public:
 private:
     std::array<ItemSlot, BACKPACK_SLOTS> backpack{};
     std::array<ItemSlot, KEYRING_SLOTS> keyring_{};
+    ItemSlot ammo_{};
     std::array<ItemSlot, NUM_EQUIP_SLOTS> equipment{};
 
     struct BagData {

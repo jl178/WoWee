@@ -1955,56 +1955,161 @@ void InventoryHandler::equipItemToSlot(uint64_t itemGuid, uint8_t equipSlot) {
     owner_.getSocket()->send(pkt);
 }
 
-void InventoryHandler::autoEquipItemBySlot(int backpackIndex, bool confirmed) {
-    if (backpackIndex < 0 || backpackIndex >= owner_.inventoryRef().getBackpackSize()) return;
-    const auto& slot = owner_.inventoryRef().getBackpackSlot(backpackIndex);
-    if (slot.empty()) return;
+bool InventoryHandler::isProjectileItem(uint32_t itemId) const {
+    const auto* info = itemId ? owner_.getItemInfo(itemId) : nullptr;
+    return info && info->valid && info->itemClass == ITEM_CLASS_PROJECTILE;
+}
 
-    const uint8_t wireSlot = static_cast<uint8_t>(Inventory::NUM_EQUIP_SLOTS + backpackIndex);
-    if (!confirmed && slot.item.wouldBindOnEquip()) {
-        pendingEquip_ = PendingEquip{.active = true, .fromBag = false, .bag = 0, .slot = backpackIndex, .wireSlot = wireSlot};
+uint32_t InventoryHandler::getAmmoItemId() const {
+    return owner_.getAmmoItemId();
+}
+
+// CMSG_SET_AMMO is the item entry and nothing else: ammunition stays in the
+// bags (a quiver or an ammo pouch, usually) and PLAYER_AMMO_ID names which of
+// it the ranged weapon shoots. Wowee never sent it, so a hunter could not
+// load arrows at all - not by dragging them to the ammo slot, not by
+// right-clicking them. Wow.exe sends it from three places: PickupInventoryItem
+// on the ammo slot (0x5E85D0), AutoEquipCursorItem (0x6DFC40) and, through
+// the latter, UseContainerItem on a projectile (0x6DFEE0).
+void InventoryHandler::setAmmo(uint32_t itemId) {
+    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
+    const uint32_t wire = wireOpcode(Opcode::CMSG_SET_AMMO);
+    if (wire == 0xFFFF) return;
+    network::Packet pkt(static_cast<uint16_t>(wire));
+    pkt.writeUInt32(itemId);
+    owner_.getSocket()->send(pkt);
+    LOG_INFO("Sending CMSG_SET_AMMO item=", itemId);
+}
+
+bool InventoryHandler::itemAtWire(uint8_t wireBag, uint8_t wireSlot, ItemDef& out,
+                                  uint64_t& guid) const {
+    const auto& inv = owner_.inventoryRef();
+    const ItemSlot* sl = nullptr;
+    guid = 0;
+    const int slot = wireSlot;
+    if (wireBag == slots::kNoContainer) {
+        const slots::BankLayout bank = slots::bankLayout();
+        if (slot < Inventory::NUM_EQUIP_SLOTS) {
+            sl = &inv.getEquipSlot(static_cast<EquipSlot>(slot));
+            guid = owner_.equipSlotGuidsRef()[static_cast<size_t>(slot)];
+        } else if (slot < slots::kBackpackFirst + inv.getBackpackSize()) {
+            const int i = slot - slots::kBackpackFirst;
+            sl = &inv.getBackpackSlot(i);
+            guid = owner_.backpackSlotGuidsRef()[static_cast<size_t>(i)];
+        } else if (slot >= slots::kBankGeneralFirst &&
+                   slot < slots::kBankGeneralFirst + bank.generalCount) {
+            sl = &inv.getBankSlot(slot - slots::kBankGeneralFirst);
+        } else if (slot >= bank.bagFirst && slot < bank.bagFirst + bank.bagCount) {
+            sl = &inv.getBankBagItem(slot - bank.bagFirst);
+        } else if (slot >= bank.keyringFirst && slot < bank.keyringFirst + inv.getKeyringSize()) {
+            sl = &inv.getKeyringSlot(slot - bank.keyringFirst);
+        }
+    } else if (wireBag >= slots::kWornBagFirst &&
+               wireBag < slots::kWornBagFirst + Inventory::NUM_BAG_SLOTS) {
+        const int b = wireBag - slots::kWornBagFirst;
+        if (slot < inv.getBagSize(b)) {
+            sl = &inv.getBagSlot(b, slot);
+            guid = owner_.getBagItemGuid(b, slot);
+        }
+    } else {
+        const slots::BankLayout bank = slots::bankLayout();
+        const int b = static_cast<int>(wireBag) - bank.bagFirst;
+        if (b >= 0 && b < bank.bagCount && slot < inv.getBankBagSize(b))
+            sl = &inv.getBankBagSlot(b, slot);
+    }
+    if (!sl || sl->empty()) return false;
+    out = sl->item;
+    if (guid == 0) guid = sl->item.guid;
+    if (guid == 0) guid = owner_.resolveOnlineItemGuid(sl->item.itemId);
+    return true;
+}
+
+// The body of AutoEquipCursorItem (Wow.exe 0x6DFC40), which UseContainerItem
+// reaches for anything with an InventoryType (0x5D8650 -> 0x6DFEE0): a
+// projectile is loaded with CMSG_SET_AMMO, an unbound bind-on-equip item asks
+// AUTOEQUIP_BIND_CONFIRM first, and everything else is CMSG_AUTOEQUIP_ITEM
+// naming where the item is. The server picks the slot - the empty ring or
+// trinket slot before the first, the off hand emptied for a two-hander
+// (AzerothCore Player::FindEquipSlot / HandleAutoEquipItemOpcode).
+void InventoryHandler::autoEquipFromWire(uint8_t wireBag, uint8_t wireSlot, bool confirmed) {
+    ItemDef item;
+    uint64_t guid = 0;
+    if (!itemAtWire(wireBag, wireSlot, item, guid)) return;
+
+    if (isProjectileItem(item.itemId)) {
+        setAmmo(item.itemId);
+        return;
+    }
+
+    const bool unbound = guid != 0 ? !owner_.isItemSoulbound(guid) : !item.soulbound;
+    const auto* info = owner_.getItemInfo(item.itemId);
+    const uint32_t bindType = (info && info->valid) ? info->bindType : item.bindType;
+    if (!confirmed && bindType == 2 && unbound) {
+        pendingEquip_ = PendingEquip{.active = true, .srcBag = wireBag, .srcSlot = wireSlot};
         // The auto-equip form of the prompt: right-clicking an item rather
         // than dropping it on a slot. FrameXML hides whichever of the two is
         // already up before showing the other, so firing the wrong one leaves
         // both on screen.
         if (owner_.addonEventCallbackRef())
-            owner_.addonEventCallbackRef()("AUTOEQUIP_BIND_CONFIRM",
-                                           {std::to_string(wireSlot)});
+            owner_.addonEventCallbackRef()("AUTOEQUIP_BIND_CONFIRM", {std::to_string(wireSlot)});
         return;
     }
 
     if (owner_.getState() == WorldState::IN_WORLD && owner_.getSocket()) {
-        auto packet = AutoEquipItemPacket::build(0xFF, wireSlot);
+        auto packet = AutoEquipItemPacket::build(wireBag, wireSlot);
         owner_.getSocket()->send(packet);
     }
+}
+
+bool InventoryHandler::swapWithBindCheck(uint8_t srcBag, uint8_t srcSlot,
+                                         uint8_t dstBag, uint8_t dstSlot) {
+    // Which of the two items lands in an equipment slot: the one moving there,
+    // or - dragging a worn item onto a bag square - the one it is swapped
+    // with (Wow.exe 0x6DF890 tests both directions).
+    auto isEquipPos = [](uint8_t bag, uint8_t slot) {
+        return bag == slots::kNoContainer && slot < slots::kWornBagFirst;
+    };
+    auto wouldBind = [&](uint8_t bag, uint8_t slot) {
+        ItemDef item;
+        uint64_t guid = 0;
+        if (!itemAtWire(bag, slot, item, guid)) return false;
+        const auto* info = owner_.getItemInfo(item.itemId);
+        const uint32_t bindType = (info && info->valid) ? info->bindType : item.bindType;
+        const bool unbound = guid != 0 ? !owner_.isItemSoulbound(guid) : !item.soulbound;
+        return bindType == 2 && unbound;
+    };
+    const bool asks = (isEquipPos(dstBag, dstSlot) && wouldBind(srcBag, srcSlot)) ||
+                      (isEquipPos(srcBag, srcSlot) && wouldBind(dstBag, dstSlot));
+    if (asks) {
+        pendingEquip_ = PendingEquip{.active = true, .srcBag = srcBag, .srcSlot = srcSlot,
+                                     .swap = true, .dstBag = dstBag, .dstSlot = dstSlot};
+        if (owner_.addonEventCallbackRef())
+            owner_.addonEventCallbackRef()("EQUIP_BIND_CONFIRM", {std::to_string(dstSlot)});
+        return true;
+    }
+    swapContainerItems(srcBag, srcSlot, dstBag, dstSlot);
+    return false;
+}
+
+void InventoryHandler::autoEquipItemBySlot(int backpackIndex, bool confirmed) {
+    if (backpackIndex < 0 || backpackIndex >= owner_.inventoryRef().getBackpackSize()) return;
+    autoEquipFromWire(slots::kNoContainer,
+                      static_cast<uint8_t>(slots::backpackWireSlot(backpackIndex)), confirmed);
 }
 
 void InventoryHandler::autoEquipItemInBag(int bagIndex, int slotIndex, bool confirmed) {
     if (bagIndex < 0 || bagIndex >= owner_.inventoryRef().NUM_BAG_SLOTS) return;
     if (slotIndex < 0 || slotIndex >= owner_.inventoryRef().getBagSize(bagIndex)) return;
-
-    if (!confirmed && equipWouldBindFromBag(bagIndex, slotIndex)) {
-        pendingEquip_ = PendingEquip{.active = true, .fromBag = true, .bag = bagIndex, .slot = slotIndex,
-                                     .wireSlot = static_cast<uint8_t>(slotIndex)};
-        if (owner_.addonEventCallbackRef())
-            owner_.addonEventCallbackRef()("AUTOEQUIP_BIND_CONFIRM",
-                                           {std::to_string(slotIndex)});
-        return;
-    }
-
-    if (owner_.getState() == WorldState::IN_WORLD && owner_.getSocket()) {
-        auto packet = AutoEquipItemPacket::build(
-            static_cast<uint8_t>(Inventory::FIRST_BAG_EQUIP_SLOT + bagIndex), static_cast<uint8_t>(slotIndex));
-        owner_.getSocket()->send(packet);
-    }
+    autoEquipFromWire(static_cast<uint8_t>(slots::wornBagContainer(bagIndex)),
+                      static_cast<uint8_t>(slotIndex), confirmed);
 }
 
 void InventoryHandler::equipPendingItem() {
     const PendingEquip pending = pendingEquip_;
     pendingEquip_ = PendingEquip{};
     if (!pending.active) return;
-    if (pending.fromBag) autoEquipItemInBag(pending.bag, pending.slot, true);
-    else                 autoEquipItemBySlot(pending.slot, true);
+    if (pending.swap) swapContainerItems(pending.srcBag, pending.srcSlot, pending.dstBag, pending.dstSlot);
+    else              autoEquipFromWire(pending.srcBag, pending.srcSlot, true);
 }
 
 void InventoryHandler::cancelPendingEquip() {
@@ -2226,12 +2331,16 @@ void InventoryHandler::replaceEnchant() {
     pendingEnchant_ = PendingEnchant{};
     if (!pending.active) return;
     // Put the request back only to answer it, so a refusal leaves nothing
-    // waiting for a target.
+    // waiting for a target. At the stage the answer reached: a bind answer
+    // still meets the replace question.
     pendingItemTarget_ = pending.request;
-    completeItemUseOnItem(pending.targetItemGuid, true);
+    confirmStage_ = pending.nextStage;
+    completeItemUseOnItem(pending.targetItemGuid, pending.nextStage >= 2);
 }
 
 void InventoryHandler::completeItemUseOnItem(uint64_t targetItemGuid, bool confirmed) {
+    const int stageIn = confirmStage_;
+    confirmStage_ = 0;
     if (!isAwaitingItemTarget()) return;
     const PendingItemTarget pending = *pendingItemTarget_;
 
@@ -2305,35 +2414,69 @@ void InventoryHandler::completeItemUseOnItem(uint64_t targetItemGuid, bool confi
     // warned about, because the temporary slot is minutes of a stone rather
     // than an enchanter, and naming a permanent enchant that is not being
     // replaced would be a warning about the wrong thing.
-    if (!confirmed && !destroysTarget) {
-        // Enchanting an unbound item binds it. Same family as the equip, use
-        // and loot warnings, and the one of the five that was missed: the
-        // interface has raised BIND_ENCHANT for it all along and nothing ever
-        // fired it.
+    // The enchanting questions, in Wow.exe's order (0x5210D0, SpellTargetItem's
+    // body), for each ENCHANT_ITEM (53), ENCHANT_ITEM_TEMPORARY (54) or
+    // ENCHANT_ITEM_PRISMATIC (156) effect of the spell:
+    //   - BIND_ENCHANT when the enchantment binds (SpellItemEnchantment Flags
+    //     bit 0) and the item is equipment not yet bound. Not every BoE item:
+    //     a sharpening stone on an unbound sword binds nothing;
+    //   - END_REFUND for a refundable item, END_BOUND_TRADEABLE("itemenchant")
+    //     for a bound one still tradeable - a permanent enchant ends both;
+    //   - REPLACE_ENCHANT when the slot the effect writes already holds one,
+    //     naming the old enchantment and the new. The temporary slot too: a
+    //     poison over a poison asks, as a rogue knows.
+    // Each answer (BindEnchant, EndRefund, EndBoundTradeable, ReplaceEnchant)
+    // comes back through replaceEnchant at the next stage, so a bind answer
+    // can still meet the replace question - the stock client asks both.
+    const int stage = confirmed ? 2 : stageIn;
+    if (stage < 2 && !destroysTarget) {
         const uint32_t targetEntry = owner_.getItemEntryByGuid(targetItemGuid);
         const auto* targetInfo = targetEntry ? owner_.getItemInfo(targetEntry) : nullptr;
-        if (targetInfo && targetInfo->bindType == 2 &&
-            !owner_.isItemSoulbound(targetItemGuid)) {
+        const auto& cache = owner_.spellNameCacheRef();
+        auto sit = cache.find(pending.spellId);
+        auto park = [&](int nextStage, const char* event, std::vector<std::string> args) {
             pendingItemTarget_.reset();
-            pendingEnchant_ = PendingEnchant{.active = true, .targetItemGuid = targetItemGuid, .request = pending};
-            if (owner_.addonEventCallbackRef())
-                owner_.addonEventCallbackRef()("BIND_ENCHANT", {});
-            return;
-        }
-
-        const auto enchants = owner_.getItemEnchantIds(targetItemGuid);
-        if (enchants.first != 0) {
-            // Taken out of the parked slot entirely: see PendingEnchant.
-            pendingItemTarget_.reset();
-            pendingEnchant_ = PendingEnchant{.active = true, .targetItemGuid = targetItemGuid, .request = pending};
-            const std::string existing = owner_.getEnchantName(enchants.first);
-            if (owner_.addonEventCallbackRef()) {
-                owner_.addonEventCallbackRef()(
-                    "REPLACE_ENCHANT",
-                    {existing.empty() ? std::string("an enchantment") : existing,
-                     pending.itemName});
+            pendingEnchant_ = PendingEnchant{.active = true, .targetItemGuid = targetItemGuid,
+                                             .request = pending, .nextStage = nextStage};
+            if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()(event, args);
+        };
+        constexpr uint32_t kEffectEnchantItem = 53, kEffectEnchantTemp = 54,
+                           kEffectEnchantPrismatic = 156;
+        constexpr uint32_t kFieldFlagBopTradeable = 0x100, kFieldFlagRefundable = 0x1000;
+        const uint32_t fieldFlags = owner_.getItemFieldFlags(targetItemGuid);
+        const bool bound = owner_.isItemSoulbound(targetItemGuid);
+        for (int e = 0; sit != cache.end() && e < 3; ++e) {
+            const uint32_t effect = sit->second.effectIds[e];
+            if (effect != kEffectEnchantItem && effect != kEffectEnchantTemp &&
+                effect != kEffectEnchantPrismatic) continue;
+            const uint32_t enchantId = static_cast<uint32_t>(sit->second.effectMiscValues[e]);
+            const bool binds = (owner_.getEnchantFlags(enchantId) & 1u) != 0;
+            if (stage < 1) {
+                if (binds && !bound && targetInfo && targetInfo->inventoryType != 0) {
+                    park(1, "BIND_ENCHANT", {});
+                    return;
+                }
+                if (effect != kEffectEnchantTemp && (fieldFlags & kFieldFlagRefundable)) {
+                    park(1, "END_REFUND", {"1"});
+                    return;
+                }
+                if (bound && (fieldFlags & kFieldFlagBopTradeable) &&
+                    !(effect == kEffectEnchantTemp && !binds)) {
+                    park(1, "END_BOUND_TRADEABLE", {"itemenchant"});
+                    return;
+                }
             }
-            return;
+            const auto enchants = owner_.getItemEnchantIds(targetItemGuid);
+            const uint32_t existing = effect == kEffectEnchantItem ? enchants.first : enchants.second;
+            if (existing != 0 && enchantId != 0) {
+                const std::string oldName = owner_.getEnchantName(existing);
+                const std::string newName = owner_.getEnchantName(enchantId);
+                park(2, "REPLACE_ENCHANT",
+                     {oldName.empty() ? std::string("an enchantment") : oldName,
+                      newName.empty() ? pending.itemName : newName});
+                return;
+            }
+            break;
         }
     }
 
@@ -2515,6 +2658,10 @@ void InventoryHandler::readItemBySlot(int backpackIndex) {
 
     const auto* info = owner_.getItemInfo(slot.item.itemId);
     uint32_t pageTextId = info ? info->pageTextId : slot.item.pageTextId;
+    {
+        uint64_t guid = owner_.backpackSlotGuidsRef()[backpackIndex];
+        if (pageTextId == 0 && readItemText(guid, info)) return;
+    }
     if (pageTextId == 0) {
         // Said rather than shrugged off. This is the first of four places a
         // read can end with nothing on screen, and the reader is left looking
@@ -2551,6 +2698,7 @@ void InventoryHandler::readItemInBag(int bagIndex, int slotIndex) {
 
     const auto* info = owner_.getItemInfo(slot.item.itemId);
     uint32_t pageTextId = info ? info->pageTextId : slot.item.pageTextId;
+    if (pageTextId == 0 && readItemText(owner_.getBagItemGuid(bagIndex, slotIndex), info)) return;
     if (pageTextId == 0) {
         LOG_WARNING("readItemInBag: no page text for item ", slot.item.itemId,
                     " (info ", info ? "cached" : "not yet queried",
@@ -4352,6 +4500,22 @@ void InventoryHandler::sendNextAuctionPost() {
 // Item Text
 // ============================================================
 
+// A letter copied out of the mail: no page on its template, its words on the
+// item (ITEM_FIELD_FLAGS 0x200, set by AzerothCore's HandleMailCreateTextItem).
+// Wow.exe 0x58A1A0 reads those through the item text cache - CMSG_ITEM_TEXT_
+// QUERY with the item's guid - and sends no CMSG_READ_ITEM for it.
+bool InventoryHandler::readItemText(uint64_t itemGuid, const ItemQueryResponseData* info) {
+    constexpr uint32_t kItemFieldFlagReadable = 0x200u;
+    if (itemGuid == 0 || (owner_.getItemFieldFlags(itemGuid) & kItemFieldFlagReadable) == 0)
+        return false;
+    owner_.bookPagesRef().clear();
+    owner_.setBookTitle(info ? info->name : std::string());
+    owner_.setBookMaterial(info ? info->pageMaterial : 0u);
+    itemTextGuid_ = itemGuid;
+    queryItemText(itemGuid);
+    return true;
+}
+
 void InventoryHandler::queryItemText(uint64_t itemGuid) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     network::Packet pkt(wireOpcode(Opcode::CMSG_ITEM_TEXT_QUERY));
@@ -4365,8 +4529,14 @@ void InventoryHandler::queryItemText(uint64_t itemGuid) {
 }
 
 void InventoryHandler::closeItemText() {
-    if (!itemTextOpen_) return;
+    itemTextGuid_ = 0;
+    // A book is open too while its pages are held - those come by page text
+    // and never set itemTextOpen_, so CloseItemText on a book announced
+    // nothing and the frame stayed up (stock fires ITEM_TEXT_CLOSED for both).
+    if (!itemTextOpen_ && owner_.bookPagesRef().empty()) return;
     itemTextOpen_ = false;
+    // Before the event, so the OnHide that answers it finds nothing open.
+    owner_.bookPagesRef().clear();
     // Announced so the interface's window closes with this client's own. Only
     // when it was open: the frame calls this from OnHide as well as from its
     // close button, and firing on an already-closed book would bounce.
@@ -4374,7 +4544,14 @@ void InventoryHandler::closeItemText() {
 }
 
 void InventoryHandler::handleItemTextQueryResponse(network::Packet& packet) {
+    // uint8 0 then the item's guid and the text, or uint8 1 alone when the
+    // server has no such item (AzerothCore WorldSession::HandleItemTextQuery).
+    // This read the whole body as one string, so the leading zero ended it at
+    // once and every letter opened blank.
     if (!packet.hasRemaining(1)) return;
+    const uint8_t missing = packet.readUInt8();
+    if (missing != 0 || !packet.hasRemaining(8)) return;
+    /*itemGuid*/ packet.readUInt64();
     std::string text = packet.readString();
     if (!text.empty()) {
         itemText_ = std::move(text);
@@ -6025,6 +6202,15 @@ void InventoryHandler::rebuildOnlineInventory() {
         }
     }
     owner_.reconcileQuestItemObjectives(carriedCounts);
+    // The ammo slot's picture, from PLAYER_AMMO_ID and what the bags hold of
+    // it - after the bags, because the count is theirs.
+    // None left in the bags draws the slot empty, as Wow.exe's
+    // GetInventoryItemTexture does for a count of zero (0x5E9BC0).
+    if (const uint32_t ammoId = getAmmoItemId()) {
+        if (const uint32_t carried = inv.countItem(ammoId)) {
+            owner_.inventoryRef().setAmmoSlot(buildItemDef(ammoId, carried, 0, 0, 0, 0, 0, 0));
+        }
+    }
     // Last, with the slots holding what they now hold.
     fireBankSlotEvents();
 }

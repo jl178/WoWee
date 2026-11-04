@@ -4363,11 +4363,16 @@ void registerQuestLuaAPI(lua_State* L) {
             lua_pushstring(L, title.c_str());
             return 1;
         }},
-                // A page really has no author on this wire -
-                // SMSG_ITEM_TEXT_QUERY_RESPONSE is an id and the words - and
-                // the frame drops the "from" line on a nil, which is honest
-                // where an invented name would not be.
-                {"ItemTextGetCreator",  [](lua_State* L) -> int { return luaReturnNil(L); }},
+                // A book has no author; a letter copied out of the mail has
+                // its sender as the item's creator (ITEM_FIELD_CREATOR), which
+                // itemtextframe.lua prints as "From <name>". Nil drops the line.
+                {"ItemTextGetCreator",  [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            const std::string who = gh ? gh->getItemTextCreator() : std::string();
+            if (who.empty()) return luaReturnNil(L);
+            lua_pushstring(L, who.c_str());
+            return 1;
+        }},
                 // The material is carried, and the claim that it was not stood
                 // beside the line discarding it: the item query's four
                 // post-description words are PageText, LanguageID,

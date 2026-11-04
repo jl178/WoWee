@@ -781,6 +781,8 @@ inline const game::ItemSlot* containerItemSlot(const game::Inventory& inv,
 /// ids land at 40 and up - so every one of them read empty while
 /// inventory_handler filled bankSlots_ from the update fields.
 inline const game::ItemSlot* inventorySlotItem(const game::Inventory& inv, int slotId) {
+    // INVSLOT_AMMO: the loaded ammunition, which is not in any slot of its own.
+    if (slotId == 0) return &inv.getAmmoSlot();
     const int wire = game::slots::toWireSlot(slotId);
     if (slotId >= 1 && slotId <= static_cast<int>(game::EquipSlot::NUM_SLOTS)) {
         return &inv.getEquipSlot(static_cast<game::EquipSlot>(slotId - 1));
@@ -977,12 +979,23 @@ inline bool playerCanUseItem(game::GameHandler* gh, uint32_t itemId) {
 ///
 /// False when the item has no use spell or that spell is ready.
 inline bool itemUseCooldown(game::GameHandler* gh, uint32_t itemId,
-                            double& start, double& duration) {
+                            double& start, double& duration, bool* enabled = nullptr) {
+    if (enabled) *enabled = true;
     if (!gh || itemId == 0) return false;
     const auto* info = gh->getItemInfo(itemId);
     if (!info || !info->valid) return false;
     for (const auto& sp : info->spells) {
         if (sp.spellId == 0 || (sp.spellTrigger != 0 && sp.spellTrigger != 5)) continue;
+        // Waiting for SMSG_COOLDOWN_EVENT - a potion drunk in combat: the
+        // length with enable 0, which containerframe.lua draws as a greyed
+        // square with no sweep.
+        if (const float pending = gh->getPendingEventCooldown(sp.spellId, sp.category);
+            pending > 0.0f && enabled) {
+            start = 0.0;
+            duration = pending;
+            *enabled = false;
+            return true;
+        }
         const auto& cds = gh->getSpellCooldowns();
         auto it = cds.find(sp.spellId);
         if (it == cds.end() || it->second <= 0.0f) continue;
@@ -1060,6 +1073,13 @@ int petTalentRank(game::GameHandler* gh, uint32_t talentId);
 /// needs from it: CursorCanGoInSlot has to know what is being dragged before
 /// it can say which paperdoll slot should light up.
 uint32_t cursorItemId();
+
+/// The ammunition on the cursor, by entry, or zero. Lifting the ammo slot puts
+/// its entry on the cursor rather than an item from a slot (Wow.exe cursor
+/// kind 9, set by 0x5E85D0): the arrows themselves never left the quiver.
+/// GetCursorInfo answers "item" for it and CursorHasItem true (0x515200,
+/// 0x515100).
+uint32_t cursorAmmoId();
 
 /// Money picked up onto the cursor, in copper, and zero when there is none.
 ///

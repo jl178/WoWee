@@ -103,7 +103,9 @@ std::vector<uint8_t> itemBytes(bool soundOverride) {
     w.f32(0.0f);                 // rangedModRange
 
     // Five spells, six fields each.
-    w.u32(8690); w.u32(0); w.u32(0); w.u32(0); w.u32(0); w.u32(0);
+    // SpellId, Trigger, Charges, Cooldown (-1: the spell's), Category and
+    // CategoryCooldown - the last three are what an item's use starts.
+    w.u32(8690); w.u32(0); w.u32(0); w.u32(0xFFFFFFFFu); w.u32(1176); w.u32(1800000);
     for (int i = 1; i < 5; ++i) for (int j = 0; j < 6; ++j) w.u32(0);
 
     w.u32(1);                    // bindType
@@ -131,6 +133,9 @@ void checkItem(const ItemQueryResponseData& data) {
     CHECK(data.holyRes == 1);
     CHECK(data.arcaneRes == 6);
     CHECK(data.spells[0].spellId == 8690u);
+    CHECK(data.spells[0].cooldownMs == -1);
+    CHECK(data.spells[0].category == 1176u);
+    CHECK(data.spells[0].categoryCooldownMs == 1800000);
     CHECK(data.bindType == 1u);
 }
 
