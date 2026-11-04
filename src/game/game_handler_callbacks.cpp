@@ -1361,6 +1361,21 @@ void GameHandler::deleteEquipmentSet(uint64_t setGuid) {
 bool GameHandler::isItemTextOpen() const {
     return inventoryHandler_ ? inventoryHandler_->isItemTextOpen() : itemTextOpen_;
 }
+std::string GameHandler::getItemTextCreator() const {
+    if (!inventoryHandler_) return {};
+    const uint64_t guid = inventoryHandler_->getItemTextGuid();
+    if (guid == 0) return {};
+    auto entity = getEntityManager().getEntity(guid);
+    if (!entity) return {};
+    // ITEM_FIELD_CREATOR: OBJECT_END + 4, the same in every expansion's item
+    // layout (owner, contained, creator).
+    constexpr uint16_t kItemFieldCreator = 10;
+    const uint64_t creator = static_cast<uint64_t>(entity->getField(kItemFieldCreator)) |
+                             (static_cast<uint64_t>(entity->getField(kItemFieldCreator + 1)) << 32);
+    if (creator == 0) return {};
+    return lookupName(creator);
+}
+
 const std::string& GameHandler::getItemText() const {
     if (inventoryHandler_) return inventoryHandler_->getItemText();
     return itemText_;
@@ -2863,6 +2878,10 @@ float GameHandler::getSpellCooldown(uint32_t spellId) const {
     return 0;
 }
 
+float GameHandler::getPendingEventCooldown(uint32_t spellId, uint32_t category) const {
+    return spellHandler_ ? spellHandler_->getPendingEventCooldown(spellId, category) : 0.0f;
+}
+
 float GameHandler::getSpellCooldownTotal(uint32_t spellId) const {
     if (spellHandler_) return spellHandler_->getSpellCooldownTotal(spellId);
     return 0;
@@ -4225,6 +4244,30 @@ void GameHandler::cancelPendingEquip() {
     if (inventoryHandler_) inventoryHandler_->cancelPendingEquip();
 }
 
+void GameHandler::autoEquipFromWire(uint8_t wireBag, uint8_t wireSlot, bool confirmed) {
+    if (inventoryHandler_) inventoryHandler_->autoEquipFromWire(wireBag, wireSlot, confirmed);
+}
+
+bool GameHandler::swapWithBindCheck(uint8_t srcBag, uint8_t srcSlot, uint8_t dstBag, uint8_t dstSlot) {
+    return inventoryHandler_ && inventoryHandler_->swapWithBindCheck(srcBag, srcSlot, dstBag, dstSlot);
+}
+
+void GameHandler::setAmmo(uint32_t itemId) {
+    if (inventoryHandler_) inventoryHandler_->setAmmo(itemId);
+}
+
+uint32_t GameHandler::getAmmoItemId() const {
+    return playerFieldValue(UF::PLAYER_AMMO_ID);
+}
+
+bool GameHandler::isProjectileItem(uint32_t itemId) const {
+    return inventoryHandler_ && inventoryHandler_->isProjectileItem(itemId);
+}
+
+void GameHandler::useEquippedItem(int equipSlot, bool confirmed, uint64_t unitTarget) {
+    if (inventoryHandler_) inventoryHandler_->useEquippedItem(equipSlot, confirmed, unitTarget);
+}
+
 void GameHandler::autoEquipItemInBag(int bagIndex, int slotIndex, bool confirmed) {
     if (inventoryHandler_) inventoryHandler_->autoEquipItemInBag(bagIndex, slotIndex, confirmed);
 }
@@ -4774,6 +4817,10 @@ const std::string& GameHandler::getTotemCategoryName(uint32_t categoryId) const 
 std::string GameHandler::getEnchantName(uint32_t enchantId) const {
     if (spellHandler_) return spellHandler_->getEnchantName(enchantId);
     return {};
+}
+
+uint32_t GameHandler::getEnchantFlags(uint32_t enchantId) const {
+    return spellHandler_ ? spellHandler_->getEnchantFlags(enchantId) : 0;
 }
 
 uint32_t GameHandler::getEnchantGemItem(uint32_t enchantId) const {

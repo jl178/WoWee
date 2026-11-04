@@ -2024,6 +2024,8 @@ public:
     // Cooldowns
     float getSpellCooldown(uint32_t spellId) const;
     float getSpellCooldownTotal(uint32_t spellId) const;
+    /// A cooldown waiting on SMSG_COOLDOWN_EVENT, in seconds; see SpellHandler.
+    float getPendingEventCooldown(uint32_t spellId, uint32_t category = 0) const;
     const std::unordered_map<uint32_t, float>& getSpellCooldowns() const {
         static const std::unordered_map<uint32_t, float> empty;
         return spellHandler_ ? spellHandler_->getSpellCooldowns() : empty;
@@ -2198,6 +2200,10 @@ public:
     // ---- Item text (books / readable items) ----
     bool isItemTextOpen() const;
     const std::string& getItemText() const;
+    /// Who wrote the letter being read: ITEM_FIELD_CREATOR, which AzerothCore
+    /// sets to the mail's sender when the letter is copied out
+    /// (HandleMailCreateTextItem). Empty for a book or an unknown sender.
+    std::string getItemTextCreator() const;
     void closeItemText();
     void queryItemText(uint64_t itemGuid);
 
@@ -3633,6 +3639,20 @@ public:
     bool equipWouldBindFromBag(int bagIndex, int slotIndex) const;
     void equipPendingItem();
     void cancelPendingEquip();
+    /// Equip (or, for ammunition, load) whatever is at a wire position. See
+    /// InventoryHandler::autoEquipFromWire.
+    void autoEquipFromWire(uint8_t wireBag, uint8_t wireSlot, bool confirmed = false);
+    /// A move that asks EQUIP_BIND_CONFIRM first when it would bind. True
+    /// when held back for the answer.
+    bool swapWithBindCheck(uint8_t srcBag, uint8_t srcSlot, uint8_t dstBag, uint8_t dstSlot);
+    /// CMSG_SET_AMMO; 0 unloads.
+    void setAmmo(uint32_t itemId);
+    /// PLAYER_AMMO_ID: the loaded ammunition's entry, 0 for none.
+    uint32_t getAmmoItemId() const;
+    /// Item class 6: loaded rather than equipped.
+    bool isProjectileItem(uint32_t itemId) const;
+    /// Use the item worn in an equipment slot (0-based) - UseInventoryItem.
+    void useEquippedItem(int equipSlot, bool confirmed = false, uint64_t unitTarget = 0);
     void useItemBySlot(int backpackIndex, bool confirmed = false,
                        uint64_t unitTarget = 0);
     void useKeyringItem(int index, bool confirmed = false);
@@ -3914,6 +3934,7 @@ public:
     std::string getEnchantName(uint32_t enchantId) const;
     /// The gem item an enchantment came out of; 0 when it is not a gem.
     uint32_t getEnchantGemItem(uint32_t enchantId) const;
+    uint32_t getEnchantFlags(uint32_t enchantId) const;
     /// The template entry of an item this client is holding, by guid. Zero when
     /// the guid names nothing in the player's own inventory or bank.
     /// Has this item already bound to its owner? ITEM_FIELD_FLAGS bit 0x1.
@@ -3950,6 +3971,13 @@ public:
     bool isItemSoulbound(uint64_t guid) const {
         auto it = onlineItems_.find(guid);
         return it != onlineItems_.end() && (it->second.flags & 0x1u) != 0;
+    }
+    /// ITEM_FIELD_FLAGS of a carried item: 0x1 soulbound, 0x100 bound but
+    /// still tradeable, 0x200 readable (a letter copied out of the mail),
+    /// 0x1000 refundable.
+    uint32_t getItemFieldFlags(uint64_t guid) const {
+        auto it = onlineItems_.find(guid);
+        return it != onlineItems_.end() ? it->second.flags : 0u;
     }
     uint32_t getItemEntryByGuid(uint64_t guid) const {
         auto it = onlineItems_.find(guid);

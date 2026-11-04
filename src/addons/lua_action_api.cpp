@@ -75,7 +75,11 @@ enum class CursorType { NONE, SPELL, ITEM, MACRO, MERCHANT, MONEY, GUILDBANK,
                         PETACTION,
                         /// A stable slot being dragged (0x520C60, kind 10):
                         /// s_cursorSlot is the slot, 0 for the pet that is out.
-                        STABLEPET };
+                        STABLEPET,
+                        /// Ammunition lifted off the ammo slot (Wow.exe cursor
+                        /// kind 9): s_cursorId is the item entry, and nothing is
+                        /// held in any slot - the arrows stay in the quiver.
+                        AMMO };
 static CursorType s_cursorType = CursorType::NONE;
 static uint32_t   s_cursorId   = 0;    // spellId, itemId, or action slot
 static int        s_cursorSlot = 0;    // source slot for placement
@@ -124,6 +128,10 @@ void setCursorMoney(lua_State* L, uint64_t copper) {
 
 uint32_t cursorItemId() {
     return s_cursorType == CursorType::ITEM ? s_cursorId : 0;
+}
+
+uint32_t cursorAmmoId() {
+    return s_cursorType == CursorType::AMMO ? s_cursorId : 0;
 }
 
 int cursorEquipSlot() {
@@ -765,9 +773,20 @@ static int lua_GetCursorInfo(lua_State* L) {
         // drop is a withdrawal - and saying so here would only give the
         // interface a kind it has no branch for.
         case CursorType::GUILDBANK:
+        // Ammunition off the ammo slot is an item too (0x515200, kind 9).
+        case CursorType::AMMO: {
+            // And its link, the third value (0x515200 pushes it for kinds 1, 7,
+            // 9 and 11). Macros and drop handlers read it.
             lua_pushstring(L, "item");
             lua_pushnumber(L, s_cursorId);
-            return 2;
+            auto* gh = getGameHandler(L);
+            const auto* info = gh ? gh->getItemInfo(s_cursorId) : nullptr;
+            if (!info || !info->valid) return 2;
+            const std::string link = game::itemChatLink(
+                s_cursorId, info->quality < 8 ? info->quality : 1u, info->name);
+            lua_pushstring(L, link.c_str());
+            return 3;
+        }
         case CursorType::MACRO:
             lua_pushstring(L, "macro");
             lua_pushnumber(L, s_cursorId);
@@ -794,7 +813,8 @@ static int lua_CursorHasItem(lua_State* L) {
     // deciding a click is a drop, so answering no for one would have left the
     // item stuck on the cursor with nowhere that would take it.
     lua_pushboolean(L, (s_cursorType == CursorType::ITEM ||
-                        s_cursorType == CursorType::GUILDBANK) ? 1 : 0);
+                        s_cursorType == CursorType::GUILDBANK ||
+                        s_cursorType == CursorType::AMMO) ? 1 : 0);
     return 1;
 }
 
@@ -1251,13 +1271,24 @@ bool dropHeldItemInto(lua_State* L, game::GameHandler* gh,
     } else if (dstSlot == 0xFF) {
         gh->autostoreBagItem(srcBag, srcSlot, dstBag);
     } else {
-        gh->swapContainerItems(srcBag, srcSlot, dstBag, dstSlot);
+        // Through the bind check: a worn item dropped on a bag square sends
+        // the bag's item the other way, into the equipment slot, and that is
+        // the one that would bind (Wow.exe 0x6DF890 asks for either).
+        // Held for EQUIP_BIND_CONFIRM: the item stays on the cursor until
+        // the answer, as Wow.exe leaves it (uiparent.lua hides the dialog on
+        // a CURSOR_UPDATE that finds the cursor empty).
+        if (gh->swapWithBindCheck(srcBag, srcSlot, dstBag, dstSlot)) return true;
     }
     clearCursorItem(L);
     return true;
 }
 
 static bool droppedItemFromNowhere(lua_State* L) {
+    // Ammunition off the ammo slot is in no slot either: dropped on a bag
+    // square or a worn slot it is simply put down, which is where
+    // PickupContainerItem leaves cursor kind 9 (0x5D7FF0 -> ClearCursor). It
+    // was unloaded when it was lifted.
+    if (s_cursorType == CursorType::AMMO) { clearCursorItem(L); return true; }
     if (s_cursorType != CursorType::ITEM) return false;
     if (game::slots::cursorSourceIsInventory(s_cursorBag)) return false;
     clearCursorItem(L);
@@ -1672,10 +1703,50 @@ static int lua_PickupBagFromSlot(lua_State* L) {
     return 0;
 }
 
+/// PickupInventoryItem(0): the ammo slot (Wow.exe 0x5E85D0, the -1 branch).
+///
+/// Nothing is ever moved into it. With ammunition on the cursor - lifted off
+/// this slot, or an arrow stack carried out of a bag - the drop is
+/// CMSG_SET_AMMO naming that entry; with any other item it is the
+/// AutoEquipCursorItem it would be anywhere. With nothing held and something
+/// loaded, the loaded entry goes onto the cursor and CMSG_SET_AMMO 0 unloads
+/// it: lifting ammo off the slot is how it is taken out.
+static void pickupAmmoSlot(lua_State* L, game::GameHandler* gh) {
+    if (s_cursorType == CursorType::AMMO) {
+        const uint32_t id = s_cursorId;
+        clearCursorItem(L);
+        gh->setAmmo(id);
+        return;
+    }
+    if (s_cursorType == CursorType::ITEM) {
+        const uint32_t id = s_cursorId;
+        uint8_t srcBag = 0, srcSlot = 0;
+        const bool fromInventory = cursorWireSlot(srcBag, srcSlot);
+        clearCursorItem(L);
+        if (gh->isProjectileItem(id)) gh->setAmmo(id);
+        else if (fromInventory) gh->autoEquipFromWire(srcBag, srcSlot);
+        return;
+    }
+    if (s_cursorType != CursorType::NONE) return;
+    const uint32_t loaded = gh->getAmmoItemId();
+    if (loaded == 0 || gh->getInventory().countItem(loaded) == 0) return;
+    setCursorType(L, CursorType::AMMO);
+    s_cursorId = loaded;
+    s_cursorSlot = 0;
+    s_cursorBag = -1;
+    cursorItemSlot() = {};
+    const auto* info = gh->getItemInfo(loaded);
+    playItemFoley(L, loaded, info ? info->displayInfoId : 0, /*pickup=*/true);
+    wowee::ui::frameXmlSetCursorItem(
+        info && info->displayInfoId ? gh->getItemIconPath(info->displayInfoId) : std::string());
+    gh->setAmmo(0);
+}
+
 static int lua_PickupInventoryItem(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) return 0;
     int slot = static_cast<int>(luaL_checknumber(L, 1));
+    if (slot == 0) { pickupAmmoSlot(L, gh); return 0; }
     if (slot < 1 || slot > 23) return 0;
 
     // Before the pickup, because the paperdoll has no SpellCanTargetItem branch
@@ -1697,15 +1768,25 @@ static int lua_PickupInventoryItem(lua_State* L) {
         // update, so nothing would redraw the slot.
         const bool sameSlot = cursorItemSlot().equipped && s_cursorSlot == slot;
         if (!sameSlot) {
-            gh->swapContainerItems(srcBag, srcSlot, 0xFF,
-                                   static_cast<uint8_t>(slot - 1));
+            // Asking EQUIP_BIND_CONFIRM first for an unbound bind-on-equip
+            // item, as Wow.exe's swap does (0x6DF890); EquipPendingItem sends
+            // the held move. Dragging one onto the character sheet bound it
+            // with no prompt at all. While the question is up the item stays
+            // on the cursor, as stock leaves it: uiparent.lua takes the
+            // dialog down on a CURSOR_UPDATE that finds the cursor empty.
+            const bool heldForAnswer =
+                gh->swapWithBindCheck(srcBag, srcSlot, 0xFF, static_cast<uint8_t>(slot - 1));
+            if (!heldForAnswer) {
+                clearCursorItem(L);
+                // And the destination, which redraws as soon as the server's
+                // update lands; saying it now costs one UpdateLock.
+                gh->fireAddonEvent("ITEM_LOCK_CHANGED", {std::to_string(slot)});
+            }
+        } else {
+            // Fires ITEM_LOCK_CHANGED for the source slot, which is what
+            // clears the dark grey on the paperdoll.
+            clearCursorItem(L);
         }
-        // Fires ITEM_LOCK_CHANGED for the source slot, which is what clears the
-        // dark grey on the paperdoll (or the bag square the item came from).
-        clearCursorItem(L);
-        // And the destination, which redraws as soon as the server's update
-        // lands; saying it now costs one UpdateLock.
-        if (!sameSlot) gh->fireAddonEvent("ITEM_LOCK_CHANGED", {std::to_string(slot)});
         return 0;
     }
 
@@ -1765,12 +1846,57 @@ static int lua_DeleteCursorItem(lua_State* L) {
     return 0;
 }
 
-// AutoEquipCursorItem() - equip item from cursor
+// AutoEquipCursorItem() - put the held item on wherever it goes (Wow.exe
+// 0x51A680 -> 0x6DFC40).
+//
+// It used the item: useItemById found the first bag item with the held
+// entry and sent CMSG_USE_ITEM for it, which is a different item when two
+// are carried and a different message whatever - a sword dropped on the
+// character model went nowhere. Stock sends CMSG_AUTOEQUIP_ITEM naming where
+// the held item is (or CMSG_SET_AMMO for ammunition), after the bind prompt
+// for an unbound bind-on-equip item.
 static int lua_AutoEquipCursorItem(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (gh && s_cursorType == CursorType::ITEM && s_cursorId != 0) {
-        gh->useItemById(s_cursorId);
+    if (!gh) { clearCursorItem(L); return 0; }
+    if (s_cursorType == CursorType::AMMO) {
+        const uint32_t id = s_cursorId;
+        clearCursorItem(L);
+        gh->setAmmo(id);
+        return 0;
     }
+    uint8_t srcBag = 0, srcSlot = 0;
+    const bool held = cursorWireSlot(srcBag, srcSlot);
+    // Already worn: put down where it was (0x6DFC40 clears for a slot below
+    // the bags).
+    const bool worn = held && cursorItemSlot().equipped;
+    clearCursorItem(L);
+    if (held && !worn) gh->autoEquipFromWire(srcBag, srcSlot);
+    return 0;
+}
+
+// EquipCursorItem(slot) - put the held item into a named equipment slot
+// (Wow.exe 0x51A3D0): the swap into that slot when the item can go there,
+// asking EQUIP_BIND_CONFIRM first as a drag onto the slot does; otherwise the
+// automatic equip. Missing, so any macro or addon naming it raised.
+static int lua_EquipCursorItem(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const int slot = static_cast<int>(luaL_checknumber(L, 1));
+    if (!gh) return 0;
+    if (slot == 0) { pickupAmmoSlot(L, gh); return 0; }
+    if (s_cursorType == CursorType::AMMO) {
+        const uint32_t id = s_cursorId;
+        clearCursorItem(L);
+        gh->setAmmo(id);
+        return 0;
+    }
+    uint8_t srcBag = 0, srcSlot = 0;
+    if (slot < 1 || slot > 19 || !cursorWireSlot(srcBag, srcSlot)) return 0;
+    const bool sameSlot = cursorItemSlot().equipped && s_cursorSlot == slot;
+    // A slot the item cannot go in is refused by the server with
+    // EQUIP_ERR_ITEM_DOESNT_GO_TO_SLOT on the error line. Held for the bind
+    // question, the item stays on the cursor (see PickupInventoryItem).
+    if (!sameSlot && gh->swapWithBindCheck(srcBag, srcSlot, 0xFF, static_cast<uint8_t>(slot - 1)))
+        return 0;
     clearCursorItem(L);
     return 0;
 }
@@ -2561,6 +2687,7 @@ void registerActionLuaAPI(lua_State* L) {
                 {"CursorHasSpell",      lua_CursorHasSpell},
                 {"DeleteCursorItem",    lua_DeleteCursorItem},
                 {"AutoEquipCursorItem", lua_AutoEquipCursorItem},
+                {"EquipCursorItem", lua_EquipCursorItem},
                 {"IsModifiedClick",     lua_IsModifiedClick},
                 {"GetModifiedClick",    lua_GetModifiedClick},
                 {"SetModifiedClick",    lua_SetModifiedClick},

@@ -358,6 +358,11 @@ public:
     /// back to the gem that is in the socket - the item fields carry the
     /// enchantment id and nothing else.
     [[nodiscard]] uint32_t getEnchantGemItem(uint32_t enchantId) const;
+    /// SpellItemEnchantment.dbc Flags: bit 0 binds the item it is put on
+    /// (AzerothCore ENCHANTMENT_CAN_SOULBOUND). The field just before Src_ItemID.
+    [[nodiscard]] uint32_t getEnchantFlags(uint32_t enchantId) const;
+    /// The SpellItemEnchantment word `offset` from Src_ItemID (see the .cpp).
+    [[nodiscard]] uint32_t enchantWordNearGem(uint32_t enchantId, int offset) const;
     [[nodiscard]] uint8_t getSpellDispelType(uint32_t spellId) const;
     [[nodiscard]] bool isSpellInterruptible(uint32_t spellId) const;
     [[nodiscard]] bool isSpellPassive(uint32_t spellId) const;
@@ -572,6 +577,19 @@ private:
     // Find the on-use spell for an item (trigger=0 Use or trigger=5 NoDelay).
     // CMSG_USE_ITEM requires a valid spellId or the server silently ignores it.
     void seedCooldownFromSpellInfo(uint32_t spellId);
+    /// The cooldown an item's own template gives its spell, and its category's
+    /// share of it (potions). See spell_handler.cpp.
+    void seedItemSpellCooldown(uint64_t itemGuid, uint32_t spellId);
+    /// Start a cooldown of `ms` on a spell now, and `categoryMs` on every
+    /// carried item spell sharing `category`. Restarts one already running.
+    void startItemCooldown(uint32_t spellId, uint32_t ms, uint32_t category, uint32_t categoryMs);
+public:
+    /// A cooldown that waits for SMSG_COOLDOWN_EVENT to begin - a potion
+    /// drunk in combat, a spell with SPELL_ATTR0_DISABLED_WHILE_ACTIVE - in
+    /// seconds, or 0 when none is pending. The item is unusable meanwhile and
+    /// its square is greyed without a sweep (enable 0).
+    [[nodiscard]] float getPendingEventCooldown(uint32_t spellId, uint32_t category = 0) const;
+private:
     void handleSupercededSpell(network::Packet& packet);
     void handleRemovedSpell(network::Packet& packet);
     void handleUnlearnSpells(network::Packet& packet);
@@ -590,6 +608,10 @@ private:
     // on every ACTIONBAR_UPDATE_COOLDOWN, so a long cooldown appears to restart
     // whenever anything else is cast.
     std::unordered_map<uint32_t, float> spellCooldownTotals_;
+    /// Cooldowns started by SMSG_COOLDOWN_EVENT rather than by the cast:
+    /// the spell's own length and its category's, held until the event.
+    struct EventCooldown { uint32_t ms = 0; uint32_t category = 0; uint32_t categoryMs = 0; };
+    std::unordered_map<uint32_t, EventCooldown> eventCooldowns_;
     uint8_t castCount_ = 0;
     GroundTargeting groundTargeting_;
     /// Whether the spell waits on a point, and if so the circle and range it

@@ -2076,6 +2076,9 @@ void SpellHandler::seedCooldownFromSpellInfo(uint32_t spellId) {
     if (spellId == 0) return;
     auto existing = spellCooldowns_.find(spellId);
     if (existing != spellCooldowns_.end() && existing->second > 0.5f) return;
+    // Already waiting for its SMSG_COOLDOWN_EVENT (an item's, set just
+    // before this).
+    if (eventCooldowns_.count(spellId)) return;
 
     owner_.loadSpellNameCache();
     auto it = owner_.spellNameCacheRef().find(spellId);
@@ -2083,6 +2086,15 @@ void SpellHandler::seedCooldownFromSpellInfo(uint32_t spellId) {
 
     const uint32_t cooldownMs = std::max(it->second.recoveryMs, it->second.categoryRecoveryMs);
     if (cooldownMs <= 1500) return; // ignore GCD-sized recovery
+
+    // SPELL_ATTR0_DISABLED_WHILE_ACTIVE: the cooldown begins when the effect
+    // ends (Stealth, Presence of Mind), which the server says with
+    // SMSG_COOLDOWN_EVENT. Until then the spell is unusable, not counting.
+    constexpr uint32_t kAttrDisabledWhileActive = 0x01000000u;
+    if (it->second.attr & kAttrDisabledWhileActive) {
+        eventCooldowns_[spellId] = EventCooldown{cooldownMs, 0, 0};
+        return;
+    }
 
     const float seconds = cooldownMs / 1000.0f;
     spellCooldowns_[spellId] = seconds;
@@ -2094,6 +2106,126 @@ void SpellHandler::seedCooldownFromSpellInfo(uint32_t spellId) {
     }
 
     LOG_DEBUG("Seeded cooldown from Spell.dbc: spell=", spellId, " ms=", cooldownMs);
+    if (owner_.addonEventCallbackRef()) {
+        owner_.addonEventCallbackRef()("SPELL_UPDATE_COOLDOWN", {});
+        owner_.addonEventCallbackRef()("BAG_UPDATE_COOLDOWN", {});
+        owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_COOLDOWN", {});
+    }
+}
+
+// The cooldown an item's use starts, from the item's template rather than the
+// spell: SMSG_SPELL_GO names the item that cast as its first guid (AzerothCore
+// Spell::SendSpellGo: m_CastItem's guid when there is one), and the item cache
+// carries SpellCooldown, SpellCategory and SpellCategoryCooldown per spell.
+// The server applies the same numbers (Player::AddSpellAndCategoryCooldowns:
+// the template's when either is set, otherwise the spell's) and never tells the
+// client about them, so the client works them out the way it is expected to.
+//
+// The category is what makes potions share: a healing and a mana potion are
+// both category 4, and using one puts the other on the same two minutes. Every
+// use-spell of every item carried in that category is started with it, which
+// is what GetContainerItemCooldown/GetItemCooldown read.
+void SpellHandler::seedItemSpellCooldown(uint64_t itemGuid, uint32_t spellId) {
+    if (itemGuid == 0 || spellId == 0) return;
+    const uint32_t entry = owner_.getItemEntryByGuid(itemGuid);
+    const auto* info = entry ? owner_.getItemInfo(entry) : nullptr;
+    if (!info || !info->valid) return;
+    int32_t rec = -1, catrec = -1;
+    uint32_t cat = 0;
+    for (const auto& sp : info->spells) {
+        if (sp.spellId != spellId) continue;
+        rec = sp.cooldownMs;
+        cat = sp.category;
+        catrec = sp.categoryCooldownMs;
+        break;
+    }
+    owner_.loadSpellNameCache();
+    const auto sit = owner_.spellNameCacheRef().find(spellId);
+    // Neither set on the template: the spell's own, as the server does.
+    if (rec < 0 && catrec < 0) {
+        if (sit == owner_.spellNameCacheRef().end()) return;
+        rec = static_cast<int32_t>(sit->second.recoveryMs);
+        cat = sit->second.category;
+        catrec = static_cast<int32_t>(sit->second.categoryRecoveryMs);
+    }
+    if (rec < 0) rec = 0;
+    if (catrec < 0) catrec = 0;
+    const uint32_t ownMs = static_cast<uint32_t>(rec > 0 ? rec : catrec);
+    if (ownMs == 0 && catrec == 0) return;
+
+    // A potion, or a spell flagged to start its cooldown on an event, waits
+    // for SMSG_COOLDOWN_EVENT: AzerothCore's Spell::SendSpellCooldown parks a
+    // potion (SetLastPotionId) and UpdatePotionCooldown sends the event when
+    // the player is out of combat - at once out of combat, on leaving it
+    // otherwise. Until then the item is simply unusable.
+    constexpr uint32_t kAttrDisabledWhileActive = 0x01000000u;
+    const bool isPotion = info->itemClass == ITEM_CLASS_CONSUMABLE && info->subClass == 1;
+    const bool onEvent = sit != owner_.spellNameCacheRef().end() &&
+                         (sit->second.attr & kAttrDisabledWhileActive) != 0;
+    if (isPotion || onEvent) {
+        eventCooldowns_[spellId] = EventCooldown{ownMs, cat, static_cast<uint32_t>(catrec)};
+        LOG_DEBUG("Item cooldown waits for its event: item ", entry, " spell ", spellId);
+        if (owner_.addonEventCallbackRef()) {
+            owner_.addonEventCallbackRef()("BAG_UPDATE_COOLDOWN", {});
+            owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_COOLDOWN", {});
+        }
+        return;
+    }
+    startItemCooldown(spellId, ownMs, cat, static_cast<uint32_t>(catrec));
+    LOG_DEBUG("Item cooldown: item ", entry, " spell ", spellId, " rec ", rec,
+              " cat ", cat, " catrec ", catrec);
+}
+
+float SpellHandler::getPendingEventCooldown(uint32_t spellId, uint32_t category) const {
+    auto it = eventCooldowns_.find(spellId);
+    if (it != eventCooldowns_.end()) return it->second.ms / 1000.0f;
+    // A category peer of a pending potion is just as unusable: a mana potion
+    // after a healing one drunk in combat.
+    if (category != 0) {
+        for (const auto& [id, cd] : eventCooldowns_) {
+            (void)id;
+            if (cd.category == category && cd.categoryMs > 0) return cd.categoryMs / 1000.0f;
+        }
+    }
+    return 0.0f;
+}
+
+void SpellHandler::startItemCooldown(uint32_t spellId, uint32_t ms, uint32_t cat,
+                                     uint32_t catrec) {
+    auto start = [&](uint32_t id, uint32_t len) {
+        if (id == 0 || len <= 1500) return;
+        const float seconds = len / 1000.0f;
+        auto it = spellCooldowns_.find(id);
+        if (it != spellCooldowns_.end() && it->second >= seconds) return;
+        spellCooldowns_[id] = seconds;
+        spellCooldownTotals_[id] = seconds;
+        for (auto& slot : owner_.actionBarRef()) {
+            if (slot.type == ActionBarSlot::SPELL && slot.id == id) {
+                slot.cooldownRemaining = seconds;
+                slot.cooldownTotal = seconds;
+            }
+        }
+    };
+    start(spellId, ms);
+    if (cat != 0 && catrec > 0) {
+        // Every carried item whose use-spell shares the category.
+        const auto& inv = owner_.getInventory();
+        auto visit = [&](const ItemSlot& sl) {
+            if (sl.empty()) return;
+            const auto* other = owner_.getItemInfo(sl.item.itemId);
+            if (!other || !other->valid) return;
+            for (const auto& sp : other->spells) {
+                if (sp.spellId != 0 && sp.category == cat &&
+                    (sp.spellTrigger == 0 || sp.spellTrigger == 5))
+                    start(sp.spellId, catrec);
+            }
+        };
+        for (int i = 0; i < inv.getBackpackSize(); ++i) visit(inv.getBackpackSlot(i));
+        for (int b = 0; b < Inventory::NUM_BAG_SLOTS; ++b)
+            for (int i = 0; i < inv.getBagSize(b); ++i) visit(inv.getBagSlot(b, i));
+        for (int i = 0; i < Inventory::NUM_EQUIP_SLOTS; ++i)
+            visit(inv.getEquipSlot(static_cast<EquipSlot>(i)));
+    }
     if (owner_.addonEventCallbackRef()) {
         owner_.addonEventCallbackRef()("SPELL_UPDATE_COOLDOWN", {});
         owner_.addonEventCallbackRef()("BAG_UPDATE_COOLDOWN", {});
@@ -3263,6 +3395,13 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
         //
         // Anything at or under the global cooldown is ignored inside, and an
         // existing cooldown is left alone, so this cannot shorten one.
+        //
+        // An item's spell first: its template carries the cooldown and the
+        // category the stock client starts (see seedItemSpellCooldown), and
+        // once that has run the Spell.dbc seed below finds a cooldown already
+        // in place and leaves it.
+        if (data.casterGuid != data.casterUnit)
+            seedItemSpellCooldown(data.casterGuid, data.spellId);
         seedCooldownFromSpellInfo(data.spellId);
 
         // Play cast-complete sound
@@ -3617,6 +3756,12 @@ void SpellHandler::handleSpellCooldown(network::Packet& packet) {
     }
 }
 
+// SMSG_COOLDOWN_EVENT: "start the cooldown timer now" (AzerothCore
+// Player::SendCooldownEvent - "Send activate cooldown timer (possible 0) at
+// client side"). For a potion it comes when the player is out of combat, for
+// a DISABLED_WHILE_ACTIVE spell when its effect ends. This erased the
+// cooldown instead, so a potion drunk out of combat lost its two minutes the
+// moment the event followed the cast.
 void SpellHandler::handleCooldownEvent(network::Packet& packet) {
     if (!packet.hasRemaining(4)) return;
     uint32_t spellId = packet.readUInt32();
@@ -3627,6 +3772,20 @@ void SpellHandler::handleCooldownEvent(network::Packet& packet) {
     for (auto& slot : owner_.actionBarRef()) {
         if (slot.type == ActionBarSlot::SPELL && slot.id == spellId) {
             slot.cooldownRemaining = 0.0f;
+        }
+    }
+    if (auto ev = eventCooldowns_.find(spellId); ev != eventCooldowns_.end()) {
+        const EventCooldown cd = ev->second;
+        eventCooldowns_.erase(ev);
+        startItemCooldown(spellId, cd.ms, cd.category, cd.categoryMs);
+    } else {
+        // No record of the cast (a reload, another client's use): the
+        // spell's own length, from now.
+        owner_.loadSpellNameCache();
+        auto it = owner_.spellNameCacheRef().find(spellId);
+        if (it != owner_.spellNameCacheRef().end()) {
+            startItemCooldown(spellId, std::max(it->second.recoveryMs,
+                                                it->second.categoryRecoveryMs), 0, 0);
         }
     }
     if (owner_.addonEventCallbackRef()) {
@@ -4528,6 +4687,7 @@ void SpellHandler::resetAllState() {
     knownSpells_.clear();
     spellCooldowns_.clear();
     spellCooldownTotals_.clear();
+    eventCooldowns_.clear();
     playerAuras_.clear();
     targetAuras_.clear();
     unitAurasCache_.clear();
@@ -5203,7 +5363,11 @@ std::string SpellHandler::getEnchantName(uint32_t enchantId) const {
     return {};
 }
 
-uint32_t SpellHandler::getEnchantGemItem(uint32_t enchantId) const {
+// One SpellItemEnchantment.dbc word, counted from Src_ItemID: 0 is the gem
+// item, -1 the Flags before it. ItemVisual, Flags and Src_ItemID trail the name
+// block in that order (Wow.exe reads the flags at record +0x40 and the name at
+// +0x38 - 0x5210D0), so both move with the gem field between expansions.
+uint32_t SpellHandler::enchantWordNearGem(uint32_t enchantId, int offset) const {
     if (enchantId == 0) return 0;
     auto* am = owner_.services().assetManager;
     if (!am || !am->isInitialized()) return 0;
@@ -5215,7 +5379,16 @@ uint32_t SpellHandler::getEnchantGemItem(uint32_t enchantId) const {
     if (gemField == 0) return 0;
     const int32_t row = dbc->findRecordById(enchantId);
     if (row < 0) return 0;
-    return dbc->getUInt32(static_cast<uint32_t>(row), gemField);
+    return dbc->getUInt32(static_cast<uint32_t>(row), static_cast<uint32_t>(
+        static_cast<int>(gemField) + offset));
+}
+
+uint32_t SpellHandler::getEnchantFlags(uint32_t enchantId) const {
+    return enchantWordNearGem(enchantId, -1);
+}
+
+uint32_t SpellHandler::getEnchantGemItem(uint32_t enchantId) const {
+    return enchantWordNearGem(enchantId, 0);
 }
 
 uint8_t SpellHandler::getSpellDispelType(uint32_t spellId) const {

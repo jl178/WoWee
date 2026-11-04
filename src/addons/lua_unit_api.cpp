@@ -1916,14 +1916,15 @@ static int lua_GetInventoryItemCooldown(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int slot = static_cast<int>(luaL_optnumber(L, 2, 0));
     double start = 0.0, duration = 0.0;
+    bool enabled = true;
     if (gh && slot >= 1 && slot <= 19) {
         const auto& sl = gh->getInventory().getEquipSlot(
             static_cast<game::EquipSlot>(slot - 1));
-        if (!sl.empty()) itemUseCooldown(gh, sl.item.itemId, start, duration);
+        if (!sl.empty()) itemUseCooldown(gh, sl.item.itemId, start, duration, &enabled);
     }
     lua_pushnumber(L, start);
     lua_pushnumber(L, duration);
-    lua_pushnumber(L, 1);
+    lua_pushnumber(L, enabled ? 1 : 0);
     return 3;
 }
 
@@ -3065,6 +3066,14 @@ void registerUnitLuaAPI(lua_State* L) {
                 {"CursorCanGoInSlot",       [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int slot = static_cast<int>(luaL_optnumber(L, 1, 0));
+            // The ammo slot takes ammunition: lifted off it (cursor kind 9),
+            // or a projectile carried out of a bag (Wow.exe 0x5EA880).
+            if (slot == 0) {
+                const uint32_t held = cursorItemId();
+                lua_pushboolean(L, cursorAmmoId() != 0 ||
+                                   (gh && held != 0 && gh->isProjectileItem(held)));
+                return 1;
+            }
             const uint32_t held = cursorItemId();
             if (!gh || slot < 1 || held == 0) { lua_pushboolean(L, 0); return 1; }
             const auto* info = gh->getItemInfo(held);
@@ -3093,6 +3102,10 @@ void registerUnitLuaAPI(lua_State* L) {
                 case SHIELD: case OFF_HAND: case HOLDABLE: fits = (slot == 17); break;
                 case RANGED_BOW: case RANGED_GUN: case THROWN: fits = (slot == 18); break;
                 case TABARD:     fits = (slot == 19); break;
+                // A relic (INVTYPE_RELIC) is the ranged slot's for the classes
+                // that have one; bags and quivers go on the bag bar.
+                case 28:         fits = (slot == 18); break;
+                case BAG: case 27: fits = (slot >= 20 && slot <= 23); break;
                 default:         fits = false; break;
             }
             lua_pushboolean(L, fits);

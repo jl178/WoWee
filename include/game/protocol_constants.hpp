@@ -90,6 +90,9 @@ constexpr uint32_t ITEM_SUBCLASS_BANDAGE = 7;
 /// Class 12 is the quest item. It is never equipment, whatever its INVTYPE
 /// says - and some of them do carry one.
 constexpr uint32_t ITEM_CLASS_QUEST      = 12;
+/// Class 6 is the projectile - arrows and bullets. It is loaded with
+/// CMSG_SET_AMMO rather than equipped (Wow.exe 0x6DFC40 tests exactly this).
+constexpr uint32_t ITEM_CLASS_PROJECTILE = 6;
 
 // ---------------------------------------------------------------------------
 // Class IDs

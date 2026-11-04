@@ -1585,10 +1585,10 @@ bool parseItemQueryPreWotlk(network::Packet& packet, ItemQueryResponseData& data
         if (!packet.hasRemaining(24)) break;
         data.spells[i].spellId = packet.readUInt32();
         data.spells[i].spellTrigger = packet.readUInt32();
-        packet.readUInt32(); // SpellCharges
-        packet.readUInt32(); // SpellCooldown
-        packet.readUInt32(); // SpellCategory
-        packet.readUInt32(); // SpellCategoryCooldown
+        data.spells[i].charges = static_cast<int32_t>(packet.readUInt32());
+        data.spells[i].cooldownMs = static_cast<int32_t>(packet.readUInt32());
+        data.spells[i].category = packet.readUInt32();
+        data.spells[i].categoryCooldownMs = static_cast<int32_t>(packet.readUInt32());
     }
 
     // Bonding type
