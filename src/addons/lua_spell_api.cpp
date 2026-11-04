@@ -583,8 +583,17 @@ static int lua_CastSpellByName(lua_State* L) {
     if (!gh) return 0;
     const char* name = luaL_checkstring(L, 1);
     if (!name || !*name) return 0;
+    // "!Auto Shot": cast without the toggle (0x540310 goes straight to
+    // 0x80DA40), so a repeat that is running is left running rather than
+    // put away.
+    const bool noToggle = *name == '!';
+    if (noToggle) ++name;
 
     const uint32_t bestId = highestKnownRankByName(gh, name);
+    if (noToggle && bestId != 0 && gh->getSpellHandler() &&
+        gh->getSpellHandler()->getAutoRepeatSpellId() == bestId) {
+        return 0;
+    }
     if (bestId != 0) {
         // The same second argument, and the same branch of SECURE_ACTIONS.spell
         // reaches here: a spell named rather than numbered is cast by name, and
@@ -1398,10 +1407,19 @@ void registerSpellLuaAPI(lua_State* L) {
         }},
                 {"GetTotemTimeLeft", lua_GetTotemTimeLeft},
                 {"SpellStopCasting", [](lua_State* L) -> int {
+            // 0x809EA0: the cast or channel stops; with none, a repeating
+            // Auto Shot or Shoot does. 1 when something stopped, else nil.
             auto* gh = getGameHandler(L);
-            const bool wasCasting = gh && gh->isCasting();
-            if (gh) gh->cancelCast();
-            lua_pushboolean(L, wasCasting);
+            bool stopped = false;
+            if (gh && gh->isCasting()) {
+                gh->cancelCast();
+                stopped = true;
+            } else if (gh && gh->getSpellHandler() &&
+                       gh->getSpellHandler()->getAutoRepeatSpellId() != 0) {
+                gh->getSpellHandler()->cancelAutoRepeat();
+                stopped = true;
+            }
+            if (stopped) lua_pushnumber(L, 1); else lua_pushnil(L);
             return 1;
         }},
                 {"SpellStopTargeting", [](lua_State* L) -> int {

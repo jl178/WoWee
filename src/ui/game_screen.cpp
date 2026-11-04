@@ -2,6 +2,7 @@
 #include "game/game_utils.hpp"
 #include "game/interaction_rules.hpp"
 #include "ui/game_screen.hpp"
+#include "game/stock_cast_timing.hpp"
 #include "ui/stock_unit_color.hpp"
 #include "ui/gamepad_controls.hpp"
 #include "core/gamepad.hpp"
@@ -1731,6 +1732,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
     if (!io.WantCaptureMouse && !frameXmlOwnsMouse() &&
         input.isMouseButtonJustPressed(SDL_BUTTON_LEFT) && !input.isMouseButtonPressed(SDL_BUTTON_RIGHT)) {
         leftClickPressPos_ = input.getMousePosition();
+        leftClickPressAt_ = std::chrono::steady_clock::now();
         leftClickWasPress_ = true;
 
         // Light the object being pressed on.
@@ -1774,8 +1776,12 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
         glm::vec2 dragDelta = releasePos - leftClickPressPos_;
         float dragDistSq = glm::dot(dragDelta, dragDelta);
         const float CLICK_THRESHOLD = clickDragThreshold();
+        // The stock rule (0x5F9600): held 800 ms is never a click, and a press
+        // that moved is one only when it was quick, under 200 ms.
+        const double heldMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - leftClickPressAt_).count();
 
-        if (dragDistSq < CLICK_THRESHOLD * CLICK_THRESHOLD) {
+        if (game::stock_cast::isWorldClick(heldMs, dragDistSq >= CLICK_THRESHOLD * CLICK_THRESHOLD)) {
             auto* renderer = services_.renderer;
             auto* camera = renderer ? renderer->getCamera() : nullptr;
             auto* window = services_.window;
@@ -1902,6 +1908,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
     if (!io.WantCaptureMouse && !frameXmlOwnsMouse() &&
         input.isMouseButtonJustPressed(SDL_BUTTON_RIGHT) && !input.isMouseButtonPressed(SDL_BUTTON_LEFT)) {
         rightClickPressPos_ = input.getMousePosition();
+        rightClickPressAt_ = std::chrono::steady_clock::now();
         rightClickWasPress_ = true;
     }
 
@@ -1910,7 +1917,10 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
         rightClickWasPress_ = false;
         glm::vec2 rDragDelta = input.getMousePosition() - rightClickPressPos_;
         const float RCLICK_THRESHOLD = clickDragThreshold();
-        if (glm::dot(rDragDelta, rDragDelta) >= RCLICK_THRESHOLD * RCLICK_THRESHOLD) {
+        const double rHeldMs = tapInteract ? 0.0 : std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - rightClickPressAt_).count();
+        if (!game::stock_cast::isWorldClick(
+                rHeldMs, glm::dot(rDragDelta, rDragDelta) >= RCLICK_THRESHOLD * RCLICK_THRESHOLD)) {
             // Treated as a camera rotate - do not interact/attack.
             return;
         }

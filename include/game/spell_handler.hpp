@@ -1,5 +1,7 @@
 #pragma once
 
+#include "game/stock_cast_timing.hpp"
+
 #include "game/world_packets.hpp"
 #include "game/opcode_table.hpp"
 #include "game/spell_defines.hpp"
@@ -128,6 +130,12 @@ public:
     /// Auto Shot or Shoot while it repeats, otherwise 0.
     [[nodiscard]] uint32_t getAutoRepeatSpellId() const { return autoRepeatSpellId_; }
     void clearAutoRepeat() { autoRepeatSpellId_ = 0; }
+    /// Turn a repeating Auto Shot or Shoot off: CMSG_CANCEL_AUTO_REPEAT_SPELL
+    /// and the button's flash stops (0x807560(1)). Nothing when none runs.
+    void cancelAutoRepeat();
+    /// On its own cooldown, or held by the running global cooldown - what
+    /// the stock client refuses before sending (0x739650 -> 0x807980).
+    [[nodiscard]] bool isSpellNotReady(uint32_t spellId) const;
     [[nodiscard]] bool isGameObjectInteractionCasting() const;
     // The cast or channel in progress, else the ability queued for the next swing.
     [[nodiscard]] uint32_t getActiveActionSpellId() const {
@@ -566,6 +574,24 @@ private:
     bool casting_ = false;
     bool castIsChannel_ = false;
     uint32_t currentCastSpellId_ = 0;
+    /// The cast count of the press the running cast answers, so a refusal of
+    /// a later press during it is told apart from the cast's own failure.
+    uint8_t currentCastCount_ = 0;
+    /// The spell whose build-up castSpell already started on the send;
+    /// SMSG_SPELL_START does not start it again.
+    uint32_t predictedPrecastSpellId_ = 0;
+    /// StartRecoveryCategory of the running global cooldown (133 nearly always).
+    uint32_t gcdCategory_ = 133;
+    /// 0x808200's once-per-burst rule for cast failure text and voice.
+    stock_cast::CastErrorThrottle castErrorThrottle_;
+    void startPredictedGcd(uint32_t spellId);
+    void refuseCastLocally(uint32_t spellId, uint8_t result);
+    /// Text and voice for a refused cast, through the throttle. False when
+    /// the throttle held it back.
+    bool showCastFailure(uint32_t spellId, uint8_t result, uint32_t miscArg, uint32_t miscArg2,
+                         bool fromServer);
+    [[nodiscard]] int playerPowerType() const;
+    static int64_t steadyNowMs();
     uint32_t autoRepeatSpellId_ = 0;
     uint8_t autoRepeatCastCount_ = 0;
     // An on-next-swing ability between its SMSG_SPELL_START and the swing.

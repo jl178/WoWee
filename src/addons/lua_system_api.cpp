@@ -1046,6 +1046,12 @@ static void pushCvarDefault(lua_State* L, const std::string& n) {
     // Off, as the real client has it: a second press stops the swing unless
     // the player has asked to be protected from that.
     else if (n == "secureabilitytoggle") lua_pushstring(L, "0");
+    // Not 3.3.5a CVars - later clients added them - but this client reads
+    // them: an action bar key acting on the press rather than the release,
+    // and a spell queued that many ms before a cast ends. Off, which is how
+    // 3.3.5a behaves (docs/re/input-timing.md).
+    else if (n == "actionbuttonusekeydown") lua_pushstring(L, "0");
+    else if (n == "spellqueuewindow") lua_pushstring(L, "0");
     // Quest titles on the world map colour by difficulty out of the box, and a
     // quest whose progress changes starts being watched - both on in the real
     // client. The other two are opt-in there and stay opt-in here.

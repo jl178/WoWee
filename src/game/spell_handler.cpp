@@ -8,6 +8,7 @@
 #include "game/gather_spells.hpp"
 #include "game/spell_classification.hpp"
 #include "game/spell_targeting.hpp"
+#include "game/stock_cast_timing.hpp"
 #include "game/pet_action.hpp"
 #include "game/game_handler.hpp"
 #include "game/game_utils.hpp"
@@ -33,6 +34,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <sstream>
 
 namespace wowee {
@@ -53,43 +56,6 @@ constexpr uint8_t kSpellFailedNotReady = 67;
 constexpr uint8_t kSpellFailedAlreadyOpen = 8;
 constexpr uint8_t kSpellFailedChestInUse = 25;
 constexpr uint8_t kSpellFailedTryAgain = 132;
-constexpr uint8_t kSpellFailedItemNotReady = 45;
-constexpr uint8_t kSpellFailedMoving = 51;
-constexpr uint8_t kSpellFailedNotBehind = 57;
-constexpr uint8_t kSpellFailedNoPower = 85;
-constexpr uint8_t kSpellFailedOutOfRange = 97;
-constexpr uint8_t kSpellFailedSpellInProgress = 105;
-constexpr uint8_t kSpellFailedTooClose = 128;
-constexpr uint8_t kSpellFailedUnitNotInFront = 134;
-
-/// A rejection the player caused by pressing a key a moment too early, or from
-/// half a step out of place.
-///
-/// These arrive once per keypress and a held key repeats them, so a few seconds
-/// of a fight produces several a second: the cooldown, the power cost, the
-/// range, the facing. The red line above the middle of the screen is the whole
-/// of what the real client shows for them - no chat line, and no sound either,
-/// since a beep per rejected keypress is the same spam in another channel.
-///
-/// Codes checked against AzerothCore's SharedDefines.h rather than inferred:
-/// 128 is TOO_CLOSE, not the in-progress code it reads like.
-bool isRoutineCastRejection(uint8_t result) {
-    switch (result) {
-        case kSpellFailedItemNotReady:
-        case kSpellFailedMoving:
-        case kSpellFailedNotBehind:
-        case kSpellFailedNotReady:
-        case kSpellFailedNoPower:
-        case kSpellFailedOutOfRange:
-        case kSpellFailedSpellInProgress:
-        case kSpellFailedTooClose:
-        case kSpellFailedTryAgain:
-        case kSpellFailedUnitNotInFront:
-            return true;
-        default:
-            return false;
-    }
-}
 
 bool isBandageSpell(const GameHandler& owner, uint32_t spellId) {
     if (spellId == 0) return false;
@@ -1047,6 +1013,7 @@ bool SpellHandler::isTargetCastInterruptible() const {
 void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     LOG_DEBUG("castSpell: spellId=", spellId, " target=0x", std::hex, targetGuid, std::dec);
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
+    const bool wasCasting = casting_;
 
     // Nothing to end here while eating or drinking. The server stands a
     // seated caster up unless the spell may be cast sitting (Attributes
@@ -1091,6 +1058,24 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     // has since superseded. The server drops casts of superseded ranks without
     // sending any error, so swap in the highest rank we actually know.
     spellId = resolveHighestKnownRank(spellId);
+
+    // Auto Shot or Shoot pressed while it repeats puts it away (0x80DA80 ->
+    // 0x807560(1): CMSG_CANCEL_AUTO_REPEAT_SPELL), as Attack above stops the
+    // swing. "/cast !Auto Shot" is the form that does not (CastSpellByName).
+    if (spellId != 0 && spellId == autoRepeatSpellId_) {
+        cancelAutoRepeat();
+        return;
+    }
+
+    // On its cooldown or the global one: refused here, with the reason, and
+    // nothing sent (0x739650 -> 0x807980 answers SPELL_FAILED_NOT_READY, which
+    // 0x808200 shows as "Spell is not ready yet." - once per burst of presses).
+    // Before the dismount and the ground cursor below, as stock checks it
+    // before either.
+    if (spellId != 0 && spellId != SPELL_ID_ATTACK && isSpellNotReady(spellId)) {
+        refuseCastLocally(spellId, kSpellFailedNotReady);
+        return;
+    }
 
     // Fishing places a bobber in front of the caster using the facing the server has
     // on record. The client only sends MSG_MOVE_SET_FACING when the aim changes by >3°
@@ -1175,21 +1160,24 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     }
 
     if (casting_) {
-        // Spell queue: if we're within 400ms of the cast completing (and not channeling),
-        // store the spell so it fires automatically when the cast finishes.
-        if (!castIsChannel_ && castTimeRemaining_ > 0.0f && castTimeRemaining_ <= 0.4f) {
+        // A gathering or opening "cast" is this client's own timer, with
+        // nothing on the server to answer a second press.
+        if (owner_.pendingGameObjectInteractGuidRef() != 0) return;
+        // No spell queue in 3.3.5a: a press during a cast goes to the server
+        // like any other, which refuses it with "Another action is in
+        // progress" - or, during a channel, starts the new spell and ends the
+        // channel. SpellQueueWindow (ms, a later client's CVar) brings the
+        // queue back as an option; 0, the default, is the stock behaviour.
+        const int queueWindowMs =
+            std::atoi(addons::storedCVarValue("SpellQueueWindow", "0").c_str());
+        if (queueWindowMs > 0 && !castIsChannel_ && castTimeRemaining_ > 0.0f &&
+            castTimeRemaining_ * 1000.0f <= static_cast<float>(queueWindowMs)) {
             queuedSpellId_     = spellId;
             queuedSpellTarget_ = targetGuid != 0 ? targetGuid : owner_.getTargetGuid();
             LOG_INFO("Spell queue: queued spellId=", spellId, " (", castTimeRemaining_ * 1000.0f,
                      "ms remaining)");
-        } else if (craftQueueSpellId_ == spellId) {
-            // Outside that window the press is dropped, which for a craft is
-            // the whole action gone with nothing said - and a bandage is a
-            // three second cast, so this is the easy one to hit.
-            LOG_WARNING("Craft: spell ", spellId, " not sent - a cast is already "
-                        "running with ", castTimeRemaining_, "s left");
+            return;
         }
-        return;
     }
 
     // A spell with a cast time cannot be started while moving, and the answer
@@ -1340,6 +1328,7 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     // this catches aiming a friendly spell at yourself, where the target guid
     // is your own and every facing block below would otherwise use it.
     bool facingHandled = (target != 0 && target == owner_.getPlayerGuid());
+    bool turnedToCast = false;
 
     // Warrior Charge (ranks 1-3): client-side range check + charge callback
     if (spellId == 100 || spellId == 6178 || spellId == 11578) {
@@ -1432,7 +1421,10 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
                     owner_.raiseUiError("Out of range.");
                     return;
                 }
-                if (owner_.isAutoFaceTarget()) owner_.faceCanonicalYaw(std::atan2(-dy, dx));
+                if (owner_.isAutoFaceTarget()) {
+                    owner_.faceCanonicalYaw(std::atan2(-dy, dx));
+                    turnedToCast = true;
+                }
                 facingHandled = true;
             }
         }
@@ -1454,11 +1446,15 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
             float lenSq = dx * dx + dy * dy;
             if (lenSq > 0.01f) {
                 owner_.faceCanonicalYaw(std::atan2(-dy, dx));
+                turnedToCast = true;
             }
         }
     }
-    // Heartbeat ensures the server has the updated orientation before the cast packet.
-    if (target != 0 || fishingCast) {
+    // The new facing goes out ahead of the cast, when this client turned the
+    // player for it (the debug auto-face). The stock client sends no movement
+    // with a cast (0x80AC90): the server has the facing of the last movement
+    // packet, which mouse steering keeps within 0.1 rad.
+    if (turnedToCast) {
         owner_.sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
     }
 
@@ -1516,23 +1512,151 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
         owner_.addonEventCallbackRef()("UNIT_SPELLCAST_SENT", {"player", targetName, std::to_string(spellId)});
     }
 
-    // Optimistically start GCD immediately on cast. Nothing else announces this
-    // GCD, so without these the buttons are not asked again and the sweep for
-    // a spell with no cooldown of its own never draws.
+    // The global cooldown starts with the send, as the stock client starts it
+    // (0x80AC90 -> 0x805D70): its length from the spell, none for a spell off
+    // the GCD. Nothing else announces it, so without these events the buttons
+    // are not asked again and the sweep never draws.
+    startPredictedGcd(spellId);
+
+    // The caster's build-up starts with the send too (0x80AC90 ->
+    // 0x805330(spell, 0, 1)): the precast kit and its pose, before the
+    // server's SMSG_SPELL_START, which then finds them already playing. Not
+    // over a cast that is still running - the stock client plays it only on a
+    // caster with no current cast (+0xA60).
+    if (!wasCasting && !owner_.isProfessionSpell(spellId) &&
+        !spellclass::isRangedWeaponAutoAttack(spellId)) {
+        const uint32_t castMs = owner_.getSpellData(spellId).castTimeMs;
+        triggerCastVisual(spellId, owner_.getPlayerGuid(), castMs);
+        if (castMs > 0 && owner_.spellCastAnimCallbackRef()) {
+            const SpellCastType type = target == 0 ? SpellCastType::AREA
+                : (target == owner_.getPlayerGuid() ? SpellCastType::OMNI : SpellCastType::DIRECTED);
+            owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), true, false, type);
+        }
+        predictedPrecastSpellId_ = spellId;
+    }
+}
+
+bool SpellHandler::isSpellNotReady(uint32_t spellId) const {
+    if (getSpellCooldown(spellId) > 0.0f) return true;
+    if (!isGCDActive()) return false;
     owner_.loadSpellNameCache();
-    const auto spellInfo = owner_.spellNameCacheRef().find(spellId);
-    const bool nextSwing = spellInfo != owner_.spellNameCacheRef().end() &&
-                           isOnNextSwingSpell(spellInfo->second.attr);
-    if (!nextSwing && !isGCDActive()) {
-        gcdTotal_ = 1.5f;
-        gcdStartedAt_ = std::chrono::steady_clock::now();
-        optimisticGcdSpellId_ = spellId;
-        optimisticGcdCastCount_ = castCount_;
-        if (owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("SPELL_UPDATE_COOLDOWN", {});
-            owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_COOLDOWN", {});
+    const auto it = owner_.spellNameCacheRef().find(spellId);
+    // A layout that does not say which spells the GCD holds: refuse nothing
+    // on its account and let the server decide, as before.
+    if (it == owner_.spellNameCacheRef().end() || it->second.startRecoveryCategory == 0xFFFFFFFFu)
+        return false;
+    // The GCD holds the spells of its category (0x807980 compares +0x28).
+    return it->second.startRecoveryCategory != 0 &&
+           it->second.startRecoveryCategory == gcdCategory_;
+}
+
+void SpellHandler::startPredictedGcd(uint32_t spellId) {
+    owner_.loadSpellNameCache();
+    const auto it = owner_.spellNameCacheRef().find(spellId);
+    const bool known = it != owner_.spellNameCacheRef().end();
+    if ((known && isOnNextSwingSpell(it->second.attr)) || isGCDActive()) return;
+    uint32_t gcdMs = 0;
+    uint32_t category = 133;
+    if (!known || it->second.startRecoveryCategory == 0xFFFFFFFFu) {
+        // No Spell.dbc row, or a file that does not say: the old guess, 1.5 s.
+        gcdMs = 1500;
+    } else {
+        const auto& info = it->second;
+        // UNIT_MOD_CAST_SPEED, field 80 of the 3.3.5a unit; older layouts
+        // keep the unhasted value.
+        float castSpeed = 1.0f;
+        if (!isPreWotlk()) {
+            if (auto player = owner_.getEntityManager().getEntity(owner_.getPlayerGuid())) {
+                const uint32_t raw = player->getField(80);
+                float f = 0.0f;
+                std::memcpy(&f, &raw, sizeof f);
+                castSpeed = f;
+            }
+        }
+        gcdMs = stock_cast::predictedGcdMs(info.startRecoveryCategory, info.startRecoveryMs,
+                                           info.dmgClass, info.attr, castSpeed);
+        category = info.startRecoveryCategory;
+    }
+    if (gcdMs == 0) return;
+    gcdTotal_ = static_cast<float>(gcdMs) / 1000.0f;
+    gcdCategory_ = category;
+    gcdStartedAt_ = std::chrono::steady_clock::now();
+    optimisticGcdSpellId_ = spellId;
+    optimisticGcdCastCount_ = castCount_;
+    if (owner_.addonEventCallbackRef()) {
+        owner_.addonEventCallbackRef()("SPELL_UPDATE_COOLDOWN", {});
+        owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_COOLDOWN", {});
+    }
+}
+
+void SpellHandler::cancelAutoRepeat() {
+    if (autoRepeatSpellId_ == 0) return;
+    if (owner_.getSocket() && owner_.getState() == WorldState::IN_WORLD) {
+        network::Packet pkt(wireOpcode(Opcode::CMSG_CANCEL_AUTO_REPEAT_SPELL));
+        owner_.getSocket()->send(pkt);
+    }
+    autoRepeatSpellId_ = 0;
+    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("STOP_AUTOREPEAT_SPELL", {});
+}
+
+void SpellHandler::refuseCastLocally(uint32_t spellId, uint8_t result) {
+    showCastFailure(spellId, result, 0, 0, false);
+}
+
+int64_t SpellHandler::steadyNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+int SpellHandler::playerPowerType() const {
+    auto playerEntity = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
+    if (auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity)) return playerUnit->getPowerType();
+    return -1;
+}
+
+bool SpellHandler::showCastFailure(uint32_t spellId, uint8_t result, uint32_t miscArg,
+                                   uint32_t miscArg2, bool fromServer) {
+    // 0x808200: the same spell refused for the same reason within 3 s of its
+    // last refusal shows nothing, from the client's own checks and the
+    // server's alike. That is the whole of the stock client's answer to a
+    // mashed key - the text and its voice then come once per burst.
+    if (!castErrorThrottle_.shouldShow(spellId, result, steadyNowMs())) return false;
+    // Totem failures name tool item ids; request their info so a retry of the
+    // craft can show the tool's name even if it wasn't cached yet.
+    if (result == kCastResultTotems) {
+        if (miscArg != 0) owner_.ensureItemInfo(miscArg);
+        if (miscArg2 != 0) owner_.ensureItemInfo(miscArg2);
+    }
+    // A missing reagent or item count names the item too.
+    constexpr uint8_t kCastResultReagents = 0x64, kCastResultNeedMoreItems = 0x37;
+    if ((result == kCastResultReagents || result == kCastResultNeedMoreItems) && miscArg != 0) {
+        owner_.ensureItemInfo(miscArg);
+    }
+    const int powerType = playerPowerType();
+    std::string errMsg;
+    // Not ready is shown as the error table's cooldown line (0x807F10), not
+    // as SPELL_FAILED_NOT_READY's "Not yet recovered".
+    {
+        owner_.loadSpellNameCache();
+        const auto it = owner_.spellNameCacheRef().find(spellId);
+        const uint32_t category = it != owner_.spellNameCacheRef().end() ? it->second.category : 0;
+        const uint32_t attr = it != owner_.spellNameCacheRef().end() ? it->second.attr : 0;
+        if (const char* key = stock_cast::notReadyErrorName(result, category, attr)) {
+            errMsg = globalString(owner_.services().assetManager, key);
+            if (errMsg.empty()) errMsg = stock_cast::notReadyErrorText(key);
         }
     }
+    if (errMsg.empty())
+        errMsg = castFailureMessage(owner_, spellId, result, powerType, miscArg, miscArg2);
+    owner_.addUIError(errMsg);
+    // The character's line for it ("Not enough mana", "I'm out of range",
+    // "That ability isn't ready yet"), which the error table plays with the
+    // text (0x5216F0); the throttle above is what keeps it from repeating.
+    if (auto speech = errorSpeechForCastResult(spellId, result, powerType))
+        owner_.playErrorSpeech(*speech);
+    LOG_DEBUG("Cast refused (", fromServer ? "server" : "client", "): spell ", spellId,
+              " result ", static_cast<int>(result), " - ", errMsg);
+    return true;
 }
 
 bool SpellHandler::groundTargetingFor(uint32_t spellId, GroundTargeting& out) const {
@@ -2657,9 +2781,34 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
     const uint64_t gatherGoGuid = owner_.lastInteractedGoGuidRef();
     const bool gatherCast = gatherGoGuid != 0 && isGatherSpellId(data.spellId);
 
+    // The refusal of a press made while another cast runs - "Another action
+    // is in progress", or a spell not ready - is about that press only. The
+    // stock client finds the refused Spell by its cast count (0x809AF0 ->
+    // 0x8051D0) and the running cast, its bar and its build-up go on.
+    const bool otherPress = casting_ &&
+        !(data.spellId == currentCastSpellId_ && answersPress(data, currentCastCount_));
+    if (otherPress) {
+        if (data.spellId == nextSwingSpellId_ && answersPress(data, nextSwingCastCount_)) nextSwingSpellId_ = 0;
+        if (data.result == kSpellFailedNotReady) seedCooldownFromSpellInfo(data.spellId);
+        // The global cooldown that press started on its send goes with it;
+        // the running cast's own is left alone.
+        if (data.spellId == optimisticGcdSpellId_ && isGCDActive() &&
+            answersPress(data, optimisticGcdCastCount_)) {
+            gcdTotal_ = 0.0f;
+            optimisticGcdSpellId_ = 0;
+            if (owner_.addonEventCallbackRef()) {
+                owner_.addonEventCallbackRef()("SPELL_UPDATE_COOLDOWN", {});
+                owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_COOLDOWN", {});
+            }
+        }
+        showCastFailure(data.spellId, data.result, data.miscArg, data.miscArg2, true);
+        return;
+    }
+
     casting_ = false;
     castIsChannel_ = false;
     currentCastSpellId_ = 0;
+    predictedPrecastSpellId_ = 0;
     // Only the refusal of the press that queued it: pressing it again while it
     // waits for the swing is refused, and the first is still queued.
     if (data.spellId == nextSwingSpellId_ && answersPress(data, nextSwingCastCount_)) nextSwingSpellId_ = 0;
@@ -2701,51 +2850,22 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
         }
     }
 
-    // Show failure reason
-    int powerType = -1;
-    auto playerEntity = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
-    if (auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity)) {
-        powerType = playerUnit->getPowerType();
-    }
     if (data.result == kSpellFailedNotReady) {
         seedCooldownFromSpellInfo(data.spellId);
     }
-    // Totem failures name tool item ids; request their info so a retry of the
-    // craft can show the tool's name even if it wasn't cached yet.
-    if (data.result == kCastResultTotems) {
-        if (data.miscArg != 0) owner_.ensureItemInfo(data.miscArg);
-        if (data.miscArg2 != 0) owner_.ensureItemInfo(data.miscArg2);
-    }
-    // A missing reagent or item count names the item too.
-    constexpr uint8_t kCastResultReagents = 0x64, kCastResultNeedMoreItems = 0x37;
-    if ((data.result == kCastResultReagents || data.result == kCastResultNeedMoreItems) &&
-        data.miscArg != 0) {
-        owner_.ensureItemInfo(data.miscArg);
-    }
-    std::string errMsg = castFailureMessage(owner_, data.spellId, data.result, powerType,
-                                            data.miscArg, data.miscArg2);
     if (gatherCast) {
-        errMsg = gatherCastFailureMessage(owner_, gatherGoGuid, data.spellId,
-                                          data.result, errMsg);
+        const std::string generic = castFailureMessage(owner_, data.spellId, data.result,
+                                                       playerPowerType(), data.miscArg, data.miscArg2);
+        const std::string errMsg = gatherCastFailureMessage(owner_, gatherGoGuid, data.spellId,
+                                                            data.result, generic);
         if (shouldDespawnGatherTarget(data.result)) {
             owner_.despawnGameObjectLocally(gatherGoGuid);
         }
-    }
-    owner_.addUIError(errMsg);
-
-    // On screen and nowhere else. A cast failure went to the chat log as well
-    // from here and from handleCastResult both, so the fix that took it out of
-    // GameHandler::raiseUiError changed nothing that was being reported.
-    const bool routine = isRoutineCastRejection(data.result);
-
-    // Character speech response ("Not enough mana", "I'm out of range", ...),
-    // which is all the stock client plays for a failed cast. The Error.wav
-    // that played here as well is in no SoundEntries row.
-    // Suppressed for gather casts, whose failures are routine and already
-    // rephrased, and for the rejections that repeat with the keypress.
-    if (!gatherCast && !routine) {
-        if (auto speech = errorSpeechForCastResult(data.spellId, data.result, powerType))
-            owner_.playErrorSpeech(*speech);
+        // Rephrased, and routine for a gatherer: the text without the voice.
+        if (castErrorThrottle_.shouldShow(data.spellId, data.result, steadyNowMs()))
+            owner_.addUIError(errMsg);
+    } else {
+        showCastFailure(data.spellId, data.result, data.miscArg, data.miscArg2, true);
     }
 
     if (owner_.addonEventCallbackRef()) {
@@ -2776,6 +2896,12 @@ void SpellHandler::handleSpellStart(network::Packet& packet) {
     };
     const SpellCastType castType = classifyCast(data.targetGuid, data.casterUnit);
     const bool rangedWeaponAttack = spellclass::isRangedWeaponAutoAttack(data.spellId);
+    // The player's own build-up already started with the press (castSpell,
+    // as 0x80AC90 -> 0x805330): 0x805330 finds it playing and leaves it.
+    const bool precastPredicted = data.casterUnit == owner_.getPlayerGuid() &&
+                                  predictedPrecastSpellId_ != 0 &&
+                                  predictedPrecastSpellId_ == data.spellId;
+    if (data.casterUnit == owner_.getPlayerGuid()) predictedPrecastSpellId_ = 0;
 
     // Track cast bar for any non-player caster
     if (data.casterUnit != owner_.getPlayerGuid() && data.castTime > 0 && !rangedWeaponAttack) {
@@ -2815,6 +2941,7 @@ void SpellHandler::handleSpellStart(network::Packet& packet) {
         casting_ = true;
         castIsChannel_ = false;
         currentCastSpellId_ = data.spellId;
+        currentCastCount_ = isClassicLikeExpansion() ? castCount_ : data.castCount;
         castTimeTotal_ = data.castTime / 1000.0f;
         castTimeRemaining_ = castTimeTotal_;
 
@@ -2835,7 +2962,7 @@ void SpellHandler::handleSpellStart(network::Packet& packet) {
             }
         }
 
-        if (owner_.spellCastAnimCallbackRef()) {
+        if (owner_.spellCastAnimCallbackRef() && !precastPredicted) {
             owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), true, false, castType);
         }
 
@@ -2870,7 +2997,7 @@ void SpellHandler::handleSpellStart(network::Packet& packet) {
 
     // The precast kit's build-up on the caster (any caster) until SPELL_GO,
     // a failure or the timeout. Skip profession spells.
-    if (!owner_.isProfessionSpell(data.spellId) && !rangedWeaponAttack) {
+    if (!owner_.isProfessionSpell(data.spellId) && !rangedWeaponAttack && !precastPredicted) {
         triggerCastVisual(data.spellId, data.casterUnit, data.castTime);
     }
 }
@@ -4469,6 +4596,16 @@ void SpellHandler::loadSpellNameCache() const {
         spellL ? spellL->field("StartRecoveryCategory") : 0xFFFFFFFF;
     if (startRecoveryCategoryField == 0xFFFFFFFF && fieldCount == 234)
         startRecoveryCategoryField = 205;
+    // Beside it in the same record: StartRecoveryTime 206, DmgClass 213,
+    // and Category 1 - the 3.3.5a columns, as the GCD and the "not ready"
+    // text need them (0x805D70, 0x807F10).
+    const bool wotlkSpellShape = fieldCount == 234;
+    const uint32_t startRecoveryTimeField = spellL && spellL->field("StartRecoveryTime") != 0xFFFFFFFF
+        ? spellL->field("StartRecoveryTime") : (wotlkSpellShape ? 206u : 0xFFFFFFFFu);
+    const uint32_t dmgClassField = spellL && spellL->field("DmgClass") != 0xFFFFFFFF
+        ? spellL->field("DmgClass") : (wotlkSpellShape ? 213u : 0xFFFFFFFFu);
+    const uint32_t categoryField = spellL && spellL->field("Category") != 0xFFFFFFFF
+        ? spellL->field("Category") : (wotlkSpellShape ? 1u : 0xFFFFFFFFu);
 
     uint32_t count = dbc->getRecordCount();
     for (uint32_t i = 0; i < count; ++i) {
@@ -4553,6 +4690,10 @@ void SpellHandler::loadSpellNameCache() const {
                 entry.categoryRecoveryMs = dbc->getUInt32(i, categoryRecoveryField);
             if (startRecoveryCategoryField < fieldCount)
                 entry.startRecoveryCategory = dbc->getUInt32(i, startRecoveryCategoryField);
+            if (startRecoveryTimeField < fieldCount)
+                entry.startRecoveryMs = dbc->getUInt32(i, startRecoveryTimeField);
+            if (dmgClassField < fieldCount) entry.dmgClass = dbc->getUInt32(i, dmgClassField);
+            if (categoryField < fieldCount) entry.category = dbc->getUInt32(i, categoryField);
             if (hasEffectFields) {
                 entry.createdItemId = pipeline::spellCreatedItem(*dbc, i, effectFields, itemTypeFields);
             }
@@ -6288,6 +6429,7 @@ void SpellHandler::handleResumeCastBar(network::Packet& packet) {
             casting_            = true;
             castIsChannel_      = false;
             currentCastSpellId_ = spellId;
+            currentCastCount_   = castCount_;
             castTimeTotal_      = totalMs  / 1000.0f;
             castTimeRemaining_  = remainMs / 1000.0f;
         } else {
@@ -6316,6 +6458,7 @@ void SpellHandler::handleChannelStart(network::Packet& packet) {
             casting_            = true;
             castIsChannel_      = true;
             currentCastSpellId_ = chanSpellId;
+            currentCastCount_   = castCount_;
             castTimeTotal_      = chanTotalMs / 1000.0f;
             castTimeRemaining_  = castTimeTotal_;
         } else {
