@@ -921,6 +921,7 @@ void GameHandler::update(float deltaTime) {
 
         // Tick logout countdown
         if (socialHandler_) socialHandler_->updateLogoutCountdown(deltaTime);
+        if (socialHandler_) socialHandler_->updateDuelCountdown(deltaTime);
 
         section("gameHandler/world/misc");
         updateTaxiAndMountState(deltaTime);
@@ -3088,7 +3089,55 @@ GameHandler::SpellDataInfo GameHandler::getSpellData(uint32_t spellId) const {
     return info;
 }
 
+std::optional<stock_duel::DuelFields> GameHandler::duelFieldsOf(const Unit& unit) const {
+    const uint16_t arbiterIdx = fieldIndex(UF::PLAYER_DUEL_ARBITER);
+    const uint16_t teamIdx = fieldIndex(UF::PLAYER_DUEL_TEAM);
+    if (arbiterIdx == 0xFFFF || teamIdx == 0xFFFF) return std::nullopt;
+    auto guidAt = [](const Entity& e, uint16_t idx) {
+        return static_cast<uint64_t>(e.getField(idx)) |
+               (static_cast<uint64_t>(e.getField(static_cast<uint16_t>(idx + 1))) << 32);
+    };
+    // 0x718B70: the unit, else whoever charms it, else whoever made it; a
+    // player at the first or second step.
+    const Entity* who = &unit;
+    for (int step = 0; step < 2 && who->getType() != ObjectType::PLAYER; ++step) {
+        uint64_t owner = guidAt(*who, fieldIndex(UF::UNIT_FIELD_CHARMEDBY));
+        if (owner == 0) owner = guidAt(*who, fieldIndex(UF::UNIT_FIELD_CREATEDBY_LO));
+        if (owner == 0) return std::nullopt;
+        auto e = getEntityManager().getEntity(owner);
+        if (!e) return std::nullopt;
+        who = e.get();
+    }
+    if (who->getType() != ObjectType::PLAYER) return std::nullopt;
+    return stock_duel::DuelFields{.arbiter = guidAt(*who, arbiterIdx), .team = who->getField(teamIdx)};
+}
+
+std::optional<int> GameHandler::duelReactionToPlayer(const Unit& unit) const {
+    auto self = getEntityManager().getEntity(playerGuid);
+    if (!self || unit.getGuid() == playerGuid) return std::nullopt;
+    const auto* selfUnit = dynamic_cast<const Unit*>(self.get());
+    if (!selfUnit) return std::nullopt;
+    const auto mine = duelFieldsOf(*selfUnit);
+    const auto theirs = duelFieldsOf(unit);
+    if (!mine || !theirs) return std::nullopt;
+    return stock_duel::duelReaction(*mine, *theirs);
+}
+
+bool GameHandler::unitHostileToPlayer(const Unit& unit) const {
+    if (const auto duel = duelReactionToPlayer(unit)) return *duel < 4;
+    return isHostileFaction(unit.getFactionTemplate());
+}
+
+void GameHandler::refreshDuelHostility() {
+    for (const auto& [guid, entity] : getEntityManager().getEntities()) {
+        if (!entity || !entity->isUnit()) continue;
+        auto* unit = static_cast<Unit*>(entity.get());
+        unit->setHostile(unitHostileToPlayer(*unit));
+    }
+}
+
 int GameHandler::unitReactionToPlayer(const Unit& unit) const {
+    if (const auto duel = duelReactionToPlayer(unit)) return *duel;
     const uint32_t ft = unit.getFactionTemplate();
     if (auto it = factionTemplateRepList_.find(ft);
         it != factionTemplateRepList_.end() && it->second < initialFactions_.size()) {
@@ -3107,11 +3156,8 @@ int GameHandler::unitReactionToPlayer(const Unit& unit) const {
 
 void GameHandler::refreshUnitHostility() {
     if (factionTemplateRepList_.empty()) return;
-    for (const auto& [guid, entity] : getEntityManager().getEntities()) {
-        if (!entity || !entity->isUnit()) continue;
-        auto* unit = static_cast<Unit*>(entity.get());
-        unit->setHostile(isHostileFaction(unit->getFactionTemplate()));
-    }
+    // The same walk as a duel's: every unit's cached hostility again.
+    refreshDuelHostility();
 }
 
 int32_t GameHandler::factionBaseReputation(uint32_t factionId) const {

@@ -145,12 +145,16 @@ ChatPanel::SlashCommands ChatPanel::consumeSlashCommands() {
 void ChatPanel::executeMacroText(game::GameHandler& gameHandler,
                                   const std::string& macroText) {
     macroStopped_ = false;
+    // The macro runner (0x564DB0): its once-per-macro switches for the run.
+    auto* combat = gameHandler.getCombatHandler();
+    if (combat) combat->macroOnce().beginMacro();
     for (const auto& cmd : macroCommandLines(macroText)) {
         strncpy(chatInputBuffer_, cmd.c_str(), sizeof(chatInputBuffer_) - 1);
         chatInputBuffer_[sizeof(chatInputBuffer_) - 1] = '\0';
         sendChatMessage(gameHandler);
         if (macroStopped_) break;
     }
+    if (combat) combat->macroOnce().endMacro();
     macroStopped_ = false;
 }
 

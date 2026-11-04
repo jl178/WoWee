@@ -1731,6 +1731,11 @@ tab_target::UnitFacts CombatHandler::targetNearestFacts(uint64_t guid, const Uni
         f.canAttack = false;
     } else if (isAggressiveTowardPlayer(guid)) {
         f.canAttack = true;
+    } else if (const auto duel = owner_.duelReactionToPlayer(unit)) {
+        // A duel joins the two (and what they control): the reaction test
+        // passes for the other side and the arbiter test answers yes,
+        // whatever the factions and PvP flags (0x729740, stock_duel.hpp).
+        f.canAttack = *duel < 4;
     } else if (f.isPlayer) {
         uint8_t mine = 0;
         if (auto self = owner_.getEntityManager().getEntity(owner_.getPlayerGuid()))
@@ -1756,9 +1761,21 @@ tab_target::UnitFacts CombatHandler::targetNearestFacts(uint64_t guid, const Uni
     return f;
 }
 
+bool CombatHandler::canAttackUnit(uint64_t guid) const {
+    if (guid == 0 || guid == owner_.getPlayerGuid()) return false;
+    auto entity = owner_.getEntityManager().getEntity(guid);
+    auto* unit = dynamic_cast<Unit*>(entity.get());
+    return unit && targetNearestFacts(guid, *unit).canAttack;
+}
+
 void CombatHandler::targetNearest(TargetNearestMode mode, bool reverse) {
     namespace tt = tab_target;
     if (!owner_.isInWorld()) return;
+    // One per macro (0xBEAF44 bit 0x20).
+    if (tt::onceEachMacro(mode) && !macroOnce_.take(tt::MacroOnce::kTargetNearestBit)) {
+        LOG_DEBUG("TargetNearest: a second call in one macro does nothing");
+        return;
+    }
     const uint64_t self = owner_.getPlayerGuid();
     const auto& mi = owner_.getMovementInfo();
     const glm::vec3 me(mi.x, mi.y, mi.z);

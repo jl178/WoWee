@@ -1293,10 +1293,13 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
     {
         // The manager filters consumed physical presses, not unrelated pad
         // sources of the same command.
-        if (!textFocus && bindings.isCommandPressed("TARGETNEARESTENEMY")) {
+        // Normally done at the top of the frame (processTargetKeysAtInput);
+        // this covers a frame that skipped it.
+        if (!targetKeysDone_ && !textFocus && bindings.isCommandPressed("TARGETNEARESTENEMY")) {
             const auto& movement = gameHandler.getMovementInfo();
             gameHandler.tabTarget(movement.x, movement.y, movement.z);
         }
+        targetKeysDone_ = false;
 
         if (!textFocus &&
             KeybindingManager::getInstance().isActionPressed(KeybindingManager::Action::TOGGLE_SETTINGS, true)) {
@@ -1740,6 +1743,19 @@ void GameScreen::processWorldClicksAtInput(game::GameHandler& gameHandler) {
     worldClicksDone_ = true;
 }
 
+void GameScreen::processTargetKeysAtInput(game::GameHandler& gameHandler) {
+    // The keyboard's Tab already ran its Bindings.xml script in the pump
+    // (LuaEngine::interfaceRunsFirst) and the manager filters that consumed
+    // press; what is left is a pad button's, or a key with no interface.
+    const bool textFocus = ImGui::GetIO().WantTextInput || interfaceTakingTypedInput();
+    auto& bindings = KeybindingManager::getInstance();
+    if (!textFocus && bindings.isCommandPressed("TARGETNEARESTENEMY")) {
+        const auto& movement = gameHandler.getMovementInfo();
+        gameHandler.tabTarget(movement.x, movement.y, movement.z);
+    }
+    targetKeysDone_ = true;
+}
+
 void GameScreen::processWorldClicks(game::GameHandler& gameHandler) {
     auto& io = ImGui::GetIO();
     auto& input = core::Input::getInstance();
@@ -2130,7 +2146,11 @@ void GameScreen::processWorldClicks(game::GameHandler& gameHandler) {
                         gameHandler.interactWithGameObject(target->getGuid());
                     }
                 } else if (target->getType() == game::ObjectType::PLAYER) {
-                    // Right-click another player could start attack in PvP context
+                    // CGUnit_C::OnRightClick (0x731260): another player the
+                    // player may attack - a duel opponent, an enemy flagged
+                    // for PvP - is attacked (0x6E4950 -> StartAttack).
+                    if (gameHandler.canAttackUnit(target->getGuid()))
+                        gameHandler.startAutoAttack(target->getGuid());
                 }
             }
         }

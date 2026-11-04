@@ -194,6 +194,19 @@ wowee_add_test(test_stock_movement
 wowee_add_test(test_stock_cast_timing
     SOURCES test_stock_cast_timing.cpp)
 
+# ── test_stock_cast_events ──────────────────────────────────
+# How a cast ends as the stock client reports it: the event per result, the
+# bar's STOP once, which cancels tell the server, the casts in flight, the
+# fizzle. Header-only.
+wowee_add_test(test_stock_cast_events
+    SOURCES test_stock_cast_events.cpp)
+
+# ── test_stock_duel ─────────────────────────────────────────
+# Duels: the reaction and CanAttack rule from the duel fields, and the chat
+# countdown. Header-only.
+wowee_add_test(test_stock_duel
+    SOURCES test_stock_duel.cpp)
+
 # ── test_stock_death_rules ──────────────────────────────────
 # Dying, the ghost world, the corpse and loot rolls as the stock client does
 # them: the release timer, the screen effect, the corpse range, the resurrect

@@ -7732,43 +7732,8 @@ void LuaEngine::registerCoreAPI() {
         "end)\n"
         "petUnlearnFrame:Hide()\n");
 
-    // The duel countdown, "3, 2, 1, Fight!" over the middle of the screen.
-    // FrameXML has the request popup and the out-of-bounds timer and nothing
-    // that counts down to the start, so this is the client's own: the server
-    // says how long with SMSG_DUEL_COUNTDOWN, and the frame counts it itself.
-    bootstrap(
-        "local duel = CreateFrame('Frame', '__WoweeDuelCountdown')\n"
-        "duel:SetWidth(400) duel:SetHeight(120)\n"
-        "duel:SetFrameStrata('FULLSCREEN_DIALOG')\n"
-        // The first big font this interface defines; 1.12, 2.4.3 and 3.3.5
-        // do not all have the same ones.
-        "local duelFont = (NumberFontNormalHuge and 'NumberFontNormalHuge')\n"
-        "    or (GameFontNormalHuge and 'GameFontNormalHuge') or 'GameFontNormalLarge'\n"
-        "local duelText = duel:CreateFontString('__WoweeDuelCountdownText', 'OVERLAY', duelFont)\n"
-        "duelText:SetPoint('CENTER', duel, 'CENTER', 0, 0)\n"
-        "local duelEnds = 0\n"
-        "duel:RegisterEvent('WOWEE_DUEL_COUNTDOWN')\n"
-        "duel:RegisterEvent('DUEL_FINISHED')\n"
-        "duel:SetScript('OnEvent', function(self, event, ms)\n"
-        "    if event == 'DUEL_FINISHED' then self:Hide() return end\n"
-        "    duelEnds = GetTime() + (tonumber(ms or arg1) or 3000) / 1000\n"
-        "    self:ClearAllPoints()\n"
-        "    self:SetPoint('CENTER', UIParent, 'CENTER', 0, UIParent:GetHeight() * 0.15)\n"
-        "    self:Show()\n"
-        "end)\n"
-        "duel:SetScript('OnUpdate', function(self)\n"
-        "    local left = duelEnds - GetTime()\n"
-        "    if left <= 0 then self:Hide() return end\n"
-        "    if left > 0.5 then\n"
-        "        duelText:SetText(tostring(math.ceil(left)))\n"
-        "        duelText:SetTextColor(1, 0.78, 0.2)\n"
-        "    else\n"
-        "        duelText:SetText('Fight!')\n"
-        "        duelText:SetTextColor(1, 0.24, 0.24)\n"
-        "    end\n"
-        "    self:SetAlpha(0.75 + 0.25 * math.sin(GetTime() * 6.28))\n"
-        "end)\n"
-        "duel:Hide()\n");
+    // No duel countdown banner: the stock client counts SMSG_DUEL_COUNTDOWN
+    // down in chat ("Duel starting: 3", SocialHandler::updateDuelCountdown).
 
     // Two banners this client puts over the middle of the screen, "Level N!"
     // with a gold wash on a level-up and "You have been resurrected" with a

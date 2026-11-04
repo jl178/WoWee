@@ -68,6 +68,7 @@ struct UnitCastState {
     bool          casting         = false;
     bool          isChannel       = false;
     uint32_t      spellId         = 0;
+    uint8_t       castCount       = 0;     // the count SMSG_SPELL_START gave it
     float         timeRemaining   = 0.0f;
     float         timeTotal       = 0.0f;
     bool          interruptible   = true;

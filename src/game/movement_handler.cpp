@@ -651,7 +651,8 @@ void MovementHandler::sendMovement(Opcode opcode) {
     // interruptForMoveStart). Run by MoveForward/Backward/Strafe starts,
     // JumpOrAscendStart and SitStandOrDescendStart, autorun and two-button
     // running - here, the start opcodes they send. Turning is not one.
-    if (!movingOtherUnit() && (owner_.isCasting() || owner_.isChanneling())) {
+    if (!movingOtherUnit() && owner_.getSpellHandler() &&
+        owner_.getSpellHandler()->moveStartHasWork()) {
         const bool isMoveStart =
             opcode == Opcode::MSG_MOVE_START_FORWARD  ||
             opcode == Opcode::MSG_MOVE_START_BACKWARD ||

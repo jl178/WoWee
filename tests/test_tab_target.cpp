@@ -231,3 +231,37 @@ TEST_CASE("another mode builds its own list", "[tab-target]") {
     CHECK(w.press(1000) == 10);
     CHECK(w.press(1100, false, TargetNearestMode::Friend) == 10);
 }
+
+TEST_CASE("one TargetNearest per macro (0xBEAF44 bit 0x20)") {
+    tt::MacroOnce once;
+    constexpr uint32_t bit = tt::MacroOnce::kTargetNearestBit;
+    // Outside a macro: always.
+    CHECK(once.take(bit));
+    CHECK(once.take(bit));
+    // In one: the first, not the second.
+    once.beginMacro();
+    CHECK(once.inMacro());
+    CHECK(once.take(bit));
+    CHECK_FALSE(once.take(bit));
+    // A macro run from inside it (RunMacro, /click) shares the switches.
+    once.beginMacro();
+    CHECK_FALSE(once.take(bit));
+    once.endMacro();
+    once.endMacro();
+    CHECK_FALSE(once.inMacro());
+    CHECK(once.take(bit));
+    // The next macro starts with them all set again.
+    once.beginMacro();
+    CHECK(once.take(bit));
+    once.endMacro();
+}
+
+TEST_CASE("party and raid stepping are not held to one per macro") {
+    CHECK(tt::onceEachMacro(TargetNearestMode::Any));
+    CHECK(tt::onceEachMacro(TargetNearestMode::Enemy));
+    CHECK(tt::onceEachMacro(TargetNearestMode::EnemyPlayer));
+    CHECK(tt::onceEachMacro(TargetNearestMode::Friend));
+    CHECK(tt::onceEachMacro(TargetNearestMode::FriendPlayer));
+    CHECK_FALSE(tt::onceEachMacro(TargetNearestMode::Party));
+    CHECK_FALSE(tt::onceEachMacro(TargetNearestMode::Raid));
+}

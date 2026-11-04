@@ -54,7 +54,9 @@ TEST_CASE("an interrupted cast names its caster as the server writes it", "[repl
         p.writeUInt32(133);
         p.writeUInt8(0);  // result
         s.receive(p);
-        CHECK(events.names == std::vector<std::string>{"UNIT_SPELLCAST_INTERRUPTED", "UNIT_SPELLCAST_STOP"});
+        // 0x809C70 -> 0x7FECC0: the event by result (0 is a plain failure),
+        // and no STOP for a cast the client was not showing.
+        CHECK(events.names == std::vector<std::string>{"UNIT_SPELLCAST_FAILED"});
     }
 }
 
@@ -64,15 +66,21 @@ TEST_CASE("the player's own interrupt reads as one in each expansion's numbering
                                             std::pair<const char*, uint8_t>{"tbc", 0x25}}) {
         CAPTURE(expansion);
         Session s(expansion);
+        std::vector<std::string> names;
+        s.handler().setAddonEventCallback([&names](const std::string& name, const std::vector<std::string>& args) {
+            if (!args.empty() && args.front() == "player") names.push_back(name);
+        });
+        const size_t chatBefore = s.handler().getChatHistory().size();
         Packet p(wireOpcode(Opcode::SMSG_SPELL_FAILURE));
         p.writePackedGuid(Session::kPlayerGuid);
         if (std::string(expansion) == "wotlk") p.writeUInt8(0);
         p.writeUInt32(133);
         p.writeUInt8(result);
         s.receive(p);
-        const auto& chat = s.handler().getChatHistory();
-        REQUIRE_FALSE(chat.empty());
-        CHECK(chat.back().message.find("Interrupted") != std::string::npos);
+        // 0x809C70 says nothing (the text is SMSG_CAST_FAILED's) and fires
+        // UNIT_SPELLCAST_INTERRUPTED - read as an interrupt in either numbering.
+        CHECK(s.handler().getChatHistory().size() == chatBefore);
+        CHECK(names == std::vector<std::string>{"UNIT_SPELLCAST_INTERRUPTED"});
     }
 }
 
@@ -85,7 +93,8 @@ TEST_CASE("another unit's failed cast names its caster as the server writes it",
         writeCaster(p, std::string(expansion) == "classic");
         p.writeUInt32(133);
         s.receive(p);
-        CHECK(events.names == std::vector<std::string>{"UNIT_SPELLCAST_FAILED", "UNIT_SPELLCAST_STOP"});
+        // The spell alone, as the older cores send it for an interrupt.
+        CHECK(events.names == std::vector<std::string>{"UNIT_SPELLCAST_INTERRUPTED"});
     }
 }
 

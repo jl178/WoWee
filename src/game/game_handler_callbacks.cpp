@@ -2441,6 +2441,10 @@ void GameHandler::emitAllOtherPlayerEquipment() {
 // Combat (delegated to CombatHandler)
 // ============================================================
 
+bool GameHandler::canAttackUnit(uint64_t guid) const {
+    return combatHandler_ && combatHandler_->canAttackUnit(guid);
+}
+
 void GameHandler::startAutoAttack(uint64_t targetGuid) {
     if (combatHandler_) combatHandler_->startAutoAttack(targetGuid);
 }
@@ -3997,6 +4001,25 @@ std::string GameHandler::guidToUnitId(uint64_t guid) const {
     if (guid == focusGuid)       return "focus";
     if (guid == petGuid_)        return "pet";
     return {};
+}
+std::vector<std::string> GameHandler::unitTokensForGuid(uint64_t guid) const {
+    std::vector<std::string> out;
+    if (guid == 0) return out;
+    if (guid == playerGuid) out.emplace_back("player");
+    if (guid == petGuid_) out.emplace_back("pet");
+    const auto& pd = getPartyData();
+    const bool raid = groupIsRaid(pd.groupType);
+    int n = 0;
+    for (const auto& m : pd.members) {
+        if (m.guid == playerGuid) continue;
+        if (raid && m.subGroup != pd.subGroup) continue;
+        if (++n > 4) break;
+        if (m.guid == guid) out.push_back("party" + std::to_string(n));
+    }
+    if (guid == targetGuid) out.emplace_back("target");
+    if (guid == focusGuid) out.emplace_back("focus");
+    if (guid == mouseoverGuid_) out.emplace_back("mouseover");
+    return out;
 }
 int GameHandler::findQuestLogSlotIndexFromServer(uint32_t questId) const {
     if (questHandler_) return questHandler_->findQuestLogSlotIndexFromServer(questId);

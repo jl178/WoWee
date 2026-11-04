@@ -28,6 +28,11 @@
 //                                  current profile window and open one
 //                                  named label (one PROFILE_AB line each,
 //                                  with frame and CPU median and p95)
+//   WoweeDebug_PadCommand(cmd, down) hold or release a binding command the
+//                                  way a pad button does - a virtual command,
+//                                  no key behind it - queued for the next
+//                                  input frame (the scripted source), for the
+//                                  pad paths
 //   WoweeDebug_Quit()              close the client
 //
 // Events pushed this way reach only this client: SDL's queue is in-process.
@@ -88,6 +93,13 @@ int luaDebugLog(lua_State* L) {
 
 int luaDebugScreenshot(lua_State* L) {
     gPendingScreenshot = luaL_checkstring(L, 1);
+    return 0;
+}
+
+int luaDebugPadCommand(lua_State* L) {
+    const char* command = luaL_checkstring(L, 1);
+    const bool down = lua_isnoneornil(L, 2) ? true : lua_toboolean(L, 2) != 0;
+    ui::KeybindingManager::getInstance().setVirtualCommand(command, "lua", down);
     return 0;
 }
 
@@ -270,6 +282,7 @@ void debugLuaHookTick(addons::LuaEngine* engine, SDL_Window* window) {
     lua_register(L, "WoweeDebug_Log", luaDebugLog);
     lua_register(L, "WoweeDebug_Screenshot", luaDebugScreenshot);
     lua_register(L, "WoweeDebug_PushKey", luaDebugPushKey);
+    lua_register(L, "WoweeDebug_PadCommand", luaDebugPadCommand);
     lua_register(L, "WoweeDebug_Quit", luaDebugQuit);
     lua_register(L, "WoweeDebug_ProfileTag", luaDebugProfileTag);
     lua_register(L, "WoweeDebug_Mouse", luaDebugMouse);
