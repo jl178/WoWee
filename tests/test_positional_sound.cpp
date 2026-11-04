@@ -85,9 +85,9 @@ TEST_CASE("A positional sound is panned towards its side of the listener", "[pos
 TEST_CASE("miniaudio adds no distance gain of its own", "[positional_sound]") {
     // The stock rolloff, set through the volume, is the only distance curve:
     // the same direction near and far mixes at the same level.
-    const Levels near = mixAt({0.0f, -2.0f, 0.0f});
-    const Levels far = mixAt({0.0f, -40.0f, 0.0f});
-    REQUIRE(far.right == Catch::Approx(near.right).epsilon(0.02));
-    REQUIRE(far.left == Catch::Approx(near.left).margin(0.01));
-    REQUIRE(far.right > 0.2f);
+    const Levels nearMix = mixAt({0.0f, -2.0f, 0.0f});
+    const Levels farMix = mixAt({0.0f, -40.0f, 0.0f});
+    REQUIRE(farMix.right == Catch::Approx(nearMix.right).epsilon(0.02));
+    REQUIRE(farMix.left == Catch::Approx(nearMix.left).margin(0.01));
+    REQUIRE(farMix.right > 0.2f);
 }

@@ -117,14 +117,11 @@ namespace {
     constexpr const char* kGroupArrowPath     = "Interface\\Minimap\\Rotating-MinimapGroupArrow.blp";
     constexpr const char* kCorpseArrowPath    = "Interface\\Minimap\\Rotating-MinimapCorpseArrow.blp";
     constexpr const char* kPoiIconsPath       = "Interface\\Minimap\\POIIcons.blp";
-    constexpr const char* kFlightMasterPath   = "Interface\\Minimap\\Tracking\\FlightMaster.blp";
 
     constexpr float kStockMinimapSize = 140.0f;  // Minimap.xml: <AbsDimension x="140" y="140"/>
     constexpr float kBlipSize = 16.0f;           // one ObjectIcons / PartyRaidBlips cell
     // The player arrow's size comes from the map (Minimap:SetPlayerTexture-
     // Width/Height, 40 in Minimap.lua) - see rendering::Minimap.
-    constexpr float kEdgeArrowSize = 32.0f;      // the rotating rim arrows
-    constexpr float kPoiIconSize = 16.0f;        // WorldMap_GetPOITextureCoords' worldMapIconDimension
 
     /// Cells of ObjectIcons.blp: 256x64, eight 32x32 cells to a row.
     ///

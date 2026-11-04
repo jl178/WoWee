@@ -413,7 +413,7 @@ void GameHandler::registerCoreOpcodes() {
     dispatchTable_[Opcode::SMSG_LEARNED_DANCE_MOVES] = [](network::Packet& packet) {
         LOG_DEBUG("SMSG_LEARNED_DANCE_MOVES: ignored (size=", packet.getSize(), ")");
     };
-    dispatchTable_[Opcode::SMSG_CHAR_RENAME] = [this](network::Packet& packet) {
+    dispatchTable_[Opcode::SMSG_CHAR_RENAME] = [](network::Packet& packet) {
         // uint8 result, and the guid and the new name only when it succeeded.
         //
         // This read a four-byte result and required thirteen bytes. A refusal
@@ -464,13 +464,13 @@ void GameHandler::registerCoreOpcodes() {
         fireAddonEvent("CONFIRM_BINDER", {lookupName(binderGuid_)});
     };
     registerSkipHandler(Opcode::SMSG_SET_PHASE_SHIFT);
-    dispatchTable_[Opcode::SMSG_TOGGLE_XP_GAIN] = [this](network::Packet& packet) {
+    dispatchTable_[Opcode::SMSG_TOGGLE_XP_GAIN] = [](network::Packet& packet) {
         if (!packet.hasRemaining(1)) return;
         uint8_t enabled = packet.readUInt8();
         // Console only (Wow.exe: "XP Gain Enabled" / "XP Gain Disabled").
         LOG_INFO("[console] ", enabled ? "XP Gain Enabled" : "XP Gain Disabled");
     };
-    dispatchTable_[Opcode::SMSG_BINDZONEREPLY] = [this](network::Packet& packet) {
+    dispatchTable_[Opcode::SMSG_BINDZONEREPLY] = [](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             // Read and dropped: Wow.exe (opcode 0x157) says nothing.
             (void)packet.readUInt32();
@@ -1277,7 +1277,7 @@ void GameHandler::registerCoreOpcodes() {
                 currencyLine(counts[i], info->name);
         }
     };
-    dispatchTable_[Opcode::SMSG_SOCKET_GEMS_RESULT] = [this](network::Packet& packet) {
+    dispatchTable_[Opcode::SMSG_SOCKET_GEMS_RESULT] = [](network::Packet& packet) {
         // There is no result field. Item::SendUpdateSockets writes the item's
         // guid and then the four enchantment ids now in its sockets, and sends
         // it only when the sockets were actually changed - so arriving *is* the
@@ -1712,7 +1712,7 @@ void GameHandler::registerRemainingOpcodes() {
         }
     };
     // Server-script text message - display in system chat
-    dispatchTable_[Opcode::SMSG_SCRIPT_MESSAGE] = [this](network::Packet& packet) {
+    dispatchTable_[Opcode::SMSG_SCRIPT_MESSAGE] = [](network::Packet& packet) {
         // Wow.exe registers no handler for this opcode: whatever a server
         // sends on it the stock client drops. Logged only.
         std::string msg = packet.readString();
@@ -1858,7 +1858,7 @@ void GameHandler::registerRemainingOpcodes() {
         const uint64_t guid = packet.readUInt64();
         if (mountSpecialCallback_) mountSpecialCallback_(guid);
     };
-    dispatchTable_[Opcode::SMSG_CHAR_CUSTOMIZE] = [this](network::Packet& packet) {
+    dispatchTable_[Opcode::SMSG_CHAR_CUSTOMIZE] = [](network::Packet& packet) {
         if (packet.hasRemaining(1)) {
             // A character-screen answer (Wow.exe 0x4D9190): the glue screen's
             // dialog says it; nothing in the world's chat.
@@ -1866,7 +1866,7 @@ void GameHandler::registerRemainingOpcodes() {
         }
         packet.skipAll();
     };
-    dispatchTable_[Opcode::SMSG_CHAR_FACTION_CHANGE] = [this](network::Packet& packet) {
+    dispatchTable_[Opcode::SMSG_CHAR_FACTION_CHANGE] = [](network::Packet& packet) {
         if (packet.hasRemaining(1)) {
             // As the customization (Wow.exe 0x4D92D0).
             (void)packet.readUInt8();
@@ -2032,7 +2032,7 @@ void GameHandler::registerRemainingOpcodes() {
             default: break;
         }
     };
-    dispatchTable_[Opcode::SMSG_GMTICKET_CREATE] = [this, gmTicketResult](network::Packet& packet) {
+    dispatchTable_[Opcode::SMSG_GMTICKET_CREATE] = [gmTicketResult](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             gmTicketResult(packet.readUInt32());
         }
@@ -3483,7 +3483,7 @@ void GameHandler::registerRemainingOpcodes() {
         fireAddonEvent("CALENDAR_UPDATE_EVENT_LIST", {});
     };
     dispatchTable_[Opcode::SMSG_CALENDAR_RAID_LOCKOUT_ADDED] =
-        [this, applyLockout](network::Packet& packet) {
+        [applyLockout](network::Packet& packet) {
         if (packet.hasRemaining(4 + 4 + 4 + 4 + 8)) {
             /*uint32_t packedNow =*/ packet.readUInt32();
             uint32_t mapId     = packet.readUInt32();
@@ -3498,7 +3498,7 @@ void GameHandler::registerRemainingOpcodes() {
     };
     // The same without the leading time: mapId, difficulty, seconds, guid.
     dispatchTable_[Opcode::SMSG_CALENDAR_RAID_LOCKOUT_REMOVED] =
-        [this, applyLockout](network::Packet& packet) {
+        [applyLockout](network::Packet& packet) {
         if (packet.hasRemaining(4 + 4)) {
             uint32_t mapId     = packet.readUInt32();
             uint32_t difficulty = packet.readUInt32();
@@ -3524,7 +3524,7 @@ void GameHandler::registerRemainingOpcodes() {
     };
     // uint64 kickerGuid + uint32 kickReasonType + null-terminated reason string
     // kickReasonType: 0=other, 1=afk, 2=vote kick
-    dispatchTable_[Opcode::SMSG_KICK_REASON] = [this](network::Packet& packet) {
+    dispatchTable_[Opcode::SMSG_KICK_REASON] = [](network::Packet& packet) {
         // uint64 kickerGuid + uint32 kickReasonType + null-terminated reason string
         // kickReasonType: 0=other, 1=afk, 2=vote kick
         if (!packet.hasRemaining(12)) {

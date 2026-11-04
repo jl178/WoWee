@@ -1497,7 +1497,7 @@ void Renderer::setEnhancements(const Enhancements& e) {
 void Renderer::applyEnhancementsToSubsystems() {
     // The subsystems come and go with the world, so the set is handed over
     // again whenever one of them is new as well as when the set changed.
-    const void* targets[std::size(enhTargets_)] = {
+    const void* targets[std::extent_v<decltype(enhTargets_)>] = {
         m2Renderer.get(), wmoRenderer.get(), characterRenderer.get(),
         terrainRenderer.get(), lensFlare.get(), lightingManager.get(),
         postProcessPipeline_.get(), cameraController.get(),

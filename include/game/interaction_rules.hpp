@@ -266,24 +266,24 @@ struct UnitCursorInput {
         return unable ? unableCursor(name) : std::string(name);
     };
     if (in.npcInteractable && in.npcFlags != 0) {
-        const bool far = in.npcOutOfRange;
+        const bool outOfRange = in.npcOutOfRange;
         // The quest status, then the template's own icon (0x715EA0).
-        std::string q = questStatusCursor(in.questGiverStatus, far);
+        std::string q = questStatusCursor(in.questGiverStatus, outOfRange);
         if (!q.empty()) return q;
-        if (!in.iconName.empty()) return pick(std::string(in.iconName).c_str(), far);
+        if (!in.iconName.empty()) return pick(std::string(in.iconName).c_str(), outOfRange);
         const uint32_t f = in.npcFlags;
-        if (f & kNpcRepair) return pick("RepairNPC", far);
-        if (f & kNpcInnkeeper) return pick("Innkeeper", far);
-        if (f & kNpcFlightMaster) return pick("Taxi", far);
-        if (f & kNpcTrainer) return pick("Trainer", far);
-        if (f & (kNpcSpiritHealer | kNpcSpiritGuide)) return pick("Speak", far);
-        if (f & (kNpcBanker | kNpcGuildBanker)) return pick("Buy", far);
-        if (f & (kNpcPetitioner | kNpcTabardDesigner | kNpcBattlemaster)) return pick("Speak", far);
-        if (f & kNpcAuctioneer) return pick("Buy", far);
-        if (f & kNpcStableMaster) return pick("Speak", far);
-        if (f & kNpcVendor) return pick("Pickup", far);
-        if (f & kNpcGossip) return pick("Speak", far);
-        if (f & kNpcSpellClick) return pick("Interact", far);
+        if (f & kNpcRepair) return pick("RepairNPC", outOfRange);
+        if (f & kNpcInnkeeper) return pick("Innkeeper", outOfRange);
+        if (f & kNpcFlightMaster) return pick("Taxi", outOfRange);
+        if (f & kNpcTrainer) return pick("Trainer", outOfRange);
+        if (f & (kNpcSpiritHealer | kNpcSpiritGuide)) return pick("Speak", outOfRange);
+        if (f & (kNpcBanker | kNpcGuildBanker)) return pick("Buy", outOfRange);
+        if (f & (kNpcPetitioner | kNpcTabardDesigner | kNpcBattlemaster)) return pick("Speak", outOfRange);
+        if (f & kNpcAuctioneer) return pick("Buy", outOfRange);
+        if (f & kNpcStableMaster) return pick("Speak", outOfRange);
+        if (f & kNpcVendor) return pick("Pickup", outOfRange);
+        if (f & kNpcGossip) return pick("Speak", outOfRange);
+        if (f & kNpcSpellClick) return pick("Interact", outOfRange);
         return {};
     }
     if (in.lootable) {

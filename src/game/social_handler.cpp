@@ -450,7 +450,7 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_WHO] = [this](network::Packet& packet) {
         if (owner_.getState() == WorldState::IN_WORLD) handleWho(packet);
     };
-    table[Opcode::SMSG_WHOIS] = [this](network::Packet& packet) {
+    table[Opcode::SMSG_WHOIS] = [](network::Packet& packet) {
         // The GM whois answer goes to the console, not the chat frame:
         // Wow.exe's handler (0x6B3280) hands the text to the console writer
         // (0x765270) and nothing else.
