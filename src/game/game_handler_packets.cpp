@@ -239,22 +239,27 @@ void GameHandler::registerCoreOpcodes() {
     // (SMSG_HEALTH_UPDATE, SMSG_POWER_UPDATE, SMSG_UPDATE_COMBO_POINTS,
     //  SMSG_PVP_CREDIT, SMSG_PROCRESIST → moved to CombatHandler)
     // -----------------------------------------------------------------------
+    // Wow.exe 0x526530 case 0x2C3: the value set, UPDATE_WORLD_STATES. World
+    // state 3191 (the arena season) also raises ARENA_SEASON_WORLD_STATE
+    // when it changes (0x549440).
     dispatchTable_[Opcode::SMSG_UPDATE_WORLD_STATE] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(8)) return;
         uint32_t field = packet.readUInt32();
         uint32_t value = packet.readUInt32();
+        auto it = worldStates_.find(field);
+        const bool changed = it == worldStates_.end() || it->second != value;
         worldStates_[field] = value;
+        if (changed && field == 3191) fireAddonEvent("ARENA_SEASON_WORLD_STATE", {});
         LOG_DEBUG("SMSG_UPDATE_WORLD_STATE: field=", field, " value=", value);
         fireAddonEvent("UPDATE_WORLD_STATES", {});
     };
+    // 0x526530 case 0x4F7 -> 0x5486E0: the server's clock, kept as an offset
+    // from the local one; the %<id>k world state timers count to it. No event.
     dispatchTable_[Opcode::SMSG_WORLD_STATE_UI_TIMER_UPDATE] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
-            uint32_t serverTime = packet.readUInt32();
-            // The world state timer bar counts from this and had nothing to
-            // count from - it was read and logged and dropped.
-            if (addonEventCallback_)
-                addonEventCallback_("WORLD_STATE_UI_TIMER_UPDATE", {std::to_string(serverTime)});
-            LOG_DEBUG("SMSG_WORLD_STATE_UI_TIMER_UPDATE: serverTime=", serverTime);
+            const uint32_t serverTime = packet.readUInt32();
+            worldStateClockOffset_ = static_cast<int64_t>(serverTime) -
+                                     static_cast<int64_t>(std::time(nullptr));
         }
     };
     dispatchTable_[Opcode::SMSG_START_MIRROR_TIMER] = [this](network::Packet& packet) {
@@ -1011,24 +1016,13 @@ void GameHandler::registerCoreOpcodes() {
     dispatchTable_[Opcode::SMSG_ZONE_UNDER_ATTACK] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             uint32_t areaId = packet.readUInt32();
-            std::string areaName = getAreaName(areaId);
-            // The zone name goes with it: the interface writes its own warning
-            // from arg1 rather than reusing the chat line.
-            if (addonEventCallback_) addonEventCallback_("ZONE_UNDER_ATTACK", {areaName});
-            // ...which is why this client only writes the line when nothing
-            // else will. chatframe.lua's own ZONE_UNDER_ATTACK branch calls
-            // AddMessage with ZONE_UNDER_ATTACK formatted from arg1, so with
-            // the interface in charge the player read every attack twice in
-            // chat and a third time on the error line - which the real client
-            // never puts it on at all. Booty Bay under sustained attack filled
-            // the window.
-            if (!ui::frameXmlOwns(ui::UiElement::Chat)) {
-                const std::string msg = areaName.empty()
-                    ? std::string("A zone is under attack!")
-                    : (areaName + " is under attack!");
-                addUIError(msg);
-                addSystemChatMessage(msg);
-            }
+            const std::string areaName = getAreaName(areaId);
+            // Wow.exe 0x50C3C0: no event - ZONE_UNDER_ATTACK is a string, not
+            // one 3.3.5 raises. The formatted line goes to the defense
+            // channels (ChatHandler::postDefenseLine).
+            std::string fmt = globalString(services_.assetManager, "ZONE_UNDER_ATTACK");
+            if (fmt.empty()) fmt = "|cffffff00%s is under attack!|r";
+            if (chatHandler_) chatHandler_->postDefenseLine(areaId, formatGlobalString(fmt, {areaName}));
         }
     };
 
@@ -1037,17 +1031,12 @@ void GameHandler::registerCoreOpcodes() {
         if (!packet.hasRemaining(12)) { packet.skipAll(); return; }
         const uint64_t guid = packet.readUInt64();
         const uint32_t timeMs = packet.readUInt32();
-        areaSpiritHealerGuid_ = guid;
-        areaSpiritHealerSeconds_ = static_cast<float>(timeMs) / 1000.0f;
-
-        // No line: Wow.exe (0x524B10) stores the time and raises
+        // Wow.exe 0x524B10: only for the spirit guide the client asked, and
+        // only a positive time - then the wave's time and
         // AREA_SPIRIT_HEALER_IN_RANGE, whose dialog counts it down.
-        //
-        // Announced to nobody before, UIParent_OnEvent
-        // answers this by joining the queue and raising the countdown dialog,
-        // and it was never told - so the reply arrived, the line was printed,
-        // and the resurrection it was counting down to was one this player had
-        // not joined.
+        updateAreaSpiritHealer();
+        if (guid != areaSpiritHealerGuid_ || static_cast<int32_t>(timeMs) <= 0) return;
+        areaSpiritHealerExpiresMs_ = bf::clockMs() + timeMs;
         fireAddonEvent("AREA_SPIRIT_HEALER_IN_RANGE", {});
     };
     dispatchTable_[Opcode::SMSG_DURABILITY_DAMAGE_DEATH] = [this](network::Packet& packet) {
@@ -1338,56 +1327,49 @@ void GameHandler::registerCoreOpcodes() {
 
     // ---- SMSG_INIT_WORLD_STATES ----
     dispatchTable_[Opcode::SMSG_INIT_WORLD_STATES] = [this](network::Packet& packet) {
-        // WotLK/TBC format: uint32 mapId, uint32 zoneId, uint32 areaId, uint16 count, N*(uint32 key, uint32 val)
-        // Classic format: uint32 mapId, uint32 zoneId, uint16 count, N*(uint32 key, uint32 val)
+        // Wow.exe 0x526530 case 0x2C2: map, zone, area (0x548970 - a change
+        // rebuilds the WorldStateUI lines), then the pairs, each set without
+        // clearing the rest (0x549440). UPDATE_WORLD_STATES only when the
+        // place or a value changed. Classic/Turtle have no area.
         if (!packet.hasRemaining(10)) {
             LOG_WARNING("SMSG_INIT_WORLD_STATES too short: ", packet.getSize(), " bytes");
             return;
         }
-        worldStateMapId_ = packet.readUInt32();
-        {
-            uint32_t newZoneId = packet.readUInt32();
-            if (newZoneId != worldStateZoneId_ && newZoneId != 0) {
-                worldStateZoneId_ = newZoneId;
-                // Once: the renderer's own area lookup usually saw the
-                // crossing first and announced it already.
-                if (announceZoneChange(newZoneId)) fireAddonEvent("ZONE_CHANGED", {});
-            } else {
-                worldStateZoneId_ = newZoneId;
-            }
+        const uint32_t mapId = packet.readUInt32();
+        const uint32_t newZoneId = packet.readUInt32();
+        uint32_t areaId = 0;
+        const bool hasAreaId = isActiveExpansion("tbc") || isActiveExpansion("wotlk");
+        if (hasAreaId && packet.getRemainingSize() >= 6) areaId = packet.readUInt32();
+        bool changed = mapId != worldStateMapId_ || newZoneId != worldStateZoneId_ ||
+                       areaId != worldStateAreaId_;
+        worldStateMapId_ = mapId;
+        if (newZoneId != worldStateZoneId_ && newZoneId != 0) {
+            worldStateZoneId_ = newZoneId;
+            // Once: the renderer's own area lookup usually saw the
+            // crossing first and announced it already.
+            if (announceZoneChange(newZoneId)) fireAddonEvent("ZONE_CHANGED", {});
+        } else {
+            worldStateZoneId_ = newZoneId;
         }
-        // TBC added areaId in 2.1.0; WotLK kept it. Classic/Turtle use the shorter format.
-        size_t remaining = packet.getRemainingSize();
-        bool hasAreaId = isActiveExpansion("tbc") || isActiveExpansion("wotlk");
-        if (hasAreaId && remaining >= 6) {
-            packet.readUInt32(); // areaId
-        }
+        worldStateAreaId_ = areaId;
         uint16_t count = packet.readUInt16();
-        size_t needed = static_cast<size_t>(count) * 8;
-        size_t available = packet.getRemainingSize();
-        if (available < needed) {
-            // Be tolerant across expansion/private-core variants: if packet shape
-            // still looks like N*(key,val) dwords, parse what is present.
-            if ((available % 8) == 0) {
-                uint16_t adjustedCount = static_cast<uint16_t>(available / 8);
-                LOG_WARNING("SMSG_INIT_WORLD_STATES count mismatch: header=", count,
-                            " adjusted=", adjustedCount, " (available=", available, ")");
-                count = adjustedCount;
-                needed = available;
-            } else {
-                LOG_WARNING("SMSG_INIT_WORLD_STATES truncated: expected ", needed,
-                            " bytes of state pairs, got ", available);
-                packet.skipAll();
-                return;
-            }
+        const size_t available = packet.getRemainingSize();
+        if (available < static_cast<size_t>(count) * 8) {
+            LOG_WARNING("SMSG_INIT_WORLD_STATES truncated: header=", count, " pairs, ",
+                        available, " bytes");
+            count = static_cast<uint16_t>(available / 8);
         }
-        worldStates_.clear();
-        worldStates_.reserve(count);
         for (uint16_t i = 0; i < count; ++i) {
-            uint32_t key = packet.readUInt32();
-            uint32_t val = packet.readUInt32();
+            const uint32_t key = packet.readUInt32();
+            const uint32_t val = packet.readUInt32();
+            auto it = worldStates_.find(key);
+            if (it == worldStates_.end() || it->second != val) {
+                changed = true;
+                if (key == 3191) fireAddonEvent("ARENA_SEASON_WORLD_STATE", {});
+            }
             worldStates_[key] = val;
         }
+        if (changed) fireAddonEvent("UPDATE_WORLD_STATES", {});
     };
 
     // ---- SMSG_ACTION_BUTTONS ----
@@ -2252,47 +2234,23 @@ void GameHandler::registerRemainingOpcodes() {
         const uint32_t type = packet.readUInt32();
         if (!socialHandler_) { packet.skipAll(); return; }
 
-        const uint32_t kSlots = game::SocialHandler::kMaxEncounterSlots;
-
+        // Wow.exe keeps up to sixteen units, packed and sorted by priority
+        // then engage order; bossN is the N-th (0x5ED750, 0x5ED710). An
+        // engage of a unit already there, or a priority for one that is not,
+        // changes nothing and raises nothing.
+        auto& units = socialHandler_->encounterUnits();
         switch (type) {
         case kEngage:
         case kDisengage:
         case kUpdatePriority: {
             if (!packet.hasRemaining(1)) { packet.skipAll(); return; }
             const uint64_t unit = packet.readPackedGuid();
-            // Non-zero means the encounter wants this unit in a particular
-            // frame - Halion's two bodies ask for one and two. Zero, which is
-            // the default and what most scripts send, means anywhere.
             const uint8_t priority = packet.hasRemaining(1) ? packet.readUInt8() : 0;
-            if (!unit) break;
-
-            uint32_t existing = kSlots;
-            uint32_t firstFree = kSlots;
-            for (uint32_t i = 0; i < kSlots; ++i) {
-                const uint64_t held = socialHandler_->getEncounterUnitGuid(i);
-                if (held == unit) existing = i;
-                else if (!held && firstFree == kSlots) firstFree = i;
-            }
-
-            if (type == kDisengage) {
-                if (existing < kSlots) socialHandler_->setEncounterUnitGuid(existing, 0);
-                break;
-            }
-
-            uint32_t slot = existing;
-            if (priority >= 1 && priority <= kSlots) {
-                slot = priority - 1u;
-            } else if (slot == kSlots) {
-                slot = firstFree;
-            }
-            if (slot >= kSlots) break;   // all five frames already taken
-            if (existing < kSlots && existing != slot) {
-                socialHandler_->setEncounterUnitGuid(existing, 0);
-            }
-            socialHandler_->setEncounterUnitGuid(slot, unit);
-            LOG_DEBUG("SMSG_UPDATE_INSTANCE_ENCOUNTER_UNIT: ",
-                      type == kEngage ? "engage" : "priority",
-                      " slot=", slot, " guid=0x", std::hex, unit, std::dec);
+            bool changed = false;
+            if (type == kEngage) changed = units.engage(unit, priority);
+            else if (type == kDisengage) changed = units.disengage(unit);
+            else changed = units.updatePriority(unit, priority);
+            if (!changed) return;
             break;
         }
         case kRefreshFrames:
@@ -2430,9 +2388,11 @@ void GameHandler::registerRemainingOpcodes() {
         }
     };
     dispatchTable_[Opcode::SMSG_RESET_FAILED_NOTIFY] = [this](network::Packet& packet) {
-        addUIError("Cannot reset instance: another player is still inside.");
-        raiseUiError("Cannot reset instance: another player is still inside.");
+        // RESET_FAILED_NOTIFY as a plain chat line; the map is not used
+        // (Wow.exe 0x50CEE0).
         packet.skipAll();
+        addGlobalStringChatLine("RESET_FAILED_NOTIFY",
+            "The party leader has attempted to reset the instance you are in.  Please zone out to allow the instance to reset.");
     };
     // uint32 splitType + uint32 deferTime + string realmName
     // Client must respond with CMSG_REALM_SPLIT to avoid session timeout on some servers.
@@ -2849,8 +2809,10 @@ void GameHandler::registerRemainingOpcodes() {
         const uint32_t bfBattleId = packet.readUInt32();
         const uint32_t bfZoneId   = packet.readUInt32();
         const uint32_t expireTime = packet.readUInt32();
-        (void)expireTime;
         bfMgrBattleId_ = bfBattleId;
+        // The world PvP queue GetWorldPVPQueueStatus reads (0x549500):
+        // "confirm" until the server time the invitation lapses.
+        setWorldPvpQueue(bfBattleId, bfZoneId, 2, expireTime);
         // Store the invitation so the UI can show a prompt
         bfMgrInvitePending_ = true;
         bfMgrZoneId_        = bfZoneId;
@@ -2878,6 +2840,7 @@ void GameHandler::registerRemainingOpcodes() {
             const uint8_t onQueue = packet.readUInt8();
             bfMgrInvitePending_ = false;
             bfMgrActive_        = true;
+            setWorldPvpQueue(bfBattleId, worldPvpQueue_.zoneId, 0, 0);
             if (onQueue) addGlobalStringChatLine("CLEARED_AFK", "You are no longer Away.");
             if (addonEventCallback_)
                 addonEventCallback_("BATTLEFIELD_MGR_ENTERED",
@@ -2925,6 +2888,7 @@ void GameHandler::registerRemainingOpcodes() {
         uint8_t accepted  = packet.readUInt8();
         const uint8_t loggedIn = packet.readUInt8();
         uint8_t result    = packet.readUInt8();
+        setWorldPvpQueue(bfId2, zoneId, accepted ? 1 : 0, 0);
         if (addonEventCallback_) {
             addonEventCallback_("BATTLEFIELD_MGR_QUEUE_REQUEST_RESPONSE",
                                 {std::to_string(bfId2), eventBool(accepted != 0), eventBool(result == 1),
@@ -2983,6 +2947,13 @@ void GameHandler::registerRemainingOpcodes() {
 
         bfMgrActive_        = false;
         bfMgrInvitePending_ = false;
+        // 0x5499C0: these reasons end the world PvP queue.
+        switch (reason) {
+            case 1: case 2: case 4: case 5: case 7: case 8: case 9: case 10: case 11:
+                setWorldPvpQueue(battleId, worldPvpQueue_.zoneId, 0, 0);
+                break;
+            default: break;
+        }
 
         // battleID, playerExited, relocated, battleActive, lowLevel. The four
         // flags are booleans in the middle of the list, so they go through

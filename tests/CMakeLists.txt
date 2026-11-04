@@ -892,6 +892,13 @@ wowee_add_test(test_taxi_rules
 wowee_add_test(test_vehicle_rules
     SOURCES test_vehicle_rules.cpp)
 
+# ── test_battlefield_rules ───────────────────────────────────
+# Stock battleground, world state and encounter-unit rules (docs/re/pvp-instances.md).
+wowee_add_test(test_battlefield_rules
+    SOURCES test_battlefield_rules.cpp
+            ${CMAKE_SOURCE_DIR}/src/game/battlefield_rules.cpp
+            ${CMAKE_SOURCE_DIR}/src/network/packet.cpp)
+
 # ── test_glue_rules ──────────────────────────────────────────
 # Stock glue screen rules (docs/re/glue-screens.md).
 wowee_add_test(test_glue_rules

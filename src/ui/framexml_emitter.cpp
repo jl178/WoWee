@@ -845,7 +845,13 @@ struct Emitter {
             // Whether this frame arrived with a parent, read before any
             // inherited template runs - a base template setting one must not
             // make a derived template's own parent look redundant.
-            line("local __noParent = not self:GetParent()");
+            // A top-level frame declared without a parent is hung on
+            // UIParent here (WoW leaves it parentless), so that default does
+            // not count as a parent of its own: RaidGroup1..8 are declared
+            // bare and take parent="RaidFrame" from RaidGroupTemplate, and
+            // without this they stayed on UIParent and drew on screen the
+            // moment Blizzard_RaidUI loaded.
+            line("local __noParent = not self:GetParent() or self.__WoweeDefaultParent");
             // A template can itself inherit one, and this branch used to return
             // before that was ever emitted - so InterfaceOptionsListButtonTemplate
             // silently dropped the OptionsListButtonTemplate it is built on,
@@ -912,6 +918,8 @@ struct Emitter {
         // existed - which is what took down most of FrameXML.
         line(var + " = CreateFrame(" + frameTypeArg(node) + ", " +
              nameArg(rawName, parentName, parentArg) + ", " + parentArg + ")");
+        if (!node.attr("parent") && parentVar.empty() && !detached)
+            line(var + ".__WoweeDefaultParent = true");
 
         // Identity before anything is built on top of it. FrameXML makes names
         // out of the id - a party member's pet frame opens its OnLoad with

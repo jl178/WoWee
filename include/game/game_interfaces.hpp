@@ -20,9 +20,6 @@ class Entity;
 class EntityManager;
 enum class WorldState;
 struct ContactEntry;
-struct BgQueueSlot;
-struct AvailableBgInfo;
-struct BgScoreboardData;
 struct BgPlayerPosition;
 struct ArenaTeamStats;
 struct ArenaTeamRoster;
@@ -117,9 +114,6 @@ public:
     [[nodiscard]] virtual bool hasPendingBgInvite() const = 0;
     virtual void acceptBattlefield(uint32_t queueSlot = 0xFFFFFFFF) = 0;
     virtual void declineBattlefield(uint32_t queueSlot = 0xFFFFFFFF) = 0;
-    [[nodiscard]] virtual const std::array<BgQueueSlot, 3>& getBgQueues() const = 0;
-    [[nodiscard]] virtual const std::vector<AvailableBgInfo>& getAvailableBgs() const = 0;
-    [[nodiscard]] virtual const BgScoreboardData* getBgScoreboard() const = 0;
     [[nodiscard]] virtual const std::vector<ArenaTeamStats>& getArenaTeamStats() const = 0;
 };
 

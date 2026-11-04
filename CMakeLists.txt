@@ -721,6 +721,7 @@ set(WOWEE_SOURCES
     src/game/spline_packet.cpp
     src/game/unit_motion.cpp
     src/game/taxi_rules.cpp
+    src/game/battlefield_rules.cpp
     src/game/glue_rules.cpp
     src/game/vehicle_data.cpp
     src/game/game_handler_vehicles.cpp
@@ -1106,6 +1107,7 @@ set(WOWEE_SOURCES
     src/addons/lua_inventory_api.cpp
     src/addons/lua_quest_api.cpp
     src/addons/lua_lfg_api.cpp
+    src/addons/lua_battlefield_api.cpp
     src/addons/lua_socket_api.cpp
     src/addons/lua_social_api.cpp
     src/addons/lua_system_api.cpp

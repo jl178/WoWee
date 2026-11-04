@@ -1,4 +1,5 @@
 #include "game/group_defines.hpp"
+#include "game/social_handler.hpp"
 
 #include <set>
 #include "ui/game_screen.hpp"
@@ -600,41 +601,31 @@ void GameScreen::renderMinimapIndicators(game::GameHandler& gameHandler, float c
     }
 
     // BG queue status indicator (when in queue but not yet invited)
-    for (const auto& slot : gameHandler.getBgQueues()) {
-        if (slot.statusId != 1) continue;  // STATUS_WAIT_QUEUE only
-
-        std::string bgName;
-        if (slot.arenaType > 0) {
-            bgName = std::to_string(slot.arenaType) + "v" + std::to_string(slot.arenaType) + " Arena";
-        } else {
-            switch (slot.bgTypeId) {
-                case 1: bgName = "AV"; break;
-                case 2: bgName = "WSG"; break;
-                case 3: bgName = "AB"; break;
-                case 7: bgName = "EotS"; break;
-                case 9: bgName = "SotA"; break;
-                case 11: bgName = "IoC"; break;
-                default: bgName = "BG"; break;
+    if (const auto* bf = gameHandler.battlefield()) {
+        const auto& queues = bf->getBattlefieldQueues();
+        for (uint32_t qi = 0; qi < game::bf::kQueueSlots; ++qi) {
+            const auto* slot = queues.slot(qi);
+            if (!slot || slot->status != 1) continue;  // queued only
+            std::string bgName;
+            if (const auto* row = gameHandler.getBattlemasterInfo(slot->bgTypeId)) bgName = row->name;
+            if (bgName.empty()) bgName = "Battleground";
+            ImGui::SetNextWindowPos(ImVec2(indicatorX, nextIndicatorY), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(indicatorW, kIndicatorH), ImGuiCond_Always);
+            if (ImGui::Begin("##BgQueueIndicator", nullptr, indicatorFlags)) {
+                float pulse = 0.6f + 0.4f * std::sin(static_cast<float>(ImGui::GetTime()) * 1.5f);
+                const uint32_t avgSec = slot->avgWaitMs / 1000;
+                if (avgSec > 0) {
+                    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, pulse),
+                        "Queue: %s (~%u:%02u)", bgName.c_str(), avgSec / 60, avgSec % 60);
+                } else {
+                    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, pulse),
+                        "In Queue: %s", bgName.c_str());
+                }
             }
+            ImGui::End();
+            nextIndicatorY += kIndicatorH;
+            break;  // Show at most one queue slot indicator
         }
-
-        ImGui::SetNextWindowPos(ImVec2(indicatorX, nextIndicatorY), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(indicatorW, kIndicatorH), ImGuiCond_Always);
-        if (ImGui::Begin("##BgQueueIndicator", nullptr, indicatorFlags)) {
-            float pulse = 0.6f + 0.4f * std::sin(static_cast<float>(ImGui::GetTime()) * 1.5f);
-            if (slot.avgWaitTimeSec > 0) {
-                int avgMin = static_cast<int>(slot.avgWaitTimeSec) / 60;
-                int avgSec = static_cast<int>(slot.avgWaitTimeSec) % 60;
-                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, pulse),
-                    "Queue: %s (~%d:%02d)", bgName.c_str(), avgMin, avgSec);
-            } else {
-                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, pulse),
-                    "In Queue: %s", bgName.c_str());
-            }
-        }
-        ImGui::End();
-        nextIndicatorY += kIndicatorH;
-        break;  // Show at most one queue slot indicator
     }
 
     // LFG queue indicator - shown when Dungeon Finder queue is active (Queued or RoleCheck)

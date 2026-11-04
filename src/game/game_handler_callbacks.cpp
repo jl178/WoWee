@@ -849,6 +849,16 @@ void GameHandler::handleLoginSetTimeSpeed(network::Packet& packet) {
              "h), timeSpeed=", timeSpeed_);
 }
 
+// Every arrival in a world, login or transfer (Wow.exe 0x528010): the
+// battleground client is reset (0x54CA50 - scoreboard and battlemaster list
+// emptied, CMSG_BATTLEFIELD_STATUS sent) and, on a map whose InstanceType is
+// 3 or 4 - an arena as well as a battleground - PLAYER_ENTERING_BATTLEGROUND.
+void GameHandler::battlefieldWorldEntered() {
+    if (socialHandler_) socialHandler_->onWorldEntered();
+    const uint32_t type = getMapInstanceType(getCurrentMapId());
+    if (type == 3 || type == 4) fireAddonEvent("PLAYER_ENTERING_BATTLEGROUND", {});
+}
+
 void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     LOG_INFO("Handling SMSG_LOGIN_VERIFY_WORLD");
     const bool initialWorldEntry = (state == WorldState::ENTERING_WORLD);
@@ -1108,9 +1118,7 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
         // announces every player joining and leaving, and the filter collapses
         // that into one line that counts them. Without the event the filter is
         // never installed and all of it goes to the chat window one at a time.
-        if (isBattlegroundMap(getCurrentMapId())) {
-            fireAddonEvent("PLAYER_ENTERING_BATTLEGROUND", {});
-        }
+        battlefieldWorldEntered();
         // The currencies are known now - CurrencyTypes.dbc is read on demand
         // and the amounts are item stacks that have just arrived with the
         // inventory. The main bar builds its token frame on this and had no
@@ -3580,18 +3588,53 @@ void GameHandler::updateInteractTarget() {
 }
 
 void GameHandler::queryAreaSpiritHealer(uint64_t guid) {
-    if (!isInWorld() || !socket) return;
-    areaSpiritHealerGuid_ = guid;
+    if (!isInWorld() || !socket || !guid) return;
     network::Packet packet(wireOpcode(Opcode::CMSG_AREA_SPIRIT_HEALER_QUERY));
     packet.writeUInt64(guid);
     socket->send(packet);
     LOG_INFO("CMSG_AREA_SPIRIT_HEALER_QUERY: 0x", std::hex, guid, std::dec);
 }
 
+// 0x523EB0: a different spirit guide (or none). Leaving one whose wave was
+// counting cancels the queue's aura; a new one is asked for its time.
+void GameHandler::setAreaSpiritHealer(uint64_t guid) {
+    if (guid == areaSpiritHealerGuid_) return;
+    areaSpiritHealerGuid_ = guid;
+    if (areaSpiritHealerExpiresMs_ != 0) cancelAreaSpiritHeal();
+    areaSpiritHealerExpiresMs_ = 0;
+    if (guid) queryAreaSpiritHealer(guid);
+}
+
+void GameHandler::updateAreaSpiritHealer() {
+    if (!isInWorld() || !isPlayerGhost()) { setAreaSpiritHealer(0); return; }
+    auto dist2 = [this](const Entity& e) {
+        const float dx = movementInfo.x - e.getX(), dy = movementInfo.y - e.getY(),
+                    dz = movementInfo.z - e.getZ();
+        return dx * dx + dy * dy + dz * dz;
+    };
+    if (areaSpiritHealerGuid_) {
+        auto e = getEntityManager().getEntity(areaSpiritHealerGuid_);
+        if (!e || dist2(*e) > 484.0f) setAreaSpiritHealer(0);   // 22 yards
+        return;
+    }
+    for (const auto& [guid, e] : getEntityManager().getEntities()) {
+        if (!e || (e->getType() != ObjectType::UNIT)) continue;
+        const auto* unit = static_cast<const Unit*>(e.get());
+        if (!(unit->getNpcFlags() & NPC_FLAG_SPIRIT_GUIDE)) continue;
+        if (dist2(*e) <= 400.0f) { setAreaSpiritHealer(guid); return; }   // 20 yards
+    }
+}
+
+int GameHandler::getAreaSpiritHealerTime() const {
+    if (areaSpiritHealerExpiresMs_ == 0) return 0;
+    const int64_t left = areaSpiritHealerExpiresMs_ - bf::clockMs();
+    return left > 0 ? static_cast<int>(left / 1000) : 0;
+}
+
+// AcceptAreaSpiritHeal() (0x5262D0 -> 0x524B60): CMSG_AREA_SPIRIT_HEALER_QUEUE
+// to the spirit guide in reach.
 void GameHandler::queueAreaSpiritHeal() {
-    // Joining the queue is what resurrects; the query only asks when the next
-    // one is. AzerothCore has no way to be told to leave it again, which is
-    // why CancelAreaSpiritHeal answers with nothing.
+    updateAreaSpiritHealer();
     if (!isInWorld() || !socket || !areaSpiritHealerGuid_) return;
     network::Packet packet(wireOpcode(Opcode::CMSG_AREA_SPIRIT_HEALER_QUEUE));
     packet.writeUInt64(areaSpiritHealerGuid_);

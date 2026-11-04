@@ -21,7 +21,6 @@
 #include "game/game_handler.hpp"
 #include "ui/world_ui_rules.hpp"
 #include <unordered_map>
-#include "game/bg_score_defs.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/audio_engine.hpp"

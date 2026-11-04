@@ -27,7 +27,6 @@
 #include "rendering/camera_controller.hpp"
 #include "addons/lua_engine.hpp"
 #include "addons/world_map_api.hpp"
-#include "game/bg_score_defs.hpp"
 #include "game/calendar_month.hpp"
 #include "game/calendar_data.hpp"
 #include "pipeline/asset_manager.hpp"
@@ -2866,59 +2865,8 @@ static int lua_GetServerTime(lua_State* L) {
 }
 
 
-static int lua_IsInInstance(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    if (!gh) { lua_pushboolean(L, 0); lua_pushstring(L, "none"); return 2; }
-    bool inInstance = gh->isInInstance();
-    lua_pushboolean(L, inInstance);
-    lua_pushstring(L, inInstance ? "party" : "none");  // simplified: "none", "party", "raid", "pvp", "arena"
-    return 2;
-}
 
-// GetInstanceInfo() → name, type, difficultyIndex, difficultyName, maxPlayers, ...
-static int lua_GetInstanceInfo(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    if (!gh) {
-        // Seven, and a difficulty of one, so this branch answers in the same
-        // shape and the same numbering as the real one below it.
-        lua_pushstring(L, ""); lua_pushstring(L, "none"); lua_pushnumber(L, 1);
-        lua_pushstring(L, "Normal"); lua_pushnumber(L, 0);
-        lua_pushnumber(L, 0); lua_pushboolean(L, 0);
-        return 7;
-    }
-    std::string mapName = gh->getMapName(gh->getCurrentMapId());
-    const uint32_t diff = gh->getInstanceDifficulty();
-    lua_pushstring(L, mapName.c_str());                    // 1: name
-    lua_pushstring(L, gh->isInInstance() ? "party" : "none"); // 2: instanceType
-    // Counted from one, which is what the interface compares against.
-    //
-    // The wire value is zero-based - social_handler reads heroic as
-    // difficulty == 1 - and this pushed it straight through. minimap.lua tests
-    // `difficulty == 1 and maxPlayers == 5` to decide there is nothing worth
-    // showing, and `difficulty == 2` for heroic, so a normal dungeon failed
-    // the first test and hung a difficulty banner on the minimap, while a
-    // heroic failed the second and had that banner read "Normal".
-    //
-    // GetInstanceDifficulty beside this already added the one; only this path
-    // did not.
-    lua_pushnumber(L, diff + 1);                           // 3: difficultyIndex
-    const char* diffName = game::instanceDifficultyName(diff);
-    lua_pushstring(L, diffName ? diffName : "Normal");      // 4: difficultyName
-    lua_pushnumber(L, 5);                                   // 5: maxPlayers (default 5-man)
-    // The two the raid branch reads. Neither is tracked here, and both are
-    // only consulted for a dynamic-difficulty raid - but nil reaches
-    // `playerDifficulty == 1` and `if ( isDynamicInstance )` in minimap.lua,
-    // and the interface unpacks all seven on one line.
-    lua_pushnumber(L, 0);                                   // 6: playerDifficulty
-    lua_pushboolean(L, 0);                                  // 7: isDynamicInstance
-    return 7;
-}
 
-static int lua_GetInstanceDifficulty(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    lua_pushnumber(L, gh ? (gh->getInstanceDifficulty() + 1) : 1);
-    return 1;
-}
 
 static int lua_strsplit(lua_State* L) {
     const char* delim = luaL_checkstring(L, 1);
@@ -3873,69 +3821,9 @@ static int lua_ReturnOne(lua_State* L) {
     return 1;
 }
 
-// The always-up battleground score lines, in the order FrameXML asks for them.
-// The server sends world states as bare key/value pairs, so the labels come
-// from the shared table this client's own heads-up display also reads.
-struct WorldStateLine {
-    std::string text;
-};
 
-static std::vector<WorldStateLine> worldStateLines(game::GameHandler* gh) {
-    std::vector<WorldStateLine> out;
-    if (!gh) return out;
-    const game::BgScoreDef* def = game::findBgScoreDef(gh->getWorldStateMapId());
-    if (!def) return out;
 
-    auto alliance = gh->getWorldState(def->allianceKey);
-    auto horde    = gh->getWorldState(def->hordeKey);
-    if (!alliance && !horde) return out;
 
-    uint32_t maxScore = def->hardcodedMax;
-    if (def->maxKey != 0) {
-        if (auto mv = gh->getWorldState(def->maxKey)) maxScore = *mv;
-    }
-    const bool showMax = maxScore > 0 && def->unit && def->unit[0] != '\0';
-
-    char buf[96];
-    for (int side = 0; side < 2; ++side) {
-        const char* label = side == 0 ? "Alliance" : "Horde";
-        const uint32_t score = (side == 0 ? alliance : horde).value_or(0);
-        if (showMax) snprintf(buf, sizeof(buf), "%s: %u/%u", label, score, maxScore);
-        else         snprintf(buf, sizeof(buf), "%s: %u", label, score);
-        out.push_back({buf});
-    }
-    return out;
-}
-
-// GetNumWorldStateUI() - how many always-up lines there are to draw.
-static int lua_GetNumWorldStateUI(lua_State* L) {
-    lua_pushinteger(L, static_cast<lua_Integer>(worldStateLines(getGameHandler(L)).size()));
-    return 1;
-}
-
-// GetWorldStateUIInfo(index) → uiType, state, text, icon, dynamicIcon, tooltip,
-// dynamicTooltip, extendedUI, extendedUIState1, extendedUIState2, extendedUIState3
-//
-// uiType 0 keeps worldstateframe.lua out of its world-PvP branch, which is the
-// one gated on a CVar and on IsSubZonePVPPOI. state 1 means "show, no flash".
-static int lua_GetWorldStateUIInfo(lua_State* L) {
-    const int index = static_cast<int>(luaL_optinteger(L, 1, 0));
-    const auto lines = worldStateLines(getGameHandler(L));
-    if (index < 1 || index > static_cast<int>(lines.size())) return 0;
-
-    lua_pushinteger(L, 0);                              // uiType
-    lua_pushinteger(L, 1);                              // state
-    lua_pushstring(L, lines[index - 1].text.c_str());   // text
-    lua_pushstring(L, "");                              // icon
-    lua_pushstring(L, "");                              // dynamicIcon
-    lua_pushstring(L, "");                              // tooltip
-    lua_pushstring(L, "");                              // dynamicTooltip
-    lua_pushstring(L, "");                              // extendedUI
-    lua_pushinteger(L, 0);                              // extendedUIState1
-    lua_pushinteger(L, 0);                              // extendedUIState2
-    lua_pushinteger(L, 0);                              // extendedUIState3
-    return 11;
-}
 
 static int lua_GetDefaultLanguage(lua_State* L) {
     auto* gh = getGameHandler(L);
@@ -4363,12 +4251,6 @@ static int lua_IsPVPTimerRunning(lua_State* L) { lua_pushboolean(L, 0); return 1
 // line after and a missing global there would raise before the branch is taken.
 static int lua_GetPVPTimer(lua_State* L) { lua_pushnumber(L, 0); return 1; }
 
-// GetCurrentArenaSeason() → the season number, or NO_ARENA_SEASON.
-//
-// Zero is the right answer here rather than the usual trap: arenaframe compares
-// it with == and ~= against NO_ARENA_SEASON, which is itself 0, so a nil would
-// fail both tests instead of meaning "no season".
-static int lua_GetCurrentArenaSeason(lua_State* L) { lua_pushnumber(L, 0); return 1; }
 
 // GetPVPRankProgress() → how far through the current rank, 0..1.
 // Fed straight to HonorFrameProgressBar:SetValue, which needs a number.
@@ -4424,8 +4306,6 @@ static int lua_CloseArenaTeamRoster(lua_State* L) { (void)L; return 0; }
 // reads as the player's to run.
 static int lua_IsArenaTeamCaptain(lua_State* L) { lua_pushboolean(L, 0); return 1; }
 
-// Closing the battlemaster's window, which is a client-side dismissal.
-static int lua_CloseBattlefield(lua_State* L) { (void)L; return 0; }
 
 // The vehicle controls (InputControl, stock 0xAD19F0..; docs/re/
 // mounts-taxi-vehicles.md 4). The seat answers what the player may do
@@ -4622,87 +4502,9 @@ static int lua_GetArenaTeam(lua_State* L) {
     return 22;
 }
 
-// The daily-win bonus on a random or holiday battleground.
-//
-// → hasWin, winHonor, winArena, lossHonor, lossArena
-//
-// Zero rather than nil for the four amounts, and the difference matters: the
-// frame writes `if (winHonor ~= 0)` and shows a reward line when that passes.
-// nil passes it - nil is not zero - and the line appears with nothing in it.
-// Zero says "no bonus" and the line is correctly skipped.
-//
-// The bonus itself is a per-character daily the server tracks and does not
-// volunteer, so "none available" is the honest answer rather than a placeholder
-// for one. Reachable, unlike most of this file's absences: the random
-// battleground row is drawn from GetBattlegroundInfo, which answers for real.
-static int lua_BattlegroundHonorBonusesNone(lua_State* L) {
-    lua_pushboolean(L, 0);   // hasWin - the daily is not known to be waiting
-    lua_pushnumber(L, 0);    // winHonor
-    lua_pushnumber(L, 0);    // winArena
-    lua_pushnumber(L, 0);    // lossHonor
-    lua_pushnumber(L, 0);    // lossArena
-    return 5;
-}
 
-/// GetRandomBGHonorCurrencyBonuses() → hasWin, winHonor, winArena, lossHonor,
-/// lossArena - what the random battleground pays on top of the match itself.
-///
-/// The five zeroes above are what this answered, and the panel hides an amount
-/// that is zero - so the random battleground's rewards box was drawn empty,
-/// which is the whole reason a player picks that row.
-///
-/// The figures are the stock ones: thirty honour and twenty-five arena points
-/// for the day's first win, five honour for a loss. They are the server's to
-/// decide and it never sends them, so a realm that has changed its
-/// Battleground.RewardWinner* settings will be described by this as though it
-/// had not - which is a great deal closer than nothing at all, and is what the
-/// real client shows, since it does not ask either.
-///
-/// hasWin is false because whether *today's* first win is still waiting is
-/// per-character daily state the server keeps to itself. The panel does not
-/// read it; it is the fifth return only because the API has five.
-static int lua_GetRandomBGHonorCurrencyBonuses(lua_State* L) {
-    lua_pushboolean(L, 0);    // hasWin
-    lua_pushnumber(L, 30);    // winHonor
-    lua_pushnumber(L, 25);    // winArena
-    lua_pushnumber(L, 5);     // lossHonor
-    lua_pushnumber(L, 0);     // lossArena
-    return 5;
-}
 
-// GetBattlefieldInstanceInfo(index) → which numbered instance that row is.
-//
-// Zero, which the list reads as unnumbered - the same "first available" the
-// selection means. The server numbers instances only for a client that asks to
-// pick one, and nothing here does.
-static int lua_GetBattlefieldInstanceInfo(lua_State* L) {
-    // The instance number of the i-th battleground instance on offer, counting
-    // from one. A flat zero before, so every row in the list read "Warsong
-    // Gulch 0" - and the count beside it, GetNumBattlefields, was not bound at
-    // all, so the list never got that far: it raised on a nil global.
-    //
-    // SMSG_BATTLEFIELD_LIST carries these and they were parsed into
-    // AvailableBgInfo::instanceIds all along.
-    auto* gh = getGameHandler(L);
-    const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh || index < 1) { lua_pushnumber(L, 0); return 1; }
-    const auto& bgs = gh->getAvailableBgs();
-    if (bgs.empty()) { lua_pushnumber(L, 0); return 1; }
-    const auto& ids = bgs.back().instanceIds;
-    if (index > static_cast<int>(ids.size())) { lua_pushnumber(L, 0); return 1; }
-    lua_pushnumber(L, ids[static_cast<size_t>(index) - 1]);
-    return 1;
-}
 
-// GetNumBattlefields() - how many instances of it there are to choose between.
-static int lua_GetNumBattlefields(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    if (!gh) { lua_pushnumber(L, 0); return 1; }
-    const auto& bgs = gh->getAvailableBgs();
-    lua_pushnumber(L, bgs.empty()
-        ? 0 : static_cast<lua_Number>(bgs.back().instanceIds.size()));
-    return 1;
-}
 
 // IsInLFGDungeon() - standing inside a dungeon the finder put you in.
 //
@@ -4724,68 +4526,13 @@ static int lua_LFGTeleport(lua_State* L) {
     return 0;
 }
 
-// Whether the world the player is standing in is an arena.
-//
-// From BattlemasterList.dbc, which names each row's maps and which this client
-// already reads for the queue list - the arena rows are loaded alongside the
-// battleground ones and only the battlegrounds are kept in the queue list, so
-// the arena maps were sitting there unasked.
-//
-// Both of these answered nil, which the battlefield frame and the arena frame
-// each read as "not an arena". That is right until the player is in one.
-static int lua_IsBattlefieldArena(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->isArenaMap(gh->getCurrentMapId()) ? 1 : 0);
-    return 1;
-}
 
-// IsActiveBattlefieldArena() → isArena, isRegistered
-//
-// The second is whether the team is a registered one rather than a skirmish,
-// which needs the arena team the server never mentions outside a match. Left
-// nil, and the frame treats that as unregistered - which a skirmish is.
-static int lua_IsActiveBattlefieldArena(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    if (gh && gh->isArenaMap(gh->getCurrentMapId())) lua_pushboolean(L, 1);
-    else lua_pushnil(L);
-    lua_pushnil(L);
-    return 2;
-}
 
 // CanHearthAndResurrectFromArea() → whether the zone offers the combined
 // hearth-and-release button. Only world PvP zones do, and none are tracked.
 static int lua_CanHearthAndResurrectFromArea(lua_State* L) { lua_pushboolean(L, 0); return 1; }
 
-// GetWorldPVPQueueStatus(i) → status, mapName, queueID
-//
-// "none", not nil. An empty world PvP queue is a status of its own, and the
-// interface tests for it by name:
-//
-//     status, mapName, queueID = GetWorldPVPQueueStatus(i);
-//     if ( status ~= "none" ) then numberQueues = numberQueues + 1; end
-//
-// nil is not "none", so this counted a queue that did not exist on every pass -
-// and BattlefieldFrame_UpdateStatus ends by hiding the minimap's battlefield
-// icon only when numberQueues reaches zero, which it now never did. The icon
-// sat beside the minimap permanently, with no queue behind it and so nothing in
-// its tooltip: a queue tracker that was always there and never tracked
-// anything.
-//
-// There is no Wintergrasp queue in this client, so "none" is also the true
-// answer. mapName and queueID stay nil, which is what an empty slot answers.
-static int lua_GetWorldPVPQueueStatus(lua_State* L) {
-    lua_pushstring(L, "none");
-    lua_pushnil(L);
-    lua_pushnil(L);
-    return 3;
-}
 
-// LeaveBattlefield() - walk out of the battleground currently being played.
-static int lua_LeaveBattlefield(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    if (gh) gh->leaveBattlefield();
-    return 0;
-}
 
 // ---- World map player arrow and ping ----
 //
@@ -4860,183 +4607,14 @@ static int lua_GetBattlefieldMapIconScale(lua_State* L) { lua_pushnumber(L, 1.0)
 // and nothing here parses it, so nobody reads as idle.
 static int lua_PlayerIsPVPInactive(lua_State* L) { lua_pushboolean(L, 0); return 1; }
 
-// ---- The battlemaster's battleground list ----
-//
-// GetBattlefieldInfo() → mapName, mapDescription, maxGroup, canEnter,
-//                        isHoliday, isRandom
-//
-// About the battleground the battlemaster being spoken to offers, which is
-// what the last SMSG_BATTLEFIELD_LIST described. The frame returns early on a
-// nil name, so before this the list drew nothing at all.
-//
-// The description is nil: BattlemasterList.dbc carries no blurb, and the panel
-// treats a missing one as "no description" rather than raising on it.
-static int lua_GetBattlefieldInfo(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    if (!gh) return luaReturnNil(L);
-    const auto& bgs = gh->getAvailableBgs();
-    if (bgs.empty()) return luaReturnNil(L);
-    const auto* info = gh->getBattlemasterInfo(bgs.back().bgTypeId);
-    if (!info || info->name.empty()) return luaReturnNil(L);
-    const auto& bg = bgs.back();
-    lua_pushstring(L, info->name.c_str());   // 1: mapName
-    lua_pushnil(L);                          // 2: mapDescription
-    lua_pushnumber(L, info->maxGroupSize);   // 3: maxGroup
-    // Three more, all of which the panel reads. Whether the player is inside
-    // the level bracket the server sent, whether this is the week's call to
-    // arms, and whether it is the random battleground rather than a named one
-    // - type 32, which is what BattlefieldFrame keys the rewards block on.
-    const uint32_t level = gh->getPlayerLevel();
-    const bool inBracket = (bg.minLevel == 0 || level >= bg.minLevel) &&
-                           (bg.maxLevel == 0 || level <= bg.maxLevel);
-    constexpr uint32_t kRandomBattleground = 32;
-    lua_pushboolean(L, inBracket ? 1 : 0);                        // 4: canEnter
-    lua_pushboolean(L, bg.isHoliday ? 1 : 0);                     // 5: isHoliday
-    lua_pushboolean(L, bg.bgTypeId == kRandomBattleground ? 1 : 0); // 6: isRandom
-    return 6;
-}
 
-// GetNumBattlegroundTypes() → how many battlegrounds there are to queue for.
-//
-// This is the PvP frame's own list, not the battlemaster's offering, and it
-// comes from BattlemasterList.dbc - which this client already loads. It was
-// answering zero from the counting stub, so the list drew no rows, nothing was
-// ever assigned frame.BGindex, and the click handler read that field as nil.
-//
-// Arenas are excluded: they share the table with battlegrounds and are told
-// apart by the instance type, so offering them here would queue the player for
-// the wrong thing.
-static int lua_GetNumBattlegroundTypes(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    lua_pushnumber(L, gh ? static_cast<double>(gh->getBattlegroundTypes().size()) : 0.0);
-    return 1;
-}
 
-// GetBattlegroundInfo(index) → localizedName, canEnter, isHoliday, isRandom, id
-//
-// canEnter is the level range from the row, which is what the client itself
-// knows; the server still has the final say when the queue request arrives.
-// isHoliday would need the call-to-arms world state, which nothing here parses,
-// and claiming a holiday that is not running is worse than not mentioning one.
-static int lua_GetBattlegroundInfo(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    const int index = static_cast<int>(luaL_checknumber(L, 1));
-    if (!gh) return luaReturnNil(L);
-    const auto& list = gh->getBattlegroundTypes();
-    if (index < 1 || index > static_cast<int>(list.size())) return luaReturnNil(L);
-    const auto& bg = list[static_cast<size_t>(index - 1)];
 
-    // A row naming no level range - the random battleground is the only one -
-    // is not a row saying nobody qualifies.
-    const uint32_t level = gh->getPlayerLevel();
-    const bool hasRange = bg.minLevel != 0 || bg.maxLevel != 0;
-    const bool canEnter = !hasRange || (level >= bg.minLevel && level <= bg.maxLevel);
 
-    lua_pushstring(L, bg.name.c_str());
-    lua_pushboolean(L, canEnter ? 1 : 0);
-    lua_pushboolean(L, 0);                       // isHoliday: world state not parsed
-    lua_pushboolean(L, bg.mapCount > 1 ? 1 : 0); // several maps means a pool, i.e. random
-    lua_pushnumber(L, bg.id);
-    return 5;
-}
 
-/// The battleground the interface has selected, as a type id.
-///
-/// The panel knows its selection as a row number and tells this client about it
-/// in one place only - RequestBattlegroundInstanceInfo, which it calls whenever
-/// the selection moves and again when it opens - so that call is where the
-/// choice is remembered.
-///
-/// JoinBattlefield used to queue for the last entry of the list of every
-/// battleground instance info had ever been asked for. That list is keyed by
-/// type and updated in place, so its last entry is whichever battleground was
-/// looked at *first*: clicking Warsong Gulch, then Arathi Basin, then back to
-/// Warsong Gulch and pressing Join queued for Arathi Basin.
-static uint32_t& selectedBattlegroundTypeId() { static uint32_t typeId = 0; return typeId; }
 
-// RequestBattlegroundInstanceInfo(index) - ask which instances are running.
-//
-// The reply is SMSG_BATTLEFIELD_LIST, which this client already handled and
-// had no way to ask for. The index is a row in the list above, not a
-// battleground id, so it is translated before it goes on the wire.
-static int lua_RequestBattlegroundInstanceInfo(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
-    if (!gh) return 0;
-    const auto& list = gh->getBattlegroundTypes();
-    if (index < 1 || index > static_cast<int>(list.size())) return 0;
-    selectedBattlegroundTypeId() = list[static_cast<size_t>(index - 1)].id;
-    gh->requestBattlefieldList(selectedBattlegroundTypeId());
-    return 0;
-}
 
-// Which instance of a battleground is picked in the list.
-//
-// Kept here because the pair has to round-trip: the frame highlights the row
-// matching what it last set, so a getter that always answered zero left the
-// first row highlighted whatever was clicked.
-//
-// Zero remains the default and still means "first available", which is what
-// the server understands as no preference - the list opens on it, and nothing
-// here queues for a specific instance regardless. This is the selection the
-// interface is showing, not an instruction to the server.
-static int& selectedBattlefield() { static int selected = 0; return selected; }
 
-static int lua_GetSelectedBattlefield(lua_State* L) {
-    lua_pushnumber(L, selectedBattlefield());
-    return 1;
-}
-
-// SetSelectedBattlefield(index) - called unguarded from two places, so it has
-// to exist before it has to do anything.
-static int lua_SetSelectedBattlefield(lua_State* L) {
-    selectedBattlefield() = static_cast<int>(luaL_optnumber(L, 1, 0));
-    return 0;
-}
-
-// JoinBattlefield(index, asGroup, isArena) - queue for it.
-//
-// The index names an instance of the selected battleground, and zero means the
-// first available one - which is what both join buttons pass.
-static int lua_JoinBattlefield(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    if (!gh) return 0;
-    const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
-    const bool asGroup = lua_toboolean(L, 2) != 0;
-
-    const auto& bgs = gh->getAvailableBgs();
-    uint32_t bgTypeId = selectedBattlegroundTypeId();
-    // Nothing selected can still happen - a queue asked for before the panel
-    // has told anyone what it is showing - and one battleground on offer is
-    // then not a guess.
-    if (bgTypeId == 0 && bgs.size() == 1) bgTypeId = bgs.front().bgTypeId;
-    if (bgTypeId == 0) {
-        LOG_WARNING("JoinBattlefield: no battleground is selected, so there is "
-                    "nothing to queue for - the panel names its choice through "
-                    "RequestBattlegroundInstanceInfo and has not");
-        return 0;
-    }
-
-    uint32_t instanceId = 0;
-    for (const auto& bg : bgs) {
-        if (bg.bgTypeId != bgTypeId) continue;
-        if (index > 0 && index <= static_cast<int>(bg.instanceIds.size())) {
-            instanceId = bg.instanceIds[static_cast<size_t>(index) - 1];
-        }
-        break;
-    }
-
-    // The battlemaster, when there is one to name. Queueing from the panel is
-    // done standing anywhere, and the guid then belongs to whoever was last
-    // spoken to - a vendor, a flight master - which is not a battlemaster and
-    // is not what the real client sends. Nought is.
-    const uint64_t battlemaster =
-        gh->isGossipWindowOpen() ? gh->getCurrentGossip().npcGuid : 0;
-    LOG_WARNING("CMSG_BATTLEMASTER_JOIN: bgTypeId=", bgTypeId, " instance=", instanceId,
-             " asGroup=", asGroup, " battlemaster=0x", std::hex, battlemaster, std::dec);
-    gh->joinBattlefield(battlemaster, bgTypeId, instanceId, asGroup);
-    return 0;
-}
 
 // GetLFGCompletionReward() →
 //   name, typeID, textureFilename, moneyBase, moneyVar, experienceBase,
@@ -5815,7 +5393,6 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"RequestRaidInfo",          lua_RequestRaidInfo},
                 {"IsPVPTimerRunning",        lua_IsPVPTimerRunning},
                 {"GetPVPTimer",              lua_GetPVPTimer},
-                {"GetCurrentArenaSeason",    lua_GetCurrentArenaSeason},
                 {"GetPVPRankProgress",       lua_GetPVPRankProgress},
                 {"ArenaTeamRoster",              lua_ArenaTeamRoster},
                 {"GetArenaTeamRosterInfo",       lua_GetArenaTeamRosterInfo},
@@ -5843,7 +5420,6 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"SetArenaTeamRosterSelection",  lua_SetArenaTeamRosterSelection},
                 {"CloseArenaTeamRoster",         lua_CloseArenaTeamRoster},
                 {"IsArenaTeamCaptain",           lua_IsArenaTeamCaptain},
-                {"CloseBattlefield",             lua_CloseBattlefield},
                 {"CanExitVehicle",               lua_CanExitVehicle},
                 {"IsVehicleAimAngleAdjustable",  lua_IsVehicleAimAngleAdjustable},
                 {"IsVehicleAimPowerAdjustable",  lua_IsVehicleAimPowerAdjustable},
@@ -5861,10 +5437,6 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"EjectPassengerFromSeat",       lua_EjectPassengerFromSeat},
                 {"HasKey",                       lua_HasKey},
                 {"GetArenaTeam",             lua_GetArenaTeam},
-                {"GetRandomBGHonorCurrencyBonuses",  lua_GetRandomBGHonorCurrencyBonuses},
-                {"GetHolidayBGHonorCurrencyBonuses", lua_BattlegroundHonorBonusesNone},
-                {"GetBattlefieldInstanceInfo",       lua_GetBattlefieldInstanceInfo},
-                {"GetNumBattlefields",       lua_GetNumBattlefields},
                 // Sorting the battleground list. This client sorts its own, so
                 // there is nothing to do - but the name has to exist, because
                 // PVPBattlegroundFrame_OnShow calls it and a nil global raises
@@ -5887,11 +5459,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"GetNumMutes",              lua_ReturnZero},
                 {"IsInLFGDungeon",           lua_IsInLFGDungeon},
                 {"LFGTeleport",              lua_LFGTeleport},
-                {"IsBattlefieldArena",       lua_IsBattlefieldArena},
-                {"IsActiveBattlefieldArena", lua_IsActiveBattlefieldArena},
                 {"CanHearthAndResurrectFromArea", lua_CanHearthAndResurrectFromArea},
-                {"GetWorldPVPQueueStatus",   lua_GetWorldPVPQueueStatus},
-                {"LeaveBattlefield",         lua_LeaveBattlefield},
                 {"CreateWorldMapArrowFrame",   lua_CreateWorldMapArrowFrame},
                 {"ShowWorldMapArrowFrame",     lua_ShowWorldMapArrowFrame},
                 {"PositionWorldMapArrowFrame", lua_PositionWorldMapArrowFrame},
@@ -5908,10 +5476,6 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"CombatLogSetCurrentEntry",       lua_CombatLogSetCurrentEntry},
                 {"CombatLogAddFilter",             lua_CombatLogAddFilter},
                 {"CombatLogResetFilter",           lua_CombatLogResetFilter},
-                {"GetBattlefieldInfo",       lua_GetBattlefieldInfo},
-                {"SetSelectedBattlefield",   lua_SetSelectedBattlefield},
-                {"GetSelectedBattlefield",   lua_GetSelectedBattlefield},
-                {"JoinBattlefield",          lua_JoinBattlefield},
                 {"GetLFGCompletionReward",     lua_GetLFGCompletionReward},
                 {"GetLFGCompletionRewardItem", lua_GetLFGCompletionRewardItem},
                 {"RunMacroText",             lua_RunMacroText},
@@ -6024,32 +5588,6 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"VehicleAimGetNormAngle",   lua_VehicleAimGetNormAngle},
                 {"VehicleAimGetNormPower",   lua_VehicleAimGetNormPower},
                 {"GetExpansionLevel",        lua_GetExpansionLevel},
-                // The difficulty the player is set to, which this client is
-                // told by SMSG_INSTANCE_DIFFICULTY and kept answering as one.
-                // A dropdown reading a constant shows the wrong tick and, worse,
-                // sends a change nobody asked for when the menu is opened.
-                // The wire counts difficulties from zero and the interface from
-                // one: DUNGEON_DIFFICULTY_NORMAL is 0 on AzerothCore, and the
-                // popup checks its menu entry with `GetDungeonDifficulty() ==
-                // index`, index being the 1-based row. Answering the stored
-                // value straight made Heroic read as Normal - `d ? d : 1` turns
-                // both 0 and 1 into 1 - so the tick sat on the wrong row and
-                // unitpopup's `GetDungeonDifficulty() == 1` heroic-lockout
-                // check was true inside a heroic.
-                //
-                // Both answer from the one value this client tracks. Only one
-                // of the two applies at a time, so that holds until a party
-                // sets a raid difficulty while standing in a dungeon.
-                {"GetDungeonDifficulty", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            lua_pushnumber(L, (gh ? gh->getInstanceDifficulty() : 0u) + 1u);
-            return 1;
-        }},
-                {"GetRaidDifficulty", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            lua_pushnumber(L, (gh ? gh->getInstanceDifficulty() : 0u) + 1u);
-            return 1;
-        }},
                 {"GetChatTypeIndex",         lua_ReturnOne},
                 {"GetDefaultLanguage",       lua_GetDefaultLanguage},
                 {"GetWeaponEnchantInfo",     lua_GetWeaponEnchantInfo},
@@ -6352,68 +5890,6 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"KBArticle_GetData",           lua_ReturnNil},
                 {"KBSystem_GetMOTD",            lua_ReturnNil},
                 {"KBSystem_GetServerNotice",    lua_ReturnNil},
-                // Three more counts read straight into a comparison or a
-                // format, with the same result: the socketing window walks
-                // `i <= numSockets`, the PvP frame formats the season number
-                // into its off-season line, and the achievement comparison
-                // concatenates its total. None of the three has data behind it
-                // here - no socketing, no arena seasons, and no way to read
-                // another player's achievements - so zero is what is true.
-                // Three battlefield timers, all read as `X()/1000`. This
-                // client has partial battlefield support - status, score,
-                // winner and positions are all bound - so these are gaps in a
-                // system a player reaches rather than one that does not exist,
-                // and each raises the moment a battleground is queued for or
-                // entered. Zero reads correctly at every call site: no time in
-                // queue, no shutdown pending, no elapsed run time.
-                // Both timers are read as X()/1000, so milliseconds. The
-                // queue slot carries each in seconds and this answered zero for
-                // both - a queue that always read as just-joined with no
-                // estimate, which is the whole content of that window.
-                {"GetBattlefieldTimeWaited", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const int index = static_cast<int>(luaL_optnumber(L, 1, 1));
-            // Counted on from the server's last word, which comes about once
-            // a minute - answered as it stood, the minimap tooltip's time in
-            // queue sat still for a minute and then jumped.
-            double ms = 0.0;
-            if (gh && index >= 1 && index <= 3) {
-                const auto& q = gh->getBgQueues()[static_cast<size_t>(index - 1)];
-                ms = q.timeInQueueSec * 1000.0;
-                if (q.statusId == 1 &&
-                    q.queueTimeReceivedAt != std::chrono::steady_clock::time_point{}) {
-                    ms += std::chrono::duration<double, std::milli>(
-                              std::chrono::steady_clock::now() - q.queueTimeReceivedAt).count();
-                }
-            }
-            lua_pushnumber(L, ms);
-            return 1;
-        }},
-                {"GetBattlefieldEstimatedWaitTime", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const int index = static_cast<int>(luaL_optnumber(L, 1, 1));
-            double ms = 0.0;
-            if (gh && index >= 1 && index <= 3)
-                ms = gh->getBgQueues()[static_cast<size_t>(index - 1)].avgWaitTimeSec * 1000.0;
-            lua_pushnumber(L, ms);
-            return 1;
-        }},
-                // CanJoinBattlefieldAsGroup() - whether the queue button offers
-                // to take the party in.
-                //
-                // The server decides for itself when the request arrives; this
-                // only says whether it is worth offering, which is a party the
-                // player leads. Solo, there is no group to bring.
-                {"CanJoinBattlefieldAsGroup", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            if (!gh) { lua_pushboolean(L, 0); return 1; }
-            const auto& pd = gh->getPartyData();
-            const bool leadsAParty = !pd.isEmpty() && pd.leaderGuid == gh->getPlayerGuid();
-            lua_pushboolean(L, leadsAParty ? 1 : 0);
-            return 1;
-        }},
-                {"GetBattlefieldInstanceExpiration", lua_ReturnZero},
-                {"GetBattlefieldInstanceRunTime",    lua_ReturnZero},
                 // The aspect ratio the Mac options panel builds its recording
                 // resolution from: `"640x"..floor(640*ratio)`. Answering the
                 // window's own ratio is both truthful and what makes that read
@@ -6441,9 +5917,6 @@ void registerSystemLuaAPI(lua_State* L) {
             lua_pushnumber(L, (w > 0.0f) ? (h / w) : 0.5625);
             return 1;
         }},
-                // GetNumSockets answered zero here, which said every item has
-                // no sockets. It is real now, and in lua_socket_api.cpp.
-                {"GetPreviousArenaSeason",      lua_ReturnZero},
                 // GetInstanceBootTimeRemaining() - the countdown on the
                 // "you are not in this instance's group" dialog, which reads
                 // it on show and hides itself when it is not positive.
@@ -6791,7 +6264,6 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"IsStereoVideoAvailable",   lua_ReturnFalse},
                 {"IsVoiceChatEnabled",       lua_ReturnFalse},
                 {"HasDebugZoneMap",          lua_ReturnFalse},
-                {"CanQueueForWintergrasp",   lua_ReturnFalse},
                 {"CancelSkillUps",           lua_ReturnNothing},
                 // RaidFrameConvertToRaidButton's OnClick. SocialHandler has
                 // sent CMSG_GROUP_RAID_CONVERT for /raid conversion all along;
@@ -7015,9 +6487,6 @@ void registerSystemLuaAPI(lua_State* L) {
             lua_pushnumber(L, offset);
             return 1;
         }},
-                {"GetNumBattlegroundTypes",  lua_GetNumBattlegroundTypes},
-                {"GetBattlegroundInfo",      lua_GetBattlegroundInfo},
-                {"RequestBattlegroundInstanceInfo", lua_RequestBattlegroundInstanceInfo},
                 {"Sound_GameSystem_GetNumOutputDrivers", lua_Sound_GetNumOutputDrivers},
                 {"Sound_ChatSystem_GetNumInputDrivers",  lua_ReturnZero},
                 {"Sound_ChatSystem_GetNumOutputDrivers", lua_ReturnZero},
@@ -7268,9 +6737,6 @@ void registerSystemLuaAPI(lua_State* L) {
             lua_pushboolean(L, 0);                      // 6: enabled (voice)
             return 6;
         }},
-                {"GetWintergraspWaitTime",   lua_ReturnNil},
-                {"GetNumWorldStateUI",       lua_GetNumWorldStateUI},
-                {"GetWorldStateUIInfo",      lua_GetWorldStateUIInfo},
                 // Whether the player is standing on a world PvP objective.
                 //
                 // This gates the whole of uiType 1 in worldstateframe, and the
@@ -7394,9 +6860,6 @@ void registerSystemLuaAPI(lua_State* L) {
             return 0;
         }},
                 {"GetAddOnMetadata",  lua_GetAddOnMetadata},
-                {"IsInInstance",         lua_IsInInstance},
-                {"GetInstanceInfo",      lua_GetInstanceInfo},
-                {"GetInstanceDifficulty", lua_GetInstanceDifficulty},
                 {"strsplit",          lua_strsplit},
                 {"strtrim",           lua_strtrim},
                 {"strlenutf8",        lua_strlenutf8},
@@ -7878,35 +7341,6 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             lua_pushnumber(L, gh ? gh->getInstanceLockouts().size() : 0);
             return 1;
-        }},
-                {"GetSavedInstanceInfo", [](lua_State* L) -> int {
-            // GetSavedInstanceInfo(index) → name, id, reset, difficulty, locked, extended, instanceIDMostSig, isRaid, maxPlayers
-            auto* gh = getGameHandler(L);
-            int index = static_cast<int>(luaL_checknumber(L, 1));
-            if (!gh || index < 1) { return luaReturnNil(L); }
-            const auto& lockouts = gh->getInstanceLockouts();
-            if (index > static_cast<int>(lockouts.size())) { return luaReturnNil(L); }
-            const auto& l = lockouts[index - 1];
-            // The real name, out of Map.dbc, which the client already reads for
-            // its own loading screens. The number was a placeholder and it
-            // reached the Raid Info panel as the instance's name.
-            std::string mapName = gh->getMapName(l.mapId);
-            if (mapName.empty()) mapName = "Instance " + std::to_string(l.mapId);
-            lua_pushstring(L, mapName.c_str());     // name
-            lua_pushnumber(L, l.mapId);             // id
-            lua_pushnumber(L, static_cast<double>(l.resetTime - static_cast<uint64_t>(time(nullptr)))); // reset (seconds until)
-            lua_pushnumber(L, l.difficulty);        // difficulty
-            lua_pushboolean(L, l.locked ? 1 : 0);  // locked
-            lua_pushboolean(L, l.extended ? 1 : 0); // extended
-            lua_pushnumber(L, 0);                   // instanceIDMostSig
-            lua_pushboolean(L, l.difficulty >= 2 ? 1 : 0); // isRaid (25-man = raid)
-            lua_pushnumber(L, l.difficulty >= 2 ? 25 : (l.difficulty >= 1 ? 10 : 5)); // maxPlayers
-            // The difficulty in words, which the raid lockout row prints
-            // beside the instance name. It was not returned, so that column
-            // was blank on every saved instance.
-            const char* diffName = game::instanceDifficultyName(l.difficulty);
-            lua_pushstring(L, diffName ? diffName : "Normal");
-            return 10;
         }},
                 {"CalendarGetDate", [](lua_State* L) -> int {
             // CalendarGetDate() → weekday, month, day, year
