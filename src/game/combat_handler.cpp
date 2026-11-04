@@ -1,6 +1,8 @@
 #include "game/combat_handler.hpp"
 #include "game/global_strings.hpp"
 #include "game/combat_log_event.hpp"
+#include "game/stock_combat_log.hpp"
+#include "game/group_defines.hpp"
 #include "game/classic_combat_chat.hpp"
 #include "audio/ui_sound_manager.hpp"
 #include "addons/lua_api_registrations.hpp"
@@ -212,6 +214,13 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
         uint32_t dmg         = packet.readUInt32();
         uint32_t envAbs      = packet.readUInt32();
         uint32_t envRes      = packet.readUInt32();
+        // 0x756800 -> 0x755270 -> 0x751150, for any unit the client has.
+        if (stockCombatLogActive() && owner_.getEntityManager().getEntity(victimGuid)) {
+            if (auto r = stock_combat_log::buildEnvironmental(
+                    victimGuid, envType, static_cast<int32_t>(dmg), static_cast<int32_t>(envAbs),
+                    static_cast<int32_t>(envRes)))
+                logCombatEvent(*r);
+        }
         if (victimGuid == owner_.getPlayerGuid()) {
             // Environmental damage: pass envType via powerType field for display differentiation
             if (dmg > 0)
@@ -580,7 +589,9 @@ void CombatHandler::addCombatText(CombatTextEntry::Type type, int32_t amount, ui
     // was empty however much fighting there was. No filter is applied here: the
     // window applies its own settings to what it is given.
     // 1.12 has no combat log event, so Classic and Turtle are not sent one.
-    if (owner_.addonEventCallbackRef() && !isClassicLikeExpansion()) {
+    // 3.3.5a's are built from the packets themselves (logCombatEvent); this
+    // older shape is TBC's alone.
+    if (owner_.addonEventCallbackRef() && !isClassicLikeExpansion() && !stockCombatLogActive()) {
         CombatLogEventInput input;
         input.layout = isActiveExpansion("tbc") ? CombatLogLayout::Tbc : CombatLogLayout::Wotlk;
         input.type = type;
@@ -597,8 +608,8 @@ void CombatHandler::addCombatText(CombatTextEntry::Type type, int32_t amount, ui
         input.timestamp = static_cast<int64_t>(std::time(nullptr));
         const std::vector<std::string> args = buildCombatLogEvent(input);
         if (!args.empty()) {
+            // COMBAT_LOG_EVENT is fired by LuaEngine, through the filters.
             owner_.addonEventCallbackRef()("COMBAT_LOG_EVENT_UNFILTERED", args);
-            owner_.addonEventCallbackRef()("COMBAT_LOG_EVENT", args);
         }
     }
 
@@ -651,6 +662,7 @@ bool CombatHandler::shouldLogSpellstealAura(uint64_t casterGuid, uint64_t victim
 }
 
 void CombatHandler::updateCombatText(float deltaTime) {
+    flushCombatLog();
     for (auto& entry : combatText_) {
         entry.age += deltaTime;
     }
@@ -783,6 +795,26 @@ constexpr uint32_t VICTIMSTATE_DODGE = 2, VICTIMSTATE_PARRY = 3, VICTIMSTATE_BLO
 void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
     AttackerStateUpdateData data;
     if (!owner_.getPacketParsers()->parseAttackerStateUpdate(packet, data)) return;
+
+    // The combat log, for every swing the client is told of (0x7512B0).
+    if (stockCombatLogActive()) {
+        stock_combat_log::SwingInput in;
+        in.attacker = data.attackerGuid;
+        in.victim = data.targetGuid;
+        in.hitInfo = data.hitInfo;
+        in.victimState = data.victimState;
+        in.damage = data.totalDamage;
+        in.overkill = data.overkill > 0 ? data.overkill : 0;
+        in.blocked = static_cast<int32_t>(data.blocked);
+        for (size_t i = 0; i < data.subDamages.size() && i < 2; ++i) {
+            const auto& sub = data.subDamages[i];
+            if (sub.schoolMask == 0) break;
+            if (i == 0) in.firstSchool = sub.schoolMask;
+            in.absorbed += static_cast<int32_t>(sub.absorbed);
+            in.resisted += static_cast<int32_t>(sub.resisted);
+        }
+        if (auto r = stock_combat_log::buildSwing(in)) logCombatEvent(*r);
+    }
 
     bool isPlayerAttacker = (data.attackerGuid == owner_.getPlayerGuid());
     bool isPlayerTarget = (data.targetGuid == owner_.getPlayerGuid());
@@ -957,6 +989,27 @@ void CombatHandler::handleSpellDamageLog(network::Packet& packet) {
     SpellDamageLogData data;
     if (!owner_.getPacketParsers()->parseSpellDamageLog(packet, data)) return;
 
+    // 0x6D3840 -> 0x751C40 / 0x752DE0. The source is the target when the
+    // hit-type's 0x10 is set, as the client reads it.
+    if (stockCombatLogActive()) {
+        stock_combat_log::SpellDamageInput in;
+        in.caster = (data.hitFlags & 0x10) ? data.targetGuid : data.attackerGuid;
+        in.victim = data.targetGuid;
+        in.spellId = data.spellId;
+        in.damage = static_cast<int32_t>(data.damage);
+        in.overkill = static_cast<int32_t>(data.overkill);
+        in.school = data.schoolMask;
+        in.absorbed = static_cast<int32_t>(data.absorbed);
+        in.resisted = static_cast<int32_t>(data.resisted);
+        in.blocked = static_cast<int32_t>(data.blocked);
+        in.crit = data.isCrit;
+        in.periodic = data.periodicLog;
+        in.split = (data.hitFlags & 0x8) != 0;
+        if (in.split) in.caster = data.attackerGuid;
+        if (auto r = stock_combat_log::buildSpellDamage(in, combatLogSpellRules(data.spellId)))
+            logCombatEvent(*r);
+    }
+
     bool isPlayerSource = (data.attackerGuid == owner_.getPlayerGuid());
     bool isPlayerTarget = (data.targetGuid == owner_.getPlayerGuid());
     // Spell damage makes the victim flinch, as a melee hit does - any
@@ -1008,6 +1061,15 @@ void CombatHandler::handleSpellDamageLog(network::Packet& packet) {
 void CombatHandler::handleSpellHealLog(network::Packet& packet) {
     SpellHealLogData data;
     if (!owner_.getPacketParsers()->parseSpellHealLog(packet, data)) return;
+
+    // 0x6D3C30 -> 0x751F70.
+    if (stockCombatLogActive()) {
+        if (auto r = stock_combat_log::buildHeal(
+                data.casterGuid, data.targetGuid, data.spellId, static_cast<int32_t>(data.heal),
+                static_cast<int32_t>(data.overheal), static_cast<int32_t>(data.absorbed),
+                data.isCrit, false, combatLogSpellRules(data.spellId)))
+            logCombatEvent(*r);
+    }
 
     bool isPlayerSource = (data.casterGuid == owner_.getPlayerGuid());
     bool isPlayerTarget = (data.targetGuid == owner_.getPlayerGuid());
@@ -1270,7 +1332,9 @@ void CombatHandler::handlePvpCredit(network::Packet& packet) {
 }
 
 void CombatHandler::handleProcResist(network::Packet& packet) {
-    const bool prUsesFullGuid = isActiveExpansion("tbc");
+    // Whole guids in TBC and WotLK (AzerothCore's Unit::SendSpellMiss sibling,
+    // Wow.exe 0x750D40 reads two uint64s), packed only on 1.12.
+    const bool prUsesFullGuid = !isClassicLikeExpansion();
     auto readPrGuid = [&]() -> uint64_t {
         if (prUsesFullGuid)
             return (packet.hasRemaining(8)) ? packet.readUInt64() : 0;
@@ -1282,6 +1346,14 @@ void CombatHandler::handleProcResist(network::Packet& packet) {
     uint64_t victim = readPrGuid();
     if (!packet.hasRemaining(4)) return;
     uint32_t spellId = packet.readUInt32();
+    // 0x750D40: a full resist, SPELL_MISSED RESIST with an amount of 0.
+    if (stockCombatLogActive()) {
+        if (auto r = stock_combat_log::buildSpellMiss(caster, victim, spellId, 2,
+                                                     combatLogSpellRules(spellId))) {
+            r->v6c = 0;
+            logCombatEvent(*r);
+        }
+    }
     if (victim == owner_.getPlayerGuid())       addCombatText(CombatTextEntry::RESIST, 0, spellId, false, 0, caster, victim);
     else if (caster == owner_.getPlayerGuid())  addCombatText(CombatTextEntry::RESIST, 0, spellId, true,  0, caster, victim);
     owner_.fireCombatTextUpdate(victim, {"SPELL_RESIST"});
@@ -1296,8 +1368,10 @@ void CombatHandler::handleProcResist(network::Packet& packet) {
 void CombatHandler::handleSpellDamageShield(network::Packet& packet) {
     // Classic: packed_guid victim + packed_guid caster + spellId(4) + damage(4) + schoolMask(4)
     // TBC:     uint64 victim + uint64 caster + spellId(4) + damage(4) + schoolMask(4)
-    // WotLK:   packed_guid victim + packed_guid caster + spellId(4) + damage(4) + absorbed(4) + schoolMask(4)
-    const bool shieldTbc = isActiveExpansion("tbc");
+    // WotLK:   uint64 victim + uint64 caster + spellId(4) + damage(4) + overkill(4) + schoolMask(4)
+    //          (AzerothCore Unit::DealDamageShieldDamage; Wow.exe 0x6D3750 reads
+    //          two whole guids). The first guid is the shield's owner.
+    const bool shieldTbc = !isClassicLikeExpansion();
     const bool shieldWotlkLike = !isClassicLikeExpansion() && !shieldTbc;
     const auto shieldRem = [&]() { return packet.getRemainingSize(); };
     const size_t shieldMinSz = shieldTbc ? 24u : 2u;
@@ -1314,15 +1388,22 @@ void CombatHandler::handleSpellDamageShield(network::Packet& packet) {
     }
     uint64_t casterGuid = shieldTbc
         ? packet.readUInt64() : packet.readPackedGuid();
-    const size_t shieldTailSize = shieldWotlkLike ? 16u : 12u;
+    const bool shieldWotlk = shieldWotlkLike && !isActiveExpansion("tbc");
+    const size_t shieldTailSize = shieldWotlk ? 16u : 12u;
     if (shieldRem() < shieldTailSize) {
         packet.skipAll(); return;
     }
     uint32_t shieldSpellId = packet.readUInt32();
     uint32_t damage        = packet.readUInt32();
-    if (shieldWotlkLike)
-        /*uint32_t absorbed =*/ packet.readUInt32();
-    /*uint32_t school =*/  packet.readUInt32();
+    uint32_t overkill = 0;
+    if (shieldWotlk) overkill = packet.readUInt32();
+    const uint32_t school = packet.readUInt32();
+    if (stockCombatLogActive()) {
+        if (auto r = stock_combat_log::buildDamageShield(
+                victimGuid, casterGuid, shieldSpellId, static_cast<int32_t>(damage),
+                static_cast<int32_t>(overkill), school, combatLogSpellRules(shieldSpellId)))
+            logCombatEvent(*r);
+    }
     // Show combat text: damage shield reflect
     if (casterGuid == owner_.getPlayerGuid()) {
         // We have a damage shield that reflected damage
@@ -1337,7 +1418,9 @@ void CombatHandler::handleSpellDamageShield(network::Packet& packet) {
 void CombatHandler::handleSpellOrDamageImmune(network::Packet& packet) {
     // WotLK/Classic/Turtle: packed casterGuid + packed victimGuid + uint32 spellId + uint8 saveType
     // TBC:                  full uint64 casterGuid + full uint64 victimGuid + uint32 + uint8
-    const bool immuneUsesFullGuid = isActiveExpansion("tbc");
+    // Whole guids in WotLK as well (AzerothCore Unit::SendSpellDamageImmune,
+    // Wow.exe 0x6CE3D0).
+    const bool immuneUsesFullGuid = !isClassicLikeExpansion();
     const size_t minSz = immuneUsesFullGuid ? 21u : 2u;
     if (!packet.hasRemaining(minSz)) {
         packet.skipAll(); return;
@@ -1354,7 +1437,14 @@ void CombatHandler::handleSpellOrDamageImmune(network::Packet& packet) {
         ? packet.readUInt64() : packet.readPackedGuid();
     if (!packet.hasRemaining(5)) return;
     uint32_t immuneSpellId = packet.readUInt32();
-    /*uint8_t saveType =*/ packet.readUInt8();
+    const uint8_t debugLog = packet.readUInt8();
+    // 0x6CE3D0 -> 0x751B80: SPELL_MISSED IMMUNE, for a spell the log knows.
+    (void)debugLog;
+    if (stockCombatLogActive()) {
+        if (auto r = stock_combat_log::buildSpellMiss(casterGuid, victimGuid, immuneSpellId, 7,
+                                                     combatLogSpellRules(immuneSpellId)))
+            logCombatEvent(*r);
+    }
     // Show IMMUNE text when the player is the caster (we hit an immune target)
     // or the victim (we are immune)
     if (casterGuid == owner_.getPlayerGuid() || victimGuid == owner_.getPlayerGuid()) {
@@ -2108,6 +2198,217 @@ void CombatHandler::handleXpGain(network::Packet& packet) {
         msg += " (+" + std::to_string(data.groupBonus) + " group bonus)";
     }
     owner_.addLocalChatLine(ChatType::COMBAT_XP_GAIN, msg);
+}
+
+
+// ---------------------------------------------------------------------------
+// The stock combat log (docs/re/chat-combatlog.md, "Combat log").
+// ---------------------------------------------------------------------------
+
+bool CombatHandler::stockCombatLogActive() const {
+    return !isClassicLikeExpansion() && !isActiveExpansion("tbc");
+}
+
+stock_combat_log::SpellRules CombatHandler::combatLogSpellRules(uint32_t spellId) const {
+    stock_combat_log::SpellRules r;
+    if (spellId == 0) return r;
+    owner_.loadSpellNameCache();
+    const auto& cache = owner_.spellNameCacheRef();
+    const auto it = cache.find(spellId);
+    if (it == cache.end() || it->second.name.empty()) return r;
+    const auto& e = it->second;
+    r.known = true;
+    r.attr = e.attr;
+    r.attrEx2 = e.attrEx2;
+    r.attrEx3 = e.attrEx3;
+    r.attrEx4 = e.attrEx4;
+    r.attrEx6 = e.attrEx6;
+    r.attrEx7 = e.attrEx7;
+    r.stackAmount = e.stackAmount;
+    for (int i = 0; i < 3; ++i) r.effects[i] = e.effectIds[i];
+    r.speed = e.missileSpeed;
+    r.castTime = owner_.getSpellData(spellId).castTimeMs > 0 || (e.attr & 0x2u) != 0;
+    return r;
+}
+
+uint32_t CombatHandler::combatLogUnitFlags(uint64_t guid) const {
+    namespace scl = stock_combat_log;
+    scl::UnitFacts u;
+    u.guid = guid;
+    if (guid == 0) return scl::unitFlags(u);
+    u.me = owner_.getPlayerGuid();
+    u.controller = guid;
+    auto guidAt = [](const Entity& e, UF field) -> uint64_t {
+        const uint16_t idx = fieldIndex(field);
+        if (idx == 0xFFFF) return 0;
+        return static_cast<uint64_t>(e.getField(idx)) |
+               (static_cast<uint64_t>(e.getField(static_cast<uint16_t>(idx + 1))) << 32);
+    };
+    auto& em = owner_.getEntityManager();
+    std::shared_ptr<Entity> unitEntity;
+    if (auto ent = em.getEntity(guid)) {
+        u.objectKnown = true;
+        if (ent->isUnit()) {
+            u.isUnit = true;
+            unitEntity = ent;
+            uint64_t owner = guidAt(*ent, UF::UNIT_FIELD_CHARMEDBY);
+            if (owner == 0) owner = guidAt(*ent, UF::UNIT_FIELD_CREATEDBY_LO);
+            if (owner != 0) u.controller = owner;
+            u.charmedOrSummoned = guidAt(*ent, UF::UNIT_FIELD_CHARMEDBY) != 0 ||
+                                  guidAt(*ent, UF::UNIT_FIELD_SUMMONEDBY_LO) != 0;
+            const int reaction = owner_.unitReactionToPlayer(static_cast<const Unit&>(*ent));
+            u.reaction = reaction > 0 ? reaction - 1 : -1;
+        } else if (ent->getType() == ObjectType::GAMEOBJECT) {
+            u.controller = guidAt(*ent, UF::GAMEOBJECT_FIELD_CREATED_BY_LO);
+        }
+        // A controller that is not a player and is itself controlled: one
+        // step further (0x74DCB0's second lookup).
+        if (u.controller != guid && !scl::isPlayerGuid(u.controller) && u.controller != 0) {
+            if (auto c = em.getEntity(u.controller); c && c->isUnit()) {
+                uint64_t next = guidAt(*c, UF::UNIT_FIELD_CHARMEDBY);
+                if (next == 0) next = guidAt(*c, UF::UNIT_FIELD_CREATEDBY_LO);
+                if (next != 0) u.controller = next;
+            }
+        }
+    }
+    const auto& party = owner_.getPartyData();
+    u.inGroup = owner_.isInGroup();
+    u.inRaid = u.inGroup && groupIsRaid(party.groupType);
+    for (const auto& m : party.members) {
+        if (m.guid == u.controller) {
+            u.controllerInRaid = u.inRaid;
+            u.controllerInParty = !u.inRaid || m.subGroup == party.subGroup;
+        }
+        if (m.guid == guid) u.roleFlags = m.flags;
+    }
+    if (guid == u.me) u.roleFlags = party.flags;
+    u.isTarget = guid == owner_.getTargetGuid();
+    u.isFocus = guid == owner_.getFocusGuid();
+    const uint8_t mark = owner_.getEntityRaidMark(guid);
+    u.raidIcon = mark < 8 ? mark : -1;
+    return scl::unitFlags(u);
+}
+
+std::string CombatHandler::combatLogName(uint64_t guid, bool& waiting) const {
+    waiting = false;
+    if (guid == 0) return {};
+    namespace scl = stock_combat_log;
+    if (const std::string& known = owner_.lookupName(guid); !known.empty()) return known;
+    auto& gh = const_cast<GameHandler&>(owner_);
+    if (scl::isPlayerGuid(guid)) {
+        gh.queryPlayerName(guid);
+        waiting = true;
+        return {};
+    }
+    const uint32_t ht = scl::guidHighType(guid);
+    uint32_t entry = static_cast<uint32_t>((guid >> 24) & 0xFFFFFFu);
+    if (auto ent = owner_.getEntityManager().getEntity(guid)) {
+        if (ent->getType() == ObjectType::GAMEOBJECT) {
+            const auto& go = static_cast<const GameObject&>(*ent);
+            if (!go.getName().empty()) return go.getName();
+            if (const auto* info = owner_.getCachedGameObjectInfo(go.getEntry());
+                info && !info->name.empty())
+                return info->name;
+            waiting = true;
+            return {};
+        }
+        if (ent->isUnit()) entry = static_cast<const Unit&>(*ent).getEntry();
+    }
+    if (ht == 0xF0300000u || ht == 0xF0500000u) {
+        std::string name = owner_.getCachedCreatureName(entry);
+        if (!name.empty()) return name;
+        if (entry != 0) gh.queryCreatureInfo(entry, guid);
+    } else if (ht == 0xF0100000u) {
+        if (const auto* info = owner_.getCachedGameObjectInfo(entry); info && !info->name.empty())
+            return info->name;
+    }
+    waiting = true;
+    return {};
+}
+
+void CombatHandler::logCombatEvent(const stock_combat_log::Record& record) {
+    if (!stockCombatLogActive() || record.event < 0) return;
+    PendingCombatLog p;
+    p.rec = record;
+    p.res.srcFlags = combatLogUnitFlags(record.src);
+    p.res.dstFlags = combatLogUnitFlags(record.dst);
+    p.res.timestamp = std::chrono::duration<double>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    p.at = std::chrono::steady_clock::now();
+    combatLogPending_.push_back(std::move(p));
+    flushCombatLog();
+}
+
+void CombatHandler::flushCombatLog() {
+    namespace scl = stock_combat_log;
+    // Long enough for a name query's answer; a unit whose name never comes
+    // goes as UNKNOWNOBJECT, as a failed lookup does in the stock client.
+    constexpr auto kNameWait = std::chrono::seconds(3);
+    const auto now = std::chrono::steady_clock::now();
+    while (!combatLogPending_.empty()) {
+        auto& p = combatLogPending_.front();
+        bool srcWait = false, dstWait = false, itemWait = false;
+        std::string srcName = combatLogName(p.rec.src, srcWait);
+        std::string dstName = combatLogName(p.rec.dst, dstWait);
+        std::string itemName;
+        if (p.rec.suffix & scl::kSufItem) {
+            const auto itemId = static_cast<uint32_t>(p.rec.v58);
+            if (const auto* info = owner_.getItemInfo(itemId); info && !info->name.empty()) {
+                itemName = info->name;
+            } else if (itemId != 0) {
+                owner_.ensureItemInfo(itemId);
+                itemWait = true;
+            }
+        }
+        if ((srcWait || dstWait || itemWait) && now - p.at < kNameWait) break;
+        if (srcWait || dstWait) {
+            std::string unknown = globalString(owner_.services().assetManager, "UNKNOWNOBJECT");
+            if (unknown.empty()) unknown = "Unknown";
+            if (srcWait) srcName = unknown;
+            if (dstWait) dstName = unknown;
+        }
+        p.res.srcName = std::move(srcName);
+        p.res.dstName = std::move(dstName);
+        p.res.itemName = std::move(itemName);
+        const auto args = scl::formatArgs(p.rec, p.res, [this](uint32_t id) {
+            scl::SpellBrief b;
+            const auto r = combatLogSpellRules(id);
+            if (!r.known) return b;
+            b.known = true;
+            b.name = owner_.getSpellName(id);
+            b.schoolMask = owner_.getSpellSchoolMask(id);
+            return b;
+        });
+        combatLogPending_.pop_front();
+        if (owner_.addonEventCallbackRef())
+            owner_.addonEventCallbackRef()("COMBAT_LOG_EVENT_UNFILTERED", args);
+    }
+}
+
+void CombatHandler::logUnitDeath(uint64_t guid) {
+    namespace scl = stock_combat_log;
+    if (!stockCombatLogActive() || guid == 0) return;
+    int event = scl::UNIT_DIED;
+    if (!scl::isPlayerGuid(guid)) {
+        auto ent = owner_.getEntityManager().getEntity(guid);
+        if (!ent || !ent->isUnit()) return;
+        const uint32_t entry = static_cast<const Unit&>(*ent).getEntry();
+        // 0x718A90: a creature with no cache record, or one whose type flags
+        // carry 0x400, has no death in the log.
+        const auto& cache = owner_.getCreatureInfoCache();
+        if (cache.find(entry) == cache.end()) return;
+        if (owner_.getCreatureTypeFlags(entry) & 0x400u) return;
+        // 0x752ED0: a gas cloud (creature type 13) dissipates; a totem
+        // (type 11; the client asks whether its summoning spell filled a totem
+        // slot) is destroyed.
+        const uint32_t type = owner_.getCreatureType(entry);
+        if (type == 13) event = scl::UNIT_DISSIPATES;
+        else if (type == 11) event = scl::UNIT_DESTROYED;
+    }
+    scl::Record r;
+    r.event = event;
+    r.dst = guid;
+    logCombatEvent(r);
 }
 
 } // namespace game

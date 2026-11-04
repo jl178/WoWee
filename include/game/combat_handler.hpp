@@ -3,6 +3,7 @@
 #include "game/world_packets.hpp"
 #include "game/opcode_table.hpp"
 #include "game/spell_defines.hpp"
+#include "game/stock_combat_log.hpp"
 #include "game/tab_target.hpp"
 #include "network/packet.hpp"
 #include <chrono>
@@ -86,6 +87,25 @@ public:
     void addCombatText(CombatTextEntry::Type type, int32_t amount, uint32_t spellId,
                        bool isPlayerSource, uint8_t powerType = 0,
                        uint64_t srcGuid = 0, uint64_t dstGuid = 0);
+
+    // --- The stock combat log (game/stock_combat_log.hpp) ---
+    /// Whether this expansion's interface reads the 3.3.5a combat log events
+    /// built here. TBC keeps the older layout through addCombatText, 1.12 has
+    /// none.
+    [[nodiscard]] bool stockCombatLogActive() const;
+    /// An entry from a packet: its units' flags are taken now, as 0x750400
+    /// does, and it waits in order until both names are known (0x74F910).
+    void logCombatEvent(const stock_combat_log::Record& record);
+    /// Hand Lua every waiting entry whose names have arrived, oldest first;
+    /// one that waits too long goes with what is known.
+    void flushCombatLog();
+    /// What the builders check of a spell (Spell.dbc attributes, effects).
+    [[nodiscard]] stock_combat_log::SpellRules combatLogSpellRules(uint32_t spellId) const;
+    /// 0x74DCB0 for a unit, from what this client knows of it.
+    [[nodiscard]] uint32_t combatLogUnitFlags(uint64_t guid) const;
+    /// UNIT_DIED / UNIT_DESTROYED / UNIT_DISSIPATES when a unit's health
+    /// reaches zero (0x7489C0 -> 0x7561E0 -> 0x752ED0).
+    void logUnitDeath(uint64_t guid);
 
     // Spellsteal dedup (used by aura update handler)
     bool shouldLogSpellstealAura(uint64_t casterGuid, uint64_t victimGuid, uint32_t spellId);
@@ -184,6 +204,16 @@ private:
     std::function<bool(uint64_t)> unitInViewProvider_;
 
     [[nodiscard]] bool isGroupMemberGuid(uint64_t guid) const;
+
+    struct PendingCombatLog {
+        stock_combat_log::Record rec;
+        stock_combat_log::Resolved res;
+        std::chrono::steady_clock::time_point at;
+    };
+    std::deque<PendingCombatLog> combatLogPending_;
+    /// The name an entry shows for a unit; `waiting` when it is not known yet
+    /// (a query is then asked for, as the name cache's GetRecord does).
+    std::string combatLogName(uint64_t guid, bool& waiting) const;
 
     /// What 0x518E40 asks of a unit, answered from what this client knows.
     [[nodiscard]] tab_target::UnitFacts targetNearestFacts(uint64_t guid, const Unit& unit) const;

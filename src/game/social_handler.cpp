@@ -3,6 +3,7 @@
 #include "game/item_text.hpp"
 #include "game/global_strings.hpp"
 #include "game/combat_log_event.hpp"
+#include "game/stock_combat_log.hpp"
 #include "game/social_handler.hpp"
 #include "game/guild_roster_throttle.hpp"
 #include "game/spell_handler.hpp"
@@ -682,10 +683,17 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
         std::string killerName = nameFor(killerGuid);
         std::string victimName = nameFor(victimGuid);
         // A combat log event, PARTY_KILL, with the killer as source and the
-        // victim as destination - the combat log window and addons read it
-        // there. It was printed as a system chat line ("X killed Y."), which
-        // the stock client never shows.
-        if (owner_.addonEventCallbackRef() && !isClassicLikeExpansion()) {
+        // victim as destination (0x750C90) - the combat log window and addons
+        // read it there. It was printed as a system chat line ("X killed Y."),
+        // which the stock client never shows.
+        (void)killerName; (void)victimName;
+        if (auto* combat = owner_.getCombatHandler(); combat && combat->stockCombatLogActive()) {
+            stock_combat_log::Record r;
+            r.event = stock_combat_log::PARTY_KILL;
+            r.src = killerGuid;
+            r.dst = victimGuid;
+            combat->logCombatEvent(r);
+        } else if (owner_.addonEventCallbackRef() && !isClassicLikeExpansion()) {
             using namespace combat_log;
             const uint64_t me = owner_.getPlayerGuid(), pet = owner_.getPetGuid();
             const std::vector<std::string> args = {
@@ -696,7 +704,6 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
                 std::to_string(unitFlags(victimGuid, me, pet)),
             };
             owner_.addonEventCallbackRef()("COMBAT_LOG_EVENT_UNFILTERED", args);
-            owner_.addonEventCallbackRef()("COMBAT_LOG_EVENT", args);
         }
     };
 

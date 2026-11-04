@@ -2147,6 +2147,8 @@ public:
     int getReleaseTimeRemaining() const;
     /// IsOutOfBounds (0x6123c0): PLAYER_FLAGS 0x4000.
     bool isPlayerOutOfBounds() const;
+    /// PLAYER_FLAGS 0x8, a game master: chat reads every language (0x509DD0).
+    bool isPlayerGmFlagged() const;
     /// The ScreenEffect.dbc row the world is drawn and heard with (0x4f88b0):
     /// an aura's SCREEN_EFFECT, else the ghost's row 1, else none (id 0).
     const stock_death::ScreenEffectRow& getScreenEffect() const { return screenEffectRow_; }
@@ -4518,6 +4520,12 @@ public:
         /// what the moving checks read (stock_cast::refusedWhileMoving).
         uint32_t attrEx2 = 0;
         uint32_t attrEx3 = 0;
+        /// AttributesEx4/Ex6/Ex7 (columns 8, 10, 11) and StackAmount (49):
+        /// what the combat log's builders test (stock_combat_log::SpellRules).
+        uint32_t attrEx4 = 0;
+        uint32_t attrEx6 = 0;
+        uint32_t attrEx7 = 0;
+        uint32_t stackAmount = 0;
         uint32_t interruptFlags = 0;
         uint32_t auraInterruptFlags = 0;
         uint32_t channelInterruptFlags = 0;

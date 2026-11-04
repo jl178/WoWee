@@ -2112,6 +2112,10 @@ int GameHandler::getReleaseTimeRemaining() const {
     return stock_death::releaseSecondsRemaining(releaseDelayMs_, deathTimeMs_, nowMs);
 }
 
+bool GameHandler::isPlayerGmFlagged() const {
+    return (playerFieldValue(UF::PLAYER_FLAGS) & 0x8u) != 0;
+}
+
 bool GameHandler::isPlayerOutOfBounds() const {
     return (playerFieldValue(UF::PLAYER_FLAGS) & stock_death::kPlayerFlagOutOfBounds) != 0;
 }

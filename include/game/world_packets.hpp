@@ -816,6 +816,8 @@ struct MessageChatData {
 class MessageChatParser {
 public:
     static bool parse(network::Packet& packet, MessageChatData& data);
+    /// gmMessage: SMSG_GM_MESSAGECHAT, whose ordinary types name the sender.
+    static bool parse(network::Packet& packet, MessageChatData& data, bool gmMessage);
 };
 
 // Returns true when a chat packet is addon traffic and extracts the standard
@@ -2207,6 +2209,13 @@ struct SpellDamageLogData {
     uint32_t absorbed = 0;
     uint32_t resisted = 0;
     bool isCrit = false;
+    /// The byte after resisted (AzerothCore's physicalLog), which the stock
+    /// client reads as "periodic" (0x6D3840 -> 0x751C40), the blocked amount
+    /// and the hit-type flags: 0x2 critical, 0x8 split damage, 0x10 the
+    /// target is the source.
+    bool periodicLog = false;
+    uint32_t blocked = 0;
+    uint32_t hitFlags = 0;
 
     [[nodiscard]] bool isValid() const { return spellId != 0; }
 };

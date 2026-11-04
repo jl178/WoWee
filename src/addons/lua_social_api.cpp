@@ -8,6 +8,7 @@
 #include <iterator>
 #include <vector>
 #include "addons/lua_api_helpers.hpp"
+#include "game/chat_handler.hpp"
 #include "game/social_handler.hpp"
 #include "game/reputation_standing.hpp"
 #include "game/stationery.hpp"
@@ -117,67 +118,22 @@ static int lua_GetLanguageByIndex(lua_State* L) {
 }
 
 static int lua_SendChatMessage(lua_State* L) {
+    // Wow.exe 0x50D170: the type word, the language by name, the target -
+    // a player for a whisper, a channel number for a channel - and the
+    // client's own checks, which ChatHandler::sendChatFromInterface holds.
     auto* gh = getGameHandler(L);
     if (!gh) return 0;
-    const char* msg = luaL_checkstring(L, 1);
-    const char* chatType = luaL_optstring(L, 2, "SAY");
-    // language arg (3) ignored - server determines language
-    const char* target = luaL_optstring(L, 4, "");
-
-    std::string typeStr(chatType);
-    for (char& c : typeStr) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-
-    // Eight of the thirteen were mapped and the rest fell to the SAY this is
-    // initialised with, which is the worst possible default: a message meant
-    // for a channel or a raid warning went to everyone standing nearby, and
-    // nothing about it looked like a failure.
-    //
-    // CHANNEL is the one that mattered most. Every numbered channel - General,
-    // Trade, LookingForGroup - sends through here, so with FrameXML drawing
-    // the chat every channel line was said out loud instead.
-    game::ChatType ct = game::ChatType::SAY;
-    bool known = true;
-    if (typeStr == "SAY")            ct = game::ChatType::SAY;
-    else if (typeStr == "YELL")      ct = game::ChatType::YELL;
-    else if (typeStr == "PARTY")     ct = game::ChatType::PARTY;
-    else if (typeStr == "GUILD")     ct = game::ChatType::GUILD;
-    else if (typeStr == "OFFICER")   ct = game::ChatType::OFFICER;
-    else if (typeStr == "RAID")      ct = game::ChatType::RAID;
-    else if (typeStr == "WHISPER")   ct = game::ChatType::WHISPER;
-    else if (typeStr == "BATTLEGROUND") ct = game::ChatType::BATTLEGROUND;
-    else if (typeStr == "CHANNEL")   ct = game::ChatType::CHANNEL;
-    else if (typeStr == "RAID_WARNING") ct = game::ChatType::RAID_WARNING;
-    // The custom emote, /e and /me. A different thing from DoEmote: this one
-    // carries the player's own words rather than an EmotesText row.
-    else if (typeStr == "EMOTE")     ct = game::ChatType::EMOTE;
-    // The messages sent to whoever whispers while away. Their own chat types
-    // on the wire, and said aloud if they are not.
-    else if (typeStr == "AFK")       ct = game::ChatType::AFK;
-    else if (typeStr == "DND")       ct = game::ChatType::DND;
-    else known = false;
-    if (!known) {
-        LOG_WARNING("SendChatMessage: unknown chat type '", typeStr,
-                    "', not sending - SAY would say it out loud");
-        return 0;
-    }
-
-    std::string targetStr(target && *target ? target : "");
-    // A channel is named on the wire and numbered in the interface.
-    // ChatEdit_ParseText stores what GetChannelName answered - an index into
-    // the joined list - as the edit box's channelTarget and hands that back
-    // here, so a bare number has to be turned into the name before it is sent.
-    if (ct == game::ChatType::CHANNEL && lua_isnumber(L, 4)) {
-        const int index = static_cast<int>(lua_tonumber(L, 4));
-        const auto& joined = gh->getJoinedChannels();
-        if (index >= 1 && index <= static_cast<int>(joined.size())) {
-            targetStr = joined[static_cast<size_t>(index) - 1];
-        } else {
-            LOG_WARNING("SendChatMessage: channel index ", index,
-                        " is outside the ", joined.size(), " joined, not sending");
-            return 0;
-        }
-    }
-    gh->sendChatMessage(ct, msg, targetStr);
+    if (lua_isnoneornil(L, 1))
+        return luaL_error(L, "Usage: SendChatMessage(text [,type] [,language] [,targetPlayer])");
+    const char* msg = lua_tostring(L, 1);
+    if (!msg) return luaL_error(L, "Usage: SendChatMessage(text [,type] [,language] [,targetPlayer])");
+    const char* typeWord = lua_isnoneornil(L, 2) ? nullptr : lua_tostring(L, 2);
+    const char* language = lua_isnoneornil(L, 3) ? nullptr : lua_tostring(L, 3);
+    const char* target = lua_isnoneornil(L, 4) ? nullptr : lua_tostring(L, 4);
+    auto* chat = gh->getChatHandler();
+    if (!chat) return 0;
+    const std::string error = chat->sendChatFromInterface(msg, typeWord, language, target);
+    if (!error.empty()) return luaL_error(L, "%s", error.c_str());
     return 0;
 }
 

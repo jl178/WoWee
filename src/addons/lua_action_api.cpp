@@ -1,5 +1,6 @@
 // lua_action_api.cpp - Action bar, cursor/pickup, keyboard input, key bindings, and pet actions Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
+#include "game/chat_rules.hpp"
 #include "game/item_text.hpp"
 #include "addons/lua_api_helpers.hpp"
 #include "addons/lua_api_registrations.hpp"
@@ -2925,14 +2926,11 @@ void registerActionLuaAPI(lua_State* L) {
                 // grey level exactly, and the green range is the distance from
                 // the player's level down to it.
                 {"GetQuestGreenRange", [](lua_State* L) -> int {
+            // Wow.exe 0x5E2860: a table by level / 5 (0xA1C4A0), not the
+            // server's grey-level formula.
             auto* gh = getGameHandler(L);
             const int lvl = gh ? static_cast<int>(gh->getPlayerLevel()) : 1;
-            int gray;
-            if (lvl <= 5)       gray = 0;
-            else if (lvl <= 39) gray = lvl - 5 - lvl / 10;
-            else if (lvl <= 59) gray = lvl - 1 - lvl / 5;
-            else                gray = lvl - 9;
-            lua_pushnumber(L, lvl - gray);
+            lua_pushnumber(L, game::chat_rules::questGreenRange(lvl));
             return 1;
         }},
                 // Two latent raises on the escape-key path, bound as no-ops

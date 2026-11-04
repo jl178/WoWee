@@ -194,6 +194,13 @@ wowee_add_test(test_stock_movement
 wowee_add_test(test_stock_cast_timing
     SOURCES test_stock_cast_timing.cpp)
 
+# ── test_name_pipeline ──────────────────────────────────────
+# Where a unit's name comes from (creature record, pet name, player name), when
+# an unanswered query is asked again, and the on-disk creature and game object
+# caches (docs/re/names-and-caches.md). Header-only.
+wowee_add_test(test_name_pipeline
+    SOURCES test_name_pipeline.cpp)
+
 # ── test_stock_cast_events ──────────────────────────────────
 # How a cast ends as the stock client reports it: the event per result, the
 # bar's STOP once, which cancels tell the server, the casts in flight, the
@@ -1490,6 +1497,16 @@ target_include_directories(test_combat_log_event SYSTEM PRIVATE ${TEST_SYSTEM_IN
 target_link_libraries(test_combat_log_event PRIVATE catch2_main)
 add_test(NAME combat_log_event COMMAND test_combat_log_event)
 register_test_target(test_combat_log_event)
+
+# ── test_stock_combat_log ────────────────────────────────────
+add_executable(test_stock_combat_log
+    test_stock_combat_log.cpp
+)
+target_include_directories(test_stock_combat_log PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_stock_combat_log SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_stock_combat_log PRIVATE catch2_main)
+add_test(NAME stock_combat_log COMMAND test_stock_combat_log)
+register_test_target(test_stock_combat_log)
 
 # ── test_classic_combat_chat ─────────────────────────────────
 add_executable(test_classic_combat_chat
@@ -3227,9 +3244,10 @@ wowee_add_test(test_talent_macro_logic SOURCES test_talent_macro_logic.cpp)
 # GameError message kinds (Wow.exe 0xAC8AF0) and GlobalStrings formatting.
 wowee_add_test(test_game_messages SOURCES test_game_messages.cpp)
 
-# ── test_name_pipeline ──────────────────────────────────────
-# Where a unit's name comes from (creature record, pet name, player name), when
-# an unanswered query is asked again, and the on-disk creature and game object
-# caches (docs/re/names-and-caches.md). Header-only.
-wowee_add_test(test_name_pipeline
-    SOURCES test_name_pipeline.cpp)
+# Chat rules of Wow.exe (docs/re/chat-combatlog.md): the language scrambler
+# (0x505930), markup, the SendChatMessage checks and throttles (0x50D170), the
+# event words. Header-only.
+wowee_add_test(test_chat_rules SOURCES test_chat_rules.cpp)
+
+# SMSG_MESSAGECHAT's type-specific fields (0x50BE70).
+wowee_add_packet_test(test_message_chat_packet)

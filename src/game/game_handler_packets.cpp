@@ -5,6 +5,7 @@
 #include "game/packed_time.hpp"
 #include "game/global_strings.hpp"
 #include "game/combat_log_event.hpp"
+#include "game/stock_combat_log.hpp"
 #include "game/protocol_constants.hpp"
 #include "game/game_utils.hpp"
 #include "game/chat_handler.hpp"
@@ -1711,22 +1712,17 @@ void GameHandler::registerRemainingOpcodes() {
         const uint32_t enchantId = packet.readUInt32();
         packet.skipAll();
         const std::string enchName = getEnchantName(enchantId);
-        if (enchName.empty() || !addonEventCallback_ || isClassicLikeExpansion()) return;
-        using namespace combat_log;
-        std::string itemName;
-        if (const ItemQueryResponseData* info = getItemInfo(itemId)) itemName = info->name;
-        const uint64_t me = playerGuid, pet = getPetGuid();
-        const std::vector<std::string> args = {
-            std::to_string(static_cast<int64_t>(std::time(nullptr))),
-            enchCasterGuid ? "ENCHANT_APPLIED" : "ENCHANT_REMOVED",
-            guidText(enchCasterGuid), textOrNil(lookupName(enchCasterGuid)),
-            std::to_string(unitFlags(enchCasterGuid, me, pet)),
-            guidText(enchTargetGuid), textOrNil(lookupName(enchTargetGuid)),
-            std::to_string(unitFlags(enchTargetGuid, me, pet)),
-            enchName, std::to_string(itemId), textOrNil(itemName),
-        };
-        addonEventCallback_("COMBAT_LOG_EVENT_UNFILTERED", args);
-        addonEventCallback_("COMBAT_LOG_EVENT", args);
+        if (enchName.empty() || !combatHandler_ || !combatHandler_->stockCombatLogActive()) return;
+        if (getEnchantFlags(enchantId) & 0x2u) return;  // 0x751050: not logged
+        // 0x751050: the enchantment's name, then the item and its name.
+        stock_combat_log::Record r;
+        r.event = enchCasterGuid ? stock_combat_log::ENCHANT_APPLIED : stock_combat_log::ENCHANT_REMOVED;
+        r.src = enchCasterGuid;
+        r.dst = enchTargetGuid;
+        r.suffix = stock_combat_log::kSufSpellNameText | stock_combat_log::kSufItem;
+        r.spellNameText = enchName;
+        r.v58 = static_cast<int32_t>(itemId);
+        combatHandler_->logCombatEvent(r);
     };
     // auctionId(u32) + action(u32) + error(u32) + itemEntry(u32) + randomPropertyId(u32) + ...
     // action: 0=sold/won, 1=expired, 2=bid placed on your auction
@@ -3574,7 +3570,7 @@ void GameHandler::registerRemainingOpcodes() {
     registerSkipHandler(Opcode::SMSG_AURACASTLOG);
     // These packets are not damage-shield events. Consume them without
     // synthesizing reflected damage entries or misattributing GUIDs.
-    registerSkipHandler(Opcode::SMSG_SPELLBREAKLOG);
+    // SMSG_SPELLBREAKLOG: SpellHandler (the combat log's AURA_BROKEN).
     // Consume silently - informational, no UI action needed
     // What an item cost and how long is left to hand it back.
     //
