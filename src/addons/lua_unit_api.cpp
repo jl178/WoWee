@@ -2223,7 +2223,14 @@ static int lua_AttackTarget(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) return 0;
     const uint64_t target = gh->getTargetGuid();
-    if (target == 0) return 0;
+    if (target == 0) {
+        // Nothing to swing at, which stock answers with nothing either; said
+        // in the log so a binding that did nothing is not mistaken for one
+        // that was never wired.
+        static core::LogBudget noTarget(5, "AttackTarget with no target");
+        if (noTarget.take()) LOG_WARNING("AttackTarget: no target, nothing to attack");
+        return 0;
+    }
     if (gh->isAutoAttacking() && gh->getAutoAttackTargetGuid() == target) {
         gh->stopAutoAttack();
     } else {

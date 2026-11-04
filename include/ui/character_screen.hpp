@@ -117,6 +117,10 @@ private:
     uint64_t selectedCharacterGuid = 0;
     bool restoredLastCharacter = false;
     bool autoEnterTried_ = false;  ///< WOWEE_AUTO_CHARACTER=name enters the world once.
+public:
+    /// WOWEE_AUTO_RELOG (a test hook): let WOWEE_AUTO_CHARACTER enter again.
+    void rearmAutoEnter() { autoEnterTried_ = false; }
+private:
     bool autoOpenTried_ = false;  ///< WOWEE_GLUE_OPEN, once
     std::string newlyCreatedCharacterName;  // Auto-select this character if set
 

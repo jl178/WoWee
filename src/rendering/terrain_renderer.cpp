@@ -525,6 +525,7 @@ void TerrainRenderer::shutdown() {
         if (entry.texture) entry.texture->destroy(device, allocator);
     }
     textureCache.clear();
+    alphaTextureKeys_.clear();
     textureCacheBytes_ = 0;
     textureCacheCounter_ = 0;
     failedTextureCache_.clear();
@@ -1194,6 +1195,7 @@ bool TerrainRenderer::evictTexturesFor(size_t needBytes) {
         if (it == textureCache.end()) continue;
         textureCacheBytes_ -= it->second.approxBytes;
         freedBytes += it->second.approxBytes;
+        alphaTextureKeys_.erase(it->second.texture.get());
         retired.push_back(it->second.texture.release());
         textureCache.erase(it);
     }
@@ -1347,10 +1349,12 @@ VkTexture* TerrainRenderer::createAlphaTexture(const std::vector<uint8_t>& alpha
 
     VkTexture* raw = tex.get();
     // One per chunk layer, under a key nothing ever looks up again, so these
-    // are dead the moment their chunk is unloaded - and nothing freed them.
-    // ownedAlphaTextures was meant to, and was never filled. Eviction is what
-    // collects them now, which is why they are counted against the budget
-    // rather than added to it in silence.
+    // are dead the moment their chunk is unloaded. They are counted against
+    // the budget and given back with their chunk (releaseChunkAlphaTextures).
+    // Left for the eviction pass instead, they filled the 4 GB cache with about
+    // a million dead 64x64 images over a quarter hour of travel - each its own
+    // device allocation - and every pass that then made room walked and sorted
+    // all of them: 420 ms frames on arrival (regression tour, 2026-11-04).
     //
     // Not refused when the cache is full, unlike a tileset texture: 4KB is
     // never what filled it, and a chunk without its alpha map draws its top
@@ -1363,6 +1367,7 @@ VkTexture* TerrainRenderer::createAlphaTexture(const std::vector<uint8_t>& alpha
     e.approxBytes = 64 * 64;
     e.lastUse = ++textureCacheCounter_;
     textureCacheBytes_ += e.approxBytes;
+    alphaTextureKeys_[raw] = key;
     textureCache[key] = std::move(e);
 
     return raw;
@@ -1996,20 +2001,24 @@ void TerrainRenderer::buildShadowDraws() {
 }
 
 void TerrainRenderer::removeTile(int tileX, int tileY) {
+    // One pass: destroy the tile's chunks in order, then close the gaps once.
+    // Erasing each chunk where it stood moved every chunk after it, 256 times
+    // per tile - with a city's 11k chunks loaded that was half a gigabyte of
+    // copying and a 30-95 ms frame on every tile unload (regression tour,
+    // 2026-11-04).
+    const auto onTile = [&](const TerrainChunkGPU& c) {
+        return c.tileX == tileX && c.tileY == tileY;
+    };
     int removed = 0;
-    auto it = chunks.begin();
-    while (it != chunks.end()) {
-        if (it->tileX == tileX && it->tileY == tileY) {
-            destroyChunkGPU(*it);
-            it = chunks.erase(it);
-            ++chunkRemovals();
-            ++chunksGeneration_;
-            removed++;
-        } else {
-            ++it;
-        }
+    for (auto& c : chunks) {
+        if (!onTile(c)) continue;
+        destroyChunkGPU(c);
+        ++chunkRemovals();
+        ++chunksGeneration_;
+        removed++;
     }
     if (removed > 0) {
+        chunks.erase(std::remove_if(chunks.begin(), chunks.end(), onTile), chunks.end());
         ++chunksRemovedGeneration_;
         LOG_DEBUG("Removed ", removed, " terrain chunks for tile [", tileX, ",", tileY, "]");
     }
@@ -2064,6 +2073,33 @@ void TerrainRenderer::registerRtChunk(TerrainChunkGPU& gpuChunk, const pipeline:
     gpuChunk.rtInstance = rtScene_->addInstance(gpuChunk.rtMesh, glm::mat4(1.0f));
 }
 
+void TerrainRenderer::releaseChunkAlphaTextures(TerrainChunkGPU& chunk) {
+    if (!vkCtx || alphaTextureKeys_.empty()) return;
+    std::vector<VkTexture*> retired;
+    const auto release = [&](VkTexture* tex) {
+        if (!tex) return;
+        auto keyIt = alphaTextureKeys_.find(tex);
+        if (keyIt == alphaTextureKeys_.end()) return;  // shared (opaque) or already gone
+        auto it = textureCache.find(keyIt->second);
+        alphaTextureKeys_.erase(keyIt);
+        if (it == textureCache.end()) return;
+        textureCacheBytes_ -= std::min(textureCacheBytes_, it->second.approxBytes);
+        retired.push_back(it->second.texture.release());
+        textureCache.erase(it);
+    };
+    for (VkTexture* t : chunk.alphaTextures) release(t);
+    release(chunk.shadowTexture);
+    if (retired.empty()) return;
+    VkDevice device = vkCtx->getDevice();
+    VmaAllocator allocator = vkCtx->getAllocator();
+    vkCtx->deferAfterAllFrameFences([device, allocator, retired]() {
+        for (VkTexture* tex : retired) {
+            tex->destroy(device, allocator);
+            delete tex;
+        }
+    });
+}
+
 void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     if (!vkCtx) return;
 
@@ -2108,11 +2144,10 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     VkDescriptorPool pool = materialDescPool;
     VkDescriptorSet materialSet = chunk.materialSet;
 
-    // The per-chunk alpha maps are not freed here. They live in the texture
-    // cache like everything else - createAlphaTexture puts them there - and
-    // the eviction pass collects them once no chunk points at them. The vector
-    // that used to be released here was never filled by anything, so this loop
-    // had been freeing nothing for as long as it existed.
+    // The chunk's own alpha maps go with it. They sit in the texture cache
+    // (createAlphaTexture puts them there, so they count against its budget)
+    // but no other chunk can ever use them.
+    releaseChunkAlphaTextures(chunk);
 
     chunk.vertexBuffer = VK_NULL_HANDLE;
     chunk.vertexAlloc = VK_NULL_HANDLE;

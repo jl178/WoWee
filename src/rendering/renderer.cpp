@@ -2569,7 +2569,20 @@ void Renderer::fireZoneEvents() {
     // for the way back out. zonetext.lua shows the zone banner on any of them
     // once GetZoneText changes, so walking through Ironforge's gates names
     // the city even before the server's SMSG_INIT_WORLD_STATES arrives.
-    if (zoneChanged) gh->announceZoneChange(zoneId);
+    //
+    // After a teleport on the same map the server's SMSG_INIT_WORLD_STATES
+    // names the new zone before this lookup has the ground under the player,
+    // and its ZONE_CHANGED_NEW_AREA went out while GetZoneText and the zone
+    // SetMapToCurrentZone reads were still the old one: WatchFrame set the
+    // map to the zone just left, GetPlayerMapPosition answered 0,0 there and
+    // the tracker's POIs were the old zone's until the next zone change (a
+    // hearthstone within a continent does exactly this). The stock client
+    // fires the event from its own zone, so when this lookup arrives at a
+    // zone already announced for it, the interface hears it again now that
+    // the answers match.
+    if (zoneChanged && !gh->announceZoneChange(zoneId)) {
+        gh->fireAddonEvent("ZONE_CHANGED_NEW_AREA", {});
+    }
     gh->fireAddonEvent(liveAreaFromWmo_ ? "ZONE_CHANGED_INDOORS" : "ZONE_CHANGED", {});
 }
 

@@ -3531,6 +3531,18 @@ void Application::performLogoutToLogin() {
     if (uiManager) {
         uiManager->getRealmScreen().reset();
         uiManager->getCharacterScreen().reset();
+        // WOWEE_AUTO_RELOG=N, a test hook: the auto login and auto character
+        // run again after a logout, up to N times, so a scripted tour
+        // (WOWEE_DEBUG_LUA) can check the way back into the world.
+        if (const char* v = std::getenv("WOWEE_AUTO_RELOG"); v && *v) {
+            static int relogs = 0;
+            if (relogs < std::atoi(v)) {
+                ++relogs;
+                LOG_WARNING("WOWEE_AUTO_RELOG: logging in again (", relogs, ")");
+                uiManager->getAuthScreen().rearmAutoLogin();
+                uiManager->getCharacterScreen().rearmAutoEnter();
+            }
+        }
     }
     setState(AppState::AUTHENTICATION);
 
