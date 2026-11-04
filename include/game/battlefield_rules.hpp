@@ -301,4 +301,35 @@ private:
     uint32_t nextOrder_ = 0;
 };
 
+// ---------------------------------------------------------------------------
+// GetZonePVPInfo (0x51BA50)
+// ---------------------------------------------------------------------------
+
+/// AreaTable.dbc's flags (field 4) and FactionGroupMask (field 28).
+struct AreaPvp {
+    uint32_t flags = 0;
+    uint32_t factionMask = 0;
+};
+
+/// What GetZonePVPInfo answers: `count` values, the type, whether the area
+/// row decided it (1 or nil), the controlling faction's name.
+struct ZonePvp {
+    int count = 0;
+    std::string type;
+    bool fromArea = false;
+    std::string faction;
+};
+
+/// The area's flags decide sanctuary (0x800), arena (0x80) and combat
+/// (0x1000000), falling back to the zone's when the area has no row. Past
+/// those, nothing unless the realm allows player killing (Cfg_Configs) or the
+/// zone is a capital (0x10). Then "contested" for an area flagged 0x40000,
+/// else the zone's FactionGroupMask against the player's faction template:
+/// its friend groups "friendly", its enemy groups "hostile", neither
+/// "contested". The faction is the first FactionGroup row in the zone's mask
+/// with a name (`factionName(maskBit)`).
+ZonePvp zonePvpInfo(const AreaPvp* area, const AreaPvp* zone, bool pvpRealm, bool hasPlayer,
+                    uint32_t friendGroups, uint32_t enemyGroups,
+                    const std::function<std::string(uint32_t zoneMask)>& factionName);
+
 }  // namespace wowee::game::bf

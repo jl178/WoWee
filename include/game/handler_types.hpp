@@ -86,15 +86,16 @@ struct EquipmentSetInfo {
 
 // ---- Inspection ----
 
+/// One MSG_INSPECT_ARENA_TEAMS reply (Wow.exe 0x5E7B00, stored by slot at
+/// 0xC241C0): the team and the inspected player's own season record in it.
+/// The name, size and tabard come from the team query cache.
 struct InspectArenaTeam {
-    uint32_t    teamId         = 0;
-    uint8_t     type           = 0;
-    uint32_t    weekGames      = 0;
-    uint32_t    weekWins       = 0;
-    uint32_t    seasonGames    = 0;
-    uint32_t    seasonWins     = 0;
-    std::string name;
-    uint32_t    personalRating = 0;
+    uint32_t    teamId            = 0;   ///< 0: nothing in this slot
+    uint32_t    rating            = 0;
+    uint32_t    seasonGames       = 0;
+    uint32_t    seasonWins        = 0;
+    uint32_t    playerSeasonGames = 0;
+    uint32_t    personalRating    = 0;
 };
 
 struct InspectResult {
@@ -109,7 +110,8 @@ struct InspectResult {
     uint8_t     activeTalentGroup = 0;
     std::array<uint32_t, 19> itemEntries{};
     std::array<uint16_t, 19> enchantIds{};
-    std::vector<InspectArenaTeam> arenaTeams;
+    /// By slot (2v2, 3v3, 5v5, and a fourth the handler accepts).
+    std::array<InspectArenaTeam, 4> arenaTeams{};
     /// The inspected player's own talents, as talent id -> rank, for their
     /// active spec. The inspect talent tab draws from these; without them it
     /// fell back to the viewer's own tree and attributed it to the target.

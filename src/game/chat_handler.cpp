@@ -1939,16 +1939,17 @@ void ChatHandler::handleMotd(network::Packet& packet) {
 }
 
 // A defense line (Wow.exe 0x50C3C0, 0x50C850): a channel line on each joined
-// defense channel - WorldDefense always, LocalDefense only for the zone the
-// player is in.
+// defense channel - WorldDefense always, LocalDefense only when the area (or
+// its parent) is the zone the player is in.
 void ChatHandler::postDefenseLine(uint32_t areaId, const std::string& text) {
     for (size_t i = 0; i < joinedChannels_.size(); ++i) {
         const uint32_t id = i < joinedChannelIds_.size() ? joinedChannelIds_[i] : 0;
         const bool world = id == 23 || joinedChannels_[i].rfind("WorldDefense", 0) == 0;
         const bool local = id == 22 || joinedChannels_[i].rfind("LocalDefense", 0) == 0;
         if (!world && !local) continue;
-        if (local && !world && areaId != owner_.getWorldStateZoneId() &&
-            areaId != owner_.getWorldStateAreaId())
+        // The area's AreaTable parent, or the area, against the zone the
+        // player is in - one step up, not a walk (0x50C3C0, 0x50C850).
+        if (local && !world && owner_.areaZoneForDefense(areaId) != owner_.getWorldStateZoneId())
             continue;
         MessageChatData line;
         line.type = ChatType::CHANNEL;

@@ -427,6 +427,15 @@ inline uint64_t resolveUnitGuid(game::GameHandler* gh, const std::string& uid) {
         if (idx < 1 || idx > static_cast<int>(game::GameHandler::kMaxEncounterSlots)) return 0;
         return gh->getEncounterUnitGuid(static_cast<uint32_t>(idx - 1));
     }
+    // arena1-5 and arenapet1-5, the arena's opponents (0x608180, 0x60A2F0):
+    // the opponent slot, and the pet the opponent has out while in view.
+    if (uid.rfind("arena", 0) == 0 && uid.size() > 5) {
+        const bool pet = uid.rfind("arenapet", 0) == 0;
+        int idx = 0;
+        try { idx = std::stoi(uid.substr(pet ? 8 : 5)); } catch (...) { return 0; }
+        if (idx < 1 || idx > 5) return 0;
+        return gh->arenaOpponentGuid(static_cast<size_t>(idx - 1), pet);
+    }
     if (uid.rfind("raid", 0) == 0 && uid.size() > 4 && uid[4] != 'p') {
         int idx = 0;
         try { idx = std::stoi(uid.substr(4)); } catch (...) { return 0; }
@@ -987,10 +996,15 @@ inline bool itemUseCooldown(game::GameHandler* gh, uint32_t itemId,
 }
 
 // Find GroupMember data for a GUID (for party members out of entity range)
+/// The roster's record of a group member. Not gated on stats having arrived:
+/// the roster names the member and starts their health and power at 1 of 1,
+/// as stock does (0x52D410), and the name is the roster's either way. Gated,
+/// a bot nobody had heard from yet answered UnitName "Unknown" and its party
+/// frame read "Dead".
 inline const game::GroupMember* findPartyMember(game::GameHandler* gh, uint64_t guid) {
     if (!gh || guid == 0) return nullptr;
     for (const auto& m : gh->getPartyData().members) {
-        if (m.guid == guid && m.hasPartyStats) return &m;
+        if (m.guid == guid) return &m;
     }
     return nullptr;
 }

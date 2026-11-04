@@ -223,7 +223,10 @@ static int lua_UnitIsDead(lua_State* L) {
         toLowerInPlace(uidStr);
         uint64_t guid = gh ? resolveUnitGuid(gh, uidStr) : 0;
         const auto* pm = findPartyMember(gh, guid);
-        lua_pushboolean(L, pm ? (pm->curHealth == 0 && pm->maxHealth > 0) : 0);
+        // Out of view the member's status says so (0x60F480: the party
+        // block's MEMBER_STATUS_DEAD, 0x04), not a health of zero - which is
+        // also what a member nothing has been heard from yet holds.
+        lua_pushboolean(L, pm ? (pm->onlineStatus & 0x0004) != 0 : 0);
     }
     return 1;
 }
@@ -306,6 +309,8 @@ static int lua_UnitIsGhost(lua_State* L) {
                 // (which is UNIT_FLAG_IMMUNE_TO_PC - would flag immune NPCs as ghosts).
                 uint32_t pf = entity->getField(game::fieldIndex(game::UF::PLAYER_FLAGS));
                 ghost = (pf & 0x00000010) != 0;
+            } else if (const auto* pm = findPartyMember(gh, guid)) {
+                ghost = (pm->onlineStatus & 0x0008) != 0;  // MEMBER_STATUS_GHOST
             }
         }
         lua_pushboolean(L, ghost);
@@ -322,7 +327,13 @@ static int lua_UnitIsDeadOrGhost(lua_State* L) {
     if (!dead && gh) {
         std::string uidStr(uid);
         toLowerInPlace(uidStr);
-        if (uidStr == "player") dead = gh->isPlayerGhost() || gh->isPlayerDead();
+        if (uidStr == "player") {
+            dead = gh->isPlayerGhost() || gh->isPlayerDead();
+        } else if (!unit) {
+            // A member out of view: MEMBER_STATUS_DEAD or _GHOST.
+            const auto* pm = findPartyMember(gh, resolveUnitGuid(gh, uidStr));
+            dead = pm && (pm->onlineStatus & 0x000C) != 0;
+        }
     }
     lua_pushboolean(L, dead);
     return 1;

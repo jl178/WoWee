@@ -242,6 +242,8 @@ void EntityController::processOutOfRangeObjects(const std::vector<uint64_t>& gui
         }
 
         LOG_DEBUG("Entity went out of range: 0x", std::hex, guid, std::dec);
+        if (entity->getType() == ObjectType::UNIT || entity->getType() == ObjectType::PLAYER)
+            owner_.onObjectLeaving(guid, true);
         // Trigger despawn callbacks before removing entity
         if (entity->getType() == ObjectType::UNIT && owner_.creatureDespawnCallbackRef()) {
             owner_.creatureDespawnCallbackRef()(guid);
@@ -876,8 +878,9 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
         // was to the unit it is showing.
         auto emitForUnit = [&](const char* event) {
             if (!owner_.addonEventCallbackRef()) return;
-            const auto uid = owner_.guidToUnitId(block.guid);
-            if (!uid.empty()) pendingEvents_.emit(event, {uid});
+            // Every token naming the unit, as Wow.exe's 0x60BF10 does: a
+            // party member's frame hears its own changes, not only the target's.
+            for (const auto& uid : owner_.unitTokensForGuid(block.guid)) pendingEvents_.emit(event, {uid});
         };
 
         if (key == ufi.health) {
@@ -901,16 +904,14 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
         } else if (key == ufi.faction) {
             unit->setFactionTemplate(val);
             if (owner_.addonEventCallbackRef()) {
-                auto uid = owner_.guidToUnitId(block.guid);
-                if (!uid.empty())
+                for (const auto& uid : owner_.unitTokensForGuid(block.guid))
                     pendingEvents_.emit("UNIT_FACTION", {uid});
             }
         }
         else if (key == ufi.flags) {
             unit->setUnitFlags(val);
             if (owner_.addonEventCallbackRef()) {
-                auto uid = owner_.guidToUnitId(block.guid);
-                if (!uid.empty())
+                for (const auto& uid : owner_.unitTokensForGuid(block.guid))
                     pendingEvents_.emit("UNIT_FLAGS", {uid});
             }
         }
@@ -1087,8 +1088,7 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             uint8_t oldPT = unit->getPowerType();
             unit->setPowerType(static_cast<uint8_t>((val >> 24) & 0xFF));
             if (unit->getPowerType() != oldPT) {
-                auto uid = owner_.guidToUnitId(block.guid);
-                if (!uid.empty())
+                for (const auto& uid : owner_.unitTokensForGuid(block.guid))
                     pendingEvents_.emit("UNIT_DISPLAYPOWER", {uid});
             }
         } else if (key == ufi.flags) {
@@ -1261,8 +1261,7 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             uint32_t oldLvl = unit->getLevel();
             unit->setLevel(val);
             if (val != oldLvl) {
-                auto uid = owner_.guidToUnitId(block.guid);
-                if (!uid.empty())
+                for (const auto& uid : owner_.unitTokensForGuid(block.guid))
                     pendingEvents_.emit("UNIT_LEVEL", {uid});
             }
             if (block.guid != owner_.getPlayerGuid() &&
@@ -1363,8 +1362,7 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
 
     // Fire UNIT_HEALTH / UNIT_POWER events for Lua addons
     if ((result.healthChanged || result.powerChanged)) {
-        auto unitId = owner_.guidToUnitId(block.guid);
-        if (!unitId.empty()) {
+        for (const auto& unitId : owner_.unitTokensForGuid(block.guid)) {
             if (result.healthChanged) pendingEvents_.emit("UNIT_HEALTH", {unitId});
             if (result.maxHealthChanged) pendingEvents_.emit("UNIT_MAXHEALTH", {unitId});
             if (result.powerChanged) {
@@ -1459,7 +1457,11 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
     auto playCoinSound = [this]() {
         if (auto* ac = owner_.services().audioCoordinator) ac->playCoinSound();
     };
+    const uint16_t arenaTeamInfo = fieldIndex(UF::PLAYER_FIELD_ARENA_TEAM_INFO_1_1);
+    bool arenaTeamInfoTouched = false;
     for (const auto& [key, val] : fields) {
+        if (arenaTeamInfo != 0xFFFF && key >= arenaTeamInfo && key < arenaTeamInfo + 21)
+            arenaTeamInfoTouched = true;
         if (pfi.baseAttackTime != 0xFFFF && key >= pfi.baseAttackTime &&
             key < pfi.baseAttackTime + 3) {
             // Main hand, off hand, then ranged: the ranged speed is part of the
@@ -1608,6 +1610,10 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
                         "You will be unflagged for PvP combat after five minutes of non-PvP action in friendly territory.");
                 }
             }
+            // The PvP timer's end, kept by the client: five minutes from the
+            // moment PLAYER_FLAGS_PVP_TIMER (0x40000) appears, none while PvP
+            // is wanted (0x6DE750 on a change, 0x6E7F50 at the create).
+            owner_.notePvpTimerFlags((isCreate || !knownPlayerFlagsValid_) ? val : knownPlayerFlags_, val);
             knownPlayerFlags_ = val;
             knownPlayerFlagsValid_ = true;
           }
@@ -1760,6 +1766,8 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
         // phantom "already accepted" quests that block quest acceptance.
     }
     if (owner_.applyInventoryFields(fields)) slotsChanged = true;
+    // 0x6CDDA0, the field's callback: rosters asked for, ARENA_TEAM_UPDATE.
+    if (arenaTeamInfoTouched) owner_.onArenaTeamInfoChanged(!isCreate);
 
     // Announced only on an update, never on the create block: at create the
     // sheet has not been built yet, and every field looks like a change.
@@ -2823,6 +2831,9 @@ void EntityController::handleCreateObject(const UpdateBlock& block, bool& newIte
     if (block.objectType == ObjectType::PLAYER && blockTouchesDuelFields(block))
         owner_.refreshDuelHostility();
 
+    if (block.objectType == ObjectType::PLAYER || block.objectType == ObjectType::UNIT)
+        owner_.onObjectAppeared(block.guid);
+
     flushPendingEvents();
 }
 
@@ -3008,6 +3019,8 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
         }
         // Mirror out-of-range handling: invoke render-layer despawn callbacks before entity removal.
         auto entity = entityManager.getEntity(data.guid);
+        if (entity && (entity->getType() == ObjectType::UNIT || entity->getType() == ObjectType::PLAYER))
+            owner_.onObjectLeaving(data.guid, false);
         if (entity) {
             if (entity->getType() == ObjectType::UNIT && owner_.creatureDespawnCallbackRef()) {
                 owner_.creatureDespawnCallbackRef()(data.guid);

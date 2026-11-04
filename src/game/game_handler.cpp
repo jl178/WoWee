@@ -3125,6 +3125,37 @@ bool GameHandler::unitHostileToPlayer(const Unit& unit) const {
     return isHostileFaction(unit.getFactionTemplate());
 }
 
+void GameHandler::onObjectAppeared(uint64_t guid) {
+    if (socialHandler_) socialHandler_->onObjectAppeared(guid);
+}
+
+void GameHandler::onObjectLeaving(uint64_t guid, bool outOfRange) {
+    if (socialHandler_) socialHandler_->onObjectLeaving(guid, outOfRange);
+}
+
+void GameHandler::notePvpTimerFlags(uint32_t oldFlags, uint32_t newFlags) {
+    constexpr uint32_t kPvpDesired = 0x200, kPvpTimer = 0x40000;
+    pvpTimerFlags_ = newFlags;
+    if (newFlags & kPvpDesired) pvpTimerExpiresMs_ = 0;
+    else if (!(newFlags & kPvpTimer) || !(oldFlags & kPvpTimer)) pvpTimerExpiresMs_ = bf::clockMs() + 300000;
+}
+
+int64_t GameHandler::pvpTimerRemainingMs() const {
+    if (!(pvpTimerFlags_ & 0x40000)) return 300000;
+    const int64_t now = bf::clockMs();
+    if (pvpTimerExpiresMs_ != 0 && pvpTimerExpiresMs_ > now) return pvpTimerExpiresMs_ - now;
+    return -1;
+}
+
+uint64_t GameHandler::arenaOpponentGuid(size_t index, bool pet) const {
+    if (!socialHandler_) return 0;
+    return pet ? socialHandler_->arenaOpponentPet(index) : socialHandler_->arenaOpponent(index);
+}
+
+void GameHandler::onArenaTeamInfoChanged(bool fireEvent) {
+    if (socialHandler_) socialHandler_->onArenaTeamInfoChanged(fireEvent);
+}
+
 void GameHandler::refreshDuelHostility() {
     for (const auto& [guid, entity] : getEntityManager().getEntities()) {
         if (!entity || !entity->isUnit()) continue;
@@ -3280,7 +3311,8 @@ void GameHandler::loadAreaNameCache() const {
             // the file is open rather than opening it twice.
             if (areaDbc->getFieldCount() > 28) {
                 areaPvpCache_[areaId] = AreaPvpInfo{.flags = areaDbc->getUInt32(i, 4),
-                                                    .team = areaDbc->getUInt32(i, 28)};
+                                                    .team = areaDbc->getUInt32(i, 28),
+                                                    .parent = areaDbc->getUInt32(i, 2)};
             }
         }
     }
@@ -3307,6 +3339,24 @@ void GameHandler::loadAreaNameCache() const {
     }
 
     LOG_INFO("Area name cache: loaded ", areaNameCache_.size(), " entries");
+}
+
+bool GameHandler::realmAllowsPlayerKilling() const {
+    // Cfg_Configs.dbc: 0 ID, 1 RealmType, 2 PlayerKillingAllowed, 3 Roleplaying.
+    static int cached = -1;
+    static uint8_t cachedType = 0xFF;
+    if (cached >= 0 && cachedType == realmType_) return cached != 0;
+    auto* am = services_.assetManager;
+    if (!am || !am->isInitialized()) return false;
+    cached = 0;
+    cachedType = realmType_;
+    auto dbc = am->loadDBC("Cfg_Configs.dbc");
+    if (dbc && dbc->isLoaded() && dbc->getFieldCount() >= 3) {
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            if (dbc->getUInt32(i, 1) == realmType_) { cached = dbc->getUInt32(i, 2) != 0 ? 1 : 0; break; }
+        }
+    }
+    return cached != 0;
 }
 
 std::string GameHandler::getAreaName(uint32_t areaId) const {
@@ -4188,6 +4238,10 @@ void GameHandler::clearPetitionDialog() {
     if (socialHandler_) socialHandler_->clearPetitionDialog();
 }
 
+const ArenaTeamRoster* GameHandler::getArenaTeamRoster(uint32_t teamId) const {
+    return socialHandler_ ? socialHandler_->getArenaTeamRoster(teamId) : nullptr;
+}
+
 void GameHandler::sortArenaTeamRosters(const std::string& key) {
     if (key.empty()) return;
     // The same column twice reverses. A different one starts again in the
@@ -4210,7 +4264,8 @@ void GameHandler::sortArenaTeamRosters(const std::string& key) {
         return 0;
     };
 
-    for (auto& roster : arenaTeamRosters_) {
+    if (!socialHandler_) return;
+    for (auto& roster : socialHandler_->mutableArenaTeamRosters()) {
         std::stable_sort(roster.members.begin(), roster.members.end(),
             [&](const ArenaTeamMember& a, const ArenaTeamMember& b) {
                 if (key == "name") {

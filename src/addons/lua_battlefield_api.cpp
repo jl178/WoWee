@@ -9,6 +9,7 @@
 #include "addons/lua_api_helpers.hpp"
 #include "addons/lua_engine.hpp"
 #include "core/logger.hpp"
+#include "game/arena_rules.hpp"
 #include "game/battlefield_rules.hpp"
 #include "game/global_strings.hpp"
 #include "game/update_field_table.hpp"
@@ -19,6 +20,7 @@
 #include "pipeline/dbc_loader.hpp"
 
 #include <ctime>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -205,8 +207,30 @@ int lua_AcceptBattlefieldPort(lua_State* L) {
         LOG_WARNING("AcceptBattlefieldPort: no queue ", luaL_optnumber(L, 1, 0));
         return luaReturnNil(L);
     }
-    const bool sent = gh->battlefield()->acceptBattlefieldPort(static_cast<uint32_t>(slot),
-                                                               lua_toboolean(L, 2) != 0);
+    const bool accept = lua_toboolean(L, 2) != 0;
+    // Accepting is refused here first, unless the player already stands in a
+    // battleground (Map.dbc InstanceType 3): with the player's pet-in-combat
+    // unit flag (0x800), dead, falling, on a vehicle, or with the fatigue
+    // timer running down - each its GameError and nil (0x54DA10).
+    auto me = gh->getEntityManager().getEntity(gh->getPlayerGuid());
+    if (accept && me && gh->getMapInstanceType(gh->getCurrentMapId()) != 3) {
+        struct Refusal { bool when; const char* key; const char* text; };
+        const auto& fatigue = gh->getMirrorTimer(0);
+        const Refusal refusals[] = {
+            {(me->getField(game::fieldIndex(game::UF::UNIT_FIELD_FLAGS)) & 0x800) != 0,
+             "ERR_NOT_IN_COMBAT", "You can't do that while in combat"},
+            {gh->isPlayerDead() || gh->isPlayerGhost(), "ERR_PLAYER_DEAD", "You can't do that when you're dead."},
+            {(gh->getMovementInfo().flags & 0x1000) != 0, "ERR_NOT_WHILE_FALLING", "You can't do that while jumping or falling"},
+            {gh->playerVehicleGuid() != 0, "ERR_CLIENT_LOCKED_OUT", "You can't do that right now."},
+            {fatigue.active && fatigue.scale < 0, "ERR_NOT_WHILE_FATIGUED", "You can't do that while fatigued"},
+        };
+        for (const auto& r : refusals) {
+            if (!r.when) continue;
+            gh->displayGameMessage(r.key, r.text);
+            return luaReturnNil(L);
+        }
+    }
+    const bool sent = gh->battlefield()->acceptBattlefieldPort(static_cast<uint32_t>(slot), accept);
     if (sent) lua_pushnumber(L, 1); else lua_pushnil(L);
     return 1;
 }
@@ -766,6 +790,239 @@ int lua_GetSavedInstanceInfo(lua_State* L) {
     return 10;
 }
 
+// ---- Arena opponents ----
+
+// GetNumArenaOpponents() (0x54A2C0).
+int lua_GetNumArenaOpponents(lua_State* L) {
+    const auto* soc = bfState(L);
+    lua_pushnumber(L, soc ? soc->arenaOpponentCount() : 0);
+    return 1;
+}
+
+// ---- Arena teams (ArenaTeamInfo.cpp) ----
+//
+// The team at an index is the slot of PLAYER_FIELD_ARENA_TEAM_INFO (1 2v2,
+// 2 3v3, 3 5v5), not the order the server's packets happened to come in.
+
+game::SocialHandler* bfMutable(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    return gh ? gh->battlefield() : nullptr;
+}
+
+int teamSlotArg(lua_State* L, int idx) {
+    const int i = static_cast<int>(luaL_optnumber(L, idx, 0));
+    return (i >= 1 && i <= static_cast<int>(game::arena::kTeamSlots)) ? i - 1 : -1;
+}
+
+void pushColor(lua_State* L, uint32_t color) {
+    for (float c : game::arena::colorComponents(color)) lua_pushnumber(L, c);
+}
+
+// GetArenaTeam(i) (0x5A3860): name, size, rating, played, wins, season
+// played, season wins, the player's played and season played, rank, the
+// player's rating, then the tabard: background r g b, emblem, its r g b,
+// border, its r g b. Nil and twenty-one zeros until the team's record is in
+// the cache - a miss asks the server for it (CMSG_ARENA_TEAM_QUERY), whose
+// answer fires ARENA_TEAM_UPDATE. UIParent asks for all three on
+// PLAYER_ENTERING_WORLD for exactly that reason.
+int lua_GetArenaTeam(lua_State* L) {
+    auto* soc = bfMutable(L);
+    const int slot = teamSlotArg(L, 1);
+    const game::arena::TeamInfo info = (soc && slot >= 0) ? soc->arenaTeamInfo(static_cast<size_t>(slot))
+                                                          : game::arena::TeamInfo{};
+    const game::arena::TeamQuery* q = (soc && info.teamId) ? soc->arenaTeamQuery(info.teamId) : nullptr;
+    if (!q) {
+        lua_pushnil(L);
+        for (int i = 0; i < 21; ++i) lua_pushnumber(L, 0);
+        return 22;
+    }
+    const game::ArenaTeamStats* st = soc->arenaTeamStatsFor(info.teamId);
+    lua_pushstring(L, q->name.c_str());
+    lua_pushnumber(L, q->type);
+    lua_pushnumber(L, st ? st->rating : 0);
+    lua_pushnumber(L, st ? st->weekGames : 0);
+    lua_pushnumber(L, st ? st->weekWins : 0);
+    lua_pushnumber(L, st ? st->seasonGames : 0);
+    lua_pushnumber(L, st ? st->seasonWins : 0);
+    lua_pushnumber(L, info.gamesWeek);
+    lua_pushnumber(L, info.gamesSeason);
+    lua_pushnumber(L, st ? st->rank : 0);
+    lua_pushnumber(L, info.personalRating);
+    pushColor(L, q->backgroundColor);
+    lua_pushnumber(L, q->emblemStyle);
+    pushColor(L, q->emblemColor);
+    lua_pushnumber(L, q->borderStyle);
+    pushColor(L, q->borderColor);
+    return 22;
+}
+
+// IsArenaTeamCaptain(i) (0x60DC70): the slot's member field is 0. An empty
+// slot reads 0 too, and stock answers 1 for it as well.
+int lua_IsArenaTeamCaptain(lua_State* L) {
+    const auto* soc = bfState(L);
+    const int slot = teamSlotArg(L, 1);
+    pushOneOrNil(L, soc && slot >= 0 && soc->arenaTeamInfo(static_cast<size_t>(slot)).member == 0);
+    return 1;
+}
+
+// IsInArenaTeam() (0x60DBF0): any slot with a team; a boolean.
+int lua_IsInArenaTeam(lua_State* L) {
+    const auto* soc = bfState(L);
+    bool any = false;
+    for (size_t i = 0; soc && i < game::arena::kTeamSlots; ++i)
+        any = any || soc->arenaTeamInfo(i).teamId != 0;
+    lua_pushboolean(L, any ? 1 : 0);
+    return 1;
+}
+
+// ArenaTeamRoster(i) (0x5A3CF0 -> 0x5A3600).
+int lua_ArenaTeamRoster(lua_State* L) {
+    auto* soc = bfMutable(L);
+    const int slot = teamSlotArg(L, 1);
+    if (soc && slot >= 0) soc->requestArenaTeamRosterSlot(static_cast<size_t>(slot));
+    return 0;
+}
+
+const game::ArenaTeamRoster* slotRoster(lua_State* L, int idx) {
+    auto* gh = getGameHandler(L);
+    const auto* soc = gh ? gh->battlefield() : nullptr;
+    const int slot = teamSlotArg(L, idx);
+    if (!soc || slot < 0) return nullptr;
+    const uint32_t id = soc->arenaTeamInfo(static_cast<size_t>(slot)).teamId;
+    return id ? gh->getArenaTeamRoster(id) : nullptr;
+}
+
+// GetNumArenaTeamMembers(i [, showOffline]) (0x5A2930): every member while
+// the show-offline switch is on (its default), else the online ones.
+int lua_GetNumArenaTeamMembers(lua_State* L) {
+    const auto* r = slotRoster(L, 1);
+    lua_pushnumber(L, r ? static_cast<lua_Number>(r->members.size()) : 0);
+    return 1;
+}
+
+// GetArenaTeamRosterInfo(i, n) (0x5A2FC0): name, rank (0 captain, 1
+// member), level, class (the localized name), online (1 or nil), played,
+// wins, season played, season wins, rating.
+int lua_GetArenaTeamRosterInfo(lua_State* L) {
+    const auto* r = slotRoster(L, 1);
+    const int n = static_cast<int>(luaL_optnumber(L, 2, 0));
+    if (!r || n < 1 || n > static_cast<int>(r->members.size())) {
+        lua_pushnil(L); lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnil(L); lua_pushnil(L);
+        for (int i = 0; i < 5; ++i) lua_pushnumber(L, 0);
+        return 10;
+    }
+    const auto& m = r->members[static_cast<size_t>(n) - 1];
+    lua_pushstring(L, m.name.c_str());
+    lua_pushnumber(L, m.isCaptain ? 0 : 1);
+    lua_pushnumber(L, m.level);
+    if (m.classId > 0 && m.classId < 12 && kLuaClasses[m.classId][0] != '\0')
+        lua_pushstring(L, kLuaClasses[m.classId]);
+    else
+        lua_pushnil(L);
+    pushOneOrNil(L, m.online);
+    lua_pushnumber(L, m.weekGames);
+    lua_pushnumber(L, m.weekWins);
+    lua_pushnumber(L, m.seasonGames);
+    lua_pushnumber(L, m.seasonWins);
+    lua_pushnumber(L, m.personalRating);
+    return 10;
+}
+
+// GetInspectArenaTeamData(i) (0x5E8030): name, size, rating, season played,
+// season wins, the player's season played, the player's rating, and the
+// tabard - eighteen; nothing at all until the reply and the team's record
+// are both in.
+int lua_GetInspectArenaTeamData(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    auto* soc = gh ? gh->battlefield() : nullptr;
+    const int slot = teamSlotArg(L, 1);
+    const auto* ir = gh ? gh->getInspectResult() : nullptr;
+    if (!soc || !ir || slot < 0) return 0;
+    const auto& t = ir->arenaTeams[static_cast<size_t>(slot)];
+    if (t.teamId == 0) return 0;
+    const game::arena::TeamQuery* q = soc->arenaTeamQuery(t.teamId);
+    if (!q) return 0;
+    lua_pushstring(L, q->name.c_str());
+    lua_pushnumber(L, q->type);
+    lua_pushnumber(L, t.rating);
+    lua_pushnumber(L, t.seasonGames);
+    lua_pushnumber(L, t.seasonWins);
+    lua_pushnumber(L, t.playerSeasonGames);
+    lua_pushnumber(L, t.personalRating);
+    pushColor(L, q->backgroundColor);
+    lua_pushnumber(L, q->emblemStyle);
+    pushColor(L, q->emblemColor);
+    lua_pushnumber(L, q->borderStyle);
+    pushColor(L, q->borderColor);
+    return 18;
+}
+
+// GetZonePVPInfo() (0x51BA50): the area under the player decides sanctuary,
+// arena and combat; past those, nothing on a realm without player killing
+// unless the zone is a capital; then friendly, hostile or contested by the
+// zone's FactionGroupMask, and the faction's name.
+int lua_GetZonePVPInfo(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    if (!gh) return 0;
+    uint32_t zoneId = 0, areaId = 0;
+    if (auto* svc = getLuaServices(L)) {
+        if (svc->getLiveZoneId) zoneId = svc->getLiveZoneId();
+        if (svc->getLiveAreaId) areaId = svc->getLiveAreaId();
+    }
+    if (zoneId == 0) zoneId = gh->getWorldStateZoneId();
+    if (areaId == 0) areaId = gh->getWorldStateAreaId();
+    auto row = [gh](uint32_t id) -> std::optional<game::bf::AreaPvp> {
+        const auto* a = gh->areaPvpInfo(id);
+        if (!a) return std::nullopt;
+        return game::bf::AreaPvp{a->flags, a->team};
+    };
+    const auto area = row(areaId);
+    const auto zone = row(zoneId);
+    // The player's faction template's friend and enemy groups: the player's
+    // own side (Alliance 2, Horde 4), and the other side with the monsters.
+    const bool alliance = gh->isPlayerAlliance();
+    const uint32_t friendGroups = alliance ? 0x2u : 0x4u;
+    const uint32_t enemyGroups = alliance ? 0xCu : 0xAu;
+    static std::vector<std::pair<uint32_t, std::string>> groups;  // FactionGroup.dbc: mask id, name
+    if (groups.empty() && gh->services().assetManager && gh->services().assetManager->isInitialized()) {
+        auto dbc = gh->services().assetManager->loadDBC("FactionGroup.dbc");
+        if (dbc && dbc->isLoaded() && dbc->getFieldCount() > 3)
+            for (uint32_t i = 0; i < dbc->getRecordCount(); ++i)
+                groups.emplace_back(dbc->getUInt32(i, 1), dbc->getString(i, 3));
+    }
+    auto factionName = [](uint32_t mask) -> std::string {
+        for (const auto& [bit, name] : groups)
+            if (bit < 32 && (mask & (1u << bit)) && !name.empty()) return name;
+        return {};
+    };
+    const bool hasPlayer = gh->getEntityManager().hasEntity(gh->getPlayerGuid());
+    const game::bf::ZonePvp z = game::bf::zonePvpInfo(area ? &*area : nullptr, zone ? &*zone : nullptr,
+                                                      gh->realmAllowsPlayerKilling(), hasPlayer,
+                                                      friendGroups, enemyGroups, factionName);
+    if (z.count == 0) return 0;
+    lua_pushstring(L, z.type.c_str());
+    pushOneOrNil(L, z.fromArea);
+    if (z.count == 2) return 2;
+    lua_pushstring(L, z.faction.c_str());
+    return 3;
+}
+
+// IsPVPTimerRunning() (0x51BD60): PLAYER_FLAGS_PVP_TIMER, 1 or nil.
+// GetPVPTimer() (0x51BD00): milliseconds, plus a second - 301000 with no
+// timer, 999 once it has run out - and 0 without a player.
+int lua_IsPVPTimerRunning(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    auto me = gh ? gh->getEntityManager().getEntity(gh->getPlayerGuid()) : nullptr;
+    pushOneOrNil(L, me && (me->getField(game::fieldIndex(game::UF::PLAYER_FLAGS)) & 0x40000) != 0);
+    return 1;
+}
+int lua_GetPVPTimer(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const bool me = gh && gh->getEntityManager().hasEntity(gh->getPlayerGuid());
+    lua_pushnumber(L, me ? static_cast<lua_Number>(gh->pvpTimerRemainingMs() + 1000) : 0);
+    return 1;
+}
+
 }  // namespace
 
 void registerBattlefieldLuaAPI(lua_State* L) {
@@ -826,6 +1083,17 @@ void registerBattlefieldLuaAPI(lua_State* L) {
         {"SetDungeonDifficulty",             lua_SetDungeonDifficulty},
         {"SetRaidDifficulty",                lua_SetRaidDifficulty},
         {"GetSavedInstanceInfo",             lua_GetSavedInstanceInfo},
+        {"GetNumArenaOpponents",             lua_GetNumArenaOpponents},
+        {"GetArenaTeam",                     lua_GetArenaTeam},
+        {"IsArenaTeamCaptain",               lua_IsArenaTeamCaptain},
+        {"IsInArenaTeam",                    lua_IsInArenaTeam},
+        {"ArenaTeamRoster",                  lua_ArenaTeamRoster},
+        {"GetNumArenaTeamMembers",           lua_GetNumArenaTeamMembers},
+        {"GetArenaTeamRosterInfo",           lua_GetArenaTeamRosterInfo},
+        {"GetInspectArenaTeamData",          lua_GetInspectArenaTeamData},
+        {"GetZonePVPInfo",                   lua_GetZonePVPInfo},
+        {"IsPVPTimerRunning",                lua_IsPVPTimerRunning},
+        {"GetPVPTimer",                      lua_GetPVPTimer},
     };
     for (const auto& [name, func] : api) {
         lua_pushcfunction(L, func);

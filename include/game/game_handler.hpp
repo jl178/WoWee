@@ -1921,6 +1921,20 @@ public:
     [[nodiscard]] bool unitHostileToPlayer(const Unit& unit) const;
     /// A duel field changed on someone: every unit's hostility again.
     void refreshDuelHostility();
+    /// A unit or player object was created, or is about to leave (out of
+    /// range when `outOfRange`, else destroyed): arena opponents and party
+    /// members in and out of view (SocialHandler).
+    void onObjectAppeared(uint64_t guid);
+    void onObjectLeaving(uint64_t guid, bool outOfRange);
+    /// The PvP timer (0x6DE750, 0x6DE7A0): PLAYER_FLAGS before and after.
+    void notePvpTimerFlags(uint32_t oldFlags, uint32_t newFlags);
+    /// GetPVPTimer's milliseconds before its 1000 is added: 300000 without
+    /// the timer flag, the time left on it, or -1 once it has run out.
+    [[nodiscard]] int64_t pvpTimerRemainingMs() const;
+    /// "arenaN" / "arenapetN" (index from zero), or 0.
+    [[nodiscard]] uint64_t arenaOpponentGuid(size_t index, bool pet) const;
+    /// PLAYER_FIELD_ARENA_TEAM_INFO was written; `fireEvent` after the create.
+    void onArenaTeamInfoChanged(bool fireEvent);
 
     // Creature move callback (online mode - triggered by SMSG_MONSTER_MOVE)
     // Parameters: guid, x, y, z (canonical), duration_ms (0 = instant)
@@ -2362,12 +2376,10 @@ public:
     /// ever shows one at a time.
     void sortArenaTeamRosters(const std::string& key);
 
-    const ArenaTeamRoster* getArenaTeamRoster(uint32_t teamId) const {
-        for (const auto& r : arenaTeamRosters_) {
-            if (r.teamId == teamId) return &r;
-        }
-        return nullptr;
-    }
+    /// The roster SMSG_ARENA_TEAM_ROSTER brought, kept by SocialHandler. This
+    /// read a list of GameHandler's own that nothing ever filled, so every
+    /// team's details window was empty.
+    const ArenaTeamRoster* getArenaTeamRoster(uint32_t teamId) const;
 
     // ---- Loot ----
     void lootTarget(uint64_t guid);
@@ -4554,31 +4566,24 @@ public:
     static constexpr size_t PLAYER_EXPLORED_ZONES_COUNT = 128;
     std::string getAreaName(uint32_t areaId) const;
 
-    /// What GetZonePVPInfo answers for a zone: one of "sanctuary", "arena",
-    /// "friendly", "hostile", "contested", or empty for a zone with no PvP
-    /// character at all. Second is the controlling faction, for the two that
-    /// name one.
-    ///
-    /// Goes through getAreaName first because that is what fills the cache
-    /// this reads, and it is lazy.
-    std::pair<std::string, std::string> getZonePvpInfo(uint32_t zoneId) const {
-        (void)getAreaName(zoneId);
-        auto it = areaPvpCache_.find(zoneId);
-        if (it == areaPvpCache_.end()) return {};
-        constexpr uint32_t kAreaFlagArena     = 0x00000080;
-        constexpr uint32_t kAreaFlagSanctuary = 0x00000800;
-        constexpr uint32_t kTeamNone = 0, kTeamAlly = 2, kTeamHorde = 4, kTeamAny = 6;
-        if (it->second.flags & kAreaFlagSanctuary) return {"sanctuary", ""};
-        if (it->second.flags & kAreaFlagArena)     return {"arena", ""};
-        const bool alliance = isPlayerAlliance();
-        switch (it->second.team) {
-            case kTeamAny:   return {"contested", ""};
-            case kTeamAlly:  return {alliance ? "friendly" : "hostile", "Alliance"};
-            case kTeamHorde: return {alliance ? "hostile" : "friendly", "Horde"};
-            case kTeamNone:
-            default:         return {};
-        }
+    /// AreaTable's flags, controlling team and parent for an area, or null.
+    struct AreaPvpInfo { uint32_t flags = 0; uint32_t team = 0; uint32_t parent = 0; };
+    const AreaPvpInfo* areaPvpInfo(uint32_t areaId) const {
+        if (areaId == 0) return nullptr;
+        (void)getAreaName(areaId);  // fills the cache, lazily
+        auto it = areaPvpCache_.find(areaId);
+        return it != areaPvpCache_.end() ? &it->second : nullptr;
     }
+    /// The zone an area's defense lines are matched against (0x50C3C0): its
+    /// AreaTable parent, or the area itself.
+    uint32_t areaZoneForDefense(uint32_t areaId) const {
+        const AreaPvpInfo* a = areaPvpInfo(areaId);
+        return (a && a->parent != 0) ? a->parent : areaId;
+    }
+    /// The realm's type from the realm list, and whether Cfg_Configs.dbc
+    /// lets players kill each other there (0x405540 -> 0xB2F998).
+    void setRealmType(uint8_t type) { realmType_ = type; }
+    [[nodiscard]] bool realmAllowsPlayerKilling() const;
     struct OnlineItemInfo {
         uint32_t entry = 0;
         uint32_t stackCount = 1;
@@ -5135,7 +5140,6 @@ private:
 
     // Arena team stats (indexed by team slot, updated by SMSG_ARENA_TEAM_STATS)
     // Arena team rosters (updated by SMSG_ARENA_TEAM_ROSTER)
-    std::vector<ArenaTeamRoster> arenaTeamRosters_;
 
     // BG scoreboard (MSG_PVP_LOG_DATA)
 
@@ -5515,8 +5519,10 @@ private:
     /// AreaTable.dbc field 4 (flags) and field 28 (team), filled alongside the
     /// names. Field numbers and the constants below are read off AzerothCore's
     /// DBCStructure.h and DBCEnums.h rather than guessed.
-    struct AreaPvpInfo { uint32_t flags = 0; uint32_t team = 0; };
     mutable std::unordered_map<uint32_t, AreaPvpInfo> areaPvpCache_;
+    uint8_t realmType_ = 0;
+    int64_t pvpTimerExpiresMs_ = 0;
+    uint32_t pvpTimerFlags_ = 0;
     mutable bool areaNameCacheLoaded_ = false;
     void loadAreaNameCache() const;
 

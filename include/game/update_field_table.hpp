@@ -111,6 +111,11 @@ enum class UF : uint16_t {
     // Player PvP currency (TBC/WotLK only - Classic uses the old weekly honor system)
     PLAYER_FIELD_HONOR_CURRENCY,     // Accumulated honor points (uint32)
     PLAYER_FIELD_ARENA_CURRENCY,     // Accumulated arena points (uint32)
+    /// Three arena team slots of seven fields (team id, type, 0 captain or 1
+    /// member, week games, season games, season wins, personal rating). WotLK
+    /// only: UNIT_END + 0x454 in AzerothCore's UpdateFields.h, and 0x1150 into
+    /// the player block where Wow.exe reads it (0x5A3860).
+    PLAYER_FIELD_ARENA_TEAM_INFO_1_1,
 
     // Glyph sockets (WotLK only). GLYPH_SLOTS_1 is six GlyphSlot.dbc ids, one
     // per socket in Order; GLYPHS_ENABLED is a bitmask, bit i = socket i+1
