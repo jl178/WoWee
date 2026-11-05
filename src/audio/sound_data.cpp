@@ -54,6 +54,9 @@ namespace ftl { constexpr uint32_t kFields = 5, kFootstep = 1, kTerrain = 2, kSo
 // ItemGroupSounds: ID, Sound[4] - pickup, put-down, and two the 3.3.5 rows leave unused.
 namespace igs { constexpr uint32_t kFields = 5, kPickup = 1, kPutDown = 2; }
 namespace idi { constexpr uint32_t kFields = 25, kGroupSound = 12; }  // ItemDisplayInfo
+// Weather: ID, AmbienceID (a SoundEntries row), EffectType, TransitionSkyBox,
+// EffectColor[3], EffectTexture. SMSG_WEATHER's state is the row id.
+namespace wth { constexpr uint32_t kFields = 8, kAmbience = 1; }
 // SoundEmitters: ID, Position[3], Direction[3], SoundEntriesID, MapID, Name.
 namespace sem { constexpr uint32_t kFields = 10, kPos = 1, kSound = 7, kMap = 8, kName = 9; }
 // VocalUISounds: ID, VocalUIEnum, RaceID, NormalSoundID[2] (male, female),
@@ -262,6 +265,12 @@ bool SoundData::load(const Loader& loadDbc) {
             footsteps_.emplace(key, std::make_pair(dbc->getUInt32(i, ftl::kSound), dbc->getUInt32(i, ftl::kSplash)));
         }
     }
+    if (auto dbc = table(loadDbc, "Weather.dbc", wth::kFields)) {
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            const uint32_t sound = dbc->getUInt32(i, wth::kAmbience);
+            if (sound != 0 && sound != 0xFFFFFFFFu) weatherSounds_[dbc->getUInt32(i, 0)] = sound;
+        }
+    }
     if (auto dbc = table(loadDbc, "ItemGroupSounds.dbc", igs::kFields)) {
         for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
             itemGroupSounds_[dbc->getUInt32(i, 0)] = {dbc->getUInt32(i, igs::kPickup), dbc->getUInt32(i, igs::kPutDown)};
@@ -373,6 +382,11 @@ const SoundEntry* SoundData::vocalUiSound(uint32_t vocalUiEnum, uint32_t raceId,
     return entry && !entry->files.empty() ? entry : nullptr;
 }
 
+uint32_t SoundData::weatherSound(uint32_t weatherState) const {
+    auto it = weatherSounds_.find(weatherState);
+    return it == weatherSounds_.end() ? 0 : it->second;
+}
+
 uint32_t SoundData::itemFoleySound(uint32_t itemDisplayId, bool pickup) const {
     if (itemDisplayId == 0 || itemGroupSounds_.empty()) return 0;
     if (!itemDisplayInfoTried_) {
@@ -440,6 +454,11 @@ const std::string* SoundData::nextFile(const SoundEntry& entry) const {
     if (freq.size() != entry.files.size()) freq.assign(entry.files.size(), 1u);
     const int i = stock::pickKitFile(entry.bag, freq, rng_);
     return i < 0 ? nullptr : &entry.files[static_cast<size_t>(i)];
+}
+
+int SoundData::nextFileIndex(const SoundEntry& entry) const {
+    const std::string* f = nextFile(entry);
+    return f ? static_cast<int>(f - entry.files.data()) : -1;
 }
 
 const std::string* SoundData::nextFile(uint32_t soundId) const {

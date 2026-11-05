@@ -1703,7 +1703,10 @@ public:
     // NPC greeting callback (plays voice line when NPC is clicked)
     /// A text emote someone performed, the player included: the sound layer
     /// plays its EmotesTextSound clip for the sender's race and sex.
-    using TextEmoteSoundCallback = std::function<void(uint64_t senderGuid, uint32_t textEmoteId)>;
+    /// emoteNum: the file of the row to play (SMSG_TEXT_EMOTE's index), or
+    /// out of range for "pick one".
+    using TextEmoteSoundCallback = std::function<void(uint64_t senderGuid, uint32_t textEmoteId,
+                                                      uint32_t emoteNum)>;
     void setTextEmoteSoundCallback(TextEmoteSoundCallback cb) { textEmoteSoundCallback_ = std::move(cb); }
     auto& textEmoteSoundCallbackRef() { return textEmoteSoundCallback_; }
     using NpcGreetingCallback = std::function<void(uint64_t guid, const glm::vec3& position)>;

@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <set>
 #include <memory>
 #include <string>
 #include <vector>
@@ -535,4 +536,51 @@ TEST_CASE("SoundData reads SoundEntriesAdvanced by the kit that names it", "[sou
     REQUIRE(k->duck[2] == 1.0f);
     REQUIRE(k->innerRadiusOfInfluence == Catch::Approx(45.0f));
     REQUIRE(k->timeToUnduckMs == 3000);
+}
+
+TEST_CASE("SoundData gives a weather state its Weather.dbc loop", "[sound_data]") {
+    Fixture f;
+    // Weather: ID, AmbienceID, EffectType, TransitionSkyBox, EffectColor[3],
+    // EffectTexture. State 3 (light rain) names "Weather - RainLight";
+    // state 1 (fine) and 2 (fog) name none.
+    f.tables["Weather.dbc"] = table(8, {
+        row(8, {{0, 1}, {1, 0}, {2, 0}}),
+        row(8, {{0, 2}, {1, 0}, {2, 1}}),
+        row(8, {{0, 3}, {1, 8533}, {2, 1}}),
+        row(8, {{0, 6}, {1, 8536}, {2, 2}}),
+    }, std::string(1, '\0'));
+    SoundData data;
+    REQUIRE(data.load(f.loader()));
+    REQUIRE(data.weatherSound(3) == 8533);
+    REQUIRE(data.weatherSound(6) == 8536);
+    REQUIRE(data.weatherSound(1) == 0);
+    REQUIRE(data.weatherSound(2) == 0);
+    REQUIRE(data.weatherSound(0) == 0);
+    REQUIRE(data.weatherSound(99) == 0);
+}
+
+TEST_CASE("SoundData draws a text emote's file index from the row's bag", "[sound_data]") {
+    Fixture f;
+    Strings se;
+    f.tables["SoundEntries.dbc"] = table(30, {
+        row(30, {{0, 2677}, {2, se.add("Cheer")}, {3, se.add("a.wav")}, {4, se.add("b.wav")},
+                 {5, se.add("c.wav")}, {13, 1}, {14, 1}, {15, 1}, {23, se.add("Sound")}}),
+        row(30, {{0, 7000}, {2, se.add("NoFiles")}}),
+    }, se.block);
+    SoundData data;
+    REQUIRE(data.load(f.loader()));
+    // The index is what CMSG_TEXT_EMOTE carries (0x4ceb70): every file once
+    // before any repeats, never the same one twice running.
+    int last = -1;
+    std::set<int> seen;
+    for (int i = 0; i < 3; ++i) {
+        const int idx = data.nextFileIndex(*data.sound(2677));
+        REQUIRE(idx >= 0);
+        REQUIRE(idx < 3);
+        REQUIRE(idx != last);
+        last = idx;
+        seen.insert(idx);
+    }
+    REQUIRE(seen.size() == 3);
+    if (const auto* none = data.sound(7000)) REQUIRE(data.nextFileIndex(*none) == -1);
 }

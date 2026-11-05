@@ -1,4 +1,5 @@
 #include "audio/mount_sound_manager.hpp"
+#include "audio/sound_trace_hook.hpp"
 #include "audio/audio_engine.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "core/logger.hpp"
@@ -60,6 +61,7 @@ static void loadSoundList(pipeline::AssetManager* assets,
         if (!assets->fileExists(path)) continue;
         auto data = assets->readFile(path);
         if (data.empty()) continue;
+        noteSoundFile(path, data);
         MountSample sample;
         sample.path = path;
         sample.data = std::move(data);
@@ -315,6 +317,7 @@ bool MountSoundManager::loadSound(const std::string& path, MountSample& sample) 
     if (data.empty()) {
         return false;
     }
+    noteSoundFile(path, data);
 
     sample.path = path;
     sample.data = std::move(data);

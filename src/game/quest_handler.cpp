@@ -874,12 +874,14 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
 
     // ---- SMSG_QUESTGIVER_QUEST_COMPLETE ----
     table[Opcode::SMSG_QUESTGIVER_QUEST_COMPLETE] = [this](network::Packet& packet) {
+        uint32_t nextInChain = 0;
         if (packet.hasRemaining(4)) {
             uint32_t questId = packet.readUInt32();
             // The rewards after the id - XP, money, honor, talent points,
             // arena points (AzerothCore SendQuestReward) - each said by
             // Wow.exe after ERR_QUEST_COMPLETE_S (0x6D1110 -> 0x6D0E10).
             uint32_t rewards[5] = {0, 0, 0, 0, 0};
+            nextInChain = 0;
             for (auto& r : rewards) if (packet.hasRemaining(4)) r = packet.readUInt32();
             LOG_INFO("Quest completed: questId=", questId);
             if (pendingTurnInQuestId_ == questId) {
@@ -889,6 +891,7 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
             }
             for (auto it = questLog_.begin(); it != questLog_.end(); ++it) {
                 if (it->questId == questId) {
+                    nextInChain = it->nextQuestInChain;
                     // ERR_QUEST_COMPLETE_S, then the rewards: ERR_QUEST_REWARD_EXP_I,
                     // ERR_QUEST_REWARD_MONEY_S, COMBATLOG_HONORAWARD (honor
                     // line), LEVEL_UP_CHAR_POINTS, COMBATLOG_ARENAPOINTSAWARD.
@@ -927,6 +930,12 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
                     break;
                 }
             }
+        }
+        // The reward frame waited for this (0x58ca70): it closes, letting
+        // the NPC go, unless the quest leads straight on to another, whose
+        // details the server sends next and which take the frame over.
+        if (questOfferRewardOpen_ && questRewardChosen_) {
+            if (nextInChain == 0) closeQuestOfferReward(true);
         }
         if (owner_.addonEventCallbackRef()) {
             owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
@@ -1322,6 +1331,7 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
                 q.questType        = readU32At(packet.getData(), 20);
                 q.suggestedPlayers = readU32At(packet.getData(), 24);
                 q.questFlags       = readU32At(packet.getData(), 80);
+                q.nextQuestInChain = readU32At(packet.getData(), 44);
                 if (q.suggestedPlayers > 40) q.suggestedPlayers = 0;   // sanity: wrong layout
             }
 
@@ -1661,8 +1671,10 @@ void QuestHandler::selectGossipQuest(uint32_t questId) {
             : QuestgiverQueryQuestPacket::build(currentGossip_.npcGuid, questId);
         owner_.getSocket()->send(packet);
     }
-
-    gossipWindowOpen_ = false;
+    // The gossip stays open until the answer replaces it: the stock
+    // SelectGossipAvailableQuest / ActiveQuest (0x58b070) only sends the
+    // query. Closing it here left the NPC with no window for the round trip,
+    // and it said its farewell in the middle of the conversation.
 }
 
 bool QuestHandler::requestQuestQuery(uint32_t questId, bool force) {
@@ -1784,8 +1796,12 @@ void QuestHandler::declineQuest(bool announce) {
 }
 
 void QuestHandler::closeGossip() {
+    // GOSSIP_CLOSED only when a gossip was open (CloseGossip 0x58a550 returns
+    // when the gossip guid is already 0): gossipframe.lua's OnHide calls
+    // CloseGossip from the event's own HideUIPanel.
+    const bool wasOpen = gossipWindowOpen_;
     gossipWindowOpen_ = false;
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("GOSSIP_CLOSED", {});
+    if (wasOpen && owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("GOSSIP_CLOSED", {});
     currentGossip_ = GossipMessageData{};
     questGreeting_.clear();
 }
@@ -1843,6 +1859,9 @@ void QuestHandler::closeQuestRequestItems(bool announce) {
 
 void QuestHandler::chooseQuestReward(uint32_t rewardIndex) {
     if (!questOfferRewardOpen_ || owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
+    // Once per offer: the stock client ignores GetQuestReward while its last
+    // choice is still unanswered (0x58cfa0, the flag at 0xc0d6ac).
+    if (questRewardChosen_) return;
     uint64_t npcGuid = currentQuestOfferReward_.npcGuid;
     LOG_INFO("Completing quest: questId=", currentQuestOfferReward_.questId,
              " npcGuid=", npcGuid, " rewardIndex=", rewardIndex);
@@ -1851,12 +1870,14 @@ void QuestHandler::chooseQuestReward(uint32_t rewardIndex) {
     owner_.getSocket()->send(packet);
     pendingTurnInQuestId_ = 0;
     pendingTurnInNpcGuid_ = 0;
-    // Announced, which is what closes the dialog. Taking the reward put the
-    // three fields back and told nothing: this client's own window reads the
-    // flag and closed, and the interface's quest frame hides on QUEST_FINISHED
-    // and nothing else, so it stayed on screen over the world after the quest
-    // had been handed in.
-    closeQuestOfferReward(true);
+    // The frame stays until the server answers: GetQuestReward (Wow.exe
+    // 0x58d620 -> 0x58cfa0) sends the choice and nothing else, and
+    // SMSG_QUESTGIVER_QUEST_COMPLETE (0x6d0e10 -> 0x58ca70) closes it with
+    // QUEST_FINISHED - or keeps it, when the quest leads straight on, for the
+    // next quest's details. Closing here let the NPC go for a moment: its
+    // farewell played on every hand-in, and again when the next quest's
+    // window was closed.
+    questRewardChosen_ = true;
 
     // Re-query quest giver status so markers update
     if (npcGuid) {
@@ -1868,6 +1889,7 @@ void QuestHandler::chooseQuestReward(uint32_t rewardIndex) {
 
 void QuestHandler::closeQuestOfferReward(bool announce) {
     pendingTurnInRewardRequest_ = false;
+    questRewardChosen_ = false;
     questOfferRewardOpen_ = false;
     currentQuestOfferReward_ = QuestOfferRewardData{};
     if (announce && owner_.addonEventCallbackRef()) {
@@ -2890,6 +2912,9 @@ void QuestHandler::handleQuestDetails(network::Packet& packet) {
     questDetailsOpen_ = true;
     questDetailsOpenTime_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
     gossipWindowOpen_ = false;
+    // The next quest of a chain takes over a reward frame kept for it.
+    questOfferRewardOpen_ = false;
+    questRewardChosen_ = false;
     if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("QUEST_DETAIL", {});
 }
 

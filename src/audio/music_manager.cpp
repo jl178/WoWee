@@ -114,6 +114,7 @@ void MusicManager::playMusic(const std::string& mpqPath, bool loop, float fadeIn
     // Play with AudioEngine (non-blocking, streams from memory)
     float targetVolume = effectiveMusicVolume();
     float startVolume = (fadeInMs > 0.0f) ? 0.0f : targetVolume;
+    SoundTraceName traced(mpqPath);
     if (AudioEngine::instance().playMusic(cacheIt->second, startVolume, loop)) {
         playing = true;
         fadingIn = false;

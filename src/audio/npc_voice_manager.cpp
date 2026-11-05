@@ -1,4 +1,5 @@
 #include "audio/npc_voice_manager.hpp"
+#include "audio/sound_trace_hook.hpp"
 #include "audio/sound_data.hpp"
 #include "audio/audio_engine.hpp"
 #include "pipeline/asset_manager.hpp"
@@ -421,6 +422,7 @@ bool NpcVoiceManager::loadSound(const std::string& path, VoiceSample& sample) {
 
     sample.path = path;
     sample.data = assetManager_->readFile(path);
+    noteSoundFile(path, sample.data);
 
     if (sample.data.empty()) {
         LOG_WARNING("NPC voice: Failed to load sound data from ", path);
@@ -630,6 +632,11 @@ void NpcVoiceManager::playAggro(uint64_t npcGuid, uint32_t displayId,
     }
 
     lastAggroTime_[npcGuid] = now;
+    // SMSG_AI_REACTION 2 (0x716b10 -> 0x7474b0 kind 0) plays the display's
+    // CreatureSoundData SoundAggroID and nothing else: a creature whose row
+    // names none is silent. The voice-type barks ("Attack my target!") are
+    // for data without the tables.
+    if (soundData_) return;
     playSound(npcGuid, voiceType, SoundCategory::AGGRO, position);
 }
 

@@ -45,6 +45,7 @@
 #include "core/debug_lua_hook.hpp"
 
 #include "addons/lua_engine.hpp"
+#include "audio/audio_engine.hpp"
 #include "core/application.hpp"
 #include "core/input.hpp"
 #include "core/logger.hpp"
@@ -94,6 +95,9 @@ int luaDebugLog(lua_State* L) {
         lua_pop(L, 1);
     }
     LOG_WARNING("[luatest] ", line);
+    // A scripted run's markers in the sound trace too, so its lines can be
+    // read scenario by scenario.
+    if (audio::soundTraceEnabled()) audio::soundTraceNote("lua " + line);
     return 0;
 }
 

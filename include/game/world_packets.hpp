@@ -848,7 +848,10 @@ const char* getItemSubclassName(uint32_t itemClass, uint32_t subClass);
  */
 class TextEmotePacket {
 public:
-    static network::Packet build(uint32_t textEmoteId, uint64_t targetGuid = 0);
+    /// emoteNum: the file of the sender's EmotesTextSound row everyone plays
+    /// (0x4ceb70's bag draw), 0xFFFFFFFF for none.
+    static network::Packet build(uint32_t textEmoteId, uint64_t targetGuid = 0,
+                                 uint32_t emoteNum = 0xFFFFFFFFu);
 };
 
 /**

@@ -96,6 +96,10 @@ void AudioCoordinator::loadSoundData(pipeline::AssetManager* assets) {
         // here: the stock instance behaviour applies to whoever plays it.
         AudioEngine::instance().setAdvancedLookup(
             [this](uint32_t kitId) { return soundData_.advancedKit(kitId); });
+        AudioEngine::instance().setKitNameLookup([this](uint32_t kitId) -> std::string_view {
+            const SoundEntry* e = soundData_.sound(kitId);
+            return e ? std::string_view(e->name) : std::string_view();
+        });
         if (npcVoiceManager_) npcVoiceManager_->setSoundData(&soundData_);
         if (playerVoiceManager_) playerVoiceManager_->setSoundData(&soundData_);
         if (combatSoundManager_) combatSoundManager_->setSoundData(&soundData_);
@@ -144,8 +148,12 @@ void AudioCoordinator::updateReverb(const ZoneAudioContext& ctx) {
     const bool under = ctx.cameraUnderwater;
     AudioEngine::instance().setWorldUnderwater(under);
     if (ambientSoundManager_) {
-        ambientSoundManager_->setUnderwaterLoop(underwaterLoopPath_, underwaterLoopVolume_);
-        ambientSoundManager_->setSubmerged(under);
+        // With the tables the underwater loop is an ambience slot of its own
+        // (updateTableAmbience); the separate loop is for data without them.
+        if (!soundData_.loaded()) {
+            ambientSoundManager_->setUnderwaterLoop(underwaterLoopPath_, underwaterLoopVolume_);
+            ambientSoundManager_->setSubmerged(under);
+        }
     }
 
     // Which SoundProviderPreferences row. A room or cave - an indoor group -
@@ -220,6 +228,38 @@ void AudioCoordinator::updateTableAmbience(const ZoneAudioContext& ctx) {
         ambientSoundManager_->setAreaAmbience(dayPath, nightPath, volume);
         return;
     }
+    // Under water the camera hears SoundEntries 4209 "Underwater (DONOTRENAME)"
+    // alone: slot 9 (0x5fe7b0 -> 0x4c8630 sets slot 9's ambience to 4209
+    // while the camera is in liquid), above the weather and the area, and the
+    // change cuts over at once instead of crossfading (0x4c9910 passes no
+    // fade while 0xb4aa9c, "the underwater state changed", is set).
+    const bool under = ctx.cameraUnderwater && !underwaterLoopPath_.empty();
+    const bool underChanged = under != ambienceUnderwater_;
+    ambienceUnderwater_ = under;
+    if (under) {
+        const uint64_t key = (1ull << 60);
+        if (key == ambienceKey_) return;
+        ambienceKey_ = key;
+        ambientSoundManager_->setAreaAmbience(underwaterLoopPath_, underwaterLoopPath_, underwaterLoopVolume_,
+                                              /*instant=*/true);
+        return;
+    }
+    // The weather's loop, Weather.dbc AmbienceID by SMSG_WEATHER's state, is
+    // slot 8 (SMSG_WEATHER 0x526530 -> 0x4c8610 writes slot 8's day and night
+    // ambience): above the area's, so rain replaces the forest with the same
+    // 5 s crossfade, and passed over indoors (0x4c86f0 skips slot 8 while
+    // 0x4c8600's flag, set from the area resolution's indoor test, is up).
+    const bool interior = ctx.wmoRootId != 0 && ctx.wmoSoundIndoors;
+    if (const uint32_t weather = interior ? 0 : soundData_.weatherSound(ctx.weatherState)) {
+        const uint64_t key = (1ull << 61) | weather;
+        if (key == ambienceKey_) return;
+        const SoundEntry* e = soundData_.sound(weather);
+        if (e && !e->files.empty()) {
+            ambienceKey_ = key;
+            ambientSoundManager_->setAreaAmbience(e->files.front(), e->files.front(), e->volume, underChanged);
+            return;
+        }
+    }
     if (ctx.areaId == 0) return;
     // A room with its own WMOAreaTable ambience sounds like itself, a room in
     // a building whose -1 row names one like the building. Outdoors, and in
@@ -228,7 +268,9 @@ void AudioCoordinator::updateTableAmbience(const ZoneAudioContext& ctx) {
     // name no ambience has none, and the area's loop fades out at the door.
     const uint32_t roomAmbience = ctx.wmoRootId
         ? soundData_.wmoAmbience(ctx.wmoRootId, ctx.wmoNameSet, ctx.wmoGroupId) : 0;
-    const bool indoorsBare = roomAmbience == 0 && ctx.wmoRootId != 0 && ctx.wmoInterior;
+    // "Indoors" is the stock sound code's: the group lacks the exterior flag
+    // (0x7a1480), which is not the same as having the indoor one.
+    const bool indoorsBare = roomAmbience == 0 && ctx.wmoRootId != 0 && ctx.wmoSoundIndoors;
     const uint64_t key = (static_cast<uint64_t>(roomAmbience) << 32) | ctx.areaId |
                          (indoorsBare ? (1ull << 63) : 0ull);
     if (key == ambienceKey_) return;
@@ -252,7 +294,7 @@ void AudioCoordinator::updateTableAmbience(const ZoneAudioContext& ctx) {
         if (nightPath.empty()) nightPath = dayPath;
         if (dayPath.empty()) dayPath = nightPath;
     }
-    ambientSoundManager_->setAreaAmbience(dayPath, nightPath, volume);
+    ambientSoundManager_->setAreaAmbience(dayPath, nightPath, volume, underChanged);
 }
 
 void AudioCoordinator::updateTableMusic(const ZoneAudioContext& ctx, uint32_t zoneId, bool suppressed) {
@@ -262,7 +304,7 @@ void AudioCoordinator::updateTableMusic(const ZoneAudioContext& ctx, uint32_t zo
     if (ctx.wmoRootId) {
         in.zoneMusicOverride = soundData_.wmoZoneMusic(ctx.wmoRootId, ctx.wmoNameSet, ctx.wmoGroupId);
         in.introOverride = soundData_.wmoIntro(ctx.wmoRootId, ctx.wmoNameSet, ctx.wmoGroupId);
-        in.indoors = ctx.wmoInterior;
+        in.indoors = ctx.wmoSoundIndoors;
     }
     in.screenEffectMusic = screenEffectMusic_;
     in.noDelay = loopMusic_;
@@ -351,7 +393,9 @@ void AudioCoordinator::updateZoneAudio(const ZoneAudioContext& ctx) {
 
     // ── Ambient weather audio sync ──
     if (ambientSoundManager_) {
-        bool isBlacksmith = (ctx.insideWmoId == 96048);
+        // The hand-made forge loop is for data without the tables: with them
+        // a smithy sounds like its area and its forge and anvil doodads.
+        bool isBlacksmith = !soundData_.loaded() && (ctx.insideWmoId == 96048);
 
         if (zoneId != 0) {
             ambientSoundManager_->setZoneId(zoneId);

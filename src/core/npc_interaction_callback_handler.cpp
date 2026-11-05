@@ -71,19 +71,15 @@ audio::CombatItem combatItem(const EntitySpawner::ItemDbcRow* row) {
     }
     return item;
 }
-// A unit's emote voice, at the unit: the row's own MinDistance and
-// DistanceCutoff, as every positional kit plays (Wow.exe 0x4c6a40 ->
-// set3DMinMaxDistance), rather than a fixed 60 yd cutoff that was still
-// heard where the row says the stock client has gone silent.
-// The local character's own: in the head at 0.65 (0x746d60, 0x747310).
-void playEntryAtUnit(const audio::SoundEntry& entry, const std::string& file, const glm::vec3& position,
+// A model's $CSD voice at the event: the row played as every kit is
+// (AudioEngine::playKit - its bag, level, spread and distances). The local
+// character's own: in the head at 0.65 (0x746d60, 0x747310).
+void playEntryAtUnit(const audio::SoundData& data, const audio::SoundEntry& entry, const glm::vec3& position,
                      bool own = false) {
-    audio::SoundOptions opts;
-    opts.minDistance = entry.minDistance;
-    opts.kitId = entry.id;
-    opts.ownCharacter = own;
-    const float cutoff = entry.distanceCutoff > 0.0f ? entry.distanceCutoff : audio::stock::kDefaultCutoff;
-    audio::AudioEngine::instance().playSound3D(file, position, entry.volume, 1.0f, cutoff, opts);
+    audio::KitPlay play;
+    play.position = &position;
+    play.opts.ownCharacter = own;
+    audio::AudioEngine::instance().playKit(data, entry, play);
 }
 } // namespace
 
@@ -279,7 +275,11 @@ void NPCInteractionCallbackHandler::handleUnitAnimEvent(uint32_t instanceId, uin
 }
 
 void NPCInteractionCallbackHandler::setupCallbacks() {
-    gameHandler_.setTextEmoteSoundCallback([this](uint64_t guid, uint32_t textEmoteId) {
+    // A text emote's voice (0x747000 -> 0x746d60): the file the sender drew
+    // (SMSG_TEXT_EMOTE's index, props[3]), two yards above the unit's feet
+    // (0xadb674), the kit refused while it already sounds (props[9] = 2), and
+    // held on the unit's handle so its next emote line cuts this one.
+    gameHandler_.setTextEmoteSoundCallback([this](uint64_t guid, uint32_t textEmoteId, uint32_t emoteNum) {
         const auto* data = audioCoordinator_ ? audioCoordinator_->getSoundData() : nullptr;
         if (!data) return;
         auto entity = gameHandler_.getEntityManager().getEntity(guid);
@@ -291,11 +291,21 @@ void NPCInteractionCallbackHandler::setupCallbacks() {
         const uint32_t sex = (bytes0 >> 16) & 0xFF;
         const audio::SoundEntry* entry = data->emoteSound(textEmoteId, race, sex == 1 ? 1u : 0u);
         if (!entry || entry->files.empty()) return;
-        static std::mt19937 rng{std::random_device{}()};
-        const auto& file = entry->files[std::uniform_int_distribution<size_t>(0, entry->files.size() - 1)(rng)];
         const glm::vec3 pos = core::coords::canonicalToRender(
-            glm::vec3(unit->getX(), unit->getY(), unit->getZ()));
-        playEntryAtUnit(*entry, file, pos, guid == gameHandler_.getPlayerGuid());
+            glm::vec3(unit->getX(), unit->getY(), unit->getZ())) + glm::vec3(0.0f, 0.0f, 2.0f);
+        audio::KitPlay play;
+        play.position = &pos;
+        play.opts.ownCharacter = guid == gameHandler_.getPlayerGuid();
+        play.opts.noDuplicate = true;
+        play.stoppable = true;
+        play.fileIndex = emoteNum < entry->files.size() ? static_cast<int>(emoteNum) : -1;
+        auto& engine = audio::AudioEngine::instance();
+        auto& last = emoteVoice_[guid];
+        // The same line still sounding refuses the new one (the kit's
+        // no-duplicate rule); another emote's line is cut for it.
+        if (last.first != 0 && last.second != entry->id) engine.stopSound(last.first);
+        const uint32_t handle = engine.playKit(*data, *entry, play);
+        if (handle != 0) last = {handle, entry->id};
     });
 
     // M2 $CSD animation sound events: the emote voices EmotesTextSound has no
@@ -328,10 +338,7 @@ void NPCInteractionCallbackHandler::setupCallbacks() {
                 // the shipped SoundEntries.dbc no longer has.
                 const audio::SoundEntry* entry = data->sound(soundEntryId);
                 if (!entry || entry->files.empty()) return;
-                static std::mt19937 rng{std::random_device{}()};
-                const auto& file =
-                    entry->files[std::uniform_int_distribution<size_t>(0, entry->files.size() - 1)(rng)];
-                playEntryAtUnit(*entry, file, position,
+                playEntryAtUnit(*data, *entry, position,
                                 renderer_ && instanceId == renderer_->getCharacterInstanceId());
             });
     }

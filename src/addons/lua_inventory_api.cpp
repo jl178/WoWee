@@ -9,6 +9,8 @@
 #include "game/stationery.hpp"
 #include "game/auction_filters.hpp"
 #include "ui/framexml_takeover.hpp"
+#include "audio/audio_coordinator.hpp"
+#include "addons/lua_services.hpp"
 #include "core/logger.hpp"
 #include "core/config_paths.hpp"
 #include <array>
@@ -2166,6 +2168,14 @@ static int lua_UseContainerItem(lua_State* L) {
         }
     }
 
+    // A right-click equip goes through the cursor (0x6dfee0 -> 0x520770 ->
+    // AutoEquipCursorItem 0x6dfc40 -> ClearCursor 0x519280): no pickup
+    // sound, and the put-down sound (ItemGroupSounds column 1, 0x4d0020) as
+    // the cursor lets go of it.
+    if (equippable && !readable) {
+        if (auto* svc = getLuaServices(L); svc && svc->audioCoordinator)
+            svc->audioCoordinator->playItemFoley(info->displayInfoId, /*pickup=*/false);
+    }
     // By slot rather than by item id: the id searches the bags for a match and
     // can find a different stack of the same thing than the one clicked.
     if (bag == 0) {

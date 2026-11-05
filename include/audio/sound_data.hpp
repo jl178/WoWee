@@ -170,6 +170,10 @@ public:
     /// weighted by Freq, each file once before any repeats, never the same
     /// file twice running. Null when the row has no file to give.
     [[nodiscard]] const std::string* nextFile(const SoundEntry& entry) const;
+    /// The same draw, as the file's index in the row; -1 when there is none.
+    /// What a text emote's sender puts in CMSG_TEXT_EMOTE (0x4ceb70), so that
+    /// everyone who hears it hears the same file.
+    [[nodiscard]] int nextFileIndex(const SoundEntry& entry) const;
     /// The same for a row by id.
     [[nodiscard]] const std::string* nextFile(uint32_t soundId) const;
     /// Lookup by SoundEntries.Name, case-insensitive.
@@ -252,6 +256,10 @@ public:
     /// (TerrainType.SoundID: 1 dirt ... 9 soggy; 0 when unknown). splash picks
     /// the SoundIDSplash column, for feet in shallow water.
     [[nodiscard]] uint32_t footstepSound(uint32_t creatureFootstepId, uint32_t terrainSoundId, bool splash) const;
+    /// Weather.dbc AmbienceID: the loop a weather state (SMSG_WEATHER's
+    /// first field, the row id) sounds like - "Weather - RainLight" and its
+    /// kin. 0 for clear skies, fog and the states with no sound.
+    [[nodiscard]] uint32_t weatherSound(uint32_t weatherState) const;
     /// ItemDisplayInfo.GroupSoundIndex -> ItemGroupSounds: the pickup or
     /// put-down sound of an item display. 0 when the display has no group.
     [[nodiscard]] uint32_t itemFoleySound(uint32_t itemDisplayId, bool pickup) const;
@@ -316,6 +324,7 @@ private:
     std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> footsteps_;
     // ItemGroupSounds: group -> pickup, put-down.
     std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> itemGroupSounds_;
+    std::unordered_map<uint32_t, uint32_t> weatherSounds_;  ///< Weather.dbc id -> SoundEntries
     // VocalUISounds: (enum << 8 | race) -> sound ids [normal male, normal
     // female, pissed male, pissed female]; 0 for none.
     std::unordered_map<uint32_t, std::array<uint32_t, 4>> vocalUiSounds_;

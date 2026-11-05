@@ -720,7 +720,11 @@ private:
     void fireCastEnd(uint64_t guid, const stock_cast::CastEndSteps& steps, stock_cast::CastRef cast);
     /// Resistances.dbc FizzleSoundID for the spell's school (0x4CFF30), at
     /// the player.
-    void playFizzle(uint32_t spellId);
+    /// The school's fizzle (Resistances.dbc FizzleSoundID). atUnit 0: as
+    /// SMSG_CAST_FAILED plays it for the caster (0x808200); otherwise at that
+    /// unit in the world with no own-character treatment, as SMSG_SPELL_FAILURE
+    /// plays it for every caster (0x809c70 -> 0x4cff30).
+    void playFizzle(uint32_t spellId, uint64_t atUnit = 0);
     // An on-next-swing ability between its SMSG_SPELL_START and the swing.
     uint32_t nextSwingSpellId_ = 0;
     uint8_t nextSwingCastCount_ = 0;
