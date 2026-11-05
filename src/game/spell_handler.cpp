@@ -21,6 +21,7 @@
 #include "rendering/spell_visual_system.hpp"
 #include "rendering/animation/weapon_anim_select.hpp"
 #include "audio/audio_coordinator.hpp"
+#include "audio/audio_engine.hpp"
 #include "audio/spell_sound_manager.hpp"
 #include "audio/combat_sound_manager.hpp"
 #include "core/application.hpp"
@@ -1425,8 +1426,10 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     // server's SMSG_SPELL_START, which then finds them already playing. Not
     // over a cast that is still running - the stock client plays it only on a
     // caster with no current cast (+0xA60).
-    if (!wasCasting && !owner_.isProfessionSpell(spellId) &&
-        !spellclass::isRangedWeaponAutoAttack(spellId)) {
+    // Professions too: a recipe's precast kit carries its tradeskill sound
+    // (Tailoring, Blacksmithing's hammer), Fishing's cast kit "Fishing Cast";
+    // the stock client plays the kits of every spell alike.
+    if (!wasCasting && !spellclass::isRangedWeaponAutoAttack(spellId)) {
         const uint32_t castMs = owner_.getSpellData(spellId).castTimeMs;
         triggerCastVisual(spellId, owner_.getPlayerGuid(), castMs);
         if (castMs > 0 && owner_.spellCastAnimCallbackRef()) {
@@ -1825,7 +1828,7 @@ bool SpellHandler::spellStopCasting() {
     return false;
 }
 
-void SpellHandler::playFizzle(uint32_t spellId) {
+void SpellHandler::playFizzle(uint32_t spellId, uint64_t atUnit) {
     owner_.loadSpellNameCache();
     const auto it = owner_.spellNameCacheRef().find(spellId);
     if (it == owner_.spellNameCacheRef().end()) return;
@@ -1845,8 +1848,24 @@ void SpellHandler::playFizzle(uint32_t spellId) {
             }
         }
     }
-    if (const uint32_t sound = fizzle[static_cast<size_t>(school)]; sound != 0)
+    const uint32_t sound = fizzle[static_cast<size_t>(school)];
+    if (sound == 0) return;
+    if (atUnit == 0) {
         owner_.playUiSoundEntry(sound);
+        return;
+    }
+    // 0x4cff30: PlaySoundKit at the unit's position (vtable +0x2c) with
+    // default properties - placed, at full level, even for the player's own.
+    auto entity = owner_.getEntityManager().getEntity(atUnit);
+    auto* ac = owner_.services().audioCoordinator;
+    const audio::SoundData* data = ac ? ac->getSoundData() : nullptr;
+    const audio::SoundEntry* entry = data ? data->sound(sound) : nullptr;
+    if (!entity || !entry) return;
+    const glm::vec3 pos = core::coords::canonicalToRender(
+        glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
+    audio::KitPlay play;
+    play.position = &pos;
+    audio::AudioEngine::instance().playKit(*data, *entry, play);
 }
 
 stock_cast::UnitCast SpellHandler::playerUnitCast() const {
@@ -3366,10 +3385,10 @@ void SpellHandler::handleSpellStart(network::Packet& packet) {
     }
 
     // The precast kit's build-up on the caster (any caster) until SPELL_GO,
-    // a failure or the timeout. Skip profession spells.
+    // a failure or the timeout, professions included.
     // Ranged attacks too: their build-up is the ranged weapon's precast kit
     // (a wand's HoldThrown, a bow's LoadBow - Wow.exe 0x7FA2E0 through 0x720F80).
-    if (!owner_.isProfessionSpell(data.spellId) && !precastPredicted) {
+    if (!precastPredicted) {
         triggerCastVisual(data.spellId, data.casterUnit, data.castTime);
     }
 }
@@ -3710,7 +3729,8 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
     // Skip profession spells and melee (schoolMask == 1) abilities.
     // Ranged attacks too: Auto Shot, Shoot and Throw play the ranged
     // weapon's visual and fly its ammo (Wow.exe 0x720F80, 0x7FFFB0).
-    if (!owner_.isProfessionSpell(data.spellId)) {
+    // Profession spells included: their kits hold their stock sounds.
+    {
         uint32_t visualId = resolveCastVisualId(data.spellId, data.casterUnit);
         if (visualId != 0) {
             // The cast kit on the caster, timed casts and instants alike
@@ -6050,8 +6070,10 @@ void SpellHandler::handleSpellFailure(network::Packet& packet) {
     }
     packet.skipAll();
     if (failSpellId == 0) return;
+    // Every caster's failure fizzles where the caster stands (0x4cff30) -
+    // the player's own as well, after SMSG_CAST_FAILED's own fizzle.
+    playFizzle(failSpellId, failGuid != 0 ? failGuid : owner_.getPlayerGuid());
     if (failGuid == owner_.getPlayerGuid() || failGuid == 0) {
-        playFizzle(failSpellId);
         if (stock_cast::spellFailureStopsAutoRepeat(failReason)) cancelAutoRepeat();
         // A channel the server ended (Wowee keeps it in the same state).
         if (casting_ && castIsChannel_ && failSpellId == currentCastSpellId_) {
@@ -7099,8 +7121,7 @@ void SpellHandler::handleChannelStart(network::Packet& packet) {
         }
         // The channel's kit (Arcane Missiles' glowing hands, Drain Life) on
         // the caster for as long as it runs.
-        if (!owner_.isProfessionSpell(chanSpellId))
-            triggerCastVisual(chanSpellId, chanCaster, chanTotalMs, /*channel=*/true);
+        triggerCastVisual(chanSpellId, chanCaster, chanTotalMs, /*channel=*/true);
 
         // Fire UNIT_SPELLCAST_CHANNEL_START for Lua addons
         if (owner_.addonEventCallbackRef()) {

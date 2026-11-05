@@ -67,6 +67,10 @@ private:
     std::vector<Sample> swimLoopClips;
     std::vector<Sample> hardLandClips;
     std::vector<Sample> landVoiceClips;
+    /// The voices came from the tables (CreatureSoundData). The landing is
+    /// then the stock one: no thud of its own - the JumpLandRun animation's
+    /// footfall events make it - and a hard landing is the injury cry.
+    bool tableVoices_ = false;
     std::vector<Sample> attackGruntClips;
     std::vector<Sample> woundClips;
     std::vector<Sample> woundCritClips;
@@ -81,6 +85,7 @@ private:
 
     std::chrono::steady_clock::time_point lastLandAt{};
     std::chrono::steady_clock::time_point lastSplashAt{};
+    std::chrono::steady_clock::time_point lastWaterChangeAt{};  ///< the last enter or exit, splashed or not
     std::chrono::steady_clock::time_point lastSwimStrokeAt{};
     std::string voiceProfileKey;
     float volumeScale = 1.0f;

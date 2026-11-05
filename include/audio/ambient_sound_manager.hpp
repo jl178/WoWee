@@ -86,7 +86,10 @@ public:
     /// hand-written zone and city libraries and the bird, cricket and wind
     /// one-shots stand down: the loops already carry those sounds, and the
     /// stock client plays nothing else for an area.
-    void setAreaAmbience(const std::string& dayPath, const std::string& nightPath, float volume);
+    /// instant: switch without the 5 s crossfade - the stock client's cut
+    /// when the camera goes under or comes up (0x4c9910 with 0xb4aa9c set).
+    void setAreaAmbience(const std::string& dayPath, const std::string& nightPath, float volume,
+                         bool instant = false);
 
     /// The loop the stock client plays with the camera under water -
     /// SoundEntries "Underwater (DONOTRENAME)", UndwaterLoop.wav - and its
@@ -230,6 +233,7 @@ private:
     std::string areaAmbienceDay_;
     std::string areaAmbienceNight_;
     float areaAmbienceVolume_ = 1.0f;
+    bool areaSwitchInstant_ = false;
     std::string areaLoopPath_;
     uint32_t areaLoopId_ = 0;
     float areaLoopVolume_ = -1.0f;

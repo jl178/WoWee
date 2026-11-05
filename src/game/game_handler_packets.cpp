@@ -1207,8 +1207,17 @@ void GameHandler::registerCoreOpcodes() {
                 // whole signal (Wow.exe 0x70BE90 plays the animation only).
                 // "Fishing Hooked" (3355): the bobber display's (668) custom
                 // animation sound, GameObjectDisplayInfo Sound[6].
-                withSoundManager(&audio::AudioCoordinator::getUiSoundManager,
-                                 [](auto* sfx) { sfx->playFishingBite(); });
+                // It sounds at the bobber (the model's $GC0 event plays the
+                // display's Sound[6] there, 0x70c050 -> 0x70bf70), not in the
+                // head.
+                const glm::vec3 at = core::coords::canonicalToRender(
+                    glm::vec3(go->getX(), go->getY(), go->getZ()));
+                withSoundManager(&audio::AudioCoordinator::getUiSoundManager, [&](auto* sfx) {
+                    const audio::SoundEntry* row = nullptr;
+                    if (auto* ac = services_.audioCoordinator)
+                        if (const auto* data = ac->getSoundData()) row = data->soundByName("Fishing Hooked");
+                    if (!row || !sfx->playEntryAt(row, at)) sfx->playFishingBite();
+                });
                 LOG_WARNING("Fishing bite ready: guid=0x", std::hex, guid, std::dec,
                             " serverAnimProgress=", animId);
             }

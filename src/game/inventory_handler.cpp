@@ -1855,6 +1855,12 @@ void InventoryHandler::repairItem(uint64_t vendorGuid, uint64_t itemGuid) {
         owner_.addUIError("Not enough money");
         return;
     }
+    // The repair cursor's click on an item (UseContainerItem 0x5d8650 and the
+    // pickups beside it): the cost check, then ITEM_REPAIR, then the packet.
+    // Repair All's sound is merchantframe.xml's own.
+    if (auto* ac = owner_.services().audioCoordinator) {
+        if (auto* sfx = ac->getUiSoundManager()) sfx->playByName("ITEM_REPAIR");
+    }
 
     network::Packet packet(wireOpcode(Opcode::CMSG_REPAIR_ITEM));
     packet.writeUInt64(vendorGuid);
@@ -3221,8 +3227,12 @@ void InventoryHandler::trainSpell(uint32_t spellId) {
 }
 
 void InventoryHandler::closeTrainer() {
+    // Only an open trainer closes (Wow.exe 0x5940e0 compares the trainer
+    // guid): FrameXML's OnHide calls CloseTrainer again from the
+    // TRAINER_CLOSED handler, and a second event replayed the close sound.
+    const bool wasOpen = trainerWindowOpen_;
     trainerWindowOpen_ = false;
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("TRAINER_CLOSED", {});
+    if (wasOpen && owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("TRAINER_CLOSED", {});
     currentTrainerList_ = TrainerListData{};
     trainerTabs_.clear();
 }
@@ -3381,6 +3391,11 @@ void InventoryHandler::selectDefaultStationery() {
 }
 
 void InventoryHandler::closeMailbox() {
+    // CloseMail (Wow.exe 0x571a40) does nothing unless a mailbox is open.
+    // mailframe.lua's MAIL_CLOSED handler hides the frame, whose OnHide calls
+    // CloseMail again: unguarded, MAIL_CLOSED fired twice and each played the
+    // frame's close sounds.
+    if (!mailboxOpen_) return;
     mailboxOpen_ = false;
     mailboxGuid_ = 0;
     showMailCompose_ = false;
@@ -4150,6 +4165,8 @@ void InventoryHandler::openAuctionHouse(uint64_t guid) {
 }
 
 void InventoryHandler::closeAuctionHouse() {
+    // CloseAuctionHouse (0x59f150) acts only on an open auction house.
+    if (!auctionOpen_) return;
     auctionOpen_ = false;
     auctioneerGuid_ = 0;
     auctionMultisell_ = AuctionMultisell{};   // the rest cannot be posted away from the auctioneer

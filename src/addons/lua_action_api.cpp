@@ -22,6 +22,7 @@
 #include "game/pet_action.hpp"
 #include "addons/lua_services.hpp"
 #include "audio/audio_coordinator.hpp"
+#include "audio/ui_sound_manager.hpp"
 #include <cstdlib>
 #include <SDL3/SDL_keyboard.h>
 
@@ -195,6 +196,19 @@ static void setCursorType(lua_State* L, CursorType type) {
     // Money onto the cursor and money off it both clink, as the stock
     // client's money pickups and its ClearCursor do.
     if (s_cursorType == CursorType::MONEY || type == CursorType::MONEY) playCoinSound(L);
+    // ClearCursor (0x519280) for the kinds that are not an item or money:
+    // a spell, macro, pet action, stable pet, merchant or ammunition pickup
+    // put down plays INTERFACESOUND_CURSORDROPOBJECT - the ammunition's after
+    // the item's own put-down sound (0x4d0090).
+    if (s_cursorType != CursorType::NONE && s_cursorType != type &&
+        s_cursorType != CursorType::ITEM && s_cursorType != CursorType::MONEY &&
+        s_cursorType != CursorType::GUILDBANK) {
+        if (s_cursorType == CursorType::AMMO && s_cursorId != 0)
+            playItemFoley(L, static_cast<uint32_t>(s_cursorId), 0, /*pickup=*/false);
+        auto* svc = getLuaServices(L);
+        auto* ac = svc ? svc->audioCoordinator : nullptr;
+        if (auto* sfx = ac ? ac->getUiSoundManager() : nullptr) sfx->playByName("INTERFACESOUND_CURSORDROPOBJECT");
+    }
     const CursorType previousType = s_cursorType;
     s_cursorType = type;
     lua_getfield(L, LUA_REGISTRYINDEX, "wowee_lua_engine");

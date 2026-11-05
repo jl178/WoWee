@@ -1,5 +1,6 @@
 #include "ui/world_ui_rules.hpp"
 #include "game/chat_handler.hpp"
+#include "audio/audio_coordinator.hpp"
 #include "game/chat_social_rules.hpp"
 #include "game/global_strings.hpp"
 
@@ -1064,7 +1065,23 @@ void ChatHandler::fireChatLineEvent(const MessageChatData& data, const char* cha
 
 void ChatHandler::sendTextEmote(uint32_t textEmoteId, uint64_t targetGuid) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    auto packet = TextEmotePacket::build(textEmoteId, targetGuid);
+    // The voice file is the sender's pick (0x6dd9e0 -> 0x4ceb70: a bag draw
+    // from the race and sex's EmotesTextSound row, -1 for none); the server
+    // hands the index back in SMSG_TEXT_EMOTE and every client plays it.
+    uint32_t emoteNum = 0xFFFFFFFFu;
+    auto* ac = owner_.services().audioCoordinator;
+    const audio::SoundData* sd = ac ? ac->getSoundData() : nullptr;
+    auto self = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
+    if (sd && self && self->isUnit()) {
+        const uint32_t bytes0 = std::static_pointer_cast<Unit>(self)->getField(
+            fieldIndex(UF::UNIT_FIELD_BYTES_0));
+        const uint32_t sex = (bytes0 >> 16) & 0xFF;
+        if (const audio::SoundEntry* e = sd->emoteSound(textEmoteId, bytes0 & 0xFF, sex == 1 ? 1u : 0u)) {
+            const int i = sd->nextFileIndex(*e);
+            if (i >= 0) emoteNum = static_cast<uint32_t>(i);
+        }
+    }
+    auto packet = TextEmotePacket::build(textEmoteId, targetGuid, emoteNum);
     owner_.getSocket()->send(packet);
 }
 
@@ -1193,7 +1210,7 @@ void ChatHandler::finishTextEmote(const MessageChatData& data) {
     }
     // The voice line, for a sender in the world - with or without wording.
     if (owner_.textEmoteSoundCallbackRef())
-        owner_.textEmoteSoundCallbackRef()(data.senderGuid, data.textEmoteId);
+        owner_.textEmoteSoundCallbackRef()(data.senderGuid, data.textEmoteId, data.emoteNum);
 }
 
 void ChatHandler::joinChannel(const std::string& channelName, const std::string& password,

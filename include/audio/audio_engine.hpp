@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <cstdint>
 
@@ -22,6 +23,8 @@ namespace pipeline { class AssetManager; }
 namespace audio {
 
 struct ReverbSettings;
+class SoundData;
+struct SoundEntry;
 
 /// Where a sound is mixed. World sounds pass through the room's reverb and
 /// the underwater muffle (WorldFx); interface sounds and music do not - a
@@ -60,6 +63,61 @@ struct SoundOptions {
     int32_t advancedOffsetMs = kDrawAdvancedOffset;
 };
 
+/// How one SoundEntries row is to be played by AudioEngine::playKit: the
+/// caller's half of PlaySoundKit's properties (Wow.exe 0x4c6a40). The row's
+/// own half - its file bag, VolumeFloat, the 0x400/0x800 pitch and volume
+/// spread, MinDistance, DistanceCutoff, the 0x20 no-duplicate flag, the
+/// 0x200 loop - comes from the row.
+struct KitPlay {
+    /// Where it sounds; null for 2D.
+    const glm::vec3* position = nullptr;
+    /// props[2], the caller's multiplier (a volume slider, an attenuation).
+    float volumeScale = 1.0f;
+    SoundBus bus = SoundBus::World;
+    /// Category, priority, own-character and the like. kitId, minDistance
+    /// and the row's no-duplicate flag are filled in from the row.
+    SoundOptions opts;
+    /// A looping row (0x200) loops and hands back its handle; otherwise
+    /// every row plays once.
+    bool keepLoop = false;
+    /// Hand back a handle for a one-shot too (to cut it or ask after it).
+    bool stoppable = false;
+    /// props[3]: this file of the row instead of a bag draw (the NPC's
+    /// annoyed lines, a text emote's index from SMSG_TEXT_EMOTE).
+    int fileIndex = -1;
+};
+
+/// The sound trace: with WOWEE_SOUND_TRACE set, every sound the engine is
+/// asked to start is written as one "[sndtrace]" line - the file, the
+/// SoundEntries row, the category, 2D or 3D, the position, the volume, the
+/// priority, whether it started (and why not), and the call stack as
+/// offsets into the binary for addr2line. "1" writes to the log; any other
+/// value is a file to write to. WOWEE_AUDIO_NULL=1 opens no output device
+/// (miniaudio's null backend): the mix runs, nothing is heard, so a scripted
+/// run exercises the same voice limits without sounding on the desk.
+///
+/// A sound handed over as bytes has no name; a caller that knows the file
+/// says so for the duration of the call with a SoundTraceName.
+class SoundTraceName {
+public:
+    explicit SoundTraceName(std::string_view name);
+    ~SoundTraceName();
+    SoundTraceName(const SoundTraceName&) = delete;
+    SoundTraceName& operator=(const SoundTraceName&) = delete;
+    /// The innermost name given on this thread, empty for none.
+    [[nodiscard]] static std::string_view current();
+private:
+    std::string_view previous_;
+};
+
+/// True when WOWEE_SOUND_TRACE is set.
+[[nodiscard]] bool soundTraceEnabled();
+/// A free-form trace line (a stop, a music change), under the same tag.
+void soundTraceNote(std::string_view line);
+/// Remember which file these bytes came from, so a later play of the cached
+/// bytes is traced by name. Nothing is kept unless the trace is on.
+void soundTraceRemember(std::string_view path, const std::vector<uint8_t>& data);
+
 /**
  * AudioEngine: Singleton managing miniaudio device and playback.
  * Replaces process-spawning audio system with proper non-blocking library.
@@ -88,6 +146,9 @@ public:
     /// stay valid for as long as the lookup is installed.
     using AdvancedLookup = std::function<const stock::AdvancedKit*(uint32_t kitId)>;
     void setAdvancedLookup(AdvancedLookup lookup) { advancedLookup_ = std::move(lookup); }
+    /// SoundEntries names by id, for the trace's lines.
+    using KitNameLookup = std::function<std::string_view(uint32_t kitId)>;
+    void setKitNameLookup(KitNameLookup lookup) { kitNameLookup_ = std::move(lookup); }
     /// The game clock, ms into the day: what the advanced rows' time windows
     /// are measured against.
     void setTimeOfDayMs(int32_t ms) { timeOfDayMs_ = ((ms % stock::kDayMs) + stock::kDayMs) % stock::kDayMs; }
@@ -172,6 +233,15 @@ public:
     bool playSound3D(const std::string& mpqPath, const glm::vec3& position,
                      float volume = 1.0f, float pitch = 1.0f, float maxDistance = stock::kDefaultCutoff,
                      const SoundOptions& opts = {});
+
+    /// Play one SoundEntries row the stock way (PlaySoundKit 0x4c6a40): the
+    /// file from the row's bag (or play.fileIndex), the row's volume times
+    /// play.volumeScale with its 0x800 spread, its 0x400 pitch, MinDistance
+    /// and DistanceCutoff, its no-duplicate flag. Every caller that plays a
+    /// row by id goes through here so none of them picks files or levels its
+    /// own way. Returns a handle when one was asked for (play.stoppable, or a
+    /// kept loop), else 1 when it started; 0 when it did not.
+    uint32_t playKit(const SoundData& data, const SoundEntry& entry, const KitPlay& play);
     /// A positional sound its owner keeps hold of - a missile's flight loop.
     /// Returns a non-zero id for stopSound / fadeOutSound / setSoundPosition,
     /// or 0 on failure. A looping one plays until it is stopped.
@@ -281,6 +351,8 @@ private:
     void releaseActive(size_t index);
     int numChannels_ = stock::kDefaultNumChannels;
     AdvancedLookup advancedLookup_;
+    KitNameLookup kitNameLookup_;
+    friend struct SoundTraceScope;
     stock::DuckMixer duck_;
     uint32_t nextInstance_ = 1;
     int32_t timeOfDayMs_ = 12 * 3600 * 1000;

@@ -5032,6 +5032,7 @@ bool WMORenderer::isInsideWMOGroups(float glX, float glY, float glZ,
                         : group.wmoGroupId;
                     outHit->instanceId = instance.id;
                     outHit->tightGroupIndex = tight >= 0 ? tight : static_cast<int32_t>(gi);
+                    outHit->soundIndoors = (lightFlags & 0x8u) == 0;
                 }
                 return true;
             }

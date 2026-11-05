@@ -57,6 +57,9 @@ private:
 
     std::function<void(uint32_t instanceId, uint32_t eventTag)> meleeEventHook_;
     std::unordered_map<uint32_t, uint64_t> instanceGuids_;
+    /// Each unit's last emote line (its +0x934 handle, Wow.exe 0x746d60):
+    /// the next emote of another kind cuts it.
+    std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> emoteVoice_;  ///< guid -> (handle, kit)
     double instanceGuidsBuiltMs_ = -1.0e9;
 
     EntitySpawner& entitySpawner_;

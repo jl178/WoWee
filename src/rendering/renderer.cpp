@@ -3214,6 +3214,7 @@ void Renderer::update(float deltaTime) {
             zctx.wmoGroupId = static_cast<int32_t>(wmoHit.wmoGroupId);
             zctx.wmoNameSet = wmoHit.nameSet;
             zctx.wmoInterior = wmoHit.interior;
+            zctx.wmoSoundIndoors = wmoHit.soundIndoors;
         }
         zctx.cameraUnderwater = cameraUnderwater_;
         if (weather) {
@@ -3244,6 +3245,9 @@ void Renderer::update(float deltaTime) {
             if (const auto* gh = core::Application::getInstance().getGameHandler()) {
                 zctx.mapId = gh->getCurrentMapId();
             }
+        }
+        if (const auto* gh = core::Application::getInstance().getGameHandler()) {
+            zctx.weatherState = gh->getWeatherType();
         }
         audioCoordinator_->updateZoneAudio(zctx);
     }

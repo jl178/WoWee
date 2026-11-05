@@ -269,10 +269,10 @@ const char* getChatTypeString(ChatType type) {
 // Text Emotes
 // ============================================================
 
-network::Packet TextEmotePacket::build(uint32_t textEmoteId, uint64_t targetGuid) {
+network::Packet TextEmotePacket::build(uint32_t textEmoteId, uint64_t targetGuid, uint32_t emoteNum) {
     network::Packet packet(wireOpcode(Opcode::CMSG_TEXT_EMOTE));
     packet.writeUInt32(textEmoteId);
-    packet.writeUInt32(0);  // emoteNum (unused)
+    packet.writeUInt32(emoteNum);  // the voice file the server hands back to everyone
     packet.writeUInt64(targetGuid);
     LOG_DEBUG("Built CMSG_TEXT_EMOTE: emoteId=", textEmoteId, " target=0x", std::hex, targetGuid, std::dec);
     return packet;

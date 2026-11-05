@@ -515,7 +515,14 @@ void SpellVisualSystem::spawnKit(uint32_t kitId, const KitSpawn& spawn) {
         }
     }
 
-    if (kit.soundId != 0) {
+    bool playKitSound = kit.soundId != 0;
+    if (playKitSound && spawn.reattach) {
+        const auto* ac = renderer_ ? renderer_->getAudioCoordinator() : nullptr;
+        const audio::SoundData* data = ac ? ac->getSoundData() : nullptr;
+        const audio::SoundEntry* entry = data ? data->sound(kit.soundId) : nullptr;
+        playKitSound = entry && (entry->flags & kSoundFlagLoops) != 0;
+    }
+    if (playKitSound) {
         glm::mat4 xf;
         const bool attached = slotTransform(SLOT_CHEST, spawn.attachInstanceId, spawn.feetPos, xf);
         const glm::vec3 at = spawn.attachInstanceId ? glm::vec3(xf[3]) : spawn.feetPos;
@@ -635,24 +642,20 @@ uint32_t SpellVisualSystem::playSoundEntry(uint32_t soundEntryId, const glm::vec
     // The spell sound slider, as the school sounds it replaces honoured.
     float scale = 1.0f;
     if (auto* ssm = ac->getSpellSoundManager()) scale = ssm->getVolumeScale();
-    const float volume = entry->volume * scale;
-    if (volume <= 0.0f) return 0;
-    const auto& file = entry->files[std::uniform_int_distribution<size_t>(
-        0, entry->files.size() - 1)(rng_)];
-    // The row's own MinDistance and DistanceCutoff, as every positional kit
-    // plays (Wow.exe 0x4c6a40 -> set3DMinMaxDistance).
-    const float maxDistance = entry->distanceCutoff > 0.0f ? entry->distanceCutoff : audio::stock::kDefaultCutoff;
-    audio::SoundOptions opts;
-    opts.minDistance = entry->minDistance;
-    opts.kitId = entry->id;
+    if (entry->volume * scale <= 0.0f) return 0;
+    // The row as every kit plays (AudioEngine::playKit): its file bag - each
+    // file once before any repeats, never the same twice running - its 0x400
+    // pitch and 0x800 level spread, MinDistance and DistanceCutoff. A uniform
+    // pick here repeated files and ignored the spreads.
     // On the local character: in the head at 0.65 (0x7469c0 kit sounds,
     // 0x6f7b00 an effect model's $SND).
-    opts.ownCharacter = own;
-    auto& engine = audio::AudioEngine::instance();
-    if (looping && keepLoop)
-        return engine.playSound3DStoppable(file, pos, volume, maxDistance, /*loop=*/true, entry->minDistance, opts);
-    engine.playSound3D(file, pos, volume, 1.0f, maxDistance, opts);
-    return 0;
+    audio::KitPlay play;
+    play.position = &pos;
+    play.volumeScale = scale;
+    play.opts.ownCharacter = own;
+    play.keepLoop = looping && keepLoop;
+    const uint32_t handle = audio::AudioEngine::instance().playKit(*data, *entry, play);
+    return play.keepLoop ? handle : 0;
 }
 
 void SpellVisualSystem::playSpellVisualKit(uint32_t kitId, const glm::vec3& worldPosition,
@@ -1806,9 +1809,11 @@ void SpellVisualSystem::spawnUnitState(uint64_t guid, UnitStateRecord& rec) {
     s.stateVisual = rec.visualId;
     s.unitGuid = guid;
     s.visualId = rec.visualId;
+    s.reattach = rec.sounded;
     spawnKit(vIt->second.stateKit, s);
     rec.attachInstanceId = inst;
     rec.spawned = true;
+    rec.sounded = true;
     rec.unresolvedTime = 0.0f;
 }
 

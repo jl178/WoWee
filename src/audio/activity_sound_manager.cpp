@@ -1,4 +1,5 @@
 #include "audio/activity_sound_manager.hpp"
+#include "audio/sound_trace_hook.hpp"
 #include "audio/footstep_paths.hpp"
 #include "audio/audio_engine.hpp"
 #include "audio/sound_data.hpp"
@@ -121,6 +122,7 @@ void ActivitySoundManager::preloadCandidates(std::vector<Sample>& out, const std
         if (!assetManager->fileExists(path)) continue;
         auto data = assetManager->readFile(path);
         if (data.empty()) continue;
+        noteSoundFile(path, data);
         out.push_back({path, std::move(data)});
     }
 }
@@ -132,6 +134,7 @@ void ActivitySoundManager::replaceFromEntry(std::vector<Sample>& out, const Soun
         if (!assetManager->fileExists(path)) continue;
         auto data = assetManager->readFile(path);
         if (data.empty()) continue;
+        noteSoundFile(path, data);
         loaded.push_back({path, std::move(data), entry->volume});
     }
     if (!loaded.empty()) out = std::move(loaded);
@@ -252,6 +255,16 @@ void ActivitySoundManager::playLanding(FootstepSurface surface, bool hardLanding
         if (std::chrono::duration<float>(now - lastLandAt).count() < 0.10f) return;
     }
 
+    // The stock landing (event 0x346 -> 0x73d3d0): the land sound, kind 12,
+    // which no player model's CreatureSoundData names, so silence - the
+    // thud is the JumpLandRun animation's own $FSD footfall; and after a
+    // drop of 13 yards or more the injury cry, kind 13 forced (0x7461e0
+    // maps 13 to the Injury column).
+    if (tableVoices_) {
+        if (hardLanding && !woundClips.empty()) playVoice(woundClips);
+        lastLandAt = now;
+        return;
+    }
     const auto& clips = landingSets[static_cast<size_t>(surface)].clips;
     if (!clips.empty()) {
         std::uniform_int_distribution<size_t> dist(0, clips.size() - 1);
@@ -366,6 +379,7 @@ void ActivitySoundManager::setCharacterVoiceProfile(const std::string& raceFolde
     const std::string key = raceFolder + "|" + raceBase + "|" + (male ? "M" : "F") + "|dbc";
     if (key == voiceProfileKey) return;
     voiceProfileKey = key;
+    tableVoices_ = true;
     // Guessed paths first, so every list has something; the tables then
     // replace each list they have a row for.
     rebuildJumpClipsForProfile(raceFolder, raceBase, male);
@@ -403,14 +417,20 @@ bool ActivitySoundManager::playSplash(const std::vector<Sample>& clips) {
     return playOwn(sample.data, 0.95f * volumeScale, pitchDist(rng));
 }
 
+// Bobbing at the surface flips the swim state in and out every second or so;
+// the trace of a scripted swim heard a splash for each flip. A splash needs
+// the state before it to have lasted - the entry, not the bob.
+constexpr float kSplashRepeatSeconds = 1.5f;
+
 void ActivitySoundManager::playWaterEnter() {
     LOG_INFO("Water entry detected - attempting to play splash sound");
     auto now = std::chrono::steady_clock::now();
-    if (lastSplashAt.time_since_epoch().count() != 0) {
-        if (std::chrono::duration<float>(now - lastSplashAt).count() < 0.20f) {
-            LOG_DEBUG("Water splash throttled (too soon)");
-            return;
-        }
+    const bool settled = lastWaterChangeAt.time_since_epoch().count() == 0 ||
+        std::chrono::duration<float>(now - lastWaterChangeAt).count() >= kSplashRepeatSeconds;
+    lastWaterChangeAt = now;
+    if (!settled) {
+        LOG_DEBUG("Water splash skipped (bobbing at the surface)");
+        return;
     }
     if (playSplash(splashEnterClips)) {
         lastSplashAt = now;
@@ -422,11 +442,12 @@ void ActivitySoundManager::playWaterEnter() {
 void ActivitySoundManager::playWaterExit() {
     LOG_INFO("Water exit detected - attempting to play splash sound");
     auto now = std::chrono::steady_clock::now();
-    if (lastSplashAt.time_since_epoch().count() != 0) {
-        if (std::chrono::duration<float>(now - lastSplashAt).count() < 0.20f) {
-            LOG_DEBUG("Water splash throttled (too soon)");
-            return;
-        }
+    const bool settled = lastWaterChangeAt.time_since_epoch().count() == 0 ||
+        std::chrono::duration<float>(now - lastWaterChangeAt).count() >= kSplashRepeatSeconds;
+    lastWaterChangeAt = now;
+    if (!settled) {
+        LOG_DEBUG("Water splash skipped (bobbing at the surface)");
+        return;
     }
     if (playSplash(splashExitClips)) {
         lastSplashAt = now;

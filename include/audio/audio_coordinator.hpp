@@ -37,6 +37,9 @@ struct ZoneAudioContext {
     // Visual weather state for ambient audio sync
     int weatherType = 0;      // 0=none, 1=rain, 2=snow, 3=storm
     float weatherIntensity = 0.0f;
+    // The server's weather state (SMSG_WEATHER), a Weather.dbc row: its
+    // AmbienceID is the rain or snow loop (sound-engine.md section 6).
+    uint32_t weatherState = 0;
     // Visible sky clock after zone ambience overrides (hours in [0, 24)).
     float gameTimeHours = 12.0f;
     // Terrain tile for offline zone lookup
@@ -59,6 +62,10 @@ struct ZoneAudioContext {
     // That group has the indoor flag: a room or a cave, whose reverb is its
     // own. An outdoor group - a city street - sounds like the area around it.
     bool wmoInterior = false;
+    // The group lacks the exterior flag (MOGP 0x8): what the stock sound
+    // code calls indoors (0x7a1480). The area's music and ambience give way
+    // to the building's rows there, and the weather's loop is not heard.
+    bool wmoSoundIndoors = false;
     // The camera is below the water's surface (not merely swimming at it):
     // the world goes muffled and the underwater loop plays.
     bool cameraUnderwater = false;
@@ -147,6 +154,7 @@ private:
     SoundData soundData_;
     std::unique_ptr<ZoneMusicController> zoneMusic_;
     uint64_t ambienceKey_ = 0;
+    bool ambienceUnderwater_ = false;  ///< slot 9 held the underwater loop last update
     int32_t reverbPrefId_ = -1;   ///< the SoundProviderPreferences row in force; 0 dry, -1 none yet
     bool reverbUnderwater_ = false;
     std::string underwaterLoopPath_;  ///< from SoundEntries, resolved once the tables load

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <glm/vec3.hpp>
 
 namespace wowee {
 namespace rendering {
@@ -28,6 +29,8 @@ private:
     bool prevGrounded_ = true;
     bool prevFalling_ = false;
     float fallSeconds_ = 0.0f;  ///< time in the current fall, for hard landings
+    float airTopZ_ = 0.0f;      ///< highest point since leaving the ground
+    glm::vec3 lastPos_{0.0f};   ///< last frame's character position, to tell a teleport from a fall
     bool prevSwimming_ = false;
 
     // Seconds since the character last left the water. Climbing out is not a

@@ -983,12 +983,10 @@ void EntitySpawner::playSheathSound(const ItemDbcRow& item, bool drawing, const 
     const auto* data = coordinator ? coordinator->getSoundData() : nullptr;
     const audio::SoundEntry* entry = data ? data->sound(soundId) : nullptr;
     if (!entry || entry->files.empty()) return;
-    const auto& file = entry->files[static_cast<size_t>(std::rand()) % entry->files.size()];
-    const float maxDistance = entry->distanceCutoff > 0.0f ? entry->distanceCutoff : audio::stock::kDefaultCutoff;
-    audio::SoundOptions opts;
-    opts.minDistance = entry->minDistance;
-    opts.kitId = entry->id;
-    audio::AudioEngine::instance().playSound3D(file, renderPos, entry->volume, 1.0f, maxDistance, opts);
+    // The row as every kit plays it (its bag, level and distances).
+    audio::KitPlay play;
+    play.position = &renderPos;
+    audio::AudioEngine::instance().playKit(*data, *entry, play);
 }
 
 void EntitySpawner::syncUnitSheath(uint64_t guid, uint32_t instanceId) {

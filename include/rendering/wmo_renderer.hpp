@@ -482,6 +482,9 @@ public:
         uint32_t wmoGroupId = 0;  ///< the tightest containing group's MOGP id
         uint16_t nameSet = 0;
         bool interior = false;    ///< the group has the indoor flag
+        /// The tightest group lacks the exterior flag (MOGP 0x8): indoors as
+        /// the stock sound code counts it (0x7a1480 -> 0x4c8600, 0x78e9a0).
+        bool soundIndoors = false;
         /// The group is lit as an interior: INDOOR and not EXTERIOR_LIT (0x40).
         bool interiorLit = false;
         uint32_t instanceId = 0;

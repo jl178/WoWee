@@ -1,6 +1,8 @@
 #define MINIAUDIO_IMPLEMENTATION
 #include "audio/audio_engine.hpp"
 #include "audio/positional_sound.hpp"
+#include "audio/sound_data.hpp"
+#include "audio/sound_trace_hook.hpp"
 #include "audio/world_fx.hpp"
 #include "core/logger.hpp"
 #include "pipeline/asset_manager.hpp"
@@ -9,13 +11,22 @@
 #include "../../extern/miniaudio.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <mutex>
+#include <sstream>
 #include <iterator>
 #include <limits>
 #include <memory>
 #include <shared_mutex>
 #include <unordered_map>
+
+#if defined(__linux__)
+#include <dlfcn.h>
+#include <execinfo.h>
+#endif
 
 namespace wowee {
 namespace audio {
@@ -192,6 +203,46 @@ struct WorldFxNode {
     WorldFx fx;
 };
 
+// ---- The sound trace (WOWEE_SOUND_TRACE) ----
+
+struct TraceSink {
+    bool on = false;
+    FILE* file = nullptr;  ///< null: the log
+    std::mutex mutex;
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    std::unordered_map<uint64_t, std::string> names;  ///< wav cache key -> path
+};
+
+TraceSink& traceSink() {
+    static TraceSink* sink = [] {
+        auto* s = new TraceSink();
+        const char* v = std::getenv("WOWEE_SOUND_TRACE");
+        if (v && *v && std::strcmp(v, "0") != 0) {
+            s->on = true;
+            gSoundTraceRemember = &soundTraceRemember;
+            if (std::strcmp(v, "1") != 0) s->file = std::fopen(v, "w");
+        }
+        return s;
+    }();
+    return *sink;
+}
+
+void traceWrite(const std::string& line) {
+    TraceSink& sink = traceSink();
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - sink.start).count();
+    char stamp[32];
+    std::snprintf(stamp, sizeof(stamp), "t=%.3f ", t);
+    if (sink.file) {
+        std::lock_guard<std::mutex> lock(sink.mutex);
+        std::fprintf(sink.file, "[sndtrace] %s%s\n", stamp, line.c_str());
+        std::fflush(sink.file);
+    } else {
+        LOG_INFO("[sndtrace] ", stamp, line);
+    }
+}
+
+thread_local std::string_view tTraceName;
+
 void worldFxProcess(ma_node* node, const float** framesIn, ma_uint32* frameCountIn,
                     float** framesOut, ma_uint32* frameCountOut) {
     (void)frameCountIn;
@@ -204,6 +255,108 @@ void worldFxProcess(ma_node* node, const float** framesIn, ma_uint32* frameCount
 ma_node_vtable gWorldFxVtable = {worldFxProcess, nullptr, 1, 1, MA_NODE_FLAG_CONTINUOUS_PROCESSING};
 
 } // namespace
+
+SoundTraceName::SoundTraceName(std::string_view name) : previous_(tTraceName) { tTraceName = name; }
+SoundTraceName::~SoundTraceName() { tTraceName = previous_; }
+std::string_view SoundTraceName::current() { return tTraceName; }
+
+bool soundTraceEnabled() { return traceSink().on; }
+
+void soundTraceNote(std::string_view line) {
+    if (!traceSink().on) return;
+    traceWrite(std::string(line));
+}
+
+void soundTraceRemember(std::string_view path, const std::vector<uint8_t>& data) {
+    TraceSink& sink = traceSink();
+    if (!sink.on || data.empty()) return;
+    const uint64_t key = makeWavCacheKey(data);
+    std::lock_guard<std::mutex> lock(sink.mutex);
+    sink.names[key] = std::string(path);
+}
+
+/// One start request, written when it goes out of scope with what became of
+/// it. The stack is taken where the request came in, so it names the caller.
+struct SoundTraceScope {
+    const AudioEngine& engine;
+    const char* kind;
+    const std::vector<uint8_t>* bytes;
+    float volume = 0.0f;
+    float pitch = 1.0f;
+    SoundOptions opts;
+    bool spatial = false;
+    bool own2D = false;
+    glm::vec3 position{0.0f};
+    float minDistance = 0.0f;
+    float maxDistance = 0.0f;
+    float gain = -1.0f;
+    int bus = 0;  ///< 0 world, 1 interface
+    const char* result = "fail";
+    uint32_t handle = 0;
+    bool active = false;
+#if defined(__linux__)
+    void* frames[14] = {};
+    int frameCount = 0;
+#endif
+    std::string name;
+
+    SoundTraceScope(const AudioEngine& e, const char* k, const std::vector<uint8_t>* b,
+                    float vol, const SoundOptions& o)
+        : engine(e), kind(k), bytes(b), volume(vol), opts(o) {
+        active = traceSink().on;
+        if (!active) return;
+        name = std::string(tTraceName);
+#if defined(__linux__)
+        frameCount = backtrace(frames, 14);
+#endif
+    }
+    ~SoundTraceScope() {
+        if (!active) return;
+        std::ostringstream os;
+        os.setf(std::ios::fixed);
+        os.precision(3);
+        if (name.empty() && bytes && !bytes->empty()) {
+            TraceSink& sink = traceSink();
+            const uint64_t key = makeWavCacheKey(*bytes);
+            std::lock_guard<std::mutex> lock(sink.mutex);
+            auto it = sink.names.find(key);
+            if (it != sink.names.end()) name = it->second;
+        }
+        os << "kind=" << kind << " res=" << result;
+        if (handle) os << " id=" << handle;
+        os << " kit=" << opts.kitId;
+        if (opts.kitId && engine.kitNameLookup_) os << " kitname=\"" << engine.kitNameLookup_(opts.kitId) << "\"";
+        os << " file=\"" << (name.empty() ? std::string("?") : name) << "\"";
+        if (bytes) os << " bytes=" << bytes->size();
+        os << " cat=" << static_cast<int>(opts.category) << " pri=" << opts.priority
+           << " own=" << (opts.ownCharacter ? 1 : 0) << " vol=" << volume << " pitch=" << pitch
+           << " bus=" << (bus ? "ui" : "world");
+        if (opts.noDuplicate) os << " nodup=1";
+        if (spatial) {
+            const glm::vec3 d = position - engine.listenerPosition_;
+            os << " 3d pos=(" << position.x << "," << position.y << "," << position.z << ")"
+               << " min=" << minDistance << " max=" << maxDistance << " dist=" << glm::length(d);
+        } else {
+            os << " 2d";
+            if (own2D) os << " (own, placed at (" << position.x << "," << position.y << "," << position.z << "))";
+        }
+        if (gain >= 0.0f) os << " gain=" << gain;
+#if defined(__linux__)
+        os << " stack=";
+        bool first = true;
+        for (int i = 1; i < frameCount; ++i) {
+            Dl_info info{};
+            uintptr_t off = reinterpret_cast<uintptr_t>(frames[i]);
+            if (dladdr(frames[i], &info) && info.dli_fbase)
+                off -= reinterpret_cast<uintptr_t>(info.dli_fbase);
+            // A return address points after the call; one back is inside it.
+            os << (first ? "" : ",") << "0x" << std::hex << (off - 1) << std::dec;
+            first = false;
+        }
+#endif
+        traceWrite(os.str());
+    }
+};
 
 AudioEngine& AudioEngine::instance() {
     static AudioEngine instance;
@@ -229,6 +382,16 @@ bool AudioEngine::initialize() {
     // same way miniaudio's does and also feeds the screen recorder's tap.
     ma_engine_config engineConfig = ma_engine_config_init();
     engineConfig.dataCallback = &AudioEngine::deviceDataCallback;
+    // WOWEE_AUDIO_NULL=1: miniaudio's null device - the mix runs in real time
+    // and nothing reaches the speakers, for scripted runs under the trace.
+    if (const char* v = std::getenv("WOWEE_AUDIO_NULL"); v && std::strcmp(v, "1") == 0) {
+        static ma_context nullContext;
+        static const bool nullReady = [] {
+            const ma_backend backends[] = {ma_backend_null};
+            return ma_context_init(backends, 1, nullptr, &nullContext) == MA_SUCCESS;
+        }();
+        if (nullReady) engineConfig.pContext = &nullContext;
+    }
     ma_result result = ma_engine_init(&engineConfig, engine_);
     if (result != MA_SUCCESS) {
         LOG_ERROR("Failed to initialize miniaudio engine: ", result);
@@ -408,24 +571,26 @@ void AudioEngine::setListenerOrientation(const glm::vec3& forward, const glm::ve
 
 bool AudioEngine::playSound2D(const std::vector<uint8_t>& wavData, float volume, float pitch,
                               SoundBus bus, const SoundOptions& opts) {
-    // Size and volume, because this overload is handed decoded bytes and has
-    // no name to report. The sample managers all cache their clips and call
-    // this one, so the path-named log above never fires for them - and a sound
-    // reported as playing loudly on every world entry produced no sfx: line at
-    // all. A byte count identifies the file well enough to find it on disk.
-    LOG_INFO("sfx2d: bytes=", wavData.size(), " vol=", volume);
-    if (!initialized_ || !engine_ || wavData.empty()) return false;
-    if (masterVolume_ <= 0.0f) return false;
+    // Every start is traced (WOWEE_SOUND_TRACE): which file, which row, how
+    // loud, and who asked. The sample managers hand over cached bytes, so the
+    // name comes from SoundTraceName or from where the bytes were read.
+    SoundTraceScope trace(*this, "2d", &wavData, volume, opts);
+    trace.pitch = pitch;
+    trace.bus = bus == SoundBus::Interface ? 1 : 0;
+    if (!initialized_ || !engine_ || wavData.empty()) { trace.result = "no-engine"; return false; }
+    if (masterVolume_ <= 0.0f) { trace.result = "muted"; return false; }
 
     SoundOptions o = opts;
     applyOwnCharacter(o, volume, false);
+    trace.opts = o;
+    trace.volume = volume;
     ActiveSound voice{};
     voice.baseVolume = volume;
     voice.priority = o.priority;
     voice.kitId = o.kitId;
     voice.category = o.category;
     attachAdvanced(voice, o);
-    if (!admitVoice(voice, o.noDuplicate)) return false;
+    if (!admitVoice(voice, o.noDuplicate)) { trace.result = "refused-voice"; return false; }
     adoptAdvancedCategory(voice);
 
     DecodedWavCacheEntry decoded;
@@ -489,6 +654,8 @@ bool AudioEngine::playSound2D(const std::vector<uint8_t>& wavData, float volume,
     // A usage-2 advanced kit ducks the moment it starts (0x4cb580).
     if (voice.hasAdvanced && voice.advanced.usage == stock::AdvancedUsage::Once)
         duck_.duck(voice.instance, voice.advanced);
+    trace.result = "ok";
+    trace.gain = voiceGain(voice);
     // Track this sound for cleanup (decoded PCM shared across plays)
     voice.sound = sound.release();
     voice.buffer = audioBuffer.release();
@@ -501,11 +668,15 @@ bool AudioEngine::playSound2D(const std::vector<uint8_t>& wavData, float volume,
 uint32_t AudioEngine::playSound2DStoppable(const std::vector<uint8_t>& wavData, float volume,
                                            bool loop, float fadeInMs, SoundBus bus,
                                            const SoundOptions& opts) {
-    if (!initialized_ || !engine_ || wavData.empty()) return 0;
-    if (masterVolume_ <= 0.0f) return 0;
+    SoundTraceScope trace(*this, loop ? "2d-loop" : "2d-handle", &wavData, volume, opts);
+    trace.bus = bus == SoundBus::Interface ? 1 : 0;
+    if (!initialized_ || !engine_ || wavData.empty()) { trace.result = "no-engine"; return 0; }
+    if (masterVolume_ <= 0.0f) { trace.result = "muted"; return 0; }
 
     SoundOptions o = opts;
     applyOwnCharacter(o, volume, false);
+    trace.opts = o;
+    trace.volume = volume;
     if (fadeInMs <= 0.0f) fadeInMs = o.fadeInMs;
     ActiveSound voice{};
     voice.baseVolume = volume;
@@ -514,11 +685,14 @@ uint32_t AudioEngine::playSound2DStoppable(const std::vector<uint8_t>& wavData, 
     voice.kitId = o.kitId;
     voice.category = o.category;
     attachAdvanced(voice, o);
-    if (!admitVoice(voice, o.noDuplicate)) return 0;
+    if (!admitVoice(voice, o.noDuplicate)) { trace.result = "refused-voice"; return 0; }
     adoptAdvancedCategory(voice);
 
     DecodedWavCacheEntry decoded;
-    if (!decodeWavCached(wavData, decoded) || !decoded.pcmData || decoded.frames == 0) return 0;
+    if (!decodeWavCached(wavData, decoded) || !decoded.pcmData || decoded.frames == 0) {
+        trace.result = "decode-fail";
+        return 0;
+    }
 
     ma_audio_buffer_config bufferConfig = ma_audio_buffer_config_init(
         decoded.format, decoded.channels, decoded.frames, decoded.pcmData->data(), nullptr);
@@ -558,6 +732,9 @@ uint32_t AudioEngine::playSound2DStoppable(const std::vector<uint8_t>& wavData, 
 
     uint32_t id = nextSoundId_++;
     if (nextSoundId_ == 0) nextSoundId_ = 1;  // Skip 0 (sentinel)
+    trace.result = "ok";
+    trace.gain = voiceGain(voice);
+    trace.handle = id;
     voice.sound = sound.release();
     voice.buffer = audioBuffer.release();
     voice.pcmDataRef = decoded.pcmData;
@@ -579,6 +756,7 @@ void AudioEngine::setSoundVolume(uint32_t id, float volume) {
 
 void AudioEngine::fadeOutSound(uint32_t id, float fadeMs) {
     if (id == 0 || !engine_) return;
+    if (soundTraceEnabled()) soundTraceNote("kind=fadeout id=" + std::to_string(id) + " ms=" + std::to_string(fadeMs));
     for (auto& active : activeSounds_) {
         if (active.id != id) continue;
         const auto frames = static_cast<ma_uint64>(fadeMs / 1000.0f * ma_engine_get_sample_rate(engine_));
@@ -599,6 +777,7 @@ bool AudioEngine::isSoundPlaying(uint32_t id) const {
 
 void AudioEngine::stopSound(uint32_t id) {
     if (id == 0) return;
+    if (soundTraceEnabled()) soundTraceNote("kind=stop id=" + std::to_string(id));
     for (auto it = activeSounds_.begin(); it != activeSounds_.end(); ++it) {
         if (it->id == id) {
             forgetVoice(*it);
@@ -616,13 +795,8 @@ void AudioEngine::stopSound(uint32_t id) {
 
 bool AudioEngine::playSound2D(const std::string& mpqPath, float volume, float pitch, SoundBus bus,
                               const SoundOptions& opts) {
-    // Which file, and how loud, for the one-shots that name a path.
-    //
-    // A sound reported as playing loudly on every world entry cannot be found
-    // by reading: a dozen managers reach this and none of them is obviously the
-    // one. This says so in a line, and the timestamp beside the world-entry
-    // lines in the same log is what pins it.
-    LOG_INFO("sfx: ", mpqPath, " vol=", volume);
+    // The trace names the file (WOWEE_SOUND_TRACE).
+    SoundTraceName traced(mpqPath);
     if (!assetManager_) {
         LOG_WARNING("AudioEngine::playSound2D(path): no AssetManager set");
         return false;
@@ -630,6 +804,8 @@ bool AudioEngine::playSound2D(const std::string& mpqPath, float volume, float pi
     auto data = assetManager_->readFile(mpqPath);
     if (data.empty()) {
         LOG_WARNING("AudioEngine::playSound2D: failed to load '", mpqPath, "'");
+        SoundTraceScope trace(*this, "2d", nullptr, volume, opts);
+        trace.result = "load-fail";
         return false;
     }
     return playSound2D(data, volume, pitch, bus, opts);
@@ -644,14 +820,50 @@ uint32_t AudioEngine::playSound3DStoppable(const std::string& mpqPath, const glm
                                            float volume, float maxDistance, bool loop,
                                            float minDistance, const SoundOptions& opts) {
     if (!assetManager_) return 0;
+    SoundTraceName traced(mpqPath);
     auto data = assetManager_->readFile(mpqPath);
     if (data.empty()) {
         LOG_WARNING("AudioEngine::playSound3DStoppable: failed to load '", mpqPath, "'");
+        SoundTraceScope trace(*this, "3d", nullptr, volume, opts);
+        trace.result = "load-fail";
         return 0;
     }
     SoundOptions o = opts;
     if (o.minDistance <= 0.0f) o.minDistance = minDistance;
     return startSound3D(data, position, volume, 1.0f, maxDistance, loop, true, o);
+}
+
+uint32_t AudioEngine::playKit(const SoundData& data, const SoundEntry& entry, const KitPlay& play) {
+    if (entry.files.empty()) return 0;
+    const std::string* file = nullptr;
+    if (play.fileIndex >= 0) {
+        file = &entry.files[std::min(static_cast<size_t>(play.fileIndex), entry.files.size() - 1)];
+    } else {
+        file = data.nextFile(entry);
+    }
+    if (!file) return 0;
+    SoundOptions o = play.opts;
+    o.kitId = entry.id;
+    if (o.minDistance <= 0.0f) o.minDistance = entry.minDistance;
+    if (entry.flags & stock::kFlagNoDuplicate) o.noDuplicate = true;
+    const float volume = stock::kitVolume(entry.volume, entry.flags, play.volumeScale, rng_);
+    const float pitch = stock::kitPitch(entry.flags, rng_);
+    const bool loop = play.keepLoop && (entry.flags & stock::kFlagLoop) != 0;
+    const float cutoff = entry.distanceCutoff > 0.0f ? entry.distanceCutoff : stock::kDefaultCutoff;
+    if (play.position) {
+        if (!loop && !play.stoppable) return playSound3D(*file, *play.position, volume, pitch, cutoff, o) ? 1u : 0u;
+        if (!assetManager_) return 0;
+        SoundTraceName traced(*file);
+        auto bytes = assetManager_->readFile(*file);
+        if (bytes.empty()) return 0;
+        return startSound3D(bytes, *play.position, volume, pitch, cutoff, loop, /*stoppable=*/true, o);
+    }
+    if (!loop && !play.stoppable) return playSound2D(*file, volume, pitch, play.bus, o) ? 1u : 0u;
+    if (!assetManager_) return 0;
+    SoundTraceName traced(*file);
+    auto bytes = assetManager_->readFile(*file);
+    if (bytes.empty()) return 0;
+    return playSound2DStoppable(bytes, volume, loop, 0.0f, play.bus, o);
 }
 
 void AudioEngine::setSoundPosition(uint32_t id, const glm::vec3& position) {
@@ -672,11 +884,18 @@ void AudioEngine::setSoundPosition(uint32_t id, const glm::vec3& position) {
 uint32_t AudioEngine::startSound3D(const std::vector<uint8_t>& wavData, const glm::vec3& position,
                                    float volume, float pitch, float maxDistance, bool loop,
                                    bool stoppable, const SoundOptions& opts) {
-    if (!initialized_ || !engine_ || wavData.empty()) return 0;
-    if (masterVolume_ <= 0.0f) return 0;
+    SoundTraceScope trace(*this, loop ? "3d-loop" : (stoppable ? "3d-handle" : "3d"), &wavData, volume, opts);
+    trace.pitch = pitch;
+    trace.position = position;
+    if (!initialized_ || !engine_ || wavData.empty()) { trace.result = "no-engine"; return 0; }
+    if (masterVolume_ <= 0.0f) { trace.result = "muted"; return 0; }
 
     SoundOptions o = opts;
     const bool spatial = applyOwnCharacter(o, volume, true);
+    trace.opts = o;
+    trace.volume = volume;
+    trace.spatial = spatial;
+    trace.own2D = !spatial;
     ActiveSound voice{};
     voice.baseVolume = volume;
     voice.spatial = spatial;
@@ -688,14 +907,20 @@ uint32_t AudioEngine::startSound3D(const std::vector<uint8_t>& wavData, const gl
     voice.kitId = o.kitId;
     voice.category = o.category;
     attachAdvanced(voice, o);
+    trace.minDistance = voice.minDistance;
+    trace.maxDistance = voice.maxDistance;
     // Past its cutoff a sound is silent from the first sample: not started.
-    if (spatial && voiceGain(voice) <= 0.0f && !loop) return 0;
-    if (spatial && voice.hasAdvanced && advancedDuplicateNear(voice.kitId, position)) return 0;
-    if (!admitVoice(voice, o.noDuplicate)) return 0;
+    if (spatial && voiceGain(voice) <= 0.0f && !loop) { trace.result = "out-of-range"; return 0; }
+    if (spatial && voice.hasAdvanced && advancedDuplicateNear(voice.kitId, position)) {
+        trace.result = "refused-advdup";
+        return 0;
+    }
+    if (!admitVoice(voice, o.noDuplicate)) { trace.result = "refused-voice"; return 0; }
     adoptAdvancedCategory(voice);
 
     DecodedWavCacheEntry decoded;
     if (!decodeWavCached(wavData, decoded) || !decoded.pcmData || decoded.frames == 0) {
+        trace.result = "decode-fail";
         return 0;
     }
 
@@ -765,6 +990,8 @@ uint32_t AudioEngine::startSound3D(const std::vector<uint8_t>& wavData, const gl
     }
     if (voice.hasAdvanced && voice.advanced.usage == stock::AdvancedUsage::Once)
         duck_.duck(voice.instance, voice.advanced);
+    trace.result = "ok";
+    trace.gain = voiceGain(voice);
 
     // Track for cleanup; a stoppable sound gets an id its owner can stop,
     // move or fade it by, an anonymous one plays out and is reclaimed.
@@ -773,6 +1000,7 @@ uint32_t AudioEngine::startSound3D(const std::vector<uint8_t>& wavData, const gl
         id = nextSoundId_++;
         if (nextSoundId_ == 0) nextSoundId_ = 1;  // Skip 0 (sentinel)
     }
+    trace.handle = id;
     voice.sound = sound.release();
     voice.buffer = audioBuffer.release();
     voice.pcmDataRef = decoded.pcmData;
@@ -788,9 +1016,12 @@ bool AudioEngine::playSound3D(const std::string& mpqPath, const glm::vec3& posit
         LOG_WARNING("AudioEngine::playSound3D(path): no AssetManager set");
         return false;
     }
+    SoundTraceName traced(mpqPath);
     auto data = assetManager_->readFile(mpqPath);
     if (data.empty()) {
         LOG_WARNING("AudioEngine::playSound3D: failed to load '", mpqPath, "'");
+        SoundTraceScope trace(*this, "3d", nullptr, volume, opts);
+        trace.result = "load-fail";
         return false;
     }
     return playSound3D(data, position, volume, pitch, maxDistance, opts);
@@ -803,6 +1034,11 @@ bool AudioEngine::playMusic(std::shared_ptr<const std::vector<uint8_t>> musicDat
     }
 
     LOG_INFO("AudioEngine::playMusic - data size: ", musicData->size(), " bytes, volume: ", volume);
+    if (soundTraceEnabled()) {
+        std::ostringstream os;
+        os << "kind=music file=\"" << SoundTraceName::current() << "\" vol=" << volume << " loop=" << loop;
+        soundTraceNote(os.str());
+    }
 
     // Stop any currently playing music
     stopMusic();

@@ -414,6 +414,10 @@ private:
         // Ground areas: the spell's radius, for the falling shards.
         float areaRadius = 0.0f;
         uint32_t missileTag = 0;  // a missile targeting kit (see SpellVisualInstance)
+        // A state kit moved onto the unit's new model (a teleport, a display
+        // change): the aura did not begin again, so its one-shot sound is
+        // not heard again. A looping one restarts with the kit.
+        bool reattach = false;
     };
 
     // An aura state visual a unit should have, and the instance it is on.
@@ -421,6 +425,7 @@ private:
         uint32_t visualId = 0;
         uint32_t attachInstanceId = 0;
         bool spawned = false;
+        bool sounded = false;   ///< its kit has been shown (and heard) once
         float unresolvedTime = 0.0f;
     };
 

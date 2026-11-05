@@ -1,4 +1,5 @@
 #include "audio/player_voice_manager.hpp"
+#include "audio/sound_trace_hook.hpp"
 #include "audio/audio_engine.hpp"
 #include "audio/sound_data.hpp"
 #include "pipeline/asset_manager.hpp"
@@ -175,6 +176,7 @@ void PlayerVoiceManager::ensureLibrary(uint8_t raceId, uint8_t gender) {
             sample.path = path;
             sample.data = assetManager_->readFile(path);
             if (!sample.data.empty()) {
+                noteSoundFile(path, sample.data);
                 samples.push_back(std::move(sample));
                 ++totalSamples;
             }

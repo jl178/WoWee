@@ -273,8 +273,13 @@ bool AmbientSoundManager::loadSound(const std::string& path, AmbientSample& samp
 void AmbientSoundManager::update(float deltaTime, const glm::vec3& cameraPos, bool isIndoor, bool isSwimming, bool isBlacksmith) {
     if (!initialized_) return;
 
-    // Update all emitter systems
-    updatePositionalEmitters(deltaTime, cameraPos);
+    // Update all emitter systems. With the tables a place sounds through
+    // WorldSoundEmitters alone - SoundEmitters.dbc and the doodads' own $DSL
+    // loops, as the stock client plays them; these guessed fires, torches,
+    // fountains and lake surfaces doubled the doodads' loops (a Goldshire
+    // fountain replayed every six seconds over its own) or sounded where
+    // stock is silent.
+    if (!areaAmbienceDriven_) updatePositionalEmitters(deltaTime, cameraPos);
 
     // Don't play outdoor periodic sounds (birds) when indoors OR in blacksmith
     if (!isIndoor && !isBlacksmith && !areaAmbienceDriven_) {
@@ -306,7 +311,9 @@ void AmbientSoundManager::update(float deltaTime, const glm::vec3& cameraPos, bo
         updateZoneAmbience(deltaTime, isIndoor);
         updateCityAmbience(deltaTime);
     }
-    updateBellTolls(deltaTime);
+    // The hourly bells are the server's (AzerothCore's Hourly Bells event
+    // plays them through the bell objects); the client has none of its own.
+    if (!areaAmbienceDriven_) updateBellTolls(deltaTime);
 
     // Track indoor state changes
     wasIndoor_ = isIndoor;
@@ -690,8 +697,9 @@ void AmbientSoundManager::setCityType(CityType type) {
 }
 
 void AmbientSoundManager::updateWeatherAmbience(float deltaTime, bool isIndoor) {
-    // Don't play weather sounds when indoors
-    if (isIndoor || currentWeather_ == WeatherType::NONE) return;
+    // Don't play weather sounds when indoors. With the tables the weather is
+    // Weather.dbc's loop in the ambience slot (AudioCoordinator), not this.
+    if (isIndoor || currentWeather_ == WeatherType::NONE || areaAmbienceDriven_) return;
 
     weatherLoopTime_ += deltaTime;
 
@@ -749,9 +757,10 @@ void AmbientSoundManager::updateWaterAmbience(float deltaTime, bool isSwimming) 
 
     wasSwimming_ = isSwimming;
 
-    // Play underwater sounds when swimming - unless the table's underwater
-    // loop is running, which is what the stock client plays down there.
-    if (isSwimming && underwaterLoopId_ == 0) {
+    // Play underwater sounds when swimming - unless the tables are read, in
+    // which case the Underwater loop under the surface is all the stock
+    // client plays (AudioCoordinator::updateReverb).
+    if (isSwimming && underwaterLoopId_ == 0 && !areaAmbienceDriven_) {
         if (!underwaterSounds_.empty() && underwaterSounds_[0].loaded) {
             oceanLoopTime_ += deltaTime;
             // Play every 18 seconds for underwater ambience
@@ -810,8 +819,10 @@ void AmbientSoundManager::setSubmerged(bool submerged) {
     }
 }
 
-void AmbientSoundManager::setAreaAmbience(const std::string& dayPath, const std::string& nightPath, float volume) {
+void AmbientSoundManager::setAreaAmbience(const std::string& dayPath, const std::string& nightPath, float volume,
+                                          bool instant) {
     areaAmbienceDriven_ = true;
+    if (instant) areaSwitchInstant_ = true;
     areaAmbienceDay_ = dayPath;
     areaAmbienceNight_ = nightPath;
     areaAmbienceVolume_ = volume;
@@ -830,9 +841,12 @@ void AmbientSoundManager::updateAreaAmbience(bool isIndoor) {
     }
     // Day to night, area to area, out of doors and in: the stock client
     // crossfades its ambience over 5 s each way (Wow.exe 0x4c9910).
-    constexpr float kFadeMs = stock::kAmbienceFadeSeconds * 1000.0f;
+    // Going under water or coming up cuts over at once.
+    const float kFadeMs = areaSwitchInstant_ ? 0.0f : stock::kAmbienceFadeSeconds * 1000.0f;
+    areaSwitchInstant_ = false;
     if (areaLoopId_ != 0) {
-        AudioEngine::instance().fadeOutSound(areaLoopId_, kFadeMs);
+        if (kFadeMs <= 0.0f) AudioEngine::instance().stopSound(areaLoopId_);
+        else AudioEngine::instance().fadeOutSound(areaLoopId_, kFadeMs);
         areaLoopId_ = 0;
     }
     areaLoopPath_ = want;

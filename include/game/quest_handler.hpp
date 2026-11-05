@@ -169,6 +169,9 @@ public:
         uint32_t questType = 0;
         uint32_t suggestedPlayers = 0;
         uint32_t questFlags = 0;
+        /// NextQuestInChain (query field 11): a turn-in that leads straight
+        /// on keeps the quest frame for the next quest's details (0x58ca70).
+        uint32_t nextQuestInChain = 0;
         /// Accepted before its title was known: ERR_QUEST_ACCEPTED_S waits
         /// for the query response.
         bool announceAcceptOnQuery = false;
@@ -374,6 +377,10 @@ private:
     std::unordered_map<uint32_t, float> pendingQuestAcceptTimeouts_;
     std::unordered_map<uint32_t, uint64_t> pendingQuestAcceptNpcGuids_;
     bool questOfferRewardOpen_ = false;
+    /// GetQuestReward was sent and the server's answer is awaited: the
+    /// reward frame and its NPC stay (Wow.exe 0x58cfa0 only sends and sets
+    /// a waiting flag; SMSG_QUESTGIVER_QUEST_COMPLETE closes it).
+    bool questRewardChosen_ = false;
     QuestOfferRewardData currentQuestOfferReward_;
 
     // Quest log

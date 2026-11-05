@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "audio/sound_trace_hook.hpp"
 #include "core/logger.hpp"
 #include "pipeline/asset_manager.hpp"
 
@@ -45,6 +46,7 @@ bool loadSampleFile(const std::string& path, Sample& sample,
         sample.data = assets->readFile(path);
         if (!sample.data.empty()) {
             sample.loaded = true;
+            noteSoundFile(path, sample.data);
             return true;
         }
     } catch (const std::exception& e) {

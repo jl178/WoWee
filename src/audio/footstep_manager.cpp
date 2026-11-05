@@ -1,4 +1,5 @@
 #include "audio/footstep_manager.hpp"
+#include "audio/sound_trace_hook.hpp"
 #include "audio/footstep_paths.hpp"
 #include "audio/audio_engine.hpp"
 #include "audio/sound_variation.hpp"
@@ -113,6 +114,7 @@ void FootstepManager::preloadSurface(SurfaceSamples* bank, FootstepSurface surfa
         if (data.empty()) {
             continue;
         }
+        noteSoundFile(path, data);
         list.push_back({path, std::move(data)});
         sampleCount++;
     }

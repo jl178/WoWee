@@ -6,7 +6,9 @@ mixes, and how zone music and ambience are scheduled. Which sound plays for
 which event is in `docs/overnight-2026-10-31.md` (the "sound audit" and
 "stock event sounds" entries). Reverse engineered from `Wow.exe` with Ghidra;
 addresses are virtual addresses in that binary. The last sections compare it
-with Wowee and list what to listen for.
+with Wowee and list what to listen for; section 11 is an end-to-end audit of
+the events against a trace of every sound the client starts
+(`WOWEE_SOUND_TRACE`).
 
 The code is in three layers:
 
@@ -599,3 +601,151 @@ none fades the loop out.
 - The meaning of category 8 (unit+0x8f0 kit) and of model flag 0x20
   (categories 15/16) was not traced; nor 0x4cfc10, 0x6f9840, 0x71cba0,
   0x73a890 beyond their own-unit handling.
+
+## 11. Event audit, 2026-11-04
+
+Sections 1-10 are the engine; this is the events that drive it, checked
+end to end with a trace of every sound the client starts, after a week of
+new systems (missiles, mounts, death, water, professions, UI flows).
+
+### The trace
+
+`WOWEE_SOUND_TRACE=1` writes one `[sndtrace]` line per start request to the
+log; any other value is a file to write them to. `WOWEE_AUDIO_NULL=1` opens
+miniaudio's null device, so a scripted run mixes (voice limits, caps and
+ducking all apply) without sounding on the desk. A line holds the time,
+the kind (2d, 3d, -loop, -handle), what became of it (`ok`,
+`refused-voice` for the stock voice/category/kit limits, `out-of-range`
+past the row's cutoff, `refused-advdup`, `load-fail`, `decode-fail`,
+`muted`), the SoundEntries id and name, the file, the category, the FMOD
+priority, the own-character flag, the volume and pitch, 2D or 3D with the
+position, distance and min/max, the gain it was started at, and the call
+stack as offsets into the binary (`addr2line -f -C -e wowee <offsets>`).
+Stops and fade-outs are lines of their own (`kind=stop id=`), and every
+`WoweeDebug_Log` line of a scripted run is copied in (`lua SCN ...`) so the
+trace reads scenario by scenario. A buffer handed over as bytes is named by
+`SoundTraceName` or by the file it was read from (the sample loaders note
+it, `sound_trace_hook.hpp`). `AudioEngine::playMusic` lines name the track.
+
+The scenarios were five scripted runs on Wptestb (Goldshire, Elwynn,
+Crystal Lake, Stormwind, Hellfire), each a WOWEE_DEBUG_LUA list of GM
+commands and API calls with a marker per step.
+
+### Stock rules found for this audit
+
+| Event | Wow.exe | Rule |
+|---|---|---|
+| Weather | SMSG_WEATHER 0x526530 -> Weather.dbc (0xad4eb0) -> 0x4c8610 | the row's AmbienceID ("Weather - RainLight" 8533 .. "SandstormHeavy" 8558) is ambience **slot 8**, day and night: it replaces the area's loop with the usual 5 s crossfade; 0x4c86f0 skips slot 8 while 0x4c8600's flag is up, which 0x78e9a0 sets from 0x7a1480 - the WMO group the camera is in **lacks the exterior flag (MOGP 0x8)** |
+| Under water | 0x5fe7b0 (camera liquid) -> 0x4c8630 | slot 9 ambience = SoundEntries 4209 "Underwater (DONOTRENAME)" while the camera is in liquid; 0xb4aa9c ("changed") makes 0x4c9910 switch with **no fade**. No ducking row, no music change |
+| Indoors, for sound | 0x7a1480 | the group lacks MOGP 0x8 (exterior). Not the same as having 0x2000 (indoor) |
+| Close events | CloseMail 0x571a40, CloseGossip 0x58a550, CloseTrainer 0x5940e0, CloseAuctionHouse 0x59f150 | act only when that window is open (its guid set); CloseBankFrame 0x57b8d0 and CloseGuildBankFrame 0x5a4270 fire their event every call |
+| Gossip quest pick | SelectGossipAvailableQuest 0x58b600 -> 0x58b070 | sends the query; the gossip stays until the answer replaces it |
+| Accept | AcceptQuest 0x58d5b0 -> 0x58cd20 | sends, clears the quest guid, QUEST_FINISHED, and lets the NPC go (farewell) only when no gossip is open |
+| Reward | GetQuestReward 0x58d620 -> 0x58cfa0 | sends the choice and sets a waiting flag (0xc0d6ac); nothing closes |
+| Turn-in answer | SMSG_QUESTGIVER_QUEST_COMPLETE 0x6d0e10 -> 0x58ca70 | igQuestListComplete, the reward lines, then the frame closes (QUEST_FINISHED, NPC let go) unless the quest's NextQuestInChain (cache +0x2c) is set - then it waits for the next quest's details |
+| Aggro | SMSG_AI_REACTION 0x716b10 | reaction 2 -> 0x7474b0 kind 0: CreatureSoundData SoundAggroID (+0x28) at the head attachment; a row with none is silent. Reaction 0 -> kind 8 (Alert, +0x34) |
+| Spell failure | SMSG_SPELL_FAILURE 0x809c70 -> 0x4cff30 | the school's fizzle at the caster's position, default properties (placed, full level, the player's own too), for **every** caster. SMSG_CAST_FAILED's fizzle (0x808200) is the caster's second |
+| Text emote voice | send 0x6dd9e0 -> 0x4ceb70; play 0x747000 -> 0x746d60 | the sender draws the file from the EmotesTextSound row's bag and sends its index in CMSG_TEXT_EMOTE; every receiver plays that file (props[3]) two yards above the unit (0xadb674) or at its head attachment, no-duplicate forced (props[9] = 2), on the unit's emote handle |
+| Jump, land | 0x73ed10, event 0x346 -> 0x73d3d0, 0x7461e0 | kinds 11/12 (CreatureSoundData JumpStart/JumpEnd): no player model's row names one, so silent; the thud is the JumpLandRun animation's $FSD. A drop of more than 13 yd (0xa349f4; 70, 0xa349f8, in the other branch) forces kind 13 = the Injury column |
+| Equip by right-click | UseContainerItem 0x5d8650 -> 0x6dfee0 -> 0x520770 / 0x6dfc40 -> ClearCursor 0x519280 | no pickup sound; the put-down sound (0x4d0020, ItemGroupSounds column 1; wrapped items "(DONOTRENAME)WrappedItemDrop") |
+| Cursor put down | ClearCursor 0x519280 | item: its put-down; money: LOOTWINDOWCOINSOUND; spell, macro, pet action, stable pet, merchant: INTERFACESOUND_CURSORDROPOBJECT; ammo and the item kinds 5-7/9: put-down then the drop sound |
+| Repair cursor | UseContainerItem 0x5d8650 (and the pickups) | cost check, ITEM_REPAIR, CMSG_REPAIR_ITEM. Repair All's sound is merchantframe.xml's |
+| Object sounds | GO model events 0x70c050 -> 0x70bf70 | a game object's model events $GO0-$GO5 and $GC0-$GC3 play GameObjectDisplayInfo Sound[0-5] / Sound[6-9] at the event; $DSL loops, $SHK shakes. Doors, chests, the bobber's bite (custom 0 -> $GC0 -> Sound[6]) |
+| Kit file pick | 0x4cbac0 | every caller of a SoundEntries row draws from the row's bag (section 2) |
+| Hourly bells | (server) | AzerothCore's "Hourly Bells" game event plays them through the bell objects; the client has none |
+
+### Scenario table
+
+Expected is the stock rule (section 1-7 and the table above, or the
+FrameXML the stock client runs, which Wowee runs too). Before is the trace
+of the build this audit started from, after is the trace with the fixes.
+
+| Scenario | Expected (stock) | Wowee before | Wowee after |
+|---|---|---|---|
+| Login, char select, enter world | gsLogin, GS_LichKing, GlueScreenIntro, char select race ambience, gsCharacterSelectionEnterWorld; zone music, area loop, $DSL loops | as expected | unchanged |
+| Bags, spellbook, character, talents, map, quest log, game menu, friends | FrameXML PlaySound names (igBackPackOpen, igSpellBookOpen, igCharacterInfoOpen, TalentScreenOpen, igQuestLogOpen, igMainMenuOpen ...) | as expected, 2D at the rows' levels | unchanged |
+| Money change | LOOTWINDOWCOINSOUND on every PLAYER_FIELD_COINAGE change (0x6da070) | as expected | unchanged |
+| Item into bags (create, loot, buy, reward) | put-down of the item's ItemGroupSounds (SMSG_ITEM_PUSH_RESULT 0x523900) | as expected (cloth, small metal, chain, food, herb, wood) | unchanged |
+| Pick up / drop an item | pickup / put-down by material | as expected | unchanged |
+| Equip by right-click | put-down of the item (cursor path) | **silent** | PutDownSmallMetal for a sword, PutDownWoodSmall for a pole |
+| Spell or macro dragged and dropped | INTERFACESOUND_CURSORDROPOBJECT | **silent** | uSpellIconDrop.wav |
+| Destroy item | put-down as the cursor clears | as expected | unchanged |
+| Eat | the Food aura's state kit "Food", the server's 5 s SMSG_PLAY_SPELL_VISUAL "Item - Eat" | as expected, but the state kit's one-shot **replayed on every teleport and model rebuild** | heard once; a looping state sound still restarts on the new model |
+| Emotes /cheer /laugh | the sender's file index from CMSG_TEXT_EMOTE, 2 yd above the unit, refused while the same line plays; /laugh is the model's $CSD | **uniform random file per receiver**, index 0 sent, no duplicate check, at the feet; $CSD uniform pick | the sender's bag draw sent and played by all; second /cheer inside the line refused; $CSD through the row's bag |
+| Level up | LEVELUP via LevelUp.m2 $SND, own 2D x0.65 | as expected | unchanged |
+| Mail open/close | mailframe.lua: tab click, OpenBackpack, igSpellBookOpen; close sounds once | close sounds **twice** (MAIL_CLOSED fired by CloseMail and again by the frame's OnHide) | once |
+| Gossip -> quest -> accept | greeting at open, igQuestListOpen, WriteQuest, farewell after accept, QUESTADDED | **farewell in the middle** (gossip closed on the pick, NPC let go for the round trip) | greeting, no mid-conversation farewell, farewell after accept |
+| Quest turn-in | igQuestListComplete, the frame closes on the server's answer, one farewell | frame closed on the click: **farewell on the hand-in and again on the close** of the chained quest | one farewell, when the frame closes |
+| Vendor, repair | igCharacterInfoOpen/Close (FrameXML), greeting/farewell, coin on money change; repair cursor: ITEM_REPAIR | repair cursor **silent** | ITEM_REPAIR (MiningHitA) |
+| NPC clicks | NPCSounds hello x5 then the annoyed lines; never over itself | as expected | unchanged |
+| NPC aggro | CreatureSoundData SoundAggroID or nothing | voice-type barks ("Attack my target!") **for rows with none** | the row's sound or silence |
+| Melee | swing $CSS / blow $CAH: WeaponSwingSounds2, WeaponImpactSounds by armour, "(DONOTRENAME)Combat Miss 1H", exertion 70%/35%, injury 60%/30% | as expected (category caps refusing extras) | unchanged |
+| Spell precast/cast/impact | the kits' SoundIDs (Precast Holy Low loop, Holy Cast, HolyImpactDDHigh, FistOfJustice, Devotion Aura, SealofMight, InnerFire) | as expected, files **picked uniformly** (repeats, no 0x400/0x800 spread) | bag draw and spreads through `AudioEngine::playKit` |
+| Interrupted cast | SMSG_CAST_FAILED fizzle (2D) + SMSG_SPELL_FAILURE fizzle at the caster | second fizzle **2D**, none for other casters | second fizzle at the caster in 3D, for every caster |
+| Missiles | MissileSound loop on the missile, stopped at impact | as expected (MissileHolyLoop, MissileIceLoop seen on others' casts; every loop stopped) | unchanged |
+| Profession casts (fishing, crafting, gathering) | the kits' sounds | **silent**: profession spells' kits were skipped | "Fishing Cast", "Item - Crinkling Paper" (Linen Bandage), "TradeSkill - Smelt", "Gather_Herb" loop |
+| Fishing bite | "Fishing Hooked" at the bobber ($GC0 -> GameObjectDisplayInfo Sound[6]) | 2D | at the bobber (no bite came in the after run's window; the path is the same playEntryAt the server's object sounds use) |
+| Mount | precast kit (Tailoring loop for Brown Horse), HorseSummon on success; footsteps from the mount's $FSD | as expected | unchanged |
+| Jump and land on foot | no voice; JumpLandRun $FSD; >13 yd fall: injury cry | **a hand-made footstep thud on every landing**, teleports included; fall voice from guessed LandHard files after a 1 s fall | no thud of its own; HumanMaleMainWound after a 28 yd drop, nothing after 6 yd, nothing for a teleport (the scripted jump did not leave the ground, so the JumpLandRun footfall was not seen) |
+| Death, ghost, revive | death cry (own 2D), GhostMusic + GhostState in slot 10, back to the area on revive | as expected | unchanged |
+| Rain, snow | Weather.dbc loop in slot 8, crossfading with the area's, not indoors | **no rain at all** (RainLight.wav does not exist; the loops are RainLightLoop.wav ...), snow as a one-shot every 20 s over the area's loop | RainMediumLoop (grade 0.4) and RainHeavyLoop (0.7) replace the forest loop; inside the Goldshire inn the room's Tavern loop, the rain again at the door |
+| Under water | 4209 replaces the ambience at once; music untouched | separate loop on the interface bus over the area's, 0.4/0.6 s fades; music turned down to 30% while swimming | slot 9 swap, no fade, no music duck |
+| Swimming | (not traced: see 11.4) | splash on every surface bob (enter/exit flapping each second), hand-made stroke one-shot every 0.8 s | one splash on entering; a bob that flips the state within 1.5 s is silent; strokes unchanged |
+| Fountains, torches, braziers, lakes | the doodads' $DSL loops and SoundEmitters.dbc | $DSL loops **plus** guessed one-shot fire/fountain/water emitters (a Goldshire fountain replayed every 6 s over its own loop) | $DSL and SoundEmitters only |
+| Smithy | the room's WMOAreaTable ambience and the forge doodads | hand-made forge loop in WMO 96048 replacing the area loop | the tables' (Goldshire's smithy room names BlackSmith.wav itself) |
+| City bells | the server's hourly bells | **random bells every 2-3 minutes** on top | the server's only |
+| Zone and WMO music/ambience | sections 6 | as expected; the room test used the indoor flag | the room test is the exterior flag, as 0x7a1480 |
+
+### What changed
+
+- `AudioEngine` trace (`WOWEE_SOUND_TRACE`, `WOWEE_AUDIO_NULL`,
+  `SoundTraceName`, `soundTraceNote`, `sound_trace_hook.hpp`); the old
+  `sfx:`/`sfx2d:` info lines it replaces are gone.
+- `AudioEngine::playKit` / `KitPlay`: one way to play a SoundEntries row
+  (bag, level spread, pitch, MinDistance, cutoff, no-duplicate, loops,
+  handles, file index). Spell kits, emote voices, `$CSD`, sheath sounds and
+  the placed fizzle use it.
+- Ambience slots in `AudioCoordinator::updateTableAmbience`: 10 screen
+  effect, 9 under water (instant), 8 weather (not indoors), then the area;
+  `SoundData::weatherSound` reads Weather.dbc; `ZoneAudioContext` carries
+  `weatherState` and `wmoSoundIndoors` (`WMORenderer::AreaHit::soundIndoors`).
+- `AmbientSoundManager`: with the tables, no guessed positional emitters,
+  bells, weather one-shots, underwater one-shots or forge loop.
+- Quest and window flow: gossip kept across the quest pick, reward frame
+  kept until SMSG_QUESTGIVER_QUEST_COMPLETE (closed unless the quest chains;
+  `nextQuestInChain` from the query), and the guarded close events.
+- `TextEmotePacket::build` sends the sound index; the receiver plays it.
+- `NpcVoiceManager::playAggro`: no voice-type fallback with the tables.
+- `SpellHandler::playFizzle(spell, unit)`; profession spells' kits play.
+- Cursor: drop sound for non-item kinds, put-down on a right-click equip,
+  ITEM_REPAIR on the repair cursor.
+- `ActivitySoundManager::playLanding`: the stock landing with the tables;
+  a splash only when the swim state it ends had lasted 1.5 s.
+  `SfxStateDriver`: fall height from the highest point of the fall, reset by
+  a teleport; no music swim duck with the tables.
+- State kits re-attached to a new model do not replay a one-shot sound.
+
+### 11.4 Not done
+
+- **Object sounds**: the `$GO0-5`/`$GC0-3` model events are not read or
+  fired for game objects (only character models fire events at run time),
+  so doors, chests, mailboxes and the like are silent except the fishing
+  bite, which is played at the bobber by hand. The fix is to keep those
+  events in `isM2SoundEventTag`, fire them from `M2Renderer` for GO
+  instances, and play GameObjectDisplayInfo.Sound[n] at the event.
+- **Swimming strokes and the water-entry splash**: the stock trigger was not
+  found (SoundEntries 1090/1096/1097 "CharacterSplashSound*" have no
+  reference in the code; LiquidType.SoundBank names the river/ocean loops
+  1111-1114). The hand-made strokes and splash remain.
+- **Duels, battlegrounds**: need a second player / a running battleground;
+  the countdown and BG sounds are FrameXML's and the server's and were not
+  traced in game.
+- AI reaction 0 (Alert, kind 8) is not played.
+- The text emote's head attachment (0x11) is approximated by 2 yd above the
+  feet, which is the stock fallback.
+- A chained quest whose next quest the server does not offer (AzerothCore
+  checks CanTakeQuest) leaves the reward frame up until it is closed, as the
+  stock client's wait would.
+- The UChatScrollButton click as Blizzard_CombatLog loads (its ADDON_LOADED
+  handler presses a quick button) is heard at world entry; whether the stock
+  loading screen swallows it was not checked.
