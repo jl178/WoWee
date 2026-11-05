@@ -16,6 +16,7 @@
  */
 #include <atomic>
 #include "rendering/character_renderer.hpp"
+#include "rendering/indoor_probes.hpp"
 #include "rendering/pom_quality.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/normal_map.hpp"
@@ -276,6 +277,17 @@ struct CharMaterialUBO {
     float diffuseTintR;
     float diffuseTintG;
     float diffuseTintB;
+    // Room light indoors (E12, updateIndoorProbes): probeW 0 is stock (the
+    // player's building colour and indoor factor from the per-frame block);
+    // 1 + indoor otherwise, with the unit's own colour and lean.
+    float probeR;
+    float probeG;
+    float probeB;
+    float probeW;
+    float probeLeanX;
+    float probeLeanY;
+    float probePad0;
+    float probePad1;
 };
 
 // GPU vertex struct with tangent (expanded from M2Vertex for normal mapping)
@@ -4045,6 +4057,14 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 matData.diffuseTintR = instance.diffuseTint.r;
                 matData.diffuseTintG = instance.diffuseTint.g;
                 matData.diffuseTintB = instance.diffuseTint.b;
+                if (indoorProbesOn_ && instance.probeLive && !instance.isSceneModel) {
+                    matData.probeR = instance.probeColour.r;
+                    matData.probeG = instance.probeColour.g;
+                    matData.probeB = instance.probeColour.b;
+                    matData.probeW = 1.0f + std::clamp(instance.probeIndoor, 0.0f, 1.0f);
+                    matData.probeLeanX = instance.probeLean.x;
+                    matData.probeLeanY = instance.probeLean.y;
+                }
 
                 // The base humanoid mesh samples a mirrored character atlas,
                 // with the face sitting directly beside a UV seam. Parallax
@@ -4928,6 +4948,58 @@ void CharacterRenderer::updateCorpseSettle(float deltaTime, const FloorHeightFn*
         active = true;
     }
     corpseSettleActive_ = active;
+}
+
+void CharacterRenderer::updateIndoorProbes(float deltaTime, const IndoorProbeFn* probe,
+                                           const glm::vec3& cameraPos) {
+    if (!probe) {
+        if (!indoorProbesOn_) return;
+        indoorProbesOn_ = false;
+        for (auto& [id, inst] : instances) {
+            (void)id;
+            inst.probeLive = false;
+        }
+        return;
+    }
+    indoorProbesOn_ = true;
+    namespace ip = indoor_probe;
+    const float k = ip::easeFactor(deltaTime);
+    constexpr float kReach = 120.0f;
+    for (auto& [id, inst] : instances) {
+        (void)id;
+        if (inst.isSceneModel || !inst.visible) continue;
+        // A weapon or a rider is placed by its matrix; read it where that is.
+        const glm::vec3 at = inst.hasOverrideModelMatrix ? glm::vec3(inst.overrideModelMatrix[3])
+                                                         : inst.position;
+        const glm::vec3 d = at - cameraPos;
+        if (glm::dot(d, d) > kReach * kReach) continue;
+        inst.probeAge += deltaTime;
+        if (!inst.probeLive || ip::needsResample(at, inst.probeReadAt, inst.probeAge)) {
+            glm::vec3 colour(0.35f);
+            glm::vec2 lean(0.0f);
+            // Chest height, as the stock ray starts a yard over the feet.
+            const bool in = (*probe)(at + glm::vec3(0.0f, 0.0f, 1.0f), colour, lean);
+            inst.probeTargetIndoor = in ? 1.0f : 0.0f;
+            if (in) {
+                inst.probeTargetColour = colour;
+                inst.probeTargetLean = lean;
+            }
+            inst.probeReadAt = at;
+            inst.probeAge = 0.0f;
+            if (!inst.probeLive) {
+                // First read: start where it is, as a unit that spawns indoors
+                // does not walk in from the sky's light.
+                inst.probeLive = true;
+                inst.probeColour = inst.probeTargetColour;
+                inst.probeIndoor = inst.probeTargetIndoor;
+                inst.probeLean = inst.probeTargetLean;
+                continue;
+            }
+        }
+        inst.probeColour += (inst.probeTargetColour - inst.probeColour) * k;
+        inst.probeIndoor += (inst.probeTargetIndoor - inst.probeIndoor) * k;
+        inst.probeLean += (inst.probeTargetLean - inst.probeLean) * k;
+    }
 }
 
 void CharacterRenderer::updateFootPlacement(float deltaTime, const FloorHeightFn* floor,

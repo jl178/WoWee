@@ -1,3 +1,7 @@
+| `contactshadows` pass | 0 (indoors: not recorded) | 0 | 0 | 0.39-0.43 first version (1.46 GHz); 0.20 after the clip-space march (1.46, eight steps); final 0.41-0.42 (1.16 GHz, a compile on the CPU), 0.17-0.29 (half) | final 0.317-0.318 in all eight windows (full window, 1.5 GHz, slow regime); 0.15-0.23 (half) |
+| `contactshadows` frame GPU | ~0 (±0.6) | +0.06 ±0.08 | -0.02 ±0.02 | +0.34 ±0.09 first version; final +0.38 ±0.10 (1.16 GHz, compile) | final +0.24 ±0.02 (1.5 GHz) |
+| `contactshadows` CPU | ~0 | ~0 | ~0 | cpu_med +0.06 ±0.26; renderWorld +0.04 to +0.10 | cpu_med -0.01 ±0.19; renderWorld +0.12 (the per-frame depth view, framebuffer and descriptor write, and the barriers) |
+
 # Phase 2 plan: enhancements over the stock 3.3.5a picture
 
 Status: written 2026-11-03 against branch `audio-data-driven`, after stock
@@ -58,6 +62,11 @@ E16 off for its cost in hilly views. Costs in 3.13, status under each entry;
 for the shoreline foam is taken from the off-screen scene's own depth (it
 read a stale image with MSAA and post-processing on), and an A/B of a row
 recommended off flips it to its fullest "on".
+
+Done (2026-11-04, evening): E12 room light indoors (`indoorlight`) and
+E14 contact shadows (`contactshadows`), each a row, stock off, both
+recommended on. Costs in 3.14, status under each entry; `test_phase2_light`
+holds the probe bake and lookup and the contact ray's limits.
 
 ## 1. Goal and rules
 
@@ -873,6 +882,62 @@ Needles cliff face, cliffs on and off), `z6c.png` (the Echo Isles shallows,
 sunlight under water on and off), `z_e18.png` (sunlit sandstone in Thousand
 Needles, soft highlights on and off).
 
+### 3.14 Measured cost of E12 and E14 (2026-11-04, evening)
+
+Measured as 3.5 (Iris Xe, Ultra quality columns, the recommended set, noon,
+the camera set again before every row), each row flipped in place on a 4 s
+period, six to eight cycles a row, paired adjacent windows, with
+`WOWEE_SINGLE_THREAD_RECORD=1` (scratch `enh7/`: `chain.sh`, `mrun.sh`,
+`ab_body.lua`, `pp.py`, which now also pairs `cpu_med` and the
+`update/footfall+sfx` stage the probe reads run in). Places: Goldshire's
+Lion's Pride Inn by the hearth, the Deadmines' first tunnel, Scarlet
+Monastery's entrance hall, the Trade District and Goldshire's road view.
+Each place's rows were one sitting; the clock regime is given, as
+performance.md asks. The evening was not quiet: another agent's compiles
+ran through the Elwynn runs (the iGPU at 300 MHz in one, which was thrown
+away), and from 18:40 to 19:30 another agent's client held half the
+screen, so one Elwynn and one Trade District run were at a 616-621 x 986
+window (marked "half"); the final runs of both were at the full window. The contact shadow pass carries its own timestamp ("contact
+shadows"), which is the figure to trust where the frame's scatter is wide.
+
+| Row | Inn | Deadmines | Scarlet | Trade District | Goldshire road |
+|---|---|---|---|---|---|
+| `indoorlight` GPU | +0.05 ±0.02 (1.5 GHz) | +0.00 ±0.01 (1.5) | +0.01 ±0.01 (1.5) | +0.01 ±0.05 (1.47); -0.12 ±0.5 (half) | ~0 (±0.5, under a compile) |
+| `indoorlight` CPU, `update/footfall+sfx` | +0.06 | +0.003 | +0.002 | +0.01 to +0.03 | +0.01 to +0.02 |
+| `contactshadows` pass | 0 (indoors: not recorded) | 0 | 0 | 0.39-0.43 first version (1.46 GHz); 0.20 after the clip-space march (1.46); 0.17-0.29 (half, 1.35) | 0.32 (full window, 1.4 GHz, one window); 0.15-0.23 (half) |
+| `contactshadows` frame GPU | ~0 (±0.6) | +0.06 ±0.08 | -0.02 ±0.02 | +0.34 ±0.09 first version; ~0 (±0.2-0.5) after | +0.5 ±0.7 (scatter) |
+| `contactshadows` CPU | ~0 | ~0 | ~0 | renderWorld +0.06 to +0.10 (the barriers and the pass's recording) | +0.2 under a compile |
+
+What each costs and why:
+
+- **Room light indoors** is a branch on a material value in
+  `character.frag` (+0.05 ms where units fill the view indoors, nothing
+  outdoors) and one WMO containment query per unit every half second or
+  third of a yard on the main thread: 0.06 ms in the inn with its dozen
+  NPCs, a few hundredths elsewhere. The bake is at group load, a few
+  passes over at most 16^3 cells; the doodads' colours are set at placement.
+  Well inside 0.5 ms. Recommended on.
+- **Contact shadows** is one full-screen pass: a depth read for every
+  pixel, and for the pixels within reach facing the sun, a six-step march.
+  The first version (eight steps, 45 yards, a matrix product per step) was
+  0.39-0.43 ms in the Trade District at full clock; marching between the
+  ray's two clip-space ends, six steps and a 35-yard reach brought it to
+  0.32 ms in Goldshire's road view at 1.5 GHz (the frame +0.24 ±0.02) and
+  0.42 in the Trade District with the iGPU held at 1.16 GHz by a compile
+  (about 0.33 at full clock). Inside 0.5 ms where it is wanted, closest to
+  it in a city under load; indoors it is not recorded. Recommended on, as
+  sun shadows are. If it is ever over: half resolution, or the depth view
+  and framebuffer kept across frames (the CPU side, +0.1 ms of renderWorld).
+- Neither moves the whole set's figures (3.12, 3.13) beyond their scatter;
+  they were not re-measured as a set tonight.
+
+Shots (scratch `enh7/run/`): `s4_inn1_il.png`, `s4_dm1_il.png`,
+`s_inn1_il.png` and `s2_inn2_il.png`
+(Goldshire's inn, room light on and off), `s2_dm1_il.png` (Deadmines),
+`s_sm1_il.png` (Scarlet Monastery), `r3_e.png` (the contact rays' debug tint
+in Goldshire), `d4_*.png` (contact shadows on, off, and where on is darker,
+with the clock frozen).
+
 ## 4. Proposed enhancements
 
 Ranked by feel gained over cost and risk. "Cost" is implementation effort
@@ -888,13 +953,13 @@ the classic look or the stock behaviour.
 | 5 | E5 | Rain ripples on water and puddles | medium | S | low | on |
 | 6 | E7 | Capes, tails and hair: secondary motion | high | L | medium | on |
 | 7 | E8 | Corpse settles to the ground slope | medium | S | low | on |
-| 8 | E12 | Indoor light for units and doodads | high | M | medium | on |
+| 8 | E12 | Indoor light for units and doodads | high | M | medium | on (3.14) |
 | 9 | E10 | Animation smoothing for other units | medium | S | medium | on |
 | 10 | E9 | Foot placement on slopes | medium | M | medium | on |
 | 11 | E11 | Horizon detail (lit WDL, far WMOs) | high | M | medium | on |
 | 12 | E6 | Snow cover while it snows | medium | S | low | on |
 | 13 | E21 | Dust and snow kicked up | medium | S | low | on |
-| 14 | E14 | Contact shadows | medium | S | low | on |
+| 14 | E14 | Contact shadows | medium | S | low | on (3.14) |
 | 15 | E19 | Weather follows the wind | low | S | low | on |
 | 16 | E20 | Smooth zoom and collision ease | low | S | low | on (zoom only) |
 | 17 | E13 | Ambient occlusion (ambient term only) | medium | M | high | off |
@@ -1448,6 +1513,68 @@ stock, the budget, and how to verify.
   frame one trilinear lookup per unit; under 0.1 ms.
 - **Verify.** Goldshire inn, Ironforge Great Forge, Karazhan halls, a cave.
   Compare unit brightness to the wall behind it in the same shot.
+- **Status (2026-11-04): done, row `indoorlight` "Room light indoors",
+  recommended on.** Built from MOCV and MODD, not MOLT: MOLT lights nothing
+  in 3.3.5a (`wmo-rendering.md` §7), so its lights would be invented; the
+  MOCV is the light the artists baked, and the MODD colours the light they
+  gave each doodad (§6). What it does (`rendering/indoor_probes.hpp`):
+  - **Bake.** When a group lit as an interior (0x2000, not 0x48) with MOCV
+    loads, `WMORenderer::createGroupResources` takes each triangle's
+    centroid with the colour the stock unit sample would read there (MOCV
+    x 2 clamped, plus the MOHD ambient under MOHD flag 2, characters.md §1
+    "Indoors"), weighted by area (held to 25 sq yd), and each MODD doodad of
+    the group at its own colour (the MODD averages sit beside the MOCV x 2:
+    Goldshire's inn 0.20-0.36 against 0.15-0.48, so no doubling) at the
+    weight of 4 sq yd. A grid of about 3-yard cells (1-16 a side) over the
+    group's box gets each sample spread over its eight cells, blurred twice
+    by [1 2 1] along each axis, divided by the blurred weights; cells nothing
+    reaches grow in from their neighbours. RGBA8 per cell, at most 16 KB a
+    group; Goldshire, Stormwind and two dungeons baked 970 groups in a run.
+  - **Units.** `CharacterRenderer::updateIndoorProbes` reads each visible
+    unit within 120 yd (a weapon or rider at its matrix) a yard over its
+    feet - again when it moves a third of a yard or half a second passes -
+    through `WMORenderer::sampleIndoorProbe`: the tightest group around it,
+    and if that group is lit as an interior, the grid's colour there,
+    muted a quarter toward its grey, moved 70% of the way from the stock
+    colour (the building's MOHD ambient x 2, at least 0.35, which every unit
+    takes now). Colour, indoor weight and lean ease over 0.25 s. The
+    character material carries them (`probeW` 0 = stock); `character.frag`
+    then puts the unit's own colour through the stock split (diffuse raised
+    to 168/255, ambient capped at 96/255), leans the fixed direction toward
+    the brighter side of the room (the luminance's slope across a cell, at
+    most half the direction's horizontal length), adds a fill of the indoor
+    ambient x 0.35 on the side turned from it, and uses the unit's own indoor
+    weight instead of the player's. So an NPC in the inn is lit as indoors
+    while the player stands outside, which stock does too (per unit) and
+    Wowee did not.
+  - **Doodads.** Each placed MODD doodad of an interior group with a grid
+    takes the room's colour at its position through the stock MODD split,
+    mixed 50% into its ambient and 35% into its diffuse; set once at
+    placement and re-applied to every placed doodad when the row changes
+    (`WMORenderer::setIndoorProbes`). No per-frame work, no shader change.
+  - **Off.** No grid is baked, no probe read, `probeW` 0 so `character.frag`
+    runs the stock expression untouched, the doodads keep the stock MODD
+    light. Turning the row on reaches buildings loaded from then on (the
+    row's restart note); turning it off takes effect at once.
+- **Looks like** (scratch `enh7/run/`): `s4_inn1_il.png` (final, clock
+  frozen), `s_inn1_il.png` (before the room colour was muted),
+  `s2_inn2_il.png`
+  (Goldshire's inn by the hearth: on, the paladin and the innkeeper take the
+  room's amber and sit in it; off, both are the building's pale grey and look
+  pasted on), `s2_dm1_il.png` (the Deadmines' first tunnel: a cold
+  green-blue cave light on, warm skin off), `s_sm1_il.png` (Scarlet
+  Monastery's candle-lit hall: warm on, grey off).
+- **Cost** (3.14): GPU +0.05 ±0.02 ms in the inn (the extra branch), 0
+  elsewhere; CPU +0.06 ms of `update/footfall+sfx` in the inn with its
+  NPCs, under 0.03 elsewhere.
+- **Gaps.** No per-unit ray to the MOCV under the feet (step 1, the stock
+  rule, is still open; this replaces the building's one colour, not that
+  ray). MOCV is light, not the walls' colour, so a white-washed room and a
+  dark-panelled one with the same lamps read alike. Transition faces (MOCV
+  alpha toward the outdoor light) are not read; the indoor weight eases
+  instead. A building loaded before the row was turned on keeps no grid
+  until it reloads. Groups without MOCV (Stormwind's exterior-lit streets)
+  are not interiors and take nothing.
 
 ### E13. Ambient occlusion, ambient term only
 
@@ -1479,6 +1606,52 @@ stock, the budget, and how to verify.
 - **Budget.** 0.3-0.5 ms at full resolution; half resolution if over.
 - **Verify.** Character on grass at noon and at sunset, at 15 and 50 yd
   zoom. Check no shadow appears on the lit side at grazing sun angles.
+- **Status (2026-11-04): done, row `contactshadows` "Contact shadows"
+  (enabled with sun shadows), recommended on.** As a pass, not in the four
+  surface shaders: they cannot read the depth they are writing. After the
+  scene pass closes and before the late particles, `ContactShadowPass`
+  (`contact_shadow_pass.cpp`, `contact_shadow.frag`) draws one full-screen
+  triangle over the resolved scene colour with the one-sample depth as a
+  texture - the same frame the soft particles' late pass uses, through a
+  `SoftParticlePass` of its own - and the per-frame block and sun maps at
+  set 0. Per pixel (`rendering/contact_shadows.hpp` has the same constants
+  and is what the tests hold):
+  - sky, pixels past 35 yd (faded over the last 12), silhouettes (the depth
+    jumps by more than 0.15 yd + 3% of the distance to the next pixel) and
+    surfaces turned from the sun (N.L <= 0.05, the facing from the depth's
+    slope) are discarded after one depth read;
+  - a ray of 0.6 yd toward the sun from a point lifted 0.02 yd + 0.2% of the
+    distance off the surface, six steps jittered per pixel, each a blend of
+    the ray's two ends in clip space; a step behind the depth by more than
+    0.02 yd and less than 0.35 yd + 1% of the distance is blocked, weighted
+    1 - (i/6)^2 by how far along;
+  - only then the sun maps (`sunShadow`): the new lit is min(map, 1 -
+    blocked), and the pixel's colour is multiplied by (A + D N.L s') / (A +
+    D N.L s), A and D the luminances of Light.dbc's ambient and diffuse, s
+    and s' the stock shadow term before and after with Light.dbc's shadow
+    darkness x the player's setting. So it takes away the sun's share and
+    nothing else, never shades a pixel past a full shadow and never twice
+    where the map already shades it; at night or under cloud, where the band
+    is light, it is faint.
+  - Indoors (the player's indoor factor at 0.99) the pass is not recorded,
+    and its darkness is scaled by how far outdoors the player is.
+  `WOWEE_CONTACT_SHADOW_DEBUG=1` tints red what the ray finds blocked,
+  shaded or not.
+- **Looks like** (scratch `enh7/run/`): `r3_e.png` (the debug tint in
+  Goldshire: feet, a barrel's foot, a crate, the base of the inn's wall, the
+  grass tufts); `d2_elwynn1.png` and `d2_sw1.png` (on, off, and where on is
+  darker in red); `d4_*.png` the same with the clock frozen. A boot on the road and a barrel's rim on the grass get a
+  hand-width line of shade where the unit map's edge is soft; the sunlit
+  ground beside them does not change.
+- **Cost** (3.14): the pass 0.32 ms in Goldshire's road view at 1.5 GHz,
+  about 0.33 in the Trade District (0.42 at 1.16 GHz under a compile);
+  nothing indoors.
+- **Gaps.** Screen space: what is off screen or hidden behind something casts
+  nothing, and a thin thing seen edge-on (a sword) can shade the ground
+  behind it for a pixel or two at a silhouette the edge test lets through.
+  It darkens the resolved colour, so water drawn in the scene pass (MSAA)
+  over a shaded bed is darkened with it. Not with MSAA on a device without
+  depth resolve (no one-sample depth), as for the soft particles.
 
 ### E15. Caustics in shallow water
 

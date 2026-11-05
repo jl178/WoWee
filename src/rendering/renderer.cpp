@@ -48,6 +48,7 @@
 #include "rendering/volumetric_fog.hpp"
 #include "rendering/sun_shafts.hpp"
 #include "rendering/soft_particle_pass.hpp"
+#include "rendering/contact_shadow_pass.hpp"
 #include "rendering/rain_ripples.hpp"
 #include "rendering/stream_fade.hpp"
 #include "rendering/rt_lighting.hpp"
@@ -1101,6 +1102,7 @@ bool Renderer::initialize(core::Window* win) {
                                                vkCtx->getCurrentFrame());
             vkCtx->gpuMark(cmd, "water refraction copy");
         }
+        recordContactShadowPass(cmd);
         recordSoftParticlePass(cmd);
         if (rtRecordedThisFrame_ || !postProcessPipeline_) return;
         recordRtLighting(postProcessPipeline_->getSceneDepthImage(),
@@ -1590,6 +1592,8 @@ void Renderer::applyEnhancementsToSubsystems() {
     if (terrainRenderer) terrainRenderer->setSpecularEnabled(e.terrainSpecular);
     // Unstretched cliffs (E16): the terrain's side-projection pipelines.
     if (terrainRenderer) terrainRenderer->setCliffProjection(e.cliffProjection);
+    // Room light indoors (E12): the WMO probes and the doodads' light.
+    if (wmoRenderer) wmoRenderer->setIndoorProbes(e.indoorLight);
     if (m2Renderer) {
         m2Renderer->setLightFlicker(e.lightFlicker);
         m2Renderer->setGlowSprites(e.glowSprites);
@@ -1848,6 +1852,7 @@ void Renderer::beginFrame() {
     // Whether this frame's blended particles wait for the late pass, which
     // also decides where the minimap goes (syncSwimEffectsTargetPass).
     decideSoftParticles();
+    decideContactShadows();
 
     // The target that call may have just created or destroyed decides where
     // the water draws, and with it where the spray and the minimap go. Asked
@@ -2051,6 +2056,7 @@ void Renderer::endFrame() {
     } else {
         markWorldPassClosed();
         // The scene went straight to the swapchain: this is where it closed.
+        recordContactShadowPass(currentCmd);
         recordSoftParticlePass(currentCmd);
     }
 
@@ -3189,6 +3195,7 @@ void Renderer::update(float deltaTime) {
     // the floors, so both wait for the M2 update above to have joined.
     updateFootfallDust(fxDt);
     updateCorpseSettle(fxDt);
+    updateUnitIndoorLight(fxDt);
 
     // Activity SFX + mount ambient sounds: delegated to AnimationController (§4.2)
     if (animationController_) animationController_->updateSfxState(deltaTime);
@@ -4441,6 +4448,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
 
         // The blended particles, before the water as they were in the scene
         // pass, now that its depth can be read (soft particles only).
+        recordContactShadowPass(currentCmd);
         recordSoftParticlePass(currentCmd);
 
         // Only with water loaded to refract it, as the MSAA path in endFrame
@@ -4914,6 +4922,8 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         wmoRenderer = std::make_unique<WMORenderer>();
         if (!wmoRenderer->initialize(vkCtx, perFrameSetLayout, assetManager))
             LOG_ERROR("WMORenderer initialization failed");
+        // Before the first model loads: the room light bakes at load (E12).
+        wmoRenderer->setIndoorProbes(enh_.indoorLight);
         wmoRenderer->setRtScene(rtScene_.get());
         if (shadowRenderPass != VK_NULL_HANDLE) {
             if (!wmoRenderer->initializeShadow(shadowRenderPass))

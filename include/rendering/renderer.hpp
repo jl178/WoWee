@@ -79,6 +79,7 @@ class RtLighting;
 class LootSparkles;
 class SunShafts;
 class SoftParticlePass;
+class ContactShadowPass;
 class ScreenCapture;
 
 class Renderer {
@@ -373,6 +374,20 @@ private:
     /// The late pass, at whichever point of the frame the scene pass closes
     /// first; once a frame, and only on a frame decideSoftParticles allowed.
     void recordSoftParticlePass(VkCommandBuffer cmd);
+
+    // Contact shadows (the "Contact shadows" row, E14, ContactShadowPass):
+    // decided once a frame beside the soft particles, recorded where the
+    // scene pass closes, just before the late particles.
+    std::unique_ptr<ContactShadowPass> contactShadowPass_;
+    bool contactShadowsFrame_ = false;
+    bool contactShadowsDone_ = false;
+    uint32_t contactShadowsOffFrames_ = 0;
+    void decideContactShadows();
+    void recordContactShadowPass(VkCommandBuffer cmd);
+    /// Room light indoors (E12): each unit's own indoor light, read from the
+    /// WMO probe grids; with the row off, the stock light again. Main thread,
+    /// in update after the floors are free.
+    void updateUnitIndoorLight(float fxDt);
 
     void runDeferredWorldInitStep(float deltaTime);
 

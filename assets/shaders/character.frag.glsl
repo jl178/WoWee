@@ -71,6 +71,16 @@ layout(set = 1, binding = 1) uniform CharMaterial {
     float diffuseTintR;
     float diffuseTintG;
     float diffuseTintB;
+    // Room light indoors (E12, not stock): probeW 0 leaves the stock light;
+    // 1 + indoor gives this unit its own colour, indoor factor and lean.
+    float probeR;
+    float probeG;
+    float probeB;
+    float probeW;
+    float probeLeanX;
+    float probeLeanY;
+    float probePad0;
+    float probePad1;
 };
 
 layout(set = 1, binding = 2) uniform sampler2D uNormalHeightMap;
@@ -475,6 +485,21 @@ void main() {
         // shadowParams.w: the eased indoor factor (stock eases the ambient
         // over 0.5 s and snaps the diffuse; one factor here).
         float indoor = shadowParams.w;
+        if (probeW > 0.5) {
+            // Room light indoors (E12, indoor_probes.hpp): the same split of
+            // this unit's own room colour, the fixed direction leaned a
+            // little toward the brighter side of the room, and a faint fill
+            // of the room's ambient on the side turned from it (kFill 0.35).
+            vec3 pc = vec3(probeR, probeG, probeB);
+            float pm = max(max(pc.r, pc.g), pc.b);
+            vec3 pDiffC = (pm > 0.0 && pm < 168.0 / 255.0) ? pc * ((168.0 / 255.0) / pm) : pc;
+            vec3 pAmb = (pm > 96.0 / 255.0) ? pc * ((96.0 / 255.0) / pm) : pc;
+            pAmb = rtAmbient(rt, min(pAmb * amul, vec3(1.0)));
+            vec3 pDir = normalize(vec3(0.30822 + probeLeanX, 0.30822 + probeLeanY, 0.9));
+            float pN = max(dot(norm, pDir), 0.0);
+            inLit = pAmb * (1.0 + 0.35 * (1.0 - pN)) + pN * pDiffC * diffuseTint;
+            indoor = probeW - 1.0;
+        }
         vec3 lit = mix(outLit, inLit, indoor);
         lit += unitPointLights(FragPos, norm);
         lit = clamp(lit, 0.0, 1.0);

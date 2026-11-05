@@ -203,6 +203,17 @@ public:
     /// off) clears every unit's correction, after which nothing is read or
     /// applied. Main thread, after M2Renderer's update has joined.
     void updateFootPlacement(float deltaTime, const FloorHeightFn* floor, const glm::vec3& cameraPos);
+    /// The light a unit takes indoors (E12, indoor_probes.hpp): true when the
+    /// point is inside a group lit as an interior, with the colour to light
+    /// it by and which way (world xy) the room is brighter.
+    using IndoorProbeFn = std::function<bool(const glm::vec3& pos, glm::vec3& colour, glm::vec2& lean)>;
+    /// "Room light indoors" (E12): each unit within reach of the camera reads
+    /// its own indoor light with `probe` (again when it has moved a third of
+    /// a yard or half a second has passed) and eases toward it; character.frag
+    /// lights it by that instead of the player's building's colour and
+    /// indoor factor. Null `probe` (the row off) returns every unit to the
+    /// stock light at once and then costs nothing. Main thread.
+    void updateIndoorProbes(float deltaTime, const IndoorProbeFn* probe, const glm::vec3& cameraPos);
     /// The motion enhancements, before each update() (docs/enhancements-plan.md
     /// E7 and E10). `secondaryMotion`: 0 off, 1 capes and robes, 2 also tails
     /// and hair (secondary_motion.hpp); `windWorld` the air's velocity in yd/s
@@ -619,6 +630,18 @@ private:
         // Opacity (for fade-in)
         float opacity = 1.0f;
         glm::vec3 diffuseTint{1.0f};  // see setInstanceDiffuseTint
+        // Room light indoors (updateIndoorProbes): the eased colour, how far
+        // indoors (0..1), the lean toward the brighter side (world xy), and
+        // when and where it was last read. probeLive false: never read.
+        glm::vec3 probeColour{0.35f};
+        float probeIndoor = 0.0f;
+        glm::vec2 probeLean{0.0f};
+        glm::vec3 probeTargetColour{0.35f};
+        float probeTargetIndoor = 0.0f;
+        glm::vec2 probeTargetLean{0.0f};
+        glm::vec3 probeReadAt{0.0f};
+        float probeAge = 0.0f;
+        bool probeLive = false;
         float fadeInTime = 0.0f;     // elapsed fade time (seconds)
         float fadeInDuration = 0.0f; // total fade duration (0 = no fade)
 
@@ -917,6 +940,7 @@ private:
     bool corpseSettleActive_ = false;  // some body is tilted or measured
     bool footIkOn_ = false;            // updateFootPlacement had a floor last
     bool footIkActive_ = false;        // some unit has a correction
+    bool indoorProbesOn_ = false;      // updateIndoorProbes has a probe this frame
     // Motion enhancements (setMotionEnhancements).
     int springLevel_ = 0;
     glm::vec3 springWind_{0.0f};

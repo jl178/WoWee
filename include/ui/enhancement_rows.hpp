@@ -116,6 +116,28 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "light_flicker",
      .controls = "lampFlicker on gathered lights, glow sprites and additive fire batches",
      .asBool = &Enhancements::lightFlicker},
+    {.key = "contactshadows", .label = "Contact shadows", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPage, .section = "",
+     .tooltip = "A crisp shadow where small things touch the ground in\n"
+                "sunlight - feet, crates, a mug on a table - which the sun's\n"
+                "shadows are too coarse to show. Near the camera only.",
+     // Recommended by its measured cost and look: docs/enhancements-plan.md
+     // 3.14.
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "contact_shadows",
+     .controls = "ContactShadowPass (built on first use): one full-screen pass after the "
+                 "scene closes, a short ray per pixel within 35 yd, dst * src",
+     .enabledWhen = "shadows", .asBool = &Enhancements::contactShadows},
+    {.key = "indoorlight", .label = "Room light indoors", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPage, .section = "",
+     .tooltip = "Characters and objects inside buildings take the colour of\n"
+                "the room around them: warm by an inn's lamps, cold in a\n"
+                "crypt. Off, the original lights everyone in a building alike.",
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "indoor_light",
+     .controls = "WMO probe grids baked at group load, a probe read per unit every half "
+                 "second or third of a yard, the room colour in character.frag and the "
+                 "doodads' two MODD colours",
+     .restartNote = "Turning this on reaches buildings loaded from now on;\nrestart to see it everywhere.",
+     .asBool = &Enhancements::indoorLight},
     {.key = "terrainspecular", .label = "Ground highlights", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPage, .section = "",
      .tooltip = "The sun glints off polished ground textures - flagstones,\n"
