@@ -493,6 +493,7 @@ void WMORenderer::shutdown() {
             destroyGroupGPU(group);
         }
     }
+    dropLoadingModels(/*defer=*/false);
 
     // Free cached textures
     for (auto& [path, entry] : textureCache) {
@@ -500,6 +501,7 @@ void WMORenderer::shutdown() {
         if (entry.normalHeightMap) entry.normalHeightMap->destroy(device, allocator);
     }
     textureCache.clear();
+    ++textureCacheGeneration_;
     textureCacheBytes_ = 0;
     textureCacheCounter_ = 0;
     failedTextureCache_.clear();
@@ -611,7 +613,21 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
 
     // The accumulating model lives across calls, so a resumed load picks up its
     // textures, materials and the groups already uploaded.
-    ModelData& modelData = loadingModels_[id];
+    auto [loadingIt, startedNow] = loadingModels_.try_emplace(id);
+    if (startedNow) {
+        loadingIt->second.textureGeneration = textureCacheGeneration_;
+    } else if (loadingIt->second.textureGeneration != textureCacheGeneration_) {
+        // Its texture pointers predate a cache clear and point at freed
+        // VkTextures. clearAll drops partial loads, so reaching this means
+        // some other path emptied the cache without doing the same.
+        core::Logger::getInstance().error(
+            "WMO model ", id, " resumed a load begun before the texture cache was "
+            "cleared; starting it again");
+        for (auto& group : loadingIt->second.groups) destroyGroupGPU(group, /*defer=*/true);
+        loadingIt->second = ModelData{};
+        loadingIt->second.textureGeneration = textureCacheGeneration_;
+    }
+    ModelData& modelData = loadingIt->second;
     modelData.id = id;
     modelData.boundingBoxMin = model.boundingBoxMin;
     modelData.boundingBoxMax = model.boundingBoxMax;
@@ -1501,6 +1517,13 @@ void WMORenderer::unloadModel(uint32_t id) {
     core::Logger::getInstance().info("WMO model ", id, " unloaded");
 }
 
+void WMORenderer::dropLoadingModels(bool defer) {
+    for (auto& [id, model] : loadingModels_) {
+        for (auto& group : model.groups) destroyGroupGPU(group, defer);
+    }
+    loadingModels_.clear();
+}
+
 void WMORenderer::cleanupUnusedModels() {
     // Build set of model IDs that are still referenced by instances
     std::unordered_set<uint32_t> usedModelIds;
@@ -1804,6 +1827,14 @@ void WMORenderer::clearAll() {
                 destroyGroupGPU(group);
             }
         }
+        // And for the models part-way through a load. A map change (every
+        // teleport is one) can land while terrain streaming or a gameobject
+        // upload has a model half done; that entry kept the VkTexture
+        // pointers it had resolved, and the next load of the same model id
+        // resumed with them after the cache below had freed them - writing a
+        // freed texture's view and sampler into a descriptor set (the
+        // world-entry SIGABRT in anv_descriptor_set_write_image_view).
+        dropLoadingModels(/*defer=*/false);
 
         // Free cached textures
         for (auto& [path, entry] : textureCache) {
@@ -1818,7 +1849,9 @@ void WMORenderer::clearAll() {
     }
 
     loadedModels.clear();
+    loadingModels_.clear();
     textureCache.clear();
+    ++textureCacheGeneration_;
     textureCacheBytes_ = 0;
     textureCacheCounter_ = 0;
     failedTextureCache_.clear();

@@ -188,21 +188,40 @@ bool GameHandler::connect(const std::string& host,
 }
 
 void GameHandler::disconnect() {
-    taxiRecoverPending_ = onTaxiFlight_;
     if (socket) {
         socket->disconnect();
         socket.reset();
     }
+    // Warden state is WardenHandler's; this used to clear a second copy of it
+    // that nothing ever filled. Per connection, so not for a logout that keeps it.
+    if (wardenHandler_) wardenHandler_->reset();
+    pendingIncomingPackets_.clear();
+    leaveWorldState();
+    setState(WorldState::DISCONNECTED);
+    LOG_INFO("Disconnected from world server");
+}
+
+void GameHandler::returnToCharacterSelect() {
+    if (!socket || !socket->isConnected()) {
+        disconnect();
+        return;
+    }
+    leaveWorldState();
+    // requestCharacterList asks from READY; the server has the session at
+    // character select once it has sent SMSG_LOGOUT_COMPLETE.
+    setState(WorldState::READY);
+    requestCharacterList();
+    LOG_INFO("Logged out to character select");
+}
+
+void GameHandler::leaveWorldState() {
+    taxiRecoverPending_ = onTaxiFlight_;
     activeCharacterGuid_ = 0;
     guildNameCache_.clear();
     pendingGuildNameQueries_.clear();
     friendGuids_.clear();
     contacts_.clear();
     transportAttachments_.clear();
-    // Warden state is WardenHandler's; this used to clear a second copy of it
-    // that nothing ever filled.
-    if (wardenHandler_) wardenHandler_->reset();
-    pendingIncomingPackets_.clear();
     // Fire despawn callbacks so the renderer releases M2/character model resources.
     for (const auto& [guid, entity] : entityController_->getEntityManager().getEntities()) {
         if (guid == playerGuid) continue;
@@ -221,8 +240,6 @@ void GameHandler::disconnect() {
     if (spellHandler_) spellHandler_->clearUnitAurasCache();
     if (combatHandler_) combatHandler_->clearCombatText();
     entityController_->clearAll();
-    setState(WorldState::DISCONNECTED);
-    LOG_INFO("Disconnected from world server");
 }
 
 void GameHandler::resetDbcCaches() {

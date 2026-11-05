@@ -138,6 +138,9 @@ public:
 
     // Logout to login screen
     void logoutToLogin();
+    /// A logout's SMSG_LOGOUT_COMPLETE: the world goes as for logoutToLogin,
+    /// the session stays, and the player lands on character select (stock).
+    void logoutToCharacterSelect();
 
     // Render bounds lookup (for click targeting / selection) - delegates to EntitySpawner
     bool getRenderBoundsForGuid(uint64_t guid, glm::vec3& outCenter, float& outRadius) const;
@@ -203,7 +206,7 @@ private:
     void syncCreatureRenderInstances(float deltaTime);
     void syncPlayerRenderInstances(float deltaTime);
     void render();
-    void performLogoutToLogin();
+    void performLogoutToLogin(bool toCharacterSelect = false);
     void processDeferredLogoutToLogin();
 
     /// Take the interface down, because the character it belongs to is leaving.
@@ -426,6 +429,7 @@ private:
     bool running = false;
     bool renderingFrame_ = false;
     bool logoutToLoginPending_ = false;
+    bool logoutPendingToCharacterSelect_ = false;
     /// Why the player is back at the login screen, when it was not their idea.
     std::string disconnectNotice_;
     bool playerCharacterSpawned = false;

@@ -622,3 +622,35 @@ TEST_CASE("a spell go miss shows what the server says happened", "[replay]") {
         CHECK(types == std::vector<wowee::game::CombatTextEntry::Type>{type});
     }
 }
+
+// SMSG_LOGOUT_COMPLETE after a plain /logout: the stock client leaves the
+// world but keeps the session, and asks for the character list again for
+// character select. This client used to drop the connection and go back to
+// the login screen.
+TEST_CASE("a logout returns to character select on the same session", "[replay]") {
+    Session s;
+    s.socket().setConnected(true);
+    s.spawnPlayer({{UF::UNIT_FIELD_HEALTH, 181}, {UF::UNIT_FIELD_LEVEL, 9}});
+    REQUIRE(s.handler().getEntityManager().getEntity(Session::kPlayerGuid));
+
+    bool called = false, exiting = true;
+    s.handler().setLogoutCompleteCallback([&](bool e) { called = true; exiting = e; });
+    s.receive(wowee::network::Packet(
+        wowee::game::wireOpcode(wowee::game::Opcode::SMSG_LOGOUT_COMPLETE)));
+    REQUIRE(called);
+    CHECK_FALSE(exiting);
+
+    // What the application does with exiting == false.
+    s.handler().returnToCharacterSelect();
+    CHECK(s.handler().isConnected());
+    CHECK(s.handler().getState() == wowee::game::WorldState::CHAR_LIST_REQUESTED);
+    CHECK(s.sent().of(wowee::game::Opcode::CMSG_CHAR_ENUM).size() == 1);
+    CHECK_FALSE(s.handler().getEntityManager().getEntity(Session::kPlayerGuid));
+}
+
+TEST_CASE("a logout whose session has gone ends at the login screen", "[replay]") {
+    Session s;  // the test socket says it is not connected
+    s.handler().returnToCharacterSelect();
+    CHECK(s.handler().getState() == wowee::game::WorldState::DISCONNECTED);
+    CHECK(s.sent().of(wowee::game::Opcode::CMSG_CHAR_ENUM).empty());
+}

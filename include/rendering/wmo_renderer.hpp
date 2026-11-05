@@ -884,6 +884,10 @@ private:
         size_t nextTextureIndex = 0;
         size_t nextGroupIndex = 0;
         uint32_t loadedGroups = 0;
+        // textureCacheGeneration_ when this load started. `textures` (and the
+        // merged batches built from them) are raw pointers into textureCache;
+        // a load that outlives a cache clear must start again, not resume.
+        uint64_t textureGeneration = 0;
 
         [[nodiscard]] uint32_t getTotalTriangles() const {
             uint32_t total = 0;
@@ -1127,6 +1131,12 @@ private:
     std::unordered_map<std::string, TextureCacheEntry> textureCache;
     size_t textureCacheBytes_ = 0;
     uint64_t textureCacheCounter_ = 0;
+    // Bumped whenever textureCache is emptied (clearAll, shutdown): every
+    // VkTexture* handed out before then is gone. See ModelData::textureGeneration.
+    uint64_t textureCacheGeneration_ = 0;
+    // Destroys the GPU resources of the models part-way through a load and
+    // forgets them. Their texture pointers die with the cache they came from.
+    void dropLoadingModels(bool defer);
     size_t textureCacheBudgetBytes_ = 8192ull * 1024 * 1024;  // 8 GB default, overridden at init
     std::unordered_set<std::string> failedTextureCache_;
     std::unordered_map<std::string, uint64_t> failedTextureRetryAt_;

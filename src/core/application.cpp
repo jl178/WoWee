@@ -3231,7 +3231,7 @@ void Application::setState(AppState newState) {
                         if (window) window->setShouldClose(true);
                     } else {
                         LOG_INFO("Logout complete - returning to character select");
-                        logoutToLogin();
+                        logoutToCharacterSelect();
                     }
                 });
                 gameHandler->setKnockBackCallback([this](float vcos, float vsin, float hspeed, float vspeed) {
@@ -3413,16 +3413,34 @@ void Application::logoutToLogin() {
             LOG_INFO("Logout requested during render; deferring until frame completes");
         }
         logoutToLoginPending_ = true;
+        // A disconnect while a logout to character select waits wins: there
+        // is no session left to go back to.
+        logoutPendingToCharacterSelect_ = false;
         return;
     }
 
     performLogoutToLogin();
 }
 
+void Application::logoutToCharacterSelect() {
+    if (renderingFrame_) {
+        if (!logoutToLoginPending_) {
+            LOG_INFO("Logout requested during render; deferring until frame completes");
+            logoutPendingToCharacterSelect_ = true;
+        }
+        logoutToLoginPending_ = true;
+        return;
+    }
+
+    performLogoutToLogin(/*toCharacterSelect=*/true);
+}
+
 void Application::processDeferredLogoutToLogin() {
     if (!logoutToLoginPending_) return;
     logoutToLoginPending_ = false;
-    performLogoutToLogin();
+    const bool toCharacterSelect = logoutPendingToCharacterSelect_;
+    logoutPendingToCharacterSelect_ = false;
+    performLogoutToLogin(toCharacterSelect);
 }
 
 void Application::unloadInterface() {
@@ -3442,8 +3460,11 @@ void Application::unloadInterface() {
     addonsLoaded_ = false;
 }
 
-void Application::performLogoutToLogin() {
-    LOG_INFO("Logout requested");
+void Application::performLogoutToLogin(bool toCharacterSelect) {
+    LOG_INFO(toCharacterSelect ? "Logout to character select" : "Logout requested");
+    // Character select needs the session; one that has gone since the logout
+    // was asked for leaves only the login screen.
+    if (toCharacterSelect && !(gameHandler && gameHandler->isConnected())) toCharacterSelect = false;
 
     // The interface leaves the world with the character that was wearing it.
     //
@@ -3463,7 +3484,8 @@ void Application::performLogoutToLogin() {
     }
 
     if (gameHandler) {
-        gameHandler->disconnect();
+        if (toCharacterSelect) gameHandler->returnToCharacterSelect();
+        else gameHandler->disconnect();
     }
 
     // --- Per-session flags ---
@@ -3528,8 +3550,9 @@ void Application::performLogoutToLogin() {
     }
 
     // Clear stale realm/character selection so switching servers starts fresh
+    // (character select keeps its realm: the session is the same one).
     if (uiManager) {
-        uiManager->getRealmScreen().reset();
+        if (!toCharacterSelect) uiManager->getRealmScreen().reset();
         uiManager->getCharacterScreen().reset();
         // WOWEE_AUTO_RELOG=N, a test hook: the auto login and auto character
         // run again after a logout, up to N times, so a scripted tour
@@ -3539,10 +3562,14 @@ void Application::performLogoutToLogin() {
             if (relogs < std::atoi(v)) {
                 ++relogs;
                 LOG_WARNING("WOWEE_AUTO_RELOG: logging in again (", relogs, ")");
-                uiManager->getAuthScreen().rearmAutoLogin();
+                if (!toCharacterSelect) uiManager->getAuthScreen().rearmAutoLogin();
                 uiManager->getCharacterScreen().rearmAutoEnter();
             }
         }
+    }
+    if (toCharacterSelect) {
+        setState(AppState::CHARACTER_SELECTION);
+        return;
     }
     setState(AppState::AUTHENTICATION);
 
