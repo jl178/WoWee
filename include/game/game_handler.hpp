@@ -213,6 +213,12 @@ public:
      */
     void disconnect();
 
+    /// SMSG_LOGOUT_COMPLETE for a plain logout: the character is out of the
+    /// world but the session stays, as the stock client keeps it - the world
+    /// state is put down as disconnect() does, the socket is kept, and the
+    /// character list is asked for again (CMSG_CHAR_ENUM) for character select.
+    void returnToCharacterSelect();
+
     /**
      * Check if connected to world server
      */
@@ -4813,6 +4819,8 @@ private:
      * Fail connection with reason
      */
     void fail(const std::string& reason);
+    /// The per-world half of disconnect(), shared with returnToCharacterSelect().
+    void leaveWorldState();
     void updateAttachedTransportChildren(float deltaTime);
 
     // Explicit service dependencies (owned by Application)

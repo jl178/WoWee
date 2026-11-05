@@ -141,6 +141,10 @@ private:
 class SentPackets : public wowee::network::WorldSocket {
 public:
     void send(const wowee::network::Packet& packet) override { sent_.push_back(packet); }
+    // Not connected unless a test says so: a session that stays up past a
+    // logout is one that asks for this.
+    [[nodiscard]] bool isConnected() const override { return connected_; }
+    void setConnected(bool on) { connected_ = on; }
 
     // Everything sent with this opcode, oldest first.
     [[nodiscard]] std::vector<wowee::network::Packet> of(Opcode opcode) const {
@@ -152,6 +156,7 @@ public:
 
 private:
     std::vector<wowee::network::Packet> sent_;
+    bool connected_ = false;
 };
 
 // A client in the world as one character, ready for packets. WotLK unless
@@ -180,6 +185,7 @@ public:
 
     wowee::game::GameHandler& handler() { return handler_; }
     const SentPackets& sent() const { return *sent_; }
+    SentPackets& socket() { return *sent_; }
 
     void receive(const wowee::network::Packet& packet) {
         wowee::game::GameHandlerTestAccess::receive(handler_, packet);

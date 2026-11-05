@@ -1099,6 +1099,21 @@ size_t M2Renderer::evictUnreferencedTextures(size_t bytesNeeded) {
         freed += it->second.approxBytes;
         textureCacheBytes_ -= std::min(textureCacheBytes_, it->second.approxBytes);
         texturePropsByPtr_.erase(it->second.texture.get());
+        // An effect strip's set (spell chains, swing trails) names its
+        // texture by pointer and nothing above holds those: once this one is
+        // freed its address can come back as another texture, which would be
+        // handed this set and its destroyed view.
+        if (auto es = effectTexSets_.find(it->second.texture.get()); es != effectTexSets_.end()) {
+            VkDescriptorSet set = es->second;
+            effectTexSets_.erase(es);
+            VkDevice device = vkCtx_->getDevice();
+            VkDescriptorPool pool = materialDescPool_;
+            if (set && pool) {
+                vkCtx_->deferAfterAllFrameFences([device, pool, set]() mutable {
+                    vkFreeDescriptorSets(device, pool, 1, &set);
+                });
+            }
+        }
         // A command buffer submitted a frame or two ago may still be reading
         // it, so the texture outlives this call and dies once every frame slot
         // has fenced. std::function needs a copyable capture, hence the shared
