@@ -7,6 +7,7 @@
 #include "rendering/shadow_cache.hpp"
 #include "rendering/wmo_minimap.hpp"
 #include "rendering/stock_wmo_portal.hpp"
+#include "rendering/indoor_probes.hpp"
 
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/grass_clearing.hpp"
@@ -507,6 +508,21 @@ public:
     }
     void setInstanceNameSet(uint32_t instanceId, uint16_t nameSet);
 
+    /// Indoor light for units and doodads (E12, indoor_probes.hpp). On: each
+    /// interior group loaded from now on bakes its probe grid, and every
+    /// placed MODD doodad of an interior group takes part of the room's light
+    /// into its two colours (re-applied to the doodads already placed when
+    /// this changes). Off (stock): no grid is baked, the doodads keep the
+    /// stock MODD light, and sampleIndoorProbe is not asked.
+    void setIndoorProbes(bool on);
+    [[nodiscard]] bool indoorProbes() const { return indoorProbes_; }
+    /// The light a unit at `worldPos` takes indoors with the row on: false
+    /// when it is not inside a group lit as an interior. `colour` is the
+    /// stock colour (the building's, as character.frag takes it) moved toward
+    /// the room's (indoor_probe::unitColour); `leanWorld` which way the room
+    /// is brighter, world xy, |lean| <= kMaxLean.
+    bool sampleIndoorProbe(const glm::vec3& worldPos, glm::vec3& colour, glm::vec2& leanWorld) const;
+
     /**
      * Check if a position is inside an interior WMO group (flag 0x2000).
      * Used to dim M2 lighting for doodads placed indoors.
@@ -636,6 +652,9 @@ private:
 
         uint32_t groupFlags = 0;
         uint32_t wmoGroupId = 0;  ///< MOGP group id (global), see WMOGroup
+        /// The room light's probes (E12), model space; empty unless the row
+        /// was on when the group loaded and the group is a lit interior.
+        indoor_probe::Grid probe;
         /// MOGP trans / interior batch counts: MOBA runs A (trans), B
         /// (interior), C (exterior), and the stock client lights each kind
         /// differently (0x7ac9f0).
@@ -872,6 +891,9 @@ private:
         std::vector<uint16_t> doodadGroup;
         /// MODD colour per doodad (BGRA as read).
         std::vector<uint32_t> doodadColor;
+        /// MODD position per doodad, model space; only kept with the indoor
+        /// light row on at load (E12), for the doodads' room light.
+        std::vector<glm::vec3> doodadPos;
 
         // Set once the textures and materials below have been populated, so a
         // resumed load skips straight to the groups it has left.
@@ -937,6 +959,7 @@ private:
             uint32_t slot;
             uint32_t m2InstanceId;
             uint16_t fileGroup;
+            uint32_t moddIndex = 0xffffffffu;  ///< for re-lighting (setIndoorProbes)
             float radius = -1.0f;        ///< world radius, -1 until asked
             glm::vec3 localCenter{0.0f};
         };
@@ -1171,6 +1194,11 @@ private:
     bool pomEnabled_ = true;             // on by default
     float sidnNightFactor_ = -1.0f;      // see setSidnNightFactor
     bool streamFadeOn_ = false;          // see setStreamFadeIn
+    bool indoorProbes_ = false;          // see setIndoorProbes
+    /// A placed doodad's two colours: stock MODD light, or with the row on and
+    /// a grid for its group, moved toward the room's at its position.
+    void applyDoodadLight(const WMOInstance& inst, const ModelData& model, uint32_t moddIndex,
+                          uint16_t fileGroup, uint32_t m2InstanceId, uint32_t slot);
     float streamFadeClock_ = 0.0f;
     int pomQuality_ = 1;                 // 0=Low(16), 1=Medium(32), 2=High(64)
     bool materialSettingsDirty_ = false; // rebuild UBOs when settings change

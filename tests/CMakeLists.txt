@@ -1654,6 +1654,12 @@ wowee_add_test(test_phase2_motion
 wowee_add_test(test_phase2_surfaces
     SOURCES test_phase2_surfaces.cpp)
 
+# ── test_phase2_light ───────────────────────────────────────
+# Room light indoors (E12): the probe grid's bake, lookup and lean; contact
+# shadows (E14): the ray's steps and reach and the sun's share it takes.
+wowee_add_test(test_phase2_light
+    SOURCES test_phase2_light.cpp)
+
 # ── test_zone_ambience ─────────────────────────────────────────
 wowee_add_test(test_zone_ambience
     SOURCES test_zone_ambience.cpp

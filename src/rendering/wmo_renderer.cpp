@@ -1409,6 +1409,10 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                 }
             }
         }
+        if (indoorProbes_) {
+            modelData.doodadPos.resize(model.doodads.size());
+            for (size_t di = 0; di < model.doodads.size(); ++di) modelData.doodadPos[di] = model.doodads[di].position;
+        }
         for (size_t di = 0; di < model.doodads.size(); ++di) {
             const glm::vec4& c = model.doodads[di].color;
             const auto byte = [](float v) {
@@ -2775,7 +2779,7 @@ static void stockVertexColors(const pipeline::WMOGroup& group, uint32_t groupFla
 }
 
 bool WMORenderer::createGroupResources(const pipeline::WMOGroup& group, GroupResources& resources, uint32_t groupFlags,
-                                       const glm::vec3& /*mohdAmbient*/, uint16_t mohdFlags,
+                                       const glm::vec3& mohdAmbient, uint16_t mohdFlags,
                                        const pipeline::WMOModel* model) {
     if (group.vertices.empty() || group.indices.empty()) {
         return false;
@@ -2805,6 +2809,53 @@ bool WMORenderer::createGroupResources(const pipeline::WMOGroup& group, GroupRes
         vertices.push_back(vd);
     }
     stockVertexColors(group, groupFlags, mohdFlags, model, vertices);
+    // Indoor light (E12): the room's light probes, from the colours the stock
+    // unit sample would read here - MOCV x 2, clamped, plus the MOHD ambient
+    // under MOHD flag 2 (characters.md section 1, "Indoors") - over each
+    // triangle by its area, and the MODD doodads standing in the group, whose
+    // colour is on that scale already (a group's MODD average sits beside its
+    // MOCV x 2: Goldshire's inn 0.2-0.36 against 0.15-0.48).
+    if (indoorProbes_ && wmoGroupLitAsInterior(groupFlags) && (groupFlags & 0x4u) != 0) {
+        const glm::vec3 add = (mohdFlags & 0x2u) != 0 ? mohdAmbient : glm::vec3(0.0f);
+        std::vector<indoor_probe::Sample> samples;
+        samples.reserve(group.indices.size() / 3 + group.doodadRefs.size());
+        for (size_t i = 0; i + 2 < group.indices.size(); i += 3) {
+            const uint16_t a = group.indices[i], b = group.indices[i + 1], c = group.indices[i + 2];
+            if (a >= vertices.size() || b >= vertices.size() || c >= vertices.size()) continue;
+            const glm::vec3& pa = vertices[a].position;
+            const glm::vec3& pb = vertices[b].position;
+            const glm::vec3& pc = vertices[c].position;
+            const float area = 0.5f * glm::length(glm::cross(pb - pa, pc - pa));
+            if (!(area > 1e-4f)) continue;
+            const glm::vec3 col = (glm::vec3(vertices[a].color) + glm::vec3(vertices[b].color) +
+                                   glm::vec3(vertices[c].color)) * (2.0f / 3.0f) + add;
+            samples.push_back({(pa + pb + pc) / 3.0f, glm::clamp(col, glm::vec3(0.0f), glm::vec3(1.0f)),
+                               std::min(area, 25.0f)});
+        }
+        if (model) {
+            for (uint16_t ref : group.doodadRefs) {
+                if (ref >= model->doodads.size()) continue;
+                const auto& dd = model->doodads[ref];
+                samples.push_back({dd.position, glm::clamp(glm::vec3(dd.color), glm::vec3(0.0f), glm::vec3(1.0f)),
+                                   indoor_probe::kDoodadWeight});
+            }
+        }
+        resources.probe = indoor_probe::bake(samples, group.boundingBoxMin, group.boundingBoxMax);
+        static const bool kProbeDebug = envFlagEnabled("WOWEE_INDOOR_PROBE_DEBUG");
+        if (kProbeDebug) {
+            glm::vec3 mocv(0.0f), modd(0.0f);
+            float nm = 0.0f, nd = 0.0f;
+            for (const auto& v : vertices) { mocv += glm::vec3(v.color); nm += 1.0f; }
+            if (model) for (uint16_t ref : group.doodadRefs)
+                if (ref < model->doodads.size()) { modd += glm::vec3(model->doodads[ref].color); nd += 1.0f; }
+            if (nm > 0) mocv /= nm;
+            if (nd > 0) modd /= nd;
+            LOG_INFO("indoor probe: group ", group.wmoGroupId, " flags 0x", std::hex, groupFlags, std::dec,
+                     " dims ", resources.probe.dims.x, "x", resources.probe.dims.y, "x", resources.probe.dims.z,
+                     " mean ", resources.probe.mean.r, ",", resources.probe.mean.g, ",", resources.probe.mean.b,
+                     " mocv ", mocv.r, ",", mocv.g, ",", mocv.b, " modd(", nd, ") ", modd.r, ",", modd.g, ",", modd.b);
+        }
+    }
     resources.transBatchCount = group.batchCountA;
     resources.intBatchCount = group.batchCountB;
 
@@ -5693,13 +5744,80 @@ void WMORenderer::attachDoodad(uint32_t instanceId, uint32_t moddIndex, uint32_t
     }
     doodadVisible_[slot] = 1;
     inst.portalDoodads.push_back({slot, m2InstanceId, fileGroup});
+    inst.portalDoodads.back().moddIndex = moddIndex;
+    applyDoodadLight(inst, model, moddIndex, fileGroup, m2InstanceId, slot);
+}
 
+void WMORenderer::applyDoodadLight(const WMOInstance& inst, const ModelData& model, uint32_t moddIndex,
+                                   uint16_t fileGroup, uint32_t m2InstanceId, uint32_t slot) {
+    namespace sp = stock_wmo_portal;
+    if (!m2Renderer_ || moddIndex >= model.doodadColor.size() ||
+        fileGroup >= model.portalGraph.groupFlags.size()) return;
     // 0x7bf740: lit as an interior doodad unless its group is exterior or
     // exterior-lit; 0x7c1150 then gives it the MODD colour's two lights.
     const uint32_t groupFlags = model.portalGraph.groupFlags[fileGroup];
     const bool interior = sp::doodadLitAsInterior(groupFlags);
-    const sp::DoodadLight light = sp::doodadLight(model.doodadColor[moddIndex]);
+    sp::DoodadLight light = sp::doodadLight(model.doodadColor[moddIndex]);
+    // Indoor light (E12): part of the room's light where the doodad stands,
+    // put through the same split as its own colour.
+    if (indoorProbes_ && interior && moddIndex < model.doodadPos.size() &&
+        fileGroup < model.fileToLoaded.size() && model.fileToLoaded[fileGroup] >= 0) {
+        const auto& grid = model.groups[static_cast<size_t>(model.fileToLoaded[fileGroup])].probe;
+        if (!grid.empty()) {
+            const glm::vec3 room = indoor_probe::sample(grid, model.doodadPos[moddIndex] + glm::vec3(0.0f, 0.0f, 0.5f));
+            const glm::vec4 c = glm::clamp(glm::vec4(room, 1.0f), 0.0f, 1.0f);
+            const auto byte = [](float v) { return static_cast<uint32_t>(v * 255.0f + 0.5f); };
+            const sp::DoodadLight roomLight =
+                sp::doodadLight((byte(c.a) << 24) | (byte(c.r) << 16) | (byte(c.g) << 8) | byte(c.b));
+            light.ambient = glm::mix(light.ambient, roomLight.ambient, indoor_probe::kDoodadAmbientMix);
+            light.diffuse = glm::mix(light.diffuse, roomLight.diffuse, indoor_probe::kDoodadDiffuseMix);
+        }
+    }
+    (void)inst;
     m2Renderer_->setInstanceWmoDoodad(m2InstanceId, slot, interior, light.ambient, light.diffuse);
+}
+
+void WMORenderer::setIndoorProbes(bool on) {
+    if (on == indoorProbes_) return;
+    indoorProbes_ = on;
+    // The doodads already placed: back to the stock light, or to the room's
+    // where their model baked a grid.
+    for (const WMOInstance& inst : instances) {
+        auto it = loadedModels.find(inst.modelId);
+        if (it == loadedModels.end()) continue;
+        for (const auto& pd : inst.portalDoodads) {
+            applyDoodadLight(inst, it->second, pd.moddIndex, pd.fileGroup, pd.m2InstanceId, pd.slot);
+        }
+    }
+}
+
+bool WMORenderer::sampleIndoorProbe(const glm::vec3& worldPos, glm::vec3& colour, glm::vec2& leanWorld) const {
+    AreaHit hit;
+    if (!isInsideWMOGroups(worldPos.x, worldPos.y, worldPos.z, /*interiorOnly=*/false, nullptr, &hit)) return false;
+    if (!hit.interiorLit || hit.tightGroupIndex < 0) return false;
+    auto idxIt = instanceIndexById.find(hit.instanceId);
+    auto it = loadedModels.find(hit.modelId);
+    if (idxIt == instanceIndexById.end() || it == loadedModels.end()) return false;
+    const WMOInstance& inst = instances[idxIt->second];
+    const ModelData& model = it->second;
+    // The stock colour as the renderer hands it to character.frag
+    // (Renderer::updatePerFrameUBO): the building's MOHD ambient x 2, at
+    // least 0.35.
+    const glm::vec3 stock = glm::max(model.wmoAmbientColor * 2.0f, glm::vec3(0.35f));
+    colour = stock;
+    leanWorld = glm::vec2(0.0f);
+    if (static_cast<size_t>(hit.tightGroupIndex) >= model.groups.size()) return true;
+    const auto& grid = model.groups[static_cast<size_t>(hit.tightGroupIndex)].probe;
+    if (grid.empty()) return true;
+    const glm::vec3 local = glm::vec3(inst.invModelMatrix * glm::vec4(worldPos, 1.0f));
+    colour = indoor_probe::unitColour(stock, indoor_probe::sample(grid, local));
+    const glm::vec2 l = indoor_probe::lean(grid, local);
+    if (l.x != 0.0f || l.y != 0.0f) {
+        glm::vec3 w = glm::mat3(inst.modelMatrix) * glm::vec3(l, 0.0f);
+        const float s = inst.scale > 0.0f ? inst.scale : 1.0f;
+        leanWorld = glm::vec2(w) / s;
+    }
+    return true;
 }
 
 void WMORenderer::releasePortalDoodads(WMOInstance& inst) {

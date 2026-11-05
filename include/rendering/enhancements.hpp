@@ -44,6 +44,18 @@ struct Enhancements {
     /// Those lights, and the lamp halos, gutter like flame. Needs localLights
     /// or glowSprites to show.
     bool  lightFlicker = false;
+    /// A short ray toward the sun from each pixel near the camera finds the
+    /// small things the shadow map is too coarse for - a boot on the road, a
+    /// crate's foot, a mug on a table - and takes the sun's share of the
+    /// light away where it is blocked (contact_shadows.hpp, E14). Only with
+    /// `shadows`; off is the shadow map alone.
+    bool  contactShadows = false;
+    /// Units and doodads inside a building take the light of the room around
+    /// them, read from a grid of probes baked from the group's MOCV and MODD
+    /// colours at load: warm in a tavern, cold in a crypt, darker in a corner
+    /// (indoor_probes.hpp, E12). Off is the stock light: every unit lit by the
+    /// building's one colour, every doodad by its MODD colour.
+    bool  indoorLight = false;
     /// The sun's highlight on `_s` tilesets (stock CVar `specular`, default 0).
     bool  terrainSpecular = false;
     /// Generated normal maps on buildings and the ground.
