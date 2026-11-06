@@ -125,7 +125,7 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      // 3.14.
      .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "contact_shadows",
      .controls = "ContactShadowPass (built on first use): one full-screen pass after the "
-                 "scene closes, a short ray per pixel within 35 yd, dst * src",
+                 "scene closes, a short ray per pixel within 24 yd, dst * src",
      .enabledWhen = "shadows", .asBool = &Enhancements::contactShadows},
     {.key = "indoorlight", .label = "Room light indoors", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPage, .section = "",
@@ -150,7 +150,11 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPage, .section = "Surfaces",
      .tooltip = "Light stone, wood and metal by their surface texture,\n"
                 "so they catch the light like the real material, not flat paint.",
-     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "normal_mapping",
+     // Off in the recommended set (Jered, Nov 2026, enhancements-plan.md
+     // section 6): the 3.3.5 art ships no normal maps, these are generated
+     // from the colour texture, and he prefers the painted look. Parallax,
+     // drawn from the same generated maps, is off too (below).
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "normal_mapping",
      .controls = "normal map generation at texture load and the bump branch in "
                  "wmo/terrain .frag",
      .restartNote = "Turning this on reaches buildings loaded from now on;\nrestart to see it everywhere.",

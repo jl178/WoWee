@@ -303,8 +303,10 @@ private:
         bool  sharpStars     = true;
         int  antiAliasing    = 1;   // 0=Off 1=2x 2=4x 3=8x
         bool fxaa            = false;
-        bool normalMapping   = true;
-        bool pom             = true;
+        // Off, as the recommended set has them (generated relief is not the
+        // painted look; Jered, Nov 2026).
+        bool normalMapping   = false;
+        bool pom             = false;
         int  pomQuality      = 1;   // 0=Low 1=Medium 2=High
         int  upscalingMode   = 0;   // 0=Off 1=FSR1 2=FSR3
         int  groundClutter   = kDefaultGroundClutter; // 0-150

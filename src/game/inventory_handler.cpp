@@ -2362,57 +2362,19 @@ void InventoryHandler::completeItemUseOnItem(uint64_t targetItemGuid, bool confi
     // asked anyway, so disenchanting a bind-on-equip item put "Enchanting this
     // item will bind it to you" in front of a cast that turns it into dust.
     bool destroysTarget = false;
-    bool isDisenchant = false;
     if (pending.fromSpell) {
         const auto& cache = owner_.spellNameCacheRef();
         if (auto it = cache.find(pending.spellId); it != cache.end()) {
             destroysTarget = spellclass::destroysTargetItem(it->second.effectIds, 3);
-            isDisenchant = spellclass::hasDisenchantEffect(it->second.effectIds, 3);
         }
     }
 
-    // What it does ask instead, for a disenchant: the item is gone and there is
-    // no undoing it. The real client asks nothing here, and prospecting and
-    // milling keep that - they are spent five at a time from a stack, and a
-    // dialog for each would be in the way of the profession rather than a
-    // guard on it.
-    if (destroysTarget && isDisenchant && !confirmed) {
-        const uint32_t targetEntry = owner_.getItemEntryByGuid(targetItemGuid);
-        const auto* targetInfo = targetEntry ? owner_.getItemInfo(targetEntry) : nullptr;
-
-        // Only what can actually be taken apart. Disenchanting is uncommon and
-        // better weapons and armour and nothing else, and the server answers
-        // anything else with SPELL_FAILED_CANT_BE_DISENCHANTED - so asking
-        // "shall I destroy this?" about a bag or a potion is a question with no
-        // outcome behind it, and an alarming one to be asked while moving
-        // things around a bank.
-        //
-        // The pending target stays armed, which is what the real client does:
-        // the cursor is still waiting for something it can be used on, and the
-        // way out of it is escape or the right button.
-        constexpr uint32_t kItemClassWeapon = 2;
-        constexpr uint32_t kItemClassArmor  = 4;
-        constexpr uint32_t kQualityUncommon = 2;
-        const bool canDisenchant =
-            targetInfo && targetInfo->valid &&
-            targetInfo->quality >= kQualityUncommon &&
-            (targetInfo->itemClass == kItemClassWeapon ||
-             targetInfo->itemClass == kItemClassArmor);
-        if (!canDisenchant) {
-            owner_.raiseUiError("Item cannot be disenchanted");
-            return;
-        }
-
-        pendingItemTarget_.reset();
-        pendingEnchant_ = PendingEnchant{.active = true, .targetItemGuid = targetItemGuid, .request = pending};
-        if (owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()(
-                "WOWEE_DISENCHANT_CONFIRM",
-                {targetInfo && !targetInfo->name.empty() ? targetInfo->name
-                                                         : std::string("that item")});
-        }
-        return;
-    }
+    // Nothing is asked for one, as stock asks nothing (SpellTargetItem,
+    // 0x5210D0, docs/re/items.md): a disenchant is cast straight away and the
+    // server answers an item that cannot be taken apart with
+    // SPELL_FAILED_CANT_BE_DISENCHANTED. Wowee used to put its own "this will
+    // destroy it" prompt (WOWEE_DISENCHANT_CONFIRM) in front of it; Jered
+    // dropped that in Nov 2026.
 
     // Something permanent is already on it, and applying this destroys it.
     //

@@ -7675,40 +7675,10 @@ void LuaEngine::registerCoreAPI() {
         "  __WoweeLogWarning('missing XML template: ' .. tostring(name))\n"
         "end\n");
 
-    // "Disenchanting X will destroy it", which the real client does not ask and
-    // this one does: the item is gone and there is no undoing it. Raised from
-    // completeItemUseOnItem, which parks the cast until the answer comes back.
-    //
-    // The dialog is written at the moment it is shown rather than here, because
-    // staticpopup.lua assigns StaticPopupDialogs itself and loads long after
-    // this. The interface's own strings first - 3.3.5 has one that names
-    // disenchanting, 1.12 has the destroy line every client has - so it reads
-    // in the player's language wherever it can.
-    bootstrap(
-        "local destroyFrame = CreateFrame('Frame', '__WoweeDisenchantConfirm')\n"
-        "destroyFrame:RegisterEvent('WOWEE_DISENCHANT_CONFIRM')\n"
-        "destroyFrame:SetScript('OnEvent', function(self, event, itemName)\n"
-        "    local name = itemName or arg1 or 'that item'\n"
-        "    if not StaticPopupDialogs then return end\n"
-        "    local text = LOOT_NO_DROP_DISENCHANT and format(LOOT_NO_DROP_DISENCHANT, name)\n"
-        "    if not text then\n"
-        "        text = DELETE_ITEM and format(DELETE_ITEM, name)\n"
-        "    end\n"
-        "    StaticPopupDialogs['WOWEE_DISENCHANT_CONFIRM'] = {\n"
-        "        text = text or ('Disenchant ' .. name .. '?'),\n"
-        "        button1 = YES or OKAY or 'Yes', button2 = NO or CANCEL or 'No',\n"
-        "        OnAccept = function() __WoweeConfirmItemSpell() end,\n"
-        "        timeout = 0, exclusive = 1, showAlert = 1, hideOnEscape = 1,\n"
-        "    }\n"
-        "    StaticPopup_Show('WOWEE_DISENCHANT_CONFIRM')\n"
-        "end)\n"
-        "destroyFrame:Hide()\n");
-
     // The pet's talent reset, which staticpopup.lua declares nothing for. The
     // server asks with SMSG_PET_UNLEARN_CONFIRM and the cost; the answer goes
     // back through ConfirmPetUnlearn and CancelPetUnlearn. Written when shown,
-    // for the reason the disenchant prompt is: staticpopup.lua assigns
-    // StaticPopupDialogs after this runs.
+    // because staticpopup.lua assigns StaticPopupDialogs after this runs.
     bootstrap(
         "local petUnlearnFrame = CreateFrame('Frame', '__WoweePetUnlearnConfirm')\n"
         "petUnlearnFrame:RegisterEvent('CONFIRM_PET_UNLEARN')\n"
@@ -9089,13 +9059,6 @@ void LuaEngine::registerCoreAPI() {
         "    if not frame then return end\n"
         "    frame.offset = math.floor(value / (itemHeight or 1) + 0.5)\n"
         "    if updateFunction then updateFunction() end\n"
-        "end\n"
-        // SecureCmdOptionParse - parses conditional macros like [target=focus]
-        "function SecureCmdOptionParse(options)\n"
-        "    if not options then return nil end\n"
-        "    -- Simple: return the unconditional fallback (text after last semicolon or the whole string)\n"
-        "    local result = options:match(';%s*(.-)$') or options:match('^%[.*%]%s*(.-)$') or options\n"
-        "    return result\n"
         "end\n"
         // ChatFrame message group stubs
         "function ChatFrame_AddMessageGroup(frame, group) end\n"
@@ -10617,12 +10580,13 @@ bool LuaEngine::dispatchBindingInput(const std::string& key, bool shift, bool ct
     if (command.empty() || (clientActsOnBinding(command) && !interfaceRunsFirst(command)))
         return false;
     // An action button bound to run on the key's release - the stock timing,
-    // press shows the button pushed, release casts - can be made to act on
-    // the press instead with ActionButtonUseKeyDown, the CVar a later client
-    // added for exactly this (off, as 3.3.5a behaves). Down and up run back
-    // to back and the release does nothing more.
+    // press shows the button pushed, release casts - acts on the press
+    // instead while ActionButtonUseKeyDown is on, the CVar a later client
+    // added for exactly this. On by default here (Jered's choice; 3.3.5a
+    // casts on the release, which 0 restores). Down and up run back to back
+    // and the release does nothing more.
     if (bindingRunsOnUp(command) && isActionButtonBinding(command) &&
-        storedCVarValue("ActionButtonUseKeyDown", "0") != "0") {
+        storedCVarValue("ActionButtonUseKeyDown", kActionButtonUseKeyDownDefault) != "0") {
         if (!runBindingScript(command, true)) return false;
         (void)runBindingScript(command, false);
         heldBindings_[key] = {command, LUA_NOREF};

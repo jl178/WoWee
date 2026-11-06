@@ -257,9 +257,13 @@ seen to lag.
   poll still casts them when no interface binding took the key, and a pad
   button keeps the client's own path (cast on the press, with the
   shoulder-button page fallback).
-  `ActionButtonUseKeyDown` (a later client's CVar, default 0) makes the
-  press cast instead: down and up run back to back (`LuaEngine::
-  dispatchBindingInput`). Both new CVars answer GetCVar with 0.
+  `ActionButtonUseKeyDown` (a later client's CVar) makes the press cast
+  instead: down and up run back to back (`LuaEngine::
+  dispatchBindingInput`). **It defaults to 1** (Jered, Nov 2026:
+  `addons::kActionButtonUseKeyDownDefault`, what GetCVar, GetCVarDefault
+  and the dispatch all read), so action bars cast on key-down out of the
+  box; `/console ActionButtonUseKeyDown 0` is the stock key-up timing.
+  `SpellQueueWindow` answers GetCVar with 0.
 - **Cooldown and GCD checked before sending** (`SpellHandler::
   isSpellNotReady`, before the dismount and the ground cursor): refused
   with the table's line (`ERR_SPELL_COOLDOWN`/`ERR_ABILITY_COOLDOWN`/
@@ -462,14 +466,18 @@ Measured (lab server, paladin Wptestb, Holy Light, `WOWEE_INPUT_TRACE=1`):
 
 - **Pad buttons** bound to the action bar still cast on the press, from
   GameScreen's poll in the UI draw.
-- **Key-up casting is the stock timing and feels slower** than the press
-  casting Wowee had, by however long the key is held (here 80-120 ms).
-  `/console ActionButtonUseKeyDown 1` (SetCVar) restores press casting.
+- **Key-up casting is the stock timing and feels slower** than press
+  casting, by however long the key is held (here 80-120 ms). So this
+  client casts on the press by default (`ActionButtonUseKeyDown` 1, a
+  deliberate departure); `/console ActionButtonUseKeyDown 0` (SetCVar)
+  gives the stock release.
 - **SPELLMOD_GLOBAL_COOLDOWN** talents are not applied to the predicted GCD;
   the server's own GCD (`SMSG_SPELL_COOLDOWN` spell 0) still corrects it.
   Haste is read only on the 3.3.5a field layout.
 - **Category cooldowns** are not part of the client-side check; only the
   spell's own cooldown and the GCD are. The server still refuses those.
+- Charge moves nothing on the press: the dash is the server's spline for
+  the player (`unit-motion.md` section 6).
 - The melee range pre-check (8 yd "Out of range.") and Charge's checks are
   Wowee's own and were left.
 - `SpellStopCasting`'s first branch (0x800BA0, `+0x1858 & 4` -> 0x6E1660) is

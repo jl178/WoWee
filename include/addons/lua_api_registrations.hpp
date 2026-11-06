@@ -18,6 +18,10 @@ void registerLfgLuaAPI(lua_State* L);
 void registerSocketLuaAPI(lua_State* L);
 void registerSocialLuaAPI(lua_State* L);
 void registerSystemLuaAPI(lua_State* L);
+/// SecureCmdOptionParse, IsEquippedItemType, IsFlyableArea and the C functions
+/// Bindings.xml calls for movement, the camera views and debugging
+/// (lua_macro_api.cpp). Run from registerActionLuaAPI.
+void registerMacroBindingLuaAPI(lua_State* L);
 /// The battleground, arena and world state bindings (lua_battlefield_api.cpp).
 void registerBattlefieldLuaAPI(lua_State* L);
 /// The QuestPOI functions over the world map (lua_quest_api.cpp).
@@ -50,6 +54,13 @@ void applySoundCVarSideEffects(lua_State* L);
 /// is long before the interface loads. Returns the fallback when the file has
 /// no such key, so a fresh install gets the default rather than nothing.
 std::string storedCVarValue(const std::string& key, const std::string& fallback);
+
+/// ActionButtonUseKeyDown's default: on, so an action bar key casts on the
+/// press. Not a 3.3.5a CVar - stock casts on the release (runOnUp,
+/// docs/re/input-timing.md) and "0" still gives that - but Jered chose the
+/// press as this client's default (Nov 2026). One value for GetCVar,
+/// GetCVarDefault and the binding dispatch, so the panel and the keys agree.
+inline constexpr const char* kActionButtonUseKeyDownDefault = "1";
 
 /// Tell the CVar store that a setting it drives has been changed elsewhere.
 ///
