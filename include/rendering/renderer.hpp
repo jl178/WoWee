@@ -490,10 +490,16 @@ private:
     /// marked as needing a restart in the panel instead, which is what the
     /// original client does for the settings it cannot change live.
     uint32_t SHADOW_MAP_SIZE = 4096;
+    /// The quality level's side; the unit map is half of it. The kept world
+    /// map (SHADOW_MAP_SIZE) is twice it, up to 4096, since it is drawn only
+    /// when the player has walked or the sun has turned, not every frame
+    /// (docs/enhancements-plan.md 3.15).
+    uint32_t shadowLevelSide_ = 2048;
     void setShadowMapSize(uint32_t side) {
         // Powers of two between 512 and 4096: the quality slider has five
         // steps and these are they.
-        SHADOW_MAP_SIZE = std::clamp(side, 512u, 4096u);
+        shadowLevelSide_ = std::clamp(side, 512u, 4096u);
+        SHADOW_MAP_SIZE = shadowLevelSide_;
     }
     // Per-frame shadow resources: each in-flight frame has its own depth image and
     // framebuffer so that frame N's shadow read and frame N+1's shadow write don't

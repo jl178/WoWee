@@ -52,13 +52,16 @@ layout(push_constant) uniform Push {
 layout(location = 0) out vec4 outColor;
 
 const float kRayYards = 0.6;
-const int kSteps = 6;
-const float kMaxDistance = 35.0;
-const float kFadeYards = 12.0;
+const int kSteps = 8;          // along the ray, shared by the 2x2 quad
+const int kStepsPerPixel = 2;  // each pixel takes two of them
+const float kMaxDistance = 24.0;
+const float kFadeYards = 8.0;
 const float kThicknessYards = 0.35;
 const float kThicknessPerYard = 0.01;
 const float kEdgeYards = 0.15;
 const float kEdgePerYard = 0.03;
+const float kQuadDepthYards = 0.1;
+const float kQuadDepthPerYard = 0.02;
 
 float eyeDistance(float d) {
     return projection[3][2] / (d + projection[2][2]);
@@ -69,6 +72,14 @@ float ign(vec2 p) {
 }
 
 float lum(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+
+// The value `v` holds in the other pixel of this one's horizontal (or
+// vertical) pair of the 2x2 quad, from the fine derivative: the quad's four
+// pixels run together, and dFdxFine is the right pixel's value less the
+// left's. Every pixel of the quad must reach these calls (no discard or
+// divergent branch before them).
+float otherH(float v, bool odd) { float d = dFdxFine(v); return odd ? v - d : v + d; }
+float otherV(float v, bool odd) { float d = dFdyFine(v); return odd ? v - d : v + d; }
 
 void main() {
     ivec2 px = ivec2(gl_FragCoord.xy);
@@ -82,44 +93,64 @@ void main() {
     float dd = eyeDistance(d);
     float slope = max(abs(dFdx(dd)), abs(dFdy(dd)));
 
-    if (d >= 1.0) discard;  // sky
     float dist = dd;
-    if (dist > kMaxDistance || dist <= 0.0) discard;
-    // A silhouette: the quad spans two surfaces and its facing is neither's.
-    if (slope > kEdgeYards + kEdgePerYard * dist) discard;
     float nl2 = dot(n, n);
-    if (nl2 < 1e-12) discard;
-    n *= inversesqrt(nl2);
+    vec3 ldir = normalize(-lightDir.xyz);
+    n *= inversesqrt(max(nl2, 1e-24));
     vec3 toCam = viewPos.xyz - pos;
     if (dot(n, toCam) < 0.0) n = -n;
-    vec3 ldir = normalize(-lightDir.xyz);
     float ndotl = dot(n, ldir);
-    if (ndotl <= 0.05) discard;  // turned from the sun: no sun to take away
+    // Sky, past the reach, a silhouette (the quad spans two surfaces and its
+    // facing is neither's), or turned from the sun: nothing to take away.
+    // Such a pixel still runs to the quad exchange below, marching nothing.
+    bool marching = d < 1.0 && dist > 0.0 && dist <= kMaxDistance &&
+                  slope <= kEdgeYards + kEdgePerYard * dist && nl2 >= 1e-12 && ndotl > 0.05;
 
-    float thick = kThicknessYards + kThicknessPerYard * dist;
-    vec3 start = pos + n * (0.02 + 0.002 * dist);
-    float jitter = ign(gl_FragCoord.xy);
+    // The march is shared by the quad: pixel q of the four (by its position
+    // in the 2x2) takes steps q and q + 4 of eight, and the four then pool
+    // what they found - a quarter of the depth reads of every pixel marching
+    // all its own, with each pixel's own depth still deciding whether its
+    // neighbours' finding counts (a neighbour on another surface is not
+    // taken). Earlier steps weigh more, so the pooled value is the largest.
+    bool oddX = (px.x & 1) != 0, oddY = (px.y & 1) != 0;
+    int lane = (oddX ? 1 : 0) + (oddY ? 2 : 0);
     float occ = 0.0;
-    // The ray's ends in clip space: a point along a line is the same blend of
-    // its ends' clip coordinates, so each step is a mix and a divide, not a
-    // matrix.
-    vec4 c0 = projection * (view * vec4(start, 1.0));
-    vec4 c1 = projection * (view * vec4(start + ldir * kRayYards, 1.0));
-    for (int i = 0; i < kSteps; ++i) {
-        float t = (float(i) + 0.5 + 0.5 * jitter) / float(kSteps);
-        vec4 c = mix(c0, c1, min(t, 1.0));
-        if (c.w <= 0.0) break;
-        vec2 suv = c.xy / c.w * 0.5 + 0.5;
-        if (suv.x < 0.0 || suv.y < 0.0 || suv.x >= 1.0 || suv.y >= 1.0) break;
-        float sd = texelFetch(uSceneDepth, ivec2(suv * pc.target.xy), 0).r;
-        float behind = c.w - eyeDistance(sd);
-        if (behind > 0.02 && behind < thick) {
-            float ti = float(i) / float(kSteps);
-            occ = 1.0 - ti * ti;
-            break;
+    if (marching) {
+        float thick = kThicknessYards + kThicknessPerYard * dist;
+        vec3 start = pos + n * (0.02 + 0.002 * dist);
+        float jitter = ign(floor(gl_FragCoord.xy * 0.5));  // one per quad: its lanes interleave
+        // The ray's ends in clip space: a point along a line is the same
+        // blend of its ends' clip coordinates, so each step is a mix and a
+        // divide, not a matrix.
+        vec4 c0 = projection * (view * vec4(start, 1.0));
+        vec4 c1 = projection * (view * vec4(start + ldir * kRayYards, 1.0));
+        for (int k = 0; k < kStepsPerPixel; ++k) {
+            int i = lane + 4 * k;
+            float t = (float(i) + 0.5 + 0.5 * jitter) / float(kSteps);
+            vec4 c = mix(c0, c1, min(t, 1.0));
+            if (c.w <= 0.0) break;
+            vec2 suv = c.xy / c.w * 0.5 + 0.5;
+            if (suv.x < 0.0 || suv.y < 0.0 || suv.x >= 1.0 || suv.y >= 1.0) break;
+            float sd = texelFetch(uSceneDepth, ivec2(suv * pc.target.xy), 0).r;
+            float behind = c.w - eyeDistance(sd);
+            if (behind > 0.02 && behind < thick) {
+                float ti = float(i) / float(kSteps);
+                occ = 1.0 - ti * ti;
+                break;
+            }
         }
     }
-    if (occ <= 0.0) discard;
+    // Pool across the quad, horizontally then vertically (which reaches the
+    // diagonal too). An inactive pixel reports nothing; a neighbour further
+    // off in depth than a few inches is another surface and is not taken.
+    float tol = kQuadDepthYards + kQuadDepthPerYard * dist;
+    float ddA = marching ? dd : -1e6;
+    float oh = otherH(occ, oddX), dh = otherH(ddA, oddX);
+    float occH = max(occ, abs(dh - dd) < tol ? oh : 0.0);
+    float ov = otherV(occH, oddY), dv = otherV(ddA, oddY);
+    float occQ = max(occH, abs(dv - dd) < tol ? ov : 0.0);
+    occ = occQ;
+    if (!marching || occ <= 0.0) discard;
 
     float fadeT = clamp((kMaxDistance - dist) / kFadeYards, 0.0, 1.0);
     occ *= fadeT * fadeT * (3.0 - 2.0 * fadeT);

@@ -117,6 +117,8 @@ units on the main thread again (below); `WOWEE_LIGHT_TILE_MARGIN_TILE=1`
 culls the local lights to tiles by their box and a tile of margin, as before
 enhancements-plan.md 3.12; `WOWEE_SHADOW_D16=1` makes both shadow maps
 16-bit depth (an experiment: half the bytes behind every filter tap).
+`WOWEE_SHADOW_WORLD_SIDE_LEVEL=1` keeps the kept world map at the quality
+level's side instead of twice it (below).
 
 `WOWEE_SINGLE_THREAD_RECORD=1` splits the scene pass on Linux: each world
 pass gets its own timestamp (`terrain`, `wmo`, `characters`, `m2`, `water`),
@@ -158,7 +160,7 @@ Ultra distance on the Iris Xe, for a picture in which almost nothing moves.
   redraw to about a third of what the one map cost every frame.
 - **The unit map** (units, the 64 nearest whose shadow can be seen;
   doodads and transports that moved lately) is drawn every frame into a
-  per-slot image half the world map's side, over a fifth of the shadow
+  per-slot image half the quality level's side (a quarter of the world map's), over a fifth of the shadow
   distance either way (32-90 yd), centred on the player and snapped to its
   own grid. A unit's shadow lies in the capsule its bounds sweep down the
   sun's rays to 40 yards below the lowest of camera, player and unit; one
@@ -188,6 +190,42 @@ Ultra distance on the Iris Xe, for a picture in which almost nothing moves.
 - Every 30 s the log says how often the world map was drawn again and why,
   and how many casters the unit map took and how many mask cells they marked
   (`Shadow world map redraws: ...`).
+
+## Shadows at a player's window (2026-11-06)
+
+The figures above are from a 1251x986 test window at the Ultra columns. A
+player's 2560x1080 window has 2.2 times the pixels, and every per-pixel cost
+of the shadow rows scales with it: at Jered's settings (the default 2048
+quality level, 500 yd, FSR2 at native scale) the `shadows` row was +5.1 ms of
+GPU in Goldshire's road view and +4.5 in the Trade District at about 1 GHz,
+of which the contact shadow pass alone was 1.2 ms (enhancements-plan.md
+3.15). What it took:
+
+- **Bias in yards** (`sunShadow` in `shadow_filter.glsli`): the normal offset
+  was a uv texel used as a world length (a thousandth of a yard), the depth
+  bias a fixed share of the depth range. Both now come from the map's own
+  matrix: 2.5 texels x sin(angle) along the geometric normal, a quarter texel
+  of depth.
+- **The kept world map at twice the level's side** (up to 4096): it is drawn
+  only on a redraw, so its size costs memory (64 MB more at the default
+  level) and a redraw's fill, not a frame's. The unit map keeps half the
+  level's side.
+- **Soft is four bilinear compares** in a 1.5-texel square, no per-pixel
+  noise; **far pixels take one** where a screen pixel spans more than 1.5
+  texels of the world map (the pixel's angle rides in
+  `localLightTileScale.z`).
+- **Contact shadows march a quarter of the depth reads**: each pixel of a
+  2x2 quad takes two steps of eight and the quad pools them through fine
+  derivatives with a depth check; the reach is 24 yd. The pass was still
+  0.8 ms at 2560x1080 and 1.05 GHz, so the row is recommended off.
+
+After the first round (bias, map, filter, quad march): `shadows` +3.4 ms in
+Goldshire's road view and +3.0 in the Trade District at the same clock and
+window, the contact pass 0.8-1.0 ms. Measure at the player's window size, not
+only the test window: the A/B scripts in scratch `sh2/` (`pair.sh` runs the
+build before and after back to back, the "before" from a copy of its
+shaders) take the window the compositor gives, and a fullscreen run (the
+`fullscreen=1` setting) is the only way to get 2560x1080 here.
 
 ## The enhancement set's budget (2026-11-04)
 

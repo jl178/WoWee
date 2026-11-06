@@ -8,7 +8,8 @@
 //     mat4 nearLightSpaceMatrix;
 //     vec4 nearShadowParams;  // x on, y one texel (uv), z 1 / depth range (yd), w yards per texel
 //     uvec4 nearShadowMask[32];
-// and declare lightSpaceMatrix, shadowParams and localLightMeta. The terrain,
+// and declare viewPos, lightSpaceMatrix, shadowParams, localLightMeta and
+// localLightTileScale (z: the angle one screen pixel spans, radians). The terrain,
 // WMO, M2 and character fragment shaders share it, so the four filter alike.
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
@@ -23,18 +24,10 @@ float shadowTexel() {
     return shadowParams.z > 0.0 ? shadowParams.z : 1.0 / 4096.0;
 }
 
-// The Soft filter's taps lie on a disk turned per pixel by interleaved
-// gradient noise: a grid's penumbra is a staircase of the map's own texels,
-// and a rotated disk trades that for a fine grain the eye reads as a soft
-// edge.
-float shadowIgn(vec2 p) {
-    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
-}
-
 float shadowFilter(sampler2DShadow smap, vec3 coords, float t, bool stockOnly) {
     // The stock filter (Wow.exe 0x8742e0, docs/re/world-lighting.md "Shadow
     // map filter"): the centre and four fixed taps, k0 k2 k4 k6 in texels,
-    // equal weights. The rotated disk below is the Soft setting.
+    // equal weights. The tent below is the Soft setting.
     if (stockOnly || (localLightMeta.z & 8) == 0) {
         float s = texture(smap, coords)
                 + texture(smap, vec3(coords.xy + vec2( 0.8, -1.0) * t, coords.z))
@@ -43,24 +36,18 @@ float shadowFilter(sampler2DShadow smap, vec3 coords, float t, bool stockOnly) {
                 + texture(smap, vec3(coords.xy + vec2(-1.0, -0.4) * t, coords.z));
         return s * 0.2;
     }
-    // A Vogel (golden-angle) disk of five taps, r = sqrt((i + 0.5) / 5),
-    // i x 137.5 degrees, 1.5 texels across, turned per pixel by interleaved
-    // gradient noise: as many taps as the stock filter, and a soft edge
-    // where its fixed pattern leaves a stepped one. It was nine taps; each
-    // is a bilinear compare of four texels already, and the four more were
-    // up to a millisecond of the scene pass on the Iris Xe
-    // (enhancements-plan.md 3.9) for a slightly finer grain.
-    const vec2 kDisk[5] = vec2[5](
-        vec2( 0.3162,  0.0000), vec2(-0.4038,  0.3700), vec2( 0.0616, -0.7044),
-        vec2( 0.5093,  0.6638), vec2(-0.9343, -0.1647));
-    float a = 6.2831853 * shadowIgn(gl_FragCoord.xy);
-    float c = cos(a), s = sin(a);
-    mat2 rot = mat2(c, s, -s, c) * (1.5 * t);
-    float shadow = 0.0;
-    for (int i = 0; i < 5; ++i) {
-        shadow += texture(smap, vec3(coords.xy + rot * kDisk[i], coords.z));
-    }
-    return shadow / 5.0;
+    // Soft: four bilinear compares at the corners of a square 1.5 texels
+    // across - each one is a 2x2 compare already, so the four together are a
+    // smooth tent about 3.5 texels wide with no grain. It was five taps on a
+    // disk turned per pixel by screen-space noise; at a 2048 map over the
+    // 500 yd distance (half a yard a texel) that noise was a coarse speckle
+    // on every penumbra, and under FSR2's jitter it crawled. One tap fewer
+    // and no trigonometry (enhancements-plan.md 3.15).
+    vec2 o = vec2(0.75 * t);
+    return 0.25 * (texture(smap, vec3(coords.xy + vec2(-o.x, -o.y), coords.z))
+                 + texture(smap, vec3(coords.xy + vec2( o.x, -o.y), coords.z))
+                 + texture(smap, vec3(coords.xy + vec2(-o.x,  o.y), coords.z))
+                 + texture(smap, vec3(coords.xy + vec2( o.x,  o.y), coords.z)));
 }
 
 bool nearShadowCell(vec2 uv) {
@@ -76,33 +63,58 @@ bool nearShadowCell(vec2 uv) {
 }
 
 // How much of the sun reaches `pos` (1 lit, 0 shaded) on a surface facing
-// `norm`, `ldir` toward the sun. The caller checks shadowParams.x first.
-float sunShadow(vec3 pos, vec3 norm, vec3 ldir) {
-    float facing = 1.0 - abs(dot(norm, ldir));
+// `norm` (the surface's own normal, not a bumped one), `ldir` toward the sun.
+// The caller checks shadowParams.x first.
+//
+// Both maps are biased the same way, in yards: the receiver is moved along
+// its normal by the filter's reach in texels times sin(angle to the light),
+// which lifts it off its own plane by reach x tan(angle) of depth - exactly
+// what a tilted surface needs so that no tap of the filter reads the surface
+// itself - and a quarter of a texel of plain depth bias covers the depth's
+// own rounding. It was a normal offset of 1/2048 of a yard (a uv texel taken
+// for a world length) and a fixed depth bias of 0.16-1.6 yd at the 500 yd
+// distance whatever the map's size: acne on slopes facing the sun at the
+// 2048 map, and shadows lifted off their casters at grazing light.
+float shadowReceiverOffset(vec3 norm, vec3 ldir) {
+    float c = clamp(abs(dot(norm, ldir)), 0.0, 1.0);
+    return sqrt(1.0 - c * c);
+}
+
+// `far` true: one bilinear compare for the world map instead of the filter -
+// where a screen pixel already spans a texel and a half of the map, the
+// filter's width is below what the pixel shows, and the far half of a 2560-
+// wide view is most of its pixels (enhancements-plan.md 3.15).
+float sunShadowAt(vec3 pos, vec3 norm, vec3 ldir, bool far) {
     float shadow = 1.0;
+    float sinA = shadowReceiverOffset(norm, ldir);
 
     float t = shadowTexel();
-    vec3 biasedPos = pos + norm * (t * 2.0 * facing);
+    // The world map is orthographic: its first row's length is two over its
+    // width in yards, its third row's one over its depth in yards.
+    vec3 row0 = vec3(lightSpaceMatrix[0][0], lightSpaceMatrix[1][0], lightSpaceMatrix[2][0]);
+    vec3 row2 = vec3(lightSpaceMatrix[0][2], lightSpaceMatrix[1][2], lightSpaceMatrix[2][2]);
+    float texelYd = 2.0 * t / max(length(row0), 1e-9);
+    vec3 biasedPos = pos + norm * (texelYd * 2.5 * sinA);
     vec4 lsPos = lightSpaceMatrix * vec4(biasedPos, 1.0);
     vec3 proj = lsPos.xyz / lsPos.w;
     proj.xy = proj.xy * 0.5 + 0.5;
     if (proj.x >= 0.0 && proj.x <= 1.0 && proj.y >= 0.0 && proj.y <= 1.0 && proj.z >= 0.0 && proj.z <= 1.0) {
-        float bias = max(0.0005 * facing, 0.00005);
-        shadow = shadowFilter(uShadowMap, vec3(proj.xy, proj.z - bias), t, false);
+        float bias = 0.25 * texelYd * length(row2);
+        shadow = far ? texture(uShadowMap, vec3(proj.xy, proj.z - bias))
+                     : shadowFilter(uShadowMap, vec3(proj.xy, proj.z - bias), t, false);
     }
 
     // Already wholly in the world's shadow, a unit's can add nothing.
     if (nearShadowParams.x > 0.5 && shadow > 0.0) {
-        // Offset along the normal by a texel at grazing angles and biased by
-        // one to three texels of depth: the unit map's texels are a few
-        // inches, its depth range a few hundred yards.
-        vec3 nearPos = pos + norm * (nearShadowParams.w * facing);
+        // The same rule at the unit map's texel (nearShadowParams.w yards),
+        // for its stock five taps (about two texels of reach).
+        vec3 nearPos = pos + norm * (nearShadowParams.w * 2.5 * sinA);
         vec4 ns = nearLightSpaceMatrix * vec4(nearPos, 1.0);
         vec3 np = ns.xyz / ns.w;
         vec2 nuv = np.xy * 0.5 + 0.5;
         if (nuv.x >= 0.0 && nuv.x < 1.0 && nuv.y >= 0.0 && nuv.y < 1.0 && np.z >= 0.0 && np.z <= 1.0 &&
             nearShadowCell(nuv)) {
-            float nbias = nearShadowParams.w * nearShadowParams.z * (1.0 + 2.0 * facing);
+            float nbias = 0.5 * nearShadowParams.w * nearShadowParams.z;
             // Five taps whatever the setting: the unit map's texels are a
             // fifth of the world map's, so they are soft enough, and this is
             // the second filter these pixels pay for.
@@ -110,4 +122,17 @@ float sunShadow(vec3 pos, vec3 norm, vec3 ldir) {
         }
     }
     return shadow;
+}
+
+// The surfaces' entry. A pixel's footprint is its distance times the angle
+// one pixel spans (localLightTileScale.z, set every frame), grown on a
+// surface seen at a slant; no derivatives, so it is safe after a discard.
+float sunShadow(vec3 pos, vec3 norm, vec3 ldir) {
+    vec3 row0 = vec3(lightSpaceMatrix[0][0], lightSpaceMatrix[1][0], lightSpaceMatrix[2][0]);
+    float texelYd = 2.0 * shadowTexel() / max(length(row0), 1e-9);
+    vec3 toEye = viewPos.xyz - pos;
+    float dist = length(toEye);
+    float slant = max(abs(dot(norm, toEye)) / max(dist, 1e-4), 0.25);
+    float pixelYd = dist * localLightTileScale.z / slant;
+    return sunShadowAt(pos, norm, ldir, localLightTileScale.z > 0.0 && pixelYd > 1.5 * texelYd);
 }

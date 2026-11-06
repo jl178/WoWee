@@ -121,9 +121,11 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .tooltip = "A crisp shadow where small things touch the ground in\n"
                 "sunlight - feet, crates, a mug on a table - which the sun's\n"
                 "shadows are too coarse to show. Near the camera only.",
-     // Recommended by its measured cost and look: docs/enhancements-plan.md
-     // 3.14.
-     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "contact_shadows",
+     // Off in the recommended set (docs/enhancements-plan.md 3.15): at a
+     // 2560x1080 window the pass is 0.8 ms of GPU even with its march shared
+     // across each 2x2 quad, over its 0.5 ms, for a line of shade at feet
+     // and crates that Jered did not find worth it. It stays as an option.
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "contact_shadows",
      .controls = "ContactShadowPass (built on first use): one full-screen pass after the "
                  "scene closes, a short ray per pixel within 24 yd, dst * src",
      .enabledWhen = "shadows", .asBool = &Enhancements::contactShadows},

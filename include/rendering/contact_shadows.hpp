@@ -27,13 +27,29 @@ namespace contact_shadow {
 
 /// The ray's reach toward the sun, yards: a boot's height, a crate's edge.
 inline constexpr float kRayYards = 0.6f;
-/// Steps along it. Six taps of depth per pixel that gets past the early
-/// outs, jittered per pixel so the steps do not band.
-inline constexpr int kSteps = 6;
+/// Steps along it, shared by each 2x2 quad of pixels: pixel q of the four
+/// takes steps q and q + 4 (kStepsPerPixel depth reads), and the quad pools
+/// what they found, each pixel taking a neighbour's finding only when the
+/// neighbour's depth is within quadDepthTolerance of its own. Jittered per
+/// quad so the steps do not band. It was six reads in every pixel; the march
+/// is now a quarter of that at 2560x1080 (enhancements-plan.md 3.15).
+inline constexpr int kSteps = 8;
+inline constexpr int kStepsPerPixel = 2;
+static_assert(kSteps == 4 * kStepsPerPixel, "the quad's four pixels take every step once");
+inline constexpr float kQuadDepthYards = 0.1f;
+inline constexpr float kQuadDepthPerYard = 0.02f;
+inline float quadDepthTolerance(float viewDistance) {
+    return kQuadDepthYards + kQuadDepthPerYard * std::max(viewDistance, 0.0f);
+}
+/// The step (0-based) that pixel `lane` of the quad (x parity + 2 y parity)
+/// takes as its k-th.
+inline int quadStep(int lane, int k) { return std::clamp(lane, 0, 3) + 4 * std::clamp(k, 0, kStepsPerPixel - 1); }
 /// Pixels further than this from the camera are left alone; the last
-/// kFadeYards fade it out.
-inline constexpr float kMaxDistance = 35.0f;
-inline constexpr float kFadeYards = 12.0f;
+/// kFadeYards fade it out. It was 35 and 12: past about 20 yards a boot's
+/// contact line is a pixel or two at 1080 lines, and the pixels between 24
+/// and 35 yards were most of what a street view marched.
+inline constexpr float kMaxDistance = 24.0f;
+inline constexpr float kFadeYards = 8.0f;
 /// A depth sample counts as in the way when the ray point is behind it by
 /// more than the bias and less than the thickness (so a wall far behind a
 /// post does not shade the ground beside the post).

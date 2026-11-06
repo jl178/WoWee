@@ -328,7 +328,7 @@ void main() {
     // exterior groups of the no-MOCV and unified paths.
     float shadow = 1.0;
     if (shadowParams.x > 0.5 && (stockFlags & 16) != 0) {
-        shadow = sunShadow(FragPos, norm, normalize(-lightDir.xyz));
+        shadow = sunShadow(FragPos, vertexNormal, normalize(-lightDir.xyz));
         shadow = mix(1.0, shadow, shadowParams.y);
     }
     RtLight rt = rtLightAt(FragPos);
