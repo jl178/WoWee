@@ -20,6 +20,7 @@
 #include "ui/settings_schema.hpp"
 #include "imgui.h"
 #include "addons/lua_api_helpers.hpp"
+#include "addons/lua_api_registrations.hpp"
 #include "addons/chat_window_background.hpp"
 #include "ui/display_modes.hpp"
 #include "ui/widget_tree.hpp"
@@ -1035,9 +1036,10 @@ static void pushCvarDefault(lua_State* L, const std::string& n) {
     else if (n == "secureabilitytoggle") lua_pushstring(L, "0");
     // Not 3.3.5a CVars - later clients added them - but this client reads
     // them: an action bar key acting on the press rather than the release,
-    // and a spell queued that many ms before a cast ends. Off, which is how
-    // 3.3.5a behaves (docs/re/input-timing.md).
-    else if (n == "actionbuttonusekeydown") lua_pushstring(L, "0");
+    // and a spell queued that many ms before a cast ends. The press is this
+    // client's default (kActionButtonUseKeyDownDefault; 0 is the stock
+    // release); the queue is off, as 3.3.5a behaves (docs/re/input-timing.md).
+    else if (n == "actionbuttonusekeydown") lua_pushstring(L, kActionButtonUseKeyDownDefault);
     else if (n == "spellqueuewindow") lua_pushstring(L, "0");
     // Quest titles on the world map colour by difficulty out of the box, and a
     // quest whose progress changes starts being watched - both on in the real
@@ -6056,7 +6058,6 @@ void registerSystemLuaAPI(lua_State* L) {
             lua_pushboolean(L, stackable);
             return 1;
         }},
-                {"IsFlyableArea",            lua_ReturnFalse},
                 // The renderer knows whether the camera is inside a WMO, and
                 // the macro conditionals [indoors] / [outdoors] have read it
                 // all along. These two answered a flat false and a flat true.

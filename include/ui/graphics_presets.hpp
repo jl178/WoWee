@@ -65,15 +65,16 @@ struct GraphicsPresetValues {
 /// A preset's enhancements: the recommended set, with what the lower presets
 /// give up for speed.
 ///
-/// Normal mapping and parallax are on from Medium up, by choice: Jered
-/// prefers the lit relief on the ground and walls (docs/enhancements-plan.md
-/// section 6 leaves the question open). The 3.3.5 art ships no such maps -
-/// they are generated from the colour texture - so this is a deliberate
-/// departure; characters never use them, because generated maps embossed the
-/// composited skins. Low drops them, its mist to the light volume, and the
-/// shoreline foam and wet ground that cost a little on every water and ground
-/// pixel. The grass columns are the generator's own experiment and off on
-/// every row; their sliders stay at the values the presets always gave them.
+/// Normal mapping and parallax are off on every row, as in the recommended
+/// set: the 3.3.5 art ships no such maps - they are generated from the colour
+/// texture - and Jered chose the painted look (docs/enhancements-plan.md
+/// section 6, Nov 2026). Either is still a switch on the Enhancements page;
+/// the presets keep a bump strength and step count for when one is turned on.
+/// Characters never use them, because generated maps embossed the composited
+/// skins. Low also drops its mist to the light volume, and the shoreline foam
+/// and wet ground that cost a little on every water and ground pixel. The
+/// grass columns are the generator's own experiment and off on every row;
+/// their sliders stay at the values the presets always gave them.
 constexpr rendering::Enhancements presetEnhancements(int level /* 0 Low .. 3 Ultra */) {
     rendering::Enhancements e = recommendedEnhancements();
     // The sun's shadow map is on every step of the ladder: picking a preset
@@ -87,8 +88,6 @@ constexpr rendering::Enhancements presetEnhancements(int level /* 0 Low .. 3 Ult
     e.normalMapStrength = kBump[level];
     e.parallaxQuality = level <= 1 ? 0 : level - 1;
     if (level == 0) {
-        e.normalMapping = false;
-        e.parallax = false;
         e.lightShafts = 1;
         e.shorelineFoam = false;
         e.wetGround = false;
@@ -107,9 +106,10 @@ constexpr rendering::Enhancements presetEnhancements(int level /* 0 Low .. 3 Ult
 // relief, point lights on the ground, glow halos or flicker), with High's
 // quality columns at the default view distance, where the fog is Light.dbc's
 // own (LightingManager::kFogReferenceViewDistance). Its view distance stays at
-// that default rather than the stock clamp of 791.7 yards below map 530 - a
-// question left open for Jered (enhancements-plan.md section 6), since the fog
-// reference is tied to it.
+// that default rather than the stock clamp of 791.7 yards below map 530
+// (Jered, Nov 2026, enhancements-plan.md section 6); the View distance slider
+// still moves freely from 400 to 2400 under it, and the fog follows the far
+// clip down as stock's does (stock_light::frameFog).
 constexpr GraphicsPresetValues kGraphicsPresets[] = {
     /* Low    */ {.viewDistance = 600.0f,  .shadowDistance = 100.0f, .antiAliasing = 0, .fxaa = false, .groundClutter = 25,  .enh = presetEnhancements(0)},
     /* Medium */ {.viewDistance = 1000.0f, .shadowDistance = 200.0f, .antiAliasing = 1, .fxaa = false, .groundClutter = 60,  .enh = presetEnhancements(1)},

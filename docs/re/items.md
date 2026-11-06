@@ -178,15 +178,18 @@ answer, which still meets the replace question; ReplaceEnchant casts.
   raised on Okay).
 - UseContainerItem had no auction-house or trade branch: a right-click there
   used the item.
-- Disenchanting asks a confirmation of Wowee's own
-  (WOWEE_DISENCHANT_CONFIRM). Stock asks nothing; left in place as a
-  deliberate deviation, see Gaps.
+- Disenchanting asked a confirmation of Wowee's own
+  (WOWEE_DISENCHANT_CONFIRM), with a local "Item cannot be disenchanted"
+  check in front of it. Stock asks nothing.
 
 ### Now
 The three questions above, in stock order and with stock arguments
 (`InventoryHandler::completeItemUseOnItem`, staged through
 `PendingEnchant::nextStage`); EndRefund/EndBoundTradeable answer them;
 ReplaceTradeEnchant is defined. Auction and trade right-clicks as stock.
+Disenchanting is cast with no question, as stock: Wowee's prompt, its
+event, `__WoweeConfirmItemSpell` and the local check went (Jered, Nov
+2026); the server answers an item that cannot be taken apart.
 
 ## 4. Item cooldowns
 
@@ -312,9 +315,6 @@ ctest: `item_query_layout` pins the three item-spell cooldown words.
 
 ## Gaps
 
-- WOWEE_DISENCHANT_CONFIRM (Wowee's own "this will destroy it" prompt before a
-  disenchant) is kept; stock asks nothing. A deliberate deviation for Jered
-  to keep or drop.
 - A right-click equip does not lift the item onto the cursor while
   AUTOEQUIP_BIND is up (stock 0x6DFEE0 does); the prompt and the equip are
   stock.

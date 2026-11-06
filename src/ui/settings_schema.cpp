@@ -54,10 +54,17 @@ constexpr SettingDesc kSchema[] = {
      "How far away things still cast shadows, in yards. The shadow map\n"
      "covers this whole range, so a shorter distance also gives sharper\n"
      "shadows close to you.", "", 300, "shadows"},
+    // A slider over the whole range the renderers clamp to, under every
+    // preset Classic included: a preset sets it, it does not hold it (moving
+    // it reads Custom). 1900 is the default by Jered's choice (Nov 2026); the
+    // stock far clip is in the tooltip, and the fog closes in with a shorter
+    // distance as stock's does (stock_light::frameFog: it ends by the far clip).
     {"viewdistance", "View distance", SettingKind::Float, 400, 2400, 50, "Graphics", "View",
      "How far into the distance the world is drawn, in yards. The single\n"
      "largest cost in the picture: terrain, buildings and creatures are all\n"
-     "drawn to this range.", "", 1900},
+     "drawn to this range, and the fog closes in with it.\n"
+     "The original game stopped at 791.7 yards in Azeroth and Kalimdor\n"
+     "and 1583.3 in Outland and Northrend; this client draws to 2400.", "", 1900},
     // It used to be left out, deferred to the Effects panel of the game's own
     // Video options - as were ground clutter, its radius, brightness,
     // particle and weather detail, environment detail and texture filtering.

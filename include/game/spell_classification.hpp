@@ -198,16 +198,6 @@ inline bool destroysTargetItem(const uint32_t* effectIds, size_t count) {
     return false;
 }
 
-/// Disenchant in particular, which is the one this client asks about first.
-inline bool hasDisenchantEffect(const uint32_t* effectIds, size_t count) {
-    constexpr uint32_t kSpellEffectDisenchant = 99;
-    if (!effectIds) return false;
-    for (size_t i = 0; i < count; ++i) {
-        if (effectIds[i] == kSpellEffectDisenchant) return true;
-    }
-    return false;
-}
-
 /// Spell.dbc stores the rank as a display string ("Rank 3"). Rankless spells sort as 0.
 inline int rankValue(const std::string& rank) {
     int value = 0;

@@ -459,6 +459,9 @@ TEST_CASE("the login screen starts where the schema says", "[settings]") {
         {"fogstrength", "fogStrength"},
         {"parallaxquality", "pomQuality"},
         {"upscaling", "upscalingMode"},
+        {"normalmapping", "normalMapping"},
+        {"parallax", "pom"},
+        {"sharpstars", "sharpStars"},
     };
 
     std::size_t count = 0;
@@ -473,7 +476,7 @@ TEST_CASE("the login screen starts where the schema says", "[settings]") {
         INFO(key << " is not in the schema any more, so this pairing is stale");
         REQUIRE(desc != nullptr);
 
-        const std::regex init(std::string("\\b") + field + R"(\s*=\s*([-0-9.]+)f?\s*;)");
+        const std::regex init(std::string("\\b") + field + R"(\s*=\s*([-0-9.]+|true|false)f?\s*;)");
         std::smatch m;
         INFO("LoginGraphicsState has no plain initialiser for " << field);
         REQUIRE(std::regex_search(body, m, init));
@@ -481,7 +484,9 @@ TEST_CASE("the login screen starts where the schema says", "[settings]") {
         INFO(key << ": the schema starts at " << desc->defaultValue
                  << " and the login screen's " << field << " starts at " << m[1].str());
         // As floats: the schema holds 0.4f, which is not the double 0.4.
-        CHECK(std::stof(m[1].str()) == desc->defaultValue);
+        const std::string text = m[1].str();
+        const float value = text == "true" ? 1.0f : text == "false" ? 0.0f : std::stof(text);
+        CHECK(value == desc->defaultValue);
     }
 }
 

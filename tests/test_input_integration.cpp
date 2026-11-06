@@ -150,14 +150,27 @@ TEST_CASE_METHOD(Integration, "Real Lua binding scripts latch their command and 
     CHECK_FALSE(lua.dispatchBindingInput("BUTTON3", false, false, false, false));
 }
 
+namespace {
+// The CVar store is the process's, so a test that sets the CVar puts the
+// default back however it leaves.
+struct KeyDownCVar {
+    explicit KeyDownCVar(const char* value) { addons::setStoredCVar("ActionButtonUseKeyDown", value); }
+    ~KeyDownCVar() {
+        addons::setStoredCVar("ActionButtonUseKeyDown", addons::kActionButtonUseKeyDownDefault);
+    }
+};
+} // namespace
+
 TEST_CASE_METHOD(Integration, "Action bar keys run their Bindings.xml scripts: pushed on press, cast on release", "[input][lua][timing]") {
     // 3.3.5a's ACTIONBUTTONn is runOnUp: ActionButtonDown pushes the button,
     // ActionButtonUp casts. They run in the pump like any interface binding,
-    // not from the client's late-frame poll (docs/re/input-timing.md).
+    // not from the client's late-frame poll (docs/re/input-timing.md). The
+    // stock timing is ActionButtonUseKeyDown 0; this client's default is 1.
     CHECK(addons::LuaEngine::interfaceRunsFirst("ACTIONBUTTON1"));
     CHECK(addons::LuaEngine::interfaceRunsFirst("MULTIACTIONBAR1BUTTON12"));
     CHECK(addons::LuaEngine::interfaceRunsFirst("SHAPESHIFTBUTTON1"));
     CHECK_FALSE(addons::LuaEngine::interfaceRunsFirst("MOVEFORWARD"));
+    const KeyDownCVar stock("0");
     REQUIRE(manager.setBinding("1", "ACTIONBUTTON1"));
     run(R"lua(
         calls = {}
@@ -168,6 +181,34 @@ TEST_CASE_METHOD(Integration, "Action bar keys run their Bindings.xml scripts: p
     truth("#calls == 1 and calls[1] == 'down'");
     REQUIRE(lua.dispatchBindingInput("1", false, false, false, false));
     truth("#calls == 2 and calls[2] == 'up'");
+}
+
+TEST_CASE_METHOD(Integration, "Action bar keys cast on the press by default", "[input][lua][timing]") {
+    // ActionButtonUseKeyDown is on unless the player turns it off: the press
+    // runs down and up back to back, and the release adds nothing. GetCVar
+    // and GetCVarDefault say so, so the interface's own option shows it.
+    truth("GetCVar('ActionButtonUseKeyDown') == '1'");
+    truth("GetCVarDefault('ActionButtonUseKeyDown') == '1'");
+    truth("GetCVarBool('ActionButtonUseKeyDown')");
+    REQUIRE(manager.setBinding("1", "ACTIONBUTTON1"));
+    run(R"lua(
+        calls = {}
+        __WoweeBindingScripts.ACTIONBUTTON1 = function(state) table.insert(calls, state) end
+        __WoweeBindingRunOnUp.ACTIONBUTTON1 = true
+    )lua");
+    REQUIRE(lua.dispatchBindingInput("1", false, false, false, true));
+    truth("#calls == 2 and calls[1] == 'down' and calls[2] == 'up'");
+    REQUIRE(lua.dispatchBindingInput("1", false, false, false, false));
+    truth("#calls == 2");
+
+    // And 0 takes it back to the release, from SetCVar as a player would.
+    const KeyDownCVar restore(addons::kActionButtonUseKeyDownDefault);
+    run("SetCVar('ActionButtonUseKeyDown', '0')");
+    truth("GetCVar('ActionButtonUseKeyDown') == '0'");
+    REQUIRE(lua.dispatchBindingInput("1", false, false, false, true));
+    truth("#calls == 3 and calls[3] == 'down'");
+    REQUIRE(lua.dispatchBindingInput("1", false, false, false, false));
+    truth("#calls == 4 and calls[4] == 'up'");
 }
 
 TEST_CASE_METHOD(Integration, "Tab runs TargetNearestEnemy from the key event", "[input][lua][timing]") {

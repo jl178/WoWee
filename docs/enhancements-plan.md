@@ -114,21 +114,21 @@ The reasons follow the table.
 | 5 | Screen-space sun shafts | `sun_shafts.cpp` | `sunshafts` | on | off | off |
 | 6 | Lens flare | `lens_flare.cpp` | `lensflare` | 1.0 | 0 | 0 |
 | 7 | Sharp point stars | `starfield.cpp` | `sharpstars` | on | off | off (taste; see note) |
-| 8 | Generated normal maps | `normal_map.cpp`, wmo/m2/terrain .frag | `normalmapping`, `normalmapstrength` | on, 0.8 | off | on, per Jered's stated preference (note) |
-| 9 | Generated parallax | same | `parallax`, `parallaxquality` | on, Medium | off | off since 3.11 (about 1 ms of the set's 3); was "follows 8" |
+| 8 | Generated normal maps | `normal_map.cpp`, wmo/m2/terrain .frag | `normalmapping`, `normalmapstrength` | off, 0.8 | off | off (Jered, Nov 6: the painted look) |
+| 9 | Generated parallax | same | `parallax`, `parallaxquality` | off, Medium | off | off (3.11 for the budget; Jered, Nov 6, with 8) |
 | 10 | Shoreline foam | `water.frag` (`shorelineFoam`), depth copy | `shorelinefoam` | on | off | on |
 | 11 | Wet ground in rain | `wet_surface.glsli` | `wetground` | on | off | on |
-| 12 | Sky reflection on water | `water.frag`, reflection pass | `waterreflections` | off | **not set** | off (open decision for Jered) |
+| 12 | Sky reflection on water | `water.frag`, reflection pass | `waterreflections` | off | **not set** | off; stays an option (Jered, Nov 6) |
 | 13 | Swim spray, wake froth, bubbles, reed midges | `swim_effects.cpp`, `water_renderer` wake | `watersplashes` | off | **not set** | split: wakes and spray on, midges off (note) |
 | 14 | GPU grass blades | `grass_renderer.cpp` | `grassenabled` + 3 sliders | off | off | off (experimental) |
 | 15 | Ray traced sun shadow, occlusion, bounce | `rt_lighting.cpp`, `rt_*.comp` | `raytracedlighting` | off | **not set** | off |
 | 16 | Fog thickness and fog sky blend | `LightingManager` | `fogstrength`, `fogskyblend` | 1, 0 | 1, 0 | 1, 0 (stock) |
 | 17 | Grass/clutter density above 100% | terrain manager | `groundclutter` | 70 | 100 | stock value (note) |
-| 18 | View distance beyond the stock far clip (stock UI 177-1277, clamped to 791.7 on maps below 530) | terrain, M2, WMO | `viewdistance` | 1900 | 1900 | 1900, with the WDL horizon (E11) |
+| 18 | View distance beyond the stock far clip (stock UI 177-1277, clamped to 791.7 on maps below 530) | terrain, M2, WMO | `viewdistance` | 1900 | 1900 | 1900, with the WDL horizon (E11); a 400-2400 slider under every preset (Jered, Nov 6) |
 | 19 | Camera follow speed, pivot height, smooth follow, idle orbit | `camera_controller.cpp` | `camerastiffness`, `pivotheight`, `smoothfollow`, `idleorbit` | 30, 1.6, off, off | n/a | verify 30/1.6 reproduce stock (note) |
 | 20 | Camera shake scale | camera controller | `camerashake` | 1.0 | n/a | 1.0 (stock) |
 | 21 | Low health red vignette (Wowee's own HUD effect) | game screen | `lowhealthvignette` | on | n/a | off; stock has `screenEdgeFlash` |
-| 22 | Wowee soundtrack in the music rotation | `ZoneMusicController` | `woweemusic` | schema 1, field `pendingUseOriginalSoundtrack = false` | n/a | off; fix the disagreement |
+| 22 | Wowee soundtrack in the music rotation | `ZoneMusicController` | `woweemusic` | off (schema, field and login screen agree) | n/a | off (Jered, Nov 6) |
 | 23 | MSAA 2x, FXAA, FSR 1/3, frame generation | `post_process_pipeline.cpp` | `antialiasing`, `fxaa`, `upscaling` ... | 2x, off, off | 4x | 2x (MSAA is a stock option) |
 | 24 | Anisotropic filtering | `VkContext::getOrCreateSampler` | `texturefiltering` | 16x | n/a | 16x (stock option) |
 
@@ -145,8 +145,9 @@ Notes:
   (shafts Low) and Ultra.
 - **8 and 9, generated relief.** The 3.3.5 art is hand-painted with the light
   in the texture; generated normal maps emboss that paint a second time. By
-  rule 4 this would default off. `graphics_presets.hpp` records that Jered
-  prefers it on, so it stays on. Listed under "For Jered to decide".
+  rule 4 this would default off, and it does: Jered chose the painted look
+  (Nov 6, section 6), so both are off in the recommended set and the
+  presets.
 - **13, splashes.** Wakes and spray at the swimmer are motion on existing
   surfaces and fit the rules. Midges over reeds add creatures that are not in
   the zone data. Split the row into "Splashes and wakes" (on) and "Insects
@@ -1428,7 +1429,17 @@ stock, the budget, and how to verify.
   of more than 0.6 rad in one frame likewise becomes a yaw offset decaying
   over 0.08 s (the stock body ease, `stepBodyFacing`, already turns
   everything smaller). `getModelMatrix` draws the offsets; the unit's real
-  position (selection, range, nameplates, the blob) is untouched. In
+  position (selection, range, nameplates, the blob) is untouched.
+  **Changed 2026-11-06:** with the stock unit motion (WotLK) a step is no
+  longer guessed from the drawn velocity: the motion reports its
+  corrections (a remote packet applied where dead reckoning did not have
+  the unit, a monster move that placed it, a ground path's sideways step;
+  `Entity::takeMotionCorrection`, `remote_smoothing::stepReported`) and
+  only those glide. The guess read a charge's start (0 to 28 yd/s in a
+  frame) as a step behind and its stop as a step ahead: the charger lagged
+  up to 2 yd, then overshot the end and slid back - a rubber band of the
+  row's own making (`unit-motion.md` section 6). The guess stays for the
+  older expansions' interpolation. In
   `beginSequenceBlend`, another unit's switch between two locomotion
   sequences (Stand, SwimIdle and the moving animations other than the
   jumps) fades over at least 150 ms where the sequence's own blendTime is
@@ -1942,25 +1953,36 @@ The rest (E6, E9, E11-E22) waits for after Friday. Each new item goes into
 
 ## 6. For Jered to decide
 
-- Generated normal maps and parallax on by default (2.1 #8, #9): keep, or
-  default off for the painted look? (Parallax and soft particles are off in
-  the recommended set since 3.11, for the budget; either can come back at
-  about 1 ms of GPU and 0.2 ms of CPU respectively.)
-- The set is inside its budget in the Trade District (+1.0 ms GPU / +0.2
-  CPU) and now Dalaran (+0.4 CPU, the unit map recorded on a worker; 3.12),
-  but Goldshire's road view is still over on GPU for a player alone on the
-  machine: +6.3 ms (+3.3 when the memory runs fast, 3.12). Taking the local
-  lights out of the recommended set (+3.3 of it there; the stock four
-  nearest lights take over) would bring it to about +3.0; the sun shadows
-  (-1.6) would not be enough on their own. Take the local lights out, or
-  raise the budget for forest views?
-- Volumetric mist, sun shafts, lens flare and sharp stars off on a fresh
-  install, on from High: agree?
-- Water sky reflection (stock has none): stays off by default.
-- Midges over water split from splashes and off by default: agree?
-- Low health vignette off by default, leaving the stock edge flash: agree?
-- Wowee soundtrack off by default (the schema and the field disagree today).
-- Classic preset view distance: 1900 (today) or the stock clamp (791.7
-  below map 530)? The fog's reference distance is tied to 1900
-  (`LightingManager::kFogReferenceViewDistance`), so changing it needs the
-  fog checked again.
+All decided by Jered on Nov 6:
+
+- **Generated normal maps and parallax** (2.1 #8, #9): **off** by default,
+  for the painted look. `normalmapping` is off in the recommended set and,
+  since the quality presets start from it, in every preset (Low to Ultra);
+  `parallax` was already off (3.11). Both stay switches on the page.
+- **The budget and Goldshire's road view** (+6.3 ms GPU, 3.12): the torch
+  and lamp light (`locallights`) **stays on** in the recommended set; the
+  forest view stays over the budget.
+- **Volumetric mist, sun shafts, lens flare, sharp stars**: left as they
+  are.
+- **Water sky reflection** (stock has none): **stays an option, off by
+  default.**
+- **Midges over water** split from splashes and off by default: left as
+  they are.
+- **Low health vignette**: left as it is.
+- **Wowee soundtrack**: **off by default.** The row, `Enhancements::
+  woweeMusic`, `ZoneManager` and the login screen's flag all start off.
+- **Classic preset view distance**: **1900**, as today, so the fog keeps
+  its reference distance (`LightingManager::kFogReferenceViewDistance`).
+  The View distance slider (Graphics page of Video options) runs 400-2400
+  under every preset, Classic included - a preset sets it and moving it
+  reads Custom - and its tooltip gives the stock far clip (791.7 yards
+  below map 530, 1583.3 from 530, docs/re/terrain.md). Lowering it looks as
+  stock's does: the fog's end is the smaller of Light.dbc's and the far
+  clip (0x7f16f0, `stock_light::frameFog`), its start that fraction of the
+  end, and from map 530 on the end is the far clip and its exponent is
+  read against it (`stock_light::lightFog`). So the fog closes in with the
+  distance and the world never stops short of it.
+- Outside this page: action bars cast on key-down by default
+  (`ActionButtonUseKeyDown` 1, docs/re/input-timing.md), Wowee's disenchant
+  prompt is gone (docs/re/items.md), and the Captured Valgarde Child stays
+  white, as stock draws it.

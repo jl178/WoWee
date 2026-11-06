@@ -48,35 +48,12 @@ Review the wowpack plan against the new client and write the next steps.
 
 Each hourly run appends one line: time, what moved, commit.
 
-## Never idle
-
-If every listed item is done or blocked before Friday, do not wait. Each
-hourly run makes sure at least two agents are working. When the list runs
-dry, audit the client against stock for new gaps (play a test character
-through quests, dungeons, cities, flight paths and PvP areas, and compare
-with the RE specs). Add new enhancement ideas with toggles, and wowpack work
-(builder, Tol Barad module, Wowee sync). Add each new item to this file
-before starting it.
 - Nov 2 morning: positional sound fix committed (pan restored, row distances). Particles agent running.
 - Nov 2 morning: unit/item particles + ParticleColor committed (f6866a1). Found Firelord drawn with pale human skin; skin agent started. Collision/step/swim agent running.
 - Nov 2 07:08: collision and skin agents running; started fog-shader agent (particles, ribbons, weather).
 - Nov 2 ~08:20: stock collision box, step and swim committed. Fog and skin agents running.
 - Nov 2 ~08:40: stock fog curve fix + particle/ribbon/rain fog committed. Skin and sound agents running.
-- Nov 2 ~08:40: stock fog curve fix + particle/ribbon/rain fog committed. Skin and sound agents running.
 - Nov 2 ~09:00: creature skin/geoset rule committed (~150 batches fixed, audit tool). Sound agent running.
-
-## For Jered to decide
-
-- Captured Valgarde Child (display 19092) names `DraeneiMaleKid_01.`; the shipped
-  file is `DraeneiMaleKid_01..blp`. The stock extension rule finds nothing and draws
-  white, so we now draw white too. Revert to finding the file?
-- Water sky reflection: stock has none. Ours still does.
-- wowpack: open upstream PRs to Kelsidavis/wowee for the sync feature, or delete the `wowpack-sync` branch? (Rule so far: no PRs outside jl178.)
-- wowpack: Jered to test `patch-Z.MPQ` with stock Wow.exe on Windows.
-- Enhancement defaults (docs/enhancements-plan.md section 6): generated normal maps on or off? Mist, sun shafts, lens flare, sharp stars off on fresh install? Low-health vignette and Wowee soundtrack off by default? Classic view distance 1900 or the stock clamp 791.7?
-- Action bars now cast on key-up like stock 3.3.5a. Keep, or set ActionButtonUseKeyDown=1 by default (cast on key-down, as later WoW does)?
-- Wowee asks before disenchanting (stock asks nothing). Keep the prompt?
-- wowpack: deploy the IP and City Siege packs (wowpack branches)? Changes live spell data (mana costs) and needs the SQL; also fixes IP spells 11202/25347 that never reached the server.
 - Nov 2 ~09:05: started M2 multitexture/blend agent and mounts/taxi/vehicles agent.
 - Nov 02 08:08: 3 agents running (sound, M2 materials, mounts/taxi). Nothing new to commit.
 - Nov 02 08:31: sound agent done (SoundEntriesAdvanced ducking/blend/time, own-character 2D x0.65, FSD footsteps, channels slider). Commit held until the mount agent finishes: they share npc_interaction_callback_handler.cpp and sweep_guard is red from in-progress mount work.
@@ -198,6 +175,53 @@ before starting it.
 - Nov 04 22:00: sound audit committed (rain never played - fixed; weather/underwater ambience slots; many duplicates/missing). Open: game object sounds (doors, chests) silent - $GO events not fired for GO models. ASan soak running.
 - Nov 04 ~22:30: both running agents (ASan soak, game-object sounds) stopped on the weekly usage limit; no work ran Thu or Fri morning. Neither left uncommitted edits.
 
+## Never idle
+
+If every listed item is done or blocked before Friday, do not wait. Each
+hourly run makes sure at least two agents are working. When the list runs
+dry, audit the client against stock for new gaps (play a test character
+through quests, dungeons, cities, flight paths and PvP areas, and compare
+with the RE specs). Add new enhancement ideas with toggles, and wowpack work
+(builder, Tol Barad module, Wowee sync). Add each new item to this file
+before starting it.
+
+## For Jered to decide
+
+Decided (Nov 6):
+
+- **Captured Valgarde Child** (display 19092 names `DraeneiMaleKid_01.`, the
+  shipped file is `DraeneiMaleKid_01..blp`, the stock extension rule finds
+  nothing): **stays stock, drawn white.** No change.
+- **Water sky reflection** (stock has none): **stays an option, off by
+  default.**
+- **Generated normal maps ("Surface bumps") and parallax**: **off** in the
+  recommended set and every quality preset; still switches on the
+  Enhancements page.
+- **Mist, sun shafts, lens flare, sharp stars; midges; low-health vignette**:
+  left as they are (see docs/enhancements-plan.md section 6).
+- **Torch and lamp light (local lights)**: **stays on** in the recommended
+  set; Goldshire's forest view stays over the GPU budget.
+- **Wowee soundtrack**: **off by default** (schema, field and login screen
+  agree).
+- **View distance**: **1900 stays the default**, Classic included. The
+  Video page's View distance slider runs 400-2400 under every preset (moving
+  it reads Custom); its tooltip gives the stock far clip (791.7 below map
+  530, 1583.3 from 530). The fog ends by the far clip, as stock's does, so a
+  shorter distance pulls the fog in with it.
+- **Action bars**: **cast on key-down by default** (`ActionButtonUseKeyDown`
+  defaults to 1); `/console ActionButtonUseKeyDown 0` is the stock key-up.
+- **Disenchant confirmation**: **removed**; disenchanting asks nothing, as
+  stock.
+
+Still open:
+
+- wowpack: open upstream PRs to Kelsidavis/wowee for the sync feature, or
+  delete the `wowpack-sync` branch? (Rule so far: no PRs outside jl178.)
+- wowpack: Jered to test `patch-Z.MPQ` with stock Wow.exe on Windows.
+- wowpack: deploy the IP and City Siege packs (wowpack branches)? Changes
+  live spell data (mana costs) and needs the SQL; also fixes IP spells
+  11202/25347 that never reached the server.
+
 ## Final summary (Nov 6)
 
 47 commits on audio-data-driven since 28327b3, all pushed to jl178/wowee.
@@ -226,4 +250,4 @@ build options, the two real modules ported on wowpack branches.
 
 Not done: the ASan soak, game-object sounds and animations (doors, chests,
 boats), a Windows package of the latest commit. Open questions are in
-"For Jered to decide" above.
+"For Jered to decide" above (decided Nov 6, the wowpack ones still open).
