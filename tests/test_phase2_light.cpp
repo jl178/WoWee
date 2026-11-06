@@ -167,6 +167,22 @@ TEST_CASE("contact: the ray stays within its reach and never starts at the pixel
     CHECK(cs::kRayYards <= 1.0f);
 }
 
+TEST_CASE("contact: the quad's four pixels take every step once", "[enhancements][contact]") {
+    int seen[cs::kSteps] = {};
+    for (int lane = 0; lane < 4; ++lane)
+        for (int k = 0; k < cs::kStepsPerPixel; ++k) {
+            const int i = cs::quadStep(lane, k);
+            REQUIRE(i >= 0);
+            REQUIRE(i < cs::kSteps);
+            ++seen[i];
+        }
+    for (int i = 0; i < cs::kSteps; ++i) CHECK(seen[i] == 1);
+    // A neighbour a few inches off in depth is the same surface; one a foot
+    // or more off is not, near the camera.
+    CHECK(cs::quadDepthTolerance(5.0f) < 0.3f);
+    CHECK(cs::quadDepthTolerance(30.0f) > cs::quadDepthTolerance(5.0f));
+}
+
 TEST_CASE("contact: limited to the near field, with a soft end", "[enhancements][contact]") {
     CHECK(cs::distanceFade(0.0f) == 1.0f);
     CHECK(cs::distanceFade(cs::kMaxDistance - cs::kFadeYards) == 1.0f);

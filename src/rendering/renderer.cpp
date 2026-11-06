@@ -175,8 +175,8 @@ bool Renderer::createPerFrameResources() {
     }
 
     // --- The unit map (rendering/shadow_cache.hpp): one per frame slot, drawn
-    //     every frame, half the world map's side ---
-    SHADOW_NEAR_SIZE = std::max(512u, SHADOW_MAP_SIZE / 2);
+    //     every frame, half the quality level's side (a quarter of the world map's) ---
+    SHADOW_NEAR_SIZE = std::max(512u, shadowLevelSide_ / 2);
     imgCI.extent = {.width = SHADOW_NEAR_SIZE, .height = SHADOW_NEAR_SIZE, .depth = 1};
     for (uint32_t i = 0; i < MAX_FRAMES; i++) {
         if (vmaCreateImage(vkCtx->getAllocator(), &imgCI, &imgAllocCI,
@@ -984,6 +984,20 @@ bool Renderer::initialize(core::Window* win) {
             std::atoi(addons::storedCVarValue("extShadowQuality", kDefaultShadowLevel).c_str()),
             0, 4);
         setShadowMapSize(kShadowSideForLevel[level]);
+        // The world map is kept and drawn again only on a redraw (walked 5%
+        // of the distance, the sun turned, the world changed), a part a
+        // frame, so its side is twice the level's, up to 4096: at the 2048
+        // level over the 500 yd distance its texel was half a yard, and every
+        // building and tree shadow was a smear of them. The one-map path
+        // (WOWEE_SHADOW_SPLIT=0) draws it every frame and keeps the level's.
+        // WOWEE_SHADOW_WORLD_SIDE_LEVEL=1 keeps the level's side for the split
+        // too (the A/B for this, 3.15).
+        if (core::envFlagEnabled("WOWEE_SHADOW_SPLIT", true) &&
+            !core::envFlagEnabled("WOWEE_SHADOW_WORLD_SIDE_LEVEL", false)) {
+            SHADOW_MAP_SIZE = std::min(4096u, shadowLevelSide_ * 2u);
+        }
+        LOG_INFO("Shadow maps: world ", SHADOW_MAP_SIZE, ", unit ", std::max(512u, shadowLevelSide_ / 2u),
+                 " (quality level ", level, ")");
     }
 
     // Create per-frame UBO and descriptor sets
@@ -1315,6 +1329,13 @@ void Renderer::buildLocalLightTiles(uint32_t count) {
     // (the four nearest, no range) has to see them all.
     auto& fd = currentFrameData;
     fd.localLightTileInfo = glm::ivec4(0);
+    // z: the angle one screen pixel spans, which the sun's shadow filter reads
+    // for a pixel's footprint on the map (shadow_filter.glsli) whether or not
+    // the tiles are built.
+    const VkExtent2D pixExt = sceneRenderExtent();
+    const float pixelAngle = pixExt.height > 0 && std::abs(fd.projection[1][1]) > 1e-6f
+        ? 2.0f / (std::abs(fd.projection[1][1]) * static_cast<float>(pixExt.height)) : 0.0f;
+    fd.localLightTileScale = glm::vec4(0.0f, 0.0f, pixelAngle, 0.0f);
     // WOWEE_LIGHT_TILES=0 walks every light per pixel, as before the grid -
     // for comparing pictures and timings against it.
     static const bool tilesOn = core::envFlagEnabled("WOWEE_LIGHT_TILES", true);
@@ -1334,7 +1355,7 @@ void Renderer::buildLocalLightTiles(uint32_t count) {
     fd.localLightTileInfo = glm::ivec4(static_cast<int>(LIGHT_TILES_X), static_cast<int>(LIGHT_TILES_Y), 1, 0);
     fd.localLightTileScale = glm::vec4(static_cast<float>(LIGHT_TILES_X) / static_cast<float>(ext.width),
                                        static_cast<float>(LIGHT_TILES_Y) / static_cast<float>(ext.height),
-                                       0.0f, 0.0f);
+                                       pixelAngle, 0.0f);
 }
 
 void Renderer::updateFootfallDust(float fxDt) {

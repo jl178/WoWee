@@ -939,6 +939,130 @@ Shots (scratch `enh7/run/`): `s4_inn1_il.png`, `s4_dm1_il.png`,
 in Goldshire), `d4_*.png` (contact shadows on, off, and where on is darker,
 with the clock frozen).
 
+### 3.15 The shadow rows at a player's window (2026-11-06)
+
+Jered played with the recommended set and found the sun shadows, their soft
+edges and the contact shadows made the picture worse and cost a lot of
+frames. Everything above was measured in a 1251x986 window at the Ultra
+columns (4096 shadow map). His client runs on the same Iris Xe, but at
+2560x1080 (2.2x the pixels), FSR2 at native scale (`upscaling_mode=2`,
+quality 1.0: the projection jitters every frame), no MSAA, normal maps on,
+the 500 yd shadow distance and the *default* shadow quality level, a 2048
+map. Measured with his `settings.cfg` copied into a test home (scratch
+`sh2/`: `mrun.sh`, `pair.sh`, `ab_body.lua`, `look_body.lua`, `pp.py`),
+`WOWEE_ENHANCE_AB` with `WOWEE_FRAME_PROFILE=1` and
+`WOWEE_SINGLE_THREAD_RECORD=1`, 4 s windows, paired. The machine was not
+quiet: another agent's ASan soak client ran beside every run and compiles
+held the iGPU at 0.9-1.07 GHz (power limit), so every figure below reads
+about 40% longer than at 1.5 GHz; before and after were run back to back in
+each place (the "before" build from a copy of its shaders, so both ran in
+the same sitting).
+
+**What looked wrong.**
+
+- *The world map's texel was half a yard.* At a 2048 map over 1.05 x 500 +
+  8 yd each way, one texel is 0.52 yd: tree and building shadows near the
+  player were smears of blocks a few texels wide, and the Soft filter's
+  1.5-texel disk turned by screen-space noise put a coarse speckle on every
+  penumbra, which crawled under FSR2's jitter.
+- *The bias was wrong in units.* `sunShadow` offset the receiver along its
+  normal by `shadowParams.z` - one texel in uv, 1/2048 - as if it were
+  yards: a thousandth of a yard, no normal offset at all. The depth bias was
+  a fixed 0.0005-0.00005 of the depth range, 0.16-1.6 yd at the 500 yd
+  distance whatever the map's size: too little for a sun-facing slope at a
+  half-yard texel (acne in the filter's taps on hills and roofs), too much
+  at grazing light (shadows lifted off the walls that cast them). The WMO
+  and unit shaders also passed the *bumped* normal, so the bias followed the
+  generated normal map's relief.
+- *Contact shadows* are where 3.14 left them in looks: feet, the bases of
+  grass tufts, crates (the debug tint, `WOWEE_CONTACT_SHADOW_DEBUG=1`), plus
+  a thin false line along concave creases seen from close (a tent's seam).
+  Their cost is the problem: a full-screen pass at 2.2x the pixels.
+- Not these rows, but seen in every "shadows off" shot: the light shafts'
+  mist reads the world map, so turning shadows on takes the sunlit haze out
+  of a forest's shade - at dusk under Elwynn's canopy nearly all of it. With
+  shadows off the mist is lit everywhere. The two pictures differ by far more
+  than the shadows themselves (mean brightness 56 against 70 in the dusk
+  shot), which is a good part of why "shadows on" read as darker and duller.
+  That is the `lightshafts` row's look, left as it is here.
+- Not seen: stale world-map shadows after walking (the redraw lands on
+  snapped texels) or units' shadows cut off at the unit map's 90 yd edge in
+  these views (a unit there is a few pixels).
+
+**What changed** (`shadow_filter.glsli`, `contact_shadow.frag`,
+`contact_shadows.hpp`, `Renderer::initialize` and `buildLocalLightTiles`):
+
+- **The world map is twice the quality level's side, up to 4096**
+  (`shadowLevelSide_`; the unit map stays at half the level's side). It is
+  drawn only on a redraw now, not every frame, which is what made the
+  quarter-size default necessary; the level's side is still what the one-map
+  path draws (`WOWEE_SHADOW_SPLIT=0`), and
+  `WOWEE_SHADOW_WORLD_SIDE_LEVEL=1` keeps it for the split too. At the
+  default level the texel is 0.26 yd; 64 MB of depth more (two kept images).
+- **Bias in yards.** The receiver moves along its geometric normal by 2.5
+  texels x sin(angle to the sun) - which lifts it off its own plane by 2.5
+  texels x tan, what the filter's reach needs - plus a quarter texel of depth
+  bias, both from the map's own matrix (texel and depth range in yards). The
+  unit map takes the same rule at its own texel. WMO and unit pixels pass
+  their vertex normal, not the bumped one.
+- **Soft is a tent of four bilinear compares** 1.5 texels apart (about 3.5
+  texels wide), no noise and no trigonometry: one tap fewer than the disk.
+  Original is the stock five taps, unchanged.
+- **Far pixels take one bilinear compare.** Where a screen pixel spans more
+  than 1.5 world-map texels (its distance x the pixel angle, now in
+  `localLightTileScale.z` every frame, over the slant), the filter is below
+  what the pixel can show; the far half of a 2560-wide view is most of its
+  pixels.
+- **Contact shadows share their march across each 2x2 quad**: pixel q takes
+  steps q and q + 4 of eight, and the quad pools what it found through fine
+  derivatives, each pixel taking a neighbour's finding only if the
+  neighbour's depth is within 0.1 yd + 2% of its own - a quarter of the depth
+  reads, a quarter-resolution march with a depth-aware reconstruction, no new
+  target. The reach is 24 yd (was 35), fading over the last 8.
+
+Off is unchanged: shadows off records nothing and draws the stock blob,
+`shadowfilter` 0 is the stock five taps, contact shadows off builds nothing.
+
+**Cost** (GPU ms, paired median; the row flipped over Jered's settings;
+`contact shadows` is the pass's own timestamp):
+
+| Row | Goldshire road, before | after (round 1) | Trade District, before | after (round 1) |
+|---|---|---|---|---|
+| `shadows` (includes the contact pass) | +5.14 ±1.03 (terrain +2.06, M2 +0.88, WMO +0.59) | +3.44 ±0.90 (terrain +1.40, M2 +0.48, WMO +0.26) | +4.45 ±1.43 (WMO +1.20, terrain +1.10) | +2.99 ±0.26 (terrain +1.04, WMO +0.73) |
+| `shadowfilter` | -0.51 ±0.81 | +1.09 ±0.52 | +1.17 ±0.50 | -0.18 ±0.39 |
+| `contactshadows` pass | 1.21 | 0.81-0.86 | 1.20-1.29 | 0.79-0.99 (at 0.88 GHz) |
+| Whole set vs stock | +7.04 ±2.25 (frame 34 vs 29 ms) | +7.58 ±1.51 | +2.02 ±1.22 | +1.31 ±1.47 |
+
+2560x1080 fullscreen, 1.05-1.07 GHz in Goldshire and 0.88-1.03 in the Trade
+District. Round 1 is the bias, filter, map size and quad march; round 2 adds
+the far-pixel tap and the 24 yd reach:
+
+Round 2 could not be measured cleanly: by then Jered was at the desk on
+the workspace the test client opens on, so it ran in a small tiled window
+(455x486 before, 924x486 after), and with three other clients up the iGPU
+was at 0.45-0.9 GHz. The one figure that survives is the contact pass per
+pixel, about 1.0 ms per million pixels before against 0.5-1.0 after at a
+lower clock; the far-pixel tap and the 24 yd reach still want a quiet
+fullscreen A/B at 2560x1080.
+
+**Recommended values.** Sun shadows and Soft edges stay on: the picture is
+fixed (no acne or lifted shadows, twice the texels, no grain) and the row is
+a third cheaper at Jered's window (+3.0 to +3.4 ms at about 1.05 GHz, so
+about 2.2-2.4 at 1.5, the contact pass included). That is still most of the
+set's 3 ms budget on its own at 2560x1080, and Goldshire's whole set is
+over (3.12). **Contact shadows: recommended off** (`enhancement_rows.hpp`).
+Even with the quad-shared march its pass is 0.8 ms at 2560x1080 and 1.05
+GHz, over its 0.5 ms, for a hand-width line at feet and crates; it stays as
+an option and the quality presets are unchanged. If the shadows row has to
+come out of the set for forest views, that is still Jered's call (section
+6).
+
+Shots (scratch `sh2/run/`): `look1_*` (before, Jered's settings, each row
+off in turn: `_on`, `_cs0`, `_sf0`, `_sh0`), `look2_*` (the contact debug
+tint), `L3base_*` and `L3new_*` (before and after, the clock frozen),
+`BA_*.png` (before | after | shadows off, side by side), `k_dusk1.png` (the
+mist with shadows on and off at dusk).
+
 ## 4. Proposed enhancements
 
 Ranked by feel gained over cost and risk. "Cost" is implementation effort
@@ -1085,6 +1209,11 @@ stock, the budget, and how to verify.
   beyond the unit map's reach, or past the 64 nearest in a crowd, cast no
   map shadow (and get no blob). Swaying trees cast still shadows. Cost:
   3.9.
+- **2026-11-06 (3.15):** the bias is in yards now (it was a uv texel used as
+  a world length, and a fixed fraction of the depth range), the kept world
+  map is twice the quality level's side, Soft is a four-tap tent with no
+  noise, and pixels whose footprint is wider than the filter take one
+  compare.
 
 ### E4. Soft particles
 
@@ -1654,6 +1783,10 @@ stock, the budget, and how to verify.
   darker in red); `d4_*.png` the same with the clock frozen. A boot on the road and a barrel's rim on the grass get a
   hand-width line of shade where the unit map's edge is soft; the sunlit
   ground beside them does not change.
+- **2026-11-06 (3.15): recommended off.** The march is shared across each
+  2x2 quad (two steps of eight per pixel, pooled through fine derivatives
+  with a depth check) and reaches 24 yd, not 35; at Jered's 2560x1080 the
+  pass was still 0.8 ms at 1.05 GHz.
 - **Cost** (3.14): the pass 0.32 ms in Goldshire's road view at 1.5 GHz,
   about 0.33 in the Trade District (0.42 at 1.16 GHz under a compile);
   nothing indoors.

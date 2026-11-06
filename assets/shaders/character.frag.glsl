@@ -453,7 +453,7 @@ void main() {
 
         float shadow = 1.0;
         if (shadowParams.x > 0.5) {
-            shadow = sunShadow(FragPos, norm, ldir);
+            shadow = sunShadow(FragPos, vertexNormal, ldir);
             shadow = mix(1.0, shadow, shadowParams.y);
         }
         RtLight rt = rtLightAt(FragPos);
