@@ -200,7 +200,7 @@ before starting it.
 
 ## Final summary (Nov 6)
 
-48 commits on audio-data-driven since 28327b3, all pushed to jl178/wowee.
+47 commits on audio-data-driven since 28327b3, all pushed to jl178/wowee.
 Windows package last rebuilt at 38b3106 (Nov 3); newer commits are not in it.
 
 Stock fidelity: sound engine and positional audio, particles, fog, creature
