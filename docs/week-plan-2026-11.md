@@ -74,6 +74,8 @@ before starting it.
 - wowpack: open upstream PRs to Kelsidavis/wowee for the sync feature, or delete the `wowpack-sync` branch? (Rule so far: no PRs outside jl178.)
 - wowpack: Jered to test `patch-Z.MPQ` with stock Wow.exe on Windows.
 - Enhancement defaults (docs/enhancements-plan.md section 6): generated normal maps on or off? Mist, sun shafts, lens flare, sharp stars off on fresh install? Low-health vignette and Wowee soundtrack off by default? Classic view distance 1900 or the stock clamp 791.7?
+- Action bars now cast on key-up like stock 3.3.5a. Keep, or set ActionButtonUseKeyDown=1 by default (cast on key-down, as later WoW does)?
+- Wowee asks before disenchanting (stock asks nothing). Keep the prompt?
 - wowpack: deploy the IP and City Siege packs (wowpack branches)? Changes live spell data (mana costs) and needs the SQL; also fixes IP spells 11202/25347 that never reached the server.
 - Nov 2 ~09:05: started M2 multitexture/blend agent and mounts/taxi/vehicles agent.
 - Nov 02 08:08: 3 agents running (sound, M2 materials, mounts/taxi). Nothing new to commit.
@@ -145,3 +147,83 @@ before starting it.
 - Nov 03 19:51: wowpack ported mod-individual-progression and mod-city-siege on 'wowpack' branches (pushed, not deployed). Found IP spells 11202/25347 never reached the server (core placeholders win). wowpack: MPQ v1 reader, DBC lookup cache, import command, signedness fix. Gaps: build options, field-level merges.
 - Nov 03 20:08: shadows split committed pending full build (running). wowpack gaps agent running.
 - Nov 03 20:12: wowpack b1cf862: field-level DBC merges, build options (IP mana costs, login/loading screens), id_ranges for any table, warning for rows shadowed by core *_dbc. Default build byte-identical, CI green.
+- Nov 03 20:21: shadows split + hitch fixes committed; full build, ctest green, smoke login clean.
+- Nov 03 20:27: Windows build at 51107f2 failed: clang -Wunused-lambda-capture (-Werror) in game_handler_packets.cpp, which gcc does not flag. Agent fixing all clang errors, adding a clang check, then shipping the package (Tol Barad override pack excluded from the zip).
+- Nov 03 21:08: Windows clang fix/ship and stock-leftovers agents running.
+- Nov 03 21:28: Windows package rebuilt at 38b3106 and served on :8081 (wowee.exe 150.7 MB). Clang fixes 79e64fc; new clang_warning_check ctest (38b3106). Stock-leftovers agent running.
+- Nov 03 22:07: stock leftovers done (jumps never sent MSG_MOVE_JUMP - fixed; air keys + FALL_LAND stock; taxi rep discounts; corpse Decay; auto-release on taxi death; blob for units without sun shadow; glue volumes). Held: camera_controller/renderer/character_renderer also carry the E9/E19/E20/E11 agent's edits; commit together.
+- Nov 03 22:08: E9/E19/E20/E11 agent running; started input-timing/responsiveness agent.
+- Nov 03 23:08: leftovers + E9/E19/E20/E11 committed. Recommended set measured +4 to +5 ms GPU over stock (over budget; cause in scene/shadow/fog, not these rows). Input-timing agent running.
+- Nov 03 23:08: input-timing and budget agents running.
+- Nov 03 23:22: input timing committed (cast on key-up as stock; ActionButtonUseKeyDown=1 for key-down; local GCD refusal; 0.2 ms key-to-packet). Budget agent running.
+- Nov 04 00:08: tab-targeting and budget agents running.
+- Nov 04 00:35: stock Tab targeting, cast-while-moving, CMSG_CANCEL_CAST fix committed. Budget agent running.
+- Nov 04 01:08: budget and combat follow-up (duels, interrupts) agents running.
+- Nov 04 02:08: budget (~3 h) and combat follow-up agents running.
+- Nov 04 02:51: cast-end events, duels, Auto Shot/food on move, macro Tab limit committed. Budget agent running.
+- Nov 04 03:08: budget and PvP/instances agents running.
+- Nov 04 04:08: budget (~5 h) and PvP/instances agents running.
+- Nov 04 04:41: PvP/instances committed (BG loop works end to end with bots; map names were wrong everywhere). Arena opponent frames still open. Budget agent running.
+- Nov 04 05:08: budget and arena agents running.
+- Nov 04 05:09: budget trim committed: Stormwind +1.3, Dalaran +1.4 GPU; Goldshire road still +6.7 GPU (needs dropping local lights or sun shadows from the set - Jered's call, plan §6). Soft particles + parallax now off by default.
+- Nov 04 06:03: arena teams/opponents, party member stats (Unknown/Dead frames), unit events to all tokens committed. GPU agent running.
+- Nov 04 06:08: GPU/Goldshire and spell-visual-gaps agents running.
+- Nov 04 07:08: GPU/Goldshire and spell-visual-gaps agents running.
+- Nov 04 07:35: ranged/item missiles, wand schools, ammo, beam ends committed. Found: client never sends CMSG_SET_AMMO (hunters cannot load ammo). GPU agent running.
+- Nov 04 08:08: GPU/Goldshire and items/ammo agents running.
+- Nov 04 08:43: render fixes committed (destroyed fallback view on map change, light tile cull, unit shadows on worker). Goldshire alone +6.3 ms; dropping torch light from the recommended set would fit it - left on (a visible lighting improvement Jered cares about), his call. Items agent running.
+- Nov 04 09:08: items/ammo and E16/E15/E18 agents running.
+- Nov 04 09:16: items/ammo committed. Open for Jered: keep Wowee's disenchant confirmation (stock asks nothing)? E16/E15/E18 agent running.
+- Nov 04 10:08: E16/E15/E18 and professions agents running.
+- Nov 04 11:08: E16/E15/E18 (~2 h) and professions agents running.
+- Nov 04 11:27: professions committed. Wptestb was left a dwarf hunter by the items run; restored to human paladin from items-re/restore.sql. E16/E15/E18 agent running.
+- Nov 04 12:08: E16/E15/E18 and names/duplicate-errors agents running.
+- Nov 04 12:12: names/caches + duplicate errors committed; fixed sweep_guard lua stack check from 7a81223. E16/E15/E18 agent running.
+- Nov 04 13:08: E16/E15/E18 (~4 h) and chat/combat-log agents running.
+- Nov 04 13:54: chat + combat log committed. E16/E15/E18 agent finishing.
+- Nov 04 13:55: chat + combat log committed. E16/E15/E18 agent finishing.
+- Nov 04 14:08: E16/E15/E18 (wrapping up) and chat-leftovers agents running.
+- Nov 04 14:35: E16 cliffs (rec off), E15 caustics, E18 soft highlights committed; shoreline foam stale-depth bug fixed. Chat-leftovers agent running.
+- Nov 04 15:08: chat-leftovers and regression-tour agents running.
+- Nov 04 15:59: chat second pass committed (/who, logout, emotes, follow crash, slurring, profanity filter, zone channels). Regression tour running.
+- Nov 04 16:08: regression tour (found terrain alpha-map leak, 4 GB growth) and E12/E14 agents running.
+- Nov 04 17:08: regression tour and E12/E14 agents running.
+- Nov 04 17:47: regression fixes committed (alpha-map leak, tile unload, resize while loading, zone event, enter-world). Open: one SIGABRT in anv descriptor write at world entry (cause unknown); logout goes to login screen not char select; instance joins General.
+- Nov 04 18:08: crash-hunt and E12/E14 agents running.
+- Nov 04 19:08: crash-hunt and E12/E14 agents running.
+- Nov 04 19:35: world-entry crash root-caused (stale WMO texture pointers after clearAll) and fixed; logout to char select. E12/E14 agent running.
+- Nov 04 19:58: E12 room light indoors + E14 contact shadows committed. ASan soak running.
+- Nov 04 20:08: ASan soak and sound-audit agents running.
+- Nov 04 21:08: ASan soak (~1.5 h) and sound-audit agents running.
+- Nov 04 22:00: sound audit committed (rain never played - fixed; weather/underwater ambience slots; many duplicates/missing). Open: game object sounds (doors, chests) silent - $GO events not fired for GO models. ASan soak running.
+- Nov 04 ~22:30: both running agents (ASan soak, game-object sounds) stopped on the weekly usage limit; no work ran Thu or Fri morning. Neither left uncommitted edits.
+
+## Final summary (Nov 6)
+
+48 commits on audio-data-driven since 28327b3, all pushed to jl178/wowee.
+Windows package last rebuilt at 38b3106 (Nov 3); newer commits are not in it.
+
+Stock fidelity: sound engine and positional audio, particles, fog, creature
+skins, M2 combiners, WMO materials and portal culling, terrain and the WDL
+horizon, water, animation, movement and collision, mounts/taxi/vehicles,
+death/ghost/loot, world UI, minimap and world map, spells (procedures,
+ground targeting, ranged and item missiles, cast-end events), input timing
+and Tab targeting, duels, gameplay flows, pets, items and ammo, professions,
+PvP and instances, glue screens, names and caches, chat and the combat log.
+Specs for each are in docs/re/.
+
+Enhancements: one toggle table, Classic = stock; see docs/enhancements-plan.md
+for each row, its cost and its recommended default.
+
+Performance: portal culling (Ironforge 34 -> 63 fps), the Intel submit fix
+(Stormwind CPU 22 -> 9 ms), hitch removal, shadow split.
+
+Stability: the world-entry crash (stale WMO textures) is fixed; a regression
+tour found no validation or Lua errors after its fixes.
+
+wowpack: phase 2 formats, Tol Barad 0.2.0 on the lab, field-level DBC merges,
+build options, the two real modules ported on wowpack branches.
+
+Not done: the ASan soak, game-object sounds and animations (doors, chests,
+boats), a Windows package of the latest commit. Open questions are in
+"For Jered to decide" above.
