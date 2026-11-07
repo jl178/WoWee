@@ -136,6 +136,7 @@ local kCategoryHost = {
     ["Enhancements"]         = "video",
     ["Enhancements: Sky"]    = "video",
     ["Enhancements: Motion"] = "video",
+    ["Enhancements: Weather"] = "video",
     ["Ray Tracing"]  = "video",
     ["Upscaling"]    = "video",
     ["Display"]      = "video",

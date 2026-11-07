@@ -42,7 +42,22 @@ public:
         NONE,
         RAIN,
         SNOW,
-        STORM
+        STORM,
+        /// A sandstorm (Weather.dbc EffectType 3). Only drawn with the
+        /// "Sandstorms" enhancement: Wowee has no stock sand emitter yet, and
+        /// without the row the renderer never asks for this kind.
+        SAND
+    };
+
+    /// The weather enhancements this draws (docs/enhancements-plan.md,
+    /// "Enhancements: Weather"; weather_fx.hpp). A default Style is the stock
+    /// rain and snow: the same counts, sizes, splash rule and nothing else.
+    struct Style {
+        float intensity = 1.0f;   ///< "Weather intensity": times the stock count
+        bool variedRain = false;  ///< drop sizes and streaks vary; splashes on the move, further out
+        bool softSnow = false;    ///< flake sizes vary, flakes turn and eddy
+        bool mistSheets = false;  ///< distant sheets of rain, snow or dust in the fog colour
+        bool operator==(const Style&) const = default;
     };
 
     /// Ground height under a point: (x, y, z to look down from) -> height.
@@ -123,6 +138,18 @@ public:
         windClock_ = clock;
     }
 
+    /// The enhancements' style (Style{} is stock). Call before update().
+    void setStyle(const Style& style) { style_ = style; }
+    [[nodiscard]] const Style& style() const { return style_; }
+    /// The fog colour (Light.dbc), which the mist sheets and the sand take,
+    /// as the stock mist and sand are drawn in it (world-lighting.md 8).
+    void setFogColour(const glm::vec3& colour) { fogColour_ = colour; }
+    /// Fireflies around the camera ("Fireflies at night"): 0 none - nothing
+    /// is kept or drawn - to 1 the most. Independent of the weather.
+    void setFireflies(float amount) { fireflyAmount_ = std::clamp(amount, 0.0f, 1.0f); }
+    [[nodiscard]] size_t fireflyCount() const { return fireflies_.size(); }
+    [[nodiscard]] size_t mistSheetCount() const { return sheets_.size(); }
+
     void setEnabled(bool enabled) { this->enabled = enabled; }
     [[nodiscard]] bool isEnabled() const { return enabled; }
 
@@ -154,9 +181,32 @@ private:
         float phase = 0.0f;        ///< Snow sway
         float size = 1.0f;         ///< Scale on the type's sprite size
         bool lands = false;        ///< groundZ is real ground: splash there
+        // Style only; stock leaves these at 1, 1 and 0.
+        float length = 1.0f;       ///< streak length scale (varied rain)
+        float alpha = 1.0f;        ///< opacity (varied rain, soft snow)
+        float spin = 0.0f;         ///< turn rate, rad/s (soft snow)
     };
     struct Splash {
         glm::vec3 position;
+        float age = 0.0f;
+        float size = 1.0f;         ///< the drop's size (varied rain), else 1
+    };
+    /// A distant sheet of rain, snow or dust (Style::mistSheets).
+    struct MistSheet {
+        glm::vec3 base;            ///< bottom centre
+        glm::vec3 velocity;
+        float age = 0.0f;
+        float life = 8.0f;
+        float halfWidth = 6.0f;
+        float height = 24.0f;
+        float peak = 0.5f;
+        bool flipU = false;
+    };
+    struct Firefly {
+        glm::vec3 position;
+        glm::vec3 home;            ///< where it wanders about
+        float phase = 0.0f;
+        float rate = 1.0f;         ///< blink speed
         float age = 0.0f;
     };
     struct Vertex {
@@ -166,12 +216,19 @@ private:
     };
     static_assert(sizeof(Vertex) == 24, "Weather vertex size");
 
-    enum Sprite : uint32_t { RAIN_STREAK = 0, RAIN_SPLASH, SNOW_FLAKE, SPRITE_COUNT };
+    enum Sprite : uint32_t { RAIN_STREAK = 0, RAIN_SPLASH, SNOW_FLAKE, MIST_SHEET, SPRITE_COUNT };
 
     void loadTextures(pipeline::AssetManager* assetManager);
     void spawnParticle(Particle& p, const glm::vec3& cameraPos, bool anywhereInColumn);
     float resolveGround(const glm::vec3& at, const glm::vec3& cameraPos) const;
     void buildVertices(const Camera& camera);
+    void spawnSheet(MistSheet& s, const glm::vec3& cameraPos);
+    void updateSheets(const glm::vec3& cameraPos, float level, float deltaTime);
+    void updateFireflies(const glm::vec3& cameraPos, float deltaTime);
+    /// Grow the per-frame vertex buffers to hold `vertexCount` (the
+    /// intensity slider and the extra sprites can need more than the stock
+    /// cap); the old ones are freed once no frame in flight reads them.
+    bool ensureVertexCapacity(size_t vertexCount);
 
     // Vulkan objects
     VkContext* vkCtx = nullptr;
@@ -182,6 +239,8 @@ private:
     /// RainDrop01/RainDropSplash01 being grey 128 at rest (MapWeather 0x7891b0,
     /// 0x78a030: blend 5, fog colour 0x80808080).
     VkPipeline mod2xPipeline_ = VK_NULL_HANDLE;
+    /// Fireflies: additive, so they glow over the night.
+    VkPipeline addPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout textureSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
@@ -204,8 +263,12 @@ private:
     std::vector<Particle> particles;
     std::vector<Splash> splashes_;
     std::vector<Vertex> vertices_;
-    uint32_t particleVertexCount_ = 0;   ///< Streaks or flakes, then splashes
+    uint32_t sheetVertexCount_ = 0;      ///< Mist sheets first, then
+    uint32_t particleVertexCount_ = 0;   ///< streaks or flakes, then splashes,
     uint32_t splashVertexCount_ = 0;
+    uint32_t fireflyVertexCount_ = 0;    ///< then fireflies
+    std::vector<MistSheet> sheets_;
+    std::vector<Firefly> fireflies_;
     Type builtType_ = Type::NONE;
     glm::vec3 lastCameraPos_{0.0f};
     bool haveLastCamera_ = false;
@@ -221,6 +284,10 @@ private:
     float time_ = 0.0f;
     float windStrength_ = 0.0f;  ///< setWind; 0 is stock
     float windClock_ = 0.0f;
+    Style style_{};
+    glm::vec3 fogColour_{0.5f};
+    float fireflyAmount_ = 0.0f;
+    bool extraTexturesAttempted_ = false;
 
     static constexpr int MAX_PARTICLES = 3000;
     static constexpr int MAX_SPLASHES = 400;

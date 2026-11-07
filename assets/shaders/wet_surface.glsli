@@ -60,3 +60,31 @@ vec3 wetSurfaceSheen(vec3 normal, vec3 worldPos, float dist, float wet, float sh
     float facing = smoothstep(0.0, 0.2, dot(normal, l));
     return amount * (lightColor.rgb * (gloss * shadow * facing) + ambientColor.rgb * fresnel);
 }
+
+// Snow settling while it snows - not stock, the "Snow settles" setting.
+// localLightTileScale.w is how far it has settled, 0 bare .. 1, eased over
+// minutes by the renderer (weather_fx::easeSnowCover) and 0 without snow or
+// with the setting off; then this returns 0 and the caller leaves the
+// albedo alone. Snow lies on faces turned up, spreads out from the patches
+// a slow noise picks as it settles, and leaves ground that is already pale -
+// a snowfield's own texture - as it is.
+float snowCoverAmount(vec3 geomNormal, vec3 albedo, vec3 worldPos) {
+    float c = localLightTileScale.w;
+    if (c <= 0.0) return 0.0;
+    float up = smoothstep(0.55, 0.9, geomNormal.z);
+    if (up <= 0.0) return 0.0;
+    float lum = dot(albedo, vec3(0.299, 0.587, 0.114));
+    float bare = 1.0 - smoothstep(0.5, 0.75, lum);
+    if (bare <= 0.0) return 0.0;
+    // One octave: the patches' shape, cheap enough for every ground pixel.
+    float n = rrNoise(worldPos.xy * 0.11);
+    // Soft-edged patches, never a full sheet: a dusting, not a snowfield.
+    float lies = smoothstep(1.0 - 0.8 * c, 1.45 - 0.8 * c, n);
+    return up * bare * lies * 0.45;
+}
+
+// The albedo under that snow: toward a cold off-white, which the scene's
+// own light then lights - grey at dusk, blue under a storm sky.
+vec3 snowCoverAlbedo(vec3 albedo, float s) {
+    return mix(albedo, vec3(0.80, 0.83, 0.88), s);
+}

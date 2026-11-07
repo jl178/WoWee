@@ -680,6 +680,9 @@ void Renderer::updatePerFrameUBO() {
         // Under water the fog is Light.dbc's underwater set (LightingManager
         // switches to it with the camera below the surface), so no fixed blue
         // is mixed in here any more.
+        // A lightning flash, a sandstorm's haze (weather rows; nothing while
+        // neither happens).
+        applyWeatherFxLight();
     }
 
     currentFrameData.lightSpaceMatrix = lightSpaceMatrix;
@@ -826,6 +829,8 @@ void Renderer::updatePerFrameUBO() {
                 case Weather::Type::RAIN:  weatherWind = 1.3f; break;
                 case Weather::Type::SNOW:  weatherWind = 1.1f; break;
                 case Weather::Type::STORM: weatherWind = std::max(1.3f, 1.0f + 0.8f * wi); break;
+                // A sandstorm (only with its enhancement row) blows hard.
+                case Weather::Type::SAND:  weatherWind = 1.2f + 0.6f * wi; break;
                 default: break;
             }
         }
@@ -1335,7 +1340,8 @@ void Renderer::buildLocalLightTiles(uint32_t count) {
     const VkExtent2D pixExt = sceneRenderExtent();
     const float pixelAngle = pixExt.height > 0 && std::abs(fd.projection[1][1]) > 1e-6f
         ? 2.0f / (std::abs(fd.projection[1][1]) * static_cast<float>(pixExt.height)) : 0.0f;
-    fd.localLightTileScale = glm::vec4(0.0f, 0.0f, pixelAngle, 0.0f);
+    // w: the "Snow settles" cover (renderer_weather_fx.cpp), 0 without it.
+    fd.localLightTileScale = glm::vec4(0.0f, 0.0f, pixelAngle, snowCover_);
     // WOWEE_LIGHT_TILES=0 walks every light per pixel, as before the grid -
     // for comparing pictures and timings against it.
     static const bool tilesOn = core::envFlagEnabled("WOWEE_LIGHT_TILES", true);
@@ -1355,7 +1361,7 @@ void Renderer::buildLocalLightTiles(uint32_t count) {
     fd.localLightTileInfo = glm::ivec4(static_cast<int>(LIGHT_TILES_X), static_cast<int>(LIGHT_TILES_Y), 1, 0);
     fd.localLightTileScale = glm::vec4(static_cast<float>(LIGHT_TILES_X) / static_cast<float>(ext.width),
                                        static_cast<float>(LIGHT_TILES_Y) / static_cast<float>(ext.height),
-                                       pixelAngle, 0.0f);
+                                       pixelAngle, snowCover_);
 }
 
 void Renderer::updateFootfallDust(float fxDt) {
@@ -1735,6 +1741,7 @@ void Renderer::applyMsaaChange() {
         swimEffects->recreatePipelines();
     }
     if (footfallDust_) footfallDust_->recreatePipelines();
+    if (breathPuffs_) breathPuffs_->recreatePipelines();
 
     // Sky system sub-renderers
     if (skySystem) {
@@ -2863,9 +2870,15 @@ void Renderer::update(float deltaTime) {
         // How far the lights lean toward their storm LightParams: the
         // server's weather intensity for any weather it sends, as stock blends
         // the storm set in by intensity rather than switching on rain.
+        // The weather preview (a client-only enhancement row) stands in for
+        // the server's weather while it is on.
+        uint32_t weatherState = 0;
+        float weatherGrade = 0.0f;
+        effectiveWeather(weatherState, weatherGrade);
+        const bool weatherPreviewOn = weatherPreview().active;
         const float stormIntensity =
-            (gh && gh->getWeatherKind() != game::WeatherKind::NONE)
-                ? glm::clamp(gh->getWeatherIntensity(), 0.0f, 1.0f) : 0.0f;
+            ((gh || weatherPreviewOn) && game::weatherKind(weatherState) != game::WeatherKind::NONE)
+                ? glm::clamp(weatherGrade, 0.0f, 1.0f) : 0.0f;
         // Light.dbc's underwater slots while the camera is under the surface -
         // not while the player swims at it, which kept the underwater set up
         // with the camera in open air.
@@ -2910,9 +2923,9 @@ void Renderer::update(float deltaTime) {
         }
 
         // Sync weather visual renderer with game state
-        if (weather && gh) {
-            uint32_t wType = gh->getWeatherType();
-            float wInt = gh->getWeatherIntensity();
+        if (weather && (gh || weatherPreviewOn)) {
+            const uint32_t wType = weatherState;
+            const float wInt = weatherGrade;
             // The server's weather, and only that, in every zone (Duskwood
             // included: stock draws whatever rain the server sends there): it
             // sends fine weather on entering a zone that has none, and this
@@ -2923,6 +2936,10 @@ void Renderer::update(float deltaTime) {
                 case game::WeatherKind::RAIN:         wanted = Weather::Type::RAIN; break;
                 case game::WeatherKind::SNOW:         wanted = Weather::Type::SNOW; break;
                 case game::WeatherKind::THUNDERSTORM: wanted = Weather::Type::STORM; break;
+                // Only with the "Sandstorms" enhancement; stock draws none.
+                case game::WeatherKind::SANDSTORM:
+                    if (enh_.sandstorms) wanted = Weather::Type::SAND;
+                    break;
                 default:                              break;
             }
             weather->followServerWeather(wanted, wInt, deltaTime);
@@ -3075,6 +3092,8 @@ void Renderer::update(float deltaTime) {
         // E19: the rain and snow take the cloth's wind (the foliage's,
         // without the indoor cut: the weather is off indoors anyway).
         weather->setWind(enh_.weatherWind ? clothWindStrength_ : 0.0f, globalTime);
+        // The weather rows: style, fireflies, snow cover, lightning, breath.
+        updateWeatherFx(fxDt);
         weather->update(*camera, fxDt);
     }
 
@@ -3274,9 +3293,12 @@ void Renderer::update(float deltaTime) {
                 zctx.mapId = gh->getCurrentMapId();
             }
         }
-        if (const auto* gh = core::Application::getInstance().getGameHandler()) {
-            zctx.weatherState = gh->getWeatherType();
+        {
+            // The server's weather, or the preview's (a client-only row).
+            float grade = 0.0f;
+            effectiveWeather(zctx.weatherState, grade);
         }
+        zctx.rainIndoors = enh_.rainIndoors;
         audioCoordinator_->updateZoneAudio(zctx);
     }
     section("update/zone audio");
@@ -4226,6 +4248,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
                 swimEffects->render(cmd, perFrameSet);
             }
             if (footfallDust_ && camera) footfallDust_->render(cmd, perFrameSet);
+            if (breathPuffs_ && camera) breathPuffs_->render(cmd, perFrameSet);
             if (footprintRenderer && camera) footprintRenderer->render(cmd, perFrameSet, *camera);
 
             renderPostSceneOverlays(cmd, gameHandler);
@@ -4421,6 +4444,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             swimEffects->render(currentCmd, perFrameSet);
         }
         if (footfallDust_ && camera) footfallDust_->render(currentCmd, perFrameSet);
+        if (breathPuffs_ && camera) breathPuffs_->render(currentCmd, perFrameSet);
         if (footprintRenderer && camera) footprintRenderer->render(currentCmd, perFrameSet, *camera);
         // The same one-line total the parallel path reports, so a profile taken
         // either way can be compared against the other.
@@ -6331,6 +6355,7 @@ float Renderer::volumetricFogExtinction() const {
             case Weather::Type::RAIN:  extinction *= 1.0f + 1.2f * w; break;
             case Weather::Type::SNOW:  extinction *= 1.0f + 0.8f * w; break;
             case Weather::Type::STORM: extinction *= 1.0f + 2.0f * w; break;
+            case Weather::Type::SAND:  extinction *= 1.0f + 1.5f * w; break;
             default: break;
         }
     }

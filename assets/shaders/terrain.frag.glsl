@@ -306,6 +306,11 @@ void main() {
     vec3 geomNorm = normalize(Normal);
     float wet = wetSurfaceAmount(geomNorm);
     if (wet > 0.0) finalColor.rgb = wetSurfaceAlbedo(finalColor.rgb, wet);
+    // Settled snow (wet_surface.glsli): 0, and untouched, without snow.
+    if (localLightTileScale.w > 0.0) {
+        float snowed = snowCoverAmount(geomNorm, finalColor.rgb, FragPos);
+        if (snowed > 0.0) finalColor.rgb = snowCoverAlbedo(finalColor.rgb, snowed);
+    }
 
     // The stock terrain light (shaders\vertex\arbvp1\terrain.bls): the
     // area's ambient plus its sun by Lambert, clamped at one per channel - it
