@@ -1993,7 +1993,7 @@ target_include_directories(test_update_check SYSTEM PRIVATE
     ${TEST_SYSTEM_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}/extern/nlohmann
 )
-target_link_libraries(test_update_check PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(test_update_check PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB)
 if(WIN32)
     # https_get.cpp reads the Windows root certificate store.
     target_link_libraries(test_update_check PRIVATE crypt32)
@@ -2011,7 +2011,7 @@ add_executable(test_http_fetch
 )
 target_include_directories(test_http_fetch PRIVATE ${TEST_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(test_http_fetch SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_http_fetch PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(test_http_fetch PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB)
 if(WIN32)
     target_link_libraries(test_http_fetch PRIVATE crypt32 ws2_32)
 endif()
@@ -2061,7 +2061,7 @@ target_include_directories(test_wowpack_sync SYSTEM PRIVATE
     ${TEST_SYSTEM_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}/extern/nlohmann
 )
-target_link_libraries(test_wowpack_sync PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(test_wowpack_sync PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB)
 if(WIN32)
     target_link_libraries(test_wowpack_sync PRIVATE crypt32 ws2_32)
 endif()

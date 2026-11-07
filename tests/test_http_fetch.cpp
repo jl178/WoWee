@@ -154,3 +154,164 @@ TEST_CASE("a file download lands byte for byte", "[http]") {
     CHECK(seenTotal == data.size());
     std::filesystem::remove(out);
 }
+
+namespace {
+
+/// Bytes that compress, but not to nothing: a pack file is closer to this
+/// than to a run of zeros.
+std::string patterned(std::size_t n) {
+    std::string s(n, '\0');
+    std::uint32_t x = 12345;
+    for (std::size_t i = 0; i < n; ++i) {
+        x = x * 1103515245u + 12345u;
+        s[i] = "ABCDEFGH"[(x >> 16) & 7];
+    }
+    return s;
+}
+
+}  // namespace
+
+TEST_CASE("gzip is asked for and a gzip body is inflated with the hash of the plain bytes", "[http][gzip]") {
+    LocalHttpServer server;
+    const std::string plain = patterned(300000);
+    server.set("/g", {.body = plain, .gzip = true});
+    server.set("/plain", {.body = plain});
+    std::string body;
+    std::uint64_t lastGot = 0;
+    std::uint64_t lastTotal = 1;
+    const FetchResult r = httpFetch(server.url("/g"), lanOptions(),
+        [&](const char* d, std::size_t n) { body.append(d, n); return true; },
+        [&](std::uint64_t got, std::uint64_t total) { lastGot = got; lastTotal = total; return true; });
+    REQUIRE(r.ok);
+    CHECK(server.lastRequest().find("\r\nAccept-Encoding: gzip\r\n") != std::string::npos);
+    CHECK(r.contentEncoding == "gzip");
+    CHECK(body == plain);
+    CHECK(r.bytes == plain.size());
+    CHECK(r.wireBytes == LocalHttpServer::gzipBytes(plain).size());
+    CHECK(r.wireBytes < plain.size() / 2);
+    // Progress counts inflated bytes, and the compressed Content-Length is
+    // not offered as their total.
+    CHECK(lastGot == plain.size());
+    CHECK(lastTotal == 0);
+
+    std::string plainBody;
+    const FetchResult p = httpFetchToString(server.url("/plain"), lanOptions(), &plainBody);
+    REQUIRE(p.ok);
+    CHECK(p.sha256 == r.sha256);
+}
+
+TEST_CASE("gzip inside a chunked body is decoded in both layers", "[http][gzip]") {
+    LocalHttpServer server;
+    const std::string plain = patterned(200000);
+    server.set("/gc", {.body = plain, .chunked = true, .gzip = true});
+    std::string body;
+    const FetchResult r = httpFetchToString(server.url("/gc"), lanOptions(), &body);
+    REQUIRE(r.ok);
+    CHECK(r.contentEncoding == "gzip");
+    CHECK(body == plain);
+    CHECK(r.bytes == plain.size());
+    CHECK(r.wireBytes == LocalHttpServer::gzipBytes(plain).size());
+}
+
+TEST_CASE("concatenated gzip members are one body", "[http][gzip]") {
+    LocalHttpServer server;
+    server.set("/two", {.body = LocalHttpServer::gzipBytes("first,") + LocalHttpServer::gzipBytes("second"),
+                        .headers = "Content-Encoding: gzip\r\n"});
+    std::string body;
+    const FetchResult r = httpFetchToString(server.url("/two"), lanOptions(), &body);
+    REQUIRE(r.ok);
+    CHECK(body == "first,second");
+}
+
+TEST_CASE("a corrupt or cut gzip body is an error and leaves no file", "[http][gzip]") {
+    LocalHttpServer server;
+    const std::string plain = patterned(100000);
+    const std::string good = LocalHttpServer::gzipBytes(plain);
+    std::string bad = good;
+    for (std::size_t i = bad.size() / 2; i < bad.size() / 2 + 64; ++i) bad[i] = static_cast<char>(bad[i] ^ 0x5a);
+    server.set("/bad", {.body = bad, .headers = "Content-Encoding: gzip\r\n"});
+    std::string crc = good;
+    crc[crc.size() - 6] = static_cast<char>(crc[crc.size() - 6] ^ 1);   // inside the CRC-32
+    server.set("/crc", {.body = crc, .headers = "Content-Encoding: gzip\r\n"});
+    // Framing that agrees with itself around a gzip stream with no trailer.
+    server.set("/cut", {.body = good.substr(0, good.size() - 10), .headers = "Content-Encoding: gzip\r\n"});
+    server.set("/garbage", {.body = "this is not gzip at all", .headers = "Content-Encoding: gzip\r\n"});
+
+    const std::filesystem::path out = std::filesystem::temp_directory_path() / "wowee_fetch_badgz.bin";
+    for (const char* path : {"/bad", "/crc", "/cut", "/garbage"}) {
+        INFO(path);
+        const FetchResult r = httpFetchToFile(server.url(path), lanOptions(), out.string());
+        CHECK_FALSE(r.ok);
+        CHECK(r.error.find("gzip") != std::string::npos);
+        CHECK_FALSE(std::filesystem::exists(out));
+    }
+}
+
+TEST_CASE("the cap counts inflated bytes and stops a gzip bomb early", "[http][gzip]") {
+    LocalHttpServer server;
+    // 64 MB of zeros is about 64 KB compressed.
+    const std::string bomb = LocalHttpServer::gzipBytes(std::string(64u * 1024u * 1024u, '\0'));
+    REQUIRE(bomb.size() < 200000);
+    server.set("/bomb", {.body = bomb, .headers = "Content-Encoding: gzip\r\n"});
+    FetchOptions o = lanOptions();
+    o.maxBytes = 1000000;
+    std::uint64_t delivered = 0;
+    const FetchResult r = httpFetch(server.url("/bomb"), o,
+        [&](const char*, std::size_t n) { delivered += n; return true; });
+    CHECK_FALSE(r.ok);
+    CHECK(r.error.find("inflated reply is larger") != std::string::npos);
+    CHECK(delivered <= o.maxBytes);
+
+    // A body that inflates to exactly the cap gets through; one byte less
+    // of cap and it does not.
+    const std::string plain = patterned(50000);
+    server.set("/fit", {.body = plain, .gzip = true});
+    o.maxBytes = plain.size();
+    std::string body;
+    CHECK(httpFetchToString(server.url("/fit"), o, &body).ok);
+    o.maxBytes = plain.size() - 1;
+    CHECK_FALSE(httpFetchToString(server.url("/fit"), o, &body).ok);
+}
+
+TEST_CASE("a server that ignores Accept-Encoding is read as is", "[http][gzip]") {
+    LocalHttpServer server;
+    const std::string plain = patterned(80000);
+    server.set("/ignore", {.body = plain});
+    std::string body;
+    std::uint64_t lastTotal = 0;
+    const FetchResult r = httpFetch(server.url("/ignore"), lanOptions(),
+        [&](const char* d, std::size_t n) { body.append(d, n); return true; },
+        [&](std::uint64_t, std::uint64_t total) { lastTotal = total; return true; });
+    REQUIRE(r.ok);
+    CHECK(server.lastRequest().find("Accept-Encoding: gzip") != std::string::npos);
+    CHECK(r.contentEncoding.empty());
+    CHECK(body == plain);
+    CHECK(r.wireBytes == plain.size());
+    CHECK(lastTotal == plain.size());
+
+    // A client that does not ask gets the plain body from a server that
+    // would have compressed it.
+    server.set("/would", {.body = plain, .gzip = true});
+    FetchOptions o = lanOptions();
+    o.acceptGzip = false;
+    const FetchResult n = httpFetchToString(server.url("/would"), o, &body);
+    REQUIRE(n.ok);
+    CHECK(server.lastRequest().find("Accept-Encoding") == std::string::npos);
+    CHECK(n.contentEncoding.empty());
+    CHECK(body == plain);
+}
+
+TEST_CASE("an encoding that was not asked for is refused by name", "[http][gzip]") {
+    LocalHttpServer server;
+    server.set("/br", {.body = "xyz", .headers = "Content-Encoding: br\r\n"});
+    std::string body;
+    const FetchResult r = httpFetchToString(server.url("/br"), lanOptions(), &body);
+    CHECK_FALSE(r.ok);
+    CHECK(r.error.find("br") != std::string::npos);
+    // An error page that is dropped unread is not decoded, so its encoding
+    // does not matter.
+    server.set("/gone", {.status = 410, .body = "zz", .headers = "Content-Encoding: br\r\n"});
+    const FetchResult g = httpFetchToString(server.url("/gone"), lanOptions(), &body);
+    CHECK(g.ok);
+    CHECK(g.status == 410);
+}

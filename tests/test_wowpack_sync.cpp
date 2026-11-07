@@ -35,6 +35,7 @@ struct Pack {
     LocalHttpServer& server;
     std::string version;
     std::vector<std::pair<std::string, std::string>> files;   // path, content
+    bool gzip = false;   // serve the files gzipped to a client that asks
 
     void publish() const {
         std::string list;
@@ -42,7 +43,7 @@ struct Pack {
             if (!list.empty()) list += ",";
             list += R"({"path":")" + path + R"(","size":)" + std::to_string(content.size()) +
                     R"(,"sha256":")" + sha256Hex(content) + "\"}";
-            server.set("/pack/" + path, {.body = content});
+            server.set("/pack/" + path, {.body = content, .gzip = gzip});
         }
         server.set("/pack/wowpack.json",
                    {.body = R"({"format":1,"name":"isle","version":")" + version +
@@ -123,6 +124,28 @@ TEST_CASE("install, update and remove a pack", "[wowpack]") {
     CHECK_FALSE(fs::exists(override / "dbfilesclient"));
     CHECK_FALSE(fs::exists(override / ".wowpack"));
     CHECK(readFile(override / "textures" / "mine.blp") == "mine");
+}
+
+TEST_CASE("a gzip-serving pack installs with the sizes and hashes of the plain files", "[wowpack]") {
+    LocalHttpServer server;
+    TempDir dir;
+    const fs::path override = dir.path / "override";
+    fs::create_directories(override);
+    std::string wdt(200000, 'w');
+    for (std::size_t i = 0; i < wdt.size(); i += 13) wdt[i] = static_cast<char>('a' + i % 26);
+    Pack pack{server, "1", {{"dbfilesclient/map.dbc", "MAP1"}, {"world/maps/isle/isle.wdt", wdt}}, true};
+    pack.publish();
+
+    WowpackSync sync;
+    sync.start(server.url("/pack/wowpack.json"), override.string(), "wotlk");
+    waitDone(sync);
+    INFO(sync.error());
+    REQUIRE(sync.state() == WowpackSync::State::Done);
+    CHECK(server.lastRequest().find("Accept-Encoding: gzip") != std::string::npos);
+    CHECK(readFile(override / "world" / "maps" / "isle" / "isle.wdt") == wdt);
+    CHECK(readFile(override / "dbfilesclient" / "map.dbc") == "MAP1");
+    CHECK(sync.bytesDone() == wdt.size() + 4);
+    CHECK(sync.bytesDone() == sync.bytesTotal());
 }
 
 TEST_CASE("a hash mismatch leaves nothing behind", "[wowpack]") {
