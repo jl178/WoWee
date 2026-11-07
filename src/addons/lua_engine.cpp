@@ -1,4 +1,5 @@
 #include "addons/lua_engine.hpp"
+#include "addons/damage_meter_lua.hpp"
 #include "game/spell_handler.hpp"
 #include "game/stock_trade_skill.hpp"
 #include "ui/link_hit.hpp"
@@ -7751,11 +7752,11 @@ void LuaEngine::registerCoreAPI() {
         "    self:Start('You have been resurrected', 3)\n"
         "end)\n");
 
-    // The cooldown tracker and the damage meter, two panels the client's own
-    // options turn on ("cooldowntracker", "dpsmeter") and no interface has.
-    // Their numbers come from WoweeActiveCooldowns and WoweeDamageMeter; the
-    // panels are only the drawing. One driver runs both, because a hidden
-    // frame gets no OnUpdate and each has to be able to come back.
+    // The cooldown tracker, a panel the client's own options turn on
+    // ("cooldowntracker") and no interface has. Its numbers come from
+    // WoweeActiveCooldowns; the panel is only the drawing. Its driver is a
+    // frame of its own, because a hidden frame gets no OnUpdate and the panel
+    // has to be able to come back. The damage meter is the next chunk.
     bootstrap(
         "local function wFont(...)\n"
         "    for i = 1, select('#', ...) do\n"
@@ -7775,11 +7776,6 @@ void LuaEngine::registerCoreAPI() {
         "    return f\n"
         "end\n"
         "local function wOn(key) return WoweeGetSetting and WoweeGetSetting(key) == '1' end\n"
-        "local function wShort(v)\n"
-        "    if v >= 1e6 then return format('%.1fM', v / 1e6) end\n"
-        "    if v >= 1000 then return format('%.1fK', v / 1000) end\n"
-        "    return format('%.0f', v)\n"
-        "end\n"
         // The tracker: its spells still cooling down, longest first, at most twelve.
         "local cd = wPanel('__WoweeCooldownTracker', 200)\n"
         "cd:SetPoint('TOPLEFT', UIParent, 'BOTTOM', 260, 290)\n"
@@ -7828,64 +7824,18 @@ void LuaEngine::registerCoreAPI() {
         "    cd:SetHeight(24 + n * 16)\n"
         "    cd:Show()\n"
         "end\n"
-        // The meter: recent damage and healing per second, and the fight's
-        // average once it has gone on for three seconds. Dragged where the
-        // player wants it, and kept there through dpsmeterleft and dpsmetertop.
-        "local dps = wPanel('__WoweeDamageMeter', 90)\n"
-        "dps:EnableMouse(true)\n"
-        "dps:SetMovable(true)\n"
-        "dps:RegisterForDrag('LeftButton')\n"
-        "dps:SetScript('OnDragStart', function(self) self:StartMoving() end)\n"
-        "dps:SetScript('OnDragStop', function(self)\n"
-        "    self:StopMovingOrSizing()\n"
-        "    if WoweeSetSetting and self:GetLeft() then\n"
-        "        WoweeSetSetting('dpsmeterleft', self:GetLeft())\n"
-        "        WoweeSetSetting('dpsmetertop', self:GetTop())\n"
-        "    end\n"
-        "end)\n"
-        "local function dpsPlace()\n"
-        "    local x = tonumber(WoweeGetSetting and WoweeGetSetting('dpsmeterleft'))\n"
-        "    local y = tonumber(WoweeGetSetting and WoweeGetSetting('dpsmetertop'))\n"
-        "    dps:ClearAllPoints()\n"
-        "    if x and y and x >= 0 and y >= 0 then\n"
-        "        dps:SetPoint('TOPLEFT', UIParent, 'BOTTOMLEFT', x, y)\n"
-        "    else\n"
-        "        dps:SetPoint('TOP', UIParent, 'TOP', 0, -132)\n"
-        "    end\n"
-        "end\n"
-        "dps.lines = {}\n"
-        "for i = 1, 4 do\n"
-        "    local line = dps:CreateFontString('__WoweeDamageMeterLine' .. i, 'OVERLAY', wFont('GameFontHighlightSmall', 'GameFontNormalSmall'))\n"
-        "    line:SetPoint('TOPLEFT', dps, 'TOPLEFT', 4, -3 - (i - 1) * 14)\n"
-        "    dps.lines[i] = line\n"
-        "end\n"
-        "local function dpsUpdate(elapsed)\n"
-        "    if not wOn('dpsmeter') or not WoweeDamageMeter then dps:Hide() return end\n"
-        "    local rDps, rHps, eDps, eHps, inCombat, show = WoweeDamageMeter(elapsed)\n"
-        "    if not show then dps:Hide() return end\n"
-        "    local rows = {}\n"
-        "    if rDps > 0.5 then rows[#rows + 1] = {wShort(rDps) .. ' dps', 1, 0.45, 0.15} end\n"
-        "    if rHps > 0.5 then rows[#rows + 1] = {wShort(rHps) .. ' hps', 0.35, 1, 0.35} end\n"
-        "    if eDps > 0.5 then rows[#rows + 1] = {wShort(eDps) .. ' enc', 1, 0.65, 0.25} end\n"
-        "    if eHps > 0.5 then rows[#rows + 1] = {wShort(eHps) .. ' enc', 0.5, 1, 0.5} end\n"
-        "    for i = 1, 4 do\n"
-        "        local r = rows[i]\n"
-        "        if r then dps.lines[i]:SetText(r[1]) dps.lines[i]:SetTextColor(r[2], r[3], r[4]) dps.lines[i]:Show()\n"
-        "        else dps.lines[i]:Hide() end\n"
-        "    end\n"
-        "    if not dps:IsShown() then dpsPlace() end\n"
-        "    dps:SetHeight(6 + math.max(#rows, 1) * 14)\n"
-        "    dps:Show()\n"
-        "end\n"
         "local driver = CreateFrame('Frame', '__WoweeHudPanels')\n"
         "local since = 0\n"
         "driver:SetScript('OnUpdate', function(self, elapsed)\n"
         "    elapsed = elapsed or arg1 or 0\n"
-        "    dpsUpdate(elapsed)\n"
         "    since = since + elapsed\n"
         "    if since >= 0.1 then since = 0 cdUpdate() end\n"
         "end)\n"
         "driver:Show()\n");
+
+    // The damage meter's window, in the manner of Recount; its own chunk,
+    // in addon_lua_snippets' way, so a test can parse it.
+    bootstrap(kDamageMeterWindow);
 
     // C_Timer implementation via Lua (uses OnUpdate internally)
     bootstrap(

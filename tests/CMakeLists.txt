@@ -1537,6 +1537,7 @@ register_test_target(test_classic_combat_chat)
 # ── test_damage_meter ────────────────────────────────────────
 add_executable(test_damage_meter
     test_damage_meter.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/damage_meter.cpp
     ${TEST_COMMON_SOURCES}
 )
 target_include_directories(test_damage_meter PRIVATE ${TEST_INCLUDE_DIRS})
@@ -1544,6 +1545,19 @@ target_include_directories(test_damage_meter SYSTEM PRIVATE ${TEST_SYSTEM_INCLUD
 target_link_libraries(test_damage_meter PRIVATE catch2_main)
 add_test(NAME damage_meter COMMAND test_damage_meter)
 register_test_target(test_damage_meter)
+
+# The meter's window is Lua in a C++ string literal; this runs it against
+# stand-in frames, including a check that a frame of it makes no garbage.
+add_executable(test_damage_meter_window
+    test_damage_meter_window.cpp
+    ${TEST_COMMON_SOURCES}
+)
+target_include_directories(test_damage_meter_window PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_damage_meter_window SYSTEM PRIVATE
+    ${TEST_SYSTEM_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR}/extern/lua-5.1.5/src)
+target_link_libraries(test_damage_meter_window PRIVATE catch2_main lua51)
+add_test(NAME damage_meter_window COMMAND test_damage_meter_window)
+register_test_target(test_damage_meter_window)
 
 # ── test_combat_fsm ──────────────────────────────────────────
 add_executable(test_combat_fsm

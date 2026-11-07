@@ -12,6 +12,7 @@
 #include "game/game_utils.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/entity.hpp"
+#include "game/protocol_constants.hpp"
 #include "game/tab_target.hpp"
 #include "game/update_field_table.hpp"
 #include "game/opcode_table.hpp"
@@ -494,6 +495,37 @@ void CombatHandler::addCombatText(CombatTextEntry::Type type, int32_t amount, ui
     // The panel's filters, before anything is built or announced. The mapping
     // lives in combat_text_filter.hpp so it can be tested without a settings
     // store; only the lookup is here.
+    // The meter's numbers for the expansions with no 3.3.5a combat log to feed
+    // it (logCombatEvent does for the rest). Ahead of the filter: hiding a
+    // number from the screen is not leaving it out of the meter.
+    if (!stockCombatLogActive()) {
+        using T = CombatTextEntry;
+        MeterEvent e;
+        bool known = true;
+        switch (type) {
+            case T::MELEE_DAMAGE: case T::SPELL_DAMAGE: case T::CRIT_DAMAGE:
+            case T::PERIODIC_DAMAGE: case T::GLANCING: case T::CRUSHING:
+                e.kind = MeterEvent::Damage; break;
+            case T::ENVIRONMENTAL:
+                e.kind = MeterEvent::Damage; break;
+            case T::HEAL: case T::CRIT_HEAL: case T::PERIODIC_HEAL:
+                e.kind = MeterEvent::Heal; break;
+            default: known = false; break;
+        }
+        if (known) {
+            e.src = (srcGuid != 0) ? srcGuid
+                  : (isPlayerSource ? owner_.getPlayerGuid() : 0);
+            e.dst = (dstGuid != 0) ? dstGuid
+                  : (isPlayerSource ? owner_.getTargetGuid() : owner_.getPlayerGuid());
+            e.srcCombatant = meterCombatantOf(e.src);
+            e.dstCombatant = isMeterCombatant(e.dst) ? e.dst : 0;
+            e.spellId = type == T::ENVIRONMENTAL ? kMeterEnvironment : spellId;
+            e.amount = amount;
+            e.crit = type == T::CRIT_DAMAGE || type == T::CRIT_HEAL;
+            damageMeter_.record(meterClock(), e);
+        }
+    }
+
     const auto rule = combatTextFilterFor(type, isPlayerSource, srcGuid, dstGuid,
                                           owner_.getPetGuid(), owner_.getTargetGuid());
     if (rule.cvar && addons::storedCVarValue(rule.cvar, rule.fallback) == "0") return;
@@ -664,6 +696,15 @@ bool CombatHandler::shouldLogSpellstealAura(uint64_t casterGuid, uint64_t victim
 
 void CombatHandler::updateCombatText(float deltaTime) {
     flushCombatLog();
+    // The group's combat flags a few times a second rather than every frame:
+    // a raid is forty entity lookups, and a fight's edge a fifth of a second
+    // late changes nothing a player can see.
+    meterCombatPoll_ -= deltaTime;
+    if (meterCombatPoll_ <= 0.0f) {
+        meterCombatPoll_ = 0.2f;
+        meterGroupInCombat_ = groupInCombat();
+    }
+    damageMeter_.update(meterClock(), meterGroupInCombat_);
     for (auto& entry : combatText_) {
         entry.age += deltaTime;
     }
@@ -1202,6 +1243,9 @@ void CombatHandler::updateAutoAttack(float deltaTime) {
 
 void CombatHandler::resetAllCombatState() {
     targetNearestCycle_.reset();
+    // Another character's fights are not this one's.
+    damageMeter_.reset();
+    meterGroupInCombat_ = false;
     hostileAttackers_.clear();
     combatText_.clear();
     autoAttacking_ = false;
@@ -1958,6 +2002,100 @@ bool CombatHandler::isGroupMemberGuid(uint64_t guid) const {
     return false;
 }
 
+// ============================================================
+// Damage meter
+// ============================================================
+
+double CombatHandler::meterClock() {
+    return std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+bool CombatHandler::isMeterCombatant(uint64_t guid) const {
+    if (guid == 0) return false;
+    return guid == owner_.getPlayerGuid() || (owner_.isInGroup() && isGroupMemberGuid(guid));
+}
+
+uint64_t CombatHandler::meterCombatantOf(uint64_t guid) const {
+    if (guid == 0) return 0;
+    if (isMeterCombatant(guid)) return guid;
+    if (guid == owner_.getPetGuid()) return owner_.getPlayerGuid();
+    if (stock_combat_log::isPlayerGuid(guid)) return 0;
+    auto ent = owner_.getEntityManager().getEntity(guid);
+    if (!ent || !ent->isUnit()) return 0;
+    auto guidAt = [&ent](UF field) -> uint64_t {
+        const uint16_t idx = fieldIndex(field);
+        if (idx == 0xFFFF) return 0;
+        return static_cast<uint64_t>(ent->getField(idx)) |
+               (static_cast<uint64_t>(ent->getField(static_cast<uint16_t>(idx + 1))) << 32);
+    };
+    // A pet or a charmed unit answers to CHARMEDBY or SUMMONEDBY, a totem or
+    // guardian to CREATEDBY: whichever names a combatant is the owner, as
+    // Recount folds pets, totems and guardians into the bar of whoever made
+    // them.
+    for (UF field : {UF::UNIT_FIELD_CHARMEDBY, UF::UNIT_FIELD_SUMMONEDBY_LO,
+                     UF::UNIT_FIELD_CREATEDBY_LO}) {
+        const uint64_t owner = guidAt(field);
+        if (owner != 0 && isMeterCombatant(owner)) return owner;
+    }
+    return 0;
+}
+
+bool CombatHandler::groupInCombat() const {
+    auto& em = owner_.getEntityManager();
+    const uint16_t flagsIdx = fieldIndex(UF::UNIT_FIELD_FLAGS);
+    if (flagsIdx == 0xFFFF) return isInCombat();
+    auto flagged = [&](uint64_t guid) {
+        auto ent = em.getEntity(guid);
+        return ent && (ent->getField(flagsIdx) & UNIT_FLAG_IN_COMBAT) != 0;
+    };
+    if (flagged(owner_.getPlayerGuid())) return true;
+    if (!owner_.isInGroup()) return false;
+    for (const auto& m : owner_.getPartyData().members) {
+        if (m.guid != 0 && flagged(m.guid)) return true;
+    }
+    return false;
+}
+
+void CombatHandler::feedDamageMeter(const stock_combat_log::Record& r) {
+    namespace scl = stock_combat_log;
+    MeterEvent e;
+    switch (r.event) {
+        case scl::SWING_DAMAGE:
+        case scl::RANGE_DAMAGE:
+        case scl::SPELL_DAMAGE:
+        case scl::SPELL_PERIODIC_DAMAGE:
+        case scl::DAMAGE_SHIELD:
+        case scl::DAMAGE_SPLIT:
+        case scl::ENVIRONMENTAL_DAMAGE:
+            if (!(r.suffix & scl::kSufDamage)) return;
+            e.kind = MeterEvent::Damage;
+            e.amount = r.v5c;
+            e.over = r.v60;
+            e.crit = (r.hitBits & 1u) != 0;
+            break;
+        case scl::SPELL_HEAL:
+        case scl::SPELL_PERIODIC_HEAL:
+            if (!(r.suffix & scl::kSufHeal)) return;
+            e.kind = MeterEvent::Heal;
+            e.amount = r.v58;
+            e.over = r.v5c;
+            e.crit = r.v64 != 0;
+            break;
+        case scl::UNIT_DIED:
+            e.kind = MeterEvent::Death;
+            break;
+        default:
+            return;
+    }
+    e.src = r.src;
+    e.dst = r.dst;
+    e.spellId = r.event == scl::ENVIRONMENTAL_DAMAGE ? kMeterEnvironment : r.spellId;
+    e.srcCombatant = meterCombatantOf(r.src);
+    e.dstCombatant = isMeterCombatant(r.dst) ? r.dst : 0;
+    damageMeter_.record(meterClock(), e);
+}
+
 void CombatHandler::targetEnemy(bool reverse) { targetNearest(TargetNearestMode::Enemy, reverse); }
 void CombatHandler::targetFriend(bool reverse) { targetNearest(TargetNearestMode::Friend, reverse); }
 void CombatHandler::targetNearestEnemyPlayer(bool reverse) {
@@ -2329,6 +2467,9 @@ std::string CombatHandler::combatLogName(uint64_t guid, bool& waiting) const {
 
 void CombatHandler::logCombatEvent(const stock_combat_log::Record& record) {
     if (!stockCombatLogActive() || record.event < 0) return;
+    // At the moment the packet said so, not once the names are in: a fight's
+    // timing is the server's, and the meter keeps guids, not names.
+    feedDamageMeter(record);
     PendingCombatLog p;
     p.rec = record;
     p.res.srcFlags = combatLogUnitFlags(record.src);

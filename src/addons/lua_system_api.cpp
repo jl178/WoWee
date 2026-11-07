@@ -1,6 +1,7 @@
 // lua_system_api.cpp - System, time, sound, locale, map, addons, instances, and utilities Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include "game/damage_meter.hpp"
+#include "game/combat_handler.hpp"
 #include <array>
 #include <algorithm>
 #include <cctype>
@@ -4948,30 +4949,241 @@ static int lua_WoweeActiveCooldowns(lua_State* L) {
     return 1;
 }
 
-// WoweeDamageMeter(elapsed) -> dps, hps, encounterDps, encounterHps, inCombat, show
+// The damage meter window's numbers (game::DamageMeter, fed by the combat
+// handler from the combat log). The window is Lua and draws; everything it
+// shows comes through these.
 //
-// Advances the meter by `elapsed` seconds and answers what it reads. Called
-// from the meter frame's OnUpdate, which is the one clock it runs on; the fight
-// totals live here between calls. See game::DamageMeter.
-static int lua_WoweeDamageMeter(lua_State* L) {
-    static game::DamageMeter meter;
-    auto* gh = getGameHandler(L);
-    if (!gh || gh->getState() != game::WorldState::IN_WORLD) {
-        for (int i = 0; i < 4; ++i) lua_pushnumber(L, 0);
-        lua_pushboolean(L, 0);
-        lua_pushboolean(L, 0);
-        return 6;
+// WoweeDamageMeterView(mode, fight) -> count, total, duration, inFight
+//   Sorts the bars for a mode (1 Damage Done, 2 DPS, 3 Healing Done, 4 HPS,
+//   5 Damage Taken, 6 Overhealing, 7 Deaths) and a fight (0 current,
+//   1 overall, 2.. the previous ones, newest first), and keeps them for the
+//   calls below until the next view.
+// WoweeDamageMeterRow(i) -> name, classToken, value, total, perSecond, percent
+// WoweeDamageMeterFights() -> previous, inFight, inWorld
+// WoweeDamageMeterFightName(fight) -> name, duration
+// WoweeDamageMeterAbilities(i, max) -> n, then WoweeDamageMeterAbility(k)
+//   -> name, amount, percent, hits, crits: what makes up bar i.
+// WoweeDamageMeterDeath(i) -> seconds, killer, spell, amount
+// WoweeDamageMeterReset()
+//
+// The bars are copied out of the view: a packet between the window's view
+// and a tooltip's question can add a combatant and move the meter's own
+// storage, and a copy by guid cannot dangle. Reserved once, so a view on
+// every frame allocates nothing.
+namespace {
+
+struct MeterBar {
+    uint64_t guid = 0;
+    double value = 0, total = 0, perSecond = 0, percent = 0;
+};
+
+struct MeterBridge {
+    std::vector<MeterBar> bars;
+    std::vector<game::MeterAbilityRow> abilities;
+    int fight = game::DamageMeter::kCurrent;
+    game::MeterMode mode = game::MeterMode::DamageDone;
+    MeterBridge() {
+        bars.reserve(64);
+        abilities.reserve(16);
     }
-    const float dt = static_cast<float>(luaL_optnumber(L, 1, 0.0));
-    const auto r = meter.update(gh->isInCombat(), dt, gh->getCombatLog(),
-                                gh->getCombatLogAppended(), gh->getCombatText());
-    lua_pushnumber(L, r.dps);
-    lua_pushnumber(L, r.hps);
-    lua_pushnumber(L, r.encounterDps);
-    lua_pushnumber(L, r.encounterHps);
-    lua_pushboolean(L, r.inCombat ? 1 : 0);
-    lua_pushboolean(L, r.show ? 1 : 0);
+};
+
+MeterBridge& meterBridge() {
+    static MeterBridge b;
+    return b;
+}
+
+game::DamageMeter* damageMeterOf(game::GameHandler* gh) {
+    if (!gh) return nullptr;
+    auto* combat = gh->getCombatHandler();
+    return combat ? &combat->damageMeter() : nullptr;
+}
+
+/// RAID_CLASS_COLORS' keys, by class id.
+const char* meterClassToken(game::GameHandler& gh, uint64_t guid) {
+    static constexpr const char* kTokens[] = {
+        "", "WARRIOR", "PALADIN", "HUNTER", "ROGUE", "PRIEST",
+        "DEATHKNIGHT", "SHAMAN", "MAGE", "WARLOCK", "", "DRUID"};
+    uint8_t classId = 0;
+    if (guid == gh.getPlayerGuid()) {
+        classId = gh.getPlayerClass();
+    } else {
+        if (auto ent = gh.getEntityManager().getEntity(guid); ent && ent->isUnit()) {
+            const uint32_t bytes0 = ent->getField(game::fieldIndex(game::UF::UNIT_FIELD_BYTES_0));
+            classId = static_cast<uint8_t>((bytes0 >> 8) & 0xFF);
+        }
+        if (classId == 0) classId = gh.lookupPlayerClass(guid);
+    }
+    return classId < 12 ? kTokens[classId] : "";
+}
+
+void pushUnitName(lua_State* L, game::GameHandler& gh, uint64_t guid) {
+    const std::string& name = gh.lookupName(guid);
+    if (!name.empty()) {
+        lua_pushlstring(L, name.data(), name.size());
+        return;
+    }
+    // A group member the name cache has not been asked about yet - the party
+    // list itself carries the name, and the bar should not read "Unknown".
+    for (const auto& m : gh.getPartyData().members) {
+        if (m.guid == guid && !m.name.empty()) {
+            lua_pushlstring(L, m.name.data(), m.name.size());
+            return;
+        }
+    }
+    if (guid == gh.getPlayerGuid()) {
+        for (const auto& c : gh.getCharacters()) {
+            if (c.guid == guid) {
+                lua_pushlstring(L, c.name.data(), c.name.size());
+                return;
+            }
+        }
+    }
+    lua_pushliteral(L, "Unknown");
+}
+
+/// "Melee", "Environment", or the spell's own name.
+std::string meterSpellName(game::GameHandler& gh, uint32_t spellId) {
+    if (spellId == 0) return "Melee";
+    if (spellId == game::kMeterEnvironment) return "Environment";
+    const std::string& name = gh.getSpellName(spellId);
+    return name.empty() ? "Spell " + std::to_string(spellId) : name;
+}
+
+}  // namespace
+
+static int lua_WoweeDamageMeterView(lua_State* L) {
+    auto& bridge = meterBridge();
+    bridge.bars.clear();
+    auto* gh = getGameHandler(L);
+    auto* meter = damageMeterOf(gh);
+    const int mode = static_cast<int>(luaL_optnumber(L, 1, 1)) - 1;
+    const int fight = static_cast<int>(luaL_optnumber(L, 2, 0));
+    if (!meter || mode < 0 || mode >= static_cast<int>(game::MeterMode::Count) || fight < 0) {
+        lua_pushnumber(L, 0);
+        lua_pushnumber(L, 0);
+        lua_pushnumber(L, 0);
+        lua_pushboolean(L, 0);
+        return 4;
+    }
+    bridge.mode = static_cast<game::MeterMode>(mode);
+    bridge.fight = fight;
+    const auto& v = meter->view(fight, bridge.mode, game::CombatHandler::meterClock());
+    for (std::size_t i = 0; i < v.count; ++i) {
+        const auto& r = v.rows[i];
+        bridge.bars.push_back({r.combatant->guid, r.value, r.total, r.perSecond, r.percent});
+    }
+    lua_pushnumber(L, static_cast<double>(v.count));
+    lua_pushnumber(L, v.total);
+    lua_pushnumber(L, v.duration);
+    lua_pushboolean(L, meter->inFight() ? 1 : 0);
+    return 4;
+}
+
+static int lua_WoweeDamageMeterRow(lua_State* L) {
+    auto& bridge = meterBridge();
+    auto* gh = getGameHandler(L);
+    const auto i = static_cast<std::size_t>(luaL_checknumber(L, 1));
+    if (!gh || i < 1 || i > bridge.bars.size()) return luaReturnNil(L);
+    const MeterBar& b = bridge.bars[i - 1];
+    pushUnitName(L, *gh, b.guid);
+    lua_pushstring(L, meterClassToken(*gh, b.guid));
+    lua_pushnumber(L, b.value);
+    lua_pushnumber(L, b.total);
+    lua_pushnumber(L, b.perSecond);
+    lua_pushnumber(L, b.percent);
     return 6;
+}
+
+static int lua_WoweeDamageMeterFights(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    auto* meter = damageMeterOf(gh);
+    lua_pushnumber(L, meter ? static_cast<double>(meter->previousCount()) : 0.0);
+    lua_pushboolean(L, meter && meter->inFight() ? 1 : 0);
+    // Whether there is a world to measure: the window waits for it, so that
+    // the character it saves its place under is the one playing.
+    lua_pushboolean(L, gh && gh->getState() == game::WorldState::IN_WORLD ? 1 : 0);
+    return 3;
+}
+
+static int lua_WoweeDamageMeterFightName(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    auto* meter = damageMeterOf(gh);
+    const int sel = static_cast<int>(luaL_optnumber(L, 1, 0));
+    const game::MeterFight* f = meter ? meter->fight(sel) : nullptr;
+    if (!f || f->mainTarget == 0) {
+        lua_pushnil(L);
+    } else {
+        const std::string& name = gh->lookupName(f->mainTarget);
+        if (name.empty()) lua_pushnil(L);
+        else lua_pushlstring(L, name.data(), name.size());
+    }
+    lua_pushnumber(L, meter ? meter->duration(sel, game::CombatHandler::meterClock()) : 0.0);
+    return 2;
+}
+
+static int lua_WoweeDamageMeterAbilities(lua_State* L) {
+    auto& bridge = meterBridge();
+    bridge.abilities.clear();
+    auto* meter = damageMeterOf(getGameHandler(L));
+    const auto i = static_cast<std::size_t>(luaL_checknumber(L, 1));
+    const auto max = static_cast<std::size_t>(std::clamp(luaL_optnumber(L, 2, 6), 1.0, 16.0));
+    if (meter && i >= 1 && i <= bridge.bars.size()) {
+        const auto& a = meter->abilities(bridge.fight, bridge.mode, bridge.bars[i - 1].guid, max);
+        bridge.abilities.assign(a.rows, a.rows + a.count);
+    }
+    lua_pushnumber(L, static_cast<double>(bridge.abilities.size()));
+    return 1;
+}
+
+static int lua_WoweeDamageMeterAbility(lua_State* L) {
+    auto& bridge = meterBridge();
+    auto* gh = getGameHandler(L);
+    const auto k = static_cast<std::size_t>(luaL_checknumber(L, 1));
+    if (!gh || k < 1 || k > bridge.abilities.size()) return luaReturnNil(L);
+    const auto& a = bridge.abilities[k - 1];
+    std::string label = meterSpellName(*gh, a.spellId);
+    // A pet's ability carries the pet's name, as the owner's bar holds both.
+    if (a.pet != 0) {
+        const std::string& pet = gh->lookupName(a.pet);
+        label = (pet.empty() ? std::string("Pet") : pet) + ": " + label;
+    }
+    lua_pushlstring(L, label.data(), label.size());
+    lua_pushnumber(L, a.amount);
+    lua_pushnumber(L, a.percent);
+    lua_pushnumber(L, a.hits);
+    lua_pushnumber(L, a.crits);
+    return 5;
+}
+
+static int lua_WoweeDamageMeterDeath(lua_State* L) {
+    auto& bridge = meterBridge();
+    auto* gh = getGameHandler(L);
+    auto* meter = damageMeterOf(gh);
+    const auto i = static_cast<std::size_t>(luaL_checknumber(L, 1));
+    if (!meter || i < 1 || i > bridge.bars.size()) return luaReturnNil(L);
+    const game::MeterFight* f = meter->fight(bridge.fight);
+    const game::MeterCombatant* c = f ? f->find(bridge.bars[i - 1].guid) : nullptr;
+    if (!c || c->deaths == 0) return luaReturnNil(L);
+    const auto& d = c->lastDeath;
+    lua_pushnumber(L, d.at);
+    if (d.killer != 0) pushUnitName(L, *gh, d.killer);
+    else lua_pushnil(L);
+    if (d.amount > 0) {
+        const std::string spell = meterSpellName(*gh, d.spellId);
+        lua_pushlstring(L, spell.data(), spell.size());
+    } else {
+        lua_pushnil(L);
+    }
+    lua_pushnumber(L, d.amount);
+    return 4;
+}
+
+static int lua_WoweeDamageMeterReset(lua_State* L) {
+    if (auto* meter = damageMeterOf(getGameHandler(L))) meter->reset();
+    meterBridge().bars.clear();
+    meterBridge().abilities.clear();
+    return 0;
 }
 
 static int lua_WoweeSetSetting(lua_State* L) {
@@ -5343,7 +5555,14 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"WoweeGetSetting",          lua_WoweeGetSetting},
                 {"WoweeSetSetting",          lua_WoweeSetSetting},
                 {"WoweeActiveCooldowns",     lua_WoweeActiveCooldowns},
-                {"WoweeDamageMeter",         lua_WoweeDamageMeter},
+                {"WoweeDamageMeterView",      lua_WoweeDamageMeterView},
+                {"WoweeDamageMeterRow",       lua_WoweeDamageMeterRow},
+                {"WoweeDamageMeterFights",    lua_WoweeDamageMeterFights},
+                {"WoweeDamageMeterFightName", lua_WoweeDamageMeterFightName},
+                {"WoweeDamageMeterAbilities", lua_WoweeDamageMeterAbilities},
+                {"WoweeDamageMeterAbility",   lua_WoweeDamageMeterAbility},
+                {"WoweeDamageMeterDeath",     lua_WoweeDamageMeterDeath},
+                {"WoweeDamageMeterReset",     lua_WoweeDamageMeterReset},
                 {"WoweeSaveVariables",       lua_WoweeSaveVariables},
                 {"HasLFGRestrictions",       lua_HasLFGRestrictions},
                 {"GetLFGProposal",           lua_GetLFGProposal},

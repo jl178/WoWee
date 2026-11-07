@@ -1,6 +1,7 @@
 #pragma once
 
 #include "game/world_packets.hpp"
+#include "game/damage_meter.hpp"
 #include "game/opcode_table.hpp"
 #include "game/spell_defines.hpp"
 #include "game/stock_combat_log.hpp"
@@ -54,6 +55,11 @@ public:
     /// How many entries the log has ever been given. It holds the last 500, so
     /// this, not its size, says how many arrived since a reader last looked.
     [[nodiscard]] uint64_t getCombatLogAppended() const { return combatLogAppended_; }
+
+    /// The group's damage meter, fed from the combat log below.
+    [[nodiscard]] DamageMeter& damageMeter() { return damageMeter_; }
+    /// The clock the meter's fights are timed on, in seconds.
+    [[nodiscard]] static double meterClock();
 
     // Threat
     struct ThreatEntry {
@@ -204,6 +210,19 @@ private:
     std::function<bool(uint64_t)> unitInViewProvider_;
 
     [[nodiscard]] bool isGroupMemberGuid(uint64_t guid) const;
+
+    // --- The damage meter ---
+    /// The player or a group member: the units the meter keeps bars for.
+    [[nodiscard]] bool isMeterCombatant(uint64_t guid) const;
+    /// Who a unit's numbers are credited to: itself if it has a bar, the
+    /// owner when it is a pet, totem or guardian of someone who does, else 0.
+    [[nodiscard]] uint64_t meterCombatantOf(uint64_t guid) const;
+    /// The server's combat flag on the player or anyone in the group.
+    [[nodiscard]] bool groupInCombat() const;
+    void feedDamageMeter(const stock_combat_log::Record& record);
+    DamageMeter damageMeter_;
+    float meterCombatPoll_ = 0.0f;
+    bool meterGroupInCombat_ = false;
 
     struct PendingCombatLog {
         stock_combat_log::Record rec;

@@ -692,6 +692,7 @@ set(WOWEE_SOURCES
     src/game/text_tokens_subject.cpp
     src/game/movement_handler.cpp
     src/game/combat_handler.cpp
+    src/game/damage_meter.cpp
     src/game/spell_handler.cpp
     src/game/game_handler_pets.cpp
     src/game/global_strings.cpp
