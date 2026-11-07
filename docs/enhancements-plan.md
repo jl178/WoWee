@@ -2281,12 +2281,10 @@ Done (2026-11-04): the row `highlightrolloff`, "Soft highlights"; costs in
   Count by `weather_fx::mistSheetTarget`: rain and snow past half their
   level, as the stock spawn rate (level - 0.5) x 2 (world-lighting.md 8),
   sand at any level.
-- **Off = stock Wowee.** No sheet and the texture not loaded. Note: the
-  stock client does draw a mist (`SnowMist01`, 0x78c420, 0x786e10) that
-  Wowee never drew (world-lighting.md "Gap table": "not done"); this row is
-  that mist with Wowee's sizes and lifetimes, since the stock sheets' motion
-  and life were not traced. When they are, the stock part belongs on the
-  stock path and the row should keep only what goes beyond it.
+- **Off = stock.** The stock mist is drawn either way (2026-11-07,
+  docs/re/weather-sky.md 2: 12 yd SnowMist01 / WeatherMistGrainy01 squares
+  blowing back past the player, 2.7 s, past half the level for rain and
+  snow). The row adds only these taller distant sheets beyond it.
 - **Status (2026-11-06): done, row `weathersheets`, recommended on.**
   Cost: 3.17.
 
@@ -2325,11 +2323,11 @@ Done (2026-11-04): the row `highlightrolloff`, "Soft highlights"; costs in
   stock sand.bls is drawn; `weather_fx::sandFogScale` on the frame's fog
   start and end, eased over 3 s; the foliage and cloth wind takes 1.2-1.8
   and the volumetric mist (if on) thickens.
-- **Off = stock Wowee.** No sand. The stock client has a sand emitter
-  (0x784580, 32000 a second, 20 x 12.5 yd, sand.bls) that Wowee never
-  drew; as with E26, the stock part should move to the stock path once its
-  texture and motion are traced (Weather.dbc names no texture on the sand
-  rows).
+- **Off = stock.** Since 2026-11-07 the stock sand draws with the row off
+  (docs/re/weather-sky.md 2: fog-coloured grains from 34-40 yd ahead at
+  18.7 yd/s, and the grainy mist). The row no longer draws grains of its
+  own; it adds the haze, the stronger foliage and cloth wind and the thicker
+  volumetric mist on top of the stock sand.
 - **Status (2026-11-06): done, row `sandstorms`, recommended on.** Cost: 3.17.
 
 ### E29. Breath in the cold
@@ -2342,11 +2340,11 @@ Done (2026-11-04): the row `highlightrolloff`, "Soft highlights"; costs in
 - **Engine.** A second `FootfallDust` (built on first use) fed by
   `Renderer::updateBreath` from the units' attachment 17 (Breath; the head,
   11, as a fallback) four times a second.
-- **Note.** The stock client has a breath of its own: the M2 event `$BTH`
-  spawns effect 3, the cold breath, at attachment 17 (0x732650, 0x6F9260;
-  world-lighting.md "Drunk"). What makes a place cold for it was not traced
-  and Wowee does not play it. Once it is, this row should step aside where
-  the stock breath shows.
+- **Now (2026-11-07).** The stock breath is traced and drawn with the row
+  off (docs/re/weather-sky.md 3): the model's `$BTH` event plays
+  `Particles\ColdBreath.m2` at attachment 17 where the unit's area (or its
+  zone) has AreaTable flag 0x1. The row's own puffs and zone list are gone;
+  it now only extends the same stock breath to wherever snow is falling.
 - **Status (2026-11-06): done, row `coldbreath`, recommended on.** Cost: 3.17.
 
 ### E30. Rain heard indoors

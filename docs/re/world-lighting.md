@@ -826,7 +826,7 @@ movement effect is the deterministic facing/pitch drift.
 | Splash blend | Mod2x | alpha 0.75, tinted | stock Mod2x |
 | Snow colour | white, unlit, unfogged, Alpha | lit-tinted, fogged, alpha 0.95 | stock |
 | Storm light | 4·min(g, 0.25)·Weather.dbc scale, 10 s ease | grade linear | stock: 4·min(g, 0.25), a quarter per 10 s (LightingManager); Weather.dbc scale not read |
-| Mist sheets (SnowMist01, fog colour) | yes, past level 0.5 | none | **not done** (spec above) |
+| Mist sheets (SnowMist01, fog colour) | yes, past level 0.5 | none | stock (weather-sky.md 2) |
 | Volumes / counts | 65x37.5 yd rain, rates 35000·0.66·p /s | 32 yd box, 3000 particles max | unchanged (Wowee extra: count cap and box sized for its CPU path) |
 | weatherDensity default | 2 (0.66) | Weather Detail 3 (1.0) | unchanged (setting is the user's) |
 | ffxGlow | on: Box4 → Gauss4 → lerp + blur²·Glow | none (shoulder tone map only in postprocess.frag, not in the FXAA path) | stock: blit 2x2 twice to a quarter-size mip, 16-tap product Gauss4 in fxaa.frag, `setGlow(LightParams.Glow, underwater 0x54/255)` |
@@ -891,11 +891,12 @@ Ultra as well. The presets were left as they are; that is a taste call.
     after;
   - the cloud noise uses a hash instead of the client's random table, and its
     churn speed is a stand-in;
-  - the timed screen tint (`0xd38b50`) and the lightning-flash dome tint are
-    missing.
+  - the timed screen tint (`0xd38b50`) is missing. The lightning-flash
+    dome tint (0xd38184 bit 0) is unreachable in stock: nothing sets the
+    bit (weather-sky.md 4).
 - **Weather and glow:**
-  - the mist sheets, the underwater glow wave and the nether/special
-    ScreenEffect washes are missing;
+  - the underwater glow wave and the nether/special ScreenEffect washes are
+    missing (the mist sheets and sand: weather-sky.md 2);
   - Weather.dbc's colour and storm scale are not read;
   - the drunk effect still uses Wowee's own blur.
 - **Old radial fog:** none left. Character, grass, particles, ribbons and

@@ -127,9 +127,9 @@ source.
 
 | Item | Size | Value | Source |
 |---|---|---|---|
-| Mist sheets (SnowMist01 past weather level 0.5) | S | M | world-lighting §8 |
+| ~~Mist sheets (SnowMist01 past weather level 0.5)~~ done 2026-11-07, with the stock sand and cold breath | S | M | weather-sky.md 2-3 |
 | Weather.dbc colour and storm scale | S | M | world-lighting §8 |
-| Lightning dome flash tint (stock) before any bolt enhancement | S | M | world-lighting §9, U17 |
+| ~~Lightning dome flash tint (stock)~~ none in stock: 0xd38184 bit 0 is never set | - | - | weather-sky.md 4 |
 | Timed screen tint `0xd38b50` | S | L | world-lighting §9 |
 | ScreenEffect types 2/3 (nether/special colour wash) | S | M | world-lighting, death-ghost G2 |
 | Underwater glow wave distortion | S | M | world-lighting §8 |
