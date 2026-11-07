@@ -547,7 +547,10 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                 "frame rate cost, especially without ray tracing hardware.\n"
                 "Traces rays against the world for the sun's shadows, the\n"
                 "darkening in corners and crevices, and light bounced off the\n"
-                "ground and walls.",
+                "ground and walls, out to 100 yards; the shadow map does the\n"
+                "rest. Integrated graphics without ray tracing hardware keep\n"
+                "it off: there it costs more than every other enhancement\n"
+                "together and looks no better than the shadow map.",
      .choices = "Off|Sun shadows|Shadows and occlusion|Shadows, occlusion and bounce light",
      .stockValue = 0, .recommendedValue = 0, .saveKey = "ray_traced_lighting",
      .controls = "RtLighting scene, BVH and its compute passes",

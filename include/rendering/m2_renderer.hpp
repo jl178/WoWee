@@ -828,8 +828,10 @@ public:
     /// Water surface height near a point, for telling a moored boat from a beached one.
     void setWaterHeightQuery(std::function<std::optional<float>(float, float, float)> q) { waterHeightAt_ = std::move(q); }
     /// Bring the scene's instances in line with this renderer's, once a frame
-    /// while the lighting is on.
-    void syncRtScene();
+    /// while the lighting is on. Only placements within `radius` of `focus`
+    /// are kept (0: all): the lighting traces the near field, and walking
+    /// and hashing all 70k placements of a loaded view cost 7 ms a frame.
+    void syncRtScene(const glm::vec3& focus, float radius);
     void setForceNoCull(bool v) { forceNoCull_ = v; }
 
     /** Ensure GPU→CPU cull output is visible to the host after a fence wait.

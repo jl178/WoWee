@@ -6192,7 +6192,28 @@ VkImageView Renderer::getNeutralRtLightingView() const {
 
 void Renderer::setRtLightingMode(int mode) {
     if (!rtLighting_) return;
-    rtLighting_->setMode(static_cast<RtLighting::Mode>(std::clamp(mode, 0, 3)));
+    mode = std::clamp(mode, 0, 3);
+    // Without ray tracing hardware the rays are walked in a compute shader,
+    // and on an integrated GPU that is far over any frame budget (on the
+    // Iris Xe at 2560x1080 the pass alone was several times the whole set of
+    // enhancements, docs/enhancements-plan.md 3.16) for shadows no better
+    // than the shadow map's. The option stays off there unless asked for.
+    if (mode != 0 && vkCtx && !vkCtx->hardwareRayQueryEnabled()) {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(vkCtx->getPhysicalDevice(), &props);
+        const bool integrated = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ||
+                                props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
+        if (integrated && !core::envFlagEnabled("WOWEE_RT_ALLOW_SOFTWARE", false)) {
+            static bool told = false;
+            if (!told) {
+                told = true;
+                LOG_WARNING("Ray traced lighting stays off: no ray tracing hardware on an integrated GPU "
+                            "(WOWEE_RT_ALLOW_SOFTWARE=1 runs the compute tracer anyway)");
+            }
+            mode = 0;
+        }
+    }
+    rtLighting_->setMode(static_cast<RtLighting::Mode>(mode));
 }
 
 void Renderer::writeRtLightingBindings() {
@@ -6234,10 +6255,19 @@ void Renderer::recordRtLighting(VkImage sceneDepth, VkExtent2D sceneExtent, bool
     in.sunColor = glm::vec3(currentFrameData.lightColor);
     in.skyColor = glm::vec3(currentFrameData.ambientColor);
     in.sunUp = in.sunDir.z > -0.05f;
+    // Timed apart for the profile: the instance sync walks every WMO and M2
+    // placement, the record builds and uploads what changed.
+    const auto t0 = std::chrono::steady_clock::now();
     if (wmoRenderer) wmoRenderer->syncRtScene();
-    if (m2Renderer) m2Renderer->syncRtScene();
+    if (m2Renderer) m2Renderer->syncRtScene(in.cameraPos, RtLighting::focusRadius());
+    const auto t1 = std::chrono::steady_clock::now();
     rtLighting_->record(currentCmd, sceneDepth, sceneExtent, depthIsMsaa, in);
     vkCtx->gpuMark(currentCmd, "rt_lighting");
+    if (stageSink_) {
+        const auto t2 = std::chrono::steady_clock::now();
+        stageSink_("rt_lighting/sync", std::chrono::duration<float, std::milli>(t1 - t0).count());
+        stageSink_("rt_lighting/record", std::chrono::duration<float, std::milli>(t2 - t1).count());
+    }
 }
 
 VkImageView Renderer::getNeutralFogVolumeView() const {

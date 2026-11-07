@@ -3212,7 +3212,7 @@ void M2Renderer::releaseRtModel(M2ModelGPU& gpuModel) {
     gpuModel.rtMesh = RtScene::kInvalid;
 }
 
-void M2Renderer::syncRtScene() {
+void M2Renderer::syncRtScene(const glm::vec3& focus, float radius) {
     if (!rtScene_ || !rtScene_->isActive()) return;
     const uint64_t gen = ++rtSyncGeneration_;
     auto track = [&](uint32_t id, uint32_t mesh) {
@@ -3224,6 +3224,18 @@ void M2Renderer::syncRtScene() {
         rtMeshOf_[id] = mesh;
     };
     for (auto& inst : instances) {
+        // Out of reach of the traced range: first, from the instance's first
+        // cache line, before any lookup. One that is in the scene stays until
+        // it is a tenth further out, so the edge does not churn the top level.
+        if (radius > 0.0f) {
+            const glm::vec3 d = inst.cachedCullCenter - focus;
+            float reach = radius + inst.cachedPaddedRadius;
+            if (inst.rtInstance != RtScene::kInvalid) reach *= 1.1f;
+            if (glm::dot(d, d) > reach * reach) {
+                inst.rtInstance = RtScene::kInvalid;  // an unseen id is removed below
+                continue;
+            }
+        }
         auto it = models.find(inst.modelId);
         const uint32_t mesh = it != models.end() ? it->second.rtMesh : RtScene::kInvalid;
         const bool wanted = mesh != RtScene::kInvalid && inst.fade >= 1.0f && inst.castsShadow;

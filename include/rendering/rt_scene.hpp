@@ -72,6 +72,12 @@ public:
     void setInstanceTransform(InstanceId instance, const glm::mat4& objectToWorld);
     void removeInstance(InstanceId instance);
 
+    /// Keep only the instances within `radius` of `center` in the top level
+    /// (RtFocus); 0 keeps every instance. Call before update() each frame.
+    /// The lighting traces only the near field, so the rest of the world is
+    /// traversal cost and top-level rebuilds for nothing.
+    void setFocus(const glm::vec3& center, float radius);
+
     /// Build and upload while active; release everything GPU-side when not.
     /// Switching off must happen with the device idle.
     void setActive(bool active);
@@ -84,13 +90,14 @@ public:
     [[nodiscard]] VkDescriptorSetLayout descriptorSetLayout() const { return setLayout_; }
     /// The set for the current frame slot. Valid after update().
     [[nodiscard]] VkDescriptorSet descriptorSet() const;
-    /// False until at least one instance has made it into an acceleration
-    /// structure; tracing an empty scene is legal but pointless.
-    [[nodiscard]] bool hasContent() const { return liveInstances_ > 0; }
+    /// Whether the current frame slot's top level holds any instance; the
+    /// trace shaders must not walk an empty one. Valid after update().
+    [[nodiscard]] bool hasContent() const;
 
     struct Stats {
         uint32_t meshes = 0;
         uint32_t instances = 0;
+        uint32_t tracedInstances = 0;  // in the top level, near the camera
         uint64_t triangles = 0;
         uint64_t gpuBytes = 0;
     };
@@ -120,6 +127,7 @@ private:
         bool live = false;
         MeshId mesh = kInvalid;
         glm::mat4 objectToWorld{1.0f};
+        RtAabb worldBounds;  // the mesh's bounds placed, for the focus test
     };
     /// What a trace shader reads per mesh (std430).
     struct MeshGPU {
@@ -191,6 +199,11 @@ private:
     std::vector<Mesh> meshes_;
     std::vector<MeshId> freeMeshes_;
     std::vector<MeshId> pendingMeshes_;
+    // The scene version the pending meshes were last sorted against, and
+    // whether a mesh was queued since: with neither changed, no pending mesh
+    // can have become wanted, and the scan over every instance is skipped.
+    uint64_t pendingScanVersion_ = ~0ull;
+    bool pendingAdded_ = false;
     std::vector<Instance> instances_;
     std::vector<InstanceId> freeInstances_;
     uint32_t liveMeshes_ = 0;
@@ -211,6 +224,15 @@ private:
 
     // CPU copies of the per-frame data, built once per version.
     uint64_t builtVersion_ = ~0ull;
+    RtFocus focus_;
+    // What update() did since the last diagnostic line (every ten seconds
+    // while active): top-level rebuilds, meshes and triangles built.
+    struct Window {
+        uint32_t frames = 0, rebuilds = 0, meshesBuilt = 0;
+        uint32_t added = 0, removed = 0, moved = 0;
+        uint64_t trianglesBuilt = 0;
+        double since = -1.0;
+    } window_;
     std::vector<InstanceGPU> instanceData_;
     std::vector<RtBvhNode> tlasNodes_;
     std::vector<VkAccelerationStructureInstanceKHR> asInstanceData_;

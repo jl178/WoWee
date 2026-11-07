@@ -178,3 +178,56 @@ TEST_CASE("RT range allocator reuses and coalesces freed ranges", "[rt_bvh]") {
     a.release(z, 90);
     CHECK(a.allocate(0) == RtRangeAllocator::kFailed);
 }
+
+namespace {
+RtAabb box(glm::vec3 lo, glm::vec3 hi) {
+    RtAabb b;
+    b.grow(lo);
+    b.grow(hi);
+    return b;
+}
+}  // namespace
+
+TEST_CASE("RT box against sphere uses the box's nearest point", "[rt_bvh]") {
+    const RtAabb b = box(glm::vec3(10, -1, -1), glm::vec3(12, 1, 1));
+    CHECK(rtBoundsTouchSphere(b, glm::vec3(0), 10.0f));
+    CHECK_FALSE(rtBoundsTouchSphere(b, glm::vec3(0), 9.9f));
+    // A big building whose centre is far but whose wall is near.
+    const RtAabb wide = box(glm::vec3(-500, 5, 0), glm::vec3(500, 6, 40));
+    CHECK(rtBoundsTouchSphere(wide, glm::vec3(0), 5.5f));
+    CHECK_FALSE(rtBoundsTouchSphere(RtAabb{}, glm::vec3(0), 1e6f));  // empty box
+}
+
+TEST_CASE("RT focus rebuilds only after the camera leaves its slack", "[rt_bvh]") {
+    RtFocus f;
+    CHECK(f.update(glm::vec3(0), 350.0f));  // first build
+    CHECK_FALSE(f.update(glm::vec3(0), 350.0f));
+    const float slack = RtFocus::kSlack * 350.0f;
+    CHECK_FALSE(f.update(glm::vec3(slack * 0.9f, 0, 0), 350.0f));
+    CHECK(f.update(glm::vec3(slack * 1.1f, 0, 0), 350.0f));
+    CHECK(f.builtCenter.x == Catch::Approx(slack * 1.1f));
+    CHECK(f.update(f.builtCenter, 300.0f));  // a new radius rebuilds
+    CHECK(f.update(glm::vec3(0), 0.0f));      // switching the limit off rebuilds once
+    CHECK_FALSE(f.update(glm::vec3(1e5f), 0.0f));
+    CHECK(f.keeps(box(glm::vec3(1e5f), glm::vec3(1e5f + 1))));  // no limit keeps all
+}
+
+TEST_CASE("RT focus keeps whatever a camera inside the slack can reach", "[rt_bvh]") {
+    RtFocus f;
+    const float r = 350.0f;
+    f.update(glm::vec3(0), r);
+    std::mt19937 rng(7);
+    std::uniform_real_distribution<float> u(-1.0f, 1.0f);
+    for (int i = 0; i < 2000; ++i) {
+        // A camera that has not yet triggered a rebuild...
+        glm::vec3 cam(u(rng), u(rng), u(rng));
+        if (glm::length(cam) > 1e-3f) cam = glm::normalize(cam) * (RtFocus::kSlack * r * std::abs(u(rng)));
+        REQUIRE_FALSE(f.update(cam, r));
+        // ...and a small instance anywhere within its own radius is kept.
+        glm::vec3 p(u(rng), u(rng), u(rng));
+        if (glm::length(p) > 1e-3f) p = cam + glm::normalize(p) * (r * std::abs(u(rng)));
+        CHECK(f.keeps(box(p - glm::vec3(0.5f), p + glm::vec3(0.5f))));
+    }
+    // Far outside, dropped.
+    CHECK_FALSE(f.keeps(box(glm::vec3(2 * r, 0, 0), glm::vec3(2 * r + 1, 1, 1))));
+}

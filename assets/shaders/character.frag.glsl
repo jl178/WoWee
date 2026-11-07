@@ -457,7 +457,7 @@ void main() {
             shadow = mix(1.0, shadow, shadowParams.y);
         }
         RtLight rt = rtLightAt(FragPos);
-        shadow = rtShadow(rt, shadow);
+        shadow = rtShadow(rt, shadow, shadowParams.y);
 
         // Stock unit light (CM2Lighting, docs/re/characters.md section 1):
         //   lit = clamp(ambient + diffuse * max(N.L, 0) + points, 0, 1)

@@ -332,7 +332,7 @@ void main() {
         shadow = mix(1.0, shadow, shadowParams.y);
     }
     RtLight rt = rtLightAt(FragPos);
-    shadow = rtShadow(rt, shadow);
+    shadow = rtShadow(rt, shadow, shadowParams.y);
 
     // The stock light (Wow.exe 3.3.5a; stock_wmo_light.hpp has the same sums
     // on the CPU, and docs/re/world-lighting.md the addresses).

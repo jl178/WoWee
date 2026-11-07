@@ -413,7 +413,7 @@ void main() {
         // ambient than the canopy underside, giving the crown depth instead
         // of a uniformly-lit blob.
         RtLight rt = rtLightAt(FragPos);
-        if (!wmoInterior) shadow = rtShadow(rt, shadow);
+        if (!wmoInterior) shadow = rtShadow(rt, shadow, shadowParams.y);
         // The area's ambient as the terrain, the WMO walls and the characters
         // take it. Foliage used to take 82-100% of it by how far the leaf
         // faced up, a darkening that dates from when the outdoor ambient
