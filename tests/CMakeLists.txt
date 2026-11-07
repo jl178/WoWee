@@ -3295,3 +3295,8 @@ wowee_add_test(test_chat_rules SOURCES test_chat_rules.cpp)
 
 # SMSG_MESSAGECHAT's type-specific fields (0x50BE70).
 wowee_add_packet_test(test_message_chat_packet)
+
+# A streamed tile's WMO placements and their liquids across finalisation
+# steps: a placement begun is resumed, never taken for a duplicate
+# (wmo_liquid_stream). Header-only.
+wowee_add_test(test_wmo_liquid_stream SOURCES test_wmo_liquid_stream.cpp)

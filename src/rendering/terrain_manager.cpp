@@ -1,4 +1,5 @@
 #include "rendering/terrain_manager.hpp"
+#include "rendering/wmo_liquid_stream.hpp"
 
 #include <vector>
 
@@ -1345,31 +1346,39 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
             constexpr size_t kLiquidGroupsPerStep = 4;
             size_t created = 0;
             size_t liquidGroupsLoaded = 0;
+            // The cursor moves on to the next placement: its liquids start
+            // from the first group and it has not been begun.
+            auto nextPlacement = [&ft]() {
+                ft.wmoInstanceIndex++;
+                ft.wmoLiquidGroupIndex = 0;
+                ft.wmoInstanceBegun = false;
+            };
             while (ft.wmoInstanceIndex < pending->wmoModels.size() && created < kWmoInstancesPerStep) {
                 auto& wmoReady = pending->wmoModels[ft.wmoInstanceIndex];
-                // Skip duplicates and unloaded models
-                if (wmoReady.uniqueId != 0 && placedWmoIds.count(wmoReady.uniqueId)) {
-                    ft.wmoInstanceIndex++;
-                    ft.wmoLiquidGroupIndex = 0;
+                // Duplicates and unloaded models are skipped - but only on the
+                // first visit. A placement this tile has begun is in
+                // placedWmoIds by its own doing, and judging it again there
+                // dropped the rest of its liquids (wmo_liquid_stream.hpp).
+                const auto visit = wmo_liquid_stream::visit(
+                    ft.wmoInstanceBegun,
+                    wmoReady.uniqueId != 0 && placedWmoIds.count(wmoReady.uniqueId) > 0,
+                    wmoRenderer->isModelLoaded(wmoReady.modelId));
+                if (visit == wmo_liquid_stream::Visit::Skip) {
+                    nextPlacement();
                     continue;
                 }
-                if (!wmoRenderer->isModelLoaded(wmoReady.modelId)) {
-                    ft.wmoInstanceIndex++;
-                    ft.wmoLiquidGroupIndex = 0;
-                    continue;
-                }
-                // Create the instance on first visit (liquidGroupIndex == 0)
-                if (ft.wmoLiquidGroupIndex == 0) {
+                if (visit == wmo_liquid_stream::Visit::Create) {
                     uint32_t wmoInstId = wmoRenderer->createInstance(
                         wmoReady.modelId, wmoReady.position, wmoReady.rotation, wmoReady.scale);
                     if (!wmoInstId) {
-                        ft.wmoInstanceIndex++;
+                        nextPlacement();
                         continue;
                     }
                     wmoRenderer->setInstanceNameSet(wmoInstId, wmoReady.nameSet);
                     wmoRenderer->setInstanceUniqueId(wmoInstId, wmoReady.uniqueId);
                     wmoRenderer->markStreamedIn(wmoInstId);  // Fade in new scenery
                     ft.wmoInstanceIds.push_back(wmoInstId);
+                    ft.wmoInstanceBegun = true;
                     if (wmoReady.uniqueId != 0) {
                         placedWmoIds.insert(wmoReady.uniqueId);
                         ft.tileWmoUniqueIds.push_back(wmoReady.uniqueId);
@@ -1384,27 +1393,24 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                     modelMatrix = glm::rotate(modelMatrix, wmoReady.rotation.y, glm::vec3(0.0f, 1.0f, 0.0f));
                     modelMatrix = glm::rotate(modelMatrix, wmoReady.rotation.x, glm::vec3(1.0f, 0.0f, 0.0f));
                     const auto& groups = wmoReady.model.groups;
-                    while (ft.wmoLiquidGroupIndex < groups.size() && liquidGroupsLoaded < kLiquidGroupsPerStep) {
-                        const auto& group = groups[ft.wmoLiquidGroupIndex];
-                        ft.wmoLiquidGroupIndex++;
-                        // Interior water is drawn too, as LiquidType 17 (0x793d20).
-                        // It used to be left out, when the sheet was drawn flat
-                        // a yard under its corner and poked through floors.
-                        if (!group.liquid.hasLiquid()) continue;
-                        const auto& mats = wmoReady.model.materials;
-                        const uint32_t momtColor = group.liquid.materialId < mats.size()
-                                                       ? mats[group.liquid.materialId].color2
-                                                       : 0xFFFFFFFFu;
-                        waterRenderer->loadFromWMO(group.liquid, modelMatrix, wmoInstId, momtColor);
-                        liquidGroupsLoaded++;
-                    }
+                    const auto& mats = wmoReady.model.materials;
+                    // Interior water is drawn too, as LiquidType 17 (0x793d20).
+                    // It used to be left out, when the sheet was drawn flat
+                    // a yard under its corner and poked through floors.
+                    const bool done = wmo_liquid_stream::step(
+                        groups.size(), ft.wmoLiquidGroupIndex, liquidGroupsLoaded, kLiquidGroupsPerStep,
+                        [&](size_t gi) { return groups[gi].liquid.hasLiquid(); },
+                        [&](size_t gi) {
+                            const auto& liquid = groups[gi].liquid;
+                            const uint32_t momtColor = liquid.materialId < mats.size()
+                                                           ? mats[liquid.materialId].color2
+                                                           : 0xFFFFFFFFu;
+                            waterRenderer->loadFromWMO(liquid, modelMatrix, wmoInstId, momtColor);
+                        });
                     // More liquid groups remain on this WMO - yield
-                    if (ft.wmoLiquidGroupIndex < groups.size()) {
-                        return false;
-                    }
+                    if (!done) return false;
                 }
-                ft.wmoInstanceIndex++;
-                ft.wmoLiquidGroupIndex = 0;
+                nextPlacement();
                 created++;
             }
             if (ft.wmoInstanceIndex < pending->wmoModels.size()) {

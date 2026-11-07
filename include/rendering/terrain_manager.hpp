@@ -229,6 +229,7 @@ struct FinalizingTile {
     size_t wmoInstanceIndex = 0;   // Next WMO placement to instantiate
     size_t wmoDoodadIndex   = 0;   // Next WMO doodad to upload
     size_t wmoLiquidGroupIndex = 0; // Next liquid group within current WMO instance
+    bool wmoInstanceBegun = false;  // This tile created the instance at wmoInstanceIndex
 
     // Incremental terrain upload state (splits TERRAIN phase across frames)
     bool terrainPreloaded = false;  // True after preloaded textures uploaded
