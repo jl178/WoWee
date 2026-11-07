@@ -450,11 +450,12 @@ void CombatHandler::startAutoAttack(uint64_t targetGuid) {
     if (target) {
         const float toTargetX = target->getLatestX() - owner_.movementInfoRef().x;
         const float toTargetY = target->getLatestY() - owner_.movementInfoRef().y;
-        if (std::abs(toTargetX) > 0.01f || std::abs(toTargetY) > 0.01f) {
-            owner_.movementInfoRef().orientation = std::atan2(-toTargetY, toTargetX);
-            if (owner_.getState() == WorldState::IN_WORLD && owner_.getSocket()) {
-                owner_.sendMovement(Opcode::MSG_MOVE_SET_FACING);
-            }
+        // Through faceCanonicalYaw: the character's own facing turns with it,
+        // or the per-frame facing sync turns it back with a SET_FACING of its
+        // own on the next frame.
+        if ((std::abs(toTargetX) > 0.01f || std::abs(toTargetY) > 0.01f) &&
+            owner_.getState() == WorldState::IN_WORLD && owner_.getSocket()) {
+            owner_.faceCanonicalYaw(std::atan2(-toTargetY, toTargetX));
         }
     }
     setUnitAttackTarget(owner_, owner_.getPlayerGuid(), targetGuid);

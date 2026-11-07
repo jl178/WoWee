@@ -3656,6 +3656,9 @@ void Application::updateServerSplineFollow(bool onTaxi) {
             cc->setFacingYaw(deg);
             if (glm::vec3* ft = cc->getFollowTargetMutable()) *ft = renderPos;
         }
+        // The server's facing: no SET_FACING for it (0x98C480 raises no
+        // event 0x13). It was sent on the frame after SPLINE_DONE.
+        if (auto* mh = gameHandler->getMovementHandler()) mh->noteServerFacing(pe->getOrientation());
     }
 }
 

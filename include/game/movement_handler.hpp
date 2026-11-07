@@ -232,6 +232,14 @@ public:
     /// MSG_MOVE_SET_PITCH due: swimming or flying, 0.1 rad from the pitch the
     /// last movement packet carried (stock_movement::pitchChangeWorthSending).
     [[nodiscard]] bool pitchChangeWorthSending(float pitchRad) const;
+    /// A facing the server put the player in (a spline's final facing): the
+    /// reference later facing changes are measured from, as if a packet had
+    /// carried it - stock applies it without an event 0x13 (0x98C480), so no
+    /// SET_FACING follows.
+    void noteServerFacing(float canonicalYaw) {
+        lastPacketOrientation_ = canonicalYaw;
+        hasLastPacketOrientation_ = true;
+    }
     /// A fall that began by walking off an edge, reported as stock reports it
     /// (event 9): FALLING with v0 0, the leg's direction and speed, a
     /// HEARTBEAT sent with the fall time counted from the edge.
@@ -384,6 +392,10 @@ private:
     /// The jump block's direction and speed (+0x70/+0x74, +0x8C) for the
     /// current flags, as a jump or a fall from an edge starts them.
     void setFallLeg();
+    /// An acknowledgement carrying the mover's movement went out: the
+    /// heartbeat restarts and its facing and pitch are the reference, as for
+    /// any movement packet (0x71F0C0).
+    void noteMovementPacketSent();
     bool hasLastPacketOrientation_ = false;
 
     // The active mover (0: the player) and the player's own movement and

@@ -1298,12 +1298,23 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
         // server says so at its end (SMSG_ATTACKSTART). A dash simulated
         // here at its own speed ended somewhere else, and the heartbeat
         // sent from there pulled the player back for everyone.
+        //
+        // Nor does anything turn: the stock client never turns the player to
+        // cast, and the charge's facing is the spline's - along the path, then
+        // the final facing at its end (0x6EB0B0 -> 0x98C480), with no
+        // SET_FACING from the client. Under the Combat page's auto-face
+        // setting it turns as every other cast does, through
+        // faceCanonicalYaw, which the per-frame facing sync keeps. The turn
+        // used to write the facing here alone; the next frame put the
+        // character's own facing back with a second SET_FACING, so the server
+        // judged the charge's arc against neither.
         (void)tx;
         (void)ty;
         (void)tz;
-        float yaw = std::atan2(-dy, dx);
-        owner_.movementInfoRef().orientation = yaw;
-        owner_.sendMovement(Opcode::MSG_MOVE_SET_FACING);
+        if (owner_.isAutoFaceTarget()) {
+            owner_.faceCanonicalYaw(std::atan2(-dy, dx));
+            turnedToCast = true;
+        }
         facingHandled = true;
     }
 
@@ -1342,8 +1353,7 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     //
     // Only with the Combat page's debug setting on, here and for melee above:
     // the original client never turns the player to cast, and a target behind
-    // them is refused as not in front. Charge still turns - its dash runs
-    // along that line.
+    // them is refused as not in front. Charge included (above).
     if (!facingHandled && target != 0 && owner_.isAutoFaceTarget()) {
         auto entity = owner_.getEntityManager().getEntity(target);
         if (entity) {

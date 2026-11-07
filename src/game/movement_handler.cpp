@@ -585,6 +585,19 @@ bool MovementHandler::inStockHeartbeatMotion() const {
     return (movementInfo.flags & stock_movement::kMovingMask) != 0;
 }
 
+void MovementHandler::noteMovementPacketSent() {
+    // Stock sends the acknowledgements through 0x7413F0 -> 0x71F0C0 like any
+    // movement packet: the heartbeat's 500 ms restart (0x6E9B70) and the
+    // facing and pitch the packet carried become the reference (CGUnit
+    // +0xA50 / +0xA54). Sent straight to the socket, an ack left the heartbeat
+    // timer counting from the packet before it - a knockback's ack was
+    // followed by a heartbeat on the next frame.
+    timeSinceLastMoveHeartbeat_ = 0.0f;
+    lastPacketOrientation_ = movementInfo.orientation;
+    lastPacketPitch_ = movementInfo.pitch;
+    hasLastPacketOrientation_ = true;
+}
+
 void MovementHandler::setFallLeg() {
     // Worked out in the wire's own frame (the stock facing), and laid down in
     // the stock order: x first. The writers put jumpSinAngle first on the
@@ -1529,6 +1542,7 @@ void MovementHandler::handleForceSpeedChange(network::Packet& packet, const char
             : buildForceAckFor(ackOpcode, counter, guid, playerState_.info);
         ack.writeFloat(newSpeed);
         owner_.getSocket()->send(ack);
+        if (target == ForceTarget::Mover) noteMovementPacketSent();
     }
 
     if (!speedStorage) return;
@@ -1631,6 +1645,7 @@ void MovementHandler::handleForceMoveFlagChange(network::Packet& packet, const c
         ack.writeUInt32(set ? 1u : 0u);
     }
     owner_.getSocket()->send(ack);
+    if (target == ForceTarget::Mover) noteMovementPacketSent();
 }
 
 void MovementHandler::handleMoveSetCollisionHeight(network::Packet& packet) {
@@ -1653,6 +1668,7 @@ void MovementHandler::handleMoveSetCollisionHeight(network::Packet& packet) {
     auto ack = buildForceAck(Opcode::CMSG_MOVE_SET_COLLISION_HGT_ACK, counter);
     ack.writeFloat(height);
     owner_.getSocket()->send(ack);
+    noteMovementPacketSent();
 }
 
 void MovementHandler::handleMoveKnockBack(network::Packet& packet) {
@@ -1696,6 +1712,7 @@ void MovementHandler::handleMoveKnockBack(network::Packet& packet) {
     if (!owner_.getSocket()) return;
     if (wireOpcode(Opcode::CMSG_MOVE_KNOCK_BACK_ACK) == 0xFFFF) return;
     owner_.getSocket()->send(buildForceAck(Opcode::CMSG_MOVE_KNOCK_BACK_ACK, counter));
+    noteMovementPacketSent();
 }
 
 // ============================================================
