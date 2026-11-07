@@ -314,6 +314,8 @@ public:
     void setRunBackSpeedOverride(float speed) { runBackSpeedOverride_ = speed; }
     // Server turn rate in rad/s (SMSG_FORCE_TURN_RATE_CHANGE); 0 = use WOW_TURN_SPEED default
     void setTurnRateOverride(float rateRadS) { turnRateOverride_ = rateRadS; }
+    /// Server pitch rate in rad/s (SMSG_FORCE_PITCH_RATE_CHANGE); 0 = pi.
+    void setPitchRateOverride(float rateRadS) { pitchRateOverride_ = rateRadS; }
     void setMovementRooted(bool rooted) { movementRooted_ = rooted; }
     /// A driven vehicle's MOVEMENTFLAG2_NO_STRAFE (0x1) / NO_JUMPING (0x2)
     /// (Vehicle.flags 0x1 / 0x2): the strafe keys or the jump do nothing.
@@ -343,10 +345,15 @@ public:
     /// other until it takes off again. Flight physics, the flight animations
     /// and the FLYING movement flag all follow this rather than permission.
     [[nodiscard]] bool isFlightAirborne() const { return flyingActive_ && flightAirborne_; }
-    /// The pitch the player is flying at, in radians: the camera's while it
-    /// steers, and held when it does not. What the mount tilts to and what
-    /// the server is told.
-    [[nodiscard]] float getFlightPitchRad() const { return glm::radians(flightPitchDeg_); }
+    /// The player's own pitch (CMovement +0x24), radians, which a swimmer or a
+    /// flier moves along: the camera's while it steers, moved by the pitch
+    /// keys otherwise, held when neither; level on the ground. What the mount
+    /// tilts to and what the server is told.
+    [[nodiscard]] float getMovePitchRad() const { return glm::radians(movePitchDeg_); }
+    /// The pitch keys' vote this frame (stock_movement::pitchVote): +1 up,
+    /// -1 down, 0 none; while it is nonzero the server is told by
+    /// START_PITCH_UP / DOWN rather than SET_PITCH.
+    [[nodiscard]] int pitchKeysVote() const { return pitchVote_; }
     [[nodiscard]] bool isAscending() const { return wasAscending_; }
     [[nodiscard]] bool isDescending() const { return wasDescending_; }
     void setHoverActive(bool active) { hoverActive_ = active; }
@@ -1069,7 +1076,10 @@ private:
     // Player-controlled flight (CAN_FLY + FLYING): 3D movement, no gravity.
     bool flyingActive_ = false;
     bool flightAirborne_ = false;
-    float flightPitchDeg_ = 0.0f;
+    float movePitchDeg_ = 0.0f;
+    int pitchVote_ = 0;       ///< this frame's PitchUp/PitchDown vote
+    int sentPitchVote_ = 0;   ///< the one the last START/STOP_PITCH reported
+    float pitchRateOverride_ = 0.0f;  ///< rad/s from the server; 0 = pi
     // Server-driven hover (HOVER flag): float at fixed height above ground.
     bool hoverActive_ = false;
     bool mounted_ = false;

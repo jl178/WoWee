@@ -45,7 +45,7 @@ stock table is in section 6.
 | `MoveAndSteerStart/Stop` | both of the above in one call | both |
 | `CameraZoomIn/Out(n=1)` | n yards (×0.2 while DAT_BD19B8, the barber shop), 0x5FF950 / 0x5FFA60: n / cameraDistanceMoveSpeed of travel | `processMouseWheel(±n)`, the same 1 yd per unit at 8.33 yd/s |
 | `VehicleCameraZoomIn/Out` | tail calls to the two above | the same functions |
-| `MoveView*Start(speed=1)` / `Stop` | 0x5FF000 with ESI = 0 in, 1 out, 2 right, 3 left, 4 up, 5 down: bit `1 << 2i` in CGCamera +0x160, start time +0x164+4i, speed +0x1AC+4i; not while +0x9C bit 0x40; Stop sets the stop bit `2 << 2i` with its time | held motion, in/out at 8.33 yd/s × speed, turn 180 °/s and tilt 90 °/s × speed (the cameraYaw/PitchMoveSpeed defaults; the per-frame consumer was not traced) |
+| `MoveView*Start(speed=1)` / `Stop` | 0x5FF000 with ESI = 0 in, 1 out, 2 right, 3 left, 4 up, 5 down: bit `1 << 2i` in CGCamera +0x160, start time +0x164+4i, speed +0x1AC+4i; not while +0x9C bit 0x40; Stop sets the stop bit `2 << 2i` with its time | held motion, in/out at 8.33 yd/s × speed, turn at cameraYawMoveSpeed and tilt at cameraPitchMoveSpeed × speed (180 / 90 °/s by default; consumer 0x6000E0, Right goes round to the character's right and Up goes up - movement-camera.md section 10) |
 | `SetView(n)` | "Usage: SetView(viewModeIndex)" without a number; n in 1..5 (`n - 1 < 5`), 0x603330(n, cameraViewBlendStyle) | `CameraController::setView` |
 | `SaveView(n)` | n in 1..5: 0x5FE440 stores the zoom target (+0x1E8), pitch (+0x230), yaw (+0x260) into view n and writes the three CVars | `saveView` (kept for the session only) |
 | `ResetView(n)` | n in 1..5: 0x6048A0 reloads view n from the default table; the current view is set again | `resetView` |
@@ -277,10 +277,10 @@ commands now follow:
 - `GetMouseButtonClicked` answers nil, so `[button:2]` from a right click on
   an action button is false (stock: the clicked button). The secure action
   button's remapped button (DAT_BEAF48) is not modelled.
-- `PitchUp/Down` hold commands nothing reads yet; the camera/movement lane
-  has to add the swim/flight pitch keys.
-- MoveView turn/tilt rates are the CVar defaults by name; the consumer that
-  applies +0x1AC per frame was not traced. Saved views are not written to
+- `PitchUp/Down` are read by the movement now (movement-camera.md section 5,
+  row 34).
+- MoveView turn/tilt: the consumer is 0x6000E0 (movement-camera.md section
+  10, row 36), at the cameraYaw/PitchMoveSpeed CVars. Saved views are not written to
   CVars across sessions. The barber shop's 0.2 zoom factor is not applied.
 - `[dead]`'s feign-death and corpse details (0x5EF8B0) are UnitIsDeadOrGhost
   here.

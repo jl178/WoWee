@@ -64,3 +64,21 @@ TEST_CASE("mouseSpeed is the Windows pointer speed over ten") {
     CHECK(slow.yawDeg == Approx(4.0f * 0.28125f * 0.375f));
     CHECK(slow.pitchDeg == Approx(4.0f * 0.25f * 0.375f));
 }
+
+TEST_CASE("held MoveView turns at the look speeds, Right and Up the stock way round") {
+    // 0x6000E0: Right raises the stock yaw (as a mouse moved left), Up raises
+    // the stock pitch (looks further down); 180 and 90 deg/s at the defaults.
+    const auto right = sc::viewMoveStep(0, 0, 1, 0, 0, 0, 8.33f, 180.0f, 90.0f, 0.5f);
+    CHECK(right.yawDeg == Approx(90.0f));
+    CHECK(right.pitchDeg == 0.0f);
+    const auto up = sc::viewMoveStep(0, 0, 0, 0, 1, 0, 8.33f, 180.0f, 90.0f, 1.0f);
+    CHECK(up.pitchDeg == Approx(-90.0f));  // this client's pitch: looking down
+    const auto left2 = sc::viewMoveStep(0, 0, 0, 2, 0, 0, 8.33f, 270.0f, 135.0f, 0.1f);
+    CHECK(left2.yawDeg == Approx(-54.0f));  // speed 2 at a 270 look speed
+    const auto out = sc::viewMoveStep(0, 1, 0, 0, 0, 0, 8.33f, 180.0f, 90.0f, 0.3f);
+    CHECK(out.zoomOut == Approx(2.499f));
+    const auto both = sc::viewMoveStep(1, 1, 1, 1, 1, 1, 8.33f, 180.0f, 90.0f, 1.0f);
+    CHECK(both.zoomOut == 0.0f);
+    CHECK(both.yawDeg == 0.0f);
+    CHECK(both.pitchDeg == 0.0f);
+}

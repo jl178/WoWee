@@ -496,7 +496,7 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
                 // the swim and the ground mover's step takes it - when the
                 // water over that ledge is shallower than the stock exit depth.
                 const float exitDepth = sm::swimExitDepth(colliderH);
-                if (swimming && inWater && f.nowForward && f.forward3D.z > -0.20f && !f.xDown) {
+                if (swimming && inWater && f.nowForward && f.flightForward.z > -0.20f && !f.xDown) {
                     auto queryFloorAt = [&](float x, float y, float probeZ) -> std::optional<float> {
                         std::optional<float> best;
                         if (terrainManager) {
@@ -574,19 +574,10 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
                    ? swimSpeedOverride_ : f.speed * SWIM_SPEED_FACTOR);
         float waterSurfaceZ = waterH ? (*waterH - swimFloatDepth()) : targetPos.z;
 
-        // For auto-run/auto-swim: use character facing (immune to camera pan)
-        // For manual W key: use camera direction (swim where you look)
-        glm::vec3 swimForward;
-        if (autoRunning || (leftMouseDown && rightMouseDown)) {
-            // Auto-running: use character's horizontal facing direction
-            swimForward = f.forward;
-        } else {
-            // Manual control: use camera's 3D direction (swim where you look)
-            swimForward = glm::normalize(f.forward3D);
-            if (glm::dot(swimForward, swimForward) < 1e-8f) {
-                swimForward = f.forward;
-            }
-        }
+        // Along the facing at the player's pitch (0x987EF0: the forward part
+        // is 3D while swimming with a pitch), autorun included. The camera
+        // sets that pitch only while it steers (update()).
+        const glm::vec3 swimForward = f.flightForward;
         // Use character's facing direction for strafe, not camera's right vector
         glm::vec3 swimRight = f.right;  // Character's right (horizontal facing), not camera's
 
@@ -603,7 +594,7 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
 
         // Spacebar = swim up, X = swim down (both continuous, not a jump)
         bool diveKey = f.xDown;
-        bool diveIntent = diveKey || (f.nowForward && (f.forward3D.z < -0.28f));
+        bool diveIntent = diveKey || (f.nowForward && (swimForward.z < -0.28f));
         // Ascending or descending is a direction of its own, at the swim speed
         // (0x987B50): straight up or down alone (case 0x10/0x12), and with a
         // horizontal direction the two at 45 degrees - the flat direction
@@ -3424,29 +3415,22 @@ void CameraController::update(float deltaTime) {
     // Swing the camera back behind a moving character (cameraSmoothStyle).
     // Before forward3D is read, so the frame is drawn with the eased angles.
     updateStockFollow(deltaTime, nowForward, nowBackward, nowStrafeLeft, nowStrafeRight,
-                      nowTurnLeft, nowTurnRight,
-                      rightHeld || mouseAutorun || steering_ || (swimming && hasMoveInput));
+                      nowTurnLeft, nowTurnRight, rightHeld || mouseAutorun || steering_);
 
     // Get camera axes - project forward onto XY plane for walking
     glm::vec3 forward3D = camera->getForward();
-    // In water the camera always steers, moving or turning, the way holding the
-    // right button steers on land.
-    //
-    // Swimming took its forward from the camera's 3D direction but its strafe
-    // and its facing from the character's own, so the two disagreed the moment
-    // the camera was panned: the swimmer went one way, sidled another, and kept
-    // facing a third, with the stroke animation pointing wherever the body
-    // happened to be left. Retail turns the swimmer to the camera and swims
-    // them where they look.
-    //
-    // Only while there is movement input. Treading on the spot and orbiting the
-    // camera to look around should not spin the character on the water.
+    // The camera steers the facing (and, swimming or flying, the pitch) only
+    // while the mouse steers: CGInputControl bits 0x2000001, the right button
+    // or mouselook (0x5FA110, 0x5FA6B0 -> 0x6023D0 -> 0x5FB260 / 0x5FBE70).
+    // Both buttons are the right one and the left. Water is no exception: a
+    // swimmer with only the keys swims along its own facing and pitch, and
+    // orbiting the camera with the left button only looks around - as on
+    // land. (It used to steer in water whenever a key was held.)
     // steering_ is the touch controls saying a finger is dragging the view.
     // On a phone that is what the right mouse button is on a desktop: the
     // character turns to face where the player is looking, so that walking
     // forward goes where the screen points.
-    bool cameraDrivesFacing = rightHeld || mouseAutorun || steering_ ||
-                              (swimming && hasMoveInput);
+    const bool cameraDrivesFacing = rightHeld || mouseAutorun || steering_;
     // The stock drunk steer (Wow.exe 0x6DEB30, docs/re/movement-camera.md
     // section 5): while moving, the facing is pushed every frame by
     // drunk * 0.01309 rad * the mean of three slow cosines of
@@ -3477,22 +3461,41 @@ void CameraController::update(float deltaTime) {
     glm::vec3 forward(std::cos(moveYawRad), std::sin(moveYawRad), 0.0f);
     glm::vec3 right(-std::sin(moveYawRad), std::cos(moveYawRad), 0.0f);
 
-    // Flight goes where the mount faces, not where the camera looks. Orbiting
-    // the camera with the left button is looking around, and it took the
-    // flight direction with it: W flew toward the camera's view, whatever the
-    // mount was pointing at. The pitch follows the camera only while the
-    // camera steers, as the facing does, and holds otherwise.
+    // The player's own pitch (CMovement +0x24), which a swimmer and a flier
+    // move along: where the character faces, at this pitch, not where the
+    // camera looks. Orbiting the camera with the left button is looking
+    // around and leaves it alone.
+    //  - Steering, it is the camera's (0x6023D0 -> 0x5FBE70: the player pitch
+    //    is the camera pitch negated into the player's sense).
+    //  - Not steering, the pitch keys move it (0x5FB1A0 vote, 0x9877D0 rate:
+    //    the pitch rate, x0.75 while moving) and START_PITCH_UP / DOWN /
+    //    STOP_PITCH go out below.
+    //  - Otherwise it holds; on the ground it is level.
+    const bool pitchMedium = swimming || isFlightAirborne();
+    const bool pitchUpKey = !uiWantsKeyboard && !sitting && !movementSuppressed &&
+                            bindings.isCommandDown("PITCHUP");
+    const bool pitchDownKey = !uiWantsKeyboard && !sitting && !movementSuppressed &&
+                              bindings.isCommandDown("PITCHDOWN");
+    pitchVote_ = externalFollow_ ? 0
+        : sm::pitchVote(pitchUpKey, pitchDownKey, cameraDrivesFacing, pitchMedium);
     if (cameraDrivesFacing && !externalFollow_) {
         const float len = glm::length(forward3D);
         if (len > 1e-4f) {
-            flightPitchDeg_ = glm::degrees(std::asin(std::clamp(forward3D.z / len, -1.0f, 1.0f)));
+            movePitchDeg_ = glm::degrees(std::asin(std::clamp(forward3D.z / len, -1.0f, 1.0f)));
         }
+    } else if (pitchVote_ != 0) {
+        const float pitchRate = (pitchRateOverride_ > 0.0f && pitchRateOverride_ < 20.0f &&
+                                 !std::isnan(pitchRateOverride_))
+                                    ? pitchRateOverride_ : sm::Speeds{}.pitchRate;
+        movePitchDeg_ = glm::degrees(sm::stepPitch(glm::radians(movePitchDeg_), pitchVote_,
+                                                   sm::keyboardPitchRate(pitchRate, stockMoveFlags),
+                                                   deltaTime));
     }
-    if (!isFlightAirborne()) flightPitchDeg_ = 0.0f;
-    const float flightPitchRad = glm::radians(flightPitchDeg_);
-    const glm::vec3 flightForward(std::cos(moveYawRad) * std::cos(flightPitchRad),
-                                  std::sin(moveYawRad) * std::cos(flightPitchRad),
-                                  std::sin(flightPitchRad));
+    if (!pitchMedium) movePitchDeg_ = 0.0f;
+    const float movePitchRad = glm::radians(movePitchDeg_);
+    const glm::vec3 flightForward(std::cos(moveYawRad) * std::cos(movePitchRad),
+                                  std::sin(moveYawRad) * std::cos(movePitchRad),
+                                  std::sin(movePitchRad));
 
     // Retain short taps/wheel pulses for sitting; diving still needs held input.
     bool prevSitting = sitting;
@@ -3757,6 +3760,23 @@ void CameraController::update(float deltaTime) {
         }
         wasAscending_ = nowAscending;
         wasDescending_ = nowDescending;
+    }
+
+    // The pitch keys (0x5FB1A0): a vote that becomes +1 or -1 is
+    // START_PITCH_UP / START_PITCH_DOWN (0x72E900, events 0xE / 0xF), one
+    // that returns to 0 STOP_PITCH (0x72E9B0, event 0x10). Steering with the
+    // mouse, or leaving the water or the air, ends the vote and so stops it
+    // (0x5FBBC0). A reversal within a frame is the stop and the start.
+    if (movementCallback && !externalFollow_ && pitchVote_ != sentPitchVote_) {
+        if (sentPitchVote_ != 0) {
+            movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_STOP_PITCH));
+        }
+        if (pitchVote_ > 0) {
+            movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_START_PITCH_UP));
+        } else if (pitchVote_ < 0) {
+            movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_START_PITCH_DOWN));
+        }
+        sentPitchVote_ = pitchVote_;
     }
 
     // Update previous-frame state
@@ -4325,13 +4345,19 @@ void CameraController::setViewMove(ViewMove move, bool on, float speed) {
 
 void CameraController::stepViewMoves(float deltaTime) {
     if (!camera) return;
-    // In and out at cameraDistanceMoveSpeed, turning at cameraYawMoveSpeed
-    // (180 deg/s) and cameraPitchMoveSpeed (90 deg/s), each times the speed
-    // the Start call gave.
+    // 0x6000E0: in and out at cameraDistanceMoveSpeed, turning at
+    // cameraYawMoveSpeed and tilting at cameraPitchMoveSpeed (the CVars, 180
+    // and 90 by default), each times the speed the Start call gave. Right
+    // takes the camera round to the character's right and Up takes it up
+    // (stock_camera::viewMoveStep has the signs).
     const auto& s = viewMoveSpeed_;
-    const float zoom = (s[size_t(ViewMove::Out)] - s[size_t(ViewMove::In)]) * kZoomMoveSpeed * deltaTime;
-    const float turn = (s[size_t(ViewMove::Left)] - s[size_t(ViewMove::Right)]) * 180.0f * deltaTime;
-    const float tilt = (s[size_t(ViewMove::Up)] - s[size_t(ViewMove::Down)]) * 90.0f * deltaTime;
+    const auto step = stock_camera::viewMoveStep(
+        s[size_t(ViewMove::In)], s[size_t(ViewMove::Out)], s[size_t(ViewMove::Right)],
+        s[size_t(ViewMove::Left)], s[size_t(ViewMove::Up)], s[size_t(ViewMove::Down)],
+        kZoomMoveSpeed, yawMoveSpeed_, pitchMoveSpeed_, deltaTime);
+    const float zoom = step.zoomOut;
+    const float turn = step.yawDeg;
+    const float tilt = step.pitchDeg;
     if (zoom != 0.0f) processMouseWheel(-zoom);
     if (turn != 0.0f || tilt != 0.0f) {
         followYaw_.active = false;

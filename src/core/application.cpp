@@ -3726,6 +3726,8 @@ void Application::applyServerMovementState(float deltaTime) {
         renderer->getCameraController()->setFlightBackSpeedOverride(gameHandler->getServerFlightBackSpeed());
         renderer->getCameraController()->setRunBackSpeedOverride(gameHandler->getServerRunBackSpeed());
         renderer->getCameraController()->setTurnRateOverride(gameHandler->getServerTurnRate());
+        if (auto* mh = gameHandler->getMovementHandler())
+            renderer->getCameraController()->setPitchRateOverride(mh->getServerPitchRate());
         renderer->getCameraController()->setMovementRooted(gameHandler->isPlayerRooted());
         renderer->getCameraController()->setGravityDisabled(gameHandler->isGravityDisabled());
         renderer->getCameraController()->setFeatherFallActive(gameHandler->isFeatherFalling());
@@ -3744,25 +3746,27 @@ void Application::applyServerMovementState(float deltaTime) {
         // The server writes the pitch field when FLYING or SWIMMING flags are set;
         // without this sync it would always be 0 (horizontal), causing other
         // players to see the character flying flat even when pitching up/down.
-        if (gameHandler->isPlayerFlying()) {
-            // The mount's pitch, which the camera sets only while it steers -
-            // orbiting it to look around does not tilt the mount or change
-            // what the server is told.
-            const float pitchRad = renderer->getCameraController()->getFlightPitchRad();
+        if (gameHandler->isPlayerFlying() || gameHandler->isSwimming()) {
+            // The player's own pitch (CMovement +0x24): the camera's only while
+            // it steers, the pitch keys' otherwise, held when neither -
+            // orbiting the camera to look around does not tilt the swimmer or
+            // the mount or change what the server is told.
+            auto* cc = renderer->getCameraController();
+            const float pitchRad = cc->getMovePitchRad();
             gameHandler->setMovementPitch(pitchRad);
+            // A steered change goes out as MSG_MOVE_SET_PITCH (0x5FB3A0 ->
+            // event 0x14) once it is 0.1 rad from the pitch the last movement
+            // packet carried (0x71AE80); held pitch keys are carried by
+            // START_PITCH_UP / DOWN instead.
+            auto* mh = gameHandler->getMovementHandler();
+            if (mh && cc->pitchKeysVote() == 0 && !game::isPreWotlk() &&
+                mh->pitchChangeWorthSending(pitchRad)) {
+                gameHandler->sendMovement(game::Opcode::MSG_MOVE_SET_PITCH);
+            }
             // Tilt the mount/character model to match flight direction
             // (taxi flight uses setTaxiOrientationCallback for this instead)
-            if (gameHandler->isMounted()) {
+            if (gameHandler->isPlayerFlying() && gameHandler->isMounted()) {
                 if (auto* ac = renderer->getAnimationController()) ac->setMountPitchRoll(pitchRad, 0.0f);
-            }
-        } else if (gameHandler->isSwimming()) {
-            // A swimmer goes where the camera looks, so its pitch is the camera's.
-            if (auto* cam = renderer->getCamera()) {
-                glm::vec3 fwd = cam->getForward();
-                float len = glm::length(fwd);
-                if (len > 1e-4f) {
-                    gameHandler->setMovementPitch(std::asin(std::clamp(fwd.z / len, -1.0f, 1.0f)));
-                }
             }
         } else if (gameHandler->isMounted()) {
             // Reset mount pitch when not flying
