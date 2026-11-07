@@ -3015,7 +3015,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             mat.hasTexture = (bgpu.texture != nullptr && bgpu.texture != whiteTexture_.get()) ? 1 : 0;
             mat.alphaTest = m2BatchNeedsAlphaTest(bgpu.blendMode, bgpu.hasAlpha) ? 1 : 0;
             mat.colorKeyBlack =
-                m2BatchWantsColorKey(bgpu.blendMode, bgpu.colorKeyBlack) ? 1 : 0;
+                m2BatchWantsColorKey(bgpu.blendMode, bgpu.colorKeyBlack, bgpu.hasAlpha) ? 1 : 0;
             mat.tintR = bgpu.tint.r;
             mat.tintG = bgpu.tint.g;
             mat.tintB = bgpu.tint.b;

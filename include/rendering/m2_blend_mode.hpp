@@ -85,7 +85,17 @@ inline bool m2BatchNeedsAlphaTest(uint8_t blendMode, bool hasAlpha) {
 /// Nor does a Mod or Mod2x batch. Those multiply the framebuffer by the
 /// texture (DstColor blends, 0xA453B0), so black is the darkening the artist
 /// painted, not a backing.
-inline bool m2BatchWantsColorKey(uint8_t blendMode, bool textureIsKeyed) {
+///
+/// Nor an alpha-blended batch whose texture has alpha to blend by. A keyed
+/// batch is drawn opaque past the key (m2.frag.glsl writes the fade, not the
+/// texture's alpha), so the key turned such a card into a solid one: the
+/// glow card of TORCH.M2 - GLOWORANGE32.BLP, blend mode 2, a soft orange
+/// falloff in its alpha - drew as an orange rectangle around every torch,
+/// Stormwind's gate tunnel full of them. It took "Soft lamp halos", which
+/// replaces the card, to hide it. A blended card with no alpha still gets the
+/// key: blending by an alpha of 1 is drawing it opaque, backing and all.
+inline bool m2BatchWantsColorKey(uint8_t blendMode, bool textureIsKeyed, bool textureHasAlpha) {
+    if (blendMode == M2_BLEND_ALPHA && textureHasAlpha) return false;
     return textureIsKeyed && !m2BlendIsAdditive(blendMode) && blendMode != M2_BLEND_MODULATE &&
            blendMode != M2_BLEND_MODULATE2X;
 }

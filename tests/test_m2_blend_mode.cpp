@@ -84,27 +84,37 @@ TEST_CASE("an additive card is not colour keyed", "[m2]") {
     // mode 4, and a glow card is a radial gradient from black to white, so
     // everything below the bright core was thrown away and the soft falloff
     // became a hard-edged disc. That is what Orgrimmar's bonfires were.
-    CHECK_FALSE(m2BatchWantsColorKey(4, true));
-    CHECK_FALSE(m2BatchWantsColorKey(3, true));
+    CHECK_FALSE(m2BatchWantsColorKey(4, true, false));
+    CHECK_FALSE(m2BatchWantsColorKey(3, true, false));
 }
 
 TEST_CASE("a modulating card is not colour keyed", "[m2]") {
     // Mod and Mod2x multiply what is behind by the texture, so black is the
     // darkening itself (stock blend table 0xA453B0).
-    CHECK_FALSE(m2BatchWantsColorKey(5, true));
-    CHECK_FALSE(m2BatchWantsColorKey(6, true));
+    CHECK_FALSE(m2BatchWantsColorKey(5, true, false));
+    CHECK_FALSE(m2BatchWantsColorKey(6, true, false));
 }
 
 TEST_CASE("everything else that asked for the key still gets it", "[m2]") {
     // The key is how a black-backed card survives being drawn opaquely, which
     // is still what happens for every non-additive mode.
-    CHECK(m2BatchWantsColorKey(0, true));
-    CHECK(m2BatchWantsColorKey(1, true));
-    CHECK(m2BatchWantsColorKey(2, true));
+    CHECK(m2BatchWantsColorKey(0, true, false));
+    CHECK(m2BatchWantsColorKey(1, true, false));
+    CHECK(m2BatchWantsColorKey(2, true, false));
+    CHECK(m2BatchWantsColorKey(0, true, true));
+    CHECK(m2BatchWantsColorKey(1, true, true));
 
     // And a texture nothing marked is never keyed, whatever it blends as.
     for (uint8_t mode = 0; mode <= 6; ++mode) {
         INFO("blend mode " << int(mode));
-        CHECK_FALSE(m2BatchWantsColorKey(mode, false));
+        CHECK_FALSE(m2BatchWantsColorKey(mode, false, false));
+        CHECK_FALSE(m2BatchWantsColorKey(mode, false, true));
     }
+}
+
+TEST_CASE("an alpha-blended card with alpha is blended, not keyed", "[m2]") {
+    // TORCH.M2's glow card: GLOWORANGE32.BLP, blend mode 2, its falloff in
+    // the alpha. Keyed, it was drawn opaque past the key - an orange
+    // rectangle around every torch.
+    CHECK_FALSE(m2BatchWantsColorKey(2, true, true));
 }
