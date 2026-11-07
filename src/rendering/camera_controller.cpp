@@ -459,6 +459,9 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
         constexpr float MAX_SWIM_DEPTH_FROM_SURFACE = 12.0f;
         bool inWater = false;
         surfaceHopThisFrame_ = false;
+        // The liquid over the feet, for the camera's water line (0x6049C0).
+        liquidDepthOverFeet_ = (waterH && !waterWalkActive_ && targetPos.z < *waterH)
+            ? *waterH - targetPos.z : -1.0f;
         // Water Walk: treat water surface as ground - player walks on top, not through.
         if (waterWalkActive_ && waterH && targetPos.z >= *waterH - 0.5f) {
             // Clamp to water surface so the player stands on it
@@ -2799,6 +2802,17 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
         // isFirstPersonView already covers the anti-clip-pushback case the
         // extra term was meant for, since it reads the target distance, not
         // the squeezed one.
+        //
+        // The stock fade (0x606F90's tail -> 0x4F8660,
+        // stock_camera::playerModelAlpha): by the camera's distance as drawn,
+        // collision pull-in included, less the near clip - opaque from 1.83
+        // yd out, gone at the near clip. The first-person snap below 0.6 is
+        // distance 0. Hidden when the alpha is 0, as stock hides it; the alpha
+        // itself goes on through the unit's presentation (EntitySpawner),
+        // which multiplies it into stealth and ghost alpha.
+        const float drawnDist = (actualDist < MIN_DISTANCE + 0.1f) ? 0.0f : actualDist;
+        playerModelAlpha_ = stock_camera::playerModelAlpha(drawnDist, -pitch,
+                                                           pivot.z - targetPos.z);
         bool shouldHidePlayer = isFirstPersonView();
         characterRenderer->setInstanceVisible(playerInstanceId, !shouldHidePlayer);
 
@@ -3412,6 +3426,24 @@ void CameraController::update(float deltaTime) {
         runPace = hasMoveInput && shiftDown;
     }
 
+    // The water line (0x6049C0) and, crossing it, the camera's final pitch
+    // (0x606F90, cameraWaterCollision): coming up to the surface the pitch
+    // eases to cameraSurfaceFinalPitch, going under to
+    // cameraSubmergeFinalPitch (5 degrees down each), over |change| /
+    // cameraPitchSmoothSpeed (0x601190). Before the follow below, which
+    // steps the ease (and drops it while the mouse holds the camera).
+    const stock_camera::WaterLine waterLine = stock_camera::waterLine(
+        liquidDepthOverFeet_ >= 0.0f, liquidDepthOverFeet_, collider_.height);
+    if (thirdPerson && !externalFollow_ && !introActive) {
+        bool fires = false;
+        const float finalDown = stock_camera::waterLineFinalPitch(waterLine_, waterLine, &fires);
+        const float target = glm::clamp(-finalDown, MIN_PITCH, MAX_PITCH);
+        if (fires && std::abs(target - pitch) >= 0.06f) {
+            followPitch_ = {true, pitch, target, std::abs(target - pitch) / kFollowPitchSpeedDeg, 0.0f};
+        }
+    }
+    waterLine_ = waterLine;
+
     // Swing the camera back behind a moving character (cameraSmoothStyle).
     // Before forward3D is read, so the frame is drawn with the eased angles.
     updateStockFollow(deltaTime, nowForward, nowBackward, nowStrafeLeft, nowStrafeRight,
@@ -3490,6 +3522,14 @@ void CameraController::update(float deltaTime) {
         movePitchDeg_ = glm::degrees(sm::stepPitch(glm::radians(movePitchDeg_), pitchVote_,
                                                    sm::keyboardPitchRate(pitchRate, stockMoveFlags),
                                                    deltaTime));
+    }
+    // cameraDive (0x606F90 / 0x6023D0): at the surface the swimmer stays
+    // level unless the mouse steers with the camera at least
+    // cameraSubmergePitch (18 degrees) down - a glance down, or the pitch
+    // keys, do not take it under. Not drunk (0x4F7290).
+    if (swimming && !externalFollow_ && drunkLevel_ <= 0.0f &&
+        stock_camera::diveHoldsLevel(waterLine_, cameraDrivesFacing, -pitch)) {
+        movePitchDeg_ = 0.0f;
     }
     if (!pitchMedium) movePitchDeg_ = 0.0f;
     const float movePitchRad = glm::radians(movePitchDeg_);

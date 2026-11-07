@@ -82,3 +82,59 @@ TEST_CASE("held MoveView turns at the look speeds, Right and Up the stock way ro
     CHECK(both.yawDeg == 0.0f);
     CHECK(both.pitchDeg == 0.0f);
 }
+
+TEST_CASE("the water line: a swimmer at the float depth is at the surface") {
+    // 0x6049C0: depth <= h - 2/9 is Shallow. A human (2.031) floats 1.52 under.
+    CHECK(sc::waterLine(false, 0.0f, 2.031f) == sc::WaterLine::None);
+    CHECK(sc::waterLine(true, 0.75f * 2.031f, 2.031f) == sc::WaterLine::Shallow);
+    CHECK(sc::waterLine(true, 1.80f, 2.031f) == sc::WaterLine::Submerged);
+    // A gnome (1.056) too.
+    CHECK(sc::waterLine(true, 0.75f * 1.056f, 1.056f) == sc::WaterLine::Shallow);
+}
+
+TEST_CASE("cameraDive holds a swimmer level at the surface unless steered 18 degrees down") {
+    using W = sc::WaterLine;
+    // Keys alone at the surface: level.
+    CHECK(sc::diveHoldsLevel(W::Shallow, false, 40.0f));
+    // Steering, looking down 10: level; 20: dives; looking up: not held.
+    CHECK(sc::diveHoldsLevel(W::Shallow, true, 10.0f));
+    CHECK_FALSE(sc::diveHoldsLevel(W::Shallow, true, 20.0f));
+    CHECK_FALSE(sc::diveHoldsLevel(W::Shallow, true, -10.0f));
+    // Under water nothing holds at the default cameraSurfacePitch 0.
+    CHECK_FALSE(sc::diveHoldsLevel(W::Submerged, false, 10.0f));
+    // With a negative surface pitch, looking up less than it holds.
+    CHECK(sc::diveHoldsLevel(W::Submerged, true, -5.0f, -10.0f));
+    CHECK_FALSE(sc::diveHoldsLevel(W::Submerged, true, -15.0f, -10.0f));
+    CHECK_FALSE(sc::diveHoldsLevel(W::None, false, 30.0f));
+}
+
+TEST_CASE("crossing the water line eases the camera to 5 degrees down") {
+    using W = sc::WaterLine;
+    bool fires = false;
+    CHECK(sc::waterLineFinalPitch(W::Submerged, W::Shallow, &fires) == 5.0f);
+    CHECK(fires);
+    CHECK(sc::waterLineFinalPitch(W::Shallow, W::Submerged, &fires) == 5.0f);
+    CHECK(fires);
+    sc::waterLineFinalPitch(W::None, W::Shallow, &fires);
+    CHECK_FALSE(fires);  // walking into the water is not a crossing
+    sc::waterLineFinalPitch(W::Shallow, W::Shallow, &fires);
+    CHECK_FALSE(fires);
+    sc::waterLineFinalPitch(W::Shallow, W::Submerged, &fires, 5.0f, 0.0f);
+    CHECK_FALSE(fires);  // a final pitch of 0 is off
+}
+
+TEST_CASE("the player model fades between 1.83 yd and the near clip") {
+    // Opaque at the default view, gone at first person.
+    CHECK(sc::playerModelAlpha(5.55f, 10.0f, 1.6f) == 1.0f);
+    CHECK(sc::playerModelAlpha(0.0f, 10.0f, 1.6f) == 0.0f);
+    CHECK(sc::playerModelAlpha(0.2f, 10.0f, 1.6f) == 0.0f);
+    // Halfway along the cosine at 0.2 + (1.8315 + 1/360) / 2.
+    CHECK(sc::playerModelAlpha(0.2f + (1.8315f + 1.0f / 360.0f) * 0.5f, 10.0f, 1.6f) ==
+          Approx(0.5f).margin(1e-3));
+    CHECK(sc::playerModelAlpha(2.0f, 10.0f, 1.6f) == Approx(0.99927f).margin(1e-3));
+    CHECK(sc::playerModelAlpha(1.5f, 10.0f, 1.6f) == Approx(0.80566f).margin(1e-3));
+    // From under the character looking up steeply it fades from further out.
+    CHECK(sc::playerModelAlpha(1.5f, -80.0f, 1.6f) < sc::playerModelAlpha(1.5f, 10.0f, 1.6f));
+    // ... but not when the camera is further than the pivot height.
+    CHECK(sc::playerModelAlpha(2.5f, -80.0f, 1.6f) == 1.0f);
+}

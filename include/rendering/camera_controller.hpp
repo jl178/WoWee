@@ -158,7 +158,11 @@ public:
     [[nodiscard]] float getFacingYaw() const { return facingYaw; }
     [[nodiscard]] float getTravelYaw() const { return travelYaw_; }
     [[nodiscard]] bool isThirdPerson() const { return thirdPerson; }
-    [[nodiscard]] bool isFirstPersonView() const { return thirdPerson && (userTargetDistance <= MIN_DISTANCE + 0.15f); }
+    /// The player model fully faded (stock_camera::playerModelAlpha 0): the
+    /// camera at the first-person end, or pulled that close.
+    [[nodiscard]] bool isFirstPersonView() const { return thirdPerson && playerModelAlpha_ <= 0.0f; }
+    /// The stock camera fade of the player's model, 0..1 (1 out of third person).
+    [[nodiscard]] float playerModelAlpha() const { return thirdPerson ? playerModelAlpha_ : 1.0f; }
     [[nodiscard]] bool isGrounded() const { return grounded; }
     [[nodiscard]] bool isJumping() const { return !grounded && verticalVelocity > 0.0f; }
     // A swimming character is not grounded and is not rising, but it is not
@@ -1077,6 +1081,9 @@ private:
     bool flyingActive_ = false;
     bool flightAirborne_ = false;
     float movePitchDeg_ = 0.0f;
+    float playerModelAlpha_ = 1.0f;     ///< stock_camera::playerModelAlpha, last frame
+    float liquidDepthOverFeet_ = -1.0f; ///< liquid over the followed feet, -1 out of it
+    stock_camera::WaterLine waterLine_ = stock_camera::WaterLine::None;
     int pitchVote_ = 0;       ///< this frame's PitchUp/PitchDown vote
     int sentPitchVote_ = 0;   ///< the one the last START/STOP_PITCH reported
     float pitchRateOverride_ = 0.0f;  ///< rad/s from the server; 0 = pi

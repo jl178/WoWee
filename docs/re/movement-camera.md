@@ -446,9 +446,43 @@ cameraFoVSmoothSpeed 0.5, cameraFlyingMountHeightSmoothSpeed 2.0,
 cameraWaterCollision 1, cameraPivot 1 (DXMax 0.05, DYMin 0.00),
 cameraDive 1, cameraSurfacePitch 0, cameraSubmergePitch 18,
 cameraSurfaceFinalPitch 5, cameraSubmergeFinalPitch 5, cameraTerrainTilt 0,
-mouseInvertYaw/Pitch 0. Not traced: what cameraDive and the
-surface/submerge pitches do to the view at the water line, and the
-first-person model fade.
+mouseInvertYaw/Pitch 0.
+
+**The water line** (0x6049C0, every frame from 0x606F90): the liquid level at
+the camera's target less its feet, against its collision height h (+0x854).
+At most `h - 2/9` (0xA1EA24) sets CGCamera +0x98 bit 0x100000 (at the
+surface: the head is out; a swimmer floating 0.75 h under is here), deeper
+0x200000 (submerged); out of liquid neither. The CVars (0x5FE010):
+cameraWaterCollision 0xC249B4, cameraDive 0xC249A0, cameraSurfacePitch 0
+(0xC2499C), cameraSubmergePitch 18 (0xC24998), cameraSurfaceFinalPitch 5
+(0xC24994), cameraSubmergeFinalPitch 5 (0xC24990).
+
+- **cameraDive** (0x606F90 for a SWIMMING player whose pitch is not already 0,
+  not drunk, no click-to-move; and 0x6023D0 on every steering mouse move):
+  at the surface, with cameraSubmergePitch > 0, the player's pitch is set to 0
+  (0x5FBE70(0)) unless the mouse steers with the camera looking down by at
+  least cameraSubmergePitch - so the keys alone (pitch keys included) and a
+  glance down under 18 degrees keep a swimmer on the surface, and looking 18
+  or more down dives. Submerged, a negative cameraSurfacePitch does the same
+  for looking up (0 by default: off).
+- **The final pitches** (0x606F90 with cameraWaterCollision): when the bits
+  go from submerged to the surface the camera's pitch eases to
+  cameraSurfaceFinalPitch, from the surface to submerged to
+  cameraSubmergeFinalPitch (5 degrees down each; 0 is off), with the pitch
+  blend 0x601190 over `|change| / cameraPitchSmoothSpeed` (0xC24E38, 45
+  deg/s). Walking into water is not a crossing (no bit before).
+
+**The player model fade** (0x606F90's tail -> 0x4F8660): with d the camera's
+distance as drawn (after the collision pull-in) less the near clip (CGCamera
++0x38, 0.2 - 0x9E8D84, set by 0x607B00 each frame), the model is opaque from
+d = 1.8315 (0xA1E308), clear at d = 1/360 (0xA1E344), and between at
+`255 x (1 - cos(pi t)) / 2` (0x8CA080). With the camera nearer than the pivot
+height (+0x128) and its pitch below -1.1868 rad (0xA1EA7C: under the
+character looking up) the start distance is divided by `((-pi/2 - pitch) x
+-2.6043 (0xA1EA78))^2`, so the model fades from further out. 0x4F8660 hides
+the model at alpha 0 (0x6CEE50) and draws it at alpha / 255 otherwise
+(0x737390). A vehicle's seat model fades by the Vehicle CameraFadeDistScalar
+fields instead (same loop; `vehicle_rules.hpp`).
 
 **Held view motion** (MoveView*Start / Stop, 0x5FF000 sets bit `1 << 2i`
 in CGCamera +0x160, the start time +0x164 + 4i and the speed argument
@@ -510,6 +544,8 @@ also skips the cameraDive surface/submerge pitch limits (0x6023D0,
 | 34 | PitchUp / PitchDown, swimming or flying and not mouse-steering, move the player's pitch at the pitch rate (x0.75 moving) and send START_PITCH_UP / DOWN / STOP_PITCH (section 5) | the binding set a command nothing read | `stock_movement::pitchVote / keyboardPitchRate / stepPitch` in `CameraController::update`; the vote's changes send the three opcodes; the server's pitch rate reaches the camera |
 | 35 | The camera sets the player's pitch (and facing) only while the mouse steers (0x2000001); a swimmer moves along its own facing and pitch; a steered pitch change goes out as SET_PITCH at 0.1 rad | in water the camera steered facing and pitch whenever a key was held, autorun swam level; SET_PITCH was never sent (the pitch rode along on the next packet) | `movePitchDeg_` for swimming and flight alike: the camera's while steering, the keys' otherwise, held; `MovementHandler::pitchChangeWorthSending` |
 | 36 | MoveView turns at cameraYawMoveSpeed and tilts at cameraPitchMoveSpeed (0x6000E0); Right goes round to the character's right, Up goes up | 180 / 90 by name, Right and Up the other way round | `stock_camera::viewMoveStep` at the controller's look speeds |
+| 37 | At the surface a swimmer stays level unless the mouse steers it 18 degrees or more down (cameraDive, cameraSubmergePitch); crossing the water line eases the camera to 5 degrees down (section 10) | a swimmer at the surface followed the camera's 3D direction and a float spring pulled it back unless it looked 16 degrees down; the camera kept its pitch at the line | `stock_camera::waterLine / diveHoldsLevel / waterLineFinalPitch`: the dive holds `movePitchDeg_` level, the crossing starts the pitch ease |
+| 38 | The player's model fades by the drawn camera distance (1.83 yd to the near clip, cosine), is hidden at 0, and the mount with it | hidden only at a zoom target of 0.65 yd or less, never faded; SetView(1) (0.5 yd) still drew it in the in-game check | `stock_camera::playerModelAlpha` each frame, `isFirstPersonView` is alpha 0, the alpha multiplied into the player's presented alpha (stealth, ghost) and given to the mount (`EntitySpawner::syncUnitPresentation`) |
 
 Still different (not changed here; each needs in-game checking):
 
@@ -541,8 +577,7 @@ Still different (not changed here; each needs in-game checking):
 - **FALL_LAND after a jump that lands within 1/36 yd of its apex** (onto a
   ledge): stock sends none; Wowee sends it, as it is what clears FALLING in
   its copy of the flags.
-- Click-to-move, cameraDive / submerge pitch and the first-person fade were
-  not traced.
+- Click-to-move was not traced.
 
 ## 12. Flight allowed, teleports and the world port
 

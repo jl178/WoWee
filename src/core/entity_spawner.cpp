@@ -14,6 +14,7 @@
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/camera_controller.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/character_renderer.hpp"
@@ -320,7 +321,25 @@ void EntitySpawner::syncUnitPresentation() {
     if (const uint64_t self = gameHandler_->getPlayerGuid(); self != 0) {
         const uint32_t drawn = renderer_->getCharacterInstanceId();
         if (const auto* unit = unitFor(self); unit && drawn != 0) {
-            presentUnitAlpha(self, drawn, unitPresentationAlpha(self, *unit, /*isLocal=*/true));
+            // Times the camera's fade of the player's own model (Wow.exe
+            // 0x606F90 -> 0x4F8660, stock_camera::playerModelAlpha).
+            const auto* cc = renderer_->getCameraController();
+            const float camFade = cc ? cc->playerModelAlpha() : 1.0f;
+            const float alpha = unitPresentationAlpha(self, *unit, /*isLocal=*/true) * camFade;
+            presentUnitAlpha(self, drawn, alpha);
+            // The mount is the player's model in the stock client (the unit
+            // draws it, the rider on it), so it takes the same alpha. Here it
+            // is an instance of its own; given the alpha when it changes.
+            static uint32_t mountShown = 0;
+            static float mountAlpha = 1.0f;
+            const auto* ac = renderer_->getAnimationController();
+            const uint32_t mount = ac ? ac->getMountInstanceId() : 0;
+            // A new mount at full alpha keeps its spawn fade-in.
+            if (mount != 0 && (mount != mountShown ? alpha < 0.999f : alpha != mountAlpha)) {
+                renderer_->getCharacterRenderer()->setInstanceOpacity(mount, alpha);
+            }
+            mountShown = mount;
+            mountAlpha = alpha;
         }
     }
 

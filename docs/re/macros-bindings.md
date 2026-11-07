@@ -262,7 +262,8 @@ commands now follow:
 - SetView, SaveView, NextView, PrevView, FlipCameraYaw, CameraZoomOut,
   MoveViewLeft/Out move the camera (screenshots); the usage errors match.
   SetView(1) holds the zoom target at 0.5 yd, but the player model was still
-  drawn there in one run (first-person hiding is the camera lane's).
+  drawn there in one run; the model now fades by the stock rule
+  (movement-camera.md section 10, row 38).
 - Screenshot() and the SCREENSHOT key wrote `Screenshots/WoWScrnShot_110626_
   154309.jpg` and fired SCREENSHOT_SUCCEEDED.
 - missing_api.txt after the run: no real gaps.
