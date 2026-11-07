@@ -361,6 +361,16 @@ TEST_CASE("A knockback is a fall on the packet's path", "[stock_movement][knockb
     CHECK((sm::landWithPendingKeys(f) & (sm::kForward | sm::kFalling | sm::kPendingStop)) == 0);
 }
 
+TEST_CASE("a swimmer has no step and steep ground is a fall") {
+    // 0x760B40: the swim trace has no step; 0x75D1C0: past 50 degrees a
+    // player is falling, past 80 anything else.
+    CHECK(sm::kSwimStepHeight == 0.0f);
+    CHECK(sm::groundIsFall(0.5f));
+    CHECK_FALSE(sm::groundIsFall(0.7f));
+    CHECK_FALSE(sm::groundIsFall(0.5f, false));
+    CHECK(sm::groundIsFall(0.1f, false));
+}
+
 TEST_CASE("a jump onto a ledge at its apex lands with no FALL_LAND") {
     // 0x73D4A0: the fall height is the apex less the landing z; within 1/36
     // nothing is sent, however long the jump took.
