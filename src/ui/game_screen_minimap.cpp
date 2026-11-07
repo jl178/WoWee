@@ -2019,6 +2019,7 @@ void GameScreen::saveSettings() {
     out << "buff_bar_scale=" << settingsPanel_.pendingBuffBarScale << "\n";
     out << "action_bar_scale=" << settingsPanel_.pendingActionBarScale << "\n";
     out << "nameplate_scale=" << settingsPanel_.nameplateScale_ << "\n";
+    out << "combat_text_scale=" << settingsPanel_.combatTextScalePct_ << "\n";
     out << "show_friendly_nameplates=" << (settingsPanel_.showFriendlyNameplates_ ? 1 : 0) << "\n";
     out << "show_enemy_nameplates=" << (settingsPanel_.showEnemyNameplates_ ? 1 : 0) << "\n";
     out << "show_action_bar2=" << (settingsPanel_.pendingShowActionBar2 ? 1 : 0) << "\n";
@@ -2254,6 +2255,8 @@ void GameScreen::loadSettings() {
                 actionBarScaleLoaded = true;
             } else if (key == "nameplate_scale") {
                 settingsPanel_.nameplateScale_ = std::clamp(std::stof(val), 0.5f, 2.0f);
+            } else if (key == "combat_text_scale") {
+                settingsPanel_.combatTextScalePct_ = std::clamp(std::stoi(val), 50, 200);
             } else if (key == "show_friendly_nameplates") {
                 settingsPanel_.showFriendlyNameplates_ = (std::stoi(val) != 0);
             } else if (key == "show_enemy_nameplates") {

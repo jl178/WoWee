@@ -18,6 +18,7 @@
 #include "core/version.hpp"
 #include "core/config_paths.hpp"
 #include "ui/settings_schema.hpp"
+#include "ui/combat_text_size.hpp"
 #include "imgui.h"
 #include "addons/lua_api_helpers.hpp"
 #include "addons/lua_api_registrations.hpp"
@@ -1985,6 +1986,22 @@ void noteClientSettingChanged(const std::string& settingKey, const std::string& 
 }
 
 void applySoundCVarSideEffects(lua_State* L) { applySoundCVars(L); }
+
+void applyCombatTextHeights(lua_State* L, int scalePct) {
+    if (!L) return;
+    const ui::CombatTextHeights h = ui::blizzardCombatTextHeights(scalePct);
+    lua_getglobal(L, "COMBAT_TEXT_HEIGHT");
+    const bool loaded = lua_type(L, -1) == LUA_TNUMBER;
+    const double current = loaded ? lua_tonumber(L, -1) : 0.0;
+    lua_pop(L, 1);
+    if (!loaded || current == static_cast<double>(h.normal)) return;
+    lua_pushnumber(L, h.normal);
+    lua_setglobal(L, "COMBAT_TEXT_HEIGHT");
+    lua_pushnumber(L, h.critMin);
+    lua_setglobal(L, "COMBAT_TEXT_CRIT_MINHEIGHT");
+    lua_pushnumber(L, h.critMax);
+    lua_setglobal(L, "COMBAT_TEXT_CRIT_MAXHEIGHT");
+}
 
 void applyStoredCVarSideEffects(lua_State* L) {
     g_replayingStoredCVars = true;

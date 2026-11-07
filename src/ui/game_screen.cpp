@@ -13,6 +13,7 @@
 #include "ui/escape_action.hpp"
 #include "ui/display_modes.hpp"
 #include "ui/framexml_takeover.hpp"
+#include "ui/combat_text_size.hpp"
 #include "ui/scene_pick.hpp"
 #include "game/spell_targeting.hpp"
 #include "ui/ui_colors.hpp"
@@ -708,6 +709,13 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     {
         const bool incoming = !frameXmlDrawsCombatText() &&
             addons::storedCVarValue("enableCombatText", "1") != "0";
+        // The size setting reaches both: CombatUI's text, and the addon's
+        // line heights (a /reload puts its defaults back, hence every frame).
+        combatUI_.setCombatTextScale(combatTextScale(settingsPanel_.combatTextScalePct_));
+        if (frameXmlDrawsCombatText() && services_.addonManager) {
+            if (auto* engine = services_.addonManager->getLuaEngine())
+                addons::applyCombatTextHeights(engine->getState(), settingsPanel_.combatTextScalePct_);
+        }
         combatUI_.renderCombatText(gameHandler, incoming);
     }
     // FriendsFrame is what "social" suppresses, and its tabs are the friends

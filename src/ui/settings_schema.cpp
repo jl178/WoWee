@@ -600,6 +600,13 @@ constexpr SettingDesc kSchema[] = {
     {"fctauras", "Auras gained and lost", SettingKind::Bool, 0, 0, 0, "Combat Text", "",
      "Each buff and debuff as it lands on you and as it fades.", "", 0, "combattext",
      "cvar:fctAuras", "", "COMBAT_TEXT_SHOW_AURAS = v COMBAT_TEXT_SHOW_AURA_FADE = v"},
+    // Not a stock option: one size for both kinds of combat text, the numbers
+    // over what you hit and the notices over your character (see
+    // combat_text_size.hpp). 100 is the stock size.
+    {"combattextscale", "Text size", SettingKind::Int, 50, 200, 5, "Combat Text", "Size",
+     "How large combat text is drawn, as a percentage of the original:\n"
+     "the numbers over what you hit and heal, and the notices over your\n"
+     "character.", "", 100},
 
     // ------------------------------------------------------------- Unit Frames
     // The game's Unit Frames and Status Text pages, and the threat rows from

@@ -266,6 +266,13 @@ yards; projected each frame and clamped so the text stays whole on screen.
 **Stacking**: four texts per unit at most; a fifth is dropped. No offsets:
 concurrent numbers overlap.
 
+**Size (not stock)**: the Combat Text page's *Text size* (`combattextscale`,
+50-200 %, 100 = the heights above) multiplies the world text's height and its
+shadow offset, this client's stand-in floating text, and Blizzard_CombatText's
+`COMBAT_TEXT_HEIGHT` / `COMBAT_TEXT_CRIT_MINHEIGHT` / `_MAXHEIGHT` (25 / 30 /
+60), which the addon reads each time it sizes a line and resets when its file
+runs (`ui/combat_text_size.hpp`, `addons::applyCombatTextHeights`).
+
 ## 6. Chat bubbles (CGChatBubbleFrame, ChatBubbleFrame.cpp)
 
 **Which lines** (0x720010, from the chat handler 0x509dd0 / 0x50a970, for any
@@ -337,3 +344,37 @@ avoidance; newer bubbles draw on top (0x56d050).
 - Bubbles: ChatTypeInfo colours are the defaults, not the player's recolours.
 - The red name after damage only sees damage this client logs (the player's
   and the player's pet's, and damage to the player), not every unit's.
+
+## 9. Which auras are listed (UnitAura, 0x614D40)
+
+UnitAura, UnitBuff and UnitDebuff (0x614D40 / 0x614CA0 / 0x614CF0 ->
+0x6147C0) count their index into the unit's visible-aura list (CGUnit_C
++0xDD4 helpful, +0xE58 harmful; index lookup 0x72C9B0), not into its aura
+slots. 0x72C510 rebuilds that list, and an aura is in it only when:
+
+- its slot has a spell and an effect mask (`flags & 7`);
+- Spell.dbc has a row for the spell: the table at 0xAD49D4 is read directly,
+  and an id outside it or a hole in it is skipped;
+- 0x53D580 passes the row:
+  - `Attributes & 0x80` (DO_NOT_DISPLAY) or `AttributesEx & 0x10000000`
+    (DONT_DISPLAY_IN_AURA_BAR): never;
+  - `Attributes & 0x40` (passive): only with an area-aura effect (0x76BED0:
+    27, 35, 65, 119, 128, 129, 143);
+  - `AttributesEx5 & 0x10000000` hides it when self-cast (aura flag 0x08),
+    `& 0x08000000` when someone else cast it;
+  - `AttributesEx6 & 0x100000`: only when the player or its active pet (the
+    PetInfo list at 0xC23500, entry 0) cast it;
+  - `RequiredAuraVision` (column 221): only when the player has that vision
+    bit (0x4F72E0, the player's +0x10E7 byte).
+
+An aura that fails is not drawn as "Unknown" or blank: it is not there, and
+the auras after it move up an index. A realm's own spells - mod-individual-
+progression's Phase Shift: IPP (89511) on the lab, which only the server's
+spell_dbc has - are the common missing row. Victorious (32216) has
+Attributes 0x180, so a 3.3.5 warrior never sees it as a buff either; the
+Victory Rush button lights from the aura state instead.
+
+Wowee: `game::stock_aura::listed`, through `GameHandler::isAuraListed`, in
+UnitAura/UnitBuff/UnitDebuff, GetPlayerBuff and CancelUnitBuff's index.
+Before, every slot with a spell id was listed, and a missing row was an
+"Unknown" buff with no icon.

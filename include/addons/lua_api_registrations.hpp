@@ -47,6 +47,13 @@ void applyStoredCVarSideEffects(lua_State* L);
 /// and the sound did not change until something else called SetCVar.
 void applySoundCVarSideEffects(lua_State* L);
 
+/// Blizzard_CombatText's line heights at the combat text size setting
+/// (ui::blizzardCombatTextHeights). The addon sets its defaults when its file
+/// runs - at load and at every /reload - and reads them each time it sizes a
+/// line, so this is called every frame and writes only when they differ.
+/// Nothing while the addon is not loaded.
+void applyCombatTextHeights(lua_State* L, int scalePct);
+
 /// One CVar's saved value, read straight from the file.
 ///
 /// For the settings that have to be known before the Lua state exists - the

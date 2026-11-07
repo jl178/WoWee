@@ -268,6 +268,9 @@ public:
 
     // ---- Config toggles (read by GameScreen rendering, edited by Interface tab) ----
     float nameplateScale_ = 1.0f; // Scale multiplier for nameplate bar dimensions
+    /// Combat text size, percent of stock (combat_text_size.hpp): the world
+    /// text over targets and the floating text over the character.
+    int combatTextScalePct_ = 100;
     bool showFriendlyNameplates_ = false; // Shift+V: nameplateShowFriends, off as it ships
     bool showEnemyNameplates_ = false;    // V: nameplateShowEnemies, off as it ships
     bool showDPSMeter_ = false;

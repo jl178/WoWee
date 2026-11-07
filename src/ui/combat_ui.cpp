@@ -195,7 +195,7 @@ void CombatUI::drawWorldText(game::GameHandler& gameHandler, const game::CombatT
     const glm::vec3 ndc = glm::vec3(clip) / clip.w;
     if (ndc.x < -1.0f || ndc.x > 1.0f) return;
 
-    const float px = su::ddcPixels(su::worldTextHeight(type, ms), screenW, screenH);
+    const float px = su::ddcPixels(su::worldTextHeight(type, ms), screenW, screenH) * combatTextScale_;
     if (px < 1.0f) return;
     const ImVec2 ts = font->CalcTextSizeA(px, FLT_MAX, 0.0f, text);
     // Centred on the point and kept whole on the screen.
@@ -203,7 +203,7 @@ void CombatUI::drawWorldText(game::GameHandler& gameHandler, const game::CombatT
     float sy = (ndc.y * 0.5f + 0.5f) * screenH - ts.y * 0.5f;
     sx = std::clamp(sx, 0.0f, std::max(0.0f, screenW - ts.x));
     sy = std::clamp(sy, 0.0f, std::max(0.0f, screenH - ts.y));
-    const float sh = su::ddcPixels(su::kWorldTextShadowDdc, screenW, screenH);
+    const float sh = su::ddcPixels(su::kWorldTextShadowDdc, screenW, screenH) * combatTextScale_;
     ImDrawList* drawList = ImGui::GetBackgroundDrawList();
     drawList->AddText(font, px, ImVec2(std::round(sx + sh), std::round(sy + sh)),
                       IM_COL32(0, 0, 0, static_cast<int>(alpha * 127.0f)), text);
@@ -233,7 +233,7 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler, bool drawIncomin
     ImFont* font = interfaceFace("frizqt__.ttf");
     if (!font) font = ImGui::GetFont();
     const float uiPx = screenH / 768.0f;
-    const float baseFontSize = 25.0f * uiPx;
+    const float baseFontSize = 25.0f * uiPx * combatTextScale_;
 
     // HUD fallback: entries without world-space anchor use classic screen-position layout.
     // We still need an ImGui window for those.
@@ -518,7 +518,7 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler, bool drawIncomin
             float h = kMin;
             if (t <= kUp) h = kMin + (kMax - kMin) * (t / kUp);
             else if (t <= kDown) h = kMax - (kMax - kMin) * ((t - kUp) / (kDown - kUp));
-            renderFontSize = h * uiPx;
+            renderFontSize = h * uiPx * combatTextScale_;
         }
 
         ImU32 shadowCol = IM_COL32(0, 0, 0, static_cast<int>(alpha * 180));

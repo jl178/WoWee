@@ -45,11 +45,14 @@ public:
     /// World text over targets always; what happened to the player only when
     /// `drawIncoming` - false once Blizzard_CombatText is drawing that half.
     void renderCombatText(game::GameHandler& gameHandler, bool drawIncoming);
+    /// The combat text size setting as a factor (combat_text_size.hpp).
+    void setCombatTextScale(float scale) { combatTextScale_ = scale; }
 
     // UIServices injection (Phase B singleton breaking)
     void setServices(const UIServices& services) { services_ = services; }
 
 private:
+    float combatTextScale_ = 1.0f;
     /// One number over a unit, by the stock world-text rules (0x7e5c30).
     void drawWorldText(game::GameHandler& gameHandler, const game::CombatTextEntry& entry,
                        std::unordered_map<uint64_t, int>& onUnit, const glm::mat4& viewProj,

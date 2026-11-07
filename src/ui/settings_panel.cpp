@@ -401,6 +401,7 @@ constexpr FieldBinding kFieldBindings[] = {
 
     // --- Combat and HUD ---
     {.key = "nameplatescale",     .asFloat = &SettingsPanel::nameplateScale_},
+    {.key = "combattextscale",    .asInt   = &SettingsPanel::combatTextScalePct_},
     {.key = "dpsmeter",           .asBool  = &SettingsPanel::showDPSMeter_},
     {.key = "dpsmeterleft",       .asFloat = &SettingsPanel::dpsMeterLeft_},
     {.key = "dpsmetertop",        .asFloat = &SettingsPanel::dpsMeterTop_},
