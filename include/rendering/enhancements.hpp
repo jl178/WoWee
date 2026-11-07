@@ -107,6 +107,13 @@ struct Enhancements {
     /// shallow water, fading out with depth and at night (water_caustics.frag,
     /// E15). Stock water lights nothing beneath it.
     bool  caustics = false;
+    /// HD water (water_hd.frag, E34): the stock animated texture and
+    /// Light.dbc's close and far colours as the base, with moving surface
+    /// normals derived from the stock frames, a Fresnel reflection of the
+    /// stock sky, a sun glint, colour and clarity from the real
+    /// depth under the surface, a soft shoreline and a gentle refraction.
+    /// Off draws water.frag, the stock surface, and takes no colour copy.
+    bool  hdWater = false;
 
     // ---- Weather (the "Enhancements: Weather" page; weather_fx.hpp) -------
     /// How much rain, snow and sand to draw, as a multiple of the stock count:

@@ -99,6 +99,20 @@ struct WaterFrameUBOData {
     glm::vec4 riverFar{0.0f, 19.0f / 255.0f, 23.0f / 255.0f, 1.0f};
     glm::vec4 oceanClose{30.0f / 255.0f, 48.0f / 255.0f, 62.0f / 255.0f, 0.75f};
     glm::vec4 oceanFar{0.0f, 19.0f / 255.0f, 23.0f / 255.0f, 1.0f};
+    // HD water (water_hd.frag; water.frag declares the block only this far,
+    // so nothing below changes the stock surface). x: 1 while the row is on;
+    // y: 1 when this frame's colour copy holds the scene without the water
+    // (its refraction reads it); zw: the share of
+    // the colour copy that copy filled, for the screen uv.
+    glm::vec4 hdParams{0.0f};
+    // Light.dbc's sky (the skybox's rings, LightIntBand 2-7): the reflected
+    // sky where nothing on screen is mirrored.
+    glm::vec4 skyTop{0.5f, 0.7f, 1.0f, 0.0f};
+    glm::vec4 skyMiddle{0.7f, 0.85f, 1.0f, 0.0f};
+    glm::vec4 skyBand1{0.9f, 0.95f, 1.0f, 0.0f};
+    glm::vec4 skyBand2{1.0f, 0.98f, 0.9f, 0.0f};
+    glm::vec4 skySmog{0.7f, 0.7f, 0.7f, 0.0f};
+    glm::vec4 skyFog{0.5f, 0.6f, 0.7f, 0.0f};
 };
 
 class WaterRenderer {
@@ -197,8 +211,15 @@ public:
     /// taken only while it is on.
     void setShorelineFoam(bool enabled) {
         shorelineFoam_ = enabled;
-        setRefractionEnabled(shorelineFoam_ || causticsStrength_ > 0.0f);
+        updateSceneCopy();
     }
+    /// HD water (E34, water_hd.frag): the row. On, the water and ocean are
+    /// drawn with the HD pipelines (made on first use, let go when it goes
+    /// off) and the scene's depth copy is taken for them; where the water
+    /// draws after the scene pass the copy takes the colour as well. Off is
+    /// water.frag and no colour copy.
+    void setHdWater(bool on);
+    [[nodiscard]] bool hdWater() const { return hdWater_; }
     /// Sunlight under water (E15, water_caustics.hpp): the row, which keeps
     /// the caustics pipelines (made on first use, let go when it goes off),
     /// and each frame its strength by the sun's height, 0 at night. While the
@@ -206,7 +227,7 @@ public:
     void setCausticsEnabled(bool on);
     void setCaustics(float strength) {
         causticsStrength_ = causticsEnabled_ ? strength : 0.0f;
-        setRefractionEnabled(shorelineFoam_ || causticsStrength_ > 0.0f);
+        updateSceneCopy();
     }
     /// Rain ripples (water.frag, push.rainRipple): how hard it is raining for
     /// the rings, 0..1. 0 - the "Rain ripples" setting off, or dry - draws
@@ -404,6 +425,25 @@ private:
     float causticsStrength_ = 0.0f;
     VkPipeline buildCausticsPipeline(VkRenderPass pass, VkSampleCountFlagBits samples);
     void destroyCausticsPipelines(bool deferred);
+
+    // HD water (water_hd.frag): the water's pipeline and its 1x sibling,
+    // same layout, vertex format and blend. Made on first use, gone while
+    // the row is off.
+    VkPipeline hdPipeline_ = VK_NULL_HANDLE;
+    VkPipeline hd1xPipeline_ = VK_NULL_HANDLE;
+    bool hdWater_ = false;
+    bool hdBuildFailed_ = false;
+    // Set by captureSceneHistory when it copied the scene's colour (taken
+    // just before the water, in the same frame), cleared once render() has
+    // told the shader.
+    bool colorCopiedThisFrame_ = false;
+    glm::vec2 colorCopyUvScale_{1.0f};
+    VkPipeline buildHdPipeline(VkRenderPass pass, VkSampleCountFlagBits samples);
+    void destroyHdPipelines(bool deferred);
+    void destroyPipelinePair(VkPipeline& scenePipeline, VkPipeline& pipeline1x, bool deferred);
+    void updateSceneCopy() {
+        setRefractionEnabled(shorelineFoam_ || causticsStrength_ > 0.0f || hdWater_);
+    }
 
     std::vector<WaterSurface> surfaces;
     bool renderingEnabled = true;

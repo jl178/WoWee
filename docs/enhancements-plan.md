@@ -1285,6 +1285,59 @@ with the zone text above 32 px and `text_pair_zone.png` (crop, 2x),
 `g_scale072_stock.png` / `g_scale072_crisp.png` and `scale072_pair.png`
 (UI scale 0.72, crop 4x).
 
+### 3.19 Measured cost of E34, HD water (2026-11-07)
+
+`WOWEE_ENHANCE_AB=hdwater:4` set per place from a `WOWEE_DEBUG_LUA` script
+(the `enhanceab` setting), `WOWEE_FRAME_PROFILE=1` and
+`WOWEE_SINGLE_THREAD_RECORD=1`, the Iris Xe with Jered's anti-aliasing and
+upscaler (MSAA 4x, FSR2 at `fsr_quality` 3, which is scale 1: the scene is
+drawn at the window's size), soft particles on (so the water draws after the
+scene pass and the colour copy exists), the rest of his set as saved. Noon.
+A 1280x540 window, not 2560x1080: Jered was playing on the same machine, so
+the windows were kept small. The water pass is per pixel, so its cost at
+2560x1080 is about four times these. Eleven on/off pairs a place; paired
+median, ms, the water pass and its copy (`water`, `water refraction copy`),
+the final shader:
+
+| Place | Stock water pass | HD water pass | HD minus stock (water + copy) | At 2560x1080 (x4) |
+|---|---|---|---|---|
+| Stormwind canals, Trade District (-8706 594) | 0.50 | 0.91 | +0.42 +0.04 | about 1.8 |
+| Elwynn, Crystal Lake shore | 0.63 | 0.86 | +0.22 +0.04 | about 1.0 |
+| Westfall Lighthouse, the coast | 2.32 (slow regime) | 4.62 | +1.24 +0.12 (slow regime: the stock pass ran at twice its 1.26 of an earlier run; about +0.6 in the fast one) | about 2.5 |
+| Thondroril River, below the bridge | 0.81 | 1.32 | +0.50 +0.04 | about 2.2 |
+
+So 1-2.5 ms at Jered's 2560x1080 where water fills most of the view, over
+the 1 ms this row was given. **Recommended off**; on for anyone who wants
+it at that price. How it got here (river and canal, 1280x540):
+
+- First version, with a screen-space reflection of the shore (twelve
+  steps of a matrix each through the depth copy, a bisection on a hit) and
+  the sky dome as a loop over local arrays: canal +1.60, river +1.18.
+- The reflection's ray stepped as a line in clip space, eight steps, only
+  where the Fresnel term is above 0.06: canal +0.73, river +0.89. Variants
+  of that shader at the river: without the reflection +0.58, with flat
+  normals +0.77, without the refraction's bend +0.83 - the reflection
+  +0.3, the normals (six taps of the liquid texture) +0.13, the bend (a
+  depth tap and a colour tap) +0.07.
+- Five steps within 60 yards, the sky dome one branch per ring, the depth
+  behind the pixel read once for the HD surface and the foam: river +0.84
+  with the reflection, +0.53 without. The reflection was dropped; the
+  surface mirrors Light.dbc's sky (and the planar sky pass where "Water
+  reflections" is on). Final: the table.
+- What is left: the body colour by depth, the Fresnel, the glint (one
+  shadow tap where it shows), the composition over the copied bed, the fog,
+  the normals and the bend. The colour copy itself (`water refraction
+  copy`, which copies the colour as well as the depth while the row is on)
+  is +0.04 at this size.
+
+The whole frame's GPU time moves with the iGPU's clock regime far more than
+by this (performance.md); the pairs are adjacent 4 s windows.
+
+Shots (scratch `hdw/shots/`, 1280x540): `ab_<place>_<noon|dusk>_<stock|hd>.png`
+for `canal1`, `canal2`, `canal3`, `crystal`, `westfall`, `river`, `river2`;
+`ab_under_noon_<stock|hd>.png` (from under the canal's surface: the same,
+the HD surface is drawn only from above). Contact sheets `hdw/final_*.png`.
+
 ## 4. Proposed enhancements
 
 Ranked by feel gained over cost and risk. "Cost" is implementation effort
@@ -1324,6 +1377,7 @@ the classic look or the stock behaviour.
 | 29 | E29 | Breath in the cold | low | S | medium | on |
 | 30 | E30 | Rain heard indoors | low | S | low | on |
 | 31 | E31 | Weather preview (client only) | tool | S | none | off |
+| 32 | E34 | HD water | medium | M | medium | off by cost (3.19) |
 
 Each entry below gives what it looks like, the engine area, how off stays
 stock, the budget, and how to verify.
@@ -2581,6 +2635,71 @@ Done (2026-11-04): the row `highlightrolloff`, "Soft highlights"; costs in
 - **Off is stock.** Aspect 0: no area is computed and the anchor loop takes
   UIParent's rect as before.
 - **Cost.** See 3.18.
+
+### E34. HD water
+
+Done (2026-11-07): the row `hdwater`, "HD water" (the Sky page, after
+"Sunlight under water"); costs in 3.19. Recommended off by cost.
+
+- **Looks like.** The stock water, sharper: the same LiquidType texture
+  sequence (lake_a, ocean_h and the rest) through its stock texture matrix,
+  added as stock adds it, over Light.dbc's close and far colours. The
+  surface ripples with the frame's own pattern; it mirrors the zone's sky
+  at grazing angles (at most 40%), takes a glint of the sun and a faint
+  sheen round it, is clear in the shallows and goes to the far colour and
+  LightParams' deep alpha with depth, fades out over the last 0.3 yards to
+  the shore instead of cutting a line, and bends what lies beneath a little.
+  The canals keep the river far colour stock gives WMO water and gain only
+  the clarity. Magma, slime, water inside a building and water seen from
+  below are the stock surface.
+- **Engine.** `water_hd.frag` with `water.vert`, the water's layout, vertex
+  format and blend (`WaterRenderer::buildHdPipeline`, made on first use for
+  the scene pass or the 1x pass, let go when the row goes off). Per pixel:
+  - *Normals*: two layers of the current stock frame, one at the stock
+    0.06 per yard drifting one way, one at 0.026 turned 37 degrees and
+    drifting another; the gradient of the frame's brightness (rgb and its
+    shimmer alpha) by forward differences a texel or a pixel's footprint
+    apart, at 0.35 strength, fading to a third by 350 yards. No texture of
+    our own.
+  - *Depth*: the scene's depth copy (the foam's) behind the pixel gives the
+    bed's position: its depth straight down sets the colour (1 - e^-d/3.5
+    for rivers, lakes and canals, /7 for the ocean, close -> far), the path
+    through the water the opacity (shallow alpha x 0.4 -> deep alpha, /3 and
+    /5). Where the copy has nothing behind the pixel, the stock ramp.
+  - *Reflection*: Fresnel (F0 0.02) through half the normals' tilt (the
+    full tilt sent rays into the canal walls: dark blots), capped at 0.4,
+    of Light.dbc's six sky colours by the skybox's ring rule (skybox.frag),
+    or the planar sky pass where "Water reflections" is on.
+  - *Glint*: Blinn-Phong from the stock light direction and colour,
+    exponents 400 and 48, by day, one shadow-map tap with the shadows on.
+  - *Refraction*: where the water draws after the scene pass the colour
+    copy is taken with the depth (`captureSceneHistory`, 1:1 into the
+    corner of the history; `hdParams.zw` scales the uv), and the shader
+    composes the bed itself: bed x (1 - op)(1 - F) + body x op (1 - F) +
+    sky x F + glint, alpha 1. The bed tap is bent by the normals up to 2.2%
+    of the screen, nothing at the waterline (so the shore meets it), and
+    falls back to the straight tap if the bent one lands on something in
+    front of the water. With MSAA and the water in the scene pass there is
+    no colour copy of the scene without the water (the end-of-frame copy has
+    the water in it, so that call now passes no colour); there the same
+    result is blended as the stock water blends, unbent.
+  - *Shore and foam*: the soft edge is the HD surface's; the foam is still
+    the "Shoreline foam" row's, drawn as water.frag draws it, held a little
+    off the sand so it sits on the fading water. Rain ripples and the wake
+    froth as water.frag.
+- **Tried and dropped.** A screen-space reflection of the shore through
+  the depth copy: it looked right (the Thondroril bridge in the river) but
+  cost 0.3 ms at 1280x540 even cut to five steps (3.19).
+- **Off = stock.** `water.frag` and its `.spv` are unchanged, and with the
+  row off it is the pipeline bound; the HD pipelines do not exist; no colour
+  is copied; the frame UBO's new fields lie past the end of the block
+  water.frag declares. With the row on and no other reader the depth copy
+  is taken for it, as for the foam.
+- **Budget.** 1 ms at 2560x1080 with FSR2; measured 1-2.5 ms where water
+  fills the view (3.19).
+- **Verify.** Stock-vs-HD shots at the canals, Crystal Lake, the Westfall
+  coast and the Thondroril, noon and dusk, and from under the canal's
+  surface (3.19).
 
 ### Further weather ideas (not done)
 

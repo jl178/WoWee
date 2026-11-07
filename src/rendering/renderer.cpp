@@ -902,6 +902,7 @@ void Renderer::updatePerFrameUBO() {
     // The water renderer is built with the world, after the settings are
     // applied, so it is told every frame rather than once.
     if (waterRenderer) waterRenderer->setShorelineFoam(shorelineFoam_);
+    if (waterRenderer) waterRenderer->setHdWater(enh_.hdWater);  // E34
     // Sunlight under water (E15): by day only, from the sun's height on the
     // stock clock (the light's own direction stays up all night).
     if (waterRenderer) {
@@ -2101,9 +2102,10 @@ void Renderer::endFrame() {
         && !(postProcessPipeline_ && postProcessPipeline_->getSceneFramebuffer() != VK_NULL_HANDLE)
         && waterRenderer && waterRenderer->isRefractionEnabled() && waterRenderer->hasSurfaces()
         && currentImageIndex < vkCtx->getSwapchainImages().size()) {
+        // No colour: the swapchain already holds this frame's water.
         waterRenderer->captureSceneHistory(
             currentCmd,
-            vkCtx->getSwapchainImages()[currentImageIndex],
+            VK_NULL_HANDLE,
             vkCtx->getDepthCopySourceImage(),
             vkCtx->getSwapchainExtent(),
             vkCtx->isDepthCopySourceMsaa(),

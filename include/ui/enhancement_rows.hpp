@@ -306,6 +306,23 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "reading the scene's depth copy; none at night; off draws nothing "
                  "and takes no depth copy for it",
      .asBool = &Enhancements::caustics},
+    // E34, measured in docs/enhancements-plan.md (3.19): 1-2 ms at 2560x1080
+    // where water fills the view, over its 1 ms, so recommended off.
+    {.key = "hdwater", .label = "HD water", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageSky, .section = "",
+     .tooltip = "Lakes, rivers, the sea and the canals keep their own moving\n"
+                "texture and colours, with a rippled surface that mirrors the\n"
+                "sky, a glint of the sun, clear shallows that deepen to the\n"
+                "zone's own water colour, soft edges at the shore\n"
+                "and a gentle bend to what lies below. Off is the original\n"
+                "water. Lava and slime stay as they are.",
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "hd_water",
+     .controls = "WaterRenderer's HD pipelines (water_hd.frag, built on first use, "
+                 "let go when off) in place of water.frag, the scene's depth copy "
+                 "and, where the water draws after the scene pass, a colour copy "
+                 "for the refraction; off draws water.frag and "
+                 "copies no colour",
+     .asBool = &Enhancements::hdWater},
 
     // ------------------------------------------------------ Water and weather
     {.key = "shorelinefoam", .label = "Shoreline foam", .kind = SettingKind::Bool,

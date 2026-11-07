@@ -261,6 +261,8 @@ void WaterRenderer::recreatePipelines() {
     // Rebuilt against the new sample count the next time they draw.
     destroyCausticsPipelines(false);
     causticsBuildFailed_ = false;
+    destroyHdPipelines(false);
+    hdBuildFailed_ = false;
 
     // Load shaders
     VkShaderModule vertShader, fragShader;
@@ -363,9 +365,15 @@ VkPipeline WaterRenderer::buildCausticsPipeline(VkRenderPass pass, VkSampleCount
 }
 
 void WaterRenderer::destroyCausticsPipelines(bool deferred) {
+    destroyPipelinePair(causticsPipeline_, caustics1xPipeline_, deferred);
+}
+
+// A pipeline made on first use for the scene pass and its 1x sibling: both
+// let go, now or once no frame in flight can still be drawing with them.
+void WaterRenderer::destroyPipelinePair(VkPipeline& scenePipeline, VkPipeline& pipeline1x, bool deferred) {
     if (!vkCtx) return;
     VkDevice device = vkCtx->getDevice();
-    for (VkPipeline* pp : {&causticsPipeline_, &caustics1xPipeline_}) {
+    for (VkPipeline* pp : {&scenePipeline, &pipeline1x}) {
         VkPipeline p = *pp;
         *pp = VK_NULL_HANDLE;
         if (!p) continue;
@@ -385,9 +393,68 @@ void WaterRenderer::setCausticsEnabled(bool on) {
         // Off: nothing drawn from the next frame, and the pipelines go once
         // no frame in flight can still be using them.
         causticsStrength_ = 0.0f;
-        setRefractionEnabled(shorelineFoam_);
+        updateSceneCopy();
         destroyCausticsPipelines(true);
     }
+}
+
+// HD water: water.vert with water_hd.frag, everything else the water's own -
+// layout, vertex format, depth tested and not written, alpha blended. Where
+// the colour copy holds the scene the shader composes the bed itself and
+// writes alpha 1; elsewhere it blends as the stock water does.
+VkPipeline WaterRenderer::buildHdPipeline(VkRenderPass pass, VkSampleCountFlagBits samples) {
+    if (!vkCtx || !pipelineLayout || pass == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+    VkDevice device = vkCtx->getDevice();
+    VkShaderModule vertShader, fragShader;
+    if (!vertShader.loadFromFile(device, "assets/shaders/water.vert.spv") ||
+        !fragShader.loadFromFile(device, "assets/shaders/water_hd.frag.spv")) {
+        LOG_WARNING("WaterRenderer: water_hd.frag.spv missing - the stock water instead");
+        vertShader.destroy();
+        fragShader.destroy();
+        return VK_NULL_HANDLE;
+    }
+    VkVertexInputBindingDescription vertBinding{};
+    vertBinding.binding = 0;
+    vertBinding.stride = 8 * sizeof(float);
+    vertBinding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    std::vector<VkVertexInputAttributeDescription> vertAttribs = {
+        { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0 },
+        { .location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 6 * sizeof(float) },
+        { .location = 2, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 3 * sizeof(float) },
+    };
+    VkPipeline p = PipelineBuilder()
+        .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
+                    fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+        .setVertexInput({ vertBinding }, vertAttribs)
+        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+        .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
+        .setColorBlendAttachment(PipelineBuilder::blendAlpha())
+        .setMultisample(samples)
+        .setLayout(pipelineLayout)
+        .setRenderPass(pass)
+        .setDynamicStates(viewportAndScissorDynamic())
+        .build(device, vkCtx->getPipelineCache());
+    vertShader.destroy();
+    fragShader.destroy();
+    if (!p) LOG_WARNING("WaterRenderer: failed to create the HD water pipeline");
+    return p;
+}
+
+void WaterRenderer::destroyHdPipelines(bool deferred) {
+    destroyPipelinePair(hdPipeline_, hd1xPipeline_, deferred);
+}
+
+void WaterRenderer::setHdWater(bool on) {
+    if (on == hdWater_) return;
+    hdWater_ = on;
+    hdBuildFailed_ = false;
+    frameUBO_.hdParams = glm::vec4(0.0f);
+    colorCopiedThisFrame_ = false;
+    updateSceneCopy();
+    // Off: water.frag from the next frame, and the pipelines go once no
+    // frame in flight can still be drawing with them.
+    if (!on) destroyHdPipelines(true);
 }
 
 void WaterRenderer::setRefractionEnabled(bool enabled) {
@@ -454,6 +521,8 @@ void WaterRenderer::shutdown() {
     destroyWater1xResources();
     destroyReflectionResources();
     destroySceneHistoryResources();
+    destroyCausticsPipelines(false);
+    destroyHdPipelines(false);
     destroy(device, waterPipeline);
     destroy(device, pipelineLayout);
     destroyLiquidTextureResources();
@@ -711,6 +780,13 @@ void WaterRenderer::setLiquidLighting(const LightingParams& lighting) {
     frameUBO_.riverFar = glm::vec4(lighting.riverFarColor, lighting.waterDeepAlpha);
     frameUBO_.oceanClose = glm::vec4(lighting.oceanCloseColor, lighting.oceanShallowAlpha);
     frameUBO_.oceanFar = glm::vec4(lighting.oceanFarColor, lighting.oceanDeepAlpha);
+    // HD water's reflected sky; water.frag never reads these.
+    frameUBO_.skyTop = glm::vec4(lighting.skyTopColor, 0.0f);
+    frameUBO_.skyMiddle = glm::vec4(lighting.skyMiddleColor, 0.0f);
+    frameUBO_.skyBand1 = glm::vec4(lighting.skyBand1Color, 0.0f);
+    frameUBO_.skyBand2 = glm::vec4(lighting.skyBand2Color, 0.0f);
+    frameUBO_.skySmog = glm::vec4(lighting.skySmogColor, 0.0f);
+    frameUBO_.skyFog = glm::vec4(lighting.skyFogColor, 0.0f);
 }
 
 VkDescriptorSet WaterRenderer::allocateMaterialSet() {
@@ -1503,10 +1579,31 @@ void WaterRenderer::clear() {
 
 void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                             const Camera& camera, float time, bool use1x, uint32_t frameIndex) {
+    // HD water (not stock): its pipeline in place of the water's, and whether
+    // this frame's colour copy, taken just before the water, can be read.
+    VkPipeline hdPipeline = VK_NULL_HANDLE;
+    if (hdWater_ && !hdBuildFailed_) {
+        VkPipeline& hp = use1x ? hd1xPipeline_ : hdPipeline_;
+        if (!hp) {
+            hp = use1x ? buildHdPipeline(water1xRenderPass, VK_SAMPLE_COUNT_1_BIT)
+                       : buildHdPipeline(vkCtx->getImGuiRenderPass(), vkCtx->getMsaaSamples());
+            if (!hp) hdBuildFailed_ = true;
+        }
+        hdPipeline = hp;
+    }
+    if (hdPipeline) {
+        frameUBO_.hdParams = glm::vec4(1.0f, colorCopiedThisFrame_ ? 1.0f : 0.0f,
+                                       colorCopyUvScale_.x, colorCopyUvScale_.y);
+    } else {
+        frameUBO_.hdParams = glm::vec4(0.0f);
+    }
+    colorCopiedThisFrame_ = false;
+
     // The wake as it stands, into this frame's slot - safe now, the frame has
     // waited for the GPU to finish with it.
     uploadFrameUBO();
     VkPipeline pipeline = (use1x && water1xPipeline) ? water1xPipeline : waterPipeline;
+    if (hdPipeline && pipeline) pipeline = hdPipeline;
     if (!renderingEnabled || surfaces.empty() || !pipeline) {
         if (renderDiagCounter_++ % 300 == 0 && !surfaces.empty()) {
             LOG_WARNING("Water: render skipped - enabled=", renderingEnabled,
@@ -1682,7 +1779,7 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 }
 
 void WaterRenderer::captureSceneHistory(VkCommandBuffer cmd,
-                                        VkImage /*srcColorImage: not copied, see below*/,
+                                        VkImage srcColorImage,
                                         VkImage srcDepthImage,
                                         VkExtent2D srcExtent,
                                         bool srcDepthIsMsaa,
@@ -1736,12 +1833,49 @@ void WaterRenderer::captureSceneHistory(VkCommandBuffer cmd,
         cmdPipelineBarrier2(cmd, dep);
     };
 
-    // No colour. The water stopped refracting (water.frag: SceneColor is
-    // bound but not read - stock water has none), and the reflection binding
-    // only names this image as a fallback view while reflections are off, so
-    // nothing samples the colour history. Copying the whole frame into it was
-    // most of the 0.27 ms "water refraction copy" the shoreline foam cost on
-    // the Iris Xe (enhancements-plan.md 3.12); the foam reads the depth.
+    // No colour for the stock water. It does not refract (water.frag:
+    // SceneColor is bound but not read), and the reflection binding only
+    // names this image as a fallback view while reflections are off. Copying
+    // the whole frame into it was most of the 0.27 ms "water refraction copy"
+    // the shoreline foam cost on the Iris Xe (enhancements-plan.md 3.12); the
+    // foam reads the depth.
+    //
+    // HD water reads it, for its refraction,
+    // and only from a caller that hands over the scene as it stands just
+    // before the water (the continuation after the scene pass): a copy taken
+    // after the water would feed the water its own picture. Copied 1:1 into
+    // the corner of the history (the scene is drawn at the upscaler's size,
+    // smaller than the history), which the shader scales its uv to. Every
+    // such scene image leaves its pass in PRESENT_SRC (the scene pass and its
+    // continuation both end there).
+    if (hdWater_ && srcColorImage != VK_NULL_HANDLE && sh.colorImage &&
+        srcExtent.width <= sceneHistoryExtent.width && srcExtent.height <= sceneHistoryExtent.height) {
+        barrier2(srcColorImage, VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        barrier2(sh.colorImage, VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkImageCopy colorCopy{};
+        colorCopy.srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1};
+        colorCopy.dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1};
+        colorCopy.extent = {.width = srcExtent.width, .height = srcExtent.height, .depth = 1};
+        vkCmdCopyImage(cmd, srcColorImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       sh.colorImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &colorCopy);
+        barrier2(sh.colorImage, VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        barrier2(srcColorImage, VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                 VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        colorCopiedThisFrame_ = true;
+        colorCopyUvScale_ = glm::vec2(static_cast<float>(srcExtent.width) / static_cast<float>(sceneHistoryExtent.width),
+                                      static_cast<float>(srcExtent.height) / static_cast<float>(sceneHistoryExtent.height));
+    }
 
     // Depth source: only copy when source is single-sampled.
     if (!srcDepthIsMsaa && srcDepthImage != VK_NULL_HANDLE) {
@@ -2650,6 +2784,7 @@ void WaterRenderer::destroyWater1xResources() {
     // The 1x caustics pipeline names the pass going away; both are made
     // again on demand.
     destroyCausticsPipelines(false);
+    destroyHdPipelines(false);
     if (water1xRenderPass) { vkDestroyRenderPass(device, water1xRenderPass, nullptr); water1xRenderPass = VK_NULL_HANDLE; }
     if (water1xKeepDepthRenderPass_) {
         vkDestroyRenderPass(device, water1xKeepDepthRenderPass_, nullptr);
