@@ -336,18 +336,18 @@ From `~/workplace/wowpack/docs/status-2026-11.md`.
 |---|---|---|
 | Stock-client test: `patch-Z.MPQ` in a clean 3.3.5a `Data/` on Windows, `.tele tolbarad`; check terrain, textures, water, buildings, loading screen, area names, map window, minimap; also whether an addon inside an MPQ is listed (gap 7) | S | Jered |
 | Windows Wowee over the LAN with the pack URL (plain HTTP on RFC1918, Windows paths) | S | after the Windows package (1.1) |
-| Live delta sync: change one mask, rebuild, confirm only changed ADTs download (nginx log) | S | agent |
+| Live delta sync: change one mask, rebuild, confirm only changed ADTs download (nginx log) | S | done Nov 6 (512c205) |
 | Re-run e2e suites (`test/e2e`, AC fork `e2e/smoke`); they create test characters, needs Jered's OK | S | agent, after OK |
 | Tag `v0.1.0` after the four above; first run of the release job | S | agent |
 | `wowpack-sync` branch: delete, or keep as the base for upstream PRs | S | Jered |
-| Pack transfer size: gzip in `wowpack serve` or nginx `gzip_types` (DBCs ~4:1; 49 MB spell.dbc) | S | agent |
-| Compressed alpha maps (2048 bytes, no big-alpha): halves ADT size | M | agent |
+| Pack transfer size: gzip in `wowpack serve` or nginx `gzip_types` (DBCs ~4:1; 49 MB spell.dbc) | S | done Nov 6 (fcb9bd9) |
+| Compressed alpha maps (2048 bytes, no big-alpha): halves ADT size | M | done Nov 6 (13bdad9, 260070c) |
 | Map images with doodads, buildings, labels; a way to supply hand-drawn world map art | M | agent |
 | Tol Barad content: reserved creature ids unused, more quests for 50-55, flight path or boat instead of the gossip teleport | M | agent, Jered for scope |
 | IP and City Siege packs: stock client and Wowee in-game checks; deploy only with Jered's go-ahead (changes live spell data, needs the SQL) | M | Jered decides |
-| A real two-module merge of one table (none of the current modules share one) | S | agent |
-| Locales: document that a pack is built from one locale | S | agent |
-| Addon folder case: pack paths are lowercase (SavedVariables move to `citysiege.lua`); document or keep case | S | agent |
+| A real two-module merge of one table (none of the current modules share one) | S | done Nov 6 (920a05a) |
+| Locales: document that a pack is built from one locale | S | done Nov 6 (5dd68ed) |
+| Addon folder case: pack paths are lowercase (SavedVariables move to `citysiege.lua`); document or keep case | S | done Nov 6 (5dd68ed) |
 | `cmd/wowpack` tests if its flags grow | S | agent |
 | Wowee side: the cross-map `.tele` stale position seen once more (fixed Nov 2 per the week plan; recheck on map 901); WDL only visible on maps larger than the far clip | S | agent |
 
@@ -423,3 +423,13 @@ no source edits); doc work.
 - Nov 06 18:21: 5-hour usage limit stopped charge, macros, ASan (and probably GO) at ~16:20; resumed all four after the reset.
 - Nov 06 18:30: charge/cast-death fixed (fake client charge removed, player follows server splines with SPLINE_DONE, knockback, E10 smoothing only reported corrections, cancelSpellCast). Held: shares application/character_renderer/spell_handler/game_handler/debug_lua_hook with the GO and macro agents still running; commit together after a full build.
 - Nov 06 18:34: GO, macros, ASan agents running; charge work held for joint commit.
+- Nov 06 19:34: running: GO, macros, combat-anim (recast/hit/death), RT shadows. Jered playing on the Nov 4 build.
+- Nov 06 19:40: fixed SMSG_LEVELUP_INFO parse (Jered saw 'gained 4294967... mana'): deltas are signed, and the 7-power block was read as stats. Uncommitted; goes in the next joint build.
+- Nov 06 20:34: GO done (held for joint commit); running: combat-anim (recast/hit/death), macros, RT shadows, weather.
+- Nov 6 21:40: integrator has A/B/C committed in scratch worktree (d451791, 84e484f, 693beb0), rerunning sweep_guard after a fix before the push; macros agent resumed after usage stop; RT shadows and weather still running; cloth pass waits for A to land.
+- Nov 6 21:55: A/B/C pushed (d451791, 84e484f, 693beb0; full ctest green except a sweep_guard dead-symbol hit from uncommitted macro work, fixed in A). Local branch moved to 693beb0. Building Jered's client from 693beb0 in wowee-ship/build-ship. Cloth motion pass started in its own worktree. Running: macros, RT shadows, weather, cloth.
+- Nov 6 22:40: macros/bindings done; its hunks split into a patch and building+full ctest in wowee-ship before commit. Jered's clean 693beb0 client staged at wowee-ship/build-ship/bin/wowee-693beb0 (awaiting his OK to restart). Started wowpack lane (gzip serve, delta-sync check, compressed alpha). Running: RT shadows, weather, cloth, wowpack. Next: movement/camera lane (Session 2 A) after the macro commit frees camera_controller.
+- Nov 6 23:30: macros/bindings pushed (20536a3; full ctest green; added GetCVar screenshot defaults for cvar_default_agreement). RT shadows done (iGPU gate, 100 yd trace, no black) and weather done (10 rows + preview); both patched into wowee-ship, full build+ctest running before two commits. Started movement/camera lane (mouse-look scale, pitch keys, cameraDive, step, air keys). Running: cloth, wowpack, movement/camera.
+- Nov 6 23:45: wowpack lane pushed 7 commits (fcb9bd9..5dd68ed): gzip serve (87->15 MB), delta sync verified (4 files, 5.2 MB), 4-bit alpha (-44% per ADT), MCSE fix (Wowee had dropped every Tol Barad alpha map), clone fix. Shared-account collision (cloth+wowpack both on WPTEST3) cleaned up; one account per agent from now on. Started Wowee gzip fetch + lab pack 0.3.1 + Wine check.
+- Nov 6 23:35 (hourly): RT+weather build linked in wowee-ship, full ctest next, then two commits. Running: cloth, movement/camera, Wowee gzip + lab pack 0.3.1. Jered's 693beb0 client still awaiting his OK.
+- Nov 7 00:00: RT shadows (8c1658e) and weather page (ce3ee03) pushed; full ctest 306/306 (2 skipped). Main tree clean. Running: cloth, movement/camera, Wowee gzip + lab pack 0.3.1.
