@@ -31,7 +31,7 @@ void main() {
     vec4 rawGi = texelFetch(uRawGi, px, 0);
     float dist = rtGbufDist(g);
     vec3 n = rtGbufNormal(g);
-    if (dist <= 0.0) {
+    if (!rtInRange(dist)) {
         imageStore(uHist, px, vec4(raw.rg, 1.0, 0.0));
         imageStore(uHistGi, px, rawGi);
         return;

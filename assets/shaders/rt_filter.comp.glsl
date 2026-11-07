@@ -33,8 +33,10 @@ void main() {
     vec4 cGi = texelFetch(uInGi, px, 0);
     float dist = rtGbufDist(g);
     vec3 n = rtGbufNormal(g);
-    if (dist <= 0.0) {
-        imageStore(uOut, px, vec4(c.rg, c.b, pc.last != 0 ? 0.0 : c.a));
+    // Sky and what is past the range: nothing traced, and no distance, so
+    // the surfaces there take the shadow map.
+    if (!rtInRange(dist)) {
+        imageStore(uOut, px, vec4(c.rg, c.b, 0.0));
         imageStore(uOutGi, px, cGi);
         return;
     }
@@ -51,7 +53,7 @@ void main() {
             if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(pass.extent.xy)))) continue;
             vec4 qg = texelFetch(uGbufCur, q, 0);
             float qd = rtGbufDist(qg);
-            if (qd <= 0.0) continue;
+            if (!rtInRange(qd)) continue;
             float k = KERNEL[abs(x)] * KERNEL[abs(y)];
             float wz = exp(-abs(qd - dist) / (0.02 * dist * float(pc.step) + 1e-3));
             float wn = pow(max(dot(rtGbufNormal(qg), n), 0.0), 32.0);

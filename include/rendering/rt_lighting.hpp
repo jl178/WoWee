@@ -51,6 +51,11 @@ public:
     void shutdown();
 
     void setMode(Mode mode) { mode_ = mode; }
+
+    /// How far from the camera an occluder can matter to a traced surface
+    /// (the traced range plus the longest ray): what the renderers keep in
+    /// the scene (RtScene::setFocus).
+    static float focusRadius();
     [[nodiscard]] Mode mode() const { return mode_; }
     [[nodiscard]] bool active() const { return mode_ != Mode::Off && pipelinesOk_; }
 
@@ -88,7 +93,9 @@ public:
 
     /// What the surface shaders need to find last frame's result, for the
     /// per-frame block: the view-projection it was traced with, the camera
-    /// position, and params (x = mode, 0 when there is no usable result).
+    /// position, and params (x = mode, 0 when there is no usable result;
+    /// y = the traced range in yards, past which the surfaces fade back to
+    /// the shadow map).
     struct ConsumerData {
         glm::mat4 viewProj{1.0f};
         glm::vec4 cameraPos{0.0f};

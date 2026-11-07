@@ -17,7 +17,8 @@ layout(set = 0, binding = 0) uniform RtPassData {
     vec4 extent;         // xy = trace size, zw = 1 / trace size
     vec4 sceneExtent;    // xy = scene depth size, zw = 1 / size
     vec4 misc;           // x = 1 when the acceleration structure holds anything,
-                         // y = 1 when last frame's slot holds history
+                         // y = 1 when last frame's slot holds history,
+                         // z = the traced range in yards (rtInRange)
 } pass;
 
 const uint RT_MODE_SHADOWS = 1u;
@@ -113,6 +114,14 @@ vec3 rtGbufWorld(vec4 g, ivec2 px) {
     vec2 uv = (vec2(sp) + 0.5) * pass.sceneExtent.zw;
     vec3 dir = normalize(rtWorldFromDepth(uv, 0.5) - pass.cameraPos.xyz);
     return pass.cameraPos.xyz + dir * g.z;
+}
+
+// Whether a surface this far from the camera is traced. Past the range the
+// depth buffer cannot place a surface finely enough to leave it toward the
+// sun (rt_lighting.glsli), so those pixels cost nothing and the surfaces fall
+// back to the shadow map.
+bool rtInRange(float viewDist) {
+    return viewDist > 0.0 && (pass.misc.z <= 0.0 || viewDist <= pass.misc.z);
 }
 
 // Distance the ray has to leave a surface by before it may hit it again.

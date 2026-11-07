@@ -42,6 +42,47 @@ struct RtAabb {
     }
 };
 
+/// Whether a box reaches into the sphere around `center` of `radius`.
+inline bool rtBoundsTouchSphere(const RtAabb& b, const glm::vec3& center, float radius) {
+    if (!b.valid()) return false;
+    const glm::vec3 d = glm::clamp(center, b.bmin, b.bmax) - center;
+    return glm::dot(d, d) <= radius * radius;
+}
+
+/// The part of the world the ray traced lighting keeps in its top level: the
+/// instances within `radius` of the camera (RtScene::setFocus). The top level
+/// is rebuilt only when the camera has moved `slack` of the radius from where
+/// it was last built, and takes in that much more, so the sphere around the
+/// camera stays inside what was built until the next rebuild.
+struct RtFocus {
+    static constexpr float kSlack = 0.125f;
+    glm::vec3 builtCenter{0.0f};
+    float builtRadius = 0.0f;  // 0: nothing built yet, or no limit
+
+    /// True when the top level must be rebuilt for a camera at `center` with
+    /// a near field of `radius`; the focus then moves there.
+    bool update(const glm::vec3& center, float radius) {
+        if (radius <= 0.0f) {
+            const bool changed = builtRadius > 0.0f;
+            builtRadius = 0.0f;
+            return changed;
+        }
+        const glm::vec3 d = center - builtCenter;
+        if (builtRadius > 0.0f && radius == builtRadius &&
+            glm::dot(d, d) <= (kSlack * radius) * (kSlack * radius)) {
+            return false;
+        }
+        builtCenter = center;
+        builtRadius = radius;
+        return true;
+    }
+    /// Whether an instance with these world bounds belongs in the top level.
+    [[nodiscard]] bool keeps(const RtAabb& worldBounds) const {
+        if (builtRadius <= 0.0f) return true;
+        return rtBoundsTouchSphere(worldBounds, builtCenter, builtRadius * (1.0f + kSlack));
+    }
+};
+
 /// count == 0: interior node, children at `leftOrFirst` and `leftOrFirst + 1`.
 /// count  > 0: leaf covering primitives [leftOrFirst, leftOrFirst + count) of
 ///             the reordered primitive array.

@@ -3,6 +3,7 @@
 #include "rendering/vk_shader.hpp"
 #include "core/logger.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 
@@ -50,7 +51,19 @@ enum Binding : uint32_t {
 constexpr VkFormat kFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr float kAoRadius = 3.0f;         // yards
 constexpr float kGiRayLength = 120.0f;
-constexpr float kShadowRayLength = 1500.0f;
+// Only the near field is traced. Past about a hundred yards the depth buffer
+// (0.5 near plane, 24 bits) places a surface to a tenth of a yard and worse,
+// the normals rebuilt from it turn to noise and the rays start under their
+// own surface: far terrain, buildings and trees came out shadowed, and black
+// where a shader scales its whole colour by the shadow. The shadow map is as
+// fine as the screen's pixels out there anyway, so the surfaces take it past
+// the range (rt_lighting.glsli fades over the last quarter).
+constexpr float kTraceRange = 100.0f;
+// A shadow ray only has to find the near casters: the result is combined
+// with the shadow map by the darker of the two, and the map (500 yards at
+// the default distance) still brings in the far ones - a mountain's shadow
+// at evening. 1500 yards walked the top level across half the loaded world.
+constexpr float kShadowRayLength = 250.0f;
 // The sun's angular radius is about a quarter of a degree. Twice that gives a
 // penumbra that reads at game distances without looking like an area light.
 constexpr float kSunTanRadius = 0.0087f;
@@ -105,6 +118,8 @@ void depthBarrier(VkCommandBuffer cmd, VkImage image, bool toRead) {
 } // namespace
 
 RtLighting::~RtLighting() { shutdown(); }
+
+float RtLighting::focusRadius() { return kTraceRange + std::max(kShadowRayLength, kGiRayLength); }
 
 bool RtLighting::initialize(VkContext* ctx, RtScene* scene) {
     ctx_ = ctx;
@@ -425,6 +440,8 @@ void RtLighting::record(VkCommandBuffer cmd, VkImage sceneDepth, VkExtent2D scen
     Slot& s = slots_[slotIndex];
     if (!s.wroteImages || s.boundDepth != depthImage_) writeSlotSets(slotIndex);
 
+    // The top level keeps what a ray from the traced range can reach.
+    scene_->setFocus(in.cameraPos, focusRadius());
     scene_->update(cmd);
 
     if (imagesNeedInit_) {
@@ -470,7 +487,7 @@ void RtLighting::record(VkCommandBuffer cmd, VkImage sceneDepth, VkExtent2D scen
                          1.0f / traceExtent_.height);
     d.sceneExtent = glm::vec4(sceneExtent.width, sceneExtent.height, 1.0f / sceneExtent.width,
                               1.0f / sceneExtent.height);
-    d.misc = glm::vec4(scene_->hasContent() ? 1.0f : 0.0f, havePrev ? 1.0f : 0.0f, 0.0f, 0.0f);
+    d.misc = glm::vec4(scene_->hasContent() ? 1.0f : 0.0f, havePrev ? 1.0f : 0.0f, kTraceRange, 0.0f);
     std::memcpy(s.ubo.info.pMappedData, &d, sizeof(d));
 
     // The outputs of this slot were last read by the surfaces of the frame
@@ -534,7 +551,7 @@ RtLighting::ConsumerData RtLighting::consumerData() const {
     if (!active() || resultFrame_ == 0 || resultFrame_ + 1 != frameCounter_) return c;
     c.viewProj = resultViewProj_;
     c.cameraPos = glm::vec4(resultCameraPos_, 1.0f);
-    c.params = glm::vec4(static_cast<float>(resultMode_), 1.0f, 0.0f, 0.0f);
+    c.params = glm::vec4(static_cast<float>(resultMode_), kTraceRange, 0.0f, 0.0f);
     return c;
 }
 

@@ -28,7 +28,7 @@ void main() {
 
     vec4 g = texelFetch(uGbufCur, px, 0);
     float dist = rtGbufDist(g);
-    if (dist <= 0.0) {
+    if (!rtInRange(dist)) {
         imageStore(uRaw, px, vec4(1.0, 1.0, 0.0, 0.0));
         imageStore(uRawGi, px, vec4(pass.skyColor.rgb, 0.0));
         return;
@@ -39,11 +39,21 @@ void main() {
     uint rng = rtSeed(uvec2(px), uint(pass.cameraPos.w));
     uint mode = uint(pass.params.x + 0.5);
 
+    // Visibility only: the surfaces' own N.L does the shading. The normal
+    // here is rebuilt from depth - noise on leaf cards, grass and any edge -
+    // so gating the sun on it put a random half of the foliage in shadow.
+    // A surface that really faces away is found by its own ray: it leaves
+    // the back of the surface and crosses it toward the sun, as the shadow
+    // map's receiver offset does. A surface facing the sun starts lifted
+    // toward it as well, so a ray at a grazing angle clears its own triangles.
+    // Only what plainly faces away (a quarter past the terminator, beyond any
+    // noise in the rebuilt normal) is taken as shadowed without a ray.
     float sun = 0.0;
     vec3 L = normalize(pass.sunDir.xyz);
-    if (pass.sunColor.w > 0.5 && dot(n, L) > 0.0) {
+    if (pass.sunColor.w > 0.5 && dot(n, L) > -0.25) {
         vec3 sd = rtConeSample(L, pass.sunDir.w, rng);
-        sun = rtOccluded(origin, sd, pass.params.w, rng) ? 0.0 : 1.0;
+        vec3 sunOrigin = dot(n, L) > 0.0 ? origin + L * rtSurfaceOffset(dist) : origin;
+        sun = rtOccluded(sunOrigin, sd, pass.params.w, rng) ? 0.0 : 1.0;
     }
 
     float ao = 1.0;

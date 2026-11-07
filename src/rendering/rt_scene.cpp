@@ -3,6 +3,7 @@
 #include "core/logger.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 
 namespace wowee::rendering {
@@ -223,6 +224,7 @@ RtScene::MeshId RtScene::addMesh(MeshSource source) {
     if (active_) {
         m.queued = true;
         pendingMeshes_.push_back(id);
+        pendingAdded_ = true;
     }
     return id;
 }
@@ -345,25 +347,37 @@ RtScene::InstanceId RtScene::addInstance(MeshId mesh, const glm::mat4& objectToW
         id = static_cast<InstanceId>(instances_.size());
         instances_.emplace_back();
     }
-    instances_[id] = Instance{true, mesh, objectToWorld};
+    instances_[id] = Instance{true, mesh, objectToWorld,
+                              transformBounds(meshes_[mesh].bounds, objectToWorld)};
     ++liveInstances_;
-    ++sceneVersion_;
+    // Outside the focus an instance is not in the top level, so it changes
+    // nothing there; a move of the focus re-reads every instance anyway.
+    if (focus_.keeps(instances_[id].worldBounds)) ++sceneVersion_;
+    ++window_.added;
     return id;
 }
 
 void RtScene::setInstanceTransform(InstanceId id, const glm::mat4& objectToWorld) {
     if (id >= instances_.size() || !instances_[id].live) return;
     if (instances_[id].objectToWorld == objectToWorld) return;
+    const bool wasKept = focus_.keeps(instances_[id].worldBounds);
     instances_[id].objectToWorld = objectToWorld;
-    ++sceneVersion_;
+    instances_[id].worldBounds = transformBounds(meshes_[instances_[id].mesh].bounds, objectToWorld);
+    if (wasKept || focus_.keeps(instances_[id].worldBounds)) ++sceneVersion_;
+    ++window_.moved;
+}
+
+void RtScene::setFocus(const glm::vec3& center, float radius) {
+    if (focus_.update(center, radius)) ++sceneVersion_;
 }
 
 void RtScene::removeInstance(InstanceId id) {
     if (id >= instances_.size() || !instances_[id].live) return;
+    if (focus_.keeps(instances_[id].worldBounds)) ++sceneVersion_;
     instances_[id] = Instance{};
     freeInstances_.push_back(id);
     --liveInstances_;
-    ++sceneVersion_;
+    ++window_.removed;
 }
 
 // ---------------------------------------------------------------------------
@@ -418,25 +432,44 @@ uint32_t RtScene::poolAllocate(VkCommandBuffer cmd, GpuPool& pool, uint32_t coun
 
 void RtScene::uploadPending(VkCommandBuffer cmd) {
     if (pendingMeshes_.empty()) return;
+    if (!pendingAdded_ && pendingScanVersion_ == sceneVersion_) return;
+    pendingAdded_ = false;
+    pendingScanVersion_ = sceneVersion_;
     if (!triPool_.buffer.buffer) ensurePoolCapacity(cmd, triPool_, kInitialTriangles);
     if (backend_ == Backend::Software && !nodePool_.buffer.buffer) {
         ensurePoolCapacity(cmd, nodePool_, kInitialNodes);
     }
 
-    // Build this frame's share from the sources.
+    // Build this frame's share from the sources - only meshes an instance in
+    // the focus places. The rest of the loaded world (every terrain chunk,
+    // WMO and model out to the view distance, millions of triangles) waits
+    // until the camera comes near it; building it all kept the CPU busy for
+    // tens of seconds after the switch and every time the view streamed in.
+    std::vector<uint8_t> wanted(meshes_.size(), 0);
+    for (const Instance& inst : instances_) {
+        if (inst.live && focus_.keeps(inst.worldBounds)) wanted[inst.mesh] = 1;
+    }
     std::vector<MeshId> batch;
+    std::vector<MeshId> later;
     uint64_t built = 0;
     size_t consumed = 0;
     for (; consumed < pendingMeshes_.size() && built < kBuildBudgetTriangles; ++consumed) {
         const MeshId id = pendingMeshes_[consumed];
         Mesh& m = meshes_[id];
         if (!m.live || !m.queued) continue;
+        if (!wanted[id]) {
+            later.push_back(id);
+            continue;
+        }
         m.queued = false;
         buildMesh(m);
         built += m.triCount;
         batch.push_back(id);
+        ++window_.meshesBuilt;
+        window_.trianglesBuilt += m.triCount;
     }
     pendingMeshes_.erase(pendingMeshes_.begin(), pendingMeshes_.begin() + consumed);
+    pendingMeshes_.insert(pendingMeshes_.end(), later.begin(), later.end());
     if (batch.empty()) return;
 
     // Allocate everything first: a pool growth copies the old contents, and
@@ -618,11 +651,12 @@ void RtScene::uploadFrame(VkCommandBuffer cmd, FrameResources& fr) {
     // Rebuild the CPU-side per-frame data once per scene version.
     if (builtVersion_ != sceneVersion_) {
         builtVersion_ = sceneVersion_;
+        ++window_.rebuilds;
         instanceData_.clear();
         asInstanceData_.clear();
         std::vector<RtAabb> bounds;
         for (const Instance& inst : instances_) {
-            if (!inst.live) continue;
+            if (!inst.live || !focus_.keeps(inst.worldBounds)) continue;
             const Mesh& m = meshes_[inst.mesh];
             if (!m.uploaded) continue;  // failed allocation, or not yet uploaded
             if (backend_ == Backend::Hardware && !m.blas) continue;
@@ -634,7 +668,7 @@ void RtScene::uploadFrame(VkCommandBuffer cmd, FrameResources& fr) {
             g.worldToObject[2] = invT[2];
             g.mesh = inst.mesh;
             instanceData_.push_back(g);
-            bounds.push_back(transformBounds(m.bounds, inst.objectToWorld));
+            bounds.push_back(inst.worldBounds);
 
             if (backend_ == Backend::Hardware) {
                 VkAccelerationStructureInstanceKHR ai{};
@@ -863,6 +897,25 @@ void RtScene::update(VkCommandBuffer cmd) {
     FrameResources& fr = frames_[ctx_->getCurrentFrame()];
     uploadFrame(cmd, fr);
     writeDescriptors(fr);
+
+    ++window_.frames;
+    const double now = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (window_.since < 0.0) window_.since = now;
+    if (now - window_.since >= 10.0) {
+        LOG_INFO("RtScene: ", window_.frames, " frames, ", window_.rebuilds, " top-level rebuilds (instances added ", window_.added, ", removed ",
+                 window_.removed, ", moved ", window_.moved, "), ",
+                 window_.meshesBuilt, " meshes (", window_.trianglesBuilt, " triangles) built, ",
+                 pendingMeshes_.size(), " pending; ", liveInstances_, " instances, ",
+                 instanceData_.size(), " traced; ", liveMeshes_, " meshes, ", liveTriangles_,
+                 " triangles");
+        window_ = Window{};
+        window_.since = now;
+    }
+}
+
+bool RtScene::hasContent() const {
+    return ctx_ && frames_[ctx_->getCurrentFrame()].instanceCount > 0;
 }
 
 VkDescriptorSet RtScene::descriptorSet() const {
@@ -873,6 +926,7 @@ RtScene::Stats RtScene::stats() const {
     Stats s;
     s.meshes = liveMeshes_;
     s.instances = liveInstances_;
+    s.tracedInstances = static_cast<uint32_t>(instanceData_.size());
     s.triangles = liveTriangles_;
     auto sz = [](const AllocatedBuffer& b) { return b.buffer ? uint64_t(b.info.size) : 0ull; };
     s.gpuBytes = sz(triPool_.buffer) + sz(nodePool_.buffer) + sz(meshTable_);

@@ -227,6 +227,78 @@ build before and after back to back, the "before" from a copy of its
 shaders) take the window the compositor gives, and a fullscreen run (the
 `fullscreen=1` setting) is the only way to get 2560x1080 here.
 
+## Ray traced lighting on the Iris Xe (2026-11-06)
+
+The `raytracedlighting` row (enhancements-plan.md 3.16) has no ray tracing
+hardware to use on the Iris Xe (Mesa ANV exposes `VK_KHR_ray_query` only from
+Xe-HPG), so it runs the compute tracer: a two-level BVH walked in a shader,
+built on the CPU. Its costs, and how to read them:
+
+- GPU: the `rt_lighting` timestamp (prepare, trace, temporal, three filter
+  passes, at half the scene's resolution each way). It scales with the
+  scene's pixels.
+- CPU: `rt_lighting/sync` (the WMO and M2 renderers bringing their
+  placements into `RtScene`) and `rt_lighting/record` (BVH builds, the top
+  level, uploads), stages of their own in the profile block and in
+  `PROFILE_AB` lines.
+- `RtScene: N frames, R top-level rebuilds (instances added, removed,
+  moved), meshes (triangles) built, pending; instances, traced; meshes,
+  triangles` every ten seconds at info: why the record stage costs what it
+  does. A rebuild every frame with a still camera means some renderer is
+  churning instances inside the focus.
+
+The row stays off on an integrated GPU without ray tracing hardware;
+`WOWEE_RT_ALLOW_SOFTWARE=1` runs it anyway, which is how it was measured.
+`WOWEE_RT_FORCE_SOFTWARE=1` keeps the compute tracer on hardware that has
+ray queries. The row's two values are both 0 in the stock and recommended
+sets, so `WOWEE_ENHANCE_AB` cannot flip it: the A/B script (scratch `rt/`,
+`ab_body.lua`, `pair.sh`, `abpp.py`) sets the row from Lua and opens a
+window per state with `WoweeDebug_ProfileTag`, a warm-up window after
+switching on (the scene's meshes are built then) and steady ones after.
+Do not name a script's own globals after anything the interface might
+define (`MODE`, `W`, `VARIANTS`): the missing-API fallback answers an
+unknown global with a no-op function, so `MODE or 1` is a function and the
+row is set to 0 without a word.
+
+What was slow, before the fixes (Goldshire, 1251x986, about 1.05 GHz):
+
+| Stage | Before | After |
+|---|---|---|
+| `rt_lighting` GPU | 5.7-6.8 ms | 8.5 ms (see below) |
+| `rt_lighting/sync` | 7.4 ms | 2.6-2.7 ms |
+| `rt_lighting/record`, first 8 s after switching on | 52-62 ms a frame | 0.06 ms (the 0.9 million triangles near the camera build in the first six frames) |
+| `rt_lighting/record`, steady | 3.3-4.8 ms (a top-level rebuild every frame) | 0.04 ms (no rebuild with the camera still) |
+
+- **The whole loaded world was in the scene.** Every terrain chunk, WMO
+  and doodad out to the view distance - 60k meshes, 18 million triangles at
+  2400 yd - was built into a BVH at 150k triangles a frame (tens of seconds
+  of 50-100 ms frames after switching on, and again whenever the view
+  streamed), and every placement was in the top level, rebuilt on the CPU
+  each time any of them changed. The lighting traces only 100 yd now, with
+  250 yd rays, so `RtScene::setFocus` keeps the instances within 350 yd of
+  the camera in the top level (rebuilt when the camera has moved an eighth
+  of that, `RtFocus`), changes outside it do not rebuild it, and only the
+  meshes those instances place are built.
+- **The M2 sync walked and hashed all ~70k placements a frame**: it now
+  drops what is out of reach on the instance's first cache line before any
+  lookup.
+- **Shadow rays were 1500 yd long**, walking the top level across half the
+  loaded world; 250 yd now, the shadow map (500 yd) supplying the far
+  casters by the darker of the two.
+
+The GPU pass reads *more* than before (8.5 against 5.7-6.8 ms, paired
+runs at 1.05-1.1 GHz with another client on the GPU): the old trace skipped
+every pixel whose depth-rebuilt normal faced away from the sun - and
+shadowed it, which was a good part of the noise on foliage - and those
+pixels now trace (only what faces away by more than a quarter skips). The
+100 yd range takes off what lies beyond it, which in a close view like
+Goldshire's road is little.
+
+What remains is the trace itself: at Jered's 2560x1080 the pass reads
+about 19 ms of GPU (8.5 ms at 1251x986, scaled by the pixels; a fullscreen run could not be had - the compositor tiles the test window), several times the whole enhancement set's 3 ms budget,
+for shadows that look about like the shadow map's. That is why the row is
+off on integrated GPUs.
+
 ## The enhancement set's budget (2026-11-04)
 
 enhancements-plan.md 3.11 has the tables. In short, what moved the set's

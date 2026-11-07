@@ -326,7 +326,7 @@ void main() {
     }
 
     RtLight rt = rtLightAt(FragPos);
-    shadow = rtShadow(rt, shadow);
+    shadow = rtShadow(rt, shadow, clamp(shadowParams.y / (1.0 - kStockShadowFloor), 0.0, 1.0));
     // The baked shadow against the live one, the darker of the two (the
     // stock shader's MIN): a tree the dynamic map already shades is not
     // shaded twice, and ground beyond its reach keeps the baked shadow.
