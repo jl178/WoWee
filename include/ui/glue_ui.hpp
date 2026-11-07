@@ -23,6 +23,38 @@ namespace glue {
 /// One glue unit in pixels: the window's height over 768.
 float unit();
 
+/// GlueParent, for the glue screens drawn while one is alive.
+///
+/// Stock (GlueParent_OnLoad) anchors GlueParent `barWidth` in from each side
+/// of a window wider than 16:9, and every glue frame - the 3D scenes, the
+/// logo, the character list, the dialogs - is laid out in it; the bars stay
+/// black (game::glue::glueParentRect). The screens here place everything from
+/// ImGui's DisplaySize and pointer, so for the life of this scope those are
+/// GlueParent's: DisplaySize is its size and the pointer is measured from its
+/// left edge. Everything added to the background and foreground draw lists
+/// meanwhile is moved right into GlueParent's rect and clipped to it, and the
+/// bars are filled black when it closes. At 16:9 and narrower it does nothing.
+///
+/// The screens draw only into those two lists (no ImGui windows), which is
+/// what makes moving their output afterwards the same as having laid it out
+/// in GlueParent to begin with.
+class GlueParentScope {
+public:
+    GlueParentScope();
+    ~GlueParentScope();
+    GlueParentScope(const GlueParentScope&) = delete;
+    GlueParentScope& operator=(const GlueParentScope&) = delete;
+
+private:
+    bool active_ = false;
+    float offsetX_ = 0.0f;
+    float width_ = 0.0f;
+    ImVec2 screen_{};
+    ImDrawList* lists_[2] = {nullptr, nullptr};
+    int vtxStart_[2] = {0, 0};
+    int cmdStart_[2] = {0, 0};
+};
+
 /// A glue texture by its archive path, uploaded once and kept. `additive`
 /// is for the ADD-blended art (highlights, glows), which has no alpha of its
 /// own: its brightness is turned into alpha so it can be drawn with ImGui's

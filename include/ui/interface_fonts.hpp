@@ -24,6 +24,17 @@ namespace wowee::ui {
 /// face replace the earlier one.
 void registerInterfaceFace(const std::string& pathOrName, ImFont* font);
 
+/// A second ImFont for a registered face, baked for the sharp interface
+/// (enhancement N14): one sample per pixel and glyph origins on whole pixels
+/// (OversampleH 1, PixelSnapH), where the face itself is baked at ImGui's
+/// default of two horizontal samples, filtered. Same file, same weight, same
+/// metrics; only the bitmaps differ. Registering again replaces it.
+void registerInterfaceCrispFace(const std::string& pathOrName, const ImFont* face,
+                                ImFont* crisp);
+
+/// The sharp twin of a registered face, or null if it has none.
+ImFont* interfaceCrispFace(const ImFont* face);
+
 /// The face for a path a font object named, or null if it was never loaded -
 /// in which case the caller should draw with whatever it was already using.
 ImFont* interfaceFace(const std::string& pathOrName);

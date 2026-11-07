@@ -8,6 +8,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "rendering/vk_context.hpp"
+#include "game/glue_rules.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -159,6 +160,56 @@ std::vector<std::string> wrap(const std::string& s, float widthPx, float sizePx,
 float unit() {
     const float h = ImGui::GetIO().DisplaySize.y;
     return h > 1.0f ? h / 768.0f : 1.0f;
+}
+
+GlueParentScope::GlueParentScope() {
+    if (ImGui::GetCurrentContext() == nullptr) return;
+    ImGuiIO& io = ImGui::GetIO();
+    screen_ = io.DisplaySize;
+    const game::glue::Rect parent = game::glue::glueParentRect(screen_.x, screen_.y);
+    // Half a pixel either side is a rounding of exactly 16:9, not a bar.
+    if (parent.x0 < 0.5f) return;
+    active_ = true;
+    offsetX_ = parent.x0;
+    width_ = parent.width();
+    lists_[0] = ImGui::GetBackgroundDrawList();
+    lists_[1] = ImGui::GetForegroundDrawList();
+    for (int i = 0; i < 2; ++i) {
+        ImDrawList* dl = lists_[i];
+        // A command of its own, so what was drawn before this is not moved
+        // with it when the two would otherwise have merged.
+        if (!dl->CmdBuffer.empty() && dl->CmdBuffer.back().ElemCount != 0) dl->AddDrawCmd();
+        vtxStart_[i] = dl->VtxBuffer.Size;
+        cmdStart_[i] = dl->CmdBuffer.Size - 1;
+    }
+    io.DisplaySize.x = width_;
+    if (ImGui::IsMousePosValid(&io.MousePos)) io.MousePos.x -= offsetX_;
+    for (ImVec2& clicked : io.MouseClickedPos) clicked.x -= offsetX_;
+}
+
+GlueParentScope::~GlueParentScope() {
+    if (!active_) return;
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = screen_;
+    if (ImGui::IsMousePosValid(&io.MousePos)) io.MousePos.x += offsetX_;
+    for (ImVec2& clicked : io.MouseClickedPos) clicked.x += offsetX_;
+    const float x0 = offsetX_;
+    const float x1 = offsetX_ + width_;
+    for (int i = 0; i < 2; ++i) {
+        ImDrawList* dl = lists_[i];
+        for (int v = vtxStart_[i]; v < dl->VtxBuffer.Size; ++v) dl->VtxBuffer[v].pos.x += offsetX_;
+        for (int c = std::max(cmdStart_[i], 0); c < dl->CmdBuffer.Size; ++c) {
+            ImVec4& clip = dl->CmdBuffer[c].ClipRect;
+            clip.x = std::max(clip.x + offsetX_, x0);
+            clip.z = std::min(clip.z + offsetX_, x1);
+        }
+        // Back to the whole window for whatever is drawn after this.
+        dl->AddDrawCmd();
+    }
+    // Outside GlueParent nothing is drawn: black, as the stock window is.
+    ImDrawList* bg = lists_[0];
+    bg->AddRectFilled(ImVec2(0.0f, 0.0f), ImVec2(x0, screen_.y), IM_COL32(0, 0, 0, 255));
+    bg->AddRectFilled(ImVec2(x1, 0.0f), ImVec2(screen_.x, screen_.y), IM_COL32(0, 0, 0, 255));
 }
 
 ImTextureID texture(const std::string& pathIn, bool additive) {

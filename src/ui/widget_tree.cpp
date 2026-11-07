@@ -243,6 +243,7 @@ uint32_t WidgetTree::create(WidgetKind kind, uint32_t parent, const std::string&
     if (kind == WidgetKind::FontString || kind == WidgetKind::Texture) artAndText_.push_back(id);
     if (kind == WidgetKind::Frame) frames_.push_back(id);
     w.creationOrder = nextOrder_++;
+    w.stockFrame = stockCreateDepth_ > 0;
     // Regions belong to the frame that made them; a widget with no parent
     // hangs off the screen, which is the root and sits above UIParent.
     if (parent == 0 && id != rootId_ && rootId_ != 0) parent = rootId_;
@@ -974,6 +975,21 @@ void WidgetTree::layout(float pixelW, float pixelH) {
         ui->effStrata = ui->strata;
         ui->effLevel = 0;
         ui->effScale = 1.0f;
+        // The ultrawide HUD's area, before anything is anchored to it.
+        hudActive_ = false;
+        if (hudAspect_ > 0.0f) {
+            const float hudW = ui->rectH * hudAspect_;
+            if (ui->rectW > hudW + 0.5f) {
+                hudActive_ = true;
+                hudW_ = hudW;
+                hudLeft_ = ui->left + (ui->rectW - hudW) * 0.5f;
+            }
+        }
+        hudXmlUiParent_ = 0;
+        if (hudActive_) {
+            const auto named = idsByName_.find("UIParent");
+            if (named != idsByName_.end()) hudXmlUiParent_ = named->second;
+        }
         for (uint32_t child : ui->children) layoutWidget(child, screenW, screenH);
     }
 
@@ -1201,11 +1217,32 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
     };
     Constraints cx, cy;
 
+    // The ultrawide HUD (setHudAspect): a stock frame's anchors on UIParent
+    // measure from the centred area, unless the frame was dragged or spans
+    // UIParent from its left edge to its right.
+    bool hudAnchors = false;
+    if (hudActive_ && w->stockFrame && !w->userMoved) {
+        bool left = false, right = false, any = false;
+        for (const Anchor& a : w->anchors) {
+            const uint32_t to = (a.relativeTo != 0) ? a.relativeTo : w->parent;
+            if (to != uiParentId_ && to != hudXmlUiParent_) continue;
+            any = true;
+            const float fx = resolveAnchorPoint(a.relativePoint).fx;
+            if (fx < 0.01f) left = true;
+            else if (fx > 0.99f) right = true;
+        }
+        hudAnchors = any && !(left && right);
+    }
+
     for (const Anchor& a : w->anchors) {
         const Widget* rel = (a.relativeTo != 0) ? node(a.relativeTo) : parent;
         float relLeft, relBottom, relW, relH;
         if (rel) {
             relLeft = rel->left; relBottom = rel->bottom; relW = rel->rectW; relH = rel->rectH;
+            if (hudAnchors && (rel->id == uiParentId_ || rel->id == hudXmlUiParent_)) {
+                relLeft = hudLeft_;
+                relW = hudW_;
+            }
         } else {
             relLeft = 0.0f; relBottom = 0.0f; relW = screenW; relH = screenH;
         }

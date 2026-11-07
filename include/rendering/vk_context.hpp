@@ -367,7 +367,12 @@ public:
     // a VkDescriptorSet suitable for use as ImTextureID.
     // The caller does NOT need to free the result - resources are tracked and
     // cleaned up when the VkContext is destroyed.
-    VkDescriptorSet uploadImGuiTexture(const uint8_t* rgba, int width, int height);
+    /// `mipmapped` adds a mip chain, filtered on the CPU with alpha weighting
+    /// so transparent texels do not darken the edges, and samples it
+    /// trilinearly (the sharp interface, enhancement N14). Off is one level
+    /// and the bilinear sampler, as every other caller has.
+    VkDescriptorSet uploadImGuiTexture(const uint8_t* rgba, int width, int height,
+                                       bool mipmapped = false);
 
 private:
     bool createInstance(SDL_Window* window);
@@ -622,6 +627,7 @@ private:
 
     // Shared sampler for UI textures (created on first uploadImGuiTexture call)
     VkSampler uiTextureSampler_ = VK_NULL_HANDLE;
+    VkSampler uiTextureSamplerMipped_ = VK_NULL_HANDLE;
     /// Bumped whenever the UI textures and the pool their descriptor sets came
     /// from are destroyed.
     ///

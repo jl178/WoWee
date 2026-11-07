@@ -79,8 +79,9 @@ const VkDescriptorSet* WidgetRenderer::cachedTexture(const std::string& path,
     // The suffixed key is only built for additive art, which is a handful of
     // frames rather than the whole screen. Everything else looks the path up
     // as it stands and allocates nothing.
-    auto it = add ? textures_.find(cacheKey(path, true)) : textures_.find(path);
-    return (it == textures_.end()) ? nullptr : &it->second;
+    const auto& cache = textureCache();
+    auto it = add ? cache.find(cacheKey(path, true)) : cache.find(path);
+    return (it == cache.end()) ? nullptr : &it->second;
 }
 
 VkDescriptorSet WidgetRenderer::resident(const std::string& path, bool add) const {
@@ -144,21 +145,22 @@ std::vector<uint8_t> WidgetRenderer::readTextureFile(const std::string& path,
 
 VkDescriptorSet WidgetRenderer::texture(const std::string& path, bool add) {
     const std::string key = cacheKey(path, add);
-    auto it = textures_.find(key);
-    if (it != textures_.end()) return it->second;
+    auto& cache = textureCache();
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
     if (!assets_ || !vkCtx_ || path.empty()) return kMissing;
 
     std::string resolved;
     auto data = readTextureFile(path, resolved);
     if (data.empty()) {
         LOG_WARNING("Widget texture not found: ", path);
-        textures_[key] = kMissing;
+        cache[key] = kMissing;
         return kMissing;
     }
     auto image = pipeline::BLPLoader::load(data);
     if (!image.isValid()) {
         LOG_WARNING("Widget texture unreadable: ", resolved);
-        textures_[key] = kMissing;
+        cache[key] = kMissing;
         return kMissing;
     }
     if (add) {
@@ -175,8 +177,8 @@ VkDescriptorSet WidgetRenderer::texture(const std::string& path, bool add) {
         }
     }
     VkDescriptorSet set = vkCtx_->uploadImGuiTexture(image.data.data(),
-                                                     image.width, image.height);
-    textures_[key] = set;
+                                                     image.width, image.height, crisp_);
+    cache[key] = set;
     return set;
 }
 
@@ -764,7 +766,14 @@ float WidgetRenderer::drawMarkupText(ImDrawList* dl, ImFont* font, float size,
     const int px = stockfont::pixelSize(size, 1.0f);
     const int raster = stockfont::rasterSize(px);
     const float stretch = static_cast<float>(px) / static_cast<float>(raster);
-    ImFontBaked* baked = metrics ? font->GetFontBaked(static_cast<float>(raster)) : nullptr;
+    // The sharp interface bakes its glyphs from the face's one-sample twin at
+    // the drawn size, 32 pixels or not; the pen is the stock one either way,
+    // so the text lands where it was measured.
+    ImFont* glyphFont = crisp_ ? interfaceCrispFace(font) : nullptr;
+    const bool crisp = glyphFont != nullptr;
+    if (!glyphFont) glyphFont = font;
+    const float bakeSize = static_cast<float>(crisp ? px : raster);
+    ImFontBaked* baked = metrics ? glyphFont->GetFontBaked(bakeSize) : nullptr;
     if (!baked) metrics = nullptr;
     const float glyphScale = baked ? static_cast<float>(px) / baked->Size : 1.0f;
 
@@ -876,7 +885,11 @@ float WidgetRenderer::drawMarkupText(ImDrawList* dl, ImFont* font, float size,
                         col = runColor(run);
                     }
                     if ((col & IM_COL32_A_MASK) == 0) return;
-                    drawBakedGlyph(dl, baked, glyphScale, ox + gx, oy, col, cp);
+                    // Above 32 pixels the stock pen steps by px / 32, so
+                    // its origins fall between pixels; a one-sample glyph
+                    // goes on the nearest whole one.
+                    const float at = crisp ? std::round(ox + gx) : ox + gx;
+                    drawBakedGlyph(dl, baked, glyphScale, at, oy, col, cp);
                 },
                 [&](const TextRun& run, float x0, float x1) {
                     if (!run.texture.empty()) drawPicture(run, ox + x0);
@@ -889,7 +902,7 @@ float WidgetRenderer::drawMarkupText(ImDrawList* dl, ImFont* font, float size,
                     x += pictureWidth(run);
                     continue;
                 }
-                dl->AddText(font, size, ImVec2(x, y), runColor(run), run.text.c_str());
+                dl->AddText(glyphFont, size, ImVec2(x, y), runColor(run), run.text.c_str());
                 const float runW = runWidth(run);
                 fileLink(run, x, runW);
                 x += runW;
@@ -1565,12 +1578,13 @@ void WidgetRenderer::layout(WidgetTree& tree, float screenW, float screenH) {
             // The fonts may have been rebuilt with the rest, possibly at the
             // addresses the remembered measurements are keyed on.
             measureCache_.clear();
-            if (!textures_.empty()) {
+            if (!textures_.empty() || !texturesMipped_.empty()) {
                 LOG_WARNING("The UI textures were destroyed; dropping ",
-                            textures_.size(),
+                            textures_.size() + texturesMipped_.size(),
                             " cached textures rather than drawing with the "
                             "descriptor sets that went with them");
                 textures_.clear();
+                texturesMipped_.clear();
             }
         }
     }

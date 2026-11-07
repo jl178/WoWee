@@ -155,6 +155,19 @@ Rect loadingImageRect(float screenW, float screenH, bool wideArt) {
     return r;
 }
 
+Rect glueParentRect(float screenW, float screenH) {
+    Rect r{0.0f, 0.0f, screenW, screenH};
+    if (screenW <= 0.0f || screenH <= 0.0f) return r;
+    // `width / height > 16 / 9` in Lua's doubles; the same comparison here.
+    if (static_cast<double>(screenW) / static_cast<double>(screenH) > 16.0 / 9.0) {
+        const float maxWidth = screenH * 16.0f / 9.0f;
+        const float barWidth = (screenW - maxWidth) * 0.5f;
+        r.x0 = barWidth;
+        r.x1 = screenW - barWidth;
+    }
+    return r;
+}
+
 LoadingBar loadingBarRects(const Rect& image, float progress) {
     progress = std::clamp(progress, 0.0f, 1.0f);
     const float w = image.width();

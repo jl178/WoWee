@@ -2430,6 +2430,7 @@ void VkContext::destroyImGuiResources() {
     }
     uiTextures_.clear();
     uiTextureSampler_ = VK_NULL_HANDLE; // Owned by sampler cache
+    uiTextureSamplerMipped_ = VK_NULL_HANDLE;
 
     // Said here rather than by whoever decided to destroy them, so that the
     // generation cannot disagree with what actually happened to the sets.
@@ -2519,11 +2520,90 @@ std::string VkContext::takeSubmitAndMemoryReport() {
     return out.str();
 }
 
-VkDescriptorSet VkContext::uploadImGuiTexture(const uint8_t* rgba, int width, int height) {
+namespace {
+/// The levels below `rgba`, each half the last (rounded down, never under
+/// one), appended after it: a 2x2 box with the colour weighted by alpha, so
+/// the black of a fully transparent texel does not bleed into the edge of the
+/// art beside it, and the alpha averaged plainly. Answers each level's offset
+/// into `out` and its size.
+struct MipLevel { size_t offset; uint32_t w, h; };
+std::vector<MipLevel> buildUiMipChain(const uint8_t* rgba, int width, int height,
+                                      std::vector<uint8_t>& out) {
+    std::vector<MipLevel> levels;
+    uint32_t w = static_cast<uint32_t>(width), h = static_cast<uint32_t>(height);
+    out.assign(rgba, rgba + static_cast<size_t>(w) * h * 4);
+    levels.push_back({0, w, h});
+    while (w > 1 || h > 1) {
+        const uint32_t nw = std::max(1u, w / 2), nh = std::max(1u, h / 2);
+        const size_t src = levels.back().offset;
+        const size_t dst = out.size();
+        out.resize(dst + static_cast<size_t>(nw) * nh * 4);
+        for (uint32_t y = 0; y < nh; ++y) {
+            for (uint32_t x = 0; x < nw; ++x) {
+                uint32_t a = 0, r = 0, g = 0, b = 0, n = 0;
+                for (uint32_t dy = 0; dy < 2; ++dy) {
+                    for (uint32_t dx = 0; dx < 2; ++dx) {
+                        const uint32_t sx = std::min(w - 1, x * 2 + dx);
+                        const uint32_t sy = std::min(h - 1, y * 2 + dy);
+                        const uint8_t* p = &out[src + (static_cast<size_t>(sy) * w + sx) * 4];
+                        r += p[0] * p[3]; g += p[1] * p[3]; b += p[2] * p[3];
+                        a += p[3];
+                        ++n;
+                    }
+                }
+                uint8_t* q = &out[dst + (static_cast<size_t>(y) * nw + x) * 4];
+                if (a > 0) {
+                    q[0] = static_cast<uint8_t>((r + a / 2) / a);
+                    q[1] = static_cast<uint8_t>((g + a / 2) / a);
+                    q[2] = static_cast<uint8_t>((b + a / 2) / a);
+                } else {
+                    q[0] = q[1] = q[2] = 0;
+                }
+                q[3] = static_cast<uint8_t>((a + n / 2) / n);
+            }
+        }
+        levels.push_back({dst, nw, nh});
+        w = nw;
+        h = nh;
+    }
+    return levels;
+}
+}  // namespace
+
+VkDescriptorSet VkContext::uploadImGuiTexture(const uint8_t* rgba, int width, int height,
+                                              bool mipmapped) {
     if (!device || !physicalDevice || width <= 0 || height <= 0 || !rgba)
         return VK_NULL_HANDLE;
 
-    VkDeviceSize imageSize = static_cast<VkDeviceSize>(width) * height * 4;
+    // One level unless asked: the stock path is exactly what it always was.
+    std::vector<uint8_t> chain;
+    std::vector<MipLevel> levels;
+    if (mipmapped) {
+        levels = buildUiMipChain(rgba, width, height, chain);
+        rgba = chain.data();
+    } else {
+        levels.push_back({0, static_cast<uint32_t>(width), static_cast<uint32_t>(height)});
+    }
+    const uint32_t levelCount = static_cast<uint32_t>(levels.size());
+    VkDeviceSize imageSize = mipmapped ? static_cast<VkDeviceSize>(chain.size())
+                                       : static_cast<VkDeviceSize>(width) * height * 4;
+
+    if (mipmapped && !uiTextureSamplerMipped_) {
+        VkSamplerCreateInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        si.magFilter = VK_FILTER_LINEAR;
+        si.minFilter = VK_FILTER_LINEAR;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.maxLod = VK_LOD_CLAMP_NONE;
+        uiTextureSamplerMipped_ = getOrCreateSampler(si);
+        if (!uiTextureSamplerMipped_) {
+            LOG_ERROR("Failed to create the mip-mapped UI texture sampler");
+            return VK_NULL_HANDLE;
+        }
+    }
 
     // Create shared sampler on first call (via sampler cache)
     if (!uiTextureSampler_) {
@@ -2582,7 +2662,7 @@ VkDescriptorSet VkContext::uploadImGuiTexture(const uint8_t* rgba, int width, in
         imgInfo.imageType = VK_IMAGE_TYPE_2D;
         imgInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
         imgInfo.extent = {.width = static_cast<uint32_t>(width), .height = static_cast<uint32_t>(height), .depth = 1};
-        imgInfo.mipLevels = 1;
+        imgInfo.mipLevels = levelCount;
         imgInfo.arrayLayers = 1;
         imgInfo.samples = VK_SAMPLE_COUNT_1_BIT;
         imgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -2623,7 +2703,7 @@ VkDescriptorSet VkContext::uploadImGuiTexture(const uint8_t* rgba, int width, in
         barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.image = image;
-        barrier.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
+        barrier.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = levelCount, .baseArrayLayer = 0, .layerCount = 1};
         barrier.srcAccessMask = 0;
         barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         VkDependencyInfo barrierDep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
@@ -2632,11 +2712,15 @@ VkDescriptorSet VkContext::uploadImGuiTexture(const uint8_t* rgba, int width, in
         barrierDep.pImageMemoryBarriers = &barrier;
         cmdPipelineBarrier2(cmd, barrierDep);
 
-        VkBufferImageCopy region{};
-        region.imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1};
-        region.imageExtent = {.width = static_cast<uint32_t>(width), .height = static_cast<uint32_t>(height), .depth = 1};
+        std::vector<VkBufferImageCopy> regions(levelCount);
+        for (uint32_t m = 0; m < levelCount; ++m) {
+            VkBufferImageCopy& region = regions[m];
+            region.bufferOffset = static_cast<VkDeviceSize>(levels[m].offset);
+            region.imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = m, .baseArrayLayer = 0, .layerCount = 1};
+            region.imageExtent = {.width = levels[m].w, .height = levels[m].h, .depth = 1};
+        }
         vkCmdCopyBufferToImage(cmd, stagingBuffer, image,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, levelCount, regions.data());
 
         barrier.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
         barrier.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
@@ -2669,7 +2753,7 @@ VkDescriptorSet VkContext::uploadImGuiTexture(const uint8_t* rgba, int width, in
         viewInfo.image = image;
         viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
         viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-        viewInfo.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
+        viewInfo.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = levelCount, .baseArrayLayer = 0, .layerCount = 1};
         if (vkCreateImageView(device, &viewInfo, nullptr, &imageView) != VK_SUCCESS) {
             vkDestroyImage(device, image, nullptr);
             vkFreeMemory(device, imageMemory, nullptr);
@@ -2691,7 +2775,7 @@ VkDescriptorSet VkContext::uploadImGuiTexture(const uint8_t* rgba, int width, in
             ds = VK_NULL_HANDLE;
         } else {
             VkDescriptorImageInfo info{};
-            info.sampler = uiTextureSampler_;
+            info.sampler = mipmapped ? uiTextureSamplerMipped_ : uiTextureSampler_;
             info.imageView = imageView;
             info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             VkWriteDescriptorSet write{};

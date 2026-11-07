@@ -380,7 +380,11 @@ void AddonManager::loadAllAddons() {
                 static_cast<float>(luaServices_.window->getHeight()));
         }
         luaEngine_.setUiSoundsSuppressed(true);
+        // Everything FrameXML makes is the stock interface's own; see
+        // WidgetTree::setHudAspect, the one thing that asks.
+        luaEngine_.widgets().beginStockCreation();
         loadFrameXml(frameXmlDir_);
+        luaEngine_.widgets().endStockCreation();
         luaEngine_.setUiSoundsSuppressed(false);
         // The client's own options, as a category in FrameXML's Interface
         // Options. After FrameXML rather than in the bootstrap, because
@@ -1695,6 +1699,14 @@ bool AddonManager::loadAddon(const TocFile& addon) {
             LOG_DEBUG("AddonManager: loaded per-character saved variables for '", addon.addonName, "'");
         }
     }
+
+    // Blizzard's load-on-demand addons are the stock interface too.
+    const bool stock = addon.addonName.rfind("Blizzard_", 0) == 0;
+    struct StockScope {
+        ui::WidgetTree* tree;
+        ~StockScope() { if (tree) tree->endStockCreation(); }
+    } stockScope{stock ? &luaEngine_.widgets() : nullptr};
+    if (stock) luaEngine_.widgets().beginStockCreation();
 
     bool success = true;
     for (const auto& filename : addon.files) {

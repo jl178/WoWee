@@ -3355,3 +3355,89 @@ TEST_CASE("A model frame playing the item animation is drawn with no size of its
     tree.layout(kScreenW, kScreenH);
     CHECK(tree.drawOrder().empty());
 }
+
+// The ultrawide HUD (enhancement N15, WidgetTree::setHudAspect): a stock
+// frame pinned to UIParent's edges is pinned to a centred 16:9 area's edges
+// instead; addon frames, frames spanning UIParent and frames the player moved
+// keep the whole screen.
+TEST_CASE("Ultrawide HUD narrows only stock frames pinned to UIParent", "[widget][layout][hud]") {
+    // 2560x1080 is 1820.44 units wide; 16:9 of 768 is 1365.33, so the area
+    // starts 227.56 in.
+    const float screenUnits = 768.0f * 2560.0f / 1080.0f;
+    const float hudW = 768.0f * 16.0f / 9.0f;
+    const float hudL = (screenUnits - hudW) * 0.5f;
+
+    WidgetTree tree;
+    const uint32_t ui = tree.uiParentId();
+    const auto pinned = [&](const char* name, const char* point, float x) {
+        const uint32_t id = tree.create(WidgetKind::Frame, ui, name);
+        Widget* w = tree.get(id);
+        w->width = 100.0f;
+        w->height = 50.0f;
+        Anchor a;
+        a.point = point;
+        a.relativePoint = point;
+        a.x = x;
+        tree.addPoint(id, a);
+        return id;
+    };
+    tree.beginStockCreation();
+    const uint32_t bar = pinned("StockRight", "BOTTOMRIGHT", -10.0f);
+    const uint32_t chat = pinned("StockLeft", "BOTTOMLEFT", 32.0f);
+    const uint32_t centre = pinned("StockCentre", "BOTTOM", 0.0f);
+    const uint32_t overlay = tree.create(WidgetKind::Frame, ui, "StockOverlay");
+    tree.setAllPoints(overlay, ui);
+    const uint32_t moved = pinned("StockMoved", "TOPLEFT", 50.0f);
+    tree.endStockCreation();
+    const uint32_t addon = pinned("AddonRight", "BOTTOMRIGHT", -10.0f);
+    REQUIRE(tree.get(bar)->stockFrame);
+    REQUIRE_FALSE(tree.get(addon)->stockFrame);
+
+    SECTION("off is the stock layout across the whole width") {
+        tree.layout(2560.0f, 1080.0f);
+        CHECK_FALSE(tree.hudNarrowed());
+        CHECK(tree.get(bar)->left + 100.0f == Catch::Approx(screenUnits - 10.0f));
+        CHECK(tree.get(chat)->left == Catch::Approx(32.0f));
+    }
+
+    SECTION("on, stock edge anchors measure from the 16:9 area") {
+        tree.setHudAspect(16.0f / 9.0f);
+        tree.layout(2560.0f, 1080.0f);
+        REQUIRE(tree.hudNarrowed());
+        CHECK(tree.hudLeft() == Catch::Approx(hudL));
+        CHECK(tree.hudWidth() == Catch::Approx(hudW));
+        CHECK(tree.get(bar)->left + 100.0f == Catch::Approx(hudL + hudW - 10.0f));
+        CHECK(tree.get(chat)->left == Catch::Approx(hudL + 32.0f));
+        // A centred anchor is where it was: the area is centred.
+        CHECK(tree.get(centre)->left == Catch::Approx(screenUnits * 0.5f - 50.0f));
+        // Vertical is untouched.
+        CHECK(tree.get(bar)->bottom == Catch::Approx(0.0f));
+        // Spanning UIParent keeps the whole width.
+        CHECK(tree.get(overlay)->left == Catch::Approx(0.0f));
+        CHECK(tree.get(overlay)->rectW == Catch::Approx(screenUnits));
+        // An addon's frame keeps the screen's edge.
+        CHECK(tree.get(addon)->left + 100.0f == Catch::Approx(screenUnits - 10.0f));
+        // UIParent itself is the whole screen.
+        CHECK(tree.get(ui)->rectW == Catch::Approx(screenUnits));
+    }
+
+    SECTION("a frame the player picked up stays where it was") {
+        tree.setHudAspect(16.0f / 9.0f);
+        tree.layout(2560.0f, 1080.0f);
+        const float before = tree.get(moved)->left;
+        CHECK(before == Catch::Approx(hudL + 50.0f));
+        tree.pinToCurrentPosition(moved);
+        tree.layout(2560.0f, 1080.0f);
+        CHECK(tree.get(moved)->left == Catch::Approx(before));
+    }
+
+    SECTION("at 16:9 and narrower nothing moves") {
+        tree.setHudAspect(16.0f / 9.0f);
+        tree.layout(1920.0f, 1080.0f);
+        CHECK_FALSE(tree.hudNarrowed());
+        CHECK(tree.get(bar)->left + 100.0f == Catch::Approx(768.0f * 16.0f / 9.0f - 10.0f));
+        tree.layout(1251.0f, 986.0f);
+        CHECK_FALSE(tree.hudNarrowed());
+        CHECK(tree.get(chat)->left == Catch::Approx(32.0f));
+    }
+}

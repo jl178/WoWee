@@ -3,6 +3,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "ui/imgui_theme.hpp"
 #include "ui/interface_fonts.hpp"
+#include "ui/glue_ui.hpp"
 
 #include <SDL3/SDL.h>
 #include <algorithm>
@@ -11,6 +12,7 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <chrono>
 #include "core/window.hpp"
 #include "core/application.hpp"
@@ -275,7 +277,19 @@ void UIManager::loadInterfaceFont(const std::string& dataRoot,
         return cfg;
     };
 
-    auto addFromArchive = [&](const char* name, float size) -> ImFont* {
+    // The sharp interface's bake of the same face (enhancement N14,
+    // registerInterfaceCrispFace): one sample per pixel, glyphs on whole
+    // pixels, as FreeType's unhinted bitmaps are in the stock client. Never
+    // asked for a glyph unless that row is on, so it costs an entry in the
+    // font list and nothing else.
+    auto crispConfig = [](ImFontConfig cfg) {
+        cfg.OversampleH = 1;
+        cfg.OversampleV = 1;
+        cfg.PixelSnapH = true;
+        return cfg;
+    };
+
+    auto addFromArchive = [&](const char* name, float size, bool crisp = false) -> ImFont* {
         if (!assets) return nullptr;
         auto data = assets->readFileOptional(std::string("Fonts\\") + name);
         if (data.empty()) return nullptr;
@@ -283,6 +297,7 @@ void UIManager::loadInterfaceFont(const std::string& dataRoot,
         std::memcpy(owned, data.data(), data.size());
         ImFontConfig cfg = interfaceFontConfig(
             fontEmSizeScale(data.data(), data.size()));
+        if (crisp) cfg = crispConfig(cfg);
         cfg.FontDataOwnedByAtlas = true;
         return io.Fonts->AddFontFromMemoryTTF(owned, static_cast<int>(data.size()),
                                               size, &cfg);
@@ -342,6 +357,16 @@ void UIManager::loadInterfaceFont(const std::string& dataRoot,
         }
         if (f) {
             registerInterfaceFace(name, f);
+            {
+                std::string upper(name);
+                for (char& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                const ImFontConfig twinCfg = crispConfig(faceCfg);
+                ImFont* twin = file.empty()
+                    ? addFromArchive(upper.c_str(), kAtlasSize, true)
+                    : io.Fonts->AddFontFromFileTTF(file.string().c_str(), kAtlasSize,
+                                                   &twinCfg);
+                registerInterfaceCrispFace(name, f, twin);
+            }
             // The same file again, for the stock client's metrics: FrameXML
             // text is measured and placed by them rather than by ImGui's
             // advances. See stock_font_metrics.hpp.
@@ -490,6 +515,14 @@ void UIManager::render(core::AppState appState, auth::AuthHandler* authHandler, 
             }
         }
     } stateReport{.start = uiRenderStart, .state = appState};
+
+    // The glue screens are laid out in GlueParent, which is a centred 16:9
+    // on a wider window (GlueParent_OnLoad); in game the interface has the
+    // whole window, as stock's UIParent does.
+    std::optional<glue::GlueParentScope> glueParent;
+    if (appState != core::AppState::IN_GAME && appState != core::AppState::DISCONNECTED) {
+        glueParent.emplace();
+    }
 
     // Render appropriate screen based on application state
     switch (appState) {

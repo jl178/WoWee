@@ -142,6 +142,8 @@ The reasons follow the table.
 | 22 | Wowee soundtrack in the music rotation | `ZoneMusicController` | `woweemusic` | off (schema, field and login screen agree) | n/a | off (Jered, Nov 6) |
 | 23 | MSAA 2x, FXAA, FSR 1/3, frame generation | `post_process_pipeline.cpp` | `antialiasing`, `fxaa`, `upscaling` ... | 2x, off, off | 4x | 2x (MSAA is a stock option) |
 | 24 | Anisotropic filtering | `VkContext::getOrCreateSampler` | `texturefiltering` | 16x | n/a | 16x (stock option) |
+| 25 | Sharp interface text and art (N14, E32) | `WidgetRenderer::drawMarkupText`, `texturesMipped_` | `crispinterface` | on (recommended) | off | on |
+| 26 | Ultrawide HUD (N15, E33) | `WidgetTree::setHudAspect` | `ultrawidehud` | on (recommended) | off | on; nothing at 16:9 and narrower |
 
 Notes:
 
@@ -1215,6 +1217,43 @@ their flashes). Seen on the way: in Gadgetzan and at K3 the weather is
 switched off (`Renderer`'s `insideWmoArea` puts the camera "inside" those
 towns' WMO areas out of doors), so neither the stock rain nor these rows
 draw there; not changed here.
+
+### 3.18 Measured cost of the interface rows, N14 and N15 (2026-11-07)
+
+`WOWEE_ENHANCE_AB=<row>:5` from a `WOWEE_DEBUG_LUA` script with
+`WOWEE_FRAME_PROFILE=1`, four adjacent on/off pairs per row, Nagrand, the
+stock FrameXML interface, a 1680x720 window (7:3, held with the new
+`WOWEE_WINDOW_FIXED`, which a tiling compositor floats; the 21:9 rule is
+the same at 2560x1080). The machine was loaded (load average 16-17: other
+agents' builds). CPU stages are the main thread's `addonWidgets/layout`
+(the tree's layout and the text/art sizing) and `frameXml->draw` (building
+the draw lists, text included); GPU is the `interface` pass.
+
+| Row | Panels | layout ms (on, off) | draw ms (on, off) | pair difference | GPU `interface` |
+|---|---|---|---|---|---|
+| `crispinterface` | none open | 0.60-0.66, 0.60-0.65 | 0.27-0.28, 0.27-0.28 | layout -0.03..+0.03, draw -0.01..+0.01 | 0.09-0.11 both |
+| `ultrawidehud` | character frame and backpack open | 0.88-0.94, 0.92-0.94 | 0.53-0.56, 0.54-0.57 | layout -0.04..+0.02, draw -0.02..+0.02 | 0.18-0.20 both |
+
+Both are inside the scatter, well under the 0.2 ms budget. The HUD rule is
+one pass over a stock frame's anchors when its parent or anchor is
+UIParent (most frames skip it on the first test); the sharp text bakes
+from a second font at the same sizes, so the per-glyph work is the same.
+The one cost that shows is the moment `crispinterface` is first turned on:
+every visible interface texture is uploaded again with its mip chain (the
+CPU box filter adds about a third to each upload) and the glyphs are baked
+from the second face - two frames of 16-20 ms of `frameXml->draw` in this
+run, once. With the row on from the start this is part of the ordinary
+first-use upload of each texture. Memory: the mipped copies are a third
+larger than the single-level ones, and with the row toggled both sets stay
+resident until the device's UI textures are rebuilt.
+
+Shots (scratch `ui-re/shots/`, 1680x720): glue `glue_login_1680x720.png`,
+`glue_charselect_1680x720.png` (stock pillarbox, 200 px bars);
+in game `g_hud_stock.png` / `g_hud_wide.png` and `g_panels_stock.png` /
+`g_panels_wide.png` (N15 off/on), `g_text_stock.png` / `g_text_crisp.png`
+with the zone text above 32 px and `text_pair_zone.png` (crop, 2x),
+`g_scale072_stock.png` / `g_scale072_crisp.png` and `scale072_pair.png`
+(UI scale 0.72, crop 4x).
 
 ## 4. Proposed enhancements
 
@@ -2445,6 +2484,73 @@ Done (2026-11-04): the row `highlightrolloff`, "Soft highlights"; costs in
   server and other players keep the real weather. Stock and recommended
   Off; it is saved like any row, so the tooltip asks to set it back.
 - **Status (2026-11-06): done, row `weatherpreview`.**
+
+### E32. Sharp interface text and art (N14)
+
+- **Stock.** A font string's pixel size is `round(height x screenH x
+  effective scale / 768)`; FreeType rasterises it unhinted, one sample per
+  pixel, at `min(px, 32)`, and above 32 pixels the 32 pixel bitmaps are
+  stretched (`stock_font_metrics.hpp`, `docs/re/screen-space.md` section 5).
+  So stock text is already at its real size up to 32 pixels, UI scale below
+  1 included; what is soft is the 32 pixel cap at large sizes (zone text,
+  headings, combat text at 1080p and up). Wowee's off path draws through the
+  same pen and sizes but bakes with ImGui's two horizontal samples per pixel,
+  a filtered, half-pixel-shifted bitmap; that is left as it was.
+- **What.** Row `crispinterface` (HUD page, "Display"), recommended on.
+  Glyphs come from a twin of each interface face baked one sample per pixel
+  with whole-pixel origins (`registerInterfaceCrispFace`, `OversampleH 1`,
+  `PixelSnapH`), at the drawn pixel size with no 32 pixel cap; each glyph is
+  placed on the nearest whole pixel of the stock pen's origin. Measurement,
+  wrapping and layout are the stock client's either way, so nothing moves.
+  FrameXML art is uploaded with a mip chain (CPU 2x2 box, colour weighted by
+  alpha so transparent texels do not darken edges) and sampled trilinearly,
+  in a texture cache of its own (`WidgetRenderer::texturesMipped_`).
+- **Off is stock.** With the row off the draw takes the stock bake and the
+  single-level image through exactly the code it did before; the twin faces
+  are in the font list but are never asked for a glyph, and no mipped
+  texture is made.
+- **Cost.** See 3.18.
+
+### E33. Ultrawide HUD (N15)
+
+- **Stock.** In game UIParent is the whole window at every aspect and the
+  default frames are pinned to its edges and middle; on 21:9 the corners go
+  out to the window's corners (screen-space.md section 4). Only the glue is
+  boxed to 16:9 (GlueParent_OnLoad), and that is stock work, done (1.10).
+- **What.** Row `ultrawidehud` (HUD page), recommended on (it does nothing
+  at 16:9 and narrower). `WidgetTree::setHudAspect(16/9)`: the full layout
+  computes a centred area of UIParent's height x 16/9, and an anchor on
+  UIParent is measured from that area instead of from UIParent when
+  - the frame was made by the stock interface (`Widget::stockFrame`: made
+    while FrameXML or a `Blizzard_` addon was loading);
+  - the player has not dragged it (`userMoved`; a picked-up frame keeps its
+    place and returns to the area when the interface next positions it);
+  - its anchors on UIParent do not pin both UIParent's left and right edges
+    (full-screen overlays, cinematic bars and anything `SetAllPoints` keep
+    the whole width).
+- **Why this rule.** The alternatives were (a) insetting UIParent itself,
+  which also boxes the full-screen overlays and every addon, and makes
+  `GetScreenWidth`/`UIParent:GetWidth` lie; and (b) re-parenting the
+  default frames under a new safe frame, which changes `GetParent`, frame
+  levels, scale inheritance and `IsShown` chains that FrameXML reads. The
+  anchor rule changes nothing a script can see except where those frames
+  land: UIParent, `GetScreenWidth` and every frame's parent are stock, and
+  rects read by Lua are the drawn ones, so hit testing and Lua agree.
+  Centred anchors (the action bar, the cast bar) land where they did since
+  the area is centred; the minimap, chat, bags, right bars, tooltip default
+  and UI panels move in to the area's edges. Frames hung off those follow
+  them. Addons' own frames keep the whole screen, which is what an addon
+  laid out for an ultrawide expects.
+- **Gaps.** Frames the stock Lua creates at run time (`CreateFrame` from an
+  event handler after the load) are not marked stock and keep the whole
+  width. An addon that moves a stock frame with `SetPoint(..., UIParent,
+  ...)` gets the area's edges, not the screen's. Lua that measures against
+  `GetScreenWidth` (the bag columns' wrap, the tooltip's right-edge clamp)
+  still uses the whole width. The engine-drawn world text (nameplates,
+  bubbles) is not part of it.
+- **Off is stock.** Aspect 0: no area is computed and the anchor loop takes
+  UIParent's rect as before.
+- **Cost.** See 3.18.
 
 ### Further weather ideas (not done)
 

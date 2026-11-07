@@ -98,6 +98,17 @@ struct Rect {
 /// and is fitted inside the window, centred, with black around it.
 Rect loadingImageRect(float screenW, float screenH, bool wideArt);
 
+/// GlueParent's rectangle in a window of this size (GlueParent_OnLoad,
+/// GlueParent.lua): wider than 16:9 it is anchored `barWidth = (width -
+/// height x 16/9) / 2` in from each side and keeps the full height; at 16:9
+/// and narrower it is the whole window. Every glue frame hangs off GlueParent,
+/// the 3D scenes included, so this is the glue's whole drawable area and the
+/// rest of the window stays black. The engine does not clamp anything itself:
+/// CGlueMgr's init (0x4da5f0) hands SetAspect (0x47bf90) the gxResolution
+/// aspect (0x50f7c0) unchanged, so the coordinate space is 768 tall and as
+/// wide as the window, and the boxing is this Lua alone.
+Rect glueParentRect(float screenW, float screenH);
+
 /// The bar, in the image's rectangle (0x9e2dfc): the border 0.6 x 0.05 of
 /// the image, centred 0.075 above its bottom edge; the fill 0.525 x 0.025 at
 /// the same centre, its right edge at left + width x progress, with the

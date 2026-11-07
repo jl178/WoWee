@@ -226,7 +226,7 @@ source.
 | Name cache flight limit 128; status 2/3; declined and realm names; `UnitName` of objects, items, corpses; totem slot refresh | S | L | names §8 |
 | PvP: arena opponent stats block, arena roster sort, faction byte watch, dynamic-difficulty lines, instance reset state (`CanShowResetInstances`), lock counts, scoreboard tie order, flag carrier order | M | L | pvp §7 |
 | Explore-objective completion text; LFG requeue on `UPDATE_STATUS` | S | L | gameplay-flows §19 |
-| Glue: pillarboxing above 16:9 (needs a glue frame rect through every glue layout and hit test) | M | M | glue-screens |
+| ~~Glue: pillarboxing above 16:9~~ done 2026-11-07 (`glue::GlueParentScope`, screen-space.md) | M | M | glue-screens |
 | Glue: preview glow pass; ghost extras in the preview; loading screen taxi variant and A/B progress split | S | L | glue-screens |
 | Stand sound (40%, 10 s spacing); AI reaction 0 Alert | S | L | sound-engine §8 |
 
@@ -315,8 +315,8 @@ lands, the backlog for it is:
 | N11 | Sky: moon phases and finer stars | Moon texture follows a phase cycle; star field with less aliasing at high resolution (sharp stars exists, this is anti-aliased stars) | stock moon and stars.mdl | S, ~0 | medium: stock moon has no phases |
 | N12 | Dithered doodad fade | Doodads fade in and out at range with a screen-door dither instead of blended alpha pop; also fixes sort artefacts on fading trees | stock alpha fade (after 1.5 doodad fade work) | S, ~0 | low |
 | N13 | Rim light in dark places | A faint edge light on units in caves and at night so silhouettes read; from the scene's own ambient colour | none | S, <0.1 ms | medium: can look modern; cap strength |
-| N14 | High-DPI UI and fonts | FrameXML fonts rasterised at the real pixel size, textures sampled with proper mips, so text is crisp at 1440p/4K and UI scale below 1 | stock font sizes at 768-high layout | M, ~0 | low |
-| N15 | Ultrawide HUD | On 21:9, keep the action bars and unit frames inside a centred 16:9 area while the world fills the screen (glue pillarboxing is stock work, 1.10) | stock stretched layout | M, 0 | low |
+| N14 | High-DPI UI and fonts (done 2026-11-07 as row `crispinterface`, enhancements-plan E32) | FrameXML fonts rasterised at the real pixel size, textures sampled with proper mips, so text is crisp at 1440p/4K and UI scale below 1 | stock font sizes at 768-high layout | M, ~0 | low |
+| N15 | Ultrawide HUD (done 2026-11-07 as row `ultrawidehud`, enhancements-plan E33) | On 21:9, keep the action bars and unit frames inside a centred 16:9 area while the world fills the screen (glue pillarboxing is stock work, 1.10) | stock stretched layout | M, 0 | low |
 | N16 | Smoother camera follow | Optional damping on follow turns and on terrain height changes (stairs, slopes), derived from the stock smooth CVars | stock `cameraSmoothStyle` | S, 0 | low-medium: some players want the stock snap |
 | N17 | Gamepad polish | Gamepad support exists; add a cursor mode for loot and vendors, a radial for bars 2-4, and stock-timed key-down on pad casts (1.9) | gamepad off | M, 0 | low |
 | N18 | Spell queue window | Cast pressed in the last N ms of a cast or GCD is held and sent when it can go, as later clients do; `SpellQueueWindow` already answers 0 | 0 ms (stock) | S, 0 | low for feel, but it changes play timing; off by default |

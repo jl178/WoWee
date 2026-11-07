@@ -220,6 +220,17 @@ struct Enhancements {
     bool  lowHealthVignette = false;
     /// Wowee's own soundtrack in the zone music rotation.
     bool  woweeMusic = false;
+    /// The interface's text from glyphs rasterised at the size they are drawn,
+    /// one sample per pixel on whole pixels (no 32 pixel cap), and its art
+    /// sampled through a mip chain (N14, WidgetRenderer::setCrispInterface).
+    /// Off is the stock bake: 2x horizontal samples, at most 32 pixels and
+    /// stretched above, single-level images.
+    bool  crispInterface = false;
+    /// On a screen wider than 16:9 the stock interface's frames pinned to the
+    /// screen's left and right edges are pinned to a centred 16:9 area's
+    /// instead (N15, WidgetTree::setHudAspect); addons' frames and the world
+    /// keep the whole screen. Off is the stock layout across the whole width.
+    bool  ultrawideHud = false;
 
     bool operator==(const Enhancements&) const = default;
 };

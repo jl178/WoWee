@@ -72,6 +72,16 @@ public:
     void reportWidgetDiagnostics(WidgetTree& tree, const std::vector<const Widget*>& order,
                                  float s, float screenW, float screenH);
 
+    /// The sharp interface (enhancement N14). Text is drawn from glyphs baked
+    /// at the size they are drawn, one sample per pixel and on whole pixels -
+    /// above 32 pixels as well, where stock stretches its 32 pixel bitmaps -
+    /// and art from a mip chain, so a texture drawn smaller than its file is
+    /// filtered rather than skipped through. Off is the stock path exactly:
+    /// the same bakes, the same single-level images, nothing extra made.
+    /// Measurement and layout are the stock client's either way.
+    void setCrispInterface(bool on) { crisp_ = on; }
+    [[nodiscard]] bool crispInterface() const { return crisp_; }
+
     /// Number of distinct textures resident. Cheap diagnostic; the cache never
     /// evicts, because Interface\ art is small, bounded and reused constantly.
     [[nodiscard]] size_t textureCount() const { return textures_.size(); }
@@ -213,7 +223,17 @@ private:
 
     pipeline::AssetManager* assets_ = nullptr;
     rendering::VkContext* vkCtx_ = nullptr;
+    bool crisp_ = false;
     std::unordered_map<std::string, VkDescriptorSet> textures_;
+    /// The same art with a mip chain, for the sharp interface. Its own map so
+    /// the stock path neither finds nor makes these.
+    std::unordered_map<std::string, VkDescriptorSet> texturesMipped_;
+    [[nodiscard]] const std::unordered_map<std::string, VkDescriptorSet>& textureCache() const {
+        return crisp_ ? texturesMipped_ : textures_;
+    }
+    std::unordered_map<std::string, VkDescriptorSet>& textureCache() {
+        return crisp_ ? texturesMipped_ : textures_;
+    }
     /// The cached set for a path, or null when nothing is cached for it -
     /// which is different from a cached kMissing, and both callers care.
     ///

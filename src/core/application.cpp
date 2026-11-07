@@ -6376,6 +6376,12 @@ void Application::render() {
                 }
             }
 #endif
+            // The interface's two enhancement rows (N14, N15); off is stock.
+            if (renderer) {
+                const auto& enh = renderer->getEnhancements();
+                engine->widgets().setHudAspect(enh.ultrawideHud ? 16.0f / 9.0f : 0.0f);
+                widgetRenderer_.setCrispInterface(enh.crispInterface);
+            }
             widgetRenderer_.layout(engine->widgets(), io.DisplaySize.x, io.DisplaySize.y);
             });
 
@@ -6612,7 +6618,11 @@ void Application::render() {
         // Let the interface settle first: ImGui sizes much of its layout from
         // what it measured last frame, and hides a window outright for its
         // first frame or two while it fits itself.
-        if (++screenshotFrames_ == kScreenshotFrame) {
+        // WOWEE_SCREENSHOT_FRAME: a later frame, for a screen that takes a
+        // while to arrive (the character list after an automatic login).
+        static const int shotFrame =
+            core::envIntClamped("WOWEE_SCREENSHOT_FRAME", kScreenshotFrame, 1, 1000000);
+        if (++screenshotFrames_ == shotFrame) {
             renderer->captureScreenshot(shot);
             running = false;
         }

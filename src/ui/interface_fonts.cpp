@@ -37,6 +37,17 @@ std::unordered_map<std::string, ImFont*>& faces() {
     return map;
 }
 
+struct CrispTwin {
+    const ImFont* face = nullptr;
+    ImFont* crisp = nullptr;
+};
+/// By face name, so a rebuilt atlas replaces the pair rather than leaving one
+/// keyed on an address the old atlas freed.
+std::unordered_map<std::string, CrispTwin>& crispFaces() {
+    static std::unordered_map<std::string, CrispTwin> map;
+    return map;
+}
+
 std::unordered_map<const ImFont*, std::unique_ptr<TrueTypeGlyphSource>>& faceMetrics() {
     static std::unordered_map<const ImFont*, std::unique_ptr<TrueTypeGlyphSource>> map;
     return map;
@@ -67,6 +78,24 @@ uint32_t beAt(const uint8_t* d, size_t n, size_t at, int bytes) {
 void registerInterfaceFace(const std::string& pathOrName, ImFont* font) {
     if (!font) return;
     faces()[faceKey(pathOrName)] = font;
+}
+
+void registerInterfaceCrispFace(const std::string& pathOrName, const ImFont* face,
+                                ImFont* crisp) {
+    if (!face || !crisp) {
+        crispFaces().erase(faceKey(pathOrName));
+        return;
+    }
+    crispFaces()[faceKey(pathOrName)] = CrispTwin{.face = face, .crisp = crisp};
+}
+
+ImFont* interfaceCrispFace(const ImFont* face) {
+    if (!face) return nullptr;
+    // Five faces: a walk is cheaper than a hash.
+    for (const auto& [name, twin] : crispFaces()) {
+        if (twin.face == face) return twin.crisp;
+    }
+    return nullptr;
 }
 
 ImFont* interfaceFace(const std::string& pathOrName) {

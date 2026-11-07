@@ -229,6 +229,7 @@ MainMenu_Northrend 2.094 / 2778.
 | Loading art | wide above 1.5, wide art stretched to the window | wide above 4/3 + 0.001, both fitted at their own aspect, `Interface\Glues\loading` fallback |
 | Saved volumes | applied when the game screen first drew: the glue music, ambience and sounds played at the audio defaults (music at 30%); stock has its Sound_* CVars from Config.wtf before the first frame | applied at startup, right after the audio managers are made (`Application::initialize`, `SettingsPanel::applyAudioVolumes`); the game screen still re-applies them with the saved mute |
 | Loading bar | 512x64 border at fixed screen units, glow and glass, any fill order | border/fill from the layout table in the art's rectangle, border and fill only, never moves back |
+| Above 16:9 | every glue screen, the scenes included, across the whole window | GlueParent pillarboxed (2026-11-07, screen-space.md section 3): `glue::GlueParentScope` around the glue states in `UIManager::render` gives the screens GlueParent's size and pointer, moves their draw lists into the centred 16:9 rect, clips them to it and fills the bars black; the scenes are built at that size, so the ModelFFX aspect is never above 16:9 |
 
 ### Not done
 
@@ -236,17 +237,6 @@ MainMenu_Northrend 2.094 / 2778.
   has no full-screen glow pass.
 - **Ghost extras**: the `Ghost_state` effect model on the Base attachment, the
   ghost light set and the ghost full-screen effect.
-- **Pillarboxing** above 16:9: Wowee fills the window instead (the glue UI is
-  laid out across the whole window too). Checked 2026-11-04 against
-  GlueParent_OnLoad (GlueParent.lua): it runs once at load - `width / height
-  > 16 / 9` anchors GlueParent `barWidth = (width - height x 16/9) / 2` in
-  from each side, and everything outside it stays black. Not done: every glue
-  screen (`auth_screen`, `realm_screen`, `character_screen`,
-  `character_create_screen`, `glue_options`, `glue_ui`'s dialogs) places its
-  art and hit boxes from `ImGui::GetIO().DisplaySize`; boxing the scene alone
-  would leave the character list and buttons over the black bars, so it
-  needs a glue frame rectangle threaded through those layouts and their
-  mouse tests.
 - **Loading screen** taxi variant and the exact A/B progress split (Wowee
   reports one figure from its own load steps; it is now monotonic).
 

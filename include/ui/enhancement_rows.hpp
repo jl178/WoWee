@@ -695,6 +695,28 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "use_original_soundtrack",
      .controls = "the Wowee tracks in ZoneManager's music rotation", .after = "musicvolume",
      .asBool = &Enhancements::woweeMusic},
+    {.key = "crispinterface", .label = "Sharp interface text", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = "HUD", .section = "Display",
+     .tooltip = "Draw the interface's letters at the size they appear on\n"
+                "screen, one to one on the screen's pixels, and its art from\n"
+                "smaller copies where it is drawn small. Sharper on a large\n"
+                "screen and at a UI scale below 1. Off is the original game's\n"
+                "softer text and art. Text stays the same size and place.",
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "crisp_interface",
+     .controls = "the one-sample font bakes and the mip-mapped interface textures in WidgetRenderer",
+     .after = "castabledebuffs",
+     .asBool = &Enhancements::crispInterface},
+    {.key = "ultrawidehud", .label = "Ultrawide HUD", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = "HUD", .section = "",
+     .tooltip = "On a screen wider than 16:9, keep the action bars, unit\n"
+                "frames, minimap, chat, bags and windows inside a 16:9 area\n"
+                "in the middle while the world fills the screen. Addons and\n"
+                "frames you have moved keep the whole screen. Off is the\n"
+                "original game's layout, out to the screen's edges.",
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "ultrawide_hud",
+     .controls = "the centred anchor area in WidgetTree::layout; nothing below 16:9",
+     .after = "castabledebuffs",
+     .asBool = &Enhancements::ultrawideHud},
 };
 
 inline constexpr std::size_t kEnhancementRowCount =

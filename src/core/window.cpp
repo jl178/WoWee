@@ -10,6 +10,7 @@
 #include "rendering/vk_context.hpp"
 #include <SDL3/SDL_vulkan.h>
 #include <cstdlib>
+#include <cstdio>
 #ifdef __APPLE__
 #include "core/macos_platform.hpp"
 #include <filesystem>
@@ -187,7 +188,20 @@ bool Window::initialize() {
     // the rest is system chrome.
     flags |= SDL_WINDOW_FULLSCREEN;
 #endif
-    if (config.resizable) {
+    // WOWEE_WINDOW_FIXED=WxH: a window of exactly that size that cannot be
+    // resized, for checking an aspect the desktop would otherwise not give a
+    // test client - a tiling compositor resizes an ordinary window to its
+    // tile, and floats one whose least and greatest sizes are the same.
+    int fixedW = 0, fixedH = 0;
+    if (const char* fixed = std::getenv("WOWEE_WINDOW_FIXED"); fixed && *fixed) {
+        if (std::sscanf(fixed, "%dx%d", &fixedW, &fixedH) != 2 || fixedW < 64 || fixedH < 64) {
+            fixedW = fixedH = 0;
+        } else {
+            width = fixedW;
+            height = fixedH;
+        }
+    }
+    if (config.resizable && fixedW == 0) {
         flags |= SDL_WINDOW_RESIZABLE;
     }
 
@@ -199,6 +213,11 @@ bool Window::initialize() {
         height,
         flags
     );
+    if (window && fixedW > 0) {
+        SDL_SetWindowMinimumSize(window, fixedW, fixedH);
+        SDL_SetWindowMaximumSize(window, fixedW, fixedH);
+        LOG_WARNING("WOWEE_WINDOW_FIXED: the window is held at ", fixedW, "x", fixedH);
+    }
 
     if (!window) {
         LOG_ERROR("Failed to create window: ", SDL_GetError());

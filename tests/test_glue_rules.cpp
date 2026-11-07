@@ -117,3 +117,26 @@ TEST_CASE("the name check the generator's names pass", "[glue][names]") {
     CHECK_FALSE(plausibleCharacterName("Th'rall"));
     CHECK_FALSE(plausibleCharacterName(""));
 }
+
+TEST_CASE("GlueParent pillarboxes above 16:9 and fills the window below", "[glue]") {
+    // 2560x1080 (21:9): 1920 wide in the middle, 320 of black each side.
+    const Rect wide = glueParentRect(2560.0f, 1080.0f);
+    CHECK(wide.x0 == Catch::Approx(320.0f));
+    CHECK(wide.x1 == Catch::Approx(2240.0f));
+    CHECK(wide.y0 == 0.0f);
+    CHECK(wide.y1 == 1080.0f);
+    CHECK(wide.width() / wide.height() == Catch::Approx(16.0f / 9.0f));
+    // 1680x720 is 7:3: 1280 in the middle.
+    const Rect r73 = glueParentRect(1680.0f, 720.0f);
+    CHECK(r73.x0 == Catch::Approx(200.0f));
+    CHECK(r73.width() == Catch::Approx(1280.0f));
+    // Exactly 16:9 and anything narrower keep the whole window.
+    const Rect hd = glueParentRect(1920.0f, 1080.0f);
+    CHECK(hd.x0 == 0.0f);
+    CHECK(hd.x1 == 1920.0f);
+    const Rect four3 = glueParentRect(1024.0f, 768.0f);
+    CHECK(four3.x0 == 0.0f);
+    CHECK(four3.x1 == 1024.0f);
+    const Rect tall = glueParentRect(1251.0f, 986.0f);
+    CHECK(tall.width() == 1251.0f);
+}

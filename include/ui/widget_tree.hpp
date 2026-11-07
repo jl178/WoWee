@@ -197,6 +197,10 @@ struct Widget {
     /// point turns that into two constraints on one axis - which sizes the
     /// frame from them and opens a bag with no width.
     bool userMoved = false;
+    /// Made while the stock interface was loading - FrameXML or one of the
+    /// Blizzard_ addons - rather than by a third-party addon. The ultrawide
+    /// HUD (setHudAspect) moves only these.
+    bool stockFrame = false;
     /// The facing a model frame was told to show, in radians. FrameXML rotates
     /// a paperdoll by keeping its own running total and calling SetRotation
     /// with it, so this is absolute rather than a delta.
@@ -963,6 +967,43 @@ public:
         markLayoutDirty();
     }
 
+    /// The ultrawide HUD (enhancement N15): on a screen wider than `aspect`,
+    /// a stock frame's anchor on UIParent is measured from a centred area of
+    /// that aspect and UIParent's full height instead of from UIParent, so
+    /// the action bars, unit frames, minimap, chat, bags and panels the stock
+    /// interface pins to the screen's edges sit at the edges of that area,
+    /// while the world fills the screen. Zero (the stock value) is off.
+    ///
+    /// The rule is per anchor and only for:
+    ///   - frames the stock interface made (Widget::stockFrame); a
+    ///     third-party addon's frames keep the whole screen, as do frames
+    ///     anchored to anything other than UIParent, which follow whatever
+    ///     they hang from;
+    ///   - frames not moved by the player (userMoved): a frame dragged to a
+    ///     place stays there;
+    ///   - frames that do not pin both of UIParent's left and right edges:
+    ///     a frame stretched across UIParent (the full-screen overlays, the
+    ///     cinematic bars) keeps the whole width.
+    /// UIParent itself, GetScreenWidth and every rect a script reads are
+    /// unchanged; only where those anchors land is.
+    void setHudAspect(float aspect) {
+        if (aspect == hudAspect_) return;
+        hudAspect_ = aspect;
+        markLayoutDirty();
+    }
+    [[nodiscard]] float hudAspect() const { return hudAspect_; }
+    /// Whether the last layout narrowed the HUD, and the area it used, in
+    /// interface units (left edge and width).
+    [[nodiscard]] bool hudNarrowed() const { return hudActive_; }
+    [[nodiscard]] float hudLeft() const { return hudLeft_; }
+    [[nodiscard]] float hudWidth() const { return hudW_; }
+
+    /// Widgets made between these two are stockFrame. Nested, so a
+    /// third-party addon that loads a Blizzard_ addon gets its frames marked
+    /// for as long as that load runs and no longer.
+    void beginStockCreation() { ++stockCreateDepth_; }
+    void endStockCreation() { if (stockCreateDepth_ > 0) --stockCreateDepth_; }
+
     /// The canvas height the interface lays out in. The scale a screen of a
     /// given pixel height gets is pixelHeight / this, times the user's own.
     static constexpr float kInterfaceHeight = 768.0f;
@@ -1250,6 +1291,15 @@ private:
     float safeTop_ = 0.0f;
     float safeRight_ = 0.0f;
     float safeBottom_ = 0.0f;
+    float hudAspect_ = 0.0f;
+    bool  hudActive_ = false;
+    float hudLeft_ = 0.0f;
+    float hudW_ = 0.0f;
+    /// FrameXML's own UIParent (UIParent.xml declares one, setAllPoints on
+    /// the built-in one, and it takes the name), which is what its frames
+    /// anchor to. Either counts as UIParent for the HUD rule.
+    uint32_t hudXmlUiParent_ = 0;
+    int   stockCreateDepth_ = 0;
     float lastPixelW_ = 0.0f;
     float lastPixelH_ = 0.0f;
     /// layout() moves widgets, and moving a widget raises the flag. Without
