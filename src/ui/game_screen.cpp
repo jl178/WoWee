@@ -335,7 +335,9 @@ void GameScreen::applyCameraControlSettings() {
     if (auto* cam = renderer->getCamera()) cam->setFov(settingsPanel_.pendingFov);
 
     if (auto* cam = renderer->getCameraController()) {
-        cam->setMouseSensitivity(settingsPanel_.pendingMouseSensitivity);
+        cam->setMouseSpeed(settingsPanel_.pendingMouseSpeed);
+        cam->setYawMoveSpeed(settingsPanel_.pendingMouseLookSpeed);
+        cam->setPitchMoveSpeed(settingsPanel_.pendingMouseLookPitchSpeed);
         cam->setInvertMouse(settingsPanel_.pendingInvertMouse);
         cam->setCameraSmoothSpeed(settingsPanel_.pendingCameraStiffness);
         cam->setPivotHeight(settingsPanel_.pendingPivotHeight);

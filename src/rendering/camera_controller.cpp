@@ -3857,16 +3857,21 @@ void CameraController::processMouseMotion(const SDL_MouseMotionEvent& event) {
         rotateArmed_ = true;  // past the dead-zone: this is a deliberate drag
     }
 
-    // Directly update stored yaw/pitch (no lossy forward-vector derivation)
-    yaw -= event.xrel * mouseSensitivity;
-    // SDL yrel > 0 = mouse moved DOWN. In WoW, mouse-down = look down = pitch decreases.
-    // invertMouse flips to flight-sim style (mouse-down = look up).
-    float invert = invertMouse ? 1.0f : -1.0f;
-    pitch += event.yrel * mouseSensitivity * invert;
+    turnByMouse(event.xrel, event.yrel);
+}
 
-    // WoW-style pitch limits: can look almost straight down, limited upward
-    pitch = glm::clamp(pitch, MIN_PITCH, MAX_PITCH);
-
+void CameraController::turnByMouse(float dxPixels, float dyPixels) {
+    // Stock 0x6020B0 (stock_camera::mouseLook): the cursor's pixel delta over
+    // the DDC rectangle, at 1/800 x cameraYawMoveSpeed and 1/600 x
+    // cameraPitchMoveSpeed, with the Windows pointer speed mouseSpeed sets.
+    const float aspect = camera ? camera->getAspectRatio() : 16.0f / 9.0f;
+    const auto d = stock_camera::mouseLook(dxPixels, dyPixels, aspect, yawMoveSpeed_,
+                                           pitchMoveSpeed_, mouseSpeed_);
+    // SDL yrel > 0 = mouse moved DOWN = look down = pitch decreases here.
+    // invertMouse (mouseInvertPitch) flips it to flight-sim style.
+    const float invert = invertMouse ? 1.0f : -1.0f;
+    yaw -= d.yawDeg;
+    pitch = glm::clamp(pitch + d.pitchDeg * invert, MIN_PITCH, MAX_PITCH);
     camera->setRotation(yaw, pitch);
 }
 
@@ -4229,10 +4234,15 @@ void CameraController::applyLookDelta(float dxPixels, float dyPixels) {
     followYaw_.active = false;
     followPitch_.active = false;
 
-    yaw -= dxPixels * mouseSensitivity;
-    const float invert = invertMouse ? 1.0f : -1.0f;
-    pitch += dyPixels * mouseSensitivity * invert;
-    pitch = glm::clamp(pitch, MIN_PITCH, MAX_PITCH);
+    turnByMouse(dxPixels, dyPixels);
+}
+
+void CameraController::applyLookDegrees(float yawDeg, float pitchDeg) {
+    if (!enabled || !camera || introActive) return;
+    followYaw_.active = false;
+    followPitch_.active = false;
+    yaw += yawDeg;
+    pitch = glm::clamp(pitch + (invertMouse ? -pitchDeg : pitchDeg), MIN_PITCH, MAX_PITCH);
     camera->setRotation(yaw, pitch);
 }
 

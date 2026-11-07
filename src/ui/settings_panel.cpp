@@ -303,7 +303,11 @@ constexpr FieldBinding kFieldBindings[] = {
     // not in the schema - but they still have to be readable and writable,
     // because that is how those panels reach them.
     {.key = "viewdistance",   .asFloat = &SettingsPanel::pendingViewDistance},
-    {.key = "mousespeed",     .asFloat = &SettingsPanel::pendingMouseSensitivity},
+    {.key = "mousespeed",     .asFloat = &SettingsPanel::pendingMouseSpeed},
+    {.key = "mouselookspeed", .asFloat = &SettingsPanel::pendingMouseLookSpeed},
+    // cameraPitchMoveSpeed, which no control of its own draws: the Mouse Look
+    // Speed slider writes it as half the yaw speed.
+    {.key = "mouselookpitchspeed", .asFloat = &SettingsPanel::pendingMouseLookPitchSpeed},
     {.key = "minimapclock",   .asBool  = &SettingsPanel::pendingShowMinimapClock},
     {.key = "friendlyplates", .asBool  = &SettingsPanel::showFriendlyNameplates_},
     {.key = "enemyplates",    .asBool  = &SettingsPanel::showEnemyNameplates_},
@@ -580,7 +584,16 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
     } else if (key == "camerashake") {
         if (cameraController) cameraController->setShakeScale(pendingCameraShake);
     } else if (key == "mousespeed") {
-        if (cameraController) cameraController->setMouseSensitivity(pendingMouseSensitivity);
+        if (cameraController) cameraController->setMouseSpeed(pendingMouseSpeed);
+    } else if (key == "mouselookspeed") {
+        // As the stock slider's OnValueChanged: the pitch speed is set to half.
+        pendingMouseLookPitchSpeed = pendingMouseLookSpeed * 0.5f;
+        if (cameraController) {
+            cameraController->setYawMoveSpeed(pendingMouseLookSpeed);
+            cameraController->setPitchMoveSpeed(pendingMouseLookPitchSpeed);
+        }
+    } else if (key == "mouselookpitchspeed") {
+        if (cameraController) cameraController->setPitchMoveSpeed(pendingMouseLookPitchSpeed);
     } else if (key == "camerastiffness") {
         if (cameraController) cameraController->setCameraSmoothSpeed(pendingCameraStiffness);
     } else if (key == "cameramaxdistance") {

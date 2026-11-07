@@ -3,6 +3,7 @@
 #include "rendering/camera.hpp"
 #include "core/input.hpp"
 #include "game/stock_movement.hpp"
+#include "rendering/stock_camera.hpp"
 #include <SDL3/SDL.h>
 #include <array>
 #include <algorithm>
@@ -27,8 +28,19 @@ public:
     void releaseMouseCapture();
 
     void setMovementSpeed(float speed) { movementSpeed = speed; }
-    void setMouseSensitivity(float sensitivity) { mouseSensitivity = sensitivity; }
-    [[nodiscard]] float getMouseSensitivity() const { return mouseSensitivity; }
+    /// mouseSpeed: the Windows pointer speed / 10 (0x86A070), which scales
+    /// the cursor movement stock's mouse look reads (stock_camera.hpp).
+    void setMouseSpeed(float speed) {
+        mouseSpeed_ = std::clamp(speed, stock_camera::kMinMouseSpeed, stock_camera::kMaxMouseSpeed);
+    }
+    [[nodiscard]] float mouseSpeed() const { return mouseSpeed_; }
+    /// cameraYawMoveSpeed / cameraPitchMoveSpeed, degrees: the mouse-look
+    /// turn per 800 reference pixels (0x6020B0), and the MoveView turn and
+    /// tilt rates.
+    void setYawMoveSpeed(float deg) { yawMoveSpeed_ = std::max(deg, 0.0f); }
+    void setPitchMoveSpeed(float deg) { pitchMoveSpeed_ = std::max(deg, 0.0f); }
+    [[nodiscard]] float yawMoveSpeed() const { return yawMoveSpeed_; }
+    [[nodiscard]] float pitchMoveSpeed() const { return pitchMoveSpeed_; }
     void setInvertMouse(bool invert) { invertMouse = invert; }
     [[nodiscard]] bool isInvertMouse() const { return invertMouse; }
     /// How far back the camera may be pulled, as a multiple of the original
@@ -65,6 +77,10 @@ public:
     /// here, in the same pixels and through the same sensitivity and limits a
     /// mouse drag goes through.
     void applyLookDelta(float dxPixels, float dyPixels);
+    /// Turns the view by degrees (yaw left positive, pitch up positive), with
+    /// the same follow cancel and limits - for a stick, which has a rate of
+    /// its own rather than pixels.
+    void applyLookDegrees(float yawDeg, float pitchDeg);
 
     /// While a finger is steering, the character faces where the view does -
     /// what holding the right mouse button means on a desktop.
@@ -437,6 +453,8 @@ public:
     }
 
 private:
+    /// A mouse delta in cursor pixels turned as stock 0x6020B0 turns it.
+    void turnByMouse(float dxPixels, float dyPixels);
     Camera* camera;
     TerrainManager* terrainManager = nullptr;
     /// One frame's input and physics setup, handed to whichever camera mode is
@@ -533,7 +551,9 @@ private:
     float slowMultiplier = 0.3f;
 
     // Mouse settings
-    float mouseSensitivity = 0.2f;
+    float mouseSpeed_ = stock_camera::kDefaultMouseSpeed;
+    float yawMoveSpeed_ = stock_camera::kDefaultYawMoveSpeed;
+    float pitchMoveSpeed_ = stock_camera::kDefaultPitchMoveSpeed;
     bool invertMouse = false;
     bool mouseButtonDown = false;
     bool leftMouseDown = false;
