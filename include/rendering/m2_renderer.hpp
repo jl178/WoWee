@@ -1122,8 +1122,18 @@ public:
      *  last call. Lets callers that track uploaded models drop stale entries. */
     std::vector<uint32_t> drainReapedModelIds();
 
+    /// The moving body for checkCollision, as WMORenderer::Body is for the
+    /// wall test: its cylinder height and the rise it may step up. Without
+    /// one, a walker (2 yd tall, 1 yd step). A swimmer passes a step of 0
+    /// (stock_movement::kSwimStepHeight): the stock swim trace climbs no
+    /// ledge, a doodad's included.
+    struct CollisionBody {
+        float height = 2.0f;
+        float stepHeight = 1.0f;
+    };
     bool checkCollision(const glm::vec3& from, const glm::vec3& to,
-                        glm::vec3& adjustedPos, float playerRadius = 0.5f) const;
+                        glm::vec3& adjustedPos, float playerRadius = 0.5f,
+                        const CollisionBody* body = nullptr) const;
     std::optional<float> getFloorHeight(float glX, float glY, float glZ, float* outNormalZ = nullptr) const;
 
     /// Every doodad the floor query would consider here, and what each one

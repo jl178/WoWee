@@ -1819,7 +1819,10 @@ std::optional<float> M2Renderer::getFloorHeight(float glX, float glY, float glZ,
 }
 
 bool M2Renderer::checkCollision(const glm::vec3& from, const glm::vec3& to,
-                                 glm::vec3& adjustedPos, float playerRadius) const {
+                                 glm::vec3& adjustedPos, float playerRadius,
+                                 const CollisionBody* body) const {
+    const CollisionBody walker{};
+    const CollisionBody& mover = body ? *body : walker;
     QueryTimer timer(&queryTimeMs, &queryCallCount);
     adjustedPos = to;
     bool collided = false;
@@ -1894,8 +1897,8 @@ bool M2Renderer::checkCollision(const glm::vec3& from, const glm::vec3& to,
             // every world distance is divided by the scale.
             const float invScale = 1.0f / instance.scale;
             const float localRadius = playerRadius * invScale;
-            const float localHeight = 2.0f * invScale;     // player cylinder
-            const float localStepUp = 1.0f * invScale;     // matches the WMO wall test and the floor query
+            const float localHeight = mover.height * invScale;     // the body's cylinder
+            const float localStepUp = mover.stepHeight * invScale; // as the WMO wall test's Body
             const float localJumpClear = 1.2f * invScale;  // rising: clears a wall this close below its top
             const float localSkin = 0.01f * invScale;
 
@@ -2048,7 +2051,7 @@ bool M2Renderer::checkCollision(const glm::vec3& from, const glm::vec3& to,
         float toR = glm::length(glm::vec2(localPos.x, localPos.y) - localCenter);
 
         // Feet-based vertical overlap test: ignore objects fully above/below us.
-        constexpr float PLAYER_HEIGHT = 2.0f;
+        const float PLAYER_HEIGHT = mover.height;
         if (localPos.z + PLAYER_HEIGHT < localMin.z || localPos.z > effectiveTop) {
             continue;
         }
@@ -2076,6 +2079,10 @@ bool M2Renderer::checkCollision(const glm::vec3& from, const glm::vec3& to,
                 maxStepUp = 25.0f;
             }
         }
+        // A body that steps less than a walker (a swimmer, step 0) climbs
+        // no planter, curb or bridge deck either; a walker keeps the
+        // per-model allowances above.
+        if (mover.stepHeight < walker.stepHeight) maxStepUp = std::min(maxStepUp, mover.stepHeight);
         bool stepableLowObject = (effectiveTop <= localFrom.z + maxStepUp);
         bool climbingAttempt = (localPos.z > localFrom.z + 0.18f);
         bool nearTop = (localFrom.z >= effectiveTop - 0.30f);

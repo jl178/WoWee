@@ -397,7 +397,8 @@ glm::vec3 CameraController::sweepAgainstWalls(const glm::vec3& from, const glm::
 
         if (includeDoodads && m2Renderer && !externalFollow_) {
             glm::vec3 adjusted;
-            if (m2Renderer->checkCollision(stepPos, candidate, adjusted, body.radius)) {
+            const M2Renderer::CollisionBody m2Body{body.height, body.stepHeight};
+            if (m2Renderer->checkCollision(stepPos, candidate, adjusted, body.radius, &m2Body)) {
                 candidate.x = adjusted.x;
                 candidate.y = adjusted.y;
             }
