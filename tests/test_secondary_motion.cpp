@@ -454,3 +454,118 @@ TEST_CASE("remote smoothing: the locomotion blend floor and nothing else", "[rem
     CHECK_FALSE(rs::smoothableLocomotion(187, true));
     CHECK_FALSE(rs::smoothableLocomotion(16, false));  // Attack
 }
+
+TEST_CASE("the strength scales the swing; 0 holds every bone to its tracks", "[secondary_motion]") {
+    const auto chains = sm::findChains(humanoid(), true);
+    const sm::Chain* cape = nullptr;
+    for (const auto& c : chains)
+        if (c.bones.front() == 5) cape = &c;
+    REQUIRE(cape);
+    // Run off at 7 yd/s and hold it; the steady trail at each strength.
+    auto trail = [&](float strength) {
+        sm::ChainState cs;
+        std::vector<sm::BoneState> b(cape->bones.size());
+        glm::vec3 p(0);
+        float v = 0;
+        const float dt = 1.0f / 60.0f;
+        for (int i = 0; i < 240; ++i) {
+            v = std::min(7.0f, v + 50.0f * dt);
+            p.x += v * dt;
+            sm::Input in;
+            in.probeWorld = p;
+            in.dt = dt;
+            in.strength = strength;
+            sm::stepChain(*cape, sm::paramsFor(cape->kind), cs, b.data(), in);
+            const float lim = sm::limitScale(strength) / static_cast<float>(b.size());
+            for (const auto& s : b) CHECK(s.swing.x <= sm::paramsFor(cape->kind).outLimit * lim + 1e-5f);
+        }
+        float out = 0;
+        for (const auto& s : b) out += s.swing.x;
+        return out;
+    };
+    CHECK(trail(0.0f) == 0.0f);
+    const float one = trail(1.0f), half = trail(0.5f);
+    // About 15 degrees of trail at a run at the tuned strength.
+    CHECK(glm::degrees(one) > 10.0f);
+    CHECK(glm::degrees(one) < 22.0f);
+    CHECK(half == Catch::Approx(0.5f * one).epsilon(0.05));  // eased into the limit, so nearly linear
+    CHECK(trail(2.0f) > one);
+    // The setting itself is clamped and never non-finite.
+    sm::setStrength(5.0f);
+    CHECK(sm::strength() == 2.0f);
+    sm::setStrength(NAN);
+    CHECK(sm::strength() == 0.0f);
+    sm::setStrength(1.0f);
+}
+
+TEST_CASE("the body collider turns a cloth bone out of a leg, and leaves a clear one", "[secondary_motion]") {
+    // A cloak bone hanging from (-0.15, 0, 0.94) to (-0.16, 0, 0.5), outward -x;
+    // a thigh kicked back so it passes through the cloth.
+    const glm::vec3 pivot(-0.15f, 0.0f, 0.94f), tip(-0.16f, 0.0f, 0.5f);
+    const glm::vec3 out(-1, 0, 0);
+    const sm::Capsule kicked{{0.0f, 0.0f, 1.0f}, {-0.2f, 0.0f, 0.55f}, 0.1f};
+    const glm::vec3 pts[2] = {tip, 0.5f * (pivot + tip)};
+    const glm::vec3 turn = sm::clearanceTurn(pivot, pts, 2, out, &kicked, 1);
+    REQUIRE(glm::length(turn) > 0.0f);
+    CHECK(glm::length(turn) <= sm::kMaxCollisionTurn + 1e-5f);
+    // Turned, the tip has moved out (-x) and is outside the capsule.
+    const glm::quat q = glm::angleAxis(glm::length(turn), glm::normalize(turn));
+    const glm::vec3 moved = pivot + q * (tip - pivot);
+    CHECK(moved.x < tip.x);
+    CHECK(sm::clearanceAlong(moved, out, kicked) < 0.02f);
+    // A leg well in front of the cloth asks for nothing.
+    const sm::Capsule front{{0.05f, 0.13f, 1.0f}, {0.05f, 0.15f, 0.55f}, 0.1f};
+    CHECK(glm::length(sm::clearanceTurn(pivot, pts, 2, out, &front, 1)) == 0.0f);
+    // A radius fitted to the rest pose never reaches a rest point.
+    const std::vector<glm::vec3> rest = {tip, 0.5f * (pivot + tip)};
+    const float r = sm::fitRadius(0.5f, front.a, front.b, rest);
+    const sm::Capsule fitted{front.a, front.b, r};
+    CHECK(glm::length(sm::clearanceTurn(pivot, pts, 2, out, &fitted, 1)) == 0.0f);
+    CHECK(r < 0.5f);
+}
+
+TEST_CASE("a robe's hem: no lag at a steady pace, a bounded swing with the stride", "[secondary_motion]") {
+    const float dt = 1.0f / 60.0f;
+    // Standing still: exactly where the shin is.
+    {
+        sm::HemState s;
+        for (int i = 0; i < 300; ++i) CHECK(sm::stepHem(s, sm::HemParams{}, {1, 2, 3}, {}, dt) == glm::vec3(0.0f));
+    }
+    // Moving steadily with no air drag: no lag once settled.
+    {
+        sm::HemState s;
+        sm::HemParams p;
+        p.drag = 0.0f;
+        glm::vec3 t(0);
+        glm::vec3 o(0);
+        for (int i = 0; i < 600; ++i) { t.x += 7.0f * dt; o = sm::stepHem(s, p, t, {}, dt); }
+        CHECK(glm::length(o) < 1e-3f);
+    }
+    // A running stride: the shin swings 0.3 yd fore and aft at 1.3 Hz while
+    // the body runs at 7 yd/s. The hem swings with a lag, stays finite, and
+    // within the soft limit.
+    for (float step : {1.0f / 30.0f, 1.0f / 60.0f, 1.0f / 144.0f}) {
+        sm::HemState s;
+        float peak = 0.0f;
+        for (int i = 0; i < static_cast<int>(6.0f / step); ++i) {
+            const float time = static_cast<float>(i) * step;
+            const glm::vec3 t(7.0f * time + 0.3f * std::sin(2.0f * 3.14159265f * 1.3f * time), 0, 0.3f);
+            const glm::vec3 o = sm::stepHem(s, sm::HemParams{}, t, {}, step);
+            REQUIRE(std::isfinite(o.x));
+            const glm::vec3 c = sm::softClamp(o, 0.07f);
+            CHECK(glm::length(c) <= 0.07f + 1e-5f);
+            if (time > 2.0f) peak = std::max(peak, glm::length(o));
+        }
+        CHECK(peak > 0.02f);
+        CHECK(peak < 0.5f);
+    }
+    // A teleport starts it over at the target.
+    {
+        sm::HemState s;
+        sm::stepHem(s, sm::HemParams{}, {0, 0, 0}, {}, dt);
+        sm::stepHem(s, sm::HemParams{}, {0.1f, 0, 0}, {}, dt);
+        CHECK(sm::stepHem(s, sm::HemParams{}, {100, 0, 0}, {}, dt) == glm::vec3(0.0f));
+    }
+    CHECK(sm::softClamp(glm::vec3(0.0f), 0.07f) == glm::vec3(0.0f));
+    CHECK(glm::length(sm::softClamp(glm::vec3(10, 0, 0), 0.07f)) <= 0.07f);
+}

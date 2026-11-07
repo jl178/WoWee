@@ -69,6 +69,7 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -87,6 +88,22 @@ inline constexpr int kLevelAll = 2;
 inline bool kindEnabled(ChainKind k, int level) {
     return level >= kLevelAll || (level == kLevelCloth && k == ChainKind::Cloth);
 }
+
+/// The strength row (`secondarymotionstrength`, 0-2, 1 the tuning below):
+/// scales every chain's steady swing, and its limits by limitScale. 0 is off,
+/// exactly as level 0 is. Process-wide, because it is handed over by
+/// SettingsPanel::applyEnhancements rather than through the renderer's
+/// per-frame setMotionEnhancements call (see the E7 note in the plan).
+inline std::atomic<float>& strengthSetting() {
+    static std::atomic<float> s{1.0f};
+    return s;
+}
+inline void setStrength(float s) {
+    strengthSetting().store(std::isfinite(s) ? std::clamp(s, 0.0f, 2.0f) : 0.0f, std::memory_order_relaxed);
+}
+inline float strength() { return strengthSetting().load(std::memory_order_relaxed); }
+/// The limits grow more slowly than the swing: 0.7x at a quarter, 1.4x at 2.
+inline float limitScale(float strength) { return 0.6f + 0.4f * std::clamp(strength, 0.0f, 2.0f); }
 
 /// What findChains needs of one bone. The weights are the summed vertex
 /// weights (0-255 each) of the bone over the model's skin, split by the kind
@@ -143,9 +160,12 @@ struct Params {
 
 inline Params paramsFor(ChainKind k) {
     switch (k) {
-        // A cloak: about 7 degrees more trail at a run, up to 29 when
-        // setting off or landing, 4 toward the legs, 14 to the side.
-        case ChainKind::Cloth: return {2.4f, 1.5f, 0.45f, 0.018f, 0.50f, 0.07f, 0.24f, 0.5f};
+        // A cloak at strength 1: about 15 degrees more trail at a run (21
+        // at a gallop), up to 43 when setting off, falling or landing, 6
+        // toward the legs (the body collider keeps it off them), 23 to the
+        // side. A little heavier and less damped than hair, so a stop or a
+        // turn swings it past and back once before it settles.
+        case ChainKind::Cloth: return {1.6f, 1.1f, 0.35f, 0.032f, 0.75f, 0.10f, 0.40f, 0.6f};
         case ChainKind::Hair:  return {3.0f, 2.0f, 0.50f, 0.012f, 0.26f, 0.05f, 0.17f, 0.4f};
         case ChainKind::Tail:  return {2.0f, 1.2f, 0.35f, 0.030f, 0.21f, 0.17f, 0.35f, 0.0f};
     }
@@ -200,7 +220,7 @@ inline void frameChain(Chain& c, const std::vector<BoneInfo>& bones) {
     if (c.kind == ChainKind::Tail)
         c.probe = root + c.restDir * (0.6f * c.length);
     else
-        c.probe = root + c.outward * 0.3f + c.restDir * (0.5f * c.length);
+        c.probe = root + c.outward * (c.kind == ChainKind::Cloth ? 0.45f : 0.3f) + c.restDir * (0.5f * c.length);
 }
 
 /// The chains of a skeleton, by the rule at the top of this file.
@@ -337,16 +357,23 @@ struct Input {
     glm::vec3 windWorld{0.0f};        ///< the air's velocity, yd/s
     float dt = 0.0f;                  ///< seconds since the chain last stepped
     float freqScale = 1.0f;           ///< lengthFrequencyScale of the drawn length
+    float strength = 1.0f;            ///< the strength row; scales the swing and (limitScale) the limits
 };
 
+/// How much of the probe's motion is taken from the root's parent bone as
+/// animated (the stride's bob, a jump's crouch) rather than the model matrix.
+inline constexpr float kGaitShare = 0.35f;
 inline constexpr float kSubstep = 1.0f / 120.0f;
-inline constexpr float kMaxSimulatedDt = 0.05f;
+inline constexpr float kMaxSimulatedDt = 0.1f;
 inline constexpr float kResetDt = 0.25f;
 inline constexpr float kTeleport = 4.0f;
 inline constexpr float kMaxAccel = 40.0f;
 inline constexpr float kMaxVelocity = 60.0f;
 inline constexpr float kMaxRate = 8.0f;
 inline constexpr float kDrag = 1.0f;          ///< 1/s: air drag on the probe
+/// How much of the foliage wind a chain takes: a breeze stirs a cloak a few
+/// degrees, where running into still air trails it fifteen.
+inline constexpr float kWindShare = 0.4f;
 inline constexpr float kVelocitySmooth = 0.05f;
 inline constexpr float kAccelSmooth = 0.04f;
 
@@ -363,7 +390,7 @@ inline bool finite(const glm::vec3& v) { return std::isfinite(v.x) && std::isfin
 /// The push on the chain in model space (yd/s^2): the probe's pseudo-force and
 /// the drag of the air, from the chain state after this frame's motion.
 inline glm::vec3 modelPush(const ChainState& cs, const Input& in) {
-    const glm::vec3 world = -cs.accel + kDrag * (in.windWorld - cs.velocity);
+    const glm::vec3 world = -cs.accel + kDrag * (kWindShare * in.windWorld - cs.velocity);
     return in.worldToModel * world;
 }
 
@@ -407,15 +434,21 @@ inline bool stepChain(const Chain& chain, const Params& p, ChainState& cs, BoneS
     }
 
     const float share = 1.0f / static_cast<float>(n);
-    const float k = p.gainK * share;
-    const float outLim = p.outLimit * share, inLim = p.inLimit * share, sideLim = p.sideLimit * share;
+    const float k = p.gainK * share * std::max(in.strength, 0.0f);
+    const float lim = share * limitScale(in.strength);
+    const float outLim = p.outLimit * lim, inLim = p.inLimit * lim, sideLim = p.sideLimit * lim;
     const float simulated = std::min(dt, kMaxSimulatedDt);
     const int steps = std::max(1, static_cast<int>(std::ceil(simulated / kSubstep)));
     const float h = simulated / static_cast<float>(steps);
     for (size_t b = 0; b < n; ++b) {
         const float t = n > 1 ? static_cast<float>(b) / static_cast<float>(n - 1) : 0.0f;
         const float w = 2.0f * 3.14159265f * (p.freqRootHz + (p.freqTipHz - p.freqRootHz) * t) * in.freqScale;
-        const glm::vec2 target = push * k;
+        // The steady answer eases into the limits (tanh) rather than running
+        // into them, so a hard start or a fast turn bends the cloak far and
+        // round instead of pinning it; only an overshoot meets the stop.
+        const glm::vec2 raw = push * k;
+        const glm::vec2 target(raw.x >= 0.0f ? outLim * std::tanh(raw.x / outLim) : inLim * std::tanh(raw.x / inLim),
+                               sideLim * std::tanh(raw.y / sideLim));
         BoneState& s = bones[b];
         for (int i = 0; i < steps; ++i) {
             const glm::vec2 acc = w * w * (target - s.swing) - 2.0f * p.damping * w * s.rate;
@@ -454,6 +487,172 @@ inline glm::quat rotationInFrame(const glm::vec3& rotVec, const glm::mat3& toFra
     const glm::vec3 axis = detail::safeNormalize(toFrame * (rotVec / angle), rotVec / angle);
     return glm::angleAxis(angle, axis);
 }
+
+// ---- The body collider ------------------------------------------------------
+//
+// A cloak or a flap that swings toward the body, or that the body moves into
+// (a leg kicking back at a run, the knees tucked in a jump, a stride into a
+// tabard's front flap), is turned back out about its pivot until it clears a
+// few capsules: each thigh and shin and one across the hips, posed from the
+// legs foot_ik::findLegs finds. Each capsule is made thinner than the gap the
+// rest pose leaves, so a chain at rest is never moved, and the turn is along
+// the chain's own outward direction, so the cloth slides over the leg rather
+// than jumping aside. It is a position fix after the pose, not part of the
+// spring: the spring keeps its own swing and the collider only ever adds an
+// outward turn.
+
+/// A capsule: the segment a-b, radius r (posed model space).
+struct Capsule {
+    glm::vec3 a{0.0f}, b{0.0f};
+    float r = 0.0f;
+};
+
+inline glm::vec3 closestOnSegment(const glm::vec3& p, const glm::vec3& a, const glm::vec3& b) {
+    const glm::vec3 ab = b - a;
+    const float l2 = glm::dot(ab, ab);
+    const float t = l2 > 1e-10f ? std::clamp(glm::dot(p - a, ab) / l2, 0.0f, 1.0f) : 0.0f;
+    return a + ab * t;
+}
+
+/// How far point p must move along unit n to be outside the capsule (0 when
+/// it already is, or when moving along n cannot help).
+inline float clearanceAlong(const glm::vec3& p, const glm::vec3& n, const Capsule& c) {
+    const glm::vec3 w = p - closestOnSegment(p, c.a, c.b);
+    const float w2 = glm::dot(w, w);
+    if (w2 >= c.r * c.r) return 0.0f;
+    const float wn = glm::dot(w, n);
+    const float disc = wn * wn - w2 + c.r * c.r;
+    return disc > 0.0f ? std::max(0.0f, -wn + std::sqrt(disc)) : 0.0f;
+}
+
+/// The most a collider turns a bone, radians.
+inline constexpr float kMaxCollisionTurn = 0.7f;
+
+/// The turn (an axis times an angle, posed model space) about pivot `p` that
+/// takes the bone's points `pts` (its tip, its middle) clear of the capsules
+/// along unit `n`; zero when all are clear.
+inline glm::vec3 clearanceTurn(const glm::vec3& p, const glm::vec3* pts, size_t ptCount, const glm::vec3& n,
+                               const Capsule* caps, size_t capCount) {
+    float angle = 0.0f;
+    glm::vec3 axis(0.0f);
+    for (size_t i = 0; i < ptCount; ++i) {
+        const glm::vec3 lever = pts[i] - p;
+        const float len = glm::length(lever);
+        if (len < 1e-4f) continue;
+        // Turning about p moves the point at right angles to its lever.
+        const glm::vec3 nPerp = n - lever * (glm::dot(n, lever) / (len * len));
+        const float np = glm::length(nPerp);
+        if (np < 0.2f) continue;
+        float need = 0.0f;
+        for (size_t c = 0; c < capCount; ++c) need = std::max(need, clearanceAlong(pts[i], n, caps[c]));
+        if (need <= 0.0f) continue;
+        const float a = std::atan2(need, len * np);
+        if (a > angle) {
+            angle = a;
+            axis = glm::cross(lever, nPerp) / (len * np);
+        }
+    }
+    if (angle <= 0.0f || !std::isfinite(angle)) return glm::vec3(0.0f);
+    const float al = glm::length(axis);
+    if (al < 1e-4f) return glm::vec3(0.0f);
+    return axis / al * std::min(angle, kMaxCollisionTurn);
+}
+
+/// A capsule's radius for a model: `nominal`, made thinner than the gap the
+/// rest pose leaves between its axis and any of the points `rest` (a margin
+/// of 15%), so that nothing at rest is pushed.
+inline float fitRadius(float nominal, const glm::vec3& a, const glm::vec3& b, const std::vector<glm::vec3>& rest) {
+    float r = nominal;
+    for (const auto& p : rest) r = std::min(r, 0.85f * glm::distance(p, closestOnSegment(p, a, b)));
+    return std::max(r, 0.0f);
+}
+
+// ---- Robes and skirts ---------------------------------------------------------
+//
+// A long robe (geosets 1302-1399 on the character models) has no bones of its
+// own: its hem is skinned to the thighs, knees and ankles, so in stock it
+// moves exactly with the legs, stiff as trousers. With the row on, the hem
+// gets a small offset in character.vert (stages.y on the robe's batches) from
+// one point spring per leg: a mass hung on the middle of the shin by a spring
+// and a damper, both acting relative to the shin, so moving at a steady speed
+// leaves it where the leg is and only the leg's swing (each stride), the
+// body's starts, stops and turns and the air's drag move it off. The offset
+// is that mass's lag behind the shin, softly limited to a few hundredths of
+// a yard; the shader spreads it over the robe by how far each vertex is below
+// the waist and how far from the leg (the cloth hugging the shin stays on
+// it), each side taking its own leg's.
+
+struct HemState {
+    glm::vec3 pos{0.0f};          ///< the hem point, world space
+    glm::vec3 vel{0.0f};
+    glm::vec3 lastTarget{0.0f};   ///< the shin point it hangs on, last step
+    glm::vec3 targetVel{0.0f};    ///< its velocity, smoothed
+    bool primed = false;
+};
+
+struct HemParams {
+    float freqHz = 2.2f;
+    float damping = 0.45f;
+    float drag = 0.8f;        ///< 1/s: the air against the hem as it moves
+};
+
+/// Limits |v| to below `maxLen` smoothly: about v while small, never past it.
+inline glm::vec3 softClamp(const glm::vec3& v, float maxLen) {
+    const float l = glm::length(v);
+    if (l < 1e-7f || maxLen <= 0.0f) return glm::vec3(0.0f);
+    return v * (maxLen * std::tanh(l / maxLen) / l);
+}
+
+/// Advance one hem point toward `target` (world) by dt; returns its offset
+/// from the target (world), unlimited. A first step, a long hitch or a
+/// teleport starts it at the target.
+inline glm::vec3 stepHem(HemState& s, const HemParams& p, const glm::vec3& target, const glm::vec3& wind, float dt) {
+    if (!finite(target)) { s = HemState{}; return glm::vec3(0.0f); }
+    if (!s.primed || !(dt >= 0.0f) || dt > kResetDt || glm::distance(target, s.lastTarget) > kTeleport) {
+        s = HemState{};
+        s.pos = s.lastTarget = target;
+        s.primed = true;
+        return glm::vec3(0.0f);
+    }
+    if (dt <= 0.0f) return s.pos - target;
+    const glm::vec3 tvRaw = (target - s.lastTarget) / dt;
+    s.targetVel += (tvRaw - s.targetVel) * (1.0f - std::exp(-dt / kVelocitySmooth));
+    const float tvLen = glm::length(s.targetVel);
+    if (tvLen > kMaxVelocity) s.targetVel *= kMaxVelocity / tvLen;
+    const glm::vec3 from = s.lastTarget;
+    s.lastTarget = target;
+    const float w = 2.0f * 3.14159265f * p.freqHz;
+    const float simulated = std::min(dt, kMaxSimulatedDt);
+    const int steps = std::max(1, static_cast<int>(std::ceil(simulated / kSubstep)));
+    const float h = simulated / static_cast<float>(steps);
+    // The target moves along its path over the frame, so the spring sees it
+    // move smoothly between substeps, read at each substep's start (which is
+    // what leaves no lag at a steady pace). A frame longer than the most
+    // simulated covers the whole path in that time.
+    for (int i = 0; i < steps; ++i) {
+        const glm::vec3 t = glm::mix(from, target, static_cast<float>(i) / static_cast<float>(steps));
+        const glm::vec3 acc = w * w * (t - s.pos) + 2.0f * p.damping * w * (s.targetVel - s.vel) +
+                              p.drag * (wind - s.vel);
+        s.vel += acc * h;
+        s.pos += s.vel * h;
+    }
+    if (!finite(s.pos) || !finite(s.vel) || glm::distance(s.pos, target) > 1.0f) {
+        s = HemState{};
+        s.pos = s.lastTarget = target;
+        s.primed = true;
+        return glm::vec3(0.0f);
+    }
+    return s.pos - target;
+}
+
+/// How much of a cloak chain's swing the whole cloak takes as a bend from the
+/// shoulders (character.vert, CharacterRenderer::updateCapeBend). The chain's
+/// own bones carry only the cloak's lower part, so without it a cloak that
+/// lies mostly on the chest bone barely moves.
+inline constexpr float kCapeBendShare = 1.0f;
+
+/// The robe's offset limit, as a fraction of the leg's length, at strength 1.
+inline constexpr float kHemMaxOffset = 0.10f;
 
 /// How much of the effect a unit this far from the camera gets: all of it to
 /// 30 yd, fading to none at 45, where its chains stop stepping.

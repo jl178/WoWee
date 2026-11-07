@@ -306,6 +306,19 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "reading the scene's depth copy; none at night; off draws nothing "
                  "and takes no depth copy for it",
      .asBool = &Enhancements::caustics},
+    // The strength of "Capes, tails and hair" (on the Motion page, which is
+    // full): here at the foot of the Sky page.
+    {.key = "secondarymotionstrength", .label = "How far capes swing", .kind = SettingKind::Float,
+     .minValue = 0, .maxValue = 2, .step = 0.05f, .category = kEnhPageSky, .section = "Capes and cloth",
+     .tooltip = "How far the cloaks, robes, flaps, tails and hair of \"Capes,\n"
+                "tails and hair\" (Motion page) swing and trail. 1 is the\n"
+                "tuned amount; 0 holds them to the animation, as in the\n"
+                "original.",
+     // Measured in docs/enhancements-plan.md (E7): the same springs, scaled.
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "secondary_motion_strength",
+     .controls = "secondary_motion::setStrength: the springs' gain and limits; 0 runs "
+                 "no spring, as Off does",
+     .enabledWhen = "secondarymotion", .asFloat = &Enhancements::secondaryMotionStrength},
 
     // ------------------------------------------------------ Water and weather
     {.key = "shorelinefoam", .label = "Shoreline foam", .kind = SettingKind::Bool,
