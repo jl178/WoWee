@@ -5,6 +5,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "rendering/weather_fx.hpp"
+#include "rendering/stock_weather.hpp"
 #include "rendering/enhancements.hpp"
 #include "rendering/stock_screen_fx.hpp"
 #include "game/weather_state.hpp"
@@ -14,6 +15,7 @@
 #include <string>
 
 namespace wfx = wowee::rendering::weather_fx;
+namespace sw = wowee::rendering::stock_weather;
 using wowee::rendering::Enhancements;
 
 TEST_CASE("weather intensity 1 is the stock count, and only ever adds", "[weather_fx]") {
@@ -104,7 +106,7 @@ TEST_CASE("zones have the climate their art shows", "[weather_fx]") {
     CHECK((wfx::climateForZone(3711) & wfx::kCold) == 0);
 }
 
-TEST_CASE("night, breath and fireflies follow the clock and the climate", "[weather_fx]") {
+TEST_CASE("night and fireflies follow the clock and the climate", "[weather_fx]") {
     CHECK(wfx::nightAmount(12.0f) == 0.0f);
     CHECK(wfx::nightAmount(0.0f) == 1.0f);
     CHECK(wfx::nightAmount(23.0f) == 1.0f);
@@ -113,13 +115,6 @@ TEST_CASE("night, breath and fireflies follow the clock and the climate", "[weat
     CHECK(wfx::nightAmount(20.25f) < 1.0f);
     CHECK(wfx::nightAmount(5.75f) > 0.0f);
     CHECK(wfx::nightAmount(5.75f) < 1.0f);
-
-    CHECK(wfx::breathShows(wfx::kCold, false, 12.0f));
-    CHECK_FALSE(wfx::breathShows(wfx::kCool, false, 12.0f));
-    CHECK(wfx::breathShows(wfx::kCool, false, 1.0f));
-    CHECK_FALSE(wfx::breathShows(wfx::kTemperate, false, 1.0f));
-    CHECK(wfx::breathShows(wfx::kTemperate, true, 12.0f));  // snow anywhere
-    CHECK(wfx::breathInterval(6.0f, 0.5f) < wfx::breathInterval(0.0f, 0.5f));
 
     CHECK(wfx::fireflyAmount(wfx::kFireflies, 1.0f, false, false) == 1.0f);
     CHECK(wfx::fireflyAmount(wfx::kFireflies, 12.0f, false, false) == 0.0f);
@@ -207,4 +202,63 @@ TEST_CASE("every weather row is off in Classic and on the weather page", "[weath
     }
     // The preview never starts on, whatever the set.
     CHECK(wowee::ui::recommendedEnhancements().weatherPreview == 0);
+}
+
+TEST_CASE("stock: the weather draws where the sky does", "[weather_fx][stock_weather]") {
+    // With the portal walk: only a sealed interior hides it - a town's
+    // street (an exterior group's box: Gadgetzan, K3) does not.
+    CHECK(sw::weatherDrawsFromCamera(true, false, false));
+    CHECK(sw::weatherDrawsFromCamera(true, false, true));   // a doorway open to the sky
+    CHECK_FALSE(sw::weatherDrawsFromCamera(true, true, true));
+    // Without it, an interior group's box.
+    CHECK(sw::weatherDrawsFromCamera(false, false, false));
+    CHECK_FALSE(sw::weatherDrawsFromCamera(false, false, true));
+}
+
+TEST_CASE("stock: IsOutdoors", "[weather_fx][stock_weather]") {
+    CHECK(sw::playerOutdoors(true, false, 0));                // exterior group
+    CHECK_FALSE(sw::playerOutdoors(true, true, 0x4000000u));  // interior group wins
+    CHECK(sw::playerOutdoors(false, false, 0));
+    CHECK_FALSE(sw::playerOutdoors(false, false, 0x2000000u));
+    CHECK(sw::playerOutdoors(false, false, 0x6000000u));
+}
+
+TEST_CASE("stock: the mist's rates, fades and texture", "[weather_fx][stock_weather]") {
+    // Rain and snow only past half the level; sand at any.
+    CHECK(sw::mistRate(sw::kRainMist, 0.5f, 1.0f) == 0.0f);
+    CHECK(sw::mistRate(sw::kRainMist, 1.0f, 1.0f) == Catch::Approx(38.0f));
+    CHECK(sw::mistRate(sw::kSnowMist, 1.0f, 0.66f) == Catch::Approx(48.0f * 0.66f));
+    CHECK(sw::mistRate(sw::kSandMist, 0.25f, 1.0f) == Catch::Approx(16.0f));
+    CHECK(std::string(sw::kSandMist.texture).find("WeatherMistGrainy01") != std::string::npos);
+    // 0.4 s in and out.
+    CHECK(sw::mistLifeAlpha(0.0f, 2.7f) == 0.0f);
+    CHECK(sw::mistLifeAlpha(0.2f, 2.7f) == Catch::Approx(0.5f));
+    CHECK(sw::mistLifeAlpha(1.3f, 2.7f) == 1.0f);
+    CHECK(sw::mistLifeAlpha(2.7f, 2.7f) == 0.0f);
+    CHECK(sw::mistNearFade(6.0f) == 0.0f);
+    CHECK(sw::mistNearFade(18.0f) == 1.0f);
+}
+
+TEST_CASE("stock: sand grains and the heading", "[weather_fx][stock_weather]") {
+    CHECK(sw::sandRate(1.0f, 0.66f) == Catch::Approx(21120.0f));
+    CHECK(sw::sandSizeScale(5.0f) == 1.0f);
+    CHECK(sw::sandSizeScale(20.0f) == Catch::Approx(0.5f));
+    CHECK(sw::sandSizeScale(30.0f) == 0.0f);
+    CHECK(sw::sandAlpha(0.1f, 3.2f) == Catch::Approx(0.5f));
+    CHECK(sw::sandAlpha(1.0f, 3.2f) == 1.0f);
+    // Slower than a yard a second: the facing; else the way it moves.
+    CHECK(sw::heading(0.5f, 0.0f, 1.0f) == 1.0f);
+    CHECK(sw::heading(0.0f, 7.0f, 1.0f) == Catch::Approx(1.5707963f));
+    CHECK(sw::heading(0.0f, -7.0f, 1.0f) == Catch::Approx(4.712389f));
+}
+
+TEST_CASE("stock: what makes a place cold", "[weather_fx][stock_weather]") {
+    // AreaTable flag 0x1: Dun Morogh (1, 0x41) is; its areas take it.
+    CHECK(sw::areaIsCold(0x41u, false, 0));
+    CHECK(sw::areaIsCold(0x40u, true, 0x41u));
+    // An area with 0x2 keeps its own flags, whatever its zone.
+    CHECK_FALSE(sw::areaIsCold(0x2u, true, 0x41u));
+    CHECK(sw::areaIsCold(0x3u, true, 0x40u));
+    // Grizzly Hills (394) has no 0x1.
+    CHECK_FALSE(sw::areaIsCold(0x40u, false, 0));
 }

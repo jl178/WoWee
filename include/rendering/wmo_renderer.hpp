@@ -199,6 +199,9 @@ public:
     bool computeVisibility(const Camera& camera, std::optional<float> groundBelow = std::nullopt);
     /// What computeVisibility found about the outdoors.
     bool outdoorSealed() const { return visSealed_; }
+    /// Whether the walk ran (WOWEE_WMO_PORTALS=0 turns it off): without it
+    /// outdoorSealed() is always false and says nothing.
+    bool portalWalkActive() const { return visActive_; }
 
     // Forward declare DoodadTemplate for public API
     struct DoodadTemplate {

@@ -172,6 +172,10 @@ public:
     using CharacterAnimSoundEventCallback =
         std::function<void(uint32_t, uint32_t, uint32_t, uint32_t, const glm::vec3&)>;
     void setCharacterAnimSoundEventCallback(CharacterAnimSoundEventCallback cb);
+    /// A unit model's $BTH event (0x732650): in a cold area its breath,
+    /// "HARDCODED Breath Cold" (Particles\ColdBreath.m2) at attachment 17;
+    /// with the "Breath in the cold" row also wherever snow is falling.
+    void onUnitBreathEvent(uint32_t instanceId, const glm::vec3& position);
     WMORenderer* getWMORenderer() const { return wmoRenderer.get(); }
     M2Renderer* getM2Renderer() const { return m2Renderer.get(); }
     Minimap* getMinimap() const { return minimap.get(); }
@@ -691,7 +695,9 @@ private:
     /// The lightning flash and the sandstorm's haze on this frame's light and
     /// fog (updatePerFrameUBO); nothing while neither is happening.
     void applyWeatherFxLight();
-    void updateBreath(float fxDt, uint8_t climate, bool snowing, float hours);
+    /// Whether the unit at `position` breathes out in the cold, from its area
+    /// (stock_weather::areaIsCold), asked again every 10 s per instance.
+    bool unitInColdArea(uint32_t instanceId, const glm::vec3& position);
     /// The "Corpses settle to the slope" and "Feet on the ground" enhancements
     /// (CharacterRenderer::updateCorpseSettle, updateFootPlacement), which
     /// read the same floors.
@@ -775,11 +781,11 @@ private:
     float nextStrikeIn_ = 0.0f;
     struct PendingThunder { float delay; float volume; bool crack; };
     std::vector<PendingThunder> pendingThunder_;
-    std::unique_ptr<FootfallDust> breathPuffs_;
-    uint32_t breathIdleFrames_ = 0;
-    bool breathFailed_ = false;
-    float breathScanClock_ = 0.0f;
-    std::unordered_map<uint32_t, float> nextBreath_;   // instance -> seconds to its next breath
+    /// Per unit instance: whether its area is cold, and when to ask again
+    /// (stock asks every 10 s, 0x71FA90).
+    struct BreathArea { float recheckAt = 0.0f; bool cold = false; };
+    std::unordered_map<uint32_t, BreathArea> breathAreas_;
+    float breathClock_ = 0.0f;
     /// The clock "Fade in new scenery" stamps and reads (stream_fade.hpp):
     /// drawn time, each frame's step held to a tenth of a second. A tile
     /// that loads during a hitch - a teleport's reload draws nothing for

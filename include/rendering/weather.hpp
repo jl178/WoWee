@@ -32,6 +32,11 @@ class VkContext;
  * - How many falls by the server's weather intensity, times the Weather
  *   Detail setting, past the stock quarter-grade threshold. Rain multiplies
  *   the scene (Mod2x); snow is white and unlit, as stock draws them.
+ * - The stock mist (MapWeather 0x78c420, 0x786e10): 12 yd sheets in the fog
+ *   colour blowing back past the player, past half the level for rain and
+ *   snow, at any level for sand.
+ * - Sand: the stock grains (0x785ea0, sand.bls), fog-coloured points that
+ *   blow at the player from 34-40 yd ahead.
  *
  * Particles live in a box around the camera that wraps as the camera moves,
  * so the fall stays even while the player runs. World space is Z-up.
@@ -43,9 +48,9 @@ public:
         RAIN,
         SNOW,
         STORM,
-        /// A sandstorm (Weather.dbc EffectType 3). Only drawn with the
-        /// "Sandstorms" enhancement: Wowee has no stock sand emitter yet, and
-        /// without the row the renderer never asks for this kind.
+        /// A sandstorm (Weather.dbc EffectType 3): the stock sand grains and
+        /// the grainy mist (stock_weather.hpp); the "Sandstorms" row adds
+        /// its haze and wind on top.
         SAND
     };
 
@@ -56,7 +61,7 @@ public:
         float intensity = 1.0f;   ///< "Weather intensity": times the stock count
         bool variedRain = false;  ///< drop sizes and streaks vary; splashes on the move, further out
         bool softSnow = false;    ///< flake sizes vary, flakes turn and eddy
-        bool mistSheets = false;  ///< distant sheets of rain, snow or dust in the fog colour
+        bool mistSheets = false;  ///< taller distant sheets of rain, snow or dust beyond the stock mist
         bool operator==(const Style&) const = default;
     };
 
@@ -141,6 +146,14 @@ public:
     /// The enhancements' style (Style{} is stock). Call before update().
     void setStyle(const Style& style) { style_ = style; }
     [[nodiscard]] const Style& style() const { return style_; }
+    /// Where the player is and which way it faces (radians, 0 = +x): the
+    /// stock mist and sand blow from its heading (stock_weather::heading).
+    /// Call before update().
+    void setPlayer(const glm::vec3& position, float facing) {
+        playerPos_ = position;
+        playerFacing_ = facing;
+        havePlayer_ = true;
+    }
     /// The fog colour (Light.dbc), which the mist sheets and the sand take,
     /// as the stock mist and sand are drawn in it (world-lighting.md 8).
     void setFogColour(const glm::vec3& colour) { fogColour_ = colour; }
@@ -149,7 +162,13 @@ public:
     void setFireflies(float amount) { fireflyAmount_ = std::clamp(amount, 0.0f, 1.0f); }
     [[nodiscard]] size_t fireflyCount() const { return fireflies_.size(); }
     [[nodiscard]] size_t mistSheetCount() const { return sheets_.size(); }
+    /// The stock mist's sheets and sand grains alive now.
+    [[nodiscard]] size_t stockMistCount() const { return mist_.size(); }
+    [[nodiscard]] size_t sandGrainCount() const { return grains_.size(); }
 
+    /// Whether the weather is drawn (the camera is not sealed indoors). Off,
+    /// it is still simulated, as stock updates its emitters and only skips
+    /// the draw (0x78ae20 and the others return after the update).
     void setEnabled(bool enabled) { this->enabled = enabled; }
     [[nodiscard]] bool isEnabled() const { return enabled; }
 
@@ -202,6 +221,23 @@ private:
         float peak = 0.5f;
         bool flipU = false;
     };
+    /// One sheet of the stock mist (stock_weather.hpp).
+    struct StockMist {
+        glm::vec3 position;        ///< centre
+        glm::vec3 velocity;
+        float accel = 0.0f;        ///< on every axis, yd/s^2 (0x128)
+        float age = 0.0f;
+        float life = 2.7f;
+        glm::vec3 groundAt[3];     ///< the ground under its path: start, middle, end (x, y, ground z)
+    };
+    /// One stock sand grain: where it was born, its velocity, and when its
+    /// path ends (it dies where it meets the ground).
+    struct Grain {
+        glm::vec3 origin;
+        glm::vec3 velocity;
+        float born = 0.0f;
+        float life = 0.0f;
+    };
     struct Firefly {
         glm::vec3 position;
         glm::vec3 home;            ///< where it wanders about
@@ -216,7 +252,7 @@ private:
     };
     static_assert(sizeof(Vertex) == 24, "Weather vertex size");
 
-    enum Sprite : uint32_t { RAIN_STREAK = 0, RAIN_SPLASH, SNOW_FLAKE, MIST_SHEET, SPRITE_COUNT };
+    enum Sprite : uint32_t { RAIN_STREAK = 0, RAIN_SPLASH, SNOW_FLAKE, MIST_SHEET, SAND_MIST, WHITE, SPRITE_COUNT };
 
     void loadTextures(pipeline::AssetManager* assetManager);
     void spawnParticle(Particle& p, const glm::vec3& cameraPos, bool anywhereInColumn);
@@ -225,6 +261,11 @@ private:
     void spawnSheet(MistSheet& s, const glm::vec3& cameraPos);
     void updateSheets(const glm::vec3& cameraPos, float level, float deltaTime);
     void updateFireflies(const glm::vec3& cameraPos, float deltaTime);
+    void updatePlayerMotion(float deltaTime);
+    void updateStockMist(const glm::vec3& cameraPos, float level, float deltaTime);
+    void spawnStockMist(StockMist& m, const glm::vec3& cameraPos);
+    void updateSand(const glm::vec3& cameraPos, float level, float deltaTime);
+    void spawnGrain(Grain& g, const glm::vec3& cameraPos);
     /// Grow the per-frame vertex buffers to hold `vertexCount` (the
     /// intensity slider and the extra sprites can need more than the stock
     /// cap); the old ones are freed once no frame in flight reads them.
@@ -263,11 +304,23 @@ private:
     std::vector<Particle> particles;
     std::vector<Splash> splashes_;
     std::vector<Vertex> vertices_;
-    uint32_t sheetVertexCount_ = 0;      ///< Mist sheets first, then
+    uint32_t stockMistVertexCount_ = 0;  ///< The stock mist first, then
+    uint32_t sheetVertexCount_ = 0;      ///< the row's sheets, then
     uint32_t particleVertexCount_ = 0;   ///< streaks or flakes, then splashes,
     uint32_t splashVertexCount_ = 0;
+    uint32_t grainVertexCount_ = 0;      ///< then sand grains
     uint32_t fireflyVertexCount_ = 0;    ///< then fireflies
     std::vector<MistSheet> sheets_;
+    std::vector<StockMist> mist_;
+    std::vector<Grain> grains_;
+    float mistAccum_ = 0.0f;   ///< sheets owed by the spawn rate
+    float grainAccum_ = 0.0f;
+    glm::vec3 playerPos_{0.0f};
+    glm::vec3 lastPlayerPos_{0.0f};
+    glm::vec3 playerVelocity_{0.0f};
+    float playerFacing_ = 0.0f;
+    bool havePlayer_ = false;
+    bool haveLastPlayer_ = false;
     std::vector<Firefly> fireflies_;
     Type builtType_ = Type::NONE;
     glm::vec3 lastCameraPos_{0.0f};
@@ -287,9 +340,12 @@ private:
     Style style_{};
     glm::vec3 fogColour_{0.5f};
     float fireflyAmount_ = 0.0f;
-    bool extraTexturesAttempted_ = false;
 
     static constexpr int MAX_PARTICLES = 3000;
+    /// Sand grains alive at most. Stock keeps about 67000 at weatherDensity 2
+    /// (32000 a second times 0.66 for 3.2 s) on the GPU; these are built on
+    /// the CPU, so fewer, each as large as stock's.
+    static constexpr int MAX_GRAINS = 9000;
     static constexpr int MAX_SPLASHES = 400;
 
     // Zone-based weather

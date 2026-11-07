@@ -63,9 +63,11 @@ public:
     // (Spells\LevelUp\LevelUp.m2) on anyone who levels, 4392 "Achievement
     // Base" (Spells\Achievement_OnRoot.m2) on anyone who earns one. Its $SND
     // events play at it as they come due, like any kit model's. False when
-    // the model cannot be loaded.
+    // the model cannot be loaded. `slot` is the KitSlot it rides (a uint8_t:
+    // the enum is declared below), the base by default; the cold breath
+    // (0x732650) rides the breath point.
     bool playEffectModel(const std::string& modelPath, const glm::vec3& feetPos,
-                         uint32_t attachInstanceId = 0);
+                         uint32_t attachInstanceId = 0, uint8_t slot = 2);
 
     // The caster's build-up while the cast bar fills (PrecastKit), or while a
     // channel runs (channel=true: ChannelKit). It stays on the caster until

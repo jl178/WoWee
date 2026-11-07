@@ -73,6 +73,7 @@
 #include "core/logger.hpp"
 #include "game/world.hpp"
 #include "game/zone_manager.hpp"
+#include "rendering/stock_weather.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/audio_engine.hpp"
 #include "audio/music_manager.hpp"
@@ -829,8 +830,8 @@ void Renderer::updatePerFrameUBO() {
                 case Weather::Type::RAIN:  weatherWind = 1.3f; break;
                 case Weather::Type::SNOW:  weatherWind = 1.1f; break;
                 case Weather::Type::STORM: weatherWind = std::max(1.3f, 1.0f + 0.8f * wi); break;
-                // A sandstorm (only with its enhancement row) blows hard.
-                case Weather::Type::SAND:  weatherWind = 1.2f + 0.6f * wi; break;
+                // A sandstorm blows hard with its enhancement row.
+                case Weather::Type::SAND:  if (enh_.sandstorms) weatherWind = 1.2f + 0.6f * wi; break;
                 default: break;
             }
         }
@@ -1395,7 +1396,7 @@ void Renderer::updateFootfallDust(float fxDt) {
     bool wet = false;
     if (weather) {
         const Weather::Type wt = weather->getWeatherType();
-        wet = wt != Weather::Type::NONE && weather->getIntensity() > 0.05f;
+        wet = wt != Weather::Type::NONE && wt != Weather::Type::SAND && weather->getIntensity() > 0.05f;
     }
     namespace fd = footfall_dust;
     const glm::vec3 camPos = camera->getPosition();
@@ -1740,7 +1741,6 @@ void Renderer::applyMsaaChange() {
         swimEffects->recreatePipelines();
     }
     if (footfallDust_) footfallDust_->recreatePipelines();
-    if (breathPuffs_) breathPuffs_->recreatePipelines();
 
     // Sky system sub-renderers
     if (skySystem) {
@@ -2830,7 +2830,15 @@ void Renderer::update(float deltaTime) {
     // area the player is in (fireZoneEvents, below), which is what the zone
     // text reads: the camera swinging into a wall's group is not a new
     // subzone, and walking into Ironforge is one whatever the camera does.
-    playerIndoors_ = insideWmo;
+    //
+    // Nor is the weather: the stock client draws it whenever the sky is drawn
+    // (docs/re/weather-sky.md 1) - the camera's group is an exterior one, or a
+    // portal of its interior opens the outdoors - not whenever the camera is
+    // in some group's box. Gadgetzan's and K3's streets are such boxes.
+    const bool weatherShown = stock_weather::weatherDrawsFromCamera(
+        wmoRenderer && wmoRenderer->portalWalkActive(),
+        wmoRenderer && wmoRenderer->outdoorSealed(),
+        canQueryWmo && wmoRenderer->isInsideInteriorWMO(camPos.x, camPos.y, camPos.z));
     {
         // Ease characters between sun and interior light over about a second,
         // as the stock client does, rather than flipping on the doorway frame.
@@ -2855,6 +2863,15 @@ void Renderer::update(float deltaTime) {
             updateLiveArea(unitHit.wmoId, unitHit.nameSet, unitHit.wmoGroupId);
         } else {
             updateLiveArea(0, 0, 0);
+        }
+        // IsIndoors / [indoors] (0x71B7F0 -> 0x77FBF0): the player's group
+        // lacks the exterior flag 0x8, else the area's AreaTable flags
+        // (0x4000000 outdoors, 0x2000000 indoors). Not the camera's box.
+        {
+            uint32_t areaFlags = 0;
+            if (zoneManager && liveAreaValid_) areaFlags = zoneManager->getAreaFlags(liveAreaId_);
+            playerIndoors_ = !stock_weather::playerOutdoors(liveAreaFromWmo_ && unitInside,
+                                                         unitHit.soundIndoors, areaFlags);
         }
         fireZoneEvents();
         // And whether the minimap shows the building's own map.
@@ -2935,14 +2952,13 @@ void Renderer::update(float deltaTime) {
                 case game::WeatherKind::RAIN:         wanted = Weather::Type::RAIN; break;
                 case game::WeatherKind::SNOW:         wanted = Weather::Type::SNOW; break;
                 case game::WeatherKind::THUNDERSTORM: wanted = Weather::Type::STORM; break;
-                // Only with the "Sandstorms" enhancement; stock draws none.
-                case game::WeatherKind::SANDSTORM:
-                    if (enh_.sandstorms) wanted = Weather::Type::SAND;
-                    break;
+                // The stock sand and its grainy mist (0x784580, 0x78cf20);
+                // the "Sandstorms" row adds its haze and wind on top.
+                case game::WeatherKind::SANDSTORM:    wanted = Weather::Type::SAND; break;
                 default:                              break;
             }
             weather->followServerWeather(wanted, wInt, deltaTime);
-            weather->setEnabled(!insideWmo);
+            weather->setEnabled(weatherShown);
 
             // Lightning flash disabled
             if (lightning) {
@@ -2951,7 +2967,7 @@ void Renderer::update(float deltaTime) {
         } else if (weather) {
             // No game handler (single-player without network) - zone weather only
             weather->updateZoneWeather(getCurrentZoneId(), deltaTime);
-            weather->setEnabled(!insideWmo);
+            weather->setEnabled(weatherShown);
         }
     }
     section("update/pre/wmo area+lighting");
@@ -3093,6 +3109,8 @@ void Renderer::update(float deltaTime) {
         weather->setWind(enh_.weatherWind ? clothWindStrength_ : 0.0f, globalTime);
         // The weather rows: style, fireflies, snow cover, lightning, breath.
         updateWeatherFx(fxDt);
+        // The stock mist and sand blow from the player's heading (0x78d170).
+        weather->setPlayer(characterPosition, glm::radians(characterYaw));
         weather->update(*camera, fxDt);
     }
 
@@ -4247,7 +4265,6 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
                 swimEffects->render(cmd, perFrameSet);
             }
             if (footfallDust_ && camera) footfallDust_->render(cmd, perFrameSet);
-            if (breathPuffs_ && camera) breathPuffs_->render(cmd, perFrameSet);
             if (footprintRenderer && camera) footprintRenderer->render(cmd, perFrameSet, *camera);
 
             renderPostSceneOverlays(cmd, gameHandler);
@@ -4443,7 +4460,6 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             swimEffects->render(currentCmd, perFrameSet);
         }
         if (footfallDust_ && camera) footfallDust_->render(currentCmd, perFrameSet);
-        if (breathPuffs_ && camera) breathPuffs_->render(currentCmd, perFrameSet);
         if (footprintRenderer && camera) footprintRenderer->render(currentCmd, perFrameSet, *camera);
         // The same one-line total the parallel path reports, so a profile taken
         // either way can be compared against the other.
@@ -6354,7 +6370,7 @@ float Renderer::volumetricFogExtinction() const {
             case Weather::Type::RAIN:  extinction *= 1.0f + 1.2f * w; break;
             case Weather::Type::SNOW:  extinction *= 1.0f + 0.8f * w; break;
             case Weather::Type::STORM: extinction *= 1.0f + 2.0f * w; break;
-            case Weather::Type::SAND:  extinction *= 1.0f + 1.5f * w; break;
+            case Weather::Type::SAND:  if (enh_.sandstorms) extinction *= 1.0f + 1.5f * w; break;
             default: break;
         }
     }
