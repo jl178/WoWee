@@ -490,12 +490,10 @@ TEST_CASE("the strength scales the swing; 0 holds every bone to its tracks", "[s
     CHECK(glm::degrees(one) < 22.0f);
     CHECK(half == Catch::Approx(0.5f * one).epsilon(0.05));  // eased into the limit, so nearly linear
     CHECK(trail(2.0f) > one);
-    // The setting itself is clamped and never non-finite.
-    sm::setStrength(5.0f);
-    CHECK(sm::strength() == 2.0f);
-    sm::setStrength(NAN);
-    CHECK(sm::strength() == 0.0f);
-    sm::setStrength(1.0f);
+    // The row's value is clamped and never non-finite.
+    CHECK(sm::clampStrength(5.0f) == 2.0f);
+    CHECK(sm::clampStrength(NAN) == 0.0f);
+    CHECK(sm::clampStrength(-1.0f) == 0.0f);
 }
 
 TEST_CASE("the body collider turns a cloth bone out of a leg, and leaves a clear one", "[secondary_motion]") {

@@ -24,7 +24,6 @@
 #include "core/logger.hpp"
 #include "core/version.hpp"
 #include "rendering/renderer.hpp"
-#include "rendering/secondary_motion.hpp"
 #include "rendering/lens_flare.hpp"
 #include "rendering/post_process_pipeline.hpp"
 #include "rendering/lighting_manager.hpp"
@@ -890,9 +889,6 @@ void SettingsPanel::applyEnhancements() {
     auto* renderer = services_.renderer;
     if (!renderer) return;
     renderer->setEnhancements(enhancements);
-    // The cape strength goes to the springs directly: CharacterRenderer
-    // reads it with the level each frame (secondary_motion::strength).
-    rendering::secondary_motion::setStrength(enhancements.secondaryMotionStrength);
     // The soundtrack switch changes which tracks the zone rotation can pick,
     // and switching it off has to stop whichever of ours is playing now - the
     // rotation would otherwise honour it only at the next zone change.

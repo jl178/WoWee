@@ -3257,7 +3257,7 @@ void Renderer::update(float deltaTime) {
             const glm::vec2 windDir = glm::normalize(glm::vec2(0.80f, 0.60f));
             const glm::vec3 wind(windDir * (windStrength_ * kClothWindSpeed), 0.0f);
             characterRenderer->setMotionEnhancements(
-                enh_.secondaryMotion, wind, enh_.remoteSmoothing, characterInstanceId,
+                enh_.secondaryMotion, enh_.secondaryMotionStrength, wind, enh_.remoteSmoothing, characterInstanceId,
                 nativeCharacterInstanceId_,
                 animationController_ ? animationController_->getMountInstanceId() : 0u);
         }

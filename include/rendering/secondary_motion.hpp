@@ -69,7 +69,6 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -91,17 +90,9 @@ inline bool kindEnabled(ChainKind k, int level) {
 
 /// The strength row (`secondarymotionstrength`, 0-2, 1 the tuning below):
 /// scales every chain's steady swing, and its limits by limitScale. 0 is off,
-/// exactly as level 0 is. Process-wide, because it is handed over by
-/// SettingsPanel::applyEnhancements rather than through the renderer's
-/// per-frame setMotionEnhancements call (see the E7 note in the plan).
-inline std::atomic<float>& strengthSetting() {
-    static std::atomic<float> s{1.0f};
-    return s;
-}
-inline void setStrength(float s) {
-    strengthSetting().store(std::isfinite(s) ? std::clamp(s, 0.0f, 2.0f) : 0.0f, std::memory_order_relaxed);
-}
-inline float strength() { return strengthSetting().load(std::memory_order_relaxed); }
+/// exactly as level 0 is. The row's value, made safe: clamped, and 0 when not
+/// finite.
+inline float clampStrength(float s) { return std::isfinite(s) ? std::clamp(s, 0.0f, 2.0f) : 0.0f; }
 /// The limits grow more slowly than the swing: 0.7x at a quarter, 1.4x at 2.
 inline float limitScale(float strength) { return 0.6f + 0.4f * std::clamp(strength, 0.0f, 2.0f); }
 

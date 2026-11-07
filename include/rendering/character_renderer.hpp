@@ -226,8 +226,8 @@ public:
     /// (render space): what "Smoother other units" (E10) glides over. Once a
     /// unit has reported one, its own steps are no longer guessed at.
     void addMotionCorrection(uint32_t instanceId, const glm::vec3& renderDelta);
-    void setMotionEnhancements(int secondaryMotion, const glm::vec3& windWorld, bool remoteSmoothing,
-                               uint32_t localA, uint32_t localB, uint32_t localC);
+    void setMotionEnhancements(int secondaryMotion, float secondaryStrength, const glm::vec3& windWorld,
+                               bool remoteSmoothing, uint32_t localA, uint32_t localB, uint32_t localC);
     /// Look twist: yaw on the SpineLow key bone and, on top of it, the Head
     /// key bone (radians, CCW positive). See animation/body_facing.hpp.
     void setInstanceTorsoYaw(uint32_t instanceId, float deltaYawRad, float headYawRad = 0.0f);
@@ -994,7 +994,7 @@ private:
     bool indoorProbesOn_ = false;      // updateIndoorProbes has a probe this frame
     // Motion enhancements (setMotionEnhancements).
     int springLevel_ = 0;
-    float springStrength_ = 1.0f;  // secondary_motion::strength() as last read
+    float springStrength_ = 1.0f;  // the strength row, clamped (setMotionEnhancements)
     glm::vec3 springWind_{0.0f};
     float springClock_ = 0.0f;
     bool remoteSmoothing_ = false;

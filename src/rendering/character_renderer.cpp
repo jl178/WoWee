@@ -5145,16 +5145,16 @@ void CharacterRenderer::updateFootPlacement(float deltaTime, const FloorHeightFn
     footIkActive_ = active;
 }
 
-void CharacterRenderer::setMotionEnhancements(int secondaryMotion, const glm::vec3& windWorld,
-                                              bool remoteSmoothing, uint32_t localA, uint32_t localB,
-                                              uint32_t localC) {
+void CharacterRenderer::setMotionEnhancements(int secondaryMotion, float secondaryStrength,
+                                              const glm::vec3& windWorld, bool remoteSmoothing,
+                                              uint32_t localA, uint32_t localB, uint32_t localC) {
     localInstances_[0] = localA;
     localInstances_[1] = localB;
     localInstances_[2] = localC;
     springWind_ = windWorld;
-    // The strength row (secondary_motion::strength) at 0 is off as level 0
-    // is: no spring runs and every bone is its tracks.
-    springStrength_ = secondary_motion::strength();
+    // The strength row at 0 is off as level 0 is: no spring runs and every
+    // bone is its tracks.
+    springStrength_ = secondary_motion::clampStrength(secondaryStrength);
     const int level = springStrength_ > 0.0f ? std::clamp(secondaryMotion, 0, 2) : 0;
     if (level != springLevel_) {
         springLevel_ = level;

@@ -1611,16 +1611,19 @@ stock, the budget, and how to verify.
   slider, robes, and a body collider. All in `secondary_motion.hpp`
   (`test_secondary_motion`), `CharacterRenderer` and `character.vert`.
   - **Strength row** `secondarymotionstrength` "How far capes swing", 0-2,
-    stock 0, recommended 1, saved as `secondary_motion_strength`. It sits at
-    the foot of the Sky page (the Motion page is full,
-    `test_settings_panel_layout`). It scales every chain's steady swing
-    (gain x s) and its limits (x `limitScale` = 0.6 + 0.4 s). 0 is off, the
-    same as level 0: no spring, collider, robe or cloak bend runs, and every
-    bone and vertex is stock. It reaches the springs through
-    `secondary_motion::setStrength` from `SettingsPanel::applyEnhancements`,
-    a process-wide value, because `Renderer::setEnhancements` /
-    `setMotionEnhancements` (renderer.cpp) belonged to another agent during
-    this pass. Moving it into `setMotionEnhancements` is a two-line change.
+    stock 0, recommended 1, saved as `secondary_motion_strength`. It sits
+    under "Capes, tails and hair" on the Motion page, live only while that
+    row is on. It scales every chain's steady swing (gain x s) and its
+    limits (x `limitScale` = 0.6 + 0.4 s). 0 is off, the same as level 0: no
+    spring, collider, robe or cloak bend runs, and every bone and vertex is
+    stock. It reaches the springs with the level, through
+    `Renderer::setEnhancements` and the per-frame
+    `CharacterRenderer::setMotionEnhancements` (clamped by `clampStrength`).
+  - **The camera's model fade** (first person, `stock_camera`) changes only
+    the player's material opacity and blend pipeline. The cloak bend and
+    the robe offsets ride the vertex shader and the bone buffer, so they
+    fade with the model, and a fully faded model is neither drawn nor
+    uploaded.
   - **Cloak tuning (s = 1).** Cloth springs 1.6 Hz at the root to 1.1 Hz at
     the tip, damping 0.35, gain 0.032 rad per yd/s^2, limits 43 deg out,
     6 deg toward the legs, 23 deg aside. The steady answer eases into the
