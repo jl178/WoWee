@@ -137,15 +137,14 @@ private:
     wowee::network::Packet body_;
 };
 
-// Keeps what the client sends instead of writing it anywhere.
-class SentPackets : public wowee::network::WorldSocket {
+// What the client sent, and whether its socket says it is connected.
+//
+// Owned by the Session, not by the socket: the handler owns the socket and
+// frees it on a disconnect (a logout is one), and a test reads what was sent
+// after that. The record used to live in the socket and was read through a
+// raw pointer to it - a use after free that ASan found in the logout test.
+class SentLog {
 public:
-    void send(const wowee::network::Packet& packet) override { sent_.push_back(packet); }
-    // Not connected unless a test says so: a session that stays up past a
-    // logout is one that asks for this.
-    [[nodiscard]] bool isConnected() const override { return connected_; }
-    void setConnected(bool on) { connected_ = on; }
-
     // Everything sent with this opcode, oldest first.
     [[nodiscard]] std::vector<wowee::network::Packet> of(Opcode opcode) const {
         std::vector<wowee::network::Packet> found;
@@ -153,10 +152,26 @@ public:
             if (p.getOpcode() == wowee::game::wireOpcode(opcode)) found.push_back(p);
         return found;
     }
+    // Not connected unless a test says so: a session that stays up past a
+    // logout is one that asks for this.
+    void setConnected(bool on) { connected_ = on; }
 
 private:
+    friend class SentPackets;
     std::vector<wowee::network::Packet> sent_;
     bool connected_ = false;
+};
+
+// Keeps what the client sends in the Session's SentLog instead of writing it
+// anywhere.
+class SentPackets : public wowee::network::WorldSocket {
+public:
+    explicit SentPackets(std::shared_ptr<SentLog> log) : log_(std::move(log)) {}
+    void send(const wowee::network::Packet& packet) override { log_->sent_.push_back(packet); }
+    [[nodiscard]] bool isConnected() const override { return log_->connected_; }
+
+private:
+    std::shared_ptr<SentLog> log_;
 };
 
 // A client in the world as one character, ready for packets. WotLK unless
@@ -177,15 +192,15 @@ public:
         REQUIRE(handler_.getUpdateFieldTable().loadFromJson(dir + "/update_fields.json"));
         handler_.setPacketParsers(wowee::game::createPacketParsers(expansion));
         handler_.setPlayerGuid(kPlayerGuid);
-        auto socket = std::make_unique<SentPackets>();
-        sent_ = socket.get();
-        wowee::game::GameHandlerTestAccess::setSocket(handler_, std::move(socket));
+        wowee::game::GameHandlerTestAccess::setSocket(handler_,
+                                                      std::make_unique<SentPackets>(sent_));
         wowee::game::GameHandlerTestAccess::enterWorld(handler_);
     }
 
     wowee::game::GameHandler& handler() { return handler_; }
-    const SentPackets& sent() const { return *sent_; }
-    SentPackets& socket() { return *sent_; }
+    // Both stay valid after the handler has dropped its socket.
+    const SentLog& sent() const { return *sent_; }
+    SentLog& socket() { return *sent_; }
 
     void receive(const wowee::network::Packet& packet) {
         wowee::game::GameHandlerTestAccess::receive(handler_, packet);
@@ -204,7 +219,7 @@ private:
     wowee::core::Application app_;
     wowee::game::GameServices services_;
     wowee::game::GameHandler handler_;
-    SentPackets* sent_ = nullptr;
+    std::shared_ptr<SentLog> sent_ = std::make_shared<SentLog>();
 };
 
 }  // namespace replay
