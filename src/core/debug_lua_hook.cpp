@@ -25,6 +25,7 @@
 //   WoweeDebug_Camera(yaw, pitch, dist)
 //                                  the camera at a yaw from the facing
 //   WoweeDebug_MouseMotion(dx, dy) a relative mouse move, in pixels
+//   WoweeDebug_KnockBack(c, s, h, v) an SMSG_MOVE_KNOCK_BACK handed in
 //   WoweeDebug_CameraState()       camera yaw, pitch, facing, movement
 //                                  pitch (degrees), distance and the
 //                                  player model's camera fade
@@ -64,6 +65,8 @@
 #include "core/profile_tag.hpp"
 #include "game/entity.hpp"
 #include "game/game_handler.hpp"
+#include "game/opcode_table.hpp"
+#include "network/packet.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/lighting_manager.hpp"
@@ -260,6 +263,25 @@ int luaDebugCameraState(lua_State* L) {
     return 8;
 }
 
+/// WoweeDebug_KnockBack(vcos, vsin, hspeed, vspeed) - an SMSG_MOVE_KNOCK_BACK
+/// for the player, handed in as if the server had sent it (a knockback spell
+/// the lab will not cast on a player). The ack goes to the server as usual.
+int luaDebugKnockBack(lua_State* L) {
+    auto* gh = Application::getInstance().getGameHandler();
+    if (!gh) return 0;
+    static uint32_t counter = 0x7F000000u;
+    network::Packet p(game::wireOpcode(game::Opcode::SMSG_MOVE_KNOCK_BACK));
+    p.writePackedGuid(gh->getPlayerGuid());
+    p.writeUInt32(counter++);
+    p.writeFloat(static_cast<float>(luaL_checknumber(L, 1)));
+    p.writeFloat(static_cast<float>(luaL_checknumber(L, 2)));
+    p.writeFloat(static_cast<float>(luaL_checknumber(L, 3)));
+    p.writeFloat(static_cast<float>(luaL_checknumber(L, 4)));
+    p.setReadPos(0);
+    gh->debugInjectPacket(p);
+    return 0;
+}
+
 /// WoweeDebug_TimeOfDay(hours) - the light and sky held at an hour, so a test
 /// can shoot the same place at noon and at dusk. A negative hour gives the
 /// clock back to the game.
@@ -418,6 +440,7 @@ void debugLuaHookTick(addons::LuaEngine* engine, SDL_Window* window) {
     lua_register(L, "WoweeDebug_Mouse", luaDebugMouse);
     lua_register(L, "WoweeDebug_Camera", luaDebugCamera);
     lua_register(L, "WoweeDebug_MouseMotion", luaDebugMouseMotion);
+    lua_register(L, "WoweeDebug_KnockBack", luaDebugKnockBack);
     lua_register(L, "WoweeDebug_CameraState", luaDebugCameraState);
     lua_register(L, "WoweeDebug_TimeOfDay", luaDebugTimeOfDay);
     lua_register(L, "WoweeDebug_UseObject", luaDebugUseObject);
