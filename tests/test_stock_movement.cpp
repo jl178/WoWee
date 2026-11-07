@@ -361,6 +361,16 @@ TEST_CASE("A knockback is a fall on the packet's path", "[stock_movement][knockb
     CHECK((sm::landWithPendingKeys(f) & (sm::kForward | sm::kFalling | sm::kPendingStop)) == 0);
 }
 
+TEST_CASE("the walker snaps 1.85 x the move down after running off an edge") {
+    // 0x7620F0 / 0xA32830: enough for a walkable 50 degree descent at any
+    // speed, never a step - a sheer drop deeper than it is a fall.
+    CHECK(sm::walkOffSnapReach(1.0f) == Approx(1.8494f).margin(1e-4));
+    CHECK(sm::walkOffSnapReach(0.5f) > 0.5f * sm::kTan50);
+    // Running at 60 fps (7 yd/s): a fifth of a yard.
+    CHECK(sm::walkOffSnapReach(7.0f / 60.0f) == Approx(0.2158f).margin(1e-3));
+    CHECK(sm::walkOffSnapReach(-1.0f) == 0.0f);
+}
+
 TEST_CASE("the pitch keys vote only swimming or flying and not while the mouse steers") {
     // 0x5FB1A0 / 0x5FBBC0.
     CHECK(sm::pitchVote(true, false, false, true) == 1);

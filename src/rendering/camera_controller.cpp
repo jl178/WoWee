@@ -2251,9 +2251,14 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
             // 1. Near ground (within step-up range above) - a step up.
             // 2. Hovering and falling onto the hover height.
             // 3. Grounded with the ground just below - a slope or a step down.
-            //    Walking, that reaches a full step so stairs and curbs are
-            //    walked down rather than fallen down (the stock client keeps
-            //    the feet on the ground the same way); standing, only the
+            //    Walking, the stock walker's snap (0x7620F0: the move's
+            //    length x 1.8494, stock_movement::walkOffSnapReach), which
+            //    keeps a walkable 50 degree descent grounded at any speed and
+            //    frame rate - a fixed 0.6 let a mount at speed, or a low frame
+            //    rate, leave the ground on a steep walkable slope - but never
+            //    less than 0.6, so curbs and stair treads are walked down.
+            //    That floor is Wowee's: stock falls off any sheer drop deeper
+            //    than its snap (movement-camera.md 7.3). Standing, only the
             //    quarter yard that absorbs contact noise.
             bool nearGround = (dz >= 0.0f && dz <= stepUp);
             float airSnapRange = std::min(fallCatch, 0.05f);
@@ -2261,7 +2266,10 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
                                && dz >= -airSnapRange);
             const bool walkingOnGround = horizStep > 1e-3f && !isFlightAirborne() &&
                                          !hoverActive_;
-            const float stepDownReach = walkingOnGround ? movement::kMaxStepUp : 0.25f;
+            const float stepDownReach = walkingOnGround
+                ? std::max(movement::kMaxStepUp,
+                           game::stock_movement::walkOffSnapReach(horizStep))
+                : 0.25f;
             // Not while climbing in flight: a frame's climb at a high frame
             // rate is less than the quarter yard this reaches down, so taking
             // off was pulled back to the ground every frame and never left it.

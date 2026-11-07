@@ -340,6 +340,42 @@ with walkable ground within 1.19 yd beyond the edge, and the box must fit
 (the up trace is the box). Nothing in the step depends on race; only r does,
 and r is under 1.19 for every playable model.
 
+### 7.3 The ground walker, in detail (0x7620F0)
+
+Per physics slice of `dist` yards and `ms` milliseconds:
+
+1. Trace the box along the current triangle's plane (0x75F9D0 against the
+   world set 0xADBA34). On a continuous walkable surface it simply follows
+   the plane: there is **no snap and no step** going up or down a ramp, at
+   any speed.
+2. **It hits a triangle** (index below the set's count 0xADBA38): if that
+   triangle is walkable (0x75D1C0: normal z over cos 50 for a
+   player-controlled unit) the walk carries on along it; if not, it is the
+   **only place a step happens**: 0x761B00 (section 7.2), and on failure the
+   rest of the move is projected onto the wall (0x75E250 / 0x75E0C0). More
+   than five slices in a row that make under a millisecond of progress end
+   the walk. A unit standing still, or moving along a ledge without
+   pushing into its side, never steps onto it.
+3. **It runs the full distance without a hit** - the box has gone past the
+   edge of what it stood on: it is traced **straight down by `dist x
+   1.8494`** (0xA32830). A triangle there is landed on (0x6EC7B0; 0x75B690
+   decides whether a SPLINE_ELEVATION climb carries on); **nothing starts a
+   fall** with v0 = 0 (0x988370(0), unless SPLINE_ELEVATION is climbing a
+   step). So the snap is 0.22 yd at a run at 60 fps and grows
+   with the slice: a sheer drop deeper than that - a curb, a stair tread
+   whose collision has risers - is a short fall, sent as one (section 9,
+   event 9), with FALL_LAND when it is over 1/36 yd.
+4. No collision set at all (0xADBA38 = 0): a fall.
+
+Wowee's floor pick is not a triangle walker: it moves the feet horizontally
+and picks a floor under the centre each frame (with a 0.2 yd footprint in
+WMO space), so it reproduces these by thresholds - a rise within the step
+height (1.0) is climbed when the centre comes within 0.2 yd of the top's
+edge, which is the move pushing into the riser, and a drop is followed
+within `max(0.6, dist x 1.8494)` (`stock_movement::walkOffSnapReach`). The
+0.6 is not stock (stock falls off a 0.3 yd curb at a run); it is kept so the
+stairs Wowee's WMO collision builds with risers are walked down.
+
 ### 8.1 The float line and the surface hop (0x75F9D0, 0x760B40, 0x730D10)
 
 - **Float depth.** The swim mover (0x760B40) traces the box against the world
@@ -546,15 +582,22 @@ also skips the cameraDive surface/submerge pitch limits (0x6023D0,
 | 36 | MoveView turns at cameraYawMoveSpeed and tilts at cameraPitchMoveSpeed (0x6000E0); Right goes round to the character's right, Up goes up | 180 / 90 by name, Right and Up the other way round | `stock_camera::viewMoveStep` at the controller's look speeds |
 | 37 | At the surface a swimmer stays level unless the mouse steers it 18 degrees or more down (cameraDive, cameraSubmergePitch); crossing the water line eases the camera to 5 degrees down (section 10) | a swimmer at the surface followed the camera's 3D direction and a float spring pulled it back unless it looked 16 degrees down; the camera kept its pitch at the line | `stock_camera::waterLine / diveHoldsLevel / waterLineFinalPitch`: the dive holds `movePitchDeg_` level, the crossing starts the pitch ease |
 | 38 | The player's model fades by the drawn camera distance (1.83 yd to the near clip, cosine), is hidden at 0, and the mount with it | hidden only at a zoom target of 0.65 yd or less, never faded; SetView(1) (0.5 yd) still drew it in the in-game check | `stock_camera::playerModelAlpha` each frame, `isFirstPersonView` is alpha 0, the alpha multiplied into the player's presented alpha (stealth, ghost) and given to the mount (`EntitySpawner::syncUnitPresentation`) |
+| 39 | After running off what it stood on, the walker snaps down `move x 1.8494` (0x7620F0), so a walkable descent stays grounded at any speed and frame rate | the walking step-down reached a fixed 0.6: on a steep walkable slope a fast mount, or a low frame rate, lost the ground and fell | `max(0.6, stock_movement::walkOffSnapReach(move))`; the 0.6 floor is Wowee's (7.3) |
 
 Still different (not changed here; each needs in-game checking):
 
-- **Step mechanics.** Stock steps only when a wall blocks and climbs over the
-  next slices (7.2); Wowee's floor pick now reaches the stock 1.0 yd every
-  frame, which also lifts the player onto a walkable top within 1 yd that it
-  stands beside rather than walks into. The heuristics around the floor pick
-  (`movement_limits.hpp`, `kMaxStepUp` = 0.6) still use 0.6 as their ground
-  tolerance.
+- **Step mechanics** (7.2, 7.3). Stock steps only when the move hits an
+  unwalkable triangle, and climbs over the next slices; Wowee's floor pick
+  climbs a top within 1.0 yd when the centre comes within 0.2 yd of its edge
+  (its WMO footprint), which in practice is the move pushing into the riser,
+  but it does so strafing along a ledge closer than 0.2 yd too, and it does
+  not need the stock's walkable ground 1.19 yd beyond the edge. Going down,
+  Wowee keeps a 0.6 yd floor under the stock snap (7.3), so curbs and stair
+  treads are walked down where stock takes a short fall. The other 0.6
+  tolerances (`movement_limits.hpp` `kMaxStepUp`: the floor-arbitration
+  anchor, the walkable-structure test, the airborne lip catch, the transport
+  floor test) are Wowee's seam heuristics with no stock counterpart; they
+  were left as they are.
 - **Box against cylinder.** Stock is an axis-aligned box (corners reach
   r x 1.41); Wowee sweeps a cylinder of radius r. The doodad test
   (`m2_renderer_instance.cpp`) still uses a fixed 2 yd height and 1 yd step;
