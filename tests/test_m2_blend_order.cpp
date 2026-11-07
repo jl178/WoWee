@@ -4,10 +4,12 @@
 #include <catch_amalgamated.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 #include "rendering/m2_blend_order.hpp"
 #include "rendering/m2_raster_state.hpp"
+#include "rendering/m2_ribbon_guard.hpp"
 #include "rendering/m2_view_distance.hpp"
 
 using namespace wowee::rendering;
@@ -121,4 +123,27 @@ TEST_CASE("a map doodad fades linearly over its class's last yards", "[m2][dooda
     REQUIRE(stockDoodadFadeAlpha(2, 200.0f, 185.1f) == 1.0f);   // above 0.99
     REQUIRE(stockDoodadFadeAlpha(2, 200.0f, 199.95f) == 0.0f);  // below 0.01
     REQUIRE(stockDoodadFadeAlpha(2, 200.0f, 201.0f) == 0.0f);
+}
+
+TEST_CASE("a ribbon strip breaks where two edges lie too far apart", "[m2][ribbon]") {
+    // A trail laid near a caster, then one edge at the world origin (a bone
+    // palette not yet filled), then on again: never one strip across.
+    const std::vector<glm::vec3> pts = {{-9448, 68, 57}, {-9447, 68, 57}, {-9446, 68, 57},
+                                        {0, 0, 0}, {-9445, 68, 57}, {-9444, 68, 57}};
+    const auto runs = ribbonStripRuns(pts, 2);
+    REQUIRE(runs.size() == 2);
+    CHECK(runs[0] == std::make_pair(size_t(0), size_t(3)));
+    CHECK(runs[1] == std::make_pair(size_t(4), size_t(6)));
+    // A NaN point is dropped, and a lone point is no strip.
+    const std::vector<glm::vec3> nan = {{0, 0, 0}, {NAN, 0, 0}, {1, 0, 0}, {2, 0, 0}};
+    const auto r2 = ribbonStripRuns(nan, 2);
+    REQUIRE(r2.size() == 1);
+    CHECK(r2[0] == std::make_pair(size_t(2), size_t(4)));
+}
+
+TEST_CASE("an emitter frame with no placement or a long jump restarts the trail", "[m2][ribbon]") {
+    CHECK(ribbonFrameDegenerate(glm::mat4(0.0f)));
+    CHECK_FALSE(ribbonFrameDegenerate(glm::mat4(1.0f)));
+    CHECK(ribbonJumped(glm::vec3(-9448, 68, 57), glm::vec3(0.0f)));
+    CHECK_FALSE(ribbonJumped(glm::vec3(0.0f), glm::vec3(1.0f, 0.0f, 0.0f)));
 }

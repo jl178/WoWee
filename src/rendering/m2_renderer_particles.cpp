@@ -1,4 +1,5 @@
 #include "rendering/m2_renderer.hpp"
+#include "rendering/m2_ribbon_guard.hpp"
 #include "rendering/m2_renderer_internal.h"
 #include "rendering/m2_particle_look.hpp"
 #include "rendering/m2_particle_stock.hpp"
@@ -413,7 +414,10 @@ void M2Renderer::updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt
         else if (!inst.boneMatrices.empty()) xf = xf * inst.boneMatrices[0];
         xf = xf * glm::translate(glm::mat4(1.0f), em.position);
         const glm::vec3 pos(xf[3]);
-        if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z)) continue;
+        // No placement this frame (a bone palette entry still zero, a NaN):
+        // treated as hidden, so the trail neither joins it nor lays an edge
+        // there (m2_ribbon_guard.hpp).
+        const bool frameBad = ribbonFrameDegenerate(xf);
 
         // Tracks, each frame, in the playing sequence (0x828A00).
         const float visibility = sampleStep(em.visibilityTrack, seq, inst.animTime,
@@ -433,7 +437,24 @@ void M2Renderer::updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt
         st.texSlot = static_cast<uint32_t>(std::max(0.0f, sampleStep(
             em.texSlotTrack, seq, inst.animTime, inst.globalSequenceTime, gsd,
             static_cast<float>(st.texSlot))));
-        const bool visible = visibility != 0.0f && !inst.emissionStopped;
+        const bool visible = visibility != 0.0f && !inst.emissionStopped && !frameBad;
+        // An emitter that moved farther than any trail does since its last
+        // update - created before its launch point was known, moved or
+        // reused without a reset - starts a new trail rather than drawing a
+        // strip across the map from where it was.
+        if (visible && st.hasPrev && ribbonJumped(st.curPos, pos)) {
+            static std::atomic<int> saidJumps{0};
+            if (saidJumps.fetch_add(1, std::memory_order_relaxed) < 20) {
+                LOG_WARNING("Ribbon trail restarted: '", gpu.name, "' emitter ", ri, " moved ",
+                            glm::length(pos - st.curPos), " yd in one update (from ",
+                            st.curPos.x, ",", st.curPos.y, ",", st.curPos.z, " to ",
+                            pos.x, ",", pos.y, ",", pos.z, ")");
+            }
+            edges.clear();
+            st.hasPrev = false;
+            st.hasHead = false;
+            st.frac = 0.0f;
+        }
 
         // SetMatrix (0x97F940): the previous frame becomes the one before; a
         // ribbon just shown (or new) starts with the previous frame equal to
@@ -559,7 +580,7 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
             const float modelAlpha = std::clamp(inst.fade, 0.0f, 1.0f);
             if (!(modelAlpha > 0.0f)) continue;
 
-            const uint32_t firstVert = static_cast<uint32_t>(written);
+            uint32_t firstVert = static_cast<uint32_t>(written);
             const auto put = [&](const M2Instance::RibbonEdge& e) {
                 if (written + 2 > MAX_RIBBON_VERTS) return;
                 const float u = e.age * cellW * invLife + u0;
@@ -575,16 +596,25 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
                     ++written;
                 }
             };
-            // Oldest first, then the live head at the emitter.
-            for (const auto& e : edges) put(e);
-            if (st.hasHead) put(st.head);
-            const uint32_t vertCount = static_cast<uint32_t>(written) - firstVert;
-            if (vertCount >= 4) {
-                draws.push_back({.texSet = texSet, .pipeline = pipe, .firstVertex = firstVert,
-                                 .vertexCount = vertCount, .blendMode = em.blendMode,
-                                 .unfogged = (em.materialFlags & 0x2u) ? 1u : 0u});
-            } else {
-                written = firstVert;
+            // Oldest first, then the live head at the emitter - one strip per
+            // run of edges that lie near each other (m2_ribbon_guard.hpp), so
+            // no single edge pair can span the map.
+            ribbonOrder_.clear();
+            ribbonCentres_.clear();
+            for (const auto& e : edges) ribbonOrder_.push_back(&e);
+            if (st.hasHead) ribbonOrder_.push_back(&st.head);
+            for (const auto* e : ribbonOrder_) ribbonCentres_.push_back(0.5f * (e->bottom + e->top));
+            for (const auto& [rb, re] : ribbonStripRuns(ribbonCentres_, 2)) {
+                firstVert = static_cast<uint32_t>(written);
+                for (size_t k = rb; k < re; ++k) put(*ribbonOrder_[k]);
+                const uint32_t vertCount = static_cast<uint32_t>(written) - firstVert;
+                if (vertCount >= 4) {
+                    draws.push_back({.texSet = texSet, .pipeline = pipe, .firstVertex = firstVert,
+                                     .vertexCount = vertCount, .blendMode = em.blendMode,
+                                     .unfogged = (em.materialFlags & 0x2u) ? 1u : 0u});
+                } else {
+                    written = firstVert;
+                }
             }
         }
     }
@@ -600,14 +630,26 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
         // matches (3 additive, 2 alpha).
         const bool additive = strip.gxBlend == 3 || strip.gxBlend == 6 || strip.gxBlend == 7 ||
                               strip.gxBlend == 10;
-        std::memcpy(dst + written * 9, strip.verts.data(), n * 9 * sizeof(float));
-        draws.push_back({.texSet = texSet,
-                         .pipeline = additive ? ribbonAdditivePipeline_ : ribbonPipeline_,
-                         .firstVertex = static_cast<uint32_t>(written),
-                         .vertexCount = static_cast<uint32_t>(n),
-                         .blendMode = additive ? 3u : 2u,
-                         .unfogged = strip.unfogged ? 1u : 0u});
-        written += n;
+        // The same guard: a chain or swing strip is drawn in pieces wherever
+        // two neighbouring vertex pairs lie too far apart, or one is not
+        // finite (a stale or unset endpoint).
+        ribbonCentres_.clear();
+        for (size_t v = 0; v + 1 < n; v += 2) {
+            const float* a = strip.verts.data() + v * 9;
+            const float* b = a + 9;
+            ribbonCentres_.push_back(0.5f * glm::vec3(a[0] + b[0], a[1] + b[1], a[2] + b[2]));
+        }
+        for (const auto& [rb, re] : ribbonStripRuns(ribbonCentres_, 2)) {
+            const size_t first = rb * 2, count = (re - rb) * 2;
+            std::memcpy(dst + written * 9, strip.verts.data() + first * 9, count * 9 * sizeof(float));
+            draws.push_back({.texSet = texSet,
+                             .pipeline = additive ? ribbonAdditivePipeline_ : ribbonPipeline_,
+                             .firstVertex = static_cast<uint32_t>(written),
+                             .vertexCount = static_cast<uint32_t>(count),
+                             .blendMode = additive ? 3u : 2u,
+                             .unfogged = strip.unfogged ? 1u : 0u});
+            written += count;
+        }
     }
     if (draws.empty() || written == 0) return;
 

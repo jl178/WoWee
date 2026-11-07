@@ -1839,6 +1839,9 @@ private:
     };
     std::vector<RibbonDrawCall> ribbonDraws_;
     std::vector<EffectStrip> effectStrips_;
+    /// Scratch for renderM2Ribbons' run split (m2_ribbon_guard.hpp).
+    std::vector<const M2Instance::RibbonEdge*> ribbonOrder_;
+    std::vector<glm::vec3> ribbonCentres_;
     /// A descriptor set per texture an effect strip has used.
     std::unordered_map<VkTexture*, VkDescriptorSet> effectTexSets_;
     VkDescriptorSet effectTextureSet(VkTexture* tex);
