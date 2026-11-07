@@ -3471,6 +3471,7 @@ void CameraController::update(float deltaTime) {
     // character turns to face where the player is looking, so that walking
     // forward goes where the screen points.
     const bool cameraDrivesFacing = rightHeld || mouseAutorun || steering_;
+    mouseSteering_ = cameraDrivesFacing && !externalFollow_;
     // The stock drunk steer (Wow.exe 0x6DEB30, docs/re/movement-camera.md
     // section 5): while moving, the facing is pushed every frame by
     // drunk * 0.01309 rad * the mean of three slow cosines of
