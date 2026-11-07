@@ -361,7 +361,7 @@ void CameraController::debugSetView(float yawOffsetDeg, float pitchDeg, float di
 }
 
 glm::vec3 CameraController::sweepAgainstWalls(const glm::vec3& from, const glm::vec3& to,
-                                              bool includeDoodads) {
+                                              bool includeDoodads, float stepHeight) {
     const glm::vec3 delta = to - from;
     const float distSq = glm::dot(delta, delta);
     if (distSq <= 1e-4f) return to;   // stationary: not worth a collision call
@@ -370,7 +370,10 @@ glm::vec3 CameraController::sweepAgainstWalls(const glm::vec3& from, const glm::
     // The character's own box (CreatureModelData, per race, form and mount):
     // a gnome is 1.06 tall and a draenei 0.43 wide where everyone was a 0.45
     // or 0.5 cylinder 2 yd tall.
-    const WMORenderer::Body body{collider_.halfWidth, collider_.height, collider_.stepHeight};
+    // The step: the collider's (1 yd on foot), or the caller's - 0 for a
+    // swimmer, whose trace has none (0x760B40).
+    const WMORenderer::Body body{collider_.halfWidth, collider_.height,
+                                 stepHeight >= 0.0f ? stepHeight : collider_.stepHeight};
     // Tighter steps indoors, where the geometry is closer together - and never
     // longer than the radius, or a sub-step could start outside a thin wall
     // and end past its plane without either end being inside the cylinder.
@@ -491,57 +494,11 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
                     ? sm::keepsSwimming(depthFromFeet, colliderH, true, true)
                     : sm::startsSwimming(depthFromFeet, colliderH, true, risingInJump);
 
-                // Ledge exits. The stock swim trace has no step: a swimmer
-                // meets a dock or a shelf as a wall and hops out at the surface
-                // (below). Wowee's wall test leaves anything within a step of
-                // the feet to the floor pass, which a swimmer does not run, so
-                // a ledge in front of or under a swimmer heading for it ends
-                // the swim and the ground mover's step takes it - when the
-                // water over that ledge is shallower than the stock exit depth.
-                const float exitDepth = sm::swimExitDepth(colliderH);
-                if (swimming && inWater && f.nowForward && f.flightForward.z > -0.20f && !f.xDown) {
-                    auto queryFloorAt = [&](float x, float y, float probeZ) -> std::optional<float> {
-                        std::optional<float> best;
-                        if (terrainManager) {
-                            best = terrainManager->getHeightAt(x, y);
-                        }
-                        if (wmoRenderer) {
-                            float nz = 1.0f;
-                            auto wh = wmoRenderer->getFloorHeight(x, y, probeZ, &nz);
-                            if (wh && nz >= 0.40f && (!best || *wh > *best)) best = wh;
-                        }
-                        if (m2Renderer && !externalFollow_) {
-                            float nz = 1.0f;
-                            auto mh = m2Renderer->getFloorHeight(x, y, probeZ, &nz);
-                            if (mh && nz >= 0.35f && (!best || *mh > *best)) best = mh;
-                        }
-                        return best;
-                    };
-                    const float step = collider_.stepHeight;
-                    const float probeZ = targetPos.z + step + 1.0f;
-                    // Under the feet, then ahead along the swim.
-                    std::optional<float> ledge;
-                    if (auto h = queryFloorAt(targetPos.x, targetPos.y, probeZ)) ledge = h;
-                    glm::vec2 fwd2(f.forward.x, f.forward.y);
-                    float fwdLenSq = glm::dot(fwd2, fwd2);
-                    if (fwdLenSq > 1e-8f) {
-                        fwd2 *= glm::inversesqrt(fwdLenSq);
-                        const float reach = std::max(collider_.halfWidth, step * sm::kTan50);
-                        for (float d : {0.45f, 0.90f, reach}) {
-                            auto h = queryFloorAt(targetPos.x + fwd2.x * d,
-                                                  targetPos.y + fwd2.y * d, probeZ);
-                            if (h && (!ledge || *h > *ledge)) ledge = h;
-                        }
-                    }
-                    if (ledge) {
-                        const float rise = *ledge - targetPos.z;
-                        const bool nearSurface = depthFromFeet <= swimFloatDepth() + 0.2f;
-                        const bool withinStep = rise >= -0.35f && rise <= step;
-                        const bool shallowOverLedge = (*waterH - *ledge) < exitDepth;
-                        if (nearSurface && withinStep && shallowOverLedge) inWater = false;
-                    }
-                }
-
+                // No ledge exit: the stock swim trace (0x760B40) has no step,
+                // so a swimmer meets a dock or a shelf as a wall (the swim
+                // sweep below passes a step of 0) and leaves the water onto it
+                // only by the hop at the surface, or by wading out where the
+                // water gets shallower than the exit depth.
                 // Ascend held at the surface jumps out of the water (0x730D10:
                 // ASCENDING within 1/3 yd of the float line -> 0x72EB80, a
                 // JUMP from the water at 9.0967 yd/s). On foot always; mounted
@@ -751,7 +708,10 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
         // Enforce collision while swimming too (horizontal only), skip when stationary.
         {
             // Horizontal only: the swim clamp owns the vertical.
-            glm::vec3 stepPos = sweepAgainstWalls(*followTarget, targetPos, true);
+            // A step of 0: the stock swim trace (0x760B40) has none, so a
+            // ledge side is a wall to a swimmer, not a stair.
+            glm::vec3 stepPos = sweepAgainstWalls(*followTarget, targetPos, true,
+                                                  game::stock_movement::kSwimStepHeight);
 
             // Terrain is a wall to a swimmer, not only a floor.
             //
@@ -2359,7 +2319,7 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
                     [this](float sx, float sy) { return terrainManager->getHeightAt(sx, sy); },
                     targetPos.x, targetPos.y, kTerrainSlopeSpacing);
                 const glm::vec2 d(n.x, n.y);
-                if (n.z < movement::kMinWalkableNormalZ && glm::length(d) > 1e-4f) {
+                if (game::stock_movement::groundIsFall(n.z) && glm::length(d) > 1e-4f) {
                     bool onStructure = false;
                     if (wmoRenderer) {
                         float nz = 1.0f;
@@ -3757,7 +3717,8 @@ void CameraController::update(float deltaTime) {
         // FALLING and applies the keys pressed in the air (0x988490) in this
         // client's copy of the flags. The frame the fall ends, rising or not:
         // a jump that meets a slope on the way up lands too.
-        if (fallTracking_ && fallJumped_ && grounded && !swimming && followTarget) {
+        if (fallTracking_ && fallJumped_ && grounded && !onSteepSlope_ && !swimming &&
+            followTarget) {
             if (sm::fallLandDue(fallApexZ_, followTarget->z)) {
                 movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_FALL_LAND));
             } else if (silentLandingCallback_) {
@@ -3849,7 +3810,14 @@ void CameraController::update(float deltaTime) {
     // The fall's height (0x986FB0): where it began plus the rise still to
     // come, z + v^2 / 2g on its first airborne frame - the apex of a jump,
     // the edge's z for a walk off it.
-    if (!grounded && !swimming && !isFlightAirborne() && followTarget) {
+    // Ground too steep to stand on is a fall too: stock has no triangle to
+    // walk there (0x75D1C0 refuses it), the walker leaves it (0x988370(0))
+    // and the air step 0x7618B0 slides the box down the face, FALLING all
+    // the way to walkable ground. Wowee keeps the feet on the face and
+    // slides them (slopeSlideVel_); the server is told of it as of a fall -
+    // HEARTBEAT with FALLING, then FALL_LAND on the walkable ground at the
+    // bottom - and the keys pressed on the way go out pending.
+    if ((!grounded || onSteepSlope_) && !swimming && !isFlightAirborne() && followTarget) {
         if (!fallTracking_) {
             fallTracking_ = true;
             fallElapsed_ = 0.0f;
@@ -3866,7 +3834,12 @@ void CameraController::update(float deltaTime) {
         // (a few frames, 54 ms from rest): a bump that loses the ground for a
         // frame or two and drops less lands with nothing to say either way,
         // so the server is not told of it at all.
+        // Not over ground that has not streamed in, nor while gravity is held
+        // for it after world entry: a far teleport hangs the character there
+        // until the floor pick finds the ground, and that is not a fall.
         if (!fallJumped_ && !externalFollow_ && fallReportCallback_ &&
+            gravitySuspendTimer_ <= 0.0f &&
+            !groundNotStreamedYet(followTarget->x, followTarget->y) &&
             fallApexZ_ - followTarget->z > sm::kFallLandMinHeight) {
             fallJumped_ = true;
             fallReportCallback_(static_cast<uint32_t>(fallElapsed_ * 1000.0f));

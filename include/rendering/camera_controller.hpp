@@ -553,7 +553,8 @@ private:
     /// Written out three times, for walking, for swimming, and for the free-fly
     /// camera, with the step sizes and the cap repeated in each.
     /// `includeDoodads` adds M2 collision, which the free-fly camera does not use.
-    glm::vec3 sweepAgainstWalls(const glm::vec3& from, const glm::vec3& to, bool includeDoodads);
+    glm::vec3 sweepAgainstWalls(const glm::vec3& from, const glm::vec3& to,
+                                bool includeDoodads, float stepHeight = -1.0f);
 
     WMORenderer* wmoRenderer = nullptr;
     M2Renderer* m2Renderer = nullptr;

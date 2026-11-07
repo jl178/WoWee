@@ -250,6 +250,19 @@ inline float stepHeight(bool playerControlled, float objectScale = 1.0f) {
     return playerControlled ? std::max(1.0f, objectScale) : kStepHeightOther;
 }
 
+/// A swimmer's step (0x760B40): none. The swim trace meets a ledge side as a
+/// wall; a swimmer leaves the water onto a ledge only by the hop at the
+/// surface (0x72EB80) or by wading out where the water is shallower than the
+/// exit depth (0x730D10).
+inline constexpr float kSwimStepHeight = 0.0f;
+
+/// Whether standing on ground with this normal is a fall (0x75D1C0 refuses
+/// the triangle, the walker starts a fall, 0x988370(0), and the air step
+/// 0x7618B0 slides the box down it, FALLING, to walkable ground).
+inline bool groundIsFall(float normalZ, bool playerControlled = true) {
+    return !isWalkableNormalZ(normalZ, playerControlled);
+}
+
 /// Whether a heartbeat is due (0x6F09F0): moving, and 500 ms since the last
 /// movement packet.
 /// The ground walker's snap after a move runs off the triangle it was on

@@ -585,6 +585,17 @@ also skips the cameraDive surface/submerge pitch limits (0x6023D0,
 | 39 | After running off what it stood on, the walker snaps down `move x 1.8494` (0x7620F0), so a walkable descent stays grounded at any speed and frame rate | the walking step-down reached a fixed 0.6: on a steep walkable slope a fast mount, or a low frame rate, lost the ground and fell | `max(0.6, stock_movement::walkOffSnapReach(move))`; the 0.6 floor is Wowee's (7.3) |
 | 40 | A fall that starts without a jump (walked off an edge) is reported at once: HEARTBEAT 0xEE with FALLING, v0 0, the leg's direction and speed (event 9, 0x988370(0)); keys in the air then go out pending, as in a jump | not reported (no FALLING went out), so its keys stayed latched and were sent at the landing, and its landing was a FALL_LAND by height alone | `MovementHandler::beginWalkOffFall` (from `CameraController`'s fall tracking once the fall has dropped 1/36; the fall time backdated to the edge), the jump's key rules from then on |
 | 41 | No FALL_LAND for a landing within 1/36 yd of the fall's apex (0x73D4A0), a jump onto a ledge at the top of its arc included; the landing still clears FALLING and applies the pending keys | a reported jump always sent FALL_LAND (it was what cleared FALLING here), and a jump that met a slope while still rising sent nothing and left FALLING set | `fallLandDue` for every reported fall, `MovementHandler::landWithoutPacket` otherwise; the landing is taken the frame the fall ends, rising or not |
+| 42 | A swimmer's trace has no step (0x760B40): a ledge side is a wall, and a swimmer leaves the water onto it only by the hop at the surface or by wading out where the water is shallower than the exit depth | a ledge within the step under or ahead of a swimmer at the surface, with water over it shallower than the exit depth, ended the swim and the ground mover stepped onto it | the ledge exit removed; the swim's wall sweep passes `stock_movement::kSwimStepHeight` (0) to the WMO wall test, so a dock side stops a swimmer; in game a swimmer at the Goldshire-area lake (-9558, 380) swam the 7 yd to the terrain shore and walked out at the exit depth |
+| 43 | Ground too steep to stand on is a fall (0x75D1C0 refuses it, 0x988370(0), the air step 0x7618B0 slides the box down it FALLING): HEARTBEAT with FALLING, the keys pending, FALL_LAND on walkable ground | a terrain slide with the feet held "grounded": no FALLING ever went out, so the server saw a walker gliding down a cliff | the slide is fall-tracked like a walk off an edge (`stock_movement::groundIsFall`): reported once it has dropped 1/36, landed with FALL_LAND by the same height rule. In game on a knoll at (-9304, 67) the slide went out as HEARTBEAT 0x1000s with a FALL_LAND on each walkable patch it crossed (four, over 3.7 yd) |
+| 44 | A seat model with Vehicle.flags 0x80000 fades by the camera distance less the 0.2 near clip (0x606F90's loop, as for the player) | the raw distance | `vehicle::cameraFadeAlpha` subtracts the near clip |
+
+Knockback in game (row 31 with 40/41, 2026-11-07): the lab casts no
+knockback on a player (`.cast self` / `.cast back` with 10689 or 11027 do
+nothing to one), so `WoweeDebug_KnockBack` hands in an SMSG_MOVE_KNOCK_BACK:
+the ack, a held fall with FORWARD | PENDING_STOP (0x5001), FALL_LAND on
+landing; W pressed in the air went out as START_FORWARD 0x1001 and its
+release as STOP 0x5001; a knockback of 0.5 yd/s up landed within 1/36 yd and
+sent no FALL_LAND.
 
 In game for rows 33-41 (lab, 2026-11-07, WPTEST7, human warrior, a
 `WOWEE_DEBUG_LUA` script, `WOWEE_INPUT_TRACE` for the packets): a 100-pixel
@@ -619,17 +630,15 @@ Still different (not changed here; each needs in-game checking):
   r x 1.41); Wowee sweeps a cylinder of radius r. The doodad test
   (`m2_renderer_instance.cpp`) still uses a fixed 2 yd height and 1 yd step;
   only its radius follows the model.
-- **Swim ledge exits.** Stock swimming has no step: a swimmer gets onto a
-  ledge only by the hop. Wowee keeps an exit to walking when a ledge within
-  the step lies under or ahead of a swimmer at the surface and the water over
-  it is shallower than the stock exit depth, because its wall tests leave
-  such a ledge to the floor pass, which a swimmer does not run. Removing the
-  exit alone would let a swimmer drift into the ledge rather than stop at
-  it: the stock behaviour needs `sweepAgainstWalls` to treat a ledge side as
-  a wall while swimming (step 0, as 0x760B40's swim trace has none), which
-  changes collision for every swimmer and was not done here.
-- **Steep ground.** Stock is FALLING on it and the air step slides the box
-  down; Wowee slides terrain only, with its own acceleration.
+- **The steep slide** keeps the feet on the face and slides them with
+  Wowee's own acceleration (the horizontal part of g sin t cos t), where
+  stock's air step projects a fall onto the face; the speeds are alike, the
+  flags now are, but a direction pressed during the slide still moves the
+  character (stock holds it pending) and the 2 yd normal sampling lets a
+  knoll's face read walkable in patches, so one slide can land several times.
+- **A swimmer against an M2 ledge**: the doodad test
+  (`m2_renderer_instance.cpp`) keeps its own fixed 1 yd step; only the WMO
+  wall test takes the swimmer's step of 0.
 - **When a walk-off fall is reported**: stock sends its HEARTBEAT the slice
   the walker finds no ground (7.3); Wowee sends it once the fall has dropped
   1/36 yd (54 ms from rest), so a frame's loss of contact that drops less -
