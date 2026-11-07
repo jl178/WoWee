@@ -242,6 +242,21 @@ MainMenu_Northrend 2.094 / 2778.
 
 ### Checking it
 
+`WOWEE_GLUE_SCRIPT=<file>` drives the glue screens with real ImGui mouse
+and key input (`glue::runInputScript`, steps in `glue_ui.hpp`): clicks are
+given in GlueParent units, so a hit test that disagreed with the drawing
+would miss. On 2026-11-07, at 1680x720 (pillarboxed), 1280x720 and 960x720,
+one script clicked the account field, Options, its Effects page and Cancel,
+Login, Change Realm, the realm row and Okay, Create New Character, a race
+icon, the name box (typed into), Back, Delete Character and the dialog's
+Cancel, the character, Back (to the realm list), the realm again and Enter
+World: 9 of 9 state checks passed at each size, with screenshots for the
+hits that change no state; a second script's Quit closed the client. The
+first run found a crash on the first character-select frame after a login
+by the button (in 3ab580b too): the selection was checked against the list
+once and used after the list had been cleared and refilled; it is checked
+at each use now and the scene gets a copy.
+
 `WOWEE_GLUE_OPEN=create` with `WOWEE_AUTO_LOGIN` goes straight from the
 character list to character creation, so the create screen can be screenshot
 unattended. The glue ambience and scene lighting choices log at info level

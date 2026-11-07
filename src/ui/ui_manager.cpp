@@ -492,6 +492,7 @@ void UIManager::update([[maybe_unused]] float deltaTime) {
     // Start ImGui frame
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplSDL3_NewFrame();
+    glue::runInputScript();
     ImGui::NewFrame();
 }
 

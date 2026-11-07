@@ -1247,6 +1247,36 @@ first-use upload of each texture. Memory: the mipped copies are a third
 larger than the single-level ones, and with the row toggled both sets stay
 resident until the device's UI textures are rebuilt.
 
+**Off against 3ab580b.** The base commit built in a second tree (with only
+the two test switches, `WOWEE_WINDOW_FIXED` and `WOWEE_SCREENSHOT_FRAME`,
+added), both rows off, the same frames captured from both binaries, and
+two captures from each binary for its own noise. Neither glue nor world is
+deterministic frame to frame (the login and select scenes animate; units,
+streaming and the portrait move), so the numbers are per UI region against
+that noise:
+
+| Region | base vs base | base vs new |
+|---|---|---|
+| In world, main bar left (opaque art), 17,100 px | 0 differ | 0 differ (twice) |
+| In world, main bar right | 158 differ, max 4 | 158 / 0 differ, max 4 |
+| In world, player frame (translucent over the world) | 795 differ, max 1 | 273 / 549 differ, max 1 |
+| In world, minimap cluster | 1,802 differ, max 24 | 1,158 / 1,088 differ, max 24 / 1 |
+| Login 16:9, Login button | 927 differ, max 7 | 715 differ, max 6 |
+| Login 16:9, Options / Quit / left buttons | max 22 / 28 / 39 | max 32 / 18 / 38 |
+| Login 21:9 (new, GlueParent rect) vs base 16:9 | - | Login max 6, left buttons max 39, Options max 32, Quit max 18 |
+| Login 21:9 bars | - | 0 of 288,000 px not black |
+| Character select 16:9, list panel / bottom buttons | - | 5 / 3 px over 16 (the scene behind) |
+
+Every difference is the size of the binary's own run-to-run difference and
+sits where the UI is translucent over something that moves; the one region
+of opaque art is identical to the byte. The version string is the one real
+difference ("unknown" in the exported base tree, which has no `.git`). The
+whole frames differ by much more (login 89% of pixels in both base-vs-base
+and base-vs-new; world 0.4-0.6% over 16 levels, the trees and terrain
+streamed differently and the 3D portrait), which is the scenes, not the
+interface. What this does not show is byte-identity under translucent UI:
+that needs a deterministic scene, which the glue does not have.
+
 Shots (scratch `ui-re/shots/`, 1680x720): glue `glue_login_1680x720.png`,
 `glue_charselect_1680x720.png` (stock pillarbox, 200 px bars);
 in game `g_hud_stock.png` / `g_hud_wide.png` and `g_panels_stock.png` /

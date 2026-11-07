@@ -9,6 +9,13 @@
 #include "pipeline/blp_loader.hpp"
 #include "rendering/vk_context.hpp"
 #include "game/glue_rules.hpp"
+#include "core/logger.hpp"
+#include "rendering/renderer.hpp"
+
+#include <SDL3/SDL.h>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
 
 #include <algorithm>
 #include <cctype>
@@ -160,6 +167,136 @@ std::vector<std::string> wrap(const std::string& s, float widthPx, float sizePx,
 float unit() {
     const float h = ImGui::GetIO().DisplaySize.y;
     return h > 1.0f ? h / 768.0f : 1.0f;
+}
+
+namespace {
+struct ScriptState {
+    bool loaded = false;
+    std::vector<std::string> lines;
+    size_t next = 0;
+    double waitUntil = 0.0;
+    int releaseIn = -1;   // frames until the button goes up
+    float rx = 0.0f, ry = 0.0f;
+    int passes = 0, fails = 0;
+};
+
+const char* stateName(core::AppState s) {
+    switch (s) {
+        case core::AppState::AUTHENTICATION: return "AUTHENTICATION";
+        case core::AppState::REALM_SELECTION: return "REALM_SELECTION";
+        case core::AppState::CHARACTER_CREATION: return "CHARACTER_CREATION";
+        case core::AppState::CHARACTER_SELECTION: return "CHARACTER_SELECTION";
+        case core::AppState::IN_GAME: return "IN_GAME";
+        case core::AppState::DISCONNECTED: return "DISCONNECTED";
+        case core::AppState::FIRST_RUN: return "FIRST_RUN";
+    }
+    return "?";
+}
+
+/// GlueParent units to window pixels, through the same rule the scope uses.
+ImVec2 scriptPoint(float fx, float dx, float y) {
+    const ImVec2 screen = ImGui::GetIO().DisplaySize;
+    const game::glue::Rect parent = game::glue::glueParentRect(screen.x, screen.y);
+    const float u = screen.y > 1.0f ? screen.y / 768.0f : 1.0f;
+    return ImVec2(parent.x0 + fx * parent.width() + dx * u, y * u);
+}
+}  // namespace
+
+void runInputScript() {
+    static ScriptState st;
+    if (!st.loaded) {
+        st.loaded = true;
+        const char* path = std::getenv("WOWEE_GLUE_SCRIPT");
+        if (!path || !*path) return;
+        std::ifstream in(path);
+        for (std::string line; std::getline(in, line);) {
+            const size_t hash = line.find('#');
+            if (hash != std::string::npos) line.resize(hash);
+            if (line.find_first_not_of(" \t\r") != std::string::npos) st.lines.push_back(line);
+        }
+        LOG_WARNING("GLUE_SCRIPT: ", st.lines.size(), " steps from ", path);
+    }
+    if (st.lines.empty() || ImGui::GetCurrentContext() == nullptr) return;
+    ImGuiIO& io = ImGui::GetIO();
+    // A click is a press on one frame and a release two later, at the same
+    // place, so the screen sees the button down at least once.
+    if (st.releaseIn >= 0) {
+        io.AddMousePosEvent(st.rx, st.ry);
+        if (st.releaseIn-- == 0) io.AddMouseButtonEvent(0, false);
+        return;
+    }
+    const double now = ImGui::GetTime();
+    if (now < st.waitUntil || st.next >= st.lines.size()) return;
+    auto& app = core::Application::getInstance();
+    const std::string line = st.lines[st.next++];
+    std::istringstream ss(line);
+    std::string op;
+    ss >> op;
+    const char* state = stateName(app.getState());
+    if (op == "wait") {
+        double s = 0.0;
+        ss >> s;
+        st.waitUntil = now + s;
+    } else if (op == "click" || op == "move") {
+        float fx = 0.0f, dx = 0.0f, y = 0.0f;
+        ss >> fx >> dx >> y;
+        std::string label;
+        std::getline(ss, label);
+        const ImVec2 p = scriptPoint(fx, dx, y);
+        st.rx = p.x;
+        st.ry = p.y;
+        io.AddMousePosEvent(p.x, p.y);
+        if (op == "click") {
+            io.AddMouseButtonEvent(0, true);
+            st.releaseIn = 2;
+        }
+        LOG_WARNING("GLUE_SCRIPT ", op, label, " at window ", p.x, ",", p.y,
+                    " (", io.DisplaySize.x, "x", io.DisplaySize.y, ") state=", state);
+        st.waitUntil = now + 0.5;
+    } else if (op == "key") {
+        std::string k;
+        ss >> k;
+        ImGuiKey key = ImGuiKey_None;
+        if (k == "enter") key = ImGuiKey_Enter;
+        else if (k == "escape") key = ImGuiKey_Escape;
+        else if (k == "tab") key = ImGuiKey_Tab;
+        else if (k == "backspace") key = ImGuiKey_Backspace;
+        if (key != ImGuiKey_None) {
+            io.AddKeyEvent(key, true);
+            io.AddKeyEvent(key, false);
+        }
+        LOG_WARNING("GLUE_SCRIPT key ", k, " state=", state);
+        st.waitUntil = now + 0.3;
+    } else if (op == "text") {
+        std::string t;
+        std::getline(ss, t);
+        if (!t.empty() && t[0] == ' ') t.erase(0, 1);
+        io.AddInputCharactersUTF8(t.c_str());
+        LOG_WARNING("GLUE_SCRIPT text '", t, "' state=", state);
+        st.waitUntil = now + 0.3;
+    } else if (op == "shot") {
+        std::string p;
+        ss >> p;
+        if (auto* r = app.getRenderer()) r->captureScreenshot(p);
+        LOG_WARNING("GLUE_SCRIPT shot ", p, " state=", state);
+        st.waitUntil = now + 0.3;
+    } else if (op == "expect") {
+        std::string want;
+        ss >> want;
+        const bool ok = want == state;
+        (ok ? st.passes : st.fails)++;
+        LOG_WARNING("GLUE_SCRIPT expect ", want, ok ? " pass" : " FAIL", " (state=", state,
+                    ") passes=", st.passes, " fails=", st.fails);
+    } else if (op == "log") {
+        std::string t;
+        std::getline(ss, t);
+        LOG_WARNING("GLUE_SCRIPT log", t, " state=", state);
+    } else if (op == "quit") {
+        LOG_WARNING("GLUE_SCRIPT done: passes=", st.passes, " fails=", st.fails);
+        SDL_Event ev{};
+        ev.type = SDL_EVENT_QUIT;
+        SDL_PushEvent(&ev);
+    }
 }
 
 GlueParentScope::GlueParentScope() {

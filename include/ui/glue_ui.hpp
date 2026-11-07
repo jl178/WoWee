@@ -23,6 +23,28 @@ namespace glue {
 /// One glue unit in pixels: the window's height over 768.
 float unit();
 
+/// WOWEE_GLUE_SCRIPT=<file>: drives the glue screens with real ImGui input,
+/// for checking that what is drawn and what is clicked agree - above 16:9
+/// in particular, where GlueParentScope moves one and not the other. Called
+/// once a frame between the platform backend's NewFrame and ImGui's, so its
+/// events follow the backend's and win. Off (and free) unless set.
+///
+/// One step per line; `#` starts a comment:
+///   wait <seconds>
+///   click <fx> <dx> <y> [label]   GlueParent units: fx 0, 0.5 or 1 is the
+///                                 left edge, centre or right edge of
+///                                 GlueParent, dx units from there, y units
+///                                 down from its top (768 tall)
+///   move <fx> <dx> <y>
+///   key <enter|escape|tab|backspace>
+///   text <characters>
+///   shot <path>                    the last finished frame
+///   expect <state>                 the AppState by name; logged pass or FAIL
+///   log <text>
+///   quit
+/// Each step is logged as "GLUE_SCRIPT".
+void runInputScript();
+
 /// GlueParent, for the glue screens drawn while one is alive.
 ///
 /// Stock (GlueParent_OnLoad) anchors GlueParent `barWidth` in from each side

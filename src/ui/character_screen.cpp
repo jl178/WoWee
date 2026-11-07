@@ -132,8 +132,17 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
         restoredLastCharacter = true;
     }
 
-    const bool haveSelection = selectedCharacterIndex >= 0 &&
-                               selectedCharacterIndex < static_cast<int>(characters.size());
+    // Asked again at every use rather than once here: `characters` is the
+    // handler's own list, and it can be cleared or replaced part way through
+    // this frame - a list request clears it, SMSG_CHAR_ENUM replaces it, and
+    // the scene's first load runs between this point and the name under it.
+    // A selection checked against the old size then indexed the new list
+    // (empty) and read a name out of freed memory: the client crashed on the
+    // first character-select frame after a login by the button.
+    const auto selectionValid = [&]() {
+        return selectedCharacterIndex >= 0 &&
+               selectedCharacterIndex < static_cast<int>(characters.size());
+    };
 
     const auto enterWorld = [&](const game::Character& character) {
         // Only on this session's list. After a logout the previous list is
@@ -182,8 +191,10 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
     // The selected character in its race's backdrop, over the whole window.
     // With nobody to show, the login's Northrend scene (drawn by the auth
     // screen behind this one) stays, as the stock default does.
-    if (haveSelection) {
-        drawScene(characters[static_cast<size_t>(selectedCharacterIndex)], screen.x, screen.y);
+    if (selectionValid()) {
+        // A copy: the load inside can replace the list it came from.
+        const game::Character shown = characters[static_cast<size_t>(selectedCharacterIndex)];
+        drawScene(shown, screen.x, screen.y);
     }
 
     // CharacterSelectLogo: the WotLK logo, 256x128 at TOPLEFT(3,-7). The
@@ -209,7 +220,7 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
 
     // ---- name, Enter World, rotation -------------------------------------------
     const float cx = screen.x * 0.5f;
-    if (haveSelection) {
+    if (selectionValid()) {
         const auto& character = characters[static_cast<size_t>(selectedCharacterIndex)];
         // CharSelectCharacterName: GlueFontNormalHuge at BOTTOM(0,100).
         const float huge = glue::kFontHuge * u;
@@ -297,7 +308,7 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
         const ImVec2 db(ba.x, bb.y);
         const ImVec2 da(db.x - 165.0f * u, ba.y);
         if (glue::button(ui_, dl, "cs.delete", da, db, "Delete Character",
-                         glue::ButtonStyle::Red, haveSelection, glue::kFontSmall)) {
+                         glue::ButtonStyle::Red, selectionValid(), glue::kFontSmall)) {
             glue_audio::play("gsCharacterSelectionDelCharacter");  // CharacterSelect_Delete
             deleteConfirmStage = 1;
             deleteConfirm_.clear();
@@ -332,7 +343,7 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
             if (selectedCharacterIndex >= listScroll_ + kRowsShown)
                 listScroll_ = selectedCharacterIndex - kRowsShown + 1;
         }
-        if (haveSelection && !disconnected &&
+        if (selectionValid() && !disconnected &&
             (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
              ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false))) {
             // Claim Enter so the game screen doesn't activate chat on the same press
@@ -350,7 +361,7 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
     if (modalUp) ui_.popInert();
 
     // ---- dialogs ------------------------------------------------------------
-    if (deleteConfirmStage != 0 && haveSelection) {
+    if (deleteConfirmStage != 0 && selectionValid()) {
         renderDeleteConfirm(characters[static_cast<size_t>(selectedCharacterIndex)], screen.x,
                             screen.y);
     } else if (deleteConfirmStage != 0) {
