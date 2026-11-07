@@ -301,12 +301,22 @@ inline uint32_t woundAnim(bool crit, bool attacking) {
     return attacking ? COMBAT_WOUND : STAND_WOUND;
 }
 
-/// Which track that flinch takes (0x736640): the whole body only for a
-/// StandWound on a unit at ease - not moving, not casting; a crit or a unit
-/// with an attack target of its own flinches on the upper-body track, over
-/// whatever its body plays (its stance, its swing, its cast).
-inline bool woundOnUpperBody(bool crit, bool attacking, bool moving, bool casting) {
-    return crit || attacking || moving || casting;
+/// Which track that flinch takes (0x736640). The whole body for a StandWound
+/// on a unit at ease - not moving, not casting. A crit, a unit with an
+/// attack target of its own, a moving or casting one is bound for the
+/// upper-body track (+0xB84) - but 0x7366B6 looks at what the whole body
+/// plays first, and over Stand (0) or a Ready stance (0x71DAE0: AnimationData
+/// BehaviorID 25-29, ReadyUnarmed/1H/2H/2HL/Bow and their Fly twins) the
+/// flinch takes the whole body after all. So a fighter standing in its
+/// stance between swings flinches whole (the stance is what is replaced),
+/// and only one mid-swing, running or casting flinches over it.
+/// `bodyAnim` is the whole-body animation playing now.
+inline bool woundOnUpperBody(bool crit, bool attacking, bool moving, bool casting,
+                             uint32_t bodyAnim) {
+    if (!(crit || attacking || moving || casting)) return false;
+    if (bodyAnim == STAND) return false;
+    const uint32_t behavior = dbcBehavior(bodyAnim);
+    return !(behavior >= 25 && behavior <= 29);
 }
 
 /// The sheath state a unit's weapons are shown in, which in the stock client

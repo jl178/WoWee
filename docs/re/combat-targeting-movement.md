@@ -366,9 +366,17 @@ is playing. Otherwise:
 - the victim has an attack target: CombatWound (9);
 - else StandWound (8).
 
-Track: the whole body when the unit stands idle or in its Ready stance (and is
-not mounted, moving, sitting or swimming); the upper-body bone set when it
-moves or is mid-swing. Played once (0x735820, speed 1).
+Track: StandWound takes the whole body unless the unit moves, is mounted,
+sitting or swimming. CombatWound and CombatCritical (and a moving unit's
+StandWound) are bound for the upper-body track (`+0xB84`) - but 0x7366B6
+then reads the whole body's animation (0x8267E0(-1)) and, when it is Stand
+(0) or a Ready stance (0x71DAE0: AnimationData BehaviorID 25-29 -
+ReadyUnarmed/1H/2H/2HL/Bow and their Fly twins), plays the wound on the whole
+body after all. So a fighter standing in its stance between swings flinches
+whole; one mid-swing, running or casting flinches on the upper body over it.
+Played once (0x735820, speed 1). The anim goes through 0x7176F0's
+AnimationData fallback chain (CombatCritical -> CombatWound -> StandWound ->
+ReadyUnarmed) and plays only if the model has it (0x825EE0).
 
 ### Parry (0x73B050)
 
@@ -605,10 +613,12 @@ recorded at `+0xFA4`.
 
 **A wound during a cast** (0x736640, from the blow's `$CAH`): the cast goes
 on. CombatWound (attack target), CombatCritical (crit), or StandWound (at
-ease) - the track: the **whole body only for a StandWound on a unit at
+ease) - the track: the **whole body for a StandWound on a unit at
 ease** (no attack target, not moving, not falling or on a spline, not
 sitting, `+0x98C` 0); otherwise the **upper-body track** (`+0xB84`), over
-whatever the body plays - a fighter's stance, its swing, a cast. A
+whatever the body plays - its swing, a cast, a run - **unless the body plays
+Stand or a Ready stance** (BehaviorID 25-29, 0x7366B6), which the wound
+replaces on the whole body (see Wound above). A
 whole-body flinch is a one-shot; at its end the re-pick answers the spell
 pose again, so a caster hit at ease flinches and goes back to its cast.
 
@@ -753,6 +763,7 @@ Fourth pass (casts ending, duels, macros; `input-timing.md` section 6):
 | 33 | A wound during the player's cast cleared the cast in `CombatFSM::triggerHitReaction`: after the flinch the caster stood idle for the rest of the cast (Jered's report: "when hit, I did a new cast and I just stand still") | The cast survives the flinch and its pose comes back after it, from the flinch's own end (no Stand frame between); a release during the flinch still plays; a cast ended during it leaves nothing to come back. Lab, Rotting Maggot hitting a casting mage: 51 -> 8 -> 51 |
 | 34 | A second instant's release (the same SpellCastOmni/Directed) was left playing as the first's - the same id was not asked for again - and the first's end was taken for the second's | `AnimOutput::restart`: a new precast or release plays from its first frame; the release's end is not read on the frame it was asked for. Lab: Ice Lance, Ice Lance - 53 restarted |
 | 35 | Wounds on other units took the whole body unless they were moving, and were dropped over a swing or a cast; a fighter's next swing then cut its flinch, and a flinch cut a swing's end ("the enemy's animation doesn't finish") | The track by 0x736640 (`anim::woundOnUpperBody`): a unit with an attack target, a crit, a moving or casting unit flinches on the upper body over its stance, swing or cast; only a unit at ease takes it on the whole body. The local player the same (`AnimationController::triggerHitReaction(id, upperTrack)`). Lab: the Rotting Maggot's CombatWound (9) on the upper body over ReadySpell / its swing (16 / 25), each running to its end |
+| 36 | Every wound bound for the upper body played there, over Stand and the Ready stance too: a mob standing between its swings flinched only on its upper-body overlay, which on a model without the SpineLow/shoulder key bones moves nothing (Jered: "enemies don't react when hit by my sword") | 0x7366B6: over Stand (0) or a Ready stance (BehaviorID 25-29) the wound takes the whole body; only over a swing, a run or a cast the upper body (`anim::woundOnUpperBody(..., bodyAnim)`, the local player the same). Lab, a level-10 mage's sword on a Young Wolf: CombatWound (9) whole-body between its swings, on the upper body over its Attack (16) and walk (4); a crit CombatCritical (10) |
 
 Still different:
 

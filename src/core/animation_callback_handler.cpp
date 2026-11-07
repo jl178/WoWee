@@ -929,15 +929,20 @@ void AnimationCallbackHandler::playHitReaction(uint64_t victimGuid, uint8_t reac
     else                            animId = firstPlayable(has, {want});
     if (animId == 0) return;
 
-    // Which track (0x736640): the whole body only for a unit standing at
-    // ease - no attack target, not moving, not casting; a unit fighting
+    // Which track (0x736640). Bound for the upper body: a unit fighting
     // something (CombatWound, a parry, a block), a crit, a moving or casting
-    // unit takes it on the upper-body track, over whatever its body plays.
-    // So a fighter's swing and stance go on under the flinch, and the next
-    // swing does not cut the flinch off: played on the whole body, each was
-    // cut by the other ("the animation doesn't finish") and a flinch over a
-    // swing was dropped.
-    const bool upperTrack = woundOnUpperBody(reaction == HR::CRIT_WOUND, victimAttacking, false, false);
+    // unit - so a fighter's swing goes on under the flinch and the next swing
+    // does not cut it off. But over Stand or a Ready stance the whole body
+    // takes it (0x7366B6, see woundOnUpperBody): a mob standing in its stance
+    // between swings flinches whole. Played on the upper body there, the
+    // flinch went over a stance whose upper half is most of the model, and
+    // over a model with no upper-body bones (no SpineLow key bone) did
+    // nothing at all - Jered's sword hits made no flinch.
+    uint32_t cur = 0; float t = 0.0f, d = 0.0f;
+    const bool haveState = cr->getAnimationState(instanceId, cur, t, d);
+    if (haveState && cur == DEATH) return;
+    const bool upperTrack = woundOnUpperBody(reaction == HR::CRIT_WOUND, victimAttacking, false, false,
+                                             haveState ? cur : STAND);
 
     // For local player: use AnimationController state
     if (isLocalPlayer) {
@@ -945,9 +950,6 @@ void AnimationCallbackHandler::playHitReaction(uint64_t victimGuid, uint8_t reac
         return;
     }
 
-    uint32_t cur = 0; float t = 0.0f, d = 0.0f;
-    const bool haveState = cr->getAnimationState(instanceId, cur, t, d);
-    if (haveState && cur == DEATH) return;
     if (haveState && (upperTrack || isLocomotionAnim(cur) || isSpellCastFamily(cur))) {
         if (playsOnUpperBody(animId)) cr->playUpperBodyAnimation(instanceId, animId, animId, animId);
         return;

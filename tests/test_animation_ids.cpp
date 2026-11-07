@@ -276,13 +276,22 @@ TEST_CASE("Combat animations follow the stock weapon tables", "[animation][comba
     REQUIRE(anim::woundAnim(false, false) == anim::STAND_WOUND);
     REQUIRE(anim::woundAnim(false, true) == anim::COMBAT_WOUND);
     REQUIRE(anim::woundAnim(true, false) == anim::COMBAT_CRITICAL);
-    // Its track: the whole body only at ease; fighting, a crit, moving or
-    // casting take the upper body, so a swing or a stance goes on under it.
-    REQUIRE_FALSE(anim::woundOnUpperBody(false, false, false, false));
-    REQUIRE(anim::woundOnUpperBody(false, true, false, false));
-    REQUIRE(anim::woundOnUpperBody(true, false, false, false));
-    REQUIRE(anim::woundOnUpperBody(false, false, true, false));
-    REQUIRE(anim::woundOnUpperBody(false, false, false, true));
+    // Its track: the whole body at ease; fighting, a crit, moving or
+    // casting take the upper body over a swing, a run or a cast pose...
+    REQUIRE_FALSE(anim::woundOnUpperBody(false, false, false, false, anim::ATTACK_1H));
+    REQUIRE(anim::woundOnUpperBody(false, true, false, false, anim::ATTACK_1H));
+    REQUIRE(anim::woundOnUpperBody(true, false, false, false, anim::ATTACK_2H));
+    REQUIRE(anim::woundOnUpperBody(false, false, true, false, anim::RUN));
+    REQUIRE(anim::woundOnUpperBody(false, false, false, true, anim::READY_SPELL_DIRECTED));
+    // ...but over Stand or a Ready stance the whole body (0x7366B6: the
+    // body's BehaviorID 25-29, or anim 0), crit or not. Jered's report: his
+    // sword hits made no flinch on mobs standing in their stance.
+    REQUIRE_FALSE(anim::woundOnUpperBody(false, true, false, false, anim::STAND));
+    REQUIRE_FALSE(anim::woundOnUpperBody(false, true, false, false, anim::READY_1H));
+    REQUIRE_FALSE(anim::woundOnUpperBody(true, true, false, false, anim::READY_UNARMED));
+    REQUIRE_FALSE(anim::woundOnUpperBody(true, false, false, false, anim::READY_2H));
+    REQUIRE_FALSE(anim::woundOnUpperBody(false, true, false, false, anim::READY_2H_LOOSE));
+    REQUIRE_FALSE(anim::woundOnUpperBody(false, true, false, false, anim::READY_BOW));
 
     // Upper body over a run, 0x71D800: swings, flinches, stances and casts
     // do; Kick, Whirlwind and Death take the whole body.
