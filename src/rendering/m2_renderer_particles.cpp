@@ -645,7 +645,7 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
 // ---------------------------------------------------------------------------
 // Particle records (0x97E730 / 0x97BE80)
 // ---------------------------------------------------------------------------
-size_t M2Renderer::writeParticleRecordsGpu(uint32_t frame) {
+size_t M2Renderer::writeParticleRecordsGpu(uint32_t frame, bool perEmitter) {
     using mp::ParticleRecord;
     auto& groups = particleGroups_;
     auto* const recBase = static_cast<ParticleRecord*>(particleRecordMapped_[frame]);
@@ -655,6 +655,8 @@ size_t M2Renderer::writeParticleRecordsGpu(uint32_t frame) {
     uint32_t curvesUsed = 0;
     particleCurveSlots_.clear();
     ParticleGroup* runGroup = nullptr;
+    size_t runInstance = SIZE_MAX;
+    int runEmitter = -1;
     const glm::vec3 camPos = cachedCamPos_;
 
     for (size_t idx : particleDrawOrder_) {
@@ -794,9 +796,16 @@ size_t M2Renderer::writeParticleRecordsGpu(uint32_t frame) {
 
             const uint32_t need = (head ? 1u : 0u) + (tail ? 1u : 0u);
             if (written + need > budget) break;
-            if (group != runGroup) {
+            // Per emitter when the blended pass sorts the runs among the
+            // batches; otherwise one run spans every emitter of a group.
+            if (group != runGroup ||
+                (perEmitter && (idx != runInstance || p.emitterIndex != runEmitter))) {
                 runGroup = group;
-                particleRuns_.push_back({.group = group, .first = written, .count = 0});
+                runInstance = idx;
+                runEmitter = p.emitterIndex;
+                particleRuns_.push_back({.group = group, .first = written, .count = 0,
+                                         .instance = static_cast<uint32_t>(idx),
+                                         .emitter = p.emitterIndex});
             }
             if (head) {
                 ParticleRecord& rec = recBase[written++];
@@ -844,23 +853,13 @@ size_t M2Renderer::writeParticleRecordsGpu(uint32_t frame) {
     return written;
 }
 
-void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
-    // Diagnostic: WOWEE_M2_NO_PARTICLES=1 drops every M2 particle draw, which
-    // tells a particle artifact apart from a skinned-geometry one.
-    static const bool kNoParticles = envFlagEnabled("WOWEE_M2_NO_PARTICLES");
-    if (kNoParticles) return;
-
-    const uint32_t frame = vkCtx_->getCurrentFrame() % 2;
+bool M2Renderer::particlePassReady(uint32_t frame) const {
     bool ready = particleRecordMapped_[frame] && particleCurveMapped_[frame] && particleCurveSet_[frame];
     for (VkPipeline p : particleGpuPipelines_) ready = ready && p != VK_NULL_HANDLE;
-    static bool saidPath = false;
-    if (!saidPath) {
-        saidPath = true;
-        if (ready) LOG_INFO("M2 particles: stock quads from records (budget ", particleRecordBudget_, ")");
-        else LOG_WARNING("M2 particles: quad pipelines unavailable (m2_particle_gpu.*.spv missing?) - not drawn");
-    }
-    if (!ready) return;
+    return ready;
+}
 
+size_t M2Renderer::prepareParticleRecords(uint32_t frame, bool perEmitter) {
     // Reuse persistent map - keep the bucket structure, drop last frame's set.
     for (auto& [k, g] : particleGroups_) g.preAllocSet = VK_NULL_HANDLE;
     particleRuns_.clear();
@@ -886,9 +885,56 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
         particleDrawOrder_.push_back(idx);
         if (d2 <= kNearFirstSq) std::swap(particleDrawOrder_[nearCount++], particleDrawOrder_.back());
     }
-    const size_t totalRecords = writeParticleRecordsGpu(frame);
+    const size_t totalRecords = writeParticleRecordsGpu(frame, perEmitter);
     particleVertsDrawn_.store(static_cast<uint32_t>(totalRecords), std::memory_order_relaxed);
     particleRunsDrawn_.store(static_cast<uint32_t>(particleRuns_.size()), std::memory_order_relaxed);
+    return totalRecords;
+}
+
+void M2Renderer::drawParticleRun(VkCommandBuffer cmd, const ParticleRun& run, VkPipeline& currentPipeline) {
+    if (run.count == 0 || !run.group) return;
+    ParticleGroup& group = *run.group;
+    const uint32_t blendType = std::min<uint32_t>(group.blendType, 6);
+    const VkPipelineLayout layout = particleGpuPipelineLayout_;
+    VkPipeline desired = particleGpuPipelines_[blendType];
+    if (desired != currentPipeline) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desired);
+        currentPipeline = desired;
+    }
+    const VkDescriptorSet texSet = particleTexSet(group);
+    if (texSet == VK_NULL_HANDLE) return;
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 1, 1, &texSet, 0, nullptr);
+    struct { float tileX, tileY; uint32_t blend, pad; } pc = {
+        .tileX = static_cast<float>(group.tilesX), .tileY = static_cast<float>(group.tilesY),
+        .blend = blendType, .pad = 0};
+    vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                       sizeof(pc), &pc);
+    // Four strip corners per record; the records are this run's instances.
+    vkCmdDraw(cmd, 4, run.count, 0, run.first);
+}
+
+void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+    // The blended pass drew them this frame, sorted among the batches.
+    if (particlesInterleaved_) {
+        particlesInterleaved_ = false;
+        return;
+    }
+    // Diagnostic: WOWEE_M2_NO_PARTICLES=1 drops every M2 particle draw, which
+    // tells a particle artifact apart from a skinned-geometry one.
+    static const bool kNoParticles = envFlagEnabled("WOWEE_M2_NO_PARTICLES");
+    if (kNoParticles) return;
+
+    const uint32_t frame = vkCtx_->getCurrentFrame() % 2;
+    const bool ready = particlePassReady(frame);
+    static bool saidPath = false;
+    if (!saidPath) {
+        saidPath = true;
+        if (ready) LOG_INFO("M2 particles: stock quads from records (budget ", particleRecordBudget_, ")");
+        else LOG_WARNING("M2 particles: quad pipelines unavailable (m2_particle_gpu.*.spv missing?) - not drawn");
+    }
+    if (!ready) return;
+
+    const size_t totalRecords = prepareParticleRecords(frame, false);
     if (totalRecords == 0) return;
 
     const VkPipelineLayout layout = particleGpuPipelineLayout_;
@@ -900,50 +946,11 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
     VkPipeline currentPipeline = VK_NULL_HANDLE;
     for (auto& run : particleRuns_) {
         if (run.count == 0 || !run.group) continue;
-        ParticleGroup& group = *run.group;
-        const uint32_t blendType = std::min<uint32_t>(group.blendType, 6);
         // Soft particles: the blended runs wait for the late pass, which
         // reads the scene's depth (renderSoftParticles). Opaque and alpha-key
         // particles write depth and stay here.
-        if (softDeferred_ && blendType >= 2) continue;
-        VkPipeline desired = particleGpuPipelines_[blendType];
-        if (desired != currentPipeline) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desired);
-            currentPipeline = desired;
-        }
-
-        // Use pre-allocated stable descriptor set; fall back to per-frame alloc only if unavailable
-        VkDescriptorSet texSet = group.preAllocSet;
-        if (texSet == VK_NULL_HANDLE) {
-            VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-            ai.descriptorPool = materialDescPool_;
-            ai.descriptorSetCount = 1;
-            ai.pSetLayouts = &particleTexLayout_;
-            if (vkAllocateDescriptorSets(vkCtx_->getDevice(), &ai, &texSet) == VK_SUCCESS) {
-                VkTexture* tex = (group.texture && group.texture->isValid())
-                    ? group.texture : whiteTexture_.get();
-                if (!tex || !tex->isValid()) continue;
-                VkDescriptorImageInfo imgInfo = tex->descriptorInfo();
-                VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-                write.dstSet = texSet;
-                write.dstBinding = 0;
-                write.descriptorCount = 1;
-                write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                write.pImageInfo = &imgInfo;
-                vkUpdateDescriptorSets(vkCtx_->getDevice(), 1, &write, 0, nullptr);
-            }
-        }
-        if (texSet != VK_NULL_HANDLE) {
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 1, 1, &texSet, 0, nullptr);
-        }
-
-        struct { float tileX, tileY; uint32_t blend, pad; } pc = {
-            .tileX = static_cast<float>(group.tilesX), .tileY = static_cast<float>(group.tilesY),
-            .blend = blendType, .pad = 0};
-        vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
-                           sizeof(pc), &pc);
-        // Four strip corners per record; the records are this run's instances.
-        vkCmdDraw(cmd, 4, run.count, 0, run.first);
+        if (softDeferred_ && std::min<uint32_t>(run.group->blendType, 6) >= 2) continue;
+        drawParticleRun(cmd, run, currentPipeline);
     }
 }
 

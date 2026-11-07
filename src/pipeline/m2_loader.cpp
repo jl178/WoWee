@@ -506,7 +506,9 @@ std::string readString(const std::vector<uint8_t>& data, uint32_t offset, uint32
     return std::string(reinterpret_cast<const char*>(&data[offset]), actualLen);
 }
 
-enum class TrackType { VEC3, QUAT_COMPRESSED, FLOAT, FIXED16, BYTE_BOOL, UINT16 };
+// QUAT_FLOAT: float[4] keys. The UV rotation track is one (stock evaluator
+// 0x82AD50 reads 16-byte keys); bone rotations are QUAT_COMPRESSED.
+enum class TrackType { VEC3, QUAT_COMPRESSED, FLOAT, FIXED16, BYTE_BOOL, UINT16, QUAT_FLOAT };
 
 // M2 sequence flag: when set, keyframe data is embedded in the M2 file.
 // When clear, data lives in an external .anim file and the M2 offsets are
@@ -564,6 +566,7 @@ void parseAnimTrack(const std::vector<uint8_t>& data,
         else if (type == TrackType::BYTE_BOOL) keyElementSize = sizeof(uint8_t);
         else if (type == TrackType::UINT16) keyElementSize = sizeof(uint16_t);
         else if (type == TrackType::VEC3) keyElementSize = sizeof(float) * 3;
+        else if (type == TrackType::QUAT_FLOAT) keyElementSize = sizeof(float) * 4;
         else keyElementSize = sizeof(int16_t) * 4;
         if (keyOffset + keyCount * keyElementSize > data.size()) {
             track.sequences[i].timestamps.clear();
@@ -603,6 +606,17 @@ void parseAnimTrack(const std::vector<uint8_t>& data,
             track.sequences[i].vec3Values.reserve(values.size());
             for (const auto& v : values) {
                 track.sequences[i].vec3Values.emplace_back(v.x, v.y, v.z);
+            }
+        } else if (type == TrackType::QUAT_FLOAT) {
+            // float[4] (x, y, z, w) per key; normalised as the stock lerp is.
+            struct QuatDisk { float x, y, z, w; };
+            auto values = readArray<QuatDisk>(data, keyOffset, keyCount);
+            track.sequences[i].quatValues.reserve(values.size());
+            for (const auto& v : values) {
+                glm::quat q(v.w, v.x, v.y, v.z);
+                const float len = glm::length(q);
+                q = (std::isfinite(len) && len > 0.001f) ? q / len : glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+                track.sequences[i].quatValues.push_back(q);
             }
         } else {
             // Rotation: compressed quaternion int16[4] per key
@@ -1460,6 +1474,7 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
         model.colorAlphas.reserve(header.nColors);
         model.colorRGB.reserve(header.nColors);
         model.colorAlphaTracks.resize(header.nColors);
+        model.colorRgbTracks.resize(header.nColors);
         for (uint32_t ci = 0; ci < header.nColors; ci++) {
             uint32_t alphaTrackOfs = header.ofsColors + ci * colorSize + alphaOfs;
             M2AnimationTrack& track = model.colorAlphaTracks[ci];
@@ -1514,6 +1529,21 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                 rgb = glm::clamp(rgb, glm::vec3(0.0f), glm::vec3(1.0f));
             }
             model.colorRGB.push_back(rgb);
+
+            // The whole RGB track, for renderers that play it per instance
+            // (stock evaluates it every frame, 0x82B0A0; m2-runtime #18).
+            {
+                M2AnimationTrack& rgbTrack = model.colorRgbTracks[ci];
+                if (wotlk) {
+                    if (colorTrackOfs + sizeof(M2TrackDisk) <= m2Data.size()) {
+                        M2TrackDisk td = readValue<M2TrackDisk>(m2Data, colorTrackOfs);
+                        parseAnimTrack(m2Data, td, rgbTrack, TrackType::VEC3, seqFlags);
+                    }
+                } else if (colorTrackOfs + sizeof(M2TrackDiskVanilla) <= m2Data.size()) {
+                    M2TrackDiskVanilla td = readValue<M2TrackDiskVanilla>(m2Data, colorTrackOfs);
+                    parseAnimTrackVanilla(m2Data, td, rgbTrack, TrackType::VEC3);
+                }
+            }
         }
     }
 
@@ -1560,7 +1590,7 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
             if (header.version >= 264) {
                 M2TextureTransformDisk dt = readValue<M2TextureTransformDisk>(m2Data, ofs);
                 parseAnimTrack(m2Data, dt.translation, tt.translation, TrackType::VEC3, seqFlags);
-                parseAnimTrack(m2Data, dt.rotation, tt.rotation, TrackType::QUAT_COMPRESSED, seqFlags);
+                parseAnimTrack(m2Data, dt.rotation, tt.rotation, TrackType::QUAT_FLOAT, seqFlags);
                 parseAnimTrack(m2Data, dt.scaling, tt.scale, TrackType::VEC3, seqFlags);
             } else {
                 M2TextureTransformDiskVanilla dt = readValue<M2TextureTransformDiskVanilla>(m2Data, ofs);
@@ -2141,6 +2171,9 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                     batch.vertexCount = sm.vertexCount;
                     batch.submeshId = sm.id;
                     batch.submeshLevel = sm.level;
+                    batch.centerBoneIndex = sm.centerBoneIndex;
+                    batch.sortCenter = glm::vec3(sm.sortCenterPosition[0], sm.sortCenterPosition[1], sm.sortCenterPosition[2]);
+                    batch.sortRadius = sm.sortRadius;
                 } else {
                     batch.indexStart = 0;
                     batch.indexCount = model.indices.size();
@@ -2256,6 +2289,9 @@ bool M2Loader::loadSkin(const std::vector<uint8_t>& skinData, M2Model& model) {
                 batch.vertexCount = sm.vertexCount;
                 batch.submeshId = sm.id;
                 batch.submeshLevel = sm.level;
+                batch.centerBoneIndex = sm.centerBoneIndex;
+                batch.sortCenter = glm::vec3(sm.sortCenterPosition[0], sm.sortCenterPosition[1], sm.sortCenterPosition[2]);
+                batch.sortRadius = sm.sortRadius;
             } else {
                 // Fallback: render entire model as one batch
                 batch.indexStart = 0;

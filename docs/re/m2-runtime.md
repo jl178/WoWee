@@ -188,23 +188,72 @@ per-bone sequence state (`bs+0x..`: 0xAC bytes per bone, array at
   - Flag 0x08 → no depth test.
   - Flag 0x10 → no depth write.
   - Flags 0x01 (unlit) and 0x02 (unfogged) work through the material.
+  - The three are GxRs states 0x11, 0x0D and 0x0F, each set from
+    `~(materialFlags >> n) & 1` whenever the material changes (0x81FE90).
+    **Depth write follows the flag alone, whatever the blend:** an
+    alpha-blended or additive layer without 0x10 writes depth.
 - **Material colour:**
   - Diffuse is `modelDiffuse × colour.rgb` (the animated M2Color RGB).
     Its alpha is the batch alpha.
   - Unlit adds the diffuse to the emissive and zeroes the diffuse.
   - Mod and Mod2x use diffuse 0 and emissive 1 or 0.5. Fog does not tint
     them.
-- **Transparent order** (comparator 0x81EF30): sort by distance, far first.
-  - The distance is the batch's: its skin section's sortCenter, through its
-    center bone, pushed towards or away from the camera by sortRadius ×
-    bone scale (batch flags 0x1 and 0x2). Some models are sorted whole by
-    their centre instead.
-  - Ties go to **priorityPlane ascending**, then batch distance, then
-    model, then **materialLayer ascending**.
-  - Opaque elements sort by texture and shader state (0x81EA90).
-- **Ribbons** are type-3 elements, transparent, with alpha
-  `model+0x198 × ribbon alpha`, sorted by their priorityPlane at
-  `ribbon+0xAC`.
+- **Transparent order.** CM2Scene's element builder (0x821A20) makes one
+  0x44-byte element per drawn batch, ribbon, particle emitter and model
+  callback. Three lists are then sorted with 0x83DCF0: the opaque list
+  (`scene+0x54`, comparator 0x81EEA0, then 0x81EA90 by state) and two
+  transparent lists (`scene+0x64`, `+0x74`, comparator **0x81EF30**). The
+  element:
+
+  | offset | field |
+  |---|---|
+  | +0x00 | type: 0 batch, 1 batch with flag 0x4 and a projected texture, 2 instanced opaque batch, 3 ribbon, 4 particle emitter, 5 model callback (`model+0x1BC`) |
+  | +0x04 | model |
+  | +0x08 | flags: 0x1 z-fill copy, 0x2 straddles the scene plane, 0x4 from a runtime skin (`model+0x2D0`) |
+  | +0x0C | alpha |
+  | +0x10 | **primary distance** (squared) |
+  | +0x14 | **own distance** (squared) |
+  | +0x18 | batch index / ribbon index / emitter |
+  | +0x24 | **priority**: the batch's priorityPlane (s8), the ribbon's `+0xAC` (s16), the emitter's `+0x18` (file field 0x2E, the int16 the format calls textureTileRotation) |
+  | +0x28, +0x2C, +0x30 | skin batch, skin section, material |
+
+  - **Distances** are squared view-space lengths. `model+0x88` is the
+    model's: `|model-view translation|²` (`model+0x124`; 0x82E140,
+    0x82F0F0), or **its parent's** when attached (`model+0x48`), so a
+    weapon or helm sorts with its wearer.
+    - A blended batch's own distance is its skin section's sortCenter
+      (`+0x20`) through bone `centerBoneIndex` (`+0x12`). Batch flag 0x1
+      pulls it `sortRadius` (`+0x2C`) × the bone's scale towards the
+      camera, else flag 0x2 pushes it away; with either, a point that ends
+      up behind the camera (view z < 0) is negative. Without them it is
+      `|p|²`.
+    - Primary = own distance, except: MD20 global flag **0x10** (header
+      `+0x10`) sorts the whole model by `model+0x88` (own distance kept,
+      without the radius push); and a z-fill model (below) keeps
+      `model+0x88` for its depth-writing layers.
+    - An opaque element has both at `model+0x88`.
+    - Particles (0x821930): primary `model+0x88`, own distance the
+      emitter's position through its bone; child emitters (`em+0x6C`
+      count, `+0x70` list) get the same keys.
+    - Ribbons and callbacks: both at `model+0x88`.
+  - **Comparator 0x81EF30:** primary far first; then z-fill copies (flag
+    0x1) first; priority **ascending**; own distance far first; (with
+    scene flag 0x4000, texture then shader grouping across models); model
+    pointer; type ascending (batches, ribbons, particles); materialLayer
+    ascending for batches; then the state compare 0x81EEA0.
+  - **Particle placement:** an emitter with blend 0 or 1 at alpha ≥
+    0.99999 is an **opaque** element. Others go to the first transparent
+    list, or the second when the model is wholly on the far side of the
+    scene plane or the emitter has flag 0x40000 (tails). The two lists are
+    drawn by "Model2 Pass 1" and "Pass 2" (0x823CB0); the world calls them
+    through its render list (not traced), most likely either side of the
+    water surface. With scene flag 0x80 (M2BatchParticles), 0x81F9E0 then
+    re-sorts runs of consecutive additive elements by texture (0x81F0E0).
+  - **Z-fill** (CVar `objectFadeZFill`, 0xA3F3E4, default 0): a model with
+    `model+0x10 & 0x40` and scene flag 1 gets, for each blended layer that
+    writes depth, a copy with flag 0x1 drawn first (depth only).
+  - **Ribbons** are type-3 elements, transparent, with alpha
+    `model+0x198 × ribbon alpha`, priority their `ribbon+0xAC`.
 
 ### Shader selection (CM2Shared::Initialize 0x837A40)
 
@@ -340,9 +389,33 @@ back to 0x11.
   the list jumps to its current frame when it returns, unless it was
   paused through `model+0x64`. No distance or LOD changes the speed or
   skips frames.
-- **Doodad fade:** the alpha `+0x178` is a distance fade per doodad size
-  class (tables at 0xADF38C..0xADF3DC). Below 0.99999 every batch goes to
+- **Doodad fade** (CMapDoodadDef, 0x791CB0): the alpha `+0x178` is a
+  distance fade per doodad size class. Below 0.99999 every batch goes to
   the blended pass, with opaque and alpha-key switched to Alpha blending.
+  - **Size class** (0x7BDB10, `doodad+0x24`): the largest extent of the
+    doodad's world-space bounding box against 0xADF350 = {1, 4, 15, 100}
+    yd: the first class it does not exceed, else 4. With scene flag 0x8000
+    clear, classes 0-2 also lose `model+0x10 & 0x40`.
+  - **Tables** (0x78F570, rebuilt when the CVar changes):
+
+    | class | 0 | 1 | 2 | 3 | 4 |
+    |---|---|---|---|---|---|
+    | largest extent ≤ (0xADF350) | 1 | 4 | 15 | 100 | any |
+    | end, yd (0xADF364 → 0xADF3A0) | 30 | 100 × d | 200 × d | 750 × d | 1250 |
+    | fade length (0xADF38C) | 5 | 10 | 15 | 20 | 50 |
+
+    `d` is the CVar **environmentDetail** (0xA3F3BC, default "1.0",
+    clamped to 0.5..1.5 by its handler 0x78DC60). 0xADF3B4 holds end²,
+    0xADF3C8 the fade start (end − length), 0xADF3DC its square.
+    Classes 0 and 4 are never scaled. Farclip does not enter it.
+  - **Rule:** with the world flag `0xCD774C & 0x4000` and without doodad
+    flag 0x800, `d²` from the camera to the doodad's bounding-sphere centre
+    (`+0x38`) past end² is not drawn; past start² the alpha is
+    `1 − (d − start) / length`, snapped to 1 above 0.99 and not drawn below
+    0.01. 0x78FB60 is the same band test, used to pick a class for a
+    distance.
+  - Only map (MDDF) doodads; WMO doodads and game objects are drawn by
+    their own paths.
 
 ## 5. Wowee: gap table
 
@@ -373,20 +446,21 @@ back to 0x11.
 | 15 | Constant alpha of 0 | not drawn | skipped and drawn at 1 | **Fixed:** hidden |
 | 16 | Skip threshold | alpha < 1e-4 | < 0.004 / 0.01 | 1e-4 for played tracks; the baked path still uses 0.01 |
 | 17 | Opaque or alpha-key batch with alpha < 1 | Alpha blend | alpha pipeline only for a faded instance | **Fixed** for animated-alpha batches. Above 0.99999 they still blend; stock goes back to opaque |
-| 18 | Animated colour RGB | per instance, every frame | baked first key into a per-batch UBO tint | open; needs a per-instance tint |
-| 19 | UV rotation and scale | full matrix: translate, then scale and rotate about (0.5, 0.5) | translation only | open; the instance SSBO carries a vec2 offset |
-| 20 | Flag 0x01 sequences | play `loops` laps, then hold the last frame | loop, unless the caller asked to hold | open for doodads. Spell kits hold one-shots through `holdInstanceAnimationAtEnd`, which matches for one lap |
+| 18 | Animated colour RGB | per instance, every frame | baked first key into a per-batch UBO tint | **Fixed:** the RGB track is loaded (`colorRgbTracks`); a batch whose colour can change is played per instance into the instance entry (flag 0x20) and replaces the material tint in m2.frag. CharacterRenderer still bakes |
+| 19 | UV rotation and scale | full matrix: translate, then scale and rotate about (0.5, 0.5) | translation only; the rotation track was read as a compressed quaternion | **Fixed:** float-quaternion keys (`QUAT_FLOAT`, 16 bytes as 0x82AD50 reads them); the 2x2 of scale then rotation per stage in the instance entry (flag 0x40, `stageMatrix` in m2.vert). `WOWEE_M2_UV_TRANSLATION_ONLY=1` for the old. CharacterRenderer still translation only |
+| 20 | Flag 0x01 sequences | play `loops` laps, then hold the last frame | loop, unless the caller asked to hold | **Fixed** for the default sequence of every instance: `loops = replayMin + rand × (replayMax − replayMin) >> 15`, at least 1, then the last frame holds (`stockLapsLeft`); a sequence set by a caller keeps its own rule. `WOWEE_M2_LOOP_ONE_SHOTS=1` loops them |
 | 21 | Variation on a looping sequence | re-rolled every lap (CM2Model handler; replay ignored) | honours the replay range on laps | open (CGUnit's callback not traced) |
 | 22 | Blend table | 3 = One+One, 4 = SrcAlpha+One, 5 Mod, 6 Mod2x | every mode ≥ 3 additive (SrcAlpha, One); no Mod or Mod2x pipelines; spell effects force blend 0/1/4/5 to additive | **Fixed:** one pipeline per mode in M2Renderer and CharacterRenderer; Mod/Mod2x unlit at emissive 1/0.5 and fogged to white/grey, additive to black; spell effects draw their own blend (a forge's keyed flame card stays additive); Mod/Mod2x never colour keyed; alpha reference 1/255 above blend 1 |
 | 23 | Alpha-key reference | `alpha × 224/255` | shader cutoff 0.4/0.5, sharpened with alpha-to-coverage | **Fixed** as the "Smooth leaf edges" enhancement: off, M2 and character alpha keys discard below 224/255 with no fringe repair or mip boost (the model-alpha factor is not applied); on, the old ramp |
-| 24 | Render flags 0x04/0x08/0x10 | cull, depth test, depth write | every M2 pipeline is cull-none; depth write by pass | open |
-| 25 | Transparent order | distance, then priorityPlane, then layer | per instance, back to front | open |
-| 26 | Animation when culled | stops beyond 10 yd; time stays absolute | bones skipped off-screen and past LOD 3 (150 yd); clocks absolute | close enough; the LOD-3 bone skip is not stock |
+| 24 | Render flags 0x04/0x08/0x10 | cull, depth test, depth write, the write by the flag alone | every M2 pipeline is cull-none; depth write by pass | **Fixed** in M2Renderer: cull mode, depth test and depth write are dynamic state (core in Vulkan 1.3) on the nine M2 pipelines, set per draw from the material flags (`m2_raster_state.hpp`); no new pipelines. Blended layers without 0x10 now write depth, as in stock. `WOWEE_M2_LEGACY_RENDER_FLAGS=1` for the old state. CharacterRenderer not changed |
+| 25 | Transparent order | distance, then priorityPlane, then own distance, model, type, layer; particles in the same sort | per instance, back to front; particles in a separate pass after | **Fixed:** one element list per frame (batches and emitter runs) with the stock keys, sorted by `m2BlendOrderLess` (`m2_blend_order.hpp`); blend 0/1 particles drawn ahead as stock's opaque elements. Not done: ribbons (still after), the two-list split, the z-fill copies, attached children taking the parent's distance. With Soft particles on, blended particles keep the late pass. `WOWEE_M2_LEGACY_BLEND_ORDER=1` for the old order |
+| 26 | Animation when culled | stops beyond 10 yd; time stays absolute | bones skipped off-screen and past LOD 3 (150 yd); clocks absolute | culled instances within 10 yd keep their bones stepping; doodad flag 0x400 not carried; the LOD-3 bone skip is not stock |
 | 27 | Shader per batch | runtime id, layer folding and Combiners_* by stage (§3 "Shader selection") | one texture, `texture × light` | **Fixed:** `m2fx::resolveBatchEffects` (`include/rendering/m2_effect_select.hpp`), `assets/shaders/m2_combiner.glsli`; folded layers are not drawn |
 | 28 | Second texture stage | bound with its own wrap flags and matrix | never bound | **Fixed** (binding 3 of the material set in both renderers) |
 | 29 | Env coordinates | sphere map of the view-space reflection | none | **Fixed** (`m2SphereEnvUv`); stock's +z view space handled |
-| 30 | UV set 1 and per-stage transforms | T2 / T1_T2 read UV set 1 through the stage's own matrix | UV set 0 only, one translation per batch | **Fixed** for translation (second stage packed as halves in the instance SSBO, `uvOffset.zw` for characters); rotation and scale still open (#19) |
-| 31 | Weapon attachment FX batches | drawn | CharacterRenderer drops blend ≥ 3 batches on attached weapons | open; most weapon shine is now a folded second stage of an opaque base and so draws |
+| 30 | UV set 1 and per-stage transforms | T2 / T1_T2 read UV set 1 through the stage's own matrix | UV set 0 only, one translation per batch | **Fixed** (translation earlier; rotation and scale with #19) |
+| 31 | Weapon attachment FX batches | drawn | CharacterRenderer drops blend ≥ 3 batches on attached weapons | **Fixed:** drawn; `WOWEE_CHAR_DROP_WEAPON_FX=1` drops them again |
+| 32 | Map doodad distance and fade | five size classes, end 30/100/200/750/1250 yd (middle three × environmentDetail), linear fade over 5/10/15/20/50 yd, blended while fading | `m2InstanceMaxDistSq`: a density-adaptive 300-1000 yd × size factor (2.6× for foliage), faded over the last 25% (45%) in the opaque pass | **Fixed** for MDDF doodads (`setInstanceMapDoodad`, `m2_view_distance.hpp`): the stock classes and fade, the fading instance in the blended pass. The view-distance slider multiplies classes 1-4 (×1 at its 1200 default), capped at the view distance. WMO doodads, game objects and clutter keep Wowee's rule. Doodad flag 0x800 (no fade) not carried. `WOWEE_M2_LEGACY_DOODAD_FADE=1` for the old rule |
 
 ## 6. In game
 

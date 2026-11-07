@@ -442,10 +442,17 @@ bool M2Renderer::buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout) {
         // MSAA alpha-to-coverage dithers the shader's sharpened cutout alpha
         // across samples for smooth foliage/leaf silhouettes.
         if (alphaToCoverage) builder.setAlphaToCoverage(true);
+        // Cull and depth are the batch's (render flags 0x04/0x08/0x10,
+        // stock 0x81FE90), set per draw: dynamic state, core in Vulkan 1.3,
+        // instead of eight variants of each of these pipelines.
+        std::vector<VkDynamicState> dynamic = viewportAndScissorDynamic();
+        dynamic.push_back(VK_DYNAMIC_STATE_CULL_MODE);
+        dynamic.push_back(VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE);
+        dynamic.push_back(VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE);
         return builder
             .setLayout(pipelineLayout_)
             .setRenderPass(mainPass)
-            .setDynamicStates(viewportAndScissorDynamic())
+            .setDynamicStates(dynamic)
             .setFlags(flags)
             .setBasePipeline(basePipeline)
             .build(device, vkCtx_->getPipelineCache());
@@ -884,7 +891,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     // Instance data SSBO - per-frame buffer holding per-instance transforms, fade, bones.
     // Shader reads instanceData[push.instanceDataOffset + gl_InstanceIndex].
     {
-        static_assert(sizeof(M2InstanceGPU) == 112, "M2InstanceGPU must be 112 bytes (std430)");
+        static_assert(sizeof(M2InstanceGPU) == 128, "M2InstanceGPU must be 128 bytes (std430)");
         const VkDeviceSize instBufSize = MAX_INSTANCE_DATA * sizeof(M2InstanceGPU);
 
         // Descriptor pool for 2 sets (double-buffered)
@@ -1780,6 +1787,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
 
     M2ModelGPU gpuModel;
     gpuModel.name = model.name;
+    gpuModel.sortByModelOrigin = (model.globalFlags & 0x10) != 0;
 
     // Use tight bounds from actual vertices for collision/camera occlusion.
     // Header bounds in some M2s are overly conservative.
@@ -2514,6 +2522,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
         };
         if (animates(model.colorAlphaTracks) || animates(model.textureWeightTracks)) {
             gpuModel.colorAlphaTracks = model.colorAlphaTracks;
+            gpuModel.colorRgbTracks = model.colorRgbTracks;
             gpuModel.textureWeightTracks = model.textureWeightTracks;
         }
     }
@@ -2571,6 +2580,13 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
 
             // Copy LOD level from batch
             bgpu.submeshLevel = batch.submeshLevel;
+            // What the blended pass sorts by (0x821A20, comparator 0x81EF30).
+            bgpu.priorityPlane = batch.priorityPlane;
+            bgpu.batchFlags = batch.flags;
+            bgpu.materialLayer = batch.materialLayer;
+            bgpu.centerBone = batch.centerBoneIndex;
+            bgpu.sortCenter = batch.sortCenter;
+            bgpu.sortRadius = batch.sortRadius;
 
             // Resolve texture: batch.textureIndex → textureLookup → allTextures
             VkTexture* tex = whiteTexture_.get();
@@ -2772,6 +2788,9 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                 // white and coloured here, so without it every fire in the
                 // world burns white: Orgrimmar's carries (1.0, 0.329, 0.0).
                 bgpu.tint = model.colorRGB[batch.colorIndex];
+                const bool rgbPlays = batch.colorIndex < model.colorRgbTracks.size() &&
+                    m2_track::trackVariesVec3(model.colorRgbTracks[batch.colorIndex], glm::vec3(1.0f));
+                if (rgbPlays) bgpu.colorRgbTrack = static_cast<int16_t>(batch.colorIndex);
             }
             if (bgpu.batchOpacity > 0.0f) {
                 float bakedAlpha = 1.0f;

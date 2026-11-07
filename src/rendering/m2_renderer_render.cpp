@@ -4,6 +4,8 @@
 #include "rendering/m2_sway.hpp"
 #include "rendering/m2_blend_mode.hpp"
 #include "rendering/m2_glow_card.hpp"
+#include "rendering/m2_raster_state.hpp"
+#include "rendering/m2_blend_order.hpp"
 #include "rendering/animation/anim_selection.hpp"
 #include "rendering/m2_object_events.hpp"
 #include "rendering/animation/sequence_variation.hpp"
@@ -73,6 +75,15 @@ M2Sway swayOfModel(const M2ModelGPU& mdl, bool sky) {
 /// none until the next one; copying them from a sibling of the same model
 /// draws it immediately. A seed entry pointing at an instance that has since
 /// gone is dropped rather than followed.
+// The laps a sequence plays before it holds: replayMin..replayMax, at least
+// one, for a flag-0x01 (non-looping) sequence (0x826B00); 0 for one that loops.
+static uint16_t stockSequenceLaps(const pipeline::M2Sequence& seq) {
+    if ((seq.flags & 0x01) == 0) return 0;
+    const uint32_t lo = seq.replayMin, hi = std::max(seq.replayMax, seq.replayMin);
+    const uint32_t laps = lo + static_cast<uint32_t>((static_cast<uint64_t>(anim::stockRand()) * (hi - lo)) >> 15);
+    return static_cast<uint16_t>(std::clamp<uint32_t>(laps, 1u, 0xFFFFu));
+}
+
 void M2Renderer::seedInstanceAnimation(const M2ModelGPU& model, uint32_t modelId,
                                        M2Instance& instance) {
         if (!model.sequences.empty()) {
@@ -89,6 +100,7 @@ void M2Renderer::seedInstanceAnimation(const M2ModelGPU& model, uint32_t modelId
             instance.idleSequenceIndex = seq;
             instance.animDuration = static_cast<float>(model.sequences[seq].duration);
             instance.animTime = 0.0f;
+            instance.stockLapsLeft = stockSequenceLaps(model.sequences[seq]);
             instance.variationTimer = randFloat(rendering::M2_VARIATION_TIMER_MIN_MS, rendering::M2_VARIATION_TIMER_MAX_MS);
         }
 
@@ -128,6 +140,7 @@ void M2Renderer::seedUnanimatedSequence(const M2ModelGPU& model, M2Instance& ins
     instance.idleSequenceIndex = 0;
     instance.animDuration = static_cast<float>(model.sequences[0].duration);
     instance.animTime = 0.0f;  // from its first frame, as the stock client starts it
+    instance.stockLapsLeft = stockSequenceLaps(model.sequences[0]);
 }
 
 uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
@@ -700,6 +713,20 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
                 // door open, and that is the pose the server is describing.
                 instance.animTime = instance.animDuration;
                 instance.animSpeed = 0.0f;
+            } else if (instance.stockLapsLeft == 1 && !instance.playingVariation &&
+                       instance.thenLoopSequence < 0) {
+                // A flag-0x01 sequence's last lap is over: it holds its last
+                // frame, as the stock client clamps at `end` (0x82F0F0).
+                // WOWEE_M2_LOOP_ONE_SHOTS=1 keeps looping it.
+                static const bool kLoopOneShots = envFlagEnabled("WOWEE_M2_LOOP_ONE_SHOTS");
+                if (kLoopOneShots) {
+                    instance.stockLapsLeft = 0;
+                    instance.animTime = 0.0f;
+                } else {
+                    instance.stockLapsLeft = 0;
+                    instance.animTime = instance.animDuration;
+                    instance.animSpeed = 0.0f;
+                }
             } else if (instance.playingVariation) {
                 instance.playingVariation = false;
                 beginM2SequenceBlend(model, instance, instance.idleSequenceIndex);
@@ -715,6 +742,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
                 while (instance.animTime >= duration) {
                     instance.animTime -= duration;
                 }
+                if (instance.stockLapsLeft > 1) --instance.stockLapsLeft;
                 // The next lap, as the stock client does it (0x831FC0): a
                 // variation of the same animation rolled by the sequences'
                 // frequency weights at every lap of a looping sequence - the
@@ -756,10 +784,12 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         // recomputeCachedCullFactors(); we only need the per-frame distance and frustum test.
         glm::vec3 toCam = instance.position - cachedCamPos_;
         float distSq = glm::dot(toCam, toCam);
-        float effectiveMaxDistSq = rendering::m2InstanceMaxDistSq(
-            cachedMaxRenderDistSq_, instance.cachedEffectiveMaxDistSqFactor,
-            false, 0.0f, cappedViewDistance(),
-            instance.cachedIsGroundDetail, groundDetailMaxDistance_);
+        float effectiveMaxDistSq = instance.stockFadeClass >= 0
+            ? instanceMaxDistSq(instance, cachedMaxRenderDistSq_)
+            : rendering::m2InstanceMaxDistSq(
+                  cachedMaxRenderDistSq_, instance.cachedEffectiveMaxDistSqFactor,
+                  false, 0.0f, cappedViewDistance(),
+                  instance.cachedIsGroundDetail, groundDetailMaxDistance_);
         if (instance.cachedIsSkyBird) {
             constexpr float kBirdMaxDistSq =
                 rendering::M2_SKY_BIRD_MAX_RENDER_DISTANCE *
@@ -767,8 +797,12 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
             effectiveMaxDistSq = std::min(effectiveMaxDistSq, kBirdMaxDistSq);
         }
         if (distSq > effectiveMaxDistSq) continue;
+        // A culled doodad keeps animating within 10 yards of the camera
+        // (stock 0x7987A0 / 0x799980 keep it on the animate list).
+        constexpr float kAnimateWhenCulledSq = 10.0f * 10.0f;
         float paddedRadius = instance.cachedPaddedRadius;
-        if (paddedRadius > 0.0f && !updateFrustum.intersectsSphere(instance.cachedCullCenter, paddedRadius)) continue;
+        if (paddedRadius > 0.0f && distSq > kAnimateWhenCulledSq &&
+            !updateFrustum.intersectsSphere(instance.cachedCullCenter, paddedRadius)) continue;
 
         // LOD 3 skip: models beyond 150 units use the lowest LOD mesh which has
         // no visible skeletal animation.  Keep their last-computed bone matrices
@@ -1146,6 +1180,73 @@ static uint32_t stage2UvOffset(const M2ModelGPU& model, const M2ModelGPU::BatchG
     return glm::packHalf2x16(uv);
 }
 
+// A texture transform past its translation: scale, then rotation, about the
+// centre (0x82D6F0), as m2.vert's stageMatrix reads it - the 2x2 that row
+// vectors multiply, two columns of halves. Identity (and false) when the
+// transform has neither track, or both give identity at this time.
+static bool uvLinearPart(const M2ModelGPU& model, int transform, const M2Instance& inst,
+                         glm::uvec2& out) {
+    if (transform < 0 || static_cast<size_t>(transform) >= model.textureTransforms.size()) return false;
+    const auto& tt = model.textureTransforms[static_cast<size_t>(transform)];
+    if (!tt.scale.hasData() && !tt.rotation.hasData()) return false;
+    glm::mat2 l(1.0f);
+    if (tt.scale.hasData()) {
+        const glm::vec3 sc = m2_track::sampleVec3(tt.scale, inst.currentSequenceIndex, inst.animTime,
+                                                  inst.globalSequenceTime, model.globalSequenceDurations,
+                                                  glm::vec3(1.0f));
+        l = glm::mat2(sc.x, 0.0f, 0.0f, sc.y);
+    }
+    if (tt.rotation.hasData()) {
+        const glm::quat q = m2_track::sampleQuat(tt.rotation, inst.currentSequenceIndex, inst.animTime,
+                                                 inst.globalSequenceTime, model.globalSequenceDurations);
+        const glm::mat3 r = glm::mat3_cast(q);
+        // Row vectors: v * R' with R' the transpose of the column rotation.
+        l = l * glm::transpose(glm::mat2(r[0][0], r[0][1], r[1][0], r[1][1]));
+    }
+    if (l == glm::mat2(1.0f)) return false;
+    out = glm::uvec2(glm::packHalf2x16(glm::vec2(l[0][0], l[0][1])),
+                     glm::packHalf2x16(glm::vec2(l[1][0], l[1][1])));
+    return true;
+}
+
+// The per-instance parts of one batch's entry that only some batches use:
+// the animated M2Color RGB (#18) and each stage's UV scale and rotation
+// (#19, #30). Returns the flag bits to add; fields of an unflagged part are
+// left alone, so a stale value in the mapped buffer is never read.
+template <class InstanceEntry>
+static int32_t batchInstanceExtras(InstanceEntry& e, const M2ModelGPU& model,
+                                   const M2ModelGPU::BatchGPU& batch, const M2Instance& inst,
+                                   float tintScale) {
+    int32_t flags = 0;
+    if (batch.colorRgbTrack >= 0 && static_cast<size_t>(batch.colorRgbTrack) < model.colorRgbTracks.size()) {
+        glm::vec3 c = m2_track::sampleVec3(model.colorRgbTracks[static_cast<size_t>(batch.colorRgbTrack)],
+                                           inst.currentSequenceIndex, inst.animTime,
+                                           inst.globalSequenceTime, model.globalSequenceDurations,
+                                           glm::vec3(1.0f));
+        c = glm::max(c, glm::vec3(0.0f)) * tintScale;
+        e.tintRG = glm::packHalf2x16(glm::vec2(c.r, c.g));
+        e.tintB = glm::packHalf2x16(glm::vec2(c.b, 0.0f));
+        flags |= 0x20;
+    }
+    static const bool kTranslationOnly = envFlagEnabled("WOWEE_M2_UV_TRANSLATION_ONLY");
+    if (!kTranslationOnly) {
+        int stage0 = -1;
+        if (batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation &&
+            batch.textureAnimIndex < model.textureTransformLookup.size())
+            stage0 = model.textureTransformLookup[batch.textureAnimIndex];
+        glm::uvec2 m0(glm::packHalf2x16(glm::vec2(1.0f, 0.0f)), glm::packHalf2x16(glm::vec2(0.0f, 1.0f)));
+        glm::uvec2 m1 = m0;
+        const bool l0 = uvLinearPart(model, stage0, inst, m0);
+        const bool l1 = uvLinearPart(model, batch.stage2Transform, inst, m1);
+        if (l0 || l1) {
+            e.uvMat0 = m0;
+            e.uvMat1 = m1;
+            flags |= 0x40;
+        }
+    }
+    return flags;
+}
+
 void M2Renderer::prepareRender(uint32_t frameIndex, const Camera& camera) {
     if (!initialized_ || instances.empty()) return;
     (void)camera;  // reserved for future frustum-based culling
@@ -1259,10 +1360,12 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
     // The shader rejects on this bound before it ever reads the per-instance
     // distance, so it has to clear the game-object floor as well - otherwise
     // that floor is silently capped at 2x the ambient doodad distance.
-    const float maxPossibleDistSq = std::max(
+    const float maxPossibleDistSqBase = std::max(
         maxRenderDistanceSq * 4.0f,  // 2x safety margin
         rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE *
         rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE);
+    // ...and the furthest a map doodad's size class draws (m2_view_distance.hpp).
+    const float maxPossibleDistSq = std::max(stockDoodadMaxDistSq(), maxPossibleDistSqBase);
 
     // --- Upload frustum planes + camera (UBO, binding 0) ---
     const glm::mat4 vp = camera.getProjectionMatrix() * camera.getViewMatrix();
@@ -1363,11 +1466,7 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
         for (uint32_t i = begin; i < end; i++) {
             const auto& inst = instances[i];
             if (submittedIds) submittedIds[i] = inst.id;
-            float effectiveMaxDistSq = rendering::m2InstanceMaxDistSq(
-                maxRenderDistanceSq, inst.cachedEffectiveMaxDistSqFactor,
-                inst.isGameObject, rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE,
-                cappedViewDistance(),
-                inst.cachedIsGroundDetail, groundDetailMaxDistance_);
+            float effectiveMaxDistSq = instanceMaxDistSq(inst, maxRenderDistanceSq);
             if (inst.cachedIsSkyBird && inst.cachedHasAnimation && !inst.cachedDisableAnimation) {
                 constexpr float kBirdMaxDistSq =
                     rendering::M2_SKY_BIRD_MAX_RENDER_DISTANCE *
@@ -1614,6 +1713,7 @@ bool M2Renderer::cullForRecording(const Camera& camera) {
 
     const glm::vec3 camPos = camera.getPosition();
     recordCamPos_ = camPos;
+    recordCamForward_ = camera.getForward();
 
     // Where this pass's three milliseconds go.
     //
@@ -1643,10 +1743,12 @@ bool M2Renderer::cullForRecording(const Camera& camera) {
     }
     // Matches the bound uploaded to the cull shader, including the headroom the
     // game-object floor needs (see dispatchCullCompute).
-    const float maxPossibleDistSq = std::max(
+    const float maxPossibleDistSqBase = std::max(
         maxRenderDistanceSq * 4.0f,
         rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE *
         rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE);
+    // ...and the furthest a map doodad's size class draws (m2_view_distance.hpp).
+    const float maxPossibleDistSq = std::max(stockDoodadMaxDistSq(), maxPossibleDistSqBase);
 
     const uint32_t totalInstances = static_cast<uint32_t>(instances.size());
     struct VisibleChunk {
@@ -1687,17 +1789,13 @@ bool M2Renderer::cullForRecording(const Camera& camera) {
             // Server game objects keep a distance floor instead of following the
             // ambient doodad distance down; it also feeds the fade curve below,
             // so a mailbox doesn't fade out at the doodad boundary either.
-            const float instanceMaxDistSq = rendering::m2InstanceMaxDistSq(
-                maxRenderDistanceSq, instance.cachedEffectiveMaxDistSqFactor,
-                instance.isGameObject, rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE,
-                cappedViewDistance(),
-                instance.cachedIsGroundDetail, groundDetailMaxDistance_);
+            const float instMaxDistSq = this->instanceMaxDistSq(instance, maxRenderDistanceSq);
 
             if (forceNoCull_) {
                 if (!instance.cachedIsValid) continue;
                 glm::vec3 toCam = instance.position - camPos;
                 distSq = glm::dot(toCam, toCam);
-                effectiveMaxDistSq = instanceMaxDistSq;
+                effectiveMaxDistSq = instMaxDistSq;
             } else if (gpuCullAvailable && i < numInstances) {
                 // Per-instance verdict scattered above - indexing visibility[]
                 // directly here would read the slot of whichever instance held
@@ -1705,13 +1803,13 @@ bool M2Renderer::cullForRecording(const Camera& camera) {
                 if (!instance.lastCullVisible) continue;
                 glm::vec3 toCam = instance.position - camPos;
                 distSq = glm::dot(toCam, toCam);
-                effectiveMaxDistSq = instanceMaxDistSq;
+                effectiveMaxDistSq = instMaxDistSq;
             } else {
                 if (!instance.cachedIsValid || (instance.cachedIsSmoke && extraSmoke_) || instance.cachedIsInvisibleTrap) continue;
                 glm::vec3 toCam = instance.position - camPos;
                 distSq = glm::dot(toCam, toCam);
                 if (distSq > maxPossibleDistSq) continue;
-                effectiveMaxDistSq = instanceMaxDistSq;
+                effectiveMaxDistSq = instMaxDistSq;
                 if (distSq > effectiveMaxDistSq) continue;
                 float paddedRadius = instance.cachedPaddedRadius;
                 if (paddedRadius > 0.0f && !frustum.intersectsSphere(instance.cachedCullCenter, paddedRadius)) continue;
@@ -1727,7 +1825,14 @@ bool M2Renderer::cullForRecording(const Camera& camera) {
 
             VisibleEntry visible{.index = i, .modelId = instance.modelId, .distSq = distSq, .effectiveMaxDistSq = effectiveMaxDistSq};
             // A faded instance is drawn blended, all of it - see M2Instance::fade.
-            const bool faded = instance.fade < 0.999f;
+            // So is a map doodad inside the last yards of its stock distance,
+            // and one past them is not drawn (0x791CB0).
+            bool faded = instance.fade < 0.999f;
+            if (instance.stockFadeClass >= 0 && instance.cachedModel) {
+                const float df = instanceDistanceFade(instance, *instance.cachedModel, distSq, effectiveMaxDistSq);
+                if (df <= 0.0f) continue;
+                faded = faded || df < 1.0f;
+            }
             if (!faded) out.opaque.push_back(visible);
             if (faded || (instance.cachedModel &&
                 (instance.cachedModel->hasTransparentBatches || instance.cachedModel->isSpellEffect))) {
@@ -1948,11 +2053,6 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     const uint32_t frameIndex = recordFrameIndex_;
     const glm::vec3 camPos = recordCamPos_;
     const float lavaAnimSeconds = recordLavaSeconds_;
-    constexpr float fadeStartFraction = 0.75f;
-
-    uint32_t currentModelId = UINT32_MAX;
-    const M2ModelGPU* currentModel = nullptr;
-    bool currentModelValid = false;
 
     // State tracking
     VkPipeline currentPipeline = VK_NULL_HANDLE;
@@ -1998,6 +2098,26 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // Start with opaque pipeline
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, opaquePipeline_);
     currentPipeline = opaquePipeline_;
+
+    // Each batch's cull and depth state, from its render flags (#24); the
+    // M2 pipelines take them as dynamic state. Set only when it changes, and
+    // again after a pipeline without them (the particles) was bound.
+    // WOWEE_M2_LEGACY_RENDER_FLAGS=1: no culling, depth written by pass.
+    static const bool kLegacyRaster = envFlagEnabled("WOWEE_M2_LEGACY_RENDER_FLAGS");
+    M2RasterState rasterBound;
+    bool rasterValid = false;
+    const auto applyRaster = [&](uint16_t materialFlags, bool pipelineWritesDepth) {
+        const M2RasterState want =
+            m2RasterStateForFlags(materialFlags, skyMode_, pipelineWritesDepth, kLegacyRaster);
+        if (!rasterValid || want.cullBack != rasterBound.cullBack)
+            vkCmdSetCullMode(cmd, want.cullBack ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE);
+        if (!rasterValid || want.depthTest != rasterBound.depthTest)
+            vkCmdSetDepthTestEnable(cmd, want.depthTest ? VK_TRUE : VK_FALSE);
+        if (!rasterValid || want.depthWrite != rasterBound.depthWrite)
+            vkCmdSetDepthWriteEnable(cmd, want.depthWrite ? VK_TRUE : VK_FALSE);
+        rasterBound = want;
+        rasterValid = true;
+    };
 
     // Bind dummy bone set (set 2) so non-animated draws have a valid binding.
     // Bind mega bone SSBO instead - all instances index into one buffer via boneBase.
@@ -2087,14 +2207,11 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     __builtin_prefetch(&ahead.boneMatrices);
                 }
 
-                // Distance-based fade alpha
-                float fadeFrac = model.disableAnimation ? 0.55f : fadeStartFraction;
-                float fadeStartDistSq = entry.effectiveMaxDistSq * fadeFrac * fadeFrac;
-                float fadeAlpha = 1.0f;
-                if (entry.distSq > fadeStartDistSq) {
-                    fadeAlpha = std::clamp((entry.effectiveMaxDistSq - entry.distSq) /
-                                          (entry.effectiveMaxDistSq - fadeStartDistSq), 0.0f, 1.0f);
-                }
+                // Distance-based fade alpha. A map doodad inside its stock
+                // fade band went to the blended pass instead (classifyRange).
+                float fadeAlpha = instance.stockFadeClass >= 0
+                    ? 1.0f
+                    : instanceDistanceFade(instance, model, entry.distSq, entry.effectiveMaxDistSq);
                 // Ground detail used to be held at 0.82 here. This is the
                 // opaque pass: nothing blended it, so it was a number with no
                 // effect - and now that the cutout pipeline turns alpha into
@@ -2404,7 +2521,8 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     // Handle texture animation: if this batch has per-instance uvOffset,
                     // write a separate SSBO range with the correct offsets.
                     bool hasBatchTexAnim = (batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation)
-                                           || model.isLavaModel || batch.stage2Transform >= 0;
+                                           || model.isLavaModel || batch.stage2Transform >= 0
+                                           || batch.colorRgbTrack >= 0;
                     uint32_t drawOffset = groupSSBOOffset;
                     uint32_t animBase = 0;
                     if (hasBatchTexAnim && claimInstanceSlots(groupSize, true, animBase) == groupSize) {
@@ -2452,6 +2570,7 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                             e.flags = (inst.afloat > 0 ? 1 : 0) | inst.groundNormalFlags |
                                       ((p.useBones && !kM2NoSkinning) ? kInstanceSkinnedFlag : 0) |
                                       streamFadeFlags(inst);
+                            e.flags |= batchInstanceExtras(e, model, batch, inst, 1.0f);
                             if (inst.wmoInteriorLight) {
                                 e.flags |= kInstanceWmoInteriorLightFlag;
                                 e.wmoAmbient = inst.wmoAmbientPacked;
@@ -2565,6 +2684,7 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     pc.texCoordSet = static_cast<int32_t>(batch.textureUnit);
                     pc.instanceDataOffset = static_cast<int32_t>(drawOffset);
                     vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+                    applyRaster(batch.materialFlags, true);
                     vkCmdDrawIndexed(cmd, batch.indexCount, groupSize, batch.indexStart, 0, 0);
                     if (skyMode_) ++counts.skyOpaque;
                     counts.draws++;
@@ -2594,45 +2714,58 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // key threshold for blend modes 0 and 1, volumetricBeam, fireCard).
     if (!lastPart) return;
 
-    currentModelId = UINT32_MAX;
-    currentModel = nullptr;
-    currentModelValid = false;
-    currentPipeline = opaquePipeline_;
-    currentMaterialSet = VK_NULL_HANDLE;
+    // The blended pass in the stock order (0x821A20 builds the elements,
+    // comparator 0x81EF30 sorts them; docs/re/m2-runtime.md #25):
+    //   1. distance, far first: the batch's own sort point for most models,
+    //      the model's origin for a model with global flag 0x10 and for
+    //      particles;
+    //   2. priorityPlane, ascending;
+    //   3. the batch's (or emitter's) own distance, far first;
+    //   4. the model, then the element type (batches before particles), then
+    //      materialLayer, ascending.
+    // Particles join the sort (0x821930: one element per emitter, its
+    // priority the file's 0x2E field), so a flame card and the sparks over
+    // it no longer draw in a fixed order whatever the camera does. Particles
+    // with blend 0 or 1 are opaque elements in stock and are drawn first.
+    // With soft particles on, the blended runs keep their late pass, which
+    // needs the scene's depth.
+    const auto tBlend0 = std::chrono::steady_clock::now();
+    static const bool kNoParticles = envFlagEnabled("WOWEE_M2_NO_PARTICLES");
+    // WOWEE_M2_LEGACY_BLEND_ORDER=1: the order before this - per instance,
+    // back to front by origin, batches in file order, particles after.
+    static const bool kLegacyOrder = envFlagEnabled("WOWEE_M2_LEGACY_BLEND_ORDER");
+    const uint32_t particleFrame = vkCtx_->getCurrentFrame() % 2;
+    particlesInterleaved_ = false;
+    if (!kLegacyOrder && !softDeferred_ && !kNoParticles && particlePassReady(particleFrame)) {
+        prepareParticleRecords(particleFrame, true);
+        particlesInterleaved_ = true;
+    }
+    // The records were written in renderM2Particles before; timed apart so
+    // the sort's own cost shows.
+    const auto tBlendSort0 = std::chrono::steady_clock::now();
+    blendParticleMsSum_ += std::chrono::duration<double, std::milli>(tBlendSort0 - tBlend0).count();
+
+    blendElements_.clear();
+    blendInstances_.clear();
+    const glm::vec3 camForward = recordCamForward_;
 
     for (const auto& entry : transparentVisible_) {
         if (entry.index >= instances.size()) continue;
-        auto& instance = instances[entry.index];
-
-        // Model boundary: read cachedModel off the instance - was doing a
-        // per-boundary models.find() even though every instance already has
-        // the pointer cached at addInstance time.
-        if (entry.modelId != currentModelId) {
-            currentModelId = entry.modelId;
-            currentModelValid = false;
-            currentModel = instance.cachedModel;
-            if (!currentModel) continue;
-            if (!currentModel->hasTransparentBatches && !currentModel->isSpellEffect) continue;
-            if (!currentModel->vertexBuffer || !currentModel->indexBuffer) continue;
-            currentModelValid = true;
-            VkDeviceSize vbOff = 0;
-            vkCmdBindVertexBuffers(cmd, 0, 1, &currentModel->vertexBuffer, &vbOff);
-            vkCmdBindIndexBuffer(cmd, currentModel->indexBuffer, 0, VK_INDEX_TYPE_UINT16);
-        }
-        if (!currentModelValid) continue;
-
-        const M2ModelGPU& model = *currentModel;
+        const auto& instance = instances[entry.index];
+        const M2ModelGPU* modelPtr = instance.cachedModel;
+        if (!modelPtr) continue;
+        if (!modelPtr->hasTransparentBatches && !modelPtr->isSpellEffect) continue;
+        if (!modelPtr->vertexBuffer || !modelPtr->indexBuffer) continue;
+        const M2ModelGPU& model = *modelPtr;
 
         // Fade alpha
-        float fadeAlpha = 1.0f;
-        float fadeFrac = model.disableAnimation ? 0.55f : fadeStartFraction;
-        float fadeStartDistSq = entry.effectiveMaxDistSq * fadeFrac * fadeFrac;
-        if (entry.distSq > fadeStartDistSq) {
-            fadeAlpha = std::clamp((entry.effectiveMaxDistSq - entry.distSq) /
-                                  (entry.effectiveMaxDistSq - fadeStartDistSq), 0.0f, 1.0f);
-        }
+        const float fadeAlpha = instanceDistanceFade(instance, model, entry.distSq, entry.effectiveMaxDistSq);
         float instanceFadeAlpha = fadeAlpha * instance.fade;
-        const bool instanceFaded = instance.fade < 0.999f;
+        // Stock blends every batch of a doodad whose model alpha is below
+        // 0.99999 (0x821A20): the spawn fade, and a map doodad's distance
+        // fade (Wowee's own distance curve stays a shader fade).
+        const bool instanceFaded = instance.fade < 0.999f ||
+                                   (instance.stockFadeClass >= 0 && fadeAlpha < 1.0f);
         if (model.isGroundDetail) instanceFadeAlpha *= 0.82f;
 
         bool modelNeedsAnimation = model.hasAnimation && !model.disableAnimation;
@@ -2650,12 +2783,17 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
         const bool particleDominantEffect = model.isSpellEffect &&
             !model.particleEmitters.empty() && model.batches.size() <= 2;
+        if (particleDominantEffect) continue; // emission-only mesh
 
-        for (const auto& batch : model.batches) {
+        const uint32_t slot = static_cast<uint32_t>(blendInstances_.size());
+        bool anyBatch = false;
+
+        for (size_t bi = 0; bi < model.batches.size(); ++bi) {
+            const auto& batch = model.batches[bi];
             if (batch.indexCount == 0) continue;
             if (!model.isGroundDetail && batch.submeshLevel != targetLOD) continue;
             if (batch.batchOpacity < 0.01f) continue;
-            if (!skyBatchAllowed(skyMode_, static_cast<std::size_t>(&batch - model.batches.data()))) continue;
+            if (!skyBatchAllowed(skyMode_, bi)) continue;
 
             // Pass 2 gate: only transparent/additive batches - or, for a faded
             // instance, every batch, since the opaque pass left it out.
@@ -2700,8 +2838,6 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 continue;
             }
 
-            if (particleDominantEffect) continue; // emission-only mesh
-
             // The batch's alpha tracks, played at the instance's time, for
             // every model whose batch has one that can change (constant ones
             // were baked into batchOpacity). The stock client multiplies the
@@ -2727,134 +2863,296 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 if (trackAlpha * batch.batchOpacity < 1e-4f) continue;
             }
 
-            // Compute UV offset for this instance + batch
-            //
-            // WOWEE_SKY_M2_NO_TEXANIM=1 freezes the sky's scrolling. Nine of
-            // its eighteen additive layers carry a texture animation, and
-            // those offsets are the one thing about those layers that changes
-            // between frames at all - so if the flicker survives freezing them
-            // it is not in what the layers sample, it is in the geometry they
-            // are drawn on.
-            static const bool skyNoTexAnim =
-                std::getenv("WOWEE_SKY_M2_NO_TEXANIM") != nullptr;
-            glm::vec2 uvOffset(0.0f);
-            if (batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation &&
-                !(skyMode_ && skyNoTexAnim)) {
-                uint16_t lookupIdx = batch.textureAnimIndex;
-                if (lookupIdx < model.textureTransformLookup.size()) {
-                    uint16_t transformIdx = model.textureTransformLookup[lookupIdx];
-                    if (transformIdx < model.textureTransforms.size()) {
-                        const auto& tt = model.textureTransforms[transformIdx];
-                        glm::vec3 trans = m2_track::sampleVec3(
-                            tt.translation, instance.currentSequenceIndex,
-                            instance.animTime, instance.globalSequenceTime,
-                            model.globalSequenceDurations, glm::vec3(0.0f));
-                        uvOffset = glm::vec2(trans.x, trans.y);
-                    }
+            // The batch's sort distance (0x821A20): its sort point through
+            // the centre bone. Flag 0x1 pulls it sortRadius (times the bone's
+            // scale) towards the camera, flag 0x2 pushes it away, and either
+            // makes a point behind the camera negative. A flag-0x10 model
+            // sorts by its origin and keeps the point for the tie.
+            BlendElement el;
+            el.instance = entry.index;
+            el.item = static_cast<uint32_t>(bi);
+            el.slot = slot;
+            el.trackAlpha = trackAlpha;
+            el.priority = batch.priorityPlane;
+            el.layer = batch.materialLayer;
+            el.type = 0;
+            {
+                const bool haveBone = needsBones && batch.centerBone < instance.boneMatrices.size();
+                const glm::vec4 local = haveBone
+                    ? instance.boneMatrices[batch.centerBone] * glm::vec4(batch.sortCenter, 1.0f)
+                    : glm::vec4(batch.sortCenter, 1.0f);
+                const glm::vec3 v = glm::vec3(instance.modelMatrix * local) - camPos;
+                float d;
+                if (!model.sortByModelOrigin && (batch.batchFlags & 0x3) && batch.sortRadius != 0.0f) {
+                    const glm::vec3 axis = haveBone
+                        ? glm::vec3(instance.modelMatrix * instance.boneMatrices[batch.centerBone][0])
+                        : glm::vec3(instance.modelMatrix[0]);
+                    d = m2BatchSortDistanceSq(v, glm::length(axis) * batch.sortRadius,
+                                              batch.batchFlags, camForward);
+                } else {
+                    d = glm::dot(v, v);
                 }
+                el.secondary = d;
+                el.primary = model.sortByModelOrigin ? entry.distSq : d;
             }
-            if (model.isLavaModel && uvOffset == glm::vec2(0.0f)) {
-                uvOffset = glm::vec2(lavaAnimSeconds * 0.03f,
-                                     -lavaAnimSeconds * 0.08f);
+            if (kLegacyOrder) {
+                el.primary = entry.distSq;
+                el.secondary = 0.0f;
+                el.priority = 0;
+                el.layer = 0;
             }
-
-            // Write single instance entry to SSBO
-            uint32_t drawOffset = 0;
-            if (claimInstanceSlots(1, true, drawOffset) == 0) continue;
-            auto& e = instSSBO[drawOffset];
-            e.model = instance.modelMatrix;
-            e.uvOffset = uvOffset;
-            e.uvOffset2 = (skyMode_ && skyNoTexAnim) ? 0u : stage2UvOffset(model, batch, instance);
-            e.fadeAlpha = instanceFadeAlpha * trackAlpha;
-            e.boneBase = needsBones ? static_cast<int32_t>(instance.megaBoneOffset) : 0;
-            e.boneCount = static_cast<int32_t>(instance.boneMatrices.size());
-            e.highlight = instance.highlight;
-            e.flags = (instance.afloat > 0 ? 1 : 0) | instance.groundNormalFlags |
-                      ((needsBones && !kM2NoSkinning) ? kInstanceSkinnedFlag : 0) |
-                      streamFadeFlags(instance);
-            if (instance.wmoInteriorLight) {
-                e.flags |= kInstanceWmoInteriorLightFlag;
-                e.wmoAmbient = instance.wmoAmbientPacked;
-                e.wmoDiffuse = instance.wmoDiffusePacked;
-            } else {
-                e.wmoAmbient = 0;
-                e.wmoDiffuse = 0;
-            }
-
-            // Pipeline selection: the material's own blend (stock 0xA453B0).
-            // Spell effects used to be pushed onto additive whatever they
-            // asked for, which drew potion bottles, parachutes and nets as
-            // glowing ghosts and Mod (5) layers as light; stock draws each
-            // as its material says. Matches the opaque pass: a forge's
-            // flame cards are additive, the forge itself is not.
-            uint8_t effectiveBlendMode = batch.blendMode;
-            if (batch.forgeFireCard && effectiveBlendMode <= 1) effectiveBlendMode = 4;
-
-            VkPipeline desiredPipeline = pipelineForBlend(effectiveBlendMode);
-            // An opaque layer of a faded instance, or one whose alpha plays:
-            // blended by it, as the stock client switches an opaque or
-            // alpha-keyed layer to alpha blending once its alpha is below 1
-            // (the blend table at 0xa453b0, rows 1 and 2).
-            if ((instanceFaded || batch.alphaAnimates) && effectiveBlendMode <= 1)
-                desiredPipeline = alphaPipeline_;
-            if (desiredPipeline != currentPipeline) {
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
-                currentPipeline = desiredPipeline;
-            }
-
-            if (batch.materialUBOMapped) {
-                auto* mat = static_cast<M2MaterialUBO*>(batch.materialUBOMapped);
-                // Here as well as in the opaque pass. A searchlight beam is
-                // additive, so this is the pass that actually draws it - and
-                // setting the flag only in the other one meant the softening
-                // never ran on the one model it was written for.
-                mat->volumetricBeam =
-                    (model.isVolumetricBeam || batch.volumetricBeam) ? 1 : 0;
-                mat->fireCard = batch.forgeFireCard ? 1 : 0;
-                mat->interiorDarken = 0.0f;
-                if (batch.colorKeyBlack)
-                    mat->colorKeyThreshold = (effectiveBlendMode == 4 || effectiveBlendMode == 5) ? 0.7f : 0.08f;
-
-                // A fire's own glow breathes. The same clock and parameters as
-                // the lamp sprites and the local light they cast, so a brazier
-                // and the pool of light under it rise and fall together
-                // instead of beating against each other.
-                //
-                // Never for a sky. lampFlicker is keyed on the instance
-                // position and says a seed that drifts re-rolls its phase every
-                // frame and strobes; a sky dome's position IS the camera's,
-                // rewritten every frame, so it is the one instance that can
-                // never be a valid seed. The classifier no longer calls
-                // HellfireSkyBox a brazier, and this makes sure the next model
-                // that gets miscalled one cannot strobe the sky either.
-                if (lightFlicker_ && !skyMode_ && m2BlendIsAdditive(batch.blendMode) &&
-                    (model.isBrazierOrFire || model.isTorch || model.isLanternLike)) {
-                    const float flicker = lampFlicker(
-                        instance.position, lampFlickerClockSeconds(),
-                        0.82f, 0.12f, 0.06f);
-                    mat->tintR = batch.tint.r * flicker;
-                    mat->tintG = batch.tint.g * flicker;
-                    mat->tintB = batch.tint.b * flicker;
-                }
-            }
-
-            if (!batch.materialSet) continue;
-            if (batch.materialSet != currentMaterialSet) {
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                        pipelineLayout_, 1, 1, &batch.materialSet, 0, nullptr);
-                currentMaterialSet = batch.materialSet;
-            }
-
-            // Push constants + single-instance draw
-            M2PushConstants pc;
-            pc.texCoordSet = static_cast<int32_t>(batch.textureUnit);
-            fillSway(pc, model, skyMode_);
-            pc.instanceDataOffset = static_cast<int32_t>(drawOffset);
-            vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
-            vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
-            if (skyMode_) ++counts.skyTransparent;
-            counts.draws++;
+            blendElements_.push_back(el);
+            anyBatch = true;
         }
+        if (anyBatch) {
+            blendInstances_.push_back({.index = entry.index, .fadeAlpha = instanceFadeAlpha,
+                                       .faded = instanceFaded, .needsBones = needsBones,
+                                       .lod = targetLOD});
+        }
+    }
+
+    // One element per emitter run of particles (0x821930): the model's
+    // distance, the emitter's priority, then the emitter's own distance.
+    if (particlesInterleaved_) {
+        for (uint32_t ri = 0; ri < particleRuns_.size(); ++ri) {
+            const ParticleRun& run = particleRuns_[ri];
+            if (run.count == 0 || !run.group || run.group->blendType < 2) continue;
+            if (run.instance >= instances.size()) continue;
+            const M2Instance& inst = instances[run.instance];
+            if (!inst.cachedModel || run.emitter < 0 ||
+                static_cast<size_t>(run.emitter) >= inst.cachedModel->particleEmitters.size() ||
+                static_cast<size_t>(run.emitter) >= inst.emitterStates.size()) continue;
+            BlendElement el;
+            const glm::vec3 toModel = inst.position - camPos;
+            const glm::vec3 toEmitter = inst.emitterStates[run.emitter].pos - camPos;
+            el.primary = glm::dot(toModel, toModel);
+            el.secondary = glm::dot(toEmitter, toEmitter);
+            el.instance = run.instance;
+            el.item = ri;
+            el.priority = inst.cachedModel->particleEmitters[run.emitter].textureTileRotation;
+            el.type = 4;
+            blendElements_.push_back(el);
+        }
+    }
+
+    std::sort(blendElements_.begin(), blendElements_.end(),
+              m2BlendOrderLess<BlendElement>);
+    blendSortMsSum_ += std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - tBlendSort0).count();
+    blendElementsSum_ += blendElements_.size();
+    ++blendSortFrames_;
+
+    // The pass switches between the model and particle pipeline layouts. They
+    // differ in their push constant ranges, so every set is bound again on
+    // each switch, and the model's vertex buffers with it.
+    enum class PassState : uint8_t { None, Model, Particle };
+    PassState bound = PassState::None;
+    const M2ModelGPU* boundModel = nullptr;
+    currentPipeline = VK_NULL_HANDLE;
+    currentMaterialSet = VK_NULL_HANDLE;
+    const auto bindModelState = [&]() {
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
+        if (megaBoneSet_[frameIndex]) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    pipelineLayout_, 2, 1, &megaBoneSet_[frameIndex], 0, nullptr);
+        } else if (dummyBoneSet_) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    pipelineLayout_, 2, 1, &dummyBoneSet_, 0, nullptr);
+        }
+        if (instanceSet_[frameIndex]) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    pipelineLayout_, 3, 1, &instanceSet_[frameIndex], 0, nullptr);
+        }
+        boundModel = nullptr;
+        currentMaterialSet = VK_NULL_HANDLE;
+        bound = PassState::Model;
+    };
+    const auto bindParticleState = [&]() {
+        const VkPipelineLayout layout = particleGpuPipelineLayout_;
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &perFrameSet, 0, nullptr);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 2, 1,
+                                &particleCurveSet_[particleFrame], 0, nullptr);
+        VkDeviceSize vbOffset = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &particleRecordBuf_[particleFrame], &vbOffset);
+        bound = PassState::Particle;
+        rasterValid = false;  // the particle pipelines set theirs statically
+    };
+
+    // Opaque and alpha-key particles are opaque elements in stock (blend
+    // below 2 at full alpha): drawn ahead of everything blended.
+    if (particlesInterleaved_) {
+        for (const ParticleRun& run : particleRuns_) {
+            if (run.count == 0 || !run.group || run.group->blendType >= 2) continue;
+            if (bound != PassState::Particle) bindParticleState();
+            drawParticleRun(cmd, run, currentPipeline);
+        }
+    }
+
+    for (const BlendElement& el : blendElements_) {
+        if (el.type == 4) {
+            if (bound != PassState::Particle) bindParticleState();
+            drawParticleRun(cmd, particleRuns_[el.item], currentPipeline);
+            continue;
+        }
+
+        const BlendInstance& bInst = blendInstances_[el.slot];
+        const auto& instance = instances[bInst.index];
+        const M2ModelGPU& model = *instance.cachedModel;
+        const auto& batch = model.batches[el.item];
+        const float instanceFadeAlpha = bInst.fadeAlpha;
+        const bool instanceFaded = bInst.faded;
+        const bool needsBones = bInst.needsBones;
+        const float trackAlpha = el.trackAlpha;
+
+        if (bound != PassState::Model) bindModelState();
+        if (boundModel != &model) {
+            VkDeviceSize vbOff = 0;
+            vkCmdBindVertexBuffers(cmd, 0, 1, &model.vertexBuffer, &vbOff);
+            vkCmdBindIndexBuffer(cmd, model.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+            boundModel = &model;
+        }
+
+        // Compute UV offset for this instance + batch
+        //
+        // WOWEE_SKY_M2_NO_TEXANIM=1 freezes the sky's scrolling. Nine of
+        // its eighteen additive layers carry a texture animation, and
+        // those offsets are the one thing about those layers that changes
+        // between frames at all - so if the flicker survives freezing them
+        // it is not in what the layers sample, it is in the geometry they
+        // are drawn on.
+        static const bool skyNoTexAnim =
+            std::getenv("WOWEE_SKY_M2_NO_TEXANIM") != nullptr;
+        glm::vec2 uvOffset(0.0f);
+        if (batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation &&
+            !(skyMode_ && skyNoTexAnim)) {
+            uint16_t lookupIdx = batch.textureAnimIndex;
+            if (lookupIdx < model.textureTransformLookup.size()) {
+                uint16_t transformIdx = model.textureTransformLookup[lookupIdx];
+                if (transformIdx < model.textureTransforms.size()) {
+                    const auto& tt = model.textureTransforms[transformIdx];
+                    glm::vec3 trans = m2_track::sampleVec3(
+                        tt.translation, instance.currentSequenceIndex,
+                        instance.animTime, instance.globalSequenceTime,
+                        model.globalSequenceDurations, glm::vec3(0.0f));
+                    uvOffset = glm::vec2(trans.x, trans.y);
+                }
+            }
+        }
+        if (model.isLavaModel && uvOffset == glm::vec2(0.0f)) {
+            uvOffset = glm::vec2(lavaAnimSeconds * 0.03f,
+                                 -lavaAnimSeconds * 0.08f);
+        }
+
+        // Write single instance entry to SSBO
+        uint32_t drawOffset = 0;
+        if (claimInstanceSlots(1, true, drawOffset) == 0) continue;
+        auto& e = instSSBO[drawOffset];
+        e.model = instance.modelMatrix;
+        e.uvOffset = uvOffset;
+        e.uvOffset2 = (skyMode_ && skyNoTexAnim) ? 0u : stage2UvOffset(model, batch, instance);
+        e.fadeAlpha = instanceFadeAlpha * trackAlpha;
+        e.boneBase = needsBones ? static_cast<int32_t>(instance.megaBoneOffset) : 0;
+        e.boneCount = static_cast<int32_t>(instance.boneMatrices.size());
+        e.highlight = instance.highlight;
+        e.flags = (instance.afloat > 0 ? 1 : 0) | instance.groundNormalFlags |
+                  ((needsBones && !kM2NoSkinning) ? kInstanceSkinnedFlag : 0) |
+                  streamFadeFlags(instance);
+        {
+            // A fire's breathing scales its played colour as it does the
+            // material tint below.
+            float tintScale = 1.0f;
+            if (lightFlicker_ && !skyMode_ && m2BlendIsAdditive(batch.blendMode) &&
+                (model.isBrazierOrFire || model.isTorch || model.isLanternLike)) {
+                tintScale = lampFlicker(instance.position, lampFlickerClockSeconds(), 0.82f, 0.12f, 0.06f);
+            }
+            e.flags |= batchInstanceExtras(e, model, batch, instance, tintScale);
+        }
+        if (instance.wmoInteriorLight) {
+            e.flags |= kInstanceWmoInteriorLightFlag;
+            e.wmoAmbient = instance.wmoAmbientPacked;
+            e.wmoDiffuse = instance.wmoDiffusePacked;
+        } else {
+            e.wmoAmbient = 0;
+            e.wmoDiffuse = 0;
+        }
+
+        // Pipeline selection: the material's own blend (stock 0xA453B0).
+        // Spell effects used to be pushed onto additive whatever they
+        // asked for, which drew potion bottles, parachutes and nets as
+        // glowing ghosts and Mod (5) layers as light; stock draws each
+        // as its material says. Matches the opaque pass: a forge's
+        // flame cards are additive, the forge itself is not.
+        uint8_t effectiveBlendMode = batch.blendMode;
+        if (batch.forgeFireCard && effectiveBlendMode <= 1) effectiveBlendMode = 4;
+
+        VkPipeline desiredPipeline = pipelineForBlend(effectiveBlendMode);
+        // An opaque layer of a faded instance, or one whose alpha plays:
+        // blended by it, as the stock client switches an opaque or
+        // alpha-keyed layer to alpha blending once its alpha is below 1
+        // (the blend table at 0xa453b0, rows 1 and 2).
+        if ((instanceFaded || batch.alphaAnimates) && effectiveBlendMode <= 1)
+            desiredPipeline = alphaPipeline_;
+        if (desiredPipeline != currentPipeline) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
+            currentPipeline = desiredPipeline;
+        }
+
+        if (batch.materialUBOMapped) {
+            auto* mat = static_cast<M2MaterialUBO*>(batch.materialUBOMapped);
+            // Here as well as in the opaque pass. A searchlight beam is
+            // additive, so this is the pass that actually draws it - and
+            // setting the flag only in the other one meant the softening
+            // never ran on the one model it was written for.
+            mat->volumetricBeam =
+                (model.isVolumetricBeam || batch.volumetricBeam) ? 1 : 0;
+            mat->fireCard = batch.forgeFireCard ? 1 : 0;
+            mat->interiorDarken = 0.0f;
+            if (batch.colorKeyBlack)
+                mat->colorKeyThreshold = (effectiveBlendMode == 4 || effectiveBlendMode == 5) ? 0.7f : 0.08f;
+
+            // A fire's own glow breathes. The same clock and parameters as
+            // the lamp sprites and the local light they cast, so a brazier
+            // and the pool of light under it rise and fall together
+            // instead of beating against each other.
+            //
+            // Never for a sky. lampFlicker is keyed on the instance
+            // position and says a seed that drifts re-rolls its phase every
+            // frame and strobes; a sky dome's position IS the camera's,
+            // rewritten every frame, so it is the one instance that can
+            // never be a valid seed. The classifier no longer calls
+            // HellfireSkyBox a brazier, and this makes sure the next model
+            // that gets miscalled one cannot strobe the sky either.
+            if (lightFlicker_ && !skyMode_ && m2BlendIsAdditive(batch.blendMode) &&
+                (model.isBrazierOrFire || model.isTorch || model.isLanternLike)) {
+                const float flicker = lampFlicker(
+                    instance.position, lampFlickerClockSeconds(),
+                    0.82f, 0.12f, 0.06f);
+                mat->tintR = batch.tint.r * flicker;
+                mat->tintG = batch.tint.g * flicker;
+                mat->tintB = batch.tint.b * flicker;
+            }
+        }
+
+        if (!batch.materialSet) continue;
+        if (batch.materialSet != currentMaterialSet) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    pipelineLayout_, 1, 1, &batch.materialSet, 0, nullptr);
+            currentMaterialSet = batch.materialSet;
+        }
+
+        // Push constants + single-instance draw
+        M2PushConstants pc;
+        pc.texCoordSet = static_cast<int32_t>(batch.textureUnit);
+        fillSway(pc, model, skyMode_);
+        pc.instanceDataOffset = static_cast<int32_t>(drawOffset);
+        vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+        applyRaster(batch.materialFlags,
+                    currentPipeline == opaquePipeline_ || currentPipeline == alphaTestPipeline_ ||
+                    currentPipeline == cutoutPipeline_);
+        vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
+        if (skyMode_) ++counts.skyTransparent;
+        counts.draws++;
     }
 }
 
@@ -2959,6 +3257,18 @@ void M2Renderer::recordGlowSprites(VkCommandBuffer cmd, VkDescriptorSet perFrame
                         "ms over ", sortedVisible_.size(), " visible of ", instances.size(),
                         " instances, opaque split at ", opaqueSplit_,
                         ", draws ", recordCounts_[0].draws, "+", recordCounts_[1].draws);
+            // The blended pass's element build and sort (#25), averaged
+            // over the window rather than the one frame above.
+            if (blendSortFrames_ > 0) {
+                LOG_WARNING("  m2 blended sort: ", blendSortMsSum_ / static_cast<double>(blendSortFrames_),
+                            "ms avg, ", blendElementsSum_ / blendSortFrames_, " elements over ",
+                            blendSortFrames_, " frames; particle records ",
+                            blendParticleMsSum_ / static_cast<double>(blendSortFrames_), "ms avg");
+            }
+            blendSortMsSum_ = 0.0;
+            blendParticleMsSum_ = 0.0;
+            blendSortFrames_ = 0;
+            blendElementsSum_ = 0;
         }
     }
 }

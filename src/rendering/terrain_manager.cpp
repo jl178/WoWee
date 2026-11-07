@@ -1274,6 +1274,8 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 }
                 uint32_t instId = m2Renderer->createInstance(p.modelId, p.position, p.rotation, p.scale);
                 if (instId) {
+                    // A map doodad: the stock size-class distance and fade.
+                    m2Renderer->setInstanceMapDoodad(instId);
                     // Fade in new scenery: dissolves in (no-op with it off).
                     m2Renderer->markStreamedIn(instId);
                     ft.m2InstanceIds.push_back(instId);

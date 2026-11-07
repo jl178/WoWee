@@ -76,6 +76,7 @@ layout(location = 8) in vec2 TexCoord2;
 // diffuse (packed RGBA8, from the MODD colour by 0x7c1ad0), z 1 when set.
 layout(location = 9) flat in uvec3 vWmoLight;
 layout(location = 10) flat in float vStreamHide;  // stream_fade.glsli
+layout(location = 11) flat in vec3 vInstanceTint;  // animated M2Color RGB, or -1
 
 layout(location = 0) out vec4 outColor;
 
@@ -217,7 +218,8 @@ void main() {
     // colour (0x81FE90), which the combiner multiplies by the lit part only;
     // Mod and Mod2x batches take none (diffuse 0, emissive 1 or 0.5).
     bool modBlend = (blendMode == 5 || blendMode == 6);
-    vec3 tint = modBlend ? vec3(blendMode == 6 ? 0.5 : 1.0) : vec3(tintR, tintG, tintB);
+    vec3 tint = modBlend ? vec3(blendMode == 6 ? 0.5 : 1.0)
+              : (vInstanceTint.x >= 0.0 ? vInstanceTint : vec3(tintR, tintG, tintB));
 
     // Original client sky M2s carry their authored colour and alpha, and are
     // taken as they are. They are camera-centered and unlit, and must not be

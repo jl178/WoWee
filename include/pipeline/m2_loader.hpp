@@ -108,6 +108,13 @@ struct M2Batch {
     // Geoset info (from submesh)
     uint16_t submeshId = 0;         // Submesh/geoset ID (determines body part group)
     uint16_t submeshLevel = 0;      // Submesh level (0=base, 1+=LOD/alternate mesh)
+
+    // The skin section's sort point (M2SkinSection +0x12, +0x20, +0x2C): the
+    // stock client sorts a blended batch by sortCenter through centerBone,
+    // pushed by sortRadius when batch flags 0x1 or 0x2 ask (0x821A20).
+    uint16_t centerBoneIndex = 0;
+    glm::vec3 sortCenter{0.0f};
+    float sortRadius = 0.0f;
 };
 
 // Material / render flags (per-batch blend mode)
@@ -476,6 +483,8 @@ struct M2Model {
     // render time to hide batches whose alpha animates to 0 in the current
     // animation (e.g. the lumberjack carry model's alternate wood bundle).
     std::vector<M2AnimationTrack> colorAlphaTracks;
+    /// The RGB half of each M2Color, the whole track (colorRGB is its first key).
+    std::vector<M2AnimationTrack> colorRgbTracks;
 
     // Attachment points (for weapon/effect anchoring)
     std::vector<M2Attachment> attachments;

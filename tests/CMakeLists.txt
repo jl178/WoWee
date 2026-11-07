@@ -1363,6 +1363,12 @@ wowee_add_test(test_m2_track_cursor
 wowee_add_test(test_m2_track_stock
     SOURCES test_m2_track_stock.cpp)
 
+# ── test_m2_blend_order ──────────────────────────────────────
+# The blended pass's stock order, cull and depth from render flags, and the
+# map doodad distance fade (docs/re/m2-runtime.md #24, #25, §4).
+wowee_add_test(test_m2_blend_order
+    SOURCES test_m2_blend_order.cpp)
+
 # ── test_m2_effect_select ────────────────────────────────────
 # The stock M2 batch shader selection: runtime shader ids, the folding of
 # env and alpha layers, and the combiner and UV sources per stage

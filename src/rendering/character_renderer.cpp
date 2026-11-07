@@ -3853,11 +3853,16 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                                           (hairTexture ||
                                            (hairGeoset && (blendMode != 0 || batch.textureCount > 1)));
 
-                // Attached weapon models can include additive FX/card batches that
-                // appear as detached flat quads for some swords. Keep core geometry
-                // and drop FX-style passes for weapon attachments. Enchant visuals
-                // are entirely such batches, so they must survive this cull.
-                if (instance.hasOverrideModelMatrix && !instance.isEffectModel && blendMode >= 3) {
+                // An attached weapon's additive and modulate batches - the
+                // glow cards and runes on a sword - are drawn, as the stock
+                // client draws every batch of an attachment (m2-runtime #31).
+                // They were dropped as "detached flat quads" before the blend
+                // table, the second stage and layer folding were stock.
+                // WOWEE_CHAR_DROP_WEAPON_FX=1 drops them again (enchant
+                // visuals, being effect models, always draw).
+                static const bool kDropWeaponFx = core::envFlagEnabled("WOWEE_CHAR_DROP_WEAPON_FX", false);
+                if (kDropWeaponFx && instance.hasOverrideModelMatrix && !instance.isEffectModel &&
+                    blendMode >= 3) {
                     continue;
                 }
 

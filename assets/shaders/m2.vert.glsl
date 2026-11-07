@@ -56,8 +56,15 @@ struct InstanceData {
     // That doodad's two lights from its MODD colour (0x7c1ad0), packed RGBA8.
     uint wmoAmbient;
     uint wmoDiffuse;
-    uint pad0;
-    uint pad1;
+    // Bit 5 (0x20) of flags: the batch's animated M2Color RGB at this
+    // instance's time, as halves (R, G) and (B, unused) - m2-runtime #18.
+    uint tintRG;
+    uint tintB;
+    // Bit 6 (0x40): each stage's texture matrix past its translation, the
+    // 2x2 of scale then rotation about (0.5, 0.5) (0x82D6F0; #19, #30), as
+    // two columns of halves per stage.
+    uvec2 uvMat0;
+    uvec2 uvMat1;
 };
 layout(set = 3, binding = 0) readonly buffer InstanceSSBO {
     InstanceData instanceData[];
@@ -89,12 +96,22 @@ layout(location = 9) flat out uvec3 vWmoLight;
 // from the instance flags' top byte (M2Renderer::streamFadeFlags). 0 for
 // everything else, always with the row off.
 layout(location = 10) flat out float vStreamHide;
+// The instance's animated batch colour, or -1 to take the material's.
+layout(location = 11) flat out vec3 vInstanceTint;
 
 #include "m2_combiner.glsli"
 
 vec2 stageUv(int src, vec2 env, vec2 offset) {
     if (src == 2) return env;
     return (src == 1 ? aTexCoord2 : aTexCoord) + offset;
+}
+
+// The rest of a stage's texture matrix: M = T(t) [T(-c) S T(c)] [T(-c) R T(c)]
+// with row vectors and c = (0.5, 0.5), so after the translation the
+// coordinate is scaled, then rotated, about the centre.
+vec2 stageMatrix(vec2 uv, uvec2 cols) {
+    mat2 l = mat2(unpackHalf2x16(cols.x), unpackHalf2x16(cols.y));
+    return (uv - 0.5) * l + 0.5;
 }
 
 void main() {
@@ -371,6 +388,13 @@ void main() {
     }
     TexCoord = stageUv(src0, env, uvOff);
     TexCoord2 = stageUv(src1, env, unpackHalf2x16(instanceData[instIdx].uvOffset2));
+    if ((instanceData[instIdx].flags & 0x40) != 0) {
+        if (src0 != 2) TexCoord = stageMatrix(TexCoord, instanceData[instIdx].uvMat0);
+        if (src1 != 2) TexCoord2 = stageMatrix(TexCoord2, instanceData[instIdx].uvMat1);
+    }
+    vInstanceTint = (instanceData[instIdx].flags & 0x20) != 0
+        ? vec3(unpackHalf2x16(instanceData[instIdx].tintRG), unpackHalf2x16(instanceData[instIdx].tintB).x)
+        : vec3(-1.0);
 
     InstanceOrigin = model[3].xyz;
     // How far up the plant this vertex is, as a fraction of the plant's own

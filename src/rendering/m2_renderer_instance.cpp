@@ -4,6 +4,8 @@
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_renderer_internal.h"
 #include "rendering/m2_model_classifier.hpp"
+#include "rendering/m2_view_distance.hpp"
+#include "rendering/render_constants.hpp"
 #include "rendering/animation/anim_selection.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_buffer.hpp"
@@ -152,6 +154,7 @@ void M2Renderer::setInstanceAnimationFrozen(uint32_t instanceId, bool frozen) {
         if (inst.cachedModel &&
             inst.idleSequenceIndex < static_cast<int>(inst.cachedModel->sequences.size())) {
             inst.currentSequenceIndex = inst.idleSequenceIndex;
+            inst.stockLapsLeft = 0;  // the caller's sequence, not the default's laps
             inst.animDuration = static_cast<float>(
                 inst.cachedModel->sequences[inst.idleSequenceIndex].duration);
         }
@@ -183,6 +186,7 @@ void M2Renderer::holdInstanceAnimationAtEnd(uint32_t instanceId) {
     if (idxIt == instanceIndexById.end()) return;
     auto& inst = instances[idxIt->second];
     inst.holdAtEnd = true;
+    inst.stockLapsLeft = 0;
     inst.thenLoopSequence = -1;
     inst.playingVariation = false;
 }
@@ -208,6 +212,7 @@ void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animatio
         // Already in the state when first seen: its loop, without the motion.
         inst.blendDurationMs = 0.0f;
         inst.currentSequenceIndex = loopIdx;
+        inst.stockLapsLeft = 0;  // the caller's sequence, not the default's laps
         inst.animDuration = static_cast<float>(seqs[loopIdx].duration);
         inst.animTime = 0.0f;
         inst.animSpeed = 1.0f;
@@ -226,6 +231,7 @@ void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animatio
         if (skipToEnd) inst.blendDurationMs = 0.0f;
         else beginM2SequenceBlend(*inst.cachedModel, inst, i);
         inst.currentSequenceIndex = i;
+        inst.stockLapsLeft = 0;  // the caller's sequence, not the default's laps
         inst.animDuration = static_cast<float>(seqs[i].duration);
         inst.playingVariation = false;   // not a variation: it does not go back
         inst.holdAtEnd = true;
@@ -260,6 +266,7 @@ void M2Renderer::setInstanceAnimation(uint32_t instanceId, uint32_t animationId,
         if (seqs[i].id == animationId) {
             beginM2SequenceBlend(*inst.cachedModel, inst, i);
             inst.currentSequenceIndex = i;
+            inst.stockLapsLeft = 0;  // the caller's sequence, not the default's laps
             inst.animDuration = static_cast<float>(seqs[i].duration);
             inst.animTime = 0.0f;
             inst.animSpeed = 1.0f;
@@ -294,6 +301,7 @@ bool M2Renderer::playInstanceSequence(uint32_t instanceId, uint32_t animationId,
     if (blend && idx != inst.currentSequenceIndex) beginM2SequenceBlend(*inst.cachedModel, inst, idx);
     else if (!blend) inst.blendDurationMs = 0.0f;
     inst.currentSequenceIndex = idx;
+    inst.stockLapsLeft = 0;  // the caller's sequence, not the default's laps
     inst.animDuration = static_cast<float>(seqs[idx].duration);
     inst.playingVariation = false;
     inst.pausedDir = 0;
@@ -593,6 +601,66 @@ void M2Renderer::setInstanceIsGameObject(uint32_t instanceId, bool isGameObject)
     auto idxIt = instanceIndexById.find(instanceId);
     if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) return;
     instances[idxIt->second].isGameObject = isGameObject;
+}
+
+void M2Renderer::setInstanceMapDoodad(uint32_t instanceId) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) return;
+    M2Instance& inst = instances[idxIt->second];
+    if (!inst.cachedModel || inst.isGameObject) return;
+    // The largest extent of the world-space bounding box (0x7BDB10).
+    glm::vec3 lo(std::numeric_limits<float>::max()), hi(std::numeric_limits<float>::lowest());
+    for (int c = 0; c < 8; ++c) {
+        const glm::vec3 local((c & 1) ? inst.cachedModel->boundMax.x : inst.cachedModel->boundMin.x,
+                              (c & 2) ? inst.cachedModel->boundMax.y : inst.cachedModel->boundMin.y,
+                              (c & 4) ? inst.cachedModel->boundMax.z : inst.cachedModel->boundMin.z);
+        const glm::vec3 w = glm::vec3(inst.modelMatrix * glm::vec4(local, 1.0f));
+        lo = glm::min(lo, w);
+        hi = glm::max(hi, w);
+    }
+    const glm::vec3 ext = hi - lo;
+    inst.stockFadeClass = static_cast<int8_t>(
+        rendering::stockDoodadSizeClass(std::max({ext.x, ext.y, ext.z})));
+}
+
+float M2Renderer::instanceMaxDistSq(const M2Instance& inst, float maxRenderDistanceSq) const {
+    static const bool kLegacy = core::envFlagEnabled("WOWEE_M2_LEGACY_DOODAD_FADE", false);
+    if (inst.stockFadeClass >= 0 && !kLegacy) {
+        const float end = std::min(rendering::stockDoodadEndDistance(
+                                       inst.stockFadeClass, environmentDetail_, viewDistanceRaw_ / 1200.0f),
+                                   cappedViewDistance());
+        return end * end;
+    }
+    return rendering::m2InstanceMaxDistSq(
+        maxRenderDistanceSq, inst.cachedEffectiveMaxDistSqFactor,
+        inst.isGameObject, rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE,
+        cappedViewDistance(),
+        inst.cachedIsGroundDetail, groundDetailMaxDistance_);
+}
+
+float M2Renderer::stockDoodadMaxDistSq() const {
+    static const bool kLegacy = core::envFlagEnabled("WOWEE_M2_LEGACY_DOODAD_FADE", false);
+    if (kLegacy) return 0.0f;
+    float farEnd = 0.0f;
+    for (int c = 0; c < rendering::kStockDoodadClasses; ++c)
+        farEnd = std::max(farEnd, rendering::stockDoodadEndDistance(c, environmentDetail_, viewDistanceRaw_ / 1200.0f));
+    farEnd = std::min(farEnd, cappedViewDistance());
+    return farEnd * farEnd;
+}
+
+float M2Renderer::instanceDistanceFade(const M2Instance& inst, const M2ModelGPU& model,
+                                       float distSq, float effMaxDistSq) const {
+    static const bool kLegacy = core::envFlagEnabled("WOWEE_M2_LEGACY_DOODAD_FADE", false);
+    if (inst.stockFadeClass >= 0 && !kLegacy) {
+        return rendering::stockDoodadFadeAlpha(inst.stockFadeClass, std::sqrt(effMaxDistSq),
+                                               std::sqrt(distSq));
+    }
+    // Wowee's own: linear over the last quarter of the distance (the last
+    // 45% for animation-disabled models), in squared distance.
+    const float fadeFrac = model.disableAnimation ? 0.55f : 0.75f;
+    const float fadeStartDistSq = effMaxDistSq * fadeFrac * fadeFrac;
+    if (distSq <= fadeStartDistSq) return 1.0f;
+    return std::clamp((effMaxDistSq - distSq) / (effMaxDistSq - fadeStartDistSq), 0.0f, 1.0f);
 }
 
 void M2Renderer::setSkipCollision(uint32_t instanceId, bool skip) {

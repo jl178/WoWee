@@ -121,8 +121,21 @@ struct M2ModelGPU {
         int16_t textureWeightTrack = -1;
         float bakedTrackAlpha = 1.0f;
         bool alphaAnimates = false;  // colorAlphaTrack or textureWeightTrack set
+        /// The batch's M2Color RGB track when it can change (index into
+        /// colorRgbTracks), played per instance; -1 uses the baked tint.
+        int16_t colorRgbTrack = -1;
         glm::vec3 center = glm::vec3(0.0f); // Center of batch geometry (model space)
         float glowSize = 1.0f;              // Approx radius of batch geometry
+        // The stock blended-pass sort key (0x821A20, 0x81EF30): the skin
+        // section's sortCenter through its centerBone, pushed sortRadius
+        // towards the camera (flag 0x1) or away (0x2); ties by priorityPlane,
+        // then materialLayer.
+        glm::vec3 sortCenter{0.0f};
+        float sortRadius = 0.0f;
+        uint16_t centerBone = 0;
+        uint16_t materialLayer = 0;
+        int8_t priorityPlane = 0;
+        uint8_t batchFlags = 0;
 
         struct LightBoneAnchor {
             uint16_t bone = 0;
@@ -274,6 +287,9 @@ struct M2ModelGPU {
     bool isBoat = false;            // Small boat; bobs if it turns out to be afloat
     bool hasTextureAnimation = false; // True if any batch has UV animation
     bool hasTransparentBatches = false; // True if any batch uses alpha-blend or additive (blendMode >= 2)
+    /// MD20 global flag 0x10: the blended pass sorts this model's batches by
+    /// the model's origin instead of each batch's sort point (0x821A20).
+    bool sortByModelOrigin = false;
     uint8_t availableLODs = 0;  // Bitmask: bit N set if any batch has submeshLevel==N
 
     // Particle emitter data (kept from M2Model)
@@ -305,6 +321,7 @@ struct M2ModelGPU {
 
     // The alpha tracks the batches name (colorAlphaTrack, textureWeightTrack).
     std::vector<pipeline::M2AnimationTrack> colorAlphaTracks;
+    std::vector<pipeline::M2AnimationTrack> colorRgbTracks;
     std::vector<pipeline::M2AnimationTrack> textureWeightTracks;
 
     // Texture transform data for UV animation
@@ -404,6 +421,10 @@ struct alignas(64) M2Instance {
     int32_t groundNormalFlags = 0;
     // Whether the boat sits on water: -1 not known yet, 0 no, 1 afloat.
     int8_t afloat = -1;
+    /// A map (ADT) doodad's stock size class for the distance fade
+    /// (stockDoodadSizeClass, 0..4), -1 for every other model, which keeps
+    /// Wowee's own distance rule. Set by setInstanceMapDoodad.
+    int8_t stockFadeClass = -1;
     /// A WMO doodad: its slot in WMORenderer's doodad visibility (drawn only
     /// while its group is, 0x7ac060), ~0u for every other model.
     uint32_t portalSlot = ~0u;
@@ -457,6 +478,10 @@ struct alignas(64) M2Instance {
     /// back to the idle sequence, which for a door is the closed pose - so an
     /// open door swung open and shut itself, over and over.
     bool holdAtEnd = false;
+    /// Laps left of a flag-0x01 default sequence before it holds its last
+    /// frame (stock 0x826B00 / 0x82F0F0: replayMin..replayMax laps); 0 for
+    /// a looping sequence or one a caller set.
+    uint16_t stockLapsLeft = 0;
     /// With holdAtEnd: the sequence to loop once the held one-shot ends, -1 none.
     ///
     /// The game's own state pairs: Open runs once and Opened loops, Close then
@@ -1059,6 +1084,20 @@ public:
     /// Mark an instance as a server game object so the adaptive doodad render
     /// distance can't cull it while the server still considers it visible.
     void setInstanceIsGameObject(uint32_t instanceId, bool isGameObject);
+    /// Mark an instance as a map (MDDF) doodad: it fades and stops at the
+    /// stock client's distance for its size (0x791CB0, m2_view_distance.hpp).
+    void setInstanceMapDoodad(uint32_t instanceId);
+    /// The instance's draw distance, squared: the stock size-class end for a
+    /// map doodad, else m2InstanceMaxDistSq.
+    [[nodiscard]] float instanceMaxDistSq(const M2Instance& inst, float maxRenderDistanceSq) const;
+    /// The furthest any map doodad size class draws, squared (0 with the
+    /// legacy rule), for the cull's global distance bound.
+    [[nodiscard]] float stockDoodadMaxDistSq() const;
+    /// The distance fade of an instance at distSq, effMaxDistSq being what
+    /// instanceMaxDistSq gave: the stock linear fade over the class's last
+    /// yards for a map doodad (0 = not drawn), else Wowee's own curve.
+    [[nodiscard]] float instanceDistanceFade(const M2Instance& inst, const M2ModelGPU& model,
+                                             float distSq, float effMaxDistSq) const;
     void setSkipCollision(uint32_t instanceId, bool skip);
     void setSkipWallCollision(uint32_t instanceId, bool skip);
     /// Mark an instance as a WMO doodad (WMORenderer::attachDoodad): its
@@ -1348,9 +1387,16 @@ private:
                                    //                         bit 3: WMO interior doodad light
         uint32_t wmoAmbient = 0;   //  4 bytes @ offset 96 - packed RGB (packUnorm4x8)
         uint32_t wmoDiffuse = 0;   //  4 bytes @ offset 100
-        uint32_t pad0 = 0;         //  4 bytes @ offset 104
-        uint32_t pad1 = 0;         //  4 bytes @ offset 108
+        // Flags bit 5 (0x20): the batch's animated M2Color RGB at this
+        // instance's time, halves (R, G) and (B, 0). m2-runtime #18.
+        uint32_t tintRG = 0;       //  4 bytes @ offset 104
+        uint32_t tintB = 0;        //  4 bytes @ offset 108
+        // Flags bit 6 (0x40): each stage's 2x2 of UV scale then rotation
+        // about (0.5, 0.5) (0x82D6F0), two columns of halves. #19, #30.
+        glm::uvec2 uvMat0{0u};     //  8 bytes @ offset 112
+        glm::uvec2 uvMat1{0u};     //  8 bytes @ offset 120
     };
+    static_assert(sizeof(M2InstanceGPU) == 128, "m2.vert InstanceData is 128 bytes");
     // How many instances one frame may hand the GPU, not how many exist. Ground
     // clutter is what fills it: it is drawn by the thousand and every tuft
     // takes a slot of its own, so at 16384 a dwarf standing in Dun Morogh
@@ -1612,8 +1658,41 @@ private:
     std::vector<std::pair<size_t, uint32_t>> splitGroups_;  // scratch for recordPartsWanted
     uint32_t recordFrameIndex_ = 0;
     glm::vec3 recordCamPos_{0.0f};
+    glm::vec3 recordCamForward_{0.0f, 1.0f, 0.0f};
     float recordLavaSeconds_ = 0.0f;
     std::chrono::steady_clock::time_point recordT0_, recordT1_, recordT2_;  // profile
+
+    /// One element of the blended pass, as the stock client sorts them
+    /// (0x821A20 builds, 0x81EF30 compares; docs/re/m2-runtime.md #25): a
+    /// batch of an instance, or one emitter's run of particles.
+    struct BlendElement {
+        float primary = 0.0f;    // element +0x10: far first
+        float secondary = 0.0f;  // +0x14: far first, after priority
+        uint32_t instance = 0;   // instances[] index; stock's model-pointer tie
+        uint32_t item = 0;       // batch index, or particleRuns_ index
+        uint32_t slot = 0;       // blendInstances_ entry (batches)
+        float trackAlpha = 1.0f; // the batch's played alpha tracks
+        int16_t priority = 0;    // +0x24: ascending
+        uint16_t layer = 0;      // materialLayer: ascending (batches)
+        uint8_t type = 0;        // stock element type: 0 batch, 4 particles
+    };
+    /// What the blended pass works out once per instance.
+    struct BlendInstance {
+        uint32_t index = 0;
+        float fadeAlpha = 1.0f;
+        bool faded = false;
+        bool needsBones = false;
+        uint16_t lod = 0;
+    };
+    std::vector<BlendElement> blendElements_;
+    std::vector<BlendInstance> blendInstances_;
+    /// The particle records were written and their blended runs drawn in
+    /// the blended pass this frame, so renderM2Particles has nothing to do.
+    bool particlesInterleaved_ = false;
+    /// The element build and sort, summed for the profile line.
+    double blendSortMsSum_ = 0.0;
+    double blendParticleMsSum_ = 0.0;  // the particle records written ahead of it
+    uint64_t blendSortFrames_ = 0, blendElementsSum_ = 0;
 
     // Shadow-pass texture descriptor cache (reused each frame, cleared via pool reset)
     std::unordered_map<VkImageView, VkDescriptorSet> shadowTexSetCache_;
@@ -1799,6 +1878,10 @@ private:
         ParticleGroup* group = nullptr;
         uint32_t first = 0;
         uint32_t count = 0;
+        // Whose particles, when runs are cut per emitter for the blended
+        // pass's sort (writeParticleRecordsGpu's perEmitter).
+        uint32_t instance = UINT32_MAX;
+        int32_t emitter = -1;
     };
     std::vector<ParticleRun> particleRuns_;
     /// Quads the particle pass draws per frame, one 48-byte record each (a
@@ -1815,7 +1898,15 @@ private:
     /// particleRecordBuf_[frame] and each emitter's curves into
     /// particleCurveBuf_[frame]. Fills particleRuns_ and returns how many
     /// records it wrote.
-    size_t writeParticleRecordsGpu(uint32_t frame);
+    size_t writeParticleRecordsGpu(uint32_t frame, bool perEmitter = false);
+    /// The particle pipelines and this frame's record buffers exist.
+    [[nodiscard]] bool particlePassReady(uint32_t frame) const;
+    /// Picks the instances whose particles are drawn this frame and writes
+    /// their records (renderM2Particles' first half). Returns the records.
+    size_t prepareParticleRecords(uint32_t frame, bool perEmitter);
+    /// Binds what one run needs (pipeline, texture, push constants) on the
+    /// particle layout and draws it; currentPipeline is the caller's.
+    void drawParticleRun(VkCommandBuffer cmd, const ParticleRun& run, VkPipeline& currentPipeline);
 
     // Animation update buffers (avoid per-frame allocation)
     std::vector<size_t> boneWorkIndices_;        // Reused each frame

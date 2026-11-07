@@ -182,6 +182,26 @@ inline bool trackVaries(const pipeline::M2AnimationTrack& track, float defaultVa
     return false;
 }
 
+/// trackVaries for a vec3 track (colour RGB, UV translation and scale).
+inline bool trackVariesVec3(const pipeline::M2AnimationTrack& track, const glm::vec3& defaultValue) {
+    bool have = false;
+    glm::vec3 first(0.0f);
+    const auto see = [&](const glm::vec3& v) {
+        if (!have) { first = v; have = true; return false; }
+        return v != first;
+    };
+    for (const auto& keys : track.sequences) {
+        const size_t n = std::min(keys.timestamps.size(), keys.vec3Values.size());
+        if (n == 0) {
+            if (see(defaultValue)) return true;
+            continue;
+        }
+        for (size_t k = 0; k < n; ++k)
+            if (see(keys.vec3Values[k])) return true;
+    }
+    return false;
+}
+
 /// The one value of a track trackVaries says is constant: its key, or the
 /// default when it has none.
 inline float trackConstant(const pipeline::M2AnimationTrack& track, float defaultValue) {

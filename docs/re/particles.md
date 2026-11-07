@@ -300,7 +300,7 @@ Files: `include/rendering/m2_particle_stock.hpp` (new, the pure arithmetic),
 | 40 | Sort 0x2 | back to front within the emitter | none | **Fixed** (by distance) |
 | 41 | Per-emitter draw cap | 0x4000 vertices | none | **Fixed** |
 | 42 | Soft round sprite edge | none | smoothstep circle | **Removed** |
-| 43 | Draw order with batches | sorted with the model's transparent batches | separate pass after | open |
+| 43 | Draw order with batches | sorted with the model's transparent batches (0x821930: model distance, the emitter's 0x2E field as priority, then its own distance; blend 0/1 opaque) | separate pass after | **Fixed** (docs/re/m2-runtime.md #25); not with Soft particles on |
 | 44 | ParticleColor.dbc override (0x2A) | per creature display and item display (§8) | ignored | **Fixed** (§8) |
 | 45 | Ground snap 0x2000, model particles, child emitters | §1 | none | open (157, 54, few emitters) |
 | 46 | Spline emitters | spline object | uniform on the polyline | approximated (133 emitters) |
